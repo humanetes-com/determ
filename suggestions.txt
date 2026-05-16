@@ -1,0 +1,102 @@
+    Query successful
+
+Two hours is not normal for cache initialization or model loading. Even with a massive model on a slow network or high-latency storage, startup usually completes within 10–20 minutes. If you’ve been stuck for 2 hours, it’s almost certainly a "hang" rather than a slow process.
+Why it might be "hanging" (and not just loading)
+
+The most likely culprit for a multi-hour hang in vLLM is CUDA Graph Capture.
+
+When vLLM starts, it runs a "warm-up" where it captures CUDA graphs for various batch sizes. If your GPU memory is almost entirely full, or if there is a driver/library mismatch, this process can loop indefinitely or dead-lock without throwing an explicit error.  
+How to diagnose the 2-hour wait
+1. The "Eager Mode" Test
+
+To verify if the hang is caused by graph capture, try running with --enforce-eager. This disables the graph capture optimization. If the server starts up instantly, you've found the problem.
+Bash
+
+# Add this to your docker command
+--enforce-eager
+
+2. Check Resource Utilization
+
+While the container is "loading," open a new terminal on your host and run:
+
+    nvidia-smi: Is the GPU memory usage stuck at a specific number? Is the Volatile GPU-Util at 0% or 100%? (100% usually means a kernel is stuck; 0% means it's waiting on the CPU/Network).
+
+    top or htop: Is one CPU core pinned at 100%? This often happens if vLLM is stuck in a Python loop during initialization.
+
+3. Is it actually downloading?
+
+If you didn't mount a local volume for the model, Docker might be re-downloading the weights from Hugging Face every time.
+
+    Check the size of your /root/.cache/huggingface inside the container.
+
+    If the model is 70B+ parameters, a slow connection could actually take 2 hours, but you would usually see a progress bar in the logs.
+
+Comparison of Startup Stages
+
+If you see the following log lines, here is what is happening behind the scenes:
+Log Message	Typical Duration	If it hangs here...
+Loading weights...	1–5 mins	Likely slow Disk I/O or downloading from HF.
+Initializing KV cache...	< 1 min	Likely out of memory (OOM) or system RAM swapping.
+Capturing CUDA graphs...	2–10 mins	Most common hang point. Try --enforce-eager.
+Profiling...	1–2 mins	vLLM is testing memory limits; check --gpu-memory-utilization.
+Immediate Fix to Try
+
+If you want to bypass the wait immediately, restart the container with these flags:
+
+    --enforce-eager (Skips graph capture).
+
+    --gpu-memory-utilization 0.8 (Give the system more breathing room).
+
+    --max-model-len 4096 (Reduce the KV cache size if it's too large).
+
+Does your current log end with a specific line, or is the screen just blank? Knowing the last visible message will pinpoint exactly which "stage" is failing.
+
+to make it clear, it was working with context size 65000 I simply changed this value to 95000 and looks like hanging
+
+That is the "smoking gun." Moving from 65,000 to 95,000 tokens is a massive jump in memory requirements.
+
+In vLLM, the KV (Key-Value) cache is pre-allocated. It doesn't grow as you use it; vLLM tries to grab almost all available GPU memory upfront to create that cache. By increasing the context window by nearly 50%, you likely crossed the threshold of what your VRAM can physically handle.
+Why it hangs for 2 hours instead of crashing
+
+When you set a context size that is too large, one of two things usually happens:
+
+    CUDA Graph Capture Hell: vLLM attempts to "capture" the computation graphs for that 95k sequence length. For very long sequences, the memory overhead of the graph capture itself can exceed your VRAM. Instead of a clean crash, the NVIDIA driver or the allocator can "thrash" or hang while trying to find space.
+
+    CPU RAM Swapping: If you are using a model where the KV cache requirement exceeds the GPU VRAM, the system might be trying to offload or swap to system RAM (OOM-killer might not catch it if it's just slow).
+
+The Math of the KV Cache
+
+The memory required for the KV cache scales linearly with sequence length.
+
+For a typical model (like Llama 3), the formula for KV cache size is roughly:
+Memory≈2×layers×heads×head_dim×precision×context_length
+
+By moving from 65k to 95k, you added gigabytes of required VRAM just for the "slots" to hold those tokens.
+How to Fix It
+
+You don't necessarily have to give up on 95k, but you need to adjust how vLLM allocates space:
+
+    Reduce gpu_memory_utilization:
+    If it's at the default (0.90), lower it to 0.80 or 0.70. This gives the "Graph Capture" process more room to breathe during startup.
+    Bash
+
+    --gpu-memory-utilization 0.8
+
+    The "Eager" Escape Hatch:
+    As mentioned before, use --enforce-eager. CUDA graphs take up a lot of memory. For very long contexts (95k+), the memory saved by not using CUDA graphs is often more valuable than the speed boost they provide.
+    Bash
+
+    --enforce-eager
+
+    Check for PagedAttention Fragmentation:
+    Check your logs for max_num_batched_tokens. If you are forcing a 95k context but your max_num_seqs is high, vLLM is trying to reserve space for multiple 95k streams. Try lowering the number of concurrent sequences:
+
+Bash
+
+    --max-num-seqs 1
+    ```
+
+**Recommendation:** Kill the current process (it’s not coming back after 2 hours). Restart with `--enforce-eager` and `--max-model-len 95000`. If it starts up in under 5 minutes, you know it was a CUDA graph memory hang.
+
+Do you know how much VRAM you have available on that GPU?
+

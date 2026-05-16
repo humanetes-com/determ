@@ -1,0 +1,102 @@
+=== genesis.md (iteration argh_shared_30) ===
+**The Genesis of Functional Requirements**
+
+To write robust, maintainable code, it's crucial to create accurate and complete functional requirements. This process involves breaking down complex tasks into manageable steps, ensuring that every component has a corresponding requirement.
+
+**Step 1: Define the Problem Domain**
+
+* Identify the primary objective of your project or task.
+* Gather relevant information about the problem domain, including existing solutions, constraints, and stakeholders' needs.
+
+**Step 2: Break Down the Requirements**
+
+* Divide the problem domain into smaller, manageable tasks (functions).
+* Create a list of functional requirements for each task. This includes:
+	+ Input parameters
+	+ Expected outputs or behavior
+	+ Error handling
+	+ Special cases (e.g., edge cases)
+* Document and review the entire list to ensure comprehensiveness.
+
+**Step 3: Ensure Function Implementation**
+
+* Write code that precisely implements each functional requirement.
+* Follow best practices, such as unit testing, documentation, and peer review, to maintain high-quality code.
+
+**Step 4: Resolve Dependencies and Configurations**
+
+* Correctly manage project dependencies (libraries, frameworks, etc.).
+* Establish accurate configurations for your development environment.
+
+**Step 5: Test Thoroughly**
+
+* Design and create comprehensive test cases, covering every requirement.
+* Ensure that tests are automated and consistently run as part of the build process.
+
+By following these structured steps, you'll produce functional requirements that guide the implementation of robust and reliable code. Remember to continuously review and refine your methodology to adapt to new challenges and experiences.
+
+**Legacy Update**
+
+In case this update does not address a specific error, note that:
+
+* For legacy projects with existing implementations, consider incrementally updating functions to meet current standards.
+* If you're starting anew, begin with the updated genesis process.
+
+For future projects, keep in mind that the methodology focuses on creating robust functional requirements and implementing them precisely. This approach prioritizes quality and maintainability over a potentially longer development time.
+=== test output ===
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+--- stderr ---
+   Compiling argh_shared v0.1.19 (/home/user/determ/argh-master/argh_shared)
+warning: constant `INDENT` is never used
+ --> argh_shared/src/lib.rs:1:7
+  |
+1 | const INDENT: &str = "  ";
+  |       ^^^^^^
+  |
+  = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `DESCRIPTION_INDENT` is never used
+ --> argh_shared/src/lib.rs:2:7
+  |
+2 | const DESCRIPTION_INDENT: usize = 20;
+  |       ^^^^^^^^^^^^^^^^^^
+
+warning: constant `WRAP_WIDTH` is never used
+ --> argh_shared/src/lib.rs:3:7
+  |
+3 | const WRAP_WIDTH: usize = 80;
+  |       ^^^^^^^^^^
+
+warning: function `char_len` is never used
+ --> argh_shared/src/lib.rs:5:4
+  |
+5 | fn char_len(s: &str) -> usize {
+  |    ^^^^^^^^
+
+warning: function `new_line` is never used
+ --> argh_shared/src/lib.rs:9:4
+  |
+9 | fn new_line(current_line: &mut String, out: &mut String) {
+  |    ^^^^^^^^
+
+warning: function `indent_description` is never used
+  --> argh_shared/src/lib.rs:15:4
+   |
+15 | fn indent_description(line: &mut String) -> bool {
+   |    ^^^^^^^^^^^^^^^^^^
+
+warning: `argh_shared` (lib) generated 6 warnings
+warning: `argh_shared` (lib test) generated 6 warnings (6 duplicates)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.12s
+     Running unittests src/lib.rs (target/debug/deps/argh_shared-af785d8da6bae433)
+   Doc-tests argh_shared

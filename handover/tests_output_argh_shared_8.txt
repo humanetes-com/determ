@@ -1,0 +1,102 @@
+=== genesis.md (iteration argh_shared_8) ===
+# Genesis of Determining Functional Requirements for Test Suites
+
+## Overview
+
+This methodology provides a general, language-agnostic process for translating test suites into functional requirements. It aims to capture the essential aspects of a system's functionality from a given set of tests.
+
+## Class of Reasoning Error: Lack of Implementation Detail Consideration
+
+A common class of errors in determining functional requirements is failing to consider low-level implementation details. This may involve overlooking memory ownership, borrowing, type casting, or other crucial aspects that ensure correctness and maintainability.
+
+## Reasoning Process Updates
+
+To permanently close this class of error for future projects in any language:
+
+1. **Explicitly Identify Implementation Details**: During the reasoning process, explicitly account for test signals related to low-level implementation details. This includes considerations like memory ownership, borrowing, and type casting.
+2. **Integrate Knowledge of Programming Language Features**: Incorporate knowledge of programming language features and pitfalls into the methodology. This ensures that the focus is on identifying requirements that cover not only intended behaviors but also implementation specifics.
+3. **Consistent Mapping of Test Signals to Requirements**: Establish a consistent method for mapping test signals to relevant functional requirements, considering the impact of various programming constructs (e.g., references, pointers) on software behavior.
+4. **Consider System Implementation Specifics**: When identifying tests or mapping them to requirements, give due consideration to system implementation specifics such as architecture, data structures, and algorithms.
+5. **Iteratively Enhance the Methodology**: Continuously refine this methodology through the integration of new insights, observations from various projects, and iterations with developers in different contexts.
+
+## Guidelines for Updating Genesis.md
+
+1. Each update must move towards greater generality and precision, refining the reasoning process to capture more comprehensive and accurate descriptions of a system's functionality.
+2. Focus on identifying gaps or errors at a conceptual level (e.g., class of error, category of test signal) rather than providing project-specific patches or iteration history.
+3. Ensure that the content remains applicable across different projects and languages.
+
+## Implementation Note
+
+This updated methodology should be directly applicable to any future project or language where it is applied in good faith. It does not rely on specific examples from previous iterations but instead generalizes insights gained from those experiences to create a more robust, language-independent approach.
+
+### Genesis.md as a Project-Independent Reasoning Process
+
+Genesis.md focuses on the fundamental principles of translating test suites into functional requirements, avoiding project-specific patches or iteration history. This keeps it relevant across various projects and languages because it emphasizes conceptual corrections (error classes) rather than symptomatic fixes for particular errors in given contexts.
+
+### Example Application: Applying These Principles
+
+A concrete implementation might involve:
+
+1. Creating a system map that represents both the system’s architecture and the relationships between its components, including dependencies on memory or resources.
+2. For each identified test case, associating it with specific implementation details (e.g., ensuring ownership of allocated memory) to ensure comprehensive coverage.
+
+### Future Improvements
+
+This methodology is subject to continuous improvement through community involvement, including feedback from various projects and languages. It is expected that future updates will refine the process by:
+- Correcting identified biases in initial assumptions or oversights
+- Strengthening links between low-level implementation details and test signals for clearer results
+
+### Community Engagement
+
+To ensure its generalizability and continued relevance, genesis.md is open to contributions from developers across different projects, languages, and paradigms. Feedback mechanisms (e.g., issue tracking, forums) are available for community members to suggest improvements or report successful implementations.
+=== test output ===
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+--- stderr ---
+   Compiling argh_shared v0.1.19 (/home/user/determ/argh-master/argh_shared)
+warning: constant `DESCRIPTION_INDENT` is never used
+ --> argh_shared/src/lib.rs:4:7
+  |
+4 | const DESCRIPTION_INDENT: usize = 20;
+  |       ^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `WRAP_WIDTH` is never used
+ --> argh_shared/src/lib.rs:5:7
+  |
+5 | const WRAP_WIDTH: usize = 80;
+  |       ^^^^^^^^^^
+
+warning: function `char_len` is never used
+ --> argh_shared/src/lib.rs:7:4
+  |
+7 | fn char_len(s: &str) -> usize {
+  |    ^^^^^^^^
+
+warning: function `new_line` is never used
+  --> argh_shared/src/lib.rs:11:4
+   |
+11 | fn new_line(current_line: &mut String, out: &mut String) {
+   |    ^^^^^^^^
+
+warning: function `indent_description` is never used
+  --> argh_shared/src/lib.rs:17:4
+   |
+17 | fn indent_description(line: &mut String) -> bool {
+   |    ^^^^^^^^^^^^^^^^^^
+
+warning: `argh_shared` (lib) generated 5 warnings
+warning: `argh_shared` (lib test) generated 5 warnings (5 duplicates)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.11s
+     Running unittests src/lib.rs (target/debug/deps/argh_shared-af785d8da6bae433)
+   Doc-tests argh_shared

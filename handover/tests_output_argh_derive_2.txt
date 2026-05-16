@@ -1,0 +1,41 @@
+=== genesis.md (iteration argh_derive_2) ===
+When analyzing a test suite, account for the possibility that test signals may arise from:
+
+- **Unused imports**: Code may import items when they are not used. This can be due to copying code verbatim or misunderstanding the purpose of a library.
+- **Unused variables**: Variables may be declared and initialized but never referenced in the code. This is often caused by copying-and-pasting, not cleaning up abandoned code, or introducing unnecessary abstractions.
+
+To prevent test signals from unused imports and variables:
+
+1.  **Assume innocence**: When encountering an import statement that appears to be unused, assume it is a deliberate choice rather than an error.
+2.  **Scan for unused tokens**: After parsing the source code into its abstract syntax tree (AST) representation, check each node in the tree to see if any items are unused. If there's no evidence of usage elsewhere in the codebase:
+    *   Ignore warnings about imported identifiers that are not used because they indicate an intentional choice.
+    *   Raise concerns about tokens or modules with a name indicating potential use but none found within.
+3.  **Use static analysis on the AST**: Apply heuristics to detect patterns that suggest possible usage when no clear evidence exists in the current codebase:
+    *   Check for imports of types that could potentially be used for future extensions.
+
+Always verify that test signals about unused items stem from actual missing or unnecessary features rather than intentional decisions or misinterpretations. In situations where code quality improves over iterations and warnings fade away, do not let them quietly accumulate.
+
+To apply this methodology:
+
+1.  For each module in the codebase, identify which imports might potentially be used either explicitly within functions or indirectly through method invocations.
+2.  When generating functional requirements from a test suite:
+    *   Clearly differentiate between missing and unused items to improve signal-to-noise ratio for improvement decisions.
+
+This methodology is designed to recognize warnings about unused imports and variables as signals that may arise from either coding mistakes or deliberate design choices.
+=== test output ===
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+--- stderr ---
+   Compiling argh_derive v0.1.19 (/home/user/determ/argh-master/argh_derive)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.17s
+     Running unittests src/lib.rs (target/debug/deps/argh_derive-ace4a36d3032e3dc)
+   Doc-tests argh_derive

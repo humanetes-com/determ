@@ -1,0 +1,72 @@
+# =============================================================================
+# ModelfileSGLang — SGLang server config for Qwen3.6-27B Q8_0
+# =============================================================================
+#
+# PURPOSE
+#   Documents the SGLang server launch parameters that mirror ModelfileHf.
+#   SGLang is not Ollama — there is no "Modelfile" concept. This file is
+#   documentation for build_sglang.sh and a reference for reproducing the
+#   server config exactly.
+#
+# QUICK START
+#   bash /home/user/determ/build_sglang.sh
+#
+# WHAT THIS CONFIG DOES (vs ModelfileHf)
+#
+#   ModelfileHf parameter     → SGLang equivalent
+#   ─────────────────────────────────────────────────────────────────
+#   FROM ./Qwen3.6-27B-Q8_0.gguf  → --model-path ./Qwen3.6-27B-Q8_0.gguf
+#   PARAMETER num_ctx 131072       → --context-length 131072
+#   PARAMETER num_gpu 99           → --tensor-parallel-size 2
+#   PARAMETER temperature 0.6      → per-request (sampling default in .env)
+#   PARAMETER top_p 0.95           → per-request (sampling default in .env)
+#   PARAMETER min_p 0.05           → per-request (no direct --min-p; set via API)
+#   PARAMETER repeat_last_n 1024   → --no-slidewindow-attn (use full context)
+#
+#   New SGLang capabilities not available in Ollama:
+#     --enable-thinking             enables Qwen3.6 thinking mode (budget_tokens param)
+#     --reasoning-parser qwen3      parses <think>…</think> into reasoning_content
+#     --mem-fraction-static 0.88    reserves 88% of VRAM for KV cache radix tree
+#     --chunked-prefill-size 4096   chunked prefill for long prompts
+#     --max-running-requests 4      limits concurrent decodes to protect KV cache
+#
+# VRAM BUDGET (dual RTX 3090, 48 GB total)
+#   28.6 GB  model weights (Q8_0, split across 2× GPU via tensor parallel)
+#   ~8.4 GB  KV radix cache (88% of remaining ~9.5 GB after weights)
+#   ~1.1 GB  runtime / CUDA overhead
+#   -------
+#   ~38 GB   total — 10 GB headroom
+#
+# WHY SGLang OVER OLLAMA FOR THIS PIPELINE
+#   1. RadixAttention: trie-based token-level KV cache reuse.
+#      The TASK 0c fix loop sends the same ~40k-char system prompt on every
+#      attempt. With Ollama these tokens are re-computed each call. SGLang
+#      reuses them from the radix cache → fix loop calls are ~3× faster.
+#   2. thinking_budget parameter: controls per-request reasoning token budget.
+#      Eliminates the "model exhausted output on thinking, returned empty"
+#      failure mode that required a two-turn recovery hack in OllamaBackend.
+#   3. OpenAI-compatible /v1/chat/completions — drop-in for the compat path.
+#      reasoning_content is returned as a separate field (not mixed into content).
+#
+# SERVER URL
+#   Default: http://localhost:30000
+#   Set SGLANG_BASE_URL in .env to override.
+#
+# SERVED MODEL NAME
+#   --served-model-name qwen3.6-27b-q8
+#   Must match SGLANG_MODEL_NAME in .env.
+# =============================================================================
+
+# --- LAUNCH COMMAND (reproduced from build_sglang.sh for reference) ---
+#
+# python -m sglang.launch_server \
+#   --model-path /home/user/determ/Qwen3.6-27B-Q8_0.gguf \
+#   --served-model-name qwen3.6-27b-q8 \
+#   --context-length 131072 \
+#   --tensor-parallel-size 2 \
+#   --mem-fraction-static 0.88 \
+#   --reasoning-parser qwen3 \
+#   --chunked-prefill-size 4096 \
+#   --max-running-requests 4 \
+#   --port 30000 \
+#   --host 0.0.0.0

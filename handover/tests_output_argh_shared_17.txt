@@ -1,0 +1,85 @@
+=== genesis.md (iteration argh_shared_17) ===
+## Handling Unused Code
+
+### Purpose
+
+Documenting and addressing unused code is crucial for several reasons: 
+1. Clarity: Clearly indicating unused elements avoids confusion among developers.
+2. Maintainability: It simplifies maintenance, as developers can directly address these sections without needing to understand their intended purpose.
+3. Completeness: Including a mechanism for future additions ensures that all aspects of the project are accounted for.
+
+### Procedure
+
+When encountering unused code:
+
+1.  **Tag unused elements:** Use designated tags or comments to mark unused functions, variables, and modules.
+2.  **Document intentions:** Briefly explain why these elements were left unused but documented or kept in reserve for potential future use or testing.
+3.  **Consider removing:** If an element is known not to be used forever, it might be more sensible to remove rather than just comment out.
+4.  **Do not ignore:** Always ensure that the codebase reflects the actual requirements and development process.
+
+### Additional Considerations
+
+- **Consistency**: Ensure all instances of unused code are handled uniformly and are tagged consistently for easy identification.
+- **Review and Revision:** Schedule regular reviews to remove unused elements, updating the documentation as needed.
+- **Communication**: Clearly communicate changes, new functionalities, or removals through project documentation.
+
+### Genesis.md Example
+
+An example of how this methodology might be applied in genesis.md:
+=== test output ===
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+--- stderr ---
+   Compiling argh_shared v0.1.19 (/home/user/determ/argh-master/argh_shared)
+warning: constant `INDENT` is never used
+ --> argh_shared/src/lib.rs:3:7
+  |
+3 | const INDENT: &str = "  ";
+  |       ^^^^^^
+  |
+  = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `DESCRIPTION_INDENT` is never used
+ --> argh_shared/src/lib.rs:4:7
+  |
+4 | const DESCRIPTION_INDENT: usize = 20;
+  |       ^^^^^^^^^^^^^^^^^^
+
+warning: constant `WRAP_WIDTH` is never used
+ --> argh_shared/src/lib.rs:5:7
+  |
+5 | const WRAP_WIDTH: usize = 80;
+  |       ^^^^^^^^^^
+
+warning: function `char_len` is never used
+ --> argh_shared/src/lib.rs:7:4
+  |
+7 | fn char_len(s: &str) -> usize {
+  |    ^^^^^^^^
+
+warning: function `new_line` is never used
+  --> argh_shared/src/lib.rs:11:4
+   |
+11 | fn new_line(current_line: &mut String, out: &mut String) {
+   |    ^^^^^^^^
+
+warning: function `indent_description` is never used
+  --> argh_shared/src/lib.rs:17:4
+   |
+17 | fn indent_description(line: &mut String) -> bool {
+   |    ^^^^^^^^^^^^^^^^^^
+
+warning: `argh_shared` (lib) generated 6 warnings
+warning: `argh_shared` (lib test) generated 6 warnings (6 duplicates)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.11s
+     Running unittests src/lib.rs (target/debug/deps/argh_shared-af785d8da6bae433)
+   Doc-tests argh_shared

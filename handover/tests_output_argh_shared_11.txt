@@ -1,0 +1,95 @@
+=== genesis.md (iteration argh_shared_11) ===
+# Determining Functional Requirements for Libraries with Auto-Generated Code
+
+## Step 1: Identify Generated Functions and Modules Across the Library
+
+* Review the library dependencies to identify all functions, variables, and modules generated through code generation frameworks, macro expansions, imports, etc.
+* Recognize that functions, variables, and modules may be explicitly declared as `unused` or `hidden`, but other parts of the code might still depend on them.
+* Be aware that warnings about unused code do not necessarily mean the function itself is never called; dependencies can exist through other means, like imports or macro invocations.
+
+## Step 2: Module and Function Extraction with Dependencies Analysis
+
+* Extract each dependency (functions, modules) as a part of your analysis without assuming anything based on names, comments, or any other information.
+* If it's present in your generated code and is accessible via function calls or other means, consider extracting it as an external module or function to be independently documented.
+
+## Step 3: Document All Public Functions and Modules
+
+* Identify all modules and functions within the library that are intended for public consumption (i.e., modules and functions not marked as `private` or similar).
+* Document each of these publicly accessible components with details such as what parameters they accept, their return types, and a high-level description of their functionality.
+
+## Step 4: Identify and Document Function Parameters
+
+* For each identified function that consumes input (in other words, not a pure function), identify all its input parameters and document them.
+* Consider the purpose, data type, and constraints on these inputs, such as required versus optional arguments.
+
+## Step 5: Handle Return Value and Output Documentation
+
+* Document the return value of functional elements—what they produce in terms of output (e.g., if a function returns a boolean or another object).
+* Be sure to detail what each component's output implies, whether it's an error indicator or results from computations.
+
+## Step 6: Identify Side Effects and External Dependencies
+
+* Analyze the behavior for side effects such as changes to external state that might not be obvious at first glance, including indirect modifications via other parts of the system.
+* Clearly document any components relying on external data sources or configuration files outside the library's control.
+
+## Step 7: Review and Validate with Use Cases
+
+* Map each identified component to a use case describing how it should be used in practical scenarios to validate documentation accuracy.
+* Regularly update the documentation to reflect actual usage patterns, especially if novel use cases emerge during testing and development phases.
+
+The documentation process detailed here has a dual benefit:
+- It aids developers who are new to the library by providing clear explanations on how to integrate its components into projects.
+- It supports maintainability through organized and comprehensive notes that can be used as a reference in future updates, contributing to codebase cleanliness.
+ 
+This methodology aims to cover all aspects necessary for effective documentation of generated components and interactions within libraries with auto-generated code. Its language-agnostic nature makes it universally applicable across diverse development environments and languages.
+=== test output ===
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+--- stderr ---
+   Compiling argh_shared v0.1.19 (/home/user/determ/argh-master/argh_shared)
+warning: constant `DESCRIPTION_INDENT` is never used
+ --> argh_shared/src/lib.rs:3:7
+  |
+3 | const DESCRIPTION_INDENT: usize = 20;
+  |       ^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `WRAP_WIDTH` is never used
+ --> argh_shared/src/lib.rs:4:7
+  |
+4 | const WRAP_WIDTH: usize = 80;
+  |       ^^^^^^^^^^
+
+warning: function `char_len` is never used
+ --> argh_shared/src/lib.rs:7:4
+  |
+7 | fn char_len(s: &str) -> usize {
+  |    ^^^^^^^^
+
+warning: function `indent_description` is never used
+  --> argh_shared/src/lib.rs:12:4
+   |
+12 | fn indent_description(line: &mut String) -> bool {
+   |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `new_line` is never used
+  --> argh_shared/src/lib.rs:24:4
+   |
+24 | fn new_line(current_line: &mut String, out: &mut String) {
+   |    ^^^^^^^^
+
+warning: `argh_shared` (lib) generated 5 warnings
+warning: `argh_shared` (lib test) generated 5 warnings (5 duplicates)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.16s
+     Running unittests src/lib.rs (target/debug/deps/argh_shared-af785d8da6bae433)
+   Doc-tests argh_shared

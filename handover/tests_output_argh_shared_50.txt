@@ -1,0 +1,64 @@
+=== genesis.md (iteration argh_shared_50) ===
+**The Functional Requirements Elicitation Methodology**
+
+This methodology aims to provide a systematic approach for eliciting functional requirements from any project. It addresses the common pitfalls in requirement gathering and provides steps to ensure that all relevant aspects are considered.
+
+### Step 1: Define the Project Scope
+
+ Clearly define the scope of the project, including its purpose, goals, deliverables, and stakeholders. This will help identify the primary requirements and users.
+
+### Step 2: Identify the System Boundary
+
+ Determine the system boundary by identifying the inputs, outputs, and interfaces between the system and its environment. This helps to understand the interactions within the system and with external factors.
+
+### Step 3: Envision Possible Scenarios
+
+ Brainstorm a list of possible scenarios that the system might encounter during operation. This aids in discovering requirements related to error handling, edge cases, and user behavior.
+
+### Step 4: Determine Stakeholder Roles and Expectations
+
+ Identify all stakeholders (internal or external) associated with the project and document their roles, expectations, and responsibilities. This ensures that all critical perspectives are considered when gathering requirements.
+
+### Step 5: Conduct Interviews and Surveys
+
+ Schedule interviews with key stakeholders to gather more detailed information about their needs, concerns, and priorities regarding the system. Also, conduct surveys among target users to collect additional insights on usability and functionality expectations.
+
+### Step 6: Analyze Functional Requirements Classes
+
+ Classify the gathered requirements into six types based on their characteristics:
+
+   a. **Functional:** Relates to what the system does.
+   b. **Performance:** Concerns how fast or efficient the system's actions are.
+   c. **Usability:** Focuses on user experience and interaction usability.
+   d. **Security:** Pertains to safeguarding against unauthorized usage, data corruption, etc.
+   e. **Interoperability:** Deals with compatibility issues related to communication interfaces (e.g., APIs).
+   f. **Operational:** Includes system maintenance needs like backup strategies, data integrity checks.
+
+### Step 7: Prioritize Requirements
+
+ Prioritize the collected requirements based on their urgency and importance using techniques such as MoSCoW method or Kano analysis.
+
+### Step 8: Review and Refine Requirements
+
+ Once all stakeholders agree on priority levels, revisit each requirement to ensure comprehensiveness and validate with end-users if possible.
+
+### Step 9: Document Requirements in Detail
+
+ Record the final set of prioritized, validated requirements thoroughly, following widely accepted template formats like IEEE EIA/IS or OMG SysML for more structured documentation.
+=== test output ===
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+--- stderr ---
+   Compiling argh_shared v0.1.19 (/home/user/determ/argh-master/argh_shared)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.17s
+     Running unittests src/lib.rs (target/debug/deps/argh_shared-af785d8da6bae433)
+   Doc-tests argh_shared

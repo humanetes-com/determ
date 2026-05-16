@@ -1,0 +1,61 @@
+=== genesis.md (iteration argh_shared_22) ===
+**Reasoning Methodology for Functional Requirements**
+
+1. **Identify Project Boundaries**: Define the scope of the project, including what is in and out of scope.
+2. **Document Test Signal Classification**: Identify categories of test signals that will be used to validate requirements (e.g., error handling, edge cases, performance).
+3. **Analyze Code Generation Process**: Study how code generation tools work, and identify potential pitfalls for misunderstanding the generated codebase.
+4. **Formalize Functional Requirements**: Write a set of formal, language-agnostic functional requirements using a precise syntax and avoiding ambiguity.
+5. **Review and Refine Requirements**: Regularly review requirements with team members to ensure they accurately reflect project needs and are complete.
+
+The previous iteration's mistake was caused by an oversimplification of the code generation process. Specifically:
+
+* The reasoning process did not account for the fact that generated code may need to be maintained and extended over time, potentially leading to discrepancies between the original requirements and the actual implementation.
+* The methodology failed to explicitly consider the importance of documenting test signal categories, which could help prevent similar errors in the future.
+
+To address these gaps, this updated version of genesis.md:
+
+* Prescribes a more explicit approach to identifying and managing project boundaries, including explicit consideration for generated code and its long-term implications.
+* Requires developers to categorize and document test signals systematically, making it easier to identify potential areas where the requirements may be incomplete or incorrect.
+
+By following these general, language-agnostic principles, developers can produce high-quality functional requirements that better serve their projects' needs.
+
+**Note:** This updated methodology incorporates insights from previous iteration's failure logs. Its purpose is to ensure completeness and prevent similar mistakes.
+=== test output ===
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+--- stderr ---
+   Compiling argh_shared v0.1.19 (/home/user/determ/argh-master/argh_shared)
+warning: function `char_len` is never used
+ --> argh_shared/src/lib.rs:5:4
+  |
+5 | fn char_len(s: &str) -> usize {
+  |    ^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `new_line` is never used
+ --> argh_shared/src/lib.rs:9:4
+  |
+9 | fn new_line(current_line: &mut String, out: &mut String) {
+  |    ^^^^^^^^
+
+warning: function `indent_description` is never used
+  --> argh_shared/src/lib.rs:15:4
+   |
+15 | fn indent_description(line: &mut String) -> bool {
+   |    ^^^^^^^^^^^^^^^^^^
+
+warning: `argh_shared` (lib) generated 3 warnings
+warning: `argh_shared` (lib test) generated 3 warnings (3 duplicates)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.17s
+     Running unittests src/lib.rs (target/debug/deps/argh_shared-af785d8da6bae433)
+   Doc-tests argh_shared

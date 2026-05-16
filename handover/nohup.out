@@ -1,0 +1,6 @@
+usage: coordinator.py [-h] [--project PROJECT] [--clean] [--progress]
+                      [--nolog]
+coordinator.py: error: argument --project: expected one argument
+usage: coordinator.py [-h] [--project PROJECT] [--clean] [--progress]
+                      [--nolog]
+coordinator.py: error: argument --project: expected one argument

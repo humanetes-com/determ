@@ -1,0 +1,95 @@
+# =============================================================================
+# ModelfileHf — Qwen3.6-27B Q8_0 for the determ pipeline
+# =============================================================================
+#
+# PURPOSE
+#   Builds a local Ollama model from the genuine Q8_0 GGUF (~8 bpp, 28.6 GB).
+#   Q8_0 is near-lossless — preserves ~99% of the original training weights.
+#   This is the highest-fidelity option that fits on dual RTX 3090s (48 GB VRAM).
+#
+# WORKFLOW
+#   Step 1 — Download the genuine GGUF (28.6 GB, use dl_from_huggingface.sh):
+#
+#     bash /home/user/determ/dl_from_huggingface.sh
+#
+#     The script runs:
+#       wget -c https://huggingface.co/unsloth/Qwen3.6-27B-GGUF/resolve/main/Qwen3.6-27B-Q8_0.gguf
+#     -c resumes automatically if the connection drops.
+#     WARNING: the existing Qwen3.6-27B-Q8_0.gguf (7.9 GB) is a mislabeled
+#     Unsloth Dynamic ~2.3 bpp file — this download overwrites it with the real one.
+#
+#   Step 2 — Build the Ollama model (run from /home/user/determ):
+#
+#     cd /home/user/determ && ollama create qwen3.6:27b-q8 -f ModelfileHf
+#
+#   Step 3 — Update .env to use the new model:
+#
+#     MODEL=qwen3.6:27b-q8
+#     TASK0_MODEL=qwen3.6:27b-q8
+#     TASK0C_MODEL=qwen3.6:27b-q8
+#     TASK1_MODEL=qwen3.6:27b-q8
+#     TASK2_MODEL=qwen3.6:27b-q8
+#     TASK4_MODEL=qwen3.6:27b-q8
+#
+#   Step 4 — Restart the pipeline:
+#
+#     cd /home/user/determ && source .venv/bin/activate
+#     nohup python pipeline.py --project anyhow-master > /tmp/pipeline_anyhow.log 2>&1 &
+#
+# VRAM BUDGET (dual RTX 3090, 48 GB total)
+#   28.6 GB  model weights (Q8_0)
+#   ~8.0 GB  KV cache (131072 ctx, q4_0 precision, 16/64 attention layers)
+#   ~1.5 GB  runtime overhead
+#   -------
+#   ~38 GB   total — 10 GB headroom, fits comfortably
+#
+# WHY Q8_0 OVER Q4_K_M
+#   Q4_K_M (~4.5 bpp, 17 GB) is what `ollama pull qwen3.6:27b` gives you.
+#   Q8_0 (~8 bpp, 28.6 GB) preserves nearly the full training signal.
+#   For syntax-critical tasks (Rust codegen, compile-check loop) the extra
+#   precision reduces hallucinated API calls and malformed syntax — the two
+#   dominant failure modes in TASK 0c.
+#
+# WHY NOT UD-Q8_K_XL (35.3 GB)
+#   Leaves only ~11 GB VRAM headroom — too tight for 131072 ctx KV cache.
+#   Q8_0 is the safe ceiling on this hardware.
+# =============================================================================
+
+# --- BASE MODEL ---
+FROM ./Qwen3.6-27B-Q8_0.gguf
+
+# --- CONTEXT ---
+# Fallback default only — model_interact.py overrides this at request time via
+# extra_body {"options": {"num_ctx": OLLAMA_NUM_CTX}} (currently 163840 in .env).
+# qwen3.6:27b is a hybrid SSM+attention model — only 16/64 layers have KV
+# cache, so KV memory per token is much lower than a full-attention model.
+PARAMETER num_ctx 163840
+
+# Prevents the model looping boilerplate in long generated code blocks.
+PARAMETER repeat_last_n 1024
+
+# --- SAMPLING (tuned for think=True coding tasks) ---
+# Qwen's own recommendation for thinking mode: temp=0.6, top_p=0.95.
+# Low temperature (e.g. 0.2) makes retries produce near-identical failing code.
+PARAMETER temperature 0.6
+PARAMETER top_p 0.95
+
+# top_k=20: official Qwen recommendation for thinking mode (Ollama default is 40).
+# Tighter candidate set reduces syntax errors without over-constraining creativity.
+PARAMETER top_k 20
+
+# Removes highly unlikely tokens — keeps Rust syntax clean without over-constraining.
+PARAMETER min_p 0.05
+
+# --- HARDWARE ---
+# Offload all layers to GPU. 48 GB VRAM holds Q8_0 + KV cache with room to spare.
+PARAMETER num_gpu 99
+
+# --- INTENTIONALLY OMITTED ---
+# stop "```"   — halts generation before the first line of any code block,
+#                breaking the pipeline's fenced-block extraction on every attempt.
+# SYSTEM       — pipeline sends task-specific system prompts; a generic baked-in
+#                prompt adds noise without helping Rust test generation.
+# TEMPLATE     — inherited correctly from the base model; no override needed.
+PARAMETER num_batch 1024 
+
