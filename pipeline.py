@@ -347,6 +347,9 @@ COVERAGE_STRATEGY_NAME = "coverage_strategy.md"
 COVERAGE_STRATEGY_HASH_NAME = "coverage_strategy.inputs_hash"
 PIPELINE_STATE_NAME = "pipeline_state.md"
 
+# Workspace directory for cloned/copied project repos (relative to pipeline root).
+WORKSPACE_DIR = "tmp"
+
 # Compiler cluster plan — derived from source, written once per project.
 BUILD_CONFIGS_NAME = "build_configs.md"
 
@@ -3078,6 +3081,160 @@ class BuildCluster:
 # Read by _cargo_env() and _run_tarpaulin() so every subprocess call inherits
 # the cluster's env and exclusion list without touching every call site.
 _current_cluster: "BuildCluster | None" = None
+
+# True when the project_dir is a git-managed workspace (--repo or auto-detected).
+# Enables git commits at key pipeline transitions.
+_git_managed: bool = False
+
+
+# ---------------------------------------------------------------------------
+# Git workspace helpers
+# ---------------------------------------------------------------------------
+
+def _is_git_repo(path: Path) -> bool:
+    try:
+        subprocess.run(
+            ["git", "rev-parse", "--git-dir"],
+            cwd=path, check=True, capture_output=True,
+        )
+        return True
+    except Exception:
+        return False
+
+
+def _git_default_branch(project_dir: Path) -> str:
+    """Return the default branch name (main, master, etc.)."""
+    for cmd in [
+        ["git", "symbolic-ref", "refs/remotes/origin/HEAD", "--short"],
+        ["git", "rev-parse", "--abbrev-ref", "origin/HEAD"],
+    ]:
+        try:
+            out = subprocess.check_output(cmd, cwd=project_dir,
+                                          stderr=subprocess.DEVNULL, text=True).strip()
+            return out.split("/")[-1]
+        except Exception:
+            pass
+    # Fallback: check which of main/master exists locally
+    for branch in ("main", "master"):
+        r = subprocess.run(["git", "rev-parse", "--verify", branch],
+                           cwd=project_dir, capture_output=True)
+        if r.returncode == 0:
+            return branch
+    return "main"
+
+
+def git_commit(project_dir: Path, message: str) -> bool:
+    """Stage all changes and commit. Returns True if a commit was made."""
+    if not _git_managed:
+        return False
+    try:
+        subprocess.run(["git", "add", "-A"], cwd=project_dir,
+                       check=True, capture_output=True)
+        diff = subprocess.run(["git", "diff", "--cached", "--quiet"],
+                              cwd=project_dir, capture_output=True)
+        if diff.returncode == 0:
+            return False  # nothing staged
+        subprocess.run(
+            ["git", "commit", "-m", message, "--no-gpg-sign"],
+            cwd=project_dir, check=True, capture_output=True,
+        )
+        _log(f"  [git] committed: {message}")
+        return True
+    except Exception as e:
+        _log(f"  [git] commit failed: {e}")
+        return False
+
+
+def git_tag(project_dir: Path, tag: str) -> None:
+    """Create or update a lightweight tag at HEAD."""
+    if not _git_managed:
+        return
+    try:
+        subprocess.run(["git", "tag", "-f", tag], cwd=project_dir,
+                       check=True, capture_output=True)
+        _log(f"  [git] tagged: {tag}")
+    except Exception as e:
+        _log(f"  [git] tag failed: {e}")
+
+
+def git_clean_reset(project_dir: Path) -> None:
+    """Reset workspace to default branch and recreate the pipeline branch."""
+    try:
+        default = _git_default_branch(project_dir)
+        subprocess.run(["git", "checkout", default], cwd=project_dir,
+                       check=True, capture_output=True)
+        subprocess.run(["git", "branch", "-D", "pipeline"],
+                       cwd=project_dir, capture_output=True)  # ok if not exists
+        subprocess.run(["git", "checkout", "-b", "pipeline"],
+                       cwd=project_dir, check=True, capture_output=True)
+        _log(f"  [git] reset to {default}, recreated pipeline branch")
+    except Exception as e:
+        _log(f"  [git] clean reset failed: {e}")
+
+
+def setup_workspace(repo: str, workspace_dir: Path) -> Path:
+    """
+    Prepare a git-managed workspace for the given repo (URL or local path).
+
+    - URL       → git clone into workspace_dir/{name}
+    - local git → copy into workspace_dir/{name} (preserves history)
+    - local dir → copy into workspace_dir/{name}, git init + initial commit
+
+    In all cases, checks out (or creates) a 'pipeline' branch and returns
+    the workspace path.
+    """
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+
+    # Derive workspace name from repo
+    name = repo.rstrip("/").split("/")[-1]
+    if name.endswith(".git"):
+        name = name[:-4]
+    dest = workspace_dir / name
+
+    _is_url = repo.startswith("http://") or repo.startswith("https://") \
+              or repo.startswith("git@") or repo.startswith("ssh://")
+
+    if dest.exists():
+        _log(f"  [git] workspace exists at {dest} — resuming")
+    elif _is_url:
+        _log(f"  [git] cloning {repo} → {dest}")
+        subprocess.run(["git", "clone", repo, str(dest)], check=True)
+    else:
+        src = Path(repo).resolve()
+        if not src.exists():
+            raise RuntimeError(f"Repo path not found: {src}")
+        _log(f"  [git] copying {src} → {dest}")
+        shutil.copytree(str(src), str(dest))
+        if not (dest / ".git").exists():
+            _log(f"  [git] no .git found — initialising git repo")
+            subprocess.run(["git", "init"], cwd=dest, check=True, capture_output=True)
+            subprocess.run(["git", "add", "-A"], cwd=dest, check=True, capture_output=True)
+            subprocess.run(
+                ["git", "commit", "-m", "initial: source snapshot", "--no-gpg-sign"],
+                cwd=dest, check=True, capture_output=True,
+            )
+            _log(f"  [git] initial commit done")
+
+    # Checkout or create pipeline branch
+    current = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=dest, capture_output=True, text=True,
+    ).stdout.strip()
+    if current != "pipeline":
+        branches = subprocess.run(
+            ["git", "branch", "--list", "pipeline"],
+            cwd=dest, capture_output=True, text=True,
+        ).stdout.strip()
+        if branches:
+            subprocess.run(["git", "checkout", "pipeline"],
+                           cwd=dest, check=True, capture_output=True)
+            _log(f"  [git] checked out existing pipeline branch")
+        else:
+            subprocess.run(["git", "checkout", "-b", "pipeline"],
+                           cwd=dest, check=True, capture_output=True)
+            _log(f"  [git] created pipeline branch")
+
+    return dest
 
 
 def _cluster_augmented_path(project_dir: Path, cluster_name: str, module_name: str) -> Path:
@@ -8127,6 +8284,8 @@ def main():
                             "Force TASK 0c even if .coverage_augmented already exists. "
                             "Normally TASK 0c runs automatically when the sentinel is absent."
                         ))
+    parser.add_argument("--repo", default=None,
+                        help="Git URL or local path — cloned/copied into tmp/, git-managed")
     parser.add_argument("--best-models-list", action="store_true",
                         help="Fetch and display top open-source coding models from HuggingFace")
     parser.add_argument("--vram-gb", type=float, default=32.0,
@@ -8137,8 +8296,23 @@ def main():
         cmd_best_models(vram_gb=args.vram_gb)
         sys.exit(0)
 
+    global _git_managed
     root = Path(__file__).parent
-    project_dir = root / args.project
+    workspace_dir = root / WORKSPACE_DIR
+
+    if args.repo:
+        # Full git-managed workspace: clone/copy into tmp/, checkout pipeline branch.
+        project_dir = setup_workspace(args.repo, workspace_dir)
+        _git_managed = True
+    else:
+        # --project: check tmp/ first, then root (backward compat).
+        candidate = workspace_dir / args.project
+        if candidate.exists():
+            project_dir = candidate
+        else:
+            project_dir = root / args.project
+        _git_managed = _is_git_repo(project_dir)
+
     genesis_path = project_dir / "genesis.md"
     functional_req_path = project_dir / "functional_requirements.md"
     manifest_path = project_dir / MANIFEST_NAME  # legacy whole-workspace manifest
@@ -8167,6 +8341,8 @@ def main():
 
     if args.clean:
         _log("\n-- --clean requested: wiping all generated state --")
+        if _git_managed:
+            git_clean_reset(project_dir)
         clean_state(root, project_dir, manifest_path, genesis_path, functional_req_path)
         _state_path(project_dir).unlink(missing_ok=True)
 
@@ -8214,6 +8390,7 @@ def main():
     )
     _mark_phase(project_dir, "task0b", "done",
                 detail=f"{len(coverage_strategy)} chars", source_hash=_src_hash)
+    git_commit(project_dir, "pipeline: task0b done")
 
     # TASK 0b: build dependency graph for bottom-up module integration.
     # Implementation selected by DEPENDENCY_GRAPH in .env (default: static).
@@ -8374,6 +8551,12 @@ def main():
         _mark_phase(project_dir, f"task0c/{_cluster.name}", "done",
                     detail=f"{len(_cluster_done)} modules", source_hash=_src_hash)
         _log(f"\n  cluster/{_cluster.name} complete — {len(_cluster_done)} module(s) done.")
+        _cov_summary = ", ".join(
+            f"{_m}:{_cluster_augmented_path(project_dir, _cluster.name, _m).read_text().strip()}"
+            for _m in _cluster_done
+            if _cluster_augmented_path(project_dir, _cluster.name, _m).exists()
+        )
+        git_commit(project_dir, f"pipeline: task0c/{_cluster.name} — {_cov_summary}")
 
     _current_cluster = None
 
@@ -8458,12 +8641,15 @@ def main():
                         f"— cannot strip source before reaching 100%. Go back to TASK 0c."
                     )
                     sys.exit(1)  # Hard stop — 100% required before strip
+            git_commit(project_dir, f"pipeline: pre-strip — {module_name} task0c complete")
+            git_tag(project_dir, f"pre-strip-{module_name}")
             strip_module_source(project_dir, module_dir)
             strip_sentinel.parent.mkdir(parents=True, exist_ok=True)
             strip_sentinel.touch()
             _mark_phase(project_dir, f"strip/{module_name}", "done",
                         source_hash=_src_hash)
             _set_current(project_dir, f"strip/{module_name} / done")
+            git_commit(project_dir, f"pipeline: stripped — {module_name}")
 
         # Re-collect after strip — picks up any tests generated by TASK 0c.
         # test_files: full read set for TASK 1 (includes inline test blocks in src/)
@@ -8505,6 +8691,7 @@ def main():
                             detail=f"{module_req_path.stat().st_size} chars",
                             source_hash=_src_hash)
                 _set_current(project_dir, f"task1/{module_name} / done")
+                git_commit(project_dir, f"pipeline: task1 — {module_name}")
                 break
             _log(f"  TASK 1 anti-corruption FAILED: {reason}")
             if t1_attempt >= T1_MAX_RETRIES:
@@ -8680,11 +8867,15 @@ This is a Rust procedural macro crate. Strict rules apply:
                         _mark_phase(project_dir, f"task2-4/{module_name}", "done",
                                     detail=f"iteration {module_iter}", source_hash=_src_hash)
                         _set_current(project_dir, f"task2-4/{module_name} / LOCKED iter {module_iter}")
+                        git_commit(project_dir, f"pipeline: task3 iter {module_iter} — {module_name} tests pass")
+                        git_tag(project_dir, f"passing-{module_name}-{module_iter}")
                         if is_multi_module:
                             lock_module(project_dir, module_name, module_dir, module_manifest)
                             locked_modules.add(module_name)
+                            git_commit(project_dir, f"pipeline: locked — {module_name}")
                         else:
                             _log(f"\nSUCCESS: all tests passed on iteration {module_iter}.")
+                            git_commit(project_dir, f"pipeline: complete — all tests pass iter {module_iter}")
                             sys.exit(0)
                         break
 
@@ -8697,6 +8888,7 @@ This is a Rust procedural macro crate. Strict rules apply:
                         if is_multi_module:
                             lock_module(project_dir, module_name, module_dir, module_manifest)
                             locked_modules.add(module_name)
+                            git_commit(project_dir, f"pipeline: locked (no tests) — {module_name}")
                         else:
                             _log(f"\nSUCCESS: build passed with no module tests.")
                             sys.exit(0)

@@ -142,6 +142,8 @@ fi
 # Start the pipeline
 # ---------------------------------------------------------------------------
 nohup python pipeline.py --project anyhow-master > /tmp/pipeline_anyhow.log 2>&1 &
+# To use full git-managed workspace mode: replace above with:
+# nohup python pipeline.py --repo tmp/anyhow-master > /tmp/pipeline_anyhow.log 2>&1 &
 echo "Pipeline started (PID $!) — backend: $BACKEND"
 echo "Pipeline log : tail -f /tmp/pipeline_anyhow.log"
 echo "Guards log   : tail -f /tmp/pipeline_guards.log"

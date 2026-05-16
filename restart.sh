@@ -31,16 +31,16 @@ fi
 
 # Clean cargo build artifacts — removes stale build-script outputs from dev-deps
 # that can cause spurious "couldn't read OUT_DIR/xxx.rs" failures on cargo test --no-run.
-echo "Running cargo clean on anyhow-master ..."
-(cd "$SCRIPT_DIR/anyhow-master" && cargo clean 2>&1 | tail -3)
+echo "Running cargo clean on tmp/anyhow-master ..."
+(cd "$SCRIPT_DIR/tmp/anyhow-master" && cargo clean 2>&1 | tail -3)
 
 # Strip any leftover gen_* test blocks (also done by --clean in pipeline, belt+suspenders).
-echo "Stripping gen_* blocks from anyhow-master/src ..."
+echo "Stripping gen_* blocks from tmp/anyhow-master/src ..."
 python3 - <<'PYEOF'
 import re, pathlib, sys
 gen_re = re.compile(r'\n+#\[cfg\(test\)\](?:\n#\[[^\]]*\])*\n(?:pub )?mod gen_\w+\s*\{.*', re.DOTALL)
 stripped = []
-for p in pathlib.Path("anyhow-master/src").glob("*.rs"):
+for p in pathlib.Path("tmp/anyhow-master/src").glob("*.rs"):
     raw = p.read_text(); cleaned = gen_re.sub("", raw).rstrip() + "\n"
     if cleaned != raw:
         p.write_text(cleaned); stripped.append(p.name)
@@ -80,6 +80,8 @@ fi
 
 cd "$SCRIPT_DIR"
 nohup .venv/bin/python pipeline.py --project anyhow-master --clean > /tmp/pipeline_anyhow.log 2>&1 &
+# To use full git-managed workspace mode: replace above with:
+# nohup .venv/bin/python pipeline.py --repo tmp/anyhow-master --clean > /tmp/pipeline_anyhow.log 2>&1 &
 echo "Pipeline started (PID $!) — backend: $BACKEND"
 echo "Pipeline log : tail -f /tmp/pipeline_anyhow.log"
 echo "Server log   : tail -f /tmp/server.log"

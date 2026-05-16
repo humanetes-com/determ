@@ -1,6 +1,6 @@
 # Handover — May 16 2026 (session 22)
 
-## Pending design — git workspace system (NOT YET IMPLEMENTED)
+## Implemented — git workspace system (session 22)
 
 Discussed but not implemented. Decision deferred to next session.
 

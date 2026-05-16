@@ -1,0 +1,25 @@
+[2026-05-16 21:10:23] 
+============================================================
+[2026-05-16 21:10:23] ============================================================
+[2026-05-16 21:10:23]   PIPELINE STARTED — 2026-05-16 19:10:23 UTC
+[2026-05-16 21:10:23] ============================================================
+[2026-05-16 21:10:23] ============================================================
+[2026-05-16 21:10:23] Using model: Qwen/Qwen3.6-27B-FP8  |  Provider: vLLM (Qwen/Qwen3.6-27B-FP8)
+[2026-05-16 21:10:23] Context budget: 369,216 chars  (SINGLE_CALL=276,912  FILE=313,833  INTERMEDIATE=184,608)
+[2026-05-16 21:10:23]   Source hash: 39ed6a54789c31ec
+[2026-05-16 21:10:23]   Pipeline state:
+[2026-05-16 21:10:23]     [✗] task0b                  STALE    3478 chars
+[2026-05-16 21:10:23]     [✗] cfg_scan                STALE    3 clusters: stable, nightly, anyhow_no_core_error
+[2026-05-16 21:10:23]     [~] task0c/stable           resumed  starting
+[2026-05-16 21:10:23]     [~] task0c/stable/anyhow    resumed  starting
+[2026-05-16 21:10:23]     [~] task0c/anyhow           resumed  79.7% attempt 3
+[2026-05-16 21:10:23]     last position: task0c/anyhow / 79.7% attempt 3
+[2026-05-16 21:10:23] Initializing: asking Qwen/Qwen3.6-27B-FP8 to extract test command from README.md...
+[2026-05-16 21:11:37] Test command: cargo test
+[2026-05-16 21:11:37] Collecting test files...
+[2026-05-16 21:11:37]   Found 42 test file(s) (33 write-protected).
+[2026-05-16 21:11:37]   Project profile cache valid (project_profile.md), loading.
+[2026-05-16 21:11:37]   Project context cache valid (project_context.md), loading.
+[2026-05-16 21:11:37] 
+TASK 0b (discovery): Analyzing project for coverage strategy...
+[2026-05-16 21:20:12]   coverage_strategy.md written (3,385 chars).
