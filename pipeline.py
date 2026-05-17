@@ -3672,7 +3672,7 @@ def task0_project_profile(profile_path: Path, test_files, readme_text: str) -> s
         for rel, content in test_files[:25]
     )
 
-    readme_section = f"README.md:\n{readme_text}\n\n" if readme_text.strip() else ""
+    readme_section = f"README.md:\n{readme_text[:3_000]}\n\n" if readme_text.strip() else ""
 
     prompt = f"""You are identifying the structure of a software project from its test files and README.
 
@@ -3693,6 +3693,7 @@ patterns indicate a proc-macro crate. `fn main()` or binary test patterns indica
 
 Be specific and concrete. This profile is used to generate source files — accuracy matters.
 Do not mention the experiment or iteration process. Output only the profile document.
+Keep the output under 2,000 characters — be concise.
 
 <FILE path="project_profile.md">
 content here
@@ -3799,7 +3800,7 @@ def task0b_discovery(strategy_path: Path, project_dir: Path, test_files,
     # README + clusters), then divide the remaining budget 55/45 between src and tests.
     # Old approach (fixed 45%/40% of SINGLE_CALL) didn't account for large README/Cargo.toml
     # and triggered the context guard which drops chars from the middle incoherently.
-    _BOILERPLATE_ESTIMATE = 1_500   # static instruction text (~1.2k), conservative estimate
+    _BOILERPLATE_ESTIMATE = 2_500   # static instruction text + FILE markers + headings
 
     # Cap cargo.toml and README so they don't eat the whole budget.
     _cargo_cap   = min(len(cargo_text), 3_000)
@@ -3866,31 +3867,21 @@ def task0b_discovery(strategy_path: Path, project_dir: Path, test_files,
              f"{', '.join(src_dropped)}")
 
     test_section_parts: list[str] = []
-    test_budget = int(SINGLE_CALL_CHAR_LIMIT * 0.40)
+    _tb = test_budget_alloc
     for rel, content in test_files:
         part = f'\n<TESTFILE path="{rel}">\n{content}\n</TESTFILE>'
-        if len(part) <= test_budget:
+        if len(part) <= _tb:
             test_section_parts.append(part)
-            test_budget -= len(part)
+            _tb -= len(part)
 
-    cargo_section = f"\nCargo.toml:\n```toml\n{cargo_text}\n```\n" if cargo_text else ""
-    dropped_note = (
+    cargo_section  = f"\nCargo.toml:\n```toml\n{cargo_text[:_cargo_cap]}\n```\n" if cargo_text else ""
+    readme_section = f"\nREADME.md:\n{readme_text[:_readme_cap]}\n" if readme_text.strip() else ""
+    dropped_note   = (
         f"\nNOTE: The following source files were excluded due to context budget limits "
         f"— the strategy below may be incomplete for: {', '.join(src_dropped)}\n"
     ) if src_dropped else ""
-    src_section = "\nSource files (signatures and type definitions only):\n" + "".join(src_section_parts) if src_section_parts else ""
+    src_section  = "\nSource files (signatures and type definitions only):\n" + "".join(src_section_parts) if src_section_parts else ""
     test_section = "\nTest files:\n" + "".join(test_section_parts) if test_section_parts else ""
-    readme_section = f"\nREADME.md:\n{readme_text}\n" if readme_text.strip() else ""
-
-    clusters_section = ""
-    if clusters:
-        lines = ["\nCompiler clusters (each is a separate test pass with its own env/cfg):"]
-        for c in clusters:
-            env_desc = ", ".join(f"{k}={v}" for k, v in c.env_extra.items()) if c.env_extra else "default"
-            active = ", ".join(c.active_cfg) if c.active_cfg else "none"
-            excluded = ", ".join(c.excluded_cfg) if c.excluded_cfg else "none"
-            lines.append(f"  {c.name}: env={env_desc}  active_cfg=[{active}]  excluded_cfg=[{excluded}]")
-        clusters_section = "\n".join(lines) + "\n"
 
     prompt = f"""You are analyzing a software project to produce a compact coverage strategy reference.
 This will be injected verbatim into every unit-test-generation prompt — token budget is scarce.
@@ -4193,8 +4184,8 @@ def task0_project_context(context_path: Path, test_files, readme_text: str,
         f"--- {rel} ---\n{content[:1000]}"
         for rel, content in test_files[:25]
     )
-    readme_section = f"README.md:\n{readme_text}\n\n" if readme_text.strip() else ""
-    profile_section = f"Project profile:\n{profile_content}\n\n" if profile_content.strip() else ""
+    readme_section = f"README.md:\n{readme_text[:3_000]}\n\n" if readme_text.strip() else ""
+    profile_section = f"Project profile:\n{profile_content[:2_000]}\n\n" if profile_content.strip() else ""
 
     prompt = f"""You are writing a concise behavioral summary of a software project.
 This summary will be used by AI agents that must write code for this project without
@@ -4214,6 +4205,7 @@ Write a project_context.md that answers:
 
 Write in plain prose. Be specific — use actual type names, function names, and module
 names observed in the test files. Do not be vague. Do not describe the pipeline process.
+Keep the output under 2,000 characters — be concise.
 
 <FILE path="project_context.md">
 content here
@@ -4352,7 +4344,7 @@ Use the methodology in genesis.md below to guide your analysis.
 Use the README and test files to understand the language, framework, and project structure.
 
 README.md:
-{readme_text}
+{readme_text[:2_000]}
 {profile_section}{strategy_section}
 Test files:
 {tests_section}
@@ -4385,7 +4377,7 @@ Use the README and test files to understand the language, framework, and project
 Do not assume any specific language or technology -- derive everything from what you read.
 
 README.md:
-{readme_text}
+{readme_text[:2_000]}
 {profile_section}{strategy_section}
 Test files:
 {tests_section}
@@ -4414,7 +4406,9 @@ Only output the file `functional_requirements.md` using the markers above.
         single condensed intermediate summary. Called once per group.
         Returns the summary text, or None on failure.
         """
-        combined = "\n\n".join(group_partials)
+        _combined_raw = "\n\n".join(group_partials)
+        _combined_cap = int(SINGLE_CALL_CHAR_LIMIT * 0.55)
+        combined = _combined_raw[-_combined_cap:] if len(_combined_raw) > _combined_cap else _combined_raw
 
         genesis_section = (
             f"\n--- genesis.md (methodology — apply when merging requirements) ---\n"
@@ -4429,7 +4423,7 @@ in this group. Preserve all specific types, function signatures, error condition
 Remove duplicate entries. Do not invent new requirements not present in the input.
 {profile_section}{genesis_section}
 README.md (for language/framework context):
-{readme_text}
+{readme_text[:2_000]}
 
 Partial requirements to merge:
 {combined}
@@ -4627,6 +4621,10 @@ Output a plain structured list of the merged requirements. No filler, no code, n
                     f"{type_signals_text}\n"
                 )
 
+        _synthesis_cap = int(SINGLE_CALL_CHAR_LIMIT * 0.60)
+        _capped_synthesis = (all_for_synthesis[-_synthesis_cap:]
+                             if len(all_for_synthesis) > _synthesis_cap else all_for_synthesis)
+
         genesis_exists = bool(existing_genesis.strip())
         if genesis_exists:
             return f"""You are synthesizing requirements into a final requirements document.
@@ -4637,13 +4635,13 @@ Use the methodology in genesis.md below to guide synthesis.
 Derive the language and framework from the README and requirements below.
 
 README.md:
-{readme_text}
+{readme_text[:2_000]}
 {profile_section}{strategy_section}{type_signals_section}
 --- genesis.md (read-only -- do not output or modify it) ---
 {existing_genesis}
 
 Requirements (merged from all test chunks):
-{all_for_synthesis}
+{_capped_synthesis}
 
 Your task: produce functional_requirements.md -- the complete, deduplicated, final
 requirements for this specific project.
@@ -4655,10 +4653,10 @@ Your output MUST be the file `functional_requirements.md` wrapped in the FILE ma
 Derive the language and framework from the README and requirements below.
 
 README.md:
-{readme_text}
+{readme_text[:2_000]}
 {profile_section}{strategy_section}{type_signals_section}
 Requirements (merged from all test chunks):
-{all_for_synthesis}
+{_capped_synthesis}
 
 Your task: produce functional_requirements.md -- the complete, deduplicated, final
 requirements for this specific project.
@@ -4686,7 +4684,7 @@ All chunks will be synthesized into one complete requirements document after all
 Focus only on what you can directly observe in the tests below -- do not invent behavior.
 {profile_header}{genesis_section}{strategy_section}
 README.md:
-{readme_text}
+{readme_text[:2_000]}
 
 Test files (chunk {chunk_idx}/{total_chunks}):
 {tests_section}
@@ -4915,22 +4913,25 @@ def _task1_proc_macro(project_dir, genesis_path, functional_req_path, test_files
         if re.search(attr_pattern, content)
     ]
     if not relevant:
-        relevant = test_files  # Fallback: use all files — context-guard handles overflow
+        relevant = test_files  # Fallback: use all files
     _log(f"  [proc-macro mode] Using {len(relevant)} file(s) with derive/attribute usage.")
 
-    tests_section = "\n\n".join(
-        f'<TESTFILE path="{rel}">\n{content}\n</TESTFILE>'
-        for rel, content in relevant
-    )
-    # Pass all relevant test files in full — no artificial truncation.
-    # Proc-macro requirements are entirely derived from derive-attribute usage; missing
-    # any test means the proc-macro silently misses an attribute variant.
     existing_genesis = read(genesis_path)
     genesis_section = (
         f"\n--- genesis.md ---\n{existing_genesis}\n"
         if existing_genesis.strip() else ""
     )
     effective_context = project_context or readme_text
+
+    # Budget: fixed overhead (~1500 boilerplate + genesis + context) then remainder for tests.
+    _fixed = 1_500 + len(genesis_section) + min(len(effective_context), 2_000)
+    _tests_budget = max(2_000, SINGLE_CALL_CHAR_LIMIT - _fixed)
+    _raw_tests = "\n\n".join(
+        f'<TESTFILE path="{rel}">\n{content}\n</TESTFILE>'
+        for rel, content in relevant
+    )
+    tests_section = _raw_tests[-_tests_budget:] if len(_raw_tests) > _tests_budget else _raw_tests
+    effective_context = effective_context[:2_000]
 
     prompt = f"""You are analysing test files to extract the interface of a Rust proc-macro crate.
 
