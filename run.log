@@ -23,3 +23,282 @@
 [2026-05-16 21:11:37] 
 TASK 0b (discovery): Analyzing project for coverage strategy...
 [2026-05-16 21:20:12]   coverage_strategy.md written (3,385 chars).
+[2026-05-16 21:20:12]   [git] committed: pipeline: task0b done
+[2026-05-16 21:20:12]   [dep graph] cargo metadata: 1 module(s).
+[2026-05-16 21:20:12]   Single module or no dependency graph detected — whole-workspace mode.
+[2026-05-16 21:20:12] 
+Compiler clusters identified: 3
+[2026-05-16 21:20:12]   cluster/stable  — default build
+[2026-05-16 21:20:12]   cluster/nightly  — RUSTFLAGS+=--cfg error_generic_member_access
+[2026-05-16 21:20:12]   cluster/anyhow_no_core_error  — RUSTFLAGS+=--cfg anyhow_no_core_error
+[2026-05-16 21:20:12] 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[2026-05-16 21:20:12]   Starting compiler cluster: stable
+[2026-05-16 21:20:12] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[2026-05-16 21:20:12] 
+TASK 0c [stable]: Augmenting 'anyhow' to 100% coverage...
+[2026-05-16 21:20:13]   [anyhow/stable] Attempt 1/10
+[2026-05-16 21:20:23]   [anyhow/stable] Coverage: 79.7%
+[2026-05-16 21:20:23]   [task0c planner] src/fmt.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 2), ('src/lib.rs', 2), ('src/chain.rs', 1), ('src/context.rs', 1)])
+[2026-05-16 21:28:54]   [anyhow] Appended gen_tests to src/fmt.rs (1 uncovered lines targeted)
+[2026-05-16 21:28:54]   [task0c planner] src/wrapper.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 3), ('src/lib.rs', 3), ('src/nightly.rs', 2), ('src/context.rs', 1)])
+[2026-05-16 21:34:30]   [anyhow] Appended gen_tests to src/wrapper.rs (2 uncovered lines targeted)
+[2026-05-16 21:34:30]   [task0c planner] src/kind.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 4), ('src/lib.rs', 3), ('src/nightly.rs', 3), ('src/wrapper.rs', 3)])
+[2026-05-16 21:39:19]   [anyhow] Appended gen_tests to src/kind.rs (3 uncovered lines targeted)
+[2026-05-16 21:39:19]   [task0c planner] src/ptr.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 1)])
+[2026-05-16 21:45:20]   [anyhow] Appended gen_tests to src/ptr.rs (3 uncovered lines targeted)
+[2026-05-16 21:45:20]   [task0c planner] src/context.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 6), ('src/lib.rs', 5), ('src/nightly.rs', 3), ('src/wrapper.rs', 3)])
+[2026-05-16 21:51:06]   [anyhow] Appended gen_tests to src/context.rs (7 uncovered lines targeted)
+[2026-05-16 21:51:06]   [task0c planner] src/lib.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 6), ('src/kind.rs', 3), ('src/nightly.rs', 3), ('src/wrapper.rs', 3)])
+[2026-05-16 21:57:21]   [anyhow] Appended gen_tests to src/lib.rs (14 uncovered lines targeted)
+[2026-05-16 21:57:21]   [task0c planner] src/error.rs: ranked 12 siblings by type overlap (top: [('src/lib.rs', 7), ('src/wrapper.rs', 6), ('src/nightly.rs', 4), ('src/ptr.rs', 4)])
+[2026-05-16 22:03:32]   [anyhow] Appended gen_tests to src/error.rs (69 uncovered lines targeted)
+[2026-05-16 22:03:32]   [anyhow/stable] Attempt 2/10
+[2026-05-16 22:03:43]   [anyhow/stable] Coverage: 79.9%
+[2026-05-16 22:03:43]   [task0c planner] src/fmt.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 2), ('src/lib.rs', 2), ('src/chain.rs', 1), ('src/context.rs', 1)])
+[2026-05-16 22:11:32]   [anyhow] Appended gen_tests to src/fmt.rs (1 uncovered lines targeted)
+[2026-05-16 22:11:32]   [anyhow] No improvement for src/fmt.rs — running retrospective.
+[2026-05-16 22:14:20]   [anyhow] Retrospective: FUNCTION ErrorImpl::debug: (c) UNREACHABLE — This `if` branch is dead code on modern Rust toolchains because `std::backtrace` no longer emits the `"stack backtrace:"` prefix, so add a `// coverage:ignore` comment or suppress it in your coverage configuration.
+[2026-05-16 22:14:20]   [task0c planner] src/wrapper.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 3), ('src/lib.rs', 3), ('src/nightly.rs', 2), ('src/context.rs', 1)])
+[2026-05-16 22:19:04]   [anyhow] Appended gen_tests to src/wrapper.rs (2 uncovered lines targeted)
+[2026-05-16 22:19:04]   [anyhow] No improvement for src/wrapper.rs — running retrospective.
+[2026-05-16 22:20:12]   [anyhow] Retrospective: FUNCTION provide: CFG_GATED — Gated behind `#[cfg(error_generic_member_access)]` which requires nightly Rust to exercise the `Error::provide` API.
+[2026-05-16 22:20:12]   [anyhow] Targeted pragma for: ['provide']
+[2026-05-16 22:24:22]   [targeted-pragma] src/wrapper.rs: LLM returned no output.
+[2026-05-16 22:24:22]   [task0c planner] src/kind.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 4), ('src/lib.rs', 3), ('src/nightly.rs', 3), ('src/wrapper.rs', 3)])
+[2026-05-16 22:31:20]   [anyhow] Appended gen_tests to src/kind.rs (3 uncovered lines targeted)
+[2026-05-16 22:31:20]   [anyhow] No improvement for src/kind.rs — running retrospective.
+[2026-05-16 22:34:14]   [anyhow] Retrospective: FUNCTION AdhocKind::anyhow_kind: (a) TESTABLE — Use `std::hint::black_box` on the return value to prevent the compiler from optimizing away the call to this default method that returns a zero-sized type.
+FUNCTION TraitKind::anyhow_kind: (a) TESTABLE — Apply `std::hint::black_box` to the result to fo
+[2026-05-16 22:34:14]   [task0c planner] src/ptr.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 1)])
+[2026-05-16 22:39:40]   [anyhow] Appended gen_tests to src/ptr.rs (3 uncovered lines targeted)
+[2026-05-16 22:39:40]   [anyhow] No improvement for src/ptr.rs — running retrospective.
+[2026-05-16 22:44:38]   [anyhow] Retrospective: FUNCTION by_mut: (a) TESTABLE — Use `std::hint::black_box` on the returned `Mut` to prevent LLVM from optimizing out the zero-cost conversion and ensure the constructor body is traced.
+FUNCTION by_ref: (a) TESTABLE — Invoke the method on a valid `Mut` instance and assert the resulting pointer, using
+[2026-05-16 22:44:38]   [task0c planner] src/context.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 6), ('src/lib.rs', 5), ('src/nightly.rs', 3), ('src/wrapper.rs', 3)])
+[2026-05-16 22:51:59]   [anyhow] Appended gen_tests to src/context.rs (7 uncovered lines targeted)
+[2026-05-16 22:51:59]   [anyhow] No improvement for src/context.rs — running retrospective.
+[2026-05-16 22:52:58]   [anyhow] Retrospective: FUNCTION provide: CFG_GATED — Gated by `#[cfg(error_generic_member_access)]`, a nightly-only feature that is not enabled during stable test runs.
+FUNCTION provide: CFG_GATED — Gated by `#[cfg(error_generic_member_access)]`, a nightly-only feature that is not enabled during stable test runs.
+[2026-05-16 22:52:58]   [anyhow] Targeted pragma for: ['provide', 'provide']
+[2026-05-16 23:01:30]   [targeted-pragma] src/context.rs: LLM returned no output.
+[2026-05-16 23:01:30]   [task0c planner] src/lib.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 6), ('src/kind.rs', 3), ('src/nightly.rs', 3), ('src/wrapper.rs', 3)])
+[2026-05-16 23:07:27]   [anyhow] Appended gen_tests to src/lib.rs (13 uncovered lines targeted)
+[2026-05-16 23:07:27]   [task0c planner] src/error.rs: ranked 12 siblings by type overlap (top: [('src/lib.rs', 7), ('src/wrapper.rs', 6), ('src/nightly.rs', 4), ('src/ptr.rs', 4)])
+[2026-05-16 23:14:21]   [anyhow] Appended gen_tests to src/error.rs (69 uncovered lines targeted)
+[2026-05-16 23:14:21]   [anyhow] No improvement for src/error.rs — running retrospective.
+[2026-05-16 23:15:59]   [anyhow] Retrospective: FUNCTION thiserror_provide: CFG_GATED — gated behind the nightly-only `error_generic_member_access` feature, making it untestable on stable Rust.
+FUNCTION provide: CFG_GATED — implements the unstable `std::error::Error::provide` trait method gated by `error_generic_member_access`, requiring nightly 
+[2026-05-16 23:15:59]   [anyhow] Targeted pragma for: ['thiserror_provide', 'provide']
+[2026-05-16 23:33:44]   [targeted-pragma] src/error.rs: LLM returned no output.
+[2026-05-16 23:33:44]   [anyhow/stable] Attempt 3/10
+[2026-05-16 23:33:55]   [anyhow/stable] Coverage: 79.9%
+[2026-05-16 23:33:55]   [anyhow] No improvement (delta 0.0%) — stall count 1/10
+[2026-05-16 23:33:55]   [task0c planner] src/lib.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 6), ('src/kind.rs', 3), ('src/nightly.rs', 3), ('src/wrapper.rs', 3)])
+[2026-05-16 23:39:11]   [anyhow] Appended gen_tests to src/lib.rs (13 uncovered lines targeted)
+[2026-05-16 23:39:11]   [anyhow] No improvement for src/lib.rs — running retrospective.
+[2026-05-16 23:42:41]   [anyhow] Retrospective: FUNCTION source: CFG_GATED — The fallback implementation is guarded by `#[cfg(not(feature = "std"))]` and cannot be executed in standard test configurations.
+FUNCTION must_use: TESTABLE — Call the function directly and wrap the result with `std::hint::black_box` to ensure the compiler does not optim
+[2026-05-16 23:42:41]   [anyhow] Targeted pragma for: ['source']
+[2026-05-16 23:54:18]   [targeted-pragma] src/lib.rs: LLM returned no output.
+[2026-05-16 23:54:18]   [task0c planner] src/fmt.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 2), ('src/lib.rs', 2), ('src/chain.rs', 1), ('src/context.rs', 1)])
+[2026-05-17 00:01:18]   [anyhow] Appended gen_tests to src/fmt.rs (1 uncovered lines targeted)
+[2026-05-17 00:01:18]   [task0c planner] src/wrapper.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 3), ('src/lib.rs', 3), ('src/nightly.rs', 2), ('src/context.rs', 1)])
+[2026-05-17 00:05:59]   [anyhow] Appended gen_tests to src/wrapper.rs (2 uncovered lines targeted)
+[2026-05-17 00:05:59]   [task0c planner] src/kind.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 4), ('src/lib.rs', 3), ('src/nightly.rs', 3), ('src/wrapper.rs', 3)])
+[2026-05-17 00:12:33]   [anyhow] Appended gen_tests to src/kind.rs (3 uncovered lines targeted)
+[2026-05-17 00:12:33]   [task0c planner] src/ptr.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 1)])
+[2026-05-17 00:20:10]   [anyhow] Appended gen_tests to src/ptr.rs (3 uncovered lines targeted)
+[2026-05-17 00:20:10]   [task0c planner] src/context.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 6), ('src/lib.rs', 5), ('src/nightly.rs', 3), ('src/wrapper.rs', 3)])
+[2026-05-17 00:25:46]   [anyhow] Appended gen_tests to src/context.rs (7 uncovered lines targeted)
+[2026-05-17 00:25:46]   [task0c planner] src/error.rs: ranked 12 siblings by type overlap (top: [('src/lib.rs', 7), ('src/wrapper.rs', 6), ('src/nightly.rs', 4), ('src/ptr.rs', 4)])
+[2026-05-17 00:30:58]   [anyhow] Appended gen_tests to src/error.rs (69 uncovered lines targeted)
+[2026-05-17 00:30:58]   [anyhow/stable] Attempt 4/10
+[2026-05-17 00:31:09]   [anyhow/stable] Coverage: 79.9%
+[2026-05-17 00:31:09]   [anyhow] No improvement (delta 0.0%) — stall count 2/10
+[2026-05-17 00:31:09]   [task0c planner] src/lib.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 6), ('src/kind.rs', 3), ('src/nightly.rs', 3), ('src/wrapper.rs', 3)])
+[2026-05-17 00:36:54]   [anyhow] Appended gen_tests to src/lib.rs (13 uncovered lines targeted)
+[2026-05-17 00:36:54]   [task0c planner] src/fmt.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 2), ('src/lib.rs', 2), ('src/chain.rs', 1), ('src/context.rs', 1)])
+[2026-05-17 00:43:32]   [anyhow] Appended gen_tests to src/fmt.rs (1 uncovered lines targeted)
+[2026-05-17 00:43:32]   [task0c planner] src/wrapper.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 3), ('src/lib.rs', 3), ('src/nightly.rs', 2), ('src/context.rs', 1)])
+[2026-05-17 00:49:50]   [anyhow] Appended gen_tests to src/wrapper.rs (2 uncovered lines targeted)
+[2026-05-17 00:49:50]   [task0c planner] src/kind.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 4), ('src/lib.rs', 3), ('src/nightly.rs', 3), ('src/wrapper.rs', 3)])
+[2026-05-17 00:57:35]   [anyhow] Appended gen_tests to src/kind.rs (3 uncovered lines targeted)
+[2026-05-17 00:57:35]   [task0c planner] src/ptr.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 1)])
+[2026-05-17 01:03:22]   [anyhow] Appended gen_tests to src/ptr.rs (3 uncovered lines targeted)
+[2026-05-17 01:03:22]   [task0c planner] src/context.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 6), ('src/lib.rs', 5), ('src/nightly.rs', 3), ('src/wrapper.rs', 3)])
+[2026-05-17 01:07:31]   [anyhow] Appended gen_tests to src/context.rs (7 uncovered lines targeted)
+[2026-05-17 01:07:31]   [task0c planner] src/error.rs: ranked 12 siblings by type overlap (top: [('src/lib.rs', 7), ('src/wrapper.rs', 6), ('src/nightly.rs', 4), ('src/ptr.rs', 4)])
+[2026-05-17 01:15:29]   [anyhow] Appended gen_tests to src/error.rs (69 uncovered lines targeted)
+[2026-05-17 01:15:29]   [anyhow/stable] Attempt 5/10
+[2026-05-17 01:15:40]   [anyhow/stable] Coverage: 79.9%
+[2026-05-17 01:15:40]   [anyhow] No improvement (delta 0.0%) — stall count 3/10
+[2026-05-17 01:15:40]   [task0c planner] src/lib.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 6), ('src/kind.rs', 3), ('src/nightly.rs', 3), ('src/wrapper.rs', 3)])
+[2026-05-17 01:20:35]   [anyhow] Appended gen_tests to src/lib.rs (13 uncovered lines targeted)
+[2026-05-17 01:20:35]   [task0c planner] src/fmt.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 2), ('src/lib.rs', 2), ('src/chain.rs', 1), ('src/context.rs', 1)])
+[2026-05-17 01:27:04]   [anyhow] Appended gen_tests to src/fmt.rs (1 uncovered lines targeted)
+[2026-05-17 01:27:04]   [task0c planner] src/wrapper.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 3), ('src/lib.rs', 3), ('src/nightly.rs', 2), ('src/context.rs', 1)])
+[2026-05-17 01:31:37]   [anyhow] Unclosed delimiter — reverting src/wrapper.rs.
+[2026-05-17 01:31:37]   [task0c planner] src/kind.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 4), ('src/lib.rs', 3), ('src/nightly.rs', 3), ('src/wrapper.rs', 3)])
+[2026-05-17 01:36:47]   [anyhow] Appended gen_tests to src/kind.rs (3 uncovered lines targeted)
+[2026-05-17 01:36:47]   [task0c planner] src/ptr.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 1)])
+[2026-05-17 01:44:37]   [anyhow] Appended gen_tests to src/ptr.rs (3 uncovered lines targeted)
+[2026-05-17 01:44:37]   [task0c planner] src/context.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 6), ('src/lib.rs', 5), ('src/nightly.rs', 3), ('src/wrapper.rs', 3)])
+[2026-05-17 01:49:54]   [anyhow] Appended gen_tests to src/context.rs (7 uncovered lines targeted)
+[2026-05-17 01:49:54]   [task0c planner] src/error.rs: ranked 12 siblings by type overlap (top: [('src/lib.rs', 7), ('src/wrapper.rs', 6), ('src/nightly.rs', 4), ('src/ptr.rs', 4)])
+[2026-05-17 01:54:59]   [anyhow] Appended gen_tests to src/error.rs (69 uncovered lines targeted)
+[2026-05-17 01:54:59]   [anyhow/stable] Attempt 6/10
+[2026-05-17 01:55:09]   [anyhow/stable] Coverage: 79.9%
+[2026-05-17 01:55:09]   [anyhow] No improvement (delta 0.0%) — stall count 4/10
+[2026-05-17 01:55:09]   [task0c planner] src/lib.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 6), ('src/kind.rs', 3), ('src/nightly.rs', 3), ('src/wrapper.rs', 3)])
+[2026-05-17 02:00:26]   [anyhow] Appended gen_tests to src/lib.rs (13 uncovered lines targeted)
+[2026-05-17 02:00:26]   [task0c planner] src/fmt.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 2), ('src/lib.rs', 2), ('src/chain.rs', 1), ('src/context.rs', 1)])
+[2026-05-17 02:08:22]   [anyhow] Appended gen_tests to src/fmt.rs (1 uncovered lines targeted)
+[2026-05-17 02:08:22]   [task0c planner] src/wrapper.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 3), ('src/lib.rs', 3), ('src/nightly.rs', 2), ('src/context.rs', 1)])
+[2026-05-17 02:13:09]   [anyhow] Appended gen_tests to src/wrapper.rs (2 uncovered lines targeted)
+[2026-05-17 02:13:09]   [task0c planner] src/kind.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 4), ('src/lib.rs', 3), ('src/nightly.rs', 3), ('src/wrapper.rs', 3)])
+[2026-05-17 02:20:58]   [anyhow] Appended gen_tests to src/kind.rs (3 uncovered lines targeted)
+[2026-05-17 02:20:58]   [task0c planner] src/ptr.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 1)])
+[2026-05-17 02:28:57]   [anyhow] Appended gen_tests to src/ptr.rs (3 uncovered lines targeted)
+[2026-05-17 02:28:57]   [task0c planner] src/context.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 6), ('src/lib.rs', 5), ('src/nightly.rs', 3), ('src/wrapper.rs', 3)])
+[2026-05-17 02:34:26]   [anyhow] Appended gen_tests to src/context.rs (7 uncovered lines targeted)
+[2026-05-17 02:34:26]   [task0c planner] src/error.rs: ranked 12 siblings by type overlap (top: [('src/lib.rs', 7), ('src/wrapper.rs', 6), ('src/nightly.rs', 4), ('src/ptr.rs', 4)])
+[2026-05-17 02:42:34]   [anyhow] Appended gen_tests to src/error.rs (69 uncovered lines targeted)
+[2026-05-17 02:42:34]   [anyhow/stable] Attempt 7/10
+[2026-05-17 02:42:45]   [anyhow/stable] Coverage: 79.9%
+[2026-05-17 02:42:45]   [anyhow] No improvement (delta 0.0%) — stall count 5/10
+[2026-05-17 02:42:45]   [task0c planner] src/lib.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 6), ('src/kind.rs', 3), ('src/nightly.rs', 3), ('src/wrapper.rs', 3)])
+[2026-05-17 02:48:11]   [anyhow] Appended gen_tests to src/lib.rs (13 uncovered lines targeted)
+[2026-05-17 02:48:11]   [task0c planner] src/fmt.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 2), ('src/lib.rs', 2), ('src/chain.rs', 1), ('src/context.rs', 1)])
+[2026-05-17 02:54:40]   [anyhow] Appended gen_tests to src/fmt.rs (1 uncovered lines targeted)
+[2026-05-17 02:54:40]   [task0c planner] src/wrapper.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 3), ('src/lib.rs', 3), ('src/nightly.rs', 2), ('src/context.rs', 1)])
+[2026-05-17 02:59:20]   [anyhow] Appended gen_tests to src/wrapper.rs (2 uncovered lines targeted)
+[2026-05-17 02:59:20]   [task0c planner] src/kind.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 4), ('src/lib.rs', 3), ('src/nightly.rs', 3), ('src/wrapper.rs', 3)])
+[2026-05-17 03:07:15]   [anyhow] Appended gen_tests to src/kind.rs (3 uncovered lines targeted)
+[2026-05-17 03:07:15]   [task0c planner] src/ptr.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 1)])
+[2026-05-17 03:13:13]   [anyhow] Appended gen_tests to src/ptr.rs (3 uncovered lines targeted)
+[2026-05-17 03:13:13]   [task0c planner] src/context.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 6), ('src/lib.rs', 5), ('src/nightly.rs', 3), ('src/wrapper.rs', 3)])
+[2026-05-17 03:18:12]   [anyhow] Appended gen_tests to src/context.rs (7 uncovered lines targeted)
+[2026-05-17 03:18:12]   [task0c planner] src/error.rs: ranked 12 siblings by type overlap (top: [('src/lib.rs', 7), ('src/wrapper.rs', 6), ('src/nightly.rs', 4), ('src/ptr.rs', 4)])
+[2026-05-17 03:24:47]   [anyhow] Appended gen_tests to src/error.rs (69 uncovered lines targeted)
+[2026-05-17 03:24:47]   [anyhow/stable] Attempt 8/10
+[2026-05-17 03:24:58]   [anyhow/stable] Coverage: 79.9%
+[2026-05-17 03:24:58]   [anyhow] No improvement (delta 0.0%) — stall count 6/10
+[2026-05-17 03:24:58]   [task0c planner] src/lib.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 6), ('src/kind.rs', 3), ('src/nightly.rs', 3), ('src/wrapper.rs', 3)])
+[2026-05-17 03:30:35]   [anyhow] Appended gen_tests to src/lib.rs (13 uncovered lines targeted)
+[2026-05-17 03:30:35]   [task0c planner] src/fmt.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 2), ('src/lib.rs', 2), ('src/chain.rs', 1), ('src/context.rs', 1)])
+[2026-05-17 03:36:28]   [anyhow] Appended gen_tests to src/fmt.rs (1 uncovered lines targeted)
+[2026-05-17 03:36:28]   [task0c planner] src/wrapper.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 3), ('src/lib.rs', 3), ('src/nightly.rs', 2), ('src/context.rs', 1)])
+[2026-05-17 03:41:44]   [anyhow] Appended gen_tests to src/wrapper.rs (2 uncovered lines targeted)
+[2026-05-17 03:41:44]   [task0c planner] src/kind.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 4), ('src/lib.rs', 3), ('src/nightly.rs', 3), ('src/wrapper.rs', 3)])
+[2026-05-17 03:52:38]   [anyhow] Appended gen_tests to src/kind.rs (3 uncovered lines targeted)
+[2026-05-17 03:52:38]   [task0c planner] src/ptr.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 1)])
+[2026-05-17 04:01:43]   [anyhow] Appended gen_tests to src/ptr.rs (3 uncovered lines targeted)
+[2026-05-17 04:01:43]   [task0c planner] src/context.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 6), ('src/lib.rs', 5), ('src/nightly.rs', 3), ('src/wrapper.rs', 3)])
+[2026-05-17 04:07:19]   [anyhow] Appended gen_tests to src/context.rs (7 uncovered lines targeted)
+[2026-05-17 04:07:19]   [task0c planner] src/error.rs: ranked 12 siblings by type overlap (top: [('src/lib.rs', 7), ('src/wrapper.rs', 6), ('src/nightly.rs', 4), ('src/ptr.rs', 4)])
+[2026-05-17 04:11:43]   [anyhow] Appended gen_tests to src/error.rs (69 uncovered lines targeted)
+[2026-05-17 04:11:43]   [anyhow/stable] Attempt 9/10
+[2026-05-17 04:11:54]   [anyhow/stable] Coverage: 79.9%
+[2026-05-17 04:11:54]   [anyhow] No improvement (delta 0.0%) — stall count 7/10
+[2026-05-17 04:11:54]   [task0c planner] src/lib.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 6), ('src/kind.rs', 3), ('src/nightly.rs', 3), ('src/wrapper.rs', 3)])
+[2026-05-17 04:18:23]   [anyhow] Appended gen_tests to src/lib.rs (13 uncovered lines targeted)
+[2026-05-17 04:18:23]   [task0c planner] src/fmt.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 2), ('src/lib.rs', 2), ('src/chain.rs', 1), ('src/context.rs', 1)])
+[2026-05-17 04:23:49]   [anyhow] Appended gen_tests to src/fmt.rs (1 uncovered lines targeted)
+[2026-05-17 04:23:49]   [task0c planner] src/wrapper.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 3), ('src/lib.rs', 3), ('src/nightly.rs', 2), ('src/context.rs', 1)])
+[2026-05-17 04:29:49]   [anyhow] Appended gen_tests to src/wrapper.rs (2 uncovered lines targeted)
+[2026-05-17 04:29:49]   [task0c planner] src/kind.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 4), ('src/lib.rs', 3), ('src/nightly.rs', 3), ('src/wrapper.rs', 3)])
+[2026-05-17 04:36:05]   [anyhow] Appended gen_tests to src/kind.rs (3 uncovered lines targeted)
+[2026-05-17 04:36:05]   [task0c planner] src/ptr.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 1)])
+[2026-05-17 04:42:49]   [anyhow] Compile error in src/ptr.rs (fix attempt 1) — sending to LLM.
+[2026-05-17 04:49:09]   [anyhow] Appended gen_tests to src/ptr.rs (3 uncovered lines targeted)
+[2026-05-17 04:49:09]   [task0c planner] src/context.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 6), ('src/lib.rs', 5), ('src/nightly.rs', 3), ('src/wrapper.rs', 3)])
+[2026-05-17 04:54:39]   [anyhow] Appended gen_tests to src/context.rs (7 uncovered lines targeted)
+[2026-05-17 04:54:39]   [task0c planner] src/error.rs: ranked 12 siblings by type overlap (top: [('src/lib.rs', 7), ('src/wrapper.rs', 6), ('src/nightly.rs', 4), ('src/ptr.rs', 4)])
+[2026-05-17 05:02:41]   [anyhow] Appended gen_tests to src/error.rs (69 uncovered lines targeted)
+[2026-05-17 05:02:41]   [anyhow/stable] Attempt 10/10
+[2026-05-17 05:02:52]   [anyhow/stable] Coverage: 79.9%
+[2026-05-17 05:02:52]   [anyhow] No improvement (delta 0.0%) — stall count 8/10
+[2026-05-17 05:02:52]   [task0c planner] src/lib.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 6), ('src/kind.rs', 3), ('src/nightly.rs', 3), ('src/wrapper.rs', 3)])
+[2026-05-17 05:08:46]   [anyhow] Appended gen_tests to src/lib.rs (13 uncovered lines targeted)
+[2026-05-17 05:08:46]   [task0c planner] src/fmt.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 2), ('src/lib.rs', 2), ('src/chain.rs', 1), ('src/context.rs', 1)])
+[2026-05-17 05:17:51]   [anyhow] Appended gen_tests to src/fmt.rs (1 uncovered lines targeted)
+[2026-05-17 05:17:51]   [task0c planner] src/wrapper.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 3), ('src/lib.rs', 3), ('src/nightly.rs', 2), ('src/context.rs', 1)])
+[2026-05-17 05:22:24]   [anyhow] Appended gen_tests to src/wrapper.rs (2 uncovered lines targeted)
+[2026-05-17 05:22:24]   [task0c planner] src/kind.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 4), ('src/lib.rs', 3), ('src/nightly.rs', 3), ('src/wrapper.rs', 3)])
+[2026-05-17 05:30:50]   [anyhow] Appended gen_tests to src/kind.rs (3 uncovered lines targeted)
+[2026-05-17 05:30:50]   [task0c planner] src/ptr.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 1)])
+[2026-05-17 05:37:34]   [anyhow] Appended gen_tests to src/ptr.rs (3 uncovered lines targeted)
+[2026-05-17 05:37:34]   [task0c planner] src/context.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 6), ('src/lib.rs', 5), ('src/nightly.rs', 3), ('src/wrapper.rs', 3)])
+[2026-05-17 05:41:29]   [anyhow] Appended gen_tests to src/context.rs (7 uncovered lines targeted)
+[2026-05-17 05:41:29]   [task0c planner] src/error.rs: ranked 12 siblings by type overlap (top: [('src/lib.rs', 7), ('src/wrapper.rs', 6), ('src/nightly.rs', 4), ('src/ptr.rs', 4)])
+[2026-05-17 05:48:16]   [anyhow] Appended gen_tests to src/error.rs (69 uncovered lines targeted)
+[2026-05-17 05:48:16]   [anyhow/stable] Finished augmentation: 79.9% coverage after 10 attempt(s).
+[2026-05-17 05:48:16]   TASK 0c [stable]: 'anyhow' coverage: 79.9%
+[2026-05-17 05:48:16]   HARD RULE (FR-018): 'anyhow' [stable] coverage 79.9% < 100% (stall 0/10, best 79.9%). Retrying.
+[2026-05-17 05:48:16] 
+TASK 0c [stable]: Augmenting 'anyhow' to 100% coverage...
+[2026-05-17 05:48:16]   [anyhow/stable] Attempt 1/10
+[2026-05-17 05:48:27]   [anyhow/stable] Coverage: 79.9%
+[2026-05-17 05:48:27]   [task0c planner] src/fmt.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 2), ('src/lib.rs', 2), ('src/chain.rs', 1), ('src/context.rs', 1)])
+[2026-05-17 05:57:34]   [anyhow] Appended gen_tests to src/fmt.rs (1 uncovered lines targeted)
+[2026-05-17 05:57:34]   [task0c planner] src/wrapper.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 3), ('src/lib.rs', 3), ('src/nightly.rs', 2), ('src/context.rs', 1)])
+[2026-05-17 06:02:50]   [anyhow] Appended gen_tests to src/wrapper.rs (2 uncovered lines targeted)
+[2026-05-17 06:02:50]   [task0c planner] src/kind.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 4), ('src/lib.rs', 3), ('src/nightly.rs', 3), ('src/wrapper.rs', 3)])
+[2026-05-17 06:12:43]   [anyhow] Appended gen_tests to src/kind.rs (3 uncovered lines targeted)
+[2026-05-17 06:12:43]   [task0c planner] src/ptr.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 1)])
+[2026-05-17 06:20:31]   [anyhow] Appended gen_tests to src/ptr.rs (3 uncovered lines targeted)
+[2026-05-17 06:20:31]   [task0c planner] src/context.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 6), ('src/lib.rs', 5), ('src/nightly.rs', 3), ('src/wrapper.rs', 3)])
+[2026-05-17 06:25:29]   [anyhow] Appended gen_tests to src/context.rs (7 uncovered lines targeted)
+[2026-05-17 06:25:29]   [task0c planner] src/lib.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 6), ('src/kind.rs', 3), ('src/nightly.rs', 3), ('src/wrapper.rs', 3)])
+[2026-05-17 06:31:26]   [anyhow] Appended gen_tests to src/lib.rs (13 uncovered lines targeted)
+[2026-05-17 06:31:26]   [task0c planner] src/error.rs: ranked 12 siblings by type overlap (top: [('src/lib.rs', 7), ('src/wrapper.rs', 6), ('src/nightly.rs', 4), ('src/ptr.rs', 4)])
+[2026-05-17 06:47:46] 
+============================================================
+[2026-05-17 06:47:46] ============================================================
+[2026-05-17 06:47:46]   PIPELINE STARTED — 2026-05-17 04:47:46 UTC
+[2026-05-17 06:47:46] ============================================================
+[2026-05-17 06:47:46] ============================================================
+[2026-05-17 06:47:46] Using model: Qwen/Qwen3.6-27B-FP8  |  Provider: vLLM (Qwen/Qwen3.6-27B-FP8)
+[2026-05-17 06:47:46] Context budget: 369,216 chars  (SINGLE_CALL=276,912  FILE=313,833  INTERMEDIATE=184,608)
+[2026-05-17 06:47:46]   Source hash: 39ed6a54789c31ec
+[2026-05-17 06:47:46]   Pipeline state:
+[2026-05-17 06:47:46]     [✓] task0b                  valid    3385 chars
+[2026-05-17 06:47:46]     [✓] cfg_scan                valid    3 clusters: stable, nightly, anyhow_no_core_error
+[2026-05-17 06:47:46]     [~] task0c/stable           resumed  starting
+[2026-05-17 06:47:46]     [~] task0c/stable/anyhow    resumed  starting
+[2026-05-17 06:47:46]     [~] task0c/anyhow           resumed  79.9% attempt 1
+[2026-05-17 06:47:46]     last position: task0c/anyhow / 79.9% attempt 1
+[2026-05-17 06:47:46] Initializing: asking Qwen/Qwen3.6-27B-FP8 to extract test command from README.md...
+[2026-05-17 06:48:46] Test command: cargo test
+[2026-05-17 06:48:46] Collecting test files...
+[2026-05-17 06:48:47]   Found 42 test file(s) (33 write-protected).
+[2026-05-17 06:48:47]   Project profile cache valid (project_profile.md), loading.
+[2026-05-17 06:48:47]   Project context cache valid (project_context.md), loading.
+[2026-05-17 06:48:47] 
+TASK 0b (discovery): Analyzing project for coverage strategy...
+[2026-05-17 06:53:05] 
+============================================================
+[2026-05-17 06:53:05] ============================================================
+[2026-05-17 06:53:05]   PIPELINE STARTED — 2026-05-17 04:53:05 UTC
+[2026-05-17 06:53:05] ============================================================
+[2026-05-17 06:53:05] ============================================================
+[2026-05-17 06:53:05] Using model: Qwen/Qwen3.6-27B-FP8  |  Provider: vLLM (Qwen/Qwen3.6-27B-FP8)
+[2026-05-17 06:53:05] Context budget: 369,216 chars  (SINGLE_CALL=276,912  FILE=313,833  INTERMEDIATE=184,608)
+[2026-05-17 06:53:05]   Source hash: 39ed6a54789c31ec
+[2026-05-17 06:53:05]   Pipeline state:
+[2026-05-17 06:53:05]     [✓] task0b                  valid    3385 chars
+[2026-05-17 06:53:05]     [✓] cfg_scan                valid    3 clusters: stable, nightly, anyhow_no_core_error
+[2026-05-17 06:53:05]     [~] task0c/stable           resumed  starting
+[2026-05-17 06:53:05]     [~] task0c/stable/anyhow    resumed  starting
+[2026-05-17 06:53:05]     [~] task0c/anyhow           resumed  79.9% attempt 1
+[2026-05-17 06:53:05]     last position: task0c/anyhow / 79.9% attempt 1
+[2026-05-17 06:53:05] Initializing: asking Qwen/Qwen3.6-27B-FP8 to extract test command from README.md...
+[2026-05-17 06:54:31] Test command: cargo test
+[2026-05-17 06:54:31] Collecting test files...
+[2026-05-17 06:54:31]   Found 42 test file(s) (33 write-protected).
+[2026-05-17 06:54:31]   Project profile cache valid (project_profile.md), loading.
+[2026-05-17 06:54:31]   Project context cache valid (project_context.md), loading.
+[2026-05-17 06:54:31] 
+TASK 0b (discovery): Analyzing project for coverage strategy...
+[2026-05-17 06:59:35]   coverage_strategy.md written (2,645 chars).

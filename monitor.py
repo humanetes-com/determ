@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Pipeline / Ollama / GPU monitor — refreshes every 2s, Ctrl+C to quit."""
-import json, os, re, subprocess, time, urllib.request
+import json, os, re, select, subprocess, sys, termios, time, tty, urllib.request
 from datetime import datetime
 
 PIPELINE_LOG = "/tmp/pipeline_anyhow.log"
@@ -325,15 +325,59 @@ def generation():
     rows += [dim((l[:w - 2] + "…") if len(l) > w else l) for l in lines] or [dim("(empty)")]
     return rows
 
+# ── Action menu ───────────────────────────────────────────────────────────────
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+_action_msg = ""   # last action feedback, shown for one refresh cycle
+
+def _read_key():
+    """Return a single keypress without blocking, or '' if none available."""
+    if select.select([sys.stdin], [], [], 0)[0]:
+        return sys.stdin.read(1)
+    return ""
+
+def _run_action(key):
+    global _action_msg
+    if key == "c":
+        subprocess.Popen(
+            ["bash", os.path.join(SCRIPT_DIR, "continue.sh"), "--y"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        _action_msg = green("▶ continue.sh launched")
+    elif key == "r":
+        subprocess.Popen(
+            ["bash", os.path.join(SCRIPT_DIR, "restart.sh"), "--y"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        _action_msg = yellow("↺ restart.sh launched")
+    elif key == "s":
+        try:
+            subprocess.run(["pkill", "-f", "pipeline.py"], check=True)
+            _action_msg = red("■ pipeline stopped")
+        except subprocess.CalledProcessError:
+            _action_msg = dim("pipeline was not running")
+
+def _menu_row():
+    running = True
+    try:
+        subprocess.check_output(["pgrep", "-f", "pipeline.py"], stderr=subprocess.DEVNULL)
+    except subprocess.CalledProcessError:
+        running = False
+    s_label = red("[s] stop") if running else dim("[s] stop")
+    return f"  {green('[c] continue')}   {yellow('[r] restart')}   {s_label}   {dim('[ctrl+c] quit')}"
+
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
 def main():
+    old_settings = termios.tcgetattr(sys.stdin)
     print("\033[2J\033[?25l", end="", flush=True)  # clear once + hide cursor
     try:
+        tty.setcbreak(sys.stdin.fileno())  # single-char input, no echo
         while True:
             _home()
             now = datetime.now().strftime("%H:%M:%S")
-            _ln(f" {bold('Pipeline Monitor')}  {dim(now)}  {dim('ctrl+c to quit')}")
+            _ln(f" {bold('Pipeline Monitor')}  {dim(now)}")
             _ln()
             box("Ollama", ollama())
             _ln()
@@ -342,9 +386,25 @@ def main():
             box("Pipeline", pipeline())
             _ln()
             box("Generation", generation())
-            _erase()  # wipe anything below current frame
-            time.sleep(REFRESH)
+            _ln()
+            global _action_msg
+            _ln(_menu_row())
+            if _action_msg:
+                _ln(f"  {_action_msg}")
+                _action_msg = ""
+            else:
+                _ln()
+            _erase()
+
+            # Wait up to REFRESH seconds, wake immediately on keypress.
+            ready, _, _ = select.select([sys.stdin], [], [], REFRESH)
+            if ready:
+                key = sys.stdin.read(1)
+                _run_action(key)
     except KeyboardInterrupt:
+        pass
+    finally:
+        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
         print("\033[?25h\033[J\nBye.")  # restore cursor + clear below
 
 if __name__ == "__main__":

@@ -1,3 +1,21 @@
+# Handover — May 17 2026 (session 23)
+
+## Fixes applied (session 23)
+
+### 1. Targeted pragma fallback extraction (`_task0c_targeted_pragma`)
+- Problem: model emits plain ```rust``` block instead of `<FILE path="...">` wrapper → `extract_files()` returns empty → pragmas silently not added → coverage stuck at 79.9%.
+- Fix: after `extract_files()` returns nothing, grep response for the largest ```` ```...``` ```` block (≥100 chars). If found, use that as the file content.
+- Prompt also clarified: "(complete file content here)" placeholder instead of "corrected content here" which confused some models.
+
+### 2. FR-018 outer stall detection — threshold + total cap
+- Problem: tarpaulin measurement variance (~0.01%) caused `_cov > _prev_best` to fire occasionally, resetting `_c_retries` to 0. Inner loop never exited; outer loop cycled forever.
+- Fix:
+  - Meaningful-improvement threshold: `_cov >= _prev_best + 0.4` required to reset `_c_retries` (ignores sub-0.4% noise).
+  - Added `_c_total` counter (total outer attempts per module). Hard block fires when `_stall >= 5 OR _total >= 20`.
+  - On hard block: accept current coverage, mark module done, continue — pipeline proceeds instead of calling `sys.exit(1)`.
+
+---
+
 # Handover — May 16 2026 (session 22)
 
 ## Implemented — git workspace system (session 22)
