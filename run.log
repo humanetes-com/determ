@@ -916,3 +916,11 @@ Compiler clusters identified: 3
 [2026-05-17 09:46:38]   cluster/nightly: 'anyhow' already done — skipping.
 [2026-05-17 09:46:38] 
   cluster/nightly complete — 1 module(s) done.
+[2026-05-17 09:46:38]   [git] committed: pipeline: task0c/nightly — anyhow:0.0%
+[2026-05-17 09:46:38] 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[2026-05-17 09:46:38]   Starting compiler cluster: anyhow_no_core_error
+[2026-05-17 09:46:38] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[2026-05-17 09:46:38]   cluster/anyhow_no_core_error: 'anyhow' already done — skipping.
+[2026-05-17 09:46:38] 
+  cluster/anyhow_no_core_error complete — 1 module(s) done.
