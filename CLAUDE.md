@@ -8,6 +8,25 @@ IMPORTANT: Always produce compact structured output instead of markdown prose wh
 
 ---
 
+# Engineering principles
+
+## Never install dependencies manually
+Every new tool, binary, or Python package must be added to `setup.sh` (and `requirements.txt` for Python deps). Never run `pip install`, `cargo install`, or `rustup component add` directly — those are one-off fixes that break reproducibility. The correct action is always: add to setup, then run setup.
+
+## Fix processes, not symptoms
+Do not patch individual failures in isolation. Ask: what process produced this failure, and how should that process be improved so the failure cannot recur? Examples:
+- A type error in pipeline.py → add static analysis to the dev workflow, not just fix that one return statement.
+- A coverage tool giving wrong results → improve the coverage backend selection process, not just ignore that file.
+- An LLM returning bad output → improve the prompt or retry logic, not manually correct the output.
+
+## Let the LLM fix code, not the autopilot
+The autopilot (this assistant) must not directly fix bugs in project source files inside `tmp/`. Those are owned by the pipeline. The correct action is to improve pipeline.py so the LLM produces better output on the next run. The autopilot fixes the process; the process fixes the code.
+
+## Same principle applies to the pipeline itself
+If pipeline.py has a bug, fix the pipeline code and restart — do not manually edit workspace files or call pipeline functions directly to work around the bug.
+
+---
+
 # Repository structure
 
 The pipeline is its own git repository. Project workspaces live in `tmp/` and are

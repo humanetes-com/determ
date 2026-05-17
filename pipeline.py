@@ -7125,7 +7125,7 @@ def task0c_augment_module(
             err_snippet = lib_err[:400]
             _log(f"  [{module_name}] Library does not compile — skipping augmentation.")
             _log(f"    Error: {err_snippet}")
-            return 0.0
+            return 0.0, 0
         _log(f"  [{module_name}] Library compile failure in gen_* block — routing to harness fix loop.")
 
     _gen_block_re = re.compile(r'\n+#\[cfg\(test\)\](?:\n#\[[^\]]*\])*\n(?:pub )?mod gen_\w+\s*\{.*', re.DOTALL)
@@ -7160,7 +7160,7 @@ def task0c_augment_module(
 
             if not broken_files:
                 _log(f"  [{module_name}] Cannot identify broken file — skipping augmentation.")
-                return 0.0
+                return 0.0, 0
 
             # Pass 1: ask LLM to fix each broken file — preserve as much generated
             # test code as possible rather than discarding it immediately.
@@ -7233,7 +7233,7 @@ corrected content here
                 harness_ok, _ = augmentor.test_harness_compiles(project_dir, module_name)
                 if not harness_ok:
                     _log(f"  [{module_name}] Harness still broken after strip — skipping augmentation.")
-                    return 0.0
+                    return 0.0, 0
                 _log(f"  [{module_name}] Harness fixed by stripping gen_* blocks.")
                 break
 

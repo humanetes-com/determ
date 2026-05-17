@@ -596,3 +596,47 @@ Compiler clusters identified: 3
 [2026-05-17 08:50:08]   cluster/stable: 'anyhow' already done — skipping.
 [2026-05-17 08:50:08] 
   cluster/stable complete — 1 module(s) done.
+[2026-05-17 08:50:08]   [git] committed: pipeline: task0c/stable — anyhow:0.0%
+[2026-05-17 08:50:08] 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[2026-05-17 08:50:08]   Starting compiler cluster: nightly
+[2026-05-17 08:50:08] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[2026-05-17 08:50:08] 
+TASK 0c [nightly]: Augmenting 'anyhow' to 100% coverage...
+[2026-05-17 08:50:08]   [anyhow] Library compile failure in gen_* block — routing to harness fix loop.
+[2026-05-17 08:50:09]   [anyhow] Harness fix attempt 1 — sending compile error to LLM.
+[2026-05-17 08:50:09]   GUARD: [context-guard/middle_trim] prompt 26,422 > limit 16,000: dropped 20,422 chars from middle
+[2026-05-17 08:56:46]     LLM fixed test code in src/lib.rs
+[2026-05-17 08:56:47]   [anyhow] Still broken — 0 error signature(s), 0 resolved since last attempt.
+[2026-05-17 08:56:47]   [anyhow] No error improvement — stripping gen_* blocks from broken files.
+[2026-05-17 08:56:47]   [anyhow] Stripped gen_* block from src/lib.rs.
+[2026-05-17 08:56:48]   [anyhow] Harness still broken after strip — skipping augmentation.
+[2026-05-17 09:33:05] 
+============================================================
+[2026-05-17 09:33:05] ============================================================
+[2026-05-17 09:33:05]   PIPELINE STARTED — 2026-05-17 07:33:05 UTC
+[2026-05-17 09:33:05] ============================================================
+[2026-05-17 09:33:05] ============================================================
+[2026-05-17 09:33:05] Using model: Qwen/Qwen3.6-27B-FP8  |  Provider: vLLM (Qwen/Qwen3.6-27B-FP8)
+[2026-05-17 09:33:05] Context budget: 16,000 chars  (SINGLE_CALL=12,000  FILE=13,600  INTERMEDIATE=8,000)
+[2026-05-17 09:33:05]   Source hash: 5e8b27ba72799664
+[2026-05-17 09:33:05]   Pipeline state:
+[2026-05-17 09:33:05]     [✗] task0b                  STALE    1358 chars
+[2026-05-17 09:33:05]     [✗] cfg_scan                STALE    3 clusters: stable, nightly, anyhow_no_core_error
+[2026-05-17 09:33:05]     [✗] task0c/stable           STALE    1 modules
+[2026-05-17 09:33:05]     [~] task0c/stable/anyhow    resumed  0.0%
+[2026-05-17 09:33:05]     [~] task0c/anyhow           resumed  0.0% attempt 1
+[2026-05-17 09:33:05]     [~] task0c/nightly          resumed  starting
+[2026-05-17 09:33:05]     [~] task0c/nightly/anyhow   resumed  starting
+[2026-05-17 09:33:05]     last position: task0c/nightly/anyhow / starting
+[2026-05-17 09:33:05] Initializing: asking Qwen/Qwen3.6-27B-FP8 to extract test command from README.md...
+[2026-05-17 09:33:47] Test command: cargo test
+[2026-05-17 09:33:47] Collecting test files...
+[2026-05-17 09:33:47]   Found 42 test file(s) (33 write-protected).
+[2026-05-17 09:33:47]   Project profile cache valid (project_profile.md), loading.
+[2026-05-17 09:33:47]   Project context cache valid (project_context.md), loading.
+[2026-05-17 09:33:47] 
+TASK 0b (discovery): Analyzing project for coverage strategy...
+[2026-05-17 09:33:47]   [task0b] WARNING: 10 source file(s) dropped (budget exhausted): src/ptr.rs, src/kind.rs, src/fmt.rs, src/ensure.rs, src/wrapper.rs, src/context.rs, src/chain.rs, src/macros.rs, src/nightly.rs, src/lib.rs
+[2026-05-17 09:33:47]   GUARD: [context-guard/middle_trim] prompt 19,422 > limit 16,000: dropped 6,810 chars from middle
+[2026-05-17 09:37:59]   coverage_strategy.md written (1,531 chars).
