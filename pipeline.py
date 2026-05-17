@@ -306,6 +306,13 @@ COVERAGE_AUGMENT_SENTINEL = ".coverage_augmented"
 # doesn't look in /root/.cargo instead of the real user's home.
 _real_home = Path(os.path.expanduser(f"~{os.environ.get('SUDO_USER', '')}") if os.environ.get("SUDO_USER") else str(Path.home()))
 TARPAULIN_BIN = _real_home / ".cargo" / "bin" / "cargo-tarpaulin"
+GRCOV_BIN     = _real_home / ".cargo" / "bin" / "grcov"
+COVERAGE_BACKEND = os.getenv("COVERAGE_BACKEND", "tarpaulin").lower()  # "tarpaulin" | "grcov"
+
+# Pragma comment each backend recognises to exclude a line from coverage.
+COVERAGE_IGNORE_PRAGMA = (
+    "// GRCOV_EXCL_LINE" if COVERAGE_BACKEND == "grcov" else "// # tarpaulin coverage ignore"
+)
 
 FILE_PATTERN = re.compile(r'<FILE path="([^"]+)">(.*?)</FILE>', re.DOTALL)
 # Single-quote variant: <FILE path='foo'>
@@ -6410,6 +6417,110 @@ def _run_tarpaulin(project_dir: Path, module_name: str) -> tuple[float, list[dic
         return 0.0, [], 0, 0
 
 
+def _run_grcov(project_dir: Path, module_name: str) -> tuple[float, list[dict], int, int]:
+    """
+    Run grcov (LLVM source-based coverage) for one module.
+    Returns (coverage_pct 0-100, files_list compatible with tarpaulin format, covered, coverable).
+    Returns (0.0, [], 0, 0) on any failure.
+
+    Requires:
+      - rustup component add llvm-tools-preview
+      - cargo install grcov
+      - COVERAGE_BACKEND=grcov in .env
+    """
+    profraw_dir = project_dir / "target" / "coverage" / module_name
+    profraw_dir.mkdir(parents=True, exist_ok=True)
+    # Clean stale profraw files so old runs don't pollute results.
+    for f in profraw_dir.glob("*.profraw"):
+        f.unlink(missing_ok=True)
+
+    env = _cargo_env()
+    env["RUSTFLAGS"] = (env.get("RUSTFLAGS", "") + " -C instrument-coverage").strip()
+    env["LLVM_PROFILE_FILE"] = str(profraw_dir / "%p-%m.profraw")
+
+    # Cluster exclude patterns reused from tarpaulin path.
+    if _current_cluster is None or _current_cluster.is_default:
+        _exclude_patterns = ["*/nightly.rs"]
+    else:
+        _exclude_patterns = list(_current_cluster.tarpaulin_exclude_files)
+
+    try:
+        # Step 1: run tests with instrumentation.
+        result = subprocess.run(
+            ["cargo", "test", "-p", module_name, "--", "--test-threads=1"],
+            cwd=project_dir, capture_output=True, text=True,
+            timeout=BUILD_TIMEOUT, env=env,
+        )
+        if result.returncode != 0 and not list(profraw_dir.glob("*.profraw")):
+            _log(f"  grcov: cargo test failed and produced no profraw: {result.stderr[:200]}")
+            return 0.0, [], 0, 0
+
+        # Step 2: run grcov to produce coveralls JSON.
+        out_json = Path("/tmp") / f"grcov_{module_name}.json"
+        cmd = [
+            str(GRCOV_BIN),
+            str(profraw_dir),
+            "--binary-path", str(project_dir / "target" / "debug"),
+            "--source-dir", str(project_dir),
+            "--output-type", "coveralls",
+            "--branch",
+            "--ignore-not-existing",
+            "--output-path", str(out_json),
+        ]
+        for pat in _exclude_patterns:
+            cmd += ["--ignore", pat]
+        subprocess.run(cmd, cwd=project_dir, capture_output=True, text=True,
+                       timeout=120, check=True)
+
+        data = json.loads(out_json.read_text())
+        source_files = data.get("source_files", [])
+
+        total_covered = total_coverable = 0
+        # Build files_data in tarpaulin-compatible format so all downstream
+        # code (pragma pass, uncovered-line extraction) works unchanged.
+        files_data = []
+        for sf in source_files:
+            cov_arr = sf.get("coverage", [])
+            # null = not coverable, 0 = uncovered, N = hit count
+            covered   = sum(1 for c in cov_arr if c is not None and c > 0)
+            coverable = sum(1 for c in cov_arr if c is not None)
+            total_covered   += covered
+            total_coverable += coverable
+            # Build traces list matching tarpaulin schema: [{line, stats:{Line:N}}]
+            traces = [
+                {"line": i + 1, "stats": {"Line": (c if c is not None else 0)}}
+                for i, c in enumerate(cov_arr)
+                if c is not None
+            ]
+            abs_path = str(project_dir / sf.get("name", ""))
+            files_data.append({
+                "path": abs_path.split(os.sep),
+                "traces": traces,
+                "covered": covered,
+                "coverable": coverable,
+            })
+
+        pct = (total_covered / total_coverable * 100.0) if total_coverable > 0 else 0.0
+        return pct, files_data, total_covered, total_coverable
+
+    except subprocess.TimeoutExpired:
+        _log(f"  grcov: timeout after {BUILD_TIMEOUT}s")
+        return 0.0, [], 0, 0
+    except Exception as e:
+        _log(f"  grcov: error: {e}")
+        return 0.0, [], 0, 0
+
+
+def _measure_coverage(project_dir: Path, module_name: str) -> tuple[float, list[dict], int, int]:
+    """Dispatch to grcov or tarpaulin based on COVERAGE_BACKEND env var."""
+    if COVERAGE_BACKEND == "grcov":
+        if not GRCOV_BIN.exists():
+            _log("  [warn] COVERAGE_BACKEND=grcov but grcov not found — falling back to tarpaulin")
+        else:
+            return _run_grcov(project_dir, module_name)
+    return _run_tarpaulin(project_dir, module_name)
+
+
 def _annotate_uncovered(content: str, uncovered: set[int]) -> str:
     """Return source annotated with '!!' markers on uncovered lines."""
     lines = content.splitlines()
@@ -6673,7 +6784,7 @@ class StaticRustTestAugmentor(TestAugmentor):
     def measure_coverage(
         self, project_dir: Path, module_name: str, module_dir: Path
     ) -> tuple[float, list, int, int]:
-        return _run_tarpaulin(project_dir, module_name)
+        return _measure_coverage(project_dir, module_name)
 
     def is_applicable(self, crate_type: str) -> bool:
         return "proc-macro" not in crate_type.lower()
@@ -6740,7 +6851,7 @@ test-generation attempts. These lines may be genuinely unreachable from inline
 - `unreachable!()` arms in exhaustive matches
 - Lines only reachable via OS-level error conditions
 
-Your task: add `// # tarpaulin coverage ignore` to each line that is intrinsically
+Your task: add `{COVERAGE_IGNORE_PRAGMA}` to each line that is intrinsically
 unreachable from a `#[cfg(test)] mod gen_tests {{ use super::*; }}` block.
 
 Rules:
@@ -6780,8 +6891,8 @@ corrected content here
                     _log(f"  [pragma-pass] {rel}: compile failed after pragma addition — reverting.")
                     abs_path.write_text(source, encoding="utf-8")
                 else:
-                    added = new_content.count("tarpaulin coverage ignore") - source.count("tarpaulin coverage ignore")
-                    _log(f"  [pragma-pass] {rel}: added {added} tarpaulin ignore pragma(s).")
+                    added = new_content.count(COVERAGE_IGNORE_PRAGMA) - source.count(COVERAGE_IGNORE_PRAGMA)
+                    _log(f"  [pragma-pass] {rel}: added {added} coverage ignore pragma(s).")
             except Exception as e:
                 _log(f"  [pragma-pass] {rel}: error — {e}. Reverting.")
                 try:
@@ -6923,7 +7034,7 @@ def _task0c_targeted_pragma(
         f"unreachable from inline `#[cfg(test)]` unit tests "
         f"(compile-time dispatch markers, cfg-gated nightly code, dead branches):\n"
         f"{fn_list}\n\n"
-        f"Add `// # tarpaulin coverage ignore` to ONLY the lines marked `// !! UNCOVERED` "
+        f"Add `{COVERAGE_IGNORE_PRAGMA}` to ONLY the lines marked `// !! UNCOVERED` "
         f"that belong to these specific functions. "
         f"Do NOT add the pragma to any other line. Do NOT change any other code.\n\n"
         f"Source file:\n```rust\n{annotated}\n```\n\n"
@@ -6960,7 +7071,7 @@ def _task0c_targeted_pragma(
         abs_path.write_text(current_source, encoding="utf-8")
         return False
 
-    added = new_content.count("tarpaulin coverage ignore") - current_source.count("tarpaulin coverage ignore")
+    added = new_content.count(COVERAGE_IGNORE_PRAGMA) - current_source.count(COVERAGE_IGNORE_PRAGMA)
     _log(f"  [targeted-pragma] {rel_path}: added {added} pragma(s) for {len(pragma_functions)} classified function(s).")
     return True
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Pipeline / GPU monitor.  Keys: c/r/s/l/g/m  ↑↓ scroll  ctrl+c quit"""
-import os, re, select, subprocess, sys, termios, time, tty
+import os, re, select, signal, subprocess, sys, termios, time, tty
 from datetime import datetime
 
 PIPELINE_LOG = "/tmp/pipeline_anyhow.log"
@@ -280,9 +280,19 @@ def generation():
 
 SCRIPT_DIR   = os.path.dirname(os.path.abspath(__file__))
 _action_msg  = ""
+
+def _detach(cmd):
+    """Launch cmd fully detached from the terminal — no stdin/stdout, new session."""
+    subprocess.Popen(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,   # setsid() — detach from controlling terminal
+    )
 _view        = "monitor"      # "monitor" | "pipeline" | "stream"
 _scroll      = {"pipeline": 0, "stream": 0}   # lines scrolled up from bottom (0=bottom)
-_confirm     = None           # pending confirmation: "restart" | None
+_confirm     = None           # pending confirmation: "restart" | "stop" | None
 
 VIEWS = [
     ("monitor",  "m", "Monitor"),
@@ -407,26 +417,32 @@ def _run_action(key):
     global _action_msg, _view, _confirm
     if _confirm == "restart":
         if key == "y":
-            subprocess.Popen(["bash", os.path.join(SCRIPT_DIR, "restart.sh"), "--y"],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            _detach(["bash", os.path.join(SCRIPT_DIR, "restart.sh"), "--y"])
             _action_msg = yellow("↺ restart.sh launched")
         else:
             _action_msg = dim("restart cancelled")
         _confirm = None
         return
+    if _confirm == "stop":
+        if key == "y":
+            try:
+                subprocess.run(["pkill", "-f", "pipeline.py"], check=True)
+                _action_msg = red("■ pipeline stopped")
+            except subprocess.CalledProcessError:
+                _action_msg = dim("pipeline was not running")
+        else:
+            _action_msg = dim("stop cancelled")
+        _confirm = None
+        return
     if key == "c":
-        subprocess.Popen(["bash", os.path.join(SCRIPT_DIR, "continue.sh"), "--y"],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        _detach(["bash", os.path.join(SCRIPT_DIR, "continue.sh"), "--y"])
         _action_msg = green("▶ continue.sh launched")
     elif key == "r":
         _confirm    = "restart"
         _action_msg = yellow("↺ restart — confirm? [y/n]")
     elif key == "s":
-        try:
-            subprocess.run(["pkill", "-f", "pipeline.py"], check=True)
-            _action_msg = red("■ pipeline stopped")
-        except subprocess.CalledProcessError:
-            _action_msg = dim("pipeline was not running")
+        _confirm    = "stop"
+        _action_msg = red("■ stop pipeline — confirm? [y/n]")
     elif key in ("m", "l", "g"):
         _view = {"m": "monitor", "l": "pipeline", "g": "stream"}[key]
     elif key == "UP"   and _view in _scroll: _scroll[_view] += SCROLL_STEP
@@ -442,27 +458,39 @@ def available_lines():
 
 def main():
     global _action_msg
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)   # survive terminal events from child procs
     old_settings = termios.tcgetattr(sys.stdin)
     sys.stdout.write("\033[2J\033[?25l")
     sys.stdout.flush()
     try:
         tty.setcbreak(sys.stdin.fileno())
         while True:
-            if _view == "pipeline":
-                _render_log_view(PIPELINE_LOG, "pipeline")
-            elif _view == "stream":
-                _render_log_view(STREAM_LOG, "stream")
-            else:
-                _render_monitor()
-            _flush_frame()
+            try:
+                if _view == "pipeline":
+                    _render_log_view(PIPELINE_LOG, "pipeline")
+                elif _view == "stream":
+                    _render_log_view(STREAM_LOG, "stream")
+                else:
+                    _render_monitor()
+                _flush_frame()
+            except Exception as e:
+                _buf.clear()
+                _ln(red(f"  render error: {e}"))
+                _flush_frame()
+
             if _confirm == "restart":
                 _action_msg = yellow("↺ restart — confirm? [y/n]")
+            elif _confirm == "stop":
+                _action_msg = red("■ stop pipeline — confirm? [y/n]")
             else:
                 _action_msg = ""
 
-            ready, _, _ = select.select([sys.stdin], [], [], REFRESH)
-            if ready:
-                _run_action(_read_key())
+            try:
+                ready, _, _ = select.select([sys.stdin], [], [], REFRESH)
+                if ready:
+                    _run_action(_read_key())
+            except Exception:
+                pass
     except KeyboardInterrupt:
         pass
     finally:

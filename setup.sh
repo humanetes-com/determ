@@ -98,7 +98,34 @@ else
     fi
 fi
 
-# ── 5. Ollama (only when BACKEND=ollama) ──────────────────────────────────────
+# ── 5. grcov + llvm-tools (optional, for COVERAGE_BACKEND=grcov) ─────────────
+echo ""
+echo "-- grcov (optional, alternative to tarpaulin) --"
+if cargo grcov --version &>/dev/null 2>&1 || command -v grcov &>/dev/null; then
+    skip "grcov already installed"
+else
+    info "Installing grcov..."
+    if cargo install grcov --locked 2>&1 | tail -2; then
+        ok "grcov installed"
+    else
+        echo "[warn] grcov failed to install — skipping (COVERAGE_BACKEND=tarpaulin will be used)"
+    fi
+fi
+
+echo ""
+echo "-- llvm-tools-preview (required for grcov) --"
+if rustup component list --installed 2>/dev/null | grep -q "llvm-tools"; then
+    skip "llvm-tools-preview already installed"
+else
+    info "Adding llvm-tools-preview rustup component..."
+    if rustup component add llvm-tools-preview 2>&1 | tail -2; then
+        ok "llvm-tools-preview installed"
+    else
+        echo "[warn] llvm-tools-preview failed — grcov will not work"
+    fi
+fi
+
+# ── 7. Ollama (only when BACKEND=ollama) ──────────────────────────────────────
 echo ""
 echo "-- Ollama --"
 if [[ "$BACKEND" == "ollama" ]]; then

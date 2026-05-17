@@ -302,3 +302,156 @@ TASK 0b (discovery): Analyzing project for coverage strategy...
 [2026-05-17 06:54:31] 
 TASK 0b (discovery): Analyzing project for coverage strategy...
 [2026-05-17 06:59:35]   coverage_strategy.md written (2,645 chars).
+[2026-05-17 06:59:35]   [git] committed: pipeline: task0b done
+[2026-05-17 06:59:35]   [dep graph] cargo metadata: 1 module(s).
+[2026-05-17 06:59:35]   Single module or no dependency graph detected — whole-workspace mode.
+[2026-05-17 06:59:35] 
+Compiler clusters identified: 3
+[2026-05-17 06:59:35]   cluster/stable  — default build
+[2026-05-17 06:59:35]   cluster/nightly  — RUSTFLAGS+=--cfg error_generic_member_access
+[2026-05-17 06:59:35]   cluster/anyhow_no_core_error  — RUSTFLAGS+=--cfg anyhow_no_core_error
+[2026-05-17 06:59:35] 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[2026-05-17 06:59:35]   Starting compiler cluster: stable
+[2026-05-17 06:59:35] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[2026-05-17 06:59:35] 
+TASK 0c [stable]: Augmenting 'anyhow' to 100% coverage...
+[2026-05-17 06:59:36]   [anyhow/stable] Attempt 1/10
+[2026-05-17 06:59:46]   [anyhow/stable] Coverage: 79.9% (389/487 lines)
+[2026-05-17 06:59:46]   [task0c planner] src/fmt.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 2), ('src/lib.rs', 2), ('src/chain.rs', 1), ('src/context.rs', 1)])
+[2026-05-17 07:06:59]   [anyhow] Appended gen_tests to src/fmt.rs (1 uncovered lines targeted)
+[2026-05-17 07:06:59]   [task0c planner] src/wrapper.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 3), ('src/lib.rs', 3), ('src/nightly.rs', 2), ('src/context.rs', 1)])
+[2026-05-17 07:11:45]   [anyhow] Appended gen_tests to src/wrapper.rs (2 uncovered lines targeted)
+[2026-05-17 07:11:45]   [task0c planner] src/kind.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 4), ('src/lib.rs', 3), ('src/nightly.rs', 3), ('src/wrapper.rs', 3)])
+[2026-05-17 07:21:16]   [anyhow] Appended gen_tests to src/kind.rs (3 uncovered lines targeted)
+[2026-05-17 07:21:16]   [task0c planner] src/ptr.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 1)])
+[2026-05-17 07:29:24]   [anyhow] Appended gen_tests to src/ptr.rs (3 uncovered lines targeted)
+[2026-05-17 07:29:24]   [task0c planner] src/context.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 6), ('src/lib.rs', 5), ('src/nightly.rs', 3), ('src/wrapper.rs', 3)])
+[2026-05-17 07:34:06]   [anyhow] Appended gen_tests to src/context.rs (7 uncovered lines targeted)
+[2026-05-17 07:34:06]   [task0c planner] src/lib.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 6), ('src/kind.rs', 3), ('src/nightly.rs', 3), ('src/wrapper.rs', 3)])
+[2026-05-17 07:39:59]   [anyhow] Appended gen_tests to src/lib.rs (13 uncovered lines targeted)
+[2026-05-17 07:39:59]   [task0c planner] src/error.rs: ranked 12 siblings by type overlap (top: [('src/lib.rs', 7), ('src/wrapper.rs', 6), ('src/nightly.rs', 4), ('src/ptr.rs', 4)])
+[2026-05-17 07:46:42]   [anyhow] Appended gen_tests to src/error.rs (69 uncovered lines targeted)
+[2026-05-17 07:46:42]   [anyhow/stable] Attempt 2/10
+[2026-05-17 07:46:53]   [anyhow/stable] Coverage: 79.9% (389/487 lines)
+[2026-05-17 07:46:53]   [anyhow] No improvement (389/487 lines, delta +0) — stall count 1/10
+[2026-05-17 07:46:53]   [task0c planner] src/fmt.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 2), ('src/lib.rs', 2), ('src/chain.rs', 1), ('src/context.rs', 1)])
+[2026-05-17 07:56:05]   [anyhow] Appended gen_tests to src/fmt.rs (1 uncovered lines targeted)
+[2026-05-17 07:56:05]   [anyhow] No improvement for src/fmt.rs — running retrospective.
+[2026-05-17 07:57:52]   [anyhow] Retrospective: FUNCTION ErrorImpl::debug: (c) UNREACHABLE — legacy compatibility branch for older `std::backtrace` output format that is dead on modern Rust; add tarpaulin ignore
+[2026-05-17 07:57:52]   [task0c planner] src/wrapper.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 3), ('src/lib.rs', 3), ('src/nightly.rs', 2), ('src/context.rs', 1)])
+[2026-05-17 08:03:05]   [anyhow] Appended gen_tests to src/wrapper.rs (2 uncovered lines targeted)
+[2026-05-17 08:03:05]   [anyhow] No improvement for src/wrapper.rs — running retrospective.
+[2026-05-17 08:04:08]   [anyhow] Retrospective: FUNCTION provide: CFG_GATED — inside #[cfg(error_generic_member_access)]; untestable on stable
+[2026-05-17 08:04:08]   [anyhow] Targeted pragma for: ['provide']
+[2026-05-17 08:08:19]   [targeted-pragma] src/wrapper.rs: LLM returned no output.
+[2026-05-17 08:08:19]   [task0c planner] src/kind.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 4), ('src/lib.rs', 3), ('src/nightly.rs', 3), ('src/wrapper.rs', 3)])
+[2026-05-17 08:18:28]   [anyhow] Appended gen_tests to src/kind.rs (3 uncovered lines targeted)
+[2026-05-17 08:18:28]   [anyhow] No improvement for src/kind.rs — running retrospective.
+[2026-05-17 08:22:22]   [anyhow] Retrospective: FUNCTION AdhocKind::anyhow_kind: (a) TESTABLE — The `#[inline]` attribute and trait dispatch often confuse coverage tools; try invoking via fully qualified syntax `AdhocKind::anyhow_kind(&msg)` or temporarily removing `#[inline]` for coverage builds.
+FUNCTION TraitKind::anyhow_kind: (a) TESTABLE — I
+[2026-05-17 08:22:22]   [task0c planner] src/ptr.rs: ranked 12 siblings by type overlap (top: [('src/error.rs', 1)])
+[2026-05-17 08:29:19] 
+============================================================
+[2026-05-17 08:29:19] ============================================================
+[2026-05-17 08:29:19]   PIPELINE STARTED — 2026-05-17 06:29:19 UTC
+[2026-05-17 08:29:19] ============================================================
+[2026-05-17 08:29:19] ============================================================
+[2026-05-17 08:29:19] Using model: Qwen/Qwen3.6-27B-FP8  |  Provider: vLLM (Qwen/Qwen3.6-27B-FP8)
+[2026-05-17 08:29:19] Context budget: 16,000 chars  (SINGLE_CALL=12,000  FILE=13,600  INTERMEDIATE=8,000)
+[2026-05-17 08:29:19]   Source hash: 39ed6a54789c31ec
+[2026-05-17 08:29:19]   Pipeline state:
+[2026-05-17 08:29:19]     [✓] task0b                  valid    2645 chars
+[2026-05-17 08:29:19]     [✓] cfg_scan                valid    3 clusters: stable, nightly, anyhow_no_core_error
+[2026-05-17 08:29:19]     [~] task0c/stable           resumed  starting
+[2026-05-17 08:29:19]     [~] task0c/stable/anyhow    resumed  starting
+[2026-05-17 08:29:19]     [~] task0c/anyhow           resumed  79.9% attempt 2
+[2026-05-17 08:29:19]     last position: task0c/anyhow / 79.9% attempt 2
+[2026-05-17 08:29:19] Initializing: asking Qwen/Qwen3.6-27B-FP8 to extract test command from README.md...
+[2026-05-17 08:29:28] 
+============================================================
+[2026-05-17 08:29:28] ============================================================
+[2026-05-17 08:29:28]   PIPELINE STARTED — 2026-05-17 06:29:28 UTC
+[2026-05-17 08:29:28] ============================================================
+[2026-05-17 08:29:28] ============================================================
+[2026-05-17 08:29:28] Using model: Qwen/Qwen3.6-27B-FP8  |  Provider: vLLM (Qwen/Qwen3.6-27B-FP8)
+[2026-05-17 08:29:28] Context budget: 16,000 chars  (SINGLE_CALL=12,000  FILE=13,600  INTERMEDIATE=8,000)
+[2026-05-17 08:29:28]   Source hash: 39ed6a54789c31ec
+[2026-05-17 08:29:28]   Pipeline state:
+[2026-05-17 08:29:28]     [✓] task0b                  valid    2645 chars
+[2026-05-17 08:29:28]     [✓] cfg_scan                valid    3 clusters: stable, nightly, anyhow_no_core_error
+[2026-05-17 08:29:28]     [~] task0c/stable           resumed  starting
+[2026-05-17 08:29:28]     [~] task0c/stable/anyhow    resumed  starting
+[2026-05-17 08:29:28]     [~] task0c/anyhow           resumed  79.9% attempt 2
+[2026-05-17 08:29:28]     last position: task0c/anyhow / 79.9% attempt 2
+[2026-05-17 08:29:28] Initializing: asking Qwen/Qwen3.6-27B-FP8 to extract test command from README.md...
+[2026-05-17 08:31:07] 
+============================================================
+[2026-05-17 08:31:07] ============================================================
+[2026-05-17 08:31:07]   PIPELINE STARTED — 2026-05-17 06:31:07 UTC
+[2026-05-17 08:31:07] ============================================================
+[2026-05-17 08:31:07] ============================================================
+[2026-05-17 08:31:07] Using model: Qwen/Qwen3.6-27B-FP8  |  Provider: vLLM (Qwen/Qwen3.6-27B-FP8)
+[2026-05-17 08:31:07] Context budget: 16,000 chars  (SINGLE_CALL=12,000  FILE=13,600  INTERMEDIATE=8,000)
+[2026-05-17 08:31:07]   Source hash: 39ed6a54789c31ec
+[2026-05-17 08:31:07]   Pipeline state:
+[2026-05-17 08:31:07]     [✓] task0b                  valid    2645 chars
+[2026-05-17 08:31:07]     [✓] cfg_scan                valid    3 clusters: stable, nightly, anyhow_no_core_error
+[2026-05-17 08:31:07]     [~] task0c/stable           resumed  starting
+[2026-05-17 08:31:07]     [~] task0c/stable/anyhow    resumed  starting
+[2026-05-17 08:31:07]     [~] task0c/anyhow           resumed  79.9% attempt 2
+[2026-05-17 08:31:07]     last position: task0c/anyhow / 79.9% attempt 2
+[2026-05-17 08:31:07] Initializing: asking Qwen/Qwen3.6-27B-FP8 to extract test command from README.md...
+[2026-05-17 08:32:00] Test command: cargo test
+[2026-05-17 08:32:00] Collecting test files...
+[2026-05-17 08:32:01]   Found 42 test file(s) (33 write-protected).
+[2026-05-17 08:32:01]   Project profile cache valid (project_profile.md), loading.
+[2026-05-17 08:32:01]   Project context cache valid (project_context.md), loading.
+[2026-05-17 08:32:01] 
+TASK 0b (discovery): Analyzing project for coverage strategy...
+[2026-05-17 08:32:01]   [task0b] WARNING: 10 source file(s) dropped (budget exhausted): src/ptr.rs, src/kind.rs, src/fmt.rs, src/ensure.rs, src/lib.rs, src/wrapper.rs, src/context.rs, src/chain.rs, src/macros.rs, src/nightly.rs
+[2026-05-17 08:32:01]   GUARD: [context-guard/middle_trim] prompt 19,422 > limit 16,000: dropped 6,810 chars from middle
+[2026-05-17 08:33:13] 
+============================================================
+[2026-05-17 08:33:13] ============================================================
+[2026-05-17 08:33:13]   PIPELINE STARTED — 2026-05-17 06:33:13 UTC
+[2026-05-17 08:33:13] ============================================================
+[2026-05-17 08:33:13] ============================================================
+[2026-05-17 08:33:13] Using model: Qwen/Qwen3.6-27B-FP8  |  Provider: vLLM (Qwen/Qwen3.6-27B-FP8)
+[2026-05-17 08:33:13] Context budget: 16,000 chars  (SINGLE_CALL=12,000  FILE=13,600  INTERMEDIATE=8,000)
+[2026-05-17 08:33:13]   Source hash: 39ed6a54789c31ec
+[2026-05-17 08:33:13]   Pipeline state:
+[2026-05-17 08:33:13]     [✓] task0b                  valid    2645 chars
+[2026-05-17 08:33:13]     [✓] cfg_scan                valid    3 clusters: stable, nightly, anyhow_no_core_error
+[2026-05-17 08:33:13]     [~] task0c/stable           resumed  starting
+[2026-05-17 08:33:13]     [~] task0c/stable/anyhow    resumed  starting
+[2026-05-17 08:33:13]     [~] task0c/anyhow           resumed  79.9% attempt 2
+[2026-05-17 08:33:13]     last position: task0c/anyhow / 79.9% attempt 2
+[2026-05-17 08:33:13] Initializing: asking Qwen/Qwen3.6-27B-FP8 to extract test command from README.md...
+[2026-05-17 08:33:20] 
+============================================================
+[2026-05-17 08:33:20] ============================================================
+[2026-05-17 08:33:20]   PIPELINE STARTED — 2026-05-17 06:33:20 UTC
+[2026-05-17 08:33:20] ============================================================
+[2026-05-17 08:33:20] ============================================================
+[2026-05-17 08:33:20] Using model: Qwen/Qwen3.6-27B-FP8  |  Provider: vLLM (Qwen/Qwen3.6-27B-FP8)
+[2026-05-17 08:33:20] Context budget: 16,000 chars  (SINGLE_CALL=12,000  FILE=13,600  INTERMEDIATE=8,000)
+[2026-05-17 08:33:20]   Source hash: 39ed6a54789c31ec
+[2026-05-17 08:33:20]   Pipeline state:
+[2026-05-17 08:33:20]     [✓] task0b                  valid    2645 chars
+[2026-05-17 08:33:20]     [✓] cfg_scan                valid    3 clusters: stable, nightly, anyhow_no_core_error
+[2026-05-17 08:33:20]     [~] task0c/stable           resumed  starting
+[2026-05-17 08:33:20]     [~] task0c/stable/anyhow    resumed  starting
+[2026-05-17 08:33:20]     [~] task0c/anyhow           resumed  79.9% attempt 2
+[2026-05-17 08:33:20]     last position: task0c/anyhow / 79.9% attempt 2
+[2026-05-17 08:33:20] Initializing: asking Qwen/Qwen3.6-27B-FP8 to extract test command from README.md...
+[2026-05-17 08:34:39] Test command: cargo test
+[2026-05-17 08:34:39] Collecting test files...
+[2026-05-17 08:34:39]   Found 42 test file(s) (33 write-protected).
+[2026-05-17 08:34:39]   Project profile cache valid (project_profile.md), loading.
+[2026-05-17 08:34:39]   Project context cache valid (project_context.md), loading.
+[2026-05-17 08:34:39] 
+TASK 0b (discovery): Analyzing project for coverage strategy...
+[2026-05-17 08:34:39]   [task0b] WARNING: 10 source file(s) dropped (budget exhausted): src/ptr.rs, src/kind.rs, src/fmt.rs, src/ensure.rs, src/lib.rs, src/wrapper.rs, src/context.rs, src/chain.rs, src/macros.rs, src/nightly.rs
+[2026-05-17 08:34:39]   GUARD: [context-guard/middle_trim] prompt 19,422 > limit 16,000: dropped 6,810 chars from middle
+[2026-05-17 08:38:39]   coverage_strategy.md written (1,460 chars).
