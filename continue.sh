@@ -32,7 +32,6 @@ fi
 # ---------------------------------------------------------------------------
 # Kill existing monitor / any old socket listeners
 # ---------------------------------------------------------------------------
-pkill -f "monitor.py" 2>/dev/null && echo "Killed monitor.py" || true
 pkill -f "socket_capture" 2>/dev/null || true  # kill legacy listener if still running
 sleep 1
 

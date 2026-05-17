@@ -523,3 +523,61 @@ TASK 0c [stable]: Augmenting 'anyhow' to 100% coverage...
 [2026-05-17 08:38:46]   HARD BLOCK (FR-018): 'anyhow' [stable] coverage stuck at 0.0% (stall 5/5, total 6/20). Accepting and moving on.
 [2026-05-17 08:38:46] 
   cluster/stable complete — 1 module(s) done.
+[2026-05-17 08:38:46]   [git] committed: pipeline: task0c/stable — anyhow:0.0%
+[2026-05-17 08:38:46] 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[2026-05-17 08:38:46]   Starting compiler cluster: nightly
+[2026-05-17 08:38:46] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[2026-05-17 08:38:46] 
+TASK 0c [nightly]: Augmenting 'anyhow' to 100% coverage...
+[2026-05-17 08:38:46]   [anyhow] Library compile failure in gen_* block — routing to harness fix loop.
+[2026-05-17 08:38:48]   [anyhow] Harness fix attempt 1 — sending compile error to LLM.
+[2026-05-17 08:38:48]   GUARD: [context-guard/middle_trim] prompt 26,943 > limit 16,000: dropped 20,943 chars from middle
+[2026-05-17 08:43:59] 
+============================================================
+[2026-05-17 08:43:59] ============================================================
+[2026-05-17 08:43:59]   PIPELINE STARTED — 2026-05-17 06:43:59 UTC
+[2026-05-17 08:43:59] ============================================================
+[2026-05-17 08:43:59] ============================================================
+[2026-05-17 08:43:59] Using model: Qwen/Qwen3.6-27B-FP8  |  Provider: vLLM (Qwen/Qwen3.6-27B-FP8)
+[2026-05-17 08:43:59] Context budget: 16,000 chars  (SINGLE_CALL=12,000  FILE=13,600  INTERMEDIATE=8,000)
+[2026-05-17 08:43:59]   Source hash: 39ed6a54789c31ec
+[2026-05-17 08:43:59]   Pipeline state:
+[2026-05-17 08:43:59]     [✓] task0b                  valid    1460 chars
+[2026-05-17 08:43:59]     [✓] cfg_scan                valid    3 clusters: stable, nightly, anyhow_no_core_error
+[2026-05-17 08:43:59]     [✓] task0c/stable           valid    1 modules
+[2026-05-17 08:43:59]     [~] task0c/stable/anyhow    resumed  0.0%
+[2026-05-17 08:43:59]     [~] task0c/anyhow           resumed  0.0% attempt 1
+[2026-05-17 08:43:59]     [~] task0c/nightly          resumed  starting
+[2026-05-17 08:43:59]     [~] task0c/nightly/anyhow   resumed  starting
+[2026-05-17 08:43:59]     last position: task0c/nightly/anyhow / starting
+[2026-05-17 08:43:59] Initializing: asking Qwen/Qwen3.6-27B-FP8 to extract test command from README.md...
+[2026-05-17 08:44:06] 
+============================================================
+[2026-05-17 08:44:06] ============================================================
+[2026-05-17 08:44:06]   PIPELINE STARTED — 2026-05-17 06:44:06 UTC
+[2026-05-17 08:44:06] ============================================================
+[2026-05-17 08:44:06] ============================================================
+[2026-05-17 08:44:06] Using model: Qwen/Qwen3.6-27B-FP8  |  Provider: vLLM (Qwen/Qwen3.6-27B-FP8)
+[2026-05-17 08:44:06] Context budget: 16,000 chars  (SINGLE_CALL=12,000  FILE=13,600  INTERMEDIATE=8,000)
+[2026-05-17 08:44:06]   Source hash: 39ed6a54789c31ec
+[2026-05-17 08:44:06]   Pipeline state:
+[2026-05-17 08:44:06]     [✓] task0b                  valid    1460 chars
+[2026-05-17 08:44:06]     [✓] cfg_scan                valid    3 clusters: stable, nightly, anyhow_no_core_error
+[2026-05-17 08:44:06]     [✓] task0c/stable           valid    1 modules
+[2026-05-17 08:44:06]     [~] task0c/stable/anyhow    resumed  0.0%
+[2026-05-17 08:44:06]     [~] task0c/anyhow           resumed  0.0% attempt 1
+[2026-05-17 08:44:06]     [~] task0c/nightly          resumed  starting
+[2026-05-17 08:44:06]     [~] task0c/nightly/anyhow   resumed  starting
+[2026-05-17 08:44:06]     last position: task0c/nightly/anyhow / starting
+[2026-05-17 08:44:06] Initializing: asking Qwen/Qwen3.6-27B-FP8 to extract test command from README.md...
+[2026-05-17 08:45:17] Test command: cargo test
+[2026-05-17 08:45:17] Collecting test files...
+[2026-05-17 08:45:17]   Found 42 test file(s) (33 write-protected).
+[2026-05-17 08:45:17]   Project profile cache valid (project_profile.md), loading.
+[2026-05-17 08:45:17]   Project context cache valid (project_context.md), loading.
+[2026-05-17 08:45:17] 
+TASK 0b (discovery): Analyzing project for coverage strategy...
+[2026-05-17 08:45:17]   [task0b] WARNING: 10 source file(s) dropped (budget exhausted): src/ptr.rs, src/kind.rs, src/fmt.rs, src/ensure.rs, src/lib.rs, src/wrapper.rs, src/context.rs, src/chain.rs, src/macros.rs, src/nightly.rs
+[2026-05-17 08:45:17]   GUARD: [context-guard/middle_trim] prompt 19,422 > limit 16,000: dropped 6,810 chars from middle
+[2026-05-17 08:50:08]   coverage_strategy.md written (1,358 chars).
