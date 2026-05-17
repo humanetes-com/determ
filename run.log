@@ -455,3 +455,71 @@ TASK 0b (discovery): Analyzing project for coverage strategy...
 [2026-05-17 08:34:39]   [task0b] WARNING: 10 source file(s) dropped (budget exhausted): src/ptr.rs, src/kind.rs, src/fmt.rs, src/ensure.rs, src/lib.rs, src/wrapper.rs, src/context.rs, src/chain.rs, src/macros.rs, src/nightly.rs
 [2026-05-17 08:34:39]   GUARD: [context-guard/middle_trim] prompt 19,422 > limit 16,000: dropped 6,810 chars from middle
 [2026-05-17 08:38:39]   coverage_strategy.md written (1,460 chars).
+[2026-05-17 08:38:39]   [git] committed: pipeline: task0b done
+[2026-05-17 08:38:39]   [dep graph] cargo metadata: 1 module(s).
+[2026-05-17 08:38:39]   Single module or no dependency graph detected — whole-workspace mode.
+[2026-05-17 08:38:39] 
+Compiler clusters identified: 3
+[2026-05-17 08:38:39]   cluster/stable  — default build
+[2026-05-17 08:38:39]   cluster/nightly  — RUSTFLAGS+=--cfg error_generic_member_access
+[2026-05-17 08:38:39]   cluster/anyhow_no_core_error  — RUSTFLAGS+=--cfg anyhow_no_core_error
+[2026-05-17 08:38:39] 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[2026-05-17 08:38:39]   Starting compiler cluster: stable
+[2026-05-17 08:38:39] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[2026-05-17 08:38:39] 
+TASK 0c [stable]: Augmenting 'anyhow' to 100% coverage...
+[2026-05-17 08:38:39]   [anyhow/stable] Attempt 1/10
+[2026-05-17 08:38:44]   grcov: error: Command '['/home/user/.cargo/bin/grcov', '/home/user/determ/tmp/anyhow-master/target/coverage/anyhow', '--binary-path', '/home/user/determ/tmp/anyhow-master/target/debug', '--source-dir', '/home/user/determ/tmp/anyhow-master', '--output-type', 'coveralls', '--branch', '--ignore-not-existing', '--output-path', '/tmp/grcov_anyhow.json', '--ignore', '*/nightly.rs']' returned non-zero exit status 2.
+[2026-05-17 08:38:44]   [anyhow/stable] Coverage: 0.0% (0/0 lines)
+[2026-05-17 08:38:44]   [anyhow] No uncovered lines in module source files.
+[2026-05-17 08:38:44]   [anyhow/stable] Finished augmentation: 0.0% coverage after 1 attempt(s).
+[2026-05-17 08:38:44]   TASK 0c [stable]: 'anyhow' coverage: 0.0%
+[2026-05-17 08:38:44]   HARD RULE (FR-018): 'anyhow' [stable] coverage 0.0% < 100% (stall 0/5, total 1/20, best covered 0 lines). Retrying.
+[2026-05-17 08:38:44] 
+TASK 0c [stable]: Augmenting 'anyhow' to 100% coverage...
+[2026-05-17 08:38:44]   [anyhow/stable] Attempt 1/10
+[2026-05-17 08:38:44]   grcov: error: Command '['/home/user/.cargo/bin/grcov', '/home/user/determ/tmp/anyhow-master/target/coverage/anyhow', '--binary-path', '/home/user/determ/tmp/anyhow-master/target/debug', '--source-dir', '/home/user/determ/tmp/anyhow-master', '--output-type', 'coveralls', '--branch', '--ignore-not-existing', '--output-path', '/tmp/grcov_anyhow.json', '--ignore', '*/nightly.rs']' returned non-zero exit status 2.
+[2026-05-17 08:38:44]   [anyhow/stable] Coverage: 0.0% (0/0 lines)
+[2026-05-17 08:38:44]   [anyhow] No uncovered lines in module source files.
+[2026-05-17 08:38:44]   [anyhow/stable] Finished augmentation: 0.0% coverage after 1 attempt(s).
+[2026-05-17 08:38:44]   TASK 0c [stable]: 'anyhow' coverage: 0.0%
+[2026-05-17 08:38:44]   HARD RULE (FR-018): 'anyhow' [stable] coverage 0.0% < 100% (stall 1/5, total 2/20, best covered 0 lines). Retrying.
+[2026-05-17 08:38:44] 
+TASK 0c [stable]: Augmenting 'anyhow' to 100% coverage...
+[2026-05-17 08:38:45]   [anyhow/stable] Attempt 1/10
+[2026-05-17 08:38:45]   grcov: error: Command '['/home/user/.cargo/bin/grcov', '/home/user/determ/tmp/anyhow-master/target/coverage/anyhow', '--binary-path', '/home/user/determ/tmp/anyhow-master/target/debug', '--source-dir', '/home/user/determ/tmp/anyhow-master', '--output-type', 'coveralls', '--branch', '--ignore-not-existing', '--output-path', '/tmp/grcov_anyhow.json', '--ignore', '*/nightly.rs']' returned non-zero exit status 2.
+[2026-05-17 08:38:45]   [anyhow/stable] Coverage: 0.0% (0/0 lines)
+[2026-05-17 08:38:45]   [anyhow] No uncovered lines in module source files.
+[2026-05-17 08:38:45]   [anyhow/stable] Finished augmentation: 0.0% coverage after 1 attempt(s).
+[2026-05-17 08:38:45]   TASK 0c [stable]: 'anyhow' coverage: 0.0%
+[2026-05-17 08:38:45]   HARD RULE (FR-018): 'anyhow' [stable] coverage 0.0% < 100% (stall 2/5, total 3/20, best covered 0 lines). Retrying.
+[2026-05-17 08:38:45] 
+TASK 0c [stable]: Augmenting 'anyhow' to 100% coverage...
+[2026-05-17 08:38:45]   [anyhow/stable] Attempt 1/10
+[2026-05-17 08:38:45]   grcov: error: Command '['/home/user/.cargo/bin/grcov', '/home/user/determ/tmp/anyhow-master/target/coverage/anyhow', '--binary-path', '/home/user/determ/tmp/anyhow-master/target/debug', '--source-dir', '/home/user/determ/tmp/anyhow-master', '--output-type', 'coveralls', '--branch', '--ignore-not-existing', '--output-path', '/tmp/grcov_anyhow.json', '--ignore', '*/nightly.rs']' returned non-zero exit status 2.
+[2026-05-17 08:38:45]   [anyhow/stable] Coverage: 0.0% (0/0 lines)
+[2026-05-17 08:38:45]   [anyhow] No uncovered lines in module source files.
+[2026-05-17 08:38:45]   [anyhow/stable] Finished augmentation: 0.0% coverage after 1 attempt(s).
+[2026-05-17 08:38:45]   TASK 0c [stable]: 'anyhow' coverage: 0.0%
+[2026-05-17 08:38:45]   HARD RULE (FR-018): 'anyhow' [stable] coverage 0.0% < 100% (stall 3/5, total 4/20, best covered 0 lines). Retrying.
+[2026-05-17 08:38:45] 
+TASK 0c [stable]: Augmenting 'anyhow' to 100% coverage...
+[2026-05-17 08:38:45]   [anyhow/stable] Attempt 1/10
+[2026-05-17 08:38:45]   grcov: error: Command '['/home/user/.cargo/bin/grcov', '/home/user/determ/tmp/anyhow-master/target/coverage/anyhow', '--binary-path', '/home/user/determ/tmp/anyhow-master/target/debug', '--source-dir', '/home/user/determ/tmp/anyhow-master', '--output-type', 'coveralls', '--branch', '--ignore-not-existing', '--output-path', '/tmp/grcov_anyhow.json', '--ignore', '*/nightly.rs']' returned non-zero exit status 2.
+[2026-05-17 08:38:45]   [anyhow/stable] Coverage: 0.0% (0/0 lines)
+[2026-05-17 08:38:45]   [anyhow] No uncovered lines in module source files.
+[2026-05-17 08:38:45]   [anyhow/stable] Finished augmentation: 0.0% coverage after 1 attempt(s).
+[2026-05-17 08:38:45]   TASK 0c [stable]: 'anyhow' coverage: 0.0%
+[2026-05-17 08:38:45]   HARD RULE (FR-018): 'anyhow' [stable] coverage 0.0% < 100% (stall 4/5, total 5/20, best covered 0 lines). Retrying.
+[2026-05-17 08:38:45] 
+TASK 0c [stable]: Augmenting 'anyhow' to 100% coverage...
+[2026-05-17 08:38:46]   [anyhow/stable] Attempt 1/10
+[2026-05-17 08:38:46]   grcov: error: Command '['/home/user/.cargo/bin/grcov', '/home/user/determ/tmp/anyhow-master/target/coverage/anyhow', '--binary-path', '/home/user/determ/tmp/anyhow-master/target/debug', '--source-dir', '/home/user/determ/tmp/anyhow-master', '--output-type', 'coveralls', '--branch', '--ignore-not-existing', '--output-path', '/tmp/grcov_anyhow.json', '--ignore', '*/nightly.rs']' returned non-zero exit status 2.
+[2026-05-17 08:38:46]   [anyhow/stable] Coverage: 0.0% (0/0 lines)
+[2026-05-17 08:38:46]   [anyhow] No uncovered lines in module source files.
+[2026-05-17 08:38:46]   [anyhow/stable] Finished augmentation: 0.0% coverage after 1 attempt(s).
+[2026-05-17 08:38:46]   TASK 0c [stable]: 'anyhow' coverage: 0.0%
+[2026-05-17 08:38:46]   HARD BLOCK (FR-018): 'anyhow' [stable] coverage stuck at 0.0% (stall 5/5, total 6/20). Accepting and moving on.
+[2026-05-17 08:38:46] 
+  cluster/stable complete — 1 module(s) done.
