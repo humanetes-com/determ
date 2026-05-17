@@ -21,6 +21,9 @@ import time
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable, TypeVar
+
+_RT = TypeVar("_RT")
 
 import importlib
 
@@ -641,7 +644,7 @@ def _extract_genesis(text: str):
     return None
 
 
-def read(path):
+def read(path) -> str:
     try:
         return Path(path).read_text()
     except FileNotFoundError:
@@ -699,8 +702,8 @@ def _condense_rust_to_signatures(source: str, filename: str = "code.rs") -> str:
         tc.add_lines_of_interest(set(range(1, source.count('\n') + 2)))
         tc.add_context()
         result = tc.format()
-        if result and len(result.strip()) > 20:
-            return result
+        if result and len(str(result).strip()) > 20:
+            return str(result)
     except Exception:
         pass
 
@@ -2630,7 +2633,7 @@ def chunk_test_files(test_files, char_limit):
     This ensures the model always receives complete, coherent test logic.
     """
     chunks = []
-    current = []
+    current: list[tuple[str, str]] = []
     current_size = 0
 
     def flush():
@@ -2688,23 +2691,46 @@ def chunk_test_files_by_file(test_files, file_char_limit):
 
 def discover_test_command(readme_text: str, project_dir: Path | None = None) -> str:
     """
-    Ask the configured model to extract the primary test command from README.md.
-    If README.md is empty/missing, ask the model to infer a sensible default from
-    common conventions (cargo test, pytest, npm test, etc.).
+    Ask the configured model to extract the primary test command from README.md,
+    Cargo.toml, and other project files. Falls back to inferred convention if none found.
     Retries if the result is empty.
     """
-    if readme_text.strip():
-        _log(f"Initializing: asking {MODEL} to extract test command from README.md...")
-        prompt = f"""Read this README.md and extract the single primary shell command used to run the full test suite.
-Output only the command on one line. No explanation, no markdown fences, no alternatives.
-If multiple test commands exist, pick the one that runs all tests.
+    # Collect available project signals beyond the README.
+    extra_sections: list[str] = []
+    if project_dir:
+        for extra_path, label in [
+            (project_dir / "Cargo.toml", "Cargo.toml"),
+            (project_dir / ".cargo" / "config.toml", ".cargo/config.toml"),
+            (project_dir / "Makefile", "Makefile"),
+            (project_dir / "package.json", "package.json"),
+        ]:
+            if extra_path.exists():
+                try:
+                    content = extra_path.read_text(encoding="utf-8")[:3000]
+                    extra_sections.append(f"{label}:\n```\n{content}\n```")
+                except Exception:
+                    pass
 
-README.md:
-{readme_text}
+    context_block = ("\n\n" + "\n\n".join(extra_sections)) if extra_sections else ""
+
+    if readme_text.strip() or extra_sections:
+        _log(f"Initializing: asking {MODEL} to discover test command from project files...")
+        readme_block = f"README.md:\n{readme_text}\n" if readme_text.strip() else "README.md: (not present or empty)\n"
+        prompt = f"""Determine the single primary shell command used to run the full test suite for this project.
+
+Check all provided files — README.md may not mention testing; if so, use Cargo.toml, package.json, Makefile, or project-type conventions to infer the correct command.
+
+Rules:
+- Output only the command on one line. No explanation, no markdown fences, no alternatives.
+- If multiple test commands exist, pick the one that runs all tests.
+- If Cargo.toml is present, default is `cargo test` unless the README or Makefile says otherwise.
+- If package.json is present with a "test" script, use `npm test`.
+
+{readme_block}{context_block}
 """
     else:
-        _log(f"Initializing: no README.md -- asking {MODEL} to infer test command from project conventions...")
-        prompt = """No README.md is available. Output the single most common shell command used to run
+        _log(f"Initializing: no project files found -- asking {MODEL} to infer test command from conventions...")
+        prompt = """No project files are available. Output the single most common shell command used to run
 the full test suite for a typical software project (e.g. `cargo test`, `pytest`, `npm test`).
 Output only the command on one line. No explanation, no markdown fences.
 """
@@ -2789,7 +2815,7 @@ Output only the command on one line. No explanation, no markdown fences.
         cmd = "cargo test"
 
     _log(f"Test command: {cmd}")
-    return cmd
+    return str(cmd)
 
 
 # ---------------------------------------------------------------------------
@@ -2950,7 +2976,7 @@ def _is_rate_limit_error(e) -> bool:
     return False
 
 
-def with_retry(fn, retries=MAX_RETRIES):
+def with_retry(fn: "Callable[[], _RT]", retries: int = MAX_RETRIES) -> "_RT":
     """
     Call fn() up to `retries` times. fn must return False to signal failure,
     or any non-False value to signal success.
@@ -2978,7 +3004,7 @@ def with_retry(fn, retries=MAX_RETRIES):
             _log(f"  Attempt {attempt}/{retries} failed, retrying...")
         attempt += 1
     _log(f"  All {retries} attempts failed.")
-    return False
+    return False  # type: ignore[return-value]
 
 
 # ---------------------------------------------------------------------------
@@ -3587,7 +3613,7 @@ def _phase_valid(project_dir: Path, phase_key: str, current_hash: str) -> bool:
     """Return True if phase is marked done AND its stored hash matches current_hash."""
     state = _read_state(project_dir)
     p = state["phases"].get(phase_key, {})
-    return p.get("status") == "done" and p.get("hash") == current_hash
+    return bool(p.get("status") == "done" and p.get("hash") == current_hash)
 
 
 def _log_state_summary(project_dir: Path, current_hash: str) -> None:
@@ -3696,11 +3722,12 @@ content here
     if result is False:
         _log("  WARNING: could not produce project_profile.md after all retries. Continuing without it.")
         return ""
-    return result
+    return str(result)
 
 
 def task0b_discovery(strategy_path: Path, project_dir: Path, test_files,
-                     readme_text: str, profile_content: str) -> str:
+                     readme_text: str, profile_content: str,
+                     clusters: "list[BuildCluster] | None" = None) -> str:
     """
     BL-001: Discovery pass — produce coverage_strategy.md before TASK 0c.
 
@@ -3833,10 +3860,20 @@ def task0b_discovery(strategy_path: Path, project_dir: Path, test_files,
     test_section = "\nTest files:\n" + "".join(test_section_parts) if test_section_parts else ""
     readme_section = f"\nREADME.md:\n{readme_text}\n" if readme_text.strip() else ""
 
+    clusters_section = ""
+    if clusters:
+        lines = ["\nCompiler clusters (each is a separate test pass with its own env/cfg):"]
+        for c in clusters:
+            env_desc = ", ".join(f"{k}={v}" for k, v in c.env_extra.items()) if c.env_extra else "default"
+            active = ", ".join(c.active_cfg) if c.active_cfg else "none"
+            excluded = ", ".join(c.excluded_cfg) if c.excluded_cfg else "none"
+            lines.append(f"  {c.name}: env={env_desc}  active_cfg=[{active}]  excluded_cfg=[{excluded}]")
+        clusters_section = "\n".join(lines) + "\n"
+
     prompt = f"""You are analyzing a software project to produce a compact coverage strategy reference.
 This will be injected verbatim into every unit-test-generation prompt — token budget is scarce.
 Output must be machine-readable compact notation, NOT prose paragraphs.
-{cargo_section}{readme_section}{dropped_note}{src_section}{test_section}
+{cargo_section}{readme_section}{clusters_section}{dropped_note}{src_section}{test_section}
 Produce coverage_strategy.md in this exact compact format (copy headings literally):
 
 IMPORTS:
@@ -3913,7 +3950,7 @@ content here
     if result is False:
         _log("  WARNING: discovery pass failed — proceeding without coverage strategy.")
         return ""
-    return result
+    return str(result)
 
 
 def _build_task0c_prompt_sections(
@@ -4182,7 +4219,7 @@ content here
         _log("  WARNING: could not produce project_context.md — using README/profile fallback.")
         fallback = readme_text or profile_content or ""
         return fallback
-    return result
+    return str(result)
 
 
 # ---------------------------------------------------------------------------
@@ -4384,7 +4421,8 @@ Output a plain structured list of the merged requirements. No filler, no code, n
                 return False
             return result
 
-        return with_retry(attempt)
+        raw = with_retry(attempt)
+        return str(raw) if raw is not False else None
 
     def _chunked(self, genesis_path, functional_req_path, test_files, readme_text,
                  existing_genesis, project_profile="", coverage_strategy=""):
@@ -4705,7 +4743,8 @@ Rules:
 
     def _synthesis_prompt(self, readme_text: str, profile_section: str,
                           existing_genesis: str, all_for_synthesis: str,
-                          coverage_strategy: str = "") -> str:
+                          coverage_strategy: str = "",
+                          project_dir: "Path | None" = None) -> str:
         genesis_exists = bool(existing_genesis.strip())
         genesis_section = (f"\n--- genesis.md (read-only — do not output or modify it) ---\n"
                            f"{existing_genesis}\n") if genesis_exists else ""
@@ -4818,7 +4857,8 @@ Output a plain structured list of the merged contracts. No prose, no code blocks
                 return False
             return result
 
-        return with_retry(attempt)
+        raw = with_retry(attempt)
+        return str(raw) if raw is not False else None
 
 
 def _task1_synthesizer_factory() -> Task1Synthesizer:
@@ -5043,6 +5083,8 @@ class Task2Generator(ABC):
         locked_dep_context: str = "",
         current_module: str = "",
         module_dir_rel: str = "",
+        whole_project_context: str = "",
+        coverage_strategy: str = "",
     ) -> bool:
         """Write source files to disk. Returns True on success."""
 
@@ -6325,7 +6367,7 @@ corrected content here
         return False
 
     result = with_retry(attempt)
-    return result == 'updated'
+    return bool(result == 'updated')
 
 
 # ---------------------------------------------------------------------------
@@ -6401,7 +6443,7 @@ def _run_tarpaulin(project_dir: Path, module_name: str) -> tuple[float, list[dic
         json_path = out_dir / "tarpaulin-report.json"
         if not json_path.exists():
             _log(f"  tarpaulin: no JSON report produced. stderr: {result.stderr[:300]}")
-            return 0.0, []
+            return 0.0, [], 0, 0
         data = json.loads(json_path.read_text())
         return (
             data.get("coverage", 0.0),
@@ -7100,7 +7142,7 @@ def task0c_augment_module(
 
     if not augmentor.is_applicable(crate_type):
         _log(f"  [{module_name}] crate type '{crate_type}' not applicable for augmentation — skipping.")
-        return 100.0  # treat as done
+        return 100.0, 0  # treat as done
 
     # Pre-flight: two-stage compile check.
     # Stage 1: library only — if broken, skip (not TASK 0c's job to fix implementation).
@@ -7355,15 +7397,15 @@ corrected content here
         mod_prefix = str(module_dir) + "/"
         uncovered_by_file: dict[str, tuple[str, set[int]]] = {}
         for fdata in files_data:
-            abs_path = str(Path(*fdata["path"]))
-            if not abs_path.startswith(mod_prefix):
+            abs_path_str = str(Path(*fdata["path"]))
+            if not abs_path_str.startswith(mod_prefix):
                 continue
-            rel = str(Path(abs_path).relative_to(project_dir))
+            rel = str(Path(abs_path_str).relative_to(project_dir))
             lines_uncov = {
                 t["line"] for t in fdata.get("traces", [])
                 if t["stats"].get("Line", 1) == 0
             }
-            if lines_uncov and not is_test_file(Path(abs_path), project_dir):
+            if lines_uncov and not is_test_file(Path(abs_path_str), project_dir):
                 uncovered_by_file[rel] = (fdata.get("content", ""), lines_uncov)
 
         if not uncovered_by_file:
@@ -7962,7 +8004,7 @@ def task0c_coverage_augmentation(
             if "proc-macro" in crate_type.lower():
                 cov = 100.0  # will be skipped anyway
             else:
-                cov, _ = _run_tarpaulin(project_dir, mod_name)
+                cov, _, _, _ = _run_tarpaulin(project_dir, mod_name)
             _log(f"  {mod_name}: {cov:.1f}%")
             baseline.append((cov, mod_name, mod_dir, crate_type))
         baseline.sort(key=lambda x: x[0], reverse=True)
@@ -8243,7 +8285,7 @@ def _measure_baseline_coverage(project_dir: Path, modules: list[str],
         if "proc-macro" in crate_type.lower():
             cov = 100.0
         else:
-            cov, _ = _run_tarpaulin(project_dir, mod_name)
+            cov, _, _, _ = _run_tarpaulin(project_dir, mod_name)
         _log(f"  {mod_name}: {cov:.1f}%")
         result[mod_name] = cov
     return result
@@ -8339,7 +8381,16 @@ def cmd_best_models(vram_gb: float = 32.0) -> None:
             "notes": notes,
         })
     order = {"✓ full": 0, "~ RAM": 1, "✗": 2}
-    ollama_rows.sort(key=lambda r: (order[r["fit"]], _OLLAMA_MODELS.index((r["id"].split(":")[0] + ":" + r["id"].split(":")[1] if ":" in r["id"] else r["id"], int(r["params"]), r["notes"])) if (r["id"].split(":")[0] + ":" + r["id"].split(":")[1] if ":" in r["id"] else r["id"], int(r["params"]), r["notes"]) in [(n, p, d) for n, p, d in _OLLAMA_MODELS] else 99))
+    def _ollama_sort_key(r: dict) -> tuple:
+        fit: str = str(r["fit"])
+        rid: str = str(r["id"])
+        rparams: int = int(float(str(r["params"])))
+        rnotes: str = str(r["notes"])
+        short_id = rid.rsplit(":", 1)[0] if rid.count(":") > 1 else rid
+        entry = (short_id, rparams, rnotes)
+        orig_idx = _OLLAMA_MODELS.index(entry) if entry in _OLLAMA_MODELS else 99
+        return (order.get(fit, 99), orig_idx)
+    ollama_rows.sort(key=_ollama_sort_key)
 
     # Check which are locally installed
     installed = set()
@@ -8352,9 +8403,9 @@ def cmd_best_models(vram_gb: float = 32.0) -> None:
         pass
 
     for r in ollama_rows:
-        base = r["id"].split(":")[0]
+        base = str(r["id"]).split(":")[0]
         if base in installed:
-            r["notes"] = "✔ installed  " + r["notes"]
+            r["notes"] = "✔ installed  " + str(r["notes"])
 
     _print_model_table(ollama_rows, f"── Ollama  (ollama pull <name>)  |  VRAM budget: {vram_gb:.0f} GB")
     print("  Benchmark scores: https://livecodebench.github.io/leaderboard.html")
@@ -8377,25 +8428,25 @@ def cmd_best_models(vram_gb: float = 32.0) -> None:
 
     hf_rows = []
     for m in raw:
-        params = _extract_params_b(m)
-        if params is None or params < 1:
+        hf_params = _extract_params_b(m)
+        if hf_params is None or hf_params < 1:
             continue
-        vram_4bit = round(params * 0.55 + 2.5, 1)
+        vram_4bit = round(hf_params * 0.55 + 2.5, 1)
         hf_rows.append({
             "id": m.id,
-            "params": params,
+            "params": hf_params,
             "vram_4bit": vram_4bit,
             "fit": _fit_label(vram_4bit, vram_gb),
             "downloads": m.downloads or 0,
             "likes": m.likes or 0,
         })
 
-    hf_rows.sort(key=lambda r: (order[r["fit"]], -r["likes"]))
+    hf_rows.sort(key=lambda r: (order.get(str(r["fit"]), 99), -int(r["likes"])))
 
     seen = {}
     deduped = []
     for r in hf_rows:
-        base = re.sub(r'[-_](AWQ|GPTQ|GGUF|bnb|4bit|8bit|fp16|bf16|Int4|Int8|MLX|2507).*$', '', r["id"], flags=re.IGNORECASE)
+        base = re.sub(r'[-_](AWQ|GPTQ|GGUF|bnb|4bit|8bit|fp16|bf16|Int4|Int8|MLX|2507).*$', '', str(r["id"]), flags=re.IGNORECASE)
         if base not in seen:
             seen[base] = True
             deduped.append(r)
@@ -8494,6 +8545,18 @@ def main():
         _log("WARNING: README.md not found -- proceeding without it.")
         readme_text = ""
 
+    # Cluster scan is pure static analysis (no LLM) — run first so all downstream
+    # LLM tasks (discover_test_command, task0b) have cluster context available.
+    global _current_cluster
+    _clusters = task0_cfg_scan(project_dir)
+    _log(f"\nCompiler clusters identified: {len(_clusters)}")
+    for _c in _clusters:
+        _env_desc = ", ".join(f"{k}+={v}" for k, v in _c.env_extra.items()) if _c.env_extra else "default build"
+        _log(f"  cluster/{_c.name}  — {_env_desc}")
+    _mark_phase(project_dir, "cfg_scan", "done",
+                detail=f"{len(_clusters)} clusters: {', '.join(c.name for c in _clusters)}",
+                source_hash=_src_hash)
+
     test_command = discover_test_command(readme_text, project_dir=project_dir)
 
     # Normalize: strip leading ./ from the executable so we use the PATH binary.
@@ -8523,7 +8586,8 @@ def main():
     # patterns, feature flags, test conventions. Injected into all TASK 0c, 1, and 2 prompts.
     strategy_path = project_dir / COVERAGE_STRATEGY_NAME
     coverage_strategy = task0b_discovery(
-        strategy_path, project_dir, test_files, readme_text, project_profile
+        strategy_path, project_dir, test_files, readme_text, project_profile,
+        clusters=_clusters,
     )
     _mark_phase(project_dir, "task0b", "done",
                 detail=f"{len(coverage_strategy)} chars", source_hash=_src_hash)
@@ -8589,19 +8653,9 @@ def main():
 
     # -----------------------------------------------------------------------
     # TASK 0c — compiler cluster phase
-    # Derive build configurations from source, then run coverage augmentation
-    # once per cluster. Each cluster gets its own set of env/flags/prompt rules
-    # so the LLM knows exactly which cfg predicates are active.
+    # _clusters and _current_cluster already set above (moved before task0b so
+    # all LLM tasks receive cluster context). Loop below runs one pass per cluster.
     # -----------------------------------------------------------------------
-    global _current_cluster
-    _clusters = task0_cfg_scan(project_dir)
-    _log(f"\nCompiler clusters identified: {len(_clusters)}")
-    for _c in _clusters:
-        _env_desc = ", ".join(f"{k}+={v}" for k, v in _c.env_extra.items()) if _c.env_extra else "default build"
-        _log(f"  cluster/{_c.name}  — {_env_desc}")
-    _mark_phase(project_dir, "cfg_scan", "done",
-                detail=f"{len(_clusters)} clusters: {', '.join(c.name for c in _clusters)}",
-                source_hash=_src_hash)
 
     for _cluster in _clusters:
         _current_cluster = _cluster
@@ -8811,6 +8865,11 @@ def main():
         # --- TASK 1: extract requirements from this module's tests ---
         module_req_path = root / f"functional_requirements_{module_name}.md"
 
+        # Initialize iteration counters here so task1's task4 escalation path can use them.
+        module_iter = 1
+        prev_pass_count = 0
+        prev_test_output = ""
+
         t1_input = module_test_files if module_has_tests else test_files
         if not module_has_tests:
             _log(f"  '{module_name}' has 0 tests — using full project tests for TASK 1.")
@@ -8887,9 +8946,9 @@ def main():
                     continue
                 try:
                     content = src_file.read_text(encoding="utf-8")
-                    m = _gen_blocks_re.search(content)
-                    if m:
-                        saved_gen_blocks[rel] = m.group(0)
+                    _src_match = _gen_blocks_re.search(content)
+                    if _src_match:
+                        saved_gen_blocks[rel] = _src_match.group(0)
                 except Exception:
                     pass
         if saved_gen_blocks:
@@ -8912,7 +8971,7 @@ def main():
             _log(f"  '{module_name}' has 0 test files — will use whole-project context in TASK 2.")
 
         # --- TASK 2-4: reconstruction loop ---
-        module_iter = 1
+        module_iter = 1  # reset in case task1 incremented it during escalation
         prev_pass_count = 0
         prev_test_output = ""
         no_improvement_streak = 0

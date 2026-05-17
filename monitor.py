@@ -300,16 +300,20 @@ VIEWS = [
     ("stream",   "g", "Stream Log"),
 ]
 
+def _pipeline_running() -> bool:
+    try:
+        subprocess.check_output(["pgrep", "-f", "pipeline.py"], stderr=subprocess.DEVNULL)
+        return True
+    except subprocess.CalledProcessError:
+        return False
+
+
 # ── Always-visible bottom bar ─────────────────────────────────────────────────
 # 3 lines: divider, tab row, action row
 
 def _bottom_bar():
     w = _w()
-    running = True
-    try:
-        subprocess.check_output(["pgrep", "-f", "pipeline.py"], stderr=subprocess.DEVNULL)
-    except subprocess.CalledProcessError:
-        running = False
+    running = _pipeline_running()
 
     # Tab row
     tabs = []
@@ -490,7 +494,9 @@ def main():
                 _ln(red(f"  render error: {e}"))
                 _flush_frame()
 
-            if _confirm == "restart":
+            if _confirm == "continue":
+                _action_msg = green("▶ continue (will kill running pipeline) — confirm? [y/n]")
+            elif _confirm == "restart":
                 _action_msg = yellow("↺ restart — confirm? [y/n]")
             elif _confirm == "stop":
                 _action_msg = red("■ stop pipeline — confirm? [y/n]")

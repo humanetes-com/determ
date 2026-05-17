@@ -76,11 +76,11 @@ MODEL_CAPS: dict[str, dict] = {
 
 
 def _model_uses_think(model: str) -> bool:
-    return MODEL_CAPS.get(model, {}).get("think", True)
+    return bool(MODEL_CAPS.get(model, {}).get("think", True))
 
 
 def _model_use_native_ollama(model: str) -> bool:
-    return MODEL_CAPS.get(model, {}).get("native_ollama", False)
+    return bool(MODEL_CAPS.get(model, {}).get("native_ollama", False))
 
 
 # ---------------------------------------------------------------------------
@@ -109,7 +109,8 @@ class LLMBackend(ABC):
 # ---------------------------------------------------------------------------
 
 class ClaudeBackend(LLMBackend):
-    def ask(self, prompt, system, model, max_tokens):
+    def ask(self, prompt: str, system: "str | None", model: str, max_tokens: int,
+            think: "bool | None" = None) -> str:
         import anthropic
         client = anthropic.Anthropic()
         kwargs = {
@@ -119,8 +120,9 @@ class ClaudeBackend(LLMBackend):
         }
         if system:
             kwargs["system"] = system
-        with client.messages.stream(**kwargs) as stream:
-            return stream.get_final_message().content[0].text
+        with client.messages.stream(**kwargs) as stream:  # type: ignore[arg-type]
+            block = stream.get_final_message().content[0]
+            return block.text if hasattr(block, "text") else ""  # type: ignore[union-attr]
 
 
 _DEBUG_LOG        = os.getenv("LLM_DEBUG_LOG", os.getenv("OLLAMA_DEBUG_LOG", "/tmp/debug.log"))
@@ -218,7 +220,8 @@ def _sock_close() -> None:
 def _timed_iter(it, timeout: int):
     """Wrap an iterator; raise TimeoutError if no item arrives within `timeout` seconds."""
     import queue as _q, threading as _t
-    q, sentinel = _q.Queue(), object()
+    q: "_q.Queue[object]" = _q.Queue()
+    sentinel = object()
 
     def _feed():
         try:
@@ -263,9 +266,11 @@ class OllamaBackend(LLMBackend):
 
         # Qwen3.6+ requires the native /api/chat endpoint — the OpenAI-compat layer
         # routes thinking tokens into reasoning_content, leaving content empty.
+        chunks: list[str] = []
+        followup_chunks: list[str] = []
         if _model_use_native_ollama(model):
             import ollama as _ollama
-            chunks: list[str] = []
+            chunks = []
             thinking_chunks: list[str] = []
             _sock_open(f"model={model} think={_think}")
             saw_content = False
@@ -355,7 +360,7 @@ class OllamaBackend(LLMBackend):
                         "Now write the code block. Do not re-explain — output only the code."
                     )},
                 ]
-                followup_chunks: list[str] = []
+                followup_chunks = []
                 _sock_write("\n[FOLLOWUP — thinking budget exhausted, requesting code]\n")
                 try:
                     for part in _timed_iter(
@@ -405,7 +410,7 @@ class OllamaBackend(LLMBackend):
         _sock_open(f"model={model} think={_think}")
         _dbg(f"CALL model={model} think={_think} input_chars={_msg_chars} "
              f"est_input_tok={_estimated_input_tokens} max_tokens={max_tokens}")
-        chunks: list[str] = []
+        chunks = []
         _in_think = False
         _think_char_count = 0
         _tail = ""  # trailing chars of last chunk, for boundary-spanning token detection
@@ -415,9 +420,9 @@ class OllamaBackend(LLMBackend):
         _blk_depth = 0
         _file_opens = 0
         _file_closes = 0
-        with client.chat.completions.create(
+        with client.chat.completions.create(  # type: ignore[union-attr]
             model=model,
-            messages=messages,
+            messages=messages,  # type: ignore[arg-type]
             max_tokens=max_tokens,
             extra_body={"options": {"num_ctx": self._num_ctx}},
             stream=True,
@@ -556,13 +561,13 @@ class OllamaBackend(LLMBackend):
             ]
             # Follow-up only needs to produce code, not re-reason — cap at 16K tokens.
             followup_max = min(max_tokens, 16384)
-            followup_chunks: list[str] = []
+            followup_chunks = []
             _fu_cbuf = ""
             _fu_blk_tracking = False
             _fu_blk_depth = 0
-            with client.chat.completions.create(
+            with client.chat.completions.create(  # type: ignore[union-attr]
                 model=model,
-                messages=followup_messages,
+                messages=followup_messages,  # type: ignore[arg-type]
                 max_tokens=followup_max,
                 extra_body={"options": {"num_ctx": self._num_ctx}},
                 stream=True,
@@ -670,9 +675,10 @@ class HuggingFaceBackend(LLMBackend):
             quantization_config=quantization_config,
         )
         print(f"[HuggingFaceBackend] Model loaded on: "
-              f"{set(str(d) for d in self._model.hf_device_map.values())}", file=sys.stderr)
+              f"{set(str(d) for d in self._model.hf_device_map.values())}", file=sys.stderr)  # type: ignore[operator]
 
-    def ask(self, prompt, system, model, max_tokens):
+    def ask(self, prompt: str, system: "str | None", model: str, max_tokens: int,
+            think: "bool | None" = None) -> str:
         self._load()
         import torch
 
@@ -686,14 +692,14 @@ class HuggingFaceBackend(LLMBackend):
         )
         inputs = self._tokenizer([text], return_tensors="pt").to(self._model.device)
         with torch.no_grad():
-            output_ids = self._model.generate(
+            output_ids = self._model.generate(  # type: ignore[operator]
                 **inputs,
                 max_new_tokens=min(max_tokens, self._max_new_tokens),
                 do_sample=False,
                 pad_token_id=self._tokenizer.eos_token_id,
             )
         new_ids = output_ids[0][inputs["input_ids"].shape[1]:]
-        return self._tokenizer.decode(new_ids, skip_special_tokens=True)
+        return str(self._tokenizer.decode(new_ids, skip_special_tokens=True))
 
 
 class SGLangBackend(LLMBackend):
@@ -747,10 +753,10 @@ class SGLangBackend(LLMBackend):
             # the actual response — eliminates empty-content responses entirely.
             extra_body["thinking_budget"] = self._thinking_budget
 
-        chunks: list[str] = []
-        with client.chat.completions.create(
+        chunks = []
+        with client.chat.completions.create(  # type: ignore[union-attr]
             model=served_model,
-            messages=messages,
+            messages=messages,  # type: ignore[arg-type]
             max_tokens=max_tokens,
             extra_body=extra_body if extra_body else None,
             stream=True,
@@ -852,9 +858,9 @@ class VLLMBackend(LLMBackend):
             _file_closes = 0
             _sock_open(f"vllm model={served_model} think={_enable_thinking} attempt={_attempt}")
             try:
-                with client.chat.completions.create(
+                with client.chat.completions.create(  # type: ignore[call-overload,union-attr]
                     model=served_model,
-                    messages=messages,
+                    messages=messages,  # type: ignore[arg-type]
                     max_tokens=_request_max_tokens,
                     extra_body=extra_body,
                     stream=True,

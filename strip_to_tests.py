@@ -140,7 +140,7 @@ def _delimiter_depth_change(line: str) -> tuple:
 
 def _brace_depth_change(line: str) -> int:
     """Net brace-only depth change for a line (convenience wrapper)."""
-    return _delimiter_depth_change(line)[0]
+    return int(_delimiter_depth_change(line)[0])
 
 
 def extract_rust_tests(content: str) -> str:
