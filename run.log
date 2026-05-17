@@ -893,3 +893,18 @@ error: could not compile `anyhow` (lib) due to 1 previous error
 [2026-05-17 09:46:38]   Project profile cache valid (project_profile.md), loading.
 [2026-05-17 09:46:38]   Project context cache valid (project_context.md), loading.
 [2026-05-17 09:46:38]   Coverage strategy cache valid (coverage_strategy.md), loading.
+[2026-05-17 09:46:38]   [git] committed: pipeline: task0b done
+[2026-05-17 09:46:38]   [dep graph] cargo metadata: 1 module(s).
+[2026-05-17 09:46:38]   Single module or no dependency graph detected — whole-workspace mode.
+[2026-05-17 09:46:38] 
+Compiler clusters identified: 3
+[2026-05-17 09:46:38]   cluster/stable  — default build
+[2026-05-17 09:46:38]   cluster/nightly  — RUSTFLAGS+=--cfg error_generic_member_access
+[2026-05-17 09:46:38]   cluster/anyhow_no_core_error  — RUSTFLAGS+=--cfg anyhow_no_core_error
+[2026-05-17 09:46:38] 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[2026-05-17 09:46:38]   Starting compiler cluster: stable
+[2026-05-17 09:46:38] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[2026-05-17 09:46:38]   cluster/stable: 'anyhow' already done — skipping.
+[2026-05-17 09:46:38] 
+  cluster/stable complete — 1 module(s) done.
