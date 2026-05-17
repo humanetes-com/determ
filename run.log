@@ -837,3 +837,59 @@ error: could not compile `anyhow` (lib) due to 1 previous error
 [2026-05-17 09:38:01]   HARD BLOCK (FR-018): 'anyhow' [anyhow_no_core_error] coverage stuck at 0.0% (stall 5/5, total 6/20). Accepting and moving on.
 [2026-05-17 09:38:01] 
   cluster/anyhow_no_core_error complete — 1 module(s) done.
+[2026-05-17 09:38:01]   [git] committed: pipeline: task0c/anyhow_no_core_error — anyhow:0.0%
+[2026-05-17 09:38:01] 
+============================================================
+[2026-05-17 09:38:01] MODULE: anyhow  [lib]
+[2026-05-17 09:38:01] ============================================================
+[2026-05-17 09:38:01]   TASK 0c: 'anyhow' all clusters done — proceeding to strip.
+[2026-05-17 09:38:01] 
+  HARD STOP: 'anyhow' coverage is 0.0% — must reach 100% before strip and reconstruction can proceed. Delete the augmented sentinel and fix TASK 0c to continue.
+[2026-05-17 09:45:33] 
+============================================================
+[2026-05-17 09:45:33] ============================================================
+[2026-05-17 09:45:33]   PIPELINE STARTED — 2026-05-17 07:45:33 UTC
+[2026-05-17 09:45:33] ============================================================
+[2026-05-17 09:45:33] ============================================================
+[2026-05-17 09:45:33] Using model: Qwen/Qwen3.6-27B-FP8  |  Provider: vLLM (Qwen/Qwen3.6-27B-FP8)
+[2026-05-17 09:45:33] Context budget: 16,000 chars  (SINGLE_CALL=12,000  FILE=13,600  INTERMEDIATE=8,000)
+[2026-05-17 09:45:33]   Source hash: 5e8b27ba72799664
+[2026-05-17 09:45:33]   Pipeline state:
+[2026-05-17 09:45:33]     [✓] task0b                  valid    1531 chars
+[2026-05-17 09:45:33]     [✓] cfg_scan                valid    3 clusters: stable, nightly, anyhow_no_core_error
+[2026-05-17 09:45:33]     [✓] task0c/stable           valid    1 modules
+[2026-05-17 09:45:33]     [~] task0c/stable/anyhow    resumed  0.0%
+[2026-05-17 09:45:33]     [~] task0c/anyhow           resumed  0.0% attempt 1
+[2026-05-17 09:45:33]     [✓] task0c/nightly          valid    1 modules
+[2026-05-17 09:45:33]     [~] task0c/nightly/anyhow   resumed  0.0%
+[2026-05-17 09:45:33]     [✓] task0c/anyhow_no_core_error  valid    1 modules
+[2026-05-17 09:45:33]     [~] task0c/anyhow_no_core_error/anyhow  resumed  0.0%
+[2026-05-17 09:45:33]     last position: task0c/anyhow_no_core_error/anyhow / 0.0%
+[2026-05-17 09:45:33] Initializing: asking Qwen/Qwen3.6-27B-FP8 to extract test command from README.md...
+[2026-05-17 09:45:50] 
+============================================================
+[2026-05-17 09:45:50] ============================================================
+[2026-05-17 09:45:50]   PIPELINE STARTED — 2026-05-17 07:45:50 UTC
+[2026-05-17 09:45:50] ============================================================
+[2026-05-17 09:45:50] ============================================================
+[2026-05-17 09:45:50] Using model: Qwen/Qwen3.6-27B-FP8  |  Provider: vLLM (Qwen/Qwen3.6-27B-FP8)
+[2026-05-17 09:45:50] Context budget: 16,000 chars  (SINGLE_CALL=12,000  FILE=13,600  INTERMEDIATE=8,000)
+[2026-05-17 09:45:50]   Source hash: 5e8b27ba72799664
+[2026-05-17 09:45:50]   Pipeline state:
+[2026-05-17 09:45:50]     [✓] task0b                  valid    1531 chars
+[2026-05-17 09:45:50]     [✓] cfg_scan                valid    3 clusters: stable, nightly, anyhow_no_core_error
+[2026-05-17 09:45:50]     [✓] task0c/stable           valid    1 modules
+[2026-05-17 09:45:50]     [~] task0c/stable/anyhow    resumed  0.0%
+[2026-05-17 09:45:50]     [~] task0c/anyhow           resumed  0.0% attempt 1
+[2026-05-17 09:45:50]     [✓] task0c/nightly          valid    1 modules
+[2026-05-17 09:45:50]     [~] task0c/nightly/anyhow   resumed  0.0%
+[2026-05-17 09:45:50]     [✓] task0c/anyhow_no_core_error  valid    1 modules
+[2026-05-17 09:45:50]     [~] task0c/anyhow_no_core_error/anyhow  resumed  0.0%
+[2026-05-17 09:45:50]     last position: task0c/anyhow_no_core_error/anyhow / 0.0%
+[2026-05-17 09:45:50] Initializing: asking Qwen/Qwen3.6-27B-FP8 to extract test command from README.md...
+[2026-05-17 09:46:38] Test command: cargo test
+[2026-05-17 09:46:38] Collecting test files...
+[2026-05-17 09:46:38]   Found 42 test file(s) (33 write-protected).
+[2026-05-17 09:46:38]   Project profile cache valid (project_profile.md), loading.
+[2026-05-17 09:46:38]   Project context cache valid (project_context.md), loading.
+[2026-05-17 09:46:38]   Coverage strategy cache valid (coverage_strategy.md), loading.

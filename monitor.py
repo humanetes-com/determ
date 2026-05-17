@@ -292,7 +292,7 @@ def _detach(cmd):
     )
 _view        = "monitor"      # "monitor" | "pipeline" | "stream"
 _scroll      = {"pipeline": 0, "stream": 0}   # lines scrolled up from bottom (0=bottom)
-_confirm     = None           # pending confirmation: "restart" | "stop" | None
+_confirm     = None           # pending confirmation: "continue" | "restart" | "stop" | None
 
 VIEWS = [
     ("monitor",  "m", "Monitor"),
@@ -434,9 +434,21 @@ def _run_action(key):
             _action_msg = dim("stop cancelled")
         _confirm = None
         return
+    if _confirm == "continue":
+        if key == "y":
+            _detach(["bash", os.path.join(SCRIPT_DIR, "continue.sh"), "--y"])
+            _action_msg = green("▶ continue.sh launched")
+        else:
+            _action_msg = dim("continue cancelled")
+        _confirm = None
+        return
     if key == "c":
-        _detach(["bash", os.path.join(SCRIPT_DIR, "continue.sh"), "--y"])
-        _action_msg = green("▶ continue.sh launched")
+        if _pipeline_running():
+            _confirm    = "continue"
+            _action_msg = green("▶ continue (will kill running pipeline) — confirm? [y/n]")
+        else:
+            _detach(["bash", os.path.join(SCRIPT_DIR, "continue.sh"), "--y"])
+            _action_msg = green("▶ continue.sh launched")
     elif key == "r":
         _confirm    = "restart"
         _action_msg = yellow("↺ restart — confirm? [y/n]")

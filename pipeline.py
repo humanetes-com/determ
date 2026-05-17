@@ -7122,11 +7122,23 @@ def task0c_augment_module(
             if not is_test_file(src_file, project_dir)
         )
         if not _lib_err_in_gen:
-            err_snippet = lib_err[:400]
-            _log(f"  [{module_name}] Library does not compile — skipping augmentation.")
-            _log(f"    Error: {err_snippet}")
-            return 0.0, 0
-        _log(f"  [{module_name}] Library compile failure in gen_* block — routing to harness fix loop.")
+            # Check whether any of the broken files are writable (i.e. we wrote them).
+            # If the error is only in write-protected originals, we truly cannot fix it.
+            _broken_in_err = [
+                src_file for src_file in module_dir.rglob("*.rs")
+                if (str(src_file.relative_to(project_dir)) in lib_err
+                    or src_file.name in lib_err)
+                and not is_test_file(src_file, project_dir)
+                and os.access(src_file, os.W_OK)
+            ]
+            if not _broken_in_err:
+                err_snippet = lib_err[:400]
+                _log(f"  [{module_name}] Library does not compile in write-protected files — skipping.")
+                _log(f"    Error: {err_snippet}")
+                return 0.0, 0
+            _log(f"  [{module_name}] Library compile failure in writable source — routing to harness fix loop.")
+        else:
+            _log(f"  [{module_name}] Library compile failure in gen_* block — routing to harness fix loop.")
 
     _gen_block_re = re.compile(r'\n+#\[cfg\(test\)\](?:\n#\[[^\]]*\])*\n(?:pub )?mod gen_\w+\s*\{.*', re.DOTALL)
 
