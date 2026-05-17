@@ -655,3 +655,94 @@ Compiler clusters identified: 3
 [2026-05-17 09:37:59]   cluster/stable: 'anyhow' already done — skipping.
 [2026-05-17 09:37:59] 
   cluster/stable complete — 1 module(s) done.
+[2026-05-17 09:37:59]   [git] committed: pipeline: task0c/stable — anyhow:0.0%
+[2026-05-17 09:37:59] 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[2026-05-17 09:37:59]   Starting compiler cluster: nightly
+[2026-05-17 09:37:59] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[2026-05-17 09:37:59] 
+TASK 0c [nightly]: Augmenting 'anyhow' to 100% coverage...
+[2026-05-17 09:37:59]   [anyhow] Library does not compile — skipping augmentation.
+[2026-05-17 09:37:59]     Error:    Compiling anyhow v1.0.102 (/home/user/determ/tmp/anyhow-master)
+error: unexpected closing delimiter: `)`
+   --> src/lib.rs:108:34
+    |
+108 | at!("{}", out), "coverage target");
+    |                                  ^ unexpected closing delimiter
+
+error: could not compile `anyhow` (lib) due to 1 previous error
+
+[2026-05-17 09:37:59]   TASK 0c [nightly]: 'anyhow' coverage: 0.0%
+[2026-05-17 09:37:59]   HARD RULE (FR-018): 'anyhow' [nightly] coverage 0.0% < 100% (stall 0/5, total 1/20, best covered 0 lines). Retrying.
+[2026-05-17 09:37:59] 
+TASK 0c [nightly]: Augmenting 'anyhow' to 100% coverage...
+[2026-05-17 09:37:59]   [anyhow] Library does not compile — skipping augmentation.
+[2026-05-17 09:37:59]     Error:    Compiling anyhow v1.0.102 (/home/user/determ/tmp/anyhow-master)
+error: unexpected closing delimiter: `)`
+   --> src/lib.rs:108:34
+    |
+108 | at!("{}", out), "coverage target");
+    |                                  ^ unexpected closing delimiter
+
+error: could not compile `anyhow` (lib) due to 1 previous error
+
+[2026-05-17 09:37:59]   TASK 0c [nightly]: 'anyhow' coverage: 0.0%
+[2026-05-17 09:37:59]   HARD RULE (FR-018): 'anyhow' [nightly] coverage 0.0% < 100% (stall 1/5, total 2/20, best covered 0 lines). Retrying.
+[2026-05-17 09:37:59] 
+TASK 0c [nightly]: Augmenting 'anyhow' to 100% coverage...
+[2026-05-17 09:37:59]   [anyhow] Library does not compile — skipping augmentation.
+[2026-05-17 09:37:59]     Error:    Compiling anyhow v1.0.102 (/home/user/determ/tmp/anyhow-master)
+error: unexpected closing delimiter: `)`
+   --> src/lib.rs:108:34
+    |
+108 | at!("{}", out), "coverage target");
+    |                                  ^ unexpected closing delimiter
+
+error: could not compile `anyhow` (lib) due to 1 previous error
+
+[2026-05-17 09:37:59]   TASK 0c [nightly]: 'anyhow' coverage: 0.0%
+[2026-05-17 09:37:59]   HARD RULE (FR-018): 'anyhow' [nightly] coverage 0.0% < 100% (stall 2/5, total 3/20, best covered 0 lines). Retrying.
+[2026-05-17 09:37:59] 
+TASK 0c [nightly]: Augmenting 'anyhow' to 100% coverage...
+[2026-05-17 09:37:59]   [anyhow] Library does not compile — skipping augmentation.
+[2026-05-17 09:37:59]     Error:    Compiling anyhow v1.0.102 (/home/user/determ/tmp/anyhow-master)
+error: unexpected closing delimiter: `)`
+   --> src/lib.rs:108:34
+    |
+108 | at!("{}", out), "coverage target");
+    |                                  ^ unexpected closing delimiter
+
+error: could not compile `anyhow` (lib) due to 1 previous error
+
+[2026-05-17 09:37:59]   TASK 0c [nightly]: 'anyhow' coverage: 0.0%
+[2026-05-17 09:37:59]   HARD RULE (FR-018): 'anyhow' [nightly] coverage 0.0% < 100% (stall 3/5, total 4/20, best covered 0 lines). Retrying.
+[2026-05-17 09:37:59] 
+TASK 0c [nightly]: Augmenting 'anyhow' to 100% coverage...
+[2026-05-17 09:38:00]   [anyhow] Library does not compile — skipping augmentation.
+[2026-05-17 09:38:00]     Error:    Compiling anyhow v1.0.102 (/home/user/determ/tmp/anyhow-master)
+error: unexpected closing delimiter: `)`
+   --> src/lib.rs:108:34
+    |
+108 | at!("{}", out), "coverage target");
+    |                                  ^ unexpected closing delimiter
+
+error: could not compile `anyhow` (lib) due to 1 previous error
+
+[2026-05-17 09:38:00]   TASK 0c [nightly]: 'anyhow' coverage: 0.0%
+[2026-05-17 09:38:00]   HARD RULE (FR-018): 'anyhow' [nightly] coverage 0.0% < 100% (stall 4/5, total 5/20, best covered 0 lines). Retrying.
+[2026-05-17 09:38:00] 
+TASK 0c [nightly]: Augmenting 'anyhow' to 100% coverage...
+[2026-05-17 09:38:00]   [anyhow] Library does not compile — skipping augmentation.
+[2026-05-17 09:38:00]     Error:    Compiling anyhow v1.0.102 (/home/user/determ/tmp/anyhow-master)
+error: unexpected closing delimiter: `)`
+   --> src/lib.rs:108:34
+    |
+108 | at!("{}", out), "coverage target");
+    |                                  ^ unexpected closing delimiter
+
+error: could not compile `anyhow` (lib) due to 1 previous error
+
+[2026-05-17 09:38:00]   TASK 0c [nightly]: 'anyhow' coverage: 0.0%
+[2026-05-17 09:38:00]   HARD BLOCK (FR-018): 'anyhow' [nightly] coverage stuck at 0.0% (stall 5/5, total 6/20). Accepting and moving on.
+[2026-05-17 09:38:00] 
+  cluster/nightly complete — 1 module(s) done.
