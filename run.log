@@ -640,3 +640,18 @@ TASK 0b (discovery): Analyzing project for coverage strategy...
 [2026-05-17 09:33:47]   [task0b] WARNING: 10 source file(s) dropped (budget exhausted): src/ptr.rs, src/kind.rs, src/fmt.rs, src/ensure.rs, src/wrapper.rs, src/context.rs, src/chain.rs, src/macros.rs, src/nightly.rs, src/lib.rs
 [2026-05-17 09:33:47]   GUARD: [context-guard/middle_trim] prompt 19,422 > limit 16,000: dropped 6,810 chars from middle
 [2026-05-17 09:37:59]   coverage_strategy.md written (1,531 chars).
+[2026-05-17 09:37:59]   [git] committed: pipeline: task0b done
+[2026-05-17 09:37:59]   [dep graph] cargo metadata: 1 module(s).
+[2026-05-17 09:37:59]   Single module or no dependency graph detected — whole-workspace mode.
+[2026-05-17 09:37:59] 
+Compiler clusters identified: 3
+[2026-05-17 09:37:59]   cluster/stable  — default build
+[2026-05-17 09:37:59]   cluster/nightly  — RUSTFLAGS+=--cfg error_generic_member_access
+[2026-05-17 09:37:59]   cluster/anyhow_no_core_error  — RUSTFLAGS+=--cfg anyhow_no_core_error
+[2026-05-17 09:37:59] 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[2026-05-17 09:37:59]   Starting compiler cluster: stable
+[2026-05-17 09:37:59] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[2026-05-17 09:37:59]   cluster/stable: 'anyhow' already done — skipping.
+[2026-05-17 09:37:59] 
+  cluster/stable complete — 1 module(s) done.
