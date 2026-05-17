@@ -461,6 +461,8 @@ def _run_action(key):
         _action_msg = red("■ stop pipeline — confirm? [y/n]")
     elif key in ("m", "l", "g"):
         _view = {"m": "monitor", "l": "pipeline", "g": "stream"}[key]
+        global _prev_buf
+        _prev_buf = []   # force full redraw on next frame — clears previous view's artifacts
     elif key == "UP"   and _view in _scroll: _scroll[_view] += SCROLL_STEP
     elif key == "DOWN" and _view in _scroll: _scroll[_view] = max(0, _scroll[_view] - SCROLL_STEP)
     elif key == "PGUP" and _view in _scroll: _scroll[_view] += available_lines()
