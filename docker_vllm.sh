@@ -25,9 +25,9 @@ CONTAINER_ID_FILE=/tmp/vllm_container.id
 # Stop existing container if any
 if [[ -f "$CONTAINER_ID_FILE" ]]; then
     OLD_CID=$(cat "$CONTAINER_ID_FILE")
-    if sudo docker inspect "$OLD_CID" > /dev/null 2>&1; then
+    if docker inspect "$OLD_CID" > /dev/null 2>&1; then
         echo "Stopping existing vLLM container ($OLD_CID) ..."
-        sudo docker stop "$OLD_CID" > /dev/null
+        docker stop "$OLD_CID" > /dev/null
     fi
     rm -f "$CONTAINER_ID_FILE"
 fi
@@ -36,7 +36,7 @@ echo "Starting vLLM Docker container (model: $VLLM_MODEL) ..."
 _hf_env=()
 [[ -n "$HF_TOKEN" ]] && _hf_env=(-e "HF_TOKEN=${HF_TOKEN}")
 
-CID=$(sudo docker run -d \
+CID=$(docker run -d \
     --runtime nvidia --gpus all \
     "${_hf_env[@]}" \
     -e NCCL_P2P_DISABLE=1 \

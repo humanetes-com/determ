@@ -7,17 +7,34 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND=$(grep -E '^[[:space:]]*BACKEND=' "$SCRIPT_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
 BACKEND="${BACKEND:-ollama}"
 
-SERVER_LOG=/tmp/server.log
-LLM_DEBUG_LOG=/tmp/debug.log
-LLM_STREAM_LOG=/tmp/stream.log
+LOG_DIR="$SCRIPT_DIR/logs"
+mkdir -p "$LOG_DIR"
+SERVER_LOG="$LOG_DIR/server.log"
+LLM_DEBUG_LOG="$LOG_DIR/debug.log"
+LLM_STREAM_LOG="$LOG_DIR/stream.log"
 
 # ---------------------------------------------------------------------------
 # Kill existing pipeline (ask confirmation unless --y passed)
 # ---------------------------------------------------------------------------
 _YES=false
-for _arg in "$@"; do [[ "$_arg" == "--y" ]] && _YES=true; done
+_GRACEFUL=false
+_WIPE=false
+for _arg in "$@"; do
+    [[ "$_arg" == "--y" ]]        && _YES=true
+    [[ "$_arg" == "--graceful" ]] && _GRACEFUL=true
+    [[ "$_arg" == "--wipe" ]]     && _WIPE=true && _YES=true
+done
 
-if pgrep -f "pipeline.py" > /dev/null 2>&1; then
+if [[ "$_GRACEFUL" == true ]]; then
+    if pgrep -f "pipeline.py" > /dev/null 2>&1; then
+        touch /tmp/pipeline_graceful_stop
+        echo "Graceful stop requested — waiting for pipeline to finish current attempt..."
+        while pgrep -f "pipeline.py" > /dev/null 2>&1; do sleep 3; done
+        echo "Pipeline stopped gracefully. Relaunching..."
+    else
+        echo "No pipeline running — launching fresh."
+    fi
+elif pgrep -f "pipeline.py" > /dev/null 2>&1; then
     if [[ "$_YES" == false ]]; then
         echo -n "Pipeline is running (PID $(pgrep -f pipeline.py)). Kill it? [y/N] "
         read -r _reply
@@ -138,17 +155,41 @@ if [[ "$BACKEND" == "vllm" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Wipe: cargo clean + strip gen_* blocks (only when --wipe passed)
+# ---------------------------------------------------------------------------
+if [[ "$_WIPE" == true ]]; then
+    > "$LOG_DIR/pipeline_anyhow.log"
+    if [[ -d "$SCRIPT_DIR/tmp/anyhow-master" ]]; then
+        echo "Running cargo clean on tmp/anyhow-master ..."
+        (cd "$SCRIPT_DIR/tmp/anyhow-master" && cargo clean 2>&1 | tail -3)
+        echo "Stripping gen_* blocks from tmp/anyhow-master/src ..."
+        python3 - <<'PYEOF'
+import re, pathlib
+gen_re = re.compile(r'\n+(?:// GRCOV_EXCL_START\n)?#\[cfg\(test\)\](?:\n#\[[^\]]*\])*\n(?:pub )?mod gen_\w+\s*\{.*', re.DOTALL)
+stripped = []
+for p in pathlib.Path("tmp/anyhow-master/src").glob("*.rs"):
+    raw = p.read_text(); cleaned = gen_re.sub("", raw).rstrip() + "\n"
+    if cleaned != raw:
+        p.write_text(cleaned); stripped.append(p.name)
+print(f"  Stripped: {', '.join(stripped)}" if stripped else "  Nothing to strip.")
+PYEOF
+    else
+        echo "tmp/anyhow-master not found — will be cloned by pipeline."
+    fi
+fi
+
+# ---------------------------------------------------------------------------
 # Start the pipeline
 # ---------------------------------------------------------------------------
-nohup python pipeline.py --project anyhow-master > /tmp/pipeline_anyhow.log 2>&1 &
-# To use full git-managed workspace mode: replace above with:
-# nohup python pipeline.py --repo tmp/anyhow-master > /tmp/pipeline_anyhow.log 2>&1 &
+_PIPELINE_ARGS="--project anyhow"
+[[ "$_WIPE" == true ]] && _PIPELINE_ARGS="--repo https://github.com/dtolnay/anyhow --clean"
+nohup .venv/bin/python pipeline.py $_PIPELINE_ARGS > "$LOG_DIR/pipeline_anyhow.log" 2>&1 &
 echo "Pipeline started (PID $!) — backend: $BACKEND"
-echo "Pipeline log : tail -f /tmp/pipeline_anyhow.log"
-echo "Guards log   : tail -f /tmp/pipeline_guards.log"
+echo "Pipeline log : tail -f $LOG_DIR/pipeline_anyhow.log"
+echo "Guards log   : tail -f $LOG_DIR/pipeline_guards.log"
 echo "Debug log    : tail -f $LLM_DEBUG_LOG"
 echo "Stream log   : tail -f $LLM_STREAM_LOG"
 if [[ "$BACKEND" != "ollama" ]] || [[ -s "$SERVER_LOG" ]]; then
     echo "Server log   : tail -f $SERVER_LOG"
 fi
-tail -f /tmp/pipeline_anyhow.log
+tail -f "$LOG_DIR/pipeline_anyhow.log"

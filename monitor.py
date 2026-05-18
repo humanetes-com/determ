@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Pipeline / GPU monitor.  Keys: c/r/s/l/g/m  ↑↓ scroll  ctrl+c quit"""
-import os, re, select, signal, subprocess, sys, termios, time, tty
+"""Pipeline / GPU monitor.  Keys: 1/2/3 views  c/g/r/s actions  ↑↓ navigate  q quit"""
+import glob, json as _json, os, re, select, signal, subprocess, sys, termios, time, tty
 from datetime import datetime
 
-PIPELINE_LOG = "/tmp/pipeline_anyhow.log"
-STREAM_LOG   = os.getenv("LLM_STREAM_LOG", os.getenv("OLLAMA_STREAM_LOG", "/tmp/stream.log"))
+_LOG_DIR     = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+PIPELINE_LOG = os.getenv("PIPELINE_LOG", os.path.join(_LOG_DIR, "pipeline_anyhow.log"))
+STREAM_LOG   = os.getenv("LLM_STREAM_LOG", os.getenv("OLLAMA_STREAM_LOG", os.path.join(_LOG_DIR, "stream.log")))
+_GUARDS_LOG  = os.getenv("PIPELINE_GUARD_LOG", os.path.join(_LOG_DIR, "pipeline_guards.log"))
 REFRESH      = 2
 
 _GPU_BW = {"3090": 936.2, "3080": 760.0, "4090": 1008.0, "4080": 716.8,
@@ -28,6 +30,7 @@ def red(s):      return f"\033[31m{s}\033[0m"
 def cyan(s):     return f"\033[36m{s}\033[0m"
 def yellow(s):   return f"\033[33m{s}\033[0m"
 def rev(s):      return f"\033[7m{s}\033[0m"   # reverse video (highlight)
+def bg_white(s): return f"\033[30;107m{s}\033[0m"  # black text on bright white background
 
 def bar(pct, width=18):
     filled = round(pct / 100 * width)
@@ -64,47 +67,52 @@ def _flush_frame():
 
 def box(title, rows):
     w = _w() - 2
-    _ln(f"┌─ {bold(title)} {'─' * max(0, w - len(title) - 4)}┐")
+    _ln(f"┌─ {bold(title)} {'─' * max(0, w - len(title) - 3)}┐")
     for row in rows:
-        pad = w - 2 - len(_plain(row))
-        _ln(f"│ {row}{' ' * max(pad - 1, 0)}│")
+        pad = w - 1 - len(_plain(row))
+        _ln(f"│ {row}{' ' * max(pad, 0)}│")
     _ln("└" + "─" * w + "┘")
 
 def box_lines(title, rows):
     """Same as box() but returns list of strings without printing."""
     w = _w() - 2
-    out = [f"┌─ {bold(title)} {'─' * max(0, w - len(title) - 4)}┐"]
+    out = [f"┌─ {bold(title)} {'─' * max(0, w - len(title) - 3)}┐"]
     for row in rows:
-        pad = w - 2 - len(_plain(row))
-        out.append(f"│ {row}{' ' * max(pad - 1, 0)}│")
+        pad = w - 1 - len(_plain(row))
+        out.append(f"│ {row}{' ' * max(pad, 0)}│")
     out.append("└" + "─" * w + "┘")
     return out
 
 # ── Key reading (handles arrow escape sequences) ──────────────────────────────
 
 def _read_key():
-    """Read one logical keypress; returns a string. Arrow keys → 'UP'/'DOWN'/'PGUP'/'PGDN'."""
-    if not select.select([sys.stdin], [], [], 0)[0]:
+    """Read one logical keypress; returns a string. Arrow keys → 'UP'/'DOWN'/'PGUP'/'PGDN'.
+
+    Uses os.read() throughout to bypass Python's BufferedReader — without this,
+    select.select() misses continuation bytes that the buffer has already consumed.
+    """
+    fd = sys.stdin.fileno()
+    if not select.select([fd], [], [], 0)[0]:
         return ""
-    ch = sys.stdin.read(1)
+    ch = os.read(fd, 1).decode("latin-1")
     if ch != "\033":
         return ch
     # Escape sequence — read more with short timeout
-    if not select.select([sys.stdin], [], [], 0.05)[0]:
+    if not select.select([fd], [], [], 0.05)[0]:
         return "ESC"
-    ch2 = sys.stdin.read(1)
+    ch2 = os.read(fd, 1).decode("latin-1")
     if ch2 != "[":
         return "ESC"
-    if not select.select([sys.stdin], [], [], 0.05)[0]:
+    if not select.select([fd], [], [], 0.05)[0]:
         return "ESC"
-    ch3 = sys.stdin.read(1)
+    ch3 = os.read(fd, 1).decode("latin-1")
     if ch3 == "A":  return "UP"
     if ch3 == "B":  return "DOWN"
     if ch3 == "5":
-        sys.stdin.read(1)   # consume trailing ~
+        os.read(fd, 1)   # consume trailing ~
         return "PGUP"
     if ch3 == "6":
-        sys.stdin.read(1)
+        os.read(fd, 1)
         return "PGDN"
     return "ESC"
 
@@ -143,37 +151,283 @@ def gpu():
     return rows
 
 
-def pipeline_status():
+def _parse_coverage_json(project_dir):
+    """Read per-file coverage from the most recent grcov/tarpaulin JSON output.
+    Returns {rel_path: (covered, coverable)}, e.g. {'src/error.rs': (248, 285)}."""
+    result = {}
+    main_mtime = 0
+
+    # grcov coveralls JSON (pipeline writes /tmp/grcov_{module}.json).
+    # Exclude quick/filecache variants — those are not full measurements.
+    _main_paths = [p for p in glob.glob("/tmp/grcov_*.json")
+                   if not os.path.basename(p).startswith(("grcov_quick_", "grcov_filecache_"))]
+    for path in sorted(_main_paths, key=os.path.getmtime, reverse=True)[:1]:
+        try:
+            main_mtime = os.path.getmtime(path)
+            data = _json.load(open(path))
+            for sf in data.get("source_files", []):
+                name      = sf.get("name", "")
+                cov       = sf.get("coverage", [])
+                covered   = sum(1 for c in cov if isinstance(c, int) and c > 0)
+                coverable = sum(1 for c in cov if c is not None)
+                if coverable > 0 and name:
+                    result[name] = (covered, coverable)
+        except Exception:
+            pass
+
+    # Merge per-file quick-cov updates that are newer than the last full measurement.
+    for _qpath in glob.glob("/tmp/grcov_filecache_*.json"):
+        try:
+            for _rel, _d in _json.load(open(_qpath)).items():
+                if _d.get("ts", 0) > main_mtime and _d.get("coverable", 0) > 0:
+                    result[_rel] = (_d["covered"], _d["coverable"])
+        except Exception:
+            pass
+
+    if result:
+        return result
+
+    # tarpaulin JSON fallback (pipeline writes /tmp/tarp_{module}/tarpaulin-report.json)
+    for path in sorted(glob.glob("/tmp/tarp_*/tarpaulin-report.json"), key=os.path.getmtime, reverse=True)[:1]:
+        try:
+            data = _json.load(open(path))
+            for f in data.get("files", []):
+                parts     = f.get("path", [])
+                name      = os.path.join(*parts) if parts else ""
+                if project_dir and name.startswith(str(project_dir) + os.sep):
+                    name = os.path.relpath(name, project_dir)
+                covered   = f.get("covered", 0)
+                coverable = f.get("coverable", 0)
+                if coverable > 0 and name:
+                    result[name] = (covered, coverable)
+            if result:
+                return result
+        except Exception:
+            pass
+
+    return result
+
+
+def _find_project_dir():
+    """Return path to the most-recently-active workspace in tmp/, or None."""
+    tmp = os.path.join(SCRIPT_DIR, "tmp")
+    if not os.path.isdir(tmp):
+        return None
+    best = None
+    for name in os.listdir(tmp):
+        p = os.path.join(tmp, name, "pipeline_state.md")
+        if os.path.isfile(p):
+            mtime = os.path.getmtime(p)
+            if best is None or mtime > best[0]:
+                best = (mtime, os.path.join(tmp, name))
+    return best[1] if best else None
+
+
+def _parse_pipeline_state(project_dir):
+    """Parse pipeline_state.md → cluster list, done set, current cluster, latest coverage."""
+    r = {"clusters": [], "done": set(), "current": "", "coverage": ""}
+    if not project_dir:
+        return r
     try:
-        subprocess.check_output(["pgrep", "-f", "pipeline.py"], stderr=subprocess.DEVNULL)
-        running = True
-    except subprocess.CalledProcessError:
-        running = False
+        text = open(os.path.join(project_dir, "pipeline_state.md")).read()
+    except Exception:
+        return r
+    m = re.search(r'\d+ clusters?: ([^\n]+)', text)
+    if m:
+        r["clusters"] = [c.strip() for c in m.group(1).split(",")]
+    for line in text.splitlines():
+        m = re.match(r'\[task0c/(\w+)\]\s+(done|in_progress)', line)
+        if m and m.group(1) in r["clusters"]:
+            if m.group(2) == "done":
+                r["done"].add(m.group(1))
+            elif m.group(2) == "in_progress" and not r["current"]:
+                r["current"] = m.group(1)
+    # Most recent coverage: scan state lines in reverse for first task0c entry with a %
+    for line in reversed(text.splitlines()):
+        if "task0c" in line:
+            cv = re.search(r'(\d+\.\d+)%', line)
+            if cv:
+                r["coverage"] = cv.group(1) + "%"
+                break
+    return r
+
+
+def _parse_pipeline_log():
+    """Parse PIPELINE_LOG → attempt, file progress, uncovered-lines history."""
+    r = {
+        "attempt": "?", "max_attempt": "?", "errors": 0,
+        "current_file": "?", "files_this_pass": [], "all_files": [],
+        "file_history": {},    # file -> [uncov_count, …] across passes
+        "queue_history": {},   # basename -> [uncov after attempt 1, attempt 2, …]
+        "current_cluster": "", "coverage": "", "last_line": "", "age": 0,
+    }
+    if not os.path.exists(PIPELINE_LOG):
+        return r
+    try:
+        r["age"] = time.time() - os.path.getmtime(PIPELINE_LOG)
+        lines = open(PIPELINE_LOG).read().splitlines()
+    except Exception:
+        return r
+    r["last_line"] = next((l.strip() for l in reversed(lines) if l.strip()), "")
+    this_pass = []
+    for line in lines:
+        if m := re.search(r'Attempt\s+(\d+)/(\d+)', line):
+            r["attempt"], r["max_attempt"] = m.group(1), m.group(2)
+            this_pass = []
+        if "Compile error" in line:
+            r["errors"] += 1
+        if m := re.search(r'Starting compiler cluster:\s*(\w+)', line):
+            r["current_cluster"] = m.group(1)
+        if m := re.search(r'\[task0c planner\]\s+(src/\S+\.rs):', line):
+            f = m.group(1)
+            if f not in this_pass:
+                this_pass.append(f)
+            if f not in r["all_files"]:
+                r["all_files"].append(f)
+            r["current_file"] = f
+        if m := re.search(r'Appended gen_tests\S* to (src/\S+\.rs)\s+\((\d+) uncovered', line):
+            f, n = m.group(1), int(m.group(2))
+            if f not in r["file_history"]:
+                r["file_history"][f] = []
+            r["file_history"][f].append(n)
+        if m := re.search(r'Coverage:\s*([\d.]+)%', line):
+            r["coverage"] = m.group(1) + "%"
+        if m := re.search(r'Queue: \d+ file\(s\) — (.+)', line):
+            for fm in re.finditer(r'(\w+\.rs)\((\d+)\)', m.group(1)):
+                fname, count = fm.group(1), int(fm.group(2))
+                if fname not in r["queue_history"]:
+                    r["queue_history"][fname] = []
+                r["queue_history"][fname].append(count)
+    r["files_this_pass"] = this_pass
+    return r
+
+
+def pipeline_status():
+    prog  = _parse_pipeline_log()
+    state = _parse_pipeline_state(_find_project_dir())
+    running   = _pipeline_running()
     status_str = green("RUNNING") if running else red("STOPPED")
+    w = _w() - 4
+
     if not os.path.exists(PIPELINE_LOG):
         return [f"{status_str}   {red('log not found')}"]
-    with open(PIPELINE_LOG) as f:
-        content = f.read()
-    lines = content.splitlines()
-    coverage, attempt, module, cur_file = "?", "?", "?", "?"
-    errors = 0
-    for line in lines:
-        if m := re.search(r'Coverage:\s*([\d.]+)%', line):      coverage = m.group(1) + "%"
-        if m := re.search(r'Attempt\s+(\d+/\d+)', line):        attempt  = m.group(1)
-        if m := re.search(r'MODULE:\s*(\S+)', line):             module   = m.group(1)
-        if m := re.search(r'\[task0c planner\]\s+(\S+):', line): cur_file = m.group(1)
-        if "Compile error" in line:                              errors  += 1
-    age   = time.time() - os.path.getmtime(PIPELINE_LOG)
+
+    # Coverage: pipeline_state.md is authoritative (updated after every measurement);
+    # fall back to log scan only if state has no value yet.
+    cov = state["coverage"] or prog["coverage"] or "?"
+    try:    cov_col = green if float(cov.rstrip("%")) >= 80 else yellow
+    except: cov_col = dim
+
+    age   = prog["age"]
     age_s = f"{int(age)}s" if age < 60 else f"{int(age/60)}m{int(age%60)}s"
-    last  = next((l.strip() for l in reversed(lines) if l.strip()), "")
-    w     = _w() - 6
-    cov_col = green if coverage != "?" and float(coverage[:-1]) >= 80 else yellow
-    return [
-        f"{status_str}   module={bold(module)}   attempt={attempt}   "
-        f"coverage={cov_col(coverage)}   errors={errors}",
-        f"file={cyan(cur_file)}   log-age={age_s}",
-        dim((last[:w] + "…") if len(last) > w else last),
-    ]
+
+    clusters = state["clusters"]
+    done_set = state["done"]
+    cur_cl   = state["current"] or prog["current_cluster"]
+
+    rows = []
+
+    # Row 1: compact status line
+    rows.append(
+        f"{status_str}  {bold(cur_cl or '?')}  cov={cov_col(bold(cov))}  "
+        f"attempt {prog['attempt']}/{prog['max_attempt']}  "
+        f"age={age_s}  errors={prog['errors']}"
+    )
+
+    # Row 2: cluster symbols  ✓done  ▶current  ○pending
+    if clusters:
+        parts = []
+        for name in clusters:
+            if name in done_set:      parts.append(green(f"✓{name}"))
+            elif name == cur_cl:      parts.append(yellow(f"▶{name}"))
+            else:                     parts.append(dim(f"○{name}"))
+        row2 = "  clusters  " + "  ".join(parts)
+        if len(_plain(row2)) > w:
+            # abbreviate to 8 chars per name
+            parts = []
+            for name in clusters:
+                ab = name[:8]
+                if name in done_set:   parts.append(green(f"✓{ab}"))
+                elif name == cur_cl:   parts.append(yellow(f"▶{ab}"))
+                else:                  parts.append(dim(f"○{ab}"))
+            row2 = "  clusters  " + "  ".join(parts)
+        rows.append(row2)
+
+    # Row 3: file progress bar within current pass
+    all_f  = prog["all_files"]
+    this_p = prog["files_this_pass"]
+    ft = max(len(all_f), len(this_p))
+    fi = len(this_p)
+    if ft > 0:
+        pct = min(100, fi / ft * 100)
+        cf  = prog["current_file"].replace("src/", "") if prog["current_file"] != "?" else "?"
+        rows.append(f"  files     [{bar(pct, 16)}] {fi}/{ft}  {cyan(cf)}")
+
+    # Row 4: uncovered-lines history for last 4 files  (e.g. error.rs:92→72→45)
+    hist = prog["file_history"]
+    if hist:
+        parts = []
+        for fname, counts in list(hist.items())[-4:]:
+            short = fname.replace("src/", "")
+            trend = "→".join(str(c) for c in counts[-4:])
+            entry = f"{short}:{trend}"
+            parts.append(green(entry) if counts and counts[-1] == 0 else entry)
+        hist_row = "  " + "  ".join(parts)
+        if len(_plain(hist_row)) > w:
+            parts = []
+            for fname, counts in list(hist.items())[-3:]:
+                short = fname.replace("src/", "")[:8]
+                trend = "→".join(str(c) for c in counts[-3:])
+                entry = f"{short}:{trend}"
+                parts.append(green(entry) if counts and counts[-1] == 0 else entry)
+            hist_row = "  " + "  ".join(parts)
+        rows.append(hist_row)
+
+    # Row 5: last log line
+    last = prog["last_line"]
+    if last:
+        rows.append(dim((last[:w] + "…") if len(last) > w else last))
+
+    # ── Files overview ──────────────────────────────────────────────────────
+    proj_dir = _find_project_dir()
+    cov_data = _parse_coverage_json(proj_dir)
+    if cov_data:
+        cur_base = os.path.basename(prog["current_file"]) if prog["current_file"] != "?" else ""
+        # Sort: pipeline processing order for current pass (same index as file counter 8/8),
+        # then files from older passes not yet reprocessed, then unknown files by coverage asc.
+        # Only show src/ files — tests/ and build.rs are excluded from pipeline coverage.
+        _this_pass_order = {f: i for i, f in enumerate(prog["files_this_pass"])}
+        _n = len(_this_pass_order)
+        _extra = {f: _n + i for i, f in enumerate(prog["all_files"]) if f not in _this_pass_order}
+        _order = {**_this_pass_order, **_extra}
+        _fallback = _n + len(_extra)
+        sorted_files = sorted(
+            [(name, cov, cvbl) for name, (cov, cvbl) in cov_data.items()
+             if name.startswith("src/")],
+            key=lambda x: _order.get(x[0], _fallback + (x[1] / x[2] if x[2] else 0)),
+        )
+        max_name = max((len(os.path.basename(n)) for n, *_ in sorted_files), default=10)
+        n_total  = len(sorted_files)
+        n_done   = sum(1 for _, cov, cvbl in sorted_files if cov >= cvbl)
+        rows.append(dim(f"  {'─' * max(4, min(w - 2, 60))}"))
+        rows.append(f"  files overview — {n_done}/{n_total} complete")
+        queue_hist = prog["queue_history"]
+        for name, covered, coverable in sorted_files:
+            short   = os.path.basename(name)
+            pct     = covered / coverable * 100 if coverable else 0.0
+            is_cur  = (short == cur_base)
+            arrow   = yellow("▶") if is_cur else " "
+            done    = covered >= coverable
+            col     = green if done else (yellow if pct >= 80 else red)
+            tick    = green(" ✓") if done else ""
+            hist    = queue_hist.get(short, [])
+            trend   = dim("  " + "→".join(str(c) for c in hist[-5:])) if hist else ""
+            rows.append(
+                f"{arrow} {short.ljust(max_name)}  [{bar(pct, 14)}] {col(f'{pct:5.1f}%')}"
+                f"  {covered}/{coverable}{tick}{trend}"
+            )
+
+    return rows
 
 
 _prev_len        = 0
@@ -181,7 +435,7 @@ _THINK_CAP_CHARS = 40_000
 
 def _parse_max_tokens():
     try:
-        with open("/tmp/pipeline_guards.log") as f:
+        with open(_GUARDS_LOG) as f:
             lines = f.readlines()
         for line in reversed(lines):
             if m := re.search(r'max_tokens \d+ → (\d+)', line):
@@ -193,7 +447,7 @@ def _parse_max_tokens():
 def _parse_vllm_cpt():
     retries, cpt = 0, None
     try:
-        with open("/tmp/pipeline_guards.log") as f:
+        with open(_GUARDS_LOG) as f:
             lines = f.readlines()
         for line in lines:
             if "vllm/400_retry" in line:
@@ -292,12 +546,14 @@ def _detach(cmd):
     )
 _view        = "monitor"      # "monitor" | "pipeline" | "stream"
 _scroll      = {"pipeline": 0, "stream": 0}   # lines scrolled up from bottom (0=bottom)
-_confirm     = None           # pending confirmation: "continue" | "restart" | "stop" | None
+_confirm          = None   # pending confirmation: "continue" | "wipe" | "stop" | None
+_graceful_pending = os.path.exists("/tmp/pipeline_graceful_stop")  # survives monitor restart
+_term_settings = None         # saved terminal settings for cooked-mode URL prompt
 
 VIEWS = [
-    ("monitor",  "m", "Monitor"),
-    ("pipeline", "l", "Pipeline Log"),
-    ("stream",   "g", "Stream Log"),
+    ("monitor",  "1", "Monitor"),
+    ("pipeline", "2", "Pipeline Log"),
+    ("stream",   "3", "Stream Log"),
 ]
 
 def _pipeline_running() -> bool:
@@ -308,55 +564,92 @@ def _pipeline_running() -> bool:
         return False
 
 
+def _detect_cached_repo_url() -> str:
+    """Return the remote origin URL of the first git repo found in tmp/, or ''."""
+    tmp_dir = os.path.join(SCRIPT_DIR, "tmp")
+    if not os.path.isdir(tmp_dir):
+        return ""
+    for name in sorted(os.listdir(tmp_dir)):
+        candidate = os.path.join(tmp_dir, name)
+        if not os.path.isdir(os.path.join(candidate, ".git")):
+            continue
+        try:
+            url = subprocess.check_output(
+                ["git", "remote", "get-url", "origin"],
+                cwd=candidate, stderr=subprocess.DEVNULL
+            ).decode().strip()
+            if url:
+                return url
+        except Exception:
+            pass
+    return ""
+
+
+def _prompt_url() -> str:
+    """Temporarily restore cooked terminal mode, read a URL from the user, return it.
+
+    Shows the cached repo URL as a default — pressing Enter accepts it.
+    Restores cbreak mode before returning.
+    """
+    suggest = _detect_cached_repo_url()
+    if _term_settings is not None:
+        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, _term_settings)
+    sys.stdout.write("\033[?25h")   # show cursor
+    h = _h()
+    hint = f" [{suggest}]" if suggest else ""
+    sys.stdout.write(f"\033[{h};0H\033[2K  ↺ Repo URL{hint}: ")
+    sys.stdout.flush()
+    try:
+        url = sys.stdin.readline().strip()
+    except Exception:
+        url = ""
+    tty.setcbreak(sys.stdin.fileno())
+    sys.stdout.write("\033[?25l")   # hide cursor
+    sys.stdout.flush()
+    return url or suggest
+
+
 # ── Always-visible bottom bar ─────────────────────────────────────────────────
-# 3 lines: divider, tab row, action row
+# 2 lines: action/feedback msg + fixed legend (never mutates — confirm state
+# shows only in the msg line above, keys stay the same)
 
 def _bottom_bar():
-    w = _w()
     running = _pipeline_running()
 
-    # Tab row
-    tabs = []
+    parts = []
     for vid, key, label in VIEWS:
-        tag = f" [{key}] {label} "
-        tabs.append(rev(bold(tag)) if vid == _view else dim(f" [{key}] {label} "))
-    tab_row = "  ".join(tabs)
-
-    # Action row
-    s_label = red("[s] stop") if running else dim("[s] stop")
-    scroll_hint = dim("  ↑↓ scroll") if _view in ("pipeline", "stream") else ""
-    actions = f"  {green('[c] continue')}  {yellow('[r] restart')}  {s_label}{scroll_hint}  {dim('[ctrl+c] quit')}"
-
-    feedback = f"  {_action_msg}" if _action_msg else ""
-
-    return ["─" * w, tab_row + feedback, actions]
+        tag = f"[{key}]{label}"
+        parts.append(rev(bold(tag)) if vid == _view else dim(tag))
+    s_col = red if running else dim
+    parts += [
+        green("[c]ontinue"),
+        cyan("[g]raceful"),
+        yellow("[w]ipe"),
+        s_col("[s]top"),
+        dim("[↑↓/PgUp/PgDn]"),
+        dim("[q]uit"),
+    ]
+    legend = "  ".join(parts)
+    msg = f"  {_action_msg}" if _action_msg else ""
+    return [msg, legend]
 
 # ── Views ─────────────────────────────────────────────────────────────────────
-
-BOTTOM_LINES = 3   # divider + tabs + actions
-
-def _render_monitor():
-    now = datetime.now().strftime("%H:%M:%S")
-    _ln(f" {bold('Pipeline Monitor')}  {dim(now)}")
-    _ln()
-    box("GPU", gpu())
-    _ln()
-    box("Pipeline", pipeline_status())
-    _ln()
-    box("Generation", generation())
-    # pad to keep bottom bar anchored
-    h = _h()
-    while len(_buf) < h - BOTTOM_LINES:
-        _ln()
-    for row in _bottom_bar():
-        _ln(row)
+#
+# Layout (order never changes):
+#   Box 1  GPU          — always compact, always present
+#   Box 2  Pipeline     — compact in monitor/stream; accordion log in pipeline view
+#   Box 3  Generation   — compact in monitor/pipeline; accordion log in stream view
+#   ──── action msg ────
+#   ──── legend     ────
+#
+BOTTOM_LINES = 2   # action/feedback msg + fixed legend
 
 
 def _log_lines(log_path):
     """Return word-wrapped lines from a log file."""
     w = _w()
     try:
-        with open(log_path) as f:
+        with open(log_path, encoding="utf-8", errors="replace") as f:
             raw = f.read().splitlines()
     except FileNotFoundError:
         return [red(f"  {log_path} not found")]
@@ -372,44 +665,83 @@ def _log_lines(log_path):
     return out
 
 
-def _render_log_view(log_path, view_key):
-    gpu_strip  = box_lines("GPU", gpu())
-    # header(1) + blank(1) + gpu_strip + blank(1) + bottom_bar(BOTTOM_LINES)
-    overhead   = 1 + 1 + len(gpu_strip) + 1 + BOTTOM_LINES
-    available  = max(2, _h() - overhead)
+def _log_box(log_path, view_key, title, inner, header=()):
+    """Render an accordion log box with exactly `inner` content rows into _buf.
 
-    now = datetime.now().strftime("%H:%M:%S")
-    _ln(f" {bold(VIEWS[[v[0] for v in VIEWS].index(view_key)][2])}  {dim(now)}")
-    _ln()
-    for row in gpu_strip:
-        _ln(row)
-    _ln()
+    `header` rows are fixed (not scrollable) at the top of the box content.
+    The scrollable region gets inner - len(header) rows.
+    """
+    w = _w() - 2
+    scroll_inner = max(1, inner - len(header))
 
     lines  = _log_lines(log_path)
     total  = len(lines)
-    offset = min(_scroll[view_key], max(0, total - available))
-    _scroll[view_key] = offset          # clamp in case file shrank
+    offset = min(_scroll[view_key], max(0, total - scroll_inner))
+    _scroll[view_key] = offset
 
-    # offset=0 → show tail; offset>0 → scroll up by that many lines
     end   = total - offset
-    start = max(0, end - available)
+    start = max(0, end - scroll_inner)
     view  = lines[start:end]
 
-    # scroll indicator
-    if total > available:
-        pct = int(100 * end / total)
-        indicator = dim(f" ↑ {offset} lines above  ({pct}%)")
+    if total > scroll_inner:
+        pct         = int(100 * end / total)
+        s_plain     = f" {pct}%  end" if offset == 0 else f" {pct}%  ↑{offset}"
+        s_display   = dim(s_plain)
     else:
-        indicator = dim(" (all lines visible)")
+        s_plain, s_display = "", ""
 
-    _ln(indicator)
+    dashes = max(0, w - len(title) - len(s_plain) - 3)
+    _ln(f"┌─ {bold(title)}{s_display} {'─' * dashes}┐")
+    for h_line in header:
+        pad = w - 1 - len(_plain(h_line))
+        _ln(f"│ {h_line}{' ' * max(pad, 0)}│")
     for l in view:
-        _ln(l)
+        pad = w - 1 - len(_plain(l))
+        _ln(f"│ {l}{' ' * max(pad, 0)}│")
+    for _ in range(scroll_inner - len(view)):   # pad to fill exact height
+        _ln(f"│{' ' * w}│")
+    _ln("└" + "─" * w + "┘")
 
-    # pad to keep bottom bar anchored
+
+def _render_all():
     h = _h()
-    while len(_buf) < h - BOTTOM_LINES:
-        _ln()
+
+    # ── Box 1: GPU (always compact) ──
+    gpu_rows = gpu()
+    for row in box_lines("GPU", gpu_rows):
+        _ln(row)
+    gpu_h = len(gpu_rows) + 2
+
+    # ── Boxes 2 & 3: layout depends on view ──
+    pipeline_rows = pipeline_status()
+    gen_rows      = generation()
+    pipeline_h    = len(pipeline_rows) + 2
+    gen_h         = len(gen_rows) + 2
+
+    if _view == "monitor":
+        for row in box_lines("Pipeline", pipeline_rows):
+            _ln(row)
+        for row in box_lines("Generation", gen_rows):
+            _ln(row)
+        while len(_buf) < h - BOTTOM_LINES:
+            _ln()
+
+    elif _view == "pipeline":
+        # Box 2 expands; Box 3 compact at bottom
+        inner = max(1, h - gpu_h - gen_h - 2 - BOTTOM_LINES)
+        _log_box(PIPELINE_LOG, "pipeline", "Pipeline Log", inner,
+                 header=(pipeline_rows[:1]))
+        for row in box_lines("Generation", gen_rows):
+            _ln(row)
+
+    elif _view == "stream":
+        # Box 2 compact; Box 3 expands
+        for row in box_lines("Pipeline", pipeline_rows):
+            _ln(row)
+        inner = max(1, h - gpu_h - pipeline_h - 2 - BOTTOM_LINES)
+        _log_box(STREAM_LOG, "stream", "Stream Log", inner,
+                 header=(gen_rows[:1]))
+
     for row in _bottom_bar():
         _ln(row)
 
@@ -418,14 +750,19 @@ def _render_log_view(log_path, view_key):
 SCROLL_STEP = 5
 
 def _run_action(key):
-    global _action_msg, _view, _confirm
-    if _confirm == "restart":
+    global _action_msg, _view, _confirm, _graceful_pending
+    if _confirm == "wipe":
         if key == "y":
-            _detach(["bash", os.path.join(SCRIPT_DIR, "restart.sh"), "--y"])
-            _action_msg = yellow("↺ restart.sh launched")
+            _confirm = None
+            url = _prompt_url()   # blocks briefly in cooked mode — no render loop interference
+            if url:
+                _detach(["bash", os.path.join(SCRIPT_DIR, "wipe.sh"), "--repo", url])
+                _action_msg = yellow(f"↺ wiping and restarting with {url}")
+            else:
+                _action_msg = dim("wipe cancelled — no URL")
         else:
-            _action_msg = dim("restart cancelled")
-        _confirm = None
+            _action_msg = dim("wipe cancelled")
+            _confirm = None
         return
     if _confirm == "stop":
         if key == "y":
@@ -446,6 +783,16 @@ def _run_action(key):
             _action_msg = dim("continue cancelled")
         _confirm = None
         return
+    if _confirm == "graceful":
+        if key == "y":
+            global _graceful_pending
+            _graceful_pending = True
+            open("/tmp/pipeline_graceful_stop", "w").close()
+            _detach(["bash", os.path.join(SCRIPT_DIR, "continue.sh"), "--graceful"])
+        else:
+            _action_msg = dim("graceful cancelled")
+        _confirm = None
+        return
     if key == "c":
         if _pipeline_running():
             _confirm    = "continue"
@@ -453,14 +800,28 @@ def _run_action(key):
         else:
             _detach(["bash", os.path.join(SCRIPT_DIR, "continue.sh"), "--y"])
             _action_msg = green("▶ continue.sh launched")
-    elif key == "r":
-        _confirm    = "restart"
-        _action_msg = yellow("↺ restart — confirm? [y/n]")
+    elif key == "g":
+        if _graceful_pending:
+            _graceful_pending = False
+            try:
+                os.remove("/tmp/pipeline_graceful_stop")
+            except FileNotFoundError:
+                pass
+            _action_msg = dim("graceful cancelled")
+        elif _pipeline_running():
+            _confirm    = "graceful"
+            _action_msg = cyan("◑ graceful continue — finish current attempt then reload — confirm? [y/n]")
+        else:
+            _detach(["bash", os.path.join(SCRIPT_DIR, "continue.sh"), "--y"])
+            _action_msg = green("▶ continue.sh launched (pipeline was not running)")
+    elif key == "w":
+        _confirm    = "wipe"
+        _action_msg = yellow("↺ wipe all generated code and restart — confirm? [y/n]")
     elif key == "s":
         _confirm    = "stop"
         _action_msg = red("■ stop pipeline — confirm? [y/n]")
-    elif key in ("m", "l", "g"):
-        _view = {"m": "monitor", "l": "pipeline", "g": "stream"}[key]
+    elif key in ("1", "2", "3"):
+        _view = {"1": "monitor", "2": "pipeline", "3": "stream"}[key]
         global _prev_buf
         _prev_buf = []   # force full redraw on next frame — clears previous view's artifacts
     elif key == "UP"   and _view in _scroll: _scroll[_view] += SCROLL_STEP
@@ -469,37 +830,48 @@ def _run_action(key):
     elif key == "PGDN" and _view in _scroll: _scroll[_view] = max(0, _scroll[_view] - available_lines())
 
 def available_lines():
-    gpu_strip = box_lines("GPU", gpu())
-    return max(2, _h() - (1 + 1 + len(gpu_strip) + 1 + BOTTOM_LINES))
+    h = _h()
+    gpu_h = len(gpu()) + 2
+    if _view == "pipeline":
+        gen_h = len(generation()) + 2
+        return max(1, h - gpu_h - gen_h - 2 - BOTTOM_LINES)
+    elif _view == "stream":
+        p_h = len(pipeline_status()) + 2
+        return max(1, h - gpu_h - p_h - 2 - BOTTOM_LINES)
+    return 1
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
 def main():
-    global _action_msg
+    global _action_msg, _term_settings, _graceful_pending
     signal.signal(signal.SIGHUP, signal.SIG_IGN)   # survive terminal events from child procs
     old_settings = termios.tcgetattr(sys.stdin)
+    _term_settings = old_settings
     sys.stdout.write("\033[2J\033[?25l")
     sys.stdout.flush()
     try:
         tty.setcbreak(sys.stdin.fileno())
         while True:
             try:
-                if _view == "pipeline":
-                    _render_log_view(PIPELINE_LOG, "pipeline")
-                elif _view == "stream":
-                    _render_log_view(STREAM_LOG, "stream")
-                else:
-                    _render_monitor()
+                _render_all()
                 _flush_frame()
             except Exception as e:
                 _buf.clear()
                 _ln(red(f"  render error: {e}"))
                 _flush_frame()
 
-            if _confirm == "continue":
+            if _graceful_pending:
+                if not os.path.exists("/tmp/pipeline_graceful_stop"):
+                    _graceful_pending = False
+                    _action_msg = ""
+                else:
+                    _action_msg = bg_white(" ◑ graceful — waiting for pipeline to restart… ")
+            elif _confirm == "continue":
                 _action_msg = green("▶ continue (will kill running pipeline) — confirm? [y/n]")
-            elif _confirm == "restart":
-                _action_msg = yellow("↺ restart — confirm? [y/n]")
+            elif _confirm == "graceful":
+                _action_msg = cyan("◑ graceful continue — finish current attempt then reload — confirm? [y/n]")
+            elif _confirm == "wipe":
+                _action_msg = yellow("↺ wipe all generated code and restart — confirm? [y/n]")
             elif _confirm == "stop":
                 _action_msg = red("■ stop pipeline — confirm? [y/n]")
             else:
@@ -508,7 +880,10 @@ def main():
             try:
                 ready, _, _ = select.select([sys.stdin], [], [], REFRESH)
                 if ready:
-                    _run_action(_read_key())
+                    key = _read_key()
+                    if key == "q":
+                        raise KeyboardInterrupt
+                    _run_action(key)
             except Exception:
                 pass
     except KeyboardInterrupt:

@@ -22,6 +22,7 @@ import sys
 from abc import ABC, abstractmethod
 from pathlib import Path
 
+import httpx
 from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).parent / ".env")
@@ -125,8 +126,9 @@ class ClaudeBackend(LLMBackend):
             return block.text if hasattr(block, "text") else ""  # type: ignore[union-attr]
 
 
-_DEBUG_LOG        = os.getenv("LLM_DEBUG_LOG", os.getenv("OLLAMA_DEBUG_LOG", "/tmp/debug.log"))
-_STREAM_LOG       = os.getenv("LLM_STREAM_LOG", os.getenv("OLLAMA_STREAM_LOG", "/tmp/stream.log"))
+_LOG_DIR          = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+_DEBUG_LOG        = os.getenv("LLM_DEBUG_LOG", os.getenv("OLLAMA_DEBUG_LOG", os.path.join(_LOG_DIR, "debug.log")))
+_STREAM_LOG       = os.getenv("LLM_STREAM_LOG", os.getenv("OLLAMA_STREAM_LOG", os.path.join(_LOG_DIR, "stream.log")))
 # Silence timeout: if no token arrives for this many seconds, treat as stalled.
 _CHUNK_TIMEOUT    = int(os.getenv("OLLAMA_CHUNK_TIMEOUT", "60"))
 # Thinking cap: break out of thinking loop after this many chars (~10k tokens).
@@ -134,7 +136,7 @@ _CHUNK_TIMEOUT    = int(os.getenv("OLLAMA_CHUNK_TIMEOUT", "60"))
 _MAX_THINK_CHARS  = int(os.getenv("OLLAMA_MAX_THINK_CHARS", "40000"))
 
 
-_GUARD_LOG = os.getenv("PIPELINE_GUARD_LOG", "/tmp/pipeline_guards.log")
+_GUARD_LOG = os.getenv("PIPELINE_GUARD_LOG", os.path.join(_LOG_DIR, "pipeline_guards.log"))
 
 
 def _dbg(msg: str) -> None:
@@ -802,7 +804,10 @@ class VLLMBackend(LLMBackend):
         import re as _re
         from openai import OpenAI, BadRequestError
         global _vllm_cpt
-        client = OpenAI(base_url=self._base_url, api_key="vllm", timeout=300)
+        # connect=30: fail fast if vLLM is down.
+        # read=900: thinking models can be silent for minutes mid-generation.
+        client = OpenAI(base_url=self._base_url, api_key="vllm",
+                        timeout=httpx.Timeout(connect=30, read=900, write=30, pool=30))
 
         messages = []
         if system:
@@ -819,8 +824,10 @@ class VLLMBackend(LLMBackend):
         # if not told otherwise, and reasoning tokens go to reasoning_content (not
         # content), making the response appear empty to callers reading only content.
         _enable_thinking = _think and self._thinking_budget > 0
+        _rep_penalty = float(os.getenv("VLLM_REPETITION_PENALTY", "1.05"))
         extra_body: dict = {
-            "chat_template_kwargs": {"enable_thinking": _enable_thinking}
+            "chat_template_kwargs": {"enable_thinking": _enable_thinking},
+            "repetition_penalty": _rep_penalty,
         }
 
         _ctx = int(os.getenv("VLLM_MAX_MODEL_LEN", "65536"))
@@ -839,8 +846,10 @@ class VLLMBackend(LLMBackend):
             return capped
 
         # Initial estimate uses the adaptive chars-per-token ratio.
-        # Hard floor 2.0: never be more optimistic than 2 chars/token.
-        _estimated_input_tokens = max(1, int(_msg_chars / max(2.0, _vllm_cpt)))
+        # Floor 3.0: qwen3 on Rust/code measures 3.1–3.6 chars/token consistently.
+        # The old floor of 2.0 overestimated input tokens for large prompts, causing
+        # safe() to hit its 512 minimum and leaving almost no content output budget.
+        _estimated_input_tokens = max(1, int(_msg_chars / max(3.0, _vllm_cpt)))
         _request_max_tokens = _cap(_estimated_input_tokens, max_tokens)
 
         chunks: list[str] = []
@@ -935,6 +944,28 @@ class VLLMBackend(LLMBackend):
                                f"cpt_ewm={_prev_cpt:.2f}→{_vllm_cpt:.2f}")
                     _estimated_input_tokens = _real_input
                     _request_max_tokens = _cap(_real_input, max_tokens)
+                    continue
+                raise
+            except (httpx.ReadTimeout, httpx.ConnectError, httpx.RemoteProtocolError) as _e:
+                _sock_close()
+                _guard("vllm/network_retry",
+                       f"attempt={_attempt} err={type(_e).__name__}: {_e}")
+                if _attempt < 2:
+                    # Wait until vLLM is accepting requests again (up to 10 min).
+                    import urllib.request as _ur
+                    _infer_url = self._base_url.rstrip("/") + "/chat/completions"
+                    _probe = json.dumps({"model": self._model_name,
+                                         "messages": [{"role": "user", "content": "hi"}],
+                                         "max_tokens": 1}).encode()
+                    for _w in range(120):
+                        try:
+                            _req = _ur.Request(_infer_url, data=_probe,
+                                               headers={"Content-Type": "application/json"})
+                            with _ur.urlopen(_req, timeout=10):
+                                pass
+                            break
+                        except Exception:
+                            time.sleep(5)
                     continue
                 raise
 

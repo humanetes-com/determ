@@ -5,13 +5,27 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND=$(grep -E '^[[:space:]]*BACKEND=' "$SCRIPT_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
 BACKEND="${BACKEND:-ollama}"
 
-LLM_DEBUG_LOG=/tmp/debug.log
-LLM_STREAM_LOG=/tmp/stream.log
+LOG_DIR="$SCRIPT_DIR/logs"
+mkdir -p "$LOG_DIR"
+LLM_DEBUG_LOG="$LOG_DIR/debug.log"
+LLM_STREAM_LOG="$LOG_DIR/stream.log"
 export LLM_DEBUG_LOG LLM_STREAM_LOG
 
-# Ask confirmation unless --y passed
+# Parse arguments
 _YES=false
-for _arg in "$@"; do [[ "$_arg" == "--y" ]] && _YES=true; done
+_REPO=""
+_args=("$@")
+for (( i=0; i<${#_args[@]}; i++ )); do
+    case "${_args[$i]}" in
+        --y)    _YES=true ;;
+        --repo) _REPO="${_args[$((i+1))]}"; i=$((i+1)) ;;
+    esac
+done
+
+# Default repo if not specified
+if [[ -z "$_REPO" ]]; then
+    _REPO="https://github.com/dtolnay/anyhow"
+fi
 
 if pgrep -f "pipeline.py" > /dev/null 2>&1; then
     if [[ "$_YES" == false ]]; then
@@ -27,18 +41,18 @@ fi
 
 > "$LLM_DEBUG_LOG"
 > "$LLM_STREAM_LOG"
-> /tmp/pipeline_anyhow.log
+> "$LOG_DIR/pipeline_anyhow.log"
 
-# Clean cargo build artifacts — removes stale build-script outputs from dev-deps
-# that can cause spurious "couldn't read OUT_DIR/xxx.rs" failures on cargo test --no-run.
-echo "Running cargo clean on tmp/anyhow-master ..."
-(cd "$SCRIPT_DIR/tmp/anyhow-master" && cargo clean 2>&1 | tail -3)
+# Clean cargo build artifacts and strip gen_* blocks only if the workspace exists.
+# If it doesn't exist, --repo will clone it fresh — no pre-clean needed.
+if [[ -d "$SCRIPT_DIR/tmp/anyhow-master" ]]; then
+    echo "Running cargo clean on tmp/anyhow-master ..."
+    (cd "$SCRIPT_DIR/tmp/anyhow-master" && cargo clean 2>&1 | tail -3)
 
-# Strip any leftover gen_* test blocks (also done by --clean in pipeline, belt+suspenders).
-echo "Stripping gen_* blocks from tmp/anyhow-master/src ..."
-python3 - <<'PYEOF'
+    echo "Stripping gen_* blocks from tmp/anyhow-master/src ..."
+    python3 - <<'PYEOF'
 import re, pathlib, sys
-gen_re = re.compile(r'\n+#\[cfg\(test\)\](?:\n#\[[^\]]*\])*\n(?:pub )?mod gen_\w+\s*\{.*', re.DOTALL)
+gen_re = re.compile(r'\n+(?:// GRCOV_EXCL_START\n)?#\[cfg\(test\)\](?:\n#\[[^\]]*\])*\n(?:pub )?mod gen_\w+\s*\{.*', re.DOTALL)
 stripped = []
 for p in pathlib.Path("tmp/anyhow-master/src").glob("*.rs"):
     raw = p.read_text(); cleaned = gen_re.sub("", raw).rstrip() + "\n"
@@ -49,6 +63,9 @@ if stripped:
 else:
     print("  Nothing to strip.")
 PYEOF
+else
+    echo "tmp/anyhow-master not found — will be cloned by pipeline."
+fi
 
 # ---------------------------------------------------------------------------
 # Ensure inference server is running
@@ -79,11 +96,10 @@ if [[ "$BACKEND" == "vllm" ]]; then
 fi
 
 cd "$SCRIPT_DIR"
-nohup .venv/bin/python pipeline.py --project anyhow-master --clean > /tmp/pipeline_anyhow.log 2>&1 &
-# To use full git-managed workspace mode: replace above with:
-# nohup .venv/bin/python pipeline.py --repo tmp/anyhow-master --clean > /tmp/pipeline_anyhow.log 2>&1 &
+echo "Starting pipeline with repo: $_REPO"
+nohup .venv/bin/python pipeline.py --repo "$_REPO" --clean > "$LOG_DIR/pipeline_anyhow.log" 2>&1 &
 echo "Pipeline started (PID $!) — backend: $BACKEND"
-echo "Pipeline log : tail -f /tmp/pipeline_anyhow.log"
-echo "Server log   : tail -f /tmp/server.log"
+echo "Pipeline log : tail -f $LOG_DIR/pipeline_anyhow.log"
+echo "Server log   : tail -f $LOG_DIR/server.log"
 echo "Debug log    : tail -f $LLM_DEBUG_LOG"
 echo "Stream log   : tail -f $LLM_STREAM_LOG"

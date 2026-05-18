@@ -108,19 +108,27 @@ MAX_RETRIES = 3
 
 def _model_context_chars() -> int:
     """Return the safe content budget in chars for one model call."""
-    for env_var in ("OLLAMA_NUM_CTX", "VLLM_MAX_MODEL_LEN", "SGLANG_MAX_MODEL_LEN"):
-        val = os.getenv(env_var)
+    backend = os.getenv("BACKEND", "ollama").lower()
+    backend_var = {
+        "vllm":        "VLLM_MAX_MODEL_LEN",
+        "sglang":      "SGLANG_MAX_MODEL_LEN",
+        "ollama":      "OLLAMA_NUM_CTX",
+        "huggingface": None,
+        "claude":      None,
+    }.get(backend)
+    if backend_var:
+        val = os.getenv(backend_var)
         if val and val.strip().isdigit():
             tokens = int(val)
             return max((tokens - 6_000), 4_000) * 4
-    if MODEL.startswith("claude"):
+    if MODEL.startswith("claude") or backend == "claude":
         return (200_000 - 6_000) * 4
     return (8_192 - 6_000) * 4  # safe fallback
 
 
 MODEL_CONTEXT_CHARS = _model_context_chars()
 
-_GUARD_LOG = os.getenv("PIPELINE_GUARD_LOG", "/tmp/pipeline_guards.log")
+_GUARD_LOG = os.getenv("PIPELINE_GUARD_LOG", str(Path(__file__).parent / "logs" / "pipeline_guards.log"))
 
 
 def _guard(location: str, msg: str) -> None:
@@ -158,7 +166,7 @@ def ask(prompt: str, system: str | None = None, model: str | None = None,
     """
     HEAD_KEEP = MODEL_CONTEXT_CHARS // 4
     TAIL_KEEP = MODEL_CONTEXT_CHARS // 8
-    MARGIN = 4_000
+    MARGIN = 1_000  # small safety buffer only — prompt builders handle their own budgets
 
     sys_len = len(system) if system else 0
     total = sys_len + len(prompt)
@@ -222,7 +230,7 @@ def ask(prompt: str, system: str | None = None, model: str | None = None,
                     + tail
                 )
                 _guard("context-guard/middle_trim",
-                       f"prompt {total:,} > limit {MODEL_CONTEXT_CHARS:,}: dropped {dropped:,} chars from middle")
+                       f"prompt {total:,} > effective limit {MODEL_CONTEXT_CHARS - MARGIN:,} (context={MODEL_CONTEXT_CHARS:,} margin={MARGIN:,}): dropped {dropped:,} chars from middle")
 
     kwargs: dict = {}
     if model is not None:
@@ -232,21 +240,109 @@ def ask(prompt: str, system: str | None = None, model: str | None = None,
     if think is not None:
         kwargs["think"] = think
     _hot_reload_mi()
-    return _ask_raw(prompt, system, **kwargs)
+    for _net_attempt in range(3):
+        try:
+            return _ask_raw(prompt, system, **kwargs)
+        except Exception as _e:
+            _ename = type(_e).__name__
+            if _net_attempt < 2 and any(w in _ename for w in ("Timeout", "Connect", "Protocol", "Network")):
+                _guard("ask/network_retry", f"attempt={_net_attempt} err={_ename}: {_e}")
+                time.sleep(10)
+                continue
+            raise
 
 
-# Single-call content budget: 75% of the total context to leave room for the
-# model's response and prompt boilerplate.
-SINGLE_CALL_CHAR_LIMIT = MODEL_CONTEXT_CHARS * 3 // 4
+# Maximum safe input chars, derived mathematically from the KV cache budget.
+#
+# model_interact._cap() guarantees at least min_content_tok output tokens when:
+#   input_chars ≤ (ctx - thinking_budget - 512 - min_content_tok) × cpt_floor
+#
+# cpt_floor=3.0 matches the floor in model_interact._estimated_input_tokens (line ~846).
+# Actual measured qwen3 cpt on Rust code is 3.1–3.6 consistently.
+#
+# History: the old empirical cap of 120_000 was a workaround for cpt_floor=2.0.
+# With cpt=2.0 and a 199K char prompt (ptr.rs observed case), estimated input tokens
+# = 99K > VLLM_MAX_MODEL_LEN=98304, so _cap() hit its 512-token minimum, leaving
+# almost no content budget → model could not write a test block → empty response.
+#
+# REVERT if empty responses return or model output degrades (session 26 added this):
+#   1. In model_interact.py ~line 846: max(3.0, _vllm_cpt) → max(2.0, _vllm_cpt)
+#   2. Replace _safe_input_char_limit() and its callers below with:
+#        _THINKING_MODEL_CHAR_LIMIT = 120_000
+#        SINGLE_CALL_CHAR_LIMIT = min(_THINKING_MODEL_CHAR_LIMIT, MODEL_CONTEXT_CHARS * 3 // 4)
+#        TASK0C_PROMPT_CHAR_CAP = _THINKING_MODEL_CHAR_LIMIT
+#        FILE_CHAR_LIMIT = min(_THINKING_MODEL_CHAR_LIMIT, MODEL_CONTEXT_CHARS * 85 // 100)
+def _safe_input_char_limit(min_content_tok: int = 16_384) -> int:
+    """
+    Maximum input chars that guarantee at least min_content_tok output tokens.
 
-# task0c prompt hard cap: originally 120K to work around think=True EMPTY_RESPONSE on
-# large prompts via compat layer. think=False is now enforced (MODEL_CAPS), so that bug
-# is gone. Raised to 200K to let planner-ranked siblings (esp. error.rs 39K) fit.
-TASK0C_PROMPT_CHAR_CAP = min(200_000, SINGLE_CALL_CHAR_LIMIT)
+    Derived from model_interact._cap():
+      input_chars ≤ (ctx - thinking_budget - 512 - min_content_tok) × cpt_floor
 
-# Per-file limit before semantic splitting (FR-001). Files rarely exceed this;
-# it only kicks in for unusually large single test files.
-FILE_CHAR_LIMIT = MODEL_CONTEXT_CHARS * 85 // 100
+    cpt_floor=3.0 matches the floor in model_interact._estimated_input_tokens so
+    the estimate is consistent between pipeline and inference layer.
+
+    min_content_tok controls the output reservation:
+      - 16_384 for tasks that generate large outputs (full source files, requirements)
+      - 4_096  for task0c which generates small test blocks only
+    """
+    CPT_FLOOR     = 3.0    # chars/token — matches model_interact.py cpt_floor
+    VLLM_OVERHEAD = 512    # internal vLLM overhead tokens
+    backend = os.getenv("BACKEND", "ollama").lower()
+    if backend == "vllm":
+        ctx      = int(os.getenv("VLLM_MAX_MODEL_LEN", "65536"))
+        thinking = int(os.getenv("VLLM_THINKING_BUDGET", "0"))
+    elif backend == "sglang":
+        ctx      = int(os.getenv("SGLANG_MAX_MODEL_LEN", "65536"))
+        thinking = int(os.getenv("SGLANG_THINKING_BUDGET", "0"))
+    elif backend == "ollama":
+        ctx      = int(os.getenv("OLLAMA_NUM_CTX", "8192"))
+        thinking = 0
+    else:
+        ctx, thinking = 8_192, 0
+    return max(4_000, int((ctx - thinking - VLLM_OVERHEAD - min_content_tok) * CPT_FLOOR))
+
+# General tasks (task1/2/3/4): large outputs (full files, requirements docs).
+# task0c: small test blocks only → smaller output reservation → more input budget.
+_SAFE_INPUT_CHAR_LIMIT      = _safe_input_char_limit(min_content_tok=16_384)
+_SAFE_INPUT_CHAR_LIMIT_TASK0C = _safe_input_char_limit(min_content_tok=4_096)
+SINGLE_CALL_CHAR_LIMIT = min(_SAFE_INPUT_CHAR_LIMIT, MODEL_CONTEXT_CHARS * 3 // 4)
+
+# Supplementary material caps — scale with context so they don't freeze at
+# values tuned for an old (small) context window.
+_README_CAP    = max(3_000, SINGLE_CALL_CHAR_LIMIT // 20)   # ~5% of budget
+_PROFILE_CAP   = max(2_000, SINGLE_CALL_CHAR_LIMIT // 30)   # ~3% of budget
+_GENESIS_CAP   = max(3_000, SINGLE_CALL_CHAR_LIMIT // 20)   # methodology doc
+_FIX_ERR_CAP   = max(2_000, SINGLE_CALL_CHAR_LIMIT // 10)   # per-attempt error in fix loop
+_STRATEGY_CAP  = max(4_000, SINGLE_CALL_CHAR_LIMIT // 15)   # coverage strategy doc
+_SIBLING_CAP   = max(3_000, SINGLE_CALL_CHAR_LIMIT // 30)   # per-sibling condensed source
+_SRC_SNIP_CAP  = max(4_000, SINGLE_CALL_CHAR_LIMIT // 10)   # source snippet in task0c prompts
+_EXTRA_CAP     = max(3_000, SINGLE_CALL_CHAR_LIMIT // 20)   # extra context files (Cargo.toml etc.)
+_WORKING_CAP   = max(800,   SINGLE_CALL_CHAR_LIMIT // 100)  # "what worked before" hint
+
+
+def prompt_budget(*fixed_parts: str) -> int:
+    """Chars remaining for dynamic content after fixed parts are accounted for.
+
+    Every prompt builder that injects dynamic content calls this to get the
+    available budget, then distributes it top-down (e.g. divide by num_files).
+    Never returns below 2,000 so there is always room for something useful.
+    """
+    used = sum(len(p) for p in fixed_parts)
+    return max(2_000, SINGLE_CALL_CHAR_LIMIT - used)
+
+
+# task0c output is a small test block (~500-2000 chars), so reserve only 2000 chars
+# for the response — use almost the full context window for source+siblings+tests.
+# Do NOT use SINGLE_CALL_CHAR_LIMIT here (that reserves 25% for large outputs like
+# full source files or requirements docs, which task0c does not produce).
+#
+# task0c generates small test blocks — no 25% output reservation needed.
+# Use the full safe input limit rather than the 75%-budget SINGLE_CALL_CHAR_LIMIT.
+TASK0C_PROMPT_CHAR_CAP = _SAFE_INPUT_CHAR_LIMIT_TASK0C
+
+# Per-file limit before semantic splitting (FR-001).
+FILE_CHAR_LIMIT = min(_SAFE_INPUT_CHAR_LIMIT, MODEL_CONTEXT_CHARS * 85 // 100)
 
 # Shared output format instruction injected into every prompt that expects <FILE> output.
 # Explicitly forbids code fences — LLMs default to wrapping content in ```lang``` blocks,
@@ -404,12 +500,25 @@ def _log(msg: str):
             f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
 
 
+def _git_file_hash(root: Path, filename: str) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "log", "--format=%h", "-1", filename],
+            cwd=root, capture_output=True, text=True, timeout=5,
+        )
+        h = result.stdout.strip()
+        return h if h else "unknown"
+    except Exception:
+        return "unknown"
+
+
 def init_log(root: Path, nolog: bool = False, progress_mode: bool = False):
     global _log_path, _nolog, _progress_mode
     _nolog = nolog
     _progress_mode = progress_mode
     if not nolog:
         _log_path = root / LOG_NAME
+    Path(_GUARD_LOG).parent.mkdir(parents=True, exist_ok=True)
     _log(f"\n{'=' * 60}")
     _log(f"{'=' * 60}")
     _log(f"  PIPELINE STARTED — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC")
@@ -2143,21 +2252,21 @@ def _get_task0c_history(project_dir: Path, rel_path: str, max_entries: int = 5) 
         if preview:
             entry_lines.append(f"Test signatures:\n{preview}")
         if err:
-            err_capped = err[-1000:] if len(err) > 1000 else err
+            err_capped = err[-_FIX_ERR_CAP:] if len(err) > _FIX_ERR_CAP else err
             entry_lines.append(f"Compiler said:\n{err_capped}")
         if outcome == "success":
             entry_lines.append(
-                "→ These tests ARE ALREADY ON DISK and covering lines. "
-                "Do NOT rewrite or remove them — copy them verbatim and add new tests only."
+                "→ These tests ARE ALREADY COMMITTED as a gen_tests_N module on disk. "
+                "Do NOT include them in your new block — they are already active as gen_tests_N modules."
             )
         else:
             entry_lines.append("→ This approach did not work. Do NOT repeat it.")
         parts.append("\n".join(entry_lines))
     if has_successes:
         parts.append(
-            "The committed tests above are working. "
-            "Copy them verbatim into your new block, then add ONLY new test functions "
-            "for the functions shown in fn_bodies below."
+            "The committed tests above are already on disk as gen_tests_N modules. "
+            "Do NOT copy or repeat them. Write ONLY NEW test functions "
+            "targeting the uncovered lines shown in fn_bodies below."
         )
     else:
         parts.append("Write a new attempt that avoids every failure pattern above.")
@@ -2708,7 +2817,7 @@ def discover_test_command(readme_text: str, project_dir: Path | None = None) -> 
         ]:
             if extra_path.exists():
                 try:
-                    content = extra_path.read_text(encoding="utf-8")[:3000]
+                    content = extra_path.read_text(encoding="utf-8")[:_EXTRA_CAP]
                     extra_sections.append(f"{label}:\n```\n{content}\n```")
                 except Exception:
                     pass
@@ -3110,6 +3219,7 @@ class BuildCluster:
     active_cfg: list                    # cfg predicates active (on top of default)
     prompt_nightly_rule: str            # nightly boundary sentence(s) for generation prompts
     is_default: bool = True             # True for the baseline stable cluster
+    gated_files: set = None             # source files (rel paths) gated behind excluded_cfg — skip augmentation
 
 
 # Active cluster during task0c — set by main() before each cluster pass.
@@ -3196,8 +3306,12 @@ def git_clean_reset(project_dir: Path) -> None:
     """Reset workspace to default branch and recreate the pipeline branch."""
     try:
         default = _git_default_branch(project_dir)
+        subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=project_dir, capture_output=True)
+        subprocess.run(["git", "clean", "-fd"], cwd=project_dir, capture_output=True)
         subprocess.run(["git", "checkout", default], cwd=project_dir,
                        check=True, capture_output=True)
+        subprocess.run(["git", "reset", "--hard", f"origin/{default}"],
+                       cwd=project_dir, capture_output=True)
         subprocess.run(["git", "branch", "-D", "pipeline"],
                        cwd=project_dir, capture_output=True)  # ok if not exists
         subprocess.run(["git", "checkout", "-b", "pipeline"],
@@ -3221,6 +3335,14 @@ def setup_workspace(repo: str, workspace_dir: Path) -> Path:
     workspace_dir.mkdir(parents=True, exist_ok=True)
 
     # Derive workspace name from repo
+    # Normalize various GitHub URL forms to HTTPS (SSH requires a key; HTTPS works everywhere).
+    # git@github.com:user/repo.git  →  https://github.com/user/repo
+    # github.com/user/repo          →  https://github.com/user/repo
+    if re.match(r'^git@github\.com:', repo):
+        repo = "https://github.com/" + repo.split(":", 1)[1]
+    elif re.match(r'^github\.com/', repo):
+        repo = "https://" + repo
+
     name = repo.rstrip("/").split("/")[-1]
     if name.endswith(".git"):
         name = name[:-4]
@@ -3401,8 +3523,38 @@ def task0_cfg_scan(project_dir: Path) -> "list[BuildCluster]":
         else:
             interesting.append((pred, 'custom'))
 
+    # --- Step 4b: find files whose entire module is gated behind a single predicate ---
+    # Parse lib.rs / main.rs for:  #[cfg(pred)]  mod filename;
+    # These files are only compiled when `pred` is active, so they must not be
+    # augmented in clusters where `pred` is excluded.
+    _MOD_CFG_RE = re.compile(
+        r'#\[cfg\(([^)]+)\)\]\s*(?:pub\s+)?mod\s+(\w+)\s*;',
+        re.MULTILINE,
+    )
+    pred_to_gated_files: dict[str, set[str]] = {}  # pred → {rel_path, ...}
+    for entry_file in ("src/lib.rs", "src/main.rs"):
+        entry_path = project_dir / entry_file
+        if not entry_path.exists():
+            continue
+        text = entry_path.read_text(errors="replace")
+        for m in _MOD_CFG_RE.finditer(text):
+            cfg_arg, mod_name = m.group(1).strip(), m.group(2)
+            # Only handle simple single-predicate gates (no any/all/not nesting)
+            if any(kw in cfg_arg for kw in ('any(', 'all(', 'not(')):
+                continue
+            # Strip feature="" wrapper if present, else use bare name
+            feat_m = re.search(r'feature\s*=\s*"([^"]*)"', cfg_arg)
+            pred = feat_m.group(1) if feat_m else cfg_arg
+            rel = f"src/{mod_name}.rs"
+            pred_to_gated_files.setdefault(pred, set()).add(rel)
+
+    def _gated_files_for_excluded(excluded: list[str]) -> set:
+        result: set[str] = set()
+        for p in excluded:
+            result |= pred_to_gated_files.get(p, set())
+        return result
+
     # --- Step 5: build clusters ---
-    # Always start with the stable (default) cluster
     stable_tarpaulin_exclude = ["*/nightly.rs"]
     stable_excluded_cfg = [p for p, _ in interesting]
 
@@ -3419,6 +3571,7 @@ def task0_cfg_scan(project_dir: Path) -> "list[BuildCluster]":
             "- Do NOT use `FormattingOptions` — it is nightly-only. Skip source lines that use it."
         ),
         is_default=True,
+        gated_files=_gated_files_for_excluded(stable_excluded_cfg),
     )
     clusters: list[BuildCluster] = [stable_cluster]
 
@@ -3457,6 +3610,7 @@ def task0_cfg_scan(project_dir: Path) -> "list[BuildCluster]":
             active_cfg=active,
             prompt_nightly_rule=pr,
             is_default=False,
+            gated_files=_gated_files_for_excluded(excl),
         ))
 
     # --- Step 6: write build_configs.md ---
@@ -3529,7 +3683,7 @@ def _source_hash(project_dir: Path) -> str:
     Shared across all phases — if source changes, all phase hashes become stale."""
     import re as _re
     _gen_re = _re.compile(
-        r'\n+#\[cfg\(test\)\](?:\n#\[[^\]]*\])*\n(?:pub )?mod gen_\w+\s*\{.*',
+        r'\n+(?:// GRCOV_EXCL_START\n)?#\[cfg\(test\)\](?:\n#\[[^\]]*\])*\n(?:pub )?mod gen_\w+\s*\{.*',
         _re.DOTALL,
     )
     parts: list[str] = []
@@ -3665,14 +3819,16 @@ def task0_project_profile(profile_path: Path, test_files, readme_text: str) -> s
 
     _log("\nTASK 0a: Identifying project structure (language, build system, workspace layout)")
 
-    # Pass test file paths + first 800 chars of content so the model can distinguish
-    # crate types (lib vs proc-macro vs bin) from use statements and attribute patterns.
-    test_entries = "\n\n".join(
-        f"  {rel}\n  (first 800 chars):\n  {content[:800].replace(chr(10), chr(10) + '  ')}"
-        for rel, content in test_files[:25]
-    )
+    readme_section = f"README.md:\n{readme_text[:_README_CAP]}\n\n" if readme_text.strip() else ""
+    _PROFILE_STATIC = 800  # static instruction text estimate
+    _sample_files = test_files[:25]
+    _per_file_budget = prompt_budget(readme_section, " " * _PROFILE_STATIC) // max(1, len(_sample_files))
+    _per_file_budget = max(200, _per_file_budget)
 
-    readme_section = f"README.md:\n{readme_text[:3_000]}\n\n" if readme_text.strip() else ""
+    test_entries = "\n\n".join(
+        f"  {rel}\n  (excerpt):\n  {content[:_per_file_budget].replace(chr(10), chr(10) + '  ')}"
+        for rel, content in _sample_files
+    )
 
     prompt = f"""You are identifying the structure of a software project from its test files and README.
 
@@ -3762,7 +3918,7 @@ def task0b_discovery(strategy_path: Path, project_dir: Path, test_files,
         except Exception:
             pass
 
-    _hash_gen_block_re = re.compile(r'\n+#\[cfg\(test\)\](?:\n#\[[^\]]*\])*\n(?:pub )?mod gen_\w+\s*\{.*', re.DOTALL)
+    _hash_gen_block_re = re.compile(r'\n+(?:// GRCOV_EXCL_START\n)?#\[cfg\(test\)\](?:\n#\[[^\]]*\])*\n(?:pub )?mod gen_\w+\s*\{.*?(?:\n// GRCOV_EXCL_STOP)?', re.DOTALL)
     src_texts: list[str] = []
     for src_file in sorted(project_dir.rglob("*.rs")):
         if is_test_file(src_file, project_dir):
@@ -3776,8 +3932,12 @@ def task0b_discovery(strategy_path: Path, project_dir: Path, test_files,
         except Exception:
             pass
 
+    # Strip gen_* blocks from test file contents before hashing — task0c continuously
+    # appends gen_* modules to src/*.rs files that are also returned by collect_test_files,
+    # so including raw content would cause a cache miss on every resume.
+    _test_contents = "".join(_hash_gen_block_re.sub("", c) for _, c in test_files)
     inputs_hash = hashlib.sha256(
-        (cargo_text + "".join(src_texts) + "".join(c for _, c in test_files)).encode()
+        (cargo_text + "".join(src_texts) + _test_contents).encode()
     ).hexdigest()[:16]
 
     hash_path = strategy_path.parent / COVERAGE_STRATEGY_HASH_NAME
@@ -3844,8 +4004,8 @@ def task0b_discovery(strategy_path: Path, project_dir: Path, test_files,
             condensed = _condense_rust_to_signatures(raw, filename=src_file.name)
             # Cap per-file contribution — macro-heavy files (ensure.rs, error.rs) produce
             # 35-50k condensed despite stripping, consuming the entire budget alone.
-            if len(condensed) > 3000:
-                condensed = condensed[:3000] + "\n// ... (signatures truncated)"
+            if len(condensed) > _SIBLING_CAP:
+                condensed = condensed[:_SIBLING_CAP] + "\n// ... (signatures truncated)"
             # Priority = count of complexity markers (unsafe, #[cfg(, #[macro_export)
             priority = raw.count("unsafe") + raw.count("#[cfg(") + raw.count("#[macro_export")
             src_candidates.append((priority, src_file, rel, condensed))
@@ -4095,10 +4255,9 @@ def _build_task0c_prompt_sections(
     old_block_section = ""
     if old_block.strip():
         s = (
-            f"\nExisting test block for this file — ALREADY COMMITTED TO DISK AND COMPILES."
-            f" Copy every test function from it verbatim into your new block,"
-            f" then add NEW tests at the end for ONLY the functions shown in fn_bodies below."
-            f" Do NOT modify, remove, or rewrite any existing test:\n```rust\n{old_block}\n```\n"
+            f"\nExisting test module(s) for this file — ALREADY COMMITTED TO DISK AND COMPILE."
+            f" Do NOT copy, repeat, or modify any test from them."
+            f" Write ONLY new test functions that cover the uncovered lines in fn_bodies below:\n```rust\n{old_block}\n```\n"
         )
         if len(s) <= remaining:
             old_block_section = s
@@ -4178,21 +4337,24 @@ def task0_project_context(context_path: Path, test_files, readme_text: str,
 
     _log("\nTASK 0a (context): Synthesizing behavioral project summary...")
 
-    # Show first 1000 chars of each test file (up to 25) so the model sees what each
-    # module does without reading the full test suite.
+    readme_section = f"README.md:\n{readme_text[:_README_CAP]}\n\n" if readme_text.strip() else ""
+    profile_section = f"Project profile:\n{profile_content[:_PROFILE_CAP]}\n\n" if profile_content.strip() else ""
+    _CONTEXT_STATIC = 600
+    _sample_files = test_files[:25]
+    _per_file_budget = prompt_budget(readme_section, profile_section, " " * _CONTEXT_STATIC) // max(1, len(_sample_files))
+    _per_file_budget = max(200, _per_file_budget)
+
     test_excerpts = "\n\n".join(
-        f"--- {rel} ---\n{content[:1000]}"
-        for rel, content in test_files[:25]
+        f"--- {rel} ---\n{content[:_per_file_budget]}"
+        for rel, content in _sample_files
     )
-    readme_section = f"README.md:\n{readme_text[:3_000]}\n\n" if readme_text.strip() else ""
-    profile_section = f"Project profile:\n{profile_content[:2_000]}\n\n" if profile_content.strip() else ""
 
     prompt = f"""You are writing a concise behavioral summary of a software project.
 This summary will be used by AI agents that must write code for this project without
 access to the original implementation — they need to understand what the project does
 and what each module's role is.
 
-{readme_section}{profile_section}Test file excerpts (first 1000 chars of each):
+{readme_section}{profile_section}Test file excerpts:
 {test_excerpts}
 
 Write a project_context.md that answers:
@@ -4331,7 +4493,7 @@ class StaticTask1Synthesizer(Task1Synthesizer):
         """Return the prompt for single-call requirements extraction (overridable)."""
         strategy_section = (
             f"\n--- Coverage strategy (import patterns, type construction, test conventions) ---\n"
-            f"{coverage_strategy[:4000]}\n"
+            f"{coverage_strategy[:_STRATEGY_CAP]}\n"
         ) if coverage_strategy.strip() else ""
         genesis_exists = bool(existing_genesis.strip())
         if genesis_exists:
@@ -4344,7 +4506,7 @@ Use the methodology in genesis.md below to guide your analysis.
 Use the README and test files to understand the language, framework, and project structure.
 
 README.md:
-{readme_text[:2_000]}
+{readme_text[:_README_CAP]}
 {profile_section}{strategy_section}
 Test files:
 {tests_section}
@@ -4377,7 +4539,7 @@ Use the README and test files to understand the language, framework, and project
 Do not assume any specific language or technology -- derive everything from what you read.
 
 README.md:
-{readme_text[:2_000]}
+{readme_text[:_README_CAP]}
 {profile_section}{strategy_section}
 Test files:
 {tests_section}
@@ -4423,7 +4585,7 @@ in this group. Preserve all specific types, function signatures, error condition
 Remove duplicate entries. Do not invent new requirements not present in the input.
 {profile_section}{genesis_section}
 README.md (for language/framework context):
-{readme_text[:2_000]}
+{readme_text[:_README_CAP]}
 
 Partial requirements to merge:
 {combined}
@@ -4442,7 +4604,16 @@ Output a plain structured list of the merged requirements. No filler, no code, n
 
     def _chunked(self, genesis_path, functional_req_path, test_files, readme_text,
                  existing_genesis, project_profile="", coverage_strategy=""):
-        chunks = chunk_test_files_by_file(test_files, FILE_CHAR_LIMIT)
+        _fixed = (
+            min(len(readme_text), 2_000)
+            + min(len(project_profile), 2_000)
+            + min(len(existing_genesis), 3_000)
+            + min(len(coverage_strategy), 4_000)
+            + 300   # type manifest header
+            + 600   # static instruction text
+        )
+        _chunk_content_budget = prompt_budget(" " * _fixed)
+        chunks = chunk_test_files_by_file(test_files, _chunk_content_budget)
         total_chunks = len(chunks)
         _log(f"  Extracting requirements file-by-file: {total_chunks} file(s) → one call each.")
         _log("  Calibration in progress, progress estimations will be available soon...")
@@ -4608,7 +4779,7 @@ Output a plain structured list of the merged requirements. No filler, no code, n
         """Return the Stage-2 synthesis prompt (overridable by subclasses)."""
         strategy_section = (
             f"\n--- Coverage strategy (import patterns, type construction, test conventions) ---\n"
-            f"{coverage_strategy[:4000]}\n"
+            f"{coverage_strategy[:_STRATEGY_CAP]}\n"
         ) if coverage_strategy.strip() else ""
 
         # BL-022: inject type difficulty signals so synthesis focuses on hard types.
@@ -4635,7 +4806,7 @@ Use the methodology in genesis.md below to guide synthesis.
 Derive the language and framework from the README and requirements below.
 
 README.md:
-{readme_text[:2_000]}
+{readme_text[:_README_CAP]}
 {profile_section}{strategy_section}{type_signals_section}
 --- genesis.md (read-only -- do not output or modify it) ---
 {existing_genesis}
@@ -4653,7 +4824,7 @@ Your output MUST be the file `functional_requirements.md` wrapped in the FILE ma
 Derive the language and framework from the README and requirements below.
 
 README.md:
-{readme_text[:2_000]}
+{readme_text[:_README_CAP]}
 {profile_section}{strategy_section}{type_signals_section}
 Requirements (merged from all test chunks):
 {_capped_synthesis}
@@ -4675,7 +4846,7 @@ Only output the file `functional_requirements.md` using the markers above.
         ) if genesis.strip() else ""
         strategy_section = (
             f"\n--- Coverage strategy (import patterns, type construction, test conventions) ---\n"
-            f"{coverage_strategy[:4000]}\n"
+            f"{coverage_strategy[:_STRATEGY_CAP]}\n"
         ) if coverage_strategy.strip() else ""
         return f"""You are extracting functional requirements from a subset of test files for a software project.
 
@@ -4684,7 +4855,7 @@ All chunks will be synthesized into one complete requirements document after all
 Focus only on what you can directly observe in the tests below -- do not invent behavior.
 {profile_header}{genesis_section}{strategy_section}
 README.md:
-{readme_text[:2_000]}
+{readme_text[:_README_CAP]}
 
 Test files (chunk {chunk_idx}/{total_chunks}):
 {tests_section}
@@ -4722,7 +4893,7 @@ class LLMTask1Synthesizer(StaticTask1Synthesizer):
                            f"{existing_genesis}\n") if genesis_exists else ""
         strategy_section = (
             f"\n--- Coverage strategy (import patterns, type construction, test conventions) ---\n"
-            f"{coverage_strategy[:4000]}\n"
+            f"{coverage_strategy[:_STRATEGY_CAP]}\n"
         ) if coverage_strategy.strip() else ""
         return f"""You are performing contract extraction from test files as part of a
 contract-first TDD reconstruction experiment.
@@ -4731,7 +4902,7 @@ Your output MUST be the file `functional_requirements.md` wrapped in the FILE ma
 Do not output anything outside those markers.
 {profile_section}{strategy_section}
 README.md:
-{readme_text}
+{readme_text[:_README_CAP]}
 {genesis_section}
 Test files:
 {tests_section}
@@ -4770,8 +4941,11 @@ Rules:
                            f"{existing_genesis}\n") if genesis_exists else ""
         strategy_section = (
             f"\n--- Coverage strategy (import patterns, type construction, test conventions) ---\n"
-            f"{coverage_strategy[:4000]}\n"
+            f"{coverage_strategy[:_STRATEGY_CAP]}\n"
         ) if coverage_strategy.strip() else ""
+        _synthesis_cap = int(SINGLE_CALL_CHAR_LIMIT * 0.60)
+        _capped_synthesis = (all_for_synthesis[-_synthesis_cap:]
+                             if len(all_for_synthesis) > _synthesis_cap else all_for_synthesis)
         return f"""You are producing the final API contract document from contract extractions
 across all test chunks. This is the last step of a contract-first TDD reconstruction.
 {FILE_FORMAT_INSTRUCTION}
@@ -4779,10 +4953,10 @@ Your output MUST be the file `functional_requirements.md` wrapped in the FILE ma
 Do not output anything outside those markers.
 {profile_section}{strategy_section}
 README.md:
-{readme_text}
+{readme_text[:_README_CAP]}
 {genesis_section}
 Contract extractions (merged from all test chunks):
-{all_for_synthesis}
+{_capped_synthesis}
 
 Your task: produce functional_requirements.md as the complete, deduplicated API contract.
 For every function, method, struct, enum, trait, or module extracted above:
@@ -4808,7 +4982,7 @@ Rules:
         ) if genesis.strip() else ""
         strategy_section = (
             f"\n--- Coverage strategy (import patterns, type construction, test conventions) ---\n"
-            f"{coverage_strategy[:4000]}\n"
+            f"{coverage_strategy[:_STRATEGY_CAP]}\n"
         ) if coverage_strategy.strip() else ""
         return f"""You are performing contract extraction from test files as the first step of
 a contract-first TDD reconstruction experiment.
@@ -4817,7 +4991,7 @@ This is chunk {chunk_idx} of {total_chunks}. All chunks will be combined into a 
 implementation contract document.
 {profile_header}{genesis_section}{strategy_section}
 README.md:
-{readme_text}
+{readme_text[:_README_CAP]}
 
 Test files (chunk {chunk_idx}/{total_chunks}):
 {tests_section}
@@ -4844,7 +5018,9 @@ Rules:
         Merge a group of contract partials into a deduplicated intermediate contract list.
         Overrides the behavioral merge prompt with a contract-aware one.
         """
-        combined = "\n\n".join(group_partials)
+        _combined_raw = "\n\n".join(group_partials)
+        _combined_cap = int(SINGLE_CALL_CHAR_LIMIT * 0.55)
+        combined = _combined_raw[-_combined_cap:] if len(_combined_raw) > _combined_cap else _combined_raw
 
         genesis_section = (
             f"\n--- genesis.md (methodology — apply when merging contracts) ---\n"
@@ -4863,7 +5039,7 @@ Rules:
   - If two entries conflict (same name, different signature), keep both and annotate with "(conflict)".
 {profile_section}{genesis_section}
 README.md (for language/framework context):
-{readme_text}
+{readme_text[:_README_CAP]}
 
 Contract partials to merge:
 {combined}
@@ -4931,7 +5107,7 @@ def _task1_proc_macro(project_dir, genesis_path, functional_req_path, test_files
         for rel, content in relevant
     )
     tests_section = _raw_tests[-_tests_budget:] if len(_raw_tests) > _tests_budget else _raw_tests
-    effective_context = effective_context[:2_000]
+    effective_context = effective_context[:_PROFILE_CAP]
 
     prompt = f"""You are analysing test files to extract the interface of a Rust proc-macro crate.
 
@@ -5327,15 +5503,21 @@ class LLMTask2Generator(Task2Generator):
         structured_rules_llm = genesis_rules_read(project_dir, module_scope=current_module or "*")
         rules_section_llm = f"\n{structured_rules_llm}\n" if structured_rules_llm else ""
 
+        _req_cap = int(SINGLE_CALL_CHAR_LIMIT * 0.40)
+        _ctx_cap = int(SINGLE_CALL_CHAR_LIMIT * 0.25)
+        _genesis_cap = min(len(genesis), 3_000)
+        _functional_req_capped = functional_req[-_req_cap:] if len(functional_req) > _req_cap else functional_req
+        _whole_ctx_capped = whole_project_context[-_ctx_cap:] if len(whole_project_context) > _ctx_cap else whole_project_context
+
         # Step 1: ask model for the list of files to create.
         plan_prompt = f"""You are planning the implementation of a software project.
 
 Process (genesis.md):
-{genesis}
+{genesis[:_genesis_cap]}
 {profile_section}{workspace_section}{module_scope_section}{locked_dep_section}{build_error_section}{pitfalls_section_llm}{rules_section_llm}
 Functional requirements:
-{functional_req}
-{assertions_section_llm}{whole_project_context}
+{_functional_req_capped}
+{assertions_section_llm}{_whole_ctx_capped}
 List ALL source files that must be created to implement these requirements.
 Do NOT include: test files, config files (Cargo.toml, package.json, build.gradle, etc.), lock files, or any non-source file.
 Only source code files (.rs, .py, .js, .ts, .go, .java, etc.).
@@ -5402,11 +5584,11 @@ Output one file path per line, relative to the project root. No other text.
             file_prompt = f"""You are implementing a single source file for a software project.
 
 Process (genesis.md):
-{genesis}
+{genesis[:_genesis_cap]}
 {profile_section}{module_scope_section}{locked_dep_section}
 Functional requirements:
-{functional_req}
-{whole_project_context}{prev_files_section}
+{_functional_req_capped}
+{_whole_ctx_capped}{prev_files_section}
 Generate the file: `{file_path}`
 
 {FILE_FORMAT_INSTRUCTION}
@@ -5586,8 +5768,12 @@ RULES:
 
             strategy_section = (
                 f"\nCoverage strategy (import patterns, type construction, test conventions):\n"
-                f"{coverage_strategy[:4000]}\n"
+                f"{coverage_strategy[:_STRATEGY_CAP]}\n"
             ) if coverage_strategy.strip() else ""
+            _req_cap2 = int(SINGLE_CALL_CHAR_LIMIT * 0.35)
+            _ctx_cap2 = int(SINGLE_CALL_CHAR_LIMIT * 0.20)
+            _f_req = functional_req[-_req_cap2:] if len(functional_req) > _req_cap2 else functional_req
+            _w_ctx = whole_project_context[-_ctx_cap2:] if len(whole_project_context) > _ctx_cap2 else whole_project_context
             prompt = f"""You are implementing a single source file for a Rust project.
 {FILE_FORMAT_INSTRUCTION}
 Output ONLY the file `{file_path}` using the markers above. Nothing else.
@@ -5596,8 +5782,8 @@ Output ONLY the file `{file_path}` using the markers above. Nothing else.
     Path: `{file_path}`
 {proc_macro_note}{locked_dep_section}{build_error_section}
 Functional requirements:
-{functional_req}
-{test_files_section}{whole_project_context}{prev_files_section}
+{_f_req}
+{test_files_section}{_w_ctx}{prev_files_section}
 Generate the complete implementation for `{file_path}`.
 """
             # FR-012: per-file retry — qwen3 thinking mode sometimes returns empty output.
@@ -5871,17 +6057,22 @@ def generate_fix_loop(
             content = p.read_text(encoding="utf-8")
             source_block += f'\n<FILE path="{rel}">\n{content}\n</FILE>\n'
 
+        _err_cap = int(SINGLE_CALL_CHAR_LIMIT * 0.30)
+        _src_cap = int(SINGLE_CALL_CHAR_LIMIT * 0.50)
+        _last_output_capped = last_output[-_err_cap:] if len(last_output) > _err_cap else last_output
+        _source_block_capped = source_block[-_src_cap:] if len(source_block) > _src_cap else source_block
+        _extra_ctx_capped = extra_context[-int(SINGLE_CALL_CHAR_LIMIT * 0.15):] if len(extra_context) > int(SINGLE_CALL_CHAR_LIMIT * 0.15) else extra_context
         prompt = f"""Code generation produced files that fail the check below.
 Fix ONLY the files causing the failure — do NOT regenerate correct files.
 {_history_section}
 Error output:
 ```
-{last_output}
+{_last_output_capped}
 ```
 
 Current source files:
-{source_block}
-{extra_context}
+{_source_block_capped}
+{_extra_ctx_capped}
 {FILE_FORMAT_INSTRUCTION}
 """
         response = ask(prompt, model=model)
@@ -5909,7 +6100,7 @@ Current source files:
             _log(f"  [fix loop] Fixed: {rel}")
 
         # Record this attempt in the running narrative for subsequent fix prompts.
-        _err_capped = last_output[-800:] if len(last_output) > 800 else last_output
+        _err_capped = last_output[-_FIX_ERR_CAP:] if len(last_output) > _FIX_ERR_CAP else last_output
         _files_changed = ", ".join(list(fixed.keys())[:4]) if fixed else "no files changed"
         _attempt_history.append(
             f"Attempt {attempt}: changed [{_files_changed}] → still failing.\n"
@@ -5957,9 +6148,9 @@ def task2_fix_loop(
         if rel not in existing_test_files and (project_dir / rel).exists()
     ]
 
-    # Full requirements — context-guard handles overflow; no pre-truncation.
     functional_req = read(functional_req_path)
-    extra = f"\nFunctional requirements:\n{functional_req}\n"
+    _req_cap3 = int(SINGLE_CALL_CHAR_LIMIT * 0.30)
+    extra = f"\nFunctional requirements:\n{functional_req[-_req_cap3:]}\n"
 
     # Test files: the model must see the assertions it needs to satisfy.
     test_parts = ["\nTest files (the tests your fix must pass):"]
@@ -5976,7 +6167,7 @@ def task2_fix_loop(
     if genesis_path and genesis_path.exists():
         genesis = read(genesis_path)
         if genesis.strip():
-            extra += f"\n--- genesis.md (methodology) ---\n{genesis}\n"
+            extra += f"\n--- genesis.md (methodology) ---\n{genesis[:_GENESIS_CAP]}\n"
 
     return generate_fix_loop(
         project_dir=project_dir,
@@ -6066,7 +6257,12 @@ def task4(genesis_path, functional_req_path, test_output, iteration, output_dir,
 
     genesis = read(genesis_path)
     functional_req = read(functional_req_path)
-    truncated_output = test_output
+    _t4_genesis_cap    = 3_000
+    _t4_req_cap        = int(SINGLE_CALL_CHAR_LIMIT * 0.25)
+    _t4_output_cap     = int(SINGLE_CALL_CHAR_LIMIT * 0.25)
+    genesis            = genesis[-_t4_genesis_cap:] if len(genesis) > _t4_genesis_cap else genesis
+    functional_req     = functional_req[-_t4_req_cap:] if len(functional_req) > _t4_req_cap else functional_req
+    truncated_output   = test_output[-_t4_output_cap:] if len(test_output) > _t4_output_cap else test_output
 
     # Regression / comparison section.
     # Prefer caller-supplied prev data (per-module mode); fall back to file lookup (legacy mode).
@@ -6083,7 +6279,8 @@ def task4(genesis_path, functional_req_path, test_output, iteration, output_dir,
             _prev_pass = count_passing_tests(_prev_output)
 
     if _prev_output:
-        prev_truncated = _prev_output
+        _prev_cap = int(SINGLE_CALL_CHAR_LIMIT * 0.20)
+        prev_truncated = _prev_output[-_prev_cap:] if len(_prev_output) > _prev_cap else _prev_output
         delta = current_pass - _prev_pass
         trend = (f"IMPROVED by {delta} tests" if delta > 0
                  else f"REGRESSED by {abs(delta)} tests" if delta < 0
@@ -6450,11 +6647,13 @@ def _run_tarpaulin(project_dir: Path, module_name: str) -> tuple[float, list[dic
     cmd = [
         str(TARPAULIN_BIN), "tarpaulin",
         "-p", module_name,
-        "--tests",         # include integration tests (tests/ dir) in coverage measurement
+        "--tests",         # run integration tests (tests/ dir) but exclude from coverage denominator
         "--no-fail-fast",  # produce report even if some tests fail at runtime
         "--out", "Json",
         "--output-dir", str(out_dir),
         "--skip-clean",
+        "--exclude-files", "*/tests/*",   # measure src/ coverage only
+        "--exclude-files", "build.rs",    # build scripts run at compile time, not under test
     ]
     for pat in _exclude_patterns:
         cmd += ["--exclude-files", pat]
@@ -6482,6 +6681,69 @@ def _run_tarpaulin(project_dir: Path, module_name: str) -> tuple[float, list[dic
         return 0.0, [], 0, 0
 
 
+def _quick_file_coverage(project_dir: Path, module_name: str, rel_path: str) -> tuple[int, int] | None:
+    """
+    Fast per-file coverage snapshot using CARGO_INCREMENTAL=1.
+    Returns (covered, coverable) for rel_path only, or None on failure.
+    Only runs when COVERAGE_BACKEND=grcov; tarpaulin is too slow for per-file checks.
+    """
+    if COVERAGE_BACKEND != "grcov" or not GRCOV_BIN.exists():
+        return None
+
+    profraw_dir = project_dir / "target" / "coverage" / f"{module_name}_quick"
+    profraw_dir.mkdir(parents=True, exist_ok=True)
+    for f in profraw_dir.glob("*.profraw"):
+        f.unlink(missing_ok=True)
+
+    env = _cargo_env()
+    # Add -C instrument-coverage; do NOT set CARGO_INCREMENTAL=0 so incremental
+    # artifacts from the compile-check step are reused where possible.
+    env["RUSTFLAGS"] = (env.get("RUSTFLAGS", "") + " -C instrument-coverage").strip()
+    env["LLVM_PROFILE_FILE"] = str(profraw_dir / "%p-%m.profraw")
+
+    try:
+        subprocess.run(
+            ["cargo", "test", "-p", module_name, "--no-fail-fast", "--", "--test-threads=1"],
+            cwd=project_dir, capture_output=True, text=True,
+            timeout=BUILD_TIMEOUT, env=env,
+        )
+        if not list(profraw_dir.glob("*.profraw")):
+            return None
+
+        out_json = Path("/tmp") / f"grcov_quick_{module_name}.json"
+        cmd = [
+            str(GRCOV_BIN),
+            str(profraw_dir),
+            "--binary-path", str(project_dir / "target" / "debug"),
+            "--source-dir", str(project_dir),
+            "--output-type", "coveralls",
+            "--token", "unused",
+            "--branch",
+            "--ignore-not-existing",
+            "--output-path", str(out_json),
+            "--ignore", str(Path.home() / ".cargo" / "registry" / "*"),
+            "--ignore", str(Path.home() / ".cargo" / "git" / "*"),
+            "--ignore", str(Path.home() / ".rustup" / "*"),
+            "--ignore", "*/target/*",
+            "--ignore", "*/tests/*",
+            "--ignore", "build.rs",
+        ]
+        subprocess.run(cmd, cwd=project_dir, capture_output=True, text=True, timeout=60, check=True)
+
+        data = json.loads(out_json.read_text())
+        abs_target = str(project_dir / rel_path)
+        for sf in data.get("source_files", []):
+            sf_abs = str(project_dir / sf.get("name", ""))
+            if sf_abs == abs_target or sf.get("name", "") == rel_path:
+                cov_arr = sf.get("coverage", [])
+                covered   = sum(1 for c in cov_arr if c is not None and c > 0)
+                coverable = sum(1 for c in cov_arr if c is not None)
+                return covered, coverable
+        return None
+    except Exception:
+        return None
+
+
 def _run_grcov(project_dir: Path, module_name: str) -> tuple[float, list[dict], int, int]:
     """
     Run grcov (LLVM source-based coverage) for one module.
@@ -6502,6 +6764,10 @@ def _run_grcov(project_dir: Path, module_name: str) -> tuple[float, list[dict], 
     env = _cargo_env()
     env["RUSTFLAGS"] = (env.get("RUSTFLAGS", "") + " -C instrument-coverage").strip()
     env["LLVM_PROFILE_FILE"] = str(profraw_dir / "%p-%m.profraw")
+    # Required for correct coverage: incremental compilation can reuse object files
+    # compiled without -C instrument-coverage, causing integration test binaries to
+    # produce no profraw data.
+    env["CARGO_INCREMENTAL"] = "0"
 
     # Cluster exclude patterns reused from tarpaulin path.
     if _current_cluster is None or _current_cluster.is_default:
@@ -6512,7 +6778,7 @@ def _run_grcov(project_dir: Path, module_name: str) -> tuple[float, list[dict], 
     try:
         # Step 1: run tests with instrumentation.
         result = subprocess.run(
-            ["cargo", "test", "-p", module_name, "--", "--test-threads=1"],
+            ["cargo", "test", "-p", module_name, "--no-fail-fast", "--", "--test-threads=1", "--no-capture"],
             cwd=project_dir, capture_output=True, text=True,
             timeout=BUILD_TIMEOUT, env=env,
         )
@@ -6528,9 +6794,21 @@ def _run_grcov(project_dir: Path, module_name: str) -> tuple[float, list[dict], 
             "--binary-path", str(project_dir / "target" / "debug"),
             "--source-dir", str(project_dir),
             "--output-type", "coveralls",
+            "--token", "unused",   # required by grcov 0.10+ for coveralls output
             "--branch",
             "--ignore-not-existing",
             "--output-path", str(out_json),
+            # Exclude dependency and toolchain sources — only measure project code.
+            "--ignore", str(Path.home() / ".cargo" / "registry" / "*"),
+            "--ignore", str(Path.home() / ".cargo" / "git" / "*"),
+            "--ignore", str(Path.home() / ".rustup" / "*"),
+            "--ignore", "*/target/*",
+            "--ignore", "*/build.rs",  # build scripts run at compile time, not under test
+            "--ignore", "build.rs",    # root-level build.rs (no parent dir prefix)
+            "--ignore", "*/tests/*",   # integration test files — measure src/ coverage only
+            "--excl-start", "GRCOV_EXCL_START",
+            "--excl-stop",  "GRCOV_EXCL_STOP",
+            "--excl-line",  "GRCOV_EXCL_LINE",
         ]
         for pat in _exclude_patterns:
             cmd += ["--ignore", pat]
@@ -6559,7 +6837,8 @@ def _run_grcov(project_dir: Path, module_name: str) -> tuple[float, list[dict], 
             ]
             abs_path = str(project_dir / sf.get("name", ""))
             files_data.append({
-                "path": abs_path.split(os.sep),
+                "path": abs_path.split(os.sep),  # tarpaulin-compat schema
+                "abs_path": abs_path,             # reliable full path for consumers
                 "traces": traces,
                 "covered": covered,
                 "coverable": coverable,
@@ -6574,6 +6853,62 @@ def _run_grcov(project_dir: Path, module_name: str) -> tuple[float, list[dict], 
     except Exception as e:
         _log(f"  grcov: error: {e}")
         return 0.0, [], 0, 0
+
+
+def _load_grcov_json(project_dir: Path, module_name: str) -> tuple[float, list[dict], int, int] | None:
+    """Parse the existing grcov JSON + filecache without re-running grcov.
+
+    Returns (pct, files_data, covered, coverable) if the JSON exists, else None.
+    Used on resume to restore coverage state without an expensive re-run.
+    """
+    out_json = Path("/tmp") / f"grcov_{module_name}.json"
+    if not out_json.exists():
+        return None
+    try:
+        main_mtime = out_json.stat().st_mtime
+        data = json.loads(out_json.read_text())
+        source_files = data.get("source_files", [])
+        if not source_files:
+            return None
+
+        # Build per-file map from main JSON.
+        file_map: dict[str, dict] = {}
+        for sf in source_files:
+            cov_arr = sf.get("coverage", [])
+            covered   = sum(1 for c in cov_arr if c is not None and c > 0)
+            coverable = sum(1 for c in cov_arr if c is not None)
+            abs_path  = str(project_dir / sf.get("name", ""))
+            traces    = [
+                {"line": i + 1, "stats": {"Line": (c if c is not None else 0)}}
+                for i, c in enumerate(cov_arr) if c is not None
+            ]
+            file_map[sf.get("name", "")] = {
+                "path": abs_path.split(os.sep),
+                "abs_path": abs_path,
+                "traces": traces,
+                "covered": covered,
+                "coverable": coverable,
+            }
+
+        # Merge filecache entries newer than the main JSON (written by quick-cov).
+        filecache = Path("/tmp") / f"grcov_filecache_{module_name}.json"
+        if filecache.exists():
+            try:
+                for rel, d in json.loads(filecache.read_text()).items():
+                    if d.get("ts", 0) > main_mtime and d.get("coverable", 0) > 0 and rel in file_map:
+                        entry = file_map[rel]
+                        entry["covered"]   = d["covered"]
+                        entry["coverable"] = d["coverable"]
+            except Exception:
+                pass
+
+        files_data = list(file_map.values())
+        total_covered   = sum(f["covered"]   for f in files_data)
+        total_coverable = sum(f["coverable"] for f in files_data)
+        pct = (total_covered / total_coverable * 100.0) if total_coverable > 0 else 0.0
+        return pct, files_data, total_covered, total_coverable
+    except Exception:
+        return None
 
 
 def _measure_coverage(project_dir: Path, module_name: str) -> tuple[float, list[dict], int, int]:
@@ -6885,10 +7220,12 @@ def _task0c_pragma_pass(
     # Build map: abs_path → set of uncovered line numbers
     uncovered_by_file: dict[Path, set[int]] = {}
     for fdata in files_data:
-        abs_path = Path(*fdata["path"])
+        abs_path = Path(fdata["abs_path"]) if "abs_path" in fdata else Path(os.sep.join(fdata["path"]))
         if not str(abs_path).startswith(mod_prefix):
             continue
         if is_test_file(abs_path, project_dir):
+            continue
+        if abs_path.name == "build.rs":
             continue
         lines_uncov = {
             t["line"] for t in fdata.get("traces", [])
@@ -7021,8 +7358,8 @@ def _task0c_retrospective(
     """
     if not fn_bodies.strip():
         return ""
-    _src_snippet = existing_text[:4000]
-    _block_snippet = old_block[:2000] if old_block else "(no previous block)"
+    _src_snippet = existing_text[:_SRC_SNIP_CAP]
+    _block_snippet = old_block[:_SRC_SNIP_CAP // 2] if old_block else "(no previous block)"
     _history_section = (
         f"Compile error history for this file (what went wrong in previous attempts):\n{attempt_history}\n\n"
     ) if attempt_history.strip() else ""
@@ -7205,7 +7542,7 @@ def task0c_augment_module(
         else:
             _log(f"  [{module_name}] Library compile failure in gen_* block — routing to harness fix loop.")
 
-    _gen_block_re = re.compile(r'\n+#\[cfg\(test\)\](?:\n#\[[^\]]*\])*\n(?:pub )?mod gen_\w+\s*\{.*', re.DOTALL)
+    _gen_block_re = re.compile(r'\n+(?:// GRCOV_EXCL_START\n)?#\[cfg\(test\)\](?:\n#\[[^\]]*\])*\n(?:pub )?mod gen_\w+\s*\{.*', re.DOTALL)
 
     def _error_signatures(cargo_output: str) -> frozenset:
         """Extract stable error signatures — error code + message, no file/line numbers."""
@@ -7293,25 +7630,86 @@ corrected content here
                  f"{len(resolved)} resolved since last attempt.")
 
             if new_signatures == prev_signatures:
-                # Truly stuck — LLM made no progress. Strip broken files as last resort.
-                _log(f"  [{module_name}] No error improvement — stripping gen_* blocks from broken files.")
+                # Truly stuck — LLM made no progress.
+                # Targeted strip: remove only the specific gen_* block(s) whose line
+                # ranges overlap with error lines — preserving all other gen_* blocks.
+                _log(f"  [{module_name}] No error improvement — targeted strip of broken gen_* block(s).")
+
+                def _strip_broken_gen_blocks(src_file: Path, error_text: str) -> bool:
+                    """Remove only gen_* blocks that contain error lines. Return True if file changed."""
+                    try:
+                        text = src_file.read_text(encoding="utf-8")
+                    except Exception:
+                        return False
+                    rel = str(src_file.relative_to(project_dir))
+                    # Collect error line numbers for this file.
+                    error_lines: set[int] = set()
+                    for m in re.finditer(r'(?:' + re.escape(rel) + r'|' + re.escape(src_file.name) + r'):(\d+)', error_text):
+                        error_lines.add(int(m.group(1)))
+
+                    # Find all gen_* block spans using the same regex, match by line range.
+                    _indiv_re = re.compile(
+                        r'\n+(?:// GRCOV_EXCL_START\n)?#\[cfg\(test\)\](?:\n#\[[^\]]*\])*\n(?:pub )?mod gen_\w+\s*\{',
+                        re.DOTALL,
+                    )
+                    lines = text.splitlines(keepends=True)
+                    def _char_to_line(pos: int) -> int:
+                        return text[:pos].count('\n') + 1
+
+                    # Build list of (start_char, end_char) for each gen_* block.
+                    blocks_to_remove: list[tuple[int, int]] = []
+                    for hdr in _indiv_re.finditer(text):
+                        # Walk braces to find the closing } of this block.
+                        depth = 0
+                        pos = hdr.end() - 1  # points at the opening {
+                        end = pos
+                        while pos < len(text):
+                            if text[pos] == '{':
+                                depth += 1
+                            elif text[pos] == '}':
+                                depth -= 1
+                                if depth == 0:
+                                    end = pos + 1
+                                    break
+                            pos += 1
+                        start_line = _char_to_line(hdr.start())
+                        end_line   = _char_to_line(end)
+                        block_lines = set(range(start_line, end_line + 1))
+                        # Remove if any error line falls inside, OR if no error lines
+                        # could be located (fall back to removing all blocks).
+                        if not error_lines or block_lines & error_lines:
+                            blocks_to_remove.append((hdr.start(), end))
+
+                    if not blocks_to_remove:
+                        # Fallback: remove all gen_* blocks (old behaviour).
+                        cleaned = _gen_block_re.sub("", text).rstrip() + "\n"
+                    else:
+                        # Remove matched blocks from right to left to preserve offsets.
+                        cleaned = text
+                        for start, end in sorted(blocks_to_remove, reverse=True):
+                            cleaned = cleaned[:start] + cleaned[end:]
+                        cleaned = cleaned.rstrip() + "\n"
+
+                    if cleaned != text:
+                        src_file.write_text(cleaned, encoding="utf-8")
+                        n = len(blocks_to_remove) if blocks_to_remove else "all"
+                        _log(f"  [{module_name}] Stripped {n} gen_* block(s) from "
+                             f"{src_file.relative_to(project_dir)} (targeted).")
+                        return True
+                    return False
+
+                any_stripped = False
                 for src_file in broken_files:
                     if is_test_file(src_file, project_dir):
                         continue
-                    try:
-                        text = src_file.read_text(encoding="utf-8")
-                        cleaned = _gen_block_re.sub("", text).rstrip() + "\n"
-                        if cleaned != text:
-                            src_file.write_text(cleaned, encoding="utf-8")
-                            _log(f"  [{module_name}] Stripped gen_* block from "
-                                 f"{src_file.relative_to(project_dir)}.")
-                    except Exception:
-                        pass
+                    if _strip_broken_gen_blocks(src_file, compile_err_out):
+                        any_stripped = True
+
                 harness_ok, _ = augmentor.test_harness_compiles(project_dir, module_name)
                 if not harness_ok:
-                    _log(f"  [{module_name}] Harness still broken after strip — skipping augmentation.")
+                    _log(f"  [{module_name}] Harness still broken after targeted strip — skipping augmentation.")
                     return 0.0, 0
-                _log(f"  [{module_name}] Harness fixed by stripping gen_* blocks.")
+                _log(f"  [{module_name}] Harness fixed by targeted strip.")
                 break
 
             prev_signatures = new_signatures
@@ -7346,9 +7744,28 @@ corrected content here
 
     max_attempts = 10
     attempt = 0
+    # Resume attempt number if interrupted mid-run.
+    _saved_phase = _read_state(project_dir)["phases"].get(f"task0c/{_cluster_label}/{module_name}", {})
+    if _saved_phase.get("status") == "in_progress":
+        _m = re.search(r"attempt (\d+)", _saved_phase.get("detail", ""))
+        if _m:
+            attempt = int(_m.group(1)) - 1  # loop does attempt += 1 at top
+            _log(f"  [{module_name}/{_cluster_label}] Resuming from attempt {int(_m.group(1))}/{max_attempts}")
     coverage = 0.0
     covered_lines = 0
-    prev_covered = -1      # integer covered-line count — deterministic, no float noise
+    coverable_lines = 0
+    files_data: list[dict] = []
+    _skip_first_measure = False
+    # On resume, reload coverage from the previous run's grcov JSON + filecache
+    # to avoid an expensive full re-run before the first gen attempt.
+    if attempt > 0:
+        _cached = _load_grcov_json(project_dir, module_name)
+        if _cached is not None:
+            coverage, files_data, covered_lines, coverable_lines = _cached
+            _skip_first_measure = True
+            _log(f"  [{module_name}/{_cluster_label}] Loaded coverage from previous run: "
+                 f"{coverage:.1f}% ({covered_lines}/{coverable_lines} lines)")
+    prev_covered = covered_lines if _skip_first_measure else -1
     no_improvement_count = 0
     MAX_NO_IMPROVEMENT = 10  # per-file retrospective runs first; global stall is last resort only
     FILE_STALL_LIMIT = 10   # consecutive no-improvement attempts before skipping a file
@@ -7384,11 +7801,14 @@ corrected content here
             continue
 
         # --- Phase B: measure coverage ---
-        coverage, files_data, covered_lines, coverable_lines = augmentor.measure_coverage(project_dir, module_name, module_dir)
-        _log(f"  [{module_name}/{_cluster_label}] Coverage: {coverage:.1f}% ({covered_lines}/{coverable_lines} lines)")
-        _mark_phase(project_dir, f"task0c/{module_name}", "in_progress",
+        if _skip_first_measure:
+            _skip_first_measure = False  # only skip once; always re-measure after first gen
+        else:
+            coverage, files_data, covered_lines, coverable_lines = augmentor.measure_coverage(project_dir, module_name, module_dir)
+            _log(f"  [{module_name}/{_cluster_label}] Coverage: {coverage:.1f}% ({covered_lines}/{coverable_lines} lines)")
+        _mark_phase(project_dir, f"task0c/{_cluster_label}/{module_name}", "in_progress",
                     detail=f"{coverage:.1f}% attempt {attempt}", source_hash=_source_hash(project_dir))
-        _set_current(project_dir, f"task0c/{module_name} / {coverage:.1f}% attempt {attempt}")
+        _set_current(project_dir, f"task0c/{_cluster_label}/{module_name} / {coverage:.1f}% attempt {attempt}")
 
         if coverage >= 100.0:
             _log(f"  [{module_name}] 100% coverage reached.")
@@ -7398,6 +7818,35 @@ corrected content here
         # Float coverage can oscillate by ±0.01% between runs (denominator shifts when
         # generated test blocks change which lines tarpaulin counts). Integers are stable.
         delta_lines = covered_lines - prev_covered
+
+        # --- Regression guard: if coverage dropped significantly, gen_tests likely have
+        # runtime failures that corrupt grcov profraw data.  Diagnose and fix before
+        # generating more tests (which would only pile more failing tests on top). ---
+        if prev_covered > 0 and delta_lines < -50:
+            _log(f"  [{module_name}] Coverage regression {delta_lines:+d} lines — running tests to detect runtime failures.")
+            _reg_env = _cargo_env()
+            _reg_result = subprocess.run(
+                ["cargo", "test", "-p", module_name, "--no-fail-fast", "--", "--test-threads=1", "--no-capture"],
+                cwd=project_dir, capture_output=True, text=True,
+                timeout=BUILD_TIMEOUT, env=_reg_env,
+            )
+            if _reg_result.returncode != 0:
+                _reg_output = (_reg_result.stdout + "\n" + _reg_result.stderr)[-_FIX_ERR_CAP:]
+                _log(f"  [{module_name}] Test failures confirmed — running runtime fix loop.")
+                generate_fix_loop(
+                    project_dir=project_dir,
+                    check_cmd=f"cargo test -p {module_name} -- --test-threads=1",
+                    source_paths=module_source_paths,
+                    existing_test_files=existing_test_files,
+                    model=_TASK0C_MODEL,
+                    max_fix_attempts=3,
+                    timeout=BUILD_TIMEOUT,
+                )
+            else:
+                _log(f"  [{module_name}] Tests pass but coverage regressed — likely stale profraw; retrying.")
+            prev_covered = covered_lines
+            continue  # skip Phase C (no new tests until runtime failures are resolved)
+
         if delta_lines <= 0:
             no_improvement_count += 1
             _log(f"  [{module_name}] No improvement ({covered_lines}/{coverable_lines} lines, delta {delta_lines:+d}) — stall count {no_improvement_count}/{MAX_NO_IMPROVEMENT}")
@@ -7420,7 +7869,7 @@ corrected content here
         mod_prefix = str(module_dir) + "/"
         uncovered_by_file: dict[str, tuple[str, set[int]]] = {}
         for fdata in files_data:
-            abs_path_str = str(Path(*fdata["path"]))
+            abs_path_str = fdata["abs_path"] if "abs_path" in fdata else os.sep.join(fdata["path"])
             if not abs_path_str.startswith(mod_prefix):
                 continue
             rel = str(Path(abs_path_str).relative_to(project_dir))
@@ -7428,7 +7877,10 @@ corrected content here
                 t["line"] for t in fdata.get("traces", [])
                 if t["stats"].get("Line", 1) == 0
             }
-            if lines_uncov and not is_test_file(Path(abs_path_str), project_dir):
+            _gated = _current_cluster.gated_files if _current_cluster and _current_cluster.gated_files else set()
+            if lines_uncov and not is_test_file(Path(abs_path_str), project_dir) \
+                    and Path(abs_path_str).name != "build.rs" \
+                    and rel not in _gated:
                 uncovered_by_file[rel] = (fdata.get("content", ""), lines_uncov)
 
         if not uncovered_by_file:
@@ -7469,6 +7921,8 @@ corrected content here
         for sib_file in sorted(module_dir.rglob("*.rs")):
             if is_test_file(sib_file, project_dir):
                 continue
+            if sib_file.name == "build.rs":
+                continue  # build scripts are not library code — no useful type context
             try:
                 if sib_file.is_relative_to(_target_dir):
                     continue  # skip build artifacts
@@ -7490,6 +7944,14 @@ corrected content here
         else:
             _ordered_files = list(uncovered_by_file.items())
 
+        _queue_summary = ", ".join(
+            f"{rel.split('/')[-1]}({len(unc)}{'*' if file_stall_counts.get(rel, 0) > 0 else ''})"
+            for rel, (_, unc) in _ordered_files
+            if rel not in skipped_files
+        )
+        _log(f"  [{module_name}] Queue: {len([r for r,_ in _ordered_files if r not in skipped_files])} file(s) — {_queue_summary}")
+
+        _active_files = [r for r, _ in _ordered_files if r not in skipped_files]
         attempt_n_within_outer = 0
         for rel_path, (content, uncov_lines) in _ordered_files:
             attempt_n_within_outer += 1
@@ -7497,6 +7959,9 @@ corrected content here
             if rel_path in skipped_files:
                 _log(f"  [{module_name}] Skipping {rel_path} — stalled for {FILE_STALL_LIMIT} consecutive attempts.")
                 continue
+
+            _file_idx = _active_files.index(rel_path) + 1 if rel_path in _active_files else attempt_n_within_outer
+            _log(f"  [{module_name}] File {_file_idx}/{len(_active_files)}: {rel_path} ({len(uncov_lines)} uncovered lines)")
 
             abs_path = project_dir / rel_path
             _raw_text = abs_path.read_text(encoding="utf-8") if abs_path.exists() else content
@@ -7531,7 +7996,7 @@ corrected content here
             _FULL_SOURCE_SIBLINGS = {"kind.rs", "error.rs"}
             relevant_siblings = [
                 (srel, sc if Path(srel).name in _FULL_SOURCE_SIBLINGS
-                       else _condense_rust_to_signatures(sc, Path(srel).name)[:3000])
+                       else _condense_rust_to_signatures(sc, Path(srel).name)[:_SIBLING_CAP])
                 for srel, sc in relevant_siblings
             ]
 
@@ -7638,7 +8103,7 @@ corrected content here
             _target_basename = Path(rel_path).name
             _file_constraints_section = _FILE_CONSTRAINTS.get(_target_basename, "")
 
-            gen_count = len(re.findall(r'mod gen_\w+', existing_text))
+            gen_count = len(re.findall(r'mod gen_\w+', _raw_text))
             mod_name = "gen_tests" if gen_count == 0 else f"gen_tests_{gen_count + 1}"
             output_format = (
                 f'<FILE path="gen_tests_block">\n'
@@ -7660,7 +8125,7 @@ corrected content here
 Target file: {rel_path}
 {secs['cargo']}{secs['full_source']}{secs['fn_bodies']}{secs['symbols']}{secs['examples']}{secs['integ_tests']}{secs['siblings']}{secs['old_block']}
 Write a `#[cfg(test)] mod {mod_name}` block for `{rel_path}`.
-{"The existing block above is ALREADY COMMITTED TO DISK and compiles. Copy every test function from it verbatim, then add NEW test functions at the end for ONLY the functions shown in fn_bodies above. Do NOT modify, remove, or rewrite any existing test." if _old_block else "Write a new test block covering the uncovered lines shown in fn_bodies above."}
+{"Write ONLY new test functions for the uncovered lines in fn_bodies above. The existing test module(s) shown are already on disk — do NOT copy or repeat any test from them." if _old_block else "Write a new test block covering the uncovered lines shown in fn_bodies above."}
 
 BEHAVIORAL SPECIFICATION REQUIREMENTS (mandatory — tests not meeting these will be discarded):
 - Every `#[test]` fn MUST contain at least one `assert!`, `assert_eq!`, `assert_ne!`,
@@ -7706,6 +8171,22 @@ INTERNAL MODULE RULES — these tests live inside the source file, not in an ext
             # FR-012: retry generation — qwen3 thinking mode sometimes returns empty output.
             # On retry, send a short explicit follow-up instead of the full prompt again:
             # repeating the same large prompt produces the same empty result.
+            def _save_stream_log(gen_attempt: int, query: str, resp: str, reason: str) -> None:
+                _fname = rel_path.replace("/", "_").replace(".", "_")
+                _path = Path(f"/tmp/stream_loop_{attempt}_{_fname}_gen{gen_attempt}.log")
+                try:
+                    _path.write_text(
+                        f"# reason: {reason}\n"
+                        f"# file: {rel_path}  outer_attempt: {attempt}  gen_attempt: {gen_attempt}\n"
+                        f"# prompt_chars: {len(query)}\n"
+                        f"{'='*60}\n## PROMPT\n{'='*60}\n{query}\n"
+                        f"{'='*60}\n## RESPONSE\n{'='*60}\n{resp}\n",
+                        encoding="utf-8",
+                    )
+                    _log(f"  [{module_name}] Stream saved → {_path}")
+                except Exception as _e:
+                    _log(f"  [{module_name}] Could not save stream log: {_e}")
+
             block = ""
             for _gen_attempt in range(2):
                 if _gen_attempt == 0:
@@ -7750,11 +8231,17 @@ INTERNAL MODULE RULES — these tests live inside the source file, not in an ext
                 # all #[test] functions have empty or comment-only bodies.
                 if block and not re.search(r'#\[test\][^{]*\{[^}]*\S', block, re.DOTALL):
                     _log(f"  [{module_name}] Skeleton-only response for {rel_path} — discarding.")
+                    _save_stream_log(_gen_attempt, _query, response or "", "skeleton_only")
                     block = ""
                 if block:
                     break
+                _raw_snippet = response[:300].replace('\n', ' ') if response else "(no output)"
                 if _gen_attempt == 0:
-                    _log(f"  [{module_name}] Empty generation response for {rel_path} — retrying.")
+                    _log(f"  [{module_name}] Empty generation for {rel_path} — retrying. Raw: {_raw_snippet}")
+                    _save_stream_log(_gen_attempt, _query, response or "", "empty_generation")
+                else:
+                    _log(f"  [{module_name}] Empty generation for {rel_path} (retry also failed). Raw: {_raw_snippet}")
+                    _save_stream_log(_gen_attempt, _query, response or "", "empty_generation_retry")
             if block:
                 # Safety net: re-inject allow line if LLM dropped it from the template.
                 # Check only for the exact full allow line — a partial #[allow(unused_imports)]
@@ -7797,7 +8284,10 @@ INTERNAL MODULE RULES — these tests live inside the source file, not in an ext
                 _block_fix_attempt = 0
                 _block_committed = False
                 while True:
-                    candidate = existing_text.rstrip() + "\n\n" + block + "\n"
+                    _excl_block = block
+                    if COVERAGE_BACKEND == "grcov":
+                        _excl_block = "// GRCOV_EXCL_START\n" + block + "\n// GRCOV_EXCL_STOP"
+                    candidate = _raw_text.rstrip() + "\n\n" + _excl_block + "\n"
                     abs_path.write_text(candidate, encoding="utf-8")
                     check = subprocess.run(
                         ["cargo", "test", "--no-run", "-p", module_name],
@@ -7848,7 +8338,8 @@ INTERNAL MODULE RULES — these tests live inside the source file, not in an ext
                     # and was the main cause of fix prompts exceeding the 120K char limit.
                     # Drop low-priority sections if compile_err+block would push total
                     # past TASK0C_PROMPT_CHAR_CAP (120K chars / ~30K tokens).
-                    _fix_extra = len(compile_err) + len(block) + len(_fix_history_section) + 4000
+                    _compile_err_capped = compile_err[-3_000:] if len(compile_err) > 3_000 else compile_err
+                    _fix_extra = len(_compile_err_capped) + len(block) + len(_fix_history_section) + 4000
                     _fix_core = secs['cargo'] + secs['full_source'] + secs['fn_bodies'] + secs['symbols']
                     _fix_optional = secs['integ_tests'] + secs['siblings']
                     _FIX_CHAR_LIMIT = TASK0C_PROMPT_CHAR_CAP
@@ -7857,7 +8348,7 @@ INTERNAL MODULE RULES — these tests live inside the source file, not in an ext
 Fix ONLY the test block so it compiles. Return the corrected <FILE path="gen_tests_block"> block.
 {_fix_history_section}
 Compile error (read carefully — this is the ONLY thing to fix):
-{compile_err}
+{_compile_err_capped}
 
 Current test block (fix this):
 {block}
@@ -7916,6 +8407,22 @@ INTERNAL MODULE RULES — these tests live inside the source file, not in an ext
                 _log_task0c_attempt(project_dir, rel_path, attempt, "", "", "no_block")
                 _log(f"  [{module_name}] No test block extracted for {rel_path}.")
 
+            # Quick per-file coverage snapshot after a successful append.
+            if _block_committed:
+                _qcov_result = _quick_file_coverage(project_dir, module_name, rel_path)
+                if _qcov_result is not None:
+                    _qcov, _qcov_able = _qcov_result
+                    _qpct = (_qcov / _qcov_able * 100.0) if _qcov_able else 0.0
+                    _log(f"  [{module_name}] {rel_path} quick-cov: {_qcov}/{_qcov_able} ({_qpct:.1f}%)")
+                    # Persist result so the monitor can merge it into the files overview.
+                    _qcache = Path("/tmp") / f"grcov_filecache_{module_name}.json"
+                    try:
+                        _cache = json.loads(_qcache.read_text()) if _qcache.exists() else {}
+                        _cache[rel_path] = {"covered": _qcov, "coverable": _qcov_able, "ts": time.time()}
+                        _qcache.write_text(json.dumps(_cache))
+                    except Exception:
+                        pass
+
             # Per-file stall detection: track whether uncovered line count improved.
             prev_best = file_best_uncov.get(rel_path, len(uncov_lines) + 1)
             if len(uncov_lines) < prev_best:
@@ -7926,7 +8433,7 @@ INTERNAL MODULE RULES — these tests live inside the source file, not in an ext
                     _condensed_working = _condense_rust_to_signatures(_old_block, "gen_tests.rs")
                     file_what_worked[rel_path] = (
                         f"Previous attempt covered {prev_best - len(uncov_lines)} more line(s). "
-                        f"Reuse these construction patterns:\n{_condensed_working[:800]}"
+                        f"Reuse these construction patterns:\n{_condensed_working[:_WORKING_CAP]}"
                     )
                 file_retrospectives.pop(rel_path, None)  # stale retrospective no longer valid
             else:
@@ -7975,6 +8482,17 @@ INTERNAL MODULE RULES — these tests live inside the source file, not in an ext
                 _log(f"    {sf}: {n_uncov} uncovered lines. Last attempts:\n{history}")
             _log(f"  Action required: improve the generation prompt or add manual tests for these files.")
             sys.exit(1)
+
+        # --- Graceful stop check ---
+        # If /tmp/pipeline_graceful_stop exists, finish this attempt cleanly and exit.
+        _graceful_sentinel = Path("/tmp/pipeline_graceful_stop")
+        if _graceful_sentinel.exists():
+            try:
+                _graceful_sentinel.unlink()
+            except OSError:
+                pass
+            _log(f"  [{module_name}] Graceful stop requested — attempt {attempt} complete. Exiting.")
+            sys.exit(0)
 
     _log(f"  [{module_name}/{_cluster_label}] Finished augmentation: {coverage:.1f}% coverage after {attempt} attempt(s).")
     return coverage, covered_lines
@@ -8489,6 +9007,58 @@ def cmd_best_models(vram_gb: float = 32.0) -> None:
     print(_legend)
 
 
+def _ensure_vllm_ready(root: Path) -> None:
+    """If BACKEND=vllm, auto-start docker_vllm.sh if the server is not responding,
+    then wait until the inference endpoint accepts requests (health passes before
+    CUDA graph compilation finishes, so an inference probe is required)."""
+    import urllib.request, urllib.error
+
+    vllm_url = os.getenv("VLLM_BASE_URL", "http://localhost:8000/v1")
+    port = vllm_url.split(":")[-1].split("/")[0]
+    health_url = f"http://localhost:{port}/health"
+    infer_url  = f"http://localhost:{port}/v1/chat/completions"
+    model      = os.getenv("VLLM_MODEL_NAME", "")
+
+    def _health_ok() -> bool:
+        try:
+            urllib.request.urlopen(health_url, timeout=5)
+            return True
+        except Exception:
+            return False
+
+    if not _health_ok():
+        _log(f"  vLLM not responding at {health_url} — launching docker_vllm.sh ...")
+        script = root / "docker_vllm.sh"
+        result = subprocess.run(["bash", str(script)], cwd=str(root))
+        if result.returncode != 0:
+            _log(f"  [warn] docker_vllm.sh exited {result.returncode} — proceeding anyway")
+    else:
+        _log(f"  vLLM health OK at {health_url} — checking inference readiness ...")
+
+    payload = json.dumps({
+        "model": model,
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 1,
+    }).encode()
+    for i in range(1, 241):
+        try:
+            req = urllib.request.Request(
+                infer_url, data=payload,
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=10):
+                pass
+            elapsed = i * 5
+            _log(f"  vLLM inference ready ({elapsed // 60}m {elapsed % 60}s).")
+            return
+        except Exception:
+            pass
+        time.sleep(5)
+        if i % 12 == 0:
+            _log(f"  ... vLLM inference not ready yet ({i * 5 // 60}m elapsed)")
+    _log("  [warn] vLLM inference not ready after 20 min — proceeding anyway")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Deterministic process pipeline.")
     parser.add_argument("--project", default="agave",
@@ -8543,6 +9113,23 @@ def main():
 
     init_log(root, nolog=args.nolog, progress_mode=args.progress)
 
+    _ph = _git_file_hash(root, "pipeline.py")
+    _mh = _git_file_hash(root, "monitor.py")
+    _params = []
+    if args.repo:
+        _params.append(f"--repo {args.repo}")
+    if args.project and not args.repo:
+        _params.append(f"--project {args.project}")
+    if args.clean:
+        _params.append("--clean")
+    if args.augment_tests:
+        _params.append("--augment-tests")
+    if args.progress:
+        _params.append("--progress")
+    if args.nolog:
+        _params.append("--nolog")
+    _log(f"  pipeline.py [{_ph}]  monitor.py [{_mh}]  params: {' '.join(_params) or '(none)'}")
+
     _backend_name = os.getenv("BACKEND", "ollama").lower()
     if MODEL.startswith("claude") or _backend_name == "claude":
         provider = "Claude (Anthropic API)"
@@ -8558,6 +9145,9 @@ def main():
     _log(f"Context budget: {MODEL_CONTEXT_CHARS:,} chars  "
          f"(SINGLE_CALL={SINGLE_CALL_CHAR_LIMIT:,}  FILE={FILE_CHAR_LIMIT:,}  "
          f"INTERMEDIATE={INTERMEDIATE_CHAR_LIMIT:,})")
+
+    if _backend_name == "vllm":
+        _ensure_vllm_ready(root)
 
     if args.clean:
         _log("\n-- --clean requested: wiping all generated state --")
@@ -8617,13 +9207,17 @@ def main():
     # TASK 0b (discovery): produce coverage_strategy.md — import idioms, type construction
     # patterns, feature flags, test conventions. Injected into all TASK 0c, 1, and 2 prompts.
     strategy_path = project_dir / COVERAGE_STRATEGY_NAME
-    coverage_strategy = task0b_discovery(
-        strategy_path, project_dir, test_files, readme_text, project_profile,
-        clusters=_clusters,
-    )
-    _mark_phase(project_dir, "task0b", "done",
-                detail=f"{len(coverage_strategy)} chars", source_hash=_src_hash)
-    git_commit(project_dir, "pipeline: task0b done")
+    if _phase_valid(project_dir, "task0b", _src_hash) and strategy_path.exists():
+        coverage_strategy = strategy_path.read_text().strip()
+        _log(f"  task0b already done (hash match) — loading coverage_strategy.md ({len(coverage_strategy):,} chars).")
+    else:
+        coverage_strategy = task0b_discovery(
+            strategy_path, project_dir, test_files, readme_text, project_profile,
+            clusters=_clusters,
+        )
+        _mark_phase(project_dir, "task0b", "done",
+                    detail=f"{len(coverage_strategy)} chars", source_hash=_src_hash)
+        git_commit(project_dir, "pipeline: task0b done")
 
     # TASK 0b: build dependency graph for bottom-up module integration.
     # Implementation selected by DEPENDENCY_GRAPH in .env (default: static).
@@ -8694,6 +9288,9 @@ def main():
         _log(f"\n{'━' * 60}")
         _log(f"  Starting compiler cluster: {_cluster.name}")
         _log(f"{'━' * 60}")
+        if _cluster.gated_files:
+            _log(f"  [cluster] Skipping {len(_cluster.gated_files)} gated file(s) not compiled in this cluster: "
+                 f"{', '.join(sorted(_cluster.gated_files))}")
         _mark_phase(project_dir, f"task0c/{_cluster.name}", "in_progress",
                     detail="starting", source_hash=_src_hash)
         _set_current(project_dir, f"task0c/{_cluster.name} / starting")
@@ -8871,7 +9468,9 @@ def main():
                         f"\n  WARNING at strip: '{module_name}' coverage is {_strip_cov:.1f}% "
                         f"— stripping anyway. Reconstruction may be incomplete."
                     )
-            git_commit(project_dir, f"pipeline: pre-strip — {module_name} task0c complete")
+            if not git_commit(project_dir, f"pipeline: pre-strip — {module_name} task0c complete"):
+                _log(f"  [ABORT] pre-strip commit failed for '{module_name}' — refusing to strip. Fix git state and retry.")
+                raise RuntimeError(f"pre-strip commit failed for {module_name}")
             git_tag(project_dir, f"pre-strip-{module_name}")
             strip_module_source(project_dir, module_dir)
             strip_sentinel.parent.mkdir(parents=True, exist_ok=True)
@@ -9149,7 +9748,7 @@ This is a Rust procedural macro crate. Strict rules apply:
                                 failure_type = "build"
                                 test_output += (
                                     f"\n\nDIAGNOSIS (--no-run): build failed — "
-                                    f"{nr_result.stderr[:2000]}"
+                                    f"{nr_result.stderr[:_FIX_ERR_CAP]}"
                                 )
                             else:
                                 failure_type = "no_tests"
