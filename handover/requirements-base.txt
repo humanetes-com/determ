@@ -1,4 +1,0 @@
-anthropic
-openai
-python-dotenv
-huggingface_hub

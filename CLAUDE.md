@@ -2,9 +2,11 @@ See autopilot.md for autopilot behavior rules.
 
 Past session handovers: see handover/HANDOVERS.md.
 
-Do not use RemoteTrigger or create remote schedule routines. No code or data should be sent to Anthropic's cloud servers via scheduled agents.
+Do not use RemoteTrigger, ScheduleWakeup, or create remote schedule routines. No code or data should be sent to Anthropic's cloud servers via scheduled agents.
 
 IMPORTANT: Always produce compact structured output instead of markdown prose when generating guides, strategy docs, or rule sets for LLM consumption. Use tables, symbolic notation, and abbreviated rules rather than verbose English paragraphs. Prose is an inefficient token format for conveying structured rules to an LLM.
+
+IMPORTANT: Keep all responses short, condensed, and unformatted. No markdown headers, no bullet lists, no tables in prose responses. Plain short sentences only. Code blocks are fine.
 
 ---
 
@@ -12,6 +14,12 @@ IMPORTANT: Always produce compact structured output instead of markdown prose wh
 
 ## Never install dependencies manually
 Every new tool, binary, or Python package must be added to `setup.sh` (and `requirements.txt` for Python deps). Never run `pip install`, `cargo install`, or `rustup component add` directly — those are one-off fixes that break reproducibility. The correct action is always: add to setup, then run setup.
+
+## Pipeline restart timestamps
+Each restart is logged as `PIPELINE STARTED — <timestamp> UTC` in `logs/pipeline_anyhow.log`. Check this to confirm which code version is running.
+
+## Static analysis after every Python edit
+After modifying any `.py` file, run `bash check.sh` and fix **all** reported errors — including pre-existing ones unrelated to your change. Never leave check.sh failing.
 
 ## Fix processes, not symptoms
 Do not patch individual failures in isolation. Ask: what process produced this failure, and how should that process be improved so the failure cannot recur? Examples:

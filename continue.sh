@@ -183,7 +183,7 @@ fi
 # ---------------------------------------------------------------------------
 _PIPELINE_ARGS="--project anyhow"
 [[ "$_WIPE" == true ]] && _PIPELINE_ARGS="--repo https://github.com/dtolnay/anyhow --clean"
-nohup .venv/bin/python pipeline.py $_PIPELINE_ARGS > "$LOG_DIR/pipeline_anyhow.log" 2>&1 &
+nohup .venv/bin/python pipeline.py $_PIPELINE_ARGS >> "$LOG_DIR/pipeline_anyhow.log" 2>&1 &
 echo "Pipeline started (PID $!) — backend: $BACKEND"
 echo "Pipeline log : tail -f $LOG_DIR/pipeline_anyhow.log"
 echo "Guards log   : tail -f $LOG_DIR/pipeline_guards.log"

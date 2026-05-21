@@ -4,9 +4,33 @@
 #
 # Installs: Rust, cargo tools, Python venv + deps.
 # Backend-specific: Ollama + model pull (BACKEND=ollama) or vLLM (BACKEND=vllm).
-# Usage: bash setup.sh
+#
+# Usage:
+#   bash setup.sh                  — full install
+#   bash setup.sh rust nightly     — install nightly toolchain only (called by pipeline)
 
 set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Optional component arguments
+# ---------------------------------------------------------------------------
+_ONLY_RUST_NIGHTLY=false
+if [[ "${1:-}" == "rust" && "${2:-}" == "nightly" ]]; then
+    _ONLY_RUST_NIGHTLY=true
+fi
+
+if [[ "$_ONLY_RUST_NIGHTLY" == true ]]; then
+    export PATH="$HOME/.cargo/bin:$PATH"
+    echo "-- Rust nightly toolchain --"
+    if rustup toolchain list 2>/dev/null | grep -q "^nightly"; then
+        echo "[skip] nightly toolchain already installed"
+    else
+        echo "       Installing nightly toolchain (profile=minimal)..."
+        rustup toolchain install nightly --profile minimal 2>&1 | tail -3
+        echo "[ok]   nightly toolchain installed"
+    fi
+    exit 0
+fi
 
 # Suppress color output from all subcommands (safe in screen/dumb terminals)
 export NO_COLOR=1

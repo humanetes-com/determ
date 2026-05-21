@@ -154,8 +154,8 @@ def gpu():
 def _parse_coverage_json(project_dir):
     """Read per-file coverage from the most recent grcov/tarpaulin JSON output.
     Returns {rel_path: (covered, coverable)}, e.g. {'src/error.rs': (248, 285)}."""
-    result = {}
-    main_mtime = 0
+    result: dict[str, tuple[int, int]] = {}
+    main_mtime: float = 0.0
 
     # grcov coveralls JSON (pipeline writes /tmp/grcov_{module}.json).
     # Exclude quick/filecache variants — those are not full measurements.
@@ -225,7 +225,11 @@ def _find_project_dir():
 
 def _parse_pipeline_state(project_dir):
     """Parse pipeline_state.md → cluster list, done set, current cluster, latest coverage."""
-    r = {"clusters": [], "done": set(), "current": "", "coverage": ""}
+    clusters: list[str] = []
+    done: set[str] = set()
+    current = ""
+    coverage = ""
+    r: dict[str, object] = {"clusters": clusters, "done": done, "current": current, "coverage": coverage}
     if not project_dir:
         return r
     try:
@@ -234,14 +238,15 @@ def _parse_pipeline_state(project_dir):
         return r
     m = re.search(r'\d+ clusters?: ([^\n]+)', text)
     if m:
-        r["clusters"] = [c.strip() for c in m.group(1).split(",")]
+        clusters[:] = [c.strip() for c in m.group(1).split(",")]
     for line in text.splitlines():
         m = re.match(r'\[task0c/(\w+)\]\s+(done|in_progress)', line)
-        if m and m.group(1) in r["clusters"]:
+        if m and m.group(1) in clusters:
             if m.group(2) == "done":
-                r["done"].add(m.group(1))
-            elif m.group(2) == "in_progress" and not r["current"]:
-                r["current"] = m.group(1)
+                done.add(m.group(1))
+            elif m.group(2) == "in_progress" and not current:
+                current = m.group(1)
+                r["current"] = current
     # Most recent coverage: scan state lines in reverse for first task0c entry with a %
     for line in reversed(text.splitlines()):
         if "task0c" in line:
@@ -254,52 +259,91 @@ def _parse_pipeline_state(project_dir):
 
 def _parse_pipeline_log():
     """Parse PIPELINE_LOG → attempt, file progress, uncovered-lines history."""
-    r = {
-        "attempt": "?", "max_attempt": "?", "errors": 0,
-        "current_file": "?", "files_this_pass": [], "all_files": [],
-        "file_history": {},    # file -> [uncov_count, …] across passes
-        "queue_history": {},   # basename -> [uncov after attempt 1, attempt 2, …]
-        "current_cluster": "", "coverage": "", "last_line": "", "age": 0,
-    }
+    attempt = "?"
+    max_attempt = "?"
+    errors = 0
+    current_file = "?"
+    files_this_pass: list[str] = []
+    all_files: list[str] = []
+    cluster_files: list[str] = []
+    file_history: dict[str, list[int]] = {}
+    queue_history: dict[str, list[int]] = {}
+    current_cluster = ""
+    coverage = ""
+    last_line = ""
+    age: float = 0.0
+
+    def _r() -> dict[str, object]:
+        return {
+            "attempt": attempt, "max_attempt": max_attempt, "errors": errors,
+            "current_file": current_file, "files_this_pass": files_this_pass,
+            "all_files": all_files, "cluster_files": cluster_files,
+            "file_history": file_history, "queue_history": queue_history,
+            "current_cluster": current_cluster, "coverage": coverage,
+            "last_line": last_line, "age": age,
+        }
+
     if not os.path.exists(PIPELINE_LOG):
-        return r
+        return _r()
     try:
-        r["age"] = time.time() - os.path.getmtime(PIPELINE_LOG)
-        lines = open(PIPELINE_LOG).read().splitlines()
+        age = time.time() - os.path.getmtime(PIPELINE_LOG)
+        # Read only the last 512 KB — the log can grow to many GB.
+        _TAIL_BYTES = 512 * 1024
+        with open(PIPELINE_LOG, "rb") as _fh:
+            _fh.seek(0, 2)
+            _size = _fh.tell()
+            _fh.seek(max(0, _size - _TAIL_BYTES))
+            _raw = _fh.read()
+        lines = _raw.decode("utf-8", errors="replace").splitlines()
+        if _size > _TAIL_BYTES:
+            lines = lines[1:]  # drop potentially partial first line
     except Exception:
-        return r
-    r["last_line"] = next((l.strip() for l in reversed(lines) if l.strip()), "")
-    this_pass = []
+        return _r()
+    last_line = next((l.strip() for l in reversed(lines) if l.strip()), "")
+    this_pass: list[str] = []
+    _cluster_files: list[str] = []
     for line in lines:
         if m := re.search(r'Attempt\s+(\d+)/(\d+)', line):
-            r["attempt"], r["max_attempt"] = m.group(1), m.group(2)
+            attempt, max_attempt = m.group(1), m.group(2)
             this_pass = []
         if "Compile error" in line:
-            r["errors"] += 1
+            errors += 1
         if m := re.search(r'Starting compiler cluster:\s*(\w+)', line):
-            r["current_cluster"] = m.group(1)
+            new_cl = m.group(1)
+            if new_cl != current_cluster:
+                current_cluster = new_cl
+                _cluster_files = []
         if m := re.search(r'\[task0c planner\]\s+(src/\S+\.rs):', line):
             f = m.group(1)
             if f not in this_pass:
                 this_pass.append(f)
-            if f not in r["all_files"]:
-                r["all_files"].append(f)
-            r["current_file"] = f
+            if f not in all_files:
+                all_files.append(f)
+            if f not in _cluster_files:
+                _cluster_files.append(f)
+            current_file = f
+        # "File X/Y: src/..." — every file processed in a pass, including skipped ones
+        if m := re.search(r'File \d+/\d+: (src/\S+\.rs)', line):
+            f = m.group(1)
+            if f not in _cluster_files:
+                _cluster_files.append(f)
+            current_file = f
         if m := re.search(r'Appended gen_tests\S* to (src/\S+\.rs)\s+\((\d+) uncovered', line):
             f, n = m.group(1), int(m.group(2))
-            if f not in r["file_history"]:
-                r["file_history"][f] = []
-            r["file_history"][f].append(n)
+            if f not in file_history:
+                file_history[f] = []
+            file_history[f].append(n)
         if m := re.search(r'Coverage:\s*([\d.]+)%', line):
-            r["coverage"] = m.group(1) + "%"
+            coverage = m.group(1) + "%"
         if m := re.search(r'Queue: \d+ file\(s\) — (.+)', line):
             for fm in re.finditer(r'(\w+\.rs)\((\d+)\)', m.group(1)):
                 fname, count = fm.group(1), int(fm.group(2))
-                if fname not in r["queue_history"]:
-                    r["queue_history"][fname] = []
-                r["queue_history"][fname].append(count)
-    r["files_this_pass"] = this_pass
-    return r
+                if fname not in queue_history:
+                    queue_history[fname] = []
+                queue_history[fname].append(count)
+    files_this_pass[:] = this_pass
+    cluster_files[:] = _cluster_files
+    return _r()
 
 
 def pipeline_status():
@@ -326,6 +370,9 @@ def pipeline_status():
     cur_cl   = state["current"] or prog["current_cluster"]
 
     rows = []
+
+    # vLLM backend status (loading indicator / docker logs when not ready)
+    rows.extend(_vllm_status())
 
     # Row 1: compact status line
     rows.append(
@@ -354,7 +401,9 @@ def pipeline_status():
         rows.append(row2)
 
     # Row 3: file progress bar within current pass
-    all_f  = prog["all_files"]
+    # For non-stable clusters use cluster_files as the denominator (avoids stale all_files count).
+    _cl_files = prog["cluster_files"]
+    all_f  = _cl_files if (cur_cl and cur_cl not in ("stable", "") and _cl_files) else prog["all_files"]
     this_p = prog["files_this_pass"]
     ft = max(len(all_f), len(this_p))
     fi = len(this_p)
@@ -393,6 +442,14 @@ def pipeline_status():
     cov_data = _parse_coverage_json(proj_dir)
     if cov_data:
         cur_base = os.path.basename(prog["current_file"]) if prog["current_file"] != "?" else ""
+        # For non-default clusters, restrict to files the cluster is actually targeting.
+        # If the cluster hasn't processed any files yet (e.g. harness fix running), show all.
+        _cluster_filter: set[str] | None = None
+        if cur_cl and cur_cl not in ("stable", ""):
+            cf = prog["cluster_files"]
+            if cf:
+                _cluster_filter = set(cf)
+
         # Sort: pipeline processing order for current pass (same index as file counter 8/8),
         # then files from older passes not yet reprocessed, then unknown files by coverage asc.
         # Only show src/ files — tests/ and build.rs are excluded from pipeline coverage.
@@ -403,9 +460,17 @@ def pipeline_status():
         _fallback = _n + len(_extra)
         sorted_files = sorted(
             [(name, cov, cvbl) for name, (cov, cvbl) in cov_data.items()
-             if name.startswith("src/")],
+             if name.startswith("src/")
+             and (_cluster_filter is None or name in _cluster_filter)],
             key=lambda x: _order.get(x[0], _fallback + (x[1] / x[2] if x[2] else 0)),
         )
+        # Ensure files_this_pass entries always appear (even if not in grcov JSON)
+        _in_sorted = {name for name, *_ in sorted_files}
+        for _f in prog["files_this_pass"]:
+            if _f not in _in_sorted and _f.startswith("src/"):
+                if _cluster_filter is None or _f in _cluster_filter:
+                    sorted_files.append((_f, 0, 0))
+        sorted_files.sort(key=lambda x: _order.get(x[0], _fallback + (x[1] / x[2] if x[2] else 0)))
         max_name = max((len(os.path.basename(n)) for n, *_ in sorted_files), default=10)
         n_total  = len(sorted_files)
         n_done   = sum(1 for _, cov, cvbl in sorted_files if cov >= cvbl)
@@ -414,14 +479,18 @@ def pipeline_status():
         queue_hist = prog["queue_history"]
         for name, covered, coverable in sorted_files:
             short   = os.path.basename(name)
-            pct     = covered / coverable * 100 if coverable else 0.0
             is_cur  = (short == cur_base)
             arrow   = yellow("▶") if is_cur else " "
+            hist    = queue_hist.get(short, [])
+            trend   = dim("  " + "→".join(str(c) for c in hist[-5:])) if hist else ""
+            if coverable == 0:
+                # file not in grcov data yet (all lines excluded or not compiled)
+                rows.append(f"{arrow} {short.ljust(max_name)}  [{bar(0, 14)}] {dim('  n/a')}{trend}")
+                continue
+            pct     = covered / coverable * 100
             done    = covered >= coverable
             col     = green if done else (yellow if pct >= 80 else red)
             tick    = green(" ✓") if done else ""
-            hist    = queue_hist.get(short, [])
-            trend   = dim("  " + "→".join(str(c) for c in hist[-5:])) if hist else ""
             rows.append(
                 f"{arrow} {short.ljust(max_name)}  [{bar(pct, 14)}] {col(f'{pct:5.1f}%')}"
                 f"  {covered}/{coverable}{tick}{trend}"
@@ -432,6 +501,86 @@ def pipeline_status():
 
 _prev_len        = 0
 _THINK_CAP_CHARS = 40_000
+
+def _read_backend() -> str:
+    try:
+        for line in open(os.path.join(SCRIPT_DIR, ".env")):
+            m = re.match(r'^\s*BACKEND\s*=\s*(\S+)', line)
+            if m:
+                return m.group(1).strip().lower()
+    except Exception:
+        pass
+    return "ollama"
+
+_vllm_cache: tuple[float, list[str]] = (0.0, [])
+
+def _vllm_status() -> list[str]:
+    """Return status rows for the vLLM backend; empty if backend != vllm.
+
+    Cached: health check runs at most once per 3 s; docker log fetch at most once per 8 s.
+    Never blocks the render loop for more than ~0.3 s.
+    """
+    global _vllm_cache
+    if _read_backend() != "vllm":
+        return []
+    import socket, urllib.request
+    now = time.time()
+    cache_age = now - _vllm_cache[0]
+
+    # Fast TCP pre-check — fails instantly if nothing listens on :8000.
+    def _tcp_open() -> bool:
+        try:
+            s = socket.create_connection(("127.0.0.1", 8000), timeout=0.3)
+            s.close()
+            return True
+        except OSError:
+            return False
+
+    # Return cached result if fresh enough (3 s when healthy, 3 s when loading).
+    if cache_age < 3.0:
+        return _vllm_cache[1]
+
+    healthy = False
+    if _tcp_open():
+        try:
+            urllib.request.urlopen("http://localhost:8000/health", timeout=0.5)
+            healthy = True
+        except Exception:
+            pass
+
+    if healthy:
+        result = [green("vLLM  ✓  healthy")]
+        _vllm_cache = (now, result)
+        return result
+
+    rows: list[str] = [yellow("vLLM  ◑  loading (not yet ready)")]
+
+    # Only re-fetch docker logs every 8 s (they're slow).
+    if cache_age >= 8.0 or not _vllm_cache[1]:
+        try:
+            cid = ""
+            cid_file = "/tmp/vllm_container.id"
+            if os.path.exists(cid_file):
+                cid = open(cid_file).read().strip()
+            if not cid:
+                cid = subprocess.check_output(
+                    ["docker", "ps", "--filter", "ancestor=vllm/vllm-openai:latest",
+                     "--format", "{{.ID}}", "--latest"],
+                    stderr=subprocess.DEVNULL, timeout=2, text=True
+                ).strip()
+            if cid:
+                logs = subprocess.check_output(
+                    ["docker", "logs", "--tail", "6", cid],
+                    stderr=subprocess.STDOUT, timeout=2, text=True
+                ).splitlines()
+                w = _w() - 4
+                for line in logs:
+                    rows.append(dim((line[:w-1] + "…") if len(line) > w else line))
+        except Exception:
+            pass
+
+    _vllm_cache = (now, rows)
+    return rows
 
 def _parse_max_tokens():
     try:
@@ -645,12 +794,19 @@ def _bottom_bar():
 BOTTOM_LINES = 2   # action/feedback msg + fixed legend
 
 
-def _log_lines(log_path):
-    """Return word-wrapped lines from a log file."""
+def _log_lines(log_path, tail_bytes: int = 2 * 1024 * 1024):
+    """Return word-wrapped lines from a log file (last tail_bytes only)."""
     w = _w()
     try:
-        with open(log_path, encoding="utf-8", errors="replace") as f:
-            raw = f.read().splitlines()
+        with open(log_path, "rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            fh.seek(max(0, size - tail_bytes))
+            raw_bytes = fh.read()
+        raw_str = raw_bytes.decode("utf-8", errors="replace")
+        raw = raw_str.splitlines()
+        if size > tail_bytes:
+            raw = raw[1:]  # drop partial first line
     except FileNotFoundError:
         return [red(f"  {log_path} not found")]
     except Exception as e:

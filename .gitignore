@@ -8,4 +8,4 @@ __pycache__
 *.log
 logs/
 tmp
-handover
+handover/
