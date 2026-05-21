@@ -8656,10 +8656,7 @@ INTERNAL MODULE RULES — these tests live inside the source file, not in an ext
                 _block_fix_attempt = 0
                 _block_committed = False
                 while True:
-                    _excl_block = block
-                    if COVERAGE_BACKEND == "grcov":
-                        _excl_block = "// GRCOV_EXCL_START\n" + block + "\n// GRCOV_EXCL_STOP"
-                    candidate = _raw_text.rstrip() + "\n\n" + _excl_block + "\n"
+                    candidate = _raw_text.rstrip() + "\n\n" + block + "\n"
                     abs_path.write_text(candidate, encoding="utf-8")
                     check = subprocess.run(
                         ["cargo", "test", "--no-run", "-p", module_name],
