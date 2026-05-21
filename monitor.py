@@ -32,9 +32,14 @@ def yellow(s):   return f"\033[33m{s}\033[0m"
 def rev(s):      return f"\033[7m{s}\033[0m"   # reverse video (highlight)
 def bg_white(s): return f"\033[30;107m{s}\033[0m"  # black text on bright white background
 
-def bar(pct, width=18):
+def bar(pct, width=18, label: str = ""):
     filled = round(pct / 100 * width)
-    return "█" * filled + "░" * (width - filled)
+    s = list("█" * filled + "░" * (width - filled))
+    if label and len(label) <= width:
+        start = 0
+        for i, ch in enumerate(label):
+            s[start + i] = ch
+    return "".join(s)
 
 def _plain(s):
     return re.sub(r'\033\[[0-9;]*[a-zA-Z]', '', s)
@@ -268,6 +273,7 @@ def _parse_pipeline_log():
     cluster_files: list[str] = []
     file_history: dict[str, list[int]] = {}
     queue_history: dict[str, list[int]] = {}
+    quick_cov_history: dict[str, list[float]] = {}
     current_cluster = ""
     coverage = ""
     last_line = ""
@@ -281,6 +287,7 @@ def _parse_pipeline_log():
             "file_history": file_history, "queue_history": queue_history,
             "current_cluster": current_cluster, "coverage": coverage,
             "last_line": last_line, "age": age,
+            "quick_cov_history": quick_cov_history,
         }
 
     if not os.path.exists(PIPELINE_LOG):
@@ -333,6 +340,13 @@ def _parse_pipeline_log():
             if f not in file_history:
                 file_history[f] = []
             file_history[f].append(n)
+        if m := re.search(r'(src/\S+\.rs)\s+quick-cov:\s*\d+/\d+\s+\(([\d.]+)%\)', line):
+            f, pct = m.group(1), float(m.group(2))
+            if f not in quick_cov_history:
+                quick_cov_history[f] = []
+            # Only append if value changed
+            if not quick_cov_history[f] or quick_cov_history[f][-1] != pct:
+                quick_cov_history[f].append(pct)
         if m := re.search(r'Coverage:\s*([\d.]+)%', line):
             coverage = m.group(1) + "%"
         if m := re.search(r'Queue: \d+ file\(s\) — (.+)', line):
@@ -476,24 +490,32 @@ def pipeline_status():
         n_done   = sum(1 for _, cov, cvbl in sorted_files if cov >= cvbl)
         rows.append(dim(f"  {'─' * max(4, min(w - 2, 60))}"))
         rows.append(f"  files overview — {n_done}/{n_total} complete")
-        queue_hist = prog["queue_history"]
+        queue_hist   = prog["queue_history"]
+        qcov_hist    = prog.get("quick_cov_history", {})
         for name, covered, coverable in sorted_files:
             short   = os.path.basename(name)
             is_cur  = (short == cur_base)
             arrow   = yellow("▶") if is_cur else " "
             hist    = queue_hist.get(short, [])
             trend   = dim("  " + "→".join(str(c) for c in hist[-5:])) if hist else ""
+            qhist   = qcov_hist.get(name, qcov_hist.get(short, []))
+            if len(qhist) >= 2:
+                qtrend = dim(f"  {qhist[-2]:.1f}%→") + f"{qhist[-1]:.1f}%"
+            elif len(qhist) == 1:
+                qtrend = dim(f"  {qhist[-1]:.1f}%")
+            else:
+                qtrend = ""
             if coverable == 0:
-                # file not in grcov data yet (all lines excluded or not compiled)
-                rows.append(f"{arrow} {short.ljust(max_name)}  [{bar(0, 14)}] {dim('  n/a')}{trend}")
+                rows.append(f"{arrow} {short.ljust(max_name)}  [{bar(0, 14, ' n/a ')}] {dim('  n/a')}{qtrend}{trend}")
                 continue
             pct     = covered / coverable * 100
             done    = covered >= coverable
             col     = green if done else (yellow if pct >= 80 else red)
             tick    = green(" ✓") if done else ""
+            _label  = f"{pct:.1f}%"
             rows.append(
-                f"{arrow} {short.ljust(max_name)}  [{bar(pct, 14)}] {col(f'{pct:5.1f}%')}"
-                f"  {covered}/{coverable}{tick}{trend}"
+                f"{arrow} {short.ljust(max_name)}  [{col(bar(pct, 14, _label))}]"
+                f"  {covered}/{coverable}{tick}{qtrend}{trend}"
             )
 
     return rows

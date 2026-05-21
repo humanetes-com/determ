@@ -377,3 +377,34 @@ above ensures it rarely triggers and that when it does, low-value content is tri
 `task0c_augment_module()`. Cargo.toml and integration test paths collected once per attempt loop
 (not per file) to avoid redundant disk reads.
 
+---
+
+## FR-020 — Truncation must always happen at semantic boundaries, never at raw byte offsets
+
+**Context:** Repeatedly, the pipeline introduces a size cap on some content (fn_bodies, source,
+siblings, history) using a raw byte slice (`content[:N]`). This always eventually produces
+broken output: a half-written function body with unclosed braces, a truncated import block,
+a split struct definition. The LLM receiving broken syntax produces worse output than receiving
+less content. This is a recurring failure mode that must be prevented by rule.
+
+**Rule:** Every truncation in the pipeline must cut at a semantic boundary appropriate to the
+content type:
+
+| Content type | Truncation boundary |
+|---|---|
+| `fn_bodies` (function blocks) | Last `// --- next function ---` separator before the cap |
+| Rust source / sibling files | Last complete line (`\n`) before the cap |
+| Attempt history / strategy | Last complete paragraph or entry before the cap |
+| Any structured list | Last complete item before the cap |
+
+Raw `content[:N]` slices are forbidden unless N is guaranteed to be a line boundary.
+Always append a `// ... (truncated)` marker so the LLM knows content was cut.
+
+**Why:** A broken function body is worse than no function body. The LLM will try to make sense
+of unclosed braces and produce syntactically invalid test code. Less complete content is always
+preferable to structurally invalid content.
+
+**Implementation:** `_build_task0c_prompt_sections()` uses `rfind` on the separator string to
+find the last clean boundary before the cap. Any new truncation site added to the pipeline must
+follow the same pattern. Code review should flag any `[:N]` slice on multi-line content.
+

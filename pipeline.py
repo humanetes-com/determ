@@ -811,6 +811,14 @@ def _parse_cmd(cmd: str) -> list[str]:
         return cmd.split()
 
 
+def trim_to_line(text: str, cap: int, marker: str = "\n// ... (truncated)") -> str:
+    """Truncate text at the last newline before cap — never mid-line. FR-020."""
+    if len(text) <= cap:
+        return text
+    cut = text.rfind("\n", 0, cap)
+    return text[:cut if cut != -1 else cap] + marker
+
+
 def smart_truncate(text, total_limit=8000, head=2000, tail=6000):
     """
     Keep the beginning (build errors, first failures) and end (summary) of
@@ -3912,7 +3920,7 @@ def task0_project_profile(profile_path: Path, test_files, readme_text: str) -> s
     _per_file_budget = max(200, _per_file_budget)
 
     test_entries = "\n\n".join(
-        f"  {rel}\n  (excerpt):\n  {content[:_per_file_budget].replace(chr(10), chr(10) + '  ')}"
+        f"  {rel}\n  (excerpt):\n  {trim_to_line(content, _per_file_budget).replace(chr(10), chr(10) + '  ')}"
         for rel, content in _sample_files
     )
 
@@ -4091,7 +4099,8 @@ def task0b_discovery(strategy_path: Path, project_dir: Path, test_files,
             # Cap per-file contribution — macro-heavy files (ensure.rs, error.rs) produce
             # 35-50k condensed despite stripping, consuming the entire budget alone.
             if len(condensed) > _SIBLING_CAP:
-                condensed = condensed[:_SIBLING_CAP] + "\n// ... (signatures truncated)"
+                _cut = condensed.rfind("\n", 0, _SIBLING_CAP)
+                condensed = condensed[:_cut if _cut != -1 else _SIBLING_CAP] + "\n// ... (signatures truncated)"
             # Priority = count of complexity markers (unsafe, #[cfg(, #[macro_export)
             priority = raw.count("unsafe") + raw.count("#[cfg(") + raw.count("#[macro_export")
             src_candidates.append((priority, src_file, rel, condensed))
@@ -4226,6 +4235,7 @@ def _build_task0c_prompt_sections(
     old_block: str = "",
     what_worked: str = "",
     retrospective: str = "",
+    uncov_lines: "set[int] | None" = None,
 ) -> dict:
     """
     BL-007: Build context sections for one TASK 0c per-file prompt.
@@ -4255,17 +4265,29 @@ def _build_task0c_prompt_sections(
     _src_cap = int(budget * 0.50)
     if len(existing_text) > _src_cap:
         _guard("task0c/source_cap", f"{rel_path}: {len(existing_text):,} chars → capped at {_src_cap:,} (50% budget)")
-    _src_text = existing_text if len(existing_text) <= _src_cap else (
-        existing_text[:_src_cap] + "\n// ... (source truncated — see fn_bodies below for uncovered code)\n"
-    )
+    if len(existing_text) <= _src_cap:
+        _src_text = existing_text
+    else:
+        _cut = existing_text.rfind("\n", 0, _src_cap)
+        _src_text = existing_text[:_cut if _cut != -1 else _src_cap] + "\n// ... (source truncated — see fn_bodies below for uncovered code)\n"
     full_source_section = (
         f"\nFull source file `{rel_path}` (file you are augmenting — note all `use` statements):\n"
         f"```rust\n{_src_text}\n```\n"
     )
 
+    _fn_cap = int(budget * 0.40)
+    if len(fn_bodies) <= _fn_cap:
+        _fn_text = fn_bodies
+    else:
+        _sep = "\n\n// --- next function ---\n\n"
+        _cutoff = fn_bodies.rfind(_sep, 0, _fn_cap)
+        if _cutoff == -1:
+            # Only one function and it's over budget — truncate at last newline
+            _cutoff = fn_bodies.rfind("\n", 0, _fn_cap)
+        _fn_text = fn_bodies[:_cutoff] + "\n\n// ... (fn_bodies truncated — remaining functions omitted)\n"
     fn_bodies_section = (
         f"\nFunctions with uncovered lines (complete bodies, `// !! UNCOVERED` marks gaps):\n"
-        f"```rust\n{fn_bodies}\n```\n"
+        f"```rust\n{_fn_text}\n```\n"
     ) if fn_bodies.strip() else ""
 
     symbols_section = (
@@ -4431,7 +4453,7 @@ def task0_project_context(context_path: Path, test_files, readme_text: str,
     _per_file_budget = max(200, _per_file_budget)
 
     test_excerpts = "\n\n".join(
-        f"--- {rel} ---\n{content[:_per_file_budget]}"
+        f"--- {rel} ---\n{trim_to_line(content, _per_file_budget)}"
         for rel, content in _sample_files
     )
 
@@ -4579,7 +4601,7 @@ class StaticTask1Synthesizer(Task1Synthesizer):
         """Return the prompt for single-call requirements extraction (overridable)."""
         strategy_section = (
             f"\n--- Coverage strategy (import patterns, type construction, test conventions) ---\n"
-            f"{coverage_strategy[:_STRATEGY_CAP]}\n"
+            f"{trim_to_line(coverage_strategy, _STRATEGY_CAP, "\n... (strategy truncated)")}\n"
         ) if coverage_strategy.strip() else ""
         genesis_exists = bool(existing_genesis.strip())
         if genesis_exists:
@@ -4865,7 +4887,7 @@ Output a plain structured list of the merged requirements. No filler, no code, n
         """Return the Stage-2 synthesis prompt (overridable by subclasses)."""
         strategy_section = (
             f"\n--- Coverage strategy (import patterns, type construction, test conventions) ---\n"
-            f"{coverage_strategy[:_STRATEGY_CAP]}\n"
+            f"{trim_to_line(coverage_strategy, _STRATEGY_CAP, "\n... (strategy truncated)")}\n"
         ) if coverage_strategy.strip() else ""
 
         # BL-022: inject type difficulty signals so synthesis focuses on hard types.
@@ -4932,7 +4954,7 @@ Only output the file `functional_requirements.md` using the markers above.
         ) if genesis.strip() else ""
         strategy_section = (
             f"\n--- Coverage strategy (import patterns, type construction, test conventions) ---\n"
-            f"{coverage_strategy[:_STRATEGY_CAP]}\n"
+            f"{trim_to_line(coverage_strategy, _STRATEGY_CAP, "\n... (strategy truncated)")}\n"
         ) if coverage_strategy.strip() else ""
         return f"""You are extracting functional requirements from a subset of test files for a software project.
 
@@ -4979,7 +5001,7 @@ class LLMTask1Synthesizer(StaticTask1Synthesizer):
                            f"{existing_genesis}\n") if genesis_exists else ""
         strategy_section = (
             f"\n--- Coverage strategy (import patterns, type construction, test conventions) ---\n"
-            f"{coverage_strategy[:_STRATEGY_CAP]}\n"
+            f"{trim_to_line(coverage_strategy, _STRATEGY_CAP, "\n... (strategy truncated)")}\n"
         ) if coverage_strategy.strip() else ""
         return f"""You are performing contract extraction from test files as part of a
 contract-first TDD reconstruction experiment.
@@ -5027,7 +5049,7 @@ Rules:
                            f"{existing_genesis}\n") if genesis_exists else ""
         strategy_section = (
             f"\n--- Coverage strategy (import patterns, type construction, test conventions) ---\n"
-            f"{coverage_strategy[:_STRATEGY_CAP]}\n"
+            f"{trim_to_line(coverage_strategy, _STRATEGY_CAP, "\n... (strategy truncated)")}\n"
         ) if coverage_strategy.strip() else ""
         _synthesis_cap = int(SINGLE_CALL_CHAR_LIMIT * 0.60)
         _capped_synthesis = (all_for_synthesis[-_synthesis_cap:]
@@ -5068,7 +5090,7 @@ Rules:
         ) if genesis.strip() else ""
         strategy_section = (
             f"\n--- Coverage strategy (import patterns, type construction, test conventions) ---\n"
-            f"{coverage_strategy[:_STRATEGY_CAP]}\n"
+            f"{trim_to_line(coverage_strategy, _STRATEGY_CAP, "\n... (strategy truncated)")}\n"
         ) if coverage_strategy.strip() else ""
         return f"""You are performing contract extraction from test files as the first step of
 a contract-first TDD reconstruction experiment.
@@ -5599,7 +5621,7 @@ class LLMTask2Generator(Task2Generator):
         plan_prompt = f"""You are planning the implementation of a software project.
 
 Process (genesis.md):
-{genesis[:_genesis_cap]}
+{trim_to_line(genesis, _genesis_cap, "\n... (genesis truncated)")}
 {profile_section}{workspace_section}{module_scope_section}{locked_dep_section}{build_error_section}{pitfalls_section_llm}{rules_section_llm}
 Functional requirements:
 {_functional_req_capped}
@@ -5670,7 +5692,7 @@ Output one file path per line, relative to the project root. No other text.
             file_prompt = f"""You are implementing a single source file for a software project.
 
 Process (genesis.md):
-{genesis[:_genesis_cap]}
+{trim_to_line(genesis, _genesis_cap, "\n... (genesis truncated)")}
 {profile_section}{module_scope_section}{locked_dep_section}
 Functional requirements:
 {_functional_req_capped}
@@ -5854,7 +5876,7 @@ RULES:
 
             strategy_section = (
                 f"\nCoverage strategy (import patterns, type construction, test conventions):\n"
-                f"{coverage_strategy[:_STRATEGY_CAP]}\n"
+                f"{trim_to_line(coverage_strategy, _STRATEGY_CAP, "\n... (strategy truncated)")}\n"
             ) if coverage_strategy.strip() else ""
             _req_cap2 = int(SINGLE_CALL_CHAR_LIMIT * 0.35)
             _ctx_cap2 = int(SINGLE_CALL_CHAR_LIMIT * 0.20)
@@ -6253,7 +6275,7 @@ def task2_fix_loop(
     if genesis_path and genesis_path.exists():
         genesis = read(genesis_path)
         if genesis.strip():
-            extra += f"\n--- genesis.md (methodology) ---\n{genesis[:_GENESIS_CAP]}\n"
+            extra += f"\n--- genesis.md (methodology) ---\n{trim_to_line(genesis, _GENESIS_CAP, "\n... (genesis truncated)")}\n"
 
     return generate_fix_loop(
         project_dir=project_dir,
@@ -6346,9 +6368,15 @@ def task4(genesis_path, functional_req_path, test_output, iteration, output_dir,
     _t4_genesis_cap    = 3_000
     _t4_req_cap        = int(SINGLE_CALL_CHAR_LIMIT * 0.25)
     _t4_output_cap     = int(SINGLE_CALL_CHAR_LIMIT * 0.25)
-    genesis            = genesis[-_t4_genesis_cap:] if len(genesis) > _t4_genesis_cap else genesis
-    functional_req     = functional_req[-_t4_req_cap:] if len(functional_req) > _t4_req_cap else functional_req
-    truncated_output   = test_output[-_t4_output_cap:] if len(test_output) > _t4_output_cap else test_output
+    def _tail_to_line(text: str, cap: int) -> str:
+        if len(text) <= cap: return text
+        tail = text[-cap:]
+        cut = tail.find("\n")
+        return ("... (truncated)\n" + tail[cut + 1:]) if cut != -1 else tail
+
+    genesis            = _tail_to_line(genesis, _t4_genesis_cap)
+    functional_req     = _tail_to_line(functional_req, _t4_req_cap)
+    truncated_output   = _tail_to_line(test_output, _t4_output_cap)
 
     # Regression / comparison section.
     # Prefer caller-supplied prev data (per-module mode); fall back to file lookup (legacy mode).
@@ -8182,11 +8210,11 @@ corrected content here
             _ordered_files = list(uncovered_by_file.items())
 
         _queue_summary = ", ".join(
-            f"{rel.split('/')[-1]}({len(unc)}{'*' if file_stall_counts.get(rel, 0) > 0 else ''})"
+            f"{rel.split('/')[-1]}({len(unc)}raw{'*' if file_stall_counts.get(rel, 0) > 0 else ''})"
             for rel, (_, unc) in _ordered_files
             if rel not in skipped_files
         )
-        _log(f"  [{module_name}] Queue: {len([r for r,_ in _ordered_files if r not in skipped_files])} file(s) — {_queue_summary}")
+        _log(f"  [{module_name}] Queue: {len([r for r,_ in _ordered_files if r not in skipped_files])} file(s) — {_queue_summary} (raw=pre-filter grcov count)")
 
         _active_files = [r for r, _ in _ordered_files if r not in skipped_files]
         attempt_n_within_outer = 0
@@ -8199,7 +8227,7 @@ corrected content here
                 continue
 
             _file_idx = _active_files.index(rel_path) + 1 if rel_path in _active_files else attempt_n_within_outer
-            _log(f"  [{module_name}] File {_file_idx}/{len(_active_files)}: {rel_path} ({len(uncov_lines)} uncovered lines)")
+            _log(f"  [{module_name}] File {_file_idx}/{len(_active_files)}: {rel_path} ({len(uncov_lines)} raw uncovered lines)")
 
             abs_path = project_dir / rel_path
             _raw_text = abs_path.read_text(encoding="utf-8") if abs_path.exists() else content
@@ -8282,7 +8310,8 @@ corrected content here
                 _log(f"  [{module_name}] {rel_path} — all remaining uncovered lines are in EXCL blocks, skipping.")
                 continue
 
-            fn_bodies = _extract_uncovered_functions(existing_text, uncov_lines, max_fns=5 if len(uncov_lines) > 10 else 0)
+            _log(f"  [{module_name}] {rel_path} — {len(uncov_lines)} actionable uncovered lines (post-filter)")
+            fn_bodies = _extract_uncovered_functions(existing_text, uncov_lines)
             pub_symbols = _extract_public_symbols(existing_text)
 
             # BL-002: retrieve prior attempt history for this file.
@@ -8322,6 +8351,7 @@ corrected content here
                 old_block=_old_block,
                 what_worked=file_what_worked.get(rel_path, ""),
                 retrospective=file_retrospectives.get(rel_path, ""),
+                uncov_lines=uncov_lines,
             )
 
             # Per-file negative constraints — injected after INTERNAL MODULE RULES when the
