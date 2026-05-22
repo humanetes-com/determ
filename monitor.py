@@ -298,6 +298,8 @@ def _parse_pipeline_log():
     coverage = ""
     last_line = ""
     age: float = 0.0
+    inner_retry: str = "?"
+    inner_retry_max: str = "?"
 
     def _r() -> dict[str, object]:
         return {
@@ -308,6 +310,7 @@ def _parse_pipeline_log():
             "current_cluster": current_cluster, "coverage": coverage,
             "last_line": last_line, "age": age,
             "quick_cov_history": quick_cov_history,
+            "inner_retry": inner_retry, "inner_retry_max": inner_retry_max,
         }
 
     if not os.path.exists(PIPELINE_LOG):
@@ -344,6 +347,7 @@ def _parse_pipeline_log():
         if m := re.search(r'Attempt\s+(\d+)/(\d+)', line):
             attempt, max_attempt = m.group(1), m.group(2)
             this_pass = []
+            inner_retry = "?"; inner_retry_max = "?"
         if "Compile error" in line:
             errors += 1
         if m := re.search(r'Starting compiler cluster:\s*(\w+)', line):
@@ -366,6 +370,11 @@ def _parse_pipeline_log():
             if f not in _cluster_files:
                 _cluster_files.append(f)
             current_file = f
+            inner_retry = "?"; inner_retry_max = "?"
+        if m := re.search(r'quick-retry\s+(\d+)/(\d+)\s+—', line):
+            inner_retry, inner_retry_max = m.group(1), m.group(2)
+        if m := re.search(r'Quick-retry \d+: (?:improvement|no improvement)', line):
+            inner_retry = "?"; inner_retry_max = "?"
         if m := re.search(r'Appended gen_tests\S* to (src/\S+\.rs)\s+\((\d+) uncovered', line):
             f, n = m.group(1), int(m.group(2))
             if f not in file_history:
@@ -419,47 +428,63 @@ def pipeline_status():
     # vLLM backend status (loading indicator / docker logs when not ready)
     rows.extend(_vllm_status())
 
-    # Row 1: compact status line
+    # ── Header: status + coverage ────────────────────────────────────────────
     _cov_data = _parse_coverage_json(_find_project_dir())
     _total_cov  = sum(c for c, _ in _cov_data.values())
     _total_cvbl = sum(v for _, v in _cov_data.values())
     _lines_str  = f"  {_total_cov}/{_total_cvbl}" if _total_cvbl else ""
     rows.append(
-        f"{status_str}  {bold(cur_cl or '?')}  cov={cov_col(bold(cov))}{dim(_lines_str)}  "
-        f"attempt {prog['attempt']}/{prog['max_attempt']}  "
+        f"{status_str}  cov={cov_col(bold(cov))}{dim(_lines_str)}  "
         f"age={age_s}  errors={prog['errors']}"
     )
 
-    # Row 2: cluster symbols  ✓done  ▶current  ○pending
-    if clusters:
-        parts = []
-        for name in clusters:
-            if name in done_set:      parts.append(green(f"✓{name}"))
-            elif name == cur_cl:      parts.append(yellow(f"▶{name}"))
-            else:                     parts.append(dim(f"○{name}"))
-        row2 = "  clusters  " + "  ".join(parts)
-        if len(_plain(row2)) > w:
-            # abbreviate to 8 chars per name
-            parts = []
-            for name in clusters:
-                ab = name[:8]
-                if name in done_set:   parts.append(green(f"✓{ab}"))
-                elif name == cur_cl:   parts.append(yellow(f"▶{ab}"))
-                else:                  parts.append(dim(f"○{ab}"))
-            row2 = "  clusters  " + "  ".join(parts)
-        rows.append(row2)
+    # ── Loop hierarchy: cluster → attempt → file → retry ────────────────────
+    #
+    #  cluster  ✓stable  ▶nightly  ○...       [██░░░░░░] 1/3
+    #    └ attempt                             [████░░░░] 2/10
+    #        └ file  context.rs               [████████] 4/8
+    #             └ retry                     [██░░░░░░] 1/2   (only when active)
 
-    # Row 3: file progress bar within current pass
-    # For non-stable clusters use cluster_files as the denominator (avoids stale all_files count).
+    # Level 0 — cluster row
+    n_clusters = len(clusters)
+    n_done_cl  = len(done_set)
+    cl_i       = next((i for i, n in enumerate(clusters) if n == cur_cl), n_done_cl)
+    cl_pct     = (cl_i / n_clusters * 100) if n_clusters else 0
+    cl_parts: list[str] = []
+    for name in clusters:
+        ab = name[:10]
+        if name in done_set:   cl_parts.append(green(f"✓{ab}"))
+        elif name == cur_cl:   cl_parts.append(yellow(bold(f"▶{ab}")))
+        else:                  cl_parts.append(dim(f"○{ab}"))
+    cl_names = "  ".join(cl_parts)
+    cl_bar   = f"[{bar(cl_pct, 10)}] {cl_i}/{n_clusters}" if n_clusters else ""
+    rows.append(f"  cluster  {cl_names}  {dim(cl_bar)}")
+
+    # Level 1 — attempt row
+    try:    att_i = int(prog["attempt"]); att_t = int(prog["max_attempt"])
+    except: att_i = 0; att_t = 0
+    att_pct = (att_i / att_t * 100) if att_t else 0
+    att_bar = f"[{bar(att_pct, 14)}] {prog['attempt']}/{prog['max_attempt']}"
+    rows.append(f"    └ attempt  {att_bar}")
+
+    # Level 2 — file row
     _cl_files = prog["cluster_files"]
     all_f  = _cl_files if (cur_cl and cur_cl not in ("stable", "") and _cl_files) else prog["all_files"]
     this_p = prog["files_this_pass"]
     ft = max(len(all_f), len(this_p))
     fi = len(this_p)
-    if ft > 0:
-        pct = min(100, fi / ft * 100)
-        cf  = prog["current_file"].replace("src/", "") if prog["current_file"] != "?" else "?"
-        rows.append(f"  files     [{bar(pct, 16)}] {fi}/{ft}  {cyan(cf)}")
+    cf = prog["current_file"].replace("src/", "") if prog["current_file"] != "?" else "?"
+    file_pct = (fi / ft * 100) if ft else 0
+    file_bar = f"[{bar(file_pct, 12)}] {fi}/{ft}"
+    rows.append(f"        └ file  {cyan(cf):<18}  {file_bar}")
+
+    # Level 3 — inner retry (only when active)
+    ir, ir_max = prog.get("inner_retry", "?"), prog.get("inner_retry_max", "?")
+    if ir != "?" and ir_max != "?":
+        try:    r_pct = int(ir) / int(ir_max) * 100
+        except: r_pct = 0
+        retry_bar = f"[{bar(r_pct, 10)}] {ir}/{ir_max}"
+        rows.append(f"             └ retry  {retry_bar}")
 
     # Row 4: uncovered-lines history for last 4 files  (e.g. error.rs:92→72→45)
     hist = prog["file_history"]
