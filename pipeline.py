@@ -551,7 +551,17 @@ def init_log(root: Path, nolog: bool = False, progress_mode: bool = False):
     Path(_GUARD_LOG).parent.mkdir(parents=True, exist_ok=True)
     _log(f"\n{'=' * 60}")
     _log(f"{'=' * 60}")
-    _log(f"  PIPELINE STARTED — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC")
+    _py_hash = hashlib.md5(Path(__file__).read_bytes()).hexdigest()[:8]
+    _git_hash = ""
+    try:
+        import subprocess as _sp
+        _git_hash = " git=" + _sp.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=Path(__file__).parent, stderr=_sp.DEVNULL, text=True
+        ).strip()
+    except Exception:
+        pass
+    _log(f"  PIPELINE STARTED — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC  pipeline.py={_py_hash}{_git_hash}")
     _log(f"{'=' * 60}")
     _log(f"{'=' * 60}")
 
