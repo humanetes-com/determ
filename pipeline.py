@@ -6884,6 +6884,9 @@ def _quick_file_coverage(project_dir: Path, module_name: str, rel_path: str) -> 
             "--ignore", "*/tests/*",
             "--ignore", "tests/*",
             "--ignore", "build.rs",
+            "--excl-start", "GRCOV_EXCL_START",
+            "--excl-stop",  "GRCOV_EXCL_STOP",
+            "--excl-line",  "GRCOV_EXCL_LINE",
         ]
         subprocess.run(cmd, cwd=project_dir, capture_output=True, text=True, timeout=60, check=True)
 
@@ -8779,7 +8782,7 @@ INTERNAL MODULE RULES — these tests live inside the source file, not in an ext
                 _block_fix_attempt = 0
                 _block_committed = False
                 while True:
-                    candidate = _raw_text.rstrip() + "\n\n" + block + "\n"
+                    candidate = _raw_text.rstrip() + "\n\n// GRCOV_EXCL_START\n" + block + "\n// GRCOV_EXCL_STOP\n"
                     abs_path.write_text(candidate, encoding="utf-8")
                     check = subprocess.run(
                         ["cargo", "test", "--no-run", "-p", module_name],
@@ -10318,7 +10321,7 @@ This is a Rust procedural macro crate. Strict rules apply:
                             if src_path.exists():
                                 content = src_path.read_text(encoding="utf-8")
                                 if "mod gen_" not in content:
-                                    src_path.write_text(content.rstrip() + "\n" + block + "\n")
+                                    src_path.write_text(content.rstrip() + "\n// GRCOV_EXCL_START\n" + block + "\n// GRCOV_EXCL_STOP\n")
                                     _log(f"  Reattached gen_tests block to {rel}.")
 
                     # TASK 3: run tests.
