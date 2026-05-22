@@ -2652,6 +2652,10 @@ def is_test_file(path: Path, project_dir: Path) -> bool:
     if len(path.suffixes) >= 2 and path.suffixes[-2].lower() in (".test", ".spec"):
         return True
 
+    # Pipeline-generated gen_tests siblings: foo.gen_tests_3.rs
+    if re.search(r'\.gen_tests_\d+\.rs$', path.name):
+        return True
+
     return False
 
 
@@ -3813,20 +3817,18 @@ def _write_build_configs(project_dir: Path, clusters: list, predicate_lines: dic
 # ---------------------------------------------------------------------------
 
 def _source_hash(project_dir: Path) -> str:
-    """Hash of Cargo.toml + src/*.rs (gen_* stripped) + test files.
+    """Hash of Cargo.toml + src/*.rs (gen_tests artifacts stripped) + test files.
     Shared across all phases — if source changes, all phase hashes become stale."""
-    import re as _re
-    _gen_re = _re.compile(
-        r'\n+(?:// GRCOV_EXCL_START\n)?#\[cfg\(test\)\](?:\n#\[[^\]]*\])*\n(?:pub )?mod gen_\w+\s*\{.*',
-        _re.DOTALL,
-    )
     parts: list[str] = []
     cargo = project_dir / "Cargo.toml"
     if cargo.exists():
         parts.append(cargo.read_text(errors="replace"))
     for p in sorted((project_dir / "src").glob("*.rs")) if (project_dir / "src").exists() else []:
+        # Skip gen_tests sibling files entirely — pipeline-generated content.
+        if re.search(r'\.gen_tests_\d+\.rs$', p.name):
+            continue
         try:
-            parts.append(_gen_re.sub("", p.read_text(errors="replace")))
+            parts.append(_strip_gen_tests_decls(p.read_text(errors="replace")))
         except Exception:
             pass
     for p in sorted(project_dir.rglob("*.rs")):
@@ -4052,24 +4054,29 @@ def task0b_discovery(strategy_path: Path, project_dir: Path, test_files,
         except Exception:
             pass
 
-    _hash_gen_block_re = re.compile(r'\n+(?:// GRCOV_EXCL_START\n)?#\[cfg\(test\)\](?:\n#\[[^\]]*\])*\n(?:pub )?mod gen_\w+\s*\{.*?(?:\n// GRCOV_EXCL_STOP)?', re.DOTALL)
     src_texts: list[str] = []
     for src_file in sorted(project_dir.rglob("*.rs")):
         if is_test_file(src_file, project_dir):
+            continue
+        # Skip gen_tests sibling files entirely — they are pipeline-generated content
+        # and including them would invalidate the hash on every pass.
+        if re.search(r'\.gen_tests_\d+\.rs$', src_file.name):
             continue
         try:
             rel = str(src_file.relative_to(project_dir))
             if rel in _generated:
                 continue
             text = src_file.read_text(encoding="utf-8")
-            src_texts.append(_hash_gen_block_re.sub("", text))
+            # Strip path-mod declarations (which point at sibling files) so the hash
+            # remains stable across pipeline passes.
+            src_texts.append(_strip_gen_tests_decls(text))
         except Exception:
             pass
 
-    # Strip gen_* blocks from test file contents before hashing — task0c continuously
-    # appends gen_* modules to src/*.rs files that are also returned by collect_test_files,
+    # Strip gen_tests decls from test file contents before hashing — task0c continuously
+    # adds declarations to src/*.rs files that are also returned by collect_test_files,
     # so including raw content would cause a cache miss on every resume.
-    _test_contents = "".join(_hash_gen_block_re.sub("", c) for _, c in test_files)
+    _test_contents = "".join(_strip_gen_tests_decls(c) for _, c in test_files)
     inputs_hash = hashlib.sha256(
         (cargo_text + "".join(src_texts) + _test_contents).encode()
     ).hexdigest()[:16]
@@ -6889,6 +6896,7 @@ def _quick_file_coverage_grcov(project_dir: Path, module_name: str, rel_path: st
             "--ignore", "*/tests/*",
             "--ignore", "tests/*",
             "--ignore", "build.rs",
+            "--ignore", "*.gen_tests_*.rs",   # pipeline-generated test siblings
             "--excl-start", "GRCOV_EXCL_START",
             "--excl-stop",  "GRCOV_EXCL_STOP",
             "--excl-line",  "GRCOV_EXCL_LINE",
@@ -6972,6 +6980,7 @@ def _run_grcov(project_dir: Path, module_name: str) -> tuple[float, list[dict], 
             "--ignore", "build.rs",    # root-level build.rs (no parent dir prefix)
             "--ignore", "*/tests/*",   # integration test files — measure src/ coverage only
             "--ignore", "tests/*",     # relative-path variant (grcov * doesn't cross /)
+            "--ignore", "*.gen_tests_*.rs",  # pipeline-generated test siblings
             "--excl-start", "GRCOV_EXCL_START",
             "--excl-stop",  "GRCOV_EXCL_STOP",
             "--excl-line",  "GRCOV_EXCL_LINE",
@@ -7150,17 +7159,20 @@ class LlvmCovProvider(CoverageProvider):
     def _run(self, project_dir: Path, module_name: str, suffix: str = "") -> tuple[float, list[dict], int, int]:
         lcov_path = self._lcov_path(module_name, suffix)
         env = _cargo_env()
+        ignore_patterns = [
+            r"tests[/\\]",
+            r"build\.rs",
+            r"\.gen_tests_\d+\.rs$",   # pipeline-generated test siblings
+        ]
+        ignore_patterns += [_glob_to_filename_regex(p) for p in _cluster_exclude_patterns()]
         cmd = [
             "cargo", "llvm-cov",
             "--lcov",
             "--output-path", str(lcov_path),
             "-p", module_name,
             "--no-fail-fast",
-            "--ignore-filename-regex", r"tests[/\\]",   # integration tests/
-            "--ignore-filename-regex", r"build\.rs",
+            "--ignore-filename-regex", "|".join(ignore_patterns),
         ]
-        for pat in _cluster_exclude_patterns():
-            cmd += ["--ignore-filename-regex", _glob_to_filename_regex(pat)]
         cmd += ["--", "--test-threads=1", "--no-capture"]
         try:
             result = subprocess.run(
@@ -7251,6 +7263,164 @@ def _make_coverage_provider() -> CoverageProvider:
 
 
 _coverage_provider: CoverageProvider = _make_coverage_provider()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# gen_tests sibling-file storage
+#
+# Each LLM gen_tests pass for src/foo.rs writes its module body to a sibling
+# file src/foo.gen_tests_N.rs, and adds a one-line path-mod declaration to
+# foo.rs:
+#     #[cfg(test)] #[allow(...)] #[path = "foo.gen_tests_N.rs"] mod gen_tests_N;
+#
+# This avoids coverage-tool contamination (test code lives in its own file,
+# excluded by --ignore-filename-regex) and removes the need for GRCOV_EXCL_*
+# markers wrapping inline test blocks.
+# ─────────────────────────────────────────────────────────────────────────────
+
+GEN_TESTS_DECL_RE = re.compile(
+    r'\n*#\[cfg\(test\)\][\s\n]*'
+    r'(?:#\[[^\]]*\][\s\n]*)*'
+    r'#\[path\s*=\s*"[^"]+\.gen_tests_\d+\.rs"\][\s\n]*'
+    r'mod\s+gen_tests_\d+\s*;',
+)
+
+
+def _gen_tests_siblings(src_file: Path) -> list[tuple[int, Path]]:
+    """Return [(N, path)] for all foo.gen_tests_N.rs siblings of src_file, sorted by N."""
+    stem = src_file.stem
+    pattern = re.compile(rf'^{re.escape(stem)}\.gen_tests_(\d+)\.rs$')
+    out: list[tuple[int, Path]] = []
+    parent = src_file.parent
+    if parent.exists():
+        for f in parent.iterdir():
+            m = pattern.match(f.name)
+            if m:
+                out.append((int(m.group(1)), f))
+    out.sort()
+    return out
+
+
+def _gen_tests_count(src_file: Path) -> int:
+    return len(_gen_tests_siblings(src_file))
+
+
+def _next_gen_tests_n(src_file: Path) -> int:
+    """Return the next free gen_tests pass number for src_file.
+    Uses max(existing) + 1 to skip over gaps from deleted siblings."""
+    siblings = _gen_tests_siblings(src_file)
+    return (siblings[-1][0] + 1) if siblings else 1
+
+
+def _gen_tests_path(src_file: Path, n: int) -> Path:
+    return src_file.with_name(f"{src_file.stem}.gen_tests_{n}.rs")
+
+
+def _read_all_gen_tests(src_file: Path) -> str:
+    """Concatenate gen_tests sibling bodies, each re-wrapped in `mod gen_tests_N { ... }`
+    for LLM prompt context (so the LLM sees the same shape it generates)."""
+    parts: list[str] = []
+    for n, sibling in _gen_tests_siblings(src_file):
+        try:
+            body = sibling.read_text(encoding="utf-8").rstrip()
+        except OSError:
+            continue
+        parts.append(f"#[cfg(test)]\nmod gen_tests_{n} {{\n{body}\n}}")
+    return "\n\n".join(parts)
+
+
+def _strip_gen_tests_decls(src_text: str) -> str:
+    """Remove all gen_tests path-mod declarations from a source file's text."""
+    return GEN_TESTS_DECL_RE.sub("", src_text)
+
+
+def _build_gen_tests_decl(sibling_name: str, n: int, allow_line: str) -> str:
+    """Build the one-line-ish `#[cfg(test)] ... mod gen_tests_N;` declaration."""
+    attrs = f"#[cfg(test)]\n{allow_line}\n" if allow_line else "#[cfg(test)]\n"
+    return f'\n{attrs}#[path = "{sibling_name}"]\nmod gen_tests_{n};\n'
+
+
+def _extract_gen_tests_body(block: str) -> str:
+    """Strip the outer `mod gen_X { ... }` wrapper from an LLM-generated block and
+    return the dedented body. If the shape doesn't match (e.g. LLM returned bare
+    test functions), return block unchanged so caller can still use it."""
+    m = re.search(
+        r'(?:#\[[^\]]*\]\s*\n)*\s*(?:pub\s+)?mod\s+gen_\w+\s*\{',
+        block,
+    )
+    if not m:
+        return block.strip() + "\n"
+    start = m.end()
+    depth = 1
+    i = start
+    while i < len(block):
+        c = block[i]
+        if c == '{':
+            depth += 1
+        elif c == '}':
+            depth -= 1
+            if depth == 0:
+                body = block[start:i]
+                lines = body.splitlines()
+                non_empty = [l for l in lines if l.strip()]
+                if non_empty:
+                    indent = min(len(l) - len(l.lstrip()) for l in non_empty)
+                    if indent > 0:
+                        body = "\n".join(
+                            (l[indent:] if len(l) >= indent and l[:indent].isspace() else l)
+                            for l in lines
+                        )
+                return body.strip() + "\n"
+        i += 1
+    return block.strip() + "\n"
+
+
+def _write_gen_tests_pass(
+    src_file: Path,
+    src_text: str,
+    block: str,
+    allow_line: str,
+    pass_n: int,
+) -> Path:
+    """Write the sibling file with extracted body, and write src_file with the decl appended.
+
+    `src_text` is the source content WITHOUT this pass's declaration (caller-managed
+    revert target). `pass_n` is the 1-indexed pass number.
+    Returns the sibling file path.
+    """
+    sibling = _gen_tests_path(src_file, pass_n)
+    body = _extract_gen_tests_body(block)
+    sibling.write_text(body, encoding="utf-8")
+    decl = _build_gen_tests_decl(sibling.name, pass_n, allow_line)
+    src_file.write_text(src_text.rstrip() + decl, encoding="utf-8")
+    return sibling
+
+
+def _revert_gen_tests_pass(src_file: Path, src_text: str, sibling: Path) -> None:
+    """Restore src_file to src_text (no decl) and delete the sibling file."""
+    src_file.write_text(src_text, encoding="utf-8")
+    try:
+        sibling.unlink()
+    except OSError:
+        pass
+
+
+def _strip_all_gen_tests_artifacts(src_file: Path) -> int:
+    """Delete all gen_tests siblings and remove all decls from src_file.
+    Returns the number of siblings deleted."""
+    count = 0
+    for _, sibling in _gen_tests_siblings(src_file):
+        try:
+            sibling.unlink()
+            count += 1
+        except OSError:
+            pass
+    if src_file.exists():
+        original = src_file.read_text(encoding="utf-8")
+        cleaned = _strip_gen_tests_decls(original)
+        if cleaned != original:
+            src_file.write_text(cleaned, encoding="utf-8")
+    return count
 
 
 def _extract_branch_guard(lines: list[str], line_no: int) -> str | None:
@@ -7932,8 +8102,10 @@ def _task0c_targeted_pragma(
     # Strip gen_* blocks before sending to LLM — files can become very large after many
     # augmentation rounds, causing the LLM to fail to return the complete file.
     # We reattach the stripped suffix after the LLM edits only the core source.
-    _pragma_gen_re = re.compile(r'\n+(?:// GRCOV_EXCL_START\n)?#\[cfg\(test\)\](?:\n#\[[^\]]*\])*\n(?:pub )?mod gen_\w+\s*\{.*', re.DOTALL)
-    _core_source = _pragma_gen_re.sub("", current_source).rstrip() + "\n"
+    # gen_tests bodies now live in sibling files (foo.gen_tests_N.rs); the source
+    # file only contains short `mod gen_tests_N;` path-mod declarations. Strip those
+    # before sending to the LLM and reattach the exact same bytes afterwards.
+    _core_source = _strip_gen_tests_decls(current_source).rstrip() + "\n"
     _gen_suffix   = current_source[len(_core_source.rstrip("\n")):]
 
     annotated = _annotate_uncovered(_core_source, uncov_lines)
@@ -8063,8 +8235,6 @@ def task0c_augment_module(
         else:
             _log(f"  [{module_name}] Library compile failure in gen_* block — routing to harness fix loop.")
 
-    _gen_block_re = re.compile(r'\n+(?:// GRCOV_EXCL_START\n)?#\[cfg\(test\)\](?:\n#\[[^\]]*\])*\n(?:pub )?mod gen_\w+\s*\{.*', re.DOTALL)
-
     def _error_signatures(cargo_output: str) -> frozenset:
         """Extract stable error signatures — error code + message, no file/line numbers."""
         return frozenset(re.findall(r'error\[E\d+\]: .+', cargo_output))
@@ -8157,90 +8327,41 @@ corrected content here
                 _log(f"  [{module_name}] No error improvement — targeted strip of broken gen_* block(s).")
 
                 def _strip_broken_gen_blocks(src_file: Path, error_text: str) -> bool:
-                    """Remove only gen_* blocks that contain error lines. Return True if file changed."""
-                    try:
-                        text = src_file.read_text(encoding="utf-8")
-                    except Exception:
-                        return False
-                    rel = str(src_file.relative_to(project_dir))
-                    # Collect error line numbers for this file.
-                    error_lines: set[int] = set()
-                    for m in re.finditer(r'(?:' + re.escape(rel) + r'|' + re.escape(src_file.name) + r'):(\d+)', error_text):
-                        error_lines.add(int(m.group(1)))
+                    """Remove gen_tests artifacts that cover broken code. Returns True if changed.
 
-                    # Find all gen_* block spans using the same regex, match by line range.
-                    _indiv_re = re.compile(
-                        r'\n+(?:// GRCOV_EXCL_START\n)?#\[cfg\(test\)\](?:\n#\[[^\]]*\])*\n(?:pub )?mod gen_\w+\s*\{',
-                        re.DOTALL,
-                    )
-                    lines = text.splitlines(keepends=True)
-                    def _char_to_line(pos: int) -> int:
-                        return text[:pos].count('\n') + 1
-
-                    # Build list of (start_char, end_char) for each gen_* block.
-                    blocks_to_remove: list[tuple[int, int]] = []
-                    for hdr in _indiv_re.finditer(text):
-                        # Walk braces to find the closing } of this block.
-                        depth = 0
-                        pos = hdr.end() - 1  # points at the opening {
-                        end = pos
-                        while pos < len(text):
-                            if text[pos] == '{':
-                                depth += 1
-                            elif text[pos] == '}':
-                                depth -= 1
-                                if depth == 0:
-                                    end = pos + 1
-                                    break
-                            pos += 1
-                        start_line = _char_to_line(hdr.start())
-                        end_line   = _char_to_line(end)
-                        block_lines = set(range(start_line, end_line + 1))
-                        # Remove if any error line falls inside, OR if no error lines
-                        # could be located (fall back to removing all blocks).
-                        if not error_lines or block_lines & error_lines:
-                            blocks_to_remove.append((hdr.start(), end))
-
-                    if not blocks_to_remove:
-                        # No gen_* blocks found — also check for non-gen_* test modules
-                        # (e.g. `mod tests`) that the LLM may have written with wrong names.
-                        _any_test_re = re.compile(
-                            r'\n+(?:// GRCOV_EXCL_START\n)?#\[cfg\(test\)\](?:\n#\[[^\]]*\])*\n(?:pub )?mod \w+\s*\{',
-                            re.DOTALL,
-                        )
-                        for _th in _any_test_re.finditer(text):
-                            depth = 0; pos = _th.end() - 1; end = pos
-                            while pos < len(text):
-                                if text[pos] == '{': depth += 1
-                                elif text[pos] == '}':
-                                    depth -= 1
-                                    if depth == 0: end = pos + 1; break
-                                pos += 1
-                            start_line = _char_to_line(_th.start())
-                            end_line   = _char_to_line(end)
-                            block_lines = set(range(start_line, end_line + 1))
-                            if not error_lines or block_lines & error_lines:
-                                blocks_to_remove.append((_th.start(), end))
-                        # Fallback: remove all gen_* blocks (old behaviour).
-                        if not blocks_to_remove:
-                            cleaned = _gen_block_re.sub("", text).rstrip() + "\n"
-                        else:
-                            cleaned = text
-                            for start, end in sorted(blocks_to_remove, reverse=True):
-                                cleaned = cleaned[:start] + cleaned[end:]
-                            cleaned = cleaned.rstrip() + "\n"
-                    else:
-                        # Remove matched blocks from right to left to preserve offsets.
-                        cleaned = text
-                        for start, end in sorted(blocks_to_remove, reverse=True):
-                            cleaned = cleaned[:start] + cleaned[end:]
-                        cleaned = cleaned.rstrip() + "\n"
-
-                    if cleaned != text:
-                        src_file.write_text(cleaned, encoding="utf-8")
-                        n = len(blocks_to_remove) if blocks_to_remove else "all"
-                        _log(f"  [{module_name}] Stripped {n} gen_* block(s) from "
-                             f"{src_file.relative_to(project_dir)} (targeted).")
+                    With the sibling-file design, each `foo.gen_tests_N.rs` IS one block.
+                    If src_file is a sibling, delete it and remove its parent's decl.
+                    If src_file is a real source file, strip all its gen_tests artifacts
+                    (siblings + decls) — we can no longer target an individual block within
+                    a source file because none live there anymore.
+                    """
+                    sibling_match = re.match(r'^(.+)\.gen_tests_(\d+)\.rs$', src_file.name)
+                    if sibling_match:
+                        parent_stem = sibling_match.group(1)
+                        pass_n = int(sibling_match.group(2))
+                        parent = src_file.with_name(f"{parent_stem}.rs")
+                        try:
+                            src_file.unlink()
+                        except OSError:
+                            return False
+                        if parent.exists():
+                            ptxt = parent.read_text(encoding="utf-8")
+                            decl_re = re.compile(
+                                r'\n*#\[cfg\(test\)\][\s\n]*(?:#\[[^\]]*\][\s\n]*)*'
+                                r'#\[path\s*=\s*"[^"]+"\][\s\n]*'
+                                rf'mod\s+gen_tests_{pass_n}\s*;',
+                            )
+                            cleaned = decl_re.sub("", ptxt)
+                            if cleaned != ptxt:
+                                parent.write_text(cleaned, encoding="utf-8")
+                        _log(f"  [{module_name}] Deleted broken sibling "
+                             f"{src_file.relative_to(project_dir)} (gen_tests_{pass_n}).")
+                        return True
+                    # Real source file — strip all gen_tests artifacts.
+                    n = _strip_all_gen_tests_artifacts(src_file)
+                    if n > 0:
+                        _log(f"  [{module_name}] Stripped {n} gen_tests sibling(s) for "
+                             f"{src_file.relative_to(project_dir)}.")
                         return True
                     return False
 
@@ -8254,17 +8375,19 @@ corrected content here
                 harness_ok, _broken_err = augmentor.test_harness_compiles(project_dir, module_name)
                 if not harness_ok and any_stripped:
                     # Targeted strip removed some blocks but harness is still broken.
-                    # Fall through to a full strip of ALL gen_* blocks from broken files.
-                    _log(f"  [{module_name}] Targeted strip insufficient — doing full gen_* strip.")
+                    # Fall through to a full strip of ALL gen_tests artifacts from broken files.
+                    _log(f"  [{module_name}] Targeted strip insufficient — doing full gen_tests strip.")
                     for src_file in broken_files:
                         if is_test_file(src_file, project_dir):
                             continue
+                        # Skip gen_tests siblings (already deleted in targeted pass).
+                        if re.search(r'\.gen_tests_\d+\.rs$', src_file.name):
+                            continue
                         try:
-                            _ft = src_file.read_text(encoding="utf-8")
-                            _fc = _gen_block_re.sub("", _ft).rstrip() + "\n"
-                            if _fc != _ft:
-                                src_file.write_text(_fc, encoding="utf-8")
-                                _log(f"    Full strip: {src_file.relative_to(project_dir)}")
+                            n_removed = _strip_all_gen_tests_artifacts(src_file)
+                            if n_removed > 0:
+                                _log(f"    Full strip: {src_file.relative_to(project_dir)} "
+                                     f"({n_removed} sibling(s))")
                         except Exception:
                             pass
                     harness_ok, _broken_err = augmentor.test_harness_compiles(project_dir, module_name)
@@ -8303,30 +8426,24 @@ corrected content here
             prev_signatures = new_signatures
             compile_err = compile_err_out
 
-    # Pre-clean: remove any gen_* blocks left over from a previous interrupted run.
-    # Without this, tarpaulin's first measurement sees a compilation failure and reports
-    # 0% even when the module has real tests — masking the true baseline coverage.
-    # Uses regex to catch any `mod gen_*` variant (e.g. gen_tests, gen_nushell_tests)
-    # since earlier runs wrote modules with module-specific names.
-    gen_marker = "#[cfg(test)]\nmod gen_tests"  # used for strip in the attempt loop below
-
     # Derive allow attributes and prelude imports from project source — no LLM.
     _allow_line, _prelude_block = _derive_gentest_prelude(project_dir)
 
-    # Pre-clean only if the harness is broken — if existing gen_* blocks compile,
+    # Pre-clean only if the harness is broken — if existing gen_tests compile,
     # keep them so accumulated coverage is never lost on re-entry.
     _precheck_ok, _ = augmentor.test_harness_compiles(project_dir, module_name)
     if not _precheck_ok:
         for src_file in sorted(module_dir.rglob("*.rs")):
             if is_test_file(src_file, project_dir):
                 continue
+            # Don't recurse into siblings here — they're handled via their parent.
+            if re.search(r'\.gen_tests_\d+\.rs$', src_file.name):
+                continue
             try:
-                text = src_file.read_text(encoding="utf-8")
-                cleaned = _gen_block_re.sub("", text).rstrip() + "\n"
-                if cleaned != text:
-                    src_file.write_text(cleaned, encoding="utf-8")
-                    _log(f"  [{module_name}] Pre-cleaned broken gen block from "
-                         f"{src_file.relative_to(project_dir)}")
+                n_removed = _strip_all_gen_tests_artifacts(src_file)
+                if n_removed > 0:
+                    _log(f"  [{module_name}] Pre-cleaned {n_removed} broken gen_tests "
+                         f"sibling(s) for {src_file.relative_to(project_dir)}")
             except Exception:
                 pass
 
@@ -8554,16 +8671,17 @@ corrected content here
             _log(f"  [{module_name}] File {_file_idx}/{len(_active_files)}: {rel_path} ({len(uncov_lines)} raw uncovered lines)")
 
             abs_path = project_dir / rel_path
+            # _raw_text = current on-disk content (including existing gen_tests decls).
+            # This is the revert target: on a failed pass we restore _raw_text and delete
+            # the just-written sibling, so previously-committed passes survive intact.
             _raw_text = abs_path.read_text(encoding="utf-8") if abs_path.exists() else content
-            # Extract the previously committed gen_tests block (if any) so the LLM can
-            # extend it rather than start from scratch. Keep _raw_text as the revert
-            # target so a failed regeneration never leaves the file worse than it was.
-            _old_block_match = _gen_block_re.search(_raw_text)
-            _old_block = _old_block_match.group(0).lstrip('\n') if _old_block_match else ""
-            # Strip gen_* blocks from the source shown to the LLM — accumulated stale
-            # blocks grow the denominator and confuse type resolution. The LLM sees clean
-            # source; the old block is passed separately as the extension base.
-            existing_text = _gen_block_re.sub("", _raw_text).rstrip() + "\n"
+            # gen_tests bodies live in sibling files. Read them all (concatenated as
+            # `mod gen_tests_N { ... }` blocks) so the LLM sees what it generated
+            # before and can extend rather than restart.
+            _old_block = _read_all_gen_tests(abs_path)
+            # The view shown to the LLM (and used for uncov_lines line counting) strips
+            # the path-mod declaration lines so the line numbers match the original src.
+            existing_text = _strip_gen_tests_decls(_raw_text).rstrip() + "\n"
 
             _src_line_count = existing_text.count('\n')
             uncov_lines = {l for l in uncov_lines if l <= _src_line_count}
@@ -8755,8 +8873,9 @@ corrected content here
             _target_basename = Path(rel_path).name
             _file_constraints_section = _FILE_CONSTRAINTS.get(_target_basename, "")
 
-            gen_count = len(re.findall(r'mod gen_\w+', _raw_text))
-            mod_name = "gen_tests" if gen_count == 0 else f"gen_tests_{gen_count + 1}"
+            gen_count = _gen_tests_count(abs_path)
+            _pass_n = _next_gen_tests_n(abs_path)
+            mod_name = f"gen_tests_{_pass_n}"
             output_format = (
                 f'<FILE path="gen_tests_block">\n'
                 f'#[cfg(test)]\n{_allow_line}\nmod {mod_name} {{{{\n'
@@ -8952,9 +9071,15 @@ INTERNAL MODULE RULES — these tests live inside the source file, not in an ext
                 _block_prev_sigs: frozenset = frozenset()
                 _block_fix_attempt = 0
                 _block_committed = False
+                # gen_tests live in a sibling file (foo.gen_tests_N.rs) with a
+                # path-mod declaration appended to abs_path. This isolates test
+                # code from the coverage tool's denominator without EXCL markers.
+                _sibling_path = _gen_tests_path(abs_path, _pass_n)
+                _decl = _build_gen_tests_decl(_sibling_path.name, _pass_n, _allow_line)
+                _src_with_decl = _raw_text.rstrip() + _decl
                 while True:
-                    candidate = _raw_text.rstrip() + "\n\n// GRCOV_EXCL_START\n" + block + "\n// GRCOV_EXCL_STOP\n"
-                    abs_path.write_text(candidate, encoding="utf-8")
+                    abs_path.write_text(_src_with_decl, encoding="utf-8")
+                    _sibling_path.write_text(_extract_gen_tests_body(block), encoding="utf-8")
                     check = subprocess.run(
                         ["cargo", "test", "--no-run", "-p", module_name],
                         cwd=project_dir, capture_output=True, text=True,
@@ -8975,7 +9100,7 @@ INTERNAL MODULE RULES — these tests live inside the source file, not in an ext
                     # Unclosed delimiter is structurally broken — revert immediately.
                     if "unclosed delimiter" in compile_err or "mismatched closing delimiter" in compile_err:
                         _log(f"  [{module_name}] Unclosed delimiter — reverting {rel_path}.")
-                        abs_path.write_text(_raw_text, encoding="utf-8")
+                        _revert_gen_tests_pass(abs_path, _raw_text, _sibling_path)
                         break
 
                     if _block_fix_attempt > 0:
@@ -8984,7 +9109,7 @@ INTERNAL MODULE RULES — these tests live inside the source file, not in an ext
                             _log(f"  [{module_name}] No error improvement in {rel_path} — reverting.")
                             _log_task0c_attempt(project_dir, rel_path, attempt + _block_fix_attempt,
                                                block, compile_err, "compile_error")
-                            abs_path.write_text(_raw_text, encoding="utf-8")
+                            _revert_gen_tests_pass(abs_path, _raw_text, _sibling_path)
                             break
                         _log(f"  [{module_name}] {len(resolved)} error(s) resolved in {rel_path}, "
                              f"{len(cur_sigs)} remaining — continuing.")
@@ -9068,7 +9193,7 @@ INTERNAL MODULE RULES — these tests live inside the source file, not in an ext
                             )
                     else:
                         _log(f"  [{module_name}] LLM returned no fix — reverting {rel_path}.")
-                        abs_path.write_text(_raw_text, encoding="utf-8")
+                        _revert_gen_tests_pass(abs_path, _raw_text, _sibling_path)
                         break
             else:
                 _log_task0c_attempt(project_dir, rel_path, attempt, "", "", "no_block")
@@ -9146,8 +9271,11 @@ INTERNAL MODULE RULES — these tests live inside the source file, not in an ext
                             _retry_block, count=1,
                         )
                     _current_text = abs_path.read_text(encoding="utf-8")
-                    _retry_candidate = _current_text.rstrip() + "\n\n" + _retry_block + "\n"
-                    abs_path.write_text(_retry_candidate, encoding="utf-8")
+                    _retry_pass_n = _next_gen_tests_n(abs_path)
+                    _retry_sibling = _gen_tests_path(abs_path, _retry_pass_n)
+                    _retry_decl = _build_gen_tests_decl(_retry_sibling.name, _retry_pass_n, _allow_line)
+                    _retry_sibling.write_text(_extract_gen_tests_body(_retry_block), encoding="utf-8")
+                    abs_path.write_text(_current_text.rstrip() + _retry_decl, encoding="utf-8")
                     _retry_check = subprocess.run(
                         ["cargo", "test", "--no-run", "-p", module_name],
                         cwd=project_dir, capture_output=True, text=True,
@@ -9155,7 +9283,7 @@ INTERNAL MODULE RULES — these tests live inside the source file, not in an ext
                     )
                     if _retry_check.returncode != 0:
                         _log(f"  [{module_name}] Quick-retry {_ir + 1}: compile failed — reverting.")
-                        abs_path.write_text(_current_text, encoding="utf-8")
+                        _revert_gen_tests_pass(abs_path, _current_text, _retry_sibling)
                         break
                     _log(f"  [{module_name}] Quick-retry {_ir + 1}: compiled — checking coverage.")
                     _qr_result = _quick_file_coverage(project_dir, module_name, rel_path)
@@ -9497,25 +9625,36 @@ def clean_state(root: Path, project_dir: Path, manifest_path: Path,
         p.unlink()
         _log(f"  Deleted {p.name}")
 
-    # Strip all gen_* test blocks from source files — these are pipeline-generated
-    # and must be removed on --clean so the next run starts from a compile-clean state.
-    _strip_re = re.compile(
-        r'\n+#\[cfg\(test\)\](?:\n#\[[^\]]*\])*\n(?:pub )?mod gen_\w+\s*\{.*',
-        re.DOTALL
+    # Strip all gen_tests artifacts from source files: delete sibling files and
+    # remove path-mod declarations. Also clean up legacy inline blocks (from
+    # pre-sibling-file design) so an old workspace can be salvaged with --clean.
+    _legacy_inline_re = re.compile(
+        r'\n+(?:// GRCOV_EXCL_START\n)?#\[cfg\(test\)\](?:\n#\[[^\]]*\])*\n(?:pub )?mod gen_\w+\s*\{.*',
+        re.DOTALL,
     )
-    stripped = 0
+    stripped_files = stripped_siblings = 0
+    # Delete sibling files first so the parent loop doesn't re-read them.
+    for sibling in sorted(project_dir.rglob("*.gen_tests_*.rs")):
+        if re.search(r'\.gen_tests_\d+\.rs$', sibling.name):
+            try:
+                sibling.unlink()
+                stripped_siblings += 1
+                _log(f"  Deleted sibling {sibling.relative_to(project_dir)}")
+            except OSError:
+                pass
     for src in sorted(project_dir.rglob("*.rs")):
         try:
             raw = src.read_text(encoding="utf-8")
-            cleaned = _strip_re.sub("", raw).rstrip() + "\n"
+            cleaned = _strip_gen_tests_decls(raw)
+            cleaned = _legacy_inline_re.sub("", cleaned).rstrip() + "\n"
             if cleaned != raw:
                 src.write_text(cleaned, encoding="utf-8")
-                _log(f"  Stripped gen_* block from {src.relative_to(project_dir)}")
-                stripped += 1
+                _log(f"  Stripped gen_tests artifacts from {src.relative_to(project_dir)}")
+                stripped_files += 1
         except Exception:
             pass
-    if stripped:
-        _log(f"  Stripped gen_* blocks from {stripped} source file(s).")
+    if stripped_files or stripped_siblings:
+        _log(f"  Removed {stripped_siblings} sibling file(s); cleaned {stripped_files} source file(s).")
 
     _log("Clean complete. Starting from scratch.")
 
@@ -10367,28 +10506,31 @@ def main():
             if is_multi_module else build_check_cmd
         )
 
-        # Save any gen_tests blocks from stripped files BEFORE wiping.
-        # TASK 0c appends these blocks inline; TASK 2 regenerates the file without them.
-        # We reattach them after each TASK 2 write so TASK 3 can actually run the tests.
-        _gen_blocks_re = re.compile(
-            r'\n+#\[cfg\(test\)\]\n(?:pub\s+)?mod\s+gen_\w+\s*\{.*',
-            re.DOTALL
-        )
-        saved_gen_blocks: dict[str, str] = {}  # rel_path -> gen_tests block text
+        # Save any gen_tests siblings + their declarations BEFORE wiping.
+        # TASK 0c writes test code to foo.gen_tests_N.rs siblings; TASK 2 regenerates
+        # source files. We reattach siblings + decls after each TASK 2 write so TASK 3
+        # can actually run the tests.
+        # Schema: rel_path of parent → list of (pass_n, sibling_body)
+        saved_gen_blocks: dict[str, list[tuple[int, str]]] = {}
         if module_dir.exists():
             for src_file in sorted(module_dir.rglob("*.rs")):
                 rel = str(src_file.relative_to(project_dir))
                 if rel in existing_test_files:
                     continue
+                if re.search(r'\.gen_tests_\d+\.rs$', src_file.name):
+                    continue  # siblings handled via their parent
                 try:
-                    content = src_file.read_text(encoding="utf-8")
-                    _src_match = _gen_blocks_re.search(content)
-                    if _src_match:
-                        saved_gen_blocks[rel] = _src_match.group(0)
+                    siblings = _gen_tests_siblings(src_file)
+                    if siblings:
+                        saved_gen_blocks[rel] = [
+                            (n, p.read_text(encoding="utf-8"))
+                            for n, p in siblings
+                        ]
                 except Exception:
                     pass
         if saved_gen_blocks:
-            _log(f"  Saved gen_tests blocks from {len(saved_gen_blocks)} file(s) for reattachment.")
+            _total = sum(len(v) for v in saved_gen_blocks.values())
+            _log(f"  Saved {_total} gen_tests sibling(s) from {len(saved_gen_blocks)} file(s) for reattachment.")
 
         # Wipe any previously generated files for this module (interrupted run).
         if module_dir.exists():
@@ -10485,15 +10627,23 @@ This is a Rust procedural macro crate. Strict rules apply:
                     test_output = f"BUILD FAILED: {t2_reason}"
                     failure_type = "build"
                 else:
-                    # Reattach saved gen_tests blocks to generated source files.
+                    # Reattach saved gen_tests siblings to generated source files.
                     if saved_gen_blocks:
-                        for rel, block in saved_gen_blocks.items():
+                        _reattach_allow_line, _ = _derive_gentest_prelude(project_dir)
+                        for rel, blocks in saved_gen_blocks.items():
                             src_path = project_dir / rel
-                            if src_path.exists():
-                                content = src_path.read_text(encoding="utf-8")
-                                if "mod gen_" not in content:
-                                    src_path.write_text(content.rstrip() + "\n// GRCOV_EXCL_START\n" + block + "\n// GRCOV_EXCL_STOP\n")
-                                    _log(f"  Reattached gen_tests block to {rel}.")
+                            if not src_path.exists():
+                                continue
+                            if _gen_tests_count(src_path) > 0:
+                                continue  # already reattached this pass
+                            content = src_path.read_text(encoding="utf-8")
+                            new_text = content.rstrip()
+                            for pass_n, body in blocks:
+                                sibling = _gen_tests_path(src_path, pass_n)
+                                sibling.write_text(body, encoding="utf-8")
+                                new_text += _build_gen_tests_decl(sibling.name, pass_n, _reattach_allow_line)
+                            src_path.write_text(new_text, encoding="utf-8")
+                            _log(f"  Reattached {len(blocks)} gen_tests sibling(s) to {rel}.")
 
                     # TASK 3: run tests.
                     passed, test_output = task3(

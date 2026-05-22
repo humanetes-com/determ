@@ -261,7 +261,7 @@ fi
 echo ""
 echo "-- GPU / context --"
 if command -v nvidia-smi &>/dev/null; then
-    READ=$(nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv,noheader 2>/dev/null || true)
+    READ=$(nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv,noheader 2>/dev/null | head -1 || true)
     if [[ -n "$READ" ]]; then
         GPU_NAME=$(echo "$READ" | cut -d',' -f1 | xargs)
         TOTAL_MIB=$(echo "$READ" | cut -d',' -f2 | tr -d ' MiB')
