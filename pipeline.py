@@ -8381,18 +8381,8 @@ corrected content here
             # source; the old block is passed separately as the extension base.
             existing_text = _gen_block_re.sub("", _raw_text).rstrip() + "\n"
 
-            # Filter uncov_lines to only lines present in existing_text and not inside
-            # GRCOV_EXCL_START/STOP blocks. Without --excl-start grcov (old JSON) includes
-            # EXCL-block lines as coverable; those lines either disappeared after gen_* strip
-            # or are in EXCL sections of the original source — neither can be covered by tests.
-            _excl_lines: set[int] = set()
-            _in_excl = False
-            for _lno, _ltxt in enumerate(existing_text.splitlines(), 1):
-                if "GRCOV_EXCL_START" in _ltxt: _in_excl = True
-                if "GRCOV_EXCL_STOP"  in _ltxt: _in_excl = False
-                if _in_excl: _excl_lines.add(_lno)
             _src_line_count = existing_text.count('\n')
-            uncov_lines = {l for l in uncov_lines if l <= _src_line_count and l not in _excl_lines}
+            uncov_lines = {l for l in uncov_lines if l <= _src_line_count}
 
             # Filter LLVM/grcov instrumentation artifacts:
             # 1. Comment-only lines (// …) — grcov sometimes marks these coverable, they never are
@@ -8424,8 +8414,7 @@ corrected content here
 
             # Filter lines inside cfg blocks incompatible with the current cluster
             # (e.g. #[cfg(not(error_generic_member_access))] under the nightly cluster).
-            # These lines are compiled out — no test can cover them. Add GRCOV_EXCL_LINE
-            # immediately so future measurements stop counting them as coverable.
+            # These lines don't compile here — no test can cover them. Filter only, no EXCL.
             if _current_cluster and _current_cluster.active_cfg:
                 _incompat = _filter_cfg_incompatible_lines(
                     existing_text, uncov_lines, _current_cluster.active_cfg
@@ -8433,17 +8422,6 @@ corrected content here
                 if _incompat:
                     _log(f"  [{module_name}] {rel_path} — filtered {len(_incompat)} cfg-incompatible line(s) "
                          f"(compiled out under {_current_cluster.name}): {sorted(_incompat)}")
-                    # Write GRCOV_EXCL_LINE pragmas to _raw_text (preserves gen_* blocks).
-                    _raw_lines = _raw_text.splitlines(keepends=True)
-                    _changed = False
-                    for _lno in sorted(_incompat):
-                        if 1 <= _lno <= len(_raw_lines) and COVERAGE_IGNORE_PRAGMA not in _raw_lines[_lno - 1]:
-                            _raw_lines[_lno - 1] = _raw_lines[_lno - 1].rstrip("\n") + f"  {COVERAGE_IGNORE_PRAGMA}\n"
-                            _changed = True
-                    if _changed:
-                        _raw_text = "".join(_raw_lines)
-                        abs_path.write_text(_raw_text, encoding="utf-8")
-                        existing_text = _gen_block_re.sub("", _raw_text).rstrip() + "\n"
                     uncov_lines -= _incompat
 
             # Filter lines inside cfg blocks that are excluded in this cluster
@@ -8460,7 +8438,7 @@ corrected content here
                     uncov_lines -= _cfg_excl
 
             if not uncov_lines:
-                _log(f"  [{module_name}] {rel_path} — all remaining uncovered lines are in EXCL blocks, skipping.")
+                _log(f"  [{module_name}] {rel_path} — no actionable uncovered lines after filtering, skipping.")
                 continue
 
             _log(f"  [{module_name}] {rel_path} — {len(uncov_lines)} actionable uncovered lines (post-filter)")
@@ -8730,33 +8708,15 @@ INTERNAL MODULE RULES — these tests live inside the source file, not in an ext
                 # Reject skeleton-only: model echoed the scaffold template unchanged —
                 # all #[test] functions have empty or comment-only bodies.
                 if block and not re.search(r'#\[test\][^{]*\{[^}]*\S', block, re.DOTALL):
-                    # Exception: LLM deliberately gave up because the target is dead/unreachable code.
-                    _giveup_signal = re.search(
+                    if re.search(
                         r'dead.code|unreachable|genuinely|not coverable|cannot be covered|grcov artifact',
                         (block or "") + (response or ""), re.IGNORECASE,
-                    )
-                    if _giveup_signal:
-                        _log(f"  [{module_name}] LLM flagged {rel_path} uncovered lines as dead/unreachable — applying EXCL pragmas.")
+                    ):
+                        _log(f"  [{module_name}] LLM flagged {rel_path} as unreachable — discarding (no EXCL, stall counter applies).")
                         _save_stream_log(_gen_attempt, _query, response or "", "llm_giveup")
-                        block = ""
-                        # Directly insert GRCOV_EXCL_LINE on the dead/artifact uncovered lines.
-                        # Bypasses stall/retrospective — the LLM has already confirmed these are unreachable.
-                        try:
-                            _giveup_src = abs_path.read_text(encoding="utf-8")
-                            _giveup_lines = _giveup_src.splitlines(keepends=True)
-                            _giveup_added = 0
-                            for _gl in sorted(uncov_lines):
-                                if 1 <= _gl <= len(_giveup_lines) and COVERAGE_IGNORE_PRAGMA not in _giveup_lines[_gl - 1]:
-                                    _giveup_lines[_gl - 1] = _giveup_lines[_gl - 1].rstrip("\n") + f"  {COVERAGE_IGNORE_PRAGMA}\n"
-                                    _giveup_added += 1
-                            if _giveup_added:
-                                abs_path.write_text("".join(_giveup_lines), encoding="utf-8")
-                                _log(f"  [{module_name}] Applied {_giveup_added} EXCL pragma(s) to dead lines in {rel_path}.")
-                        except Exception as _ge:
-                            _log(f"  [{module_name}] Failed to apply EXCL pragmas: {_ge}")
-                        break
-                    _log(f"  [{module_name}] Skeleton-only response for {rel_path} — discarding.")
-                    _save_stream_log(_gen_attempt, _query, response or "", "skeleton_only")
+                    else:
+                        _log(f"  [{module_name}] Skeleton-only response for {rel_path} — discarding.")
+                        _save_stream_log(_gen_attempt, _query, response or "", "skeleton_only")
                     block = ""
                 if block:
                     break
@@ -9107,11 +9067,10 @@ INTERNAL MODULE RULES — these tests live inside the source file, not in an ext
                          f"attempts with no improvement — skipping this file.")
                     skipped_files.add(rel_path)
 
-        # If this entire pass was skipped (all files filtered as EXCL/artifact with no LLM
-        # calls), there is nothing more the pipeline can do — break immediately rather than
-        # burning 10 stall attempts on blank lines and grcov instrumentation artifacts.
+        # If this entire pass had no LLM calls (all files filtered by cfg/artifact with
+        # nothing actionable), there is nothing more the pipeline can do — stop immediately.
         if not _pass_had_work:
-            _log(f"  [{module_name}] All files filtered (EXCL/artifact) — no actionable uncovered lines. Stopping.")
+            _log(f"  [{module_name}] All files filtered (cfg/artifact) — no actionable uncovered lines. Stopping.")
             _at_ceiling = True
             break
 
@@ -10006,7 +9965,7 @@ def main():
                 if _at_ceiling and _cov < 100.0:
                     _log(
                         f"  CEILING [{_cluster.name}]: '{_mod_name}' at {_cov:.1f}% — all remaining "
-                        f"uncovered lines are excluded-cfg or EXCL-blocked. No further passes possible "
+                        f"uncovered lines are cfg-filtered or LLVM artifacts. No further passes possible "
                         f"in this cluster. Accepting and moving on."
                     )
                 mark_cluster_augmented(project_dir, _cluster.name, _mod_name, _cov)
@@ -10025,17 +9984,15 @@ def main():
                 else:
                     _c_retries[_mod_name] = _c_retries.get(_mod_name, 0) + 1
 
-                # Hard block after 5 consecutive no-improvement outer retries.
-                # No total cap — any improvement resets the stall counter and the loop
-                # continues. At 0.1% per step the worst case is ~1000 iterations to 100%.
+                # Hard block after 10 consecutive no-improvement outer retries.
+                # Any improvement resets the stall counter and the loop continues.
                 _stall = _c_retries.get(_mod_name, 0)
                 _total = _c_total.get(_mod_name, 0)
-                if _stall >= 5:
+                if _stall >= 10:
                     _log(
                         f"  HARD BLOCK (FR-018): '{_mod_name}' [{_cluster.name}] coverage stuck "
-                        f"at {_cov:.1f}% (stall {_stall}/5, total {_total}). Accepting and moving on."
+                        f"at {_cov:.1f}% (stall {_stall}/10, total {_total}). Accepting and moving on."
                     )
-                    # Accept current coverage — mark as done so the pipeline continues.
                     mark_cluster_augmented(project_dir, _cluster.name, _mod_name, _cov)
                     if _cluster == _clusters[-1]:
                         mark_module_augmented(project_dir, _mod_name, _cov)
@@ -10043,7 +10000,7 @@ def main():
                     continue
                 _log(
                     f"  HARD RULE (FR-018): '{_mod_name}' [{_cluster.name}] coverage {_cov:.1f}% < 100% "
-                    f"(stall {_stall}/5, total {_total}, best covered {_c_best_covered.get(_mod_name, _covered)} lines). "
+                    f"(stall {_stall}/10, total {_total}, best covered {_c_best_covered.get(_mod_name, _covered)} lines). "
                     f"Retrying."
                 )
                 _module_augmented_path(project_dir, _mod_name).unlink(missing_ok=True)
