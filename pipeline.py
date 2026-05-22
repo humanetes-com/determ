@@ -4776,7 +4776,8 @@ Only output the file `functional_requirements.md` using the markers above.
         """
         _combined_raw = "\n\n".join(group_partials)
         _combined_cap = int(SINGLE_CALL_CHAR_LIMIT * 0.55)
-        combined = _combined_raw[-_combined_cap:] if len(_combined_raw) > _combined_cap else _combined_raw
+        combined = smart_truncate(_combined_raw, total_limit=_combined_cap,
+                                  head=_combined_cap // 3, tail=2 * _combined_cap // 3)
 
         genesis_section = (
             f"\n--- genesis.md (methodology — apply when merging requirements) ---\n"
@@ -4999,8 +5000,8 @@ Output a plain structured list of the merged requirements. No filler, no code, n
                 )
 
         _synthesis_cap = int(SINGLE_CALL_CHAR_LIMIT * 0.60)
-        _capped_synthesis = (all_for_synthesis[-_synthesis_cap:]
-                             if len(all_for_synthesis) > _synthesis_cap else all_for_synthesis)
+        _capped_synthesis = smart_truncate(all_for_synthesis, total_limit=_synthesis_cap,
+                                           head=_synthesis_cap // 3, tail=2 * _synthesis_cap // 3)
 
         genesis_exists = bool(existing_genesis.strip())
         if genesis_exists:
@@ -5150,8 +5151,8 @@ Rules:
             f"{trim_to_line(coverage_strategy, _STRATEGY_CAP, "\n... (strategy truncated)")}\n"
         ) if coverage_strategy.strip() else ""
         _synthesis_cap = int(SINGLE_CALL_CHAR_LIMIT * 0.60)
-        _capped_synthesis = (all_for_synthesis[-_synthesis_cap:]
-                             if len(all_for_synthesis) > _synthesis_cap else all_for_synthesis)
+        _capped_synthesis = smart_truncate(all_for_synthesis, total_limit=_synthesis_cap,
+                                           head=_synthesis_cap // 3, tail=2 * _synthesis_cap // 3)
         return f"""You are producing the final API contract document from contract extractions
 across all test chunks. This is the last step of a contract-first TDD reconstruction.
 {FILE_FORMAT_INSTRUCTION}
@@ -5226,7 +5227,8 @@ Rules:
         """
         _combined_raw = "\n\n".join(group_partials)
         _combined_cap = int(SINGLE_CALL_CHAR_LIMIT * 0.55)
-        combined = _combined_raw[-_combined_cap:] if len(_combined_raw) > _combined_cap else _combined_raw
+        combined = smart_truncate(_combined_raw, total_limit=_combined_cap,
+                                  head=_combined_cap // 3, tail=2 * _combined_cap // 3)
 
         genesis_section = (
             f"\n--- genesis.md (methodology — apply when merging contracts) ---\n"
@@ -5312,7 +5314,8 @@ def _task1_proc_macro(project_dir, genesis_path, functional_req_path, test_files
         f'<TESTFILE path="{rel}">\n{content}\n</TESTFILE>'
         for rel, content in relevant
     )
-    tests_section = _raw_tests[-_tests_budget:] if len(_raw_tests) > _tests_budget else _raw_tests
+    tests_section = smart_truncate(_raw_tests, total_limit=_tests_budget,
+                                   head=_tests_budget // 3, tail=2 * _tests_budget // 3)
     effective_context = effective_context[:_PROFILE_CAP]
 
     prompt = f"""You are analysing test files to extract the interface of a Rust proc-macro crate.
@@ -5712,8 +5715,10 @@ class LLMTask2Generator(Task2Generator):
         _req_cap = int(SINGLE_CALL_CHAR_LIMIT * 0.40)
         _ctx_cap = int(SINGLE_CALL_CHAR_LIMIT * 0.25)
         _genesis_cap = min(len(genesis), 3_000)
-        _functional_req_capped = functional_req[-_req_cap:] if len(functional_req) > _req_cap else functional_req
-        _whole_ctx_capped = whole_project_context[-_ctx_cap:] if len(whole_project_context) > _ctx_cap else whole_project_context
+        _functional_req_capped = smart_truncate(functional_req, total_limit=_req_cap,
+                                                head=_req_cap // 3, tail=2 * _req_cap // 3)
+        _whole_ctx_capped = smart_truncate(whole_project_context, total_limit=_ctx_cap,
+                                           head=_ctx_cap // 4, tail=3 * _ctx_cap // 4)
 
         # Step 1: ask model for the list of files to create.
         plan_prompt = f"""You are planning the implementation of a software project.
@@ -5978,8 +5983,10 @@ RULES:
             ) if coverage_strategy.strip() else ""
             _req_cap2 = int(SINGLE_CALL_CHAR_LIMIT * 0.35)
             _ctx_cap2 = int(SINGLE_CALL_CHAR_LIMIT * 0.20)
-            _f_req = functional_req[-_req_cap2:] if len(functional_req) > _req_cap2 else functional_req
-            _w_ctx = whole_project_context[-_ctx_cap2:] if len(whole_project_context) > _ctx_cap2 else whole_project_context
+            _f_req = smart_truncate(functional_req, total_limit=_req_cap2,
+                                    head=_req_cap2 // 3, tail=2 * _req_cap2 // 3)
+            _w_ctx = smart_truncate(whole_project_context, total_limit=_ctx_cap2,
+                                    head=_ctx_cap2 // 4, tail=3 * _ctx_cap2 // 4)
             prompt = f"""You are implementing a single source file for a Rust project.
 {FILE_FORMAT_INSTRUCTION}
 Output ONLY the file `{file_path}` using the markers above. Nothing else.
@@ -6265,9 +6272,15 @@ def generate_fix_loop(
 
         _err_cap = int(SINGLE_CALL_CHAR_LIMIT * 0.30)
         _src_cap = int(SINGLE_CALL_CHAR_LIMIT * 0.50)
-        _last_output_capped = last_output[-_err_cap:] if len(last_output) > _err_cap else last_output
-        _source_block_capped = source_block[-_src_cap:] if len(source_block) > _src_cap else source_block
-        _extra_ctx_capped = extra_context[-int(SINGLE_CALL_CHAR_LIMIT * 0.15):] if len(extra_context) > int(SINGLE_CALL_CHAR_LIMIT * 0.15) else extra_context
+        _ctx_cap_extra = int(SINGLE_CALL_CHAR_LIMIT * 0.15)
+        # Errors: tail-weighted (most recent matters most). Source: head-weighted
+        # (imports/type defs at the top inform the fix).
+        _last_output_capped = smart_truncate(last_output, total_limit=_err_cap,
+                                             head=_err_cap // 4, tail=3 * _err_cap // 4)
+        _source_block_capped = smart_truncate(source_block, total_limit=_src_cap,
+                                              head=_src_cap // 3, tail=2 * _src_cap // 3)
+        _extra_ctx_capped = smart_truncate(extra_context, total_limit=_ctx_cap_extra,
+                                           head=_ctx_cap_extra // 3, tail=2 * _ctx_cap_extra // 3)
         prompt = f"""Code generation produced files that fail the check below.
 Fix ONLY the files causing the failure — do NOT regenerate correct files.
 {_history_section}
@@ -6356,7 +6369,9 @@ def task2_fix_loop(
 
     functional_req = read(functional_req_path)
     _req_cap3 = int(SINGLE_CALL_CHAR_LIMIT * 0.30)
-    extra = f"\nFunctional requirements:\n{functional_req[-_req_cap3:]}\n"
+    _req_truncated = smart_truncate(functional_req, total_limit=_req_cap3,
+                                    head=_req_cap3 // 3, tail=2 * _req_cap3 // 3)
+    extra = f"\nFunctional requirements:\n{_req_truncated}\n"
 
     # Test files: the model must see the assertions it needs to satisfy.
     test_parts = ["\nTest files (the tests your fix must pass):"]
@@ -6466,15 +6481,15 @@ def task4(genesis_path, functional_req_path, test_output, iteration, output_dir,
     _t4_genesis_cap    = 3_000
     _t4_req_cap        = int(SINGLE_CALL_CHAR_LIMIT * 0.25)
     _t4_output_cap     = int(SINGLE_CALL_CHAR_LIMIT * 0.25)
-    def _tail_to_line(text: str, cap: int) -> str:
-        if len(text) <= cap: return text
-        tail = text[-cap:]
-        cut = tail.find("\n")
-        return ("... (truncated)\n" + tail[cut + 1:]) if cut != -1 else tail
-
-    genesis            = _tail_to_line(genesis, _t4_genesis_cap)
-    functional_req     = _tail_to_line(functional_req, _t4_req_cap)
-    truncated_output   = _tail_to_line(test_output, _t4_output_cap)
+    # genesis: head-weighted (the methodology intro and core rules sit at the top).
+    # functional_req: head-weighted (early sections define core types/errors).
+    # test_output: tail-weighted (most recent test failures are most actionable).
+    genesis            = smart_truncate(genesis, total_limit=_t4_genesis_cap,
+                                        head=2 * _t4_genesis_cap // 3, tail=_t4_genesis_cap // 3)
+    functional_req     = smart_truncate(functional_req, total_limit=_t4_req_cap,
+                                        head=_t4_req_cap // 3, tail=2 * _t4_req_cap // 3)
+    truncated_output   = smart_truncate(test_output, total_limit=_t4_output_cap,
+                                        head=_t4_output_cap // 4, tail=3 * _t4_output_cap // 4)
 
     # Regression / comparison section.
     # Prefer caller-supplied prev data (per-module mode); fall back to file lookup (legacy mode).
@@ -6492,7 +6507,8 @@ def task4(genesis_path, functional_req_path, test_output, iteration, output_dir,
 
     if _prev_output:
         _prev_cap = int(SINGLE_CALL_CHAR_LIMIT * 0.20)
-        prev_truncated = _prev_output[-_prev_cap:] if len(_prev_output) > _prev_cap else _prev_output
+        prev_truncated = smart_truncate(_prev_output, total_limit=_prev_cap,
+                                        head=_prev_cap // 4, tail=3 * _prev_cap // 4)
         delta = current_pass - _prev_pass
         trend = (f"IMPROVED by {delta} tests" if delta > 0
                  else f"REGRESSED by {abs(delta)} tests" if delta < 0
@@ -6509,11 +6525,19 @@ Previous test output (for comparison):
 {prev_truncated}
 """
 
+    # Cap failure_log to ~20% of the budget; otherwise after many iterations it
+    # grows multi-KB and squeezes every other section out of the prompt. Recent
+    # entries are most actionable, so weight 1/4 head + 3/4 tail.
+    _t4_failure_log_cap = int(SINGLE_CALL_CHAR_LIMIT * 0.20)
+    failure_log_capped = smart_truncate(
+        failure_log, total_limit=_t4_failure_log_cap,
+        head=_t4_failure_log_cap // 4, tail=3 * _t4_failure_log_cap // 4,
+    )
     failure_log_section = (
         f"\nYou have already attempted to fix this {failure_type} failure multiple times. "
         f"Here is the history of what was tried and what happened each time — "
         f"do NOT repeat any approach that already failed. Each iteration that did not improve "
-        f"the pass count means that approach is wrong:\n{failure_log}\n"
+        f"the pass count means that approach is wrong:\n{failure_log_capped}\n"
         f"Study this history carefully. The next update to genesis.md must take a substantively "
         f"different angle than anything already tried above.\n"
     ) if failure_log.strip() else ""
