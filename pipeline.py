@@ -8958,7 +8958,7 @@ INTERNAL MODULE RULES — these tests live inside the source file, not in an ext
                 and _qcov_after is not None
                 and _qcov_able > 0
                 and _qcov_after < _qcov_able
-                and (file_stall_counts.get(rel_path, 0) > 0 or len(uncov_lines) <= 4)
+                and file_stall_counts.get(rel_path, 0) > 0
             ):
                 _src_lines_for_guard = existing_text.splitlines()
                 _guard_hints = []

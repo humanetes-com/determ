@@ -140,6 +140,13 @@ Pipeline touches: files inside tmp/{project}/.
 **4. Never commit secrets.**
 .env is gitignored. Never add it to git.
 
+**5. Commit immediately after every agreed fix.**
+As soon as a fix to pipeline.py (or related files) is implemented and agreed upon — do not wait for a restart:
+1. Run `bash check.sh` — must pass clean.
+2. `git add` the changed files and commit with a message summarizing: what was implemented, the investigation that led to it, and the conclusions reached.
+3. Add an entry to `handover/HANDOVERS.md` covering the same: state at handover, changes made, key code locations, and how to restart.
+Do not commit "Co-Authored-By" lines — keep the git log LLM-agnostic.
+
 ---
 
 # Improvements enabled by pipeline-in-own-repo
