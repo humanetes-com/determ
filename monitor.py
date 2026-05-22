@@ -389,8 +389,12 @@ def pipeline_status():
     rows.extend(_vllm_status())
 
     # Row 1: compact status line
+    _cov_data = _parse_coverage_json(_find_project_dir())
+    _total_cov  = sum(c for c, _ in _cov_data.values())
+    _total_cvbl = sum(v for _, v in _cov_data.values())
+    _lines_str  = f"  {_total_cov}/{_total_cvbl}" if _total_cvbl else ""
     rows.append(
-        f"{status_str}  {bold(cur_cl or '?')}  cov={cov_col(bold(cov))}  "
+        f"{status_str}  {bold(cur_cl or '?')}  cov={cov_col(bold(cov))}{dim(_lines_str)}  "
         f"attempt {prog['attempt']}/{prog['max_attempt']}  "
         f"age={age_s}  errors={prog['errors']}"
     )

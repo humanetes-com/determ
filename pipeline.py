@@ -3462,6 +3462,35 @@ def _nightly_rules_for_cluster() -> str:
     )
 
 
+def _estimate_cluster_ceiling(project_dir: Path, cluster: "BuildCluster") -> tuple[float, int, int]:
+    """Scan source files and estimate the maximum coverage % achievable in this cluster.
+
+    Returns (ceiling_pct, excluded_lines, total_lines). Uses source line count as a proxy
+    for grcov region count — the ratio is approximate but directionally correct.
+    """
+    if not cluster.excluded_cfg:
+        return 100.0, 0, 0
+    total = 0
+    excluded = 0
+    src_dir = project_dir / "src"
+    if not src_dir.exists():
+        return 100.0, 0, 0
+    for rs in sorted(src_dir.rglob("*.rs")):
+        try:
+            text = rs.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        lines = text.splitlines()
+        n = len(lines)
+        excl = _filter_cfg_excluded_lines(text, set(range(1, n + 1)), cluster.excluded_cfg)
+        total += n
+        excluded += len(excl)
+    if total == 0:
+        return 100.0, 0, 0
+    ceiling = (1.0 - excluded / total) * 100.0
+    return ceiling, excluded, total
+
+
 def task0_cfg_scan(project_dir: Path) -> "list[BuildCluster]":
     """
     Derive compiler clusters from project source — no LLM, pure static scan.
@@ -7220,6 +7249,63 @@ def _filter_cfg_incompatible_lines(
     return incompatible
 
 
+def _filter_cfg_excluded_lines(
+    source_text: str,
+    uncov_lines: set[int],
+    excluded_cfgs: list[str],
+) -> set[int]:
+    """Return the subset of uncov_lines inside #[cfg(X)] blocks where X is in excluded_cfgs.
+
+    These lines are compiled only when X is active — in a cluster where X is excluded (e.g.
+    stable when error_generic_member_access is excluded), they are never compiled and can
+    never be covered regardless of what the LLM writes.
+
+    Unlike _filter_cfg_incompatible_lines (which targets not(X) blocks for active clusters),
+    this function targets direct X blocks for excluded clusters.
+    """
+    if not excluded_cfgs or not uncov_lines:
+        return set()
+
+    excluded_set = set(excluded_cfgs)
+
+    def _is_excluded_block(cfg_expr: str) -> bool:
+        for pred in excluded_set:
+            if not re.search(rf'\b{re.escape(pred)}\b', cfg_expr):
+                continue
+            # Make sure it's not wrapped in not(...) — that would be a stable-compatible block
+            if re.search(rf'\bnot\s*\(\s*{re.escape(pred)}\s*\)', cfg_expr):
+                continue
+            return True
+        return False
+
+    code_lines = source_text.splitlines()
+    n = len(code_lines)
+    excluded: set[int] = set()
+
+    i = 0
+    while i < n:
+        stripped = code_lines[i].strip()
+        cfg_m = re.match(r'#\[cfg\((.+)\)\]\s*$', stripped)
+        if cfg_m and _is_excluded_block(cfg_m.group(1)):
+            depth = 0
+            block_started = False
+            for j in range(i, min(n, i + 500)):
+                opens  = code_lines[j].count('{')
+                closes = code_lines[j].count('}')
+                if opens > 0:
+                    block_started = True
+                depth += opens - closes
+                if block_started and depth <= 0:
+                    for lno in range(i + 1, j + 2):
+                        if lno in uncov_lines:
+                            excluded.add(lno)
+                    i = j
+                    break
+        i += 1
+
+    return excluded
+
+
 def _extract_existing_tests(source_text: str) -> str:
     """Extract the existing #[cfg(test)] mod tests block from a source file.
 
@@ -7684,7 +7770,7 @@ def task0c_augment_module(
     existing_test_files: set | None = None,
     project_context: str = "",
     coverage_strategy: str = "",
-) -> tuple[float, int]:
+) -> tuple[float, int, bool]:
     """
     Generate unit tests (#[cfg(test)] blocks appended inline) for a module
     until tarpaulin reports 100% coverage or MAX_RETRIES is exhausted.
@@ -7700,7 +7786,7 @@ def task0c_augment_module(
 
     if not augmentor.is_applicable(crate_type):
         _log(f"  [{module_name}] crate type '{crate_type}' not applicable for augmentation — skipping.")
-        return 100.0, 0  # treat as done
+        return 100.0, 0, False  # treat as done
 
     # Pre-flight: two-stage compile check.
     # Stage 1: library only — if broken, skip (not TASK 0c's job to fix implementation).
@@ -7735,7 +7821,7 @@ def task0c_augment_module(
                 err_snippet = lib_err[:400]
                 _log(f"  [{module_name}] Library does not compile in write-protected files — skipping.")
                 _log(f"    Error: {err_snippet}")
-                return 0.0, 0
+                return 0.0, 0, False
             _log(f"  [{module_name}] Library compile failure in writable source — routing to harness fix loop.")
         else:
             _log(f"  [{module_name}] Library compile failure in gen_* block — routing to harness fix loop.")
@@ -7772,7 +7858,7 @@ def task0c_augment_module(
 
             if not broken_files:
                 _log(f"  [{module_name}] Cannot identify broken file — skipping augmentation.")
-                return 0.0, 0
+                return 0.0, 0, False
 
             # Pass 1: ask LLM to fix each broken file — preserve as much generated
             # test code as possible rather than discarding it immediately.
@@ -7973,7 +8059,7 @@ corrected content here
                                 _log(f"  [{module_name}] Source restored — harness now compiles.")
                                 break
                     _log(f"  [{module_name}] Harness still broken after targeted strip — skipping augmentation.")
-                    return 0.0, 0
+                    return 0.0, 0, False
                 _log(f"  [{module_name}] Harness fixed by targeted strip.")
                 break
 
@@ -8039,6 +8125,7 @@ corrected content here
     skipped_files: set[str] = set()          # files permanently skipped due to stall
     file_what_worked: dict[str, str] = {}    # confirmed-working patterns per file (from improving attempts)
     file_retrospectives: dict[str, str] = {} # per-file classification of why coverage stalled
+    _at_ceiling = False                      # True when a full pass produced no actionable lines
     while attempt < max_attempts:
         attempt += 1
         _log(f"  [{module_name}/{_cluster_label}] Attempt {attempt}/{max_attempts}")
@@ -8305,6 +8392,19 @@ corrected content here
                         abs_path.write_text(_raw_text, encoding="utf-8")
                         existing_text = _gen_block_re.sub("", _raw_text).rstrip() + "\n"
                     uncov_lines -= _incompat
+
+            # Filter lines inside cfg blocks that are excluded in this cluster
+            # (e.g. #[cfg(error_generic_member_access)] under the stable cluster).
+            # No EXCL pragmas written — these lines ARE coverable in the nightly cluster
+            # pass and must not be permanently marked ignored.
+            if _current_cluster and _current_cluster.excluded_cfg:
+                _cfg_excl = _filter_cfg_excluded_lines(
+                    existing_text, uncov_lines, _current_cluster.excluded_cfg
+                )
+                if _cfg_excl:
+                    _log(f"  [{module_name}] {rel_path} — filtered {len(_cfg_excl)} excluded-cfg line(s) "
+                         f"(compiled out in {_current_cluster.name}): {sorted(_cfg_excl)}")
+                    uncov_lines -= _cfg_excl
 
             if not uncov_lines:
                 _log(f"  [{module_name}] {rel_path} — all remaining uncovered lines are in EXCL blocks, skipping.")
@@ -8867,6 +8967,7 @@ INTERNAL MODULE RULES — these tests live inside the source file, not in an ext
         # burning 10 stall attempts on blank lines and grcov instrumentation artifacts.
         if not _pass_had_work:
             _log(f"  [{module_name}] All files filtered (EXCL/artifact) — no actionable uncovered lines. Stopping.")
+            _at_ceiling = True
             break
 
         # If every remaining uncovered file is now skipped, die with a report.
@@ -8894,7 +8995,7 @@ INTERNAL MODULE RULES — these tests live inside the source file, not in an ext
             sys.exit(0)
 
     _log(f"  [{module_name}/{_cluster_label}] Finished augmentation: {coverage:.1f}% coverage after {attempt} attempt(s).")
-    return coverage, covered_lines
+    return coverage, covered_lines, _at_ceiling
 
 
 def task0c_coverage_augmentation(
@@ -8957,8 +9058,8 @@ def task0c_coverage_augmentation(
     for mod_name, mod_dir, crate_type in work_list:
         _log(f"\n  {'='*50}")
         _log(f"  Module: {mod_name}  [{crate_type}]")
-        final_cov, _ = task0c_augment_module(project_dir, mod_name, mod_dir, crate_type,
-                                             existing_test_files=existing_test_files)
+        final_cov, _, _ = task0c_augment_module(project_dir, mod_name, mod_dir, crate_type,
+                                               existing_test_files=existing_test_files)
         results.append((mod_name, final_cov))
 
     _log(f"\nTASK 0c complete. Coverage summary:")
@@ -9686,6 +9787,11 @@ def main():
         _current_cluster = _cluster
         _log(f"\n{'━' * 60}")
         _log(f"  Starting compiler cluster: {_cluster.name}")
+        _ceiling_pct, _ceiling_excl, _ceiling_total = _estimate_cluster_ceiling(project_dir, _cluster)
+        if _ceiling_excl > 0:
+            _log(f"  Cluster ceiling estimate: ~{_ceiling_pct:.1f}% "
+                 f"({_ceiling_excl} of {_ceiling_total} source lines inside excluded-cfg blocks — "
+                 f"unreachable in this cluster)")
         _log(f"{'━' * 60}")
         if _cluster.gated_files:
             _log(f"  [cluster] Skipping {len(_cluster.gated_files)} gated file(s) not compiled in this cluster: "
@@ -9737,7 +9843,7 @@ def main():
             _set_current(project_dir, f"task0c/{_cluster.name}/{_mod_name} / starting")
 
             _etf_pre = {rel for rel, _ in collect_test_files(project_dir)}
-            _cov, _covered = task0c_augment_module(
+            _cov, _covered, _at_ceiling = task0c_augment_module(
                 project_dir, _mod_name, _mod_dir, _crate_type,
                 existing_test_files=_etf_pre,
                 project_context=project_context,
@@ -9751,7 +9857,13 @@ def main():
 
             _c_total[_mod_name] = _c_total.get(_mod_name, 0) + 1
 
-            if _cov >= 100.0 or _crate_type == "proc-macro":
+            if _cov >= 100.0 or _crate_type == "proc-macro" or _at_ceiling:
+                if _at_ceiling and _cov < 100.0:
+                    _log(
+                        f"  CEILING [{_cluster.name}]: '{_mod_name}' at {_cov:.1f}% — all remaining "
+                        f"uncovered lines are excluded-cfg or EXCL-blocked. No further passes possible "
+                        f"in this cluster. Accepting and moving on."
+                    )
                 mark_cluster_augmented(project_dir, _cluster.name, _mod_name, _cov)
                 # Also write the main module sentinel when the last cluster finishes,
                 # so the strip/task1-4 loop sees it as done.
@@ -9768,13 +9880,15 @@ def main():
                 else:
                     _c_retries[_mod_name] = _c_retries.get(_mod_name, 0) + 1
 
-                # Hard block after 5 no-improvement outer retries OR 20 total outer attempts.
+                # Hard block after 5 consecutive no-improvement outer retries.
+                # No total cap — any improvement resets the stall counter and the loop
+                # continues. At 0.1% per step the worst case is ~1000 iterations to 100%.
                 _stall = _c_retries.get(_mod_name, 0)
                 _total = _c_total.get(_mod_name, 0)
-                if _stall >= 5 or _total >= 20:
+                if _stall >= 5:
                     _log(
                         f"  HARD BLOCK (FR-018): '{_mod_name}' [{_cluster.name}] coverage stuck "
-                        f"at {_cov:.1f}% (stall {_stall}/5, total {_total}/20). Accepting and moving on."
+                        f"at {_cov:.1f}% (stall {_stall}/5, total {_total}). Accepting and moving on."
                     )
                     # Accept current coverage — mark as done so the pipeline continues.
                     mark_cluster_augmented(project_dir, _cluster.name, _mod_name, _cov)
@@ -9784,7 +9898,7 @@ def main():
                     continue
                 _log(
                     f"  HARD RULE (FR-018): '{_mod_name}' [{_cluster.name}] coverage {_cov:.1f}% < 100% "
-                    f"(stall {_stall}/5, total {_total}/20, best covered {_c_best_covered.get(_mod_name, _covered)} lines). "
+                    f"(stall {_stall}/5, total {_total}, best covered {_c_best_covered.get(_mod_name, _covered)} lines). "
                     f"Retrying."
                 )
                 _module_augmented_path(project_dir, _mod_name).unlink(missing_ok=True)
