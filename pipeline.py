@@ -7159,10 +7159,11 @@ class LlvmCovProvider(CoverageProvider):
     def _run(self, project_dir: Path, module_name: str, suffix: str = "") -> tuple[float, list[dict], int, int]:
         lcov_path = self._lcov_path(module_name, suffix)
         env = _cargo_env()
+        # llvm-cov uses LLVM's regex (POSIX-ERE-ish): no `\d`, use `[0-9]` instead.
         ignore_patterns = [
             r"tests[/\\]",
             r"build\.rs",
-            r"\.gen_tests_\d+\.rs$",   # pipeline-generated test siblings
+            r"\.gen_tests_[0-9]+\.rs$",   # pipeline-generated test siblings
         ]
         ignore_patterns += [_glob_to_filename_regex(p) for p in _cluster_exclude_patterns()]
         cmd = [
