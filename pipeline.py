@@ -6552,7 +6552,7 @@ def task3(project_dir, test_command, iteration, output_dir, genesis_path):
 def task4(genesis_path, functional_req_path, test_output, iteration, output_dir,
           failure_type: str = "test", failure_log: str = "",
           prev_pass_count: int = 0, prev_test_output: str = "",
-          source_context: str = ""):
+          source_context: str = "", api_surface: str = ""):
     """
     Analyze failures and update genesis.md.
 
@@ -6649,6 +6649,25 @@ Previous test output (for comparison):
         f"\nGenerated source files (the code that was compiled/tested):\n{source_context}\n"
     ) if source_context.strip() else ""
 
+    # If a pre-strip API surface was captured, TASK 1 received it as structural
+    # ground truth. The methodology in genesis.md must reflect that contract:
+    # we are NOT asking TASK 1 to derive signatures from tests anymore -- only
+    # behaviour. A regression caused by signature drift is a TASK 2 / LLM
+    # discipline issue, not a methodology gap that genesis should chase.
+    api_surface_section = ""
+    if api_surface and api_surface.strip():
+        api_surface_section = (
+            "\n⚠️  CONTEXT — pipeline contract has changed:\n"
+            "TASK 1 received an explicit API surface (signatures + type definitions)\n"
+            "captured before strip. That is structural GROUND TRUTH. The methodology\n"
+            "you are updating must therefore focus on BEHAVIOURAL extraction from tests\n"
+            "(what each function returns, invariants, error paths) — not on rediscovering\n"
+            "signatures or struct shapes from test-call patterns. If the failure looks\n"
+            "like the LLM ignored the provided API surface (wrong signature, missing\n"
+            "pub item, renamed field), the lesson is for the GENERATION step's rule set,\n"
+            "not a new test-extraction rule.\n"
+        )
+
     # BL-019: build sub-category hint for the prompt.
     _failure_hint = {
         "assertion": "Tests ran. The failure is an ASSERTION mismatch — the function returned "
@@ -6673,7 +6692,7 @@ Previous test output (for comparison):
 The implementation failed to COMPILE this iteration — the tests could not even run.
 This is a STRUCTURAL failure: the generated code was missing required files, had wrong
 module declarations, or had incorrect workspace layout. This is NOT a logic error.
-
+{api_surface_section}
 Your task: update genesis.md so that its methodology explicitly captures the structural
 information that leads to correct compilation. The methodology must teach readers how to
 derive workspace layout, required entry-point files, and module structure from tests and
@@ -6716,7 +6735,7 @@ genesis.md is not a patch document — it is a project-independent, language-agn
 process that, when mature, should work on any test suite without needing iteration. Every update
 must move it toward greater generality and precision, not toward narrow fixes for the specific
 failures just observed.
-{failure_hint_section}
+{api_surface_section}{failure_hint_section}
 genesis.md (the reasoning process followed this iteration):
 {genesis}
 
@@ -10782,6 +10801,7 @@ def main():
                      f"escalating to TASK 4 with failure_type='requirements_failure'.")
                 genesis_before = read(genesis_path)
                 failure_log_content = load_failure_log(failure_log_path)
+                _t4_api_surface = load_api_surface(project_dir, module_name)
                 task4(
                     genesis_path, module_req_path,
                     f"TASK 1 produced invalid requirements after {T1_MAX_RETRIES} retries. "
@@ -10790,6 +10810,7 @@ def main():
                     failure_type="requirements_failure",
                     failure_log=failure_log_content,
                     prev_pass_count=prev_pass_count, prev_test_output=prev_test_output,
+                    api_surface=_t4_api_surface,
                 )
                 break  # do not set t1_valid; fall through to `if not t1_valid: continue`
 
@@ -11072,6 +11093,7 @@ This is a Rust procedural macro crate. Strict rules apply:
                 failure_type=failure_type, failure_log=failure_log_content,
                 prev_pass_count=prev_pass_count, prev_test_output=prev_test_output,
                 source_context=t4_source_context,
+                api_surface=load_api_surface(project_dir, module_name),
             )
             genesis_after = read(genesis_path)
 
