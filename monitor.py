@@ -330,6 +330,17 @@ def _parse_pipeline_log():
     this_pass: list[str] = []
     _cluster_files: list[str] = []
     for line in lines:
+        # Fresh pipeline start — reset all accumulated state so the previous run's
+        # data in the log tail does not bleed into the current run's display.
+        if "PIPELINE STARTED" in line:
+            attempt = "?"
+            max_attempt = "?"
+            errors = 0
+            current_cluster = ""
+            coverage = ""
+            this_pass = []
+            _cluster_files = []
+            all_files.clear()
         if m := re.search(r'Attempt\s+(\d+)/(\d+)', line):
             attempt, max_attempt = m.group(1), m.group(2)
             this_pass = []
