@@ -3276,6 +3276,57 @@ class BuildCluster:
     requires_nightly: bool = False      # cluster needs nightly toolchain (set at runtime when E0554 detected)
 
 
+@dataclasses.dataclass
+class ModuleAugmentState:
+    """Per-(module, cluster) augmentation lifecycle.
+
+    Consolidates the five outer-loop state variables that used to live as
+    parallel dicts (_c_retries, _c_best_covered, _c_total + _stall + _at_ceiling).
+    Every exit path goes through `status()`, so adding a new termination
+    condition is a single-case edit instead of a five-place edit.
+
+    Lifecycle:
+      record_pass(...) is called after each task0c_augment_module() return.
+      status(crate_type) returns one of:
+        'done'       — coverage 100%, or crate is proc-macro (cannot augment)
+        'ceiling'    — task0c reported at_ceiling (no actionable lines remain)
+        'hard_block' — stall_passes >= STALL_LIMIT (genuinely stuck)
+        'retry'      — keep going
+    """
+    module_name: str
+    cluster_name: str
+    total_passes: int = 0
+    best_covered_lines: int = -1
+    stall_passes: int = 0    # consecutive passes with no improvement in covered count
+    last_pct: float = 0.0
+    last_covered: int = 0
+    last_at_ceiling: bool = False
+
+    STALL_LIMIT: int = 10
+
+    def record_pass(self, pct: float, covered: int, at_ceiling: bool) -> None:
+        self.total_passes += 1
+        self.last_pct = pct
+        self.last_covered = covered
+        self.last_at_ceiling = at_ceiling
+        if covered > self.best_covered_lines:
+            self.best_covered_lines = covered
+            self.stall_passes = 0
+        else:
+            self.stall_passes += 1
+
+    def status(self, crate_type: str) -> str:
+        if self.last_pct >= 100.0:
+            return 'done'
+        if crate_type == 'proc-macro':
+            return 'done'
+        if self.last_at_ceiling:
+            return 'ceiling'
+        if self.stall_passes >= self.STALL_LIMIT:
+            return 'hard_block'
+        return 'retry'
+
+
 # Active cluster during task0c — set by main() before each cluster pass.
 # Read by _cargo_env() and _run_tarpaulin() so every subprocess call inherits
 # the cluster's env and exclusion list without touching every call site.
@@ -10228,9 +10279,7 @@ def main():
                     detail="starting", source_hash=_src_hash)
         _set_current(project_dir, f"task0c/{_cluster.name} / starting")
 
-        _c_retries: dict[str, int] = {}
-        _c_best_covered: dict[str, int] = {}   # integer covered-line count — no float noise
-        _c_total: dict[str, int] = {}          # total outer attempts per module (caps infinite loops)
+        _module_states: dict[str, ModuleAugmentState] = {}
         _cluster_done: set[str] = set()
 
         # Pre-load which modules are already done for this cluster (resume support).
@@ -10283,14 +10332,24 @@ def main():
                         detail=f"{_cov:.1f}%", source_hash=_src_hash)
             _set_current(project_dir, f"task0c/{_cluster.name}/{_mod_name} / {_cov:.1f}%")
 
-            _c_total[_mod_name] = _c_total.get(_mod_name, 0) + 1
+            _state = _module_states.setdefault(
+                _mod_name, ModuleAugmentState(_mod_name, _cluster.name)
+            )
+            _state.record_pass(_cov, _covered, _at_ceiling)
+            _status = _state.status(_crate_type)
 
-            if _cov >= 100.0 or _crate_type == "proc-macro" or _at_ceiling:
-                if _at_ceiling and _cov < 100.0:
+            if _status in ('done', 'ceiling', 'hard_block'):
+                if _status == 'ceiling':
                     _log(
                         f"  CEILING [{_cluster.name}]: '{_mod_name}' at {_cov:.1f}% — all remaining "
                         f"uncovered lines are cfg-filtered or LLVM artifacts. No further passes possible "
                         f"in this cluster. Accepting and moving on."
+                    )
+                elif _status == 'hard_block':
+                    _log(
+                        f"  HARD BLOCK (FR-018): '{_mod_name}' [{_cluster.name}] coverage stuck "
+                        f"at {_cov:.1f}% (stall {_state.stall_passes}/{ModuleAugmentState.STALL_LIMIT}, "
+                        f"total {_state.total_passes}). Accepting and moving on."
                     )
                 mark_cluster_augmented(project_dir, _cluster.name, _mod_name, _cov)
                 # Also write the main module sentinel when the last cluster finishes,
@@ -10299,32 +10358,10 @@ def main():
                     mark_module_augmented(project_dir, _mod_name, _cov)
                 _cluster_done.add(_mod_name)
             else:
-                # Stall detection: compare integer covered-line counts — deterministic,
-                # no float noise from tarpaulin percentage rounding.
-                _prev_best_covered = _c_best_covered.get(_mod_name, -1)
-                if _covered > _prev_best_covered:
-                    _c_best_covered[_mod_name] = _covered
-                    _c_retries[_mod_name] = 0
-                else:
-                    _c_retries[_mod_name] = _c_retries.get(_mod_name, 0) + 1
-
-                # Hard block after 10 consecutive no-improvement outer retries.
-                # Any improvement resets the stall counter and the loop continues.
-                _stall = _c_retries.get(_mod_name, 0)
-                _total = _c_total.get(_mod_name, 0)
-                if _stall >= 10:
-                    _log(
-                        f"  HARD BLOCK (FR-018): '{_mod_name}' [{_cluster.name}] coverage stuck "
-                        f"at {_cov:.1f}% (stall {_stall}/10, total {_total}). Accepting and moving on."
-                    )
-                    mark_cluster_augmented(project_dir, _cluster.name, _mod_name, _cov)
-                    if _cluster == _clusters[-1]:
-                        mark_module_augmented(project_dir, _mod_name, _cov)
-                    _cluster_done.add(_mod_name)
-                    continue
                 _log(
                     f"  HARD RULE (FR-018): '{_mod_name}' [{_cluster.name}] coverage {_cov:.1f}% < 100% "
-                    f"(stall {_stall}/10, total {_total}, best covered {_c_best_covered.get(_mod_name, _covered)} lines). "
+                    f"(stall {_state.stall_passes}/{ModuleAugmentState.STALL_LIMIT}, "
+                    f"total {_state.total_passes}, best covered {_state.best_covered_lines} lines). "
                     f"Retrying."
                 )
                 _module_augmented_path(project_dir, _mod_name).unlink(missing_ok=True)

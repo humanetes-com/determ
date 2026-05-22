@@ -116,6 +116,57 @@ mod gen_tests_1 {
     print("  OK  gen_tests helpers")
 
 
+def test_module_augment_state() -> None:
+    """Cover every transition in the augmentation state machine."""
+    import pipeline
+
+    # 1. Done — coverage hits 100.
+    s = pipeline.ModuleAugmentState("m", "stable")
+    s.record_pass(100.0, 50, False)
+    assert s.status("lib") == "done"
+
+    # 2. Done — proc-macro crates short-circuit regardless of coverage.
+    s = pipeline.ModuleAugmentState("m", "stable")
+    s.record_pass(12.0, 1, False)
+    assert s.status("proc-macro") == "done"
+
+    # 3. Ceiling — at_ceiling=True maps to 'ceiling' (used to accept the module).
+    s = pipeline.ModuleAugmentState("m", "stable")
+    s.record_pass(45.0, 12, True)
+    assert s.status("lib") == "ceiling"
+
+    # 4. Retry — first non-improving pass below ceiling, still under stall limit.
+    s = pipeline.ModuleAugmentState("m", "stable")
+    s.record_pass(80.0, 80, False)   # baseline
+    s.record_pass(80.0, 80, False)   # no improvement; stall=1
+    assert s.status("lib") == "retry"
+    assert s.stall_passes == 1
+    assert s.best_covered_lines == 80
+
+    # 5. Stall counter resets on improvement.
+    s.record_pass(82.0, 82, False)   # improved
+    assert s.stall_passes == 0
+    assert s.best_covered_lines == 82
+
+    # 6. Hard block — STALL_LIMIT consecutive no-improvement passes.
+    s = pipeline.ModuleAugmentState("m", "stable")
+    s.record_pass(80.0, 80, False)
+    for _ in range(pipeline.ModuleAugmentState.STALL_LIMIT):
+        s.record_pass(80.0, 80, False)
+    assert s.stall_passes == pipeline.ModuleAugmentState.STALL_LIMIT
+    assert s.status("lib") == "hard_block"
+
+    # 7. Coverage reaching 100 wins over hard_block (done takes precedence).
+    s = pipeline.ModuleAugmentState("m", "stable")
+    for _ in range(pipeline.ModuleAugmentState.STALL_LIMIT + 1):
+        s.record_pass(99.0, 99, False)
+    assert s.status("lib") == "hard_block"
+    s.record_pass(100.0, 100, False)
+    assert s.status("lib") == "done"
+
+    print("  OK  ModuleAugmentState transitions")
+
+
 def test_extract_gen_tests_body() -> None:
     import pipeline
 
@@ -231,6 +282,7 @@ def main() -> int:
     print("Pure-Python phase:")
     test_gen_tests_helpers()
     test_extract_gen_tests_body()
+    test_module_augment_state()
 
     if full:
         print("Cargo phase (--full):")
