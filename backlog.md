@@ -72,6 +72,32 @@ P2 = changes LLM behavior in a measurable way, validate on fixture + anyhow.
 
 ## Closed
 
+### P1 — Capture pre-strip API surface as TASK 1 ground truth (DONE — session 34)
+- Sites: `_capture_api_surface` (new helper), `load_api_surface`,
+  `_format_api_surface_section`, all four TASK 1 prompt builders
+  (StaticTask1 _single/_chunk/_synthesize_group/_synthesis,
+  LLMTask1 overrides, _task1_proc_macro).
+- Symptom: TASK 1 had to derive BOTH structure (signatures, struct fields,
+  enum variants) AND behaviour from tests alone. Tests exercise the API
+  but don't enumerate it — public items not exercised by a test would
+  silently disappear in the reconstruction, costing iterations to
+  rediscover.
+- Fix: just before strip, `_capture_api_surface` runs
+  `_condense_rust_to_signatures` on every non-test .rs in the module and
+  writes the concatenated skeleton to
+  `.original_structure/<module>.api.md`. The dir survives strip (lives at
+  project root, not under src/). TASK 1 calls `load_api_surface()`, threads
+  the text into every prompt builder via a new `api_surface=""` parameter,
+  and `_format_api_surface_section` wraps it with a "ground truth — do not
+  contradict shapes shown below" header. Capped at ~25% of
+  SINGLE_CALL_CHAR_LIMIT (2/3 head, 1/3 tail) so it can't crowd out tests.
+- Note: changes the experimental claim from "reconstruct from tests alone"
+  to "structure given, behaviour derived from tests". The new framing
+  should be reflected in genesis.md the next time TASK 4 updates it.
+- Verified: fixture's API surface is 960 chars after capture, contains
+  every public fn signature with bodies elided, round-trips through
+  load_api_surface, and wraps correctly via _format_api_surface_section.
+
 ### P0 — Replace `text[-cap:]` with `smart_truncate` everywhere (DONE — session 34)
 - Sites: `_synthesize_group` (StaticTask1 + LLMTask1), `_task1_proc_macro`,
   `Task2 plan_prompt`, `Task2 file_prompt`, `Task2 LLM file gen`, `generate_fix_loop`,

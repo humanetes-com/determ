@@ -4619,6 +4619,33 @@ content here
 #   TASK1_SYNTHESIZER=llm      (default — contract-first, more deterministic)
 # ---------------------------------------------------------------------------
 
+# API-surface section cap: ~25% of the single-call budget. The skeleton must
+# survive truncation because TASK 1 treats it as ground truth — but we still
+# bound it so it doesn't crowd out tests and README on large projects.
+_API_SURFACE_CAP = max(8_000, SINGLE_CALL_CHAR_LIMIT // 4)
+
+
+def _format_api_surface_section(api_surface: str) -> str:
+    """Wrap the captured API surface into a labelled prompt section, head+tail
+    truncated to _API_SURFACE_CAP. Returns '' if api_surface is empty."""
+    if not api_surface or not api_surface.strip():
+        return ""
+    text = smart_truncate(
+        api_surface,
+        total_limit=_API_SURFACE_CAP,
+        head=2 * _API_SURFACE_CAP // 3,
+        tail=_API_SURFACE_CAP // 3,
+    )
+    return (
+        "\n--- Public API surface (ground truth — pre-strip skeleton) ---\n"
+        "Use these signatures and type definitions exactly. Do not invent items not\n"
+        "listed here, do not change signatures, and do not contradict the shapes shown\n"
+        "below. The behavioral semantics (what each function returns, invariants)\n"
+        "are still derived from the tests; this skeleton only defines the SHAPE.\n"
+        f"{text}\n"
+    )
+
+
 class Task1Synthesizer(ABC):
     """Analyze test files and produce functional_requirements.md (TASK 1)."""
 
@@ -4633,8 +4660,15 @@ class Task1Synthesizer(ABC):
         project_profile: str = "",
         project_context: str = "",
         coverage_strategy: str = "",
+        api_surface: str = "",
     ) -> bool:
-        """Write functional_requirements.md (and genesis stub if absent). Returns True on success."""
+        """Write functional_requirements.md (and genesis stub if absent). Returns True on success.
+
+        api_surface (when provided) is the pre-strip structural skeleton of the module —
+        public signatures, type definitions, function bodies elided. It is structural
+        ground truth: TASK 1 should derive BEHAVIOR from the tests, but not invent
+        signatures or types that conflict with this skeleton.
+        """
 
 
 class StaticTask1Synthesizer(Task1Synthesizer):
@@ -4646,7 +4680,8 @@ class StaticTask1Synthesizer(Task1Synthesizer):
     """
 
     def synthesize(self, project_dir, genesis_path, functional_req_path, test_files,
-                   readme_text, project_profile="", project_context="", coverage_strategy=""):
+                   readme_text, project_profile="", project_context="", coverage_strategy="",
+                   api_surface=""):
         existing_genesis = read(genesis_path)
         genesis_exists = bool(existing_genesis.strip())
         total_chars = sum(len(c) for _, c in test_files)
@@ -4656,17 +4691,20 @@ class StaticTask1Synthesizer(Task1Synthesizer):
         if total_chars <= SINGLE_CALL_CHAR_LIMIT:
             ok = with_retry(lambda: self._single(
                 genesis_path, functional_req_path, test_files, effective_context,
-                existing_genesis, project_profile, coverage_strategy=coverage_strategy
+                existing_genesis, project_profile, coverage_strategy=coverage_strategy,
+                api_surface=api_surface,
             ))
         else:
             ok = self._chunked(
                 genesis_path, functional_req_path, test_files, effective_context,
-                existing_genesis, project_profile, coverage_strategy=coverage_strategy
+                existing_genesis, project_profile, coverage_strategy=coverage_strategy,
+                api_surface=api_surface,
             )
         return ok
 
     def _single(self, genesis_path, functional_req_path, test_files, readme_text,
-                existing_genesis, project_profile="", coverage_strategy=""):
+                existing_genesis, project_profile="", coverage_strategy="",
+                api_surface=""):
         genesis_exists = bool(existing_genesis.strip())
         tests_section = format_test_files(test_files)
         profile_section = (f"\n--- Project profile (language, build system, workspace layout) ---\n"
@@ -4677,7 +4715,7 @@ class StaticTask1Synthesizer(Task1Synthesizer):
 
         prompt = self._single_prompt(
             tests_section, readme_text, profile_section, existing_genesis,
-            coverage_strategy=coverage_strategy
+            coverage_strategy=coverage_strategy, api_surface=api_surface,
         )
         response = ask(prompt, model=_TASK1_MODEL)
         files = extract_files(response)
@@ -4695,12 +4733,14 @@ class StaticTask1Synthesizer(Task1Synthesizer):
         return False
 
     def _single_prompt(self, tests_section: str, readme_text: str, profile_section: str,
-                       existing_genesis: str, coverage_strategy: str = "") -> str:
+                       existing_genesis: str, coverage_strategy: str = "",
+                       api_surface: str = "") -> str:
         """Return the prompt for single-call requirements extraction (overridable)."""
         strategy_section = (
             f"\n--- Coverage strategy (import patterns, type construction, test conventions) ---\n"
             f"{trim_to_line(coverage_strategy, _STRATEGY_CAP, "\n... (strategy truncated)")}\n"
         ) if coverage_strategy.strip() else ""
+        api_section = _format_api_surface_section(api_surface)
         genesis_exists = bool(existing_genesis.strip())
         if genesis_exists:
             return f"""You are working on a deterministic AI-driven software reconstruction experiment.
@@ -4713,7 +4753,7 @@ Use the README and test files to understand the language, framework, and project
 
 README.md:
 {readme_text[:_README_CAP]}
-{profile_section}{strategy_section}
+{profile_section}{strategy_section}{api_section}
 Test files:
 {tests_section}
 
@@ -4746,7 +4786,7 @@ Do not assume any specific language or technology -- derive everything from what
 
 README.md:
 {readme_text[:_README_CAP]}
-{profile_section}{strategy_section}
+{profile_section}{strategy_section}{api_section}
 Test files:
 {tests_section}
 
@@ -4768,7 +4808,7 @@ Only output the file `functional_requirements.md` using the markers above.
 
     def _synthesize_group(self, group_partials: list[str], group_idx: int, total_groups: int,
                           readme_text: str, profile_section: str, genesis: str = "",
-                          coverage_strategy: str = "") -> str | None:
+                          coverage_strategy: str = "", api_surface: str = "") -> str | None:
         """
         Stage-1 hierarchical synthesis: merge a group of raw chunk partials into a
         single condensed intermediate summary. Called once per group.
@@ -4783,6 +4823,7 @@ Only output the file `functional_requirements.md` using the markers above.
             f"\n--- genesis.md (methodology — apply when merging requirements) ---\n"
             f"{genesis}\n"
         ) if genesis.strip() else ""
+        api_section = _format_api_surface_section(api_surface)
 
         prompt = f"""You are merging a group of partial functional requirements extracted from test files.
 
@@ -4790,7 +4831,7 @@ This is group {group_idx} of {total_groups}. Each entry was extracted independen
 of test files. Your task: produce a single, deduplicated, concise summary of all requirements
 in this group. Preserve all specific types, function signatures, error conditions, and invariants.
 Remove duplicate entries. Do not invent new requirements not present in the input.
-{profile_section}{genesis_section}
+{profile_section}{genesis_section}{api_section}
 README.md (for language/framework context):
 {readme_text[:_README_CAP]}
 
@@ -4810,7 +4851,8 @@ Output a plain structured list of the merged requirements. No filler, no code, n
         return str(raw) if raw is not False else None
 
     def _chunked(self, genesis_path, functional_req_path, test_files, readme_text,
-                 existing_genesis, project_profile="", coverage_strategy=""):
+                 existing_genesis, project_profile="", coverage_strategy="",
+                 api_surface=""):
         _fixed = (
             min(len(readme_text), 2_000)
             + min(len(project_profile), 2_000)
@@ -4877,7 +4919,8 @@ Output a plain structured list of the merged requirements. No filler, no code, n
             profile_header = (f"\nProject context:\n{project_profile}\n") if project_profile.strip() else ""
             prompt = self._chunk_prompt(i, total_chunks, readme_text, tests_section,
                                        profile_header + type_manifest_header,
-                                       genesis=existing_genesis, coverage_strategy=coverage_strategy)
+                                       genesis=existing_genesis, coverage_strategy=coverage_strategy,
+                                       api_surface=api_surface)
 
             def chunk_attempt(p=prompt):
                 result = ask(p)
@@ -4925,7 +4968,8 @@ Output a plain structured list of the merged requirements. No filler, no code, n
 
                 _log(f"  Merging group {g_idx}/{total_groups} ({len(group)} partials)...")
                 summary = self._synthesize_group(group, g_idx, total_groups, readme_text, profile_section,
-                                                genesis=existing_genesis, coverage_strategy=coverage_strategy)
+                                                genesis=existing_genesis, coverage_strategy=coverage_strategy,
+                                                api_surface=api_surface)
                 if summary is False or not summary:
                     _log(f"  ERROR: group {g_idx} merge failed after all retries.")
                     return False
@@ -4949,6 +4993,7 @@ Output a plain structured list of the merged requirements. No filler, no code, n
             readme_text, profile_section, existing_genesis, all_for_synthesis,
             coverage_strategy=coverage_strategy,
             project_dir=genesis_path.parent,
+            api_surface=api_surface,
         )
 
         def synthesis_attempt():
@@ -4982,12 +5027,14 @@ Output a plain structured list of the merged requirements. No filler, no code, n
     def _synthesis_prompt(self, readme_text: str, profile_section: str,
                           existing_genesis: str, all_for_synthesis: str,
                           coverage_strategy: str = "",
-                          project_dir: Path | None = None) -> str:
+                          project_dir: Path | None = None,
+                          api_surface: str = "") -> str:
         """Return the Stage-2 synthesis prompt (overridable by subclasses)."""
         strategy_section = (
             f"\n--- Coverage strategy (import patterns, type construction, test conventions) ---\n"
             f"{trim_to_line(coverage_strategy, _STRATEGY_CAP, "\n... (strategy truncated)")}\n"
         ) if coverage_strategy.strip() else ""
+        api_section = _format_api_surface_section(api_surface)
 
         # BL-022: inject type difficulty signals so synthesis focuses on hard types.
         type_signals_section = ""
@@ -5014,7 +5061,7 @@ Derive the language and framework from the README and requirements below.
 
 README.md:
 {readme_text[:_README_CAP]}
-{profile_section}{strategy_section}{type_signals_section}
+{profile_section}{strategy_section}{api_section}{type_signals_section}
 --- genesis.md (read-only -- do not output or modify it) ---
 {existing_genesis}
 
@@ -5032,7 +5079,7 @@ Derive the language and framework from the README and requirements below.
 
 README.md:
 {readme_text[:_README_CAP]}
-{profile_section}{strategy_section}{type_signals_section}
+{profile_section}{strategy_section}{api_section}{type_signals_section}
 Requirements (merged from all test chunks):
 {_capped_synthesis}
 
@@ -5045,7 +5092,7 @@ Only output the file `functional_requirements.md` using the markers above.
 
     def _chunk_prompt(self, chunk_idx: int, total_chunks: int, readme_text: str,
                       tests_section: str, profile_header: str, genesis: str = "",
-                      coverage_strategy: str = "") -> str:
+                      coverage_strategy: str = "", api_surface: str = "") -> str:
         """Return the per-chunk extraction prompt (overridable by subclasses)."""
         genesis_section = (
             f"\n--- genesis.md (methodology — apply when extracting requirements) ---\n"
@@ -5055,12 +5102,13 @@ Only output the file `functional_requirements.md` using the markers above.
             f"\n--- Coverage strategy (import patterns, type construction, test conventions) ---\n"
             f"{trim_to_line(coverage_strategy, _STRATEGY_CAP, "\n... (strategy truncated)")}\n"
         ) if coverage_strategy.strip() else ""
+        api_section = _format_api_surface_section(api_surface)
         return f"""You are extracting functional requirements from a subset of test files for a software project.
 
 This is chunk {chunk_idx} of {total_chunks} -- there are more test files not shown here.
 All chunks will be synthesized into one complete requirements document after all chunks are processed.
 Focus only on what you can directly observe in the tests below -- do not invent behavior.
-{profile_header}{genesis_section}{strategy_section}
+{profile_header}{genesis_section}{strategy_section}{api_section}
 README.md:
 {readme_text[:_README_CAP]}
 
@@ -5094,7 +5142,8 @@ class LLMTask1Synthesizer(StaticTask1Synthesizer):
     """
 
     def _single_prompt(self, tests_section: str, readme_text: str, profile_section: str,
-                       existing_genesis: str, coverage_strategy: str = "") -> str:
+                       existing_genesis: str, coverage_strategy: str = "",
+                       api_surface: str = "") -> str:
         genesis_exists = bool(existing_genesis.strip())
         genesis_section = (f"\n--- genesis.md (read-only — do not output or modify it) ---\n"
                            f"{existing_genesis}\n") if genesis_exists else ""
@@ -5102,12 +5151,13 @@ class LLMTask1Synthesizer(StaticTask1Synthesizer):
             f"\n--- Coverage strategy (import patterns, type construction, test conventions) ---\n"
             f"{trim_to_line(coverage_strategy, _STRATEGY_CAP, "\n... (strategy truncated)")}\n"
         ) if coverage_strategy.strip() else ""
+        api_section = _format_api_surface_section(api_surface)
         return f"""You are performing contract extraction from test files as part of a
 contract-first TDD reconstruction experiment.
 {FILE_FORMAT_INSTRUCTION}
 Your output MUST be the file `functional_requirements.md` wrapped in the FILE markers above.
 Do not output anything outside those markers.
-{profile_section}{strategy_section}
+{profile_section}{strategy_section}{api_section}
 README.md:
 {readme_text[:_README_CAP]}
 {genesis_section}
@@ -5142,7 +5192,8 @@ Rules:
     def _synthesis_prompt(self, readme_text: str, profile_section: str,
                           existing_genesis: str, all_for_synthesis: str,
                           coverage_strategy: str = "",
-                          project_dir: "Path | None" = None) -> str:
+                          project_dir: "Path | None" = None,
+                          api_surface: str = "") -> str:
         genesis_exists = bool(existing_genesis.strip())
         genesis_section = (f"\n--- genesis.md (read-only — do not output or modify it) ---\n"
                            f"{existing_genesis}\n") if genesis_exists else ""
@@ -5150,6 +5201,7 @@ Rules:
             f"\n--- Coverage strategy (import patterns, type construction, test conventions) ---\n"
             f"{trim_to_line(coverage_strategy, _STRATEGY_CAP, "\n... (strategy truncated)")}\n"
         ) if coverage_strategy.strip() else ""
+        api_section = _format_api_surface_section(api_surface)
         _synthesis_cap = int(SINGLE_CALL_CHAR_LIMIT * 0.60)
         _capped_synthesis = smart_truncate(all_for_synthesis, total_limit=_synthesis_cap,
                                            head=_synthesis_cap // 3, tail=2 * _synthesis_cap // 3)
@@ -5158,7 +5210,7 @@ across all test chunks. This is the last step of a contract-first TDD reconstruc
 {FILE_FORMAT_INSTRUCTION}
 Your output MUST be the file `functional_requirements.md` wrapped in the FILE markers above.
 Do not output anything outside those markers.
-{profile_section}{strategy_section}
+{profile_section}{strategy_section}{api_section}
 README.md:
 {readme_text[:_README_CAP]}
 {genesis_section}
@@ -5182,7 +5234,7 @@ Rules:
 
     def _chunk_prompt(self, chunk_idx: int, total_chunks: int, readme_text: str,
                       tests_section: str, profile_header: str, genesis: str = "",
-                      coverage_strategy: str = "") -> str:
+                      coverage_strategy: str = "", api_surface: str = "") -> str:
         genesis_section = (
             f"\n--- genesis.md (methodology — apply when extracting contracts) ---\n"
             f"{genesis}\n"
@@ -5191,12 +5243,13 @@ Rules:
             f"\n--- Coverage strategy (import patterns, type construction, test conventions) ---\n"
             f"{trim_to_line(coverage_strategy, _STRATEGY_CAP, "\n... (strategy truncated)")}\n"
         ) if coverage_strategy.strip() else ""
+        api_section = _format_api_surface_section(api_surface)
         return f"""You are performing contract extraction from test files as the first step of
 a contract-first TDD reconstruction experiment.
 
 This is chunk {chunk_idx} of {total_chunks}. All chunks will be combined into a single
 implementation contract document.
-{profile_header}{genesis_section}{strategy_section}
+{profile_header}{genesis_section}{strategy_section}{api_section}
 README.md:
 {readme_text[:_README_CAP]}
 
@@ -5220,7 +5273,7 @@ Rules:
 
     def _synthesize_group(self, group_partials: list[str], group_idx: int, total_groups: int,
                           readme_text: str, profile_section: str, genesis: str = "",
-                          coverage_strategy: str = "") -> str | None:
+                          coverage_strategy: str = "", api_surface: str = "") -> str | None:
         """
         Merge a group of contract partials into a deduplicated intermediate contract list.
         Overrides the behavioral merge prompt with a contract-aware one.
@@ -5234,6 +5287,7 @@ Rules:
             f"\n--- genesis.md (methodology — apply when merging contracts) ---\n"
             f"{genesis}\n"
         ) if genesis.strip() else ""
+        api_section = _format_api_surface_section(api_surface)
 
         prompt = f"""You are merging contract extractions from multiple test file chunks.
 
@@ -5245,7 +5299,7 @@ Rules:
   - Merge duplicate entries (same symbol, same signature) into one.
   - Do not add, invent, or generalise — only what is present in the input.
   - If two entries conflict (same name, different signature), keep both and annotate with "(conflict)".
-{profile_section}{genesis_section}
+{profile_section}{genesis_section}{api_section}
 README.md (for language/framework context):
 {readme_text[:_README_CAP]}
 
@@ -5274,7 +5328,7 @@ def _task1_synthesizer_factory() -> Task1Synthesizer:
 
 def _task1_proc_macro(project_dir, genesis_path, functional_req_path, test_files,
                       readme_text, project_profile, crate_name: str = "",
-                      project_context: str = ""):
+                      project_context: str = "", api_surface: str = ""):
     """
     Specialised TASK 1 for proc-macro crates.
     Instead of extracting runtime API contracts, extracts the proc-macro interface:
@@ -5318,6 +5372,7 @@ def _task1_proc_macro(project_dir, genesis_path, functional_req_path, test_files
                                    head=_tests_budget // 3, tail=2 * _tests_budget // 3)
     effective_context = effective_context[:_PROFILE_CAP]
 
+    api_section = _format_api_surface_section(api_surface)
     prompt = f"""You are analysing test files to extract the interface of a Rust proc-macro crate.
 
 A proc-macro crate provides #[derive(...)] macros and/or #[attribute] macros used in the
@@ -5326,7 +5381,7 @@ this proc-macro crate must implement — not the runtime API of dependent crates
 
 {FILE_FORMAT_INSTRUCTION}
 Your output MUST be the file `functional_requirements.md` wrapped in the FILE markers above.
-{genesis_section}
+{genesis_section}{api_section}
 Project context:
 {effective_context}
 
@@ -5405,12 +5460,20 @@ def task1(project_dir, genesis_path, functional_req_path, test_files, readme_tex
           project_context: str = "", coverage_strategy: str = ""):
     _log("\nTASK 1: Analyzing tests + README, building functional_requirements.md")
 
+    # Pre-strip API surface snapshot (signatures + type defs of the original
+    # source). Used as structural ground truth — TASK 1 derives behaviour from
+    # the tests but must respect the shapes captured here.
+    api_surface = load_api_surface(project_dir, module_name) if module_name else ""
+    if api_surface:
+        _log(f"  Loaded API surface: {len(api_surface):,} chars (pre-strip skeleton).")
+
     # For proc-macro crates with no own tests, extract proc-macro interface
     # (derive macros, helper attributes) from how they're used in the test suite.
     if crate_type == "proc-macro":
         return _task1_proc_macro(project_dir, genesis_path, functional_req_path,
                                  test_files, readme_text, project_profile,
-                                 crate_name=module_name, project_context=project_context)
+                                 crate_name=module_name, project_context=project_context,
+                                 api_surface=api_surface)
 
     existing_genesis = read(genesis_path)
     genesis_exists = bool(existing_genesis.strip())
@@ -5425,7 +5488,8 @@ def task1(project_dir, genesis_path, functional_req_path, test_files, readme_tex
     _log(f"  Using {synthesizer.__class__.__name__}.")
     ok = synthesizer.synthesize(
         project_dir, genesis_path, functional_req_path, test_files, readme_text,
-        project_profile, project_context=project_context, coverage_strategy=coverage_strategy
+        project_profile, project_context=project_context, coverage_strategy=coverage_strategy,
+        api_surface=api_surface,
     )
 
     if not ok:
@@ -9804,6 +9868,78 @@ def _save_original_structure(project_dir: Path, module_dir: Path) -> None:
     _log(f"  Saved original structure: {len(files)} source file(s) recorded.")
 
 
+def _api_surface_path(project_dir: Path, module_name: str) -> Path:
+    """Path where the pre-strip API surface for a module is saved."""
+    return project_dir / ORIGINAL_STRUCTURE_DIR / f"{module_name}.api.md"
+
+
+def _capture_api_surface(project_dir: Path, module_dir: Path, module_name: str) -> Path | None:
+    """Snapshot the module's public API surface BEFORE strip.
+
+    Walks every non-test .rs file in module_dir, runs _condense_rust_to_signatures
+    on each (signatures + type definitions, function bodies elided), concatenates
+    them under <FILE path="..."> markers, and writes to
+    .original_structure/<module>.api.md. The directory survives strip (it lives at
+    the project root, not under src/), so TASK 1 can read it after strip as a
+    "structural ground truth" alongside the test-derived behavioral requirements.
+
+    Returns the file path on success, or None if nothing could be captured.
+    """
+    out_path = _api_surface_path(project_dir, module_name)
+    out_path.parent.mkdir(exist_ok=True)
+
+    parts: list[str] = [
+        f"# API surface — {module_name}",
+        "",
+        "Public-API skeleton captured before strip. Signatures and type definitions",
+        "only (function bodies are elided as `{ /* ... */ }`). This is structural",
+        "ground truth for TASK 1: any item NOT listed here did not exist in the",
+        "original source. The behavioral semantics are still derived from tests —",
+        "this document only defines the shape of the public API.",
+        "",
+    ]
+    file_count = 0
+    for src_file in sorted(module_dir.rglob("*.rs")):
+        rel = src_file.relative_to(project_dir)
+        if any(part in SKIP_DIR_NAMES for part in rel.parts):
+            continue
+        if is_test_file(src_file, project_dir):
+            continue
+        try:
+            text = src_file.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        # Drop any gen_tests declarations the pipeline added — they aren't part
+        # of the original API surface.
+        text = _strip_gen_tests_decls(text)
+        condensed = _condense_rust_to_signatures(text, filename=src_file.name).rstrip()
+        if not condensed:
+            continue
+        parts.append(f'<FILE path="{rel}">')
+        parts.append(condensed)
+        parts.append("</FILE>")
+        parts.append("")
+        file_count += 1
+
+    if file_count == 0:
+        return None
+    out_path.write_text("\n".join(parts), encoding="utf-8")
+    _log(f"  Captured API surface: {file_count} file(s) → "
+         f"{out_path.relative_to(project_dir)} ({out_path.stat().st_size:,} chars).")
+    return out_path
+
+
+def load_api_surface(project_dir: Path, module_name: str) -> str:
+    """Load the saved API surface for a module. Returns '' if not present."""
+    p = _api_surface_path(project_dir, module_name)
+    if not p.exists():
+        return ""
+    try:
+        return p.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
 def load_original_structure(project_dir: Path, module_name: str) -> list[str]:
     """Load the saved pre-strip file list for a module. Returns [] if not found.
 
@@ -10492,6 +10628,10 @@ def main():
                         f"\n  WARNING at strip: '{module_name}' coverage is {_strip_cov:.1f}% "
                         f"— stripping anyway. Reconstruction may be incomplete."
                     )
+            # Capture API surface BEFORE strip — structural ground truth for
+            # TASK 1. The .original_structure/ dir survives strip (lives at the
+            # project root, not under src/), so TASK 1 can read it post-strip.
+            _capture_api_surface(project_dir, module_dir, module_name)
             if not git_commit(project_dir, f"pipeline: pre-strip — {module_name} task0c complete"):
                 _log(f"  [ABORT] pre-strip commit failed for '{module_name}' — refusing to strip. Fix git state and retry.")
                 raise RuntimeError(f"pre-strip commit failed for {module_name}")

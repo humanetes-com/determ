@@ -116,6 +116,42 @@ mod gen_tests_1 {
     print("  OK  gen_tests helpers")
 
 
+def test_api_surface_capture() -> None:
+    """Capture pre-strip API surface from the fixture and validate the artifact."""
+    import pipeline
+
+    workspace = _setup_workspace("smoke-api-surface")
+    module_name = "tiny"
+    out = pipeline._capture_api_surface(workspace, workspace, module_name)
+    assert out is not None, "API capture must return a path for the fixture"
+    assert out.exists()
+    assert out.parent.name == pipeline.ORIGINAL_STRUCTURE_DIR
+
+    text = out.read_text()
+    # Must include each public function as a signature, with body elided.
+    assert "fn add" in text, "missing add() signature"
+    assert "fn divide" in text, "missing divide() signature"
+    assert "fn never_called" in text, "missing never_called() signature"
+    # Function bodies should be elided in the condensed view (no implementation).
+    assert "a + b" not in text, "function body leaked into API surface"
+    # Header / role text must be present so the LLM knows what this is.
+    assert "API surface" in text
+    assert "ground truth" in text.lower()
+
+    # load_api_surface round-trip.
+    loaded = pipeline.load_api_surface(workspace, module_name)
+    assert loaded == text
+
+    # _format_api_surface_section wraps it with the prompt header and truncates.
+    section = pipeline._format_api_surface_section(loaded)
+    assert "Public API surface" in section
+    assert "ground truth" in section.lower()
+    # Empty input → empty section (no prompt noise).
+    assert pipeline._format_api_surface_section("") == ""
+
+    print("  OK  api_surface capture + load + format")
+
+
 def test_module_augment_state() -> None:
     """Cover every transition in the augmentation state machine."""
     import pipeline
@@ -282,6 +318,7 @@ def main() -> int:
     print("Pure-Python phase:")
     test_gen_tests_helpers()
     test_extract_gen_tests_body()
+    test_api_surface_capture()
     test_module_augment_state()
 
     if full:
