@@ -2694,6 +2694,34 @@ def collect_test_files(project_dir: Path):
     return result
 
 
+def collect_examples(project_dir: Path, module_dir: Path | None = None) -> list[tuple[str, str]]:
+    """Return (rel_path, content) for example source files.
+
+    Examples sit in <crate>/examples/ and demonstrate idiomatic API usage. They
+    are not assertions — TASK 1 should treat them as usage signal, not as
+    compliance targets. Filtered to module_dir when supplied (multi-crate
+    workspaces).
+    """
+    if module_dir is None:
+        roots = [project_dir]
+    else:
+        roots = [module_dir]
+    result: list[tuple[str, str]] = []
+    for root in roots:
+        ex_dir = root / "examples"
+        if not ex_dir.is_dir():
+            continue
+        for p in sorted(ex_dir.rglob("*.rs")):
+            if any(part in SKIP_DIR_NAMES for part in p.relative_to(project_dir).parts):
+                continue
+            try:
+                content = p.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            result.append((str(p.relative_to(project_dir)), content))
+    return result
+
+
 def collect_protected_test_files(project_dir: Path) -> set[str]:
     """Return rel paths of files TASK 2 must NEVER overwrite.
 
@@ -9929,11 +9957,21 @@ def _capture_api_surface(project_dir: Path, module_dir: Path, module_name: str) 
         "",
     ]
     file_count = 0
-    for src_file in sorted(module_dir.rglob("*.rs")):
+    # Only walk the crate's src/ tree. examples/, benches/, tests/ are NOT
+    # part of the public API — they are consumers of it. Including them in
+    # the api_surface would tell TASK 1 to preserve signatures that don't
+    # actually exist in the implementation.
+    src_root = module_dir / "src"
+    walk_root = src_root if src_root.is_dir() else module_dir
+    for src_file in sorted(walk_root.rglob("*.rs")):
         rel = src_file.relative_to(project_dir)
         if any(part in SKIP_DIR_NAMES for part in rel.parts):
             continue
         if is_test_file(src_file, project_dir):
+            continue
+        # Defence in depth: skip example/bench/integration-test directories
+        # if walk_root somehow ended up at the module root.
+        if any(part in {"examples", "benches", "tests"} for part in rel.parts):
             continue
         try:
             text = src_file.read_text(encoding="utf-8", errors="replace")
@@ -10693,6 +10731,23 @@ def main():
         t1_input = module_test_files if module_has_tests else test_files
         if not module_has_tests:
             _log(f"  '{module_name}' has 0 tests — using full project tests for TASK 1.")
+
+        # Append example files (examples/*.rs) as usage signal. They are NOT
+        # assertions — the inline header makes that explicit so the LLM doesn't
+        # derive requirements from example-only behavior.
+        _t1_examples = collect_examples(project_dir, module_dir=module_dir if is_multi_module else None)
+        if _t1_examples:
+            _EXAMPLE_HEADER = (
+                "// !!!! TASK 1 NOTE: This file is from the project's `examples/` directory.\n"
+                "// !!!! It demonstrates idiomatic API usage. It is NOT a test and contains\n"
+                "// !!!! no assertions to enforce. Use it to understand HOW the public API is\n"
+                "// !!!! invoked, but do not derive requirements from it unless the same\n"
+                "// !!!! behavior is also asserted by a test in the test suite.\n\n"
+            )
+            t1_input = t1_input + [
+                (rel, _EXAMPLE_HEADER + content) for rel, content in _t1_examples
+            ]
+            _log(f"  Appended {len(_t1_examples)} example file(s) to TASK 1 input as usage signal.")
 
         # TASK 1 with anti-corruption retry (max 2 retries after initial attempt).
         T1_MAX_RETRIES = 2

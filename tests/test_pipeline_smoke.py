@@ -116,6 +116,29 @@ mod gen_tests_1 {
     print("  OK  gen_tests helpers")
 
 
+def test_examples_collector() -> None:
+    """collect_examples picks up examples/*.rs files for TASK 1 usage signal."""
+    import pipeline
+
+    workspace = _setup_workspace("smoke-examples")
+    examples = pipeline.collect_examples(workspace)
+    rels = [rel for rel, _ in examples]
+    assert any("examples/usage.rs" in r for r in rels), \
+        f"expected examples/usage.rs in collected examples, got: {rels}"
+
+    # Sanity: content is the actual example body, not empty.
+    _, content = examples[0]
+    assert "fn main" in content
+    assert "add(" in content
+
+    # collect_test_files does NOT pick up examples (they aren't tests).
+    test_files = pipeline.collect_test_files(workspace)
+    assert not any("examples/" in rel for rel, _ in test_files), \
+        "examples/ files must NOT appear in collect_test_files output"
+
+    print("  OK  collect_examples")
+
+
 def test_decl_only_src_noise_filter() -> None:
     """Stripped src files containing only gen_tests decls should be skipped by
     TASK 1's input collector. Regression for the post-strip noise issue where
@@ -394,6 +417,7 @@ def main() -> int:
     print("Pure-Python phase:")
     test_gen_tests_helpers()
     test_extract_gen_tests_body()
+    test_examples_collector()
     test_decl_only_src_noise_filter()
     test_has_gen_tests_decl()
     test_api_surface_capture()
