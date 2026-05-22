@@ -15,7 +15,7 @@ Invocation:
 Exit non-zero on first failure.
 """
 import os
-import re
+import re  # noqa: F401  — used by individual test bodies
 import shutil
 import sys
 from pathlib import Path
@@ -114,6 +114,52 @@ mod gen_tests_1 {
     fake_sibling.unlink()
 
     print("  OK  gen_tests helpers")
+
+
+def test_api_surface_conformance() -> None:
+    """Capture api_surface, mutate the regenerated source, and verify the
+    conformance check reports the missing pub items."""
+    import pipeline
+
+    workspace = _setup_workspace("smoke-api-conformance")
+    module_name = "tiny"
+    pipeline._capture_api_surface(workspace, workspace, module_name)
+
+    # All pub items present → ok.
+    ok, report = pipeline.validate_task2_api_surface_conformance(
+        workspace, module_name, workspace
+    )
+    assert ok, f"unmodified fixture should conform: {report}"
+    assert "ok" in report.lower()
+
+    # Drop a public function from the source. Conformance should flag it.
+    src = workspace / "src" / "lib.rs"
+    text = src.read_text()
+    # Remove the never_called fn entirely.
+    text_mutated = re.sub(
+        r'pub fn never_called\(\) -> i32 \{\s*42\s*\}\s*',
+        '',
+        text,
+    )
+    assert text_mutated != text, "test setup: expected to remove never_called"
+    src.write_text(text_mutated)
+
+    ok, report = pipeline.validate_task2_api_surface_conformance(
+        workspace, module_name, workspace
+    )
+    assert not ok, "expected drift report after removing pub fn"
+    assert "never_called" in report
+    assert "fn:" in report
+
+    # Missing api_surface → check is a no-op.
+    workspace2 = _setup_workspace("smoke-api-conformance-no-api")
+    ok, report = pipeline.validate_task2_api_surface_conformance(
+        workspace2, module_name, workspace2
+    )
+    assert ok
+    assert "no api_surface" in report.lower()
+
+    print("  OK  validate_task2_api_surface_conformance")
 
 
 def test_examples_collector() -> None:
@@ -421,6 +467,7 @@ def main() -> int:
     test_decl_only_src_noise_filter()
     test_has_gen_tests_decl()
     test_api_surface_capture()
+    test_api_surface_conformance()
     test_module_augment_state()
 
     if full:

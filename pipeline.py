@@ -2488,6 +2488,70 @@ def validate_task2_output(project_dir: Path, expected_paths: list[str],
     return True, "ok"
 
 
+_PUB_ITEM_RE = re.compile(
+    r'\bpub(?:\([^)]*\))?\s+'
+    r'(?:unsafe\s+)?(?:async\s+)?(?:const\s+)?(?:default\s+)?'
+    r'(fn|struct|enum|trait|type|mod)\s+(\w+)',
+)
+
+
+def _extract_pub_items(text: str) -> set[tuple[str, str]]:
+    """Return {(kind, name)} for every pub item declared in text."""
+    return {(m.group(1), m.group(2)) for m in _PUB_ITEM_RE.finditer(text)}
+
+
+def validate_task2_api_surface_conformance(
+    project_dir: Path, module_name: str, module_dir: Path,
+) -> tuple[bool, str]:
+    """Compare pub items in the regenerated source to those captured pre-strip
+    in the api_surface. Returns (ok, drift_report).
+
+    Soft check: missing pub items are reported but do NOT block the iteration.
+    The drift report is logged and (when present) appended to test_output before
+    TASK 4 so the methodology refinement sees both the cargo failure and the
+    contract violation in one prompt. Use this signal to spot "LLM ignored the
+    given api_surface" failures distinctly from "tests genuinely don't pass".
+    """
+    api_text = load_api_surface(project_dir, module_name)
+    if not api_text:
+        return True, "no api_surface captured — skipping conformance check"
+
+    api_items = _extract_pub_items(api_text)
+    if not api_items:
+        return True, "api_surface contained no pub items — skipping"
+
+    src_root = module_dir / "src"
+    walk_root = src_root if src_root.is_dir() else module_dir
+    gen_items: set[tuple[str, str]] = set()
+    for p in walk_root.rglob("*.rs"):
+        rel_parts = p.relative_to(project_dir).parts
+        if any(part in {"examples", "benches", "tests"} for part in rel_parts):
+            continue
+        if any(part in SKIP_DIR_NAMES for part in rel_parts):
+            continue
+        if is_test_file(p, project_dir):
+            continue
+        try:
+            text = p.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        gen_items |= _extract_pub_items(text)
+
+    missing = api_items - gen_items
+    if not missing:
+        return True, f"ok — all {len(api_items)} pub item(s) present in regenerated source"
+
+    by_kind: dict[str, list[str]] = {}
+    for kind, name in sorted(missing):
+        by_kind.setdefault(kind, []).append(name)
+    parts = [f"{kind}: {', '.join(names)}" for kind, names in sorted(by_kind.items())]
+    report = (
+        f"API drift — {len(missing)} of {len(api_items)} pub item(s) missing from "
+        f"regenerated source: " + "; ".join(parts)
+    )
+    return False, report
+
+
 def validate_task3_output(pass_count: int, fail_count: int,
                           module_has_tests: bool) -> tuple[str, str]:
     """
@@ -10977,10 +11041,29 @@ This is a Rust procedural macro crate. Strict rules apply:
                                 src_path.write_text(new_text, encoding="utf-8")
                                 _log(f"  Reattached {added_decls} gen_tests decl(s) to {rel}.")
 
+                    # API surface conformance: soft check — log drift but don't
+                    # block. The report is appended to test_output below if
+                    # TASK 3 fails, so TASK 4 sees structural drift alongside
+                    # cargo's failure.
+                    api_conformance_ok, api_conformance_report = (
+                        validate_task2_api_surface_conformance(
+                            project_dir, module_name, module_dir
+                        )
+                    )
+                    if not api_conformance_ok:
+                        _log(f"  ⚠️  {api_conformance_report}")
+
                     # TASK 3: run tests.
                     passed, test_output = task3(
                         project_dir, module_test_cmd, label, root, genesis_path
                     )
+                    if not api_conformance_ok:
+                        test_output = (
+                            test_output
+                            + "\n\n--- API surface drift (pre-test) ---\n"
+                            + api_conformance_report
+                            + "\n"
+                        )
                     pass_count, fail_count = _parse_test_counts(test_output)
 
                     # Anti-corruption: classify the test result before deciding what to do.
