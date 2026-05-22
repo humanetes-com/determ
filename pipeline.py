@@ -6841,9 +6841,14 @@ def _cargo_env() -> dict:
     # Keeps LLM error context clean and eliminates false-positive noise.
     env["RUSTFLAGS"] = "-A warnings"
     env["CARGO_TERM_COLOR"] = "never"
-    # Enable backtraces so tarpaulin instruments backtrace-conditional branches
-    # (e.g. ErrorImpl::debug in fmt.rs only runs its formatting path when captured).
-    env["RUST_BACKTRACE"] = "1"
+    # Do NOT force RUST_BACKTRACE=1 here. It used to be set so tarpaulin would
+    # instrument backtrace-conditional code paths (e.g. fmt.rs's debug formatter),
+    # but it also makes legitimate library tests fail when they assert on Debug
+    # output — for example anyhow's tests/test_fmt.rs:83 compares against a
+    # backtrace-free string. With RUST_BACKTRACE=1 the test panics, cargo-test
+    # exits non-zero, and cargo-llvm-cov aborts before writing lcov, leaving the
+    # pipeline measuring 0/0 lines on every pass. If you ever need backtrace
+    # coverage for tarpaulin, set RUST_BACKTRACE only inside TarpaulinProvider.
     # Apply cluster-specific env overrides (e.g. RUSTFLAGS=--cfg error_generic_member_access).
     # RUSTFLAGS entries are appended to avoid clobbering the base -A warnings flag.
     if _current_cluster and _current_cluster.env_extra:
@@ -7246,7 +7251,12 @@ class LlvmCovProvider(CoverageProvider):
             "--lcov",
             "--output-path", str(lcov_path),
             "-p", module_name,
-            "--no-fail-fast",
+            # Keep generating the coverage report even if some individual tests
+            # fail. Without this, a single failing test (e.g. a buggy gen_tests
+            # block) zeroes out the entire measurement. cargo-llvm-cov rejects
+            # --no-fail-fast and --ignore-run-fail together; --ignore-run-fail
+            # already covers the "report even on failure" case we need here.
+            "--ignore-run-fail",
             "--ignore-filename-regex", "|".join(ignore_patterns),
         ]
         cmd += ["--", "--test-threads=1", "--no-capture"]
@@ -7256,7 +7266,10 @@ class LlvmCovProvider(CoverageProvider):
                 timeout=BUILD_TIMEOUT, env=env,
             )
             if result.returncode != 0 and not lcov_path.exists():
-                _log(f"  llvm-cov: failed: {result.stderr[:200]}")
+                # Capture more of stderr (the relevant error usually appears in
+                # the LAST kilobyte after pages of "Compiling …" messages).
+                _err_tail = result.stderr[-1500:] if len(result.stderr) > 1500 else result.stderr
+                _log(f"  llvm-cov: failed (exit={result.returncode}):\n{_err_tail}")
                 return 0.0, [], 0, 0
         except subprocess.TimeoutExpired:
             _log(f"  llvm-cov: timeout after {BUILD_TIMEOUT}s")
