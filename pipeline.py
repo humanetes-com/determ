@@ -2685,6 +2685,11 @@ def collect_test_files(project_dir: Path):
         if is_test_file(p, project_dir):
             result.append((str(rel), content))
         elif p.suffix == ".rs" and ("#[cfg(test)]" in content or "#[test]" in content):
+            # Skip stripped source files that contain only gen_tests path-mod
+            # declarations — their actual test content lives in sibling files
+            # (which are picked up separately by is_test_file).
+            if _is_gen_tests_decl_only_src(content):
+                continue
             result.append((str(rel), content))
     return result
 
@@ -7492,6 +7497,24 @@ def _has_gen_tests_decl(src_text: str, pass_n: int) -> bool:
     Used by the TASK 2 reattach path to detect when a sibling exists on disk
     but its declaration was dropped during regeneration of the source file."""
     return bool(re.search(rf'\bmod\s+gen_tests_{pass_n}\s*;', src_text))
+
+
+def _is_gen_tests_decl_only_src(content: str) -> bool:
+    """True if content consists only of gen_tests path-mod decls + whitespace + comments.
+
+    After strip, a source file like src/lib.rs is reduced to its `#[cfg(test)]
+    #[path = "..."] mod gen_tests_N;` declarations -- the rest is removed by
+    extract_rust_tests. Those declaration-only files leak into TASK 1's input
+    because they contain `#[cfg(test)]`, but they carry no test semantics
+    (the actual tests live in the sibling files referenced by the decls).
+    """
+    if not content.strip():
+        return True
+    no_decls = _strip_gen_tests_decls(content)
+    # Strip line and block comments before checking for remaining code.
+    no_line_comments = re.sub(r'//[^\n]*', '', no_decls)
+    no_block_comments = re.sub(r'/\*.*?\*/', '', no_line_comments, flags=re.DOTALL)
+    return no_block_comments.strip() == ""
 
 
 def _build_gen_tests_decl(sibling_name: str, n: int, allow_line: str) -> str:
