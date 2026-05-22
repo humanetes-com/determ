@@ -156,16 +156,33 @@ def gpu():
     return rows
 
 
+def _pipeline_start_time() -> float:
+    """Return the mtime of /proc/{pid} for the running pipeline process (= process start time).
+    Returns 0.0 if no pipeline process is found."""
+    try:
+        out = subprocess.run(["pgrep", "-f", "pipeline.py"], capture_output=True, text=True).stdout
+        for pid in out.strip().split():
+            proc_dir = f"/proc/{pid}"
+            if os.path.exists(proc_dir):
+                return os.path.getmtime(proc_dir)
+    except Exception:
+        pass
+    return 0.0
+
+
 def _parse_coverage_json(project_dir):
     """Read per-file coverage from the most recent grcov/tarpaulin JSON output.
-    Returns {rel_path: (covered, coverable)}, e.g. {'src/error.rs': (248, 285)}."""
+    Returns {rel_path: (covered, coverable)}, e.g. {'src/error.rs': (248, 285)}.
+    Files older than the current pipeline process start time are ignored (stale from prior run)."""
     result: dict[str, tuple[int, int]] = {}
     main_mtime: float = 0.0
+    _run_start = _pipeline_start_time()
 
     # grcov coveralls JSON (pipeline writes /tmp/grcov_{module}.json).
     # Exclude quick/filecache variants — those are not full measurements.
     _main_paths = [p for p in glob.glob("/tmp/grcov_*.json")
-                   if not os.path.basename(p).startswith(("grcov_quick_", "grcov_filecache_"))]
+                   if not os.path.basename(p).startswith(("grcov_quick_", "grcov_filecache_"))
+                   and (_run_start == 0.0 or os.path.getmtime(p) >= _run_start)]
     for path in sorted(_main_paths, key=os.path.getmtime, reverse=True)[:1]:
         try:
             main_mtime = os.path.getmtime(path)
@@ -181,7 +198,8 @@ def _parse_coverage_json(project_dir):
             pass
 
     # Merge per-file quick-cov updates that are newer than the last full measurement.
-    for _qpath in glob.glob("/tmp/grcov_filecache_*.json"):
+    for _qpath in [p for p in glob.glob("/tmp/grcov_filecache_*.json")
+                   if _run_start == 0.0 or os.path.getmtime(p) >= _run_start]:
         try:
             for _rel, _d in _json.load(open(_qpath)).items():
                 if _d.get("ts", 0) > main_mtime and _d.get("coverable", 0) > 0:
@@ -193,7 +211,9 @@ def _parse_coverage_json(project_dir):
         return result
 
     # tarpaulin JSON fallback (pipeline writes /tmp/tarp_{module}/tarpaulin-report.json)
-    for path in sorted(glob.glob("/tmp/tarp_*/tarpaulin-report.json"), key=os.path.getmtime, reverse=True)[:1]:
+    _tarp_paths = [p for p in glob.glob("/tmp/tarp_*/tarpaulin-report.json")
+                   if _run_start == 0.0 or os.path.getmtime(p) >= _run_start]
+    for path in sorted(_tarp_paths, key=os.path.getmtime, reverse=True)[:1]:
         try:
             data = _json.load(open(path))
             for f in data.get("files", []):

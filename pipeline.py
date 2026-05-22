@@ -7069,12 +7069,46 @@ def _measure_coverage(project_dir: Path, module_name: str) -> tuple[float, list[
     return _run_tarpaulin(project_dir, module_name)
 
 
+def _extract_branch_guard(lines: list[str], line_no: int) -> str | None:
+    """Walk backward from line_no to find the nearest enclosing if/match-arm/while condition.
+
+    Returns a short string describing the condition that must be true for line_no to execute,
+    or None if no guard is found within the search window.
+    """
+    for i in range(line_no - 2, max(-1, line_no - 30), -1):
+        stripped = lines[i].strip()
+        if not stripped:
+            continue
+        # Stop at function/impl/struct boundary — guard must be within the same function
+        if re.match(r'^(?:pub\s+|async\s+|unsafe\s+)*fn\s+', stripped):
+            break
+        if re.match(r'^(?:impl|struct|enum|trait)\b', stripped):
+            break
+        # if / else if / else
+        if re.match(r'^(?:\}\s*)?else\s+if\b', stripped) or re.match(r'^if\b', stripped):
+            return stripped[:120]
+        if re.match(r'^(?:\}\s*)?else\s*\{', stripped):
+            return "else branch"
+        # match arm: `Pattern => {`
+        if '=>' in stripped and re.search(r'=>\s*\{?\s*$', stripped):
+            return f"match arm: {stripped[:100]}"
+        # while loop
+        if re.match(r'^while\b', stripped):
+            return stripped[:120]
+    return None
+
+
 def _annotate_uncovered(content: str, uncovered: set[int]) -> str:
-    """Return source annotated with '!!' markers on uncovered lines."""
+    """Return source annotated with '!!' markers on uncovered lines, including branch guards."""
     lines = content.splitlines()
     out = []
     for i, line in enumerate(lines, 1):
-        marker = "  // !! UNCOVERED" if i in uncovered else ""
+        if i in uncovered:
+            guard = _extract_branch_guard(lines, i)
+            guard_hint = f" [guard: {guard}]" if guard else ""
+            marker = f"  // !! UNCOVERED{guard_hint}"
+        else:
+            marker = ""
         out.append(f"{i:4d} | {line}{marker}")
     return "\n".join(out)
 
@@ -7096,7 +7130,12 @@ def _focused_annotation(content: str, uncovered: set[int], ctx: int = 4) -> str:
     for i in sorted(show):
         if prev is not None and i > prev + 1:
             result.append("     | ...")
-        marker = "  // !! UNCOVERED" if i in uncovered else ""
+        if i in uncovered:
+            guard = _extract_branch_guard(lines, i)
+            guard_hint = f" [guard: {guard}]" if guard else ""
+            marker = f"  // !! UNCOVERED{guard_hint}"
+        else:
+            marker = ""
         result.append(f"{i:4d} | {lines[i - 1]}{marker}")
         prev = i
     return "\n".join(result)
@@ -7607,6 +7646,7 @@ def _task0c_retrospective(
     old_block: str,
     module_name: str,
     attempt_history: str = "",
+    uncov_lines: "set[int] | None" = None,
 ) -> str:
     """Ask LLM to classify why remaining uncovered functions can't be reached.
 
@@ -7626,10 +7666,23 @@ def _task0c_retrospective(
         f"There are {_fn_count} function(s) with uncovered lines. "
         f"You MUST output exactly one FUNCTION line for EVERY function — do not skip any.\n\n"
     ) if _fn_count > 0 else ""
+    # Build branch-guard hints for each uncovered line so the retrospective LLM
+    # knows exactly what condition guards each line — improves TESTABLE vs UNREACHABLE accuracy.
+    _guard_section = ""
+    if uncov_lines:
+        _src_lines = existing_text.splitlines()
+        _guard_hints = []
+        for _lno in sorted(uncov_lines):
+            g = _extract_branch_guard(_src_lines, _lno)
+            if g:
+                _guard_hints.append(f"  line {_lno}: guarded by `{g}`")
+        if _guard_hints:
+            _guard_section = "Branch conditions for uncovered lines:\n" + "\n".join(_guard_hints) + "\n\n"
     prompt = (
         f"You generated tests for `{rel_path}` but some lines remain uncovered.\n"
         f"{_count_line}"
         f"For each function still marked `// !! UNCOVERED` below, classify it and suggest what to try.\n\n"
+        f"{_guard_section}"
         f"{_history_section}"
         f"Previous test block (already committed):\n```rust\n{_block_snippet}\n```\n\n"
         f"Still-uncovered functions:\n```rust\n{fn_bodies}\n```\n\n"
@@ -8878,10 +8931,12 @@ INTERNAL MODULE RULES — these tests live inside the source file, not in an ext
                 _log(f"  [{module_name}] No test block extracted for {rel_path}.")
 
             # Quick per-file coverage snapshot after a successful append.
+            _qcov_after: int | None = None
             if _block_committed:
                 _qcov_result = _quick_file_coverage(project_dir, module_name, rel_path)
                 if _qcov_result is not None:
                     _qcov, _qcov_able = _qcov_result
+                    _qcov_after = _qcov
                     _qpct = (_qcov / _qcov_able * 100.0) if _qcov_able else 0.0
                     _log(f"  [{module_name}] {rel_path} quick-cov: {_qcov}/{_qcov_able} ({_qpct:.1f}%)")
                     # Persist result so the monitor can merge it into the files overview.
@@ -8892,6 +8947,95 @@ INTERNAL MODULE RULES — these tests live inside the source file, not in an ext
                         _qcache.write_text(json.dumps(_cache))
                     except Exception:
                         pass
+
+            # Inner quick-retry: if quick-cov didn't reach 100% on a stalled or
+            # few-lines-remaining file, immediately try a second focused generation
+            # targeting only the still-uncovered lines with explicit branch hints.
+            # Cheaper than an outer retry (no full grcov run, smaller prompt).
+            _INNER_RETRY_LIMIT = 2
+            if (
+                _block_committed
+                and _qcov_after is not None
+                and _qcov_able > 0
+                and _qcov_after < _qcov_able
+                and (file_stall_counts.get(rel_path, 0) > 0 or len(uncov_lines) <= 4)
+            ):
+                _src_lines_for_guard = existing_text.splitlines()
+                _guard_hints = []
+                for _lno in sorted(uncov_lines):
+                    _g = _extract_branch_guard(_src_lines_for_guard, _lno)
+                    if _g:
+                        _guard_hints.append(f"  line {_lno}: `{_g}`")
+                _guard_block = (
+                    "Branch conditions to exercise:\n" + "\n".join(_guard_hints) + "\n"
+                ) if _guard_hints else ""
+
+                for _ir in range(_INNER_RETRY_LIMIT):
+                    _log(f"  [{module_name}] {rel_path} quick-retry {_ir + 1}/{_INNER_RETRY_LIMIT} "
+                         f"— {len(uncov_lines)} line(s) still uncovered.")
+                    _mod_name_retry = f"gen_tests_retry{attempt}_{_ir}"
+                    _retry_prompt = (
+                        f"The test block you just wrote for `{rel_path}` compiled and ran "
+                        f"but did NOT cover these specific lines: {sorted(uncov_lines)}\n\n"
+                        f"{_guard_block}"
+                        f"The function ran but took the OTHER branch. "
+                        f"Write a NEW `#[cfg(test)] mod {_mod_name_retry}` block containing "
+                        f"ONLY tests that exercise the specific branch conditions above. "
+                        f"Do not repeat tests from the existing block.\n\n"
+                        f"Source (uncovered lines marked):\n```rust\n"
+                        f"{_annotate_uncovered(existing_text, uncov_lines)[:_SRC_SNIP_CAP]}\n```\n\n"
+                        f"Existing test block (already on disk — do NOT duplicate):\n```rust\n"
+                        f"{_old_block[:2000] if _old_block else '(none)'}\n```\n\n"
+                        f"Output ONLY the new mod block wrapped in <FILE path=\"{rel_path}\">...</FILE>."
+                    )
+                    _retry_resp = ask(_retry_prompt, model=_TASK0C_MODEL,
+                                      max_tokens=8192, think=None)
+                    _retry_block = extract_test_mod(_retry_resp)
+                    if not _retry_block:
+                        _log(f"  [{module_name}] Quick-retry {_ir + 1}: no block extracted.")
+                        break
+                    _retry_block = re.sub(r'\s*</FILE>\s*$', '', _retry_block).strip()
+                    if _allow_line not in _retry_block:
+                        _retry_block = re.sub(
+                            r'((?:pub\s+)?mod\s+\w+\s*\{)',
+                            f'{_allow_line}\n\\1',
+                            _retry_block, count=1,
+                        )
+                    _current_text = abs_path.read_text(encoding="utf-8")
+                    _retry_candidate = _current_text.rstrip() + "\n\n" + _retry_block + "\n"
+                    abs_path.write_text(_retry_candidate, encoding="utf-8")
+                    _retry_check = subprocess.run(
+                        ["cargo", "test", "--no-run", "-p", module_name],
+                        cwd=project_dir, capture_output=True, text=True,
+                        timeout=BUILD_TIMEOUT, env=_cargo_env(),
+                    )
+                    if _retry_check.returncode != 0:
+                        _log(f"  [{module_name}] Quick-retry {_ir + 1}: compile failed — reverting.")
+                        abs_path.write_text(_current_text, encoding="utf-8")
+                        break
+                    _log(f"  [{module_name}] Quick-retry {_ir + 1}: compiled — checking coverage.")
+                    _qr_result = _quick_file_coverage(project_dir, module_name, rel_path)
+                    if _qr_result is not None:
+                        _qr_cov, _qr_able = _qr_result
+                        _qr_pct = (_qr_cov / _qr_able * 100.0) if _qr_able else 0.0
+                        _log(f"  [{module_name}] {rel_path} quick-retry {_ir + 1} cov: "
+                             f"{_qr_cov}/{_qr_able} ({_qr_pct:.1f}%)")
+                        _qcache = Path("/tmp") / f"grcov_filecache_{module_name}.json"
+                        try:
+                            _cache = json.loads(_qcache.read_text()) if _qcache.exists() else {}
+                            _cache[rel_path] = {"covered": _qr_cov, "coverable": _qr_able,
+                                                "ts": time.time()}
+                            _qcache.write_text(json.dumps(_cache))
+                        except Exception:
+                            pass
+                        if _qr_cov > _qcov_after:
+                            _log(f"  [{module_name}] Quick-retry {_ir + 1}: improvement "
+                                 f"+{_qr_cov - _qcov_after} lines — stopping inner retries.")
+                            _qcov_after = _qr_cov
+                            _pass_had_work = True
+                            break
+                    else:
+                        break
 
             # Per-file stall detection: track whether uncovered line count improved.
             prev_best = file_best_uncov.get(rel_path, len(uncov_lines) + 1)
@@ -8919,6 +9063,7 @@ INTERNAL MODULE RULES — these tests live inside the source file, not in an ext
                     retro = _task0c_retrospective(
                         rel_path, existing_text, _retro_fn_bodies, _old_block, module_name,
                         attempt_history=attempt_history,
+                        uncov_lines=uncov_lines,
                     )
                     if retro:
                         file_retrospectives[rel_path] = retro
