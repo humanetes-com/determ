@@ -5654,8 +5654,15 @@ class Task2Generator(ABC):
         module_dir_rel: str = "",
         whole_project_context: str = "",
         coverage_strategy: str = "",
+        api_surface: str = "",
     ) -> bool:
-        """Write source files to disk. Returns True on success."""
+        """Write source files to disk. Returns True on success.
+
+        api_surface (when provided) is the pre-strip public-API skeleton. TASK 1
+        already received it; passing it here too prevents loss-in-translation
+        if TASK 1's requirements doc dropped any signature -- TASK 2 sees the
+        ground truth directly.
+        """
 
 
 class StaticTask2Generator(Task2Generator):
@@ -5667,7 +5674,7 @@ class StaticTask2Generator(Task2Generator):
     def generate(self, project_dir, genesis_path, functional_req_path, manifest_path,
                  existing_test_files, project_profile="", workspace_structure="", build_error="",
                  locked_dep_context="", current_module="", module_dir_rel="",
-                 whole_project_context="", coverage_strategy=""):
+                 whole_project_context="", coverage_strategy="", api_surface=""):
         _log("\nTASK 2: Implementing source code from functional requirements")
         genesis = read(genesis_path)
         functional_req = read(functional_req_path)
@@ -5756,12 +5763,14 @@ class StaticTask2Generator(Task2Generator):
         structured_rules = genesis_rules_read(project_dir, module_scope=current_module or "*")
         rules_section = f"\n{structured_rules}\n" if structured_rules else ""
 
+        api_section = _format_api_surface_section(api_surface)
+
         def attempt():
             prompt = f"""You are implementing a software project from functional requirements.
 
 Process (genesis.md):
 {genesis}
-{profile_section}{workspace_section}{module_scope_section}{locked_dep_section}{build_error_section}{pitfalls_section}{rules_section}
+{profile_section}{workspace_section}{module_scope_section}{locked_dep_section}{build_error_section}{pitfalls_section}{rules_section}{api_section}
 Functional requirements:
 {functional_req}
 {assertions_section}{whole_project_context}
@@ -5805,7 +5814,7 @@ class LLMTask2Generator(Task2Generator):
     def generate(self, project_dir, genesis_path, functional_req_path, manifest_path,
                  existing_test_files, project_profile="", workspace_structure="", build_error="",
                  locked_dep_context="", current_module="", module_dir_rel="",
-                 whole_project_context="", coverage_strategy=""):
+                 whole_project_context="", coverage_strategy="", api_surface=""):
         _log("\nTASK 2: Implementing source code from functional requirements (file-by-file)")
         genesis = read(genesis_path)
         functional_req = read(functional_req_path)
@@ -5880,13 +5889,14 @@ class LLMTask2Generator(Task2Generator):
                                                 head=_req_cap // 3, tail=2 * _req_cap // 3)
         _whole_ctx_capped = smart_truncate(whole_project_context, total_limit=_ctx_cap,
                                            head=_ctx_cap // 4, tail=3 * _ctx_cap // 4)
+        api_section = _format_api_surface_section(api_surface)
 
         # Step 1: ask model for the list of files to create.
         plan_prompt = f"""You are planning the implementation of a software project.
 
 Process (genesis.md):
 {trim_to_line(genesis, _genesis_cap, "\n... (genesis truncated)")}
-{profile_section}{workspace_section}{module_scope_section}{locked_dep_section}{build_error_section}{pitfalls_section_llm}{rules_section_llm}
+{profile_section}{workspace_section}{module_scope_section}{locked_dep_section}{build_error_section}{pitfalls_section_llm}{rules_section_llm}{api_section}
 Functional requirements:
 {_functional_req_capped}
 {assertions_section_llm}{_whole_ctx_capped}
@@ -5957,7 +5967,7 @@ Output one file path per line, relative to the project root. No other text.
 
 Process (genesis.md):
 {trim_to_line(genesis, _genesis_cap, "\n... (genesis truncated)")}
-{profile_section}{module_scope_section}{locked_dep_section}
+{profile_section}{module_scope_section}{locked_dep_section}{api_section}
 Functional requirements:
 {_functional_req_capped}
 {_whole_ctx_capped}{prev_files_section}
@@ -6030,7 +6040,7 @@ class StaticFileListTask2Generator(Task2Generator):
     def generate(self, project_dir, genesis_path, functional_req_path, manifest_path,
                  existing_test_files, project_profile="", workspace_structure="", build_error="",
                  locked_dep_context="", current_module="", module_dir_rel="",
-                 whole_project_context="", coverage_strategy=""):
+                 whole_project_context="", coverage_strategy="", api_surface=""):
         _log("\nTASK 2: Implementing source code (static file list)")
         genesis = read(genesis_path)
         functional_req = read(functional_req_path)
@@ -6148,10 +6158,11 @@ RULES:
                                     head=_req_cap2 // 3, tail=2 * _req_cap2 // 3)
             _w_ctx = smart_truncate(whole_project_context, total_limit=_ctx_cap2,
                                     head=_ctx_cap2 // 4, tail=3 * _ctx_cap2 // 4)
+            api_section = _format_api_surface_section(api_surface)
             prompt = f"""You are implementing a single source file for a Rust project.
 {FILE_FORMAT_INSTRUCTION}
 Output ONLY the file `{file_path}` using the markers above. Nothing else.
-{profile_section}{workspace_section}{strategy_section}
+{profile_section}{workspace_section}{strategy_section}{api_section}
 ⚠️  MODULE SCOPE: This file belongs to the `{current_module}` crate.
     Path: `{file_path}`
 {proc_macro_note}{locked_dep_section}{build_error_section}
@@ -6233,7 +6244,7 @@ def _format_whole_project_context(test_files: list, reason: str = "") -> str:
 def task2(project_dir, genesis_path, functional_req_path, manifest_path, existing_test_files,
           project_profile: str = "", workspace_structure: str = "", build_error: str = "",
           locked_dep_context: str = "", current_module: str = "", module_dir_rel: str = "",
-          whole_project_context: str = "", coverage_strategy: str = ""):
+          whole_project_context: str = "", coverage_strategy: str = "", api_surface: str = ""):
     """
     Generate source files from functional requirements.
     Implementation is selected by TASK2_GENERATOR in .env (default: static).
@@ -6244,6 +6255,7 @@ def task2(project_dir, genesis_path, functional_req_path, manifest_path, existin
         locked_dep_context, current_module, module_dir_rel,
         whole_project_context=whole_project_context,
         coverage_strategy=coverage_strategy,
+        api_surface=api_surface,
     )
 
 
@@ -6251,7 +6263,8 @@ def task2_inner_loop(project_dir, genesis_path, functional_req_path, manifest_pa
                      existing_test_files, project_profile, workspace_structure,
                      build_check_cmd: str | None, locked_dep_context: str = "",
                      current_module: str = "", module_dir_rel: str = "",
-                     whole_project_context: str = "", coverage_strategy: str = ""):
+                     whole_project_context: str = "", coverage_strategy: str = "",
+                     api_surface: str = ""):
     """
     Inner loop: TASK 2 (code generation) followed by a compile-only check.
     If the build check fails, feeds the compiler error back into TASK 2 and retries.
@@ -6283,7 +6296,8 @@ def task2_inner_loop(project_dir, genesis_path, functional_req_path, manifest_pa
                    existing_test_files, project_profile, workspace_structure, build_error,
                    locked_dep_context, current_module, module_dir_rel,
                    whole_project_context=whole_project_context,
-                   coverage_strategy=coverage_strategy)
+                   coverage_strategy=coverage_strategy,
+                   api_surface=api_surface)
         if not ok:
             # When module scope filtering discards all planned files the model listed
             # files for the wrong crates. Inject an explicit corrective error and retry
@@ -11058,6 +11072,7 @@ This is a Rust procedural macro crate. Strict rules apply:
                 module_dir_rel=module_dir_rel,
                 whole_project_context=whole_project_context,
                 coverage_strategy=coverage_strategy,
+                api_surface=load_api_surface(project_dir, module_name),
             ):
                 _log("TASK 2 inner loop exhausted — escalating to TASK 4.")
                 test_output = "BUILD FAILED: inner loop exhausted all retries."
