@@ -70,7 +70,50 @@ P2 = changes LLM behavior in a measurable way, validate on fixture + anyhow.
   and fill until the per-file budget is exhausted. Drop the hard cap.
 - Risk: low.
 
+## Deferred
+
+### project_profile + project_context merge — not worth the risk
+~90 references touch these two artifacts. The two docs serve different
+downstream prompts (profile → TASK 2 structural checks; context → TASK 0c
+behavioural section). The only saving is one LLM call at pipeline startup,
+which is cached on first run and amortises to ~0 over the rest of a run.
+Risk-adjusted value is negative — skipped.
+
 ## Closed
+
+### P0 — Idempotent gen_tests reattach (orphan-siblings bug, session 34, 85e9526)
+Strip preserves *.gen_tests_N.rs siblings but reduces parent src/foo.rs to
+just its path-mod decls. TASK 2 wipe+regenerate produced a fresh lib.rs
+without those decls, and the reattach guard `_gen_tests_count > 0 → skip`
+became a permanent no-op. Now per-pass idempotent via new helper
+_has_gen_tests_decl. This bug had been silently zeroing every TASK 0c
+coverage contribution since the sibling-file refactor.
+
+### P1 — Drop stripped decl-only src from TASK 1 input (session 34, be1d185)
+After strip, src/foo.rs is just `#[cfg(test)] #[path] mod gen_tests_N;`
+lines. New helper _is_gen_tests_decl_only_src filters these out of
+collect_test_files so they don't pollute TASK 1's prompt as fake test
+content.
+
+### P1 — Ingest examples/*.rs as TASK 1 usage signal (session 34, 87db703)
+New collect_examples() walks <crate>/examples/, returns (rel, content)
+pairs. main() appends them to t1_input with a clear inline header
+explaining they are demos, not assertions. Also restricted
+_capture_api_surface to <module>/src/ so example files aren't mistakenly
+treated as part of the public API.
+
+### P1 — TASK 4 api_surface awareness (session 34, 04c3ce0)
+task4() now takes api_surface=, and when non-empty the prompt gains a
+section explaining that structure was given as ground truth — methodology
+updates should focus on behavioural extraction, signature drift is a
+generation-discipline issue not a methodology gap.
+
+### P1 — api_surface conformance check (session 34, eb78be8)
+validate_task2_api_surface_conformance() extracts (kind, name) pairs for
+pub fn/struct/enum/trait/type/mod from both the captured api_surface and
+the regenerated source. Missing items become a drift report. Soft signal:
+logged immediately, appended to test_output if TASK 3 fails so TASK 4
+sees structural drift distinctly from cargo failures.
 
 ### P1 — Capture pre-strip API surface as TASK 1 ground truth (DONE — session 34)
 - Sites: `_capture_api_surface` (new helper), `load_api_surface`,
