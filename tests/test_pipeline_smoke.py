@@ -116,6 +116,62 @@ mod gen_tests_1 {
     print("  OK  gen_tests helpers")
 
 
+def test_retrospective_prompt_includes_failed_attempts() -> None:
+    """When unproductive_blocks is non-empty, the retrospective prompt must
+    surface them as concrete evidence so the LLM can revise a TESTABLE call.
+    We don't actually call the LLM — we monkey-patch `ask` and inspect the
+    prompt string the retrospective would have sent."""
+    import pipeline
+
+    captured: dict = {}
+
+    def fake_ask(prompt, **_kw):
+        captured['prompt'] = prompt
+        return "FUNCTION foo: UNREACHABLE — based on the prior failed attempts.\n"
+
+    original_ask = pipeline.ask
+    pipeline.ask = fake_ask
+    try:
+        result = pipeline._task0c_retrospective(
+            rel_path="src/foo.rs",
+            existing_text="pub fn foo() {\n    // !! UNCOVERED\n}\n",
+            fn_bodies="pub fn foo() {\n    // !! UNCOVERED\n}\n",
+            old_block="mod gen_tests_1 { #[test] fn t() { foo(); } }",
+            module_name="tiny",
+            unproductive_blocks=[
+                'mod gen_tests_1 { #[test] fn a() { std::env::set_var("X", "1"); } }',
+                'mod gen_tests_2 { #[test] fn b() { std::env::set_var("X", "1"); } }',
+            ],
+        )
+    finally:
+        pipeline.ask = original_ask
+
+    prompt = captured['prompt']
+    assert "PRIOR FAILED ATTEMPTS" in prompt
+    assert "attempt 1" in prompt and "attempt 2" in prompt
+    assert "did NOT improve coverage" in prompt
+    assert "the classification was\nwrong" in prompt or "wrong" in prompt
+    assert "set_var" in prompt, "concrete attempt content should appear in the prompt"
+    assert "UNREACHABLE" in result, "fake LLM response should be returned"
+
+    # Without unproductive_blocks, no PRIOR FAILED ATTEMPTS section.
+    captured.clear()
+    pipeline.ask = fake_ask
+    try:
+        pipeline._task0c_retrospective(
+            rel_path="src/foo.rs",
+            existing_text="pub fn foo() {}\n",
+            fn_bodies="pub fn foo() {}\n",
+            old_block="",
+            module_name="tiny",
+        )
+    finally:
+        pipeline.ask = original_ask
+    assert "PRIOR FAILED ATTEMPTS" not in captured['prompt']
+
+    print("  OK  retrospective_prompt_includes_failed_attempts")
+
+
 def test_api_surface_conformance() -> None:
     """Capture api_surface, mutate the regenerated source, and verify the
     conformance check reports the missing pub items."""
@@ -468,6 +524,7 @@ def main() -> int:
     test_has_gen_tests_decl()
     test_api_surface_capture()
     test_api_surface_conformance()
+    test_retrospective_prompt_includes_failed_attempts()
     test_module_augment_state()
 
     if full:

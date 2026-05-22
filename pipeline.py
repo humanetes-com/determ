@@ -8295,11 +8295,19 @@ def _task0c_retrospective(
     module_name: str,
     attempt_history: str = "",
     uncov_lines: "set[int] | None" = None,
+    unproductive_blocks: "list[str] | None" = None,
 ) -> str:
     """Ask LLM to classify why remaining uncovered functions can't be reached.
 
     Returns a structured per-function classification to inject into the next attempt
     so the model knows whether to try a different approach or skip with a pragma.
+
+    When `unproductive_blocks` is non-empty, the classifier is told that those
+    specific gen_tests blocks have already been written, compiled and run, and
+    did NOT improve coverage of the targeted lines. The LLM is then asked to
+    revise any earlier TESTABLE call -- if multiple concrete attempts failed
+    to move the metric, the line is probably structurally unreachable in this
+    test environment.
     """
     if not fn_bodies.strip():
         return ""
@@ -8326,12 +8334,29 @@ def _task0c_retrospective(
                 _guard_hints.append(f"  line {_lno}: guarded by `{g}`")
         if _guard_hints:
             _guard_section = "Branch conditions for uncovered lines:\n" + "\n".join(_guard_hints) + "\n\n"
+    # When called with evidence of prior failed attempts, surface them and ask
+    # for reclassification with that evidence in mind.
+    _unproductive_section = ""
+    if unproductive_blocks:
+        _BLOCK_CAP = max(800, _SRC_SNIP_CAP // 4)
+        _shown = []
+        for i, blk in enumerate(unproductive_blocks, 1):
+            _shown.append(f"--- attempt {i} (compiled, ran, did NOT improve coverage of the targeted lines) ---\n"
+                          f"{blk[:_BLOCK_CAP]}")
+        _unproductive_section = (
+            "PRIOR FAILED ATTEMPTS — these blocks compiled and ran but did NOT increase\n"
+            "coverage of the still-uncovered lines. Treat them as concrete evidence that\n"
+            "the strategy used to write them does NOT work in this test environment. If\n"
+            "the same target was previously classified TESTABLE, the classification was\n"
+            f"wrong — revise it now.\n\n{chr(10).join(_shown)}\n\n"
+        )
     prompt = (
         f"You generated tests for `{rel_path}` but some lines remain uncovered.\n"
         f"{_count_line}"
         f"For each function still marked `// !! UNCOVERED` below, classify it and suggest what to try.\n\n"
         f"{_guard_section}"
         f"{_history_section}"
+        f"{_unproductive_section}"
         f"Previous test block (already committed):\n```rust\n{_block_snippet}\n```\n\n"
         f"Still-uncovered functions:\n```rust\n{fn_bodies}\n```\n\n"
         f"Source context:\n```rust\n{_src_snippet}\n```\n\n"
@@ -8768,11 +8793,19 @@ corrected content here
     no_improvement_count = 0
     MAX_NO_IMPROVEMENT = 10  # per-file retrospective runs first; global stall is last resort only
     FILE_STALL_LIMIT = 10   # consecutive no-improvement attempts before skipping a file
+    RETRO_DEEP_AT_STALL = 5 # re-fire retrospective with concrete failed-attempt evidence
     file_stall_counts: dict[str, int] = {}   # consecutive no-improvement attempts per file
     file_best_uncov: dict[str, int] = {}     # fewest uncovered lines seen per file
     skipped_files: set[str] = set()          # files permanently skipped due to stall
     file_what_worked: dict[str, str] = {}    # confirmed-working patterns per file (from improving attempts)
     file_retrospectives: dict[str, str] = {} # per-file classification of why coverage stalled
+    # Track concrete attempts that compiled but added zero coverage to the
+    # targeted lines. Fed to the deep retrospective so the classifier can see
+    # which strategies the LLM has already tried — and revise its TESTABLE
+    # call to UNREACHABLE when evidence demands it.
+    file_last_qcov: dict[str, int] = {}          # last quick-cov 'covered' count per file
+    file_failed_blocks: dict[str, list[str]] = {}  # gen blocks that compiled but didn't move the metric
+    file_retro_deep_fired: set[str] = set()      # files where the deep retrospective has already run
     _at_ceiling = False                      # True when a full pass produced no actionable lines
     while attempt < max_attempts:
         attempt += 1
@@ -9510,6 +9543,15 @@ INTERNAL MODULE RULES — these tests live inside the source file, not in an ext
                         _qcache.write_text(json.dumps(_cache))
                     except Exception:
                         pass
+                    # Track whether THIS block actually moved the metric. If the
+                    # previous quick-cov for this file was already known and the
+                    # new value didn't increase, this block is concrete evidence
+                    # that the LLM's current strategy isn't working — feed it
+                    # to the deep retrospective at stall_n == RETRO_DEEP_AT_STALL.
+                    _prev_qcov = file_last_qcov.get(rel_path)
+                    file_last_qcov[rel_path] = _qcov
+                    if _prev_qcov is not None and _qcov <= _prev_qcov:
+                        file_failed_blocks.setdefault(rel_path, []).append(block)
 
             # Inner quick-retry: if quick-cov didn't reach 100% on a stalled or
             # few-lines-remaining file, immediately try a second focused generation
@@ -9619,10 +9661,26 @@ INTERNAL MODULE RULES — these tests live inside the source file, not in an ext
             else:
                 file_stall_counts[rel_path] = file_stall_counts.get(rel_path, 0) + 1
                 stall_n = file_stall_counts[rel_path]
-                # Run retrospective on first stall to classify remaining functions
-                # and immediately apply pragmas for UNREACHABLE/CFG_GATED ones.
-                if stall_n == 1 and fn_bodies.strip():
-                    _log(f"  [{module_name}] No improvement for {rel_path} — running retrospective.")
+                # Retrospective is fired twice:
+                #   stall_n == 1                — initial classification from source alone
+                #   stall_n == RETRO_DEEP_AT_STALL — re-classification with concrete
+                #     evidence of failed attempts. Closes the feedback loop: when the
+                #     first call said TESTABLE and the LLM has since committed several
+                #     blocks that didn't move the metric, the classifier should revise
+                #     that call to UNREACHABLE / NEEDS_INTERNALS instead.
+                _fire_deep = (
+                    stall_n == RETRO_DEEP_AT_STALL
+                    and rel_path not in file_retro_deep_fired
+                    and bool(file_failed_blocks.get(rel_path))
+                )
+                if (stall_n == 1 or _fire_deep) and fn_bodies.strip():
+                    if _fire_deep:
+                        _log(f"  [{module_name}] {rel_path} stalled at {stall_n} with "
+                             f"{len(file_failed_blocks[rel_path])} failed attempt(s) — "
+                             f"running deep retrospective with concrete evidence.")
+                        file_retro_deep_fired.add(rel_path)
+                    else:
+                        _log(f"  [{module_name}] No improvement for {rel_path} — running retrospective.")
                     # Pass ALL uncovered functions to the retrospective (no max_fns cap)
                     # so the LLM classifies every function in one shot, not one per attempt.
                     _retro_fn_bodies = _extract_uncovered_functions(existing_text, uncov_lines, max_fns=0)
@@ -9630,6 +9688,7 @@ INTERNAL MODULE RULES — these tests live inside the source file, not in an ext
                         rel_path, existing_text, _retro_fn_bodies, _old_block, module_name,
                         attempt_history=attempt_history,
                         uncov_lines=uncov_lines,
+                        unproductive_blocks=file_failed_blocks.get(rel_path, []) if _fire_deep else None,
                     )
                     if retro:
                         file_retrospectives[rel_path] = retro
