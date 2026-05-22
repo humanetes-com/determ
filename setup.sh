@@ -122,9 +122,9 @@ else
     fi
 fi
 
-# ── 5. grcov + llvm-tools (optional, for COVERAGE_BACKEND=grcov) ─────────────
+# ── 5. grcov + llvm-tools + cargo-llvm-cov (for COVERAGE_BACKEND=grcov|llvm-cov) ─────────────
 echo ""
-echo "-- grcov (optional, alternative to tarpaulin) --"
+echo "-- grcov (optional, for COVERAGE_BACKEND=grcov) --"
 if cargo grcov --version &>/dev/null 2>&1 || command -v grcov &>/dev/null; then
     skip "grcov already installed"
 else
@@ -137,7 +137,7 @@ else
 fi
 
 echo ""
-echo "-- llvm-tools-preview (required for grcov) --"
+echo "-- llvm-tools-preview (required for grcov and cargo-llvm-cov) --"
 if rustup component list --installed 2>/dev/null | grep -q "llvm-tools"; then
     skip "llvm-tools-preview already installed"
 else
@@ -145,7 +145,20 @@ else
     if rustup component add llvm-tools-preview 2>&1 | tail -2; then
         ok "llvm-tools-preview installed"
     else
-        echo "[warn] llvm-tools-preview failed — grcov will not work"
+        echo "[warn] llvm-tools-preview failed — grcov/llvm-cov will not work"
+    fi
+fi
+
+echo ""
+echo "-- cargo-llvm-cov (optional, for COVERAGE_BACKEND=llvm-cov) --"
+if cargo llvm-cov --version &>/dev/null 2>&1; then
+    skip "cargo-llvm-cov already installed"
+else
+    info "Installing cargo-llvm-cov..."
+    if cargo install cargo-llvm-cov --locked 2>&1 | tail -2; then
+        ok "cargo-llvm-cov installed"
+    else
+        echo "[warn] cargo-llvm-cov failed to install — COVERAGE_BACKEND=grcov will be used as fallback"
     fi
 fi
 

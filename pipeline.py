@@ -431,11 +431,12 @@ COVERAGE_AUGMENT_SENTINEL = ".coverage_augmented"
 _real_home = Path(os.path.expanduser(f"~{os.environ.get('SUDO_USER', '')}") if os.environ.get("SUDO_USER") else str(Path.home()))
 TARPAULIN_BIN = _real_home / ".cargo" / "bin" / "cargo-tarpaulin"
 GRCOV_BIN     = _real_home / ".cargo" / "bin" / "grcov"
-COVERAGE_BACKEND = os.getenv("COVERAGE_BACKEND", "tarpaulin").lower()  # "tarpaulin" | "grcov"
+COVERAGE_BACKEND = os.getenv("COVERAGE_BACKEND", "tarpaulin").lower()  # "tarpaulin" | "grcov" | "llvm-cov"
 
 # Pragma comment each backend recognises to exclude a line from coverage.
 COVERAGE_IGNORE_PRAGMA = (
-    "// GRCOV_EXCL_LINE" if COVERAGE_BACKEND == "grcov" else "// # tarpaulin coverage ignore"
+    "// # tarpaulin coverage ignore" if COVERAGE_BACKEND == "tarpaulin"
+    else "// GRCOV_EXCL_LINE"
 )
 
 FILE_PATTERN = re.compile(r'<FILE path="([^"]+)">(.*?)</FILE>', re.DOTALL)
@@ -6838,12 +6839,16 @@ def _run_tarpaulin(project_dir: Path, module_name: str) -> tuple[float, list[dic
 
 
 def _quick_file_coverage(project_dir: Path, module_name: str, rel_path: str) -> tuple[int, int] | None:
+    """Per-file coverage snapshot. Delegates to the active CoverageProvider."""
+    return _coverage_provider.measure_file(project_dir, module_name, rel_path)
+
+
+def _quick_file_coverage_grcov(project_dir: Path, module_name: str, rel_path: str) -> tuple[int, int] | None:
     """
-    Fast per-file coverage snapshot using CARGO_INCREMENTAL=1.
+    Fast per-file coverage snapshot using grcov + LLVM instrumentation.
     Returns (covered, coverable) for rel_path only, or None on failure.
-    Only runs when COVERAGE_BACKEND=grcov; tarpaulin is too slow for per-file checks.
     """
-    if COVERAGE_BACKEND != "grcov" or not GRCOV_BIN.exists():
+    if not GRCOV_BIN.exists():
         return None
 
     profraw_dir = project_dir / "target" / "coverage" / f"{module_name}_quick"
@@ -7073,13 +7078,179 @@ def _load_grcov_json(project_dir: Path, module_name: str) -> tuple[float, list[d
 
 
 def _measure_coverage(project_dir: Path, module_name: str) -> tuple[float, list[dict], int, int]:
-    """Dispatch to grcov or tarpaulin based on COVERAGE_BACKEND env var."""
-    if COVERAGE_BACKEND == "grcov":
+    return _coverage_provider.measure(project_dir, module_name)
+
+
+# ── Coverage provider interface ───────────────────────────────────────────────
+
+def _cluster_exclude_patterns() -> list[str]:
+    if _current_cluster is None or _current_cluster.is_default:
+        return ["*/nightly.rs"]
+    return list(_current_cluster.tarpaulin_exclude_files)
+
+
+def _glob_to_filename_regex(pat: str) -> str:
+    """Convert a simple glob (*/foo.rs) to a regex fragment for --ignore-filename-regex."""
+    return re.escape(os.path.basename(pat.lstrip("*/")))
+
+
+class CoverageProvider(ABC):
+    """Pluggable coverage measurement backend.
+
+    All implementations return files_data entries in the tarpaulin-compatible schema:
+      {"abs_path": str, "path": list[str], "traces": [{"line": N, "stats": {"Line": N}}],
+       "covered": int, "coverable": int}
+    """
+    ignore_pragma: str = COVERAGE_IGNORE_PRAGMA
+
+    @abstractmethod
+    def measure(self, project_dir: Path, module_name: str) -> tuple[float, list[dict], int, int]:
+        """Run instrumented tests. Returns (pct, files_data, covered, coverable)."""
+
+    @abstractmethod
+    def measure_file(self, project_dir: Path, module_name: str, rel_path: str) -> tuple[int, int] | None:
+        """Quick per-file snapshot. Returns (covered, coverable) or None on failure."""
+
+    @abstractmethod
+    def load_cached(self, project_dir: Path, module_name: str) -> tuple[float, list[dict], int, int] | None:
+        """Load previous measurement without re-running. Returns None if unavailable."""
+
+
+class TarpaulinProvider(CoverageProvider):
+    def measure(self, project_dir: Path, module_name: str) -> tuple[float, list[dict], int, int]:
+        return _run_tarpaulin(project_dir, module_name)
+
+    def measure_file(self, project_dir: Path, module_name: str, rel_path: str) -> tuple[int, int] | None:
+        return None  # tarpaulin is too slow for per-file quick checks
+
+    def load_cached(self, project_dir: Path, module_name: str) -> tuple[float, list[dict], int, int] | None:
+        return None
+
+
+class GrcovProvider(CoverageProvider):
+    def measure(self, project_dir: Path, module_name: str) -> tuple[float, list[dict], int, int]:
         if not GRCOV_BIN.exists():
             _log("  [warn] COVERAGE_BACKEND=grcov but grcov not found — falling back to tarpaulin")
-        else:
-            return _run_grcov(project_dir, module_name)
-    return _run_tarpaulin(project_dir, module_name)
+            return _run_tarpaulin(project_dir, module_name)
+        return _run_grcov(project_dir, module_name)
+
+    def measure_file(self, project_dir: Path, module_name: str, rel_path: str) -> tuple[int, int] | None:
+        return _quick_file_coverage_grcov(project_dir, module_name, rel_path)
+
+    def load_cached(self, project_dir: Path, module_name: str) -> tuple[float, list[dict], int, int] | None:
+        return _load_grcov_json(project_dir, module_name)
+
+
+class LlvmCovProvider(CoverageProvider):
+    """Coverage backend using cargo-llvm-cov (lcov output, src-based coverage)."""
+
+    def _lcov_path(self, module_name: str, suffix: str = "") -> Path:
+        return Path("/tmp") / f"llvmcov_{module_name}{suffix}.lcov"
+
+    def _run(self, project_dir: Path, module_name: str, suffix: str = "") -> tuple[float, list[dict], int, int]:
+        lcov_path = self._lcov_path(module_name, suffix)
+        env = _cargo_env()
+        cmd = [
+            "cargo", "llvm-cov",
+            "--lcov",
+            "--output-path", str(lcov_path),
+            "-p", module_name,
+            "--no-fail-fast",
+            "--ignore-filename-regex", r"tests[/\\]",   # integration tests/
+            "--ignore-filename-regex", r"build\.rs",
+        ]
+        for pat in _cluster_exclude_patterns():
+            cmd += ["--ignore-filename-regex", _glob_to_filename_regex(pat)]
+        cmd += ["--", "--test-threads=1", "--no-capture"]
+        try:
+            result = subprocess.run(
+                cmd, cwd=project_dir, capture_output=True, text=True,
+                timeout=BUILD_TIMEOUT, env=env,
+            )
+            if result.returncode != 0 and not lcov_path.exists():
+                _log(f"  llvm-cov: failed: {result.stderr[:200]}")
+                return 0.0, [], 0, 0
+        except subprocess.TimeoutExpired:
+            _log(f"  llvm-cov: timeout after {BUILD_TIMEOUT}s")
+            return 0.0, [], 0, 0
+        except Exception as e:
+            _log(f"  llvm-cov: error: {e}")
+            return 0.0, [], 0, 0
+        return self._parse_lcov(lcov_path, project_dir)
+
+    def _parse_lcov(self, lcov_path: Path, project_dir: Path) -> tuple[float, list[dict], int, int]:
+        try:
+            text = lcov_path.read_text(encoding="utf-8", errors="replace")
+        except FileNotFoundError:
+            return 0.0, [], 0, 0
+        files_data: list[dict] = []
+        current_file: str | None = None
+        line_hits: dict[int, int] = {}
+        project_str = str(project_dir)
+        for raw in text.splitlines():
+            if raw.startswith("SF:"):
+                current_file = raw[3:]
+                line_hits = {}
+            elif raw.startswith("DA:") and current_file is not None:
+                parts = raw[3:].split(",")
+                if len(parts) >= 2:
+                    try:
+                        ln = int(parts[0])
+                        ct = int(parts[1])
+                        line_hits[ln] = max(line_hits.get(ln, 0), ct)
+                    except ValueError:
+                        pass
+            elif raw == "end_of_record" and current_file is not None:
+                abs_path = current_file if os.path.isabs(current_file) else str(project_dir / current_file)
+                rel = os.path.relpath(abs_path, project_str)
+                if rel.startswith("src" + os.sep) or rel.startswith("src/"):
+                    covered   = sum(1 for c in line_hits.values() if c > 0)
+                    coverable = len(line_hits)
+                    traces    = [{"line": ln, "stats": {"Line": ct}} for ln, ct in sorted(line_hits.items())]
+                    files_data.append({
+                        "abs_path":  abs_path,
+                        "path":      abs_path.split(os.sep),
+                        "traces":    traces,
+                        "covered":   covered,
+                        "coverable": coverable,
+                    })
+                current_file = None
+                line_hits = {}
+        total_covered   = sum(f["covered"]   for f in files_data)
+        total_coverable = sum(f["coverable"] for f in files_data)
+        pct = (total_covered / total_coverable * 100.0) if total_coverable > 0 else 0.0
+        return pct, files_data, total_covered, total_coverable
+
+    def measure(self, project_dir: Path, module_name: str) -> tuple[float, list[dict], int, int]:
+        return self._run(project_dir, module_name)
+
+    def measure_file(self, project_dir: Path, module_name: str, rel_path: str) -> tuple[int, int] | None:
+        pct, files_data, _, _ = self._run(project_dir, module_name, suffix="_quick")
+        abs_target = str(project_dir / rel_path)
+        for fd in files_data:
+            if fd["abs_path"] == abs_target:
+                return fd["covered"], fd["coverable"]
+        return None
+
+    def load_cached(self, project_dir: Path, module_name: str) -> tuple[float, list[dict], int, int] | None:
+        lcov_path = self._lcov_path(module_name)
+        if not lcov_path.exists():
+            return None
+        try:
+            return self._parse_lcov(lcov_path, project_dir)
+        except Exception:
+            return None
+
+
+def _make_coverage_provider() -> CoverageProvider:
+    if COVERAGE_BACKEND == "grcov":
+        return GrcovProvider()
+    if COVERAGE_BACKEND == "llvm-cov":
+        return LlvmCovProvider()
+    return TarpaulinProvider()
+
+
+_coverage_provider: CoverageProvider = _make_coverage_provider()
 
 
 def _extract_branch_guard(lines: list[str], line_no: int) -> str | None:
@@ -8176,7 +8347,7 @@ corrected content here
     # On resume, reload coverage from the previous run's grcov JSON + filecache
     # to avoid an expensive full re-run before the first gen attempt.
     if attempt > 0:
-        _cached = _load_grcov_json(project_dir, module_name)
+        _cached = _coverage_provider.load_cached(project_dir, module_name)
         if _cached is not None:
             coverage, files_data, covered_lines, coverable_lines = _cached
             _skip_first_measure = True
