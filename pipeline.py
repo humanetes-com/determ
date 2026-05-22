@@ -7487,6 +7487,13 @@ def _strip_gen_tests_decls(src_text: str) -> str:
     return GEN_TESTS_DECL_RE.sub("", src_text)
 
 
+def _has_gen_tests_decl(src_text: str, pass_n: int) -> bool:
+    """True if src_text contains a `mod gen_tests_<pass_n>;` declaration.
+    Used by the TASK 2 reattach path to detect when a sibling exists on disk
+    but its declaration was dropped during regeneration of the source file."""
+    return bool(re.search(rf'\bmod\s+gen_tests_{pass_n}\s*;', src_text))
+
+
 def _build_gen_tests_decl(sibling_name: str, n: int, allow_line: str) -> str:
     """Build the one-line-ish `#[cfg(test)] ... mod gen_tests_N;` declaration."""
     attrs = f"#[cfg(test)]\n{allow_line}\n" if allow_line else "#[cfg(test)]\n"
@@ -10843,22 +10850,33 @@ This is a Rust procedural macro crate. Strict rules apply:
                     failure_type = "build"
                 else:
                     # Reattach saved gen_tests siblings to generated source files.
+                    # Idempotent: for each saved (pass_n, body) we ensure
+                    #   (a) the sibling file exists with the saved body, and
+                    #   (b) the source file contains a path-mod decl for it.
+                    # The previous guard ("skip if any sibling already on disk")
+                    # was a no-op once strip started preserving sibling files,
+                    # leaving them orphaned by the regenerated source.
                     if saved_gen_blocks:
                         _reattach_allow_line, _ = _derive_gentest_prelude(project_dir)
                         for rel, blocks in saved_gen_blocks.items():
                             src_path = project_dir / rel
                             if not src_path.exists():
                                 continue
-                            if _gen_tests_count(src_path) > 0:
-                                continue  # already reattached this pass
                             content = src_path.read_text(encoding="utf-8")
                             new_text = content.rstrip()
+                            added_decls = 0
                             for pass_n, body in blocks:
                                 sibling = _gen_tests_path(src_path, pass_n)
-                                sibling.write_text(body, encoding="utf-8")
-                                new_text += _build_gen_tests_decl(sibling.name, pass_n, _reattach_allow_line)
-                            src_path.write_text(new_text, encoding="utf-8")
-                            _log(f"  Reattached {len(blocks)} gen_tests sibling(s) to {rel}.")
+                                if not sibling.exists() or sibling.read_text(encoding="utf-8") != body:
+                                    sibling.write_text(body, encoding="utf-8")
+                                if not _has_gen_tests_decl(new_text, pass_n):
+                                    new_text += _build_gen_tests_decl(
+                                        sibling.name, pass_n, _reattach_allow_line
+                                    )
+                                    added_decls += 1
+                            if added_decls > 0:
+                                src_path.write_text(new_text, encoding="utf-8")
+                                _log(f"  Reattached {added_decls} gen_tests decl(s) to {rel}.")
 
                     # TASK 3: run tests.
                     passed, test_output = task3(

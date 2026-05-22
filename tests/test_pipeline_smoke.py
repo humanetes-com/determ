@@ -116,6 +116,31 @@ mod gen_tests_1 {
     print("  OK  gen_tests helpers")
 
 
+def test_has_gen_tests_decl() -> None:
+    """The guard used by task2 reattach: detects whether src contains
+    `mod gen_tests_<n>;`. Regression coverage for the orphan-siblings bug
+    where the previous guard checked only sibling-file existence."""
+    import pipeline
+
+    src = (
+        'pub fn add(a: i32, b: i32) -> i32 { a + b }\n'
+        '#[cfg(test)]\n'
+        '#[allow(clippy::all)]\n'
+        '#[path = "lib.gen_tests_1.rs"]\n'
+        'mod gen_tests_1;\n'
+        '#[cfg(test)]\n'
+        '#[path = "lib.gen_tests_3.rs"]\n'
+        'mod gen_tests_3;\n'
+    )
+    assert pipeline._has_gen_tests_decl(src, 1) is True
+    assert pipeline._has_gen_tests_decl(src, 3) is True
+    assert pipeline._has_gen_tests_decl(src, 2) is False, "missing decl must report False"
+    assert pipeline._has_gen_tests_decl("", 1) is False
+    assert pipeline._has_gen_tests_decl("// no decls here\n", 1) is False
+
+    print("  OK  _has_gen_tests_decl")
+
+
 def test_api_surface_capture() -> None:
     """Capture pre-strip API surface from the fixture and validate the artifact."""
     import pipeline
@@ -318,6 +343,7 @@ def main() -> int:
     print("Pure-Python phase:")
     test_gen_tests_helpers()
     test_extract_gen_tests_body()
+    test_has_gen_tests_decl()
     test_api_surface_capture()
     test_module_augment_state()
 
