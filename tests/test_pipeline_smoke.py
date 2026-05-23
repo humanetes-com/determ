@@ -455,6 +455,131 @@ def test_module_augment_state() -> None:
     print("  OK  ModuleAugmentState transitions")
 
 
+def test_model_context_chars() -> None:
+    """_model_context_chars returns sensible values for different env configs."""
+    import importlib
+    import pipeline
+
+    orig_env = {k: os.environ.get(k) for k in ("BACKEND", "OLLAMA_NUM_CTX", "VLLM_MAX_MODEL_LEN", "MODEL")}
+
+    def _call(**env_overrides):
+        for k, v in env_overrides.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        result = pipeline._model_context_chars()
+        return result
+
+    try:
+        # Ollama with explicit context window.
+        v = _call(BACKEND="ollama", OLLAMA_NUM_CTX="32768")
+        assert v == (32768 - 6_000) * 4, f"ollama 32768 → {v}"
+
+        # Ollama with very small context — floor at 4_000 tokens budget.
+        v = _call(BACKEND="ollama", OLLAMA_NUM_CTX="6000")
+        assert v == max((6000 - 6_000), 4_000) * 4, f"ollama 6000 floor → {v}"
+
+        # Claude backend → 200k token budget.
+        v = _call(BACKEND="claude", OLLAMA_NUM_CTX=None)
+        assert v == (200_000 - 6_000) * 4, f"claude backend → {v}"
+
+        # Unknown backend, no env var → safe fallback 8192.
+        v = _call(BACKEND="unknown_backend", OLLAMA_NUM_CTX=None, VLLM_MAX_MODEL_LEN=None)
+        assert v == (8_192 - 6_000) * 4, f"fallback → {v}"
+
+        # vLLM backend.
+        v = _call(BACKEND="vllm", VLLM_MAX_MODEL_LEN="65536", OLLAMA_NUM_CTX=None)
+        assert v == (65536 - 6_000) * 4, f"vllm 65536 → {v}"
+
+    finally:
+        for k, v in orig_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    print("  OK  _model_context_chars")
+
+
+def test_context_guard_section_removal() -> None:
+    """ask() context guard drops sections in priority order before falling back to middle-trim."""
+    import pipeline
+
+    limit = pipeline.MODEL_CONTEXT_CHARS
+    margin = 1_000
+
+    # Build a prompt with 2 TESTFILE sections that together exceed the limit.
+    # Each block is ~60% of (limit-margin) so one fits but two don't.
+    section_size = (limit - margin) * 3 // 5
+    padding = "x" * section_size
+
+    testfile_block = f'\n<TESTFILE path="tests/foo.rs">{padding}</TESTFILE>'
+    base_prompt = "A" * 200 + testfile_block + testfile_block
+
+    # Confirm it's actually over limit (so the guard fires).
+    assert len(base_prompt) > limit - margin, (
+        f"test precondition failed: prompt {len(base_prompt)} not > limit {limit - margin}"
+    )
+
+    # Monkey-patch _ask_raw to capture the trimmed prompt.
+    captured: list[str] = []
+    orig_ask = pipeline._ask_raw
+
+    def fake_ask(prompt, system=None, **kw):
+        captured.append(prompt)
+        return "ok"
+
+    pipeline._ask_raw = fake_ask
+    try:
+        pipeline.ask(base_prompt)
+    finally:
+        pipeline._ask_raw = orig_ask
+
+    assert captured, "ask() never called model_interact.ask"
+    sent = captured[0]
+    assert len(sent) <= limit - margin, (
+        f"guard failed to trim: sent {len(sent)} chars, limit {limit - margin}"
+    )
+    # At least one TESTFILE block was dropped.
+    assert sent.count("<TESTFILE") < base_prompt.count("<TESTFILE"), (
+        "guard should have dropped at least one TESTFILE block"
+    )
+    print("  OK  context_guard section removal")
+
+
+def test_context_guard_middle_trim() -> None:
+    """ask() falls back to middle-trim when section removal is insufficient."""
+    import pipeline
+
+    limit = pipeline.MODEL_CONTEXT_CHARS
+    margin = 1_000
+
+    # Build a prompt with no recognisable sections — forces blind middle-trim.
+    big_prompt = "B" * (limit + 10_000)
+
+    captured: list[str] = []
+    orig_ask = pipeline._ask_raw
+
+    def fake_ask(prompt, system=None, **kw):
+        captured.append(prompt)
+        return "ok"
+
+    pipeline._ask_raw = fake_ask
+    try:
+        pipeline.ask(big_prompt)
+    finally:
+        pipeline._ask_raw = orig_ask
+
+    assert captured
+    sent = captured[0]
+    assert len(sent) <= limit - margin, (
+        f"middle-trim failed: {len(sent)} > {limit - margin}"
+    )
+    assert "trimmed by context-guard" in sent, "expected context-guard ellipsis in trimmed output"
+    print("  OK  context_guard middle-trim fallback")
+
+
 def test_extract_gen_tests_body() -> None:
     import pipeline
 
@@ -578,6 +703,9 @@ def main() -> int:
     test_describe_test_environment()
     test_retrospective_prompt_includes_failed_attempts()
     test_module_augment_state()
+    test_model_context_chars()
+    test_context_guard_section_removal()
+    test_context_guard_middle_trim()
 
     if full:
         print("Cargo phase (--full):")
