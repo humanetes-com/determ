@@ -254,6 +254,22 @@ P2 = changes LLM behavior in a measurable way, validate on fixture + anyhow.
   N minutes". Later: ingest events.jsonl → SQLite for ad-hoc queries.
 - Risk: low. Strictly additive; no behavior change.
 
+### P1 — TASK 4 in forward mode must update FR (and optionally API), not genesis.md
+- Site: `task4()` (~line 6783); orchestration in main() per-module iteration loop.
+- Symptom: with `--from-spec`, the pipeline takes FR + API + tests as inputs and
+  iterates TASK 2 → TASK 3 → TASK 4. Today TASK 4 only updates `genesis.md`
+  (abstract methodology) — the FR/API the user actually supplied never get
+  refined, so the retrospective signal is lost between iterations.
+- Fix: when `_from_spec=True`, TASK 4 should produce an updated FR (and possibly
+  API surface diff) based on the failing test output, not a methodology
+  update. The simplest shape: add `mode="forward"` branch to `task4()` that
+  swaps the prompt template (asks the LLM to revise FR/API to make the tests
+  pass), reads/writes from the project-level FR file, and emits
+  `task4.done data.target=fr|api` so events.jsonl distinguishes the two.
+- Risk: medium — requires a new prompt template and a careful policy on when
+  to touch FR vs API. Recommend writing both as separate diffs the next
+  iteration reads from disk.
+
 ## Deferred
 
 ### project_profile + project_context merge — not worth the risk

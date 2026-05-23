@@ -10593,6 +10593,14 @@ def main():
                         help="Fetch and display top open-source coding models from HuggingFace")
     parser.add_argument("--vram-gb", type=float, default=32.0,
                         help="Total GPU VRAM in GB used to annotate model fit (default: 32)")
+    parser.add_argument("--from-spec", action="store_true",
+                        help=(
+                            "Forward (spec-driven) mode. Skip task0a/0b/0c/strip/task1. "
+                            "Requires functional_requirements.md at the project root. "
+                            "API surface (if present at .original_structure/{name}.api.md) "
+                            "is used by TASK 2. Goes directly to module iteration loop "
+                            "(TASK 2 → TASK 3 → TASK 4)."
+                        ))
     args = parser.parse_args()
 
     if args.best_models_list:
@@ -10626,10 +10634,24 @@ def main():
 
     init_log(root, nolog=args.nolog, progress_mode=args.progress)
     init_events(product=project_dir.name)
+
+    # Forward (spec-driven) mode: skip reconstruction-phase tasks. The user
+    # provides functional_requirements.md (+ optional API surface) and tests;
+    # the pipeline goes straight to TASK 2 → TASK 3 → TASK 4.
+    _from_spec = args.from_spec
+    if _from_spec:
+        _fr_root = project_dir / "functional_requirements.md"
+        if not _fr_root.exists():
+            print(f"ERROR: --from-spec requires {_fr_root} (project-level FR file).")
+            sys.exit(1)
+        _log(f"FORWARD MODE: spec-driven generation. "
+             f"Skipping task0a/0b/0c/strip/task1. FR={_fr_root}")
+
     _emit("pipeline.start", data={
         "project_dir": str(project_dir),
         "clean": args.clean,
         "augment_tests": args.augment_tests,
+        "from_spec": _from_spec,
         "model": MODEL,
         "backend": os.getenv("BACKEND", "ollama").lower(),
         "coverage_backend": COVERAGE_BACKEND,
@@ -10651,6 +10673,8 @@ def main():
         _params.append("--progress")
     if args.nolog:
         _params.append("--nolog")
+    if args.from_spec:
+        _params.append("--from-spec")
     _log(f"  pipeline.py [{_ph}]  monitor.py [{_mh}]  params: {' '.join(_params) or '(none)'}")
 
     _backend_name = os.getenv("BACKEND", "ollama").lower()
@@ -10718,29 +10742,39 @@ def main():
 
     # TASK 0a: identify project structure once; profile stored per-project (not pipeline root)
     # so running project B never loads project A's cached profile.
-    profile_path = project_dir / PROJECT_PROFILE_NAME
-    project_profile = task0_project_profile(profile_path, test_files, readme_text)
-
-    # TASK 0a (context): synthesize behavioral project summary from test content.
-    # This is the "big picture" document injected into every task — especially TASK 0c
-    # which currently receives no project-level context. Works even without README.
-    context_path = project_dir / PROJECT_CONTEXT_NAME
-    project_context = task0_project_context(context_path, test_files, readme_text, project_profile)
-
-    # TASK 0b (discovery): produce coverage_strategy.md — import idioms, type construction
-    # patterns, feature flags, test conventions. Injected into all TASK 0c, 1, and 2 prompts.
-    strategy_path = project_dir / COVERAGE_STRATEGY_NAME
-    if _phase_valid(project_dir, "task0b", _src_hash) and strategy_path.exists():
-        coverage_strategy = strategy_path.read_text().strip()
-        _log(f"  task0b already done (hash match) — loading coverage_strategy.md ({len(coverage_strategy):,} chars).")
+    # FORWARD MODE: task0a/0b/0c provide reconstruction-phase context (profile/
+    # behavioral summary/coverage strategy). In spec-driven mode the user supplies
+    # FR+API directly so this preprocessing is unnecessary — empty strings keep
+    # downstream prompts well-formed without triggering a regeneration.
+    if _from_spec:
+        project_profile = ""
+        project_context = ""
+        coverage_strategy = ""
+        _log("  [from-spec] Skipping task0a/0a-context/0b (FR+API are user-provided).")
     else:
-        coverage_strategy = task0b_discovery(
-            strategy_path, project_dir, test_files, readme_text, project_profile,
-            clusters=_clusters,
-        )
-        _mark_phase(project_dir, "task0b", "done",
-                    detail=f"{len(coverage_strategy)} chars", source_hash=_src_hash)
-        git_commit(project_dir, "pipeline: task0b done")
+        profile_path = project_dir / PROJECT_PROFILE_NAME
+        project_profile = task0_project_profile(profile_path, test_files, readme_text)
+
+        # TASK 0a (context): synthesize behavioral project summary from test content.
+        # This is the "big picture" document injected into every task — especially TASK 0c
+        # which currently receives no project-level context. Works even without README.
+        context_path = project_dir / PROJECT_CONTEXT_NAME
+        project_context = task0_project_context(context_path, test_files, readme_text, project_profile)
+
+        # TASK 0b (discovery): produce coverage_strategy.md — import idioms, type construction
+        # patterns, feature flags, test conventions. Injected into all TASK 0c, 1, and 2 prompts.
+        strategy_path = project_dir / COVERAGE_STRATEGY_NAME
+        if _phase_valid(project_dir, "task0b", _src_hash) and strategy_path.exists():
+            coverage_strategy = strategy_path.read_text().strip()
+            _log(f"  task0b already done (hash match) — loading coverage_strategy.md ({len(coverage_strategy):,} chars).")
+        else:
+            coverage_strategy = task0b_discovery(
+                strategy_path, project_dir, test_files, readme_text, project_profile,
+                clusters=_clusters,
+            )
+            _mark_phase(project_dir, "task0b", "done",
+                        detail=f"{len(coverage_strategy)} chars", source_hash=_src_hash)
+            git_commit(project_dir, "pipeline: task0b done")
 
     # TASK 0b: build dependency graph for bottom-up module integration.
     # Implementation selected by DEPENDENCY_GRAPH in .env (default: static).
@@ -10806,6 +10840,9 @@ def main():
     # all LLM tasks receive cluster context). Loop below runs one pass per cluster.
     # -----------------------------------------------------------------------
 
+    if _from_spec:
+        _log("  [from-spec] Skipping task0c cluster loop (no test augmentation needed).")
+        _clusters = []  # ensure the loop below is a no-op
     for _cluster in _clusters:
         _current_cluster = _cluster
         _cluster_t0 = time.monotonic()
@@ -10968,9 +11005,11 @@ def main():
         # --- TASK 0c: all clusters complete — sentinel check only ---
         # All coverage augmentation (across all clusters) was done by the cluster
         # outer loop above. This block just verifies the sentinel and proceeds.
-        if not is_module_augmented(project_dir, module_name):
-            _log(f"  WARNING: '{module_name}' has no augmentation sentinel — proceeding anyway.")
-        _log(f"  TASK 0c: '{module_name}' all clusters done — proceeding to strip.")
+        # FORWARD MODE: skip — there is no augmentation phase in spec-driven mode.
+        if not _from_spec:
+            if not is_module_augmented(project_dir, module_name):
+                _log(f"  WARNING: '{module_name}' has no augmentation sentinel — proceeding anyway.")
+            _log(f"  TASK 0c: '{module_name}' all clusters done — proceeding to strip.")
 
         # Coverage check before strip — warn if below 100% but proceed anyway.
         # A hard stop here would abort the pipeline on coverage tool failures (bad sentinel,
@@ -11003,36 +11042,42 @@ def main():
         # !IMPORTANT CAN'T STRIP CODE IF COVERAGE <100%, IF <100% go back to task 0c
         # Only strip once — if already stripped, the original structure file list
         # is intact and the implementation is already gone.
-        strip_sentinel = project_dir / MODULE_STRIPPED_DIR / module_name
-        if strip_sentinel.exists():
-            _log(f"  '{module_name}' already stripped — skipping.")
+        # FORWARD MODE: no source to strip — the workspace starts with src/ empty
+        # (or absent). The user-provided API file at .original_structure/{name}.api.md
+        # already serves as structural ground truth.
+        if _from_spec:
+            _log(f"  [from-spec] Skipping strip for '{module_name}'.")
         else:
-            if crate_type != "proc-macro" and TARPAULIN_BIN.exists():
-                _sentinel_path = _module_augmented_path(project_dir, module_name)
-                try:
-                    _strip_cov = float(_sentinel_path.read_text().strip().rstrip('%'))
-                except (ValueError, OSError):
-                    _strip_cov = 0.0
-                if _strip_cov < 100.0:
-                    _log(
-                        f"\n  WARNING at strip: '{module_name}' coverage is {_strip_cov:.1f}% "
-                        f"— stripping anyway. Reconstruction may be incomplete."
-                    )
-            # Capture API surface BEFORE strip — structural ground truth for
-            # TASK 1. The .original_structure/ dir survives strip (lives at the
-            # project root, not under src/), so TASK 1 can read it post-strip.
-            _capture_api_surface(project_dir, module_dir, module_name)
-            if not git_commit(project_dir, f"pipeline: pre-strip — {module_name} task0c complete"):
-                _log(f"  [ABORT] pre-strip commit failed for '{module_name}' — refusing to strip. Fix git state and retry.")
-                raise RuntimeError(f"pre-strip commit failed for {module_name}")
-            git_tag(project_dir, f"pre-strip-{module_name}")
-            strip_module_source(project_dir, module_dir)
-            strip_sentinel.parent.mkdir(parents=True, exist_ok=True)
-            strip_sentinel.touch()
-            _mark_phase(project_dir, f"strip/{module_name}", "done",
-                        source_hash=_src_hash)
-            _set_current(project_dir, f"strip/{module_name} / done")
-            git_commit(project_dir, f"pipeline: stripped — {module_name}")
+            strip_sentinel = project_dir / MODULE_STRIPPED_DIR / module_name
+            if strip_sentinel.exists():
+                _log(f"  '{module_name}' already stripped — skipping.")
+            else:
+                if crate_type != "proc-macro" and TARPAULIN_BIN.exists():
+                    _sentinel_path = _module_augmented_path(project_dir, module_name)
+                    try:
+                        _strip_cov = float(_sentinel_path.read_text().strip().rstrip('%'))
+                    except (ValueError, OSError):
+                        _strip_cov = 0.0
+                    if _strip_cov < 100.0:
+                        _log(
+                            f"\n  WARNING at strip: '{module_name}' coverage is {_strip_cov:.1f}% "
+                            f"— stripping anyway. Reconstruction may be incomplete."
+                        )
+                # Capture API surface BEFORE strip — structural ground truth for
+                # TASK 1. The .original_structure/ dir survives strip (lives at the
+                # project root, not under src/), so TASK 1 can read it post-strip.
+                _capture_api_surface(project_dir, module_dir, module_name)
+                if not git_commit(project_dir, f"pipeline: pre-strip — {module_name} task0c complete"):
+                    _log(f"  [ABORT] pre-strip commit failed for '{module_name}' — refusing to strip. Fix git state and retry.")
+                    raise RuntimeError(f"pre-strip commit failed for {module_name}")
+                git_tag(project_dir, f"pre-strip-{module_name}")
+                strip_module_source(project_dir, module_dir)
+                strip_sentinel.parent.mkdir(parents=True, exist_ok=True)
+                strip_sentinel.touch()
+                _mark_phase(project_dir, f"strip/{module_name}", "done",
+                            source_hash=_src_hash)
+                _set_current(project_dir, f"strip/{module_name} / done")
+                git_commit(project_dir, f"pipeline: stripped — {module_name}")
 
         # Re-collect after strip — picks up any tests generated by TASK 0c.
         # test_files: full read set for TASK 1 (includes inline test blocks in src/)
@@ -11072,12 +11117,28 @@ def main():
             ]
             _log(f"  Appended {len(_t1_examples)} example file(s) to TASK 1 input as usage signal.")
 
+        # FORWARD MODE: copy the user-provided FR into the per-module slot so
+        # TASK 2 picks it up via the existing module_req_path. Skip the full
+        # TASK 1 inference loop — the user is the source of truth.
+        if _from_spec:
+            _fr_root = project_dir / "functional_requirements.md"
+            if not module_req_path.exists():
+                module_req_path.write_text(_fr_root.read_text(encoding="utf-8"),
+                                           encoding="utf-8")
+                _log(f"  [from-spec] Seeded {module_req_path.name} "
+                     f"from {_fr_root.name} ({_fr_root.stat().st_size} chars).")
+            else:
+                _log(f"  [from-spec] {module_req_path.name} already present — leaving as-is.")
+            t1_valid = True
+        else:
+            t1_valid = False
+
         # TASK 1 with anti-corruption retry (max 2 retries after initial attempt).
         T1_MAX_RETRIES = 2
-        t1_valid = False
         _task1_t0 = time.monotonic()
-        _emit("task.start", task="task1", module=module_name)
-        for t1_attempt in range(T1_MAX_RETRIES + 1):
+        if not _from_spec:
+            _emit("task.start", task="task1", module=module_name)
+        for t1_attempt in (range(0) if _from_spec else range(T1_MAX_RETRIES + 1)):
             if module_req_path.exists() and t1_attempt == 0:
                 _log(f"\nTASK 1: requirements for '{module_name}' already extracted — skipping.")
             else:
