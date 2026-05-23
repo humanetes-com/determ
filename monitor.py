@@ -1344,12 +1344,14 @@ def _run_action(key):
     if _confirm == "wipe":
         if key == "y":
             _confirm = None
-            url = _prompt_url()   # blocks briefly in cooked mode — no render loop interference
-            if url:
-                _detach(["bash", os.path.join(SCRIPT_DIR, "wipe.sh"), "--repo", url])
-                _action_msg = yellow(f"↺ wiping and restarting with {url}")
-            else:
-                _action_msg = dim("wipe cancelled — no URL")
+            # Use the cached default repo URL with no interactive prompt — the
+            # blocking readline was confusing the workflow (the yellow confirm
+            # message stayed visible while the URL prompt waited silently at
+            # the bottom of the screen). For non-default URLs, use
+            # `bash wipe.sh --repo URL` from the CLI.
+            url = _detect_cached_repo_url() or "https://github.com/dtolnay/anyhow"
+            _detach(["bash", os.path.join(SCRIPT_DIR, "wipe.sh"), "--repo", url])
+            _action_msg = yellow(f"↺ wiping and restarting with {url}")
         else:
             _action_msg = dim("wipe cancelled")
             _confirm = None
@@ -1361,12 +1363,9 @@ def _run_action(key):
             _action_msg = cyan("↺ restoring augmentation, restarting from task1")
         elif key == "h":
             _confirm = None
-            url = _prompt_url()
-            if url:
-                _detach(["bash", os.path.join(SCRIPT_DIR, "wipe.sh"), "--repo", url])
-                _action_msg = yellow(f"↺ hard reset, restarting with {url}")
-            else:
-                _action_msg = dim("hard reset cancelled — no URL")
+            url = _detect_cached_repo_url() or "https://github.com/dtolnay/anyhow"
+            _detach(["bash", os.path.join(SCRIPT_DIR, "wipe.sh"), "--repo", url])
+            _action_msg = yellow(f"↺ hard reset, restarting with {url}")
         else:
             _action_msg = dim("wipe cancelled")
             _confirm = None
