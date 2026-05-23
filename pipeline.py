@@ -3660,7 +3660,7 @@ def git_clean_reset(project_dir: Path) -> None:
         _log(f"  [git] clean reset failed: {e}")
 
 
-def setup_workspace(repo: str, workspace_dir: Path) -> Path:
+def setup_workspace(repo: str, workspace_dir: Path, force_fresh: bool = False) -> Path:
     """
     Prepare a git-managed workspace for the given repo (URL or local path).
 
@@ -3670,6 +3670,12 @@ def setup_workspace(repo: str, workspace_dir: Path) -> Path:
 
     In all cases, checks out (or creates) a 'pipeline' branch and returns
     the workspace path.
+
+    If `force_fresh` is True AND the repo source is a URL, an existing
+    workspace is deleted and re-cloned. This is what --clean + --repo means:
+    nuke target/, stale gen_tests artifacts, half-applied LLM edits — start
+    from a true upstream HEAD. For local-path repos we never auto-delete the
+    user's source tree.
     """
     workspace_dir.mkdir(parents=True, exist_ok=True)
 
@@ -3689,6 +3695,10 @@ def setup_workspace(repo: str, workspace_dir: Path) -> Path:
 
     _is_url = repo.startswith("http://") or repo.startswith("https://") \
               or repo.startswith("git@") or repo.startswith("ssh://")
+
+    if dest.exists() and force_fresh and _is_url:
+        _log(f"  [git] --clean + URL repo: removing {dest} for fresh re-clone")
+        shutil.rmtree(dest)
 
     if dest.exists():
         _log(f"  [git] workspace exists at {dest} — resuming")
@@ -10602,7 +10612,8 @@ def main():
 
     if args.repo:
         # Full git-managed workspace: clone/copy into tmp/, checkout pipeline branch.
-        project_dir = setup_workspace(args.repo, workspace_dir)
+        project_dir = setup_workspace(args.repo, workspace_dir,
+                                      force_fresh=args.clean)
         _git_managed = True
     else:
         # --project: check tmp/ first, then root (backward compat).
