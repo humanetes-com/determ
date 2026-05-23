@@ -616,6 +616,89 @@ def test_event_log() -> None:
     print("  OK  event log (_emit, _store_prompt_content)")
 
 
+def test_monitor_task_pipeline_parser() -> None:
+    """_parse_task_pipeline reconstructs task progression from log lines."""
+    import monitor
+
+    # Build a synthetic log that walks the full pipeline.
+    log_lines = [
+        "PIPELINE STARTED — 2026-05-23 11:00:00 UTC",
+        "TASK 0a: Identifying project structure",
+        "TASK 0b (discovery): Analyzing project for coverage strategy...",
+        "  [git] committed: pipeline: task0b done",
+        "TASK 0c [stable]: Augmenting 'anyhow' to 100% coverage...",
+        "  [git] committed: pipeline: task0c/stable — anyhow:99.5%",
+        "TASK 0c [nightly]: Augmenting 'anyhow' to 100% coverage...",
+        "  [git] committed: pipeline: task0c/nightly — anyhow:99.5%",
+        "  [git] committed: pipeline: stripped — anyhow",
+        "TASK 1: Analyzing tests + README, building functional_requirements.md",
+        "  TASK 1 output validated OK.",
+        "  [git] committed: pipeline: task1 — anyhow",
+        "TASK 1.5: 100 use-paths in tests, 6 missing from requirements.",
+        "==================================================",
+        "MODULE anyhow — ITERATION 1",
+        "==================================================",
+        "TASK 2: Implementing source code (static file list)",
+    ]
+    tp = monitor._parse_task_pipeline(log_lines)
+    assert tp["module"] == "anyhow"
+    assert tp["iteration"] == 1
+    assert tp["task0c_clusters_done"] == 2
+    assert tp["states"]["task0a"]  == "done"
+    assert tp["states"]["task0b"]  == "done"
+    assert tp["states"]["task0c"]  == "done"
+    assert tp["states"]["strip"]   == "done"
+    assert tp["states"]["task1"]   == "done"
+    assert tp["states"]["task2"]   == "in_progress"
+    assert tp["states"]["task3"]   == "pending"
+    assert tp["states"]["task4"]   == "pending"
+    assert tp["current"] == "task2"
+
+    # Test PIPELINE STARTED reset.
+    log_lines.extend([
+        "PIPELINE STARTED — 2026-05-23 12:00:00 UTC",
+        "TASK 0a: Identifying project structure",
+    ])
+    tp2 = monitor._parse_task_pipeline(log_lines)
+    assert tp2["states"]["task0a"] == "in_progress"
+    assert tp2["states"]["task0c"] == "pending", "PIPELINE STARTED must reset all phases"
+    assert tp2["module"] is None
+    assert tp2["task0c_clusters_done"] == 0
+
+    # Test test PASS/FAIL recording.
+    log_lines2 = [
+        "PIPELINE STARTED — 2026-05-23 13:00:00 UTC",
+        "TASK 3: Running tests (iteration 1)",
+        "  Tests PASSED. Output -> /tmp/foo.txt",
+    ]
+    tp3 = monitor._parse_task_pipeline(log_lines2)
+    assert tp3["states"]["task3"] == "done"
+    assert tp3["task3_pass"] is True
+
+    log_lines3 = [
+        "PIPELINE STARTED — 2026-05-23 14:00:00 UTC",
+        "TASK 3: Running tests (iteration 1)",
+        "  Tests FAILED. Output -> /tmp/foo.txt",
+    ]
+    tp4 = monitor._parse_task_pipeline(log_lines3)
+    assert tp4["task3_pass"] is False
+
+    # Iteration boundary resets task2/3/4 but not task1.
+    log_lines4 = [
+        "PIPELINE STARTED — 2026-05-23 15:00:00 UTC",
+        "TASK 1: Analyzing tests",
+        "  [git] committed: pipeline: task1 — anyhow",
+        "TASK 2: Implementing source code",
+        "MODULE anyhow — ITERATION 2",
+        "TASK 2: Implementing source code",
+    ]
+    tp5 = monitor._parse_task_pipeline(log_lines4)
+    assert tp5["states"]["task1"] == "done", "task1 must persist across iterations"
+    assert tp5["states"]["task2"] == "in_progress"
+
+    print("  OK  monitor task pipeline parser")
+
+
 def test_context_guard_middle_trim() -> None:
     """ask() falls back to middle-trim when section removal is insufficient."""
     import pipeline
@@ -775,6 +858,7 @@ def main() -> int:
     test_context_guard_section_removal()
     test_context_guard_middle_trim()
     test_event_log()
+    test_monitor_task_pipeline_parser()
 
     if full:
         print("Cargo phase (--full):")

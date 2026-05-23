@@ -19,6 +19,7 @@ import subprocess
 import sys
 import time
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, TypeVar
@@ -245,6 +246,37 @@ def _emit(event: str, **fields) -> None:
             fh.write(json.dumps(record, default=str) + "\n")
     except Exception:
         pass  # observability must never crash the pipeline
+
+
+@contextmanager
+def _phase(prefix: str, **fields):
+    """Emit `{prefix}.start` on enter and `{prefix}.done` on exit with auto duration_ms.
+
+    Yields a mutable dict the caller can update; the keys become extra fields on
+    `.done`. Top-level keys (task, cluster, module, attempt, data) merge with
+    `fields`; the `data` dict deep-merges so callers can add per-result info.
+
+    On exception, `.done` is still emitted with `data.error = <ExceptionName>` so
+    every `.start` has a matching `.done`. The exception is re-raised.
+    """
+    t0 = time.monotonic()
+    _emit(f"{prefix}.start", **fields)
+    extra: dict = {}
+    err: str | None = None
+    try:
+        yield extra
+    except BaseException as _e:
+        err = type(_e).__name__
+        raise
+    finally:
+        merged: dict = {**fields, **{k: v for k, v in extra.items() if k != "data"}}
+        merged_data: dict = {**(fields.get("data") or {}), **(extra.get("data") or {})}
+        if err is not None:
+            merged_data["error"] = err
+        if merged_data:
+            merged["data"] = merged_data
+        merged["duration_ms"] = int((time.monotonic() - t0) * 1000)
+        _emit(f"{prefix}.done", **merged)
 
 
 def ask(prompt: str, system: str | None = None, model: str | None = None,
@@ -6417,6 +6449,10 @@ def task2_inner_loop(project_dir, genesis_path, functional_req_path, manifest_pa
                 )
 
     build_error = ""
+    _t2_t0 = time.monotonic()
+    _emit("task.start", task="task2", module=current_module,
+          data={"max_attempts": BUILD_CHECK_RETRIES,
+                "has_build_check": bool(build_check_cmd)})
     for attempt_num in range(1, BUILD_CHECK_RETRIES + 1):
         if attempt_num > 1:
             _log(f"  Inner loop attempt {attempt_num}/{BUILD_CHECK_RETRIES} "
@@ -6446,9 +6482,17 @@ def task2_inner_loop(project_dir, genesis_path, functional_req_path, manifest_pa
                 build_error = scope_msg
                 continue
             _log("  TASK 2 failed to generate files — aborting inner loop.")
+            _emit("task.done", task="task2", module=current_module,
+                  duration_ms=int((time.monotonic() - _t2_t0) * 1000),
+                  attempt=attempt_num,
+                  data={"ok": False, "reason": "no_files_generated"})
             return False
 
         if not build_check_cmd:
+            _emit("task.done", task="task2", module=current_module,
+                  duration_ms=int((time.monotonic() - _t2_t0) * 1000),
+                  attempt=attempt_num,
+                  data={"ok": True, "build_checked": False})
             return True  # No build check available; proceed to full tests.
 
         # Use generate_fix_loop: run build check, if it fails ask LLM to fix only
@@ -6471,14 +6515,24 @@ def task2_inner_loop(project_dir, genesis_path, functional_req_path, manifest_pa
         )
         if build_ok:
             _log("  Build check PASSED.")
+            _emit("compile.success", module=current_module, attempt=attempt_num)
+            _emit("task.done", task="task2", module=current_module,
+                  duration_ms=int((time.monotonic() - _t2_t0) * 1000),
+                  attempt=attempt_num,
+                  data={"ok": True, "build_checked": True})
             return True
 
         _log(f"  Build still failing after fix attempts (inner loop attempt {attempt_num}).")
+        _emit("compile.fail", module=current_module, attempt=attempt_num,
+              data={"output": _store_prompt_content(build_output or "")})
         # Pass the error into the next full task2 regeneration so the model
         # understands what structural issues need to be addressed.
         build_error = build_output
 
     _log(f"  Inner loop exhausted after {BUILD_CHECK_RETRIES} attempts — escalating to outer loop.")
+    _emit("task.done", task="task2", module=current_module,
+          duration_ms=int((time.monotonic() - _t2_t0) * 1000),
+          data={"ok": False, "reason": "retries_exhausted"})
     return False
 
 
@@ -6711,51 +6765,60 @@ def task2_fix_loop(
 def task3(project_dir, test_command, iteration, output_dir, genesis_path):
     _log(f"\nTASK 3: Running tests (iteration {iteration})")
     output_file = Path(output_dir) / f"tests_output_{iteration}.txt"
-
     env = _cargo_env()
+    _attempt = iteration if isinstance(iteration, int) else None
 
-    try:
-        result = subprocess.run(
-            _parse_cmd(test_command),
-            cwd=project_dir,
-            capture_output=True,
-            text=True,
-            timeout=TEST_TIMEOUT,
-            env=env,
-        )
+    with _phase("task", task="task3", attempt=_attempt,
+                data={"command": test_command, "iteration": iteration}) as done:
+        _emit("test.start", attempt=_attempt, data={"command": test_command})
+        _t_start = time.monotonic()
+        try:
+            result = subprocess.run(
+                _parse_cmd(test_command),
+                cwd=project_dir, capture_output=True, text=True,
+                timeout=TEST_TIMEOUT, env=env,
+            )
+        except subprocess.TimeoutExpired:
+            msg = f"TIMEOUT: tests exceeded {TEST_TIMEOUT} seconds."
+            genesis = read(genesis_path)
+            write(output_file,
+                  f"=== genesis.md (iteration {iteration}) ===\n{genesis}\n{OUTPUT_SEPARATOR}\n{msg}")
+            _log(f"  {msg}")
+            _emit("test.fail",
+                  duration_ms=int((time.monotonic() - _t_start) * 1000),
+                  data={"reason": "timeout", "timeout_s": TEST_TIMEOUT})
+            done["data"] = {"passed": False, "reason": "timeout"}
+            return False, msg
+        except FileNotFoundError as e:
+            msg = (f"ERROR: test command not found: {e}\n"
+                   f"Command was: {test_command}\n"
+                   "Ensure the required runtime is installed and on PATH.")
+            genesis = read(genesis_path)
+            write(output_file,
+                  f"=== genesis.md (iteration {iteration}) ===\n{genesis}\n{OUTPUT_SEPARATOR}\n{msg}")
+            _log(f"  {msg}")
+            _emit("test.fail",
+                  duration_ms=int((time.monotonic() - _t_start) * 1000),
+                  data={"reason": "command_not_found", "error": str(e)[:200]})
+            done["data"] = {"passed": False, "reason": "command_not_found"}
+            sys.exit(1)
+
         test_output = result.stdout
         if result.stderr:
             test_output += "\n--- stderr ---\n" + result.stderr
-
         genesis = read(genesis_path)
-        file_content = (
-            f"=== genesis.md (iteration {iteration}) ===\n"
-            f"{genesis}\n"
-            f"{OUTPUT_SEPARATOR}\n"
-            f"{test_output}"
-        )
-        write(output_file, file_content)
-        passed = result.returncode == 0
+        write(output_file,
+              f"=== genesis.md (iteration {iteration}) ===\n{genesis}\n{OUTPUT_SEPARATOR}\n{test_output}")
+        passed   = result.returncode == 0
+        _pass_n, _fail_n = _parse_test_counts(test_output)
         _log(f"  Tests {'PASSED' if passed else 'FAILED'}. Output -> {output_file}")
+        _emit("test.pass" if passed else "test.fail",
+              duration_ms=int((time.monotonic() - _t_start) * 1000),
+              data={"returncode": result.returncode,
+                    "pass_count": _pass_n, "fail_count": _fail_n,
+                    "output": _store_prompt_content(test_output)})
+        done["data"] = {"passed": passed, "pass_count": _pass_n, "fail_count": _fail_n}
         return passed, test_output
-
-    except subprocess.TimeoutExpired:
-        msg = f"TIMEOUT: tests exceeded {TEST_TIMEOUT} seconds."
-        genesis = read(genesis_path)
-        write(output_file,
-              f"=== genesis.md (iteration {iteration}) ===\n{genesis}\n{OUTPUT_SEPARATOR}\n{msg}")
-        _log(f"  {msg}")
-        return False, msg
-
-    except FileNotFoundError as e:
-        msg = (f"ERROR: test command not found: {e}\n"
-               f"Command was: {test_command}\n"
-               "Ensure the required runtime is installed and on PATH.")
-        genesis = read(genesis_path)
-        write(output_file,
-              f"=== genesis.md (iteration {iteration}) ===\n{genesis}\n{OUTPUT_SEPARATOR}\n{msg}")
-        _log(f"  {msg}")
-        sys.exit(1)
 
 
 def task4(genesis_path, functional_req_path, test_output, iteration, output_dir,
@@ -6781,6 +6844,11 @@ def task4(genesis_path, functional_req_path, test_output, iteration, output_dir,
     # BL-019: map sub-categories back to the two TASK 4 paths.
     _is_build = (failure_type == "build")
     _log(f"\nTASK 4: Analyzing failure [{failure_type}], updating genesis.md")
+    _t4_t0 = time.monotonic()
+    _emit("task.start", task="task4",
+          attempt=iteration if isinstance(iteration, int) else None,
+          data={"failure_type": failure_type, "iteration": iteration,
+                "prev_pass_count": prev_pass_count})
 
     genesis = read(genesis_path)
     functional_req = read(functional_req_path)
@@ -7004,6 +7072,11 @@ updated genesis.md content here
             iteration=iteration if isinstance(iteration, int) else 0,
         )
 
+    _emit("task.done", task="task4",
+          attempt=iteration if isinstance(iteration, int) else None,
+          duration_ms=int((time.monotonic() - _t4_t0) * 1000),
+          data={"ok": ok, "current_pass_count": current_pass,
+                "failure_type": failure_type})
     return ok, current_pass
 
 
@@ -10735,9 +10808,17 @@ def main():
 
     for _cluster in _clusters:
         _current_cluster = _cluster
+        _cluster_t0 = time.monotonic()
         _log(f"\n{'━' * 60}")
         _log(f"  Starting compiler cluster: {_cluster.name}")
         _ceiling_pct, _ceiling_excl, _ceiling_total = _estimate_cluster_ceiling(project_dir, _cluster)
+        _emit("cluster.start", cluster=_cluster.name,
+              data={"ceiling_pct": _ceiling_pct,
+                    "ceiling_excl": _ceiling_excl,
+                    "ceiling_total": _ceiling_total,
+                    "active_cfg": list(_cluster.active_cfg or []),
+                    "excluded_cfg": list(_cluster.excluded_cfg or []),
+                    "gated_files": sorted(_cluster.gated_files or [])})
         if _ceiling_excl > 0:
             _log(f"  Cluster ceiling estimate: ~{_ceiling_pct:.1f}% "
                  f"({_ceiling_excl} of {_ceiling_total} source lines inside excluded-cfg blocks — "
@@ -10791,6 +10872,8 @@ def main():
             _mark_phase(project_dir, f"task0c/{_cluster.name}/{_mod_name}", "in_progress",
                         detail="starting", source_hash=_src_hash)
             _set_current(project_dir, f"task0c/{_cluster.name}/{_mod_name} / starting")
+            _task0c_t0 = time.monotonic()
+            _emit("task.start", task="task0c", cluster=_cluster.name, module=_mod_name)
 
             _etf_pre = {rel for rel, _ in collect_test_files(project_dir)}
             _cov, _covered, _at_ceiling = task0c_augment_module(
@@ -10800,6 +10883,10 @@ def main():
                 coverage_strategy=coverage_strategy,
             )
             _log(f"  TASK 0c [{_cluster.name}]: '{_mod_name}' coverage: {_cov:.1f}%")
+            _emit("task.done", task="task0c", cluster=_cluster.name, module=_mod_name,
+                  duration_ms=int((time.monotonic() - _task0c_t0) * 1000),
+                  data={"coverage_pct": _cov, "covered_lines": _covered,
+                        "at_ceiling": _at_ceiling})
             _mark_phase(project_dir, f"task0c/{_cluster.name}/{_mod_name}",
                         "done" if _cov >= 100.0 else "in_progress",
                         detail=f"{_cov:.1f}%", source_hash=_src_hash)
@@ -10843,6 +10930,9 @@ def main():
         _mark_phase(project_dir, f"task0c/{_cluster.name}", "done",
                     detail=f"{len(_cluster_done)} modules", source_hash=_src_hash)
         _log(f"\n  cluster/{_cluster.name} complete — {len(_cluster_done)} module(s) done.")
+        _emit("cluster.done", cluster=_cluster.name,
+              duration_ms=int((time.monotonic() - _cluster_t0) * 1000),
+              data={"modules_done": sorted(_cluster_done)})
         _cov_summary = ", ".join(
             f"{_m}:{_cluster_augmented_path(project_dir, _cluster.name, _m).read_text().strip()}"
             for _m in _cluster_done
@@ -10985,6 +11075,8 @@ def main():
         # TASK 1 with anti-corruption retry (max 2 retries after initial attempt).
         T1_MAX_RETRIES = 2
         t1_valid = False
+        _task1_t0 = time.monotonic()
+        _emit("task.start", task="task1", module=module_name)
         for t1_attempt in range(T1_MAX_RETRIES + 1):
             if module_req_path.exists() and t1_attempt == 0:
                 _log(f"\nTASK 1: requirements for '{module_name}' already extracted — skipping.")
@@ -10997,6 +11089,9 @@ def main():
                              module_name=module_name, project_context=project_context,
                              coverage_strategy=coverage_strategy):
                     _log(f"  TASK 1 failed for '{module_name}' — skipping module.")
+                    _emit("task.done", task="task1", module=module_name,
+                          duration_ms=int((time.monotonic() - _task1_t0) * 1000),
+                          data={"ok": False, "reason": "task1_failed"})
                     break
 
             ok, reason = validate_task1_output(module_req_path, t1_input)
@@ -11008,6 +11103,10 @@ def main():
                             source_hash=_src_hash)
                 _set_current(project_dir, f"task1/{module_name} / done")
                 git_commit(project_dir, f"pipeline: task1 — {module_name}")
+                _emit("task.done", task="task1", module=module_name,
+                      duration_ms=int((time.monotonic() - _task1_t0) * 1000),
+                      data={"ok": True, "retries": t1_attempt,
+                            "req_chars": module_req_path.stat().st_size})
                 break
             _log(f"  TASK 1 anti-corruption FAILED: {reason}")
             if t1_attempt >= T1_MAX_RETRIES:

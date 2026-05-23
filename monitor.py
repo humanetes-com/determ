@@ -400,6 +400,148 @@ def _parse_pipeline_log():
     return _r()
 
 
+# ── Top-level task pipeline (task0a → 0b → 0c → strip → 1 → 2 → 3 → 4) ─────────
+#
+# Tracks the overall progression of the pipeline across all top-level tasks, not
+# just task0c. Used to render a "phases" row at the top of the monitor display
+# so it is obvious which task is currently active and which have completed.
+
+_TASKS_ORDER: list[str] = [
+    "task0a", "task0b", "task0c", "strip",
+    "task1", "task2", "task3", "task4",
+]
+_TASK_SHORT: dict[str, str] = {
+    "task0a": "0a", "task0b": "0b", "task0c": "0c", "strip": "strip",
+    "task1": "T1", "task2": "T2", "task3": "T3", "task4": "T4",
+}
+
+def _read_log_tail() -> list[str]:
+    """Read the last 512 KB of PIPELINE_LOG as a list of lines. Empty if missing."""
+    if not os.path.exists(PIPELINE_LOG):
+        return []
+    try:
+        _TAIL_BYTES = 512 * 1024
+        with open(PIPELINE_LOG, "rb") as _fh:
+            _fh.seek(0, 2)
+            _size = _fh.tell()
+            _fh.seek(max(0, _size - _TAIL_BYTES))
+            _raw = _fh.read()
+        lines = _raw.decode("utf-8", errors="replace").splitlines()
+        if _size > _TAIL_BYTES:
+            lines = lines[1:]  # drop potentially partial first line
+        return lines
+    except Exception:
+        return []
+
+
+def _parse_task_pipeline(lines: list[str]) -> dict[str, object]:
+    """Scan log lines and return overall task progression.
+
+    Returns:
+        {
+          "states":  {task_name: "done"|"in_progress"|"pending"},
+          "current": str | None,        # current task name
+          "iteration": int | None,      # most recent ITERATION number
+          "module":  str | None,        # most recent MODULE name
+          "task0c_clusters_done": int,  # count of task0c/{cluster} commits
+          "task3_pass": bool | None,    # last task3 outcome
+        }
+    """
+    states: dict[str, str] = {t: "pending" for t in _TASKS_ORDER}
+    current: str | None = None
+    iteration: int | None = None
+    module: str | None = None
+    task0c_clusters_done: int = 0
+    task3_pass: bool | None = None
+
+    def _start(name: str) -> None:
+        nonlocal current
+        states[name] = "in_progress"
+        current = name
+
+    def _done(name: str) -> None:
+        states[name] = "done"
+
+    for line in lines:
+        # Pipeline reset clears all task state.
+        if "PIPELINE STARTED" in line:
+            for t in _TASKS_ORDER:
+                states[t] = "pending"
+            current = None
+            iteration = None
+            module = None
+            task0c_clusters_done = 0
+            task3_pass = None
+            continue
+
+        if m := re.search(r'MODULE\s+(\S+)\s+[—-]\s+ITERATION\s+(\d+)', line):
+            module = m.group(1)
+            iteration = int(m.group(2))
+            # New iteration → task2/task3/task4 reset to pending. task1 is
+            # per-module not per-iteration — its requirements file persists across
+            # iterations (the LLM call short-circuits with "already extracted").
+            for t in ("task2", "task3", "task4"):
+                states[t] = "pending"
+            current = None
+            continue
+
+        if "TASK 0a:" in line or "TASK 0a (context):" in line:
+            _start("task0a")
+        elif "TASK 0b" in line:
+            _done("task0a")
+            _start("task0b")
+        elif re.search(r'TASK 0c \[', line):
+            _done("task0b")
+            _start("task0c")
+        elif re.search(r'pipeline: task0c/', line) and "[git] committed" in line:
+            task0c_clusters_done += 1
+        elif re.search(r'pipeline: stripped', line) and "[git] committed" in line:
+            _done("task0c")
+            _done("strip")
+        elif "TASK 1:" in line and "TASK 1.5" not in line:
+            # "TASK 1: requirements for ... already extracted — skipping" → already done
+            if "already extracted" in line:
+                _done("task1")
+            else:
+                _start("task1")
+        elif "TASK 1.5:" in line:
+            pass  # treat as part of task1
+        elif re.search(r'pipeline: task1 ', line) and "[git] committed" in line:
+            _done("task1")
+        elif "TASK 1 output validated OK" in line:
+            _done("task1")
+        elif re.search(r'TASK 2:', line):
+            _start("task2")
+        elif "TASK 2 inner loop exhausted" in line:
+            # task2 failed → task4 will run next
+            pass
+        elif re.search(r'pipeline: task2 ', line) and "[git] committed" in line:
+            _done("task2")
+        elif re.search(r'TASK 3:', line):
+            _done("task2")
+            _start("task3")
+            task3_pass = None
+        elif re.search(r'Tests PASSED', line):
+            _done("task3")
+            task3_pass = True
+        elif re.search(r'Tests FAILED', line):
+            states["task3"] = "done"
+            task3_pass = False
+        elif re.search(r'TASK 4:', line):
+            _start("task4")
+        elif "genesis.md updated" in line:
+            _done("task4")
+
+    return {
+        "states":  states,
+        "current": current,
+        "iteration": iteration,
+        "module":  module,
+        "task0c_clusters_done": task0c_clusters_done,
+        "task3_pass": task3_pass,
+    }
+
+
 def pipeline_status():
     prog  = _parse_pipeline_log()
     state = _parse_pipeline_state(_find_project_dir())
@@ -437,6 +579,36 @@ def pipeline_status():
         f"{status_str}  cov={cov_col(bold(cov))}{dim(_lines_str)}  "
         f"age={age_s}  errors={prog['errors']}"
     )
+
+    # ── Phase pipeline: task0a → 0b → 0c → strip → T1 → T2 → T3 → T4 ─────────
+    tp = _parse_task_pipeline(_read_log_tail())
+    phase_parts: list[str] = []
+    for tname in _TASKS_ORDER:
+        short = _TASK_SHORT[tname]
+        st = tp["states"][tname]
+        # Inline cluster progress for task0c.
+        if tname == "task0c" and tp["task0c_clusters_done"] > 0 and st != "pending":
+            cc = tp["task0c_clusters_done"]
+            short = f"{short}[{cc}/{len(clusters) or '?'}]"
+        # Mark task3 pass/fail with colour.
+        if tname == "task3" and st == "done" and tp["task3_pass"] is not None:
+            mark = "✓" if tp["task3_pass"] else "✗"
+            colour = green if tp["task3_pass"] else red
+            phase_parts.append(colour(f"{mark}{short}"))
+            continue
+        if st == "done":
+            phase_parts.append(green(f"✓{short}"))
+        elif st == "in_progress":
+            phase_parts.append(yellow(bold(f"▶{short}")))
+        else:
+            phase_parts.append(dim(f"○{short}"))
+    _iter_str = ""
+    if tp["module"] or tp["iteration"]:
+        _bits = []
+        if tp["module"]:    _bits.append(f"M={tp['module']}")
+        if tp["iteration"]: _bits.append(f"iter={tp['iteration']}")
+        _iter_str = dim("   " + "  ".join(_bits))
+    rows.append("  phases  " + "  ".join(phase_parts) + _iter_str)
 
     # ── Loop hierarchy: cluster → attempt → file → retry ────────────────────
     #
