@@ -4880,6 +4880,9 @@ A requirement like `fn generate() -> String` is insufficient. A requirement like
 `fn generate() -> String — returns a shell completion script string; tests assert it
 contains flag names and descriptions in the expected format` is actionable.
 
+CRITICAL: Every requirement must trace directly to a test call or assertion in the files above.
+Do NOT add items based on general knowledge of the crate, language, or domain.
+If no test calls it, do not include it.
 {FILE_FORMAT_INSTRUCTION}
 Only output the file `functional_requirements.md` using the markers above.
 """
@@ -4909,6 +4912,9 @@ A requirement like `fn generate() -> String` is insufficient. A requirement like
 `fn generate() -> String — returns a shell completion script string; tests assert it
 contains flag names and descriptions in the expected format` is actionable.
 
+CRITICAL: Every requirement must trace directly to a test call or assertion in the files above.
+Do NOT add items based on general knowledge of the crate, language, or domain.
+If no test calls it, do not include it.
 {FILE_FORMAT_INSTRUCTION}
 Only output the file `functional_requirements.md` using the markers above.
 """
@@ -5177,6 +5183,9 @@ Requirements (merged from all test chunks):
 
 Your task: produce functional_requirements.md -- the complete, deduplicated, final
 requirements for this specific project.
+
+CRITICAL: Only include items present in the chunk extractions above.
+Do NOT add requirements based on general knowledge of the project or language.
 """
         return f"""You are synthesizing requirements into a final requirements document.
 {FILE_FORMAT_INSTRUCTION}
@@ -5193,6 +5202,8 @@ Requirements (merged from all test chunks):
 Your task: produce functional_requirements.md -- the complete, deduplicated, final
 requirements for this specific project.
 
+CRITICAL: Only include items present in the chunk extractions above.
+Do NOT add requirements based on general knowledge of the project or language.
 {FILE_FORMAT_INSTRUCTION}
 Only output the file `functional_requirements.md` using the markers above.
 """
@@ -5665,6 +5676,7 @@ class Task2Generator(ABC):
         whole_project_context: str = "",
         coverage_strategy: str = "",
         api_surface: str = "",
+        prev_source_context: str = "",
     ) -> bool:
         """Write source files to disk. Returns True on success.
 
@@ -5684,7 +5696,8 @@ class StaticTask2Generator(Task2Generator):
     def generate(self, project_dir, genesis_path, functional_req_path, manifest_path,
                  existing_test_files, project_profile="", workspace_structure="", build_error="",
                  locked_dep_context="", current_module="", module_dir_rel="",
-                 whole_project_context="", coverage_strategy="", api_surface=""):
+                 whole_project_context="", coverage_strategy="", api_surface="",
+                 prev_source_context=""):
         _log("\nTASK 2: Implementing source code from functional requirements")
         genesis = read(genesis_path)
         functional_req = read(functional_req_path)
@@ -5774,13 +5787,17 @@ class StaticTask2Generator(Task2Generator):
         rules_section = f"\n{structured_rules}\n" if structured_rules else ""
 
         api_section = _format_api_surface_section(api_surface)
+        prev_source_section = (
+            f"\nPrevious attempt's generated code (failed the tests — improve on this, do not repeat its mistakes):\n"
+            f"{prev_source_context}\n"
+        ) if prev_source_context.strip() else ""
 
         def attempt():
             prompt = f"""You are implementing a software project from functional requirements.
 
 Process (genesis.md):
 {genesis}
-{profile_section}{workspace_section}{module_scope_section}{locked_dep_section}{build_error_section}{pitfalls_section}{rules_section}{api_section}
+{profile_section}{workspace_section}{module_scope_section}{locked_dep_section}{build_error_section}{pitfalls_section}{rules_section}{api_section}{prev_source_section}
 Functional requirements:
 {functional_req}
 {assertions_section}{whole_project_context}
@@ -5824,7 +5841,8 @@ class LLMTask2Generator(Task2Generator):
     def generate(self, project_dir, genesis_path, functional_req_path, manifest_path,
                  existing_test_files, project_profile="", workspace_structure="", build_error="",
                  locked_dep_context="", current_module="", module_dir_rel="",
-                 whole_project_context="", coverage_strategy="", api_surface=""):
+                 whole_project_context="", coverage_strategy="", api_surface="",
+                 prev_source_context=""):
         _log("\nTASK 2: Implementing source code from functional requirements (file-by-file)")
         genesis = read(genesis_path)
         functional_req = read(functional_req_path)
@@ -6050,7 +6068,8 @@ class StaticFileListTask2Generator(Task2Generator):
     def generate(self, project_dir, genesis_path, functional_req_path, manifest_path,
                  existing_test_files, project_profile="", workspace_structure="", build_error="",
                  locked_dep_context="", current_module="", module_dir_rel="",
-                 whole_project_context="", coverage_strategy="", api_surface=""):
+                 whole_project_context="", coverage_strategy="", api_surface="",
+                 prev_source_context=""):
         _log("\nTASK 2: Implementing source code (static file list)")
         genesis = read(genesis_path)
         functional_req = read(functional_req_path)
@@ -6254,7 +6273,8 @@ def _format_whole_project_context(test_files: list, reason: str = "") -> str:
 def task2(project_dir, genesis_path, functional_req_path, manifest_path, existing_test_files,
           project_profile: str = "", workspace_structure: str = "", build_error: str = "",
           locked_dep_context: str = "", current_module: str = "", module_dir_rel: str = "",
-          whole_project_context: str = "", coverage_strategy: str = "", api_surface: str = ""):
+          whole_project_context: str = "", coverage_strategy: str = "", api_surface: str = "",
+          prev_source_context: str = ""):
     """
     Generate source files from functional requirements.
     Implementation is selected by TASK2_GENERATOR in .env (default: static).
@@ -6266,6 +6286,7 @@ def task2(project_dir, genesis_path, functional_req_path, manifest_path, existin
         whole_project_context=whole_project_context,
         coverage_strategy=coverage_strategy,
         api_surface=api_surface,
+        prev_source_context=prev_source_context,
     )
 
 
@@ -6274,7 +6295,7 @@ def task2_inner_loop(project_dir, genesis_path, functional_req_path, manifest_pa
                      build_check_cmd: str | None, locked_dep_context: str = "",
                      current_module: str = "", module_dir_rel: str = "",
                      whole_project_context: str = "", coverage_strategy: str = "",
-                     api_surface: str = ""):
+                     api_surface: str = "", prev_source_context: str = ""):
     """
     Inner loop: TASK 2 (code generation) followed by a compile-only check.
     If the build check fails, feeds the compiler error back into TASK 2 and retries.
@@ -6307,7 +6328,8 @@ def task2_inner_loop(project_dir, genesis_path, functional_req_path, manifest_pa
                    locked_dep_context, current_module, module_dir_rel,
                    whole_project_context=whole_project_context,
                    coverage_strategy=coverage_strategy,
-                   api_surface=api_surface)
+                   api_surface=api_surface,
+                   prev_source_context=prev_source_context if attempt_num == 1 else "")
         if not ok:
             # When module scope filtering discards all planned files the model listed
             # files for the wrong crates. Inject an explicit corrective error and retry
@@ -6663,7 +6685,7 @@ def task4(genesis_path, functional_req_path, test_output, iteration, output_dir,
 
     genesis = read(genesis_path)
     functional_req = read(functional_req_path)
-    _t4_genesis_cap    = 3_000
+    _t4_genesis_cap    = INTERMEDIATE_CHAR_LIMIT
     _t4_req_cap        = int(SINGLE_CALL_CHAR_LIMIT * 0.25)
     _t4_output_cap     = int(SINGLE_CALL_CHAR_LIMIT * 0.25)
     # genesis: head-weighted (the methodology intro and core rules sit at the top).
@@ -8892,6 +8914,7 @@ corrected content here
     RETRO_DEEP_AT_STALL = 5 # re-fire retrospective with concrete failed-attempt evidence
     file_stall_counts: dict[str, int] = {}   # consecutive no-improvement attempts per file
     file_best_uncov: dict[str, int] = {}     # fewest uncovered lines seen per file
+    file_prev_uncov_lines: dict[str, set] = {}  # uncov_lines snapshot from previous attempt per file
     skipped_files: set[str] = set()          # files permanently skipped due to stall
     file_what_worked: dict[str, str] = {}    # confirmed-working patterns per file (from improving attempts)
     file_retrospectives: dict[str, str] = {} # per-file classification of why coverage stalled
@@ -9249,7 +9272,7 @@ corrected content here
 Target file: {rel_path}
 {_env_section}{secs['cargo']}{secs['full_source']}{secs['fn_bodies']}{secs['symbols']}{secs['examples']}{secs['integ_tests']}{secs['siblings']}{secs['old_block']}
 Write a `#[cfg(test)] mod {mod_name}` block for `{rel_path}`.
-{"Write ONLY new test functions for the uncovered lines in fn_bodies above. The existing test module(s) shown are already on disk — do NOT copy or repeat any test from them." if _old_block else "Write a new test block covering the uncovered lines shown in fn_bodies above."}
+{"Write ONLY new test functions for the uncovered lines in fn_bodies above. The existing test module(s) shown are already on disk — do NOT copy or repeat any test from them." if secs['old_block'] else "Write a new test block covering the uncovered lines shown in fn_bodies above."}
 
 BEHAVIORAL SPECIFICATION REQUIREMENTS (mandatory — tests not meeting these will be discarded):
 - Every `#[test]` fn MUST contain at least one `assert!`, `assert_eq!`, `assert_ne!`,
@@ -9635,13 +9658,16 @@ project-specific import paths, type construction patterns, and hard constraints.
             # Per-file stall detection: track whether uncovered line count improved.
             prev_best = file_best_uncov.get(rel_path, len(uncov_lines) + 1)
             if len(uncov_lines) < prev_best:
+                newly_covered = file_prev_uncov_lines.get(rel_path, set()) - uncov_lines
                 file_best_uncov[rel_path] = len(uncov_lines)
                 file_stall_counts[rel_path] = 0
                 # Capture what worked so next attempt can reuse the same patterns.
                 if _old_block:
                     _condensed_working = _condense_rust_to_signatures(_old_block, "gen_tests.rs")
+                    _covered_sample = sorted(newly_covered)[:8]
+                    _covered_note = (f" Lines newly covered: {_covered_sample}." if _covered_sample else "")
                     file_what_worked[rel_path] = (
-                        f"Previous attempt covered {prev_best - len(uncov_lines)} more line(s). "
+                        f"Previous attempt covered {prev_best - len(uncov_lines)} more line(s).{_covered_note} "
                         f"Reuse these construction patterns:\n{_condensed_working[:_WORKING_CAP]}"
                     )
                 file_retrospectives.pop(rel_path, None)  # stale retrospective no longer valid
@@ -9718,6 +9744,9 @@ project-specific import paths, type construction patterns, and hard constraints.
                     _log(f"  [{module_name}] {rel_path} stalled for {FILE_STALL_LIMIT} consecutive "
                          f"attempts with no improvement — skipping this file.")
                     skipped_files.add(rel_path)
+
+            # Update snapshot for next attempt's line-coverage delta.
+            file_prev_uncov_lines[rel_path] = set(uncov_lines)
 
         # If this entire pass had no LLM calls (all files filtered by cfg/artifact with
         # nothing actionable), there is nothing more the pipeline can do — stop immediately.
@@ -10784,6 +10813,7 @@ def main():
         module_iter = 1
         prev_pass_count = 0
         prev_test_output = ""
+        prev_task2_source = ""  # generated source from previous iteration (for TASK 2 context)
 
         t1_input = module_test_files if module_has_tests else test_files
         if not module_has_tests:
@@ -10974,6 +11004,7 @@ This is a Rust procedural macro crate. Strict rules apply:
                 whole_project_context=whole_project_context,
                 coverage_strategy=coverage_strategy,
                 api_surface=load_api_surface(project_dir, module_name),
+                prev_source_context=prev_task2_source,
             ):
                 _log("TASK 2 inner loop exhausted — escalating to TASK 4.")
                 test_output = "BUILD FAILED: inner loop exhausted all retries."
@@ -11191,6 +11222,11 @@ This is a Rust procedural macro crate. Strict rules apply:
                 _log("\nGenesis audit triggered"
                      + (" (regression)" if regression else f" (every {GENESIS_AUDIT_INTERVAL} iters)"))
                 task_genesis_audit(genesis_path)
+
+            # Capture generated source for next iteration's TASK 2 (prev_source_context).
+            # t4_source_context was already built from manifest; reuse it here so TASK 2
+            # can compare against what failed rather than starting blind.
+            prev_task2_source = t4_source_context
 
             # Clean generated files; restore stub so workspace stays parseable.
             _log(f"\n  Cleaning up '{module_name}' generated files for retry...")
