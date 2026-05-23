@@ -576,8 +576,23 @@ def pipeline_status():
     _total_cov  = sum(c for c, _ in _cov_data.values())
     _total_cvbl = sum(v for _, v in _cov_data.values())
     _lines_str  = f"  {_total_cov}/{_total_cvbl}" if _total_cvbl else ""
+
+    # Projection: sum of per-file coverage (which includes quick-cov updates
+    # newer than the last full grcov run) gives the live total. If it's
+    # strictly higher than the value carried in pipeline_state.md / log, show
+    # it as a parenthesised target alongside the committed value.
+    _proj_str = ""
+    if _total_cvbl > 0:
+        proj_pct = _total_cov / _total_cvbl * 100.0
+        try:
+            cur_pct = float(cov.rstrip("%"))
+        except (ValueError, AttributeError):
+            cur_pct = -1.0
+        if proj_pct - cur_pct >= 0.05:   # only show if a meaningful uplift
+            proj_col = green if proj_pct >= 80 else yellow
+            _proj_str = dim("(→") + proj_col(f"{proj_pct:.1f}%") + dim(")")
     rows.append(
-        f"{status_str}  cov={cov_col(bold(cov))}{dim(_lines_str)}  "
+        f"{status_str}  cov={cov_col(bold(cov))}{_proj_str}{dim(_lines_str)}  "
         f"age={age_s}  errors={prog['errors']}"
     )
 
