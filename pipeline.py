@@ -10264,6 +10264,37 @@ def clean_state(root: Path, project_dir: Path, manifest_path: Path,
         p.unlink()
         _log(f"  Deleted {p.name}")
 
+    # Stale per-run coverage artifacts in /tmp/ — these live outside the
+    # workspace dir, so they survive every wipe of tmp/{project}/. Without
+    # cleaning them, the monitor reads stale per-file coverage from
+    # /tmp/grcov_filecache_*.json (and the lcov / json outputs themselves)
+    # and shows misleading carry-over numbers until the next full coverage
+    # measurement overwrites them.
+    import glob as _glob
+    _tmp_patterns = [
+        "/tmp/grcov_*.json",
+        "/tmp/grcov_filecache_*.json",
+        "/tmp/llvmcov_*.lcov",
+        "/tmp/llvmcov_*.lcov.json",
+    ]
+    _tmp_deleted = 0
+    for _pat in _tmp_patterns:
+        for _p in _glob.glob(_pat):
+            try:
+                os.unlink(_p)
+                _tmp_deleted += 1
+            except OSError:
+                pass
+    for _tarp in _glob.glob("/tmp/tarp_*"):
+        try:
+            if os.path.isdir(_tarp):
+                shutil.rmtree(_tarp)
+                _tmp_deleted += 1
+        except OSError:
+            pass
+    if _tmp_deleted:
+        _log(f"  Deleted {_tmp_deleted} stale coverage artifact(s) from /tmp/")
+
     # Strip all gen_tests artifacts from source files: delete sibling files and
     # remove path-mod declarations. Also clean up legacy inline blocks (from
     # pre-sibling-file design) so an old workspace can be salvaged with --clean.
