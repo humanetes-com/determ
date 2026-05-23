@@ -4188,11 +4188,18 @@ def _set_current(project_dir: Path, current: str) -> None:
     _write_state(project_dir, state)
 
 
-def _phase_valid(project_dir: Path, phase_key: str, current_hash: str) -> bool:
-    """Return True if phase is marked done AND its stored hash matches current_hash."""
+def _phase_valid(project_dir: Path, phase_key: str, current_hash: str | None = None) -> bool:
+    """Return True if phase is marked done in pipeline_state.md.
+
+    pipeline_state.md is the single source of truth for which phases are
+    complete. We do NOT compare against an input hash — test files can change
+    legitimately (task0c augments them, the user edits them) without
+    invalidating the structural artifacts task0a/0b produce. `current_hash` is
+    accepted as a backward-compat shim and ignored.
+    """
     state = _read_state(project_dir)
     p = state["phases"].get(phase_key, {})
-    return bool(p.get("status") == "done" and p.get("hash") == current_hash)
+    return p.get("status") == "done"
 
 
 def _log_state_summary(project_dir: Path, current_hash: str) -> None:
@@ -4224,21 +4231,21 @@ def task0_project_profile(profile_path: Path, test_files, readme_text: str) -> s
     """
     Run once at startup. Identifies the project's language, build system, and
     workspace/module structure from README + test file paths + content excerpts.
-    Produces project_profile.md. Cached: regenerated when project inputs change.
-    Returns the profile content.
+    Produces project_profile.md. Skip is governed by pipeline_state.md — once
+    "task0a" is marked done there, this is treated as finalized; tests changing
+    later does not invalidate it. Returns the profile content.
     """
-    inputs_hash = _profile_inputs_hash(readme_text, test_files)
-    hash_path = profile_path.parent / PROJECT_INPUTS_HASH_NAME
-
-    if profile_path.exists() and hash_path.exists():
-        stored_hash = hash_path.read_text().strip()
-        if stored_hash == inputs_hash:
-            content = profile_path.read_text().strip()
-            if content:
-                _log(f"  Project profile cache valid ({profile_path.name}), loading.")
-                return content
-        else:
-            _log("  Project inputs changed — regenerating project profile.")
+    project_dir = profile_path.parent
+    if profile_path.exists():
+        content = profile_path.read_text().strip()
+        if content:
+            # Artifact exists → treat as done. Backfill the state entry if it
+            # predates pipeline_state.md tracking for this phase.
+            if not _phase_valid(project_dir, "task0a"):
+                _mark_phase(project_dir, "task0a", "done",
+                            detail=f"{len(content)} chars (existing artifact)")
+            _log(f"  task0a already done — loading {profile_path.name}.")
+            return content
 
     _log("\nTASK 0a: Identifying project structure (language, build system, workspace layout)")
 
@@ -4293,10 +4300,10 @@ content here
                 return False
         content = files["project_profile.md"].strip()
         write(profile_path, content)
-        hash_path.write_text(inputs_hash)
         # Invalidate the context document whenever the profile is regenerated so
         # task0_project_context re-synthesizes against the updated inputs.
         (profile_path.parent / PROJECT_CONTEXT_NAME).unlink(missing_ok=True)
+        _mark_phase(project_dir, "task0a-context", "pending", detail="profile regenerated")
         _log(f"  project_profile.md written ({len(content):,} chars).")
         return content
 
@@ -4304,6 +4311,8 @@ content here
     if result is False:
         _log("  WARNING: could not produce project_profile.md after all retries. Continuing without it.")
         return ""
+    _mark_phase(project_dir, "task0a", "done",
+                detail=f"{len(str(result))} chars")
     return str(result)
 
 
@@ -4361,24 +4370,9 @@ def task0b_discovery(strategy_path: Path, project_dir: Path, test_files,
         except Exception:
             pass
 
-    # Strip gen_tests decls from test file contents before hashing — task0c continuously
-    # adds declarations to src/*.rs files that are also returned by collect_test_files,
-    # so including raw content would cause a cache miss on every resume.
-    _test_contents = "".join(_strip_gen_tests_decls(c) for _, c in test_files)
-    inputs_hash = hashlib.sha256(
-        (cargo_text + "".join(src_texts) + _test_contents).encode()
-    ).hexdigest()[:16]
-
-    hash_path = strategy_path.parent / COVERAGE_STRATEGY_HASH_NAME
-    if not force and strategy_path.exists() and hash_path.exists():
-        try:
-            if hash_path.read_text().strip() == inputs_hash:
-                content = strategy_path.read_text().strip()
-                if content:
-                    _log(f"  Coverage strategy cache valid ({strategy_path.name}), loading.")
-                    return content
-        except Exception:
-            pass
+    # Skip is governed by pipeline_state.md ("task0b" phase) — the outer caller
+    # already checks _phase_valid before invoking task0b_discovery. Source/tests
+    # changes (e.g. task0c augmentation) do not invalidate the strategy doc.
 
     _log("\nTASK 0b (discovery): Analyzing project for coverage strategy...")
 
@@ -4543,10 +4537,6 @@ content here
             deduped.append(line)
         content = "\n".join(deduped)
         write(strategy_path, content)
-        try:
-            hash_path.write_text(inputs_hash)
-        except Exception:
-            pass
         _log(f"  coverage_strategy.md written ({len(content):,} chars).")
         return content
 
@@ -4766,18 +4756,19 @@ def task0_project_context(context_path: Path, test_files, readme_text: str,
     Produces project_context.md — the portable big-picture document injected into every
     task, especially TASK 0c which receives no other project-level context.
 
-    Cached with the same hash as the project profile. Returns the summary text.
+    Skip is governed by pipeline_state.md (phase key "task0a-context"). Returns the
+    summary text. If the upstream profile is regenerated, task0a clears this phase
+    so it re-runs against fresh inputs.
     """
-    inputs_hash = _profile_inputs_hash(readme_text, test_files)
-    hash_path = context_path.parent / PROJECT_INPUTS_HASH_NAME  # shared with profile hash
-
-    if context_path.exists() and hash_path.exists():
-        stored_hash = hash_path.read_text().strip()
-        if stored_hash == inputs_hash:
-            content = context_path.read_text().strip()
-            if content:
-                _log(f"  Project context cache valid ({context_path.name}), loading.")
-                return content
+    project_dir = context_path.parent
+    if context_path.exists():
+        content = context_path.read_text().strip()
+        if content:
+            if not _phase_valid(project_dir, "task0a-context"):
+                _mark_phase(project_dir, "task0a-context", "done",
+                            detail=f"{len(content)} chars (existing artifact)")
+            _log(f"  task0a-context already done — loading {context_path.name}.")
+            return content
 
     _log("\nTASK 0a (context): Synthesizing behavioral project summary...")
 
@@ -4839,6 +4830,8 @@ content here
         _log("  WARNING: could not produce project_context.md — using README/profile fallback.")
         fallback = readme_text or profile_content or ""
         return fallback
+    _mark_phase(project_dir, "task0a-context", "done",
+                detail=f"{len(str(result))} chars")
     return str(result)
 
 
@@ -5382,10 +5375,15 @@ class LLMTask1Synthesizer(StaticTask1Synthesizer):
 
     def _single_prompt(self, tests_section: str, readme_text: str, profile_section: str,
                        existing_genesis: str, coverage_strategy: str = "",
-                       api_surface: str = "") -> str:
-        genesis_exists = bool(existing_genesis.strip())
-        genesis_section = (f"\n--- genesis.md (read-only — do not output or modify it) ---\n"
-                           f"{existing_genesis}\n") if genesis_exists else ""
+                       api_surface: str = "", context_section: str = "") -> str:
+        # genesis is always shown — empty placeholder on first iteration so the
+        # LLM knows this is the document accumulating retrospective findings.
+        if existing_genesis.strip():
+            genesis_section = (f"\n--- genesis.md (methodology — read-only here; do not output or modify) ---\n"
+                               f"{existing_genesis}\n")
+        else:
+            genesis_section = ("\n--- genesis.md (methodology — empty for now; will be filled by retrospectives in later iterations) ---\n"
+                               "(empty)\n")
         strategy_section = (
             f"\n--- Coverage strategy (import patterns, type construction, test conventions) ---\n"
             f"{trim_to_line(coverage_strategy, _STRATEGY_CAP, "\n... (strategy truncated)")}\n"
@@ -5396,7 +5394,7 @@ contract-first TDD reconstruction experiment.
 {FILE_FORMAT_INSTRUCTION}
 Your output MUST be the file `functional_requirements.md` wrapped in the FILE markers above.
 Do not output anything outside those markers.
-{profile_section}{strategy_section}{api_section}
+{profile_section}{context_section}{strategy_section}{api_section}
 README.md:
 {readme_text[:_README_CAP]}
 {genesis_section}
@@ -10753,17 +10751,22 @@ def main():
 
         # TASK 0b (discovery): produce coverage_strategy.md — import idioms, type construction
         # patterns, feature flags, test conventions. Injected into all TASK 0c, 1, and 2 prompts.
+        # Skip if either pipeline_state marks task0b done, or the artifact already
+        # exists from a prior run that predates state tracking (auto-backfill).
         strategy_path = project_dir / COVERAGE_STRATEGY_NAME
-        if _phase_valid(project_dir, "task0b", _src_hash) and strategy_path.exists():
+        if strategy_path.exists() and strategy_path.read_text().strip():
             coverage_strategy = strategy_path.read_text().strip()
-            _log(f"  task0b already done (hash match) — loading coverage_strategy.md ({len(coverage_strategy):,} chars).")
+            if not _phase_valid(project_dir, "task0b"):
+                _mark_phase(project_dir, "task0b", "done",
+                            detail=f"{len(coverage_strategy)} chars (existing artifact)")
+            _log(f"  task0b already done — loading coverage_strategy.md ({len(coverage_strategy):,} chars).")
         else:
             coverage_strategy = task0b_discovery(
                 strategy_path, project_dir, test_files, readme_text, project_profile,
                 clusters=_clusters,
             )
             _mark_phase(project_dir, "task0b", "done",
-                        detail=f"{len(coverage_strategy)} chars", source_hash=_src_hash)
+                        detail=f"{len(coverage_strategy)} chars")
             git_commit(project_dir, "pipeline: task0b done")
 
     # TASK 0b: build dependency graph for bottom-up module integration.
