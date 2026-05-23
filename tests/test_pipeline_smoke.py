@@ -548,6 +548,74 @@ def test_context_guard_section_removal() -> None:
     print("  OK  context_guard section removal")
 
 
+def test_event_log() -> None:
+    """_emit writes JSONL with fixed schema; _store_prompt_content content-addresses."""
+    import json as _json
+    import tempfile
+    import pipeline
+
+    with tempfile.TemporaryDirectory() as td:
+        events_path = Path(td) / "events.jsonl"
+        prompts_dir = Path(td) / "prompts"
+
+        # Redirect event sinks at module-level.
+        orig_log = pipeline._EVENTS_LOG
+        orig_dir = pipeline._PROMPTS_DIR
+        orig_ctx = dict(pipeline._RUN_CONTEXT)
+        pipeline._EVENTS_LOG = str(events_path)
+        pipeline._PROMPTS_DIR = prompts_dir
+        prompts_dir.mkdir()
+        pipeline._RUN_CONTEXT["product"] = "test-product"
+        pipeline._RUN_CONTEXT["pipeline_sha"] = "abc123"
+
+        try:
+            # Content addressing: same text → same sha, file written once.
+            m1 = pipeline._store_prompt_content("hello world")
+            m2 = pipeline._store_prompt_content("hello world")
+            assert m1["sha256"] == m2["sha256"]
+            assert m1["char_count"] == 11
+            assert (prompts_dir / f"{m1['sha256']}.txt").exists()
+
+            # Empty input returns empty sha — and writes nothing.
+            empty = pipeline._store_prompt_content("")
+            assert empty == {"sha256": "", "char_count": 0}
+
+            # Emit two events.
+            pipeline._emit("test.one", task="task0c", attempt=3, data={"k": "v"})
+            pipeline._emit("test.two", duration_ms=42)
+
+            lines = events_path.read_text().splitlines()
+            assert len(lines) == 2, f"expected 2 events, got {len(lines)}"
+            e1 = _json.loads(lines[0])
+            e2 = _json.loads(lines[1])
+
+            # Schema must include fixed fields.
+            for required in ("ts", "product", "pipeline_sha", "event"):
+                assert required in e1, f"missing {required} in {e1}"
+            assert e1["product"] == "test-product"
+            assert e1["pipeline_sha"] == "abc123"
+            assert e1["event"] == "test.one"
+            assert e1["task"] == "task0c"
+            assert e1["attempt"] == 3
+            assert e1["data"] == {"k": "v"}
+            assert "duration_ms" not in e1, "None fields must be omitted"
+
+            assert e2["event"] == "test.two"
+            assert e2["duration_ms"] == 42
+
+            # _emit must never raise even if write fails.
+            pipeline._EVENTS_LOG = "/nonexistent/dir/foo.jsonl"
+            pipeline._emit("test.three")  # should not raise
+
+        finally:
+            pipeline._EVENTS_LOG = orig_log
+            pipeline._PROMPTS_DIR = orig_dir
+            pipeline._RUN_CONTEXT.clear()
+            pipeline._RUN_CONTEXT.update(orig_ctx)
+
+    print("  OK  event log (_emit, _store_prompt_content)")
+
+
 def test_context_guard_middle_trim() -> None:
     """ask() falls back to middle-trim when section removal is insufficient."""
     import pipeline
@@ -706,6 +774,7 @@ def main() -> int:
     test_model_context_chars()
     test_context_guard_section_removal()
     test_context_guard_middle_trim()
+    test_event_log()
 
     if full:
         print("Cargo phase (--full):")

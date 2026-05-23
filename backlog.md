@@ -234,6 +234,26 @@ P2 = changes LLM behavior in a measurable way, validate on fixture + anyhow.
   and fill until the per-file budget is exhausted. Drop the hard cap.
 - Risk: low.
 
+### P1 — Structured event log for pipeline observability
+- Site: new helper `_emit(event, **fields)` writing `logs/events.jsonl`; wire into
+  pipeline.start, cluster.{start,done}, task.{start,done}, file.{start,skipped,
+  stalled,done}, llm.{request,response,error}, compile.{start,success,fail},
+  test.{start,pass,fail}, coverage.measured, git.commit, guard.fired.
+- Symptom: today, "is the pipeline alive or stuck" requires tailing
+  `pipeline_anyhow.log` and `stream.log` and guessing from timestamps. There is
+  no machine-readable record of what happened, when, and which determ commit
+  produced it. Coverage measurements, LLM call durations, and stall events are
+  not queryable.
+- Fix: append-only JSONL with fixed schema `{ts, product, pipeline_sha, event,
+  task, cluster, module, file, attempt, duration_ms, data}`. Content-address
+  prompts/responses to `prompts/{sha256}.txt` and store
+  `{sha256, char_count, input_tokens, output_tokens}` in the event so events.jsonl
+  stays small (~90% of context is repeated across calls — strong dedup).
+  Replace existing `_guard()` writes with `guard.fired` events for unification.
+- Followups: tiny `monitor_events.py` reading the tail and flagging "no event in
+  N minutes". Later: ingest events.jsonl → SQLite for ad-hoc queries.
+- Risk: low. Strictly additive; no behavior change.
+
 ## Deferred
 
 ### project_profile + project_context merge — not worth the risk

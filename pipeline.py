@@ -160,6 +160,7 @@ def _guard(location: str, msg: str) -> None:
 
     Format: GUARD: [location] msg
     Grep `GUARD:` across pipeline log + guard log to find all truncations in one place.
+    Also emits a `guard.fired` structured event so the JSONL log captures truncations.
     """
     import datetime
     line = f"  GUARD: [{location}] {msg}"
@@ -170,6 +171,80 @@ def _guard(location: str, msg: str) -> None:
             fh.write(f"[{ts}] {line}\n")
     except Exception:
         pass
+    _emit("guard.fired", data={"location": location, "msg": msg})
+
+
+# ── Structured event log ───────────────────────────────────────────────────────
+# Append-only JSONL at logs/events.jsonl. One JSON object per line. Cheap to
+# write, crash-safe, tail-friendly, easy to ingest into SQLite later.
+#
+# Fixed schema fields (see backlog "Structured event log for pipeline observability"):
+#   ts             ISO 8601 UTC, ms precision
+#   product        e.g. "anyhow"  — set once by init_events()
+#   pipeline_sha   determ HEAD short SHA — set once by init_events()
+#   event          dot.notation verb: "llm.request", "coverage.measured", ...
+#   (optional)     task, cluster, module, file, attempt, duration_ms, data
+#
+# Prompts/responses are content-addressed to logs/prompts/{sha256}.txt to keep
+# events.jsonl small. ~90% of context is repeated across calls (genesis,
+# profile, examples) so dedup is strong.
+
+_EVENTS_LOG  = os.getenv("PIPELINE_EVENTS_LOG",
+                         str(Path(__file__).parent / "logs" / "events.jsonl"))
+_PROMPTS_DIR = Path(__file__).parent / "logs" / "prompts"
+_RUN_CONTEXT: dict[str, str] = {"product": "unknown", "pipeline_sha": "unknown"}
+
+
+def init_events(product: str) -> None:
+    """Initialize the event log: cache the product name and determ HEAD SHA."""
+    _RUN_CONTEXT["product"] = product
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(Path(__file__).parent), "rev-parse", "--short=12", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+        )
+        _RUN_CONTEXT["pipeline_sha"] = result.stdout.strip() or "unknown"
+    except Exception:
+        _RUN_CONTEXT["pipeline_sha"] = "unknown"
+    try:
+        _PROMPTS_DIR.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+
+
+def _store_prompt_content(text: str) -> dict[str, int | str]:
+    """Content-address a prompt/response. Returns {sha256, char_count}.
+
+    Writes to logs/prompts/{sha256}.txt if not already present. Never raises.
+    """
+    if not text:
+        return {"sha256": "", "char_count": 0}
+    h = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
+    path = _PROMPTS_DIR / f"{h}.txt"
+    if not path.exists():
+        try:
+            path.write_text(text, encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+    return {"sha256": h, "char_count": len(text)}
+
+
+def _emit(event: str, **fields) -> None:
+    """Append a structured event to logs/events.jsonl. Never raises."""
+    try:
+        record: dict = {
+            "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+            "product": _RUN_CONTEXT.get("product", "unknown"),
+            "pipeline_sha": _RUN_CONTEXT.get("pipeline_sha", "unknown"),
+            "event": event,
+        }
+        for k, v in fields.items():
+            if v is not None:
+                record[k] = v
+        with open(_EVENTS_LOG, "a") as fh:
+            fh.write(json.dumps(record, default=str) + "\n")
+    except Exception:
+        pass  # observability must never crash the pipeline
 
 
 def ask(prompt: str, system: str | None = None, model: str | None = None,
@@ -264,15 +339,31 @@ def ask(prompt: str, system: str | None = None, model: str | None = None,
     if think is not None:
         kwargs["think"] = think
     _hot_reload_mi()
+
+    _prompt_meta = _store_prompt_content(prompt)
+    _system_meta = _store_prompt_content(system) if system else None
+    _emit("llm.request", data={
+        "model": model or MODEL,
+        "prompt": _prompt_meta,
+        "system": _system_meta,
+        "max_tokens": max_tokens,
+    })
+    _t0 = time.monotonic()
     for _net_attempt in range(3):
         try:
-            return _ask_raw(prompt, system, **kwargs)
+            _response = _ask_raw(prompt, system, **kwargs)
+            _dur_ms = int((time.monotonic() - _t0) * 1000)
+            _emit("llm.response", duration_ms=_dur_ms,
+                  data={"response": _store_prompt_content(_response or "")})
+            return _response
         except Exception as _e:
             _ename = type(_e).__name__
             if _net_attempt < 2 and any(w in _ename for w in ("Timeout", "Connect", "Protocol", "Network")):
                 _guard("ask/network_retry", f"attempt={_net_attempt} err={_ename}: {_e}")
                 time.sleep(10)
                 continue
+            _emit("llm.error", duration_ms=int((time.monotonic() - _t0) * 1000),
+                  data={"error_type": _ename, "error_msg": str(_e)[:500]})
             raise
     raise RuntimeError("ask: retry loop exhausted")
 
@@ -3492,9 +3583,17 @@ def git_commit(project_dir: Path, message: str) -> bool:
             cwd=project_dir, check=True, capture_output=True,
         )
         _log(f"  [git] committed: {message}")
+        try:
+            _sha = subprocess.run(["git", "rev-parse", "--short=12", "HEAD"],
+                                  cwd=project_dir, capture_output=True, text=True,
+                                  timeout=5).stdout.strip()
+        except Exception:
+            _sha = ""
+        _emit("git.commit", data={"message": message, "workspace_sha": _sha})
         return True
     except Exception as e:
         _log(f"  [git] commit failed: {e}")
+        _emit("git.error", data={"message": message, "error": str(e)[:300]})
         return False
 
 
@@ -7438,7 +7537,15 @@ def _load_grcov_json(project_dir: Path, module_name: str) -> tuple[float, list[d
 
 
 def _measure_coverage(project_dir: Path, module_name: str) -> tuple[float, list[dict], int, int]:
-    return _coverage_provider.measure(project_dir, module_name)
+    _t0 = time.monotonic()
+    pct, files_data, covered, coverable = _coverage_provider.measure(project_dir, module_name)
+    _emit("coverage.measured",
+          module=module_name,
+          cluster=_current_cluster.name if _current_cluster is not None else None,
+          duration_ms=int((time.monotonic() - _t0) * 1000),
+          data={"pct": pct, "covered": covered, "coverable": coverable,
+                "backend": COVERAGE_BACKEND, "file_count": len(files_data)})
+    return pct, files_data, covered, coverable
 
 
 # ── Coverage provider interface ───────────────────────────────────────────────
@@ -10445,6 +10552,16 @@ def main():
         sys.exit(1)
 
     init_log(root, nolog=args.nolog, progress_mode=args.progress)
+    init_events(product=project_dir.name)
+    _emit("pipeline.start", data={
+        "project_dir": str(project_dir),
+        "clean": args.clean,
+        "augment_tests": args.augment_tests,
+        "model": MODEL,
+        "backend": os.getenv("BACKEND", "ollama").lower(),
+        "coverage_backend": COVERAGE_BACKEND,
+        "context_chars": MODEL_CONTEXT_CHARS,
+    })
 
     _ph = _git_file_hash(root, "pipeline.py")
     _mh = _git_file_hash(root, "monitor.py")
