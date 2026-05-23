@@ -3618,17 +3618,19 @@ def mark_cluster_augmented(project_dir: Path, cluster_name: str, module_name: st
 
 def _nightly_rules_for_cluster() -> str:
     """Return the nightly boundary rules to inject into generation prompts.
-    Stable cluster: hardcoded 'do not use nightly' rules.
     Non-default cluster: cluster-specific override from prompt_nightly_rule.
+    Default/stable cluster: derived from the cluster's excluded_cfg list.
+    Returns empty string if no exclusions apply.
     """
     if _current_cluster and not _current_cluster.is_default:
         return _current_cluster.prompt_nightly_rule
-    return (
-        "- Do NOT use `error_generic_member_access`, `.provide()`, `Request`, or import `crate::nightly`\n"
-        "  — these are nightly-only features unavailable on the stable test toolchain. Skip any source\n"
-        "  lines inside `#[cfg(error_generic_member_access)]` blocks — they are untestable on stable.\n"
-        "- Do NOT use `FormattingOptions` — it is nightly-only. Skip source lines that use it."
-    )
+    if _current_cluster and _current_cluster.excluded_cfg:
+        predicates = ", ".join(f"`{p}`" for p in sorted(_current_cluster.excluded_cfg))
+        return (
+            f"- Do NOT write tests for code gated behind these excluded cfg predicates: {predicates}.\n"
+            f"  Skip any source lines inside their `#[cfg(...)]` blocks — they are untestable on this toolchain."
+        )
+    return ""
 
 
 def _estimate_cluster_ceiling(project_dir: Path, cluster: "BuildCluster") -> tuple[float, int, int]:
@@ -4176,7 +4178,8 @@ content here
 
 def task0b_discovery(strategy_path: Path, project_dir: Path, test_files,
                      readme_text: str, profile_content: str,
-                     clusters: "list[BuildCluster] | None" = None) -> str:
+                     clusters: "list[BuildCluster] | None" = None,
+                     force: bool = False) -> str:
     """
     BL-001: Discovery pass — produce coverage_strategy.md before TASK 0c.
 
@@ -4236,7 +4239,7 @@ def task0b_discovery(strategy_path: Path, project_dir: Path, test_files,
     ).hexdigest()[:16]
 
     hash_path = strategy_path.parent / COVERAGE_STRATEGY_HASH_NAME
-    if strategy_path.exists() and hash_path.exists():
+    if not force and strategy_path.exists() and hash_path.exists():
         try:
             if hash_path.read_text().strip() == inputs_hash:
                 content = strategy_path.read_text().strip()
@@ -4372,9 +4375,10 @@ PITFALLS:
 
 RULES:
   # Hard constraints observed from source/Cargo.toml (one per line, terse):
-  NEVER: use std::io or std::io::Error  # not available in internal test modules; use inline E struct
-  NEVER: error_generic_member_access|Request|provide()|crate::nightly  # nightly-only
-  NEVER: macro_export macros from internal mods  # e.g. anyhow!→Error::msg("x"), bail!→return Err(Error::msg("x"))
+  # Only include rules you can verify from the files above. Format examples (do NOT copy):
+  #   NEVER: SomeType  # private / sealed — not accessible from test module
+  #   NEVER: some_cfg_feature  # cfg-gated, nightly-only on this project
+  #   NEVER: some_macro  # #[macro_export], not importable from inside crate
 
 Only include lines you can directly observe in the files. Omit sections with nothing to say.
 Each line must be self-contained — no cross-references between sections.
@@ -8352,6 +8356,31 @@ def _derive_gentest_prelude(project_dir: Path) -> tuple[str, str]:
     return allow_line, prelude_block
 
 
+def _load_file_constraints(project_dir: Path) -> dict[str, str]:
+    """Load per-file generation constraints from project_configs/{project}.constraints.toml.
+
+    Keys are source file basenames (e.g. "error.rs"). Values are constraint text injected
+    into the generation prompt after INTERNAL MODULE RULES. Returns {} if no config exists.
+
+    The TOML file has [stable] and [nightly] tables; the nightly table entries override
+    stable when a non-default cluster is active.
+    """
+    import tomllib
+    config_path = Path(__file__).parent / "project_configs" / f"{project_dir.name}.constraints.toml"
+    if not config_path.exists():
+        return {}
+    try:
+        data = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    except Exception as _e:
+        _log(f"  WARNING: could not load file constraints from {config_path}: {_e}")
+        return {}
+    is_nightly = _current_cluster is not None and not _current_cluster.is_default
+    result: dict[str, str] = dict(data.get("stable", {}))
+    if is_nightly:
+        result.update(data.get("nightly", {}))
+    return result
+
+
 def _task0c_retrospective(
     rel_path: str,
     existing_text: str,
@@ -9181,91 +9210,11 @@ corrected content here
                 uncov_lines=uncov_lines,
             )
 
-            # Per-file negative constraints — injected after INTERNAL MODULE RULES when the
-            # target file matches. These address recurring compile errors specific to each file
-            # that generic rules cannot catch (wrong types, private field access patterns, etc.)
-            _FILE_CONSTRAINTS: dict[str, str] = {
-                "error.rs": (
-                    "\nFILE-SPECIFIC RULES for error.rs:\n"
-                    "- `construct_from_std`, `construct_from_adhoc`, `construct_from_boxed`,"
-                    " `construct_from_display` are `pub(crate)` — callable from tests.\n"
-                    "- `Error::new(E)` requires E: StdError+Send+Sync+'static. Use the inline"
-                    " E struct pattern from INTERNAL MODULE RULES above.\n"
-                    "- The crate's `Backtrace` type is a CUSTOM ENUM — NOT `std::backtrace::Backtrace`."
-                    " Do NOT call `.capture()`, `.status()`, `.frames()`, or `.is_some()` on it."
-                    " Do NOT call `.backtrace()` expecting a std method.\n"
-                    + (
-                        "- NIGHTLY BLOCK RULE: Any source line inside `#[cfg(error_generic_member_access)]`"
-                        " is nightly-only. Write ZERO tests that touch `Request`, `.provide()`,"
-                        " `error_generic_member_access`, or `crate::nightly`. These will always be"
-                        " a compile error on stable. SKIP these lines entirely.\n"
-                        "- Do NOT import `crate::nightly` or reference `nightly::` anything.\n"
-                        if (_current_cluster is None or _current_cluster.is_default) else
-                        "- `error_generic_member_access` IS active for this cluster. You MAY import"
-                        " `crate::nightly` and use `Request`, `.provide()`. Focus on these lines.\n"
-                    ) +
-                    "- Do NOT use `vec![]` — this crate is no_std. Use `Vec::new()` + `.push()`"
-                    " or construct a fixed array instead.\n"
-                    "- Do NOT pass bare `dyn Error` or `Box<dyn Error>` to `Error::new()`."
-                    " Use the inline E struct pattern which is automatically Send+Sync.\n"
-                ),
-                "kind.rs": (
-                    "\nFILE-SPECIFIC RULES for kind.rs:\n"
-                    "- `anyhow_kind()` is an INSTANCE METHOD on the IMPLEMENTING type."
-                    " CORRECT: `let x = MyStruct; let k = x.anyhow_kind();`"
-                    " WRONG: `AdhocKind::anyhow_kind(&x)` — this is not valid Rust trait syntax."
-                    " WRONG: `Adhoc::anyhow_kind()` — `Adhoc` is the RETURN type, not the caller.\n"
-                    "- The trait impls use `Sealed` — you cannot implement `AdhocKind`/`TraitKind`/"
-                    "`BoxedKind` for your own test struct. Test via concrete types that already"
-                    " implement the trait (look in the source for which types impl which trait).\n"
-                    "- `Adhoc`, `Trait`, `Boxed` have no `PartialEq` — do NOT use `assert_eq!`."
-                    " Use `assert!` or `matches!()` instead.\n"
-                    "- Do NOT use `io::Error` or `use std::io`. Use `Error::msg()` or inline E.\n"
-                ),
-                "ptr.rs": (
-                    "\nFILE-SPECIFIC RULES for ptr.rs:\n"
-                    "- `Own::new(Box<T>)`, `Ref::new(&T)`, `Ref::from_raw(NonNull<T>)` are the"
-                    " ONLY constructors. Do NOT use struct literal syntax `Own {{ ptr: ... }}`"
-                    " — all fields are private.\n"
-                    "- `NonNull::as_ptr()` returns `*mut T` (mutable raw pointer), NOT `*const T`."
-                    " When comparing with a reference, cast as `&mut val as *mut T`,"
-                    " not `&val as *const T` — the mutability must match.\n"
-                ),
-                "fmt.rs": (
-                    "\nFILE-SPECIFIC RULES for fmt.rs:\n"
-                    + ("- Do NOT use `FormattingOptions` — nightly only. Skip lines that use it.\n"
-                       if (_current_cluster is None or _current_cluster.is_default) else
-                       "- `FormattingOptions` IS available in this cluster. You MAY use it.\n")
-                    + "- For string literals containing backslashes, use raw strings: `r\"text\\here\"`"
-                    " instead of escaped strings.\n"
-                ),
-                "context.rs": (
-                    "\nFILE-SPECIFIC RULES for context.rs:\n"
-                    "- `Context` is a sealed trait. Do NOT implement it for custom types in tests.\n"
-                    "- `.context(msg)` is available on `Result<T,E>` and `Option<T>` via `use super::*;`.\n"
-                    + ("- Do NOT import `crate::nightly`. Do NOT use `formatting_options`.\n"
-                       if (_current_cluster is None or _current_cluster.is_default) else
-                       "- `crate::nightly` IS available. You MAY use `formatting_options`.\n")
-                    +
-                    "- `ContextError<C,E>` has pub(crate) fields `context: C` and `error: E`"
-                    " — accessible from within the crate's test module.\n"
-                ),
-                "lib.rs": (
-                    "\nFILE-SPECIFIC RULES for lib.rs:\n"
-                    "- `Error::new(val)` requires val: StdError+Send+Sync+'static."
-                    " Do NOT pass bare `dyn Error` without Send+Sync. Use the inline E struct.\n"
-                    "- Do NOT use `vec![]` — use `Vec::new()` + `.push()` instead.\n"
-                    "- Do NOT use `use crate::...` — you are already inside the crate.\n"
-                ),
-                "wrapper.rs": (
-                    "\nFILE-SPECIFIC RULES for wrapper.rs:\n"
-                    "- `MessageWrapper` and `Wrapper` DO NOT EXIST in this module."
-                    " Do NOT invent types. Only use types that appear in the source above.\n"
-                    "- `BoxedError<E>` wraps a boxed error. Access the inner error via `.0`.\n"
-                ),
-            }
+            # Per-file negative constraints — loaded from project_configs/{project}.constraints.toml.
+            # Keys are source file basenames. Values are injected after INTERNAL MODULE RULES.
+            _file_constraints = _load_file_constraints(project_dir)
             _target_basename = Path(rel_path).name
-            _file_constraints_section = _FILE_CONSTRAINTS.get(_target_basename, "")
+            _file_constraints_section = _file_constraints.get(_target_basename, "")
 
             gen_count = _gen_tests_count(abs_path)
             _pass_n = _next_gen_tests_n(abs_path)
@@ -9317,29 +9266,14 @@ Rust rules:
 
 INTERNAL MODULE RULES — these tests live inside the source file, not in an external test crate:
 - Do NOT write `use <crate_name>::...` — you are already inside the crate.
-- This crate uses `#![no_std]` with `extern crate alloc`. The prelude shown in the template
-  already imports String, Vec, Box, format!, StdError, and fmt.
-- Do NOT use `#[macro_export]` macros (e.g. `anyhow!`, `bail!`, `ensure!`) inside this module —
-  they cannot be imported from within the crate. Construct values through direct API calls instead
-  (e.g. `Error::msg("text")`, `Error::from(e)`, direct struct construction).
+- The template prelude already imports String, Vec, Box, format!, StdError, and fmt — use them directly.
+- Do NOT use `#[macro_export]` macros inside this module — they cannot be imported from within the crate.
+  Construct values through direct API calls instead.
 - Do NOT use `assert_eq!` or `assert_ne!` on types that do not implement `PartialEq`.
   Use `format!("{{}}",  val)`, boolean checks, or `matches!()` instead.
-- Do NOT use `std::io::Error` or `use std::io` — std::io is unavailable in this crate's
-  test configuration. To create a concrete error for testing, define one inline:
-      #[derive(Debug)] struct E(&'static str);
-      impl fmt::Display for E {{ fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {{ write!(f, "{{}}", self.0) }} }}
-      impl StdError for E {{}}
-  Then: `Error::new(E("msg"))` for a wrapped error, or `Error::msg("msg")` for a plain string.
 {_nightly_rules_for_cluster()}
-- anyhow's `Error` type is NOT `std::error::Error`. It WRAPS errors — it does not implement
-  the std trait itself. Consequences:
-    - Do NOT pass `&str` or `String` to `Error::new()` — they don't implement StdError.
-    - Do NOT call `.source()` on `Error` expecting a std trait method.
-    - Do NOT use `assert_eq!` on `Error` values — no PartialEq. Use `.to_string()` or `.chain()`.
-    - Use `format!("{{}}",  err)` instead of `err.to_string()` to avoid scope issues.
-- When implementing StdError::source() in a test helper, the field type MUST be
-  `Box<dyn StdError>` (no Send+Sync). `Box<dyn StdError + Send + Sync>` does NOT coerce
-  to `&dyn StdError` in the function return position and will produce a mismatched-types error.
+See the IMPORTS, PITFALLS, and RULES sections of coverage_strategy.md (shown above) for
+project-specific import paths, type construction patterns, and hard constraints.
 {_file_constraints_section}
 {output_format}
 """
@@ -9375,11 +9309,10 @@ INTERNAL MODULE RULES — these tests live inside the source file, not in an ext
                     # chars — well below the silent-failure threshold.
                     _medium_rules = (
                         "RULES (mandatory):\n"
-                        "- No_std crate: do NOT use `vec![]`, `std::io`, `println!`, or any std macro.\n"
-                        "- Do NOT use `#[macro_export]` macros (`anyhow!`, `bail!`, `ensure!`) — unavailable inside the crate.\n"
+                        "- Do NOT write `use <crate_name>::...` — you are already inside the crate.\n"
+                        "- Do NOT use `#[macro_export]` macros — unavailable inside the crate.\n"
                         + _nightly_rules_for_cluster() + "\n"
                         + "- Do NOT use `assert_eq!`/`assert_ne!` on types without `PartialEq` — use `format!` or `matches!()`.\n"
-                        "- Do NOT use `std::io::Error`. Define inline error structs for testing.\n"
                         "- Each `#[test]` fn must have ZERO arguments and at least one assertion.\n"
                         f"{_file_constraints_section}"
                     )
@@ -9550,29 +9483,14 @@ Rust rules:
 
 INTERNAL MODULE RULES — these tests live inside the source file, not in an external test crate:
 - Do NOT write `use <crate_name>::...` — you are already inside the crate.
-- This crate uses `#![no_std]` with `extern crate alloc`. The prelude shown in the template
-  already imports String, Vec, Box, format!, StdError, and fmt.
-- Do NOT use `#[macro_export]` macros (e.g. `anyhow!`, `bail!`, `ensure!`) inside this module —
-  they cannot be imported from within the crate. Construct values through direct API calls instead
-  (e.g. `Error::msg("text")`, `Error::from(e)`, direct struct construction).
+- The template prelude already imports String, Vec, Box, format!, StdError, and fmt — use them directly.
+- Do NOT use `#[macro_export]` macros inside this module — they cannot be imported from within the crate.
+  Construct values through direct API calls instead.
 - Do NOT use `assert_eq!` or `assert_ne!` on types that do not implement `PartialEq`.
   Use `format!("{{}}",  val)`, boolean checks, or `matches!()` instead.
-- Do NOT use `std::io::Error` or `use std::io` — std::io is unavailable in this crate's
-  test configuration. To create a concrete error for testing, define one inline:
-      #[derive(Debug)] struct E(&'static str);
-      impl fmt::Display for E {{ fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {{ write!(f, "{{}}", self.0) }} }}
-      impl StdError for E {{}}
-  Then: `Error::new(E("msg"))` for a wrapped error, or `Error::msg("msg")` for a plain string.
 {_nightly_rules_for_cluster()}
-- anyhow's `Error` type is NOT `std::error::Error`. It WRAPS errors — it does not implement
-  the std trait itself. Consequences:
-    - Do NOT pass `&str` or `String` to `Error::new()` — they don't implement StdError.
-    - Do NOT call `.source()` on `Error` expecting a std trait method.
-    - Do NOT use `assert_eq!` on `Error` values — no PartialEq. Use `.to_string()` or `.chain()`.
-    - Use `format!("{{}}",  err)` instead of `err.to_string()` to avoid scope issues.
-- When implementing StdError::source() in a test helper, the field type MUST be
-  `Box<dyn StdError>` (no Send+Sync). `Box<dyn StdError + Send + Sync>` does NOT coerce
-  to `&dyn StdError` in the function return position and will produce a mismatched-types error.
+See the IMPORTS, PITFALLS, and RULES sections of coverage_strategy.md (shown above) for
+project-specific import paths, type construction patterns, and hard constraints.
 {_file_constraints_section}"""
                     fix_response = ask(fix_prompt, model=_TASK0C_MODEL, think=None)
                     fixed = extract_test_mod(fix_response)
@@ -11246,6 +11164,15 @@ This is a Rust procedural macro crate. Strict rules apply:
             else:
                 t4_summary = "genesis.md updated."
                 failure_type_logged = failure_type
+                # Genesis grew — regenerate coverage_strategy.md so TASK 0c and TASK 1
+                # prompts reflect lessons learned this iteration. force=True bypasses
+                # the hash cache (genesis update isn't captured in the inputs hash).
+                _log("  Regenerating coverage_strategy.md after genesis update...")
+                strategy_path = project_dir / COVERAGE_STRATEGY_NAME
+                coverage_strategy = task0b_discovery(
+                    strategy_path, project_dir, test_files, readme_text, project_profile,
+                    clusters=_clusters, force=True,
+                )
 
             append_failure_log(
                 failure_log_path, label, failure_type_logged,

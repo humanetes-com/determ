@@ -1,0 +1,82 @@
+# Per-file generation constraints for argh-master (anyhow crate).
+# Loaded by _load_file_constraints(project_dir) at gen-prompt build time.
+# [stable] entries: injected when the default/stable cluster is active.
+# [nightly] entries: override stable when a non-default (nightly) cluster is active.
+
+[stable]
+"error.rs" = '''
+FILE-SPECIFIC RULES for error.rs:
+- `construct_from_std`, `construct_from_adhoc`, `construct_from_boxed`, `construct_from_display` are `pub(crate)` — callable from tests.
+- `Error::new(E)` requires E: StdError+Send+Sync+'static. Use the inline E struct pattern from INTERNAL MODULE RULES above.
+- The crate's `Backtrace` type is a CUSTOM ENUM — NOT `std::backtrace::Backtrace`. Do NOT call `.capture()`, `.status()`, `.frames()`, or `.is_some()` on it. Do NOT call `.backtrace()` expecting a std method.
+- NIGHTLY BLOCK RULE: Any source line inside `#[cfg(error_generic_member_access)]` is nightly-only. Write ZERO tests that touch `Request`, `.provide()`, `error_generic_member_access`, or `crate::nightly`. These will always be a compile error on stable. SKIP these lines entirely.
+- Do NOT import `crate::nightly` or reference `nightly::` anything.
+- Do NOT use `vec![]` — this crate is no_std. Use `Vec::new()` + `.push()` or construct a fixed array instead.
+- Do NOT pass bare `dyn Error` or `Box<dyn Error>` to `Error::new()`. Use the inline E struct pattern which is automatically Send+Sync.
+'''
+
+"kind.rs" = '''
+FILE-SPECIFIC RULES for kind.rs:
+- `anyhow_kind()` is an INSTANCE METHOD on the IMPLEMENTING type. CORRECT: `let x = MyStruct; let k = x.anyhow_kind();` WRONG: `AdhocKind::anyhow_kind(&x)` — this is not valid Rust trait syntax. WRONG: `Adhoc::anyhow_kind()` — `Adhoc` is the RETURN type, not the caller.
+- The trait impls use `Sealed` — you cannot implement `AdhocKind`/`TraitKind`/`BoxedKind` for your own test struct. Test via concrete types that already implement the trait (look in the source for which types impl which trait).
+- `Adhoc`, `Trait`, `Boxed` have no `PartialEq` — do NOT use `assert_eq!`. Use `assert!` or `matches!()` instead.
+- Do NOT use `io::Error` or `use std::io`. Use `Error::msg()` or inline E.
+'''
+
+"ptr.rs" = '''
+FILE-SPECIFIC RULES for ptr.rs:
+- `Own::new(Box<T>)`, `Ref::new(&T)`, `Ref::from_raw(NonNull<T>)` are the ONLY constructors. Do NOT use struct literal syntax `Own { ptr: ... }` — all fields are private.
+- `NonNull::as_ptr()` returns `*mut T` (mutable raw pointer), NOT `*const T`. When comparing with a reference, cast as `&mut val as *mut T`, not `&val as *const T` — the mutability must match.
+'''
+
+"fmt.rs" = '''
+FILE-SPECIFIC RULES for fmt.rs:
+- Do NOT use `FormattingOptions` — nightly only. Skip lines that use it.
+- For string literals containing backslashes, use raw strings: `r"text\here"` instead of escaped strings.
+'''
+
+"context.rs" = '''
+FILE-SPECIFIC RULES for context.rs:
+- `Context` is a sealed trait. Do NOT implement it for custom types in tests.
+- `.context(msg)` is available on `Result<T,E>` and `Option<T>` via `use super::*;`.
+- Do NOT import `crate::nightly`. Do NOT use `formatting_options`.
+- `ContextError<C,E>` has pub(crate) fields `context: C` and `error: E` — accessible from within the crate's test module.
+'''
+
+"lib.rs" = '''
+FILE-SPECIFIC RULES for lib.rs:
+- `Error::new(val)` requires val: StdError+Send+Sync+'static. Do NOT pass bare `dyn Error` without Send+Sync. Use the inline E struct.
+- Do NOT use `vec![]` — use `Vec::new()` + `.push()` instead.
+- Do NOT use `use crate::...` — you are already inside the crate.
+'''
+
+"wrapper.rs" = '''
+FILE-SPECIFIC RULES for wrapper.rs:
+- `MessageWrapper` and `Wrapper` DO NOT EXIST in this module. Do NOT invent types. Only use types that appear in the source above.
+- `BoxedError<E>` wraps a boxed error. Access the inner error via `.0`.
+'''
+
+[nightly]
+"error.rs" = '''
+FILE-SPECIFIC RULES for error.rs:
+- `construct_from_std`, `construct_from_adhoc`, `construct_from_boxed`, `construct_from_display` are `pub(crate)` — callable from tests.
+- `Error::new(E)` requires E: StdError+Send+Sync+'static. Use the inline E struct pattern from INTERNAL MODULE RULES above.
+- The crate's `Backtrace` type is a CUSTOM ENUM — NOT `std::backtrace::Backtrace`. Do NOT call `.capture()`, `.status()`, `.frames()`, or `.is_some()` on it. Do NOT call `.backtrace()` expecting a std method.
+- `error_generic_member_access` IS active for this cluster. You MAY import `crate::nightly` and use `Request`, `.provide()`. Focus on these lines.
+- Do NOT use `vec![]` — this crate is no_std. Use `Vec::new()` + `.push()` or construct a fixed array instead.
+- Do NOT pass bare `dyn Error` or `Box<dyn Error>` to `Error::new()`. Use the inline E struct pattern which is automatically Send+Sync.
+'''
+
+"fmt.rs" = '''
+FILE-SPECIFIC RULES for fmt.rs:
+- `FormattingOptions` IS available in this cluster. You MAY use it.
+- For string literals containing backslashes, use raw strings: `r"text\here"` instead of escaped strings.
+'''
+
+"context.rs" = '''
+FILE-SPECIFIC RULES for context.rs:
+- `Context` is a sealed trait. Do NOT implement it for custom types in tests.
+- `.context(msg)` is available on `Result<T,E>` and `Option<T>` via `use super::*;`.
+- `crate::nightly` IS available. You MAY use `formatting_options`.
+- `ContextError<C,E>` has pub(crate) fields `context: C` and `error: E` — accessible from within the crate's test module.
+'''
