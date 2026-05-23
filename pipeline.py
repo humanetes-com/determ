@@ -10049,6 +10049,77 @@ def _sentinel_coverage(sentinel_path: Path) -> float:
 # Main loop
 # ---------------------------------------------------------------------------
 
+def restart_from_augmented(root: Path, project_dir: Path) -> None:
+    """Restore workspace to the task0c augmentation commit and clear only
+    iteration state (strip / task1+ artifacts). Task0a/0b/0c outputs are kept.
+
+    Single-module workspaces only. Errors loudly if the augmentation tag is
+    missing or the workspace has >1 module.
+    """
+    # Find the single augmentation tag — multi-module is out of scope for v1.
+    try:
+        tags = subprocess.run(
+            ["git", "tag", "-l", "task0c-augmented-*"],
+            cwd=project_dir, capture_output=True, text=True, check=True,
+        ).stdout.strip().splitlines()
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"git tag listing failed: {e}")
+    tags = [t for t in tags if t]
+    if not tags:
+        # Fall back to legacy pre-strip tag if present.
+        tags = subprocess.run(
+            ["git", "tag", "-l", "pre-strip-*"],
+            cwd=project_dir, capture_output=True, text=True,
+        ).stdout.strip().splitlines()
+        tags = [t for t in tags if t]
+    if not tags:
+        raise RuntimeError(
+            "No task0c-augmented-* or pre-strip-* tag in the workspace. "
+            "There is no augmented restore point — use --clean for a full wipe instead."
+        )
+    if len(tags) > 1:
+        raise RuntimeError(
+            f"Multi-module restore not supported in this version. Found tags: {tags}. "
+            "Use --clean for a full wipe."
+        )
+    restore_tag = tags[0]
+    module_name = restore_tag.split("-")[-1]
+
+    _log(f"  [restart-from-augmented] resetting workspace to {restore_tag}")
+    subprocess.run(["git", "reset", "--hard", restore_tag],
+                   cwd=project_dir, check=True, capture_output=True)
+
+    # Wipe iteration state — strip sentinels onward. Keep task0a/0b/0c outputs.
+    iteration_paths: list[Path] = [
+        project_dir / MODULE_STRIPPED_DIR,         # strip sentinel
+        root / f"functional_requirements_{module_name}.md",
+        root / FAILURE_LOG_NAME,
+        root / ".task1_partials",
+    ]
+    iteration_paths += list(project_dir.glob(".generated_files_*.txt"))
+    iteration_paths += list(root.glob("tests_output_*.txt"))
+    for p in iteration_paths:
+        if p.is_dir():
+            shutil.rmtree(p)
+            _log(f"  Deleted {p.relative_to(root) if p.is_relative_to(root) else p}/")
+        elif p.exists():
+            p.unlink()
+            _log(f"  Deleted {p.relative_to(root) if p.is_relative_to(root) else p}")
+
+    # Pipeline state file: clear strip/task1+ entries so they re-run; keep
+    # task0a/0b/0c entries so those tasks skip via sentinel check.
+    state = _read_state(project_dir)
+    iteration_prefixes = ("strip/", "task1/", "task2-4/", "task2/", "task3/", "task4/")
+    state["phases"] = {
+        k: v for k, v in state["phases"].items()
+        if not k.startswith(iteration_prefixes)
+    }
+    state["current"] = "restart-from-augmented"
+    _write_state(project_dir, state)
+    _log(f"  Cleared iteration entries from pipeline_state.md")
+    _log(f"  Workspace restored to {restore_tag}; task0a/0b/0c kept, strip + task1+ will re-run.")
+
+
 def clean_state(root: Path, project_dir: Path, manifest_path: Path,
                 genesis_path: Path, functional_req_path: Path):
     """Delete all pipeline-generated state so the next run starts fresh."""
@@ -10600,6 +10671,15 @@ def main():
                             "is used by TASK 2. Goes directly to module iteration loop "
                             "(TASK 2 → TASK 3 → TASK 4)."
                         ))
+    parser.add_argument("--restart-from-augmented", action="store_true",
+                        help=(
+                            "Restore the workspace to the task0c augmentation commit "
+                            "(tag: task0c-augmented-{module}) and clear only iteration "
+                            "state (strip sentinels, FR file, tests_output, manifest, "
+                            "failure log). Keeps task0a/0b/0c outputs. Strip + task1+ "
+                            "re-run from scratch with the augmented test suite. "
+                            "Single-module workspaces only for now."
+                        ))
     args = parser.parse_args()
 
     if args.best_models_list:
@@ -10675,6 +10755,8 @@ def main():
         _params.append("--nolog")
     if args.from_spec:
         _params.append("--from-spec")
+    if args.restart_from_augmented:
+        _params.append("--restart-from-augmented")
     _log(f"  pipeline.py [{_ph}]  monitor.py [{_mh}]  params: {' '.join(_params) or '(none)'}")
 
     _backend_name = os.getenv("BACKEND", "ollama").lower()
@@ -10696,12 +10778,24 @@ def main():
     if _backend_name == "vllm":
         _ensure_vllm_ready(root)
 
+    if args.clean and args.restart_from_augmented:
+        _log("\n-- ERROR: --clean and --restart-from-augmented are mutually exclusive --")
+        sys.exit(2)
+
     if args.clean:
         _log("\n-- --clean requested: wiping all generated state --")
         if _git_managed:
             git_clean_reset(project_dir)
         clean_state(root, project_dir, manifest_path, genesis_path, functional_req_path)
         _state_path(project_dir).unlink(missing_ok=True)
+
+    if args.restart_from_augmented:
+        _log("\n-- --restart-from-augmented: restoring workspace to task0c augmented state --")
+        try:
+            restart_from_augmented(root, project_dir)
+        except Exception as e:
+            _log(f"  [ABORT] restart-from-augmented failed: {e}")
+            sys.exit(2)
 
     _src_hash = _source_hash(project_dir)
     _log(f"  Source hash: {_src_hash}")
@@ -11072,9 +11166,16 @@ def main():
                 # TASK 1. The .original_structure/ dir survives strip (lives at the
                 # project root, not under src/), so TASK 1 can read it post-strip.
                 _capture_api_surface(project_dir, module_dir, module_name)
-                if not git_commit(project_dir, f"pipeline: pre-strip — {module_name} task0c complete"):
-                    _log(f"  [ABORT] pre-strip commit failed for '{module_name}' — refusing to strip. Fix git state and retry.")
-                    raise RuntimeError(f"pre-strip commit failed for {module_name}")
+                if not git_commit(project_dir,
+                                  f"pipeline: task0c augmentation complete — "
+                                  f"all unit tests added for {module_name}"):
+                    _log(f"  [ABORT] augmentation commit failed for '{module_name}' — refusing to strip. Fix git state and retry.")
+                    raise RuntimeError(f"augmentation commit failed for {module_name}")
+                # Tag the augmented commit. The new tag name is the canonical
+                # restore point used by --restart-from-augmented; the legacy
+                # pre-strip-{module} tag is kept as an alias for anything that
+                # already pinned to it.
+                git_tag(project_dir, f"task0c-augmented-{module_name}")
                 git_tag(project_dir, f"pre-strip-{module_name}")
                 strip_module_source(project_dir, module_dir)
                 strip_sentinel.parent.mkdir(parents=True, exist_ok=True)

@@ -1294,6 +1294,36 @@ def _render_all():
 
 SCROLL_STEP = 5
 
+
+def _augmentation_tag() -> str | None:
+    """Return the single task0c-augmented-* tag in the workspace, or None.
+
+    Returns None for multi-module workspaces (>1 tag) — augmentation restore
+    is single-module only in this version.
+    """
+    proj = _find_project_dir()
+    if not proj or not (proj / ".git").exists():
+        return None
+    try:
+        out = subprocess.run(
+            ["git", "tag", "-l", "task0c-augmented-*"],
+            cwd=proj, capture_output=True, text=True, timeout=5,
+        ).stdout.strip().splitlines()
+        tags = [t for t in out if t]
+        # Fall back to legacy pre-strip-* tag if the new naming is absent.
+        if not tags:
+            out = subprocess.run(
+                ["git", "tag", "-l", "pre-strip-*"],
+                cwd=proj, capture_output=True, text=True, timeout=5,
+            ).stdout.strip().splitlines()
+            tags = [t for t in out if t]
+        if len(tags) == 1:
+            return tags[0]
+        return None
+    except Exception:
+        return None
+
+
 def _run_action(key):
     global _action_msg, _view, _confirm, _graceful_pending
     if _confirm == "wipe":
@@ -1305,6 +1335,23 @@ def _run_action(key):
                 _action_msg = yellow(f"↺ wiping and restarting with {url}")
             else:
                 _action_msg = dim("wipe cancelled — no URL")
+        else:
+            _action_msg = dim("wipe cancelled")
+            _confirm = None
+        return
+    if _confirm == "wipe-augmented":
+        if key == "a":
+            _confirm = None
+            _detach(["bash", os.path.join(SCRIPT_DIR, "wipe.sh"), "--keep-augmented"])
+            _action_msg = cyan("↺ restoring augmentation, restarting from task1")
+        elif key == "h":
+            _confirm = None
+            url = _prompt_url()
+            if url:
+                _detach(["bash", os.path.join(SCRIPT_DIR, "wipe.sh"), "--repo", url])
+                _action_msg = yellow(f"↺ hard reset, restarting with {url}")
+            else:
+                _action_msg = dim("hard reset cancelled — no URL")
         else:
             _action_msg = dim("wipe cancelled")
             _confirm = None
@@ -1360,8 +1407,17 @@ def _run_action(key):
             _detach(["bash", os.path.join(SCRIPT_DIR, "continue.sh"), "--y"])
             _action_msg = green("▶ continue.sh launched (pipeline was not running)")
     elif key == "w":
-        _confirm    = "wipe"
-        _action_msg = yellow("↺ wipe all generated code and restart — confirm? [y/n]")
+        tag = _augmentation_tag()
+        if tag:
+            _confirm    = "wipe-augmented"
+            _action_msg = yellow(
+                f"↺ augmentation found ({tag}): "
+                f"[a]ugmentation restore → restart from task1, "
+                f"[h]ard reset → re-clone repo, [other] cancel"
+            )
+        else:
+            _confirm    = "wipe"
+            _action_msg = yellow("↺ wipe all generated code and restart — confirm? [y/n]")
     elif key == "s":
         _confirm    = "stop"
         _action_msg = red("■ stop pipeline — confirm? [y/n]")
@@ -1420,6 +1476,11 @@ def main():
                 _action_msg = cyan("◑ graceful continue — finish current attempt then reload — confirm? [y/n]")
             elif _confirm == "wipe":
                 _action_msg = yellow("↺ wipe all generated code and restart — confirm? [y/n]")
+            elif _confirm == "wipe-augmented":
+                _action_msg = yellow(
+                    "↺ augmentation found: [a]ugmentation restore, "
+                    "[h]ard reset, [other] cancel"
+                )
             elif _confirm == "stop":
                 _action_msg = red("■ stop pipeline — confirm? [y/n]")
             else:

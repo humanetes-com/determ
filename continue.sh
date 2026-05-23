@@ -19,10 +19,12 @@ LLM_STREAM_LOG="$LOG_DIR/stream.log"
 _YES=false
 _GRACEFUL=false
 _WIPE=false
+_KEEP_AUGMENTED=false
 for _arg in "$@"; do
-    [[ "$_arg" == "--y" ]]        && _YES=true
-    [[ "$_arg" == "--graceful" ]] && _GRACEFUL=true
-    [[ "$_arg" == "--wipe" ]]     && _WIPE=true && _YES=true
+    [[ "$_arg" == "--y" ]]              && _YES=true
+    [[ "$_arg" == "--graceful" ]]       && _GRACEFUL=true
+    [[ "$_arg" == "--wipe" ]]           && _WIPE=true && _YES=true
+    [[ "$_arg" == "--keep-augmented" ]] && _KEEP_AUGMENTED=true && _YES=true
 done
 
 if [[ "$_GRACEFUL" == true ]]; then
@@ -182,7 +184,8 @@ fi
 # Start the pipeline
 # ---------------------------------------------------------------------------
 _PIPELINE_ARGS="--project anyhow"
-[[ "$_WIPE" == true ]] && _PIPELINE_ARGS="--repo https://github.com/dtolnay/anyhow --clean"
+[[ "$_WIPE" == true ]]           && _PIPELINE_ARGS="--repo https://github.com/dtolnay/anyhow --clean"
+[[ "$_KEEP_AUGMENTED" == true ]] && _PIPELINE_ARGS="--project anyhow --restart-from-augmented"
 nohup .venv/bin/python pipeline.py $_PIPELINE_ARGS >> "$LOG_DIR/pipeline_anyhow.log" 2>&1 &
 echo "Pipeline started (PID $!) — backend: $BACKEND"
 echo "Pipeline log : tail -f $LOG_DIR/pipeline_anyhow.log"
