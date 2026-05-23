@@ -1316,10 +1316,10 @@ def _augmentation_tag() -> str | None:
     Returns None for multi-module workspaces (>1 tag) — augmentation restore
     is single-module only in this version.
     """
-    proj = _find_project_dir()
-    if not proj or not (proj / ".git").exists():
-        return None
     try:
+        proj = _find_project_dir()
+        if not proj or not os.path.isdir(os.path.join(proj, ".git")):
+            return None
         out = subprocess.run(
             ["git", "tag", "-l", "task0c-augmented-*"],
             cwd=proj, capture_output=True, text=True, timeout=5,
