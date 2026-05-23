@@ -6,6 +6,7 @@ from datetime import datetime
 _LOG_DIR     = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 PIPELINE_LOG = os.getenv("PIPELINE_LOG", os.path.join(_LOG_DIR, "pipeline_anyhow.log"))
 STREAM_LOG   = os.getenv("LLM_STREAM_LOG", os.getenv("OLLAMA_STREAM_LOG", os.path.join(_LOG_DIR, "stream.log")))
+EVENTS_LOG   = os.getenv("PIPELINE_EVENTS_LOG", os.path.join(_LOG_DIR, "events.jsonl"))
 _GUARDS_LOG  = os.getenv("PIPELINE_GUARD_LOG", os.path.join(_LOG_DIR, "pipeline_guards.log"))
 REFRESH      = 2
 
@@ -947,8 +948,8 @@ def _detach(cmd):
         stderr=subprocess.DEVNULL,
         start_new_session=True,   # setsid() — detach from controlling terminal
     )
-_view        = "monitor"      # "monitor" | "pipeline" | "stream"
-_scroll      = {"pipeline": 0, "stream": 0}   # lines scrolled up from bottom (0=bottom)
+_view        = "monitor"      # "monitor" | "pipeline" | "stream" | "events"
+_scroll      = {"pipeline": 0, "stream": 0, "events": 0}   # lines scrolled up from bottom (0=bottom)
 _confirm          = None   # pending confirmation: "continue" | "wipe" | "stop" | None
 _graceful_pending = os.path.exists("/tmp/pipeline_graceful_stop")  # survives monitor restart
 _term_settings = None         # saved terminal settings for cooked-mode URL prompt
@@ -957,6 +958,7 @@ VIEWS = [
     ("monitor",  "1", "Monitor"),
     ("pipeline", "2", "Pipeline Log"),
     ("stream",   "3", "Stream Log"),
+    ("events",   "4", "Events"),
 ]
 
 def _pipeline_running() -> bool:
@@ -1075,6 +1077,131 @@ def _log_lines(log_path, tail_bytes: int = 2 * 1024 * 1024):
     return out
 
 
+def _event_format(ev: dict) -> str:
+    """Render a single event-log entry as one human-readable colored line."""
+    ts = ev.get("ts", "")
+    # Time portion only: HH:MM:SS.mmm
+    if "T" in ts:
+        time_part = ts.split("T", 1)[1].split("+")[0].split(".")
+        ts_s = time_part[0] + ("." + time_part[1][:3] if len(time_part) > 1 else "")
+    else:
+        ts_s = ts[:12]
+
+    verb = ev.get("event", "")
+    if verb.endswith(".done") or verb.endswith(".pass") or verb.endswith(".success"):
+        verb_col = green
+    elif verb.endswith(".fail") or verb.endswith(".error"):
+        verb_col = red
+    elif verb.endswith(".start") or verb.endswith(".request"):
+        verb_col = yellow
+    elif verb.startswith("guard.") or verb.startswith("llm."):
+        verb_col = cyan
+    else:
+        verb_col = bold
+
+    fields = []
+    for k in ("task", "cluster", "module", "file", "attempt"):
+        v = ev.get(k)
+        if v not in (None, "", "-"):
+            fields.append(f"{k}={v}")
+    if ev.get("duration_ms") is not None:
+        fields.append(f"{ev['duration_ms']}ms")
+
+    # Short data summary: prefer a couple of high-signal fields.
+    data = ev.get("data") or {}
+    data_bits = []
+    for k in ("pct", "passed", "ok", "covered", "coverable", "pass_count", "fail_count",
+              "returncode", "reason", "model"):
+        if k in data:
+            v = data[k]
+            if isinstance(v, str) and len(v) > 30:
+                v = v[:27] + "..."
+            data_bits.append(f"{k}={v}")
+    # Compact prompt content-addressed summary when present.
+    for k in ("prompt", "response"):
+        sub = data.get(k)
+        if isinstance(sub, dict) and "char_count" in sub:
+            data_bits.append(f"{k}={sub['char_count']}c")
+
+    head = f"{dim(ts_s)} {verb_col(bold(verb)):<22}"
+    tail = "  ".join(fields)
+    extra = "  ".join(data_bits)
+    return f"{head}  {dim(tail) if tail else ''}{('  ' + dim(extra)) if extra else ''}".rstrip()
+
+
+def _event_lines(events_path: str, tail_bytes: int = 1024 * 1024) -> list[str]:
+    """Word-wrap formatted events from the tail of events.jsonl."""
+    w = _w()
+    try:
+        with open(events_path, "rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            fh.seek(max(0, size - tail_bytes))
+            raw_bytes = fh.read()
+        text = raw_bytes.decode("utf-8", errors="replace")
+        raw = text.splitlines()
+        if size > tail_bytes:
+            raw = raw[1:]  # drop partial first line
+    except FileNotFoundError:
+        return [red(f"  {events_path} not found")]
+    except Exception as e:
+        return [red(f"  error: {e}")]
+
+    out: list[str] = []
+    import json as _json
+    for line in raw:
+        if not line.strip():
+            continue
+        try:
+            ev = _json.loads(line)
+        except Exception:
+            out.append(dim(line[:w]))
+            continue
+        formatted = _event_format(ev)
+        plain_len = len(_plain(formatted))
+        if plain_len <= w:
+            out.append(formatted)
+        else:
+            # Naive wrap on plain length — color spans rarely break mid-token in practice.
+            for i in range(0, len(formatted), w):
+                out.append(formatted[i:i + w])
+    return out
+
+
+def _event_box(events_path: str, view_key: str, title: str, inner: int, header=()):
+    """Render an events.jsonl viewer with the same scroll semantics as _log_box."""
+    w = _w() - 2
+    scroll_inner = max(1, inner - len(header))
+
+    lines  = _event_lines(events_path)
+    total  = len(lines)
+    offset = min(_scroll[view_key], max(0, total - scroll_inner))
+    _scroll[view_key] = offset
+
+    end   = total - offset
+    start = max(0, end - scroll_inner)
+    view  = lines[start:end]
+
+    if total > scroll_inner:
+        pct       = int(100 * end / total)
+        s_plain   = f" {pct}%  end" if offset == 0 else f" {pct}%  ↑{offset}"
+        s_display = dim(s_plain)
+    else:
+        s_plain, s_display = "", ""
+
+    dashes = max(0, w - len(title) - len(s_plain) - 3)
+    _ln(f"┌─ {bold(title)}{s_display} {'─' * dashes}┐")
+    for h_line in header:
+        pad = w - 1 - len(_plain(h_line))
+        _ln(f"│ {h_line}{' ' * max(pad, 0)}│")
+    for l in view:
+        pad = w - 1 - len(_plain(l))
+        _ln(f"│ {l}{' ' * max(pad, 0)}│")
+    for _ in range(scroll_inner - len(view)):
+        _ln(f"│{' ' * w}│")
+    _ln("└" + "─" * w + "┘")
+
+
 def _log_box(log_path, view_key, title, inner, header=()):
     """Render an accordion log box with exactly `inner` content rows into _buf.
 
@@ -1151,6 +1278,14 @@ def _render_all():
         inner = max(1, h - gpu_h - pipeline_h - 2 - BOTTOM_LINES)
         _log_box(STREAM_LOG, "stream", "Stream Log", inner,
                  header=(gen_rows[:1]))
+
+    elif _view == "events":
+        # Box 2 compact; events box expands at the bottom.
+        for row in box_lines("Pipeline", pipeline_rows):
+            _ln(row)
+        inner = max(1, h - gpu_h - pipeline_h - 2 - BOTTOM_LINES)
+        _event_box(EVENTS_LOG, "events", "Events (logs/events.jsonl)", inner,
+                   header=(pipeline_rows[:1] if pipeline_rows else ()))
 
     for row in _bottom_bar():
         _ln(row)
@@ -1230,8 +1365,8 @@ def _run_action(key):
     elif key == "s":
         _confirm    = "stop"
         _action_msg = red("■ stop pipeline — confirm? [y/n]")
-    elif key in ("1", "2", "3"):
-        _view = {"1": "monitor", "2": "pipeline", "3": "stream"}[key]
+    elif key in ("1", "2", "3", "4"):
+        _view = {"1": "monitor", "2": "pipeline", "3": "stream", "4": "events"}[key]
         global _prev_buf
         _prev_buf = []   # force full redraw on next frame — clears previous view's artifacts
     elif key == "UP"   and _view in _scroll: _scroll[_view] += SCROLL_STEP
@@ -1246,6 +1381,9 @@ def available_lines():
         gen_h = len(generation()) + 2
         return max(1, h - gpu_h - gen_h - 2 - BOTTOM_LINES)
     elif _view == "stream":
+        p_h = len(pipeline_status()) + 2
+        return max(1, h - gpu_h - p_h - 2 - BOTTOM_LINES)
+    elif _view == "events":
         p_h = len(pipeline_status()) + 2
         return max(1, h - gpu_h - p_h - 2 - BOTTOM_LINES)
     return 1
