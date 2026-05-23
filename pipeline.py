@@ -10047,13 +10047,14 @@ def clean_state(root: Path, project_dir: Path, manifest_path: Path,
         delete_source_files(project_dir, manifest_path)
 
     # Per-iteration documents, the project profile, and synthesized context (all per-project)
-    profile_path = project_dir / PROJECT_PROFILE_NAME
-    context_path = project_dir / PROJECT_CONTEXT_NAME
-    hash_path = project_dir / PROJECT_INPUTS_HASH_NAME
-    strategy_path = project_dir / COVERAGE_STRATEGY_NAME
+    profile_path       = project_dir / PROJECT_PROFILE_NAME
+    context_path       = project_dir / PROJECT_CONTEXT_NAME
+    hash_path          = project_dir / PROJECT_INPUTS_HASH_NAME
+    strategy_path      = project_dir / COVERAGE_STRATEGY_NAME
     strategy_hash_path = project_dir / COVERAGE_STRATEGY_HASH_NAME
+    state_path         = _state_path(project_dir)
     for p in [functional_req_path, genesis_path, profile_path, context_path, hash_path,
-              strategy_path, strategy_hash_path]:
+              strategy_path, strategy_hash_path, state_path]:
         if p.exists():
             p.unlink()
             _log(f"  Deleted {p.name}")
