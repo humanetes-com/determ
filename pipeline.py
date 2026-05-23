@@ -7905,10 +7905,42 @@ def _is_gen_tests_decl_only_src(content: str) -> bool:
     return no_block_comments.strip() == ""
 
 
-def _build_gen_tests_decl(sibling_name: str, n: int, allow_line: str) -> str:
-    """Build the one-line-ish `#[cfg(test)] ... mod gen_tests_N;` declaration."""
-    attrs = f"#[cfg(test)]\n{allow_line}\n" if allow_line else "#[cfg(test)]\n"
-    return f'\n{attrs}#[path = "{sibling_name}"]\nmod gen_tests_{n};\n'
+def _cluster_cfg_attr(cluster) -> str:
+    """Return the cfg predicate string that gates code to this cluster.
+
+    Empty string for the default (stable) cluster — no extra gate needed.
+    For clusters with one active_cfg flag: returns the bare flag name.
+    For multiple flags: combines via all(...).
+    """
+    if cluster is None or getattr(cluster, "is_default", True):
+        return ""
+    flags = list(getattr(cluster, "active_cfg", []) or [])
+    if not flags:
+        return ""
+    if len(flags) == 1:
+        return flags[0]
+    return "all(" + ", ".join(flags) + ")"
+
+
+def _build_gen_tests_decl(sibling_name: str, n: int, allow_line: str,
+                           cluster_cfg_attr: str = "") -> str:
+    """Build the one-line-ish `#[cfg(test)] ... mod gen_tests_N;` declaration.
+
+    cluster_cfg_attr (optional): cfg predicate gating this gen_tests mod to a
+    specific compiler cluster, e.g. "error_generic_member_access" for nightly.
+    When provided, the declaration is wrapped in #[cfg(<attr>)] so the sibling
+    file is silently excluded under any other cluster's flags. This is what
+    keeps task0c's per-cluster tests from breaking the harness when the next
+    cluster's pre-check runs.
+    """
+    lines: list[str] = []
+    if cluster_cfg_attr:
+        lines.append(f"#[cfg({cluster_cfg_attr})]")
+    lines.append("#[cfg(test)]")
+    if allow_line:
+        lines.append(allow_line)
+    lines.append(f'#[path = "{sibling_name}"]')
+    return "\n" + "\n".join(lines) + f"\nmod gen_tests_{n};\n"
 
 
 def _extract_gen_tests_body(block: str) -> str:
@@ -7952,17 +7984,21 @@ def _write_gen_tests_pass(
     block: str,
     allow_line: str,
     pass_n: int,
+    cluster_cfg_attr: str = "",
 ) -> Path:
     """Write the sibling file with extracted body, and write src_file with the decl appended.
 
     `src_text` is the source content WITHOUT this pass's declaration (caller-managed
     revert target). `pass_n` is the 1-indexed pass number.
+    `cluster_cfg_attr` (optional): cfg predicate used to scope this gen_tests
+    mod to a specific compiler cluster — see _build_gen_tests_decl.
     Returns the sibling file path.
     """
     sibling = _gen_tests_path(src_file, pass_n)
     body = _extract_gen_tests_body(block)
     sibling.write_text(body, encoding="utf-8")
-    decl = _build_gen_tests_decl(sibling.name, pass_n, allow_line)
+    decl = _build_gen_tests_decl(sibling.name, pass_n, allow_line,
+                                  cluster_cfg_attr=cluster_cfg_attr)
     src_file.write_text(src_text.rstrip() + decl, encoding="utf-8")
     return sibling
 
@@ -9625,6 +9661,23 @@ project-specific import paths, type construction patterns, and hard constraints.
                             f'\\1    {inject}\n',
                             block, count=1,
                         )
+
+                # Reject blocks with no #[test] functions before writing. The LLM
+                # occasionally returns a structurally valid mod block whose body
+                # is all imports / helpers / commentary and no actual test fn.
+                # Accepting it would clutter the source with a dead declaration,
+                # burn the next pass_n slot, and force a compile+quick-cov cycle
+                # that can't produce coverage. Counting #[test] and namespaced
+                # variants (#[tokio::test], #[async_std::test], ...) catches the
+                # common Rust test attributes without flagging #[cfg(test)].
+                _test_attr_count = len(re.findall(r'#\[(?:\w+::)*test\]', block))
+                if _test_attr_count == 0:
+                    _log(f"  [{module_name}] {rel_path} — LLM block has 0 #[test] functions; "
+                         f"skipping write (no productive content).")
+                    _log_task0c_attempt(project_dir, rel_path, attempt, block, "",
+                                       "no_tests_in_block")
+                    continue
+
                 # Write, compile-check, fix loop — keep iterating as long as errors
                 # are being resolved. Only revert when truly stuck (no improvement).
                 _block_prev_sigs: frozenset = frozenset()
@@ -9634,7 +9687,9 @@ project-specific import paths, type construction patterns, and hard constraints.
                 # path-mod declaration appended to abs_path. This isolates test
                 # code from the coverage tool's denominator without EXCL markers.
                 _sibling_path = _gen_tests_path(abs_path, _pass_n)
-                _decl = _build_gen_tests_decl(_sibling_path.name, _pass_n, _allow_line)
+                _cluster_attr = _cluster_cfg_attr(_current_cluster)
+                _decl = _build_gen_tests_decl(_sibling_path.name, _pass_n, _allow_line,
+                                              cluster_cfg_attr=_cluster_attr)
                 _src_with_decl = _raw_text.rstrip() + _decl
                 while True:
                     abs_path.write_text(_src_with_decl, encoding="utf-8")
@@ -9764,11 +9819,20 @@ project-specific import paths, type construction patterns, and hard constraints.
                     # previous quick-cov for this file was already known and the
                     # new value didn't increase, this block is concrete evidence
                     # that the LLM's current strategy isn't working — feed it
-                    # to the deep retrospective at stall_n == RETRO_DEEP_AT_STALL.
+                    # to the deep retrospective at stall_n == RETRO_DEEP_AT_STALL,
+                    # and immediately REVERT the block so the source file isn't
+                    # cluttered with dead gen_tests siblings that never produced
+                    # coverage. _pass_n is recomputed from disk on the next
+                    # generation attempt, so the slot is naturally reused.
                     _prev_qcov = file_last_qcov.get(rel_path)
                     file_last_qcov[rel_path] = _qcov
                     if _prev_qcov is not None and _qcov <= _prev_qcov:
                         file_failed_blocks.setdefault(rel_path, []).append(block)
+                        _log(f"  [{module_name}] {rel_path} — block produced no coverage "
+                             f"increase (was {_prev_qcov}, now {_qcov}); reverting.")
+                        _revert_gen_tests_pass(abs_path, _raw_text, _sibling_path)
+                        _block_committed = False
+                        file_last_qcov[rel_path] = _prev_qcov  # restore tracker too
 
             # Inner quick-retry: if quick-cov didn't reach 100% on a stalled or
             # few-lines-remaining file, immediately try a second focused generation
@@ -9826,7 +9890,8 @@ project-specific import paths, type construction patterns, and hard constraints.
                     _current_text = abs_path.read_text(encoding="utf-8")
                     _retry_pass_n = _next_gen_tests_n(abs_path)
                     _retry_sibling = _gen_tests_path(abs_path, _retry_pass_n)
-                    _retry_decl = _build_gen_tests_decl(_retry_sibling.name, _retry_pass_n, _allow_line)
+                    _retry_decl = _build_gen_tests_decl(_retry_sibling.name, _retry_pass_n, _allow_line,
+                                                        cluster_cfg_attr=_cluster_cfg_attr(_current_cluster))
                     _retry_sibling.write_text(_extract_gen_tests_body(_retry_block), encoding="utf-8")
                     abs_path.write_text(_current_text.rstrip() + _retry_decl, encoding="utf-8")
                     _retry_check = subprocess.run(
