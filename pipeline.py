@@ -4923,30 +4923,34 @@ class StaticTask1Synthesizer(Task1Synthesizer):
         existing_genesis = read(genesis_path)
         genesis_exists = bool(existing_genesis.strip())
         total_chars = sum(len(c) for _, c in test_files)
-        # Use synthesized context as fallback when README is absent (FR-017).
-        effective_context = project_context or readme_text
 
         if total_chars <= SINGLE_CALL_CHAR_LIMIT:
             ok = with_retry(lambda: self._single(
-                genesis_path, functional_req_path, test_files, effective_context,
-                existing_genesis, project_profile, coverage_strategy=coverage_strategy,
+                genesis_path, functional_req_path, test_files, readme_text,
+                existing_genesis, project_profile,
+                project_context=project_context,
+                coverage_strategy=coverage_strategy,
                 api_surface=api_surface,
             ))
         else:
             ok = self._chunked(
-                genesis_path, functional_req_path, test_files, effective_context,
-                existing_genesis, project_profile, coverage_strategy=coverage_strategy,
+                genesis_path, functional_req_path, test_files, readme_text,
+                existing_genesis, project_profile,
+                project_context=project_context,
+                coverage_strategy=coverage_strategy,
                 api_surface=api_surface,
             )
         return ok
 
     def _single(self, genesis_path, functional_req_path, test_files, readme_text,
-                existing_genesis, project_profile="", coverage_strategy="",
-                api_surface=""):
+                existing_genesis, project_profile="", project_context="",
+                coverage_strategy="", api_surface=""):
         genesis_exists = bool(existing_genesis.strip())
         tests_section = format_test_files(test_files)
         profile_section = (f"\n--- Project profile (language, build system, workspace layout) ---\n"
                            f"{project_profile}\n") if project_profile.strip() else ""
+        context_section = (f"\n--- Project context (behavioral summary) ---\n"
+                           f"{project_context}\n") if project_context.strip() else ""
 
         if not genesis_exists and not genesis_path.exists():
             write(genesis_path, "# genesis.md\n\n(populated by TASK 4 after first iteration)\n")
@@ -4954,6 +4958,7 @@ class StaticTask1Synthesizer(Task1Synthesizer):
         prompt = self._single_prompt(
             tests_section, readme_text, profile_section, existing_genesis,
             coverage_strategy=coverage_strategy, api_surface=api_surface,
+            context_section=context_section,
         )
         response = ask(prompt, model=_TASK1_MODEL)
         files = extract_files(response)
@@ -4972,67 +4977,44 @@ class StaticTask1Synthesizer(Task1Synthesizer):
 
     def _single_prompt(self, tests_section: str, readme_text: str, profile_section: str,
                        existing_genesis: str, coverage_strategy: str = "",
-                       api_surface: str = "") -> str:
+                       api_surface: str = "", context_section: str = "") -> str:
         """Return the prompt for single-call requirements extraction (overridable)."""
         strategy_section = (
             f"\n--- Coverage strategy (import patterns, type construction, test conventions) ---\n"
             f"{trim_to_line(coverage_strategy, _STRATEGY_CAP, "\n... (strategy truncated)")}\n"
         ) if coverage_strategy.strip() else ""
         api_section = _format_api_surface_section(api_surface)
-        genesis_exists = bool(existing_genesis.strip())
-        if genesis_exists:
-            return f"""You are working on a deterministic AI-driven software reconstruction experiment.
+        # genesis.md is always shown — when empty it carries a placeholder so the
+        # LLM understands it is the document that will accumulate retrospective
+        # findings across iterations and should be respected even before first fill.
+        if existing_genesis.strip():
+            genesis_section = (
+                f"\n--- genesis.md (methodology — read-only here; do not output or modify) ---\n"
+                f"{existing_genesis}\n"
+            )
+        else:
+            genesis_section = (
+                "\n--- genesis.md (methodology — empty for now; will be filled by retrospectives in later iterations) ---\n"
+                "(empty)\n"
+            )
+        return f"""You are working on a deterministic AI-driven software reconstruction experiment.
 
 The goal: given a project's test files and README, produce functional requirements precise
 enough that any implementation satisfying them will make all tests pass.
 
-Use the methodology in genesis.md below to guide your analysis.
-Use the README and test files to understand the language, framework, and project structure.
+Use the methodology in genesis.md below to guide your analysis (it may be empty on the
+first iteration — that is expected; it accumulates retrospective findings across loops).
+Use the README, project profile, project context, and test files to understand the
+language, framework, and project structure.
 
 README.md:
 {readme_text[:_README_CAP]}
-{profile_section}{strategy_section}{api_section}
+{profile_section}{context_section}{strategy_section}{api_section}
 Test files:
 {tests_section}
-
---- genesis.md (read-only -- do not output or modify it) ---
-{existing_genesis}
-
-Your task: produce functional_requirements.md by applying the genesis.md methodology to
-the test files above. Requirements must be complete enough that any implementation
-satisfying them will pass all tests.
-
-For each public function, method, or trait implementation, capture ALL of the following
-(not just the signature):
-- What it returns: the format, structure, and content of the return value.
-- Behavioral invariants: what must always be true of the output?
-- Any concrete examples visible in test assertions (copy them verbatim if present).
-A requirement like `fn generate() -> String` is insufficient. A requirement like
-`fn generate() -> String — returns a shell completion script string; tests assert it
-contains flag names and descriptions in the expected format` is actionable.
-
-CRITICAL: Every requirement must trace directly to a test call or assertion in the files above.
-Do NOT add items based on general knowledge of the crate, language, or domain.
-If no test calls it, do not include it.
-{FILE_FORMAT_INSTRUCTION}
-Only output the file `functional_requirements.md` using the markers above.
-"""
-        return f"""You are working on a deterministic AI-driven software reconstruction experiment.
-
-Given a project's test files and README, produce functional requirements precise enough
-that any implementation satisfying them will make all tests pass.
-
-Use the README and test files to understand the language, framework, and project context.
-Do not assume any specific language or technology -- derive everything from what you read.
-
-README.md:
-{readme_text[:_README_CAP]}
-{profile_section}{strategy_section}{api_section}
-Test files:
-{tests_section}
-
-Your task: produce functional_requirements.md -- complete functional requirements for this
-project that guarantee a passing implementation.
+{genesis_section}
+Your task: produce functional_requirements.md. Requirements must be complete enough that
+any implementation satisfying them will pass all tests.
 
 For each public function, method, or trait implementation, capture ALL of the following
 (not just the signature):
@@ -5095,11 +5077,12 @@ Output a plain structured list of the merged requirements. No filler, no code, n
         return str(raw) if raw is not False else None
 
     def _chunked(self, genesis_path, functional_req_path, test_files, readme_text,
-                 existing_genesis, project_profile="", coverage_strategy="",
-                 api_surface=""):
+                 existing_genesis, project_profile="", project_context="",
+                 coverage_strategy="", api_surface=""):
         _fixed = (
             min(len(readme_text), 2_000)
             + min(len(project_profile), 2_000)
+            + min(len(project_context), 2_000)
             + min(len(existing_genesis), 3_000)
             + min(len(coverage_strategy), 4_000)
             + 300   # type manifest header
@@ -5160,9 +5143,11 @@ Output a plain structured list of the merged requirements. No filler, no code, n
                     f"only add NEW requirements not yet covered): {type_list}\n"
                 )
 
-            profile_header = (f"\nProject context:\n{project_profile}\n") if project_profile.strip() else ""
+            profile_header = (f"\nProject profile:\n{project_profile}\n") if project_profile.strip() else ""
+            context_header = (f"\nProject context (behavioral summary):\n{project_context}\n"
+                              ) if project_context.strip() else ""
             prompt = self._chunk_prompt(i, total_chunks, readme_text, tests_section,
-                                       profile_header + type_manifest_header,
+                                       profile_header + context_header + type_manifest_header,
                                        genesis=existing_genesis, coverage_strategy=coverage_strategy,
                                        api_surface=api_surface)
 
@@ -5194,6 +5179,11 @@ Output a plain structured list of the merged requirements. No filler, no code, n
         genesis_exists = bool(existing_genesis.strip())
         profile_section = (f"\n--- Project profile (language, build system, workspace layout) ---\n"
                            f"{project_profile}\n") if project_profile.strip() else ""
+        context_section_chunked = (f"\n--- Project context (behavioral summary) ---\n"
+                                   f"{project_context}\n") if project_context.strip() else ""
+        # Concatenate profile + context so synthesizers downstream see both as one
+        # passed-through section (avoids changing every call signature).
+        profile_section = profile_section + context_section_chunked
 
         groups = [partial_requirements[i:i + SYNTHESIS_GROUP_SIZE]
                   for i in range(0, len(partial_requirements), SYNTHESIS_GROUP_SIZE)]
