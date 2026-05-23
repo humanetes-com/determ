@@ -7576,6 +7576,14 @@ class LlvmCovProvider(CoverageProvider):
                 abs_path = current_file if os.path.isabs(current_file) else str(project_dir / current_file)
                 rel = os.path.relpath(abs_path, project_str)
                 if rel.startswith("src" + os.sep) or rel.startswith("src/"):
+                    if COVERAGE_IGNORE_PRAGMA:
+                        try:
+                            src_lines = Path(abs_path).read_text(encoding="utf-8", errors="replace").splitlines()
+                            pragma_lnos = {i + 1 for i, ln in enumerate(src_lines) if COVERAGE_IGNORE_PRAGMA in ln}
+                            if pragma_lnos:
+                                line_hits = {ln: ct for ln, ct in line_hits.items() if ln not in pragma_lnos}
+                        except Exception:
+                            pass
                     covered   = sum(1 for c in line_hits.values() if c > 0)
                     coverable = len(line_hits)
                     traces    = [{"line": ln, "stats": {"Line": ct}} for ln, ct in sorted(line_hits.items())]
