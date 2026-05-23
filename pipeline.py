@@ -8589,6 +8589,27 @@ def _task0c_targeted_pragma(
             _log(f"  [targeted-pragma] {rel_path}: LLM returned no output.")
             return False
 
+    # Strip any // !! UNCOVERED annotations the LLM may have copied from the annotated
+    # prompt back into the output — these are prompt-only markers and must not persist
+    # in the source file.
+    _raw_llm_out = files_out[rel_path]
+    _cleaned_out = re.sub(r'\s*//\s*!!\s*UNCOVERED[^\n]*', '', _raw_llm_out)
+    if _cleaned_out != _raw_llm_out:
+        files_out[rel_path] = _cleaned_out
+        _log(f"  [targeted-pragma] {rel_path}: stripped leaked // !! UNCOVERED annotations from LLM output.")
+
+    # Ensure all uncov_lines actually have the pragma — the LLM sometimes returns the
+    # file unchanged.  Apply any missing pragmas programmatically to the LLM's output.
+    _out_lines = files_out[rel_path].splitlines(keepends=True)
+    _missed = 0
+    for _lno in sorted(uncov_lines):
+        if 1 <= _lno <= len(_out_lines) and COVERAGE_IGNORE_PRAGMA not in _out_lines[_lno - 1]:
+            _out_lines[_lno - 1] = _out_lines[_lno - 1].rstrip("\n") + f"  {COVERAGE_IGNORE_PRAGMA}\n"
+            _missed += 1
+    if _missed:
+        files_out[rel_path] = "".join(_out_lines)
+        _log(f"  [targeted-pragma] {rel_path}: LLM missed {_missed} pragma(s) — added programmatically.")
+
     # Reattach gen_* suffix so no accumulated tests are lost.
     _core_out = files_out[rel_path].rstrip("\n") + "\n"
     new_content = _core_out + _gen_suffix
