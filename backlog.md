@@ -1,5 +1,7 @@
 # Prompt-engineering backlog (May 2026)
 
+Please refer to plan.md for the execution plan.
+
 Open improvements to LLM prompts in pipeline.py, derived from a session-34 audit of
 all 27 ask() call sites. Each item has a priority, a one-line description, the
 affected sites, and a sketch of the change. "Done" entries stay listed (with their
@@ -12,6 +14,168 @@ P1 = small behavior change, ship after smoke tests pass.
 P2 = changes LLM behavior in a measurable way, validate on fixture + anyhow.
 
 ## Open
+
+### P1 — Pass `_current_cluster.excluded_cfg` explicitly to gen prompt RULES section
+- Site: main task0c gen prompt (~L9307 `_nightly_rules_for_cluster()`), medium-retry
+  prompt (~L9374).
+- Symptom: `_nightly_rules_for_cluster()` returns a prose sentence about nightly
+  features but doesn't enumerate the inactive cfg predicates by name. The LLM must
+  infer from prose whether `#[cfg(error_generic_member_access)]` is active or not. For
+  clusters with multiple excluded predicates this guessing is error-prone.
+- Fix: append an explicit machine-scannable block to both prompts:
+  `"Inactive cfg predicates in this cluster: <comma list>"`. Distinct from the
+  retrospective item (which targets classification) — this targets the generation
+  prompt so the LLM avoids writing tests that rely on inactive predicates.
+- Risk: low; purely additive context. `_describe_test_environment()` already shows
+  active/excluded cfg — this makes it appear in the RULES section too.
+
+### P1 — Surface per-file retrospective results in all-files-stalled log
+- Site: `task0c_augment_module` hard-block log (~L9808).
+- Symptom: when all files stall, the log shows uncovered line counts and attempt history
+  but not the CFG_GATED / UNREACHABLE / TESTABLE classification from `_task0c_retrospective`.
+  Operator cannot tell whether it's an expected ceiling (all CFG_GATED) or an actionable
+  failure (TESTABLE functions not reached).
+- Fix: append `file_retrospectives.get(rel_path, "(no retrospective)")` to the per-file
+  line in the hard-block log. `file_retrospectives` is already populated during augmentation.
+- Risk: low (log-only change). Also see BL-033 in BACKLOG.md.
+
+### P0 — TASK 0b RULES section has hardcoded anyhow-specific examples
+- Site: task0b_discovery prompt (~L4369-4371).
+- Symptom: the RULES section of the prompt shows literal examples:
+  `NEVER: use std::io or std::io::Error # not available...`
+  `NEVER: error_generic_member_access|Request|provide()|crate::nightly`
+  `NEVER: macro_export macros from internal mods  # e.g. anyhow!→...`
+  These look like observations but are actually anyhow-specific facts baked in as prompt
+  text. On any other project the model copies or generalises these as real observations,
+  polluting strategy.md with wrong NEVER rules.
+- Fix: move these three lines into a comment block prefixed `# EXAMPLE ONLY — replace:`.
+  Or remove them entirely and trust the model to derive NEVER rules from the source.
+- Risk: low; the examples are pedagogical, not functional — removing them loses nothing.
+
+### P1 — TASK 0c INTERNAL MODULE RULES section is anyhow-specific
+- Site: main gen prompt (~L9307-9337), medium-retry prompt (~L9547-9567).
+- Symptom: the INTERNAL MODULE RULES section hardcodes:
+  "This crate uses `#![no_std]` with `extern crate alloc`..."
+  "Do NOT use `#[macro_export]` macros (e.g. `anyhow!`, `bail!`, `ensure!`)..."
+  "anyhow's `Error` type is NOT `std::error::Error`..."
+  "When implementing StdError::source() in a test helper, the field type MUST be
+   `Box<dyn StdError>` (no Send+Sync)..."
+  These appear for EVERY project, not just anyhow. On a std crate with no special error
+  type, the `anyhow's Error` rule actively misleads the LLM. The no_std prelude rules
+  are wrong for std projects.
+- Fix: move these project-specific rules into the `RULES` section of coverage_strategy.md
+  (TASK 0b output), which IS project-derived. The generation prompt should read rules from
+  the strategy doc rather than embedding them as static strings. Remove anyhow-specific
+  strings from the prompt body; keep only truly universal rules (zero-arg test fns,
+  no PartialEq on non-PartialEq types, etc.).
+- Risk: medium; requires TASK 0b to reliably produce RULES that cover what the hardcoded
+  section covers. Validate on fixture + anyhow before removing the hardcoded block.
+
+### P1 — _PRELUDE_ITEMS injection is no_std-specific but runs for all crates
+- Site: ~L9437-9452, after block extraction in task0c_augment_module.
+- Symptom: pipeline injects `use std::string::{String, ToString}`, `use std::vec::Vec`,
+  `use std::boxed::Box` etc. into every generated test block regardless of whether the
+  crate is `#![no_std]`. For std crates these are redundant (already in prelude) and
+  cause "unused import" warnings; on stricter codebases they may be errors.
+- Fix: read the module's `src/lib.rs` for `#![no_std]` before deciding whether to inject
+  these prelude items. Only inject when `#![no_std]` is confirmed. The `extern crate alloc`
+  line is the clearest signal.
+- Risk: low; the injection only fires when the imports are absent, so in practice it
+  won't double-inject on std crates — but it does add noise.
+
+### P1 — _FILE_CONSTRAINTS dict is anyhow-specific and hardcoded in pipeline
+- Site: ~L9180-9260, inside task0c_augment_module.
+- Symptom: file-specific rules for error.rs, kind.rs, ptr.rs, fmt.rs, context.rs, lib.rs,
+  wrapper.rs are compiled into the pipeline source. These rules are genuinely useful for
+  anyhow but appear for any project with files of the same name (many Rust crates have
+  an error.rs or lib.rs). The context.rs rules specifically mention `Context` (anyhow's
+  trait) — on a different project Context may be a completely different type.
+- Fix: store per-file constraint notes in coverage_strategy.md under a new FILE_NOTES section.
+  TASK 0b already analyzes source — it can produce file-specific notes. Pipeline reads
+  `FILE_NOTES` section from strategy and injects matching entry by filename. Fall back to
+  the hardcoded table only if no TASK 0b note exists for that file.
+- Risk: high; the hardcoded rules prevent a large class of anyhow-specific compile errors.
+  Implement TASK 0b FILE_NOTES derivation first, validate it produces equivalent rules,
+  then remove the hardcoded table. Not a one-step change.
+
+### P1 — coverage_strategy.md never updated after TASK 4 learns type errors
+- Site: entire pipeline flow.
+- Symptom: TASK 0b writes coverage_strategy.md once at the start and it is read for the
+  entire run. TASK 4 may discover that the TYPES or PITFALLS section in strategy.md is
+  wrong (e.g. wrong construction expression for a type, a pitfall not listed). TASK 4
+  updates genesis.md but NOT strategy.md. TASK 0c on every subsequent pass still reads
+  the stale, wrong type hints. The error can recur for the entire run.
+- Fix: after TASK 4 updates genesis.md, optionally run a lightweight strategy patch call:
+  read the new genesis rules, check if any contradict strategy.md TYPES/PITFALLS lines,
+  emit targeted line replacements. This is additive — only update lines that have direct
+  evidence of being wrong. Do NOT regenerate the whole strategy (expensive and risky).
+- Risk: medium; needs careful scoping to avoid the patch call producing contradictions.
+
+### P2 — TASK 4 genesis hard-capped at 3,000 chars — middle content silently dropped
+- Site: task4() ~L6656: `_t4_genesis_cap = 3_000`.
+- Symptom: genesis is capped at 3k chars with head-weighted truncation (2k head / 1k
+  tail). As genesis grows over iterations (adding rules per failure), the middle sections
+  are invisible to TASK 4 when it decides what to update. TASK 4 updates genesis.md
+  based on a truncated view — it may re-add rules that are already in the middle, or fail
+  to notice conflicts with middle-section rules it can't see.
+- Fix: raise to `min(len(genesis), SINGLE_CALL_CHAR_LIMIT // 8)` — roughly 8-10k chars at
+  current context budget. This still fits easily in the TASK 4 prompt alongside test output
+  and functional_req. Use 50/50 head/tail split since new rules are often in the MIDDLE of
+  an evolving genesis, not just the tail.
+- Risk: low; larger genesis context gives TASK 4 better self-awareness at modest token cost.
+
+### P2 — TASK 2 has no visibility into previous iteration's generated code
+- Site: main reconstruction loop in main(), TASK 2 call path.
+- Symptom: TASK 2 regenerates all source files from scratch each iteration using only
+  functional_requirements.md + genesis.md. It cannot build on iteration N's "mostly
+  correct" code — it must re-derive everything. If iteration N had the right module
+  structure but one wrong function implementation, iteration N+1 may get the module
+  structure wrong again while fixing the function.
+- Fix: after TASK 3 fails, write a condensed summary of what the previous iteration's
+  code looked like (public function signatures + structural outline only, no bodies) to a
+  temp file. Pass it to TASK 2 as an additional context section: "Previous iteration
+  output (structure that COMPILED — use as a structural starting point, fix logic errors
+  only)." This gives the model a scaffold to build on rather than starting cold.
+- Risk: medium; may cause anchoring to previous mistakes. Only safe if the compile check
+  passed (build_ok). Add a flag TASK2_SCAFFOLD_PREVIOUS in .env to toggle.
+
+### P2 — old_block "do not repeat" instruction too far from the old_block content
+- Site: main task0c gen prompt, ~L9297 vs ~L9295 (secs['old_block'] near end).
+- Symptom: the instruction "Write ONLY new test functions... do NOT copy or repeat any
+  test from them" appears near the TOP of the generation prompt (before all the source
+  sections). The old_block content is rendered at the VERY END of the prompt. The LLM
+  must hold the "don't repeat" rule across potentially 100K chars of context. On large
+  prompts this attention gap increases repeat probability.
+- Fix: add a one-line reminder immediately BEFORE secs['old_block'] in the prompt:
+  `"↑ ALREADY ON DISK — do NOT copy any function from this block into your output:\n"`.
+  Keep the main instruction at top too — this is a duplicate for emphasis, not a move.
+- Risk: very low; purely additive.
+
+### P2 — what_worked section shows patterns but not which lines they covered
+- Site: _build_task0c_prompt_sections, what_worked_section (~L4507-4514).
+- Symptom: what_worked says "covered N more lines, reuse these patterns" with condensed
+  function signatures. The LLM cannot tell from a signature whether the pattern is
+  relevant to the specific uncovered lines it's now targeting.
+- Fix: store alongside the condensed signature which UNCOVERED lines it moved
+  (e.g. "covered lines {45, 67, 89} — pattern: `let e = Error::msg(…)`"). Inject as a
+  mapping: `line N: covered by pattern X`. The LLM can then prioritise patterns that
+  covered lines structurally similar to the current targets.
+- Risk: medium; requires storing line-to-pattern mapping in file_what_worked, not just
+  signatures. The mapping is available at the point the coverage improvement is measured.
+
+### P2 — TASK 1 prompt has no "derive only from tests" guardrail
+- Site: _single_prompt (~L4843-4904), chunk prompts.
+- Symptom: TASK 1 is asked to produce requirements from tests but no instruction
+  explicitly forbids inventing requirements for behaviors not in the test assertions.
+  With api_surface as structural ground truth, the model now knows the right shapes —
+  but it may still invent behavioral contracts (return values, error conditions) that
+  no test asserts. Requirements invented beyond what tests assert lead to TASK 2
+  implementing untested code paths.
+- Fix: add one sentence near the end of the requirements prompt: "Do not add a requirement
+  for any behavior unless you can point to a specific assertion in the tests above that
+  mandates it. Silence in the tests = no requirement for that behavior."
+- Risk: low. Purely additive constraint. May slightly reduce requirement document length
+  (which is a feature, not a bug — more precise requirements = fewer false TASK 2 targets).
 
 ### P1 — Pass `_current_cluster.excluded_cfg` to retrospective classifier
 - Site: `_task0c_retrospective` (~L8104).

@@ -1,5 +1,7 @@
 # Pipeline Backlog
 
+Please refer to plan.md for the execution plan.
+
 Items are ordered by priority. Each entry has a status: `open`, `in-progress`, `done`.
 
 ---
@@ -216,6 +218,89 @@ Foundation for BL-022 through BL-025. No task reads from this store until its co
 **Status:** done (implemented as part of BL-003/BL-004/BL-007 whole-folder approach)
 **Context:** The TASK 0c prompt never showed the LLM what dependencies were available in `[dependencies]`. This caused the LLM to generate `use serde::` when serde wasn't a dependency.
 **What was built:** Cargo.toml content is now always-included (priority 1) in every TASK 0c per-file prompt.
+
+---
+
+## BL-026 — BUG: sys.exit(1) inside task0c_augment_module bypasses outer cluster loop
+**Status:** open
+**Severity:** high — kills the whole pipeline process instead of returning to the cluster loop.
+**Location:** pipeline.py ~line 9816, inside `task0c_augment_module`.
+**Root cause:** When every file hits `FILE_STALL_LIMIT` consecutive no-improvement attempts within a single pass, the function calls `sys.exit(1)`. This prevents the outer `ModuleAugmentState.hard_block` path from handling the situation: the cluster-level git commit is skipped, resume state is not written, and the pipeline exits with no recovery path.
+**What to build:** Replace `sys.exit(1)` at line 9816 with a `return (coverage, covered_lines, False)` (or a new `_all_files_stalled=True` return element). The outer cluster loop already has hard_block handling — let it decide whether to accept the module and proceed.
+**Expected gain:** All-files-stalled scenario handled gracefully: git commit written, sentinel written, outer loop can move to the next module instead of crashing.
+
+---
+
+## BL-027 — BUG: monitor wipe confirmation message never clears
+**Status:** open
+**Severity:** minor UX — yellow "↺ wiping and restarting with <url>" stays visible forever after a wipe.
+**Location:** monitor.py `_run_action()` wipe branch (~line 998).
+**Root cause:** `_action_msg` is set to the yellow wipe message when wipe is confirmed. Nothing ever clears it — not when wipe.sh finishes, not when the pipeline comes back up.
+**What to build:** In the render loop, detect the transition from pipeline-not-running to pipeline-running (which happens after wipe.sh starts the pipeline). When that transition fires, clear `_action_msg` if it matches the wipe/graceful pattern. Alternatively: timestamp `_action_msg` and auto-expire after 60s.
+**Expected gain:** The bottom message resets to the default state once the restarted pipeline is detected.
+
+---
+
+## BL-028 — BUG: monitor shows stale "all clusters covered" after early pipeline crash
+**Status:** open
+**Severity:** misleading UX — monitor displays completed state from previous run when pipeline crashes before modifying pipeline_state.md.
+**Root cause:** `_parse_pipeline_state()` reads pipeline_state.md from disk. When the pipeline crashes on startup (e.g. missing dependency, vLLM not ready), no new state is written. The monitor reads the previous run's completed state and shows all clusters done and coverage numbers that reflect the old run.
+**What to build:** In `_parse_pipeline_state()`, cross-check the "done" timestamps against the pipeline process start time (`_pipeline_start_time()`). If a phase was marked done BEFORE the current pipeline started, treat it as stale (show as `(stale)` rather than done). Already done for coverage JSON — same logic needed for pipeline_state.md parse.
+**Expected gain:** Monitor accurately shows pipeline state is from a previous run when the current pipeline hasn't written any new state yet.
+
+---
+
+## BL-029 — CLEANUP: task0c_coverage_augmentation() is dead code
+**Status:** open
+**Severity:** low — confusion risk, maintenance overhead.
+**Location:** pipeline.py ~line 9833, function `task0c_coverage_augmentation`.
+**Root cause:** This was the pre-cluster TASK 0c implementation. The cluster-based loop in `main()` replaced it entirely. The function is never called. It still references the old tarpaulin-based coverage loop without cluster awareness.
+**What to build:** Delete the function (lines ~9833–9906). Verify `grep task0c_coverage_augmentation pipeline.py` shows only the definition. Update tests if any reference it.
+**Expected gain:** Removes ~75 lines of confusing dead code that could mislead anyone reading the pipeline.
+
+---
+
+## BL-030 — BUG: ModuleAugmentState accepts ceiling on a single at_ceiling pass
+**Status:** open
+**Severity:** medium — can lock a module at artificially low coverage when LLVM misreports all lines as covered for one pass.
+**Location:** pipeline.py `ModuleAugmentState.status()` ~line 3415, and `_pass_had_work` logic in `task0c_augment_module` ~line 9800.
+**Root cause:** `status()` returns `'ceiling'` the first time `last_at_ceiling=True`. `at_ceiling` is True when `_pass_had_work=False` (no LLM calls made because all files were filtered). One pass where all files are filtered by cfg/artifact is enough to permanently accept the module — even if the previous pass showed substantial uncovered lines.
+**What to build:** Either:
+- Track a consecutive `ceiling_passes` counter in `ModuleAugmentState`. Only return `'ceiling'` when `ceiling_passes >= 2` (two consecutive all-filtered passes).
+- OR require `last_pct >= cluster_ceiling_estimate * 0.95` before accepting ceiling.
+The second option requires passing `cluster_ceiling_pct` into `ModuleAugmentState` or into `status()`.
+**Session 34 handover** noted this as a known caveat: "fake ceiling at low coverage" is not structurally prevented.
+**Expected gain:** Single-pass LLVM noise doesn't permanently lock a module at low coverage.
+
+---
+
+## BL-031 — BUG: graceful stop _graceful_pending flag never auto-clears in monitor
+**Status:** open
+**Severity:** minor UX — graceful-pending banner stays visible after the pipeline actually consumed the sentinel.
+**Location:** monitor.py, global `_graceful_pending` usage (~lines 781, 1026–1048).
+**Root cause:** When the pipeline consumes `/tmp/pipeline_graceful_stop` (deletes the file), the monitor's `_graceful_pending` flag remains True. The user must press `g` again to cancel the display manually. The monitor has no polling to detect that the sentinel was consumed.
+**What to build:** In the render loop (or in the status function), check: if `_graceful_pending` is True AND `/tmp/pipeline_graceful_stop` does NOT exist AND pipeline is running → auto-clear `_graceful_pending`. The pipeline deletes the sentinel the moment it picks it up, so this is a reliable signal.
+**Expected gain:** Graceful banner disappears automatically once the pipeline has processed the stop request, without requiring user intervention.
+
+---
+
+## BL-032 — cluster_pre_check failure marked "done" — indistinguishable from success
+**Status:** open
+**Severity:** medium — misleading pipeline_state.md; 0.0% coverage modules silently proceed to strip.
+**Location:** pipeline.py main cluster loop ~line 10742, `mark_cluster_augmented(..., 0.0)`.
+**Root cause:** When `_cluster_pre_check` fails, all modules are marked augmented at 0.0% with no error status. `pipeline_state.md` shows `task0c/<cluster>/<module>` as "done" with `0.0%`. The monitor shows the cluster as complete. The subsequent strip phase sees a 0.0% sentinel and logs a WARNING but proceeds anyway. Reconstruction from 0% test coverage produces poor results.
+**What to build:** Introduce a distinct "skip" or "error" status in `_mark_phase`. Use it when pre-check forces all modules to 0.0%. The monitor can display this distinctly (e.g. red "pre-check failed") instead of green "done". The strip phase can refuse to proceed if the sentinel contains a pre-check-error marker.
+**Expected gain:** Operator sees immediately that a cluster was skipped due to toolchain failure and can intervene before reconstruction starts from near-zero coverage.
+
+---
+
+## BL-033 — all-files-stalled log should include per-file retrospective results
+**Status:** open
+**Severity:** minor — harder to diagnose why augmentation failed without retrospective summaries.
+**Location:** pipeline.py ~line 9808–9815, the hard-block log inside `task0c_augment_module`.
+**Root cause:** The log shows uncovered line counts and attempt history for each stalled file, but not the retrospective classification (CFG_GATED / UNREACHABLE / TESTABLE / NEEDS_INTERNALS) computed for each. If a file is stalled because every uncovered function was classified CFG_GATED, that's a success (expected ceiling). If classified TESTABLE, it's an actionable failure. Without this, the operator can't distinguish the two cases from the log.
+**What to build:** In the hard-block log, append `file_retrospectives.get(rel_path, "(no retrospective)")` for each stalled file. `file_retrospectives` is already populated by `_task0c_retrospective` calls.
+**Expected gain:** Hard-block log clearly shows whether each stalled file is a genuine ceiling (CFG_GATED/UNREACHABLE) or a prompt/design failure (TESTABLE).
 
 ---
 

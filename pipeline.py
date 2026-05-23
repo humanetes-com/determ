@@ -3395,17 +3395,23 @@ class ModuleAugmentState:
     total_passes: int = 0
     best_covered_lines: int = -1
     stall_passes: int = 0    # consecutive passes with no improvement in covered count
+    ceiling_passes: int = 0  # consecutive passes where task0c reported at_ceiling
     last_pct: float = 0.0
     last_covered: int = 0
     last_at_ceiling: bool = False
 
     STALL_LIMIT: int = 10
+    CEILING_CONFIRM: int = 2  # consecutive at_ceiling reports required before accepting ceiling
 
     def record_pass(self, pct: float, covered: int, at_ceiling: bool) -> None:
         self.total_passes += 1
         self.last_pct = pct
         self.last_covered = covered
         self.last_at_ceiling = at_ceiling
+        if at_ceiling:
+            self.ceiling_passes += 1
+        else:
+            self.ceiling_passes = 0
         if covered > self.best_covered_lines:
             self.best_covered_lines = covered
             self.stall_passes = 0
@@ -3417,7 +3423,7 @@ class ModuleAugmentState:
             return 'done'
         if crate_type == 'proc-macro':
             return 'done'
-        if self.last_at_ceiling:
+        if self.ceiling_passes >= self.CEILING_CONFIRM:
             return 'ceiling'
         if self.stall_passes >= self.STALL_LIMIT:
             return 'hard_block'
@@ -7057,6 +7063,51 @@ def _cargo_env() -> dict:
     return env
 
 
+def _describe_test_environment() -> str:
+    """Return a prompt-ready description of the cargo subprocess env.
+
+    The pipeline knows which env vars and cfg predicates are set for the
+    test process; the LLM doesn't. Without this signal, the LLM can propose
+    strategies that the pipeline knows can't work — for example writing tests
+    that try to enable a feature whose env var was never set in the parent
+    process. Describe the env factually; let the LLM draw its own implications.
+
+    Generic across projects: only states what IS / IS NOT set + the active
+    test runner. No project-specific reasoning is baked in.
+    """
+    env = _cargo_env()
+
+    # Variables the LLM should always see if present.
+    visible = ("RUSTFLAGS", "CARGO_TERM_COLOR", "RUSTUP_TOOLCHAIN")
+    # Variables whose ABSENCE is informative — std libs commonly gate behavior
+    # on these and cache the lookup at process start, so per-test set_var
+    # doesn't help.
+    notable = ("RUST_BACKTRACE", "RUST_LIB_BACKTRACE", "RUST_LOG")
+
+    lines = [
+        "--- Test environment (cargo subprocess under coverage instrumentation) ---",
+    ]
+    for k in visible:
+        if k in env:
+            lines.append(f"  {k} = {env[k]!r}")
+    unset = [k for k in notable if k not in env]
+    if unset:
+        lines.append(f"  NOT SET in parent process: {', '.join(unset)}")
+        lines.append(
+            "  Code paths whose execution depends on these variables (env-gated "
+            "logging, backtrace capture, etc.) are unreachable from this test run."
+        )
+
+    if _current_cluster is not None:
+        active = ", ".join(_current_cluster.active_cfg) if _current_cluster.active_cfg else "(none)"
+        excluded = ", ".join(_current_cluster.excluded_cfg) if _current_cluster.excluded_cfg else "(none)"
+        lines.append(f"  active cfg predicates: {active}")
+        lines.append(f"  excluded cfg predicates: {excluded}")
+
+    lines.append("  test runner: `cargo test --test-threads=1` (under cargo-llvm-cov instrumentation)")
+    return "\n".join(lines) + "\n"
+
+
 def _crate_name_from_toml(module_dir: Path, fallback: str) -> str:
     """Extract `name` from Cargo.toml and normalise hyphens to underscores."""
     toml = module_dir / "Cargo.toml"
@@ -8364,10 +8415,12 @@ def _task0c_retrospective(
             "the same target was previously classified TESTABLE, the classification was\n"
             f"wrong — revise it now.\n\n{chr(10).join(_shown)}\n\n"
         )
+    _env_section = _describe_test_environment()
     prompt = (
         f"You generated tests for `{rel_path}` but some lines remain uncovered.\n"
         f"{_count_line}"
         f"For each function still marked `// !! UNCOVERED` below, classify it and suggest what to try.\n\n"
+        f"{_env_section}\n"
         f"{_guard_section}"
         f"{_history_section}"
         f"{_unproductive_section}"
@@ -8378,9 +8431,9 @@ def _task0c_retrospective(
         f"FUNCTION <name>: <category> — <one sentence reason or concrete suggestion>\n\n"
         f"Categories:\n"
         f"(a) TESTABLE — coverable with a different approach; describe the specific approach\n"
-        f"(b) CFG_GATED — inside #[cfg(feature=...)] or #[cfg(error_generic_member_access)]; untestable on stable\n"
+        f"(b) CFG_GATED — inside #[cfg(feature=...)] or excluded by the test environment above; untestable in this run\n"
         f"(c) UNREACHABLE — unreachable!() arm, dead branch, or intrinsically dead code; add tarpaulin ignore\n"
-        f"(d) NEEDS_INTERNALS — requires private state, unsafe vtable dispatch, or internal construction not accessible from inline tests\n"
+        f"(d) NEEDS_INTERNALS — requires private state, unsafe vtable dispatch, env vars not set in the parent process, or internal construction not accessible from inline tests\n"
     )
     result = ask(prompt, model=_TASK0C_MODEL, max_tokens=4096, think=None)
     lines = [l.strip() for l in result.splitlines() if l.strip().startswith("FUNCTION")]
@@ -9241,10 +9294,11 @@ corrected content here
                 )
             ) if coverage > 0 else ""
 
+            _env_section = _describe_test_environment()
             prompt = f"""You are writing Rust unit tests that specify the behavioral contract of source code.
 {secs['strategy']}{secs['history']}{secs['what_worked']}{secs['retrospective']}{secs['context']}{_coverage_status}
 Target file: {rel_path}
-{secs['cargo']}{secs['full_source']}{secs['fn_bodies']}{secs['symbols']}{secs['examples']}{secs['integ_tests']}{secs['siblings']}{secs['old_block']}
+{_env_section}{secs['cargo']}{secs['full_source']}{secs['fn_bodies']}{secs['symbols']}{secs['examples']}{secs['integ_tests']}{secs['siblings']}{secs['old_block']}
 Write a `#[cfg(test)] mod {mod_name}` block for `{rel_path}`.
 {"Write ONLY new test functions for the uncovered lines in fn_bodies above. The existing test module(s) shown are already on disk — do NOT copy or repeat any test from them." if _old_block else "Write a new test block covering the uncovered lines shown in fn_bodies above."}
 
@@ -9332,6 +9386,7 @@ INTERNAL MODULE RULES — these tests live inside the source file, not in an ext
                     _query = (
                         f"You are writing Rust unit tests for `{rel_path}`.\n"
                         f"Target file: {rel_path}\n"
+                        f"{_describe_test_environment()}"
                         f"{secs['cargo']}{secs['full_source']}{secs['fn_bodies']}{secs['symbols']}"
                         f"{_medium_rules}"
                         f"\nWrite a `#[cfg(test)] mod {mod_name}` block covering the uncovered lines shown above.\n"
@@ -9762,9 +9817,11 @@ INTERNAL MODULE RULES — these tests live inside the source file, not in an ext
             for sf in sorted(skipped_files):
                 n_uncov = len(uncovered_by_file.get(sf, (None, set()))[1])
                 history = _get_task0c_history(project_dir, sf)
-                _log(f"    {sf}: {n_uncov} uncovered lines. Last attempts:\n{history}")
+                retro = file_retrospectives.get(sf, "")
+                retro_note = f"\n      retrospective: {retro[:300]}" if retro else ""
+                _log(f"    {sf}: {n_uncov} uncovered lines. Last attempts:\n{history}{retro_note}")
             _log(f"  Action required: improve the generation prompt or add manual tests for these files.")
-            sys.exit(1)
+            return coverage, covered_lines, False
 
         # --- Graceful stop check ---
         # If /tmp/pipeline_graceful_stop exists, finish this attempt cleanly and exit.
@@ -9779,82 +9836,6 @@ INTERNAL MODULE RULES — these tests live inside the source file, not in an ext
 
     _log(f"  [{module_name}/{_cluster_label}] Finished augmentation: {coverage:.1f}% coverage after {attempt} attempt(s).")
     return coverage, covered_lines, _at_ceiling
-
-
-def task0c_coverage_augmentation(
-    project_dir: Path,
-    dep_graph: DependencyGraph,
-    modules: list[str],
-    test_command: str,
-) -> None:
-    """
-    TASK 0c: Drive each module to 100% unit-test coverage using cargo tarpaulin.
-    Requires full implementation to be present — run before strip_to_tests.py.
-    Writes COVERAGE_AUGMENT_SENTINEL when complete.
-    """
-    sentinel = project_dir / COVERAGE_AUGMENT_SENTINEL
-    if sentinel.exists():
-        _log("\nTASK 0c: Already done (.coverage_augmented exists) — skipping.")
-        return
-
-    if not TARPAULIN_BIN.exists():
-        raise RuntimeError(
-            f"HARD STOP: cargo-tarpaulin not found at {TARPAULIN_BIN}. "
-            "Install with: cargo install cargo-tarpaulin --features vendored-openssl"
-        )
-
-    _log("\nTASK 0c: Coverage augmentation — driving all modules to 100% unit-test coverage")
-
-    is_multi = len(modules) > 1
-    if not is_multi:
-        mod_name = modules[0] if modules else project_dir.name
-        work_list = [(mod_name, project_dir, "lib")]
-    else:
-        work_list = [
-            (mod_name, dep_graph.crate_dir(mod_name), dep_graph.crate_type(mod_name))
-            for mod_name in modules
-        ]
-
-    # Measure baseline coverage for each module and sort descending.
-    # Modules with more existing tests give the LLM more signal to pattern-match
-    # against when generating new tests. 0%-coverage modules go last — they require
-    # pure invention and benefit from the LLM having "warmed up" on easier cases.
-    # Topo order is irrelevant here: the full implementation is present, so all
-    # modules compile regardless of which order we process them.
-    if len(work_list) > 1:
-        _log("\nTASK 0c: Measuring baseline coverage to determine augmentation order...")
-        baseline: list[tuple[float, str, Path, str]] = []
-        for mod_name, mod_dir, crate_type in work_list:
-            if "proc-macro" in crate_type.lower():
-                cov = 100.0  # will be skipped anyway
-            else:
-                cov, _, _, _ = _run_tarpaulin(project_dir, mod_name)
-            _log(f"  {mod_name}: {cov:.1f}%")
-            baseline.append((cov, mod_name, mod_dir, crate_type))
-        baseline.sort(key=lambda x: x[0], reverse=True)
-        work_list = [(mod_name, mod_dir, crate_type) for _, mod_name, mod_dir, crate_type in baseline]
-        _log(f"  Augmentation order: {[m for m, _, _ in work_list]}")
-
-    existing_test_files = collect_protected_test_files(project_dir)
-    results: list[tuple[str, float]] = []
-
-    for mod_name, mod_dir, crate_type in work_list:
-        _log(f"\n  {'='*50}")
-        _log(f"  Module: {mod_name}  [{crate_type}]")
-        final_cov, _, _ = task0c_augment_module(project_dir, mod_name, mod_dir, crate_type,
-                                               existing_test_files=existing_test_files)
-        results.append((mod_name, final_cov))
-
-    _log(f"\nTASK 0c complete. Coverage summary:")
-    for mod_name, cov in results:
-        status = "OK" if cov >= 100.0 else f"PARTIAL ({cov:.1f}%)"
-        _log(f"  {mod_name}: {status}")
-
-    overall = sum(c for _, c in results) / len(results) if results else 0.0
-    lines = [f"{name}: {cov:.1f}%" for name, cov in results]
-    lines.append(f"overall: {overall:.1f}%")
-    sentinel.write_text("\n".join(lines))
-    _log(f"  Sentinel written: {COVERAGE_AUGMENT_SENTINEL} (overall {overall:.1f}%)")
 
 
 # ---------------------------------------------------------------------------
@@ -10691,6 +10672,8 @@ def main():
             _pc_mod = next((m for m in modules if m not in _cluster_done), modules[0])
             if not _cluster_pre_check(project_dir, _pc_mod, _cluster):
                 _log(f"  cluster/{_cluster.name}: pre-check failed — skipping all modules.")
+                _mark_phase(project_dir, f"task0c/{_cluster.name}", "error",
+                            detail="pre-check failed — cluster skipped", source_hash=_src_hash)
                 for _m in modules:
                     if _m not in _cluster_done:
                         mark_cluster_augmented(project_dir, _cluster.name, _m, 0.0)

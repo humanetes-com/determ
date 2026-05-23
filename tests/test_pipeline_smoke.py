@@ -116,6 +116,46 @@ mod gen_tests_1 {
     print("  OK  gen_tests helpers")
 
 
+def test_describe_test_environment() -> None:
+    """_describe_test_environment should describe what cargo sees: the env
+    vars set, the env vars notably NOT set, the cluster cfg state, and the
+    test runner. Used as prompt context so the LLM stops proposing strategies
+    that depend on env vars the pipeline doesn't actually set."""
+    import pipeline
+
+    desc = pipeline._describe_test_environment()
+    # Header is recognisable so prompt assembly can identify the section.
+    assert "Test environment" in desc
+    # Always-present env keys.
+    assert "RUSTFLAGS" in desc
+    # The pipeline deliberately does NOT set RUST_BACKTRACE; the description
+    # must surface that absence so env-dependent strategies are flagged.
+    assert "RUST_BACKTRACE" in desc
+    assert "NOT SET" in desc
+    # Should mention the test runner so the LLM knows the invocation shape.
+    assert "cargo test" in desc
+
+    # When a cluster is active, the cluster's cfg state should appear.
+    original_cluster = pipeline._current_cluster
+    try:
+        pipeline._current_cluster = pipeline.BuildCluster(
+            name="nightly",
+            env_extra={},
+            tarpaulin_exclude_files=[],
+            excluded_cfg=["target_has_atomic_load_store"],
+            active_cfg=["error_generic_member_access"],
+            prompt_nightly_rule="",
+        )
+        desc2 = pipeline._describe_test_environment()
+        assert "active cfg predicates" in desc2
+        assert "error_generic_member_access" in desc2
+        assert "excluded cfg predicates" in desc2
+    finally:
+        pipeline._current_cluster = original_cluster
+
+    print("  OK  _describe_test_environment")
+
+
 def test_retrospective_prompt_includes_failed_attempts() -> None:
     """When unproductive_blocks is non-empty, the retrospective prompt must
     surface them as concrete evidence so the LLM can revise a TESTABLE call.
@@ -367,8 +407,19 @@ def test_module_augment_state() -> None:
     s.record_pass(12.0, 1, False)
     assert s.status("proc-macro") == "done"
 
-    # 3. Ceiling — at_ceiling=True maps to 'ceiling' (used to accept the module).
+    # 3. Ceiling — requires CEILING_CONFIRM (2) consecutive at_ceiling passes.
     s = pipeline.ModuleAugmentState("m", "stable")
+    s.record_pass(45.0, 12, True)
+    assert s.status("lib") == "retry", "single at_ceiling should not yet trigger ceiling"
+    s.record_pass(45.0, 12, True)
+    assert s.status("lib") == "ceiling", "two consecutive at_ceiling passes should trigger ceiling"
+
+    # 3b. Ceiling counter resets on a non-ceiling pass.
+    s = pipeline.ModuleAugmentState("m", "stable")
+    s.record_pass(45.0, 12, True)
+    s.record_pass(45.0, 12, False)   # resets ceiling_passes
+    s.record_pass(45.0, 12, True)
+    assert s.status("lib") == "retry", "ceiling counter should reset on non-ceiling pass"
     s.record_pass(45.0, 12, True)
     assert s.status("lib") == "ceiling"
 
@@ -524,6 +575,7 @@ def main() -> int:
     test_has_gen_tests_decl()
     test_api_surface_capture()
     test_api_surface_conformance()
+    test_describe_test_environment()
     test_retrospective_prompt_includes_failed_attempts()
     test_module_augment_state()
 
