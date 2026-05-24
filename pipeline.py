@@ -461,6 +461,14 @@ def ask(prompt: str, system: str | None = None, model: str | None = None,
 
     _prompt_meta = _store_prompt_content(prompt)
     _system_meta = _store_prompt_content(system) if system else None
+    # Budget-utilization warning: flag prompts that consume most of the input
+    # window so silent overflows surface in logs.
+    _prompt_len = len(prompt) + (len(system) if system else 0)
+    if _prompt_len > SINGLE_CALL_CHAR_LIMIT * 90 // 100:
+        _guard("prompt/budget_high",
+               f"prompt {_prompt_len:,} chars = "
+               f"{_prompt_len * 100 // max(1, SINGLE_CALL_CHAR_LIMIT)}% of "
+               f"SINGLE_CALL_CHAR_LIMIT ({SINGLE_CALL_CHAR_LIMIT:,})")
     _emit("llm.request", data={
         "model": model or MODEL,
         "prompt": _prompt_meta,
@@ -5094,7 +5102,10 @@ class StaticTask1Synthesizer(Task1Synthesizer):
                 "(empty)\n"
             )
         return f"""You are working on a deterministic AI-driven software reconstruction experiment.
-{_TASK1_THINKING_DIRECTIVE}The goal: given a project's test files and README, produce functional requirements precise
+{_TASK1_THINKING_DIRECTIVE}{FILE_FORMAT_INSTRUCTION}
+Your output MUST be the file `functional_requirements.md` wrapped in the FILE markers above.
+
+The goal: given a project's test files and README, produce functional requirements precise
 enough that any implementation satisfying them will make all tests pass.
 
 Use the methodology in genesis.md below to guide your analysis (it may be empty on the
@@ -5123,8 +5134,12 @@ contains flag names and descriptions in the expected format` is actionable.
 CRITICAL: Every requirement must trace directly to a test call or assertion in the files above.
 Do NOT add items based on general knowledge of the crate, language, or domain.
 If no test calls it, do not include it.
-{FILE_FORMAT_INSTRUCTION}
-Only output the file `functional_requirements.md` using the markers above.
+
+Test helpers vs. production API:
+- Do NOT include `fn test_*` or `#[test]` functions — these are the tests, not the code under test.
+  Extract the APIs that the test functions CALL (the production symbols being exercised).
+- Do NOT include test fixtures, mock builders, or helper utilities defined in the test files.
+  Only extract the real production API the tests depend on.
 """
 
     def _synthesize_group(self, group_partials: list[str], group_idx: int, total_groups: int,
@@ -5141,8 +5156,28 @@ Only output the file `functional_requirements.md` using the markers above.
         ) if genesis.strip() else ""
         api_section = _format_api_surface_section(api_surface)
 
-        # Fill-down: measure fixed overhead, give remainder to the partials being merged.
-        _fixed_overhead = len(genesis_section) + len(api_section) + 3_000
+        # Fill-down: render the scaffold with sized sections empty so the
+        # overhead is exact (no hardcoded estimate).
+        _readme_cap_str = readme_text[:_README_CAP]
+        _merge_scaffold = f"""You are merging a group of partial functional requirements extracted from test files.
+
+This is group {group_idx} of {total_groups}. Each entry was extracted independently from a chunk
+of test files. Your task: produce a single, deduplicated, concise summary of all requirements
+in this group. Preserve all specific types, function signatures, error conditions, and invariants.
+Remove duplicate entries. Do not invent new requirements not present in the input.
+
+README.md (for language/framework context):
+{_readme_cap_str}
+
+Partial requirements to merge:
+
+
+Output a plain structured list of the merged requirements. No filler, no code, no headers.
+"""
+        _fixed_overhead = (
+            len(_merge_scaffold) + len(profile_section)
+            + len(genesis_section) + len(api_section)
+        )
         _combined_cap = max(10_000, SINGLE_CALL_CHAR_LIMIT - _fixed_overhead)
         _combined_raw = "\n\n".join(group_partials)
         combined = smart_truncate(_combined_raw, total_limit=_combined_cap,
@@ -5156,7 +5191,7 @@ in this group. Preserve all specific types, function signatures, error condition
 Remove duplicate entries. Do not invent new requirements not present in the input.
 {profile_section}{genesis_section}{api_section}
 README.md (for language/framework context):
-{readme_text[:_README_CAP]}
+{_readme_cap_str}
 
 Partial requirements to merge:
 {combined}
@@ -5422,8 +5457,6 @@ requirements for this specific project.
 
 CRITICAL: Only include items present in the chunk extractions above.
 Do NOT add requirements based on general knowledge of the project or language.
-{FILE_FORMAT_INSTRUCTION}
-Only output the file `functional_requirements.md` using the markers above.
 """
 
     def _chunk_prompt(self, chunk_idx: int, total_chunks: int, readme_text: str,
@@ -5506,7 +5539,7 @@ Test files:
 
 Your task: produce functional_requirements.md as a precise API contract document.
 For every function, method, struct, enum, trait, or module that the tests call or assert:
-  - Exact module path or import (e.g. `argh::from_env`, `argh_derive::ArghParser`)
+  - Exact module path or import (e.g. `crate_name::function_name`, `crate_name::TypeName`)
   - Full function/method signature: name, argument names and types, return type
   - Struct/enum/trait definition: fields with types, variants, trait methods with signatures
   - Error types returned or matched
@@ -5542,9 +5575,36 @@ Rules:
             f"{trim_to_line(coverage_strategy, _STRATEGY_CAP, "\n... (strategy truncated)")}\n"
         ) if coverage_strategy.strip() else ""
         api_section = _format_api_surface_section(api_surface)
+        _readme_cap_str = readme_text[:_README_CAP]
+        _contract_synthesis_scaffold = f"""You are producing the final API contract document from contract extractions
+across all test chunks. This is the last step of a contract-first TDD reconstruction.
+{FILE_FORMAT_INSTRUCTION}
+Your output MUST be the file `functional_requirements.md` wrapped in the FILE markers above.
+Do not output anything outside those markers.
+
+README.md:
+{_readme_cap_str}
+
+Contract extractions (merged from all test chunks):
+
+
+Your task: produce functional_requirements.md as the complete, deduplicated API contract.
+For every function, method, struct, enum, trait, or module extracted above:
+  - Exact module path or import
+  - Full signature: name, argument names and types, return type
+  - Struct/enum/trait definitions with fields, variants, trait method signatures
+  - Error types
+  - Invariants explicitly asserted in the tests
+
+Rules:
+  - Deduplicate: same symbol + same signature = one entry.
+  - Conflicts (same name, different signature): keep all variants, annotate "(conflict)".
+  - Do not add, invent, or generalise beyond what is in the extractions above.
+  - Group by module/crate. Use concise structured notation, not prose.
+"""
         _fixed_contract_overhead = (
-            len(profile_section) + len(strategy_section) + len(api_section)
-            + len(existing_genesis) + 3_000
+            len(_contract_synthesis_scaffold) + len(profile_section)
+            + len(strategy_section) + len(api_section) + len(existing_genesis)
         )
         _synthesis_cap = max(10_000, SINGLE_CALL_CHAR_LIMIT - _fixed_contract_overhead)
         _capped_synthesis = smart_truncate(all_for_synthesis, total_limit=_synthesis_cap,
@@ -5627,7 +5687,30 @@ Rules:
         ) if genesis.strip() else ""
         api_section = _format_api_surface_section(api_surface)
 
-        _fixed_overhead = len(genesis_section) + len(api_section) + 3_000
+        _readme_cap_str = readme_text[:_README_CAP]
+        _contract_merge_scaffold = f"""You are merging contract extractions from multiple test file chunks.
+
+This is group {group_idx} of {total_groups}. Each entry lists API contracts extracted
+from a subset of test files. Your task: produce a single deduplicated contract list.
+
+Rules:
+  - Preserve exact module paths, function signatures, types, and invariants.
+  - Merge duplicate entries (same symbol, same signature) into one.
+  - Do not add, invent, or generalise — only what is present in the input.
+  - If two entries conflict (same name, different signature), keep both and annotate with "(conflict)".
+
+README.md (for language/framework context):
+{_readme_cap_str}
+
+Contract partials to merge:
+
+
+Output a plain structured list of the merged contracts. No prose, no code blocks, no headers.
+"""
+        _fixed_overhead = (
+            len(_contract_merge_scaffold) + len(profile_section)
+            + len(genesis_section) + len(api_section)
+        )
         _combined_cap = max(10_000, SINGLE_CALL_CHAR_LIMIT - _fixed_overhead)
         _combined_raw = "\n\n".join(group_partials)
         combined = smart_truncate(_combined_raw, total_limit=_combined_cap,
@@ -5705,8 +5788,27 @@ def _task1_proc_macro(project_dir, genesis_path, functional_req_path, test_files
     )
     effective_context = project_context or readme_text
 
-    # Budget: fixed overhead (~1500 boilerplate + genesis + context) then remainder for tests.
-    _fixed = 1_500 + len(genesis_section) + min(len(effective_context), 2_000)
+    # Budget: render the prompt scaffold with sized sections empty for exact
+    # overhead; remainder goes to tests.
+    _effective_context_capped = effective_context[:min(len(effective_context), 2_000)]
+    _pm_scaffold = f"""You are analysing test files to extract the interface of a Rust proc-macro crate.
+
+A proc-macro crate provides #[derive(...)] macros and/or #[attribute] macros used in the
+test files below. Your task is to produce functional_requirements.md describing ONLY what
+this proc-macro crate must implement — not the runtime API of dependent crates.
+
+{FILE_FORMAT_INSTRUCTION}
+Your output MUST be the file `functional_requirements.md` wrapped in the FILE markers above.
+
+Project context:
+{_effective_context_capped}
+
+Test files:
+
+
+Produce functional_requirements.md with:
+"""
+    _fixed = len(_pm_scaffold) + len(genesis_section)
     _tests_budget = max(2_000, SINGLE_CALL_CHAR_LIMIT - _fixed)
     _raw_tests = "\n\n".join(
         f'<TESTFILE path="{rel}">\n{content}\n</TESTFILE>'
@@ -5737,13 +5839,13 @@ Produce functional_requirements.md with:
 1. **Derive macros provided** — list every `#[derive(MacroName)]` used in the tests
    that comes from this crate (not std derives like Clone, Debug, PartialEq).
    For each:
-   - The derive name (e.g. `FromArgs`)
+   - The derive name (e.g. `MyDerive`)
    - Which trait(s) it must implement on the annotated type
    - The signature of trait methods that tests call
 
 2. **Helper attributes** — list every `#[crate_name(key = "value")]` attribute used
    on struct fields, enum variants, or items. For each:
-   - The attribute path (e.g. `#[argh(option)]`, `#[argh(description = "...")]`)
+   - The attribute path (e.g. `#[my_crate(option)]`, `#[my_crate(description = "...")]`)
    - Which field/item types it applies to
    - What it controls in the generated code
 
@@ -5964,9 +6066,9 @@ class StaticTask2Generator(Task2Generator):
                 f"      WRONG: `pub fn helper(...)` or `pub struct Foo` — these cause 'cannot export' compile error\n"
                 f"      RIGHT: `fn helper(...)` or `struct Foo` — private, no pub keyword\n"
                 f"  - Use `std::env` not bare `env::` for environment variables.\n"
-                f"  - Do NOT define EarlyExit, FromArgs, SubCommand, SubCommands, or any argh runtime types here.\n"
-                f"    These types are defined in the argh/argh_shared crates. This crate only GENERATES CODE that uses them.\n"
-                f"    In generated quote! blocks, reference them as `argh::EarlyExit`, `argh::FromArgs`, etc.\n"
+                f"  - A proc-macro crate does NOT define runtime types from the crates it serves —\n"
+                f"    those types live in the runtime crate(s) and are referenced by full path\n"
+                f"    inside `quote! {{ ... }}` blocks (e.g. `runtime_crate::SomeType`).\n"
                 f"  - Parse input as `DeriveInput` (not `ItemStruct`/`ItemEnum`/`ItemFn` — those require 'full' feature):\n"
                 f"      let input = parse_macro_input!(input as DeriveInput);\n"
                 f"      match input.data {{ Data::Struct(s) => ..., Data::Enum(e) => ..., _ => ... }}\n"
@@ -5974,12 +6076,10 @@ class StaticTask2Generator(Task2Generator):
                 f"  - Iterating FieldsNamed: use `fields.named.iter()` not `fields.iter()`.\n"
                 f"    FieldsNamed has a `.named` field (Punctuated<Field, Comma>), not a direct iterator.\n"
                 f"  - Do NOT declare `extern crate proc_macro;` — it is implicit in proc-macro crates.\n"
-                f"  - Runtime types from argh (CommandInfo, EarlyExit, FromArgs) must be referenced\n"
-                f"    inside quote! blocks as `argh::CommandInfo`, `argh::EarlyExit`, etc. — do not import them.\n"
                 f"  - Structs are data only — NO function signatures inside struct bodies.\n"
                 f"  - References in struct fields MUST have lifetimes: `struct Foo<'a> {{ x: &'a Bar }}`\n"
-                f"  - Do NOT use inline `mod helpers {{ }}` blocks — define helpers directly in lib.rs or in a separate helpers.rs file.\n"
-                f"  - If a submodule file (errors.rs, helpers.rs) is generated, declare it as `mod errors;` (no braces) in lib.rs.\n"
+                f"  - Do NOT use inline `mod xyz {{ }}` blocks — put helpers directly in lib.rs or in a separate file.\n"
+                f"  - If a submodule file `foo.rs` is generated, declare it in lib.rs as `mod foo;` (no braces).\n"
                 f"  - Every `mod foo;` declaration needs a corresponding foo.rs file.\n"
             )
 
@@ -6019,18 +6119,45 @@ class StaticTask2Generator(Task2Generator):
         ) if prev_source_context.strip() else ""
 
         def attempt():
-            prompt = f"""You are implementing a software project from functional requirements.
+            # Cap genesis and whole_project_context to keep the prompt within
+            # the input budget. Without these caps, a large genesis or huge
+            # whole-project context could push the prompt past the limit and
+            # silently truncate other sections.
+            _genesis_capped = trim_to_line(genesis, _GENESIS_CAP, "\n... (genesis truncated)")
+            # Render scaffold with sized sections empty for exact overhead.
+            _mono_scaffold = f"""You are implementing a software project from functional requirements.
 {_TASK2_THINKING_DIRECTIVE}
 Process (genesis.md):
-{genesis}
+
 {profile_section}{workspace_section}{module_scope_section}{locked_dep_section}{build_error_section}{pitfalls_section}{rules_section}{api_section}{prev_source_section}
 Functional requirements:
-{functional_req}
-{assertions_section}{whole_project_context}
+
+{assertions_section}
 Produce ALL source files needed to satisfy these requirements.
 Every module/crate/package in the workspace structure above MUST have its required entry-point
 file (e.g. each Rust crate declaring a lib target needs src/lib.rs; a bin target needs src/main.rs).
-Do NOT output test files or any file that belongs in the project's test directories.
+The TESTFILE blocks above are READ-ONLY spec; do NOT regenerate any test files.
+
+{FILE_FORMAT_INSTRUCTION}
+{_TASK2_VERBOSITY_GUARD}Output ALL files one after another using only those markers.
+"""
+            _mono_overhead = len(_mono_scaffold) + len(_genesis_capped) + len(functional_req)
+            _wpc_budget = max(0, SINGLE_CALL_CHAR_LIMIT - _mono_overhead)
+            _whole_project_capped = smart_truncate(whole_project_context, total_limit=_wpc_budget,
+                                                   head=_wpc_budget // 4, tail=3 * _wpc_budget // 4) \
+                                    if whole_project_context else ""
+            prompt = f"""You are implementing a software project from functional requirements.
+{_TASK2_THINKING_DIRECTIVE}
+Process (genesis.md):
+{_genesis_capped}
+{profile_section}{workspace_section}{module_scope_section}{locked_dep_section}{build_error_section}{pitfalls_section}{rules_section}{api_section}{prev_source_section}
+Functional requirements:
+{functional_req}
+{assertions_section}{_whole_project_capped}
+Produce ALL source files needed to satisfy these requirements.
+Every module/crate/package in the workspace structure above MUST have its required entry-point
+file (e.g. each Rust crate declaring a lib target needs src/lib.rs; a bin target needs src/main.rs).
+The TESTFILE blocks above are READ-ONLY spec; do NOT regenerate any test files.
 
 {FILE_FORMAT_INSTRUCTION}
 {_TASK2_VERBOSITY_GUARD}Output ALL files one after another using only those markers.
@@ -6094,14 +6221,12 @@ class LLMTask2Generator(Task2Generator):
         if current_module and module_dir_rel:
             rust_module_rules = (
                 f"\n⚠️  RUST MODULE FILE RULES:\n"
-                f"1. Each file (args.rs, dynamic_subcommand.rs, from_arg_value.rs) must contain module CONTENTS directly — NOT wrapped in `pub mod xyz {{ }}`. "
-                f"Writing `pub mod args {{ ... }}` inside args.rs creates double nesting and won't compile.\n"
-                f"2. EarlyExit must be defined ONCE in lib.rs as `pub struct EarlyExit {{ ... }}`. "
-                f"Do NOT define EarlyExit in any submodule file.\n"
-                f"3. Submodules reference it as `use crate::EarlyExit;` at the top of the file.\n"
-                f"4. Types imported directly from the crate root "
-                f"(CommandInfoWithArgs, FlagInfo, FlagInfoKind, Optionality, SubCommandInfo) "
-                f"must be defined with real fields in lib.rs — not empty stubs.\n"
+                f"1. A `foo.rs` file IS the module `foo`. Write its contents directly — do NOT wrap "
+                f"them in `pub mod foo {{ ... }}`. That creates double nesting and won't compile.\n"
+                f"2. Types declared in lib.rs at the crate root are referenced from submodules as "
+                f"`use crate::TypeName;`. Submodules MUST NOT redefine root-level types.\n"
+                f"3. Submodule types declared at the root must have real field/variant definitions "
+                f"in lib.rs — not empty stubs.\n"
             )
 
         module_scope_section = (
@@ -6139,11 +6264,27 @@ class LLMTask2Generator(Task2Generator):
         api_section = _format_api_surface_section(api_surface)
         # Fill-down: measure all fixed sections, give remainder to functional_req then whole_ctx.
         _genesis_truncated_plan = trim_to_line(genesis, _GENESIS_CAP, "\n... (genesis truncated)")
+        # Render the plan prompt scaffold with measured sections empty to get
+        # an exact overhead (replaces hardcoded estimate).
+        _plan_scaffold = f"""You are planning the implementation of a software project.
+
+Process (genesis.md):
+
+{""}{""}{""}{""}{""}{""}{""}{""}{""}
+Functional requirements:
+
+{""}{""}
+List ALL source files that must be created to implement these requirements.
+Do NOT include: test files, config files (Cargo.toml, package.json, build.gradle, etc.), lock files, or any non-source file.
+Only source code files (.rs, .py, .js, .ts, .go, .java, etc.).
+Output one file path per line, relative to the project root. No other text.
+"""
         _plan_fixed_size = (
-            len(_genesis_truncated_plan) + len(profile_section) + len(workspace_section) +
+            len(_plan_scaffold)
+            + len(_genesis_truncated_plan) + len(profile_section) + len(workspace_section) +
             len(module_scope_section) + len(locked_dep_section) + len(build_error_section) +
             len(pitfalls_section_llm) + len(rules_section_llm) + len(api_section) +
-            len(assertions_section_llm) + 2_000
+            len(assertions_section_llm)
         )
         _plan_remaining = max(10_000, SINGLE_CALL_CHAR_LIMIT - _plan_fixed_size)
         _req_cap = _plan_remaining * 2 // 3
@@ -6218,6 +6359,26 @@ Output one file path per line, relative to the project root. No other text.
         # so each file can see what the others define (critical for cross-file type references).
         all_files: dict[str, str] = {}
         for file_path in file_paths:
+            # Multi-file roadmap so the LLM doesn't try to cram the whole crate
+            # into the current file.
+            _file_list_parts = [
+                f"\nCrate `{current_module}` consists of {len(file_paths)} "
+                f"source files, each generated in a separate call. "
+                f"This call generates ONE file; the others have been or will be "
+                f"generated by other calls. Trust they will exist — reference "
+                f"items from pending files by their declared module path."
+                f"\nFile list:"
+            ]
+            for _fp in file_paths:
+                if _fp == file_path:
+                    _marker, _status = "→", "THIS CALL"
+                elif _fp in all_files:
+                    _marker, _status = "✓", "already generated"
+                else:
+                    _marker, _status = " ", "pending"
+                _file_list_parts.append(f"  [{_marker}] {_fp}   ({_status})")
+            file_roadmap_section = "\n".join(_file_list_parts) + "\n"
+
             prev_files_section = ""
             if all_files:
                 parts = ["\nAlready-generated files for this module (for context — do NOT regenerate them):"]
@@ -6229,15 +6390,14 @@ Output one file path per line, relative to the project root. No other text.
 {_TASK2_THINKING_DIRECTIVE}
 Process (genesis.md):
 {trim_to_line(genesis, _GENESIS_CAP, "\n... (genesis truncated)")}
-{profile_section}{module_scope_section}{locked_dep_section}{api_section}
+{file_roadmap_section}{profile_section}{module_scope_section}{locked_dep_section}{api_section}
 Functional requirements:
 {_functional_req_capped}
 {_whole_ctx_capped}{prev_files_section}
-Generate the file: `{file_path}`
+Generate the file: `{file_path}` (this call writes ONLY that file).
 
 {FILE_FORMAT_INSTRUCTION}
-{_TASK2_VERBOSITY_GUARD}Only output the single file `{file_path}` using the markers above.
-"""
+{_TASK2_VERBOSITY_GUARD}"""
             response = ask(file_prompt, model=_TASK2_MODEL)
             files = extract_files(response)
             if file_path in files:
@@ -6371,10 +6531,59 @@ class StaticFileListTask2Generator(Task2Generator):
 
         while pending:
             file_path = pending.pop(0)
+            # Multi-file roadmap so the LLM doesn't try to cram the whole crate
+            # into the current file. Without this, the first file (typically
+            # lib.rs) gets the full functional_requirements doc and the
+            # instruction "Output ONLY this file" and concludes it must
+            # implement everything in one place.
+            _file_list_parts = [
+                f"\nCrate `{current_module}` consists of {len(file_paths)} "
+                f"source files, each generated in a separate call. "
+                f"This call generates ONE file; the others have been or will be "
+                f"generated by other calls. Trust they will exist — reference "
+                f"items from pending files by their declared module path."
+                f"\nFile list:"
+            ]
+            for _fp in file_paths:
+                if _fp == file_path:
+                    _marker = "→"
+                    _status = "THIS CALL"
+                elif _fp in all_files:
+                    _marker = "✓"
+                    _status = "already generated"
+                else:
+                    _marker = " "
+                    _status = "pending"
+                _file_list_parts.append(f"  [{_marker}] {_fp}   ({_status})")
+            file_roadmap_section = "\n".join(_file_list_parts) + "\n"
+
+            # Prev files: most recent N in full content, older files as API
+            # signatures only (extracted from api_surface) so the prompt does
+            # not balloon as the per-module file count grows.
             prev_files_section = ""
             if all_files:
+                _FULL_PREV_COUNT = 3  # most recent N files keep full body
+                _prev_items = list(all_files.items())
+                _full_items = _prev_items[-_FULL_PREV_COUNT:]
+                _digest_items = _prev_items[:-_FULL_PREV_COUNT]
                 parts = ["\nAlready-generated files for this module (do NOT regenerate):"]
-                for prev_path, prev_content in all_files.items():
+                # Digest older files via their API surface section if available.
+                _api_by_path = dict(_api_file_sections)
+                for prev_path, _prev_content in _digest_items:
+                    _digest = _api_by_path.get(prev_path, "")
+                    if _digest:
+                        parts.append(
+                            f'\n<FILE path="{prev_path}" digest="api-signatures-only">\n'
+                            f'{_digest}\n</FILE>'
+                        )
+                    else:
+                        # No API section available — keep just the file declaration.
+                        parts.append(
+                            f'\n<FILE path="{prev_path}" digest="omitted-for-budget">\n'
+                            f'// (content elided — see other already-generated files for cross-references)\n'
+                            f'</FILE>'
+                        )
+                for prev_path, prev_content in _full_items:
                     parts.append(f'\n<FILE path="{prev_path}">\n{prev_content}\n</FILE>')
                 prev_files_section = "\n".join(parts) + "\n"
 
@@ -6429,7 +6638,26 @@ RULES:
                 else:
                     _secondary_api_parts.append(_api_sec)
 
-            # Split test files.
+            # Split test files. Primary = tests relevant to the current file.
+            # Match is loose: a test file is primary if its stem contains, is
+            # contained in, or starts with `test_<file_stem>`. Exact-equality
+            # is too strict — `test_chain.rs` should bind to `error.rs` when
+            # error.rs defines the Chain type.
+            def _is_primary_test(rel: str) -> bool:
+                if _is_entry and rel.startswith("tests/"):
+                    return True
+                test_stem = Path(rel).name.split('.')[0]
+                if not _file_stem or not test_stem:
+                    return False
+                # Drop common test prefixes for the comparison.
+                norm_test = re.sub(r'^(test_|tests_|it_)', '', test_stem)
+                norm_file = _file_stem
+                return (
+                    norm_test == norm_file
+                    or norm_file in norm_test
+                    or norm_test in norm_file
+                )
+
             _primary_tests: list[tuple[str, str]] = []
             _secondary_tests: list[tuple[str, str]] = []
             for _rel in sorted(existing_test_files):
@@ -6439,14 +6667,16 @@ RULES:
                 if not _tp.exists():
                     continue
                 _content = _tp.read_text(encoding="utf-8")
-                _rel_stem = Path(_rel).name.split('.')[0]
-                if _rel_stem == _file_stem or (_is_entry and _rel.startswith("tests/")):
+                if _is_primary_test(_rel):
                     _primary_tests.append((_rel, _content))
                 else:
                     _secondary_tests.append((_rel, _content))
 
             # Build primary test section (always included in full).
-            _primary_test_parts = ["\nTest files — primary (must pass for this file):"]
+            # READ-ONLY: these test files are the SPEC; do not regenerate them.
+            _primary_test_parts = [
+                "\nTest files — primary (READ-ONLY spec your implementation must satisfy; do NOT output these files):"
+            ]
             for _rel, _content in _primary_tests:
                 _primary_test_parts.append(f'\n<TESTFILE path="{_rel}">\n{_content}\n</TESTFILE>')
             _primary_test_section = (
@@ -6471,17 +6701,36 @@ RULES:
                                     head=SINGLE_CALL_CHAR_LIMIT // 16,
                                     tail=3 * SINGLE_CALL_CHAR_LIMIT // 16)
 
-            # Measure primary content to compute remaining fill budget.
+            # Compute scaffolding overhead by rendering the prompt with all
+            # measured sections empty. Captures static text + thinking
+            # directive + format instruction + verbosity guard + module-scope
+            # warning + conditional blocks (proc_macro_note, locked_dep,
+            # build_error) at their actual size. No hardcoded estimate.
+            _scaffold = f"""You are implementing a single source file for a Rust project.
+{_TASK2_THINKING_DIRECTIVE}{FILE_FORMAT_INSTRUCTION}
+{_TASK2_VERBOSITY_GUARD}Output ONLY the file `{file_path}` using the markers above. Nothing else.
+
+⚠️  MODULE SCOPE: This file belongs to the `{current_module}` crate.
+    Path: `{file_path}`
+{proc_macro_note}{locked_dep_section}{build_error_section}
+Functional requirements:
+
+
+
+Generate the implementation for `{file_path}` (this call writes ONLY that file).
+"""
             _primary_size = (
-                len(_genesis_section)
+                len(_scaffold)
+                + len(file_roadmap_section)
+                + len(_genesis_section)
                 + len(profile_section)
+                + len(workspace_section)
                 + len(strategy_section)
                 + len(_primary_api)
                 + len(_primary_test_section)
                 + len(_f_req)
                 + len(_w_ctx)
                 + len(prev_files_section)
-                + 3_000  # prompt scaffolding overhead
             )
             _fill_budget = max(0, SINGLE_CALL_CHAR_LIMIT - _primary_size)
 
@@ -6498,10 +6747,27 @@ RULES:
             if _sec_api_parts:
                 _secondary_api_section = "\n".join(_sec_api_parts) + "\n"
 
+            # Sort secondary tests by relevance to current file before fill:
+            # score = number of times the file's API-surface item names appear
+            # in the test file (proxy for "this test exercises the current file").
+            # Tie-break alphabetically for stability.
+            _symbol_names = re.findall(r'\b(?:fn|struct|enum|trait|type|const)\s+([A-Za-z_]\w*)',
+                                       _primary_api or "")
+            _symbol_set = set(_symbol_names)
+            def _relevance_score(item: tuple[str, str]) -> tuple[int, str]:
+                _, content = item
+                if not _symbol_set:
+                    return (0, item[0])
+                hits = sum(content.count(s) for s in _symbol_set)
+                return (-hits, item[0])  # negative for descending sort on hits
+            _secondary_tests_sorted = sorted(_secondary_tests, key=_relevance_score)
+
             _sec_test_parts: list[str] = []
-            if _secondary_tests and _fill_used < _fill_budget:
-                _sec_test_parts.append("\nTest files — additional context:")
-                for _rel, _content in _secondary_tests:
+            if _secondary_tests_sorted and _fill_used < _fill_budget:
+                _sec_test_parts.append(
+                    "\nTest files — additional context (READ-ONLY; do NOT output):"
+                )
+                for _rel, _content in _secondary_tests_sorted:
                     if _fill_used + len(_content) > _fill_budget:
                         break
                     _sec_test_parts.append(
@@ -6520,14 +6786,14 @@ RULES:
             prompt = f"""You are implementing a single source file for a Rust project.
 {_TASK2_THINKING_DIRECTIVE}{FILE_FORMAT_INSTRUCTION}
 {_TASK2_VERBOSITY_GUARD}Output ONLY the file `{file_path}` using the markers above. Nothing else.
-{_genesis_section}{profile_section}{workspace_section}{strategy_section}{api_section}
+{file_roadmap_section}{_genesis_section}{profile_section}{workspace_section}{strategy_section}{api_section}
 ⚠️  MODULE SCOPE: This file belongs to the `{current_module}` crate.
     Path: `{file_path}`
 {proc_macro_note}{locked_dep_section}{build_error_section}
 Functional requirements:
 {_f_req}
 {test_files_section}{_w_ctx}{prev_files_section}
-Generate the complete implementation for `{file_path}`.
+Generate the implementation for `{file_path}` (this call writes ONLY that file).
 """
             # FR-012: per-file retry — qwen3 thinking mode sometimes returns empty output.
             _per_file_attempts = 2
@@ -6700,6 +6966,10 @@ def task2_inner_loop(project_dir, genesis_path, functional_req_path, manifest_pa
             project_dir / rel for rel in load_manifest(manifest_path)
             if rel not in existing_test_files and (project_dir / rel).exists()
         ]
+        try:
+            _fix_loop_fr = read(functional_req_path) if functional_req_path.exists() else ""
+        except Exception:
+            _fix_loop_fr = ""
         build_ok, build_output = generate_fix_loop(
             project_dir=project_dir,
             check_cmd=build_check_cmd,
@@ -6710,6 +6980,7 @@ def task2_inner_loop(project_dir, genesis_path, functional_req_path, manifest_pa
             max_fix_attempts=4,
             timeout=BUILD_TIMEOUT,
             allowed_dir_prefix=module_dir_rel,
+            functional_req=_fix_loop_fr,
         )
         if build_ok:
             _log("  Build check PASSED.")
@@ -6744,6 +7015,7 @@ def generate_fix_loop(
     max_fix_attempts: int = 2,
     timeout: int = BUILD_TIMEOUT,
     allowed_dir_prefix: str = "",
+    functional_req: str = "",
 ) -> tuple[bool, str]:
     """
     Shared iterative fix loop for any code generation step.
@@ -6896,19 +7168,47 @@ def generate_fix_loop(
             source_block += f'\n<FILE path="{rel}">\n{content}\n</FILE>\n'
 
         # Fill-down: extra_context may be large (test files + requirements from
-        # task2_fix_loop) or small (proc-macro rules). Give it the full budget minus
-        # a minimum reservation for error and source, then fill error and source
-        # with what remains.
-        _fl_overhead = 3_000
+        # task2_fix_loop) or small (proc-macro rules). Give it the full budget
+        # minus reservations for error, source, and (optionally) the spec.
+        # Render the fix prompt scaffold with sized sections empty for an
+        # exact overhead measurement.
+        _spec_header = "\nFunctional requirements (the contract code must satisfy):\n" if functional_req else ""
+        _fl_scaffold = f"""Code generation produced files that fail the check below.
+{_FIX_THINKING_DIRECTIVE}Fix ONLY the files causing the failure — do NOT regenerate correct files.
+{_history_section}{_spec_header}
+Error output:
+```
+
+```
+
+Current source files:
+
+
+{FILE_FORMAT_INSTRUCTION}
+{_TASK2_VERBOSITY_GUARD}"""
+        _fl_overhead = len(_fl_scaffold)
         _fl_min_err  = 10_000
         _fl_min_src  = 30_000
-        _extra_budget = max(0, SINGLE_CALL_CHAR_LIMIT - _fl_overhead - _fl_min_err - _fl_min_src)
+        _fl_min_spec = 8_000 if functional_req else 0
+        _extra_budget = max(0,
+            SINGLE_CALL_CHAR_LIMIT - _fl_overhead - _fl_min_err - _fl_min_src - _fl_min_spec)
         _extra_ctx_capped = smart_truncate(extra_context, total_limit=_extra_budget,
                                            head=_extra_budget // 3, tail=2 * _extra_budget // 3)
-        _after_extra = max(_fl_min_err + _fl_min_src,
+        _after_extra = max(_fl_min_err + _fl_min_src + _fl_min_spec,
                            SINGLE_CALL_CHAR_LIMIT - _fl_overhead - len(_extra_ctx_capped))
-        _err_cap = _after_extra // 3   # errors are concise; 1/3 is generous
-        _src_cap = _after_extra * 2 // 3  # source gets the larger share
+        # Split _after_extra: spec (if any) gets its share, then 1/3 err 2/3 src.
+        if functional_req:
+            _spec_cap = _after_extra // 4
+            _remaining = _after_extra - _spec_cap
+            _err_cap = _remaining // 3
+            _src_cap = _remaining * 2 // 3
+            _spec_capped = smart_truncate(functional_req, total_limit=_spec_cap,
+                                          head=_spec_cap // 3, tail=2 * _spec_cap // 3)
+            _spec_block = f"\nFunctional requirements (the contract code must satisfy):\n{_spec_capped}\n"
+        else:
+            _err_cap = _after_extra // 3
+            _src_cap = _after_extra * 2 // 3
+            _spec_block = ""
         # Errors: tail-weighted (most recent matters most). Source: head-weighted
         # (imports/type defs at the top inform the fix).
         _last_output_capped = smart_truncate(last_output, total_limit=_err_cap,
@@ -6917,7 +7217,7 @@ def generate_fix_loop(
                                               head=_src_cap // 3, tail=2 * _src_cap // 3)
         prompt = f"""Code generation produced files that fail the check below.
 {_FIX_THINKING_DIRECTIVE}Fix ONLY the files causing the failure — do NOT regenerate correct files.
-{_history_section}
+{_history_section}{_spec_block}
 Error output:
 ```
 {_last_output_capped}
@@ -7003,9 +7303,11 @@ def task2_fix_loop(
 
     functional_req = read(functional_req_path)
 
-    # Fill-down for extra_context: genesis → functional_req → test files (stem-prioritized).
-    # generate_fix_loop gives extra_context the full budget minus minimums for error+source.
-    _extra_budget = max(10_000, SINGLE_CALL_CHAR_LIMIT - 3_000 - 10_000 - 30_000)
+    # Fill-down for extra_context: genesis → test files (stem-prioritized).
+    # functional_req is passed via its own dedicated parameter so it gets a
+    # guaranteed slot in the fix prompt.
+    # generate_fix_loop reservation: SINGLE_CALL_CHAR_LIMIT - min(err)+min(src)+min(spec).
+    _extra_budget = max(10_000, SINGLE_CALL_CHAR_LIMIT - 10_000 - 30_000 - 8_000)
 
     # 1. Genesis — methodology, always first.
     _genesis_section = ""
@@ -7017,14 +7319,8 @@ def task2_fix_loop(
                 f"{trim_to_line(_genesis, _GENESIS_CAP, chr(10) + '... (genesis truncated)')}\n"
             )
 
-    # 2. Functional requirements — fill after genesis.
-    _req_budget = max(0, _extra_budget - len(_genesis_section) - 2_000)
-    _req_truncated = smart_truncate(functional_req, total_limit=_req_budget,
-                                    head=_req_budget // 3, tail=2 * _req_budget // 3)
-    _req_section = f"\nFunctional requirements:\n{_req_truncated}\n"
-
-    # 3. Test files — stem-prioritized, fill remaining budget.
-    _test_budget = max(0, _extra_budget - len(_genesis_section) - len(_req_section))
+    # 2. Test files — stem-prioritized, fill remaining budget.
+    _test_budget = max(0, _extra_budget - len(_genesis_section))
     _file_stem = Path(module_dir_rel.rstrip("/")).name if module_dir_rel else ""
     _primary_tests: list[str] = []
     _secondary_tests: list[str] = []
@@ -7048,7 +7344,7 @@ def task2_fix_loop(
         _test_used += len(_blk)
     _test_section = ("\n".join(_test_parts) + "\n") if len(_test_parts) > 1 else ""
 
-    extra = _genesis_section + _req_section + _test_section
+    extra = _genesis_section + _test_section
 
     return generate_fix_loop(
         project_dir=project_dir,
@@ -7059,6 +7355,7 @@ def task2_fix_loop(
         model=_TASK2_MODEL,
         max_fix_attempts=TASK2_FIX_RETRIES,
         timeout=TEST_TIMEOUT,
+        functional_req=functional_req,
     )
 
 
@@ -7223,11 +7520,6 @@ Previous test output (for comparison):
     ) if failure_log.strip() else ""
 
     # Different prompt depending on whether this is a build or test failure.
-    delim_instruction = (
-        f"IMPORTANT: Output the updated genesis.md ONLY between these exact delimiters — "
-        f"no other format accepted:\n{GENESIS_DELIM_START}\n...content...\n{GENESIS_DELIM_END}\n"
-    )
-
     source_section = (
         f"\nGenerated source files (the code that was compiled/tested):\n{source_context}\n"
     ) if source_context.strip() else ""
@@ -7271,7 +7563,7 @@ Previous test output (for comparison):
 
     if _is_build:
         prompt = f"""You are refining a methodology for translating test suites into functional requirements.
-{delim_instruction}
+
 The implementation failed to COMPILE this iteration — the tests could not even run.
 This is a STRUCTURAL failure: the generated code was missing required files, had wrong
 module declarations, or had incorrect workspace layout. This is NOT a logic error.
@@ -7313,7 +7605,7 @@ updated genesis.md content here
             f"\n⚠️  Failure sub-type: {failure_type.upper()}\n{_failure_hint}\n"
         ) if _failure_hint else ""
         prompt = f"""You are refining a general methodology for translating test suites into functional requirements.
-{delim_instruction}
+
 genesis.md is not a patch document — it is a project-independent, language-agnostic reasoning
 process that, when mature, should work on any test suite without needing iteration. Every update
 must move it toward greater generality and precision, not toward narrow fixes for the specific
@@ -8908,6 +9200,47 @@ def _derive_gentest_prelude(project_dir: Path) -> tuple[str, str]:
     return allow_line, prelude_block
 
 
+def _prelude_import_names(prelude_block: str) -> str:
+    """Extract comma-separated short names from `use ...;` lines in the prelude block.
+
+    Used in task0c prompts so the INTERNAL MODULE RULES list reflects whatever
+    the project's prelude actually provides (instead of hardcoding anyhow's set).
+    """
+    names: list[str] = []
+    for line in prelude_block.splitlines():
+        line = line.strip().rstrip(";")
+        if not line.startswith("use "):
+            continue
+        # Take the last path segment of each import; expand {A, B} groups.
+        # Examples:
+        #   "use std::string::{String, ToString}" → ["String", "ToString"]
+        #   "use std::vec::Vec"                   → ["Vec"]
+        #   "use std::error::Error as StdError"   → ["StdError"]
+        path = line[len("use "):].strip()
+        m = re.match(r'(.*)::\{(.+)\}$', path)
+        if m:
+            for raw in m.group(2).split(","):
+                raw = raw.strip()
+                if " as " in raw:
+                    raw = raw.split(" as ", 1)[1].strip()
+                if raw:
+                    names.append(raw)
+        else:
+            last = path.split("::")[-1].strip()
+            if " as " in last:
+                last = last.split(" as ", 1)[1].strip()
+            if last:
+                names.append(last)
+    # Deduplicate while preserving order.
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for n in names:
+        if n not in seen:
+            seen.add(n)
+            ordered.append(n)
+    return ", ".join(ordered)
+
+
 def _load_file_constraints(project_dir: Path) -> dict[str, str]:
     """Load per-file generation constraints from project_configs/{project}.constraints.toml.
 
@@ -9415,6 +9748,7 @@ corrected content here
 
     # Derive allow attributes and prelude imports from project source — no LLM.
     _allow_line, _prelude_block = _derive_gentest_prelude(project_dir)
+    _prelude_names = _prelude_import_names(_prelude_block)
 
     # Pre-clean only if the harness is broken — if existing gen_tests compile,
     # keep them so accumulated coverage is never lost on re-entry.
@@ -9839,7 +10173,7 @@ Rust rules:
 
 INTERNAL MODULE RULES — these tests live inside the source file, not in an external test crate:
 - Do NOT write `use <crate_name>::...` — you are already inside the crate.
-- The template prelude already imports String, Vec, Box, format!, StdError, and fmt — use them directly.
+- The template prelude already imports: {_prelude_names} — use them directly.
 - Do NOT use `#[macro_export]` macros inside this module — they cannot be imported from within the crate.
   Construct values through direct API calls instead.
 - Do NOT use `assert_eq!` or `assert_ne!` on types that do not implement `PartialEq`.
@@ -10075,7 +10409,7 @@ Rust rules:
 
 INTERNAL MODULE RULES — these tests live inside the source file, not in an external test crate:
 - Do NOT write `use <crate_name>::...` — you are already inside the crate.
-- The template prelude already imports String, Vec, Box, format!, StdError, and fmt — use them directly.
+- The template prelude already imports: {_prelude_names} — use them directly.
 - Do NOT use `#[macro_export]` macros inside this module — they cannot be imported from within the crate.
   Construct values through direct API calls instead.
 - Do NOT use `assert_eq!` or `assert_ne!` on types that do not implement `PartialEq`.
