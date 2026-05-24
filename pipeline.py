@@ -4669,6 +4669,7 @@ def _build_task0c_prompt_sections(
     what_worked: str = "",
     retrospective: str = "",
     uncov_lines: "set[int] | None" = None,
+    scaffold_chars: int = 0,
 ) -> dict:
     """
     BL-007: Build context sections for one TASK 0c per-file prompt.
@@ -4680,8 +4681,12 @@ def _build_task0c_prompt_sections(
       4. Add if fits: sibling source files (shortest first)
 
     Returns dict of section_name -> content string.
+
+    `scaffold_chars` (optional): caller-measured size of the wrapping prompt
+    text excluding section content. When supplied, used directly as the
+    overhead — eliminates the magic 8_000 fallback.
     """
-    OVERHEAD = 8_000  # chars reserved for instructions, format markers, prompt boilerplate
+    OVERHEAD = scaffold_chars if scaffold_chars > 0 else 8_000
     budget = TASK0C_PROMPT_CHAR_CAP - OVERHEAD
     dropped: list[str] = []
 
@@ -5050,7 +5055,7 @@ class StaticTask1Synthesizer(Task1Synthesizer):
                 existing_genesis, project_profile="", project_context="",
                 coverage_strategy="", api_surface=""):
         genesis_exists = bool(existing_genesis.strip())
-        tests_section = format_test_files(test_files)
+        _full_tests_section = format_test_files(test_files)
         profile_section = (f"\n--- Project profile (language, build system, workspace layout) ---\n"
                            f"{project_profile}\n") if project_profile.strip() else ""
         context_section = (f"\n--- Project context (behavioral summary) ---\n"
@@ -5058,6 +5063,20 @@ class StaticTask1Synthesizer(Task1Synthesizer):
 
         if not genesis_exists and not genesis_path.exists():
             write(genesis_path, "# genesis.md\n\n(populated by TASK 4 after first iteration)\n")
+
+        # Budget the tests_section against the actual prompt overhead. The
+        # single-call path is taken when tests are expected to fit, but
+        # measure to be safe — overflow would otherwise hit the context
+        # guard's middle-trim, which can split a test file mid-content.
+        _probe = self._single_prompt(
+            "", readme_text, profile_section, existing_genesis,
+            coverage_strategy=coverage_strategy, api_surface=api_surface,
+            context_section=context_section,
+        )
+        _tests_budget = max(2_000, SINGLE_CALL_CHAR_LIMIT - len(_probe))
+        tests_section = smart_truncate(_full_tests_section, total_limit=_tests_budget,
+                                       head=_tests_budget // 3,
+                                       tail=2 * _tests_budget // 3)
 
         prompt = self._single_prompt(
             tests_section, readme_text, profile_section, existing_genesis,
@@ -5875,11 +5894,15 @@ that is NOT a proc-macro derive or attribute provided by this crate.
         # Static fallback: scan tests for derive usage and write minimal requirements.
         derives = set()
         attrs = set()
+        # Derive crate-attribute pattern from the actual crate name so this
+        # fallback works on any proc-macro crate, not just argh.
+        _attr_name = (crate_name or "").replace("-", "_") or "derive"
+        _attr_re = re.compile(rf'#\[{re.escape(_attr_name)}\(([^)]+)\)')
         for _, content in relevant:
             for m in re.finditer(r'#\[derive\(([^)]+)\)', content):
                 for d in m.group(1).split(','):
                     derives.add(d.strip())
-            for m in re.finditer(r'#\[argh\(([^)]+)\)', content):
+            for m in _attr_re.finditer(content):
                 attrs.add(m.group(1).strip())
         req_content = "# Proc-macro interface\n\n"
         req_content += "## Derive macros\n"
@@ -5888,7 +5911,7 @@ that is NOT a proc-macro derive or attribute provided by this crate.
         if attrs:
             req_content += "\n## Helper attributes\n"
             for a in sorted(attrs):
-                req_content += f"- `#[argh({a})]`\n"
+                req_content += f"- `#[{_attr_name}({a})]`\n"
         req_content += (
             "\n## Entry points\n"
             "Each derive macro must be registered with `#[proc_macro_derive(Name)]`.\n"
@@ -6697,6 +6720,14 @@ RULES:
 
             # Whole-project context — only present when module has no tests or is stuck;
             # always include in full up to a hard cap.
+            # Suppress when primary/secondary tests already cover the same
+            # TESTFILE blocks (the whole_project_context block lists each test
+            # as <TESTFILE path="...">; if every path it mentions is already
+            # in primary+secondary, it adds nothing but token cost).
+            _wp_paths = set(re.findall(r'<TESTFILE path="([^"]+)"', whole_project_context or ""))
+            _have_paths = {p for p, _ in _primary_tests} | {p for p, _ in _secondary_tests}
+            if _wp_paths and _wp_paths.issubset(_have_paths):
+                whole_project_context = ""
             _w_ctx = smart_truncate(whole_project_context, total_limit=SINGLE_CALL_CHAR_LIMIT // 4,
                                     head=SINGLE_CALL_CHAR_LIMIT // 16,
                                     tail=3 * SINGLE_CALL_CHAR_LIMIT // 16)
@@ -7520,9 +7551,17 @@ Previous test output (for comparison):
     ) if failure_log.strip() else ""
 
     # Different prompt depending on whether this is a build or test failure.
-    source_section = (
-        f"\nGenerated source files (the code that was compiled/tested):\n{source_context}\n"
-    ) if source_context.strip() else ""
+    # source_context can be tens of KB on a multi-file module — cap it against
+    # whatever budget remains after genesis/req/output/comparison/log.
+    if source_context.strip():
+        _t4_src_used = (len(genesis) + len(functional_req) + len(truncated_output)
+                        + len(comparison_section) + len(failure_log_section))
+        _t4_src_cap = max(5_000, SINGLE_CALL_CHAR_LIMIT - _t4_src_used - 10_000)
+        _source_truncated = smart_truncate(source_context, total_limit=_t4_src_cap,
+                                           head=_t4_src_cap // 3, tail=2 * _t4_src_cap // 3)
+        source_section = f"\nGenerated source files (the code that was compiled/tested):\n{_source_truncated}\n"
+    else:
+        source_section = ""
 
     # If a pre-strip API surface was captured, TASK 1 received it as structural
     # ground truth. The methodology in genesis.md must reflect that contract:
@@ -10099,6 +10138,63 @@ corrected content here
                 for srel, sc in relevant_siblings
             ]
 
+            # Measure prompt scaffold (everything in the prompt template that
+            # is NOT a `secs[...]` section) so the budget reflects actual
+            # overhead instead of a magic estimate.
+            gen_count = _gen_tests_count(abs_path)
+            _pass_n = _next_gen_tests_n(abs_path)
+            mod_name = f"gen_tests_{_pass_n}"
+            output_format = (
+                f'<FILE path="gen_tests_block">\n'
+                f'#[cfg(test)]\n{_allow_line}\nmod {mod_name} {{{{\n'
+                f'    use super::*;\n'
+                f'    {_prelude_block}\n\n'
+                f'    #[test]\n    fn test_example() {{{{\n        // tests\n    }}}}\n}}}}\n'
+                f'</FILE>'
+            )
+            _coverage_status_probe = (
+                f"\nCoverage status: {coverage:.1f}% covered. "
+                f"The {len(uncov_lines)} line(s) in fn_bodies below are the ONLY remaining uncovered targets — "
+                f"all other lines are already covered. Focus exclusively on these.\n"
+            ) if coverage > 0 else ""
+            _env_section = _describe_test_environment()
+            _file_constraints = _load_file_constraints(project_dir)
+            _target_basename = Path(rel_path).name
+            _file_constraints_section = _file_constraints.get(_target_basename, "")
+            _scaffold_template = f"""You are writing Rust unit tests that specify the behavioral contract of source code.
+{_TASK0C_THINKING_DIRECTIVE}{_coverage_status_probe}
+Target file: {rel_path}
+{_env_section}
+Write a `#[cfg(test)] mod {mod_name}` block for `{rel_path}`.
+Write a new test block covering the uncovered lines shown in fn_bodies above.
+
+Coverage guidance:
+- Prefer tests with at least one `assert!`, `assert_eq!`, `assert_ne!`, or `.unwrap()` —
+  asserting on return values adds spec value. If asserting is genuinely awkward (void
+  returns, side effects only), simply exercising the code path is acceptable.
+- Prefer testing edge cases and error conditions, not just happy paths.
+- When testing a function that returns `Result` or `Option`, test BOTH the Ok/Some path
+  AND the Err/None path if the code shows both branches.
+
+Rust rules:
+- Each `#[test]` fn must have ZERO arguments.
+- Use `use super::*;` to access module items.
+- Read field types from the struct definitions in the source file — match EXACTLY.
+
+INTERNAL MODULE RULES — these tests live inside the source file, not in an external test crate:
+- Do NOT write `use <crate_name>::...` — you are already inside the crate.
+- The template prelude already imports: {_prelude_names} — use them directly.
+- Do NOT use `#[macro_export]` macros inside this module — they cannot be imported from within the crate.
+  Construct values through direct API calls instead.
+- Do NOT use `assert_eq!` or `assert_ne!` on types that do not implement `PartialEq`.
+  Use `format!("{{}}",  val)`, boolean checks, or `matches!()` instead.
+{_nightly_rules_for_cluster()}
+See the IMPORTS, PITFALLS, and RULES sections of coverage_strategy.md (shown above) for
+project-specific import paths, type construction patterns, and hard constraints.
+{_file_constraints_section}
+{output_format}
+"""
+
             # BL-007: build whole-folder context with prioritized degradation.
             secs = _build_task0c_prompt_sections(
                 rel_path=rel_path,
@@ -10115,30 +10211,14 @@ corrected content here
                 what_worked=file_what_worked.get(rel_path, ""),
                 retrospective=file_retrospectives.get(rel_path, ""),
                 uncov_lines=uncov_lines,
+                scaffold_chars=len(_scaffold_template),
             )
 
-            # Per-file negative constraints — loaded from project_configs/{project}.constraints.toml.
-            # Keys are source file basenames. Values are injected after INTERNAL MODULE RULES.
-            _file_constraints = _load_file_constraints(project_dir)
-            _target_basename = Path(rel_path).name
-            _file_constraints_section = _file_constraints.get(_target_basename, "")
-
-            gen_count = _gen_tests_count(abs_path)
-            _pass_n = _next_gen_tests_n(abs_path)
-            mod_name = f"gen_tests_{_pass_n}"
-            output_format = (
-                f'<FILE path="gen_tests_block">\n'
-                f'#[cfg(test)]\n{_allow_line}\nmod {mod_name} {{{{\n'
-                f'    use super::*;\n'
-                f'    {_prelude_block}\n\n'
-                f'    #[test]\n    fn test_example() {{{{\n        // tests\n    }}}}\n}}}}\n'
-                f'</FILE>'
-            )
-
+            # The full _coverage_status may add a dead-code hedge when there
+            # are few remaining uncovered lines; the scaffold probe used the
+            # short form only (the hedge is best-effort overhead).
             _coverage_status = (
-                f"\nCoverage status: {coverage:.1f}% covered. "
-                f"The {len(uncov_lines)} line(s) in fn_bodies below are the ONLY remaining uncovered targets — "
-                f"all other lines are already covered. Focus exclusively on these.\n"
+                _coverage_status_probe
                 + (
                     f"IMPORTANT: grcov sometimes misreports dead branches, closing braces, or comments as "
                     f"uncovered even when the surrounding code executes fine. If after careful analysis "
@@ -10146,11 +10226,10 @@ corrected content here
                     f"condition is structurally never true on modern Rust), a comment, or a closing brace "
                     f"— do NOT attempt to cover them. Instead output an empty test block with a comment "
                     f"explaining why the line is unreachable. Do not waste tests on genuinely dead code.\n"
-                    if len(uncov_lines) <= 3 else ""
+                    if uncov_lines and len(uncov_lines) <= 3 else ""
                 )
-            ) if coverage > 0 else ""
+            )
 
-            _env_section = _describe_test_environment()
             prompt = f"""You are writing Rust unit tests that specify the behavioral contract of source code.
 {_TASK0C_THINKING_DIRECTIVE}{secs['strategy']}{secs['history']}{secs['what_worked']}{secs['retrospective']}{secs['context']}{_coverage_status}
 Target file: {rel_path}
