@@ -4209,7 +4209,7 @@ def _phase_valid(project_dir: Path, phase_key: str, current_hash: str | None = N
     """
     state = _read_state(project_dir)
     p = state["phases"].get(phase_key, {})
-    return p.get("status") == "done"
+    return bool(p.get("status") == "done")
 
 
 def _log_state_summary(project_dir: Path, current_hash: str) -> None:
@@ -6041,7 +6041,7 @@ class LLMTask2Generator(Task2Generator):
 
         _req_cap = int(SINGLE_CALL_CHAR_LIMIT * 0.40)
         _ctx_cap = int(SINGLE_CALL_CHAR_LIMIT * 0.25)
-        _genesis_cap = min(len(genesis), 3_000)
+        _genesis_cap = _GENESIS_CAP
         _functional_req_capped = smart_truncate(functional_req, total_limit=_req_cap,
                                                 head=_req_cap // 3, tail=2 * _req_cap // 3)
         _whole_ctx_capped = smart_truncate(whole_project_context, total_limit=_ctx_cap,
@@ -6186,6 +6186,68 @@ def _topo_sort_files(file_paths: list, known_content: dict) -> list:
     return list(ts.static_order())
 
 
+def _task2_design_manifest(
+    project_dir: Path,
+    genesis: str,
+    functional_req: str,
+    existing_test_files,
+    module_dir_rel: str,
+    current_module: str,
+    model: str,
+) -> str:
+    """
+    Generate a design manifest before file-by-file code generation (task2b).
+    Produces: public types with fields, trait impls, module declarations, function signatures.
+    Cached in project_dir; delete to force regeneration.
+    """
+    plan_name = f"task2_plan_{current_module}.md" if current_module else "task2_plan.md"
+    plan_path = project_dir / plan_name
+    if plan_path.exists():
+        _log(f"  [task2b] Design manifest found — loading ({plan_path.stat().st_size:,} chars).")
+        return plan_path.read_text(encoding="utf-8")
+
+    test_parts = []
+    for rel in sorted(existing_test_files):
+        if module_dir_rel and not rel.startswith(module_dir_rel):
+            continue
+        tp = project_dir / rel
+        if tp.exists():
+            test_parts.append(f'\n<TESTFILE path="{rel}">\n{tp.read_text(encoding="utf-8")}\n</TESTFILE>')
+
+    test_section = "".join(test_parts) if test_parts else "(no test files found)"
+    req_cap = int(SINGLE_CALL_CHAR_LIMIT * 0.40)
+    req_capped = smart_truncate(functional_req, total_limit=req_cap,
+                                head=req_cap // 3, tail=2 * req_cap // 3)
+    genesis_capped = trim_to_line(genesis, _GENESIS_CAP, "\n... (genesis truncated)")
+
+    prompt = f"""You are designing the implementation of a Rust crate before writing any source code.
+
+Process (genesis.md):
+{genesis_capped}
+
+Functional requirements:
+{req_capped}
+
+Test files (ground truth — read every assertion carefully):
+{test_section}
+
+Produce a DESIGN MANIFEST covering:
+
+1. Public types: every struct, enum, type alias with all fields and their types, visibility, derives.
+2. Trait implementations: every trait impl required by the tests (Display, From, Error, Iterator, etc.).
+3. Module declarations: exact `pub mod X;` lines for lib.rs and which .rs file each maps to.
+4. Key function signatures: exact `pub fn` / `pub(crate) fn` signatures derived from how tests call them.
+5. Crate-level re-exports: all `pub use` lines needed in lib.rs.
+
+Use Rust syntax. Write only declarations — no function bodies. Be complete and concrete.
+"""
+    _log(f"  [task2b] Generating design manifest ({len(prompt):,} chars prompt)...")
+    response = ask(prompt, model=model)
+    plan_path.write_text(response, encoding="utf-8")
+    _log(f"  [task2b] Design manifest written: {plan_name} ({len(response):,} chars).")
+    return response
+
+
 class StaticFileListTask2Generator(Task2Generator):
     """
     File-by-file generator using the original source file list saved before stripping.
@@ -6244,6 +6306,22 @@ class StaticFileListTask2Generator(Task2Generator):
             if _cargo_toml_path.exists():
                 _cargo_text = _cargo_toml_path.read_text(encoding="utf-8")
                 _is_proc_macro = bool(re.search(r'proc-macro\s*=\s*true', _cargo_text, re.MULTILINE))
+
+        # task2b: design manifest — types, traits, module hierarchy, signatures.
+        # Generated once before file-by-file loop; included in every per-file prompt.
+        _design_manifest = _task2_design_manifest(
+            project_dir, genesis, functional_req,
+            existing_test_files, module_dir_rel, current_module,
+            model=_TASK2_MODEL,
+        )
+        _design_section = (
+            f"\nDesign manifest (types, traits, module structure, function signatures):\n"
+            f"{_design_manifest}\n"
+        ) if _design_manifest.strip() else ""
+        _genesis_section = (
+            f"Process (genesis.md):\n"
+            f"{trim_to_line(genesis, _GENESIS_CAP, chr(10) + '... (genesis truncated)')}\n"
+        ) if genesis.strip() else ""
 
         all_files: dict[str, str] = {}
         pending = list(file_paths)
@@ -6320,13 +6398,13 @@ RULES:
             prompt = f"""You are implementing a single source file for a Rust project.
 {FILE_FORMAT_INSTRUCTION}
 Output ONLY the file `{file_path}` using the markers above. Nothing else.
-{profile_section}{workspace_section}{strategy_section}{api_section}
+{_genesis_section}{profile_section}{workspace_section}{strategy_section}{api_section}
 ⚠️  MODULE SCOPE: This file belongs to the `{current_module}` crate.
     Path: `{file_path}`
 {proc_macro_note}{locked_dep_section}{build_error_section}
 Functional requirements:
 {_f_req}
-{test_files_section}{_w_ctx}{prev_files_section}
+{_design_section}{test_files_section}{_w_ctx}{prev_files_section}
 Generate the complete implementation for `{file_path}`.
 """
             # FR-012: per-file retry — qwen3 thinking mode sometimes returns empty output.
@@ -7985,8 +8063,8 @@ def _cluster_cfg_attr(cluster) -> str:
     if not flags:
         return ""
     if len(flags) == 1:
-        return flags[0]
-    return "all(" + ", ".join(flags) + ")"
+        return str(flags[0])
+    return "all(" + ", ".join(str(f) for f in flags) + ")"
 
 
 def _build_gen_tests_decl(sibling_name: str, n: int, allow_line: str,

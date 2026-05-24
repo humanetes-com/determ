@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Pipeline / GPU monitor.  Keys: 1/2/3 views  c/g/r/s actions  ↑↓ navigate  q quit"""
 import glob, json as _json, os, re, select, signal, subprocess, sys, termios, time, tty
+from typing import Any
 from datetime import datetime
 
 _LOG_DIR     = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
@@ -234,7 +235,7 @@ def _parse_coverage_json(project_dir):
     return result
 
 
-def _latest_compile_file_stats() -> dict | None:
+def _latest_compile_file_stats() -> dict[str, Any] | None:
     """Return the most recent compile.file_stats event payload, or None."""
     try:
         _run_start = _pipeline_start_time()
@@ -259,8 +260,8 @@ def _latest_compile_file_stats() -> dict | None:
                         continue
                 except Exception:
                     pass
-            result = rec.get("data")
-        return result
+            result = rec.get("data") or {}
+        return result if result else None
     except Exception:
         return None
 
@@ -466,7 +467,7 @@ def _read_log_tail() -> list[str]:
         return []
 
 
-def _parse_task_pipeline(lines: list[str]) -> dict[str, object]:
+def _parse_task_pipeline(lines: list[str]) -> dict[str, Any]:
     """Scan log lines and return overall task progression.
 
     Returns:
