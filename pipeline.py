@@ -6566,6 +6566,62 @@ def generate_fix_loop(
     def _error_sigs(output: str) -> frozenset:
         return frozenset(re.findall(r'error\[E\d+\]: .+', output))
 
+    def _errors_by_file(output: str) -> dict[str, int]:
+        """Count primary error locations per file from rustc output."""
+        counts: dict[str, int] = {}
+        # Each error block: error[Exxxx] line followed by --> src/file.rs:line:col
+        in_error = False
+        for line in output.splitlines():
+            if re.match(r'^error\[E\d+\]', line):
+                in_error = True
+            elif in_error:
+                m = re.match(r'\s+-->\s+(\S+\.rs):\d+', line)
+                if m:
+                    f = m.group(1).lstrip("./")
+                    counts[f] = counts.get(f, 0) + 1
+                    in_error = False
+        return counts
+
+    def _file_stats(paths: list[Path]) -> dict[str, dict]:
+        """Return lines and fn count per file (relative path → {lines, fns})."""
+        stats: dict[str, dict] = {}
+        fn_re = re.compile(r'^\s*(?:pub\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+\w')
+        for p in paths:
+            if not p.exists():
+                continue
+            try:
+                text = p.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            rel = str(p.relative_to(project_dir))
+            lines = text.count("\n") + 1
+            fns = sum(1 for l in text.splitlines() if fn_re.match(l))
+            stats[rel] = {"lines": lines, "fns": fns}
+        return stats
+
+    def _log_compile_overview(output: str, attempt_n: int) -> None:
+        """Log per-file error table and emit compile.file_stats event."""
+        err_by_file = _errors_by_file(output)
+        fstats = _file_stats(source_paths)
+        all_files = sorted({*fstats.keys(), *err_by_file.keys()})
+        clean = sum(1 for f in all_files if err_by_file.get(f, 0) == 0 and f in fstats)
+        total = len(all_files)
+        _log(f"  [fix loop] File overview — {clean}/{total} clean, attempt {attempt_n}:")
+        max_name = max((len(f.split('/')[-1]) for f in all_files), default=10)
+        rows_data = []
+        for f in sorted(all_files, key=lambda f: (-err_by_file.get(f, 0), f)):
+            errs = err_by_file.get(f, 0)
+            st = fstats.get(f, {})
+            lines = st.get("lines", 0)
+            fns = st.get("fns", 0)
+            short = f.split("/")[-1]
+            bar_s = "█" * min(errs, 8) if errs else "✓"
+            _log(f"    {short.ljust(max_name)}  {str(lines).rjust(4)}L  {str(fns).rjust(3)}fn  {bar_s} {errs or 'clean'}")
+            rows_data.append({"file": f, "lines": lines, "fns": fns, "errors": errs})
+        _emit("compile.file_stats", data={
+            "attempt": attempt_n, "clean": clean, "total": total, "files": rows_data,
+        })
+
     env = _cargo_env()
     last_output = ""
     prev_sigs: frozenset = frozenset()
@@ -6591,6 +6647,7 @@ def generate_fix_loop(
             return False, last_output
 
         cur_sigs = _error_sigs(last_output)
+        _log_compile_overview(last_output, attempt)
         if attempt > 0:
             resolved = prev_sigs - cur_sigs
             if cur_sigs == prev_sigs:

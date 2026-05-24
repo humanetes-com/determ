@@ -234,6 +234,37 @@ def _parse_coverage_json(project_dir):
     return result
 
 
+def _latest_compile_file_stats() -> dict | None:
+    """Return the most recent compile.file_stats event payload, or None."""
+    try:
+        _run_start = _pipeline_start_time()
+        with open(EVENTS_LOG, "rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            fh.seek(max(0, size - 128 * 1024))
+            raw = fh.read()
+        result = None
+        for line in raw.decode("utf-8", errors="replace").splitlines():
+            try:
+                rec = _json.loads(line)
+            except Exception:
+                continue
+            if rec.get("event") != "compile.file_stats":
+                continue
+            if _run_start > 0:
+                try:
+                    from datetime import datetime, timezone
+                    ts = datetime.fromisoformat(rec["ts"].replace("Z", "+00:00"))
+                    if ts.timestamp() < _run_start:
+                        continue
+                except Exception:
+                    pass
+            result = rec.get("data")
+        return result
+    except Exception:
+        return None
+
+
 def _find_project_dir():
     """Return path to the most-recently-active workspace in tmp/, or None."""
     tmp = os.path.join(SCRIPT_DIR, "tmp")
@@ -701,8 +732,31 @@ def pipeline_status():
 
     # ── Files overview ──────────────────────────────────────────────────────
     proj_dir = _find_project_dir()
+
+    # Task2/fix-loop: show per-file compile error stats instead of coverage.
+    _compile_stats = _latest_compile_file_stats()
+    _in_fix_phase = state["phases"].get("task2") == "in_progress" or state["phases"].get("task3") == "in_progress"
+    if _compile_stats and _in_fix_phase:
+        files = _compile_stats.get("files", [])
+        clean = _compile_stats.get("clean", 0)
+        total = _compile_stats.get("total", 0)
+        attempt_n = _compile_stats.get("attempt", "?")
+        rows.append(dim(f"  {'─' * max(4, min(w - 2, 60))}"))
+        rows.append(f"  compile overview — {green(str(clean))}/{total} clean  (attempt {attempt_n})")
+        max_name = max((len(f["file"].split("/")[-1]) for f in files), default=10)
+        for fd in sorted(files, key=lambda f: (-f["errors"], f["file"])):
+            short = fd["file"].split("/")[-1]
+            errs  = fd["errors"]
+            lines = fd["lines"]
+            fns   = fd["fns"]
+            if errs == 0:
+                marker = green("✓ clean")
+            else:
+                marker = red("█" * min(errs, 6)) + f" {errs}"
+            rows.append(f"  {short.ljust(max_name)}  {str(lines).rjust(4)}L  {str(fns).rjust(3)}fn  {marker}")
+
     cov_data = _parse_coverage_json(proj_dir)
-    if cov_data:
+    if cov_data and not (_compile_stats and _in_fix_phase):
         cur_base = os.path.basename(prog["current_file"]) if prog["current_file"] != "?" else ""
         # For non-default clusters, restrict to files the cluster is actually targeting.
         # If the cluster hasn't processed any files yet (e.g. harness fix running), show all.
