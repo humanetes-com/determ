@@ -2850,7 +2850,7 @@ def detect_resume_point(root: Path, project_dir: Path, manifest_path: Path,
         max_n>0, no functional, manifest     -> TASK 5 done, TASK 6 not done; finish
                                                cleanup then TASK 1 of max_n+1
     """
-    existing = list(root.glob("tests_output_*.txt"))
+    existing = list(project_dir.glob("tests_output_*.txt"))
     max_n = 0
     if existing:
         max_n = max(
@@ -10799,11 +10799,11 @@ def restart_from_augmented(root: Path, project_dir: Path) -> None:
     iteration_paths: list[Path] = [
         project_dir / MODULE_STRIPPED_DIR,         # strip sentinel
         project_dir / f"functional_requirements_{module_name}.md",
-        root / FAILURE_LOG_NAME,
-        root / ".task1_partials",
+        project_dir / FAILURE_LOG_NAME,
+        project_dir / ".task1_partials",
     ]
     iteration_paths += list(project_dir.glob(".generated_files_*.txt"))
-    iteration_paths += list(root.glob("tests_output_*.txt"))
+    iteration_paths += list(project_dir.glob("tests_output_*.txt"))
     for p in iteration_paths:
         if p.is_dir():
             shutil.rmtree(p)
@@ -10847,12 +10847,12 @@ def clean_state(root: Path, project_dir: Path, manifest_path: Path,
             _log(f"  Deleted {p.name}")
 
     # Test output files
-    for p in root.glob("tests_output_*.txt"):
+    for p in project_dir.glob("tests_output_*.txt"):
         p.unlink()
         _log(f"  Deleted {p.name}")
 
     # Chunk partials from interrupted chunked task1
-    partials_dir = root / ".task1_partials"
+    partials_dir = project_dir / ".task1_partials"
     if partials_dir.exists():
         for p in partials_dir.glob("*.txt"):
             p.unlink()
@@ -10863,7 +10863,7 @@ def clean_state(root: Path, project_dir: Path, manifest_path: Path,
         _log("  Deleted .task1_partials/")
 
     # Failure log
-    failure_log_path = root / FAILURE_LOG_NAME
+    failure_log_path = project_dir / FAILURE_LOG_NAME
     if failure_log_path.exists():
         failure_log_path.unlink()
         _log(f"  Deleted {FAILURE_LOG_NAME}")
@@ -11653,7 +11653,7 @@ def main():
         if locked_modules:
             _log(f"\nAlready locked: {', '.join(sorted(locked_modules))}")
 
-    failure_log_path = root / FAILURE_LOG_NAME
+    failure_log_path = project_dir / FAILURE_LOG_NAME
 
     # Measure baseline coverage once to determine processing order.
     # Coverage-first: richest test spec → easiest reconstruction → best context for later modules.
@@ -12044,7 +12044,7 @@ def main():
                     genesis_path, module_req_path,
                     f"TASK 1 produced invalid requirements after {T1_MAX_RETRIES} retries. "
                     f"Last rejection reason: {reason}",
-                    module_iter, root,
+                    module_iter, project_dir,
                     failure_type="requirements_failure",
                     failure_log=failure_log_content,
                     prev_pass_count=prev_pass_count, prev_test_output=prev_test_output,
@@ -12231,7 +12231,7 @@ This is a Rust procedural macro crate. Strict rules apply:
 
                     # TASK 3: run tests.
                     passed, test_output = task3(
-                        project_dir, module_test_cmd, label, root, genesis_path
+                        project_dir, module_test_cmd, label, project_dir, genesis_path
                     )
                     if not api_conformance_ok:
                         test_output = (
@@ -12348,7 +12348,7 @@ This is a Rust procedural macro crate. Strict rules apply:
                 if sp.exists():
                     t4_source_context += f'\n<FILE path="{rel}">\n{sp.read_text(encoding="utf-8")}\n</FILE>\n'
             t4_ok, current_pass = task4(
-                genesis_path, module_req_path, test_output, module_iter, root,
+                genesis_path, module_req_path, test_output, module_iter, project_dir,
                 failure_type=failure_type, failure_log=failure_log_content,
                 prev_pass_count=prev_pass_count, prev_test_output=prev_test_output,
                 source_context=t4_source_context,
@@ -12415,7 +12415,7 @@ This is a Rust procedural macro crate. Strict rules apply:
     _log(f"\n{'=' * 60}")
     _log("FINAL: Running full test suite to validate integrated workspace")
     _log(f"{'=' * 60}")
-    passed, _ = task3(project_dir, test_command, "final", root, genesis_path)
+    passed, _ = task3(project_dir, test_command, "final", project_dir, genesis_path)
     if passed:
         _log("\nSUCCESS: all tests passed.")
         sys.exit(0)
