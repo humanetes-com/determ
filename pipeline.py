@@ -60,6 +60,93 @@ _TASK1_MODEL  = os.getenv("TASK1_MODEL",  MODEL)  # requirements synthesis — c
 _TASK2_MODEL  = os.getenv("TASK2_MODEL",  MODEL)  # code generation — best code model
 _TASK4_MODEL  = os.getenv("TASK4_MODEL",  MODEL)  # failure analysis — reasoning model
 
+
+def _model_tier(model: str) -> str:
+    """Return 'mid' for capable instruction-following models, 'weak' for small/distilled ones.
+
+    Mid-tier: large instruction-tuned models (27B+, Claude, GPT-4, Gemini).
+      → follow FILE markers reliably; benefit from explicit reasoning directives.
+    Weak-tier: smaller models (≤14B) that need repetition and verbosity guards.
+    """
+    _lower = model.lower().split(":")[0].split("/")[-1]
+    for _prefix in (
+        "qwen3", "qwen2.5-72",
+        "llama-3.3-70", "llama-3.1-70", "llama-3.1-405",
+        "mistral-large", "mixtral-8x22",
+        "claude", "gpt-4", "gemini-1.5", "gemini-2",
+    ):
+        if _lower.startswith(_prefix):
+            return "mid"
+    return "weak"
+
+
+_TASK0C_TIER = _model_tier(_TASK0C_MODEL)
+_TASK1_TIER  = _model_tier(_TASK1_MODEL)
+_TASK2_TIER  = _model_tier(_TASK2_MODEL)
+_TASK4_TIER  = _model_tier(_TASK4_MODEL)
+
+# Thinking directive (mid-tier only): injected at the start of generation prompts.
+# Guides WHAT to reason about during the model's thinking budget before writing code.
+# Omitted for weak-tier — they don't have a thinking budget; chain-of-thought in the
+# prompt just adds tokens to the output rather than improving reasoning.
+_TASK2_THINKING_DIRECTIVE = (
+    "Before writing code: reason through all required public types, trait impls, "
+    "module structure, and re-exports against the API surface and test assertions. "
+    "Then write complete, compilable source.\n\n"
+    if _TASK2_TIER == "mid" else ""
+)
+
+_FIX_THINKING_DIRECTIVE = (
+    "Before writing fixes: trace the error to its root cause — identify the specific "
+    "type mismatch, missing impl, or wrong signature — then write a targeted correction.\n\n"
+    if _TASK2_TIER == "mid" else ""
+)
+
+# Verbosity guard (weak-tier only): appended after FILE_FORMAT_INSTRUCTION.
+# Weak-tier models sometimes emit prose outside FILE markers despite the instruction;
+# this explicit reminder reduces that failure mode. Mid-tier models follow reliably.
+_TASK2_VERBOSITY_GUARD = (
+    ""
+    if _TASK2_TIER == "mid"
+    else "Output ONLY the FILE markers above — no prose, no markdown fences, no text outside markers.\n"
+)
+
+# Task 1: requirements / contract extraction.
+# Thinking directive guides the model to trace every behavioral contract to a specific
+# test assertion before writing, preventing omissions and hallucination.
+_TASK1_THINKING_DIRECTIVE = (
+    "Before writing requirements: for each test assertion, trace exactly what behavior "
+    "it verifies — function name, arguments, return value, invariants. Miss nothing.\n\n"
+    if _TASK1_TIER == "mid" else ""
+)
+
+# Task 0c: coverage test generation.
+# Thinking directive guides planning: which input values cover which branches, what
+# assertion verifies each result. Prevents tests that execute code but don't assert.
+_TASK0C_THINKING_DIRECTIVE = (
+    "Before writing tests: for each uncovered function, determine which input values "
+    "or states exercise each branch, and what assertion verifies the result. Then write.\n\n"
+    if _TASK0C_TIER == "mid" else ""
+)
+
+# Task 0c: compile / test-block fix.
+# Directs the model to identify the error class before writing the fix.
+_TASK0C_FIX_THINKING_DIRECTIVE = (
+    "Before writing the fix: identify the exact error — wrong type, wrong path, missing "
+    "impl, bad import — then write the minimal correction.\n\n"
+    if _TASK0C_TIER == "mid" else ""
+)
+
+# Task 4: genesis update.
+# The prompts already prescribe a step-by-step analysis structure, so no thinking
+# directive is added. Only a verbosity guard for weak-tier models that might miss the
+# custom GENESIS_DELIM_START / GENESIS_DELIM_END markers.
+_TASK4_VERBOSITY_GUARD = (
+    ""
+    if _TASK4_TIER == "mid"
+    else "Use ONLY the delimiters shown above for output — no text outside them.\n"
+)
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -5001,8 +5088,7 @@ class StaticTask1Synthesizer(Task1Synthesizer):
                 "(empty)\n"
             )
         return f"""You are working on a deterministic AI-driven software reconstruction experiment.
-
-The goal: given a project's test files and README, produce functional requirements precise
+{_TASK1_THINKING_DIRECTIVE}The goal: given a project's test files and README, produce functional requirements precise
 enough that any implementation satisfying them will make all tests pass.
 
 Use the methodology in genesis.md below to guide your analysis (it may be empty on the
@@ -5348,8 +5434,7 @@ Only output the file `functional_requirements.md` using the markers above.
         ) if coverage_strategy.strip() else ""
         api_section = _format_api_surface_section(api_surface)
         return f"""You are extracting functional requirements from a subset of test files for a software project.
-
-This is chunk {chunk_idx} of {total_chunks} -- there are more test files not shown here.
+{_TASK1_THINKING_DIRECTIVE}This is chunk {chunk_idx} of {total_chunks} -- there are more test files not shown here.
 All chunks will be synthesized into one complete requirements document after all chunks are processed.
 Focus only on what you can directly observe in the tests below -- do not invent behavior.
 {profile_header}{genesis_section}{strategy_section}{api_section}
@@ -5403,7 +5488,7 @@ class LLMTask1Synthesizer(StaticTask1Synthesizer):
         api_section = _format_api_surface_section(api_surface)
         return f"""You are performing contract extraction from test files as part of a
 contract-first TDD reconstruction experiment.
-{FILE_FORMAT_INSTRUCTION}
+{_TASK1_THINKING_DIRECTIVE}{FILE_FORMAT_INSTRUCTION}
 Your output MUST be the file `functional_requirements.md` wrapped in the FILE markers above.
 Do not output anything outside those markers.
 {profile_section}{context_section}{strategy_section}{api_section}
@@ -5499,8 +5584,7 @@ Rules:
         api_section = _format_api_surface_section(api_surface)
         return f"""You are performing contract extraction from test files as the first step of
 a contract-first TDD reconstruction experiment.
-
-This is chunk {chunk_idx} of {total_chunks}. All chunks will be combined into a single
+{_TASK1_THINKING_DIRECTIVE}This is chunk {chunk_idx} of {total_chunks}. All chunks will be combined into a single
 implementation contract document.
 {profile_header}{genesis_section}{strategy_section}{api_section}
 README.md:
@@ -5930,7 +6014,7 @@ class StaticTask2Generator(Task2Generator):
 
         def attempt():
             prompt = f"""You are implementing a software project from functional requirements.
-
+{_TASK2_THINKING_DIRECTIVE}
 Process (genesis.md):
 {genesis}
 {profile_section}{workspace_section}{module_scope_section}{locked_dep_section}{build_error_section}{pitfalls_section}{rules_section}{api_section}{prev_source_section}
@@ -5943,7 +6027,7 @@ file (e.g. each Rust crate declaring a lib target needs src/lib.rs; a bin target
 Do NOT output test files or any file that belongs in the project's test directories.
 
 {FILE_FORMAT_INSTRUCTION}
-Output ALL files one after another using only those markers.
+{_TASK2_VERBOSITY_GUARD}Output ALL files one after another using only those markers.
 """
             response = ask(prompt, model=_TASK2_MODEL)
             files = extract_files(response)
@@ -6136,7 +6220,7 @@ Output one file path per line, relative to the project root. No other text.
                 prev_files_section = "\n".join(parts) + "\n"
 
             file_prompt = f"""You are implementing a single source file for a software project.
-
+{_TASK2_THINKING_DIRECTIVE}
 Process (genesis.md):
 {trim_to_line(genesis, _GENESIS_CAP, "\n... (genesis truncated)")}
 {profile_section}{module_scope_section}{locked_dep_section}{api_section}
@@ -6146,7 +6230,7 @@ Functional requirements:
 Generate the file: `{file_path}`
 
 {FILE_FORMAT_INSTRUCTION}
-Only output the single file `{file_path}` using the markers above.
+{_TASK2_VERBOSITY_GUARD}Only output the single file `{file_path}` using the markers above.
 """
             response = ask(file_prompt, model=_TASK2_MODEL)
             files = extract_files(response)
@@ -6428,8 +6512,8 @@ RULES:
             ) if (_primary_api or _secondary_api_section) else ""
             test_files_section = _primary_test_section + _secondary_test_section
             prompt = f"""You are implementing a single source file for a Rust project.
-{FILE_FORMAT_INSTRUCTION}
-Output ONLY the file `{file_path}` using the markers above. Nothing else.
+{_TASK2_THINKING_DIRECTIVE}{FILE_FORMAT_INSTRUCTION}
+{_TASK2_VERBOSITY_GUARD}Output ONLY the file `{file_path}` using the markers above. Nothing else.
 {_genesis_section}{profile_section}{workspace_section}{strategy_section}{api_section}
 ⚠️  MODULE SCOPE: This file belongs to the `{current_module}` crate.
     Path: `{file_path}`
@@ -6826,7 +6910,7 @@ def generate_fix_loop(
         _source_block_capped = smart_truncate(source_block, total_limit=_src_cap,
                                               head=_src_cap // 3, tail=2 * _src_cap // 3)
         prompt = f"""Code generation produced files that fail the check below.
-Fix ONLY the files causing the failure — do NOT regenerate correct files.
+{_FIX_THINKING_DIRECTIVE}Fix ONLY the files causing the failure — do NOT regenerate correct files.
 {_history_section}
 Error output:
 ```
@@ -6837,7 +6921,7 @@ Current source files:
 {_source_block_capped}
 {_extra_ctx_capped}
 {FILE_FORMAT_INSTRUCTION}
-"""
+{_TASK2_VERBOSITY_GUARD}"""
         response = ask(prompt, model=model)
         fixed = extract_files(response)
 
@@ -7213,7 +7297,7 @@ Produce an updated genesis.md. Rules must be:
 - More precise and complete than the current version
 
 Output the updated genesis.md between these exact delimiters (required — do not use any other format):
-
+{_TASK4_VERBOSITY_GUARD}
 {GENESIS_DELIM_START}
 updated genesis.md content here
 {GENESIS_DELIM_END}
@@ -7256,7 +7340,7 @@ Produce an updated genesis.md. It must:
   the iterative process by which it was built
 
 Output the updated genesis.md between these exact delimiters (required — do not use any other format):
-
+{_TASK4_VERBOSITY_GUARD}
 {GENESIS_DELIM_START}
 updated genesis.md content here
 {GENESIS_DELIM_END}
@@ -7418,7 +7502,7 @@ If no issues found, respond with exactly: AUDIT_CLEAN
 
 If issues are found, output the corrected document with contradictions resolved
 and redundant rules removed. Do not add new rules — only clean up existing ones.
-
+{_TASK4_VERBOSITY_GUARD}
 {GENESIS_DELIM_START}
 corrected content here
 {GENESIS_DELIM_END}
@@ -9177,8 +9261,7 @@ def task0c_augment_module(
                 rel = str(src_file.relative_to(project_dir))
 
                 prompt = f"""A Rust source file has a test block that fails to compile.
-
-File: {rel}
+{_TASK0C_FIX_THINKING_DIRECTIVE}File: {rel}
 
 Compile error:
 ```
@@ -9729,7 +9812,7 @@ corrected content here
 
             _env_section = _describe_test_environment()
             prompt = f"""You are writing Rust unit tests that specify the behavioral contract of source code.
-{secs['strategy']}{secs['history']}{secs['what_worked']}{secs['retrospective']}{secs['context']}{_coverage_status}
+{_TASK0C_THINKING_DIRECTIVE}{secs['strategy']}{secs['history']}{secs['what_worked']}{secs['retrospective']}{secs['context']}{_coverage_status}
 Target file: {rel_path}
 {_env_section}{secs['cargo']}{secs['full_source']}{secs['fn_bodies']}{secs['symbols']}{secs['examples']}{secs['integ_tests']}{secs['siblings']}{secs['old_block']}
 Write a `#[cfg(test)] mod {mod_name}` block for `{rel_path}`.
@@ -9969,7 +10052,7 @@ project-specific import paths, type construction patterns, and hard constraints.
                     _FIX_CHAR_LIMIT = TASK0C_PROMPT_CHAR_CAP
                     _fix_ctx = _fix_core + (_fix_optional if len(_fix_core) + len(_fix_optional) + _fix_extra < _FIX_CHAR_LIMIT else "")
                     fix_prompt = f"""The Rust test block you generated for `{rel_path}` does not compile.
-Fix ONLY the test block so it compiles. Return the corrected <FILE path="gen_tests_block"> block.
+{_TASK0C_FIX_THINKING_DIRECTIVE}Fix ONLY the test block so it compiles. Return the corrected <FILE path="gen_tests_block"> block.
 {_fix_history_section}
 Compile error (read carefully — this is the ONLY thing to fix):
 {_compile_err_capped}
@@ -10375,7 +10458,7 @@ def restart_from_augmented(root: Path, project_dir: Path) -> None:
     # Wipe iteration state — strip sentinels onward. Keep task0a/0b/0c outputs.
     iteration_paths: list[Path] = [
         project_dir / MODULE_STRIPPED_DIR,         # strip sentinel
-        root / f"functional_requirements_{module_name}.md",
+        project_dir / f"functional_requirements_{module_name}.md",
         root / FAILURE_LOG_NAME,
         root / ".task1_partials",
     ]
@@ -11522,7 +11605,7 @@ def main():
              f"{len(existing_test_files)} write-protected.")
 
         # --- TASK 1: extract requirements from this module's tests ---
-        module_req_path = root / f"functional_requirements_{module_name}.md"
+        module_req_path = project_dir / f"functional_requirements_{module_name}.md"
 
         # Initialize iteration counters here so task1's task4 escalation path can use them.
         module_iter = 1
