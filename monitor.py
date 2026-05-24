@@ -735,7 +735,8 @@ def pipeline_status():
 
     # Task2/fix-loop: show per-file compile error stats instead of coverage.
     _compile_stats = _latest_compile_file_stats()
-    _in_fix_phase = state["phases"].get("task2") == "in_progress" or state["phases"].get("task3") == "in_progress"
+    _in_fix_phase = (tp["states"].get("task2") == "in_progress"
+                     or tp["states"].get("task3") == "in_progress")
     if _compile_stats and _in_fix_phase:
         files = _compile_stats.get("files", [])
         clean = _compile_stats.get("clean", 0)
