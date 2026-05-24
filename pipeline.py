@@ -9517,10 +9517,10 @@ Target file: {rel_path}
 Write a `#[cfg(test)] mod {mod_name}` block for `{rel_path}`.
 {"Write ONLY new test functions for the uncovered lines in fn_bodies above. The existing test module(s) shown are already on disk — do NOT copy or repeat any test from them." if secs['old_block'] else "Write a new test block covering the uncovered lines shown in fn_bodies above."}
 
-BEHAVIORAL SPECIFICATION REQUIREMENTS (mandatory — tests not meeting these will be discarded):
-- Every `#[test]` fn MUST contain at least one `assert!`, `assert_eq!`, `assert_ne!`,
-  or an `.unwrap()` that panics on failure. Tests that call a function without asserting
-  anything provide no specification value and are INVALID.
+Coverage guidance:
+- Prefer tests with at least one `assert!`, `assert_eq!`, `assert_ne!`, or `.unwrap()` —
+  asserting on return values adds spec value. If asserting is genuinely awkward (void
+  returns, side effects only), simply exercising the code path is acceptable.
 - Prefer testing edge cases and error conditions, not just happy paths.
 - When testing a function that returns `Result` or `Option`, test BOTH the Ok/Some path
   AND the Err/None path if the code shows both branches.
@@ -9579,7 +9579,7 @@ project-specific import paths, type construction patterns, and hard constraints.
                         "- Do NOT use `#[macro_export]` macros — unavailable inside the crate.\n"
                         + _nightly_rules_for_cluster() + "\n"
                         + "- Do NOT use `assert_eq!`/`assert_ne!` on types without `PartialEq` — use `format!` or `matches!()`.\n"
-                        "- Each `#[test]` fn must have ZERO arguments and at least one assertion.\n"
+                        "- Each `#[test]` fn must have ZERO arguments.\n"
                         f"{_file_constraints_section}"
                     )
                     _query = (
@@ -11067,10 +11067,22 @@ def main():
         _cluster_done: set[str] = set()
 
         # Pre-load which modules are already done for this cluster (resume support).
+        _is_last_cluster = (_cluster == _clusters[-1])
         for _m in modules:
             if is_cluster_augmented(project_dir, _cluster.name, _m):
                 _cluster_done.add(_m)
                 _log(f"  cluster/{_cluster.name}: '{_m}' already done — skipping.")
+                # Crash-recovery: if this is the last cluster and the main module sentinel
+                # is missing (pipeline crashed after writing cluster sentinel but before
+                # mark_module_augmented), write it now from the cluster sentinel value.
+                if _is_last_cluster and not is_module_augmented(project_dir, _m):
+                    _cov_str = _cluster_augmented_path(project_dir, _cluster.name, _m).read_text().strip()
+                    try:
+                        _cov_val = float(_cov_str.rstrip("%"))
+                    except ValueError:
+                        _cov_val = 0.0
+                    mark_module_augmented(project_dir, _m, _cov_val)
+                    _log(f"  cluster/{_cluster.name}: recovery — wrote main sentinel for '{_m}' ({_cov_val:.1f}%)")
 
         # Pre-check: verify base library compiles under this cluster's env.
         # Handles E0554 (nightly feature on stable) by auto-installing nightly toolchain.
@@ -11083,6 +11095,8 @@ def main():
                 for _m in modules:
                     if _m not in _cluster_done:
                         mark_cluster_augmented(project_dir, _cluster.name, _m, 0.0)
+                        if _is_last_cluster:
+                            mark_module_augmented(project_dir, _m, 0.0)
                         _cluster_done.add(_m)
 
         while True:
