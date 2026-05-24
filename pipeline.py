@@ -5043,16 +5043,18 @@ Only output the file `functional_requirements.md` using the markers above.
         single condensed intermediate summary. Called once per group.
         Returns the summary text, or None on failure.
         """
-        _combined_raw = "\n\n".join(group_partials)
-        _combined_cap = int(SINGLE_CALL_CHAR_LIMIT * 0.55)
-        combined = smart_truncate(_combined_raw, total_limit=_combined_cap,
-                                  head=_combined_cap // 3, tail=2 * _combined_cap // 3)
-
         genesis_section = (
             f"\n--- genesis.md (methodology — apply when merging requirements) ---\n"
             f"{genesis}\n"
         ) if genesis.strip() else ""
         api_section = _format_api_surface_section(api_surface)
+
+        # Fill-down: measure fixed overhead, give remainder to the partials being merged.
+        _fixed_overhead = len(genesis_section) + len(api_section) + 3_000
+        _combined_cap = max(10_000, SINGLE_CALL_CHAR_LIMIT - _fixed_overhead)
+        _combined_raw = "\n\n".join(group_partials)
+        combined = smart_truncate(_combined_raw, total_limit=_combined_cap,
+                                  head=_combined_cap // 3, tail=2 * _combined_cap // 3)
 
         prompt = f"""You are merging a group of partial functional requirements extracted from test files.
 
@@ -5449,7 +5451,11 @@ Rules:
             f"{trim_to_line(coverage_strategy, _STRATEGY_CAP, "\n... (strategy truncated)")}\n"
         ) if coverage_strategy.strip() else ""
         api_section = _format_api_surface_section(api_surface)
-        _synthesis_cap = int(SINGLE_CALL_CHAR_LIMIT * 0.60)
+        _fixed_contract_overhead = (
+            len(profile_section) + len(strategy_section) + len(api_section)
+            + len(existing_genesis) + 3_000
+        )
+        _synthesis_cap = max(10_000, SINGLE_CALL_CHAR_LIMIT - _fixed_contract_overhead)
         _capped_synthesis = smart_truncate(all_for_synthesis, total_limit=_synthesis_cap,
                                            head=_synthesis_cap // 3, tail=2 * _synthesis_cap // 3)
         return f"""You are producing the final API contract document from contract extractions
@@ -5525,16 +5531,17 @@ Rules:
         Merge a group of contract partials into a deduplicated intermediate contract list.
         Overrides the behavioral merge prompt with a contract-aware one.
         """
-        _combined_raw = "\n\n".join(group_partials)
-        _combined_cap = int(SINGLE_CALL_CHAR_LIMIT * 0.55)
-        combined = smart_truncate(_combined_raw, total_limit=_combined_cap,
-                                  head=_combined_cap // 3, tail=2 * _combined_cap // 3)
-
         genesis_section = (
             f"\n--- genesis.md (methodology — apply when merging contracts) ---\n"
             f"{genesis}\n"
         ) if genesis.strip() else ""
         api_section = _format_api_surface_section(api_surface)
+
+        _fixed_overhead = len(genesis_section) + len(api_section) + 3_000
+        _combined_cap = max(10_000, SINGLE_CALL_CHAR_LIMIT - _fixed_overhead)
+        _combined_raw = "\n\n".join(group_partials)
+        combined = smart_truncate(_combined_raw, total_limit=_combined_cap,
+                                  head=_combined_cap // 3, tail=2 * _combined_cap // 3)
 
         prompt = f"""You are merging contract extractions from multiple test file chunks.
 
@@ -6039,20 +6046,28 @@ class LLMTask2Generator(Task2Generator):
         structured_rules_llm = genesis_rules_read(project_dir, module_scope=current_module or "*")
         rules_section_llm = f"\n{structured_rules_llm}\n" if structured_rules_llm else ""
 
-        _req_cap = int(SINGLE_CALL_CHAR_LIMIT * 0.40)
-        _ctx_cap = int(SINGLE_CALL_CHAR_LIMIT * 0.25)
-        _genesis_cap = _GENESIS_CAP
+        api_section = _format_api_surface_section(api_surface)
+        # Fill-down: measure all fixed sections, give remainder to functional_req then whole_ctx.
+        _genesis_truncated_plan = trim_to_line(genesis, _GENESIS_CAP, "\n... (genesis truncated)")
+        _plan_fixed_size = (
+            len(_genesis_truncated_plan) + len(profile_section) + len(workspace_section) +
+            len(module_scope_section) + len(locked_dep_section) + len(build_error_section) +
+            len(pitfalls_section_llm) + len(rules_section_llm) + len(api_section) +
+            len(assertions_section_llm) + 2_000
+        )
+        _plan_remaining = max(10_000, SINGLE_CALL_CHAR_LIMIT - _plan_fixed_size)
+        _req_cap = _plan_remaining * 2 // 3
+        _ctx_cap = _plan_remaining * 1 // 3
         _functional_req_capped = smart_truncate(functional_req, total_limit=_req_cap,
                                                 head=_req_cap // 3, tail=2 * _req_cap // 3)
         _whole_ctx_capped = smart_truncate(whole_project_context, total_limit=_ctx_cap,
                                            head=_ctx_cap // 4, tail=3 * _ctx_cap // 4)
-        api_section = _format_api_surface_section(api_surface)
 
         # Step 1: ask model for the list of files to create.
         plan_prompt = f"""You are planning the implementation of a software project.
 
 Process (genesis.md):
-{trim_to_line(genesis, _genesis_cap, "\n... (genesis truncated)")}
+{_genesis_truncated_plan}
 {profile_section}{workspace_section}{module_scope_section}{locked_dep_section}{build_error_section}{pitfalls_section_llm}{rules_section_llm}{api_section}
 Functional requirements:
 {_functional_req_capped}
@@ -6123,7 +6138,7 @@ Output one file path per line, relative to the project root. No other text.
             file_prompt = f"""You are implementing a single source file for a software project.
 
 Process (genesis.md):
-{trim_to_line(genesis, _genesis_cap, "\n... (genesis truncated)")}
+{trim_to_line(genesis, _GENESIS_CAP, "\n... (genesis truncated)")}
 {profile_section}{module_scope_section}{locked_dep_section}{api_section}
 Functional requirements:
 {_functional_req_capped}
@@ -6186,66 +6201,12 @@ def _topo_sort_files(file_paths: list, known_content: dict) -> list:
     return list(ts.static_order())
 
 
-def _task2_design_manifest(
-    project_dir: Path,
-    genesis: str,
-    functional_req: str,
-    existing_test_files,
-    module_dir_rel: str,
-    current_module: str,
-    model: str,
-) -> str:
-    """
-    Generate a design manifest before file-by-file code generation (task2b).
-    Produces: public types with fields, trait impls, module declarations, function signatures.
-    Cached in project_dir; delete to force regeneration.
-    """
-    plan_name = f"task2_plan_{current_module}.md" if current_module else "task2_plan.md"
-    plan_path = project_dir / plan_name
-    if plan_path.exists():
-        _log(f"  [task2b] Design manifest found — loading ({plan_path.stat().st_size:,} chars).")
-        return plan_path.read_text(encoding="utf-8")
-
-    test_parts = []
-    for rel in sorted(existing_test_files):
-        if module_dir_rel and not rel.startswith(module_dir_rel):
-            continue
-        tp = project_dir / rel
-        if tp.exists():
-            test_parts.append(f'\n<TESTFILE path="{rel}">\n{tp.read_text(encoding="utf-8")}\n</TESTFILE>')
-
-    test_section = "".join(test_parts) if test_parts else "(no test files found)"
-    req_cap = int(SINGLE_CALL_CHAR_LIMIT * 0.40)
-    req_capped = smart_truncate(functional_req, total_limit=req_cap,
-                                head=req_cap // 3, tail=2 * req_cap // 3)
-    genesis_capped = trim_to_line(genesis, _GENESIS_CAP, "\n... (genesis truncated)")
-
-    prompt = f"""You are designing the implementation of a Rust crate before writing any source code.
-
-Process (genesis.md):
-{genesis_capped}
-
-Functional requirements:
-{req_capped}
-
-Test files (ground truth — read every assertion carefully):
-{test_section}
-
-Produce a DESIGN MANIFEST covering:
-
-1. Public types: every struct, enum, type alias with all fields and their types, visibility, derives.
-2. Trait implementations: every trait impl required by the tests (Display, From, Error, Iterator, etc.).
-3. Module declarations: exact `pub mod X;` lines for lib.rs and which .rs file each maps to.
-4. Key function signatures: exact `pub fn` / `pub(crate) fn` signatures derived from how tests call them.
-5. Crate-level re-exports: all `pub use` lines needed in lib.rs.
-
-Use Rust syntax. Write only declarations — no function bodies. Be complete and concrete.
-"""
-    _log(f"  [task2b] Generating design manifest ({len(prompt):,} chars prompt)...")
-    response = ask(prompt, model=model)
-    plan_path.write_text(response, encoding="utf-8")
-    _log(f"  [task2b] Design manifest written: {plan_name} ({len(response):,} chars).")
-    return response
+def _split_api_surface_by_file(api_surface: str) -> list[tuple[str, str]]:
+    """Parse monolithic API surface doc into (path, full_section_text) pairs."""
+    result = []
+    for m in re.finditer(r'<FILE path="([^"]+)">(.*?)</FILE>', api_surface, re.DOTALL):
+        result.append((m.group(1), m.group(0)))
+    return result
 
 
 class StaticFileListTask2Generator(Task2Generator):
@@ -6307,21 +6268,13 @@ class StaticFileListTask2Generator(Task2Generator):
                 _cargo_text = _cargo_toml_path.read_text(encoding="utf-8")
                 _is_proc_macro = bool(re.search(r'proc-macro\s*=\s*true', _cargo_text, re.MULTILINE))
 
-        # task2b: design manifest — types, traits, module hierarchy, signatures.
-        # Generated once before file-by-file loop; included in every per-file prompt.
-        _design_manifest = _task2_design_manifest(
-            project_dir, genesis, functional_req,
-            existing_test_files, module_dir_rel, current_module,
-            model=_TASK2_MODEL,
-        )
-        _design_section = (
-            f"\nDesign manifest (types, traits, module structure, function signatures):\n"
-            f"{_design_manifest}\n"
-        ) if _design_manifest.strip() else ""
         _genesis_section = (
             f"Process (genesis.md):\n"
             f"{trim_to_line(genesis, _GENESIS_CAP, chr(10) + '... (genesis truncated)')}\n"
         ) if genesis.strip() else ""
+
+        # Pre-parse API surface into per-file sections once.
+        _api_file_sections = _split_api_surface_by_file(api_surface) if api_surface else []
 
         all_files: dict[str, str] = {}
         pending = list(file_paths)
@@ -6370,31 +6323,110 @@ RULES:
   - Derive/attribute macro names and helper attribute paths are in the functional requirements.
 """
 
-            # Include test files for this module so the model can see the exact
-            # assertions it must satisfy — not just the requirements prose.
-            test_files_section = ""
-            if existing_test_files:
-                parts = ["\nTest files (these tests must pass — use them to verify your implementation):"]
-                for rel in sorted(existing_test_files):
-                    if module_dir_rel and not rel.startswith(module_dir_rel):
-                        continue
-                    tp = project_dir / rel
-                    if tp.exists():
-                        parts.append(f'\n<TESTFILE path="{rel}">\n{tp.read_text(encoding="utf-8")}\n</TESTFILE>')
-                if len(parts) > 1:
-                    test_files_section = "\n".join(parts) + "\n"
+            # ── Per-file content: priority-ordered fill-down ──────────────────
+            # Split into primary (always include) and secondary (fill remaining budget).
+            # No fixed percentage caps — each primary section uses its actual size,
+            # leftover budget goes to secondary content in priority order.
+            _file_stem = Path(file_path).stem  # e.g. "error" for "src/error.rs"
+            _is_entry = _file_stem in ("lib", "main")
 
+            # Split API surface sections.
+            _primary_api = ""
+            _secondary_api_parts: list[str] = []
+            for _api_path, _api_sec in _api_file_sections:
+                if _api_path == file_path or Path(_api_path).stem == _file_stem:
+                    _primary_api = _api_sec
+                else:
+                    _secondary_api_parts.append(_api_sec)
+
+            # Split test files.
+            _primary_tests: list[tuple[str, str]] = []
+            _secondary_tests: list[tuple[str, str]] = []
+            for _rel in sorted(existing_test_files):
+                if module_dir_rel and not _rel.startswith(module_dir_rel):
+                    continue
+                _tp = project_dir / _rel
+                if not _tp.exists():
+                    continue
+                _content = _tp.read_text(encoding="utf-8")
+                _rel_stem = Path(_rel).name.split('.')[0]
+                if _rel_stem == _file_stem or (_is_entry and _rel.startswith("tests/")):
+                    _primary_tests.append((_rel, _content))
+                else:
+                    _secondary_tests.append((_rel, _content))
+
+            # Build primary test section (always included in full).
+            _primary_test_parts = ["\nTest files — primary (must pass for this file):"]
+            for _rel, _content in _primary_tests:
+                _primary_test_parts.append(f'\n<TESTFILE path="{_rel}">\n{_content}\n</TESTFILE>')
+            _primary_test_section = (
+                "\n".join(_primary_test_parts) + "\n" if len(_primary_test_parts) > 1 else ""
+            )
+
+            # Strategy section (actual size, always included).
             strategy_section = (
                 f"\nCoverage strategy (import patterns, type construction, test conventions):\n"
                 f"{trim_to_line(coverage_strategy, _STRATEGY_CAP, "\n... (strategy truncated)")}\n"
             ) if coverage_strategy.strip() else ""
-            _req_cap2 = int(SINGLE_CALL_CHAR_LIMIT * 0.35)
-            _ctx_cap2 = int(SINGLE_CALL_CHAR_LIMIT * 0.20)
-            _f_req = smart_truncate(functional_req, total_limit=_req_cap2,
-                                    head=_req_cap2 // 3, tail=2 * _req_cap2 // 3)
-            _w_ctx = smart_truncate(whole_project_context, total_limit=_ctx_cap2,
-                                    head=_ctx_cap2 // 4, tail=3 * _ctx_cap2 // 4)
-            api_section = _format_api_surface_section(api_surface)
+
+            # Functional requirements — always include in full; only hard-truncate if
+            # the doc alone would exceed the entire budget (pathological case).
+            _f_req = smart_truncate(functional_req, total_limit=SINGLE_CALL_CHAR_LIMIT // 2,
+                                    head=SINGLE_CALL_CHAR_LIMIT // 6,
+                                    tail=SINGLE_CALL_CHAR_LIMIT // 3)
+
+            # Whole-project context — only present when module has no tests or is stuck;
+            # always include in full up to a hard cap.
+            _w_ctx = smart_truncate(whole_project_context, total_limit=SINGLE_CALL_CHAR_LIMIT // 4,
+                                    head=SINGLE_CALL_CHAR_LIMIT // 16,
+                                    tail=3 * SINGLE_CALL_CHAR_LIMIT // 16)
+
+            # Measure primary content to compute remaining fill budget.
+            _primary_size = (
+                len(_genesis_section)
+                + len(profile_section)
+                + len(strategy_section)
+                + len(_primary_api)
+                + len(_primary_test_section)
+                + len(_f_req)
+                + len(_w_ctx)
+                + len(prev_files_section)
+                + 3_000  # prompt scaffolding overhead
+            )
+            _fill_budget = max(0, SINGLE_CALL_CHAR_LIMIT - _primary_size)
+
+            # Fill secondary API sections then secondary test files with remaining budget.
+            _secondary_api_section = ""
+            _secondary_test_section = ""
+            _fill_used = 0
+            _sec_api_parts: list[str] = []
+            for _sec in _secondary_api_parts:
+                if _fill_used + len(_sec) > _fill_budget:
+                    break
+                _sec_api_parts.append(_sec)
+                _fill_used += len(_sec)
+            if _sec_api_parts:
+                _secondary_api_section = "\n".join(_sec_api_parts) + "\n"
+
+            _sec_test_parts: list[str] = []
+            if _secondary_tests and _fill_used < _fill_budget:
+                _sec_test_parts.append("\nTest files — additional context:")
+                for _rel, _content in _secondary_tests:
+                    if _fill_used + len(_content) > _fill_budget:
+                        break
+                    _sec_test_parts.append(
+                        f'\n<TESTFILE path="{_rel}">\n{_content}\n</TESTFILE>'
+                    )
+                    _fill_used += len(_content)
+            if len(_sec_test_parts) > 1:
+                _secondary_test_section = "\n".join(_sec_test_parts) + "\n"
+
+            # Assemble final API and test sections.
+            api_section = (
+                "\nAPI surface — pre-strip structural skeleton (signatures and type definitions):\n"
+                + _primary_api + _secondary_api_section
+            ) if (_primary_api or _secondary_api_section) else ""
+            test_files_section = _primary_test_section + _secondary_test_section
             prompt = f"""You are implementing a single source file for a Rust project.
 {FILE_FORMAT_INSTRUCTION}
 Output ONLY the file `{file_path}` using the markers above. Nothing else.
@@ -6404,7 +6436,7 @@ Output ONLY the file `{file_path}` using the markers above. Nothing else.
 {proc_macro_note}{locked_dep_section}{build_error_section}
 Functional requirements:
 {_f_req}
-{_design_section}{test_files_section}{_w_ctx}{prev_files_section}
+{test_files_section}{_w_ctx}{prev_files_section}
 Generate the complete implementation for `{file_path}`.
 """
             # FR-012: per-file retry — qwen3 thinking mode sometimes returns empty output.
@@ -6773,17 +6805,26 @@ def generate_fix_loop(
             content = p.read_text(encoding="utf-8")
             source_block += f'\n<FILE path="{rel}">\n{content}\n</FILE>\n'
 
-        _err_cap = int(SINGLE_CALL_CHAR_LIMIT * 0.30)
-        _src_cap = int(SINGLE_CALL_CHAR_LIMIT * 0.50)
-        _ctx_cap_extra = int(SINGLE_CALL_CHAR_LIMIT * 0.15)
+        # Fill-down: extra_context may be large (test files + requirements from
+        # task2_fix_loop) or small (proc-macro rules). Give it the full budget minus
+        # a minimum reservation for error and source, then fill error and source
+        # with what remains.
+        _fl_overhead = 3_000
+        _fl_min_err  = 10_000
+        _fl_min_src  = 30_000
+        _extra_budget = max(0, SINGLE_CALL_CHAR_LIMIT - _fl_overhead - _fl_min_err - _fl_min_src)
+        _extra_ctx_capped = smart_truncate(extra_context, total_limit=_extra_budget,
+                                           head=_extra_budget // 3, tail=2 * _extra_budget // 3)
+        _after_extra = max(_fl_min_err + _fl_min_src,
+                           SINGLE_CALL_CHAR_LIMIT - _fl_overhead - len(_extra_ctx_capped))
+        _err_cap = _after_extra // 3   # errors are concise; 1/3 is generous
+        _src_cap = _after_extra * 2 // 3  # source gets the larger share
         # Errors: tail-weighted (most recent matters most). Source: head-weighted
         # (imports/type defs at the top inform the fix).
         _last_output_capped = smart_truncate(last_output, total_limit=_err_cap,
                                              head=_err_cap // 4, tail=3 * _err_cap // 4)
         _source_block_capped = smart_truncate(source_block, total_limit=_src_cap,
                                               head=_src_cap // 3, tail=2 * _src_cap // 3)
-        _extra_ctx_capped = smart_truncate(extra_context, total_limit=_ctx_cap_extra,
-                                           head=_ctx_cap_extra // 3, tail=2 * _ctx_cap_extra // 3)
         prompt = f"""Code generation produced files that fail the check below.
 Fix ONLY the files causing the failure — do NOT regenerate correct files.
 {_history_section}
@@ -6871,27 +6912,53 @@ def task2_fix_loop(
     ]
 
     functional_req = read(functional_req_path)
-    _req_cap3 = int(SINGLE_CALL_CHAR_LIMIT * 0.30)
-    _req_truncated = smart_truncate(functional_req, total_limit=_req_cap3,
-                                    head=_req_cap3 // 3, tail=2 * _req_cap3 // 3)
-    extra = f"\nFunctional requirements:\n{_req_truncated}\n"
 
-    # Test files: the model must see the assertions it needs to satisfy.
-    test_parts = ["\nTest files (the tests your fix must pass):"]
-    for rel in sorted(existing_test_files):
-        if module_dir_rel and not rel.startswith(module_dir_rel):
-            continue
-        tp = project_dir / rel
-        if tp.exists():
-            test_parts.append(f'\n<TESTFILE path="{rel}">\n{tp.read_text(encoding="utf-8")}\n</TESTFILE>')
-    if len(test_parts) > 1:
-        extra += "\n".join(test_parts) + "\n"
+    # Fill-down for extra_context: genesis → functional_req → test files (stem-prioritized).
+    # generate_fix_loop gives extra_context the full budget minus minimums for error+source.
+    _extra_budget = max(10_000, SINGLE_CALL_CHAR_LIMIT - 3_000 - 10_000 - 30_000)
 
-    # genesis.md: methodology for reasoning about requirements gaps.
+    # 1. Genesis — methodology, always first.
+    _genesis_section = ""
     if genesis_path and genesis_path.exists():
-        genesis = read(genesis_path)
-        if genesis.strip():
-            extra += f"\n--- genesis.md (methodology) ---\n{trim_to_line(genesis, _GENESIS_CAP, "\n... (genesis truncated)")}\n"
+        _genesis = read(genesis_path)
+        if _genesis.strip():
+            _genesis_section = (
+                f"\n--- genesis.md (methodology) ---\n"
+                f"{trim_to_line(_genesis, _GENESIS_CAP, chr(10) + '... (genesis truncated)')}\n"
+            )
+
+    # 2. Functional requirements — fill after genesis.
+    _req_budget = max(0, _extra_budget - len(_genesis_section) - 2_000)
+    _req_truncated = smart_truncate(functional_req, total_limit=_req_budget,
+                                    head=_req_budget // 3, tail=2 * _req_budget // 3)
+    _req_section = f"\nFunctional requirements:\n{_req_truncated}\n"
+
+    # 3. Test files — stem-prioritized, fill remaining budget.
+    _test_budget = max(0, _extra_budget - len(_genesis_section) - len(_req_section))
+    _file_stem = Path(module_dir_rel.rstrip("/")).name if module_dir_rel else ""
+    _primary_tests: list[str] = []
+    _secondary_tests: list[str] = []
+    for _rel in sorted(existing_test_files):
+        if module_dir_rel and not _rel.startswith(module_dir_rel):
+            continue
+        _tp = project_dir / _rel
+        if not _tp.exists():
+            continue
+        _blk = f'\n<TESTFILE path="{_rel}">\n{_tp.read_text(encoding="utf-8")}\n</TESTFILE>'
+        if _file_stem and Path(_rel).name.split(".")[0] == _file_stem:
+            _primary_tests.append(_blk)
+        else:
+            _secondary_tests.append(_blk)
+    _test_parts = ["\nTest files (the tests your fix must pass):"]
+    _test_used = 0
+    for _blk in _primary_tests + _secondary_tests:
+        if _test_used + len(_blk) > _test_budget:
+            break
+        _test_parts.append(_blk)
+        _test_used += len(_blk)
+    _test_section = ("\n".join(_test_parts) + "\n") if len(_test_parts) > 1 else ""
+
+    extra = _genesis_section + _req_section + _test_section
 
     return generate_fix_loop(
         project_dir=project_dir,
@@ -6995,18 +7062,22 @@ def task4(genesis_path, functional_req_path, test_output, iteration, output_dir,
 
     genesis = read(genesis_path)
     functional_req = read(functional_req_path)
-    _t4_genesis_cap    = INTERMEDIATE_CHAR_LIMIT
-    _t4_req_cap        = int(SINGLE_CALL_CHAR_LIMIT * 0.25)
-    _t4_output_cap     = int(SINGLE_CALL_CHAR_LIMIT * 0.25)
-    # genesis: head-weighted (the methodology intro and core rules sit at the top).
-    # functional_req: head-weighted (early sections define core types/errors).
-    # test_output: tail-weighted (most recent test failures are most actionable).
-    genesis            = smart_truncate(genesis, total_limit=_t4_genesis_cap,
-                                        head=2 * _t4_genesis_cap // 3, tail=_t4_genesis_cap // 3)
-    functional_req     = smart_truncate(functional_req, total_limit=_t4_req_cap,
-                                        head=_t4_req_cap // 3, tail=2 * _t4_req_cap // 3)
-    truncated_output   = smart_truncate(test_output, total_limit=_t4_output_cap,
-                                        head=_t4_output_cap // 4, tail=3 * _t4_output_cap // 4)
+    # Fill-down: genesis and functional_req are typically small (10-20k each).
+    # Include them in full (up to hard safety caps), then give ALL remaining budget
+    # to test_output — the actual failure signal the model must reason about.
+    _t4_genesis_cap = INTERMEDIATE_CHAR_LIMIT
+    _t4_req_cap     = SINGLE_CALL_CHAR_LIMIT // 3
+    # genesis: head-weighted (methodology intro at top). req: head-weighted (core types first).
+    genesis        = smart_truncate(genesis, total_limit=_t4_genesis_cap,
+                                    head=2 * _t4_genesis_cap // 3, tail=_t4_genesis_cap // 3)
+    functional_req = smart_truncate(functional_req, total_limit=_t4_req_cap,
+                                    head=_t4_req_cap // 3, tail=2 * _t4_req_cap // 3)
+    # test_output gets everything left after genesis + req + overhead.
+    _t4_output_cap = max(10_000,
+                         SINGLE_CALL_CHAR_LIMIT - len(genesis) - len(functional_req) - 10_000)
+    # test_output: tail-weighted (most recent failures are most actionable).
+    truncated_output = smart_truncate(test_output, total_limit=_t4_output_cap,
+                                      head=_t4_output_cap // 4, tail=3 * _t4_output_cap // 4)
 
     # Regression / comparison section.
     # Prefer caller-supplied prev data (per-module mode); fall back to file lookup (legacy mode).
@@ -7023,7 +7094,9 @@ def task4(genesis_path, functional_req_path, test_output, iteration, output_dir,
             _prev_pass = count_passing_tests(_prev_output)
 
     if _prev_output:
-        _prev_cap = int(SINGLE_CALL_CHAR_LIMIT * 0.20)
+        _t4_used = len(genesis) + len(functional_req) + len(truncated_output)
+        _t4_secondary_budget = max(5_000, SINGLE_CALL_CHAR_LIMIT - _t4_used - 10_000)
+        _prev_cap = _t4_secondary_budget // 2
         prev_truncated = smart_truncate(_prev_output, total_limit=_prev_cap,
                                         head=_prev_cap // 4, tail=3 * _prev_cap // 4)
         delta = current_pass - _prev_pass
@@ -7042,10 +7115,10 @@ Previous test output (for comparison):
 {prev_truncated}
 """
 
-    # Cap failure_log to ~20% of the budget; otherwise after many iterations it
-    # grows multi-KB and squeezes every other section out of the prompt. Recent
-    # entries are most actionable, so weight 1/4 head + 3/4 tail.
-    _t4_failure_log_cap = int(SINGLE_CALL_CHAR_LIMIT * 0.20)
+    # failure_log shares the secondary budget with prev_output.
+    _t4_used2 = len(genesis) + len(functional_req) + len(truncated_output)
+    _t4_log_budget = max(5_000, SINGLE_CALL_CHAR_LIMIT - _t4_used2 - 10_000) // 2
+    _t4_failure_log_cap = _t4_log_budget
     failure_log_capped = smart_truncate(
         failure_log, total_limit=_t4_failure_log_cap,
         head=_t4_failure_log_cap // 4, tail=3 * _t4_failure_log_cap // 4,
