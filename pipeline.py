@@ -4333,14 +4333,16 @@ def task0_project_profile(profile_path: Path, test_files, readme_text: str) -> s
     later does not invalidate it. Returns the profile content.
     """
     project_dir = profile_path.parent
+    if _phase_valid(project_dir, "task0a"):
+        content = profile_path.read_text().strip() if profile_path.exists() else ""
+        _log(f"  task0a already done — loading {profile_path.name}.")
+        return content
     if profile_path.exists():
         content = profile_path.read_text().strip()
         if content:
-            # Artifact exists → treat as done. Backfill the state entry if it
-            # predates pipeline_state.md tracking for this phase.
-            if not _phase_valid(project_dir, "task0a"):
-                _mark_phase(project_dir, "task0a", "done",
-                            detail=f"{len(content)} chars (existing artifact)")
+            # Artifact predates pipeline_state.md tracking — backfill and skip.
+            _mark_phase(project_dir, "task0a", "done",
+                        detail=f"{len(content)} chars (existing artifact)")
             _log(f"  task0a already done — loading {profile_path.name}.")
             return content
 
@@ -4858,12 +4860,16 @@ def task0_project_context(context_path: Path, test_files, readme_text: str,
     so it re-runs against fresh inputs.
     """
     project_dir = context_path.parent
+    if _phase_valid(project_dir, "task0a-context"):
+        content = context_path.read_text().strip() if context_path.exists() else ""
+        _log(f"  task0a-context already done — loading {context_path.name}.")
+        return content
     if context_path.exists():
         content = context_path.read_text().strip()
         if content:
-            if not _phase_valid(project_dir, "task0a-context"):
-                _mark_phase(project_dir, "task0a-context", "done",
-                            detail=f"{len(content)} chars (existing artifact)")
+            # Artifact predates pipeline_state.md tracking — backfill and skip.
+            _mark_phase(project_dir, "task0a-context", "done",
+                        detail=f"{len(content)} chars (existing artifact)")
             _log(f"  task0a-context already done — loading {context_path.name}.")
             return content
 
@@ -11217,7 +11223,12 @@ def main():
                 detail=f"{len(_clusters)} clusters: {', '.join(c.name for c in _clusters)}",
                 source_hash=_src_hash)
 
-    test_command = discover_test_command(readme_text, project_dir=project_dir)
+    if _phase_valid(project_dir, "test_cmd"):
+        test_command = _read_state(project_dir)["phases"]["test_cmd"].get("detail", "")
+        _log(f"Test command: {test_command} (from pipeline state)")
+    else:
+        test_command = discover_test_command(readme_text, project_dir=project_dir)
+        _mark_phase(project_dir, "test_cmd", "done", detail=test_command, source_hash=_src_hash)
 
     # Normalize: strip leading ./ from the executable so we use the PATH binary.
     parts_check = _parse_cmd(test_command)
@@ -11257,11 +11268,14 @@ def main():
         # Skip if either pipeline_state marks task0b done, or the artifact already
         # exists from a prior run that predates state tracking (auto-backfill).
         strategy_path = project_dir / COVERAGE_STRATEGY_NAME
-        if strategy_path.exists() and strategy_path.read_text().strip():
+        if _phase_valid(project_dir, "task0b"):
+            coverage_strategy = strategy_path.read_text().strip() if strategy_path.exists() else ""
+            _log(f"  task0b already done — loading coverage_strategy.md ({len(coverage_strategy):,} chars).")
+        elif strategy_path.exists() and strategy_path.read_text().strip():
+            # Artifact predates pipeline_state.md tracking — backfill and skip.
             coverage_strategy = strategy_path.read_text().strip()
-            if not _phase_valid(project_dir, "task0b"):
-                _mark_phase(project_dir, "task0b", "done",
-                            detail=f"{len(coverage_strategy)} chars (existing artifact)")
+            _mark_phase(project_dir, "task0b", "done",
+                        detail=f"{len(coverage_strategy)} chars (existing artifact)")
             _log(f"  task0b already done — loading coverage_strategy.md ({len(coverage_strategy):,} chars).")
         else:
             coverage_strategy = task0b_discovery(
@@ -11558,8 +11572,7 @@ def main():
         if _from_spec:
             _log(f"  [from-spec] Skipping strip for '{module_name}'.")
         else:
-            strip_sentinel = project_dir / MODULE_STRIPPED_DIR / module_name
-            if strip_sentinel.exists():
+            if _phase_valid(project_dir, f"strip/{module_name}"):
                 _log(f"  '{module_name}' already stripped — skipping.")
             else:
                 if crate_type != "proc-macro" and TARPAULIN_BIN.exists():
@@ -11656,8 +11669,8 @@ def main():
         if not _from_spec:
             _emit("task.start", task="task1", module=module_name)
         for t1_attempt in (range(0) if _from_spec else range(T1_MAX_RETRIES + 1)):
-            if module_req_path.exists() and t1_attempt == 0:
-                _log(f"\nTASK 1: requirements for '{module_name}' already extracted — skipping.")
+            if _phase_valid(project_dir, f"task1/{module_name}") and module_req_path.exists() and t1_attempt == 0:
+                _log(f"\nTASK 1: requirements for '{module_name}' already done — skipping.")
             else:
                 if t1_attempt > 0:
                     _log(f"\nTASK 1: retry {t1_attempt}/{T1_MAX_RETRIES} for '{module_name}'.")
