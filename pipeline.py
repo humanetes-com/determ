@@ -6655,6 +6655,16 @@ def generate_fix_loop(
                 break
             _log(f"  [fix loop] {len(resolved)} error(s) resolved, {len(cur_sigs)} remaining — continuing.")
 
+        # Graceful stop check — mirrors task0c behaviour: finish current attempt, then exit.
+        _graceful_sentinel = Path("/tmp/pipeline_graceful_stop")
+        if _graceful_sentinel.exists():
+            try:
+                _graceful_sentinel.unlink()
+            except OSError:
+                pass
+            _log(f"  [fix loop] Graceful stop requested — attempt {attempt} complete. Exiting.")
+            sys.exit(0)
+
         attempt += 1
         prev_sigs = cur_sigs
 
