@@ -116,6 +116,335 @@ mod gen_tests_1 {
     print("  OK  gen_tests helpers")
 
 
+def test_merge_fills_preserving_existing() -> None:
+    """Phase C merge must (a) fill `unimplemented!()` bodies from model output,
+    (b) preserve all non-function content from disk (imports, types, attrs),
+    and (c) never overwrite an already-filled body.
+    """
+    import pipeline
+
+    disk = """\
+#![allow(unused)]
+use std::fmt::Debug;
+
+pub mod sub;
+
+pub struct Foo {
+    pub a: u32,
+}
+
+pub fn known() -> u32 { 7 }
+
+pub fn stub_a(x: u32) -> u32 { ::core::unimplemented!() }
+
+pub fn stub_b() -> &'static str { ::core::unimplemented!() }
+"""
+    # Model returns a thinner file: drops the `use`, drops the `mod sub`, drops
+    # the struct, drops `known`, but provides bodies for both stubs.
+    model = """\
+pub fn stub_a(x: u32) -> u32 { x * 2 }
+
+pub fn stub_b() -> &'static str { "hello" }
+"""
+    merged = pipeline._merge_fills_preserving_existing(disk, model)
+    # Preserved from disk:
+    assert "#![allow(unused)]" in merged
+    assert "use std::fmt::Debug;" in merged
+    assert "pub mod sub;" in merged
+    assert "pub struct Foo" in merged
+    assert "pub fn known() -> u32 { 7 }" in merged
+    # Filled from model:
+    assert "x * 2" in merged
+    assert '"hello"' in merged
+    # unimplemented stubs are gone:
+    assert "unimplemented" not in merged
+    print("  OK  _merge_fills_preserving_existing (basic)")
+
+    # Already-filled body is never overwritten by the model.
+    disk2 = "pub fn already() -> u32 { 42 }\n"
+    model2 = "pub fn already() -> u32 { 0 }\n"
+    merged2 = pipeline._merge_fills_preserving_existing(disk2, model2)
+    assert "42" in merged2
+    assert "0 }" not in merged2
+    print("  OK  _merge_fills_preserving_existing (preserves filled)")
+
+    # Empty model output returns disk verbatim (we never lose structure).
+    disk3 = "pub fn x() -> u32 { ::core::unimplemented!() }\n"
+    merged3 = pipeline._merge_fills_preserving_existing(disk3, "")
+    assert merged3 == disk3
+    print("  OK  _merge_fills_preserving_existing (empty model)")
+
+
+def test_fn_block_extract_and_merge() -> None:
+    """P3.2: per-function output format. _extract_fn_blocks parses <FN sig=...>
+    blocks; _merge_fn_blocks_into_disk substitutes bodies into disk by sig.
+    """
+    import pipeline
+
+    # Use double quotes for outer sig and embed single-quote lifetime as-is.
+    response = (
+        "prose the LLM might emit before...\n\n"
+        '<FN sig="pub fn stub_a(x: u32) -> u32">\n'
+        "    x.wrapping_add(1)\n"
+        "</FN>\n\n"
+        "junk between\n\n"
+        "<FN sig=\"pub fn stub_b() -> &'static str\">\n"
+        '    "hello"\n'
+        "</FN>\n"
+    )
+    blocks = pipeline._extract_fn_blocks(response)
+    assert "pub fn stub_a(x: u32) -> u32" in blocks
+    assert blocks["pub fn stub_a(x: u32) -> u32"] == "x.wrapping_add(1)"
+    assert len(blocks) == 2
+    print("  OK  _extract_fn_blocks")
+
+    disk = """\
+#![allow(unused)]
+use std::fmt;
+
+pub fn stub_a(x: u32) -> u32 { ::core::unimplemented!() }
+pub fn already() -> u32 { 7 }
+pub fn stub_b() -> &'static str { ::core::unimplemented!() }
+"""
+    merged = pipeline._merge_fn_blocks_into_disk(disk, blocks)
+    assert "#![allow(unused)]" in merged
+    assert "use std::fmt;" in merged
+    assert "pub fn already() -> u32 { 7 }" in merged
+    assert "x.wrapping_add(1)" in merged
+    assert '"hello"' in merged
+    assert "unimplemented" not in merged
+    print("  OK  _merge_fn_blocks_into_disk (basic)")
+
+    # Empty dict returns disk verbatim.
+    assert pipeline._merge_fn_blocks_into_disk(disk, {}) == disk
+    print("  OK  _merge_fn_blocks_into_disk (empty)")
+
+
+def test_format_skeleton_index() -> None:
+    """P3.3: signatures-only skeleton. Replaces `{...}` bodies with `;`."""
+    import pipeline
+
+    files = [(
+        "src/lib.rs",
+        """\
+pub fn foo() -> u32 { ::core::unimplemented!() }
+pub struct S { pub a: u32 }
+pub fn bar(x: u32) -> u32 {
+    let y = x + 1;
+    y
+}
+""",
+    )]
+    out = pipeline._format_skeleton_index(files)
+    assert "src/lib.rs" in out
+    assert "mode=\"signatures-only\"" in out
+    # Bodies should be replaced with `;`.
+    assert "unimplemented" not in out
+    assert "pub fn foo() -> u32;" in out or "pub fn foo() -> u32 ;" in out
+    # Struct definition preserved.
+    assert "pub struct S { pub a: u32 }" in out
+    print("  OK  _format_skeleton_index")
+
+
+def test_prune_redundant_clusters() -> None:
+    """Plan 4 + cluster pruning: drop clusters that duplicate defaults or
+    gate too few items."""
+    import pipeline
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "src"
+        src.mkdir()
+        # 6 items gated by 'nightly', 1 item by 'rare_cfg'
+        (src / "lib.rs").write_text("""
+#[cfg(nightly)] fn a() {}
+#[cfg(nightly)] fn b() {}
+#[cfg(nightly)] fn c() {}
+#[cfg(nightly)] fn d() {}
+#[cfg(nightly)] fn e() {}
+#[cfg(nightly)] fn f() {}
+#[cfg(rare_cfg)] fn g() {}
+""")
+        cargo = Path(td) / "Cargo.toml"
+        cargo.write_text('[features]\ndefault = ["std"]\nstd = []\n')
+
+        clusters = [
+            pipeline.BuildCluster(name="stable", env_extra={}, tarpaulin_exclude_files=[],
+                                  excluded_cfg=[], active_cfg=[], prompt_nightly_rule="",
+                                  is_default=True),
+            pipeline.BuildCluster(name="std", env_extra={"RUSTFLAGS": "--cfg std"},
+                                  tarpaulin_exclude_files=[], excluded_cfg=[],
+                                  active_cfg=["std"], prompt_nightly_rule="",
+                                  is_default=False),
+            pipeline.BuildCluster(name="nightly", env_extra={"RUSTFLAGS": "--cfg nightly"},
+                                  tarpaulin_exclude_files=[], excluded_cfg=[],
+                                  active_cfg=["nightly"], prompt_nightly_rule="",
+                                  is_default=False),
+            pipeline.BuildCluster(name="rare", env_extra={"RUSTFLAGS": "--cfg rare_cfg"},
+                                  tarpaulin_exclude_files=[], excluded_cfg=[],
+                                  active_cfg=["rare_cfg"], prompt_nightly_rule="",
+                                  is_default=False),
+        ]
+        kept = pipeline._prune_redundant_clusters(clusters, Path(td), cargo_toml_path=cargo,
+                                                   min_gated_items=5)
+        kept_names = {c.name for c in kept}
+        # stable (baseline) → kept
+        assert "stable" in kept_names
+        # std → dropped (cfg is in default features)
+        assert "std" not in kept_names
+        # nightly → kept (gates 6 items, above threshold)
+        assert "nightly" in kept_names
+        # rare → dropped (gates only 1 item, below threshold)
+        assert "rare" not in kept_names
+        print(f"  OK  _prune_redundant_clusters (4 → {len(kept)}: {sorted(kept_names)})")
+
+
+def test_filter_tests_for_cluster() -> None:
+    """Plan 4: top-level #![cfg(...)] filter on test files."""
+    import pipeline, dataclasses
+
+    cluster_stable = pipeline.BuildCluster(
+        name="stable", env_extra={}, tarpaulin_exclude_files=[],
+        excluded_cfg=["nightly"],
+        active_cfg=['feature = "std"'],
+        prompt_nightly_rule="",
+    )
+    tests = [
+        ("tests/always.rs", "fn t1() {}"),
+        ("tests/needs_nightly.rs", "#![cfg(nightly)]\n\nfn t2() {}"),
+        ("tests/needs_std.rs", '#![cfg(feature = "std")]\n\nfn t3() {}'),
+        ("tests/no_std.rs", '#![cfg(not(feature = "std"))]\n\nfn t4() {}'),
+        ("tests/unknown.rs", "#![cfg(some_random)]\n\nfn t5() {}"),
+    ]
+    filtered = pipeline._filter_tests_for_cluster(tests, cluster_stable)
+    rels = {r for r, _ in filtered}
+    assert "tests/always.rs" in rels
+    assert "tests/needs_nightly.rs" not in rels  # nightly is false in stable
+    assert "tests/needs_std.rs" in rels
+    assert "tests/no_std.rs" not in rels  # cfg(not(feature="std")) is false
+    assert "tests/unknown.rs" in rels  # undecidable → keep
+    print("  OK  _filter_tests_for_cluster")
+
+
+def test_eval_cfg_pred() -> None:
+    """Plan 4: cfg predicate evaluator handles all/any/not."""
+    import pipeline
+    true_set = {'feature="std"', 'nightly'}
+    false_set = {'feature="alloc"'}
+    e = pipeline._eval_cfg_pred
+    assert e('feature = "std"', true_set, false_set) is True
+    assert e('feature = "alloc"', true_set, false_set) is False
+    assert e('nightly', true_set, false_set) is True
+    assert e('not(nightly)', true_set, false_set) is False
+    assert e('all(nightly, feature = "std")', true_set, false_set) is True
+    assert e('any(feature = "alloc", nightly)', true_set, false_set) is True
+    assert e('not(feature = "alloc")', true_set, false_set) is True
+    assert e('something_unknown', true_set, false_set) is None
+    assert e('all(nightly, something_unknown)', true_set, false_set) is None
+    print("  OK  _eval_cfg_pred")
+
+
+def test_cluster_extractor_args() -> None:
+    """Plan 4: cluster → CLI args translation."""
+    import pipeline
+
+    cluster = pipeline.BuildCluster(
+        name="stable", env_extra={}, tarpaulin_exclude_files=[],
+        excluded_cfg=["nightly"],
+        active_cfg=['feature = "std"'],
+        prompt_nightly_rule="",
+    )
+    args = pipeline._cluster_extractor_args(cluster)
+    assert "--cfg-true" in args
+    assert 'feature = "std"' in args
+    assert "--cfg-false" in args
+    assert "nightly" in args
+    # None → empty.
+    assert pipeline._cluster_extractor_args(None) == []
+    print("  OK  _cluster_extractor_args")
+
+
+def test_buildcluster_features_toolchain() -> None:
+    """Plan 4: BuildCluster derives features and toolchain from cfg lists."""
+    import pipeline
+
+    c = pipeline.BuildCluster(
+        name="nightly", env_extra={}, tarpaulin_exclude_files=[],
+        excluded_cfg=[],
+        active_cfg=['feature = "std"', 'feature = "backtrace"', "nightly"],
+        prompt_nightly_rule="",
+        requires_nightly=True,
+    )
+    feats = c.features
+    assert "std" in feats
+    assert "backtrace" in feats
+    assert c.toolchain == "nightly"
+    c2 = pipeline.BuildCluster(
+        name="stable", env_extra={}, tarpaulin_exclude_files=[],
+        excluded_cfg=["nightly"], active_cfg=[],
+        prompt_nightly_rule="",
+    )
+    assert c2.toolchain is None
+    assert c2.features == []
+    print("  OK  BuildCluster.features / .toolchain")
+
+
+def test_format_skeleton_index_elides_macros() -> None:
+    """P3.11: macro_rules! bodies must be elided from the skeleton index."""
+    import pipeline
+
+    files = [(
+        "src/macros.rs",
+        """\
+#[macro_export]
+macro_rules! shout {
+    ($e:expr) => {
+        {
+            let s = format!("{}", $e);
+            s.to_uppercase()
+        }
+    };
+}
+
+pub fn helper() { ::core::unimplemented!() }
+""",
+    )]
+    out = pipeline._format_skeleton_index(files)
+    # Macro name must remain visible.
+    assert "macro_rules! shout" in out
+    # Macro body must be gone.
+    assert "to_uppercase" not in out
+    assert "macro body elided" in out
+    # Function body also elided.
+    assert "unimplemented" not in out
+    assert "pub fn helper();" in out or "pub fn helper() ;" in out
+    print("  OK  _format_skeleton_index elides macros")
+
+
+def test_split_oversized_groups() -> None:
+    """P3.6: groups with >max_size test files get split into chunks."""
+    import pipeline
+
+    groups = [
+        {"name": "small", "rationale": "r1", "test_files": ["a.rs", "b.rs"],
+         "target_symbols": ["x"]},
+        {"name": "big", "rationale": "r2",
+         "test_files": ["a.rs", "b.rs", "c.rs", "d.rs", "e.rs", "f.rs", "g.rs"],
+         "target_symbols": ["y", "z"]},
+    ]
+    split = pipeline._split_oversized_groups(groups, max_size=3)
+    # small is untouched.
+    assert any(g["name"] == "small" for g in split)
+    # big becomes 3 chunks (7 tests / 3 = 3 chunks).
+    big_chunks = [g for g in split if g["name"].startswith("big_")]
+    assert len(big_chunks) == 3
+    assert sum(len(g["test_files"]) for g in big_chunks) == 7
+    # All chunks inherit target_symbols.
+    assert all(g["target_symbols"] == ["y", "z"] for g in big_chunks)
+    print("  OK  _split_oversized_groups")
+
+
 def test_describe_test_environment() -> None:
     """_describe_test_environment should describe what cargo sees: the env
     vars set, the env vars notably NOT set, the cluster cfg state, and the
@@ -851,6 +1180,16 @@ def main() -> int:
     test_has_gen_tests_decl()
     test_api_surface_capture()
     test_api_surface_conformance()
+    test_merge_fills_preserving_existing()
+    test_fn_block_extract_and_merge()
+    test_format_skeleton_index()
+    test_format_skeleton_index_elides_macros()
+    test_prune_redundant_clusters()
+    test_filter_tests_for_cluster()
+    test_eval_cfg_pred()
+    test_cluster_extractor_args()
+    test_buildcluster_features_toolchain()
+    test_split_oversized_groups()
     test_describe_test_environment()
     test_retrospective_prompt_includes_failed_attempts()
     test_module_augment_state()

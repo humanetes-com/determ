@@ -5,11 +5,78 @@ from typing import Any
 from datetime import datetime
 
 _LOG_DIR     = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
-PIPELINE_LOG = os.getenv("PIPELINE_LOG", os.path.join(_LOG_DIR, "pipeline_anyhow.log"))
-STREAM_LOG   = os.getenv("LLM_STREAM_LOG", os.getenv("OLLAMA_STREAM_LOG", os.path.join(_LOG_DIR, "stream.log")))
-EVENTS_LOG   = os.getenv("PIPELINE_EVENTS_LOG", os.path.join(_LOG_DIR, "events.jsonl"))
-_GUARDS_LOG  = os.getenv("PIPELINE_GUARD_LOG", os.path.join(_LOG_DIR, "pipeline_guards.log"))
+_RUN_REGISTRY = os.getenv("PIPELINE_RUN_REGISTRY", "/tmp/determ_pipelines.json")
 REFRESH      = 2
+
+
+def _discover_running_runs() -> list[dict]:
+    """Read the pipeline registry and return entries whose PIDs are still alive."""
+    try:
+        with open(_RUN_REGISTRY) as fh:
+            reg = _json.load(fh)
+        if not isinstance(reg, list):
+            return []
+    except Exception:
+        return []
+    live: list[dict] = []
+    for r in reg:
+        pid = r.get("pid")
+        if pid and os.path.exists(f"/proc/{pid}"):
+            live.append(r)
+    return live
+
+
+def _pick_run(runs: list[dict]) -> dict | None:
+    """Auto-pick when only one run is live; otherwise prompt the user."""
+    if not runs:
+        return None
+    if len(runs) == 1:
+        return runs[0]
+    print("Multiple pipelines running:")
+    for i, r in enumerate(runs):
+        argv = " ".join(r.get("argv", []) or [])
+        log = r.get("stdout_log") or r.get("pipeline_log") or "?"
+        age = int(time.time() - r.get("started_at", 0))
+        print(f"  [{i}] pid={r.get('pid')} project={r.get('project','?')} "
+              f"age={age}s log={log}\n      argv={argv}")
+    try:
+        choice = input("Select index (default 0): ").strip() or "0"
+        idx = int(choice)
+        return runs[idx] if 0 <= idx < len(runs) else runs[0]
+    except (EOFError, ValueError, KeyboardInterrupt):
+        return runs[0]
+
+
+def _pick_log(run: dict | None, key: str, default_path: str) -> str:
+    """Prefer the registered run's log; fall back to default."""
+    if run:
+        v = run.get(key)
+        if v and os.path.exists(v):
+            return v
+        # stdout_log is special: when present it's the live combined log.
+        stdout_log = run.get("stdout_log")
+        if key == "pipeline_log" and stdout_log and os.path.exists(stdout_log):
+            return stdout_log
+    return default_path
+
+
+# Discovery order: explicit env var → registry → default. Env wins so users
+# can still force a specific file when they want to.
+_DISCOVERED = None if os.getenv("PIPELINE_LOG") else _pick_run(_discover_running_runs())
+
+PIPELINE_LOG = os.getenv("PIPELINE_LOG", _pick_log(
+    _DISCOVERED, "pipeline_log", os.path.join(_LOG_DIR, "pipeline_anyhow.log")))
+# When a live run has a stdout_log, that's the actual live output.
+if _DISCOVERED and not os.getenv("PIPELINE_LOG"):
+    _stdout = _DISCOVERED.get("stdout_log")
+    if _stdout and os.path.exists(_stdout):
+        PIPELINE_LOG = _stdout
+STREAM_LOG   = os.getenv("LLM_STREAM_LOG", os.getenv("OLLAMA_STREAM_LOG", _pick_log(
+    _DISCOVERED, "stream_log", os.path.join(_LOG_DIR, "stream.log"))))
+EVENTS_LOG   = os.getenv("PIPELINE_EVENTS_LOG", _pick_log(
+    _DISCOVERED, "events_log", os.path.join(_LOG_DIR, "events.jsonl")))
+_GUARDS_LOG  = os.getenv("PIPELINE_GUARD_LOG", _pick_log(
+    _DISCOVERED, "guard_log", os.path.join(_LOG_DIR, "pipeline_guards.log")))
 
 _GPU_BW = {"3090": 936.2, "3080": 760.0, "4090": 1008.0, "4080": 716.8,
            "A100": 2000.0, "H100": 3350.0}
@@ -80,13 +147,46 @@ def box(title, rows):
         _ln(f"│ {row}{' ' * max(pad, 0)}│")
     _ln("└" + "─" * w + "┘")
 
+def _truncate_visible(s: str, max_visible: int) -> str:
+    """Truncate `s` so its plain (ANSI-stripped) length is at most max_visible.
+    Preserves ANSI escapes that have already been opened by appending a reset.
+    """
+    if max_visible <= 0:
+        return ""
+    if len(_plain(s)) <= max_visible:
+        return s
+    out: list[str] = []
+    visible = 0
+    i = 0
+    while i < len(s) and visible < max_visible:
+        if s[i] == "\033":
+            # Copy the whole ANSI sequence verbatim (up to and including the
+            # final letter).
+            m = re.match(r"\033\[[0-9;]*[a-zA-Z]", s[i:])
+            if m:
+                out.append(m.group(0))
+                i += len(m.group(0))
+                continue
+        out.append(s[i])
+        visible += 1
+        i += 1
+    out.append("\033[0m")  # safety reset
+    return "".join(out)
+
+
 def box_lines(title, rows):
     """Same as box() but returns list of strings without printing."""
     w = _w() - 2
     out = [f"┌─ {bold(title)} {'─' * max(0, w - len(title) - 3)}┐"]
+    # Inner content width: w - 2 ("│ " left pad and " │" right) → w - 1 visible.
+    inner_w = max(0, w - 2)
     for row in rows:
-        pad = w - 1 - len(_plain(row))
-        out.append(f"│ {row}{' ' * max(pad, 0)}│")
+        visible = len(_plain(row))
+        if visible > inner_w:
+            row = _truncate_visible(row, max(0, inner_w - 1)) + "…"
+            visible = len(_plain(row))
+        pad = inner_w - visible
+        out.append(f"│ {row}{' ' * max(pad, 0)} │")
     out.append("└" + "─" * w + "┘")
     return out
 

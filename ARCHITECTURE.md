@@ -40,6 +40,62 @@ genesis.md faster than a toy project would.
 
 ---
 
+## Design Principles
+
+The two principles below govern every architectural decision in this pipeline.
+They are non-negotiable — they take precedence over engineering convenience,
+runtime speed, or simplicity of implementation.
+
+### Principle 1 — Cluster boundaries are extracted from source
+
+A "cluster" is the unit by which the pipeline splits the reconstruction
+problem into sub-problems. Concretely: identify the restrictions present
+in source code (compilation directives like `#[cfg(feature = "...")]`,
+`#[cfg(nightly)]`, `#[cfg(not(...))]`, cargo features, toolchain
+selection, `RUSTFLAGS`), and enumerate the distinct restriction sets
+they imply. The pipeline then iterates restriction-by-restriction.
+
+While a given restriction is active:
+  - All OTHER restrictions are excluded.
+  - The current restriction OWNS the rules in force (which source
+    compiles, which tests run, which env vars apply).
+  - All cluster-derived parameters (env_extra, features, toolchain) flow
+    through every downstream phase end-to-end — not just at extraction
+    time. Compilation uses them. Test invocation uses them. Logs are
+    scoped to them.
+
+Cluster identification is purely static — no LLM. Per-cluster scoping
+shrinks the model's cognitive load (fewer cfg branches to consider, less
+code to read) and isolates failures to a specific compilation context so
+they can be diagnosed precisely. Cross-cluster reasoning is the exception,
+not the default.
+
+### Principle 2 — Quality, systemic, deterministic. Never "faster", never "easier"
+
+Ranking when picking between approaches: deterministic > systemic >
+quality. Speed and ease are not criteria. A solution that is 5× slower
+but reproducible and addresses the root cause beats a fast patch that
+leaves the underlying problem in place.
+
+Specific preferences:
+  - Extract structure from source over guessing it via LLM (LLM output is
+    non-deterministic, source is the ground truth).
+  - Per-cluster scoped reasoning over global reasoning (smaller scope =
+    less ambiguity).
+  - Immutable scratch directories and merge passes over in-place mutation
+    (mutation races, merges are reproducible).
+  - Regenerate from upstream truth over caching arbitrary state.
+  - Documented invariants over implicit assumptions.
+
+When in doubt: ASK the user — do not silently pick.
+
+When two solutions appear equivalent: pick the one that ADDS MORE
+CONSTRAINTS. More constraints further narrow what the model, the clusters,
+or the source structures can be. More constraints = less ambiguity =
+better comprehension.
+
+---
+
 ## Determinism Principle
 
 **The goal is not to approximate a solution. The goal is to produce, each time, exactly

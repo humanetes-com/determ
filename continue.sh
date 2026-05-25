@@ -3,6 +3,18 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# ---------------------------------------------------------------------------
+# Single-instance lock — prevents two simultaneous continue.sh invocations
+# from each launching a pipeline (the race that produced the duplicate-PID
+# bug). Exits cleanly if another invocation is in flight.
+# ---------------------------------------------------------------------------
+_LOCKFILE="/tmp/determ_continue.lock"
+exec 200>"$_LOCKFILE"
+if ! flock -n 200; then
+    echo "Another continue.sh is already running (lock: $_LOCKFILE). Exiting."
+    exit 1
+fi
+
 # Read BACKEND from .env (grep for uncommented BACKEND= line)
 BACKEND=$(grep -E '^[[:space:]]*BACKEND=' "$SCRIPT_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
 BACKEND="${BACKEND:-ollama}"
@@ -186,6 +198,13 @@ fi
 _PIPELINE_ARGS="--project anyhow"
 [[ "$_WIPE" == true ]]           && _PIPELINE_ARGS="--repo https://github.com/dtolnay/anyhow --clean"
 [[ "$_KEEP_AUGMENTED" == true ]] && _PIPELINE_ARGS="--project anyhow --restart-from-augmented"
+
+# Final guard against a duplicate slipping in despite the flock (e.g. if
+# someone bypassed the lock or pgrep was momentarily wrong above).
+if pgrep -f "pipeline.py" > /dev/null 2>&1; then
+    echo "Pipeline already running (PID $(pgrep -f pipeline.py | head -1)). Not launching another."
+    exit 0
+fi
 nohup .venv/bin/python pipeline.py $_PIPELINE_ARGS >> "$LOG_DIR/pipeline_anyhow.log" 2>&1 &
 echo "Pipeline started (PID $!) — backend: $BACKEND"
 echo "Pipeline log : tail -f $LOG_DIR/pipeline_anyhow.log"

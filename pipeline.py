@@ -221,6 +221,7 @@ _PIPELINE_LOG     = os.getenv("PIPELINE_LOG",         str(Path(__file__).parent 
 _LOG_MAX_BYTES    = 512 * 1024   # keep last 512 KB in pipeline_anyhow.log
 _LOG_TRIM_EVERY   = 50           # check file size every N _log() calls
 _log_trim_counter = 0
+_RUN_REGISTRY     = Path(os.getenv("PIPELINE_RUN_REGISTRY", "/tmp/determ_pipelines.json"))
 
 
 def _trim_pipeline_log() -> None:
@@ -724,6 +725,9 @@ SKIP_DIR_NAMES = {
     "__pycache__", ".mypy_cache",     # Python caches
     "dist", "build", ".build",        # Generic build output
     ".tox", ".eggs",                   # Python test infra artifacts
+    ".skeleton", ".skeleton-filled",  # TASK 2 skeleton backend scratch dirs
+    ".original_structure",             # pre-strip API snapshot
+    ".chunk_cache", ".task1_partials", # task1 caches
 }
 
 # ---------------------------------------------------------------------------
@@ -761,6 +765,74 @@ def _git_file_hash(root: Path, filename: str) -> str:
         return "unknown"
 
 
+def _resolve_stdout_path() -> str | None:
+    """Best-effort: when stdout is redirected (nohup ... > /tmp/foo.log) return
+    the resolved target path so monitors can find the live log. Returns None
+    when stdout is a tty or otherwise non-file."""
+    try:
+        if sys.stdout.isatty():
+            return None
+        return str(Path(f"/proc/{os.getpid()}/fd/1").resolve())
+    except Exception:
+        return None
+
+
+def _register_run(project_dir: Path) -> None:
+    """Write this run's coordinates to the shared registry so monitor.py can
+    auto-discover it. Idempotent: also prunes dead pids."""
+    try:
+        pid = os.getpid()
+        stdout_log = _resolve_stdout_path()
+        entry: dict = {
+            "pid": pid,
+            "project": project_dir.name,
+            "project_dir": str(project_dir),
+            "pipeline_log": _PIPELINE_LOG,
+            "run_log": (str(_log_path) if _log_path else None),
+            "stdout_log": stdout_log,
+            "stream_log": os.getenv("LLM_STREAM_LOG", os.getenv("OLLAMA_STREAM_LOG",
+                str(Path(__file__).parent / "logs" / "stream.log"))),
+            "events_log": os.getenv("PIPELINE_EVENTS_LOG",
+                str(Path(__file__).parent / "logs" / "events.jsonl")),
+            "guard_log": _GUARD_LOG,
+            "argv": sys.argv[1:],
+            "cwd": os.getcwd(),
+            "started_at": int(time.time()),
+        }
+        reg: list[dict] = []
+        if _RUN_REGISTRY.exists():
+            try:
+                reg = json.loads(_RUN_REGISTRY.read_text())
+                if not isinstance(reg, list):
+                    reg = []
+            except Exception:
+                reg = []
+        # Drop dead pids and any duplicate of our own pid.
+        reg = [r for r in reg
+               if r.get("pid") != pid and Path(f"/proc/{r.get('pid')}").exists()]
+        reg.append(entry)
+        _RUN_REGISTRY.parent.mkdir(parents=True, exist_ok=True)
+        _RUN_REGISTRY.write_text(json.dumps(reg, indent=2))
+
+        import atexit
+        def _unregister() -> None:
+            try:
+                if not _RUN_REGISTRY.exists():
+                    return
+                cur = json.loads(_RUN_REGISTRY.read_text())
+                cur = [r for r in cur if r.get("pid") != pid]
+                _RUN_REGISTRY.write_text(json.dumps(cur, indent=2))
+            except Exception:
+                pass
+        atexit.register(_unregister)
+    except Exception as e:
+        # Never let registry bookkeeping break a real run.
+        try:
+            _log(f"  (registry write failed: {e})")
+        except Exception:
+            pass
+
+
 def init_log(root: Path, nolog: bool = False, progress_mode: bool = False):
     global _log_path, _nolog, _progress_mode
     _nolog = nolog
@@ -783,6 +855,7 @@ def init_log(root: Path, nolog: bool = False, progress_mode: bool = False):
     _log(f"  PIPELINE STARTED — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC  pipeline.py={_py_hash}{_git_hash}")
     _log(f"{'=' * 60}")
     _log(f"{'=' * 60}")
+    _register_run(root)
 
 
 # ---------------------------------------------------------------------------
@@ -1024,6 +1097,18 @@ def read(path) -> str:
 def write(path, content):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     Path(path).write_text(content)
+
+
+def _write_fr_preserving_notes(path, new_content: str) -> None:
+    """Write FR content, preserving an existing `## Model Notes` section.
+    Use at every TASK 1 write site so regenerating FR never wipes the
+    model's accumulated self-corrections.
+    """
+    p = Path(path)
+    old = p.read_text(encoding="utf-8") if p.exists() else None
+    merged = _preserve_model_notes(old, new_content)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(merged, encoding="utf-8")
 
 
 def delete(path):
@@ -3590,6 +3675,55 @@ class BuildCluster:
     gated_files: set = None             # source files (rel paths) gated behind excluded_cfg — skip augmentation
     requires_nightly: bool = False      # cluster needs nightly toolchain (set at runtime when E0554 detected)
 
+    @property
+    def cfg_true(self) -> list[str]:
+        """List of cfg predicates that evaluate to true under this cluster.
+
+        Each entry is a predicate as it would appear in `#[cfg(...)]`.
+        For each bare name N in active_cfg, we emit BOTH the bare form
+        (`N`) and the cargo-feature form (`feature = "N"`) because source
+        code may use either. The skeleton extractor's CfgSet eval ignores
+        keys that don't match a real predicate in the source, so the
+        extra forms are harmless.
+        """
+        out: list[str] = []
+        for pred in (self.active_cfg or []):
+            out.append(pred)
+            if "=" not in pred and "(" not in pred:
+                out.append(f'feature = "{pred}"')
+        return out
+
+    @property
+    def cfg_false(self) -> list[str]:
+        """List of cfg predicates that evaluate to false under this cluster.
+        Same expansion as cfg_true."""
+        out: list[str] = []
+        for pred in (self.excluded_cfg or []):
+            out.append(pred)
+            if "=" not in pred and "(" not in pred:
+                out.append(f'feature = "{pred}"')
+        return out
+
+    @property
+    def features(self) -> list[str]:
+        """Cargo feature names enabled in this cluster.
+        Bare names in active_cfg that match a known feature pattern are
+        treated as feature names."""
+        out: list[str] = []
+        for pred in (self.active_cfg or []):
+            # Bare name or feature = "X"
+            m = re.match(r'feature\s*=\s*"([^"]+)"', pred)
+            if m:
+                out.append(m.group(1))
+            elif "=" not in pred and "(" not in pred and re.match(r'^[a-z_]\w*$', pred):
+                out.append(pred)
+        return out
+
+    @property
+    def toolchain(self) -> str | None:
+        """Required toolchain name (e.g. "nightly") or None for stable default."""
+        return "nightly" if self.requires_nightly else None
+
 
 @dataclasses.dataclass
 class ModuleAugmentState:
@@ -3896,6 +4030,2861 @@ def _estimate_cluster_ceiling(project_dir: Path, cluster: "BuildCluster") -> tup
         return 100.0, 0, 0
     ceiling = (1.0 - excluded / total) * 100.0
     return ceiling, excluded, total
+
+
+# ---------------------------------------------------------------------------
+# Skeleton extractor (TASK 2 Phase A) — wraps the Rust binary built by setup.sh.
+# ---------------------------------------------------------------------------
+
+SKELETON_EXTRACTOR_BIN = Path(__file__).parent / "tools" / "skeleton_extractor" / "target" / "release" / "skeleton-extractor"
+
+
+def _prune_redundant_clusters(
+    clusters: list["BuildCluster"],
+    source_dir: Path,
+    cargo_toml_path: "Path | None" = None,
+    min_gated_items: int = 5,
+) -> list["BuildCluster"]:
+    """Drop clusters whose work is already covered by another cluster.
+
+    Two pruning strategies:
+      (P) Default-redundancy: if a cluster's distinguishing cfg_true is a
+          subset of Cargo.toml's `default = [...]` features, drop it —
+          the default build (cluster with no cfgs added) already covers
+          its activated set.
+      (Q) Empty-cluster: count items in `source_dir/src/` whose
+          `#[cfg(...)]` references the cluster's distinguishing predicate.
+          If fewer than `min_gated_items`, the cluster's contribution is
+          too small to justify its own LLM run. Drop it.
+
+    Always keep at least one cluster (the default). Returns the pruned
+    list. Logs each prune decision with reason.
+    """
+    if not clusters:
+        return clusters
+    # Parse Cargo.toml [features].default to get baseline-enabled features.
+    default_features: set[str] = set()
+    if cargo_toml_path is None:
+        cargo_toml_path = source_dir / "Cargo.toml"
+    if cargo_toml_path.exists():
+        raw = cargo_toml_path.read_text(errors="replace")
+        feat_block_m = re.search(r'\[features\](.*?)(?=\n\[|\Z)', raw, re.DOTALL)
+        if feat_block_m:
+            def_m = re.search(r'default\s*=\s*\[([^\]]*)\]', feat_block_m.group(1))
+            if def_m:
+                default_features = {
+                    f.strip().strip('"').strip("'")
+                    for f in def_m.group(1).split(",") if f.strip()
+                }
+
+    # Count per-predicate gated items in source.
+    pred_counts: dict[str, int] = {}
+    src_dir = source_dir / "src"
+    if src_dir.exists():
+        pred_re = re.compile(r'#\[cfg(?:_attr)?\(([^)]+(?:\([^)]*\)[^)]*)*)\)')
+        bare_re = re.compile(r'\b([a-z_]\w*)(?!\s*=)')
+        feat_re = re.compile(r'\bfeature\s*=\s*"([^"]*)"')
+        skip = {"any", "all", "not", "cfg", "cfg_attr", "feature"}
+        for rs in src_dir.rglob("*.rs"):
+            try:
+                txt = rs.read_text(errors="replace")
+            except Exception:
+                continue
+            for m in pred_re.finditer(txt):
+                inner = m.group(1)
+                for fm in feat_re.finditer(inner):
+                    name = fm.group(1)
+                    if name:
+                        pred_counts[name] = pred_counts.get(name, 0) + 1
+                for bm in bare_re.finditer(feat_re.sub("", inner)):
+                    name = bm.group(1)
+                    if name and name not in skip:
+                        pred_counts[name] = pred_counts.get(name, 0) + 1
+
+    keep: list[BuildCluster] = []
+    dropped: list[tuple[str, str]] = []
+    # Sort clusters: stable/default first so we always retain a baseline.
+    ordered = sorted(clusters, key=lambda c: (not c.is_default, c.name))
+    has_baseline = False
+    for c in ordered:
+        distinguishing = [p for p in (c.active_cfg or [])]
+        # (P) default-redundancy: drop if all distinguishing cfgs are in defaults.
+        if distinguishing and all(p in default_features for p in distinguishing):
+            if has_baseline:
+                dropped.append((c.name, f"all cfgs {distinguishing} are in default features"))
+                continue
+        # (Q) empty-cluster: drop if distinguishing predicates gate too little.
+        if distinguishing:
+            total_gated = sum(pred_counts.get(p, 0) for p in distinguishing)
+            if total_gated < min_gated_items and not c.is_default:
+                if has_baseline:
+                    dropped.append((c.name,
+                                    f"distinguishing cfgs gate only {total_gated} item(s) "
+                                    f"(< {min_gated_items})"))
+                    continue
+        keep.append(c)
+        if c.is_default or not distinguishing:
+            has_baseline = True
+
+    if not keep:
+        # Pathological: nothing survived. Keep the lex-first as safety baseline.
+        keep = [sorted(clusters, key=lambda c: c.name)[0]]
+        _log(f"  [prune] all clusters were redundant; keeping baseline '{keep[0].name}' as safety.")
+
+    if dropped:
+        for name, reason in dropped:
+            _log(f"  [prune] dropped cluster '{name}': {reason}")
+    else:
+        _log(f"  [prune] no redundant clusters; keeping all {len(keep)}.")
+    return keep
+
+
+def _filter_tests_for_cluster(test_files: list[tuple[str, str]],
+                              cluster: "BuildCluster | None") -> list[tuple[str, str]]:
+    """File-level cluster test filter.
+
+    For each test file, evaluate any top-level `#![cfg(...)]` against the
+    cluster's cfg-set. If the predicate is decidably false, drop the file.
+    Files with no top-level cfg, or with undecidable predicates, are kept
+    (safe default — better to include than wrongly exclude).
+    """
+    if cluster is None:
+        return test_files
+    cfg_true_set = {_normalize_cfg_pred(p) for p in cluster.cfg_true}
+    cfg_false_set = {_normalize_cfg_pred(p) for p in cluster.cfg_false}
+
+    out: list[tuple[str, str]] = []
+    for rel, content in test_files:
+        if _file_top_cfg_excluded(content, cfg_true_set, cfg_false_set):
+            continue
+        out.append((rel, content))
+    return out
+
+
+def _normalize_cfg_pred(p: str) -> str:
+    """Normalize a cfg predicate for set comparison (strip spaces)."""
+    return p.replace(" ", "")
+
+
+def _file_top_cfg_excluded(content: str, cfg_true: set[str], cfg_false: set[str]) -> bool:
+    """Return True if the file has a top-level `#![cfg(...)]` that evaluates
+    to false. Conservative: returns False (don't exclude) on any uncertainty.
+
+    We use a narrow regex match for the common case `#![cfg(PRED)]` rather
+    than full AST parsing — test files are small and the pattern is common.
+    """
+    # Match all top-level #![cfg(...)] occurrences (allow nested parens up to 3 deep).
+    pat = re.compile(r'^\s*#!\[cfg\((.*?)\)\]\s*$', re.MULTILINE)
+    for m in pat.finditer(content):
+        pred = m.group(1).strip()
+        if _eval_cfg_pred(pred, cfg_true, cfg_false) is False:
+            return True
+    return False
+
+
+def _eval_cfg_pred(pred: str, cfg_true: set[str], cfg_false: set[str]) -> "bool | None":
+    """Evaluate a cfg predicate string (the part inside `cfg(...)`).
+
+    Supports `not(X)`, `all(X, Y)`, `any(X, Y)`, bare ident, `feature = "X"`.
+    Returns True/False if fully decidable, None if any inner key is unknown.
+    """
+    s = pred.strip()
+    norm = _normalize_cfg_pred(s)
+    if norm in cfg_true:
+        return True
+    if norm in cfg_false:
+        return False
+    # Operators
+    for op in ("not", "all", "any"):
+        if s.startswith(op + "(") and s.endswith(")"):
+            inner = s[len(op) + 1:-1]
+            parts = _split_top_level_commas(inner)
+            evaluated = [_eval_cfg_pred(p, cfg_true, cfg_false) for p in parts]
+            if op == "not":
+                if not evaluated or evaluated[0] is None:
+                    return None
+                return not evaluated[0]
+            if op == "all":
+                if any(e is None for e in evaluated):
+                    return None
+                return all(evaluated)
+            if op == "any":
+                if any(e is None for e in evaluated):
+                    return None
+                return any(evaluated)
+    return None  # undecidable
+
+
+def _split_top_level_commas(s: str) -> list[str]:
+    """Split `s` on commas not inside parens."""
+    parts: list[str] = []
+    depth = 0
+    buf: list[str] = []
+    for ch in s:
+        if ch == "(":
+            depth += 1
+            buf.append(ch)
+        elif ch == ")":
+            depth -= 1
+            buf.append(ch)
+        elif ch == "," and depth == 0:
+            parts.append("".join(buf).strip())
+            buf = []
+        else:
+            buf.append(ch)
+    if buf:
+        parts.append("".join(buf).strip())
+    return parts
+
+
+def _cluster_extractor_args(cluster: "BuildCluster | None") -> list[str]:
+    """Build `--cfg-true PRED` / `--cfg-false PRED` CLI args for the extractor
+    from a BuildCluster. Returns empty list if cluster is None."""
+    if cluster is None:
+        return []
+    out: list[str] = []
+    for pred in cluster.cfg_true:
+        out.extend(["--cfg-true", pred])
+    for pred in cluster.cfg_false:
+        out.extend(["--cfg-false", pred])
+    return out
+
+
+def _extract_skeleton(input_dir: Path, output_dir: Path,
+                      cluster: "BuildCluster | None" = None) -> dict:
+    """Invoke the Rust skeleton extractor over a pre-strip source tree.
+
+    When `cluster` is provided, item-level `#[cfg(...)]` filtering runs
+    first — items whose predicates evaluate to false under the cluster's
+    cfg-set are dropped before body-stubbing.
+
+    Returns {'ok': bool, 'reports': list[dict], 'stderr': str}. On success,
+    `output_dir` contains the skeletonised .rs files mirroring input_dir's
+    layout.
+    """
+    if not SKELETON_EXTRACTOR_BIN.exists():
+        return {
+            "ok": False,
+            "reports": [],
+            "stderr": f"skeleton-extractor binary missing at {SKELETON_EXTRACTOR_BIN}. "
+                      f"Run `bash setup.sh` to build it.",
+        }
+    output_dir.mkdir(parents=True, exist_ok=True)
+    cmd = [str(SKELETON_EXTRACTOR_BIN),
+           "--input", str(input_dir),
+           "--output", str(output_dir),
+           "--report"]
+    cmd.extend(_cluster_extractor_args(cluster))
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "reports": [], "stderr": "skeleton-extractor timed out (>120s)"}
+    except Exception as e:
+        return {"ok": False, "reports": [], "stderr": f"skeleton-extractor invocation failed: {e}"}
+    if result.returncode != 0:
+        return {"ok": False, "reports": [], "stderr": result.stderr.strip()}
+    try:
+        reports = json.loads(result.stdout) if result.stdout.strip() else []
+    except json.JSONDecodeError as e:
+        return {"ok": False, "reports": [], "stderr": f"could not parse JSON report: {e}"}
+    return {"ok": True, "reports": reports, "stderr": result.stderr.strip()}
+
+
+def _find_prestrip_commit(project_dir: Path) -> str | None:
+    """Return the most recent commit hash whose message indicates pre-strip state.
+
+    We look for the commit just before a `pipeline: stripped — {module}` commit;
+    that commit holds the augmented (pre-strip) source tree.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "log", "--pretty=format:%H %s", "--all"],
+            cwd=project_dir, capture_output=True, text=True, timeout=30,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    lines = result.stdout.splitlines()
+    # Most recent strip commit (top of log) → the commit BEFORE it is pre-strip.
+    for i, line in enumerate(lines):
+        parts = line.split(" ", 1)
+        if len(parts) != 2:
+            continue
+        _h, msg = parts
+        if msg.startswith("pipeline: stripped"):
+            if i + 1 < len(lines):
+                next_parts = lines[i + 1].split(" ", 1)
+                if next_parts:
+                    return next_parts[0]
+            return None
+    return None
+
+
+def _checkout_prestrip_source(project_dir: Path, dest: Path) -> bool:
+    """Materialise the pre-strip source tree into `dest` via git checkout.
+
+    Returns True on success. `dest` will contain the project's source files
+    as they existed at the latest pre-strip commit. The project's working
+    tree is NOT modified — we use git --work-tree to redirect output.
+    """
+    sha = _find_prestrip_commit(project_dir)
+    if not sha:
+        _log(f"  [phase-a] no pre-strip commit found in {project_dir}.")
+        return False
+    dest.mkdir(parents=True, exist_ok=True)
+    try:
+        result = subprocess.run(
+            ["git", f"--work-tree={dest}", "checkout", sha, "--", "src"],
+            cwd=project_dir, capture_output=True, text=True, timeout=60,
+        )
+    except Exception as e:
+        _log(f"  [phase-a] git checkout failed: {e}")
+        return False
+    if result.returncode != 0:
+        _log(f"  [phase-a] git checkout returned {result.returncode}: {result.stderr.strip()}")
+        return False
+    _log(f"  [phase-a] pre-strip source ({sha[:8]}) checked out under {dest}")
+    return True
+
+
+def _load_skeleton_files(skeleton_dir: Path) -> list[tuple[str, str]]:
+    """Return [(relative_path, content), ...] for every .rs file under skeleton_dir."""
+    out: list[tuple[str, str]] = []
+    for p in sorted(skeleton_dir.rglob("*.rs")):
+        try:
+            out.append((str(p.relative_to(skeleton_dir)), p.read_text(encoding="utf-8")))
+        except Exception:
+            continue
+    return out
+
+
+def _format_skeleton_for_prompt(skeleton_files: list[tuple[str, str]]) -> str:
+    """Render the skeleton as a sequence of <FILE> blocks for prompt embedding."""
+    parts: list[str] = []
+    for rel, content in skeleton_files:
+        parts.append(f'<FILE path="{rel}">\n{content}\n</FILE>')
+    return "\n\n".join(parts)
+
+
+def _format_skeleton_index_for_cluster(
+    skeleton_files: list[tuple[str, str]],
+    cluster: "BuildCluster | None",
+) -> str:
+    """Same as _format_skeleton_index but additionally elides items whose
+    `#[cfg(...)]` evaluates to false under the cluster's cfg-set.
+
+    Used in Phase C prompts so the model sees only items that compile in
+    THIS cluster — reduces cognitive load without affecting the on-disk
+    unfiltered skeleton (which Rust's own cfg eval handles correctly).
+
+    Items whose cfg is undecidable (unknown keys) are kept (safe default).
+    """
+    if cluster is None:
+        return _format_skeleton_index(skeleton_files)
+    cfg_true = {_normalize_cfg_pred(p) for p in cluster.cfg_true}
+    cfg_false = {_normalize_cfg_pred(p) for p in cluster.cfg_false}
+
+    # Per-item cfg attr matcher: a leading `#[cfg(...)]` (or several) above
+    # the item declaration.
+    cfg_attr_re = re.compile(r'^[ \t]*#\[cfg\(([^\]]+(?:\([^\]]*\)[^\]]*)*)\)\]\s*$', re.MULTILINE)
+
+    filtered_files: list[tuple[str, str]] = []
+    for rel, content in skeleton_files:
+        # Walk the content line by line collecting leading #[cfg(...)] groups
+        # before each top-level item; drop the item block if any cfg evaluates
+        # to false.
+        lines = content.split("\n")
+        out_lines: list[str] = []
+        i = 0
+        while i < len(lines):
+            # Collect attributes that precede the current item (any line
+            # starting with `#[...]` or `#![...]` or doc comment).
+            attr_start = i
+            collected_cfgs: list[str] = []
+            while i < len(lines):
+                line = lines[i]
+                stripped = line.strip()
+                m = cfg_attr_re.match(line)
+                if m:
+                    collected_cfgs.append(m.group(1).strip())
+                    i += 1
+                    continue
+                # Any other attribute / doc / blank line: keep walking.
+                if stripped.startswith("#[") or stripped.startswith("#![") or stripped.startswith("///") or stripped.startswith("//!") or stripped == "":
+                    i += 1
+                    continue
+                break
+            # i now points to (probably) an item declaration. Evaluate cfgs.
+            keep = True
+            for pred in collected_cfgs:
+                if _eval_cfg_pred(pred, cfg_true, cfg_false) is False:
+                    keep = False
+                    break
+            if keep:
+                # Emit attr block + the item.
+                out_lines.extend(lines[attr_start:i + 1])
+                i += 1
+            else:
+                # Skip this item entirely — including its body if it has one.
+                # Simple heuristic: skip until brace depth returns to zero or
+                # we hit a `;` at depth zero (for body-less items like
+                # `pub use X;`).
+                if i >= len(lines):
+                    break
+                line = lines[i]
+                if "{" in line:
+                    depth = line.count("{") - line.count("}")
+                    i += 1
+                    while i < len(lines) and depth > 0:
+                        depth += lines[i].count("{") - lines[i].count("}")
+                        i += 1
+                else:
+                    # body-less item terminated by ';' on the same line
+                    i += 1
+        filtered_files.append((rel, "\n".join(out_lines)))
+    return _format_skeleton_index(filtered_files)
+
+
+def _format_skeleton_index(skeleton_files: list[tuple[str, str]]) -> str:
+    """Render skeleton as signatures-only index. Drops bodies (which are
+    `unimplemented!()` anyway), keeps type declarations + function signatures
+    + macro definitions for cross-reference. Used in Phase C prompts so we
+    don't waste input tokens on body stubs the model already knows about.
+
+    P3.11: macro_rules! bodies are also elided. Phase A preserves macros
+    verbatim on disk; the prompt's index just needs the macro NAMES so the
+    model knows what's exported, not the multi-KB rule definitions.
+    """
+    out_parts: list[str] = []
+    fn_re = re.compile(
+        r'((?:^|\n)[ \t]*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?'
+        r'(?:const\s+)?fn\s+[A-Za-z_]\w*[^{]*)\{',
+        re.MULTILINE,
+    )
+    # `macro_rules!` (with optional `#[macro_export]` etc. attributes lurking
+    # above on a separate line — we don't try to capture those, just the macro).
+    macro_re = re.compile(
+        r'((?:^|\n)[ \t]*(?:pub(?:\([^)]*\))?\s+)?macro_rules!\s+[A-Za-z_]\w*\s*)\{',
+        re.MULTILINE,
+    )
+
+    def _elide_bodies(text: str, regex: re.Pattern, terminator: str) -> str:
+        """Walk `regex` matches; for each, brace-match to find the body and
+        replace it with `terminator`. Returns the rewritten text."""
+        result_parts: list[str] = []
+        last = 0
+        for m in regex.finditer(text):
+            body_start = m.end()
+            depth = 1
+            i = body_start
+            while i < len(text) and depth > 0:
+                if text[i] == "{":
+                    depth += 1
+                elif text[i] == "}":
+                    depth -= 1
+                i += 1
+            if depth != 0:
+                continue
+            body_end = i
+            result_parts.append(text[last:m.start(1)])
+            result_parts.append(m.group(1).rstrip())
+            result_parts.append(terminator)
+            last = body_end
+        result_parts.append(text[last:])
+        return "".join(result_parts)
+
+    for rel, content in skeleton_files:
+        # Order matters: elide macros first (their bodies contain `fn` patterns
+        # in rule expansions that would otherwise confuse the fn regex).
+        condensed = _elide_bodies(content, macro_re, " { /* macro body elided — preserved verbatim on disk */ }")
+        condensed = _elide_bodies(condensed, fn_re, ";")
+        out_parts.append(f'<FILE path="{rel}" mode="signatures-only">\n{condensed}\n</FILE>')
+    return "\n\n".join(out_parts)
+
+
+def _collect_skeleton_symbols(skeleton_files: list[tuple[str, str]]) -> set[str]:
+    """Return the set of fn/method names declared in the skeleton.
+
+    Used by Phase B validation: every target_symbol the LLM emits should exist
+    in this set. We use a coarse regex — sufficient for validation, not
+    intended to be precise.
+    """
+    syms: set[str] = set()
+    fn_re = re.compile(r'\bfn\s+([A-Za-z_]\w*)\s*[<(]')
+    for _, content in skeleton_files:
+        for m in fn_re.finditer(content):
+            syms.add(m.group(1))
+    return syms
+
+
+def _task2_group_tests(
+    skeleton_dir: Path,
+    test_files: list[tuple[str, str]],
+    cluster_name: str,
+    module_name: str,
+) -> list[dict]:
+    """Phase B: ask the LLM to group test files into cohesive units.
+
+    Returns a list of group dicts: {name, rationale, test_files, target_symbols}.
+    Falls back to one-group-per-test-file on LLM failure or validation failure.
+    Result is also written to skeleton_dir/groups.json.
+    """
+    out_path = skeleton_dir / "groups.json"
+    skeleton_files = _load_skeleton_files(skeleton_dir)
+    if not skeleton_files or not test_files:
+        groups = _fallback_groups_per_file(test_files)
+        out_path.write_text(json.dumps(groups, indent=2), encoding="utf-8")
+        return groups
+
+    skeleton_block = _format_skeleton_for_prompt(skeleton_files)
+    tests_block = "\n\n".join(
+        f'<TESTFILE path="{rel}">\n{content}\n</TESTFILE>'
+        for rel, content in test_files
+    )
+    sym_set = _collect_skeleton_symbols(skeleton_files)
+    test_paths = sorted({rel for rel, _ in test_files})
+
+    prompt = f"""You are planning a test-driven reconstruction of the `{module_name}` crate (cluster: {cluster_name}).
+
+The implementation skeleton below has all type definitions, signatures, and macros, but
+every function body is `unimplemented!()`. Your job is to group the test files into
+cohesive units. Each group should exercise a coherent piece of functionality so that one
+LLM call per group can fill the necessary `unimplemented!()` bodies and make that group's
+tests pass.
+
+Rules:
+  - Aim for 6-15 groups. Each group should contain 1-3 test files (smaller
+    groups → smaller per-call output → fewer empty responses from the model).
+  - Every test file appears in EXACTLY one group. Include compile-fail tests
+    (e.g. tests/compiletest.rs, trybuild harness files) — those are real
+    tests and must be assigned to a group too.
+  - target_symbols must be function/method names that exist in the skeleton.
+  - rationale: one sentence describing what the group tests.
+
+Test files you MUST cover (every entry here appears in exactly one group):
+{chr(10).join(f"  - {p}" for p in test_paths)}
+
+Implementation skeleton:
+{skeleton_block}
+
+Test files:
+{tests_block}
+
+Output a JSON object with this exact shape (no prose, no markdown fences):
+
+{{
+  "groups": [
+    {{
+      "name": "short_kebab_case_name",
+      "rationale": "one sentence",
+      "test_files": ["tests/foo.rs", "tests/bar.rs"],
+      "target_symbols": ["func_a", "Method::name", "Type::method"]
+    }}
+  ]
+}}
+"""
+
+    for attempt in range(2):
+        response = ask(prompt, model=_TASK1_MODEL)
+        groups, err, recoverable_missing = _parse_and_validate_groups(
+            response, test_paths, sym_set
+        )
+        if groups is not None:
+            # P3.6: post-process to enforce max group size = 3.
+            groups = _split_oversized_groups(groups, max_size=3)
+            _log(f"  [phase-b] LLM produced {len(groups)} group(s) (post-split).")
+            out_path.write_text(json.dumps(groups, indent=2), encoding="utf-8")
+            return groups
+        # Auto-recover small omissions (≤2 missing test files) by appending
+        # them to a "miscellaneous" group rather than burning another full LLM
+        # round-trip. Compile-fail tests (trybuild) tend to get silently
+        # dropped by the model.
+        if recoverable_missing and len(recoverable_missing) <= 2 and attempt == 0:
+            # Re-parse to get the partial groups (validator returned None when
+            # it rejected, but the parsed structure is still useful).
+            partial = _extract_groups_or_none(response)
+            if partial is not None:
+                partial.append({
+                    "name": "miscellaneous_auto_added",
+                    "rationale": "auto-appended test files omitted by LLM grouping",
+                    "test_files": sorted(recoverable_missing),
+                    "target_symbols": [],
+                })
+                # Apply P3.6 split even on the auto-recovered path so big
+                # groups still get chunked.
+                partial = _split_oversized_groups(partial, max_size=3)
+                _log(f"  [phase-b] auto-recovered {len(recoverable_missing)} "
+                     f"omitted test file(s) into a 'miscellaneous' group "
+                     f"({len(partial)} groups post-split).")
+                out_path.write_text(json.dumps(partial, indent=2), encoding="utf-8")
+                return partial
+        _log(f"  [phase-b] attempt {attempt + 1} rejected: {err}")
+
+    _log("  [phase-b] LLM grouping failed validation twice — falling back to per-file groups.")
+    groups = _fallback_groups_per_file(test_files)
+    out_path.write_text(json.dumps(groups, indent=2), encoding="utf-8")
+    return groups
+
+
+def _split_oversized_groups(groups: list[dict], max_size: int = 3) -> list[dict]:
+    """Split any group with >max_size test files into smaller chunks.
+
+    Each chunk inherits the parent's rationale + target_symbols, with the
+    name suffixed by a 1-based index. Keeps target_symbols on every chunk
+    so leaf-first ordering still works.
+    """
+    out: list[dict] = []
+    for g in groups:
+        tests = list(g.get("test_files", []))
+        if len(tests) <= max_size:
+            out.append(g)
+            continue
+        base_name = g.get("name", "group")
+        chunks: list[list[str]] = [tests[i:i + max_size] for i in range(0, len(tests), max_size)]
+        for idx, chunk in enumerate(chunks, 1):
+            out.append({
+                "name": f"{base_name}_{idx}of{len(chunks)}",
+                "rationale": f"{g.get('rationale', '')} (auto-split {idx}/{len(chunks)})",
+                "test_files": chunk,
+                "target_symbols": list(g.get("target_symbols", [])),
+            })
+    return out
+
+
+def _extract_groups_or_none(response: str) -> list[dict] | None:
+    """Parse the LLM's JSON manifest into a groups list without validation."""
+    txt = response.strip()
+    if txt.startswith("```"):
+        txt = re.sub(r'^```[a-zA-Z]*\n?', '', txt)
+        txt = re.sub(r'\n?```\s*$', '', txt)
+    try:
+        data = json.loads(txt)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict) or "groups" not in data:
+        return None
+    g = data["groups"]
+    return g if isinstance(g, list) else None
+
+
+def _parse_and_validate_groups(
+    response: str, test_paths: list[str], known_symbols: set[str]
+) -> tuple[list[dict] | None, str, set[str]]:
+    """Parse the LLM's JSON manifest, validate coverage and symbol existence.
+
+    Returns (groups, error_message, recoverable_missing).
+      - groups is None on validation failure.
+      - recoverable_missing is the set of test files the LLM omitted; populated
+        only when the failure was a coverage gap (not a structural error).
+    """
+    # Tolerate fenced JSON.
+    txt = response.strip()
+    if txt.startswith("```"):
+        txt = re.sub(r'^```[a-zA-Z]*\n?', '', txt)
+        txt = re.sub(r'\n?```\s*$', '', txt)
+    try:
+        data = json.loads(txt)
+    except json.JSONDecodeError as e:
+        return None, f"not valid JSON: {e}", set()
+    if not isinstance(data, dict) or "groups" not in data:
+        return None, "missing 'groups' key", set()
+    groups = data["groups"]
+    if not isinstance(groups, list) or not groups:
+        return None, "'groups' must be a non-empty list", set()
+
+    seen_tests: set[str] = set()
+    expected_tests = set(test_paths)
+    for i, g in enumerate(groups):
+        if not isinstance(g, dict):
+            return None, f"group #{i} is not an object", set()
+        for key in ("name", "rationale", "test_files", "target_symbols"):
+            if key not in g:
+                return None, f"group #{i} missing key '{key}'", set()
+        if not isinstance(g["test_files"], list) or not g["test_files"]:
+            return None, f"group '{g.get('name','?')}' has empty test_files", set()
+        for tf in g["test_files"]:
+            if tf in seen_tests:
+                return None, f"test file '{tf}' appears in multiple groups", set()
+            seen_tests.add(tf)
+        # Symbol existence is a soft check — warn but don't reject.
+        # (LLM may use slight name variations like `Self::method`.)
+
+    missing = expected_tests - seen_tests
+    extra = seen_tests - expected_tests
+    if missing:
+        return None, f"groups omit {len(missing)} test file(s); first: {sorted(missing)[:3]}", missing
+    if extra:
+        return None, f"groups include unknown test file(s): {sorted(extra)[:3]}", set()
+    return groups, "ok", set()
+
+
+def _fallback_groups_per_file(test_files: list[tuple[str, str]]) -> list[dict]:
+    """One group per test file — deterministic safe default."""
+    groups: list[dict] = []
+    for rel, _ in test_files:
+        stem = Path(rel).stem
+        groups.append({
+            "name": f"file_{stem}",
+            "rationale": f"single-file fallback grouping for {rel}",
+            "test_files": [rel],
+            "target_symbols": [],
+        })
+    return groups
+
+
+_FAILED_ATTEMPT_SENTINEL = "// SKELETON_STUB_FAILED_ATTEMPT"
+
+
+def _is_unimplemented_body(body_text: str) -> bool:
+    """True if a function body looks like our `unimplemented!()` stub.
+
+    Recognises two forms:
+      1. Plain stub: contains `unimplemented` and body < 60 chars
+      2. Annotated stub: contains the SKELETON_STUB_FAILED_ATTEMPT sentinel
+         (used by the fix-loop exhaustion path to preserve the failed attempt
+         and cargo error as comments while keeping the fn callable)
+    """
+    stripped = body_text.strip().strip("{").strip("}").strip()
+    if _FAILED_ATTEMPT_SENTINEL in stripped:
+        return True
+    return "unimplemented" in stripped and len(stripped) < 60
+
+
+def _make_failed_attempt_body(attempted_body: str, error_excerpt: str,
+                               fix_attempts: int) -> str:
+    """Build a fn body that documents a failed fill attempt as comments and
+    ends in `unimplemented!()` so the crate still compiles.
+
+    The body carries the SKELETON_STUB_FAILED_ATTEMPT sentinel so a later
+    pass's `_scan_unimplemented_functions` re-discovers this fn as still
+    needing a fill — but the model sees the failure history in context.
+    """
+    ts = int(time.time())
+    lines = [
+        _FAILED_ATTEMPT_SENTINEL,
+        f"// Previous attempt failed compilation after {fix_attempts} fix-loop "
+        "attempts.",
+        "// Body reverted to `unimplemented!()` so the crate compiles. A later",
+        "// pass will retry — by then more sibling functions in this file will",
+        "// be implemented, giving the model richer context.",
+        "//",
+        "// ATTEMPTED BODY:",
+    ]
+    if attempted_body:
+        for ln in attempted_body.splitlines()[:60]:
+            lines.append(f"//   {ln}")
+    else:
+        lines.append("//   (no body captured)")
+    lines.append("//")
+    lines.append("// CARGO ERROR (focused excerpt):")
+    if error_excerpt:
+        for ln in error_excerpt.splitlines()[:30]:
+            lines.append(f"//   {ln}")
+    else:
+        lines.append("//   (no error captured)")
+    lines.append(f"// Timestamp: {ts}")
+    lines.append("unimplemented!()")
+    return "\n".join(lines)
+
+
+def _extract_fn_blocks(response: str) -> dict[str, str]:
+    """Parse `<FN sig="...">body</FN>` blocks from the LLM response.
+
+    Returns {signature → body_text}. The body is the raw content between
+    the opening `<FN ...>` and closing `</FN>` markers, trimmed of leading/
+    trailing whitespace. The signature must include everything from "fn name"
+    to the opening `{` exclusive — matching how `_merge_fills_preserving_existing`
+    keys its disk-function map.
+
+    Tolerates loosely-formatted responses (extra whitespace, mixed quoting on
+    the sig attribute).
+    """
+    # `(?s)` for DOTALL so body can span lines. Match sig attribute value
+    # in double quotes (most common) or single quotes (sometimes used).
+    pat = re.compile(
+        r'<FN\s+sig\s*=\s*(?P<q>["\'])(?P<sig>.+?)(?P=q)\s*>(?P<body>.*?)</FN>',
+        re.DOTALL,
+    )
+    out: dict[str, str] = {}
+    stubs_dropped = 0
+    for m in pat.finditer(response):
+        sig = m.group("sig").strip()
+        body = m.group("body").strip()
+        if not sig or not body:
+            continue
+        # P3.10 enforcement: drop stub bodies so they don't appear successful.
+        if _is_unimplemented_body(body) or body.strip() in ("todo!()", "todo!();"):
+            stubs_dropped += 1
+            continue
+        out[sig] = body
+    if stubs_dropped:
+        _log(f"  [phase-c] dropped {stubs_dropped} stub <FN> block(s) "
+             f"from model output (model re-emitted unimplemented!).")
+    return out
+
+
+def _merge_fn_blocks_into_disk(disk_text: str, fn_blocks: dict[str, str]) -> str:
+    """Merge dict of {signature → body} into disk_text by replacing the body
+    of each disk function whose signature key matches and whose body is
+    currently `unimplemented!()`.
+
+    All non-function content on disk is preserved verbatim. This is the
+    P3.2 partner of `_merge_fills_preserving_existing` for the per-function
+    output format — same safety guarantees, simpler input.
+    """
+    if not fn_blocks:
+        return disk_text
+    fn_re = re.compile(
+        r'((?:^|\n)[ \t]*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?'
+        r'(?:const\s+)?fn\s+[A-Za-z_]\w*[^{]*\{)',
+        re.MULTILINE,
+    )
+    # Re-extract disk functions to find their bodies, then splice in.
+    matches: list[tuple[str, int, int]] = []  # (sig, body_start, body_end)
+    for m in fn_re.finditer(disk_text):
+        body_start = m.end()
+        depth = 1
+        i = body_start
+        while i < len(disk_text) and depth > 0:
+            ch = disk_text[i]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+            i += 1
+        if depth != 0:
+            continue
+        body_end = i - 1
+        # Strip the trailing '{' so the sig matches the LLM's <FN sig="..."> key
+        # (which is the signature without the opening brace).
+        sig_line = disk_text[m.start():body_start].rstrip("{ \t\n").strip()
+        matches.append((sig_line, body_start, body_end))
+
+    out = disk_text
+    for sig, body_start, body_end in reversed(matches):
+        existing_body = out[body_start:body_end]
+        if not _is_unimplemented_body(existing_body):
+            continue  # already filled — never overwrite
+        new_body = fn_blocks.get(sig)
+        if new_body is None:
+            # Try a relaxed match: normalize whitespace and compare.
+            normalized_sig = " ".join(sig.split())
+            for k, v in fn_blocks.items():
+                if " ".join(k.split()) == normalized_sig:
+                    new_body = v
+                    break
+        if new_body is None:
+            continue
+        out = out[:body_start] + new_body + out[body_end:]
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Per-fn TDD fill (Flavour B): one LLM call per unimplemented function.
+# We own the splice site; the model returns only the body text.
+# ---------------------------------------------------------------------------
+
+_FN_RE_GLOBAL = re.compile(
+    r'((?:^|\n)[ \t]*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?'
+    r'(?:const\s+)?fn\s+([A-Za-z_]\w*)[^{]*\{)',
+    re.MULTILINE,
+)
+
+
+def _locate_fn(file_text: str, fn_name: str) -> tuple[str, int, int, int] | None:
+    """Return (sig_text, sig_start, body_start, body_end) for the first fn whose
+    name matches `fn_name`. body_start is just after the opening `{`; body_end
+    is the position of the matching `}` (exclusive end of body).
+
+    Returns None if not found or braces are malformed.
+    """
+    for m in _FN_RE_GLOBAL.finditer(file_text):
+        if m.group(2) != fn_name:
+            continue
+        sig_start = m.start()
+        body_start = m.end()
+        depth = 1
+        i = body_start
+        while i < len(file_text) and depth > 0:
+            ch = file_text[i]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+            i += 1
+        if depth != 0:
+            return None
+        body_end = i - 1
+        sig_text = file_text[sig_start:body_start].rstrip("{ \t\n").strip()
+        return sig_text, sig_start, body_start, body_end
+    return None
+
+
+def _splice_fn_body(file_path: Path, fn_name: str, new_body: str) -> tuple[bool, int]:
+    """Replace the body of `fn_name` in `file_path` with `new_body`.
+
+    Only splices when the current body is an `unimplemented!()` stub — never
+    overwrites an already-filled function. Returns (success, bytes_delta).
+    """
+    try:
+        text = file_path.read_text(encoding="utf-8")
+    except Exception:
+        return False, 0
+    loc = _locate_fn(text, fn_name)
+    if loc is None:
+        return False, 0
+    _sig, _sig_start, body_start, body_end = loc
+    cur_body = text[body_start:body_end]
+    if not _is_unimplemented_body(cur_body):
+        return False, 0
+    # Normalise the body: model may have included extraneous braces or
+    # leading/trailing whitespace. Strip outer braces if present.
+    nb = new_body.strip()
+    if nb.startswith("{") and nb.endswith("}"):
+        nb = nb[1:-1].strip()
+    if not nb or _is_unimplemented_body(nb):
+        return False, 0
+    # Re-indent so the body sits cleanly inside the existing braces. Detect
+    # the indentation of the opening brace's line and use it +4 for body.
+    line_start = text.rfind("\n", 0, _sig_start) + 1
+    sig_line = text[line_start:_sig_start]
+    base_indent = ""
+    for ch in sig_line:
+        if ch in (" ", "\t"):
+            base_indent += ch
+        else:
+            break
+    inner_indent = base_indent + "    "
+    nb_indented = "\n" + "\n".join(
+        (inner_indent + ln) if ln.strip() else "" for ln in nb.splitlines()
+    ) + "\n" + base_indent
+    new_text = text[:body_start] + nb_indented + text[body_end:]
+    file_path.write_text(new_text, encoding="utf-8")
+    return True, len(new_text) - len(text)
+
+
+def _find_tests_referencing_fn(
+    test_files: list[Path],
+    fn_name: str,
+    max_blocks: int = 4,
+) -> list[tuple[str, str]]:
+    """Return up to `max_blocks` test files whose source text mentions `fn_name`.
+
+    Cheap textual heuristic — sufficient for Rust tests that call the fn
+    by name (most common). Results are ranked by reference count.
+    """
+    if not fn_name:
+        return []
+    ranked: list[tuple[int, Path]] = []
+    pat = re.compile(r"\b" + re.escape(fn_name) + r"\b")
+    for tf in test_files:
+        try:
+            txt = tf.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        n = len(pat.findall(txt))
+        if n:
+            ranked.append((n, tf))
+    ranked.sort(key=lambda x: -x[0])
+    out: list[tuple[str, str]] = []
+    for _, tf in ranked[:max_blocks]:
+        try:
+            out.append((str(tf), tf.read_text(encoding="utf-8")))
+        except Exception:
+            continue
+    return out
+
+
+def _extract_body_response(response: str) -> str | None:
+    """Pull a function body out of the LLM response.
+
+    Accepts (in order):
+      - `<BODY> ... </BODY>` block
+      - ```rust ... ``` fenced block
+      - ``` ... ``` fenced block
+      - Raw response (last resort)
+
+    Returns the trimmed text, or None on empty.
+    """
+    if not response or not response.strip():
+        return None
+    m = re.search(r"<BODY>(.*?)</BODY>", response, re.DOTALL)
+    if m:
+        candidate = m.group(1).strip()
+        return candidate or None
+    for fence in (r"```rust\s*(.*?)```", r"```(?:rs)?\s*(.*?)```"):
+        m = re.search(fence, response, re.DOTALL)
+        if m:
+            candidate = m.group(1).strip()
+            if candidate:
+                return candidate
+    return response.strip() or None
+
+
+def _annotate_file_view(file_text: str, target_fn: str) -> str:
+    """Return a view of file_text where every unimplemented stub is prefixed
+    with a comment clarifying its status. The TARGET fn (the one being filled
+    in this call) is marked distinctly. Helps the model reason about which
+    fns are "to-be-filled later" vs the immediate target, instead of treating
+    the stubs as permanent missing pieces it must work around.
+    """
+    out: list[str] = []
+    i = 0
+    last_fn_end = 0
+    for m in _FN_RE_GLOBAL.finditer(file_text):
+        fn_name = m.group(2)
+        sig_start = m.start()
+        body_start = m.end()
+        depth = 1
+        j = body_start
+        while j < len(file_text) and depth > 0:
+            c = file_text[j]
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+            j += 1
+        if depth != 0:
+            continue
+        body_end = j - 1
+        body = file_text[body_start:body_end]
+        is_stub = _is_unimplemented_body(body)
+        # Find the indent of the fn's first line.
+        line_start = file_text.rfind("\n", 0, sig_start) + 1
+        indent = ""
+        for ch in file_text[line_start:sig_start]:
+            if ch in (" ", "\t"):
+                indent += ch
+            else:
+                break
+        # Emit everything before this fn from where we left off.
+        out.append(file_text[last_fn_end:sig_start])
+        if fn_name == target_fn:
+            annot = (f"{indent}// >>> TARGET — implement THIS function below; the body is "
+                     f"currently `unimplemented!()`. <<<\n")
+        elif is_stub:
+            annot = (f"{indent}// SKELETON STUB — body will be filled in a separate "
+                     f"call; you may rely on it existing (signature is fixed).\n")
+        else:
+            annot = ""
+        out.append(annot)
+        out.append(file_text[sig_start:j])
+        last_fn_end = j
+    out.append(file_text[last_fn_end:])
+    return "".join(out)
+
+
+def _collect_crate_macros(src_dir: Path, max_chars: int = 6000) -> str:
+    """Extract `macro_rules!` blocks from every .rs file in `src_dir`.
+
+    Returned as a compact section the model can scan to understand how
+    user-facing macros invoke internal helpers (the most common reason a
+    private fn has no direct test-name match).
+    """
+    macros: list[tuple[str, str]] = []
+    for p in sorted(src_dir.rglob("*.rs")):
+        try:
+            text = p.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        for m in re.finditer(r"(?:#\[macro_export\][^\n]*\n)?macro_rules!\s+(\w+)\s*\{",
+                              text):
+            name = m.group(1)
+            start = m.start()
+            # Match balanced braces of the macro_rules! body.
+            i = text.find("{", start)
+            if i < 0:
+                continue
+            depth = 1
+            j = i + 1
+            while j < len(text) and depth > 0:
+                if text[j] == "{":
+                    depth += 1
+                elif text[j] == "}":
+                    depth -= 1
+                j += 1
+            if depth != 0:
+                continue
+            block = text[start:j]
+            macros.append((p.name, f"// from {p.name}\n{block}"))
+    if not macros:
+        return ""
+    joined = "\n\n".join(b for _, b in macros)
+    if len(joined) > max_chars:
+        joined = joined[:max_chars] + "\n... (macros truncated)"
+    return joined
+
+
+def _find_tests_for_fn(
+    tests_dir_files: list[Path],
+    fn_name: str,
+    file_rel: str = "",
+    src_dir: Path | None = None,
+    max_blocks: int = 4,
+) -> list[tuple[str, str]]:
+    """Layered heuristic to find tests relevant to one fn.
+
+    Order of attempts (each adds to the candidate set):
+      1. Direct name reference — tests calling `fn_name` literally.
+      2. File-stem match — for fn in `src/ensure.rs`, include tests whose
+         filename contains "ensure".
+      3. Macro-aware — if `src_dir` is given and `file_rel`'s file defines
+         macros, include tests that call those macros by name.
+
+    Results ranked by relevance score (direct > stem > macro) then by hit
+    count. Returns up to `max_blocks` (path, content) tuples.
+    """
+    if not fn_name and not file_rel:
+        return []
+    # Build candidate set with scores.
+    scored: dict[Path, tuple[int, int]] = {}  # path → (tier, hits) — lower tier = better
+
+    # Tier 1: direct name.
+    if fn_name:
+        pat = re.compile(r"\b" + re.escape(fn_name) + r"\b")
+        for tf in tests_dir_files:
+            try:
+                txt = tf.read_text(encoding="utf-8")
+            except Exception:
+                continue
+            n = len(pat.findall(txt))
+            if n:
+                cur = scored.get(tf, (99, 0))
+                scored[tf] = (1, max(cur[1], n))
+
+    # Tier 2: file-stem match.
+    if file_rel:
+        stem = Path(file_rel).stem.lower()
+        # Strip common prefixes/suffixes that don't help matching:
+        stem = re.sub(r"^(mod|tests?)_", "", stem)
+        for tf in tests_dir_files:
+            tname = tf.stem.lower()
+            if stem and (stem in tname or tname in stem):
+                cur = scored.get(tf, (99, 0))
+                scored[tf] = (min(cur[0], 2), max(cur[1], 1))
+
+    # Tier 3: macro-aware.
+    if file_rel and src_dir is not None:
+        fp = src_dir / file_rel
+        macro_names: set[str] = set()
+        try:
+            txt = fp.read_text(encoding="utf-8")
+            for m in re.finditer(r"macro_rules!\s+(\w+)\s*\{", txt):
+                macro_names.add(m.group(1))
+        except Exception:
+            pass
+        if macro_names:
+            pats = [re.compile(r"\b" + re.escape(n) + r"\s*!") for n in macro_names]
+            for tf in tests_dir_files:
+                try:
+                    ttxt = tf.read_text(encoding="utf-8")
+                except Exception:
+                    continue
+                hits = sum(len(p.findall(ttxt)) for p in pats)
+                if hits:
+                    cur = scored.get(tf, (99, 0))
+                    scored[tf] = (min(cur[0], 3), max(cur[1], hits))
+
+    ranked = sorted(scored.items(), key=lambda kv: (kv[1][0], -kv[1][1]))[:max_blocks]
+    out: list[tuple[str, str]] = []
+    for path, _ in ranked:
+        try:
+            out.append((str(path), path.read_text(encoding="utf-8")))
+        except Exception:
+            continue
+    return out
+
+
+def _leaf_first_fn_order(
+    stubs: list[tuple[str, str]],
+    prestrip_dir: Path | None,
+) -> list[tuple[str, str]]:
+    """Sort stubs so the most-referenced fns come first (likely call-graph
+    leaves — utility fns relied on by many others). Public-API entry points
+    end up last, where they can see real helper bodies on disk.
+
+    When `prestrip_dir` is unavailable, falls back to deterministic order
+    (file, fn_name).
+    """
+    if not prestrip_dir or not prestrip_dir.exists():
+        return sorted(stubs)
+    joined = []
+    for p in prestrip_dir.rglob("*.rs"):
+        try:
+            joined.append(p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+    text = "\n".join(joined)
+    if not text:
+        return sorted(stubs)
+    scores: dict[tuple[str, str], int] = {}
+    for s in stubs:
+        _, fn = s
+        if not fn:
+            scores[s] = 0
+            continue
+        scores[s] = len(re.findall(r"\b" + re.escape(fn) + r"\b", text))
+    # Higher refs = more depended on = fill earlier (leaf-first).
+    return sorted(stubs, key=lambda s: (-scores.get(s, 0), s[0], s[1]))
+
+
+# ---------------------------------------------------------------------------
+# Model self-correction notes — stored in functional_requirements_{crate}.md
+# under the `## Model Notes — Confusions to Avoid` section. The MODEL writes
+# entries in its own voice after fix loops; the next attempt reads them as
+# part of the per-fn prompt. See CLAUDE.md "The model authors its own
+# anti-hallucination notes".
+# ---------------------------------------------------------------------------
+
+_MODEL_NOTES_HEADER = "## Model Notes — Confusions to Avoid"
+_MODEL_NOTES_MAX_CHARS = 4000  # cap on the notes section in any one prompt
+_MODEL_NOTES_MAX_ENTRIES = 80  # hard cap; older entries dropped LRU on overflow
+
+
+def _slice_model_notes(fr_text: str) -> tuple[str, str]:
+    """Split FR text into (body_without_notes, notes_section_inclusive).
+
+    notes_section_inclusive starts at the `## Model Notes` header line and
+    extends to the next top-level `##` heading or EOF. Returns empty notes
+    string when the section is absent.
+    """
+    if _MODEL_NOTES_HEADER not in fr_text:
+        return fr_text, ""
+    idx = fr_text.index(_MODEL_NOTES_HEADER)
+    body = fr_text[:idx].rstrip() + "\n"
+    rest = fr_text[idx:]
+    # Find the next top-level heading after the notes header (skip the
+    # notes header itself).
+    m = re.search(r"\n##\s", rest[len(_MODEL_NOTES_HEADER):])
+    if m:
+        end = len(_MODEL_NOTES_HEADER) + m.start() + 1  # keep the '\n'
+        notes = rest[:end]
+        body += rest[end:]
+    else:
+        notes = rest
+    return body, notes.rstrip() + "\n"
+
+
+def _preserve_model_notes(old_fr_text: str | None, new_fr_text: str) -> str:
+    """Re-append the `## Model Notes` section from old_fr_text to new_fr_text.
+
+    Used at every TASK 1 write site so regenerating FR never wipes the
+    model's accumulated self-corrections.
+    """
+    if not old_fr_text or _MODEL_NOTES_HEADER not in old_fr_text:
+        return new_fr_text
+    _, notes_section = _slice_model_notes(old_fr_text)
+    if not notes_section.strip():
+        return new_fr_text
+    # If the new FR happens to already include a notes header (it shouldn't
+    # but be defensive), strip it first.
+    new_body, _ = _slice_model_notes(new_fr_text)
+    return new_body.rstrip() + "\n\n" + notes_section
+
+
+def _load_model_notes(fr_path: Path) -> list[str]:
+    """Return the list of note bullets currently in FR. Each bullet is the
+    text after `- ` on a single logical entry (multi-line entries joined)."""
+    try:
+        fr_text = fr_path.read_text(encoding="utf-8")
+    except Exception:
+        return []
+    _, notes_section = _slice_model_notes(fr_text)
+    if not notes_section.strip():
+        return []
+    notes: list[str] = []
+    cur: list[str] = []
+    for ln in notes_section.splitlines():
+        if ln.startswith("- "):
+            if cur:
+                notes.append(" ".join(cur).strip())
+                cur = []
+            cur.append(ln[2:].strip())
+        elif cur and ln.startswith("  "):
+            cur.append(ln.strip())
+        elif cur and not ln.strip():
+            notes.append(" ".join(cur).strip())
+            cur = []
+    if cur:
+        notes.append(" ".join(cur).strip())
+    return [n for n in notes if n]
+
+
+def _save_model_notes(fr_path: Path, notes: list[str]) -> None:
+    """Rewrite the `## Model Notes` section in FR with the given bullets.
+    Creates the FR file (with just the section) if it doesn't exist.
+    """
+    if fr_path.exists():
+        try:
+            fr_text = fr_path.read_text(encoding="utf-8")
+        except Exception:
+            fr_text = ""
+    else:
+        fr_text = ""
+    body, _ = _slice_model_notes(fr_text)
+    if not body.strip():
+        body = "# Functional Requirements\n\n"
+    section = _MODEL_NOTES_HEADER + "\n\n" + "\n".join(f"- {n}" for n in notes) + "\n"
+    out = body.rstrip() + "\n\n" + section
+    try:
+        fr_path.parent.mkdir(parents=True, exist_ok=True)
+        fr_path.write_text(out, encoding="utf-8")
+    except Exception as e:
+        _log(f"  [model-notes] write failed: {e}")
+
+
+def _filter_model_notes_for_prompt(
+    fr_path: Path,
+    file_rel: str,
+    fn_name: str,
+    file_text: str = "",
+    max_chars: int = _MODEL_NOTES_MAX_CHARS,
+) -> str:
+    """Pull notes from FR ranked by relevance for the current (file, fn).
+
+    Ranking tiers:
+      1. Note text mentions the file's basename or fn name.
+      2. Note text mentions any symbol (type/fn) appearing in `file_text`.
+      3. Otherwise (recency only — most recently added first).
+
+    Returns a single string ready to insert into a <MODEL_NOTES> block,
+    capped at `max_chars`. Empty string if no notes apply.
+    """
+    notes = _load_model_notes(fr_path)
+    if not notes:
+        return ""
+    base = Path(file_rel).stem if file_rel else ""
+    # Extract crude symbol set from file_text — type/fn names.
+    symbols: set[str] = set()
+    if file_text:
+        for m in re.finditer(r"\b(?:fn|struct|enum|trait|type)\s+([A-Za-z_]\w*)",
+                              file_text):
+            symbols.add(m.group(1))
+
+    def tier(n: str) -> int:
+        lower = n.lower()
+        if (base and base.lower() in lower) or (fn_name and fn_name.lower() in lower):
+            return 1
+        if any(sym in n for sym in symbols):
+            return 2
+        return 3
+
+    # Stable rank: lower tier first, then preserve newest-first within tier
+    # (reverse the input order so most recent appear earlier).
+    indexed = list(enumerate(notes))
+    indexed.sort(key=lambda iv: (tier(iv[1]), -iv[0]))
+    out_lines: list[str] = []
+    total = 0
+    for _, n in indexed:
+        line = f"- {n}"
+        if total + len(line) + 1 > max_chars:
+            break
+        out_lines.append(line)
+        total += len(line) + 1
+    return "\n".join(out_lines)
+
+
+_NOTE_HASH_CACHE: dict[Path, set[str]] = {}
+
+
+def _note_hash(text: str) -> str:
+    """Stable short hash for dedup. Normalises whitespace + lowercases so
+    near-duplicate phrasings collide."""
+    norm = re.sub(r"\s+", " ", text.strip().lower())
+    return hashlib.md5(norm.encode("utf-8")).hexdigest()[:16]
+
+
+def _append_model_note(fr_path: Path, note: str) -> bool:
+    """Append `note` to FR's model-notes section. Returns True if added,
+    False if it was a near-duplicate (hash collision) or empty.
+    """
+    note = (note or "").strip()
+    if not note or len(note) < 20:
+        return False
+    # Strip leading "- " if the model wrote it.
+    if note.startswith("- "):
+        note = note[2:].strip()
+    existing = _load_model_notes(fr_path)
+    existing_hashes = _NOTE_HASH_CACHE.get(fr_path)
+    if existing_hashes is None:
+        existing_hashes = {_note_hash(n) for n in existing}
+        _NOTE_HASH_CACHE[fr_path] = existing_hashes
+    h = _note_hash(note)
+    if h in existing_hashes:
+        return False
+    existing.append(note)
+    existing_hashes.add(h)
+    # Hard cap — drop oldest.
+    if len(existing) > _MODEL_NOTES_MAX_ENTRIES:
+        dropped = existing[:-_MODEL_NOTES_MAX_ENTRIES]
+        existing = existing[-_MODEL_NOTES_MAX_ENTRIES:]
+        for d in dropped:
+            existing_hashes.discard(_note_hash(d))
+    _save_model_notes(fr_path, existing)
+    return True
+
+
+_NOTE_EXTRACTION_PROMPT = """A model attempted to implement a Rust function and
+the first attempt did not compile. The second (or later) attempt did compile.
+
+Read the failed body, the cargo error from that failure, and the body that
+finally compiled. Then write a SINGLE short note to your future self, in
+first-person voice, that names the specific confusion and how to avoid it.
+
+Format guidance:
+  - Lead with what you tried that failed ("I tried X").
+  - Name the reason it failed in concrete terms ("because Y").
+  - State the correction as a rule ("Use Z, not X").
+  - Keep it to ONE sentence; ≤300 chars.
+  - Do NOT mention the function name, file name, or crate name — the note
+    should generalise. Focus on the language/library/type confusion.
+  - Output ONLY the note text, no preamble, no markdown, no quotes.
+
+If no general lesson can be extracted (e.g. the failure was just a typo),
+output the literal token NONE.
+
+<FAILED_BODY>
+{failed_body}
+</FAILED_BODY>
+
+<COMPILE_ERROR>
+{error_excerpt}
+</COMPILE_ERROR>
+
+<FIXED_BODY>
+{fixed_body}
+</FIXED_BODY>
+"""
+
+
+def _extract_self_note(
+    failed_body: str, error_excerpt: str, fixed_body: str,
+) -> str | None:
+    """One LLM call to author a self-correction note. Returns None when the
+    model declines (responds with NONE or empty).
+    """
+    if not failed_body or not error_excerpt:
+        return None
+    prompt = _NOTE_EXTRACTION_PROMPT.format(
+        failed_body=failed_body[:1500],
+        error_excerpt=error_excerpt[:1500],
+        fixed_body=fixed_body[:1500] if fixed_body else "(no fixed body — fix loop exhausted)",
+    )
+    # Two-attempt ladder for extraction: default (thinking on) then think=False
+    # fallback. Mirrors the body-extraction recovery — Qwen3.6 occasionally
+    # returns empty with think=False on small prompts and vice versa.
+    resp = ""
+    try:
+        resp = ask(prompt, model=_TASK2_MODEL)
+    except Exception as e:
+        _log(f"  [model-notes] extraction failed (default): {e}")
+    if not resp or not resp.strip():
+        try:
+            resp = ask(prompt, model=_TASK2_MODEL, think=False)
+        except Exception as e:
+            _log(f"  [model-notes] extraction failed (think=False): {e}")
+            return None
+    if not resp:
+        return None
+    txt = resp.strip()
+    # Pull just the last non-empty line if model wrote multiple lines.
+    lines = [ln.strip() for ln in txt.splitlines() if ln.strip()]
+    if not lines:
+        return None
+    candidate = lines[-1]
+    # Strip surrounding quotes / fences.
+    candidate = candidate.strip("`").strip("\"'")
+    if candidate.upper() == "NONE" or len(candidate) < 20:
+        return None
+    return candidate[:300]
+
+
+def _build_per_fn_prompt(
+    file_text: str,
+    fn_name: str,
+    sig_text: str,
+    test_blocks: list[tuple[str, str]],
+    module_name: str,
+    cluster_name: str,
+    file_rel: str,
+    macros_section: str = "",
+    notes_section: str = "",
+) -> str:
+    """Small focused prompt for one fn fill. No crate-wide signature index,
+    no full FR, no genesis — only what the model needs to implement THIS fn.
+    """
+    tests_section = ""
+    if test_blocks:
+        parts = []
+        for path, txt in test_blocks:
+            parts.append(f'<TEST path="{path}">\n{txt}\n</TEST>')
+        tests_section = "\n\n".join(parts)
+    else:
+        tests_section = ("(no tests directly reference this fn — it may be "
+                         "invoked indirectly via a macro; consult MACROS below)")
+    annotated = _annotate_file_view(file_text, fn_name)
+    notes_block = f"\n<MODEL_NOTES>\n{notes_section}\n</MODEL_NOTES>\n" if notes_section else ""
+    macros_block = f"\n<MACROS>\n{macros_section}\n</MACROS>\n" if macros_section else ""
+    return f"""Implement ONE Rust function so its tests pass.
+
+Crate: {module_name} | Cluster: {cluster_name} | File: {file_rel} | Fn: {fn_name}
+Signature (verbatim, do not change):
+{sig_text}
+{notes_block}
+FILE — stubs are annotated. SKELETON STUB = will be filled later (rely on
+the signature). TARGET = implement now.
+
+<FILE path="{file_rel}">
+{annotated}
+</FILE>
+{macros_block}
+Tests (read-only):
+
+{tests_section}
+
+Output:
+  <BODY>
+  body without surrounding braces
+  </BODY>
+
+Rules:
+- Body only — no sig, no markdown, no use statements inside body.
+- Use fully-qualified paths (std::fmt::Write, crate::Error) for symbols
+  not in this file's `use` block.
+- No unimplemented!()/todo!()/panic-only bodies. Omit <BODY> if you can't
+  implement; a later pass retries.
+- You MAY call SKELETON STUB fns — their sigs are final.
+"""
+
+
+_GRACEFUL_SENTINEL_PATH = Path("/tmp/pipeline_graceful_stop")
+_PER_FN_FIX_CAP = int(os.getenv("PHASE_C_FIX_CAP_PER_FN", "10"))
+_PER_PASS_TEST_FIX_CAP = int(os.getenv("PHASE_C_FIX_CAP_PER_PASS", "5"))
+
+
+def _check_graceful_stop(context: str) -> None:
+    """Exit cleanly when the graceful stop sentinel is set. Called from inside
+    long-running loops so `bash continue.sh --graceful` is responsive."""
+    if _GRACEFUL_SENTINEL_PATH.exists():
+        try:
+            _GRACEFUL_SENTINEL_PATH.unlink()
+        except OSError:
+            pass
+        _log(f"  [graceful] stop sentinel detected at {context} — exiting cleanly.")
+        sys.exit(0)
+
+
+def _cargo_err_sig(output: str) -> frozenset:
+    """Stable signature of a cargo error set so we can detect 'same error twice'.
+
+    Catches both rustc structured errors (`error[E0308]: ...`) and generic
+    cargo/build errors (`error: ...`). Matches `generate_fix_loop._error_sigs`.
+    """
+    return (
+        frozenset(re.findall(r"error\[E\d+\]: .+", output))
+        | frozenset(re.findall(r"^error: .+", output, re.MULTILINE))
+    )
+
+
+def _strip_cargo_warnings(output: str) -> str:
+    """Drop `warning:` blocks from cargo output. A block runs from the
+    `warning:` header until the next blank line (rustc separates each block
+    with a blank line). Used as a defensive filter — the model should never
+    see warnings, only errors.
+    """
+    out: list[str] = []
+    skip = False
+    for ln in output.splitlines():
+        if ln.startswith("warning:") or ln.startswith("warning["):
+            skip = True
+            continue
+        if skip:
+            if ln.strip() == "":
+                # blank line terminates the warning block
+                skip = False
+            # while skipping, drop every non-blank line of the block
+            continue
+        out.append(ln)
+    return "\n".join(out)
+
+
+def _focus_cargo_errors(output: str, file_rel: str, max_chars: int = 2500) -> str:
+    """Extract a focused error excerpt from cargo output.
+
+    Strategy: drop warning blocks first, then keep lines whose `-->` location
+    mentions `file_rel`'s basename, plus all `error[...]` / `error:` heading
+    lines. Falls back to the (warning-free) head of output when filtering
+    finds nothing.
+    """
+    output = _strip_cargo_warnings(output)
+    base = file_rel.rsplit("/", 1)[-1]
+    keep: list[str] = []
+    in_err_block = False
+    cur_block: list[str] = []
+    block_is_relevant = False
+    for ln in output.splitlines():
+        if ln.startswith("error[") or ln.startswith("error: ") or re.match(r"^error\b", ln):
+            # flush previous block
+            if in_err_block and block_is_relevant:
+                keep.extend(cur_block)
+            cur_block = [ln]
+            in_err_block = True
+            block_is_relevant = False
+        elif in_err_block:
+            cur_block.append(ln)
+            if base in ln:
+                block_is_relevant = True
+            if ln.strip() == "" and cur_block:
+                if block_is_relevant:
+                    keep.extend(cur_block)
+                cur_block = []
+                in_err_block = False
+                block_is_relevant = False
+    if in_err_block and block_is_relevant:
+        keep.extend(cur_block)
+    excerpt = "\n".join(keep) if keep else output
+    return excerpt[:max_chars]
+
+
+def _build_per_fn_fix_prompt(
+    file_text: str,
+    fn_name: str,
+    sig_text: str,
+    test_blocks: list[tuple[str, str]],
+    module_name: str,
+    cluster_name: str,
+    file_rel: str,
+    prev_body: str,
+    error_excerpt: str,
+    macros_section: str = "",
+    notes_section: str = "",
+) -> str:
+    """Re-prompt for a fn whose previous fill broke `cargo check`."""
+    tests_section = ""
+    if test_blocks:
+        parts = [f'<TEST path="{p}">\n{t}\n</TEST>' for p, t in test_blocks]
+        tests_section = "\n\n".join(parts)
+    else:
+        tests_section = "(no tests directly reference this fn — see MACROS)"
+    annotated = _annotate_file_view(file_text, fn_name)
+    notes_block = f"\n<MODEL_NOTES>\n{notes_section}\n</MODEL_NOTES>\n" if notes_section else ""
+    macros_block = f"\n<MACROS>\n{macros_section}\n</MACROS>\n" if macros_section else ""
+    return f"""RE-implement ONE Rust function. Previous attempt broke cargo check.
+Diagnose the errors, return a corrected body. Don't repeat the previous body.
+
+Crate: {module_name} | Cluster: {cluster_name} | File: {file_rel} | Fn: {fn_name}
+Signature (verbatim, do not change):
+{sig_text}
+{notes_block}
+FILE (previous attempt reverted; stubs annotated):
+<FILE path="{file_rel}">
+{annotated}
+</FILE>
+{macros_block}
+<PREVIOUS_BODY>
+{prev_body}
+</PREVIOUS_BODY>
+
+<COMPILE_ERRORS>
+{error_excerpt}
+</COMPILE_ERRORS>
+
+Tests:
+{tests_section}
+
+Output:
+  <BODY>
+  corrected body without surrounding braces
+  </BODY>
+
+Rules:
+- Body only — no sig, no markdown, no use statements inside body.
+- Use fully-qualified paths for symbols not in the file's `use` block.
+- No unimplemented!()/todo!()/panic-only. Omit <BODY> if you cannot fix.
+"""
+
+
+def _run_cargo(cmd: str, cwd: Path, env: dict, timeout: int = 180) -> tuple[int, str]:
+    """Run a cargo command and return (rc, combined_output). rc=-1 on timeout."""
+    try:
+        r = subprocess.run(
+            shlex.split(cmd), cwd=cwd, capture_output=True, text=True,
+            timeout=timeout, env=env,
+        )
+        out = (r.stdout or "") + ("\n--- stderr ---\n" + r.stderr if r.stderr else "")
+        return r.returncode, out
+    except subprocess.TimeoutExpired:
+        return -1, f"TIMEOUT after {timeout}s"
+    except FileNotFoundError as e:
+        return -1, f"FILE NOT FOUND: {e}"
+
+
+def _build_test_cmd(test_stems: list[str], cluster: "BuildCluster | None") -> str:
+    """Build `cargo test --no-fail-fast --test stem1 --test stem2 ...` honoring
+    the cluster toolchain."""
+    parts = ["cargo"]
+    if cluster and cluster.toolchain:
+        parts.append(f"+{cluster.toolchain}")
+    parts += ["test", "--no-fail-fast"]
+    for s in test_stems:
+        parts += ["--test", s]
+    return shlex.join(parts)
+
+
+def _parse_failed_tests(output: str) -> set[str]:
+    """Extract names of failed test fns from cargo test output.
+
+    Matches lines like:
+        test foo::bar ... FAILED
+        ---- foo::bar stdout ----
+    Returns set of unqualified-or-qualified test fn names ('foo::bar').
+    """
+    failed: set[str] = set()
+    for ln in output.splitlines():
+        m = re.match(r"^test\s+(\S+)\s+\.\.\.\s+FAILED", ln)
+        if m:
+            failed.add(m.group(1))
+        m = re.match(r"^----\s+(\S+)\s+stdout\s+----", ln)
+        if m:
+            failed.add(m.group(1))
+    return failed
+
+
+def _ask_per_fn_body(
+    prompt: str, fn_name: str, attempts_log: list[str],
+) -> tuple[str | None, str]:
+    """Run the 3-attempt response-extraction ladder for a per-fn prompt.
+
+    Returns (body or None, last_response). On None, the model's response was
+    unparseable or stub-only on all three tries.
+    """
+    last_response = ""
+    for think_off, label in [(False, "default"), (True, "think=False"),
+                             (True, "think=False+retry")]:
+        kwargs: dict = {"model": _TASK2_MODEL}
+        if think_off:
+            kwargs["think"] = False
+        last_response = ask(prompt, **kwargs)
+        body = _extract_body_response(last_response)
+        if body and not _is_unimplemented_body(body):
+            if label != "default":
+                attempts_log.append(f"{fn_name}: recovered via {label}")
+            return body, last_response
+        attempts_log.append(f"{fn_name}: empty/stub from {label}")
+    return None, last_response
+
+
+def _task2_fill_fns_one_by_one(
+    project_dir: Path,
+    target_src_dir: Path,
+    tests_dir_files: list[Path],
+    module_name: str,
+    cluster_name: str,
+    cluster: "BuildCluster | None" = None,
+    check_cmd: str = "cargo check",
+    cluster_env: dict | None = None,
+    max_passes: int = 3,
+    prestrip_dir: Path | None = None,
+    fr_path: Path | None = None,
+) -> dict:
+    """Phase C — Flavour B with full validation loops.
+
+    For each pass:
+      For each unimplemented fn:
+        Snapshot the file.
+        Ask LLM → splice → cargo check.
+        On compile failure: revert, re-prompt with focused errors, retry.
+        Loop while the error signature CHANGES (model making progress).
+        Stop on identical-errors-twice or PER_FN_FIX_CAP attempts.
+        On exhaustion: revert, leave fn as stub for next pass.
+      After all fns in the pass: cargo test on test files referenced by
+      this pass's fills. On assertion failure: re-prompt the responsible
+      fns with the test output, loop while progress.
+
+    Returns {'fns_filled', 'bytes_filled', 'attempts', 'errors', 'remaining'}.
+    """
+    if cluster_env is None:
+        cluster_env = _cargo_env()
+    target_src_dir.mkdir(parents=True, exist_ok=True)
+    bytes_before = sum(p.stat().st_size for p in target_src_dir.rglob("*.rs"))
+    fns_filled = 0
+    attempts = 0
+    errors: list[str] = []
+
+    failures_dir = project_dir / ".skeleton" / "_failures"
+    failures_dir.mkdir(parents=True, exist_ok=True)
+
+    # C: crate-wide macros (cached across passes — file set doesn't change).
+    _src_for_macros = target_src_dir / "src" if (target_src_dir / "src").exists() else target_src_dir
+    macros_section = _collect_crate_macros(_src_for_macros)
+
+    for pass_n in range(1, max_passes + 1):
+        _check_graceful_stop(f"per-fn pass {pass_n}")
+        # Note: every pass scans for stubs fresh. Fns that failed their
+        # fix-loop in earlier passes are now annotated stubs (sentinel +
+        # commented failure history). _scan_unimplemented_functions returns
+        # them again here, so passes 2/3 retry them with the new context
+        # of siblings that have been filled in the meantime.
+        stubs = _scan_unimplemented_functions(target_src_dir)
+        if not stubs:
+            break
+        # D: leaf-first order — most-referenced fns first.
+        stubs = _leaf_first_fn_order(stubs, prestrip_dir)
+        _log(f"  [phase-c/per-fn] pass {pass_n}/{max_passes}: "
+             f"{len(stubs)} stub(s) to fill in cluster '{cluster_name}'.")
+        _pass_t0 = time.monotonic()
+        _emit("phase_c.pass.start", data={
+            "pass_n": pass_n, "cluster": cluster_name, "stubs": len(stubs),
+            "max_passes": max_passes,
+        })
+        progress_this_pass = 0
+        filled_this_pass: list[tuple[str, str]] = []  # [(file_rel, fn_name)]
+
+        for idx, (rel_file, fn_name) in enumerate(stubs, 1):
+            _check_graceful_stop(f"per-fn pass {pass_n} fn {fn_name}")
+            file_path = target_src_dir / rel_file
+            try:
+                snapshot = file_path.read_text(encoding="utf-8")
+            except Exception:
+                continue
+            loc = _locate_fn(snapshot, fn_name)
+            if loc is None:
+                continue
+            sig_text, _, _, _ = loc
+            test_blocks = _find_tests_for_fn(
+                tests_dir_files, fn_name,
+                file_rel=rel_file, src_dir=_src_for_macros,
+            )
+            _fn_t0 = time.monotonic()
+            _emit("phase_c.fn.fill.start", data={
+                "cluster": cluster_name, "pass_n": pass_n,
+                "file": rel_file, "fn": fn_name,
+                "tests_attached": len(test_blocks),
+                "sig_chars": len(sig_text),
+            })
+
+            # Load notes relevant to this (file, fn) — fresh per fn so a
+            # note added during this fn's own fix loop becomes visible to
+            # later fns in the same pass.
+            notes_section = ""
+            if fr_path is not None:
+                notes_section = _filter_model_notes_for_prompt(
+                    fr_path, file_rel=rel_file, fn_name=fn_name,
+                    file_text=snapshot,
+                )
+
+            # === Inner fix loop ===
+            success = False
+            prev_err_sig: frozenset | None = None
+            last_response = ""
+            last_body = ""
+            error_excerpt = ""
+            fix_attempt = 0
+            attempts_log: list[str] = []
+            first_failed_body = ""
+            first_error_excerpt = ""
+            while fix_attempt < _PER_FN_FIX_CAP:
+                fix_attempt += 1
+                attempts += 1
+                _check_graceful_stop(f"per-fn fix attempt {fix_attempt} for {fn_name}")
+                cur_text = file_path.read_text(encoding="utf-8")
+                if fix_attempt == 1:
+                    prompt = _build_per_fn_prompt(
+                        file_text=cur_text, fn_name=fn_name, sig_text=sig_text,
+                        test_blocks=test_blocks, module_name=module_name,
+                        cluster_name=cluster_name, file_rel=rel_file,
+                        macros_section=macros_section,
+                        notes_section=notes_section,
+                    )
+                else:
+                    prompt = _build_per_fn_fix_prompt(
+                        file_text=cur_text, fn_name=fn_name, sig_text=sig_text,
+                        test_blocks=test_blocks, module_name=module_name,
+                        cluster_name=cluster_name, file_rel=rel_file,
+                        prev_body=last_body, error_excerpt=error_excerpt,
+                        macros_section=macros_section,
+                        notes_section=notes_section,
+                    )
+
+                body, last_response = _ask_per_fn_body(prompt, fn_name, attempts_log)
+                if body is None:
+                    # Model gave no usable response — stop retrying this fn.
+                    _emit("phase_c.fn.fill.skip", data={
+                        "cluster": cluster_name, "pass_n": pass_n,
+                        "file": rel_file, "fn": fn_name,
+                        "fix_attempt": fix_attempt,
+                        "reason": "empty_response",
+                    })
+                    break
+
+                ok, delta = _splice_fn_body(file_path, fn_name, body)
+                if not ok:
+                    # splice rejected (file changed or body was a stub)
+                    _emit("phase_c.fn.fill.skip", data={
+                        "cluster": cluster_name, "pass_n": pass_n,
+                        "file": rel_file, "fn": fn_name,
+                        "fix_attempt": fix_attempt, "body_chars": len(body),
+                        "reason": "splice_rejected",
+                    })
+                    break
+
+                rc, cargo_out = _run_cargo(check_cmd, target_src_dir, cluster_env)
+                if rc == 0:
+                    success = True
+                    _log(f"  [phase-c/per-fn] {idx}/{len(stubs)} filled "
+                         f"{rel_file}::{fn_name} (+{delta} bytes, body={len(body)}"
+                         + (f", fix-attempts={fix_attempt}" if fix_attempt > 1 else "")
+                         + ")")
+                    _emit("phase_c.fn.fill.done", duration_ms=int(
+                            (time.monotonic() - _fn_t0) * 1000),
+                          data={
+                        "cluster": cluster_name, "pass_n": pass_n,
+                        "file": rel_file, "fn": fn_name,
+                        "body_chars": len(body), "bytes_delta": delta,
+                        "fix_attempts": fix_attempt,
+                        "recovered": fix_attempt > 1,
+                        "success": True,
+                    })
+                    # Recovered fix-loop → extract a self-note (model writes
+                    # for itself). High-signal moment: we know the lesson
+                    # actually worked.
+                    if fix_attempt > 1 and fr_path is not None and first_failed_body:
+                        note = _extract_self_note(
+                            failed_body=first_failed_body,
+                            error_excerpt=first_error_excerpt,
+                            fixed_body=body,
+                        )
+                        if note and _append_model_note(fr_path, note):
+                            _log(f"  [model-notes] +1 note (recovered): {note[:80]}...")
+                            _emit("phase_c.note.added", data={
+                                "cluster": cluster_name, "pass_n": pass_n,
+                                "file": rel_file, "fn": fn_name,
+                                "kind": "recovered", "preview": note[:200],
+                            })
+                    break
+
+                # Capture first-failure context for note extraction later.
+                if fix_attempt == 1:
+                    first_failed_body = body
+                    first_error_excerpt = _focus_cargo_errors(cargo_out, rel_file)
+
+                cur_err_sig = _cargo_err_sig(cargo_out)
+                if cur_err_sig == prev_err_sig and fix_attempt > 1:
+                    _log(f"  [phase-c/per-fn] {fn_name}: same error set after "
+                         f"attempt {fix_attempt} — stopping fix loop.")
+                    break
+                prev_err_sig = cur_err_sig
+                last_body = body
+                error_excerpt = _focus_cargo_errors(cargo_out, rel_file)
+                # Revert to snapshot before next attempt; the model will see
+                # the file as unimplemented again but with last_body + errors
+                # in the prompt.
+                file_path.write_text(snapshot, encoding="utf-8")
+                _log(f"  [phase-c/per-fn] {fn_name}: compile failed "
+                     f"(attempt {fix_attempt}); re-prompting with errors.")
+
+            if not success:
+                # Restore the snapshot first (clears whatever broken body the
+                # loop left in place), then splice an annotated stub that
+                # preserves the last attempt + cargo error as comments. The
+                # fn stays callable (unimplemented!() at the end) and a later
+                # pass will retry — by then more siblings in the file will be
+                # implemented, giving richer context.
+                file_path.write_text(snapshot, encoding="utf-8")
+                annotated_body = _make_failed_attempt_body(
+                    attempted_body=last_body or first_failed_body or "",
+                    error_excerpt=error_excerpt or first_error_excerpt or "",
+                    fix_attempts=fix_attempt,
+                )
+                _splice_fn_body(file_path, fn_name, annotated_body)
+                errors.append(f"{rel_file}::{fn_name}: fix loop exhausted "
+                              f"after {fix_attempt} attempt(s)")
+                _emit("phase_c.fn.fill.fail", duration_ms=int(
+                        (time.monotonic() - _fn_t0) * 1000),
+                      data={
+                    "cluster": cluster_name, "pass_n": pass_n,
+                    "file": rel_file, "fn": fn_name,
+                    "fix_attempts": fix_attempt,
+                    "last_error_chars": len(error_excerpt),
+                    "last_error_preview": error_excerpt[:200],
+                })
+                # Exhausted fix-loop — extract a "what didn't work" note so the
+                # model doesn't repeat the same dead-end approach on the next pass.
+                if fr_path is not None and (first_failed_body or last_body):
+                    note = _extract_self_note(
+                        failed_body=last_body or first_failed_body,
+                        error_excerpt=error_excerpt or first_error_excerpt,
+                        fixed_body="",  # no fixed body — fix loop exhausted
+                    )
+                    if note and _append_model_note(fr_path, note):
+                        _log(f"  [model-notes] +1 note (exhausted): {note[:80]}...")
+                        _emit("phase_c.note.added", data={
+                            "cluster": cluster_name, "pass_n": pass_n,
+                            "file": rel_file, "fn": fn_name,
+                            "kind": "exhausted", "preview": note[:200],
+                        })
+                try:
+                    ts = int(time.time())
+                    fpath = failures_dir / f"{fn_name}-{ts}.txt"
+                    fpath.write_text(
+                        f"# fn: {rel_file}::{fn_name}\n"
+                        f"# fix_attempts: {fix_attempt}\n"
+                        f"# last_response_chars: {len(last_response)}\n"
+                        f"# last_error_excerpt: {error_excerpt[:500]}\n"
+                        f"{'=' * 60}\n## ATTEMPTS LOG\n{'=' * 60}\n"
+                        + "\n".join(attempts_log) + "\n"
+                        f"{'=' * 60}\n## LAST RESPONSE\n{'=' * 60}\n{last_response}\n"
+                        f"{'=' * 60}\n## LAST ERROR EXCERPT\n{'=' * 60}\n{error_excerpt}\n",
+                        encoding="utf-8",
+                    )
+                except Exception:
+                    pass
+                _log(f"  [phase-c/per-fn] {idx}/{len(stubs)} {rel_file}::{fn_name}: "
+                     f"reverted after {fix_attempt} attempt(s).")
+                continue
+
+            fns_filled += 1
+            progress_this_pass += 1
+            filled_this_pass.append((rel_file, fn_name))
+
+        # === Per-pass cargo test on tests touched by this pass's fills ===
+        if filled_this_pass:
+            _check_graceful_stop(f"per-fn pass {pass_n} test phase")
+            # Build the union of test files referenced by ANY fn filled this pass.
+            test_paths: set[Path] = set()
+            for rel_f, fn in filled_this_pass:
+                for tf in _find_tests_for_fn(
+                    tests_dir_files, fn,
+                    file_rel=rel_f, src_dir=_src_for_macros,
+                ):
+                    test_paths.add(Path(tf[0]))
+            test_stems = sorted({p.stem for p in test_paths})
+            if test_stems:
+                test_cmd = _build_test_cmd(test_stems, cluster)
+                _log(f"  [phase-c/per-fn] pass {pass_n}: cargo test "
+                     f"{len(test_stems)} test file(s): {', '.join(test_stems[:5])}"
+                     + ("..." if len(test_stems) > 5 else ""))
+                _test_t0 = time.monotonic()
+                rc, test_out = _run_cargo(test_cmd, target_src_dir, cluster_env,
+                                          timeout=300)
+                _test_dur_ms = int((time.monotonic() - _test_t0) * 1000)
+                _emit("phase_c.pass.test", duration_ms=_test_dur_ms, data={
+                    "cluster": cluster_name, "pass_n": pass_n,
+                    "stems": test_stems, "rc": rc,
+                    "failed_tests": sorted(_parse_failed_tests(test_out))
+                                    if rc != 0 else [],
+                })
+                if rc == 0:
+                    _log(f"  [phase-c/per-fn] pass {pass_n}: cargo test PASSED.")
+                else:
+                    _log(f"  [phase-c/per-fn] pass {pass_n}: cargo test FAILED "
+                         f"(rc={rc}).")
+                    # === Per-pass test fix loop ===
+                    test_fix_attempt = 0
+                    prev_test_sig: frozenset | None = None
+                    while test_fix_attempt < _PER_PASS_TEST_FIX_CAP:
+                        test_fix_attempt += 1
+                        _check_graceful_stop(f"test fix attempt {test_fix_attempt}")
+                        failed_tests = _parse_failed_tests(test_out)
+                        if not failed_tests:
+                            break  # rc!=0 but no parseable failed tests; bail
+                        # Map each failing test back to the fns this pass filled
+                        # that the test could exercise. We use a fn-name token
+                        # appearing in the test output as the link.
+                        fns_to_retry: list[tuple[str, str]] = []
+                        for (rel_f, fn) in filled_this_pass:
+                            if any(fn in t for t in failed_tests) or fn in test_out:
+                                fns_to_retry.append((rel_f, fn))
+                        if not fns_to_retry:
+                            # Conservative: retry all fns filled this pass.
+                            fns_to_retry = list(filled_this_pass)
+
+                        any_progress = False
+                        for rel_f, fn in fns_to_retry:
+                            fp = target_src_dir / rel_f
+                            try:
+                                cur_text = fp.read_text(encoding="utf-8")
+                            except Exception:
+                                continue
+                            sloc = _locate_fn(cur_text, fn)
+                            if sloc is None:
+                                continue
+                            sig_t = sloc[0]
+                            cur_body = cur_text[sloc[2]:sloc[3]]
+                            error_excerpt_test = _focus_cargo_errors(
+                                test_out, rel_f, max_chars=3000)
+                            t_blocks = _find_tests_for_fn(
+                                tests_dir_files, fn,
+                                file_rel=rel_f, src_dir=_src_for_macros,
+                            )
+                            notes_t = ""
+                            if fr_path is not None:
+                                notes_t = _filter_model_notes_for_prompt(
+                                    fr_path, file_rel=rel_f, fn_name=fn,
+                                    file_text=cur_text,
+                                )
+                            prompt = _build_per_fn_fix_prompt(
+                                file_text=cur_text, fn_name=fn, sig_text=sig_t,
+                                test_blocks=t_blocks, module_name=module_name,
+                                cluster_name=cluster_name, file_rel=rel_f,
+                                prev_body=cur_body, error_excerpt=error_excerpt_test,
+                                macros_section=macros_section,
+                                notes_section=notes_t,
+                            )
+                            attempts += 1
+                            attempts_log_t: list[str] = []
+                            new_body, _ = _ask_per_fn_body(prompt, fn, attempts_log_t)
+                            if not new_body:
+                                continue
+                            ok2, _ = _splice_fn_body(fp, fn, new_body)
+                            if ok2:
+                                any_progress = True
+                                _log(f"  [phase-c/per-fn] test-fix: re-spliced "
+                                     f"{rel_f}::{fn} (attempt {test_fix_attempt}).")
+                        if not any_progress:
+                            _log(f"  [phase-c/per-fn] pass {pass_n}: no fn could "
+                                 f"be re-spliced for failing tests — stopping.")
+                            break
+
+                        # Re-run cargo check (cheap) then cargo test.
+                        rc_c, out_c = _run_cargo(check_cmd, target_src_dir,
+                                                 cluster_env)
+                        if rc_c != 0:
+                            _log(f"  [phase-c/per-fn] pass {pass_n}: test-fix "
+                                 f"broke cargo check; leaving for next pass.")
+                            break
+                        rc, test_out = _run_cargo(test_cmd, target_src_dir,
+                                                  cluster_env, timeout=300)
+                        if rc == 0:
+                            _log(f"  [phase-c/per-fn] pass {pass_n}: cargo test "
+                                 f"PASSED after test-fix attempt {test_fix_attempt}.")
+                            break
+                        cur_test_sig = _cargo_err_sig(test_out) | frozenset(
+                            _parse_failed_tests(test_out))
+                        if cur_test_sig == prev_test_sig:
+                            _log(f"  [phase-c/per-fn] pass {pass_n}: same test "
+                                 f"failures repeat — stopping test-fix loop.")
+                            break
+                        prev_test_sig = cur_test_sig
+
+        _emit("phase_c.pass.done", duration_ms=int(
+                (time.monotonic() - _pass_t0) * 1000),
+              data={
+            "pass_n": pass_n, "cluster": cluster_name,
+            "fns_filled": progress_this_pass, "errors_so_far": len(errors),
+            "remaining": len(_scan_unimplemented_functions(target_src_dir)),
+        })
+        if progress_this_pass == 0:
+            _log(f"  [phase-c/per-fn] pass {pass_n} made no progress; stopping.")
+            break
+
+    bytes_after = sum(p.stat().st_size for p in target_src_dir.rglob("*.rs"))
+    remaining = len(_scan_unimplemented_functions(target_src_dir))
+    _emit("phase_c.cluster.done", data={
+        "cluster": cluster_name,
+        "fns_filled": fns_filled,
+        "bytes_filled": bytes_after - bytes_before,
+        "llm_calls": attempts,
+        "remaining_stubs": remaining,
+        "errors": len(errors),
+    })
+    return {
+        "fns_filled": fns_filled,
+        "bytes_filled": bytes_after - bytes_before,
+        "attempts": attempts,
+        "errors": errors,
+        "remaining": remaining,
+    }
+
+
+def _merge_fills_preserving_existing(disk_text: str, model_text: str) -> str:
+    """Merge model-emitted file with the on-disk file.
+
+    Strategy: disk_text is the structural base (skeleton + any prior fills
+    + all imports/types/macros/attributes). We walk it function-by-function
+    and ONLY replace `unimplemented!()` bodies with the corresponding body
+    from model_text. Everything else from disk is preserved verbatim —
+    imports, type definitions, module declarations, attributes, comments.
+
+    This is the safe direction: the model can emit a thin file that drops
+    the surrounding context, but we never lose what's already on disk.
+    The model contributes function bodies only.
+
+    Matching is by function signature line. If the model didn't return a
+    given function (or returned it with `unimplemented!()` still), the disk
+    body is kept — Phase D will pick up any residuals.
+    """
+    fn_re = re.compile(
+        r'((?:^|\n)[ \t]*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?'
+        r'(?:const\s+)?fn\s+[A-Za-z_]\w*[^{]*\{)',
+        re.MULTILINE,
+    )
+
+    def extract_fns(text: str) -> list[tuple[str, str, int, int]]:
+        """Return [(signature_line, body, body_start, body_end), ...] for each fn.
+
+        body_start is the offset of the first char inside the opening `{`.
+        body_end is the offset of the closing `}` itself (exclusive end of body).
+        """
+        out: list[tuple[str, str, int, int]] = []
+        for m in fn_re.finditer(text):
+            body_start = m.end()  # right after the opening `{`
+            depth = 1
+            i = body_start
+            while i < len(text) and depth > 0:
+                ch = text[i]
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                i += 1
+            if depth != 0:
+                continue  # malformed; skip
+            body_end = i - 1  # position of the matching '}'
+            body = text[body_start:body_end]
+            sig_line = text[m.start():body_start].strip()
+            out.append((sig_line, body, body_start, body_end))
+        return out
+
+    disk_fns = extract_fns(disk_text)
+    if not disk_fns:
+        # Disk has no functions to fill — either an empty or
+        # non-Rust-source-ish file. Don't risk overwriting structure;
+        # return disk verbatim.
+        return disk_text
+
+    # Build a map from signature → model's body, for any signature the
+    # model returned that ALSO doesn't look like a fresh unimplemented stub.
+    # (If the model regurgitated `unimplemented!()` for some function, that
+    # adds no value over what's already on disk.)
+    model_bodies: dict[str, str] = {}
+    for sig, body, _bs, _be in extract_fns(model_text):
+        if _is_unimplemented_body(body):
+            continue
+        model_bodies[sig] = body
+
+    if not model_bodies:
+        return disk_text  # model gave us nothing usable
+
+    # Walk disk fns IN REVERSE so character offsets stay valid as we splice.
+    # Replace body slice only when disk's body is unimplemented AND model
+    # has a real body for the same signature.
+    out = disk_text
+    for sig, body, body_start, body_end in reversed(disk_fns):
+        if not _is_unimplemented_body(body):
+            continue  # already filled — never overwrite
+        new_body = model_bodies.get(sig)
+        if new_body is None:
+            continue  # model didn't return this function
+        out = out[:body_start] + new_body + out[body_end:]
+    return out
+
+
+def _leaf_first_group_order(groups: list[dict]) -> list[dict]:
+    """Sort groups so leaf groups (fewest cross-group symbol overlaps) come first.
+
+    A group with many shared target_symbols depends on more "other" groups'
+    work, so should be filled later.
+    """
+    all_other_syms: list[set[str]] = []
+    for g in groups:
+        all_other_syms.append(set(g.get("target_symbols", [])))
+
+    def overlap_count(idx: int) -> int:
+        mine = set(groups[idx].get("target_symbols", []))
+        if not mine:
+            return 0
+        count = 0
+        for j, others in enumerate(all_other_syms):
+            if j == idx:
+                continue
+            count += len(mine & others)
+        return count
+
+    indexed = list(range(len(groups)))
+    indexed.sort(key=lambda i: (overlap_count(i), groups[i].get("name", "")))
+    return [groups[i] for i in indexed]
+
+
+def _task2_fill_groups(
+    skeleton_dir: Path,
+    target_src_dir: Path,
+    groups: list[dict],
+    project_dir: Path,
+    cluster_name: str,
+    module_name: str,
+    functional_req: str,
+    genesis: str,
+    cluster: "BuildCluster | None" = None,
+) -> dict:
+    """Phase C: per-group fill calls.
+
+    - Seeds target_src_dir from the skeleton on first call (idempotent).
+    - For each group (leaf-first), feeds the LLM the current skeleton state +
+      the group's test files + an instruction to replace `unimplemented!()`
+      bodies that these tests need.
+    - Merges model output with on-disk source, preserving already-filled bodies.
+
+    Returns {'groups_processed': int, 'bytes_filled': int, 'errors': list}.
+    """
+    target_src_dir.mkdir(parents=True, exist_ok=True)
+    # Seed: copy any skeleton file that doesn't yet exist in target_src_dir.
+    for src in skeleton_dir.rglob("*.rs"):
+        rel = src.relative_to(skeleton_dir)
+        dst = target_src_dir / rel
+        if not dst.exists():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+
+    ordered = _leaf_first_group_order(groups)
+    bytes_before = sum(p.stat().st_size for p in target_src_dir.rglob("*.rs"))
+    errors: list[str] = []
+    skipped_already_filled = 0
+
+    # P3.5: cache the smallest successful fills from earlier groups so we can
+    # offer them as few-shot examples on retry.
+    successful_examples: list[tuple[str, str]] = []  # [(sig, body), ...]
+
+    # P3.7: stash directory for failure triples (prompt, response, outcome).
+    failures_dir = project_dir / ".skeleton" / "_failures"
+    failures_dir.mkdir(parents=True, exist_ok=True)
+
+    def _stub_count_for_group(group: dict) -> int:
+        """Decide whether to skip the group's LLM call because all work is done.
+
+        Returns 0 ONLY when we are confident no work remains:
+          - the group has target_symbols
+          - at least one of them resolves to a function name in target_src_dir
+          - and EVERY matched function has a non-stub body
+        Otherwise returns 1 (treat as needing work) — including the ambiguous
+        case where the target_symbols are type names that don't map to any fn.
+        That ambiguity caused F7's over-firing and is the safer default.
+        """
+        target_names: set[str] = set()
+        for sym in group.get("target_symbols", []):
+            bare = sym.rsplit("::", 1)[-1]
+            target_names.add(bare)
+        if not target_names:
+            return 1  # no signal → run
+        # Build set of ALL fn names in target_src_dir (filled + stubs).
+        all_fn_names: set[str] = set()
+        stub_fn_names: set[str] = set()
+        fn_re = re.compile(
+            r'(?:^|\n)[ \t]*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?'
+            r'(?:const\s+)?fn\s+([A-Za-z_]\w*)[^{]*\{',
+            re.MULTILINE,
+        )
+        for p in target_src_dir.rglob("*.rs"):
+            try:
+                text = p.read_text(encoding="utf-8")
+            except Exception:
+                continue
+            for m in fn_re.finditer(text):
+                all_fn_names.add(m.group(1))
+        for _rel, fn in _scan_unimplemented_functions(target_src_dir):
+            stub_fn_names.add(fn)
+        # How many target names map to ANY function (filled or unfilled)?
+        matched_to_fn = target_names & all_fn_names
+        if not matched_to_fn:
+            # Targets are type names (or strings the skeleton has no fn for).
+            # Can't infer from this signal. Run the group.
+            return 1
+        # Targets DID resolve to fns. Skip only when none of those fns are
+        # currently unimplemented stubs.
+        remaining_stub_targets = matched_to_fn & stub_fn_names
+        return len(remaining_stub_targets)
+
+    for g_idx, g in enumerate(ordered, 1):
+        gname = g.get("name", f"group_{g_idx}")
+        gtests = g.get("test_files", [])
+        _log(f"  [phase-c] group {g_idx}/{len(ordered)}: {gname} "
+             f"({len(gtests)} test file(s))")
+
+        # P3.4: skip the group entirely if its target_symbols all already
+        # have bodies. Saves an LLM round-trip and prevents the model from
+        # being asked to "fill" things that are already done.
+        remaining = _stub_count_for_group(g)
+        if remaining == 0:
+            _log(f"  [phase-c] group {gname}: all target symbols already "
+                 f"filled — skipping LLM call.")
+            skipped_already_filled += 1
+            continue
+
+        # Collect this group's test contents.
+        test_blocks: list[str] = []
+        for trel in gtests:
+            tp = project_dir / trel
+            if tp.exists():
+                test_blocks.append(f'<TESTFILE path="{trel}">\n{tp.read_text(encoding="utf-8")}\n</TESTFILE>')
+        if not test_blocks:
+            _log(f"  [phase-c] group {gname}: no readable tests; skipping.")
+            continue
+
+        # P3.3 + Plan 4: signature-only skeleton index, additionally
+        # cfg-filtered for the active cluster so the model sees only
+        # items active in this cluster (reduces cognitive load).
+        cur_files = _load_skeleton_files(target_src_dir)
+        skeleton_index = _format_skeleton_index_for_cluster(cur_files, cluster)
+
+        # Genesis and FR capped against the per-prompt budget.
+        _genesis_capped = trim_to_line(genesis, _GENESIS_CAP,
+                                       "\n... (genesis truncated)") if genesis else ""
+        _fr_cap = SINGLE_CALL_CHAR_LIMIT // 4
+        _fr_capped = smart_truncate(functional_req or "", total_limit=_fr_cap,
+                                    head=_fr_cap // 3, tail=2 * _fr_cap // 3)
+
+        # P3.5: few-shot examples included from attempt 2 onward.
+        def _build_prompt(include_examples: bool) -> str:
+            examples_block = ""
+            if include_examples and successful_examples:
+                ex_parts = ["Example successful fills from earlier groups in this run:"]
+                # Sort by body length, take 2 smallest.
+                for sig, body in sorted(successful_examples, key=lambda x: len(x[1]))[:2]:
+                    ex_parts.append(f'<FN sig="{sig}">\n{body}\n</FN>')
+                examples_block = "\n\n" + "\n".join(ex_parts) + "\n"
+            return f"""You are filling `unimplemented!()` bodies in a Rust crate so that a specific
+group of tests passes.
+
+Crate: `{module_name}` (cluster: {cluster_name})
+Group: {gname}
+Group rationale: {g.get('rationale', '(none)')}
+
+Implementation skeleton (signature-only index of every file on disk; bodies
+that are `unimplemented!()` need filling, bodies that are already implemented
+must be preserved verbatim):
+{skeleton_index}
+
+Functional requirements (the spec):
+{_fr_capped}
+
+Tests this group must pass:
+{chr(10).join(test_blocks)}
+
+Methodology (genesis.md):
+{_genesis_capped}
+{examples_block}
+Output format (mandatory — anything else is silently discarded):
+
+  <FN sig="EXACT_SIGNATURE_FROM_SKELETON">
+  body code goes here, WITHOUT the surrounding braces
+  </FN>
+
+One block per function whose body you fill. The `sig` attribute must be the
+function declaration text exactly as it appears in the skeleton up to (but
+excluding) the opening `{{`. Do NOT include the braces. Do NOT include other
+content (no markdown, no prose, no full-file replacements).
+
+CRITICAL — omit, don't stub:
+  - If you cannot produce a real implementation for a function, OMIT it
+    entirely from your output. Do not emit a `<FN>` block whose body is
+    `unimplemented!()`, `todo!()`, or just panics.
+  - Emitting nothing for a function leaves its current `unimplemented!()`
+    body intact, which is correct — a later pass will handle it.
+  - Re-emitting a stub wastes our LLM budget and yields no progress.
+
+Only emit blocks for functions you ACTUALLY fill with real implementations
+that satisfy the tests above.
+"""
+
+        # Three-attempt strategy:
+        #   1. Default (thinking on, no few-shot).
+        #   2. think=False (no few-shot) — recovers groups thinking-mode chokes on.
+        #   3. think=False with few-shot examples (if any from prior groups).
+        attempt_specs: list[tuple[bool, bool, str]] = [
+            (False, False, "default"),  # include_examples=False, think_off=False
+            (False, True, "think=False"),
+            (True, True, "think=False+few-shot"),
+        ]
+        fn_blocks: dict[str, str] = {}
+        last_response = ""
+        for ex_flag, think_off, label in attempt_specs:
+            this_prompt = _build_prompt(include_examples=ex_flag)
+            kwargs: dict = {"model": _TASK2_MODEL}
+            if think_off:
+                kwargs["think"] = False
+            last_response = ask(this_prompt, **kwargs)
+            fn_blocks = _extract_fn_blocks(last_response)
+            if fn_blocks:
+                if label != "default":
+                    _log(f"  [phase-c] group {gname}: recovered via {label}.")
+                break
+            _log(f"  [phase-c] group {gname}: no FN blocks from {label} attempt.")
+
+        if not fn_blocks:
+            _log(f"  [phase-c] group {gname}: all attempts failed.")
+            errors.append(f"{gname}: empty/unparseable response")
+            # P3.7: persist the failure for inspection / future training corpus.
+            try:
+                ts = int(time.time())
+                fpath = failures_dir / f"{gname}-{ts}.txt"
+                fpath.write_text(
+                    f"# group: {gname}\n# response_chars: {len(last_response)}\n"
+                    f"# response_preview: {last_response[:200].replace(chr(10),' ')}\n"
+                    f"{'='*60}\n## RESPONSE\n{'='*60}\n{last_response}\n",
+                    encoding="utf-8",
+                )
+            except Exception:
+                pass
+            continue
+
+        # Merge: walk each file in target_src_dir, splice in any of our fn_blocks
+        # whose signature matches an unimplemented body in that file.
+        for src_path in sorted(target_src_dir.rglob("*.rs")):
+            rel = str(src_path.relative_to(target_src_dir))
+            if ".gen_tests_" in rel:
+                continue  # protected
+            disk_text = src_path.read_text(encoding="utf-8")
+            merged = _merge_fn_blocks_into_disk(disk_text, fn_blocks)
+            if merged != disk_text:
+                src_path.write_text(merged, encoding="utf-8")
+                _log(f"  [phase-c] group {gname}: updated {rel} "
+                     f"({len(disk_text)} → {len(merged)} bytes)")
+                # P3.5: cache small successful fills as future few-shot examples.
+                for sig, body in fn_blocks.items():
+                    if len(body) < 800 and len(successful_examples) < 20:
+                        successful_examples.append((sig, body))
+
+    bytes_after = sum(p.stat().st_size for p in target_src_dir.rglob("*.rs"))
+    return {
+        "groups_processed": len(ordered),
+        "groups_skipped_already_filled": skipped_already_filled,
+        "bytes_filled": bytes_after - bytes_before,
+        "errors": errors,
+    }
+
+
+def _cmd_phase_a_only(project_dir: Path) -> int:
+    """Standalone Phase A: extract skeleton from pre-strip source and verify it compiles.
+
+    Writes to `.skeleton/_standalone/` (isolated from the backend's per-cluster
+    cache at `.skeleton/{cluster}/`) so running --phase-* CLI flags during a
+    live pipeline iteration cannot wipe the backend's working tree.
+
+    Returns 0 on success, non-zero on any failure step.
+    """
+    _log(f"\n=== Phase A (skeleton extraction) for {project_dir.name} ===")
+    prestrip_dir = Path("/tmp") / f"prestrip_{project_dir.name}_standalone"
+    if prestrip_dir.exists():
+        shutil.rmtree(prestrip_dir)
+    if not _checkout_prestrip_source(project_dir, prestrip_dir):
+        _log("  [phase-a] FAILED to materialise pre-strip source.")
+        return 2
+
+    skeleton_dir = project_dir / ".skeleton" / "_standalone"
+    if skeleton_dir.exists():
+        shutil.rmtree(skeleton_dir)
+    res = _extract_skeleton(prestrip_dir, skeleton_dir)
+    if not res["ok"]:
+        _log(f"  [phase-a] extractor FAILED: {res['stderr']}")
+        return 3
+    rep = res["reports"]
+    _log(f"  [phase-a] {len(rep)} file(s) skeletonised; "
+         f"{sum(r['bytes_in'] for r in rep):,} → {sum(r['bytes_out'] for r in rep):,} bytes.")
+
+    # Wrap skeleton in a minimal Cargo project: copy the original Cargo.toml.
+    cargo_src = project_dir / "Cargo.toml"
+    if cargo_src.exists():
+        shutil.copy(cargo_src, skeleton_dir / "Cargo.toml")
+    else:
+        _log("  [phase-a] WARNING: no Cargo.toml found in project_dir — skipping cargo check.")
+        return 0
+
+    _log("  [phase-a] running `cargo check` on skeleton...")
+    try:
+        result = subprocess.run(
+            ["cargo", "check", "--message-format=short"],
+            cwd=skeleton_dir, capture_output=True, text=True, timeout=300,
+        )
+    except subprocess.TimeoutExpired:
+        _log("  [phase-a] cargo check TIMED OUT (>300s).")
+        return 4
+    if result.returncode != 0:
+        # Surface a snippet of the failure for diagnosis.
+        err_tail = "\n".join(result.stderr.splitlines()[-25:])
+        _log(f"  [phase-a] cargo check FAILED (rc={result.returncode}):\n{err_tail}")
+        return 5
+    _log("  [phase-a] cargo check PASSED — skeleton is compilable.")
+    return 0
+
+
+def _scan_unimplemented_functions(src_dir: Path) -> list[tuple[str, str]]:
+    """Return [(file_rel_path, fn_name), ...] for every fn whose body is still `unimplemented!()`.
+
+    Uses the same extractor logic as the merge helper, scoped to leaf functions.
+    """
+    fn_re = re.compile(
+        r'(?:^|\n)[ \t]*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?'
+        r'(?:const\s+)?fn\s+([A-Za-z_]\w*)[^{]*\{',
+        re.MULTILINE,
+    )
+    out: list[tuple[str, str]] = []
+    for p in sorted(src_dir.rglob("*.rs")):
+        try:
+            text = p.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        for m in fn_re.finditer(text):
+            fn_name = m.group(1)
+            body_start = m.end()
+            depth = 1
+            i = body_start
+            while i < len(text) and depth > 0:
+                if text[i] == "{":
+                    depth += 1
+                elif text[i] == "}":
+                    depth -= 1
+                i += 1
+            if depth != 0:
+                continue
+            body = text[body_start:i - 1]
+            if _is_unimplemented_body(body):
+                out.append((str(p.relative_to(src_dir)), fn_name))
+    return out
+
+
+def _filter_test_exercised(stubs: list[tuple[str, str]],
+                            test_files: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Keep only stubs whose function name appears (as a token) in any test file."""
+    if not stubs or not test_files:
+        return []
+    test_blob = "\n".join(content for _, content in test_files)
+    out: list[tuple[str, str]] = []
+    for rel, name in stubs:
+        if re.search(rf'\b{re.escape(name)}\b', test_blob):
+            out.append((rel, name))
+    return out
+
+
+def _task2_cleanup_residuals(
+    target_src_dir: Path,
+    project_dir: Path,
+    functional_req: str,
+    test_files: list[tuple[str, str]],
+    module_name: str,
+) -> dict:
+    """Phase D: scan for residual `unimplemented!()` and patch what tests need.
+
+    - Classifies remaining stubs as test-exercised vs not.
+    - For test-exercised stubs, issues ONE LLM call with the relevant tests + the
+      current source of each touched file + an instruction to fill those stubs.
+    - Untouched stubs are left as-is (cargo test won't trigger them).
+
+    Returns {'stubs_total': int, 'stubs_exercised': int, 'files_updated': int,
+             'stubs_remaining': int}.
+    """
+    stubs = _scan_unimplemented_functions(target_src_dir)
+    if not stubs:
+        return {"stubs_total": 0, "stubs_exercised": 0, "files_updated": 0, "stubs_remaining": 0}
+
+    exercised = _filter_test_exercised(stubs, test_files)
+    _log(f"  [phase-d] {len(stubs)} residual stub(s); {len(exercised)} reachable from tests.")
+
+    if not exercised:
+        return {"stubs_total": len(stubs), "stubs_exercised": 0,
+                "files_updated": 0, "stubs_remaining": len(stubs)}
+
+    # Group exercised stubs by file so the model sees each affected file as one unit.
+    by_file: dict[str, list[str]] = {}
+    for rel, fn in exercised:
+        by_file.setdefault(rel, []).append(fn)
+
+    # Load only the affected files (plus all of the rest for type context).
+    skeleton_block = _format_skeleton_for_prompt(_load_skeleton_files(target_src_dir))
+    targets_block = "\n".join(
+        f"  - {rel}: {', '.join(fns)}" for rel, fns in by_file.items()
+    )
+    # Surface only tests that mention any of the target functions (relevance filter).
+    relevant_tests: list[str] = []
+    for rel, content in test_files:
+        if any(re.search(rf'\b{re.escape(fn)}\b', content)
+               for fns in by_file.values() for fn in fns):
+            relevant_tests.append(f'<TESTFILE path="{rel}">\n{content}\n</TESTFILE>')
+    tests_block = "\n\n".join(relevant_tests)
+    _fr_cap = SINGLE_CALL_CHAR_LIMIT // 4
+    _fr_capped = smart_truncate(functional_req or "", total_limit=_fr_cap,
+                                head=_fr_cap // 3, tail=2 * _fr_cap // 3)
+
+    prompt = f"""You are cleaning up residual `unimplemented!()` bodies in a Rust crate after a
+phase of group-driven test-driven fills.
+
+Crate: `{module_name}`
+
+These specific functions are still `unimplemented!()` but the tests call them:
+{targets_block}
+
+Current source on disk:
+{skeleton_block}
+
+Tests that reference these functions:
+{tests_block}
+
+Functional requirements:
+{_fr_capped}
+
+{FILE_FORMAT_INSTRUCTION}
+
+Output the source files you modified. Fill ONLY the functions listed above.
+Do NOT modify any function whose body is NOT `unimplemented!()`.
+Do NOT modify type definitions, imports, or any other items.
+"""
+    response = ask(prompt, model=_TASK2_MODEL)
+    files = extract_files(response)
+    files_updated = 0
+    for rel, model_text in files.items():
+        if ".gen_tests_" in rel:
+            continue  # never touch task0c protected test artifacts
+        disk_path = target_src_dir / rel
+        if not disk_path.exists():
+            continue
+        disk_text = disk_path.read_text(encoding="utf-8")
+        merged = _merge_fills_preserving_existing(disk_text, model_text)
+        if merged != disk_text:
+            disk_path.write_text(merged, encoding="utf-8")
+            files_updated += 1
+
+    remaining = _scan_unimplemented_functions(target_src_dir)
+    return {
+        "stubs_total": len(stubs),
+        "stubs_exercised": len(exercised),
+        "files_updated": files_updated,
+        "stubs_remaining": len(remaining),
+    }
+
+
+def _cmd_phase_c_only(project_dir: Path) -> int:
+    """Standalone Phase A + B + C: skeleton → grouping → per-group fill."""
+    rc = _cmd_phase_a_only(project_dir)
+    if rc != 0:
+        return rc
+    skeleton_dir = project_dir / ".skeleton" / "_standalone"
+    test_files = collect_protected_test_files(project_dir)
+    pairs: list[tuple[str, str]] = []
+    for rel in sorted(test_files):
+        p = project_dir / rel
+        if p.exists():
+            try:
+                pairs.append((rel, p.read_text(encoding="utf-8")))
+            except Exception:
+                continue
+    if not pairs:
+        _log("  [phase-c] no test files found.")
+        return 6
+
+    _log(f"\n=== Phase B (test grouping) for {project_dir.name} ===")
+    groups = _task2_group_tests(skeleton_dir, pairs, cluster_name="default",
+                                 module_name=project_dir.name)
+    _log(f"  [phase-b] {len(groups)} groups produced.")
+
+    _log(f"\n=== Phase C (per-group fill) for {project_dir.name} ===")
+    target_src_dir = project_dir / ".skeleton-filled"
+    if target_src_dir.exists():
+        shutil.rmtree(target_src_dir)
+    fr_path = project_dir / "functional_requirements.md"
+    genesis_path = project_dir / "genesis.md"
+    fr = fr_path.read_text(encoding="utf-8") if fr_path.exists() else ""
+    genesis = genesis_path.read_text(encoding="utf-8") if genesis_path.exists() else ""
+
+    result = _task2_fill_groups(skeleton_dir, target_src_dir, groups, project_dir,
+                                 cluster_name="default", module_name=project_dir.name,
+                                 functional_req=fr, genesis=genesis)
+    _log(f"  [phase-c] processed {result['groups_processed']} group(s), "
+         f"filled {result['bytes_filled']:,} bytes; "
+         f"{len(result['errors'])} error(s).")
+    for e in result["errors"]:
+        _log(f"    - {e}")
+    # Always return 0 from Phase C so downstream callers (Phase D, the
+    # backend class) can perform residual cleanup regardless of per-group
+    # failures. Partial Phase C output is the recovery case Phase D exists for.
+    return 0
+
+
+def _cmd_skeleton_backend(project_dir: Path) -> int:
+    """Standalone harness invoking StaticSkeletonTask2Generator.generate()
+    directly. Drives the full per-cluster Plan 4 flow without needing
+    task0c/strip/task1 to have run."""
+    _log(f"\n=== Skeleton backend (Plan 4 per-cluster) for {project_dir.name} ===")
+    fr_path = project_dir / "functional_requirements.md"
+    genesis_path = project_dir / "genesis.md"
+    manifest_path = project_dir / MANIFEST_NAME
+    if not fr_path.exists():
+        # No FR yet — synthesize an empty one so the backend can still run.
+        fr_path.write_text("# (no functional_requirements.md available)\n", encoding="utf-8")
+    if not genesis_path.exists():
+        genesis_path.write_text("# (no genesis.md available)\n", encoding="utf-8")
+    existing_test_files = collect_protected_test_files(project_dir)
+    backend = StaticSkeletonTask2Generator()
+    ok = backend.generate(
+        project_dir=project_dir,
+        genesis_path=genesis_path,
+        functional_req_path=fr_path,
+        manifest_path=manifest_path,
+        existing_test_files=existing_test_files,
+        current_module=project_dir.name,
+    )
+    return 0 if ok else 8
+
+
+def _cmd_phase_d_only(project_dir: Path) -> int:
+    """Standalone Phase A + B + C + D."""
+    rc = _cmd_phase_c_only(project_dir)
+    if rc != 0:
+        return rc
+    _log(f"\n=== Phase D (residual cleanup) for {project_dir.name} ===")
+    target_src_dir = project_dir / ".skeleton-filled"
+    test_files = collect_protected_test_files(project_dir)
+    pairs: list[tuple[str, str]] = []
+    for rel in sorted(test_files):
+        p = project_dir / rel
+        if p.exists():
+            try:
+                pairs.append((rel, p.read_text(encoding="utf-8")))
+            except Exception:
+                continue
+    fr_path = project_dir / "functional_requirements.md"
+    fr = fr_path.read_text(encoding="utf-8") if fr_path.exists() else ""
+
+    result = _task2_cleanup_residuals(target_src_dir, project_dir, fr, pairs,
+                                       module_name=project_dir.name)
+    _log(f"  [phase-d] {result['stubs_total']} residual stubs, "
+         f"{result['stubs_exercised']} reachable from tests; "
+         f"{result['files_updated']} file(s) updated; "
+         f"{result['stubs_remaining']} stub(s) still remaining.")
+    return 0
+
+
+def _cmd_phase_b_only(project_dir: Path) -> int:
+    """Standalone Phase A + B: skeleton + LLM-driven test grouping."""
+    rc = _cmd_phase_a_only(project_dir)
+    if rc != 0:
+        return rc
+    _log(f"\n=== Phase B (test grouping) for {project_dir.name} ===")
+    skeleton_dir = project_dir / ".skeleton" / "_standalone"
+    test_files = collect_protected_test_files(project_dir)
+    # collect_protected_test_files returns set of relative paths; load contents.
+    pairs: list[tuple[str, str]] = []
+    for rel in sorted(test_files):
+        p = project_dir / rel
+        if p.exists():
+            try:
+                pairs.append((rel, p.read_text(encoding="utf-8")))
+            except Exception:
+                continue
+    if not pairs:
+        _log("  [phase-b] no test files found.")
+        return 6
+    # Use a synthetic cluster_name + the project name as module for a quick smoke.
+    groups = _task2_group_tests(skeleton_dir, pairs, cluster_name="default",
+                                 module_name=project_dir.name)
+    _log(f"  [phase-b] manifest written to {skeleton_dir / 'groups.json'} "
+         f"({len(groups)} groups, "
+         f"{sum(len(g['test_files']) for g in groups)} test files covered).")
+    for g in groups:
+        _log(f"    - {g['name']}: {len(g['test_files'])} test(s); "
+             f"{len(g.get('target_symbols', []))} target symbol(s)")
+    return 0
 
 
 def task0_cfg_scan(project_dir: Path) -> "list[BuildCluster]":
@@ -5086,13 +8075,13 @@ class StaticTask1Synthesizer(Task1Synthesizer):
         response = ask(prompt, model=_TASK1_MODEL)
         files = extract_files(response)
         if "functional_requirements.md" in files:
-            write(functional_req_path, files["functional_requirements.md"])
+            _write_fr_preserving_notes(functional_req_path, files["functional_requirements.md"])
             return True
         # Fallback: model returned content without FILE markers.
         stripped = response.strip()
         if stripped and len(stripped) > 200:
             _log("  WARNING: no FILE markers — using raw response as requirements.")
-            write(functional_req_path, stripped)
+            _write_fr_preserving_notes(functional_req_path, stripped)
             return True
         _log(f"  ERROR: {MODEL} did not return functional_requirements.md.")
         _log(f"  Raw response snippet: {response[:500]}")
@@ -5385,7 +8374,7 @@ Output a plain structured list of the merged requirements. No filler, no code, n
             response = ask(synthesis_prompt, model=_TASK1_MODEL)
             files = extract_files(response)
             if "functional_requirements.md" in files:
-                write(functional_req_path, files["functional_requirements.md"])
+                _write_fr_preserving_notes(functional_req_path, files["functional_requirements.md"])
                 return True
             # Fallback: model returned content without FILE markers.
             # Accept the raw response if it's non-empty and looks like requirements
@@ -5393,7 +8382,7 @@ Output a plain structured list of the merged requirements. No filler, no code, n
             stripped = response.strip()
             if stripped and len(stripped) > 200:
                 _log("  WARNING: no FILE markers in synthesis response — using raw response as requirements.")
-                write(functional_req_path, stripped)
+                _write_fr_preserving_notes(functional_req_path, stripped)
                 return True
             _log("  ERROR: synthesis returned empty or unusable response.")
             _log(f"  Raw response snippet: {response[:300]}")
@@ -5919,7 +8908,7 @@ that is NOT a proc-macro derive or attribute provided by this crate.
             "Parse input with `syn::parse_macro_input!(input as syn::DeriveInput)`.\n"
             "Generate output with `quote::quote! { impl Name for #ident { ... } }`.\n"
         )
-    functional_req_path.write_text(req_content)
+    _write_fr_preserving_notes(functional_req_path, req_content)
     _log(f"  [proc-macro TASK 1] functional_requirements written ({len(req_content)} chars).")
     return True
 
@@ -6421,13 +9410,29 @@ Generate the file: `{file_path}` (this call writes ONLY that file).
 
 {FILE_FORMAT_INSTRUCTION}
 {_TASK2_VERBOSITY_GUARD}"""
-            response = ask(file_prompt, model=_TASK2_MODEL)
-            files = extract_files(response)
-            if file_path in files:
-                all_files[file_path] = files[file_path]
-            else:
+            _per_file_attempts = 2
+            for _attempt in range(_per_file_attempts):
+                response = ask(file_prompt, model=_TASK2_MODEL)
+                files = extract_files(response)
+                if file_path in files:
+                    all_files[file_path] = files[file_path]
+                    break
+                matched = next((v for k, v in files.items()
+                                if Path(k).name == Path(file_path).name), None)
+                if matched:
+                    all_files[file_path] = matched
+                    _log(f"  Matched '{file_path}' by filename.")
+                    break
+                bare = extract_code_content(response)
+                if bare:
+                    all_files[file_path] = bare
+                    _log(f"  Extracted '{file_path}' via content strip (model ignored FILE markers).")
+                    break
                 preview = response.strip()[:200].replace('\n', '↵') if response else "(empty)"
-                _log(f"  WARNING: model did not return `{file_path}`. Response preview: {preview}")
+                if _attempt < _per_file_attempts - 1:
+                    _log(f"  Empty response for `{file_path}`, retrying ({_attempt + 2}/{_per_file_attempts})...")
+                else:
+                    _log(f"  WARNING: model did not return `{file_path}`. Response preview: {preview}")
 
         if not all_files:
             _log("  ERROR: no files were successfully generated.")
@@ -6870,12 +9875,501 @@ Generate the implementation for `{file_path}` (this call writes ONLY that file).
         return True
 
 
+def _merge_cluster_outputs(project_dir: Path,
+                            cluster_specs: dict,
+                            successes: list[dict]) -> dict:
+    """Cross-cluster merge: compose per-cluster filled source dirs into
+    project_dir/src/ with cfg-gated divergence for conflicting fills.
+
+    For each rel path P that appears in any cluster's `.skeleton-filled/{c}/src/`:
+      - Collect each cluster's version of P.
+      - For each function (signature-keyed): if all clusters' bodies are
+        identical, emit once. If they differ, emit each version with a
+        `#[cfg(...)]` gate derived from the cluster's cfg-set.
+      - Non-function items: take the union, preferring the cluster's
+        existing cfg attribute.
+
+    Algorithm: for v1 we use the body of the lexicographically-first cluster
+    that contains the file, with cfg-divergence detection. Full per-function
+    diff-aware merge is implemented per Plan 4 Step 10.
+
+    Returns {'files_written': int, 'cfg_gated_fns': int}.
+    """
+    cluster_dirs: dict[str, Path] = {}
+    for s in successes:
+        cname = s["cluster"]
+        d = project_dir / ".skeleton-filled" / cname
+        if d.exists():
+            cluster_dirs[cname] = d
+    if not cluster_dirs:
+        return {"files_written": 0, "cfg_gated_fns": 0}
+
+    # Collect every file path across all cluster outputs.
+    all_paths: set[str] = set()
+    for d in cluster_dirs.values():
+        for p in (d / "src").rglob("*.rs"):
+            all_paths.add(str(p.relative_to(d)))
+
+    fn_re = re.compile(
+        r'((?:^|\n)[ \t]*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?'
+        r'(?:const\s+)?fn\s+[A-Za-z_]\w*[^{]*\{)',
+        re.MULTILINE,
+    )
+
+    def _extract_fns(text: str) -> list[tuple[str, str, int, int]]:
+        out: list[tuple[str, str, int, int]] = []
+        for m in fn_re.finditer(text):
+            body_start = m.end()
+            depth = 1
+            i = body_start
+            while i < len(text) and depth > 0:
+                if text[i] == "{":
+                    depth += 1
+                elif text[i] == "}":
+                    depth -= 1
+                i += 1
+            if depth != 0:
+                continue
+            body_end = i - 1
+            sig = text[m.start():body_start].rstrip("{ \t\n").strip()
+            body = text[body_start:body_end]
+            out.append((sig, body, body_start, body_end))
+        return out
+
+    def _cluster_cfg_attr(cluster_name: str) -> str:
+        """Build a Rust `#[cfg(...)]` attribute that's true for this cluster
+        and false for others — using the cluster's defining cfg predicates."""
+        c = cluster_specs.get(cluster_name)
+        if not c:
+            return ""
+        true_preds = c.cfg_true
+        false_preds = c.cfg_false
+        terms: list[str] = list(true_preds)
+        for fp in false_preds:
+            terms.append(f"not({fp})")
+        if not terms:
+            return ""
+        if len(terms) == 1:
+            return f"#[cfg({terms[0]})]"
+        return f"#[cfg(all({', '.join(terms)}))]"
+
+    files_written = 0
+    cfg_gated_fns = 0
+    for rel in sorted(all_paths):
+        if ".gen_tests_" in rel:
+            continue
+        # Read each cluster's version of this file.
+        per_cluster: dict[str, str] = {}
+        for cname, d in cluster_dirs.items():
+            p = d / rel
+            if p.exists():
+                per_cluster[cname] = p.read_text(encoding="utf-8")
+        if not per_cluster:
+            continue
+
+        # Lexicographically-first cluster's version becomes the base.
+        base_cluster = sorted(per_cluster.keys())[0]
+        base_text = per_cluster[base_cluster]
+
+        # Detect cfg divergence: for each fn in base, compare against other clusters.
+        base_fns = _extract_fns(base_text)
+        out_text = base_text
+        for sig, body, body_start, body_end in reversed(base_fns):
+            divergent_versions: dict[str, str] = {}
+            for cname, ctext in per_cluster.items():
+                if cname == base_cluster:
+                    continue
+                # Find same-sig fn in this cluster's file.
+                for sig2, body2, _, _ in _extract_fns(ctext):
+                    if sig2 == sig:
+                        if body2 != body:
+                            divergent_versions[cname] = body2
+                        break
+            if divergent_versions:
+                # Emit base version with base's cfg attr + each divergent
+                # version with its cluster's cfg attr.
+                base_attr = _cluster_cfg_attr(base_cluster)
+                replacement_parts: list[str] = []
+                if base_attr:
+                    replacement_parts.append(base_attr + "\n")
+                replacement_parts.append(sig + " {" + body + "}\n")
+                for cname, dbody in divergent_versions.items():
+                    attr = _cluster_cfg_attr(cname)
+                    replacement_parts.append((attr + "\n") if attr else "")
+                    replacement_parts.append(sig + " {" + dbody + "}\n")
+                replacement = "".join(replacement_parts)
+                # Splice: original is "sig { body }". We replace the whole
+                # construct (start of sig to body_end + 1) with replacement.
+                sig_start = base_text.rfind(sig, 0, body_start)
+                if sig_start == -1:
+                    continue
+                out_text = out_text[:sig_start] + replacement + out_text[body_end + 1:]
+                cfg_gated_fns += 1
+
+        # Write the merged file.
+        out_path = project_dir / rel
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(out_text, encoding="utf-8")
+        files_written += 1
+
+    return {"files_written": files_written, "cfg_gated_fns": cfg_gated_fns}
+
+
+class StaticSkeletonTask2Generator(Task2Generator):
+    """4-phase reconstruction: mechanical skeleton → LLM grouping → per-group fill → cleanup.
+
+    Phase A:  Rust syn-based extractor produces a skeleton (signatures + types +
+              macros + `unimplemented!()` bodies) from the pre-strip source tree.
+              No LLM. Skeleton compiles via `cargo check`.
+    Phase B:  One LLM call to group test files into cohesive units. Validated.
+    Phase C:  Per-group LLM call that fills `unimplemented!()` bodies the group's
+              tests transitively need. Leaf-first ordering. Merge preserves bodies
+              already filled by prior groups.
+    Phase D:  Single cleanup pass for test-exercised stubs left untouched.
+
+    Phase A and B results cached on disk; Phase C and D re-run per iteration.
+    """
+
+    def generate(self, project_dir, genesis_path, functional_req_path, manifest_path,
+                 existing_test_files, project_profile="", workspace_structure="", build_error="",
+                 locked_dep_context="", current_module="", module_dir_rel="",
+                 whole_project_context="", coverage_strategy="", api_surface="",
+                 prev_source_context=""):
+        _log("\nTASK 2: Implementing source code (skeleton backend, per-cluster)")
+        module = current_module or project_dir.name
+
+        # Discover clusters statically — no LLM (Principle 1).
+        # Source for cluster discovery: the pre-strip snapshot, since the
+        # current `tmp/{project}/src/` may have been stripped already.
+        clusters: list[BuildCluster] = []
+        try:
+            clusters = task0_cfg_scan(project_dir)
+        except Exception as e:
+            _log(f"  [skeleton] cluster discovery on project_dir failed: {e}")
+        # If discovery on the current state returned nothing useful, fall
+        # back to scanning the pre-strip snapshot.
+        if not clusters or (len(clusters) == 1 and not clusters[0].cfg_true and not clusters[0].cfg_false):
+            _log("  [skeleton] discovering clusters from pre-strip snapshot...")
+            prestrip_for_scan = Path("/tmp") / f"prestrip_{project_dir.name}_scan"
+            if prestrip_for_scan.exists():
+                shutil.rmtree(prestrip_for_scan)
+            if _checkout_prestrip_source(project_dir, prestrip_for_scan):
+                try:
+                    discovered = task0_cfg_scan(prestrip_for_scan)
+                    if discovered and any(c.cfg_true or c.cfg_false for c in discovered):
+                        clusters = discovered
+                        _log(f"  [skeleton] pre-strip scan discovered {len(clusters)} cluster(s).")
+                except Exception as e:
+                    _log(f"  [skeleton] pre-strip cluster discovery failed: {e}")
+        if not clusters:
+            clusters = [BuildCluster(
+                name="default", env_extra={}, tarpaulin_exclude_files=[],
+                excluded_cfg=[], active_cfg=[], prompt_nightly_rule="",
+                is_default=True,
+            )]
+        # Lexicographic for reproducibility (Principle 2: deterministic).
+        clusters = sorted(clusters, key=lambda c: c.name)
+        _log(f"  [skeleton] discovered {len(clusters)} cluster(s): "
+             f"{', '.join(c.name for c in clusters)}")
+
+        # Prune redundant clusters (default-feature overlap, near-empty gating).
+        # Source for pruning analysis: the pre-strip snapshot (already on
+        # disk under /tmp/prestrip_{project}_scan from the discovery step).
+        _prune_src = Path("/tmp") / f"prestrip_{project_dir.name}_scan"
+        if not _prune_src.exists():
+            _prune_src = project_dir  # fall back if scan dir doesn't exist
+        clusters = _prune_redundant_clusters(
+            clusters, _prune_src,
+            cargo_toml_path=project_dir / "Cargo.toml",
+        )
+        _log(f"  [skeleton] processing {len(clusters)} cluster(s) after pruning: "
+             f"{', '.join(c.name for c in clusters)}")
+
+        genesis = read(genesis_path) if genesis_path.exists() else ""
+        functional_req = read(functional_req_path) if functional_req_path.exists() else ""
+        all_test_pairs: list[tuple[str, str]] = []
+        for rel in sorted(existing_test_files):
+            tp = project_dir / rel
+            if tp.exists():
+                try:
+                    all_test_pairs.append((rel, tp.read_text(encoding="utf-8")))
+                except Exception:
+                    continue
+        if not all_test_pairs:
+            _log("  [skeleton] no test files; cannot proceed.")
+            return False
+
+        # Per-cluster Phase A → D
+        cluster_summaries: list[dict] = []
+        for cluster in clusters:
+            tag = f"[{cluster.name}]"
+            _log(f"\n  {tag} === cluster start ===")
+            res = self._generate_one_cluster(
+                project_dir=project_dir,
+                cluster=cluster,
+                module=module,
+                all_test_pairs=all_test_pairs,
+                genesis=genesis,
+                functional_req=functional_req,
+            )
+            cluster_summaries.append({"cluster": cluster.name, **res})
+            if not res.get("ok"):
+                _log(f"  {tag} cluster aborted: {res.get('reason', 'unknown')}")
+
+        # Cross-cluster merge composes all cluster outputs into project_dir/src/.
+        _log(f"\n  [skeleton-merge] composing {len(cluster_summaries)} cluster output(s) "
+             f"into {project_dir}/src/")
+        merge_stats = _merge_cluster_outputs(
+            project_dir=project_dir,
+            cluster_specs={c.name: c for c in clusters},
+            successes=[s for s in cluster_summaries if s.get("ok")],
+        )
+        _log(f"  [skeleton-merge] {merge_stats['files_written']} file(s) written, "
+             f"{merge_stats['cfg_gated_fns']} cfg-gated divergence(s).")
+
+        # Update the manifest so downstream task3/4 see the generated files.
+        if manifest_path:
+            generated = [str(p.relative_to(project_dir))
+                         for p in (project_dir / "src").rglob("*.rs")
+                         if str(p.relative_to(project_dir)) not in existing_test_files]
+            if generated:
+                save_manifest(manifest_path, generated)
+                _log(f"  [skeleton] manifest written: {len(generated)} source file(s).")
+
+        return True
+
+    def _generate_one_cluster(
+        self,
+        project_dir: Path,
+        cluster: "BuildCluster",
+        module: str,
+        all_test_pairs: list[tuple[str, str]],
+        genesis: str,
+        functional_req: str,
+    ) -> dict:
+        """Run Phase A + B + C + D for a single cluster, returning a stats dict.
+
+        All artifacts land under `.skeleton/{cluster}/` (skeleton + groups +
+        failure dumps) and `.skeleton-filled/{cluster}/src/` (filled output).
+        Cargo invocations honour `cluster.env_extra` end-to-end.
+        """
+        tag = f"[{cluster.name}]"
+        skeleton_dir = project_dir / ".skeleton" / cluster.name
+        filled_dir = project_dir / ".skeleton-filled" / cluster.name
+
+        # Phase A — extract FULL skeleton (no cfg filter at extraction time).
+        # Rationale: dropping items behind cfg gates leaves dangling references
+        # in items that survive (e.g. `use crate::Chain;` when Chain is dropped).
+        # Rust's own cfg evaluator already handles per-cluster compilation
+        # correctly because the cfg attrs are preserved on every item.
+        # The cluster filtering happens later, only on the PROMPT view of
+        # the skeleton (see _format_skeleton_index_for_cluster), not the
+        # on-disk skeleton.
+        if not (skeleton_dir / "src").exists() or not any(skeleton_dir.rglob("*.rs")):
+            _log(f"  {tag} [skeleton-A] extracting skeleton (no cfg filter; compiles under all clusters)...")
+            prestrip_dir = Path("/tmp") / f"prestrip_{project_dir.name}_{cluster.name}"
+            if prestrip_dir.exists():
+                shutil.rmtree(prestrip_dir)
+            if not _checkout_prestrip_source(project_dir, prestrip_dir):
+                return {"ok": False, "reason": "checkout_failed"}
+            skeleton_dir.mkdir(parents=True, exist_ok=True)
+            res = _extract_skeleton(prestrip_dir, skeleton_dir, cluster=None)
+            if not res["ok"]:
+                _log(f"  {tag} [skeleton-A] extractor FAILED: {res['stderr']}")
+                return {"ok": False, "reason": f"extractor: {res['stderr']}"}
+            _log(f"  {tag} [skeleton-A] {len(res['reports'])} file(s) skeletonised.")
+        else:
+            _log(f"  {tag} [skeleton-A] cached skeleton at {skeleton_dir}.")
+
+        # cargo check on the skeleton with cluster env. Fix-loop on failure.
+        _cargo_toml = project_dir / "Cargo.toml"
+        if _cargo_toml.exists() and not (skeleton_dir / "Cargo.toml").exists():
+            shutil.copy(_cargo_toml, skeleton_dir / "Cargo.toml")
+        check_cmd = self._cluster_check_cmd(cluster)
+        _log(f"  {tag} [skeleton-A] cargo check ({check_cmd})...")
+        try:
+            _r = subprocess.run(
+                shlex.split(check_cmd),
+                cwd=skeleton_dir, capture_output=True, text=True, timeout=180,
+                env=self._cluster_env(cluster),
+            )
+        except subprocess.TimeoutExpired:
+            _log(f"  {tag} [skeleton-A] cargo check timed out; proceeding anyway.")
+            _r = None
+        if _r is not None and _r.returncode != 0:
+            _log(f"  {tag} [skeleton-A] cargo check FAILED; invoking fix-loop.")
+            _skel_sources = [p for p in (skeleton_dir / "src").rglob("*.rs")]
+            ok, _ = generate_fix_loop(
+                project_dir=skeleton_dir,
+                check_cmd=check_cmd,
+                source_paths=_skel_sources,
+                existing_test_files=set(),
+                model=_TASK2_MODEL,
+                max_fix_attempts=3,
+                timeout=180,
+            )
+            if not ok:
+                return {"ok": False, "reason": "skeleton_fix_loop_exhausted"}
+
+        # Per-cluster test scoping.
+        cluster_tests = _filter_tests_for_cluster(all_test_pairs, cluster)
+        _log(f"  {tag} [skeleton-B] tests for this cluster: "
+             f"{len(cluster_tests)}/{len(all_test_pairs)}")
+        if not cluster_tests:
+            return {"ok": True, "phase_c": None, "phase_d": None,
+                    "note": "no tests apply to this cluster"}
+
+        # Mode selection for Phase B+C: per-group (default, current behaviour)
+        # or per-fn TDD (Flavour B, smaller prompts, one call per fn, no
+        # LLM grouping). Switched via env var PHASE_C_MODE=per_fn.
+        per_fn_mode = os.getenv("PHASE_C_MODE", "per_group").strip().lower() == "per_fn"
+
+        # Seed filled_dir from skeleton state (idempotent) regardless of mode.
+        filled_dir.mkdir(parents=True, exist_ok=True)
+        for src in skeleton_dir.rglob("*.rs"):
+            rel = src.relative_to(skeleton_dir)
+            dst = filled_dir / rel
+            if not dst.exists():
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+
+        if per_fn_mode:
+            _log(f"  {tag} [skeleton-C] per-fn mode (Flavour B): scanning stubs...")
+            # Make filled_dir a runnable crate root so cargo check/test work:
+            # copy Cargo.toml + symlink tests/. Idempotent.
+            if _cargo_toml.exists() and not (filled_dir / "Cargo.toml").exists():
+                shutil.copy(_cargo_toml, filled_dir / "Cargo.toml")
+            _proj_tests = project_dir / "tests"
+            _filled_tests = filled_dir / "tests"
+            if _proj_tests.exists() and not _filled_tests.exists():
+                try:
+                    os.symlink(_proj_tests, _filled_tests)
+                except OSError as e:
+                    _log(f"  {tag} [skeleton-C] tests symlink failed: {e}")
+            tests_dir_files: list[Path] = []
+            for trel, _ in cluster_tests:
+                tp = project_dir / trel
+                if tp.exists():
+                    tests_dir_files.append(tp)
+            # Pre-strip dir for leaf-first ordering: if missing, ensure it
+            # exists by re-checking out pre-strip source for this cluster.
+            _prestrip_for_order = Path("/tmp") / f"prestrip_{project_dir.name}_{cluster.name}"
+            if not _prestrip_for_order.exists():
+                try:
+                    _checkout_prestrip_source(project_dir, _prestrip_for_order)
+                except Exception as e:
+                    _log(f"  {tag} [skeleton-C] prestrip checkout for ordering "
+                         f"failed: {e} (falling back to alphabetical order)")
+                    _prestrip_for_order = None
+            # Per-crate FR is the home for model self-correction notes.
+            _fr_for_notes = project_dir / f"functional_requirements_{module}.md"
+            c_result = _task2_fill_fns_one_by_one(
+                project_dir=project_dir,
+                target_src_dir=filled_dir,
+                tests_dir_files=tests_dir_files,
+                module_name=module,
+                cluster_name=cluster.name,
+                cluster=cluster,
+                check_cmd=self._cluster_check_cmd(cluster),
+                cluster_env=self._cluster_env(cluster),
+                max_passes=int(os.getenv("PHASE_C_MAX_PASSES", "3")),
+                prestrip_dir=_prestrip_for_order,
+                fr_path=_fr_for_notes,
+            )
+            _log(f"  {tag} [skeleton-C] {c_result['fns_filled']} fn(s) filled, "
+                 f"{c_result['bytes_filled']:,} bytes net, "
+                 f"{c_result['attempts']} LLM call(s), "
+                 f"{c_result['remaining']} stub(s) remaining, "
+                 f"{len(c_result['errors'])} error(s).")
+        else:
+            # Phase B — grouping (cached per cluster).
+            groups_path = skeleton_dir / "groups.json"
+            groups: list[dict] | None = None
+            if groups_path.exists():
+                try:
+                    groups = json.loads(groups_path.read_text(encoding="utf-8"))
+                    _log(f"  {tag} [skeleton-B] cached manifest: {len(groups)} group(s).")
+                except Exception:
+                    groups = None
+            if groups is None:
+                _log(f"  {tag} [skeleton-B] grouping...")
+                groups = _task2_group_tests(skeleton_dir, cluster_tests,
+                                             cluster_name=cluster.name, module_name=module)
+
+            # Phase C — per-group fill into cluster-specific scratch dir.
+            _log(f"  {tag} [skeleton-C] filling {len(groups)} group(s) into {filled_dir}/")
+            c_result = _task2_fill_groups(skeleton_dir, filled_dir, groups, project_dir,
+                                           cluster_name=cluster.name, module_name=module,
+                                           functional_req=functional_req, genesis=genesis,
+                                           cluster=cluster)
+            _log(f"  {tag} [skeleton-C] {c_result['groups_processed']} group(s), "
+                 f"{c_result['bytes_filled']:,} bytes filled, "
+                 f"{len(c_result['errors'])} error(s).")
+
+        # Phase D — residual cleanup (per cluster).
+        _log(f"  {tag} [skeleton-D] scanning for residual stubs...")
+        d_result = _task2_cleanup_residuals(filled_dir, project_dir, functional_req,
+                                             cluster_tests, module_name=module)
+        _log(f"  {tag} [skeleton-D] {d_result['stubs_total']} stubs, "
+             f"{d_result['stubs_exercised']} test-exercised, "
+             f"{d_result['files_updated']} updated, "
+             f"{d_result['stubs_remaining']} remaining.")
+
+        # Per-cluster intermediate validation: cargo check the filled output.
+        if _cargo_toml.exists() and not (filled_dir / "Cargo.toml").exists():
+            shutil.copy(_cargo_toml, filled_dir / "Cargo.toml")
+        _log(f"  {tag} [skeleton-validate] cargo check on filled output...")
+        try:
+            _vr = subprocess.run(
+                shlex.split(check_cmd),
+                cwd=filled_dir, capture_output=True, text=True, timeout=180,
+                env=self._cluster_env(cluster),
+            )
+            validate_ok = (_vr.returncode == 0)
+            if not validate_ok:
+                _log(f"  {tag} [skeleton-validate] cargo check FAILED "
+                     f"(rc={_vr.returncode}). First errors:")
+                for line in _vr.stderr.splitlines()[:10]:
+                    _log(f"    {line}")
+        except subprocess.TimeoutExpired:
+            _log(f"  {tag} [skeleton-validate] cargo check timed out.")
+            validate_ok = False
+
+        return {"ok": True, "phase_c": c_result, "phase_d": d_result,
+                "validates": validate_ok}
+
+    @staticmethod
+    def _cluster_check_cmd(cluster: "BuildCluster") -> str:
+        """Build the cargo check command. Cluster-specific flags are passed
+        via env_extra (RUSTFLAGS etc.), not via --features — that distinction
+        depends on which cfg names are real Cargo features vs --cfg flags,
+        and task0_cfg_scan has already encoded the right form in env_extra.
+        Toolchain is applied via `cargo +nightly` when required."""
+        # Default message format (not --message-format=short) so the model
+        # sees rustc's `note:` and `help:` hints alongside the bare error,
+        # which often points directly at the fix (e.g. "consider importing
+        # one of these traits: ...").
+        parts = ["cargo", "check"]
+        if cluster.toolchain:
+            parts = ["cargo", f"+{cluster.toolchain}"] + parts[1:]
+        return shlex.join(parts)
+
+    @staticmethod
+    def _cluster_env(cluster: "BuildCluster") -> dict:
+        """Cargo env with cluster's env_extra merged in."""
+        env = _cargo_env()
+        env.update(cluster.env_extra or {})
+        return env
+
+
 def _task2_generator_factory() -> Task2Generator:
     backend = os.getenv("TASK2_GENERATOR", "filelist").lower()
     if backend == "llm":
         return LLMTask2Generator()
     if backend == "static":
         return StaticTask2Generator()
+    if backend == "skeleton":
+        return StaticSkeletonTask2Generator()
     return StaticFileListTask2Generator()  # default: filelist
 
 
@@ -11496,6 +14990,43 @@ def main():
                             "re-run from scratch with the augmented test suite. "
                             "Single-module workspaces only for now."
                         ))
+    parser.add_argument("--phase-a-only", action="store_true",
+                        help=(
+                            "TASK 2 skeleton backend, Phase A only: read the project's "
+                            "pre-strip source (from the most recent pre-strip tag in "
+                            "tmp/{project}/), run the Rust skeleton extractor, write the "
+                            "skeleton under tmp/{project}/.skeleton/{cluster}/, run "
+                            "cargo check against it, report. No LLM calls. For testing "
+                            "the skeleton-based reconstruction backend."
+                        ))
+    parser.add_argument("--phase-b-only", action="store_true",
+                        help=(
+                            "TASK 2 skeleton backend, Phase A + B: run Phase A then ask "
+                            "the LLM to group the project's test files into cohesive units. "
+                            "Writes the validated group manifest to "
+                            "tmp/{project}/.skeleton/groups.json and reports group counts. "
+                            "For testing the planner before wiring up Phase C/D."
+                        ))
+    parser.add_argument("--phase-c-only", action="store_true",
+                        help=(
+                            "TASK 2 skeleton backend, Phase A + B + C: run A and B, then "
+                            "fill the skeleton group-by-group (leaf-first). Filled source "
+                            "lands at tmp/{project}/.skeleton-filled/. Reports bytes filled "
+                            "per group. No final compile/test run."
+                        ))
+    parser.add_argument("--phase-d-only", action="store_true",
+                        help=(
+                            "TASK 2 skeleton backend, Phase A + B + C + D: full skeleton "
+                            "pipeline including the residual-cleanup pass. Reports stubs "
+                            "filled vs left untouched."
+                        ))
+    parser.add_argument("--skeleton-backend", action="store_true",
+                        help=(
+                            "Invoke StaticSkeletonTask2Generator.generate() directly "
+                            "(per-cluster Plan 4 flow). Reads functional_requirements.md "
+                            "and genesis.md from the project, runs Phase A→D per cluster, "
+                            "then merges into project_dir/src/. Standalone test path."
+                        ))
     args = parser.parse_args()
 
     if args.best_models_list:
@@ -11530,6 +15061,26 @@ def main():
 
     init_log(root, nolog=args.nolog, progress_mode=args.progress)
     init_events(product=project_dir.name)
+
+    if args.phase_a_only:
+        rc = _cmd_phase_a_only(project_dir)
+        sys.exit(rc)
+
+    if args.phase_b_only:
+        rc = _cmd_phase_b_only(project_dir)
+        sys.exit(rc)
+
+    if args.phase_c_only:
+        rc = _cmd_phase_c_only(project_dir)
+        sys.exit(rc)
+
+    if args.phase_d_only:
+        rc = _cmd_phase_d_only(project_dir)
+        sys.exit(rc)
+
+    if args.skeleton_backend:
+        rc = _cmd_skeleton_backend(project_dir)
+        sys.exit(rc)
 
     # Forward (spec-driven) mode: skip reconstruction-phase tasks. The user
     # provides functional_requirements.md (+ optional API surface) and tests;
@@ -12171,13 +15722,20 @@ def main():
             _log(f"  Saved {_total} gen_tests sibling(s) from {len(saved_gen_blocks)} file(s) for reattachment.")
 
         # Wipe any previously generated files for this module (interrupted run).
+        # Skip our scratch/cache directories (anything under a dot-dir like
+        # .skeleton/, .skeleton-filled/, .task1_partials/, etc.) so per-cluster
+        # caches survive a restart and the per-fn fill loop can resume.
         if module_dir.exists():
             wiped = []
             for src_file in sorted(module_dir.rglob("*.rs")):
                 rel = str(src_file.relative_to(project_dir))
-                if rel not in existing_test_files:
-                    src_file.unlink()
-                    wiped.append(rel)
+                if rel in existing_test_files:
+                    continue
+                # Skip scratch dirs — components starting with '.' are our caches.
+                if any(part.startswith(".") for part in src_file.parts):
+                    continue
+                src_file.unlink()
+                wiped.append(rel)
             if wiped:
                 _log(f"  Wiped {len(wiped)} leftover generated file(s): {', '.join(wiped)}")
             # Stub so workspace parses while we generate.

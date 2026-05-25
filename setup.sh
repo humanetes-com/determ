@@ -162,6 +162,22 @@ else
     fi
 fi
 
+# ── 6b. Skeleton extractor (Rust helper for TASK 2 Phase A) ───────────────────
+echo ""
+echo "-- skeleton-extractor (Rust helper, used by TASK 2 Phase A) --"
+SKEL_DIR="$SCRIPT_DIR/tools/skeleton_extractor"
+SKEL_BIN="$SKEL_DIR/target/release/skeleton-extractor"
+if [[ -x "$SKEL_BIN" ]]; then
+    skip "skeleton-extractor already built ($SKEL_BIN)"
+else
+    info "Building skeleton-extractor (release)..."
+    if (cd "$SKEL_DIR" && cargo build --release 2>&1 | tail -3); then
+        ok "skeleton-extractor built"
+    else
+        echo "[warn] skeleton-extractor build failed — TASK 2 skeleton backend will be unavailable"
+    fi
+fi
+
 # ── 7. Ollama (only when BACKEND=ollama) ──────────────────────────────────────
 echo ""
 echo "-- Ollama --"

@@ -33,6 +33,17 @@ The autopilot (this assistant) must not directly fix bugs in project source file
 ## Same principle applies to the pipeline itself
 If pipeline.py has a bug, fix the pipeline code and restart — do not manually edit workspace files or call pipeline functions directly to work around the bug.
 
+## The model authors its own anti-hallucination notes
+When the LLM gets a fact wrong (wrong type, invented method, format-string mismatch, etc.) and recovers via the fix-loop, the LESSON belongs in a place the model itself can read on its next attempt. The model writes the note in its own voice ("I tried X; X failed because Y; the correction is Z"). Humans do NOT curate these notes.
+
+Storage: `functional_requirements_{crate}.md`, section `## Model Notes — Confusions to Avoid`. Append-only within a run, preserved by TASK 1 when it regenerates the rest of FR. Same lifecycle as FR — wiping FR also wipes notes (consistent semantics for "fresh start on this crate").
+
+When read: included in every per-fn prompt (initial + fix) before the file context, so the model loads its own past disambiguations first. Filtered by relevance (file name, symbols) and capped by char budget so the section never bloats the prompt.
+
+When written: after recovered fix-loops (success at attempt > 1) and exhausted fix-loops (cap reached). These are high-signal moments. First-try successes and protocol failures (empty response, splice rejected) don't trigger extraction.
+
+Why one document per crate (FR) instead of a separate notes file: single source of truth. "Everything the LLM needs to know about this crate" is one mental model, one file. TASK 1 just preserves the notes section when regenerating the spec.
+
 ---
 
 # Repository structure
@@ -145,6 +156,18 @@ When asked for evaluation or analysis, discuss findings and proposed fixes until
 
 **6. Ask before committing.**
 After implementing a fix, give a short overview of what was done, then ask "May I commit?" Wait for yes or no before running any git command.
+
+**7. Pipeline is self-hosted only — no external LLMs.**
+The pipeline must solve every reconstruction issue using only the locally-served model (via vLLM / Ollama / sglang). It may NEVER call out to Claude, GPT-4, Gemini, or any other cloud/external LLM API for any task — not as a fallback, not for "hard groups", not for cleanup. Do not propose, design, or implement any feature whose execution path can reach an external LLM. The only correct response to "the local model is stuck" is to improve the prompt, the architecture, the model itself (fine-tune), or accept the limitation — never to outsource the call. This rule overrides any prior plan items that suggested optional fallback models (e.g. P3.8 in plan.md): such items are permanently rejected, not deferred.
+
+**8. Identify cluster boundaries from source-level compilation directives.**
+A "cluster" is the unit by which we split the reconstruction problem into sub-problems. Concretely: identify restrictions in the source (compilation directives like `#[cfg(feature = "...")]`, `#[cfg(nightly)]`, `#[cfg(not(...))]`, cargo features, toolchain selection, `RUSTFLAGS`) and enumerate the distinct restriction sets they imply. The pipeline then iterates restriction-by-restriction; while a given restriction is active, all OTHER restrictions are excluded and the current restriction owns the set of rules in force (which source compiles, which tests run, which env vars apply). Cluster identification is purely static — no LLM. Every task that operates on source or tests is cluster-aware: it sees only what compiles in this cluster, runs only the tests that apply to this cluster, and validates with the cluster's compile/test env. Cluster-derived compile/test parameters (env_extra, features, toolchain) flow through every downstream phase end-to-end — not just at extraction time. Cross-cluster work is the exception, not the default.
+
+**9. Always prefer quality, systemic, deterministic solutions. Never optimise for "faster" or "easier".**
+Ranking when picking between approaches: deterministic > systemic > quality. Speed and ease are not criteria. A solution that is 5× slower but reproducible and addresses root cause beats a fast patch that leaves the underlying problem in place. Specifically: (a) prefer extracting structure from source over guessing it via LLM (LLM output is non-deterministic), (b) prefer per-cluster scoped reasoning over global reasoning (smaller scope = less ambiguity), (c) prefer immutable scratch dirs and merge passes over in-place mutation that races, (d) prefer regenerating from upstream truth over caching arbitrary state, (e) prefer documented invariants over implicit assumptions. When in doubt: ASK the user — do not silently pick. When two solutions appear equivalent: pick the one that ADDS MORE CONSTRAINTS — the option that further narrows what the model, the clusters, or the source structures can be. More constraints = less ambiguity = better.
+
+**10. Never hedge a recommendation by inventing difficulty.**
+When uncertain about effort or feasibility, do NOT downgrade the more-correct option by labeling it "harder", "more complex", or "more invasive" as a way to give the user balanced choices without committing. That pattern looks thorough but is intellectual laziness — it transfers the decision burden to the user with a thumb on the scale, when what's needed is actual analysis. The two acceptable behaviours are: (a) trace through the implementation enough to make a real recommendation and commit to it, or (b) explicitly say "I haven't analyzed this yet — let me look" and then do the analysis. The unacceptable behaviour is (c) "X might be harder", "Y is more invasive", or any other vague difficulty claim used to manufacture options. If you find yourself reaching for a difficulty label, stop and check whether you actually traced the implementation. If you didn't, either do it now or admit you didn't.
 
 ---
 
