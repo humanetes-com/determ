@@ -185,6 +185,17 @@ pub fn extract_tree_with_cfg(
             || rel_str.contains("/examples/")
             || rel_str.starts_with("benches/")
             || rel_str.contains("/benches/")
+            // Pipeline scratch directories. If the caller accidentally
+            // passes `project_dir` instead of `project_dir/src`, the
+            // extractor would otherwise recurse into prior cluster
+            // outputs (and prior cluster outputs of prior cluster
+            // outputs, etc.) and emit until `mkdir` hits ENAMETOOLONG.
+            || rel_str.starts_with(".skeleton")
+            || rel_str.contains("/.skeleton")
+            || rel_str.starts_with(".phase_c_logs")
+            || rel_str.contains("/.phase_c_logs")
+            || rel_str.starts_with(".original_structure")
+            || rel_str.contains("/.original_structure")
             // task0c-generated test sibling files. They sit in src/ next to the
             // real source but are protected — never include them in skeletons.
             || rel_str.contains(".gen_tests_")

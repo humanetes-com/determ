@@ -4391,7 +4391,11 @@ def _bake_skeleton_artifacts(
         if skeleton_dir.exists():
             shutil.rmtree(skeleton_dir)
         skeleton_dir.mkdir(parents=True, exist_ok=True)
-        res = _extract_skeleton(src_dir.parent, skeleton_dir, cluster=None)
+        # Pass `src_dir` (NOT project_dir) so the extractor can never walk
+        # into prior cluster outputs under `.skeleton/`. Output mirrors
+        # under `skeleton_dir/src/`, matching the runnable-crate layout
+        # Phase A expects.
+        res = _extract_skeleton(src_dir, skeleton_dir / "src", cluster=None)
         if not res["ok"]:
             _log(f"  [bake-skeleton] cluster {cluster.name}: extractor FAILED: "
                  f"{res['stderr']}")
