@@ -13,12 +13,14 @@ export LLM_DEBUG_LOG LLM_STREAM_LOG
 
 # Parse arguments
 _YES=false
+_FORCE=false
 _REPO=""
 _args=("$@")
 for (( i=0; i<${#_args[@]}; i++ )); do
     case "${_args[$i]}" in
-        --y)    _YES=true ;;
-        --repo) _REPO="${_args[$((i+1))]}"; i=$((i+1)) ;;
+        --y)     _YES=true ;;
+        --force) _FORCE=true ;;
+        --repo)  _REPO="${_args[$((i+1))]}"; i=$((i+1)) ;;
     esac
 done
 
@@ -27,14 +29,27 @@ if [[ -z "$_REPO" ]]; then
     _REPO="https://github.com/dtolnay/anyhow"
 fi
 
+# shellcheck source=lib/graceful_stop.sh
+source "$SCRIPT_DIR/lib/graceful_stop.sh"
+
 if pgrep -f "pipeline.py" > /dev/null 2>&1; then
-    if [[ "$_YES" == false ]]; then
-        echo -n "Pipeline is running (PID $(pgrep -f pipeline.py)). Kill it? [y/N] "
-        read -r _reply
-        [[ "$_reply" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 0; }
+    if [[ "$_FORCE" == true ]]; then
+        if [[ "$_YES" == false ]]; then
+            echo -n "Pipeline is running (PID $(pgrep -f pipeline.py)). Force-kill? [y/N] "
+            read -r _reply
+            [[ "$_reply" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 0; }
+        fi
+        pkill -f "pipeline.py" 2>/dev/null && echo "Killed existing pipeline" || true
+        sleep 2
+    else
+        if [[ "$_YES" == true ]]; then
+            graceful_stop_pipeline 0
+        else
+            if ! graceful_stop_pipeline 1; then
+                exit 0
+            fi
+        fi
     fi
-    pkill -f "pipeline.py" 2>/dev/null && echo "Killed existing pipeline" || true
-    sleep 2
 else
     echo "No pipeline running."
 fi

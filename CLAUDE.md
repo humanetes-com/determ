@@ -117,7 +117,7 @@ pipeline      ← all pipeline commits
 |---|---|---|
 | task0b done | `pipeline: task0b done` | — |
 | each cluster task0c done | `pipeline: task0c/stable — anyhow:83.4%` | — |
-| before strip | `pipeline: pre-strip — {module} task0c complete` | `pre-strip-{module}` |
+| before strip | `pipeline: task0c augmentation complete — all unit tests added for {module}` | `task0c-augmented-{module}` |
 | after strip | `pipeline: stripped — {module}` | — |
 | task1 done | `pipeline: task1 — {module}` | — |
 | task3 pass | `pipeline: task3 iter N — {module} tests pass` | `passing-{module}-N` |
@@ -127,7 +127,7 @@ pipeline      ← all pipeline commits
 ## Reverting to before strip
 
 ```bash
-git -C tmp/anyhow-master checkout pre-strip-anyhow
+git -C tmp/anyhow checkout task0c-augmented-anyhow
 ```
 
 ## --clean in git mode
@@ -168,6 +168,9 @@ Ranking when picking between approaches: deterministic > systemic > quality. Spe
 
 **10. Never hedge a recommendation by inventing difficulty.**
 When uncertain about effort or feasibility, do NOT downgrade the more-correct option by labeling it "harder", "more complex", or "more invasive" as a way to give the user balanced choices without committing. That pattern looks thorough but is intellectual laziness — it transfers the decision burden to the user with a thumb on the scale, when what's needed is actual analysis. The two acceptable behaviours are: (a) trace through the implementation enough to make a real recommendation and commit to it, or (b) explicitly say "I haven't analyzed this yet — let me look" and then do the analysis. The unacceptable behaviour is (c) "X might be harder", "Y is more invasive", or any other vague difficulty claim used to manufacture options. If you find yourself reaching for a difficulty label, stop and check whether you actually traced the implementation. If you didn't, either do it now or admit you didn't.
+
+**11. After strip, the pipeline and the LLM have NO access to the original source code.**
+The original implementation is read exactly once — during the pre-strip bake step (`_bake_skeleton_artifacts`) — which runs after task0c and before strip. That step extracts every source-derived artefact the pipeline will ever need (skeleton with `unimplemented!()` bodies, fn-name reference counts for leaf-first ordering, cluster manifest, API surface) and saves them to disk. From TASK 1 onwards every phase reads ONLY these saved artefacts plus tests and stripped source; no code path may re-read source files, re-checkout a pre-strip git tag, scan `/tmp/prestrip*`, or otherwise smuggle the original bodies back in. The `task0c-augmented-{module}` git tag exists as a human rollback aid (`git checkout` it manually to inspect), but pipeline code must not read from it. New work that needs source-derived data must extend the bake step, not add a post-strip source read. Violating this rule turns "tests-only reconstruction" into "copy the answer", invalidating the entire experiment.
 
 ---
 

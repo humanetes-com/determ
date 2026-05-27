@@ -728,6 +728,7 @@ SKIP_DIR_NAMES = {
     ".skeleton", ".skeleton-filled",  # TASK 2 skeleton backend scratch dirs
     ".original_structure",             # pre-strip API snapshot
     ".chunk_cache", ".task1_partials", # task1 caches
+    ".phase_c_logs",                   # Phase C test-fix iteration archives (P4)
 }
 
 # ---------------------------------------------------------------------------
@@ -4252,7 +4253,10 @@ def _cluster_extractor_args(cluster: "BuildCluster | None") -> list[str]:
 
 def _extract_skeleton(input_dir: Path, output_dir: Path,
                       cluster: "BuildCluster | None" = None) -> dict:
-    """Invoke the Rust skeleton extractor over a pre-strip source tree.
+    """Invoke the Rust skeleton extractor over a live source tree.
+
+    Run only during the bake step (`_bake_skeleton_artifacts`), before
+    strip removes the original source (Hard Rule 11).
 
     When `cluster` is provided, item-level `#[cfg(...)]` filtering runs
     first — items whose predicates evaluate to false under the cluster's
@@ -4292,62 +4296,195 @@ def _extract_skeleton(input_dir: Path, output_dir: Path,
     return {"ok": True, "reports": reports, "stderr": result.stderr.strip()}
 
 
-def _find_prestrip_commit(project_dir: Path) -> str | None:
-    """Return the most recent commit hash whose message indicates pre-strip state.
+def _compute_fn_name_counts(src_dir: Path) -> dict[str, int]:
+    """Count word-boundary fn-name references across every .rs file under
+    `src_dir`. Used to build leaf-first fill ordering for Phase C.
 
-    We look for the commit just before a `pipeline: stripped — {module}` commit;
-    that commit holds the augmented (pre-strip) source tree.
+    Caller is responsible for passing a directory that contains real source
+    (typically the live project_dir/src/ BEFORE strip). Result is a dict
+    `{fn_name: ref_count}` that gets serialised to disk so Phase C never
+    needs to re-read source after strip.
     """
-    try:
-        result = subprocess.run(
-            ["git", "log", "--pretty=format:%H %s", "--all"],
-            cwd=project_dir, capture_output=True, text=True, timeout=30,
-        )
-    except Exception:
-        return None
-    if result.returncode != 0:
-        return None
-    lines = result.stdout.splitlines()
-    # Most recent strip commit (top of log) → the commit BEFORE it is pre-strip.
-    for i, line in enumerate(lines):
-        parts = line.split(" ", 1)
-        if len(parts) != 2:
+    text_parts: list[str] = []
+    if not src_dir.exists():
+        return {}
+    for p in src_dir.rglob("*.rs"):
+        try:
+            text_parts.append(p.read_text(encoding="utf-8"))
+        except Exception:
             continue
-        _h, msg = parts
-        if msg.startswith("pipeline: stripped"):
-            if i + 1 < len(lines):
-                next_parts = lines[i + 1].split(" ", 1)
-                if next_parts:
-                    return next_parts[0]
-            return None
-    return None
+    text = "\n".join(text_parts)
+    if not text:
+        return {}
+    counts: dict[str, int] = {}
+    # Extract candidate fn names from `fn <name>` declarations. Counting
+    # those names across all files gives a usage-frequency map. This is
+    # an approximation — comments and string literals can inflate counts —
+    # but the order it produces (most-referenced first) is robust enough
+    # for leaf-first scheduling.
+    for m in re.finditer(r"\bfn\s+([A-Za-z_][A-Za-z0-9_]*)", text):
+        name = m.group(1)
+        if name in counts:
+            continue
+        counts[name] = len(re.findall(
+            r"\b" + re.escape(name) + r"\b", text))
+    return counts
 
 
-def _checkout_prestrip_source(project_dir: Path, dest: Path) -> bool:
-    """Materialise the pre-strip source tree into `dest` via git checkout.
+def _bake_skeleton_artifacts(
+    project_dir: Path, module_name: str,
+) -> dict:
+    """Run BEFORE strip while the live source is still on disk.
 
-    Returns True on success. `dest` will contain the project's source files
-    as they existed at the latest pre-strip commit. The project's working
-    tree is NOT modified — we use git --work-tree to redirect output.
+    Discovers clusters, prunes redundant ones, then for each cluster:
+      - extracts the skeleton (signatures + types + macros, bodies →
+        `unimplemented!()`) to `.skeleton/{cluster}/`
+      - computes fn-name reference counts and writes them to
+        `.skeleton/{cluster}/_leaf_order.json`
+
+    Cluster metadata is saved to `.skeleton/_clusters.json` so TASK 2 can
+    rehydrate clusters post-strip without re-scanning source.
+
+    Per Hard Rule 11: this is the ONLY place pipeline code is allowed to
+    read the original source. After strip, every downstream phase reads
+    `.skeleton/` artefacts only.
+
+    Returns {'ok': bool, 'clusters': list[str], 'reason': str}.
     """
-    sha = _find_prestrip_commit(project_dir)
-    if not sha:
-        _log(f"  [phase-a] no pre-strip commit found in {project_dir}.")
-        return False
-    dest.mkdir(parents=True, exist_ok=True)
+    skel_root = project_dir / ".skeleton"
+    skel_root.mkdir(parents=True, exist_ok=True)
+
+    src_dir = project_dir / "src"
+    if not src_dir.exists() or not any(src_dir.rglob("*.rs")):
+        return {"ok": False, "clusters": [],
+                "reason": f"no source at {src_dir} — strip already happened?"}
+
+    # Cluster discovery on the live source (Principle 1: deterministic).
     try:
-        result = subprocess.run(
-            ["git", f"--work-tree={dest}", "checkout", sha, "--", "src"],
-            cwd=project_dir, capture_output=True, text=True, timeout=60,
+        clusters = task0_cfg_scan(project_dir)
+    except Exception as e:
+        return {"ok": False, "clusters": [], "reason": f"task0_cfg_scan: {e}"}
+    if not clusters:
+        clusters = [BuildCluster(
+            name="default", env_extra={}, tarpaulin_exclude_files=[],
+            excluded_cfg=[], active_cfg=[], prompt_nightly_rule="",
+            is_default=True,
+        )]
+    clusters = sorted(clusters, key=lambda c: c.name)
+    _log(f"  [bake-skeleton] discovered {len(clusters)} cluster(s): "
+         f"{', '.join(c.name for c in clusters)}")
+
+    cargo_toml = project_dir / "Cargo.toml"
+    clusters = _prune_redundant_clusters(
+        clusters, project_dir,
+        cargo_toml_path=cargo_toml if cargo_toml.exists() else None,
+    )
+    _log(f"  [bake-skeleton] processing {len(clusters)} cluster(s) after pruning: "
+         f"{', '.join(c.name for c in clusters)}")
+
+    name_counts = _compute_fn_name_counts(src_dir)
+    _log(f"  [bake-skeleton] computed reference counts for {len(name_counts)} fn name(s).")
+
+    baked: list[str] = []
+    for cluster in clusters:
+        skeleton_dir = skel_root / cluster.name
+        if skeleton_dir.exists():
+            shutil.rmtree(skeleton_dir)
+        skeleton_dir.mkdir(parents=True, exist_ok=True)
+        res = _extract_skeleton(src_dir.parent, skeleton_dir, cluster=None)
+        if not res["ok"]:
+            _log(f"  [bake-skeleton] cluster {cluster.name}: extractor FAILED: "
+                 f"{res['stderr']}")
+            return {"ok": False, "clusters": baked,
+                    "reason": f"extract {cluster.name}: {res['stderr']}"}
+        order_path = skeleton_dir / "_leaf_order.json"
+        try:
+            order_path.write_text(json.dumps(name_counts, sort_keys=True),
+                                  encoding="utf-8")
+        except Exception as e:
+            _log(f"  [bake-skeleton] cluster {cluster.name}: leaf-order write failed: {e}")
+        _log(f"  [bake-skeleton] cluster {cluster.name}: {len(res['reports'])} "
+             f"file(s) skeletonised → {skeleton_dir}")
+        baked.append(cluster.name)
+
+    # Save cluster metadata for TASK 2 to rehydrate.
+    try:
+        manifest = {
+            "module": module_name,
+            "clusters": [
+                {
+                    "name": c.name,
+                    "env_extra": dict(c.env_extra),
+                    "tarpaulin_exclude_files": list(c.tarpaulin_exclude_files),
+                    "excluded_cfg": list(c.excluded_cfg),
+                    "active_cfg": list(c.active_cfg),
+                    "prompt_nightly_rule": c.prompt_nightly_rule,
+                    "is_default": c.is_default,
+                    "cfg_true": list(getattr(c, "cfg_true", []) or []),
+                    "cfg_false": list(getattr(c, "cfg_false", []) or []),
+                    "toolchain": getattr(c, "toolchain", None),
+                    "requires_nightly": bool(getattr(c, "requires_nightly", False)),
+                }
+                for c in clusters
+            ],
+        }
+        (skel_root / "_clusters.json").write_text(
+            json.dumps(manifest, indent=2), encoding="utf-8",
         )
     except Exception as e:
-        _log(f"  [phase-a] git checkout failed: {e}")
-        return False
-    if result.returncode != 0:
-        _log(f"  [phase-a] git checkout returned {result.returncode}: {result.stderr.strip()}")
-        return False
-    _log(f"  [phase-a] pre-strip source ({sha[:8]}) checked out under {dest}")
-    return True
+        _log(f"  [bake-skeleton] cluster manifest write failed: {e}")
+
+    return {"ok": True, "clusters": baked, "reason": ""}
+
+
+def _load_baked_clusters(project_dir: Path) -> list["BuildCluster"]:
+    """Rehydrate clusters from `.skeleton/_clusters.json` (written by
+    `_bake_skeleton_artifacts` before strip). Returns [] if absent.
+
+    Replaces every post-strip call to `task0_cfg_scan` — those would need
+    the source tree, which is gone.
+    """
+    path = project_dir / ".skeleton" / "_clusters.json"
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    out: list[BuildCluster] = []
+    for c in data.get("clusters", []):
+        bc = BuildCluster(
+            name=c.get("name", ""),
+            env_extra=dict(c.get("env_extra", {}) or {}),
+            tarpaulin_exclude_files=list(c.get("tarpaulin_exclude_files", []) or []),
+            excluded_cfg=list(c.get("excluded_cfg", []) or []),
+            active_cfg=list(c.get("active_cfg", []) or []),
+            prompt_nightly_rule=c.get("prompt_nightly_rule", "") or "",
+            is_default=bool(c.get("is_default", False)),
+        )
+        if c.get("cfg_true") is not None:
+            bc.cfg_true = list(c["cfg_true"])
+        if c.get("cfg_false") is not None:
+            bc.cfg_false = list(c["cfg_false"])
+        if c.get("toolchain") is not None:
+            bc.toolchain = c["toolchain"]
+        if c.get("requires_nightly"):
+            bc.requires_nightly = True
+        out.append(bc)
+    return out
+
+
+def _load_baked_leaf_order(project_dir: Path, cluster_name: str) -> dict[str, int]:
+    """Load the `{fn_name: ref_count}` map saved during the bake step.
+    Returns {} if absent — caller falls back to alphabetical order."""
+    path = project_dir / ".skeleton" / cluster_name / "_leaf_order.json"
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return {str(k): int(v) for k, v in data.items() if isinstance(v, (int, float))}
 
 
 def _load_skeleton_files(skeleton_dir: Path) -> list[tuple[str, str]]:
@@ -4838,9 +4975,8 @@ def _merge_fn_blocks_into_disk(disk_text: str, fn_blocks: dict[str, str]) -> str
     if not fn_blocks:
         return disk_text
     fn_re = re.compile(
-        r'((?:^|\n)[ \t]*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?'
+        r'((?<![A-Za-z_0-9])(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?'
         r'(?:const\s+)?fn\s+[A-Za-z_]\w*[^{]*\{)',
-        re.MULTILINE,
     )
     # Re-extract disk functions to find their bodies, then splice in.
     matches: list[tuple[str, int, int]] = []  # (sig, body_start, body_end)
@@ -4888,9 +5024,8 @@ def _merge_fn_blocks_into_disk(disk_text: str, fn_blocks: dict[str, str]) -> str
 # ---------------------------------------------------------------------------
 
 _FN_RE_GLOBAL = re.compile(
-    r'((?:^|\n)[ \t]*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?'
+    r'((?<![A-Za-z_0-9])(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?'
     r'(?:const\s+)?fn\s+([A-Za-z_]\w*)[^{]*\{)',
-    re.MULTILINE,
 )
 
 
@@ -4921,6 +5056,106 @@ def _locate_fn(file_text: str, fn_name: str) -> tuple[str, int, int, int] | None
         sig_text = file_text[sig_start:body_start].rstrip("{ \t\n").strip()
         return sig_text, sig_start, body_start, body_end
     return None
+
+
+def _is_pub_fn(file_text: str, fn_name: str) -> bool:
+    """True if the fn declaration includes `pub` (any visibility variant)."""
+    loc = _locate_fn(file_text, fn_name)
+    if loc is None:
+        return False
+    sig = loc[0]
+    return bool(re.match(r"\s*pub\b", sig))
+
+
+def _replace_fn_signature(file_path: Path, fn_name: str, new_sig: str) -> bool:
+    """P3.1: replace the verbatim signature line(s) of `fn_name` with
+    `new_sig`. The body is left intact. Used only when the per-fn fix loop
+    has tried >= 5 attempts and the model proposes a signature change in
+    addition to a new body. Returns True if the splice was applied.
+
+    Constraints:
+      - target fn must exist in file
+      - target fn must NOT be `pub` (changing public sigs would break tests)
+      - new_sig must contain `fn {fn_name}` (sanity check; model can't rename)
+    """
+    try:
+        text = file_path.read_text(encoding="utf-8")
+    except Exception:
+        return False
+    if not _is_pub_fn(text, fn_name) is False:
+        # Only relax for private fns; pub fns are part of the test surface.
+        pass
+    if _is_pub_fn(text, fn_name):
+        return False
+    if not re.search(r"\bfn\s+" + re.escape(fn_name) + r"\b", new_sig):
+        return False
+    loc = _locate_fn(text, fn_name)
+    if loc is None:
+        return False
+    _old_sig, sig_start, body_start, _body_end = loc
+    # Find the start of the line that contains the sig.
+    line_start = text.rfind("\n", 0, sig_start) + 1
+    # New sig must end immediately before the opening brace (which body_start
+    # points just past). Compose: text[:line_start] + new_sig.rstrip() + " {" + text[body_start:]
+    cleaned = new_sig.strip().rstrip("{").rstrip()
+    new_text = text[:line_start] + cleaned + " {" + text[body_start:]
+    file_path.write_text(new_text, encoding="utf-8")
+    return True
+
+
+def _extract_signature_block(response: str) -> str | None:
+    """Pull `<SIGNATURE>...</SIGNATURE>` from an LLM response. Returns the
+    trimmed body or None if absent."""
+    m = re.search(r"<SIGNATURE>(.*?)</SIGNATURE>", response, re.DOTALL)
+    if not m:
+        return None
+    txt = m.group(1).strip()
+    return txt or None
+
+
+def _splice_fn_body_at(file_path: Path, body_byte_start: int, body_byte_end: int,
+                        new_body: str) -> tuple[bool, int]:
+    """Splice `new_body` between bytes [body_byte_start, body_byte_end) in
+    `file_path`. Replaces an explicit byte range — used when the caller has
+    canonical offsets from the syn enumerator. Refuses to overwrite a body
+    that isn't currently a stub.
+
+    The body content between [start, end) is whatever currently sits between
+    the fn's `{` and `}`. If that text doesn't look like an unimplemented
+    stub, the splice is rejected so we never clobber a real body.
+
+    Returns (success, bytes_delta).
+    """
+    try:
+        text = file_path.read_text(encoding="utf-8")
+    except Exception:
+        return False, 0
+    if body_byte_end > len(text) or body_byte_start > body_byte_end:
+        return False, 0
+    cur_body = text[body_byte_start:body_byte_end]
+    if not _is_unimplemented_body(cur_body):
+        return False, 0
+    nb = new_body.strip()
+    if nb.startswith("{") and nb.endswith("}"):
+        nb = nb[1:-1].strip()
+    if not nb or _is_unimplemented_body(nb):
+        return False, 0
+    # Re-indent the body to match the fn's existing indentation. Find the
+    # column of the fn declaration by walking back to the previous newline.
+    line_start = text.rfind("\n", 0, body_byte_start) + 1
+    base_indent = ""
+    for ch in text[line_start:body_byte_start]:
+        if ch in (" ", "\t"):
+            base_indent += ch
+        else:
+            break
+    inner_indent = base_indent + "    "
+    nb_indented = "\n" + "\n".join(
+        (inner_indent + ln) if ln.strip() else "" for ln in nb.splitlines()
+    ) + "\n" + base_indent
+    new_text = text[:body_byte_start] + nb_indented + text[body_byte_end:]
+    file_path.write_text(new_text, encoding="utf-8")
+    return True, len(new_text) - len(text)
 
 
 def _splice_fn_body(file_path: Path, fn_name: str, new_body: str) -> tuple[bool, int]:
@@ -5024,13 +5259,44 @@ def _extract_body_response(response: str) -> str | None:
     return response.strip() or None
 
 
+def _strip_crate_attrs(text: str) -> str:
+    """Strip top-level `#![...]` crate attributes from the file view shown to
+    the LLM. They eat tokens and don't help the model fill a fn body. They're
+    only stripped from the PROMPT view — the on-disk file keeps them so cargo
+    builds correctly.
+    """
+    out_lines: list[str] = []
+    in_attr = False
+    depth = 0
+    for ln in text.splitlines():
+        s = ln.lstrip()
+        if not in_attr and s.startswith("#!["):
+            # Single-line `#![...]` — count brackets on this line.
+            depth = s.count("[") - s.count("]")
+            if depth <= 0:
+                continue  # one-line attr fully closed; skip
+            in_attr = True
+            continue
+        if in_attr:
+            depth += ln.count("[") - ln.count("]")
+            if depth <= 0:
+                in_attr = False
+            continue
+        out_lines.append(ln)
+    return "\n".join(out_lines)
+
+
 def _annotate_file_view(file_text: str, target_fn: str) -> str:
     """Return a view of file_text where every unimplemented stub is prefixed
     with a comment clarifying its status. The TARGET fn (the one being filled
     in this call) is marked distinctly. Helps the model reason about which
     fns are "to-be-filled later" vs the immediate target, instead of treating
     the stubs as permanent missing pieces it must work around.
+
+    Top-level `#![...]` crate attributes are stripped from the prompt view
+    (P3.6) since they only eat tokens and don't help fill bodies.
     """
+    file_text = _strip_crate_attrs(file_text)
     out: list[str] = []
     i = 0
     last_fn_end = 0
@@ -5124,23 +5390,61 @@ def _find_tests_for_fn(
     file_rel: str = "",
     src_dir: Path | None = None,
     max_blocks: int = 4,
+    container: str = "",
 ) -> list[tuple[str, str]]:
     """Layered heuristic to find tests relevant to one fn.
 
     Order of attempts (each adds to the candidate set):
+      0. Container-type filter (P5.4) — when fn_name is generic (`new`,
+         `fmt`, `source`, etc.), match by the type name extracted from
+         `container` rather than the fn name alone. Tests for
+         `impl Display for ContextError::fmt` only count when they
+         mention "ContextError".
       1. Direct name reference — tests calling `fn_name` literally.
       2. File-stem match — for fn in `src/ensure.rs`, include tests whose
          filename contains "ensure".
       3. Macro-aware — if `src_dir` is given and `file_rel`'s file defines
          macros, include tests that call those macros by name.
 
-    Results ranked by relevance score (direct > stem > macro) then by hit
-    count. Returns up to `max_blocks` (path, content) tuples.
+    Results ranked by relevance score (container > direct > stem > macro)
+    then by hit count. Returns up to `max_blocks` (path, content) tuples.
     """
     if not fn_name and not file_rel:
         return []
     # Build candidate set with scores.
     scored: dict[Path, tuple[int, int]] = {}  # path → (tier, hits) — lower tier = better
+
+    # P5.4 Tier 0: when fn_name is generic (very common: new, fmt, source,
+    # clone, drop, default), filter by the container's TYPE NAME so we don't
+    # match every test that mentions e.g. "new". Falls back to the regular
+    # name-based search if the container doesn't yield a clear type name.
+    _GENERIC_FN_NAMES = {
+        "new", "fmt", "source", "clone", "default", "drop", "next",
+        "from", "into", "deref", "deref_mut", "as_ref", "as_mut",
+        "hash", "eq", "cmp", "partial_cmp", "from_str", "anyhow_kind",
+        "provide",
+    }
+    container_type = ""
+    if container:
+        # Match the "for X" part of "impl Trait for X<...>"; fall back to
+        # "impl X<...>" for inherent impls.
+        m = re.search(r"\bfor\s+([A-Za-z_]\w*)", container)
+        if not m:
+            m = re.search(r"\bimpl\s+(?:<[^>]*>\s+)?([A-Za-z_]\w*)", container)
+        if m:
+            container_type = m.group(1)
+    if fn_name in _GENERIC_FN_NAMES and container_type:
+        pat0 = re.compile(r"\b" + re.escape(container_type) + r"\b")
+        for tf in tests_dir_files:
+            try:
+                txt = tf.read_text(encoding="utf-8")
+            except Exception:
+                continue
+            n = len(pat0.findall(txt))
+            if n:
+                cur = scored.get(tf, (99, 0))
+                # Tier 0 = highest priority. Hit count = type mentions.
+                scored[tf] = (0, max(cur[1], n))
 
     # Tier 1: direct name.
     if fn_name:
@@ -5153,7 +5457,7 @@ def _find_tests_for_fn(
             n = len(pat.findall(txt))
             if n:
                 cur = scored.get(tf, (99, 0))
-                scored[tf] = (1, max(cur[1], n))
+                scored[tf] = (min(cur[0], 1), max(cur[1], n))
 
     # Tier 2: file-stem match.
     if file_rel:
@@ -5200,33 +5504,22 @@ def _find_tests_for_fn(
 
 def _leaf_first_fn_order(
     stubs: list[tuple[str, str]],
-    prestrip_dir: Path | None,
+    name_counts: dict[str, int] | None,
 ) -> list[tuple[str, str]]:
     """Sort stubs so the most-referenced fns come first (likely call-graph
     leaves — utility fns relied on by many others). Public-API entry points
     end up last, where they can see real helper bodies on disk.
 
-    When `prestrip_dir` is unavailable, falls back to deterministic order
-    (file, fn_name).
+    `name_counts` is the `{fn_name: ref_count}` map written during the
+    pre-strip bake step (`_bake_skeleton_artifacts`). When empty/None,
+    falls back to deterministic order (file, fn_name).
     """
-    if not prestrip_dir or not prestrip_dir.exists():
-        return sorted(stubs)
-    joined = []
-    for p in prestrip_dir.rglob("*.rs"):
-        try:
-            joined.append(p.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-    text = "\n".join(joined)
-    if not text:
+    if not name_counts:
         return sorted(stubs)
     scores: dict[tuple[str, str], int] = {}
     for s in stubs:
         _, fn = s
-        if not fn:
-            scores[s] = 0
-            continue
-        scores[s] = len(re.findall(r"\b" + re.escape(fn) + r"\b", text))
+        scores[s] = name_counts.get(fn, 0) if fn else 0
     # Higher refs = more depended on = fill earlier (leaf-first).
     return sorted(stubs, key=lambda s: (-scores.get(s, 0), s[0], s[1]))
 
@@ -5341,14 +5634,17 @@ def _filter_model_notes_for_prompt(
     file_rel: str,
     fn_name: str,
     file_text: str = "",
+    current_error: str = "",
     max_chars: int = _MODEL_NOTES_MAX_CHARS,
 ) -> str:
     """Pull notes from FR ranked by relevance for the current (file, fn).
 
-    Ranking tiers:
-      1. Note text mentions the file's basename or fn name.
-      2. Note text mentions any symbol (type/fn) appearing in `file_text`.
-      3. Otherwise (recency only — most recently added first).
+    P3.4 ranking tiers (lower number = higher priority):
+      1. Note mentions an error code present in `current_error` (E0xxx).
+      2. Note keyword overlap with `current_error`'s _note_signature keywords.
+      3. Note mentions the file's basename or fn name.
+      4. Note mentions any symbol (type/fn) appearing in `file_text`.
+      5. Otherwise (recency only).
 
     Returns a single string ready to insert into a <MODEL_NOTES> block,
     capped at `max_chars`. Empty string if no notes apply.
@@ -5357,23 +5653,34 @@ def _filter_model_notes_for_prompt(
     if not notes:
         return ""
     base = Path(file_rel).stem if file_rel else ""
-    # Extract crude symbol set from file_text — type/fn names.
     symbols: set[str] = set()
     if file_text:
         for m in re.finditer(r"\b(?:fn|struct|enum|trait|type)\s+([A-Za-z_]\w*)",
                               file_text):
             symbols.add(m.group(1))
+    # Extract error context (codes + keywords) for tier 1/2 matching.
+    err_codes: set[str] = set()
+    err_keywords: set[str] = set()
+    if current_error:
+        err_codes = set(re.findall(r"\bE\d{3,4}\b", current_error))
+        err_codes_l = {e.lower() for e in err_codes}
+        low_err = current_error.lower()
+        err_keywords = {k for k in _NOTE_SIGNATURE_KEYWORDS if k in low_err}
 
     def tier(n: str) -> int:
         lower = n.lower()
-        if (base and base.lower() in lower) or (fn_name and fn_name.lower() in lower):
+        if err_codes and any(c in lower.upper() or c.lower() in lower
+                              for c in err_codes):
             return 1
-        if any(sym in n for sym in symbols):
+        n_codes, n_kw = _note_signature(n)
+        if err_keywords and n_kw and len(err_keywords & n_kw) >= 2:
             return 2
-        return 3
+        if (base and base.lower() in lower) or (fn_name and fn_name.lower() in lower):
+            return 3
+        if any(sym in n for sym in symbols):
+            return 4
+        return 5
 
-    # Stable rank: lower tier first, then preserve newest-first within tier
-    # (reverse the input order so most recent appear earlier).
     indexed = list(enumerate(notes))
     indexed.sort(key=lambda iv: (tier(iv[1]), -iv[0]))
     out_lines: list[str] = []
@@ -5387,26 +5694,217 @@ def _filter_model_notes_for_prompt(
     return "\n".join(out_lines)
 
 
+# P5.3: standard library trait contracts. When a fn is being implemented
+# inside `impl Trait for X`, inject the trait's documented behavior so the
+# model knows what's expected (return type semantics, format conventions,
+# etc.). Hardcoded for the most common stdlib traits — covers ~90% of impl
+# blocks in typical Rust crates.
+_TRAIT_CONTRACTS: dict[str, str] = {
+    "Display": (
+        "Display::fmt(&self, f: &mut Formatter) -> fmt::Result\n"
+        "  - Produces user-facing string representation via `write!(f, \"...\", ...)`.\n"
+        "  - Return value of `write!(...)` IS the return value of fmt.\n"
+        "  - Do NOT use {:?} or include type names in the output."
+    ),
+    "Debug": (
+        "Debug::fmt(&self, f: &mut Formatter) -> fmt::Result\n"
+        "  - Produces developer-facing representation, typically via\n"
+        "    f.debug_struct(\"Name\").field(\"k\", &v).finish() OR\n"
+        "    write!(f, \"Name({:?}, {:?})\", a, b)\n"
+        "  - For structs: use debug_struct/debug_tuple/debug_list/debug_map.\n"
+        "  - Return value of the helper IS the return value of fmt."
+    ),
+    "Error": (
+        "std::error::Error has these methods (all default to None / no-op):\n"
+        "  source(&self) -> Option<&(dyn Error + 'static)>  — return cause if any\n"
+        "  provide(&'_ self, request: &mut Request<'_>)     — nightly only\n"
+        "Most impls override `source` to return Some(&self.inner_error) or None."
+    ),
+    "Hash": (
+        "Hash::hash<H: Hasher>(&self, state: &mut H)\n"
+        "  - Feed each field into state.write_*() or call field.hash(state).\n"
+        "  - Must be consistent with Eq: a == b ⟹ hash(a) == hash(b)."
+    ),
+    "PartialEq": (
+        "PartialEq::eq(&self, other: &Self) -> bool\n"
+        "  - Compare each meaningful field; return true iff all match.\n"
+        "  - Reflexive in most cases (a == a); doesn't need transitivity."
+    ),
+    "Eq": "Eq is a marker trait extending PartialEq — no methods to impl.",
+    "PartialOrd": (
+        "PartialOrd::partial_cmp(&self, other: &Self) -> Option<Ordering>\n"
+        "  - Return Some(Less/Equal/Greater) or None if incomparable.\n"
+        "  - Often delegates: `self.field.partial_cmp(&other.field)`."
+    ),
+    "Ord": (
+        "Ord::cmp(&self, other: &Self) -> Ordering\n"
+        "  - Total ordering: always returns Less/Equal/Greater.\n"
+        "  - Often delegates to inner field's .cmp()."
+    ),
+    "Clone": (
+        "Clone::clone(&self) -> Self\n"
+        "  - Construct a new value structurally identical to self.\n"
+        "  - Often: Self { field1: self.field1.clone(), ... }"
+    ),
+    "Default": (
+        "Default::default() -> Self\n"
+        "  - Construct a sensible empty/zero value.\n"
+        "  - Often: Self { field1: Default::default(), ... }"
+    ),
+    "From": (
+        "From<T>::from(value: T) -> Self\n"
+        "  - Convert from T into Self. Should be infallible.\n"
+        "  - Self::from(x) is also reachable via x.into()."
+    ),
+    "Into": "Into<T> is auto-implemented from From<U> — implement From instead.",
+    "Deref": (
+        "Deref::deref(&self) -> &Self::Target\n"
+        "  - Return a reference to the inner / wrapped value.\n"
+        "  - Often: &self.inner_field"
+    ),
+    "DerefMut": (
+        "DerefMut::deref_mut(&mut self) -> &mut Self::Target\n"
+        "  - Mutable counterpart of Deref. Often: &mut self.inner_field"
+    ),
+    "Drop": (
+        "Drop::drop(&mut self)\n"
+        "  - Cleanup when value goes out of scope.\n"
+        "  - Manually drop fields needing custom dispose; primitives auto-drop."
+    ),
+    "Iterator": (
+        "Iterator has `type Item;` and `fn next(&mut self) -> Option<Self::Item>`.\n"
+        "  - Return Some(item) until exhausted; then None forever after.\n"
+        "  - Other methods (map, filter, ...) are provided via defaults."
+    ),
+    "AsRef": (
+        "AsRef<T>::as_ref(&self) -> &T\n"
+        "  - Return a borrowed reference to T. Should be cheap (no allocation)."
+    ),
+    "AsMut": (
+        "AsMut<T>::as_mut(&mut self) -> &mut T\n"
+        "  - Mutable counterpart of AsRef."
+    ),
+    "FromStr": (
+        "FromStr::from_str(s: &str) -> Result<Self, Self::Err>\n"
+        "  - Parse Self from a string. Return Err on parse failure."
+    ),
+}
+
+
+def _extract_trait_from_container(container: str) -> str | None:
+    """Pull the trait name out of an `impl Trait for X` container string.
+    Returns None for inherent impls (no trait) or unsupported forms.
+    """
+    if not container:
+        return None
+    # Match: impl <Generics>? TraitPath::Tail for ...
+    m = re.match(r"\s*impl\s+(?:<[^>]*>\s+)?([A-Za-z_][\w:]*)(?:<[^>]*>)?\s+for\s+",
+                 container)
+    if not m:
+        return None
+    path = m.group(1)
+    # Take the last path segment as the trait name (e.g. "fmt::Display" → "Display").
+    return path.rsplit("::", 1)[-1]
+
+
+def _trait_contract_for(container: str) -> str:
+    """Return the standard contract text for the trait this fn implements,
+    or empty string if no matching contract is known. P5.3.
+    """
+    name = _extract_trait_from_container(container)
+    if not name:
+        return ""
+    return _TRAIT_CONTRACTS.get(name, "")
+
+
 _NOTE_HASH_CACHE: dict[Path, set[str]] = {}
+
+# Curated set of Rust-load-bearing keywords that, when co-mentioned in two
+# notes, almost certainly mean the notes are about the same confusion.
+# Used by _note_signature for semantic dedup (P3.3).
+_NOTE_SIGNATURE_KEYWORDS = {
+    "typeid", "'static", "static", "&dyn", "dyn", "box", "nonnull",
+    "ptr", "as_ptr", "as_ref", "from_raw", "deref",
+    "unimplemented", "todo", "unsafe",
+    "trait", "impl", "generic", "lifetime", "sized", "unsized",
+    "format", "display", "debug",
+    "feature", "no_std", "core::", "std::",
+    "ref::", "wrapper", "delegation",
+}
 
 
 def _note_hash(text: str) -> str:
-    """Stable short hash for dedup. Normalises whitespace + lowercases so
-    near-duplicate phrasings collide."""
+    """Exact-text hash for early-rejection of literal duplicates."""
     norm = re.sub(r"\s+", " ", text.strip().lower())
     return hashlib.md5(norm.encode("utf-8")).hexdigest()[:16]
 
 
-def _append_model_note(fr_path: Path, note: str) -> bool:
+def _note_signature(text: str) -> tuple[frozenset, frozenset]:
+    """Semantic signature: (error codes mentioned, keyword set).
+
+    P3.3: two notes are considered semantically duplicate when their
+    signatures' keyword sets overlap by >= 80%. Catches the 4-way
+    paraphrase of "TypeId::of::<T>() needs T: 'static" we saw overnight,
+    where exact-hash dedup let all four through.
+    """
+    low = text.lower()
+    err_codes = frozenset(re.findall(r"\be\d{3,4}\b", low))
+    keywords = frozenset(k for k in _NOTE_SIGNATURE_KEYWORDS if k in low)
+    return err_codes, keywords
+
+
+def _notes_are_semantic_dupes(a: str, b: str) -> bool:
+    """True when two notes mostly mean the same thing.
+
+    Two-tier check:
+      - Same error code set (non-empty) → dupe regardless of phrasing.
+      - Otherwise: keyword overlap >= 2 keywords AND >= 50% Jaccard.
+        50% catches the overnight TypeId-paraphrase set where shared
+        keywords are {typeid, static, generic} but each note adds one
+        unique extra ("impl", "lifetime", etc.).
+    """
+    a_err, a_kw = _note_signature(a)
+    b_err, b_kw = _note_signature(b)
+    if a_err and b_err and a_err == b_err:
+        return True
+    if not a_kw or not b_kw:
+        return False
+    inter = len(a_kw & b_kw)
+    union = len(a_kw | b_kw)
+    if inter < 2:
+        return False
+    return union > 0 and inter / union >= 0.5
+
+
+def _append_model_note(
+    fr_path: Path,
+    note: str,
+    error_codes: "list[str] | set[str] | None" = None,
+) -> bool:
     """Append `note` to FR's model-notes section. Returns True if added,
-    False if it was a near-duplicate (hash collision) or empty.
+    False on dedup or empty/short input.
+
+    Dedup logic (P3.3 tightened):
+      1. Exact hash match → reject (literal duplicate)
+      2. Semantic match against any existing note → reject
+         (paraphrase of an already-known rule)
+
+    P6.4: when `error_codes` is given, prefix the stored note with a
+    `[E0xxx,E0yyy]` tag. This tag is readable to the LLM and lets us
+    later surface past notes tied to recurring error codes alongside
+    <RECURRING_ERRORS>.
     """
     note = (note or "").strip()
     if not note or len(note) < 20:
         return False
-    # Strip leading "- " if the model wrote it.
     if note.startswith("- "):
         note = note[2:].strip()
+    # P6.4: prepend error-code tag (deduped, sorted, only well-formed codes).
+    if error_codes:
+        clean = sorted({c for c in error_codes
+                        if isinstance(c, str) and re.fullmatch(r"E\d{3,4}", c)})
+        if clean and not note.startswith("[E"):
+            note = f"[{','.join(clean)}] {note}"
     existing = _load_model_notes(fr_path)
     existing_hashes = _NOTE_HASH_CACHE.get(fr_path)
     if existing_hashes is None:
@@ -5415,9 +5913,12 @@ def _append_model_note(fr_path: Path, note: str) -> bool:
     h = _note_hash(note)
     if h in existing_hashes:
         return False
+    # P3.3: semantic dedup. Walk existing notes; reject if any is a paraphrase.
+    for prev in existing:
+        if _notes_are_semantic_dupes(prev, note):
+            return False
     existing.append(note)
     existing_hashes.add(h)
-    # Hard cap — drop oldest.
     if len(existing) > _MODEL_NOTES_MAX_ENTRIES:
         dropped = existing[:-_MODEL_NOTES_MAX_ENTRIES]
         existing = existing[-_MODEL_NOTES_MAX_ENTRIES:]
@@ -5502,6 +6003,144 @@ def _extract_self_note(
     return candidate[:300]
 
 
+# Six Rust confusion classes seen recurrently in overnight runs (P3.2).
+# Each has a one-line summary (always shown in the prompt) and a fuller
+# detail block (injected only when the current cargo error trips the
+# gotcha's trigger keyword/code, via _gotchas_for_error).
+_RUST_GOTCHAS: list[dict] = [
+    {
+        "id": "typeid_static",
+        "summary": "TypeId::of::<T>() requires T: 'static. If T is generic without that bound and the signature is locked, you cannot use TypeId::of in the body.",
+        "triggers": {"E0310", "E0311", "typeid"},
+        "detail": (
+            "If T is a generic parameter without a 'static bound, TypeId::of::<T>() "
+            "will not compile. You can NOT just add the bound when the signature is "
+            "locked — you need a different approach: pattern-match on a runtime "
+            "TypeId stored elsewhere (e.g. a vtable field), or use the surrounding "
+            "context to get the comparison value without invoking TypeId::of."
+        ),
+    },
+    {
+        "id": "dyn_parens",
+        "summary": "&dyn Trait + Bounds needs parentheses → &(dyn Trait + Bounds). Same for *const, Box, etc.",
+        "triggers": {"ambiguous", "&dyn", "dyn"},
+        "detail": (
+            "Rust parses `&dyn Trait + Bound` as `(&dyn Trait) + Bound` which is "
+            "an arithmetic + on a type. Always wrap the dyn portion in parens: "
+            "`&(dyn Trait + Bound)`, `*const (dyn Trait + Send)`, "
+            "`Box<dyn Trait + Send + Sync>` (Box's generics already do the parens)."
+        ),
+    },
+    {
+        "id": "unsized_value",
+        "summary": "Trait objects (&dyn X, *const dyn X) are unsized. Cannot store by value; format with {:?} not {}.",
+        "triggers": {"E0277", "doesn't have a size known at compile-time", "unsized", "display"},
+        "detail": (
+            "Sized requirement: trait objects don't have known sizes, so they can "
+            "only live behind a pointer (&, Box, Rc, etc.). `let x: dyn Trait = ...` "
+            "fails. Also, &dyn Debug does NOT implement Display — use {:?} for "
+            "trait objects, not {}."
+        ),
+    },
+    {
+        "id": "wrapper_field",
+        "summary": "Wrapper struct (Own<T>, Ref<T>): if wrapper.method() fails, try wrapper.field.method() or wrapper.as_ptr().method().",
+        "triggers": {"E0599", "no method"},
+        "detail": (
+            "Many wrapper types in anyhow (Own<T>, Ref<T>) don't auto-delegate "
+            "methods to their inner pointer. If `wrapper.foo()` reports "
+            "'no method foo', access the inner field directly: "
+            "`wrapper.inner.foo()`, `wrapper.as_ptr()`, or "
+            "`unsafe { (*wrapper.as_ptr()).foo() }`."
+        ),
+    },
+    {
+        "id": "generic_field",
+        "summary": "Generic params have no fields. `(*this).field` where this: *const E (E generic) is rejected; cast to a concrete type first.",
+        "triggers": {"E0609", "unknown field"},
+        "detail": (
+            "Rust does not know the layout of an unbounded generic parameter, so "
+            "field access is rejected. If you have `*const E` and you know the "
+            "concrete wrapping struct is `ErrorImpl<E>`, cast first: "
+            "`let p = ptr as *const ErrorImpl<E>; (*p).known_field`."
+        ),
+    },
+    {
+        "id": "nonnull_ref",
+        "summary": "NonNull<T> doesn't auto-deref. Get a reference via unsafe { ptr.as_ref() }. Construct via NonNull::from(&val) or NonNull::new_unchecked(raw).",
+        "triggers": {"E0308", "NonNull", "expected `&", "mismatched types"},
+        "detail": (
+            "NonNull<T> is a raw pointer wrapper, not Deref. Conversion table:\n"
+            "  NonNull<T> → &T          : `unsafe { ptr.as_ref() }`\n"
+            "  NonNull<T> → *mut T      : `ptr.as_ptr()`\n"
+            "  &T → NonNull<T>          : `NonNull::from(&val)`\n"
+            "  *mut T → NonNull<T>      : `unsafe { NonNull::new_unchecked(raw) }`\n"
+            "Don't pass NonNull where &T is expected. Don't call constructors\n"
+            "like `Ref::new(non_null_value)` — read the constructor's signature\n"
+            "from TYPES_IN_SCOPE first."
+        ),
+    },
+    {
+        "id": "fn_ptr_field",
+        "summary": "Function-pointer FIELDS need parens to call: (s.callback)(args), NOT s.callback(args). Method-style fails because the field isn't a method.",
+        "triggers": {"E0599", "no method", "is not a method", "is a field", "callback", "vtable"},
+        "detail": (
+            "When a struct field holds a function pointer (e.g. `fn(X) -> Y`),\n"
+            "you cannot invoke it with method syntax. Wrap the field access in\n"
+            "parens before the call:\n"
+            "  WRONG: vtable.object_downcast(this, target)\n"
+            "  RIGHT: (vtable.object_downcast)(this, target)\n"
+            "This is the standard Rust idiom for vtable dispatch. anyhow's\n"
+            "`ErrorVTable` exposes its dispatch fns as fields, not methods."
+        ),
+    },
+    {
+        "id": "match_move_borrow",
+        "summary": "`match self.field { ... }` moves the field. To match without moving use `match &self.field { ... }`, `match self { Foo { ref field, .. } => ... }`, or destructure with `ref`.",
+        "triggers": {"E0507", "cannot move out", "moved here", "behind a shared reference"},
+        "detail": (
+            "Pattern matching against `self.field` consumes (moves) the field.\n"
+            "When you only have `&self`, this fails with E0507. Three fixes:\n"
+            "  1. Borrow the scrutinee: `match &self.field { Foo { x } => ... }`.\n"
+            "     The bindings will be `&T` references.\n"
+            "  2. Use `ref`: `match self { Foo { ref field } => ... }`.\n"
+            "  3. Re-borrow inside arms: `Buffered { rest } => rest.iter().len()`\n"
+            "     instead of `rest.len()` if `rest` itself is owned-by-binding.\n"
+            "Pick (1) for most cases — least invasive."
+        ),
+    },
+]
+
+
+def _gotchas_summary() -> str:
+    """Compact one-line-per-gotcha cheatsheet (always shown)."""
+    return "\n".join(f"- {g['summary']}" for g in _RUST_GOTCHAS)
+
+
+def _gotchas_for_error(error_excerpt: str) -> str:
+    """Full detail blocks for whichever gotchas the current error triggers.
+
+    Selective injection: empty string when no trigger matches. Keeps the
+    prompt small for unrelated errors and adds detailed guidance only when
+    the model is actually fighting one of these confusion classes.
+    """
+    if not error_excerpt:
+        return ""
+    low = error_excerpt.lower()
+    matched: list[dict] = []
+    for g in _RUST_GOTCHAS:
+        for trig in g["triggers"]:
+            if trig.lower() in low:
+                matched.append(g)
+                break
+    if not matched:
+        return ""
+    parts = []
+    for g in matched:
+        parts.append(f"## {g['summary']}\n{g['detail']}")
+    return "\n\n".join(parts)
+
+
 def _build_per_fn_prompt(
     file_text: str,
     fn_name: str,
@@ -5512,6 +6151,9 @@ def _build_per_fn_prompt(
     file_rel: str,
     macros_section: str = "",
     notes_section: str = "",
+    container: str = "",
+    types_section: str = "",
+    fr_path: "Path | None" = None,
 ) -> str:
     """Small focused prompt for one fn fill. No crate-wide signature index,
     no full FR, no genesis — only what the model needs to implement THIS fn.
@@ -5528,12 +6170,29 @@ def _build_per_fn_prompt(
     annotated = _annotate_file_view(file_text, fn_name)
     notes_block = f"\n<MODEL_NOTES>\n{notes_section}\n</MODEL_NOTES>\n" if notes_section else ""
     macros_block = f"\n<MACROS>\n{macros_section}\n</MACROS>\n" if macros_section else ""
+    # P5.1: type definitions for types the fn touches. The model often
+    # confuses Own/Ref/ErrorImpl fields with methods (writes self.ptr.as_ref
+    # instead of self.ptr.as_ref()); listing each type's actual fields and
+    # methods makes this unambiguous.
+    types_block = f"\n<TYPES_IN_SCOPE>\n{types_section}\n</TYPES_IN_SCOPE>\n" if types_section else ""
+    # P5.3: when impl-ing a known stdlib trait, inject its contract.
+    _trait_text = _trait_contract_for(container)
+    trait_block = f"\n<TRAIT_CONTRACT>\n{_trait_text}\n</TRAIT_CONTRACT>\n" if _trait_text else ""
+    # P5.5: promoted recurring errors (E0xxx codes seen 3+ times this run).
+    # P6.4: pass fr_path so past notes tagged with active codes get surfaced.
+    _recurring = _promoted_error_rules(fr_path)
+    recurring_block = f"\n<RECURRING_ERRORS>\n{_recurring}\n</RECURRING_ERRORS>\n" if _recurring else ""
+    container_line = f"In: {container}\n" if container else ""
     return f"""Implement ONE Rust function so its tests pass.
 
 Crate: {module_name} | Cluster: {cluster_name} | File: {file_rel} | Fn: {fn_name}
-Signature (verbatim, do not change):
+{container_line}Signature (verbatim, do not change):
 {sig_text}
-{notes_block}
+
+<RUST_GOTCHAS>
+{_gotchas_summary()}
+</RUST_GOTCHAS>
+{trait_block}{types_block}{recurring_block}{notes_block}
 FILE — stubs are annotated. SKELETON STUB = will be filled later (rely on
 the signature). TARGET = implement now.
 
@@ -5560,9 +6219,430 @@ Rules:
 """
 
 
+# P5.5: track Exxxx error codes seen across the current run. When a code
+# fires 3+ times, auto-promote a short rule to every subsequent per-fn
+# prompt (as a <RECURRING_ERRORS> block). Catches when one class of
+# Rust gotcha keeps biting and one fix-loop's local note isn't enough.
+from collections import Counter as _Counter_PY
+_ERROR_CODE_COUNTS: "_Counter_PY | None" = None
+# P6.3: per-error-code accumulator of cargo-error excerpts (capped). When
+# an error code recurs, we mine these for common type tokens / file
+# locations and surface them in <RECURRING_ERRORS>.
+_ERROR_CODE_EXCERPTS: dict[str, list[str]] = {}
+_ERROR_EXCERPT_MAX_PER_CODE = 10  # keep at most N excerpts per code
+_ERROR_EXCERPT_MAX_CHARS = 600   # truncate each excerpt
+_ERROR_CODE_PROMOTED_THRESHOLD = 3
+_ERROR_CODE_HINTS: dict[str, str] = {
+    "E0277": "trait bound not satisfied — usually `?Sized` is missing or `Send/Sync/'static` bound needs to be added.",
+    "E0308": "mismatched types — check whether you're returning a Result vs Option, owned vs referenced, or wrong generic instantiation.",
+    "E0382": "use of moved value — clone, borrow, or use Cow/Arc if you need both old and new value.",
+    "E0507": "cannot move out of borrowed — use .clone(), .as_ref(), or destructure with `ref`.",
+    "E0599": "no method found — likely calling a method that doesn't exist on this type. Read TYPES_IN_SCOPE for the exact method names.",
+    "E0609": "no field — usually trying to access a method as if it were a field. Use .name() not .name. See TYPES_IN_SCOPE.",
+    "E0615": "took value of method instead of calling it — `.method` vs `.method()`. Add parens.",
+    "E0107": "wrong number of generic arguments — check the type's actual generic signature in TYPES_IN_SCOPE.",
+    "E0310": "type parameter may not live long enough — add a `'static` bound.",
+    "E0119": "conflicting impls — remove the duplicate or specialise via different generic params.",
+    "E0554": "feature attribute only on nightly — guard with #[cfg] or check that the nightly toolchain is active.",
+}
+
+
+def _record_error_codes_seen(output: str) -> None:
+    """Increment the global counter for each unique E0xxx code found in
+    `output`. Also accumulate a short excerpt per code for later mining
+    of recurring type-token context (P6.3)."""
+    global _ERROR_CODE_COUNTS
+    if _ERROR_CODE_COUNTS is None:
+        _ERROR_CODE_COUNTS = _Counter_PY()
+    if not output:
+        return
+    codes = set(re.findall(r"\bE\d{3,4}\b", output))
+    for c in codes:
+        _ERROR_CODE_COUNTS[c] += 1
+        # Capture an excerpt: the error[Exxxx]: line + its few surrounding
+        # lines. Per-code list is capped to N excerpts (FIFO).
+        m = re.search(
+            r"error\[" + re.escape(c) + r"\][^\n]*\n(?:[^\n]*\n){0,6}",
+            output,
+        )
+        if m:
+            excerpt = m.group(0).strip()[:_ERROR_EXCERPT_MAX_CHARS]
+            bucket = _ERROR_CODE_EXCERPTS.setdefault(c, [])
+            bucket.append(excerpt)
+            if len(bucket) > _ERROR_EXCERPT_MAX_PER_CODE:
+                bucket.pop(0)
+
+
+def _mine_common_tokens(excerpts: list[str], top_n: int = 3) -> list[tuple[str, int]]:
+    """From a list of cargo error excerpts, return the most common Rust
+    type-like tokens (CapitalisedCamelCase names, with possible generic
+    decoration). Used to enrich RECURRING_ERRORS with type context.
+    """
+    if not excerpts:
+        return []
+    tok = _Counter_PY()
+    # Match `Foo`, `Foo<T>`, `Box<dyn StdError + Send + Sync>` etc.
+    type_re = re.compile(
+        r"\b([A-Z][A-Za-z0-9_]*(?:<[^<>\n]{1,60}>)?)\b"
+    )
+    # Generic noise that's NOT useful type context.
+    skip = {
+        "Err", "Ok", "None", "Some", "Box", "Self", "T", "E", "C", "V",
+        "From", "Into", "Vec", "String", "Result", "Option",
+    }
+    for ex in excerpts:
+        seen_here: set[str] = set()
+        for m in type_re.finditer(ex):
+            t = m.group(1)
+            # Filter: must be longer than 3 chars OR clearly composite.
+            bare = t.split("<", 1)[0]
+            if bare in skip:
+                continue
+            if len(bare) < 4 and "<" not in t:
+                continue
+            if t in seen_here:
+                continue  # one count per excerpt
+            seen_here.add(t)
+            tok[t] += 1
+    return [(t, n) for t, n in tok.most_common(top_n) if n >= 2]
+
+
+def _promoted_error_rules(fr_path: "Path | None" = None) -> str:
+    """Return a compact block listing error codes that have recurred 3+
+    times this run, with their canonical fix hint and (P6.3) any shared
+    type-tokens mined from the error excerpts.
+
+    P6.4: when `fr_path` is provided, scan stored model notes for
+    `[E0xxx,...]` prefix tags and append up to 2 matching past notes
+    per promoted code (most-recent first, deduped). This gives the LLM
+    the exact rule it wrote for itself the previous time the same code
+    fired."""
+    if not _ERROR_CODE_COUNTS:
+        return ""
+    # Pre-build code → notes index from the FR file (P6.4).
+    code_to_notes: dict[str, list[str]] = {}
+    if fr_path is not None:
+        try:
+            stored = _load_model_notes(fr_path)
+        except Exception:
+            stored = []
+        tag_re = re.compile(r"^\[((?:E\d{3,4})(?:,E\d{3,4})*)\]\s*(.+)$")
+        # Walk newest-first so the most recent rule wins per code.
+        for n in reversed(stored):
+            m = tag_re.match(n)
+            if not m:
+                continue
+            body = m.group(2).strip()
+            for code in m.group(1).split(","):
+                bucket = code_to_notes.setdefault(code, [])
+                if body not in bucket:
+                    bucket.append(body)
+
+    promoted: list[str] = []
+    for code, count in _ERROR_CODE_COUNTS.most_common():
+        if count < _ERROR_CODE_PROMOTED_THRESHOLD:
+            break
+        hint = _ERROR_CODE_HINTS.get(code,
+                                      f"recurring; rustc --explain {code} for details.")
+        # P6.3: mine common type tokens from the excerpts for this code.
+        common = _mine_common_tokens(_ERROR_CODE_EXCERPTS.get(code, []))
+        if common:
+            shared = ", ".join(f"`{t}`" for t, _ in common[:3])
+            promoted.append(
+                f"  {code} (seen {count}×, often on {shared}): {hint}")
+        else:
+            promoted.append(f"  {code} (seen {count}×): {hint}")
+        # P6.4: surface past notes tagged with this code.
+        for past in code_to_notes.get(code, [])[:2]:
+            past_short = past if len(past) <= 240 else past[:237] + "..."
+            promoted.append(f"    ↳ past note: {past_short}")
+    if not promoted:
+        return ""
+    return ("These errors keep recurring in this run; address them proactively:\n"
+            + "\n".join(promoted))
+
+
 _GRACEFUL_SENTINEL_PATH = Path("/tmp/pipeline_graceful_stop")
-_PER_FN_FIX_CAP = int(os.getenv("PHASE_C_FIX_CAP_PER_FN", "10"))
-_PER_PASS_TEST_FIX_CAP = int(os.getenv("PHASE_C_FIX_CAP_PER_PASS", "5"))
+# P7.2: per-fn cargo-check inner loop is now governed by a failure-floor
+# stall budget against rustc error count. Legacy `PHASE_C_FIX_CAP_PER_FN`
+# alias is honored for the hard cap.
+_PER_FN_FIX_HARD_CAP = int(os.getenv(
+    "PHASE_C_FN_HARD_CAP",
+    os.getenv("PHASE_C_FIX_CAP_PER_FN", "30"),
+))
+_PER_FN_FIX_MAX_STALLS = int(os.getenv("PHASE_C_FN_MAX_STALLS", "3"))
+_PER_FN_FIX_CAP = _PER_FN_FIX_HARD_CAP  # back-compat alias
+# P1: per-pass test-fix loop now governed by a failure-floor stall budget,
+# not a flat count. Iterate as long as the minimum failure count keeps
+# decreasing. Break when N consecutive iterations make no new minimum, or
+# when the absolute hard cap fires (runaway safety). `PHASE_C_FIX_CAP_PER_PASS`
+# is the legacy alias for the hard cap; kept for backward compatibility.
+_PER_PASS_TEST_FIX_MAX_STALLS = int(os.getenv("PHASE_C_TEST_FIX_MAX_STALLS", "3"))
+_PER_PASS_TEST_FIX_HARD_CAP = int(os.getenv(
+    "PHASE_C_TEST_FIX_HARD_CAP",
+    os.getenv("PHASE_C_FIX_CAP_PER_PASS", "100"),
+))
+
+# P4: directory under each project workspace where Phase C test-fix
+# iterations are archived for post-hoc retrospective. Per-iter file:
+# tmp/{project}/.phase_c_logs/{cluster}/pass_{n}/fix_{iter}.txt
+_PHASE_C_LOGS_DIRNAME = ".phase_c_logs"
+
+
+# P7.1: shared improvement-driven loop primitive. Every fix/retry loop in
+# the pipeline converges on the same shape — run a check, if it fails feed
+# the output to a fix step, repeat while the failure metric keeps falling.
+# Numeric caps survive only as runaway-safety hard ceilings; the real exit
+# is "no new minimum for K consecutive iterations".
+#
+# Used by Phase C per-fn (L1), task3 inline retry (L5), generate_fix_loop
+# (L6), task2 build retries (L4), Phase C pass loop (L2), task0c (L3).
+
+def _improvement_loop(
+    *,
+    name: str,
+    run_check,                    # () -> (ok: bool, output: str, metric: int)
+    do_fix,                       # (output: str, history: list[dict]) -> dict
+    do_retro=None,                # optional (output, history) -> str — extra
+                                  # retro context appended to next fix prompt
+    max_stalls: int = 3,
+    hard_cap: int = 100,
+    on_iter=None,                 # optional (record: dict) -> None — archival
+) -> tuple[bool, str, list[dict]]:
+    """Iterate while a numeric failure metric keeps strictly decreasing.
+
+    `run_check` returns (ok, output, metric). When ok is True the loop
+    returns immediately with (True, output, history).
+
+    Otherwise `do_fix(output, history)` performs one attempt at fixing
+    the failure. Its return value is appended to `history` (the caller
+    decides what fields to include — `body`, `error_sig`, `outcome`,
+    etc.; `_improvement_loop` adds bookkeeping fields).
+
+    Stop conditions, in priority order:
+      1. `run_check` returns ok=True → return (True, output, history).
+      2. Stall counter ≥ max_stalls → return (False, last_output, history).
+      3. Iter counter ≥ hard_cap → return (False, last_output, history).
+      4. `do_fix` returns dict with key 'abort': True → return.
+
+    Emits `loop.iter` events for monitor.py consumption.
+    """
+    history: list[dict] = []
+    last_output = ""
+    best_metric: int | None = None
+    stall = 0
+    iter_n = 0
+
+    while iter_n < hard_cap:
+        ok, output, metric = run_check()
+        last_output = output
+        if ok:
+            return True, output, history
+        if best_metric is None:
+            best_metric = metric
+
+        # Compute retro for iter ≥ 2 (the first failure goes straight to
+        # do_fix; classifier/retro fires only after one naive attempt).
+        retro = ""
+        if iter_n >= 1 and do_retro is not None:
+            try:
+                retro = do_retro(output, history) or ""
+            except Exception as e:
+                _log(f"  [improvement_loop/{name}] do_retro failed: {e}")
+                retro = ""
+
+        iter_n += 1
+        try:
+            record = do_fix(output, history) or {}
+        except Exception as e:
+            _log(f"  [improvement_loop/{name}] do_fix raised: {e}")
+            record = {"abort": True, "reason": f"do_fix_exception: {e}"}
+
+        # Re-measure metric AFTER the fix so the next iter's check decides
+        # whether stall increments. We must run run_check again here to
+        # observe the post-fix state — record may carry a fresh `metric`
+        # hint, but we let run_check be the source of truth on the next
+        # iter. The current iter just bookkeeps the pre-fix metric.
+        new_metric = record.get("post_fix_metric", metric)
+        improved = (new_metric < best_metric)
+        if improved:
+            best_metric = new_metric
+            stall = 0
+        else:
+            stall += 1
+
+        ev = {
+            "name": name,
+            "iter": iter_n,
+            "metric_prev": metric,
+            "metric_new": new_metric,
+            "metric_best": best_metric,
+            "improved": improved,
+            "stalled": stall,
+            "fix_summary": record.get("summary", ""),
+            "retro_chars": len(retro),
+        }
+        try:
+            _emit("loop.iter", data=ev)
+        except Exception:
+            pass
+        if on_iter is not None:
+            try:
+                on_iter(ev | {"output": output, "record": record,
+                              "retro": retro})
+            except Exception as e:
+                _log(f"  [improvement_loop/{name}] on_iter raised: {e}")
+
+        history.append({"iter": iter_n, **record, "retro": retro,
+                        "metric": metric, "post_fix_metric": new_metric})
+
+        if record.get("abort"):
+            _log(f"  [improvement_loop/{name}] aborted at iter {iter_n}: "
+                 f"{record.get('reason', 'unknown')}")
+            return False, last_output, history
+        if stall >= max_stalls:
+            _log(f"  [improvement_loop/{name}] floor stalled at "
+                 f"{best_metric} for {stall} iter(s) — stopping.")
+            return False, last_output, history
+
+    _log(f"  [improvement_loop/{name}] hard cap {hard_cap} reached — stopping.")
+    return False, last_output, history
+
+
+def _write_phase_c_test_fix_log(
+    project_dir: Path,
+    cluster_name: str,
+    pass_n: int,
+    fix_iter: int,
+    test_out: str,
+    failed_tests: list[str],
+    fns_retried: list[tuple[str, str]],
+    cur_fail_count: int,
+    new_fail_count: int,
+    best_fail_count: int,
+    stall: int,
+) -> None:
+    """Archive one test-fix iteration to disk for post-hoc analysis (P4).
+    Failure to write is non-fatal: this is observability, not control flow.
+    """
+    try:
+        out_dir = (project_dir / _PHASE_C_LOGS_DIRNAME
+                   / cluster_name / f"pass_{pass_n}")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        fp = out_dir / f"fix_{fix_iter:02d}.txt"
+        header = (
+            f"# Phase C test-fix iteration\n"
+            f"cluster: {cluster_name}\n"
+            f"pass:    {pass_n}\n"
+            f"iter:    {fix_iter}\n"
+            f"prev_fail_count: {cur_fail_count}\n"
+            f"new_fail_count:  {new_fail_count}\n"
+            f"best_fail_count: {best_fail_count}\n"
+            f"stalled:         {stall}\n"
+            f"failed_tests:\n"
+            + "".join(f"  - {t}\n" for t in failed_tests)
+            + f"fns_retried:\n"
+            + "".join(f"  - {r}::{f}\n" for r, f in fns_retried)
+            + "\n=== cargo test output ===\n"
+        )
+        fp.write_text(header + test_out, encoding="utf-8")
+    except Exception as e:
+        _log(f"  [phase-c/per-fn] failed to write test-fix log: {e}")
+
+
+# P3: classification step run before each post-stall test-fix iteration.
+# A single LLM call labels each failing test into a small fixed taxonomy so
+# the loop can target the right fn(s) instead of bluntly retrying everything
+# that was filled this pass.
+
+_PHASE_C_CLASSIFIER_CATEGORIES = (
+    "BAD_FILL", "TEST_PRECONDITION_MISSING",
+    "CFG_BOUNDARY", "PANIC_OR_TIMEOUT", "ENV_DEPENDENT",
+)
+
+
+def _classify_phase_c_test_failures(
+    test_out: str,
+    filled_this_pass: list[tuple[str, str]],
+    failed_tests: list[str],
+    cluster_name: str,
+) -> dict[str, dict]:
+    """Ask the LLM to classify each failing test. Returns
+        {test_name: {"category": str, "fn": "file::name" | "", "reason": str}}.
+    Empty dict on failure / no failing tests / classifier disabled.
+
+    This is a single short LLM call; one inference for the whole set, not
+    one per test. Output schema is strictly enforced by line-level parsing.
+    Unknown categories or unparseable lines are dropped (silently — we'd
+    rather fall back to the naive "retry everything" path than block the loop).
+    """
+    if not failed_tests:
+        return {}
+    if os.getenv("PHASE_C_TEST_FIX_USE_CLASSIFIER", "1") == "0":
+        return {}
+
+    # Budget the test_out excerpt: classifier needs to see error blocks but
+    # has no need for the full multi-MB cargo output.
+    excerpt = test_out[-6000:] if len(test_out) > 6000 else test_out
+
+    filled_lines = "\n".join(f"  - {r}::{f}" for r, f in filled_this_pass[:60])
+    failing_lines = "\n".join(f"  - {t}" for t in failed_tests[:30])
+
+    prompt = (
+        f"You are diagnosing a Rust test failure in cluster `{cluster_name}` "
+        f"of a source-reconstruction pipeline. The fns listed below were filled "
+        f"this pass; the tests listed below failed. For each failing test, "
+        f"classify the most likely cause and (when applicable) name the fn that "
+        f"should be re-implemented.\n\n"
+        f"Categories:\n"
+        f"  BAD_FILL                  — a fn just filled this pass has a wrong "
+        f"body; name the fn (file::name).\n"
+        f"  TEST_PRECONDITION_MISSING — the failing test depends on a DIFFERENT "
+        f"fn that hasn't been filled correctly yet; name the suspect fn if you "
+        f"can identify it from the error.\n"
+        f"  CFG_BOUNDARY              — the failure points at code excluded "
+        f"from this cluster's cfg-set (different cluster owns it).\n"
+        f"  PANIC_OR_TIMEOUT          — the test compiled but panicked at runtime, "
+        f"or timed out. Include the panic site/frame if visible.\n"
+        f"  ENV_DEPENDENT             — failure stems from environment (missing "
+        f"file, env var, network), not the fill body.\n\n"
+        f"FNs filled this pass:\n{filled_lines}\n\n"
+        f"Failing tests:\n{failing_lines}\n\n"
+        f"Cargo test output (tail):\n```\n{excerpt}\n```\n\n"
+        f"Output one line PER failing test, EXACT format:\n"
+        f"  TEST <name>: <CATEGORY> [fn=<file::name>] — <one-sentence reason>\n"
+        f"The fn= field is required for BAD_FILL and TEST_PRECONDITION_MISSING; "
+        f"omit the [...] block for the other categories.\n"
+        f"Do not output anything else."
+    )
+
+    try:
+        result = ask(prompt, model=_TASK0C_MODEL, max_tokens=2048, think=None)
+    except Exception as e:
+        _log(f"  [phase-c/classifier] LLM call failed: {e}")
+        return {}
+
+    out: dict[str, dict] = {}
+    line_re = re.compile(
+        r"^\s*TEST\s+(?P<test>\S+?)\s*:\s*"
+        r"(?P<cat>[A-Z_]+)\s*"
+        r"(?:\[fn=(?P<fn>[^\]]+)\])?\s*"
+        r"(?:—|-)\s*"
+        r"(?P<reason>.+?)\s*$"
+    )
+    for ln in result.splitlines():
+        m = line_re.match(ln)
+        if not m:
+            continue
+        cat = m.group("cat")
+        if cat not in _PHASE_C_CLASSIFIER_CATEGORIES:
+            continue
+        out[m.group("test")] = {
+            "category": cat,
+            "fn": (m.group("fn") or "").strip(),
+            "reason": m.group("reason").strip(),
+        }
+    return out
 
 
 def _check_graceful_stop(context: str) -> None:
@@ -5611,42 +6691,85 @@ def _strip_cargo_warnings(output: str) -> str:
     return "\n".join(out)
 
 
-def _focus_cargo_errors(output: str, file_rel: str, max_chars: int = 2500) -> str:
+def _focus_cargo_errors(output: str, file_rel: str, max_chars: int = 4000) -> str:
     """Extract a focused error excerpt from cargo output.
 
-    Strategy: drop warning blocks first, then keep lines whose `-->` location
-    mentions `file_rel`'s basename, plus all `error[...]` / `error:` heading
-    lines. Falls back to the (warning-free) head of output when filtering
-    finds nothing.
+    P3.7 tiered output. Two groups of error blocks:
+      - In-target-file: blocks whose `-->` mentions `file_rel`'s basename
+      - Cross-file: blocks whose `-->` mentions any other .rs file
+    Returned with a header demarcating the two. Budget split 60/40 in favour
+    of in-target. Warnings dropped first.
+
+    A bad fill in error.rs can break compilation in lib.rs (downstream
+    consumer of error.rs). Without the cross-file slice, the model would
+    not see the real symptom — only the absence of expected errors in its
+    own file.
     """
     output = _strip_cargo_warnings(output)
     base = file_rel.rsplit("/", 1)[-1]
-    keep: list[str] = []
+    in_blocks: list[list[str]] = []
+    cross_blocks: list[list[str]] = []
     in_err_block = False
     cur_block: list[str] = []
-    block_is_relevant = False
+    has_target = False
+    has_any_loc = False
     for ln in output.splitlines():
         if ln.startswith("error[") or ln.startswith("error: ") or re.match(r"^error\b", ln):
-            # flush previous block
-            if in_err_block and block_is_relevant:
-                keep.extend(cur_block)
+            if in_err_block and cur_block:
+                if has_target:
+                    in_blocks.append(cur_block)
+                elif has_any_loc:
+                    cross_blocks.append(cur_block)
             cur_block = [ln]
             in_err_block = True
-            block_is_relevant = False
+            has_target = False
+            has_any_loc = False
         elif in_err_block:
             cur_block.append(ln)
             if base in ln:
-                block_is_relevant = True
+                has_target = True
+            if re.search(r"\.rs:\d+", ln):
+                has_any_loc = True
             if ln.strip() == "" and cur_block:
-                if block_is_relevant:
-                    keep.extend(cur_block)
+                if has_target:
+                    in_blocks.append(cur_block)
+                elif has_any_loc:
+                    cross_blocks.append(cur_block)
                 cur_block = []
                 in_err_block = False
-                block_is_relevant = False
-    if in_err_block and block_is_relevant:
-        keep.extend(cur_block)
-    excerpt = "\n".join(keep) if keep else output
-    return excerpt[:max_chars]
+                has_target = False
+                has_any_loc = False
+    if in_err_block and cur_block:
+        if has_target:
+            in_blocks.append(cur_block)
+        elif has_any_loc:
+            cross_blocks.append(cur_block)
+
+    if not in_blocks and not cross_blocks:
+        return output[:max_chars]
+
+    in_budget = int(max_chars * 0.6)
+    cross_budget = max_chars - in_budget
+    parts: list[str] = []
+    if in_blocks:
+        parts.append("# Errors in target file:")
+        used = 0
+        for b in in_blocks:
+            txt = "\n".join(b)
+            if used + len(txt) + 1 > in_budget:
+                break
+            parts.append(txt)
+            used += len(txt) + 1
+    if cross_blocks:
+        parts.append("# Errors elsewhere in the crate (likely downstream of the target):")
+        used = 0
+        for b in cross_blocks:
+            txt = "\n".join(b)
+            if used + len(txt) + 1 > cross_budget:
+                break
+            parts.append(txt)
+            used += len(txt) + 1
+    return "\n".join(parts)[:max_chars]
 
 
 def _build_per_fn_fix_prompt(
@@ -5661,8 +6784,24 @@ def _build_per_fn_fix_prompt(
     error_excerpt: str,
     macros_section: str = "",
     notes_section: str = "",
+    container: str = "",
+    types_section: str = "",
+    allow_sig_change: bool = False,
+    fr_path: "Path | None" = None,
+    attempt_history: "list[dict] | None" = None,
 ) -> str:
-    """Re-prompt for a fn whose previous fill broke `cargo check`."""
+    """Re-prompt for a fn whose previous fill broke `cargo check`.
+
+    When `allow_sig_change` is True (P3.1, fired by the per-fn loop after
+    attempt 5), the prompt invites the model to optionally return a
+    <SIGNATURE>...</SIGNATURE> block proposing a new sig (e.g. adding a
+    `T: 'static` bound). The loop applies it only when the fn is non-pub.
+
+    P2: `attempt_history` is a list of dicts (oldest first), each of:
+        {"attempt": int, "body": str, "error_sig": str, "outcome": str}
+    Rendered as a <PRIOR_ATTEMPTS> block so the model sees what it has
+    already tried (and what failed) rather than re-deriving from scratch.
+    """
     tests_section = ""
     if test_blocks:
         parts = [f'<TEST path="{p}">\n{t}\n</TEST>' for p, t in test_blocks]
@@ -5672,13 +6811,61 @@ def _build_per_fn_fix_prompt(
     annotated = _annotate_file_view(file_text, fn_name)
     notes_block = f"\n<MODEL_NOTES>\n{notes_section}\n</MODEL_NOTES>\n" if notes_section else ""
     macros_block = f"\n<MACROS>\n{macros_section}\n</MACROS>\n" if macros_section else ""
+    # P3.2: full detail block for gotchas matching the current error.
+    gotcha_detail = _gotchas_for_error(error_excerpt)
+    gotchas_block = (
+        f"\n<RUST_GOTCHAS_DETAIL>\n{gotcha_detail}\n</RUST_GOTCHAS_DETAIL>\n"
+        if gotcha_detail else ""
+    )
+    container_line = f"In: {container}\n" if container else ""
+    types_block = f"\n<TYPES_IN_SCOPE>\n{types_section}\n</TYPES_IN_SCOPE>\n" if types_section else ""
+    _trait_text2 = _trait_contract_for(container)
+    trait_block = f"\n<TRAIT_CONTRACT>\n{_trait_text2}\n</TRAIT_CONTRACT>\n" if _trait_text2 else ""
+    _recurring2 = _promoted_error_rules(fr_path)
+    recurring_block = f"\n<RECURRING_ERRORS>\n{_recurring2}\n</RECURRING_ERRORS>\n" if _recurring2 else ""
+    # P2: prior-attempts block. Show up to the last 3 distinct attempts
+    # with their compact error signature, so the model can see the search
+    # space it has already explored. Budget capped to keep prompt lean.
+    prior_block = ""
+    if attempt_history:
+        _PRIOR_MAX_ITEMS = 3
+        _PRIOR_BODY_CAP = 320
+        _PRIOR_ERR_CAP = 180
+        recent = attempt_history[-_PRIOR_MAX_ITEMS:]
+        rendered: list[str] = []
+        for h in recent:
+            body_excerpt = (h.get("body") or "").strip()
+            if len(body_excerpt) > _PRIOR_BODY_CAP:
+                body_excerpt = body_excerpt[:_PRIOR_BODY_CAP] + "..."
+            err_excerpt = (h.get("error_sig") or "").strip()
+            if len(err_excerpt) > _PRIOR_ERR_CAP:
+                err_excerpt = err_excerpt[:_PRIOR_ERR_CAP] + "..."
+            outcome = h.get("outcome", "fail")
+            attempt_n = h.get("attempt", "?")
+            rendered.append(
+                f"attempt {attempt_n} → {outcome}\n"
+                f"body:\n{body_excerpt}\n"
+                f"errors:\n{err_excerpt}"
+            )
+        if rendered:
+            prior_block = (
+                "\n<PRIOR_ATTEMPTS>\n"
+                "These bodies have already been tried for THIS fn and failed.\n"
+                "Do not repeat them — try a structurally different approach.\n\n"
+                + "\n---\n".join(rendered)
+                + "\n</PRIOR_ATTEMPTS>\n"
+            )
     return f"""RE-implement ONE Rust function. Previous attempt broke cargo check.
 Diagnose the errors, return a corrected body. Don't repeat the previous body.
 
 Crate: {module_name} | Cluster: {cluster_name} | File: {file_rel} | Fn: {fn_name}
-Signature (verbatim, do not change):
+{container_line}Signature (verbatim, do not change):
 {sig_text}
-{notes_block}
+
+<RUST_GOTCHAS>
+{_gotchas_summary()}
+</RUST_GOTCHAS>
+{gotchas_block}{trait_block}{types_block}{recurring_block}{notes_block}{prior_block}
 FILE (previous attempt reverted; stubs annotated):
 <FILE path="{file_rel}">
 {annotated}
@@ -5699,12 +6886,25 @@ Output:
   <BODY>
   corrected body without surrounding braces
   </BODY>
-
+{
+("\nIf the fix REQUIRES a signature change (e.g. adding `T: 'static`, "
+ "tightening lifetimes, or relaxing a generic bound), AND the function is "
+ "private (not pub), include a `<SIGNATURE>` block AFTER your `<BODY>`:\n"
+ "  <SIGNATURE>\n"
+ "  unsafe fn " + fn_name + "<E: 'static>(e: Own<ErrorImpl>, target: TypeId) {{\n"
+ "  </SIGNATURE>\n"
+ "The signature line must end at the opening brace `{{`. We will splice it "
+ "in place of the current signature. This option is available only after "
+ "multiple failed attempts; use it only when the body cannot be made to "
+ "compile under the existing signature."
+ if allow_sig_change else "")
+}
 Rules:
-- Body only — no sig, no markdown, no use statements inside body.
+- Body only — no sig in the BODY block.
 - Use fully-qualified paths for symbols not in the file's `use` block.
 - No unimplemented!()/todo!()/panic-only. Omit <BODY> if you cannot fix.
-"""
+{("- Public fns: signature MUST remain verbatim (tests depend on it).\n"
+  if allow_sig_change else "")}"""
 
 
 def _run_cargo(cmd: str, cwd: Path, env: dict, timeout: int = 180) -> tuple[int, str]:
@@ -5787,7 +6987,7 @@ def _task2_fill_fns_one_by_one(
     check_cmd: str = "cargo check",
     cluster_env: dict | None = None,
     max_passes: int = 3,
-    prestrip_dir: Path | None = None,
+    leaf_name_counts: dict[str, int] | None = None,
     fr_path: Path | None = None,
 ) -> dict:
     """Phase C — Flavour B with full validation loops.
@@ -5812,6 +7012,20 @@ def _task2_fill_fns_one_by_one(
     bytes_before = sum(p.stat().st_size for p in target_src_dir.rglob("*.rs"))
     fns_filled = 0
     attempts = 0
+    # P4: PHASE_C_PARALLELISM env knob.
+    #   1 = strictly sequential — single worker, identical quality.
+    #  >1 = up to N concurrent fn-fills via worker threads. LLM calls
+    #       overlap; splice + cargo check is serialised through a global
+    #       lock (cargo's own target/.cargo-lock blocks concurrent invocations
+    #       anyway, and we want predictable file mutations).
+    _parallelism = max(1, int(os.getenv("PHASE_C_PARALLELISM", "1")))
+    if _parallelism > 1:
+        _log(f"  [phase-c/per-fn] parallelism={_parallelism} (LLM calls "
+             f"concurrent; splice+cargo serialised).")
+    import threading as _threading
+    import queue as _queue_mod
+    _splice_check_lock = _threading.Lock()
+    _counters_lock = _threading.Lock()
     errors: list[str] = []
 
     failures_dir = project_dir / ".skeleton" / "_failures"
@@ -5820,44 +7034,148 @@ def _task2_fill_fns_one_by_one(
     # C: crate-wide macros (cached across passes — file set doesn't change).
     _src_for_macros = target_src_dir / "src" if (target_src_dir / "src").exists() else target_src_dir
     macros_section = _collect_crate_macros(_src_for_macros)
+    # P5.1: crate-wide type records (struct/enum/type/trait with fields +
+    # method names). Used per-fn to inject only the types the fn's signature
+    # actually mentions. Cached across passes; file set doesn't change.
+    _crate_type_records = _enumerate_types_via_extractor(target_src_dir) or []
+
+    # P7.6: floor-stall against (remaining_stubs + last_pass_failures) across
+    # passes. max_passes becomes the hard cap. A pass that strictly decreases
+    # the metric resets the stall counter; otherwise we increment. The legacy
+    # `progress_this_pass == 0` early exit is preserved as a fast path.
+    _pass_max_stalls = int(os.getenv("PHASE_C_PASS_MAX_STALLS", "2"))
+    _pass_best_metric: int | None = None
+    _pass_stall = 0
+    _pass_last_fail_count = 0
 
     for pass_n in range(1, max_passes + 1):
         _check_graceful_stop(f"per-fn pass {pass_n}")
         # Note: every pass scans for stubs fresh. Fns that failed their
         # fix-loop in earlier passes are now annotated stubs (sentinel +
-        # commented failure history). _scan_unimplemented_functions returns
-        # them again here, so passes 2/3 retry them with the new context
-        # of siblings that have been filled in the meantime.
-        stubs = _scan_unimplemented_functions(target_src_dir)
+        # commented failure history) and re-appear here, so passes 2/3
+        # retry them with the new context of siblings filled meanwhile.
+        # Cluster-aware filter: skip stubs whose enclosing cfg doesn't
+        # match the current cluster's cfg_set (P5 focused fix). Avoids
+        # wasted fills of e.g. nightly-only fns from the stable cluster.
+        # Prefer record-based scan (syn enumerator gives container + sig_text
+        # which disambiguates same-named fns like Display::fmt vs Debug::fmt).
+        # Falls back to name-only tuples when the extractor isn't available.
+        recs = _scan_unimplemented_records_for_cluster(target_src_dir, cluster)
+        if recs is not None:
+            stubs = recs
+        else:
+            stubs = [{"file": f, "fn_name": fn, "container": "", "sig_text": ""}
+                     for f, fn in _scan_unimplemented_for_cluster(target_src_dir, cluster)]
         if not stubs:
             break
         # D: leaf-first order — most-referenced fns first.
-        stubs = _leaf_first_fn_order(stubs, prestrip_dir)
+        _tuples = [(r["file"], r["fn_name"]) for r in stubs]
+        _ordered_tuples = _leaf_first_fn_order(_tuples, leaf_name_counts)
+        # Reorder records to match the leaf-first tuple order. When the same
+        # (file, fn_name) appears multiple times (same-named fns), preserve
+        # their relative order.
+        _seen: dict[tuple[str, str], int] = {}
+        _reordered: list[dict] = []
+        for tup in _ordered_tuples:
+            matches = [r for r in stubs if (r["file"], r["fn_name"]) == tup]
+            taken = _seen.get(tup, 0)
+            if taken < len(matches):
+                _reordered.append(matches[taken])
+                _seen[tup] = taken + 1
+        stubs = _reordered
+        # Count total fns in the cluster (regardless of body state). Used by
+        # monitor to render a CUMULATIVE progress bar across restarts —
+        # filled = total - stubs_at_pass_start + pass_fills_done.
+        _total_fns_in_cluster = 0
+        try:
+            _all_recs = _enumerate_fns_via_extractor(target_src_dir) or []
+            if cluster is not None:
+                _all_recs = [r for r in _all_recs
+                              if _fn_belongs_to_cluster(target_src_dir, r["file"], r["fn_name"], cluster)]
+            _total_fns_in_cluster = len(_all_recs)
+        except Exception:
+            _total_fns_in_cluster = len(stubs)  # fallback
         _log(f"  [phase-c/per-fn] pass {pass_n}/{max_passes}: "
-             f"{len(stubs)} stub(s) to fill in cluster '{cluster_name}'.")
+             f"{len(stubs)} stub(s) to fill in cluster '{cluster_name}' "
+             f"({_total_fns_in_cluster - len(stubs)}/{_total_fns_in_cluster} "
+             f"already filled).")
         _pass_t0 = time.monotonic()
         _emit("phase_c.pass.start", data={
             "pass_n": pass_n, "cluster": cluster_name, "stubs": len(stubs),
             "max_passes": max_passes,
+            "total_fns_in_cluster": _total_fns_in_cluster,
         })
         progress_this_pass = 0
         filled_this_pass: list[tuple[str, str]] = []  # [(file_rel, fn_name)]
 
-        for idx, (rel_file, fn_name) in enumerate(stubs, 1):
+        # P4: queue of (idx, rec) pairs consumed by workers. Sequential mode
+        # = 1 worker; parallel mode = N workers concurrently. Workers exit
+        # when the queue is empty.
+        _work_queue: _queue_mod.Queue = _queue_mod.Queue()
+        for _i, _r in enumerate(stubs, 1):
+            _work_queue.put((_i, _r))
+
+        def _worker():
+            nonlocal attempts, fns_filled, progress_this_pass
+            while True:
+                try:
+                    idx, rec = _work_queue.get_nowait()
+                except _queue_mod.Empty:
+                    return
+                try:
+                    _process_one_stub(idx, rec)
+                except Exception as _e:
+                    # Isolate worker failures so a single bad fn doesn't
+                    # kill the worker thread (others keep draining the queue).
+                    _log(f"  [phase-c/per-fn] worker error on "
+                         f"{rec.get('file')}::{rec.get('fn_name')}: {_e}")
+                    with _counters_lock:
+                        errors.append(f"{rec.get('file')}::{rec.get('fn_name')}: "
+                                      f"worker exception: {_e}")
+
+        def _process_one_stub(idx, rec):
+            nonlocal attempts, fns_filled, progress_this_pass
+            rel_file = rec["file"]
+            fn_name = rec["fn_name"]
+            container = rec.get("container", "")
+            sig_text = rec.get("sig_text", "")
             _check_graceful_stop(f"per-fn pass {pass_n} fn {fn_name}")
             file_path = target_src_dir / rel_file
             try:
                 snapshot = file_path.read_text(encoding="utf-8")
             except Exception:
-                continue
-            loc = _locate_fn(snapshot, fn_name)
-            if loc is None:
-                continue
-            sig_text, _, _, _ = loc
+                return
+            # Resolve current offsets — file may have been modified by prior
+            # fills in this pass, shifting byte positions. Re-enumerate to
+            # find this specific record's current location.
+            loc_at = _locate_fn_by_record(file_path, fn_name, container, sig_text)
+            if loc_at is None:
+                # Fall back to regex locator (for tests-fixture path where
+                # the extractor binary isn't built).
+                loc = _locate_fn(snapshot, fn_name)
+                if loc is None:
+                    return
+                sig_text = sig_text or loc[0]
+                loc_sig_start = loc[1]
+                loc_body_start = loc[2]
+                loc_body_end = loc[3]
+            else:
+                loc_sig_start, loc_body_start, loc_body_end, sig_text = loc_at
             test_blocks = _find_tests_for_fn(
                 tests_dir_files, fn_name,
                 file_rel=rel_file, src_dir=_src_for_macros,
+                container=container,
             )
+            # P5.1: pick type records that the fn's signature OR container
+            # name mentions. These get inserted as <TYPES_IN_SCOPE> so the
+            # model knows fields vs methods on Own/Ref/ErrorImpl/etc.
+            _type_search_text = f"{sig_text}\n{container}"
+            _types_for_fn = _types_referenced_in_text(
+                _type_search_text, _crate_type_records)
+            # Cap to ~6 types and ~3 KB to keep prompts focused.
+            _types_for_fn = _types_for_fn[:6]
+            types_section = "\n\n".join(
+                _format_type_for_prompt(r) for r in _types_for_fn)[:3000]
             _fn_t0 = time.monotonic()
             _emit("phase_c.fn.fill.start", data={
                 "cluster": cluster_name, "pass_n": pass_n,
@@ -5866,15 +7184,12 @@ def _task2_fill_fns_one_by_one(
                 "sig_chars": len(sig_text),
             })
 
-            # Load notes relevant to this (file, fn) — fresh per fn so a
-            # note added during this fn's own fix loop becomes visible to
-            # later fns in the same pass.
+            # Notes loaded inside the fix-loop on every iteration so that
+            # (a) notes added during this fn's own fix loop become visible
+            # to later iterations, and (b) the relevance filter (P3.4) can
+            # use the CURRENT cargo error excerpt to prioritise notes whose
+            # error codes / keywords match.
             notes_section = ""
-            if fr_path is not None:
-                notes_section = _filter_model_notes_for_prompt(
-                    fr_path, file_rel=rel_file, fn_name=fn_name,
-                    file_text=snapshot,
-                )
 
             # === Inner fix loop ===
             success = False
@@ -5886,11 +7201,27 @@ def _task2_fill_fns_one_by_one(
             attempts_log: list[str] = []
             first_failed_body = ""
             first_error_excerpt = ""
+            # P2: history of (body, error_sig, outcome) for THIS fn's fix loop.
+            # Surfaced to the model in subsequent fix prompts so it sees the
+            # search space it has already explored.
+            per_fn_history: list[dict] = []
+            # P7.2: failure-floor stall tracking for the inner loop.
+            best_err_count: int | None = None
+            fn_stall = 0
             while fix_attempt < _PER_FN_FIX_CAP:
                 fix_attempt += 1
-                attempts += 1
+                with _counters_lock:
+                    attempts += 1
                 _check_graceful_stop(f"per-fn fix attempt {fix_attempt} for {fn_name}")
                 cur_text = file_path.read_text(encoding="utf-8")
+                # P3.4: re-filter notes each iteration using the LATEST
+                # cargo error so error-code/keyword matches bubble up.
+                if fr_path is not None:
+                    notes_section = _filter_model_notes_for_prompt(
+                        fr_path, file_rel=rel_file, fn_name=fn_name,
+                        file_text=cur_text,
+                        current_error=error_excerpt,
+                    )
                 if fix_attempt == 1:
                     prompt = _build_per_fn_prompt(
                         file_text=cur_text, fn_name=fn_name, sig_text=sig_text,
@@ -5898,6 +7229,9 @@ def _task2_fill_fns_one_by_one(
                         cluster_name=cluster_name, file_rel=rel_file,
                         macros_section=macros_section,
                         notes_section=notes_section,
+                        container=container,
+                        types_section=types_section,
+                        fr_path=fr_path,
                     )
                 else:
                     prompt = _build_per_fn_fix_prompt(
@@ -5907,6 +7241,14 @@ def _task2_fill_fns_one_by_one(
                         prev_body=last_body, error_excerpt=error_excerpt,
                         macros_section=macros_section,
                         notes_section=notes_section,
+                        container=container,
+                        types_section=types_section,
+                        # P3.1: open the sig-change escape hatch after multiple
+                        # compile failures. The model can return an additional
+                        # <SIGNATURE> block; we splice it only when fn is non-pub.
+                        allow_sig_change=(fix_attempt >= 5),
+                        fr_path=fr_path,
+                        attempt_history=per_fn_history,  # P2
                     )
 
                 body, last_response = _ask_per_fn_body(prompt, fn_name, attempts_log)
@@ -5920,8 +7262,44 @@ def _task2_fill_fns_one_by_one(
                     })
                     break
 
-                ok, delta = _splice_fn_body(file_path, fn_name, body)
+                # P3.1: if the model proposed a sig change, try it FIRST so
+                # the body splice operates on the updated sig. Rolls back if
+                # the resulting cargo check still fails (revert via snapshot).
+                sig_swapped = False
+                if fix_attempt >= 5:
+                    proposed_sig = _extract_signature_block(last_response)
+                    if proposed_sig and _replace_fn_signature(file_path, fn_name, proposed_sig):
+                        sig_swapped = True
+                        # Refresh sig_text so subsequent prompts use the new one.
+                        new_loc = _locate_fn(file_path.read_text(encoding="utf-8"), fn_name)
+                        if new_loc is not None:
+                            sig_text = new_loc[0]
+                        _log(f"  [phase-c/per-fn] {fn_name}: sig swapped (attempt "
+                             f"{fix_attempt}): {sig_text}")
+
+                # Splice by exact byte offset. Re-enumerate just before
+                # splicing because prior fills (or our sig swap above) may
+                # have shifted offsets. When a fn's name is duplicated in a
+                # file (Display::fmt vs Debug::fmt), we disambiguate by
+                # container + sig_text in _locate_fn_by_record.
+                # P4: hold _splice_check_lock from splice through cargo check
+                # through the revert (if applicable). Other workers wait so
+                # we don't corrupt target/ with concurrent cargo invocations.
+                _splice_check_lock.acquire()
+                _lock_released = False
+                _splice_loc = _locate_fn_by_record(
+                    file_path, fn_name, container, sig_text)
+                if _splice_loc is not None:
+                    _, _bs, _be, _ = _splice_loc
+                    ok, delta = _splice_fn_body_at(file_path, _bs, _be, body)
+                else:
+                    # Fallback: regex-based locator. Less accurate for
+                    # same-name collisions but acceptable when the syn
+                    # binary isn't available.
+                    ok, delta = _splice_fn_body(file_path, fn_name, body)
                 if not ok:
+                    _splice_check_lock.release()
+                    _lock_released = True
                     # splice rejected (file changed or body was a stub)
                     _emit("phase_c.fn.fill.skip", data={
                         "cluster": cluster_name, "pass_n": pass_n,
@@ -5933,6 +7311,8 @@ def _task2_fill_fns_one_by_one(
 
                 rc, cargo_out = _run_cargo(check_cmd, target_src_dir, cluster_env)
                 if rc == 0:
+                    _splice_check_lock.release()
+                    _lock_released = True
                     success = True
                     _log(f"  [phase-c/per-fn] {idx}/{len(stubs)} filled "
                          f"{rel_file}::{fn_name} (+{delta} bytes, body={len(body)}"
@@ -5957,7 +7337,13 @@ def _task2_fill_fns_one_by_one(
                             error_excerpt=first_error_excerpt,
                             fixed_body=body,
                         )
-                        if note and _append_model_note(fr_path, note):
+                        # P6.4: tag the note with the error codes from the
+                        # original failure so it can be surfaced next time
+                        # any of those codes recurs.
+                        _ecodes = set(re.findall(r"\bE\d{3,4}\b",
+                                                  first_error_excerpt or ""))
+                        if note and _append_model_note(fr_path, note,
+                                                       error_codes=_ecodes):
                             _log(f"  [model-notes] +1 note (recovered): {note[:80]}...")
                             _emit("phase_c.note.added", data={
                                 "cluster": cluster_name, "pass_n": pass_n,
@@ -5971,8 +7357,50 @@ def _task2_fill_fns_one_by_one(
                     first_failed_body = body
                     first_error_excerpt = _focus_cargo_errors(cargo_out, rel_file)
 
+                # P5.5: track error codes seen so we can promote recurring
+                # ones to every subsequent prompt.
+                _record_error_codes_seen(cargo_out)
                 cur_err_sig = _cargo_err_sig(cargo_out)
+                # P2: record this failed attempt for the prior-attempts block.
+                # We store the focused excerpt (already tier-sliced) so the
+                # next prompt sees what really failed without re-paying budget.
+                _focused = _focus_cargo_errors(cargo_out, rel_file, max_chars=600)
+                per_fn_history.append({
+                    "attempt": fix_attempt,
+                    "body": body,
+                    "error_sig": _focused,
+                    "outcome": "compile_fail",
+                })
+                # P7.2: floor-stall against rustc error count. Reset stall
+                # when count strictly decreases; increment otherwise.
+                cur_err_count = len(cur_err_sig)
+                if best_err_count is None or cur_err_count < best_err_count:
+                    best_err_count = cur_err_count
+                    fn_stall = 0
+                else:
+                    fn_stall += 1
+                _emit("loop.iter", data={
+                    "name": "phase_c.per_fn",
+                    "cluster": cluster_name, "pass_n": pass_n,
+                    "file": rel_file, "fn": fn_name,
+                    "iter": fix_attempt,
+                    "metric_new": cur_err_count,
+                    "metric_best": best_err_count,
+                    "improved": fn_stall == 0,
+                    "stalled": fn_stall,
+                })
+                if fn_stall >= _PER_FN_FIX_MAX_STALLS:
+                    if not _lock_released:
+                        _splice_check_lock.release()
+                        _lock_released = True
+                    _log(f"  [phase-c/per-fn] {fn_name}: floor stalled at "
+                         f"{best_err_count} errors for {fn_stall} iter(s) — "
+                         f"stopping fix loop (attempt {fix_attempt}).")
+                    break
                 if cur_err_sig == prev_err_sig and fix_attempt > 1:
+                    if not _lock_released:
+                        _splice_check_lock.release()
+                        _lock_released = True
                     _log(f"  [phase-c/per-fn] {fn_name}: same error set after "
                          f"attempt {fix_attempt} — stopping fix loop.")
                     break
@@ -5983,6 +7411,9 @@ def _task2_fill_fns_one_by_one(
                 # the file as unimplemented again but with last_body + errors
                 # in the prompt.
                 file_path.write_text(snapshot, encoding="utf-8")
+                if not _lock_released:
+                    _splice_check_lock.release()
+                    _lock_released = True
                 _log(f"  [phase-c/per-fn] {fn_name}: compile failed "
                      f"(attempt {fix_attempt}); re-prompting with errors.")
 
@@ -5992,16 +7423,19 @@ def _task2_fill_fns_one_by_one(
                 # preserves the last attempt + cargo error as comments. The
                 # fn stays callable (unimplemented!() at the end) and a later
                 # pass will retry — by then more siblings in the file will be
-                # implemented, giving richer context.
-                file_path.write_text(snapshot, encoding="utf-8")
-                annotated_body = _make_failed_attempt_body(
-                    attempted_body=last_body or first_failed_body or "",
-                    error_excerpt=error_excerpt or first_error_excerpt or "",
-                    fix_attempts=fix_attempt,
-                )
-                _splice_fn_body(file_path, fn_name, annotated_body)
-                errors.append(f"{rel_file}::{fn_name}: fix loop exhausted "
-                              f"after {fix_attempt} attempt(s)")
+                # implemented, giving richer context. Lock the file-write
+                # phase against concurrent workers.
+                with _splice_check_lock:
+                    file_path.write_text(snapshot, encoding="utf-8")
+                    annotated_body = _make_failed_attempt_body(
+                        attempted_body=last_body or first_failed_body or "",
+                        error_excerpt=error_excerpt or first_error_excerpt or "",
+                        fix_attempts=fix_attempt,
+                    )
+                    _splice_fn_body(file_path, fn_name, annotated_body)
+                with _counters_lock:
+                    errors.append(f"{rel_file}::{fn_name}: fix loop exhausted "
+                                  f"after {fix_attempt} attempt(s)")
                 _emit("phase_c.fn.fill.fail", duration_ms=int(
                         (time.monotonic() - _fn_t0) * 1000),
                       data={
@@ -6019,7 +7453,14 @@ def _task2_fill_fns_one_by_one(
                         error_excerpt=error_excerpt or first_error_excerpt,
                         fixed_body="",  # no fixed body — fix loop exhausted
                     )
-                    if note and _append_model_note(fr_path, note):
+                    # P6.4: tag exhausted-fail notes with the codes seen
+                    # across the run so they re-surface for the same code.
+                    _ecodes2 = set(re.findall(r"\bE\d{3,4}\b",
+                                               (error_excerpt or "")
+                                               + " "
+                                               + (first_error_excerpt or "")))
+                    if note and _append_model_note(fr_path, note,
+                                                   error_codes=_ecodes2):
                         _log(f"  [model-notes] +1 note (exhausted): {note[:80]}...")
                         _emit("phase_c.note.added", data={
                             "cluster": cluster_name, "pass_n": pass_n,
@@ -6044,23 +7485,59 @@ def _task2_fill_fns_one_by_one(
                     pass
                 _log(f"  [phase-c/per-fn] {idx}/{len(stubs)} {rel_file}::{fn_name}: "
                      f"reverted after {fix_attempt} attempt(s).")
-                continue
+                return  # done with this fn — next worker grabs from queue
 
-            fns_filled += 1
-            progress_this_pass += 1
-            filled_this_pass.append((rel_file, fn_name))
+            with _counters_lock:
+                fns_filled += 1
+                progress_this_pass += 1
+                filled_this_pass.append((rel_file, fn_name))
 
-        # === Per-pass cargo test on tests touched by this pass's fills ===
-        if filled_this_pass:
+        # P4 dispatch: spawn N workers or run inline. Workers exit when the
+        # queue is empty. Sequential (parallelism=1) uses a single worker
+        # which is functionally identical to the previous for-loop path.
+        if _parallelism > 1:
+            _workers = [
+                _threading.Thread(target=_worker, name=f"per-fn-worker-{i}")
+                for i in range(_parallelism)
+            ]
+            for _t in _workers:
+                _t.start()
+            for _t in _workers:
+                _t.join()
+        else:
+            _worker()
+
+        # === Per-pass cargo test ===
+        # Always run at end of every pass, even when filled_this_pass is empty
+        # (e.g. cluster fully filled from a prior run). A pre-filled cluster
+        # without a test run silently passes through to Phase D — masking any
+        # breakage introduced by other clusters' fills or by previously-stalled
+        # fix loops. Run unconditionally so we always have signal.
+        if True:
             _check_graceful_stop(f"per-fn pass {pass_n} test phase")
             # Build the union of test files referenced by ANY fn filled this pass.
+            # Only keep paths under the project's `tests/` directory — those are
+            # the actual `cargo test --test {stem}` targets. Filter out anything
+            # else (e.g. src/*.gen_tests_*.rs siblings, which are imported via
+            # `#[path]` from src files, NOT compiled as separate test binaries —
+            # passing them to `--test` makes cargo fail at command-parse time
+            # with rc=101, which is what was breaking the per-pass test loop).
             test_paths: set[Path] = set()
             for rel_f, fn in filled_this_pass:
                 for tf in _find_tests_for_fn(
                     tests_dir_files, fn,
                     file_rel=rel_f, src_dir=_src_for_macros,
                 ):
-                    test_paths.add(Path(tf[0]))
+                    p = Path(tf[0])
+                    if "tests" in p.parts:
+                        test_paths.add(p)
+            # When nothing was filled this pass (or no test could be linked to
+            # the fills), fall back to the cluster's complete tests/ surface so
+            # we still get pass/fail signal for the whole cluster.
+            if not test_paths:
+                for p in tests_dir_files:
+                    if "tests" in p.parts:
+                        test_paths.add(p)
             test_stems = sorted({p.stem for p in test_paths})
             if test_stems:
                 test_cmd = _build_test_cmd(test_stems, cluster)
@@ -6083,21 +7560,106 @@ def _task2_fill_fns_one_by_one(
                     _log(f"  [phase-c/per-fn] pass {pass_n}: cargo test FAILED "
                          f"(rc={rc}).")
                     # === Per-pass test fix loop ===
+                    # P1: stall budget against the failure-floor — keep iterating
+                    # while the minimum failure count keeps decreasing. The
+                    # numeric count cap is reinterpreted as a runaway-safety
+                    # hard ceiling; the real exit is "no new minimum for K iters".
                     test_fix_attempt = 0
                     prev_test_sig: frozenset | None = None
-                    while test_fix_attempt < _PER_PASS_TEST_FIX_CAP:
+                    best_fail_count: int | None = None
+                    stall = 0
+                    # P2: per-(file, fn) attempt history maintained across
+                    # this pass's test-fix iterations. Surfaced to the model
+                    # so it can see what bodies it has already tried for the
+                    # same fn rather than re-deriving from scratch.
+                    test_fix_history: dict[tuple[str, str], list[dict]] = {}
+                    while test_fix_attempt < _PER_PASS_TEST_FIX_HARD_CAP:
                         test_fix_attempt += 1
                         _check_graceful_stop(f"test fix attempt {test_fix_attempt}")
                         failed_tests = _parse_failed_tests(test_out)
                         if not failed_tests:
                             break  # rc!=0 but no parseable failed tests; bail
-                        # Map each failing test back to the fns this pass filled
-                        # that the test could exercise. We use a fn-name token
-                        # appearing in the test output as the link.
+                        # Seed the floor with the count we entered the iter with.
+                        cur_fail_count = len(failed_tests)
+                        if best_fail_count is None:
+                            best_fail_count = cur_fail_count
+                        # P3: classifier-driven retry candidates. Normally
+                        # fires only after one naive iteration stalls. But when
+                        # filled_this_pass is empty (pre-filled cluster), there
+                        # IS no naive baseline — the token-match path produces
+                        # nothing — so the classifier must fire on iter 1.
+                        classification: dict[str, dict] = {}
+                        if stall >= 1 or not filled_this_pass:
+                            classification = _classify_phase_c_test_failures(
+                                test_out=test_out,
+                                filled_this_pass=filled_this_pass,
+                                failed_tests=sorted(failed_tests),
+                                cluster_name=cluster_name,
+                            )
                         fns_to_retry: list[tuple[str, str]] = []
-                        for (rel_f, fn) in filled_this_pass:
-                            if any(fn in t for t in failed_tests) or fn in test_out:
-                                fns_to_retry.append((rel_f, fn))
+                        if classification:
+                            # Collect fn= refs only from actionable categories.
+                            wanted: set[tuple[str, str]] = set()
+                            for t, info in classification.items():
+                                if info["category"] not in (
+                                        "BAD_FILL", "TEST_PRECONDITION_MISSING"):
+                                    continue
+                                ref = info["fn"]
+                                if "::" in ref:
+                                    rel_f, fn = ref.split("::", 1)
+                                    wanted.add((rel_f.strip(), fn.strip()))
+                            # When we filled something this pass, restrict to
+                            # that scope (classifier may hallucinate). When
+                            # nothing was filled, accept any fn the classifier
+                            # names that actually exists in the workspace —
+                            # the resolve happens in _locate_fn below.
+                            if filled_this_pass:
+                                in_scope = set(filled_this_pass)
+                                fns_to_retry = [p for p in wanted if p in in_scope]
+                            else:
+                                fns_to_retry = list(wanted)
+                            # Log a one-line summary of categories.
+                            _cat_counts = _Counter_PY(
+                                v["category"] for v in classification.values())
+                            _log(f"  [phase-c/classifier] pass {pass_n} iter "
+                                 f"{test_fix_attempt}: "
+                                 + ", ".join(f"{c}={n}"
+                                             for c, n in _cat_counts.items()))
+                        if not fns_to_retry and filled_this_pass:
+                            # Naive fallback: token match in test output.
+                            for (rel_f, fn) in filled_this_pass:
+                                if any(fn in t for t in failed_tests) or fn in test_out:
+                                    fns_to_retry.append((rel_f, fn))
+                        if not fns_to_retry and not filled_this_pass:
+                            # Reverse-lookup fallback: for each failing test
+                            # binary, enumerate fns it exercises via
+                            # _find_tests_for_fn and feed those as candidates.
+                            test_fname_set = {
+                                t.split("::")[0].split("__")[0]
+                                for t in failed_tests
+                            }
+                            for rs in target_src_dir.rglob("*.rs"):
+                                rel_path = str(rs.relative_to(target_src_dir))
+                                try:
+                                    txt = rs.read_text(encoding="utf-8")
+                                except Exception:
+                                    continue
+                                for m in re.finditer(
+                                    r"\bfn\s+([A-Za-z_]\w*)", txt
+                                ):
+                                    fn = m.group(1)
+                                    tfs = _find_tests_for_fn(
+                                        tests_dir_files, fn,
+                                        file_rel=rel_path,
+                                        src_dir=_src_for_macros,
+                                    )
+                                    for tf in tfs:
+                                        if Path(tf[0]).stem in test_fname_set:
+                                            fns_to_retry.append(
+                                                (rel_path, fn))
+                                            break
+                            # Dedupe.
+                            fns_to_retry = list(dict.fromkeys(fns_to_retry))
                         if not fns_to_retry:
                             # Conservative: retry all fns filled this pass.
                             fns_to_retry = list(filled_this_pass)
@@ -6125,6 +7687,7 @@ def _task2_fill_fns_one_by_one(
                                 notes_t = _filter_model_notes_for_prompt(
                                     fr_path, file_rel=rel_f, fn_name=fn,
                                     file_text=cur_text,
+                                    current_error=error_excerpt_test,
                                 )
                             prompt = _build_per_fn_fix_prompt(
                                 file_text=cur_text, fn_name=fn, sig_text=sig_t,
@@ -6133,6 +7696,9 @@ def _task2_fill_fns_one_by_one(
                                 prev_body=cur_body, error_excerpt=error_excerpt_test,
                                 macros_section=macros_section,
                                 notes_section=notes_t,
+                                fr_path=fr_path,  # P6.4 note recall
+                                attempt_history=test_fix_history.get(  # P2
+                                    (rel_f, fn), []),
                             )
                             attempts += 1
                             attempts_log_t: list[str] = []
@@ -6144,6 +7710,19 @@ def _task2_fill_fns_one_by_one(
                                 any_progress = True
                                 _log(f"  [phase-c/per-fn] test-fix: re-spliced "
                                      f"{rel_f}::{fn} (attempt {test_fix_attempt}).")
+                                # P2: record this attempt's body + the error
+                                # excerpt that PROMPTED the retry. We can't
+                                # bind the new error until after the test run
+                                # below; bind a placeholder now and update
+                                # with the real outcome later.
+                                test_fix_history.setdefault(
+                                    (rel_f, fn), []).append({
+                                        "attempt": test_fix_attempt,
+                                        "body": new_body,
+                                        "error_sig": _focus_cargo_errors(
+                                            test_out, rel_f, max_chars=400),
+                                        "outcome": "test_fail",
+                                    })
                         if not any_progress:
                             _log(f"  [phase-c/per-fn] pass {pass_n}: no fn could "
                                  f"be re-spliced for failing tests — stopping.")
@@ -6162,27 +7741,90 @@ def _task2_fill_fns_one_by_one(
                             _log(f"  [phase-c/per-fn] pass {pass_n}: cargo test "
                                  f"PASSED after test-fix attempt {test_fix_attempt}.")
                             break
-                        cur_test_sig = _cargo_err_sig(test_out) | frozenset(
-                            _parse_failed_tests(test_out))
-                        if cur_test_sig == prev_test_sig:
-                            _log(f"  [phase-c/per-fn] pass {pass_n}: same test "
-                                 f"failures repeat — stopping test-fix loop.")
+                        new_fail_count = len(_parse_failed_tests(test_out))
+                        # P4: persist this iter's cargo test output for post-hoc.
+                        _write_phase_c_test_fix_log(
+                            project_dir=project_dir,
+                            cluster_name=cluster_name,
+                            pass_n=pass_n,
+                            fix_iter=test_fix_attempt,
+                            test_out=test_out,
+                            failed_tests=sorted(_parse_failed_tests(test_out)),
+                            fns_retried=fns_to_retry,
+                            cur_fail_count=cur_fail_count,
+                            new_fail_count=new_fail_count,
+                            best_fail_count=min(
+                                best_fail_count,
+                                new_fail_count),
+                            stall=stall,  # value before the update below
+                        )
+                        # P1: did this iter beat the failure floor?
+                        if new_fail_count < best_fail_count:
+                            improved = True
+                            best_fail_count = new_fail_count
+                            stall = 0
+                        else:
+                            improved = False
+                            stall += 1
+                        # P5: expose the signal as an event for retro tooling.
+                        _emit("phase_c.test_fix.iter", data={
+                            "cluster": cluster_name, "pass_n": pass_n,
+                            "iter": test_fix_attempt,
+                            "prev_fail_count": cur_fail_count,
+                            "new_fail_count": new_fail_count,
+                            "delta": new_fail_count - cur_fail_count,
+                            "best": best_fail_count,
+                            "improved": improved,
+                            "stalled": stall,
+                            "fns_retried": [f"{r}::{f}" for r, f in fns_to_retry],
+                        })
+                        _log(f"  [phase-c/per-fn] pass {pass_n} test-fix iter "
+                             f"{test_fix_attempt}: "
+                             f"{cur_fail_count}→{new_fail_count} failures "
+                             f"(floor={best_fail_count}, stall={stall}).")
+                        if stall >= _PER_PASS_TEST_FIX_MAX_STALLS:
+                            _log(f"  [phase-c/per-fn] pass {pass_n}: failure "
+                                 f"floor stalled at {best_fail_count} for "
+                                 f"{stall} iter(s) — stopping test-fix loop.")
                             break
-                        prev_test_sig = cur_test_sig
+                        # Keep prev_test_sig for diagnostic logging only — no
+                        # longer an exit condition (the floor budget governs).
+                        prev_test_sig = (_cargo_err_sig(test_out)
+                                         | frozenset(_parse_failed_tests(test_out)))
 
+        # P7.6: capture last-pass failure count for the pass-level floor.
+        # If the test phase ran, `best_fail_count` reflects the last cargo
+        # test outcome of this pass; otherwise zero (no failing tests yet).
+        _pass_last_fail_count = locals().get("best_fail_count") or 0
+        _remaining_pass = len(_scan_unimplemented_for_cluster(
+            target_src_dir, cluster))
+        _pass_metric = _remaining_pass + _pass_last_fail_count
+        if _pass_best_metric is None or _pass_metric < _pass_best_metric:
+            _pass_best_metric = _pass_metric
+            _pass_stall = 0
+        else:
+            _pass_stall += 1
         _emit("phase_c.pass.done", duration_ms=int(
                 (time.monotonic() - _pass_t0) * 1000),
               data={
             "pass_n": pass_n, "cluster": cluster_name,
             "fns_filled": progress_this_pass, "errors_so_far": len(errors),
-            "remaining": len(_scan_unimplemented_functions(target_src_dir)),
+            "remaining": _remaining_pass,
+            "pass_metric": _pass_metric,
+            "pass_metric_best": _pass_best_metric,
+            "pass_stalled": _pass_stall,
         })
         if progress_this_pass == 0:
             _log(f"  [phase-c/per-fn] pass {pass_n} made no progress; stopping.")
             break
+        if _pass_stall >= _pass_max_stalls:
+            _log(f"  [phase-c/per-fn] cluster {cluster_name}: pass-level floor "
+                 f"stalled at metric={_pass_best_metric} for {_pass_stall} "
+                 f"pass(es) — stopping early at pass {pass_n}/{max_passes}.")
+            break
 
     bytes_after = sum(p.stat().st_size for p in target_src_dir.rglob("*.rs"))
-    remaining = len(_scan_unimplemented_functions(target_src_dir))
+    remaining = len(_scan_unimplemented_for_cluster(target_src_dir, cluster))
     _emit("phase_c.cluster.done", data={
         "cluster": cluster_name,
         "fns_filled": fns_filled,
@@ -6218,9 +7860,8 @@ def _merge_fills_preserving_existing(disk_text: str, model_text: str) -> str:
     body is kept — Phase D will pick up any residuals.
     """
     fn_re = re.compile(
-        r'((?:^|\n)[ \t]*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?'
+        r'((?<![A-Za-z_0-9])(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?'
         r'(?:const\s+)?fn\s+[A-Za-z_]\w*[^{]*\{)',
-        re.MULTILINE,
     )
 
     def extract_fns(text: str) -> list[tuple[str, str, int, int]]:
@@ -6557,68 +8198,312 @@ that satisfy the tests above.
 
 
 def _cmd_phase_a_only(project_dir: Path) -> int:
-    """Standalone Phase A: extract skeleton from pre-strip source and verify it compiles.
+    """Standalone Phase A: run the pre-strip skeleton bake on live source.
 
-    Writes to `.skeleton/_standalone/` (isolated from the backend's per-cluster
-    cache at `.skeleton/{cluster}/`) so running --phase-* CLI flags during a
-    live pipeline iteration cannot wipe the backend's working tree.
+    Per Hard Rule 11, the bake MUST run while the original source is still
+    on disk (i.e. before strip). This command refuses to run if `src/` is
+    missing or empty — strip has already happened and there is nothing to
+    extract from.
 
     Returns 0 on success, non-zero on any failure step.
     """
-    _log(f"\n=== Phase A (skeleton extraction) for {project_dir.name} ===")
-    prestrip_dir = Path("/tmp") / f"prestrip_{project_dir.name}_standalone"
-    if prestrip_dir.exists():
-        shutil.rmtree(prestrip_dir)
-    if not _checkout_prestrip_source(project_dir, prestrip_dir):
-        _log("  [phase-a] FAILED to materialise pre-strip source.")
+    _log(f"\n=== Phase A (skeleton bake) for {project_dir.name} ===")
+    src_dir = project_dir / "src"
+    if not src_dir.exists() or not any(src_dir.rglob("*.rs")):
+        _log(f"  [phase-a] no source at {src_dir} — strip already ran. "
+             "Cannot bake skeleton from absent source (Hard Rule 11).")
         return 2
-
-    skeleton_dir = project_dir / ".skeleton" / "_standalone"
-    if skeleton_dir.exists():
-        shutil.rmtree(skeleton_dir)
-    res = _extract_skeleton(prestrip_dir, skeleton_dir)
-    if not res["ok"]:
-        _log(f"  [phase-a] extractor FAILED: {res['stderr']}")
+    module_name = project_dir.name
+    res = _bake_skeleton_artifacts(project_dir, module_name)
+    if not res.get("ok"):
+        _log(f"  [phase-a] bake FAILED: {res.get('reason', 'unknown')}")
         return 3
-    rep = res["reports"]
-    _log(f"  [phase-a] {len(rep)} file(s) skeletonised; "
-         f"{sum(r['bytes_in'] for r in rep):,} → {sum(r['bytes_out'] for r in rep):,} bytes.")
-
-    # Wrap skeleton in a minimal Cargo project: copy the original Cargo.toml.
-    cargo_src = project_dir / "Cargo.toml"
-    if cargo_src.exists():
-        shutil.copy(cargo_src, skeleton_dir / "Cargo.toml")
-    else:
-        _log("  [phase-a] WARNING: no Cargo.toml found in project_dir — skipping cargo check.")
-        return 0
-
-    _log("  [phase-a] running `cargo check` on skeleton...")
-    try:
-        result = subprocess.run(
-            ["cargo", "check", "--message-format=short"],
-            cwd=skeleton_dir, capture_output=True, text=True, timeout=300,
-        )
-    except subprocess.TimeoutExpired:
-        _log("  [phase-a] cargo check TIMED OUT (>300s).")
-        return 4
-    if result.returncode != 0:
-        # Surface a snippet of the failure for diagnosis.
-        err_tail = "\n".join(result.stderr.splitlines()[-25:])
-        _log(f"  [phase-a] cargo check FAILED (rc={result.returncode}):\n{err_tail}")
-        return 5
-    _log("  [phase-a] cargo check PASSED — skeleton is compilable.")
+    _log(f"  [phase-a] baked {len(res['clusters'])} cluster(s): "
+         f"{', '.join(res['clusters'])}")
     return 0
 
 
-def _scan_unimplemented_functions(src_dir: Path) -> list[tuple[str, str]]:
-    """Return [(file_rel_path, fn_name), ...] for every fn whose body is still `unimplemented!()`.
+_SKELETON_EXTRACTOR_BIN = (
+    Path(__file__).parent / "tools" / "skeleton_extractor"
+    / "target" / "release" / "skeleton-extractor"
+)
 
-    Uses the same extractor logic as the merge helper, scoped to leaf functions.
+
+def _locate_fn_by_record(file_path: Path, name: str, container: str, sig_text: str) -> tuple[int, int, int, str] | None:
+    """Re-enumerate `file_path` and return (sig_byte_start, body_byte_start,
+    body_byte_end, fresh_sig_text) for the fn matching (name, container,
+    sig_text). Used by the per-fn loop to splice by EXACT byte offset
+    instead of regex-locating by name (which collides when a file has
+    multiple fns sharing a name — e.g. Display::fmt vs Debug::fmt).
+
+    Re-enumeration is required because byte offsets shift after any prior
+    splice in the same file. ~30 ms via the syn binary; negligible vs the
+    LLM call cost.
+
+    Disambiguation order (each tier narrows the candidate set):
+      1. fn name match
+      2. container match (e.g. "impl Display for X")
+      3. signature similarity (exact, else normalised whitespace)
     """
+    src_dir = file_path.parent
+    # The extractor walks a directory tree; we want one file. Easiest path:
+    # enumerate the parent directory and filter to records from this file.
+    # For large crates that's wasteful; for our scale (12 files) it's fine.
+    recs = _enumerate_fns_via_extractor(src_dir.parent
+                                         if src_dir.name == "src" else src_dir)
+    if recs is None:
+        return None
+    file_rel_candidates = {
+        str(file_path.name),
+        str(file_path).split("/src/", 1)[-1] if "/src/" in str(file_path) else str(file_path.name),
+        f"src/{file_path.name}",
+    }
+    file_recs = [r for r in recs if r.get("file") in file_rel_candidates
+                  or r.get("file", "").endswith("/" + file_path.name)
+                  or r.get("file", "") == file_path.name]
+    if not file_recs:
+        return None
+    cands = [r for r in file_recs if r.get("fn_name") == name]
+    if not cands:
+        return None
+    if container:
+        narrowed = [r for r in cands if r.get("container") == container]
+        if narrowed:
+            cands = narrowed
+    if sig_text:
+        exact = [r for r in cands if r.get("sig_text") == sig_text]
+        if exact:
+            cands = exact
+        else:
+            norm = " ".join(sig_text.split())
+            close = [r for r in cands if " ".join(r.get("sig_text", "").split()) == norm]
+            if close:
+                cands = close
+    if len(cands) != 1:
+        # Ambiguous still — pick the first stub-bodied one (more likely to
+        # be the one we want to fill).
+        stubs = [r for r in cands if r.get("has_unimplemented_body")]
+        if stubs:
+            cands = [stubs[0]]
+        else:
+            cands = [cands[0]]
+    r = cands[0]
+    return (
+        int(r["sig_byte_start"]),
+        int(r["body_byte_start"]),
+        int(r["body_byte_end"]),
+        r.get("sig_text", ""),
+    )
+
+
+def _enumerate_types_via_extractor(src_dir: Path) -> list[dict] | None:
+    """Invoke the syn-based extractor's --enumerate-types subcommand.
+
+    Returns a list of type records (struct/enum/type/trait) with fields and
+    method names. Used by per-fn prompts to inject type definitions when a
+    fn's signature references the type (P5.1).
+
+    Each record has: file, kind, name, generics, definition, fields[],
+    variants[], methods[], is_pub.
+    """
+    if not _SKELETON_EXTRACTOR_BIN.exists():
+        return None
+    try:
+        r = subprocess.run(
+            [str(_SKELETON_EXTRACTOR_BIN), "--enumerate-types",
+             "--input", str(src_dir)],
+            capture_output=True, text=True, timeout=60,
+        )
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    try:
+        return json.loads(r.stdout)
+    except Exception:
+        return None
+
+
+def _format_type_for_prompt(rec: dict) -> str:
+    """Render a type record as a compact Rust-like definition for prompts.
+
+    P5.2 includes a field-vs-method annotation: each name is shown with `.x`
+    for fields and `.x()` for methods so the model doesn't confuse them.
+
+    P6.1: methods are shown with their FULL SIGNATURE so the model knows
+    exactly what each takes/returns. Without this it kept calling e.g.
+    `Ref::new(NonNull<T>)` when `Ref::new` actually takes `&T` — visible
+    method NAME but invisible argument types.
+    """
+    kind = rec.get("kind", "?")
+    name = rec.get("name", "?")
+    generics = rec.get("generics", "") or ""
+    fields = rec.get("fields", [])
+    variants = rec.get("variants", [])
+    methods = rec.get("methods", [])
+    lines = [f"{kind} {name}{generics}"]
+    if fields:
+        lines.append("  fields (access with .name):")
+        for f in fields:
+            pub = "pub " if f.get("is_pub") else ""
+            lines.append(f"    {pub}{f['name']}: {f['ty']}")
+    if variants:
+        lines.append("  variants:")
+        for v in variants[:8]:
+            lines.append(f"    {v}")
+        if len(variants) > 8:
+            lines.append(f"    ... ({len(variants) - 8} more)")
+    if methods:
+        # Dedup by method name (same fn can appear in multiple impl blocks);
+        # keep the first sig we saw. Then render WITH SIGNATURE (P6.1).
+        seen: set[str] = set()
+        sigs: list[tuple[str, str, bool]] = []  # (name, sig, is_pub)
+        for m in methods:
+            mn = m.get("name", "")
+            if mn and mn not in seen:
+                seen.add(mn)
+                sig = m.get("sig", "") or ""
+                # Trim verbose where-clauses to fit the prompt; keep up to
+                # 120 chars of the sig (covers virtually all real fn sigs).
+                if len(sig) > 120:
+                    sig = sig[:117] + "..."
+                sigs.append((mn, sig.strip(), bool(m.get("is_pub"))))
+        if sigs:
+            lines.append("  methods (sig shown; call with .name(args)):")
+            # Cap to top 10 methods to keep prompts compact for types with
+            # many. The first 10 are typically the most-used.
+            for mn, sig, is_pub in sigs[:10]:
+                vis = "pub " if is_pub else ""
+                if sig:
+                    lines.append(f"    {vis}{sig}")
+                else:
+                    lines.append(f"    {vis}fn {mn}(...)  // sig unknown")
+            if len(sigs) > 10:
+                rest = ", ".join(n for n, _, _ in sigs[10:])
+                if len(rest) > 200:
+                    rest = rest[:197] + "..."
+                lines.append(f"    // also: {rest}")
+    return "\n".join(lines)
+
+
+def _types_referenced_in_text(text: str, all_types: list[dict]) -> list[dict]:
+    """Return type records whose `name` appears in `text` as a standalone
+    identifier. Used to select which types to include in a per-fn prompt:
+    only types the fn's signature or body actually mentions.
+    """
+    if not text or not all_types:
+        return []
+    out: list[dict] = []
+    seen_names: set[str] = set()
+    for rec in all_types:
+        name = rec.get("name", "")
+        if not name or name in seen_names:
+            continue
+        # Word-boundary match — avoid matching `Boxed` when searching for `Box`.
+        if re.search(r"\b" + re.escape(name) + r"\b", text):
+            out.append(rec)
+            seen_names.add(name)
+    return out
+
+
+def _enumerate_fns_via_extractor(src_dir: Path) -> list[dict] | None:
+    """Invoke the syn-based extractor's --enumerate-fns subcommand.
+
+    Returns a list of fn records (each a dict from the extractor's JSON
+    output) or None if the binary isn't available or fails. Each record:
+        file (str, rel path from src_dir)
+        fn_name (str)
+        sig_text (str)
+        body_text (str)
+        sig_byte_start (int), body_byte_start (int), body_byte_end (int)
+        cfg_predicates (list[str])
+        is_pub (bool)
+        container (str): "" for free fn, "impl ..." or "trait ..."
+        has_unimplemented_body (bool)
+    """
+    if not _SKELETON_EXTRACTOR_BIN.exists():
+        return None
+    try:
+        r = subprocess.run(
+            [str(_SKELETON_EXTRACTOR_BIN), "--enumerate-fns",
+             "--input", str(src_dir)],
+            capture_output=True, text=True, timeout=60,
+        )
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    try:
+        return json.loads(r.stdout)
+    except Exception:
+        return None
+
+
+def _scan_unimplemented_records(src_dir: Path) -> list[dict] | None:
+    """Return full FnRecord dicts (from the syn enumerator) for every fn whose
+    body is still unimplemented. Returns None when the extractor binary isn't
+    available — callers should fall back to _scan_unimplemented_functions.
+
+    Records include `container` and `sig_text` for disambiguating same-named
+    fns (Display::fmt vs Debug::fmt).
+    """
+    recs = _enumerate_fns_via_extractor(src_dir)
+    if recs is None:
+        return None
+    return [r for r in recs if r.get("has_unimplemented_body")]
+
+
+def _scan_unimplemented_records_for_cluster(
+    target_src_dir: Path,
+    cluster: "BuildCluster | None",
+) -> list[dict] | None:
+    """Cluster-aware variant of _scan_unimplemented_records.
+
+    Returns records filtered to fns whose file/fn cfg evaluates true for
+    `cluster`. Returns None if the extractor binary isn't available —
+    callers should fall back to _scan_unimplemented_for_cluster (tuple form).
+    """
+    recs = _scan_unimplemented_records(target_src_dir)
+    if recs is None:
+        return None
+    if cluster is None:
+        return recs
+    out: list[dict] = []
+    skipped = 0
+    for r in recs:
+        if _fn_belongs_to_cluster(target_src_dir, r["file"], r["fn_name"], cluster):
+            out.append(r)
+        else:
+            skipped += 1
+    if skipped:
+        _log(f"  [phase-c/per-fn] cluster {cluster.name}: skipped "
+             f"{skipped} stub(s) not active in this cluster's cfg-set.")
+    return out
+
+
+def _scan_unimplemented_functions(src_dir: Path) -> list[tuple[str, str]]:
+    """Return [(file_rel_path, fn_name), ...] for every fn whose body is still
+    `unimplemented!()` (or an annotated stub).
+
+    Prefers the syn-based extractor binary for robustness — it catches every
+    fn rustc would consider (free fns, impl methods, trait method defaults,
+    inline-compressed declarations, cfg-attributed fns). Falls back to a
+    regex scanner when the binary isn't available.
+
+    Note: this is the LEGACY name-only return form. New code should use
+    `_scan_unimplemented_records` to also get container + signature, which
+    are needed to disambiguate same-named fns within a single file.
+    """
+    recs = _enumerate_fns_via_extractor(src_dir)
+    if recs is not None:
+        return [(r["file"], r["fn_name"]) for r in recs
+                if r.get("has_unimplemented_body")]
+    # Fallback: best-effort regex scan. Less robust but doesn't require
+    # the Rust binary; kept for the tests-fixture path and for portability.
     fn_re = re.compile(
-        r'(?:^|\n)[ \t]*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?'
+        r'(?<![A-Za-z_0-9])'
+        r'(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?'
         r'(?:const\s+)?fn\s+([A-Za-z_]\w*)[^{]*\{',
-        re.MULTILINE,
     )
     out: list[tuple[str, str]] = []
     for p in sorted(src_dir.rglob("*.rs")):
@@ -6642,6 +8527,257 @@ def _scan_unimplemented_functions(src_dir: Path) -> list[tuple[str, str]]:
             body = text[body_start:i - 1]
             if _is_unimplemented_body(body):
                 out.append((str(p.relative_to(src_dir)), fn_name))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Cluster-aware stub filter (P5 Step 1, focused fix). Filters stubs to only
+# those whose enclosing cfg evaluates true for the current cluster. Skips
+# fns that wouldn't compile in this cluster anyway (e.g., nightly.rs items
+# being scanned in the stable cluster). Pure static analysis, no LLM.
+# ---------------------------------------------------------------------------
+
+_CFG_ATTR_RE = re.compile(r"^\s*#\s*\[\s*cfg\s*\(([^]]+)\)\s*\]\s*$")
+# Inline form: matches `#[cfg(X)]` even when not on its own line. Used when
+# searching the lib.rs `mod foo;` declaration — the skeleton extractor
+# formats attributes with spaces (`# [cfg (X)] mod foo ;`) and may keep
+# them on the same line as the item.
+_CFG_INLINE_RE = re.compile(r"#\s*\[\s*cfg\s*\(([^]]+)\)\s*\]")
+
+
+def _fn_cfg_predicates(file_text: str, fn_name: str) -> list[str]:
+    """Return all `#[cfg(...)]` predicates that gate `fn_name` in `file_text`.
+
+    Walks BACKWARD from the fn's declaration line, collecting consecutive
+    `#[cfg(...)]` and `#[...]` attribute lines. Stops at the first
+    non-attribute, non-blank line. Returns just the cfg predicates
+    (the part inside `cfg(...)`).
+    """
+    fn_pat = re.compile(
+        r"(?:^|\n)([ \t]*)(?:pub(?:\([^)]*\))?\s+)?"
+        r"(?:async\s+)?(?:unsafe\s+)?(?:const\s+)?"
+        r"fn\s+" + re.escape(fn_name) + r"\b",
+        re.MULTILINE,
+    )
+    m = fn_pat.search(file_text)
+    if not m:
+        return []
+    decl_offset = m.start() + (1 if file_text[m.start()] == "\n" else 0)
+    # Window: from the previous blank line (or start) to the fn decl.
+    # Captures both same-line and above-line cfg attributes that the
+    # skeleton extractor may emit (`# [cfg (X)] fn foo ...` or
+    # `#[cfg(X)]\nfn foo`).
+    ws = file_text.rfind("\n\n", 0, decl_offset)
+    window_start = ws + 2 if ws >= 0 else 0
+    window = file_text[window_start:decl_offset + 1]
+    preds: list[str] = []
+    for cm in _CFG_INLINE_RE.finditer(window):
+        preds.append(cm.group(1).strip())
+    return preds
+
+
+def _file_cfg_predicate(target_src_dir: Path, file_rel: str) -> str | None:
+    """Find the cfg predicate (if any) under which `file_rel` is compiled.
+
+    Looks in src/lib.rs (or src/main.rs) for `#[cfg(...)] mod {stem};` and
+    returns the predicate. Returns None when the file is unconditionally
+    included or when no parent mod decl is found (some files are included
+    via build.rs etc — out of scope).
+
+    Limited to one level of nesting (file directly declared from lib.rs).
+    Deeper nesting (mod/foo/bar.rs) would need recursive resolution; skip
+    for now (the common case in anyhow / argh / etc is single-level).
+    """
+    stem = Path(file_rel).stem
+    if stem in ("lib", "main"):
+        return None
+    for root in ("src/lib.rs", "src/main.rs"):
+        p = target_src_dir / root
+        if not p.exists():
+            continue
+        try:
+            text = p.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        # Find `mod {stem};` declaration and collect cfg attrs ATTACHED
+        # to it. We harvest from the start of the mod decl's line backward
+        # across contiguous attribute tokens — both inline-same-line and
+        # above-line forms. Stop at the first non-attribute token.
+        mod_decl_pat = re.compile(
+            r"(?:^|\n)([^\n]*\b(?:pub(?:\([^)]*\))?\s+)?mod\s+"
+            + re.escape(stem) + r"\s*;[^\n]*)",
+            re.MULTILINE,
+        )
+        m = mod_decl_pat.search(text)
+        if not m:
+            continue
+        # The line containing the mod decl. May have inline attrs to its left.
+        decl_line = m.group(1)
+        preds: list[str] = []
+        # Inline attrs on the decl line up to but not including `mod`.
+        mod_idx = decl_line.find("mod ")
+        if mod_idx < 0:
+            mod_idx = len(decl_line)
+        for cm in _CFG_INLINE_RE.finditer(decl_line[:mod_idx]):
+            preds.append(cm.group(1).strip())
+        # Above-line attrs. Walk backward across contiguous attribute lines.
+        decl_start = m.start() + (1 if text[m.start()] == "\n" else 0)
+        head = text[:decl_start]
+        for ln in reversed(head.splitlines()):
+            s = ln.strip()
+            if not s:
+                # Blank line ends the attribute block above this mod.
+                break
+            if s.startswith("//") or s.startswith("/*"):
+                continue  # comments don't break the attr chain
+            if _CFG_INLINE_RE.search(ln):
+                # Cfg attribute line — collect its predicate(s).
+                for cm in _CFG_INLINE_RE.finditer(ln):
+                    preds.append(cm.group(1).strip())
+                continue
+            if s.startswith("#["):
+                # Non-cfg attribute (e.g. #[allow]) — doesn't gate but
+                # doesn't break the chain.
+                continue
+            break  # any other content ends the attr block
+        if not preds:
+            return None
+        if len(preds) == 1:
+            return preds[0]
+        return "all(" + ", ".join(preds) + ")"
+    return None
+
+
+def _fn_belongs_to_cluster(
+    target_src_dir: Path,
+    file_rel: str,
+    fn_name: str,
+    cluster: "BuildCluster",
+) -> bool:
+    """True when the fn (or its enclosing file) is active in `cluster`.
+
+    Evaluates the conjunction of:
+      - The file's parent-mod cfg (if any)
+      - The fn's own cfg attrs (if any)
+    against the cluster's cfg_true / cfg_false sets.
+
+    Conservative on uncertainty: when a predicate is undecidable, defaults
+    to True (include the stub) so the per-fn fill loop sees it — better
+    to waste a call than miss a fn we should have filled.
+    """
+    cfg_true = set(cluster.cfg_true)
+    cfg_false = set(cluster.cfg_false)
+    preds: list[str] = []
+    file_pred = _file_cfg_predicate(target_src_dir, file_rel)
+    if file_pred:
+        preds.append(file_pred)
+    try:
+        text = (target_src_dir / file_rel).read_text(encoding="utf-8")
+    except Exception:
+        text = ""
+    if text:
+        preds.extend(_fn_cfg_predicates(text, fn_name))
+    if not preds:
+        return True  # no cfg gating → exists in every cluster
+    for p in preds:
+        v = _eval_cfg_pred(p, cfg_true, cfg_false)
+        if v is False:
+            return False
+        # v is None (undecidable) → conservatively keep
+    return True
+
+
+def _implicated_fns_from_cargo_errors(
+    cargo_output: str,
+    target_src_dir: Path,
+) -> list[tuple[str, str]]:
+    """Parse cargo error output and return the (file_rel, fn_name) pairs the
+    errors implicate.
+
+    For each `error[...]` block: find the `--> file.rs:line:col` marker, then
+    walk backward in that file from `line` to find the enclosing fn. Dedup
+    by (file, fn). Used by P3.12 end-of-cluster fix loop to identify which
+    fns to revert + retry.
+    """
+    if not cargo_output:
+        return []
+    cargo_output = _strip_cargo_warnings(cargo_output)
+    pairs: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    loc_re = re.compile(r"-->\s+([^:\s]+\.rs):(\d+):\d+")
+    for m in loc_re.finditer(cargo_output):
+        file_str = m.group(1)
+        line_no = int(m.group(2))
+        # Normalise to rel path under target_src_dir.
+        try:
+            abs_p = (target_src_dir / file_str).resolve()
+            rel_p = str(abs_p.relative_to(target_src_dir.resolve()))
+        except Exception:
+            # cargo sometimes emits absolute paths; try suffix match.
+            cand = Path(file_str)
+            rel_p = None
+            for p in target_src_dir.rglob("*.rs"):
+                if str(p).endswith(file_str) or p.name == cand.name:
+                    rel_p = str(p.relative_to(target_src_dir))
+                    break
+            if rel_p is None:
+                continue
+        src_path = target_src_dir / rel_p
+        if not src_path.exists():
+            continue
+        try:
+            text = src_path.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        # Walk backward from line_no to find the enclosing fn declaration.
+        lines = text.splitlines()
+        if line_no > len(lines):
+            line_no = len(lines)
+        fn_re = re.compile(
+            r"\bfn\s+([A-Za-z_]\w*)",
+        )
+        fn_name: str | None = None
+        for i in range(line_no - 1, -1, -1):
+            fm = fn_re.search(lines[i])
+            if fm:
+                # Make sure this fn line is actually a declaration (has fn
+                # followed by name and parens/generics later in the line OR
+                # within the next few lines).
+                fn_name = fm.group(1)
+                break
+        if not fn_name:
+            continue
+        key = (rel_p, fn_name)
+        if key in seen:
+            continue
+        seen.add(key)
+        pairs.append(key)
+    return pairs
+
+
+def _scan_unimplemented_for_cluster(
+    target_src_dir: Path,
+    cluster: "BuildCluster | None",
+) -> list[tuple[str, str]]:
+    """Cluster-aware variant of _scan_unimplemented_functions.
+
+    Returns only stubs that belong to `cluster` per static cfg evaluation.
+    When `cluster` is None (no cluster context), behaves identically to
+    the unfiltered scan — used by callers that don't yet thread cluster.
+    """
+    raw = _scan_unimplemented_functions(target_src_dir)
+    if cluster is None:
+        return raw
+    out: list[tuple[str, str]] = []
+    skipped: int = 0
+    for rel, fn in raw:
+        if _fn_belongs_to_cluster(target_src_dir, rel, fn, cluster):
+            out.append((rel, fn))
+        else:
+            skipped += 1
+    if skipped:
+        _log(f"  [phase-c/per-fn] cluster {cluster.name}: skipped "
+             f"{skipped} stub(s) not active in this cluster's cfg-set.")
     return out
 
 
@@ -9911,9 +12047,8 @@ def _merge_cluster_outputs(project_dir: Path,
             all_paths.add(str(p.relative_to(d)))
 
     fn_re = re.compile(
-        r'((?:^|\n)[ \t]*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?'
+        r'((?<![A-Za-z_0-9])(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?'
         r'(?:const\s+)?fn\s+[A-Za-z_]\w*[^{]*\{)',
-        re.MULTILINE,
     )
 
     def _extract_fns(text: str) -> list[tuple[str, str, int, int]]:
@@ -10018,9 +12153,10 @@ def _merge_cluster_outputs(project_dir: Path,
 class StaticSkeletonTask2Generator(Task2Generator):
     """4-phase reconstruction: mechanical skeleton → LLM grouping → per-group fill → cleanup.
 
-    Phase A:  Rust syn-based extractor produces a skeleton (signatures + types +
-              macros + `unimplemented!()` bodies) from the pre-strip source tree.
-              No LLM. Skeleton compiles via `cargo check`.
+    Phase A:  Load the skeleton (signatures + types + macros +
+              `unimplemented!()` bodies) baked from live source before strip
+              (see `_bake_skeleton_artifacts`). No LLM. cargo check verifies
+              the cached skeleton still compiles under this cluster's env.
     Phase B:  One LLM call to group test files into cohesive units. Validated.
     Phase C:  Per-group LLM call that fills `unimplemented!()` bodies the group's
               tests transitively need. Leaf-first ordering. Merge preserves bodies
@@ -10038,51 +12174,17 @@ class StaticSkeletonTask2Generator(Task2Generator):
         _log("\nTASK 2: Implementing source code (skeleton backend, per-cluster)")
         module = current_module or project_dir.name
 
-        # Discover clusters statically — no LLM (Principle 1).
-        # Source for cluster discovery: the pre-strip snapshot, since the
-        # current `tmp/{project}/src/` may have been stripped already.
-        clusters: list[BuildCluster] = []
-        try:
-            clusters = task0_cfg_scan(project_dir)
-        except Exception as e:
-            _log(f"  [skeleton] cluster discovery on project_dir failed: {e}")
-        # If discovery on the current state returned nothing useful, fall
-        # back to scanning the pre-strip snapshot.
-        if not clusters or (len(clusters) == 1 and not clusters[0].cfg_true and not clusters[0].cfg_false):
-            _log("  [skeleton] discovering clusters from pre-strip snapshot...")
-            prestrip_for_scan = Path("/tmp") / f"prestrip_{project_dir.name}_scan"
-            if prestrip_for_scan.exists():
-                shutil.rmtree(prestrip_for_scan)
-            if _checkout_prestrip_source(project_dir, prestrip_for_scan):
-                try:
-                    discovered = task0_cfg_scan(prestrip_for_scan)
-                    if discovered and any(c.cfg_true or c.cfg_false for c in discovered):
-                        clusters = discovered
-                        _log(f"  [skeleton] pre-strip scan discovered {len(clusters)} cluster(s).")
-                except Exception as e:
-                    _log(f"  [skeleton] pre-strip cluster discovery failed: {e}")
+        # Load clusters from the bake artefact written before strip
+        # (Hard Rule 11: no source access post-strip). If absent, abort —
+        # there is no live source to discover from at this point.
+        clusters = _load_baked_clusters(project_dir)
         if not clusters:
-            clusters = [BuildCluster(
-                name="default", env_extra={}, tarpaulin_exclude_files=[],
-                excluded_cfg=[], active_cfg=[], prompt_nightly_rule="",
-                is_default=True,
-            )]
-        # Lexicographic for reproducibility (Principle 2: deterministic).
+            _log("  [skeleton] FATAL: no baked clusters at "
+                 f"{project_dir}/.skeleton/_clusters.json. The skeleton bake "
+                 "step (pre-strip) must run before TASK 2.")
+            return False
         clusters = sorted(clusters, key=lambda c: c.name)
-        _log(f"  [skeleton] discovered {len(clusters)} cluster(s): "
-             f"{', '.join(c.name for c in clusters)}")
-
-        # Prune redundant clusters (default-feature overlap, near-empty gating).
-        # Source for pruning analysis: the pre-strip snapshot (already on
-        # disk under /tmp/prestrip_{project}_scan from the discovery step).
-        _prune_src = Path("/tmp") / f"prestrip_{project_dir.name}_scan"
-        if not _prune_src.exists():
-            _prune_src = project_dir  # fall back if scan dir doesn't exist
-        clusters = _prune_redundant_clusters(
-            clusters, _prune_src,
-            cargo_toml_path=project_dir / "Cargo.toml",
-        )
-        _log(f"  [skeleton] processing {len(clusters)} cluster(s) after pruning: "
+        _log(f"  [skeleton] loaded {len(clusters)} baked cluster(s): "
              f"{', '.join(c.name for c in clusters)}")
 
         genesis = read(genesis_path) if genesis_path.exists() else ""
@@ -10157,35 +12259,26 @@ class StaticSkeletonTask2Generator(Task2Generator):
         skeleton_dir = project_dir / ".skeleton" / cluster.name
         filled_dir = project_dir / ".skeleton-filled" / cluster.name
 
-        # Phase A — extract FULL skeleton (no cfg filter at extraction time).
-        # Rationale: dropping items behind cfg gates leaves dangling references
-        # in items that survive (e.g. `use crate::Chain;` when Chain is dropped).
-        # Rust's own cfg evaluator already handles per-cluster compilation
-        # correctly because the cfg attrs are preserved on every item.
-        # The cluster filtering happens later, only on the PROMPT view of
-        # the skeleton (see _format_skeleton_index_for_cluster), not the
-        # on-disk skeleton.
+        # Phase A — load the pre-baked skeleton from disk. Hard Rule 11:
+        # the original source is gone after strip, so the skeleton MUST
+        # have been produced earlier by `_bake_skeleton_artifacts`. If
+        # absent here, that step did not run — fail loud.
         if not (skeleton_dir / "src").exists() or not any(skeleton_dir.rglob("*.rs")):
-            _log(f"  {tag} [skeleton-A] extracting skeleton (no cfg filter; compiles under all clusters)...")
-            prestrip_dir = Path("/tmp") / f"prestrip_{project_dir.name}_{cluster.name}"
-            if prestrip_dir.exists():
-                shutil.rmtree(prestrip_dir)
-            if not _checkout_prestrip_source(project_dir, prestrip_dir):
-                return {"ok": False, "reason": "checkout_failed"}
-            skeleton_dir.mkdir(parents=True, exist_ok=True)
-            res = _extract_skeleton(prestrip_dir, skeleton_dir, cluster=None)
-            if not res["ok"]:
-                _log(f"  {tag} [skeleton-A] extractor FAILED: {res['stderr']}")
-                return {"ok": False, "reason": f"extractor: {res['stderr']}"}
-            _log(f"  {tag} [skeleton-A] {len(res['reports'])} file(s) skeletonised.")
-        else:
-            _log(f"  {tag} [skeleton-A] cached skeleton at {skeleton_dir}.")
+            _log(f"  {tag} [skeleton-A] FATAL: no baked skeleton at "
+                 f"{skeleton_dir}. The pre-strip bake step did not run "
+                 "for this cluster.")
+            return {"ok": False, "reason": "no_baked_skeleton"}
+        _log(f"  {tag} [skeleton-A] using baked skeleton at {skeleton_dir}.")
 
         # cargo check on the skeleton with cluster env. Fix-loop on failure.
         _cargo_toml = project_dir / "Cargo.toml"
         if _cargo_toml.exists() and not (skeleton_dir / "Cargo.toml").exists():
             shutil.copy(_cargo_toml, skeleton_dir / "Cargo.toml")
         check_cmd = self._cluster_check_cmd(cluster)
+        # P3.8 diagnostic: log toolchain + final check_cmd so we can verify
+        # the nightly cluster is actually using +nightly.
+        _log(f"  {tag} [skeleton-A] cluster.toolchain={cluster.toolchain!r} "
+             f"requires_nightly={getattr(cluster, 'requires_nightly', False)}")
         _log(f"  {tag} [skeleton-A] cargo check ({check_cmd})...")
         try:
             _r = subprocess.run(
@@ -10196,6 +12289,27 @@ class StaticSkeletonTask2Generator(Task2Generator):
         except subprocess.TimeoutExpired:
             _log(f"  {tag} [skeleton-A] cargo check timed out; proceeding anyway.")
             _r = None
+        # P3.8: detect E0554 (nightly feature on stable channel) and retry
+        # with nightly toolchain. The cluster's requires_nightly flag is set
+        # by an earlier TASK 0 phase only when its cargo build hits E0554;
+        # the skeleton backend's Phase A may run BEFORE that phase, so we
+        # need a local catch.
+        if (_r is not None and _r.returncode != 0
+                and "E0554" in (_r.stderr or "") + (_r.stdout or "")
+                and not cluster.requires_nightly):
+            _log(f"  {tag} [skeleton-A] detected E0554 — promoting cluster to nightly.")
+            cluster.requires_nightly = True
+            check_cmd = self._cluster_check_cmd(cluster)
+            try:
+                _r = subprocess.run(
+                    shlex.split(check_cmd),
+                    cwd=skeleton_dir, capture_output=True, text=True, timeout=180,
+                    env=self._cluster_env(cluster),
+                )
+                _log(f"  {tag} [skeleton-A] retry with +nightly: rc={_r.returncode}")
+            except subprocess.TimeoutExpired:
+                _log(f"  {tag} [skeleton-A] cargo +nightly check timed out.")
+                _r = None
         if _r is not None and _r.returncode != 0:
             _log(f"  {tag} [skeleton-A] cargo check FAILED; invoking fix-loop.")
             _skel_sources = [p for p in (skeleton_dir / "src").rglob("*.rs")]
@@ -10251,16 +12365,14 @@ class StaticSkeletonTask2Generator(Task2Generator):
                 tp = project_dir / trel
                 if tp.exists():
                     tests_dir_files.append(tp)
-            # Pre-strip dir for leaf-first ordering: if missing, ensure it
-            # exists by re-checking out pre-strip source for this cluster.
-            _prestrip_for_order = Path("/tmp") / f"prestrip_{project_dir.name}_{cluster.name}"
-            if not _prestrip_for_order.exists():
-                try:
-                    _checkout_prestrip_source(project_dir, _prestrip_for_order)
-                except Exception as e:
-                    _log(f"  {tag} [skeleton-C] prestrip checkout for ordering "
-                         f"failed: {e} (falling back to alphabetical order)")
-                    _prestrip_for_order = None
+            # Leaf-first ordering counts come from the bake artefact
+            # (computed against live source pre-strip). Falls back to
+            # alphabetical when absent.
+            _leaf_counts = _load_baked_leaf_order(project_dir, cluster.name)
+            if not _leaf_counts:
+                _log(f"  {tag} [skeleton-C] no leaf-order artefact "
+                     f"({skeleton_dir}/_leaf_order.json); falling back to "
+                     "alphabetical fn ordering.")
             # Per-crate FR is the home for model self-correction notes.
             _fr_for_notes = project_dir / f"functional_requirements_{module}.md"
             c_result = _task2_fill_fns_one_by_one(
@@ -10273,7 +12385,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
                 check_cmd=self._cluster_check_cmd(cluster),
                 cluster_env=self._cluster_env(cluster),
                 max_passes=int(os.getenv("PHASE_C_MAX_PASSES", "3")),
-                prestrip_dir=_prestrip_for_order,
+                leaf_name_counts=_leaf_counts,
                 fr_path=_fr_for_notes,
             )
             _log(f"  {tag} [skeleton-C] {c_result['fns_filled']} fn(s) filled, "
@@ -10318,22 +12430,113 @@ class StaticSkeletonTask2Generator(Task2Generator):
         # Per-cluster intermediate validation: cargo check the filled output.
         if _cargo_toml.exists() and not (filled_dir / "Cargo.toml").exists():
             shutil.copy(_cargo_toml, filled_dir / "Cargo.toml")
-        _log(f"  {tag} [skeleton-validate] cargo check on filled output...")
-        try:
-            _vr = subprocess.run(
-                shlex.split(check_cmd),
-                cwd=filled_dir, capture_output=True, text=True, timeout=180,
-                env=self._cluster_env(cluster),
+        # P3.12: end-of-cluster validation with a fix-loop. The per-fn
+        # check catches errors as they happen, but bodies that pass at
+        # splice-time can still break integration when all fills are in
+        # place (cross-fn semantic issues, stale fills from prior runs).
+        # When this cargo check fails, identify the implicated fns from
+        # the error output, revert their bodies to unimplemented!() so
+        # they re-appear as stubs, then re-enter the per-fn fill loop
+        # targeting only those fns. Loop up to PHASE_C_VALIDATE_ITERS
+        # times.
+        max_validate_iters = int(
+            os.getenv("PHASE_C_VALIDATE_ITERS", "3"))
+        validate_ok = False
+        _vr_out = ""
+        for v_iter in range(1, max_validate_iters + 1):
+            _check_graceful_stop(f"skeleton-validate iter {v_iter}")
+            _log(f"  {tag} [skeleton-validate] cargo check on filled output "
+                 f"(iter {v_iter}/{max_validate_iters})...")
+            try:
+                _vr = subprocess.run(
+                    shlex.split(check_cmd),
+                    cwd=filled_dir, capture_output=True, text=True,
+                    timeout=180, env=self._cluster_env(cluster),
+                )
+                _vr_out = (_vr.stdout or "") + "\n" + (_vr.stderr or "")
+                validate_ok = (_vr.returncode == 0)
+            except subprocess.TimeoutExpired:
+                _log(f"  {tag} [skeleton-validate] cargo check timed out.")
+                validate_ok = False
+                break
+
+            if validate_ok:
+                if v_iter > 1:
+                    _log(f"  {tag} [skeleton-validate] PASSED after "
+                         f"{v_iter} iteration(s).")
+                break
+
+            # Failure path. Identify implicated fns.
+            _log(f"  {tag} [skeleton-validate] cargo check FAILED "
+                 f"(rc={_vr.returncode}). First errors:")
+            for line in _vr_out.splitlines()[:10]:
+                _log(f"    {line}")
+            implicated = _implicated_fns_from_cargo_errors(
+                _vr_out, filled_dir)
+            if not implicated:
+                _log(f"  {tag} [skeleton-validate] no implicated fns parsed "
+                     f"— cannot retry, giving up.")
+                break
+            _log(f"  {tag} [skeleton-validate] implicated fns: "
+                 f"{', '.join(f'{f}::{fn}' for f, fn in implicated[:6])}"
+                 + ("..." if len(implicated) > 6 else ""))
+            # Revert each implicated fn to unimplemented!() so the
+            # per-fn loop picks them up again as stubs.
+            reverted = 0
+            for rel_f, fn in implicated:
+                fp = filled_dir / rel_f
+                try:
+                    text = fp.read_text(encoding="utf-8")
+                except Exception:
+                    continue
+                loc = _locate_fn(text, fn)
+                if loc is None:
+                    continue
+                _sig, _ss, body_start, body_end = loc
+                cur_body = text[body_start:body_end]
+                if _is_unimplemented_body(cur_body):
+                    continue  # already a stub — nothing to revert
+                # Re-indent unimplemented!() like a normal body.
+                line_start = text.rfind("\n", 0, _ss) + 1
+                indent = ""
+                for ch in text[line_start:_ss]:
+                    if ch in (" ", "\t"):
+                        indent += ch
+                    else:
+                        break
+                inner = indent + "    "
+                new_body = "\n" + inner + "unimplemented!()\n" + indent
+                fp.write_text(
+                    text[:body_start] + new_body + text[body_end:],
+                    encoding="utf-8",
+                )
+                reverted += 1
+            _log(f"  {tag} [skeleton-validate] reverted {reverted} fn(s) "
+                 f"to stubs; re-entering per-fn fill loop.")
+            _emit("phase_c.cluster.validate_retry", data={
+                "cluster": cluster.name, "iter": v_iter,
+                "implicated": [{"file": f, "fn": fn}
+                               for f, fn in implicated],
+                "reverted": reverted,
+            })
+            # Re-enter the per-fn fill loop for ONE pass over just the
+            # reverted stubs. Use the cargo error excerpt as initial
+            # prompting context (the fix loop will refresh per attempt).
+            _ = _task2_fill_fns_one_by_one(
+                project_dir=project_dir,
+                target_src_dir=filled_dir,
+                tests_dir_files=[project_dir / trel
+                                  for trel, _ in cluster_tests
+                                  if (project_dir / trel).exists()],
+                module_name=module,
+                cluster_name=cluster.name,
+                cluster=cluster,
+                check_cmd=check_cmd,
+                cluster_env=self._cluster_env(cluster),
+                max_passes=1,  # one pass through the reverted set
+                leaf_name_counts=_load_baked_leaf_order(project_dir, cluster.name),
+                fr_path=_fr_for_notes,
             )
-            validate_ok = (_vr.returncode == 0)
-            if not validate_ok:
-                _log(f"  {tag} [skeleton-validate] cargo check FAILED "
-                     f"(rc={_vr.returncode}). First errors:")
-                for line in _vr.stderr.splitlines()[:10]:
-                    _log(f"    {line}")
-        except subprocess.TimeoutExpired:
-            _log(f"  {tag} [skeleton-validate] cargo check timed out.")
-            validate_ok = False
 
         return {"ok": True, "phase_c": c_result, "phase_d": d_result,
                 "validates": validate_ok}
@@ -10442,6 +12645,13 @@ def task2_inner_loop(project_dir, genesis_path, functional_req_path, manifest_pa
     _emit("task.start", task="task2", module=current_module,
           data={"max_attempts": BUILD_CHECK_RETRIES,
                 "has_build_check": bool(build_check_cmd)})
+    # P7.5: floor-stall against rustc error count across regen attempts.
+    # Each regen produces fundamentally different code; if a new regen has
+    # fewer errors than any prior, we're getting closer and should keep
+    # going. Hard cap = BUILD_CHECK_RETRIES (regens are expensive).
+    _t2_max_stalls = int(os.getenv("TASK2_BUILD_MAX_STALLS", "2"))
+    _t2_best_count: int | None = None
+    _t2_stall = 0
     for attempt_num in range(1, BUILD_CHECK_RETRIES + 1):
         if attempt_num > 1:
             _log(f"  Inner loop attempt {attempt_num}/{BUILD_CHECK_RETRIES} "
@@ -10519,6 +12729,28 @@ def task2_inner_loop(project_dir, genesis_path, functional_req_path, manifest_pa
         _log(f"  Build still failing after fix attempts (inner loop attempt {attempt_num}).")
         _emit("compile.fail", module=current_module, attempt=attempt_num,
               data={"output": _store_prompt_content(build_output or "")})
+        # P7.5: floor-stall against error count across regens. If we've
+        # tried multiple regens and the best one still has the same or
+        # more errors as the previous best, escalate early rather than
+        # burning more regens.
+        _t2_count = len(set(re.findall(r"\bE\d{3,4}\b", build_output or "")))
+        if _t2_best_count is None or _t2_count < _t2_best_count:
+            _t2_best_count = _t2_count
+            _t2_stall = 0
+        else:
+            _t2_stall += 1
+        _emit("loop.iter", data={
+            "name": "task2.build_retries",
+            "iter": attempt_num,
+            "metric_new": _t2_count,
+            "metric_best": _t2_best_count,
+            "improved": _t2_stall == 0,
+            "stalled": _t2_stall,
+        })
+        if _t2_stall >= _t2_max_stalls:
+            _log(f"  Inner loop floor stalled at {_t2_best_count} errors "
+                 f"for {_t2_stall} regen(s) — escalating to outer loop early.")
+            break
         # Pass the error into the next full task2 regeneration so the model
         # understands what structural issues need to be addressed.
         build_error = build_output
@@ -10624,6 +12856,13 @@ def generate_fix_loop(
     prev_sigs: frozenset = frozenset()
     attempt = 0
     _attempt_history: list[str] = []  # running narrative of what was tried and what happened
+    # P7.4: floor-stall against rustc error count. Replaces the sigs-equality
+    # exit (which treated any error swap as "progress"). max_fix_attempts is
+    # now interpreted as the hard cap; the real exit is "no new minimum for
+    # max_stalls iters". Env-overridable for A/B comparison.
+    _fl_max_stalls = int(os.getenv("GENERATE_FIX_LOOP_MAX_STALLS", "3"))
+    _fl_best_count: int | None = None
+    _fl_stall = 0
 
     while True:
         # Run the check.
@@ -10645,12 +12884,32 @@ def generate_fix_loop(
 
         cur_sigs = _error_sigs(last_output)
         _log_compile_overview(last_output, attempt)
+        # P7.4: track floor on rustc error count, not sig equality.
+        cur_count = len(cur_sigs)
+        if _fl_best_count is None or cur_count < _fl_best_count:
+            _fl_best_count = cur_count
+            _fl_stall = 0
+        else:
+            _fl_stall += 1
         if attempt > 0:
             resolved = prev_sigs - cur_sigs
-            if cur_sigs == prev_sigs:
-                _log(f"  [fix loop] No error improvement after attempt {attempt} — giving up.")
+            _log(f"  [fix loop] {len(resolved)} error(s) resolved, {cur_count} "
+                 f"remaining (floor={_fl_best_count}, stall={_fl_stall}).")
+            _emit("loop.iter", data={
+                "name": "generate_fix_loop",
+                "iter": attempt,
+                "metric_new": cur_count,
+                "metric_best": _fl_best_count,
+                "improved": _fl_stall == 0,
+                "stalled": _fl_stall,
+            })
+            if _fl_stall >= _fl_max_stalls:
+                _log(f"  [fix loop] floor stalled at {_fl_best_count} for "
+                     f"{_fl_stall} iter(s) — giving up.")
                 break
-            _log(f"  [fix loop] {len(resolved)} error(s) resolved, {len(cur_sigs)} remaining — continuing.")
+            if attempt >= max_fix_attempts:
+                _log(f"  [fix loop] hard cap {max_fix_attempts} attempts reached.")
+                break
 
         # Graceful stop check — mirrors task0c behaviour: finish current attempt, then exit.
         _graceful_sentinel = Path("/tmp/pipeline_graceful_stop")
@@ -10884,6 +13143,144 @@ def task2_fix_loop(
     )
 
 
+# P7.3: task3 inline retry. Currently task3 is one-shot; failure escalates
+# straight to task4 + full regen. The inline retry catches the case where
+# only a handful of fns broke a test — classifier identifies them, a single
+# LLM call per fn fixes the body, cargo test re-runs. Bounded by stall budget
+# and a snapshot/revert guard so we never leave the tree worse than we found it.
+
+def _task3_inline_retry(
+    project_dir: Path,
+    test_command: str,
+    iteration,
+    initial_test_output: str,
+) -> tuple[bool, str]:
+    """Improvement-driven retry over a failed task3. Returns (passed, final_output).
+    If the retry cannot beat the initial failure floor, restores the source
+    tree from snapshot and returns (False, initial_output).
+    """
+    if os.getenv("TASK3_INLINE_RETRY", "1") == "0":
+        return False, initial_test_output
+
+    failed = sorted(_parse_failed_tests(initial_test_output))
+    if not failed:
+        return False, initial_test_output
+
+    max_stalls = int(os.getenv("TASK3_INLINE_MAX_STALLS", "3"))
+    hard_cap = int(os.getenv("TASK3_INLINE_HARD_CAP", "10"))
+    initial_count = len(failed)
+    _log(f"  [task3-retry] entering inline retry: {initial_count} failing test(s).")
+
+    # Snapshot every .rs file under project_dir/src — only files we might
+    # touch. Excluding tests/ keeps the snapshot cheap. Use bytes to handle
+    # any odd encodings without surprise.
+    snapshot: dict[Path, bytes] = {}
+    src_root = project_dir / "src"
+    if src_root.is_dir():
+        for p in src_root.rglob("*.rs"):
+            try:
+                snapshot[p] = p.read_bytes()
+            except Exception:
+                pass
+
+    def _run_check() -> tuple[bool, str, int]:
+        rc, out = _run_cargo(test_command, project_dir, _cargo_env(),
+                             timeout=TEST_TIMEOUT)
+        f = _parse_failed_tests(out)
+        return rc == 0, out, len(f)
+
+    def _do_fix(output: str, history: list[dict]) -> dict:
+        # Classify failing tests, locate implicated fns, single-shot fix
+        # for each. We do NOT call into _task2_fill_fns_one_by_one — the
+        # per-fn fix loop's machinery is cluster-scoped and would be
+        # awkward to drive from here.
+        fails_now = sorted(_parse_failed_tests(output))
+        if not fails_now:
+            return {"abort": True, "reason": "no_failed_tests"}
+        classification = _classify_phase_c_test_failures(
+            test_out=output,
+            filled_this_pass=[],   # task3 lacks cluster scope; classifier
+                                    # may name any fn — we resolve below
+            failed_tests=fails_now,
+            cluster_name="task3",
+        )
+        refs: list[tuple[str, str]] = []
+        for info in classification.values():
+            if info["category"] not in (
+                    "BAD_FILL", "TEST_PRECONDITION_MISSING"):
+                continue
+            r = info["fn"]
+            if "::" in r:
+                f_part, fn_part = r.split("::", 1)
+                refs.append((f_part.strip(), fn_part.strip()))
+        # Dedupe; classifier may name the same fn from multiple failing tests.
+        refs = list(dict.fromkeys(refs))
+        if not refs:
+            return {"abort": True, "reason": "classifier_no_actionable_refs"}
+
+        fixed_count = 0
+        for rel_f, fn in refs:
+            fp = project_dir / rel_f
+            if not fp.exists():
+                # Classifier may have hallucinated a path; skip silently.
+                continue
+            try:
+                cur_text = fp.read_text(encoding="utf-8")
+            except Exception:
+                continue
+            sloc = _locate_fn(cur_text, fn)
+            if sloc is None:
+                continue
+            sig_t = sloc[0]
+            cur_body = cur_text[sloc[2]:sloc[3]]
+            err_excerpt = _focus_cargo_errors(output, rel_f, max_chars=3000)
+            prompt = _build_per_fn_fix_prompt(
+                file_text=cur_text, fn_name=fn, sig_text=sig_t,
+                test_blocks=[], module_name=project_dir.name,
+                cluster_name="task3", file_rel=rel_f,
+                prev_body=cur_body, error_excerpt=err_excerpt,
+            )
+            new_body, _ = _ask_per_fn_body(prompt, fn, [])
+            if not new_body:
+                continue
+            ok2, _ = _splice_fn_body(fp, fn, new_body)
+            if ok2:
+                fixed_count += 1
+                _log(f"  [task3-retry] re-spliced {rel_f}::{fn}.")
+        return {
+            "summary": f"fixed_{fixed_count}/{len(refs)}",
+            "fns_touched": refs,
+            "abort": fixed_count == 0,
+            "reason": "no_fns_spliced" if fixed_count == 0 else "",
+        }
+
+    passed, last_out, history = _improvement_loop(
+        name="task3.inline_retry",
+        run_check=_run_check,
+        do_fix=_do_fix,
+        max_stalls=max_stalls,
+        hard_cap=hard_cap,
+    )
+    final_failed = _parse_failed_tests(last_out)
+    if passed:
+        _log(f"  [task3-retry] tests now PASS after {len(history)} iter(s).")
+        return True, last_out
+    # Decide whether to keep partial progress or revert. If the inline retry
+    # made things STRICTLY WORSE than the initial state, restore the snapshot.
+    if len(final_failed) > initial_count and snapshot:
+        _log(f"  [task3-retry] result {len(final_failed)} > initial "
+             f"{initial_count} — reverting from snapshot.")
+        for p, data in snapshot.items():
+            try:
+                p.write_bytes(data)
+            except Exception:
+                pass
+        return False, initial_test_output
+    _log(f"  [task3-retry] stopped at {len(final_failed)} failing tests "
+         f"(initial {initial_count}). Keeping partial progress.")
+    return False, last_out
+
+
 def task3(project_dir, test_command, iteration, output_dir, genesis_path):
     _log(f"\nTASK 3: Running tests (iteration {iteration})")
     output_file = Path(output_dir) / f"tests_output_{iteration}.txt"
@@ -10939,6 +13336,40 @@ def task3(project_dir, test_command, iteration, output_dir, genesis_path):
               data={"returncode": result.returncode,
                     "pass_count": _pass_n, "fail_count": _fail_n,
                     "output": _store_prompt_content(test_output)})
+        # P7.3: inline retry before escalating to task4. The classifier
+        # identifies fns that likely caused the failure; we attempt single-
+        # shot fixes per fn, re-run, and either accept the improved state
+        # or revert from snapshot. Guarded by TASK3_INLINE_RETRY env (default
+        # on).
+        if not passed:
+            retry_passed, retry_output = _task3_inline_retry(
+                project_dir=project_dir,
+                test_command=test_command,
+                iteration=iteration,
+                initial_test_output=test_output,
+            )
+            if retry_passed:
+                passed = True
+                test_output = retry_output
+                # Overwrite the on-disk record so downstream (task4, failure
+                # log) reflects the recovered state.
+                write(output_file,
+                      f"=== genesis.md (iteration {iteration}) ===\n{genesis}"
+                      f"\n{OUTPUT_SEPARATOR}\n{test_output}")
+                _pass_n, _fail_n = _parse_test_counts(test_output)
+                _log(f"  Tests PASSED via inline retry. Output -> {output_file}")
+                _emit("test.pass", duration_ms=int(
+                    (time.monotonic() - _t_start) * 1000),
+                      data={"returncode": 0, "pass_count": _pass_n,
+                            "fail_count": _fail_n, "via": "task3_inline_retry",
+                            "output": _store_prompt_content(test_output)})
+            elif retry_output != test_output:
+                # Partial improvement kept; refresh the on-disk record.
+                test_output = retry_output
+                write(output_file,
+                      f"=== genesis.md (iteration {iteration}) ===\n{genesis}"
+                      f"\n{OUTPUT_SEPARATOR}\n{test_output}")
+                _pass_n, _fail_n = _parse_test_counts(test_output)
         done["data"] = {"passed": passed, "pass_count": _pass_n, "fail_count": _fail_n}
         return passed, test_output
 
@@ -12111,6 +14542,88 @@ def _extract_gen_tests_body(block: str) -> str:
     return block.strip() + "\n"
 
 
+def _rust_delimiters_balanced(text: str) -> bool:
+    """Best-effort syntactic sanity check: are `{}`, `[]`, `()` balanced in
+    `text`? Respects string literals, char literals, and comments.
+
+    Catches the most common LLM-output corruption (extra closing paren,
+    missing brace) without requiring a full Rust parser. Used to validate
+    gen_tests siblings before committing them, and to detect already-broken
+    siblings at startup.
+    """
+    if not text:
+        return True
+    pairs = {")": "(", "]": "[", "}": "{"}
+    stack: list[str] = []
+    in_str = False
+    in_chr = False
+    in_line_cmt = False
+    in_blk_cmt = 0
+    esc = False
+    i = 0
+    n = len(text)
+    while i < n:
+        c = text[i]
+        nxt = text[i + 1] if i + 1 < n else ""
+        if esc:
+            esc = False
+            i += 1
+            continue
+        if in_line_cmt:
+            if c == "\n":
+                in_line_cmt = False
+            i += 1
+            continue
+        if in_blk_cmt:
+            if c == "*" and nxt == "/":
+                in_blk_cmt -= 1
+                i += 2
+                continue
+            if c == "/" and nxt == "*":
+                in_blk_cmt += 1
+                i += 2
+                continue
+            i += 1
+            continue
+        if in_str:
+            if c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+            i += 1
+            continue
+        if in_chr:
+            if c == "\\":
+                esc = True
+            elif c == "'":
+                in_chr = False
+            i += 1
+            continue
+        if c == '"':
+            in_str = True
+            i += 1
+            continue
+        if c == "/" and nxt == "/":
+            in_line_cmt = True
+            i += 2
+            continue
+        if c == "/" and nxt == "*":
+            in_blk_cmt = 1
+            i += 2
+            continue
+        # Heuristic for char vs lifetime — skip both; lifetimes don't have
+        # a matching closing `'` and char literals contain at most 1 visible
+        # char or escape. Treating as opaque is good enough for balance.
+        if c in "([{":
+            stack.append(c)
+        elif c in ")]}":
+            if not stack or stack[-1] != pairs[c]:
+                return False
+            stack.pop()
+        i += 1
+    return not stack and not in_str and not in_chr and not in_blk_cmt
+
+
 def _write_gen_tests_pass(
     src_file: Path,
     src_text: str,
@@ -12126,14 +14639,92 @@ def _write_gen_tests_pass(
     `cluster_cfg_attr` (optional): cfg predicate used to scope this gen_tests
     mod to a specific compiler cluster — see _build_gen_tests_decl.
     Returns the sibling file path.
+
+    Performs a delimiter-balance sanity check on the extracted body before
+    committing. When the body has unbalanced `()`/`[]`/`{}` (a common LLM-
+    corruption mode that propagates a syntax error into the test crate and
+    breaks subsequent cargo invocations), the sibling is written for
+    inspection but the parent src file is NOT updated with the decl —
+    making the bad pass a no-op at compile time. Returns the sibling path
+    regardless (caller's contract).
     """
     sibling = _gen_tests_path(src_file, pass_n)
     body = _extract_gen_tests_body(block)
+    if not _rust_delimiters_balanced(body):
+        # Quarantine: still write the file (for debugging) but do NOT attach
+        # the decl to the parent. cargo will never see it; pipeline can
+        # inspect it offline.
+        quarantine = sibling.with_suffix(".rs.broken")
+        quarantine.write_text(body, encoding="utf-8")
+        try:
+            _log(f"  [gen_tests] REJECTED pass {pass_n} for {src_file.name}: "
+                 f"delimiters unbalanced. Quarantined → {quarantine.name}")
+        except Exception:
+            pass
+        return sibling  # parent decl unchanged
     sibling.write_text(body, encoding="utf-8")
     decl = _build_gen_tests_decl(sibling.name, pass_n, allow_line,
                                   cluster_cfg_attr=cluster_cfg_attr)
     src_file.write_text(src_text.rstrip() + decl, encoding="utf-8")
     return sibling
+
+
+def _quarantine_broken_gen_tests(project_dir: Path) -> int:
+    """Scan all existing gen_tests siblings; rename any with unbalanced
+    delimiters to `.rs.broken` and strip their `#[path] mod gen_tests_N`
+    decl from the parent src file. Returns count of quarantined files.
+
+    Runs at pipeline startup as a recovery for state inherited from
+    earlier runs that committed broken gen_tests before this validation
+    existed.
+    """
+    moved = 0
+    for src in (project_dir / "src").rglob("*.gen_tests_*.rs"):
+        try:
+            text = src.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        if _rust_delimiters_balanced(text):
+            continue
+        # Identify the parent src file (foo.gen_tests_N.rs → foo.rs).
+        m = re.match(r"^(.*?)\.gen_tests_(\d+)\.rs$", src.name)
+        if not m:
+            continue
+        parent_name = m.group(1) + ".rs"
+        pass_n = int(m.group(2))
+        parent = src.parent / parent_name
+        # Strip the decl block from the parent (best-effort).
+        try:
+            if parent.exists():
+                ptext = parent.read_text(encoding="utf-8")
+                # Match the gen_tests_N decl block: optional cfg + path
+                # attribute + mod statement.
+                decl_re = re.compile(
+                    r"\n*(?:#\[cfg\([^)]*\)\]\s*)?"
+                    r"#\s*\[\s*allow\s*\([^)]*\)\s*\][^\n]*\n*"
+                    r"#\s*\[\s*path\s*=\s*\"" + re.escape(src.name)
+                    + r"\"\s*\][^\n]*\n*"
+                    r"(?:pub\s+)?mod\s+gen_tests_" + str(pass_n)
+                    + r"\s*;\s*",
+                )
+                ptext_new = decl_re.sub("\n", ptext)
+                if ptext_new != ptext:
+                    parent.write_text(ptext_new, encoding="utf-8")
+        except Exception:
+            pass
+        # Rename the broken file so cargo can't pick it up via stray paths.
+        try:
+            src.rename(src.with_suffix(".rs.broken"))
+            moved += 1
+        except Exception:
+            try:
+                src.unlink()
+                moved += 1
+            except Exception:
+                pass
+    if moved:
+        _log(f"  [gen_tests] quarantined {moved} broken sibling(s) at startup.")
+    return moved
 
 
 def _revert_gen_tests_pass(src_file: Path, src_text: str, sibling: Path) -> None:
@@ -13301,7 +15892,10 @@ corrected content here
             except Exception:
                 pass
 
-    max_attempts = 10
+    # P7.7: floor-stall semantics with the absolute cap raised so it's no
+    # longer the binding constraint. `MAX_NO_IMPROVEMENT` below already
+    # functions as the stall budget; we just surface both as env-configurable.
+    max_attempts = int(os.getenv("TASK0C_HARD_CAP", "30"))
     attempt = 0
     # Resume attempt number if interrupted mid-run.
     _saved_phase = _read_state(project_dir)["phases"].get(f"task0c/{_cluster_label}/{module_name}", {})
@@ -13326,7 +15920,11 @@ corrected content here
                  f"{coverage:.1f}% ({covered_lines}/{coverable_lines} lines)")
     prev_covered = covered_lines if _skip_first_measure else -1
     no_improvement_count = 0
-    MAX_NO_IMPROVEMENT = 10  # per-file retrospective runs first; global stall is last resort only
+    MAX_NO_IMPROVEMENT = int(os.getenv(
+        "TASK0C_MAX_STALLS", "5"
+    ))  # P7.7: tightened — per-file retrospective fires first; this is the
+    # global stall budget. Lower than the legacy 10 because the per-file
+    # deep retrospective (RETRO_DEEP_AT_STALL=5) is the heavy lifter.
     FILE_STALL_LIMIT = 10   # consecutive no-improvement attempts before skipping a file
     RETRO_DEEP_AT_STALL = 5 # re-fire retrospective with concrete failed-attempt evidence
     file_stall_counts: dict[str, int] = {}   # consecutive no-improvement attempts per file
@@ -13416,6 +16014,17 @@ corrected content here
             prev_covered = covered_lines
             continue  # skip Phase C (no new tests until runtime failures are resolved)
 
+        # P7.7: uniform loop.iter event on every attempt for monitor.py.
+        _emit("loop.iter", data={
+            "name": "task0c.augment",
+            "module": module_name,
+            "cluster": _cluster_label,
+            "iter": attempt,
+            "metric_new": coverable_lines - covered_lines,  # uncov lines
+            "metric_best": coverable_lines - max(covered_lines, prev_covered),
+            "improved": delta_lines > 0,
+            "stalled": no_improvement_count,
+        })
         if delta_lines <= 0:
             no_improvement_count += 1
             _log(f"  [{module_name}] No improvement ({covered_lines}/{coverable_lines} lines, delta {delta_lines:+d}) — stall count {no_improvement_count}/{MAX_NO_IMPROVEMENT}")
@@ -14345,15 +16954,8 @@ def restart_from_augmented(root: Path, project_dir: Path) -> None:
         raise RuntimeError(f"git tag listing failed: {e}")
     tags = [t for t in tags if t]
     if not tags:
-        # Fall back to legacy pre-strip tag if present.
-        tags = subprocess.run(
-            ["git", "tag", "-l", "pre-strip-*"],
-            cwd=project_dir, capture_output=True, text=True,
-        ).stdout.strip().splitlines()
-        tags = [t for t in tags if t]
-    if not tags:
         raise RuntimeError(
-            "No task0c-augmented-* or pre-strip-* tag in the workspace. "
+            "No task0c-augmented-* tag in the workspace. "
             "There is no augmented restore point — use --clean for a full wipe instead."
         )
     if len(tags) > 1:
@@ -14992,12 +17594,11 @@ def main():
                         ))
     parser.add_argument("--phase-a-only", action="store_true",
                         help=(
-                            "TASK 2 skeleton backend, Phase A only: read the project's "
-                            "pre-strip source (from the most recent pre-strip tag in "
-                            "tmp/{project}/), run the Rust skeleton extractor, write the "
-                            "skeleton under tmp/{project}/.skeleton/{cluster}/, run "
-                            "cargo check against it, report. No LLM calls. For testing "
-                            "the skeleton-based reconstruction backend."
+                            "Standalone bake: discover clusters from live source, "
+                            "run the Rust skeleton extractor per cluster, save the "
+                            "skeleton + leaf-first ordering under "
+                            "tmp/{project}/.skeleton/{cluster}/. Refuses to run if "
+                            "strip has already happened (no source to read)."
                         ))
     parser.add_argument("--phase-b-only", action="store_true",
                         help=(
@@ -15061,6 +17662,16 @@ def main():
 
     init_log(root, nolog=args.nolog, progress_mode=args.progress)
     init_events(product=project_dir.name)
+
+    # P3.13: scan gen_tests siblings inherited from prior runs; quarantine
+    # any with unbalanced delimiters and strip their decls from the parent
+    # source. Prevents a broken file (an LLM-corrupted task0c output) from
+    # blocking every future cargo invocation. The systemic guard at write
+    # time lives in _write_gen_tests_pass.
+    try:
+        _quarantine_broken_gen_tests(project_dir)
+    except Exception as _e:
+        _log(f"  [gen_tests] startup quarantine scan failed: {_e}")
 
     if args.phase_a_only:
         rc = _cmd_phase_a_only(project_dir)
@@ -15554,17 +18165,25 @@ def main():
                 # TASK 1. The .original_structure/ dir survives strip (lives at the
                 # project root, not under src/), so TASK 1 can read it post-strip.
                 _capture_api_surface(project_dir, module_dir, module_name)
+                # Hard Rule 11: bake the skeleton + leaf-first ordering +
+                # cluster manifest from live source BEFORE strip. After
+                # strip these artefacts are the only source-derived inputs
+                # any downstream phase is allowed to read.
+                _bake_res = _bake_skeleton_artifacts(project_dir, module_name)
+                if not _bake_res.get("ok"):
+                    _log(f"  [ABORT] skeleton bake failed for '{module_name}': "
+                         f"{_bake_res.get('reason', 'unknown')} — refusing to strip.")
+                    raise RuntimeError(
+                        f"skeleton bake failed for {module_name}: "
+                        f"{_bake_res.get('reason', 'unknown')}")
+                _log(f"  Baked skeleton for {len(_bake_res['clusters'])} cluster(s): "
+                     f"{', '.join(_bake_res['clusters'])}")
                 if not git_commit(project_dir,
                                   f"pipeline: task0c augmentation complete — "
                                   f"all unit tests added for {module_name}"):
                     _log(f"  [ABORT] augmentation commit failed for '{module_name}' — refusing to strip. Fix git state and retry.")
                     raise RuntimeError(f"augmentation commit failed for {module_name}")
-                # Tag the augmented commit. The new tag name is the canonical
-                # restore point used by --restart-from-augmented; the legacy
-                # pre-strip-{module} tag is kept as an alias for anything that
-                # already pinned to it.
                 git_tag(project_dir, f"task0c-augmented-{module_name}")
-                git_tag(project_dir, f"pre-strip-{module_name}")
                 strip_module_source(project_dir, module_dir)
                 strip_sentinel.parent.mkdir(parents=True, exist_ok=True)
                 strip_sentinel.touch()
@@ -15722,17 +18341,27 @@ def main():
             _log(f"  Saved {_total} gen_tests sibling(s) from {len(saved_gen_blocks)} file(s) for reattachment.")
 
         # Wipe any previously generated files for this module (interrupted run).
-        # Skip our scratch/cache directories (anything under a dot-dir like
-        # .skeleton/, .skeleton-filled/, .task1_partials/, etc.) so per-cluster
-        # caches survive a restart and the per-fn fill loop can resume.
+        # Skip:
+        #  - scratch/cache directories (dot-dirs: .skeleton/, .skeleton-filled/,
+        #    .task1_partials/, .cluster_augmented/, etc.)
+        #  - target/ (cargo's build output; contains dependency build-script
+        #    outputs like target/debug/build/thiserror-xxx/out/private.rs
+        #    that cargo expects to find on subsequent compiles — deleting
+        #    these breaks dependency compilation in mysterious ways)
+        # Only wipe regenerated source files, not anything cargo manages.
+        _wipe_skip_dirs = {"target"}
         if module_dir.exists():
             wiped = []
             for src_file in sorted(module_dir.rglob("*.rs")):
                 rel = str(src_file.relative_to(project_dir))
                 if rel in existing_test_files:
                     continue
-                # Skip scratch dirs — components starting with '.' are our caches.
-                if any(part.startswith(".") for part in src_file.parts):
+                # Skip scratch dirs (any component starting with '.') and
+                # cargo's target/ tree.
+                parts = src_file.parts
+                if any(p.startswith(".") for p in parts):
+                    continue
+                if any(p in _wipe_skip_dirs for p in parts):
                     continue
                 src_file.unlink()
                 wiped.append(rel)
@@ -15834,6 +18463,8 @@ This is a Rust procedural macro crate. Strict rules apply:
                     # leaving them orphaned by the regenerated source.
                     if saved_gen_blocks:
                         _reattach_allow_line, _ = _derive_gentest_prelude(project_dir)
+                        # Track reattachments so we can validate them in batch.
+                        _reattached: list[tuple[Path, Path, int]] = []
                         for rel, blocks in saved_gen_blocks.items():
                             src_path = project_dir / rel
                             if not src_path.exists():
@@ -15850,9 +18481,70 @@ This is a Rust procedural macro crate. Strict rules apply:
                                         sibling.name, pass_n, _reattach_allow_line
                                     )
                                     added_decls += 1
+                                _reattached.append((src_path, sibling, pass_n))
                             if added_decls > 0:
                                 src_path.write_text(new_text, encoding="utf-8")
                                 _log(f"  Reattached {added_decls} gen_tests decl(s) to {rel}.")
+
+                        # P3.14: validate reattached gen_tests against the
+                        # REGENERATED source. The original task0c validated
+                        # each gen_tests file at write-time, but regeneration
+                        # of source can introduce import / API changes that
+                        # break the saved tests. Run cargo check --tests once
+                        # to surface all such failures, then quarantine each
+                        # gen_tests whose file is named in the errors. Strips
+                        # the decl from the parent so cargo can't see it.
+                        if _reattached:
+                            try:
+                                _vchk = subprocess.run(
+                                    ["cargo", "check", "--tests"],
+                                    cwd=project_dir, capture_output=True,
+                                    text=True, timeout=300, env=_cargo_env(),
+                                )
+                            except Exception as _e:
+                                _log(f"  [reattach] validate cargo check failed: {_e}")
+                                _vchk = None
+                            if _vchk is not None and _vchk.returncode != 0:
+                                _out = (_vchk.stdout or "") + (_vchk.stderr or "")
+                                # Quarantine any reattached sibling whose name
+                                # appears in the error output.
+                                quarantined = 0
+                                for src_path, sibling, pass_n in _reattached:
+                                    if sibling.name not in _out:
+                                        continue
+                                    # Strip the decl from the parent.
+                                    try:
+                                        ptext = src_path.read_text(encoding="utf-8")
+                                        decl_re = re.compile(
+                                            r"\n*(?:#\[cfg\([^)]*\)\]\s*)?"
+                                            r"#\s*\[\s*allow\s*\([^)]*\)\s*\][^\n]*\n*"
+                                            r"#\s*\[\s*path\s*=\s*\""
+                                            + re.escape(sibling.name)
+                                            + r"\"\s*\][^\n]*\n*"
+                                            r"(?:pub\s+)?mod\s+gen_tests_"
+                                            + str(pass_n) + r"\s*;\s*",
+                                        )
+                                        ptext_new = decl_re.sub("\n", ptext)
+                                        if ptext_new != ptext:
+                                            src_path.write_text(ptext_new, encoding="utf-8")
+                                    except Exception:
+                                        pass
+                                    try:
+                                        sibling.rename(sibling.with_suffix(".rs.broken"))
+                                    except Exception:
+                                        try:
+                                            sibling.unlink()
+                                        except Exception:
+                                            pass
+                                    quarantined += 1
+                                if quarantined:
+                                    _log(f"  [reattach] quarantined {quarantined} "
+                                         f"gen_tests sibling(s) whose tests no longer "
+                                         f"compile against the regenerated source.")
+                                    _emit("gen_tests.reattach_quarantine", data={
+                                        "module": module_name,
+                                        "quarantined": quarantined,
+                                    })
 
                     # API surface conformance: soft check — log drift but don't
                     # block. The report is appended to test_output below if

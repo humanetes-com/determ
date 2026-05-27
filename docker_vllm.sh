@@ -22,15 +22,74 @@ VLLM_MAX_LEN=$(_env VLLM_MAX_MODEL_LEN); VLLM_MAX_LEN="${VLLM_MAX_LEN:-131072}"
 HF_TOKEN=$(_env HF_TOKEN)
 CONTAINER_ID_FILE=/tmp/vllm_container.id
 
-# Stop existing container if any
-if [[ -f "$CONTAINER_ID_FILE" ]]; then
-    OLD_CID=$(cat "$CONTAINER_ID_FILE")
-    if docker inspect "$OLD_CID" > /dev/null 2>&1; then
-        echo "Stopping existing vLLM container ($OLD_CID) ..."
-        docker stop "$OLD_CID" > /dev/null
+# Parse flags: --y / -y skips the confirmation prompts below.
+_YES=false
+for _arg in "$@"; do
+    [[ "$_arg" == "--y" || "$_arg" == "-y" ]] && _YES=true
+done
+
+# Detect a running pipeline first — restarting vLLM mid-pipeline would
+# crash whatever LLM call is in flight. Warn (or kill with --y).
+_pipeline_pids=$(pgrep -f "pipeline.py" 2>/dev/null || true)
+if [[ -n "$_pipeline_pids" ]]; then
+    if [[ "$_YES" == true ]]; then
+        echo "Stopping running pipeline (PIDs: $_pipeline_pids) before vLLM restart ..."
+        kill $_pipeline_pids 2>/dev/null || true
+        sleep 2
+        pkill -9 -f "pipeline.py" 2>/dev/null || true
+        # Also clean up dangling continue.sh + lock so the next launch is fresh.
+        pkill -f "continue.sh" 2>/dev/null || true
+        rm -f /tmp/determ_continue.lock
+    else
+        echo "WARNING: pipeline.py is running (PIDs: $_pipeline_pids)."
+        echo "Restarting vLLM now will crash its in-flight LLM call."
+        echo -n "Stop the pipeline and proceed? [y/N] "
+        read -r _reply
+        if [[ "$_reply" =~ ^[Yy]$ ]]; then
+            echo "Stopping pipeline ..."
+            kill $_pipeline_pids 2>/dev/null || true
+            sleep 2
+            pkill -9 -f "pipeline.py" 2>/dev/null || true
+            pkill -f "continue.sh" 2>/dev/null || true
+            rm -f /tmp/determ_continue.lock
+        else
+            echo "Aborted — pipeline left running, vLLM not restarted."
+            exit 0
+        fi
     fi
-    rm -f "$CONTAINER_ID_FILE"
 fi
+
+# Detect a running vLLM container (by id-file OR by image match) and ask
+# before stopping it. Skipped with --y/-y.
+_running_cid=""
+if [[ -f "$CONTAINER_ID_FILE" ]]; then
+    _candidate=$(cat "$CONTAINER_ID_FILE")
+    if docker inspect -f '{{.State.Running}}' "$_candidate" 2>/dev/null | grep -q true; then
+        _running_cid="$_candidate"
+    fi
+fi
+if [[ -z "$_running_cid" ]]; then
+    # Fallback: look for any running vllm-openai container.
+    _running_cid=$(docker ps -q --filter ancestor=vllm/vllm-openai:latest | head -1)
+fi
+
+if [[ -n "$_running_cid" ]]; then
+    if [[ "$_YES" == true ]]; then
+        echo "Stopping existing vLLM container ($_running_cid) ..."
+        docker stop "$_running_cid" > /dev/null
+    else
+        echo -n "vLLM container is running (ID $_running_cid). Stop and restart? [y/N] "
+        read -r _reply
+        if [[ "$_reply" =~ ^[Yy]$ ]]; then
+            echo "Stopping existing vLLM container ($_running_cid) ..."
+            docker stop "$_running_cid" > /dev/null
+        else
+            echo "Aborted — current container left running."
+            exit 0
+        fi
+    fi
+fi
+rm -f "$CONTAINER_ID_FILE"
 
 echo "Starting vLLM Docker container (model: $VLLM_MODEL) ..."
 _hf_env=()
@@ -50,8 +109,7 @@ CID=$(docker run -d \
     --max-model-len "$VLLM_MAX_LEN" \
     --gpu-memory-utilization 0.90 \
     --enable-prefix-caching \
-    --enforce-eager \
-    --max-num-seqs 1 \
+    --max-num-seqs 4 \
     --reasoning-parser qwen3)
 
 echo "$CID" > "$CONTAINER_ID_FILE"

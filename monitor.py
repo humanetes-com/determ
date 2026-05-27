@@ -335,6 +335,229 @@ def _parse_coverage_json(project_dir):
     return result
 
 
+def _phase_c_state() -> dict[str, Any]:
+    """Roll up Phase C per-fn events into a dashboard summary.
+
+    Reads only events emitted SINCE the most recent pipeline start so the
+    panel reflects the live run, not historical noise. Returns:
+        {
+          "active": bool,             # any phase_c.* events at all
+          "cluster": str | None,      # most-recent cluster name
+          "pass_n": int | None,       # most-recent pass number
+          "max_passes": int | None,
+          "fills_done": int,
+          "fills_first": int,         # first-try
+          "fills_recovered": int,
+          "fills_failed": int,        # exhausted → annotated stub
+          "fills_skipped": int,
+          "stubs_remaining": int,     # latest pass_done value
+          "notes": int,
+          "current_fn": str | None,   # in-flight fn (start without matching done/fail)
+          "current_attempt": int | None,
+          "recent_fills": list[tuple[str, int, int]],  # last 5: (fn, body, attempts)
+          "hot_fn": tuple[str, int] | None,            # fn with most attempts
+          "last_test_rc": int | None,
+          "last_test_failed": int | None,
+          "last_event_age_s": int | None,
+        }
+    """
+    out: dict[str, Any] = {
+        "active": False, "cluster": None, "pass_n": None, "max_passes": None,
+        "fills_done": 0, "fills_first": 0, "fills_recovered": 0,
+        "fills_failed": 0, "fills_skipped": 0, "stubs_remaining": 0,
+        "notes": 0, "current_fn": None, "current_attempt": None,
+        "recent_fills": [], "hot_fn": None,
+        "last_test_rc": None, "last_test_failed": None,
+        "last_event_age_s": None,
+        # P4: progress bar fields (per-pass progress against stubs_at_pass_start).
+        "pass_stubs_total": 0,
+        "pass_fills_done": 0,
+        "pass_fills_failed": 0,
+        # Cumulative progress denominator (total fns in cluster scope).
+        "total_fns_in_cluster": 0,
+    }
+    if not os.path.exists(EVENTS_LOG):
+        return out
+    try:
+        run_start = _pipeline_start_time()
+    except Exception:
+        run_start = 0
+    try:
+        with open(EVENTS_LOG, "rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            fh.seek(max(0, size - 1024 * 1024))  # last 1 MB
+            raw = fh.read()
+    except Exception:
+        return out
+    from datetime import datetime, timezone as _tz
+    events: list[dict] = []
+    for line in raw.decode("utf-8", errors="replace").splitlines():
+        try:
+            rec = _json.loads(line)
+        except Exception:
+            continue
+        if not rec.get("event", "").startswith("phase_c."):
+            continue
+        if run_start > 0:
+            try:
+                ts = datetime.fromisoformat(rec["ts"].replace("Z", "+00:00")).timestamp()
+                if ts < run_start:
+                    continue
+            except Exception:
+                pass
+        events.append(rec)
+
+    if not events:
+        return out
+    out["active"] = True
+
+    fn_attempts: dict[str, int] = {}
+    in_flight_fn: str | None = None
+    in_flight_pass: int | None = None
+    last_ts_iso: str | None = None
+    for e in events:
+        ev = e["event"]
+        d = e.get("data", {})
+        last_ts_iso = e.get("ts") or last_ts_iso
+        if ev == "phase_c.pass.start":
+            out["cluster"] = d.get("cluster") or out["cluster"]
+            out["pass_n"] = d.get("pass_n") or out["pass_n"]
+            out["max_passes"] = d.get("max_passes") or out["max_passes"]
+            # Snapshot the pass's stub total so the progress bar has a
+            # fixed denominator. Reset the in-pass counters tracked below
+            # (otherwise prior pass's counts leak into this pass's bar).
+            out["pass_stubs_total"] = int(d.get("stubs", 0))
+            out["pass_fills_done"] = 0
+            out["pass_fills_failed"] = 0
+            # Cumulative progress denominator (total fns in cluster's cfg
+            # scope, including ones filled in prior runs). Lets the bar
+            # show real cumulative state instead of resetting to 0 per run.
+            out["total_fns_in_cluster"] = int(d.get("total_fns_in_cluster", 0))
+        elif ev == "phase_c.fn.fill.start":
+            in_flight_fn = d.get("fn")
+            in_flight_pass = d.get("pass_n")
+            out["cluster"] = d.get("cluster") or out["cluster"]
+        elif ev == "phase_c.fn.fill.done":
+            fn = d.get("fn") or "?"
+            attempts = d.get("fix_attempts", 1)
+            out["fills_done"] += 1
+            out["pass_fills_done"] = out.get("pass_fills_done", 0) + 1
+            if d.get("recovered"):
+                out["fills_recovered"] += 1
+            else:
+                out["fills_first"] += 1
+            fn_attempts[fn] = fn_attempts.get(fn, 0) + attempts
+            out["recent_fills"].append((fn, d.get("body_chars", 0), attempts))
+            in_flight_fn = None
+        elif ev == "phase_c.fn.fill.fail":
+            fn = d.get("fn") or "?"
+            attempts = d.get("fix_attempts", 0)
+            out["fills_failed"] += 1
+            out["pass_fills_failed"] = out.get("pass_fills_failed", 0) + 1
+            fn_attempts[fn] = fn_attempts.get(fn, 0) + attempts
+            in_flight_fn = None
+        elif ev == "phase_c.fn.fill.skip":
+            out["fills_skipped"] += 1
+            in_flight_fn = None
+        elif ev == "phase_c.note.added":
+            out["notes"] += 1
+        elif ev == "phase_c.pass.done":
+            out["stubs_remaining"] = d.get("remaining", out["stubs_remaining"])
+        elif ev == "phase_c.pass.test":
+            out["last_test_rc"] = d.get("rc")
+            out["last_test_failed"] = len(d.get("failed_tests") or [])
+
+    out["current_fn"] = in_flight_fn
+    if in_flight_fn:
+        out["current_attempt"] = fn_attempts.get(in_flight_fn, 0)
+    if out["recent_fills"]:
+        out["recent_fills"] = out["recent_fills"][-5:]
+    if fn_attempts:
+        hot = max(fn_attempts.items(), key=lambda x: x[1])
+        out["hot_fn"] = hot
+    if last_ts_iso:
+        try:
+            ts = datetime.fromisoformat(last_ts_iso.replace("Z", "+00:00")).timestamp()
+            out["last_event_age_s"] = int(time.time() - ts)
+        except Exception:
+            pass
+    return out
+
+
+def _phase_c_panel_rows(state: dict[str, Any]) -> list[str]:
+    """Render the Phase C panel rows. Empty list when no Phase C activity."""
+    if not state.get("active"):
+        return []
+    rows: list[str] = []
+    cluster = state.get("cluster") or "?"
+    pass_n = state.get("pass_n") or "?"
+    maxp = state.get("max_passes") or "?"
+    age = state.get("last_event_age_s")
+    age_s = (f"{age}s" if age is not None and age < 60
+             else f"{age // 60}m" if age is not None else "?")
+    rows.append(f"  phase-c  cluster={cluster}  pass={pass_n}/{maxp}  last={age_s}")
+
+    # Cumulative progress bar (across runs):
+    # filled_cumulative = total_in_cluster - stubs_at_pass_start + this_pass_done
+    # = "how many fns in this cluster are NOT still unimplemented".
+    # Stays accurate across restarts because pass_stubs_total snapshots the
+    # current count AT pass start, and total_fns_in_cluster is constant.
+    _pt = state.get("pass_stubs_total", 0) or 0
+    _pd = state.get("pass_fills_done", 0) or 0
+    _pf = state.get("pass_fills_failed", 0) or 0
+    _total = state.get("total_fns_in_cluster", 0) or 0
+    if _total > 0 and _pt > 0:
+        _cum_filled = _total - _pt + _pd  # exhausted failures still count as stubs
+        _cum_pct = _cum_filled / _total if _total else 0
+        _bar_w = 28
+        _bar_filled = int(_bar_w * _cum_pct)
+        _bar = "█" * _bar_filled + "░" * (_bar_w - _bar_filled)
+        rows.append(f"           progress  [{_bar}]  "
+                    f"{_cum_filled}/{_total} ({int(_cum_pct * 100)}%) "
+                    f"cumulative  · this pass: {_pd + _pf}/{_pt}")
+    elif _pt > 0:
+        # Fallback when total_fns_in_cluster missing (older events).
+        _done_this_pass = _pd + _pf
+        _pct = _done_this_pass / _pt
+        _bar_w = 28
+        _filled = int(_bar_w * _pct)
+        _bar = "█" * _filled + "░" * (_bar_w - _filled)
+        rows.append(f"           progress  [{_bar}]  {_done_this_pass}/{_pt} ({int(_pct * 100)}%)")
+
+    first = state.get("fills_first", 0)
+    rec = state.get("fills_recovered", 0)
+    failed = state.get("fills_failed", 0)
+    skip = state.get("fills_skipped", 0)
+    total_done = first + rec
+    rows.append(f"           fills  "
+                f"{green(f'✓ first={first}')}  "
+                f"{yellow(f'↻ recovered={rec}')}  "
+                f"{red(f'✗ failed={failed}')}  "
+                f"{dim(f'⊘ skip={skip}')}  "
+                f"{dim(f'(done={total_done})')}")
+    notes = state.get("notes", 0)
+    cur_fn = state.get("current_fn")
+    cur_att = state.get("current_attempt") or 0
+    cur_str = f"{cur_fn} (attempt {cur_att})" if cur_fn else dim("idle")
+    rows.append(f"           current  {cyan(cur_str)}   notes={notes}")
+    hot = state.get("hot_fn")
+    if hot:
+        rows.append(f"           hot fn   {dim(hot[0])} ({hot[1]} attempts)")
+    recent = state.get("recent_fills") or []
+    if recent:
+        bits = "  ".join(f"{fn}:{body}c×{a}" for fn, body, a in recent)
+        rows.append(f"           recent   {dim(bits)}")
+    test_rc = state.get("last_test_rc")
+    if test_rc is not None:
+        if test_rc == 0:
+            rows.append(f"           test     {green('PASSED')}")
+        else:
+            tf = state.get("last_test_failed") or 0
+            rows.append(f"           test     {red(f'rc={test_rc} failed={tf}')}")
+    return rows
+
+
 def _latest_compile_file_stats() -> dict[str, Any] | None:
     """Return the most recent compile.file_stats event payload, or None."""
     try:
@@ -757,6 +980,15 @@ def pipeline_status():
         if tp["iteration"]: _bits.append(f"iter={tp['iteration']}")
         _iter_str = dim("   " + "  ".join(_bits))
     rows.append("  phases  " + "  ".join(phase_parts) + _iter_str)
+
+    # ── P3.11: Phase C per-fn panel (visible when the skeleton backend
+    # is running). Pulls structured data from logs/events.jsonl.
+    try:
+        _pc = _phase_c_state()
+        for r in _phase_c_panel_rows(_pc):
+            rows.append(r)
+    except Exception as _e:
+        rows.append(dim(f"  phase-c  (panel error: {_e})"))
 
     # ── Loop hierarchy: cluster → attempt → file → retry ────────────────────
     #
@@ -1481,13 +1713,6 @@ def _augmentation_tag() -> str | None:
             cwd=proj, capture_output=True, text=True, timeout=5,
         ).stdout.strip().splitlines()
         tags = [t for t in out if t]
-        # Fall back to legacy pre-strip-* tag if the new naming is absent.
-        if not tags:
-            out = subprocess.run(
-                ["git", "tag", "-l", "pre-strip-*"],
-                cwd=proj, capture_output=True, text=True, timeout=5,
-            ).stdout.strip().splitlines()
-            tags = [t for t in out if t]
         if len(tags) == 1:
             return tags[0]
         return None

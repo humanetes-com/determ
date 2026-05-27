@@ -510,6 +510,517 @@ impl VisitMut for SkeletonVisitor {
     }
 }
 
+// ---------------------------------------------------------------------------
+// enumerate-fns: walk a source tree, emit one JSON record per fn item.
+// Used by Python pipeline to replace regex-based fn discovery with the
+// canonical syn AST. Catches inline declarations, trait methods, impl
+// methods, cfg-attributed fns — everything rustc considers a fn.
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize, Debug, Clone)]
+pub struct FnRecord {
+    pub file: String,           // relative path from input root
+    pub fn_name: String,
+    pub sig_text: String,       // verbatim from source, up to but excluding `{`
+    pub body_text: String,      // verbatim contents between `{` and `}`, no braces
+    pub sig_byte_start: usize,  // byte offset of fn declaration start (incl any pub/async kws)
+    pub body_byte_start: usize, // byte offset just AFTER the opening `{`
+    pub body_byte_end: usize,   // byte offset of the closing `}` (exclusive end of body)
+    pub cfg_predicates: Vec<String>, // accumulated cfg predicates gating this fn
+    pub is_pub: bool,           // any pub visibility (incl pub(crate), pub(super))
+    pub container: String,      // "" for free fn, "impl X for Y" for inherent/trait impl, "trait T" for trait method
+    pub has_unimplemented_body: bool, // body is a single `unimplemented!()` or annotated stub
+}
+
+fn extract_cfg_predicates(attrs: &[syn::Attribute]) -> Vec<String> {
+    let mut out = Vec::new();
+    for attr in attrs {
+        if attr.path().is_ident("cfg") {
+            // attr.meta is Meta::List(MetaList { tokens, ... })
+            if let syn::Meta::List(list) = &attr.meta {
+                out.push(list.tokens.to_string().trim().to_string());
+            }
+        }
+    }
+    out
+}
+
+fn body_looks_unimplemented(body: &str) -> bool {
+    let s = body.trim();
+    // Plain `unimplemented!()` form (possibly with `::core::` prefix and spaces).
+    if s.len() < 60 && s.contains("unimplemented") {
+        return true;
+    }
+    // Annotated stub form (P3.12: failed-attempt comment + unimplemented at end).
+    s.contains("// SKELETON_STUB_FAILED_ATTEMPT")
+}
+
+struct FnEnumerator<'a> {
+    source: &'a str,
+    file_rel: String,
+    cfg_stack: Vec<String>,
+    container_stack: Vec<String>,
+    records: Vec<FnRecord>,
+}
+
+impl<'a> FnEnumerator<'a> {
+    fn new(source: &'a str, file_rel: String) -> Self {
+        Self {
+            source,
+            file_rel,
+            cfg_stack: Vec::new(),
+            container_stack: Vec::new(),
+            records: Vec::new(),
+        }
+    }
+
+    fn record_from_fn(
+        &mut self,
+        fn_name: &str,
+        attrs: &[syn::Attribute],
+        is_pub: bool,
+        sig: &syn::Signature,
+        block: &syn::Block,
+    ) {
+        // sig_byte_start: best-effort using the fn token's span, fallback to
+        // the first attribute's span if attrs are present.
+        let fn_span = sig.fn_token.span;
+        let sig_start = fn_span.byte_range().start;
+        // body open/close braces. block.brace_token has a Span covering the
+        // full {..} region; we want the inside.
+        let brace_span = block.brace_token.span;
+        // brace_token.span() returns a Span covering the entire {...} including
+        // both braces. We use .join().byte_range() but that's not directly
+        // available; instead use the open/close delimited spans.
+        let body_open = brace_span.open().byte_range().end; // just past `{`
+        let body_close = brace_span.close().byte_range().start; // position of `}`
+        let body_byte_start = body_open;
+        let body_byte_end = body_close;
+        // sig_text: from sig_start to the opening brace
+        let sig_text = self
+            .source
+            .get(sig_start..body_byte_start.saturating_sub(1))
+            .unwrap_or("")
+            .trim()
+            .trim_end_matches('{')
+            .trim()
+            .to_string();
+        let body_text = self
+            .source
+            .get(body_byte_start..body_byte_end)
+            .unwrap_or("")
+            .to_string();
+        let mut cfgs = self.cfg_stack.clone();
+        cfgs.extend(extract_cfg_predicates(attrs));
+        let container = self.container_stack.last().cloned().unwrap_or_default();
+        self.records.push(FnRecord {
+            file: self.file_rel.clone(),
+            fn_name: fn_name.to_string(),
+            sig_text,
+            body_text: body_text.clone(),
+            sig_byte_start: sig_start,
+            body_byte_start,
+            body_byte_end,
+            cfg_predicates: cfgs,
+            is_pub,
+            container,
+            has_unimplemented_body: body_looks_unimplemented(&body_text),
+        });
+    }
+
+    fn walk_items(&mut self, items: &[Item]) {
+        for item in items {
+            // Push cfg from item attrs (so nested fns inherit).
+            let item_cfgs = extract_cfg_predicates(item_attrs(item));
+            for c in &item_cfgs {
+                self.cfg_stack.push(c.clone());
+            }
+            match item {
+                Item::Fn(item_fn) => {
+                    self.record_from_fn(
+                        &item_fn.sig.ident.to_string(),
+                        &item_fn.attrs,
+                        matches!(item_fn.vis, syn::Visibility::Public(_) | syn::Visibility::Restricted(_)),
+                        &item_fn.sig,
+                        &item_fn.block,
+                    );
+                }
+                Item::Impl(item_impl) => {
+                    let container = render_impl_header(item_impl);
+                    self.container_stack.push(container);
+                    for impl_item in &item_impl.items {
+                        let ii_cfgs = extract_cfg_predicates(impl_item_attrs(impl_item));
+                        for c in &ii_cfgs {
+                            self.cfg_stack.push(c.clone());
+                        }
+                        if let ImplItem::Fn(item_fn) = impl_item {
+                            self.record_from_fn(
+                                &item_fn.sig.ident.to_string(),
+                                &item_fn.attrs,
+                                matches!(item_fn.vis, syn::Visibility::Public(_) | syn::Visibility::Restricted(_)),
+                                &item_fn.sig,
+                                &item_fn.block,
+                            );
+                        }
+                        for _ in &ii_cfgs {
+                            self.cfg_stack.pop();
+                        }
+                    }
+                    self.container_stack.pop();
+                }
+                Item::Trait(item_trait) => {
+                    let container = format!("trait {}", item_trait.ident);
+                    self.container_stack.push(container);
+                    for trait_item in &item_trait.items {
+                        let ti_cfgs = extract_cfg_predicates(trait_item_attrs(trait_item));
+                        for c in &ti_cfgs {
+                            self.cfg_stack.push(c.clone());
+                        }
+                        if let TraitItem::Fn(item_fn) = trait_item {
+                            if let Some(block) = &item_fn.default {
+                                self.record_from_fn(
+                                    &item_fn.sig.ident.to_string(),
+                                    &item_fn.attrs,
+                                    false,
+                                    &item_fn.sig,
+                                    block,
+                                );
+                            }
+                        }
+                        for _ in &ti_cfgs {
+                            self.cfg_stack.pop();
+                        }
+                    }
+                    self.container_stack.pop();
+                }
+                Item::Mod(item_mod) => {
+                    if let Some((_, items)) = &item_mod.content {
+                        self.container_stack
+                            .push(format!("mod {}", item_mod.ident));
+                        self.walk_items(items);
+                        self.container_stack.pop();
+                    }
+                }
+                _ => {}
+            }
+            for _ in &item_cfgs {
+                self.cfg_stack.pop();
+            }
+        }
+    }
+}
+
+fn impl_item_attrs(it: &ImplItem) -> &[syn::Attribute] {
+    match it {
+        ImplItem::Fn(i) => &i.attrs,
+        ImplItem::Const(i) => &i.attrs,
+        ImplItem::Type(i) => &i.attrs,
+        _ => &[],
+    }
+}
+
+fn trait_item_attrs(it: &TraitItem) -> &[syn::Attribute] {
+    match it {
+        TraitItem::Fn(i) => &i.attrs,
+        TraitItem::Const(i) => &i.attrs,
+        TraitItem::Type(i) => &i.attrs,
+        _ => &[],
+    }
+}
+
+fn render_impl_header(item_impl: &ItemImpl) -> String {
+    let ty = &item_impl.self_ty;
+    let ty_str = quote::quote!(#ty).to_string();
+    let trait_str = item_impl
+        .trait_
+        .as_ref()
+        .map(|(_, path, _)| quote::quote!(#path).to_string())
+        .unwrap_or_default();
+    if trait_str.is_empty() {
+        format!("impl {}", ty_str)
+    } else {
+        format!("impl {} for {}", trait_str, ty_str)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Type records — P5.1: cross-file type definitions for prompt context.
+// One record per struct/enum, including its fields and known method names.
+// Used by Python to inject relevant type definitions into per-fn prompts
+// so the model knows e.g. `Own<T>` has a `.ptr` field (not a `.foo()` method).
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize, Debug, Clone)]
+pub struct TypeRecord {
+    pub file: String,
+    pub kind: String,           // "struct" | "enum" | "type" (alias) | "trait"
+    pub name: String,
+    pub generics: String,       // "<T, E>" or "" if none
+    pub definition: String,     // full source-level definition (sig + body for struct/enum)
+    pub fields: Vec<FieldRecord>, // struct fields (empty for enums and tuples-only structs)
+    pub variants: Vec<String>,  // enum variants (name and parenthesised shape)
+    pub methods: Vec<MethodRecord>, // names of methods declared on this type
+    pub is_pub: bool,
+}
+
+#[derive(serde::Serialize, Debug, Clone)]
+pub struct FieldRecord {
+    pub name: String,
+    pub ty: String,
+    pub is_pub: bool,
+}
+
+#[derive(serde::Serialize, Debug, Clone)]
+pub struct MethodRecord {
+    pub name: String,
+    pub sig: String,             // sig text up to but excluding `{`
+    pub is_pub: bool,
+}
+
+fn render_type<T: quote::ToTokens>(t: &T) -> String {
+    quote::quote!(#t).to_string()
+}
+
+fn collect_types_and_methods(
+    items: &[Item],
+    file_rel: &str,
+    out_types: &mut std::collections::BTreeMap<String, TypeRecord>,
+) {
+    use syn::Fields;
+    for item in items {
+        match item {
+            Item::Struct(s) => {
+                let name = s.ident.to_string();
+                let generics = render_type(&s.generics).trim().to_string();
+                let mut fields = Vec::new();
+                match &s.fields {
+                    Fields::Named(f) => {
+                        for nf in &f.named {
+                            fields.push(FieldRecord {
+                                name: nf.ident.as_ref().map(|i| i.to_string()).unwrap_or_default(),
+                                ty: render_type(&nf.ty).trim().to_string(),
+                                is_pub: matches!(nf.vis, syn::Visibility::Public(_)),
+                            });
+                        }
+                    }
+                    Fields::Unnamed(f) => {
+                        for (i, nf) in f.unnamed.iter().enumerate() {
+                            fields.push(FieldRecord {
+                                name: i.to_string(),
+                                ty: render_type(&nf.ty).trim().to_string(),
+                                is_pub: matches!(nf.vis, syn::Visibility::Public(_)),
+                            });
+                        }
+                    }
+                    Fields::Unit => {}
+                }
+                let is_pub = matches!(s.vis,
+                    syn::Visibility::Public(_) | syn::Visibility::Restricted(_));
+                let definition = quote::quote!(#s).to_string();
+                // Update the entry: an earlier impl block may have created a
+                // placeholder with empty fields. We always overwrite the
+                // struct-level fields (definition, generics, kind, fields).
+                let entry = out_types.entry(name.clone()).or_insert_with(|| TypeRecord {
+                    file: file_rel.to_string(),
+                    kind: "struct".to_string(),
+                    name: name.clone(),
+                    generics: String::new(),
+                    definition: String::new(),
+                    fields: Vec::new(),
+                    variants: Vec::new(),
+                    methods: Vec::new(),
+                    is_pub: false,
+                });
+                entry.kind = "struct".to_string();
+                entry.file = file_rel.to_string();
+                entry.generics = generics;
+                entry.definition = definition;
+                entry.fields = fields;
+                entry.is_pub = is_pub;
+            }
+            Item::Enum(e) => {
+                let name = e.ident.to_string();
+                let generics = render_type(&e.generics).trim().to_string();
+                let mut variants = Vec::new();
+                for v in &e.variants {
+                    variants.push(render_type(v).trim().to_string());
+                }
+                let is_pub = matches!(e.vis,
+                    syn::Visibility::Public(_) | syn::Visibility::Restricted(_));
+                let definition = quote::quote!(#e).to_string();
+                out_types.entry(name.clone()).or_insert(TypeRecord {
+                    file: file_rel.to_string(),
+                    kind: "enum".to_string(),
+                    name: name.clone(), generics,
+                    definition, fields: Vec::new(),
+                    variants, methods: Vec::new(),
+                    is_pub,
+                });
+            }
+            Item::Type(t) => {
+                let name = t.ident.to_string();
+                let generics = render_type(&t.generics).trim().to_string();
+                let is_pub = matches!(t.vis,
+                    syn::Visibility::Public(_) | syn::Visibility::Restricted(_));
+                let definition = quote::quote!(#t).to_string();
+                out_types.entry(name.clone()).or_insert(TypeRecord {
+                    file: file_rel.to_string(),
+                    kind: "type".to_string(),
+                    name: name.clone(), generics,
+                    definition, fields: Vec::new(),
+                    variants: Vec::new(), methods: Vec::new(),
+                    is_pub,
+                });
+            }
+            Item::Trait(tr) => {
+                let name = tr.ident.to_string();
+                let generics = render_type(&tr.generics).trim().to_string();
+                let is_pub = matches!(tr.vis,
+                    syn::Visibility::Public(_) | syn::Visibility::Restricted(_));
+                let definition = quote::quote!(#tr).to_string();
+                let mut methods = Vec::new();
+                for ti in &tr.items {
+                    if let TraitItem::Fn(itf) = ti {
+                        methods.push(MethodRecord {
+                            name: itf.sig.ident.to_string(),
+                            sig: render_type(&itf.sig).trim().to_string(),
+                            is_pub: false,
+                        });
+                    }
+                }
+                out_types.entry(name.clone()).or_insert(TypeRecord {
+                    file: file_rel.to_string(),
+                    kind: "trait".to_string(),
+                    name: name.clone(), generics,
+                    definition, fields: Vec::new(),
+                    variants: Vec::new(), methods,
+                    is_pub,
+                });
+            }
+            Item::Impl(ii) => {
+                // Inherent impls (no trait_) attach methods to the self_ty.
+                if ii.trait_.is_some() {
+                    continue;
+                }
+                let ty_name = self_ty_name(&ii.self_ty);
+                if ty_name.is_empty() {
+                    continue;
+                }
+                let entry = out_types.entry(ty_name.clone()).or_insert(TypeRecord {
+                    file: file_rel.to_string(),
+                    kind: "struct".to_string(),  // we don't know yet; corrected by struct/enum entry if it exists
+                    name: ty_name.clone(), generics: String::new(),
+                    definition: String::new(), fields: Vec::new(),
+                    variants: Vec::new(), methods: Vec::new(),
+                    is_pub: false,
+                });
+                for impl_item in &ii.items {
+                    if let ImplItem::Fn(item_fn) = impl_item {
+                        entry.methods.push(MethodRecord {
+                            name: item_fn.sig.ident.to_string(),
+                            sig: render_type(&item_fn.sig).trim().to_string(),
+                            is_pub: matches!(item_fn.vis,
+                                syn::Visibility::Public(_) | syn::Visibility::Restricted(_)),
+                        });
+                    }
+                }
+            }
+            Item::Mod(item_mod) => {
+                if let Some((_, items)) = &item_mod.content {
+                    collect_types_and_methods(items, file_rel, out_types);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn self_ty_name(ty: &syn::Type) -> String {
+    // Get the bare ident from a possibly-generic type: `Foo<X, Y>` → "Foo".
+    if let syn::Type::Path(tp) = ty {
+        if let Some(seg) = tp.path.segments.last() {
+            return seg.ident.to_string();
+        }
+    }
+    String::new()
+}
+
+/// Walk a directory tree and emit one TypeRecord per (file × struct/enum/type/trait).
+pub fn enumerate_types_in_tree(input_dir: &Path) -> Result<Vec<TypeRecord>> {
+    let mut types: std::collections::BTreeMap<String, TypeRecord> =
+        std::collections::BTreeMap::new();
+    for entry in walkdir::WalkDir::new(input_dir).into_iter().filter_map(|e| e.ok()) {
+        let p = entry.path();
+        if !p.is_file() {
+            continue;
+        }
+        if p.extension().and_then(|s| s.to_str()) != Some("rs") {
+            continue;
+        }
+        let rel = p.strip_prefix(input_dir).unwrap_or(p);
+        if rel.components().any(|c| {
+            let s = c.as_os_str().to_string_lossy();
+            s.starts_with('.') || s == "target"
+        }) {
+            continue;
+        }
+        let source = match std::fs::read_to_string(p) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let ast: syn::File = match parse_file(&source) {
+            Ok(a) => a,
+            Err(_) => continue,
+        };
+        let rel_str = rel.to_string_lossy().to_string();
+        collect_types_and_methods(&ast.items, &rel_str, &mut types);
+    }
+    Ok(types.into_values().collect())
+}
+
+
+/// Parse a single file and emit one FnRecord per fn item.
+pub fn enumerate_fns_in_file(path: &Path, root: &Path) -> Result<Vec<FnRecord>> {
+    let source = std::fs::read_to_string(path)
+        .with_context(|| format!("read {}", path.display()))?;
+    let ast: syn::File = parse_file(&source)
+        .with_context(|| format!("parse {}", path.display()))?;
+    let rel = path
+        .strip_prefix(root)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| path.to_string_lossy().to_string());
+    let mut en = FnEnumerator::new(&source, rel);
+    en.walk_items(&ast.items);
+    Ok(en.records)
+}
+
+/// Walk a directory tree and enumerate all fns across all .rs files.
+pub fn enumerate_fns_in_tree(input_dir: &Path) -> Result<Vec<FnRecord>> {
+    let mut out = Vec::new();
+    for entry in walkdir::WalkDir::new(input_dir).into_iter().filter_map(|e| e.ok()) {
+        let p = entry.path();
+        if !p.is_file() {
+            continue;
+        }
+        if p.extension().and_then(|s| s.to_str()) != Some("rs") {
+            continue;
+        }
+        // Skip our own scratch dirs and target/
+        let rel = p.strip_prefix(input_dir).unwrap_or(p);
+        if rel.components().any(|c| {
+            let s = c.as_os_str().to_string_lossy();
+            s.starts_with('.') || s == "target"
+        }) {
+            continue;
+        }
+        match enumerate_fns_in_file(p, input_dir) {
+            Ok(mut recs) => out.append(&mut recs),
+            Err(_e) => continue, // skip files that don't parse (gen_tests etc.)
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

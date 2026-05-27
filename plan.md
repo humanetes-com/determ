@@ -1,8 +1,915 @@
 # Pipeline plans
 
-Two plans live here. Plan 1 (the prompt-quality audit) is COMPLETE — kept
-at the bottom as historical reference. Plan 2 (skeleton-based reconstruction)
-is the active work.
+Three plans live here. Plan 3 (this section) is the active work — fixes
+derived from the 2026-05-26 morning retrospective. Plan 2 (skeleton-based
+reconstruction) is the implemented baseline. Plan 1 (the prompt-quality
+audit) is COMPLETE, kept at the bottom as historical reference.
+
+---
+
+# Retrospective — 2026-05-26 (overnight run, session 40)
+
+Pipeline ran ~13 hours on anyhow with the per-fn fix-loop + notes
+architecture from session 40. Three clusters processed, 17 self-correction
+notes accumulated, 2 clusters Phase-C-done. Below is what worked, what
+didn't, and the resulting fix plan.
+
+## Pipeline — logic and loops
+
+### Wins
+- Per-fn architecture: 22 first-try + 11 recovered = 75% net success rate
+  (excluding the 4 protocol skips).
+- Multi-pass retry firing as designed. `object_drop_front` got 3 chances
+  across pass 1/2/3 in cluster `stable`, each with richer file context.
+- Annotated stubs preserving failure history across passes (sentinel
+  `// SKELETON_STUB_FAILED_ATTEMPT` correctly recognised by
+  `_scan_unimplemented_functions`).
+- Wipe-bug fix held — `.skeleton/` and `.skeleton-filled/` caches
+  survived restarts; pipeline picked up from where it left off without
+  re-extracting.
+- Leaf-first ordering visible in logs: `vtable` filled first in every
+  cluster (helper that other fns reference).
+- Hard fns DID recover via fix-loop: `object_downcast` in stable
+  converged on attempt 7; in anyhow_no_core_error on attempt 4.
+- Notes accumulating with high quality, written in the model's own
+  first-person voice, semantically usable on later attempts.
+
+### Misses
+1. **Test phase silently broken all night.** 3 `phase_c.pass.test` events,
+   all rc=101 in 0.1s. Cargo crashed at command-parse time because
+   `_find_tests_for_fn` returned `src/*.gen_tests_*.rs` siblings as
+   `--test {stem}` targets. Those aren't standalone test binaries — they're
+   imported via `#[path]` from src files. Whole runtime-validation half of
+   the architecture sat idle.
+   STATUS: fixed in pipeline.py (filter `test_paths` to those with `tests`
+   in `Path.parts`). Takes effect on next restart.
+
+2. **Nightly cluster's toolchain not applying.** Failed prompts for the
+   nightly cluster show `error[E0554]`: `#![feature]` may not be used on the
+   stable release channel — but we're explicitly in the nightly cluster.
+   Either `cluster.toolchain` is None when it should be "nightly", or the
+   `cargo +nightly` prefix isn't reaching the actual invocation. To diagnose.
+
+3. **object_drop_front: 5 exhaustions across all clusters, never recovered.**
+   The notes system extracted the lesson five times (4 of the 17 notes are
+   TypeId/'static variants). The model knows the lesson. But the fix would
+   require modifying the fn signature to add `T: 'static`, and the per-fn
+   prompt forbids changing the signature ("Signature (verbatim, do not
+   change)"). Architectural mismatch: note advises a fix the prompt rules
+   prohibit.
+
+4. **Multi-pass duplicate work.** 48 fills across all runs for a crate with
+   ~30 unique fns. The `_scan_unimplemented_functions` correctly skips
+   already-filled (non-stub) bodies, but each pass re-scans and re-iterates
+   every stub including annotated ones — useful for genuine retry, but
+   leads to wasted re-attempts when an annotated stub fails the same way.
+   The fn's own past failure note doesn't strongly enough deter the model
+   from repeating the approach.
+
+5. **Body sizes small.** Median body 64 chars, 23/44 bodies under 50 chars.
+   Many "successes" may be trivial fills that compile but don't implement
+   real behavior. The compile loop validated they compile; tests would have
+   revealed if they work — and tests never ran (miss #1).
+
+## Prompts — context quality
+
+### Wins
+- Prompt size manageable (26-33 KB for fix prompts).
+- MODEL_NOTES section reaches the model and grows across the run.
+- `help:` lines from rustc are now visible (yesterday's
+  --message-format-default change paying off).
+- Annotated stubs in file context: the model sees prior failed attempts
+  inline as comments while writing the new attempt.
+- MACROS section visible (ensure!, bail!, anyhow! reachable to every fn).
+- Tests filtered by file-stem + macro-aware: relevant tests reach the
+  prompt even when the fn name doesn't appear in test text.
+
+### Misses
+1. **Notes deduplication is hash-based only — semantic duplicates slip
+   through.** 4 of the 17 notes paraphrase the same TypeId/'static rule.
+   Each costs prompt budget; the model sees redundant guidance.
+
+2. **Note relevance filter not aggressive enough.** A fix-prompt for
+   `object_drop_front` includes 8 notes. Most don't apply. Tier 1 (file/fn
+   name match) should bubble TypeId notes higher than wrapper-struct notes
+   when filling a TypeId-related fn — but the current filter ranks by
+   simple substring presence.
+
+3. **No `rustc --explain Exxxx` augmentation for stuck fns.** We have
+   `help:` lines now, but for fns stuck 10+ attempts on the same error code
+   the canonical explain output would be a stronger signal than re-reading
+   the same help line. Identified yesterday as Option 2; deferred; now
+   warranted by observed convergence problems.
+
+4. **File context includes verbose attributes.** Top-of-file
+   `#![allow(unused, dead_code, ...)]` and similar attrs are visible to the
+   model unchanged. They eat tokens, don't help fill bodies.
+
+5. **Cargo error excerpt may be too narrow.** `_focus_cargo_errors` keeps
+   only errors whose `-->` mentions the fn's file. But a wrong fill in
+   error.rs can break compilation in lib.rs (consumer of error.rs). Those
+   lib.rs errors are filtered out, hiding the real symptom.
+
+## Recurring confusion classes — rules to add to prompts
+
+From the 17 extracted notes, six confusion classes recur:
+
+1. `TypeId::of::<T>()` requires `T: 'static`. If T is generic without that
+   bound and the signature is locked, you cannot use TypeId::of::<T>.
+2. `&dyn Trait + Bounds` needs parentheses → `&(dyn Trait + Bounds)`.
+3. Trait objects (&dyn Debug, *const dyn StdError) are unsized; cannot be
+   stored by value. Format with `{:?}`, not `{}`.
+4. Wrapper struct method-vs-field: when `wrapper.method()` fails, try
+   `wrapper.field.method()`.
+5. Generic parameters cannot have fields accessed. `(*this).field` where
+   `this: *const E` is rejected; cast `*const E` to a concrete known struct
+   first.
+6. `NonNull<T>` doesn't auto-deref to `&T`. Use
+   `unsafe { ptr.as_ref() }` to get a reference.
+
+These are Rust-general (not anyhow-specific), should be in the base prompt
+template, not relying on the notes system to re-discover them per-run.
+
+---
+
+# Plan 3 — fixes from 2026-05-26 retrospective
+
+Numbered fixes ranked by expected impact. Each one is independently
+implementable and testable. Notation: ⚑ = ready, ⏳ = depends.
+
+## P3.1 ⚑ Constraint relaxation — let the model alter signatures when necessary
+
+**Problem.** `object_drop_front` and similar stuck fns need a signature
+change (add `T: 'static`) that the prompt explicitly forbids.
+
+**Fix.** In the fix-prompt, after attempt 3, relax the "signature verbatim"
+rule. Allow the model to return a `<SIGNATURE>...</SIGNATURE>` block in
+addition to `<BODY>`. If present, we splice the new signature in place of
+the old one. Cargo check validates correctness as before.
+
+**Risk.** Model may "improve" signatures that don't need improving. Mitigate
+by gating on attempt count (only after attempt 3) and by requiring a
+non-empty `<BODY>` alongside.
+
+**Files.** pipeline.py: `_build_per_fn_fix_prompt`, `_locate_fn` splice
+extended to handle signature swap, new `_replace_fn_signature` helper.
+
+## P3.2 ⚑ Rust-general rules as static prompt preamble
+
+**Problem.** Six confusion classes recur across runs. Each is rediscovered
+via the notes system on every fresh project. Inefficient.
+
+**Fix.** Add a `<RUST_GOTCHAS>` section to the base per-fn prompt template,
+inserted between the signature and MODEL_NOTES. Contains the 6 rules above
+verbatim. MODEL_NOTES then adds project-specific learnings on top.
+
+**Files.** pipeline.py: `_build_per_fn_prompt`, `_build_per_fn_fix_prompt`,
+new constant `_RUST_GOTCHAS_PREAMBLE`.
+
+## P3.3 ⚑ Smarter note dedup — semantic similarity, not just hash
+
+**Problem.** 4 of 17 notes paraphrase the same TypeId rule.
+
+**Fix.** Before appending a new note, compute a normalised signature
+(error code mentioned + key symbols mentioned). Reject if the signature
+matches an existing note's signature. Keep the older note (it has more
+history).
+
+**Files.** pipeline.py: `_append_model_note`, new `_note_signature`.
+
+## P3.4 ⚑ Note relevance filter — error-class-aware ranking
+
+**Problem.** Fix-prompts include 8 notes regardless of relevance.
+
+**Fix.** When loading notes for a fix-prompt, extract the error code(s)
+from the current cargo error excerpt. Boost notes whose text mentions
+the same error code or its associated keywords (`'static`, `TypeId`,
+`dyn`, `NonNull`, etc.). Tier 1 by error-code match, tier 2 by file/symbol,
+tier 3 by recency.
+
+**Files.** pipeline.py: `_filter_model_notes_for_prompt`.
+
+## P3.5 ⏳ `rustc --explain` for stuck fns
+
+**Problem.** No canonical guidance for repeated error codes.
+
+**Fix.** After fix-attempt 5, identify the most-recurring error code in the
+current fix-loop and append its `rustc --explain Exxxx` output to the
+prompt's COMPILE_ERRORS section (as `<EXPLAIN>` block, ~50-200 lines).
+Cached per error code.
+
+**Files.** pipeline.py: `_explain_cache`, `_run_rustc_explain`,
+`_build_per_fn_fix_prompt` injection.
+
+## P3.6 ⚑ Strip file attributes from prompt view
+
+**Problem.** Top-of-file `#![allow(...)]` etc. eat tokens.
+
+**Fix.** Extend `_annotate_file_view` to strip top-level
+`#![...]` attribute lines from the rendered file. Keep them on disk so
+the actual splice site is unaffected; only the prompt view is cleaner.
+
+**Files.** pipeline.py: `_annotate_file_view`.
+
+## P3.7 ⚑ Widen cargo error excerpt for indirect failures
+
+**Problem.** Wrong fill in src/error.rs can break src/lib.rs; the lib.rs
+errors are filtered out by `_focus_cargo_errors`.
+
+**Fix.** Include errors that mention crate-level or `lib.rs`/`main.rs`
+locations even when the target fn's file doesn't appear in them. Tier the
+output: errors-in-target-file first, then errors-in-other-files of the
+same crate, with a header demarcating the two.
+
+**Files.** pipeline.py: `_focus_cargo_errors`.
+
+## P3.8 ⚑ Diagnose nightly cluster toolchain mis-application
+
+**Problem.** E0554 in nightly cluster → toolchain not "nightly".
+
+**Fix.** Investigation step: print `cluster.toolchain` and the final
+`check_cmd` to the log on every cluster start. If `nightly` cluster has
+no toolchain set, fix in `task0_cfg_scan` so it produces
+`toolchain="nightly"` correctly.
+
+**Files.** pipeline.py: instrument `_generate_one_cluster` startup,
+verify `task0_cfg_scan` cluster construction.
+
+## P3.9 ⏳ Annotated-stub fatigue handling
+
+**Problem.** Multi-pass retry attempts annotated stubs multiple times with
+the same underlying failure mode, even when prior attempts produced the
+same error class.
+
+**Fix.** When an annotated stub fails AGAIN in a later pass with the same
+error code as before, skip that fn in subsequent passes within the same
+run. Track in a per-run `(file, fn) → failure_error_codes` map; if a new
+attempt's first cargo error code matches a code already in that fn's
+set from a previous pass, mark the fn truly_stuck and don't retry.
+
+**Files.** pipeline.py: `_task2_fill_fns_one_by_one` state.
+
+## P3.10 ⏳ Per-pass cargo test exercise (re-run after P3.0 wipe fix)
+
+**Problem.** Test phase silently broken all night. Now fixed in code but
+not yet exercised — next pipeline run will validate.
+
+**Action.** Restart pipeline after P3.1-P3.8 land. Watch for first real
+`phase_c.pass.test rc=0` events. If tests still don't run, escalate.
+
+## P3.11 ⚑ monitor.py — actionable per-fn overview panel
+
+**Problem.** Current monitor view shows TASK phases (t0a/t0b/...) but
+nothing about Phase C per-fn progress. After 13 overnight hours, the user
+has no at-a-glance answer to "what is happening right now and is it
+healthy?". They have to ask Claude to read events.
+
+**Fix.** New `Phase C` panel added to the monitor view (key `1`), populated
+from `logs/events.jsonl`. Six metrics from the overnight retrospective
+that turn out to actually be measurable and useful:
+
+```
+─── Phase C (per-fn) ───────────────────────────────────────────────
+cluster: nightly | pass 2/3 | elapsed 3h14m | last event 47s ago
+
+stubs:  ████████░░░░░░  9/13 done · 1 in flight · 3 remaining
+fills:  ✓ first-try 6  ↻ recovered 3  ✗ exhausted 4  ⊘ skip 0
+recent: ▁▂▃▅▅▆▄▃▂▁ fills/10min (last hour)
+
+body:   median 64c · last 5: [161, 87, 35, 17, 41]
+fix:    median 1 attempt · last 5: [4, 2, 1, 1, 2]
+notes:  17 in FR  (+5 last hour)
+
+current: object_downcast attempt 14/20 (8min elapsed)
+hot fn:  object_drop_front (18 attempts cumulative across passes)
+test:    last: rc=101 stems=11 failed=0 (broken — see P3.10)
+```
+
+**Implementation.**
+- New helper `_parse_phase_c_events(events_path) → dict` returns the
+  rolled-up view (current cluster/pass, fills counter, recent fill rate,
+  hot fn, last test).
+- New panel renderer `_phase_c_panel(state, width) → list[str]`.
+- Inserted into the `monitor` view's render flow between the existing
+  Pipeline phases row and the Generation panel.
+- Refresh on the existing 2-second tick.
+
+**What the panel proves over time.** Beyond at-a-glance status, the
+historical data feeds back. Patterns identifiable after a few hours:
+- Hottest fn → candidate for prompt-rule injection
+- Recovery rate trend → measure of whether notes are helping
+- Time-per-fn distribution → identify timeout candidates
+- Test phase result trend → confirms P3.10 fix worked
+
+**Files.** monitor.py: new helpers + integration into existing `monitor`
+view path.
+
+## Reanalysis — refinements before implementing
+
+### P3.1 — signature relaxation is more nuanced than first written
+
+Reality check: signatures aren't truly locked because the model has to
+match them. They're locked because the tests CALL fns by those signatures.
+Changing a `pub fn` sig may break tests. Changing a PRIVATE fn sig only
+needs to not break in-crate callers — cargo check catches that.
+
+Refined design:
+- Allow sig change ONLY for fns whose `_locate_fn` finds no `pub` keyword
+  in the sig text.
+- Gate by attempt count: not before attempt 5 (give the verbatim-sig
+  approach a fair shot).
+- Splice the new sig, run cargo check, on failure revert sig AND body to
+  snapshot.
+- Add to MODEL_NOTES the fact that a sig change was attempted (so future
+  attempts on the same fn don't re-try the same change).
+
+### P3.2 — Rust-gotchas preamble — selective injection vs always-on
+
+Always-on (1-2 KB per call × hundreds of calls = ~2-5 MB extra prompt
+chars over a full run). Acceptable cost but ALSO drowns the model in
+generic rules for fns where they don't apply.
+
+Refined design: TWO levels.
+- A short 1-line summary of each gotcha (~15 chars each, 6 lines ≈ 90 chars)
+  appears in EVERY fix-prompt. Just enough to remind the model the
+  category exists.
+- The full multi-line gotcha rule is injected ONLY when the cargo error
+  matches the gotcha's trigger (error code or keyword). E.g. "TypeId" in
+  error → inject the TypeId rule. Triggered by P3.4's relevance filter.
+
+This way the model always has the cheat-sheet line, and gets the full
+text only when it matches the current error.
+
+### P3.3 — semantic dedup — what's the signature?
+
+Simplest signature that catches the 4 TypeId paraphrases:
+- The set of important Rust tokens in the note: error code (Exxxx) if
+  any, keywords from a curated set (`TypeId`, `'static`, `&dyn`, `Box`,
+  `NonNull`, `unimplemented`, etc.), and the verbs used ("tried", "use",
+  "consider").
+- Two notes are duplicates if their token sets overlap by >=80%.
+
+### P3.4 — note relevance filter — needs the current error in scope
+
+The current `_filter_model_notes_for_prompt` only takes file/fn/file_text.
+To rank by error-code match, it needs the cargo error excerpt too. Easy
+signature change — add `current_error: str = ""`.
+
+### P3.7 — wider cargo error excerpt — needs cap discipline
+
+Adding cross-file errors could explode the COMPILE_ERRORS block. Cap at
+~4 KB total, split as: 60% target file errors, 40% cross-file errors.
+
+### Net refined order
+
+```
+P3.6 → P3.7 → P3.8 → P3.3 → P3.4 → P3.2 → P3.1 → P3.11 → restart → P3.10
+```
+
+P3.6/P3.7/P3.8: small mechanical fixes, no architectural risk, do first
+to keep the diff small per commit.
+
+P3.3 → P3.4 → P3.2: notes pipeline cleanup. P3.4 must come before P3.2
+because P3.2's trigger-based injection depends on the error-aware filter.
+
+P3.1: highest-leverage architectural change, do last so we land on top of
+a clean note-system.
+
+P3.11: monitor improvement is independent; do alongside pipeline.py
+changes since it consumes events those don't break.
+
+P3.5 (rustc --explain) and P3.9 (truly-stuck handling): defer until the
+P3.1-P3.4 changes ship and we measure their effect.
+
+---
+
+# Plan 6 — Error-pattern-driven prompt enhancements (2026-05-26 PM)
+
+Source: mid-run analysis of the fresh-start anyhow run after P5.1–P5.5
+shipped. Error code distribution after ~50 fills:
+
+```
+E0277 (trait bound not satisfied):    11   ← top
+E0061 (wrong number of args):          7   ← top
+E0308 (mismatched types):              4
+E0599 (no method):                     2
+E0507 (cannot move out of borrow):     1
+```
+
+Top recurring error classes signal specific blind spots in the current
+prompt design. The notes system auto-extracts lessons (8 notes this run)
+but only AFTER the failure happens — fns processed earlier in the same
+pass don't benefit.
+
+## Status legend
+⚑ = ready to implement
+⏳ = depends on earlier work or measurement
+○ = parked (overlaps with existing functionality)
+
+## P6.1 ⚑ Method signatures in TYPES_IN_SCOPE
+**Largest expected impact.** Currently the prompt shows:
+```
+struct Ref<T>
+  methods (call with .name()): new, from_raw, cast, by_mut, as_ptr, deref
+```
+The model knows methods EXIST but not their signatures. When it writes
+`Ref::new(self.inner.ptr)` and `Ref::new` takes `&T` (not `NonNull<T>`),
+cargo barks E0308. With sigs:
+```
+struct Ref<T>
+  methods:
+    pub fn new(ptr: &T) -> Ref<'_, T>
+    pub fn from_raw(ptr: *const T) -> Ref<'_, T>
+    pub fn cast<U>(self) -> Ref<'_, U>
+    ...
+```
+The model would have picked `from_raw` for the NonNull case.
+
+The syn extractor already emits sigs in MethodRecord.sig — we just
+display only names today. Change in `_format_type_for_prompt`. Cap
+to ~6 methods per type to keep prompts compact; truncate long sigs.
+Estimated impact: directly attacks E0061 + E0308 (~44% of this run's
+errors).
+
+**Files:** pipeline.py:`_format_type_for_prompt`. ~15 lines.
+
+## P6.2 ⚑ New Rust gotcha entries (function-pointer fields, move-vs-borrow, NonNull conversions)
+Three patterns the model keeps hitting:
+
+1. **Function-pointer fields need parens**: `(s.callback)(args)`,
+   not `s.callback(args)`. Vtables in anyhow expose dispatch fns as
+   fields; model keeps using method syntax.
+2. **Match on owned vs borrowed**: `match self.field { ... }`
+   moves. Use `match &self.field { ... }` or `match self { Foo { ref field } }`.
+3. **NonNull conversion table**:
+   ```
+   NonNull<T> → &T   :  unsafe { ptr.as_ref() }
+   NonNull<T> → *mut T:  ptr.as_ptr()
+   &T → NonNull<T>   :  NonNull::from(&val)
+   *mut T → NonNull<T>: unsafe { NonNull::new_unchecked(raw) }
+   ```
+
+Add three entries to `_RUST_GOTCHAS` with their trigger keywords.
+
+**Files:** pipeline.py:`_RUST_GOTCHAS`. ~50 lines.
+
+## P6.3 ⚑ Type-specific RECURRING_ERRORS enrichment
+Today `<RECURRING_ERRORS>` says:
+```
+E0277 (seen 11×): trait bound not satisfied — add Send/Sync/'static.
+```
+The 11 actual E0277 cases this run all involved `Box<dyn StdError +
+Send + Sync>`. A smarter version would mine the recent error excerpts
+for shared type strings and surface them:
+```
+E0277 (seen 11×, all on `Box<dyn StdError + Send + Sync>`):
+  trait bound not satisfied; the dyn trait object is unsized
+  — wrap with Box::new(value) when constructing.
+```
+
+Approach: when promoting an error code, also collect substrings of
+recent error excerpts that share a type token. Show the top shared
+context.
+
+**Files:** pipeline.py:`_promoted_error_rules`,
+`_record_error_codes_seen` (now stores excerpts not just counts).
+~40 lines.
+
+## P6.4 ⚑ Notes tagged by error code; surfaced alongside RECURRING_ERRORS
+Today notes are filtered by file/symbol relevance (P3.4). But if a
+note about "fn pointer field syntax" was extracted because the model
+hit E0061, it should be surfaced when E0061 RECURS — even if the
+file/symbol filter doesn't match.
+
+Approach: when a note is added, tag it with the error code(s) that
+triggered its extraction. When emitting `<RECURRING_ERRORS>`, also
+emit the relevant past notes for those codes.
+
+**Files:** pipeline.py:`_append_model_note` (add error_codes param),
+note storage format (extend with optional `<!--codes:E0061,E0308-->`
+suffix or similar inline metadata), `_promoted_error_rules`.
+~50 lines.
+
+## P6.5 ○ Mid-pass note propagation (already in place)
+Re-examined: `_filter_model_notes_for_prompt` is called INSIDE the
+per-fn fix loop's while iteration. So each retry within a fn DOES
+pick up newly-added notes. Across fns within a pass, fn B's first
+attempt sees notes added by fn A's recovery (because notes are
+loaded fresh from FR per call). NOT a problem — verified.
+
+## P6.6 ⏳ Intra-file impl method sigs (defer until measured)
+The file context shown to the model is already the full file
+content; method sigs for types defined in the file are visible
+inline. P6.1 fixes the cross-file case; intra-file is solved by
+the file context. Park unless evidence shows the model misuses
+same-file methods despite seeing them.
+
+## P6.7 ⏳ Persist cross-run RECURRING_ERRORS context
+Today RECURRING_ERRORS resets per run. The 11 E0277s of this run
+are forgotten on restart. A persistent counter in
+`functional_requirements_{crate}.md` (under a new section like
+`## Recurring Errors`) would let restarts benefit from prior runs'
+error patterns. Same general approach as Model Notes.
+
+Defer: low marginal value until cross-run state matters more
+than within-run learning.
+
+## Order of work
+```
+P6.1 → P6.2 → P6.3 → P6.4 → measure → maybe P6.7
+P6.5 already done. P6.6 parked.
+```
+
+Estimated total: ~150 lines of code across these four. Each
+independently testable via `bash check.sh` + a sample prompt
+inspection.
+
+## What we expect to see after P6.1-P6.4
+- E0061 rate drops by ~70% (method sig now visible)
+- E0308 rate drops by ~50% (method sig + NonNull gotcha)
+- E0507 drops to ~0 (move-vs-borrow gotcha)
+- Function-pointer field misuses drop to ~0
+
+If those don't materialise, the gotchas / type info aren't reaching
+the model effectively — investigation needed (prompt size, ordering,
+priority filter).
+
+---
+
+# Plan 7 — Universal improvement-driven loop (2026-05-26 evening)
+
+Source: systematic audit of every fix/retry loop in pipeline.py after
+P1+P5 converted the per-pass test-fix loop to a failure-floor stall budget.
+Five other loops still use numeric caps or set-equality stop conditions
+that prematurely abandon improving runs.
+
+## Loop inventory
+
+```
+ID  Loop                                  File:line    Cap kind         Retro?    Metric
+L1  Per-fn cargo-check fix loop           6946         count=10         excerpt   error count
+L2  Phase C pass loop                     6789         count=3          via subs  fail count
+L3  task0c augmentation loop              15428        count=10         deep      uncov lines
+L4  task2 BUILD_CHECK_RETRIES             12367        count=5          excerpt   error count
+L5  task3 full test run                   12820        none (one-shot)  none      —
+L6  generate_fix_loop                     12550        sigs equality    narrative error sig
+L7  Per-pass test-fix loop (Phase C)      7273         floor-stall ✓    classifier  fail count
+L8  Outer module loop                     17855        none             genesis   pass/fail
+```
+
+L7 was rebuilt this session (P1+P5+P3). L8 is healthy. L5 has no retry
+at all — the biggest gap. L1/L2/L3/L4 use raw counters that override the
+improvement signal. L6 stops on signature-set change, which is too strict
+(error swap counts as "improvement" even when count is unchanged).
+
+## P7.1 ⚑ Helper `_improvement_loop`
+
+```python
+def _improvement_loop(
+    *, name: str,
+    run_check: Callable[[], tuple[bool, str, int]],   # → (ok, output, metric)
+    do_fix:    Callable[[str, list[dict]], dict],     # → record
+    do_retro:  Callable[[str, list[dict]], str] | None = None,
+    max_stalls: int = 3,
+    hard_cap:   int = 100,
+    on_iter:    Callable[[dict], None] | None = None, # archival hook
+) -> tuple[bool, str, list[dict]]:
+```
+
+Behaviour:
+1. `ok, out, metric = run_check()`; if ok → return.
+2. iter += 1. If iter ≥ 2 and `do_retro` given → call it; append to fix
+   prompt context.
+3. `do_fix(out, history)`; append record; emit `loop.iter` event.
+4. `run_check()` again; update floor and stall counter.
+5. Break on `stall >= max_stalls` or `iter >= hard_cap`.
+
+Emit schema (`loop.iter`):
+```
+{name, iter, metric_prev, metric_new, metric_best,
+ improved, stalled, fix_summary}
+```
+
+## P7.2 ⚑ Migrate L1 (per-fn cargo-check loop)
+
+`PHASE_C_FIX_CAP_PER_FN` becomes `PHASE_C_FN_MAX_STALLS` (default 3) +
+`PHASE_C_FN_HARD_CAP` (default 30; legacy `PHASE_C_FIX_CAP_PER_FN` honored).
+Metric = `len(_cargo_err_sig(output))` (rustc error count, not set).
+do_retro = None initially — the current prompt already contains
+RECURRING_ERRORS + model-notes + PRIOR_ATTEMPTS. Revisit after measurement.
+
+## P7.3 ⚑ Add L5 (task3 inline retry)
+
+Currently absent. After task3 cargo test fails:
+- Run `_classify_phase_c_test_failures` on the failure set.
+- For BAD_FILL refs that map to fns we filled this iteration: snapshot
+  the file → revert → re-enter the per-fn fix loop with the test failure
+  as context.
+- Only after the inline retry budget is exhausted, escalate to task4.
+- Guard: never touch fns outside the current iteration's manifest (avoid
+  mutating already-passing modules).
+Env: `TASK3_INLINE_MAX_STALLS=3`, `TASK3_INLINE_HARD_CAP=10`.
+
+## P7.4 ⚑ Migrate L6 (generate_fix_loop)
+
+Add a count-based metric alongside the existing signature-set exit.
+Keep the `_attempt_history` retro narrative (it works). Replace the
+"sigs unchanged → break" exit with "error count didn't decrease for
+MAX_STALLS iters → break". Treat the existing `max_fix_attempts`
+parameter as `hard_cap`.
+
+## P7.5 ⚑ Migrate L4 (task2 BUILD_CHECK_RETRIES)
+
+`BUILD_CHECK_RETRIES=5` is a count on full regenerations (expensive).
+Replace with floor tracking against the regeneration's first cargo check:
+if a regen made strictly fewer errors than the previous regen, reset
+stall to 0; otherwise increment. Hard cap stays at 5 (regen is costly).
+
+## P7.6 ⚑ Migrate L2 (Phase C pass loop)
+
+`max_passes=3` becomes the hard cap. Stall counter against
+`len(remaining_stubs) + last_pass_test_failures`. A pass that makes any
+strict decrease in either resets stall.
+
+## P7.7 ⏳ Migrate L3 (task0c)
+
+Lowest priority: task0c already has the best retro pattern in the
+codebase (deep retrospective with category labels and failed-block
+evidence). Only the numeric cap is suboptimal. Migrate after P7.1–P7.6
+land, to keep the change set small.
+
+## Order of work
+
+1. P7.1 — write helper + tests with a stub run_check.
+2. P7.2 — migrate L1; rerun pipeline on anyhow, compare loop exit reasons.
+3. P7.3 — add L5; this is the largest behavioural change (new path).
+4. P7.4 — migrate L6 (touches every fix-loop caller).
+5. P7.5 — migrate L4 (small surface area).
+6. P7.6 — migrate L2 (touches Phase C orchestration).
+7. P7.7 — migrate L3 (optional).
+
+## Expected effects
+
+- No loop quits because of an arbitrary numeric cap while it was still
+  improving. Every termination is tied to "the failure floor has not
+  moved for K iterations" with K configurable per loop.
+- One uniform `loop.iter` event stream across the pipeline — monitor.py
+  panels stop depending on per-loop naming conventions.
+- task3 finally has an inline retry path. Failures bounce through a
+  per-fn classifier + per-fn fix loop before escalating to task4 + full
+  regeneration.
+- generate_fix_loop stops abandoning runs on the first error swap.
+
+## What this plan does NOT do
+
+- Does not touch L8 (the outer module loop) — already healthy.
+- Does not change task4 / genesis.md flow.
+- Does not introduce a new LLM call inside L1 — the per-fn prompt
+  already carries the retro signal. Revisit only if measurement shows
+  L1 stalls on classifiable patterns.
+
+---
+
+# Plan 5 — Static cluster-set derivation, cross-cluster shared fills
+
+## STATUS: SUPERSEDED (2026-05-26)
+
+The "good part" of Plan 5 — using static cfg analysis to filter fns per
+cluster — was implemented as a focused fix instead of a full plan
+rewrite. See `_scan_unimplemented_for_cluster` / `_fn_belongs_to_cluster`
+/ `_file_cfg_predicate` / `_fn_cfg_predicates` in pipeline.py. The filter
+removes ~30% of wasted LLM calls (skips nightly.rs items from non-nightly
+clusters) with zero new failure modes.
+
+The "ambitious part" of Plan 5 — cross-cluster SHARED FILLS with variance
+recovery — is parked. Empirical reason: the overnight data showed the
+model wrote DIFFERENT bodies for the same fn across clusters when each
+got its own per-cluster context. Forcing a single shared body would have
+saved more LLM calls but at the cost of per-cluster optimisation.
+
+Quality > raw LLM-call savings, so the focused fix wins.
+
+Reconsider only if:
+  - A future project has many clusters with truly identical
+    implementations (cfg about features, not std-flavor)
+  - LLM calls become the dominant bottleneck again after the focused fix
+    is measured in practice
+
+The original Plan 5 design follows for reference. Do not implement
+without re-validating the variance-rate assumption.
+
+---
+
+Source: 2026-05-26 morning conversation. After Plan 3 fixes shipped, the
+remaining inefficiency in the per-fn fill loop is per-cluster duplication:
+each unique fn is currently filled once per cluster (3× for anyhow), even
+though most fns have NO cluster-specific behaviour. The LLM does identical
+work three times.
+
+Original idea was to ask the LLM "are there variances per cluster?" — but
+that introduces a false-variance risk and adds prompt complexity. Better:
+derive the cluster-set for each fn STATICALLY from the source + Cargo.toml.
+No LLM judgment needed for the variance question.
+
+## What's statically derivable
+
+```
+inputs:
+  Cargo.toml              → features, defaults, dep requirements
+  src/**/*.rs (pre-strip) → #[cfg(...)] attrs on items, modules, files
+  syn AST                 → cfg-alternate fns (same name, disjoint cfg sets)
+
+output per fn:
+  {
+    file, fn_name, sig,
+    cluster_set: ["stable", "anyhow_no_core_error"],  # where this fn exists
+    cfg_attrs: ["not(error_generic_member_access)"],   # what gates it
+    cfg_alternate: false,                              # true if a same-name
+                                                       # fn with disjoint cfg
+                                                       # exists elsewhere
+  }
+```
+
+Rules:
+- Fn with no `#[cfg]` and no `#[cfg]` on its enclosing mod/file
+  → cluster_set = all active clusters
+- Fn with `#[cfg(error_generic_member_access)]`
+  → cluster_set = clusters whose cfg_set evaluates that predicate true
+- Two `fn foo` with `#[cfg(nightly)]` and `#[cfg(not(nightly))]`
+  → two entries, each with its own cluster_set, cfg_alternate=true
+- Fn in a file gated `#[cfg(...)]` (e.g. nightly.rs has the cfg at file
+  level via mod decl)
+  → file-level gate propagates to all fns inside
+
+## Architecture
+
+```
+Phase A* (NEW, no LLM) — extend skeleton extractor:
+  Walk pre-strip source under cluster=ALL (no cfg filter at extraction).
+  For each fn item, evaluate its accumulated cfg_attrs against EACH active
+  cluster's cfg_set. Emit a per-fn record into
+    .skeleton/manifest.json
+  with the cluster_set + cfg_attrs.
+  Cache across runs.
+
+Per-fn loop iterates over UNIQUE (fn_name, cluster_set) entries:
+  for entry in manifest:
+    cs = entry.cluster_set
+    if len(cs) == 1:
+      # cluster-specific fn, fill once in that cluster's filled_dir
+      fill_in_clusters([entry.cluster], entry)
+    else:
+      # shared fn, fill once, splice into all clusters in cs
+      fill_in_clusters(cs, entry)
+
+fill_in_clusters(clusters, entry):
+  - Build prompt explicitly listing the clusters this fn exists in
+  - LLM writes ONE body
+  - Splice the same body into every cluster in `clusters`
+  - For each cluster: cargo check in its env
+  - If all pass: done
+  - If some fail: enter variance-recovery loop (below)
+
+variance-recovery loop:
+  For each failing cluster C:
+    Re-prompt: "your body works in {passing clusters} but fails in {C}
+                with these errors: ...".
+    Model returns a cluster-specific body for C (or a cfg-gated variant
+    of the original).
+    Splice into C's filled_dir only, leave other clusters untouched.
+    Re-check C.
+  If a variance is needed, mark this fn as 'has_variances' in the
+  manifest so future passes know to fill it per-cluster.
+```
+
+## Implementation status
+
+⚑ = ready to implement
+⏳ = depends on earlier step
+
+### Step 1 ⚑ Skeleton extractor emits per-fn cluster manifest
+Extend `tools/skeleton_extractor/src/lib.rs` to walk all fn items and
+emit a JSON record per fn:
+- `file: String`
+- `fn_name: String`
+- `sig: String`
+- `cfg_predicate: String` (accumulated from item, impl block, mod, file)
+- `is_pub: bool`
+
+The cluster_set evaluation lives in Python (uses existing `_eval_cfg_pred`
++ `cluster.cfg_set` infrastructure). Writes `.skeleton/manifest.json`.
+
+### Step 2 ⚑ Python reads manifest, computes cluster_set per fn
+New helper `_load_fn_manifest(skeleton_dir) → list[FnEntry]`.
+For each FnEntry, evaluate `cfg_predicate` against each active cluster's
+cfg_set. Returns enriched entries with `cluster_set: list[str]`.
+
+### Step 3 ⏳ De-duplicate by (fn_name, file): merge cfg-alternates
+If two manifest entries share fn_name + file but have disjoint
+cluster_sets, that's a cfg-alternate. Keep as separate entries with
+`cfg_alternate=True`. Both get filled per-cluster (the LLM is told only
+the cluster cfg active for that specific alternate).
+
+### Step 4 ⏳ Per-fn loop iterates over unique manifest entries
+Replace the current per-cluster outer loop with a single pass over
+unique (fn_name, cluster_set) tuples. For each:
+- Build the per-fn prompt as before, but with the cluster list in the
+  header line: `Clusters: stable, anyhow_no_core_error, nightly`
+- Tell the model "this fn must compile in ALL listed clusters under their
+  respective cfg sets — do not introduce cfg gates unless your body
+  fundamentally cannot satisfy all clusters".
+- Splice the returned body into each cluster's filled_dir.
+
+### Step 5 ⏳ Per-cluster validation after shared splice
+After splicing into N clusters: cargo check in each. Collect outcomes.
+- All pass: emit `phase_c.fn.fill.done` once with `clusters=[...]` in data
+- Some fail: enter Step 6
+
+### Step 6 ⏳ Variance-recovery: per-failing-cluster cfg-gated body
+For each failing cluster:
+- Revert the cluster's body to snapshot
+- Re-prompt with the cargo error excerpt for that cluster only
+- The fix prompt tells the model: "the body works in {passing} but not in
+  {failing} — return a cluster-specific body wrapped in
+  `#[cfg(...)]` matching this cluster's predicate, OR a body using only
+  the intersection of APIs that all clusters provide."
+- Splice the variance body into the failing cluster only
+
+### Step 7 ⏳ Mark variances in manifest
+When a fn required a variance, record this in the manifest so subsequent
+passes (or restarts) skip the unified prompt and go straight to
+per-cluster fills.
+
+### Step 8 ⏳ Phase A cache invalidation
+The manifest is computed from pre-strip source, which doesn't change
+during the run. Cache key: pre-strip git sha + clusters tuple. Invalidate
+on cluster set change.
+
+## Expected impact
+
+```
+current per-fn × per-cluster (anyhow, 3 active clusters):
+  ~30 unique fns × 3 clusters = ~90 fill iterations
+  each iteration = 1-20 LLM calls
+  worst case: ~30 × 3 × 20 = 1800 LLM calls
+
+after Plan 5:
+  ~30 unique fns (most cluster_set = all) → ~30 fills
+  shared ones validated in 3 clusters (cheap cargo check)
+  variance-recovery only fires when cargo disagrees (~1-3 fns)
+  estimated: ~30 × 3 LLM calls (one fill + 0-2 variance) = ~90-150 LLM calls
+
+savings: 70-90% fewer LLM calls. Wall time drops proportionally.
+Note quality should be unchanged (same per-fn prompts, just deduped
+across clusters).
+```
+
+## Risks / mitigations
+
+1. **A "shared" fill that's actually subtly wrong in one cluster.**
+   Mitigation: cargo check in EACH cluster post-splice catches it.
+   Variance loop fixes.
+
+2. **cfg-alternates pattern not detected.**
+   Mitigation: Step 3 detects same-name + disjoint cfg explicitly.
+
+3. **Manifest cache staleness.**
+   Mitigation: pre-strip sha key in cache; rebuild on cluster change.
+
+4. **The model writes a `#[cfg]` gate when the variance loop fires.**
+   This is correct behavior (we asked for cfg gating). But it changes
+   the on-disk skeleton — different from the current "body only" splice.
+   Mitigation: extend `_splice_fn_body` to handle the case where the
+   returned body includes a `#[cfg(...)]` wrapper around the fn.
+
+5. **Skeleton extractor emits manifest at extraction time, but Phase A
+   currently runs per-cluster.**
+   Mitigation: change Phase A to extract once with cluster=None (no cfg
+   filter — we already do this) and emit manifest then. Per-cluster
+   skeleton dirs become symlinks or copies of the same underlying source.
+
+## Order of work
+
+```
+Step 1 (Rust extractor) → Step 2 (Python loader) → Step 3 (dedup)
+  → Step 4 (loop refactor) → Step 5 (multi-cluster validation)
+  → Step 6 (variance recovery) → Step 7 (manifest update on variance)
+  → Step 8 (cache key) → restart → measure
+```
+
+Steps 1-4 are the minimum to get the LLM-call savings. Steps 5-7 are
+needed for correctness (catching false-shared cases). Step 8 is
+optimisation.
+
+Total estimated effort: ~250-350 lines (Rust extractor extension is
+~80 lines, the rest is Python refactor). Higher risk than Plan 3 fixes
+since it touches the per-fn loop architecture.
+
+## Not started — open until Plan 3 fixes measured
+
+Plan 3 is currently running. Wait one more iteration cycle to confirm
+P3.1-P3.4 land the expected convergence improvements. Then start Plan 5
+if the LLM-call cost is still the dominant factor.
 
 ---
 

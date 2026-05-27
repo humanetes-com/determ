@@ -26,38 +26,49 @@ LLM_DEBUG_LOG="$LOG_DIR/debug.log"
 LLM_STREAM_LOG="$LOG_DIR/stream.log"
 
 # ---------------------------------------------------------------------------
-# Kill existing pipeline (ask confirmation unless --y passed)
+# Stop existing pipeline. Graceful by default — the pipeline exits at its
+# next per-fn checkpoint, no in-flight work is lost. Use --force to revert
+# to the legacy abrupt SIGTERM-then-SIGKILL behaviour. During the graceful
+# wait the user can press [c] to cancel or [f] to force-kill.
 # ---------------------------------------------------------------------------
+# shellcheck source=lib/graceful_stop.sh
+source "$SCRIPT_DIR/lib/graceful_stop.sh"
+
 _YES=false
-_GRACEFUL=false
+_FORCE=false
 _WIPE=false
 _KEEP_AUGMENTED=false
 for _arg in "$@"; do
     [[ "$_arg" == "--y" ]]              && _YES=true
-    [[ "$_arg" == "--graceful" ]]       && _GRACEFUL=true
+    [[ "$_arg" == "--force" ]]          && _FORCE=true
+    # --graceful kept for back-compat; now the default (no-op).
+    [[ "$_arg" == "--graceful" ]]       && true
     [[ "$_arg" == "--wipe" ]]           && _WIPE=true && _YES=true
     [[ "$_arg" == "--keep-augmented" ]] && _KEEP_AUGMENTED=true && _YES=true
 done
 
-if [[ "$_GRACEFUL" == true ]]; then
-    if pgrep -f "pipeline.py" > /dev/null 2>&1; then
-        touch /tmp/pipeline_graceful_stop
-        echo "Graceful stop requested — waiting for pipeline to finish current attempt..."
-        while pgrep -f "pipeline.py" > /dev/null 2>&1; do sleep 3; done
-        echo "Pipeline stopped gracefully. Relaunching..."
+if pgrep -f "pipeline.py" > /dev/null 2>&1; then
+    if [[ "$_FORCE" == true ]]; then
+        if [[ "$_YES" == false ]]; then
+            echo -n "Pipeline is running (PID $(pgrep -f pipeline.py)). Force-kill? [y/N] "
+            read -r _reply
+            [[ "$_reply" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 0; }
+        fi
+        kill $(pgrep -f "pipeline.py") 2>/dev/null && echo "Killed existing pipeline"
+        sleep 2
+        pkill -9 -f "pipeline.py" 2>/dev/null || true
+        sleep 1
     else
-        echo "No pipeline running — launching fresh."
+        # Graceful stop. _YES=true → non-interactive (just wait).
+        if [[ "$_YES" == true ]]; then
+            graceful_stop_pipeline 0
+        else
+            if ! graceful_stop_pipeline 1; then
+                # User pressed [c] — leave the pipeline running and exit.
+                exit 0
+            fi
+        fi
     fi
-elif pgrep -f "pipeline.py" > /dev/null 2>&1; then
-    if [[ "$_YES" == false ]]; then
-        echo -n "Pipeline is running (PID $(pgrep -f pipeline.py)). Kill it? [y/N] "
-        read -r _reply
-        [[ "$_reply" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 0; }
-    fi
-    kill $(pgrep -f "pipeline.py") 2>/dev/null && echo "Killed existing pipeline"
-    sleep 2
-    pkill -9 -f "pipeline.py" 2>/dev/null || true
-    sleep 1
 fi
 
 # ---------------------------------------------------------------------------
@@ -205,7 +216,7 @@ if pgrep -f "pipeline.py" > /dev/null 2>&1; then
     echo "Pipeline already running (PID $(pgrep -f pipeline.py | head -1)). Not launching another."
     exit 0
 fi
-nohup .venv/bin/python pipeline.py $_PIPELINE_ARGS >> "$LOG_DIR/pipeline_anyhow.log" 2>&1 &
+nohup .venv/bin/python pipeline.py $_PIPELINE_ARGS >> "$LOG_DIR/pipeline_anyhow.log" 2>&1 200<&- &
 echo "Pipeline started (PID $!) — backend: $BACKEND"
 echo "Pipeline log : tail -f $LOG_DIR/pipeline_anyhow.log"
 echo "Guards log   : tail -f $LOG_DIR/pipeline_guards.log"
@@ -214,4 +225,15 @@ echo "Stream log   : tail -f $LLM_STREAM_LOG"
 if [[ "$BACKEND" != "ollama" ]] || [[ -s "$SERVER_LOG" ]]; then
     echo "Server log   : tail -f $SERVER_LOG"
 fi
+
+# Release the launch lock before tailing the log forever. The lock's job
+# was to prevent two simultaneous LAUNCHES — once the pipeline is running
+# (PID echoed above), other continue.sh invocations should be free to act
+# (they'll hit the running-pipeline guard above instead). Closing fd 200
+# also prevents the tail child from inheriting the lock (the bug where a
+# zombie `tail -f` from a prior run kept the file's fd open and held the
+# advisory flock indefinitely).
+flock -u 200
+exec 200<&-
+
 tail -f "$LOG_DIR/pipeline_anyhow.log"
