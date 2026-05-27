@@ -5343,6 +5343,124 @@ def _annotate_file_view(file_text: str, target_fn: str) -> str:
     return "".join(out)
 
 
+def _enumerate_macro_variants(
+    src_dir: Path,
+) -> list[tuple[str, str, str, str]]:
+    """Scan all .rs files under `src_dir` for `macro_rules!` blocks and
+    return a list of `(macro_name, cfg_pred, body, source_file)` tuples.
+
+    `cfg_pred` is the predicate of the `#[cfg(...)]` attribute immediately
+    preceding the macro (empty string if no cfg gate). `body` is the full
+    `macro_rules! NAME { ... }` text. Used by
+    `_compute_cluster_macro_invariants` to decide which variant of a
+    multiply-defined macro is active under a given cluster.
+    """
+    variants: list[tuple[str, str, str, str]] = []
+    for p in sorted(src_dir.rglob("*.rs")):
+        try:
+            text = p.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        for m in re.finditer(r"macro_rules!\s+(\w+)\s*\{", text):
+            name = m.group(1)
+            start = m.start()
+            # Walk backwards from the macro to find a leading #[cfg(...)]
+            # attribute on the same item. Stop at a blank line or another
+            # item — only attributes that immediately precede the macro
+            # gate it.
+            head = text[max(0, start - 800):start]
+            cfg_pred = ""
+            for am in reversed(list(re.finditer(
+                    r"#\[cfg\(((?:[^()]|\([^()]*\))+)\)\]\s*$",
+                    head, re.MULTILINE))):
+                cfg_pred = am.group(1).strip()
+                break
+            # Match balanced braces of the macro_rules! body.
+            i = text.find("{", start)
+            if i < 0:
+                continue
+            depth = 1
+            j = i + 1
+            while j < len(text) and depth > 0:
+                if text[j] == "{":
+                    depth += 1
+                elif text[j] == "}":
+                    depth -= 1
+                j += 1
+            if depth != 0:
+                continue
+            variants.append((name, cfg_pred, text[start:j], p.name))
+    return variants
+
+
+def _compute_cluster_macro_invariants(
+    src_dir: Path, cluster: "BuildCluster | None",
+) -> str:
+    """For macros defined multiple times under different `#[cfg(...)]`,
+    select the variant active under `cluster`'s cfg-set and render a
+    compact "in this cluster, NAME!(...) expands to: <body>" line per
+    macro. Macros with a single variant are skipped (no ambiguity).
+
+    Without this section the model has to read every `#[cfg(...)]`
+    variant in the MACROS block and reason about which one applies —
+    leading to defensive fills (e.g. `unwrap_or(&DEFAULT)`) when the
+    active expansion in this cluster guarantees a `Some`.
+    """
+    if cluster is None:
+        return ""
+    variants = _enumerate_macro_variants(src_dir)
+    if not variants:
+        return ""
+    by_name: dict[str, list[tuple[str, str, str]]] = {}
+    for name, cfg, body, src in variants:
+        by_name.setdefault(name, []).append((cfg, body, src))
+    cfg_true = {_normalize_cfg_pred(p) for p in cluster.cfg_true}
+    cfg_false = {_normalize_cfg_pred(p) for p in cluster.cfg_false}
+    lines: list[str] = []
+    for name in sorted(by_name):
+        vs = by_name[name]
+        if len(vs) < 2:
+            continue
+        # Pick the variant whose cfg evaluates True. A variant with no cfg
+        # is treated as always-active fallback.
+        active: tuple[str, str, str] | None = None
+        unconditional: tuple[str, str, str] | None = None
+        for cfg, body, src in vs:
+            if not cfg:
+                unconditional = (cfg, body, src)
+                continue
+            v = _eval_cfg_pred(cfg, cfg_true, cfg_false)
+            if v is True:
+                active = (cfg, body, src)
+                break
+        if active is None and unconditional is not None:
+            active = unconditional
+        if active is None:
+            continue
+        cfg, body, src = active
+        # Render compactly: strip the `macro_rules! NAME {` header and
+        # outer `}` so the model sees just the arm(s).
+        compact = body
+        head_match = re.search(r"macro_rules!\s+\w+\s*\{\s*", compact)
+        if head_match:
+            compact = compact[head_match.end():].rstrip()
+            if compact.endswith("}"):
+                compact = compact[:-1].rstrip()
+        # Collapse internal whitespace runs for compactness.
+        compact = re.sub(r"\n\s*\n+", "\n", compact)
+        if len(compact) > 240:
+            compact = compact[:237] + "..."
+        cfg_note = f" [cfg={cfg}]" if cfg else " [always]"
+        lines.append(f"{name}!(...){cfg_note} → {compact}")
+    if not lines:
+        return ""
+    header = (
+        "Macros with multiple #[cfg]-gated variants — only the active "
+        "expansion for this cluster is shown."
+    )
+    return header + "\n" + "\n".join(lines)
+
+
 def _collect_crate_macros(src_dir: Path, max_chars: int = 6000) -> str:
     """Extract `macro_rules!` blocks from every .rs file in `src_dir`.
 
@@ -6154,6 +6272,7 @@ def _build_per_fn_prompt(
     container: str = "",
     types_section: str = "",
     fr_path: "Path | None" = None,
+    invariants_section: str = "",
 ) -> str:
     """Small focused prompt for one fn fill. No crate-wide signature index,
     no full FR, no genesis — only what the model needs to implement THIS fn.
@@ -6175,6 +6294,14 @@ def _build_per_fn_prompt(
     # instead of self.ptr.as_ref()); listing each type's actual fields and
     # methods makes this unambiguous.
     types_block = f"\n<TYPES_IN_SCOPE>\n{types_section}\n</TYPES_IN_SCOPE>\n" if types_section else ""
+    # Cluster-aware macro invariants: which arm of each cfg-gated macro
+    # is active for THIS cluster. Without this the model defends against
+    # cases that can't occur (e.g. `unwrap_or(&default)` when the active
+    # macro always returns Some).
+    invariants_block = (
+        f"\n<CLUSTER_INVARIANTS>\n{invariants_section}\n</CLUSTER_INVARIANTS>\n"
+        if invariants_section else ""
+    )
     # P5.3: when impl-ing a known stdlib trait, inject its contract.
     _trait_text = _trait_contract_for(container)
     trait_block = f"\n<TRAIT_CONTRACT>\n{_trait_text}\n</TRAIT_CONTRACT>\n" if _trait_text else ""
@@ -6192,7 +6319,7 @@ Crate: {module_name} | Cluster: {cluster_name} | File: {file_rel} | Fn: {fn_name
 <RUST_GOTCHAS>
 {_gotchas_summary()}
 </RUST_GOTCHAS>
-{trait_block}{types_block}{recurring_block}{notes_block}
+{trait_block}{types_block}{invariants_block}{recurring_block}{notes_block}
 FILE — stubs are annotated. SKELETON STUB = will be filled later (rely on
 the signature). TARGET = implement now.
 
@@ -6789,6 +6916,7 @@ def _build_per_fn_fix_prompt(
     allow_sig_change: bool = False,
     fr_path: "Path | None" = None,
     attempt_history: "list[dict] | None" = None,
+    invariants_section: str = "",
 ) -> str:
     """Re-prompt for a fn whose previous fill broke `cargo check`.
 
@@ -6819,6 +6947,10 @@ def _build_per_fn_fix_prompt(
     )
     container_line = f"In: {container}\n" if container else ""
     types_block = f"\n<TYPES_IN_SCOPE>\n{types_section}\n</TYPES_IN_SCOPE>\n" if types_section else ""
+    invariants_block = (
+        f"\n<CLUSTER_INVARIANTS>\n{invariants_section}\n</CLUSTER_INVARIANTS>\n"
+        if invariants_section else ""
+    )
     _trait_text2 = _trait_contract_for(container)
     trait_block = f"\n<TRAIT_CONTRACT>\n{_trait_text2}\n</TRAIT_CONTRACT>\n" if _trait_text2 else ""
     _recurring2 = _promoted_error_rules(fr_path)
@@ -6865,7 +6997,7 @@ Crate: {module_name} | Cluster: {cluster_name} | File: {file_rel} | Fn: {fn_name
 <RUST_GOTCHAS>
 {_gotchas_summary()}
 </RUST_GOTCHAS>
-{gotchas_block}{trait_block}{types_block}{recurring_block}{notes_block}{prior_block}
+{gotchas_block}{trait_block}{types_block}{invariants_block}{recurring_block}{notes_block}{prior_block}
 FILE (previous attempt reverted; stubs annotated):
 <FILE path="{file_rel}">
 {annotated}
@@ -7034,6 +7166,11 @@ def _task2_fill_fns_one_by_one(
     # C: crate-wide macros (cached across passes — file set doesn't change).
     _src_for_macros = target_src_dir / "src" if (target_src_dir / "src").exists() else target_src_dir
     macros_section = _collect_crate_macros(_src_for_macros)
+    # Per-cluster macro invariants: which arm of each cfg-gated macro is
+    # active under this cluster. Cached per call — small set, cheap to
+    # recompute, but constant for the duration of this Phase C loop.
+    invariants_section = _compute_cluster_macro_invariants(
+        _src_for_macros, cluster)
     # P5.1: crate-wide type records (struct/enum/type/trait with fields +
     # method names). Used per-fn to inject only the types the fn's signature
     # actually mentions. Cached across passes; file set doesn't change.
@@ -7231,6 +7368,7 @@ def _task2_fill_fns_one_by_one(
                         notes_section=notes_section,
                         container=container,
                         types_section=types_section,
+                        invariants_section=invariants_section,
                         fr_path=fr_path,
                     )
                 else:
@@ -7243,6 +7381,7 @@ def _task2_fill_fns_one_by_one(
                         notes_section=notes_section,
                         container=container,
                         types_section=types_section,
+                        invariants_section=invariants_section,
                         # P3.1: open the sig-change escape hatch after multiple
                         # compile failures. The model can return an additional
                         # <SIGNATURE> block; we splice it only when fn is non-pub.
@@ -7696,6 +7835,7 @@ def _task2_fill_fns_one_by_one(
                                 prev_body=cur_body, error_excerpt=error_excerpt_test,
                                 macros_section=macros_section,
                                 notes_section=notes_t,
+                                invariants_section=invariants_section,
                                 fr_path=fr_path,  # P6.4 note recall
                                 attempt_history=test_fix_history.get(  # P2
                                     (rel_f, fn), []),
@@ -8387,22 +8527,58 @@ def _format_type_for_prompt(rec: dict) -> str:
 
 
 def _types_referenced_in_text(text: str, all_types: list[dict]) -> list[dict]:
-    """Return type records whose `name` appears in `text` as a standalone
-    identifier. Used to select which types to include in a per-fn prompt:
-    only types the fn's signature or body actually mentions.
+    """Return type records that the fn's prompt should expose, with one
+    level of transitive expansion through fields.
+
+    Pass 1: direct text match — types whose `name` appears in `text` as a
+    standalone identifier. Picks up names mentioned in the fn signature
+    or container.
+
+    Pass 2: field-transitive expansion — for each type matched in pass 1,
+    parse the type names out of its fields' Rust type strings and pull
+    those records in too. This is what lets the model see `Own::by_ref()`
+    when the only direct match was `Error` (whose field is
+    `inner: Own<ErrorImpl>`). Without this step the model sees the field
+    type as a bare name with no API and starts inventing methods.
+
+    Word boundaries guard against `Boxed` matching when searching for
+    `Box`. Field expansion is one level only — going deeper would bloat
+    the prompt.
     """
     if not text or not all_types:
         return []
+    by_name = {rec.get("name", ""): rec for rec in all_types if rec.get("name")}
     out: list[dict] = []
     seen_names: set[str] = set()
     for rec in all_types:
         name = rec.get("name", "")
         if not name or name in seen_names:
             continue
-        # Word-boundary match — avoid matching `Boxed` when searching for `Box`.
         if re.search(r"\b" + re.escape(name) + r"\b", text):
             out.append(rec)
             seen_names.add(name)
+
+    # Pass 2: expand by one field-hop. For each matched type, look at the
+    # type names appearing in its fields and pull those records in.
+    field_hop: list[dict] = []
+    for rec in list(out):
+        for f in rec.get("fields", []) or []:
+            ty = f.get("ty", "") or ""
+            if not ty:
+                continue
+            # Extract identifier-shaped tokens from the field's type
+            # string. Tokens like `Own`, `ErrorImpl`, `Backtrace` get
+            # added; generics and primitives are dropped via the
+            # by_name lookup (we only keep names that match real records).
+            for tok in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", ty):
+                if tok in seen_names:
+                    continue
+                hop_rec = by_name.get(tok)
+                if hop_rec is None:
+                    continue
+                field_hop.append(hop_rec)
+                seen_names.add(tok)
+    out.extend(field_hop)
     return out
 
 
