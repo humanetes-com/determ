@@ -18365,8 +18365,6 @@ def main():
                     raise RuntimeError(f"augmentation commit failed for {module_name}")
                 git_tag(project_dir, f"task0c-augmented-{module_name}")
                 strip_module_source(project_dir, module_dir)
-                strip_sentinel.parent.mkdir(parents=True, exist_ok=True)
-                strip_sentinel.touch()
                 _mark_phase(project_dir, f"strip/{module_name}", "done",
                             source_hash=_src_hash)
                 _set_current(project_dir, f"strip/{module_name} / done")

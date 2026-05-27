@@ -84,6 +84,15 @@ SKIP_DIRS = {
     "dist", "build", ".build",
     ".tox", ".eggs",
     "farf",             # Solana test ledger artifacts
+    # Pipeline scratch dirs — produced by the bake step (which runs
+    # BEFORE strip). Without these in the skip list, strip would walk
+    # `.skeleton/{cluster}/src/` and delete the very artefacts TASK 2
+    # depends on. Mirror of pipeline.py's SKIP_DIR_NAMES.
+    ".skeleton", ".skeleton-filled",
+    ".original_structure",
+    ".phase_c_logs",
+    ".chunk_cache", ".task1_partials",
+    ".module_augmented", ".module_stripped",
 }
 
 
