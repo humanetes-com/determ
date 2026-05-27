@@ -4466,12 +4466,10 @@ def _load_baked_clusters(project_dir: Path) -> list["BuildCluster"]:
             prompt_nightly_rule=c.get("prompt_nightly_rule", "") or "",
             is_default=bool(c.get("is_default", False)),
         )
-        if c.get("cfg_true") is not None:
-            bc.cfg_true = list(c["cfg_true"])
-        if c.get("cfg_false") is not None:
-            bc.cfg_false = list(c["cfg_false"])
-        if c.get("toolchain") is not None:
-            bc.toolchain = c["toolchain"]
+        # cfg_true / cfg_false / toolchain are read-only @properties derived
+        # from active_cfg, excluded_cfg, and requires_nightly. They're written
+        # into the manifest for human readability but must not be assigned
+        # back onto the cluster.
         if c.get("requires_nightly"):
             bc.requires_nightly = True
         out.append(bc)
@@ -5397,6 +5395,36 @@ def _enumerate_macro_variants(
     return variants
 
 
+def _detect_crate_no_std_invariant(src_dir: Path) -> str:
+    """Return a no_std-aware invariant string if the crate's lib.rs
+    declares `#![no_std]`. Otherwise empty.
+
+    Crate-level rather than cluster-level: anyhow is `#![no_std]` by
+    default with `extern crate std` conditionally enabled via the
+    `std` feature. Even with `std` enabled, `format!`, `vec!`, etc.
+    are NOT auto-imported in a no_std crate root — they must be
+    pulled in explicitly. The model trips over this every time.
+    """
+    lib_rs = src_dir / "src" / "lib.rs" if (src_dir / "src").exists() else src_dir / "lib.rs"
+    if not lib_rs.exists():
+        return ""
+    try:
+        head = lib_rs.read_text(encoding="utf-8")[:4000]
+    except Exception:
+        return ""
+    if not re.search(r"#\s*!\s*\[\s*no_std\s*\]", head):
+        return ""
+    return (
+        "crate is #![no_std]. `format!`, `vec!`, `print!`, `println!` "
+        "are NOT in scope by default — even when `feature = \"std\"` is "
+        "enabled. If you need to produce a String, prefer passing the "
+        "Display value directly (most APIs take `M: Display` and don't "
+        "need a String at all). Only if you genuinely need allocation, "
+        "use `alloc::format!` after `use alloc::format;` or "
+        "`crate::__private::format` if the crate provides it."
+    )
+
+
 def _compute_cluster_macro_invariants(
     src_dir: Path, cluster: "BuildCluster | None",
 ) -> str:
@@ -6231,6 +6259,25 @@ _RUST_GOTCHAS: list[dict] = [
             "Pick (1) for most cases — least invasive."
         ),
     },
+    {
+        # Rule C: when a target API takes M: Display, pass the value
+        # directly — do NOT format!() to a string first. format!() needs
+        # an allocator (std or alloc::format) and may not be in scope,
+        # particularly in no_std clusters.
+        "id": "display_passthrough",
+        "summary": "If a target API takes `M: Display`, pass the Display value DIRECTLY. Don't `format!(\"{}\", x)` first — `format!` needs an allocator and is often out of scope. `Error::msg(value)` works when `value: impl Display`.",
+        "triggers": {"format", "cannot find macro", "not found in scope"},
+        "detail": (
+            "Many anyhow APIs accept any Display value:\n"
+            "  pub fn Error::msg<M: Display + Debug + Send + Sync + 'static>(message: M)\n"
+            "Pass the Display value straight through. Don't materialise it\n"
+            "to a String first.\n"
+            "  WRONG: Error::msg(format!(\"{}\", context))   // needs alloc::format\n"
+            "  RIGHT: Error::msg(context)                    // context: impl Display\n"
+            "Only fall back to `format!` when concatenating multiple values —\n"
+            "and even then prefer `core::fmt::Write` on a buffer."
+        ),
+    },
 ]
 
 
@@ -6346,7 +6393,11 @@ Rules:
   not in this file's `use` block.
 - No unimplemented!()/todo!()/panic-only bodies. Omit <BODY> if you can't
   implement; a later pass retries.
-- You MAY call SKELETON STUB fns — their sigs are final.
+- SKELETON STUB fns are part of the CONTRACT. If a SKELETON STUB fn's
+  signature matches what you need, CALL it — that is the intended path,
+  not a hint you should reinvent. The pipeline will fill the stub
+  separately. Reinventing what a sibling stub already promises is the
+  most common cause of fix-loop divergence.
 """
 
 
@@ -7113,6 +7164,233 @@ def _ask_per_fn_body(
     return None, last_response
 
 
+def _count_relevant_notes(fr_path: Path | None,
+                            fn_key: tuple[str, str]) -> int:
+    """Count model-notes currently relevant to a (file, fn) — proxy for
+    'has the model's accumulated knowledge about this fn grown since
+    the prior attempt'. Used by the TDD driver's D3 re-entry policy.
+    """
+    if fr_path is None or not fr_path.exists():
+        return 0
+    try:
+        text = fr_path.read_text(encoding="utf-8")
+    except Exception:
+        return 0
+    rel, fn = fn_key
+    section = _filter_model_notes_for_prompt(
+        fr_path, file_rel=rel, fn_name=fn,
+        file_text="", current_error="",
+    )
+    return section.count("\n- ") if section else 0
+
+
+def _run_phase_c_tdd(
+    *, project_dir: Path,
+    target_src_dir: Path,
+    tests_dir_files: list[Path],
+    cluster_tests: list[tuple[str, str]],
+    module: str,
+    cluster: "BuildCluster",
+    check_cmd: str,
+    cluster_env: dict,
+    leaf_counts: dict[str, int] | None,
+    fr_path: Path | None,
+    test_cmd_builder,
+    tag: str,
+) -> dict:
+    """Plan 4 — TDD-scoped Phase C driver.
+
+    Outer loop: cargo test → frontier → fill frontier → repeat.
+
+    Per D-decisions resolved 2026-05-27:
+      D2: order frontier by ascending panic depth, descending caller count
+      D3: re-enter an exhausted fn only if other fills landed OR new
+          relevant notes accumulated since the last attempt
+      D4: cargo build failure routes into a compile-error frontier
+      D5: 120s wall-clock timeout per cargo test invocation
+      D7: iter-0 frontier surfaces shallowest fn per test naturally
+    """
+    # Frontier extraction expects the cargo project root (NOT project_root/src):
+    # cargo's panic messages emit `src/foo.rs` paths relative to the project
+    # root, and the syn extractor records `file` fields the same way. Passing
+    # `project_root/src` would produce double-prefixed paths and zero matches.
+    src_dir = target_src_dir
+    # Filter to direct children of tests/ — only those are cargo --test targets.
+    test_stems = sorted({
+        Path(rel).stem
+        for rel, _ in cluster_tests
+        if "tests" in Path(rel).parts and Path(rel).parent.name == "tests"
+    })
+    if not test_stems:
+        _log(f"  {tag} [phase-c/tdd] no test stems in cluster; skipping TDD.")
+        return {"fns_filled": 0, "bytes_filled": 0, "attempts": 0,
+                "remaining": len(_scan_unimplemented_for_cluster(
+                    target_src_dir, cluster)),
+                "errors": []}
+    test_cmd = test_cmd_builder(test_stems)
+    max_iters = int(os.getenv("TDD_MAX_ITERS", "5"))
+    test_timeout = int(os.getenv("PHASE_C_TEST_TIMEOUT", "120"))
+
+    _log(f"  {tag} [phase-c/tdd] driver=tdd, max_iters={max_iters}, "
+         f"timeout={test_timeout}s, stems={len(test_stems)}")
+
+    permanently_exhausted: set[tuple[str, str]] = set()
+    last_notes_count: dict[tuple[str, str], int] = {}
+    last_total_filled = 0
+
+    total_filled = 0
+    total_attempts = 0
+    total_bytes = 0
+    errors: list[str] = []
+
+    for iter_n in range(1, max_iters + 1):
+        _check_graceful_stop(f"TDD iter {iter_n}")
+        _log(f"  {tag} [phase-c/tdd] iter {iter_n}/{max_iters}: running cargo test...")
+        t0 = time.monotonic()
+        rc, output = _run_cargo(test_cmd, target_src_dir, cluster_env,
+                                  timeout=test_timeout)
+        dt = time.monotonic() - t0
+        if rc == 0:
+            _log(f"  {tag} [phase-c/tdd] iter {iter_n}: all tests pass "
+                 f"({dt:.1f}s). Cluster done.")
+            _emit("phase_c.tdd.iter", data={
+                "cluster": cluster.name, "iter": iter_n, "rc": 0,
+                "frontier_size": 0, "kind": "pass",
+            })
+            break
+        if rc == -1:
+            _log(f"  {tag} [phase-c/tdd] iter {iter_n}: cargo test TIMED OUT "
+                 f"({test_timeout}s). Skipping iter — model may have produced "
+                 "a body with an infinite loop.")
+            _emit("phase_c.tdd.iter", data={
+                "cluster": cluster.name, "iter": iter_n, "rc": -1,
+                "frontier_size": 0, "kind": "timeout",
+            })
+            break
+
+        # Try runtime-panic frontier first; fall back to compile-error.
+        frontier = _extract_tdd_frontier(output, src_dir)
+        kind = "runtime"
+        if not frontier:
+            frontier = _extract_tdd_compile_frontier(output, src_dir)
+            kind = "compile"
+        if not frontier:
+            # P4.5: assertion-failure attribution. cargo test failed but
+            # neither runtime panics nor compile errors yielded an
+            # actionable frontier — likely assertion failures from
+            # semantically-wrong bodies. Ask the classifier to attribute
+            # each failing test to a specific fn (file::name) and synthesize
+            # a frontier from BAD_FILL / TEST_PRECONDITION_MISSING entries.
+            # Gated by PHASE_C_TDD_USE_CLASSIFIER (default on).
+            if os.getenv("PHASE_C_TDD_USE_CLASSIFIER", "1") != "0":
+                _fails = sorted(_parse_failed_tests(output))
+                if _fails:
+                    classification = _classify_phase_c_test_failures(
+                        test_out=output, filled_this_pass=[],
+                        failed_tests=_fails, cluster_name=cluster.name,
+                    )
+                    synth: dict[tuple[str, str], set[str]] = {}
+                    for _tname, _info in classification.items():
+                        if _info.get("category") not in (
+                                "BAD_FILL", "TEST_PRECONDITION_MISSING"):
+                            continue
+                        _ref = _info.get("fn") or ""
+                        if "::" not in _ref:
+                            continue
+                        _fp, _fn = _ref.split("::", 1)
+                        _fp, _fn = _fp.strip(), _fn.strip()
+                        if not _fp or not _fn:
+                            continue
+                        synth.setdefault((_fp, _fn), set()).add(_tname)
+                    if synth:
+                        frontier = synth
+                        kind = "assertion"
+                        _log(f"  {tag} [phase-c/tdd] iter {iter_n}: "
+                             f"classifier attributed {len(_fails)} failing "
+                             f"test(s) to {len(synth)} fn(s).")
+        if not frontier:
+            _log(f"  {tag} [phase-c/tdd] iter {iter_n}: cargo test failed "
+                 f"(rc={rc}, {dt:.1f}s) but no actionable frontier extracted. "
+                 "Stopping TDD loop.")
+            _emit("phase_c.tdd.iter", data={
+                "cluster": cluster.name, "iter": iter_n, "rc": rc,
+                "frontier_size": 0, "kind": "no_frontier",
+            })
+            break
+
+        # D3 — re-entry filter.
+        eligible: dict[tuple[str, str], set[str]] = {}
+        skipped_perm: int = 0
+        for key, tests in frontier.items():
+            if key in permanently_exhausted:
+                notes_now = _count_relevant_notes(fr_path, key)
+                if total_filled == last_total_filled and \
+                   notes_now <= last_notes_count.get(key, 0):
+                    skipped_perm += 1
+                    continue
+                permanently_exhausted.discard(key)
+            eligible[key] = tests
+        if not eligible:
+            _log(f"  {tag} [phase-c/tdd] iter {iter_n}: all {len(frontier)} "
+                 f"frontier members permanently exhausted with no new "
+                 "context. Stopping.")
+            _emit("phase_c.tdd.iter", data={
+                "cluster": cluster.name, "iter": iter_n, "rc": rc,
+                "frontier_size": 0, "kind": "exhausted",
+            })
+            break
+
+        ordered = _order_frontier(eligible, leaf_counts)
+        frontier_keys = {key for key, _ in ordered}
+        _log(f"  {tag} [phase-c/tdd] iter {iter_n}: cargo test failed "
+             f"(rc={rc}, {dt:.1f}s); frontier={len(eligible)} fn(s) "
+             f"({kind}), {skipped_perm} skipped as exhausted.")
+        _emit("phase_c.tdd.iter", data={
+            "cluster": cluster.name, "iter": iter_n, "rc": rc,
+            "frontier_size": len(eligible), "kind": kind,
+        })
+
+        # Drive the per-fn fill machinery with this frontier. One pass
+        # per TDD iter; the outer loop is what advances.
+        sub = _task2_fill_fns_one_by_one(
+            project_dir=project_dir,
+            target_src_dir=target_src_dir,
+            tests_dir_files=tests_dir_files,
+            module_name=module,
+            cluster_name=cluster.name,
+            cluster=cluster,
+            check_cmd=check_cmd,
+            cluster_env=cluster_env,
+            max_passes=1,
+            leaf_name_counts=leaf_counts,
+            fr_path=fr_path,
+            tdd_frontier_keys=frontier_keys,
+            skip_end_pass_test=True,
+        )
+        total_filled += sub.get("fns_filled", 0)
+        total_attempts += sub.get("attempts", 0)
+        total_bytes += sub.get("bytes_filled", 0)
+        errors.extend(sub.get("errors", []))
+
+        # Mark any fn that's STILL in the unimplemented set as exhausted
+        # for D3's purposes on the next iter.
+        cur_stubs = set(_scan_unimplemented_functions(src_dir))
+        for key in frontier_keys:
+            if key in cur_stubs:
+                permanently_exhausted.add(key)
+                last_notes_count[key] = _count_relevant_notes(fr_path, key)
+        last_total_filled = total_filled
+
+    return {
+        "fns_filled": total_filled,
+        "bytes_filled": total_bytes,
+        "attempts": total_attempts,
+        "remaining": len(_scan_unimplemented_for_cluster(
+            target_src_dir, cluster)),
+        "errors": errors,
+    }
+
+
 def _task2_fill_fns_one_by_one(
     project_dir: Path,
     target_src_dir: Path,
@@ -7125,6 +7403,9 @@ def _task2_fill_fns_one_by_one(
     max_passes: int = 3,
     leaf_name_counts: dict[str, int] | None = None,
     fr_path: Path | None = None,
+    # Plan 4 — TDD-scoped driver knobs.
+    tdd_frontier_keys: "set[tuple[str, str]] | None" = None,
+    skip_end_pass_test: bool = False,
 ) -> dict:
     """Phase C — Flavour B with full validation loops.
 
@@ -7173,8 +7454,12 @@ def _task2_fill_fns_one_by_one(
     # Per-cluster macro invariants: which arm of each cfg-gated macro is
     # active under this cluster. Cached per call — small set, cheap to
     # recompute, but constant for the duration of this Phase C loop.
-    invariants_section = _compute_cluster_macro_invariants(
+    # Plus crate-level no_std warning when applicable (A).
+    _macro_invariants = _compute_cluster_macro_invariants(
         _src_for_macros, cluster)
+    _no_std_invariant = _detect_crate_no_std_invariant(target_src_dir)
+    invariants_section = "\n\n".join(
+        s for s in (_no_std_invariant, _macro_invariants) if s)
     # P5.1: crate-wide type records (struct/enum/type/trait with fields +
     # method names). Used per-fn to inject only the types the fn's signature
     # actually mentions. Cached across passes; file set doesn't change.
@@ -7207,6 +7492,11 @@ def _task2_fill_fns_one_by_one(
         else:
             stubs = [{"file": f, "fn_name": fn, "container": "", "sig_text": ""}
                      for f, fn in _scan_unimplemented_for_cluster(target_src_dir, cluster)]
+        # Plan 4 — when TDD driver supplies a frontier, restrict this pass
+        # to fns it nominated. Avoids walking fns no test reaches.
+        if tdd_frontier_keys is not None:
+            stubs = [s for s in stubs
+                     if (s["file"], s["fn_name"]) in tdd_frontier_keys]
         if not stubs:
             break
         # D: leaf-first order — most-referenced fns first.
@@ -7310,7 +7600,18 @@ def _task2_fill_fns_one_by_one(
             # P5.1: pick type records that the fn's signature OR container
             # name mentions. These get inserted as <TYPES_IN_SCOPE> so the
             # model knows fields vs methods on Own/Ref/ErrorImpl/etc.
-            _type_search_text = f"{sig_text}\n{container}"
+            # Also include the enclosing impl's WHERE CLAUSE in the
+            # search. The syn extractor records the container as
+            # `impl Context<T, E> for Result<T, E>` without the where
+            # clause, but bounds like `where E: ext::StdError` reveal
+            # which trait's methods are usable on E. Without them,
+            # `ext::StdError` would never make it into TYPES_IN_SCOPE
+            # and the model can't see the helper methods it should
+            # delegate to. `snapshot` is the initial file text read at
+            # the top of this per-stub function — use that since
+            # `cur_text` isn't bound until inside the fix loop.
+            _impl_where = _extract_impl_where_clause(snapshot, container)
+            _type_search_text = f"{sig_text}\n{container}\n{_impl_where}"
             _types_for_fn = _types_referenced_in_text(
                 _type_search_text, _crate_type_records)
             # Cap to ~6 types and ~3 KB to keep prompts focused.
@@ -7656,7 +7957,9 @@ def _task2_fill_fns_one_by_one(
         # without a test run silently passes through to Phase D — masking any
         # breakage introduced by other clusters' fills or by previously-stalled
         # fix loops. Run unconditionally so we always have signal.
-        if True:
+        # Plan 4 — TDD driver runs the cluster test in its OUTER loop; the
+        # per-pass run would be redundant. Skip when the caller asked us to.
+        if not skip_end_pass_test:
             _check_graceful_stop(f"per-fn pass {pass_n} test phase")
             # Build the union of test files referenced by ANY fn filled this pass.
             # Only keep paths under the project's `tests/` directory — those are
@@ -7672,14 +7975,24 @@ def _task2_fill_fns_one_by_one(
                     file_rel=rel_f, src_dir=_src_for_macros,
                 ):
                     p = Path(tf[0])
-                    if "tests" in p.parts:
+                    # Only direct children of `tests/` are cargo --test
+                    # targets. Files under `tests/ui/`, `tests/common/`,
+                    # etc. are trybuild fixtures or shared helpers, not
+                    # standalone test binaries — passing them to `--test`
+                    # makes cargo fail rc=101 at command-parse time.
+                    if p.parent.name == "tests":
                         test_paths.add(p)
             # When nothing was filled this pass (or no test could be linked to
             # the fills), fall back to the cluster's complete tests/ surface so
             # we still get pass/fail signal for the whole cluster.
             if not test_paths:
                 for p in tests_dir_files:
-                    if "tests" in p.parts:
+                    # Only direct children of `tests/` are cargo --test
+                    # targets. Files under `tests/ui/`, `tests/common/`,
+                    # etc. are trybuild fixtures or shared helpers, not
+                    # standalone test binaries — passing them to `--test`
+                    # makes cargo fail rc=101 at command-parse time.
+                    if p.parent.name == "tests":
                         test_paths.add(p)
             test_stems = sorted({p.stem for p in test_paths})
             if test_stems:
@@ -8530,6 +8843,51 @@ def _format_type_for_prompt(rec: dict) -> str:
     return "\n".join(lines)
 
 
+def _extract_impl_where_clause(file_text: str, container: str) -> str:
+    """For a fn whose container is `impl ... for ...` or `impl ...`,
+    locate the impl block in `file_text` and return its `where` clause
+    (or empty string if absent / not found).
+
+    The syn extractor records the container header but drops the
+    `where` clause. Bounds like `where E: ext::StdError` are critical
+    for picking the right TYPES_IN_SCOPE entries — they tell us which
+    trait's methods are callable on the generic parameter.
+
+    Best-effort string match: works for impls written on one line
+    (the skeleton extractor produces compact single-line items, so
+    nearly every impl will match).
+    """
+    if not container or not container.startswith("impl"):
+        return ""
+    # The extractor's container string strips the impl's own generics:
+    # the file has `impl <T, E> Context<T, E> for Result<T, E>` but
+    # container is `impl Context<T, E> for Result<T, E>`. Match on the
+    # post-"impl" portion to bridge the gap.
+    body = container[len("impl"):].lstrip()  # e.g. "Context<T, E> for Result<T, E>"
+    if not body:
+        return ""
+    # Build a regex that allows optional `< ... >` generics after `impl`.
+    norm_target = re.sub(r"\s+", " ", body).strip()
+    norm_text = re.sub(r"\s+", " ", file_text)
+    # Escape regex specials in the body, then locate it preceded by
+    # `impl` and optional generics on the normalised text.
+    pat = re.compile(
+        r"impl\s*(?:<[^>]*>\s*)?" + re.escape(norm_target),
+    )
+    m = pat.search(norm_text)
+    if m is None:
+        return ""
+    start = m.start()
+    end = norm_text.find("{", m.end())
+    if end < 0:
+        return ""
+    header = norm_text[start:end]
+    wm = re.search(r"\bwhere\b(.*)$", header, re.DOTALL)
+    if wm:
+        return wm.group(1).strip().rstrip(",").strip()
+    return ""
+
+
 def _types_referenced_in_text(text: str, all_types: list[dict]) -> list[dict]:
     """Return type records that the fn's prompt should expose, with one
     level of transitive expansion through fields.
@@ -8659,6 +9017,223 @@ def _scan_unimplemented_records_for_cluster(
         _log(f"  [phase-c/per-fn] cluster {cluster.name}: skipped "
              f"{skipped} stub(s) not active in this cluster's cfg-set.")
     return out
+
+
+# ---------------------------------------------------------------------------
+# Plan 4 — TDD-scoped driver: frontier extraction from cargo test output.
+#
+# A "frontier" maps (file_rel, fn_name) → set of test names that hit it at
+# runtime. Built from cargo test output by parsing per-test stdout blocks
+# for `not yet implemented` panics (and optionally assertion failures), then
+# resolving panic file:line back to the containing fn via the syn extractor.
+#
+# The TDD outer loop in `_generate_one_cluster_tdd` uses this to drive
+# what gets filled — only fns reachable from at least one failing test.
+# ---------------------------------------------------------------------------
+
+
+_PANIC_HEADER_RE = re.compile(
+    # Modern Rust prints `thread 'NAME' (TID) panicked at FILE:LINE:COL:`
+    # with an optional `(THREAD_ID)` after the name. Older Rust just has
+    # `thread 'NAME' panicked at ...`. Match both. We capture the column
+    # too — the skeleton extractor produces compact one-line-per-item
+    # output, so multiple fns can live on the same line and only the
+    # column disambiguates which one panicked.
+    r"thread '([^']+)'(?:\s+\(\d+\))?\s+panicked at ([^:]+):(\d+)(?::(\d+))?:\s*\n([^\n]*)"
+)
+_TEST_STDOUT_HEADER_RE = re.compile(r"^----\s+(\S+)\s+stdout\s+----\s*$",
+                                     re.MULTILINE)
+_COMPILE_ERROR_RE = re.compile(
+    r"^error(?:\[E\d+\])?:\s+([^\n]+)\n\s*-->\s*([^:]+):(\d+)(?::\d+)?",
+    re.MULTILINE,
+)
+
+
+def _line_to_fn_record(
+    file_text: str, line_no: int, fn_records: list[dict],
+    col_no: int | None = None,
+) -> dict | None:
+    """Given file text and a 1-based (line, col), return the fn record
+    whose body spans that position. Returns None if no fn contains it.
+
+    `fn_records` should be the syn extractor's enumerate-fns output for
+    the file (caller is responsible for filtering to one file's records).
+
+    The skeleton extractor produces compact one-line-per-item output, so
+    a single line can hold several fns. Without `col_no` we pick the
+    FIRST fn whose body range overlaps the line — usually fine but can
+    misattribute in dense files. With `col_no`, we resolve precisely.
+    """
+    if line_no < 1 or not fn_records:
+        return None
+    lines_iter = file_text.splitlines(keepends=True)
+    if line_no > len(lines_iter):
+        return None
+    line_start = sum(len(l) for l in lines_iter[:line_no - 1])
+    line_end = line_start + len(lines_iter[line_no - 1])
+    if col_no is not None and col_no >= 1:
+        byte_offset = line_start + col_no - 1
+        for rec in fn_records:
+            s = rec.get("sig_byte_start", 0)
+            e = rec.get("body_byte_end", 0)
+            if s <= byte_offset < e:
+                return rec
+    # Fallback: pick the first fn whose body overlaps the line range.
+    for rec in fn_records:
+        s = rec.get("sig_byte_start", 0)
+        e = rec.get("body_byte_end", 0)
+        if max(s, line_start) < min(e, line_end):
+            return rec
+    return None
+
+
+def _extract_tdd_frontier(
+    test_output: str, src_dir: Path,
+) -> dict[tuple[str, str], set[str]]:
+    """Parse cargo test output → frontier dict.
+
+    Keys are (file_rel, fn_name), values are sets of test names that
+    panicked inside that fn. Only `not yet implemented` panics are
+    included by default — they map cleanly to a still-unfilled fn.
+    Assertion-failure attribution is handled in a separate pass (see
+    `_extract_tdd_assertion_frontier`).
+
+    Returns {} when no panics could be parsed (e.g. cargo build failed
+    before any test ran).
+    """
+    frontier: dict[tuple[str, str], set[str]] = {}
+    if not test_output:
+        return frontier
+    # Per-file fn records cache.
+    fn_records_by_file: dict[str, list[dict]] = {}
+    file_text_cache: dict[str, str] = {}
+    # Split output into per-test stdout sections. Each section holds the
+    # panic header for that test's failures.
+    sections = _TEST_STDOUT_HEADER_RE.split(test_output)
+    # _TEST_STDOUT_HEADER_RE.split returns [pre, test1, body1, test2, body2, ...].
+    if len(sections) < 3:
+        # No per-test sections — try parsing the whole output as a single
+        # block (some cargo versions don't emit `---- N stdout ----` headers
+        # for single-test runs).
+        sections = ["", "unknown_test", test_output]
+    for i in range(1, len(sections) - 1, 2):
+        test_name = sections[i].strip()
+        body = sections[i + 1]
+        for m in _PANIC_HEADER_RE.finditer(body):
+            _thread, file_path, line_str, col_str, _panic_msg = m.group(
+                1, 2, 3, 4, 5)
+            # Accept every panic whose path resolves to a fn in src/. The
+            # skeleton extractor replaced every fn body with
+            # `unimplemented!()`, so any panic inside src/ IS from a stub.
+            # Test-file panics (tests/foo.rs:N) get rejected later by the
+            # fn-lookup, since we only enumerate src/ fns.
+            try:
+                line_no = int(line_str)
+            except ValueError:
+                continue
+            # Resolve file_path relative to src_dir.
+            p_abs = Path(file_path)
+            if not p_abs.is_absolute():
+                p_abs = (src_dir / file_path).resolve()
+            try:
+                rel = str(p_abs.relative_to(src_dir.resolve()))
+            except ValueError:
+                # File outside src_dir — skip (likely a panic from std).
+                continue
+            # Look up fn at this line.
+            if rel not in fn_records_by_file:
+                _all_recs = _enumerate_fns_via_extractor(src_dir) or []
+                fn_records_by_file[rel] = [r for r in _all_recs
+                                            if r.get("file") == rel]
+            recs = fn_records_by_file[rel]
+            if not recs:
+                continue
+            if rel not in file_text_cache:
+                try:
+                    file_text_cache[rel] = p_abs.read_text(encoding="utf-8")
+                except Exception:
+                    continue
+            col_no = int(col_str) if col_str else None
+            rec = _line_to_fn_record(file_text_cache[rel], line_no, recs,
+                                      col_no=col_no)
+            if rec is None:
+                continue
+            key = (rel, rec["fn_name"])
+            frontier.setdefault(key, set()).add(test_name)
+    return frontier
+
+
+def _extract_tdd_compile_frontier(
+    build_output: str, src_dir: Path,
+) -> dict[tuple[str, str], set[str]]:
+    """When cargo test fails because cargo BUILD failed (compile errors,
+    not panics), parse error[Exxxx] messages → fn records. Same shape as
+    `_extract_tdd_frontier` but with test names replaced by "<compile>"
+    so the caller can distinguish.
+    """
+    frontier: dict[tuple[str, str], set[str]] = {}
+    if not build_output:
+        return frontier
+    fn_records_by_file: dict[str, list[dict]] = {}
+    file_text_cache: dict[str, str] = {}
+    for m in _COMPILE_ERROR_RE.finditer(build_output):
+        _msg, file_path, line_str = m.group(1, 2, 3)
+        try:
+            line_no = int(line_str)
+        except ValueError:
+            continue
+        p_abs = Path(file_path)
+        if not p_abs.is_absolute():
+            p_abs = (src_dir / file_path).resolve()
+        try:
+            rel = str(p_abs.relative_to(src_dir.resolve()))
+        except ValueError:
+            continue
+        if rel not in fn_records_by_file:
+            _all_recs = _enumerate_fns_via_extractor(src_dir) or []
+            fn_records_by_file[rel] = [r for r in _all_recs
+                                        if r.get("file") == rel]
+        recs = fn_records_by_file[rel]
+        if not recs:
+            continue
+        if rel not in file_text_cache:
+            try:
+                file_text_cache[rel] = p_abs.read_text(encoding="utf-8")
+            except Exception:
+                continue
+        rec = _line_to_fn_record(file_text_cache[rel], line_no, recs)
+        if rec is None:
+            continue
+        frontier.setdefault((rel, rec["fn_name"]), set()).add("<compile>")
+    return frontier
+
+
+def _order_frontier(
+    frontier: dict[tuple[str, str], set[str]],
+    leaf_name_counts: dict[str, int] | None,
+    panic_depths: dict[tuple[str, str], int] | None = None,
+) -> list[tuple[tuple[str, str], set[str]]]:
+    """Order frontier entries by D2's rule: shallowest panic depth first,
+    then most-callers, then alphabetical (file, fn) for reproducibility.
+
+    `panic_depths` (optional) maps the same keys to integer panic stack
+    depths. Absent → all treated as same depth, the secondary sort wins.
+    Most-referenced fn (from `leaf_name_counts`) breaks final ties so the
+    pre-strip leaf-order metadata still influences scheduling.
+    """
+    panic_depths = panic_depths or {}
+    leaf_name_counts = leaf_name_counts or {}
+    items = list(frontier.items())
+
+    def _key(item: tuple[tuple[str, str], set[str]]):
+        (file_rel, fn_name), tests = item
+        return (
+            panic_depths.get((file_rel, fn_name), 0),  # shallowest first
+            -len(tests),                                # most tests first
+            -leaf_name_counts.get(fn_name, 0),          # most-referenced first
+            file_rel, fn_name,                          # alphabetical reproducible
+        )
+    return sorted(items, key=_key)
 
 
 def _scan_unimplemented_functions(src_dir: Path) -> list[tuple[str, str]]:
@@ -12527,6 +13102,55 @@ class StaticSkeletonTask2Generator(Task2Generator):
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 dst.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
 
+        # Propagate gen_tests siblings from project_dir/src/ into filled_dir/src/.
+        # task0c commits these as cluster-specific unit-test specs; the bake step
+        # emits only the structural skeleton. Without this propagation Phase C
+        # runs cargo test against integration tests only and gen_tests are
+        # invisible. `.broken` suffixes (left over from the legacy reattach
+        # quarantine path) are treated as live — they were renamed because
+        # earlier LLM-regenerated source didn't satisfy them, not because they
+        # are broken in themselves.
+        _proj_src = project_dir / "src"
+        _filled_src = filled_dir / "src"
+        if _proj_src.exists() and _filled_src.exists():
+            _gt_re = re.compile(r"^(.+?)\.gen_tests_(\d+)\.rs(?:\.broken)?$")
+            _gt_allow_line, _ = _derive_gentest_prelude(project_dir)
+            _gt_cluster_attr = _cluster_cfg_attr(cluster)
+            _gt_propagated = 0
+            for gt in sorted(_proj_src.iterdir()):
+                if not gt.is_file():
+                    continue
+                _m = _gt_re.match(gt.name)
+                if not _m:
+                    continue
+                _parent_stem = _m.group(1)
+                _pass_n = int(_m.group(2))
+                _dst_name = f"{_parent_stem}.gen_tests_{_pass_n}.rs"
+                _dst = _filled_src / _dst_name
+                _parent_path = _filled_src / f"{_parent_stem}.rs"
+                if not _parent_path.exists():
+                    continue
+                try:
+                    _body = gt.read_text(encoding="utf-8")
+                except Exception as _e:
+                    _log(f"  {tag} [skeleton-C] gen_tests read failed {gt.name}: {_e}")
+                    continue
+                if not _rust_delimiters_balanced(_body):
+                    continue
+                if not _dst.exists() or _dst.read_text(encoding="utf-8") != _body:
+                    _dst.write_text(_body, encoding="utf-8")
+                _ptext = _parent_path.read_text(encoding="utf-8")
+                if not _has_gen_tests_decl(_ptext, _pass_n):
+                    _decl = _build_gen_tests_decl(
+                        _dst_name, _pass_n, _gt_allow_line,
+                        cluster_cfg_attr=_gt_cluster_attr,
+                    )
+                    _parent_path.write_text(_ptext.rstrip() + _decl, encoding="utf-8")
+                    _gt_propagated += 1
+            if _gt_propagated:
+                _log(f"  {tag} [skeleton-C] propagated {_gt_propagated} "
+                     f"gen_tests decl(s) into filled tree.")
+
         if per_fn_mode:
             _log(f"  {tag} [skeleton-C] per-fn mode (Flavour B): scanning stubs...")
             # Make filled_dir a runnable crate root so cargo check/test work:
@@ -12555,19 +13179,40 @@ class StaticSkeletonTask2Generator(Task2Generator):
                      "alphabetical fn ordering.")
             # Per-crate FR is the home for model self-correction notes.
             _fr_for_notes = project_dir / f"functional_requirements_{module}.md"
-            c_result = _task2_fill_fns_one_by_one(
-                project_dir=project_dir,
-                target_src_dir=filled_dir,
-                tests_dir_files=tests_dir_files,
-                module_name=module,
-                cluster_name=cluster.name,
-                cluster=cluster,
-                check_cmd=self._cluster_check_cmd(cluster),
-                cluster_env=self._cluster_env(cluster),
-                max_passes=int(os.getenv("PHASE_C_MAX_PASSES", "3")),
-                leaf_name_counts=_leaf_counts,
-                fr_path=_fr_for_notes,
-            )
+            # Plan 4 — PHASE_C_DRIVER=tdd switches to the TDD outer loop
+            # (cargo test → frontier → fill). Default `fn_walk` keeps the
+            # legacy per-fn-walk driver.
+            _driver = os.getenv("PHASE_C_DRIVER", "fn_walk").strip().lower()
+            if _driver == "tdd":
+                _log(f"  {tag} [skeleton-C] PHASE_C_DRIVER=tdd — using TDD outer loop")
+                c_result = _run_phase_c_tdd(
+                    project_dir=project_dir,
+                    target_src_dir=filled_dir,
+                    tests_dir_files=tests_dir_files,
+                    cluster_tests=cluster_tests,
+                    module=module,
+                    cluster=cluster,
+                    check_cmd=self._cluster_check_cmd(cluster),
+                    cluster_env=self._cluster_env(cluster),
+                    leaf_counts=_leaf_counts,
+                    fr_path=_fr_for_notes,
+                    test_cmd_builder=lambda stems: _build_test_cmd(stems, cluster),
+                    tag=tag,
+                )
+            else:
+                c_result = _task2_fill_fns_one_by_one(
+                    project_dir=project_dir,
+                    target_src_dir=filled_dir,
+                    tests_dir_files=tests_dir_files,
+                    module_name=module,
+                    cluster_name=cluster.name,
+                    cluster=cluster,
+                    check_cmd=self._cluster_check_cmd(cluster),
+                    cluster_env=self._cluster_env(cluster),
+                    max_passes=int(os.getenv("PHASE_C_MAX_PASSES", "3")),
+                    leaf_name_counts=_leaf_counts,
+                    fr_path=_fr_for_notes,
+                )
             _log(f"  {tag} [skeleton-C] {c_result['fns_filled']} fn(s) filled, "
                  f"{c_result['bytes_filled']:,} bytes net, "
                  f"{c_result['attempts']} LLM call(s), "
@@ -12599,13 +13244,23 @@ class StaticSkeletonTask2Generator(Task2Generator):
                  f"{len(c_result['errors'])} error(s).")
 
         # Phase D — residual cleanup (per cluster).
-        _log(f"  {tag} [skeleton-D] scanning for residual stubs...")
-        d_result = _task2_cleanup_residuals(filled_dir, project_dir, functional_req,
-                                             cluster_tests, module_name=module)
-        _log(f"  {tag} [skeleton-D] {d_result['stubs_total']} stubs, "
-             f"{d_result['stubs_exercised']} test-exercised, "
-             f"{d_result['files_updated']} updated, "
-             f"{d_result['stubs_remaining']} remaining.")
+        # Plan 4 — under driver=tdd, the outer loop fills exactly the fns
+        # reachable from failing tests. Residuals are by-design unreachable
+        # from any test → leaving them `unimplemented!()` is correct under
+        # tests-only reconstruction. Skip Phase D.
+        if _driver == "tdd":
+            _log(f"  {tag} [skeleton-D] skipped (driver=tdd; residual stubs "
+                 "are correctly left unimplemented).")
+            d_result = {"stubs_total": 0, "stubs_exercised": 0,
+                         "files_updated": 0, "stubs_remaining": 0}
+        else:
+            _log(f"  {tag} [skeleton-D] scanning for residual stubs...")
+            d_result = _task2_cleanup_residuals(filled_dir, project_dir, functional_req,
+                                                 cluster_tests, module_name=module)
+            _log(f"  {tag} [skeleton-D] {d_result['stubs_total']} stubs, "
+                 f"{d_result['stubs_exercised']} test-exercised, "
+                 f"{d_result['files_updated']} updated, "
+                 f"{d_result['stubs_remaining']} remaining.")
 
         # Per-cluster intermediate validation: cargo check the filled output.
         if _cargo_toml.exists() and not (filled_dir / "Cargo.toml").exists():
@@ -18358,11 +19013,23 @@ def main():
                         f"{_bake_res.get('reason', 'unknown')}")
                 _log(f"  Baked skeleton for {len(_bake_res['clusters'])} cluster(s): "
                      f"{', '.join(_bake_res['clusters'])}")
-                if not git_commit(project_dir,
-                                  f"pipeline: task0c augmentation complete — "
-                                  f"all unit tests added for {module_name}"):
-                    _log(f"  [ABORT] augmentation commit failed for '{module_name}' — refusing to strip. Fix git state and retry.")
-                    raise RuntimeError(f"augmentation commit failed for {module_name}")
+                # The bake's outputs (.skeleton/) are tracked in git. When
+                # resuming from a task0c-augmented-{module} tag, the
+                # rebake produces byte-identical files → nothing to
+                # commit. That is success, not failure — the augmented
+                # state IS already captured by the existing tag.
+                _porc = subprocess.run(
+                    ["git", "status", "--porcelain"],
+                    cwd=project_dir, capture_output=True, text=True, timeout=10,
+                ).stdout.strip()
+                if _porc:
+                    if not git_commit(project_dir,
+                                      f"pipeline: task0c augmentation complete — "
+                                      f"all unit tests added for {module_name}"):
+                        _log(f"  [ABORT] augmentation commit failed for '{module_name}' — refusing to strip. Fix git state and retry.")
+                        raise RuntimeError(f"augmentation commit failed for {module_name}")
+                else:
+                    _log("  [augmentation] tree already clean — augmented state preserved from prior run.")
                 git_tag(project_dir, f"task0c-augmented-{module_name}")
                 strip_module_source(project_dir, module_dir)
                 _mark_phase(project_dir, f"strip/{module_name}", "done",
@@ -18664,14 +19331,15 @@ This is a Rust procedural macro crate. Strict rules apply:
                                 src_path.write_text(new_text, encoding="utf-8")
                                 _log(f"  Reattached {added_decls} gen_tests decl(s) to {rel}.")
 
-                        # P3.14: validate reattached gen_tests against the
-                        # REGENERATED source. The original task0c validated
-                        # each gen_tests file at write-time, but regeneration
-                        # of source can introduce import / API changes that
-                        # break the saved tests. Run cargo check --tests once
-                        # to surface all such failures, then quarantine each
-                        # gen_tests whose file is named in the errors. Strips
-                        # the decl from the parent so cargo can't see it.
+                        # Validate reattached gen_tests against the regenerated
+                        # source. Compile failures are signal that the
+                        # reconstruction is wrong, NOT that the gen_test is
+                        # broken (gen_tests were validated at task0c time
+                        # against the original). Log the names but leave them
+                        # in place — Phase C / TDD picks up compile errors via
+                        # the compile-frontier extractor and drives fills.
+                        # Opt back into permanent quarantine with
+                        # GEN_TESTS_REATTACH_QUARANTINE=1.
                         if _reattached:
                             try:
                                 _vchk = subprocess.run(
@@ -18682,47 +19350,59 @@ This is a Rust procedural macro crate. Strict rules apply:
                             except Exception as _e:
                                 _log(f"  [reattach] validate cargo check failed: {_e}")
                                 _vchk = None
+                            _legacy_quarantine = os.getenv(
+                                "GEN_TESTS_REATTACH_QUARANTINE", "0",
+                            ) == "1"
                             if _vchk is not None and _vchk.returncode != 0:
                                 _out = (_vchk.stdout or "") + (_vchk.stderr or "")
-                                # Quarantine any reattached sibling whose name
-                                # appears in the error output.
-                                quarantined = 0
-                                for src_path, sibling, pass_n in _reattached:
-                                    if sibling.name not in _out:
-                                        continue
-                                    # Strip the decl from the parent.
-                                    try:
-                                        ptext = src_path.read_text(encoding="utf-8")
-                                        decl_re = re.compile(
-                                            r"\n*(?:#\[cfg\([^)]*\)\]\s*)?"
-                                            r"#\s*\[\s*allow\s*\([^)]*\)\s*\][^\n]*\n*"
-                                            r"#\s*\[\s*path\s*=\s*\""
-                                            + re.escape(sibling.name)
-                                            + r"\"\s*\][^\n]*\n*"
-                                            r"(?:pub\s+)?mod\s+gen_tests_"
-                                            + str(pass_n) + r"\s*;\s*",
-                                        )
-                                        ptext_new = decl_re.sub("\n", ptext)
-                                        if ptext_new != ptext:
-                                            src_path.write_text(ptext_new, encoding="utf-8")
-                                    except Exception:
-                                        pass
-                                    try:
-                                        sibling.rename(sibling.with_suffix(".rs.broken"))
-                                    except Exception:
+                                _failing = [
+                                    (sp, sb, pn) for sp, sb, pn in _reattached
+                                    if sb.name in _out
+                                ]
+                                if _failing and not _legacy_quarantine:
+                                    _names = ", ".join(sb.name for _, sb, _ in _failing)
+                                    _log(f"  [reattach] {len(_failing)} gen_tests sibling(s) "
+                                         f"fail compile against regenerated source: {_names}. "
+                                         "Leaving in place so Phase C compile-frontier can act.")
+                                    _emit("gen_tests.reattach_compile_fail", data={
+                                        "module": module_name,
+                                        "count": len(_failing),
+                                        "files": [sb.name for _, sb, _ in _failing],
+                                    })
+                                elif _failing and _legacy_quarantine:
+                                    quarantined = 0
+                                    for src_path, sibling, pass_n in _failing:
                                         try:
-                                            sibling.unlink()
+                                            ptext = src_path.read_text(encoding="utf-8")
+                                            decl_re = re.compile(
+                                                r"\n*(?:#\[cfg\([^)]*\)\]\s*)?"
+                                                r"#\s*\[\s*allow\s*\([^)]*\)\s*\][^\n]*\n*"
+                                                r"#\s*\[\s*path\s*=\s*\""
+                                                + re.escape(sibling.name)
+                                                + r"\"\s*\][^\n]*\n*"
+                                                r"(?:pub\s+)?mod\s+gen_tests_"
+                                                + str(pass_n) + r"\s*;\s*",
+                                            )
+                                            ptext_new = decl_re.sub("\n", ptext)
+                                            if ptext_new != ptext:
+                                                src_path.write_text(ptext_new, encoding="utf-8")
                                         except Exception:
                                             pass
-                                    quarantined += 1
-                                if quarantined:
-                                    _log(f"  [reattach] quarantined {quarantined} "
-                                         f"gen_tests sibling(s) whose tests no longer "
-                                         f"compile against the regenerated source.")
-                                    _emit("gen_tests.reattach_quarantine", data={
-                                        "module": module_name,
-                                        "quarantined": quarantined,
-                                    })
+                                        try:
+                                            sibling.rename(sibling.with_suffix(".rs.broken"))
+                                        except Exception:
+                                            try:
+                                                sibling.unlink()
+                                            except Exception:
+                                                pass
+                                        quarantined += 1
+                                    if quarantined:
+                                        _log(f"  [reattach] quarantined {quarantined} "
+                                             "gen_tests sibling(s) (legacy mode).")
+                                        _emit("gen_tests.reattach_quarantine", data={
+                                            "module": module_name,
+                                            "quarantined": quarantined,
+                                        })
 
                     # API surface conformance: soft check — log drift but don't
                     # block. The report is appended to test_output below if
