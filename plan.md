@@ -1,9 +1,311 @@
 # Pipeline plans
 
-Three plans live here. Plan 3 (this section) is the active work — fixes
-derived from the 2026-05-26 morning retrospective. Plan 2 (skeleton-based
-reconstruction) is the implemented baseline. Plan 1 (the prompt-quality
-audit) is COMPLETE, kept at the bottom as historical reference.
+Four plans live here. Plan 4 (this section, NEW) is the next architectural
+move — TDD-scoped per-fn driver. Plan 3 = fixes derived from the
+2026-05-26 morning retrospective. Plan 2 = skeleton-based reconstruction
+baseline. Plan 1 = prompt-quality audit, complete, historical.
+
+---
+
+# Plan 4 — TDD-scoped per-fn driver (2026-05-27)
+
+## Problem
+
+The current Phase C driver walks `unimplemented!()` stubs file-by-file
+and fills every one of them. This violates the spirit of tests-only
+reconstruction in two ways:
+
+1. **Unreachable fns get filled.** Private helpers that no test
+   exercises still consume LLM calls. Their notes pollute the
+   `<MODEL_NOTES>` section for unrelated fills. The resulting body is
+   never validated by any test — only by `cargo check`, which only
+   verifies it type-checks, not that it implements anything.
+2. **Fns see one test, not all callers.** `_find_tests_for_fn` returns
+   up to 4 tests that reference the fn name. The model gets a narrow
+   view of how the fn is exercised. Bodies tend to be small (median
+   38 chars on first-try) — minimal-passing rather than fully-correct.
+
+The runtime-validation half of the architecture (end-of-pass cargo
+test) is supposed to catch these. It does so coarsely — per pass, not
+per fn — and the classifier's mapping back to fns is fragile.
+
+## Approach
+
+Keep the per-fn fill mechanics (prompt, fix loop, splice, parallelism
+of 4). Change only the driver:
+
+  - **What to fill** = fns reachable from at least one failing test
+  - **What context to attach** = ALL tests that exercise this fn (capped
+    by budget), not just `_find_tests_for_fn`'s top-4 picks
+  - **When to stop** = when cargo test passes OR no progress across N
+    iterations
+
+Practically: after Phase A loads the cluster's skeleton, run
+`cargo test` once. Every unimplemented body panics with
+`not yet implemented` — the panic stack identifies the offending fn.
+Parse that into a **frontier set** of fns to fill. Fill them in parallel
+(reusing `_task2_fill_fns_one_by_one`'s machinery with a different stub
+discovery). Re-run cargo test. Compute the new frontier (might include
+fns that compile-passed but mis-implement, surfaced as runtime
+assertion failures rather than `unimplemented!()` panics). Repeat.
+
+Fns never reached by any test stay `unimplemented!()` forever —
+correct under Hard Rule 11 (CLAUDE.md) and FR-022.
+
+## Step-by-step
+
+P4.1 — Frontier extraction
+  - New `_extract_unimplemented_panic_frontier(test_output, source_dir)`
+    parses cargo test stderr / panic output. Each `not yet implemented`
+    panic has a `panicked at src/foo.rs:N` line. Map (file, line) →
+    (file, fn_name, container) via the syn extractor's per-file fn
+    enumeration. Returns `dict[(file, fn_name), set[test_name]]`.
+  - On the first call (skeleton untouched), this yields every fn
+    transitively reachable from any test. Subsequent calls return only
+    the still-unimplemented frontier.
+
+P4.2 — Test-driven stub discovery
+  - Replace `_scan_unimplemented_for_cluster(target_src_dir, cluster)`
+    with `_frontier_stubs_for_cluster(target_src_dir, cluster,
+    frontier)`. Same return shape (list of fn records), filtered to
+    members of `frontier`. Preserves leaf-first ordering within the
+    frontier.
+  - `_task2_fill_fns_one_by_one` gets a new param `frontier:
+    dict[(file, fn_name), set[test_name]] | None`. When `None`,
+    falls back to current behaviour (every stub). When set, only stubs
+    in the frontier are processed.
+
+P4.3 — All-caller tests in per-fn prompt
+  - `_find_tests_for_fn` currently returns up to 4 tests via heuristic
+    ranking. Augment with the EXACT test names from the frontier map:
+    `frontier[(file, fn_name)]` is the authoritative set of tests
+    that hit this fn at runtime. Include their full bodies (or
+    truncated form if over budget) in the per-fn prompt's
+    `<TESTS_EXERCISING_THIS_FN>` section.
+  - Keep `_find_tests_for_fn`'s heuristic results as supplementary
+    when the frontier set is small (e.g. < 2 tests).
+
+P4.4 — Outer TDD loop in `_generate_one_cluster`
+  - After Phase A (skeleton loaded + cargo check passing) and Phase B
+    (test grouping skipped in per-fn mode):
+    ```
+    frontier = first run of cargo test → extract panic frontier
+    iter = 0
+    while frontier and iter < TDD_MAX_ITERS (default 5):
+        _task2_fill_fns_one_by_one(... frontier=frontier ...)
+        new_frontier = re-run cargo test → extract panic frontier
+        if new_frontier == frontier (no progress): break
+        frontier = new_frontier
+        iter += 1
+    ```
+  - When the loop exits with frontier non-empty, those fns are
+    genuinely intractable — accept their `// SKELETON_STUB_FAILED_ATTEMPT`
+    annotation.
+
+P4.5 — Test-exit recognition
+  - cargo test return codes:
+      0 = all tests pass → frontier empty → done
+      101 with `not yet implemented` panics → fill them
+      101 with runtime assertion failures → fill the implicated fn (the
+          one whose body returned the wrong value)
+  - Distinguish via panic message text. Assertion failures are harder
+    to attribute — for now, treat assertion-failed tests as a
+    secondary frontier: take the fn at the TOP of the test's call
+    stack (the one the test calls directly), put it in the frontier
+    for re-fill.
+
+P4.6 — Wiring
+  - Env `PHASE_C_DRIVER` defaults to `fn_walk` (current). Set to `tdd`
+    to enable Plan 4. Keep both backends alive during validation so
+    we can A/B compare on the same workspace.
+  - Phase D (residual stub cleanup) gated: skip when driver=tdd —
+    by definition the TDD loop already filled everything reachable
+    from tests; residual stubs are correctly left unimplemented.
+
+P4.7 — Metrics
+  - New event `phase_c.tdd.iter` per TDD-loop iteration:
+    `{cluster, iter, frontier_size, fills_done, fills_failed,
+     test_pass_count, test_fail_count}`.
+  - End-of-cluster summary includes "unreachable stubs" count — fns
+    that no test touched, intentionally left `unimplemented!()`.
+
+## Trade-offs vs current
+
+  PRO  Faithful to tests-only reconstruction principle
+  PRO  Each fn fill sees ALL its test callers (not 4)
+  PRO  No wasted LLM calls on unreachable fns
+  PRO  Per-iteration cargo test gives precise pass/fail signal
+  PRO  Notes accumulate only for fns the model actually had to fill,
+       not for fns that no test would ever validate
+  CON  Cargo test runs more often (once per outer iter, vs once per
+       pass). Mitigated by parallelism on the inner per-fn loop.
+  CON  Runtime assertion failures need a heuristic to map back to
+       fns. Crude but workable; classifier already exists for this.
+  CON  Long-tail fns that depend on each other might need multiple
+       outer iters to all converge. TDD_MAX_ITERS bounds this.
+
+## Implementation cost
+
+  P4.1   ~60 lines (panic-output parser, fn lookup)
+  P4.2   ~20 lines (frontier filter)
+  P4.3   ~30 lines (prompt section, budget handling)
+  P4.4   ~40 lines (outer loop wiring)
+  P4.5   ~20 lines (assertion-failure heuristic)
+  P4.6   ~10 lines (env flag + Phase D gate)
+  P4.7   ~15 lines (events)
+  Total: ~200 lines of new code, mostly localised to
+  `_task2_fill_fns_one_by_one` and a new helper module.
+  Existing fn_walk driver kept intact behind the env flag.
+
+## Validation
+
+  - Smoke: fixtures/tiny cargo phase with PHASE_C_DRIVER=tdd should
+    fill the 3 stub fns the test exercises and leave 0 unreachable
+    (tiny has no unreachable fns).
+  - Real run on anyhow: A/B against the current run's outputs.
+    Metrics to compare: fns_filled, fns_unreachable, llm_calls,
+    test_pass_count after cluster-done, wall-clock per cluster.
+
+## When to abandon Plan 4
+
+  - If frontier-extraction false-positives rate is high (assertion
+    failures map to wrong fn) — would manifest as fills oscillating
+    between fn A and fn B without resolving.
+  - If TDD_MAX_ITERS is consistently hit before tests pass — outer
+    loop isn't converging, signal that the prompt or notes don't have
+    enough context.
+
+## Resolved design decisions (2026-05-27 discussion)
+
+### D1 — Parallelism: parallel across distinct fns, serial within a fn
+
+The 4 worker threads stay. Per-fn lock (`{fn_key: Lock}` map) ensures
+no two threads splice/fix the same fn concurrently. Two failures on
+the same fn ALWAYS serialize — one fill may satisfy both, and a
+concurrent re-fill would fight the first. Existing
+`_task2_fill_fns_one_by_one` already does this for splice + cargo
+check via `_splice_check_lock`. The TDD driver inherits it.
+
+### D2 — Frontier ordering: shallowest panic first, then most-callers
+
+Sort frontier entries by:
+  1. ascending panic stack depth (shallowest = closest to a stub =
+     fewer dependencies = easier to fix)
+  2. tie-break descending by `len(caller_tests)` (more tests hit it
+     → fixing it cascades to satisfy more failures per LLM call)
+  3. tie-break ascending by (file, fn_name) for reproducibility
+
+### D3 — Exhausted-fn re-entry only on changed context
+
+When a fn exhausted in iter N reappears in iter N+1's frontier, the
+TDD driver checks two conditions before retrying:
+  - Did any OTHER fill land between iter N and N+1? (`fills_since`
+    counter on the cluster state) — gives the model a different
+    surrounding context.
+  - Did new model-notes get added relevant to this fn? (check
+    `_filter_model_notes_for_prompt` returns more entries than last
+    attempt)
+If either is true, retry. Otherwise skip — mark the fn as
+permanently exhausted for this cluster. The state survives across
+TDD iters via a `permanently_exhausted: set[(file, fn)]` on the
+per-cluster work state.
+
+### D4 — Cargo build failure: route into the compile-error frontier
+
+cargo test wraps cargo build. If the build fails (rc=101 with
+"error[E0xxx]" in stderr, no test panics), the TDD driver builds a
+DIFFERENT frontier: every (file, fn) named in a compile error.
+Falls back to the existing per-fn compile-fix loop. Once the cluster
+builds again, resume the runtime-failure TDD loop.
+
+### D5 — Per-test invocation timeout: 120s wrap, suspect last-filled
+
+Single hung test blocks the whole test binary. Wrap each cargo test
+invocation with shell `timeout 120s`. On timeout:
+  - Mark all fns filled since the last successful cargo test as
+    "suspect" — sorted by most-recent-first
+  - Revert the most-recent suspect's body to `unimplemented!()` with
+    `// SKELETON_STUB_HUNG_TEST` annotation
+  - Re-run cargo test. If it completes (with the now-stub fn
+    panicking), the revert was correct.
+  - If it still times out, revert the next suspect. Cap at 3 reverts
+    per timeout event.
+Default 120s configurable via env `PHASE_C_TEST_TIMEOUT`.
+
+### D6 — Unified localised loop abstraction: `_localized_test_loop`
+
+Extract the common pattern shared by per-fn compile-fix, per-pass
+test-fix, TDD per-failure inner loop, and TASK 3 inline retry into
+one helper:
+
+```python
+def _localized_test_loop(
+    *, target_fn: tuple[str, str],          # (file_rel, fn_name)
+    failing_test: str | None,               # test name, or None for compile
+    test_cmd: list[str],                    # how to verify
+    cwd: Path,
+    cluster_env: dict,
+    prompt_builder: Callable,               # _build_per_fn_prompt or fix variant
+    max_iters: int,
+    max_stalls: int,
+    ...
+) -> {"converged": bool, "iters": int, "exhausted": bool}:
+    """Focus one fn until a specific test passes (or compile succeeds).
+
+    On each iter: fill fn → run test_cmd → if pass, done.
+    Otherwise build fix prompt with the cargo output as error_excerpt,
+    floor-stall on error count, splice retry, repeat.
+    """
+```
+
+Then refactor existing call sites to use it:
+  - `_task2_fill_fns_one_by_one`'s compile-fix loop → call with
+    `failing_test=None`, `test_cmd=cargo check`
+  - End-of-pass test-fix retry → call with the specific failing test
+    name and `test_cmd=cargo test --test <stem>`
+  - TASK 3 inline retry → same shape
+  - New TDD per-failure loop → same shape
+
+This is the "generic rule" interpretation: ONE function, called from
+many places with different parameters. Same fix-loop machinery,
+same floor-stall, same notes, same prompt building. Drives consistent
+behaviour across the pipeline.
+
+### D7 — Initial cargo test on skeleton
+
+Untouched skeleton: every test panics on its FIRST `unimplemented!()`.
+The iter-0 frontier is the set of fns called as the first
+`unimplemented!()` reached by each test. This is naturally shallowest
+first — leaf-first ordering emerges from test execution order without
+the leaf-order metadata. The `.skeleton/{cluster}/_leaf_order.json`
+artefact is still used as the secondary sort key when iter > 0 (when
+the model has implemented enough that multiple fns are at the same
+panic depth).
+
+## Cluster scoping (unchanged)
+
+Each cluster's TDD outer loop runs cargo test on its own filtered
+test set (`_filter_tests_for_cluster`). Cross-cluster test failures
+surface at TASK 3 (full cargo test over merged source).
+
+## Revised step list
+
+  P4.1 — Frontier extraction (panic + assertion + compile-error parsers)
+  P4.2 — Test-driven stub discovery (filter by frontier)
+  P4.3 — All-caller tests in per-fn prompt
+  P4.4 — Outer TDD loop with D2 ordering + D3 re-entry + D4 compile fallback + D5 timeout
+  P4.5 — Assertion-failure attribution heuristic
+  P4.6 — `PHASE_C_DRIVER=tdd` env flag + Phase D gate
+  P4.7 — Metrics + events
+  P4.8 — Extract `_localized_test_loop` helper (D6); refactor existing
+         test-fix sites to use it
+  P4.9 — Per-fn lock map for D1 enforcement (defensive — current
+         queue model already prevents same-fn concurrency, but the
+         TDD frontier could theoretically queue the same fn twice
+         from two different failures)
+
+Implementation cost: bumped from ~200 to ~300 lines because of D6's
+refactor and D5's timeout-recovery logic.
 
 ---
 

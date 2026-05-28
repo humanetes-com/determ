@@ -1032,6 +1032,103 @@ pub fn enumerate_fns_in_tree(input_dir: &Path) -> Result<Vec<FnRecord>> {
     Ok(out)
 }
 
+/// One module declaration in a crate root file (lib.rs or main.rs).
+/// `name` is the mod identifier, `file` is the relative path to its source
+/// (`<name>.rs` by default, or whatever `#[path = "..."]` points at), and
+/// `cfg_predicates` is the list of `#[cfg(...)]` predicates that gate the
+/// declaration in the parent file. AST-derived via syn; supersedes any
+/// regex-based discovery on the caller side.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ModRecord {
+    pub name: String,
+    pub file: String,
+    pub cfg_predicates: Vec<String>,
+    pub declared_in: String,
+}
+
+fn extract_path_attr(attrs: &[syn::Attribute]) -> Option<String> {
+    for a in attrs {
+        if a.path().is_ident("path") {
+            if let syn::Meta::NameValue(nv) = &a.meta {
+                if let syn::Expr::Lit(el) = &nv.value {
+                    if let syn::Lit::Str(s) = &el.lit {
+                        return Some(s.value());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Parse the crate-root file (lib.rs or main.rs) and return one ModRecord
+/// per top-level `mod foo;` declaration found there. Inline modules
+/// (`mod foo { ... }`) are skipped — those don't correspond to a separate
+/// file the pipeline needs to gate.
+pub fn enumerate_mods_in_file(path: &Path, root: &Path) -> Result<Vec<ModRecord>> {
+    let source = std::fs::read_to_string(path)
+        .with_context(|| format!("read {}", path.display()))?;
+    let ast: syn::File = parse_file(&source)
+        .with_context(|| format!("parse {}", path.display()))?;
+    let declared_in = path
+        .strip_prefix(root)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| path.to_string_lossy().to_string());
+    let mut out = Vec::new();
+    for item in &ast.items {
+        if let syn::Item::Mod(m) = item {
+            if m.content.is_some() {
+                continue; // inline module — no separate file
+            }
+            let name = m.ident.to_string();
+            let file = extract_path_attr(&m.attrs)
+                .unwrap_or_else(|| format!("{name}.rs"));
+            let cfg_predicates = extract_cfg_predicates(&m.attrs);
+            out.push(ModRecord {
+                name,
+                file,
+                cfg_predicates,
+                declared_in: declared_in.clone(),
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// Walk a directory tree, locate each crate root (src/lib.rs or src/main.rs),
+/// and emit ModRecord entries for every external mod declaration. Used by the
+/// pipeline to determine which files are gated by which `#[cfg(...)]` and
+/// therefore active under a given cluster. Replaces a regex-based scan that
+/// could conflate adjacent mod declarations' cfgs.
+pub fn enumerate_mods_in_tree(input_dir: &Path) -> Result<Vec<ModRecord>> {
+    let mut out = Vec::new();
+    for entry in walkdir::WalkDir::new(input_dir).into_iter().filter_map(|e| e.ok()) {
+        let p = entry.path();
+        if !p.is_file() {
+            continue;
+        }
+        let name = match p.file_name().and_then(|s| s.to_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+        if name != "lib.rs" && name != "main.rs" {
+            continue;
+        }
+        let rel = p.strip_prefix(input_dir).unwrap_or(p);
+        if rel.components().any(|c| {
+            let s = c.as_os_str().to_string_lossy();
+            s.starts_with('.') || s == "target"
+        }) {
+            continue;
+        }
+        match enumerate_mods_in_file(p, input_dir) {
+            Ok(mut recs) => out.append(&mut recs),
+            Err(_) => continue,
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

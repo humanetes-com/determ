@@ -21,6 +21,25 @@ Each restart is logged as `PIPELINE STARTED — <timestamp> UTC` in `logs/pipeli
 ## Static analysis after every Python edit
 After modifying any `.py` file, run `bash check.sh` and fix **all** reported errors — including pre-existing ones unrelated to your change. Never leave check.sh failing.
 
+## IMPORTANT: Right solution > fast fix. We are not lazy.
+When presenting options, never bias toward the smaller-change option for its
+own sake. "Minimal change", "less code", "no new schema to design", "less
+invasive" are NOT advantages on their own — they are just lower effort. The
+question is always which option is structurally correct, which uses the right
+tool at the right layer, which generalises, which makes the next bug less
+likely. Effort is a tiebreaker, never a criterion. If you catch yourself
+recommending the smaller option because it's smaller, stop and re-justify on
+correctness grounds. If the smaller option is still correct, say so on those
+grounds; if it isn't, recommend the bigger one and do the work.
+
+Patterns to flag in your own reasoning:
+- "B is the smallest extension" — what does "smallest" buy us beyond effort?
+- "No new schema to design" — is the existing schema actually the right home?
+- "Less invasive" — invasive vs what? If the bigger change is more correct,
+  invasive is a feature, not a cost.
+- "We can defer the cleaner option" — defer based on what evidence, or just
+  to avoid work right now?
+
 ## Fix processes, not symptoms
 Do not patch individual failures in isolation. Ask: what process produced this failure, and how should that process be improved so the failure cannot recur? Examples:
 - A type error in pipeline.py → add static analysis to the dev workflow, not just fix that one return statement.
@@ -154,8 +173,8 @@ Pipeline touches: files inside tmp/{project}/.
 **5. No implementation without explicit approval.**
 When asked for evaluation or analysis, discuss findings and proposed fixes until the user says to proceed. Do not implement anything — no edits, no file writes — until the user explicitly says to go ahead.
 
-**6. Ask before committing.**
-After implementing a fix, give a short overview of what was done, then ask "May I commit?" Wait for yes or no before running any git command.
+**6. Ask before committing. Permission is single-use.**
+After implementing a fix, give a short overview of what was done, then ask "May I commit?" Wait for yes or no before running any git command. Permission to commit applies ONLY to the work just shown — it does NOT carry forward to the next fix. Each subsequent commit needs a new explicit yes. Batch related changes by holding them uncommitted until the user asks for a single commit covering the batch. Do not auto-commit after each Edit just because you committed once earlier in the session.
 
 **7. Pipeline is self-hosted only — no external LLMs.**
 The pipeline must solve every reconstruction issue using only the locally-served model (via vLLM / Ollama / sglang). It may NEVER call out to Claude, GPT-4, Gemini, or any other cloud/external LLM API for any task — not as a fallback, not for "hard groups", not for cleanup. Do not propose, design, or implement any feature whose execution path can reach an external LLM. The only correct response to "the local model is stuck" is to improve the prompt, the architecture, the model itself (fine-tune), or accept the limitation — never to outsource the call. This rule overrides any prior plan items that suggested optional fallback models (e.g. P3.8 in plan.md): such items are permanently rejected, not deferred.
@@ -169,8 +188,22 @@ Ranking when picking between approaches: deterministic > systemic > quality. Spe
 **10. Never hedge a recommendation by inventing difficulty.**
 When uncertain about effort or feasibility, do NOT downgrade the more-correct option by labeling it "harder", "more complex", or "more invasive" as a way to give the user balanced choices without committing. That pattern looks thorough but is intellectual laziness — it transfers the decision burden to the user with a thumb on the scale, when what's needed is actual analysis. The two acceptable behaviours are: (a) trace through the implementation enough to make a real recommendation and commit to it, or (b) explicitly say "I haven't analyzed this yet — let me look" and then do the analysis. The unacceptable behaviour is (c) "X might be harder", "Y is more invasive", or any other vague difficulty claim used to manufacture options. If you find yourself reaching for a difficulty label, stop and check whether you actually traced the implementation. If you didn't, either do it now or admit you didn't.
 
-**11. After strip, the pipeline and the LLM have NO access to the original source code.**
-The original implementation is read exactly once — during the pre-strip bake step (`_bake_skeleton_artifacts`) — which runs after task0c and before strip. That step extracts every source-derived artefact the pipeline will ever need (skeleton with `unimplemented!()` bodies, fn-name reference counts for leaf-first ordering, cluster manifest, API surface) and saves them to disk. From TASK 1 onwards every phase reads ONLY these saved artefacts plus tests and stripped source; no code path may re-read source files, re-checkout a pre-strip git tag, scan `/tmp/prestrip*`, or otherwise smuggle the original bodies back in. The `task0c-augmented-{module}` git tag exists as a human rollback aid (`git checkout` it manually to inspect), but pipeline code must not read from it. New work that needs source-derived data must extend the bake step, not add a post-strip source read. Violating this rule turns "tests-only reconstruction" into "copy the answer", invalidating the entire experiment.
+**11. IMPORTANT! After strip, the pipeline and the LLM have NO access to the original source code. EVER. NO EXCEPTIONS.**
+This is the defining constraint of this experiment. Violating it makes the whole project meaningless — reconstructing a library from tests + signatures is the entire point. If pipeline code can re-read the original bodies after strip, then "tests-only reconstruction" reduces to "copy the answer", and every result we measure is fraudulent.
+
+The original implementation is read exactly once — during the pre-strip bake step (`_bake_skeleton_artifacts`) — which runs after task0c and before strip. That step extracts every source-derived artefact the pipeline will ever need (skeleton with `unimplemented!()` bodies, fn-name reference counts for leaf-first ordering, cluster manifest, API surface) and saves them to disk. From TASK 1 onwards every phase reads ONLY these saved artefacts plus tests and stripped source.
+
+Forbidden, with no override flag, no "just this once", no "for hard cases":
+  - Re-reading any `.rs` file under the original `src/` after strip
+  - Checking out the `task0c-augmented-{module}` git tag from pipeline code
+  - Scanning `/tmp/prestrip*` or any directory containing pre-strip source
+  - Injecting pre-strip bodies into LLM prompts as a "fallback" or "last attempt"
+  - Adding a feature flag that conditionally enables any of the above
+  - Caching pre-strip content in memory across the strip boundary
+
+The `task0c-augmented-{module}` git tag exists ONLY as a human rollback aid. A user may `git checkout` it manually to inspect — pipeline code may not. New work that needs source-derived data must extend the bake step, not add a post-strip source read. If a fn cannot be reconstructed within this constraint, that is a real limitation of tests-only reconstruction; the correct response is to accept the failure and improve the prompt/architecture, never to relax this rule.
+
+See FR-022 for the same constraint stated as a functional requirement.
 
 ---
 

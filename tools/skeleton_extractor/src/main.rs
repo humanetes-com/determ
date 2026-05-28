@@ -16,6 +16,7 @@ fn main() -> Result<()> {
     let mut report_json = false;
     let mut enumerate_fns = false;
     let mut enumerate_types = false;
+    let mut enumerate_mods = false;
     let mut cfg_set = skeleton_extractor::CfgSet::new();
 
     let mut args = std::env::args().skip(1);
@@ -39,6 +40,16 @@ fn main() -> Result<()> {
                 // (Mutually exclusive with --enumerate-fns; the later flag wins.)
                 enumerate_fns = false;
                 enumerate_types = true;
+                enumerate_mods = false;
+            }
+            "--enumerate-mods" => {
+                // No --output needed; emits a JSON array of ModRecord to stdout.
+                // One entry per top-level `mod foo;` in any crate root
+                // (src/lib.rs or src/main.rs) under <input>. Mutually
+                // exclusive with the other --enumerate-* flags.
+                enumerate_fns = false;
+                enumerate_types = false;
+                enumerate_mods = true;
             }
             "--cfg-true" => {
                 cfg_set.set_true(args.next().context("--cfg-true requires a predicate")?);
@@ -81,6 +92,11 @@ fn main() -> Result<()> {
     }
     if enumerate_types {
         let records = skeleton_extractor::enumerate_types_in_tree(&input)?;
+        println!("{}", serde_json::to_string(&records)?);
+        return Ok(());
+    }
+    if enumerate_mods {
+        let records = skeleton_extractor::enumerate_mods_in_tree(&input)?;
         println!("{}", serde_json::to_string(&records)?);
         return Ok(());
     }

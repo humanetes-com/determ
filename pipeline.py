@@ -7517,9 +7517,14 @@ def _task2_fill_fns_one_by_one(
         # Count total fns in the cluster (regardless of body state). Used by
         # monitor to render a CUMULATIVE progress bar across restarts —
         # filled = total - stubs_at_pass_start + pass_fills_done.
+        # Excludes `.gen_tests_*.rs` siblings: those are test fns (not
+        # reconstruction work) and inflate the denominator misleadingly.
         _total_fns_in_cluster = 0
         try:
             _all_recs = _enumerate_fns_via_extractor(target_src_dir) or []
+            _all_recs = [r for r in _all_recs
+                          if not re.search(r"\.gen_tests_\d+\.rs$",
+                                            r.get("file", ""))]
             if cluster is not None:
                 _all_recs = [r for r in _all_recs
                               if _fn_belongs_to_cluster(target_src_dir, r["file"], r["fn_name"], cluster)]
@@ -7744,12 +7749,38 @@ def _task2_fill_fns_one_by_one(
                 if not ok:
                     _splice_check_lock.release()
                     _lock_released = True
-                    # splice rejected (file changed or body was a stub)
+                    # splice rejected — usually because another worker filled
+                    # this fn between our read and our splice (race) OR
+                    # because the body was no longer `unimplemented!()` for
+                    # some other reason. Distinguish via a quick re-read.
+                    _race_detected = False
+                    try:
+                        _cur_text = file_path.read_text(encoding="utf-8")
+                        _race_loc = _locate_fn_by_record(
+                            file_path, fn_name, container, sig_text)
+                        if _race_loc is not None:
+                            _, _race_bs, _race_be, _ = _race_loc
+                            _race_cur_body = _cur_text[_race_bs:_race_be]
+                            if not _is_unimplemented_body(_race_cur_body):
+                                _race_detected = True
+                    except Exception:
+                        pass
+                    _ctx = f" [{container}]" if container else ""
+                    if _race_detected:
+                        _log(f"  [phase-c/per-fn] GUARD POSSIBLE RACE — "
+                             f"{rel_file}::{fn_name}{_ctx} already filled by "
+                             "another worker; this worker's LLM output "
+                             "discarded.")
+                    else:
+                        _log(f"  [phase-c/per-fn] splice rejected for "
+                             f"{rel_file}::{fn_name}{_ctx} (body no longer "
+                             "a stub).")
                     _emit("phase_c.fn.fill.skip", data={
                         "cluster": cluster_name, "pass_n": pass_n,
                         "file": rel_file, "fn": fn_name,
+                        "container": container,
                         "fix_attempt": fix_attempt, "body_chars": len(body),
-                        "reason": "splice_rejected",
+                        "reason": "race_lost" if _race_detected else "splice_rejected",
                     })
                     break
 
@@ -7758,8 +7789,10 @@ def _task2_fill_fns_one_by_one(
                     _splice_check_lock.release()
                     _lock_released = True
                     success = True
+                    _ctx = f" [{container}]" if container else ""
                     _log(f"  [phase-c/per-fn] {idx}/{len(stubs)} filled "
-                         f"{rel_file}::{fn_name} (+{delta} bytes, body={len(body)}"
+                         f"{rel_file}::{fn_name}{_ctx} "
+                         f"(+{delta} bytes, body={len(body)}"
                          + (f", fix-attempts={fix_attempt}" if fix_attempt > 1 else "")
                          + ")")
                     _emit("phase_c.fn.fill.done", duration_ms=int(
@@ -9331,17 +9364,85 @@ def _fn_cfg_predicates(file_text: str, fn_name: str) -> list[str]:
     return preds
 
 
+def _enumerate_mods_via_extractor(src_dir: Path) -> list[dict] | None:
+    """Invoke the syn-based extractor's --enumerate-mods subcommand.
+
+    Returns a list of mod records (each: {name, file, cfg_predicates,
+    declared_in}) or None if the binary isn't available or fails.
+    Replaces the regex-based scan of `mod foo;` declarations — syn parses
+    Rust correctly and never conflates an adjacent mod's cfg with the
+    target mod's cfg.
+    """
+    if not _SKELETON_EXTRACTOR_BIN.exists():
+        return None
+    try:
+        r = subprocess.run(
+            [str(_SKELETON_EXTRACTOR_BIN), "--enumerate-mods",
+             "--input", str(src_dir)],
+            capture_output=True, text=True, timeout=60,
+        )
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    try:
+        return json.loads(r.stdout)
+    except Exception:
+        return None
+
+
+# Cache of mod records per src_dir to avoid re-invoking the extractor for
+# every fn lookup. Invalidated when target_src_dir's identity changes — the
+# pipeline only ever queries one dir at a time during a cluster pass.
+_MOD_RECORDS_CACHE: dict[str, list[dict]] = {}
+
+
 def _file_cfg_predicate(target_src_dir: Path, file_rel: str) -> str | None:
-    """Find the cfg predicate (if any) under which `file_rel` is compiled.
+    """Return the cfg predicate (if any) under which `file_rel` is compiled.
 
-    Looks in src/lib.rs (or src/main.rs) for `#[cfg(...)] mod {stem};` and
-    returns the predicate. Returns None when the file is unconditionally
-    included or when no parent mod decl is found (some files are included
-    via build.rs etc — out of scope).
+    AST-derived via the syn-based skeleton extractor (`--enumerate-mods`).
+    Returns None when the file is unconditionally included or when no
+    parent mod decl is found.
 
-    Limited to one level of nesting (file directly declared from lib.rs).
-    Deeper nesting (mod/foo/bar.rs) would need recursive resolution; skip
-    for now (the common case in anyhow / argh / etc is single-level).
+    Falls back to the old regex-based scan when the extractor binary
+    isn't available (test-fixture environments, partial setup, etc).
+    """
+    stem = Path(file_rel).stem
+    if stem in ("lib", "main"):
+        return None
+    key = str(target_src_dir.resolve())
+    if key not in _MOD_RECORDS_CACHE:
+        recs = _enumerate_mods_via_extractor(target_src_dir)
+        if recs is None:
+            return _file_cfg_predicate_regex_fallback(target_src_dir, file_rel)
+        _MOD_RECORDS_CACHE[key] = recs
+    file_name = Path(file_rel).name
+    for r in _MOD_RECORDS_CACHE[key]:
+        if r.get("name") == stem or r.get("file") == file_name:
+            preds = r.get("cfg_predicates") or []
+            if not preds:
+                return None
+            if len(preds) == 1:
+                return preds[0]
+            return "all(" + ", ".join(preds) + ")"
+    return None
+
+
+def _invalidate_mod_records_cache() -> None:
+    """Clear the mod-records cache. Call after any operation that changes
+    the on-disk mod declarations in lib.rs/main.rs (strip, task1 reset,
+    task2 regeneration). Cheap enough that callers should err on the side
+    of invalidation."""
+    _MOD_RECORDS_CACHE.clear()
+
+
+def _file_cfg_predicate_regex_fallback(
+    target_src_dir: Path, file_rel: str,
+) -> str | None:
+    """Regex-based fallback for environments without the syn extractor
+    binary. Known limitation: can conflate cfg attrs from an adjacent
+    mod declaration when they share a line region. The AST path is
+    preferred whenever available.
     """
     stem = Path(file_rel).stem
     if stem in ("lib", "main"):
@@ -9354,10 +9455,6 @@ def _file_cfg_predicate(target_src_dir: Path, file_rel: str) -> str | None:
             text = p.read_text(encoding="utf-8")
         except Exception:
             continue
-        # Find `mod {stem};` declaration and collect cfg attrs ATTACHED
-        # to it. We harvest from the start of the mod decl's line backward
-        # across contiguous attribute tokens — both inline-same-line and
-        # above-line forms. Stop at the first non-attribute token.
         mod_decl_pat = re.compile(
             r"(?:^|\n)([^\n]*\b(?:pub(?:\([^)]*\))?\s+)?mod\s+"
             + re.escape(stem) + r"\s*;[^\n]*)",
@@ -9366,35 +9463,33 @@ def _file_cfg_predicate(target_src_dir: Path, file_rel: str) -> str | None:
         m = mod_decl_pat.search(text)
         if not m:
             continue
-        # The line containing the mod decl. May have inline attrs to its left.
         decl_line = m.group(1)
         preds: list[str] = []
-        # Inline attrs on the decl line up to but not including `mod`.
         mod_idx = decl_line.find("mod ")
         if mod_idx < 0:
             mod_idx = len(decl_line)
         for cm in _CFG_INLINE_RE.finditer(decl_line[:mod_idx]):
             preds.append(cm.group(1).strip())
-        # Above-line attrs. Walk backward across contiguous attribute lines.
         decl_start = m.start() + (1 if text[m.start()] == "\n" else 0)
         head = text[:decl_start]
         for ln in reversed(head.splitlines()):
             s = ln.strip()
             if not s:
-                # Blank line ends the attribute block above this mod.
                 break
             if s.startswith("//") or s.startswith("/*"):
-                continue  # comments don't break the attr chain
+                continue
+            # Stop on any line that contains a declaration keyword — the
+            # cfg attrs on such a line belong to ITS item, not ours.
+            if re.search(r"\b(mod|fn|struct|enum|trait|impl|use|extern|"
+                          r"static|const|type|macro_rules|pub|unsafe)\b", s):
+                break
             if _CFG_INLINE_RE.search(ln):
-                # Cfg attribute line — collect its predicate(s).
                 for cm in _CFG_INLINE_RE.finditer(ln):
                     preds.append(cm.group(1).strip())
                 continue
             if s.startswith("#["):
-                # Non-cfg attribute (e.g. #[allow]) — doesn't gate but
-                # doesn't break the chain.
                 continue
-            break  # any other content ends the attr block
+            break
         if not preds:
             return None
         if len(preds) == 1:

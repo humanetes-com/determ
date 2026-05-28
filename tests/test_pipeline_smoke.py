@@ -345,6 +345,74 @@ def test_eval_cfg_pred() -> None:
     print("  OK  _eval_cfg_pred")
 
 
+def test_file_cfg_predicate_adjacent_mod_decls() -> None:
+    """Regression: when two `mod foo;` decls sit on adjacent lines and the
+    FIRST one has a `#[cfg(...)]` attribute, `_file_cfg_predicate` must
+    return the predicate ONLY for the gated mod, not for its unrelated
+    neighbour below. The old regex-based scan walked backward over lines
+    and greedily harvested any `#[cfg(...)]` token it found, conflating
+    the two mod decls.
+
+    Real case caught in the wild: anyhow's `lib.rs` has
+        # [cfg (error_generic_member_access)] mod nightly ;
+        mod ptr ;
+    on consecutive lines. The bug labeled `src/ptr.rs` as gated by
+    `error_generic_member_access`, which evaluated false in the stable
+    cluster, so all 19 unimplemented methods in `ptr.rs` were silently
+    filtered out of the per-fn fill loop. 3 boxed-error tests panicked
+    forever at `unimplemented!()` because the pipeline never queued
+    those fns.
+    """
+    import pipeline
+    import tempfile
+    import os
+    with tempfile.TemporaryDirectory(prefix="cfg_pred_test_") as td:
+        root = Path(td)
+        src = root / "src"
+        src.mkdir()
+        # Reproduce the anyhow lib.rs pattern: gated mod, then ungated
+        # mod on the very next line, no blank line between them. Spaces
+        # around the cfg tokens match how the skeleton extractor emits
+        # them in real workspaces.
+        (src / "lib.rs").write_text(
+            " # [cfg (gated_feature)] mod nightly ;\n"
+            " mod ptr ;\n"
+            " mod wrapper ;\n"
+        )
+        (src / "nightly.rs").write_text("")
+        (src / "ptr.rs").write_text("")
+        (src / "wrapper.rs").write_text("")
+
+        # AST path (requires the extractor binary). Skip if not built.
+        if pipeline._SKELETON_EXTRACTOR_BIN.exists():
+            pipeline._invalidate_mod_records_cache()
+            assert pipeline._file_cfg_predicate(root, "src/nightly.rs") == \
+                "gated_feature", "AST path: nightly should be gated"
+            assert pipeline._file_cfg_predicate(root, "src/ptr.rs") is None, \
+                "AST path: ptr must NOT inherit neighbour's cfg"
+            assert pipeline._file_cfg_predicate(root, "src/wrapper.rs") is None, \
+                "AST path: wrapper must NOT inherit any cfg"
+            pipeline._invalidate_mod_records_cache()
+
+        # Regex fallback path: force it by pointing _SKELETON_EXTRACTOR_BIN
+        # at a non-existent file. The fallback must also resist conflation
+        # via its "stop on declaration keyword" guard.
+        orig = pipeline._SKELETON_EXTRACTOR_BIN
+        try:
+            pipeline._SKELETON_EXTRACTOR_BIN = Path("/nonexistent/extractor")
+            pipeline._invalidate_mod_records_cache()
+            assert pipeline._file_cfg_predicate(root, "src/nightly.rs") == \
+                "gated_feature", "fallback: nightly should be gated"
+            assert pipeline._file_cfg_predicate(root, "src/ptr.rs") is None, \
+                "fallback: ptr must NOT inherit neighbour's cfg"
+            assert pipeline._file_cfg_predicate(root, "src/wrapper.rs") is None, \
+                "fallback: wrapper must NOT inherit any cfg"
+        finally:
+            pipeline._SKELETON_EXTRACTOR_BIN = orig
+            pipeline._invalidate_mod_records_cache()
+    print("  OK  _file_cfg_predicate adjacent mod decls (AST + fallback)")
+
+
 def test_cluster_extractor_args() -> None:
     """Plan 4: cluster → CLI args translation."""
     import pipeline
@@ -1187,6 +1255,7 @@ def main() -> int:
     test_prune_redundant_clusters()
     test_filter_tests_for_cluster()
     test_eval_cfg_pred()
+    test_file_cfg_predicate_adjacent_mod_decls()
     test_cluster_extractor_args()
     test_buildcluster_features_toolchain()
     test_split_oversized_groups()

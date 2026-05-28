@@ -44,30 +44,33 @@ for _arg in "$@"; do
     # --graceful kept for back-compat; now the default (no-op).
     [[ "$_arg" == "--graceful" ]]       && true
     [[ "$_arg" == "--wipe" ]]           && _WIPE=true && _YES=true
-    [[ "$_arg" == "--keep-augmented" ]] && _KEEP_AUGMENTED=true && _YES=true
+    [[ "$_arg" == "--keep-augmented" ]] && _KEEP_AUGMENTED=true
 done
 
+# Policy: an unflagged `continue.sh` invocation NEVER kills a running
+# pipeline. The user must opt in via --y (graceful stop) or --force
+# (SIGTERM then SIGKILL). This prevents the surprise where a quick
+# `continue.sh` to restart with new flags silently kills an in-flight run.
 if pgrep -f "pipeline.py" > /dev/null 2>&1; then
+    _running_pids="$(pgrep -f pipeline.py | tr '\n' ' ')"
     if [[ "$_FORCE" == true ]]; then
-        if [[ "$_YES" == false ]]; then
-            echo -n "Pipeline is running (PID $(pgrep -f pipeline.py)). Force-kill? [y/N] "
-            read -r _reply
-            [[ "$_reply" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 0; }
-        fi
-        kill $(pgrep -f "pipeline.py") 2>/dev/null && echo "Killed existing pipeline"
+        echo "Pipeline running (PID $_running_pids) — force-killing."
+        kill $(pgrep -f "pipeline.py") 2>/dev/null || true
         sleep 2
         pkill -9 -f "pipeline.py" 2>/dev/null || true
         sleep 1
+    elif [[ "$_YES" == true ]]; then
+        echo "Pipeline running (PID $_running_pids) — graceful stop."
+        graceful_stop_pipeline 0
     else
-        # Graceful stop. _YES=true → non-interactive (just wait).
-        if [[ "$_YES" == true ]]; then
-            graceful_stop_pipeline 0
-        else
-            if ! graceful_stop_pipeline 1; then
-                # User pressed [c] — leave the pipeline running and exit.
-                exit 0
-            fi
-        fi
+        echo "Pipeline already running (PID $_running_pids)."
+        echo "  continue.sh alone will NOT kill it. Choose one:"
+        echo "    bash continue.sh --y      # graceful stop, then relaunch"
+        echo "    bash continue.sh --force  # SIGTERM+SIGKILL, then relaunch"
+        echo "    bash redo.sh              # kill + wipe .skeleton-filled + relaunch"
+        echo "  Or attach a monitor:"
+        echo "    tail -f $LOG_DIR/pipeline_anyhow.log"
+        exit 0
     fi
 fi
 

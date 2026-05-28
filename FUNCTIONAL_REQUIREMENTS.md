@@ -439,3 +439,57 @@ correct LLM targeting.
 **Why this is safe:** The LLM never sees gen_tests lines as coverage targets regardless of EXCL,
 because `uncov_lines` is filtered to `l <= stripped_file_length` before building the prompt.
 
+---
+
+## FR-022 — IMPORTANT! No access to original source after strip. NO EXCEPTIONS.
+
+**Decision:** From TASK 1 onwards, no pipeline code path may read the original
+implementation source. The original is read exactly once, by
+`_bake_skeleton_artifacts`, which runs between task0c and strip on the live source
+tree. That step writes every artefact downstream phases will need (skeleton with
+`unimplemented!()` bodies, fn-name reference counts, cluster manifest, API surface)
+to disk. After strip, those artefacts plus tests plus stripped source are the only
+inputs.
+
+**Why this matters more than any other rule:** The entire experiment is
+"can the LLM reconstruct a library from tests + signatures alone?" If pipeline
+code can re-read the original bodies post-strip — even once, even for the hardest
+fns, even behind a feature flag — then we are measuring "LLM copies an answer"
+not "LLM reconstructs from tests". Every coverage number, every fn fill, every
+note becomes meaningless. The rule is absolute because anything less reduces
+the project's worth to zero.
+
+**Forbidden behaviours (non-exhaustive):**
+- Re-reading any `.rs` file under the original `src/` after strip
+- Checking out the `task0c-augmented-{module}` git tag from pipeline code
+- Scanning `/tmp/prestrip*` or any directory containing pre-strip source
+- Injecting pre-strip bodies into LLM prompts as "fallback" or "last attempt"
+- Adding a feature flag that conditionally enables any of the above
+- Caching pre-strip content in memory across the strip boundary
+- Adding a new bake-step output that contains pre-strip implementation bodies
+  (only signatures, types, macros, and reference counts may flow through)
+
+**Allowed:** Humans may `git checkout task0c-augmented-{module}` to inspect by
+hand. Pipeline code may not.
+
+**Implementation:**
+- `_bake_skeleton_artifacts(project_dir, module_name)` — the only legitimate
+  reader of live source. Runs in the main module loop between
+  `_capture_api_surface` and `strip_module_source`.
+- `_load_baked_clusters`, `_load_baked_leaf_order` — post-strip consumers of
+  the bake artefacts. Read only `.skeleton/_clusters.json` and
+  `.skeleton/{cluster}/_leaf_order.json` respectively.
+- `_checkout_prestrip_source` and `_find_prestrip_commit` were deleted. They
+  must not be re-added. Any future feature claiming to need them is wrong by
+  construction — extend the bake step instead.
+- `tools/skeleton_extractor` skip-list includes `.skeleton*`, `.phase_c_logs`,
+  `.original_structure` so it cannot accidentally walk pipeline scratch dirs
+  even if a caller misroutes the input path.
+
+**When a fn cannot be reconstructed:** Accept the failure. Mark it
+`// SKELETON_STUB_FAILED_ATTEMPT`. Improve the prompt or the architecture
+on the next iteration. Do NOT relax this rule.
+
+**Cross-reference:** CLAUDE.md Hard Rule 11 states the same constraint in
+operational terms. The two must stay in sync — when one is updated, update
+the other.
