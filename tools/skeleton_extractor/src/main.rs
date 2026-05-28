@@ -17,6 +17,13 @@ fn main() -> Result<()> {
     let mut enumerate_fns = false;
     let mut enumerate_types = false;
     let mut enumerate_mods = false;
+    // --merge-clusters mode: read N cluster file specs, produce one merged
+    // source file that compiles under each cluster's cfg. Each --cluster
+    // arg is `name:path:cfg_predicate` (cfg may be empty for the default
+    // cluster). --merge-output is the destination path.
+    let mut merge_clusters = false;
+    let mut merge_cluster_specs: Vec<String> = Vec::new();
+    let mut merge_output: Option<PathBuf> = None;
     let mut cfg_set = skeleton_extractor::CfgSet::new();
 
     let mut args = std::env::args().skip(1);
@@ -51,6 +58,22 @@ fn main() -> Result<()> {
                 enumerate_types = false;
                 enumerate_mods = true;
             }
+            "--merge-clusters" => {
+                merge_clusters = true;
+                enumerate_fns = false;
+                enumerate_types = false;
+                enumerate_mods = false;
+            }
+            "--cluster" => {
+                merge_cluster_specs.push(
+                    args.next().context("--cluster requires name:path:cfg")?,
+                );
+            }
+            "--merge-output" => {
+                merge_output = Some(PathBuf::from(
+                    args.next().context("--merge-output requires a path")?,
+                ));
+            }
             "--cfg-true" => {
                 cfg_set.set_true(args.next().context("--cfg-true requires a predicate")?);
             }
@@ -77,6 +100,33 @@ fn main() -> Result<()> {
                 bail!("unrecognised argument: {other}");
             }
         }
+    }
+
+    if merge_clusters {
+        let out_path = merge_output.context("--merge-output is required for --merge-clusters")?;
+        if merge_cluster_specs.is_empty() {
+            bail!("--merge-clusters requires at least one --cluster name:path:cfg");
+        }
+        let mut files: Vec<skeleton_extractor::ClusterFile> = Vec::new();
+        for spec in merge_cluster_specs {
+            // Format: name:path:cfg_predicate (cfg may contain colons inside
+            // strings — split on the first two colons only).
+            let mut parts = spec.splitn(3, ':');
+            let name = parts.next().context("--cluster missing name")?.to_string();
+            let path_str = parts.next().context("--cluster missing path")?;
+            let cfg_gate = parts.next().unwrap_or("").to_string();
+            let path = PathBuf::from(path_str);
+            let source = std::fs::read_to_string(&path)
+                .with_context(|| format!("read cluster file {}", path.display()))?;
+            files.push(skeleton_extractor::ClusterFile { name, source, cfg_gate });
+        }
+        let merged = skeleton_extractor::merge_cluster_files(files)?;
+        if let Some(parent) = out_path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        std::fs::write(&out_path, merged)
+            .with_context(|| format!("write merged file {}", out_path.display()))?;
+        return Ok(());
     }
 
     let input = input.context("--input is required")?;

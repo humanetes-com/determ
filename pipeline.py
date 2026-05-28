@@ -2859,7 +2859,10 @@ def validate_task2_api_surface_conformance(
 def validate_task3_output(pass_count: int, fail_count: int,
                           module_has_tests: bool) -> tuple[str, str]:
     """
-    Anti-corruption check on test results.
+    Anti-corruption check on test results — LEGACY non-strict variant kept
+    for the few call sites that have no cluster context. The current TASK 3
+    path uses `validate_task3_output_strict` below.
+
     Returns (status, reason) where status is one of:
       'pass'      — all tests passed, lock the module
       'fail'      — tests ran but failed, continue to TASK 4
@@ -2876,6 +2879,216 @@ def validate_task3_output(pass_count: int, fail_count: int,
             "test binary may be empty, harness may not compile, or test filter excludes everything"
         )
     return "fail", f"{pass_count} passed, {fail_count} failed"
+
+
+_TEST_ATTR_RE = re.compile(
+    r"#\s*\[\s*(?:test|tokio::test|async_std::test|"
+    r"serial_test::serial|rstest|parameterized|test_case)\s*[\s\],(]",
+)
+
+
+def _count_test_attrs_in_text(text: str) -> int:
+    """Count `#[test]`-family attribute occurrences in a Rust source string.
+    Naive but adequate: counts every macro-attribute that recognises as a
+    test marker. Used by the per-cluster expected_count computation."""
+    return len(_TEST_ATTR_RE.findall(text or ""))
+
+
+def _count_test_fns_cfg_aware(
+    text: str,
+    cfg_true: set[str],
+    cfg_false: set[str],
+) -> int:
+    """Count `#[test]`-attributed fn declarations in `text` whose surrounding
+    `#[cfg(...)]` attributes evaluate true (or undecidable) under the given
+    cluster cfg sets. A `#[test]` fn with a `#[cfg(X)]` where X is in
+    cfg_false is NOT counted — cargo won't compile it under this cluster
+    and we shouldn't expect it to report a verdict.
+
+    Pragmatic line-level walker: for each line containing `#[test]`,
+    look at the contiguous block of `#[...]` attribute lines around the
+    fn declaration. Collect every `#[cfg(...)]` predicate. If any of
+    them evaluates false under (cfg_true, cfg_false), drop the fn.
+    Otherwise count it (true or undecidable predicates → still counted).
+    """
+    lines = text.splitlines()
+    n = len(lines)
+    test_attr_re = re.compile(
+        r"^\s*#\s*\[\s*(?:test|tokio::test|async_std::test|"
+        r"serial_test::serial|rstest|parameterized|test_case)\s*[\s\],(]",
+    )
+    cfg_inline_re = re.compile(
+        r"#\s*\[\s*cfg\s*\(([^]]+)\)\s*\]",
+    )
+    attr_line_re = re.compile(r"^\s*#\s*\[")
+    count = 0
+    for i, line in enumerate(lines):
+        if not test_attr_re.search(line):
+            continue
+        # Walk backward across the attribute block above this #[test] to
+        # collect cfg predicates that gate this fn.
+        gates: list[str] = []
+        for cm in cfg_inline_re.finditer(line):
+            gates.append(cm.group(1).strip())
+        j = i - 1
+        while j >= 0:
+            s = lines[j].strip()
+            if not s:
+                break  # blank line ends the attribute block
+            if s.startswith("//") or s.startswith("/*"):
+                j -= 1
+                continue
+            if not attr_line_re.match(lines[j]):
+                break  # not an attribute line — chain ends
+            for cm in cfg_inline_re.finditer(lines[j]):
+                gates.append(cm.group(1).strip())
+            j -= 1
+        # If any gate is definitively False, skip this test.
+        excluded = False
+        for g in gates:
+            v = _eval_cfg_pred(g, cfg_true, cfg_false)
+            if v is False:
+                excluded = True
+                break
+        if not excluded:
+            count += 1
+    return count
+
+
+def _count_active_tests_for_cluster(
+    project_dir: Path,
+    cluster: "BuildCluster | None",
+) -> int:
+    """FR-024 strict-verdict helper: how many `#[test]` fns SHOULD have run
+    if cargo test compiles every test source active under `cluster`'s cfg.
+
+    Counts three sources, all cfg-filtered against the cluster's
+    (cfg_true, cfg_false) sets so cargo-cannot-compile tests don't inflate
+    the expected count:
+
+      1. `tests/**/*.rs` — integration tests; per-test cfg attrs filter.
+      2. `src/*.gen_tests_*.rs` — gen_tests siblings; included only if
+         the parent file's `#[path] mod gen_tests_N;` decl is active
+         under this cluster's cfg (the decl carries the gate).
+      3. `src/**/*.rs` (excluding gen_tests siblings) — per-test cfg
+         attrs filter, same as tests/.
+
+    Returns the cfg-aware total. Used to gate SUCCESS: cargo must report
+    at least this many tests across all binaries before TASK 3 accepts.
+    """
+    if cluster is None:
+        cfg_true: set[str] = set()
+        cfg_false: set[str] = set()
+    else:
+        cfg_true = set(getattr(cluster, "cfg_true", []) or [])
+        cfg_false = set(getattr(cluster, "cfg_false", []) or [])
+
+    total = 0
+    # 1. tests/**/*.rs — cfg-filtered per-test.
+    tests_dir = project_dir / "tests"
+    if tests_dir.is_dir():
+        for tp in tests_dir.rglob("*.rs"):
+            try:
+                text = tp.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            total += _count_test_fns_cfg_aware(text, cfg_true, cfg_false)
+
+    src_dir = project_dir / "src"
+    if not src_dir.is_dir():
+        return total
+
+    # 2. gen_tests siblings — gated by their parent file's #[path] decl.
+    decl_re = re.compile(
+        r"(?:#\[cfg\(([^)]+)\)\][^\n]*\n)?"
+        r"\s*#\[cfg\(test\)\][^\n]*\n"
+        r"(?:\s*#\[[^\n]*\][^\n]*\n)*"
+        r'\s*#\[path\s*=\s*"([^"]+\.gen_tests_\d+\.rs)"\][^\n]*\n'
+        r"\s*mod\s+gen_tests_\d+\s*;",
+    )
+    for parent in src_dir.glob("*.rs"):
+        if re.search(r"\.gen_tests_\d+\.rs$", parent.name):
+            continue
+        try:
+            ptext = parent.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        for m in decl_re.finditer(ptext):
+            gate = (m.group(1) or "").strip()
+            sib_name = m.group(2)
+            if gate:
+                v = _eval_cfg_pred(gate, cfg_true, cfg_false)
+                if v is False:
+                    continue
+            sib = src_dir / sib_name
+            if not sib.exists():
+                continue
+            try:
+                stext = sib.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            # gen_tests bodies don't have additional cfg gates on
+            # individual #[test] fns (they're written by task0c, which
+            # doesn't emit per-test cfgs), so cfg-aware vs naive count
+            # produces the same result here.
+            total += _count_test_fns_cfg_aware(stext, cfg_true, cfg_false)
+
+    # 3. src/**/*.rs (excluding gen_tests siblings) — inline test mods.
+    for srf in src_dir.rglob("*.rs"):
+        if re.search(r"\.gen_tests_\d+\.rs$", srf.name):
+            continue
+        try:
+            stext = srf.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        total += _count_test_fns_cfg_aware(stext, cfg_true, cfg_false)
+    return total
+
+
+def validate_task3_output_strict(
+    pass_count: int, fail_count: int, ignored_count: int,
+    expected_count: int, cluster_name: str,
+) -> tuple[str, str]:
+    """FR-024 strict acceptance for TASK 3 per cluster. Returns (status, reason)
+    where status is 'pass' | 'fail' | 'incomplete'.
+
+    Pass criteria (ALL must hold):
+      - fail_count == 0
+      - pass_count + ignored_count >= expected_count
+        (every expected test reported a verdict, with `ignored` counting
+        toward "reported")
+      - expected_count > 0 OR pass_count > 0
+        (refuse silent successes — at least one test must exist & have run)
+
+    'incomplete' is returned when the corpus is non-empty but the run
+    reported fewer tests than expected — usually a test binary failed
+    to compile, or a binary panicked before reporting all tests. The
+    caller treats 'incomplete' as 'fail' for control flow but logs the
+    distinct reason for diagnostic value.
+    """
+    reported = pass_count + fail_count + ignored_count
+    if fail_count > 0:
+        return "fail", (
+            f"cluster '{cluster_name}': {fail_count} failed, "
+            f"{pass_count} passed, {ignored_count} ignored "
+            f"(expected {expected_count})"
+        )
+    if expected_count <= 0 and pass_count == 0:
+        return "incomplete", (
+            f"cluster '{cluster_name}': no tests detected statically and "
+            "none ran — corpus appears empty for this cluster"
+        )
+    if reported < expected_count:
+        return "incomplete", (
+            f"cluster '{cluster_name}': {reported} tests reported "
+            f"({pass_count} pass + {fail_count} fail + {ignored_count} ignored), "
+            f"but {expected_count} expected — some binary failed to compile "
+            "or crashed before reporting all tests"
+        )
+    return "pass", (
+        f"cluster '{cluster_name}': {pass_count} passed, "
+        f"{ignored_count} ignored (expected {expected_count})"
+    )
 
 
 def validate_task4_output(genesis_before: str, genesis_after: str,
@@ -7109,6 +7322,136 @@ def _run_cargo(cmd: str, cwd: Path, env: dict, timeout: int = 180) -> tuple[int,
         return -1, f"FILE NOT FOUND: {e}"
 
 
+# FR-024: every cargo test invocation must be wrapped in an improvement-driven
+# loop. These helpers provide the metric (pass/fail counts), the attribution
+# fallbacks (recently-filled queue, test-reverse map), and the stall budget.
+
+def _build_test_reverse_map(
+    test_files: list[Path],
+    src_dir: Path,
+) -> dict[str, set[tuple[str, str]]]:
+    """Return {test_name: set[(file_rel, fn_name)]} — for each #[test] fn in
+    the test files, the set of fn records in `src_dir` whose names appear
+    textually in the test's body. Best-effort static analysis used as the
+    last-resort attribution path when panics/compile errors/classifier
+    all fail to identify a fn to fix.
+
+    Coarse: matches any identifier whose name equals a src fn name, even
+    if it's a comment or string. Acceptable — over-attribution just
+    queues a few extra fns for refill; the per-fn fix loop will skip
+    fns that are already filled correctly.
+    """
+    fn_index = _enumerate_fns_via_extractor(src_dir) or []
+    if not fn_index:
+        return {}
+    # name → list[(file, fn_name)] (a name may map to multiple impls)
+    by_name: dict[str, list[tuple[str, str]]] = {}
+    for r in fn_index:
+        name = r.get("fn_name", "")
+        f = r.get("file", "")
+        if name and f:
+            by_name.setdefault(name, []).append((f, name))
+    out: dict[str, set[tuple[str, str]]] = {}
+    test_fn_re = re.compile(
+        r"#\s*\[\s*test\s*\][^\n]*\n[^\n]*?fn\s+(\w+)\s*\(",
+    )
+    for tp in test_files:
+        try:
+            text = tp.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        ids = set(re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\b", text))
+        # Match each #[test] fn's name; pair it with all fn records whose
+        # identifier appears anywhere in the test file. This is file-level
+        # not fn-body-level (cheaper, captures helper fns the test calls).
+        for m in test_fn_re.finditer(text):
+            test_name = m.group(1)
+            candidates: set[tuple[str, str]] = set()
+            for ident in ids:
+                if ident in by_name:
+                    candidates.update(by_name[ident])
+            out[test_name] = candidates
+    return out
+
+
+def _attribute_failures(
+    test_output: str,
+    src_dir: Path,
+    recently_filled: list[tuple[str, str]],
+    test_reverse_map: dict[str, set[tuple[str, str]]],
+    cluster_name: str,
+) -> tuple[dict[tuple[str, str], set[str]], str]:
+    """Robust failure-to-fn attribution chain. Returns (frontier, kind).
+    Tries each path until one yields a non-empty frontier:
+      1. Runtime panics (unimplemented stubs) — `_extract_tdd_frontier`
+      2. Compile errors — `_extract_tdd_compile_frontier`
+      3. LLM classifier — `_classify_phase_c_test_failures` (P4.5)
+      4. Recently-filled fallback — most recent fills are likely culprits
+         for new assertion failures
+      5. Test-reverse-map fallback — every fn the failing tests could reach
+
+    Empty frontier means all paths exhausted — caller should let the
+    stall budget exit the loop. Kind tells the caller which path produced
+    the frontier (for logs/events).
+    """
+    # 1. Runtime panics.
+    frontier = _extract_tdd_frontier(test_output, src_dir)
+    if frontier:
+        return frontier, "runtime"
+    # 2. Compile errors.
+    frontier = _extract_tdd_compile_frontier(test_output, src_dir)
+    if frontier:
+        return frontier, "compile"
+    # 3. LLM classifier — turn off via PHASE_C_TDD_USE_CLASSIFIER=0.
+    if os.getenv("PHASE_C_TDD_USE_CLASSIFIER", "1") != "0":
+        failing = sorted(_parse_failed_tests(test_output))
+        if failing:
+            classification = _classify_phase_c_test_failures(
+                test_out=test_output, filled_this_pass=[],
+                failed_tests=failing, cluster_name=cluster_name,
+            )
+            synth: dict[tuple[str, str], set[str]] = {}
+            for tname, info in classification.items():
+                if info.get("category") not in (
+                        "BAD_FILL", "TEST_PRECONDITION_MISSING"):
+                    continue
+                ref = info.get("fn") or ""
+                if "::" in ref:
+                    fp, fn = ref.split("::", 1)
+                    key = (fp.strip(), fn.strip())
+                    if key[0] and key[1]:
+                        synth.setdefault(key, set()).add(tname)
+            if synth:
+                return synth, "classifier"
+    # 4. Recently-filled fallback. If new assertion failures appeared
+    # after recent fills, the recent fills are the most likely cause.
+    # Queue them in reverse-filled order (newest first).
+    if recently_filled:
+        failing = sorted(_parse_failed_tests(test_output))
+        if failing:
+            recent_synth: dict[tuple[str, str], set[str]] = {}
+            for key in reversed(recently_filled):
+                recent_synth.setdefault(key, set()).update(failing)
+            return recent_synth, "recently_filled"
+    # 5. Test-reverse-map. For each failing test, queue every fn it
+    # could reach according to the static reverse map. Over-attribution
+    # is tolerable here — per-fn splice guards reject overwriting
+    # non-stub bodies, so already-correct fills aren't clobbered.
+    if test_reverse_map:
+        failing = sorted(_parse_failed_tests(test_output))
+        if failing:
+            reverse_synth: dict[tuple[str, str], set[str]] = {}
+            for tname in failing:
+                # Strip module prefix if cargo formats as `module::test_name`.
+                bare = tname.split("::")[-1]
+                cands = test_reverse_map.get(bare) or test_reverse_map.get(tname) or set()
+                for key in cands:
+                    reverse_synth.setdefault(key, set()).add(tname)
+            if reverse_synth:
+                return reverse_synth, "reverse_map"
+    return {}, "no_frontier"
+
+
 def _build_test_cmd(test_stems: list[str], cluster: "BuildCluster | None") -> str:
     """Build `cargo test --no-fail-fast --test stem1 --test stem2 ...` honoring
     the cluster toolchain."""
@@ -7243,82 +7586,77 @@ def _run_phase_c_tdd(
     total_bytes = 0
     errors: list[str] = []
 
-    for iter_n in range(1, max_iters + 1):
+    # FR-024: improvement-driven loop. Track passing-test count across iters;
+    # exit only after `max_stalls` consecutive non-improving iters. The hard
+    # cap (TDD_MAX_ITERS) survives as a safety net only — the stall budget
+    # is the real exit gate.
+    max_stalls = int(os.getenv("TDD_MAX_STALLS", "3"))
+    stall = 0
+    best_pass = -1
+    best_fail = None
+    recently_filled: list[tuple[str, str]] = []
+    recently_filled_max = int(os.getenv("TDD_RECENTLY_FILLED_MAX", "50"))
+    # Build the test reverse map once per cluster — cheap (one extractor
+    # invocation, one regex scan of each test file). Used as the LAST
+    # attribution fallback when panics/compile errors/classifier all miss.
+    try:
+        test_reverse_map = _build_test_reverse_map(tests_dir_files, src_dir)
+    except Exception as _e:
+        _log(f"  {tag} [phase-c/tdd] reverse-map build failed: {_e}")
+        test_reverse_map = {}
+
+    iter_n = 0
+    while True:
+        iter_n += 1
+        if iter_n > max_iters:
+            _log(f"  {tag} [phase-c/tdd] iter cap {max_iters} reached "
+                 "(safety net) — exiting.")
+            break
         _check_graceful_stop(f"TDD iter {iter_n}")
-        _log(f"  {tag} [phase-c/tdd] iter {iter_n}/{max_iters}: running cargo test...")
+        _log(f"  {tag} [phase-c/tdd] iter {iter_n}: running cargo test...")
         t0 = time.monotonic()
         rc, output = _run_cargo(test_cmd, target_src_dir, cluster_env,
                                   timeout=test_timeout)
         dt = time.monotonic() - t0
+        pass_count, fail_count, _ignored = _parse_test_counts(output)
         if rc == 0:
             _log(f"  {tag} [phase-c/tdd] iter {iter_n}: all tests pass "
-                 f"({dt:.1f}s). Cluster done.")
+                 f"({pass_count} passed, {dt:.1f}s). Cluster done.")
             _emit("phase_c.tdd.iter", data={
                 "cluster": cluster.name, "iter": iter_n, "rc": 0,
                 "frontier_size": 0, "kind": "pass",
+                "pass_count": pass_count, "fail_count": fail_count,
             })
             break
         if rc == -1:
             _log(f"  {tag} [phase-c/tdd] iter {iter_n}: cargo test TIMED OUT "
-                 f"({test_timeout}s). Skipping iter — model may have produced "
-                 "a body with an infinite loop.")
+                 f"({test_timeout}s). Stopping.")
             _emit("phase_c.tdd.iter", data={
                 "cluster": cluster.name, "iter": iter_n, "rc": -1,
                 "frontier_size": 0, "kind": "timeout",
+                "pass_count": pass_count, "fail_count": fail_count,
             })
             break
 
-        # Try runtime-panic frontier first; fall back to compile-error.
-        frontier = _extract_tdd_frontier(output, src_dir)
-        kind = "runtime"
-        if not frontier:
-            frontier = _extract_tdd_compile_frontier(output, src_dir)
-            kind = "compile"
-        if not frontier:
-            # P4.5: assertion-failure attribution. cargo test failed but
-            # neither runtime panics nor compile errors yielded an
-            # actionable frontier — likely assertion failures from
-            # semantically-wrong bodies. Ask the classifier to attribute
-            # each failing test to a specific fn (file::name) and synthesize
-            # a frontier from BAD_FILL / TEST_PRECONDITION_MISSING entries.
-            # Gated by PHASE_C_TDD_USE_CLASSIFIER (default on).
-            if os.getenv("PHASE_C_TDD_USE_CLASSIFIER", "1") != "0":
-                _fails = sorted(_parse_failed_tests(output))
-                if _fails:
-                    classification = _classify_phase_c_test_failures(
-                        test_out=output, filled_this_pass=[],
-                        failed_tests=_fails, cluster_name=cluster.name,
-                    )
-                    synth: dict[tuple[str, str], set[str]] = {}
-                    for _tname, _info in classification.items():
-                        if _info.get("category") not in (
-                                "BAD_FILL", "TEST_PRECONDITION_MISSING"):
-                            continue
-                        _ref = _info.get("fn") or ""
-                        if "::" not in _ref:
-                            continue
-                        _fp, _fn = _ref.split("::", 1)
-                        _fp, _fn = _fp.strip(), _fn.strip()
-                        if not _fp or not _fn:
-                            continue
-                        synth.setdefault((_fp, _fn), set()).add(_tname)
-                    if synth:
-                        frontier = synth
-                        kind = "assertion"
-                        _log(f"  {tag} [phase-c/tdd] iter {iter_n}: "
-                             f"classifier attributed {len(_fails)} failing "
-                             f"test(s) to {len(synth)} fn(s).")
-        if not frontier:
-            _log(f"  {tag} [phase-c/tdd] iter {iter_n}: cargo test failed "
-                 f"(rc={rc}, {dt:.1f}s) but no actionable frontier extracted. "
-                 "Stopping TDD loop.")
-            _emit("phase_c.tdd.iter", data={
-                "cluster": cluster.name, "iter": iter_n, "rc": rc,
-                "frontier_size": 0, "kind": "no_frontier",
-            })
-            break
+        # Improvement metric: did pass count strictly increase since best?
+        improved = pass_count > best_pass
+        if improved:
+            best_pass = pass_count
+            best_fail = fail_count
+            stall = 0
+        else:
+            stall += 1
 
-        # D3 — re-entry filter.
+        # Attribute failures via the full chain (panics → compile →
+        # classifier → recently_filled → reverse_map).
+        frontier, kind = _attribute_failures(
+            output, src_dir, recently_filled,
+            test_reverse_map, cluster.name,
+        )
+
+        # D3 — re-entry filter for fns that already exhausted the per-fn
+        # fix loop in a prior iter (avoid burning compute on the same fn
+        # with no new context).
         eligible: dict[tuple[str, str], set[str]] = {}
         skipped_perm: int = 0
         for key, tests in frontier.items():
@@ -7330,28 +7668,54 @@ def _run_phase_c_tdd(
                     continue
                 permanently_exhausted.discard(key)
             eligible[key] = tests
-        if not eligible:
-            _log(f"  {tag} [phase-c/tdd] iter {iter_n}: all {len(frontier)} "
-                 f"frontier members permanently exhausted with no new "
-                 "context. Stopping.")
+
+        # Exit condition: stall budget exhausted AND no eligible work.
+        # We do NOT exit on empty frontier alone — the improvement metric
+        # might still tell us tests are getting better via a different
+        # path (e.g. cascading effects from earlier fills).
+        if not eligible and stall >= max_stalls:
+            _log(f"  {tag} [phase-c/tdd] iter {iter_n}: no actionable "
+                 f"frontier and {stall} stall(s); stopping. "
+                 f"best pass={best_pass} fail={best_fail}.")
             _emit("phase_c.tdd.iter", data={
                 "cluster": cluster.name, "iter": iter_n, "rc": rc,
-                "frontier_size": 0, "kind": "exhausted",
+                "frontier_size": 0, "kind": "stall_exit",
+                "pass_count": pass_count, "fail_count": fail_count,
+                "improved": improved, "stall": stall,
             })
             break
+        if not eligible:
+            _log(f"  {tag} [phase-c/tdd] iter {iter_n}: no actionable "
+                 f"frontier this iter but stall={stall}/{max_stalls} — "
+                 f"continuing (pass={pass_count}, fail={fail_count}, "
+                 f"improved={improved}).")
+            _emit("phase_c.tdd.iter", data={
+                "cluster": cluster.name, "iter": iter_n, "rc": rc,
+                "frontier_size": 0, "kind": "no_frontier_continue",
+                "pass_count": pass_count, "fail_count": fail_count,
+                "improved": improved, "stall": stall,
+            })
+            # Nothing to do this iter — loop back to re-run cargo test.
+            # (Mostly a no-op, but keeps the loop honest: if a flaky
+            # failure or test ordering surfaced a fn next iter, we'll
+            # pick it up.)
+            continue
 
         ordered = _order_frontier(eligible, leaf_counts)
         frontier_keys = {key for key, _ in ordered}
-        _log(f"  {tag} [phase-c/tdd] iter {iter_n}: cargo test failed "
-             f"(rc={rc}, {dt:.1f}s); frontier={len(eligible)} fn(s) "
-             f"({kind}), {skipped_perm} skipped as exhausted.")
+        _log(f"  {tag} [phase-c/tdd] iter {iter_n}: cargo test rc={rc} "
+             f"({dt:.1f}s); pass={pass_count} fail={fail_count} "
+             f"(improved={improved}, stall={stall}/{max_stalls}); "
+             f"frontier={len(eligible)} fn(s) ({kind}), "
+             f"{skipped_perm} skipped as exhausted.")
         _emit("phase_c.tdd.iter", data={
             "cluster": cluster.name, "iter": iter_n, "rc": rc,
             "frontier_size": len(eligible), "kind": kind,
+            "pass_count": pass_count, "fail_count": fail_count,
+            "improved": improved, "stall": stall,
         })
 
-        # Drive the per-fn fill machinery with this frontier. One pass
-        # per TDD iter; the outer loop is what advances.
+        # Drive the per-fn fill machinery with this frontier.
         sub = _task2_fill_fns_one_by_one(
             project_dir=project_dir,
             target_src_dir=target_src_dir,
@@ -7372,9 +7736,16 @@ def _run_phase_c_tdd(
         total_bytes += sub.get("bytes_filled", 0)
         errors.extend(sub.get("errors", []))
 
-        # Mark any fn that's STILL in the unimplemented set as exhausted
-        # for D3's purposes on the next iter.
+        # Update recently_filled ring buffer with this iter's actual fills.
+        # We don't have the exact list from the sub-result, so use the
+        # frontier keys that are NO LONGER in the unimplemented set after
+        # the pass — that's the set of fns that materially changed.
         cur_stubs = set(_scan_unimplemented_functions(src_dir))
+        newly_filled = [k for k in frontier_keys if k not in cur_stubs]
+        for k in newly_filled:
+            recently_filled.append(k)
+        if len(recently_filled) > recently_filled_max:
+            recently_filled = recently_filled[-recently_filled_max:]
         for key in frontier_keys:
             if key in cur_stubs:
                 permanently_exhausted.add(key)
@@ -7492,6 +7863,11 @@ def _task2_fill_fns_one_by_one(
         else:
             stubs = [{"file": f, "fn_name": fn, "container": "", "sig_text": ""}
                      for f, fn in _scan_unimplemented_for_cluster(target_src_dir, cluster)]
+        # True remaining stub count BEFORE the frontier filter — used by
+        # the progress log so "already filled" reflects actual disk state,
+        # not the TDD-narrowed pass list (which would over-report progress
+        # since the frontier is only the subset tests have reached).
+        _all_stubs_count = len(stubs)
         # Plan 4 — when TDD driver supplies a frontier, restrict this pass
         # to fns it nominated. Avoids walking fns no test reaches.
         if tdd_frontier_keys is not None:
@@ -7531,10 +7907,21 @@ def _task2_fill_fns_one_by_one(
             _total_fns_in_cluster = len(_all_recs)
         except Exception:
             _total_fns_in_cluster = len(stubs)  # fallback
+        # Progress numbers — use the TRUE remaining stubs (pre-frontier)
+        # so "already filled" reflects disk state. When the TDD driver
+        # narrows this pass, surface "K in frontier" separately so the
+        # log shows both the actionable size and the global stub count.
+        _filled_count = max(0, _total_fns_in_cluster - _all_stubs_count)
+        _frontier_suffix = (
+            f", {len(stubs)} in frontier this pass"
+            if tdd_frontier_keys is not None and len(stubs) != _all_stubs_count
+            else ""
+        )
         _log(f"  [phase-c/per-fn] pass {pass_n}/{max_passes}: "
-             f"{len(stubs)} stub(s) to fill in cluster '{cluster_name}' "
-             f"({_total_fns_in_cluster - len(stubs)}/{_total_fns_in_cluster} "
-             f"already filled).")
+             f"{_all_stubs_count} stub(s) remaining in cluster "
+             f"'{cluster_name}' "
+             f"({_filled_count}/{_total_fns_in_cluster} already filled"
+             f"{_frontier_suffix}).")
         _pass_t0 = time.monotonic()
         _emit("phase_c.pass.start", data={
             "pass_n": pass_n, "cluster": cluster_name, "stubs": len(stubs),
@@ -12861,25 +13248,80 @@ Generate the implementation for `{file_path}` (this call writes ONLY that file).
         return True
 
 
+def _cluster_cfg_predicate_for_gate(cluster) -> str:
+    """Build the cfg predicate body (without `#[cfg(...)]` wrapping) that's
+    true for this cluster and false for all others — used as the gate when
+    multiple clusters have divergent versions of the same item.
+
+    Composed from the cluster's own active_cfg (must be true) and the
+    excluded_cfg (must be false). Returns "" when the cluster has no
+    active/excluded preds — meaning it's the unconditional default and
+    items only present in this cluster don't need a gate.
+    """
+    if cluster is None:
+        return ""
+    true_preds = list(getattr(cluster, "cfg_true", []) or [])
+    false_preds = list(getattr(cluster, "cfg_false", []) or [])
+    terms: list[str] = list(true_preds)
+    for fp in false_preds:
+        terms.append(f"not({fp})")
+    if not terms:
+        return ""
+    if len(terms) == 1:
+        return terms[0]
+    return "all(" + ", ".join(terms) + ")"
+
+
+def _ast_merge_files(out_path: Path,
+                     cluster_files: list[tuple[str, Path, str]]) -> bool:
+    """Invoke the syn-based merger on a single file. `cluster_files` is a
+    list of (cluster_name, source_path, cfg_predicate). Writes the merged
+    output to `out_path`. Returns True on success.
+
+    Replaces the regex-based item splicer that broke down on trait/impl
+    bodies (each method's textual splice produced orphan declarations
+    outside its trait/impl when bodies diverged across clusters).
+    """
+    if not _SKELETON_EXTRACTOR_BIN.exists():
+        return False
+    cmd: list[str] = [
+        str(_SKELETON_EXTRACTOR_BIN),
+        "--merge-clusters",
+        "--merge-output", str(out_path),
+    ]
+    for name, src_path, cfg_pred in cluster_files:
+        cmd += ["--cluster", f"{name}:{src_path}:{cfg_pred}"]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    except Exception as e:
+        _log(f"  [skeleton-merge] extractor invocation failed: {e}")
+        return False
+    if r.returncode != 0:
+        _log(f"  [skeleton-merge] extractor returned rc={r.returncode}: "
+             f"{(r.stderr or '').strip()[:240]}")
+        return False
+    return True
+
+
 def _merge_cluster_outputs(project_dir: Path,
                             cluster_specs: dict,
                             successes: list[dict]) -> dict:
     """Cross-cluster merge: compose per-cluster filled source dirs into
     project_dir/src/ with cfg-gated divergence for conflicting fills.
 
-    For each rel path P that appears in any cluster's `.skeleton-filled/{c}/src/`:
-      - Collect each cluster's version of P.
-      - For each function (signature-keyed): if all clusters' bodies are
-        identical, emit once. If they differ, emit each version with a
-        `#[cfg(...)]` gate derived from the cluster's cfg-set.
-      - Non-function items: take the union, preferring the cluster's
-        existing cfg attribute.
+    AST-based via the syn extractor's --merge-clusters subcommand. For
+    each file present in any cluster's `.skeleton-filled/{c}/src/`:
+      - The extractor parses each cluster's version into a syn::File.
+      - It walks items in parallel: identical token streams collapse to
+        one entry; divergent items get emitted as gated copies (with
+        their cluster cfg attribute) AT THEIR NATURAL POSITION (inside
+        trait body, impl block, etc — recursively).
+      - The merge respects nested items, which the previous regex-based
+        textual splicer could not.
 
-    Algorithm: for v1 we use the body of the lexicographically-first cluster
-    that contains the file, with cfg-divergence detection. Full per-function
-    diff-aware merge is implemented per Plan 4 Step 10.
-
-    Returns {'files_written': int, 'cfg_gated_fns': int}.
+    Returns {'files_written': int, 'cfg_gated_fns': int}. The
+    `cfg_gated_fns` value is approximate — derived from a post-merge
+    grep — since the AST merger doesn't currently report it back.
     """
     cluster_dirs: dict[str, Path] = {}
     for s in successes:
@@ -12896,106 +13338,60 @@ def _merge_cluster_outputs(project_dir: Path,
         for p in (d / "src").rglob("*.rs"):
             all_paths.add(str(p.relative_to(d)))
 
-    fn_re = re.compile(
-        r'((?<![A-Za-z_0-9])(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?'
-        r'(?:const\s+)?fn\s+[A-Za-z_]\w*[^{]*\{)',
-    )
-
-    def _extract_fns(text: str) -> list[tuple[str, str, int, int]]:
-        out: list[tuple[str, str, int, int]] = []
-        for m in fn_re.finditer(text):
-            body_start = m.end()
-            depth = 1
-            i = body_start
-            while i < len(text) and depth > 0:
-                if text[i] == "{":
-                    depth += 1
-                elif text[i] == "}":
-                    depth -= 1
-                i += 1
-            if depth != 0:
-                continue
-            body_end = i - 1
-            sig = text[m.start():body_start].rstrip("{ \t\n").strip()
-            body = text[body_start:body_end]
-            out.append((sig, body, body_start, body_end))
-        return out
-
-    def _cluster_cfg_attr(cluster_name: str) -> str:
-        """Build a Rust `#[cfg(...)]` attribute that's true for this cluster
-        and false for others — using the cluster's defining cfg predicates."""
-        c = cluster_specs.get(cluster_name)
-        if not c:
-            return ""
-        true_preds = c.cfg_true
-        false_preds = c.cfg_false
-        terms: list[str] = list(true_preds)
-        for fp in false_preds:
-            terms.append(f"not({fp})")
-        if not terms:
-            return ""
-        if len(terms) == 1:
-            return f"#[cfg({terms[0]})]"
-        return f"#[cfg(all({', '.join(terms)}))]"
-
     files_written = 0
     cfg_gated_fns = 0
+    extractor_available = _SKELETON_EXTRACTOR_BIN.exists()
+    if not extractor_available:
+        _log("  [skeleton-merge] WARN: extractor binary missing; falling "
+             "back to base-cluster passthrough (no divergence handling).")
+
     for rel in sorted(all_paths):
         if ".gen_tests_" in rel:
             continue
-        # Read each cluster's version of this file.
-        per_cluster: dict[str, str] = {}
-        for cname, d in cluster_dirs.items():
-            p = d / rel
-            if p.exists():
-                per_cluster[cname] = p.read_text(encoding="utf-8")
-        if not per_cluster:
+        # Gather (cluster_name, path, cfg_predicate) for every cluster
+        # that has this file. Lexicographic order means a stable cluster
+        # is base when present, which keeps merge output deterministic.
+        cluster_files: list[tuple[str, Path, str]] = []
+        for cname in sorted(cluster_dirs.keys()):
+            p = cluster_dirs[cname] / rel
+            if not p.exists():
+                continue
+            cluster_obj = cluster_specs.get(cname)
+            cfg_pred = _cluster_cfg_predicate_for_gate(cluster_obj)
+            cluster_files.append((cname, p, cfg_pred))
+        if not cluster_files:
             continue
 
-        # Lexicographically-first cluster's version becomes the base.
-        base_cluster = sorted(per_cluster.keys())[0]
-        base_text = per_cluster[base_cluster]
-
-        # Detect cfg divergence: for each fn in base, compare against other clusters.
-        base_fns = _extract_fns(base_text)
-        out_text = base_text
-        for sig, body, body_start, body_end in reversed(base_fns):
-            divergent_versions: dict[str, str] = {}
-            for cname, ctext in per_cluster.items():
-                if cname == base_cluster:
-                    continue
-                # Find same-sig fn in this cluster's file.
-                for sig2, body2, _, _ in _extract_fns(ctext):
-                    if sig2 == sig:
-                        if body2 != body:
-                            divergent_versions[cname] = body2
-                        break
-            if divergent_versions:
-                # Emit base version with base's cfg attr + each divergent
-                # version with its cluster's cfg attr.
-                base_attr = _cluster_cfg_attr(base_cluster)
-                replacement_parts: list[str] = []
-                if base_attr:
-                    replacement_parts.append(base_attr + "\n")
-                replacement_parts.append(sig + " {" + body + "}\n")
-                for cname, dbody in divergent_versions.items():
-                    attr = _cluster_cfg_attr(cname)
-                    replacement_parts.append((attr + "\n") if attr else "")
-                    replacement_parts.append(sig + " {" + dbody + "}\n")
-                replacement = "".join(replacement_parts)
-                # Splice: original is "sig { body }". We replace the whole
-                # construct (start of sig to body_end + 1) with replacement.
-                sig_start = base_text.rfind(sig, 0, body_start)
-                if sig_start == -1:
-                    continue
-                out_text = out_text[:sig_start] + replacement + out_text[body_end + 1:]
-                cfg_gated_fns += 1
-
-        # Write the merged file.
         out_path = project_dir / rel
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(out_text, encoding="utf-8")
+
+        merged_ok = False
+        if extractor_available:
+            merged_ok = _ast_merge_files(out_path, cluster_files)
+        if not merged_ok:
+            # Fallback: copy the base cluster's file verbatim. Loses
+            # divergence handling but never corrupts the output. Only
+            # exercised when the extractor binary is missing or its
+            # invocation fails on a specific file.
+            base_path = cluster_files[0][1]
+            try:
+                out_path.write_text(base_path.read_text(encoding="utf-8"),
+                                     encoding="utf-8")
+            except Exception as e:
+                _log(f"  [skeleton-merge] copy fallback failed for {rel}: {e}")
+                continue
         files_written += 1
+        # Approximate cfg_gated_fns by counting #[cfg(... )] attributes
+        # in the merged output that match our cluster gates. Used only
+        # for the post-merge log line.
+        try:
+            text_out = out_path.read_text(encoding="utf-8")
+            cfg_gated_fns += len(re.findall(
+                r"#\[cfg\([^)]*(error_generic_member_access|anyhow_no_core_error)",
+                text_out,
+            ))
+        except Exception:
+            pass
 
     return {"files_written": files_written, "cfg_gated_fns": cfg_gated_fns}
 
@@ -13078,6 +13474,25 @@ class StaticSkeletonTask2Generator(Task2Generator):
         )
         _log(f"  [skeleton-merge] {merge_stats['files_written']} file(s) written, "
              f"{merge_stats['cfg_gated_fns']} cfg-gated divergence(s).")
+
+        # Post-merge fill pass: per-cluster Phase C drove fills against each
+        # cluster's filtered cfg view of the code. After the AST merge, the
+        # default-cfg view of `project_dir/src/` may expose fns that none of
+        # the per-cluster Phase Cs reached (typically the stable variants of
+        # cfg-divergent code paths). Without this step, TASK 3 panics at
+        # `unimplemented!()` on fns Phase C never queued.
+        #
+        # Strategy: run cargo test --no-fail-fast on the merged tree, extract
+        # panic frontier with the same syn-based mapper Phase C uses, fill
+        # those fns via the per-fn machinery, repeat until frontier is empty
+        # or stall budget exhausted. Always uses --no-fail-fast so panics
+        # from every binary surface, not just the first one to crash.
+        self._post_merge_fill_pass(
+            project_dir=project_dir,
+            clusters=clusters,
+            module=module,
+            functional_req=functional_req,
+        )
 
         # Update the manifest so downstream task3/4 see the generated files.
         if manifest_path:
@@ -13470,6 +13885,158 @@ class StaticSkeletonTask2Generator(Task2Generator):
 
         return {"ok": True, "phase_c": c_result, "phase_d": d_result,
                 "validates": validate_ok}
+
+    def _post_merge_fill_pass(
+        self,
+        project_dir: Path,
+        clusters: list["BuildCluster"],
+        module: str,
+        functional_req: str,
+    ) -> None:
+        """FR-024 improvement-driven loop on the merged tree.
+
+        Runs cargo test on `project_dir`, attributes failures via the full
+        chain (runtime/compile/classifier/recently_filled/reverse_map),
+        fills, repeats. Exits when pass count stalls for `max_stalls`
+        consecutive iters AND there's no actionable frontier — never on
+        a fixed iter count alone. Closes the per-cluster / merged-view
+        mismatch where Phase C declares done but the merged source still
+        has unfilled stubs under the default cfg TASK 3 runs under.
+        """
+        max_stalls = int(os.getenv("POST_MERGE_MAX_STALLS", "3"))
+        hard_cap = int(os.getenv("POST_MERGE_HARD_CAP", "20"))
+        if hard_cap <= 0:
+            return
+        tag = "[skeleton-merge]"
+        tests_dir_files: list[Path] = list(
+            (project_dir / "tests").rglob("*.rs"))
+        fr_path = project_dir / f"functional_requirements_{module}.md"
+        leaf_counts: dict[str, int] = {}
+        for c in clusters:
+            for k, v in (_load_baked_leaf_order(project_dir, c.name) or {}).items():
+                leaf_counts[k] = max(leaf_counts.get(k, 0), int(v))
+        test_cmd = "cargo test --no-fail-fast"
+        test_timeout = int(os.getenv("POST_MERGE_TEST_TIMEOUT", "180"))
+        try:
+            test_reverse_map = _build_test_reverse_map(
+                tests_dir_files, project_dir)
+        except Exception as _e:
+            _log(f"  {tag} post-merge reverse-map build failed: {_e}")
+            test_reverse_map = {}
+
+        permanently_exhausted: set[tuple[str, str]] = set()
+        recently_filled: list[tuple[str, str]] = []
+        recently_filled_max = int(os.getenv("TDD_RECENTLY_FILLED_MAX", "50"))
+        stall = 0
+        best_pass = -1
+        best_fail = None
+        iter_n = 0
+        while iter_n < hard_cap:
+            iter_n += 1
+            _check_graceful_stop(f"post-merge fill iter {iter_n}")
+            _log(f"\n  {tag} post-merge fill iter {iter_n}: "
+                 f"running cargo test on merged tree...")
+            t0 = time.monotonic()
+            rc, output = _run_cargo(test_cmd, project_dir, _cargo_env(),
+                                     timeout=test_timeout)
+            dt = time.monotonic() - t0
+            pass_count, fail_count, _ignored = _parse_test_counts(output)
+            if rc == 0:
+                _log(f"  {tag} post-merge cargo test PASSED "
+                     f"({pass_count} passed, {dt:.1f}s).")
+                _emit("post_merge.fill.iter", data={
+                    "iter": iter_n, "rc": 0, "frontier_size": 0,
+                    "kind": "pass",
+                    "pass_count": pass_count, "fail_count": fail_count,
+                })
+                return
+            if rc == -1:
+                _log(f"  {tag} post-merge cargo test TIMED OUT. Stopping.")
+                _emit("post_merge.fill.iter", data={
+                    "iter": iter_n, "rc": -1, "frontier_size": 0,
+                    "kind": "timeout",
+                    "pass_count": pass_count, "fail_count": fail_count,
+                })
+                return
+
+            improved = pass_count > best_pass
+            if improved:
+                best_pass = pass_count
+                best_fail = fail_count
+                stall = 0
+            else:
+                stall += 1
+
+            frontier, kind = _attribute_failures(
+                output, project_dir, recently_filled,
+                test_reverse_map, "merged",
+            )
+            eligible = {k: v for k, v in frontier.items()
+                         if k not in permanently_exhausted}
+            if not eligible and stall >= max_stalls:
+                _log(f"  {tag} post-merge iter {iter_n}: stall={stall} "
+                     f"and no actionable frontier; stopping. "
+                     f"best pass={best_pass} fail={best_fail}.")
+                _emit("post_merge.fill.iter", data={
+                    "iter": iter_n, "rc": rc, "frontier_size": 0,
+                    "kind": "stall_exit",
+                    "pass_count": pass_count, "fail_count": fail_count,
+                    "improved": improved, "stall": stall,
+                })
+                return
+            if not eligible:
+                _log(f"  {tag} post-merge iter {iter_n}: no actionable "
+                     f"frontier (stall={stall}/{max_stalls}); continuing.")
+                _emit("post_merge.fill.iter", data={
+                    "iter": iter_n, "rc": rc, "frontier_size": 0,
+                    "kind": "no_frontier_continue",
+                    "pass_count": pass_count, "fail_count": fail_count,
+                    "improved": improved, "stall": stall,
+                })
+                continue
+
+            _log(f"  {tag} post-merge iter {iter_n}: cargo test rc={rc} "
+                 f"({dt:.1f}s); pass={pass_count} fail={fail_count} "
+                 f"(improved={improved}, stall={stall}/{max_stalls}); "
+                 f"frontier={len(eligible)} fn(s) ({kind}).")
+            _emit("post_merge.fill.iter", data={
+                "iter": iter_n, "rc": rc,
+                "frontier_size": len(eligible), "kind": kind,
+                "pass_count": pass_count, "fail_count": fail_count,
+                "improved": improved, "stall": stall,
+            })
+            sub = _task2_fill_fns_one_by_one(
+                project_dir=project_dir,
+                target_src_dir=project_dir,
+                tests_dir_files=tests_dir_files,
+                module_name=module,
+                cluster_name="merged",
+                cluster=None,
+                check_cmd="cargo check",
+                cluster_env=_cargo_env(),
+                max_passes=1,
+                leaf_name_counts=leaf_counts,
+                fr_path=fr_path,
+                tdd_frontier_keys=set(eligible.keys()),
+                skip_end_pass_test=True,
+            )
+            cur_stubs = set(_scan_unimplemented_functions(project_dir / "src"))
+            newly_filled = [
+                k for k in eligible.keys()
+                if k not in cur_stubs
+                and (k[0].split("/")[-1], k[1]) not in cur_stubs
+            ]
+            for k in newly_filled:
+                recently_filled.append(k)
+            if len(recently_filled) > recently_filled_max:
+                recently_filled = recently_filled[-recently_filled_max:]
+            for key in eligible.keys():
+                if key in cur_stubs or (key[0].split("/")[-1], key[1]) in cur_stubs:
+                    permanently_exhausted.add(key)
+            _log(f"  {tag} post-merge iter {iter_n}: "
+                 f"{sub.get('fns_filled', 0)} fn(s) filled, "
+                 f"{sub.get('attempts', 0)} attempt(s).")
+        _log(f"  {tag} post-merge hard cap {hard_cap} reached (safety net).")
 
     @staticmethod
     def _cluster_check_cmd(cluster: "BuildCluster") -> str:
@@ -14120,33 +14687,28 @@ def _task3_inline_retry(
         return rc == 0, out, len(f)
 
     def _do_fix(output: str, history: list[dict]) -> dict:
-        # Classify failing tests, locate implicated fns, single-shot fix
-        # for each. We do NOT call into _task2_fill_fns_one_by_one — the
-        # per-fn fix loop's machinery is cluster-scoped and would be
-        # awkward to drive from here.
+        # FR-024: full attribution chain. The classifier is one step in a
+        # longer chain — when it returns no actionable refs, fall back to
+        # the test-reverse-map. Previously this gave up at classifier
+        # exhaustion; now it has more candidates to try.
         fails_now = sorted(_parse_failed_tests(output))
         if not fails_now:
             return {"abort": True, "reason": "no_failed_tests"}
-        classification = _classify_phase_c_test_failures(
-            test_out=output,
-            filled_this_pass=[],   # task3 lacks cluster scope; classifier
-                                    # may name any fn — we resolve below
-            failed_tests=fails_now,
+        try:
+            tests_dir_files = list((project_dir / "tests").rglob("*.rs"))
+            test_reverse_map = _build_test_reverse_map(
+                tests_dir_files, project_dir)
+        except Exception:
+            test_reverse_map = {}
+        frontier, _kind = _attribute_failures(
+            output, project_dir,
+            recently_filled=[],  # task3 has no per-cluster fill history
+            test_reverse_map=test_reverse_map,
             cluster_name="task3",
         )
-        refs: list[tuple[str, str]] = []
-        for info in classification.values():
-            if info["category"] not in (
-                    "BAD_FILL", "TEST_PRECONDITION_MISSING"):
-                continue
-            r = info["fn"]
-            if "::" in r:
-                f_part, fn_part = r.split("::", 1)
-                refs.append((f_part.strip(), fn_part.strip()))
-        # Dedupe; classifier may name the same fn from multiple failing tests.
-        refs = list(dict.fromkeys(refs))
+        refs: list[tuple[str, str]] = list(frontier.keys())
         if not refs:
-            return {"abort": True, "reason": "classifier_no_actionable_refs"}
+            return {"abort": True, "reason": "no_actionable_refs"}
 
         fixed_count = 0
         for rel_f, fn in refs:
@@ -14212,7 +14774,183 @@ def _task3_inline_retry(
 
 
 def task3(project_dir, test_command, iteration, output_dir, genesis_path):
+    """TASK 3 — per-cluster strict-verdict test runner.
+
+    FR-024: SUCCESS only when every test in every cluster genuinely runs
+    and passes. For each baked cluster:
+      1. Compose `cargo test --no-fail-fast` with the cluster's toolchain
+         and `env_extra` (RUSTFLAGS etc).
+      2. Run, parse (pass, fail, ignored).
+      3. Compute expected_count = #[test] fns active under this cluster's
+         cfg (`_count_active_tests_for_cluster`).
+      4. Accept iff `pass + ignored + fail == expected` AND `fail == 0`.
+
+    Aggregate: SUCCESS only if every cluster accepts. Any cluster failing
+    or reporting fewer than expected tests → fail → loop to TASK 4.
+
+    The `test_command` parameter is retained for back-compat but ignored
+    when baked clusters are available. When the workspace has no baked
+    clusters (e.g. fresh non-skeleton-backend run) we fall back to the
+    legacy single-shot path using the discovered `test_command`.
+    """
     _log(f"\nTASK 3: Running tests (iteration {iteration})")
+    output_file = Path(output_dir) / f"tests_output_{iteration}.txt"
+    _attempt = iteration if isinstance(iteration, int) else None
+
+    clusters = _load_baked_clusters(project_dir)
+    if not clusters:
+        # Legacy fallback: no baked cluster manifest, run once with the
+        # discovered command. Used for non-skeleton-backend pipelines.
+        return _task3_legacy_single(project_dir, test_command, iteration,
+                                     output_dir, genesis_path)
+
+    with _phase("task", task="task3", attempt=_attempt,
+                data={"command": "per-cluster", "iteration": iteration,
+                      "clusters": [c.name for c in clusters]}) as done:
+        _emit("test.start", attempt=_attempt,
+              data={"command": "per-cluster",
+                    "clusters": [c.name for c in clusters]})
+        _t_start = time.monotonic()
+
+        per_cluster_results: list[dict] = []
+        aggregated_output_chunks: list[str] = []
+        any_failed = False
+        any_incomplete = False
+        agg_pass = agg_fail = agg_ignored = agg_expected = 0
+        primary_test_output = ""
+
+        for cluster in sorted(clusters, key=lambda c: c.name):
+            cmd_parts = ["cargo"]
+            if cluster.toolchain:
+                cmd_parts.append(f"+{cluster.toolchain}")
+            cmd_parts += ["test", "--no-fail-fast"]
+            cluster_cmd = shlex.join(cmd_parts)
+            cluster_env = _cargo_env()
+            cluster_env.update(cluster.env_extra or {})
+            _log(f"  [task3/{cluster.name}] running {cluster_cmd}")
+            t_c = time.monotonic()
+            try:
+                result = subprocess.run(
+                    _parse_cmd(cluster_cmd),
+                    cwd=project_dir, capture_output=True, text=True,
+                    timeout=TEST_TIMEOUT, env=cluster_env,
+                )
+                rc = result.returncode
+                stdout = result.stdout or ""
+                stderr = result.stderr or ""
+            except subprocess.TimeoutExpired:
+                rc = -1
+                stdout = ""
+                stderr = (f"TIMEOUT: cluster '{cluster.name}' tests exceeded "
+                          f"{TEST_TIMEOUT}s")
+                _log(f"  [task3/{cluster.name}] {stderr}")
+            dt = time.monotonic() - t_c
+            output = stdout + ("\n--- stderr ---\n" + stderr if stderr else "")
+            pass_n, fail_n, ign_n = _parse_test_counts(output)
+            expected_n = _count_active_tests_for_cluster(project_dir, cluster)
+            status, reason = validate_task3_output_strict(
+                pass_n, fail_n, ign_n, expected_n, cluster.name,
+            )
+            _log(f"  [task3/{cluster.name}] {status}: {reason} "
+                 f"(rc={rc}, {dt:.1f}s)")
+            per_cluster_results.append({
+                "cluster": cluster.name,
+                "status": status,
+                "rc": rc,
+                "pass": pass_n,
+                "fail": fail_n,
+                "ignored": ign_n,
+                "expected": expected_n,
+                "duration_s": dt,
+            })
+            aggregated_output_chunks.append(
+                f"=== cluster: {cluster.name} (rc={rc}, "
+                f"{status}, {pass_n}/{expected_n} passed, {fail_n} failed, "
+                f"{ign_n} ignored) ===\n{output}\n"
+            )
+            agg_pass += pass_n
+            agg_fail += fail_n
+            agg_ignored += ign_n
+            agg_expected += expected_n
+            if status != "pass":
+                any_failed = any_failed or status == "fail"
+                any_incomplete = any_incomplete or status == "incomplete"
+                # Keep this cluster's output as primary for the inline retry
+                # — it has the actionable signal.
+                if not primary_test_output:
+                    primary_test_output = output
+
+        aggregated_output = "".join(aggregated_output_chunks)
+        genesis = read(genesis_path)
+        write(output_file,
+              f"=== genesis.md (iteration {iteration}) ===\n{genesis}\n"
+              f"{OUTPUT_SEPARATOR}\n{aggregated_output}")
+
+        all_pass = not any_failed and not any_incomplete
+        _log(f"  TASK 3 aggregate: {agg_pass}/{agg_expected} passed, "
+             f"{agg_fail} failed, {agg_ignored} ignored across "
+             f"{len(per_cluster_results)} cluster(s) — "
+             f"{'PASS' if all_pass else ('FAIL' if any_failed else 'INCOMPLETE')}.")
+
+        if all_pass:
+            _emit("test.pass", duration_ms=int(
+                (time.monotonic() - _t_start) * 1000),
+                  data={"per_cluster": per_cluster_results,
+                        "pass_count": agg_pass, "fail_count": agg_fail,
+                        "ignored_count": agg_ignored,
+                        "expected_count": agg_expected,
+                        "output": _store_prompt_content(aggregated_output)})
+            done["data"] = {
+                "passed": True, "pass_count": agg_pass,
+                "fail_count": agg_fail, "expected_count": agg_expected,
+                "per_cluster": per_cluster_results,
+            }
+            return True, aggregated_output
+
+        _emit("test.fail", duration_ms=int(
+            (time.monotonic() - _t_start) * 1000),
+              data={"per_cluster": per_cluster_results,
+                    "pass_count": agg_pass, "fail_count": agg_fail,
+                    "ignored_count": agg_ignored,
+                    "expected_count": agg_expected,
+                    "reason": "incomplete" if any_incomplete and not any_failed
+                              else "failed_tests",
+                    "output": _store_prompt_content(aggregated_output)})
+
+        # FR-024 inline retry on the primary failing cluster. Uses the
+        # full attribution chain (panics → compile → classifier →
+        # recently_filled → reverse_map) to identify fns to refix.
+        if primary_test_output:
+            retry_passed, retry_output = _task3_inline_retry(
+                project_dir=project_dir,
+                test_command="cargo test --no-fail-fast",
+                iteration=iteration,
+                initial_test_output=primary_test_output,
+            )
+            if retry_passed or retry_output != primary_test_output:
+                # Re-run all clusters to verify the retry's fixes hold
+                # across the corpus, not just the primary failing cluster.
+                # Recurse once.
+                return task3(
+                    project_dir, test_command, iteration,
+                    output_dir, genesis_path,
+                )
+
+        done["data"] = {
+            "passed": False, "pass_count": agg_pass,
+            "fail_count": agg_fail, "expected_count": agg_expected,
+            "per_cluster": per_cluster_results,
+        }
+        return False, aggregated_output
+
+
+def _task3_legacy_single(
+    project_dir, test_command, iteration, output_dir, genesis_path,
+) -> tuple[bool, str]:
+    """Pre-FR-024 single-shot path. Retained for pipelines without baked
+    clusters (non-skeleton backends, plain-cargo projects). Uses the
+    discovered `test_command` and the lenient `validate_task3_output`
+    classifier. New skeleton-backend runs never hit this path."""
     output_file = Path(output_dir) / f"tests_output_{iteration}.txt"
     env = _cargo_env()
     _attempt = iteration if isinstance(iteration, int) else None
@@ -14259,18 +14997,13 @@ def task3(project_dir, test_command, iteration, output_dir, genesis_path):
         write(output_file,
               f"=== genesis.md (iteration {iteration}) ===\n{genesis}\n{OUTPUT_SEPARATOR}\n{test_output}")
         passed   = result.returncode == 0
-        _pass_n, _fail_n = _parse_test_counts(test_output)
+        _pass_n, _fail_n, _ = _parse_test_counts(test_output)
         _log(f"  Tests {'PASSED' if passed else 'FAILED'}. Output -> {output_file}")
         _emit("test.pass" if passed else "test.fail",
               duration_ms=int((time.monotonic() - _t_start) * 1000),
               data={"returncode": result.returncode,
                     "pass_count": _pass_n, "fail_count": _fail_n,
                     "output": _store_prompt_content(test_output)})
-        # P7.3: inline retry before escalating to task4. The classifier
-        # identifies fns that likely caused the failure; we attempt single-
-        # shot fixes per fn, re-run, and either accept the improved state
-        # or revert from snapshot. Guarded by TASK3_INLINE_RETRY env (default
-        # on).
         if not passed:
             retry_passed, retry_output = _task3_inline_retry(
                 project_dir=project_dir,
@@ -14281,12 +15014,10 @@ def task3(project_dir, test_command, iteration, output_dir, genesis_path):
             if retry_passed:
                 passed = True
                 test_output = retry_output
-                # Overwrite the on-disk record so downstream (task4, failure
-                # log) reflects the recovered state.
                 write(output_file,
                       f"=== genesis.md (iteration {iteration}) ===\n{genesis}"
                       f"\n{OUTPUT_SEPARATOR}\n{test_output}")
-                _pass_n, _fail_n = _parse_test_counts(test_output)
+                _pass_n, _fail_n, _ = _parse_test_counts(test_output)
                 _log(f"  Tests PASSED via inline retry. Output -> {output_file}")
                 _emit("test.pass", duration_ms=int(
                     (time.monotonic() - _t_start) * 1000),
@@ -14294,12 +15025,11 @@ def task3(project_dir, test_command, iteration, output_dir, genesis_path):
                             "fail_count": _fail_n, "via": "task3_inline_retry",
                             "output": _store_prompt_content(test_output)})
             elif retry_output != test_output:
-                # Partial improvement kept; refresh the on-disk record.
                 test_output = retry_output
                 write(output_file,
                       f"=== genesis.md (iteration {iteration}) ===\n{genesis}"
                       f"\n{OUTPUT_SEPARATOR}\n{test_output}")
-                _pass_n, _fail_n = _parse_test_counts(test_output)
+                _pass_n, _fail_n, _ = _parse_test_counts(test_output)
         done["data"] = {"passed": passed, "pass_count": _pass_n, "fail_count": _fail_n}
         return passed, test_output
 
@@ -18229,19 +18959,35 @@ def load_original_structure(project_dir: Path, module_name: str) -> list[str]:
     return []
 
 
-def _parse_test_counts(test_output: str) -> tuple[int, int]:
+def _parse_test_counts(test_output: str) -> tuple[int, int, int]:
     """
-    Parse the number of passed and failed tests from cargo test / pytest output.
-    Returns (passed, failed). Returns (0, 0) if not parseable.
+    Parse the number of passed, failed, and ignored tests from cargo
+    test / pytest output. Returns (passed, failed, ignored) summed
+    across every `test result:` line. Returns (0, 0, 0) when not
+    parseable.
+
+    Used by FR-024 improvement-driven loops (the metric for "is the
+    pipeline making progress on tests?") and by older single-shot
+    callers that just need passed+failed (ignored is appended and the
+    older callers unpack only the first two — Python tolerates this
+    via tuple-unpack with `_` or explicit indexing).
     """
-    passed = failed = 0
-    # Cargo: "test result: ok. 3 passed; 0 failed; ..."
-    # Cargo: "test result: FAILED. 1 passed; 2 failed; ..."
-    for m in re.finditer(r'(\d+)\s+passed', test_output):
-        passed += int(m.group(1))
-    for m in re.finditer(r'(\d+)\s+failed', test_output):
-        failed += int(m.group(1))
-    return passed, failed
+    passed = failed = ignored = 0
+    if not test_output:
+        return (0, 0, 0)
+    # Per-binary line: `test result: ok. 5 passed; 0 failed; 1 ignored; ...`
+    for m in re.finditer(
+        r"test result:\s*\w+\.\s*(\d+)\s+passed;\s*(\d+)\s+failed"
+        r"(?:;\s*(\d+)\s+ignored)?",
+        test_output,
+    ):
+        try:
+            passed += int(m.group(1))
+            failed += int(m.group(2))
+            ignored += int(m.group(3) or "0")
+        except ValueError:
+            continue
+    return (passed, failed, ignored)
 
 
 def _measure_baseline_coverage(project_dir: Path, modules: list[str],
@@ -19522,7 +20268,7 @@ This is a Rust procedural macro crate. Strict rules apply:
                             + api_conformance_report
                             + "\n"
                         )
-                    pass_count, fail_count = _parse_test_counts(test_output)
+                    pass_count, fail_count, _ = _parse_test_counts(test_output)
 
                     # Anti-corruption: classify the test result before deciding what to do.
                     t3_status, t3_reason = validate_task3_output(
@@ -19600,7 +20346,7 @@ This is a Rust procedural macro crate. Strict rules apply:
                             module_dir_rel=module_dir_rel,
                         )
                         if fix_passed:
-                            pass_count, fail_count = _parse_test_counts(test_output)
+                            pass_count, fail_count, _ = _parse_test_counts(test_output)
                             t3_status, _ = validate_task3_output(
                                 pass_count, fail_count, module_has_tests
                             )

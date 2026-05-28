@@ -345,6 +345,301 @@ def test_eval_cfg_pred() -> None:
     print("  OK  _eval_cfg_pred")
 
 
+def test_count_test_fns_cfg_aware() -> None:
+    """FR-024: cfg-aware test counter must skip #[test] fns gated by a
+    #[cfg(...)] whose predicate is in the cluster's cfg_false set."""
+    import pipeline
+    text = (
+        "#[test]\nfn t_always() {}\n"
+        "\n"
+        "#[cfg(error_generic_member_access)]\n#[test]\nfn t_nightly_only() {}\n"
+        "\n"
+        "#[test]\n#[cfg(any(feature=\"std\", not(anyhow_no_core_error)))]\n"
+        "fn t_std_or_default() {}\n"
+        "\n"
+        "#[cfg(unknown_predicate)]\n#[test]\nfn t_unknown() {}\n"
+    )
+    # Stable: error_generic_member_access ∈ cfg_false → t_nightly_only
+    # excluded. t_unknown undecidable → kept. t_always always. t_std_or_default
+    # has any() with `not(anyhow_no_core_error)` true → kept.
+    n_stable = pipeline._count_test_fns_cfg_aware(
+        text,
+        cfg_true=set(),
+        cfg_false={"error_generic_member_access", "anyhow_no_core_error"},
+    )
+    assert n_stable == 3, f"stable count expected 3, got {n_stable}"
+    # Nightly: error_generic_member_access ∈ cfg_true → t_nightly_only kept.
+    n_nightly = pipeline._count_test_fns_cfg_aware(
+        text,
+        cfg_true={"error_generic_member_access"},
+        cfg_false=set(),
+    )
+    assert n_nightly == 4, f"nightly count expected 4, got {n_nightly}"
+    print("  OK  _count_test_fns_cfg_aware (FR-024)")
+
+
+def test_validate_task3_strict() -> None:
+    """FR-024 strict per-cluster acceptance criterion."""
+    import pipeline
+    v = pipeline.validate_task3_output_strict
+    # All accounted, no failures → pass.
+    s, _ = v(pass_count=10, fail_count=0, ignored_count=2, expected_count=12, cluster_name="x")
+    assert s == "pass", s
+    # Any failure → fail.
+    s, _ = v(pass_count=10, fail_count=1, ignored_count=0, expected_count=11, cluster_name="x")
+    assert s == "fail", s
+    # Reported fewer than expected → incomplete (binary failed to build).
+    s, _ = v(pass_count=5, fail_count=0, ignored_count=0, expected_count=12, cluster_name="x")
+    assert s == "incomplete", s
+    # Empty corpus and no runs → incomplete.
+    s, _ = v(pass_count=0, fail_count=0, ignored_count=0, expected_count=0, cluster_name="x")
+    assert s == "incomplete", s
+    # Ignored tests count toward the expected total.
+    s, _ = v(pass_count=8, fail_count=0, ignored_count=4, expected_count=12, cluster_name="x")
+    assert s == "pass", s
+    print("  OK  validate_task3_output_strict (FR-024)")
+
+
+def test_parse_test_counts() -> None:
+    """FR-024 metric parser: sum (passed, failed, ignored) across all
+    `test result:` lines in cargo test output."""
+    import pipeline
+    sample = (
+        "running 0 tests\n"
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n"
+        "\n"
+        "running 5 tests\n"
+        "test foo ... ok\n"
+        "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n"
+        "\n"
+        "running 3 tests\n"
+        "test bar ... FAILED\n"
+        "test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out\n"
+        "\n"
+        "running 2 tests\n"
+        "test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out\n"
+    )
+    passed, failed, ignored = pipeline._parse_test_counts(sample)
+    assert (passed, failed, ignored) == (6, 3, 1), \
+        f"got ({passed}, {failed}, {ignored}), expected (6, 3, 1)"
+    # Empty input → (0, 0, 0).
+    assert pipeline._parse_test_counts("") == (0, 0, 0)
+    print("  OK  _parse_test_counts (FR-024)")
+
+
+def test_build_test_reverse_map() -> None:
+    """FR-024 reverse map: each #[test] fn maps to fns it could reach."""
+    import pipeline
+    import tempfile
+    if not pipeline._SKELETON_EXTRACTOR_BIN.exists():
+        print("  SKIP _build_test_reverse_map (extractor missing)")
+        return
+    with tempfile.TemporaryDirectory(prefix="rev_map_") as td:
+        root = Path(td)
+        src = root / "src"
+        src.mkdir()
+        (src / "lib.rs").write_text(
+            "pub fn alpha() -> i32 { 1 }\n"
+            "pub fn beta() -> i32 { 2 }\n"
+            "pub fn gamma() -> i32 { 3 }\n"
+        )
+        tests_dir = root / "tests"
+        tests_dir.mkdir()
+        (tests_dir / "test_alpha_beta.rs").write_text(
+            "use mycrate::{alpha, beta};\n"
+            "#[test]\nfn t_one() { assert_eq!(alpha(), 1); }\n"
+            "#[test]\nfn t_two() { assert_eq!(beta(), 2); }\n"
+        )
+        test_files = list(tests_dir.rglob("*.rs"))
+        rev = pipeline._build_test_reverse_map(test_files, src)
+        # Both test fns should map to alpha and beta (gamma not referenced
+        # by name in the test file, but it's in src — coarse reverse map
+        # is file-level, so it may or may not appear; either way both
+        # named fns must be present).
+        assert "t_one" in rev, f"t_one missing from reverse map: {rev}"
+        assert "t_two" in rev, f"t_two missing from reverse map: {rev}"
+        names = {n for (_f, n) in rev["t_one"]}
+        assert "alpha" in names, f"alpha not attributed to t_one: {names}"
+        assert "beta" in names, f"beta not attributed to t_one: {names}"
+    print("  OK  _build_test_reverse_map (FR-024)")
+
+
+def test_ast_cluster_merge_preserves_trait_structure() -> None:
+    """Regression: the AST-based cluster merger must keep cfg-divergent
+    items at their natural AST position. The previous regex-based splicer
+    emitted divergent trait/impl method bodies OUTSIDE their trait/impl
+    block, producing orphan declarations with stray `}` braces — concrete
+    case observed in anyhow's `ensure.rs`:
+
+        pub trait BothDebug { #[cfg(...)] fn __dispatch_ensure(...); }
+        impl BothDebug for (A,B) { fn __dispatch_ensure(...) { body_X } }
+        #[cfg(...)] fn __dispatch_ensure(...) ; }   ← orphan with stray `}`
+
+    This test feeds three cluster fixtures where the same trait method's
+    impl body differs and asserts that the merged output keeps the impl
+    bodies INSIDE the impl block (no orphan items) AND compiles cleanly.
+    """
+    import pipeline
+    import subprocess
+    import tempfile
+
+    if not pipeline._SKELETON_EXTRACTOR_BIN.exists():
+        print("  SKIP _ast_cluster_merge (extractor binary missing)")
+        return
+
+    base = (
+        "pub trait T { fn dispatch(self, m: &'static str) -> i32; }\n"
+        "impl T for (i32, i32) {\n"
+        "    fn dispatch(self, m: &'static str) -> i32 { self.0 + self.1 }\n"
+        "}\n"
+        "fn helper() -> i32 { 0 }\n"
+    )
+    variant = (
+        "pub trait T { fn dispatch(self, m: &'static str) -> i32; }\n"
+        "impl T for (i32, i32) {\n"
+        "    fn dispatch(self, m: &'static str) -> i32 { self.0 * self.1 }\n"
+        "}\n"
+        "fn helper() -> i32 { 0 }\n"
+    )
+    with tempfile.TemporaryDirectory(prefix="ast_merge_") as td:
+        root = Path(td)
+        (root / "a.rs").write_text(base)
+        (root / "b.rs").write_text(variant)
+        out = root / "merged.rs"
+        r = subprocess.run(
+            [str(pipeline._SKELETON_EXTRACTOR_BIN), "--merge-clusters",
+             "--merge-output", str(out),
+             "--cluster", f"cluster_a:{root}/a.rs:feature_a",
+             "--cluster", f"cluster_b:{root}/b.rs:feature_b"],
+            capture_output=True, text=True, timeout=30,
+        )
+        assert r.returncode == 0, f"extractor failed: {r.stderr}"
+        merged = out.read_text()
+        # The trait declaration appears exactly once (identical across clusters).
+        assert merged.count("pub trait T") == 1, \
+            f"trait collapsed wrong; merged:\n{merged}"
+        # Two impl-method bodies appear, gated, INSIDE the impl block.
+        assert merged.count("impl T for (i32, i32)") == 1, \
+            f"impl block duplicated; merged:\n{merged}"
+        assert "self.0 + self.1" in merged
+        assert "self.0 * self.1" in merged
+        # No orphan fn appears with a `}` directly preceding it at top level.
+        # Crude check: the count of top-level `}` mid-file should be balanced.
+        # A definitive check: the merged file must parse + compile.
+        crate = root / "compile_test"
+        (crate).mkdir()
+        (crate / "Cargo.toml").write_text(
+            '[package]\nname="m"\nversion="0.0.1"\nedition="2021"\n'
+        )
+        src = crate / "src"
+        src.mkdir()
+        (src / "lib.rs").write_text(
+            '#![allow(unused, dead_code)]\nmod merged;\n'
+        )
+        (src / "merged.rs").write_text(merged)
+        # Build under each cluster cfg in turn — exactly one impl method
+        # must be active per build (the trait must be fully implemented).
+        # If the merge had misplaced the methods outside the impl block,
+        # the trait would be empty and cargo would either err on a stub
+        # impl or on the orphan fn syntax.
+        for feat in ("feature_a", "feature_b"):
+            cc = subprocess.run(
+                ["cargo", "check"], cwd=crate, capture_output=True, text=True,
+                timeout=60,
+                env={**os.environ, "RUSTFLAGS": f"--cfg={feat}"},
+            )
+            assert cc.returncode == 0, (
+                f"merged output did not compile under {feat}:\n"
+                f"--- merged.rs ---\n{merged}\n"
+                f"--- cargo stderr ---\n{cc.stderr}"
+            )
+            # cargo caches per-RUSTFLAGS. Wipe target between builds so
+            # both feats are exercised cleanly.
+            subprocess.run(["cargo", "clean"], cwd=crate,
+                            capture_output=True, timeout=30)
+    print("  OK  AST cluster merge preserves trait/impl structure")
+
+
+def test_strip_preserves_gen_tests_verbatim() -> None:
+    """FR-023: strip must preserve `*.gen_tests_N.rs` siblings byte-for-byte.
+
+    These files are task0c output — pure test code with imports and helper
+    types. Running `extract_rust_tests` on them drops the imports and
+    helpers, leaving `#[test]` fns that reference undefined symbols. The
+    gen_test then fails to compile when Phase C runs cargo test, the TDD
+    compile-frontier sees unresolved-name errors that don't map to any
+    reconstruction target, and the gen_test is silently disabled.
+    """
+    import subprocess
+    import sys
+    import tempfile
+    strip_script = Path(__file__).resolve().parent.parent / "strip_to_tests.py"
+    if not strip_script.exists():
+        print("  SKIP _strip_preserves_gen_tests_verbatim (script missing)")
+        return
+    fixture = (
+        "use super::*;\n"
+        "use std::io;\n"
+        "use std::error::Error as StdError;\n"
+        "use std::fmt::{self, Debug, Display};\n"
+        "\n"
+        "#[derive(Debug)]\n"
+        "struct MyTestErr(&'static str);\n"
+        "\n"
+        "impl Display for MyTestErr {\n"
+        "    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {\n"
+        "        f.write_str(self.0)\n"
+        "    }\n"
+        "}\n"
+        "\n"
+        "impl StdError for MyTestErr {}\n"
+        "\n"
+        "#[test]\n"
+        "fn test_with_helper() {\n"
+        "    let e = MyTestErr(\"hi\");\n"
+        "    assert_eq!(e.to_string(), \"hi\");\n"
+        "    let _: &dyn StdError = &e;\n"
+        "    let _io = io::Error::new(io::ErrorKind::Other, \"x\");\n"
+        "}\n"
+    )
+    with tempfile.TemporaryDirectory(prefix="strip_gentests_") as td:
+        root = Path(td)
+        (root / "Cargo.toml").write_text(
+            '[package]\nname = "x"\nversion = "0.1.0"\nedition = "2021"\n'
+        )
+        src = root / "src"
+        src.mkdir()
+        (src / "lib.rs").write_text(
+            "#[cfg(test)]\n#[path = \"foo.gen_tests_1.rs\"]\n"
+            "mod gen_tests_1;\nfn _x() {}\n"
+        )
+        gen_path = src / "foo.gen_tests_1.rs"
+        gen_path.write_text(fixture)
+
+        r = subprocess.run(
+            [sys.executable, str(strip_script), str(root)],
+            capture_output=True, text=True, timeout=30,
+        )
+        assert r.returncode == 0, f"strip_to_tests.py failed: {r.stderr}"
+        survivor = gen_path.read_text()
+        # Must keep helper struct + Display + StdError impl.
+        assert "struct MyTestErr" in survivor, \
+            "gen_tests helper struct dropped by strip"
+        assert "impl Display for MyTestErr" in survivor, \
+            "gen_tests Display impl dropped by strip"
+        assert "impl StdError for MyTestErr" in survivor, \
+            "gen_tests StdError impl dropped by strip"
+        # Must keep imports the tests rely on.
+        assert "use super::*;" in survivor, "use super::*; dropped by strip"
+        assert "use std::io;" in survivor, "use std::io; dropped by strip"
+        # Byte-for-byte is the strongest property.
+        assert survivor == fixture, (
+            "gen_tests file modified by strip; expected byte-for-byte "
+            "preservation per FR-023."
+        )
+    print("  OK  strip preserves gen_tests verbatim (FR-023)")
+
+
 def test_file_cfg_predicate_adjacent_mod_decls() -> None:
     """Regression: when two `mod foo;` decls sit on adjacent lines and the
     FIRST one has a `#[cfg(...)]` attribute, `_file_cfg_predicate` must
@@ -1255,6 +1550,12 @@ def main() -> int:
     test_prune_redundant_clusters()
     test_filter_tests_for_cluster()
     test_eval_cfg_pred()
+    test_count_test_fns_cfg_aware()
+    test_validate_task3_strict()
+    test_parse_test_counts()
+    test_build_test_reverse_map()
+    test_ast_cluster_merge_preserves_trait_structure()
+    test_strip_preserves_gen_tests_verbatim()
     test_file_cfg_predicate_adjacent_mod_decls()
     test_cluster_extractor_args()
     test_buildcluster_features_toolchain()

@@ -420,6 +420,18 @@ def process_rust(project_dir: Path, dry_run: bool):
             kept += 1
             continue
 
+        # FR-023: gen_tests siblings are pure test code written by task0c.
+        # Every line (imports, helper structs/impls, #[test] fns) is signal
+        # for reconstruction. They MUST survive strip byte-for-byte —
+        # running `extract_rust_tests` on them drops imports + helpers and
+        # leaves test bodies referencing undefined symbols. The file then
+        # fails to compile under cargo test in Phase C; the TDD compile-
+        # frontier sees unresolved-name errors that don't map to any
+        # reconstruction target, so the gen_test is silently disabled.
+        if re.match(r"^.+\.gen_tests_\d+\.rs$", path.name):
+            kept += 1
+            continue
+
         # .rs source file: extract test blocks, delete if none
         try:
             content = path.read_text(errors='ignore')
