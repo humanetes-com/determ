@@ -18,6 +18,9 @@ Every new tool, binary, or Python package must be added to `setup.sh` (and `requ
 ## Pipeline restart timestamps
 Each restart is logged as `PIPELINE STARTED — <timestamp> UTC` in `logs/pipeline_anyhow.log`. Check this to confirm which code version is running.
 
+## Never create tools in /tmp
+Throwaway scripts, benchmarks, probes, one-off analysis tools — none of these go in `/tmp`. They are deleted on reboot and lost for future reuse. Put every tool under `determ/tools/` so it is versioned and reusable. `/tmp` is for transient data artifacts (logs, caches, intermediate output), never for code we might want again.
+
 ## Static analysis after every Python edit
 After modifying any `.py` file, run `bash check.sh` and fix **all** reported errors — including pre-existing ones unrelated to your change. Never leave check.sh failing.
 

@@ -2087,3 +2087,82 @@ empty-response retry. See handover for details.
 Items deemed non-issues on inspection (P0.2, P0.3, P2.3, P2.5, P2.6) are
 documented in handover. Plan 2 above supersedes most remaining "task2
 output budget" concerns by structurally reducing per-call output size.
+
+---
+
+# Plan 8 — GPU-parallel unit-test generation for task0c (2026-05-29)
+
+Goal: raise GPU utilization by issuing N concurrent vLLM generation requests
+during task0c augmentation. NOT coverage parallelism — splice+coverage stay
+serial. Mirrors PHASE_C_PARALLELISM (LLM concurrent, cargo serialized).
+
+## Decisive facts (measured 2026-05-29, live vLLM)
+
+| Fact | Value | Source |
+|---|---|---|
+| Scheduler concurrency cap | `--max-num-seqs 4` | vLLM launch args |
+| Prefix caching | `--enable-prefix-caching` ON | cache_config_info |
+| Hist. prefix-cache hit rate | ~1.8% (1.54M/84.2M tok) | /metrics |
+| KV budget gauge | num_gpu_blocks reported 204 — implausible, ignored; measured empirically | /metrics |
+
+## Measured concurrency behaviour (tools/bench_parallel.py, P=4, prefix≈6K, out=200)
+
+| mode | wall | agg tok/s | peakKV | capWait |
+|---|---|---|---|---|
+| serial x1 | 1.30s | 39.1 | 7.4% | 0 |
+| x4 DISTINCT prefix | 31.30s | 7.4 | 31.0% | 3 |
+| x4 SHARED prefix | 3.76s | 72.8 | 14.8% | 0 |
+
+Distinct-prefix fan-out THRASHES (prefills serialize, capacity-waits, slower
+than serial). Shared-prefix scales clean (~10x, no stalls). Effect grows with
+prompt size; real task0c prompts are 60-100K tok.
+
+## Cost model (P = effective parallelism)
+
+```
+B = KV budget (tok); per req = prefix p + suffix s + output o; cap = max_num_seqs = 4
+distinct:  P_eff = min(4, floor( B / (p+s+o) ))
+shared:    P_eff = min(4, floor( (B - p) / (s+o) ))   # marginal/req = s+o only
+```
+
+Shared prefix makes P_eff scheduler-bound (4), not KV-bound. ⇒ parallelism is
+only safe/fast if concurrent requests share their large prefix.
+
+## Design
+
+D1 — Parallel unit = "N generations sharing a prefix", not distinct files.
+  Primary mode: same-file best-of-N (N candidate gen_tests blocks for one
+  file's uncovered lines, same prompt prefix, picked by coverage gain). KV-near-
+  free, improves coverage/attempt, deterministic selection (max lines moved,
+  tie-break stable order).
+
+D2 — Prompt ordering for cache hits: stable content (rules preamble, file
+  source, coverage_strategy, invariants) as PREFIX; variable content (target
+  uncovered lines, per-candidate seed, retro notes) as SUFFIX. vLLM keys on
+  longest matching token prefix.
+
+D3 — Serialized stage unchanged: apply gen_tests sibling + mod decl + quick-cov
+  behind one lock, in deterministic order. No target/ collision.
+
+D4 — Shared worker-pool helper: factor the PHASE_C dispatch (pipeline.py ~9888)
+  into a reusable pool both phases call. Do NOT copy-paste thread logic into
+  task0c. New knob TASK0C_PARALLELISM (default 1), same shape as
+  PHASE_C_PARALLELISM.
+
+D5 — Cross-file fan-out (distinct prefixes) is allowed only when prompts are
+  small enough that P*(p+s+o) <= B; otherwise it thrashes. Default OFF.
+
+D6 — Intra-attempt staleness accepted (same tradeoff PHASE_C documents): batched
+  candidates don't see each other's just-confirmed file_what_worked.
+
+## Open / to confirm
+
+- Re-run tools/bench_parallel.py at PREFIX_TOK=80000 to quantify P_eff and the
+  shared-vs-distinct gap at realistic task0c prompt size.
+- Consider raising --max-num-seqs (setup.sh / vLLM relaunch) only if shared-
+  prefix runs show KV headroom at realistic sizes; today 4 is the cap.
+- Connects to the prompt-budget finding: smaller prompts + shared prefix both
+  raise achievable P. Shrinking task0c prompts compounds the win.
+
+Status: PLANNED. No implementation. tools/bench_parallel.py committed as the
+measurement harness (size-parameterized via PREFIX_TOK/OUT_TOK/P env).
