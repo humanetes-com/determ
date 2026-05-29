@@ -51,11 +51,12 @@ def _pick_log(run: dict | None, key: str, default_path: str) -> str:
     """Prefer the registered run's log; fall back to default."""
     if run:
         v = run.get(key)
-        if v and os.path.exists(v):
+        if isinstance(v, str) and os.path.exists(v):
             return v
         # stdout_log is special: when present it's the live combined log.
         stdout_log = run.get("stdout_log")
-        if key == "pipeline_log" and stdout_log and os.path.exists(stdout_log):
+        if (key == "pipeline_log" and isinstance(stdout_log, str)
+                and os.path.exists(stdout_log)):
             return stdout_log
     return default_path
 
@@ -375,6 +376,12 @@ def _phase_c_state() -> dict[str, Any]:
         "pass_fills_failed": 0,
         # Cumulative progress denominator (total fns in cluster scope).
         "total_fns_in_cluster": 0,
+        # Authoritative cluster-scope filled count emitted by pass.start.
+        # Preferred over the inferred `total - pass_stubs_total + done` math
+        # below — that math gives wrong answers when the TDD driver narrows
+        # `pass_stubs_total` to a per-pass frontier.
+        "filled_count_at_pass_start": 0,
+        "all_stubs_remaining_at_pass_start": 0,
     }
     if not os.path.exists(EVENTS_LOG):
         return out
@@ -434,6 +441,12 @@ def _phase_c_state() -> dict[str, Any]:
             # scope, including ones filled in prior runs). Lets the bar
             # show real cumulative state instead of resetting to 0 per run.
             out["total_fns_in_cluster"] = int(d.get("total_fns_in_cluster", 0))
+            # Authoritative cluster-scope filled / remaining counts at the
+            # moment this pass started. Newer events carry these directly;
+            # older events (before the disambiguation) won't, and we fall
+            # back to the inferred math.
+            out["filled_count_at_pass_start"] = int(d.get("filled_count", 0))
+            out["all_stubs_remaining_at_pass_start"] = int(d.get("all_stubs_remaining", 0))
         elif ev == "phase_c.fn.fill.start":
             in_flight_fn = d.get("fn")
             in_flight_pass = d.get("pass_n")
@@ -499,25 +512,45 @@ def _phase_c_panel_rows(state: dict[str, Any]) -> list[str]:
     rows.append(f"  phase-c  cluster={cluster}  pass={pass_n}/{maxp}  last={age_s}")
 
     # Cumulative progress bar (across runs):
-    # filled_cumulative = total_in_cluster - stubs_at_pass_start + this_pass_done
-    # = "how many fns in this cluster are NOT still unimplemented".
-    # Stays accurate across restarts because pass_stubs_total snapshots the
-    # current count AT pass start, and total_fns_in_cluster is constant.
+    #   filled_cumulative = filled_count_at_pass_start + this_pass_done
+    # Authoritative source = `filled_count` from phase_c.pass.start (snapshot
+    # of "how many fns in this cluster are NOT still unimplemented" at the
+    # moment the pass started). Adding this-pass fills tracks progress
+    # mid-pass without ever crossing the total.
+    #
+    # Legacy fallback for events emitted before that field existed:
+    # `total - pass_stubs_total + done`. This is wrong when the TDD driver
+    # narrows pass_stubs_total to a per-pass frontier (1-2 fns) instead of
+    # the full remaining-stubs count — the math then claims ~99% with only
+    # 1 frontier slot, which is what was hiding the real cluster progress.
     _pt = state.get("pass_stubs_total", 0) or 0
     _pd = state.get("pass_fills_done", 0) or 0
     _pf = state.get("pass_fills_failed", 0) or 0
     _total = state.get("total_fns_in_cluster", 0) or 0
-    if _total > 0 and _pt > 0:
-        _cum_filled = _total - _pt + _pd  # exhausted failures still count as stubs
+    _filled_at_start = state.get("filled_count_at_pass_start", 0) or 0
+    _all_stubs_at_start = state.get("all_stubs_remaining_at_pass_start", 0) or 0
+    if _total > 0 and _filled_at_start >= 0 and (_filled_at_start + _all_stubs_at_start) > 0:
+        _cum_filled = min(_total, _filled_at_start + _pd)
+        _cum_pct = _cum_filled / _total if _total else 0
+        _bar_w = 28
+        _bar_filled = int(_bar_w * _cum_pct)
+        _bar = "█" * _bar_filled + "░" * (_bar_w - _bar_filled)
+        # `this pass` denominator: prefer the frontier size (pass_stubs_total)
+        # — that's the actionable workload for the current TDD iteration.
+        rows.append(f"           progress  [{_bar}]  "
+                    f"{_cum_filled}/{_total} ({int(_cum_pct * 100)}%) "
+                    f"cluster  · frontier: {_pd + _pf}/{_pt}")
+    elif _total > 0 and _pt > 0:
+        # Legacy fallback path (no filled_count in events).
+        _cum_filled = max(0, _total - _pt + _pd)
         _cum_pct = _cum_filled / _total if _total else 0
         _bar_w = 28
         _bar_filled = int(_bar_w * _cum_pct)
         _bar = "█" * _bar_filled + "░" * (_bar_w - _bar_filled)
         rows.append(f"           progress  [{_bar}]  "
                     f"{_cum_filled}/{_total} ({int(_cum_pct * 100)}%) "
-                    f"cumulative  · this pass: {_pd + _pf}/{_pt}")
+                    f"cluster (legacy)  · frontier: {_pd + _pf}/{_pt}")
     elif _pt > 0:
-        # Fallback when total_fns_in_cluster missing (older events).
         _done_this_pass = _pd + _pf
         _pct = _done_this_pass / _pt
         _bar_w = 28

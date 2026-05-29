@@ -623,8 +623,12 @@ TEST_TIMEOUT = 600
 # Timeout in seconds for the compile-only build check.
 BUILD_TIMEOUT = 120
 
-# Max retries for the inner build-fix loop (TASK 2 + compile check).
-BUILD_CHECK_RETRIES = 5
+# Backstop for the inner build-fix loop (TASK 2 + compile check). The
+# real terminator is the per-loop floor-stall on rustc error count
+# (`_t2_max_stalls`). Set to a high value so the stall budget always
+# fires first under the "no hard caps on improvement" principle. Operators
+# wanting a strict regen cap can override the env.
+BUILD_CHECK_RETRIES = int(os.getenv("BUILD_CHECK_RETRIES", "10000"))
 
 # Fix attempts after TASK 3 failure before escalating to TASK 4 + full regeneration.
 # Each attempt asks the LLM to fix only the specific files causing test failures,
@@ -1008,6 +1012,72 @@ def extract_files(text):
         _log("  WARNING: model used wrong file format (e.g. <path/to/file> instead of "
              '<FILE path="path/to/file">). Retrying so it uses the correct format.')
     return files
+
+
+# Aider-style SEARCH/REPLACE patch protocol. Used by generate_fix_loop so
+# the model can emit a tiny localised change instead of the entire
+# multi-thousand-line file. Each <PATCH file="..."> block may contain one
+# or more SEARCH/REPLACE pairs; the pipeline applies them by exact-string
+# match against current file contents.
+_PATCH_BLOCK_RE = re.compile(
+    r'<PATCH\s+file="([^"]+)"\s*>(.*?)</PATCH\s*>',
+    re.DOTALL,
+)
+_PATCH_HUNK_RE = re.compile(
+    r'<{5,}\s*SEARCH\s*\n(.*?)\n={5,}\s*\n(.*?)\n>{5,}\s*REPLACE\s*',
+    re.DOTALL,
+)
+
+
+def extract_patches(text: str) -> list[tuple[str, str, str]]:
+    """Parse <PATCH file="..."> blocks containing SEARCH/REPLACE hunks.
+
+    Returns a list of (file_rel, search_text, replace_text) tuples in the
+    order the model emitted them. Tolerant of code fences inside the
+    PATCH block (some models wrap the hunk in ```diff … ```).
+    """
+    out: list[tuple[str, str, str]] = []
+    for path, body in _PATCH_BLOCK_RE.findall(text or ""):
+        # Strip outer code fences if present.
+        body_stripped = body.strip()
+        if body_stripped.startswith("```"):
+            # drop the opening fence line and the closing fence line
+            lines = body_stripped.splitlines()
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            body_stripped = "\n".join(lines)
+        for search, replace in _PATCH_HUNK_RE.findall(body_stripped):
+            out.append((path.strip(), search, replace))
+    return out
+
+
+def apply_patch(file_path: Path, search: str, replace: str) -> tuple[bool, str]:
+    """Apply a single SEARCH/REPLACE hunk to `file_path` by exact match.
+
+    Returns (success, reason). Search must match EXACTLY once — zero
+    matches means the model invented or paraphrased the surrounding
+    context; multiple matches means the hunk is ambiguous. Both cases
+    are rejected so we never silently corrupt unrelated sites.
+    """
+    try:
+        text = file_path.read_text(encoding="utf-8")
+    except Exception as e:
+        return False, f"read_failed: {e}"
+    if not search:
+        return False, "empty_search"
+    n = text.count(search)
+    if n == 0:
+        return False, "no_match"
+    if n > 1:
+        return False, f"ambiguous_{n}_matches"
+    new_text = text.replace(search, replace, 1)
+    try:
+        file_path.write_text(new_text, encoding="utf-8")
+    except Exception as e:
+        return False, f"write_failed: {e}"
+    return True, "ok"
 
 
 def extract_test_mod(text: str) -> str:
@@ -5416,6 +5486,109 @@ def _splice_fn_body(file_path: Path, fn_name: str, new_body: str) -> tuple[bool,
     return True, len(new_text) - len(text)
 
 
+# --- Per-impl response parser + splice helpers --------------------------
+#
+# The per-impl prompt asks the model to emit one `<FN name="X" block="...">`
+# block per stub. The parser collects them keyed by (block_container,
+# fn_name) so the splicer can route each body to the correct impl.
+
+_FN_BLOCK_RE = re.compile(
+    r'<FN\s+name="([^"]+)"\s+block="([^"]+)"\s*>(.*?)</FN\s*>',
+    re.DOTALL,
+)
+
+# A body may start with an optional `where ...` clause (on its own line) used
+# to tighten the impl-level bounds for this fn alone. Match it greedily to
+# the end of the line; the splicer rewrites the fn signature when present.
+_WHERE_CLAUSE_RE = re.compile(r'^\s*(where\s[^\n]+)\n', re.MULTILINE)
+
+
+def extract_fn_bodies(text: str) -> list[dict]:
+    """Parse `<FN name="X" block="...">body</FN>` blocks from a model
+    response. Returns a list of records:
+        {"fn_name": str, "block": str, "where_clause": str | None,
+         "body": str}
+    The order in the response is preserved. Bodies are stripped of
+    surrounding fences if present.
+    """
+    out: list[dict] = []
+    for fn_name, block_header, body in _FN_BLOCK_RE.findall(text or ""):
+        body_stripped = body.strip()
+        # Strip outermost code fence if the model wrapped the body.
+        if body_stripped.startswith("```"):
+            lines = body_stripped.splitlines()
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            body_stripped = "\n".join(lines).strip()
+        if not body_stripped:
+            continue
+        # Detect an optional leading `where ...` clause used to tighten
+        # bounds. Remove it from the body and surface separately.
+        where_clause: str | None = None
+        m = _WHERE_CLAUSE_RE.match(body_stripped + "\n")
+        if m:
+            where_clause = m.group(1).strip()
+            body_stripped = body_stripped[m.end() - 1:].lstrip()
+        out.append({
+            "fn_name": fn_name.strip(),
+            "block": block_header.strip(),
+            "where_clause": where_clause,
+            "body": body_stripped,
+        })
+    return out
+
+
+def _splice_fn_with_where(
+    file_path: Path,
+    container: str,
+    fn_name: str,
+    body: str,
+    where_clause: str | None = None,
+) -> tuple[bool, str, int]:
+    """Splice `body` into `fn_name` whose containing impl block matches
+    `container`. If `where_clause` is provided, insert it into the fn
+    signature (between sig and the opening brace).
+
+    Returns (success, reason, bytes_delta). `reason` is "ok" on success
+    or a short failure tag for telemetry / retro context.
+    """
+    if not file_path.exists():
+        return False, "file_missing", 0
+    loc = _locate_fn_by_record(file_path, fn_name, container, "")
+    if loc is None:
+        # Fallback: the extractor's container string sometimes includes
+        # the first member's signature. Match on the impl HEADER prefix
+        # only (everything before the first `{`).
+        loose_container = container.split("{", 1)[0].strip()
+        loc = _locate_fn_by_record(file_path, fn_name, loose_container, "")
+    if loc is None:
+        return False, "fn_not_found", 0
+    sig_byte_start, body_byte_start, body_byte_end, sig_text = loc
+
+    # If a where-clause patch is supplied, splice it into the signature.
+    # The signature spans [sig_byte_start, opening-brace-of-body). We
+    # insert `\n    where <clause>` before the opening brace.
+    text = file_path.read_text(encoding="utf-8")
+    brace_pos = text.rfind("{", sig_byte_start, body_byte_start + 1)
+    if where_clause and brace_pos != -1:
+        # Don't double-add a where clause if the sig already has one.
+        sig_slice = text[sig_byte_start:brace_pos]
+        if "where" not in sig_slice:
+            insert = f"\n    {where_clause}\n"
+            text = text[:brace_pos] + insert + text[brace_pos:]
+            shift = len(insert)
+            body_byte_start += shift
+            body_byte_end += shift
+            file_path.write_text(text, encoding="utf-8")
+
+    ok, delta = _splice_fn_body_at(file_path, body_byte_start, body_byte_end, body)
+    if not ok:
+        return False, "splice_rejected", 0
+    return True, "ok", delta
+
+
 def _find_tests_referencing_fn(
     test_files: list[Path],
     fn_name: str,
@@ -5474,6 +5647,41 @@ def _extract_body_response(response: str) -> str | None:
     return response.strip() or None
 
 
+def _strip_doc_attrs(text: str) -> str:
+    """Strip `#[doc = "..."]` attributes from the file view shown to the LLM.
+
+    The skeleton extractor preserves docstrings verbatim — anyhow's source
+    has hundreds of chars of example code embedded in `#[doc = "..."]`
+    attributes for each public fn. They eat huge amounts of prompt budget
+    and don't help the model fill a body. Strip them from the PROMPT
+    view only (on-disk file keeps them so cargo's `cargo doc` etc still
+    works).
+
+    Handles multi-line attributes by counting brackets.
+    """
+    out_lines: list[str] = []
+    in_attr = False
+    depth = 0
+    for ln in text.splitlines():
+        s = ln.lstrip()
+        if not in_attr:
+            # `#[doc = "..."]` or `# [doc (hidden)]` etc. — whitespace
+            # between the # and [ is allowed by Rust.
+            if re.match(r'#\s*\[\s*doc\b', s):
+                depth = s.count("[") - s.count("]")
+                if depth <= 0:
+                    continue
+                in_attr = True
+                continue
+        else:
+            depth += ln.count("[") - ln.count("]")
+            if depth <= 0:
+                in_attr = False
+            continue
+        out_lines.append(ln)
+    return "\n".join(out_lines)
+
+
 def _strip_crate_attrs(text: str) -> str:
     """Strip top-level `#![...]` crate attributes from the file view shown to
     the LLM. They eat tokens and don't help the model fill a fn body. They're
@@ -5512,6 +5720,7 @@ def _annotate_file_view(file_text: str, target_fn: str) -> str:
     (P3.6) since they only eat tokens and don't help fill bodies.
     """
     file_text = _strip_crate_attrs(file_text)
+    file_text = _strip_doc_attrs(file_text)
     out: list[str] = []
     i = 0
     last_fn_end = 0
@@ -6473,6 +6682,73 @@ _RUST_GOTCHAS: list[dict] = [
         ),
     },
     {
+        # Two `impl AsRef<T1> for X` and `impl AsRef<T2> for X` blocks must
+        # remain SEPARATE. Collapsing them into one impl produces E0201
+        # (duplicate method) — Rust has no overloading.
+        "id": "split_trait_impl",
+        "summary": "Two `impl Trait<A> for X` and `impl Trait<B> for X` blocks must stay SEPARATE — never merge into one impl block. Rust has no method overloading; same-named methods in one impl is E0201.",
+        "triggers": {"E0201", "duplicate definitions", "duplicate definition"},
+        "detail": (
+            "If rustc reports `duplicate definitions with name`, the two same-named\n"
+            "methods belong in TWO distinct trait impls, each with its own header:\n"
+            "  WRONG:\n"
+            "    impl AsRef<dyn StdError + Send + Sync> for Error {\n"
+            "        fn as_ref(&self) -> &(dyn StdError + Send + Sync + 'static) { ... }\n"
+            "        fn as_ref(&self) -> &(dyn StdError + 'static) { ... }  // E0201\n"
+            "    }\n"
+            "  RIGHT:\n"
+            "    impl AsRef<dyn StdError + Send + Sync> for Error {\n"
+            "        fn as_ref(&self) -> &(dyn StdError + Send + Sync + 'static) { ... }\n"
+            "    }\n"
+            "    impl AsRef<dyn StdError> for Error {\n"
+            "        fn as_ref(&self) -> &(dyn StdError + 'static) { ... }\n"
+            "    }\n"
+            "Cross-check against FR / SIBLING_REFERENCE for the exact list of\n"
+            "trait headers — never invent overloads under one header."
+        ),
+    },
+    {
+        # The trait header's generic parameter IS the return type — they must
+        # match character-for-character including Send/Sync/'static bounds.
+        "id": "trait_header_signature",
+        "summary": "For `impl AsRef<T> for X`, the fn return type must match `T` exactly — including `+ Send + Sync + 'static` bounds. Mismatch is E0053.",
+        "triggers": {"E0053", "incompatible type for trait", "expected signature"},
+        "detail": (
+            "E0053 means the impl's fn signature does not match the trait's\n"
+            "expected signature. Read the rustc note carefully:\n"
+            "  = note: expected signature `fn(&Error) -> &(dyn ... + Send + Sync + 'static)`\n"
+            "                  found signature `fn(&Error) -> &(dyn ... + 'static)`\n"
+            "The fix: align the fn's return type with what the trait header demands.\n"
+            "Common case: `impl AsRef<dyn Trait + Send + Sync> for X` requires the\n"
+            "fn to return `&(dyn Trait + Send + Sync + 'static)`, NOT `&(dyn Trait + 'static)`.\n"
+            "Before writing, copy the trait header's generic parameter verbatim into\n"
+            "the fn return position."
+        ),
+    },
+    {
+        # A fn returning T by value cannot inherit T: ?Sized from its impl
+        # block — by-value return requires a known size at compile time.
+        "id": "unsized_by_value_return",
+        "summary": "A fn returning `T` by value cannot inherit `T: ?Sized` from its enclosing impl. Either add `where T: Sized` to that fn, or change return to `&T`/`Box<T>`/`*const T`.",
+        "triggers": {"E0277", "doesn't have a size known at compile-time", "?Sized", "statically known size"},
+        "detail": (
+            "When an `impl<T> X<T> where T: ?Sized` contains a fn whose return\n"
+            "type is bare `T` (by value), rustc rejects it: the return slot needs\n"
+            "a known size at compile time.\n"
+            "  WRONG:\n"
+            "    impl<'a, T> Mut<'a, T> where T: ?Sized {\n"
+            "        pub unsafe fn read(self) -> T { ... }  // E0277\n"
+            "    }\n"
+            "  RIGHT (tighten just this fn):\n"
+            "    impl<'a, T> Mut<'a, T> where T: ?Sized {\n"
+            "        pub unsafe fn read(self) -> T where T: Sized { ... }\n"
+            "    }\n"
+            "Or change the return type to a pointer/reference (`&T`, `*const T`,\n"
+            "`Box<T>`) if the API genuinely supports unsized values. Removing the\n"
+            "`?Sized` bound from the impl block is usually wrong — other fns rely on it."
+        ),
+    },
+    {
         # Rule C: when a target API takes M: Display, pass the value
         # directly — do NOT format!() to a string first. format!() needs
         # an allocator (std or alloc::format) and may not be in scope,
@@ -6523,6 +6799,195 @@ def _gotchas_for_error(error_excerpt: str) -> str:
     return "\n\n".join(parts)
 
 
+def _format_impl_block_for_prompt(
+    block: dict,
+    mark_target: bool = True,
+) -> str:
+    """Render an impl block in TARGET form: the impl header followed by every
+    member's signature + a one-line body status. Stub members are tagged
+    [STUB] so the model knows which to fill; already-filled members carry a
+    shortened body preview so the model can mirror their structural shape
+    when designing the new ones.
+
+    `block` is a record produced by `_collect_impl_blocks`.
+    """
+    container = block.get("container", "")
+    lines: list[str] = []
+    if container:
+        # Trim the {fns…} body from the container header — we render each fn
+        # explicitly below. The extractor's container string captures the
+        # entire impl header up to the opening brace; some variants tack on
+        # the first fn signature. Cut at the first newline or `{` to keep
+        # just the header.
+        header = container
+        brace_pos = header.find("{")
+        if brace_pos != -1:
+            header = header[:brace_pos].rstrip()
+        lines.append(f"{header} {{")
+    else:
+        lines.append("// free fns at file level")
+    for m in block.get("members", []):
+        sig = (m.get("sig_text") or "").strip()
+        is_stub = bool(m.get("has_unimplemented_body"))
+        if is_stub:
+            tag = " // [STUB] — fill in this response" if mark_target else " // [STUB]"
+            lines.append(f"    {sig} {tag}")
+        else:
+            body = (m.get("body_text") or "").strip()
+            preview = body
+            if len(preview) > 200:
+                preview = preview[:200].rsplit("\n", 1)[0] + " /* ... */"
+            preview = preview.replace("\n", "\n    ")
+            lines.append(f"    {sig} {{ /* FILLED */ {preview} }}")
+    if container:
+        lines.append("}")
+    return "\n".join(lines)
+
+
+def _build_per_impl_prompt(
+    block: dict,
+    related_blocks: "list[dict]",
+    test_blocks: list[tuple[str, str]],
+    module_name: str,
+    cluster_name: str,
+    types_section: str = "",
+    invariants_section: str = "",
+    notes_section: str = "",
+    fr_path: "Path | None" = None,
+    retrospective_guidance: str = "",
+    crate_idioms_section: str = "",
+) -> str:
+    """Per-impl-block prompt — fills every stub fn in `block` and (when
+    `related_blocks` is non-empty) jointly designs sibling impls of the
+    same trait so the model can see all trait-header variants at once.
+
+    `block` is a record from `_collect_impl_blocks`. `related_blocks` are
+    other impl blocks in the same file whose trait name matches (used to
+    surface the `impl AsRef<T1>` + `impl AsRef<T2>` case that per-fn
+    prompts cannot show together).
+    """
+    file_rel = block.get("file", "")
+    container = block.get("container", "")
+    stub_members = block.get("stub_members", [])
+    target_render = _format_impl_block_for_prompt(block, mark_target=True)
+    related_renders = []
+    for rb in related_blocks:
+        related_renders.append(
+            _format_impl_block_for_prompt(rb, mark_target=False))
+    related_section = ""
+    if related_renders:
+        related_section = (
+            "\n<RELATED_IMPL_BLOCKS>\nThese impl blocks live in the SAME "
+            "file as TARGET and implement the same trait name with "
+            "DIFFERENT generic parameters. They MUST stay in separate impl "
+            "blocks (Rust has no overloading). Design every fn together so "
+            "each impl's body matches its trait header's expected return / "
+            "argument types verbatim.\n```rust\n"
+            + "\n\n".join(related_renders)
+            + "\n```\n</RELATED_IMPL_BLOCKS>\n"
+        )
+
+    tests_section = ""
+    if test_blocks:
+        parts = []
+        for path, txt in test_blocks:
+            parts.append(f'<TEST path="{path}">\n{txt}\n</TEST>')
+        tests_section = "\n\n".join(parts)
+    else:
+        tests_section = ("(no tests directly reference fns in this block "
+                         "— they may be invoked indirectly via macros or "
+                         "sibling fns)")
+
+    notes_block = f"\n<MODEL_NOTES>\n{notes_section}\n</MODEL_NOTES>\n" if notes_section else ""
+    types_block = f"\n<TYPES_IN_SCOPE>\n{types_section}\n</TYPES_IN_SCOPE>\n" if types_section else ""
+    invariants_block = (
+        f"\n<CLUSTER_INVARIANTS>\n{invariants_section}\n</CLUSTER_INVARIANTS>\n"
+        if invariants_section else ""
+    )
+    _trait_text = _trait_contract_for(container)
+    trait_block = f"\n<TRAIT_CONTRACT>\n{_trait_text}\n</TRAIT_CONTRACT>\n" if _trait_text else ""
+    _recurring = _promoted_error_rules(fr_path)
+    recurring_block = f"\n<RECURRING_ERRORS>\n{_recurring}\n</RECURRING_ERRORS>\n" if _recurring else ""
+    retro_block = (
+        f"\n<RETROSPECTIVE_GUIDANCE>\nThe previous attempt at this impl "
+        f"block did not reduce the error count. Apply this strategy "
+        f"differently this time:\n{retrospective_guidance}\n"
+        "</RETROSPECTIVE_GUIDANCE>\n" if retrospective_guidance else ""
+    )
+    # Crate idioms — patterns extracted from already-filled fns in THIS
+    # file. Surfaces e.g. anyhow's `Self::construct_from_*(arg, None)`
+    # constructor family, its `ContextError { context, error }` wrapper,
+    # its vtable fn-pointer dispatch syntax. Generic detectors (no
+    # per-crate knowledge); the content the model sees is specific
+    # because it's extracted from the live source.
+    idioms_block = (
+        f"\n<CRATE_IDIOMS>\nPatterns this file already uses — design new "
+        "fns to MATCH these idioms whenever your fn's situation matches "
+        "one of them. Do NOT invent a new approach when one of these "
+        "patterns clearly applies.\n"
+        f"{crate_idioms_section}\n"
+        "</CRATE_IDIOMS>\n" if crate_idioms_section else ""
+    )
+
+    # Output protocol example.
+    output_example: list[str] = []
+    for m in stub_members[:2]:  # show up to 2 worked examples in the
+                                # output format
+        output_example.append(
+            f'<FN name="{m["fn_name"]}" block="{container}">\n'
+            "  // body (no outer braces, no signature)\n"
+            "</FN>"
+        )
+    output_example_str = "\n".join(output_example) if output_example else (
+        '<FN name="..." block="...">\nbody\n</FN>')
+
+    stub_names = ", ".join(m["fn_name"] for m in stub_members)
+    return f"""Implement the marked [STUB] fns in this Rust impl block so the
+tests pass. The unit of work is the IMPL BLOCK — design every member
+together; each fn must respect the impl header's generic parameters,
+where-clauses, and trait header. A fn may add a TIGHTER where-clause if
+its body needs it (e.g. `where T: Sized` on a fn returning `T` by value
+when the impl block declares `T: ?Sized`).
+
+Crate: {module_name} | Cluster: {cluster_name} | File: {file_rel}
+Stubs to fill in this response: {stub_names}
+
+<RUST_GOTCHAS>
+{_gotchas_summary()}
+</RUST_GOTCHAS>
+{retro_block}{trait_block}{types_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{related_section}
+<TARGET_IMPL_BLOCK file="{file_rel}">
+```rust
+{target_render}
+```
+</TARGET_IMPL_BLOCK>
+
+Tests (read-only):
+{tests_section}
+
+Output protocol — emit ONE `<FN>` block per stub. Match `block` to the
+TARGET impl header verbatim so the splicer can route each body to the
+correct impl. Multiple `<FN>` blocks per response are required when the
+TARGET (or any RELATED impl) has multiple stubs you are filling.
+
+Each `<FN>` body may optionally start with a `where` clause on its own
+line to TIGHTEN the impl-level bounds for that fn alone — useful when a
+fn returns T by value in an `impl<T: ?Sized>` block.
+
+Format:
+{output_example_str}
+
+Rules:
+- Body only — no fn signature, no outer braces around the body.
+- Use fully-qualified paths (`std::fmt::Write`, `crate::Error`) for
+  symbols not in this file's `use` block.
+- No `unimplemented!()` / `todo!()` / panic-only bodies. Omit an `<FN>`
+  block if you cannot implement that fn; a later pass retries.
+- Each fn you emit MUST appear in the TARGET (or a RELATED) block above.
+  Emitting an `<FN>` for a fn name not in the block is rejected.
+"""
+
+
 def _build_per_fn_prompt(
     file_text: str,
     fn_name: str,
@@ -6537,6 +7002,7 @@ def _build_per_fn_prompt(
     types_section: str = "",
     fr_path: "Path | None" = None,
     invariants_section: str = "",
+    siblings_section: str = "",
 ) -> str:
     """Small focused prompt for one fn fill. No crate-wide signature index,
     no full FR, no genesis — only what the model needs to implement THIS fn.
@@ -6566,6 +7032,14 @@ def _build_per_fn_prompt(
         f"\n<CLUSTER_INVARIANTS>\n{invariants_section}\n</CLUSTER_INVARIANTS>\n"
         if invariants_section else ""
     )
+    # FR-024 sibling reference (initial-prompt variant).
+    siblings_block = (
+        f"\n<SIBLING_REFERENCE>\nFns with the same name `{fn_name}` in "
+        f"OTHER impl blocks of this file (already filled — your TARGET "
+        f"should follow the same structural pattern):\n```rust\n"
+        f"{siblings_section}\n```\n</SIBLING_REFERENCE>\n"
+        if siblings_section else ""
+    )
     # P5.3: when impl-ing a known stdlib trait, inject its contract.
     _trait_text = _trait_contract_for(container)
     trait_block = f"\n<TRAIT_CONTRACT>\n{_trait_text}\n</TRAIT_CONTRACT>\n" if _trait_text else ""
@@ -6583,7 +7057,7 @@ Crate: {module_name} | Cluster: {cluster_name} | File: {file_rel} | Fn: {fn_name
 <RUST_GOTCHAS>
 {_gotchas_summary()}
 </RUST_GOTCHAS>
-{trait_block}{types_block}{invariants_block}{recurring_block}{notes_block}
+{siblings_block}{trait_block}{types_block}{invariants_block}{recurring_block}{notes_block}
 FILE — stubs are annotated. SKELETON STUB = will be filled later (rely on
 the signature). TARGET = implement now.
 
@@ -6675,7 +7149,7 @@ def _mine_common_tokens(excerpts: list[str], top_n: int = 3) -> list[tuple[str, 
     """
     if not excerpts:
         return []
-    tok = _Counter_PY()
+    tok: "_Counter_PY[str]" = _Counter_PY()
     # Match `Foo`, `Foo<T>`, `Box<dyn StdError + Send + Sync>` etc.
     type_re = re.compile(
         r"\b([A-Z][A-Za-z0-9_]*(?:<[^<>\n]{1,60}>)?)\b"
@@ -6759,11 +7233,15 @@ def _promoted_error_rules(fr_path: "Path | None" = None) -> str:
 
 _GRACEFUL_SENTINEL_PATH = Path("/tmp/pipeline_graceful_stop")
 # P7.2: per-fn cargo-check inner loop is now governed by a failure-floor
-# stall budget against rustc error count. Legacy `PHASE_C_FIX_CAP_PER_FN`
-# alias is honored for the hard cap.
+# stall budget against rustc error count. Hard cap was a counter — the
+# user's "no hard limits" principle replaced that with floor-stall as the
+# sole non-success exit. The 10k backstop is now a runaway safety net only;
+# `PHASE_C_FN_MAX_STALLS` is the real terminator. Legacy env vars
+# `PHASE_C_FN_HARD_CAP` and `PHASE_C_FIX_CAP_PER_FN` still work for
+# operators who want to clamp behaviour explicitly.
 _PER_FN_FIX_HARD_CAP = int(os.getenv(
     "PHASE_C_FN_HARD_CAP",
-    os.getenv("PHASE_C_FIX_CAP_PER_FN", "30"),
+    os.getenv("PHASE_C_FIX_CAP_PER_FN", "10000"),
 ))
 _PER_FN_FIX_MAX_STALLS = int(os.getenv("PHASE_C_FN_MAX_STALLS", "3"))
 _PER_FN_FIX_CAP = _PER_FN_FIX_HARD_CAP  # back-compat alias
@@ -6773,9 +7251,11 @@ _PER_FN_FIX_CAP = _PER_FN_FIX_HARD_CAP  # back-compat alias
 # when the absolute hard cap fires (runaway safety). `PHASE_C_FIX_CAP_PER_PASS`
 # is the legacy alias for the hard cap; kept for backward compatibility.
 _PER_PASS_TEST_FIX_MAX_STALLS = int(os.getenv("PHASE_C_TEST_FIX_MAX_STALLS", "3"))
+# Hard cap raised to a backstop value (10k) — floor-stall is the real exit.
+# Operators can clamp explicitly via env if needed.
 _PER_PASS_TEST_FIX_HARD_CAP = int(os.getenv(
     "PHASE_C_TEST_FIX_HARD_CAP",
-    os.getenv("PHASE_C_FIX_CAP_PER_PASS", "100"),
+    os.getenv("PHASE_C_FIX_CAP_PER_PASS", "10000"),
 ))
 
 # P4: directory under each project workspace where Phase C test-fix
@@ -6797,31 +7277,47 @@ def _improvement_loop(
     *,
     name: str,
     run_check,                    # () -> (ok: bool, output: str, metric: int)
-    do_fix,                       # (output: str, history: list[dict]) -> dict
-    do_retro=None,                # optional (output, history) -> str — extra
-                                  # retro context appended to next fix prompt
+    do_fix,                       # (output, history, *, retro: str) -> dict
+    do_retro=None,                # optional (output, history) -> str — produces
+                                  # strategy guidance shown to do_fix on stall
     max_stalls: int = 3,
-    hard_cap: int = 100,
+    hard_cap: int = 10_000,       # backstop against runaway only; the real
+                                  # terminator is `stall >= max_stalls`
     on_iter=None,                 # optional (record: dict) -> None — archival
 ) -> tuple[bool, str, list[dict]]:
-    """Iterate while a numeric failure metric keeps strictly decreasing.
+    """Canonical pipeline fix-loop primitive. Every fix loop in this file
+    should go through this function — same definition of "improvement",
+    same exit rule.
 
-    `run_check` returns (ok, output, metric). When ok is True the loop
-    returns immediately with (True, output, history).
+    Semantics:
+      - improvement = strict decrease in `best_metric` (the minimum metric
+        observed so far). If a fresh check produces a new minimum, `stall`
+        resets to 0; otherwise it increments.
+      - the loop exits when `stall >= max_stalls` (real terminator) or when
+        `run_check` returns ok=True (success). `hard_cap` is a 10k-iter
+        backstop against runaway behaviour, not a feature.
+      - `do_retro` is the strategy hook. It fires whenever the previous iter
+        did NOT improve (the loop is currently stalled). Its output — a
+        short "try X instead" string — is passed to `do_fix` as the keyword
+        argument `retro`. `do_fix` is expected to inject `retro` into the
+        prompt or otherwise incorporate it.
+      - history records carry the per-iter `retro`, `metric`, `post_fix_metric`,
+        plus whatever fields `do_fix` returned. Subsequent iters can read
+        prior retros from `history` if they want compounding diagnosis.
 
-    Otherwise `do_fix(output, history)` performs one attempt at fixing
-    the failure. Its return value is appended to `history` (the caller
-    decides what fields to include — `body`, `error_sig`, `outcome`,
-    etc.; `_improvement_loop` adds bookkeeping fields).
+    `do_fix(output, history, *, retro)` signature is required — pass
+    `retro=""` when no guidance applies. Legacy 2-arg callables are still
+    accepted (introspected at call time); new callers should accept retro.
+    Returning `{"abort": True, "reason": ...}` short-circuits the loop.
 
-    Stop conditions, in priority order:
-      1. `run_check` returns ok=True → return (True, output, history).
-      2. Stall counter ≥ max_stalls → return (False, last_output, history).
-      3. Iter counter ≥ hard_cap → return (False, last_output, history).
-      4. `do_fix` returns dict with key 'abort': True → return.
-
-    Emits `loop.iter` events for monitor.py consumption.
+    Emits `loop.iter` events for monitor.py.
     """
+    import inspect as _inspect
+    try:
+        _do_fix_accepts_retro = "retro" in _inspect.signature(do_fix).parameters
+    except (TypeError, ValueError):
+        _do_fix_accepts_retro = False
+
     history: list[dict] = []
     last_output = ""
     best_metric: int | None = None
@@ -6836,10 +7332,10 @@ def _improvement_loop(
         if best_metric is None:
             best_metric = metric
 
-        # Compute retro for iter ≥ 2 (the first failure goes straight to
-        # do_fix; classifier/retro fires only after one naive attempt).
+        # Stall-triggered retro: fires when the prior iter did not move the
+        # floor. First iter has no prior to compare and never runs retro.
         retro = ""
-        if iter_n >= 1 and do_retro is not None:
+        if iter_n >= 1 and stall >= 1 and do_retro is not None:
             try:
                 retro = do_retro(output, history) or ""
             except Exception as e:
@@ -6848,7 +7344,10 @@ def _improvement_loop(
 
         iter_n += 1
         try:
-            record = do_fix(output, history) or {}
+            if _do_fix_accepts_retro:
+                record = do_fix(output, history, retro=retro) or {}
+            else:
+                record = do_fix(output, history) or {}
         except Exception as e:
             _log(f"  [improvement_loop/{name}] do_fix raised: {e}")
             record = {"abort": True, "reason": f"do_fix_exception: {e}"}
@@ -6900,8 +7399,106 @@ def _improvement_loop(
                  f"{best_metric} for {stall} iter(s) — stopping.")
             return False, last_output, history
 
-    _log(f"  [improvement_loop/{name}] hard cap {hard_cap} reached — stopping.")
+    _log(f"  [improvement_loop/{name}] hard cap {hard_cap} reached "
+         "(should never happen — stall budget should fire first).")
     return False, last_output, history
+
+
+def _whole_tree_retrospective(
+    error_excerpt: str,
+    history: "list[dict]",
+    *,
+    name: str = "fix_loop",
+) -> str:
+    """Strategy retrospective for whole-tree fix loops. Mirrors the per-fn
+    `_phase_c_retrospective` but at the tree-wide compile-error level.
+
+    Called by `_improvement_loop` when the prior iter did not reduce the
+    error floor. Asks the model: "you tried X and the error count stayed
+    the same — what categorically different approach should the next
+    attempt take?". Returns a short guidance string the next `do_fix`
+    closure injects into its prompt.
+
+    Empty string on transient failures (LLM exception, empty response).
+    """
+    if not error_excerpt.strip():
+        return ""
+    # Compact history view — the last 3 attempts' summaries and the error
+    # signature they failed against.
+    recent = history[-3:] if history else []
+    history_block = ""
+    for h in recent:
+        summary = h.get("summary") or h.get("fix_summary") or ""
+        err = (h.get("error_sig") or "")[:600]
+        history_block += (
+            f"\nIter {h.get('iter','?')}: {summary}\n"
+            f"  metric_before={h.get('metric','?')} → "
+            f"metric_after={h.get('post_fix_metric','?')}\n"
+            f"  error_sig: {err}\n"
+        )
+    prior_retro = ""
+    for h in reversed(recent):
+        if h.get("retro"):
+            prior_retro = h["retro"]
+            break
+    prior_block = (
+        f"\nPrior retrospective said:\n{prior_retro}\n"
+        "If that guidance did not move the error floor, escalate to a\n"
+        "DIFFERENT strategy this time.\n"
+    ) if prior_retro else ""
+    prompt = (
+        f"You are diagnosing why fix-loop `{name}` has stopped reducing\n"
+        f"the rustc error count across multiple attempts.\n\n"
+        f"Recent attempts:\n{history_block}\n"
+        f"Current error excerpt:\n```\n{error_excerpt[:4000]}\n```\n"
+        f"{prior_block}\n"
+        "Output EXACTLY two lines:\n"
+        "  CATEGORY: <one short tag — e.g. WRONG_FILE_TARGETED, "
+        "TRAIT_HEADER_MISMATCH, UNSIZED_RETURN, DUPLICATE_IMPL, "
+        "GENUINELY_HARD>\n"
+        "  GUIDANCE: <one paragraph — what concretely different approach to "
+        "try next iter. Reference specific symbols, fns, or rustc error codes.>\n\n"
+        "GUIDANCE must be actionable, not 'try harder'. If two iters in a row\n"
+        "with non-trivial strategy changes both failed to move the floor,\n"
+        "set CATEGORY: GENUINELY_HARD."
+    )
+    try:
+        result = ask(prompt, model=_TASK2_MODEL, think=False)
+    except Exception as e:
+        _log(f"  [retro/{name}] LLM call failed: {e}")
+        return ""
+    if not (result or "").strip():
+        _log(f"  [retro/{name}] LLM returned empty content")
+        return ""
+    # Lightweight parse: collect everything after "GUIDANCE:" up to next
+    # uppercase-tag-style label. Tolerant of decorations.
+    cat = ""
+    guidance_lines: list[str] = []
+    in_guidance = False
+    for ln in (result or "").splitlines():
+        s = ln.strip().lstrip("*-• ").strip()
+        s = re.sub(r"^\*+\s*|\s*\*+$", "", s)
+        m = re.match(r"(?i)^category\s*[:=]\s*(\S+)", s)
+        if m:
+            cat = m.group(1).strip().rstrip(".,;").upper()
+            in_guidance = False
+            continue
+        m = re.match(r"(?i)^guidance\s*[:=]\s*(.+)$", s)
+        if m:
+            guidance_lines = [m.group(1).strip()]
+            in_guidance = True
+            continue
+        if in_guidance and s:
+            if re.match(r"(?i)^(category|guidance|note)\s*[:=]", s):
+                in_guidance = False
+            else:
+                guidance_lines.append(s)
+    guidance = " ".join(guidance_lines).strip()
+    if not cat and not guidance:
+        guidance = (result or "").strip()[:1200]
+    if cat:
+        return f"[{cat}] {guidance}" if guidance else f"[{cat}]"
+    return guidance
 
 
 def _write_phase_c_test_fix_log(
@@ -7012,7 +7609,9 @@ def _classify_phase_c_test_failures(
     )
 
     try:
-        result = ask(prompt, model=_TASK0C_MODEL, max_tokens=2048, think=None)
+        # Use global MAX_TOKENS default — hardcoded caps risked content
+        # truncation under tight thinking-budget conditions.
+        result = ask(prompt, model=_TASK0C_MODEL, think=None)
     except Exception as e:
         _log(f"  [phase-c/classifier] LLM call failed: {e}")
         return {}
@@ -7053,15 +7652,146 @@ def _check_graceful_stop(context: str) -> None:
 
 
 def _cargo_err_sig(output: str) -> frozenset:
-    """Stable signature of a cargo error set so we can detect 'same error twice'.
+    """LEGACY regex-based fallback. Prefer `_cargo_diagnostics_from_json`
+    (the JSON-format parse) when cargo is invoked with
+    `--message-format=json-diagnostic-rendered-ansi` — the regex path
+    misses non-E-coded failures (linker, build-script, cargo wrapper) and
+    is the source of the recurring "compile failed but errs=0" false
+    positive.
 
-    Catches both rustc structured errors (`error[E0308]: ...`) and generic
-    cargo/build errors (`error: ...`). Matches `generate_fix_loop._error_sigs`.
+    This wrapper inspects `output` for JSON `compiler-message` lines and
+    routes to the structured path when present. Otherwise falls back to
+    the regex over rendered text (with a guard so the rc-honest counter
+    can be derived by the caller).
     """
+    diags = _cargo_diagnostics_from_json(output)
+    if diags is not None:
+        return _cargo_err_sig_from_diagnostics(diags)
     return (
         frozenset(re.findall(r"error\[E\d+\]: .+", output))
         | frozenset(re.findall(r"^error: .+", output, re.MULTILINE))
     )
+
+
+def _cargo_diagnostics_from_json(output: str) -> "list[dict] | None":
+    """Walk `output` line-by-line, parse JSON cargo messages, return the
+    `compiler-message`s with `level == "error"` as structured records:
+
+        [{"code": "E0277" | "", "file": "src/error.rs" | "",
+          "line": int | 0, "message": str, "rendered": str}, …]
+
+    Returns None if the output contains no JSON cargo messages — caller
+    falls back to regex. Empty list means "JSON present, zero errors"
+    (an actual signal: a JSON cargo check that returned cleanly).
+    """
+    json_seen = False
+    out: list[dict] = []
+    for ln in output.splitlines():
+        ln = ln.strip()
+        if not ln.startswith("{"):
+            continue
+        try:
+            obj = json.loads(ln)
+        except Exception:
+            continue
+        if obj.get("reason") != "compiler-message":
+            json_seen = True  # JSON present even if not an error
+            continue
+        msg = obj.get("message") or {}
+        if msg.get("level") != "error":
+            json_seen = True
+            continue
+        json_seen = True
+        code_field = msg.get("code") or {}
+        code = (code_field.get("code") or "") if isinstance(code_field, dict) else ""
+        spans = msg.get("spans") or []
+        primary = next((s for s in spans if s.get("is_primary")), spans[0] if spans else {})
+        out.append({
+            "code": code,
+            "file": (primary.get("file_name") or "") if isinstance(primary, dict) else "",
+            "line": int(primary.get("line_start") or 0) if isinstance(primary, dict) else 0,
+            "message": msg.get("message") or "",
+            "rendered": msg.get("rendered") or "",
+        })
+    return out if json_seen else None
+
+
+def _cargo_err_sig_from_diagnostics(diagnostics: "list[dict]") -> frozenset:
+    """Build the stable error signature directly from structured
+    diagnostics. Sig is `code:message` (or just `message` when no code) —
+    same disambiguation power as the regex sig but produced from
+    rustc's own classification rather than guessed from rendered text."""
+    sigs: set[str] = set()
+    for d in diagnostics:
+        code = d.get("code") or ""
+        msg = (d.get("message") or "").strip()
+        sigs.add(f"{code}:{msg}" if code else msg)
+    return frozenset(sigs)
+
+
+def _run_cargo_check_diag(
+    cmd: str,
+    cwd: Path,
+    env: dict,
+    timeout: int = 180,
+) -> "tuple[int, str, list[dict]]":
+    """Run a cargo check / build / test command with
+    `--message-format=json-diagnostic-rendered-ansi` so the caller gets
+    BOTH a rendered text view (for prompts / logs) AND structured
+    diagnostics (for error counting / file attribution). The flag is
+    appended automatically when the command doesn't already include
+    `--message-format`.
+
+    Returns (rc, rendered_text, diagnostics). Diagnostics is the list
+    returned by `_cargo_diagnostics_from_json` over the JSON output, or
+    [] if cargo emitted no compiler messages. The rendered text is
+    reconstructed from the JSON `message.rendered` fields plus any
+    non-JSON lines, so it mirrors what a plain `cargo check` would print
+    without --message-format.
+
+    Use this in place of `_run_cargo` when the caller needs to count or
+    locate errors — it eliminates the regex false-positive class.
+    """
+    argv = shlex.split(cmd)
+    if not any(a.startswith("--message-format") for a in argv):
+        # Insert after the cargo SUBCOMMAND (check / test / build / etc.),
+        # not after `cargo` itself — the cmd may be `cargo +nightly check`
+        # (3 tokens) or `cargo check` (2 tokens). Find the first token
+        # that is a known subcommand name and insert right after it.
+        _known_subs = {"check", "test", "build", "run", "doc", "clippy"}
+        _insert_at = len(argv)  # fallback: append at end
+        for i, a in enumerate(argv):
+            if a in _known_subs:
+                _insert_at = i + 1
+                break
+        argv.insert(_insert_at,
+                    "--message-format=json-diagnostic-rendered-ansi")
+    try:
+        r = subprocess.run(
+            argv, cwd=cwd, capture_output=True, text=True,
+            timeout=timeout, env=env,
+        )
+        raw = (r.stdout or "") + ("\n--- stderr ---\n" + r.stderr if r.stderr else "")
+        diagnostics = _cargo_diagnostics_from_json(raw) or []
+        # Reconstruct a rendered text view: prefer message.rendered when
+        # we have it (it's the same string cargo would have printed),
+        # plus any non-JSON lines from stderr (linker errors, etc.).
+        rendered_parts: list[str] = []
+        for ln in raw.splitlines():
+            s = ln.strip()
+            if s.startswith("{"):
+                continue
+            rendered_parts.append(ln)
+        for d in diagnostics:
+            r_text = d.get("rendered") or ""
+            if r_text:
+                rendered_parts.append(r_text)
+        rendered = "\n".join(rendered_parts)
+        return r.returncode, rendered, diagnostics
+    except subprocess.TimeoutExpired:
+        return -1, f"TIMEOUT after {timeout}s", []
+    except FileNotFoundError as e:
+        return -1, f"FILE NOT FOUND: {e}", []
 
 
 def _strip_cargo_warnings(output: str) -> str:
@@ -7185,6 +7915,8 @@ def _build_per_fn_fix_prompt(
     fr_path: "Path | None" = None,
     attempt_history: "list[dict] | None" = None,
     invariants_section: str = "",
+    retrospective_guidance: str = "",
+    siblings_section: str = "",
 ) -> str:
     """Re-prompt for a fn whose previous fill broke `cargo check`.
 
@@ -7218,6 +7950,25 @@ def _build_per_fn_fix_prompt(
     invariants_block = (
         f"\n<CLUSTER_INVARIANTS>\n{invariants_section}\n</CLUSTER_INVARIANTS>\n"
         if invariants_section else ""
+    )
+    # FR-024 retrospective guidance: surfaced FIRST in the prompt when
+    # available — the prior diagnosis is the highest-signal hint.
+    retro_block = (
+        f"\n<RETROSPECTIVE_GUIDANCE>\nPrior diagnosis of this fn's "
+        f"compile failures (act on this — do NOT repeat the previous "
+        f"approach):\n{retrospective_guidance}\n</RETROSPECTIVE_GUIDANCE>\n"
+        if retrospective_guidance else ""
+    )
+    # FR-024 sibling reference: when the same fn name has a sibling impl
+    # already filled correctly in this file, hoist it to the top of the
+    # prompt. Best source-of-truth for "what does a body for this fn look
+    # like" — pattern-matching beats reasoning from scratch.
+    siblings_block = (
+        f"\n<SIBLING_REFERENCE>\nFns with the same name `{fn_name}` in OTHER "
+        f"impl blocks of this file (already filled — your TARGET should "
+        f"follow the same structural pattern):\n```rust\n{siblings_section}\n"
+        f"```\n</SIBLING_REFERENCE>\n"
+        if siblings_section else ""
     )
     _trait_text2 = _trait_contract_for(container)
     trait_block = f"\n<TRAIT_CONTRACT>\n{_trait_text2}\n</TRAIT_CONTRACT>\n" if _trait_text2 else ""
@@ -7265,7 +8016,7 @@ Crate: {module_name} | Cluster: {cluster_name} | File: {file_rel} | Fn: {fn_name
 <RUST_GOTCHAS>
 {_gotchas_summary()}
 </RUST_GOTCHAS>
-{gotchas_block}{trait_block}{types_block}{invariants_block}{recurring_block}{notes_block}{prior_block}
+{retro_block}{siblings_block}{gotchas_block}{trait_block}{types_block}{invariants_block}{recurring_block}{notes_block}{prior_block}
 FILE (previous attempt reverted; stubs annotated):
 <FILE path="{file_rel}">
 {annotated}
@@ -7485,18 +8236,33 @@ def _parse_failed_tests(output: str) -> set[str]:
 
 def _ask_per_fn_body(
     prompt: str, fn_name: str, attempts_log: list[str],
+    sig_text: str = "",
 ) -> tuple[str | None, str]:
     """Run the 3-attempt response-extraction ladder for a per-fn prompt.
 
     Returns (body or None, last_response). On None, the model's response was
     unparseable or stub-only on all three tries.
+
+    For `unsafe` fns (rigid pointer/vtable manipulation), drops sampling
+    temperature to PHASE_C_UNSAFE_TEMP (default 0.1). High-temperature
+    creative sampling is the wrong mode for unsafe code — there's
+    typically one correct token sequence per body, not a range of valid
+    creative choices. The Qwen3.6 model documentation explicitly
+    recommends lowering temperature for syntactically rigid code.
     """
+    # Detect unsafe-fn context from the signature.
+    is_unsafe = bool(
+        sig_text and re.search(r"\bunsafe\s+fn\b", sig_text)
+    )
+    unsafe_temp = float(os.getenv("PHASE_C_UNSAFE_TEMP", "0.1"))
     last_response = ""
     for think_off, label in [(False, "default"), (True, "think=False"),
                              (True, "think=False+retry")]:
         kwargs: dict = {"model": _TASK2_MODEL}
         if think_off:
             kwargs["think"] = False
+        if is_unsafe:
+            kwargs["temperature"] = unsafe_temp
         last_response = ask(prompt, **kwargs)
         body = _extract_body_response(last_response)
         if body and not _is_unimplemented_body(body):
@@ -7505,6 +8271,224 @@ def _ask_per_fn_body(
             return body, last_response
         attempts_log.append(f"{fn_name}: empty/stub from {label}")
     return None, last_response
+
+
+def _collect_sibling_filled_bodies(
+    file_text: str, target_fn_name: str, target_container: str,
+    max_siblings: int = 3, max_body_chars: int = 800,
+) -> str:
+    """FR-024 fix 3: hoist already-filled sibling-impl bodies to the prompt.
+
+    Finds every fn with the same `target_fn_name` in `file_text` whose body
+    is NOT a stub, EXCLUDING the target itself (matched by container).
+    Returns a formatted block ready for `<SIBLING_REFERENCE>` injection.
+    Empty string when no usable siblings exist.
+
+    The model is much more likely to produce a working body for an
+    overloaded `fn as_ref` if a sibling `as_ref` impl in the same file
+    is already correct — it can pattern-match the structural template.
+    """
+    out: list[str] = []
+    count = 0
+    for m in _FN_RE_GLOBAL.finditer(file_text):
+        if m.group(2) != target_fn_name:
+            continue
+        sig_start = m.start()
+        body_start = m.end()
+        depth = 1
+        i = body_start
+        while i < len(file_text) and depth > 0:
+            ch = file_text[i]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+            i += 1
+        if depth != 0:
+            continue
+        body_end = i - 1
+        body = file_text[body_start:body_end].strip()
+        if not body or _is_unimplemented_body(body):
+            continue
+        # Skip the target fn itself — heuristic by container substring match
+        # since we don't have AST nodes here. The container fragment usually
+        # appears in the ~200 chars above the fn declaration.
+        if target_container:
+            context_above = file_text[max(0, sig_start - 200):sig_start]
+            if target_container.strip() in context_above:
+                # Likely the target — skip.
+                continue
+        sig = file_text[sig_start:body_start].strip().rstrip("{").rstrip()
+        if len(body) > max_body_chars:
+            body = body[:max_body_chars] + "\n    /* ...truncated... */"
+        out.append(f"{sig} {{\n{body}\n}}")
+        count += 1
+        if count >= max_siblings:
+            break
+    return "\n\n".join(out)
+
+
+def _retrospectives_path(project_dir: Path) -> Path:
+    """Path to the per-fn retrospectives JSON. Keyed by (file, fn, container)
+    so same-named fns in different impls track independently. Survives
+    across module iterations — that's the point: learning compounds."""
+    d = project_dir / ".phase_c_logs"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / "retrospectives.json"
+
+
+def _load_retrospectives(project_dir: Path) -> dict:
+    """Load the on-disk retrospective record. Returns {} on first run or
+    when the file is malformed (caller treats missing entries as 'no
+    prior retrospective')."""
+    p = _retrospectives_path(project_dir)
+    if not p.exists():
+        return {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_retrospectives(project_dir: Path, data: dict) -> None:
+    try:
+        _retrospectives_path(project_dir).write_text(
+            json.dumps(data, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _retro_key(file_rel: str, fn_name: str, container: str) -> str:
+    """Stable key for the retrospective dict. Container is included so
+    overloaded `fn new` impls (Adhoc/Trait/Boxed) track independently."""
+    return f"{file_rel}::{fn_name}::{container}"
+
+
+def _phase_c_retrospective(
+    fn_name: str, sig_text: str, container: str, file_rel: str,
+    cluster_name: str,
+    last_body: str, error_excerpt: str,
+    fix_attempts: int,
+    prior_retrospective: str = "",
+    sibling_bodies: str = "",
+) -> dict:
+    """Diagnose why the per-fn fix loop exhausted on this fn. Returns
+    {category, guidance, signal} — a structured diagnosis used to shape
+    the NEXT attempt's prompt with explicit "try X instead" hints rather
+    than just retrying the same approach.
+
+    Categories:
+      WRONG_TYPE_CHOICE / WRONG_DEREF_PATTERN / MISSING_UNSAFE_PRIMITIVE
+      TRAIT_BOUND_VIOLATION / API_HALLUCINATION / NEEDS_VTABLE_ACCESS
+      GENUINELY_HARD
+
+    'GENUINELY_HARD' signals the caller should mark the fn as
+    fully-exhausted and skip on subsequent iters.
+    """
+    if not last_body and not error_excerpt:
+        return {"category": "", "guidance": "", "signal": "no_data"}
+    prior_section = (
+        f"\nPrior retrospective for this fn (you said this LAST time it failed; "
+        f"if the same approach still failed, escalate to GENUINELY_HARD):\n"
+        f"{prior_retrospective}\n"
+    ) if prior_retrospective.strip() else ""
+    siblings_section = (
+        f"\nSibling impls of `{fn_name}` already filled correctly in this file "
+        f"(use as reference):\n{sibling_bodies}\n"
+    ) if sibling_bodies.strip() else ""
+    prompt = (
+        f"You are diagnosing why a reconstruction attempt for fn `{fn_name}` "
+        f"in `{file_rel}` (impl: `{container}`, cluster: `{cluster_name}`) "
+        f"could not be made to compile after {fix_attempts} attempt(s).\n\n"
+        f"Signature:\n```rust\n{sig_text}\n```\n\n"
+        f"Last attempted body (failed to compile):\n```rust\n{last_body[:1500]}\n```\n\n"
+        f"Compile errors from that attempt:\n```\n{error_excerpt[:2000]}\n```\n"
+        f"{prior_section}"
+        f"{siblings_section}\n"
+        "Classify the root cause in ONE of these categories:\n"
+        "  WRONG_TYPE_CHOICE       — used wrong wrapper/type (e.g. Box vs NonNull vs Own)\n"
+        "  WRONG_DEREF_PATTERN     — *ptr vs .as_ref() vs .deref(); name the correct chain\n"
+        "  MISSING_UNSAFE_PRIMITIVE— body needs unsafe { Self::X() } or similar; name X\n"
+        "  TRAIT_BOUND_VIOLATION   — generic bounds or where-clause mismatch; name the bound\n"
+        "  API_HALLUCINATION       — model called a method that does not exist; name it\n"
+        "  NEEDS_VTABLE_ACCESS     — requires reading the ErrorVTable; layout is needed\n"
+        "  GENUINELY_HARD          — multiple categories or fundamental layout unknown; flag for skip\n\n"
+        "Output EXACTLY two lines:\n"
+        "  CATEGORY: <one of the above>\n"
+        "  GUIDANCE: <one paragraph: what to try instead, specific to this fn>\n\n"
+        "The GUIDANCE should be a concrete instruction (e.g. \"Use "
+        "`self.inner.by_ref().as_ref()` to traverse the NonNull wrapper "
+        "instead of `*self.inner`\"), NOT a generic 'try harder' platitude."
+    )
+    # FR-024: use the global MAX_TOKENS default (derived from
+    # VLLM_MAX_MODEL_LEN). Hardcoding max_tokens=600 starved the call —
+    # with Qwen's thinking budget allocations the visible-content
+    # portion was empty, parser failed, and no retrospective got saved.
+    try:
+        result = ask(prompt, model=_TASK2_MODEL, think=False)
+    except Exception as e:
+        _log(f"  [phase-c/retro] LLM call failed: {e}")
+        return {"category": "", "guidance": "", "signal": "llm_error"}
+    if not (result or "").strip():
+        _log(f"  [phase-c/retro] LLM returned empty content for {fn_name}")
+        return {"category": "", "guidance": "", "signal": "empty_response"}
+    cat = ""
+    guid = ""
+    # Tolerant parsing: model may emit "CATEGORY:", "category:", "**CATEGORY**:",
+    # or bullet-prefix variants. Strip markdown-ish decorations and match
+    # case-insensitively. GUIDANCE may span multiple lines — collect them all.
+    lines = (result or "").splitlines()
+    guidance_lines: list[str] = []
+    in_guidance = False
+    for ln in lines:
+        s = ln.strip().lstrip("*").lstrip("-").lstrip("•").strip()
+        s_clean = re.sub(r"^\*+\s*|\s*\*+$", "", s)  # strip markdown bold
+        m = re.match(r"(?i)^category\s*[:=]\s*(\S+)", s_clean)
+        if m:
+            cat = m.group(1).strip().rstrip(".,;").upper()
+            in_guidance = False
+            continue
+        m = re.match(r"(?i)^guidance\s*[:=]\s*(.+)$", s_clean)
+        if m:
+            guidance_lines = [m.group(1).strip()]
+            in_guidance = True
+            continue
+        if in_guidance and s_clean:
+            # Multi-line guidance continuation (stop on blank or new label).
+            if re.match(r"(?i)^(category|guidance|note|reason)\s*[:=]", s_clean):
+                in_guidance = False
+            else:
+                guidance_lines.append(s_clean)
+    guid = " ".join(guidance_lines).strip()
+    # Fallback: if neither field parsed, but the response is non-empty,
+    # treat the whole response as guidance and leave category blank. This
+    # still gives the next attempt useful "what to try" text in the
+    # retrospective block, even if our structured parser missed.
+    if not cat and not guid and (result or "").strip():
+        guid = (result or "").strip()[:1200]
+    return {
+        "category": cat,
+        "guidance": guid,
+        "signal": "ok" if (cat or guid) else "unparseable",
+    }
+
+
+def _is_fn_fully_exhausted(
+    retros: dict, file_rel: str, fn_name: str, container: str,
+) -> bool:
+    """FR-024 cross-iter skip: progress-gated. A fn is permanently skipped
+    only when (a) the LLM classified it GENUINELY_HARD, or (b) a
+    retrospective fired AND the next-best error count did NOT improve over
+    the prior best (`fully_exhausted` flag set at write time). No hard
+    retrospective-count cap — as long as each retro reduces errors, the
+    loop is free to continue. `retrospective_count` is kept only for
+    telemetry."""
+    key = _retro_key(file_rel, fn_name, container)
+    rec = retros.get(key)
+    if not rec:
+        return False
+    return bool(rec.get("fully_exhausted"))
 
 
 def _count_relevant_notes(fr_path: Path | None,
@@ -7571,11 +8555,14 @@ def _run_phase_c_tdd(
                     target_src_dir, cluster)),
                 "errors": []}
     test_cmd = test_cmd_builder(test_stems)
-    max_iters = int(os.getenv("TDD_MAX_ITERS", "5"))
     test_timeout = int(os.getenv("PHASE_C_TEST_TIMEOUT", "120"))
+    # max_iters is legacy — only the 10k backstop in the loop body honors it.
+    # The real terminator is floor-stall on pass_count (max_stalls below).
+    max_stalls = int(os.getenv("TDD_MAX_STALLS", "3"))
 
-    _log(f"  {tag} [phase-c/tdd] driver=tdd, max_iters={max_iters}, "
-         f"timeout={test_timeout}s, stems={len(test_stems)}")
+    _log(f"  {tag} [phase-c/tdd] driver=tdd, "
+         f"max_stalls={max_stalls}, timeout={test_timeout}s, "
+         f"stems={len(test_stems)}")
 
     permanently_exhausted: set[tuple[str, str]] = set()
     last_notes_count: dict[tuple[str, str], int] = {}
@@ -7587,10 +8574,8 @@ def _run_phase_c_tdd(
     errors: list[str] = []
 
     # FR-024: improvement-driven loop. Track passing-test count across iters;
-    # exit only after `max_stalls` consecutive non-improving iters. The hard
-    # cap (TDD_MAX_ITERS) survives as a safety net only — the stall budget
-    # is the real exit gate.
-    max_stalls = int(os.getenv("TDD_MAX_STALLS", "3"))
+    # exit only after `max_stalls` consecutive non-improving iters. The 10k
+    # backstop in the loop body is a runaway-safety net only.
     stall = 0
     best_pass = -1
     best_fail = None
@@ -7606,11 +8591,16 @@ def _run_phase_c_tdd(
         test_reverse_map = {}
 
     iter_n = 0
+    # Hard cap removed — the sole non-success terminator is `stall >=
+    # max_stalls` on the pass_count floor. The 10k backstop here mirrors
+    # `_improvement_loop`'s safety net and should never fire in practice.
+    _tdd_backstop = 10_000
     while True:
         iter_n += 1
-        if iter_n > max_iters:
-            _log(f"  {tag} [phase-c/tdd] iter cap {max_iters} reached "
-                 "(safety net) — exiting.")
+        if iter_n > _tdd_backstop:
+            _log(f"  {tag} [phase-c/tdd] backstop {_tdd_backstop} reached — "
+                 "stopping. This should never happen — stall budget should "
+                 "have fired first.")
             break
         _check_graceful_stop(f"TDD iter {iter_n}")
         _log(f"  {tag} [phase-c/tdd] iter {iter_n}: running cargo test...")
@@ -7669,17 +8659,26 @@ def _run_phase_c_tdd(
                 permanently_exhausted.discard(key)
             eligible[key] = tests
 
-        # Exit condition: stall budget exhausted AND no eligible work.
-        # We do NOT exit on empty frontier alone — the improvement metric
-        # might still tell us tests are getting better via a different
-        # path (e.g. cascading effects from earlier fills).
-        if not eligible and stall >= max_stalls:
-            _log(f"  {tag} [phase-c/tdd] iter {iter_n}: no actionable "
-                 f"frontier and {stall} stall(s); stopping. "
-                 f"best pass={best_pass} fail={best_fail}.")
+        # Exit condition: stall budget exhausted on the cluster-level
+        # pass_count floor. Fires regardless of whether `eligible` is
+        # empty — pass_count is the only metric that captures real-world
+        # progress, so when it hasn't moved for `max_stalls` iters the
+        # loop isn't making progress no matter how busy the frontier
+        # looks. Pre-fix, an unfixable fn that stayed in the frontier
+        # forever would override the stall check and burn compute
+        # indefinitely. The frontier is now a hint about WHERE to look,
+        # not a license to keep iterating.
+        if stall >= max_stalls:
+            _log(f"  {tag} [phase-c/tdd] iter {iter_n}: pass_count plateau "
+                 f"{stall} iter(s) at best={best_pass}; stopping "
+                 f"({len(eligible)} fn(s) still on frontier — will be "
+                 "marked exhausted). best pass="
+                 f"{best_pass} fail={best_fail}.")
+            for _stuck_key in eligible.keys():
+                permanently_exhausted.add(_stuck_key)
             _emit("phase_c.tdd.iter", data={
                 "cluster": cluster.name, "iter": iter_n, "rc": rc,
-                "frontier_size": 0, "kind": "stall_exit",
+                "frontier_size": len(eligible), "kind": "stall_exit",
                 "pass_count": pass_count, "fail_count": fail_count,
                 "improved": improved, "stall": stall,
             })
@@ -7762,6 +8761,378 @@ def _run_phase_c_tdd(
     }
 
 
+# Soft cap on stub members per impl block. Larger blocks fall back to the
+# per-fn path so the output budget always fits. Anyhow's `impl Error` is
+# the only block likely to exceed this in practice.
+_PER_IMPL_MAX_STUBS = int(os.getenv("PHASE_C_IMPL_MAX_STUBS", "12"))
+
+# Module-level splice+cargo lock. Originally a local in
+# `_task2_fill_fns_one_by_one`, hoisted because the per-impl path also
+# needs to serialise its splice + cargo invocations against any other
+# worker mutating the same cluster's source tree. cargo's own target/
+# .cargo-lock blocks concurrent invocations anyway, but holding our own
+# lock keeps file mutations deterministic across the per-impl + per-fn
+# fallback path interaction.
+import threading as _threading_mod
+_splice_check_lock = _threading_mod.Lock()
+
+
+def _phase_c_fill_impl_blocks(
+    project_dir: Path,
+    target_src_dir: Path,
+    tests_dir_files: list[Path],
+    module_name: str,
+    cluster_name: str,
+    cluster: "BuildCluster | None",
+    check_cmd: str,
+    cluster_env: dict,
+    fr_path: Path | None,
+    tdd_frontier_keys: "set[tuple[str, str]] | None",
+) -> dict:
+    """Per-impl-block Phase C fill — alternative to `_task2_fill_fns_one_by_one`.
+
+    Collects impl blocks active in this cluster, optionally narrows to
+    those that contain a frontier fn, then for each block runs one LLM
+    call that fills every stub member of the block in one shot. Splices
+    all bodies, runs cargo check; on failure reverts and re-prompts with
+    the focused errors. Each impl block has its own floor-stall on rustc
+    error count.
+
+    Returns the same stats dict shape as `_task2_fill_fns_one_by_one` so
+    callers don't need to branch:
+        {fns_filled, bytes_filled, attempts, errors, remaining,
+         impls_filled, impls_failed}.
+
+    Free fns (container == "") and impl blocks with more than
+    `_PER_IMPL_MAX_STUBS` stubs are left untouched — the caller's per-fn
+    fallback handles them.
+    """
+    if cluster_env is None:
+        cluster_env = _cargo_env()
+    target_src_dir.mkdir(parents=True, exist_ok=True)
+    bytes_before = sum(p.stat().st_size for p in target_src_dir.rglob("*.rs"))
+    impls_filled = 0
+    impls_failed = 0
+    fns_filled_total = 0
+    attempts_total = 0
+    errors: list[str] = []
+
+    blocks = _collect_impl_blocks_for_cluster(target_src_dir, cluster) or []
+    if not blocks:
+        return {
+            "fns_filled": 0, "bytes_filled": 0, "attempts": 0,
+            "errors": [], "remaining": 0,
+            "impls_filled": 0, "impls_failed": 0,
+        }
+
+    # If a TDD frontier is provided, narrow to blocks whose stub_members
+    # intersect the frontier. Otherwise process all blocks with stubs.
+    if tdd_frontier_keys is not None:
+        narrowed: list[dict] = []
+        for b in blocks:
+            stub_keys = {(b["file"], m["fn_name"]) for m in b["stub_members"]}
+            if stub_keys & tdd_frontier_keys:
+                narrowed.append(b)
+        blocks = narrowed
+
+    # Drop empty / free-fn / oversized blocks (handled by per-fn fallback).
+    def _viable(b: dict) -> bool:
+        if not b["container"]:
+            return False
+        if not b["stub_members"]:
+            return False
+        if len(b["stub_members"]) > _PER_IMPL_MAX_STUBS:
+            return False
+        return True
+    viable_blocks = [b for b in blocks if _viable(b)]
+    _log(f"  [phase-c/impl] cluster {cluster_name}: "
+         f"{len(viable_blocks)} impl block(s) viable "
+         f"({len(blocks) - len(viable_blocks)} skipped — free fns / "
+         "oversized).")
+
+    # Crate-level context (shared by every block we visit).
+    _src_for_macros = target_src_dir / "src" if (target_src_dir / "src").exists() else target_src_dir
+    _macro_invariants = _compute_cluster_macro_invariants(_src_for_macros, cluster)
+    _no_std_invariant = _detect_crate_no_std_invariant(target_src_dir)
+    invariants_section = "\n\n".join(
+        s for s in (_no_std_invariant, _macro_invariants) if s)
+    _crate_type_records = _enumerate_types_via_extractor(target_src_dir) or []
+
+    retros_cache = _load_retrospectives(project_dir)
+
+    block_max_stalls = int(os.getenv("PHASE_C_IMPL_MAX_STALLS", "3"))
+
+    for block in viable_blocks:
+        block_id = _impl_block_id(block["file"], block["container"])
+        file_path = target_src_dir / block["file"]
+        if not file_path.exists():
+            continue
+        # Honor cross-iter exhaustion — if a prior retrospective marked
+        # this block GENUINELY_HARD it's skipped.
+        if _is_fn_fully_exhausted(retros_cache, block["file"], "*impl*", block["container"]):
+            _log(f"  [phase-c/impl] {block_id}: skipped (prior retro "
+                 "marked exhausted).")
+            continue
+        # Related blocks (same trait, different generic) for the prompt.
+        all_blocks_by_id = {_impl_block_id(b["file"], b["container"]): b for b in blocks}
+        related_blocks: list[dict] = []
+        for rc in block.get("related_containers", []):
+            rb = all_blocks_by_id.get(_impl_block_id(block["file"], rc))
+            if rb is not None:
+                related_blocks.append(rb)
+        snapshot = file_path.read_text(encoding="utf-8")
+        # Per-block context.
+        stub_fn_names = [m["fn_name"] for m in block["stub_members"]]
+        test_blocks: list[tuple[str, str]] = []
+        # Reuse the per-fn test finder by unioning tests touching any stub.
+        for fn_name in stub_fn_names[:4]:
+            for path_str, txt in _find_tests_referencing_fn(
+                    tests_dir_files, fn_name, max_blocks=2):
+                if not any(p == path_str for p, _ in test_blocks):
+                    test_blocks.append((path_str, txt))
+        # Types in scope: union over all stub signatures in this block.
+        types_for_block_text = " ".join(
+            (m.get("sig_text") or "") for m in block["members"])
+        types_records = _types_referenced_in_text(
+            types_for_block_text, _crate_type_records)
+        types_section = "\n\n".join(_format_type_for_prompt(t) for t in types_records[:12])
+        # Crate idioms — surfaces THIS file's repeating patterns (Self::
+        # constructor family, vtable dispatch, wrapper construction,
+        # unsafe chains) from already-filled fn bodies. The target
+        # sig_text drives the relevance ranking so the model sees the
+        # patterns most likely to apply to the fns it's about to write.
+        _target_sig_concat = " ".join(
+            (m.get("sig_text") or "") for m in block["stub_members"])
+        crate_idioms_section = _extract_crate_idioms(
+            blocks, block["file"],
+            target_sig_text=_target_sig_concat,
+            max_idioms=5,
+        )
+        prior_retro = retros_cache.get(
+            _retro_key(block["file"], "*impl*", block["container"]), {}
+        ).get("guidance", "")
+        notes_section = ""
+        if fr_path is not None:
+            notes_section = _filter_model_notes_for_prompt(
+                fr_path, file_rel=block["file"], fn_name=stub_fn_names[0] if stub_fn_names else "",
+                file_text=snapshot, current_error="",
+            )
+        prev_err_sig: frozenset = frozenset()
+        best_err_count: int | None = None
+        block_stall = 0
+        fix_attempt = 0
+        last_error_excerpt = ""
+        last_response = ""
+        members_filled_this_block = 0
+        _t0 = time.monotonic()
+        _emit("phase_c.impl.fill.start", data={
+            "cluster": cluster_name,
+            "file": block["file"],
+            "container": block["container"],
+            "stub_count": len(block["stub_members"]),
+        })
+        while fix_attempt < _PER_FN_FIX_CAP:
+            fix_attempt += 1
+            attempts_total += 1
+            _check_graceful_stop(f"per-impl attempt {fix_attempt} for {block_id}")
+            prompt = _build_per_impl_prompt(
+                block=block,
+                related_blocks=related_blocks,
+                test_blocks=test_blocks,
+                module_name=module_name,
+                cluster_name=cluster_name,
+                types_section=types_section,
+                invariants_section=invariants_section,
+                notes_section=notes_section,
+                fr_path=fr_path,
+                retrospective_guidance=prior_retro,
+                crate_idioms_section=crate_idioms_section,
+            )
+            try:
+                response = ask(prompt, model=_TASK2_MODEL)
+            except Exception as e:
+                _log(f"  [phase-c/impl] {block_id}: LLM error: {e}")
+                break
+            last_response = response
+            parsed = extract_fn_bodies(response)
+            if not parsed:
+                _log(f"  [phase-c/impl] {block_id}: empty/no FN blocks "
+                     f"(attempt {fix_attempt}).")
+                break
+            # Hold the global splice+cargo lock while we mutate and check.
+            with _splice_check_lock:
+                # Splice each parsed body into the impl indicated by its
+                # `block` attribute. Match against TARGET container OR any
+                # related container.
+                routed: list[tuple[dict, str]] = []  # (fn_data, container)
+                for fn_data in parsed:
+                    container = fn_data["block"]
+                    if container == block["container"]:
+                        routed.append((fn_data, block["container"]))
+                        continue
+                    matched = False
+                    for rb in related_blocks:
+                        if container == rb["container"]:
+                            routed.append((fn_data, rb["container"]))
+                            matched = True
+                            break
+                    if not matched:
+                        # Loose match: header prefix only.
+                        for cand in [block, *related_blocks]:
+                            if container.split("{", 1)[0].strip() == cand["container"].split("{", 1)[0].strip():
+                                routed.append((fn_data, cand["container"]))
+                                matched = True
+                                break
+                    if not matched:
+                        _log(f"  [phase-c/impl] {block_id}: dropped "
+                             f"`{fn_data['fn_name']}` — block header "
+                             "does not match any TARGET or RELATED.")
+                spliced_now = 0
+                # Apply each splice. Operating on the same file in
+                # sequence keeps byte offsets consistent because we
+                # re-locate after each splice via the syn enumerator.
+                for fn_data, container in routed:
+                    target_file = target_src_dir / block["file"]
+                    ok, reason, delta = _splice_fn_with_where(
+                        target_file, container, fn_data["fn_name"],
+                        fn_data["body"], fn_data["where_clause"],
+                    )
+                    if ok:
+                        spliced_now += 1
+                    else:
+                        _log(f"  [phase-c/impl] {block_id}: splice "
+                             f"`{fn_data['fn_name']}` failed: {reason}")
+                if spliced_now == 0:
+                    _log(f"  [phase-c/impl] {block_id}: nothing spliced "
+                         f"(attempt {fix_attempt}).")
+                    break
+                # Run cargo check via the structured-diagnostics wrapper
+                # so error counts come from rustc's own classification
+                # (JSON `compiler-message`s with `level == "error"`) and
+                # not from regex over rendered text. The regex path
+                # produced false zeros for non-E-coded failures (linker,
+                # build script, cargo wrapper) — the source of the
+                # recurring "compile failed but errs=0" stall bug.
+                rc, cargo_out, diagnostics = _run_cargo_check_diag(
+                    check_cmd, target_src_dir, cluster_env)
+                if rc == 0:
+                    members_filled_this_block = spliced_now
+                    fns_filled_total += spliced_now
+                    impls_filled += 1
+                    _log(f"  [phase-c/impl] {block_id}: "
+                         f"FILLED {spliced_now} fn(s) "
+                         f"(attempt {fix_attempt}).")
+                    _emit("phase_c.impl.fill.done", duration_ms=int(
+                        (time.monotonic() - _t0) * 1000),
+                        data={
+                            "cluster": cluster_name,
+                            "file": block["file"],
+                            "container": block["container"],
+                            "members_filled": spliced_now,
+                            "members_failed": 0,
+                            "fix_attempts": fix_attempt,
+                        })
+                    break
+                # Compile failed. Use the structured diagnostics list as
+                # the source of truth for the error signature; the rc !=
+                # 0 path establishes a minimum count of 1 even when JSON
+                # produced no compiler-message records (cargo-level
+                # failure with no rustc diagnostic — rare but possible).
+                cur_err_sig = _cargo_err_sig_from_diagnostics(diagnostics)
+                cur_err_count = max(1, len(cur_err_sig))  # rc-honest minimum
+                if best_err_count is None or cur_err_count < best_err_count:
+                    best_err_count = cur_err_count
+                    block_stall = 0
+                else:
+                    block_stall += 1
+                last_error_excerpt = _focus_cargo_errors(cargo_out, block["file"])
+                _record_error_codes_seen(cargo_out)
+                _log(f"  [phase-c/impl] {block_id}: compile failed "
+                     f"(attempt {fix_attempt}); errs={cur_err_count} "
+                     f"floor={best_err_count} stall={block_stall}.")
+                # Revert and let the next iter try with the error context.
+                file_path.write_text(snapshot, encoding="utf-8")
+                if block_stall >= block_max_stalls:
+                    _log(f"  [phase-c/impl] {block_id}: floor stalled "
+                         f"at {best_err_count} for {block_stall} iter(s) "
+                         "— stopping this block.")
+                    break
+                if cur_err_sig == prev_err_sig and fix_attempt > 1:
+                    _log(f"  [phase-c/impl] {block_id}: identical errors "
+                         f"after attempt {fix_attempt} — stopping.")
+                    break
+                prev_err_sig = cur_err_sig
+        if members_filled_this_block == 0:
+            impls_failed += 1
+            errors.append(f"{block['file']}::{block['container']}: "
+                          f"impl-fill failed after {fix_attempt} attempt(s)")
+            _emit("phase_c.impl.fill.fail", duration_ms=int(
+                (time.monotonic() - _t0) * 1000),
+                data={
+                    "cluster": cluster_name,
+                    "file": block["file"],
+                    "container": block["container"],
+                    "members_failed": len(block["stub_members"]),
+                    "fix_attempts": fix_attempt,
+                    "last_error_preview": last_error_excerpt[:200],
+                })
+            # Per-impl retrospective — surface a strategy hint for the
+            # next iter to consume. Uses the existing per-fn retro helper
+            # with the impl id as the fn key so the on-disk store layout
+            # stays uniform.
+            try:
+                cur_errs = len(_cargo_err_sig(last_error_excerpt))
+                prior = retros_cache.get(
+                    _retro_key(block["file"], "*impl*", block["container"]), {})
+                prior_best = prior.get("best_error_count")
+                retro = _phase_c_retrospective(
+                    fn_name="*impl*",
+                    sig_text=block["container"],
+                    container=block["container"],
+                    file_rel=block["file"],
+                    cluster_name=cluster_name,
+                    last_body=last_response[:1500],
+                    error_excerpt=last_error_excerpt,
+                    fix_attempts=fix_attempt,
+                    prior_retrospective=prior.get("guidance", ""),
+                )
+                if prior_best is None:
+                    new_best = cur_errs
+                    improved = True
+                else:
+                    new_best = min(int(prior_best), cur_errs)
+                    improved = cur_errs < int(prior_best)
+                full_exhaust = (
+                    retro.get("category") == "GENUINELY_HARD"
+                    or (prior_best is not None and not improved)
+                )
+                retros_cache[_retro_key(block["file"], "*impl*", block["container"])] = {
+                    "category": retro.get("category", ""),
+                    "guidance": retro.get("guidance", ""),
+                    "signal": retro.get("signal", ""),
+                    "retrospective_count": int(prior.get("retrospective_count", 0)) + 1,
+                    "error_count": cur_errs,
+                    "best_error_count": new_best,
+                    "fully_exhausted": full_exhaust,
+                    "last_error_preview": last_error_excerpt[:240],
+                }
+                _save_retrospectives(project_dir, retros_cache)
+            except Exception as _re:
+                _log(f"  [phase-c/impl/retro] {block_id}: {_re}")
+    bytes_after = sum(p.stat().st_size for p in target_src_dir.rglob("*.rs"))
+    remaining_records = _scan_unimplemented_records_for_cluster(target_src_dir, cluster)
+    remaining_n = len(remaining_records) if remaining_records is not None else 0
+    return {
+        "fns_filled": fns_filled_total,
+        "bytes_filled": max(0, bytes_after - bytes_before),
+        "attempts": attempts_total,
+        "errors": errors,
+        "remaining": remaining_n,
+        "impls_filled": impls_filled,
+        "impls_failed": impls_failed,
+    }
+
+
 def _task2_fill_fns_one_by_one(
     project_dir: Path,
     target_src_dir: Path,
@@ -7796,6 +9167,41 @@ def _task2_fill_fns_one_by_one(
     """
     if cluster_env is None:
         cluster_env = _cargo_env()
+    # P5 — per-impl-block path. New default unit of work: fill all stubs of
+    # one impl block in one LLM call. Solves the class of failures where the
+    # right fn body depends on a constraint declared at the impl level that
+    # per-fn prompts cannot show. The per-impl path delegates free fns and
+    # oversized blocks back to the per-fn path below, which continues to
+    # exist as a fallback. Toggle via `PHASE_C_FILL_UNIT=fn`.
+    _fill_unit = os.getenv("PHASE_C_FILL_UNIT", "impl").lower()
+    if _fill_unit == "impl":
+        _impl_stats = _phase_c_fill_impl_blocks(
+            project_dir=project_dir,
+            target_src_dir=target_src_dir,
+            tests_dir_files=tests_dir_files,
+            module_name=module_name,
+            cluster_name=cluster_name,
+            cluster=cluster,
+            check_cmd=check_cmd,
+            cluster_env=cluster_env,
+            fr_path=fr_path,
+            tdd_frontier_keys=tdd_frontier_keys,
+        )
+        # If there are still stub members the per-impl path didn't cover
+        # (free fns or oversized blocks), fall through to the per-fn path
+        # to clean those up. We keep impl_stats counters around so the
+        # caller can see both populations.
+        if _impl_stats["remaining"] == 0:
+            return _impl_stats
+        # Carry the impl-pass numbers into the combined stats by stashing
+        # them; the per-fn path below will overlay its own numbers.
+        _carryover = {
+            "impls_filled": _impl_stats.get("impls_filled", 0),
+            "impls_failed": _impl_stats.get("impls_failed", 0),
+            "fns_filled_via_impl": _impl_stats.get("fns_filled", 0),
+        }
+    else:
+        _carryover = {}
     target_src_dir.mkdir(parents=True, exist_ok=True)
     bytes_before = sum(p.stat().st_size for p in target_src_dir.rglob("*.rs"))
     fns_filled = 0
@@ -7812,7 +9218,8 @@ def _task2_fill_fns_one_by_one(
              f"concurrent; splice+cargo serialised).")
     import threading as _threading
     import queue as _queue_mod
-    _splice_check_lock = _threading.Lock()
+    # _splice_check_lock is now module-level (used by both per-impl and
+    # per-fn paths so they don't race on the same file).
     _counters_lock = _threading.Lock()
     errors: list[str] = []
 
@@ -7927,6 +9334,12 @@ def _task2_fill_fns_one_by_one(
             "pass_n": pass_n, "cluster": cluster_name, "stubs": len(stubs),
             "max_passes": max_passes,
             "total_fns_in_cluster": _total_fns_in_cluster,
+            # Disambiguate "all stubs in cluster" vs "frontier size in stubs".
+            # `stubs` is the per-pass workload (frontier when TDD driver
+            # narrows it). `all_stubs_remaining` is the cluster-scope count
+            # the monitor needs to compute "filled / total" correctly.
+            "all_stubs_remaining": _all_stubs_count,
+            "filled_count": _filled_count,
         })
         progress_this_pass = 0
         filled_this_pass: list[tuple[str, str]] = []  # [(file_rel, fn_name)]
@@ -7956,12 +9369,30 @@ def _task2_fill_fns_one_by_one(
                         errors.append(f"{rec.get('file')}::{rec.get('fn_name')}: "
                                       f"worker exception: {_e}")
 
+        # FR-024 cross-iter exhausted skip: load the retrospectives map
+        # once per pass (cheap JSON read) and use it to skip fns the LLM
+        # has classified as GENUINELY_HARD or that have exhausted >=2
+        # retrospectives. Saves compute and lets the pipeline complete
+        # the rest of the corpus.
+        _retros_cache = _load_retrospectives(project_dir)
+
         def _process_one_stub(idx, rec):
             nonlocal attempts, fns_filled, progress_this_pass
             rel_file = rec["file"]
             fn_name = rec["fn_name"]
             container = rec.get("container", "")
             sig_text = rec.get("sig_text", "")
+            if _is_fn_fully_exhausted(_retros_cache, rel_file, fn_name, container):
+                _log(f"  [phase-c/per-fn] {idx}/{len(stubs)} skipped "
+                     f"{rel_file}::{fn_name} [{container}] — fully exhausted "
+                     "across iters (retrospective marked GENUINELY_HARD or "
+                     ">=2 prior retrospectives).")
+                _emit("phase_c.fn.fill.skip", data={
+                    "cluster": cluster_name, "pass_n": pass_n,
+                    "file": rel_file, "fn": fn_name,
+                    "reason": "fully_exhausted",
+                })
+                return
             _check_graceful_stop(f"per-fn pass {pass_n} fn {fn_name}")
             file_path = target_src_dir / rel_file
             try:
@@ -8067,6 +9498,9 @@ def _task2_fill_fns_one_by_one(
                         types_section=types_section,
                         invariants_section=invariants_section,
                         fr_path=fr_path,
+                        siblings_section=_collect_sibling_filled_bodies(
+                            cur_text, fn_name, container,
+                        ),
                     )
                 else:
                     prompt = _build_per_fn_fix_prompt(
@@ -8085,9 +9519,21 @@ def _task2_fill_fns_one_by_one(
                         allow_sig_change=(fix_attempt >= 5),
                         fr_path=fr_path,
                         attempt_history=per_fn_history,  # P2
+                        # FR-024: inject prior retrospective guidance (if any)
+                        # so the fix attempt starts from "what to try instead"
+                        # rather than naive retry-with-errors.
+                        retrospective_guidance=(_retros_cache.get(
+                            _retro_key(rel_file, fn_name, container), {}
+                        ).get("guidance", "")),
+                        # FR-024 fix 3: hoist sibling fn impls (same name,
+                        # different container) that are already filled —
+                        # best source of truth for the target body shape.
+                        siblings_section=_collect_sibling_filled_bodies(
+                            cur_text, fn_name, container,
+                        ),
                     )
 
-                body, last_response = _ask_per_fn_body(prompt, fn_name, attempts_log)
+                body, last_response = _ask_per_fn_body(prompt, fn_name, attempts_log, sig_text=sig_text)
                 if body is None:
                     # Model gave no usable response — stop retrying this fn.
                     _emit("phase_c.fn.fill.skip", data={
@@ -8331,6 +9777,89 @@ def _task2_fill_fns_one_by_one(
                             "file": rel_file, "fn": fn_name,
                             "kind": "exhausted", "preview": note[:200],
                         })
+
+                # FR-024 retrospective: actively diagnose why the fix
+                # loop exhausted and prescribe a different strategy for
+                # the next attempt. Persisted across module iterations.
+                #
+                # Exhaustion is PROGRESS-GATED — no hard cap on the number
+                # of retros. A retro fires; if the next-best error count
+                # is strictly lower than the prior best (real improvement),
+                # the fn stays eligible. If it isn't, the fn is marked
+                # fully exhausted on the spot.
+                try:
+                    _retros = _load_retrospectives(project_dir)
+                    _retro_k = _retro_key(rel_file, fn_name, container)
+                    _prior = _retros.get(_retro_k, {})
+                    _prior_count = int(_prior.get("retrospective_count", 0))
+                    _prior_best = _prior.get("best_error_count")
+                    _prior_guidance = _prior.get("guidance", "")
+                    _retro = _phase_c_retrospective(
+                        fn_name=fn_name, sig_text=sig_text,
+                        container=container, file_rel=rel_file,
+                        cluster_name=cluster_name,
+                        last_body=last_body or first_failed_body or "",
+                        error_excerpt=error_excerpt or first_error_excerpt or "",
+                        fix_attempts=fix_attempt,
+                        prior_retrospective=_prior_guidance,
+                    )
+                    # Transient empties (llm_error / empty_response) don't
+                    # update state — we never saw a real fix attempt's
+                    # outcome, so they cannot count toward exhaustion.
+                    _signal = _retro.get("signal", "")
+                    _transient = _signal in ("llm_error", "empty_response")
+                    if not _transient:
+                        _cur_errs = len(_cargo_err_sig(
+                            error_excerpt or first_error_excerpt or ""
+                        ))
+                        # First retro for this fn establishes a baseline —
+                        # no prior to compare, so we never exhaust on
+                        # round 1. Subsequent retros exhaust unless
+                        # current count is strictly lower than prior best.
+                        if _prior_best is None:
+                            _new_best = _cur_errs
+                            _improved = True
+                        else:
+                            _new_best = min(int(_prior_best), _cur_errs)
+                            _improved = _cur_errs < int(_prior_best)
+                        _new_count = _prior_count + 1
+                        _full_exhaust = (
+                            _retro.get("category") == "GENUINELY_HARD"
+                            or (_prior_best is not None and not _improved)
+                        )
+                        _retros[_retro_k] = {
+                            "category": _retro.get("category", ""),
+                            "guidance": _retro.get("guidance", ""),
+                            "signal": _signal,
+                            "retrospective_count": _new_count,
+                            "error_count": _cur_errs,
+                            "best_error_count": _new_best,
+                            "fully_exhausted": _full_exhaust,
+                            "last_error_preview": (error_excerpt or "")[:240],
+                        }
+                        _save_retrospectives(project_dir, _retros)
+                        _log(f"  [phase-c/retro] {fn_name} "
+                             f"[{_retro.get('category','?')}] "
+                             f"signal={_signal} "
+                             f"errs={_cur_errs} "
+                             f"(prior_best={_prior_best}, "
+                             f"improved={_improved}, "
+                             f"exhausted={_full_exhaust}): "
+                             f"{_retro.get('guidance','')[:120]}...")
+                        _emit("phase_c.retrospective", data={
+                            "cluster": cluster_name, "pass_n": pass_n,
+                            "file": rel_file, "fn": fn_name,
+                            "category": _retro.get("category", ""),
+                            "signal": _signal,
+                            "retrospective_count": _new_count,
+                            "error_count": _cur_errs,
+                            "best_error_count": _new_best,
+                            "improved": _improved,
+                            "fully_exhausted": _full_exhaust,
+                            "preview": _retro.get("guidance", "")[:200],
+                        })
+                except Exception as _re:
+                    _log(f"  [phase-c/retro] failed for {fn_name}: {_re}")
                 try:
                     ts = int(time.time())
                     fpath = failures_dir / f"{fn_name}-{ts}.txt"
@@ -8579,7 +10108,7 @@ def _task2_fill_fns_one_by_one(
                             )
                             attempts += 1
                             attempts_log_t: list[str] = []
-                            new_body, _ = _ask_per_fn_body(prompt, fn, attempts_log_t)
+                            new_body, _ = _ask_per_fn_body(prompt, fn, attempts_log_t, sig_text=sig_t)
                             if not new_body:
                                 continue
                             ok2, _ = _splice_fn_body(fp, fn, new_body)
@@ -8711,11 +10240,13 @@ def _task2_fill_fns_one_by_one(
         "errors": len(errors),
     })
     return {
-        "fns_filled": fns_filled,
+        "fns_filled": fns_filled + _carryover.get("fns_filled_via_impl", 0),
         "bytes_filled": bytes_after - bytes_before,
         "attempts": attempts,
         "errors": errors,
         "remaining": remaining,
+        "impls_filled": _carryover.get("impls_filled", 0),
+        "impls_failed": _carryover.get("impls_failed", 0),
     }
 
 
@@ -9051,14 +10582,14 @@ that satisfy the tests above.
         # Merge: walk each file in target_src_dir, splice in any of our fn_blocks
         # whose signature matches an unimplemented body in that file.
         for src_path in sorted(target_src_dir.rglob("*.rs")):
-            rel = str(src_path.relative_to(target_src_dir))
-            if ".gen_tests_" in rel:
+            rel_str: str = str(src_path.relative_to(target_src_dir))
+            if ".gen_tests_" in rel_str:
                 continue  # protected
             disk_text = src_path.read_text(encoding="utf-8")
             merged = _merge_fn_blocks_into_disk(disk_text, fn_blocks)
             if merged != disk_text:
                 src_path.write_text(merged, encoding="utf-8")
-                _log(f"  [phase-c] group {gname}: updated {rel} "
+                _log(f"  [phase-c] group {gname}: updated {rel_str} "
                      f"({len(disk_text)} → {len(merged)} bytes)")
                 # P3.5: cache small successful fills as future few-shot examples.
                 for sig, body in fn_blocks.items():
@@ -9196,7 +10727,8 @@ def _enumerate_types_via_extractor(src_dir: Path) -> list[dict] | None:
     if r.returncode != 0:
         return None
     try:
-        return json.loads(r.stdout)
+        data = json.loads(r.stdout)
+        return data if isinstance(data, list) else None
     except Exception:
         return None
 
@@ -9392,7 +10924,8 @@ def _enumerate_fns_via_extractor(src_dir: Path) -> list[dict] | None:
     if r.returncode != 0:
         return None
     try:
-        return json.loads(r.stdout)
+        data = json.loads(r.stdout)
+        return data if isinstance(data, list) else None
     except Exception:
         return None
 
@@ -9409,6 +10942,608 @@ def _scan_unimplemented_records(src_dir: Path) -> list[dict] | None:
     if recs is None:
         return None
     return [r for r in recs if r.get("has_unimplemented_body")]
+
+
+# --- Per-impl-block unit of work -----------------------------------------
+#
+# The skeleton extractor tags every fn with `container` — the impl-block (or
+# trait, or mod) header text that owns the fn. Grouping fns by (file,
+# container) yields an impl-block view of the codebase. The per-impl Phase C
+# path operates on these blocks instead of individual fns so that the model
+# sees the impl-level design decisions (lifetime parameters, where-clauses,
+# trait headers) when filling each member — solving the class of failures
+# where the right fn body depends on a constraint declared at the impl level
+# that per-fn prompts cannot show.
+
+
+def _parse_impl_block_ranges(source: str) -> "list[dict]":
+    """Source-aware scan of a Rust file for impl block byte ranges.
+
+    Returns one record per impl block:
+        {
+            "header_start": int,   # byte offset of the `impl` keyword
+            "body_open":    int,   # byte offset of the `{` that opens the body
+            "body_close":   int,   # byte offset of the matching `}`
+        }
+
+    The scanner respects comments (line and block, including nested),
+    string literals (regular and raw), char literals, and lifetime
+    tokens — so braces inside any of those don't confuse the
+    depth counter. Used by `_collect_impl_blocks` to assign each fn
+    record to the SPECIFIC impl block whose body range contains the
+    fn's `sig_byte_start`, which disambiguates two impls that share an
+    identical container string but differ in their where-clauses
+    (e.g. `impl<'a, T> Mut<'a, T> where T: ?Sized` vs the unsized
+    `impl<'a, T> Mut<'a, T>`).
+    """
+    n = len(source)
+    out: "list[dict]" = []
+
+    def _skip_line_comment(i: int) -> int:
+        while i < n and source[i] != "\n":
+            i += 1
+        return i
+
+    def _skip_block_comment(i: int) -> int:
+        # Rust permits nested `/* … */` blocks.
+        depth = 1
+        i += 2
+        while i < n and depth > 0:
+            if source[i] == "/" and i + 1 < n and source[i+1] == "*":
+                depth += 1; i += 2
+            elif source[i] == "*" and i + 1 < n and source[i+1] == "/":
+                depth -= 1; i += 2
+            else:
+                i += 1
+        return i
+
+    def _skip_string(i: int) -> int:
+        # Cursor is on the opening `"`.
+        i += 1
+        while i < n and source[i] != '"':
+            if source[i] == "\\" and i + 1 < n:
+                i += 2
+            else:
+                i += 1
+        return i + 1 if i < n else i
+
+    def _skip_raw_string(i: int) -> int:
+        # Cursor is on `r`. Match `r#…#"…"#…#`.
+        j = i + 1
+        hashes = 0
+        while j < n and source[j] == "#":
+            hashes += 1; j += 1
+        if j >= n or source[j] != '"':
+            return i + 1  # not a raw string, just consume `r`
+        end_pat = '"' + ("#" * hashes)
+        pos = source.find(end_pat, j + 1)
+        return pos + len(end_pat) if pos != -1 else n
+
+    def _skip_char_or_lifetime(i: int) -> int:
+        # Cursor is on `'`. Could be `'x'` (char) or `'a` (lifetime).
+        j = i + 1
+        if j < n and (source[j].isalpha() or source[j] == "_"):
+            k = j
+            while k < n and (source[k].isalnum() or source[k] == "_"):
+                k += 1
+            if k < n and source[k] == "'":
+                return k + 1  # char literal `'A'`
+            return k  # lifetime `'a` — already past
+        # Escaped char or symbol literal.
+        if j < n and source[j] == "\\" and j + 1 < n:
+            j += 2
+        elif j < n:
+            j += 1
+        if j < n and source[j] == "'":
+            return j + 1
+        return j
+
+    def _is_word_boundary(i: int) -> bool:
+        if i == 0:
+            return True
+        prev = source[i - 1]
+        return not (prev.isalnum() or prev == "_")
+
+    i = 0
+    while i < n:
+        ch = source[i]
+        # Whitespace.
+        if ch.isspace():
+            i += 1; continue
+        # Comments.
+        if ch == "/" and i + 1 < n and source[i+1] == "/":
+            i = _skip_line_comment(i); continue
+        if ch == "/" and i + 1 < n and source[i+1] == "*":
+            i = _skip_block_comment(i); continue
+        # Strings.
+        if ch == '"':
+            i = _skip_string(i); continue
+        if ch == "r" and i + 1 < n and source[i+1] in ('"', "#"):
+            i = _skip_raw_string(i); continue
+        # Char / lifetime.
+        if ch == "'":
+            i = _skip_char_or_lifetime(i); continue
+        # Impl keyword.
+        if (ch == "i" and source.startswith("impl", i)
+                and _is_word_boundary(i)
+                and (i + 4 >= n
+                     or not (source[i+4].isalnum() or source[i+4] == "_"))):
+            header_start = i
+            j = i + 4
+            # Walk to the `{` that opens the impl body — same scanner so
+            # `<…>` and `where … { … }` clauses (in generics' const
+            # expressions, theoretical) don't fool us.
+            body_open = -1
+            while j < n:
+                cj = source[j]
+                if cj.isspace(): j += 1; continue
+                if cj == "/" and j + 1 < n and source[j+1] == "/":
+                    j = _skip_line_comment(j); continue
+                if cj == "/" and j + 1 < n and source[j+1] == "*":
+                    j = _skip_block_comment(j); continue
+                if cj == '"':
+                    j = _skip_string(j); continue
+                if cj == "r" and j + 1 < n and source[j+1] in ('"', "#"):
+                    j = _skip_raw_string(j); continue
+                if cj == "'":
+                    j = _skip_char_or_lifetime(j); continue
+                if cj == "{":
+                    body_open = j; break
+                if cj == ";":
+                    # `impl X;` is not valid Rust; abort this candidate.
+                    body_open = -1; break
+                j += 1
+            if body_open == -1:
+                i = j; continue
+            # Walk to matching `}`.
+            depth = 1
+            k = body_open + 1
+            while k < n and depth > 0:
+                ck = source[k]
+                if ck == "/" and k + 1 < n and source[k+1] == "/":
+                    k = _skip_line_comment(k); continue
+                if ck == "/" and k + 1 < n and source[k+1] == "*":
+                    k = _skip_block_comment(k); continue
+                if ck == '"':
+                    k = _skip_string(k); continue
+                if ck == "r" and k + 1 < n and source[k+1] in ('"', "#"):
+                    k = _skip_raw_string(k); continue
+                if ck == "'":
+                    k = _skip_char_or_lifetime(k); continue
+                if ck == "{": depth += 1; k += 1; continue
+                if ck == "}":
+                    depth -= 1; k += 1
+                    if depth == 0:
+                        out.append({
+                            "header_start": header_start,
+                            "body_open": body_open,
+                            "body_close": k - 1,
+                        })
+                        i = k; break
+                    continue
+                k += 1
+            else:
+                i = k
+            continue
+        i += 1
+    return out
+
+
+def _collect_impl_blocks(src_dir: Path) -> list[dict] | None:
+    """Group every fn record into its impl/trait/mod container.
+
+    Disambiguation: blocks are keyed by the FULL impl header (text from
+    source between the `impl` keyword and the opening `{`), not by the
+    container string the extractor records. Two impls with identical
+    `impl Foo<T>` heads but different `where T: …` clauses are now
+    separate blocks instead of collapsing into one — this fixes the
+    Mut::read class of failure where the impl-level `T: ?Sized` was
+    invisible to the model.
+
+    Returns one record per (file, header_text) pair:
+        {
+            "file": str,
+            "container": str,            # FULL impl header text including
+                                          # where-clauses (or "" for free
+                                          # fns / fallback when source
+                                          # parsing failed).
+            "members": [fn_record, …],   # ordered by source byte position
+            "stub_members": [fn_record, …],  # subset where body is unimplemented
+            "related_containers": [str, …],  # other impl blocks in the SAME
+                                              # file whose trait name matches
+                                              # this block's (lets the prompt
+                                              # show e.g. both impl AsRef<T1>
+                                              # and impl AsRef<T2> for X side
+                                              # by side).
+        }
+
+    Returns None when the extractor binary isn't available.
+    """
+    recs = _enumerate_fns_via_extractor(src_dir)
+    if recs is None:
+        return None
+
+    # Step 1 — per file: parse the source to get impl block byte ranges,
+    # then assign each fn record to the block whose body range contains
+    # its sig_byte_start. Caches parsed ranges so we don't re-parse the
+    # same file once per fn record.
+    file_to_source: dict[str, str] = {}
+    file_to_impl_ranges: dict[str, "list[dict]"] = {}
+    def _source_for(rel: str) -> str:
+        if rel not in file_to_source:
+            p = src_dir / rel
+            try:
+                file_to_source[rel] = p.read_text(encoding="utf-8")
+            except Exception:
+                file_to_source[rel] = ""
+        return file_to_source[rel]
+    def _ranges_for(rel: str) -> "list[dict]":
+        if rel not in file_to_impl_ranges:
+            file_to_impl_ranges[rel] = _parse_impl_block_ranges(_source_for(rel))
+        return file_to_impl_ranges[rel]
+
+    # Step 2 — group fns by (file, header_text). header_text is the
+    # actual source slice for the impl block — includes generics,
+    # where-clauses, `for Trait` headers verbatim.
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for r in recs:
+        rel = r.get("file", "")
+        sig_start = int(r.get("sig_byte_start", 0))
+        # Find the impl block whose body range contains this sig.
+        header_text = ""
+        for rng in _ranges_for(rel):
+            if rng["body_open"] < sig_start < rng["body_close"]:
+                src = _source_for(rel)
+                # Header slice = [impl keyword .. opening `{`).
+                header_text = src[rng["header_start"]:rng["body_open"]].rstrip()
+                break
+        if not header_text:
+            # Fallback to the extractor's container string when source
+            # parsing missed (e.g. fn in a trait, free fn, or our
+            # scanner failed). Keeps legacy behaviour for those cases.
+            header_text = r.get("container", "") or ""
+        key = (rel, header_text)
+        groups.setdefault(key, []).append(r)
+
+    # Step 3 — render block records. `related_containers` lookup uses
+    # the trait-name regex against the header text.
+    blocks: list[dict] = []
+    trait_name_re = re.compile(
+        r"\bimpl\b(?:\s*<[^>]*>)?\s+(?:[A-Za-z_:][\w:]*\s*(?:<[^<>]*>)?\s+for\s+)?"
+        r"([A-Za-z_:][\w:]*)"
+    )
+    # We want the TRAIT NAME (`impl Trait<T> for Type`), not the
+    # `Type` — use a stricter pattern for related grouping. Two impls
+    # are "related" iff they share the same trait name AND target type.
+    trait_with_for_re = re.compile(
+        r"\bimpl\s*(?:<[^>]*>)?\s+([A-Za-z_:][\w:]*)\s*(?:<[^>]*>)?\s+for\b"
+    )
+    file_to_trait_containers: dict[str, dict[str, list[str]]] = {}
+    for (file_rel, container), _members in groups.items():
+        if not container:
+            continue
+        m = trait_with_for_re.search(container)
+        if not m:
+            continue
+        trait_name = m.group(1)
+        file_to_trait_containers.setdefault(file_rel, {}).setdefault(
+            trait_name, []).append(container)
+    for (file_rel, container), members in groups.items():
+        members_sorted = sorted(members, key=lambda r: int(r.get("sig_byte_start", 0)))
+        stub_members = [m for m in members_sorted if m.get("has_unimplemented_body")]
+        related: list[str] = []
+        if container:
+            m = trait_with_for_re.search(container)
+            if m:
+                trait_name = m.group(1)
+                same_trait = file_to_trait_containers.get(file_rel, {}).get(trait_name, [])
+                related = [c for c in same_trait if c != container]
+        blocks.append({
+            "file": file_rel,
+            "container": container,
+            "members": members_sorted,
+            "stub_members": stub_members,
+            "related_containers": related,
+        })
+    return blocks
+
+
+def _impl_block_id(file_rel: str, container: str) -> str:
+    """Stable hashable id for an impl block (used as a dict key in the
+    Phase C frontier mapping and as a per-block lock key)."""
+    return f"{file_rel}::{container}"
+
+
+# --- Crate-internal idiom extraction --------------------------------------
+#
+# When the model is filling a stub, the gotchas section provides GENERIC
+# Rust patterns (NonNull deref, trait header signature matching, etc.). The
+# generic patterns are necessary but insufficient: each crate develops its
+# own internal idioms — e.g. anyhow's `Self::construct_from_*(arg, None)`
+# family, its `ContextError { context, error }` wrapper, its vtable
+# fn-pointer dispatch `(vtable.method)(this)` syntax. The model can only
+# discover those by seeing them used in already-filled fns of the same
+# file. `_extract_crate_idioms` scans the file's filled bodies, identifies
+# the highest-signal idioms, and renders a compact `<CRATE_IDIOMS>`
+# section the per-impl prompt injects so the model has a cheat-sheet of
+# THIS crate's patterns alongside the generic gotchas.
+#
+# Generic over crates: there is no anyhow-specific code in here. The
+# pattern detectors look for shapes (`Self::name(args)` recurrence,
+# `(field.subfield)(args)` fn-pointer calls, `unsafe { x.as_ref() }`
+# chains, `Struct { … }` literal construction). Anyhow happens to be a
+# rich source of all of these; smaller crates emit fewer idioms and the
+# section is correspondingly shorter.
+
+
+_IDIOM_SELF_CALL_RE = re.compile(
+    r"\bSelf::([A-Za-z_][A-Za-z_0-9]*)\s*\(([^()]{0,200}?)\)",
+    re.DOTALL,
+)
+_IDIOM_FN_PTR_FIELD_RE = re.compile(
+    r"\(\s*([A-Za-z_][\w.]+?)\s*\)\s*\(",
+)
+_IDIOM_STRUCT_LITERAL_RE = re.compile(
+    r"\b([A-Z][A-Za-z0-9_]{2,40})\s*\{\s*([^{}]{1,400})\s*\}",
+    re.DOTALL,
+)
+_IDIOM_UNSAFE_CHAIN_RE = re.compile(
+    r"unsafe\s*\{\s*([^\n{}]{1,160})\s*\}",
+)
+
+
+def _extract_filled_fn_bodies(impl_blocks: "list[dict]", file_rel: str) -> "list[dict]":
+    """Return [{fn_name, container, body}] for every FILLED fn in `file_rel`,
+    pulled from the impl block records. Free fns are dropped (they have no
+    container). Used by `_extract_crate_idioms` to scan for patterns."""
+    out: "list[dict]" = []
+    for b in impl_blocks:
+        if b.get("file") != file_rel:
+            continue
+        for m in b.get("members", []):
+            if m.get("has_unimplemented_body"):
+                continue
+            body = (m.get("body_text") or "").strip()
+            if not body:
+                continue
+            out.append({
+                "fn_name": m.get("fn_name", ""),
+                "container": b.get("container", ""),
+                "body": body,
+            })
+    return out
+
+
+def _extract_crate_idioms(
+    impl_blocks: "list[dict]",
+    file_rel: str,
+    target_sig_text: str = "",
+    max_idioms: int = 5,
+) -> str:
+    """Walk filled fn bodies in `file_rel` and surface up to `max_idioms`
+    distinctive patterns the model would benefit from seeing while filling
+    a stub in the same file.
+
+    Returned string is the body of a `<CRATE_IDIOMS>` section — empty
+    when no patterns clear the relevance bar. Each idiom is one line:
+
+        # Pattern label — used by `fn caller_name` in this file
+        <one-line code snippet>
+
+    Detection axes (each rendered at most twice):
+      1. Self::method(arg, None) family — recurrent constructor pattern.
+      2. (field.subfield)(args) — fn-pointer-via-field dispatch (vtable).
+      3. unsafe { … } single-line chains — pointer / NonNull manipulation.
+      4. StructName { field: …, … } — wrapper-type construction.
+
+    Relevance: prefer idioms whose symbols (Self::method name, struct
+    name, field name) appear in `target_sig_text` so the model sees
+    crate-specific patterns it's about to need.
+    """
+    fns = _extract_filled_fn_bodies(impl_blocks, file_rel)
+    if not fns:
+        return ""
+
+    target_tokens = set(re.findall(r"[A-Za-z_][\w]*", target_sig_text or ""))
+
+    # Per-axis collectors with rank score.
+    candidates: "list[tuple[float, str]]" = []
+
+    # Axis 1 — Self:: family. Count occurrences per method name.
+    self_method_counts: dict[str, int] = {}
+    self_method_examples: dict[str, tuple[str, str]] = {}  # name → (caller, snippet)
+    for fn in fns:
+        for m in _IDIOM_SELF_CALL_RE.finditer(fn["body"]):
+            name = m.group(1)
+            self_method_counts[name] = self_method_counts.get(name, 0) + 1
+            self_method_examples.setdefault(name, (fn["fn_name"], m.group(0)))
+    family_names = [n for n, c in self_method_counts.items() if c >= 2]
+    if family_names:
+        # One synthesised entry: "this file uses Self::X / Self::Y / Self::Z as constructors"
+        family_list = ", ".join(f"Self::{n}" for n in sorted(family_names))
+        # Show ONE concrete call from the highest-count family member.
+        top = max(family_names, key=lambda n: self_method_counts[n])
+        caller, snippet = self_method_examples[top]
+        snippet = " ".join(snippet.split())  # collapse whitespace
+        if len(snippet) > 140:
+            snippet = snippet[:140] + " …"
+        rel_score = 2.0 if any(n in target_tokens for n in family_names) else 1.0
+        candidates.append((
+            rel_score + 0.1 * sum(self_method_counts[n] for n in family_names),
+            f"# Self:: family — this file's constructors: {family_list}.\n"
+            f"# Example, from `fn {caller}`:\n"
+            f"#   {snippet}"
+        ))
+
+    # Axis 2 — fn-pointer field dispatch `(x.y)(args)`. Group by the path.
+    fnptr_counts: dict[str, int] = {}
+    fnptr_examples: dict[str, tuple[str, str]] = {}
+    for fn in fns:
+        for m in _IDIOM_FN_PTR_FIELD_RE.finditer(fn["body"]):
+            path = m.group(1).strip()
+            if "." not in path:
+                continue  # likely an arithmetic expression, not a vtable access
+            base = path.rsplit(".", 1)[1]
+            fnptr_counts[base] = fnptr_counts.get(base, 0) + 1
+            fnptr_examples.setdefault(base, (fn["fn_name"], path))
+    # Pick the 2 most frequent fn-pointer fields.
+    for name in sorted(fnptr_counts, key=lambda n: -fnptr_counts[n])[:2]:
+        if fnptr_counts[name] < 1:
+            continue
+        caller, path = fnptr_examples[name]
+        rel_score = 2.0 if name in target_tokens else 1.0
+        candidates.append((
+            rel_score + 0.05 * fnptr_counts[name],
+            f"# Fn-pointer field dispatch — call via the field, NOT via\n"
+            f"# method syntax. Used in `fn {caller}`:\n"
+            f"#   ({path})(args…)   // NOT  {path.split('.')[-1]}(args…)"
+        ))
+
+    # Axis 3 — unsafe { … } single-line chains. Surface the most common
+    # SHAPE of such a chain (collapsed by token-pattern, not exact text).
+    unsafe_examples: dict[str, tuple[str, str]] = {}
+    unsafe_counts: dict[str, int] = {}
+    for fn in fns:
+        for m in _IDIOM_UNSAFE_CHAIN_RE.finditer(fn["body"]):
+            chain = " ".join(m.group(1).split())
+            if not chain:
+                continue
+            # Shape = identifier-only with `.`s preserved.
+            shape = re.sub(r"[A-Za-z_][\w]*", "X", chain)
+            shape = re.sub(r"\s+", " ", shape).strip()
+            unsafe_counts[shape] = unsafe_counts.get(shape, 0) + 1
+            unsafe_examples.setdefault(shape, (fn["fn_name"], chain))
+    for shape in sorted(unsafe_counts, key=lambda s: -unsafe_counts[s])[:2]:
+        if unsafe_counts[shape] < 1:
+            continue
+        caller, chain = unsafe_examples[shape]
+        if len(chain) > 140:
+            chain = chain[:140] + " …"
+        rel_score = 1.0 + 0.05 * unsafe_counts[shape]
+        # Bias if the chain mentions a target token (e.g. inner, vtable, ptr).
+        for t in re.findall(r"[A-Za-z_][\w]*", chain):
+            if t in target_tokens:
+                rel_score += 0.5
+                break
+        candidates.append((
+            rel_score,
+            f"# Unsafe chain pattern — used in `fn {caller}`:\n"
+            f"#   unsafe {{ {chain} }}"
+        ))
+
+    # Axis 4 — Struct literal construction. Show wrapper types the file
+    # constructs that aren't trivial single-field types.
+    struct_examples: dict[str, tuple[str, str]] = {}
+    struct_counts: dict[str, int] = {}
+    for fn in fns:
+        for m in _IDIOM_STRUCT_LITERAL_RE.finditer(fn["body"]):
+            name = m.group(1)
+            # Skip stdlib-y names that are noise.
+            if name in {"Self", "Some", "None", "Ok", "Err", "Box", "Vec",
+                        "String", "Result", "Option"}:
+                continue
+            inner = " ".join(m.group(2).split())
+            if not inner or "," not in inner and ":" not in inner:
+                continue
+            struct_counts[name] = struct_counts.get(name, 0) + 1
+            struct_examples.setdefault(name, (fn["fn_name"], inner))
+    for name in sorted(struct_counts, key=lambda n: -struct_counts[n])[:2]:
+        if struct_counts[name] < 1:
+            continue
+        caller, inner = struct_examples[name]
+        if len(inner) > 140:
+            inner = inner[:140] + " …"
+        rel_score = 2.0 if name in target_tokens else 1.0
+        candidates.append((
+            rel_score + 0.05 * struct_counts[name],
+            f"# Wrapper construction — used in `fn {caller}`:\n"
+            f"#   {name} {{ {inner} }}"
+        ))
+
+    if not candidates:
+        return ""
+    candidates.sort(key=lambda x: -x[0])
+    chosen = [snippet for _score, snippet in candidates[:max_idioms]]
+    return "\n\n".join(chosen)
+
+
+def _group_frontier_by_impl_block(
+    frontier: "dict[tuple[str, str], set[str]]",
+    impl_blocks: "list[dict]",
+) -> "list[dict]":
+    """Map a per-fn frontier into a per-impl-block fill plan.
+
+    The TDD loop attributes failures to `(file, fn_name)` keys. The
+    per-impl path widens each entry to the WHOLE impl block containing
+    that fn — if any member of an impl block is on the frontier, the
+    block becomes one fill unit covering all its still-stub members
+    (not just the trapped one).
+
+    Returns a list of `{block: impl_block_record, fns_in_frontier:
+    set[str], related_blocks: list[impl_block_record]}` records, ordered
+    by the position the first frontier fn appears (so TDD's leaf
+    ordering carries through).
+    """
+    # Index impl blocks by (file, container) for quick lookup, and by
+    # member fn key for the inverse mapping.
+    file_container_to_block: dict[tuple[str, str], dict] = {}
+    fn_to_block: dict[tuple[str, str], dict] = {}
+    for b in impl_blocks:
+        file_container_to_block[(b["file"], b["container"])] = b
+        for m in b["members"]:
+            fn_to_block[(b["file"], m["fn_name"])] = b
+    plan: list[dict] = []
+    seen_block_ids: set[str] = set()
+    for (file_rel, fn_name), tests in frontier.items():
+        block = fn_to_block.get((file_rel, fn_name))
+        if block is None:
+            continue
+        bid = _impl_block_id(file_rel, block["container"])
+        if bid in seen_block_ids:
+            # Already added this block — record the additional frontier fn.
+            for entry in plan:
+                if _impl_block_id(entry["block"]["file"], entry["block"]["container"]) == bid:
+                    entry["fns_in_frontier"].add(fn_name)
+                    break
+            continue
+        seen_block_ids.add(bid)
+        related_blocks = []
+        for rc in block.get("related_containers", []):
+            rb = file_container_to_block.get((file_rel, rc))
+            if rb is not None:
+                related_blocks.append(rb)
+        plan.append({
+            "block": block,
+            "fns_in_frontier": {fn_name},
+            "related_blocks": related_blocks,
+        })
+    return plan
+
+
+def _collect_impl_blocks_for_cluster(
+    target_src_dir: Path,
+    cluster: "BuildCluster | None",
+) -> list[dict] | None:
+    """Cluster-aware variant of `_collect_impl_blocks`. A block is included
+    iff at least one of its STUB members is active under this cluster's
+    cfg-set. Stub members not active in the cluster are dropped from
+    `stub_members` so the per-impl prompt never asks the model to fill
+    something that wouldn't compile in this cluster anyway."""
+    blocks = _collect_impl_blocks(target_src_dir)
+    if blocks is None:
+        return None
+    if cluster is None:
+        return blocks
+    out: list[dict] = []
+    for b in blocks:
+        kept_stubs = [
+            m for m in b["stub_members"]
+            if _fn_belongs_to_cluster(target_src_dir, b["file"], m["fn_name"], cluster)
+        ]
+        if not kept_stubs:
+            continue
+        out.append({**b, "stub_members": kept_stubs})
+    return out
 
 
 def _scan_unimplemented_records_for_cluster(
@@ -9773,7 +11908,8 @@ def _enumerate_mods_via_extractor(src_dir: Path) -> list[dict] | None:
     if r.returncode != 0:
         return None
     try:
-        return json.loads(r.stdout)
+        data = json.loads(r.stdout)
+        return data if isinstance(data, list) else None
     except Exception:
         return None
 
@@ -9806,7 +11942,7 @@ def _file_cfg_predicate(target_src_dir: Path, file_rel: str) -> str | None:
     file_name = Path(file_rel).name
     for r in _MOD_RECORDS_CACHE[key]:
         if r.get("name") == stem or r.get("file") == file_name:
-            preds = r.get("cfg_predicates") or []
+            preds: list[str] = list(r.get("cfg_predicates") or [])
             if not preds:
                 return None
             if len(preds) == 1:
@@ -10620,6 +12756,10 @@ def _read_state(project_dir: Path) -> dict:
 
 
 def _write_state(project_dir: Path, state: dict) -> None:
+    """Atomic write: render to a sibling tempfile, fsync, then os.replace.
+    Guarantees readers never see a partially-written state file even if
+    the process is killed mid-write or another pipeline races us.
+    """
     from datetime import datetime as _dt
     lines = [
         f"# pipeline_state — {project_dir.name}",
@@ -10633,19 +12773,53 @@ def _write_state(project_dir: Path, state: dict) -> None:
         lines.append(f"[{key}]  {status:<12}  hash={h}  {detail}")
     lines.append("")
     lines.append(f"current: {state.get('current', '')}")
-    _state_path(project_dir).write_text("\n".join(lines) + "\n")
+    body = "\n".join(lines) + "\n"
+    target = _state_path(project_dir)
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(body)
+        f.flush()
+        try:
+            os.fsync(f.fileno())
+        except OSError:
+            pass
+    os.replace(tmp, target)
 
 
 def _mark_phase(project_dir: Path, phase_key: str, status: str,
                 detail: str = "", source_hash: str | None = None) -> None:
-    """Update a single phase entry and rewrite the state file."""
-    state = _read_state(project_dir)
-    state["phases"][phase_key] = {
-        "status": status,
-        "hash":   source_hash or "-",
-        "detail": detail,
-    }
-    _write_state(project_dir, state)
+    """Update a single phase entry and rewrite the state file.
+
+    Holds an fcntl advisory lock on `{project_dir}/.pipeline_state.lock`
+    around the read-modify-write so concurrent pipeline processes can't
+    clobber each other's updates. The atomic os.replace in `_write_state`
+    is the second line of defence.
+    """
+    lock_path = project_dir / ".pipeline_state.lock"
+    try:
+        lock_path.touch(exist_ok=True)
+        import fcntl as _fcntl
+        with open(lock_path, "w") as _lf:
+            _fcntl.flock(_lf.fileno(), _fcntl.LOCK_EX)
+            state = _read_state(project_dir)
+            state["phases"][phase_key] = {
+                "status": status,
+                "hash":   source_hash or "-",
+                "detail": detail,
+            }
+            _write_state(project_dir, state)
+    except Exception:
+        # Lock unavailable (e.g. /tmp on read-only FS, exotic env). Fall
+        # back to unlocked write — preserves legacy behaviour and the
+        # atomic os.replace keeps the file consistent even without the
+        # cross-process lock.
+        state = _read_state(project_dir)
+        state["phases"][phase_key] = {
+            "status": status,
+            "hash":   source_hash or "-",
+            "detail": detail,
+        }
+        _write_state(project_dir, state)
 
 
 def _set_current(project_dir: Path, current: str) -> None:
@@ -10653,6 +12827,43 @@ def _set_current(project_dir: Path, current: str) -> None:
     state = _read_state(project_dir)
     state["current"] = current
     _write_state(project_dir, state)
+
+
+def _commit_and_mark(
+    project_dir: Path,
+    phase_key: str,
+    status: str,
+    *,
+    commit_message: str,
+    tag: "str | None" = None,
+    detail: str = "",
+    source_hash: "str | None" = None,
+) -> None:
+    """Atomic transition: COMMIT the workspace, optionally TAG, THEN mark
+    the phase done in pipeline_state.md.
+
+    This ordering is the persistence fix for the original bug — the
+    legacy pattern was `do_work → _mark_phase("done") → git_commit(...)`,
+    which leaks irrecoverably when the process dies between the mark and
+    the commit: the next run sees `state=done`, skips re-running the
+    phase, and the workspace mutation is never preserved in git. Reverse
+    the order: commit first, then mark. Death between commit and mark is
+    benign — the next run re-runs the (idempotent) phase, the second
+    `git_commit` is a no-op because the tree is already clean, and the
+    `_mark_phase` finally records done.
+
+    `commit_message` is passed verbatim to `git_commit`. If the working
+    tree has no changes the commit silently no-ops (already-clean case);
+    we still proceed to tag + mark, which preserves the "resume" case
+    where a prior run already committed.
+
+    Returns nothing — failures are logged inside git_commit/git_tag.
+    """
+    git_commit(project_dir, commit_message)
+    if tag:
+        git_tag(project_dir, tag)
+    _mark_phase(project_dir, phase_key, status,
+                detail=detail, source_hash=source_hash)
 
 
 def _phase_valid(project_dir: Path, phase_key: str, current_hash: str | None = None) -> bool:
@@ -10985,7 +13196,7 @@ content here
 """
 
     def attempt():
-        response = ask(prompt, model=_TASK0_MODEL, max_tokens=4096)
+        response = ask(prompt, model=_TASK0_MODEL)
         files = extract_files(response)
         if "coverage_strategy.md" not in files:
             stripped = re.sub(r'^```[^\n]*\n', '', response.strip())
@@ -13904,7 +16115,10 @@ class StaticSkeletonTask2Generator(Task2Generator):
         has unfilled stubs under the default cfg TASK 3 runs under.
         """
         max_stalls = int(os.getenv("POST_MERGE_MAX_STALLS", "3"))
-        hard_cap = int(os.getenv("POST_MERGE_HARD_CAP", "20"))
+        # Hard cap is now a runaway-safety backstop only — floor-stall
+        # (max_stalls) is the real terminator. Set to 0 to skip the pass
+        # entirely (legacy behaviour preserved).
+        hard_cap = int(os.getenv("POST_MERGE_HARD_CAP", "10000"))
         if hard_cap <= 0:
             return
         tag = "[skeleton-merge]"
@@ -13913,8 +16127,8 @@ class StaticSkeletonTask2Generator(Task2Generator):
         fr_path = project_dir / f"functional_requirements_{module}.md"
         leaf_counts: dict[str, int] = {}
         for c in clusters:
-            for k, v in (_load_baked_leaf_order(project_dir, c.name) or {}).items():
-                leaf_counts[k] = max(leaf_counts.get(k, 0), int(v))
+            for fn_name_k, v in (_load_baked_leaf_order(project_dir, c.name) or {}).items():
+                leaf_counts[fn_name_k] = max(leaf_counts.get(fn_name_k, 0), int(v))
         test_cmd = "cargo test --no-fail-fast"
         test_timeout = int(os.getenv("POST_MERGE_TEST_TIMEOUT", "180"))
         try:
@@ -13973,12 +16187,21 @@ class StaticSkeletonTask2Generator(Task2Generator):
             )
             eligible = {k: v for k, v in frontier.items()
                          if k not in permanently_exhausted}
-            if not eligible and stall >= max_stalls:
-                _log(f"  {tag} post-merge iter {iter_n}: stall={stall} "
-                     f"and no actionable frontier; stopping. "
-                     f"best pass={best_pass} fail={best_fail}.")
+            # Stall on pass_count is the sole real terminator. A non-empty
+            # frontier with a stuck fn must not override it — same fix as
+            # _run_phase_c_tdd: pass_count plateau is the only "no real
+            # improvement" signal that captures cluster-level progress.
+            if stall >= max_stalls:
+                _log(f"  {tag} post-merge iter {iter_n}: pass_count plateau "
+                     f"{stall} iter(s) at best={best_pass}; stopping "
+                     f"({len(eligible)} fn(s) still on frontier — marking "
+                     "exhausted). best pass="
+                     f"{best_pass} fail={best_fail}.")
+                for _stuck_key in eligible.keys():
+                    permanently_exhausted.add(_stuck_key)
                 _emit("post_merge.fill.iter", data={
-                    "iter": iter_n, "rc": rc, "frontier_size": 0,
+                    "iter": iter_n, "rc": rc,
+                    "frontier_size": len(eligible),
                     "kind": "stall_exit",
                     "pass_count": pass_count, "fail_count": fail_count,
                     "improved": improved, "stall": stall,
@@ -14021,7 +16244,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
                 skip_end_pass_test=True,
             )
             cur_stubs = set(_scan_unimplemented_functions(project_dir / "src"))
-            newly_filled = [
+            newly_filled: list[tuple[str, str]] = [
                 k for k in eligible.keys()
                 if k not in cur_stubs
                 and (k[0].split("/")[-1], k[1]) not in cur_stubs
@@ -14349,97 +16572,43 @@ def generate_fix_loop(
         })
 
     env = _cargo_env()
-    last_output = ""
-    prev_sigs: frozenset = frozenset()
-    attempt = 0
-    _attempt_history: list[str] = []  # running narrative of what was tried and what happened
-    # P7.4: floor-stall against rustc error count. Replaces the sigs-equality
-    # exit (which treated any error swap as "progress"). max_fix_attempts is
-    # now interpreted as the hard cap; the real exit is "no new minimum for
-    # max_stalls iters". Env-overridable for A/B comparison.
     _fl_max_stalls = int(os.getenv("GENERATE_FIX_LOOP_MAX_STALLS", "3"))
-    _fl_best_count: int | None = None
-    _fl_stall = 0
+    # `max_fix_attempts` retained as a kwarg for backward-compat but is no
+    # longer a counter cap — it's used only as a logging hint. Real exit is
+    # the floor-stall in `_improvement_loop`.
+    _ = max_fix_attempts
 
-    while True:
-        # Run the check.
-        try:
-            result = subprocess.run(
-                _parse_cmd(check_cmd), cwd=project_dir,
-                capture_output=True, text=True, timeout=timeout, env=env,
-            )
-            last_output = result.stdout + (
-                "\n--- stderr ---\n" + result.stderr if result.stderr else ""
-            )
-            if result.returncode == 0:
-                if attempt > 0:
-                    _log(f"  [fix loop] Check PASSED after fix attempt {attempt}.")
-                return True, last_output
-        except subprocess.TimeoutExpired:
-            last_output = f"TIMEOUT after {timeout}s"
-            return False, last_output
-
-        cur_sigs = _error_sigs(last_output)
-        _log_compile_overview(last_output, attempt)
-        # P7.4: track floor on rustc error count, not sig equality.
-        cur_count = len(cur_sigs)
-        if _fl_best_count is None or cur_count < _fl_best_count:
-            _fl_best_count = cur_count
-            _fl_stall = 0
-        else:
-            _fl_stall += 1
-        if attempt > 0:
-            resolved = prev_sigs - cur_sigs
-            _log(f"  [fix loop] {len(resolved)} error(s) resolved, {cur_count} "
-                 f"remaining (floor={_fl_best_count}, stall={_fl_stall}).")
-            _emit("loop.iter", data={
-                "name": "generate_fix_loop",
-                "iter": attempt,
-                "metric_new": cur_count,
-                "metric_best": _fl_best_count,
-                "improved": _fl_stall == 0,
-                "stalled": _fl_stall,
-            })
-            if _fl_stall >= _fl_max_stalls:
-                _log(f"  [fix loop] floor stalled at {_fl_best_count} for "
-                     f"{_fl_stall} iter(s) — giving up.")
-                break
-            if attempt >= max_fix_attempts:
-                _log(f"  [fix loop] hard cap {max_fix_attempts} attempts reached.")
-                break
-
-        # Graceful stop check — mirrors task0c behaviour: finish current attempt, then exit.
+    def _run_check() -> tuple[bool, str, int]:
+        # Graceful-stop check at the top of each iter.
         _graceful_sentinel = Path("/tmp/pipeline_graceful_stop")
         if _graceful_sentinel.exists():
             try:
                 _graceful_sentinel.unlink()
             except OSError:
                 pass
-            _log(f"  [fix loop] Graceful stop requested — attempt {attempt} complete. Exiting.")
+            _log("  [fix loop] Graceful stop requested — exiting cleanly.")
             sys.exit(0)
-
-        attempt += 1
-        prev_sigs = cur_sigs
-
-        # BL-025: record the error category before attempting a fix.
-        _fix_error_before = last_output
-
-        _log(f"  [fix loop] Attempt {attempt} — asking LLM to fix specific failures.")
-
-        # Build running narrative of prior fix attempts for this loop.
-        _history_section = ""
-        if _attempt_history:
-            n = len(_attempt_history)
-            _history_section = (
-                f"You have already made {n} fix attempt{'s' if n != 1 else ''} in this loop. "
-                f"Here is what happened — do NOT repeat the same changes:\n\n"
-                + "\n\n".join(_attempt_history)
-                + "\n\nNow make a different fix that avoids every approach above.\n"
+        try:
+            result = subprocess.run(
+                _parse_cmd(check_cmd), cwd=project_dir,
+                capture_output=True, text=True, timeout=timeout, env=env,
             )
+            output = result.stdout + (
+                "\n--- stderr ---\n" + result.stderr if result.stderr else ""
+            )
+            if result.returncode == 0:
+                return True, output, 0
+        except subprocess.TimeoutExpired:
+            return False, f"TIMEOUT after {timeout}s", 10**9
+        metric = len(_error_sigs(output))
+        return False, output, metric
 
+    def _do_fix(output: str, history: list[dict], *, retro: str) -> dict:
+        if output.startswith("TIMEOUT after "):
+            return {"abort": True, "reason": "check_timeout",
+                    "summary": "check timed out"}
+        _log_compile_overview(output, len(history))
         # Build source context — read current content from disk in full.
-        # Truncating source files or capping total size causes the model to fix errors
-        # in code it cannot see, often producing new errors. Pass all files completely.
         source_block = ""
         for p in source_paths:
             rel = str(p.relative_to(project_dir))
@@ -14448,15 +16617,81 @@ def generate_fix_loop(
             content = p.read_text(encoding="utf-8")
             source_block += f'\n<FILE path="{rel}">\n{content}\n</FILE>\n'
 
-        # Fill-down: extra_context may be large (test files + requirements from
-        # task2_fix_loop) or small (proc-macro rules). Give it the full budget
-        # minus reservations for error, source, and (optionally) the spec.
-        # Render the fix prompt scaffold with sized sections empty for an
-        # exact overhead measurement.
+        # Running narrative of prior fix attempts (from improvement-loop history).
+        _attempt_lines: list[str] = []
+        for rec in history:
+            iter_n = rec.get("iter", "?")
+            chg = rec.get("files_changed_str", "no files changed")
+            err_prev = rec.get("error_preview", "")
+            _attempt_lines.append(
+                f"Attempt {iter_n}: changed [{chg}] → still failing.\n"
+                f"Error was:\n{err_prev}"
+            )
+        _history_section = ""
+        if _attempt_lines:
+            n = len(_attempt_lines)
+            _history_section = (
+                f"You have already made {n} fix attempt{'s' if n != 1 else ''} in this loop. "
+                f"Here is what happened — do NOT repeat the same changes:\n\n"
+                + "\n\n".join(_attempt_lines)
+                + "\n\nNow make a different fix that avoids every approach above.\n"
+            )
+
+        # Strategy retrospective injected when prior iter didn't improve.
+        _retro_block = (
+            f"\n<RETROSPECTIVE_GUIDANCE>\nThe previous attempt did not reduce "
+            "the compile error count. Apply this strategy instead of repeating "
+            f"the prior approach:\n{retro}\n</RETROSPECTIVE_GUIDANCE>\n"
+            if retro.strip() else ""
+        )
+
+        _gotchas_brief    = _gotchas_summary()
+        _gotchas_specific = _gotchas_for_error(output)
+        _gotchas_block    = f"\n<RUST_GOTCHAS>\n{_gotchas_brief}\n</RUST_GOTCHAS>\n"
+        if _gotchas_specific:
+            _gotchas_block += (
+                f"\n<RELEVANT_GOTCHAS_DETAIL>\n{_gotchas_specific}\n"
+                "</RELEVANT_GOTCHAS_DETAIL>\n"
+            )
+        _patch_protocol = (
+            "\n<OUTPUT_PROTOCOL>\n"
+            "When the fix is localised (touches <=3 fns or <=200 lines of\n"
+            "a file), PREFER emitting a SEARCH/REPLACE patch over rewriting\n"
+            "the whole file. The whole-file format may be truncated for\n"
+            "files over ~30KB; the patch format never is.\n"
+            "\n"
+            "PATCH format (one or more hunks per PATCH block, one PATCH\n"
+            "block per file you touch):\n"
+            '<PATCH file="src/error.rs">\n'
+            "<<<<<<< SEARCH\n"
+            "fn as_ref(&self) -> &(dyn StdError + 'static) {\n"
+            "    unsafe { ErrorImpl::error(self.inner.by_ref()) }\n"
+            "}\n"
+            "=======\n"
+            "fn as_ref(&self) -> &(dyn StdError + Send + Sync + 'static) {\n"
+            "    unsafe { ErrorImpl::error(self.inner.by_ref()) }\n"
+            "}\n"
+            ">>>>>>> REPLACE\n"
+            "</PATCH>\n"
+            "\n"
+            "Rules for SEARCH text:\n"
+            "1. Must appear EXACTLY ONCE in the current file (verbatim,\n"
+            "   including indentation and surrounding lines). Add 1–2\n"
+            "   lines of context if a snippet would otherwise be ambiguous.\n"
+            "2. Do NOT paraphrase, abbreviate, or use `// ...`.\n"
+            "3. Multiple PATCH blocks per response are fine; multiple hunks\n"
+            "   per block are fine.\n"
+            "4. You MAY mix PATCH blocks (for small fixes) and FILE blocks\n"
+            "   (for files that need wholesale rewrite) in the same response.\n"
+            "Hunks whose SEARCH does not match exactly once are rejected.\n"
+            "</OUTPUT_PROTOCOL>\n"
+        )
+        _gotchas_block = _gotchas_block + _patch_protocol
+
         _spec_header = "\nFunctional requirements (the contract code must satisfy):\n" if functional_req else ""
         _fl_scaffold = f"""Code generation produced files that fail the check below.
 {_FIX_THINKING_DIRECTIVE}Fix ONLY the files causing the failure — do NOT regenerate correct files.
-{_history_section}{_spec_header}
+{_history_section}{_spec_header}{_retro_block}{_gotchas_block}
 Error output:
 ```
 
@@ -14477,7 +16712,6 @@ Current source files:
                                            head=_extra_budget // 3, tail=2 * _extra_budget // 3)
         _after_extra = max(_fl_min_err + _fl_min_src + _fl_min_spec,
                            SINGLE_CALL_CHAR_LIMIT - _fl_overhead - len(_extra_ctx_capped))
-        # Split _after_extra: spec (if any) gets its share, then 1/3 err 2/3 src.
         if functional_req:
             _spec_cap = _after_extra // 4
             _remaining = _after_extra - _spec_cap
@@ -14490,15 +16724,13 @@ Current source files:
             _err_cap = _after_extra // 3
             _src_cap = _after_extra * 2 // 3
             _spec_block = ""
-        # Errors: tail-weighted (most recent matters most). Source: head-weighted
-        # (imports/type defs at the top inform the fix).
-        _last_output_capped = smart_truncate(last_output, total_limit=_err_cap,
+        _last_output_capped = smart_truncate(output, total_limit=_err_cap,
                                              head=_err_cap // 4, tail=3 * _err_cap // 4)
         _source_block_capped = smart_truncate(source_block, total_limit=_src_cap,
                                               head=_src_cap // 3, tail=2 * _src_cap // 3)
         prompt = f"""Code generation produced files that fail the check below.
 {_FIX_THINKING_DIRECTIVE}Fix ONLY the files causing the failure — do NOT regenerate correct files.
-{_history_section}{_spec_block}
+{_history_section}{_spec_block}{_retro_block}{_gotchas_block}
 Error output:
 ```
 {_last_output_capped}
@@ -14509,54 +16741,86 @@ Current source files:
 {_extra_ctx_capped}
 {FILE_FORMAT_INSTRUCTION}
 {_TASK2_VERBOSITY_GUARD}"""
+        _log(f"  [fix loop] iter {len(history) + 1} — asking LLM to fix specific failures.")
         response = ask(prompt, model=model)
         fixed = extract_files(response)
-
-        if not fixed:
-            _log(f"  [fix loop] LLM produced no fixes on attempt {attempt + 1}.")
-            continue
+        patches = extract_patches(response)
+        if not fixed and not patches:
+            _log(f"  [fix loop] LLM produced no fixes on iter {len(history) + 1}.")
+            _err_preview = output[-_FIX_ERR_CAP:] if len(output) > _FIX_ERR_CAP else output
+            return {"summary": "no_fixes_produced",
+                    "files_changed_str": "no files changed",
+                    "error_preview": _err_preview}
+        # SEARCH/REPLACE patches first; then whole-file rewrites for files
+        # not already patched.
+        _patched_files: set[str] = set()
+        for rel, search, replace in patches:
+            if rel in existing_test_files:
+                continue
+            if Path(rel).suffix not in SOURCE_EXTENSIONS:
+                continue
+            if allowed_dir_prefix and not rel.startswith(allowed_dir_prefix):
+                _log(f"  [fix loop] REJECTED PATCH {rel}: outside allowed dir '{allowed_dir_prefix}'.")
+                continue
+            ok_p, reason = apply_patch(project_dir / rel, search, replace)
+            if ok_p:
+                _patched_files.add(rel)
+                _log(f"  [fix loop] Patched: {rel} ({len(search)}→{len(replace)} chars)")
+            else:
+                _log(f"  [fix loop] PATCH {rel} rejected: {reason}")
 
         for rel, content in fixed.items():
             if rel in existing_test_files:
                 continue
             if Path(rel).suffix not in SOURCE_EXTENSIONS:
                 continue
-            # Reject files outside the allowed module directory (prevents cross-module corruption).
             if allowed_dir_prefix and not rel.startswith(allowed_dir_prefix):
                 _log(f"  [fix loop] REJECTED {rel}: outside allowed dir '{allowed_dir_prefix}'.")
                 continue
-            # Reject content that looks like compiler error output, not source code.
             stripped = content.lstrip()
             if re.match(r'^error(\[E\d+\])?:', stripped) or re.match(r'^warning(\[W\d+\])?:', stripped):
                 _log(f"  [fix loop] REJECTED {rel}: content looks like compiler output, not code.")
                 continue
+            if rel in _patched_files:
+                _log(f"  [fix loop] SKIP whole-file rewrite for {rel}: already patched this round.")
+                continue
             write(project_dir / rel, content)
             _log(f"  [fix loop] Fixed: {rel}")
 
-        # Record this attempt in the running narrative for subsequent fix prompts.
-        _err_capped = last_output[-_FIX_ERR_CAP:] if len(last_output) > _FIX_ERR_CAP else last_output
-        _files_changed = ", ".join(list(fixed.keys())[:4]) if fixed else "no files changed"
-        _attempt_history.append(
-            f"Attempt {attempt}: changed [{_files_changed}] → still failing.\n"
-            f"Error was:\n{_err_capped}"
-        )
+        _all_changed = sorted({*fixed.keys(), *_patched_files})
+        _err_preview = output[-_FIX_ERR_CAP:] if len(output) > _FIX_ERR_CAP else output
 
-        # BL-025: if the next check passes, record what error was fixed and how.
-        # We check after writing files; if the loop continues, the next iteration's
-        # initial check will detect success and we'll have stored the pattern.
-        if fixed:
+        # BL-025: log fix patterns for future prompts.
+        if _all_changed:
             _bl025_module = allowed_dir_prefix.rstrip('/').split('/')[-2] if allowed_dir_prefix else ""
             if _bl025_module:
-                _error_category = _categorize_compile_error(_fix_error_before)
-                _fix_hint = "; ".join(f"{p}" for p in list(fixed.keys())[:3])
+                _error_category = _categorize_compile_error(output)
+                _fix_hint = "; ".join(_all_changed[:3])
                 compile_patterns_write(
                     project_dir, _bl025_module, _error_category,
-                    example=_fix_error_before[:200],
+                    example=output[:200],
                     fix_hint=f"fixed in {_fix_hint}",
                 )
+        return {
+            "summary": f"patched={len(_patched_files)},rewrote={len(fixed) - len([f for f in fixed if f in _patched_files])}",
+            "files_changed_str": ", ".join(_all_changed[:4]) if _all_changed else "no files changed",
+            "error_preview": _err_preview,
+            "error_sig": _err_preview,
+        }
 
-    _log(f"  [fix loop] All {max_fix_attempts} fix attempts exhausted.")
-    return False, last_output
+    def _do_retro(output: str, history: list[dict]) -> str:
+        return _whole_tree_retrospective(
+            error_excerpt=output, history=history, name="generate_fix_loop",
+        )
+
+    ok, last_output, _hist = _improvement_loop(
+        name="generate_fix_loop",
+        run_check=_run_check,
+        do_fix=_do_fix,
+        do_retro=_do_retro,
+        max_stalls=_fl_max_stalls,
+    )
+    return ok, last_output
 
 
 def task2_fix_loop(
@@ -14732,7 +16996,7 @@ def _task3_inline_retry(
                 cluster_name="task3", file_rel=rel_f,
                 prev_body=cur_body, error_excerpt=err_excerpt,
             )
-            new_body, _ = _ask_per_fn_body(prompt, fn, [])
+            new_body, _ = _ask_per_fn_body(prompt, fn, [], sig_text=sig_t)
             if not new_body:
                 continue
             ok2, _ = _splice_fn_body(fp, fn, new_body)
@@ -17133,7 +19397,7 @@ def _task0c_retrospective(
         f"(c) UNREACHABLE — unreachable!() arm, dead branch, or intrinsically dead code; add tarpaulin ignore\n"
         f"(d) NEEDS_INTERNALS — requires private state, unsafe vtable dispatch, env vars not set in the parent process, or internal construction not accessible from inline tests\n"
     )
-    result = ask(prompt, model=_TASK0C_MODEL, max_tokens=4096, think=None)
+    result = ask(prompt, model=_TASK0C_MODEL, think=None)
     lines = [l.strip() for l in result.splitlines() if l.strip().startswith("FUNCTION")]
     return "\n".join(lines) if lines else result[:600].strip()
 
@@ -17211,7 +19475,7 @@ def _task0c_targeted_pragma(
         f"</FILE>"
     )
 
-    response = ask(prompt, model=model, max_tokens=16384, think=None)
+    response = ask(prompt, model=model, think=None)
     files_out = extract_files(response)
     if rel_path not in files_out:
         # Fallback: extract from the largest ```rust ... ``` code block.
@@ -18358,7 +20622,7 @@ project-specific import paths, type construction patterns, and hard constraints.
                         f"Output ONLY the new mod block wrapped in <FILE path=\"{rel_path}\">...</FILE>."
                     )
                     _retry_resp = ask(_retry_prompt, model=_TASK0C_MODEL,
-                                      max_tokens=8192, think=None)
+                                      think=None)
                     _retry_block = extract_test_mod(_retry_resp)
                     if not _retry_block:
                         _log(f"  [{module_name}] Quick-retry {_ir + 1}: no block extracted.")
@@ -19533,9 +21797,11 @@ def main():
                 strategy_path, project_dir, test_files, readme_text, project_profile,
                 clusters=_clusters,
             )
-            _mark_phase(project_dir, "task0b", "done",
-                        detail=f"{len(coverage_strategy)} chars")
-            git_commit(project_dir, "pipeline: task0b done")
+            _commit_and_mark(
+                project_dir, "task0b", "done",
+                commit_message="pipeline: task0b done",
+                detail=f"{len(coverage_strategy)} chars",
+            )
 
     # TASK 0b: build dependency graph for bottom-up module integration.
     # Implementation selected by DEPENDENCY_GRAPH in .env (default: static).
@@ -19739,8 +22005,6 @@ def main():
                 _module_augmented_path(project_dir, _mod_name).unlink(missing_ok=True)
                 continue
 
-        _mark_phase(project_dir, f"task0c/{_cluster.name}", "done",
-                    detail=f"{len(_cluster_done)} modules", source_hash=_src_hash)
         _log(f"\n  cluster/{_cluster.name} complete — {len(_cluster_done)} module(s) done.")
         _emit("cluster.done", cluster=_cluster.name,
               duration_ms=int((time.monotonic() - _cluster_t0) * 1000),
@@ -19750,7 +22014,12 @@ def main():
             for _m in _cluster_done
             if _cluster_augmented_path(project_dir, _cluster.name, _m).exists()
         )
-        git_commit(project_dir, f"pipeline: task0c/{_cluster.name} — {_cov_summary}")
+        _commit_and_mark(
+            project_dir, f"task0c/{_cluster.name}", "done",
+            commit_message=f"pipeline: task0c/{_cluster.name} — {_cov_summary}",
+            detail=f"{len(_cluster_done)} modules",
+            source_hash=_src_hash,
+        )
 
     _current_cluster = None
 
@@ -19873,10 +22142,18 @@ def main():
                     _log("  [augmentation] tree already clean — augmented state preserved from prior run.")
                 git_tag(project_dir, f"task0c-augmented-{module_name}")
                 strip_module_source(project_dir, module_dir)
-                _mark_phase(project_dir, f"strip/{module_name}", "done",
-                            source_hash=_src_hash)
+                # ATOMIC: commit the stripped tree FIRST, then mark state
+                # done. Reverse of the legacy order — protects against
+                # the lost-commit bug where a process dying between mark
+                # and commit lost the strip commit forever.
+                _commit_and_mark(
+                    project_dir,
+                    f"strip/{module_name}",
+                    "done",
+                    commit_message=f"pipeline: stripped — {module_name}",
+                    source_hash=_src_hash,
+                )
                 _set_current(project_dir, f"strip/{module_name} / done")
-                git_commit(project_dir, f"pipeline: stripped — {module_name}")
 
         # Re-collect after strip — picks up any tests generated by TASK 0c.
         # test_files: full read set for TASK 1 (includes inline test blocks in src/)
@@ -19958,11 +22235,13 @@ def main():
             if ok:
                 _log(f"  TASK 1 output validated OK.")
                 t1_valid = True
-                _mark_phase(project_dir, f"task1/{module_name}", "done",
-                            detail=f"{module_req_path.stat().st_size} chars",
-                            source_hash=_src_hash)
+                _commit_and_mark(
+                    project_dir, f"task1/{module_name}", "done",
+                    commit_message=f"pipeline: task1 — {module_name}",
+                    detail=f"{module_req_path.stat().st_size} chars",
+                    source_hash=_src_hash,
+                )
                 _set_current(project_dir, f"task1/{module_name} / done")
-                git_commit(project_dir, f"pipeline: task1 — {module_name}")
                 _emit("task.done", task="task1", module=module_name,
                       duration_ms=int((time.monotonic() - _task1_t0) * 1000),
                       data={"ok": True, "retries": t1_attempt,
@@ -20277,11 +22556,14 @@ This is a Rust procedural macro crate. Strict rules apply:
                     _log(f"  TASK 3 result: {t3_status} — {t3_reason}")
 
                     if t3_status == "pass":
-                        _mark_phase(project_dir, f"task2-4/{module_name}", "done",
-                                    detail=f"iteration {module_iter}", source_hash=_src_hash)
+                        _commit_and_mark(
+                            project_dir, f"task2-4/{module_name}", "done",
+                            commit_message=f"pipeline: task3 iter {module_iter} — {module_name} tests pass",
+                            tag=f"passing-{module_name}-{module_iter}",
+                            detail=f"iteration {module_iter}",
+                            source_hash=_src_hash,
+                        )
                         _set_current(project_dir, f"task2-4/{module_name} / LOCKED iter {module_iter}")
-                        git_commit(project_dir, f"pipeline: task3 iter {module_iter} — {module_name} tests pass")
-                        git_tag(project_dir, f"passing-{module_name}-{module_iter}")
                         if is_multi_module:
                             lock_module(project_dir, module_name, module_dir, module_manifest)
                             locked_modules.add(module_name)
@@ -20295,8 +22577,12 @@ This is a Rust procedural macro crate. Strict rules apply:
                     elif t3_status == "no_files":
                         # Module has no test files — lock on build success.
                         _log(f"  Module has no test files — locking on build success.")
-                        _mark_phase(project_dir, f"task2-4/{module_name}", "done",
-                                    detail=f"no tests iter {module_iter}", source_hash=_src_hash)
+                        _commit_and_mark(
+                            project_dir, f"task2-4/{module_name}", "done",
+                            commit_message=f"pipeline: build passed (no tests) — {module_name} iter {module_iter}",
+                            detail=f"no tests iter {module_iter}",
+                            source_hash=_src_hash,
+                        )
                         _set_current(project_dir, f"task2-4/{module_name} / LOCKED (no tests)")
                         if is_multi_module:
                             lock_module(project_dir, module_name, module_dir, module_manifest)
