@@ -364,6 +364,32 @@ def test_strip_doc_attrs() -> None:
     print("  OK  _strip_doc_attrs (FR-024)")
 
 
+def test_run_scoped_tests() -> None:
+    """Plan 10 U1: reusable scoped-test check classifies pass/fail/timeout and
+    returns failure detail for prompt feedback."""
+    import pipeline
+    _orig = pipeline._run_cargo
+    try:
+        # all pass → (True, 0, "")
+        pipeline._run_cargo = lambda *a, **k: (0, "test result: ok. 5 passed; 0 failed")
+        ok, n, detail = pipeline._run_scoped_tests("cargo test", __import__("pathlib").Path("."), {})
+        assert ok and n == 0 and detail == "", (ok, n, detail)
+
+        # failures → (False, count>0, detail carries the output tail)
+        out = "test foo::bar ... FAILED\ntest result: FAILED. 4 passed; 1 failed\nassertion `left == right` failed"
+        pipeline._run_cargo = lambda *a, **k: (101, out)
+        ok, n, detail = pipeline._run_scoped_tests("cargo test", __import__("pathlib").Path("."), {})
+        assert (not ok) and n == 1 and "assertion" in detail, (ok, n, detail)
+
+        # timeout → inconclusive (False, -1, ...)
+        pipeline._run_cargo = lambda *a, **k: (-1, "")
+        ok, n, detail = pipeline._run_scoped_tests("cargo test", __import__("pathlib").Path("."), {})
+        assert (not ok) and n == -1, (ok, n, detail)
+    finally:
+        pipeline._run_cargo = _orig
+    print("  OK  _run_scoped_tests (Plan 10 U1)")
+
+
 def test_generate_in_parallel() -> None:
     """Plan 8: split-and-merge fans out one concurrent ask() per subset prompt,
     returns responses index-aligned, and survives a failing request."""
@@ -1659,6 +1685,7 @@ def main() -> int:
     test_filter_tests_for_cluster()
     test_eval_cfg_pred()
     test_strip_doc_attrs()
+    test_run_scoped_tests()
     test_generate_in_parallel()
     test_partition_uncovered_lines()
     test_collect_sibling_filled_bodies()

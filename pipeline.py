@@ -8259,6 +8259,29 @@ def _attribute_failures(
     return {}, "no_frontier"
 
 
+def _run_scoped_tests(
+    test_cmd: str, cwd: Path, env: dict, *, timeout: int = 120,
+) -> "tuple[bool, int, str]":
+    """Plan 10 U1 — reusable test-validation step (the runtime analog of a
+    compile check). Runs `test_cmd` (already scoped to the relevant test stems
+    via _build_test_cmd) and returns (passed, fail_count, detail).
+
+    `passed` is True only when cargo reports rc==0 with zero failing tests.
+    `detail` is the failing-test output tail (panic / assertion / expected-vs-
+    actual) for feeding back into the next generation prompt. On timeout the
+    caller gets (False, -1, ...) and should treat the result as INCONCLUSIVE —
+    fall back to compile-based acceptance rather than block. This is the single
+    place the pipeline runs scoped tests, so every loop validates identically.
+    """
+    rc, out = _run_cargo(test_cmd, cwd, env, timeout=timeout)
+    if rc == -1:
+        return False, -1, "scoped test run timed out"
+    fail_count = len(_parse_failed_tests(out))
+    passed = (rc == 0 and fail_count == 0)
+    detail = "" if passed else out[-_FIX_ERR_CAP:]
+    return passed, fail_count, detail
+
+
 def _build_test_cmd(test_stems: list[str], cluster: "BuildCluster | None") -> str:
     """Build `cargo test --no-fail-fast --test stem1 --test stem2 ...` honoring
     the cluster toolchain."""

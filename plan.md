@@ -2295,3 +2295,79 @@ via generous type-section + existing trait-contract injection. F3
 _API_SURFACE_CAP //4→//2 (fits 129K). F4 error-named types injected into per-fn
 fix prompts (_types_section_eff). F5 phase-c/types_truncated guards. check.sh
 green (mypy+smoke). NOT yet validated on a real reconstruction run.
+
+---
+
+# Plan 10 — One universal test→retro→feedback loop everywhere (2026-05-30)
+
+Goal (user): a single reusable loop — generate → run TESTS → retro → feed the
+retro+failure back into the prompt → improvement-stop — used across the whole
+pipeline. Kills the fragmentation that lets compiling-but-wrong fills through.
+
+## Situation (verified)
+The primitive already exists: `_improvement_loop` (7332) does run_check → on
+stall do_retro → retro threaded into do_fix's prompt → improvement-stop (no hard
+caps). Its docstring says every fix loop "should go through this function." But
+only 2 callers use it (generate_fix_loop 16914, task3 retry 17111). ~14 bespoke
+while-loops roll their own with inconsistent signals: per-fn fill = cargo CHECK,
+per-impl fill = cargo CHECK, per-pass test-fix = cargo TEST, task0c = coverage.
+The compile-only acceptance in the fill loops is why semantically-wrong fills are
+accepted and the stall happens with tests failing.
+
+## Target architecture
+ONE loop (`_improvement_loop`), with two invariants made universal:
+- INV1 acceptance = the unit's TESTS pass, not mere compilation. `cargo check`
+  is only a cheap fail-fast pre-gate. The metric for improvement-stall is the
+  failing-test count (fall back to rustc error count only while the unit doesn't
+  yet compile).
+- INV2 the retro lesson + the concrete failure detail (compile errors AND
+  assertion/expected-vs-actual) are fed into the next generate prompt, and
+  persisted to model notes.
+
+## Pieces
+U1 `_run_scoped_tests(target_src_dir, cluster_env, test_names) -> (ok, fail_count,
+   detail)` — runs ONLY the unit's own tests (names from the reverse-map), not the
+   whole suite. Cheap, reusable. compile pre-gate first, then scoped test.
+U2 `_unit_fill_loop(...)` — thin wrapper over `_improvement_loop`: run_check =
+   compile pre-gate then U1; do_fix = build prompt (with retro + failure detail +
+   F1-F5 context) → ask → splice; do_retro = author lesson (model voice) →
+   `_append_model_note` + threaded into do_fix.
+U3 Migrate consumers to U2 as thin adapters, in order:
+   1. per-fn fill (`_task2_fill_fns_one_by_one` inner loop) — highest volume
+   2. per-impl fill (`_phase_c_fill_impl_blocks`)
+   3. per-pass test-fix (collapses into U2 — no longer a separate loop)
+   4. task0c (metric = uncovered-line count; same loop, coverage validator)
+U4 TDD outer loop (`_run_phase_c_tdd`): once fills are test-validated (U2), the
+   empty-frontier stall disappears — a fill isn't "done" until its tests pass, so
+   wrong fills stay on the frontier instead of becoming untouchable.
+
+## Rollout (safe, gated, sequenced — NOT all-at-once)
+- Each migration behind `UNIFIED_FILL_LOOP` (default off) so the running pipeline
+  is untouched until a step is validated on a live run, then flipped on.
+- Build order = U1 → U2 → migrate per-fn → validate live → per-impl → per-pass →
+  task0c. Old loop stays as fallback until its replacement is validated.
+
+## Cost
+Scoped tests (per-unit, via reverse-map) not whole-suite, so per-fill validation
+is bounded. Compile pre-gate fails fast before paying for a test run.
+
+## Why this is the right solution (per CLAUDE.md hard rules)
+Systemic + single-source-of-truth (one loop), deterministic acceptance (tests,
+not compile), more constraints (a fill must satisfy its tests). No hard caps.
+
+Status (2026-05-30, AFK run): U1 IMPLEMENTED — `_run_scoped_tests` (single
+reusable scoped-test check: pass/fail/timeout + failure-detail tail for prompt
+feedback) + smoke test `test_run_scoped_tests`. check.sh green.
+
+U2/U3/U4 (wiring test-based acceptance into per-impl/per-fn fill loops and
+migrating to `_improvement_loop`) are STAGED — deliberately NOT deployed on the
+unattended run. Reason: the acceptance gate needs a per-cluster fail-count
+baseline + revert semantics whose subtle bugs could waste a multi-hour AFK run
+on churn or regress a fill. That belongs in an ATTENDED session with live
+validation, not a blind deploy. The pipeline was started from t2 on the current
+validated code (F1-F5 + per-fn/per-impl F4) — a confirmed improvement.
+
+Next attended step: wire U1 into _phase_c_fill_impl_blocks as a "do-no-harm"
+gate — after a block compiles, run U1; if fail_count rose vs the cluster
+baseline, revert (the fill broke tests) instead of accepting; feed `detail` into
+the next attempt. Then per-fn, then collapse the per-pass loop, then task0c.
