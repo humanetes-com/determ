@@ -183,27 +183,18 @@ if [[ "$BACKEND" == "vllm" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Wipe: cargo clean + strip gen_* blocks (only when --wipe passed)
+# Wipe: fresh log only. Workspace cleanup is owned by the pipeline.
+#
+# --wipe launches with `--repo <URL> --clean`, and pipeline.py's --clean path
+# does the complete reset itself: for a URL repo it rmtree's + re-clones from
+# upstream HEAD (setup_workspace, ~line 4212); then git_clean_reset (~line
+# 21703) runs `git reset --hard` + `git clean -fd` + checkout default branch,
+# wiping every gen_* block and working edit. A script-side cargo-clean/strip
+# would only duplicate that — and the old hardcoded tmp/anyhow-master path was
+# stale (workspace is tmp/<repo-name>, e.g. tmp/anyhow), so it never ran.
 # ---------------------------------------------------------------------------
 if [[ "$_WIPE" == true ]]; then
     > "$LOG_DIR/pipeline_anyhow.log"
-    if [[ -d "$SCRIPT_DIR/tmp/anyhow-master" ]]; then
-        echo "Running cargo clean on tmp/anyhow-master ..."
-        (cd "$SCRIPT_DIR/tmp/anyhow-master" && cargo clean 2>&1 | tail -3)
-        echo "Stripping gen_* blocks from tmp/anyhow-master/src ..."
-        python3 - <<'PYEOF'
-import re, pathlib
-gen_re = re.compile(r'\n+(?:// GRCOV_EXCL_START\n)?#\[cfg\(test\)\](?:\n#\[[^\]]*\])*\n(?:pub )?mod gen_\w+\s*\{.*', re.DOTALL)
-stripped = []
-for p in pathlib.Path("tmp/anyhow-master/src").glob("*.rs"):
-    raw = p.read_text(); cleaned = gen_re.sub("", raw).rstrip() + "\n"
-    if cleaned != raw:
-        p.write_text(cleaned); stripped.append(p.name)
-print(f"  Stripped: {', '.join(stripped)}" if stripped else "  Nothing to strip.")
-PYEOF
-    else
-        echo "tmp/anyhow-master not found — will be cloned by pipeline."
-    fi
 fi
 
 # ---------------------------------------------------------------------------

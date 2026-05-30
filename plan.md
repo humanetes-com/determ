@@ -2164,5 +2164,42 @@ D6 — Intra-attempt staleness accepted (same tradeoff PHASE_C documents): batch
 - Connects to the prompt-budget finding: smaller prompts + shared prefix both
   raise achievable P. Shrinking task0c prompts compounds the win.
 
-Status: PLANNED. No implementation. tools/bench_parallel.py committed as the
-measurement harness (size-parameterized via PREFIX_TOK/OUT_TOK/P env).
+tools/bench_parallel.py committed as the measurement harness
+(size-parameterized via PREFIX_TOK/OUT_TOK/P env).
+
+## IMPLEMENTED (2026-05-30) — split-and-merge, within file (Option B)
+
+Chosen objective: partition the file's uncovered functions across N concurrent
+generations and MERGE all results (additive), not best-of-N (which discarded
+N−1). Per-block compile via the existing fix-loop; coverage once on the merge.
+
+| Piece | Where |
+|---|---|
+| `generate_in_parallel(queries)` | pipeline.py — one concurrent ask() per query (threads); responses index-aligned; a failed request → "" not abort; len<=1 short-circuits |
+| `_partition_uncovered_lines(content, uncov, n)` | pipeline.py — group uncovered lines by function, distribute units largest-first into ≤n balanced disjoint buckets |
+| `_finalize_and_commit(raw, pass_n, base_text)` (nested) | pipeline.py — extracted finalize (allow/prelude inject + reject-0-test) + commit/compile-fix loop; reverts to `base_text` on fail so already-merged blocks survive; shared by single-shot AND split |
+| `_subset_prompt(lines)` / `_render_prompt` (nested) | per-subset prompt: same file context (shared prefix), narrowed fn_bodies/target |
+| `TASK0C_SPLIT_N` env knob | task0c_augment_module; default 1 = legacy single-shot (default path routed through the same extracted helper) |
+| `test_generate_in_parallel`, `test_partition_uncovered_lines` | tests/test_pipeline_smoke.py |
+
+Execution per file/attempt: GENERATE N subset blocks concurrently (GPU batch) →
+COMPILE each serially via the fix-loop, survivors accumulate as gen_tests_1..N
+siblings → COVERAGE (quick-cov) once on the merge. All cargo/coverage serial
+(no shared target/ race). Throughput win = each attempt covers N subsets →
+far fewer attempts → fewer total coverage runs.
+
+Known minor: on a merge that adds no coverage, revert restores _raw_text
+(removes all merged decls) but only unlinks the last subset sibling; the other
+gen_tests_*.rs files are left orphaned (unreferenced, harmless, cleaned by the
+later strip). Per-subset success log reuses the full uncov count (cosmetic).
+
+NOT YET VALIDATED end-to-end: only check.sh smoke + unit tests. Default
+TASK0C_SPLIT_N=1 leaves current runs unchanged. .env currently sets =4 for the
+first validation run; confirm: subset prompts batch on the GPU
+(num_requests_running>1), `split-and-merge … merged k/N subset block(s)` logs,
+coverage climbs faster per attempt, no orphaned-sibling compile issues.
+
+## Still open (cross-file throughput, deferred)
+Cross-file fan-out + batched single coverage measurement was the other fork —
+not built. Within-file split-and-merge covers the multi-function-file case;
+revisit cross-file if whole-file task0c wall-time is still the bottleneck.

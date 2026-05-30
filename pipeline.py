@@ -1111,6 +1111,53 @@ def extract_test_mod(text: str) -> str:
     return ""
 
 
+def generate_in_parallel(
+    queries: "list[str]",
+    *,
+    model: "str | None" = None,
+    think: "bool | None" = None,
+) -> "list[str]":
+    """Fire one ask() per query concurrently; return responses index-aligned to
+    `queries`.
+
+    Used by task0c split-and-merge: the N subset prompts share their large file-
+    context prefix and differ only in the small "target these functions" tail, so
+    vLLM's prefix cache prefills the shared part once and the marginal KV per
+    extra request is just its tail — N requests batch on the GPU where N big
+    distinct prompts would thrash (measured: shared-prefix x4 clean, distinct x4
+    thrashed).
+
+    ask() is already thread-safe (per-call OpenAI client in model_interact;
+    content-addressed prompt store; append-only event log). A failed/empty call
+    contributes "" rather than aborting the batch. len<=1 short-circuits to a
+    single synchronous call (no threads).
+    """
+    if not queries:
+        return []
+    if len(queries) == 1:
+        try:
+            return [ask(queries[0], model=model, think=think)]
+        except Exception:
+            return [""]
+
+    import threading as _t
+    results: "list[str]" = [""] * len(queries)
+
+    def _worker(i: int) -> None:
+        try:
+            results[i] = ask(queries[i], model=model, think=think) or ""
+        except Exception as _e:  # one bad request must not sink the batch
+            _guard("task0c/candidate_error", f"request {i}: {type(_e).__name__}: {_e}")
+            results[i] = ""
+
+    threads = [_t.Thread(target=_worker, args=(i,), name=f"task0c-gen-{i}") for i in range(len(queries))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return results
+
+
 def extract_code_content(text: str) -> str:
     """Strip thinking blocks and outermost code fence, return bare code content.
 
@@ -19540,6 +19587,61 @@ def _task0c_targeted_pragma(
     return True
 
 
+def _partition_uncovered_lines(content: str, uncovered: "set[int]", n_groups: int) -> "list[set[int]]":
+    """Split a file's uncovered lines into up to `n_groups` disjoint buckets,
+    keeping each function's lines together.
+
+    Used by task0c split-and-merge so N concurrent generations each own a
+    distinct subset of the file's uncovered functions (additive coverage, no
+    redundant work). Functions are detected the same way _extract_uncovered_
+    functions does (scan for `fn`, brace-match to the closing `}`); each
+    function that contains uncovered lines becomes one unit, distributed
+    round-robin (largest-first) so buckets are roughly balanced. Uncovered
+    lines outside any function are pooled into one extra unit. Returns only
+    non-empty buckets (so the result length may be < n_groups, e.g. when the
+    file has fewer functions than groups).
+    """
+    n_groups = max(1, n_groups)
+    if not uncovered or n_groups == 1:
+        return [set(uncovered)] if uncovered else []
+
+    code_lines = content.splitlines()
+    n = len(code_lines)
+    fn_pattern = re.compile(r'^\s*(?:pub\s+)?(?:async\s+)?fn\s+')
+    remaining = set(uncovered)
+    units: "list[set[int]]" = []  # one per function that owns uncovered lines
+
+    i = 0
+    while i < n:
+        if fn_pattern.match(code_lines[i]):
+            depth = 0
+            fn_end = i
+            for j in range(i, min(n, i + 300)):
+                depth += code_lines[j].count('{') - code_lines[j].count('}')
+                fn_end = j
+                if j > i and depth <= 0:
+                    break
+            fn_lines = set(range(i + 1, fn_end + 2)) & remaining  # 1-indexed
+            if fn_lines:
+                units.append(fn_lines)
+                remaining -= fn_lines
+            i = fn_end + 1
+        else:
+            i += 1
+    if remaining:  # uncovered lines outside any detected function
+        units.append(remaining)
+
+    if len(units) <= 1:
+        return units if units else [set(uncovered)]
+
+    # Distribute units largest-first into n_groups balanced buckets.
+    buckets: "list[set[int]]" = [set() for _ in range(min(n_groups, len(units)))]
+    for unit in sorted(units, key=len, reverse=True):
+        smallest = min(buckets, key=len)
+        smallest |= unit
+    return [b for b in buckets if b]
+
+
 def task0c_augment_module(
     project_dir: Path,
     module_name: str,
@@ -19559,6 +19661,18 @@ def task0c_augment_module(
 
     # Cluster label for log messages — shows which compiler configuration is active.
     _cluster_label = _current_cluster.name if _current_cluster else "stable"
+
+    # TASK0C_SPLIT_N: split-and-merge degree for per-file generation. 1 = legacy
+    # single-shot. >1 = partition the file's uncovered functions into N disjoint
+    # subsets, generate a test block for each CONCURRENTLY (shared-prefix prompts
+    # batch on the GPU), then commit each block through the normal compile-fix
+    # loop so survivors accumulate (additive coverage). Generation is parallel;
+    # every cargo/coverage call stays serial (no shared-target/ race). Coverage
+    # (quick-cov) runs once on the merged result. See _partition_uncovered_lines.
+    _split_n = max(1, int(os.getenv("TASK0C_SPLIT_N", "1")))
+    if _split_n > 1:
+        _log(f"  [{module_name}/{_cluster_label}] split-and-merge generation enabled: "
+             f"TASK0C_SPLIT_N={_split_n} (subset blocks concurrent; compile+cov serial).")
 
     augmentor = _test_augmentor_factory()
 
@@ -20257,12 +20371,13 @@ project-specific import paths, type construction patterns, and hard constraints.
                 )
             )
 
-            prompt = f"""You are writing Rust unit tests that specify the behavioral contract of source code.
-{_TASK0C_THINKING_DIRECTIVE}{secs['strategy']}{secs['history']}{secs['what_worked']}{secs['retrospective']}{secs['context']}{_coverage_status}
+            def _render_prompt(_secs: dict, _cov_status: str) -> str:
+                return f"""You are writing Rust unit tests that specify the behavioral contract of source code.
+{_TASK0C_THINKING_DIRECTIVE}{_secs['strategy']}{_secs['history']}{_secs['what_worked']}{_secs['retrospective']}{_secs['context']}{_cov_status}
 Target file: {rel_path}
-{_env_section}{secs['cargo']}{secs['full_source']}{secs['fn_bodies']}{secs['symbols']}{secs['examples']}{secs['integ_tests']}{secs['siblings']}{secs['old_block']}
+{_env_section}{_secs['cargo']}{_secs['full_source']}{_secs['fn_bodies']}{_secs['symbols']}{_secs['examples']}{_secs['integ_tests']}{_secs['siblings']}{_secs['old_block']}
 Write a `#[cfg(test)] mod {mod_name}` block for `{rel_path}`.
-{"Write ONLY new test functions for the uncovered lines in fn_bodies above. The existing test module(s) shown are already on disk — do NOT copy or repeat any test from them." if secs['old_block'] else "Write a new test block covering the uncovered lines shown in fn_bodies above."}
+{"Write ONLY new test functions for the uncovered lines in fn_bodies above. The existing test module(s) shown are already on disk — do NOT copy or repeat any test from them." if _secs['old_block'] else "Write a new test block covering the uncovered lines shown in fn_bodies above."}
 
 Coverage guidance:
 - Prefer tests with at least one `assert!`, `assert_eq!`, `assert_ne!`, or `.unwrap()` —
@@ -20290,6 +20405,34 @@ project-specific import paths, type construction patterns, and hard constraints.
 {_file_constraints_section}
 {output_format}
 """
+
+            prompt = _render_prompt(secs, _coverage_status)
+
+            def _subset_prompt(_subset_lines: "set[int]") -> str:
+                """Render a generation prompt targeting only a subset of the
+                file's uncovered lines (split-and-merge). Same file context as
+                the full prompt; only the fn_bodies/target section narrows, so
+                the big prefix is shared across the concurrent subset requests."""
+                _sfn = _extract_uncovered_functions(existing_text, _subset_lines)
+                _ssecs = _build_task0c_prompt_sections(
+                    rel_path=rel_path,
+                    existing_text=existing_text,
+                    fn_bodies=_sfn,
+                    pub_symbols=pub_symbols,
+                    cargo_toml_content=cargo_toml_content,
+                    integration_tests=integration_tests,
+                    sibling_files=relevant_siblings,
+                    coverage_strategy=coverage_strategy,
+                    attempt_history=attempt_history,
+                    project_context=project_context,
+                    old_block=_old_block,
+                    what_worked=file_what_worked.get(rel_path, ""),
+                    retrospective=file_retrospectives.get(rel_path, ""),
+                    uncov_lines=_subset_lines,
+                    scaffold_chars=len(_scaffold_template),
+                )
+                return _render_prompt(_ssecs, _coverage_status_probe)
+
             # FR-012: retry generation — qwen3 thinking mode sometimes returns empty output.
             # On retry, send a short explicit follow-up instead of the full prompt again:
             # repeating the same large prompt produces the same empty result.
@@ -20309,9 +20452,158 @@ project-specific import paths, type construction patterns, and hard constraints.
                 except Exception as _e:
                     _log(f"  [{module_name}] Could not save stream log: {_e}")
 
+            def _finalize_and_commit(raw_block: str, pass_n: int, base_text: str) -> "tuple[str, str]":
+                """Inject allow-line + prelude into a raw gen_tests block, reject
+                blocks with no #[test] fns, then write it as sibling `pass_n` on
+                top of `base_text` and run the compile-fix loop. Returns
+                (status, final_block), status ∈ {"committed","no_tests","failed"}.
+                On failure reverts the file to base_text — so in split-and-merge
+                any subset blocks already merged before this one survive."""
+                nonlocal _pass_had_work
+                block = raw_block
+                if _allow_line not in block:
+                    block = re.sub(r'((?:pub\s+)?mod\s+gen_\w+\s*\{)', f'{_allow_line}\n\\1', block, count=1)
+                _PRELUDE_ITEMS = [
+                    ("use std::string::{String, ToString};", r'use (?:std|alloc)::[^;]*\bString\b'),
+                    ("use std::vec::Vec;",                   r'use (?:std|alloc)::[^;]*\bVec\b'),
+                    ("use std::boxed::Box;",                 r'use (?:std|alloc)::[^;]*\bBox\b'),
+                    ("use std::format;",                     r'use (?:std|alloc)::[^;]*\bformat\b'),
+                    ("use std::error::Error as StdError;",   r'use std::error::Error'),
+                    ("use std::fmt::{self, Display, Debug};",r'use (?:std|core)::fmt'),
+                ]
+                missing_preludes = [stmt for stmt, pat in _PRELUDE_ITEMS if not re.search(pat, block)]
+                if missing_preludes:
+                    inject = "\n    ".join(missing_preludes)
+                    if "use super::*;" in block:
+                        block = block.replace("use super::*;", f"use super::*;\n    {inject}", 1)
+                    else:
+                        block = re.sub(r'((?:pub\s+)?mod\s+gen_\w+\s*\{\s*\n)', f'\\1    {inject}\n', block, count=1)
+                if len(re.findall(r'#\[(?:\w+::)*test\]', block)) == 0:
+                    _log(f"  [{module_name}] {rel_path} — LLM block has 0 #[test] functions; "
+                         f"skipping write (no productive content).")
+                    _log_task0c_attempt(project_dir, rel_path, attempt, block, "", "no_tests_in_block")
+                    return "no_tests", block
+                _prev_sigs: frozenset = frozenset()
+                _fix_attempt = 0
+                _sib = _gen_tests_path(abs_path, pass_n)
+                _decl = _build_gen_tests_decl(_sib.name, pass_n, _allow_line,
+                                              cluster_cfg_attr=_cluster_cfg_attr(_current_cluster))
+                _src_with_decl = base_text.rstrip() + _decl
+                while True:
+                    abs_path.write_text(_src_with_decl, encoding="utf-8")
+                    _sib.write_text(_extract_gen_tests_body(block), encoding="utf-8")
+                    check = subprocess.run(
+                        ["cargo", "test", "--no-run", "-p", module_name],
+                        cwd=project_dir, capture_output=True, text=True,
+                        timeout=BUILD_TIMEOUT, env=_cargo_env(),
+                    )
+                    if check.returncode == 0:
+                        _log_task0c_attempt(project_dir, rel_path, attempt + _fix_attempt, block, "", "success")
+                        _log(f"  [{module_name}] Appended gen_tests_{pass_n} to {rel_path} "
+                             f"({len(uncov_lines)} uncovered lines targeted)")
+                        _pass_had_work = True
+                        return "committed", block
+                    compile_err = (check.stdout + check.stderr).strip()
+                    cur_sigs = frozenset(re.findall(r'error\[E\d+\]: .+', compile_err))
+                    if "unclosed delimiter" in compile_err or "mismatched closing delimiter" in compile_err:
+                        _log(f"  [{module_name}] Unclosed delimiter — reverting {rel_path}.")
+                        _revert_gen_tests_pass(abs_path, base_text, _sib)
+                        return "failed", block
+                    if _fix_attempt > 0:
+                        resolved = _prev_sigs - cur_sigs
+                        if cur_sigs == _prev_sigs:
+                            _log(f"  [{module_name}] No error improvement in {rel_path} — reverting.")
+                            _log_task0c_attempt(project_dir, rel_path, attempt + _fix_attempt, block, compile_err, "compile_error")
+                            _revert_gen_tests_pass(abs_path, base_text, _sib)
+                            return "failed", block
+                        _log(f"  [{module_name}] {len(resolved)} error(s) resolved in {rel_path}, "
+                             f"{len(cur_sigs)} remaining — continuing.")
+                    _fix_attempt += 1
+                    _prev_sigs = cur_sigs
+                    _log(f"  [{module_name}] Compile error in {rel_path} "
+                         f"(fix attempt {_fix_attempt}) — sending to LLM.")
+                    _log_task0c_attempt(project_dir, rel_path, attempt + _fix_attempt, block, compile_err, "compile_error")
+                    _fix_history = _get_task0c_history(project_dir, rel_path)
+                    _fix_history_section = (f"\n{_fix_history}\n") if _fix_history.strip() else ""
+                    _compile_err_capped = compile_err[-3_000:] if len(compile_err) > 3_000 else compile_err
+                    _fix_extra = len(_compile_err_capped) + len(block) + len(_fix_history_section) + 4000
+                    _fix_core = secs['cargo'] + secs['full_source'] + secs['fn_bodies'] + secs['symbols']
+                    _fix_optional = secs['integ_tests'] + secs['siblings']
+                    _FIX_CHAR_LIMIT = TASK0C_PROMPT_CHAR_CAP
+                    _fix_ctx = _fix_core + (_fix_optional if len(_fix_core) + len(_fix_optional) + _fix_extra < _FIX_CHAR_LIMIT else "")
+                    fix_prompt = f"""The Rust test block you generated for `{rel_path}` does not compile.
+{_TASK0C_FIX_THINKING_DIRECTIVE}Fix ONLY the test block so it compiles. Return the corrected <FILE path="gen_tests_block"> block.
+{_fix_history_section}
+Compile error (read carefully — this is the ONLY thing to fix):
+{_compile_err_capped}
+
+Current test block (fix this):
+{block}
+
+--- Full context below — same constraints apply as when you generated the block ---
+{_fix_ctx}
+Rust rules:
+- Each `#[test]` fn must have ZERO arguments.
+- Use `use super::*;` to access module items.
+- Read field types from the struct definitions in the source file — match EXACTLY.
+
+INTERNAL MODULE RULES — these tests live inside the source file, not in an external test crate:
+- Do NOT write `use <crate_name>::...` — you are already inside the crate.
+- The template prelude already imports: {_prelude_names} — use them directly.
+- Do NOT use `#[macro_export]` macros inside this module — they cannot be imported from within the crate.
+  Construct values through direct API calls instead.
+- Do NOT use `assert_eq!` or `assert_ne!` on types that do not implement `PartialEq`.
+  Use `format!("{{}}",  val)`, boolean checks, or `matches!()` instead.
+{_nightly_rules_for_cluster()}
+See the IMPORTS, PITFALLS, and RULES sections of coverage_strategy.md (shown above) for
+project-specific import paths, type construction patterns, and hard constraints.
+{_file_constraints_section}"""
+                    fix_response = ask(fix_prompt, model=_TASK0C_MODEL, think=None)
+                    fixed = extract_test_mod(fix_response)
+                    if fixed:
+                        block = re.sub(r'\s*</FILE>\s*$', '', fixed).strip()
+                        if _allow_line not in block:
+                            block = re.sub(r'((?:pub\s+)?mod\s+gen_\w+\s*\{)', f'{_allow_line}\n\\1', block, count=1)
+                    else:
+                        _log(f"  [{module_name}] LLM returned no fix — reverting {rel_path}.")
+                        _revert_gen_tests_pass(abs_path, base_text, _sib)
+                        return "failed", block
+
             block = ""
             _block_committed = False
+            _did_split = False
+            _sibling_path = _gen_tests_path(abs_path, _pass_n)
+            # Split-and-merge: partition the file's uncovered functions into N
+            # disjoint subsets, generate a test block for each CONCURRENTLY
+            # (shared-prefix prompts batch on the GPU), then commit each through
+            # the normal compile-fix loop so survivors accumulate (additive).
+            # Coverage (quick-cov below) runs once on the merged result.
+            if _split_n > 1:
+                _partitions = _partition_uncovered_lines(existing_text, uncov_lines, _split_n)
+                if len(_partitions) >= 2:
+                    _did_split = True
+                    _queries = [_subset_prompt(_p) for _p in _partitions]
+                    _responses = generate_in_parallel(_queries, model=_TASK0C_MODEL, think=None)
+                    _base = _raw_text
+                    _n_ok = 0
+                    for _resp in _responses:
+                        _raw_sub = extract_test_mod(_resp)
+                        if _raw_sub:
+                            _raw_sub = re.sub(r'\s*</FILE>\s*$', '', _raw_sub).strip()
+                        if not _raw_sub:
+                            continue
+                        _pn = _next_gen_tests_n(abs_path)
+                        _st, _ = _finalize_and_commit(_raw_sub, _pn, _base)
+                        if _st == "committed":
+                            _base = abs_path.read_text(encoding="utf-8")
+                            _sibling_path = _gen_tests_path(abs_path, _pn)
+                            _n_ok += 1
+                    _block_committed = _n_ok > 0
+                    _log(f"  [{module_name}] split-and-merge {rel_path}: merged "
+                         f"{_n_ok}/{len(_partitions)} subset block(s)")
             for _gen_attempt in range(2):
+                if _did_split or block:
+                    break  # split-and-merge ran (or single-shot already has a block)
                 if _gen_attempt == 0:
                     _query = prompt
                 else:
@@ -20373,175 +20665,14 @@ project-specific import paths, type construction patterns, and hard constraints.
                     _log(f"  [{module_name}] Empty generation for {rel_path} (retry also failed). Raw: {_raw_snippet}")
                     _save_stream_log(_gen_attempt, _query, response or "", "empty_generation_retry")
             if block:
-                # Safety net: re-inject allow line if LLM dropped it from the template.
-                # Check only for the exact full allow line — a partial #[allow(unused_imports)]
-                # from the LLM does NOT satisfy the guard; we need all lints covered.
-                if _allow_line not in block:
-                    block = re.sub(
-                        r'((?:pub\s+)?mod\s+gen_\w+\s*\{)',
-                        f'{_allow_line}\n\\1',
-                        block, count=1,
-                    )
-                # Safety net: re-inject prelude imports if LLM dropped or partially wrote them.
-                # Use regex presence checks — exact-string matching causes double-injection
-                # when the LLM writes a partial form (e.g. `use std::string::String;` instead
-                # of `use std::string::{String, ToString};`) producing "String defined multiple times".
-                _PRELUDE_ITEMS = [
-                    ("use std::string::{String, ToString};", r'use (?:std|alloc)::[^;]*\bString\b'),
-                    ("use std::vec::Vec;",                   r'use (?:std|alloc)::[^;]*\bVec\b'),
-                    ("use std::boxed::Box;",                 r'use (?:std|alloc)::[^;]*\bBox\b'),
-                    ("use std::format;",                     r'use (?:std|alloc)::[^;]*\bformat\b'),
-                    ("use std::error::Error as StdError;",   r'use std::error::Error'),
-                    ("use std::fmt::{self, Display, Debug};",r'use (?:std|core)::fmt'),
-                ]
-                missing_preludes = [
-                    stmt for stmt, pat in _PRELUDE_ITEMS
-                    if not re.search(pat, block)
-                ]
-                if missing_preludes:
-                    inject = "\n    ".join(missing_preludes)
-                    if "use super::*;" in block:
-                        block = block.replace("use super::*;", f"use super::*;\n    {inject}", 1)
-                    else:
-                        block = re.sub(
-                            r'((?:pub\s+)?mod\s+gen_\w+\s*\{\s*\n)',
-                            f'\\1    {inject}\n',
-                            block, count=1,
-                        )
-
-                # Reject blocks with no #[test] functions before writing. The LLM
-                # occasionally returns a structurally valid mod block whose body
-                # is all imports / helpers / commentary and no actual test fn.
-                # Accepting it would clutter the source with a dead declaration,
-                # burn the next pass_n slot, and force a compile+quick-cov cycle
-                # that can't produce coverage. Counting #[test] and namespaced
-                # variants (#[tokio::test], #[async_std::test], ...) catches the
-                # common Rust test attributes without flagging #[cfg(test)].
-                _test_attr_count = len(re.findall(r'#\[(?:\w+::)*test\]', block))
-                if _test_attr_count == 0:
-                    _log(f"  [{module_name}] {rel_path} — LLM block has 0 #[test] functions; "
-                         f"skipping write (no productive content).")
-                    _log_task0c_attempt(project_dir, rel_path, attempt, block, "",
-                                       "no_tests_in_block")
+                # Single-shot: finalize + commit the one generated block.
+                _status, block = _finalize_and_commit(block, _pass_n, _raw_text)
+                if _status == "no_tests":
                     continue
-
-                # Write, compile-check, fix loop — keep iterating as long as errors
-                # are being resolved. Only revert when truly stuck (no improvement).
-                _block_prev_sigs: frozenset = frozenset()
-                _block_fix_attempt = 0
-                _block_committed = False
-                # gen_tests live in a sibling file (foo.gen_tests_N.rs) with a
-                # path-mod declaration appended to abs_path. This isolates test
-                # code from the coverage tool's denominator without EXCL markers.
-                _sibling_path = _gen_tests_path(abs_path, _pass_n)
-                _cluster_attr = _cluster_cfg_attr(_current_cluster)
-                _decl = _build_gen_tests_decl(_sibling_path.name, _pass_n, _allow_line,
-                                              cluster_cfg_attr=_cluster_attr)
-                _src_with_decl = _raw_text.rstrip() + _decl
-                while True:
-                    abs_path.write_text(_src_with_decl, encoding="utf-8")
-                    _sibling_path.write_text(_extract_gen_tests_body(block), encoding="utf-8")
-                    check = subprocess.run(
-                        ["cargo", "test", "--no-run", "-p", module_name],
-                        cwd=project_dir, capture_output=True, text=True,
-                        timeout=BUILD_TIMEOUT, env=_cargo_env(),
-                    )
-                    if check.returncode == 0:
-                        _log_task0c_attempt(project_dir, rel_path, attempt + _block_fix_attempt,
-                                           block, "", "success")
-                        _log(f"  [{module_name}] Appended {mod_name} to {rel_path} "
-                             f"({len(uncov_lines)} uncovered lines targeted)")
-                        _block_committed = True
-                        _pass_had_work = True
-                        break
-
-                    compile_err = (check.stdout + check.stderr).strip()
-                    cur_sigs = frozenset(re.findall(r'error\[E\d+\]: .+', compile_err))
-
-                    # Unclosed delimiter is structurally broken — revert immediately.
-                    if "unclosed delimiter" in compile_err or "mismatched closing delimiter" in compile_err:
-                        _log(f"  [{module_name}] Unclosed delimiter — reverting {rel_path}.")
-                        _revert_gen_tests_pass(abs_path, _raw_text, _sibling_path)
-                        break
-
-                    if _block_fix_attempt > 0:
-                        resolved = _block_prev_sigs - cur_sigs
-                        if cur_sigs == _block_prev_sigs:
-                            _log(f"  [{module_name}] No error improvement in {rel_path} — reverting.")
-                            _log_task0c_attempt(project_dir, rel_path, attempt + _block_fix_attempt,
-                                               block, compile_err, "compile_error")
-                            _revert_gen_tests_pass(abs_path, _raw_text, _sibling_path)
-                            break
-                        _log(f"  [{module_name}] {len(resolved)} error(s) resolved in {rel_path}, "
-                             f"{len(cur_sigs)} remaining — continuing.")
-
-                    _block_fix_attempt += 1
-                    _block_prev_sigs = cur_sigs
-                    _log(f"  [{module_name}] Compile error in {rel_path} "
-                         f"(fix attempt {_block_fix_attempt}) — sending to LLM.")
-                    _log_task0c_attempt(project_dir, rel_path, attempt + _block_fix_attempt,
-                                       block, compile_err, "compile_error")
-
-                    _fix_history = _get_task0c_history(project_dir, rel_path)
-                    _fix_history_section = (
-                        f"\n{_fix_history}\n"
-                    ) if _fix_history.strip() else ""
-                    # Fix prompt: compile error + bad block + source context only.
-                    # Excludes examples (sibling code) — not needed for fixing compile errors,
-                    # and was the main cause of fix prompts exceeding the 120K char limit.
-                    # Drop low-priority sections if compile_err+block would push total
-                    # past TASK0C_PROMPT_CHAR_CAP (120K chars / ~30K tokens).
-                    _compile_err_capped = compile_err[-3_000:] if len(compile_err) > 3_000 else compile_err
-                    _fix_extra = len(_compile_err_capped) + len(block) + len(_fix_history_section) + 4000
-                    _fix_core = secs['cargo'] + secs['full_source'] + secs['fn_bodies'] + secs['symbols']
-                    _fix_optional = secs['integ_tests'] + secs['siblings']
-                    _FIX_CHAR_LIMIT = TASK0C_PROMPT_CHAR_CAP
-                    _fix_ctx = _fix_core + (_fix_optional if len(_fix_core) + len(_fix_optional) + _fix_extra < _FIX_CHAR_LIMIT else "")
-                    fix_prompt = f"""The Rust test block you generated for `{rel_path}` does not compile.
-{_TASK0C_FIX_THINKING_DIRECTIVE}Fix ONLY the test block so it compiles. Return the corrected <FILE path="gen_tests_block"> block.
-{_fix_history_section}
-Compile error (read carefully — this is the ONLY thing to fix):
-{_compile_err_capped}
-
-Current test block (fix this):
-{block}
-
---- Full context below — same constraints apply as when you generated the block ---
-{_fix_ctx}
-Rust rules:
-- Each `#[test]` fn must have ZERO arguments.
-- Use `use super::*;` to access module items.
-- Read field types from the struct definitions in the source file — match EXACTLY.
-
-INTERNAL MODULE RULES — these tests live inside the source file, not in an external test crate:
-- Do NOT write `use <crate_name>::...` — you are already inside the crate.
-- The template prelude already imports: {_prelude_names} — use them directly.
-- Do NOT use `#[macro_export]` macros inside this module — they cannot be imported from within the crate.
-  Construct values through direct API calls instead.
-- Do NOT use `assert_eq!` or `assert_ne!` on types that do not implement `PartialEq`.
-  Use `format!("{{}}",  val)`, boolean checks, or `matches!()` instead.
-{_nightly_rules_for_cluster()}
-See the IMPORTS, PITFALLS, and RULES sections of coverage_strategy.md (shown above) for
-project-specific import paths, type construction patterns, and hard constraints.
-{_file_constraints_section}"""
-                    fix_response = ask(fix_prompt, model=_TASK0C_MODEL, think=None)
-                    fixed = extract_test_mod(fix_response)
-                    if fixed:
-                        block = re.sub(r'\s*</FILE>\s*$', '', fixed).strip()
-                        # Use the full _allow_line from _derive_gentest_prelude — not a
-                        # hardcoded subset. The crate's #![deny(...)] may require lints
-                        # (clippy::all, unsafe_op_in_unsafe_fn) beyond unused_imports.
-                        if _allow_line not in block:
-                            block = re.sub(
-                                r'((?:pub\s+)?mod\s+gen_\w+\s*\{)',
-                                f'{_allow_line}\n\\1',
-                                block, count=1,
-                            )
-                    else:
-                        _log(f"  [{module_name}] LLM returned no fix — reverting {rel_path}.")
-                        _revert_gen_tests_pass(abs_path, _raw_text, _sibling_path)
-                        break
-            else:
+                _block_committed = (_status == "committed")
+                if _block_committed:
+                    _sibling_path = _gen_tests_path(abs_path, _pass_n)
+            elif not _did_split:
                 _log_task0c_attempt(project_dir, rel_path, attempt, "", "", "no_block")
                 _log(f"  [{module_name}] No test block extracted for {rel_path}.")
 

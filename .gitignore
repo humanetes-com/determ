@@ -14,4 +14,3 @@ failure_log.md
 tests_output_*.txt
 .task1_partials/
 tools/skeleton_extractor/target/
-tests/*

@@ -58,29 +58,13 @@ fi
 > "$LLM_STREAM_LOG"
 > "$LOG_DIR/pipeline_anyhow.log"
 
-# Clean cargo build artifacts and strip gen_* blocks only if the workspace exists.
-# If it doesn't exist, --repo will clone it fresh — no pre-clean needed.
-if [[ -d "$SCRIPT_DIR/tmp/anyhow-master" ]]; then
-    echo "Running cargo clean on tmp/anyhow-master ..."
-    (cd "$SCRIPT_DIR/tmp/anyhow-master" && cargo clean 2>&1 | tail -3)
-
-    echo "Stripping gen_* blocks from tmp/anyhow-master/src ..."
-    python3 - <<'PYEOF'
-import re, pathlib, sys
-gen_re = re.compile(r'\n+(?:// GRCOV_EXCL_START\n)?#\[cfg\(test\)\](?:\n#\[[^\]]*\])*\n(?:pub )?mod gen_\w+\s*\{.*', re.DOTALL)
-stripped = []
-for p in pathlib.Path("tmp/anyhow-master/src").glob("*.rs"):
-    raw = p.read_text(); cleaned = gen_re.sub("", raw).rstrip() + "\n"
-    if cleaned != raw:
-        p.write_text(cleaned); stripped.append(p.name)
-if stripped:
-    print(f"  Stripped: {', '.join(stripped)}")
-else:
-    print("  Nothing to strip.")
-PYEOF
-else
-    echo "tmp/anyhow-master not found — will be cloned by pipeline."
-fi
+# Workspace cleanup is owned by the pipeline. This script always launches with
+# `--repo <repo> --clean`; pipeline.py's --clean path resets the workspace fully
+# (git_clean_reset: `git reset --hard` + `git clean -fd` + checkout default, plus
+# rmtree + re-clone for URL repos — see pipeline.py ~line 21703 / ~4212), which
+# removes every gen_* block. The old script-side cargo-clean/strip was both
+# redundant and keyed on a stale path (tmp/anyhow-master; the workspace is
+# tmp/<repo-name>), so it never ran. Removed to keep one source of truth.
 
 # ---------------------------------------------------------------------------
 # Ensure inference server is running
