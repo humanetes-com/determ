@@ -6645,6 +6645,55 @@ def _extract_self_note(
 # gotcha's trigger keyword/code, via _gotchas_for_error).
 _RUST_GOTCHAS: list[dict] = [
     {
+        # Archetype map (concrete generic examples; NOT crate source). Built
+        # from the dominant fix-loop errors. Each shows WRONG → RIGHT so the
+        # model learns the transformation, not an abstract rule.
+        "id": "missing_trait_bound",
+        "summary": "`T doesn't implement Display/Debug/...` → the generic has NO such bound (that's the spec). Do NOT add it; don't call that trait on T.",
+        "triggers": {"E0277", "doesn't implement", "is not satisfied", "the trait bound"},
+        "detail": (
+            "`T doesn't implement Display` (or Debug/PartialEq/...) means the generic\n"
+            "carries no such bound. Unlike `T: Sized`, this bound is the CALLER's\n"
+            "contract — you may NOT add it.\n"
+            "  WRONG (assumes T: Display):\n"
+            "    fn label<T>(x: T) -> String { format!(\"{}\", x) }   // E0277\n"
+            "  RIGHT only if the REAL signature already declares it:\n"
+            "    fn label<T: Display>(x: T) -> String { format!(\"{}\", x) }\n"
+            "  If the signature does NOT grant Display, the body must not format T at\n"
+            "  all — the function was never meant to. Build/return the value another\n"
+            "  way using only the traits the bounds already provide."
+        ),
+    },
+    {
+        "id": "unsafe_call_block",
+        "summary": "Calling an unsafe fn needs `unsafe { ... }` — unless the enclosing fn is itself `unsafe fn` (then the body is already an unsafe context).",
+        "triggers": {"E0133", "call to unsafe", "requires unsafe", "unsafe function or block"},
+        "detail": (
+            "  WRONG (safe fn calls an unsafe fn bare):\n"
+            "    fn first(p: *const u8) -> u8 { core::ptr::read(p) }   // E0133\n"
+            "  RIGHT (wrap the unsafe call):\n"
+            "    fn first(p: *const u8) -> u8 { unsafe { core::ptr::read(p) } }\n"
+            "  If the signature is `unsafe fn first(...)`, the WHOLE body is already\n"
+            "  unsafe — do NOT add a redundant inner `unsafe {}`. Rule: bare unsafe\n"
+            "  call only inside an `unsafe fn`; otherwise wrap each call in `unsafe {}`."
+        ),
+    },
+    {
+        "id": "name_not_in_scope",
+        "summary": "`cannot find X in scope` → X is not a real name here. Use ONLY items shown in TYPES_IN_SCOPE; never invent a helper or constructor.",
+        "triggers": {"E0425", "E0433", "cannot find", "not found in this scope"},
+        "detail": (
+            "The body used a name that doesn't exist.\n"
+            "  WRONG (invented constructor):\n"
+            "    let w = Wrapper::from_raw(p);   // E0425 — no such fn\n"
+            "  RIGHT — only use the real fields/methods TYPES_IN_SCOPE lists:\n"
+            "    let w = Wrapper { ptr: p };\n"
+            "Never guess function or type names. If you can't build the value from the\n"
+            "items in scope, you're constructing it the wrong way — re-read the type's\n"
+            "actual fields and methods."
+        ),
+    },
+    {
         "id": "typeid_static",
         "summary": "TypeId::of::<T>() requires T: 'static. If T is generic without that bound and the signature is locked, you cannot use TypeId::of in the body.",
         "triggers": {"E0310", "E0311", "typeid"},
@@ -7166,7 +7215,7 @@ _ERROR_EXCERPT_MAX_PER_CODE = 10  # keep at most N excerpts per code
 _ERROR_EXCERPT_MAX_CHARS = 600   # truncate each excerpt
 _ERROR_CODE_PROMOTED_THRESHOLD = 3
 _ERROR_CODE_HINTS: dict[str, str] = {
-    "E0277": "trait bound not satisfied — usually `?Sized` is missing or `Send/Sync/'static` bound needs to be added.",
+    "E0277": "trait bound not satisfied — TWO opposite cases (see the matching gotcha for concrete examples): (a) by-value return/use of a possibly-unsized `T` (\"size cannot be known\") → you MAY add `where T: Sized` to THIS one fn, or return `&T`/`Box<T>`; (b) `T doesn't implement Display/Debug/...` → you may NOT add that bound (it is the caller's contract) — do not call that trait on `T`, build the value another way.",
     "E0308": "mismatched types — check whether you're returning a Result vs Option, owned vs referenced, or wrong generic instantiation.",
     "E0382": "use of moved value — clone, borrow, or use Cow/Arc if you need both old and new value.",
     "E0507": "cannot move out of borrowed — use .clone(), .as_ref(), or destructure with `ref`.",

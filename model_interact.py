@@ -975,6 +975,23 @@ class VLLMBackend(LLMBackend):
         # Defensive: strip any <think>...</think> that leaked through content.
         result = _re.sub(r'<think>.*?</think>\s*', '', result, flags=_re.DOTALL).strip()
 
+        # Persist the model's reasoning (thinking) keyed by the response content
+        # sha — the SAME sha the pipeline stores the response under — so callers
+        # can read WHY the model produced what it did. Previously discarded; only
+        # the content survived, so the reasoning behind a wrong fill was lost.
+        if thinking_chunks:
+            try:
+                import hashlib as _hl
+                _think_dir = os.path.join(_LOG_DIR, "thinking")
+                os.makedirs(_think_dir, exist_ok=True)
+                _sha = _hl.sha256(result.encode("utf-8", "replace")).hexdigest()
+                _tp = os.path.join(_think_dir, f"{_sha}.txt")
+                if not os.path.exists(_tp):
+                    with open(_tp, "w", encoding="utf-8", errors="replace") as _tf:
+                        _tf.write("".join(thinking_chunks))
+            except Exception:
+                pass
+
         # Update the adaptive chars-per-token ratio from actual usage stats.
         if _actual_prompt_tokens and _actual_prompt_tokens > 0 and _msg_chars > 0:
             _measured_cpt = _msg_chars / _actual_prompt_tokens

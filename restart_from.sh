@@ -34,11 +34,13 @@ for _arg in "$@"; do [[ "$_arg" == "--force" ]] && _FORCE=true; done
 # only the merged-tree fill). task2-4 is the loop-complete marker — always
 # cleared so the reconstruct loop re-enters.
 case "$STAGE" in
-    task1)         _KEYS=(task1 task2a task2b task2c task2-4) ;;
-    task2|task2a)  _KEYS=(task2a task2b task2c task2-4) ;;
-    task2b)        _KEYS=(task2b task2c task2-4) ;;
-    task2c)        _KEYS=(task2c task2-4) ;;
-    task3|task4)   _KEYS=(task2-4) ;;   # keep task2a/b/c done → generate no-ops → straight to test/fix
+    task1)             _KEYS=(task1 task2a task2b task2c task2-4) ;;
+    task2|task2a)      _KEYS=(task2a task2b task2c task2-4) ;;
+    # task2c/task2b BOTH re-run the merge (it's cheap, ~seconds) so we never
+    # trust a possibly-stale merged tree — only the expensive per-cluster fill
+    # (task2a, persisted in .skeleton-filled/) is preserved.
+    task2b|task2c)     _KEYS=(task2b task2c task2-4) ;;
+    task3|task4)       _KEYS=(task2-4) ;;   # keep task2a/b/c done → generate no-ops → straight to test/fix
     *)
         echo "usage: restart_from.sh <stage> [--force]"
         echo "  stage ∈ task1 | task2 | task2a | task2b | task2c | task3 | task4"
