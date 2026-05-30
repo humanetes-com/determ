@@ -564,6 +564,15 @@ _SRC_SNIP_CAP  = max(4_000, SINGLE_CALL_CHAR_LIMIT // 10)   # source snippet in 
 _EXTRA_CAP     = max(3_000, SINGLE_CALL_CHAR_LIMIT // 20)   # extra context files (Cargo.toml etc.)
 _WORKING_CAP   = max(800,   SINGLE_CALL_CHAR_LIMIT // 100)  # "what worked before" hint
 
+# Per-fn / per-impl reconstruction context (Plan 9 F1/F2). Types+traits are the
+# highest-value context for body reconstruction — they drive the dominant
+# E0277/E0599/E0046/E0053 errors. Budget-derive generously; do NOT freeze at
+# 8192-era hardcoded values (3000 chars / 6 types). The char cap governs; the
+# count cap is only a runaway safety net.
+_TYPES_SECTION_CAP = max(8_000, SINGLE_CALL_CHAR_LIMIT // 3)   # type/trait defs in fill prompt
+_TYPES_COUNT_CAP   = max(40,    SINGLE_CALL_CHAR_LIMIT // 6000)  # safety net only; chars govern
+_FAILED_BODY_CAP   = max(2_000, SINGLE_CALL_CHAR_LIMIT // 12)  # prior failed body in fix prompt
+
 
 def prompt_budget(*fixed_parts: str) -> int:
     """Chars remaining for dynamic content after fixed parts are accounted for.
@@ -5962,7 +5971,7 @@ def _compute_cluster_macro_invariants(
     return header + "\n" + "\n".join(lines)
 
 
-def _collect_crate_macros(src_dir: Path, max_chars: int = 6000) -> str:
+def _collect_crate_macros(src_dir: Path, max_chars: int = max(6_000, SINGLE_CALL_CHAR_LIMIT // 25)) -> str:  # Plan 9 F1: budget-derived (was 6000)
     """Extract `macro_rules!` blocks from every .rs file in `src_dir`.
 
     Returned as a compact section the model can scan to understand how
@@ -8449,8 +8458,8 @@ def _phase_c_retrospective(
         f"in `{file_rel}` (impl: `{container}`, cluster: `{cluster_name}`) "
         f"could not be made to compile after {fix_attempts} attempt(s).\n\n"
         f"Signature:\n```rust\n{sig_text}\n```\n\n"
-        f"Last attempted body (failed to compile):\n```rust\n{last_body[:1500]}\n```\n\n"
-        f"Compile errors from that attempt:\n```\n{error_excerpt[:2000]}\n```\n"
+        f"Last attempted body (failed to compile):\n```rust\n{last_body[:_FAILED_BODY_CAP]}\n```\n\n"
+        f"Compile errors from that attempt:\n```\n{error_excerpt[:_FIX_ERR_CAP]}\n```\n"
         f"{prior_section}"
         f"{siblings_section}\n"
         "Classify the root cause in ONE of these categories:\n"
@@ -8942,7 +8951,14 @@ def _phase_c_fill_impl_blocks(
             (m.get("sig_text") or "") for m in block["members"])
         types_records = _types_referenced_in_text(
             types_for_block_text, _crate_type_records)
-        types_section = "\n\n".join(_format_type_for_prompt(t) for t in types_records[:12])
+        # Plan 9 F1/F2: budget-derive (was hardcoded 12 types).
+        types_records = types_records[:_TYPES_COUNT_CAP]
+        _types_full = "\n\n".join(_format_type_for_prompt(t) for t in types_records)
+        types_section = _types_full[:_TYPES_SECTION_CAP]
+        if len(_types_full) > _TYPES_SECTION_CAP:  # Plan 9 F5
+            _guard("phase-c/impl/types_truncated",
+                   f"{block.get('container','')[:50]}: type context "
+                   f"{len(_types_full):,} > cap {_TYPES_SECTION_CAP:,}")
         # Crate idioms — surfaces THIS file's repeating patterns (Self::
         # constructor family, vtable dispatch, wrapper construction,
         # unsafe chains) from already-filled fn bodies. The target
@@ -9138,7 +9154,7 @@ def _phase_c_fill_impl_blocks(
                     container=block["container"],
                     file_rel=block["file"],
                     cluster_name=cluster_name,
-                    last_body=last_response[:1500],
+                    last_body=last_response[:_FAILED_BODY_CAP],
                     error_excerpt=last_error_excerpt,
                     fix_attempts=fix_attempt,
                     prior_retrospective=prior.get("guidance", ""),
@@ -9484,10 +9500,17 @@ def _task2_fill_fns_one_by_one(
             _type_search_text = f"{sig_text}\n{container}\n{_impl_where}"
             _types_for_fn = _types_referenced_in_text(
                 _type_search_text, _crate_type_records)
-            # Cap to ~6 types and ~3 KB to keep prompts focused.
-            _types_for_fn = _types_for_fn[:6]
-            types_section = "\n\n".join(
-                _format_type_for_prompt(r) for r in _types_for_fn)[:3000]
+            # Plan 9 F1/F2: budget-derive the type/trait context — it is the
+            # highest-value context for reconstruction. Count cap is a safety
+            # net only; the char cap governs.
+            _types_for_fn = _types_for_fn[:_TYPES_COUNT_CAP]
+            _types_full = "\n\n".join(
+                _format_type_for_prompt(r) for r in _types_for_fn)
+            types_section = _types_full[:_TYPES_SECTION_CAP]
+            if len(_types_full) > _TYPES_SECTION_CAP:  # Plan 9 F5: surface starvation
+                _guard("phase-c/types_truncated",
+                       f"{container[:50]}: type context {len(_types_full):,} > "
+                       f"cap {_TYPES_SECTION_CAP:,} ({len(_types_for_fn)} types)")
             _fn_t0 = time.monotonic()
             _emit("phase_c.fn.fill.start", data={
                 "cluster": cluster_name, "pass_n": pass_n,
@@ -9534,6 +9557,19 @@ def _task2_fill_fns_one_by_one(
                         file_text=cur_text,
                         current_error=error_excerpt,
                     )
+                # Plan 9 F4: on fix attempts, also surface the definitions of any
+                # type/trait NAMED IN THE CURRENT ERROR (E0277/E0599/E0046/E0053
+                # routinely name a trait/type the signature doesn't mention).
+                # Re-selected each attempt so the retry is informed, not a guess.
+                _types_section_eff = types_section
+                if error_excerpt:
+                    _err_types = _types_referenced_in_text(error_excerpt, _crate_type_records)
+                    _base_names = {r.get("name") for r in _types_for_fn}
+                    _extra = [r for r in _err_types if r.get("name") not in _base_names]
+                    if _extra:
+                        _aug = _types_full + "\n\n" + "\n\n".join(
+                            _format_type_for_prompt(r) for r in _extra[:_TYPES_COUNT_CAP])
+                        _types_section_eff = _aug[:_TYPES_SECTION_CAP]
                 if fix_attempt == 1:
                     prompt = _build_per_fn_prompt(
                         file_text=cur_text, fn_name=fn_name, sig_text=sig_text,
@@ -9542,7 +9578,7 @@ def _task2_fill_fns_one_by_one(
                         macros_section=macros_section,
                         notes_section=notes_section,
                         container=container,
-                        types_section=types_section,
+                        types_section=_types_section_eff,
                         invariants_section=invariants_section,
                         fr_path=fr_path,
                         siblings_section=_collect_sibling_filled_bodies(
@@ -9558,7 +9594,7 @@ def _task2_fill_fns_one_by_one(
                         macros_section=macros_section,
                         notes_section=notes_section,
                         container=container,
-                        types_section=types_section,
+                        types_section=_types_section_eff,
                         invariants_section=invariants_section,
                         # P3.1: open the sig-change escape hatch after multiple
                         # compile failures. The model can return an additional
@@ -9721,7 +9757,7 @@ def _task2_fill_fns_one_by_one(
                 # P2: record this failed attempt for the prior-attempts block.
                 # We store the focused excerpt (already tier-sliced) so the
                 # next prompt sees what really failed without re-paying budget.
-                _focused = _focus_cargo_errors(cargo_out, rel_file, max_chars=600)
+                _focused = _focus_cargo_errors(cargo_out, rel_file, max_chars=_FIX_ERR_CAP)
                 per_fn_history.append({
                     "attempt": fix_attempt,
                     "body": body,
@@ -10129,7 +10165,7 @@ def _task2_fill_fns_one_by_one(
                             sig_t = sloc[0]
                             cur_body = cur_text[sloc[2]:sloc[3]]
                             error_excerpt_test = _focus_cargo_errors(
-                                test_out, rel_f, max_chars=3000)
+                                test_out, rel_f, max_chars=_FIX_ERR_CAP)
                             t_blocks = _find_tests_for_fn(
                                 tests_dir_files, fn,
                                 file_rel=rel_f, src_dir=_src_for_macros,
@@ -10173,7 +10209,7 @@ def _task2_fill_fns_one_by_one(
                                         "attempt": test_fix_attempt,
                                         "body": new_body,
                                         "error_sig": _focus_cargo_errors(
-                                            test_out, rel_f, max_chars=400),
+                                            test_out, rel_f, max_chars=_FIX_ERR_CAP),
                                         "outcome": "test_fail",
                                     })
                         if not any_progress:
@@ -13589,7 +13625,10 @@ content here
 # API-surface section cap: ~25% of the single-call budget. The skeleton must
 # survive truncation because TASK 1 treats it as ground truth — but we still
 # bound it so it doesn't crowd out tests and README on large projects.
-_API_SURFACE_CAP = max(8_000, SINGLE_CALL_CHAR_LIMIT // 4)
+# Plan 9 F3: was SINGLE_CALL//4 (~79K) — dropped 38% of a 129K API surface at
+# task1. Raised to //2 (~159K) so the whole API reaches FR synthesis; the
+# context guard still protects total-prompt overflow.
+_API_SURFACE_CAP = max(8_000, SINGLE_CALL_CHAR_LIMIT // 2)
 
 
 def _format_api_surface_section(api_surface: str) -> str:

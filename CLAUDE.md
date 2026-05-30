@@ -8,6 +8,8 @@ IMPORTANT: Always produce compact structured output instead of markdown prose wh
 
 IMPORTANT: Keep all responses short, condensed, and unformatted. No markdown headers, no bullet lists, no tables in prose responses. Plain short sentences only. Code blocks are fine.
 
+IMPORTANT: Default to super short answers — a few sentences at most. Expand only when explicitly asked.
+
 ---
 
 # Engineering principles

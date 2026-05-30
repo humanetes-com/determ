@@ -2203,3 +2203,95 @@ coverage climbs faster per attempt, no orphaned-sibling compile issues.
 Cross-file fan-out + batched single coverage measurement was the other fork —
 not built. Within-file split-and-merge covers the multi-function-file case;
 revisit cross-file if whole-file task0c wall-time is still the bottleneck.
+
+---
+# Plan 9 — Feed the model the structure it's guessing (context, not caps) (2026-05-30, REV3)
+
+History: rev1 (registry/freeze-spec) and rev2 (gut outer loop) were both wrong —
+the outer loop fires 22x in all history; persistence + fixed spec already exist.
+Event data showed the cost+instability is the INNER Phase C loop, and the
+dominant fix-prompt errors are STRUCTURAL guessing. This rev targets that.
+
+## Quantified root cause (verified)
+Budget SINGLE_CALL_CHAR_LIMIT = 317,952 chars. Fill-path structural caps are
+HARDCODED at 8192-era values and never re-derived from the window:
+| context | cap | as % of budget | line |
+|---|---|---|---|
+| per-fn type section | 3,000 chars | 0.9% | 9490 |
+| per-fn type count | 6 types | — | 9488 |
+| per-impl type count | 12 types | — | 8945 |
+| task1 API cap (_API_SURFACE_CAP) | 79,488 | — | 13592 |
+| anyhow API surface (ground truth) | 129,041 chars | task1 drops 38% | disk |
+| API reaching the fill prompt | ~3,000 | ~2% of the 129K | — |
+
+Dominant fix-loop errors (from logs/prompts): E0277 trait-bound ×1996, E0599
+method-not-found ×922, E0046 missing-trait-items ×169, E0053 sig-mismatch ×120,
+E0609 no-field ×98. All = model guessing types/traits/signatures it wasn't shown.
+
+Big picture: the model window is large; the pipeline extracts rich ground truth
+(129K API, type records incl. crate traits, std trait contracts); but the
+prompts that reconstruct bodies are starved by stale hardcoded caps. Fix = feed
+the ground truth, budget-derived. No hard caps (those regress session 43 and
+lower quality). This is a quality lever: informed attempts converge; uninformed
+ones thrash.
+
+## F1 ⚑ Budget-derive ALL per-fn / per-impl caps (systemic — not just types)
+Older task2_inner_loop / generate_fix_loop / task4 paths are already
+budget-derived; the newer per-fn/per-impl Phase C path shipped hardcoded
+8192-era caps and was never migrated. Full inventory to fix:
+| cap | hardcoded | line | budget-derived target |
+|---|---|---|---|
+| per-fn type section | 6 types / 3000 chars | 9488/9490 | high-priority fraction of SINGLE_CALL |
+| per-impl type section | 12 types | 8945 | same |
+| fix-loop error history | 600 chars/attempt | 9724 | _FIX_ERR_CAP (~31K, ALREADY EXISTS, unused here) |
+| failed body in prompt | 1500 chars | 8453/8905 | SINGLE_CALL fraction |
+| retro compile errors | 2000 chars | 8454 | _FIX_ERR_CAP |
+| per-pass test output | 400 / 3000 | 10132/10176 | _focus_cargo_errors default (4000) → budget |
+| crate macros | 6000 chars | 5965 | budget fraction |
+Make the TYPE/TRAIT section highest-priority. The 600-char error cap is the
+headline: the model can't see the full error it must fix while a 31K
+budget-derived constant for exactly this is bypassed. One systemic move: route
+every per-fn cap through the existing budget-derived constants.
+
+## F2 ⚑ Route full structural ground truth into per-fn / per-impl fills
+For the fn being filled, inject the COMPLETE definitions of every type its
+signature / impl header / where-clause / referenced tests touch — fields+types,
+methods+signatures — plus the trait contract it must satisfy: std via
+_TRAIT_CONTRACTS (exists), crate traits via the extractor's trait records
+(required methods + exact sigs). Stop selecting a 6-type slice; include the
+fn's full structural neighbourhood. Pull from the baked API surface (the FR
+intent), not just the live filtered slice.
+
+## F3 ⚑ Stop truncating the API at task1
+129K API < 318K budget — it fits. Raise _API_SURFACE_CAP so task1 synthesizes FR
+from the WHOLE API instead of dropping 38%.
+
+## F4 ⚑ Error-targeted structural injection in the fix loop
+When a fix-loop error names a trait/type/method (E0277/E0599/E0046/E0053/E0609),
+deterministically pull that exact symbol's definition/contract and inject it
+into the fix prompt — so the retry is informed, not a re-guess.
+
+## F5 ⏳ Observability: log when a structural section is truncated
+Emit a guard (like the context guard) whenever types/trait/API context is
+dropped, so starvation is visible and we can measure F1-F4's effect.
+
+## Sequencing & framing
+F1+F2 first (the fill — biggest quality lever). F3 (task1, cheap). F4 (fix
+loop). F5 (observability, do alongside). Pure quality: give the model the facts
+it's guessing wrong → more bodies correct on first try → fix loops converge
+because each attempt is informed. NOT speed, NOT caps.
+
+## Risk
+Bigger prompts approach the window — but measured budget (318K) holds 129K API +
+fn context, and the context guard already protects overflow. Prioritize the fn's
+OWN types + trait contract first, expand toward whole-API as budget allows.
+Verify F2 doesn't push the average fill prompt past SINGLE_CALL after F1.
+
+Status: IMPLEMENTED 2026-05-30. F1 budget-derived constants (_TYPES_SECTION_CAP,
+_TYPES_COUNT_CAP, _FAILED_BODY_CAP) + migrated all per-fn/per-impl caps (types
+6/3000→budget, 12→budget, 600-err→_FIX_ERR_CAP, 1500-body→_FAILED_BODY_CAP,
+2000-err→_FIX_ERR_CAP, test-out 400/3000→_FIX_ERR_CAP, macros 6000→budget). F2
+via generous type-section + existing trait-contract injection. F3
+_API_SURFACE_CAP //4→//2 (fits 129K). F4 error-named types injected into per-fn
+fix prompts (_types_section_eff). F5 phase-c/types_truncated guards. check.sh
+green (mypy+smoke). NOT yet validated on a real reconstruction run.
