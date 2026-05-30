@@ -1031,70 +1031,12 @@ def extract_files(text):
     return files
 
 
-# Aider-style SEARCH/REPLACE patch protocol. Used by generate_fix_loop so
-# the model can emit a tiny localised change instead of the entire
-# multi-thousand-line file. Each <PATCH file="..."> block may contain one
-# or more SEARCH/REPLACE pairs; the pipeline applies them by exact-string
-# match against current file contents.
-_PATCH_BLOCK_RE = re.compile(
-    r'<PATCH\s+file="([^"]+)"\s*>(.*?)</PATCH\s*>',
-    re.DOTALL,
-)
-_PATCH_HUNK_RE = re.compile(
-    r'<{5,}\s*SEARCH\s*\n(.*?)\n={5,}\s*\n(.*?)\n>{5,}\s*REPLACE\s*',
-    re.DOTALL,
-)
-
-
-def extract_patches(text: str) -> list[tuple[str, str, str]]:
-    """Parse <PATCH file="..."> blocks containing SEARCH/REPLACE hunks.
-
-    Returns a list of (file_rel, search_text, replace_text) tuples in the
-    order the model emitted them. Tolerant of code fences inside the
-    PATCH block (some models wrap the hunk in ```diff … ```).
-    """
-    out: list[tuple[str, str, str]] = []
-    for path, body in _PATCH_BLOCK_RE.findall(text or ""):
-        # Strip outer code fences if present.
-        body_stripped = body.strip()
-        if body_stripped.startswith("```"):
-            # drop the opening fence line and the closing fence line
-            lines = body_stripped.splitlines()
-            if lines and lines[0].startswith("```"):
-                lines = lines[1:]
-            if lines and lines[-1].strip() == "```":
-                lines = lines[:-1]
-            body_stripped = "\n".join(lines)
-        for search, replace in _PATCH_HUNK_RE.findall(body_stripped):
-            out.append((path.strip(), search, replace))
-    return out
-
-
-def apply_patch(file_path: Path, search: str, replace: str) -> tuple[bool, str]:
-    """Apply a single SEARCH/REPLACE hunk to `file_path` by exact match.
-
-    Returns (success, reason). Search must match EXACTLY once — zero
-    matches means the model invented or paraphrased the surrounding
-    context; multiple matches means the hunk is ambiguous. Both cases
-    are rejected so we never silently corrupt unrelated sites.
-    """
-    try:
-        text = file_path.read_text(encoding="utf-8")
-    except Exception as e:
-        return False, f"read_failed: {e}"
-    if not search:
-        return False, "empty_search"
-    n = text.count(search)
-    if n == 0:
-        return False, "no_match"
-    if n > 1:
-        return False, f"ambiguous_{n}_matches"
-    new_text = text.replace(search, replace, 1)
-    try:
-        file_path.write_text(new_text, encoding="utf-8")
-    except Exception as e:
-        return False, f"write_failed: {e}"
-    return True, "ok"
+# SEARCH/REPLACE patch protocol REMOVED. The model could not reliably
+# reproduce an anchor byte-exact (flush-left vs indented bodies → no_match),
+# and the anchor example leaked crate-specific source. Fix-loop edit
+# granularity is now selected by FIX_LOOP_STRATEGY: `legacy` = whole-file
+# rewrite (the proven path for small files), `per_fn` = per-fn body splice
+# (for large files where whole-file rewrites truncate). See generate_fix_loop.
 
 
 def extract_test_mod(text: str) -> str:
@@ -1258,6 +1200,32 @@ def _parse_cmd(cmd: str) -> list[str]:
         return shlex.split(cmd)
     except ValueError:
         return cmd.split()
+
+
+def _derive_check_only_cmd(check_cmd: str) -> str:
+    """Derive a compile-only (`cargo check`) command from a caller's check_cmd:
+    swap the `test`/`build` subcommand → `check`, drop the test harness args
+    (anything after a bare `--`) and `--no-run`/`--no-fail-fast`. Used as the
+    fast inner-loop check for the per_fn fix strategy — `cargo check` skips
+    codegen and test execution, and incremental compilation means a check
+    after editing one fn recompiles only that module + its dependents.
+
+    Examples:
+      cargo test -p anyhow --no-run          → cargo check -p anyhow
+      cargo +nightly test -p x -- --threads  → cargo +nightly check -p x
+      cargo check -p x                       → cargo check -p x  (unchanged)
+    """
+    out_toks: list[str] = []
+    for t in _parse_cmd(check_cmd):
+        if t == "--":
+            break
+        if t in ("test", "build"):
+            out_toks.append("check"); continue
+        if t in ("--no-run", "--no-fail-fast"):
+            continue
+        out_toks.append(t)
+    s = " ".join(out_toks).strip()
+    return s if "check" in s.split() else "cargo check"
 
 
 def trim_to_line(text: str, cap: int, marker: str = "\n// ... (truncated)") -> str:
@@ -5463,15 +5431,19 @@ def _extract_signature_block(response: str) -> str | None:
 
 
 def _splice_fn_body_at(file_path: Path, body_byte_start: int, body_byte_end: int,
-                        new_body: str) -> tuple[bool, int]:
+                        new_body: str, allow_nonstub: bool = False) -> tuple[bool, int]:
     """Splice `new_body` between bytes [body_byte_start, body_byte_end) in
     `file_path`. Replaces an explicit byte range — used when the caller has
-    canonical offsets from the syn enumerator. Refuses to overwrite a body
-    that isn't currently a stub.
+    canonical offsets from the syn enumerator. By default refuses to
+    overwrite a body that isn't currently a stub.
 
     The body content between [start, end) is whatever currently sits between
     the fn's `{` and `}`. If that text doesn't look like an unimplemented
-    stub, the splice is rejected so we never clobber a real body.
+    stub, the splice is rejected so we never clobber a real body — UNLESS
+    `allow_nonstub=True` (the fix-loop per_fn strategy, which re-fills a fn
+    whose previous body was filled but wrong). When re-filling a non-stub,
+    the caller MUST re-enumerate offsets before each splice, since every
+    write shifts the byte ranges of later fns in the same file.
 
     Returns (success, bytes_delta).
     """
@@ -5482,7 +5454,7 @@ def _splice_fn_body_at(file_path: Path, body_byte_start: int, body_byte_end: int
     if body_byte_end > len(text) or body_byte_start > body_byte_end:
         return False, 0
     cur_body = text[body_byte_start:body_byte_end]
-    if not _is_unimplemented_body(cur_body):
+    if not allow_nonstub and not _is_unimplemented_body(cur_body):
         return False, 0
     nb = new_body.strip()
     if nb.startswith("{") and nb.endswith("}"):
@@ -5507,11 +5479,16 @@ def _splice_fn_body_at(file_path: Path, body_byte_start: int, body_byte_end: int
     return True, len(new_text) - len(text)
 
 
-def _splice_fn_body(file_path: Path, fn_name: str, new_body: str) -> tuple[bool, int]:
+def _splice_fn_body(file_path: Path, fn_name: str, new_body: str,
+                    allow_nonstub: bool = False) -> tuple[bool, int]:
     """Replace the body of `fn_name` in `file_path` with `new_body`.
 
-    Only splices when the current body is an `unimplemented!()` stub — never
-    overwrites an already-filled function. Returns (success, bytes_delta).
+    By default only splices when the current body is an `unimplemented!()`
+    stub — never overwrites an already-filled function. Pass
+    `allow_nonstub=True` (fix-loop per_fn strategy) to re-fill a fn whose
+    previous body compiled wrong. The file is re-read here on every call, so
+    byte offsets are always fresh — safe to call repeatedly on the same file.
+    Returns (success, bytes_delta).
     """
     try:
         text = file_path.read_text(encoding="utf-8")
@@ -5522,7 +5499,7 @@ def _splice_fn_body(file_path: Path, fn_name: str, new_body: str) -> tuple[bool,
         return False, 0
     _sig, _sig_start, body_start, body_end = loc
     cur_body = text[body_start:body_end]
-    if not _is_unimplemented_body(cur_body):
+    if not allow_nonstub and not _is_unimplemented_body(cur_body):
         return False, 0
     # Normalise the body: model may have included extraneous braces or
     # leading/trailing whitespace. Strip outer braces if present.
@@ -16936,41 +16913,6 @@ def generate_fix_loop(
                 f"\n<RELEVANT_GOTCHAS_DETAIL>\n{_gotchas_specific}\n"
                 "</RELEVANT_GOTCHAS_DETAIL>\n"
             )
-        _patch_protocol = (
-            "\n<OUTPUT_PROTOCOL>\n"
-            "When the fix is localised (touches <=3 fns or <=200 lines of\n"
-            "a file), PREFER emitting a SEARCH/REPLACE patch over rewriting\n"
-            "the whole file. The whole-file format may be truncated for\n"
-            "files over ~30KB; the patch format never is.\n"
-            "\n"
-            "PATCH format (one or more hunks per PATCH block, one PATCH\n"
-            "block per file you touch):\n"
-            '<PATCH file="src/error.rs">\n'
-            "<<<<<<< SEARCH\n"
-            "fn as_ref(&self) -> &(dyn StdError + 'static) {\n"
-            "    unsafe { ErrorImpl::error(self.inner.by_ref()) }\n"
-            "}\n"
-            "=======\n"
-            "fn as_ref(&self) -> &(dyn StdError + Send + Sync + 'static) {\n"
-            "    unsafe { ErrorImpl::error(self.inner.by_ref()) }\n"
-            "}\n"
-            ">>>>>>> REPLACE\n"
-            "</PATCH>\n"
-            "\n"
-            "Rules for SEARCH text:\n"
-            "1. Must appear EXACTLY ONCE in the current file (verbatim,\n"
-            "   including indentation and surrounding lines). Add 1–2\n"
-            "   lines of context if a snippet would otherwise be ambiguous.\n"
-            "2. Do NOT paraphrase, abbreviate, or use `// ...`.\n"
-            "3. Multiple PATCH blocks per response are fine; multiple hunks\n"
-            "   per block are fine.\n"
-            "4. You MAY mix PATCH blocks (for small fixes) and FILE blocks\n"
-            "   (for files that need wholesale rewrite) in the same response.\n"
-            "Hunks whose SEARCH does not match exactly once are rejected.\n"
-            "</OUTPUT_PROTOCOL>\n"
-        )
-        _gotchas_block = _gotchas_block + _patch_protocol
-
         _spec_header = "\nFunctional requirements (the contract code must satisfy):\n" if functional_req else ""
         _fl_scaffold = f"""Code generation produced files that fail the check below.
 {_FIX_THINKING_DIRECTIVE}Fix ONLY the files causing the failure — do NOT regenerate correct files.
@@ -17027,31 +16969,14 @@ Current source files:
         _log(f"  [fix loop] iter {len(history) + 1} — asking LLM to fix specific failures.")
         response = ask(prompt, model=model)
         fixed = extract_files(response)
-        patches = extract_patches(response)
-        if not fixed and not patches:
+        if not fixed:
             _log(f"  [fix loop] LLM produced no fixes on iter {len(history) + 1}.")
             _err_preview = output[-_FIX_ERR_CAP:] if len(output) > _FIX_ERR_CAP else output
             return {"summary": "no_fixes_produced",
                     "files_changed_str": "no files changed",
                     "error_preview": _err_preview}
-        # SEARCH/REPLACE patches first; then whole-file rewrites for files
-        # not already patched.
-        _patched_files: set[str] = set()
-        for rel, search, replace in patches:
-            if rel in existing_test_files:
-                continue
-            if Path(rel).suffix not in SOURCE_EXTENSIONS:
-                continue
-            if allowed_dir_prefix and not rel.startswith(allowed_dir_prefix):
-                _log(f"  [fix loop] REJECTED PATCH {rel}: outside allowed dir '{allowed_dir_prefix}'.")
-                continue
-            ok_p, reason = apply_patch(project_dir / rel, search, replace)
-            if ok_p:
-                _patched_files.add(rel)
-                _log(f"  [fix loop] Patched: {rel} ({len(search)}→{len(replace)} chars)")
-            else:
-                _log(f"  [fix loop] PATCH {rel} rejected: {reason}")
-
+        # Whole-file rewrites (legacy strategy — the model returns each broken
+        # file in full and we overwrite it).
         for rel, content in fixed.items():
             if rel in existing_test_files:
                 continue
@@ -17064,13 +16989,10 @@ Current source files:
             if re.match(r'^error(\[E\d+\])?:', stripped) or re.match(r'^warning(\[W\d+\])?:', stripped):
                 _log(f"  [fix loop] REJECTED {rel}: content looks like compiler output, not code.")
                 continue
-            if rel in _patched_files:
-                _log(f"  [fix loop] SKIP whole-file rewrite for {rel}: already patched this round.")
-                continue
             write(project_dir / rel, content)
             _log(f"  [fix loop] Fixed: {rel}")
 
-        _all_changed = sorted({*fixed.keys(), *_patched_files})
+        _all_changed = sorted(fixed.keys())
         _err_preview = output[-_FIX_ERR_CAP:] if len(output) > _FIX_ERR_CAP else output
 
         # BL-025: log fix patterns for future prompts.
@@ -17085,7 +17007,7 @@ Current source files:
                     fix_hint=f"fixed in {_fix_hint}",
                 )
         return {
-            "summary": f"patched={len(_patched_files)},rewrote={len(fixed) - len([f for f in fixed if f in _patched_files])}",
+            "summary": f"rewrote={len(_all_changed)}",
             "files_changed_str": ", ".join(_all_changed[:4]) if _all_changed else "no files changed",
             "error_preview": _err_preview,
             "error_sig": _err_preview,
@@ -17096,10 +17018,163 @@ Current source files:
             error_excerpt=output, history=history, name="generate_fix_loop",
         )
 
+    def _do_fix_per_fn(output: str, history: list[dict], *, retro: str) -> dict:
+        """per_fn strategy: group compile errors by enclosing fn, then fix each
+        fn in its own inner `cargo check` loop via a single-body splice (no
+        whole-file rewrite, no anchor matching). Errors that don't resolve to a
+        unique fn (file-level: imports, E0201 dup-impl, trait headers; or
+        runtime/assertion failures) fall back to the legacy whole-file rewrite.
+        Fail-safe: any unexpected error reverts to legacy."""
+        if output.startswith("TIMEOUT after "):
+            return {"abort": True, "reason": "check_timeout", "summary": "check timed out"}
+        try:
+            src_dir = project_dir
+            _log_compile_overview(output, len(history))
+            frontier = _extract_tdd_compile_frontier(output, src_dir)
+            if not frontier:
+                # No per-fn-addressable compile errors (runtime/assertion failure
+                # or file-level only) → whole-file rewrite.
+                return _do_fix(output, history, retro=retro)
+
+            recs = _enumerate_fns_via_extractor(src_dir) or []
+            name_count: dict[tuple[str, str], int] = {}
+            for r in recs:
+                k = (r.get("file", ""), r.get("fn_name", ""))
+                name_count[k] = name_count.get(k, 0) + 1
+
+            _inner_cmd = _derive_check_only_cmd(check_cmd)
+            _gotchas_brief = _gotchas_summary()
+            changed: list[str] = []
+            deferred_file_level = False
+
+            for (rel, fn) in sorted(frontier.keys()):
+                if rel in existing_test_files:
+                    continue
+                if allowed_dir_prefix and not rel.startswith(allowed_dir_prefix):
+                    continue
+                if name_count.get((rel, fn), 0) != 1:
+                    # Ambiguous (same-name sibling impls) — let the file-level
+                    # whole-file pass handle it.
+                    deferred_file_level = True
+                    continue
+                path = project_dir / rel
+                if not path.exists():
+                    continue
+
+                def _fn_run_check(_rel=rel, _fn=fn) -> tuple[bool, str, int]:
+                    rc, rendered, diags = _run_cargo_check_diag(
+                        _inner_cmd, project_dir, env, timeout)
+                    fr = _extract_tdd_compile_frontier(rendered, src_dir)
+                    file_errs = sum(1 for d in diags if (d.get("file") or "") == _rel)
+                    ok = (rc == 0) or ((_rel, _fn) not in fr)
+                    return ok, rendered, file_errs
+
+                def _fn_do_fix(out: str, hist: list[dict], *, retro: str = "",
+                               _rel=rel, _fn=fn, _path=path) -> dict:
+                    file_text = _path.read_text(encoding="utf-8", errors="replace")
+                    loc = _locate_fn(file_text, _fn)
+                    if loc is None:
+                        return {"abort": True, "reason": "fn_not_located"}
+                    sig_text, _ss, _bs, _be = loc
+                    cur_body = file_text[_bs:_be]
+                    _fn_errs = out[-_FIX_ERR_CAP:] if len(out) > _FIX_ERR_CAP else out
+                    _tparts: list[str] = []
+                    _tused = 0
+                    for _trel in sorted(existing_test_files):
+                        _tp = project_dir / _trel
+                        if not _tp.exists():
+                            continue
+                        try:
+                            _tc = _tp.read_text(encoding="utf-8")
+                        except OSError:
+                            continue
+                        if _fn not in _tc:
+                            continue
+                        _blk = f'<TEST path="{_trel}">\n{_tc}\n</TEST>'
+                        if _tused + len(_blk) > _TYPES_SECTION_CAP:
+                            break
+                        _tparts.append(_blk); _tused += len(_blk)
+                    _tests_block = ("\nTests this fn must satisfy:\n"
+                                    + "\n".join(_tparts) + "\n") if _tparts else ""
+                    _gd = _gotchas_for_error(out)
+                    _gblock = f"\n<RUST_GOTCHAS>\n{_gotchas_brief}\n</RUST_GOTCHAS>\n"
+                    if _gd:
+                        _gblock += (f"<RELEVANT_GOTCHAS_DETAIL>\n{_gd}\n"
+                                    "</RELEVANT_GOTCHAS_DETAIL>\n")
+                    _rblock = (f"\n<RETROSPECTIVE_GUIDANCE>\n{retro}\n"
+                               "</RETROSPECTIVE_GUIDANCE>\n" if retro.strip() else "")
+                    prompt = f"""ONE Rust function does not compile. Return ONLY its corrected body.
+{_FIX_THINKING_DIRECTIVE}File: {_rel} | Fn: {_fn}
+Signature (do NOT change it):
+{sig_text}
+
+Current body (it does NOT compile):
+{{
+{cur_body}
+}}
+
+Compiler errors:
+```
+{_fn_errs}
+```
+{_rblock}{_gblock}{_tests_block}
+Return the corrected body as EXACTLY one block (statements only — no fn
+signature, no outer braces):
+<FN name="{_fn}" block="any">
+...corrected body...
+</FN>
+Output nothing else."""
+                    resp = ask(prompt, model=model)
+                    bodies = extract_fn_bodies(resp)
+                    body = next((b.get("body") for b in bodies
+                                 if b.get("fn_name") == _fn), None)
+                    if body is None and bodies:
+                        body = bodies[0].get("body")
+                    if not body:
+                        return {"summary": "no_body",
+                                "files_changed_str": "no files changed",
+                                "error_preview": out[-_FIX_ERR_CAP:]}
+                    ok_s, delta = _splice_fn_body(_path, _fn, body, allow_nonstub=True)
+                    if ok_s:
+                        changed.append(f"{_rel}::{_fn}")
+                        _log(f"  [fix loop/per_fn] spliced {_rel}::{_fn} ({delta:+d} bytes)")
+                    else:
+                        _log(f"  [fix loop/per_fn] splice rejected {_rel}::{_fn}")
+                    return {"summary": f"per_fn {_rel}::{_fn}",
+                            "files_changed_str": f"{_rel}::{_fn}",
+                            "error_preview": out[-_FIX_ERR_CAP:]}
+
+                _log(f"  [fix loop/per_fn] fixing {rel}::{fn} (inner cargo check loop)")
+                _improvement_loop(
+                    name=f"per_fn:{rel}::{fn}",
+                    run_check=_fn_run_check,
+                    do_fix=_fn_do_fix,
+                    max_stalls=int(os.getenv("FIX_LOOP_PER_FN_MAX_STALLS", "2")),
+                )
+
+            if deferred_file_level:
+                rc, rendered, _ = _run_cargo_check_diag(
+                    _inner_cmd, project_dir, env, timeout)
+                if rc != 0:
+                    _log("  [fix loop/per_fn] file-level errors remain → whole-file fallback")
+                    _do_fix(rendered, history, retro=retro)
+
+            _err_preview = output[-_FIX_ERR_CAP:] if len(output) > _FIX_ERR_CAP else output
+            return {"summary": f"per_fn changed={len(changed)}",
+                    "files_changed_str": ", ".join(changed[:4]) if changed else "no files changed",
+                    "error_preview": _err_preview, "error_sig": _err_preview}
+        except Exception as e:
+            _log(f"  [fix loop/per_fn] unexpected error ({e}) → legacy whole-file fallback")
+            return _do_fix(output, history, retro=retro)
+
+    _fix_strategy = os.getenv("FIX_LOOP_STRATEGY", "per_fn").strip().lower()
+    _chosen_do_fix = _do_fix_per_fn if _fix_strategy == "per_fn" else _do_fix
+    _log(f"  [fix loop] strategy={_fix_strategy}")
+
     ok, last_output, _hist = _improvement_loop(
         name="generate_fix_loop",
         run_check=_run_check,
-        do_fix=_do_fix,
+        do_fix=_chosen_do_fix,
         do_retro=_do_retro,
         max_stalls=_fl_max_stalls,
     )

@@ -1665,6 +1665,53 @@ mod gen_tests_1 {
     print("  OK  coverage ignores siblings")
 
 
+def test_derive_check_only_cmd() -> None:
+    """per_fn fix strategy: the inner-loop check command is the caller's
+    test/build command rewritten to `cargo check` (codegen + harness dropped)."""
+    import pipeline
+    cases = {
+        "cargo test -p anyhow --no-run": "cargo check -p anyhow",
+        "cargo +nightly test -p x -- --test-threads=1": "cargo +nightly check -p x",
+        "cargo test --no-fail-fast": "cargo check",
+        "cargo check -p x": "cargo check -p x",
+        "cargo build -p x": "cargo check -p x",
+    }
+    for src, want in cases.items():
+        got = pipeline._derive_check_only_cmd(src)
+        assert got == want, f"{src!r} → {got!r}, expected {want!r}"
+    print("  OK  _derive_check_only_cmd (per_fn inner check)")
+
+
+def test_splice_fn_body_allow_nonstub() -> None:
+    """per_fn fix strategy: re-fill an already-filled (wrong) fn body. Default
+    splice refuses a non-stub; allow_nonstub=True overwrites it."""
+    import pipeline, tempfile
+    from pathlib import Path
+    src = (
+        "impl Foo {\n"
+        "    fn as_ref(&self) -> u32 {\n"
+        "        self.wrong_field\n"
+        "    }\n"
+        "}\n"
+    )
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "f.rs"
+        p.write_text(src, encoding="utf-8")
+        # Default: refuses to clobber a non-stub body.
+        ok, _ = pipeline._splice_fn_body(p, "as_ref", "self.right_field")
+        assert not ok, "default splice must refuse a non-stub body"
+        assert "wrong_field" in p.read_text(encoding="utf-8")
+        # allow_nonstub: overwrites it.
+        ok, delta = pipeline._splice_fn_body(
+            p, "as_ref", "self.right_field", allow_nonstub=True)
+        assert ok, "allow_nonstub splice must succeed"
+        out = p.read_text(encoding="utf-8")
+        assert "right_field" in out and "wrong_field" not in out, out
+        # Signature + surrounding impl preserved.
+        assert "fn as_ref(&self) -> u32" in out and out.count("impl Foo") == 1, out
+    print("  OK  _splice_fn_body allow_nonstub (per_fn re-fill)")
+
+
 # ─── Driver ─────────────────────────────────────────────────────────────────
 
 def main() -> int:
@@ -1708,6 +1755,8 @@ def main() -> int:
     test_context_guard_middle_trim()
     test_event_log()
     test_monitor_task_pipeline_parser()
+    test_derive_check_only_cmd()
+    test_splice_fn_body_allow_nonstub()
 
     if full:
         print("Cargo phase (--full):")
