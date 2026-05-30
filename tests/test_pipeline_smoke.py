@@ -1743,6 +1743,29 @@ def test_render_impl_block() -> None:
     print("  OK  _render_impl_block (per_impl fix unit)")
 
 
+def test_strip_ansi_and_diag_frontier() -> None:
+    """Inner fix-loop check must read STRUCTURED diags, not ANSI-rendered text.
+    Regression: _run_cargo_check_diag emits json-diagnostic-rendered-ansi, and
+    the plain-text _COMPILE_ERROR_RE can't parse colour codes — so re-parsing
+    rendered text gave an empty frontier and the inner loop never asked the
+    model (0 splices). The structured path is ANSI-immune."""
+    import pipeline
+    ansi = ("\x1b[0m\x1b[1m\x1b[38;5;9merror[E0201]\x1b[0m\x1b[1m: dup\x1b[0m\n"
+            "  \x1b[38;5;12m-->\x1b[0m src/error.rs:1634:5")
+    plain = pipeline._strip_ansi(ansi)
+    assert "\x1b[" not in plain and "error[E0201]" in plain, plain
+    # The plain-text regex matches only the de-ANSI'd text — proving why the
+    # rendered-text path silently failed.
+    assert not pipeline._COMPILE_ERROR_RE.search(ansi)
+    assert pipeline._COMPILE_ERROR_RE.search(plain)
+    # Structured-diag frontier never touches rendered text; empty/garbage in →
+    # empty out (no crash), and it ignores ANSI entirely.
+    assert pipeline._frontier_from_diags([], pipeline.Path(".")) == {}
+    assert pipeline._frontier_from_diags(
+        [{"file": "", "line": 0}], pipeline.Path(".")) == {}
+    print("  OK  _strip_ansi + _frontier_from_diags (ANSI-immune inner check)")
+
+
 # ─── Driver ─────────────────────────────────────────────────────────────────
 
 def main() -> int:
@@ -1789,6 +1812,7 @@ def main() -> int:
     test_derive_check_only_cmd()
     test_splice_fn_body_allow_nonstub()
     test_render_impl_block()
+    test_strip_ansi_and_diag_frontier()
 
     if full:
         print("Cargo phase (--full):")

@@ -11989,6 +11989,51 @@ def _extract_tdd_compile_frontier(
     return frontier
 
 
+def _frontier_from_diags(
+    diagnostics: list[dict], src_dir: Path,
+) -> dict[tuple[str, str], set[str]]:
+    """Same (file, fn) → {"<compile>"} frontier as
+    `_extract_tdd_compile_frontier`, but built from STRUCTURED cargo
+    diagnostics (each has file/line/code) instead of regex-parsing rendered
+    text. Use this when the diagnostics come from `_run_cargo_check_diag`,
+    whose rendered text carries ANSI colour codes that the plain-text
+    `_COMPILE_ERROR_RE` cannot match — re-parsing that text yields an empty
+    frontier and silently defeats any "is this fn still broken?" check.
+    """
+    frontier: dict[tuple[str, str], set[str]] = {}
+    fn_records_by_file: dict[str, list[dict]] = {}
+    file_text_cache: dict[str, str] = {}
+    for d in diagnostics or []:
+        rel = d.get("file") or ""
+        line_no = int(d.get("line") or 0)
+        if not rel or line_no < 1:
+            continue
+        if rel not in fn_records_by_file:
+            _all_recs = _enumerate_fns_via_extractor(src_dir) or []
+            fn_records_by_file[rel] = [r for r in _all_recs if r.get("file") == rel]
+        recs = fn_records_by_file[rel]
+        if not recs:
+            continue
+        if rel not in file_text_cache:
+            try:
+                file_text_cache[rel] = (src_dir / rel).read_text(encoding="utf-8")
+            except Exception:
+                continue
+        rec = _line_to_fn_record(file_text_cache[rel], line_no, recs)
+        if rec is None:
+            continue
+        frontier.setdefault((rel, rec["fn_name"]), set()).add("<compile>")
+    return frontier
+
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _strip_ansi(text: str) -> str:
+    """Drop ANSI SGR colour escapes (cargo's rendered-ansi diagnostics)."""
+    return _ANSI_RE.sub("", text or "")
+
+
 def _order_frontier(
     frontier: dict[tuple[str, str], set[str]],
     leaf_name_counts: dict[str, int] | None,
@@ -17071,10 +17116,12 @@ Current source files:
 
         def _run_check(_rel=rel, _fn=fn) -> tuple[bool, str, int]:
             rc, rendered, diags = _run_cargo_check_diag(inner_cmd, project_dir, env, timeout)
-            fr = _extract_tdd_compile_frontier(rendered, project_dir)
+            # Build the frontier from STRUCTURED diags, not the ANSI-rendered
+            # text (the plain-text regex can't parse colour codes → empty).
+            fr = _frontier_from_diags(diags, project_dir)
             file_errs = sum(1 for d in diags if (d.get("file") or "") == _rel)
             ok = (rc == 0) or ((_rel, _fn) not in fr)
-            return ok, rendered, file_errs
+            return ok, _strip_ansi(rendered), file_errs
 
         def _do(out: str, hist: list[dict], *, retro: str = "",
                 _rel=rel, _fn=fn, _path=path) -> dict:
@@ -17148,11 +17195,14 @@ Output nothing else."""
 
         def _run_check(_rel=rel, _names=tuple(member_names)) -> tuple[bool, str, int]:
             rc, rendered, diags = _run_cargo_check_diag(inner_cmd, project_dir, env, timeout)
-            fr = _extract_tdd_compile_frontier(rendered, project_dir)
+            # Frontier from STRUCTURED diags (ANSI-rendered text defeats the
+            # plain-text regex → empty frontier → the loop would think the
+            # block is clean and never ask the model).
+            fr = _frontier_from_diags(diags, project_dir)
             group_errs = sum(1 for (f2, fn2) in fr if f2 == _rel and fn2 in _names)
             file_errs = sum(1 for d in diags if (d.get("file") or "") == _rel)
             ok = (rc == 0) or (group_errs == 0)
-            return ok, rendered, file_errs
+            return ok, _strip_ansi(rendered), file_errs
 
         def _do(out: str, hist: list[dict], *, retro: str = "") -> dict:
             file_text = path.read_text(encoding="utf-8", errors="replace")
