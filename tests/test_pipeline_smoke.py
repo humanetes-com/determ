@@ -370,21 +370,22 @@ def test_run_scoped_tests() -> None:
     import pipeline
     _orig = pipeline._run_cargo
     try:
-        # all pass → (True, 0, "")
+        _P = __import__("pathlib").Path(".")
+        # all pass → (True, 0, "", set())
         pipeline._run_cargo = lambda *a, **k: (0, "test result: ok. 5 passed; 0 failed")
-        ok, n, detail = pipeline._run_scoped_tests("cargo test", __import__("pathlib").Path("."), {})
-        assert ok and n == 0 and detail == "", (ok, n, detail)
+        ok, n, detail, failed = pipeline._run_scoped_tests("cargo test", _P, {})
+        assert ok and n == 0 and detail == "" and failed == set(), (ok, n, detail, failed)
 
-        # failures → (False, count>0, detail carries the output tail)
+        # failures → (False, count>0, detail tail, failed names set)
         out = "test foo::bar ... FAILED\ntest result: FAILED. 4 passed; 1 failed\nassertion `left == right` failed"
         pipeline._run_cargo = lambda *a, **k: (101, out)
-        ok, n, detail = pipeline._run_scoped_tests("cargo test", __import__("pathlib").Path("."), {})
-        assert (not ok) and n == 1 and "assertion" in detail, (ok, n, detail)
+        ok, n, detail, failed = pipeline._run_scoped_tests("cargo test", _P, {})
+        assert (not ok) and n == 1 and "assertion" in detail and "foo::bar" in failed, (ok, n, detail, failed)
 
-        # timeout → inconclusive (False, -1, ...)
+        # timeout → inconclusive (False, -1, ..., set())
         pipeline._run_cargo = lambda *a, **k: (-1, "")
-        ok, n, detail = pipeline._run_scoped_tests("cargo test", __import__("pathlib").Path("."), {})
-        assert (not ok) and n == -1, (ok, n, detail)
+        ok, n, detail, failed = pipeline._run_scoped_tests("cargo test", _P, {})
+        assert (not ok) and n == -1 and failed == set(), (ok, n, detail, failed)
     finally:
         pipeline._run_cargo = _orig
     print("  OK  _run_scoped_tests (Plan 10 U1)")

@@ -569,7 +569,7 @@ def _phase_c_panel_rows(state: dict[str, Any]) -> list[str]:
     age = state.get("last_event_age_s")
     age_s = (f"{age}s" if age is not None and age < 60
              else f"{age // 60}m" if age is not None else "?")
-    rows.append(f"  phase-c  cluster={cluster}  pass={pass_n}/{maxp}  last={age_s}")
+    rows.append(f"  reconstruct  cluster={cluster}  pass={pass_n}/{maxp}  last={age_s}")
 
     # Per-cluster overview — where we are across all clusters. Prefer the
     # authoritative baked order/total from the log; fall back to events-seen.
@@ -775,6 +775,64 @@ def _parse_pipeline_state(project_dir):
                 r["coverage"] = cv.group(1) + "%"
                 break
     return r
+
+
+_PHASE_SEQ = ["task0a", "task0b", "task0c", "strip", "task1",
+              "task2a", "task2b", "task2c", "task3", "task4"]
+
+
+def _current_stage_label() -> str:
+    """Raw `current:` line from pipeline_state.md, e.g.
+    'task2c/anyhow / merged-tree fill'. '' if unavailable."""
+    pd = _find_project_dir()
+    if not pd:
+        return ""
+    try:
+        for line in open(os.path.join(pd, "pipeline_state.md")):
+            if line.startswith("current:"):
+                return line.split(":", 1)[1].strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _phase_bar() -> list[str]:
+    """Render the full pipeline phase sequence with ✓done / ▶current / ·pending,
+    read from pipeline_state.md (authoritative): the `[key] done` entries give
+    real per-phase status, the `current:` line gives the active stage."""
+    pd = _find_project_dir()
+    done_keys: set[str] = set()
+    cur = ""
+    if pd:
+        try:
+            for line in open(os.path.join(pd, "pipeline_state.md")):
+                m = re.match(r"\[([^\]/]+)(?:/[^\]]*)?\]\s+done\b", line)
+                if m:
+                    done_keys.add(m.group(1))
+                if line.startswith("current:"):
+                    cur = line.split(":", 1)[1].strip()
+        except Exception:
+            pass
+    # The combined reconstruct marker means the whole loop finished.
+    if "task2-4" in done_keys:
+        done_keys |= {"task2a", "task2b", "task2c", "task3", "task4"}
+    stage = cur.split("/", 1)[0].strip() if cur else ""
+    if stage in ("task2", "task2-4"):
+        stage = "task2c"
+    cells = []
+    for p in _PHASE_SEQ:
+        short = p.replace("task", "t")
+        if p == stage and p not in done_keys:
+            cells.append(cyan("▶" + short))
+        elif p in done_keys:
+            cells.append(green("✓" + short))
+        else:
+            cells.append(dim("·" + short))
+    rows = ["  phase    " + " ".join(cells)]
+    _detail = cur.split("/", 2)[-1].strip() if cur.count("/") >= 1 else ""
+    if _detail and _detail != cur:
+        rows.append("           " + dim(_detail))
+    return rows
 
 
 def _parse_pipeline_log():
@@ -1065,6 +1123,9 @@ def pipeline_status():
     # vLLM backend status (loading indicator / docker logs when not ready)
     rows.extend(_vllm_status())
 
+    # Full pipeline phase sequence (t0a … t4) with the current stage highlighted.
+    rows.extend(_phase_bar())
+
     # ── Header: status + coverage ────────────────────────────────────────────
     _cov_data = _parse_coverage_json(_find_project_dir())
     _total_cov  = sum(c for c, _ in _cov_data.values())
@@ -1090,35 +1151,10 @@ def pipeline_status():
         f"age={age_s}  errors={prog['errors']}"
     )
 
-    # ── Phase pipeline: task0a → 0b → 0c → strip → T1 → T2 → T3 → T4 ─────────
+    # (The old log-parsed "phases" line was removed — the state-driven
+    # _phase_bar() above is the single, granular phase display. tp is still
+    # parsed below for the fix-phase detection further down.)
     tp = _parse_task_pipeline(_read_log_tail())
-    phase_parts: list[str] = []
-    for tname in _TASKS_ORDER:
-        short = _TASK_SHORT[tname]
-        st = tp["states"][tname]
-        # Inline cluster progress for task0c.
-        if tname == "task0c" and tp["task0c_clusters_done"] > 0 and st != "pending":
-            cc = tp["task0c_clusters_done"]
-            short = f"{short}[{cc}/{len(clusters) or '?'}]"
-        # Mark task3 pass/fail with colour.
-        if tname == "task3" and st == "done" and tp["task3_pass"] is not None:
-            mark = "✓" if tp["task3_pass"] else "✗"
-            colour = green if tp["task3_pass"] else red
-            phase_parts.append(colour(f"{mark}{short}"))
-            continue
-        if st == "done":
-            phase_parts.append(green(f"✓{short}"))
-        elif st == "in_progress":
-            phase_parts.append(yellow(bold(f"▶{short}")))
-        else:
-            phase_parts.append(dim(f"○{short}"))
-    _iter_str = ""
-    if tp["module"] or tp["iteration"]:
-        _bits = []
-        if tp["module"]:    _bits.append(f"M={tp['module']}")
-        if tp["iteration"]: _bits.append(f"iter={tp['iteration']}")
-        _iter_str = dim("   " + "  ".join(_bits))
-    rows.append("  phases  " + "  ".join(phase_parts) + _iter_str)
 
     # ── P3.11: Phase C per-fn panel (visible when the skeleton backend
     # is running). Pulls structured data from logs/events.jsonl.

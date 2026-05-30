@@ -573,6 +573,14 @@ _TYPES_SECTION_CAP = max(8_000, SINGLE_CALL_CHAR_LIMIT // 3)   # type/trait defs
 _TYPES_COUNT_CAP   = max(40,    SINGLE_CALL_CHAR_LIMIT // 6000)  # safety net only; chars govern
 _FAILED_BODY_CAP   = max(2_000, SINGLE_CALL_CHAR_LIMIT // 12)  # prior failed body in fix prompt
 
+# Plan 10 U2: test-based acceptance. When on, a per-fn fill is accepted only if
+# the fn's OWN tests pass (not just compile); test failures route through the
+# same fix loop as compile errors. Default OFF — identical to legacy behavior —
+# so it can be validated live before enabling. Fail-safe: any error in the test
+# check falls back to compile-based acceptance.
+_UNIFIED_FILL_LOOP = os.getenv("UNIFIED_FILL_LOOP", "0").strip() == "1"
+_U2_TEST_TIMEOUT   = int(os.getenv("U2_TEST_TIMEOUT", "120"))
+
 
 def prompt_budget(*fixed_parts: str) -> int:
     """Chars remaining for dynamic content after fixed parts are accounted for.
@@ -8261,25 +8269,60 @@ def _attribute_failures(
 
 def _run_scoped_tests(
     test_cmd: str, cwd: Path, env: dict, *, timeout: int = 120,
-) -> "tuple[bool, int, str]":
+) -> "tuple[bool, int, str, set[str]]":
     """Plan 10 U1 — reusable test-validation step (the runtime analog of a
-    compile check). Runs `test_cmd` (already scoped to the relevant test stems
-    via _build_test_cmd) and returns (passed, fail_count, detail).
+    compile check). Runs `test_cmd` (scoped to the relevant test stems via
+    _build_test_cmd) and returns (passed, fail_count, detail, failed_names).
 
     `passed` is True only when cargo reports rc==0 with zero failing tests.
     `detail` is the failing-test output tail (panic / assertion / expected-vs-
-    actual) for feeding back into the next generation prompt. On timeout the
-    caller gets (False, -1, ...) and should treat the result as INCONCLUSIVE —
-    fall back to compile-based acceptance rather than block. This is the single
-    place the pipeline runs scoped tests, so every loop validates identically.
+    actual) for feeding back into the next generation prompt. `failed_names` is
+    the set of failing test names (same format as _parse_failed_tests) so a
+    caller can check whether a SPECIFIC unit's tests pass. On timeout the caller
+    gets (False, -1, ..., set()) and should treat it as INCONCLUSIVE — fall back
+    to compile-based acceptance rather than block. Single place the pipeline
+    runs tests, so every loop validates identically.
     """
     rc, out = _run_cargo(test_cmd, cwd, env, timeout=timeout)
     if rc == -1:
-        return False, -1, "scoped test run timed out"
-    fail_count = len(_parse_failed_tests(out))
-    passed = (rc == 0 and fail_count == 0)
+        return False, -1, "scoped test run timed out", set()
+    failed = _parse_failed_tests(out)
+    passed = (rc == 0 and len(failed) == 0)
     detail = "" if passed else out[-_FIX_ERR_CAP:]
-    return passed, fail_count, detail
+    return passed, len(failed), detail, failed
+
+
+def _u2_test_gate(
+    fn_tests: "set[str]", test_cmd: "str | None",
+    target_src_dir: Path, cluster_env: "dict | None",
+) -> "tuple[frozenset, str] | None":
+    """Plan 10 — the SINGLE reusable test-acceptance gate, called by every fill
+    loop (per-fn, per-impl, post-merge) at the point a unit compiles.
+
+    Given the test names the unit must make pass (`fn_tests`), run them via the
+    shared `_run_scoped_tests` and decide:
+      - return None  → ACCEPT (tests pass, or U2 off, or no tests, or the test
+        run was inconclusive — never block on uncertainty).
+      - return (fail_sig, detail) → DO NOT ACCEPT: the unit compiled but its own
+        tests still fail. `fail_sig` is the failing-test set (use as the stall
+        signature so the fix loop terminates), `detail` is the assertion / panic
+        text to feed back into the next prompt.
+    Fail-safe: any error → None (fall back to compile-based acceptance).
+    """
+    if not (_UNIFIED_FILL_LOOP and test_cmd and fn_tests):
+        return None
+    try:
+        _passed, _fc, _detail, _failed = _run_scoped_tests(
+            test_cmd, target_src_dir, cluster_env or {}, timeout=_U2_TEST_TIMEOUT)
+    except Exception as _e:
+        _guard("phase-c/u2_skip", f"{type(_e).__name__}: {_e}")
+        return None
+    _still = set(fn_tests) & _failed
+    if not _still:
+        return None
+    _msg = (f"This compiled, but these tests still FAIL: {sorted(_still)}\n\n"
+            "Fix the BEHAVIOR so they pass.\n" + _detail)
+    return frozenset(_still), _msg
 
 
 def _build_test_cmd(test_stems: list[str], cluster: "BuildCluster | None") -> str:
@@ -8807,6 +8850,8 @@ def _run_phase_c_tdd(
             leaf_name_counts=leaf_counts,
             fr_path=fr_path,
             tdd_frontier_keys=frontier_keys,
+            tdd_frontier_tests=eligible,   # Plan 10 U2: {key: {tests}} to validate
+            tdd_test_cmd=test_cmd,         # Plan 10 U2: scoped cluster test cmd
             skip_end_pass_test=True,
         )
         total_filled += sub.get("fns_filled", 0)
@@ -8867,6 +8912,8 @@ def _phase_c_fill_impl_blocks(
     cluster_env: dict,
     fr_path: Path | None,
     tdd_frontier_keys: "set[tuple[str, str]] | None",
+    tdd_frontier_tests: "dict[tuple[str, str], set[str]] | None" = None,  # Plan 10 U2
+    tdd_test_cmd: str | None = None,                                       # Plan 10 U2
 ) -> dict:
     """Per-impl-block Phase C fill — alternative to `_task2_fill_fns_one_by_one`.
 
@@ -9114,6 +9161,17 @@ def _phase_c_fill_impl_blocks(
                 rc, cargo_out, diagnostics = _run_cargo_check_diag(
                     check_cmd, target_src_dir, cluster_env)
                 if rc == 0:
+                    # Plan 10 U2 (shared gate): accept the block only if its
+                    # members' own tests pass too — not just compile.
+                    _block_tests: set = set()
+                    for _bm in block["stub_members"]:
+                        _block_tests |= (tdd_frontier_tests or {}).get(
+                            (block["file"], _bm.get("fn_name", "")), set())
+                    _u2_impl = _u2_test_gate(_block_tests, tdd_test_cmd,
+                                             target_src_dir, cluster_env)
+                else:
+                    _u2_impl = None
+                if rc == 0 and _u2_impl is None:
                     members_filled_this_block = spliced_now
                     fns_filled_total += spliced_now
                     impls_filled += 1
@@ -9131,12 +9189,14 @@ def _phase_c_fill_impl_blocks(
                             "fix_attempts": fix_attempt,
                         })
                     break
-                # Compile failed. Use the structured diagnostics list as
-                # the source of truth for the error signature; the rc !=
-                # 0 path establishes a minimum count of 1 even when JSON
-                # produced no compiler-message records (cargo-level
-                # failure with no rustc diagnostic — rare but possible).
-                cur_err_sig = _cargo_err_sig_from_diagnostics(diagnostics)
+                if _u2_impl is not None:
+                    cargo_out = _u2_impl[1]   # route test-failure detail as the error
+                # Compile failed (or U2 test failure). Use the structured
+                # diagnostics for the error signature; for a U2 test failure use
+                # the failing-test set so the floor-stall works (test output has
+                # no rustc E-codes). rc != 0 establishes a minimum count of 1.
+                cur_err_sig = (_u2_impl[0] if _u2_impl is not None
+                               else _cargo_err_sig_from_diagnostics(diagnostics))
                 cur_err_count = max(1, len(cur_err_sig))  # rc-honest minimum
                 if best_err_count is None or cur_err_count < best_err_count:
                     best_err_count = cur_err_count
@@ -9246,6 +9306,10 @@ def _task2_fill_fns_one_by_one(
     # Plan 4 — TDD-scoped driver knobs.
     tdd_frontier_keys: "set[tuple[str, str]] | None" = None,
     skip_end_pass_test: bool = False,
+    # Plan 10 U2 — per-fn test-based acceptance: {(file, fn): {test names}}
+    # the fn must make pass, plus the cluster test command to run.
+    tdd_frontier_tests: "dict[tuple[str, str], set[str]] | None" = None,
+    tdd_test_cmd: str | None = None,
 ) -> dict:
     """Phase C — Flavour B with full validation loops.
 
@@ -9284,6 +9348,8 @@ def _task2_fill_fns_one_by_one(
             cluster_env=cluster_env,
             fr_path=fr_path,
             tdd_frontier_keys=tdd_frontier_keys,
+            tdd_frontier_tests=tdd_frontier_tests,   # Plan 10 U2
+            tdd_test_cmd=tdd_test_cmd,               # Plan 10 U2
         )
         # If there are still stub members the per-impl path didn't cover
         # (free fns or oversized blocks), fall through to the per-fn path
@@ -9736,7 +9802,18 @@ def _task2_fill_fns_one_by_one(
                     break
 
                 rc, cargo_out = _run_cargo(check_cmd, target_src_dir, cluster_env)
+                # Plan 10 U2: compile is only a pre-gate — accept the fn only if
+                # its OWN tests pass. The SHARED _u2_test_gate decides; on a test
+                # failure it routes through the same fix loop as a compile error
+                # (failing-test set as the stall signature).
+                _u2_fail_sig: "frozenset | None" = None
                 if rc == 0:
+                    _g = _u2_test_gate(
+                        (tdd_frontier_tests or {}).get((rel_file, fn_name), set()),
+                        tdd_test_cmd, target_src_dir, cluster_env)
+                    if _g is not None:
+                        _u2_fail_sig, cargo_out = _g
+                if rc == 0 and _u2_fail_sig is None:
                     _splice_check_lock.release()
                     _lock_released = True
                     success = True
@@ -9788,7 +9865,12 @@ def _task2_fill_fns_one_by_one(
                 # P5.5: track error codes seen so we can promote recurring
                 # ones to every subsequent prompt.
                 _record_error_codes_seen(cargo_out)
-                cur_err_sig = _cargo_err_sig(cargo_out)
+                # Plan 10 U2: when the failure is a TEST failure (not compile),
+                # the stall signature is the failing-test set so floor-stall
+                # works (a test output has no E-codes → _cargo_err_sig would be
+                # empty and never stall).
+                cur_err_sig = (_u2_fail_sig if _u2_fail_sig is not None
+                               else _cargo_err_sig(cargo_out))
                 # P2: record this failed attempt for the prior-attempts block.
                 # We store the focused excerpt (already tier-sliced) so the
                 # next prompt sees what really failed without re-paying budget.
@@ -15779,33 +15861,54 @@ class StaticSkeletonTask2Generator(Task2Generator):
             _log("  [skeleton] no test files; cannot proceed.")
             return False
 
-        # Per-cluster Phase A → D
+        # === task2a — per-cluster Phase A→D (RESUMABLE). The per-cluster
+        # .skeleton-filled/ trees persist, so once this stage is marked done it
+        # is skipped on resume / retry; restart_from.sh task2a re-runs it. ===
         cluster_summaries: list[dict] = []
-        for cluster in clusters:
-            tag = f"[{cluster.name}]"
-            _log(f"\n  {tag} === cluster start ===")
-            res = self._generate_one_cluster(
-                project_dir=project_dir,
-                cluster=cluster,
-                module=module,
-                all_test_pairs=all_test_pairs,
-                genesis=genesis,
-                functional_req=functional_req,
-            )
-            cluster_summaries.append({"cluster": cluster.name, **res})
-            if not res.get("ok"):
-                _log(f"  {tag} cluster aborted: {res.get('reason', 'unknown')}")
+        if _phase_valid(project_dir, f"task2a/{module}"):
+            _log("  [skeleton] task2a (per-cluster reconstruction) already done — "
+                 "skipping (fills persist in .skeleton-filled/).")
+            cluster_summaries = [{"cluster": c.name, "ok": True} for c in clusters]
+        else:
+            _set_current(project_dir, f"task2a/{module} / per-cluster reconstruction (0/{len(clusters)})")
+            for _ci, cluster in enumerate(clusters):
+                tag = f"[{cluster.name}]"
+                _set_current(project_dir,
+                             f"task2a/{module} / cluster {cluster.name} ({_ci + 1}/{len(clusters)})")
+                _log(f"\n  {tag} === cluster start ===")
+                res = self._generate_one_cluster(
+                    project_dir=project_dir,
+                    cluster=cluster,
+                    module=module,
+                    all_test_pairs=all_test_pairs,
+                    genesis=genesis,
+                    functional_req=functional_req,
+                )
+                cluster_summaries.append({"cluster": cluster.name, **res})
+                if not res.get("ok"):
+                    _log(f"  {tag} cluster aborted: {res.get('reason', 'unknown')}")
+            _mark_phase(project_dir, f"task2a/{module}", "done",
+                        detail=f"{len(clusters)} cluster(s)")
 
-        # Cross-cluster merge composes all cluster outputs into project_dir/src/.
-        _log(f"\n  [skeleton-merge] composing {len(cluster_summaries)} cluster output(s) "
-             f"into {project_dir}/src/")
-        merge_stats = _merge_cluster_outputs(
-            project_dir=project_dir,
-            cluster_specs={c.name: c for c in clusters},
-            successes=[s for s in cluster_summaries if s.get("ok")],
-        )
-        _log(f"  [skeleton-merge] {merge_stats['files_written']} file(s) written, "
-             f"{merge_stats['cfg_gated_fns']} cfg-gated divergence(s).")
+        # === task2b — cross-cluster merge into project_dir/src/ (RESUMABLE).
+        # Skipped only if marked done AND the merged tree still exists (task4's
+        # delete-and-retry clears this marker, forcing a re-merge). ===
+        if _phase_valid(project_dir, f"task2b/{module}") and (project_dir / "src").exists():
+            _log("  [skeleton-merge] task2b (merge) already done — skipping.")
+        else:
+            _set_current(project_dir,
+                         f"task2b/{module} / merging {len(cluster_summaries)} cluster output(s)")
+            _log(f"\n  [skeleton-merge] composing {len(cluster_summaries)} cluster output(s) "
+                 f"into {project_dir}/src/")
+            merge_stats = _merge_cluster_outputs(
+                project_dir=project_dir,
+                cluster_specs={c.name: c for c in clusters},
+                successes=[s for s in cluster_summaries if s.get("ok")],
+            )
+            _log(f"  [skeleton-merge] {merge_stats['files_written']} file(s) written, "
+                 f"{merge_stats['cfg_gated_fns']} cfg-gated divergence(s).")
+            _mark_phase(project_dir, f"task2b/{module}", "done",
+                        detail=f"{merge_stats['files_written']} file(s)")
 
         # Post-merge fill pass: per-cluster Phase C drove fills against each
         # cluster's filtered cfg view of the code. After the AST merge, the
@@ -15819,12 +15922,20 @@ class StaticSkeletonTask2Generator(Task2Generator):
         # those fns via the per-fn machinery, repeat until frontier is empty
         # or stall budget exhausted. Always uses --no-fail-fast so panics
         # from every binary surface, not just the first one to crash.
-        self._post_merge_fill_pass(
-            project_dir=project_dir,
-            clusters=clusters,
-            module=module,
-            functional_req=functional_req,
-        )
+        # === task2c — merged-tree fill (RESUMABLE). This is where U2 test-
+        # acceptance does most of its work. restart_from.sh task2c re-runs ONLY
+        # this stage (per-cluster + merge skipped if their markers stand). ===
+        if _phase_valid(project_dir, f"task2c/{module}"):
+            _log("  task2c (merged-tree fill) already done — skipping.")
+        else:
+            _set_current(project_dir, f"task2c/{module} / merged-tree fill")
+            self._post_merge_fill_pass(
+                project_dir=project_dir,
+                clusters=clusters,
+                module=module,
+                functional_req=functional_req,
+            )
+            _mark_phase(project_dir, f"task2c/{module}", "done")
 
         # Update the manifest so downstream task3/4 see the generated files.
         if manifest_path:
@@ -16362,6 +16473,8 @@ class StaticSkeletonTask2Generator(Task2Generator):
                 leaf_name_counts=leaf_counts,
                 fr_path=fr_path,
                 tdd_frontier_keys=set(eligible.keys()),
+                tdd_frontier_tests=eligible,   # Plan 10 U2
+                tdd_test_cmd=test_cmd,         # Plan 10 U2
                 skip_end_pass_test=True,
             )
             cur_stubs = set(_scan_unimplemented_functions(project_dir / "src"))
@@ -22742,6 +22855,7 @@ This is a Rust procedural macro crate. Strict rules apply:
                         _log(f"  ⚠️  {api_conformance_report}")
 
                     # TASK 3: run tests.
+                    _set_current(project_dir, f"task3/{module_name} / running tests (iter {module_iter})")
                     passed, test_output = task3(
                         project_dir, module_test_cmd, label, project_dir, genesis_path
                     )
@@ -22866,6 +22980,7 @@ This is a Rust procedural macro crate. Strict rules apply:
                 sp = project_dir / rel
                 if sp.exists():
                     t4_source_context += f'\n<FILE path="{rel}">\n{sp.read_text(encoding="utf-8")}\n</FILE>\n'
+            _set_current(project_dir, f"task4/{module_name} / genesis update (iter {module_iter})")
             t4_ok, current_pass = task4(
                 genesis_path, module_req_path, test_output, module_iter, project_dir,
                 failure_type=failure_type, failure_log=failure_log_content,
@@ -22922,6 +23037,12 @@ This is a Rust procedural macro crate. Strict rules apply:
             delete_source_files(project_dir, module_manifest,
                                 module_dir=module_dir,
                                 existing_test_files=existing_test_files)
+            # The merged tree is gone → invalidate task2b/task2c so the next
+            # iteration re-merges + re-fills. task2a (per-cluster fills in
+            # .skeleton-filled/) survives, so per-cluster reconstruction is NOT
+            # repeated across retries — granular resume saves that cost.
+            _mark_phase(project_dir, f"task2b/{module_name}", "pending")
+            _mark_phase(project_dir, f"task2c/{module_name}", "pending")
             if is_multi_module:
                 _write_workspace_stub(crate_type, module_dir)
 
