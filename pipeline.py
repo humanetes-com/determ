@@ -16742,6 +16742,20 @@ def task2_inner_loop(project_dir, genesis_path, functional_req_path, manifest_pa
     return False
 
 
+def _render_impl_block(file_text: str, members: list[dict]) -> str:
+    """Verbatim source of the impl block containing `members` (header +
+    where-clause + all bodies), via byte-range parse. Used by the per_impl fix
+    unit to give the model the whole impl block as context. Falls back to
+    listing member signatures if the byte range can't be resolved."""
+    if not members:
+        return ""
+    anchor = members[0].get("sig_byte_start", 0)
+    for r in _parse_impl_block_ranges(file_text):
+        if r["body_open"] <= anchor < r["body_close"]:
+            return file_text[r["header_start"]:r["body_close"] + 1]
+    return "\n".join(m.get("sig_text", "") for m in members)
+
+
 def generate_fix_loop(
     project_dir: Path,
     check_cmd: str,
@@ -17018,92 +17032,62 @@ Current source files:
             error_excerpt=output, history=history, name="generate_fix_loop",
         )
 
-    def _do_fix_per_fn(output: str, history: list[dict], *, retro: str) -> dict:
-        """per_fn strategy: group compile errors by enclosing fn, then fix each
-        fn in its own inner `cargo check` loop via a single-body splice (no
-        whole-file rewrite, no anchor matching). Errors that don't resolve to a
-        unique fn (file-level: imports, E0201 dup-impl, trait headers; or
-        runtime/assertion failures) fall back to the legacy whole-file rewrite.
-        Fail-safe: any unexpected error reverts to legacy."""
-        if output.startswith("TIMEOUT after "):
-            return {"abort": True, "reason": "check_timeout", "summary": "check timed out"}
-        try:
-            src_dir = project_dir
-            _log_compile_overview(output, len(history))
-            frontier = _extract_tdd_compile_frontier(output, src_dir)
-            if not frontier:
-                # No per-fn-addressable compile errors (runtime/assertion failure
-                # or file-level only) → whole-file rewrite.
-                return _do_fix(output, history, retro=retro)
+    # --- shared helpers for the per_fn strategy (unit = fn | impl) ----------
+    def _tests_for_names(names: "set[str]") -> str:
+        """Test files referencing any of `names`, budget-capped."""
+        parts: list[str] = []
+        used = 0
+        for trel in sorted(existing_test_files):
+            tp = project_dir / trel
+            if not tp.exists():
+                continue
+            try:
+                tc = tp.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            if not any(n and n in tc for n in names):
+                continue
+            blk = f'<TEST path="{trel}">\n{tc}\n</TEST>'
+            if used + len(blk) > _TYPES_SECTION_CAP:
+                break
+            parts.append(blk); used += len(blk)
+        return ("\nTests this code must satisfy:\n" + "\n".join(parts) + "\n") if parts else ""
 
-            recs = _enumerate_fns_via_extractor(src_dir) or []
-            name_count: dict[tuple[str, str], int] = {}
-            for r in recs:
-                k = (r.get("file", ""), r.get("fn_name", ""))
-                name_count[k] = name_count.get(k, 0) + 1
+    def _gotchas_block_for(out: str) -> str:
+        gd = _gotchas_for_error(out)
+        block = f"\n<RUST_GOTCHAS>\n{_gotchas_summary()}\n</RUST_GOTCHAS>\n"
+        if gd:
+            block += f"<RELEVANT_GOTCHAS_DETAIL>\n{gd}\n</RELEVANT_GOTCHAS_DETAIL>\n"
+        return block
 
-            _inner_cmd = _derive_check_only_cmd(check_cmd)
-            _gotchas_brief = _gotchas_summary()
-            changed: list[str] = []
-            deferred_file_level = False
+    def _fix_single_fn(rel: str, fn: str) -> list[str]:
+        """Inner cargo-check loop that re-fills ONE fn by body splice. Returns
+        the changed unit ids (0 or 1)."""
+        changed: list[str] = []
+        path = project_dir / rel
+        if not path.exists():
+            return changed
+        inner_cmd = _derive_check_only_cmd(check_cmd)
 
-            for (rel, fn) in sorted(frontier.keys()):
-                if rel in existing_test_files:
-                    continue
-                if allowed_dir_prefix and not rel.startswith(allowed_dir_prefix):
-                    continue
-                if name_count.get((rel, fn), 0) != 1:
-                    # Ambiguous (same-name sibling impls) — let the file-level
-                    # whole-file pass handle it.
-                    deferred_file_level = True
-                    continue
-                path = project_dir / rel
-                if not path.exists():
-                    continue
+        def _run_check(_rel=rel, _fn=fn) -> tuple[bool, str, int]:
+            rc, rendered, diags = _run_cargo_check_diag(inner_cmd, project_dir, env, timeout)
+            fr = _extract_tdd_compile_frontier(rendered, project_dir)
+            file_errs = sum(1 for d in diags if (d.get("file") or "") == _rel)
+            ok = (rc == 0) or ((_rel, _fn) not in fr)
+            return ok, rendered, file_errs
 
-                def _fn_run_check(_rel=rel, _fn=fn) -> tuple[bool, str, int]:
-                    rc, rendered, diags = _run_cargo_check_diag(
-                        _inner_cmd, project_dir, env, timeout)
-                    fr = _extract_tdd_compile_frontier(rendered, src_dir)
-                    file_errs = sum(1 for d in diags if (d.get("file") or "") == _rel)
-                    ok = (rc == 0) or ((_rel, _fn) not in fr)
-                    return ok, rendered, file_errs
-
-                def _fn_do_fix(out: str, hist: list[dict], *, retro: str = "",
-                               _rel=rel, _fn=fn, _path=path) -> dict:
-                    file_text = _path.read_text(encoding="utf-8", errors="replace")
-                    loc = _locate_fn(file_text, _fn)
-                    if loc is None:
-                        return {"abort": True, "reason": "fn_not_located"}
-                    sig_text, _ss, _bs, _be = loc
-                    cur_body = file_text[_bs:_be]
-                    _fn_errs = out[-_FIX_ERR_CAP:] if len(out) > _FIX_ERR_CAP else out
-                    _tparts: list[str] = []
-                    _tused = 0
-                    for _trel in sorted(existing_test_files):
-                        _tp = project_dir / _trel
-                        if not _tp.exists():
-                            continue
-                        try:
-                            _tc = _tp.read_text(encoding="utf-8")
-                        except OSError:
-                            continue
-                        if _fn not in _tc:
-                            continue
-                        _blk = f'<TEST path="{_trel}">\n{_tc}\n</TEST>'
-                        if _tused + len(_blk) > _TYPES_SECTION_CAP:
-                            break
-                        _tparts.append(_blk); _tused += len(_blk)
-                    _tests_block = ("\nTests this fn must satisfy:\n"
-                                    + "\n".join(_tparts) + "\n") if _tparts else ""
-                    _gd = _gotchas_for_error(out)
-                    _gblock = f"\n<RUST_GOTCHAS>\n{_gotchas_brief}\n</RUST_GOTCHAS>\n"
-                    if _gd:
-                        _gblock += (f"<RELEVANT_GOTCHAS_DETAIL>\n{_gd}\n"
-                                    "</RELEVANT_GOTCHAS_DETAIL>\n")
-                    _rblock = (f"\n<RETROSPECTIVE_GUIDANCE>\n{retro}\n"
-                               "</RETROSPECTIVE_GUIDANCE>\n" if retro.strip() else "")
-                    prompt = f"""ONE Rust function does not compile. Return ONLY its corrected body.
+        def _do(out: str, hist: list[dict], *, retro: str = "",
+                _rel=rel, _fn=fn, _path=path) -> dict:
+            file_text = _path.read_text(encoding="utf-8", errors="replace")
+            loc = _locate_fn(file_text, _fn)
+            if loc is None:
+                return {"abort": True, "reason": "fn_not_located"}
+            sig_text, _ss, _bs, _be = loc
+            cur_body = file_text[_bs:_be]
+            errs = out[-_FIX_ERR_CAP:] if len(out) > _FIX_ERR_CAP else out
+            rblock = (f"\n<RETROSPECTIVE_GUIDANCE>\n{retro}\n</RETROSPECTIVE_GUIDANCE>\n"
+                      if retro.strip() else "")
+            prompt = f"""ONE Rust function does not compile. Return ONLY its corrected body.
 {_FIX_THINKING_DIRECTIVE}File: {_rel} | Fn: {_fn}
 Signature (do NOT change it):
 {sig_text}
@@ -17115,61 +17099,219 @@ Current body (it does NOT compile):
 
 Compiler errors:
 ```
-{_fn_errs}
+{errs}
 ```
-{_rblock}{_gblock}{_tests_block}
+{rblock}{_gotchas_block_for(out)}{_tests_for_names({_fn})}
 Return the corrected body as EXACTLY one block (statements only — no fn
 signature, no outer braces):
 <FN name="{_fn}" block="any">
 ...corrected body...
 </FN>
 Output nothing else."""
-                    resp = ask(prompt, model=model)
-                    bodies = extract_fn_bodies(resp)
-                    body = next((b.get("body") for b in bodies
-                                 if b.get("fn_name") == _fn), None)
-                    if body is None and bodies:
-                        body = bodies[0].get("body")
-                    if not body:
-                        return {"summary": "no_body",
-                                "files_changed_str": "no files changed",
-                                "error_preview": out[-_FIX_ERR_CAP:]}
-                    ok_s, delta = _splice_fn_body(_path, _fn, body, allow_nonstub=True)
-                    if ok_s:
-                        changed.append(f"{_rel}::{_fn}")
-                        _log(f"  [fix loop/per_fn] spliced {_rel}::{_fn} ({delta:+d} bytes)")
-                    else:
-                        _log(f"  [fix loop/per_fn] splice rejected {_rel}::{_fn}")
-                    return {"summary": f"per_fn {_rel}::{_fn}",
-                            "files_changed_str": f"{_rel}::{_fn}",
-                            "error_preview": out[-_FIX_ERR_CAP:]}
+            resp = ask(prompt, model=model)
+            bodies = extract_fn_bodies(resp)
+            body = next((b.get("body") for b in bodies if b.get("fn_name") == _fn), None)
+            if body is None and bodies:
+                body = bodies[0].get("body")
+            if not body:
+                return {"summary": "no_body", "files_changed_str": "no files changed",
+                        "error_preview": out[-_FIX_ERR_CAP:]}
+            ok_s, delta = _splice_fn_body(_path, _fn, body, allow_nonstub=True)
+            if ok_s:
+                changed.append(f"{_rel}::{_fn}")
+                _log(f"  [fix loop/fn] spliced {_rel}::{_fn} ({delta:+d} bytes)")
+            else:
+                _log(f"  [fix loop/fn] splice rejected {_rel}::{_fn}")
+            return {"summary": f"fn {_rel}::{_fn}", "files_changed_str": f"{_rel}::{_fn}",
+                    "error_preview": out[-_FIX_ERR_CAP:]}
 
-                _log(f"  [fix loop/per_fn] fixing {rel}::{fn} (inner cargo check loop)")
-                _improvement_loop(
-                    name=f"per_fn:{rel}::{fn}",
-                    run_check=_fn_run_check,
-                    do_fix=_fn_do_fix,
-                    max_stalls=int(os.getenv("FIX_LOOP_PER_FN_MAX_STALLS", "2")),
-                )
+        _log(f"  [fix loop/fn] fixing {rel}::{fn} (inner cargo check loop)")
+        _improvement_loop(name=f"fn:{rel}::{fn}", run_check=_run_check, do_fix=_do,
+                          max_stalls=int(os.getenv("FIX_LOOP_PER_FN_MAX_STALLS", "2")))
+        return changed
 
-            if deferred_file_level:
+    def _fix_impl_block(rel: str, container: str, block: dict) -> list[str]:
+        """Inner cargo-check loop that re-fills a WHOLE impl block in one prompt
+        (the model sees the header, where-clauses, every member body, and any
+        sibling impl of the same trait). Each returned body is spliced into the
+        CORRECT impl via container-aware location — so two same-name methods in
+        different impls (E0201/E0053 as_ref) are disambiguated. Returns changed
+        unit ids."""
+        changed: list[str] = []
+        path = project_dir / rel
+        if not path.exists():
+            return changed
+        inner_cmd = _derive_check_only_cmd(check_cmd)
+        members = block.get("members", [])
+        member_names = {m.get("fn_name") for m in members if m.get("fn_name")}
+        siblings = block.get("related_containers", []) or []
+
+        def _run_check(_rel=rel, _names=tuple(member_names)) -> tuple[bool, str, int]:
+            rc, rendered, diags = _run_cargo_check_diag(inner_cmd, project_dir, env, timeout)
+            fr = _extract_tdd_compile_frontier(rendered, project_dir)
+            group_errs = sum(1 for (f2, fn2) in fr if f2 == _rel and fn2 in _names)
+            file_errs = sum(1 for d in diags if (d.get("file") or "") == _rel)
+            ok = (rc == 0) or (group_errs == 0)
+            return ok, rendered, file_errs
+
+        def _do(out: str, hist: list[dict], *, retro: str = "") -> dict:
+            file_text = path.read_text(encoding="utf-8", errors="replace")
+            block_src = _render_impl_block(file_text, members)
+            errs = out[-_FIX_ERR_CAP:] if len(out) > _FIX_ERR_CAP else out
+            sib_block = (
+                "\nSibling impl blocks of the same trait in this file — keep them "
+                "mutually consistent (e.g. matching return types / bounds):\n"
+                + "\n".join(f"- {s}" for s in siblings) + "\n"
+            ) if siblings else ""
+            rblock = (f"\n<RETROSPECTIVE_GUIDANCE>\n{retro}\n</RETROSPECTIVE_GUIDANCE>\n"
+                      if retro.strip() else "")
+            prompt = f"""A Rust impl block fails to compile. Fix the function BODIES so the
+whole block compiles. Change ONLY what the errors require; leave already-correct
+functions untouched. Do NOT change any signature.
+{_FIX_THINKING_DIRECTIVE}File: {rel}
+Impl block:
+```rust
+{block_src}
+```
+{sib_block}
+Compiler errors:
+```
+{errs}
+```
+{rblock}{_gotchas_block_for(out)}{_tests_for_names(member_names)}
+For EACH function you change, return one block (statements only — no signature,
+no braces). Use the function name verbatim:
+<FN name="FUNCTION_NAME" block="impl">
+...corrected body...
+</FN>
+Output nothing else."""
+            resp = ask(prompt, model=model)
+            fn_blocks = extract_fn_bodies(resp)
+            spliced = 0
+            for fb in fn_blocks:
+                nm = fb.get("fn_name"); body = fb.get("body")
+                if not nm or not body:
+                    continue
+                sig = next((m.get("sig_text", "") for m in members
+                            if m.get("fn_name") == nm), "")
+                locr = _locate_fn_by_record(path, nm, container, sig)
+                if locr is not None:
+                    sbs, bbs, bbe, _fresh = locr
+                    ok_s, delta = _splice_fn_body_at(path, bbs, bbe, body, allow_nonstub=True)
+                else:
+                    ok_s, delta = _splice_fn_body(path, nm, body, allow_nonstub=True)
+                if ok_s:
+                    spliced += 1
+                    changed.append(f"{rel}::{nm}")
+                    _log(f"  [fix loop/impl] spliced {rel}::{nm} ({delta:+d} bytes)")
+                else:
+                    _log(f"  [fix loop/impl] splice rejected {rel}::{nm}")
+            if spliced == 0:
+                return {"summary": "no_splice", "files_changed_str": "no files changed",
+                        "error_preview": out[-_FIX_ERR_CAP:]}
+            return {"summary": f"impl {rel} ({spliced} fn)",
+                    "files_changed_str": f"{rel}::{container[:40]}",
+                    "error_preview": out[-_FIX_ERR_CAP:]}
+
+        _log(f"  [fix loop/impl] fixing {rel}::{container[:50]} (inner cargo check loop)")
+        _improvement_loop(name=f"impl:{rel}::{container[:40]}", run_check=_run_check,
+                          do_fix=_do,
+                          max_stalls=int(os.getenv("FIX_LOOP_PER_FN_MAX_STALLS", "2")))
+        return changed
+
+    def _do_fix_per_fn(output: str, history: list[dict], *, retro: str) -> dict:
+        """unit=fn: group compile errors by enclosing fn, fix each unique fn in
+        its own inner cargo-check loop. Ambiguous (same-name sibling impls) and
+        non-compile failures → legacy whole-file. Fail-safe → legacy."""
+        if output.startswith("TIMEOUT after "):
+            return {"abort": True, "reason": "check_timeout", "summary": "check timed out"}
+        try:
+            _log_compile_overview(output, len(history))
+            frontier = _extract_tdd_compile_frontier(output, project_dir)
+            if not frontier:
+                return _do_fix(output, history, retro=retro)
+            recs = _enumerate_fns_via_extractor(project_dir) or []
+            name_count: dict[tuple[str, str], int] = {}
+            for r in recs:
+                k = (r.get("file", ""), r.get("fn_name", ""))
+                name_count[k] = name_count.get(k, 0) + 1
+            changed: list[str] = []
+            deferred = False
+            for (rel, fn) in sorted(frontier.keys()):
+                if rel in existing_test_files:
+                    continue
+                if allowed_dir_prefix and not rel.startswith(allowed_dir_prefix):
+                    continue
+                if name_count.get((rel, fn), 0) != 1:
+                    deferred = True
+                    continue
+                changed += _fix_single_fn(rel, fn)
+            if deferred:
                 rc, rendered, _ = _run_cargo_check_diag(
-                    _inner_cmd, project_dir, env, timeout)
+                    _derive_check_only_cmd(check_cmd), project_dir, env, timeout)
                 if rc != 0:
-                    _log("  [fix loop/per_fn] file-level errors remain → whole-file fallback")
+                    _log("  [fix loop/fn] file-level errors remain → whole-file fallback")
                     _do_fix(rendered, history, retro=retro)
-
             _err_preview = output[-_FIX_ERR_CAP:] if len(output) > _FIX_ERR_CAP else output
             return {"summary": f"per_fn changed={len(changed)}",
                     "files_changed_str": ", ".join(changed[:4]) if changed else "no files changed",
                     "error_preview": _err_preview, "error_sig": _err_preview}
         except Exception as e:
-            _log(f"  [fix loop/per_fn] unexpected error ({e}) → legacy whole-file fallback")
+            _log(f"  [fix loop/fn] unexpected error ({e}) → legacy whole-file fallback")
+            return _do_fix(output, history, retro=retro)
+
+    def _do_fix_per_impl(output: str, history: list[dict], *, retro: str) -> dict:
+        """unit=impl (default, mirrors PHASE_C_FILL_UNIT): group compile errors by
+        their enclosing impl block and fix the whole block in one inner
+        cargo-check loop — the model sees impl-level constraints and sibling
+        impls that per-fn cannot. Free functions fall to the per-fn path; the
+        extractor being unavailable or a non-compile failure → fall back."""
+        if output.startswith("TIMEOUT after "):
+            return {"abort": True, "reason": "check_timeout", "summary": "check timed out"}
+        try:
+            _log_compile_overview(output, len(history))
+            frontier = _extract_tdd_compile_frontier(output, project_dir)
+            if not frontier:
+                return _do_fix(output, history, retro=retro)
+            blocks = _collect_impl_blocks(project_dir)
+            if not blocks:
+                return _do_fix_per_fn(output, history, retro=retro)
+            fn_to_block: dict[tuple[str, str], dict] = {}
+            for b in blocks:
+                for m in b.get("members", []):
+                    fn_to_block[(b["file"], m.get("fn_name"))] = b
+            changed: list[str] = []
+            impl_groups: dict[tuple[str, str], dict] = {}
+            free_fns: list[tuple[str, str]] = []
+            for (rel, fn) in frontier.keys():
+                if rel in existing_test_files:
+                    continue
+                if allowed_dir_prefix and not rel.startswith(allowed_dir_prefix):
+                    continue
+                b = fn_to_block.get((rel, fn))
+                if b is None or not b.get("container"):
+                    free_fns.append((rel, fn))
+                else:
+                    impl_groups[(b["file"], b["container"])] = b
+            for (f2, cont) in sorted(impl_groups.keys()):
+                changed += _fix_impl_block(f2, cont, impl_groups[(f2, cont)])
+            for (rel, fn) in sorted(set(free_fns)):
+                changed += _fix_single_fn(rel, fn)
+            _err_preview = output[-_FIX_ERR_CAP:] if len(output) > _FIX_ERR_CAP else output
+            return {"summary": f"per_impl changed={len(changed)}",
+                    "files_changed_str": ", ".join(changed[:4]) if changed else "no files changed",
+                    "error_preview": _err_preview, "error_sig": _err_preview}
+        except Exception as e:
+            _log(f"  [fix loop/impl] unexpected error ({e}) → legacy whole-file fallback")
             return _do_fix(output, history, retro=retro)
 
     _fix_strategy = os.getenv("FIX_LOOP_STRATEGY", "per_fn").strip().lower()
-    _chosen_do_fix = _do_fix_per_fn if _fix_strategy == "per_fn" else _do_fix
-    _log(f"  [fix loop] strategy={_fix_strategy}")
+    _fix_unit = os.getenv("FIX_LOOP_UNIT", "impl").strip().lower()
+    if _fix_strategy == "per_fn":
+        _chosen_do_fix = _do_fix_per_impl if _fix_unit == "impl" else _do_fix_per_fn
+    else:
+        _chosen_do_fix = _do_fix
+    _log(f"  [fix loop] strategy={_fix_strategy} unit={_fix_unit}")
 
     ok, last_output, _hist = _improvement_loop(
         name="generate_fix_loop",

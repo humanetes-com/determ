@@ -1712,6 +1712,37 @@ def test_splice_fn_body_allow_nonstub() -> None:
     print("  OK  _splice_fn_body allow_nonstub (per_fn re-fill)")
 
 
+def test_render_impl_block() -> None:
+    """per_impl fix unit: render the whole impl block (header + where-clause +
+    all bodies) verbatim from the byte range containing the first member."""
+    import pipeline
+    src = (
+        "use std::fmt;\n"
+        "\n"
+        "impl<T> AsRef<T> for Wrap<T> where T: ?Sized {\n"
+        "    fn as_ref(&self) -> &T {\n"
+        "        &self.0\n"
+        "    }\n"
+        "}\n"
+        "\n"
+        "fn free() {}\n"
+    )
+    sig = "    fn as_ref(&self) -> &T {"
+    member = {"fn_name": "as_ref", "sig_byte_start": src.index(sig),
+              "sig_text": "fn as_ref(&self) -> &T"}
+    rendered = pipeline._render_impl_block(src, [member])
+    assert rendered.startswith("impl<T> AsRef<T> for Wrap<T> where T: ?Sized"), rendered
+    assert "fn as_ref" in rendered and rendered.rstrip().endswith("}"), rendered
+    # The where-clause (the impl-level constraint per-fn prompts can't show) is
+    # part of the rendered block — the whole point of the per_impl unit.
+    assert "where T: ?Sized" in rendered, rendered
+    # Does not bleed into the free fn outside the block.
+    assert "fn free" not in rendered, rendered
+    # Empty members → empty string (caller falls back).
+    assert pipeline._render_impl_block(src, []) == ""
+    print("  OK  _render_impl_block (per_impl fix unit)")
+
+
 # ─── Driver ─────────────────────────────────────────────────────────────────
 
 def main() -> int:
@@ -1757,6 +1788,7 @@ def main() -> int:
     test_monitor_task_pipeline_parser()
     test_derive_check_only_cmd()
     test_splice_fn_body_allow_nonstub()
+    test_render_impl_block()
 
     if full:
         print("Cargo phase (--full):")
