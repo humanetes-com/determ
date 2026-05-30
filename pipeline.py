@@ -8998,13 +8998,25 @@ def _phase_c_fill_impl_blocks(
             fix_attempt += 1
             attempts_total += 1
             _check_graceful_stop(f"per-impl attempt {fix_attempt} for {block_id}")
+            # Plan 9 F4: on fix attempts, also surface the definitions of any
+            # type/trait NAMED IN THE CURRENT ERROR (E0277/E0599/E0046/E0053
+            # routinely name a trait the impl block's signatures don't mention).
+            _types_section_eff = types_section
+            if last_error_excerpt:
+                _err_types = _types_referenced_in_text(last_error_excerpt, _crate_type_records)
+                _base_names = {r.get("name") for r in types_records}
+                _extra = [r for r in _err_types if r.get("name") not in _base_names]
+                if _extra:
+                    _aug = _types_full + "\n\n" + "\n\n".join(
+                        _format_type_for_prompt(r) for r in _extra[:_TYPES_COUNT_CAP])
+                    _types_section_eff = _aug[:_TYPES_SECTION_CAP]
             prompt = _build_per_impl_prompt(
                 block=block,
                 related_blocks=related_blocks,
                 test_blocks=test_blocks,
                 module_name=module_name,
                 cluster_name=cluster_name,
-                types_section=types_section,
+                types_section=_types_section_eff,
                 invariants_section=invariants_section,
                 notes_section=notes_section,
                 fr_path=fr_path,

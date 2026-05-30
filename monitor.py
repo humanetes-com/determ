@@ -382,6 +382,13 @@ def _phase_c_state() -> dict[str, Any]:
         # `pass_stubs_total` to a per-pass frontier.
         "filled_count_at_pass_start": 0,
         "all_stubs_remaining_at_pass_start": 0,
+        # TDD outer-loop trajectory (phase_c.tdd.iter) — the headline "are we
+        # converging" signal: passing/failing tests over iterations.
+        "tdd_iter": 0, "tdd_pass": None, "tdd_fail": None, "tdd_frontier": None,
+        "tdd_stall": None, "tdd_kind": None, "tdd_pass_hist": [],
+        # Per-cluster overview ("where are we") + current error class.
+        "clusters_seen": [], "clusters_done": [], "last_error_code": None,
+        "err_codes": {},
     }
     if not os.path.exists(EVENTS_LOG):
         return out
@@ -404,7 +411,8 @@ def _phase_c_state() -> dict[str, Any]:
             rec = _json.loads(line)
         except Exception:
             continue
-        if not rec.get("event", "").startswith("phase_c."):
+        _evn = rec.get("event", "")
+        if not (_evn.startswith("phase_c.") or _evn == "cluster.done"):
             continue
         if run_start > 0:
             try:
@@ -427,6 +435,15 @@ def _phase_c_state() -> dict[str, Any]:
         ev = e["event"]
         d = e.get("data", {})
         last_ts_iso = e.get("ts") or last_ts_iso
+        # Cluster ordering: record first-seen order so we can show k/N progress.
+        _cl = d.get("cluster") or e.get("cluster")
+        if _cl and _cl not in out["clusters_seen"]:
+            out["clusters_seen"].append(_cl)
+        if ev == "cluster.done":
+            _dc = e.get("cluster") or d.get("cluster")
+            if _dc and _dc not in out["clusters_done"]:
+                out["clusters_done"].append(_dc)
+            continue
         if ev == "phase_c.pass.start":
             out["cluster"] = d.get("cluster") or out["cluster"]
             out["pass_n"] = d.get("pass_n") or out["pass_n"]
@@ -470,6 +487,13 @@ def _phase_c_state() -> dict[str, Any]:
             out["pass_fills_failed"] = out.get("pass_fills_failed", 0) + 1
             fn_attempts[fn] = fn_attempts.get(fn, 0) + attempts
             in_flight_fn = None
+            # Current/last error class — extract the rustc code the model is
+            # fighting, from the failed attempt's error preview.
+            _m = re.findall(r"E\d{4}", d.get("last_error_preview") or "")
+            if _m:
+                out["last_error_code"] = _m[0]
+                for _c in _m:
+                    out["err_codes"][_c] = out["err_codes"].get(_c, 0) + 1
         elif ev == "phase_c.fn.fill.skip":
             out["fills_skipped"] += 1
             in_flight_fn = None
@@ -480,6 +504,17 @@ def _phase_c_state() -> dict[str, Any]:
         elif ev == "phase_c.pass.test":
             out["last_test_rc"] = d.get("rc")
             out["last_test_failed"] = len(d.get("failed_tests") or [])
+        elif ev == "phase_c.tdd.iter":
+            out["cluster"] = d.get("cluster") or out["cluster"]
+            out["tdd_iter"] = d.get("iter", out["tdd_iter"])
+            _pc = d.get("pass_count")
+            if _pc is not None:
+                out["tdd_pass"] = _pc
+                out["tdd_pass_hist"].append(_pc)
+            out["tdd_fail"] = d.get("fail_count", out["tdd_fail"])
+            out["tdd_frontier"] = d.get("frontier_size", out["tdd_frontier"])
+            out["tdd_stall"] = d.get("stall", out["tdd_stall"])
+            out["tdd_kind"] = d.get("kind", out["tdd_kind"])
 
     out["current_fn"] = in_flight_fn
     if in_flight_fn:
@@ -498,6 +533,31 @@ def _phase_c_state() -> dict[str, Any]:
     return out
 
 
+def _baked_cluster_order() -> list[str]:
+    """Authoritative cluster list+order from the pipeline log's
+    'loaded N baked cluster(s): a, b, c' line. [] if unavailable — the panel
+    then falls back to clusters seen in events so far."""
+    try:
+        with open(PIPELINE_LOG, encoding="utf-8", errors="replace") as f:
+            txt = f.read()
+    except Exception:
+        return []
+    last = None
+    for last in re.finditer(r"loaded \d+ baked cluster\(s\):\s*([^\n]+)", txt):
+        pass
+    if not last:
+        return []
+    return [c.strip() for c in last.group(1).split(",") if c.strip()]
+
+
+_ERR_NAMES = {
+    "E0277": "trait bound", "E0599": "no method", "E0046": "missing trait items",
+    "E0053": "sig mismatch", "E0308": "type mismatch", "E0425": "name not found",
+    "E0609": "no field", "E0201": "dup impl", "E0119": "conflicting impl",
+    "E0433": "bad path", "E0282": "need annotation", "E0432": "unresolved import",
+}
+
+
 def _phase_c_panel_rows(state: dict[str, Any]) -> list[str]:
     """Render the Phase C panel rows. Empty list when no Phase C activity."""
     if not state.get("active"):
@@ -510,6 +570,52 @@ def _phase_c_panel_rows(state: dict[str, Any]) -> list[str]:
     age_s = (f"{age}s" if age is not None and age < 60
              else f"{age // 60}m" if age is not None else "?")
     rows.append(f"  phase-c  cluster={cluster}  pass={pass_n}/{maxp}  last={age_s}")
+
+    # Per-cluster overview — where we are across all clusters. Prefer the
+    # authoritative baked order/total from the log; fall back to events-seen.
+    _seen = _baked_cluster_order() or (state.get("clusters_seen") or [])
+    if _seen:
+        _done = set(state.get("clusters_done") or [])
+        _marks = []
+        for c in _seen:
+            _short = c.replace("anyhow_", "")
+            if c in _done:
+                _marks.append(green("✓" + _short))
+            elif c == state.get("cluster"):
+                _marks.append(cyan("▶" + _short))
+            else:
+                _marks.append(dim("·" + _short))
+        rows.append(f"           clusters {len(_done)}/{len(_seen)} done   "
+                    + "  ".join(_marks))
+
+    # TDD trajectory — the headline "are we converging" overview: passing /
+    # failing tests over iterations, the active frontier, and stall budget.
+    _tp = state.get("tdd_pass")
+    if _tp is not None:
+        _tf = state.get("tdd_fail")
+        _hist = state.get("tdd_pass_hist") or []
+        _trend = ""
+        if len(_hist) >= 2:
+            _delta = _hist[-1] - _hist[-2]
+            _trend = (green(f" ↑{_delta}") if _delta > 0
+                      else red(f" ↓{-_delta}") if _delta < 0 else dim(" ="))
+        _fr = state.get("tdd_frontier")
+        _stall = state.get("tdd_stall")
+        _it = state.get("tdd_iter")
+        rows.append(f"           tdd      iter={_it}  "
+                    f"{green(f'pass={_tp}')}{_trend}  {red(f'fail={_tf}')}  "
+                    f"frontier={_fr}  stall={_stall}")
+        if len(_hist) >= 2:
+            rows.append(f"           pass→    {dim('→'.join(str(x) for x in _hist[-8:]))}")
+
+    # Current error class — what the model is fighting right now.
+    _ec = state.get("last_error_code")
+    if _ec:
+        _codes = state.get("err_codes") or {}
+        _top = ", ".join(f"{k}×{v}" for k, v in
+                         sorted(_codes.items(), key=lambda x: -x[1])[:4])
+        rows.append(f"           err      {yellow(_ec)} "
+                    f"{dim('(' + _ERR_NAMES.get(_ec, '?') + ')')}   {dim('top: ' + _top)}")
 
     # Cumulative progress bar (across runs):
     #   filled_cumulative = filled_count_at_pass_start + this_pass_done
