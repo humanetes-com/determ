@@ -5587,10 +5587,14 @@ def _splice_fn_with_where(
     fn_name: str,
     body: str,
     where_clause: str | None = None,
+    allow_nonstub: bool = False,
 ) -> tuple[bool, str, int]:
     """Splice `body` into `fn_name` whose containing impl block matches
     `container`. If `where_clause` is provided, insert it into the fn
     signature (between sig and the opening brace).
+
+    `allow_nonstub=True` (fix-loop) re-fills a fn whose body is already
+    filled-but-wrong; default refuses non-stub bodies (build path).
 
     Returns (success, reason, bytes_delta). `reason` is "ok" on success
     or a short failure tag for telemetry / retro context.
@@ -5624,7 +5628,8 @@ def _splice_fn_with_where(
             body_byte_end += shift
             file_path.write_text(text, encoding="utf-8")
 
-    ok, delta = _splice_fn_body_at(file_path, body_byte_start, body_byte_end, body)
+    ok, delta = _splice_fn_body_at(file_path, body_byte_start, body_byte_end, body,
+                                   allow_nonstub=allow_nonstub)
     if not ok:
         return False, "splice_rejected", 0
     return True, "ok", delta
@@ -17113,6 +17118,11 @@ Current source files:
         if not path.exists():
             return changed
         inner_cmd = _derive_check_only_cmd(check_cmd)
+        fn_container = ""
+        for _r in (_enumerate_fns_via_extractor(project_dir) or []):
+            if _r.get("file") == rel and _r.get("fn_name") == fn:
+                fn_container = _r.get("container") or ""
+                break
 
         def _run_check(_rel=rel, _fn=fn) -> tuple[bool, str, int]:
             rc, rendered, diags = _run_cargo_check_diag(inner_cmd, project_dir, env, timeout)
@@ -17134,10 +17144,19 @@ Current source files:
             errs = out[-_FIX_ERR_CAP:] if len(out) > _FIX_ERR_CAP else out
             rblock = (f"\n<RETROSPECTIVE_GUIDANCE>\n{retro}\n</RETROSPECTIVE_GUIDANCE>\n"
                       if retro.strip() else "")
+            # After a body-only attempt stalled, a PRIVATE fn may tighten its
+            # bounds (unsized-T class: returns `T` by value but `T` is `?Sized`
+            # → needs `where T: Sized`). Only a leading `where …` may be added.
+            allow_where = len(hist) >= 1 and not _is_pub_fn(file_text, _fn)
+            sig_rule = (
+                "Signature is FIXED — except, if this fn fails because a type "
+                "parameter needs a tighter bound (E0277 'size cannot be known'), "
+                "you MAY add it by making the FIRST body line a `where` clause "
+                "(e.g. `where T: Sized`).\n"
+            ) if allow_where else "Signature (do NOT change it):\n"
             prompt = f"""ONE Rust function does not compile. Return ONLY its corrected body.
 {_FIX_THINKING_DIRECTIVE}File: {_rel} | Fn: {_fn}
-Signature (do NOT change it):
-{sig_text}
+{sig_rule}{sig_text}
 
 Current body (it does NOT compile):
 {{
@@ -17157,18 +17176,22 @@ signature, no outer braces):
 Output nothing else."""
             resp = ask(prompt, model=model)
             bodies = extract_fn_bodies(resp)
-            body = next((b.get("body") for b in bodies if b.get("fn_name") == _fn), None)
-            if body is None and bodies:
-                body = bodies[0].get("body")
+            blk = next((b for b in bodies if b.get("fn_name") == _fn),
+                       bodies[0] if bodies else None)
+            body = blk.get("body") if blk else None
             if not body:
                 return {"summary": "no_body", "files_changed_str": "no files changed",
                         "error_preview": out[-_FIX_ERR_CAP:]}
-            ok_s, delta = _splice_fn_body(_path, _fn, body, allow_nonstub=True)
+            wc = blk.get("where_clause") if blk else None
+            use_wc = wc if (allow_where and wc) else None
+            ok_s, reason, delta = _splice_fn_with_where(
+                _path, fn_container, _fn, body, where_clause=use_wc, allow_nonstub=True)
             if ok_s:
                 changed.append(f"{_rel}::{_fn}")
-                _log(f"  [fix loop/fn] spliced {_rel}::{_fn} ({delta:+d} bytes)")
+                _log(f"  [fix loop/fn] spliced {_rel}::{_fn}"
+                     f"{' +where' if use_wc else ''} ({delta:+d} bytes)")
             else:
-                _log(f"  [fix loop/fn] splice rejected {_rel}::{_fn}")
+                _log(f"  [fix loop/fn] splice rejected {_rel}::{_fn} ({reason})")
             return {"summary": f"fn {_rel}::{_fn}", "files_changed_str": f"{_rel}::{_fn}",
                     "error_preview": out[-_FIX_ERR_CAP:]}
 
@@ -17215,9 +17238,24 @@ Output nothing else."""
             ) if siblings else ""
             rblock = (f"\n<RETROSPECTIVE_GUIDANCE>\n{retro}\n</RETROSPECTIVE_GUIDANCE>\n"
                       if retro.strip() else "")
+            # After a body-only attempt has stalled, allow the model to tighten a
+            # PRIVATE fn's bounds — the unsized-T class (e.g. `read(self) -> T`
+            # needing `where T: Sized`) cannot be fixed by a body alone. Only a
+            # leading `where …` may be added; the rest of the signature is fixed
+            # and public fns are never touched (API surface). Spliced via the
+            # syn extractor's byte range — no anchor matching.
+            allow_where = len(hist) >= 1
+            where_rule = (
+                "\nIf — and ONLY if — a PRIVATE (non-`pub`) fn fails because a type "
+                "parameter needs a tighter bound (e.g. E0277 'size cannot be known': "
+                "the fn returns `T` by value but `T` is `?Sized`), you MAY add a bound "
+                "by making the FIRST line of that fn's body a `where` clause:\n"
+                '<FN name="read" block="impl">\nwhere T: Sized\n... body ...\n</FN>\n'
+                "Do not otherwise change any signature. Never add a bound to a `pub` fn.\n"
+            ) if allow_where else "Do NOT change any signature.\n"
             prompt = f"""A Rust impl block fails to compile. Fix the function BODIES so the
 whole block compiles. Change ONLY what the errors require; leave already-correct
-functions untouched. Do NOT change any signature.
+functions untouched. {where_rule}
 {_FIX_THINKING_DIRECTIVE}File: {rel}
 Impl block:
 ```rust
@@ -17229,8 +17267,8 @@ Compiler errors:
 {errs}
 ```
 {rblock}{_gotchas_block_for(out)}{_tests_for_names(member_names)}
-For EACH function you change, return one block (statements only — no signature,
-no braces). Use the function name verbatim:
+For EACH function you change, return one block (body statements only — no fn
+signature line, no outer braces). Use the function name verbatim:
 <FN name="FUNCTION_NAME" block="impl">
 ...corrected body...
 </FN>
@@ -17242,20 +17280,18 @@ Output nothing else."""
                 nm = fb.get("fn_name"); body = fb.get("body")
                 if not nm or not body:
                     continue
-                sig = next((m.get("sig_text", "") for m in members
-                            if m.get("fn_name") == nm), "")
-                locr = _locate_fn_by_record(path, nm, container, sig)
-                if locr is not None:
-                    sbs, bbs, bbe, _fresh = locr
-                    ok_s, delta = _splice_fn_body_at(path, bbs, bbe, body, allow_nonstub=True)
-                else:
-                    ok_s, delta = _splice_fn_body(path, nm, body, allow_nonstub=True)
+                # Honour a where-clause only for PRIVATE fns (API surface guard).
+                wc = fb.get("where_clause")
+                use_wc = wc if (allow_where and wc and not _is_pub_fn(file_text, nm)) else None
+                ok_s, reason, delta = _splice_fn_with_where(
+                    path, container, nm, body, where_clause=use_wc, allow_nonstub=True)
                 if ok_s:
                     spliced += 1
                     changed.append(f"{rel}::{nm}")
-                    _log(f"  [fix loop/impl] spliced {rel}::{nm} ({delta:+d} bytes)")
+                    _log(f"  [fix loop/impl] spliced {rel}::{nm}"
+                         f"{' +where' if use_wc else ''} ({delta:+d} bytes)")
                 else:
-                    _log(f"  [fix loop/impl] splice rejected {rel}::{nm}")
+                    _log(f"  [fix loop/impl] splice rejected {rel}::{nm} ({reason})")
             if spliced == 0:
                 return {"summary": "no_splice", "files_changed_str": "no files changed",
                         "error_preview": out[-_FIX_ERR_CAP:]}

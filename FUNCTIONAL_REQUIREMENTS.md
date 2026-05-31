@@ -605,3 +605,38 @@ exhausted → exit. Otherwise continue.
 **Cross-reference:** This is the test-driven counterpart to the
 compile-error `_improvement_loop` pattern. Both share the principle:
 numeric caps are a smell; improvement is the criterion.
+
+## FR-025 — Cross-cluster merge identity for impl blocks must be the full impl header
+
+**Decision:** The syn-based cluster merger (`tools/skeleton_extractor`,
+`merge_cluster_files`) groups same-identity items across clusters before
+emitting cfg-gated copies of divergent ones. For `Item::Impl`, the identity
+key MUST be the **complete impl header** — impl generics, the trait reference
+*including its generic arguments*, the self-type *including its generics*, and
+the where-clause. Two impls whose headers differ in ANY of these are distinct
+blocks and must never be merged into one.
+
+**Why:** The previous key was `path_to_string(trait) | quote(self_ty)`, and
+`path_to_string` discards generic arguments (it joins segment idents only).
+This collapsed structurally distinct impls that share a trait name and self
+type:
+
+- `impl AsRef<dyn StdError> for Error` and
+  `impl AsRef<dyn StdError + Send + Sync> for Error` → same key → merged into
+  one impl holding two `as_ref` fns with different return types → **E0201**
+  (duplicate method) + **E0053** (incompatible return type).
+- `impl<'a,T> Mut<'a,T>` (holds `read(self) -> T`, T implicitly Sized) and
+  `impl<'a,T> Mut<'a,T> where T: ?Sized` (pointer methods) → key ignores the
+  where-clause → merged → `read` lands under `where T: ?Sized` → **E0277**
+  (unsized return).
+
+Both are unrecoverable downstream: the fix loop is forbidden from changing
+signatures or impl headers (FR — body-only fixes), so it churns forever on
+`as_ref` (splice_rejected) and `read` (fn_not_found). The skeleton was always
+correct; only the merge corrupted it. Fix the process (merge identity), never
+the symptom (LLM body edits).
+
+**Rule:** impl identity = `quote(generics) + trait_ref(with args) + quote(self_ty) + quote(where_clause)`.
+This is the maximally-constraining identity (Hard Rule 9): when two impls might
+be "the same", the merge must add MORE constraints to keep them apart, not
+fewer to fuse them.

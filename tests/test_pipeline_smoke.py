@@ -1766,6 +1766,37 @@ def test_strip_ansi_and_diag_frontier() -> None:
     print("  OK  _strip_ansi + _frontier_from_diags (ANSI-immune inner check)")
 
 
+def test_sig_tighten_guard_and_where_parse() -> None:
+    """Fix-loop signature tightening: the model may add a leading `where` clause
+    (parsed by extract_fn_bodies) but only PRIVATE fns may be touched
+    (_is_pub_fn guard) — public signatures are the test surface, never changed."""
+    import pipeline
+    src = (
+        "impl<T> Mut<T> {\n"
+        "    fn read(self) -> T {\n"
+        "        unimplemented!()\n"
+        "    }\n"
+        "    pub fn get(&self) -> &T {\n"
+        "        unimplemented!()\n"
+        "    }\n"
+        "}\n"
+    )
+    # API-surface guard: private fn may be tightened, pub fn may not.
+    assert pipeline._is_pub_fn(src, "read") is False
+    assert pipeline._is_pub_fn(src, "get") is True
+    # The model expresses a bound as a leading `where` line in the FN body;
+    # extract_fn_bodies lifts it into where_clause and removes it from the body.
+    resp = ('<FN name="read" block="impl">\n'
+            'where T: Sized\n'
+            'self.0\n'
+            '</FN>')
+    recs = pipeline.extract_fn_bodies(resp)
+    assert len(recs) == 1, recs
+    assert recs[0]["where_clause"] == "where T: Sized", recs[0]
+    assert "where" not in recs[0]["body"] and "self.0" in recs[0]["body"], recs[0]
+    print("  OK  sig-tighten guard (_is_pub_fn) + where-clause parse")
+
+
 # ─── Driver ─────────────────────────────────────────────────────────────────
 
 def main() -> int:
@@ -1813,6 +1844,7 @@ def main() -> int:
     test_splice_fn_body_allow_nonstub()
     test_render_impl_block()
     test_strip_ansi_and_diag_frontier()
+    test_sig_tighten_guard_and_where_parse()
 
     if full:
         print("Cargo phase (--full):")
