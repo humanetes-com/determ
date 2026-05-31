@@ -10,6 +10,10 @@ IMPORTANT: Keep all responses short, condensed, and unformatted. No markdown hea
 
 IMPORTANT: Default to super short answers — a few sentences at most. Expand only when explicitly asked.
 
+IMPORTANT! Write short answers. Two lines maximum.
+
+IMPORTANT! You do NOT commit and you do NOT restart the pipeline. When a unit of work is done, write a single commit message for the user; they handle the commit and the restart.
+
 ---
 
 # Engineering principles

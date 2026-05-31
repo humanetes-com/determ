@@ -364,6 +364,33 @@ def test_strip_doc_attrs() -> None:
     print("  OK  _strip_doc_attrs (FR-024)")
 
 
+def test_condense_doc_attrs() -> None:
+    """FR-026: doc attrs condense to a one-line intent, not deleted, not dumped.
+    Brackets inside doc content (markdown links/badges) must not desync."""
+    import pipeline
+    text = (
+        '# ! [doc = " [![badge]](http://x)&ensp;"]\n'
+        '# ! [doc = " The crate does [a thing](http://y). More detail here."]\n'
+        'impl Error { '
+        '# [doc = " Create a new error object from any error type."] '
+        '# [doc = ""] '
+        '# [doc = " ```"] '
+        '# [doc = " let x = 1;"] '
+        '# [doc = " ```"] '
+        '# [cold] pub fn new < E > (e: E) -> Self { unimplemented!() } }\n'
+    )
+    out = pipeline._condense_doc_attrs(text)
+    assert 'doc =' not in out, f"doc attrs survived:\n{out}"
+    # crate intent kept as //! , first sentence only, link reduced to text
+    assert '//! The crate does a thing.' in out, out
+    # fn intent kept as // , code example dropped
+    assert '// Create a new error object from any error type.' in out, out
+    assert 'let x = 1;' not in out, "code example leaked"
+    assert 'badge' not in out, "badge leaked"
+    assert 'pub fn new' in out
+    print("  OK  _condense_doc_attrs (FR-026)")
+
+
 def test_run_scoped_tests() -> None:
     """Plan 10 U1: reusable scoped-test check classifies pass/fail/timeout and
     returns failure detail for prompt feedback."""
@@ -1818,6 +1845,7 @@ def main() -> int:
     test_filter_tests_for_cluster()
     test_eval_cfg_pred()
     test_strip_doc_attrs()
+    test_condense_doc_attrs()
     test_run_scoped_tests()
     test_generate_in_parallel()
     test_partition_uncovered_lines()

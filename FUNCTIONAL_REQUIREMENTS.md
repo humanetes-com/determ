@@ -640,3 +640,54 @@ the symptom (LLM body edits).
 This is the maximally-constraining identity (Hard Rule 9): when two impls might
 be "the same", the merge must add MORE constraints to keep them apart, not
 fewer to fuse them.
+
+## FR-028 — Retrospective/diagnosis calls run with think=True, output-bounded
+
+**Decision:** Every retro/diagnosis LLM call (`_phase_c_retrospective`,
+`_whole_tree_retrospective`, and any future diagnosis prompt) MUST use
+`think=True` via the shared `_ask_retrospective` helper, with a bounded OUTPUT
+budget (`_RETRO_MAX_TOKENS`) and one retry on empty content. `think=False` is
+forbidden for these calls.
+
+**Why:** The served `Qwen/Qwen3.6-27B-FP8` (vLLM, `--reasoning-parser qwen3`)
+is a hybrid-thinking model. Under `think=False` it returns EMPTY `content` — the
+reasoning path never populates the visible answer — so the retro silently
+no-ops and the fix loop loses its guidance at exactly the stall points where it
+needs it most. Fill calls already use `think=True` and work. think=False was
+chosen for speed and to avoid context-budget blowups, but those blowups were on
+large fill/whole-file prompts; retro INPUT is tiny (error excerpt capped at a
+few KB), so the correct lever is bounding OUTPUT tokens, not disabling thinking.
+
+**Rule:** retro = `think=True` + `max_tokens=_RETRO_MAX_TOKENS` + retry-on-empty.
+The output cap must leave room for reasoning AND the final answer to both emit —
+if reasoning alone exhausts the budget, `content` truncates to empty again, so
+the cap is generous (not a 600-style starvation cap, which FR-024 already
+rejected).
+
+## FR-026 — Doc comments are condensed (not stripped, not dumped) in fill views
+
+**Decision:** In the prompt view shown to the model for body fills, doc
+comments are CONDENSED to a single `// <intent>` (or `//! <intent>`) line via
+the deterministic Python `_condense_doc_attrs` — never dumped verbatim and
+never erased. Each run of `#[doc=...]` / `#![doc=...]` collapses to the first
+sentence of prose; fenced code examples, badges (`[![…]]`), link refs, and
+inline `[t](url)` decorations are dropped (the url, not the text). The on-disk
+file is untouched.
+
+**Why:** Two prior behaviours were both wrong. Dumping raw docs floods the
+prompt (anyhow embeds hundreds of chars of example code per public fn — it hit
+the 100%-budget guard). Stripping docs to nothing throws away the author's
+intent, which is high-signal exactly for the hard fns (e.g. the `AdhocKind`
+specialization trick, the `Context` blanket impl). Condensing keeps the intent
+at ~1 line, in place (locality — the model fills that fn and sees its purpose
+right there), at negligible token cost (~46% smaller on error.rs).
+
+**Deterministic, not LLM (Hard Rule 9):** condensation is pure text processing
+on skeleton-derived `#[doc]` attrs (a pre-strip artifact, Rule-11-clean). No
+model call — the summary must be reproducible.
+
+**Scope / follow-ups:** the per-fn fill view (`_annotate_file_view`) uses it
+now. `#[cfg_attr(.., doc=..)]` conditional docs are intentionally left intact
+(cfg machinery, low volume). Still TODO: a 1-line `// intent:` per stub in the
+per-impl render, and a compact `file::sym → summary` doc-index artifact for the
+overview-style prompts (TASK 0b) that still dump full files.

@@ -5693,66 +5693,227 @@ def _extract_body_response(response: str) -> str | None:
     return response.strip() or None
 
 
+# Matches the start of an attribute: `#[`, `#![`, or any of those with
+# Rust-legal whitespace between the tokens (the baked skeleton emits the
+# spaced token form `# ! [ doc = ... ]`). Group 1 is the optional `!`.
+_ATTR_OPENER_RE = re.compile(r'#\s*(!?)\s*\[')
+
+
+def _attr_span_end(text: str, open_idx: int) -> int:
+    """Given `open_idx` = index of the `[` that opens an attribute, return the
+    index just past the matching `]`. Bracket depth is tracked ONLY outside
+    string literals, so `[`/`]` inside a doc string (markdown links, badges,
+    embedded code) do not corrupt the count. Returns -1 if unbalanced.
+
+    Handles normal (`"..."`, with `\\"` escapes) and raw (`r"..."`, `r#"..."#`)
+    string literals — the forms that appear inside `#[doc = ...]`.
+    """
+    n = len(text)
+    i = open_idx
+    depth = 0
+    while i < n:
+        c = text[i]
+        if c == '"':
+            # Possible raw string: count preceding `r` + `#`s.
+            hashes = 0
+            j = i - 1
+            while j >= 0 and text[j] == '#':
+                hashes += 1
+                j -= 1
+            is_raw = j >= 0 and text[j] == 'r'
+            i += 1
+            if is_raw:
+                closer = '"' + ('#' * hashes)
+                end = text.find(closer, i)
+                i = n if end == -1 else end + len(closer)
+            else:
+                while i < n:
+                    if text[i] == '\\':
+                        i += 2
+                        continue
+                    if text[i] == '"':
+                        i += 1
+                        break
+                    i += 1
+            continue
+        if c == '[':
+            depth += 1
+        elif c == ']':
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return -1
+
+
+def _strip_attrs_for_view(text: str, *, bang: bool, doc_only: bool) -> str:
+    """Remove attributes from the PROMPT view only (on-disk file is untouched).
+
+    `bang=True`  → strip inner `#![...]` attributes (crate-level).
+    `bang=False` + `doc_only=True` → strip outer `#[doc...]` attributes.
+
+    Attribute spans are located string-literal-aware via `_attr_span_end`, so
+    `[`/`]` inside doc content can never desync the parser (the bug that leaked
+    bare doc text into the view). The trailing newline after a stripped
+    attribute is swallowed so no blank line is left behind.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        if text[i] == '#':
+            m = _ATTR_OPENER_RE.match(text, i)
+            if m:
+                is_bang = m.group(1) == '!'
+                open_idx = m.end() - 1  # index of the `[`
+                end = _attr_span_end(text, open_idx)
+                if end != -1:
+                    inner = text[open_idx + 1:end - 1].lstrip()
+                    want = (is_bang if bang
+                            else (not is_bang and (not doc_only
+                                                   or inner.startswith('doc'))))
+                    if want:
+                        i = end
+                        if i < n and text[i] == '\n':
+                            i += 1
+                        continue
+        out.append(text[i])
+        i += 1
+    return ''.join(out)
+
+
 def _strip_doc_attrs(text: str) -> str:
     """Strip `#[doc = "..."]` attributes from the file view shown to the LLM.
 
-    The skeleton extractor preserves docstrings verbatim — anyhow's source
-    has hundreds of chars of example code embedded in `#[doc = "..."]`
-    attributes for each public fn. They eat huge amounts of prompt budget
-    and don't help the model fill a body. Strip them from the PROMPT
-    view only (on-disk file keeps them so cargo's `cargo doc` etc still
-    works).
-
-    Handles multi-line attributes by counting brackets.
+    anyhow's source embeds hundreds of chars of example code (with `[]`
+    markdown and embedded newlines) in `#[doc = "..."]` per public fn. They
+    eat prompt budget and don't help fill a body. Stripped from the PROMPT
+    view only — the on-disk file keeps them so `cargo doc` still works.
     """
-    out_lines: list[str] = []
-    in_attr = False
-    depth = 0
-    for ln in text.splitlines():
-        s = ln.lstrip()
-        if not in_attr:
-            # `#[doc = "..."]` or `# [doc (hidden)]` etc. — whitespace
-            # between the # and [ is allowed by Rust.
-            if re.match(r'#\s*\[\s*doc\b', s):
-                depth = s.count("[") - s.count("]")
-                if depth <= 0:
-                    continue
-                in_attr = True
-                continue
-        else:
-            depth += ln.count("[") - ln.count("]")
-            if depth <= 0:
-                in_attr = False
-            continue
-        out_lines.append(ln)
-    return "\n".join(out_lines)
+    return _strip_attrs_for_view(text, bang=False, doc_only=True)
 
 
 def _strip_crate_attrs(text: str) -> str:
-    """Strip top-level `#![...]` crate attributes from the file view shown to
-    the LLM. They eat tokens and don't help the model fill a fn body. They're
-    only stripped from the PROMPT view — the on-disk file keeps them so cargo
-    builds correctly.
+    """Strip inner `#![...]` crate attributes from the file view shown to the
+    LLM (including the multi-line `#![doc = "..."]` module doc). PROMPT view
+    only — the on-disk file keeps them so cargo builds correctly.
     """
-    out_lines: list[str] = []
-    in_attr = False
-    depth = 0
-    for ln in text.splitlines():
-        s = ln.lstrip()
-        if not in_attr and s.startswith("#!["):
-            # Single-line `#![...]` — count brackets on this line.
-            depth = s.count("[") - s.count("]")
-            if depth <= 0:
-                continue  # one-line attr fully closed; skip
-            in_attr = True
+    return _strip_attrs_for_view(text, bang=True, doc_only=False)
+
+
+def _doc_attr_string(attr_inner: str) -> "str | None":
+    """Given the text inside an attribute's brackets (e.g. `doc = " summary"`),
+    return the doc string content, or None if this is not a `doc = "..."` attr.
+    `#[doc(hidden)]` and other non-string doc attrs return "" (drop, no text)."""
+    m = re.match(r'doc\s*=\s*', attr_inner)
+    if not m:
+        return None
+    rest = attr_inner[m.end():].lstrip()
+    if not rest.startswith('"'):
+        return ""  # doc(hidden) / doc(alias=...) etc — no prose to keep
+    body = rest[1:]
+    out: list[str] = []
+    i = 0
+    while i < len(body):
+        if body[i] == '\\' and i + 1 < len(body):
+            out.append(body[i + 1])
+            i += 2
             continue
-        if in_attr:
-            depth += ln.count("[") - ln.count("]")
-            if depth <= 0:
-                in_attr = False
+        if body[i] == '"':
+            break
+        out.append(body[i])
+        i += 1
+    return ''.join(out)
+
+
+def _condense_doc_run(contents: "list[str]") -> str:
+    """Condense a run of consecutive doc-attr strings to a one-line summary:
+    first sentence of prose, with fenced code, badges, and link-refs dropped
+    and inline `[text](url)` reduced to `text`. Empty when the doc is all
+    examples/badges (nothing worth a line)."""
+    summary: list[str] = []
+    for raw in contents:
+        s = raw.strip()
+        if s.startswith('```'):
+            break                      # code example begins — stop the summary
+        if not s:
+            if summary:
+                break                  # blank line after prose ends the summary
             continue
-        out_lines.append(ln)
-    return "\n".join(out_lines)
+        if s.startswith('[![') or re.match(r'\[[^\]]+\]:', s):
+            continue                   # badge / link reference definition
+        summary.append(s)
+        if '.' in s:
+            break                      # sentence terminator reached
+    text = ' '.join(summary).strip()
+    if '.' in text:
+        text = text[:text.index('.') + 1]
+    text = re.sub(r'\[([^\]]+)\]\([^)]*\)', r'\1', text)   # [t](url) -> t
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text[:200].rstrip()
+
+
+def _condense_doc_attrs(text: str) -> str:
+    """Condense (not delete) doc comments in the prompt view: each run of
+    `#[doc=...]` / `#![doc=...]` attributes collapses to a single
+    `// <intent>` (or `//! <intent>`) line. Non-doc `#![...]` crate attrs are
+    dropped (they don't help fill a body). All other tokens pass through.
+
+    Deterministic Python (Hard Rule 9) — preserves the author's intent overview
+    at ~1 line instead of either dumping hundreds of chars of examples or
+    erasing the intent entirely (FR-026). String-literal-aware via
+    `_attr_span_end`, so `[]` inside doc content can never desync the parse.
+    """
+    out: list[str] = []
+    run: list[str] = []
+    run_bang = False
+    run_active = False
+
+    def _flush() -> None:
+        nonlocal run, run_active, run_bang
+        if run_active:
+            s = _condense_doc_run(run)
+            if s:
+                out.append(('//! ' if run_bang else '// ') + s + '\n')
+            run = []
+            run_active = False
+            run_bang = False
+
+    i = 0
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if c == '#':
+            m = _ATTR_OPENER_RE.match(text, i)
+            if m:
+                is_bang = m.group(1) == '!'
+                open_idx = m.end() - 1
+                end = _attr_span_end(text, open_idx)
+                if end != -1:
+                    inner = text[open_idx + 1:end - 1].strip()
+                    doc_str = _doc_attr_string(inner)
+                    if doc_str is not None:           # a doc attr
+                        if not run_active:
+                            run_active = True
+                            run_bang = is_bang
+                        if doc_str:
+                            run.append(doc_str)
+                        i = end
+                        if i < n and text[i] == '\n':
+                            i += 1
+                        continue
+                    if is_bang:                       # non-doc crate attr → drop
+                        _flush()
+                        i = end
+                        if i < n and text[i] == '\n':
+                            i += 1
+                        continue
+        if not c.isspace():
+            _flush()
+        out.append(c)
+        i += 1
+    _flush()
+    return ''.join(out)
 
 
 def _annotate_file_view(file_text: str, target_fn: str) -> str:
@@ -5762,11 +5923,11 @@ def _annotate_file_view(file_text: str, target_fn: str) -> str:
     fns are "to-be-filled later" vs the immediate target, instead of treating
     the stubs as permanent missing pieces it must work around.
 
-    Top-level `#![...]` crate attributes are stripped from the prompt view
-    (P3.6) since they only eat tokens and don't help fill bodies.
+    Doc comments are CONDENSED to a one-line intent (FR-026) rather than
+    dumped (token blowup) or erased (intent lost). Non-doc crate attrs are
+    dropped. PROMPT view only — the on-disk file is untouched.
     """
-    file_text = _strip_crate_attrs(file_text)
-    file_text = _strip_doc_attrs(file_text)
+    file_text = _condense_doc_attrs(file_text)
     out: list[str] = []
     i = 0
     last_fn_end = 0
@@ -7499,6 +7660,31 @@ def _improvement_loop(
     return False, last_output, history
 
 
+# Retro/diagnosis calls MUST run with think=True (FR-028). The served
+# Qwen3.6 model (vLLM + --reasoning-parser qwen3) returns EMPTY content under
+# think=False — its hybrid-thinking path never populates `content`. Fill calls
+# already use think=True and work. think=True was once dropped pipeline-wide for
+# context-budget reasons, but that was the large fill prompts; retro INPUT is
+# tiny, so we cap OUTPUT tokens instead of disabling thinking. The cap must be
+# generous enough for reasoning + the 2-line answer to both emit (if reasoning
+# alone exhausts the budget, `content` is truncated to empty again).
+_RETRO_MAX_TOKENS = 6144
+
+
+def _ask_retrospective(prompt: str, model: str | None = None) -> str:
+    """Issue a retro/diagnosis prompt with think=True and a bounded output
+    budget. One retry when the first response is empty (transient empty-content
+    from the reasoning endpoint). Returns "" if both attempts come back empty.
+    Raising callers keep their own try/except for true LLM exceptions."""
+    result = ""
+    for _attempt in range(2):
+        result = ask(prompt, model=model or _TASK2_MODEL,
+                     think=True, max_tokens=_RETRO_MAX_TOKENS)
+        if (result or "").strip():
+            return result
+    return result or ""
+
+
 def _whole_tree_retrospective(
     error_excerpt: str,
     history: "list[dict]",
@@ -7558,7 +7744,7 @@ def _whole_tree_retrospective(
         "set CATEGORY: GENUINELY_HARD."
     )
     try:
-        result = ask(prompt, model=_TASK2_MODEL, think=False)
+        result = _ask_retrospective(prompt)
     except Exception as e:
         _log(f"  [retro/{name}] LLM call failed: {e}")
         return ""
@@ -8574,12 +8760,12 @@ def _phase_c_retrospective(
         "`self.inner.by_ref().as_ref()` to traverse the NonNull wrapper "
         "instead of `*self.inner`\"), NOT a generic 'try harder' platitude."
     )
-    # FR-024: use the global MAX_TOKENS default (derived from
-    # VLLM_MAX_MODEL_LEN). Hardcoding max_tokens=600 starved the call —
-    # with Qwen's thinking budget allocations the visible-content
-    # portion was empty, parser failed, and no retrospective got saved.
+    # FR-028: retro runs think=True with a bounded output budget. think=False
+    # returns empty content on the vLLM reasoning-parser endpoint; the OUTPUT
+    # cap (not a context-budget cap) keeps reasoning from running away. One
+    # retry on empty is handled inside _ask_retrospective.
     try:
-        result = ask(prompt, model=_TASK2_MODEL, think=False)
+        result = _ask_retrospective(prompt)
     except Exception as e:
         _log(f"  [phase-c/retro] LLM call failed: {e}")
         return {"category": "", "guidance": "", "signal": "llm_error"}
