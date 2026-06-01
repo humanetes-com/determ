@@ -1432,6 +1432,100 @@ pub fn enumerate_dispatch_families_in_tree(input_dir: &Path) -> Result<Vec<Dispa
     Ok(out)
 }
 
+/// Collect the leaf cfg predicates of a `#[cfg(...)]`-style condition meta
+/// (e.g. `error_generic_member_access`, `feature = "std"`), descending through
+/// `all(...)`/`any(...)`/`not(...)`. Used to learn which cfgs, when active,
+/// switch on a nightly `feature(...)` attribute.
+fn cfg_meta_leaves(meta: &syn::Meta, out: &mut std::collections::BTreeSet<String>) {
+    match meta {
+        syn::Meta::Path(p) => {
+            out.insert(path_to_string(p));
+        }
+        syn::Meta::NameValue(_) => {
+            out.insert(quote!(#meta).to_string());
+        }
+        syn::Meta::List(list) => {
+            let name = list.path.get_ident().map(|i| i.to_string()).unwrap_or_default();
+            if matches!(name.as_str(), "all" | "any" | "not") {
+                if let Ok(nested) = syn::parse2::<NestedMetaList>(list.tokens.clone()) {
+                    for m in &nested.items {
+                        cfg_meta_leaves(m, out);
+                    }
+                }
+            } else {
+                out.insert(quote!(#meta).to_string());
+            }
+        }
+    }
+}
+
+/// If `attr` is `#[cfg_attr(COND, ... feature(...) ...)]`, record COND's leaf
+/// cfg predicates — i.e. the cfgs that, when active, enable a nightly
+/// `#![feature(...)]`. Such a cluster must compile with `+nightly`.
+fn collect_feature_gate_cfgs_from_attr(
+    attr: &syn::Attribute,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    if !attr.path().is_ident("cfg_attr") {
+        return;
+    }
+    let syn::Meta::List(list) = &attr.meta else { return };
+    let Ok(nested) = syn::parse2::<NestedMetaList>(list.tokens.clone()) else { return };
+    let mut it = nested.items.iter();
+    let Some(cond) = it.next() else { return };
+    // The remaining metas are the attributes applied when COND holds.
+    let enables_feature = it.any(|m| matches!(
+        m, syn::Meta::List(l) if l.path.is_ident("feature")
+    ));
+    if enables_feature {
+        cfg_meta_leaves(cond, out);
+    }
+}
+
+fn scan_items_for_feature_gates(
+    items: &[Item],
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    for it in items {
+        for attr in item_attrs(it) {
+            collect_feature_gate_cfgs_from_attr(attr, out);
+        }
+        if let Item::Mod(m) = it {
+            if let Some((_, inner)) = &m.content {
+                scan_items_for_feature_gates(inner, out);
+            }
+        }
+    }
+}
+
+/// Walk a tree and return the set of cfg predicates that gate a nightly
+/// `#![feature(...)]` attribute (via `#[cfg_attr(COND, feature(...))]`). A
+/// compiler cluster whose active cfg-set intersects this needs `+nightly`.
+pub fn enumerate_feature_gate_cfgs_in_tree(input_dir: &Path) -> Result<Vec<String>> {
+    use std::collections::BTreeSet;
+    let mut out: BTreeSet<String> = BTreeSet::new();
+    for entry in walkdir::WalkDir::new(input_dir).into_iter().filter_map(|e| e.ok()) {
+        let p = entry.path();
+        if !p.is_file() || p.extension().and_then(|s| s.to_str()) != Some("rs") {
+            continue;
+        }
+        let rel = p.strip_prefix(input_dir).unwrap_or(p);
+        if rel.components().any(|c| {
+            let s = c.as_os_str().to_string_lossy();
+            s.starts_with('.') || s == "target"
+        }) {
+            continue;
+        }
+        let Ok(source) = std::fs::read_to_string(p) else { continue };
+        let Ok(ast) = parse_file(&source) else { continue };
+        for attr in &ast.attrs {
+            collect_feature_gate_cfgs_from_attr(attr, &mut out);
+        }
+        scan_items_for_feature_gates(&ast.items, &mut out);
+    }
+    Ok(out.into_iter().collect())
+}
+
 // ---------------------------------------------------------------------------
 // AST-level cluster merge.
 //
@@ -1888,6 +1982,86 @@ fn merge_mod_block(bucket: &[(&str, &str, &syn::Item)]) -> syn::ItemMod {
 }
 
 /// Top-level entry: merge N cluster files into a single source string.
+/// If `attr` is a `#[doc = "...\n..."]` whose string spans multiple lines,
+/// return the individual lines. `None` for non-doc or already single-line docs.
+fn doc_attr_lines(attr: &syn::Attribute) -> Option<Vec<String>> {
+    if !attr.path().is_ident("doc") {
+        return None;
+    }
+    let syn::Meta::NameValue(nv) = &attr.meta else { return None };
+    let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) = &nv.value else {
+        return None;
+    };
+    let val = s.value();
+    if !val.contains('\n') {
+        return None;
+    }
+    Some(val.split('\n').map(|l| l.to_string()).collect())
+}
+
+fn make_doc_attr(style: syn::AttrStyle, line: &str) -> syn::Attribute {
+    let lit = syn::LitStr::new(line, proc_macro2::Span::call_site());
+    match style {
+        syn::AttrStyle::Inner(_) => syn::parse_quote!(#![doc = #lit]),
+        syn::AttrStyle::Outer => syn::parse_quote!(#[doc = #lit]),
+    }
+}
+
+/// Split every multi-line `#[doc]` in `attrs` into one single-line `#[doc]` per
+/// line (FR-033). prettyplease renders single-line docs uniformly as `///` /
+/// `//!`, but switches a doc string that contains an embedded newline to the
+/// `/** */` / `/*! */` block form — and a run that alternates between the two
+/// styles splits a doctest's ```` ``` ```` fence across comment kinds, so the
+/// example's hidden setup lines (`# struct Foo;`) no longer reach the doctest
+/// (E0425). Normalising to one line per doc keeps every example intact.
+fn normalize_doc_attrs(attrs: &mut Vec<syn::Attribute>) {
+    if !attrs.iter().any(|a| doc_attr_lines(a).is_some()) {
+        return;
+    }
+    let mut out: Vec<syn::Attribute> = Vec::with_capacity(attrs.len());
+    for attr in attrs.drain(..) {
+        match doc_attr_lines(&attr) {
+            Some(lines) => {
+                for line in lines {
+                    out.push(make_doc_attr(attr.style, &line));
+                }
+            }
+            None => out.push(attr),
+        }
+    }
+    *attrs = out;
+}
+
+fn normalize_doc_attrs_in_items(items: &mut [syn::Item]) {
+    for it in items.iter_mut() {
+        if let Some(attrs) = item_attrs_mut(it) {
+            normalize_doc_attrs(attrs);
+        }
+        match it {
+            syn::Item::Mod(m) => {
+                if let Some((_, inner)) = &mut m.content {
+                    normalize_doc_attrs_in_items(inner);
+                }
+            }
+            syn::Item::Impl(i) => {
+                for ii in &mut i.items {
+                    if let Some(a) = impl_item_attrs_mut(ii) {
+                        normalize_doc_attrs(a);
+                    }
+                }
+            }
+            syn::Item::Trait(t) => {
+                for ti in &mut t.items {
+                    if let Some(a) = trait_item_attrs_mut(ti) {
+                        normalize_doc_attrs(a);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 pub fn merge_cluster_files(files: Vec<ClusterFile>) -> Result<String> {
     if files.is_empty() {
         return Ok(String::new());
@@ -1900,11 +2074,15 @@ pub fn merge_cluster_files(files: Vec<ClusterFile>) -> Result<String> {
     // Preserve shebang and inner attrs from the first cluster (base).
     let base_ast = &parsed[0].2;
     let merged_items = merge_top_items(&parsed);
-    let merged = syn::File {
+    let mut merged = syn::File {
         shebang: base_ast.shebang.clone(),
         attrs: base_ast.attrs.clone(),
         items: merged_items,
     };
+    // FR-033: normalise doc comments to one line per `#[doc]` so prettyplease
+    // renders them uniformly (no `///`↔`/** */` alternation that breaks docs).
+    normalize_doc_attrs(&mut merged.attrs);
+    normalize_doc_attrs_in_items(&mut merged.items);
     Ok(prettyplease::unparse(&merged))
 }
 
@@ -2089,6 +2267,24 @@ mod tests {
         // `read` must not be fused into the `where T: ?Sized` block.
         assert!(out.contains("fn read"));
         assert!(out.contains("fn as_ptr"));
+    }
+
+    #[test]
+    fn merge_normalizes_multiline_doc_to_uniform_line_docs() {
+        // FR-033: a doc example must not render with mixed /// and /** */ —
+        // that splits the ``` fence and drops `# struct Foo;` from the doctest.
+        let src = "#[doc = \" ```\\n # struct Foo;\\n let _ = Foo;\\n ```\"]\npub fn f() {}\n";
+        let out = merge_cluster_files(vec![ClusterFile {
+            name: "stable".into(),
+            source: src.into(),
+            cfg_gate: String::new(),
+        }])
+        .unwrap();
+        assert!(!out.contains("/**"), "block doc leaked:\n{out}");
+        assert!(!out.contains("*/"), "block doc close leaked:\n{out}");
+        assert!(out.contains("struct Foo;"), "hidden setup line lost:\n{out}");
+        // every doc line is a `///` line-doc
+        assert_eq!(out.matches("///").count(), 4, "{out}");
     }
 
     #[test]

@@ -775,3 +775,56 @@ B3 unblocks compile convergence; it does not bypass behavioural validation.
 **Validation:** live KEEP/REVERT decisions must match the shadow predictions, and
 the per-pass error floor should drop below its previously-stuck value for the
 first time as correct pieces accumulate.
+
+## FR-030 — Clusters that gate a nightly feature must use the nightly toolchain
+
+**Decision:** At cluster identification, a compiler cluster is marked
+`requires_nightly=True` (→ `toolchain="nightly"`, so every per-cluster compile
+and TASK 3 runs `cargo +nightly`) when its active cfg-set intersects the set of
+cfgs that gate a nightly `#![feature(...)]` attribute. That set is computed
+statically by the syn extractor (`--enumerate-feature-gate-cfgs`): it finds
+`#[cfg_attr(COND, feature(...))]` and returns COND's leaf cfg predicates. No
+regex.
+
+**Why:** anyhow's nightly cfg activates
+`#![cfg_attr(error_generic_member_access, feature(error_generic_member_access))]`,
+a nightly-only attribute. Running that cluster on stable yields E0554. The old
+behaviour relied on a runtime E0554→nightly retry that did not persist to the
+cluster manifest, so TASK 3 still ran on stable. Static detection at cluster ID
+is deterministic and persists.
+
+## FR-032 — Cluster gate predicate must OR the cfg and feature forms
+
+**Decision:** When the merge gates a divergent item to one cluster
+(`_cluster_cfg_predicate_for_gate`), each active predicate `N` becomes
+`any(N, feature = "N")` and each excluded predicate becomes
+`not(any(N, feature = "N"))`, all AND'd. A cfg can be switched on EITHER as a
+bare `--cfg N` (RUSTFLAGS) or as a cargo `feature = "N"`, and a cluster sets
+only one; the gate must be true under whichever form that cluster uses.
+
+**Why:** The old builder read `cfg_true`/`cfg_false`, which list BOTH forms as
+separate AND terms → `all(N, feature = "N", …)`. A `--cfg`-activated cluster
+does NOT enable the feature, so that gate was UNSATISFIABLE, and every divergent
+method gated this way disappeared under that cluster — producing E0046 ("not all
+trait items implemented") across the merged tree for the non-stable clusters,
+even though each cluster's source compiled standalone. `cfg_true`/`cfg_false`
+remain correct for predicate EVALUATION (OR semantics); only the gate BUILDER
+was wrong. Verified: with the fix, the merged anyhow lib compiles under all
+three clusters (stable / anyhow_no_core_error / nightly) with 0 errors.
+
+## FR-033 — Doc comments merge to one-line `#[doc]` so rendering stays uniform
+
+**Decision:** Before the merged tree is unparsed (`merge_cluster_files`), every
+multi-line `#[doc = "...\n..."]` is split into one single-line `#[doc]` per
+line. prettyplease renders single-line docs uniformly as `///` / `//!`, but
+switches any doc string containing an embedded newline to the `/** */` / `/*! */`
+block form.
+
+**Why:** A doc example that ends up rendered with a MIX of `///` and `/** */`
+splits the example's ```` ``` ```` code fence across two comment kinds, so its
+hidden setup lines (`# struct SuspiciousError;`, `# fn helper() {...}`) no longer
+reach the doctest — yielding E0425 ("cannot find type/function") on otherwise
+correct examples. The same alternation corrupted module docs (the earlier bare
+`//!` line). Normalising to one line per `#[doc]` keeps prettyplease in the
+uniform `///`/`//!` path, so doctests and module docs render intact. Verified:
+0 block-doc lines in the merged `lib.rs`, examples preserved.

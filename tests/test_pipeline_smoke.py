@@ -391,6 +391,29 @@ def test_condense_doc_attrs() -> None:
     print("  OK  _condense_doc_attrs (FR-026)")
 
 
+def test_cluster_gate_predicate_is_satisfiable() -> None:
+    """FR-032: a cluster activated by `--cfg N` must get a gate that's true
+    under that cfg. The old `all(N, feature="N", …)` was unsatisfiable (feature
+    off) → divergent items vanished from the merge → E0046."""
+    import pipeline
+    from types import SimpleNamespace
+    # no_core cluster: activated by --cfg anyhow_no_core_error, excludes egma
+    c = SimpleNamespace(
+        active_cfg=["anyhow_no_core_error"],
+        excluded_cfg=["error_generic_member_access"],
+    )
+    g = pipeline._cluster_cfg_predicate_for_gate(c)
+    # each cfg is OR'd with its feature form → satisfiable by the bare --cfg
+    assert 'any(anyhow_no_core_error, feature = "anyhow_no_core_error")' in g, g
+    assert 'not(any(error_generic_member_access' in g, g
+    # must NOT require the feature form via a bare AND term
+    assert ', feature = "anyhow_no_core_error",' not in g, f"feature AND'd: {g}"
+    # default (no active/excluded) → empty gate
+    assert pipeline._cluster_cfg_predicate_for_gate(
+        SimpleNamespace(active_cfg=[], excluded_cfg=[])) == ""
+    print("  OK  _cluster_cfg_predicate_for_gate (FR-032)")
+
+
 def test_run_scoped_tests() -> None:
     """Plan 10 U1: reusable scoped-test check classifies pass/fail/timeout and
     returns failure detail for prompt feedback."""
@@ -1846,6 +1869,7 @@ def main() -> int:
     test_eval_cfg_pred()
     test_strip_doc_attrs()
     test_condense_doc_attrs()
+    test_cluster_gate_predicate_is_satisfiable()
     test_run_scoped_tests()
     test_generate_in_parallel()
     test_partition_uncovered_lines()

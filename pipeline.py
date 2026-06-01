@@ -11496,6 +11496,33 @@ def _dispatch_families_via_extractor(src_dir: Path) -> list[dict] | None:
         return None
 
 
+def _feature_gate_cfgs_via_extractor(src_dir: Path) -> list[str] | None:
+    """Invoke the extractor's --enumerate-feature-gate-cfgs subcommand.
+
+    Returns the cfg predicates that gate a nightly `#![feature(...)]` (via
+    `#[cfg_attr(cond, feature(...))]`), or None if the binary is unavailable.
+    A compiler cluster whose active cfg-set intersects this MUST compile with
+    the nightly toolchain (FR-030) — running it on stable yields E0554.
+    """
+    if not _SKELETON_EXTRACTOR_BIN.exists():
+        return None
+    try:
+        r = subprocess.run(
+            [str(_SKELETON_EXTRACTOR_BIN), "--enumerate-feature-gate-cfgs",
+             "--input", str(src_dir)],
+            capture_output=True, text=True, timeout=60,
+        )
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    try:
+        data = json.loads(r.stdout)
+        return data if isinstance(data, list) else None
+    except Exception:
+        return None
+
+
 def _build_dispatch_family_section(family: dict) -> str:
     """Render the <DISPATCH_FAMILY> prompt block: the family's traits, the
     dispatch method, and the dispatching macro_rules! source — the behavioural
@@ -13179,6 +13206,11 @@ def task0_cfg_scan(project_dir: Path) -> "list[BuildCluster]":
         return result
 
     # --- Step 5: build clusters ---
+    # FR-030: cfgs that switch on a nightly `#![feature(...)]`. Any cluster
+    # whose active cfg-set intersects this needs the nightly toolchain — set
+    # requires_nightly statically here rather than relying on a runtime E0554
+    # retry that doesn't persist to TASK 3.
+    _feature_gate_cfgs = set(_feature_gate_cfgs_via_extractor(src_dir) or [])
     stable_tarpaulin_exclude = ["*/nightly.rs"]
     stable_excluded_cfg = [p for p, _ in interesting]
 
@@ -13226,7 +13258,7 @@ def task0_cfg_scan(project_dir: Path) -> "list[BuildCluster]":
                 f"  You MAY use any symbols gated behind `#[cfg({pred})]`.\n"
                 f"  Only write tests for lines inside `#[cfg({pred})]` blocks — stable lines are already covered."
             )
-        clusters.append(BuildCluster(
+        _bc = BuildCluster(
             name=cluster_name,
             env_extra=env_extra,
             tarpaulin_exclude_files=tarpaulin_excl,
@@ -13235,7 +13267,13 @@ def task0_cfg_scan(project_dir: Path) -> "list[BuildCluster]":
             prompt_nightly_rule=pr,
             is_default=False,
             gated_files=_gated_files_for_excluded(excl),
-        ))
+        )
+        # FR-030: this cluster activates a nightly feature attr → needs +nightly.
+        if set(active) & _feature_gate_cfgs:
+            _bc.requires_nightly = True
+            _log(f"  cluster/{cluster_name}: requires nightly toolchain "
+                 f"(active cfg gates #![feature(...)]).")
+        clusters.append(_bc)
 
     # --- Step 6: write build_configs.md ---
     _write_build_configs(project_dir, clusters, predicate_lines)
@@ -16118,18 +16156,30 @@ def _cluster_cfg_predicate_for_gate(cluster) -> str:
     true for this cluster and false for all others — used as the gate when
     multiple clusters have divergent versions of the same item.
 
-    Composed from the cluster's own active_cfg (must be true) and the
-    excluded_cfg (must be false). Returns "" when the cluster has no
-    active/excluded preds — meaning it's the unconditional default and
-    items only present in this cluster don't need a gate.
+    FR-032: each cfg may be activated EITHER as a bare `--cfg N` (RUSTFLAGS)
+    OR as a cargo `feature = "N"`, and a given cluster sets only ONE of the
+    two. So each active predicate becomes `any(N, feature = "N")` (true under
+    whichever form this cluster uses) and each excluded predicate becomes
+    `not(any(N, feature = "N"))`. The whole gate ANDs these together.
+
+    The previous version read `cfg_true`/`cfg_false`, which list BOTH forms as
+    separate AND terms — `all(N, feature = "N", …)`. That is unsatisfiable for
+    a `--cfg`-activated cluster (the feature is off), so every divergent item
+    gated this way vanished under that cluster → E0046 in the merged tree.
+    Built from active_cfg/excluded_cfg (bare names) to avoid that double form.
     """
     if cluster is None:
         return ""
-    true_preds = list(getattr(cluster, "cfg_true", []) or [])
-    false_preds = list(getattr(cluster, "cfg_false", []) or [])
-    terms: list[str] = list(true_preds)
-    for fp in false_preds:
-        terms.append(f"not({fp})")
+
+    def _either(pred: str) -> str:
+        # Active if the bare cfg OR its cargo-feature form is set.
+        return f'any({pred}, feature = "{pred}")'
+
+    terms: list[str] = []
+    for p in (getattr(cluster, "active_cfg", []) or []):
+        terms.append(_either(p))
+    for p in (getattr(cluster, "excluded_cfg", []) or []):
+        terms.append(f"not({_either(p)})")
     if not terms:
         return ""
     if len(terms) == 1:

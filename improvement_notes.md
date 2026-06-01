@@ -87,3 +87,20 @@ Putting `fmt` in scope appears to invite `fmt::format_args` guesses (E0433),
 masked by `allow(unused_imports)` only when unused. Consider injecting prelude
 items only when referenced, or dropping `fmt::self`. Effort: low. Verify it
 actually reduces E0433 before/after. Low priority.
+
+## IN-5 💡 Fix-loop edit granularity should key off file SIZE, not a global flag
+Date: 2026-05-30 · Source: generate_fix_loop strategy discussion
+
+Whole-file rewrite worked "perfectly" in task0c only because task0c rewrites
+small files (generated `#[cfg(test)] mod gen_*` blocks). It breaks on large
+t2/t3 files (error.rs ~1644L/~50KB): output-token cap truncates the rewrite,
+and we regenerate 1600 lines to change 3. The new per_fn strategy (splice one
+body) targets exactly the large-file case.
+
+Insight: whole-file vs per_fn isn't a property of the PHASE — it's a property
+of the FILE. Small file → whole-file rewrite is fine and simplest. Big file →
+per-fn splice. The truly correct selector is file size (or fn-count), chosen
+per-file at fix time, not a global FIX_LOOP_STRATEGY env. We shipped the env
+switch as requested (per_fn default, legacy fallback); a future refinement is
+to make per_fn itself fall back to whole-file for small files automatically,
+making the env redundant. Effort: low once per_fn lands.

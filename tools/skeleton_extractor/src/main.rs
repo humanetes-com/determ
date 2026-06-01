@@ -18,6 +18,7 @@ fn main() -> Result<()> {
     let mut enumerate_types = false;
     let mut enumerate_mods = false;
     let mut enumerate_dispatch = false;
+    let mut enumerate_feature_cfgs = false;
     // --merge-clusters mode: read N cluster file specs, produce one merged
     // source file that compiles under each cluster's cfg. Each --cluster
     // arg is `name:path:cfg_predicate` (cfg may be empty for the default
@@ -67,6 +68,16 @@ fn main() -> Result<()> {
                 enumerate_types = false;
                 enumerate_mods = false;
                 enumerate_dispatch = true;
+            }
+            "--enumerate-feature-gate-cfgs" => {
+                // Emits a JSON array of cfg predicates that gate a nightly
+                // `#![feature(...)]` (via #[cfg_attr(cond, feature(...))]).
+                // A cluster whose active cfg-set intersects this needs +nightly.
+                enumerate_fns = false;
+                enumerate_types = false;
+                enumerate_mods = false;
+                enumerate_dispatch = false;
+                enumerate_feature_cfgs = true;
             }
             "--merge-clusters" => {
                 merge_clusters = true;
@@ -163,6 +174,11 @@ fn main() -> Result<()> {
     }
     if enumerate_dispatch {
         let records = skeleton_extractor::enumerate_dispatch_families_in_tree(&input)?;
+        println!("{}", serde_json::to_string(&records)?);
+        return Ok(());
+    }
+    if enumerate_feature_cfgs {
+        let records = skeleton_extractor::enumerate_feature_gate_cfgs_in_tree(&input)?;
         println!("{}", serde_json::to_string(&records)?);
         return Ok(());
     }
