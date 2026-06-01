@@ -9325,6 +9325,20 @@ def _phase_c_fill_impl_blocks(
         last_error_excerpt = ""
         last_response = ""
         members_filled_this_block = 0
+        # B3 (FR-029): baseline = the crate's error signature with THIS block's
+        # stubs still unimplemented. A fill is "non-regressing" if it adds no
+        # error beyond this baseline and none on the filled fns — then we keep
+        # it even when the crate doesn't fully compile, so prerequisites of an
+        # interdependent web accumulate instead of being reverted forever.
+        # Gated by PHASE_C_KEEP_NONREGRESSING (instant rollback); captured once
+        # per block (the snapshot is pristine here).
+        _b3_keep = os.getenv("PHASE_C_KEEP_NONREGRESSING", "0").strip() not in ("", "0", "false")
+        _baseline_sig: frozenset = frozenset()
+        if _b3_keep:
+            with _splice_check_lock:
+                _brc, _bout, _bdiag = _run_cargo_check_diag(
+                    check_cmd, target_src_dir, cluster_env)
+            _baseline_sig = _cargo_err_sig_from_diagnostics(_bdiag)
         _t0 = time.monotonic()
         _emit("phase_c.impl.fill.start", data={
             "cluster": cluster_name,
@@ -9458,6 +9472,39 @@ def _phase_c_fill_impl_blocks(
                             "fix_attempts": fix_attempt,
                         })
                     break
+                # B3 (FR-029): keep a NON-REGRESSING fill even when the crate
+                # doesn't fully compile — it adds no error beyond baseline and
+                # none on the filled fns, so it's a correct prerequisite of the
+                # interdependent web, not a failure to discard. This dissolves
+                # the convergence deadlock where every correct piece is reverted
+                # for not single-handedly making rc==0.
+                if _b3_keep:
+                    _cur_sig = _cargo_err_sig_from_diagnostics(diagnostics)
+                    _new_errs = _cur_sig - _baseline_sig
+                    _frontier = _frontier_from_diags(diagnostics, target_src_dir)
+                    _filled = {fd["fn_name"] for fd, _ in routed}
+                    _on_fill = any(f == block["file"] and fn in _filled
+                                   for (f, fn) in _frontier)
+                    if not _new_errs and not _on_fill:
+                        members_filled_this_block = spliced_now
+                        fns_filled_total += spliced_now
+                        impls_filled += 1
+                        _log(f"  [phase-c/impl] {block_id}: KEPT {spliced_now} "
+                             f"fn(s) (B3 non-regressing; {len(_cur_sig)} crate "
+                             f"err(s) remain elsewhere) (attempt {fix_attempt}).")
+                        _emit("phase_c.impl.fill.done", duration_ms=int(
+                            (time.monotonic() - _t0) * 1000),
+                            data={
+                                "cluster": cluster_name,
+                                "file": block["file"],
+                                "container": block["container"],
+                                "members_filled": spliced_now,
+                                "members_failed": 0,
+                                "fix_attempts": fix_attempt,
+                                "b3_kept": True,
+                                "crate_errs_remaining": len(_cur_sig),
+                            })
+                        break
                 if _u2_impl is not None:
                     cargo_out = _u2_impl[1]   # route test-failure detail as the error
                 # Compile failed (or U2 test failure). Use the structured
@@ -9477,6 +9524,26 @@ def _phase_c_fill_impl_blocks(
                 _log(f"  [phase-c/impl] {block_id}: compile failed "
                      f"(attempt {fix_attempt}); errs={cur_err_count} "
                      f"floor={best_err_count} stall={block_stall}.")
+                # B3 SHADOW (FR-029) — observe only, NO behaviour change. Log
+                # what a "keep non-regressing fills" rule WOULD do: a fill is
+                # non-regressing when NO remaining crate error points at the
+                # fns we just filled (the blockers are elsewhere), yet the
+                # current rc==0 gate reverts it anyway. We collect these shadow
+                # decisions for ~one run and compare against outcomes before
+                # flipping the rule live, so we never relax revert blindly.
+                try:
+                    _filled_fns = {fd["fn_name"] for fd, _ in routed}
+                    _diag_frontier = _frontier_from_diags(diagnostics, target_src_dir)
+                    _errs_on_fill = sorted(
+                        fn for (f, fn) in _diag_frontier
+                        if f == block["file"] and fn in _filled_fns)
+                    _b3 = "KEEP" if not _errs_on_fill else "REVERT"
+                    _log(f"  [B3-shadow] {block_id}: WOULD {_b3} — "
+                         f"{cur_err_count} crate err(s), {len(_errs_on_fill)} "
+                         f"on this fill (filled={sorted(_filled_fns)}; "
+                         f"on_fill={_errs_on_fill}).")
+                except Exception as _b3e:
+                    _log(f"  [B3-shadow] {block_id}: shadow calc skipped ({_b3e}).")
                 # Revert and let the next iter try with the error context.
                 file_path.write_text(snapshot, encoding="utf-8")
                 if block_stall >= block_max_stalls:

@@ -748,3 +748,30 @@ container names a family trait OR a return ("tag") type, so the tag impls
 out the full `.method().chained()` path. General signal — no crate-specific
 names. Open follow-ups: fill the whole family in ONE call (B2) and stop
 reverting locally-correct fills blocked by other unfilled fns (B3, FR-029).
+
+## FR-029 — Keep non-regressing fills (dissolve the convergence deadlock)
+
+**Decision:** A per-impl fill is accepted when it does NOT regress — it adds no
+compile error beyond the block's baseline (the crate's errors with this block's
+stubs still unimplemented) AND no remaining error points at the filled fns —
+even if the crate as a whole does not yet compile. The old rule (`rc==0`, whole
+crate compiles, else revert) is replaced by "revert only on a real regression."
+Gated by `PHASE_C_KEEP_NONREGRESSING` for instant rollback.
+
+**Why:** Interdependent code (anyhow's macro-support traits: `Bool`, the `ensure`
+machinery, `Context`, the `anyhow_kind` family) has a stable error set no single
+fill clears alone. Under the `rc==0` gate every CORRECT piece is reverted for not
+single-handedly making the crate compile, so prerequisites never accumulate and
+the error floor never drops — a convergence deadlock. The B3 shadow run proved
+it: 16 fills with zero errors on themselves (e.g. `anyhow_kind` returning its
+tag) were being discarded purely because ~14 errors sat elsewhere.
+
+**Guard (never relax blindly):** keep ONLY when the post-splice error set adds
+nothing over baseline and nothing references the filled fns. A fill that
+introduces any new error, anywhere, is still reverted. A kept fill that compiles
+but is behaviourally wrong is caught downstream by the TDD test loop (FR-024) —
+B3 unblocks compile convergence; it does not bypass behavioural validation.
+
+**Validation:** live KEEP/REVERT decisions must match the shadow predictions, and
+the per-pass error floor should drop below its previously-stuck value for the
+first time as correct pieces accumulate.
