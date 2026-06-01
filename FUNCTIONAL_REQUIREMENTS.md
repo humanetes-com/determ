@@ -691,3 +691,60 @@ now. `#[cfg_attr(.., doc=..)]` conditional docs are intentionally left intact
 (cfg machinery, low volume). Still TODO: a 1-line `// intent:` per stub in the
 per-impl render, and a compact `file::sym → summary` doc-index artifact for the
 overview-style prompts (TASK 0b) that still dump full files.
+
+## FR-027 — Autoref-specialization dispatch families are co-designed as one unit
+
+**Decision:** A "dispatch family" — 2+ sibling traits declaring the same method
+name, where that method is invoked (`.method(...)`) from a `macro_rules!` body —
+is detected statically by the syn extractor (`--enumerate-dispatch-families`)
+and co-designed together in the per-impl fill. When a block implements a family
+trait, the fill broadens `related_blocks` to EVERY family-trait block and
+injects a `<DISPATCH_FAMILY>` section carrying the dispatching macro source (the
+behavioural spec). Detection is AST/token-walk only — no regex (banned).
+
+**Why:** anyhow's `anyhow!`/`ensure!` use autoref-specialization:
+`AdhocKind`/`TraitKind`/`BoxedKind` each expose `anyhow_kind` returning a
+distinct tag, and the macro's `x.anyhow_kind()....` chain dispatches by method
+resolution over the blanket-impl bounds. Correctness is a CROSS-IMPL invariant:
+filling one member in isolation (the model returned just `Boxed` for
+`anyhow_kind`) silently breaks every call site — `anyhow_kind` *compiled* but 14
+runtime tests failed. Per-fn / per-impl granularity is structurally too small
+for this class; the family must be seen and designed together.
+
+**Detection signal (general, not anyhow-specific):** shared method name across
+sibling traits, GATED by an actual macro that calls it. The macro gate is what
+excludes incidental shared names (e.g. std's `source`). On anyhow it cleanly
+finds exactly two families (`anyhow_kind`, `__dispatch_ensure`) and nothing
+spurious.
+
+**Approach:** co-design is delivered by surfacing the whole family + the
+dispatch macro as shared context to each member fill (reusing the per-impl
+loop), not by a single mega-call — the model gets the full family view on every
+member so it keeps tags and bounds consistent. If it still fails with the full
+family + macro spec shown, that fn class is genuinely hard (Rule 11 spirit):
+accept the limit, do not cheat.
+
+**Rejected earlier framing:** "macros are a missing fill unit." The spike showed
+macros are preserved verbatim in the skeleton — not the problem. The defect is
+the macro's SUPPORT machinery (the specialization traits), so the fix is family
+co-design, not macro reconstruction.
+
+**B1 — chain-following (the family surface is the whole macro call chain).**
+The dispatched method is only the FIRST hop. anyhow's macro chains
+`x.anyhow_kind().new(arg)`: `anyhow_kind` (a trait method) returns a tag type
+(`Adhoc`/`Trait`/`Boxed`), then `.new(...)` is called on that tag — and `new`
+lives on the tag's INHERENT impl, not on any trait. A trait-only scan therefore
+sees `anyhow_kind` (trivial: return a tag) but misses `new` (the method that
+actually builds the `Error`), which is exactly where behaviour was wrong while
+the code still compiled.
+
+The detector follows the chain: for the dispatched method it reads its return
+types from the trait signatures, finds `.first().second(...)` chains in the
+macro body (token walk, no regex), and keeps `second` when it exists on a return
+type's inherent impl. The family then carries `return_types`, `chained_methods`,
+and `member_files`. The fill treats a block as a family member when its
+container names a family trait OR a return ("tag") type, so the tag impls
+(holding `new`) are co-designed with the dispatch traits, and the prompt spells
+out the full `.method().chained()` path. General signal — no crate-specific
+names. Open follow-ups: fill the whole family in ONE call (B2) and stop
+reverting locally-correct fills blocked by other unfilled fns (B3, FR-029).

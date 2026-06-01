@@ -17,6 +17,7 @@ fn main() -> Result<()> {
     let mut enumerate_fns = false;
     let mut enumerate_types = false;
     let mut enumerate_mods = false;
+    let mut enumerate_dispatch = false;
     // --merge-clusters mode: read N cluster file specs, produce one merged
     // source file that compiles under each cluster's cfg. Each --cluster
     // arg is `name:path:cfg_predicate` (cfg may be empty for the default
@@ -58,11 +59,21 @@ fn main() -> Result<()> {
                 enumerate_types = false;
                 enumerate_mods = true;
             }
+            "--enumerate-dispatch-families" => {
+                // Emits a JSON array of DispatchFamily to stdout — autoref-
+                // specialization trait families (shared method + macro
+                // dispatch). Mutually exclusive with the other --enumerate-*.
+                enumerate_fns = false;
+                enumerate_types = false;
+                enumerate_mods = false;
+                enumerate_dispatch = true;
+            }
             "--merge-clusters" => {
                 merge_clusters = true;
                 enumerate_fns = false;
                 enumerate_types = false;
                 enumerate_mods = false;
+                enumerate_dispatch = false;
             }
             "--cluster" => {
                 merge_cluster_specs.push(
@@ -147,6 +158,11 @@ fn main() -> Result<()> {
     }
     if enumerate_mods {
         let records = skeleton_extractor::enumerate_mods_in_tree(&input)?;
+        println!("{}", serde_json::to_string(&records)?);
+        return Ok(());
+    }
+    if enumerate_dispatch {
+        let records = skeleton_extractor::enumerate_dispatch_families_in_tree(&input)?;
         println!("{}", serde_json::to_string(&records)?);
         return Ok(());
     }

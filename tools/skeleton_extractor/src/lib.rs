@@ -1129,6 +1129,309 @@ pub fn enumerate_mods_in_tree(input_dir: &Path) -> Result<Vec<ModRecord>> {
     Ok(out)
 }
 
+/// An autoref-specialization "dispatch family": a set of 2+ sibling traits
+/// that declare the SAME method name, where that method name is also invoked
+/// (`.method(...)`) from a `macro_rules!` body. anyhow's
+/// `AdhocKind`/`TraitKind`/`BoxedKind` (all expose `anyhow_kind`, dispatched by
+/// `anyhow!`) is the canonical case; `BothDebug`/`NotBothDebug`
+/// (`__dispatch_ensure`, dispatched by `__fancy_ensure`) is another. Dispatch
+/// correctness is a cross-impl invariant, so the whole family must be designed
+/// in ONE fill prompt.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DispatchFamily {
+    pub method: String,
+    pub traits: Vec<String>,
+    pub macros: Vec<String>,
+    pub trait_files: Vec<String>,
+    /// Source text of each dispatching `macro_rules!` — the behavioural spec
+    /// the co-design fill must satisfy (shows the `.method().new(...)` chain).
+    pub macro_defs: Vec<String>,
+    /// Return types of the dispatched method across the sibling traits (the
+    /// "tag" types — e.g. Adhoc/Trait/Boxed). The macro chains a second call
+    /// onto these, so their inherent impls are part of the family surface.
+    pub return_types: Vec<String>,
+    /// Methods the macro chains onto the dispatched method's result (e.g.
+    /// `new`), declared on the return types' inherent impls — NOT on any trait.
+    pub chained_methods: Vec<String>,
+    /// Files holding the return types' inherent impls (where `chained_methods`
+    /// live) — so the fill can pull those blocks into the co-design context.
+    pub member_files: Vec<String>,
+}
+
+/// Walk a macro body's token stream and collect every method name invoked as
+/// `.method(...)` — i.e. a `.` punct, then an ident, then a parenthesised
+/// group. Recurses into all delimiter groups. AST/token walk, no regex.
+fn collect_method_calls(
+    ts: TokenStream,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    use proc_macro2::{Delimiter, TokenTree};
+    let trees: Vec<TokenTree> = ts.into_iter().collect();
+    for (i, tt) in trees.iter().enumerate() {
+        if let TokenTree::Punct(p) = tt {
+            if p.as_char() == '.' {
+                if let (Some(TokenTree::Ident(id)), Some(TokenTree::Group(g))) =
+                    (trees.get(i + 1), trees.get(i + 2))
+                {
+                    if g.delimiter() == Delimiter::Parenthesis {
+                        out.insert(id.to_string());
+                    }
+                }
+            }
+        }
+        if let TokenTree::Group(g) = tt {
+            collect_method_calls(g.stream(), out);
+        }
+    }
+}
+
+/// Walk a macro body and collect CHAINED calls `.first().second(...)` — i.e.
+/// `.` Ident `()` `.` Ident `(...)`. Records (first, second) so the dispatch
+/// chain `x.anyhow_kind().new(arg)` yields ("anyhow_kind", "new"). The second
+/// hop is invoked on the RETURN TYPE of the first, so it lives on that type's
+/// inherent impl, not on a sibling trait — which is why it is invisible to the
+/// trait-only scan. Recurses into all groups. AST/token walk, no regex.
+fn collect_method_chains(
+    ts: TokenStream,
+    out: &mut std::collections::BTreeSet<(String, String)>,
+) {
+    use proc_macro2::{Delimiter, TokenTree};
+    let trees: Vec<TokenTree> = ts.into_iter().collect();
+    for (i, tt) in trees.iter().enumerate() {
+        if let TokenTree::Punct(p) = tt {
+            if p.as_char() == '.' {
+                // .first ( ) . second ( ...
+                if let (
+                    Some(TokenTree::Ident(first)),
+                    Some(TokenTree::Group(g1)),
+                    Some(TokenTree::Punct(dot2)),
+                    Some(TokenTree::Ident(second)),
+                    Some(TokenTree::Group(g2)),
+                ) = (
+                    trees.get(i + 1), trees.get(i + 2), trees.get(i + 3),
+                    trees.get(i + 4), trees.get(i + 5),
+                ) {
+                    if g1.delimiter() == Delimiter::Parenthesis
+                        && dot2.as_char() == '.'
+                        && g2.delimiter() == Delimiter::Parenthesis
+                    {
+                        out.insert((first.to_string(), second.to_string()));
+                    }
+                }
+            }
+        }
+        if let TokenTree::Group(g) = tt {
+            collect_method_chains(g.stream(), out);
+        }
+    }
+}
+
+/// Name of a fn's return type, if it is a simple named path type — the last
+/// path segment's ident (e.g. `-> Adhoc` → "Adhoc", `-> kind::Trait` →
+/// "Trait"). `None` for `-> Self`, references, tuples, generics, or `()`.
+fn return_type_name(output: &syn::ReturnType) -> Option<String> {
+    if let syn::ReturnType::Type(_, ty) = output {
+        if let syn::Type::Path(tp) = &**ty {
+            if let Some(seg) = tp.path.segments.last() {
+                let id = seg.ident.to_string();
+                if id != "Self" {
+                    return Some(id);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Recursively collect, from a list of items (descending into inline modules):
+///   - method name -> set of traits declaring it
+///   - trait name  -> set of files it appears in
+///   - method name -> set of `macro_rules!` macros that invoke `.method(`
+struct FamilyScan {
+    /// method name -> traits declaring it
+    method_traits: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    /// trait name -> files it appears in
+    trait_files: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    /// method name -> macros invoking `.method(`
+    method_macros: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    /// macro name -> its source text
+    macro_src: std::collections::BTreeMap<String, String>,
+    /// trait-method name -> return type names (across all declaring traits)
+    method_return_types: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    /// chained calls (first, second) seen in any macro body
+    macro_chains: std::collections::BTreeSet<(String, String)>,
+    /// type name (of an inherent `impl Type`) -> methods it declares
+    type_methods: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    /// type name -> files its inherent impls appear in
+    type_files: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+}
+
+impl FamilyScan {
+    fn new() -> Self {
+        FamilyScan {
+            method_traits: Default::default(),
+            trait_files: Default::default(),
+            method_macros: Default::default(),
+            macro_src: Default::default(),
+            method_return_types: Default::default(),
+            macro_chains: Default::default(),
+            type_methods: Default::default(),
+            type_files: Default::default(),
+        }
+    }
+}
+
+fn collect_traits_and_macros(items: &[Item], file: &str, s: &mut FamilyScan) {
+    for it in items {
+        match it {
+            Item::Trait(t) => {
+                let tname = t.ident.to_string();
+                for ti in &t.items {
+                    if let TraitItem::Fn(f) = ti {
+                        let m = f.sig.ident.to_string();
+                        s.method_traits.entry(m.clone()).or_default().insert(tname.clone());
+                        s.trait_files.entry(tname.clone()).or_default().insert(file.to_string());
+                        if let Some(rt) = return_type_name(&f.sig.output) {
+                            s.method_return_types.entry(m).or_default().insert(rt);
+                        }
+                    }
+                }
+            }
+            Item::Impl(i) if i.trait_.is_none() => {
+                // Inherent `impl Type { ... }` — record its methods so the
+                // chained call (e.g. tag `new`) can be attached to the type.
+                if let syn::Type::Path(tp) = &*i.self_ty {
+                    if let Some(seg) = tp.path.segments.last() {
+                        let tyname = seg.ident.to_string();
+                        for ii in &i.items {
+                            if let ImplItem::Fn(f) = ii {
+                                s.type_methods
+                                    .entry(tyname.clone())
+                                    .or_default()
+                                    .insert(f.sig.ident.to_string());
+                            }
+                        }
+                        s.type_files.entry(tyname).or_default().insert(file.to_string());
+                    }
+                }
+            }
+            Item::Macro(m) => {
+                if m.mac.path.is_ident("macro_rules") {
+                    if let Some(id) = &m.ident {
+                        let mut calls = std::collections::BTreeSet::new();
+                        collect_method_calls(m.mac.tokens.clone(), &mut calls);
+                        for c in calls {
+                            s.method_macros.entry(c).or_default().insert(id.to_string());
+                        }
+                        collect_method_chains(m.mac.tokens.clone(), &mut s.macro_chains);
+                        s.macro_src
+                            .entry(id.to_string())
+                            .or_insert_with(|| quote!(#m).to_string());
+                    }
+                }
+            }
+            Item::Mod(md) => {
+                if let Some((_, inner)) = &md.content {
+                    collect_traits_and_macros(inner, file, s);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Walk a tree and return every dispatch family (see `DispatchFamily`). A
+/// shared-method trait set is only a family when a macro actually dispatches
+/// it — that gate excludes incidental shared names (e.g. std's `source`).
+pub fn enumerate_dispatch_families_in_tree(input_dir: &Path) -> Result<Vec<DispatchFamily>> {
+    use std::collections::BTreeSet;
+    let mut s = FamilyScan::new();
+
+    for entry in walkdir::WalkDir::new(input_dir).into_iter().filter_map(|e| e.ok()) {
+        let p = entry.path();
+        if !p.is_file() || p.extension().and_then(|s| s.to_str()) != Some("rs") {
+            continue;
+        }
+        let rel = p.strip_prefix(input_dir).unwrap_or(p);
+        if rel.components().any(|c| {
+            let s = c.as_os_str().to_string_lossy();
+            s.starts_with('.') || s == "target"
+        }) {
+            continue;
+        }
+        let source = match std::fs::read_to_string(p) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let ast = match parse_file(&source) {
+            Ok(a) => a,
+            Err(_) => continue,
+        };
+        let file = rel.to_string_lossy().to_string();
+        collect_traits_and_macros(&ast.items, &file, &mut s);
+    }
+
+    let mut out = Vec::new();
+    for (method, traits) in &s.method_traits {
+        if traits.len() < 2 {
+            continue;
+        }
+        let macros = s.method_macros.get(method).cloned().unwrap_or_default();
+        if macros.is_empty() {
+            continue; // shared name but no macro dispatch — not a family
+        }
+        let mut tfiles: BTreeSet<String> = BTreeSet::new();
+        for t in traits {
+            if let Some(fs) = s.trait_files.get(t) {
+                tfiles.extend(fs.iter().cloned());
+            }
+        }
+        let macro_defs: Vec<String> = macros
+            .iter()
+            .filter_map(|m| s.macro_src.get(m).cloned())
+            .collect();
+
+        // Chain-following (FR-027): the dispatched method returns tag types;
+        // the macro calls a second method on that result, which lives on the
+        // tag's inherent impl (not a trait). Pull those types + their chained
+        // methods + files into the family surface so co-design sees the WHOLE
+        // `.method().chained()` path, not just the trivial first hop.
+        let return_types: BTreeSet<String> = s
+            .method_return_types
+            .get(method)
+            .cloned()
+            .unwrap_or_default();
+        let mut chained_methods: BTreeSet<String> = BTreeSet::new();
+        let mut member_files: BTreeSet<String> = BTreeSet::new();
+        for (first, second) in &s.macro_chains {
+            if first != method {
+                continue;
+            }
+            // keep only chained methods that actually exist on a return type
+            for rt in &return_types {
+                if s.type_methods.get(rt).is_some_and(|ms| ms.contains(second)) {
+                    chained_methods.insert(second.clone());
+                    if let Some(fs) = s.type_files.get(rt) {
+                        member_files.extend(fs.iter().cloned());
+                    }
+                }
+            }
+        }
+
+        out.push(DispatchFamily {
+            method: method.clone(),
+            traits: traits.iter().cloned().collect(),
+            macros: macros.iter().cloned().collect(),
+            trait_files: tfiles.into_iter().collect(),
+            macro_defs,
+            return_types: return_types.into_iter().collect(),
+            chained_methods: chained_methods.into_iter().collect(),
+            member_files: member_files.into_iter().collect(),
+        });
+    }
+    Ok(out)
+}
+
 // ---------------------------------------------------------------------------
 // AST-level cluster merge.
 //
@@ -1205,13 +1508,27 @@ fn item_key(item: &syn::Item) -> ItemKey {
             ("macro".to_string(), name)
         }
         syn::Item::Impl(i) => {
-            // impl X for Y → ("impl", "X|Y"). Inherent impl → ("impl", "|Y").
-            let trait_part = i.trait_.as_ref()
-                .map(|(_, p, _)| path_to_string(p))
-                .unwrap_or_default();
+            // Identity = the FULL impl header (FR-025): impl generics, the
+            // trait ref WITH its generic args, the self-type WITH its
+            // generics, and the where-clause. `path_to_string` is NOT used
+            // here because it drops generic arguments, which would collapse
+            // `impl AsRef<dyn StdError>` and
+            // `impl AsRef<dyn StdError + Send + Sync>` (and likewise impls
+            // that differ only by their where-clause) into one merged block.
+            let generics = &i.generics;
+            let where_clause = &i.generics.where_clause;
             let self_ty = &*i.self_ty;
-            let self_part = quote!(#self_ty).to_string();
-            ("impl".to_string(), format!("{}|{}", trait_part, self_part))
+            let trait_part = i.trait_.as_ref()
+                .map(|(bang, p, _)| quote!(#bang #p).to_string())
+                .unwrap_or_default();
+            let header = format!(
+                "{}|{}|{}|{}",
+                quote!(#generics),
+                trait_part,
+                quote!(#self_ty),
+                quote!(#where_clause),
+            );
+            ("impl".to_string(), header)
         }
         syn::Item::Use(u) => {
             // Each `use` is unique by its full path.
@@ -1722,6 +2039,92 @@ mod tests {
         let out = skeletonise_with_cfg(src, &cfg);
         assert!(out.contains("always"));
         assert!(!out.contains("nightly_only"));
+    }
+
+    #[test]
+    fn merge_keeps_impls_distinct_by_trait_generic_args() {
+        // FR-025: two `impl AsRef<...> for Error` blocks that differ only in
+        // the trait's generic argument must NOT collapse into one impl (which
+        // would produce E0201 duplicate + E0053 mismatch).
+        let src = r#"
+            impl AsRef<dyn StdError + Send + Sync> for Error {
+                fn as_ref(&self) -> &(dyn StdError + Send + Sync + 'static) { unimplemented!() }
+            }
+            impl AsRef<dyn StdError> for Error {
+                fn as_ref(&self) -> &(dyn StdError + 'static) { unimplemented!() }
+            }
+        "#;
+        let out = merge_cluster_files(vec![ClusterFile {
+            name: "stable".into(),
+            source: src.into(),
+            cfg_gate: String::new(),
+        }])
+        .unwrap();
+        // Both impl headers survive as separate blocks.
+        assert!(out.contains("impl AsRef<dyn StdError + Send + Sync> for Error"));
+        assert!(out.contains("impl AsRef<dyn StdError> for Error"));
+        // Exactly two impls, each with exactly one as_ref.
+        assert_eq!(out.matches("fn as_ref").count(), 2);
+        assert_eq!(out.matches("impl AsRef").count(), 2);
+    }
+
+    #[test]
+    fn merge_keeps_impls_distinct_by_where_clause() {
+        // FR-025: same trait/self-type but divergent where-clause → distinct.
+        let src = r#"
+            impl<'a, T> Mut<'a, T> {
+                pub unsafe fn read(self) -> T { unimplemented!() }
+            }
+            impl<'a, T> Mut<'a, T> where T: ?Sized {
+                pub fn as_ptr(self) -> *const T { unimplemented!() }
+            }
+        "#;
+        let out = merge_cluster_files(vec![ClusterFile {
+            name: "stable".into(),
+            source: src.into(),
+            cfg_gate: String::new(),
+        }])
+        .unwrap();
+        assert_eq!(out.matches("impl<'a, T> Mut<'a, T>").count(), 2);
+        // `read` must not be fused into the `where T: ?Sized` block.
+        assert!(out.contains("fn read"));
+        assert!(out.contains("fn as_ptr"));
+    }
+
+    #[test]
+    fn detects_dispatch_family_and_excludes_spurious() {
+        // FR-027: shared method + macro dispatch = family; shared method
+        // WITHOUT a macro that calls it = not a family.
+        use std::fs;
+        let tmp = std::env::temp_dir().join("skel_dispatch_test");
+        if tmp.exists() {
+            fs::remove_dir_all(&tmp).unwrap();
+        }
+        fs::create_dir_all(tmp.join("src")).unwrap();
+        fs::write(
+            tmp.join("src").join("lib.rs"),
+            r#"
+            pub struct Adhoc;
+            pub struct Trait;
+            pub trait AdhocKind { fn kind(&self) -> Adhoc; }
+            pub trait TraitKind { fn kind(&self) -> Trait; }
+            impl Adhoc { fn new(self) -> Error { unimplemented!() } }
+            impl Trait { fn new(self) -> Error { unimplemented!() } }
+            // spurious: shared method `other` but no macro dispatches it
+            pub trait A { fn other(&self) -> u8; }
+            pub trait B { fn other(&self) -> u8; }
+            macro_rules! make { ($e:expr) => { ($e).kind().new() } }
+            "#,
+        )
+        .unwrap();
+        let fams = enumerate_dispatch_families_in_tree(&tmp).unwrap();
+        let kind = fams.iter().find(|f| f.method == "kind").expect("kind family");
+        assert_eq!(kind.traits, vec!["AdhocKind", "TraitKind"]);
+        assert_eq!(kind.macros, vec!["make"]);
+        // chain-following: `.kind().new()` pulls the tag types + `new` in
+        assert_eq!(kind.return_types, vec!["Adhoc", "Trait"]);
+        assert_eq!(kind.chained_methods, vec!["new"]);
+        assert!(fams.iter().all(|f| f.method != "other"), "spurious `other` leaked");
     }
 
     #[test]

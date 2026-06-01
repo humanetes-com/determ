@@ -7112,6 +7112,7 @@ def _build_per_impl_prompt(
     fr_path: "Path | None" = None,
     retrospective_guidance: str = "",
     crate_idioms_section: str = "",
+    dispatch_family_section: str = "",
 ) -> str:
     """Per-impl-block prompt — fills every stub fn in `block` and (when
     `related_blocks` is non-empty) jointly designs sibling impls of the
@@ -7211,7 +7212,7 @@ Stubs to fill in this response: {stub_names}
 <RUST_GOTCHAS>
 {_gotchas_summary()}
 </RUST_GOTCHAS>
-{retro_block}{trait_block}{types_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{related_section}
+{retro_block}{trait_block}{types_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{dispatch_family_section}{related_section}
 <TARGET_IMPL_BLOCK file="{file_rel}">
 ```rust
 {target_render}
@@ -9201,6 +9202,36 @@ def _phase_c_fill_impl_blocks(
         s for s in (_no_std_invariant, _macro_invariants) if s)
     _crate_type_records = _enumerate_types_via_extractor(target_src_dir) or []
 
+    # Dispatch families (FR-027): autoref-specialization trait sets dispatched
+    # by a macro. Their correctness is a cross-impl invariant, so when a block
+    # belongs to one we co-design the whole family — broaden related_blocks to
+    # every family-trait block and inject the dispatching macro as the spec.
+    _families = _dispatch_families_via_extractor(target_src_dir) or []
+    # A block belongs to a family if its container names a family trait OR one
+    # of the dispatched method's return ("tag") types — the latter pulls the
+    # tag's inherent impl (where the chained `new` lives) into co-design.
+    _name_to_family: dict[str, dict] = {}
+    for _fam in _families:
+        for _nm in list(_fam.get("traits", [])) + list(_fam.get("return_types", [])):
+            _name_to_family[_nm] = _fam
+    if _families:
+        _log(f"  [phase-c/impl] {len(_families)} dispatch family(ies): "
+             + "; ".join(
+                 f"{f.get('method')}←{f.get('traits')}"
+                 f"+tags{f.get('return_types')}.{f.get('chained_methods')}"
+                 for f in _families))
+
+    def _container_names(container: str) -> set:
+        return set(container.replace("<", " ").replace(">", " ")
+                   .replace("+", " ").split())
+
+    def _family_for_container(container: str) -> "dict | None":
+        toks = _container_names(container)
+        for _nm, _f in _name_to_family.items():
+            if _nm in toks:
+                return _f
+        return None
+
     retros_cache = _load_retrospectives(project_dir)
 
     block_max_stalls = int(os.getenv("PHASE_C_IMPL_MAX_STALLS", "3"))
@@ -9223,6 +9254,26 @@ def _phase_c_fill_impl_blocks(
             rb = all_blocks_by_id.get(_impl_block_id(block["file"], rc))
             if rb is not None:
                 related_blocks.append(rb)
+        # Dispatch-family co-design: if this block implements a family trait,
+        # surface EVERY family-trait block (not just same-name relatives) plus
+        # the dispatching macro, so the model designs the family consistently.
+        _family = _family_for_container(block["container"])
+        dispatch_family_section = ""
+        if _family is not None:
+            _fam_names = (set(_family.get("traits", []))
+                          | set(_family.get("return_types", [])))
+            _seen = {_impl_block_id(block["file"], block["container"])}
+            _seen |= {_impl_block_id(rb["file"], rb["container"]) for rb in related_blocks}
+            for b2 in blocks:
+                bid = _impl_block_id(b2["file"], b2["container"])
+                if bid in _seen:
+                    continue
+                # Pull in every block of this family — the dispatch traits AND
+                # the tag types' inherent impls (where the chained `new` lives).
+                if _container_names(b2["container"]) & _fam_names:
+                    related_blocks.append(b2)
+                    _seen.add(bid)
+            dispatch_family_section = _build_dispatch_family_section(_family)
         snapshot = file_path.read_text(encoding="utf-8")
         # Per-block context.
         stub_fn_names = [m["fn_name"] for m in block["stub_members"]]
@@ -9309,6 +9360,7 @@ def _phase_c_fill_impl_blocks(
                 fr_path=fr_path,
                 retrospective_guidance=prior_retro,
                 crate_idioms_section=crate_idioms_section,
+                dispatch_family_section=dispatch_family_section,
             )
             try:
                 response = ask(prompt, model=_TASK2_MODEL)
@@ -11345,6 +11397,76 @@ def _enumerate_fns_via_extractor(src_dir: Path) -> list[dict] | None:
         return data if isinstance(data, list) else None
     except Exception:
         return None
+
+
+def _dispatch_families_via_extractor(src_dir: Path) -> list[dict] | None:
+    """Invoke the extractor's --enumerate-dispatch-families subcommand.
+
+    Returns a list of family records (or None if the binary is unavailable /
+    fails). Each record: method (str), traits (list[str]), macros (list[str]),
+    trait_files (list[str]), macro_defs (list[str]). A family is a set of 2+
+    sibling traits sharing a method that a `macro_rules!` dispatches — anyhow's
+    AdhocKind/TraitKind/BoxedKind (anyhow_kind, via anyhow!) being canonical.
+    Dispatch correctness is a cross-impl invariant (FR-027), so the whole
+    family is co-designed in one prompt context.
+    """
+    if not _SKELETON_EXTRACTOR_BIN.exists():
+        return None
+    try:
+        r = subprocess.run(
+            [str(_SKELETON_EXTRACTOR_BIN), "--enumerate-dispatch-families",
+             "--input", str(src_dir)],
+            capture_output=True, text=True, timeout=60,
+        )
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    try:
+        data = json.loads(r.stdout)
+        return data if isinstance(data, list) else None
+    except Exception:
+        return None
+
+
+def _build_dispatch_family_section(family: dict) -> str:
+    """Render the <DISPATCH_FAMILY> prompt block: the family's traits, the
+    dispatch method, and the dispatching macro_rules! source — the behavioural
+    spec the co-design fill must satisfy. Macro defs are capped so the section
+    can't dominate the budget."""
+    traits = ", ".join(family.get("traits", []))
+    method = family.get("method", "")
+    macros = ", ".join(family.get("macros", []))
+    tags = ", ".join(family.get("return_types", []))
+    chained = ", ".join(family.get("chained_methods", []))
+    defs = family.get("macro_defs", []) or []
+    _cap = max(2000, SINGLE_CALL_CHAR_LIMIT // 8)
+    macro_text = "\n\n".join(defs)
+    if len(macro_text) > _cap:
+        macro_text = macro_text[:_cap] + "\n/* … macro truncated … */"
+    _chain_line = ""
+    if chained and tags:
+        _chain_line = (
+            f"The macro then CHAINS `.{chained}(...)` onto that tag — those "
+            f"methods live on the inherent impls of the tag types ({tags}), "
+            "NOT on a trait. They do the REAL work (building the result), so "
+            "they are part of this family: design the tag impls TOGETHER with "
+            f"the `{method}` returns so the full `.{method}().{chained}(...)` "
+            "path is consistent. "
+        )
+    return (
+        "\n<DISPATCH_FAMILY>\n"
+        f"These traits form an AUTOREF-SPECIALIZATION family: {traits}. "
+        f"Each declares `{method}` returning a DIFFERENT tag type ({tags}), and "
+        f"the macro(s) `{macros}` dispatch on it (`x.{method}()....`). Method "
+        "resolution (autoref + the blanket-impl bounds) selects which trait "
+        f"applies per argument type. {_chain_line}You MUST design every family "
+        "member consistently so the macro expansion resolves to the correct "
+        "tag for each input — getting one bound, tag, or chained body wrong "
+        "silently breaks every call site. The dispatching macro (the "
+        "behavioural spec):\n```rust\n"
+        f"{macro_text}\n```\n</DISPATCH_FAMILY>\n"
+    )
 
 
 def _scan_unimplemented_records(src_dir: Path) -> list[dict] | None:
