@@ -9524,27 +9524,10 @@ def _phase_c_fill_impl_blocks(
                 _log(f"  [phase-c/impl] {block_id}: compile failed "
                      f"(attempt {fix_attempt}); errs={cur_err_count} "
                      f"floor={best_err_count} stall={block_stall}.")
-                # B3 SHADOW (FR-029) — observe only, NO behaviour change. Log
-                # what a "keep non-regressing fills" rule WOULD do: a fill is
-                # non-regressing when NO remaining crate error points at the
-                # fns we just filled (the blockers are elsewhere), yet the
-                # current rc==0 gate reverts it anyway. We collect these shadow
-                # decisions for ~one run and compare against outcomes before
-                # flipping the rule live, so we never relax revert blindly.
-                try:
-                    _filled_fns = {fd["fn_name"] for fd, _ in routed}
-                    _diag_frontier = _frontier_from_diags(diagnostics, target_src_dir)
-                    _errs_on_fill = sorted(
-                        fn for (f, fn) in _diag_frontier
-                        if f == block["file"] and fn in _filled_fns)
-                    _b3 = "KEEP" if not _errs_on_fill else "REVERT"
-                    _log(f"  [B3-shadow] {block_id}: WOULD {_b3} — "
-                         f"{cur_err_count} crate err(s), {len(_errs_on_fill)} "
-                         f"on this fill (filled={sorted(_filled_fns)}; "
-                         f"on_fill={_errs_on_fill}).")
-                except Exception as _b3e:
-                    _log(f"  [B3-shadow] {block_id}: shadow calc skipped ({_b3e}).")
-                # Revert and let the next iter try with the error context.
+                # Reaching here means the fill regressed (a new error, or an
+                # error on the filled fns) — B3 (FR-029) already kept and broke
+                # out for non-regressing fills above. Revert and let the next
+                # iter try with the error context.
                 file_path.write_text(snapshot, encoding="utf-8")
                 if block_stall >= block_max_stalls:
                     _log(f"  [phase-c/impl] {block_id}: floor stalled "
@@ -19408,17 +19391,20 @@ def _cluster_cfg_attr(cluster) -> str:
     """Return the cfg predicate string that gates code to this cluster.
 
     Empty string for the default (stable) cluster — no extra gate needed.
-    For clusters with one active_cfg flag: returns the bare flag name.
-    For multiple flags: combines via all(...).
+    Each active cfg `N` becomes `any(N, feature = "N")` (FR-032): a cluster may
+    be switched on by either `--cfg N` (RUSTFLAGS) or `--features N`, and this
+    gate must be true under whichever form the cluster uses. Multiple flags
+    combine via `all(...)`.
     """
     if cluster is None or getattr(cluster, "is_default", True):
         return ""
     flags = list(getattr(cluster, "active_cfg", []) or [])
     if not flags:
         return ""
-    if len(flags) == 1:
-        return str(flags[0])
-    return "all(" + ", ".join(str(f) for f in flags) + ")"
+    terms = [f'any({f}, feature = "{f}")' for f in flags]
+    if len(terms) == 1:
+        return terms[0]
+    return "all(" + ", ".join(terms) + ")"
 
 
 def _build_gen_tests_decl(sibling_name: str, n: int, allow_line: str,
@@ -20928,7 +20914,14 @@ corrected content here
     # global stall budget. Lower than the legacy 10 because the per-file
     # deep retrospective (RETRO_DEEP_AT_STALL=5) is the heavy lifter.
     FILE_STALL_LIMIT = 10   # consecutive no-improvement attempts before skipping a file
-    RETRO_DEEP_AT_STALL = 5 # re-fire retrospective with concrete failed-attempt evidence
+    # Escalate to the deep retrospective on the FIRST 0-coverage attempt.
+    # Plain re-rolls are coverage-BLIND — the model gets compile/test errors
+    # (Phase A fix loop) but never the "this compiled yet covered nothing"
+    # signal, which is only injected once the retrospective fires. So a second
+    # plain attempt just reproduces the same useless test at the cost of another
+    # full instrumented coverage run. Default 1: one attempt, then straight to
+    # the informed retrospective.
+    RETRO_DEEP_AT_STALL = int(os.getenv("TASK0C_RETRO_DEEP_AT_STALL", "1"))
     file_stall_counts: dict[str, int] = {}   # consecutive no-improvement attempts per file
     file_best_uncov: dict[str, int] = {}     # fewest uncovered lines seen per file
     file_prev_uncov_lines: dict[str, set] = {}  # uncov_lines snapshot from previous attempt per file
