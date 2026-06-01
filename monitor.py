@@ -1532,6 +1532,12 @@ _confirm          = None   # pending confirmation: "continue" | "wipe" | "stop" 
 _graceful_pending = os.path.exists("/tmp/pipeline_graceful_stop")  # survives monitor restart
 _term_settings = None         # saved terminal settings for cooked-mode URL prompt
 
+# --demo: auto-cycle through views 1→2→3 (Monitor → Pipeline Log → Stream Log)
+# on a fixed interval, so a screencast shows every panel without keypresses.
+_DEMO          = False
+_DEMO_VIEWS    = ["monitor", "pipeline", "stream"]   # views 1, 2, 3
+DEMO_INTERVAL  = 5            # seconds shown per view in demo mode
+
 VIEWS = [
     ("monitor",  "1", "Monitor"),
     ("pipeline", "2", "Pipeline Log"),
@@ -2017,15 +2023,22 @@ def available_lines():
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
 def main():
-    global _action_msg, _term_settings, _graceful_pending
+    global _action_msg, _term_settings, _graceful_pending, _view
     signal.signal(signal.SIGHUP, signal.SIG_IGN)   # survive terminal events from child procs
     old_settings = termios.tcgetattr(sys.stdin)
     _term_settings = old_settings
     sys.stdout.write("\033[2J\033[?25l")
     sys.stdout.flush()
+    _demo_idx = 0
+    _demo_next = time.monotonic() + DEMO_INTERVAL
     try:
         tty.setcbreak(sys.stdin.fileno())
         while True:
+            # --demo: advance to the next of views 1/2/3 every DEMO_INTERVAL s.
+            if _DEMO and time.monotonic() >= _demo_next:
+                _demo_idx = (_demo_idx + 1) % len(_DEMO_VIEWS)
+                _view = _DEMO_VIEWS[_demo_idx]
+                _demo_next = time.monotonic() + DEMO_INTERVAL
             try:
                 _render_all()
                 _flush_frame()
@@ -2057,7 +2070,12 @@ def main():
                 _action_msg = ""
 
             try:
-                ready, _, _ = select.select([sys.stdin], [], [], REFRESH)
+                # In demo mode wake exactly at the next view switch (≤ REFRESH)
+                # so cycling stays crisp while the panel still refreshes live.
+                timeout: float = REFRESH
+                if _DEMO:
+                    timeout = max(0.1, min(float(REFRESH), _demo_next - time.monotonic()))
+                ready, _, _ = select.select([sys.stdin], [], [], timeout)
                 if ready:
                     key = _read_key()
                     if key == "q":
@@ -2073,4 +2091,17 @@ def main():
         sys.stdout.flush()
 
 if __name__ == "__main__":
+    # --demo cycles views 1→2→3 every DEMO_INTERVAL s. Optional override:
+    #   --demo=12   or   --demo 12   (seconds per view).
+    _args = sys.argv[1:]
+    for _i, _a in enumerate(_args):
+        if _a == "--demo":
+            _DEMO = True
+            if _i + 1 < len(_args) and _args[_i + 1].isdigit():
+                DEMO_INTERVAL = int(_args[_i + 1])
+        elif _a.startswith("--demo="):
+            _DEMO = True
+            _val = _a.split("=", 1)[1]
+            if _val.isdigit():
+                DEMO_INTERVAL = int(_val)
     main()

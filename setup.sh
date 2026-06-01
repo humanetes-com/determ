@@ -162,6 +162,20 @@ else
     fi
 fi
 
+# ── 6c. agg (renders an asciinema cast to gif/mp4 for screencasts) ────────────
+echo ""
+echo "-- agg (optional, renders asciinema .cast → gif) --"
+if command -v agg &>/dev/null; then
+    skip "agg already installed"
+else
+    info "Installing agg..."
+    if cargo install --locked agg 2>&1 | tail -2; then
+        ok "agg installed"
+    else
+        echo "[warn] agg failed to install — screencast gif rendering unavailable (recording still works)"
+    fi
+fi
+
 # ── 6b. Skeleton extractor (Rust helper for TASK 2 Phase A) ───────────────────
 echo ""
 echo "-- skeleton-extractor (Rust helper, used by TASK 2 Phase A) --"
