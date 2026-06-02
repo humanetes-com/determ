@@ -73,6 +73,8 @@ from pipeline_core.adapters.coverage import CoverageDeps
 from pipeline_core.adapters.workspace import WorkspaceDeps
 from pipeline_core.application.orchestrator import Orchestrator
 from pipeline_core.application.tasks.genesis_audit import genesis_audit, GenesisAuditDeps
+from pipeline_core.application.tasks.task3 import task3 as _task3_impl, Task3Deps
+from pipeline_core.application.tasks.task4 import task4 as _task4_impl, Task4Deps
 
 _mi_mtime: float = os.path.getmtime(_mi.__file__)
 
@@ -17740,174 +17742,8 @@ def _task3_inline_retry(
 
 
 def task3(project_dir, test_command, iteration, output_dir, genesis_path):
-    """TASK 3 — per-cluster strict-verdict test runner.
-
-    FR-024: SUCCESS only when every test in every cluster genuinely runs
-    and passes. For each baked cluster:
-      1. Compose `cargo test --no-fail-fast` with the cluster's toolchain
-         and `env_extra` (RUSTFLAGS etc).
-      2. Run, parse (pass, fail, ignored).
-      3. Compute expected_count = #[test] fns active under this cluster's
-         cfg (`_count_active_tests_for_cluster`).
-      4. Accept iff `pass + ignored + fail == expected` AND `fail == 0`.
-
-    Aggregate: SUCCESS only if every cluster accepts. Any cluster failing
-    or reporting fewer than expected tests → fail → loop to TASK 4.
-
-    The `test_command` parameter is retained for back-compat but ignored
-    when baked clusters are available. When the workspace has no baked
-    clusters (e.g. fresh non-skeleton-backend run) we fall back to the
-    legacy single-shot path using the discovered `test_command`.
-    """
-    _log(f"\nTASK 3: Running tests (iteration {iteration})")
-    output_file = Path(output_dir) / f"tests_output_{iteration}.txt"
-    _attempt = iteration if isinstance(iteration, int) else None
-
-    clusters = _load_baked_clusters(project_dir)
-    if not clusters:
-        # Legacy fallback: no baked cluster manifest, run once with the
-        # discovered command. Used for non-skeleton-backend pipelines.
-        return _task3_legacy_single(project_dir, test_command, iteration,
-                                     output_dir, genesis_path)
-
-    with _phase("task", task="task3", attempt=_attempt,
-                data={"command": "per-cluster", "iteration": iteration,
-                      "clusters": [c.name for c in clusters]}) as done:
-        _emit("test.start", attempt=_attempt,
-              data={"command": "per-cluster",
-                    "clusters": [c.name for c in clusters]})
-        _t_start = time.monotonic()
-
-        per_cluster_results: list[dict] = []
-        aggregated_output_chunks: list[str] = []
-        any_failed = False
-        any_incomplete = False
-        agg_pass = agg_fail = agg_ignored = agg_expected = 0
-        primary_test_output = ""
-
-        for cluster in sorted(clusters, key=lambda c: c.name):
-            cmd_parts = ["cargo"]
-            if cluster.toolchain:
-                cmd_parts.append(f"+{cluster.toolchain}")
-            cmd_parts += ["test", "--no-fail-fast"]
-            cluster_cmd = shlex.join(cmd_parts)
-            cluster_env = _cargo_env()
-            cluster_env.update(cluster.env_extra or {})
-            _log(f"  [task3/{cluster.name}] running {cluster_cmd}")
-            t_c = time.monotonic()
-            try:
-                result = subprocess.run(
-                    _parse_cmd(cluster_cmd),
-                    cwd=project_dir, capture_output=True, text=True,
-                    timeout=TEST_TIMEOUT, env=cluster_env,
-                )
-                rc = result.returncode
-                stdout = result.stdout or ""
-                stderr = result.stderr or ""
-            except subprocess.TimeoutExpired:
-                rc = -1
-                stdout = ""
-                stderr = (f"TIMEOUT: cluster '{cluster.name}' tests exceeded "
-                          f"{TEST_TIMEOUT}s")
-                _log(f"  [task3/{cluster.name}] {stderr}")
-            dt = time.monotonic() - t_c
-            output = stdout + ("\n--- stderr ---\n" + stderr if stderr else "")
-            pass_n, fail_n, ign_n = _parse_test_counts(output)
-            expected_n = _count_active_tests_for_cluster(project_dir, cluster)
-            status, reason = validate_task3_output_strict(
-                pass_n, fail_n, ign_n, expected_n, cluster.name,
-            )
-            _log(f"  [task3/{cluster.name}] {status}: {reason} "
-                 f"(rc={rc}, {dt:.1f}s)")
-            per_cluster_results.append({
-                "cluster": cluster.name,
-                "status": status,
-                "rc": rc,
-                "pass": pass_n,
-                "fail": fail_n,
-                "ignored": ign_n,
-                "expected": expected_n,
-                "duration_s": dt,
-            })
-            aggregated_output_chunks.append(
-                f"=== cluster: {cluster.name} (rc={rc}, "
-                f"{status}, {pass_n}/{expected_n} passed, {fail_n} failed, "
-                f"{ign_n} ignored) ===\n{output}\n"
-            )
-            agg_pass += pass_n
-            agg_fail += fail_n
-            agg_ignored += ign_n
-            agg_expected += expected_n
-            if status != "pass":
-                any_failed = any_failed or status == "fail"
-                any_incomplete = any_incomplete or status == "incomplete"
-                # Keep this cluster's output as primary for the inline retry
-                # — it has the actionable signal.
-                if not primary_test_output:
-                    primary_test_output = output
-
-        aggregated_output = "".join(aggregated_output_chunks)
-        genesis = read(genesis_path)
-        write(output_file,
-              f"=== genesis.md (iteration {iteration}) ===\n{genesis}\n"
-              f"{OUTPUT_SEPARATOR}\n{aggregated_output}")
-
-        all_pass = not any_failed and not any_incomplete
-        _log(f"  TASK 3 aggregate: {agg_pass}/{agg_expected} passed, "
-             f"{agg_fail} failed, {agg_ignored} ignored across "
-             f"{len(per_cluster_results)} cluster(s) — "
-             f"{'PASS' if all_pass else ('FAIL' if any_failed else 'INCOMPLETE')}.")
-
-        if all_pass:
-            _emit("test.pass", duration_ms=int(
-                (time.monotonic() - _t_start) * 1000),
-                  data={"per_cluster": per_cluster_results,
-                        "pass_count": agg_pass, "fail_count": agg_fail,
-                        "ignored_count": agg_ignored,
-                        "expected_count": agg_expected,
-                        "output": _store_prompt_content(aggregated_output)})
-            done["data"] = {
-                "passed": True, "pass_count": agg_pass,
-                "fail_count": agg_fail, "expected_count": agg_expected,
-                "per_cluster": per_cluster_results,
-            }
-            return True, aggregated_output
-
-        _emit("test.fail", duration_ms=int(
-            (time.monotonic() - _t_start) * 1000),
-              data={"per_cluster": per_cluster_results,
-                    "pass_count": agg_pass, "fail_count": agg_fail,
-                    "ignored_count": agg_ignored,
-                    "expected_count": agg_expected,
-                    "reason": "incomplete" if any_incomplete and not any_failed
-                              else "failed_tests",
-                    "output": _store_prompt_content(aggregated_output)})
-
-        # FR-024 inline retry on the primary failing cluster. Uses the
-        # full attribution chain (panics → compile → classifier →
-        # recently_filled → reverse_map) to identify fns to refix.
-        if primary_test_output:
-            retry_passed, retry_output = _task3_inline_retry(
-                project_dir=project_dir,
-                test_command="cargo test --no-fail-fast",
-                iteration=iteration,
-                initial_test_output=primary_test_output,
-            )
-            if retry_passed or retry_output != primary_test_output:
-                # Re-run all clusters to verify the retry's fixes hold
-                # across the corpus, not just the primary failing cluster.
-                # Recurse once.
-                return task3(
-                    project_dir, test_command, iteration,
-                    output_dir, genesis_path,
-                )
-
-        done["data"] = {
-            "passed": False, "pass_count": agg_pass,
-            "fail_count": agg_fail, "expected_count": agg_expected,
-            "per_cluster": per_cluster_results,
-        }
-        return False, aggregated_output
+    # slice 5b: extracted to pipeline_core.application.tasks.task3; thin shim binding deps.
+    return _task3_impl(project_dir, test_command, iteration, output_dir, genesis_path, _TASK3_DEPS)
 
 
 def _task3_legacy_single(
@@ -18004,268 +17840,13 @@ def task4(genesis_path, functional_req_path, test_output, iteration, output_dir,
           failure_type: str = "test", failure_log: str = "",
           prev_pass_count: int = 0, prev_test_output: str = "",
           source_context: str = "", api_surface: str = ""):
-    """
-    Analyze failures and update genesis.md.
-
-    failure_type: "build" (code didn't compile) or "test" (tests failed at runtime).
-      - build failures: the model is asked to identify what STRUCTURAL information the
-        requirements missed (workspace layout, entry-point files, module declarations).
-        genesis.md is updated to require capturing that structural class of information.
-      - test failures: the model performs a full reasoning-gap analysis and updates
-        genesis.md with general lessons about what categories of test signal were missed.
-
-    failure_log: running record of previous iteration outcomes. Fed in so the model
-      can avoid repeating approaches that already failed.
-
-    prev_pass_count / prev_test_output: when provided by the caller (per-module mode),
-      used directly for regression comparison instead of reading tests_output_{N-1}.txt.
-    """
-    # BL-019: map sub-categories back to the two TASK 4 paths.
-    _is_build = (failure_type == "build")
-    _log(f"\nTASK 4: Analyzing failure [{failure_type}], updating genesis.md")
-    _t4_t0 = time.monotonic()
-    _emit("task.start", task="task4",
-          attempt=iteration if isinstance(iteration, int) else None,
-          data={"failure_type": failure_type, "iteration": iteration,
-                "prev_pass_count": prev_pass_count})
-
-    genesis = read(genesis_path)
-    functional_req = read(functional_req_path)
-    # Fill-down: genesis and functional_req are typically small (10-20k each).
-    # Include them in full (up to hard safety caps), then give ALL remaining budget
-    # to test_output — the actual failure signal the model must reason about.
-    _t4_genesis_cap = INTERMEDIATE_CHAR_LIMIT
-    _t4_req_cap     = SINGLE_CALL_CHAR_LIMIT // 3
-    # genesis: head-weighted (methodology intro at top). req: head-weighted (core types first).
-    genesis        = smart_truncate(genesis, total_limit=_t4_genesis_cap,
-                                    head=2 * _t4_genesis_cap // 3, tail=_t4_genesis_cap // 3)
-    functional_req = smart_truncate(functional_req, total_limit=_t4_req_cap,
-                                    head=_t4_req_cap // 3, tail=2 * _t4_req_cap // 3)
-    # test_output gets everything left after genesis + req + overhead.
-    _t4_output_cap = max(10_000,
-                         SINGLE_CALL_CHAR_LIMIT - len(genesis) - len(functional_req) - 10_000)
-    # test_output: tail-weighted (most recent failures are most actionable).
-    truncated_output = smart_truncate(test_output, total_limit=_t4_output_cap,
-                                      head=_t4_output_cap // 4, tail=3 * _t4_output_cap // 4)
-
-    # Regression / comparison section.
-    # Prefer caller-supplied prev data (per-module mode); fall back to file lookup (legacy mode).
-    current_pass = count_passing_tests(test_output)
-    comparison_section = ""
-
-    _prev_output = prev_test_output
-    _prev_pass = prev_pass_count
-    if not _prev_output and isinstance(iteration, int) and iteration > 1:
-        prev_file = Path(output_dir) / f"tests_output_{iteration - 1}.txt"
-        prev_content = read(prev_file)
-        if prev_content:
-            _prev_output = extract_test_output_from_file(prev_content)
-            _prev_pass = count_passing_tests(_prev_output)
-
-    if _prev_output:
-        _t4_used = len(genesis) + len(functional_req) + len(truncated_output)
-        _t4_secondary_budget = max(5_000, SINGLE_CALL_CHAR_LIMIT - _t4_used - 10_000)
-        _prev_cap = _t4_secondary_budget // 2
-        prev_truncated = smart_truncate(_prev_output, total_limit=_prev_cap,
-                                        head=_prev_cap // 4, tail=3 * _prev_cap // 4)
-        delta = current_pass - _prev_pass
-        trend = (f"IMPROVED by {delta} tests" if delta > 0
-                 else f"REGRESSED by {abs(delta)} tests" if delta < 0
-                 else "NO CHANGE")
-        comparison_section = f"""
-Previous iteration result: {_prev_pass} tests passing.
-Current iteration result: {current_pass} tests passing.
-Trend: {trend}.
-
-{"⚠️  The last genesis.md change made things WORSE. You must take a completely different approach — do not refine the previous change, reverse it and try something different." if delta < 0 else ""}
-{"⚠️  The last genesis.md change had NO EFFECT. The previous approach is not working. Try a substantively different reasoning strategy." if delta == 0 else ""}
-
-Previous test output (for comparison):
-{prev_truncated}
-"""
-
-    # failure_log shares the secondary budget with prev_output.
-    _t4_used2 = len(genesis) + len(functional_req) + len(truncated_output)
-    _t4_log_budget = max(5_000, SINGLE_CALL_CHAR_LIMIT - _t4_used2 - 10_000) // 2
-    _t4_failure_log_cap = _t4_log_budget
-    failure_log_capped = smart_truncate(
-        failure_log, total_limit=_t4_failure_log_cap,
-        head=_t4_failure_log_cap // 4, tail=3 * _t4_failure_log_cap // 4,
+    # slice 5b: extracted to pipeline_core.application.tasks.task4; thin shim binding deps.
+    return _task4_impl(
+        genesis_path, functional_req_path, test_output, iteration, output_dir, _TASK4_DEPS,
+        failure_type=failure_type, failure_log=failure_log,
+        prev_pass_count=prev_pass_count, prev_test_output=prev_test_output,
+        source_context=source_context, api_surface=api_surface,
     )
-    failure_log_section = (
-        f"\nYou have already attempted to fix this {failure_type} failure multiple times. "
-        f"Here is the history of what was tried and what happened each time — "
-        f"do NOT repeat any approach that already failed. Each iteration that did not improve "
-        f"the pass count means that approach is wrong:\n{failure_log_capped}\n"
-        f"Study this history carefully. The next update to genesis.md must take a substantively "
-        f"different angle than anything already tried above.\n"
-    ) if failure_log.strip() else ""
-
-    # Different prompt depending on whether this is a build or test failure.
-    # source_context can be tens of KB on a multi-file module — cap it against
-    # whatever budget remains after genesis/req/output/comparison/log.
-    if source_context.strip():
-        _t4_src_used = (len(genesis) + len(functional_req) + len(truncated_output)
-                        + len(comparison_section) + len(failure_log_section))
-        _t4_src_cap = max(5_000, SINGLE_CALL_CHAR_LIMIT - _t4_src_used - 10_000)
-        _source_truncated = smart_truncate(source_context, total_limit=_t4_src_cap,
-                                           head=_t4_src_cap // 3, tail=2 * _t4_src_cap // 3)
-        source_section = f"\nGenerated source files (the code that was compiled/tested):\n{_source_truncated}\n"
-    else:
-        source_section = ""
-
-    # If a pre-strip API surface was captured, TASK 1 received it as structural
-    # ground truth. The methodology in genesis.md must reflect that contract:
-    # we are NOT asking TASK 1 to derive signatures from tests anymore -- only
-    # behaviour. A regression caused by signature drift is a TASK 2 / LLM
-    # discipline issue, not a methodology gap that genesis should chase.
-    api_surface_section = ""
-    if api_surface and api_surface.strip():
-        api_surface_section = (
-            "\n⚠️  CONTEXT — pipeline contract has changed:\n"
-            "TASK 1 received an explicit API surface (signatures + type definitions)\n"
-            "captured before strip. That is structural GROUND TRUTH. The methodology\n"
-            "you are updating must therefore focus on BEHAVIOURAL extraction from tests\n"
-            "(what each function returns, invariants, error paths) — not on rediscovering\n"
-            "signatures or struct shapes from test-call patterns. If the failure looks\n"
-            "like the LLM ignored the provided API surface (wrong signature, missing\n"
-            "pub item, renamed field), the lesson is for the GENERATION step's rule set,\n"
-            "not a new test-extraction rule.\n"
-        )
-
-    # BL-019: build sub-category hint for the prompt.
-    _failure_hint = {
-        "assertion": "Tests ran. The failure is an ASSERTION mismatch — the function returned "
-                     "a wrong value or the behavior does not match what the test expects. "
-                     "Focus on: what was the expected value vs. actual, and what requirement "
-                     "was incomplete or incorrect.",
-        "panic":     "Tests ran but the code PANICKED (not from an assertion). This typically "
-                     "means an unwrap() on None/Err, index out of bounds, or an invariant "
-                     "violation. Focus on: what invariant or error condition was not captured "
-                     "in the requirements.",
-        "timeout":   "The test runner TIMED OUT. This usually means an infinite loop, "
-                     "deadlock, or unexpectedly slow operation. Focus on: what algorithmic "
-                     "or termination condition was missing from the requirements.",
-        "no_tests":  "ZERO tests ran despite test files existing. This is a test-harness "
-                     "misconfiguration — check module declarations, feature flags, and "
-                     "test discovery conventions.",
-    }.get(failure_type, "")
-
-    if _is_build:
-        prompt = f"""You are refining a methodology for translating test suites into functional requirements.
-
-The implementation failed to COMPILE this iteration — the tests could not even run.
-This is a STRUCTURAL failure: the generated code was missing required files, had wrong
-module declarations, or had incorrect workspace layout. This is NOT a logic error.
-{api_surface_section}
-Your task: update genesis.md so that its methodology explicitly captures the structural
-information that leads to correct compilation. The methodology must teach readers how to
-derive workspace layout, required entry-point files, and module structure from tests and
-README alone — as general rules, not project-specific fixes.
-
-genesis.md (current methodology):
-{genesis}
-
-functional_requirements.md (requirements that led to broken code):
-{functional_req}
-{source_section}
-Compiler/build output (what broke):
-{truncated_output}
-{comparison_section}{failure_log_section}
-Analyze in this order:
-1. What structural information was absent from functional_requirements.md that caused the build to fail?
-2. Which step in genesis.md failed to extract or require that structural information?
-3. What general rule should genesis.md add so that any project's workspace structure,
-   entry-point files, and module declarations are always captured in requirements?
-
-Produce an updated genesis.md. Rules must be:
-- General and language-agnostic (not "always generate src/lib.rs" but "for any module
-  system, identify and require every declared entry-point file")
-- Never mention specific tests, files, iteration numbers, or this experiment
-- More precise and complete than the current version
-
-Output the updated genesis.md between these exact delimiters (required — do not use any other format):
-{_TASK4_VERBOSITY_GUARD}
-{GENESIS_DELIM_START}
-updated genesis.md content here
-{GENESIS_DELIM_END}
-"""
-    else:
-        failure_hint_section = (
-            f"\n⚠️  Failure sub-type: {failure_type.upper()}\n{_failure_hint}\n"
-        ) if _failure_hint else ""
-        prompt = f"""You are refining a general methodology for translating test suites into functional requirements.
-
-genesis.md is not a patch document — it is a project-independent, language-agnostic reasoning
-process that, when mature, should work on any test suite without needing iteration. Every update
-must move it toward greater generality and precision, not toward narrow fixes for the specific
-failures just observed.
-{api_surface_section}{failure_hint_section}
-genesis.md (the reasoning process followed this iteration):
-{genesis}
-
-functional_requirements.md (produced by that process):
-{functional_req}
-{source_section}
-Test output (iteration {iteration}):
-{truncated_output}
-{comparison_section}{failure_log_section}
-Analyze in this order:
-1. Which tests failed and what do the failures reveal about what was missing or wrong in
-   the functional requirements?
-2. Trace each gap back to the reasoning process in genesis.md: which step produced an
-   incomplete or incorrect requirement, and why?
-3. What is the general CLASS of reasoning error — not "I missed function X" but
-   "the process did not account for category Y of test signal"?
-4. How should genesis.md be updated to permanently close that class of error for
-   any future project, in any language?
-
-Produce an updated genesis.md. It must:
-- Remain a general, language-agnostic methodology, not a list of project-specific patches
-- Be more precise and complete than the previous version
-- Reflect the class of error, not just the symptom
-- Never mention specific tests, test file names, test failures, iteration numbers, or
-  the iterative process by which it was built
-
-Output the updated genesis.md between these exact delimiters (required — do not use any other format):
-{_TASK4_VERBOSITY_GUARD}
-{GENESIS_DELIM_START}
-updated genesis.md content here
-{GENESIS_DELIM_END}
-"""
-
-    def attempt():
-        response = ask(prompt, model=_TASK4_MODEL)
-        content = _extract_genesis(response)
-        if content is None:
-            _log(f"  WARNING: {MODEL} did not return an updated genesis.md.")
-            _log(f"  Raw response snippet: {response[:600]}")
-            return False
-        write(genesis_path, content)
-        _log("  genesis.md updated.")
-        return True
-
-    ok = with_retry(attempt)
-    if not ok:
-        _log("  task4 failed after all retries -- genesis.md unchanged this iteration.")
-
-    # BL-024: write structured rules to the pipeline knowledge store.
-    # Extract bullet-point rules from the new genesis.md content.
-    if ok:
-        new_genesis = read(genesis_path)
-        _task4_extract_and_store_rules(
-            genesis_path.parent, new_genesis,
-            module_scope="*",  # genesis rules are global
-            failure_type=failure_type,
-            iteration=iteration if isinstance(iteration, int) else 0,
-        )
-
-    _emit("task.done", task="task4",
-          attempt=iteration if isinstance(iteration, int) else None,
-          duration_ms=int((time.monotonic() - _t4_t0) * 1000),
-          data={"ok": ok, "current_pass_count": current_pass,
-                "failure_type": failure_type})
-    return ok, current_pass
 
 
 def _task4_extract_and_store_rules(project_dir: Path, genesis_text: str,
@@ -18413,6 +17994,34 @@ def _cargo_env() -> dict:
     if _current_cluster and _current_cluster.requires_nightly:
         env["RUSTUP_TOOLCHAIN"] = "nightly"
     return env
+
+
+# slice 5b: deps records for the extracted TASK 3 / TASK 4. Defined here, after every
+# collaborator they bind (notably _cargo_env). The task3/task4 shims above read these.
+_TASK3_DEPS = Task3Deps(
+    phase=_phase,
+    load_baked_clusters=_load_baked_clusters,
+    task3_legacy_single=_task3_legacy_single,
+    cargo_env=_cargo_env,
+    parse_cmd=_parse_cmd,
+    count_active_tests_for_cluster=_count_active_tests_for_cluster,
+    store_prompt_content=_store_prompt_content,
+    task3_inline_retry=_task3_inline_retry,
+    read=read,
+    write=write,
+    test_timeout=TEST_TIMEOUT,
+)
+_TASK4_DEPS = Task4Deps(
+    ask=ask,
+    read=read,
+    write=write,
+    extract_and_store_rules=_task4_extract_and_store_rules,
+    model=MODEL,
+    task4_model=_TASK4_MODEL,
+    verbosity_guard=_TASK4_VERBOSITY_GUARD,
+    intermediate_char_limit=INTERMEDIATE_CHAR_LIMIT,
+    single_call_char_limit=SINGLE_CALL_CHAR_LIMIT,
+)
 
 
 def _describe_test_environment() -> str:

@@ -2064,6 +2064,71 @@ def test_slice5a_shims_delegate_to_adapters() -> None:
     print("  OK  pipeline extractor + cargo shims delegate to ADAPTERS (slice 5a)")
 
 
+def test_slice5b_task3_task4() -> None:
+    """Slice 5b: extracted TASK 3 (test runner) + TASK 4 (failure analysis) drive their
+    branches correctly with injected fakes — no cargo, no LLM."""
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from pathlib import Path
+    import pipeline_core.application.tasks.task3 as t3mod
+    from pipeline_core.application.tasks.task3 import task3, Task3Deps
+    from pipeline_core.application.tasks.task4 import task4, Task4Deps
+    from pipeline_core.domain.llm_output import GENESIS_DELIM_START, GENESIS_DELIM_END
+
+    @contextmanager
+    def fake_phase(*a, **k):
+        yield {}
+
+    # --- TASK 3 legacy fallback: no baked clusters → delegate to task3_legacy_single ---
+    d_legacy = Task3Deps(
+        phase=fake_phase, load_baked_clusters=lambda p: [],
+        task3_legacy_single=lambda *a: ("LEGACY", "out"),
+        cargo_env=dict, parse_cmd=lambda c: c.split(),
+        count_active_tests_for_cluster=lambda p, c: 0, store_prompt_content=lambda s: s,
+        task3_inline_retry=lambda **k: (False, ""), read=lambda p: "", write=lambda p, c: None,
+        test_timeout=1,
+    )
+    assert task3(Path("."), "cargo test", 1, ".", Path("g"), d_legacy) == ("LEGACY", "out")
+
+    # --- TASK 3 all-pass: monkeypatch subprocess in the task3 module ---
+    cluster = SimpleNamespace(name="stable", toolchain=None, env_extra={})
+    fake_run = lambda *a, **k: SimpleNamespace(
+        returncode=0, stdout="test result: ok. 2 passed; 0 failed; 0 ignored", stderr="")
+    written: dict = {}
+    d_pass = Task3Deps(
+        phase=fake_phase, load_baked_clusters=lambda p: [cluster],
+        task3_legacy_single=lambda *a: ("X", "X"),
+        cargo_env=dict, parse_cmd=lambda c: c.split(),
+        count_active_tests_for_cluster=lambda p, c: 2, store_prompt_content=lambda s: len(s),
+        task3_inline_retry=lambda **k: (False, ""),
+        read=lambda p: "genesis", write=lambda p, c: written.__setitem__("t3", c),
+        test_timeout=5,
+    )
+    orig_run = t3mod.subprocess.run
+    t3mod.subprocess.run = fake_run
+    try:
+        passed, agg = task3(Path("."), "cargo test", 1, ".", Path("g"), d_pass)
+    finally:
+        t3mod.subprocess.run = orig_run
+    assert passed is True and "stable" in agg and "t3" in written
+
+    # --- TASK 4: ask returns a genesis update → written + (True, current_pass) ---
+    t4_written: dict = {}
+    resp = f"{GENESIS_DELIM_START}\nnew-genesis-methodology\n{GENESIS_DELIM_END}"
+    d4 = Task4Deps(
+        ask=lambda prompt, model=None: resp,
+        read=lambda p: "a" * 300,  # genesis/req content
+        write=lambda p, c: t4_written.__setitem__("g", c),
+        extract_and_store_rules=lambda *a, **k: None,
+        model="m", task4_model="m4", verbosity_guard="",
+        intermediate_char_limit=50_000, single_call_char_limit=120_000,
+    )
+    out = "test result: ok. 3 passed; 1 failed; 0 ignored"
+    ok, cur = task4(Path("g"), Path("r"), out, 2, ".", d4, failure_type="test")
+    assert ok is True and cur == 3 and t4_written["g"] == "new-genesis-methodology"
+    print("  OK  task3 + task4 extracted behind orchestrator (slice 5b)")
+
+
 def test_slice5b_genesis_audit_task() -> None:
     """Slice 5b: extracted genesis_audit use case behaves per-branch with injected deps,
     and pipeline's shim + Orchestrator composition context are wired."""
@@ -2210,6 +2275,7 @@ def main() -> int:
     test_adapters_satisfy_ports()
     test_coverage_workspace_adapters()
     test_slice5a_shims_delegate_to_adapters()
+    test_slice5b_task3_task4()
     test_slice5b_genesis_audit_task()
 
     if full:
