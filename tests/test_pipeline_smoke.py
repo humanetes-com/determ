@@ -2077,7 +2077,16 @@ def test_slice5b_genesis_audit_task() -> None:
     assert isinstance(pipeline.ORCHESTRATOR, Orchestrator)
     assert pipeline.ORCHESTRATOR.adapters is pipeline.ADAPTERS
     assert isinstance(pipeline._GENESIS_AUDIT_DEPS, GenesisAuditDeps)
-    print("  OK  genesis_audit task extracted behind orchestrator (slice 5b)")
+
+    # 5b foundation: test-result helpers relocated to domain; pipeline re-exports the
+    # SAME objects (single source of truth) so call sites + tasks share one definition.
+    from pipeline_core.domain import test_results as tr
+    assert pipeline._parse_test_counts is tr._parse_test_counts
+    assert pipeline.count_passing_tests is tr.count_passing_tests
+    assert pipeline.validate_task3_output_strict is tr.validate_task3_output_strict
+    assert pipeline.extract_test_output_from_file is tr.extract_test_output_from_file
+    assert pipeline.OUTPUT_SEPARATOR == tr.OUTPUT_SEPARATOR == "=== test output ==="
+    print("  OK  genesis_audit task + test_results foundation (slice 5b)")
 
 
 # ─── Driver ─────────────────────────────────────────────────────────────────
