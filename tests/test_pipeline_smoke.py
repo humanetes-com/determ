@@ -1895,6 +1895,37 @@ def test_domain_enums_and_model_caps() -> None:
     print("  OK  pipeline_core domain enums + model_caps + Settings (slice 1+2+3)")
 
 
+def test_adapters_satisfy_ports() -> None:
+    """Slice 4a: LLM / Extractor / Cargo adapters structurally satisfy their ports,
+    and the composition root builds them on `pipeline.ADAPTERS`."""
+    from pipeline_core.ports import LLM, Extractor, Cargo, ProcessResult
+    from pipeline_core.adapters import build_adapters, Adapters, CargoCli, CliExtractor, ModelInteractLLM
+    from pipeline_core.adapters.cargo import Process
+    from pipeline_core.settings import Settings
+    from pathlib import Path
+
+    a = build_adapters(Settings.from_env(), extractor_bin=Path("/nonexistent/bin"), model="m")
+    assert isinstance(a, Adapters)
+    # runtime_checkable Protocols → structural isinstance.
+    assert isinstance(a.llm, LLM) and isinstance(a.llm, ModelInteractLLM)
+    assert isinstance(a.extractor, Extractor) and isinstance(a.extractor, CliExtractor)
+    assert isinstance(a.cargo, Cargo) and isinstance(a.cargo, CargoCli)
+
+    # Missing-binary extractor degrades to None / not-ok, never raises (parity with pipeline).
+    assert a.extractor.enumerate_fns(Path("/tmp")) is None
+    assert a.extractor.merge_clusters(Path("/tmp/x"), []) is False
+    assert a.extractor.skeletonise(Path("/tmp"), Path("/tmp/out"))["ok"] is False
+
+    # Cargo: bogus binary → rc=-1, structured Process satisfying ProcessResult.
+    p = a.cargo.run("definitely-not-cargo --version", Path("/tmp"), env={})
+    assert isinstance(p, Process) and isinstance(p, ProcessResult)
+    assert p.returncode == -1 and "NOT FOUND" in p.stderr
+
+    import pipeline
+    assert isinstance(pipeline.ADAPTERS, Adapters)
+    print("  OK  pipeline_core adapters satisfy ports (slice 4a)")
+
+
 # ─── Driver ─────────────────────────────────────────────────────────────────
 
 def main() -> int:
@@ -1946,6 +1977,7 @@ def main() -> int:
     test_strip_ansi_and_diag_frontier()
     test_sig_tighten_guard_and_where_parse()
     test_domain_enums_and_model_caps()
+    test_adapters_satisfy_ports()
 
     if full:
         print("Cargo phase (--full):")

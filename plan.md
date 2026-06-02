@@ -7,6 +7,39 @@ baseline. Plan 1 = prompt-quality audit, complete, historical.
 
 ---
 
+# Plan 5 — task0c-final: consolidate gen_tests before strip (BACKLOG, deferred)
+
+Scheduled AFTER the CODE_ARCHITECTURE.md migration slices land. Do not start
+until slices 4b–7 are done.
+
+Problem
+- Each task0c augmentation pass for `src/{stem}.rs` emits a sibling
+  `{stem}.gen_tests_{N}.rs` + a path-mod decl `#[cfg(test)] #[path=...] mod
+  gen_tests_{N};`. Many passes ⇒ N siblings + N decls per file. Sprawl, and any
+  future single-module collapse would collide same-named `fn test_*`/helpers/`use`.
+
+Step (new task0c-final, runs after the last pass, before bake+strip)
+- Per source file, fold its `gen_tests_{N}` siblings into ONE
+  `{stem}.gen_tests.rs`; replace the N path-mod decls with one.
+- Namespace each pass as an inline `mod pass_{N} { use super::*; <pass body> }`
+  ⇒ identical fn/helper names across passes never collide (no renames needed).
+- Per-file only — gen_tests bind to their module via `use super::*`; a global
+  merge would break `super::` paths. No cross-file merge.
+
+Constraints
+- Deterministic / AST-based via the syn extractor — NO regex (Rule 9). Add a
+  `--merge-gen-tests` (or reuse merge-clusters machinery) subcommand; Python
+  drives it.
+- gen_tests are TEST code, not source bodies ⇒ reading/merging them pre-strip is
+  allowed (Hard Rule 11 unaffected). Output must round-trip the existing
+  `test_strip_preserves_gen_tests_verbatim` invariant on the consolidated file.
+- Idempotent: re-running on already-consolidated state is a no-op.
+
+Open: none material — per-file granularity + inline-`mod pass_N` namespacing is
+the only coherent design (confirmed against the `use super::*` binding).
+
+---
+
 # Plan 4 — TDD-scoped per-fn driver (2026-05-27)
 
 ## Problem

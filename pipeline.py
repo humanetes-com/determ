@@ -45,6 +45,7 @@ from pipeline_core.domain.model_caps import (
     model_context_chars as _model_context_chars_pure,
 )
 from pipeline_core.settings import Settings
+from pipeline_core.adapters import build_adapters
 
 _mi_mtime: float = os.path.getmtime(_mi.__file__)
 
@@ -4350,6 +4351,12 @@ def _estimate_cluster_ceiling(project_dir: Path, cluster: "BuildCluster") -> tup
 # ---------------------------------------------------------------------------
 
 SKELETON_EXTRACTOR_BIN = Path(__file__).parent / "tools" / "skeleton_extractor" / "target" / "release" / "skeleton-extractor"
+
+# Composition root (continued from SETTINGS): build the port adapters once, here where
+# the extractor-binary path is in scope. `pipeline.py` is the __main__/composition layer
+# (CODE_ARCHITECTURE.md §1), so it owns construction; call sites migrate onto ADAPTERS
+# one task at a time (slice 5). Adapters wrap real primitives and never import back here.
+ADAPTERS = build_adapters(SETTINGS, extractor_bin=SKELETON_EXTRACTOR_BIN, model=MODEL)
 
 
 def _prune_redundant_clusters(
