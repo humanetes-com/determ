@@ -24,6 +24,25 @@ _CLAUDE_CONTEXT_TOKENS = 200_000
 _FALLBACK_CONTEXT_TOKENS = 8_192
 _CHARS_PER_TOKEN = 4
 
+# Input-budget math (mirrors model_interact._cap): the max input chars that still guarantee
+# `min_content_tokens` of output. cpt_floor=3.0 matches model_interact's estimate floor.
+_CPT_FLOOR = 3.0
+_VLLM_OVERHEAD_TOKENS = 512
+_MIN_SAFE_INPUT_CHARS = 4_000
+
+
+def safe_input_char_limit(ctx_tokens: int, thinking_tokens: int, min_content_tokens: int) -> int:
+    """Max input chars that guarantee at least ``min_content_tokens`` of output.
+
+        input_chars ≤ (ctx - thinking - vllm_overhead - min_content) × cpt_floor
+
+    Pure: caller resolves ctx/thinking from the backend env. Never below a 4k-char floor.
+    """
+    return max(
+        _MIN_SAFE_INPUT_CHARS,
+        int((ctx_tokens - thinking_tokens - _VLLM_OVERHEAD_TOKENS - min_content_tokens) * _CPT_FLOOR),
+    )
+
 
 def model_tier(model: str) -> ModelTier:
     """Classify a model as MID (capable instruction-follower) or WEAK (small/distilled)."""

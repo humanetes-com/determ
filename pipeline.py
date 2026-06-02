@@ -95,7 +95,7 @@ load_dotenv(Path(__file__).parent / ".env")
 # Composition root: resolve all env-driven knobs once into one typed object.
 # Everything downstream reads SETTINGS rather than os.environ for these values.
 # (Per-task numeric tuning knobs still live as their own getenv reads for now.)
-SETTINGS = Settings.from_env()
+SETTINGS = Settings.from_env(model=MODEL)
 
 # Per-task model overrides — each task uses the most appropriate model.
 # Falls back to MODEL (the global default) if a specific override is not set.
@@ -536,46 +536,16 @@ def ask(prompt: str, system: str | None = None, model: str | None = None,
 #
 # REVERT if empty responses return or model output degrades (session 26 added this):
 #   1. In model_interact.py ~line 846: max(3.0, _vllm_cpt) → max(2.0, _vllm_cpt)
-#   2. Replace _safe_input_char_limit() and its callers below with:
+#   2. Override the budget in Settings.from_env with the old empirical cap:
 #        _THINKING_MODEL_CHAR_LIMIT = 120_000
-#        SINGLE_CALL_CHAR_LIMIT = min(_THINKING_MODEL_CHAR_LIMIT, MODEL_CONTEXT_CHARS * 3 // 4)
-#        TASK0C_PROMPT_CHAR_CAP = _THINKING_MODEL_CHAR_LIMIT
-#        FILE_CHAR_LIMIT = min(_THINKING_MODEL_CHAR_LIMIT, MODEL_CONTEXT_CHARS * 85 // 100)
-def _safe_input_char_limit(min_content_tok: int = 16_384) -> int:
-    """
-    Maximum input chars that guarantee at least min_content_tok output tokens.
-
-    Derived from model_interact._cap():
-      input_chars ≤ (ctx - thinking_budget - 512 - min_content_tok) × cpt_floor
-
-    cpt_floor=3.0 matches the floor in model_interact._estimated_input_tokens so
-    the estimate is consistent between pipeline and inference layer.
-
-    min_content_tok controls the output reservation:
-      - 16_384 for tasks that generate large outputs (full source files, requirements)
-      - 4_096  for task0c which generates small test blocks only
-    """
-    CPT_FLOOR     = 3.0    # chars/token — matches model_interact.py cpt_floor
-    VLLM_OVERHEAD = 512    # internal vLLM overhead tokens
-    match SETTINGS.backend:
-        case Backend.VLLM:
-            ctx      = int(os.getenv("VLLM_MAX_MODEL_LEN", "65536"))
-            thinking = int(os.getenv("VLLM_THINKING_BUDGET", "0"))
-        case Backend.SGLANG:
-            ctx      = int(os.getenv("SGLANG_MAX_MODEL_LEN", "65536"))
-            thinking = int(os.getenv("SGLANG_THINKING_BUDGET", "0"))
-        case Backend.OLLAMA:
-            ctx      = int(os.getenv("OLLAMA_NUM_CTX", "8192"))
-            thinking = 0
-        case _:  # claude / huggingface / unrecognised → safe fallback
-            ctx, thinking = 8_192, 0
-    return max(4_000, int((ctx - thinking - VLLM_OVERHEAD - min_content_tok) * CPT_FLOOR))
-
-# General tasks (task1/2/3/4): large outputs (full files, requirements docs).
-# task0c: small test blocks only → smaller output reservation → more input budget.
-_SAFE_INPUT_CHAR_LIMIT      = _safe_input_char_limit(min_content_tok=16_384)
-_SAFE_INPUT_CHAR_LIMIT_TASK0C = _safe_input_char_limit(min_content_tok=4_096)
-SINGLE_CALL_CHAR_LIMIT = min(_SAFE_INPUT_CHAR_LIMIT, MODEL_CONTEXT_CHARS * 3 // 4)
+#        single_call_char_limit = min(_THINKING_MODEL_CHAR_LIMIT, mcc * 3 // 4)
+#      (the safe-input math now lives in domain.model_caps.safe_input_char_limit).
+# slice 5b/Settings: the safe-input + single-call char budgets are now computed once in
+# Settings.from_env (pipeline_core.settings, via domain.model_caps.safe_input_char_limit).
+# These constants are single-sourced from SETTINGS; call sites are unchanged.
+_SAFE_INPUT_CHAR_LIMIT        = SETTINGS.safe_input_char_limit
+_SAFE_INPUT_CHAR_LIMIT_TASK0C = SETTINGS.safe_input_char_limit_task0c
+SINGLE_CALL_CHAR_LIMIT        = SETTINGS.single_call_char_limit
 
 # Supplementary material caps — scale with context so they don't freeze at
 # values tuned for an old (small) context window.

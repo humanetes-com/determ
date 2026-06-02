@@ -1892,7 +1892,20 @@ def test_domain_enums_and_model_caps() -> None:
     assert pipeline.COVERAGE_BACKEND is pipeline.SETTINGS.coverage_backend
     assert isinstance(pipeline.SETTINGS.backend, Backend)
     assert isinstance(pipeline.SETTINGS.phase_c_fill_unit, FillUnit)
-    print("  OK  pipeline_core domain enums + model_caps + Settings (slice 1+2+3)")
+
+    # Settings owns the derived char budgets; pipeline constants are single-sourced from it.
+    from pipeline_core.domain.model_caps import safe_input_char_limit
+    s = pipeline.SETTINGS
+    assert pipeline.SINGLE_CALL_CHAR_LIMIT == s.single_call_char_limit
+    assert pipeline._SAFE_INPUT_CHAR_LIMIT == s.safe_input_char_limit
+    assert pipeline._SAFE_INPUT_CHAR_LIMIT_TASK0C == s.safe_input_char_limit_task0c
+    assert s.single_call_char_limit == min(s.safe_input_char_limit, s.model_context_chars * 3 // 4)
+    assert s.intermediate_char_limit == s.model_context_chars // 2
+    assert s.model == pipeline.MODEL
+    # pure budget helper: floor + formula
+    assert safe_input_char_limit(65536, 0, 16_384) == int((65536 - 512 - 16_384) * 3.0)
+    assert safe_input_char_limit(1, 0, 0) == 4_000  # 4k floor
+    print("  OK  pipeline_core domain enums + model_caps + Settings budget (slice 1+2+3)")
 
 
 def test_adapters_satisfy_ports() -> None:
