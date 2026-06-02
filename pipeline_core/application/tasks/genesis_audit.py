@@ -15,17 +15,22 @@ from typing import Any
 
 from ...log import log
 from ...retry import with_retry
-from ...domain.llm_output import _extract_genesis as extract_genesis
+from ...domain.llm_output import (
+    _extract_genesis as extract_genesis,
+    GENESIS_DELIM_START,
+    GENESIS_DELIM_END,
+)
 
 
 @dataclass(frozen=True, slots=True)
 class GenesisAuditDeps:
     """Collaborators the genesis audit needs, injected by the composition root.
 
-    Logging + retry (pipeline_core.log / .retry) and genesis extraction
-    (domain.llm_output) are imported directly rather than injected — the de-ceremony
-    payoff of the 5b foundation step. Only the genuinely pipeline-bound collaborators
-    (ask/read/write, the model id, prompt-format strings) remain injected.
+    Logging + retry (pipeline_core.log / .retry), genesis extraction and the genesis
+    delimiters (domain.llm_output) are imported directly rather than injected — the
+    de-ceremony payoff of the 5b foundation step, and it guarantees the prompt's
+    delimiters are the same ones _extract_genesis parses. Only the genuinely
+    pipeline-bound collaborators (ask/read/write, model id, verbosity guard) remain.
     """
 
     ask: Callable[..., str]
@@ -33,8 +38,6 @@ class GenesisAuditDeps:
     write: Callable[[Any, str], None]
     model: str
     verbosity_guard: str
-    delim_start: str
-    delim_end: str
 
 
 def genesis_audit(genesis_path: Path, deps: GenesisAuditDeps) -> bool:
@@ -62,9 +65,9 @@ If no issues found, respond with exactly: AUDIT_CLEAN
 If issues are found, output the corrected document with contradictions resolved
 and redundant rules removed. Do not add new rules — only clean up existing ones.
 {deps.verbosity_guard}
-{deps.delim_start}
+{GENESIS_DELIM_START}
 corrected content here
-{deps.delim_end}
+{GENESIS_DELIM_END}
 """
 
     def attempt():

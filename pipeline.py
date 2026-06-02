@@ -65,6 +65,7 @@ from pipeline_core.domain.llm_output import (
 )
 from pipeline_core import log as _pclog, retry as _pcretry
 from pipeline_core.retry import with_retry, is_rate_limit_error as _is_rate_limit_error
+from pipeline_core.io import read, write
 from pipeline_core.settings import Settings
 from pipeline_core.adapters import build_adapters
 from pipeline_core.adapters import coverage as _covmod, workspace as _wsmod
@@ -1069,16 +1070,10 @@ def generate_in_parallel(
 # slice 5b foundation: relocated to pipeline_core.domain.llm_output (imported at top).
 
 
-def read(path) -> str:
-    try:
-        return Path(path).read_text()
-    except FileNotFoundError:
-        return ""
+# slice 5b foundation: read/write relocated to pipeline_core.io (imported at top).
 
 
-def write(path, content):
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    Path(path).write_text(content)
+# slice 5b foundation: read/write relocated to pipeline_core.io (imported at top).
 
 
 def _write_fr_preserving_notes(path, new_content: str) -> None:
@@ -18406,7 +18401,6 @@ NO_IMPROVEMENT_THRESHOLD = 3
 _GENESIS_AUDIT_DEPS = GenesisAuditDeps(
     ask=ask, read=read, write=write, model=_TASK4_MODEL,
     verbosity_guard=_TASK4_VERBOSITY_GUARD,
-    delim_start=GENESIS_DELIM_START, delim_end=GENESIS_DELIM_END,
 )
 
 

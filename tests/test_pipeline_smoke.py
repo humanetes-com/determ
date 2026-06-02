@@ -2058,7 +2058,6 @@ def test_slice5b_genesis_audit_task() -> None:
             read=lambda p: genesis_text,
             write=lambda p, c: written.__setitem__("c", c),
             model="m", verbosity_guard="",
-            delim_start=GENESIS_DELIM_START, delim_end=GENESIS_DELIM_END,
         )
 
     long = "x" * 250  # over the 200-char audit threshold
@@ -2119,10 +2118,18 @@ def test_slice5b_genesis_audit_task() -> None:
     assert pipeline.GENESIS_DELIM_START == lo.GENESIS_DELIM_START == "===GENESIS_START==="
     assert lo.extract_files('<FILE path="a.rs">fn x(){}</FILE>') == {"a.rs": "fn x(){}"}
 
-    # genesis_audit deps no longer carry log/retry/extract_genesis (de-ceremony payoff).
-    for gone in ("log", "retry", "extract_genesis"):
+    # 5b foundation: read/write homed in pipeline_core.io; pipeline re-exports them.
+    from pipeline_core import io as pcio
+    assert pipeline.read is pcio.read and pipeline.write is pcio.write
+
+    # genesis_audit deps shed everything cross-cutting/derivable (de-ceremony payoff):
+    # log/retry/extract_genesis imported, delimiters imported (prompt == parse), leaving
+    # only ask/read/write/model/verbosity_guard.
+    for gone in ("log", "retry", "extract_genesis", "delim_start", "delim_end"):
         assert gone not in GenesisAuditDeps.__dataclass_fields__
-    print("  OK  genesis_audit + test_results + text + infra + llm_output (slice 5b)")
+    assert set(GenesisAuditDeps.__dataclass_fields__) == {
+        "ask", "read", "write", "model", "verbosity_guard"}
+    print("  OK  genesis_audit + test_results + text + infra + llm_output + io (slice 5b)")
 
 
 # ─── Driver ─────────────────────────────────────────────────────────────────
