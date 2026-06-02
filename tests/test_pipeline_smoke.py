@@ -1847,6 +1847,43 @@ def test_sig_tighten_guard_and_where_parse() -> None:
     print("  OK  sig-tighten guard (_is_pub_fn) + where-clause parse")
 
 
+def test_domain_enums_and_model_caps() -> None:
+    """pipeline_core domain: StrEnum coerce + pure model-caps math (strangler slice 1)."""
+    from pipeline_core.domain.enums import (
+        Backend, CoverageBackend, FillUnit, ModelTier,
+    )
+    from pipeline_core.domain.model_caps import model_tier, model_context_chars
+
+    # StrEnum members compare equal to their token → drop-in for string literals.
+    assert Backend.OLLAMA == "ollama"
+    assert FillUnit.IMPL == "impl"
+
+    # coerce: case-insensitive, typed fallback, None → default.
+    assert Backend.coerce("VLLM", Backend.OLLAMA) is Backend.VLLM
+    assert Backend.coerce("  ollama ", Backend.CLAUDE) is Backend.OLLAMA
+    assert Backend.coerce("nonsense", Backend.OLLAMA) is Backend.OLLAMA
+    assert Backend.coerce(None, Backend.CLAUDE) is Backend.CLAUDE
+    assert CoverageBackend.coerce("llvm-cov", CoverageBackend.TARPAULIN) is CoverageBackend.LLVM_COV
+
+    # backend → context-length env var mapping.
+    assert Backend.OLLAMA.max_len_env_var == "OLLAMA_NUM_CTX"
+    assert Backend.CLAUDE.max_len_env_var is None
+
+    # model_tier classification (pure).
+    assert model_tier("qwen3:32b") is ModelTier.MID
+    assert model_tier("claude-opus") is ModelTier.MID
+    assert model_tier("random-13b") is ModelTier.WEAK
+    assert model_tier("x/llama-3.3-70b") is ModelTier.MID
+
+    # model_context_chars budget math (pure).
+    assert model_context_chars("qwen3", Backend.OLLAMA, 32768) == (32768 - 6_000) * 4
+    assert model_context_chars("qwen3", Backend.OLLAMA, 6000) == 4_000 * 4  # floor
+    assert model_context_chars("x", Backend.CLAUDE, None) == (200_000 - 6_000) * 4
+    assert model_context_chars("claude-x", Backend.OLLAMA, None) == (200_000 - 6_000) * 4
+    assert model_context_chars("x", Backend.OLLAMA, None) == (8_192 - 6_000) * 4
+    print("  OK  pipeline_core domain enums + model_caps (slice 1)")
+
+
 # ─── Driver ─────────────────────────────────────────────────────────────────
 
 def main() -> int:
@@ -1897,6 +1934,7 @@ def main() -> int:
     test_render_impl_block()
     test_strip_ansi_and_diag_frontier()
     test_sig_tighten_guard_and_where_parse()
+    test_domain_enums_and_model_caps()
 
     if full:
         print("Cargo phase (--full):")

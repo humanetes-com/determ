@@ -29,6 +29,16 @@ echo "Running mypy on monitor.py..."
     2>&1 | grep -E "error:|warning:|Found [0-9]+ error" || true
 
 echo ""
+echo "Running mypy on pipeline_core/..."
+"$SCRIPT_DIR/.venv/bin/mypy" pipeline_core \
+    --ignore-missing-imports \
+    --warn-return-any \
+    --check-untyped-defs \
+    --no-strict-optional \
+    --no-error-summary \
+    2>&1 | grep -E "error:|warning:|Found [0-9]+ error" || true
+
+echo ""
 echo "Running pure-Python smoke tests..."
 "$SCRIPT_DIR/.venv/bin/python" tests/test_pipeline_smoke.py
 

@@ -32,6 +32,11 @@ from dotenv import load_dotenv
 import model_interact as _mi
 from model_interact import ask as _ask_raw, MODEL
 from strip_to_tests import detect_language, process_rust
+from pipeline_core.domain.enums import Backend
+from pipeline_core.domain.model_caps import (
+    model_tier as _model_tier_pure,
+    model_context_chars as _model_context_chars_pure,
+)
 
 _mi_mtime: float = os.path.getmtime(_mi.__file__)
 
@@ -62,22 +67,8 @@ _TASK4_MODEL  = os.getenv("TASK4_MODEL",  MODEL)  # failure analysis — reasoni
 
 
 def _model_tier(model: str) -> str:
-    """Return 'mid' for capable instruction-following models, 'weak' for small/distilled ones.
-
-    Mid-tier: large instruction-tuned models (27B+, Claude, GPT-4, Gemini).
-      → follow FILE markers reliably; benefit from explicit reasoning directives.
-    Weak-tier: smaller models (≤14B) that need repetition and verbosity guards.
-    """
-    _lower = model.lower().split(":")[0].split("/")[-1]
-    for _prefix in (
-        "qwen3", "qwen2.5-72",
-        "llama-3.3-70", "llama-3.1-70", "llama-3.1-405",
-        "mistral-large", "mixtral-8x22",
-        "claude", "gpt-4", "gemini-1.5", "gemini-2",
-    ):
-        if _lower.startswith(_prefix):
-            return "mid"
-    return "weak"
+    """Thin shim → pipeline_core.domain.model_caps.model_tier (returns 'mid'/'weak')."""
+    return str(_model_tier_pure(model))
 
 
 _TASK0C_TIER = _model_tier(_TASK0C_MODEL)
@@ -195,23 +186,15 @@ MAX_RETRIES = 3
 #   Fallback (8192 tokens):                                           → ~26k chars budget
 
 def _model_context_chars() -> int:
-    """Return the safe content budget in chars for one model call."""
-    backend = os.getenv("BACKEND", "ollama").lower()
-    backend_var = {
-        "vllm":        "VLLM_MAX_MODEL_LEN",
-        "sglang":      "SGLANG_MAX_MODEL_LEN",
-        "ollama":      "OLLAMA_NUM_CTX",
-        "huggingface": None,
-        "claude":      None,
-    }.get(backend)
-    if backend_var:
-        val = os.getenv(backend_var)
-        if val and val.strip().isdigit():
-            tokens = int(val)
-            return max((tokens - 6_000), 4_000) * 4
-    if MODEL.startswith("claude") or backend == "claude":
-        return (200_000 - 6_000) * 4
-    return (8_192 - 6_000) * 4  # safe fallback
+    """Return the safe content budget in chars for one model call.
+
+    Thin shim: resolves env → pipeline_core.domain.model_caps.model_context_chars.
+    """
+    backend = Backend.coerce(os.getenv("BACKEND"), Backend.OLLAMA)
+    var = backend.max_len_env_var
+    raw = os.getenv(var) if var else None
+    max_len = int(raw) if raw and raw.strip().isdigit() else None
+    return _model_context_chars_pure(MODEL, backend, max_len)
 
 
 MODEL_CONTEXT_CHARS = _model_context_chars()

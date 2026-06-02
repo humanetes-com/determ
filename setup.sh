@@ -182,8 +182,8 @@ echo "-- agg (optional, renders asciinema .cast → gif) --"
 if command -v agg &>/dev/null; then
     skip "agg already installed"
 else
-    info "Installing agg..."
-    if cargo install --locked agg 2>&1 | tail -2; then
+    info "Installing agg (asciinema gif generator, from git)..."
+    if cargo install --locked --git https://github.com/asciinema/agg 2>&1 | tail -2; then
         ok "agg installed"
     else
         echo "[warn] agg failed to install — screencast gif rendering unavailable (recording still works)"
