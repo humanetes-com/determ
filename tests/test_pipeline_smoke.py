@@ -1991,6 +1991,55 @@ def test_coverage_workspace_adapters() -> None:
     print("  OK  pipeline_core coverage + workspace adapters (slice 4b)")
 
 
+def test_slice5a_shims_delegate_to_adapters() -> None:
+    """Slice 5a: pipeline's extractor + cargo shims delegate to ADAPTERS (no duplicated
+    subprocess logic), and _run_cargo preserves the legacy (rc, text) contract."""
+    import types
+    from pathlib import Path
+    import pipeline
+    from pipeline_core.adapters.cargo import Process
+
+    calls: list[tuple] = []
+
+    class _FakeExtractor:
+        def enumerate_fns(self, d, **k): calls.append(("fns", d)); return [{"fn_name": "x"}]
+        def enumerate_types(self, d, **k): calls.append(("types", d)); return [{"name": "T"}]
+        def enumerate_dispatch_families(self, d, **k): calls.append(("disp", d)); return []
+        def enumerate_feature_gate_cfgs(self, d, **k): calls.append(("feat", d)); return ["nightly"]
+        def enumerate_mods(self, d, **k): calls.append(("mods", d)); return [{"name": "m"}]
+        def skeletonise(self, i, o, **k): calls.append(("skel", i, o, k)); return {"ok": True, "reports": [], "stderr": ""}
+
+    class _FakeCargo:
+        def __init__(self): self.last = None
+        def run(self, cmd, cwd, *, env, timeout=180):
+            self.last = (cmd, cwd, env, timeout)
+            if cmd == "boom":
+                return Process(-1, "", "TIMEOUT after 5s")
+            return Process(0, "out", "err")
+
+    orig = pipeline.ADAPTERS
+    pipeline.ADAPTERS = types.SimpleNamespace(extractor=_FakeExtractor(), cargo=_FakeCargo())
+    try:
+        d = Path("/tmp/x")
+        assert pipeline._enumerate_fns_via_extractor(d) == [{"fn_name": "x"}]
+        assert pipeline._enumerate_types_via_extractor(d) == [{"name": "T"}]
+        assert pipeline._dispatch_families_via_extractor(d) == []
+        assert pipeline._feature_gate_cfgs_via_extractor(d) == ["nightly"]
+        assert pipeline._enumerate_mods_via_extractor(d) == [{"name": "m"}]
+        r = pipeline._extract_skeleton(Path("/in"), Path("/out"))
+        assert r["ok"] is True
+        assert {c[0] for c in calls} == {"fns", "types", "disp", "feat", "mods", "skel"}
+
+        # _run_cargo: success → (rc, combined stdout+stderr-block); error rc=-1 → bare stderr.
+        rc, out = pipeline._run_cargo("ok", Path("/tmp"), {})
+        assert rc == 0 and out == "out\n--- stderr ---\nerr"
+        rc, out = pipeline._run_cargo("boom", Path("/tmp"), {})
+        assert rc == -1 and out == "TIMEOUT after 5s"  # no stderr-block prefix on error
+    finally:
+        pipeline.ADAPTERS = orig
+    print("  OK  pipeline extractor + cargo shims delegate to ADAPTERS (slice 5a)")
+
+
 # ─── Driver ─────────────────────────────────────────────────────────────────
 
 def main() -> int:
@@ -2044,6 +2093,7 @@ def main() -> int:
     test_domain_enums_and_model_caps()
     test_adapters_satisfy_ports()
     test_coverage_workspace_adapters()
+    test_slice5a_shims_delegate_to_adapters()
 
     if full:
         print("Cargo phase (--full):")

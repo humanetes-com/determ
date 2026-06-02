@@ -69,6 +69,9 @@ class CliExtractor:
     def enumerate_feature_gate_cfgs(self, src_dir: Path, *, cfg_true: tuple[str, ...] = (), cfg_false: tuple[str, ...] = ()) -> list[str] | None:
         return self._enumerate("--enumerate-feature-gate-cfgs", src_dir, cfg_true, cfg_false)
 
+    def enumerate_mods(self, src_dir: Path, *, cfg_true: tuple[str, ...] = (), cfg_false: tuple[str, ...] = ()) -> list[dict] | None:
+        return self._enumerate("--enumerate-mods", src_dir, cfg_true, cfg_false)
+
     # ── skeletonise : --input/--output tree, structured report dict ───────────
     def skeletonise(self, input_dir: Path, output_dir: Path, *, cfg_true: tuple[str, ...] = (), cfg_false: tuple[str, ...] = ()) -> dict:
         if not self._bin.exists():

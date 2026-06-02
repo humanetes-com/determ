@@ -4521,34 +4521,11 @@ def _extract_skeleton(input_dir: Path, output_dir: Path,
     `output_dir` contains the skeletonised .rs files mirroring input_dir's
     layout.
     """
-    if not SKELETON_EXTRACTOR_BIN.exists():
-        return {
-            "ok": False,
-            "reports": [],
-            "stderr": f"skeleton-extractor binary missing at {SKELETON_EXTRACTOR_BIN}. "
-                      f"Run `bash setup.sh` to build it.",
-        }
-    output_dir.mkdir(parents=True, exist_ok=True)
-    cmd = [str(SKELETON_EXTRACTOR_BIN),
-           "--input", str(input_dir),
-           "--output", str(output_dir),
-           "--report"]
-    cmd.extend(_cluster_extractor_args(cluster))
-    try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=120,
-        )
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "reports": [], "stderr": "skeleton-extractor timed out (>120s)"}
-    except Exception as e:
-        return {"ok": False, "reports": [], "stderr": f"skeleton-extractor invocation failed: {e}"}
-    if result.returncode != 0:
-        return {"ok": False, "reports": [], "stderr": result.stderr.strip()}
-    try:
-        reports = json.loads(result.stdout) if result.stdout.strip() else []
-    except json.JSONDecodeError as e:
-        return {"ok": False, "reports": [], "stderr": f"could not parse JSON report: {e}"}
-    return {"ok": True, "reports": reports, "stderr": result.stderr.strip()}
+    # slice 5a: via Extractor adapter. Map the cluster's cfg-sets to the adapter's
+    # cfg_true/cfg_false tuples (same `--cfg-true/--cfg-false` args as _cluster_extractor_args).
+    ct = tuple(cluster.cfg_true) if cluster is not None else ()
+    cf = tuple(cluster.cfg_false) if cluster is not None else ()
+    return ADAPTERS.extractor.skeletonise(input_dir, output_dir, cfg_true=ct, cfg_false=cf)
 
 
 def _compute_fn_name_counts(src_dir: Path) -> dict[str, int]:
@@ -8318,18 +8295,16 @@ Rules:
 
 
 def _run_cargo(cmd: str, cwd: Path, env: dict, timeout: int = 180) -> tuple[int, str]:
-    """Run a cargo command and return (rc, combined_output). rc=-1 on timeout."""
-    try:
-        r = subprocess.run(
-            shlex.split(cmd), cwd=cwd, capture_output=True, text=True,
-            timeout=timeout, env=env,
-        )
-        out = (r.stdout or "") + ("\n--- stderr ---\n" + r.stderr if r.stderr else "")
-        return r.returncode, out
-    except subprocess.TimeoutExpired:
-        return -1, f"TIMEOUT after {timeout}s"
-    except FileNotFoundError as e:
-        return -1, f"FILE NOT FOUND: {e}"
+    """Run a cargo command and return (rc, combined_output). rc=-1 on timeout.
+
+    slice 5a: delegates to the Cargo adapter. rc=-1 (timeout / binary-not-found) keeps the
+    bare message in stderr (parity with the legacy form); otherwise the stdout+stderr-block
+    combined layout.
+    """
+    p = ADAPTERS.cargo.run(cmd, cwd, env=env, timeout=timeout)
+    if p.returncode == -1:
+        return -1, p.stderr
+    return p.returncode, p.combined
 
 
 # FR-024: every cargo test invocation must be wrapped in an improvement-driven
@@ -11218,23 +11193,7 @@ def _enumerate_types_via_extractor(src_dir: Path) -> list[dict] | None:
     Each record has: file, kind, name, generics, definition, fields[],
     variants[], methods[], is_pub.
     """
-    if not _SKELETON_EXTRACTOR_BIN.exists():
-        return None
-    try:
-        r = subprocess.run(
-            [str(_SKELETON_EXTRACTOR_BIN), "--enumerate-types",
-             "--input", str(src_dir)],
-            capture_output=True, text=True, timeout=60,
-        )
-    except Exception:
-        return None
-    if r.returncode != 0:
-        return None
-    try:
-        data = json.loads(r.stdout)
-        return data if isinstance(data, list) else None
-    except Exception:
-        return None
+    return ADAPTERS.extractor.enumerate_types(src_dir)  # slice 5a: via Extractor adapter
 
 
 def _format_type_for_prompt(rec: dict) -> str:
@@ -11415,23 +11374,7 @@ def _enumerate_fns_via_extractor(src_dir: Path) -> list[dict] | None:
         container (str): "" for free fn, "impl ..." or "trait ..."
         has_unimplemented_body (bool)
     """
-    if not _SKELETON_EXTRACTOR_BIN.exists():
-        return None
-    try:
-        r = subprocess.run(
-            [str(_SKELETON_EXTRACTOR_BIN), "--enumerate-fns",
-             "--input", str(src_dir)],
-            capture_output=True, text=True, timeout=60,
-        )
-    except Exception:
-        return None
-    if r.returncode != 0:
-        return None
-    try:
-        data = json.loads(r.stdout)
-        return data if isinstance(data, list) else None
-    except Exception:
-        return None
+    return ADAPTERS.extractor.enumerate_fns(src_dir)  # slice 5a: via Extractor adapter
 
 
 def _dispatch_families_via_extractor(src_dir: Path) -> list[dict] | None:
@@ -11445,23 +11388,7 @@ def _dispatch_families_via_extractor(src_dir: Path) -> list[dict] | None:
     Dispatch correctness is a cross-impl invariant (FR-027), so the whole
     family is co-designed in one prompt context.
     """
-    if not _SKELETON_EXTRACTOR_BIN.exists():
-        return None
-    try:
-        r = subprocess.run(
-            [str(_SKELETON_EXTRACTOR_BIN), "--enumerate-dispatch-families",
-             "--input", str(src_dir)],
-            capture_output=True, text=True, timeout=60,
-        )
-    except Exception:
-        return None
-    if r.returncode != 0:
-        return None
-    try:
-        data = json.loads(r.stdout)
-        return data if isinstance(data, list) else None
-    except Exception:
-        return None
+    return ADAPTERS.extractor.enumerate_dispatch_families(src_dir)  # slice 5a: via adapter
 
 
 def _feature_gate_cfgs_via_extractor(src_dir: Path) -> list[str] | None:
@@ -11472,23 +11399,7 @@ def _feature_gate_cfgs_via_extractor(src_dir: Path) -> list[str] | None:
     A compiler cluster whose active cfg-set intersects this MUST compile with
     the nightly toolchain (FR-030) — running it on stable yields E0554.
     """
-    if not _SKELETON_EXTRACTOR_BIN.exists():
-        return None
-    try:
-        r = subprocess.run(
-            [str(_SKELETON_EXTRACTOR_BIN), "--enumerate-feature-gate-cfgs",
-             "--input", str(src_dir)],
-            capture_output=True, text=True, timeout=60,
-        )
-    except Exception:
-        return None
-    if r.returncode != 0:
-        return None
-    try:
-        data = json.loads(r.stdout)
-        return data if isinstance(data, list) else None
-    except Exception:
-        return None
+    return ADAPTERS.extractor.enumerate_feature_gate_cfgs(src_dir)  # slice 5a: via adapter
 
 
 def _build_dispatch_family_section(family: dict) -> str:
@@ -12609,23 +12520,7 @@ def _enumerate_mods_via_extractor(src_dir: Path) -> list[dict] | None:
     Rust correctly and never conflates an adjacent mod's cfg with the
     target mod's cfg.
     """
-    if not _SKELETON_EXTRACTOR_BIN.exists():
-        return None
-    try:
-        r = subprocess.run(
-            [str(_SKELETON_EXTRACTOR_BIN), "--enumerate-mods",
-             "--input", str(src_dir)],
-            capture_output=True, text=True, timeout=60,
-        )
-    except Exception:
-        return None
-    if r.returncode != 0:
-        return None
-    try:
-        data = json.loads(r.stdout)
-        return data if isinstance(data, list) else None
-    except Exception:
-        return None
+    return ADAPTERS.extractor.enumerate_mods(src_dir)  # slice 5a: via Extractor adapter
 
 
 # Cache of mod records per src_dir to avoid re-invoking the extractor for
