@@ -51,6 +51,12 @@ from pipeline_core.domain.test_results import (
     validate_task3_output_strict,
     extract_test_output_from_file,
 )
+from pipeline_core.domain.text import (
+    strip_markdown_fences as _strip_markdown_fences,
+    extract_code_content,
+    trim_to_line,
+    smart_truncate,
+)
 from pipeline_core.settings import Settings
 from pipeline_core.adapters import build_adapters
 from pipeline_core.adapters import coverage as _covmod, workspace as _wsmod
@@ -978,25 +984,7 @@ def _normalize_file_markers(text: str) -> str:
     return text
 
 
-def _strip_markdown_fences(content: str) -> str:
-    """Remove markdown code fences that models sometimes include in file content.
-
-    Handles three cases:
-    1. Opening fence at start:  ```rust\\ncode\\n```  →  code
-    2. Closing fence at end (after opening already stripped)
-    3. Orphaned standalone fence lines anywhere in the content (e.g. the model
-       wrapped only part of the output, leaving a stray ``` in the middle).
-    Rust doc-comment fences (/// ```) start with slashes so are unaffected.
-    """
-    content = content.strip()
-    # Strip opening fence: ```lang or ``` on its own line at the very start
-    content = re.sub(r'^```[a-zA-Z0-9_-]*\s*\n', '', content)
-    # Strip closing fence at the very end
-    content = re.sub(r'\n```\s*$', '', content)
-    # Strip any remaining standalone fence lines anywhere in the file
-    # (lines that are exactly ``` or ```lang with optional trailing whitespace)
-    content = re.sub(r'^```[a-zA-Z0-9_-]*\s*$', '', content, flags=re.MULTILINE)
-    return content.strip()
+# slice 5b foundation: relocated to pipeline_core.domain.text (imported at top).
 
 
 def _looks_like_prose(content: str, path: str) -> bool:
@@ -1119,23 +1107,7 @@ def generate_in_parallel(
     return results
 
 
-def extract_code_content(text: str) -> str:
-    """Strip thinking blocks and outermost code fence, return bare code content.
-
-    Used as last-resort fallback when the model ignores <FILE> markers.
-    Works for whole-file extraction (TASK 2 source files, genesis, etc.)
-    where brace-counting is not appropriate.
-    Steps:
-      1. Remove <think>...</think> blocks (compat path leaks these as content).
-      2. Find the first code fence (```[lang]\\n...```) and return its body.
-      3. If no fence, return the full text stripped of leading/trailing whitespace.
-    """
-    import re as _re
-    cleaned = _re.sub(r'<think>.*?</think>\s*', '', text, flags=_re.DOTALL).strip()
-    fence = _re.search(r'```[a-zA-Z0-9_-]*\n(.*?)```', cleaned, flags=_re.DOTALL)
-    if fence:
-        return fence.group(1).strip()
-    return cleaned
+# slice 5b foundation: relocated to pipeline_core.domain.text (imported at top).
 
 
 def _extract_genesis(text: str):
@@ -1230,23 +1202,10 @@ def _derive_check_only_cmd(check_cmd: str) -> str:
     return s if "check" in s.split() else "cargo check"
 
 
-def trim_to_line(text: str, cap: int, marker: str = "\n// ... (truncated)") -> str:
-    """Truncate text at the last newline before cap — never mid-line. FR-020."""
-    if len(text) <= cap:
-        return text
-    cut = text.rfind("\n", 0, cap)
-    return text[:cut if cut != -1 else cap] + marker
+# slice 5b foundation: relocated to pipeline_core.domain.text (imported at top).
 
 
-def smart_truncate(text, total_limit=8000, head=2000, tail=6000):
-    """
-    Keep the beginning (build errors, first failures) and end (summary) of
-    output. Truncating from the middle avoids losing either signal.
-    """
-    if len(text) <= total_limit:
-        return text
-    omitted = len(text) - head - tail
-    return text[:head] + f"\n\n[... {omitted:,} chars omitted ...]\n\n" + text[-tail:]
+# slice 5b foundation: relocated to pipeline_core.domain.text (imported at top).
 
 
 # ---------------------------------------------------------------------------

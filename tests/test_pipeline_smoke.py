@@ -2086,7 +2086,18 @@ def test_slice5b_genesis_audit_task() -> None:
     assert pipeline.validate_task3_output_strict is tr.validate_task3_output_strict
     assert pipeline.extract_test_output_from_file is tr.extract_test_output_from_file
     assert pipeline.OUTPUT_SEPARATOR == tr.OUTPUT_SEPARATOR == "=== test output ==="
-    print("  OK  genesis_audit task + test_results foundation (slice 5b)")
+
+    # 5b foundation: pure text helpers relocated to domain.text; pipeline re-exports them
+    # (strip_markdown_fences aliased to the legacy _strip_markdown_fences name).
+    from pipeline_core.domain import text as txt
+    assert pipeline._strip_markdown_fences is txt.strip_markdown_fences
+    assert pipeline.extract_code_content is txt.extract_code_content
+    assert pipeline.trim_to_line is txt.trim_to_line
+    assert pipeline.smart_truncate is txt.smart_truncate
+    assert txt.strip_markdown_fences("```rust\nlet x = 1;\n```") == "let x = 1;"
+    assert txt.smart_truncate("abcdef", total_limit=4, head=2, tail=2).startswith("ab")
+    assert txt.trim_to_line("a\nbb\nccc", 4) == "a" + "\n// ... (truncated)"
+    print("  OK  genesis_audit + test_results + text foundation (slice 5b)")
 
 
 # ─── Driver ─────────────────────────────────────────────────────────────────
