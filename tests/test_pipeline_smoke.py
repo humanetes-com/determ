@@ -2064,6 +2064,129 @@ def test_slice5a_shims_delegate_to_adapters() -> None:
     print("  OK  pipeline extractor + cargo shims delegate to ADAPTERS (slice 5a)")
 
 
+def test_slice5b_task0_docs() -> None:
+    """Slice 5b: extracted task0 profile/context doc tasks generate + write via fakes,
+    and the fence-fallback path uses strip_markdown_fences (no regex in the clean layer)."""
+    from pathlib import Path
+    from pipeline_core.application.tasks.task0_docs import (
+        task0_project_profile, task0_project_context, Task0DocsDeps)
+
+    written: dict = {}
+    marked: list = []
+
+    def mk(ask_resp: str) -> Task0DocsDeps:
+        return Task0DocsDeps(
+            phase_valid=lambda d, k: False, mark_phase=lambda *a, **k: marked.append(a),
+            ask=lambda prompt, model=None: ask_resp,
+            write=lambda p, c: written.__setitem__(Path(p).name, c),
+            prompt_budget=lambda *fixed: 10_000,
+            task0_model="m", model="m", readme_cap=3000, profile_cap=2000,
+            project_context_name="project_context.md",
+        )
+
+    tf = [("tests/a.rs", "fn t(){}")]
+    # <FILE> path
+    r = task0_project_profile(Path("/tmp/zz/project_profile.md"), tf, "readme",
+                              mk('<FILE path="project_profile.md">PROFILE BODY</FILE>'))
+    assert r == "PROFILE BODY" and written["project_profile.md"] == "PROFILE BODY"
+    # fence-fallback path (model ignored <FILE>): strip_markdown_fences kicks in
+    written.clear()
+    body = "x" * 150
+    r = task0_project_context(Path("/tmp/zz/project_context.md"), tf, "readme", "profile",
+                              mk(f"```md\n{body}\n```"))
+    assert r == body and written["project_context.md"] == body
+    print("  OK  task0 doc tasks extracted (slice 5b)")
+
+
+def test_slice5b_task0b_discovery() -> None:
+    """Slice 5b: extracted TASK 0b builds the strategy doc, dedups lines, writes via fakes;
+    the fence fallback uses strip_markdown_fences (no regex in the clean layer)."""
+    import tempfile
+    from pathlib import Path
+    from pipeline_core.application.tasks.task0b_discovery import task0b_discovery, Task0bDeps
+
+    written: dict = {}
+    deps = Task0bDeps(
+        ask=lambda prompt, model=None: '<FILE path="coverage_strategy.md">A\nA\nB</FILE>',
+        write=lambda p, c: written.__setitem__("s", c),
+        is_test_file=lambda f, d: False, is_gen_tests_file=lambda n: False,
+        strip_gen_tests_decls=lambda t: t, condense_rust_to_signatures=lambda raw, filename="": raw,
+        manifest_name=".generated_files.txt", sibling_cap=3000,
+        single_call_char_limit=120_000, task0_model="m",
+    )
+    with tempfile.TemporaryDirectory() as td:
+        proj = Path(td)
+        (proj / "src").mkdir()
+        (proj / "src" / "lib.rs").write_text("pub fn x() {}")
+        r = task0b_discovery(proj / "coverage_strategy.md", proj, [("tests/a.rs", "fn t(){}")],
+                             "readme", "profile", deps)
+    # dedup collapsed the repeated "A"
+    assert written["s"] == "A\nB" and r == "A\nB"
+    print("  OK  task0b discovery extracted (slice 5b)")
+
+
+def test_slice5b_task1() -> None:
+    """Slice 5b: extracted TASK 1 dispatches to the synthesizer, and the proc-macro path
+    builds requirements via fakes (Rust-source regex stays injected from pipeline)."""
+    from types import SimpleNamespace
+    from pathlib import Path
+    from pipeline_core.application.tasks.task1 import task1, Task1Deps
+
+    calls: dict = {}
+
+    def mk(synth_ok=True, ask_resp="") -> Task1Deps:
+        synth = SimpleNamespace(synthesize=lambda *a, **k: calls.setdefault("synth", True) or synth_ok)
+        return Task1Deps(
+            load_api_surface=lambda d, m: "", read=lambda p: "",
+            ask=lambda prompt, model=None: ask_resp,
+            write_fr_preserving_notes=lambda p, c: calls.__setitem__("fr", c),
+            synthesizer_factory=lambda: synth,
+            filter_proc_macro_test_files=lambda tf, cn: tf,
+            proc_macro_fallback_requirements=lambda rel, cn: "FALLBACK",
+            format_api_surface_section=lambda s: "", file_format_instruction="FMT",
+            single_call_char_limit=120_000, profile_cap=2000, task1_model="m",
+        )
+
+    tf = [("tests/a.rs", "#[derive(Foo)] struct S;")]
+    # standard path → synthesizer.synthesize drives it
+    assert task1(Path("."), Path("g"), Path("r"), tf, "readme", mk(True)) is True
+    assert calls.get("synth") is True
+    # proc-macro path → writes FR from a <FILE> response
+    calls.clear()
+    r = task1(Path("."), Path("g"), Path("r"), tf, "readme",
+              mk(ask_resp='<FILE path="functional_requirements.md">PM REQS</FILE>'),
+              crate_type="proc-macro", module_name="mycrate")
+    assert r is True and calls["fr"] == "PM REQS"
+    print("  OK  task1 (dispatcher + proc-macro) extracted (slice 5b)")
+
+
+def test_slice5b_task2() -> None:
+    """Slice 5b: extracted TASK 2 dispatcher + inner loop (no-build-check path) + fix loop
+    (empty manifest) behave with fakes; generation engine stays injected from pipeline."""
+    from types import SimpleNamespace
+    from pathlib import Path
+    from pipeline_core.application.tasks.task2 import (
+        task2, task2_inner_loop, task2_fix_loop, Task2Deps)
+
+    gen = SimpleNamespace(generate=lambda *a, **k: True)
+    deps = Task2Deps(
+        generator_factory=lambda: gen, load_manifest=lambda p: [], read=lambda p: "",
+        generate_fix_loop=lambda **k: (True, "ok"), store_prompt_content=lambda s: s,
+        is_proc_macro_crate=lambda t: False, count_error_codes=lambda o: 0,
+        build_check_retries=3, build_max_stalls=2, build_timeout=1, test_timeout=1,
+        task2_model="m", task2_fix_retries=2, single_call_char_limit=120_000, genesis_cap=3000,
+    )
+    # dispatcher → generator.generate
+    assert task2(Path("."), Path("g"), Path("r"), Path("m"), set(), deps) is True
+    # inner loop with no build check → True after one generate
+    assert task2_inner_loop(Path("."), Path("g"), Path("r"), Path("m"), set(),
+                            "prof", "ws", None, deps) is True
+    # fix loop with empty manifest → (False, test_output)
+    assert task2_fix_loop(Path("."), Path("m"), set(), "OUT", "cargo test",
+                          Path("r"), deps) == (False, "OUT")
+    print("  OK  task2 (dispatcher + inner/fix loops) extracted (slice 5b)")
+
+
 def test_slice5b_task3_task4() -> None:
     """Slice 5b: extracted TASK 3 (test runner) + TASK 4 (failure analysis) drive their
     branches correctly with injected fakes — no cargo, no LLM."""
@@ -2275,6 +2398,10 @@ def main() -> int:
     test_adapters_satisfy_ports()
     test_coverage_workspace_adapters()
     test_slice5a_shims_delegate_to_adapters()
+    test_slice5b_task0_docs()
+    test_slice5b_task0b_discovery()
+    test_slice5b_task1()
+    test_slice5b_task2()
     test_slice5b_task3_task4()
     test_slice5b_genesis_audit_task()
 

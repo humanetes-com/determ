@@ -75,6 +75,22 @@ from pipeline_core.application.orchestrator import Orchestrator
 from pipeline_core.application.tasks.genesis_audit import genesis_audit, GenesisAuditDeps
 from pipeline_core.application.tasks.task3 import task3 as _task3_impl, Task3Deps
 from pipeline_core.application.tasks.task4 import task4 as _task4_impl, Task4Deps
+from pipeline_core.application.tasks.task0_docs import (
+    task0_project_profile as _task0_profile_impl,
+    task0_project_context as _task0_context_impl,
+    Task0DocsDeps,
+)
+from pipeline_core.application.tasks.task0b_discovery import (
+    task0b_discovery as _task0b_impl,
+    Task0bDeps,
+)
+from pipeline_core.application.tasks.task1 import task1 as _task1_impl, Task1Deps
+from pipeline_core.application.tasks.task2 import (
+    task2 as _task2_impl,
+    task2_inner_loop as _task2_inner_impl,
+    task2_fix_loop as _task2_fix_impl,
+    Task2Deps,
+)
 
 _mi_mtime: float = os.path.getmtime(_mi.__file__)
 
@@ -13287,326 +13303,33 @@ def _log_state_summary(project_dir: Path, current_hash: str) -> None:
         _log(f"    last position: {state['current']}")
 
 
+# slice 5b: deps for the extracted task0 doc tasks (profile + context).
+_TASK0_DOCS_DEPS = Task0DocsDeps(
+    phase_valid=_phase_valid,
+    mark_phase=_mark_phase,
+    ask=ask,
+    write=write,
+    prompt_budget=prompt_budget,
+    task0_model=_TASK0_MODEL,
+    model=MODEL,
+    readme_cap=_README_CAP,
+    profile_cap=_PROFILE_CAP,
+    project_context_name=PROJECT_CONTEXT_NAME,
+)
+
+
 def task0_project_profile(profile_path: Path, test_files, readme_text: str) -> str:
-    """
-    Run once at startup. Identifies the project's language, build system, and
-    workspace/module structure from README + test file paths + content excerpts.
-    Produces project_profile.md. Skip is governed by pipeline_state.md — once
-    "task0a" is marked done there, this is treated as finalized; tests changing
-    later does not invalidate it. Returns the profile content.
-    """
-    project_dir = profile_path.parent
-    if _phase_valid(project_dir, "task0a"):
-        content = profile_path.read_text().strip() if profile_path.exists() else ""
-        _log(f"  task0a already done — loading {profile_path.name}.")
-        return content
-    if profile_path.exists():
-        content = profile_path.read_text().strip()
-        if content:
-            # Artifact predates pipeline_state.md tracking — backfill and skip.
-            _mark_phase(project_dir, "task0a", "done",
-                        detail=f"{len(content)} chars (existing artifact)")
-            _log(f"  task0a already done — loading {profile_path.name}.")
-            return content
-
-    _log("\nTASK 0a: Identifying project structure (language, build system, workspace layout)")
-
-    readme_section = f"README.md:\n{readme_text[:_README_CAP]}\n\n" if readme_text.strip() else ""
-    _PROFILE_STATIC = 800  # static instruction text estimate
-    _sample_files = test_files[:25]
-    _per_file_budget = prompt_budget(readme_section, " " * _PROFILE_STATIC) // max(1, len(_sample_files))
-    _per_file_budget = max(200, _per_file_budget)
-
-    test_entries = "\n\n".join(
-        f"  {rel}\n  (excerpt):\n  {trim_to_line(content, _per_file_budget).replace(chr(10), chr(10) + '  ')}"
-        for rel, content in _sample_files
-    )
-
-    prompt = f"""You are identifying the structure of a software project from its test files and README.
-
-{readme_section}Test files (path + content excerpt):
-{test_entries}
-
-Produce a concise project_profile.md that answers the following:
-1. Primary language and version (if specified or detectable from test imports).
-2. Build system and test runner (e.g. "Cargo + cargo-nextest", "npm + jest").
-3. Project layout: is it a monorepo / workspace? List each top-level module/crate/package
-   with its directory path and type (library, binary, proc-macro, or both).
-4. Minimum required files for each module so the build system accepts it
-   (e.g. for Rust: Cargo.toml with [lib] section + src/lib.rs).
-5. Structural conventions visible from the test files (e.g. tests in <crate>/tests/).
-
-Infer crate types from test content: `extern crate proc_macro` or `#[proc_macro_derive]`
-patterns indicate a proc-macro crate. `fn main()` or binary test patterns indicate a bin.
-
-Be specific and concrete. This profile is used to generate source files — accuracy matters.
-Do not mention the experiment or iteration process. Output only the profile document.
-Keep the output under 2,000 characters — be concise.
-
-<FILE path="project_profile.md">
-content here
-</FILE>
-"""
-
-    def attempt():
-        response = ask(prompt, model=_TASK0_MODEL)
-        files = extract_files(response)
-        if "project_profile.md" not in files:
-            stripped = re.sub(r'^```[^\n]*\n', '', response.strip())
-            stripped = re.sub(r'\n```$', '', stripped).strip()
-            if len(stripped) > 100:
-                files = {"project_profile.md": stripped}
-            else:
-                _log(f"  WARNING: {MODEL} did not return project_profile.md.")
-                _log(f"  Raw response snippet: {response[:500]}")
-                return False
-        content = files["project_profile.md"].strip()
-        write(profile_path, content)
-        # Invalidate the context document whenever the profile is regenerated so
-        # task0_project_context re-synthesizes against the updated inputs.
-        (profile_path.parent / PROJECT_CONTEXT_NAME).unlink(missing_ok=True)
-        _mark_phase(project_dir, "task0a-context", "pending", detail="profile regenerated")
-        _log(f"  project_profile.md written ({len(content):,} chars).")
-        return content
-
-    result = with_retry(attempt)
-    if result is False:
-        _log("  WARNING: could not produce project_profile.md after all retries. Continuing without it.")
-        return ""
-    _mark_phase(project_dir, "task0a", "done",
-                detail=f"{len(str(result))} chars")
-    return str(result)
+    # slice 5b: extracted to application.tasks.task0_docs; thin shim binding deps.
+    return _task0_profile_impl(profile_path, test_files, readme_text, _TASK0_DOCS_DEPS)
 
 
 def task0b_discovery(strategy_path: Path, project_dir: Path, test_files,
                      readme_text: str, profile_content: str,
                      clusters: "list[BuildCluster] | None" = None,
                      force: bool = False) -> str:
-    """
-    BL-001: Discovery pass — produce coverage_strategy.md before TASK 0c.
-
-    Feeds the LLM the entire project source tree (src/**/*.rs, tests/**/*.rs, Cargo.toml)
-    so it can document:
-      - Correct `use` import paths for this crate's own types
-      - How each public type is constructed (fields, variants, builders)
-      - cfg/feature flags active in the project
-      - Test style conventions already present in the test suite
-
-    Cached with a hash of all source content. Returns strategy text (empty on failure).
-    """
-    cargo_toml_path = project_dir / "Cargo.toml"
-    cargo_text = ""
-    if cargo_toml_path.exists():
-        try:
-            cargo_text = cargo_toml_path.read_text(encoding="utf-8")
-        except Exception:
-            pass
-
-    # Load manifest-tracked generated files so they can be excluded from the hash.
-    # On restart mid-run the pipeline may have stripped or rewritten source files;
-    # including them would produce a different hash and force an unnecessary re-run.
-    _generated: set[str] = set()
-    for _mf in [project_dir / MANIFEST_NAME, *project_dir.glob(".generated_files_*.txt")]:
-        try:
-            if _mf.exists():
-                _generated.update(l.strip() for l in _mf.read_text().splitlines() if l.strip())
-        except Exception:
-            pass
-
-    src_texts: list[str] = []
-    for src_file in sorted(project_dir.rglob("*.rs")):
-        if is_test_file(src_file, project_dir):
-            continue
-        # Skip gen_tests sibling files entirely — they are pipeline-generated content
-        # and including them would invalidate the hash on every pass.
-        if re.search(r'\.gen_tests_\d+\.rs$', src_file.name):
-            continue
-        try:
-            rel = str(src_file.relative_to(project_dir))
-            if rel in _generated:
-                continue
-            text = src_file.read_text(encoding="utf-8")
-            # Strip path-mod declarations (which point at sibling files) so the hash
-            # remains stable across pipeline passes.
-            src_texts.append(_strip_gen_tests_decls(text))
-        except Exception:
-            pass
-
-    # Skip is governed by pipeline_state.md ("task0b" phase) — the outer caller
-    # already checks _phase_valid before invoking task0b_discovery. Source/tests
-    # changes (e.g. task0c augmentation) do not invalidate the strategy doc.
-
-    _log("\nTASK 0b (discovery): Analyzing project for coverage strategy...")
-
-    # BL-010: condense source files to signatures only — function bodies are irrelevant
-    # for TASK 0b which only needs import patterns, type shapes, and cfg flags.
-    #
-    # Budget: measure fixed overhead first (boilerplate instruction text + Cargo.toml +
-    # README + clusters), then divide the remaining budget 55/45 between src and tests.
-    # Old approach (fixed 45%/40% of SINGLE_CALL) didn't account for large README/Cargo.toml
-    # and triggered the context guard which drops chars from the middle incoherently.
-    _BOILERPLATE_ESTIMATE = 2_500   # static instruction text + FILE markers + headings
-
-    # Cap cargo.toml and README so they don't eat the whole budget.
-    _cargo_cap   = min(len(cargo_text), 3_000)
-    _readme_cap  = min(len(readme_text), 2_000)
-
-    clusters_section = ""
-    if clusters:
-        _cluster_lines = ["\nCompiler clusters (each is a separate test pass with its own env/cfg):"]
-        for c in clusters:
-            env_desc = ", ".join(f"{k}={v}" for k, v in c.env_extra.items()) if c.env_extra else "default"
-            active   = ", ".join(c.active_cfg)   if c.active_cfg   else "none"
-            excluded = ", ".join(c.excluded_cfg) if c.excluded_cfg else "none"
-            _cluster_lines.append(f"  {c.name}: env={env_desc}  active_cfg=[{active}]  excluded_cfg=[{excluded}]")
-        clusters_section = "\n".join(_cluster_lines) + "\n"
-
-    _fixed_overhead = _BOILERPLATE_ESTIMATE + _cargo_cap + _readme_cap + len(clusters_section)
-    _content_budget = max(2_000, SINGLE_CALL_CHAR_LIMIT - _fixed_overhead)
-    src_budget  = int(_content_budget * 0.55)
-    test_budget_alloc = int(_content_budget * 0.45)
-
-    src_section_parts: list[str] = []
-    src_dropped: list[str] = []
-
-    # Collect and condense all source files first, then sort by DESCENDING complexity
-    # (unsafe/cfg count) so the hardest-to-test files are included first. Alphabetical
-    # order was dropping error.rs, ptr.rs, wrapper.rs — the most important files.
-    # Exclude target/ directory — rglob picks up build-script output .rs files otherwise.
-    src_candidates: list[tuple[int, Path, str, str]] = []  # (priority, path, rel, condensed)
-    target_dir = project_dir / "target"
-    for src_file in project_dir.rglob("*.rs"):
-        if is_test_file(src_file, project_dir):
-            continue
-        try:
-            if src_file.is_relative_to(target_dir):
-                continue  # skip build artifacts
-        except Exception:
-            pass
-        try:
-            raw = src_file.read_text(encoding="utf-8")
-            rel = str(src_file.relative_to(project_dir))
-            condensed = _condense_rust_to_signatures(raw, filename=src_file.name)
-            # Cap per-file contribution — macro-heavy files (ensure.rs, error.rs) produce
-            # 35-50k condensed despite stripping, consuming the entire budget alone.
-            if len(condensed) > _SIBLING_CAP:
-                _cut = condensed.rfind("\n", 0, _SIBLING_CAP)
-                condensed = condensed[:_cut if _cut != -1 else _SIBLING_CAP] + "\n// ... (signatures truncated)"
-            # Priority = count of complexity markers (unsafe, #[cfg(, #[macro_export)
-            priority = raw.count("unsafe") + raw.count("#[cfg(") + raw.count("#[macro_export")
-            src_candidates.append((priority, src_file, rel, condensed))
-        except Exception:
-            pass
-    src_candidates.sort(key=lambda x: x[0], reverse=True)  # most complex first
-
-    for _, _sf, rel, condensed in src_candidates:
-        part = f'\n<FILE path="{rel}">\n{condensed}\n</FILE>'
-        if len(part) <= src_budget:
-            src_section_parts.append(part)
-            src_budget -= len(part)
-        else:
-            src_dropped.append(rel)  # BL-017: track dropped files
-
-    # BL-017: warn if any source files were dropped from the discovery pass.
-    if src_dropped:
-        _log(f"  [task0b] WARNING: {len(src_dropped)} source file(s) dropped (budget exhausted): "
-             f"{', '.join(src_dropped)}")
-
-    test_section_parts: list[str] = []
-    _tb = test_budget_alloc
-    for rel, content in test_files:
-        part = f'\n<TESTFILE path="{rel}">\n{content}\n</TESTFILE>'
-        if len(part) <= _tb:
-            test_section_parts.append(part)
-            _tb -= len(part)
-
-    cargo_section  = f"\nCargo.toml:\n```toml\n{cargo_text[:_cargo_cap]}\n```\n" if cargo_text else ""
-    readme_section = f"\nREADME.md:\n{readme_text[:_readme_cap]}\n" if readme_text.strip() else ""
-    dropped_note   = (
-        f"\nNOTE: The following source files were excluded due to context budget limits "
-        f"— the strategy below may be incomplete for: {', '.join(src_dropped)}\n"
-    ) if src_dropped else ""
-    src_section  = "\nSource files (signatures and type definitions only):\n" + "".join(src_section_parts) if src_section_parts else ""
-    test_section = "\nTest files:\n" + "".join(test_section_parts) if test_section_parts else ""
-
-    prompt = f"""You are analyzing a software project to produce a compact coverage strategy reference.
-This will be injected verbatim into every unit-test-generation prompt — token budget is scarce.
-Output must be machine-readable compact notation, NOT prose paragraphs.
-{cargo_section}{readme_section}{clusters_section}{dropped_note}{src_section}{test_section}
-Produce coverage_strategy.md in this exact compact format (copy headings literally):
-
-IMPORTS:
-  # one use-statement per line, only what internal mod gen_tests {{ use super::*; }} actually needs
-  # tests are INSIDE the crate — never use <crate_name>::... paths
-  # example lines (replace with real observations):
-  #   std_prelude: use std::{{format, string::String, vec::Vec, boxed::Box}};
-  #   fmt: use std::fmt::{{self, Display, Debug}};
-  NEVER: <list items that look importable but will fail, one per line with reason after #>
-
-TYPES:
-  # TypeName: construction_expression  # notes (no PartialEq / opaque / etc.)
-  # enum variants on same line: EnumName: Variant1|Variant2(T)|Variant3{{field:T}}
-  # builder pattern: TypeName::builder().field(x).build()
-
-CFG:
-  # feature=name: default=on|off  # which code it gates
-  # cfg(target_os/arch/...): ... if relevant
-
-CONVENTIONS:
-  # fn_sig: #[test] fn name() or #[test] fn name() -> Result<(),E>
-  # assert: assert_eq!, assert!(x), assert!(matches!(x, Pat))
-  # error_helper: inline pattern if tests need a custom error type
-
-PITFALLS:
-  # item → reason_it_fails → correct_alternative  (one per line)
-
-RULES:
-  # Hard constraints observed from source/Cargo.toml (one per line, terse):
-  # Only include rules you can verify from the files above. Format examples (do NOT copy):
-  #   NEVER: SomeType  # private / sealed — not accessible from test module
-  #   NEVER: some_cfg_feature  # cfg-gated, nightly-only on this project
-  #   NEVER: some_macro  # #[macro_export], not importable from inside crate
-
-Only include lines you can directly observe in the files. Omit sections with nothing to say.
-Each line must be self-contained — no cross-references between sections.
-No prose. No markdown headers beyond the section names above.
-Keep total output under 5,000 characters. Stop after RULES — do not add more sections.
-
-<FILE path="coverage_strategy.md">
-content here
-</FILE>
-"""
-
-    def attempt():
-        response = ask(prompt, model=_TASK0_MODEL)
-        files = extract_files(response)
-        if "coverage_strategy.md" not in files:
-            stripped = re.sub(r'^```[^\n]*\n', '', response.strip())
-            stripped = re.sub(r'\n```$', '', stripped).strip()
-            if len(stripped) > 100:
-                files = {"coverage_strategy.md": stripped}
-            else:
-                _log("  WARNING: could not produce coverage_strategy.md.")
-                return False
-        content = files["coverage_strategy.md"].strip()
-        # Deduplicate lines — model sometimes repeats NEVER/ALWAYS entries.
-        seen, deduped = set(), []
-        for line in content.splitlines():
-            key = line.strip()
-            if key and key in seen:
-                continue
-            seen.add(key)
-            deduped.append(line)
-        content = "\n".join(deduped)
-        write(strategy_path, content)
-        _log(f"  coverage_strategy.md written ({len(content):,} chars).")
-        return content
-
-    result = with_retry(attempt)
-    if result is False:
-        _log("  WARNING: discovery pass failed — proceeding without coverage strategy.")
-        return ""
-    return str(result)
+    # slice 5b: extracted to application.tasks.task0b_discovery; thin shim binding deps.
+    return _task0b_impl(strategy_path, project_dir, test_files, readme_text,
+                        profile_content, _TASK0B_DEPS, clusters=clusters, force=force)
 
 
 def _build_task0c_prompt_sections(
@@ -13818,92 +13541,8 @@ def _build_task0c_prompt_sections(
 
 def task0_project_context(context_path: Path, test_files, readme_text: str,
                           profile_content: str) -> str:
-    """
-    Synthesize a behavioral summary of the project from test content + README + profile.
-    Produces project_context.md — the portable big-picture document injected into every
-    task, especially TASK 0c which receives no other project-level context.
-
-    Skip is governed by pipeline_state.md (phase key "task0a-context"). Returns the
-    summary text. If the upstream profile is regenerated, task0a clears this phase
-    so it re-runs against fresh inputs.
-    """
-    project_dir = context_path.parent
-    if _phase_valid(project_dir, "task0a-context"):
-        content = context_path.read_text().strip() if context_path.exists() else ""
-        _log(f"  task0a-context already done — loading {context_path.name}.")
-        return content
-    if context_path.exists():
-        content = context_path.read_text().strip()
-        if content:
-            # Artifact predates pipeline_state.md tracking — backfill and skip.
-            _mark_phase(project_dir, "task0a-context", "done",
-                        detail=f"{len(content)} chars (existing artifact)")
-            _log(f"  task0a-context already done — loading {context_path.name}.")
-            return content
-
-    _log("\nTASK 0a (context): Synthesizing behavioral project summary...")
-
-    readme_section = f"README.md:\n{readme_text[:_README_CAP]}\n\n" if readme_text.strip() else ""
-    profile_section = f"Project profile:\n{profile_content[:_PROFILE_CAP]}\n\n" if profile_content.strip() else ""
-    _CONTEXT_STATIC = 600
-    _sample_files = test_files[:25]
-    _per_file_budget = prompt_budget(readme_section, profile_section, " " * _CONTEXT_STATIC) // max(1, len(_sample_files))
-    _per_file_budget = max(200, _per_file_budget)
-
-    test_excerpts = "\n\n".join(
-        f"--- {rel} ---\n{trim_to_line(content, _per_file_budget)}"
-        for rel, content in _sample_files
-    )
-
-    prompt = f"""You are writing a concise behavioral summary of a software project.
-This summary will be used by AI agents that must write code for this project without
-access to the original implementation — they need to understand what the project does
-and what each module's role is.
-
-{readme_section}{profile_section}Test file excerpts:
-{test_excerpts}
-
-Write a project_context.md that answers:
-1. What does this project do? (2-3 sentences, concrete and specific)
-2. What is each module/crate/package responsible for? (one line per module)
-3. What are the key public abstractions — the types, traits, or interfaces that most
-   code in the project depends on? (names + one-line description each)
-4. What conventions does this project follow for error handling, data formats, or
-   important invariants? (inferred from test assertions and naming patterns)
-
-Write in plain prose. Be specific — use actual type names, function names, and module
-names observed in the test files. Do not be vague. Do not describe the pipeline process.
-Keep the output under 2,000 characters — be concise.
-
-<FILE path="project_context.md">
-content here
-</FILE>
-"""
-
-    def attempt():
-        response = ask(prompt, model=_TASK0_MODEL)
-        files = extract_files(response)
-        if "project_context.md" not in files:
-            stripped = re.sub(r'^```[^\n]*\n', '', response.strip())
-            stripped = re.sub(r'\n```$', '', stripped).strip()
-            if len(stripped) > 100:
-                files = {"project_context.md": stripped}
-            else:
-                _log(f"  WARNING: could not synthesize project_context.md.")
-                return False
-        content = files["project_context.md"].strip()
-        write(context_path, content)
-        _log(f"  project_context.md written ({len(content):,} chars).")
-        return content
-
-    result = with_retry(attempt)
-    if result is False:
-        _log("  WARNING: could not produce project_context.md — using README/profile fallback.")
-        fallback = readme_text or profile_content or ""
-        return fallback
-    _mark_phase(project_dir, "task0a-context", "done",
-                detail=f"{len(str(result))} chars")
-    return str(result)
+    # slice 5b: extracted to application.tasks.task0_docs; thin shim binding deps.
+    return _task0_context_impl(context_path, test_files, readme_text, profile_content, _TASK0_DOCS_DEPS)
 
 
 # ---------------------------------------------------------------------------
@@ -14723,6 +14362,51 @@ Output a plain structured list of the merged contracts. No prose, no code blocks
         return str(raw) if raw is not False else None
 
 
+def _filter_proc_macro_test_files(test_files, crate_name: str = ""):
+    """Keep test files that use #[derive(...)] or the crate's own #[crate_name(...)]
+    attribute. Falls back to all files if none match. (Regex kept in pipeline.py — Option 1.)"""
+    attr_pattern = r'#\[derive\('
+    if crate_name:
+        safe = re.escape(crate_name.replace("-", "_"))
+        attr_pattern += rf'|#\[{safe}\('
+    relevant = [
+        (rel, content) for rel, content in test_files
+        if re.search(attr_pattern, content)
+    ]
+    return relevant or test_files
+
+
+def _proc_macro_fallback_requirements(relevant, crate_name: str = "") -> str:
+    """Static fallback: scan tests for derive/attribute usage and synthesise minimal
+    proc-macro requirements. (Rust-source regex kept in pipeline.py — Option 1.)"""
+    derives: set[str] = set()
+    attrs: set[str] = set()
+    _attr_name = (crate_name or "").replace("-", "_") or "derive"
+    _attr_re = re.compile(rf'#\[{re.escape(_attr_name)}\(([^)]+)\)')
+    for _, content in relevant:
+        for m in re.finditer(r'#\[derive\(([^)]+)\)', content):
+            for d in m.group(1).split(','):
+                derives.add(d.strip())
+        for m in _attr_re.finditer(content):
+            attrs.add(m.group(1).strip())
+    req_content = "# Proc-macro interface\n\n"
+    req_content += "## Derive macros\n"
+    for d in sorted(derives):
+        req_content += f"- `#[derive({d})]` — implement the `{d}` trait on annotated types\n"
+    if attrs:
+        req_content += "\n## Helper attributes\n"
+        for a in sorted(attrs):
+            req_content += f"- `#[{_attr_name}({a})]`\n"
+    req_content += (
+        "\n## Entry points\n"
+        "Each derive macro must be registered with `#[proc_macro_derive(Name)]`.\n"
+        "Input: `proc_macro::TokenStream`, Output: `proc_macro::TokenStream`.\n"
+        "Parse input with `syn::parse_macro_input!(input as syn::DeriveInput)`.\n"
+        "Generate output with `quote::quote! { impl Name for #ident { ... } }`.\n"
+    )
+    return req_content
+
+
 def _task1_synthesizer_factory() -> Task1Synthesizer:
     backend = os.getenv("TASK1_SYNTHESIZER", "llm").lower()
     if backend == "static":
@@ -14730,203 +14414,18 @@ def _task1_synthesizer_factory() -> Task1Synthesizer:
     return LLMTask1Synthesizer()
 
 
-def _task1_proc_macro(project_dir, genesis_path, functional_req_path, test_files,
-                      readme_text, project_profile, crate_name: str = "",
-                      project_context: str = "", api_surface: str = ""):
-    """
-    Specialised TASK 1 for proc-macro crates.
-    Instead of extracting runtime API contracts, extracts the proc-macro interface:
-    - Which #[derive(...)] macros are provided
-    - Which helper attributes (#[module(...)]) are used on fields/variants
-    - What trait implementations the derives must generate
-    """
-    _log("  [proc-macro mode] Extracting derive macro interface from test usage.")
-
-    # Prefilter: keep files that use #[derive(...)] (universal proc-macro signal) or
-    # any attribute whose name matches the crate being implemented (e.g. #[my_crate(...)]).
-    # The crate_name pattern is derived from the actual Cargo package name, not hardcoded.
-    attr_pattern = r'#\[derive\('
-    if crate_name:
-        # Also catch #[crate_name(...)] attribute usage (dashes normalised to underscores).
-        safe = re.escape(crate_name.replace("-", "_"))
-        attr_pattern += rf'|#\[{safe}\('
-    relevant = [
-        (rel, content) for rel, content in test_files
-        if re.search(attr_pattern, content)
-    ]
-    if not relevant:
-        relevant = test_files  # Fallback: use all files
-    _log(f"  [proc-macro mode] Using {len(relevant)} file(s) with derive/attribute usage.")
-
-    existing_genesis = read(genesis_path)
-    genesis_section = (
-        f"\n--- genesis.md ---\n{existing_genesis}\n"
-        if existing_genesis.strip() else ""
-    )
-    effective_context = project_context or readme_text
-
-    # Budget: render the prompt scaffold with sized sections empty for exact
-    # overhead; remainder goes to tests.
-    _effective_context_capped = effective_context[:min(len(effective_context), 2_000)]
-    _pm_scaffold = f"""You are analysing test files to extract the interface of a Rust proc-macro crate.
-
-A proc-macro crate provides #[derive(...)] macros and/or #[attribute] macros used in the
-test files below. Your task is to produce functional_requirements.md describing ONLY what
-this proc-macro crate must implement — not the runtime API of dependent crates.
-
-{FILE_FORMAT_INSTRUCTION}
-Your output MUST be the file `functional_requirements.md` wrapped in the FILE markers above.
-
-Project context:
-{_effective_context_capped}
-
-Test files:
-
-
-Produce functional_requirements.md with:
-"""
-    _fixed = len(_pm_scaffold) + len(genesis_section)
-    _tests_budget = max(2_000, SINGLE_CALL_CHAR_LIMIT - _fixed)
-    _raw_tests = "\n\n".join(
-        f'<TESTFILE path="{rel}">\n{content}\n</TESTFILE>'
-        for rel, content in relevant
-    )
-    tests_section = smart_truncate(_raw_tests, total_limit=_tests_budget,
-                                   head=_tests_budget // 3, tail=2 * _tests_budget // 3)
-    effective_context = effective_context[:_PROFILE_CAP]
-
-    api_section = _format_api_surface_section(api_surface)
-    prompt = f"""You are analysing test files to extract the interface of a Rust proc-macro crate.
-
-A proc-macro crate provides #[derive(...)] macros and/or #[attribute] macros used in the
-test files below. Your task is to produce functional_requirements.md describing ONLY what
-this proc-macro crate must implement — not the runtime API of dependent crates.
-
-{FILE_FORMAT_INSTRUCTION}
-Your output MUST be the file `functional_requirements.md` wrapped in the FILE markers above.
-{genesis_section}{api_section}
-Project context:
-{effective_context}
-
-Test files:
-{tests_section}
-
-Produce functional_requirements.md with:
-
-1. **Derive macros provided** — list every `#[derive(MacroName)]` used in the tests
-   that comes from this crate (not std derives like Clone, Debug, PartialEq).
-   For each:
-   - The derive name (e.g. `MyDerive`)
-   - Which trait(s) it must implement on the annotated type
-   - The signature of trait methods that tests call
-
-2. **Helper attributes** — list every `#[crate_name(key = "value")]` attribute used
-   on struct fields, enum variants, or items. For each:
-   - The attribute path (e.g. `#[my_crate(option)]`, `#[my_crate(description = "...")]`)
-   - Which field/item types it applies to
-   - What it controls in the generated code
-
-3. **proc-macro entry points** — for each derive/attribute macro:
-   - The `#[proc_macro_derive(Name, attributes(...))]` registration
-   - Input type: `TokenStream` (proc_macro::TokenStream)
-   - Output type: `TokenStream`
-
-4. **Generated trait implementations** — what `impl TraitName for T` blocks the macro
-   must emit, and what methods those impls must contain, inferred from test assertions.
-
-Do NOT include: runtime functions (from_env, from_file), stdlib types, or any API
-that is NOT a proc-macro derive or attribute provided by this crate.
-"""
-    response = ask(prompt, model=_TASK1_MODEL)
-    files = extract_files(response)
-    req_content = files.get("functional_requirements.md", "").strip()
-    if not req_content:
-        # Model may have returned content without FILE markers — use raw response.
-        # Strip any leading/trailing markdown fences.
-        raw = re.sub(r'^```\w*\n?|```$', '', response.strip(), flags=re.MULTILINE).strip()
-        if len(raw) > 200:
-            req_content = raw
-            _log(f"  [proc-macro TASK 1] Using raw response as requirements ({len(raw)} chars).")
-    if not req_content:
-        _log("  [proc-macro TASK 1] No output — writing static fallback requirements.")
-        # Static fallback: scan tests for derive usage and write minimal requirements.
-        derives = set()
-        attrs = set()
-        # Derive crate-attribute pattern from the actual crate name so this
-        # fallback works on any proc-macro crate, not just argh.
-        _attr_name = (crate_name or "").replace("-", "_") or "derive"
-        _attr_re = re.compile(rf'#\[{re.escape(_attr_name)}\(([^)]+)\)')
-        for _, content in relevant:
-            for m in re.finditer(r'#\[derive\(([^)]+)\)', content):
-                for d in m.group(1).split(','):
-                    derives.add(d.strip())
-            for m in _attr_re.finditer(content):
-                attrs.add(m.group(1).strip())
-        req_content = "# Proc-macro interface\n\n"
-        req_content += "## Derive macros\n"
-        for d in sorted(derives):
-            req_content += f"- `#[derive({d})]` — implement the `{d}` trait on annotated types\n"
-        if attrs:
-            req_content += "\n## Helper attributes\n"
-            for a in sorted(attrs):
-                req_content += f"- `#[{_attr_name}({a})]`\n"
-        req_content += (
-            "\n## Entry points\n"
-            "Each derive macro must be registered with `#[proc_macro_derive(Name)]`.\n"
-            "Input: `proc_macro::TokenStream`, Output: `proc_macro::TokenStream`.\n"
-            "Parse input with `syn::parse_macro_input!(input as syn::DeriveInput)`.\n"
-            "Generate output with `quote::quote! { impl Name for #ident { ... } }`.\n"
-        )
-    _write_fr_preserving_notes(functional_req_path, req_content)
-    _log(f"  [proc-macro TASK 1] functional_requirements written ({len(req_content)} chars).")
-    return True
+# slice 5b: _task1_proc_macro moved to application.tasks.task1.
 
 
 def task1(project_dir, genesis_path, functional_req_path, test_files, readme_text,
           project_profile: str = "", crate_type: str = "", module_name: str = "",
           project_context: str = "", coverage_strategy: str = ""):
-    _log("\nTASK 1: Analyzing tests + README, building functional_requirements.md")
-
-    # Pre-strip API surface snapshot (signatures + type defs of the original
-    # source). Used as structural ground truth — TASK 1 derives behaviour from
-    # the tests but must respect the shapes captured here.
-    api_surface = load_api_surface(project_dir, module_name) if module_name else ""
-    if api_surface:
-        _log(f"  Loaded API surface: {len(api_surface):,} chars (pre-strip skeleton).")
-
-    # For proc-macro crates with no own tests, extract proc-macro interface
-    # (derive macros, helper attributes) from how they're used in the test suite.
-    if crate_type == "proc-macro":
-        return _task1_proc_macro(project_dir, genesis_path, functional_req_path,
-                                 test_files, readme_text, project_profile,
-                                 crate_name=module_name, project_context=project_context,
-                                 api_surface=api_surface)
-
-    existing_genesis = read(genesis_path)
-    genesis_exists = bool(existing_genesis.strip())
-    if genesis_exists:
-        _log("  genesis.md exists — will use as-is; only producing functional_requirements.md.")
-    else:
-        _log("  No genesis.md yet — will create it alongside functional_requirements.md.")
-    total_chars = sum(len(c) for _, c in test_files)
-    _log(f"  Total test content: {total_chars:,} chars across {len(test_files)} file(s).")
-
-    synthesizer = _task1_synthesizer_factory()
-    _log(f"  Using {synthesizer.__class__.__name__}.")
-    ok = synthesizer.synthesize(
-        project_dir, genesis_path, functional_req_path, test_files, readme_text,
-        project_profile, project_context=project_context, coverage_strategy=coverage_strategy,
-        api_surface=api_surface,
+    # slice 5b: extracted to application.tasks.task1; thin shim binding deps.
+    return _task1_impl(
+        project_dir, genesis_path, functional_req_path, test_files, readme_text, _TASK1_DEPS,
+        project_profile=project_profile, crate_type=crate_type, module_name=module_name,
+        project_context=project_context, coverage_strategy=coverage_strategy,
     )
-
-    if not ok:
-        return False
-    existing_genesis = read(genesis_path)
-    if existing_genesis.strip():
-        _log("  functional_requirements.md written (genesis.md unchanged).")
-    else:
-        _log("  genesis.md and functional_requirements.md written.")
-    return True
 
 
 # ---------------------------------------------------------------------------
@@ -16713,6 +16212,17 @@ class StaticSkeletonTask2Generator(Task2Generator):
         return env
 
 
+def _is_proc_macro_crate(cargo_toml_text: str) -> bool:
+    """True if Cargo.toml declares `proc-macro = true`. (Regex kept in pipeline — Option 1.)"""
+    return bool(re.search(r'proc-macro\s*=\s*true', cargo_toml_text, re.MULTILINE))
+
+
+def _count_rustc_error_codes(output: str) -> int:
+    """Count distinct rustc error codes (E0001 etc.) in build output.
+    (Tool-output regex kept in pipeline — Option 1.)"""
+    return len(set(re.findall(r"\bE\d{3,4}\b", output or "")))
+
+
 def _task2_generator_factory() -> Task2Generator:
     backend = os.getenv("TASK2_GENERATOR", "filelist").lower()
     if backend == "llm":
@@ -16746,18 +16256,14 @@ def task2(project_dir, genesis_path, functional_req_path, manifest_path, existin
           locked_dep_context: str = "", current_module: str = "", module_dir_rel: str = "",
           whole_project_context: str = "", coverage_strategy: str = "", api_surface: str = "",
           prev_source_context: str = ""):
-    """
-    Generate source files from functional requirements.
-    Implementation is selected by TASK2_GENERATOR in .env (default: static).
-    """
-    return _task2_generator_factory().generate(
-        project_dir, genesis_path, functional_req_path, manifest_path,
-        existing_test_files, project_profile, workspace_structure, build_error,
-        locked_dep_context, current_module, module_dir_rel,
-        whole_project_context=whole_project_context,
-        coverage_strategy=coverage_strategy,
-        api_surface=api_surface,
-        prev_source_context=prev_source_context,
+    # slice 5b: extracted to application.tasks.task2; thin shim binding deps.
+    return _task2_impl(
+        project_dir, genesis_path, functional_req_path, manifest_path, existing_test_files,
+        _TASK2_DEPS, project_profile=project_profile, workspace_structure=workspace_structure,
+        build_error=build_error, locked_dep_context=locked_dep_context,
+        current_module=current_module, module_dir_rel=module_dir_rel,
+        whole_project_context=whole_project_context, coverage_strategy=coverage_strategy,
+        api_surface=api_surface, prev_source_context=prev_source_context,
     )
 
 
@@ -16767,147 +16273,15 @@ def task2_inner_loop(project_dir, genesis_path, functional_req_path, manifest_pa
                      current_module: str = "", module_dir_rel: str = "",
                      whole_project_context: str = "", coverage_strategy: str = "",
                      api_surface: str = "", prev_source_context: str = ""):
-    """
-    Inner loop: TASK 2 (code generation) followed by a compile-only check.
-    If the build check fails, feeds the compiler error back into TASK 2 and retries.
-    Avoids burning full outer-loop iterations on structural code errors.
-
-    Returns True if code was generated and (if a build check exists) compiles cleanly.
-    Returns False if all retries are exhausted.
-    """
-    # Pre-detect proc-macro so fix-loop can pass the constraint as extra_context.
-    _fix_extra_context = ""
-    if module_dir_rel:
-        _cargo_toml_check = project_dir / module_dir_rel / "Cargo.toml"
-        if _cargo_toml_check.exists():
-            _ct = _cargo_toml_check.read_text(encoding="utf-8")
-            if re.search(r'proc-macro\s*=\s*true', _ct, re.MULTILINE):
-                _fix_extra_context = (
-                    "\n⚠️  PROC-MACRO CRATE: `#[proc_macro_derive]`, `#[proc_macro]`, and "
-                    "`#[proc_macro_attribute]` functions MUST be at the TOP LEVEL of lib.rs — "
-                    "NEVER inside any `mod` block. Do NOT wrap the file in `mod lib { ... }`.\n"
-                )
-
-    build_error = ""
-    _t2_t0 = time.monotonic()
-    _emit("task.start", task="task2", module=current_module,
-          data={"max_attempts": BUILD_CHECK_RETRIES,
-                "has_build_check": bool(build_check_cmd)})
-    # P7.5: floor-stall against rustc error count across regen attempts.
-    # Each regen produces fundamentally different code; if a new regen has
-    # fewer errors than any prior, we're getting closer and should keep
-    # going. Hard cap = BUILD_CHECK_RETRIES (regens are expensive).
-    _t2_max_stalls = int(os.getenv("TASK2_BUILD_MAX_STALLS", "2"))
-    _t2_best_count: int | None = None
-    _t2_stall = 0
-    for attempt_num in range(1, BUILD_CHECK_RETRIES + 1):
-        if attempt_num > 1:
-            _log(f"  Inner loop attempt {attempt_num}/{BUILD_CHECK_RETRIES} "
-                 f"(fixing build error from previous attempt)...")
-
-        ok = task2(project_dir, genesis_path, functional_req_path, manifest_path,
-                   existing_test_files, project_profile, workspace_structure, build_error,
-                   locked_dep_context, current_module, module_dir_rel,
-                   whole_project_context=whole_project_context,
-                   coverage_strategy=coverage_strategy,
-                   api_surface=api_surface,
-                   prev_source_context=prev_source_context if attempt_num == 1 else "")
-        if not ok:
-            # When module scope filtering discards all planned files the model listed
-            # files for the wrong crates. Inject an explicit corrective error and retry
-            # rather than aborting — the model needs one more chance with clear guidance.
-            if module_dir_rel and attempt_num < BUILD_CHECK_RETRIES:
-                scope_msg = (
-                    f"CRITICAL SCOPE ERROR: Every file path you output was WRONG and was discarded.\n"
-                    f"You MUST ONLY generate files for the `{current_module}` crate inside this Cargo workspace.\n"
-                    f"Every file path MUST start with `{module_dir_rel}` (note: this includes the `src/` subdirectory).\n"
-                    f"CORRECT examples:  {module_dir_rel}src/lib.rs  |  {module_dir_rel}src/parse_attrs.rs\n"
-                    f"WRONG examples:    src/lib.rs  |  src/{current_module}/lib.rs  |  {current_module}/lib.rs\n"
-                    f"Output ONLY files whose path starts with `{module_dir_rel}`."
-                )
-                _log(f"  TASK 2 produced no in-scope files — injecting scope correction for retry...")
-                build_error = scope_msg
-                continue
-            _log("  TASK 2 failed to generate files — aborting inner loop.")
-            _emit("task.done", task="task2", module=current_module,
-                  duration_ms=int((time.monotonic() - _t2_t0) * 1000),
-                  attempt=attempt_num,
-                  data={"ok": False, "reason": "no_files_generated"})
-            return False
-
-        if not build_check_cmd:
-            _emit("task.done", task="task2", module=current_module,
-                  duration_ms=int((time.monotonic() - _t2_t0) * 1000),
-                  attempt=attempt_num,
-                  data={"ok": True, "build_checked": False})
-            return True  # No build check available; proceed to full tests.
-
-        # Use generate_fix_loop: run build check, if it fails ask LLM to fix only
-        # the broken files rather than regenerating everything on the next attempt.
-        # Keeps files that compiled correctly, targets only the broken ones.
-        generated_paths = [
-            project_dir / rel for rel in load_manifest(manifest_path)
-            if rel not in existing_test_files and (project_dir / rel).exists()
-        ]
-        try:
-            _fix_loop_fr = read(functional_req_path) if functional_req_path.exists() else ""
-        except Exception:
-            _fix_loop_fr = ""
-        build_ok, build_output = generate_fix_loop(
-            project_dir=project_dir,
-            check_cmd=build_check_cmd,
-            source_paths=generated_paths,
-            existing_test_files=existing_test_files,
-            extra_context=_fix_extra_context,
-            model=_TASK2_MODEL,
-            max_fix_attempts=4,
-            timeout=BUILD_TIMEOUT,
-            allowed_dir_prefix=module_dir_rel,
-            functional_req=_fix_loop_fr,
-        )
-        if build_ok:
-            _log("  Build check PASSED.")
-            _emit("compile.success", module=current_module, attempt=attempt_num)
-            _emit("task.done", task="task2", module=current_module,
-                  duration_ms=int((time.monotonic() - _t2_t0) * 1000),
-                  attempt=attempt_num,
-                  data={"ok": True, "build_checked": True})
-            return True
-
-        _log(f"  Build still failing after fix attempts (inner loop attempt {attempt_num}).")
-        _emit("compile.fail", module=current_module, attempt=attempt_num,
-              data={"output": _store_prompt_content(build_output or "")})
-        # P7.5: floor-stall against error count across regens. If we've
-        # tried multiple regens and the best one still has the same or
-        # more errors as the previous best, escalate early rather than
-        # burning more regens.
-        _t2_count = len(set(re.findall(r"\bE\d{3,4}\b", build_output or "")))
-        if _t2_best_count is None or _t2_count < _t2_best_count:
-            _t2_best_count = _t2_count
-            _t2_stall = 0
-        else:
-            _t2_stall += 1
-        _emit("loop.iter", data={
-            "name": "task2.build_retries",
-            "iter": attempt_num,
-            "metric_new": _t2_count,
-            "metric_best": _t2_best_count,
-            "improved": _t2_stall == 0,
-            "stalled": _t2_stall,
-        })
-        if _t2_stall >= _t2_max_stalls:
-            _log(f"  Inner loop floor stalled at {_t2_best_count} errors "
-                 f"for {_t2_stall} regen(s) — escalating to outer loop early.")
-            break
-        # Pass the error into the next full task2 regeneration so the model
-        # understands what structural issues need to be addressed.
-        build_error = build_output
-
-    _log(f"  Inner loop exhausted after {BUILD_CHECK_RETRIES} attempts — escalating to outer loop.")
-    _emit("task.done", task="task2", module=current_module,
-          duration_ms=int((time.monotonic() - _t2_t0) * 1000),
-          data={"ok": False, "reason": "retries_exhausted"})
-    return False
+    # slice 5b: extracted to application.tasks.task2; thin shim binding deps.
+    return _task2_inner_impl(
+        project_dir, genesis_path, functional_req_path, manifest_path, existing_test_files,
+        project_profile, workspace_structure, build_check_cmd, _TASK2_DEPS,
+        locked_dep_context=locked_dep_context, current_module=current_module,
+        module_dir_rel=module_dir_rel, whole_project_context=whole_project_context,
+        coverage_strategy=coverage_strategy, api_surface=api_surface,
+        prev_source_context=prev_source_context,
+    )
 
 
 def _render_impl_block(file_text: str, members: list[dict]) -> str:
@@ -17537,75 +16911,31 @@ def task2_fix_loop(
     genesis_path: Path | None = None,
     module_dir_rel: str = "",
 ) -> tuple[bool, str]:
-    """
-    After TASK 3 failure: targeted fix before full TASK 4 + regeneration.
-    Thin wrapper around generate_fix_loop using the manifest's source files.
-    """
-    current_files = load_manifest(manifest_path)
-    if not current_files:
-        return False, test_output
-
-    source_paths = [
-        project_dir / rel for rel in current_files
-        if rel not in existing_test_files and (project_dir / rel).exists()
-    ]
-
-    functional_req = read(functional_req_path)
-
-    # Fill-down for extra_context: genesis → test files (stem-prioritized).
-    # functional_req is passed via its own dedicated parameter so it gets a
-    # guaranteed slot in the fix prompt.
-    # generate_fix_loop reservation: SINGLE_CALL_CHAR_LIMIT - min(err)+min(src)+min(spec).
-    _extra_budget = max(10_000, SINGLE_CALL_CHAR_LIMIT - 10_000 - 30_000 - 8_000)
-
-    # 1. Genesis — methodology, always first.
-    _genesis_section = ""
-    if genesis_path and genesis_path.exists():
-        _genesis = read(genesis_path)
-        if _genesis.strip():
-            _genesis_section = (
-                f"\n--- genesis.md (methodology) ---\n"
-                f"{trim_to_line(_genesis, _GENESIS_CAP, chr(10) + '... (genesis truncated)')}\n"
-            )
-
-    # 2. Test files — stem-prioritized, fill remaining budget.
-    _test_budget = max(0, _extra_budget - len(_genesis_section))
-    _file_stem = Path(module_dir_rel.rstrip("/")).name if module_dir_rel else ""
-    _primary_tests: list[str] = []
-    _secondary_tests: list[str] = []
-    for _rel in sorted(existing_test_files):
-        if module_dir_rel and not _rel.startswith(module_dir_rel):
-            continue
-        _tp = project_dir / _rel
-        if not _tp.exists():
-            continue
-        _blk = f'\n<TESTFILE path="{_rel}">\n{_tp.read_text(encoding="utf-8")}\n</TESTFILE>'
-        if _file_stem and Path(_rel).name.split(".")[0] == _file_stem:
-            _primary_tests.append(_blk)
-        else:
-            _secondary_tests.append(_blk)
-    _test_parts = ["\nTest files (the tests your fix must pass):"]
-    _test_used = 0
-    for _blk in _primary_tests + _secondary_tests:
-        if _test_used + len(_blk) > _test_budget:
-            break
-        _test_parts.append(_blk)
-        _test_used += len(_blk)
-    _test_section = ("\n".join(_test_parts) + "\n") if len(_test_parts) > 1 else ""
-
-    extra = _genesis_section + _test_section
-
-    return generate_fix_loop(
-        project_dir=project_dir,
-        check_cmd=test_command,
-        source_paths=source_paths,
-        existing_test_files=existing_test_files,
-        extra_context=extra,
-        model=_TASK2_MODEL,
-        max_fix_attempts=TASK2_FIX_RETRIES,
-        timeout=TEST_TIMEOUT,
-        functional_req=functional_req,
+    # slice 5b: extracted to application.tasks.task2; thin shim binding deps.
+    return _task2_fix_impl(
+        project_dir, manifest_path, existing_test_files, test_output, test_command,
+        functional_req_path, _TASK2_DEPS, genesis_path=genesis_path, module_dir_rel=module_dir_rel,
     )
+
+
+# slice 5b: deps for the extracted TASK 2 (defined after generate_fix_loop, its latest dep).
+_TASK2_DEPS = Task2Deps(
+    generator_factory=_task2_generator_factory,
+    load_manifest=load_manifest,
+    read=read,
+    generate_fix_loop=generate_fix_loop,
+    store_prompt_content=_store_prompt_content,
+    is_proc_macro_crate=_is_proc_macro_crate,
+    count_error_codes=_count_rustc_error_codes,
+    build_check_retries=BUILD_CHECK_RETRIES,
+    build_max_stalls=int(os.getenv("TASK2_BUILD_MAX_STALLS", "2")),
+    build_timeout=BUILD_TIMEOUT,
+    test_timeout=TEST_TIMEOUT,
+    task2_model=_TASK2_MODEL,
+    task2_fix_retries=TASK2_FIX_RETRIES,
+    single_call_char_limit=SINGLE_CALL_CHAR_LIMIT,
+    genesis_cap=_GENESIS_CAP,
+)
 
 
 # P7.3: task3 inline retry. Currently task3 is one-shot; failure escalates
@@ -18398,6 +17728,27 @@ def _read_all_gen_tests(src_file: Path) -> str:
 def _strip_gen_tests_decls(src_text: str) -> str:
     """Remove all gen_tests path-mod declarations from a source file's text."""
     return GEN_TESTS_DECL_RE.sub("", src_text)
+
+
+def _is_gen_tests_file(name: str) -> bool:
+    """True if `name` is a pipeline-generated `*.gen_tests_<N>.rs` sibling.
+    Keeps this filename regex in pipeline.py (Option 1) so the clean layer stays regex-free."""
+    return bool(re.search(r"\.gen_tests_\d+\.rs$", name))
+
+
+# slice 5b: deps for the extracted TASK 0b discovery (defined after its parsers).
+_TASK0B_DEPS = Task0bDeps(
+    ask=ask,
+    write=write,
+    is_test_file=is_test_file,
+    is_gen_tests_file=_is_gen_tests_file,
+    strip_gen_tests_decls=_strip_gen_tests_decls,
+    condense_rust_to_signatures=_condense_rust_to_signatures,
+    manifest_name=MANIFEST_NAME,
+    sibling_cap=_SIBLING_CAP,
+    single_call_char_limit=SINGLE_CALL_CHAR_LIMIT,
+    task0_model=_TASK0_MODEL,
+)
 
 
 def _has_gen_tests_decl(src_text: str, pass_n: int) -> bool:
@@ -21350,6 +20701,23 @@ def load_api_surface(project_dir: Path, module_name: str) -> str:
         return p.read_text(encoding="utf-8")
     except OSError:
         return ""
+
+
+# slice 5b: deps for the extracted TASK 1 (defined after load_api_surface, its latest dep).
+_TASK1_DEPS = Task1Deps(
+    load_api_surface=load_api_surface,
+    read=read,
+    ask=ask,
+    write_fr_preserving_notes=_write_fr_preserving_notes,
+    synthesizer_factory=_task1_synthesizer_factory,
+    filter_proc_macro_test_files=_filter_proc_macro_test_files,
+    proc_macro_fallback_requirements=_proc_macro_fallback_requirements,
+    format_api_surface_section=_format_api_surface_section,
+    file_format_instruction=FILE_FORMAT_INSTRUCTION,
+    single_call_char_limit=SINGLE_CALL_CHAR_LIMIT,
+    profile_cap=_PROFILE_CAP,
+    task1_model=_TASK1_MODEL,
+)
 
 
 def load_original_structure(project_dir: Path, module_name: str) -> list[str]:
