@@ -18,6 +18,8 @@ IMPORTANT! No regular expressions, anywhere. Use proper structured parsers for w
 
 IMPORTANT! Always build the best/correct solution outright. Do not take gradual, incremental, or stopgap approaches.
 
+IMPORTANT! Reconstruction target is TEST-PASSING BEHAVIOUR, not source fidelity. The goal is ANY implementation that compiles and passes the tests — never to reproduce or match the original library's implementation. Neither the pipeline nor you (the autopilot) may infer the original's implementation OR its strategy/approach. Do not steer the model toward "what the real library does" (e.g. "use Box because anyhow does"). The model is free to invent its own scheme; we only help it use REAL, in-scope, stable symbols so whatever it chooses actually compiles. Allowed inputs to a fix: the tests, the frozen signatures/skeleton, the in-scope symbol inventory, the cluster's stable-API constraints, and the model's own compile-error feedback. Forbidden: the original bodies, and any "the upstream library implements it as X" inference. This extends Hard Rule 11 / FR-022 from "no source bytes" to "no source-derived strategy."
+
 ---
 
 # Engineering principles

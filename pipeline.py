@@ -20913,14 +20913,17 @@ corrected content here
     ))  # P7.7: tightened — per-file retrospective fires first; this is the
     # global stall budget. Lower than the legacy 10 because the per-file
     # deep retrospective (RETRO_DEEP_AT_STALL=5) is the heavy lifter.
-    FILE_STALL_LIMIT = 10   # consecutive no-improvement attempts before skipping a file
-    # Escalate to the deep retrospective on the FIRST 0-coverage attempt.
-    # Plain re-rolls are coverage-BLIND — the model gets compile/test errors
-    # (Phase A fix loop) but never the "this compiled yet covered nothing"
-    # signal, which is only injected once the retrospective fires. So a second
-    # plain attempt just reproduces the same useless test at the cost of another
-    # full instrumented coverage run. Default 1: one attempt, then straight to
-    # the informed retrospective.
+    # Per-file budget: up to 5 INFORMED attempts before skipping a file. Each
+    # stalled attempt regenerates the deep retrospective with the latest
+    # accumulated failed-attempt evidence (see below), so these are 5 evidence-
+    # driven shots, not blind re-rolls.
+    FILE_STALL_LIMIT = int(os.getenv("TASK0C_FILE_STALL_LIMIT", "5"))
+    # Regenerate the evidence-rich retrospective on EVERY stall from this count
+    # on (default 1 = from the first 0-coverage attempt). Plain re-rolls are
+    # coverage-BLIND — the model gets compile/test errors (Phase A fix loop) but
+    # never the "compiled yet covered nothing" signal, which only the
+    # retrospective injects. Firing it each iteration (with fresh evidence)
+    # gives the model informed, varying shots instead of one stale retro reused.
     RETRO_DEEP_AT_STALL = int(os.getenv("TASK0C_RETRO_DEEP_AT_STALL", "1"))
     file_stall_counts: dict[str, int] = {}   # consecutive no-improvement attempts per file
     file_best_uncov: dict[str, int] = {}     # fewest uncovered lines seen per file
@@ -20934,7 +20937,6 @@ corrected content here
     # call to UNREACHABLE when evidence demands it.
     file_last_qcov: dict[str, int] = {}          # last quick-cov 'covered' count per file
     file_failed_blocks: dict[str, list[str]] = {}  # gen blocks that compiled but didn't move the metric
-    file_retro_deep_fired: set[str] = set()      # files where the deep retrospective has already run
     _at_ceiling = False                      # True when a full pass produced no actionable lines
     while attempt < max_attempts:
         attempt += 1
@@ -21788,17 +21790,18 @@ project-specific import paths, type construction patterns, and hard constraints.
                 #     first call said TESTABLE and the LLM has since committed several
                 #     blocks that didn't move the metric, the classifier should revise
                 #     that call to UNREACHABLE / NEEDS_INTERNALS instead.
+                # Regenerate the evidence-rich retrospective on EVERY stall (not
+                # once) so each of the FILE_STALL_LIMIT attempts is informed by
+                # the latest accumulated failed-attempt evidence.
                 _fire_deep = (
-                    stall_n == RETRO_DEEP_AT_STALL
-                    and rel_path not in file_retro_deep_fired
+                    stall_n >= RETRO_DEEP_AT_STALL
                     and bool(file_failed_blocks.get(rel_path))
                 )
-                if (stall_n == 1 or _fire_deep) and fn_bodies.strip():
+                if (stall_n >= 1) and fn_bodies.strip():
                     if _fire_deep:
                         _log(f"  [{module_name}] {rel_path} stalled at {stall_n} with "
                              f"{len(file_failed_blocks[rel_path])} failed attempt(s) — "
-                             f"running deep retrospective with concrete evidence.")
-                        file_retro_deep_fired.add(rel_path)
+                             f"deep retrospective with concrete evidence.")
                     else:
                         _log(f"  [{module_name}] No improvement for {rel_path} — running retrospective.")
                     # Pass ALL uncovered functions to the retrospective (no max_fns cap)

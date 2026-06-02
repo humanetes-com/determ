@@ -828,3 +828,39 @@ correct examples. The same alternation corrupted module docs (the earlier bare
 `//!` line). Normalising to one line per `#[doc]` keeps prettyplease in the
 uniform `///`/`//!` path, so doctests and module docs render intact. Verified:
 0 block-doc lines in the merged `lib.rs`, examples preserved.
+
+## FR-036 — Reconstruction target is test-passing behaviour, not source fidelity
+
+**Decision:** The pipeline reconstructs ANY implementation that compiles and
+passes the tests. It is NOT trying to reproduce the original library's
+implementation, and it must never infer the original's implementation OR its
+strategy/approach. No phase, prompt, or autopilot action may steer the model
+toward "what the upstream library does" (e.g. "use `Box` because anyhow does",
+"the real vtable is laid out like X"). The model is free to invent its own
+scheme; the pipeline only helps that scheme COMPILE by surfacing real, in-scope,
+stable symbols.
+
+**Why:** The whole experiment is "reconstruct from tests," so the success
+criterion is the test suite, not byte- or strategy-level similarity to the
+source. Concretely, when the model wrote `core::alloc::Global.allocate_zeroed(...)`
+instead of `Box`, that was not "wrong because anyhow uses Box" — a raw-allocator
+scheme is a perfectly valid reconstruction. It failed only because the SYMBOLS
+don't exist/aren't stable (`Global` is in `alloc::alloc`/`std::alloc`;
+`allocate_zeroed` is unstable). Forcing the anyhow approach would (a) leak
+source-derived strategy and (b) discard valid alternative implementations.
+
+**Allowed inputs to any fix:** the tests; the frozen signatures/skeleton; the
+in-scope symbol inventory; the cluster's stable-API constraints (toolchain/cfg);
+the model's own compile/test-error feedback (incl. anti-hallucination notes).
+**Forbidden:** the original bodies (already FR-022/Hard Rule 11), AND any
+"upstream implements it as X" inference — strategy, layout, type choice, or
+algorithm derived from the original. This FR extends FR-022 from "no source
+bytes" to "no source-derived strategy."
+
+**Consequence for the vtable/alloc failure class:** the fix is NOT "tell it to
+use Box." It is (1) co-design the coupled vtable/`Own`/`Ref`/`construct_*` unit
+in one prompt so the model's own symbols stay self-consistent
+(`ADHOC_VTABLE` vs `VTABLE_ADHOC` is self-contradiction, not missing knowledge);
+(2) surface the available in-scope + stable symbol inventory so it stops
+inventing non-existent paths; (3) let compile errors + the model's notes correct
+symbol locations. Whatever scheme it then converges on is its own choice.
