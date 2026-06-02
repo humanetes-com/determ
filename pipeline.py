@@ -98,13 +98,13 @@ load_dotenv(Path(__file__).parent / ".env")
 SETTINGS = Settings.from_env(model=MODEL)
 
 # Per-task model overrides — each task uses the most appropriate model.
-# Falls back to MODEL (the global default) if a specific override is not set.
+# Single-sourced from Settings.task_models (env TASK*_MODEL, falling back to MODEL).
 # Rationale for each choice is documented in .env.
-_TASK0_MODEL  = os.getenv("TASK0_MODEL",  MODEL)  # project profile — small/fast
-_TASK0C_MODEL = os.getenv("TASK0C_MODEL", MODEL)  # coverage augmentation — best code model
-_TASK1_MODEL  = os.getenv("TASK1_MODEL",  MODEL)  # requirements synthesis — code understanding
-_TASK2_MODEL  = os.getenv("TASK2_MODEL",  MODEL)  # code generation — best code model
-_TASK4_MODEL  = os.getenv("TASK4_MODEL",  MODEL)  # failure analysis — reasoning model
+_TASK0_MODEL  = SETTINGS.task_models.task0
+_TASK0C_MODEL = SETTINGS.task_models.task0c
+_TASK1_MODEL  = SETTINGS.task_models.task1
+_TASK2_MODEL  = SETTINGS.task_models.task2
+_TASK4_MODEL  = SETTINGS.task_models.task4
 
 
 def _model_tier(model: str) -> str:

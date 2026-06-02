@@ -29,6 +29,26 @@ _MIN_CONTENT_TOKENS_GENERAL = 16_384  # task1/2/3/4 — large outputs (full file
 _MIN_CONTENT_TOKENS_TASK0C = 4_096    # task0c — small test blocks only
 
 
+@dataclass(frozen=True, slots=True)
+class TaskModels:
+    """Per-task model overrides; each falls back to the global default model."""
+
+    task0: str   # project profile — small/fast
+    task0c: str  # coverage augmentation — best code model
+    task1: str   # requirements synthesis — code understanding
+    task2: str   # code generation — best code model
+    task4: str   # failure analysis — reasoning model
+
+    @classmethod
+    def from_env(cls, default: str) -> "TaskModels":
+        def g(key: str) -> str:
+            return os.getenv(key, default)
+        return cls(
+            task0=g("TASK0_MODEL"), task0c=g("TASK0C_MODEL"), task1=g("TASK1_MODEL"),
+            task2=g("TASK2_MODEL"), task4=g("TASK4_MODEL"),
+        )
+
+
 def _resolve_ctx_thinking(backend: Backend) -> tuple[int, int]:
     """Backend context length + thinking-budget tokens, with the legacy defaults."""
     if backend is Backend.VLLM:
@@ -57,6 +77,7 @@ class Settings:
     safe_input_char_limit_task0c: int
     single_call_char_limit: int
     intermediate_char_limit: int
+    task_models: TaskModels
 
     @classmethod
     def from_env(cls, model: str = "") -> "Settings":
@@ -87,4 +108,5 @@ class Settings:
             safe_input_char_limit_task0c=safe_t0c,
             single_call_char_limit=min(safe, mcc * 3 // 4),
             intermediate_char_limit=mcc // 2,
+            task_models=TaskModels.from_env(model),
         )

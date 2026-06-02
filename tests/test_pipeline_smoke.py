@@ -1905,7 +1905,18 @@ def test_domain_enums_and_model_caps() -> None:
     # pure budget helper: floor + formula
     assert safe_input_char_limit(65536, 0, 16_384) == int((65536 - 512 - 16_384) * 3.0)
     assert safe_input_char_limit(1, 0, 0) == 4_000  # 4k floor
-    print("  OK  pipeline_core domain enums + model_caps + Settings budget (slice 1+2+3)")
+
+    # per-task model overrides single-sourced from Settings.task_models.
+    from pipeline_core.settings import TaskModels
+    tm = s.task_models
+    assert isinstance(tm, TaskModels)
+    assert pipeline._TASK0_MODEL == tm.task0 and pipeline._TASK4_MODEL == tm.task4
+    assert pipeline._TASK0C_MODEL == tm.task0c and pipeline._TASK2_MODEL == tm.task2
+    # default fallback: a task with no env override resolves to the global model.
+    import os as _os
+    if "TASK1_MODEL" not in _os.environ:
+        assert TaskModels.from_env("the-default").task1 == "the-default"
+    print("  OK  pipeline_core domain enums + model_caps + Settings budget + task_models (slice 1+2+3)")
 
 
 def test_adapters_satisfy_ports() -> None:
