@@ -49,6 +49,8 @@ from pipeline_core.adapters import build_adapters
 from pipeline_core.adapters import coverage as _covmod, workspace as _wsmod
 from pipeline_core.adapters.coverage import CoverageDeps
 from pipeline_core.adapters.workspace import WorkspaceDeps
+from pipeline_core.application.orchestrator import Orchestrator
+from pipeline_core.application.tasks.genesis_audit import genesis_audit, GenesisAuditDeps
 
 _mi_mtime: float = os.path.getmtime(_mi.__file__)
 
@@ -4293,6 +4295,9 @@ SKELETON_EXTRACTOR_BIN = Path(__file__).parent / "tools" / "skeleton_extractor" 
 # (CODE_ARCHITECTURE.md §1), so it owns construction; call sites migrate onto ADAPTERS
 # one task at a time (slice 5). Adapters wrap real primitives and never import back here.
 ADAPTERS = build_adapters(SETTINGS, extractor_bin=SKELETON_EXTRACTOR_BIN, model=MODEL)
+# The application-layer composition context. main()'s task dispatch migrates onto it
+# slice by slice (5b); for now it bundles the resolved settings + adapters.
+ORCHESTRATOR = Orchestrator(settings=SETTINGS, adapters=ADAPTERS)
 
 
 def _prune_redundant_clusters(
@@ -18606,50 +18611,18 @@ GENESIS_AUDIT_INTERVAL = 5
 NO_IMPROVEMENT_THRESHOLD = 3
 
 
+# slice 5b: genesis audit extracted to pipeline_core.application.tasks.genesis_audit.
+# Deps bind the pipeline's collaborators once; main() calls the shim below unchanged.
+_GENESIS_AUDIT_DEPS = GenesisAuditDeps(
+    ask=ask, read=read, write=write, log=_log, retry=with_retry,
+    extract_genesis=_extract_genesis, model=_TASK4_MODEL,
+    verbosity_guard=_TASK4_VERBOSITY_GUARD,
+    delim_start=GENESIS_DELIM_START, delim_end=GENESIS_DELIM_END,
+)
+
+
 def task_genesis_audit(genesis_path: Path) -> bool:
-    """
-    Ask the LLM to review genesis.md for internal contradictions or redundant
-    rules and return a cleaned version if issues are found.
-
-    Returns True if genesis.md was updated, False if it was clean or the call
-    failed. Called periodically (every GENESIS_AUDIT_INTERVAL iterations) or
-    immediately after a regression is detected.
-    """
-    genesis = read(genesis_path)
-    if len(genesis.strip()) < 200:
-        _log("  Genesis audit: document too short to audit.")
-        return False
-
-    prompt = f"""Review this methodology document for internal contradictions, redundant rules,
-or rules that directly conflict with each other.
-
-genesis.md:
-{genesis}
-
-If no issues found, respond with exactly: AUDIT_CLEAN
-
-If issues are found, output the corrected document with contradictions resolved
-and redundant rules removed. Do not add new rules — only clean up existing ones.
-{_TASK4_VERBOSITY_GUARD}
-{GENESIS_DELIM_START}
-corrected content here
-{GENESIS_DELIM_END}
-"""
-
-    def attempt():
-        response = ask(prompt, model=_TASK4_MODEL)
-        if 'AUDIT_CLEAN' in response:
-            _log("  Genesis audit: no issues found.")
-            return 'clean'
-        content = _extract_genesis(response)
-        if content:
-            write(genesis_path, content)
-            _log("  Genesis audit: contradictions resolved — genesis.md updated.")
-            return 'updated'
-        return False
-
-    result = with_retry(attempt)
-    return bool(result == 'updated')
+    return genesis_audit(genesis_path, _GENESIS_AUDIT_DEPS)
 
 
 # ---------------------------------------------------------------------------

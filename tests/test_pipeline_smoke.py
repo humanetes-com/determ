@@ -2040,6 +2040,46 @@ def test_slice5a_shims_delegate_to_adapters() -> None:
     print("  OK  pipeline extractor + cargo shims delegate to ADAPTERS (slice 5a)")
 
 
+def test_slice5b_genesis_audit_task() -> None:
+    """Slice 5b: extracted genesis_audit use case behaves per-branch with injected deps,
+    and pipeline's shim + Orchestrator composition context are wired."""
+    from pathlib import Path
+    from pipeline_core.application.tasks.genesis_audit import genesis_audit, GenesisAuditDeps
+    from pipeline_core.application.orchestrator import Orchestrator
+
+    written: dict = {}
+
+    def mk_deps(genesis_text: str, response: str) -> GenesisAuditDeps:
+        return GenesisAuditDeps(
+            ask=lambda prompt, model=None: response,
+            read=lambda p: genesis_text,
+            write=lambda p, c: written.__setitem__("c", c),
+            log=lambda m: None,
+            retry=lambda fn: fn(),  # no-retry passthrough
+            extract_genesis=lambda r: (r.split("BEG", 1)[1] if "BEG" in r else None),
+            model="m", verbosity_guard="", delim_start="BEG", delim_end="END",
+        )
+
+    long = "x" * 250  # over the 200-char audit threshold
+
+    # too short → False, no write
+    assert genesis_audit(Path("g"), mk_deps("short", "whatever")) is False
+    # clean → False, no write
+    written.clear()
+    assert genesis_audit(Path("g"), mk_deps(long, "AUDIT_CLEAN")) is False
+    assert "c" not in written
+    # contradictions resolved → True, writes extracted content
+    written.clear()
+    assert genesis_audit(Path("g"), mk_deps(long, "BEGfixed-genesis-body")) is True
+    assert written["c"] == "fixed-genesis-body"
+
+    import pipeline
+    assert isinstance(pipeline.ORCHESTRATOR, Orchestrator)
+    assert pipeline.ORCHESTRATOR.adapters is pipeline.ADAPTERS
+    assert isinstance(pipeline._GENESIS_AUDIT_DEPS, GenesisAuditDeps)
+    print("  OK  genesis_audit task extracted behind orchestrator (slice 5b)")
+
+
 # ─── Driver ─────────────────────────────────────────────────────────────────
 
 def main() -> int:
@@ -2094,6 +2134,7 @@ def main() -> int:
     test_adapters_satisfy_ports()
     test_coverage_workspace_adapters()
     test_slice5a_shims_delegate_to_adapters()
+    test_slice5b_genesis_audit_task()
 
     if full:
         print("Cargo phase (--full):")
