@@ -12,7 +12,11 @@ IMPORTANT: Default to super short answers — a few sentences at most. Expand on
 
 IMPORTANT! Write short answers. Two lines maximum. Short does NOT mean cryptic: when you use a term you coined or a piece of jargon, add a few words explaining it so the user follows without prior context. Understandable first, then short.
 
-IMPORTANT! You do NOT commit and you do NOT restart the pipeline. When a unit of work is done, write a single commit message for the user; they handle the commit and the restart.
+IMPORTANT! You do NOT commit and you do NOT restart the pipeline — the user handles those. The user is a senior developer: do NOT explain git/commit basics, what committing means, "good practice", or whether to commit. Just write the commit message when a unit is done and move on.
+
+IMPORTANT! Work FAST. Validate (spike when it genuinely de-risks), but do not hedge, do not re-ask for permission, and do not stall on "want me to proceed?" — if the user said proceed/build/do it, PROCEED and keep going until done. Bias to action over ceremony.
+
+IMPORTANT! LLM guidance must be CONCRETE EXAMPLES, not abstract prose. Anything injected into a model prompt (gotchas, fix hints, family/spec sections) must show WRONG→RIGHT concrete code, not jargon or "you MUST be consistent / design X correctly". The model acts on examples, not rules. Follow the `_RUST_GOTCHAS` archetype style (WRONG: … / RIGHT: …). Prefer TWO OR MORE diverse examples per rule (few-shot: variety teaches the pattern; one example gets overfit). Use generic placeholder names, never crate source (FR-036). Corollary: do NOT strip concrete examples (e.g. the crate's own doc usage examples) from prompts that have budget headroom — condense only when a prompt actually overflows the context limit.
 
 IMPORTANT! No regular expressions, anywhere. Use proper structured parsers for whatever you are reading (for source code that means the syn-based AST extractor; for other formats use their real parser). Regex is banned as a general tool, not just for source.
 
@@ -28,7 +32,17 @@ IMPORTANT! Reconstruction target is TEST-PASSING BEHAVIOUR, not source fidelity.
 Every new tool, binary, or Python package must be added to `setup.sh` (and `requirements.txt` for Python deps). Never run `pip install`, `cargo install`, or `rustup component add` directly — those are one-off fixes that break reproducibility. The correct action is always: add to setup, then run setup.
 
 ## Pipeline restart timestamps
-Each restart is logged as `PIPELINE STARTED — <timestamp> UTC` in `logs/pipeline_anyhow.log`. Check this to confirm which code version is running.
+Each restart is logged as `PIPELINE STARTED — <timestamp> UTC  pipeline.py=<md5_8>  git=<sha>` in `logs/pipeline_anyhow.log`.
+
+## Which code is running — check the HASH, not the commit
+The pipeline runs `pipeline.py` from DISK at startup; commit status is irrelevant. To know whether the RUNNING process has a given edit, compare the on-disk hash to the one it logged:
+```bash
+# logged at start (md5 of pipeline.py at that moment, first 8 hex — pipeline.py:867)
+grep 'PIPELINE STARTED' logs/pipeline_anyhow.log | tail -1
+# current on-disk
+python3 -c "import hashlib;print(hashlib.md5(open('pipeline.py','rb').read()).hexdigest()[:8])"
+```
+Equal → the running process has the current on-disk code (a restart would change nothing). Different → the file changed since startup; those edits are NOT in the running process (it won't re-read the file). Do NOT infer what's running from `git log`/the commit hash.
 
 ## Never create tools in /tmp
 Throwaway scripts, benchmarks, probes, one-off analysis tools — none of these go in `/tmp`. They are deleted on reboot and lost for future reuse. Put every tool under `determ/tools/` so it is versioned and reusable. `/tmp` is for transient data artifacts (logs, caches, intermediate output), never for code we might want again.

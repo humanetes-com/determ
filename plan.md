@@ -2371,3 +2371,226 @@ Next attended step: wire U1 into _phase_c_fill_impl_blocks as a "do-no-harm"
 gate — after a block compiles, run U1; if fail_count rose vs the cluster
 baseline, revert (the fill broke tests) instead of accepting; feed `detail` into
 the next attempt. Then per-fn, then collapse the per-pass loop, then task0c.
+
+---
+
+# Night analysis — 2026-06-02 (anyhow run, git e68befe) — SCIENTIFIC PASS
+
+Method: for each failure class — hypothesis → prediction → test on the night's
+prompts/failure-dumps → verdict. Confidence stated. Raw error-code aggregates
+proved UNRELIABLE (see meta-finding), so verdicts use the failure DUMPS, which
+separate "Errors in target file" from "Errors elsewhere in the crate".
+
+## META-FINDING (most important)
+Raw error-code counts across prompts (E0425×151, E0277×218, …) are INFLATED by
+cascade: when one fn (or a doc parse error) breaks the crate, every other fn's
+fix prompt shows those SAME errors as "Errors elsewhere in the crate (likely
+downstream of the target)". So an aggregate count ≠ a failure taxonomy. Use the
+per-dump target-vs-elsewhere split. (My first plan ignored this and over-counted.)
+
+## P0 — cluster env not threaded into task0c augmentation — CONFIRMED
+Test: read `StaticRustTestAugmentor.test_harness_compiles` → `env=_cargo_env()`
+(default), and the no_core gen_tests (request_ref) are gated `#[cfg(anyhow_no_core_error)]`.
+Verdict: CONFIRMED. A nightly-only-API test passes augmentation under the wrong
+env, is kept, then fails under no_core's real env (E0658). Fix (FR-035): thread
+cluster env_extra+toolchain through `test_harness_compiles` / `measure_coverage`
+/ `_quick_file_coverage`. Confidence: HIGH.
+
+## #1 — vtable / type-erasure machinery — CONFIRMED, cause refined
+Hypothesis: tightly-coupled internals the model can't fill per-fn.
+Test: `construct_from_adhoc` body = `Self::construct(message, &ADHOC_VTABLE, …)`;
+error E0425 "cannot find value `ADHOC_VTABLE`"; another fn used `&VTABLE_ADHOC`;
+NO fn defines either and neither is surfaced.
+Verdict: CONFIRMED. Root cause is precise: the per-type vtable is SHARED DATA
+referenced by several `construct_*`/`new` fns, but per-fn filling gives it no
+owner — so no fn materialises it and they reference it under inconsistent names.
+`core::alloc::Global` / `allocate_zeroed` are the same shape (model materialises
+an allocation scheme from non-existent/unstable symbols).
+Solution (FR-036-compliant, NOT "use Box"): co-design the construct/vtable unit
+in ONE prompt so the shared vtable is defined once and referenced consistently;
+surface the `ErrorVTable` type + the sibling `construct_*` signatures + in-scope
+stable symbols so whatever scheme it picks uses real names. Confidence: HIGH on
+cause; MEDIUM that co-design alone suffices (some may be a genuine tests-only limit).
+
+## #2 — "API hallucination" — LARGELY REFUTED
+Hypothesis (original): model invents internal helpers like `construct_from_boxed`.
+Test: `construct_from_boxed` EXISTS in the skeleton AND is surfaced in the
+from_boxed prompt (all 5 `construct_*` shown). The from_boxed failure dump's real
+error was `unknown start of token: ` at src/lib.rs:212 — "Errors elsewhere",
+i.e. a DOC parse error, not the target. The retro nonetheless labelled it
+"hallucinated construct_from_boxed".
+Verdict: REFUTED as a standalone class. It was (a) a misattributed downstream
+error + (b) folds into the genuine vtable-symbol issue (#1). Real symbols exist
+and are surfaced. No "inject the API" fix needed — the API is already there.
+Confidence: HIGH.
+
+## #2' — Retro MISATTRIBUTION — NEW, CONFIRMED
+The retrospective blamed the target fn (`construct_from_boxed`) when the real
+error was downstream (doc parse error elsewhere). This wastes fix attempts and
+writes WRONG anti-hallucination notes. The fix loop ALREADY tags errors "in
+target file" vs "elsewhere" (it's in the dump header) — the retro ignores it.
+Fix: when a stalled fill's errors are ONLY "elsewhere/downstream", do NOT run a
+target retro and do NOT write a note; treat it as a downstream block (B3 already
+keeps non-regressing fills, so this should rarely revert). Confidence: HIGH.
+
+## #3 — E0277 trait-bound / unsized-T — PARTIALLY VALIDATED
+Test: context/new/msg dumps show genuine "Errors in target file: error[E0277]
+the trait bound …" and "size for values of type T" (unsized return). Real target
+errors, not cascade. Subcategory split (unsized-T vs missing Debug/Display vs
+where-clause) NOT yet measured per-dump.
+Verdict: GENUINE but UNDER-ANALYSED. Before proposing, do the same per-dump
+breakdown. Candidate levers (where-tightening; surface exact skeleton bounds)
+unverified. Confidence: LOW on solution; do the breakdown first.
+
+## #4 — E0284/E0282 type-inference — UNVERIFIED
+Could be genuine or downstream of #1. Not tested. Re-measure AFTER #1/#2' land,
+since cascade inflates these. Confidence: NONE yet.
+
+## #5 — doctest doc corruption — RESOLVED (verify)
+Test: live merged lib.rs:212 now has `//!` (clean); extractor binary contains
+`normalize_doc_attrs`; only 7/147 error-prompts had the corruption (transient,
+early in the run before/around the doc-norm taking effect).
+Verdict: FR-033 is working; doc corruption is being fixed. Action: confirm zero
+recurrence on the next clean run. Confidence: HIGH it's fixed.
+
+## Ranked, evidence-backed next steps
+1. P0 cluster-env (FR-035) — HIGH confidence, clear fix.
+2. #2' retro-misattribution suppression — HIGH confidence, small, stops wrong notes.
+3. #1 vtable co-design — HIGH on cause, the real reconstruction blocker.
+4. #3 — do the per-dump E0277 breakdown BEFORE proposing a fix.
+5. #4 — re-measure after 1–3 (likely shrinks via cascade removal).
+
+---
+
+# DESIGN — Behaviour hardening via mutation-kill (re-target task0c) — SPIKE-VALIDATED
+
+## Correction vs first draft
+NOT a new task0d. The mutation logic re-targets the EXISTING task0c generation
+objective from line-coverage to mutation-kill (coverage kept only as a cheap
+"line reachable" pre-filter — a mutant on an unexecuted line can't be killed).
+One generation phase, behaviour-driven. task0a/0b reframe "coverage strategy" as
+"behaviour/mutation strategy"; strip and task1 unchanged.
+
+## Spike results (2026-06-02, pristine anyhow /tmp/anyhow_mut, cargo-mutants 27.0.0)
+- S1 tractable count: 176 mutants total (error.rs 44, ptr.rs 37, ensure.rs 26…).
+  Verdict: tractable for an LLM loop. PASS.
+- S2 cost + survivors exist: fmt.rs 5 mutants in 12s (~2.4s/mutant → ~7 min for
+  all 176). 1 MISSED survivor = `> → >=` in `Indented::write_str` — a real
+  behavioural gap the author's OWN strong suite misses. Verdict: fast; survivors
+  are genuine missing assertions. PASS.
+- S3 black-box reachable: that survivor is on the public Debug path
+  (fmt.rs:34-39 formats the chain through `Indented`), so a `{:?}` string
+  assertion kills it without reading internals. Verdict: black-box discrimination
+  feasible. PASS.
+
+## Validated algorithm (re-targeted task0c, per cluster, pre-strip)
+1. Coverage pre-filter (cheap): keep current line-coverage pass as the floor
+   (ensures lines are reachable).
+2. Mutation pass: `cargo mutants` → SURVIVING mutants = behaviours the suite is
+   blind to. (deterministic; cargo-mutants in setup.sh.)
+3. For each survivor (black-box): LLM proposes public-API call sequences/inputs
+   (sees ONLY public signatures/types — never source, never the mutant diff);
+   run each on REAL vs MUTANT builds; an input whose observable result differs
+   (return/panic/Err/public-state) is discriminating.
+4. Emit a characterization test: call with that input, assert the REAL output.
+   It kills the mutant AND encodes the behaviour. gen_tests sibling, gated per
+   cluster (FR-032), survives strip.
+5. Loop until surviving non-equivalent mutants < threshold or input budget hit;
+   equivalent mutants (no discriminating input found) → skip.
+
+## Black-box guards (FR-036 / Hard Rule 11)
+LLM never sees source bodies or mutant diffs — only public API + observed
+outputs. Discrimination is by RUNNING, not reading. Assertions cover public
+observable behaviour only.
+
+## Spike-gated implementation sequence (build only after each spike passes)
+- M0 [DONE] spikes S1–S3 above → design feasible. PASS.
+- M1 wrapper: deterministic `cargo mutants --list/--json` runner per cluster
+  (env+toolchain) → survivor list. Spike: returns survivors for one cluster file.
+- M2 black-box discrimination harness: given a survivor + a candidate input,
+  build REAL vs MUTANT and compare observable output. Spike: kill the fmt.rs
+  `>→>=` survivor with a hand-written `{:?}` assertion (proves the loop's core).
+- M3 LLM input-proposal loop (public API only) feeding M2; emit passing test.
+  Spike: auto-kill ≥1 survivor end-to-end on one file.
+- M4 integrate as task0c objective (coverage floor + mutation-kill metric),
+  per-cluster, gen_tests emission. Spike: one full file reaches 0 non-equiv
+  survivors and the tests survive strip.
+
+## Remaining plan items — each spike-gated
+- P0 cluster-env (FR-035): spike = run `test_harness_compiles` with cluster env
+  on a no_core nightly-API test and confirm it's REJECTED. Then implement.
+- #2' retro-misattribution: spike = confirm dumps tag target-vs-elsewhere; then
+  suppress target retro when errors are elsewhere-only.
+- #1 vtable co-design: spike = one prompt filling the construct/vtable unit
+  together yields a self-consistent vtable symbol. Then implement.
+- #3 E0277 / #4 inference: do the per-dump breakdown spike BEFORE proposing.
+
+---
+
+# SPIKE LOG — 2026-06-02 (continued)
+
+## P0 spike → REFUTED my own root cause (good — caught before implementing)
+Hypothesis: task0c augmentation uses default env, so it accepted a nightly-API
+(`request_ref`) test for the no_core cluster.
+Spike: (a) `_cargo_env()` ALREADY appends cluster RUSTFLAGS (pipeline.py, the
+"Apply cluster-specific env overrides" block) — so the cfg DOES flow. (b)
+`request_ref` fails E0658 under STABLE regardless of cfg (tested in
+/tmp/anyhow_mut). The no_core cluster runs on stable → it would have REJECTED the
+test at augmentation, not accepted it.
+Verdict: REFUTED. Do NOT implement the "thread cluster env into augmentation"
+fix. The only env gap that remains is TOOLCHAIN (_cargo_env sets RUSTFLAGS but
+not +toolchain) — relevant to nightly, not this no_core symptom.
+Re-diagnosis needed: how does a nightly-API gen_test end up gated
+`#[cfg(any(anyhow_no_core_error,...))]`? Likely the gen_tests reattach/merge
+assigns the wrong cluster cfg to a test generated under the nightly cluster.
+Next spike (before any fix): find which cluster generated context.gen_tests_5
+and why its decl carries the no_core gate. UNTIL THEN P0 has no validated fix.
+
+## Methodology note
+Two of my plan's root causes (#2 API-hallucination, P0 cluster-env) were refuted
+by cheap spikes. Lesson reinforced: do not implement a plan item until its
+specific causal claim survives a spike. Confidence ordering for what to build
+next is therefore: items whose CAUSE is already spike-confirmed, namely —
+mutation-kill design (S1–S3 PASS) and #2' retro-misattribution (seen directly in
+the from_boxed dump). #1 vtable cause is confirmed; its FIX (co-design) still
+needs a spike. P0/#3/#4 need re-diagnosis spikes first.
+
+## P0 re-diagnosis spike (2026-06-02) — mechanism found, fix not yet pinned
+Finding: `request_ref` (nightly API) gen_tests appear in ALL THREE clusters'
+`.skeleton-filled` trees (shared, not per-cluster). Some carry an internal
+`#[cfg(error_generic_member_access)]` (e.g. error.gen_tests_8 — safe under
+stable/no_core); others (context.gen_tests_5, wrapper.gen_tests_5, error.gen_tests_9)
+do NOT, so they fail E0658 under stable/no_core. The merged decl then gates
+context.gen_tests_5 `#[cfg(anyhow_no_core_error)]` — the WRONG cluster (it needs
+nightly). So: a nightly-cluster-generated test using a cfg-gated API is shared to
+other clusters without being gated to the cfg it requires.
+Fix direction (needs one more spike to pin the assigning code): gate each
+gen_test to the cluster/cfg it was generated+compiled under, so it only compiles
+where its APIs exist. Candidate sites: gen_tests reattach (`_build_gen_tests_decl`
+/ cluster_cfg_attr) and the cross-cluster gen_tests merge. NOT the augmentation
+env (that hypothesis was refuted).
+
+## P0 — FULLY DIAGNOSED (spike-validated, both mechanisms)
+The per-cluster `.skeleton-filled` trees are each CORRECT: nightly's
+context.gen_tests_5 has `request_ref`, gated `error_generic_member_access`;
+no_core's has no request_ref, gated `anyhow_no_core_error`. The merged tree
+mixes them via TWO collapses:
+1. SAVE collapse: `saved_gen_blocks` (pipeline.py:23386) is keyed by `rel` only
+   and reads siblings from ONE tree → only one cluster's context.gen_tests_5
+   CONTENT survives (nightly's request_ref).
+2. MERGE-decl collapse: the per-cluster `mod gen_tests_5` DECLS (each gated to
+   its cluster) are merged as same-key `Item::Mod` and collapse to ONE gate
+   (no_core). The post-merge reattach (23544) passes NO cfg_attr and skips if a
+   decl already exists, so the merge's (wrong) gate stands.
+Result: nightly `request_ref` CONTENT under a no_core GATE → E0658 under no_core.
+
+### Fix spec (the change to implement)
+Make gen_tests per-cluster end-to-end: collect them per cluster from
+`.skeleton-filled/{cluster}/src/`, give each a cluster-unique sibling name (so
+content can't collapse), and reattach each gated by THAT cluster's cfg
+(`_cluster_cfg_attr`). Then a nightly test is gated nightly and excluded from
+stable/no_core; no content↔gate mismatch. Touch points: the save (key by
+(rel,cluster)), the reattach (per-cluster name+gate), and exclude gen_tests from
+the decl-merge collapse (they're now distinct names). FR-038.
+Spike before building: confirm per-cluster sibling names + per-cluster gates
+produce a merged tree where each cluster compiles its own gen_tests only.

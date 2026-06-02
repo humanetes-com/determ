@@ -162,6 +162,20 @@ else
     fi
 fi
 
+# ── 6d. cargo-mutants (mutation testing — behaviour-hardening spike/phase) ────
+echo ""
+echo "-- cargo-mutants (mutation testing) --"
+if command -v cargo-mutants &>/dev/null; then
+    skip "cargo-mutants already installed"
+else
+    info "Installing cargo-mutants..."
+    if cargo install --locked cargo-mutants 2>&1 | tail -2; then
+        ok "cargo-mutants installed"
+    else
+        echo "[warn] cargo-mutants failed to install — behaviour-hardening spike unavailable"
+    fi
+fi
+
 # ── 6c. agg (renders an asciinema cast to gif/mp4 for screencasts) ────────────
 echo ""
 echo "-- agg (optional, renders asciinema .cast → gif) --"

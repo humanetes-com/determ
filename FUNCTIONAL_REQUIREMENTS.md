@@ -864,3 +864,81 @@ in one prompt so the model's own symbols stay self-consistent
 (2) surface the available in-scope + stable symbol inventory so it stops
 inventing non-existent paths; (3) let compile errors + the model's notes correct
 symbol locations. Whatever scheme it then converges on is its own choice.
+
+## FR-037 — No target retrospective for downstream-only failures
+
+**Decision:** `_phase_c_retrospective` returns immediately
+(`signal=downstream_only`, no LLM call) when the focused error excerpt has
+errors ONLY "elsewhere in the crate" and none "in target file".
+
+**Why:** When a fn compiles fine but the crate is broken by ANOTHER fn (or a doc
+parse error), the fix loop still ran a retrospective on the innocent target —
+which misattributed the cause (e.g. blaming `construct_from_boxed`, which exists
+and is surfaced, for a `lib.rs` doc parse error) and wrote a WRONG
+anti-hallucination note that then misleads future attempts. The fix-loop already
+classifies errors target-vs-elsewhere (`_focus_cargo_errors`); the retro just
+ignored it. Found via the night's scientific pass: the cited "API hallucination"
+failures were largely this misattribution, not real invention. B3 (FR-029)
+already keeps non-regressing fills, so an innocent fn is rarely reverted anyway —
+this stops the wrong notes.
+
+## FR-038 — gen_tests are reattached per-cluster (content+gate never separate)
+
+**Decision:** The post-merge gen_tests reattach sources tests PER-CLUSTER from
+`.skeleton-filled/{cluster}/src/`. Tests identical across clusters are emitted
+once, ungated. Tests that diverge across clusters are emitted as one gated
+sibling per cluster, with a cluster-unique filename (`foo.gen_tests_N_{cluster}.rs`,
+mod `gen_tests_N_{cluster}`), gated by that cluster's `_cluster_cfg_attr`.
+
+**Why:** The old reattach keyed `saved_gen_blocks` by file path and read from a
+single collapsed tree, so when clusters had a same-named gen_test with divergent
+content (e.g. nightly's `request_ref` vs no_core's), one CONTENT won while the
+cross-cluster merge set a different GATE — yielding nightly `request_ref` content
+under a no_core gate → E0658, breaking the no_core test binary. Sourcing
+per-cluster keeps each test's content and its required cfg together; a nightly
+test is gated nightly and excluded from stable/no_core. Validated via the night's
+spike (nightly tree gates nightly, no_core tree gates no_core — each correct
+alone; only the merge mixed them).
+
+## FR-039 — Mutation-kill behaviour hardening in task0c (M1–M4)
+
+**Decision:** task0c's strength metric is augmented from line coverage to
+mutation-kill. Pipeline: M1 `_mutation_survivors` (cargo-mutants, per-cluster
+toolchain/env → surviving mutants); M2 `_mutation_kill_check` (attach a
+candidate test, run the real suite, re-run mutants, confirm the survivor moved
+missed→caught, restore the file); M3 `_mutation_harden_file` (LLM proposes
+BLACK-BOX behaviour tests from the PUBLIC API only — never source or mutant
+diffs (FR-036) — kept only if they compile, pass, and lower the survivor count);
+M4 `_task0c_mutation_pass` persists kept tests as per-cluster gen_tests siblings
+(FR-038). Coverage stays as the cheap reachability floor.
+
+**Why:** coverage-driven tests are one-liners that execute a line without
+asserting its effect, so post-strip reconstruction is under-constrained.
+Mutation-kill defines strength as "catches a behaviour change," directly
+rejecting no-assert tests. Spike-validated on anyhow (cargo-mutants: 176
+mutants, ~2.4s each; real survivors like `>→>=` in `Indented::write_str`
+reachable via the public Debug path).
+
+**Opt-in:** gated by `TASK0C_MUTATION_HARDEN=1` (default off) until validated on
+a full run; M1/M2 are spike-validated, M3/M4 need a real run. Dep: cargo-mutants
+(setup.sh).
+
+## FR-040 — Undefined-symbol guidance for the vtable / shared-machinery class
+
+**Decision:** A fix-loop gotcha (auto-injected by `_gotchas_for_error` on
+`E0425`/`E0433` / "cannot find value|function" / "in this scope") tells the
+model: you fill fn BODIES only — you may NOT add a new top-level item (`static`,
+`const`, free fn, `use`) — so a referenced-but-undefined module-level symbol can
+never resolve. Build what you need INLINE from in-scope items; if several fns
+need the same value, build it the same way in each (there is nowhere to define a
+shared external name); do not guess paths like `core::alloc::Global` — use an
+in-scope item (e.g. `Box`). A detector `_coupled_cofill_groups` identifies the
+situation (2+ fns in a file sharing "cannot find" errors).
+
+**Why:** anyhow's type-erasure (`Own`/`Ref`/`ErrorVTable`) led the model, filling
+`construct_*`/`new` per-fn, to invent a shared vtable static under inconsistent
+names (`ADHOC_VTABLE` vs `VTABLE_ADHOC`) that no fill could define — E0425 across
+the construction machinery. The real constraint is structural: body-only fills
+cannot introduce the top-level static, so the value must be built inline. This is
+source-free (FR-036): it teaches the constraint and points at in-scope/stable
+symbols, never anyhow's actual implementation or "use Box because anyhow does".

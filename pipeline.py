@@ -5916,6 +5916,13 @@ def _condense_doc_attrs(text: str) -> str:
     return ''.join(out)
 
 
+# Below this file-view size, keep doc comments in FULL (their usage examples are
+# concrete guidance). Above it, condense to one-line intents to protect budget.
+# ~1/6 of a single call → only the few genuinely huge files (e.g. error.rs) get
+# condensed; the many small/medium files keep their examples.
+_DOC_KEEP_FULL_LIMIT = SINGLE_CALL_CHAR_LIMIT // 6
+
+
 def _annotate_file_view(file_text: str, target_fn: str) -> str:
     """Return a view of file_text where every unimplemented stub is prefixed
     with a comment clarifying its status. The TARGET fn (the one being filled
@@ -5923,11 +5930,18 @@ def _annotate_file_view(file_text: str, target_fn: str) -> str:
     fns are "to-be-filled later" vs the immediate target, instead of treating
     the stubs as permanent missing pieces it must work around.
 
-    Doc comments are CONDENSED to a one-line intent (FR-026) rather than
-    dumped (token blowup) or erased (intent lost). Non-doc crate attrs are
+    Doc comments are kept in FULL when the view fits comfortably in budget —
+    the crate's own usage examples are concrete WRONG/RIGHT guidance the model
+    learns from, so we never strip them from a small prompt (FR-026 amended).
+    Only when the file view is large enough to threaten the context budget do
+    we CONDENSE docs to a one-line intent. Non-doc crate attrs are always
     dropped. PROMPT view only — the on-disk file is untouched.
     """
-    file_text = _condense_doc_attrs(file_text)
+    # Keep examples when there's room; condense only big files.
+    if len(file_text) > _DOC_KEEP_FULL_LIMIT:
+        file_text = _condense_doc_attrs(file_text)
+    else:
+        file_text = _strip_crate_attrs(file_text)   # drop only #![...] crate attrs
     out: list[str] = []
     i = 0
     last_fn_end = 0
@@ -6787,6 +6801,29 @@ def _extract_self_note(
 # detail block (injected only when the current cargo error trips the
 # gotcha's trigger keyword/code, via _gotchas_for_error).
 _RUST_GOTCHAS: list[dict] = [
+    {
+        # FR-040: the vtable / shared-machinery class. You fill fn BODIES only —
+        # you cannot introduce a new top-level item — so a referenced-but-
+        # undefined module-level symbol can never resolve. Build it inline.
+        "id": "undefined_symbol_build_inline",
+        "summary": "`cannot find value/function X` → X is undefined and you CANNOT add a new top-level item. Build what you need INLINE from in-scope items; never reference an undefined module-level const/static/helper.",
+        "triggers": {"E0425", "E0433", "cannot find value", "cannot find function", "in this scope"},
+        "detail": (
+            "You are filling a fn BODY. You may NOT add new top-level items\n"
+            "(no new `static`, `const`, free fn, or `use`), so referencing a\n"
+            "module-level symbol that doesn't already exist can never compile.\n"
+            "  WRONG (invents an external constant that nothing defines):\n"
+            "    unsafe { Self::construct(value, &ADHOC_VTABLE, backtrace) }   // E0425\n"
+            "  RIGHT (construct the value you need INLINE, from in-scope items):\n"
+            "    let vtable = &SomeInScopeType { /* fields from items shown to you */ };\n"
+            "    unsafe { Self::construct(value, vtable, backtrace) }\n"
+            "Use ONLY names shown in TYPES_IN_SCOPE / the impl + its siblings. If\n"
+            "several fns need the same value, build it the SAME way in each (do\n"
+            "not invent a shared external name — there is no place to define it).\n"
+            "Do not guess a path like `core::alloc::Global`; if an allocator or\n"
+            "helper isn't in scope, use one that is (e.g. `Box`)."
+        ),
+    },
     {
         # Archetype map (concrete generic examples; NOT crate source). Built
         # from the dominant fix-loop errors. Each shows WRONG → RIGHT so the
@@ -8728,6 +8765,14 @@ def _phase_c_retrospective(
     """
     if not last_body and not error_excerpt:
         return {"category": "", "guidance": "", "signal": "no_data"}
+    # #2' (FR-037): if EVERY error is downstream (in other files, none in the
+    # target file), this fn is probably fine and the crate is broken elsewhere.
+    # Running a target retro here misattributes the cause and writes a WRONG
+    # anti-hallucination note (e.g. blaming `construct_from_boxed` for a doc
+    # parse error in lib.rs). Skip it; let the blocking fn's own loop fix it.
+    _exc = error_excerpt or ""
+    if "Errors elsewhere in the crate" in _exc and "Errors in target file" not in _exc:
+        return {"category": "DOWNSTREAM", "guidance": "", "signal": "downstream_only"}
     prior_section = (
         f"\nPrior retrospective for this fn (you said this LAST time it failed; "
         f"if the same approach still failed, escalate to GENUINELY_HARD):\n"
@@ -11521,27 +11566,41 @@ def _build_dispatch_family_section(family: dict) -> str:
     macro_text = "\n\n".join(defs)
     if len(macro_text) > _cap:
         macro_text = macro_text[:_cap] + "\n/* … macro truncated … */"
-    _chain_line = ""
-    if chained and tags:
-        _chain_line = (
-            f"The macro then CHAINS `.{chained}(...)` onto that tag — those "
-            f"methods live on the inherent impls of the tag types ({tags}), "
-            "NOT on a trait. They do the REAL work (building the result), so "
-            "they are part of this family: design the tag impls TOGETHER with "
-            f"the `{method}` returns so the full `.{method}().{chained}(...)` "
-            "path is consistent. "
-        )
+    tag_list = family.get("return_types", [])
+    trait_list = family.get("traits", [])
+    # Concrete WRONG→RIGHT examples (generic placeholder names, NOT crate
+    # source) — the model acts on examples, not on "autoref-specialization"
+    # jargon. Two examples so the pattern generalises.
+    ex = (
+        "Each trait's `" + (method or "kind") + "` returns ITS OWN distinct tag; "
+        "the macro chains a builder on that tag. Get any one tag/return wrong and "
+        "the macro silently resolves to the wrong branch everywhere.\n"
+        "  WRONG (two impls return the SAME tag → dispatch collapses):\n"
+        "    impl KindA for A { fn kind(self) -> TagA { TagA } }\n"
+        "    impl KindB for B { fn kind(self) -> TagA { TagA } }   // should be TagB\n"
+        "  RIGHT (each returns its OWN tag; builders match per tag):\n"
+        "    impl KindA for A { fn kind(self) -> TagA { TagA } }\n"
+        "    impl KindB for B { fn kind(self) -> TagB { TagB } }\n"
+        "    impl TagA { fn build(self, x: A) -> Out { /* A-specific */ } }\n"
+        "    impl TagB { fn build(self, x: B) -> Out { /* B-specific */ } }\n"
+        "  WRONG (inventing one shared name across impls — there is no such item):\n"
+        "    fn kind(self) -> Tag { SHARED_TAG }                   // E0425, undefined\n"
+        "  RIGHT (return the per-impl tag value directly):\n"
+        "    fn kind(self) -> TagA { TagA }\n"
+    )
+    _map = ""
+    if trait_list and tag_list and len(trait_list) == len(tag_list):
+        _map = ("In THIS family map each trait to its own tag: "
+                + ", ".join(f"`{t}`→`{g}`" for t, g in zip(trait_list, tag_list))
+                + (f", then `.{chained}(...)` builds the result on that tag. "
+                   if chained else ". "))
     return (
         "\n<DISPATCH_FAMILY>\n"
-        f"These traits form an AUTOREF-SPECIALIZATION family: {traits}. "
-        f"Each declares `{method}` returning a DIFFERENT tag type ({tags}), and "
-        f"the macro(s) `{macros}` dispatch on it (`x.{method}()....`). Method "
-        "resolution (autoref + the blanket-impl bounds) selects which trait "
-        f"applies per argument type. {_chain_line}You MUST design every family "
-        "member consistently so the macro expansion resolves to the correct "
-        "tag for each input — getting one bound, tag, or chained body wrong "
-        "silently breaks every call site. The dispatching macro (the "
-        "behavioural spec):\n```rust\n"
+        f"`{traits}` are dispatched together by macro(s) `{macros}` "
+        f"(`x.{method}()" + (f".{chained}()" if chained else "") + "...`) — fill "
+        "them in this one response, consistently.\n"
+        f"{ex}{_map}"
+        "The dispatching macro (the behaviour these must satisfy):\n```rust\n"
         f"{macro_text}\n```\n</DISPATCH_FAMILY>\n"
     )
 
@@ -12414,6 +12473,60 @@ def _frontier_from_diags(
             continue
         frontier.setdefault((rel, rec["fn_name"]), set()).add("<compile>")
     return frontier
+
+
+# "cannot find …" diagnostics — an undefined value/fn/type/macro referenced but
+# never defined. When several fns in one file hit these, they likely share
+# internal machinery (a constructor, a const, a helper) that no single per-fn
+# fill establishes — the vtable class (FR-040).
+_CANNOT_FIND_CODES = {"E0425", "E0433", "E0412", "E0531", "E0405", "E0422", "E0423"}
+
+
+def _coupled_cofill_groups(
+    diagnostics: list[dict], src_dir: Path,
+) -> list[dict]:
+    """#1 (FR-040): detect co-fill groups — 2+ fns in the SAME file that fail
+    with "cannot find" errors (undefined symbols). Filled per-fn they each
+    invent the shared item under inconsistent names (`ADHOC_VTABLE` vs
+    `VTABLE_ADHOC`); designed together the model can define it ONCE and
+    reference it consistently. Returns [{file, fns:[...], symbols:[...]}], one
+    per file with >= 2 such fns. Symbols are extracted from the diagnostic
+    message between backticks (no regex)."""
+    recs_by_file: dict[str, list[dict]] = {}
+    text_cache: dict[str, str] = {}
+    fn_syms: dict[str, dict[str, set]] = {}
+    for d in diagnostics or []:
+        if (d.get("code") or "") not in _CANNOT_FIND_CODES:
+            continue
+        rel = d.get("file") or ""
+        line_no = int(d.get("line") or 0)
+        msg = d.get("message") or ""
+        if not rel or line_no < 1:
+            continue
+        sym = msg.split("`")[1] if msg.count("`") >= 2 else ""
+        if rel not in recs_by_file:
+            _all = _enumerate_fns_via_extractor(src_dir) or []
+            recs_by_file[rel] = [r for r in _all if r.get("file") == rel]
+        recs = recs_by_file[rel]
+        if not recs:
+            continue
+        if rel not in text_cache:
+            try:
+                text_cache[rel] = (src_dir / rel).read_text(encoding="utf-8")
+            except Exception:
+                continue
+        rec = _line_to_fn_record(text_cache[rel], line_no, recs)
+        if rec is None:
+            continue
+        fn_syms.setdefault(rel, {}).setdefault(rec["fn_name"], set())
+        if sym:
+            fn_syms[rel][rec["fn_name"]].add(sym)
+    groups: list[dict] = []
+    for rel, fns in fn_syms.items():
+        if len(fns) >= 2:
+            syms = sorted({s for ss in fns.values() for s in ss})
+            groups.append({"file": rel, "fns": sorted(fns), "symbols": syms})
+    return groups
 
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
@@ -18848,6 +18961,214 @@ def _run_tarpaulin(project_dir: Path, module_name: str) -> tuple[float, list[dic
         return 0.0, [], 0, 0
 
 
+def _mutation_survivors(
+    project_dir: Path,
+    cluster: "BuildCluster | None" = None,
+    file_rel: "str | None" = None,
+    timeout: int = 1200,
+) -> "list[str] | None":
+    """Run cargo-mutants and return the SURVIVING ("missed") mutants — the
+    behaviour changes the current test suite is BLIND to (M1, behaviour
+    hardening, FR-039). Each entry is the mutant description, e.g.
+    `src/fmt.rs:87:25: replace > with >= in <impl Write for Indented>::write_str`.
+
+    Uses the cluster's toolchain (`+nightly`) and env so survivors reflect that
+    cluster's real build. Returns None when cargo-mutants is unavailable or no
+    report was produced. cargo-mutants exits non-zero when mutants survive, so
+    the report (mutants.out/missed.txt) is read regardless of exit code.
+    """
+    if not (Path.home() / ".cargo" / "bin" / "cargo-mutants").exists() \
+            and shutil.which("cargo-mutants") is None:
+        return None
+    cmd = ["cargo"]
+    tc = getattr(cluster, "toolchain", None) if cluster is not None else None
+    if tc:
+        cmd.append(f"+{tc}")
+    cmd += ["mutants", "--no-shuffle"]
+    if file_rel:
+        cmd += ["--file", file_rel]
+    try:
+        subprocess.run(cmd, cwd=project_dir, capture_output=True, text=True,
+                       timeout=timeout, env=_cargo_env())
+    except Exception:
+        return None
+    missed = project_dir / "mutants.out" / "missed.txt"
+    if not missed.exists():
+        return None
+    try:
+        return [ln.strip() for ln in missed.read_text(encoding="utf-8").splitlines()
+                if ln.strip()]
+    except OSError:
+        return None
+
+
+def _mutation_kill_check(
+    project_dir: Path,
+    cluster: "BuildCluster | None",
+    survivor: str,
+    test_code: str,
+    target_rel: str,
+    timeout: int = 900,
+) -> "tuple[bool, bool]":
+    """M2 discrimination harness. Returns (real_passes, kills_survivor).
+
+    Temporarily attaches `test_code` as a test module to `target_rel`, runs the
+    real suite (the test MUST pass on the correct code), then re-runs
+    cargo-mutants scoped to the survivor's file and checks the survivor moved
+    missed→caught. Always restores the file. Black-box: operates on test code
+    and observable behaviour only — never the mutant diff (FR-036).
+    """
+    surv_file = survivor.split(":", 1)[0] if survivor else None
+    tgt = project_dir / target_rel
+    if not tgt.exists():
+        return (False, False)
+    sib = tgt.with_name(f"{tgt.stem}.mut_candidate.rs")
+    decl = f'\n#[cfg(test)]\n#[allow(clippy::all, unused)]\n#[path = "{sib.name}"]\nmod mut_candidate;\n'
+    orig = tgt.read_text(encoding="utf-8")
+    tc = getattr(cluster, "toolchain", None) if cluster is not None else None
+    try:
+        sib.write_text(test_code, encoding="utf-8")
+        tgt.write_text(orig.rstrip() + decl, encoding="utf-8")
+        cmd = ["cargo"] + ([f"+{tc}"] if tc else []) + ["test", "--quiet"]
+        r = subprocess.run(cmd, cwd=project_dir, capture_output=True, text=True,
+                           timeout=timeout, env=_cargo_env())
+        if r.returncode != 0:
+            return (False, False)            # invalid test (won't compile/pass)
+        if not surv_file:
+            return (True, False)
+        remaining = _mutation_survivors(project_dir, cluster, file_rel=surv_file,
+                                        timeout=timeout)
+        killed = remaining is not None and survivor not in remaining
+        return (True, killed)
+    except Exception:
+        return (False, False)
+    finally:
+        tgt.write_text(orig, encoding="utf-8")
+        try:
+            if sib.exists():
+                sib.unlink()
+        except OSError:
+            pass
+
+
+def _mutation_harden_file(
+    project_dir: Path,
+    module_name: str,
+    cluster: "BuildCluster | None",
+    file_rel: str,
+    max_rounds: int = 3,
+    timeout: int = 900,
+) -> str:
+    """M3: generate BLACK-BOX behaviour tests (public API only, FR-036) that
+    reduce the surviving mutants for `file_rel`. The LLM never sees source
+    bodies or mutant diffs — only the crate's public API surface. Tests are
+    accepted only when they (a) compile + pass on the correct code and (b)
+    actually lower the surviving-mutant count. Returns the accumulated kept
+    test code ("" if nothing helped or no survivors).
+    """
+    baseline = _mutation_survivors(project_dir, cluster, file_rel, timeout)
+    if not baseline:
+        return ""
+    tgt = project_dir / file_rel
+    if not tgt.exists():
+        return ""
+    api = (load_api_surface(project_dir, module_name) or "")[: SINGLE_CALL_CHAR_LIMIT // 3]
+    sib = tgt.with_name(f"{tgt.stem}.mut_hardening.rs")
+    decl = (f'\n#[cfg(test)]\n#[allow(clippy::all, unused)]\n'
+            f'#[path = "{sib.name}"]\nmod mut_hardening;\n')
+    orig = tgt.read_text(encoding="utf-8")
+    tc = getattr(cluster, "toolchain", None) if cluster is not None else None
+    kept: list[str] = []
+    cur = set(baseline)
+    try:
+        for _r in range(max_rounds):
+            if not cur:
+                break
+            prompt = (
+                "Write Rust `#[test]` functions that exercise and ASSERT the exact "
+                "observable behaviour of this crate's PUBLIC API — return values, "
+                "panics/Err, and precise formatted output (Display/Debug). Cover "
+                "edge cases and boundaries; pin exact strings/values with "
+                "`assert_eq!`. Use ONLY the public API below — do not reference "
+                "internal items. The current suite still misses subtle behaviour "
+                "changes; make your assertions tight enough to catch them.\n"
+                f'<PUBLIC_API crate="{module_name}">\n{api}\n</PUBLIC_API>\n'
+                "Output ONLY the test code (no prose, no explanation)."
+            )
+            try:
+                resp = ask(prompt, model=_TASK0C_MODEL)
+            except Exception:
+                break
+            code = _strip_markdown_fences(resp or "").strip()
+            if not code:
+                continue
+            sib.write_text("\n\n".join(kept + [code]), encoding="utf-8")
+            tgt.write_text(orig.rstrip() + decl, encoding="utf-8")
+            cmd = ["cargo"] + ([f"+{tc}"] if tc else []) + ["test", "--quiet"]
+            try:
+                rr = subprocess.run(cmd, cwd=project_dir, capture_output=True,
+                                    text=True, timeout=timeout, env=_cargo_env())
+            except Exception:
+                continue
+            if rr.returncode != 0:
+                continue   # invalid tests — discard this round
+            remaining = _mutation_survivors(project_dir, cluster, file_rel, timeout)
+            if remaining is None:
+                continue
+            if len(remaining) < len(cur):
+                kept.append(code)
+                cur = set(remaining)
+                _log(f"  [mut-harden] {file_rel}: survivors "
+                     f"{len(baseline)}→{len(cur)} (kept round {_r + 1})")
+        return "\n\n".join(kept)
+    finally:
+        tgt.write_text(orig, encoding="utf-8")
+        try:
+            if sib.exists():
+                sib.unlink()
+        except OSError:
+            pass
+
+
+def _task0c_mutation_pass(
+    project_dir: Path,
+    module_name: str,
+    cluster: "BuildCluster | None",
+    rel_files: "list[str]",
+) -> int:
+    """M4: behaviour-hardening pass over a cluster's source files. For each file
+    with surviving mutants, generate black-box tests (M3) and persist the kept
+    ones as a gen_tests sibling so they survive strip and reattach per-cluster
+    (FR-038). Opt-in via TASK0C_MUTATION_HARDEN=1 (mutation-kill as the strength
+    metric on top of coverage). Returns the number of files hardened.
+    """
+    if os.getenv("TASK0C_MUTATION_HARDEN", "0").strip() in ("", "0", "false"):
+        return 0
+    hardened = 0
+    for rel in rel_files:
+        src = project_dir / rel
+        if not src.exists():
+            continue
+        try:
+            code = _mutation_harden_file(project_dir, module_name, cluster, rel)
+        except Exception as e:
+            _log(f"  [mut-harden] {rel}: skipped ({e})")
+            continue
+        if not code.strip():
+            continue
+        # persist as the next gen_tests sibling of this file
+        existing = _gen_tests_siblings(src)
+        n = (max((k for k, _ in existing), default=0)) + 1
+        sib = _gen_tests_path(src, n)
+        sib.write_text(
+            f"// mutation-hardening tests (M4) — behaviour, not coverage\n"
+            f"#[cfg(test)]\nmod gen_tests_{n} {{\n    use super::*;\n{code}\n}}\n",
+            encoding="utf-8")
+        hardened += 1
+        _log(f"  [mut-harden] {rel}: persisted hardening tests as gen_tests_{n}")
+    return hardened
+
+
 def _quick_file_coverage(project_dir: Path, module_name: str, rel_path: str) -> tuple[int, int] | None:
     """Per-file coverage snapshot. Delegates to the active CoverageProvider."""
     return _coverage_provider.measure_file(project_dir, module_name, rel_path)
@@ -19407,7 +19728,7 @@ def _cluster_cfg_attr(cluster) -> str:
     return "all(" + ", ".join(terms) + ")"
 
 
-def _build_gen_tests_decl(sibling_name: str, n: int, allow_line: str,
+def _build_gen_tests_decl(sibling_name: str, n: "int | str", allow_line: str,
                            cluster_cfg_attr: str = "") -> str:
     """Build the one-line-ish `#[cfg(test)] ... mod gen_tests_N;` declaration.
 
@@ -21891,6 +22212,22 @@ project-specific import paths, type construction patterns, and hard constraints.
             _log(f"  [{module_name}] Graceful stop requested — attempt {attempt} complete. Exiting.")
             sys.exit(0)
 
+    # M4 (FR-039): behaviour-hardening pass — mutation-kill as the strength
+    # metric on top of line coverage. Opt-in via TASK0C_MUTATION_HARDEN; a
+    # no-op (returns 0) otherwise, so the default flow is unchanged.
+    try:
+        _rel_files = [
+            str(p.relative_to(project_dir))
+            for p in sorted(module_dir.rglob("*.rs"))
+            if not re.search(r'\.gen_tests_\d+\.rs$', p.name)
+            and str(p.relative_to(project_dir)) not in existing_test_files
+        ]
+        _hard = _task0c_mutation_pass(project_dir, module_name, _current_cluster, _rel_files)
+        if _hard:
+            _log(f"  [{module_name}/{_cluster_label}] mutation-hardened {_hard} file(s).")
+    except Exception as _me:
+        _log(f"  [{module_name}/{_cluster_label}] mutation-harden pass skipped ({_me}).")
+
     _log(f"  [{module_name}/{_cluster_label}] Finished augmentation: {coverage:.1f}% coverage after {attempt} attempt(s).")
     return coverage, covered_lines, _at_ceiling
 
@@ -23517,10 +23854,79 @@ This is a Rust procedural macro crate. Strict rules apply:
                     # The previous guard ("skip if any sibling already on disk")
                     # was a no-op once strip started preserving sibling files,
                     # leaving them orphaned by the regenerated source.
-                    if saved_gen_blocks:
+                    _reattached: list[tuple[Path, Path, int]] = []
+                    # FR-038: source gen_tests PER-CLUSTER so a test's content and
+                    # its cfg gate never separate. A gen_test generated under one
+                    # cluster (e.g. nightly's `request_ref`) must be gated to THAT
+                    # cluster and excluded from others. When clusters share an
+                    # identical test, emit it once ungated; when they diverge, emit
+                    # one gated sibling per cluster with a cluster-unique name (so
+                    # neither the file content nor the decl collapses in the merge).
+                    _filled_root = project_dir / ".skeleton-filled"
+                    _per_cluster_filled = [
+                        c for c in _clusters
+                        if (_filled_root / c.name).exists()
+                    ]
+                    if _per_cluster_filled:
                         _reattach_allow_line, _ = _derive_gentest_prelude(project_dir)
-                        # Track reattachments so we can validate them in batch.
-                        _reattached: list[tuple[Path, Path, int]] = []
+                        # (rel, n) -> {cluster_name: body}
+                        _gt: dict[tuple[str, int], dict[str, str]] = {}
+                        _cl_by_name = {c.name: c for c in _per_cluster_filled}
+                        for _c in _per_cluster_filled:
+                            _cdir = _filled_root / _c.name
+                            for _sf in sorted(_cdir.rglob("*.rs")):
+                                if re.search(r'\.gen_tests_\d+\.rs$', _sf.name):
+                                    continue
+                                _rel = str(_sf.relative_to(_cdir))
+                                if _rel in existing_test_files:
+                                    continue
+                                for _n, _p in _gen_tests_siblings(_sf):
+                                    try:
+                                        _gt.setdefault((_rel, _n), {})[_c.name] = \
+                                            _p.read_text(encoding="utf-8")
+                                    except OSError:
+                                        continue
+                        _appends: dict[str, list[str]] = {}
+                        for (_rel, _n), _bodies in sorted(_gt.items()):
+                            _tgt = project_dir / _rel
+                            if not _tgt.exists():
+                                continue
+                            if len(set(_bodies.values())) == 1:
+                                # identical across clusters → one ungated sibling
+                                _body = next(iter(_bodies.values()))
+                                _sib = _gen_tests_path(_tgt, _n)
+                                _sib.write_text(_body, encoding="utf-8")
+                                _appends.setdefault(_rel, []).append(
+                                    _build_gen_tests_decl(_sib.name, _n, _reattach_allow_line))
+                                _reattached.append((_tgt, _sib, _n))
+                            else:
+                                # divergent → per-cluster gated siblings, unique names
+                                for _cname, _body in sorted(_bodies.items()):
+                                    _gate = _cluster_cfg_attr(_cl_by_name.get(_cname))
+                                    _sib = _tgt.with_name(
+                                        f"{_tgt.stem}.gen_tests_{_n}_{_cname}.rs")
+                                    _sib.write_text(_body, encoding="utf-8")
+                                    _appends.setdefault(_rel, []).append(
+                                        _build_gen_tests_decl(
+                                            _sib.name, f"{_n}_{_cname}",
+                                            _reattach_allow_line, _gate))
+                                    _reattached.append((_tgt, _sib, _n))
+                        for _rel, _decls in _appends.items():
+                            _tgt = project_dir / _rel
+                            _txt = _tgt.read_text(encoding="utf-8").rstrip()
+                            _added = 0
+                            for _d in _decls:
+                                _path_line = _d.split("#[path = ")[-1].split("]")[0]
+                                if _path_line not in _txt:
+                                    _txt += _d
+                                    _added += 1
+                            if _added:
+                                _tgt.write_text(_txt, encoding="utf-8")
+                                _log(f"  Reattached {_added} per-cluster gen_tests "
+                                     f"decl(s) to {_rel}.")
+                    elif saved_gen_blocks:
+                        # Non-cluster fallback (single tree): original behaviour.
+                        _reattach_allow_line, _ = _derive_gentest_prelude(project_dir)
                         for rel, blocks in saved_gen_blocks.items():
                             src_path = project_dir / rel
                             if not src_path.exists():
@@ -23541,6 +23947,7 @@ This is a Rust procedural macro crate. Strict rules apply:
                             if added_decls > 0:
                                 src_path.write_text(new_text, encoding="utf-8")
                                 _log(f"  Reattached {added_decls} gen_tests decl(s) to {rel}.")
+                    if _reattached:
 
                         # Validate reattached gen_tests against the regenerated
                         # source. Compile failures are signal that the
