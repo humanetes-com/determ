@@ -1885,7 +1885,14 @@ def test_domain_enums_and_model_caps() -> None:
     # Slice 2: module-level knobs are wired to the enum types, not bare strings.
     import pipeline
     assert isinstance(pipeline.COVERAGE_BACKEND, CoverageBackend)
-    print("  OK  pipeline_core domain enums + model_caps (slice 1+2)")
+
+    # Slice 3: one typed Settings singleton is the source of truth for these knobs.
+    from pipeline_core.settings import Settings
+    assert isinstance(pipeline.SETTINGS, Settings)
+    assert pipeline.COVERAGE_BACKEND is pipeline.SETTINGS.coverage_backend
+    assert isinstance(pipeline.SETTINGS.backend, Backend)
+    assert isinstance(pipeline.SETTINGS.phase_c_fill_unit, FillUnit)
+    print("  OK  pipeline_core domain enums + model_caps + Settings (slice 1+2+3)")
 
 
 # ─── Driver ─────────────────────────────────────────────────────────────────

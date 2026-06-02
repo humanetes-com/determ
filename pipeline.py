@@ -44,6 +44,7 @@ from pipeline_core.domain.model_caps import (
     model_tier as _model_tier_pure,
     model_context_chars as _model_context_chars_pure,
 )
+from pipeline_core.settings import Settings
 
 _mi_mtime: float = os.path.getmtime(_mi.__file__)
 
@@ -62,6 +63,11 @@ def _hot_reload_mi() -> None:
         _log(f"  [hot-reload] reload failed: {e}")
 
 load_dotenv(Path(__file__).parent / ".env")
+
+# Composition root: resolve all env-driven knobs once into one typed object.
+# Everything downstream reads SETTINGS rather than os.environ for these values.
+# (Per-task numeric tuning knobs still live as their own getenv reads for now.)
+SETTINGS = Settings.from_env()
 
 # Per-task model overrides — each task uses the most appropriate model.
 # Falls back to MODEL (the global default) if a specific override is not set.
@@ -195,7 +201,8 @@ MAX_RETRIES = 3
 def _model_context_chars() -> int:
     """Return the safe content budget in chars for one model call.
 
-    Thin shim: resolves env → pipeline_core.domain.model_caps.model_context_chars.
+    Thin shim: resolves env live → pipeline_core.domain.model_caps.model_context_chars.
+    Reads env per-call (not SETTINGS) so late env changes recompute the budget.
     """
     backend = Backend.coerce(os.getenv("BACKEND"), Backend.OLLAMA)
     var = backend.max_len_env_var
@@ -522,7 +529,7 @@ def _safe_input_char_limit(min_content_tok: int = 16_384) -> int:
     """
     CPT_FLOOR     = 3.0    # chars/token — matches model_interact.py cpt_floor
     VLLM_OVERHEAD = 512    # internal vLLM overhead tokens
-    match Backend.coerce(os.getenv("BACKEND"), Backend.OLLAMA):
+    match SETTINGS.backend:
         case Backend.VLLM:
             ctx      = int(os.getenv("VLLM_MAX_MODEL_LEN", "65536"))
             thinking = int(os.getenv("VLLM_THINKING_BUDGET", "0"))
@@ -661,7 +668,7 @@ COVERAGE_AUGMENT_SENTINEL = ".coverage_augmented"
 _real_home = Path(os.path.expanduser(f"~{os.environ.get('SUDO_USER', '')}") if os.environ.get("SUDO_USER") else str(Path.home()))
 TARPAULIN_BIN = _real_home / ".cargo" / "bin" / "cargo-tarpaulin"
 GRCOV_BIN     = _real_home / ".cargo" / "bin" / "grcov"
-COVERAGE_BACKEND = CoverageBackend.coerce(os.getenv("COVERAGE_BACKEND"), CoverageBackend.TARPAULIN)
+COVERAGE_BACKEND = SETTINGS.coverage_backend
 
 # Pragma comment each backend recognises to exclude a line from coverage.
 COVERAGE_IGNORE_PRAGMA = (
@@ -9689,7 +9696,7 @@ def _task2_fill_fns_one_by_one(
     # per-fn prompts cannot show. The per-impl path delegates free fns and
     # oversized blocks back to the per-fn path below, which continues to
     # exist as a fallback. Toggle via `PHASE_C_FILL_UNIT=fn`.
-    _fill_unit = FillUnit.coerce(os.getenv("PHASE_C_FILL_UNIT"), FillUnit.IMPL)
+    _fill_unit = SETTINGS.phase_c_fill_unit
     if _fill_unit is FillUnit.IMPL:
         _impl_stats = _phase_c_fill_impl_blocks(
             project_dir=project_dir,
@@ -16631,7 +16638,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
         # Mode selection for Phase B+C: per-group (default, current behaviour)
         # or per-fn TDD (Flavour B, smaller prompts, one call per fn, no
         # LLM grouping). Switched via env var PHASE_C_MODE=per_fn.
-        per_fn_mode = PhaseCMode.coerce(os.getenv("PHASE_C_MODE"), PhaseCMode.PER_GROUP) is PhaseCMode.PER_FN
+        per_fn_mode = SETTINGS.phase_c_mode is PhaseCMode.PER_FN
 
         # Seed filled_dir from skeleton state (idempotent) regardless of mode.
         filled_dir.mkdir(parents=True, exist_ok=True)
@@ -16722,7 +16729,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
             # Plan 4 — PHASE_C_DRIVER=tdd switches to the TDD outer loop
             # (cargo test → frontier → fill). Default `fn_walk` keeps the
             # legacy per-fn-walk driver.
-            _driver = PhaseCDriver.coerce(os.getenv("PHASE_C_DRIVER"), PhaseCDriver.FN_WALK)
+            _driver = SETTINGS.phase_c_driver
             if _driver is PhaseCDriver.TDD:
                 _log(f"  {tag} [skeleton-C] PHASE_C_DRIVER=tdd — using TDD outer loop")
                 c_result = _run_phase_c_tdd(
@@ -17902,8 +17909,8 @@ Output nothing else."""
             _log(f"  [fix loop/impl] unexpected error ({e}) → legacy whole-file fallback")
             return _do_fix(output, history, retro=retro)
 
-    _fix_strategy = FixStrategy.coerce(os.getenv("FIX_LOOP_STRATEGY"), FixStrategy.PER_FN)
-    _fix_unit = FillUnit.coerce(os.getenv("FIX_LOOP_UNIT"), FillUnit.IMPL)
+    _fix_strategy = SETTINGS.fix_loop_strategy
+    _fix_unit = SETTINGS.fix_loop_unit
     if _fix_strategy is FixStrategy.PER_FN:
         _chosen_do_fix = _do_fix_per_impl if _fix_unit is FillUnit.IMPL else _do_fix_per_fn
     else:
@@ -23069,7 +23076,7 @@ def main():
         "augment_tests": args.augment_tests,
         "from_spec": _from_spec,
         "model": MODEL,
-        "backend": Backend.coerce(os.getenv("BACKEND"), Backend.OLLAMA),
+        "backend": SETTINGS.backend,
         "coverage_backend": COVERAGE_BACKEND,
         "context_chars": MODEL_CONTEXT_CHARS,
     })
@@ -23095,7 +23102,7 @@ def main():
         _params.append("--restart-from-augmented")
     _log(f"  pipeline.py [{_ph}]  monitor.py [{_mh}]  params: {' '.join(_params) or '(none)'}")
 
-    _backend = Backend.coerce(os.getenv("BACKEND"), Backend.OLLAMA)
+    _backend = SETTINGS.backend
     if MODEL.startswith("claude") or _backend is Backend.CLAUDE:
         provider = "Claude (Anthropic API)"
     elif _backend is Backend.VLLM:
