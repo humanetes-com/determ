@@ -2046,17 +2046,19 @@ def test_slice5b_genesis_audit_task() -> None:
     from pathlib import Path
     from pipeline_core.application.tasks.genesis_audit import genesis_audit, GenesisAuditDeps
     from pipeline_core.application.orchestrator import Orchestrator
+    from pipeline_core.domain.llm_output import GENESIS_DELIM_START, GENESIS_DELIM_END
 
     written: dict = {}
 
     def mk_deps(genesis_text: str, response: str) -> GenesisAuditDeps:
-        # log + retry are now imported infra (pipeline_core.log/.retry), not injected.
+        # log + retry + extract_genesis are now imported (infra / domain.llm_output),
+        # not injected. Only ask/read/write/model/prompt-strings remain.
         return GenesisAuditDeps(
             ask=lambda prompt, model=None: response,
             read=lambda p: genesis_text,
             write=lambda p, c: written.__setitem__("c", c),
-            extract_genesis=lambda r: (r.split("BEG", 1)[1] if "BEG" in r else None),
-            model="m", verbosity_guard="", delim_start="BEG", delim_end="END",
+            model="m", verbosity_guard="",
+            delim_start=GENESIS_DELIM_START, delim_end=GENESIS_DELIM_END,
         )
 
     long = "x" * 250  # over the 200-char audit threshold
@@ -2067,9 +2069,10 @@ def test_slice5b_genesis_audit_task() -> None:
     written.clear()
     assert genesis_audit(Path("g"), mk_deps(long, "AUDIT_CLEAN")) is False
     assert "c" not in written
-    # contradictions resolved → True, writes extracted content
+    # contradictions resolved → True, writes content extracted between the real delimiters
     written.clear()
-    assert genesis_audit(Path("g"), mk_deps(long, "BEGfixed-genesis-body")) is True
+    resp = f"{GENESIS_DELIM_START}\nfixed-genesis-body\n{GENESIS_DELIM_END}"
+    assert genesis_audit(Path("g"), mk_deps(long, resp)) is True
     assert written["c"] == "fixed-genesis-body"
 
     import pipeline
@@ -2109,10 +2112,17 @@ def test_slice5b_genesis_audit_task() -> None:
         _n[0] += 1
         return False
     assert pcretry.with_retry(_always_false, retries=2) is False and _n[0] == 2
-    # genesis_audit deps no longer carry log/retry (de-ceremony payoff).
-    assert "log" not in GenesisAuditDeps.__dataclass_fields__
-    assert "retry" not in GenesisAuditDeps.__dataclass_fields__
-    print("  OK  genesis_audit + test_results + text + infra foundation (slice 5b)")
+    # 5b foundation: <FILE>/genesis extraction relocated to domain.llm_output; re-exported.
+    from pipeline_core.domain import llm_output as lo
+    assert pipeline.extract_files is lo.extract_files
+    assert pipeline._extract_genesis is lo._extract_genesis
+    assert pipeline.GENESIS_DELIM_START == lo.GENESIS_DELIM_START == "===GENESIS_START==="
+    assert lo.extract_files('<FILE path="a.rs">fn x(){}</FILE>') == {"a.rs": "fn x(){}"}
+
+    # genesis_audit deps no longer carry log/retry/extract_genesis (de-ceremony payoff).
+    for gone in ("log", "retry", "extract_genesis"):
+        assert gone not in GenesisAuditDeps.__dataclass_fields__
+    print("  OK  genesis_audit + test_results + text + infra + llm_output (slice 5b)")
 
 
 # ─── Driver ─────────────────────────────────────────────────────────────────

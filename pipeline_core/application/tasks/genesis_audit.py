@@ -15,20 +15,22 @@ from typing import Any
 
 from ...log import log
 from ...retry import with_retry
+from ...domain.llm_output import _extract_genesis as extract_genesis
 
 
 @dataclass(frozen=True, slots=True)
 class GenesisAuditDeps:
     """Collaborators the genesis audit needs, injected by the composition root.
 
-    Logging + retry are cross-cutting infra (pipeline_core.log / .retry), imported directly
-    rather than injected — that is the de-ceremony payoff of the 5b foundation step.
+    Logging + retry (pipeline_core.log / .retry) and genesis extraction
+    (domain.llm_output) are imported directly rather than injected — the de-ceremony
+    payoff of the 5b foundation step. Only the genuinely pipeline-bound collaborators
+    (ask/read/write, the model id, prompt-format strings) remain injected.
     """
 
     ask: Callable[..., str]
     read: Callable[[Any], str]
     write: Callable[[Any, str], None]
-    extract_genesis: Callable[[str], "str | None"]
     model: str
     verbosity_guard: str
     delim_start: str
@@ -70,7 +72,7 @@ corrected content here
         if 'AUDIT_CLEAN' in response:
             log("  Genesis audit: no issues found.")
             return 'clean'
-        content = deps.extract_genesis(response)
+        content = extract_genesis(response)
         if content:
             deps.write(genesis_path, content)
             log("  Genesis audit: contradictions resolved — genesis.md updated.")

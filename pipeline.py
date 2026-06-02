@@ -57,6 +57,12 @@ from pipeline_core.domain.text import (
     trim_to_line,
     smart_truncate,
 )
+from pipeline_core.domain.llm_output import (
+    GENESIS_DELIM_START,
+    GENESIS_DELIM_END,
+    extract_files,
+    _extract_genesis,
+)
 from pipeline_core import log as _pclog, retry as _pcretry
 from pipeline_core.retry import with_retry, is_rate_limit_error as _is_rate_limit_error
 from pipeline_core.settings import Settings
@@ -697,22 +703,12 @@ COVERAGE_IGNORE_PRAGMA = (
     else "// GRCOV_EXCL_LINE"
 )
 
-FILE_PATTERN = re.compile(r'<FILE path="([^"]+)">(.*?)</FILE>', re.DOTALL)
-# Single-quote variant: <FILE path='foo'>
-_FILE_PATTERN_SQ = re.compile(r"<FILE path='([^']+)'>(.*?)</FILE>", re.DOTALL)
-# Fallback: models sometimes use <path/to/file> ... </path/to/file> or ```lang blocks.
-# We only support the canonical FILE format; this pattern helps detect the wrong format
-# so we can log a useful warning instead of silently returning nothing.
-_BAD_FILE_PATTERN = re.compile(r'<([^>]+\.[a-zA-Z0-9]+)>')
-# Code-block-comment pattern: ```lang\n// FILE path="src/lib.rs"\n...\n```
+# <FILE>-extraction + genesis delimiters relocated to domain.llm_output (slice 5b);
+# imported at top. _CODE_BLOCK_FILE_PATTERN stays here (its only consumer is local).
 _CODE_BLOCK_FILE_PATTERN = re.compile(
     r'```[^\n]*\n(?:(?://|#|--)\s*FILE\s+path=["\']?([^\s"\'>\n]+)["\']?\s*\n)(.*?)```',
     re.DOTALL,
 )
-
-# Delimiter used by task4 to return updated genesis.md (simpler than XML for small models).
-GENESIS_DELIM_START = "===GENESIS_START==="
-GENESIS_DELIM_END = "===GENESIS_END==="
 
 # Separator written into tests_output_N.txt between genesis snapshot and output.
 
@@ -969,58 +965,16 @@ class ChunkProgress:
 # Utilities
 # ---------------------------------------------------------------------------
 
-def _normalize_file_markers(text: str) -> str:
-    """
-    Small models frequently prefix <FILE ...> tags with markdown artefacts:
-      ### <FILE path="x">   ->  <FILE path="x">
-      ### FILE path="x">    ->  <FILE path="x">
-      <FILE path='x'>       ->  <FILE path="x">
-    Normalise these so the primary regex can match them.
-    """
-    # Strip leading `###` (or `##`, `#`) before a <FILE ... > tag on the same line.
-    text = re.sub(r'#{1,6}\s*(<FILE\s)', r'\1', text)
-    # Handle `### FILE path=` (missing opening `<`)
-    text = re.sub(r'#{1,6}\s*FILE\s+path=', '<FILE path=', text)
-    # Single-quote to double-quote: <FILE path='x'> -> <FILE path="x">
-    text = _FILE_PATTERN_SQ.sub(lambda m: f'<FILE path="{m.group(1)}">{m.group(2)}</FILE>', text)
-    return text
+# slice 5b foundation: relocated to pipeline_core.domain.llm_output (imported at top).
 
 
 # slice 5b foundation: relocated to pipeline_core.domain.text (imported at top).
 
 
-def _looks_like_prose(content: str, path: str) -> bool:
-    """Return True if file content appears to be prose description rather than source code.
-
-    Guards against the model writing 'This snippet outlines...' style descriptions
-    instead of actual code inside <FILE> blocks.
-    """
-    # Only apply to source code extensions
-    if not any(path.endswith(ext) for ext in ('.rs', '.py', '.js', '.ts', '.go', '.java', '.c', '.cpp', '.h')):
-        return False
-    first_line = content.lstrip().split('\n')[0] if content.strip() else ''
-    prose_starters = (
-        'this ', 'the ', 'here ', 'below ', 'note:', 'note ', 'file ', 'module ',
-        'this file', 'this module', 'this snippet', 'this code', 'this implementation',
-        'the following', 'below is', 'here is', 'as outlined', 'per the',
-    )
-    return any(first_line.lower().startswith(p) for p in prose_starters)
+# slice 5b foundation: relocated to pipeline_core.domain.llm_output (imported at top).
 
 
-def extract_files(text):
-    """Parse all <FILE path="...">...</FILE> blocks from model output."""
-    text = _normalize_file_markers(text)
-    files = {}
-    for path, content in FILE_PATTERN.findall(text):
-        content = _strip_markdown_fences(content)
-        if _looks_like_prose(content, path):
-            _log(f"  WARNING: model wrote prose instead of code for `{path}` — skipping.")
-            continue
-        files[path] = content
-    if not files and _BAD_FILE_PATTERN.search(text):
-        _log("  WARNING: model used wrong file format (e.g. <path/to/file> instead of "
-             '<FILE path="path/to/file">). Retrying so it uses the correct format.')
-    return files
+# slice 5b foundation: relocated to pipeline_core.domain.llm_output (imported at top).
 
 
 # SEARCH/REPLACE patch protocol REMOVED. The model could not reliably
@@ -1112,32 +1066,7 @@ def generate_in_parallel(
 # slice 5b foundation: relocated to pipeline_core.domain.text (imported at top).
 
 
-def _extract_genesis(text: str):
-    """
-    Extract genesis.md content from Task 4 response.
-    1. Primary: content between GENESIS_DELIM_START / GENESIS_DELIM_END.
-    2. Fallback: <FILE path="genesis.md">...</FILE> block.
-    3. Last resort: content inside any markdown/text code fence (model wraps in ```markdown).
-    Returns the stripped content string, or None if not found.
-    """
-    start = text.find(GENESIS_DELIM_START)
-    end = text.find(GENESIS_DELIM_END)
-    if start != -1 and end != -1 and end > start:
-        return text[start + len(GENESIS_DELIM_START):end].strip()
-    # Model output start delimiter but forgot the closing one — use rest of response.
-    if start != -1:
-        content = text[start + len(GENESIS_DELIM_START):].strip()
-        if len(content) > 100:
-            return content
-    # Fallback: FILE tag format
-    files = extract_files(text)
-    if "genesis.md" in files:
-        return files["genesis.md"]
-    # Last resort: strip thinking + any code fence and take the bare content.
-    content = extract_code_content(text)
-    if content and len(content) > 100:
-        return content
-    return None
+# slice 5b foundation: relocated to pipeline_core.domain.llm_output (imported at top).
 
 
 def read(path) -> str:
@@ -18475,8 +18404,7 @@ NO_IMPROVEMENT_THRESHOLD = 3
 # slice 5b: genesis audit extracted to pipeline_core.application.tasks.genesis_audit.
 # Deps bind the pipeline's collaborators once; main() calls the shim below unchanged.
 _GENESIS_AUDIT_DEPS = GenesisAuditDeps(
-    ask=ask, read=read, write=write,
-    extract_genesis=_extract_genesis, model=_TASK4_MODEL,
+    ask=ask, read=read, write=write, model=_TASK4_MODEL,
     verbosity_guard=_TASK4_VERBOSITY_GUARD,
     delim_start=GENESIS_DELIM_START, delim_end=GENESIS_DELIM_END,
 )
