@@ -57,6 +57,8 @@ from pipeline_core.domain.text import (
     trim_to_line,
     smart_truncate,
 )
+from pipeline_core import log as _pclog, retry as _pcretry
+from pipeline_core.retry import with_retry, is_rate_limit_error as _is_rate_limit_error
 from pipeline_core.settings import Settings
 from pipeline_core.adapters import build_adapters
 from pipeline_core.adapters import coverage as _covmod, workspace as _wsmod
@@ -3733,49 +3735,10 @@ def delete_source_files(project_dir: Path, manifest_path: Path,
 
 RATE_LIMIT_WAIT = 60  # seconds to wait when hitting a rate limit
 
-def _is_rate_limit_error(e) -> bool:
-    """Return True (and sleep) if e is a provider rate-limit error."""
-    if MODEL.startswith("claude"):
-        try:
-            import anthropic
-            if isinstance(e, anthropic.RateLimitError):
-                _log(f"  Rate limit hit: {e}. Waiting {RATE_LIMIT_WAIT}s before retrying...")
-                time.sleep(RATE_LIMIT_WAIT)
-                return True
-        except ImportError:
-            pass
-    return False
+# slice 5b infra: relocated to pipeline_core.retry (imported at top).
 
 
-def with_retry(fn: "Callable[[], _RT]", retries: int = MAX_RETRIES) -> "_RT":
-    """
-    Call fn() up to `retries` times. fn must return False to signal failure,
-    or any non-False value to signal success.
-    Rate limit errors (429) pause for RATE_LIMIT_WAIT seconds before retrying
-    and do not consume a retry attempt.
-    """
-    attempt = 1
-    while attempt <= retries:
-        try:
-            result = fn()
-        except Exception as e:
-            if _is_rate_limit_error(e):
-                continue  # retry without consuming an attempt
-            _ename = type(e).__name__
-            if any(t in _ename for t in ("Timeout", "ConnectionError", "APIError", "ReadTimeout")):
-                _wait = min(30, 5 * attempt)
-                _log(f"  Network error ({_ename}) — waiting {_wait}s before retry ({attempt}/{retries})...")
-                time.sleep(_wait)
-                attempt += 1
-                continue
-            raise
-        if result is not False:
-            return result
-        if attempt < retries:
-            _log(f"  Attempt {attempt}/{retries} failed, retrying...")
-        attempt += 1
-    _log(f"  All {retries} attempts failed.")
-    return False  # type: ignore[return-value]
+# slice 5b infra: relocated to pipeline_core.retry (imported at top).
 
 
 # ---------------------------------------------------------------------------
@@ -4193,6 +4156,9 @@ ADAPTERS = build_adapters(SETTINGS, extractor_bin=SKELETON_EXTRACTOR_BIN, model=
 # The application-layer composition context. main()'s task dispatch migrates onto it
 # slice by slice (5b); for now it bundles the resolved settings + adapters.
 ORCHESTRATOR = Orchestrator(settings=SETTINGS, adapters=ADAPTERS)
+# Wire the cross-cutting infra seams to the pipeline's concrete sinks/config (slice 5b).
+_pclog.set_sinks(_log, _emit)
+_pcretry.configure(max_retries=MAX_RETRIES, rate_limit_wait=RATE_LIMIT_WAIT, model=MODEL)
 
 
 def _prune_redundant_clusters(
@@ -18509,7 +18475,7 @@ NO_IMPROVEMENT_THRESHOLD = 3
 # slice 5b: genesis audit extracted to pipeline_core.application.tasks.genesis_audit.
 # Deps bind the pipeline's collaborators once; main() calls the shim below unchanged.
 _GENESIS_AUDIT_DEPS = GenesisAuditDeps(
-    ask=ask, read=read, write=write, log=_log, retry=with_retry,
+    ask=ask, read=read, write=write,
     extract_genesis=_extract_genesis, model=_TASK4_MODEL,
     verbosity_guard=_TASK4_VERBOSITY_GUARD,
     delim_start=GENESIS_DELIM_START, delim_end=GENESIS_DELIM_END,

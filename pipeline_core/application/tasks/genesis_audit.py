@@ -13,16 +13,21 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ...log import log
+from ...retry import with_retry
+
 
 @dataclass(frozen=True, slots=True)
 class GenesisAuditDeps:
-    """Collaborators the genesis audit needs, injected by the composition root."""
+    """Collaborators the genesis audit needs, injected by the composition root.
+
+    Logging + retry are cross-cutting infra (pipeline_core.log / .retry), imported directly
+    rather than injected — that is the de-ceremony payoff of the 5b foundation step.
+    """
 
     ask: Callable[..., str]
     read: Callable[[Any], str]
     write: Callable[[Any, str], None]
-    log: Callable[[str], None]
-    retry: Callable[[Callable[[], Any]], Any]
     extract_genesis: Callable[[str], "str | None"]
     model: str
     verbosity_guard: str
@@ -41,7 +46,7 @@ def genesis_audit(genesis_path: Path, deps: GenesisAuditDeps) -> bool:
     """
     genesis = deps.read(genesis_path)
     if len(genesis.strip()) < 200:
-        deps.log("  Genesis audit: document too short to audit.")
+        log("  Genesis audit: document too short to audit.")
         return False
 
     prompt = f"""Review this methodology document for internal contradictions, redundant rules,
@@ -63,14 +68,14 @@ corrected content here
     def attempt():
         response = deps.ask(prompt, model=deps.model)
         if 'AUDIT_CLEAN' in response:
-            deps.log("  Genesis audit: no issues found.")
+            log("  Genesis audit: no issues found.")
             return 'clean'
         content = deps.extract_genesis(response)
         if content:
             deps.write(genesis_path, content)
-            deps.log("  Genesis audit: contradictions resolved — genesis.md updated.")
+            log("  Genesis audit: contradictions resolved — genesis.md updated.")
             return 'updated'
         return False
 
-    result = deps.retry(attempt)
+    result = with_retry(attempt)
     return bool(result == 'updated')

@@ -2050,12 +2050,11 @@ def test_slice5b_genesis_audit_task() -> None:
     written: dict = {}
 
     def mk_deps(genesis_text: str, response: str) -> GenesisAuditDeps:
+        # log + retry are now imported infra (pipeline_core.log/.retry), not injected.
         return GenesisAuditDeps(
             ask=lambda prompt, model=None: response,
             read=lambda p: genesis_text,
             write=lambda p, c: written.__setitem__("c", c),
-            log=lambda m: None,
-            retry=lambda fn: fn(),  # no-retry passthrough
             extract_genesis=lambda r: (r.split("BEG", 1)[1] if "BEG" in r else None),
             model="m", verbosity_guard="", delim_start="BEG", delim_end="END",
         )
@@ -2097,7 +2096,23 @@ def test_slice5b_genesis_audit_task() -> None:
     assert txt.strip_markdown_fences("```rust\nlet x = 1;\n```") == "let x = 1;"
     assert txt.smart_truncate("abcdef", total_limit=4, head=2, tail=2).startswith("ab")
     assert txt.trim_to_line("a\nbb\nccc", 4) == "a" + "\n// ... (truncated)"
-    print("  OK  genesis_audit + test_results + text foundation (slice 5b)")
+
+    # 5b infra: log + retry seams. pipeline re-exports with_retry; sinks wired to _log/_emit.
+    from pipeline_core import log as pclog, retry as pcretry
+    assert pipeline.with_retry is pcretry.with_retry
+    assert pclog._log_sink is pipeline._log and pclog._emit_sink is pipeline._emit
+    assert pcretry.MAX_RETRIES == pipeline.MAX_RETRIES and pcretry.MODEL == pipeline.MODEL
+    # with_retry contract: returns first non-False result; returns False if all attempts fail.
+    assert pcretry.with_retry(lambda: "ok", retries=2) == "ok"
+    _n = [0]
+    def _always_false():
+        _n[0] += 1
+        return False
+    assert pcretry.with_retry(_always_false, retries=2) is False and _n[0] == 2
+    # genesis_audit deps no longer carry log/retry (de-ceremony payoff).
+    assert "log" not in GenesisAuditDeps.__dataclass_fields__
+    assert "retry" not in GenesisAuditDeps.__dataclass_fields__
+    print("  OK  genesis_audit + test_results + text + infra foundation (slice 5b)")
 
 
 # ─── Driver ─────────────────────────────────────────────────────────────────
