@@ -46,6 +46,9 @@ from pipeline_core.domain.model_caps import (
 )
 from pipeline_core.settings import Settings
 from pipeline_core.adapters import build_adapters
+from pipeline_core.adapters import coverage as _covmod, workspace as _wsmod
+from pipeline_core.adapters.coverage import CoverageDeps
+from pipeline_core.adapters.workspace import WorkspaceDeps
 
 _mi_mtime: float = os.path.getmtime(_mi.__file__)
 
@@ -774,15 +777,8 @@ def _log(msg: str):
 
 
 def _git_file_hash(root: Path, filename: str) -> str:
-    try:
-        result = subprocess.run(
-            ["git", "log", "--format=%h", "-1", filename],
-            cwd=root, capture_output=True, text=True, timeout=5,
-        )
-        h = result.stdout.strip()
-        return h if h else "unknown"
-    except Exception:
-        return "unknown"
+    # Slice 4b: relocated to adapters.workspace; thin shim until call sites migrate.
+    return _wsmod.git_file_hash(root, filename)
 
 
 def _resolve_stdout_path() -> str | None:
@@ -4121,86 +4117,26 @@ def _is_git_repo(path: Path) -> bool:
         return False
 
 
+# Slice 4b: git workspace I/O relocated to pipeline_core.adapters.workspace. These are
+# thin shims delegating to the adapter with injected log/emit and the live `_git_managed`
+# flag, until call sites migrate onto a GitWorkspace instance (slice 5).
+_WS_DEPS = WorkspaceDeps(log=_log, emit=_emit)
+
+
 def _git_default_branch(project_dir: Path) -> str:
-    """Return the default branch name (main, master, etc.)."""
-    for cmd in [
-        ["git", "symbolic-ref", "refs/remotes/origin/HEAD", "--short"],
-        ["git", "rev-parse", "--abbrev-ref", "origin/HEAD"],
-    ]:
-        try:
-            out = subprocess.check_output(cmd, cwd=project_dir,
-                                          stderr=subprocess.DEVNULL, text=True).strip()
-            return out.split("/")[-1]
-        except Exception:
-            pass
-    # Fallback: check which of main/master exists locally
-    for branch in ("main", "master"):
-        r = subprocess.run(["git", "rev-parse", "--verify", branch],
-                           cwd=project_dir, capture_output=True)
-        if r.returncode == 0:
-            return branch
-    return "main"
+    return _wsmod.git_default_branch(project_dir)
 
 
 def git_commit(project_dir: Path, message: str) -> bool:
-    """Stage all changes and commit. Returns True if a commit was made."""
-    if not _git_managed:
-        return False
-    try:
-        subprocess.run(["git", "add", "-A"], cwd=project_dir,
-                       check=True, capture_output=True)
-        diff = subprocess.run(["git", "diff", "--cached", "--quiet"],
-                              cwd=project_dir, capture_output=True)
-        if diff.returncode == 0:
-            return False  # nothing staged
-        subprocess.run(
-            ["git", "commit", "-m", message, "--no-gpg-sign"],
-            cwd=project_dir, check=True, capture_output=True,
-        )
-        _log(f"  [git] committed: {message}")
-        try:
-            _sha = subprocess.run(["git", "rev-parse", "--short=12", "HEAD"],
-                                  cwd=project_dir, capture_output=True, text=True,
-                                  timeout=5).stdout.strip()
-        except Exception:
-            _sha = ""
-        _emit("git.commit", data={"message": message, "workspace_sha": _sha})
-        return True
-    except Exception as e:
-        _log(f"  [git] commit failed: {e}")
-        _emit("git.error", data={"message": message, "error": str(e)[:300]})
-        return False
+    return _wsmod.git_commit(_WS_DEPS, project_dir, message, managed=_git_managed)
 
 
 def git_tag(project_dir: Path, tag: str) -> None:
-    """Create or update a lightweight tag at HEAD."""
-    if not _git_managed:
-        return
-    try:
-        subprocess.run(["git", "tag", "-f", tag], cwd=project_dir,
-                       check=True, capture_output=True)
-        _log(f"  [git] tagged: {tag}")
-    except Exception as e:
-        _log(f"  [git] tag failed: {e}")
+    _wsmod.git_tag(_WS_DEPS, project_dir, tag, managed=_git_managed)
 
 
 def git_clean_reset(project_dir: Path) -> None:
-    """Reset workspace to default branch and recreate the pipeline branch."""
-    try:
-        default = _git_default_branch(project_dir)
-        subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=project_dir, capture_output=True)
-        subprocess.run(["git", "clean", "-fd"], cwd=project_dir, capture_output=True)
-        subprocess.run(["git", "checkout", default], cwd=project_dir,
-                       check=True, capture_output=True)
-        subprocess.run(["git", "reset", "--hard", f"origin/{default}"],
-                       cwd=project_dir, capture_output=True)
-        subprocess.run(["git", "branch", "-D", "pipeline"],
-                       cwd=project_dir, capture_output=True)  # ok if not exists
-        subprocess.run(["git", "checkout", "-b", "pipeline"],
-                       cwd=project_dir, check=True, capture_output=True)
-        _log(f"  [git] reset to {default}, recreated pipeline branch")
-    except Exception as e:
-        _log(f"  [git] clean reset failed: {e}")
+    _wsmod.git_clean_reset(_WS_DEPS, project_dir)
 
 
 def setup_workspace(repo: str, workspace_dir: Path, force_fresh: bool = False) -> Path:
@@ -18913,56 +18849,24 @@ def _crate_name_from_toml(module_dir: Path, fallback: str) -> str:
     return fallback.replace("-", "_")
 
 
+# Slice 4b: coverage I/O relocated to pipeline_core.adapters.coverage. _COV_DEPS injects
+# the pipeline's log + cargo-env + live-cluster accessor + tool paths/timeout/pragma so the
+# adapter stays import-independent of pipeline.py. `cluster` is a callable (the active
+# cluster is reassigned across the run; resolve at call time = original global semantics).
+_COV_DEPS = CoverageDeps(
+    log=_log,
+    cargo_env=_cargo_env,
+    cluster=lambda: _current_cluster,
+    tarpaulin_bin=TARPAULIN_BIN,
+    grcov_bin=GRCOV_BIN,
+    build_timeout=BUILD_TIMEOUT,
+    ignore_pragma=COVERAGE_IGNORE_PRAGMA,
+)
+
+
 def _run_tarpaulin(project_dir: Path, module_name: str) -> tuple[float, list[dict], int, int]:
-    """
-    Run cargo tarpaulin for one module.
-    Returns (coverage_pct 0-100, files_list, covered_lines, coverable_lines).
-    Returns (0.0, [], 0, 0) on any failure.
-    """
-    out_dir = Path("/tmp") / f"tarp_{module_name}"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    # Exclude files based on current cluster:
-    # - stable/default: exclude nightly.rs (cfg-excluded, not in coverage denominator)
-    # - non-default cluster: use cluster's own exclusion list (may be empty to include nightly.rs)
-    if _current_cluster is None or _current_cluster.is_default:
-        _exclude_patterns = ["*/nightly.rs"]
-    else:
-        _exclude_patterns = list(_current_cluster.tarpaulin_exclude_files)
-    cmd = [
-        str(TARPAULIN_BIN), "tarpaulin",
-        "-p", module_name,
-        "--tests",         # run integration tests (tests/ dir) but exclude from coverage denominator
-        "--no-fail-fast",  # produce report even if some tests fail at runtime
-        "--out", "Json",
-        "--output-dir", str(out_dir),
-        "--skip-clean",
-        "--exclude-files", "*/tests/*",   # measure src/ coverage only
-        "--exclude-files", "build.rs",    # build scripts run at compile time, not under test
-    ]
-    for pat in _exclude_patterns:
-        cmd += ["--exclude-files", pat]
-    try:
-        result = subprocess.run(
-            cmd, cwd=project_dir, capture_output=True, text=True,
-            timeout=BUILD_TIMEOUT, env=_cargo_env(),
-        )
-        json_path = out_dir / "tarpaulin-report.json"
-        if not json_path.exists():
-            _log(f"  tarpaulin: no JSON report produced. stderr: {result.stderr[:300]}")
-            return 0.0, [], 0, 0
-        data = json.loads(json_path.read_text())
-        return (
-            data.get("coverage", 0.0),
-            data.get("files", []),
-            data.get("covered", 0),
-            data.get("coverable", 0),
-        )
-    except subprocess.TimeoutExpired:
-        _log(f"  tarpaulin: timeout after {BUILD_TIMEOUT}s")
-        return 0.0, [], 0, 0
-    except Exception as e:
-        _log(f"  tarpaulin: error: {e}")
-        return 0.0, [], 0, 0
+    # Thin shim until call sites migrate (slice 5).
+    return _covmod.run_tarpaulin(_COV_DEPS, project_dir, module_name)
 
 
 def _mutation_survivors(
@@ -19178,242 +19082,6 @@ def _quick_file_coverage(project_dir: Path, module_name: str, rel_path: str) -> 
     return _coverage_provider.measure_file(project_dir, module_name, rel_path)
 
 
-def _quick_file_coverage_grcov(project_dir: Path, module_name: str, rel_path: str) -> tuple[int, int] | None:
-    """
-    Fast per-file coverage snapshot using grcov + LLVM instrumentation.
-    Returns (covered, coverable) for rel_path only, or None on failure.
-    """
-    if not GRCOV_BIN.exists():
-        return None
-
-    profraw_dir = project_dir / "target" / "coverage" / f"{module_name}_quick"
-    profraw_dir.mkdir(parents=True, exist_ok=True)
-    for f in profraw_dir.glob("*.profraw"):
-        f.unlink(missing_ok=True)
-
-    env = _cargo_env()
-    # Add -C instrument-coverage; do NOT set CARGO_INCREMENTAL=0 so incremental
-    # artifacts from the compile-check step are reused where possible.
-    env["RUSTFLAGS"] = (env.get("RUSTFLAGS", "") + " -C instrument-coverage").strip()
-    env["LLVM_PROFILE_FILE"] = str(profraw_dir / "%p-%m.profraw")
-
-    try:
-        subprocess.run(
-            ["cargo", "test", "-p", module_name, "--no-fail-fast", "--", "--test-threads=1"],
-            cwd=project_dir, capture_output=True, text=True,
-            timeout=BUILD_TIMEOUT, env=env,
-        )
-        if not list(profraw_dir.glob("*.profraw")):
-            return None
-
-        out_json = Path("/tmp") / f"grcov_quick_{module_name}.json"
-        cmd = [
-            str(GRCOV_BIN),
-            str(profraw_dir),
-            "--binary-path", str(project_dir / "target" / "debug"),
-            "--source-dir", str(project_dir),
-            "--output-type", "coveralls",
-            "--token", "unused",
-            "--branch",
-            "--ignore-not-existing",
-            "--output-path", str(out_json),
-            "--ignore", str(Path.home() / ".cargo" / "registry" / "*"),
-            "--ignore", str(Path.home() / ".cargo" / "git" / "*"),
-            "--ignore", str(Path.home() / ".rustup" / "*"),
-            "--ignore", "*/target/*",
-            "--ignore", "*/tests/*",
-            "--ignore", "tests/*",
-            "--ignore", "build.rs",
-            "--ignore", "*.gen_tests_*.rs",   # pipeline-generated test siblings
-            "--excl-start", "GRCOV_EXCL_START",
-            "--excl-stop",  "GRCOV_EXCL_STOP",
-            "--excl-line",  "GRCOV_EXCL_LINE",
-        ]
-        subprocess.run(cmd, cwd=project_dir, capture_output=True, text=True, timeout=60, check=True)
-
-        data = json.loads(out_json.read_text())
-        abs_target = str(project_dir / rel_path)
-        for sf in data.get("source_files", []):
-            sf_abs = str(project_dir / sf.get("name", ""))
-            if sf_abs == abs_target or sf.get("name", "") == rel_path:
-                cov_arr = sf.get("coverage", [])
-                covered   = sum(1 for c in cov_arr if c is not None and c > 0)
-                coverable = sum(1 for c in cov_arr if c is not None)
-                return covered, coverable
-        return None
-    except Exception:
-        return None
-
-
-def _run_grcov(project_dir: Path, module_name: str) -> tuple[float, list[dict], int, int]:
-    """
-    Run grcov (LLVM source-based coverage) for one module.
-    Returns (coverage_pct 0-100, files_list compatible with tarpaulin format, covered, coverable).
-    Returns (0.0, [], 0, 0) on any failure.
-
-    Requires:
-      - rustup component add llvm-tools-preview
-      - cargo install grcov
-      - COVERAGE_BACKEND=grcov in .env
-    """
-    profraw_dir = project_dir / "target" / "coverage" / module_name
-    profraw_dir.mkdir(parents=True, exist_ok=True)
-    # Clean stale profraw files so old runs don't pollute results.
-    for f in profraw_dir.glob("*.profraw"):
-        f.unlink(missing_ok=True)
-
-    env = _cargo_env()
-    env["RUSTFLAGS"] = (env.get("RUSTFLAGS", "") + " -C instrument-coverage").strip()
-    env["LLVM_PROFILE_FILE"] = str(profraw_dir / "%p-%m.profraw")
-    # Required for correct coverage: incremental compilation can reuse object files
-    # compiled without -C instrument-coverage, causing integration test binaries to
-    # produce no profraw data.
-    env["CARGO_INCREMENTAL"] = "0"
-
-    # Cluster exclude patterns reused from tarpaulin path.
-    if _current_cluster is None or _current_cluster.is_default:
-        _exclude_patterns = ["*/nightly.rs"]
-    else:
-        _exclude_patterns = list(_current_cluster.tarpaulin_exclude_files)
-
-    try:
-        # Step 1: run tests with instrumentation.
-        result = subprocess.run(
-            ["cargo", "test", "-p", module_name, "--no-fail-fast", "--", "--test-threads=1", "--no-capture"],
-            cwd=project_dir, capture_output=True, text=True,
-            timeout=BUILD_TIMEOUT, env=env,
-        )
-        if result.returncode != 0 and not list(profraw_dir.glob("*.profraw")):
-            _log(f"  grcov: cargo test failed and produced no profraw: {result.stderr[:200]}")
-            return 0.0, [], 0, 0
-
-        # Step 2: run grcov to produce coveralls JSON.
-        out_json = Path("/tmp") / f"grcov_{module_name}.json"
-        cmd = [
-            str(GRCOV_BIN),
-            str(profraw_dir),
-            "--binary-path", str(project_dir / "target" / "debug"),
-            "--source-dir", str(project_dir),
-            "--output-type", "coveralls",
-            "--token", "unused",   # required by grcov 0.10+ for coveralls output
-            "--branch",
-            "--ignore-not-existing",
-            "--output-path", str(out_json),
-            # Exclude dependency and toolchain sources — only measure project code.
-            "--ignore", str(Path.home() / ".cargo" / "registry" / "*"),
-            "--ignore", str(Path.home() / ".cargo" / "git" / "*"),
-            "--ignore", str(Path.home() / ".rustup" / "*"),
-            "--ignore", "*/target/*",
-            "--ignore", "*/build.rs",  # build scripts run at compile time, not under test
-            "--ignore", "build.rs",    # root-level build.rs (no parent dir prefix)
-            "--ignore", "*/tests/*",   # integration test files — measure src/ coverage only
-            "--ignore", "tests/*",     # relative-path variant (grcov * doesn't cross /)
-            "--ignore", "*.gen_tests_*.rs",  # pipeline-generated test siblings
-            "--excl-start", "GRCOV_EXCL_START",
-            "--excl-stop",  "GRCOV_EXCL_STOP",
-            "--excl-line",  "GRCOV_EXCL_LINE",
-        ]
-        for pat in _exclude_patterns:
-            cmd += ["--ignore", pat]
-        subprocess.run(cmd, cwd=project_dir, capture_output=True, text=True,
-                       timeout=120, check=True)
-
-        data = json.loads(out_json.read_text())
-        source_files = data.get("source_files", [])
-
-        total_covered = total_coverable = 0
-        # Build files_data in tarpaulin-compatible format so all downstream
-        # code (pragma pass, uncovered-line extraction) works unchanged.
-        files_data = []
-        for sf in source_files:
-            cov_arr = sf.get("coverage", [])
-            # null = not coverable, 0 = uncovered, N = hit count
-            covered   = sum(1 for c in cov_arr if c is not None and c > 0)
-            coverable = sum(1 for c in cov_arr if c is not None)
-            total_covered   += covered
-            total_coverable += coverable
-            # Build traces list matching tarpaulin schema: [{line, stats:{Line:N}}]
-            traces = [
-                {"line": i + 1, "stats": {"Line": (c if c is not None else 0)}}
-                for i, c in enumerate(cov_arr)
-                if c is not None
-            ]
-            abs_path = str(project_dir / sf.get("name", ""))
-            files_data.append({
-                "path": abs_path.split(os.sep),  # tarpaulin-compat schema
-                "abs_path": abs_path,             # reliable full path for consumers
-                "traces": traces,
-                "covered": covered,
-                "coverable": coverable,
-            })
-
-        pct = (total_covered / total_coverable * 100.0) if total_coverable > 0 else 0.0
-        return pct, files_data, total_covered, total_coverable
-
-    except subprocess.TimeoutExpired:
-        _log(f"  grcov: timeout after {BUILD_TIMEOUT}s")
-        return 0.0, [], 0, 0
-    except Exception as e:
-        _log(f"  grcov: error: {e}")
-        return 0.0, [], 0, 0
-
-
-def _load_grcov_json(project_dir: Path, module_name: str) -> tuple[float, list[dict], int, int] | None:
-    """Parse the existing grcov JSON + filecache without re-running grcov.
-
-    Returns (pct, files_data, covered, coverable) if the JSON exists, else None.
-    Used on resume to restore coverage state without an expensive re-run.
-    """
-    out_json = Path("/tmp") / f"grcov_{module_name}.json"
-    if not out_json.exists():
-        return None
-    try:
-        main_mtime = out_json.stat().st_mtime
-        data = json.loads(out_json.read_text())
-        source_files = data.get("source_files", [])
-        if not source_files:
-            return None
-
-        # Build per-file map from main JSON.
-        file_map: dict[str, dict] = {}
-        for sf in source_files:
-            cov_arr = sf.get("coverage", [])
-            covered   = sum(1 for c in cov_arr if c is not None and c > 0)
-            coverable = sum(1 for c in cov_arr if c is not None)
-            abs_path  = str(project_dir / sf.get("name", ""))
-            traces    = [
-                {"line": i + 1, "stats": {"Line": (c if c is not None else 0)}}
-                for i, c in enumerate(cov_arr) if c is not None
-            ]
-            file_map[sf.get("name", "")] = {
-                "path": abs_path.split(os.sep),
-                "abs_path": abs_path,
-                "traces": traces,
-                "covered": covered,
-                "coverable": coverable,
-            }
-
-        # Merge filecache entries newer than the main JSON (written by quick-cov).
-        filecache = Path("/tmp") / f"grcov_filecache_{module_name}.json"
-        if filecache.exists():
-            try:
-                for rel, d in json.loads(filecache.read_text()).items():
-                    if d.get("ts", 0) > main_mtime and d.get("coverable", 0) > 0 and rel in file_map:
-                        entry = file_map[rel]
-                        entry["covered"]   = d["covered"]
-                        entry["coverable"] = d["coverable"]
-            except Exception:
-                pass
-
-        files_data = list(file_map.values())
-        total_covered   = sum(f["covered"]   for f in files_data)
-        total_coverable = sum(f["coverable"] for f in files_data)
-        pct = (total_covered / total_coverable * 100.0) if total_coverable > 0 else 0.0
-        return pct, files_data, total_covered, total_coverable
-    except Exception:
-        return None
-
-
 def _measure_coverage(project_dir: Path, module_name: str) -> tuple[float, list[dict], int, int]:
     _t0 = time.monotonic()
     pct, files_data, covered, coverable = _coverage_provider.measure(project_dir, module_name)
@@ -19426,196 +19094,11 @@ def _measure_coverage(project_dir: Path, module_name: str) -> tuple[float, list[
     return pct, files_data, covered, coverable
 
 
-# ── Coverage provider interface ───────────────────────────────────────────────
-
-def _cluster_exclude_patterns() -> list[str]:
-    if _current_cluster is None or _current_cluster.is_default:
-        return ["*/nightly.rs"]
-    return list(_current_cluster.tarpaulin_exclude_files)
-
-
-def _glob_to_filename_regex(pat: str) -> str:
-    """Convert a simple glob (*/foo.rs) to a regex fragment for --ignore-filename-regex."""
-    return re.escape(os.path.basename(pat.lstrip("*/")))
-
-
-class CoverageProvider(ABC):
-    """Pluggable coverage measurement backend.
-
-    All implementations return files_data entries in the tarpaulin-compatible schema:
-      {"abs_path": str, "path": list[str], "traces": [{"line": N, "stats": {"Line": N}}],
-       "covered": int, "coverable": int}
-    """
-    ignore_pragma: str = COVERAGE_IGNORE_PRAGMA
-
-    @abstractmethod
-    def measure(self, project_dir: Path, module_name: str) -> tuple[float, list[dict], int, int]:
-        """Run instrumented tests. Returns (pct, files_data, covered, coverable)."""
-
-    @abstractmethod
-    def measure_file(self, project_dir: Path, module_name: str, rel_path: str) -> tuple[int, int] | None:
-        """Quick per-file snapshot. Returns (covered, coverable) or None on failure."""
-
-    @abstractmethod
-    def load_cached(self, project_dir: Path, module_name: str) -> tuple[float, list[dict], int, int] | None:
-        """Load previous measurement without re-running. Returns None if unavailable."""
-
-
-class TarpaulinProvider(CoverageProvider):
-    def measure(self, project_dir: Path, module_name: str) -> tuple[float, list[dict], int, int]:
-        return _run_tarpaulin(project_dir, module_name)
-
-    def measure_file(self, project_dir: Path, module_name: str, rel_path: str) -> tuple[int, int] | None:
-        return None  # tarpaulin is too slow for per-file quick checks
-
-    def load_cached(self, project_dir: Path, module_name: str) -> tuple[float, list[dict], int, int] | None:
-        return None
-
-
-class GrcovProvider(CoverageProvider):
-    def measure(self, project_dir: Path, module_name: str) -> tuple[float, list[dict], int, int]:
-        if not GRCOV_BIN.exists():
-            _log("  [warn] COVERAGE_BACKEND=grcov but grcov not found — falling back to tarpaulin")
-            return _run_tarpaulin(project_dir, module_name)
-        return _run_grcov(project_dir, module_name)
-
-    def measure_file(self, project_dir: Path, module_name: str, rel_path: str) -> tuple[int, int] | None:
-        return _quick_file_coverage_grcov(project_dir, module_name, rel_path)
-
-    def load_cached(self, project_dir: Path, module_name: str) -> tuple[float, list[dict], int, int] | None:
-        return _load_grcov_json(project_dir, module_name)
-
-
-class LlvmCovProvider(CoverageProvider):
-    """Coverage backend using cargo-llvm-cov (lcov output, src-based coverage)."""
-
-    def _lcov_path(self, module_name: str, suffix: str = "") -> Path:
-        return Path("/tmp") / f"llvmcov_{module_name}{suffix}.lcov"
-
-    def _run(self, project_dir: Path, module_name: str, suffix: str = "") -> tuple[float, list[dict], int, int]:
-        lcov_path = self._lcov_path(module_name, suffix)
-        env = _cargo_env()
-        # llvm-cov uses LLVM's regex (POSIX-ERE-ish): no `\d`, use `[0-9]` instead.
-        ignore_patterns = [
-            r"tests[/\\]",
-            r"build\.rs",
-            r"\.gen_tests_[0-9]+\.rs$",   # pipeline-generated test siblings
-        ]
-        ignore_patterns += [_glob_to_filename_regex(p) for p in _cluster_exclude_patterns()]
-        cmd = [
-            "cargo", "llvm-cov",
-            "--lcov",
-            "--output-path", str(lcov_path),
-            "-p", module_name,
-            # Keep generating the coverage report even if some individual tests
-            # fail. Without this, a single failing test (e.g. a buggy gen_tests
-            # block) zeroes out the entire measurement. cargo-llvm-cov rejects
-            # --no-fail-fast and --ignore-run-fail together; --ignore-run-fail
-            # already covers the "report even on failure" case we need here.
-            "--ignore-run-fail",
-            "--ignore-filename-regex", "|".join(ignore_patterns),
-        ]
-        cmd += ["--", "--test-threads=1", "--no-capture"]
-        try:
-            result = subprocess.run(
-                cmd, cwd=project_dir, capture_output=True, text=True,
-                timeout=BUILD_TIMEOUT, env=env,
-            )
-            if result.returncode != 0 and not lcov_path.exists():
-                # Capture more of stderr (the relevant error usually appears in
-                # the LAST kilobyte after pages of "Compiling …" messages).
-                _err_tail = result.stderr[-1500:] if len(result.stderr) > 1500 else result.stderr
-                _log(f"  llvm-cov: failed (exit={result.returncode}):\n{_err_tail}")
-                return 0.0, [], 0, 0
-        except subprocess.TimeoutExpired:
-            _log(f"  llvm-cov: timeout after {BUILD_TIMEOUT}s")
-            return 0.0, [], 0, 0
-        except Exception as e:
-            _log(f"  llvm-cov: error: {e}")
-            return 0.0, [], 0, 0
-        return self._parse_lcov(lcov_path, project_dir)
-
-    def _parse_lcov(self, lcov_path: Path, project_dir: Path) -> tuple[float, list[dict], int, int]:
-        try:
-            text = lcov_path.read_text(encoding="utf-8", errors="replace")
-        except FileNotFoundError:
-            return 0.0, [], 0, 0
-        files_data: list[dict] = []
-        current_file: str | None = None
-        line_hits: dict[int, int] = {}
-        project_str = str(project_dir)
-        for raw in text.splitlines():
-            if raw.startswith("SF:"):
-                current_file = raw[3:]
-                line_hits = {}
-            elif raw.startswith("DA:") and current_file is not None:
-                parts = raw[3:].split(",")
-                if len(parts) >= 2:
-                    try:
-                        ln = int(parts[0])
-                        ct = int(parts[1])
-                        line_hits[ln] = max(line_hits.get(ln, 0), ct)
-                    except ValueError:
-                        pass
-            elif raw == "end_of_record" and current_file is not None:
-                abs_path = current_file if os.path.isabs(current_file) else str(project_dir / current_file)
-                rel = os.path.relpath(abs_path, project_str)
-                if rel.startswith("src" + os.sep) or rel.startswith("src/"):
-                    if COVERAGE_IGNORE_PRAGMA:
-                        try:
-                            src_lines = Path(abs_path).read_text(encoding="utf-8", errors="replace").splitlines()
-                            pragma_lnos = {i + 1 for i, ln in enumerate(src_lines) if COVERAGE_IGNORE_PRAGMA in ln}
-                            if pragma_lnos:
-                                line_hits = {ln: ct for ln, ct in line_hits.items() if ln not in pragma_lnos}
-                        except Exception:
-                            pass
-                    covered   = sum(1 for c in line_hits.values() if c > 0)
-                    coverable = len(line_hits)
-                    traces    = [{"line": ln, "stats": {"Line": ct}} for ln, ct in sorted(line_hits.items())]
-                    files_data.append({
-                        "abs_path":  abs_path,
-                        "path":      abs_path.split(os.sep),
-                        "traces":    traces,
-                        "covered":   covered,
-                        "coverable": coverable,
-                    })
-                current_file = None
-                line_hits = {}
-        total_covered   = sum(f["covered"]   for f in files_data)
-        total_coverable = sum(f["coverable"] for f in files_data)
-        pct = (total_covered / total_coverable * 100.0) if total_coverable > 0 else 0.0
-        return pct, files_data, total_covered, total_coverable
-
-    def measure(self, project_dir: Path, module_name: str) -> tuple[float, list[dict], int, int]:
-        return self._run(project_dir, module_name)
-
-    def measure_file(self, project_dir: Path, module_name: str, rel_path: str) -> tuple[int, int] | None:
-        pct, files_data, _, _ = self._run(project_dir, module_name, suffix="_quick")
-        abs_target = str(project_dir / rel_path)
-        for fd in files_data:
-            if fd["abs_path"] == abs_target:
-                return fd["covered"], fd["coverable"]
-        return None
-
-    def load_cached(self, project_dir: Path, module_name: str) -> tuple[float, list[dict], int, int] | None:
-        lcov_path = self._lcov_path(module_name)
-        if not lcov_path.exists():
-            return None
-        try:
-            return self._parse_lcov(lcov_path, project_dir)
-        except Exception:
-            return None
-
-
-def _make_coverage_provider() -> CoverageProvider:
-    if COVERAGE_BACKEND is CoverageBackend.GRCOV:
-        return GrcovProvider()
-    if COVERAGE_BACKEND is CoverageBackend.LLVM_COV:
-        return LlvmCovProvider()
-    return TarpaulinProvider()
-
-
-_coverage_provider: CoverageProvider = _make_coverage_provider()
+# ── Coverage provider (relocated to pipeline_core.adapters.coverage, slice 4b) ──
+# Built from _COV_DEPS at the composition root; selection keyed on COVERAGE_BACKEND.
+_coverage_provider: _covmod.CoverageProvider = _covmod.make_coverage_provider(
+    COVERAGE_BACKEND, _COV_DEPS,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

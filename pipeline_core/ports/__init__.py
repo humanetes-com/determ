@@ -57,11 +57,17 @@ class Cargo(Protocol):
 
 @runtime_checkable
 class Coverage(Protocol):
-    """A coverage backend (tarpaulin / grcov / llvm-cov)."""
+    """A coverage backend (tarpaulin / grcov / llvm-cov).
 
-    def measure(self, project_dir: Path, *, env_extra: dict[str, str]) -> dict[str, float]:
-        """Return per-file (or per-fn) coverage fractions for the workspace."""
-        ...
+    Matches the relocated provider seam: ``measure`` returns the tarpaulin-compatible
+    ``(pct, files_data, covered, coverable)`` tuple that downstream pragma/uncovered-line
+    passes consume; ``measure_file`` is the fast per-file snapshot; ``load_cached`` restores
+    a prior measurement without re-running.
+    """
+
+    def measure(self, project_dir: Path, module_name: str) -> tuple[float, list[dict], int, int]: ...
+    def measure_file(self, project_dir: Path, module_name: str, rel_path: str) -> tuple[int, int] | None: ...
+    def load_cached(self, project_dir: Path, module_name: str) -> tuple[float, list[dict], int, int] | None: ...
 
 
 @runtime_checkable
@@ -74,6 +80,8 @@ class Workspace(Protocol):
     def write(self, rel: str, content: str) -> None: ...
     def commit(self, message: str, *, tag: str | None = ...) -> None: ...
     def reset_clean(self) -> None: ...
+    def default_branch(self) -> str: ...
+    def file_hash(self, filename: str) -> str: ...
 
 
 @runtime_checkable

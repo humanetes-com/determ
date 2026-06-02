@@ -1926,6 +1926,71 @@ def test_adapters_satisfy_ports() -> None:
     print("  OK  pipeline_core adapters satisfy ports (slice 4a)")
 
 
+def test_coverage_workspace_adapters() -> None:
+    """Slice 4b: relocated coverage parse paths + GitWorkspace behave identically,
+    and pipeline's shims delegate to the adapters. No cargo needed — exercises the
+    transcription-risk pure logic (lcov parse, grcov-json parse, git read/write/commit)."""
+    import os
+    import json as _json
+    import subprocess
+    import tempfile
+    from pathlib import Path
+    from pipeline_core.adapters import coverage as cov, workspace as ws
+    from pipeline_core.ports import Coverage, Workspace
+    from pipeline_core.domain.enums import CoverageBackend
+
+    deps = cov.CoverageDeps(
+        log=lambda m: None, cargo_env=lambda: {}, cluster=lambda: None,
+        tarpaulin_bin=Path("/nonexistent/tarp"), grcov_bin=Path("/nonexistent/grcov"),
+        build_timeout=1, ignore_pragma="GRCOV_EXCL_LINE",
+    )
+    prov = cov.make_coverage_provider(CoverageBackend.LLVM_COV, deps)
+    assert isinstance(prov, Coverage)  # measure(...) shape
+
+    with tempfile.TemporaryDirectory() as td:
+        proj = Path(td)
+        # default-cluster (None) exclude patterns parity with the old _cluster_exclude_patterns.
+        assert cov.cluster_exclude_patterns(deps) == ["*/nightly.rs"]
+
+        # lcov parse: one src file, 2/3 lines covered; pragma line excluded.
+        (proj / "src").mkdir()
+        (proj / "src" / "f.rs").write_text("a\nb // GRCOV_EXCL_LINE\nc\n")
+        lcov = proj / "cov.lcov"
+        lcov.write_text("SF:src/f.rs\nDA:1,5\nDA:2,0\nDA:3,0\nend_of_record\n")
+        pct, files, covd, total = prov._parse_lcov(lcov, proj)  # type: ignore[attr-defined]
+        assert (covd, total) == (1, 2)  # line 2 dropped by pragma; 1 of {1,3} hit
+        assert files and files[0]["abs_path"].endswith("src/f.rs")
+
+        # grcov-json parse (load_grcov_json reads /tmp/grcov_<mod>.json).
+        mod = f"covtest_{os.getpid()}"
+        gj = Path("/tmp") / f"grcov_{mod}.json"
+        gj.write_text(_json.dumps({"source_files": [{"name": "src/f.rs", "coverage": [1, 0, None, 2]}]}))
+        try:
+            pct, files, covd, total = cov.load_grcov_json(proj, mod)
+            assert (covd, total) == (2, 3)
+        finally:
+            gj.unlink(missing_ok=True)
+
+        # GitWorkspace: read/write/commit on a real temp repo.
+        subprocess.run(["git", "init", "-q"], cwd=proj, check=True)
+        subprocess.run(["git", "config", "user.email", "t@t"], cwd=proj, check=True)
+        subprocess.run(["git", "config", "user.name", "t"], cwd=proj, check=True)
+        wsd = ws.WorkspaceDeps(log=lambda m: None, emit=lambda *a, **k: None)
+        gw = ws.GitWorkspace(proj, wsd, managed=True)
+        assert isinstance(gw, Workspace)
+        gw.write("hello.txt", "hi")
+        assert gw.read("hello.txt") == "hi"
+        assert gw.commit("first") in (None,)  # commit returns None, must not raise
+        # second commit with no changes → underlying git_commit returns False (nothing staged)
+        assert ws.git_commit(wsd, proj, "noop", managed=True) is False
+        assert ws.git_commit(wsd, proj, "skip", managed=False) is False  # unmanaged guard
+
+    # pipeline shims delegate to the adapter (identity of provider + module funcs).
+    import pipeline
+    assert isinstance(pipeline._coverage_provider, cov.CoverageProvider)
+    print("  OK  pipeline_core coverage + workspace adapters (slice 4b)")
+
+
 # ─── Driver ─────────────────────────────────────────────────────────────────
 
 def main() -> int:
@@ -1978,6 +2043,7 @@ def main() -> int:
     test_sig_tighten_guard_and_where_parse()
     test_domain_enums_and_model_caps()
     test_adapters_satisfy_ports()
+    test_coverage_workspace_adapters()
 
     if full:
         print("Cargo phase (--full):")

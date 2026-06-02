@@ -39,4 +39,12 @@ def build_adapters(settings: Settings, *, extractor_bin: Path, model: str | None
     )
 
 
-__all__ = ["Adapters", "build_adapters", "CargoCli", "CliExtractor", "ModelInteractLLM"]
+from . import coverage, workspace  # noqa: E402  (re-export submodules for callers)
+from .coverage import CoverageDeps, CoverageProvider, make_coverage_provider  # noqa: E402
+from .workspace import GitWorkspace, WorkspaceDeps  # noqa: E402
+
+__all__ = [
+    "Adapters", "build_adapters", "CargoCli", "CliExtractor", "ModelInteractLLM",
+    "coverage", "workspace", "CoverageDeps", "CoverageProvider", "make_coverage_provider",
+    "GitWorkspace", "WorkspaceDeps",
+]
