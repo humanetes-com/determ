@@ -1881,7 +1881,11 @@ def test_domain_enums_and_model_caps() -> None:
     assert model_context_chars("x", Backend.CLAUDE, None) == (200_000 - 6_000) * 4
     assert model_context_chars("claude-x", Backend.OLLAMA, None) == (200_000 - 6_000) * 4
     assert model_context_chars("x", Backend.OLLAMA, None) == (8_192 - 6_000) * 4
-    print("  OK  pipeline_core domain enums + model_caps (slice 1)")
+
+    # Slice 2: module-level knobs are wired to the enum types, not bare strings.
+    import pipeline
+    assert isinstance(pipeline.COVERAGE_BACKEND, CoverageBackend)
+    print("  OK  pipeline_core domain enums + model_caps (slice 1+2)")
 
 
 # ─── Driver ─────────────────────────────────────────────────────────────────

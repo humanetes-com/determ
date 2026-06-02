@@ -32,7 +32,14 @@ from dotenv import load_dotenv
 import model_interact as _mi
 from model_interact import ask as _ask_raw, MODEL
 from strip_to_tests import detect_language, process_rust
-from pipeline_core.domain.enums import Backend
+from pipeline_core.domain.enums import (
+    Backend,
+    CoverageBackend,
+    FillUnit,
+    FixStrategy,
+    PhaseCDriver,
+    PhaseCMode,
+)
 from pipeline_core.domain.model_caps import (
     model_tier as _model_tier_pure,
     model_context_chars as _model_context_chars_pure,
@@ -515,18 +522,18 @@ def _safe_input_char_limit(min_content_tok: int = 16_384) -> int:
     """
     CPT_FLOOR     = 3.0    # chars/token — matches model_interact.py cpt_floor
     VLLM_OVERHEAD = 512    # internal vLLM overhead tokens
-    backend = os.getenv("BACKEND", "ollama").lower()
-    if backend == "vllm":
-        ctx      = int(os.getenv("VLLM_MAX_MODEL_LEN", "65536"))
-        thinking = int(os.getenv("VLLM_THINKING_BUDGET", "0"))
-    elif backend == "sglang":
-        ctx      = int(os.getenv("SGLANG_MAX_MODEL_LEN", "65536"))
-        thinking = int(os.getenv("SGLANG_THINKING_BUDGET", "0"))
-    elif backend == "ollama":
-        ctx      = int(os.getenv("OLLAMA_NUM_CTX", "8192"))
-        thinking = 0
-    else:
-        ctx, thinking = 8_192, 0
+    match Backend.coerce(os.getenv("BACKEND"), Backend.OLLAMA):
+        case Backend.VLLM:
+            ctx      = int(os.getenv("VLLM_MAX_MODEL_LEN", "65536"))
+            thinking = int(os.getenv("VLLM_THINKING_BUDGET", "0"))
+        case Backend.SGLANG:
+            ctx      = int(os.getenv("SGLANG_MAX_MODEL_LEN", "65536"))
+            thinking = int(os.getenv("SGLANG_THINKING_BUDGET", "0"))
+        case Backend.OLLAMA:
+            ctx      = int(os.getenv("OLLAMA_NUM_CTX", "8192"))
+            thinking = 0
+        case _:  # claude / huggingface / unrecognised → safe fallback
+            ctx, thinking = 8_192, 0
     return max(4_000, int((ctx - thinking - VLLM_OVERHEAD - min_content_tok) * CPT_FLOOR))
 
 # General tasks (task1/2/3/4): large outputs (full files, requirements docs).
@@ -654,11 +661,11 @@ COVERAGE_AUGMENT_SENTINEL = ".coverage_augmented"
 _real_home = Path(os.path.expanduser(f"~{os.environ.get('SUDO_USER', '')}") if os.environ.get("SUDO_USER") else str(Path.home()))
 TARPAULIN_BIN = _real_home / ".cargo" / "bin" / "cargo-tarpaulin"
 GRCOV_BIN     = _real_home / ".cargo" / "bin" / "grcov"
-COVERAGE_BACKEND = os.getenv("COVERAGE_BACKEND", "tarpaulin").lower()  # "tarpaulin" | "grcov" | "llvm-cov"
+COVERAGE_BACKEND = CoverageBackend.coerce(os.getenv("COVERAGE_BACKEND"), CoverageBackend.TARPAULIN)
 
 # Pragma comment each backend recognises to exclude a line from coverage.
 COVERAGE_IGNORE_PRAGMA = (
-    "// # tarpaulin coverage ignore" if COVERAGE_BACKEND == "tarpaulin"
+    "// # tarpaulin coverage ignore" if COVERAGE_BACKEND is CoverageBackend.TARPAULIN
     else "// GRCOV_EXCL_LINE"
 )
 
@@ -9682,8 +9689,8 @@ def _task2_fill_fns_one_by_one(
     # per-fn prompts cannot show. The per-impl path delegates free fns and
     # oversized blocks back to the per-fn path below, which continues to
     # exist as a fallback. Toggle via `PHASE_C_FILL_UNIT=fn`.
-    _fill_unit = os.getenv("PHASE_C_FILL_UNIT", "impl").lower()
-    if _fill_unit == "impl":
+    _fill_unit = FillUnit.coerce(os.getenv("PHASE_C_FILL_UNIT"), FillUnit.IMPL)
+    if _fill_unit is FillUnit.IMPL:
         _impl_stats = _phase_c_fill_impl_blocks(
             project_dir=project_dir,
             target_src_dir=target_src_dir,
@@ -16624,7 +16631,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
         # Mode selection for Phase B+C: per-group (default, current behaviour)
         # or per-fn TDD (Flavour B, smaller prompts, one call per fn, no
         # LLM grouping). Switched via env var PHASE_C_MODE=per_fn.
-        per_fn_mode = os.getenv("PHASE_C_MODE", "per_group").strip().lower() == "per_fn"
+        per_fn_mode = PhaseCMode.coerce(os.getenv("PHASE_C_MODE"), PhaseCMode.PER_GROUP) is PhaseCMode.PER_FN
 
         # Seed filled_dir from skeleton state (idempotent) regardless of mode.
         filled_dir.mkdir(parents=True, exist_ok=True)
@@ -16715,8 +16722,8 @@ class StaticSkeletonTask2Generator(Task2Generator):
             # Plan 4 — PHASE_C_DRIVER=tdd switches to the TDD outer loop
             # (cargo test → frontier → fill). Default `fn_walk` keeps the
             # legacy per-fn-walk driver.
-            _driver = os.getenv("PHASE_C_DRIVER", "fn_walk").strip().lower()
-            if _driver == "tdd":
+            _driver = PhaseCDriver.coerce(os.getenv("PHASE_C_DRIVER"), PhaseCDriver.FN_WALK)
+            if _driver is PhaseCDriver.TDD:
                 _log(f"  {tag} [skeleton-C] PHASE_C_DRIVER=tdd — using TDD outer loop")
                 c_result = _run_phase_c_tdd(
                     project_dir=project_dir,
@@ -17895,10 +17902,10 @@ Output nothing else."""
             _log(f"  [fix loop/impl] unexpected error ({e}) → legacy whole-file fallback")
             return _do_fix(output, history, retro=retro)
 
-    _fix_strategy = os.getenv("FIX_LOOP_STRATEGY", "per_fn").strip().lower()
-    _fix_unit = os.getenv("FIX_LOOP_UNIT", "impl").strip().lower()
-    if _fix_strategy == "per_fn":
-        _chosen_do_fix = _do_fix_per_impl if _fix_unit == "impl" else _do_fix_per_fn
+    _fix_strategy = FixStrategy.coerce(os.getenv("FIX_LOOP_STRATEGY"), FixStrategy.PER_FN)
+    _fix_unit = FillUnit.coerce(os.getenv("FIX_LOOP_UNIT"), FillUnit.IMPL)
+    if _fix_strategy is FixStrategy.PER_FN:
+        _chosen_do_fix = _do_fix_per_impl if _fix_unit is FillUnit.IMPL else _do_fix_per_fn
     else:
         _chosen_do_fix = _do_fix
     _log(f"  [fix loop] strategy={_fix_strategy} unit={_fix_unit}")
@@ -19587,9 +19594,9 @@ class LlvmCovProvider(CoverageProvider):
 
 
 def _make_coverage_provider() -> CoverageProvider:
-    if COVERAGE_BACKEND == "grcov":
+    if COVERAGE_BACKEND is CoverageBackend.GRCOV:
         return GrcovProvider()
-    if COVERAGE_BACKEND == "llvm-cov":
+    if COVERAGE_BACKEND is CoverageBackend.LLVM_COV:
         return LlvmCovProvider()
     return TarpaulinProvider()
 
@@ -23062,7 +23069,7 @@ def main():
         "augment_tests": args.augment_tests,
         "from_spec": _from_spec,
         "model": MODEL,
-        "backend": os.getenv("BACKEND", "ollama").lower(),
+        "backend": Backend.coerce(os.getenv("BACKEND"), Backend.OLLAMA),
         "coverage_backend": COVERAGE_BACKEND,
         "context_chars": MODEL_CONTEXT_CHARS,
     })
@@ -23088,14 +23095,14 @@ def main():
         _params.append("--restart-from-augmented")
     _log(f"  pipeline.py [{_ph}]  monitor.py [{_mh}]  params: {' '.join(_params) or '(none)'}")
 
-    _backend_name = os.getenv("BACKEND", "ollama").lower()
-    if MODEL.startswith("claude") or _backend_name == "claude":
+    _backend = Backend.coerce(os.getenv("BACKEND"), Backend.OLLAMA)
+    if MODEL.startswith("claude") or _backend is Backend.CLAUDE:
         provider = "Claude (Anthropic API)"
-    elif _backend_name == "vllm":
+    elif _backend is Backend.VLLM:
         provider = f"vLLM ({os.getenv('VLLM_MODEL_NAME', MODEL)})"
-    elif _backend_name == "sglang":
+    elif _backend is Backend.SGLANG:
         provider = f"SGLang ({os.getenv('SGLANG_MODEL_NAME', MODEL)})"
-    elif _backend_name == "huggingface":
+    elif _backend is Backend.HUGGINGFACE:
         provider = f"HuggingFace ({os.getenv('HF_MODEL', MODEL)})"
     else:
         provider = f"Ollama ({MODEL})"
@@ -23104,7 +23111,7 @@ def main():
          f"(SINGLE_CALL={SINGLE_CALL_CHAR_LIMIT:,}  FILE={FILE_CHAR_LIMIT:,}  "
          f"INTERMEDIATE={INTERMEDIATE_CHAR_LIMIT:,})")
 
-    if _backend_name == "vllm":
+    if _backend is Backend.VLLM:
         _ensure_vllm_ready(root)
 
     if args.clean and args.restart_from_augmented:
