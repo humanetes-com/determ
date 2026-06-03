@@ -2160,6 +2160,26 @@ def test_slice5b_task1() -> None:
     print("  OK  task1 (dispatcher + proc-macro) extracted (slice 5b)")
 
 
+def test_slice5b_task0c() -> None:
+    """Slice 5b: extracted task0c engine — verbatim body behind a rebind-prelude. Exercise the
+    early-skip path (augmentor not applicable) with all-stub deps; confirm pipeline builds the
+    real _TASK0C_DEPS (which validates all injected names resolve)."""
+    from types import SimpleNamespace
+    from pathlib import Path
+    from pipeline_core.application.tasks.task0c import task0c_augment_module, Task0cDeps
+
+    stub = {f: (lambda *a, **k: None) for f in Task0cDeps.__dataclass_fields__}
+    stub["test_augmentor_factory"] = lambda: SimpleNamespace(is_applicable=lambda ct: False)
+    stub["get_current_cluster"] = lambda: None
+    deps = Task0cDeps(**stub)
+    # crate type not applicable → returns (100.0, 0, False) before any cargo/LLM work.
+    assert task0c_augment_module(Path("."), "m", Path("."), deps, crate_type="proc-macro") == (100.0, 0, False)
+
+    import pipeline
+    assert isinstance(pipeline._TASK0C_DEPS, Task0cDeps)
+    print("  OK  task0c engine extracted behind orchestrator (slice 5b)")
+
+
 def test_slice5b_task2() -> None:
     """Slice 5b: extracted TASK 2 dispatcher + inner loop (no-build-check path) + fix loop
     (empty manifest) behave with fakes; generation engine stays injected from pipeline."""
@@ -2402,6 +2422,7 @@ def main() -> int:
     test_slice5b_task0b_discovery()
     test_slice5b_task1()
     test_slice5b_task2()
+    test_slice5b_task0c()
     test_slice5b_task3_task4()
     test_slice5b_genesis_audit_task()
 
