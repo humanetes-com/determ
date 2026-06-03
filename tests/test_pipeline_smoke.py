@@ -20,10 +20,20 @@ import shutil
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parent.parent
 FIXTURE = REPO / "fixtures" / "tiny"
 
 sys.path.insert(0, str(REPO))
+
+# Cargo-backed coverage tests are slow (~30-60s) and need cargo + a coverage backend
+# (tarpaulin/grcov). Opt in with SMOKE_FULL=1; otherwise pytest skips them (and CI, which
+# has no coverage toolchain, stays fast). Mirrors the old `--full` gate. The condition is a
+# STRING so pytest evaluates it lazily at collection — after main() may have set the env.
+needs_cargo = pytest.mark.skipif(
+    "os.environ.get('SMOKE_FULL') != '1'", reason="needs cargo + coverage backend; set SMOKE_FULL=1"
+)
 
 
 def _setup_workspace(name: str = "fixture-tiny-test") -> Path:
@@ -1639,6 +1649,7 @@ mod gen_tests_5 {
 
 # ─── Cargo phase (slow, opt-in) ─────────────────────────────────────────────
 
+@needs_cargo
 def test_coverage_measurement() -> None:
     """Run the configured coverage provider on the fixture; assert sensible output."""
     import pipeline
@@ -1668,6 +1679,7 @@ def test_coverage_measurement() -> None:
     print("  OK  coverage measurement")
 
 
+@needs_cargo
 def test_coverage_ignores_siblings() -> None:
     """Write a synthetic sibling that would inflate coverage if measured;
     confirm the coverage provider's ignore patterns exclude it."""
@@ -2450,76 +2462,14 @@ def test_slice5b_genesis_audit_task() -> None:
 # ─── Driver ─────────────────────────────────────────────────────────────────
 
 def main() -> int:
-    full = "--full" in sys.argv or os.getenv("SMOKE_FULL") == "1"
-
-    print("Pure-Python phase:")
-    test_gen_tests_helpers()
-    test_extract_gen_tests_body()
-    test_examples_collector()
-    test_decl_only_src_noise_filter()
-    test_has_gen_tests_decl()
-    test_api_surface_capture()
-    test_api_surface_conformance()
-    test_merge_fills_preserving_existing()
-    test_fn_block_extract_and_merge()
-    test_format_skeleton_index()
-    test_format_skeleton_index_elides_macros()
-    test_prune_redundant_clusters()
-    test_filter_tests_for_cluster()
-    test_eval_cfg_pred()
-    test_strip_doc_attrs()
-    test_condense_doc_attrs()
-    test_cluster_gate_predicate_is_satisfiable()
-    test_run_scoped_tests()
-    test_generate_in_parallel()
-    test_partition_uncovered_lines()
-    test_collect_sibling_filled_bodies()
-    test_count_test_fns_cfg_aware()
-    test_validate_task3_strict()
-    test_parse_test_counts()
-    test_build_test_reverse_map()
-    test_ast_cluster_merge_preserves_trait_structure()
-    test_strip_preserves_gen_tests_verbatim()
-    test_file_cfg_predicate_adjacent_mod_decls()
-    test_cluster_extractor_args()
-    test_buildcluster_features_toolchain()
-    test_split_oversized_groups()
-    test_describe_test_environment()
-    test_retrospective_prompt_includes_failed_attempts()
-    test_module_augment_state()
-    test_model_context_chars()
-    test_context_guard_section_removal()
-    test_context_guard_middle_trim()
-    test_event_log()
-    test_monitor_task_pipeline_parser()
-    test_derive_check_only_cmd()
-    test_splice_fn_body_allow_nonstub()
-    test_render_impl_block()
-    test_strip_ansi_and_diag_frontier()
-    test_sig_tighten_guard_and_where_parse()
-    test_domain_enums_and_model_caps()
-    test_adapters_satisfy_ports()
-    test_coverage_workspace_adapters()
-    test_slice5a_shims_delegate_to_adapters()
-    test_slice5b_task0_docs()
-    test_slice5b_task0b_discovery()
-    test_slice5b_task1()
-    test_slice5b_task2()
-    test_slice5b_task0c()
-    test_slice6_models()
-    test_slice6_models_seam_wiring()
-    test_slice5b_task3_task4()
-    test_slice5b_genesis_audit_task()
-
-    if full:
-        print("Cargo phase (--full):")
-        test_coverage_measurement()
-        test_coverage_ignores_siblings()
-    else:
-        print("Skipping cargo phase (pass --full or SMOKE_FULL=1 to enable).")
-
-    print("\nAll smoke tests passed.")
-    return 0
+    """Back-compat CLI shim: delegate to pytest so there is ONE source of truth for which
+    tests exist (pytest collection), not a hand-maintained call list that silently drifts.
+        python tests/test_pipeline_smoke.py          # fast suite (cargo tests skipped)
+        python tests/test_pipeline_smoke.py --full   # + cargo coverage tests
+    """
+    if "--full" in sys.argv:
+        os.environ["SMOKE_FULL"] = "1"
+    return pytest.main([__file__, "-q"])
 
 
 if __name__ == "__main__":

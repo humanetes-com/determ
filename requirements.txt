@@ -4,3 +4,5 @@ python-dotenv
 mypy==2.1.0
 asciinema
 ruff==0.15.15
+pytest==8.4.2
+pytest-cov==7.0.0

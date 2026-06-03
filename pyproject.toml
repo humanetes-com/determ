@@ -32,6 +32,10 @@ check_untyped_defs = true
 warn_return_any = true
 strict_optional = false
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
 [[tool.mypy.overrides]]
 # The extracted package is new and clean — hold it to strict-optional (catches real
 # Optional bugs). `disallow_untyped_defs` is deferred (backlog R1.3b): the verbatim-moved

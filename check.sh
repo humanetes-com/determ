@@ -28,8 +28,12 @@ echo "Checking task-extraction invariants (deps fields declared==provided==consu
 "$SCRIPT_DIR/.venv/bin/python" tools/check_extraction_invariants.py || exit 1
 
 echo ""
-echo "Running pure-Python smoke tests..."
-"$SCRIPT_DIR/.venv/bin/python" tests/test_pipeline_smoke.py
+echo "Running pytest + domain coverage floor (cargo coverage tests skip unless SMOKE_FULL=1)..."
+# Gate the DOMAIN layer's coverage — it is the stable, OSS-facing contract and currently
+# ~98%; the floor stops it regressing. The application/ engine is mid-migration and not gated
+# here (its real coverage comes later via the fill-replay harness, backlog R4.3).
+"$SCRIPT_DIR/.venv/bin/python" -m pytest \
+    --cov=pipeline_core.domain --cov-report=term-missing:skip-covered --cov-fail-under=95
 
 echo ""
 echo "Done."
