@@ -109,6 +109,12 @@ from pipeline_core.domain.models import (
     ModuleAugmentState,
     TypeRecord,
 )
+from pipeline_core.domain.refine import (
+    Attempt as _Attempt,
+)
+from pipeline_core.domain.refine import (
+    LoopState as _LoopState,
+)
 from pipeline_core.domain.test_results import (
     OUTPUT_SEPARATOR,
     _parse_test_counts,
@@ -7260,10 +7266,16 @@ def _improvement_loop(
     except (TypeError, ValueError):
         _do_fix_accepts_retro = False
 
+    # Stall/best/iteration bookkeeping is delegated to the shared LoopState
+    # domain type (pipeline_core.domain.refine) so every loop that runs through
+    # _improvement_loop shares ONE definition of improvement/stall AND gets the
+    # same cumulative meta-awareness (`state.context()` — iteration, consecutive
+    # stalls, per-attempt trajectory, latest retro) handed to its fix attempts.
+    # Metric is "lower is better" here (error/uncovered-line count); LoopState is
+    # "higher is better", so we carry the negated metric internally.
+    state = _LoopState()
     history: list[dict] = []
     last_output = ""
-    best_metric: int | None = None
-    stall = 0
     iter_n = 0
 
     while iter_n < hard_cap:
@@ -7271,23 +7283,28 @@ def _improvement_loop(
         last_output = output
         if ok:
             return True, output, history
-        if best_metric is None:
-            best_metric = metric
+        if not state.attempts:
+            state.best_metric = float(-metric)   # seed with iter-1 pre-fix floor
 
         # Stall-triggered retro: fires when the prior iter did not move the
         # floor. First iter has no prior to compare and never runs retro.
         retro = ""
-        if iter_n >= 1 and stall >= 1 and do_retro is not None:
+        if state.attempts and state.stalls >= 1 and do_retro is not None:
             try:
                 retro = do_retro(output, history) or ""
             except Exception as e:
                 _log(f"  [improvement_loop/{name}] do_retro failed: {e}")
                 retro = ""
+        state.pending_retro = retro
+        # Cumulative meta-awareness for THIS fix attempt: trajectory + stall
+        # count + latest retro. Empty on the first iter (no history yet), so
+        # first-attempt behaviour is unchanged.
+        fix_guidance = state.context()
 
         iter_n += 1
         try:
             if _do_fix_accepts_retro:
-                record = do_fix(output, history, retro=retro) or {}
+                record = do_fix(output, history, retro=fix_guidance) or {}
             else:
                 record = do_fix(output, history) or {}
         except Exception as e:
@@ -7300,23 +7317,25 @@ def _improvement_loop(
         # hint, but we let run_check be the source of truth on the next
         # iter. The current iter just bookkeeps the pre-fix metric.
         new_metric = record.get("post_fix_metric", metric)
-        improved = (new_metric < best_metric)
-        if improved:
-            best_metric = new_metric
-            stall = 0
-        else:
-            stall += 1
+        improved = float(-new_metric) > state.best_metric
+        state.record(_Attempt(
+            metric=float(-new_metric),
+            iteration=state.iteration,
+            improved=improved,
+            error=output[:2000],
+            retro=retro,
+        ))
 
         ev = {
             "name": name,
             "iter": iter_n,
             "metric_prev": metric,
             "metric_new": new_metric,
-            "metric_best": best_metric,
+            "metric_best": int(-state.best_metric),
             "improved": improved,
-            "stalled": stall,
+            "stalled": state.stalls,
             "fix_summary": record.get("summary", ""),
-            "retro_chars": len(retro),
+            "retro_chars": len(fix_guidance),
         }
         with suppress(Exception):
             _emit("loop.iter", data=ev)
@@ -7334,9 +7353,9 @@ def _improvement_loop(
             _log(f"  [improvement_loop/{name}] aborted at iter {iter_n}: "
                  f"{record.get('reason', 'unknown')}")
             return False, last_output, history
-        if stall >= max_stalls:
+        if state.stalls >= max_stalls:
             _log(f"  [improvement_loop/{name}] floor stalled at "
-                 f"{best_metric} for {stall} iter(s) — stopping.")
+                 f"{int(-state.best_metric)} for {state.stalls} iter(s) — stopping.")
             return False, last_output, history
 
     _log(f"  [improvement_loop/{name}] hard cap {hard_cap} reached "
@@ -18721,6 +18740,7 @@ def _task0c_retrospective(
     attempt_history: str = "",
     uncov_lines: "set[int] | None" = None,
     unproductive_blocks: "list[str] | None" = None,
+    consecutive_giveups: int = 0,
 ) -> str:
     """Ask LLM to classify why remaining uncovered functions can't be reached.
 
@@ -18775,6 +18795,16 @@ def _task0c_retrospective(
             "the same target was previously classified TESTABLE, the classification was\n"
             f"wrong — revise it now.\n\n{chr(10).join(_shown)}\n\n"
         )
+    # The test-generation model itself has repeatedly declared these lines unreachable. That is
+    # the strongest signal there's no public-API test path — weigh it heavily toward UNREACHABLE.
+    _giveup_section = ""
+    if consecutive_giveups >= 2:
+        _giveup_section = (
+            f"STRONG SIGNAL: the test-generation model has, on {consecutive_giveups} consecutive "
+            "attempts, judged these lines to have NO reachable test path (it returned an empty "
+            "block citing unreachability). If you cannot point to a concrete public-API call that "
+            "would execute a line, classify it UNREACHABLE — do not keep it TESTABLE.\n\n"
+        )
     _env_section = _describe_test_environment()
     prompt = (
         f"You generated tests for `{rel_path}` but some lines remain uncovered.\n"
@@ -18784,6 +18814,7 @@ def _task0c_retrospective(
         f"{_guard_section}"
         f"{_history_section}"
         f"{_unproductive_section}"
+        f"{_giveup_section}"
         f"Previous test block (already committed):\n```rust\n{_block_snippet}\n```\n\n"
         f"Still-uncovered functions:\n```rust\n{fn_bodies}\n```\n\n"
         f"Source context:\n```rust\n{_src_snippet}\n```\n\n"

@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ...domain.refine import Attempt, LoopState
 from ...log import emit, log
 
 
@@ -513,6 +514,13 @@ corrected content here
     # call to UNREACHABLE when evidence demands it.
     file_last_qcov: dict[str, int] = {}          # last quick-cov 'covered' count per file
     file_failed_blocks: dict[str, list[str]] = {}  # gen blocks that compiled but didn't move the metric
+    file_giveup_counts: dict[str, int] = {}      # consecutive attempts the LLM flagged "unreachable"
+    file_loops: dict[str, LoopState] = {}        # per-file refine history → meta-awareness context
+    # FIX (session 48): give the generation model META-AWARENESS that it is stalling (today it gets
+    # none — it re-tries blind), and FEED the consecutive give-up signal to the retrospective so
+    # genuinely-unreachable lines are classified (and pragma'd) faster instead of burning the full
+    # stall budget. Env-gated so a fresh run can be A/B'd against the current (pre-fix) run.
+    _STALL_CONTEXT = os.getenv("TASK0C_STALL_CONTEXT", "1") == "1"
     _at_ceiling = False                      # True when a full pass produced no actionable lines
     while attempt < max_attempts:
         attempt += 1
@@ -902,6 +910,15 @@ project-specific import paths, type construction patterns, and hard constraints.
                 )
             )
 
+            # Meta-awareness (via the shared refine-loop primitive): prepend this file's stall
+            # trajectory + latest retro so the model knows it is repeating (it otherwise re-tries
+            # blind). The LoopState is recorded after each pass (below).
+            _giveup_before = file_giveup_counts.get(rel_path, 0)
+            if _STALL_CONTEXT:
+                _loop_ctx = file_loops.setdefault(rel_path, LoopState()).context()
+                if _loop_ctx:
+                    _coverage_status = _loop_ctx + _coverage_status
+
             def _render_prompt(_secs: dict, _cov_status: str) -> str:
                 return f"""You are writing Rust unit tests that specify the behavioral contract of source code.
 {_TASK0C_THINKING_DIRECTIVE}{_secs['strategy']}{_secs['history']}{_secs['what_worked']}{_secs['retrospective']}{_secs['context']}{_cov_status}
@@ -1161,7 +1178,8 @@ project-specific import paths, type construction patterns, and hard constraints.
                 # all #[test] functions have empty or comment-only bodies.
                 if block and not _has_nonempty_test_body(block):
                     if _flags_unreachable((block or "") + (response or "")):
-                        _log(f"  [{module_name}] LLM flagged {rel_path} as unreachable — discarding (no EXCL, stall counter applies).")
+                        file_giveup_counts[rel_path] = file_giveup_counts.get(rel_path, 0) + 1
+                        _log(f"  [{module_name}] LLM flagged {rel_path} as unreachable — discarding (no EXCL, stall counter applies; give-up {file_giveup_counts[rel_path]}).")
                         _save_stream_log(_gen_attempt, _query, response or "", "llm_giveup")
                     else:
                         _log(f"  [{module_name}] Skeleton-only response for {rel_path} — discarding.")
@@ -1318,6 +1336,9 @@ project-specific import paths, type construction patterns, and hard constraints.
                 newly_covered = file_prev_uncov_lines.get(rel_path, set()) - uncov_lines
                 file_best_uncov[rel_path] = len(uncov_lines)
                 file_stall_counts[rel_path] = 0
+                file_giveup_counts[rel_path] = 0   # progress resets the give-up streak
+                file_loops.setdefault(rel_path, LoopState()).record(
+                    Attempt(metric=float(-len(uncov_lines)), improved=True))
                 # Capture what worked so next attempt can reuse the same patterns.
                 if _old_block:
                     _condensed_working = _condense_rust_to_signatures(_old_block, "gen_tests.rs")
@@ -1331,6 +1352,11 @@ project-specific import paths, type construction patterns, and hard constraints.
             else:
                 file_stall_counts[rel_path] = file_stall_counts.get(rel_path, 0) + 1
                 stall_n = file_stall_counts[rel_path]
+                _note = ("model judged these lines unreachable"
+                         if file_giveup_counts.get(rel_path, 0) > _giveup_before
+                         else "compiled but added no coverage")
+                file_loops.setdefault(rel_path, LoopState()).record(
+                    Attempt(metric=float(-len(uncov_lines)), improved=False, note=_note))
                 # Retrospective is fired twice:
                 #   stall_n == 1                — initial classification from source alone
                 #   stall_n == RETRO_DEEP_AT_STALL — re-classification with concrete
@@ -1360,6 +1386,7 @@ project-specific import paths, type construction patterns, and hard constraints.
                         attempt_history=attempt_history,
                         uncov_lines=uncov_lines,
                         unproductive_blocks=file_failed_blocks.get(rel_path, []) if _fire_deep else None,
+                        consecutive_giveups=file_giveup_counts.get(rel_path, 0) if _STALL_CONTEXT else 0,
                     )
                     if retro:
                         file_retrospectives[rel_path] = retro

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from ..domain.models import ConstRecord, DispatchFamily, FnRecord, ModRecord, TypeRecord
+from ..domain.refine import Attempt, LoopState
 
 
 @runtime_checkable
@@ -95,3 +96,31 @@ class ProcessResult(Protocol):
     returncode: int
     stdout: str
     stderr: str
+
+
+@runtime_checkable
+class RefineStrategy(Protocol):
+    """The task-specific half of a refine loop (see `application.refine_loop`). The loop driver
+    owns the iterate/stall/retro/budget shape; the strategy owns the domain work — measure the
+    metric, decide success, do one generate+apply attempt (reading `state.context()` for
+    meta-awareness), and produce a retrospective on stall. Implementations do the I/O
+    (model calls, cargo); the loop driver and `LoopState` stay pure."""
+
+    def measure(self) -> float:
+        """Current value of the metric being improved (coverage %, pass count, -error count, …)."""
+        ...
+
+    def is_done(self, metric: float) -> bool:
+        """True when the loop has succeeded and should stop (e.g. 100% / all tests pass)."""
+        ...
+
+    def attempt(self, state: LoopState) -> Attempt:
+        """Run ONE generate+apply step. Read `state.context()` to put the trajectory/retro into
+        the prompt. Return the resulting :class:`Attempt` (its `improved` flag is recomputed by
+        the driver against the running best, so the strategy may leave it False)."""
+        ...
+
+    def retrospect(self, state: LoopState) -> str:
+        """Produce retrospective guidance on a stall (or "" for none). Surfaced to the next attempt
+        via `state.context()`."""
+        ...

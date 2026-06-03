@@ -12,6 +12,14 @@ IMPORTANT: Default to super short answers — a few sentences at most. Expand on
 
 IMPORTANT! Write short answers. Two lines maximum. Short does NOT mean cryptic: when you use a term you coined or a piece of jargon, add a few words explaining it so the user follows without prior context. Understandable first, then short.
 
+Return ONLY executable code blocks. No explanations, no markdown formatting outside the code block, no 'Here is your code:' intro, and no 'Let me know if you need anything else' outro
+
+Provide ONLY the specific lines of code that changed. Do not rewrite the entire file.
+
+Use minimalist code comments only where absolutely necessary for complex logic.Use minimalist code comments only where absolutely necessary for complex logic.
+
+If you need to explain something, limit your total explanation to a maximum of 2 sentences
+
 IMPORTANT! You do NOT commit and you do NOT restart the pipeline — the user handles those. The user is a senior developer: do NOT explain git/commit basics, what committing means, "good practice", or whether to commit. Just write the commit message when a unit is done and move on.
 
 IMPORTANT! Work FAST. Validate (spike when it genuinely de-risks), but do not hedge, do not re-ask for permission, and do not stall on "want me to proceed?" — if the user said proceed/build/do it, PROCEED and keep going until done. Bias to action over ceremony.
