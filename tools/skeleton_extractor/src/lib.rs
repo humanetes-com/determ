@@ -245,6 +245,33 @@ mod tests {
     }
 
     #[test]
+    fn fn_cfg_predicates_are_not_duplicated() {
+        use std::fs;
+        let tmp = std::env::temp_dir().join("skel_cfgdup_test");
+        if tmp.exists() {
+            fs::remove_dir_all(&tmp).unwrap();
+        }
+        fs::create_dir_all(tmp.join("src")).unwrap();
+        fs::write(
+            tmp.join("src").join("lib.rs"),
+            "#[cfg(feature = \"std\")]\npub fn foo() {}\npub fn plain() {}\n",
+        )
+        .unwrap();
+        let fns = enumerate_fns_in_tree(&tmp).unwrap();
+        let foo = fns.iter().find(|f| f.fn_name == "foo").unwrap();
+        assert_eq!(
+            foo.cfg_predicates.len(),
+            1,
+            "cfg must not be double-counted"
+        );
+        let plain = fns.iter().find(|f| f.fn_name == "plain").unwrap();
+        assert!(
+            plain.cfg_predicates.is_empty(),
+            "uncfg'd fn has no predicates"
+        );
+    }
+
+    #[test]
     fn enumerates_pub_consts_and_statics() {
         use std::fs;
         let tmp = std::env::temp_dir().join("skel_consts_test");

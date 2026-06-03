@@ -65,8 +65,13 @@ impl<'a> FnEnumerator<'a> {
             .get(body_byte_start..body_byte_end)
             .unwrap_or("")
             .to_string();
-        let mut cfgs = self.cfg_stack.clone();
-        cfgs.extend(extract_cfg_predicates(attrs));
+        // The fn's own cfg attrs are already on `cfg_stack` (pushed by the caller in
+        // `walk_items` before this fn is recorded), alongside any enclosing impl/mod/trait
+        // cfgs. Re-adding `extract_cfg_predicates(attrs)` here double-counted the fn's own
+        // predicate (e.g. a free `#[cfg(feature="std")] fn` reported it twice). Fixed: trust
+        // the stack. `attrs` is retained only for signature stability / future span use.
+        let _ = attrs;
+        let cfgs = self.cfg_stack.clone();
         let container = self.container_stack.last().cloned().unwrap_or_default();
         self.records.push(FnRecord {
             file: self.file_rel.clone(),

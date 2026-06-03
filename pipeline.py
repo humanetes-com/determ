@@ -2890,7 +2890,12 @@ _TEST_ATTR_RE = re.compile(
 def _count_test_attrs_in_text(text: str) -> int:
     """Count `#[test]`-family attribute occurrences in a Rust source string.
     Naive but adequate: counts every macro-attribute that recognises as a
-    test marker. Used by the per-cluster expected_count computation."""
+    test marker. Used by the per-cluster expected_count computation.
+
+    Regex is deliberate here, NOT a no-regex-on-source violation: this counts markers in
+    generated test code that may not yet be valid Rust (mid-fill), where syn would fail to
+    parse and under-count. A robust marker count is the right tool. See CODE_ARCHITECTURE.md
+    §8 R7.3."""
     return len(_TEST_ATTR_RE.findall(text or ""))
 
 
@@ -11537,6 +11542,11 @@ def _extract_crate_idioms(
     """Walk filled fn bodies in `file_rel` and surface up to `max_idioms`
     distinctive patterns the model would benefit from seeing while filling
     a stub in the same file.
+
+    The `_IDIOM_*` regex here mine recurring TEXT patterns (Self::call, struct literals,
+    fn-ptr field calls) to build a heuristic cheat-sheet — NOT a no-regex-on-source violation:
+    this is fuzzy pattern-mining, not structured-fact extraction (which goes through syn). See
+    CODE_ARCHITECTURE.md §8 R7.5.
 
     Returned string is the body of a `<CRATE_IDIOMS>` section — empty
     when no patterns clear the relevance bar. Each idiom is one line:
