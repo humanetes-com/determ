@@ -2787,8 +2787,33 @@ _PUB_ITEM_RE = re.compile(
 
 
 def _extract_pub_items(text: str) -> set[tuple[str, str]]:
-    """Return {(kind, name)} for every pub item declared in text."""
+    """Return {(kind, name)} for every pub item in the API-surface LISTING artifact.
+
+    NOTE: this parses the `_extract_public_symbols` *listing* (`pub struct X { ... }`,
+    `pub fn sig`, …), which is a summary artifact, NOT valid Rust source — so syn cannot
+    parse it and the regex is legitimate here (Hard Rule applies to Rust *source*). The
+    generated-source side uses `_pub_items_from_tree` (syn). See R7.2 in CODE_ARCHITECTURE.md.
+    """
     return {(m.group(1), m.group(2)) for m in _PUB_ITEM_RE.finditer(text)}
+
+
+def _pub_items_from_tree(src_dir: Path) -> set[tuple[str, str]]:
+    """Return {(kind, name)} for pub struct/enum/trait/fn in a Rust source tree, via the syn
+    extractor (no regex on source). Excludes examples/benches/tests + scratch dirs by record
+    path. Only these kinds matter for the conformance check — the API-surface listing never
+    contains `type`/`mod`/`const` items."""
+    def _excluded(rel: str) -> bool:
+        parts = set(Path(rel).parts)
+        return bool(parts & {"examples", "benches", "tests"}) or bool(parts & SKIP_DIR_NAMES)
+
+    out: set[tuple[str, str]] = set()
+    for t in _enumerate_types_via_extractor(src_dir) or []:
+        if t.is_pub and t.kind in {"struct", "enum", "trait"} and not _excluded(t.file):
+            out.add((t.kind, t.name))
+    for f in _enumerate_fns_via_extractor(src_dir) or []:   # dicts (engine contract)
+        if f.get("is_pub") and not _excluded(f.get("file", "")):
+            out.add(("fn", f.get("fn_name", "")))
+    return out
 
 
 def validate_task2_api_surface_conformance(
@@ -2811,22 +2836,10 @@ def validate_task2_api_surface_conformance(
     if not api_items:
         return True, "api_surface contained no pub items — skipping"
 
+    # Generated source — parsed with syn (the extractor walks the tree itself), NOT regex.
     src_root = module_dir / "src"
     walk_root = src_root if src_root.is_dir() else module_dir
-    gen_items: set[tuple[str, str]] = set()
-    for p in walk_root.rglob("*.rs"):
-        rel_parts = p.relative_to(project_dir).parts
-        if any(part in {"examples", "benches", "tests"} for part in rel_parts):
-            continue
-        if any(part in SKIP_DIR_NAMES for part in rel_parts):
-            continue
-        if is_test_file(p, project_dir):
-            continue
-        try:
-            text = p.read_text(encoding="utf-8")
-        except OSError:
-            continue
-        gen_items |= _extract_pub_items(text)
+    gen_items = _pub_items_from_tree(walk_root)
 
     missing = api_items - gen_items
     if not missing:

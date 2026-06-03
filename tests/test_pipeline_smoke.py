@@ -1277,6 +1277,32 @@ def test_extract_public_symbols_via_syn() -> None:
     assert "Hidden" not in out and "SECRET" not in out   # private excluded by syn visibility
 
 
+@needs_extractor
+def test_pub_items_from_tree_via_syn() -> None:
+    """_pub_items_from_tree returns (kind, name) for pub struct/enum/trait/fn via syn, excludes
+    private items and tests/examples dirs."""
+    import tempfile
+    from pathlib import Path
+
+    import pipeline
+
+    with tempfile.TemporaryDirectory() as d:
+        src = Path(d) / "src"
+        src.mkdir()
+        (src / "lib.rs").write_text(
+            "pub struct A; pub enum E { X } pub trait T {} pub fn f() {} struct Priv; pub fn g() {}",
+            encoding="utf-8",
+        )
+        tests = Path(d) / "tests"
+        tests.mkdir()
+        (tests / "it.rs").write_text("pub fn should_not_appear() {}", encoding="utf-8")
+        items = pipeline._pub_items_from_tree(Path(d))
+    assert ("struct", "A") in items and ("enum", "E") in items and ("trait", "T") in items
+    assert ("fn", "f") in items and ("fn", "g") in items
+    assert not any(n == "Priv" for _, n in items)                 # private excluded by syn
+    assert ("fn", "should_not_appear") not in items              # tests/ excluded by path
+
+
 def test_api_surface_capture() -> None:
     """Capture pre-strip API surface from the fixture and validate the artifact."""
     import pipeline
