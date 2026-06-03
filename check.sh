@@ -24,6 +24,10 @@ echo "Running ruff (config: pyproject.toml — F,I,UP,C4,B,SIM + select E codes)
 echo "  OK  ruff clean"
 
 echo ""
+echo "Checking architecture layers (import-linter: adapters > application > ports > domain)..."
+"$SCRIPT_DIR/.venv/bin/lint-imports" --config pyproject.toml || { echo "layer contract broken (see above)"; exit 1; }
+
+echo ""
 echo "Checking task-extraction invariants (deps fields declared==provided==consumed, no unbound names)..."
 "$SCRIPT_DIR/.venv/bin/python" tools/check_extraction_invariants.py || exit 1
 

@@ -20,12 +20,14 @@ jobs:
       - name: Install tools + runtime deps
         run: |
           python -m pip install --upgrade pip
-          pip install ruff==0.15.15 mypy==2.1.0 pytest==8.4.2 pytest-cov==7.0.0
+          pip install ruff==0.15.15 mypy==2.1.0 pytest==8.4.2 pytest-cov==7.0.0 import-linter==2.5
           pip install -r requirements-base.txt
       - name: ruff (lint — pyproject config)
         run: ruff check pipeline.py monitor.py model_interact.py pipeline_core tools
       - name: mypy (types — pyproject config; pipeline_core strict-optional)
         run: mypy pipeline.py monitor.py model_interact.py pipeline_core
+      - name: import-linter (architecture layers)
+        run: lint-imports --config pyproject.toml
       - name: extraction invariants
         run: python tools/check_extraction_invariants.py
       - name: pytest + domain coverage floor

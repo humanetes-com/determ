@@ -36,6 +36,22 @@ strict_optional = false
 testpaths = ["tests"]
 addopts = "-q"
 
+# Enforce the clean-architecture dependency rule (CODE_ARCHITECTURE.md §1): a higher layer
+# may import a lower one, never the reverse. domain is the floor (stdlib + the foundational
+# log/retry/io facades only — those aren't layers so the contract doesn't govern them).
+[tool.importlinter]
+root_package = "pipeline_core"
+
+[[tool.importlinter.contracts]]
+name = "Layers: adapters > application > ports > domain"
+type = "layers"
+layers = [
+    "pipeline_core.adapters",
+    "pipeline_core.application",
+    "pipeline_core.ports",
+    "pipeline_core.domain",
+]
+
 [[tool.mypy.overrides]]
 # The extracted package is new and clean — hold it to strict-optional (catches real
 # Optional bugs). `disallow_untyped_defs` is deferred (backlog R1.3b): the verbatim-moved

@@ -2369,10 +2369,9 @@ def test_slice5b_task3_task4() -> None:
 
 def test_slice5b_genesis_audit_task() -> None:
     """Slice 5b: extracted genesis_audit use case behaves per-branch with injected deps,
-    and pipeline's shim + Orchestrator composition context are wired."""
+    and pipeline's shim + deps record are wired."""
     from pathlib import Path
     from pipeline_core.application.tasks.genesis_audit import genesis_audit, GenesisAuditDeps
-    from pipeline_core.application.orchestrator import Orchestrator
     from pipeline_core.domain.llm_output import GENESIS_DELIM_START, GENESIS_DELIM_END
 
     written: dict = {}
@@ -2402,8 +2401,6 @@ def test_slice5b_genesis_audit_task() -> None:
     assert written["c"] == "fixed-genesis-body"
 
     import pipeline
-    assert isinstance(pipeline.ORCHESTRATOR, Orchestrator)
-    assert pipeline.ORCHESTRATOR.adapters is pipeline.ADAPTERS
     assert isinstance(pipeline._GENESIS_AUDIT_DEPS, GenesisAuditDeps)
 
     # 5b foundation: test-result helpers relocated to domain; pipeline re-exports the

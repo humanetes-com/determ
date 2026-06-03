@@ -39,7 +39,6 @@ from pipeline_core.adapters import coverage as _covmod
 from pipeline_core.adapters import workspace as _wsmod
 from pipeline_core.adapters.coverage import CoverageDeps
 from pipeline_core.adapters.workspace import WorkspaceDeps
-from pipeline_core.application.orchestrator import Orchestrator
 from pipeline_core.application.tasks.genesis_audit import (
     GenesisAuditDeps,
     genesis_audit,
@@ -3981,7 +3980,6 @@ SKELETON_EXTRACTOR_BIN = Path(__file__).parent / "tools" / "skeleton_extractor" 
 ADAPTERS = build_adapters(SETTINGS, extractor_bin=SKELETON_EXTRACTOR_BIN, model=MODEL)
 # The application-layer composition context. main()'s task dispatch migrates onto it
 # slice by slice (5b); for now it bundles the resolved settings + adapters.
-ORCHESTRATOR = Orchestrator(settings=SETTINGS, adapters=ADAPTERS)
 # Wire the cross-cutting infra seams to the pipeline's concrete sinks/config (slice 5b).
 _pclog.set_sinks(_log, _emit)
 _pcretry.configure(max_retries=MAX_RETRIES, rate_limit_wait=RATE_LIMIT_WAIT, model=MODEL)
