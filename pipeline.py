@@ -8555,6 +8555,55 @@ def _count_relevant_notes(fr_path: Path | None,
     return section.count("\n- ") if section else 0
 
 
+def _record_tdd_regression(
+    fr_path: Path,
+    src_dir: Path,
+    filled_keys: "list[tuple[str, str]]",
+    broken_tests: "set[str]",
+    prev_best: int,
+    now_pass: int,
+) -> str:
+    """Hook 3 — turn a `14→11` pass-count regression into an ACTIONABLE note.
+
+    For each fn filled in the pass that just broke previously-passing tests,
+    write a concrete WRONG-body Model Note (file + fn + the broken test names +
+    the body that was applied) into the FR Model Notes channel, which the next
+    fill prompt for that fn injects automatically (relevance-ranked by file/fn).
+    The bare metric is unactionable; the body+broken-tests pair is the WRONG
+    example the model can react to.
+
+    Best-effort: never raises into the TDD loop. Returns a compact note (e.g.
+    "regressed t1, t2") to stamp on the LoopState trajectory, or "" if none.
+    """
+    try:
+        recs = _enumerate_fns_via_extractor(src_dir) or []
+    except Exception:
+        recs = []
+    by_name: dict[str, dict] = {}
+    for r in recs:
+        nm = r.get("fn_name", "")
+        if nm and nm not in by_name:
+            by_name[nm] = r
+    broken = ", ".join(sorted(broken_tests)[:6])
+    for key in filled_keys:
+        fn = key[1] if isinstance(key, tuple) and len(key) > 1 else str(key)
+        rec = by_name.get(fn)
+        if not rec:
+            continue
+        file_rel = rec.get("file", "")
+        body = (rec.get("body_text", "") or "").strip()
+        note = (
+            f"[regression] In {Path(file_rel).name or '?'}, the body just written for "
+            f"`{fn}` made previously-passing test(s) FAIL: {broken} (cluster pass "
+            f"count dropped {int(prev_best)}→{int(now_pass)}). WRONG (this body "
+            f"broke those tests):\n{body[:_FAILED_BODY_CAP]}\nRe-implement `{fn}` so "
+            f"{broken} keep passing; do not repeat that approach."
+        )
+        with suppress(Exception):
+            _append_model_note(fr_path, note)
+    return f"regressed {broken}" if broken else ""
+
+
 def _run_phase_c_tdd(
     *, project_dir: Path,
     target_src_dir: Path,
@@ -8620,11 +8669,24 @@ def _run_phase_c_tdd(
     # FR-024: improvement-driven loop. Track passing-test count across iters;
     # exit only after `max_stalls` consecutive non-improving iters. The 10k
     # backstop in the loop body is a runaway-safety net only.
+    # LoopState is the source of truth for the pass_count floor / stall streak
+    # AND the carrier of cumulative meta-awareness (the pass trajectory + the
+    # causal "this fill broke these tests" notes) fed back into each fill.
+    # `stall`/`best_pass` below are kept as synced mirrors so the existing
+    # log/emit lines read unchanged.
+    state = _LoopState()
     stall = 0
     best_pass = -1
     best_fail = None
     recently_filled: list[tuple[str, str]] = []
     recently_filled_max = int(os.getenv("TDD_RECENTLY_FILLED_MAX", "50"))
+    # Hook 3 — causal-regression tracking. `prev_failed` = the failing-test set
+    # from the previous iter; `last_newly_filled` = the fns we materially
+    # changed last iter. A test that flips pass→fail right after a fill is a
+    # regression attributable to that fill.
+    prev_failed: set[str] = set()
+    last_newly_filled: list[tuple[str, str]] = []
+    _regression_notes = os.getenv("TDD_REGRESSION_NOTES", "1") == "1"
     # Build the test reverse map once per cluster — cheap (one extractor
     # invocation, one regex scan of each test file). Used as the LAST
     # attribution fallback when panics/compile errors/classifier all miss.
@@ -8653,6 +8715,7 @@ def _run_phase_c_tdd(
                                   timeout=test_timeout)
         dt = time.monotonic() - t0
         pass_count, fail_count, _ignored = _parse_test_counts(output)
+        cur_failed = _parse_failed_tests(output)
         if rc == 0:
             _log(f"  {tag} [phase-c/tdd] iter {iter_n}: all tests pass "
                  f"({pass_count} passed, {dt:.1f}s). Cluster done.")
@@ -8675,11 +8738,28 @@ def _run_phase_c_tdd(
         # Improvement metric: did pass count strictly increase since best?
         improved = pass_count > best_pass
         if improved:
-            best_pass = pass_count
             best_fail = fail_count
-            stall = 0
-        else:
-            stall += 1
+        # Hook 3 — detect a causal regression BEFORE recording, so the note
+        # rides this iter's Attempt (frozen) and surfaces in context(). A test
+        # that flipped pass→fail right after last iter's fill is attributable
+        # to that fill; write the concrete WRONG-body note for the model.
+        _regr_note = ""
+        if _regression_notes and fr_path and last_newly_filled:
+            _newly_failed = cur_failed - prev_failed
+            if _newly_failed:
+                _regr_note = _record_tdd_regression(
+                    fr_path, src_dir, last_newly_filled, _newly_failed,
+                    best_pass, pass_count,
+                )
+        prev_failed = cur_failed
+        # Record this iter's measurement on the shared LoopState (metric is
+        # pass_count — "higher is better" here, so NO negation). record()
+        # updates the floor + stall streak; mirror them into the scalars the
+        # log/emit lines below read.
+        state.record(_Attempt(metric=float(pass_count), iteration=state.iteration,
+                              improved=improved, note=_regr_note))
+        best_pass = int(state.best_metric)
+        stall = state.stalls
 
         # Attribute failures via the full chain (panics → compile →
         # classifier → recently_filled → reverse_map).
@@ -8787,6 +8867,7 @@ def _run_phase_c_tdd(
         # the pass — that's the set of fns that materially changed.
         cur_stubs = set(_scan_unimplemented_functions(src_dir))
         newly_filled = [k for k in frontier_keys if k not in cur_stubs]
+        last_newly_filled = newly_filled   # hook 3: next iter attributes regressions to these
         for k in newly_filled:
             recently_filled.append(k)
         if len(recently_filled) > recently_filled_max:

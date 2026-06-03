@@ -613,7 +613,7 @@ def _phase_c_panel_rows(state: dict[str, Any]) -> list[str]:
                     f"{green(f'pass={_tp}')}{_trend}  {red(f'fail={_tf}')}  "
                     f"frontier={_fr}  stall={_stall}")
         if len(_hist) >= 2:
-            rows.append(f"           pass→    {dim('→'.join(str(x) for x in _hist[-8:]))}")
+            rows.append(f"           pass→    {dim('→ '.join(str(x) for x in _hist[-8:]))}")
 
     # Current error class — what the model is fighting right now.
     _ec = state.get("last_error_code")
@@ -1218,13 +1218,13 @@ def pipeline_status():
         retry_bar = f"[{bar(r_pct, 10)}] {ir}/{ir_max}"
         rows.append(f"             └ retry  {retry_bar}")
 
-    # Row 4: uncovered-lines history for last 4 files  (e.g. error.rs:92→72→45)
+    # Row 4: uncovered-lines history for last 4 files  (e.g. error.rs:92→ 72→ 45)
     hist = prog["file_history"]
     if hist:
         parts = []
         for fname, counts in list(hist.items())[-4:]:
             short = fname.replace("src/", "")
-            trend = "→".join(str(c) for c in counts[-4:])
+            trend = "→ ".join(str(c) for c in counts[-4:])
             entry = f"{short}:{trend}"
             parts.append(green(entry) if counts and counts[-1] == 0 else entry)
         hist_row = "  " + "  ".join(parts)
@@ -1232,7 +1232,7 @@ def pipeline_status():
             parts = []
             for fname, counts in list(hist.items())[-3:]:
                 short = fname.replace("src/", "")[:8]
-                trend = "→".join(str(c) for c in counts[-3:])
+                trend = "→ ".join(str(c) for c in counts[-3:])
                 entry = f"{short}:{trend}"
                 parts.append(green(entry) if counts and counts[-1] == 0 else entry)
             hist_row = "  " + "  ".join(parts)
@@ -1310,10 +1310,10 @@ def pipeline_status():
             is_cur  = (short == cur_base)
             arrow   = yellow("▶") if is_cur else " "
             hist    = queue_hist.get(short, [])
-            trend   = dim("  " + "→".join(str(c) for c in hist[-5:])) if hist else ""
+            trend   = dim("  " + "→ ".join(str(c) for c in hist[-5:])) if hist else ""
             qhist   = qcov_hist.get(name, qcov_hist.get(short, []))
             if len(qhist) >= 2:
-                qtrend = dim(f"  {qhist[-2]:.1f}%→") + f"{qhist[-1]:.1f}%"
+                qtrend = dim(f"  {qhist[-2]:.1f}%→ ") + f"{qhist[-1]:.1f}%"
             elif len(qhist) == 1:
                 qtrend = dim(f"  {qhist[-1]:.1f}%")
             else:
