@@ -7,7 +7,6 @@ Usage:
 """
 
 import argparse
-import dataclasses
 import hashlib
 import json
 import os
@@ -69,6 +68,7 @@ from pipeline_core.io import read, write
 from pipeline_core.settings import Settings
 from pipeline_core.domain.models import (
     TypeRecord, ModRecord, DispatchFamily, Diagnostic,
+    BuildCluster, ModuleAugmentState,
 )
 from pipeline_core.adapters import build_adapters
 from pipeline_core.adapters import coverage as _covmod, workspace as _wsmod
@@ -3754,124 +3754,8 @@ def _profile_inputs_hash(readme_text: str, test_files: list) -> str:
 # Compiler cluster system
 # ---------------------------------------------------------------------------
 
-@dataclasses.dataclass
-class BuildCluster:
-    """One compiler configuration (e.g. stable, nightly, feature/async)."""
-    name: str                           # short identifier used in logs and state keys
-    env_extra: dict                     # env vars merged into _cargo_env() for this cluster
-    tarpaulin_exclude_files: list       # --exclude-files patterns for tarpaulin
-    excluded_cfg: list                  # cfg predicates inactive in this cluster
-    active_cfg: list                    # cfg predicates active (on top of default)
-    prompt_nightly_rule: str            # nightly boundary sentence(s) for generation prompts
-    is_default: bool = True             # True for the baseline stable cluster
-    gated_files: set = None             # source files (rel paths) gated behind excluded_cfg — skip augmentation
-    requires_nightly: bool = False      # cluster needs nightly toolchain (set at runtime when E0554 detected)
-
-    @property
-    def cfg_true(self) -> list[str]:
-        """List of cfg predicates that evaluate to true under this cluster.
-
-        Each entry is a predicate as it would appear in `#[cfg(...)]`.
-        For each bare name N in active_cfg, we emit BOTH the bare form
-        (`N`) and the cargo-feature form (`feature = "N"`) because source
-        code may use either. The skeleton extractor's CfgSet eval ignores
-        keys that don't match a real predicate in the source, so the
-        extra forms are harmless.
-        """
-        out: list[str] = []
-        for pred in (self.active_cfg or []):
-            out.append(pred)
-            if "=" not in pred and "(" not in pred:
-                out.append(f'feature = "{pred}"')
-        return out
-
-    @property
-    def cfg_false(self) -> list[str]:
-        """List of cfg predicates that evaluate to false under this cluster.
-        Same expansion as cfg_true."""
-        out: list[str] = []
-        for pred in (self.excluded_cfg or []):
-            out.append(pred)
-            if "=" not in pred and "(" not in pred:
-                out.append(f'feature = "{pred}"')
-        return out
-
-    @property
-    def features(self) -> list[str]:
-        """Cargo feature names enabled in this cluster.
-        Bare names in active_cfg that match a known feature pattern are
-        treated as feature names."""
-        out: list[str] = []
-        for pred in (self.active_cfg or []):
-            # Bare name or feature = "X"
-            m = re.match(r'feature\s*=\s*"([^"]+)"', pred)
-            if m:
-                out.append(m.group(1))
-            elif "=" not in pred and "(" not in pred and re.match(r'^[a-z_]\w*$', pred):
-                out.append(pred)
-        return out
-
-    @property
-    def toolchain(self) -> str | None:
-        """Required toolchain name (e.g. "nightly") or None for stable default."""
-        return "nightly" if self.requires_nightly else None
-
-
-@dataclasses.dataclass
-class ModuleAugmentState:
-    """Per-(module, cluster) augmentation lifecycle.
-
-    Consolidates the five outer-loop state variables that used to live as
-    parallel dicts (_c_retries, _c_best_covered, _c_total + _stall + _at_ceiling).
-    Every exit path goes through `status()`, so adding a new termination
-    condition is a single-case edit instead of a five-place edit.
-
-    Lifecycle:
-      record_pass(...) is called after each task0c_augment_module() return.
-      status(crate_type) returns one of:
-        'done'       — coverage 100%, or crate is proc-macro (cannot augment)
-        'ceiling'    — task0c reported at_ceiling (no actionable lines remain)
-        'hard_block' — stall_passes >= STALL_LIMIT (genuinely stuck)
-        'retry'      — keep going
-    """
-    module_name: str
-    cluster_name: str
-    total_passes: int = 0
-    best_covered_lines: int = -1
-    stall_passes: int = 0    # consecutive passes with no improvement in covered count
-    ceiling_passes: int = 0  # consecutive passes where task0c reported at_ceiling
-    last_pct: float = 0.0
-    last_covered: int = 0
-    last_at_ceiling: bool = False
-
-    STALL_LIMIT: int = 10
-    CEILING_CONFIRM: int = 2  # consecutive at_ceiling reports required before accepting ceiling
-
-    def record_pass(self, pct: float, covered: int, at_ceiling: bool) -> None:
-        self.total_passes += 1
-        self.last_pct = pct
-        self.last_covered = covered
-        self.last_at_ceiling = at_ceiling
-        if at_ceiling:
-            self.ceiling_passes += 1
-        else:
-            self.ceiling_passes = 0
-        if covered > self.best_covered_lines:
-            self.best_covered_lines = covered
-            self.stall_passes = 0
-        else:
-            self.stall_passes += 1
-
-    def status(self, crate_type: str) -> str:
-        if self.last_pct >= 100.0:
-            return 'done'
-        if crate_type == 'proc-macro':
-            return 'done'
-        if self.ceiling_passes >= self.CEILING_CONFIRM:
-            return 'ceiling'
-        if self.stall_passes >= self.STALL_LIMIT:
-            return 'hard_block'
-        return 'retry'
+# BuildCluster + ModuleAugmentState relocated to pipeline_core.domain.models (slice 6);
+# imported at the top of this module and re-exported for unchanged call sites.
 
 
 # Active cluster during task0c — set by main() before each cluster pass.

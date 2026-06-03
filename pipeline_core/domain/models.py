@@ -239,7 +239,126 @@ class Diagnostic:
         }
 
 
+@dataclass
+class BuildCluster:
+    """One compiler configuration (e.g. stable, nightly, feature/async).
+
+    Mutable: `requires_nightly` is flipped at runtime when an E0554 is detected.
+    `cfg_true`/`cfg_false` expand each bare active/excluded predicate into both the
+    bare form (`N`) and the cargo-feature form (`feature = "N"`) because source code
+    may use either; the extractor's CfgSet ignores keys that match no real predicate.
+    """
+    name: str                           # short identifier used in logs and state keys
+    env_extra: dict                     # env vars merged into _cargo_env() for this cluster
+    tarpaulin_exclude_files: list       # --exclude-files patterns for tarpaulin
+    excluded_cfg: list                  # cfg predicates inactive in this cluster
+    active_cfg: list                    # cfg predicates active (on top of default)
+    prompt_nightly_rule: str            # nightly boundary sentence(s) for generation prompts
+    is_default: bool = True             # True for the baseline stable cluster
+    gated_files: set = None             # source files (rel paths) gated behind excluded_cfg — skip augmentation
+    requires_nightly: bool = False      # cluster needs nightly toolchain (set at runtime when E0554 detected)
+
+    def _expand(self, preds: list) -> list[str]:
+        out: list[str] = []
+        for pred in (preds or []):
+            out.append(pred)
+            if "=" not in pred and "(" not in pred:
+                out.append(f'feature = "{pred}"')
+        return out
+
+    @property
+    def cfg_true(self) -> list[str]:
+        """cfg predicates that evaluate true under this cluster (bare + feature form)."""
+        return self._expand(self.active_cfg)
+
+    @property
+    def cfg_false(self) -> list[str]:
+        """cfg predicates that evaluate false under this cluster (bare + feature form)."""
+        return self._expand(self.excluded_cfg)
+
+    @property
+    def features(self) -> list[str]:
+        """Cargo feature names enabled in this cluster: `feature = "X"` → X, plus bare
+        lowercase identifiers in active_cfg treated as feature names. (Parsed with plain
+        string ops — no regex — per the project's structured-parsing rule.)"""
+        out: list[str] = []
+        for pred in (self.active_cfg or []):
+            key, eq, val = pred.partition("=")
+            if eq and key.strip() == "feature":
+                v = val.strip()
+                if len(v) > 2 and v[0] == '"' and v[-1] == '"':   # feature = "X", X non-empty
+                    out.append(v[1:-1])
+            elif "=" not in pred and "(" not in pred and pred \
+                    and (pred[0] == "_" or (pred[0].isalpha() and pred[0].islower())) \
+                    and all(c.isalnum() or c == "_" for c in pred):
+                out.append(pred)
+        return out
+
+    @property
+    def toolchain(self) -> str | None:
+        """Required toolchain name (e.g. "nightly") or None for the stable default."""
+        return "nightly" if self.requires_nightly else None
+
+
+@dataclass
+class ModuleAugmentState:
+    """Per-(module, cluster) augmentation lifecycle.
+
+    Consolidates the five outer-loop state variables that used to live as parallel
+    dicts (_c_retries, _c_best_covered, _c_total + _stall + _at_ceiling). Every exit
+    path goes through `status()`, so adding a new termination condition is a single-case
+    edit instead of a five-place edit.
+
+    Lifecycle:
+      record_pass(...) is called after each task0c_augment_module() return.
+      status(crate_type) returns one of:
+        'done'       — coverage 100%, or crate is proc-macro (cannot augment)
+        'ceiling'    — task0c reported at_ceiling (no actionable lines remain)
+        'hard_block' — stall_passes >= STALL_LIMIT (genuinely stuck)
+        'retry'      — keep going
+    """
+    module_name: str
+    cluster_name: str
+    total_passes: int = 0
+    best_covered_lines: int = -1
+    stall_passes: int = 0    # consecutive passes with no improvement in covered count
+    ceiling_passes: int = 0  # consecutive passes where task0c reported at_ceiling
+    last_pct: float = 0.0
+    last_covered: int = 0
+    last_at_ceiling: bool = False
+
+    STALL_LIMIT: int = 10
+    CEILING_CONFIRM: int = 2  # consecutive at_ceiling reports required before accepting ceiling
+
+    def record_pass(self, pct: float, covered: int, at_ceiling: bool) -> None:
+        self.total_passes += 1
+        self.last_pct = pct
+        self.last_covered = covered
+        self.last_at_ceiling = at_ceiling
+        if at_ceiling:
+            self.ceiling_passes += 1
+        else:
+            self.ceiling_passes = 0
+        if covered > self.best_covered_lines:
+            self.best_covered_lines = covered
+            self.stall_passes = 0
+        else:
+            self.stall_passes += 1
+
+    def status(self, crate_type: str) -> str:
+        if self.last_pct >= 100.0:
+            return 'done'
+        if crate_type == 'proc-macro':
+            return 'done'
+        if self.ceiling_passes >= self.CEILING_CONFIRM:
+            return 'ceiling'
+        if self.stall_passes >= self.STALL_LIMIT:
+            return 'hard_block'
+        return 'retry'
+
+
 __all__ = [
     "FieldRecord", "MethodRecord", "TypeRecord",
     "FnRecord", "ModRecord", "DispatchFamily", "Diagnostic",
+    "BuildCluster", "ModuleAugmentState",
 ]
