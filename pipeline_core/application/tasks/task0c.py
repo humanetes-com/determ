@@ -815,7 +815,6 @@ corrected content here
             # Measure prompt scaffold (everything in the prompt template that
             # is NOT a `secs[...]` section) so the budget reflects actual
             # overhead instead of a magic estimate.
-            gen_count = _gen_tests_count(abs_path)
             _pass_n = _next_gen_tests_n(abs_path)
             mod_name = f"gen_tests_{_pass_n}"
             output_format = (

@@ -404,7 +404,6 @@ def _phase_c_state() -> dict[str, Any]:
             raw = fh.read()
     except Exception:
         return out
-    from datetime import datetime, timezone as _tz
     events: list[dict] = []
     for line in raw.decode("utf-8", errors="replace").splitlines():
         try:
@@ -429,7 +428,6 @@ def _phase_c_state() -> dict[str, Any]:
 
     fn_attempts: dict[str, int] = {}
     in_flight_fn: str | None = None
-    in_flight_pass: int | None = None
     last_ts_iso: str | None = None
     for e in events:
         ev = e["event"]
@@ -466,7 +464,6 @@ def _phase_c_state() -> dict[str, Any]:
             out["all_stubs_remaining_at_pass_start"] = int(d.get("all_stubs_remaining", 0))
         elif ev == "phase_c.fn.fill.start":
             in_flight_fn = d.get("fn")
-            in_flight_pass = d.get("pass_n")
             out["cluster"] = d.get("cluster") or out["cluster"]
         elif ev == "phase_c.fn.fill.done":
             fn = d.get("fn") or "?"
@@ -716,7 +713,7 @@ def _latest_compile_file_stats() -> dict[str, Any] | None:
                 continue
             if _run_start > 0:
                 try:
-                    from datetime import datetime, timezone
+                    from datetime import datetime
                     ts = datetime.fromisoformat(rec["ts"].replace("Z", "+00:00"))
                     if ts.timestamp() < _run_start:
                         continue

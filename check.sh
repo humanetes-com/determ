@@ -39,6 +39,19 @@ echo "Running mypy on pipeline_core/..."
     2>&1 | grep -E "error:|warning:|Found [0-9]+ error" || true
 
 echo ""
+echo "Running ruff (pyflakes bug rules: undefined names, unused imports/vars, redefinitions)..."
+# F = pyflakes rule family (real bug classes). F541 (f-string without placeholder) is
+# cosmetic-only and excluded; everything else in F is a genuine defect. Fail on any finding
+# (engineering principle: fix all reported errors, including pre-existing).
+"$SCRIPT_DIR/.venv/bin/ruff" check pipeline.py monitor.py pipeline_core tools \
+    --select F --ignore F541 --no-cache --quiet || { echo "ruff found issues (see above)"; exit 1; }
+echo "  OK  ruff F-rules clean"
+
+echo ""
+echo "Checking task-extraction invariants (deps fields declared==provided==consumed, no unbound names)..."
+"$SCRIPT_DIR/.venv/bin/python" tools/check_extraction_invariants.py || exit 1
+
+echo ""
 echo "Running pure-Python smoke tests..."
 "$SCRIPT_DIR/.venv/bin/python" tests/test_pipeline_smoke.py
 

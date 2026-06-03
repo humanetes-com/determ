@@ -42,8 +42,6 @@ def main() -> None:
     # We pair each fix-attempt prompt with the immediately-following
     # phase_c.fn.fill.* event to label which fn it was for.
     reqs = [e for e in events if e.get("event") == "llm.request"]
-    fills = [e for e in events
-             if e.get("event", "").startswith("phase_c.fn.fill")]
 
     found = 0
     for req in reversed(reqs):

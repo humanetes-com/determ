@@ -22,7 +22,7 @@ from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, TypeVar
+from typing import TypeVar
 
 _RT = TypeVar("_RT")
 
@@ -64,7 +64,7 @@ from pipeline_core.domain.llm_output import (
     _extract_genesis,
 )
 from pipeline_core import log as _pclog, retry as _pcretry
-from pipeline_core.retry import with_retry, is_rate_limit_error as _is_rate_limit_error
+from pipeline_core.retry import with_retry
 from pipeline_core.io import read, write
 from pipeline_core.settings import Settings
 from pipeline_core.domain.models import (
@@ -95,6 +95,14 @@ from pipeline_core.application.tasks.task2 import (
     Task2Deps,
 )
 from pipeline_core.application.tasks.task0c import task0c_augment_module as _task0c_impl, Task0cDeps
+
+# Names re-exported through pipeline.py for backward-compatible call sites + the smoke
+# suite (which references them as pipeline.X). Declaring them here documents the public
+# surface and tells the linter these imports are intentional re-exports, not dead code.
+__all__ = [
+    "count_passing_tests", "validate_task3_output_strict", "extract_test_output_from_file",
+    "GENESIS_DELIM_START", "GENESIS_DELIM_END", "_extract_genesis",
+]
 
 _mi_mtime: float = os.path.getmtime(_mi.__file__)
 
@@ -2565,7 +2573,6 @@ def _get_task0c_history(project_dir: Path, rel_path: str, max_entries: int = 5) 
     recent = entries[-max_entries:]
     n = len(recent)
     has_successes = any(e.get("outcome") == "success" for e in recent)
-    has_failures  = any(e.get("outcome") != "success" for e in recent)
     parts = [f"Attempt history for `{rel_path}` ({n} attempt{'s' if n != 1 else ''}):"]
     for e in recent:
         outcome = e.get("outcome", "unknown")
@@ -2866,7 +2873,6 @@ def _count_test_fns_cfg_aware(
     Otherwise count it (true or undecidable predicates → still counted).
     """
     lines = text.splitlines()
-    n = len(lines)
     test_attr_re = re.compile(
         r"^\s*#\s*\[\s*(?:test|tokio::test|async_std::test|"
         r"serial_test::serial|rstest|parameterized|test_case)\s*[\s\],(]",
@@ -3271,13 +3277,13 @@ def _split_at_semantic_boundaries(content: str, part_size: int) -> list[str]:
     parts = []
     current_chars = 0
     current_lines: list[str] = []
+    i = 0
 
     def emit():
         if current_lines:
             parts.append("".join(current_lines))
             current_lines.clear()
 
-    i = 0
     while i < len(lines):
         line = lines[i]
         # Check if adding this line would overflow the part.
@@ -5642,7 +5648,6 @@ def _annotate_file_view(file_text: str, target_fn: str) -> str:
     else:
         file_text = _strip_crate_attrs(file_text)   # drop only #![...] crate attrs
     out: list[str] = []
-    i = 0
     last_fn_end = 0
     for m in _FN_RE_GLOBAL.finditer(file_text):
         fn_name = m.group(2)
@@ -5850,7 +5855,6 @@ def _collect_crate_macros(src_dir: Path, max_chars: int = max(6_000, SINGLE_CALL
             continue
         for m in re.finditer(r"(?:#\[macro_export\][^\n]*\n)?macro_rules!\s+(\w+)\s*\{",
                               text):
-            name = m.group(1)
             start = m.start()
             # Match balanced braces of the macro_rules! body.
             i = text.find("{", start)
@@ -6155,7 +6159,6 @@ def _filter_model_notes_for_prompt(
     err_keywords: set[str] = set()
     if current_error:
         err_codes = set(re.findall(r"\bE\d{3,4}\b", current_error))
-        err_codes_l = {e.lower() for e in err_codes}
         low_err = current_error.lower()
         err_keywords = {k for k in _NOTE_SIGNATURE_KEYWORDS if k in low_err}
 
@@ -8582,7 +8585,7 @@ def _count_relevant_notes(fr_path: Path | None,
     if fr_path is None or not fr_path.exists():
         return 0
     try:
-        text = fr_path.read_text(encoding="utf-8")
+        fr_path.read_text(encoding="utf-8")  # readability probe; content unused
     except Exception:
         return 0
     rel, fn = fn_key
@@ -9791,11 +9794,9 @@ def _task2_fill_fns_one_by_one(
                 # P3.1: if the model proposed a sig change, try it FIRST so
                 # the body splice operates on the updated sig. Rolls back if
                 # the resulting cargo check still fails (revert via snapshot).
-                sig_swapped = False
                 if fix_attempt >= 5:
                     proposed_sig = _extract_signature_block(last_response)
                     if proposed_sig and _replace_fn_signature(file_path, fn_name, proposed_sig):
-                        sig_swapped = True
                         # Refresh sig_text so subsequent prompts use the new one.
                         new_loc = _locate_fn(file_path.read_text(encoding="utf-8"), fn_name)
                         if new_loc is not None:
@@ -11195,7 +11196,6 @@ def _build_dispatch_family_section(family: DispatchFamily) -> str:
     traits = ", ".join(family.traits)
     method = family.method
     macros = ", ".join(family.macros)
-    tags = ", ".join(family.return_types)
     chained = ", ".join(family.chained_methods)
     defs = list(family.macro_defs)
     _cap = max(2000, SINGLE_CALL_CHAR_LIMIT // 8)
@@ -11519,10 +11519,6 @@ def _collect_impl_blocks(src_dir: Path) -> list[dict] | None:
     # Step 3 — render block records. `related_containers` lookup uses
     # the trait-name regex against the header text.
     blocks: list[dict] = []
-    trait_name_re = re.compile(
-        r"\bimpl\b(?:\s*<[^>]*>)?\s+(?:[A-Za-z_:][\w:]*\s*(?:<[^<>]*>)?\s+for\s+)?"
-        r"([A-Za-z_:][\w:]*)"
-    )
     # We want the TRAIT NAME (`impl Trait<T> for Type`), not the
     # `Type` — use a stricter pattern for related grouping. Two impls
     # are "related" iff they share the same trait name AND target type.
@@ -12950,7 +12946,6 @@ def task0_cfg_scan(project_dir: Path) -> "list[BuildCluster]":
     for pred, kind in interesting:
         if kind == 'feature':
             env_extra = {}
-            flags_desc = f"--features {pred}"
             cluster_name = f"feature/{pred}"
             tarpaulin_excl: list[str] = []
             active = [pred]
@@ -12963,7 +12958,6 @@ def task0_cfg_scan(project_dir: Path) -> "list[BuildCluster]":
         else:
             # custom cfg → RUSTFLAGS --cfg
             env_extra = {"RUSTFLAGS": f"--cfg {pred}"}
-            flags_desc = f"RUSTFLAGS += --cfg {pred}"
             cluster_name = _cfg_to_cluster_name(pred)
             tarpaulin_excl = []
             active = [pred]
@@ -13634,7 +13628,6 @@ class StaticTask1Synthesizer(Task1Synthesizer):
                    readme_text, project_profile="", project_context="", coverage_strategy="",
                    api_surface=""):
         existing_genesis = read(genesis_path)
-        genesis_exists = bool(existing_genesis.strip())
         total_chars = sum(len(c) for _, c in test_files)
 
         if total_chars <= SINGLE_CALL_CHAR_LIMIT:
@@ -18674,7 +18667,6 @@ corrected content here
         if rel in files_out:
             new_content = files_out[rel]
             # Sanity: must still compile before writing.
-            import tempfile
             tmp = abs_path.with_suffix(".pragma_tmp.rs")
             try:
                 tmp.write_text(new_content, encoding="utf-8")
