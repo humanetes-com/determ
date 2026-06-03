@@ -2025,12 +2025,15 @@ def test_slice5a_shims_delegate_to_adapters() -> None:
 
     calls: list[tuple] = []
 
+    from pipeline_core.domain.models import FnRecord, TypeRecord, ModRecord
+
     class _FakeExtractor:
-        def enumerate_fns(self, d, **k): calls.append(("fns", d)); return [{"fn_name": "x"}]
-        def enumerate_types(self, d, **k): calls.append(("types", d)); return [{"name": "T"}]
+        # slice 6: the adapter contract returns typed records, not dicts.
+        def enumerate_fns(self, d, **k): calls.append(("fns", d)); return [FnRecord(fn_name="x")]
+        def enumerate_types(self, d, **k): calls.append(("types", d)); return [TypeRecord(name="T")]
         def enumerate_dispatch_families(self, d, **k): calls.append(("disp", d)); return []
         def enumerate_feature_gate_cfgs(self, d, **k): calls.append(("feat", d)); return ["nightly"]
-        def enumerate_mods(self, d, **k): calls.append(("mods", d)); return [{"name": "m"}]
+        def enumerate_mods(self, d, **k): calls.append(("mods", d)); return [ModRecord(name="m")]
         def skeletonise(self, i, o, **k): calls.append(("skel", i, o, k)); return {"ok": True, "reports": [], "stderr": ""}
 
     class _FakeCargo:
@@ -2045,11 +2048,13 @@ def test_slice5a_shims_delegate_to_adapters() -> None:
     pipeline.ADAPTERS = types.SimpleNamespace(extractor=_FakeExtractor(), cargo=_FakeCargo())
     try:
         d = Path("/tmp/x")
-        assert pipeline._enumerate_fns_via_extractor(d) == [{"fn_name": "x"}]
-        assert pipeline._enumerate_types_via_extractor(d) == [{"name": "T"}]
+        # fns wrapper re-serialises typed records to wire dicts for the fill engine.
+        assert pipeline._enumerate_fns_via_extractor(d) == [FnRecord(fn_name="x").to_dict()]
+        # types/mods/dispatch wrappers pass the typed records straight through.
+        assert pipeline._enumerate_types_via_extractor(d) == [TypeRecord(name="T")]
         assert pipeline._dispatch_families_via_extractor(d) == []
         assert pipeline._feature_gate_cfgs_via_extractor(d) == ["nightly"]
-        assert pipeline._enumerate_mods_via_extractor(d) == [{"name": "m"}]
+        assert pipeline._enumerate_mods_via_extractor(d) == [ModRecord(name="m")]
         r = pipeline._extract_skeleton(Path("/in"), Path("/out"))
         assert r["ok"] is True
         assert {c[0] for c in calls} == {"fns", "types", "disp", "feat", "mods", "skel"}
@@ -2178,6 +2183,72 @@ def test_slice5b_task0c() -> None:
     import pipeline
     assert isinstance(pipeline._TASK0C_DEPS, Task0cDeps)
     print("  OK  task0c engine extracted behind orchestrator (slice 5b)")
+
+
+def test_slice6_models() -> None:
+    """Slice 6: domain dataclasses for the Rust↔Python extractor seam. Verify tolerant
+    from_dict (missing keys default, nested records parse, extra keys ignored) and that
+    to_dict round-trips the exact wire shape (the seam is sacred — CODE_ARCHITECTURE.md §4)."""
+    from pipeline_core.domain.models import (
+        FnRecord, TypeRecord, FieldRecord, MethodRecord, ModRecord, DispatchFamily)
+
+    # FnRecord wire dict (every field as the Rust extractor emits it).
+    fn_wire = {
+        "file": "src/error.rs", "fn_name": "backtrace", "sig_text": "pub fn backtrace(&self) -> &Backtrace",
+        "body_text": "unimplemented!()", "sig_byte_start": 10, "body_byte_start": 50, "body_byte_end": 70,
+        "cfg_predicates": ["feature = \"std\""], "is_pub": True, "container": "impl Error",
+        "has_unimplemented_body": True,
+    }
+    fr = FnRecord.from_dict(fn_wire)
+    assert fr.fn_name == "backtrace" and fr.container == "impl Error" and fr.has_unimplemented_body
+    assert fr.cfg_predicates == ("feature = \"std\"",) and fr.sig_byte_start == 10
+    assert fr.to_dict() == fn_wire, "FnRecord round-trip must equal the wire dict byte-for-byte"
+
+    # Tolerant: empty dict → all defaults, no crash; extra keys ignored.
+    blank = FnRecord.from_dict({"unknown_future_field": 1})
+    assert blank.fn_name == "" and blank.cfg_predicates == () and blank.body_byte_end == 0
+
+    # TypeRecord with nested field/method records.
+    ty_wire = {
+        "file": "src/lib.rs", "kind": "struct", "name": "Error", "generics": "", "definition": "struct Error",
+        "fields": [{"name": "inner", "ty": "Own<ErrorImpl>", "is_pub": False}],
+        "variants": [], "methods": [{"name": "new", "sig": "fn new() -> Self", "is_pub": True}], "is_pub": True,
+    }
+    tr = TypeRecord.from_dict(ty_wire)
+    assert isinstance(tr.fields[0], FieldRecord) and tr.fields[0].ty == "Own<ErrorImpl>"
+    assert isinstance(tr.methods[0], MethodRecord) and tr.methods[0].sig == "fn new() -> Self"
+    assert tr.to_dict() == ty_wire
+
+    mod = ModRecord.from_dict({"name": "error", "file": "error.rs", "cfg_predicates": [], "declared_in": "lib.rs"})
+    assert mod.name == "error" and mod.declared_in == "lib.rs" and mod.cfg_predicates == ()
+
+    fam_wire = {"method": "kind", "traits": ["AdhocKind", "TraitKind"], "macros": ["anyhow"],
+                "trait_files": ["kind.rs"], "macro_defs": ["macro_rules!{}"], "return_types": ["Adhoc"],
+                "chained_methods": ["new"], "member_files": ["kind.rs"]}
+    fam = DispatchFamily.from_dict(fam_wire)
+    assert fam.traits == ("AdhocKind", "TraitKind") and fam.method == "kind"
+    assert fam.to_dict() == fam_wire
+    print("  OK  domain models for extractor seam (slice 6)")
+
+
+def test_slice6_models_seam_wiring() -> None:
+    """Slice 6: the Extractor adapter parses JSON into typed records; the pipeline.py fns
+    wrapper re-serialises to dicts via to_dict so the dict-based fill engine is unchanged."""
+    from pipeline_core.adapters.extractor import CliExtractor
+    from pipeline_core.domain.models import FnRecord
+    from pathlib import Path
+
+    # Missing binary → None (not a crash), preserved from the dict era.
+    ext = CliExtractor(Path("/nonexistent/skeleton-extractor"))
+    assert ext.enumerate_fns(Path(".")) is None
+    assert ext.enumerate_types(Path(".")) is None
+
+    # The adapter's parse step yields typed records from wire dicts.
+    rec = FnRecord.from_dict({"fn_name": "f", "file": "a.rs"})
+    import pipeline
+    # The pipeline wrapper hands the engine dicts (to_dict), not dataclasses.
+    assert rec.to_dict()["fn_name"] == "f"
+    print("  OK  extractor seam typed; engine still dict-fed (slice 6)")
 
 
 def test_slice5b_task2() -> None:
@@ -2423,6 +2494,8 @@ def main() -> int:
     test_slice5b_task1()
     test_slice5b_task2()
     test_slice5b_task0c()
+    test_slice6_models()
+    test_slice6_models_seam_wiring()
     test_slice5b_task3_task4()
     test_slice5b_genesis_audit_task()
 

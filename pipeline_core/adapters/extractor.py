@@ -16,6 +16,8 @@ import json
 import subprocess
 from pathlib import Path
 
+from ..domain.models import FnRecord, TypeRecord, ModRecord, DispatchFamily
+
 
 def _cfg_args(cfg_true: tuple[str, ...], cfg_false: tuple[str, ...]) -> list[str]:
     out: list[str] = []
@@ -57,20 +59,25 @@ class CliExtractor:
             return None
         return data if isinstance(data, list) else None
 
-    def enumerate_fns(self, src_dir: Path, *, cfg_true: tuple[str, ...] = (), cfg_false: tuple[str, ...] = ()) -> list[dict] | None:
-        return self._enumerate("--enumerate-fns", src_dir, cfg_true, cfg_false)
+    def enumerate_fns(self, src_dir: Path, *, cfg_true: tuple[str, ...] = (), cfg_false: tuple[str, ...] = ()) -> list[FnRecord] | None:
+        rows = self._enumerate("--enumerate-fns", src_dir, cfg_true, cfg_false)
+        return None if rows is None else [FnRecord.from_dict(r) for r in rows]
 
-    def enumerate_types(self, src_dir: Path, *, cfg_true: tuple[str, ...] = (), cfg_false: tuple[str, ...] = ()) -> list[dict] | None:
-        return self._enumerate("--enumerate-types", src_dir, cfg_true, cfg_false)
+    def enumerate_types(self, src_dir: Path, *, cfg_true: tuple[str, ...] = (), cfg_false: tuple[str, ...] = ()) -> list[TypeRecord] | None:
+        rows = self._enumerate("--enumerate-types", src_dir, cfg_true, cfg_false)
+        return None if rows is None else [TypeRecord.from_dict(r) for r in rows]
 
-    def enumerate_dispatch_families(self, src_dir: Path, *, cfg_true: tuple[str, ...] = (), cfg_false: tuple[str, ...] = ()) -> list[dict] | None:
-        return self._enumerate("--enumerate-dispatch-families", src_dir, cfg_true, cfg_false)
+    def enumerate_dispatch_families(self, src_dir: Path, *, cfg_true: tuple[str, ...] = (), cfg_false: tuple[str, ...] = ()) -> list[DispatchFamily] | None:
+        rows = self._enumerate("--enumerate-dispatch-families", src_dir, cfg_true, cfg_false)
+        return None if rows is None else [DispatchFamily.from_dict(r) for r in rows]
 
     def enumerate_feature_gate_cfgs(self, src_dir: Path, *, cfg_true: tuple[str, ...] = (), cfg_false: tuple[str, ...] = ()) -> list[str] | None:
-        return self._enumerate("--enumerate-feature-gate-cfgs", src_dir, cfg_true, cfg_false)
+        rows = self._enumerate("--enumerate-feature-gate-cfgs", src_dir, cfg_true, cfg_false)
+        return None if rows is None else [str(x) for x in rows]
 
-    def enumerate_mods(self, src_dir: Path, *, cfg_true: tuple[str, ...] = (), cfg_false: tuple[str, ...] = ()) -> list[dict] | None:
-        return self._enumerate("--enumerate-mods", src_dir, cfg_true, cfg_false)
+    def enumerate_mods(self, src_dir: Path, *, cfg_true: tuple[str, ...] = (), cfg_false: tuple[str, ...] = ()) -> list[ModRecord] | None:
+        rows = self._enumerate("--enumerate-mods", src_dir, cfg_true, cfg_false)
+        return None if rows is None else [ModRecord.from_dict(r) for r in rows]
 
     # ── skeletonise : --input/--output tree, structured report dict ───────────
     def skeletonise(self, input_dir: Path, output_dir: Path, *, cfg_true: tuple[str, ...] = (), cfg_false: tuple[str, ...] = ()) -> dict:

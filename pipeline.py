@@ -67,6 +67,9 @@ from pipeline_core import log as _pclog, retry as _pcretry
 from pipeline_core.retry import with_retry, is_rate_limit_error as _is_rate_limit_error
 from pipeline_core.io import read, write
 from pipeline_core.settings import Settings
+from pipeline_core.domain.models import (
+    TypeRecord, ModRecord, DispatchFamily,
+)
 from pipeline_core.adapters import build_adapters
 from pipeline_core.adapters import coverage as _covmod, workspace as _wsmod
 from pipeline_core.adapters.coverage import CoverageDeps
@@ -8949,22 +8952,22 @@ def _phase_c_fill_impl_blocks(
     # A block belongs to a family if its container names a family trait OR one
     # of the dispatched method's return ("tag") types — the latter pulls the
     # tag's inherent impl (where the chained `new` lives) into co-design.
-    _name_to_family: dict[str, dict] = {}
+    _name_to_family: dict[str, DispatchFamily] = {}
     for _fam in _families:
-        for _nm in list(_fam.get("traits", [])) + list(_fam.get("return_types", [])):
+        for _nm in list(_fam.traits) + list(_fam.return_types):
             _name_to_family[_nm] = _fam
     if _families:
         _log(f"  [phase-c/impl] {len(_families)} dispatch family(ies): "
              + "; ".join(
-                 f"{f.get('method')}←{f.get('traits')}"
-                 f"+tags{f.get('return_types')}.{f.get('chained_methods')}"
+                 f"{f.method}←{f.traits}"
+                 f"+tags{f.return_types}.{f.chained_methods}"
                  for f in _families))
 
     def _container_names(container: str) -> set:
         return set(container.replace("<", " ").replace(">", " ")
                    .replace("+", " ").split())
 
-    def _family_for_container(container: str) -> "dict | None":
+    def _family_for_container(container: str) -> "DispatchFamily | None":
         toks = _container_names(container)
         for _nm, _f in _name_to_family.items():
             if _nm in toks:
@@ -8999,8 +9002,7 @@ def _phase_c_fill_impl_blocks(
         _family = _family_for_container(block["container"])
         dispatch_family_section = ""
         if _family is not None:
-            _fam_names = (set(_family.get("traits", []))
-                          | set(_family.get("return_types", [])))
+            _fam_names = set(_family.traits) | set(_family.return_types)
             _seen = {_impl_block_id(block["file"], block["container"])}
             _seen |= {_impl_block_id(rb["file"], rb["container"]) for rb in related_blocks}
             for b2 in blocks:
@@ -9095,8 +9097,8 @@ def _phase_c_fill_impl_blocks(
             _types_section_eff = types_section
             if last_error_excerpt:
                 _err_types = _types_referenced_in_text(last_error_excerpt, _crate_type_records)
-                _base_names = {r.get("name") for r in types_records}
-                _extra = [r for r in _err_types if r.get("name") not in _base_names]
+                _base_names = {r.name for r in types_records}
+                _extra = [r for r in _err_types if r.name not in _base_names]
                 if _extra:
                     _aug = _types_full + "\n\n" + "\n\n".join(
                         _format_type_for_prompt(r) for r in _extra[:_TYPES_COUNT_CAP])
@@ -9723,8 +9725,8 @@ def _task2_fill_fns_one_by_one(
                 _types_section_eff = types_section
                 if error_excerpt:
                     _err_types = _types_referenced_in_text(error_excerpt, _crate_type_records)
-                    _base_names = {r.get("name") for r in _types_for_fn}
-                    _extra = [r for r in _err_types if r.get("name") not in _base_names]
+                    _base_names = {r.name for r in _types_for_fn}
+                    _extra = [r for r in _err_types if r.name not in _base_names]
                     if _extra:
                         _aug = _types_full + "\n\n" + "\n\n".join(
                             _format_type_for_prompt(r) for r in _extra[:_TYPES_COUNT_CAP])
@@ -10962,7 +10964,7 @@ def _locate_fn_by_record(file_path: Path, name: str, container: str, sig_text: s
     )
 
 
-def _enumerate_types_via_extractor(src_dir: Path) -> list[dict] | None:
+def _enumerate_types_via_extractor(src_dir: Path) -> list[TypeRecord] | None:
     """Invoke the syn-based extractor's --enumerate-types subcommand.
 
     Returns a list of type records (struct/enum/type/trait) with fields and
@@ -10975,7 +10977,7 @@ def _enumerate_types_via_extractor(src_dir: Path) -> list[dict] | None:
     return ADAPTERS.extractor.enumerate_types(src_dir)  # slice 5a: via Extractor adapter
 
 
-def _format_type_for_prompt(rec: dict) -> str:
+def _format_type_for_prompt(rec: TypeRecord) -> str:
     """Render a type record as a compact Rust-like definition for prompts.
 
     P5.2 includes a field-vs-method annotation: each name is shown with `.x`
@@ -10986,18 +10988,18 @@ def _format_type_for_prompt(rec: dict) -> str:
     `Ref::new(NonNull<T>)` when `Ref::new` actually takes `&T` — visible
     method NAME but invisible argument types.
     """
-    kind = rec.get("kind", "?")
-    name = rec.get("name", "?")
-    generics = rec.get("generics", "") or ""
-    fields = rec.get("fields", [])
-    variants = rec.get("variants", [])
-    methods = rec.get("methods", [])
+    kind = rec.kind or "?"
+    name = rec.name or "?"
+    generics = rec.generics or ""
+    fields = rec.fields
+    variants = rec.variants
+    methods = rec.methods
     lines = [f"{kind} {name}{generics}"]
     if fields:
         lines.append("  fields (access with .name):")
         for f in fields:
-            pub = "pub " if f.get("is_pub") else ""
-            lines.append(f"    {pub}{f['name']}: {f['ty']}")
+            pub = "pub " if f.is_pub else ""
+            lines.append(f"    {pub}{f.name}: {f.ty}")
     if variants:
         lines.append("  variants:")
         for v in variants[:8]:
@@ -11010,15 +11012,15 @@ def _format_type_for_prompt(rec: dict) -> str:
         seen: set[str] = set()
         sigs: list[tuple[str, str, bool]] = []  # (name, sig, is_pub)
         for m in methods:
-            mn = m.get("name", "")
+            mn = m.name
             if mn and mn not in seen:
                 seen.add(mn)
-                sig = m.get("sig", "") or ""
+                sig = m.sig or ""
                 # Trim verbose where-clauses to fit the prompt; keep up to
                 # 120 chars of the sig (covers virtually all real fn sigs).
                 if len(sig) > 120:
                     sig = sig[:117] + "..."
-                sigs.append((mn, sig.strip(), bool(m.get("is_pub"))))
+                sigs.append((mn, sig.strip(), bool(m.is_pub)))
         if sigs:
             lines.append("  methods (sig shown; call with .name(args)):")
             # Cap to top 10 methods to keep prompts compact for types with
@@ -11082,7 +11084,7 @@ def _extract_impl_where_clause(file_text: str, container: str) -> str:
     return ""
 
 
-def _types_referenced_in_text(text: str, all_types: list[dict]) -> list[dict]:
+def _types_referenced_in_text(text: str, all_types: list[TypeRecord]) -> list[TypeRecord]:
     """Return type records that the fn's prompt should expose, with one
     level of transitive expansion through fields.
 
@@ -11103,11 +11105,11 @@ def _types_referenced_in_text(text: str, all_types: list[dict]) -> list[dict]:
     """
     if not text or not all_types:
         return []
-    by_name = {rec.get("name", ""): rec for rec in all_types if rec.get("name")}
-    out: list[dict] = []
+    by_name = {rec.name: rec for rec in all_types if rec.name}
+    out: list[TypeRecord] = []
     seen_names: set[str] = set()
     for rec in all_types:
-        name = rec.get("name", "")
+        name = rec.name
         if not name or name in seen_names:
             continue
         if re.search(r"\b" + re.escape(name) + r"\b", text):
@@ -11116,10 +11118,10 @@ def _types_referenced_in_text(text: str, all_types: list[dict]) -> list[dict]:
 
     # Pass 2: expand by one field-hop. For each matched type, look at the
     # type names appearing in its fields and pull those records in.
-    field_hop: list[dict] = []
+    field_hop: list[TypeRecord] = []
     for rec in list(out):
-        for f in rec.get("fields", []) or []:
-            ty = f.get("ty", "") or ""
+        for f in rec.fields or ():
+            ty = f.ty or ""
             if not ty:
                 continue
             # Extract identifier-shaped tokens from the field's type
@@ -11141,8 +11143,11 @@ def _types_referenced_in_text(text: str, all_types: list[dict]) -> list[dict]:
 def _enumerate_fns_via_extractor(src_dir: Path) -> list[dict] | None:
     """Invoke the syn-based extractor's --enumerate-fns subcommand.
 
-    Returns a list of fn records (each a dict from the extractor's JSON
-    output) or None if the binary isn't available or fails. Each record:
+    The adapter now returns typed :class:`FnRecord`s (the seam is typed, slice 6).
+    This wrapper feeds the dict-based per-fn / per-impl fill engine, so it serialises
+    each record back to its wire dict via the model's own ``to_dict`` — keeping the
+    engine (``_process_one_stub``, ``_collect_impl_blocks``, the hand-built fallback
+    stub dicts) byte-identical. Each dict:
         file (str, rel path from src_dir)
         fn_name (str)
         sig_text (str)
@@ -11153,10 +11158,11 @@ def _enumerate_fns_via_extractor(src_dir: Path) -> list[dict] | None:
         container (str): "" for free fn, "impl ..." or "trait ..."
         has_unimplemented_body (bool)
     """
-    return ADAPTERS.extractor.enumerate_fns(src_dir)  # slice 5a: via Extractor adapter
+    recs = ADAPTERS.extractor.enumerate_fns(src_dir)  # typed FnRecords (slice 6)
+    return None if recs is None else [r.to_dict() for r in recs]
 
 
-def _dispatch_families_via_extractor(src_dir: Path) -> list[dict] | None:
+def _dispatch_families_via_extractor(src_dir: Path) -> list[DispatchFamily] | None:
     """Invoke the extractor's --enumerate-dispatch-families subcommand.
 
     Returns a list of family records (or None if the binary is unavailable /
@@ -11181,23 +11187,23 @@ def _feature_gate_cfgs_via_extractor(src_dir: Path) -> list[str] | None:
     return ADAPTERS.extractor.enumerate_feature_gate_cfgs(src_dir)  # slice 5a: via adapter
 
 
-def _build_dispatch_family_section(family: dict) -> str:
+def _build_dispatch_family_section(family: DispatchFamily) -> str:
     """Render the <DISPATCH_FAMILY> prompt block: the family's traits, the
     dispatch method, and the dispatching macro_rules! source — the behavioural
     spec the co-design fill must satisfy. Macro defs are capped so the section
     can't dominate the budget."""
-    traits = ", ".join(family.get("traits", []))
-    method = family.get("method", "")
-    macros = ", ".join(family.get("macros", []))
-    tags = ", ".join(family.get("return_types", []))
-    chained = ", ".join(family.get("chained_methods", []))
-    defs = family.get("macro_defs", []) or []
+    traits = ", ".join(family.traits)
+    method = family.method
+    macros = ", ".join(family.macros)
+    tags = ", ".join(family.return_types)
+    chained = ", ".join(family.chained_methods)
+    defs = list(family.macro_defs)
     _cap = max(2000, SINGLE_CALL_CHAR_LIMIT // 8)
     macro_text = "\n\n".join(defs)
     if len(macro_text) > _cap:
         macro_text = macro_text[:_cap] + "\n/* … macro truncated … */"
-    tag_list = family.get("return_types", [])
-    trait_list = family.get("traits", [])
+    tag_list = family.return_types
+    trait_list = family.traits
     # Concrete WRONG→RIGHT examples (generic placeholder names, NOT crate
     # source) — the model acts on examples, not on "autoref-specialization"
     # jargon. Two examples so the pattern generalises.
@@ -12290,7 +12296,7 @@ def _fn_cfg_predicates(file_text: str, fn_name: str) -> list[str]:
     return preds
 
 
-def _enumerate_mods_via_extractor(src_dir: Path) -> list[dict] | None:
+def _enumerate_mods_via_extractor(src_dir: Path) -> list[ModRecord] | None:
     """Invoke the syn-based extractor's --enumerate-mods subcommand.
 
     Returns a list of mod records (each: {name, file, cfg_predicates,
@@ -12305,7 +12311,7 @@ def _enumerate_mods_via_extractor(src_dir: Path) -> list[dict] | None:
 # Cache of mod records per src_dir to avoid re-invoking the extractor for
 # every fn lookup. Invalidated when target_src_dir's identity changes — the
 # pipeline only ever queries one dir at a time during a cluster pass.
-_MOD_RECORDS_CACHE: dict[str, list[dict]] = {}
+_MOD_RECORDS_CACHE: dict[str, list[ModRecord]] = {}
 
 
 def _file_cfg_predicate(target_src_dir: Path, file_rel: str) -> str | None:
@@ -12329,8 +12335,8 @@ def _file_cfg_predicate(target_src_dir: Path, file_rel: str) -> str | None:
         _MOD_RECORDS_CACHE[key] = recs
     file_name = Path(file_rel).name
     for r in _MOD_RECORDS_CACHE[key]:
-        if r.get("name") == stem or r.get("file") == file_name:
-            preds: list[str] = list(r.get("cfg_predicates") or [])
+        if r.name == stem or r.file == file_name:
+            preds: list[str] = list(r.cfg_predicates)
             if not preds:
                 return None
             if len(preds) == 1:
