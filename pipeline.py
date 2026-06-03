@@ -68,7 +68,7 @@ from pipeline_core.retry import with_retry
 from pipeline_core.io import read, write
 from pipeline_core.settings import Settings
 from pipeline_core.domain.models import (
-    TypeRecord, ModRecord, DispatchFamily,
+    TypeRecord, ModRecord, DispatchFamily, Diagnostic,
 )
 from pipeline_core.adapters import build_adapters
 from pipeline_core.adapters import coverage as _covmod, workspace as _wsmod
@@ -7694,7 +7694,7 @@ def _cargo_err_sig(output: str) -> frozenset:
     )
 
 
-def _cargo_diagnostics_from_json(output: str) -> "list[dict] | None":
+def _cargo_diagnostics_from_json(output: str) -> "list[Diagnostic] | None":
     """Walk `output` line-by-line, parse JSON cargo messages, return the
     `compiler-message`s with `level == "error"` as structured records:
 
@@ -7706,7 +7706,7 @@ def _cargo_diagnostics_from_json(output: str) -> "list[dict] | None":
     (an actual signal: a JSON cargo check that returned cleanly).
     """
     json_seen = False
-    out: list[dict] = []
+    out: list[Diagnostic] = []
     for ln in output.splitlines():
         ln = ln.strip()
         if not ln.startswith("{"):
@@ -7727,25 +7727,25 @@ def _cargo_diagnostics_from_json(output: str) -> "list[dict] | None":
         code = (code_field.get("code") or "") if isinstance(code_field, dict) else ""
         spans = msg.get("spans") or []
         primary = next((s for s in spans if s.get("is_primary")), spans[0] if spans else {})
-        out.append({
-            "code": code,
-            "file": (primary.get("file_name") or "") if isinstance(primary, dict) else "",
-            "line": int(primary.get("line_start") or 0) if isinstance(primary, dict) else 0,
-            "message": msg.get("message") or "",
-            "rendered": msg.get("rendered") or "",
-        })
+        out.append(Diagnostic(
+            code=code,
+            file=(primary.get("file_name") or "") if isinstance(primary, dict) else "",
+            line=int(primary.get("line_start") or 0) if isinstance(primary, dict) else 0,
+            message=msg.get("message") or "",
+            rendered=msg.get("rendered") or "",
+        ))
     return out if json_seen else None
 
 
-def _cargo_err_sig_from_diagnostics(diagnostics: "list[dict]") -> frozenset:
+def _cargo_err_sig_from_diagnostics(diagnostics: "list[Diagnostic]") -> frozenset:
     """Build the stable error signature directly from structured
     diagnostics. Sig is `code:message` (or just `message` when no code) —
     same disambiguation power as the regex sig but produced from
     rustc's own classification rather than guessed from rendered text."""
     sigs: set[str] = set()
     for d in diagnostics:
-        code = d.get("code") or ""
-        msg = (d.get("message") or "").strip()
+        code = d.code or ""
+        msg = (d.message or "").strip()
         sigs.add(f"{code}:{msg}" if code else msg)
     return frozenset(sigs)
 
@@ -7755,7 +7755,7 @@ def _run_cargo_check_diag(
     cwd: Path,
     env: dict,
     timeout: int = 180,
-) -> "tuple[int, str, list[dict]]":
+) -> "tuple[int, str, list[Diagnostic]]":
     """Run a cargo check / build / test command with
     `--message-format=json-diagnostic-rendered-ansi` so the caller gets
     BOTH a rendered text view (for prompts / logs) AND structured
@@ -7804,7 +7804,7 @@ def _run_cargo_check_diag(
                 continue
             rendered_parts.append(ln)
         for d in diagnostics:
-            r_text = d.get("rendered") or ""
+            r_text = d.rendered or ""
             if r_text:
                 rendered_parts.append(r_text)
         rendered = "\n".join(rendered_parts)
@@ -12071,7 +12071,7 @@ def _extract_tdd_compile_frontier(
 
 
 def _frontier_from_diags(
-    diagnostics: list[dict], src_dir: Path,
+    diagnostics: list[Diagnostic], src_dir: Path,
 ) -> dict[tuple[str, str], set[str]]:
     """Same (file, fn) → {"<compile>"} frontier as
     `_extract_tdd_compile_frontier`, but built from STRUCTURED cargo
@@ -12085,8 +12085,8 @@ def _frontier_from_diags(
     fn_records_by_file: dict[str, list[dict]] = {}
     file_text_cache: dict[str, str] = {}
     for d in diagnostics or []:
-        rel = d.get("file") or ""
-        line_no = int(d.get("line") or 0)
+        rel = d.file or ""
+        line_no = int(d.line or 0)
         if not rel or line_no < 1:
             continue
         if rel not in fn_records_by_file:
@@ -16621,7 +16621,7 @@ Current source files:
             # Build the frontier from STRUCTURED diags, not the ANSI-rendered
             # text (the plain-text regex can't parse colour codes → empty).
             fr = _frontier_from_diags(diags, project_dir)
-            file_errs = sum(1 for d in diags if (d.get("file") or "") == _rel)
+            file_errs = sum(1 for d in diags if (d.file or "") == _rel)
             ok = (rc == 0) or ((_rel, _fn) not in fr)
             return ok, _strip_ansi(rendered), file_errs
 
@@ -16715,7 +16715,7 @@ Output nothing else."""
             # block is clean and never ask the model).
             fr = _frontier_from_diags(diags, project_dir)
             group_errs = sum(1 for (f2, fn2) in fr if f2 == _rel and fn2 in _names)
-            file_errs = sum(1 for d in diags if (d.get("file") or "") == _rel)
+            file_errs = sum(1 for d in diags if (d.file or "") == _rel)
             ok = (rc == 0) or (group_errs == 0)
             return ok, _strip_ansi(rendered), file_errs
 

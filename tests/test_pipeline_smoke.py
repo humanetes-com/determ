@@ -1811,8 +1811,9 @@ def test_strip_ansi_and_diag_frontier() -> None:
     # Structured-diag frontier never touches rendered text; empty/garbage in →
     # empty out (no crash), and it ignores ANSI entirely.
     assert pipeline._frontier_from_diags([], pipeline.Path(".")) == {}
+    # slice 6: diagnostics are typed Diagnostic records now (empty file → skipped → {}).
     assert pipeline._frontier_from_diags(
-        [{"file": "", "line": 0}], pipeline.Path(".")) == {}
+        [pipeline.Diagnostic(file="", line=0)], pipeline.Path(".")) == {}
     print("  OK  _strip_ansi + _frontier_from_diags (ANSI-immune inner check)")
 
 
@@ -2228,7 +2229,18 @@ def test_slice6_models() -> None:
     fam = DispatchFamily.from_dict(fam_wire)
     assert fam.traits == ("AdhocKind", "TraitKind") and fam.method == "kind"
     assert fam.to_dict() == fam_wire
-    print("  OK  domain models for extractor seam (slice 6)")
+
+    # Diagnostic — the cargo↔Python seam (slice 6, 2nd unit).
+    from pipeline_core.domain.models import Diagnostic
+    diag_wire = {"code": "E0277", "file": "src/error.rs", "line": 42,
+                 "message": "the trait bound is not satisfied", "rendered": "error[E0277]..."}
+    dg = Diagnostic.from_dict(diag_wire)
+    assert dg.code == "E0277" and dg.file == "src/error.rs" and dg.line == 42
+    assert dg.to_dict() == diag_wire
+    # tolerant: no code / no span.
+    blank_dg = Diagnostic.from_dict({"message": "linker error"})
+    assert blank_dg.code == "" and blank_dg.line == 0 and blank_dg.message == "linker error"
+    print("  OK  domain models for extractor + cargo seams (slice 6)")
 
 
 def test_slice6_models_seam_wiring() -> None:

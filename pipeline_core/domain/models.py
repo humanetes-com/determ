@@ -208,7 +208,38 @@ class DispatchFamily:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class Diagnostic:
+    """One rustc error from cargo's `--message-format=json` output — the cargo↔Python
+    seam. Produced by `_cargo_diagnostics_from_json`; `code` is "" when rustc gave no
+    error code, `file`/`line` come from the primary span ("" / 0 when absent)."""
+    code: str = ""           # "E0277" or ""
+    file: str = ""           # primary span file, relative; "" if none
+    line: int = 0            # primary span start line; 0 if none
+    message: str = ""
+    rendered: str = ""       # rustc's own rendered text (may carry ANSI)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Diagnostic":
+        return cls(
+            code=d.get("code", ""),
+            file=d.get("file", ""),
+            line=int(d.get("line", 0)),
+            message=d.get("message", ""),
+            rendered=d.get("rendered", ""),
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "code": self.code,
+            "file": self.file,
+            "line": self.line,
+            "message": self.message,
+            "rendered": self.rendered,
+        }
+
+
 __all__ = [
     "FieldRecord", "MethodRecord", "TypeRecord",
-    "FnRecord", "ModRecord", "DispatchFamily",
+    "FnRecord", "ModRecord", "DispatchFamily", "Diagnostic",
 ]
