@@ -171,6 +171,27 @@ class ModRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class ConstRecord:
+    """A `const` / `static` item (model.rs ConstRecord)."""
+    file: str = ""
+    name: str = ""
+    ty: str = ""
+    is_pub: bool = False
+
+    @classmethod
+    def from_dict(cls, d: dict) -> ConstRecord:
+        return cls(
+            file=d.get("file", ""),
+            name=d.get("name", ""),
+            ty=d.get("ty", ""),
+            is_pub=bool(d.get("is_pub", False)),
+        )
+
+    def to_dict(self) -> dict:
+        return {"file": self.file, "name": self.name, "ty": self.ty, "is_pub": self.is_pub}
+
+
+@dataclass(frozen=True, slots=True)
 class DispatchFamily:
     """A method-dispatch family: trait + macro chain (model.rs DispatchFamily)."""
     method: str = ""
@@ -367,6 +388,6 @@ class ModuleAugmentState:
 
 __all__ = [
     "FieldRecord", "MethodRecord", "TypeRecord",
-    "FnRecord", "ModRecord", "DispatchFamily", "Diagnostic",
+    "FnRecord", "ModRecord", "ConstRecord", "DispatchFamily", "Diagnostic",
     "BuildCluster", "ModuleAugmentState",
 ]

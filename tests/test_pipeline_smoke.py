@@ -35,6 +35,14 @@ needs_cargo = pytest.mark.skipif(
     "os.environ.get('SMOKE_FULL') != '1'", reason="needs cargo + coverage backend; set SMOKE_FULL=1"
 )
 
+# Some helpers now parse Rust source through the syn extractor binary (no regex on source).
+# Tests of those skip when the binary isn't built (e.g. the CI Python job, which doesn't build
+# the Rust crate). Built by `bash setup.sh`.
+needs_extractor = pytest.mark.skipif(
+    not (REPO / "tools" / "skeleton_extractor" / "target" / "release" / "skeleton-extractor").exists(),
+    reason="skeleton-extractor binary not built (bash setup.sh)",
+)
+
 
 def _setup_workspace(name: str = "fixture-tiny-test") -> Path:
     workspace = REPO / "tmp" / name
@@ -1242,6 +1250,31 @@ def test_has_gen_tests_decl() -> None:
     assert pipeline._has_gen_tests_decl("// no decls here\n", 1) is False
 
     print("  OK  _has_gen_tests_decl")
+
+
+@needs_extractor
+def test_extract_public_symbols_via_syn() -> None:
+    """_extract_public_symbols parses Rust source via the syn extractor (no regex on source).
+    Confirm it surfaces pub structs (with fields), enums (with variants), traits, fn sigs, and
+    consts — and excludes private items."""
+    import pipeline
+
+    src = (
+        "pub struct Error { pub inner: Box<E>, code: u32 }\n"
+        "pub enum Kind { A, B(u32) }\n"
+        "pub trait Show { fn show(&self) -> String; }\n"
+        "pub fn build(x: u32) -> Error { unimplemented!() }\n"
+        "pub const MAX: usize = 10;\n"
+        "struct Hidden { x: u8 }\n"          # private — must NOT appear
+        "const SECRET: u8 = 1;\n"
+    )
+    out = pipeline._extract_public_symbols(src)
+    assert "pub struct Error" in out and "inner" in out and "code" in out
+    assert "pub enum Kind" in out and "A" in out
+    assert "pub trait Show" in out
+    assert "pub fn build" in out and "-> Error" in out
+    assert "pub const MAX" in out
+    assert "Hidden" not in out and "SECRET" not in out   # private excluded by syn visibility
 
 
 def test_api_surface_capture() -> None:

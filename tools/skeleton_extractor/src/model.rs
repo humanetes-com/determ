@@ -70,6 +70,15 @@ pub struct ModRecord {
     pub declared_in: String,
 }
 
+/// A `const` or `static` item (public-API surface), enumerated by `--enumerate-consts`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ConstRecord {
+    pub file: String,
+    pub name: String,
+    pub ty: String, // the declared type, rendered
+    pub is_pub: bool,
+}
+
 /// An autoref-specialization "dispatch family": a set of 2+ sibling traits
 /// that declare the SAME method name, where that method name is also invoked
 /// (`.method(...)`) from a `macro_rules!` body. anyhow's

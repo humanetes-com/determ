@@ -333,3 +333,22 @@ be done in an environment that can run the pipeline, not by static edits alone.
 Carried forward from §5 (now folded into the groups above): Slice-5b Group E tail → **R3.4**;
 Slice-6 engine models → **R3.1–R3.3**; Slice-7 thiserror/`Cfg` → **R5.1/R5.3**; the dead
 Orchestrator → **R2.1–R2.2**.
+
+### R7 — regex→syn: stop parsing Rust source with regex  🔄 IN PROGRESS  (P1 · Hard Rule: no regex on source)
+~300 `re.*` calls in pipeline.py. **Most legitimately stay** — they parse model responses
+(`<FILE>`/`<FN>`), cargo/pytest/ANSI output, or filenames (no structured parser exists). The
+target is the subset that parses **Rust source**, which must go through the syn extractor.
+Two confirmed design choices: (a) **temp-dir bridge** — the extractor is path-based, so for an
+in-memory source string the Python side writes a throwaway `src/lib.rs` and enumerates over it;
+(b) **grow the extractor faithfully** when a site needs facts syn doesn't emit yet (no behaviour loss).
+| # | step | Pri | Eff | Risk | status |
+|---|---|---|---|---|---|
+| R7.0 | keystone: `_public_api_from_source` temp-dir bridge (string → enumerate types/fns/consts via syn). | P1 | S | ● | ✅ |
+| R7.1 | `_extract_public_symbols`: was regex over structs/enums/traits/fns/consts → now syn (`enumerate_types` + `enumerate_fns` + new `enumerate_consts`). **Grew the extractor**: `ConstRecord` + `--enumerate-consts` (model.rs/enumerate.rs/main.rs + adapter/port/`ConstRecord` + Rust test). Behavioural test `test_extract_public_symbols_via_syn` (skips without the binary). | P1 | M | ●● | ✅ |
+| R7.2 | `_PUB_ITEM_RE` (kind,name pairs) → `enumerate_types`/`enumerate_fns`. | P1 | S | ● | ⬜ |
+| R7.3 | `_TEST_ATTR_RE` / test-fn counting on source → extractor (report test fns / `#[test]`). | P2 | M | ●● | ⬜ |
+| R7.4 | cfg-on-source (`_CFG_ATTR_RE`/`_CFG_INLINE_RE`/`_eval_cfg_pred` where they scan source) → extractor cfg facts (it already has `CfgSet` + `extract_cfg_predicates`). Woven into cluster logic — careful. | P1 | L | ●●● | ⬜ |
+| R7.5 | `_IDIOM_*` crate-idiom mining on filled source → syn token/AST walk (or accept as text-pattern mining, not structural parsing — decide per pattern). | P2 | M | ●● | ⬜ |
+| R7.6 | `_COMMENT_RE` source comment-stripping, attr openers, gen_tests-decl parsing → syn where structural. | P2 | M | ●● | ⬜ |
+Note: the syn-bridge sites depend on the extractor binary at runtime; their tests skip when it's
+not built (CI Python job). The const enumeration itself is covered by the Rust crate's tests in CI.

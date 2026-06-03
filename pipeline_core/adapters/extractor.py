@@ -16,7 +16,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from ..domain.models import DispatchFamily, FnRecord, ModRecord, TypeRecord
+from ..domain.models import ConstRecord, DispatchFamily, FnRecord, ModRecord, TypeRecord
 
 
 def _cfg_args(cfg_true: tuple[str, ...], cfg_false: tuple[str, ...]) -> list[str]:
@@ -78,6 +78,10 @@ class CliExtractor:
     def enumerate_mods(self, src_dir: Path, *, cfg_true: tuple[str, ...] = (), cfg_false: tuple[str, ...] = ()) -> list[ModRecord] | None:
         rows = self._enumerate("--enumerate-mods", src_dir, cfg_true, cfg_false)
         return None if rows is None else [ModRecord.from_dict(r) for r in rows]
+
+    def enumerate_consts(self, src_dir: Path, *, cfg_true: tuple[str, ...] = (), cfg_false: tuple[str, ...] = ()) -> list[ConstRecord] | None:
+        rows = self._enumerate("--enumerate-consts", src_dir, cfg_true, cfg_false)
+        return None if rows is None else [ConstRecord.from_dict(r) for r in rows]
 
     # ── skeletonise : --input/--output tree, structured report dict ───────────
     def skeletonise(self, input_dir: Path, output_dir: Path, *, cfg_true: tuple[str, ...] = (), cfg_false: tuple[str, ...] = ()) -> dict:

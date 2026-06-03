@@ -245,6 +245,35 @@ mod tests {
     }
 
     #[test]
+    fn enumerates_pub_consts_and_statics() {
+        use std::fs;
+        let tmp = std::env::temp_dir().join("skel_consts_test");
+        if tmp.exists() {
+            fs::remove_dir_all(&tmp).unwrap();
+        }
+        fs::create_dir_all(tmp.join("src")).unwrap();
+        fs::write(
+            tmp.join("src").join("lib.rs"),
+            r#"
+            pub const MAX: usize = 10;
+            pub static NAME: &str = "x";
+            const PRIVATE: u8 = 1;
+            pub mod inner { pub const NESTED: i32 = 2; }
+            "#,
+        )
+        .unwrap();
+        let cs = enumerate_consts_in_tree(&tmp).unwrap();
+        let pubs: Vec<_> = cs
+            .iter()
+            .filter(|c| c.is_pub)
+            .map(|c| c.name.as_str())
+            .collect();
+        assert!(pubs.contains(&"MAX") && pubs.contains(&"NAME") && pubs.contains(&"NESTED"));
+        assert!(cs.iter().any(|c| c.name == "PRIVATE" && !c.is_pub));
+        assert_eq!(cs.iter().find(|c| c.name == "MAX").unwrap().ty, "usize");
+    }
+
+    #[test]
     fn detects_dispatch_family_and_excludes_spurious() {
         // FR-027: shared method + macro dispatch = family; shared method
         // WITHOUT a macro that calls it = not a family.

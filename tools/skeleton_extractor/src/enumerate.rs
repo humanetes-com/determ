@@ -560,6 +560,75 @@ pub fn enumerate_mods_in_tree(input_dir: &Path) -> Result<Vec<ModRecord>> {
     Ok(out)
 }
 
+/// Collect `const` / `static` items (recursing into inline `mod`s) into ConstRecords.
+fn collect_consts(items: &[Item], file: &str, out: &mut Vec<ConstRecord>) {
+    fn is_pub(vis: &syn::Visibility) -> bool {
+        matches!(vis, syn::Visibility::Public(_))
+    }
+    for item in items {
+        match item {
+            Item::Const(c) => out.push(ConstRecord {
+                file: file.to_string(),
+                name: c.ident.to_string(),
+                ty: render_type(&c.ty),
+                is_pub: is_pub(&c.vis),
+            }),
+            Item::Static(s) => out.push(ConstRecord {
+                file: file.to_string(),
+                name: s.ident.to_string(),
+                ty: render_type(&s.ty),
+                is_pub: is_pub(&s.vis),
+            }),
+            Item::Mod(m) => {
+                if let Some((_, inner)) = &m.content {
+                    collect_consts(inner, file, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+pub fn enumerate_consts_in_file(path: &Path, root: &Path) -> Result<Vec<ConstRecord>> {
+    let source = std::fs::read_to_string(path).map_err(|e| ExtractError::read(path, e))?;
+    let ast: syn::File = parse_file(&source).map_err(|e| ExtractError::parse(path, e))?;
+    let rel = path
+        .strip_prefix(root)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| path.to_string_lossy().to_string());
+    let mut out = Vec::new();
+    collect_consts(&ast.items, &rel, &mut out);
+    Ok(out)
+}
+
+pub fn enumerate_consts_in_tree(input_dir: &Path) -> Result<Vec<ConstRecord>> {
+    let mut out = Vec::new();
+    for entry in walkdir::WalkDir::new(input_dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let p = entry.path();
+        if !p.is_file() {
+            continue;
+        }
+        if p.extension().and_then(|s| s.to_str()) != Some("rs") {
+            continue;
+        }
+        let rel = p.strip_prefix(input_dir).unwrap_or(p);
+        if rel.components().any(|c| {
+            let s = c.as_os_str().to_string_lossy();
+            s.starts_with('.') || s == "target"
+        }) {
+            continue;
+        }
+        match enumerate_consts_in_file(p, input_dir) {
+            Ok(mut recs) => out.append(&mut recs),
+            Err(_e) => continue,
+        }
+    }
+    Ok(out)
+}
+
 /// Walk a macro body's token stream and collect every method name invoked as
 /// `.method(...)` — i.e. a `.` punct, then an ident, then a parenthesised
 /// group. Recurses into all delimiter groups. AST/token walk, no regex.

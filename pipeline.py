@@ -100,6 +100,7 @@ from pipeline_core.domain.model_caps import (
 )
 from pipeline_core.domain.models import (
     BuildCluster,
+    ConstRecord,
     Diagnostic,
     DispatchFamily,
     Frontier,
@@ -12197,6 +12198,64 @@ def _enumerate_mods_via_extractor(src_dir: Path) -> list[ModRecord] | None:
     return ADAPTERS.extractor.enumerate_mods(src_dir)  # slice 5a: via Extractor adapter
 
 
+def _enumerate_consts_via_extractor(src_dir: Path) -> list[ConstRecord] | None:
+    """Invoke the syn-based extractor's --enumerate-consts subcommand: pub/private
+    `const` and `static` items (name, type, is_pub). Replaces regex scans of source
+    for `pub const`/`pub static` (Hard Rule: no regex on Rust source — use syn)."""
+    return ADAPTERS.extractor.enumerate_consts(src_dir)
+
+
+def _public_api_from_source(content: str) -> str:
+    """Render a single Rust source string's public API surface using the syn extractor —
+    no regex on Rust source (Hard Rule). The extractor is path-based, so write the string to a
+    throwaway crate tree and enumerate types / fns / consts over it.
+
+    Output mirrors the legacy regex format: `pub struct Name { f: T, ... }`, `pub enum Name
+    { A, B }`, `pub trait Name`, full pub fn signatures, and `pub const NAME: T`.
+    """
+    import tempfile as _tempfile
+    lines: list[str] = []
+    with _tempfile.TemporaryDirectory() as _d:
+        _src = Path(_d) / "src"
+        _src.mkdir()
+        (_src / "lib.rs").write_text(content, encoding="utf-8")
+        _td = Path(_d)
+        types = _enumerate_types_via_extractor(_td) or []
+        fns = _enumerate_fns_via_extractor(_td) or []        # dicts (engine contract)
+        consts = _enumerate_consts_via_extractor(_td) or []
+
+    for t in types:
+        if not t.is_pub:
+            continue
+        if t.kind == "struct":
+            if t.fields:
+                fields = ", ".join(f"{f.name}: {f.ty}" for f in t.fields)
+                lines.append(f"pub struct {t.name}{t.generics} {{ {fields} }}")
+            else:
+                lines.append(f"pub struct {t.name}{t.generics}")
+        elif t.kind == "enum":
+            if t.variants:
+                lines.append(f"pub enum {t.name}{t.generics} {{ {', '.join(t.variants)} }}")
+            else:
+                lines.append(f"pub enum {t.name}{t.generics}")
+        elif t.kind == "trait":
+            lines.append(f"pub trait {t.name}")
+
+    for f in fns:
+        if f.get("is_pub"):
+            # sig_text starts at the `fn`/`unsafe`/`async` keyword (the extractor's sig span
+            # excludes the visibility), so prepend `pub ` to match the API-listing convention.
+            sig = " ".join((f.get("sig_text") or "").split())
+            if sig:
+                lines.append(sig if sig.startswith("pub ") else f"pub {sig}")
+
+    for c in consts:
+        if c.is_pub:
+            lines.append(f"pub const {c.name}: {c.ty}")
+
+    return "\n".join(lines)
+
+
 # Cache of mod records per src_dir to avoid re-invoking the extractor for
 # every fn lookup. Invalidated when target_src_dir's identity changes — the
 # pipeline only ever queries one dir at a time during a cluster pass.
@@ -18333,58 +18392,11 @@ def _extract_public_symbols(content: str) -> str:
 
     Returns a structured listing that lets the model construct types correctly
     without guessing field names, enum variants, or function parameter types.
+
+    Parsing goes through the syn extractor — NOT regex (Hard Rule: no regex on Rust
+    source). See `_public_api_from_source`.
     """
-    lines: list[str] = []
-
-    # Structs with field types (handles both named and tuple structs)
-    for m in re.finditer(
-        r'pub\s+struct\s+(\w+)(?:<[^{>]*>)?\s*\{([^}]*)\}', content, re.DOTALL
-    ):
-        name = m.group(1)
-        body = m.group(2)
-        fields = re.findall(r'(?:pub\s+)?(\w+)\s*:\s*([^,\n]+)', body)
-        if fields:
-            field_str = ", ".join(
-                f"{f}: {t.strip().rstrip(',')}" for f, t in fields
-                if f not in ('use', 'fn', 'let', 'const', 'pub')
-            )
-            lines.append(f"pub struct {name} {{ {field_str} }}")
-        else:
-            lines.append(f"pub struct {name}")
-
-    # Enums with variants (including tuple and struct variants)
-    for m in re.finditer(
-        r'pub\s+enum\s+(\w+)(?:<[^{>]*>)?\s*\{([^}]*)\}', content, re.DOTALL
-    ):
-        name = m.group(1)
-        body = m.group(2)
-        # Extract variant names (may be bare, tuple, or struct variants)
-        variants = re.findall(r'^\s*(\w+)(?:\([^)]*\)|\s*\{[^}]*\})?', body, re.MULTILINE)
-        variants = [v for v in variants if v and not v.startswith(('#', '/', 'pub', 'use'))]
-        if variants:
-            lines.append(f"pub enum {name} {{ {', '.join(variants)} }}")
-        else:
-            lines.append(f"pub enum {name}")
-
-    # Traits
-    for m in re.finditer(r'pub\s+trait\s+(\w+)', content):
-        lines.append(f"pub trait {m.group(1)}")
-
-    # Function signatures (full: name, params, return type)
-    for m in re.finditer(
-        r'pub\s+(?:async\s+)?fn\s+(\w+\s*(?:<[^>]*>)?\s*\([^)]*\)\s*(?:->\s*[^{;]+)?)',
-        content
-    ):
-        sig = re.sub(r'\s+', ' ', m.group(0).strip().rstrip('{').strip())
-        lines.append(sig)
-
-    # Constants and statics with types
-    for m in re.finditer(
-        r'pub\s+(?:const|static)\s+(?:mut\s+)?(\w+)\s*:\s*([^=\n]+)', content
-    ):
-        lines.append(f"pub const {m.group(1)}: {m.group(2).strip()}")
-
-    return "\n".join(lines) if lines else ""
+    return _public_api_from_source(content)
 
 
 # ---------------------------------------------------------------------------
