@@ -289,7 +289,7 @@ work; docs last). R5 (Rust) is independent and can run in parallel from the star
 | R4.1 | **pytest** adopted; the drift-prone hand-rolled `main()` call-list replaced by a thin pytest delegator (one source of truth = collection); cargo coverage tests gated `@needs_cargo` (SMOKE_FULL=1); root `conftest.py` for imports; config in pyproject. check.sh + CI run `pytest`. | P0 | S | ● | ✅ 72 pass / 2 skip |
 | R4.2 | `tests/test_domain.py` — 15 behavioural input→output tests for the pure parsers (`text`, `llm_output`, `test_results`). Lifted the **domain layer to 98.6%** (text/model_caps/enums 100%). | P0 | L | ● | ✅ |
 | R4.4 | coverage gate: **`pipeline_core.domain` floored at 95%** in check.sh + CI (currently 98.6%). The application/ engine is intentionally not gated (mid-migration). | P2 | S | ● | ✅ |
-| R4.3 | fixture-replay harness for ONE per-fn fill (canned LLM response) — **DEFERRED, sequence directly before R3**: it's the safety net that lets the engine (`_process_one_stub`, 542L) be refactored without a live model; building it faithfully is deep engine work, best done adjacent to R3 not bundled with the test-infra setup. | P1 | M | ●● | ⬜ before R3 |
+| R4.3 | **DONE** (at the achievable granularity) — `tests/test_fill_replay.py`: characterisation tests for the fill engine's *deterministic core*. A faithful end-to-end replay of `_process_one_stub` (542L) is infeasible because it's a **closure capturing the whole `_task2_fill_fns_one_by_one` scope** + interleaves LLM/cargo/retro — extracting it from the closure IS the R3 work. So the net pins the transform that R3 must preserve: canned `<FN>` response → `extract_fn_bodies` → `_splice_fn_with_where` → filled stub (impl-method, where-clause-tighten, multi-member-one-response). No model, no cargo. | P1 | M | ●● | ✅ |
 
 ### R2 — Make the layering load-bearing  🔄 MOSTLY DONE  (P1 · the architecture was aspirational)
 | # | step | Pri | Eff | Risk | status |
@@ -299,7 +299,12 @@ work; docs last). R5 (Rust) is independent and can run in parallel from the star
 | R2.4 | `pipeline_core/__init__.py` declares the public API (`__all__`): the 10 domain record types + `Settings` + the 5 port Protocols. Adapters/tasks deliberately NOT re-exported (keeps `import pipeline_core` side-effect-free — no `model_interact` pull-in). | P2 | S | ● | ✅ |
 | R2.2 | move `main()`'s (1321L) task dispatch into a **real** ports-first driver, one task at a time — DEFERRED: it's the engine-coupled rewrite, needs the R4.3 replay net; folds into R3. | P1 | L | ●●● | ⬜ with R3 |
 
-### R3 — Engine decomposition + domain models  (P1 · dissolves the 72-field `Task0cDeps`)
+### R3 — Engine decomposition + domain models  ⛔ BLOCKED ON LIVE RUNS  (P1 · dissolves the 72-field `Task0cDeps`)
+Net now exists (R4.3 fill-replay characterisation), but every step below is ●●● — its only real
+validation is a **live pipeline run on a crate** (check.sh cannot exercise the fill loop). The
+first move is extracting `_process_one_stub`/`_task2_fill_fns_one_by_one` from their closures into
+named, injectable units, under the R4.3 net + new characterisation tests added per extraction. To
+be done in an environment that can run the pipeline, not by static edits alone.
 | # | step | Pri | Eff | Risk | validation |
 |---|---|---|---|---|---|
 | R3.1 | domain models `Stub`/`ImplBlock`/`FillResult` (`Frontier` ✅ done) | P1 | M | ●● | round-trip tests |
