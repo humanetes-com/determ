@@ -1252,6 +1252,34 @@ def test_has_gen_tests_decl() -> None:
     print("  OK  _has_gen_tests_decl")
 
 
+def test_cargo_toml_parsed_with_tomllib() -> None:
+    """Cargo.toml facts come from tomllib, not regex — so comments, inline tables, and the
+    correct [lib] scoping are handled (cases the old regex got wrong)."""
+    import pipeline
+
+    toml = (
+        "[package]\n"
+        'name = "my-crate"   # trailing comment\n'
+        "version = \"0.1.0\"\n"
+        "[lib]\n"
+        "proc-macro = true\n"
+        "[features]\n"
+        'default = ["std", "backtrace"]\n'
+        'std = []\n'
+        "[dependencies]\n"
+        'serde = { version = "1", features = ["derive"] }\n'
+        '# proc-macro = true   ← a commented decoy the regex would have matched\n'
+    )
+    assert pipeline._cargo_package_name(toml) == "my-crate"
+    assert pipeline._cargo_is_proc_macro(toml) is True
+    assert set(pipeline._cargo_default_features(toml)) == {"std", "backtrace"}
+    # A crate WITHOUT [lib] proc-macro: the commented decoy must not register.
+    not_pm = '[package]\nname = "x"\n# proc-macro = true\n[dependencies]\n'
+    assert pipeline._cargo_is_proc_macro(not_pm) is False
+    # Malformed TOML degrades to empty, never raises.
+    assert pipeline._load_cargo_toml("this is not [valid toml") == {}
+
+
 @needs_extractor
 def test_extract_public_symbols_via_syn() -> None:
     """_extract_public_symbols parses Rust source via the syn extractor (no regex on source).

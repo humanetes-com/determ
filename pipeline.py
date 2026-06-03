@@ -17,6 +17,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import tomllib
 from abc import ABC, abstractmethod
 from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
@@ -1552,6 +1553,36 @@ class WorkspaceScanner(ABC):
         """Return a markdown string, or empty string if nothing found."""
 
 
+# Cargo.toml is TOML — parse it with the stdlib parser, never regex (CODE_ARCHITECTURE.md §8
+# R8: a structured format scraped with regex is a recurring bug source — comments, quoting,
+# inline tables, and multi-line all break the patterns).
+def _load_cargo_toml(text: str) -> dict:
+    """Parse Cargo.toml content via tomllib. Returns {} on malformed/unparseable input."""
+    try:
+        return tomllib.loads(text)
+    except (tomllib.TOMLDecodeError, ValueError, TypeError):
+        return {}
+
+
+def _cargo_package_name(text: str) -> str:
+    """The [package] name, or "" if absent/unparseable."""
+    pkg = _load_cargo_toml(text).get("package", {})
+    return str(pkg.get("name", "") or "") if isinstance(pkg, dict) else ""
+
+
+def _cargo_is_proc_macro(text: str) -> bool:
+    """True iff `[lib] proc-macro = true`."""
+    lib = _load_cargo_toml(text).get("lib", {})
+    return isinstance(lib, dict) and lib.get("proc-macro", False) is True
+
+
+def _cargo_default_features(text: str) -> list[str]:
+    """The `[features] default = [...]` list (empty if absent)."""
+    feats = _load_cargo_toml(text).get("features", {})
+    default = feats.get("default", []) if isinstance(feats, dict) else []
+    return [str(x) for x in default] if isinstance(default, list) else []
+
+
 class StaticWorkspaceScanner(WorkspaceScanner):
     """
     Deterministic Python parsing of known build manifests (Rust/Cargo, Node/npm).
@@ -1575,29 +1606,27 @@ class StaticWorkspaceScanner(WorkspaceScanner):
                 except Exception:
                     continue
 
-                pkg_m = re.search(r'^\s*\[package\].*?name\s*=\s*"([^"]+)"', text, re.DOTALL | re.MULTILINE)
-                if not pkg_m:
+                data = _load_cargo_toml(text)
+                pkg = data.get("package", {})
+                pkg_name = pkg.get("name", "") if isinstance(pkg, dict) else ""
+                if not pkg_name:
                     continue
-                pkg_name = pkg_m.group(1)
                 crate_dir = ct.parent
                 rel_dir = str(crate_dir.relative_to(project_dir)) if crate_dir != project_dir else "."
 
                 targets = []
-                if re.search(r'^\s*\[lib\]', text, re.MULTILINE):
-                    lib_path_m = re.search(r'^\s*\[lib\].*?path\s*=\s*"([^"]+)"', text, re.DOTALL | re.MULTILINE)
-                    lib_path = lib_path_m.group(1) if lib_path_m else "src/lib.rs"
-                    is_proc_macro = bool(re.search(r'proc-macro\s*=\s*true', text, re.MULTILINE))
+                lib = data.get("lib")
+                if isinstance(lib, dict):
+                    lib_path = lib.get("path", "src/lib.rs")
+                    is_proc_macro = lib.get("proc-macro", False) is True
                     label = "proc-macro target" if is_proc_macro else "lib target"
                     targets.append(f"  - {label} → required file: `{rel_dir}/{lib_path}`")
-                elif re.search(r'^\s*src/lib\.rs', text, re.MULTILINE) or (crate_dir / "src" / "lib.rs").exists():
+                elif (crate_dir / "src" / "lib.rs").exists():
                     targets.append(f"  - lib target (implicit) → required file: `{rel_dir}/src/lib.rs`")
 
-                for bin_m in re.finditer(r'\[\[bin\]\]([^\[]*)', text, re.DOTALL):
-                    bin_block = bin_m.group(1)
-                    bin_name_m = re.search(r'name\s*=\s*"([^"]+)"', bin_block)
-                    bin_path_m = re.search(r'path\s*=\s*"([^"]+)"', bin_block)
-                    bin_name = bin_name_m.group(1) if bin_name_m else pkg_name
-                    bin_path = bin_path_m.group(1) if bin_path_m else "src/main.rs"
+                for b in data.get("bin", []) if isinstance(data.get("bin"), list) else []:
+                    bin_name = b.get("name", pkg_name) if isinstance(b, dict) else pkg_name
+                    bin_path = b.get("path", "src/main.rs") if isinstance(b, dict) else "src/main.rs"
                     targets.append(f"  - bin target `{bin_name}` → required file: `{rel_dir}/{bin_path}`")
 
                 if not targets and (crate_dir / "src" / "main.rs").exists():
@@ -1614,15 +1643,19 @@ class StaticWorkspaceScanner(WorkspaceScanner):
                         f"`#[cfg(test)] mod tests;` at the end"
                     )
 
-                # Extract [dependencies] section to expose library versions.
+                # Expose [dependencies] versions (from the parsed TOML, rendered compactly).
                 dep_lines = []
-                dep_m = re.search(r'^\[dependencies\](.*?)(?=^\[|\Z)', text, re.DOTALL | re.MULTILINE)
-                if dep_m:
-                    raw_deps = dep_m.group(1).strip()
-                    for dep_line in raw_deps.splitlines():
-                        dep_line = dep_line.strip()
-                        if dep_line and not dep_line.startswith('#'):
-                            dep_lines.append(f"    {dep_line}")
+                deps = data.get("dependencies", {})
+                if isinstance(deps, dict):
+                    for name, spec in deps.items():
+                        if isinstance(spec, str):
+                            rendered = f'"{spec}"'
+                        elif isinstance(spec, dict):
+                            inner = ", ".join(f"{k} = {v!r}" for k, v in spec.items())
+                            rendered = f"{{ {inner} }}"
+                        else:
+                            rendered = str(spec)
+                        dep_lines.append(f"    {name} = {rendered}")
 
                 if targets:
                     lines.append(f"**Crate `{pkg_name}`** (at `{rel_dir}/`):")
@@ -1996,17 +2029,16 @@ class StaticDependencyGraph(DependencyGraph):
             except Exception:
                 continue
 
-            pkg_m = re.search(
-                r'^\s*\[package\].*?name\s*=\s*"([^"]+)"', text, re.DOTALL | re.MULTILINE
-            )
-            if not pkg_m:
+            data = _load_cargo_toml(text)
+            pkg = data.get("package", {})
+            pkg_name = pkg.get("name", "") if isinstance(pkg, dict) else ""
+            if not pkg_name:
                 continue
-            pkg_name = pkg_m.group(1)
             self._modules[pkg_name] = ct.parent
 
-            if re.search(r'proc-macro\s*=\s*true', text, re.MULTILINE):
+            if _cargo_is_proc_macro(text):
                 self._crate_types[pkg_name] = "proc-macro"
-            elif re.search(r'^\s*\[\[bin\]\]', text, re.MULTILINE):
+            elif isinstance(data.get("bin"), list) and data["bin"]:
                 self._crate_types[pkg_name] = "bin"
             else:
                 self._crate_types[pkg_name] = "lib"
@@ -4032,15 +4064,7 @@ def _prune_redundant_clusters(
     if cargo_toml_path is None:
         cargo_toml_path = source_dir / "Cargo.toml"
     if cargo_toml_path.exists():
-        raw = cargo_toml_path.read_text(errors="replace")
-        feat_block_m = re.search(r'\[features\](.*?)(?=\n\[|\Z)', raw, re.DOTALL)
-        if feat_block_m:
-            def_m = re.search(r'default\s*=\s*\[([^\]]*)\]', feat_block_m.group(1))
-            if def_m:
-                default_features = {
-                    f.strip().strip('"').strip("'")
-                    for f in def_m.group(1).split(",") if f.strip()
-                }
+        default_features = set(_cargo_default_features(cargo_toml_path.read_text(errors="replace")))
 
     # Count per-predicate gated items in source.
     pred_counts: dict[str, int] = {}
@@ -12782,22 +12806,11 @@ def task0_cfg_scan(project_dir: Path) -> "list[BuildCluster]":
     cargo_features: set[str] = set()
     default_features: set[str] = set()
     if cargo_toml.exists():
-        raw = cargo_toml.read_text(errors="replace")
-        # Extract [features] section
-        feat_m = re.search(r'\[features\](.*?)(?=\n\[|\Z)', raw, re.DOTALL)
-        if feat_m:
-            feat_block = feat_m.group(1)
-            for line in feat_block.splitlines():
-                line = line.strip()
-                if not line or line.startswith('#'):
-                    continue
-                m = re.match(r'^(\w[\w-]*)\s*=', line)
-                if m:
-                    cargo_features.add(m.group(1))
-            # Parse default = ["feat1", "feat2"]
-            def_m = re.search(r'default\s*=\s*\[([^\]]*)\]', feat_block)
-            if def_m:
-                default_features = {f.strip().strip('"').strip("'") for f in def_m.group(1).split(',')}
+        _feats = _load_cargo_toml(cargo_toml.read_text(errors="replace")).get("features", {})
+        if isinstance(_feats, dict):
+            cargo_features = set(_feats.keys())   # all feature names (incl. "default", as before)
+            _def = _feats.get("default", [])
+            default_features = {str(x) for x in _def} if isinstance(_def, list) else set()
 
     # --- Step 2: collect cfg predicates from src/**/*.rs ---
     # Match entire #[cfg(...)] or #[cfg_attr(..., ...)] attribute contents.
@@ -14979,7 +14992,7 @@ class StaticFileListTask2Generator(Task2Generator):
             _cargo_toml_path = project_dir / module_dir_rel / "Cargo.toml"
             if _cargo_toml_path.exists():
                 _cargo_text = _cargo_toml_path.read_text(encoding="utf-8")
-                _is_proc_macro = bool(re.search(r'proc-macro\s*=\s*true', _cargo_text, re.MULTILINE))
+                _is_proc_macro = _cargo_is_proc_macro(_cargo_text)
 
         _genesis_section = (
             f"Process (genesis.md):\n"
@@ -16179,7 +16192,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
 
 def _is_proc_macro_crate(cargo_toml_text: str) -> bool:
     """True if Cargo.toml declares `proc-macro = true`. (Regex kept in pipeline — Option 1.)"""
-    return bool(re.search(r'proc-macro\s*=\s*true', cargo_toml_text, re.MULTILINE))
+    return _cargo_is_proc_macro(cargo_toml_text)
 
 
 def _count_rustc_error_codes(output: str) -> int:
@@ -17362,9 +17375,9 @@ def _crate_name_from_toml(module_dir: Path, fallback: str) -> str:
     """Extract `name` from Cargo.toml and normalise hyphens to underscores."""
     toml = module_dir / "Cargo.toml"
     if toml.exists():
-        m = re.search(r'^name\s*=\s*"([^"]+)"', toml.read_text(), re.MULTILINE)
-        if m:
-            return m.group(1).replace("-", "_")
+        name = _cargo_package_name(toml.read_text())
+        if name:
+            return name.replace("-", "_")
     return fallback.replace("-", "_")
 
 

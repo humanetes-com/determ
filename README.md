@@ -324,3 +324,10 @@ Can also be used standalone to send a prompt to the configured model:
     echo "prompt" | python model_interact.py
     python model_interact.py "prompt" --output response.txt
     python model_interact.py "prompt" --system "system prompt"
+
+---
+
+## License
+
+Licensed under the **Apache License, Version 2.0** — see [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE).
+Copyright 2026 Virgilio Lino (Humanetes).
