@@ -208,6 +208,14 @@ class DispatchFamily:
         }
 
 
+# A reconstruction frontier: maps (file_rel, fn_name) → the set of test names (or the
+# sentinel "<compile>") that reach that still-broken fn at runtime/compile time. Produced
+# by the TDD driver from cargo output and consumed by the per-fn / per-impl fill planners.
+# It is a mapping keyed by identity, not a record with fields, so a type alias — not a
+# dataclass — is its correct domain form.
+Frontier = dict[tuple[str, str], set[str]]
+
+
 @dataclass(frozen=True, slots=True)
 class Diagnostic:
     """One rustc error from cargo's `--message-format=json` output — the cargo↔Python

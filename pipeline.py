@@ -68,7 +68,7 @@ from pipeline_core.io import read, write
 from pipeline_core.settings import Settings
 from pipeline_core.domain.models import (
     TypeRecord, ModRecord, DispatchFamily, Diagnostic,
-    BuildCluster, ModuleAugmentState,
+    BuildCluster, ModuleAugmentState, Frontier,
 )
 from pipeline_core.adapters import build_adapters
 from pipeline_core.adapters import coverage as _covmod, workspace as _wsmod
@@ -8034,7 +8034,7 @@ def _attribute_failures(
     recently_filled: list[tuple[str, str]],
     test_reverse_map: dict[str, set[tuple[str, str]]],
     cluster_name: str,
-) -> tuple[dict[tuple[str, str], set[str]], str]:
+) -> tuple[Frontier, str]:
     """Robust failure-to-fn attribution chain. Returns (frontier, kind).
     Tries each path until one yields a non-empty frontier:
       1. Runtime panics (unimplemented stubs) — `_extract_tdd_frontier`
@@ -8064,7 +8064,7 @@ def _attribute_failures(
                 test_out=test_output, filled_this_pass=[],
                 failed_tests=failing, cluster_name=cluster_name,
             )
-            synth: dict[tuple[str, str], set[str]] = {}
+            synth: Frontier = {}
             for tname, info in classification.items():
                 if info.get("category") not in (
                         "BAD_FILL", "TEST_PRECONDITION_MISSING"):
@@ -8083,7 +8083,7 @@ def _attribute_failures(
     if recently_filled:
         failing = sorted(_parse_failed_tests(test_output))
         if failing:
-            recent_synth: dict[tuple[str, str], set[str]] = {}
+            recent_synth: Frontier = {}
             for key in reversed(recently_filled):
                 recent_synth.setdefault(key, set()).update(failing)
             return recent_synth, "recently_filled"
@@ -8094,7 +8094,7 @@ def _attribute_failures(
     if test_reverse_map:
         failing = sorted(_parse_failed_tests(test_output))
         if failing:
-            reverse_synth: dict[tuple[str, str], set[str]] = {}
+            reverse_synth: Frontier = {}
             for tname in failing:
                 # Strip module prefix if cargo formats as `module::test_name`.
                 bare = tname.split("::")[-1]
@@ -8616,7 +8616,7 @@ def _run_phase_c_tdd(
         # D3 — re-entry filter for fns that already exhausted the per-fn
         # fix loop in a prior iter (avoid burning compute on the same fn
         # with no new context).
-        eligible: dict[tuple[str, str], set[str]] = {}
+        eligible: Frontier = {}
         skipped_perm: int = 0
         for key, tests in frontier.items():
             if key in permanently_exhausted:
@@ -8759,7 +8759,7 @@ def _phase_c_fill_impl_blocks(
     cluster_env: dict,
     fr_path: Path | None,
     tdd_frontier_keys: "set[tuple[str, str]] | None",
-    tdd_frontier_tests: "dict[tuple[str, str], set[str]] | None" = None,  # Plan 10 U2
+    tdd_frontier_tests: "Frontier | None" = None,  # Plan 10 U2
     tdd_test_cmd: str | None = None,                                       # Plan 10 U2
 ) -> dict:
     """Per-impl-block Phase C fill — alternative to `_task2_fill_fns_one_by_one`.
@@ -9255,7 +9255,7 @@ def _task2_fill_fns_one_by_one(
     skip_end_pass_test: bool = False,
     # Plan 10 U2 — per-fn test-based acceptance: {(file, fn): {test names}}
     # the fn must make pass, plus the cluster test command to run.
-    tdd_frontier_tests: "dict[tuple[str, str], set[str]] | None" = None,
+    tdd_frontier_tests: "Frontier | None" = None,
     tdd_test_cmd: str | None = None,
 ) -> dict:
     """Phase C — Flavour B with full validation loops.
@@ -11659,7 +11659,7 @@ def _extract_crate_idioms(
 
 
 def _group_frontier_by_impl_block(
-    frontier: "dict[tuple[str, str], set[str]]",
+    frontier: "Frontier",
     impl_blocks: "list[dict]",
 ) -> "list[dict]":
     """Map a per-fn frontier into a per-impl-block fill plan.
@@ -11835,7 +11835,7 @@ def _line_to_fn_record(
 
 def _extract_tdd_frontier(
     test_output: str, src_dir: Path,
-) -> dict[tuple[str, str], set[str]]:
+) -> Frontier:
     """Parse cargo test output → frontier dict.
 
     Keys are (file_rel, fn_name), values are sets of test names that
@@ -11847,7 +11847,7 @@ def _extract_tdd_frontier(
     Returns {} when no panics could be parsed (e.g. cargo build failed
     before any test ran).
     """
-    frontier: dict[tuple[str, str], set[str]] = {}
+    frontier: Frontier = {}
     if not test_output:
         return frontier
     # Per-file fn records cache.
@@ -11911,13 +11911,13 @@ def _extract_tdd_frontier(
 
 def _extract_tdd_compile_frontier(
     build_output: str, src_dir: Path,
-) -> dict[tuple[str, str], set[str]]:
+) -> Frontier:
     """When cargo test fails because cargo BUILD failed (compile errors,
     not panics), parse error[Exxxx] messages → fn records. Same shape as
     `_extract_tdd_frontier` but with test names replaced by "<compile>"
     so the caller can distinguish.
     """
-    frontier: dict[tuple[str, str], set[str]] = {}
+    frontier: Frontier = {}
     if not build_output:
         return frontier
     fn_records_by_file: dict[str, list[dict]] = {}
@@ -11956,7 +11956,7 @@ def _extract_tdd_compile_frontier(
 
 def _frontier_from_diags(
     diagnostics: list[Diagnostic], src_dir: Path,
-) -> dict[tuple[str, str], set[str]]:
+) -> Frontier:
     """Same (file, fn) → {"<compile>"} frontier as
     `_extract_tdd_compile_frontier`, but built from STRUCTURED cargo
     diagnostics (each has file/line/code) instead of regex-parsing rendered
@@ -11965,7 +11965,7 @@ def _frontier_from_diags(
     `_COMPILE_ERROR_RE` cannot match — re-parsing that text yields an empty
     frontier and silently defeats any "is this fn still broken?" check.
     """
-    frontier: dict[tuple[str, str], set[str]] = {}
+    frontier: Frontier = {}
     fn_records_by_file: dict[str, list[dict]] = {}
     file_text_cache: dict[str, str] = {}
     for d in diagnostics or []:
@@ -12054,7 +12054,7 @@ def _strip_ansi(text: str) -> str:
 
 
 def _order_frontier(
-    frontier: dict[tuple[str, str], set[str]],
+    frontier: Frontier,
     leaf_name_counts: dict[str, int] | None,
     panic_depths: dict[tuple[str, str], int] | None = None,
 ) -> list[tuple[tuple[str, str], set[str]]]:
