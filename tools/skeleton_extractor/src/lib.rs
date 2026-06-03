@@ -1,12 +1,25 @@
-// Skeleton extractor — Phase A of the 4-phase TASK 2 reconstruction.
-//
-// Reads a pre-strip Rust source tree, emits per-file "skeletons" where:
-//   - All type declarations (pub + private) keep their full body.
-//   - All function/method bodies are replaced with `unimplemented!()`.
-//   - All `#[cfg(test)] mod ...` items are dropped.
-//   - Macros, imports, attributes, and consts are preserved verbatim.
-//
-// The skeleton is the structural ground truth that Phase B/C/D fill in.
+//! Skeleton extractor — Phase A of the 4-phase TASK 2 reconstruction.
+//!
+//! Reads a pre-strip Rust source tree and provides two capabilities to the Python pipeline
+//! over a JSON CLI (the seam — see `CODE_ARCHITECTURE.md` §4):
+//!
+//!   - **Skeletonise** ([`extract_tree`]): emit per-file skeletons where every fn/method body
+//!     becomes `unimplemented!()`, `#[cfg(test)] mod ...` items are dropped, and types / macros
+//!     / imports / attributes / consts are preserved verbatim. The structural ground truth
+//!     Phase B/C/D fill in.
+//!   - **Enumerate** ([`enumerate_fns_in_tree`], [`enumerate_types_in_tree`], …): emit typed
+//!     [`FnRecord`] / [`TypeRecord`] / [`ModRecord`] / [`DispatchFamily`] records.
+//!
+//! Plus [`merge_cluster_files`] for cross-cluster AST merge. All public functions return
+//! [`Result`] ([`ExtractError`]); the binary (`main.rs`) adapts these into `anyhow`.
+
+// Library code returns typed errors (see error.rs) — a stray `.unwrap()` is a latent panic
+// at the lib edge. Warn on it so it shows up in review / `clippy -D warnings`. Tests opt out
+// (a test SHOULD panic on an unexpected None/Err) via `#![allow(...)]` in the test module.
+#![warn(clippy::unwrap_used)]
+
+mod error;
+pub use error::{ExtractError, Result};
 
 mod model;
 pub use model::*;
@@ -23,6 +36,7 @@ pub use skeleton::*;
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)] // tests should panic on unexpected None/Err
     use super::*;
     use quote::quote;
     use syn::parse_file;

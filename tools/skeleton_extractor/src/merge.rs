@@ -1,6 +1,6 @@
 //! Cross-cluster AST merge (syn + prettyplease). Moved verbatim from lib.rs (slice 7).
 
-use anyhow::{Context as _, Result};
+use crate::error::{ExtractError, Result};
 use proc_macro2::TokenStream;
 use quote::quote;
 use syn::parse_file;
@@ -44,7 +44,7 @@ pub struct ClusterFile {
 
 impl ClusterFile {
     fn ast(&self) -> Result<syn::File> {
-        parse_file(&self.source).with_context(|| format!("parse cluster {} source", self.name))
+        parse_file(&self.source).map_err(|e| ExtractError::parse_named(&self.name, e))
     }
 }
 
@@ -237,7 +237,9 @@ pub(crate) fn merge_trait_items(
     let total_clusters = cluster_items.len();
     let mut out: Vec<syn::TraitItem> = Vec::new();
     for key in order {
-        let bucket = groups.remove(&key).unwrap();
+        let bucket = groups
+            .remove(&key)
+            .expect("`order` is built from `groups`' own keys — remove cannot miss");
         // Group by token hash so identical content collapses.
         let mut by_content: BTreeMap<String, Vec<(&str, &str, &syn::TraitItem)>> = BTreeMap::new();
         for entry in &bucket {
@@ -285,7 +287,9 @@ pub(crate) fn merge_impl_items(
     let total_clusters = cluster_items.len();
     let mut out: Vec<syn::ImplItem> = Vec::new();
     for key in order {
-        let bucket = groups.remove(&key).unwrap();
+        let bucket = groups
+            .remove(&key)
+            .expect("`order` is built from `groups`' own keys — remove cannot miss");
         let mut by_content: BTreeMap<String, Vec<(&str, &str, &syn::ImplItem)>> = BTreeMap::new();
         for entry in &bucket {
             let item_ref = entry.2;
@@ -346,7 +350,9 @@ pub(crate) fn merge_top_items(cluster_files: &[(String, String, syn::File)]) -> 
     let total_clusters = cluster_files.len();
     let mut out: Vec<syn::Item> = Vec::new();
     for key in order {
-        let bucket = groups.remove(&key).unwrap();
+        let bucket = groups
+            .remove(&key)
+            .expect("`order` is built from `groups`' own keys — remove cannot miss");
 
         // Items that have inner bodies (Trait, Impl, Mod) need recursive
         // merge regardless of whether the outer signatures match — the

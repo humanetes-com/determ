@@ -2,8 +2,8 @@
 //! apply per-cluster cfg filtering. Moved verbatim from lib.rs (slice 7).
 
 use crate::cfg::*;
+use crate::error::{ExtractError, Result};
 use crate::model::*;
-use anyhow::{Context as _, Result};
 use proc_macro2::TokenStream;
 use quote::quote;
 use std::path::{Path, PathBuf};
@@ -68,8 +68,8 @@ pub fn extract_tree_with_cfg(
         {
             continue;
         }
-        let report = extract_file_with_cfg(path, input_dir, output_dir, cfg_set)
-            .with_context(|| format!("skeletonising {}", path.display()))?;
+        // Inner error already carries the offending path (Read/Parse/Write); just propagate.
+        let report = extract_file_with_cfg(path, input_dir, output_dir, cfg_set)?;
         reports.push(report);
     }
     Ok(reports)
@@ -88,13 +88,12 @@ pub fn extract_file_with_cfg(
     output_dir: &Path,
     cfg_set: &CfgSet,
 ) -> Result<FileReport> {
-    let source = std::fs::read_to_string(input_path)
-        .with_context(|| format!("reading {}", input_path.display()))?;
+    let source =
+        std::fs::read_to_string(input_path).map_err(|e| ExtractError::read(input_path, e))?;
     let bytes_in = source.len();
 
     // syn::parse_file accepts a full Rust source file.
-    let mut ast = parse_file(&source)
-        .with_context(|| format!("parsing {} as Rust source", input_path.display()))?;
+    let mut ast = parse_file(&source).map_err(|e| ExtractError::parse(input_path, e))?;
 
     // Phase 1: drop items whose #[cfg(...)] evaluates to false under cfg_set.
     let mut cfg_filter = CfgFilterVisitor::new(cfg_set);
@@ -113,10 +112,9 @@ pub fn extract_file_with_cfg(
     let rel = input_path.strip_prefix(input_dir).unwrap_or(input_path);
     let out_path: PathBuf = output_dir.join(rel);
     if let Some(parent) = out_path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
+        std::fs::create_dir_all(parent).map_err(|e| ExtractError::write(parent, e))?;
     }
-    std::fs::write(&out_path, &rendered)
-        .with_context(|| format!("writing {}", out_path.display()))?;
+    std::fs::write(&out_path, &rendered).map_err(|e| ExtractError::write(&out_path, e))?;
 
     Ok(FileReport {
         relative_path: rel.to_string_lossy().into_owned(),

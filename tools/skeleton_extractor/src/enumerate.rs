@@ -2,9 +2,9 @@
 //! The structured records here are the JSON seam payloads. Moved verbatim from lib.rs (slice 7).
 
 use crate::cfg::*;
+use crate::error::{ExtractError, Result};
 use crate::model::*;
 use crate::skeleton::*;
-use anyhow::{Context as _, Result};
 use proc_macro2::TokenStream;
 use quote::quote;
 use std::path::Path;
@@ -438,10 +438,8 @@ pub fn enumerate_types_in_tree(input_dir: &Path) -> Result<Vec<TypeRecord>> {
 
 /// Parse a single file and emit one FnRecord per fn item.
 pub fn enumerate_fns_in_file(path: &Path, root: &Path) -> Result<Vec<FnRecord>> {
-    let source =
-        std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-    let ast: syn::File =
-        parse_file(&source).with_context(|| format!("parse {}", path.display()))?;
+    let source = std::fs::read_to_string(path).map_err(|e| ExtractError::read(path, e))?;
+    let ast: syn::File = parse_file(&source).map_err(|e| ExtractError::parse(path, e))?;
     let rel = path
         .strip_prefix(root)
         .map(|p| p.to_string_lossy().to_string())
@@ -499,10 +497,8 @@ pub(crate) fn extract_path_attr(attrs: &[syn::Attribute]) -> Option<String> {
 /// (`mod foo { ... }`) are skipped — those don't correspond to a separate
 /// file the pipeline needs to gate.
 pub fn enumerate_mods_in_file(path: &Path, root: &Path) -> Result<Vec<ModRecord>> {
-    let source =
-        std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-    let ast: syn::File =
-        parse_file(&source).with_context(|| format!("parse {}", path.display()))?;
+    let source = std::fs::read_to_string(path).map_err(|e| ExtractError::read(path, e))?;
+    let ast: syn::File = parse_file(&source).map_err(|e| ExtractError::parse(path, e))?;
     let declared_in = path
         .strip_prefix(root)
         .map(|p| p.to_string_lossy().to_string())
