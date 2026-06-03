@@ -1,0 +1,330 @@
+# Code Architecture
+
+Target *code* structure for the two codebases (the existing `ARCHITECTURE.md` covers the
+*experiment/methodology* — different concern, untouched).
+
+- **Python** — `pipeline.py` orchestration (the LLM-driven reconstruction loop).
+- **Rust** — `tools/skeleton_extractor` (syn-based AST extraction).
+
+This defines the *target* layout and the migration rule. Migration is **strangler-fig**:
+the package grows beside `pipeline.py`; `pipeline.py` stays the entrypoint and
+progressively imports from it; behaviour stays identical; `check.sh` stays green at
+every step. No big-bang rewrite.
+
+Guiding constraint (both languages): **Pythonic / Rustacean, not Java-ish.** SOLID via
+language idioms — `Protocol`, `@dataclass`, plain constructor injection on Python;
+traits, modules, `thiserror` on Rust. No DI containers, no abstract-factory ceremony, no
+interface-per-class reflex.
+
+---
+
+## 1. Layers (dependency rule: inner never imports outer)
+
+```
+domain      → pure types + rules. No I/O, no subprocess, no LLM, no filesystem.
+ports       → interfaces (typing.Protocol) the application depends on.
+application → use cases: the tasks + fill/merge/mutation loops + orchestrator.
+adapters    → concrete port impls. The ONLY layer that does I/O.
+__main__    → composition root: build Settings + adapters, inject, run.
+```
+
+| Layer | May import | Must NOT import |
+|---|---|---|
+| domain | stdlib only | ports, application, adapters |
+| ports | domain | application, adapters |
+| application | domain, ports | adapters, subprocess, requests, model_interact |
+| adapters | domain, ports, libs | application |
+| __main__ | everything | — |
+
+Discipline now; `import-linter` contract in CI later.
+
+---
+
+## 2. Python package layout (`pipeline_core/`)
+
+Entrypoint stays `pipeline.py` (shim). Package name `pipeline_core` avoids shadowing
+`pipeline.py`.
+
+```
+pipeline_core/
+  domain/
+    enums.py        # StrEnum: Backend, CoverageBackend, FillUnit, FixStrategy,
+                    #          PhaseCMode, PhaseCDriver, ModelTier
+    model_caps.py   # model_tier(model), model_context_chars(model)  — pure
+    models.py       # @dataclass(slots): Cluster, Module, FnRecord, Diagnostic,
+                    #          Frontier, FillResult   (replaces dict-typing)  [later]
+    cfg.py          # pure cfg-predicate evaluation (CfgSet)                  [later]
+  ports/
+    __init__.py     # Protocols: LLM, Extractor, Cargo, Coverage, Workspace
+  application/       # tasks/ reconstruct/ merge/ mutation/ orchestrator.py    [later]
+  adapters/          # vllm_llm, cli_extractor, cargo_cli, coverage, workspace  [later]
+  prompts/           # t-string templates + budget/condense                    [later]
+  settings.py        # one typed Settings (collapses globals + getenv)         [later]
+```
+
+### SOLID → Python idiom map
+
+| Principle | Realization |
+|---|---|
+| SRP | one module per task / loop (vs 1.3k-line god-fns) |
+| OCP | new backend/strategy/task = new class impl of a port + registry/`match` arm |
+| LSP | `Protocol`/ABC impls substitutable (already true for `TestAugmentor`) |
+| ISP | small ports (`LLM`, `Extractor`, `Cargo`, `Coverage`) not one god-object |
+| DIP | `application` imports `ports` (Protocols); `__main__` injects adapters |
+
+Structural `Protocol` ⇒ adapters need no base class. Injection is plain constructor
+args — no framework.
+
+---
+
+## 3. Rust layout (`tools/skeleton_extractor`)
+
+```
+src/
+  lib.rs            # re-exports only
+  model.rs          # records serialized to Python (the JSON seam) — pub types
+  skeleton.rs       # skeletonise: bodies → unimplemented!()
+  enumerate.rs      # fns / types / mods / dispatch families / feature-gate cfgs
+  merge.rs          # cross-cluster merge (prettyplease)
+  cfg.rs            # Cfg newtype + predicate logic
+  error.rs          # thiserror typed errors (replace String/anyhow at lib edge)
+  cli/              # clap derive subcommands (replace hand-rolled flag parsing)
+```
+
+- Edition **2024** (let-chains for token walks, `gen` blocks where they read cleaner).
+- `clap` derive replaces the 26 hand-rolled `--flag` branches in `main.rs`.
+- `thiserror` for the library error type; `anyhow` only in the binary.
+- `Cfg` newtype instead of bare `String` cfg predicates.
+
+---
+
+## 4. The Python↔Rust seam is sacred
+
+The JSON record contract (`enumerate-*`, `--skeletonise`, `--merge`) between the
+`cli_extractor` adapter (Py) and `model.rs` (Rust) is a **good** boundary. Migration
+preserves it byte-for-byte. Schema changes go through `model.rs` + the Python domain
+dataclass together, never ad-hoc dict mutation.
+
+---
+
+## 5. Migration order (each slice keeps check.sh green, pipeline runnable)
+
+1. ✅ scaffold + `domain/enums.py` + `domain/model_caps.py`; `pipeline.py` delegates.
+2. ✅ wire enums into the ~9 stringly env reads via `Enum.coerce`.
+3. ✅ `settings.py` Settings dataclass + composition root `SETTINGS`; knobs read it.
+   Expanded to own the derived char budgets: `model`, `model_context_chars`,
+   `safe_input_char_limit(_task0c)`, `single_call_char_limit`, `intermediate_char_limit`
+   computed once in `from_env(model=...)` via the pure `domain.model_caps.safe_input_char_limit`.
+   pipeline's `SINGLE_CALL_CHAR_LIMIT`/`_SAFE_INPUT_CHAR_LIMIT*` are single-sourced from
+   `SETTINGS` (values verified byte-identical to the old inline math). `prompt_budget` now
+   reads the Settings-sourced limit, so it no longer blocks on a config home.
+4. `ports/` Protocols + `adapters/`:
+   - 4a ✅ LLM / Extractor / Cargo adapters wrap real primitives (model_interact /
+     extractor binary / cargo subprocess); ports corrected to the real path/cluster +
+     subprocess seam; `ADAPTERS` built at the composition root. No call sites moved yet.
+   - 4b ✅ Coverage / Workspace relocated into `adapters/coverage.py` + `adapters/workspace.py`.
+     Cross-cutting deps (`_log`/`_emit`/`_cargo_env`/live `_current_cluster`/tool paths,
+     `_git_managed`) are injected via `CoverageDeps`/`WorkspaceDeps` from the composition
+     root; `pipeline.py` keeps thin delegating shims until call sites migrate (slice 5).
+     Coverage/Workspace ports corrected to the real provider/git shapes. Bodies moved
+     verbatim; parse-path unit tests (lcov/grcov-json) + GitWorkspace git test guard the
+     transcription (no cargo needed).
+5. migrate call sites onto the ports/adapters, then extract `application/tasks/*`:
+   - 5a ✅ adapter call-site de-dup: the extractor `_*_via_extractor` fns, `_extract_skeleton`,
+     and `_run_cargo` now delegate to `ADAPTERS` (the duplicated subprocess logic 4a/4b
+     introduced is gone). `enumerate_mods` added to the Extractor adapter+port. `_run_cargo`
+     keeps its legacy (rc, text) contract (bare message on rc=-1). `_ast_merge_files` left as-is
+     (its diagnostic `_log` lines aren't on the merge port — revisit when merge gains a deps seam).
+   - 5b ✅ extract `application/tasks/*` one task at a time behind an orchestrator.
+     Scaffolded `application/` + `Orchestrator(settings, adapters)` (built as `ORCHESTRATOR`
+     at the composition root). First task extracted: `tasks/genesis_audit.py` (LLM use case)
+     — body verbatim, collaborators injected via a frozen `GenesisAuditDeps`; pipeline.py
+     keeps a thin `task_genesis_audit` shim. Remaining tasks (task0*/1/2/3/4, task0c) follow
+     the same pattern.
+     Foundation step (de-ceremony): pure shared helpers move below the application layer so
+     tasks import them instead of injecting them. Done so far → `domain/test_results.py`
+     (`_parse_test_counts`, `count_passing_tests`, `validate_task3_output_strict`,
+     `extract_test_output_from_file`, `OUTPUT_SEPARATOR`) and `domain/text.py`
+     (`strip_markdown_fences` [aliased `_strip_markdown_fences`], `extract_code_content`,
+     `trim_to_line`, `smart_truncate`). pipeline.py re-exports the same objects so all call
+     sites are unchanged. This directly shrinks task3/task4's future deps record. Remaining
+     Infra seams now exist → `pipeline_core/log.py` (settable `log`/`emit` facade, stdlib-
+     logging pattern; sinks wired to `_log`/`_emit` at the composition root) and
+     `pipeline_core/retry.py` (`with_retry`/`is_rate_limit_error`, config via `configure()`).
+     `domain/llm_output.py` holds the model-response extraction (`extract_files`,
+     `_extract_genesis`, `_looks_like_prose`, `_normalize_file_markers`, `FILE_PATTERN`,
+     `GENESIS_DELIM_*`); pipeline.py re-exports the names it still uses.
+     `pipeline_core/io.py` homes the `read`/`write` fs primitives (tasks still inject them
+     for test control; non-test code imports them).
+     Payoff: `GenesisAuditDeps` shrank 10→5 — `log`, `retry`, `extract_genesis`, and the
+     genesis delimiters are now imported (the last also guarantees prompt delims == parse
+     delims), leaving only the genuinely pipeline-bound `ask`/`read`/`write`/`model`/
+     `verbosity_guard`. Tasks log, retry, parse model output, and read/write without a
+     ceremony-heavy deps record.
+     Config home now exists: Settings owns the char budgets (see item 3), so `prompt_budget`
+     and the limit constants are single-sourced from `SETTINGS`.
+     Extracted so far → `tasks/genesis_audit.py`, `tasks/task3.py` (Task3Deps, 11 injected:
+     phase/cluster-load/cargo-env/parse-cmd/active-test-count/store-prompt/inline-retry/
+     legacy-path/read/write/timeout; log+emit+test_results imported), `tasks/task4.py`
+     (Task4Deps, 9 injected; budget/parse/extract + retry imported). pipeline.py keeps thin
+     `task3`/`task4` shims binding `_TASK3_DEPS`/`_TASK4_DEPS` (built after `_cargo_env`).
+     Bodies verbatim; fake-deps tests drive the legacy-fallback + all-pass (task3, subprocess
+     monkeypatched) and full genesis-update (task4) paths without cargo/LLM.
+     Extracted (Option 1 — orchestration moves to application/, regex parsers stay injected
+     from pipeline.py so the clean layer is regex-free): genesis_audit, task3, task4,
+     task0_project_profile/context (`task0_docs.py`), task0b_discovery. Incidental fence
+     regex replaced by `strip_markdown_fences`; gen_tests filename regex kept behind an
+     injected `_is_gen_tests_file` predicate. Each has a fakes-deps test.
+     IMPORTANT distinction: some "tasks" are pure static PARSERS, not orchestration —
+     `task0_cfg_scan` (Cargo.toml + cfg regex) and `task1_static_audit` (use-path scan) ARE
+     the regex; under Option 1 they STAY in pipeline.py as Option-3 regex-replacement targets.
+     Wrapping a parser in an application shim is empty ceremony — don't.
+     Extracted, groups A–D (all green, fakes tests): task0_docs (profile/context),
+     task0b_discovery, task1 (+`_task1_proc_macro`; `task1.py`), task2 family
+     (task2/inner_loop/fix_loop; `task2.py`). Regex kept in pipeline.py behind injected
+     predicates: `_is_gen_tests_file`, `_filter_proc_macro_test_files`,
+     `_proc_macro_fallback_requirements`, `_is_proc_macro_crate`, `_count_rustc_error_codes`.
+     ENGINE classes/helpers stay in pipeline.py (implementation, not orchestration):
+     Task1Synthesizer impls, Task2Generator impls + `generate_fix_loop` + `_task2_fill_*`.
+     Pure-parser tasks stay (Option-3 targets): `task0_cfg_scan`, `task1_static_audit`.
+     Group E 🔄 PARTIAL — `task0c_augment_module` (the ~1316-line orchestrator) extracted to
+     `tasks/task0c.py`: verbatim body behind a rebind-prelude (every collaborator localised
+     from a frozen `Task0cDeps`, ~75 fields, body byte-for-byte unchanged). All 25 inline
+     regex were factored into named pipeline helpers (injected) BEFORE the move so the clean
+     layer is regex-free. SPECIAL injections: `subprocess` (the module — app never imports it),
+     `get_current_cluster` (getter resolved at CALL time, the global is mutable),
+     `coverage_provider`; `log`/`emit` imported. pipeline.py keeps a thin shim binding
+     `_TASK0C_DEPS`. Fakes-deps smoke test drives the not-applicable early-skip path. green.
+     STILL IN pipeline.py (Group E tail, ~640 lines, injected back via Task0cDeps): the task0c
+     ENGINE helpers `_build_task0c_prompt_sections`, `_task0c_pragma_pass`,
+     `_task0c_targeted_pragma`, `_task0c_mutation_pass`, `_task0c_retrospective`,
+     `_get_task0c_history`, `_log_task0c_attempt`. Moving them needs the deps record to DROP
+     them (not re-inject) so task0c.py is self-contained. The ~75-field `Task0cDeps` is itself
+     a smell: a dependency object that large = relocated-not-decoupled. Lower value than slice 6.
+6. 🔄 `domain/models.py` dataclasses replacing dict records at the seam.
+   DONE: frozen slotted dataclasses mirroring `model.rs` field-for-field — `FnRecord`,
+   `TypeRecord`, `FieldRecord`, `MethodRecord`, `ModRecord`, `DispatchFamily` — each with a
+   tolerant `from_dict` (missing keys default, extra keys ignored, nested records parsed) and
+   a `to_dict` that round-trips the exact wire shape (seam stays sacred, §4). The `Extractor`
+   adapter + port now return typed records; `enumerate_types/mods/dispatch_families` flow
+   typed end-to-end and their (bounded) consumers use attribute access (`_types_referenced_in_text`,
+   `_format_type_for_prompt`, `_build_dispatch_family_section`, `_MOD_RECORDS_CACHE`).
+   BOUNDARY DECISION: `FnRecord` is typed at the adapter, but the pipeline.py
+   `_enumerate_fns_via_extractor` wrapper re-serialises via `.to_dict()` because FnRecord-as-dict
+   is woven through the per-fn / per-impl FILL ENGINE (`stubs`→`_process_one_stub`, the
+   `_collect_impl_blocks` block dicts, and a hand-built fallback stub dict of the same shape).
+   Typing the engine through is an engine rewrite (violates "engines stay") and wants its own
+   `Stub`/`ImplBlock`/`Frontier` domain models — a later slice, not this one.
+   `Diagnostic` (2nd unit, DONE) — the cargo↔Python seam ({code,file,line,message,rendered} from
+   `_cargo_diagnostics_from_json`) is now a typed record; consumers `_cargo_err_sig_from_diagnostics`,
+   `_frontier_from_diags`, `_run_cargo_check_diag` + the inner-loop file-error counters use attribute
+   access. It does NOT cascade into the fill engine (consumed into a frontier/sig, not stashed), so
+   no `.to_dict()` boundary was needed (unlike FnRecord). Tests: `test_slice6_models` (round-trip +
+   tolerant, incl. Diagnostic), `test_slice6_models_seam_wiring`. check.sh green.
+   `Cluster`/`Module` (3rd unit, DONE) — `BuildCluster` + `ModuleAugmentState` relocated from
+   pipeline.py to `domain/models.py` (mutable `@dataclass`es; `requires_nightly`/`record_pass`
+   mutate). pipeline.py imports + re-exports them so all ~40 `BuildCluster` sites + the
+   `ModuleAugmentState` construction are unchanged. The dead `BuildCluster.features` regex (0 prod
+   uses, only a test) was rewritten regex-free (plain string ops) to keep the domain module
+   regex-clean per the project rule; the cfg_true/cfg_false duplication folded into `_expand`.
+   `import dataclasses` dropped from pipeline.py (those two classes were its only users).
+   `Frontier` (4th unit, DONE) — the (file,fn)→{tests} reconstruction frontier is a mapping
+   keyed by identity, not a record, so its domain form is a type alias
+   `Frontier = dict[tuple[str,str], set[str]]` (domain/models.py), applied across the 15 TDD-driver
+   signatures/locals. Pure annotation; mypy confirms type-identity.
+   REMAINING (deliberately NOT done — engine change, needs a live pipeline run to validate):
+   `Stub`/`ImplBlock`/`FillResult` + threading FnRecord through the fill engine. These dicts are
+   ENGINE-INTERNAL (not seams): `stubs` threads through `_task2_fill_fns_one_by_one` (1157L) and
+   `_process_one_stub` (544L) with Any-typed access mypy can't see and inconsistent keys
+   (`"fn"` vs `"fn_name"`), and there is no behavioural test. Converting them as dataclass-then-
+   `.to_dict()` at the producer would be ceremony (relocated-not-decoupled); the only correct form
+   is full engine threading, which must be validated by a real run, not check.sh. Left for a
+   dedicated engine pass.
+7. 🔄 Rust split + clap + thiserror.
+   DONE: `lib.rs` (2356L monolith) split into cohesive modules, each moved verbatim (the JSON
+   seam stays byte-identical — guarded by the crate's 15 tests + the Python smoke):
+   `model.rs` (serde record types — the seam, mirrors `domain/models.py`), `cfg.rs`
+   (`CfgSet` + cfg-predicate parsing), `skeleton.rs` (skeletonise visitors), `enumerate.rs`
+   (fns/types/mods/dispatch/feature-gate subcommands), `merge.rs` (cross-cluster syn merge).
+   `lib.rs` is now ~305L = header + `mod`/`pub use` re-exports + the test module (public API and
+   all call sites unchanged). Cross-module helpers are `pub(crate)`. `main.rs` rewritten with
+   clap derive — flag names preserved byte-for-byte (they're part of the seam: the adapter shells
+   `--enumerate-fns`/`--cfg-true`/`--merge-clusters`/… exactly); validated by running every exact
+   adapter invocation. Crate bumped to edition 2024. `cargo build`/`cargo test` (15) green,
+   warning-clean; functional seam output verified identical.
+   DEFERRED: thiserror for the library error edge (anyhow only in the binary). It's a pervasive
+   change — every `enumerate_*`/`skeletonise`/`merge_*` signature returns `anyhow::Result` — so it
+   touches the whole lib surface for little architectural gain over the split; left as a focused
+   later pass. `Cfg` newtype (§3) similarly deferred; `CfgSet` already encapsulates predicate eval.
+
+Invariant: after every slice, `bash check.sh` passes and `pipeline.py` imports cleanly.
+
+---
+
+## 8. Open-source-readiness backlog (prioritized)
+
+Grounded in a 3-lens review (senior Pythonista / Rustacean / architect). Each **group** is a
+theme; each **step** is independently shippable behind a green `check.sh`. Legend —
+Pri: P0 (do first) > P1 > P2.  Eff: S/M/L.  Risk: ●low ●●med ●●●high (●●● = needs a live
+pipeline run to validate, not just check.sh).  Status: ⬜ todo · 🔄 partial · ✅ done.
+
+Dependency order:  **R1 → R4 → {R2, R3, R5} → R6**  (gates first; tests unblock the engine
+work; docs last). R5 (Rust) is independent and can run in parallel from the start.
+
+### R1 — Automated idiom gates & CI  ✅ DONE  (P0 · the quality floor; cheap, permanent)
+| # | step | Pri | Eff | Risk | status |
+|---|---|---|---|---|---|
+| R1.1 | ruff: broadened to `F,I,UP,C4,B,SIM` + `E711/E714/E741`; ~150 findings fixed (autofix + 22 manual: E741 renames, B904/B905/B007, SIM105). | P0 | M | ●● | ✅ ruff gates in check.sh |
+| R1.2 | `pyproject.toml`: home for ruff + mypy config (`target-version=py312`). | P0 | S | ● | ✅ |
+| R1.3 | mypy: `pipeline_core` held to **strict_optional** (caught + fixed the `gated_files` Optional bug); **mypy now HARD-GATES check.sh** (a blind autofix once renamed a loop var into a same-named `Thread` — only mypy caught it). | P1 | M | ● | ✅ |
+| R1.4 | Rust: `cargo clippy -D warnings` (20 fixed → 0) + `cargo fmt`. | P0 | S | ● | ✅ |
+| R1.5 | CI workflow (`.github/workflows/ci.yml`): py = ruff+mypy+invariants+smoke; rust = fmt+clippy(-D)+test. Linters pinned (ruff 0.15.15, mypy 2.1.0). | P0 | M | ● | ✅ |
+| R1.1b | **B023** (82, loop-var capture) — DEFERRED & ignored-with-note: almost all in the threaded fill ENGINE; audit needs the R4 test net. Also `SIM102`/`SIM115` ignored (stylistic / legit long-lived handles). | P1 | M | ●●● | ⬜ after R4 |
+| R1.3b | mypy `disallow_untyped_defs` on `pipeline_core` (26 missing annotations, mostly trivial inner closures) — deferred; completeness not bugs. | P2 | M | ● | ⬜ |
+| R1.x | import-linter contract (layer rules) → folded into **R2.3**. pytest adoption → **R4.1**. | — | — | — | — |
+
+### R4 — Behavioral test suite  🔄 MOSTLY DONE  (P0 · unblocks safe engine refactors)
+| # | step | Pri | Eff | Risk | status |
+|---|---|---|---|---|---|
+| R4.1 | **pytest** adopted; the drift-prone hand-rolled `main()` call-list replaced by a thin pytest delegator (one source of truth = collection); cargo coverage tests gated `@needs_cargo` (SMOKE_FULL=1); root `conftest.py` for imports; config in pyproject. check.sh + CI run `pytest`. | P0 | S | ● | ✅ 72 pass / 2 skip |
+| R4.2 | `tests/test_domain.py` — 15 behavioural input→output tests for the pure parsers (`text`, `llm_output`, `test_results`). Lifted the **domain layer to 98.6%** (text/model_caps/enums 100%). | P0 | L | ● | ✅ |
+| R4.4 | coverage gate: **`pipeline_core.domain` floored at 95%** in check.sh + CI (currently 98.6%). The application/ engine is intentionally not gated (mid-migration). | P2 | S | ● | ✅ |
+| R4.3 | fixture-replay harness for ONE per-fn fill (canned LLM response) — **DEFERRED, sequence directly before R3**: it's the safety net that lets the engine (`_process_one_stub`, 542L) be refactored without a live model; building it faithfully is deep engine work, best done adjacent to R3 not bundled with the test-infra setup. | P1 | M | ●● | ⬜ before R3 |
+
+### R2 — Make the layering load-bearing  🔄 MOSTLY DONE  (P1 · the architecture was aspirational)
+| # | step | Pri | Eff | Risk | status |
+|---|---|---|---|---|---|
+| R2.1 | **Orchestrator DELETED.** It was a fields-only dataclass with 0 method call sites (everything used the `ADAPTERS` global directly) AND it imported concrete `Adapters` (the sole application→adapters **DIP violation**). Removing it killed dead scaffolding + the violation in one move. A real driver is R2.2/R3, to be designed ports-first. | P1 | S | ● | ✅ |
+| R2.3 | **import-linter** layers contract (`adapters > application > ports > domain`) in pyproject; gated in check.sh + CI. Passes (29 files, 39 deps) — the layer rule is now enforced, not just described. `log`/`retry`/`io` are foundational facades (not layers), so domain may import them. | P1 | S | ● | ✅ |
+| R2.4 | `pipeline_core/__init__.py` declares the public API (`__all__`): the 10 domain record types + `Settings` + the 5 port Protocols. Adapters/tasks deliberately NOT re-exported (keeps `import pipeline_core` side-effect-free — no `model_interact` pull-in). | P2 | S | ● | ✅ |
+| R2.2 | move `main()`'s (1321L) task dispatch into a **real** ports-first driver, one task at a time — DEFERRED: it's the engine-coupled rewrite, needs the R4.3 replay net; folds into R3. | P1 | L | ●●● | ⬜ with R3 |
+
+### R3 — Engine decomposition + domain models  (P1 · dissolves the 72-field `Task0cDeps`)
+| # | step | Pri | Eff | Risk | validation |
+|---|---|---|---|---|---|
+| R3.1 | domain models `Stub`/`ImplBlock`/`FillResult` (`Frontier` ✅ done) | P1 | M | ●● | round-trip tests |
+| R3.2 | thread `FnRecord`/`Stub` through the fill engine; **shrink `Task0cDeps` 72→manageable** | P1 | L | ●●● | live run: fills still land |
+| R3.3 | split `_task2_fill_fns_one_by_one` (1155L) + `_process_one_stub` (542L) into named units (gated by R4.3) | P1 | L | ●●● | live run + replay test |
+| R3.4 | Group E tail: move the 7 `_task0c_*` helpers into `tasks/task0c.py`, **drop them from `Task0cDeps`** (don't re-inject) | P2 | M | ●● | invariant checker + live run |
+
+### R5 — Rust library-grade error handling & polish  ✅ DONE  (P1 · independent)
+| # | step | Pri | Eff | Risk | status |
+|---|---|---|---|---|---|
+| R5.1 | **thiserror** `ExtractError` enum (`Read`/`Write`/`Parse`, each carrying the path) in `error.rs`; the 10 `pub fn` now return `crate::Result`; `anyhow` is **binary-only** (`?` adapts `ExtractError`→`anyhow` for free). Seam output verified byte-identical. | P1 | M | ●● | ✅ 15 tests |
+| R5.2 | unwrap audit: the "34" were mostly safe `unwrap_or*`; only 3 real `.unwrap()` (provably-infallible map removes) → documented `.expect(invariant)` (not `?` — that'd add an unreachable error path). `#![warn(clippy::unwrap_used)]` on the lib (tests `#![allow]`); `clippy -D warnings` green. | P1 | S | ● | ✅ |
+| R5.3 | rustc reports **no dead `pub(crate)`** → split visibility isn't wrong; fine-grained private-vs-`pub(crate)` tightening is cosmetic, left as-is. `Cfg` newtype not needed (`CfgSet` encapsulates eval). | P2 | S | ● | ✅ (assessed) |
+| R5.4 | crate-level `//!` rustdoc with intra-doc links to the public API; `cargo doc --no-deps` clean; CI gates broken links (`RUSTDOCFLAGS=-D warnings`). | P2 | S | ● | ✅ |
+
+### R6 — OSS hygiene & docs  🔄 MOSTLY DONE  (P1 · launch gate)
+| # | step | Pri | Eff | Risk | status |
+|---|---|---|---|---|---|
+| R6.1 | `README.md` — prepended a title + overview + **Architecture** section (layers, the Rust extractor, the seam, the strip boundary, the gate); kept the existing research-framing/setup content. | P1 | M | ● | ✅ |
+| R6.2 | `CONTRIBUTING.md` — the gate (`check.sh` stages + the Rust gate), the enforced layer rules, the two hard rules (strip boundary, self-hosted-only), how to add a task, how to run. | P1 | S | ● | ✅ |
+| R6.4 | `docs/SEAM.md` — the JSON wire contract: the record table (`model.rs` ↔ `domain/models.py`), an example `FnRecord`, the CLI subcommands/flags, why it's stable. | P2 | M | ● | ✅ |
+| R6.x | **bonus**: `.gitignore` had a blanket `*.md` (public docs were force-added / invisible to git). Re-included README/CONTRIBUTING/CODE_ARCHITECTURE/ARCHITECTURE/`docs/*.md` so they track normally. | — | S | ● | ✅ |
+| R6.3 | **LICENSE — awaiting decision** (Apache-2.0 vs dual MIT-OR-Apache, the Rust-ecosystem norm). Genuinely the org's call; not fabricated. | P0 | S | ● | ⬜ user |
+| R6.5 | continue the `pipeline.py` god-module split; on extraction **drop the misleading `_` prefix** from functions that become a module's public entry — DEFERRED (large/risky ongoing extraction, overlaps R2.2/R3). | P2 | L | ●● | ⬜ |
+
+Carried forward from §5 (now folded into the groups above): Slice-5b Group E tail → **R3.4**;
+Slice-6 engine models → **R3.1–R3.3**; Slice-7 thiserror/`Cfg` → **R5.1/R5.3**; the dead
+Orchestrator → **R2.1–R2.2**.

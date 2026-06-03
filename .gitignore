@@ -14,4 +14,12 @@ failure_log.md
 tests_output_*.txt
 .task1_partials/
 tools/skeleton_extractor/target/
+
+# Workspace / generated markdown is ignored (genesis.md, model notes, scratch docs, etc.),
+# but the PROJECT's public documentation is tracked — re-include it explicitly.
 *.md
+!README.md
+!CONTRIBUTING.md
+!CODE_ARCHITECTURE.md
+!ARCHITECTURE.md
+!docs/*.md

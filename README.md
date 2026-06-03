@@ -1,3 +1,54 @@
+# determ
+
+**Reconstruct a software implementation from its tests alone — deterministically, with a
+self-hosted LLM.** Strip a project down to its tests + frozen signatures, then drive a local
+model through a fixed pipeline until the *original* test suite passes. The target is
+test-passing behaviour, never source fidelity — the model never sees the original bodies.
+
+The current reference target is Rust libraries; the methodology (captured in `genesis.md`) is
+meant to generalise. The real output of the experiment is that methodology, not the rebuilt code
+(see [Deterministic Process](#deterministic-process) below for the full framing).
+
+> Research pipeline, mid-migration to a layered architecture. Design + live refactoring backlog:
+> [`CODE_ARCHITECTURE.md`](CODE_ARCHITECTURE.md).
+
+## Architecture
+
+Two codebases with one sacred boundary between them.
+
+| Part | What | Where |
+|---|---|---|
+| **Pipeline** (Python) | the LLM-driven reconstruction loop + layered core | `pipeline.py` (entrypoint) → `pipeline_core/` |
+| **Extractor** (Rust) | `syn`-based AST extraction: skeletonise, enumerate fns/types/mods, cross-cluster merge | `tools/skeleton_extractor/` |
+| **The seam** | a JSON CLI contract between them | [`docs/SEAM.md`](docs/SEAM.md) |
+
+`pipeline_core/` follows clean-architecture layers, **enforced by import-linter** (a higher
+layer may import a lower one, never the reverse):
+
+```
+domain      pure record types + rules (the wire contract, cfg eval). stdlib only.
+ports       typing.Protocol interfaces the application depends on.
+application use cases: the extracted task* functions.
+adapters    the only layer that does I/O (LLM client, extractor binary, cargo).
+__main__    pipeline.py — composition root: build Settings + adapters, inject, run.
+```
+
+**The strip boundary** is the defining constraint: after `strip`, neither the pipeline nor the
+model may ever read the original source again. Everything source-derived (the `unimplemented!()`
+skeleton, signatures, the cluster manifest) is extracted *once* before strip and saved to disk;
+from `task1` on, the only inputs are the tests, those artefacts, and the model's own compile
+errors. A **cluster** is one compiler configuration (stable / nightly / a cargo feature); the
+pipeline is cluster-aware end-to-end. Self-hosted only — it never calls a cloud LLM.
+
+## Development
+
+Every change must keep `bash check.sh` green: mypy + ruff + the import-linter layer contract +
+the extraction-invariant checker + pytest (with a domain-coverage floor). The Rust crate is gated
+by `cargo fmt --check`, `clippy -D warnings`, `cargo test`, `cargo doc`. CI runs both — see
+[`CONTRIBUTING.md`](CONTRIBUTING.md).
+
+---
+
 ## Quick start
 
 ```bash
