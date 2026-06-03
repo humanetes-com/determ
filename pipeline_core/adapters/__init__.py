@@ -40,7 +40,11 @@ def build_adapters(settings: Settings, *, extractor_bin: Path, model: str | None
 
 
 from . import coverage, workspace  # noqa: E402  (re-export submodules for callers)
-from .coverage import CoverageDeps, CoverageProvider, make_coverage_provider  # noqa: E402
+from .coverage import (  # noqa: E402
+    CoverageDeps,
+    CoverageProvider,
+    make_coverage_provider,
+)
 from .workspace import GitWorkspace, WorkspaceDeps  # noqa: E402
 
 __all__ = [

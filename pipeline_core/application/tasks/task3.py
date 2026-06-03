@@ -17,8 +17,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ...log import log, emit
-from ...domain.test_results import _parse_test_counts, validate_task3_output_strict, OUTPUT_SEPARATOR
+from ...domain.test_results import (
+    OUTPUT_SEPARATOR,
+    _parse_test_counts,
+    validate_task3_output_strict,
+)
+from ...log import emit, log
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,8 +1,19 @@
 #!/usr/bin/env python3
 """Pipeline / GPU monitor.  Keys: 1/2/3 views  c/g/r/s actions  ↑↓ navigate  q quit"""
-import glob, json as _json, os, re, select, signal, subprocess, sys, termios, time, tty
-from typing import Any
+import contextlib
+import glob
+import json as _json
+import os
+import re
+import select
+import signal
+import subprocess
+import sys
+import termios
+import time
+import tty
 from datetime import datetime
+from typing import Any
 
 _LOG_DIR     = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 _RUN_REGISTRY = os.getenv("PIPELINE_RUN_REGISTRY", "/tmp/determ_pipelines.json")
@@ -539,9 +550,8 @@ def _baked_cluster_order() -> list[str]:
             txt = f.read()
     except Exception:
         return []
-    last = None
-    for last in re.finditer(r"loaded \d+ baked cluster\(s\):\s*([^\n]+)", txt):
-        pass
+    _matches = list(re.finditer(r"loaded \d+ baked cluster\(s\):\s*([^\n]+)", txt))
+    last = _matches[-1] if _matches else None
     if not last:
         return []
     return [c.strip() for c in last.group(1).split(",") if c.strip()]
@@ -879,7 +889,7 @@ def _parse_pipeline_log():
             lines = lines[1:]  # drop potentially partial first line
     except Exception:
         return _r()
-    last_line = next((l.strip() for l in reversed(lines) if l.strip()), "")
+    last_line = next((ln.strip() for ln in reversed(lines) if ln.strip()), "")
     this_pass: list[str] = []
     _cluster_files: list[str] = []
     for line in lines:
@@ -997,7 +1007,7 @@ def _parse_task_pipeline(lines: list[str]) -> dict[str, Any]:
           "task3_pass": bool | None,    # last task3 outcome
         }
     """
-    states: dict[str, str] = {t: "pending" for t in _TASKS_ORDER}
+    states: dict[str, str] = dict.fromkeys(_TASKS_ORDER, "pending")
     current: str | None = None
     iteration: int | None = None
     module: str | None = None
@@ -1056,9 +1066,7 @@ def _parse_task_pipeline(lines: list[str]) -> dict[str, Any]:
                 _start("task1")
         elif "TASK 1.5:" in line:
             pass  # treat as part of task1
-        elif re.search(r'pipeline: task1 ', line) and "[git] committed" in line:
-            _done("task1")
-        elif "TASK 1 output validated OK" in line:
+        elif re.search(r'pipeline: task1 ', line) and "[git] committed" in line or "TASK 1 output validated OK" in line:
             _done("task1")
         elif re.search(r'TASK 2:', line):
             _start("task2")
@@ -1255,10 +1263,7 @@ def pipeline_status():
             errs  = fd["errors"]
             lines = fd["lines"]
             fns   = fd["fns"]
-            if errs == 0:
-                marker = green("✓ clean")
-            else:
-                marker = red("█" * min(errs, 6)) + f" {errs}"
+            marker = green("✓ clean") if errs == 0 else red("█" * min(errs, 6)) + f" {errs}"
             rows.append(f"  {short.ljust(max_name)}  {str(lines).rjust(4)}L  {str(fns).rjust(3)}fn  {marker}")
 
     cov_data = _parse_coverage_json(proj_dir)
@@ -1353,7 +1358,8 @@ def _vllm_status() -> list[str]:
     global _vllm_cache
     if _read_backend() != "vllm":
         return []
-    import socket, urllib.request
+    import socket
+    import urllib.request
     now = time.time()
     cache_age = now - _vllm_cache[0]
 
@@ -1500,13 +1506,13 @@ def generation():
             display = display.split(marker)[-1].lstrip("\n")
             break
     w      = _w() - 4
-    dlines = [l for l in display.splitlines() if l.strip()][-5:]
+    dlines = [ln for ln in display.splitlines() if ln.strip()][-5:]
     cpt, retries = _parse_vllm_cpt()
     cpt_s    = f"cpt={cpt:.2f}" if cpt else dim("cpt=?")
     retry_s  = f"  {red(f'400-retries={retries}')}" if retries else ""
     rows  = [f"phase={phase}   {cur_chars:,} chars   last-tok {age_s} ago   {rate_str}   {cpt_s}{retry_s}"]
     rows += progress_rows
-    rows += [dim((l[:w-2] + "…") if len(l) > w else l) for l in dlines] or [dim("(empty)")]
+    rows += [dim((ln[:w-2] + "…") if len(ln) > w else ln) for ln in dlines] or [dim("(empty)")]
     return rows
 
 # ── State ─────────────────────────────────────────────────────────────────────
@@ -1775,9 +1781,9 @@ def _event_box(events_path: str, view_key: str, title: str, inner: int, header=(
     for h_line in header:
         pad = w - 1 - len(_plain(h_line))
         _ln(f"│ {h_line}{' ' * max(pad, 0)}│")
-    for l in view:
-        pad = w - 1 - len(_plain(l))
-        _ln(f"│ {l}{' ' * max(pad, 0)}│")
+    for ln in view:
+        pad = w - 1 - len(_plain(ln))
+        _ln(f"│ {ln}{' ' * max(pad, 0)}│")
     for _ in range(scroll_inner - len(view)):
         _ln(f"│{' ' * w}│")
     _ln("└" + "─" * w + "┘")
@@ -1813,9 +1819,9 @@ def _log_box(log_path, view_key, title, inner, header=()):
     for h_line in header:
         pad = w - 1 - len(_plain(h_line))
         _ln(f"│ {h_line}{' ' * max(pad, 0)}│")
-    for l in view:
-        pad = w - 1 - len(_plain(l))
-        _ln(f"│ {l}{' ' * max(pad, 0)}│")
+    for ln in view:
+        pad = w - 1 - len(_plain(ln))
+        _ln(f"│ {ln}{' ' * max(pad, 0)}│")
     for _ in range(scroll_inner - len(view)):   # pad to fill exact height
         _ln(f"│{' ' * w}│")
     _ln("└" + "─" * w + "┘")
@@ -1968,10 +1974,8 @@ def _run_action(key):
     elif key == "g":
         if _graceful_pending:
             _graceful_pending = False
-            try:
+            with contextlib.suppress(FileNotFoundError):
                 os.remove("/tmp/pipeline_graceful_stop")
-            except FileNotFoundError:
-                pass
             _action_msg = dim("graceful cancelled")
         elif _pipeline_running():
             _confirm    = "graceful"
@@ -2009,10 +2013,7 @@ def available_lines():
     if _view == "pipeline":
         gen_h = len(generation()) + 2
         return max(1, h - gpu_h - gen_h - 2 - BOTTOM_LINES)
-    elif _view == "stream":
-        p_h = len(pipeline_status()) + 2
-        return max(1, h - gpu_h - p_h - 2 - BOTTOM_LINES)
-    elif _view == "events":
+    elif _view == "stream" or _view == "events":
         p_h = len(pipeline_status()) + 2
         return max(1, h - gpu_h - p_h - 2 - BOTTOM_LINES)
     return 1

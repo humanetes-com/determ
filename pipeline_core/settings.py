@@ -40,7 +40,7 @@ class TaskModels:
     task4: str   # failure analysis — reasoning model
 
     @classmethod
-    def from_env(cls, default: str) -> "TaskModels":
+    def from_env(cls, default: str) -> TaskModels:
         def g(key: str) -> str:
             return os.getenv(key, default)
         return cls(
@@ -80,7 +80,7 @@ class Settings:
     task_models: TaskModels
 
     @classmethod
-    def from_env(cls, model: str = "") -> "Settings":
+    def from_env(cls, model: str = "") -> Settings:
         backend = Backend.coerce(os.getenv("BACKEND"), Backend.OLLAMA)
         var = backend.max_len_env_var
         raw = os.getenv(var) if var else None

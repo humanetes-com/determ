@@ -7,7 +7,11 @@ Compares, at concurrency P=4:
 Reports wall time, aggregate output tok/s, and peak KV usage + capacity-waits
 sampled from /metrics during each run.
 """
-import os, time, threading, urllib.request
+import os
+import threading
+import time
+import urllib.request
+
 from openai import OpenAI
 
 BASE = os.getenv("VLLM_BASE_URL", "http://localhost:8000/v1")

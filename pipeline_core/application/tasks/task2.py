@@ -14,8 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ...log import log, emit
 from ...domain.text import trim_to_line
+from ...log import emit, log
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,7 +211,7 @@ def task2_fix_loop(
     test_command: str,
     functional_req_path: Path,
     deps: Task2Deps,
-    genesis_path: "Path | None" = None,
+    genesis_path: Path | None = None,
     module_dir_rel: str = "",
 ) -> tuple[bool, str]:
     """

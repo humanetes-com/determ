@@ -13,13 +13,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ...log import log
-from ...retry import with_retry
+from ...domain.llm_output import (
+    GENESIS_DELIM_END,
+    GENESIS_DELIM_START,
+)
 from ...domain.llm_output import (
     _extract_genesis as extract_genesis,
-    GENESIS_DELIM_START,
-    GENESIS_DELIM_END,
 )
+from ...log import log
+from ...retry import with_retry
 
 
 @dataclass(frozen=True, slots=True)

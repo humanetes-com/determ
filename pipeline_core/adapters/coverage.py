@@ -47,7 +47,7 @@ class CoverageDeps:
 
     log: Callable[[str], None]
     cargo_env: Callable[[], dict]
-    cluster: Callable[[], "ClusterView | None"]
+    cluster: Callable[[], ClusterView | None]
     tarpaulin_bin: Path
     grcov_bin: Path
     build_timeout: int

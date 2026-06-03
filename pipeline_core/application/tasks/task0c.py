@@ -10,6 +10,7 @@ pipeline.py.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
@@ -18,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ...log import log, emit
+from ...log import emit, log
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,7 +102,7 @@ def task0c_augment_module(
     project_dir: Path,
     module_name: str,
     module_dir: Path,
-    deps: "Task0cDeps",
+    deps: Task0cDeps,
     crate_type: str = "",
     existing_test_files: set | None = None,
     project_context: str = "",
@@ -644,10 +645,8 @@ corrected content here
             cargo_toml_path = project_dir / "Cargo.toml"
         cargo_toml_content = ""
         if cargo_toml_path.exists():
-            try:
+            with contextlib.suppress(Exception):
                 cargo_toml_content = cargo_toml_path.read_text(encoding="utf-8")
-            except Exception:
-                pass
 
         # BL-004: collect integration test files (tests/*.rs) for pattern reference.
         integration_tests: list[tuple[str, str]] = []
@@ -728,7 +727,7 @@ corrected content here
             existing_text = _strip_gen_tests_decls(_raw_text).rstrip() + "\n"
 
             _src_line_count = existing_text.count('\n')
-            uncov_lines = {l for l in uncov_lines if l <= _src_line_count}
+            uncov_lines = {ln for ln in uncov_lines if ln <= _src_line_count}
 
             # Filter LLVM/grcov instrumentation artifacts:
             # 1. Comment-only lines (// …) — grcov sometimes marks these coverable, they never are
@@ -893,12 +892,12 @@ project-specific import paths, type construction patterns, and hard constraints.
             _coverage_status = (
                 _coverage_status_probe
                 + (
-                    f"IMPORTANT: grcov sometimes misreports dead branches, closing braces, or comments as "
-                    f"uncovered even when the surrounding code executes fine. If after careful analysis "
-                    f"the uncovered line(s) appear to be a dead code path (e.g. an if-branch whose "
-                    f"condition is structurally never true on modern Rust), a comment, or a closing brace "
-                    f"— do NOT attempt to cover them. Instead output an empty test block with a comment "
-                    f"explaining why the line is unreachable. Do not waste tests on genuinely dead code.\n"
+                    "IMPORTANT: grcov sometimes misreports dead branches, closing braces, or comments as "
+                    "uncovered even when the surrounding code executes fine. If after careful analysis "
+                    "the uncovered line(s) appear to be a dead code path (e.g. an if-branch whose "
+                    "condition is structurally never true on modern Rust), a comment, or a closing brace "
+                    "— do NOT attempt to cover them. Instead output an empty test block with a comment "
+                    "explaining why the line is unreachable. Do not waste tests on genuinely dead code.\n"
                     if uncov_lines and len(uncov_lines) <= 3 else ""
                 )
             )
@@ -940,7 +939,7 @@ project-specific import paths, type construction patterns, and hard constraints.
 
             prompt = _render_prompt(secs, _coverage_status)
 
-            def _subset_prompt(_subset_lines: "set[int]") -> str:
+            def _subset_prompt(_subset_lines: set[int]) -> str:
                 """Render a generation prompt targeting only a subset of the
                 file's uncovered lines (split-and-merge). Same file context as
                 the full prompt; only the fn_bodies/target section narrows, so
@@ -984,7 +983,7 @@ project-specific import paths, type construction patterns, and hard constraints.
                 except Exception as _e:
                     _log(f"  [{module_name}] Could not save stream log: {_e}")
 
-            def _finalize_and_commit(raw_block: str, pass_n: int, base_text: str) -> "tuple[str, str]":
+            def _finalize_and_commit(raw_block: str, pass_n: int, base_text: str) -> tuple[str, str]:
                 """Inject allow-line + prelude into a raw gen_tests block, reject
                 blocks with no #[test] fns, then write it as sibling `pass_n` on
                 top of `base_text` and run the compile-fix loop. Returns
@@ -1419,24 +1418,22 @@ project-specific import paths, type construction patterns, and hard constraints.
         if not remaining and skipped_files and coverage < 100.0:
             _log(f"\n  [{module_name}] HARD BLOCK: all uncovered files are stalled. "
                  f"Coverage: {coverage:.1f}%. Cannot reach 100%.")
-            _log(f"  Stalled files and their uncovered line counts:")
+            _log("  Stalled files and their uncovered line counts:")
             for sf in sorted(skipped_files):
                 n_uncov = len(uncovered_by_file.get(sf, (None, set()))[1])
                 history = _get_task0c_history(project_dir, sf)
                 retro = file_retrospectives.get(sf, "")
                 retro_note = f"\n      retrospective: {retro[:300]}" if retro else ""
                 _log(f"    {sf}: {n_uncov} uncovered lines. Last attempts:\n{history}{retro_note}")
-            _log(f"  Action required: improve the generation prompt or add manual tests for these files.")
+            _log("  Action required: improve the generation prompt or add manual tests for these files.")
             return coverage, covered_lines, False
 
         # --- Graceful stop check ---
         # If /tmp/pipeline_graceful_stop exists, finish this attempt cleanly and exit.
         _graceful_sentinel = Path("/tmp/pipeline_graceful_stop")
         if _graceful_sentinel.exists():
-            try:
+            with contextlib.suppress(OSError):
                 _graceful_sentinel.unlink()
-            except OSError:
-                pass
             _log(f"  [{module_name}] Graceful stop requested — attempt {attempt} complete. Exiting.")
             sys.exit(0)
 

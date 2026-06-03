@@ -10,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from ..domain.models import FnRecord, TypeRecord, ModRecord, DispatchFamily
+from ..domain.models import DispatchFamily, FnRecord, ModRecord, TypeRecord
 
 
 @runtime_checkable
@@ -55,7 +55,7 @@ class Cargo(Protocol):
     application layer — they are not part of this port.
     """
 
-    def run(self, cmd: str, cwd: Path, *, env: dict[str, str], timeout: int = ...) -> "ProcessResult": ...
+    def run(self, cmd: str, cwd: Path, *, env: dict[str, str], timeout: int = ...) -> ProcessResult: ...
 
 
 @runtime_checkable

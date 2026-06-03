@@ -16,7 +16,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from ..domain.models import FnRecord, TypeRecord, ModRecord, DispatchFamily
+from ..domain.models import DispatchFamily, FnRecord, ModRecord, TypeRecord
 
 
 def _cfg_args(cfg_true: tuple[str, ...], cfg_false: tuple[str, ...]) -> list[str]:

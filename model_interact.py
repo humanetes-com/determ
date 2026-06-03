@@ -17,6 +17,7 @@ Usage:
 """
 
 import argparse
+import contextlib
 import json
 import os
 import sys
@@ -184,10 +185,8 @@ def _sock_open(label: str = "") -> None:
     global _stream_fh
     import time as _time
     if _stream_fh:
-        try:
+        with contextlib.suppress(Exception):
             _stream_fh.close()
-        except Exception:
-            pass
     if not _STREAM_LOG:
         _stream_fh = None
         return
@@ -214,17 +213,16 @@ def _sock_write(text: str) -> None:
 def _sock_close() -> None:
     global _stream_fh
     if _stream_fh:
-        try:
+        with contextlib.suppress(Exception):
             _stream_fh.close()
-        except Exception:
-            pass
         _stream_fh = None
 
 
 def _timed_iter(it, timeout: int):
     """Wrap an iterator; raise TimeoutError if no item arrives within `timeout` seconds."""
-    import queue as _q, threading as _t
-    q: "_q.Queue[object]" = _q.Queue()
+    import queue as _q
+    import threading as _t
+    q: _q.Queue[object] = _q.Queue()
     sentinel = object()
 
     def _feed():
@@ -241,7 +239,7 @@ def _timed_iter(it, timeout: int):
         try:
             item = q.get(timeout=timeout)
         except _q.Empty:
-            raise TimeoutError(f"no token received in {timeout}s — generation stalled")
+            raise TimeoutError(f"no token received in {timeout}s — generation stalled") from None
         if item is sentinel:
             return
         if isinstance(item, BaseException):
@@ -679,7 +677,7 @@ class HuggingFaceBackend(LLMBackend):
             quantization_config=quantization_config,
         )
         print(f"[HuggingFaceBackend] Model loaded on: "
-              f"{set(str(d) for d in self._model.hf_device_map.values())}", file=sys.stderr)  # type: ignore[operator]
+              f"{ {str(d) for d in self._model.hf_device_map.values()} }", file=sys.stderr)  # type: ignore[operator]
 
     def ask(self, prompt: str, system: "str | None", model: str, max_tokens: int,
             think: "bool | None" = None) -> str:
@@ -804,7 +802,8 @@ class VLLMBackend(LLMBackend):
 
     def ask(self, prompt, system, model, max_tokens, think=None):
         import re as _re
-        from openai import OpenAI, BadRequestError
+
+        from openai import BadRequestError, OpenAI
         global _vllm_cpt
         # connect=30: fail fast if vLLM is down.
         # read=900: thinking models can be silent for minutes mid-generation.
@@ -1059,7 +1058,7 @@ def main():
     args = parser.parse_args()
 
     if args.file:
-        with open(args.file, "r") as f:
+        with open(args.file) as f:
             prompt = f.read()
     elif args.prompt:
         prompt = args.prompt

@@ -9,15 +9,16 @@ collaborators are injected via :class:`Task0bDeps`. No import of pipeline.py.
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ...domain.llm_output import extract_files
+from ...domain.text import strip_markdown_fences
 from ...log import log
 from ...retry import with_retry
-from ...domain.text import strip_markdown_fences
-from ...domain.llm_output import extract_files
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,7 +40,7 @@ class Task0bDeps:
 def task0b_discovery(strategy_path: Path, project_dir: Path, test_files,
                      readme_text: str, profile_content: str,
                      deps: Task0bDeps,
-                     clusters: "list | None" = None,
+                     clusters: list | None = None,
                      force: bool = False) -> str:
     """
     BL-001: Discovery pass — produce coverage_strategy.md before TASK 0c.
@@ -56,10 +57,8 @@ def task0b_discovery(strategy_path: Path, project_dir: Path, test_files,
     cargo_toml_path = project_dir / "Cargo.toml"
     cargo_text = ""
     if cargo_toml_path.exists():
-        try:
+        with contextlib.suppress(Exception):
             cargo_text = cargo_toml_path.read_text(encoding="utf-8")
-        except Exception:
-            pass
 
     # Load manifest-tracked generated files so they can be excluded from the hash.
     # On restart mid-run the pipeline may have stripped or rewritten source files;
@@ -68,7 +67,7 @@ def task0b_discovery(strategy_path: Path, project_dir: Path, test_files,
     for _mf in [project_dir / deps.manifest_name, *project_dir.glob(".generated_files_*.txt")]:
         try:
             if _mf.exists():
-                _generated.update(l.strip() for l in _mf.read_text().splitlines() if l.strip())
+                _generated.update(ln.strip() for ln in _mf.read_text().splitlines() if ln.strip())
         except Exception:
             pass
 

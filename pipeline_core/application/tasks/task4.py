@@ -15,11 +15,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ...log import log, emit
-from ...retry import with_retry
-from ...domain.text import smart_truncate
+from ...domain.llm_output import (
+    GENESIS_DELIM_END,
+    GENESIS_DELIM_START,
+    _extract_genesis,
+)
 from ...domain.test_results import count_passing_tests, extract_test_output_from_file
-from ...domain.llm_output import _extract_genesis, GENESIS_DELIM_START, GENESIS_DELIM_END
+from ...domain.text import smart_truncate
+from ...log import emit, log
+from ...retry import with_retry
 
 
 @dataclass(frozen=True, slots=True)

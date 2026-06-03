@@ -13,9 +13,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from ...log import log
-from ...domain.text import smart_truncate, strip_markdown_fences
 from ...domain.llm_output import extract_files
+from ...domain.text import smart_truncate, strip_markdown_fences
+from ...log import log
 
 
 @dataclass(frozen=True, slots=True)

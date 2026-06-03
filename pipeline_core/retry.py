@@ -11,11 +11,8 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from typing import TypeVar
 
 from . import log as _log
-
-_RT = TypeVar("_RT")
 
 # Module config (overridden by configure() at the composition root).
 MAX_RETRIES: int = 3
@@ -45,7 +42,7 @@ def is_rate_limit_error(e) -> bool:
     return False
 
 
-def with_retry(fn: "Callable[[], _RT]", retries: int | None = None) -> "_RT":
+def with_retry[RT](fn: Callable[[], RT], retries: int | None = None) -> RT:
     """
     Call fn() up to `retries` times. fn must return False to signal failure,
     or any non-False value to signal success.

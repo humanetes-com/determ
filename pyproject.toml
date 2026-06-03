@@ -1,0 +1,41 @@
+# Tooling config home for the Python side (ruff + mypy). Deps still live in the
+# requirements-*.txt files consumed by setup.sh; this file is config-only for now.
+# `bash check.sh` is the gate; it invokes ruff/mypy which read the sections below.
+
+[tool.ruff]
+line-length = 120          # generous; E501 is intentionally NOT enforced on the legacy module
+target-version = "py312"   # the code uses PEP 701 f-strings (3.12+); runtime is 3.14
+extend-exclude = [".venv", "tmp", "tools/skeleton_extractor/target"]
+
+[tool.ruff.lint]
+# Bug + idiom rule families. F=pyflakes, I=isort, UP=pyupgrade, C4=comprehensions,
+# B=bugbear, SIM=simplify, plus high-signal individual E codes.
+select = ["F", "I", "UP", "C4", "B", "SIM", "E711", "E714", "E741"]
+ignore = [
+    # B023 (closure captures loop var): 82 hits, almost all in the threaded fill
+    # ENGINE; auditing them safely needs the behavioural test net (backlog R4) — tracked
+    # as a dedicated pass, not blanket-fixed blind. See CODE_ARCHITECTURE.md §8 R1.1.
+    "B023",
+    # SIM102 (collapsible nested if): stylistic; one site needs a risky reindent in the
+    # untested engine. Tracked.
+    "SIM102",
+    # SIM115 (open without context manager): mixed — several are legitimate long-lived
+    # handles (e.g. the line-buffered stream log). A resource-handling audit, not a gate.
+    "SIM115",
+]
+
+[tool.mypy]
+# Baseline posture (matches the historical check.sh flags). pipeline_core is held to a
+# stricter bar via the per-module override below.
+ignore_missing_imports = true
+check_untyped_defs = true
+warn_return_any = true
+strict_optional = false
+
+[[tool.mypy.overrides]]
+# The extracted package is new and clean — hold it to strict-optional (catches real
+# Optional bugs). `disallow_untyped_defs` is deferred (backlog R1.3b): the verbatim-moved
+# task bodies carry many trivial inner closures whose annotation is churn-without-bug-value;
+# enable it after those are cleaned up.
+module = "pipeline_core.*"
+strict_optional = true

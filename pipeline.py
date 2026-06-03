@@ -18,8 +18,8 @@ import subprocess
 import sys
 import time
 from abc import ABC, abstractmethod
-from contextlib import contextmanager
-from datetime import datetime, timezone
+from contextlib import contextmanager, suppress
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TypeVar
 
@@ -28,9 +28,57 @@ _RT = TypeVar("_RT")
 import importlib
 
 from dotenv import load_dotenv
+
 import model_interact as _mi
-from model_interact import ask as _ask_raw, MODEL
-from strip_to_tests import detect_language, process_rust
+from model_interact import MODEL
+from model_interact import ask as _ask_raw
+from pipeline_core import log as _pclog
+from pipeline_core import retry as _pcretry
+from pipeline_core.adapters import build_adapters
+from pipeline_core.adapters import coverage as _covmod
+from pipeline_core.adapters import workspace as _wsmod
+from pipeline_core.adapters.coverage import CoverageDeps
+from pipeline_core.adapters.workspace import WorkspaceDeps
+from pipeline_core.application.orchestrator import Orchestrator
+from pipeline_core.application.tasks.genesis_audit import (
+    GenesisAuditDeps,
+    genesis_audit,
+)
+from pipeline_core.application.tasks.task0_docs import (
+    Task0DocsDeps,
+)
+from pipeline_core.application.tasks.task0_docs import (
+    task0_project_context as _task0_context_impl,
+)
+from pipeline_core.application.tasks.task0_docs import (
+    task0_project_profile as _task0_profile_impl,
+)
+from pipeline_core.application.tasks.task0b_discovery import (
+    Task0bDeps,
+)
+from pipeline_core.application.tasks.task0b_discovery import (
+    task0b_discovery as _task0b_impl,
+)
+from pipeline_core.application.tasks.task0c import Task0cDeps
+from pipeline_core.application.tasks.task0c import task0c_augment_module as _task0c_impl
+from pipeline_core.application.tasks.task1 import Task1Deps
+from pipeline_core.application.tasks.task1 import task1 as _task1_impl
+from pipeline_core.application.tasks.task2 import (
+    Task2Deps,
+)
+from pipeline_core.application.tasks.task2 import (
+    task2 as _task2_impl,
+)
+from pipeline_core.application.tasks.task2 import (
+    task2_fix_loop as _task2_fix_impl,
+)
+from pipeline_core.application.tasks.task2 import (
+    task2_inner_loop as _task2_inner_impl,
+)
+from pipeline_core.application.tasks.task3 import Task3Deps
+from pipeline_core.application.tasks.task3 import task3 as _task3_impl
+from pipeline_core.application.tasks.task4 import Task4Deps
+from pipeline_core.application.tasks.task4 import task4 as _task4_impl
 from pipeline_core.domain.enums import (
     Backend,
     CoverageBackend,
@@ -39,62 +87,46 @@ from pipeline_core.domain.enums import (
     PhaseCDriver,
     PhaseCMode,
 )
+from pipeline_core.domain.llm_output import (
+    GENESIS_DELIM_END,
+    GENESIS_DELIM_START,
+    _extract_genesis,
+    extract_files,
+)
+from pipeline_core.domain.model_caps import (
+    model_context_chars as _model_context_chars_pure,
+)
 from pipeline_core.domain.model_caps import (
     model_tier as _model_tier_pure,
-    model_context_chars as _model_context_chars_pure,
+)
+from pipeline_core.domain.models import (
+    BuildCluster,
+    Diagnostic,
+    DispatchFamily,
+    Frontier,
+    ModRecord,
+    ModuleAugmentState,
+    TypeRecord,
 )
 from pipeline_core.domain.test_results import (
     OUTPUT_SEPARATOR,
     _parse_test_counts,
     count_passing_tests,
-    validate_task3_output_strict,
     extract_test_output_from_file,
+    validate_task3_output_strict,
+)
+from pipeline_core.domain.text import (
+    extract_code_content,
+    smart_truncate,
+    trim_to_line,
 )
 from pipeline_core.domain.text import (
     strip_markdown_fences as _strip_markdown_fences,
-    extract_code_content,
-    trim_to_line,
-    smart_truncate,
 )
-from pipeline_core.domain.llm_output import (
-    GENESIS_DELIM_START,
-    GENESIS_DELIM_END,
-    extract_files,
-    _extract_genesis,
-)
-from pipeline_core import log as _pclog, retry as _pcretry
-from pipeline_core.retry import with_retry
 from pipeline_core.io import read, write
+from pipeline_core.retry import with_retry
 from pipeline_core.settings import Settings
-from pipeline_core.domain.models import (
-    TypeRecord, ModRecord, DispatchFamily, Diagnostic,
-    BuildCluster, ModuleAugmentState, Frontier,
-)
-from pipeline_core.adapters import build_adapters
-from pipeline_core.adapters import coverage as _covmod, workspace as _wsmod
-from pipeline_core.adapters.coverage import CoverageDeps
-from pipeline_core.adapters.workspace import WorkspaceDeps
-from pipeline_core.application.orchestrator import Orchestrator
-from pipeline_core.application.tasks.genesis_audit import genesis_audit, GenesisAuditDeps
-from pipeline_core.application.tasks.task3 import task3 as _task3_impl, Task3Deps
-from pipeline_core.application.tasks.task4 import task4 as _task4_impl, Task4Deps
-from pipeline_core.application.tasks.task0_docs import (
-    task0_project_profile as _task0_profile_impl,
-    task0_project_context as _task0_context_impl,
-    Task0DocsDeps,
-)
-from pipeline_core.application.tasks.task0b_discovery import (
-    task0b_discovery as _task0b_impl,
-    Task0bDeps,
-)
-from pipeline_core.application.tasks.task1 import task1 as _task1_impl, Task1Deps
-from pipeline_core.application.tasks.task2 import (
-    task2 as _task2_impl,
-    task2_inner_loop as _task2_inner_impl,
-    task2_fix_loop as _task2_fix_impl,
-    Task2Deps,
-)
-from pipeline_core.application.tasks.task0c import task0c_augment_module as _task0c_impl, Task0cDeps
+from strip_to_tests import detect_language, process_rust
 
 # Names re-exported through pipeline.py for backward-compatible call sites + the smoke
 # suite (which references them as pipeline.X). Declaring them here documents the public
@@ -350,10 +382,8 @@ def init_events(product: str) -> None:
         _RUN_CONTEXT["pipeline_sha"] = result.stdout.strip() or "unknown"
     except Exception:
         _RUN_CONTEXT["pipeline_sha"] = "unknown"
-    try:
+    with suppress(Exception):
         _PROMPTS_DIR.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        pass
 
 
 def _store_prompt_content(text: str) -> dict[str, int | str]:
@@ -366,10 +396,8 @@ def _store_prompt_content(text: str) -> dict[str, int | str]:
     h = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
     path = _PROMPTS_DIR / f"{h}.txt"
     if not path.exists():
-        try:
+        with suppress(Exception):
             path.write_text(text, encoding="utf-8", errors="replace")
-        except Exception:
-            pass
     return {"sha256": h, "char_count": len(text)}
 
 
@@ -377,7 +405,7 @@ def _emit(event: str, **fields) -> None:
     """Append a structured event to logs/events.jsonl. Never raises."""
     try:
         record: dict = {
-            "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+            "ts": datetime.now(UTC).isoformat(timespec="milliseconds"),
             "product": _RUN_CONTEXT.get("product", "unknown"),
             "pipeline_sha": _RUN_CONTEXT.get("pipeline_sha", "unknown"),
             "event": event,
@@ -856,10 +884,8 @@ def _register_run(project_dir: Path) -> None:
         atexit.register(_unregister)
     except Exception as e:
         # Never let registry bookkeeping break a real run.
-        try:
+        with suppress(Exception):
             _log(f"  (registry write failed: {e})")
-        except Exception:
-            pass
 
 
 def init_log(root: Path, nolog: bool = False, progress_mode: bool = False):
@@ -881,7 +907,7 @@ def init_log(root: Path, nolog: bool = False, progress_mode: bool = False):
         ).strip()
     except Exception:
         pass
-    _log(f"  PIPELINE STARTED — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC  pipeline.py={_py_hash}{_git_hash}")
+    _log(f"  PIPELINE STARTED — {datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S')} UTC  pipeline.py={_py_hash}{_git_hash}")
     _log(f"{'=' * 60}")
     _log(f"{'=' * 60}")
     _register_run(root)
@@ -1047,7 +1073,7 @@ def generate_in_parallel(
             return [""]
 
     import threading as _t
-    results: "list[str]" = [""] * len(queries)
+    results: list[str] = [""] * len(queries)
 
     def _worker(i: int) -> None:
         try:
@@ -1265,7 +1291,7 @@ def type_signals_write(project_dir: Path, file: str, type_name: str,
             "INSERT INTO type_signals(project,file,type_name,difficulty,pattern,ts) "
             "VALUES(?,?,?,?,?,?)",
             (_db_project_name(project_dir), file, type_name, difficulty, pattern,
-             datetime.now(timezone.utc).isoformat())
+             datetime.now(UTC).isoformat())
         )
         conn.commit()
         conn.close()
@@ -1309,7 +1335,7 @@ def compile_patterns_write(project_dir: Path, module: str, error_category: str,
             "INSERT INTO compile_patterns(project,module,error_category,example,fix_hint,iteration,ts) "
             "VALUES(?,?,?,?,?,?,?)",
             (_db_project_name(project_dir), module, error_category, example[:500],
-             fix_hint[:500], iteration, datetime.now(timezone.utc).isoformat())
+             fix_hint[:500], iteration, datetime.now(UTC).isoformat())
         )
         conn.commit()
         conn.close()
@@ -1355,7 +1381,7 @@ def genesis_rules_write(project_dir: Path, module_scope: str, category: str,
             "INSERT INTO genesis_rules(project,module_scope,category,rule_text,iteration,ts) "
             "VALUES(?,?,?,?,?,?)",
             (_db_project_name(project_dir), module_scope, category, rule_text[:1000],
-             iteration, datetime.now(timezone.utc).isoformat())
+             iteration, datetime.now(UTC).isoformat())
         )
         conn.commit()
         conn.close()
@@ -1415,7 +1441,7 @@ def module_status_write(project_dir: Path, module: str, iteration: int,
             "INSERT INTO module_status(project,module,iteration,outcome,pass_count,fail_count,ts) "
             "VALUES(?,?,?,?,?,?,?)",
             (_db_project_name(project_dir), module, iteration, outcome, pass_count,
-             fail_count, datetime.now(timezone.utc).isoformat())
+             fail_count, datetime.now(UTC).isoformat())
         )
         conn.commit()
         conn.close()
@@ -1604,7 +1630,7 @@ class StaticWorkspaceScanner(WorkspaceScanner):
                     if tests_note:
                         lines.extend(tests_note)
                     if dep_lines:
-                        lines.append(f"  - dependencies:")
+                        lines.append("  - dependencies:")
                         lines.extend(dep_lines)
                     lines.append("")
 
@@ -2029,7 +2055,7 @@ class StaticDependencyGraph(DependencyGraph):
             return []
 
         dependents: dict[str, list[str]] = {n: [] for n in self._modules}
-        in_deg: dict[str, int] = {n: 0 for n in self._modules}
+        in_deg: dict[str, int] = dict.fromkeys(self._modules, 0)
 
         for name, deps in self._deps.items():
             for dep in deps:
@@ -2525,7 +2551,7 @@ def _log_task0c_attempt(project_dir: Path, rel_path: str, attempt_n: int,
         "block_preview": block_preview,
         "compile_error": compile_error,  # BL-016: no cap — full error stored
         "outcome": outcome,  # "success", "compile_error", "no_block", "reverted"
-        "ts": datetime.now(timezone.utc).isoformat(),
+        "ts": datetime.now(UTC).isoformat(),
     }
     try:
         with open(log_path, "a", encoding="utf-8") as f:
@@ -2630,7 +2656,7 @@ _STOP_WORDS = {
     "always", "never", "only", "also", "both", "either", "every",
     "given", "used", "list", "item", "value", "values", "name", "names",
     "error", "result", "output", "input", "string", "number", "data",
-    "file", "path", "type", "field", "method", "function", "module",
+    "file", "path", "field", "method", "function", "module",
     "crate", "test", "tests", "assert", "check", "build", "code",
 }
 
@@ -3151,10 +3177,7 @@ def is_test_file(path: Path, project_dir: Path) -> bool:
         return True
 
     # Pipeline-generated gen_tests siblings: foo.gen_tests_3.rs
-    if re.search(r'\.gen_tests_\d+\.rs$', path.name):
-        return True
-
-    return False
+    return bool(re.search(r'\.gen_tests_\d+\.rs$', path.name))
 
 
 def collect_test_files(project_dir: Path):
@@ -3200,10 +3223,7 @@ def collect_examples(project_dir: Path, module_dir: Path | None = None) -> list[
     compliance targets. Filtered to module_dir when supplied (multi-crate
     workspaces).
     """
-    if module_dir is None:
-        roots = [project_dir]
-    else:
-        roots = [module_dir]
+    roots = [project_dir] if module_dir is None else [module_dir]
     result: list[tuple[str, str]] = []
     for root in roots:
         ex_dir = root / "examples"
@@ -3306,7 +3326,7 @@ def _split_at_semantic_boundaries(content: str, part_size: int) -> list[str]:
                 del current_lines[split_at:]
                 emit()
                 current_lines.extend(overflow)
-                current_chars = sum(len(l) for l in current_lines)
+                current_chars = sum(len(ln) for ln in current_lines)
             else:
                 # Hard split — no good boundary found.
                 emit()
@@ -3452,8 +3472,8 @@ Output only the command on one line. No explanation, no markdown fences.
             if any(first.startswith(p.strip()) for p in KNOWN_PREFIXES) or "/" in first:
                 return match.group(1).lstrip("$ ")
         # 2. Take first non-fence line, strip any prose prefix before ': '.
-        lines = [l.strip() for l in response.splitlines()
-                 if l.strip() and not l.strip().startswith("```")]
+        lines = [ln.strip() for ln in response.splitlines()
+                 if ln.strip() and not ln.strip().startswith("```")]
         if not lines:
             return ""
         line = lines[0]
@@ -3857,14 +3877,14 @@ def setup_workspace(repo: str, workspace_dir: Path, force_fresh: bool = False) -
         _log(f"  [git] copying {src} → {dest}")
         shutil.copytree(str(src), str(dest))
         if not (dest / ".git").exists():
-            _log(f"  [git] no .git found — initialising git repo")
+            _log("  [git] no .git found — initialising git repo")
             subprocess.run(["git", "init"], cwd=dest, check=True, capture_output=True)
             subprocess.run(["git", "add", "-A"], cwd=dest, check=True, capture_output=True)
             subprocess.run(
                 ["git", "commit", "-m", "initial: source snapshot", "--no-gpg-sign"],
                 cwd=dest, check=True, capture_output=True,
             )
-            _log(f"  [git] initial commit done")
+            _log("  [git] initial commit done")
 
     # Checkout or create pipeline branch
     current = subprocess.run(
@@ -3879,11 +3899,11 @@ def setup_workspace(repo: str, workspace_dir: Path, force_fresh: bool = False) -
         if branches:
             subprocess.run(["git", "checkout", "pipeline"],
                            cwd=dest, check=True, capture_output=True)
-            _log(f"  [git] checked out existing pipeline branch")
+            _log("  [git] checked out existing pipeline branch")
         else:
             subprocess.run(["git", "checkout", "-b", "pipeline"],
                            cwd=dest, check=True, capture_output=True)
-            _log(f"  [git] created pipeline branch")
+            _log("  [git] created pipeline branch")
 
     return dest
 
@@ -4035,7 +4055,7 @@ def _prune_redundant_clusters(
     ordered = sorted(clusters, key=lambda c: (not c.is_default, c.name))
     has_baseline = False
     for c in ordered:
-        distinguishing = [p for p in (c.active_cfg or [])]
+        distinguishing = list(c.active_cfg or [])
         # (P) default-redundancy: drop if all distinguishing cfgs are in defaults.
         if distinguishing and all(p in default_features for p in distinguishing):
             if has_baseline:
@@ -4988,7 +5008,7 @@ def _replace_fn_signature(file_path: Path, fn_name: str, new_sig: str) -> bool:
         text = file_path.read_text(encoding="utf-8")
     except Exception:
         return False
-    if not _is_pub_fn(text, fn_name) is False:
+    if _is_pub_fn(text, fn_name) is not False:
         # Only relax for private fns; pub fns are part of the test surface.
         pass
     if _is_pub_fn(text, fn_name):
@@ -6973,6 +6993,7 @@ Rules:
 # prompt (as a <RECURRING_ERRORS> block). Catches when one class of
 # Rust gotcha keeps biting and one fix-loop's local note isn't enough.
 from collections import Counter as _Counter_PY
+
 _ERROR_CODE_COUNTS: "_Counter_PY | None" = None
 # P6.3: per-error-code accumulator of cargo-error excerpts (capped). When
 # an error code recurs, we mine these for common type tokens / file
@@ -7029,7 +7050,7 @@ def _mine_common_tokens(excerpts: list[str], top_n: int = 3) -> list[tuple[str, 
     """
     if not excerpts:
         return []
-    tok: "_Counter_PY[str]" = _Counter_PY()
+    tok: _Counter_PY[str] = _Counter_PY()
     # Match `Foo`, `Foo<T>`, `Box<dyn StdError + Send + Sync>` etc.
     type_re = re.compile(
         r"\b([A-Z][A-Za-z0-9_]*(?:<[^<>\n]{1,60}>)?)\b"
@@ -7256,10 +7277,8 @@ def _improvement_loop(
             "fix_summary": record.get("summary", ""),
             "retro_chars": len(retro),
         }
-        try:
+        with suppress(Exception):
             _emit("loop.iter", data=ev)
-        except Exception:
-            pass
         if on_iter is not None:
             try:
                 on_iter(ev | {"output": output, "record": record,
@@ -7438,7 +7457,7 @@ def _write_phase_c_test_fix_log(
             f"stalled:         {stall}\n"
             f"failed_tests:\n"
             + "".join(f"  - {t}\n" for t in failed_tests)
-            + f"fns_retried:\n"
+            + "fns_retried:\n"
             + "".join(f"  - {r}::{f}\n" for r, f in fns_retried)
             + "\n=== cargo test output ===\n"
         )
@@ -7548,10 +7567,8 @@ def _check_graceful_stop(context: str) -> None:
     """Exit cleanly when the graceful stop sentinel is set. Called from inside
     long-running loops so `bash continue.sh --graceful` is responsive."""
     if _GRACEFUL_SENTINEL_PATH.exists():
-        try:
+        with suppress(OSError):
             _GRACEFUL_SENTINEL_PATH.unlink()
-        except OSError:
-            pass
         _log(f"  [graceful] stop sentinel detected at {context} — exiting cleanly.")
         sys.exit(0)
 
@@ -8313,11 +8330,9 @@ def _load_retrospectives(project_dir: Path) -> dict:
 
 
 def _save_retrospectives(project_dir: Path, data: dict) -> None:
-    try:
+    with suppress(Exception):
         _retrospectives_path(project_dir).write_text(
             json.dumps(data, indent=2), encoding="utf-8")
-    except Exception:
-        pass
 
 
 def _retro_key(file_rel: str, fn_name: str, container: str) -> str:
@@ -8643,7 +8658,7 @@ def _run_phase_c_tdd(
                  f"({len(eligible)} fn(s) still on frontier — will be "
                  "marked exhausted). best pass="
                  f"{best_pass} fail={best_fail}.")
-            for _stuck_key in eligible.keys():
+            for _stuck_key in eligible:
                 permanently_exhausted.add(_stuck_key)
             _emit("phase_c.tdd.iter", data={
                 "cluster": cluster.name, "iter": iter_n, "rc": rc,
@@ -8745,6 +8760,7 @@ _PER_IMPL_MAX_STUBS = int(os.getenv("PHASE_C_IMPL_MAX_STUBS", "12"))
 # lock keeps file mutations deterministic across the per-impl + per-fn
 # fallback path interaction.
 import threading as _threading_mod
+
 _splice_check_lock = _threading_mod.Lock()
 
 
@@ -8814,9 +8830,7 @@ def _phase_c_fill_impl_blocks(
             return False
         if not b["stub_members"]:
             return False
-        if len(b["stub_members"]) > _PER_IMPL_MAX_STUBS:
-            return False
-        return True
+        return not len(b["stub_members"]) > _PER_IMPL_MAX_STUBS
     viable_blocks = [b for b in blocks if _viable(b)]
     _log(f"  [phase-c/impl] cluster {cluster_name}: "
          f"{len(viable_blocks)} impl block(s) viable "
@@ -9327,8 +9341,8 @@ def _task2_fill_fns_one_by_one(
     if _parallelism > 1:
         _log(f"  [phase-c/per-fn] parallelism={_parallelism} (LLM calls "
              f"concurrent; splice+cargo serialised).")
-    import threading as _threading
     import queue as _queue_mod
+    import threading as _threading
     # _splice_check_lock is now module-level (used by both per-impl and
     # per-fn paths so they don't race on the same file).
     _counters_lock = _threading.Lock()
@@ -9751,7 +9765,7 @@ def _task2_fill_fns_one_by_one(
                 # its OWN tests pass. The SHARED _u2_test_gate decides; on a test
                 # failure it routes through the same fix loop as a compile error
                 # (failing-test set as the stall signature).
-                _u2_fail_sig: "frozenset | None" = None
+                _u2_fail_sig: frozenset | None = None
                 if rc == 0:
                     _g = _u2_test_gate(
                         (tdd_frontier_tests or {}).get((rel_file, fn_name), set()),
@@ -10150,7 +10164,7 @@ def _task2_fill_fns_one_by_one(
                         if classification:
                             # Collect fn= refs only from actionable categories.
                             wanted: set[tuple[str, str]] = set()
-                            for t, info in classification.items():
+                            for _test, info in classification.items():
                                 if info["category"] not in (
                                         "BAD_FILL", "TEST_PRECONDITION_MISSING"):
                                     continue
@@ -10836,10 +10850,7 @@ def _locate_fn_by_record(file_path: Path, name: str, container: str, sig_text: s
         # Ambiguous still — pick the first stub-bodied one (more likely to
         # be the one we want to fill).
         stubs = [r for r in cands if r.get("has_unimplemented_body")]
-        if stubs:
-            cands = [stubs[0]]
-        else:
-            cands = [cands[0]]
+        cands = [stubs[0]] if stubs else [cands[0]]
     r = cands[0]
     return (
         int(r["sig_byte_start"]),
@@ -11111,7 +11122,7 @@ def _build_dispatch_family_section(family: DispatchFamily) -> str:
     _map = ""
     if trait_list and tag_list and len(trait_list) == len(tag_list):
         _map = ("In THIS family map each trait to its own tag: "
-                + ", ".join(f"`{t}`→`{g}`" for t, g in zip(trait_list, tag_list))
+                + ", ".join(f"`{t}`→`{g}`" for t, g in zip(trait_list, tag_list, strict=False))
                 + (f", then `.{chained}(...)` builds the result on that tag. "
                    if chained else ". "))
     return (
@@ -11172,7 +11183,7 @@ def _parse_impl_block_ranges(source: str) -> "list[dict]":
     `impl<'a, T> Mut<'a, T>`).
     """
     n = len(source)
-    out: "list[dict]" = []
+    out: list[dict] = []
 
     def _skip_line_comment(i: int) -> int:
         while i < n and source[i] != "\n":
@@ -11363,7 +11374,7 @@ def _collect_impl_blocks(src_dir: Path) -> list[dict] | None:
     # its sig_byte_start. Caches parsed ranges so we don't re-parse the
     # same file once per fn record.
     file_to_source: dict[str, str] = {}
-    file_to_impl_ranges: dict[str, "list[dict]"] = {}
+    file_to_impl_ranges: dict[str, list[dict]] = {}
     def _source_for(rel: str) -> str:
         if rel not in file_to_source:
             p = src_dir / rel
@@ -11487,7 +11498,7 @@ def _extract_filled_fn_bodies(impl_blocks: "list[dict]", file_rel: str) -> "list
     """Return [{fn_name, container, body}] for every FILLED fn in `file_rel`,
     pulled from the impl block records. Free fns are dropped (they have no
     container). Used by `_extract_crate_idioms` to scan for patterns."""
-    out: "list[dict]" = []
+    out: list[dict] = []
     for b in impl_blocks:
         if b.get("file") != file_rel:
             continue
@@ -11538,7 +11549,7 @@ def _extract_crate_idioms(
     target_tokens = set(re.findall(r"[A-Za-z_][\w]*", target_sig_text or ""))
 
     # Per-axis collectors with rank score.
-    candidates: "list[tuple[float, str]]" = []
+    candidates: list[tuple[float, str]] = []
 
     # Axis 1 — Self:: family. Count occurrences per method name.
     self_method_counts: dict[str, int] = {}
@@ -11685,7 +11696,7 @@ def _group_frontier_by_impl_block(
             fn_to_block[(b["file"], m["fn_name"])] = b
     plan: list[dict] = []
     seen_block_ids: set[str] = set()
-    for (file_rel, fn_name), tests in frontier.items():
+    for (file_rel, fn_name), _tests in frontier.items():
         block = fn_to_block.get((file_rel, fn_name))
         if block is None:
             continue
@@ -11815,7 +11826,7 @@ def _line_to_fn_record(
     lines_iter = file_text.splitlines(keepends=True)
     if line_no > len(lines_iter):
         return None
-    line_start = sum(len(l) for l in lines_iter[:line_no - 1])
+    line_start = sum(len(ln) for ln in lines_iter[:line_no - 1])
     line_end = line_start + len(lines_iter[line_no - 1])
     if col_no is not None and col_no >= 1:
         byte_offset = line_start + col_no - 1
@@ -12948,7 +12959,7 @@ def _write_build_configs(project_dir: Path, clusters: list, predicate_lines: dic
     lines = [
         f"# Build configurations — {project_dir.name}",
         f"# {len(clusters)} cluster(s) derived from source",
-        f"# Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}",
+        f"# Generated: {datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S UTC')}",
         "",
     ]
     for c in clusters:
@@ -13000,17 +13011,13 @@ def _source_hash(project_dir: Path) -> str:
         # Skip gen_tests sibling files entirely — pipeline-generated content.
         if re.search(r'\.gen_tests_\d+\.rs$', p.name):
             continue
-        try:
+        with suppress(Exception):
             parts.append(_strip_gen_tests_decls(p.read_text(errors="replace")))
-        except Exception:
-            pass
     for p in sorted(project_dir.rglob("*.rs")):
         rel = str(p.relative_to(project_dir))
         if "tests/" in rel or rel.startswith("tests"):
-            try:
+            with suppress(Exception):
                 parts.append(p.read_text(errors="replace")[:500])
-            except Exception:
-                pass
     return hashlib.sha256("".join(parts).encode()).hexdigest()[:16]
 
 
@@ -13062,10 +13069,8 @@ def _write_state(project_dir: Path, state: dict) -> None:
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(body)
         f.flush()
-        try:
+        with suppress(OSError):
             os.fsync(f.fileno())
-        except OSError:
-            pass
     os.replace(tmp, target)
 
 
@@ -13884,10 +13889,8 @@ Output a plain structured list of the merged requirements. No filler, no code, n
         if ok:
             for f in partials_dir.glob("*.txt"):
                 f.unlink()
-            try:
+            with suppress(OSError):
                 partials_dir.rmdir()
-            except OSError:
-                pass
         return ok
 
     def _synthesis_prompt(self, readme_text: str, profile_section: str,
@@ -14402,49 +14405,49 @@ class StaticTask2Generator(Task2Generator):
         proc_macro_note = ""
         if "proc-macro target" in workspace_structure and current_module:
             proc_macro_note = (
-                f"\n⚠️  PROC-MACRO CRATE — mandatory rules (syn = \"2.0\", default features only):\n"
-                f"\n  IMPORTS — lib.rs must have these at the top:\n"
-                f"    use proc_macro::TokenStream;\n"
-                f"    use proc_macro2::{{TokenStream as TokenStream2, Span}};\n"
-                f"    use syn::{{parse_macro_input, DeriveInput, Data, Fields, FieldsNamed, FieldsUnnamed,\n"
-                f"              Field, Ident, Type, Attribute, Meta, Expr, Lit, LitStr, LitInt,\n"
-                f"              Path, PathSegment, Generics, Error as SynError}};\n"
-                f"    use quote::{{quote, quote_spanned, ToTokens}};\n"
-                f"    use syn::spanned::Spanned;\n"
-                f"\n  AVAILABLE syn 2.0 types (default features, no 'full' needed):\n"
-                f"    DeriveInput, Data, DataStruct, DataEnum, DataUnion\n"
-                f"    Fields, FieldsNamed, FieldsUnnamed, Field\n"
-                f"    Attribute, Meta, MetaList, MetaNameValue\n"
-                f"    Ident, Type, TypePath, Generics, GenericParam\n"
-                f"    Path, PathSegment, PathArguments, AngleBracketedGenericArguments\n"
-                f"    Expr, ExprLit, Lit, LitStr, LitInt, LitBool\n"
-                f"    syn::Error (for compile-time errors via .to_compile_error())\n"
-                f"    Span comes from proc_macro2::Span, NOT syn::Span\n"
-                f"\n  NOT AVAILABLE without features = [\"full\"]:\n"
-                f"    ItemEnum, ItemFn, ItemStruct, ItemImpl — DO NOT USE\n"
-                f"    PatIdent, Stmt, Block, Arm — DO NOT USE\n"
-                f"\n  STRUCTURE rules:\n"
-                f"  - Entry-point fn MUST be tagged `#[proc_macro_derive(TraitName)]` or `#[proc_macro_attribute]`.\n"
-                f"  - proc-macro crates can ONLY export #[proc_macro_derive]/#[proc_macro_attribute]/#[proc_macro] fns.\n"
-                f"  - ALL other functions and types MUST be private (no `pub`). Example:\n"
-                f"      WRONG: `pub fn helper(...)` or `pub struct Foo` — these cause 'cannot export' compile error\n"
-                f"      RIGHT: `fn helper(...)` or `struct Foo` — private, no pub keyword\n"
-                f"  - Use `std::env` not bare `env::` for environment variables.\n"
-                f"  - A proc-macro crate does NOT define runtime types from the crates it serves —\n"
-                f"    those types live in the runtime crate(s) and are referenced by full path\n"
-                f"    inside `quote! {{ ... }}` blocks (e.g. `runtime_crate::SomeType`).\n"
-                f"  - Parse input as `DeriveInput` (not `ItemStruct`/`ItemEnum`/`ItemFn` — those require 'full' feature):\n"
-                f"      let input = parse_macro_input!(input as DeriveInput);\n"
-                f"      match input.data {{ Data::Struct(s) => ..., Data::Enum(e) => ..., _ => ... }}\n"
-                f"  - `syn::AttributeArgs` does not exist in syn 2.x — parse attributes via `Attribute::parse_nested_meta`.\n"
-                f"  - Iterating FieldsNamed: use `fields.named.iter()` not `fields.iter()`.\n"
-                f"    FieldsNamed has a `.named` field (Punctuated<Field, Comma>), not a direct iterator.\n"
-                f"  - Do NOT declare `extern crate proc_macro;` — it is implicit in proc-macro crates.\n"
-                f"  - Structs are data only — NO function signatures inside struct bodies.\n"
-                f"  - References in struct fields MUST have lifetimes: `struct Foo<'a> {{ x: &'a Bar }}`\n"
-                f"  - Do NOT use inline `mod xyz {{ }}` blocks — put helpers directly in lib.rs or in a separate file.\n"
-                f"  - If a submodule file `foo.rs` is generated, declare it in lib.rs as `mod foo;` (no braces).\n"
-                f"  - Every `mod foo;` declaration needs a corresponding foo.rs file.\n"
+                "\n⚠️  PROC-MACRO CRATE — mandatory rules (syn = \"2.0\", default features only):\n"
+                "\n  IMPORTS — lib.rs must have these at the top:\n"
+                "    use proc_macro::TokenStream;\n"
+                "    use proc_macro2::{TokenStream as TokenStream2, Span};\n"
+                "    use syn::{parse_macro_input, DeriveInput, Data, Fields, FieldsNamed, FieldsUnnamed,\n"
+                "              Field, Ident, Type, Attribute, Meta, Expr, Lit, LitStr, LitInt,\n"
+                "              Path, PathSegment, Generics, Error as SynError};\n"
+                "    use quote::{quote, quote_spanned, ToTokens};\n"
+                "    use syn::spanned::Spanned;\n"
+                "\n  AVAILABLE syn 2.0 types (default features, no 'full' needed):\n"
+                "    DeriveInput, Data, DataStruct, DataEnum, DataUnion\n"
+                "    Fields, FieldsNamed, FieldsUnnamed, Field\n"
+                "    Attribute, Meta, MetaList, MetaNameValue\n"
+                "    Ident, Type, TypePath, Generics, GenericParam\n"
+                "    Path, PathSegment, PathArguments, AngleBracketedGenericArguments\n"
+                "    Expr, ExprLit, Lit, LitStr, LitInt, LitBool\n"
+                "    syn::Error (for compile-time errors via .to_compile_error())\n"
+                "    Span comes from proc_macro2::Span, NOT syn::Span\n"
+                "\n  NOT AVAILABLE without features = [\"full\"]:\n"
+                "    ItemEnum, ItemFn, ItemStruct, ItemImpl — DO NOT USE\n"
+                "    PatIdent, Stmt, Block, Arm — DO NOT USE\n"
+                "\n  STRUCTURE rules:\n"
+                "  - Entry-point fn MUST be tagged `#[proc_macro_derive(TraitName)]` or `#[proc_macro_attribute]`.\n"
+                "  - proc-macro crates can ONLY export #[proc_macro_derive]/#[proc_macro_attribute]/#[proc_macro] fns.\n"
+                "  - ALL other functions and types MUST be private (no `pub`). Example:\n"
+                "      WRONG: `pub fn helper(...)` or `pub struct Foo` — these cause 'cannot export' compile error\n"
+                "      RIGHT: `fn helper(...)` or `struct Foo` — private, no pub keyword\n"
+                "  - Use `std::env` not bare `env::` for environment variables.\n"
+                "  - A proc-macro crate does NOT define runtime types from the crates it serves —\n"
+                "    those types live in the runtime crate(s) and are referenced by full path\n"
+                "    inside `quote! { ... }` blocks (e.g. `runtime_crate::SomeType`).\n"
+                "  - Parse input as `DeriveInput` (not `ItemStruct`/`ItemEnum`/`ItemFn` — those require 'full' feature):\n"
+                "      let input = parse_macro_input!(input as DeriveInput);\n"
+                "      match input.data { Data::Struct(s) => ..., Data::Enum(e) => ..., _ => ... }\n"
+                "  - `syn::AttributeArgs` does not exist in syn 2.x — parse attributes via `Attribute::parse_nested_meta`.\n"
+                "  - Iterating FieldsNamed: use `fields.named.iter()` not `fields.iter()`.\n"
+                "    FieldsNamed has a `.named` field (Punctuated<Field, Comma>), not a direct iterator.\n"
+                "  - Do NOT declare `extern crate proc_macro;` — it is implicit in proc-macro crates.\n"
+                "  - Structs are data only — NO function signatures inside struct bodies.\n"
+                "  - References in struct fields MUST have lifetimes: `struct Foo<'a> { x: &'a Bar }`\n"
+                "  - Do NOT use inline `mod xyz { }` blocks — put helpers directly in lib.rs or in a separate file.\n"
+                "  - If a submodule file `foo.rs` is generated, declare it in lib.rs as `mod foo;` (no braces).\n"
+                "  - Every `mod foo;` declaration needs a corresponding foo.rs file.\n"
             )
 
         module_scope_section = (
@@ -14584,13 +14587,13 @@ class LLMTask2Generator(Task2Generator):
         rust_module_rules = ""
         if current_module and module_dir_rel:
             rust_module_rules = (
-                f"\n⚠️  RUST MODULE FILE RULES:\n"
-                f"1. A `foo.rs` file IS the module `foo`. Write its contents directly — do NOT wrap "
-                f"them in `pub mod foo {{ ... }}`. That creates double nesting and won't compile.\n"
-                f"2. Types declared in lib.rs at the crate root are referenced from submodules as "
-                f"`use crate::TypeName;`. Submodules MUST NOT redefine root-level types.\n"
-                f"3. Submodule types declared at the root must have real field/variant definitions "
-                f"in lib.rs — not empty stubs.\n"
+                "\n⚠️  RUST MODULE FILE RULES:\n"
+                "1. A `foo.rs` file IS the module `foo`. Write its contents directly — do NOT wrap "
+                "them in `pub mod foo { ... }`. That creates double nesting and won't compile.\n"
+                "2. Types declared in lib.rs at the crate root are referenced from submodules as "
+                "`use crate::TypeName;`. Submodules MUST NOT redefine root-level types.\n"
+                "3. Submodule types declared at the root must have real field/variant definitions "
+                "in lib.rs — not empty stubs.\n"
             )
 
         module_scope_section = (
@@ -14704,7 +14707,7 @@ Output one file path per line, relative to the project root. No other text.
             if line and '/' in line and '.' in line:
                 file_paths.append(line)
         if not file_paths:
-            _log(f"  ERROR: model returned no file list.")
+            _log("  ERROR: model returned no file list.")
             return False
 
         # Hard filter: discard files outside current module scope
@@ -14969,17 +14972,17 @@ class StaticFileListTask2Generator(Task2Generator):
 
             proc_macro_note = ""
             if _is_proc_macro:
-                proc_macro_note = f"""
+                proc_macro_note = """
 ⚠️  PROC-MACRO CRATE (syn = "2.0", default features only):
 
 IMPORTS for lib.rs:
   use proc_macro::TokenStream;
-  use proc_macro2::{{TokenStream as TokenStream2, Span}};
-  use syn::{{parse_macro_input, DeriveInput, Data, DataStruct, DataEnum, Fields,
+  use proc_macro2::{TokenStream as TokenStream2, Span};
+  use syn::{parse_macro_input, DeriveInput, Data, DataStruct, DataEnum, Fields,
             FieldsNamed, FieldsUnnamed, Field, Ident, Type, Attribute, Meta,
-            Expr, Lit, LitStr, LitInt, Path, Generics, Error as SynError}};
+            Expr, Lit, LitStr, LitInt, Path, Generics, Error as SynError};
   use syn::spanned::Spanned;
-  use quote::{{quote, quote_spanned, ToTokens}};
+  use quote::{quote, quote_spanned, ToTokens};
 
 AVAILABLE syn 2.0 types (default features, no 'full' needed):
   DeriveInput, Data, DataStruct, DataEnum, Fields, FieldsNamed, FieldsUnnamed, Field
@@ -14994,10 +14997,10 @@ RULES:
   - Do NOT define types that belong to dependent crates — reference them via their crate path
     inside quote! blocks (e.g. `my_crate::SomeType`).
   - Entry points must be at the TOP LEVEL of lib.rs with the correct registration attribute.
-  - References in struct fields MUST have lifetimes: `struct Foo<'a> {{ x: &'a Bar }}`
+  - References in struct fields MUST have lifetimes: `struct Foo<'a> { x: &'a Bar }`
   - Iterate FieldsNamed: `fields.named.iter()` (NOT `fields.iter()`)
   - `syn::AttributeArgs` removed in syn 2.x — parse attrs via `Attribute::parse_nested_meta`
-  - Do NOT use inline `mod helpers {{ }}` blocks — helper functions go directly in the file.
+  - Do NOT use inline `mod helpers { }` blocks — helper functions go directly in the file.
   - Each `mod foo;` in lib.rs needs a corresponding foo.rs file (already in file list).
   - Derive/attribute macro names and helper attribute paths are in the functional requirements.
 """
@@ -15213,10 +15216,8 @@ Generate the implementation for `{file_path}` (this call writes ONLY that file).
 
             # FR-010: re-sort remaining files using mod declarations from just-generated file.
             if pending and file_path in all_files:
-                try:
+                with suppress(Exception):  # cycle or error — keep current order
                     pending = _topo_sort_files(pending, all_files)
-                except Exception:
-                    pass  # cycle or error — keep current order
 
         if not all_files:
             _log("  ERROR: no files generated.")
@@ -15597,7 +15598,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
                 _r = None
         if _r is not None and _r.returncode != 0:
             _log(f"  {tag} [skeleton-A] cargo check FAILED; invoking fix-loop.")
-            _skel_sources = [p for p in (skeleton_dir / "src").rglob("*.rs")]
+            _skel_sources = list((skeleton_dir / "src").rglob("*.rs"))
             ok, _ = generate_fix_loop(
                 project_dir=skeleton_dir,
                 check_cmd=check_cmd,
@@ -16006,7 +16007,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
                      f"({len(eligible)} fn(s) still on frontier — marking "
                      "exhausted). best pass="
                      f"{best_pass} fail={best_fail}.")
-                for _stuck_key in eligible.keys():
+                for _stuck_key in eligible:
                     permanently_exhausted.add(_stuck_key)
                 _emit("post_merge.fill.iter", data={
                     "iter": iter_n, "rc": rc,
@@ -16056,7 +16057,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
             )
             cur_stubs = set(_scan_unimplemented_functions(project_dir / "src"))
             newly_filled: list[tuple[str, str]] = [
-                k for k in eligible.keys()
+                k for k in eligible
                 if k not in cur_stubs
                 and (k[0].split("/")[-1], k[1]) not in cur_stubs
             ]
@@ -16064,7 +16065,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
                 recently_filled.append(k)
             if len(recently_filled) > recently_filled_max:
                 recently_filled = recently_filled[-recently_filled_max:]
-            for key in eligible.keys():
+            for key in eligible:
                 if key in cur_stubs or (key[0].split("/")[-1], key[1]) in cur_stubs:
                     permanently_exhausted.add(key)
             _log(f"  {tag} post-merge iter {iter_n}: "
@@ -16244,7 +16245,7 @@ def generate_fix_loop(
                 continue
             rel = str(p.relative_to(project_dir))
             lines = text.count("\n") + 1
-            fns = sum(1 for l in text.splitlines() if fn_re.match(l))
+            fns = sum(1 for ln in text.splitlines() if fn_re.match(ln))
             stats[rel] = {"lines": lines, "fns": fns}
         return stats
 
@@ -16282,10 +16283,8 @@ def generate_fix_loop(
         # Graceful-stop check at the top of each iter.
         _graceful_sentinel = Path("/tmp/pipeline_graceful_stop")
         if _graceful_sentinel.exists():
-            try:
+            with suppress(OSError):
                 _graceful_sentinel.unlink()
-            except OSError:
-                pass
             _log("  [fix loop] Graceful stop requested — exiting cleanly.")
             sys.exit(0)
         try:
@@ -16745,7 +16744,7 @@ Output nothing else."""
             changed: list[str] = []
             impl_groups: dict[tuple[str, str], dict] = {}
             free_fns: list[tuple[str, str]] = []
-            for (rel, fn) in frontier.keys():
+            for (rel, fn) in frontier:
                 if rel in existing_test_files:
                     continue
                 if allowed_dir_prefix and not rel.startswith(allowed_dir_prefix):
@@ -16857,10 +16856,8 @@ def _task3_inline_retry(
     src_root = project_dir / "src"
     if src_root.is_dir():
         for p in src_root.rglob("*.rs"):
-            try:
+            with suppress(Exception):
                 snapshot[p] = p.read_bytes()
-            except Exception:
-                pass
 
     def _run_check() -> tuple[bool, str, int]:
         rc, out = _run_cargo(test_command, project_dir, _cargo_env(),
@@ -16945,10 +16942,8 @@ def _task3_inline_retry(
         _log(f"  [task3-retry] result {len(final_failed)} > initial "
              f"{initial_count} — reverting from snapshot.")
         for p, data in snapshot.items():
-            try:
+            with suppress(Exception):
                 p.write_bytes(data)
-            except Exception:
-                pass
         return False, initial_test_output
     _log(f"  [task3-retry] stopped at {len(final_failed)} failing tests "
          f"(initial {initial_count}). Keeping partial progress.")
@@ -17820,13 +17815,13 @@ def _extract_gen_tests_body(block: str) -> str:
             if depth == 0:
                 body = block[start:i]
                 lines = body.splitlines()
-                non_empty = [l for l in lines if l.strip()]
+                non_empty = [ln for ln in lines if ln.strip()]
                 if non_empty:
-                    indent = min(len(l) - len(l.lstrip()) for l in non_empty)
+                    indent = min(len(ln) - len(ln.lstrip()) for ln in non_empty)
                     if indent > 0:
                         body = "\n".join(
-                            (l[indent:] if len(l) >= indent and l[:indent].isspace() else l)
-                            for l in lines
+                            (ln[indent:] if len(ln) >= indent and ln[:indent].isspace() else ln)
+                            for ln in lines
                         )
                 return body.strip() + "\n"
         i += 1
@@ -17947,11 +17942,9 @@ def _write_gen_tests_pass(
         # inspect it offline.
         quarantine = sibling.with_suffix(".rs.broken")
         quarantine.write_text(body, encoding="utf-8")
-        try:
+        with suppress(Exception):
             _log(f"  [gen_tests] REJECTED pass {pass_n} for {src_file.name}: "
                  f"delimiters unbalanced. Quarantined → {quarantine.name}")
-        except Exception:
-            pass
         return sibling  # parent decl unchanged
     sibling.write_text(body, encoding="utf-8")
     decl = _build_gen_tests_decl(sibling.name, pass_n, allow_line,
@@ -18021,10 +18014,8 @@ def _quarantine_broken_gen_tests(project_dir: Path) -> int:
 def _revert_gen_tests_pass(src_file: Path, src_text: str, sibling: Path) -> None:
     """Restore src_file to src_text (no decl) and delete the sibling file."""
     src_file.write_text(src_text, encoding="utf-8")
-    try:
+    with suppress(OSError):
         sibling.unlink()
-    except OSError:
-        pass
 
 
 def _strip_all_gen_tests_artifacts(src_file: Path) -> int:
@@ -18229,10 +18220,7 @@ def _filter_cfg_incompatible_lines(
     active_set = set(active_cfgs)
 
     def _is_incompatible(cfg_expr: str) -> bool:
-        for pred in active_set:
-            if re.search(rf'\bnot\s*\(\s*{re.escape(pred)}\s*\)', cfg_expr):
-                return True
-        return False
+        return any(re.search(rf'\bnot\s*\(\s*{re.escape(pred)}\s*\)', cfg_expr) for pred in active_set)
 
     code_lines = source_text.splitlines()
     n = len(code_lines)
@@ -18568,10 +18556,8 @@ corrected content here
                     _log(f"  [pragma-pass] {rel}: added {added} coverage ignore pragma(s).")
             except Exception as e:
                 _log(f"  [pragma-pass] {rel}: error — {e}. Reverting.")
-                try:
+                with suppress(Exception):
                     abs_path.write_text(source, encoding="utf-8")
-                except Exception:
-                    pass
         else:
             _log(f"  [pragma-pass] {rel}: LLM returned no output — skipping.")
 
@@ -18705,7 +18691,7 @@ def _task0c_retrospective(
     if not fn_bodies.strip():
         return ""
     # Count the distinct function names so we can require all to be classified.
-    _fn_count = sum(1 for l in fn_bodies.splitlines() if re.match(r'\s*(pub\s+)?fn\s+', l))
+    _fn_count = sum(1 for ln in fn_bodies.splitlines() if re.match(r'\s*(pub\s+)?fn\s+', ln))
     _src_snippet = existing_text[:_SRC_SNIP_CAP]
     _block_snippet = old_block[:_SRC_SNIP_CAP // 2] if old_block else "(no previous block)"
     _history_section = (
@@ -18764,7 +18750,7 @@ def _task0c_retrospective(
         f"(d) NEEDS_INTERNALS — requires private state, unsafe vtable dispatch, env vars not set in the parent process, or internal construction not accessible from inline tests\n"
     )
     result = ask(prompt, model=_TASK0C_MODEL, think=None)
-    lines = [l.strip() for l in result.splitlines() if l.strip().startswith("FUNCTION")]
+    lines = [ln.strip() for ln in result.splitlines() if ln.strip().startswith("FUNCTION")]
     return "\n".join(lines) if lines else result[:600].strip()
 
 
@@ -18928,7 +18914,7 @@ def _partition_uncovered_lines(content: str, uncovered: "set[int]", n_groups: in
     n = len(code_lines)
     fn_pattern = re.compile(r'^\s*(?:pub\s+)?(?:async\s+)?fn\s+')
     remaining = set(uncovered)
-    units: "list[set[int]]" = []  # one per function that owns uncovered lines
+    units: list[set[int]] = []  # one per function that owns uncovered lines
 
     i = 0
     while i < n:
@@ -18954,7 +18940,7 @@ def _partition_uncovered_lines(content: str, uncovered: "set[int]", n_groups: in
         return units if units else [set(uncovered)]
 
     # Distribute units largest-first into n_groups balanced buckets.
-    buckets: "list[set[int]]" = [set() for _ in range(min(n_groups, len(units)))]
+    buckets: list[set[int]] = [set() for _ in range(min(n_groups, len(units)))]
     for unit in sorted(units, key=len, reverse=True):
         smallest = min(buckets, key=len)
         smallest |= unit
@@ -19049,7 +19035,7 @@ def restart_from_augmented(root: Path, project_dir: Path) -> None:
             cwd=project_dir, capture_output=True, text=True, check=True,
         ).stdout.strip().splitlines()
     except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"git tag listing failed: {e}")
+        raise RuntimeError(f"git tag listing failed: {e}") from e
     tags = [t for t in tags if t]
     if not tags:
         raise RuntimeError(
@@ -19095,7 +19081,7 @@ def restart_from_augmented(root: Path, project_dir: Path) -> None:
     }
     state["current"] = "restart-from-augmented"
     _write_state(project_dir, state)
-    _log(f"  Cleared iteration entries from pipeline_state.md")
+    _log("  Cleared iteration entries from pipeline_state.md")
     _log(f"  Workspace restored to {restore_tag}; task0a/0b/0c kept, strip + task1+ will re-run.")
 
 
@@ -19129,10 +19115,8 @@ def clean_state(root: Path, project_dir: Path, manifest_path: Path,
     if partials_dir.exists():
         for p in partials_dir.glob("*.txt"):
             p.unlink()
-        try:
+        with suppress(OSError):
             partials_dir.rmdir()
-        except OSError:
-            pass
         _log("  Deleted .task1_partials/")
 
     # Failure log
@@ -19148,10 +19132,8 @@ def clean_state(root: Path, project_dir: Path, manifest_path: Path,
         for p in cache_dir.glob("*.txt"):
             p.unlink()
             deleted += 1
-        try:
+        with suppress(OSError):
             cache_dir.rmdir()
-        except OSError:
-            pass
         _log(f"  Deleted {CHUNK_CACHE_DIR}/ ({deleted} cached chunks)")
 
     # Cluster augmentation sentinels — must be wiped so task0c reruns on --clean
@@ -19410,7 +19392,7 @@ def load_original_structure(project_dir: Path, module_name: str) -> list[str]:
         stem = candidate.stem.replace("-", "_")
         if stem == target:
             content = candidate.read_text()
-            return [l.strip() for l in content.splitlines() if l.strip()]
+            return [ln.strip() for ln in content.splitlines() if ln.strip()]
     return []
 
 
@@ -19543,7 +19525,8 @@ def cmd_best_models(vram_gb: float = 32.0) -> None:
     # Check which are locally installed
     installed = set()
     try:
-        import urllib.request, json as _json
+        import json as _json
+        import urllib.request
         with urllib.request.urlopen("http://localhost:11434/api/tags", timeout=2) as resp:
             data = _json.loads(resp.read())
         installed = {m["name"].split(":")[0] for m in data.get("models", [])}
@@ -19566,7 +19549,7 @@ def cmd_best_models(vram_gb: float = 32.0) -> None:
         print(_legend)
         return
 
-    print(f"\nFetching HuggingFace Hub top models …")
+    print("\nFetching HuggingFace Hub top models …")
     raw = list(list_models(
         pipeline_tag="text-generation",
         sort="likes",
@@ -19609,7 +19592,8 @@ def _ensure_vllm_ready(root: Path) -> None:
     """If BACKEND=vllm, auto-start docker_vllm.sh if the server is not responding,
     then wait until the inference endpoint accepts requests (health passes before
     CUDA graph compilation finishes, so an inference probe is required)."""
-    import urllib.request, urllib.error
+    import urllib.error
+    import urllib.request
 
     vllm_url = os.getenv("VLLM_BASE_URL", "http://localhost:8000/v1")
     port = vllm_url.split(":")[-1].split("/")[0]
@@ -19760,10 +19744,7 @@ def main():
     else:
         # --project: check tmp/ first, then root (backward compat).
         candidate = workspace_dir / args.project
-        if candidate.exists():
-            project_dir = candidate
-        else:
-            project_dir = root / args.project
+        project_dir = candidate if candidate.exists() else root / args.project
         _git_managed = _is_git_repo(project_dir)
 
     genesis_path = project_dir / "genesis.md"
@@ -20407,7 +20388,7 @@ def main():
 
             ok, reason = validate_task1_output(module_req_path, t1_input)
             if ok:
-                _log(f"  TASK 1 output validated OK.")
+                _log("  TASK 1 output validated OK.")
                 t1_valid = True
                 _commit_and_mark(
                     project_dir, f"task1/{module_name}", "done",
@@ -20755,10 +20736,8 @@ This is a Rust procedural macro crate. Strict rules apply:
                                         try:
                                             sibling.rename(sibling.with_suffix(".rs.broken"))
                                         except Exception:
-                                            try:
+                                            with suppress(Exception):
                                                 sibling.unlink()
-                                            except Exception:
-                                                pass
                                         quarantined += 1
                                     if quarantined:
                                         _log(f"  [reattach] quarantined {quarantined} "
@@ -20821,7 +20800,7 @@ This is a Rust procedural macro crate. Strict rules apply:
 
                     elif t3_status == "no_files":
                         # Module has no test files — lock on build success.
-                        _log(f"  Module has no test files — locking on build success.")
+                        _log("  Module has no test files — locking on build success.")
                         _commit_and_mark(
                             project_dir, f"task2-4/{module_name}", "done",
                             commit_message=f"pipeline: build passed (no tests) — {module_name} iter {module_iter}",
@@ -20834,7 +20813,7 @@ This is a Rust procedural macro crate. Strict rules apply:
                             locked_modules.add(module_name)
                             git_commit(project_dir, f"pipeline: locked (no tests) — {module_name}")
                         else:
-                            _log(f"\nSUCCESS: build passed with no module tests.")
+                            _log("\nSUCCESS: build passed with no module tests.")
                             sys.exit(0)
                         break
 
@@ -20886,7 +20865,7 @@ This is a Rust procedural macro crate. Strict rules apply:
                                     lock_module(project_dir, module_name, module_dir, module_manifest)
                                     locked_modules.add(module_name)
                                 else:
-                                    _log(f"\nSUCCESS: all tests passed after fix loop.")
+                                    _log("\nSUCCESS: all tests passed after fix loop.")
                                     sys.exit(0)
                                 break
 

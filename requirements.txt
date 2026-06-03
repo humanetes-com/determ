@@ -1,6 +1,6 @@
 anthropic
 openai
 python-dotenv
-mypy
+mypy==2.1.0
 asciinema
-ruff
+ruff==0.15.15

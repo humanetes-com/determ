@@ -34,7 +34,7 @@ class FieldRecord:
     is_pub: bool = False
 
     @classmethod
-    def from_dict(cls, d: dict) -> "FieldRecord":
+    def from_dict(cls, d: dict) -> FieldRecord:
         return cls(name=d.get("name", ""), ty=d.get("ty", ""), is_pub=bool(d.get("is_pub", False)))
 
     def to_dict(self) -> dict:
@@ -49,7 +49,7 @@ class MethodRecord:
     is_pub: bool = False
 
     @classmethod
-    def from_dict(cls, d: dict) -> "MethodRecord":
+    def from_dict(cls, d: dict) -> MethodRecord:
         return cls(name=d.get("name", ""), sig=d.get("sig", ""), is_pub=bool(d.get("is_pub", False)))
 
     def to_dict(self) -> dict:
@@ -70,7 +70,7 @@ class TypeRecord:
     is_pub: bool = False
 
     @classmethod
-    def from_dict(cls, d: dict) -> "TypeRecord":
+    def from_dict(cls, d: dict) -> TypeRecord:
         return cls(
             file=d.get("file", ""),
             kind=d.get("kind", ""),
@@ -113,7 +113,7 @@ class FnRecord:
     has_unimplemented_body: bool = False
 
     @classmethod
-    def from_dict(cls, d: dict) -> "FnRecord":
+    def from_dict(cls, d: dict) -> FnRecord:
         return cls(
             file=d.get("file", ""),
             fn_name=d.get("fn_name", ""),
@@ -153,7 +153,7 @@ class ModRecord:
     declared_in: str = ""
 
     @classmethod
-    def from_dict(cls, d: dict) -> "ModRecord":
+    def from_dict(cls, d: dict) -> ModRecord:
         return cls(
             name=d.get("name", ""),
             file=d.get("file", ""),
@@ -183,7 +183,7 @@ class DispatchFamily:
     member_files: tuple[str, ...] = ()
 
     @classmethod
-    def from_dict(cls, d: dict) -> "DispatchFamily":
+    def from_dict(cls, d: dict) -> DispatchFamily:
         return cls(
             method=d.get("method", ""),
             traits=_strs(d.get("traits")),
@@ -228,7 +228,7 @@ class Diagnostic:
     rendered: str = ""       # rustc's own rendered text (may carry ANSI)
 
     @classmethod
-    def from_dict(cls, d: dict) -> "Diagnostic":
+    def from_dict(cls, d: dict) -> Diagnostic:
         return cls(
             code=d.get("code", ""),
             file=d.get("file", ""),
@@ -263,7 +263,7 @@ class BuildCluster:
     active_cfg: list                    # cfg predicates active (on top of default)
     prompt_nightly_rule: str            # nightly boundary sentence(s) for generation prompts
     is_default: bool = True             # True for the baseline stable cluster
-    gated_files: set = None             # source files (rel paths) gated behind excluded_cfg — skip augmentation
+    gated_files: set | None = None      # source files (rel paths) gated behind excluded_cfg — skip augmentation
     requires_nightly: bool = False      # cluster needs nightly toolchain (set at runtime when E0554 detected)
 
     def _expand(self, preds: list) -> list[str]:
