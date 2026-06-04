@@ -87,6 +87,7 @@ def task3(project_dir, test_command, iteration, output_dir, genesis_path, deps: 
         any_incomplete = False
         agg_pass = agg_fail = agg_ignored = agg_expected = 0
         primary_test_output = ""
+        primary_cluster = None
 
         for cluster in sorted(clusters, key=lambda c: c.name):
             cmd_parts = ["cargo"]
@@ -144,10 +145,12 @@ def task3(project_dir, test_command, iteration, output_dir, genesis_path, deps: 
             if status != "pass":
                 any_failed = any_failed or status == "fail"
                 any_incomplete = any_incomplete or status == "incomplete"
-                # Keep this cluster's output as primary for the inline retry
-                # — it has the actionable signal.
+                # Keep this cluster's output AND identity as primary for the inline
+                # retry — it has the actionable signal, and the retry must rebuild
+                # under THIS cluster's toolchain/env to reproduce its failure (R9).
                 if not primary_test_output:
                     primary_test_output = output
+                    primary_cluster = cluster
 
         aggregated_output = "".join(aggregated_output_chunks)
         genesis = deps.read(genesis_path)
@@ -195,6 +198,7 @@ def task3(project_dir, test_command, iteration, output_dir, genesis_path, deps: 
                 test_command="cargo test --no-fail-fast",
                 iteration=iteration,
                 initial_test_output=primary_test_output,
+                cluster=primary_cluster,
             )
             if retry_passed or retry_output != primary_test_output:
                 # Re-run all clusters to verify the retry's fixes hold

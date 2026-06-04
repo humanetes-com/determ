@@ -381,7 +381,11 @@ build failure is a real signal, then route it, then stop the retry trusting it).
 Validation: R9.1/R9.2 are ●●● — only a live pipeline run exercises the build-failure → fix → re-test path
 (check.sh cannot). R9.3 has an offline test (`test_task0b_iter_source_rs_prunes_scratch_dirs`). After the fix
 the same crate run must reach a stable TASK 3 verdict (real pass/fail count, no `INCOMPLETE`→`no_tests`→`build`
-oscillation) and stop regenerating from scratch each iteration. Known residual (not in R9 scope): inline retry
-uses the global `_cargo_env()` (not per-cluster), so a *cluster-cfg-specific* build error won't reproduce under
-the default env → BUILD mode bails (safe: returns unchanged input → TASK 4) rather than fixing it. Make the
-retry cluster-aware in a follow-up.
+oscillation) and stop regenerating from scratch each iteration.
+
+R9 residual (SHIPPED, 🔄 ●●● await live): inline retry is now **cluster-aware** — task3 threads the primary
+failing `BuildCluster` into `_task3_inline_retry`, which rebuilds the cluster command (`cargo +{toolchain} test
+--no-fail-fast`) and overlays `cluster.env_extra` over `_cargo_env()` (mirrors task3's own per-cluster
+invocation) for every run_check / compile-check / fix, instead of the stale global `_cargo_env()`. A
+cluster-cfg-specific compile error (e.g. nightly-only) now reproduces under the right env → BUILD mode can
+attribute + fix it. Prompts also carry the real cluster name (`_cluster_label`) instead of the literal `"task3"`.

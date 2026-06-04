@@ -17107,6 +17107,7 @@ def _task3_inline_retry(
     test_command: str,
     iteration,
     initial_test_output: str,
+    cluster: "BuildCluster | None" = None,
 ) -> tuple[bool, str]:
     """Improvement-driven retry over a failed task3. Returns (passed, final_output).
     If the retry cannot beat the initial failure floor, restores the source
@@ -17114,6 +17115,27 @@ def _task3_inline_retry(
     """
     if os.getenv("TASK3_INLINE_RETRY", "1") == "0":
         return False, initial_test_output
+
+    # R9 residual: be CLUSTER-AWARE. task3 runs each cluster with its own toolchain
+    # + env_extra (RUSTFLAGS/cfg); the failing cluster is threaded in so the retry
+    # reproduces THAT cluster's build under THAT env — the global `_cargo_env()` would
+    # use whatever `_current_cluster` is stale-set to, so a cluster-cfg-specific compile
+    # error (e.g. nightly-only) would not reproduce and BUILD mode would silently bail.
+    _cluster_label = cluster.name if cluster is not None else "task3"
+    if cluster is not None:
+        _parts = ["cargo"]
+        if cluster.toolchain:
+            _parts.append(f"+{cluster.toolchain}")
+        _parts += ["test", "--no-fail-fast"]
+        test_command = shlex.join(_parts)
+
+    def _env() -> dict:
+        # Mirror task3's per-cluster invocation: base cargo env, then the cluster's
+        # env_extra overlaid (its RUSTFLAGS/cfg win over the stale global cluster's).
+        e = _cargo_env()
+        if cluster is not None and cluster.env_extra:
+            e.update(cluster.env_extra)
+        return e
 
     max_stalls = int(os.getenv("TASK3_INLINE_MAX_STALLS", "3"))
     hard_cap = int(os.getenv("TASK3_INLINE_HARD_CAP", "10"))
@@ -17129,7 +17151,7 @@ def _task3_inline_retry(
     build_mode = not failed
     if build_mode:
         _, _, _init_diags = _run_cargo_check_diag(
-            compile_cmd, project_dir, _cargo_env(), timeout=TEST_TIMEOUT)
+            compile_cmd, project_dir, _env(), timeout=TEST_TIMEOUT)
         if not _init_diags:
             # No FAILED tests AND no reproducible compile errors under this env
             # (e.g. the failure is cluster-cfg-specific) — nothing to act on here.
@@ -17174,7 +17196,7 @@ def _task3_inline_retry(
             prompt = _build_per_fn_fix_prompt(
                 file_text=cur_text, fn_name=fn, sig_text=sig_t,
                 test_blocks=[], module_name=project_dir.name,
-                cluster_name="task3", file_rel=rel_f,
+                cluster_name=_cluster_label, file_rel=rel_f,
                 prev_body=cur_body, error_excerpt=err_excerpt,
             )
             new_body, _ = _ask_per_fn_body(prompt, fn, [], sig_text=sig_t)
@@ -17187,14 +17209,14 @@ def _task3_inline_retry(
         return fixed_count
 
     def _run_check_test() -> tuple[bool, str, int]:
-        rc, out = _run_cargo(test_command, project_dir, _cargo_env(),
+        rc, out = _run_cargo(test_command, project_dir, _env(),
                              timeout=TEST_TIMEOUT)
         f = _parse_failed_tests(out)
         return rc == 0, out, len(f)
 
     def _run_check_build() -> tuple[bool, str, int]:
         rc, rendered, diags = _run_cargo_check_diag(
-            compile_cmd, project_dir, _cargo_env(), timeout=TEST_TIMEOUT)
+            compile_cmd, project_dir, _env(), timeout=TEST_TIMEOUT)
         # ok = the tree COMPILES; metric = remaining compile errors (lower better).
         return rc == 0, _strip_ansi(rendered), len(diags)
 
@@ -17216,7 +17238,7 @@ def _task3_inline_retry(
             output, project_dir,
             recently_filled=[],  # task3 has no per-cluster fill history
             test_reverse_map=test_reverse_map,
-            cluster_name="task3",
+            cluster_name=_cluster_label,
         )
         refs: list[tuple[str, str]] = list(frontier.keys())
         if not refs:
@@ -17231,7 +17253,7 @@ def _task3_inline_retry(
 
     def _do_fix_build(output: str, history: list[dict]) -> dict:
         _, _, diags = _run_cargo_check_diag(
-            compile_cmd, project_dir, _cargo_env(), timeout=TEST_TIMEOUT)
+            compile_cmd, project_dir, _env(), timeout=TEST_TIMEOUT)
         if not diags:
             return {"abort": True, "reason": "no_compile_errors"}
         frontier = _frontier_from_diags(diags, project_dir)
@@ -17259,7 +17281,7 @@ def _task3_inline_retry(
         # (changed output) only on strict progress so task3's re-verification
         # terminates — fewer errors each round, or back to the unchanged input.
         _, _, fin_diags = _run_cargo_check_diag(
-            compile_cmd, project_dir, _cargo_env(), timeout=TEST_TIMEOUT)
+            compile_cmd, project_dir, _env(), timeout=TEST_TIMEOUT)
         final_err = len(fin_diags)
         if snapshot and final_err > initial_count:
             _log(f"  [task3-retry] build-fix worsened compile ({final_err} > "
