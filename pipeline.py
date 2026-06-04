@@ -3095,7 +3095,8 @@ def _count_active_tests_for_cluster(
 
 
 def validate_task4_output(genesis_before: str, genesis_after: str,
-                          test_output: str) -> tuple[bool, str]:
+                          test_output: str,
+                          failure_type: str = "test") -> tuple[bool, str]:
     """
     Anti-corruption check on genesis.md update.
     Returns (ok, reason). A stall or duplicate is flagged but not fatal.
@@ -3108,11 +3109,17 @@ def validate_task4_output(genesis_before: str, genesis_after: str,
 
     new_text = genesis_after[len(genesis_before):]
 
-    # Verify new content references at least one identifier from the test output.
-    test_idents = _extract_identifiers(test_output)
-    new_idents = _extract_identifiers(new_text)
-    if test_idents and not (test_idents & new_idents):
-        return False, "genesis update contains no identifiers from the failing test output"
+    # R9.5: the identifier-overlap check is a TEST-failure heuristic. For BUILD
+    # failures test_output is compiler errors (project-specific idents) but the
+    # build prompt MANDATES general, identifier-free structural rules — so a correct
+    # update has empty intersection. Applying it there contradicts the prompt and
+    # falsely stalls legitimate updates. Skip it for build; keep stall/shrank/dedup.
+    if failure_type != "build":
+        # Verify new content references at least one identifier from the test output.
+        test_idents = _extract_identifiers(test_output)
+        new_idents = _extract_identifiers(new_text)
+        if test_idents and not (test_idents & new_idents):
+            return False, "genesis update contains no identifiers from the failing test output"
 
     # Deduplication: flag if any substantial new paragraph already exists verbatim.
     new_paragraphs = [p.strip() for p in new_text.split("\n\n") if len(p.strip()) > 100]
@@ -21310,7 +21317,7 @@ This is a Rust procedural macro crate. Strict rules apply:
             genesis_after = read(genesis_path)
 
             # Anti-corruption: detect genesis stall (TASK 4 produced no update).
-            t4_valid, t4_reason = validate_task4_output(genesis_before, genesis_after, test_output)
+            t4_valid, t4_reason = validate_task4_output(genesis_before, genesis_after, test_output, failure_type)
             if not t4_valid:
                 _log(f"  TASK 4 anti-corruption: {t4_reason}")
                 t4_summary = f"genesis_stall: {t4_reason}"

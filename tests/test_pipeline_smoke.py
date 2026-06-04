@@ -2604,6 +2604,42 @@ def test_task0b_iter_source_rs_prunes_scratch_dirs() -> None:
         print(f"  OK  _iter_source_rs pruned scratch/build dirs ({len(got)} real file(s))")
 
 
+def test_validate_task4_output_build_skips_identifier_check() -> None:
+    """R9.5: the identifier-overlap anti-corruption check is a TEST-failure
+    heuristic and must NOT apply to BUILD failures — the build prompt mandates
+    general, identifier-free structural rules, so a correct build update shares
+    no identifier with the (identifier-heavy) compiler output."""
+    import pipeline
+
+    before = "# Methodology\n\nStep 1: read the tests.\n"
+    # A general, identifier-free structural rule (what the build prompt asks for).
+    general_update = (
+        before
+        + "\nStep 2: for any module system, identify and require every declared "
+        "entry-point file and its module structure before generating code.\n"
+    )
+    # Compiler output full of project-specific identifiers — zero overlap with the
+    # general rule above.
+    compiler_output = "error[E0658]: use of unstable library feature; request_ref Backtrace StdError"
+
+    # TEST mode: empty intersection → rejected (existing behaviour preserved).
+    ok_test, _ = pipeline.validate_task4_output(
+        before, general_update, compiler_output, failure_type="test")
+    assert ok_test is False
+
+    # BUILD mode: identifier check skipped → accepted.
+    ok_build, reason = pipeline.validate_task4_output(
+        before, general_update, compiler_output, failure_type="build")
+    assert ok_build is True, reason
+
+    # BUILD mode still catches real corruption: no-change stalls, shrink rejected.
+    assert pipeline.validate_task4_output(before, before, compiler_output,
+                                          failure_type="build")[0] is False
+    assert pipeline.validate_task4_output(before, before[:10], compiler_output,
+                                          failure_type="build")[0] is False
+    print("  OK  validate_task4_output build-mode skips identifier check (R9.5)")
+
+
 # ─── Driver ─────────────────────────────────────────────────────────────────
 
 def main() -> int:

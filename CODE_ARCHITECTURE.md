@@ -389,3 +389,16 @@ failing `BuildCluster` into `_task3_inline_retry`, which rebuilds the cluster co
 invocation) for every run_check / compile-check / fix, instead of the stale global `_cargo_env()`. A
 cluster-cfg-specific compile error (e.g. nightly-only) now reproduces under the right env → BUILD mode can
 attribute + fix it. Prompts also carry the real cluster name (`_cluster_label`) instead of the literal `"task3"`.
+
+#### R9.5 — TASK 4 anti-corruption falsely stalls build-failure genesis updates  ✅ SHIPPED + test (full propagation ●● awaits live run)
+Correction to the earlier framing: TASK 4 is NOT missing a build path — `task4.py:196-234` (`_is_build`) already
+feeds the compiler output and asks for general structural-methodology rules. The bug is the **validator**.
+
+| aspect | finding |
+|---|---|
+| symptom | legitimate build-failure genesis updates flagged `genesis_stall` → coverage_strategy.md NOT regenerated → lesson never reaches TASK 0c/1 prompts → next iter regenerates identically → spin |
+| root cause | `validate_task4_output` (pipeline.py:3097) is **failure-type-agnostic**. Line 3112-3115 requires the new genesis text to share an identifier (`_extract_identifiers`) with `test_output`. For a build failure `test_output`=compiler errors (project-specific idents: `request_ref`, `Backtrace`, type names), but the build PROMPT forbids referencing specifics ("not 'always generate src/lib.rs' but 'for any module system…'"; "Never mention specific tests, files"). A correct general update → empty intersection → false `genesis_stall`. The check is a TEST-failure heuristic contradicting the build prompt. |
+| consequence of stall | does NOT revert genesis (model already wrote it); it ONLY skips the coverage_strategy regen (21321-21329) + records `genesis_stall` in the failure log. So the lesson is silently dropped. |
+| fix (proposed) | thread `failure_type` into `validate_task4_output`; for `failure_type=="build"` **drop the identifier-intersection requirement** (incompatible with the build prompt's general-rules mandate). KEEP stall (no-change) + shrank (removed-content) + dedup (verbatim-paragraph) checks — those are real corruption signals regardless of type. Single call site (pipeline.py:21313). |
+| why not a positive build-signal | requiring structural keywords (module/layout/entry-point/compile…) would just reintroduce the same false-positive class against a heavily-constrained prompt. For build failures, stall/shrank/dedup are the honest anti-corruption set. |
+| validation | ●● — a unit test can drive `validate_task4_output(..., failure_type="build")` with a general (identifier-free) update and assert it's accepted; full propagation (coverage_strategy regen → fewer build spins) wants a live run. |
