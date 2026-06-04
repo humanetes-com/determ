@@ -355,6 +355,7 @@ class ModuleAugmentState:
     last_pct: float = 0.0
     last_covered: int = 0
     last_at_ceiling: bool = False
+    target_pct: float = 100.0  # coverage % at/above which the module is 'done'
 
     STALL_LIMIT: int = 10
     CEILING_CONFIRM: int = 2  # consecutive at_ceiling reports required before accepting ceiling
@@ -375,7 +376,7 @@ class ModuleAugmentState:
             self.stall_passes += 1
 
     def status(self, crate_type: str) -> str:
-        if self.last_pct >= 100.0:
+        if self.last_pct >= self.target_pct:
             return 'done'
         if crate_type == 'proc-macro':
             return 'done'

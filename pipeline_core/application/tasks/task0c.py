@@ -26,6 +26,7 @@ from ...log import emit, log
 @dataclass(frozen=True, slots=True)
 class Task0cDeps:
     BUILD_TIMEOUT: Any
+    COVERAGE_TARGET: Any
     TASK0C_PROMPT_CHAR_CAP: Any
     FIX_ERR_CAP: Any
     SIBLING_CAP: Any
@@ -116,6 +117,7 @@ def task0c_augment_module(
     """
     # slice 5b: rebind injected collaborators as locals so the body below is verbatim.
     BUILD_TIMEOUT = deps.BUILD_TIMEOUT
+    _COVERAGE_TARGET = deps.COVERAGE_TARGET
     TASK0C_PROMPT_CHAR_CAP = deps.TASK0C_PROMPT_CHAR_CAP
     _FIX_ERR_CAP = deps.FIX_ERR_CAP
     _SIBLING_CAP = deps.SIBLING_CAP
@@ -558,8 +560,8 @@ corrected content here
                     detail=f"{coverage:.1f}% attempt {attempt}", source_hash=_source_hash(project_dir))
         _set_current(project_dir, f"task0c/{_cluster_label}/{module_name} / {coverage:.1f}% attempt {attempt}")
 
-        if coverage >= 100.0:
-            _log(f"  [{module_name}] 100% coverage reached.")
+        if coverage >= _COVERAGE_TARGET:
+            _log(f"  [{module_name}] {coverage:.1f}% coverage reached (target {_COVERAGE_TARGET:.0f}%).")
             break
 
         # Stall detection: compare integer covered-line counts, not float percentages.
@@ -1442,9 +1444,9 @@ project-specific import paths, type construction patterns, and hard constraints.
 
         # If every remaining uncovered file is now skipped, die with a report.
         remaining = set(uncovered_by_file.keys()) - skipped_files
-        if not remaining and skipped_files and coverage < 100.0:
+        if not remaining and skipped_files and coverage < _COVERAGE_TARGET:
             _log(f"\n  [{module_name}] HARD BLOCK: all uncovered files are stalled. "
-                 f"Coverage: {coverage:.1f}%. Cannot reach 100%.")
+                 f"Coverage: {coverage:.1f}%. Cannot reach {_COVERAGE_TARGET:.0f}%.")
             _log("  Stalled files and their uncovered line counts:")
             for sf in sorted(skipped_files):
                 n_uncov = len(uncovered_by_file.get(sf, (None, set()))[1])

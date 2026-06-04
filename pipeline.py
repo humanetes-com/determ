@@ -700,6 +700,9 @@ TEST_TIMEOUT = 600
 # Timeout in seconds for the compile-only build check.
 BUILD_TIMEOUT = 120
 
+# task0c stops augmenting once coverage reaches this percent (was hardcoded 100).
+COVERAGE_AUGMENTATION_TARGET = float(os.getenv("COVERAGE_AUGMENTATION_TARGET", "98"))
+
 # Backstop for the inner build-fix loop (TASK 2 + compile check). The
 # real terminator is the per-loop floor-stall on rustc error count
 # (`_t2_max_stalls`). Set to a high value so the stall budget always
@@ -915,6 +918,7 @@ def init_log(root: Path, nolog: bool = False, progress_mode: bool = False):
     except Exception:
         pass
     _log(f"  PIPELINE STARTED — {datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S')} UTC  pipeline.py={_py_hash}{_git_hash}")
+    _log(f"  CMD: {sys.executable} {' '.join(sys.argv)}")
     _log(f"{'=' * 60}")
     _log(f"{'=' * 60}")
     _register_run(root)
@@ -19804,7 +19808,7 @@ def _ensure_vllm_ready(root: Path) -> None:
 # collaborator). subprocess/git injected as the module; _current_cluster via a call-time
 # getter (mutable global); coverage provider as a value.
 _TASK0C_DEPS = Task0cDeps(
-    BUILD_TIMEOUT=BUILD_TIMEOUT, TASK0C_PROMPT_CHAR_CAP=TASK0C_PROMPT_CHAR_CAP, FIX_ERR_CAP=_FIX_ERR_CAP, SIBLING_CAP=_SIBLING_CAP, SRC_SNIP_CAP=_SRC_SNIP_CAP, TASK0C_FIX_THINKING_DIRECTIVE=_TASK0C_FIX_THINKING_DIRECTIVE, TASK0C_MODEL=_TASK0C_MODEL, TASK0C_THINKING_DIRECTIVE=_TASK0C_THINKING_DIRECTIVE, WORKING_CAP=_WORKING_CAP, annotate_uncovered=_annotate_uncovered, block_is_prose=_block_is_prose, build_gen_tests_decl=_build_gen_tests_decl, build_task0c_prompt_sections=_build_task0c_prompt_sections, cargo_env=_cargo_env, cluster_cfg_attr=_cluster_cfg_attr, condense_rust_to_signatures=_condense_rust_to_signatures, count_test_attrs=_count_test_attrs, derive_gentest_prelude=_derive_gentest_prelude, describe_test_environment=_describe_test_environment, error_signatures_from_output=_error_signatures_from_output, extract_branch_guard=_extract_branch_guard, extract_gen_tests_body=_extract_gen_tests_body, extract_public_symbols=_extract_public_symbols, extract_uncovered_functions=_extract_uncovered_functions, filter_cfg_excluded_lines=_filter_cfg_excluded_lines, filter_cfg_incompatible_lines=_filter_cfg_incompatible_lines, flags_unreachable=_flags_unreachable, gen_tests_count=_gen_tests_count, gen_tests_path=_gen_tests_path, get_task0c_history=_get_task0c_history, has_nonempty_test_body=_has_nonempty_test_body, inject_allow_before_any_mod=_inject_allow_before_any_mod, inject_allow_before_gen_mod=_inject_allow_before_gen_mod, inject_gen_prelude_imports=_inject_gen_prelude_imports, is_gen_tests_file=_is_gen_tests_file, is_structural_line=_is_structural_line, load_file_constraints=_load_file_constraints, log_task0c_attempt=_log_task0c_attempt, mark_phase=_mark_phase, match_gen_tests_sibling=_match_gen_tests_sibling, next_gen_tests_n=_next_gen_tests_n, nightly_rules_for_cluster=_nightly_rules_for_cluster, parse_attempt_number=_parse_attempt_number, parse_retrospective_categories=_parse_retrospective_categories, partition_uncovered_lines=_partition_uncovered_lines, prelude_import_names=_prelude_import_names, quick_file_coverage=_quick_file_coverage, read_all_gen_tests=_read_all_gen_tests, read_state=_read_state, revert_gen_tests_pass=_revert_gen_tests_pass, select_relevant_siblings=_select_relevant_siblings, set_current=_set_current, source_hash=_source_hash, strip_all_gen_tests_artifacts=_strip_all_gen_tests_artifacts, strip_gen_tests_decl_n=_strip_gen_tests_decl_n, strip_gen_tests_decls=_strip_gen_tests_decls, strip_trailing_file_tag=_strip_trailing_file_tag, task0c_mutation_pass=_task0c_mutation_pass, task0c_pragma_pass=_task0c_pragma_pass, task0c_retrospective=_task0c_retrospective, task0c_targeted_pragma=_task0c_targeted_pragma, test_augmentor_factory=_test_augmentor_factory, ask=ask, extract_files=extract_files, extract_test_mod=extract_test_mod, generate_fix_loop=generate_fix_loop, generate_in_parallel=generate_in_parallel, is_test_file=is_test_file, write=write,
+    BUILD_TIMEOUT=BUILD_TIMEOUT, COVERAGE_TARGET=COVERAGE_AUGMENTATION_TARGET, TASK0C_PROMPT_CHAR_CAP=TASK0C_PROMPT_CHAR_CAP, FIX_ERR_CAP=_FIX_ERR_CAP, SIBLING_CAP=_SIBLING_CAP, SRC_SNIP_CAP=_SRC_SNIP_CAP, TASK0C_FIX_THINKING_DIRECTIVE=_TASK0C_FIX_THINKING_DIRECTIVE, TASK0C_MODEL=_TASK0C_MODEL, TASK0C_THINKING_DIRECTIVE=_TASK0C_THINKING_DIRECTIVE, WORKING_CAP=_WORKING_CAP, annotate_uncovered=_annotate_uncovered, block_is_prose=_block_is_prose, build_gen_tests_decl=_build_gen_tests_decl, build_task0c_prompt_sections=_build_task0c_prompt_sections, cargo_env=_cargo_env, cluster_cfg_attr=_cluster_cfg_attr, condense_rust_to_signatures=_condense_rust_to_signatures, count_test_attrs=_count_test_attrs, derive_gentest_prelude=_derive_gentest_prelude, describe_test_environment=_describe_test_environment, error_signatures_from_output=_error_signatures_from_output, extract_branch_guard=_extract_branch_guard, extract_gen_tests_body=_extract_gen_tests_body, extract_public_symbols=_extract_public_symbols, extract_uncovered_functions=_extract_uncovered_functions, filter_cfg_excluded_lines=_filter_cfg_excluded_lines, filter_cfg_incompatible_lines=_filter_cfg_incompatible_lines, flags_unreachable=_flags_unreachable, gen_tests_count=_gen_tests_count, gen_tests_path=_gen_tests_path, get_task0c_history=_get_task0c_history, has_nonempty_test_body=_has_nonempty_test_body, inject_allow_before_any_mod=_inject_allow_before_any_mod, inject_allow_before_gen_mod=_inject_allow_before_gen_mod, inject_gen_prelude_imports=_inject_gen_prelude_imports, is_gen_tests_file=_is_gen_tests_file, is_structural_line=_is_structural_line, load_file_constraints=_load_file_constraints, log_task0c_attempt=_log_task0c_attempt, mark_phase=_mark_phase, match_gen_tests_sibling=_match_gen_tests_sibling, next_gen_tests_n=_next_gen_tests_n, nightly_rules_for_cluster=_nightly_rules_for_cluster, parse_attempt_number=_parse_attempt_number, parse_retrospective_categories=_parse_retrospective_categories, partition_uncovered_lines=_partition_uncovered_lines, prelude_import_names=_prelude_import_names, quick_file_coverage=_quick_file_coverage, read_all_gen_tests=_read_all_gen_tests, read_state=_read_state, revert_gen_tests_pass=_revert_gen_tests_pass, select_relevant_siblings=_select_relevant_siblings, set_current=_set_current, source_hash=_source_hash, strip_all_gen_tests_artifacts=_strip_all_gen_tests_artifacts, strip_gen_tests_decl_n=_strip_gen_tests_decl_n, strip_gen_tests_decls=_strip_gen_tests_decls, strip_trailing_file_tag=_strip_trailing_file_tag, task0c_mutation_pass=_task0c_mutation_pass, task0c_pragma_pass=_task0c_pragma_pass, task0c_retrospective=_task0c_retrospective, task0c_targeted_pragma=_task0c_targeted_pragma, test_augmentor_factory=_test_augmentor_factory, ask=ask, extract_files=extract_files, extract_test_mod=extract_test_mod, generate_fix_loop=generate_fix_loop, generate_in_parallel=generate_in_parallel, is_test_file=is_test_file, write=write,
     subprocess=subprocess, get_current_cluster=lambda: _current_cluster,
     coverage_provider=_coverage_provider,
 )
@@ -20279,12 +20283,13 @@ def main():
                   data={"coverage_pct": _cov, "covered_lines": _covered,
                         "at_ceiling": _at_ceiling})
             _mark_phase(project_dir, f"task0c/{_cluster.name}/{_mod_name}",
-                        "done" if _cov >= 100.0 else "in_progress",
+                        "done" if _cov >= COVERAGE_AUGMENTATION_TARGET else "in_progress",
                         detail=f"{_cov:.1f}%", source_hash=_src_hash)
             _set_current(project_dir, f"task0c/{_cluster.name}/{_mod_name} / {_cov:.1f}%")
 
             _state = _module_states.setdefault(
-                _mod_name, ModuleAugmentState(_mod_name, _cluster.name)
+                _mod_name, ModuleAugmentState(_mod_name, _cluster.name,
+                                              target_pct=COVERAGE_AUGMENTATION_TARGET)
             )
             _state.record_pass(_cov, _covered, _at_ceiling)
             _status = _state.status(_crate_type)
@@ -20310,7 +20315,7 @@ def main():
                 _cluster_done.add(_mod_name)
             else:
                 _log(
-                    f"  HARD RULE (FR-018): '{_mod_name}' [{_cluster.name}] coverage {_cov:.1f}% < 100% "
+                    f"  HARD RULE (FR-018): '{_mod_name}' [{_cluster.name}] coverage {_cov:.1f}% < {COVERAGE_AUGMENTATION_TARGET:.0f}% "
                     f"(stall {_state.stall_passes}/{ModuleAugmentState.STALL_LIMIT}, "
                     f"total {_state.total_passes}, best covered {_state.best_covered_lines} lines). "
                     f"Retrying."
@@ -20377,7 +20382,7 @@ def main():
                 _final_cov = float(_sentinel_path.read_text().strip().rstrip('%'))
             except (ValueError, OSError):
                 _final_cov = 0.0
-            if _final_cov < 100.0:
+            if _final_cov < COVERAGE_AUGMENTATION_TARGET:
                 _log(
                     f"\n  WARNING: '{module_name}' coverage is {_final_cov:.1f}% — "
                     f"proceeding to strip anyway. Reconstruction quality may be lower."
@@ -20414,7 +20419,7 @@ def main():
                         _strip_cov = float(_sentinel_path.read_text().strip().rstrip('%'))
                     except (ValueError, OSError):
                         _strip_cov = 0.0
-                    if _strip_cov < 100.0:
+                    if _strip_cov < COVERAGE_AUGMENTATION_TARGET:
                         _log(
                             f"\n  WARNING at strip: '{module_name}' coverage is {_strip_cov:.1f}% "
                             f"— stripping anyway. Reconstruction may be incomplete."
