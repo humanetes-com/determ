@@ -643,6 +643,16 @@ corrected content here
                     and Path(abs_path_str).name != "build.rs" \
                     and rel not in _gated:
                 uncovered_by_file[rel] = (fdata.get("content", ""), lines_uncov)
+                # Baseline-floor seed: the file's covered-line count from the
+                # start-of-attempt full measurement. The quick-cov accept gate
+                # (below) reverts any block whose quick-cov drops at/below this,
+                # so a DESTRUCTIVE first block (e.g. a test that aborts the test
+                # binary and wipes real coverage — fmt.rs 84→40) is caught instead
+                # of sailing through on a None _prev_qcov. Without this seed the
+                # gate only guards the 2nd+ block against the 1st, never the 1st
+                # against baseline, letting a net-negative block lower total
+                # coverage and spin the outer attempt loop.
+                file_last_qcov[rel] = fdata.get("covered", 0)
 
         if not uncovered_by_file:
             _log(f"  [{module_name}] No uncovered lines in module source files.")
