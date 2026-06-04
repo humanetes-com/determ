@@ -20748,10 +20748,11 @@ This is a Rust procedural macro crate. Strict rules apply:
                     # FR-038: source gen_tests PER-CLUSTER so a test's content and
                     # its cfg gate never separate. A gen_test generated under one
                     # cluster (e.g. nightly's `request_ref`) must be gated to THAT
-                    # cluster and excluded from others. When clusters share an
-                    # identical test, emit it once ungated; when they diverge, emit
-                    # one gated sibling per cluster with a cluster-unique name (so
-                    # neither the file content nor the decl collapses in the merge).
+                    # cluster and excluded from others. Emit ONE ungated sibling only
+                    # when the identical test is present in EVERY cluster; otherwise
+                    # emit one gated sibling per present cluster with a cluster-unique
+                    # name (so neither the file content nor the decl collapses in the
+                    # merge, and a single-cluster test stays fenced to its cluster).
                     _filled_root = project_dir / ".skeleton-filled"
                     _per_cluster_filled = [
                         c for c in _clusters
@@ -20777,12 +20778,17 @@ This is a Rust procedural macro crate. Strict rules apply:
                                     except OSError:
                                         continue
                         _appends: dict[str, list[str]] = {}
+                        _all_cluster_names = {c.name for c in _clusters}
                         for (_rel, _n), _bodies in sorted(_gt.items()):
                             _tgt = project_dir / _rel
                             if not _tgt.exists():
                                 continue
-                            if len(set(_bodies.values())) == 1:
-                                # identical across clusters → one ungated sibling
+                            if (len(set(_bodies.values())) == 1
+                                    and set(_bodies) == _all_cluster_names):
+                                # present in EVERY cluster AND identical → safe ungated.
+                                # A body found in only a subset (e.g. nightly-only
+                                # `request_ref`) must NOT land here — it would compile
+                                # under the other clusters' test build and break them.
                                 _body = next(iter(_bodies.values()))
                                 _sib = _gen_tests_path(_tgt, _n)
                                 _sib.write_text(_body, encoding="utf-8")
