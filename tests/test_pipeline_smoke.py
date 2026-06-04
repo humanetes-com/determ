@@ -131,6 +131,39 @@ mod gen_tests_1 {
         "is_test_file must return True for gen_tests siblings"
     fake_sibling.unlink()
 
+
+def test_gen_tests_origin_cfgs() -> None:
+    """A gen_tests decl's origin cluster cfg is recovered from the parent source,
+    so post-strip propagation can gate it to the cluster that generated it (not
+    the current, always-active cluster) — preventing the nightly→no_core E0658 leak."""
+    import pipeline
+
+    nightly_cfg = 'any(error_generic_member_access, feature = "error_generic_member_access")'
+    src = (
+        "pub fn add(a: i32, b: i32) -> i32 { a + b }\n"
+        + pipeline._build_gen_tests_decl("error.gen_tests_1.rs", 1, "#[allow(clippy::all)]")
+        + pipeline._build_gen_tests_decl("error.gen_tests_7.rs", 7, "#[allow(clippy::all)]",
+                                         cluster_cfg_attr=nightly_cfg)
+    )
+    origins = pipeline._gen_tests_origin_cfgs(src)
+    assert origins[1] == "", "stable-origin (no extra cfg) must map to ''"
+    assert origins[7] == nightly_cfg, "nightly-origin must recover the error_generic_member_access gate"
+
+    # Round-trip through the on-disk manifest loader.
+    ws = _setup_workspace("smoke-gt-origin")
+    skel = ws / ".skeleton"
+    skel.mkdir(parents=True, exist_ok=True)
+    import json
+    (skel / "_gen_tests_origin.json").write_text(json.dumps({
+        "error.gen_tests_1": "",
+        "error.gen_tests_7": nightly_cfg,
+    }))
+    loaded = pipeline._load_gen_tests_origin(ws)
+    assert loaded["error.gen_tests_7"] == nightly_cfg
+    assert loaded["error.gen_tests_1"] == ""
+    assert pipeline._load_gen_tests_origin(ws / "nonexistent") == {}, \
+        "missing manifest must return {} (older runs fall back to heuristic)"
+
     print("  OK  gen_tests helpers")
 
 

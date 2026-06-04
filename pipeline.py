@@ -4413,6 +4413,32 @@ def _bake_skeleton_artifacts(
     except Exception as e:
         _log(f"  [bake-skeleton] cluster manifest write failed: {e}")
 
+    # Capture each gen_tests sibling's ORIGIN cluster cfg from the live (pre-strip)
+    # decls. task0c stamps the generating cluster's cfg on the `mod gen_tests_N;`
+    # decl; strip then removes the decl and `saved_gen_blocks` keeps only the body,
+    # losing provenance. Without this manifest, downstream propagation re-derives
+    # the gate from the CURRENT cluster (always-active → no protection), so a
+    # nightly-only test (e.g. `request_ref`) leaks into stable/no_core → E0658.
+    # Keyed by sibling stem "{parent_stem}.gen_tests_{n}" → origin cfg ('' = default).
+    try:
+        origin: dict[str, str] = {}
+        for rs in sorted(src_dir.rglob("*.rs")):
+            if _is_gen_tests_file(rs.name):
+                continue
+            try:
+                text = rs.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            for n, cfg in _gen_tests_origin_cfgs(text).items():
+                origin[f"{rs.stem}.gen_tests_{n}"] = cfg
+        (skel_root / "_gen_tests_origin.json").write_text(
+            json.dumps(origin, indent=2, sort_keys=True), encoding="utf-8",
+        )
+        if origin:
+            _log(f"  [bake-skeleton] captured origin cfg for {len(origin)} gen_tests sibling(s).")
+    except Exception as e:
+        _log(f"  [bake-skeleton] gen_tests origin manifest write failed: {e}")
+
     return {"ok": True, "clusters": baked, "reason": ""}
 
 
@@ -15843,7 +15869,14 @@ class StaticSkeletonTask2Generator(Task2Generator):
         if _proj_src.exists() and _filled_src.exists():
             _gt_re = re.compile(r"^(.+?)\.gen_tests_(\d+)\.rs(?:\.broken)?$")
             _gt_allow_line, _ = _derive_gentest_prelude(project_dir)
-            _gt_cluster_attr = _cluster_cfg_attr(cluster)
+            # Gate each sibling by the cfg of the cluster that GENERATED it (origin),
+            # not the current cluster — `_cluster_cfg_attr(cluster)` is always-active
+            # in its own build and gives no protection, so a nightly-only test would
+            # compile (and E0658) in stable/no_core. Origin cfg excludes it there and
+            # keeps it only where it belongs. Fallback to current cluster if the
+            # manifest is missing (older runs).
+            _gt_origin = _load_gen_tests_origin(project_dir)
+            _gt_cur_attr = _cluster_cfg_attr(cluster)
             _gt_propagated = 0
             for gt in sorted(_proj_src.iterdir()):
                 if not gt.is_file():
@@ -15869,9 +15902,11 @@ class StaticSkeletonTask2Generator(Task2Generator):
                     _dst.write_text(_body, encoding="utf-8")
                 _ptext = _parent_path.read_text(encoding="utf-8")
                 if not _has_gen_tests_decl(_ptext, _pass_n):
+                    _gt_attr = _gt_origin.get(
+                        f"{_parent_stem}.gen_tests_{_pass_n}", _gt_cur_attr)
                     _decl = _build_gen_tests_decl(
                         _dst_name, _pass_n, _gt_allow_line,
-                        cluster_cfg_attr=_gt_cluster_attr,
+                        cluster_cfg_attr=_gt_attr,
                     )
                     _parent_path.write_text(_ptext.rstrip() + _decl, encoding="utf-8")
                     _gt_propagated += 1
@@ -17988,6 +18023,56 @@ def _build_gen_tests_decl(sibling_name: str, n: "int | str", allow_line: str,
         lines.append(allow_line)
     lines.append(f'#[path = "{sibling_name}"]')
     return "\n" + "\n".join(lines) + f"\nmod gen_tests_{n};\n"
+
+
+def _gen_tests_origin_cfgs(file_text: str) -> dict[int, str]:
+    """Map each `mod gen_tests_<n>;` decl in `file_text` to the cluster cfg
+    predicate that gates it — i.e. the `#[cfg(...)]` that is NOT `#[cfg(test)]`,
+    as stamped by `_build_gen_tests_decl(cluster_cfg_attr=...)` at task0c gen
+    time. Returns {pass_n: cfg_predicate}; '' when only `#[cfg(test)]` is present
+    (stable/default cluster). Deterministic structural scan of the pipeline's own
+    fixed decl format — not a source parse of arbitrary Rust."""
+    lines = file_text.splitlines()
+    out: dict[int, str] = {}
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if not (s.startswith("mod gen_tests_") and s.endswith(";")):
+            continue
+        try:
+            n = int(s[len("mod gen_tests_"):-1])
+        except ValueError:
+            continue
+        cfg = ""
+        j = i - 1
+        while j >= 0:
+            a = lines[j].strip()
+            if a.startswith("#["):
+                if a.startswith("#[cfg(") and a.endswith(")]") and a != "#[cfg(test)]":
+                    inner = a[len("#[cfg("):].rsplit(")]", 1)[0]
+                    if inner != "test":
+                        cfg = inner
+                j -= 1
+                continue
+            if a == "":
+                j -= 1
+                continue
+            break
+        out[n] = cfg
+    return out
+
+
+def _load_gen_tests_origin(project_dir: Path) -> dict[str, str]:
+    """Load the gen_tests origin-cfg manifest baked pre-strip. Keyed by sibling
+    stem `"{parent_stem}.gen_tests_{n}"` → cluster cfg predicate ('' = default).
+    Empty dict if absent (older runs / pre-bake)."""
+    path = project_dir / ".skeleton" / "_gen_tests_origin.json"
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return {str(k): str(v) for k, v in data.items()}
+    except Exception:
+        return {}
 
 
 def _extract_gen_tests_body(block: str) -> str:
@@ -20779,16 +20864,33 @@ This is a Rust procedural macro crate. Strict rules apply:
                                         continue
                         _appends: dict[str, list[str]] = {}
                         _all_cluster_names = {c.name for c in _clusters}
+                        _gt_origin = _load_gen_tests_origin(project_dir)
                         for (_rel, _n), _bodies in sorted(_gt.items()):
                             _tgt = project_dir / _rel
                             if not _tgt.exists():
                                 continue
-                            if (len(set(_bodies.values())) == 1
+                            _origin_gate = _gt_origin.get(f"{_tgt.stem}.gen_tests_{_n}")
+                            if _origin_gate is not None:
+                                # Origin-cfg path (deterministic): one sibling gated by
+                                # the cluster that GENERATED the test ('' = default/stable
+                                # → ungated). A nightly-only test carries
+                                # `#[cfg(error_generic_member_access)]` → excluded from
+                                # stable/no_core, compiled in nightly. Bodies are copied
+                                # verbatim across clusters, so any is representative.
+                                _body = next(iter(_bodies.values()))
+                                _sib = _gen_tests_path(_tgt, _n)
+                                _sib.write_text(_body, encoding="utf-8")
+                                _appends.setdefault(_rel, []).append(
+                                    _build_gen_tests_decl(
+                                        _sib.name, _n, _reattach_allow_line, _origin_gate))
+                                _reattached.append((_tgt, _sib, _n))
+                            elif (len(set(_bodies.values())) == 1
                                     and set(_bodies) == _all_cluster_names):
-                                # present in EVERY cluster AND identical → safe ungated.
-                                # A body found in only a subset (e.g. nightly-only
-                                # `request_ref`) must NOT land here — it would compile
-                                # under the other clusters' test build and break them.
+                                # Fallback (no origin manifest): present in EVERY cluster
+                                # AND identical → safe ungated. A body found in only a
+                                # subset (e.g. nightly-only `request_ref`) must NOT land
+                                # here — it would compile under the other clusters' test
+                                # build and break them.
                                 _body = next(iter(_bodies.values()))
                                 _sib = _gen_tests_path(_tgt, _n)
                                 _sib.write_text(_body, encoding="utf-8")
@@ -20796,7 +20898,7 @@ This is a Rust procedural macro crate. Strict rules apply:
                                     _build_gen_tests_decl(_sib.name, _n, _reattach_allow_line))
                                 _reattached.append((_tgt, _sib, _n))
                             else:
-                                # divergent → per-cluster gated siblings, unique names
+                                # Fallback: divergent → per-cluster gated siblings, unique names
                                 for _cname, _body in sorted(_bodies.items()):
                                     _gate = _cluster_cfg_attr(_cl_by_name.get(_cname))
                                     _sib = _tgt.with_name(
