@@ -15893,6 +15893,12 @@ class StaticSkeletonTask2Generator(Task2Generator):
                     continue
                 _parent_stem = _m.group(1)
                 _pass_n = int(_m.group(2))
+                # R9.6: skip + quarantine undeclared orphans (on disk but absent from
+                # a non-empty origin manifest) — they were never coverage-validated and
+                # must not be resurrected under a guessed gate.
+                if not _propagate_or_quarantine_sibling(
+                        gt, _gt_origin, _parent_stem, _pass_n, _log, tag):
+                    continue
                 _dst_name = f"{_parent_stem}.gen_tests_{_pass_n}.rs"
                 _dst = _filled_src / _dst_name
                 _parent_path = _filled_src / f"{_parent_stem}.rs"
@@ -18225,6 +18231,36 @@ def _load_gen_tests_origin(project_dir: Path) -> dict[str, str]:
         return {}
 
 
+def _propagate_or_quarantine_sibling(
+    gt: Path, origin_manifest: dict, parent_stem: str, pass_n: int,
+    log_fn=None, tag: str = "",
+) -> bool:
+    """R9.6: the origin manifest is authoritative for which gen_tests siblings are
+    legitimate. Returns True if `gt` should be propagated (it is declared in a
+    non-empty manifest, OR the manifest is empty/absent → legacy pre-bake run).
+
+    If the manifest is NON-empty and this sibling is absent from it, it was never
+    declared pre-strip — i.e. never coverage-validated by task0c. Resurrecting it
+    under a guessed cfg gate is the latent cluster-leak class (a nightly-only orphan
+    would E0658 in a stable cluster). Quarantine it to `.rs.broken` and return False.
+    """
+    key = f"{parent_stem}.gen_tests_{pass_n}"
+    if origin_manifest and key not in origin_manifest:
+        if not gt.name.endswith(".broken"):
+            broken = gt.with_name(gt.name + ".broken")
+            try:
+                gt.rename(broken)
+                if log_fn:
+                    log_fn(f"  {tag} [skeleton-C] ⚠️  orphan gen_tests sibling "
+                           f"'{gt.name}' absent from origin manifest (undeclared "
+                           f"pre-strip) — quarantined → {broken.name}, not propagated.")
+            except OSError as e:
+                if log_fn:
+                    log_fn(f"  {tag} [skeleton-C] orphan quarantine failed {gt.name}: {e}")
+        return False
+    return True
+
+
 def _extract_gen_tests_body(block: str) -> str:
     """Strip the outer `mod gen_X { ... }` wrapper from an LLM-generated block and
     return the dedented body. If the shape doesn't match (e.g. LLM returned bare
@@ -18444,10 +18480,21 @@ def _quarantine_broken_gen_tests(project_dir: Path) -> int:
 
 
 def _revert_gen_tests_pass(src_file: Path, src_text: str, sibling: Path) -> None:
-    """Restore src_file to src_text (no decl) and delete the sibling file."""
+    """Restore src_file to src_text (no decl) and delete the sibling file.
+
+    R9.6 atomicity: restoring `src_text` (a snapshot) can drop the decls of MORE
+    than one sibling — e.g. a split/inner-retry added extra siblings since the
+    snapshot. Unlinking only the named `sibling` would orphan the rest (file on
+    disk, no decl). Enforce the invariant `sibling file ⟺ decl in parent`: after
+    the restore, delete every sibling of this parent whose decl the restore removed.
+    """
     src_file.write_text(src_text, encoding="utf-8")
     with suppress(OSError):
         sibling.unlink()
+    for _n, _sib in _gen_tests_siblings(src_file):
+        if not _has_gen_tests_decl(src_text, _n):
+            with suppress(OSError):
+                _sib.unlink()
 
 
 def _strip_all_gen_tests_artifacts(src_file: Path) -> int:

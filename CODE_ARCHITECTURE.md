@@ -257,6 +257,40 @@ dataclass together, never ad-hoc dict mutation.
    touches the whole lib surface for little architectural gain over the split; left as a focused
    later pass. `Cfg` newtype (§3) similarly deferred; `CfgSet` already encapsulates predicate eval.
 
+#### R9.6 — orphan gen_tests siblings resurrected under a guessed cfg gate  ✅ SHIPPED (P1 propagation + P2 atomicity) + tests (full effect ●● awaits live run)
+Resolves session-51's open "24-vs-23 manifest gap". Ground truth from the live workspace:
+
+| evidence | finding |
+|---|---|
+| `.skeleton/_gen_tests_origin.json` | 23 entries (error.gen_tests_1–4) |
+| `src/*.gen_tests_*.rs` on disk | 24 files (error.gen_tests_**5** is the extra) |
+| `task0c-augmented-anyhow:src/error.rs` (pre-strip, human-inspect only) | declares gen_tests_1–4 only — **no gen_tests_5 decl** |
+| `error.gen_tests_5.rs` | git-tracked, real coverage tests; nightly call `request_ref_backtrace` is internally `#[cfg(error_generic_member_access)]`-gated |
+
+Root cause: `error.gen_tests_5.rs` is an **orphan** — task0c wrote the file + decl (pipeline.py:18381-18384, body
+was balanced), but a later revert/strip path (session-51 destructive-block coverage gate, or a quarantine) removed
+the **parent decl without deleting the sibling** (`_revert_gen_tests_pass` deletes both, but not every strip path
+does). Bake correctly captured only the 4 declared decls. Post-strip, skeleton-C propagation (pipeline.py:15911-15919)
+finds the orphan file, sees no decl, and **resurrects it under a guessed gate** via the silent
+`_gt_origin.get(key, _gt_cur_attr)` — line 774 now carries the no_core fallback cfg, not a real origin. It avoids a
+leak ONLY by luck (its nightly call self-gates internally); a nightly-only orphan without that internal gate WOULD
+E0658-leak. It also adds test load that task0c never coverage-validated (it was undeclared = never compiled pre-strip).
+
+| fix | where | scope |
+|---|---|---|
+| **(load-bearing) manifest is the authority.** When `_gen_tests_origin` is NON-empty (bake ran) and a sibling is absent from it → undeclared orphan → quarantine (`.rs.broken`) + loud `_log`, do NOT propagate under a guessed gate. Empty/absent manifest → keep today's legacy fallback (back-compat for pre-bake runs). | pipeline.py:15911-15919 (replace the silent `.get(key, _gt_cur_attr)`) | P1 |
+| **(defense-in-depth) atomic decl-strip.** Every path that strips a `mod gen_tests_N;` decl from a parent must delete/`.broken` the sibling in the same step, so an orphan can't form. Audit the session-51 destructive-block revert + `_strip_gen_tests_decl_n` callers. | task0c.py revert paths | P2 |
+
+Effect: count reconciles (23==23), no fabricated gates ever (kills the latent-leak class at its source, not just the
+one lucky case), unvalidated test load dropped. Validation: ●● — a unit test drives propagation with a manifest
+missing one on-disk sibling and asserts it's quarantined not resurrected; full effect wants a live run.
+SHIPPED: P1 — `_propagate_or_quarantine_sibling` (manifest-authority; quarantines undeclared orphans to `.rs.broken`,
+loud log; wired into skeleton-C propagation; legacy fallback kept for empty manifest). P2 — `_revert_gen_tests_pass`
+now reconciles the sibling⟺decl invariant: after restoring the snapshot it deletes EVERY sibling whose decl the
+restore dropped (the orphan root: a split/retry added extra siblings, the snapshot restore removed their decls but
+only the one named sibling was unlinked). Tests: `test_propagate_or_quarantine_orphan_sibling`,
+`test_revert_gen_tests_pass_reconciles_all_siblings`. Decisions taken: quarantine (not delete) for P1; both parts now.
+
 Invariant: after every slice, `bash check.sh` passes and `pipeline.py` imports cleanly.
 
 ---

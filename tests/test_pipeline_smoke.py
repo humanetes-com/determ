@@ -2640,6 +2640,73 @@ def test_validate_task4_output_build_skips_identifier_check() -> None:
     print("  OK  validate_task4_output build-mode skips identifier check (R9.5)")
 
 
+def test_propagate_or_quarantine_orphan_sibling() -> None:
+    """R9.6: the origin manifest is authoritative. A sibling on disk but absent
+    from a NON-empty manifest is an undeclared orphan → quarantined (.rs.broken),
+    not propagated under a guessed gate. Empty manifest → legacy pass-through."""
+    import tempfile
+    from pathlib import Path
+
+    import pipeline
+
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td)
+        orphan = src / "error.gen_tests_5.rs"
+        declared = src / "error.gen_tests_1.rs"
+        orphan.write_text("fn t() {}\n")
+        declared.write_text("fn t() {}\n")
+        manifest = {"error.gen_tests_1": "", "context.gen_tests_2": ""}
+
+        # Orphan (gen_tests_5 not in manifest) → quarantined, returns False.
+        assert pipeline._propagate_or_quarantine_sibling(
+            orphan, manifest, "error", 5, log_fn=None, tag="t") is False
+        assert not orphan.exists()
+        assert (src / "error.gen_tests_5.rs.broken").exists()
+
+        # Declared sibling → propagate, returns True, untouched.
+        assert pipeline._propagate_or_quarantine_sibling(
+            declared, manifest, "error", 1, log_fn=None, tag="t") is True
+        assert declared.exists()
+
+        # Empty manifest (pre-bake/legacy) → always propagate, no quarantine.
+        legacy = src / "lib.gen_tests_9.rs"
+        legacy.write_text("fn t() {}\n")
+        assert pipeline._propagate_or_quarantine_sibling(
+            legacy, {}, "lib", 9, log_fn=None, tag="t") is True
+        assert legacy.exists()
+        print("  OK  _propagate_or_quarantine_sibling quarantines orphans (R9.6)")
+
+
+def test_revert_gen_tests_pass_reconciles_all_siblings() -> None:
+    """R9.6 atomicity: reverting to a snapshot that drops MULTIPLE decls (split/
+    retry added extra siblings) must delete every sibling whose decl the restore
+    removed — not just the one named sibling — so no orphan file is left behind."""
+    import tempfile
+    from pathlib import Path
+
+    import pipeline
+
+    with tempfile.TemporaryDirectory() as td:
+        src_dir = Path(td)
+        parent = src_dir / "error.rs"
+        sib1 = src_dir / "error.gen_tests_1.rs"
+        sib2 = src_dir / "error.gen_tests_2.rs"
+        snapshot = "fn real() {}\n"  # pre-attempt text: NO gen_tests decls
+        # Current state: both siblings on disk, both declared in the parent.
+        parent.write_text(snapshot + "\n#[cfg(test)]\nmod gen_tests_1;\n"
+                          "#[cfg(test)]\nmod gen_tests_2;\n")
+        sib1.write_text("fn t1() {}\n")
+        sib2.write_text("fn t2() {}\n")
+
+        # Revert naming only sib1 — sib2's decl is also dropped by the snapshot.
+        pipeline._revert_gen_tests_pass(parent, snapshot, sib1)
+
+        assert parent.read_text() == snapshot
+        assert not sib1.exists()
+        assert not sib2.exists(), "sib2 orphaned — reconciliation missed it"
+        print("  OK  _revert_gen_tests_pass reconciles all dropped siblings (R9.6)")
+
+
 # ─── Driver ─────────────────────────────────────────────────────────────────
 
 def main() -> int:
