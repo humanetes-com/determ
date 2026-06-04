@@ -2576,6 +2576,34 @@ def test_slice5b_genesis_audit_task() -> None:
     print("  OK  genesis_audit + test_results + text + infra + llm_output + io (slice 5b)")
 
 
+def test_task0b_iter_source_rs_prunes_scratch_dirs() -> None:
+    """R9.3: the discovery file walk must yield real source only — never the
+    pipeline scratch trees (.skeleton / .skeleton-filled, each with its own src/
+    + nested target/ build output). Those phantom files exhausted the budget."""
+    import tempfile
+    from pathlib import Path
+
+    from pipeline_core.application.tasks.task0b_discovery import _iter_source_rs
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        real = [root / "src" / "lib.rs", root / "src" / "error.rs"]
+        phantom = [
+            root / ".skeleton" / "stable" / "src" / "lib.rs",
+            root / ".skeleton-filled" / "nightly" / "src" / "macros.rs",
+            root / ".skeleton-filled" / "nightly" / "target" / "debug" / "build" / "x" / "out" / "private.rs",
+            root / "target" / "debug" / "build" / "y" / "out" / "gen.rs",
+            root / ".git" / "hooks" / "weird.rs",
+        ]
+        for p in real + phantom:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("fn x() {}\n")
+
+        got = {p.relative_to(root).as_posix() for p in _iter_source_rs(root)}
+        assert got == {"src/lib.rs", "src/error.rs"}, got
+        print(f"  OK  _iter_source_rs pruned scratch/build dirs ({len(got)} real file(s))")
+
+
 # ─── Driver ─────────────────────────────────────────────────────────────────
 
 def main() -> int:

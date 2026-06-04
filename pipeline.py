@@ -15927,6 +15927,49 @@ class StaticSkeletonTask2Generator(Task2Generator):
                     os.symlink(_proj_tests, _filled_tests)
                 except OSError as e:
                     _log(f"  {tag} [skeleton-C] tests symlink failed: {e}")
+
+            # Deterministic cluster-leak guard. A gen_test that belongs to another
+            # cluster (e.g. nightly's `request_ref`) must not be ACTIVE in this
+            # cluster. With correct origin gating it is cfg-excluded and invisible
+            # here; if any gen_tests file still produces an unstable-feature error
+            # (E0658/E0554) under this cluster's stable toolchain, its origin gate
+            # is missing/wrong — surface it loudly and quarantine the sibling so it
+            # can't poison phase-c as undifferentiated reconstruction noise. The
+            # skeleton's unimplemented!() bodies compile, so unrelated fill gaps
+            # don't false-trigger (we act only on gen_tests-attributed diags).
+            _has_gt = _filled_src.exists() and any(
+                _is_gen_tests_file(p.name) for p in _filled_src.iterdir() if p.is_file())
+            if _has_gt:
+                _norun = (f"cargo +{cluster.toolchain} test --no-run"
+                          if cluster.toolchain else "cargo test --no-run")
+                _lrc, _ltxt, _ldiags = _run_cargo_check_diag(
+                    _norun, filled_dir, self._cluster_env(cluster), timeout=300)
+                _leaks = sorted({
+                    d.file for d in _ldiags
+                    if ".gen_tests_" in d.file
+                    and (d.code in ("E0658", "E0554") or "unstable" in d.message.lower())
+                })
+                if _leaks:
+                    _log(f"  {tag} [skeleton-C] ⛔ CLUSTER LEAK in '{cluster.name}': "
+                         f"{len(_leaks)} gen_tests file(s) use nightly-only API but are "
+                         f"active under this cluster's stable toolchain "
+                         f"(origin-cfg gate missing/wrong): {', '.join(_leaks)}. "
+                         f"Quarantining so phase-c is not poisoned.")
+                    for _bf in _leaks:
+                        _name = Path(_bf).name
+                        if _name.endswith(".rs") and ".gen_tests_" in _name:
+                            _stem, _rest = _name.rsplit(".gen_tests_", 1)
+                            _ns = _rest[:-3]  # strip ".rs"
+                            if _ns.isdigit():
+                                _pp = _filled_src / f"{_stem}.rs"
+                                if _pp.exists():
+                                    _pp.write_text(
+                                        _strip_gen_tests_decl_n(
+                                            _pp.read_text(encoding="utf-8"), int(_ns)),
+                                        encoding="utf-8")
+                        _sp = filled_dir / _bf
+                        if _sp.exists():
+                            _sp.rename(_sp.with_name(_sp.name + ".broken"))
             tests_dir_files: list[Path] = []
             for trel, _ in cluster_tests:
                 tp = project_dir / trel
@@ -17072,14 +17115,30 @@ def _task3_inline_retry(
     if os.getenv("TASK3_INLINE_RETRY", "1") == "0":
         return False, initial_test_output
 
-    failed = sorted(_parse_failed_tests(initial_test_output))
-    if not failed:
-        return False, initial_test_output
-
     max_stalls = int(os.getenv("TASK3_INLINE_MAX_STALLS", "3"))
     hard_cap = int(os.getenv("TASK3_INLINE_HARD_CAP", "10"))
-    initial_count = len(failed)
-    _log(f"  [task3-retry] entering inline retry: {initial_count} failing test(s).")
+
+    # R9.1: two modes. TEST mode (some test FAILED) attributes via the test
+    # reverse-map/classifier. BUILD mode (zero FAILED lines because the tree did
+    # not COMPILE) attributes via structured cargo diagnostics and fixes the fns
+    # the compile errors point at — TASK 4 (a test-failure analyzer) cannot, since
+    # it has no failing-test identifiers. compile_cmd compiles the tests without
+    # running them so a 0-test "incomplete" cluster yields real error diagnostics.
+    failed = sorted(_parse_failed_tests(initial_test_output))
+    compile_cmd = test_command if "--no-run" in test_command else test_command + " --no-run"
+    build_mode = not failed
+    if build_mode:
+        _, _, _init_diags = _run_cargo_check_diag(
+            compile_cmd, project_dir, _cargo_env(), timeout=TEST_TIMEOUT)
+        if not _init_diags:
+            # No FAILED tests AND no reproducible compile errors under this env
+            # (e.g. the failure is cluster-cfg-specific) — nothing to act on here.
+            return False, initial_test_output
+        initial_count = len(_init_diags)
+        _log(f"  [task3-retry] build-failure mode: {initial_count} compile error(s).")
+    else:
+        initial_count = len(failed)
+        _log(f"  [task3-retry] entering inline retry: {initial_count} failing test(s).")
 
     # Snapshot every .rs file under project_dir/src — only files we might
     # touch. Excluding tests/ keeps the snapshot cheap. Use bytes to handle
@@ -17091,42 +17150,17 @@ def _task3_inline_retry(
             with suppress(Exception):
                 snapshot[p] = p.read_bytes()
 
-    def _run_check() -> tuple[bool, str, int]:
-        rc, out = _run_cargo(test_command, project_dir, _cargo_env(),
-                             timeout=TEST_TIMEOUT)
-        f = _parse_failed_tests(out)
-        return rc == 0, out, len(f)
-
-    def _do_fix(output: str, history: list[dict]) -> dict:
-        # FR-024: full attribution chain. The classifier is one step in a
-        # longer chain — when it returns no actionable refs, fall back to
-        # the test-reverse-map. Previously this gave up at classifier
-        # exhaustion; now it has more candidates to try.
-        fails_now = sorted(_parse_failed_tests(output))
-        if not fails_now:
-            return {"abort": True, "reason": "no_failed_tests"}
-        try:
-            tests_dir_files = list((project_dir / "tests").rglob("*.rs"))
-            test_reverse_map = _build_test_reverse_map(
-                tests_dir_files, project_dir)
-        except Exception:
-            test_reverse_map = {}
-        frontier, _kind = _attribute_failures(
-            output, project_dir,
-            recently_filled=[],  # task3 has no per-cluster fill history
-            test_reverse_map=test_reverse_map,
-            cluster_name="task3",
-        )
-        refs: list[tuple[str, str]] = list(frontier.keys())
-        if not refs:
-            return {"abort": True, "reason": "no_actionable_refs"}
-
+    def _apply_per_fn_fixes(refs: list[tuple[str, str]], output: str) -> int:
+        # Re-ask the model for each (file, fn) body and splice it. Frozen tests
+        # are never rewritten — skip tests/ and gen_tests siblings even if a
+        # compile error's span lands inside one (Hard Rule: tests are frozen).
         fixed_count = 0
         for rel_f, fn in refs:
+            if rel_f.startswith("tests/") or _is_gen_tests_file(Path(rel_f).name):
+                continue
             fp = project_dir / rel_f
             if not fp.exists():
-                # Classifier may have hallucinated a path; skip silently.
-                continue
+                continue  # classifier may have hallucinated a path
             try:
                 cur_text = fp.read_text(encoding="utf-8")
             except Exception:
@@ -17150,6 +17184,61 @@ def _task3_inline_retry(
             if ok2:
                 fixed_count += 1
                 _log(f"  [task3-retry] re-spliced {rel_f}::{fn}.")
+        return fixed_count
+
+    def _run_check_test() -> tuple[bool, str, int]:
+        rc, out = _run_cargo(test_command, project_dir, _cargo_env(),
+                             timeout=TEST_TIMEOUT)
+        f = _parse_failed_tests(out)
+        return rc == 0, out, len(f)
+
+    def _run_check_build() -> tuple[bool, str, int]:
+        rc, rendered, diags = _run_cargo_check_diag(
+            compile_cmd, project_dir, _cargo_env(), timeout=TEST_TIMEOUT)
+        # ok = the tree COMPILES; metric = remaining compile errors (lower better).
+        return rc == 0, _strip_ansi(rendered), len(diags)
+
+    def _do_fix_test(output: str, history: list[dict]) -> dict:
+        # FR-024: full attribution chain. The classifier is one step in a
+        # longer chain — when it returns no actionable refs, fall back to
+        # the test-reverse-map. Previously this gave up at classifier
+        # exhaustion; now it has more candidates to try.
+        fails_now = sorted(_parse_failed_tests(output))
+        if not fails_now:
+            return {"abort": True, "reason": "no_failed_tests"}
+        try:
+            tests_dir_files = list((project_dir / "tests").rglob("*.rs"))
+            test_reverse_map = _build_test_reverse_map(
+                tests_dir_files, project_dir)
+        except Exception:
+            test_reverse_map = {}
+        frontier, _kind = _attribute_failures(
+            output, project_dir,
+            recently_filled=[],  # task3 has no per-cluster fill history
+            test_reverse_map=test_reverse_map,
+            cluster_name="task3",
+        )
+        refs: list[tuple[str, str]] = list(frontier.keys())
+        if not refs:
+            return {"abort": True, "reason": "no_actionable_refs"}
+        fixed_count = _apply_per_fn_fixes(refs, output)
+        return {
+            "summary": f"fixed_{fixed_count}/{len(refs)}",
+            "fns_touched": refs,
+            "abort": fixed_count == 0,
+            "reason": "no_fns_spliced" if fixed_count == 0 else "",
+        }
+
+    def _do_fix_build(output: str, history: list[dict]) -> dict:
+        _, _, diags = _run_cargo_check_diag(
+            compile_cmd, project_dir, _cargo_env(), timeout=TEST_TIMEOUT)
+        if not diags:
+            return {"abort": True, "reason": "no_compile_errors"}
+        frontier = _frontier_from_diags(diags, project_dir)
+        refs: list[tuple[str, str]] = list(frontier.keys())
+        if not refs:
+            return {"abort": True, "reason": "unattributed_compile_errors"}
+        fixed_count = _apply_per_fn_fixes(refs, output)
         return {
             "summary": f"fixed_{fixed_count}/{len(refs)}",
             "fns_touched": refs,
@@ -17159,20 +17248,52 @@ def _task3_inline_retry(
 
     passed, last_out, history = _improvement_loop(
         name="task3.inline_retry",
-        run_check=_run_check,
-        do_fix=_do_fix,
+        run_check=_run_check_build if build_mode else _run_check_test,
+        do_fix=_do_fix_build if build_mode else _do_fix_test,
         max_stalls=max_stalls,
         hard_cap=hard_cap,
     )
+
+    if build_mode:
+        # Re-measure compile errors. Revert if the retry INCREASED them; recurse
+        # (changed output) only on strict progress so task3's re-verification
+        # terminates — fewer errors each round, or back to the unchanged input.
+        _, _, fin_diags = _run_cargo_check_diag(
+            compile_cmd, project_dir, _cargo_env(), timeout=TEST_TIMEOUT)
+        final_err = len(fin_diags)
+        if snapshot and final_err > initial_count:
+            _log(f"  [task3-retry] build-fix worsened compile ({final_err} > "
+                 f"{initial_count}) — reverting from snapshot.")
+            for p, data in snapshot.items():
+                with suppress(Exception):
+                    p.write_bytes(data)
+            return False, initial_test_output
+        if final_err < initial_count:
+            _log(f"  [task3-retry] build-fix progress: {final_err} compile "
+                 f"error(s) (initial {initial_count}) — re-running TASK 3.")
+            return False, last_out
+        _log(f"  [task3-retry] build-fix made no progress ({final_err} error(s)) "
+             "— escalating to TASK 4.")
+        return False, initial_test_output
+
     final_failed = _parse_failed_tests(last_out)
     if passed:
         _log(f"  [task3-retry] tests now PASS after {len(history)} iter(s).")
         return True, last_out
-    # Decide whether to keep partial progress or revert. If the inline retry
-    # made things STRICTLY WORSE than the initial state, restore the snapshot.
-    if len(final_failed) > initial_count and snapshot:
-        _log(f"  [task3-retry] result {len(final_failed)} > initial "
-             f"{initial_count} — reverting from snapshot.")
+    # Decide whether to keep partial progress or revert. R9.2: a non-compiling tree
+    # emits NO `FAILED` lines, so `len(final_failed)` reads as 0 ("near success") even
+    # when a re-splice broke the build. Compile/ran-state is the real signal — if the
+    # tree ran tests before the retry but no longer does, the retry made it STRICTLY
+    # WORSE (a tree that won't compile is worse than N failing tests) → revert.
+    init_p, init_f, _ = _parse_test_counts(initial_test_output)
+    fin_p, fin_f, _ = _parse_test_counts(last_out)
+    init_ran = (init_p + init_f) > 0
+    final_ran = (fin_p + fin_f) > 0
+    broke_build = init_ran and not final_ran
+    if snapshot and (broke_build or len(final_failed) > initial_count):
+        reason = ("retry broke the build (tests no longer run)" if broke_build
+                  else f"result {len(final_failed)} > initial {initial_count}")
+        _log(f"  [task3-retry] {reason} — reverting from snapshot.")
         for p, data in snapshot.items():
             with suppress(Exception):
                 p.write_bytes(data)

@@ -20,6 +20,25 @@ from ...domain.text import strip_markdown_fences
 from ...log import log
 from ...retry import with_retry
 
+# Pipeline scratch + build dirs that are NOT project source. rglob over project_dir
+# otherwise pulls in `.skeleton`/`.skeleton-filled` (each has its own `src/` + nested
+# `target/.../out/*.rs` build-script output) and bloats the discovery budget (R9.3).
+_NON_SOURCE_DIRS = frozenset({".skeleton", ".skeleton-filled", "target", ".git"})
+
+
+def _iter_source_rs(project_dir: Path):
+    """Yield real source `*.rs` files under `project_dir`, pruning pipeline scratch
+    and build directories (see `_NON_SOURCE_DIRS`). Used by both the hash loop and
+    the content loop so neither sees phantom files."""
+    for p in project_dir.rglob("*.rs"):
+        try:
+            parts = p.relative_to(project_dir).parts
+        except ValueError:
+            continue
+        if any(part in _NON_SOURCE_DIRS for part in parts):
+            continue
+        yield p
+
 
 @dataclass(frozen=True, slots=True)
 class Task0bDeps:
@@ -72,7 +91,7 @@ def task0b_discovery(strategy_path: Path, project_dir: Path, test_files,
             pass
 
     src_texts: list[str] = []
-    for src_file in sorted(project_dir.rglob("*.rs")):
+    for src_file in sorted(_iter_source_rs(project_dir)):
         if deps.is_test_file(src_file, project_dir):
             continue
         # Skip gen_tests sibling files entirely — they are pipeline-generated content
@@ -130,17 +149,12 @@ def task0b_discovery(strategy_path: Path, project_dir: Path, test_files,
     # Collect and condense all source files first, then sort by DESCENDING complexity
     # (unsafe/cfg count) so the hardest-to-test files are included first. Alphabetical
     # order was dropping error.rs, ptr.rs, wrapper.rs — the most important files.
-    # Exclude target/ directory — rglob picks up build-script output .rs files otherwise.
+    # _iter_source_rs prunes target/ + pipeline scratch dirs (.skeleton, .skeleton-filled)
+    # which otherwise contribute build-script output + skeleton copies (R9.3).
     src_candidates: list[tuple[int, Path, str, str]] = []  # (priority, path, rel, condensed)
-    target_dir = project_dir / "target"
-    for src_file in project_dir.rglob("*.rs"):
+    for src_file in _iter_source_rs(project_dir):
         if deps.is_test_file(src_file, project_dir):
             continue
-        try:
-            if src_file.is_relative_to(target_dir):
-                continue  # skip build artifacts
-        except Exception:
-            pass
         try:
             raw = src_file.read_text(encoding="utf-8")
             rel = str(src_file.relative_to(project_dir))

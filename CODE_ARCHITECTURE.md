@@ -363,3 +363,25 @@ Principle: regex bugs cluster where a *structured format is scraped as text* (it
 Outcome: every Rust-source regex is now accounted for — **migrated** (R7.1 `_extract_public_symbols`, R7.2 source side of `_PUB_ITEM_RE`), **kept with justification** (R7.3/R7.5/R7.6 — text-mining / display-views / heuristics / fallback, where syn is the wrong tool), or **flagged ●●● live-validation** (R7.4 cfg, with its real bugs documented and the extractor dup fixed). The "no regex on source" rule means *no regex for structured fact extraction*; text transformation/mining over source legitimately remains.
 Note: syn-bridge sites depend on the extractor binary at runtime; their tests skip when it's not
 built (CI Python job). Enumeration is covered by the Rust crate's tests in CI.
+
+### R9 — convergence bugs surfaced by the session-51/52 live run  🔄 IMPLEMENTED (R9.3 tested; R9.1/R9.2 ●●● await live run)  (P0 · these cause the iteration spin)
+Live run `pipeline.py=289f0a38 git=3d74425 --clean` (started 13:00 UTC). Leak fix (origin-cfg #4 + guard
+#5) VALIDATED — 0 `E0658`, 0 `CLUSTER LEAK` across the whole run. But the run never converges: it loops
+t0→t3→t4→regen because the pipeline cannot distinguish **"did not compile"** from **"tests ran"**.
+Root theme (R9.1+R9.2): compile-state is inferred from test-result text, which is empty on a build failure.
+R9.3 is independent (scratch-dir pollution). Dependency order: R9.3 → R9.1 → R9.2 (fix file set first so a
+build failure is a real signal, then route it, then stop the retry trusting it).
+
+| # | bug | root cause | fix SHIPPED | where | status |
+|---|---|---|---|---|---|
+| R9.1 | build failure had no fix path → TASK 4 (genesis analyzer) → genesis churn → full regen | inline retry **bailed at the gate** (`if not failed: return`) — a non-compiling tree emits 0 `FAILED` lines so it never even tried; `task2_fix_loop` is test-failure-driven | `_task3_inline_retry` now has a **BUILD mode**: when 0 tests FAILED, run `compile_cmd` (`<test_cmd> --no-run`) through `_run_cargo_check_diag`, attribute error diags→fns via `_frontier_from_diags`, re-splice per-fn (shared `_apply_per_fn_fixes`, which **skips frozen tests/ + gen_tests**). Metric = compile-error count (lower=better). Terminating recurse: return changed output only on strict error-count decrease, else the unchanged input → no infinite re-verify. Still-broken after this → TASK 4 fallback (documented limitation) | `pipeline.py:_task3_inline_retry` | 🔄 ●●● await live |
+| R9.2 | inline retry kept a tree it just broke ("80→0 failing, keeping partial progress") | keep/revert used only `len(_parse_failed_tests(last_out))`; a non-compiling tree emits no `FAILED` lines → count 0 → read as success | keep/revert is now **compile-state aware**: `broke_build = init_ran and not final_ran` (via `_parse_test_counts` pass+fail>0); if the pre-fix tree ran tests and the post-fix tree no longer does → **revert from snapshot** (non-compiling is strictly worse than N failing). BUILD mode reverts when final error-count > initial | `pipeline.py:_task3_inline_retry` (post-loop) | 🔄 ●●● await live |
+| R9.3 | task0b ingested 40 phantom `.rs` from scratch dirs → budget exhausted, real source dropped, TASK 4 at 99% | both rglob loops walked all of `project_dir` incl. `.skeleton/` + `.skeleton-filled/` (own `src/` + nested `target/.../out/*.rs`); `target_dir` guard only caught top-level `target/` | new `_iter_source_rs(project_dir)` prunes any path with a `_NON_SOURCE_DIRS` component (`.skeleton`, `.skeleton-filled`, `target`, `.git`); applied to BOTH the hash loop and the content loop | `task0b_discovery.py` | ✅ shipped + test |
+
+Validation: R9.1/R9.2 are ●●● — only a live pipeline run exercises the build-failure → fix → re-test path
+(check.sh cannot). R9.3 has an offline test (`test_task0b_iter_source_rs_prunes_scratch_dirs`). After the fix
+the same crate run must reach a stable TASK 3 verdict (real pass/fail count, no `INCOMPLETE`→`no_tests`→`build`
+oscillation) and stop regenerating from scratch each iteration. Known residual (not in R9 scope): inline retry
+uses the global `_cargo_env()` (not per-cluster), so a *cluster-cfg-specific* build error won't reproduce under
+the default env → BUILD mode bails (safe: returns unchanged input → TASK 4) rather than fixing it. Make the
+retry cluster-aware in a follow-up.

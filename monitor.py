@@ -397,6 +397,10 @@ def _phase_c_state() -> dict[str, Any]:
         # converging" signal: passing/failing tests over iterations.
         "tdd_iter": 0, "tdd_pass": None, "tdd_fail": None, "tdd_frontier": None,
         "tdd_stall": None, "tdd_kind": None, "tdd_pass_hist": [],
+        # Per-cluster TDD trajectory so each cluster's pass floor is shown on its
+        # own row — a fresh cluster starting lower never reads as a regression of
+        # the previous one (the per-cluster loops reset their floor by design).
+        "tdd_by_cluster": {},
         # Per-cluster overview ("where are we") + current error class.
         "clusters_seen": [], "clusters_done": [], "last_error_code": None,
         "err_codes": {},
@@ -513,7 +517,8 @@ def _phase_c_state() -> dict[str, Any]:
             out["last_test_rc"] = d.get("rc")
             out["last_test_failed"] = len(d.get("failed_tests") or [])
         elif ev == "phase_c.tdd.iter":
-            out["cluster"] = d.get("cluster") or out["cluster"]
+            _tcl = d.get("cluster") or out["cluster"]
+            out["cluster"] = _tcl or out["cluster"]
             out["tdd_iter"] = d.get("iter", out["tdd_iter"])
             _pc = d.get("pass_count")
             if _pc is not None:
@@ -523,6 +528,17 @@ def _phase_c_state() -> dict[str, Any]:
             out["tdd_frontier"] = d.get("frontier_size", out["tdd_frontier"])
             out["tdd_stall"] = d.get("stall", out["tdd_stall"])
             out["tdd_kind"] = d.get("kind", out["tdd_kind"])
+            if _tcl:
+                _cs = out["tdd_by_cluster"].setdefault(
+                    _tcl, {"iter": 0, "pass": None, "fail": None,
+                           "frontier": None, "stall": None, "hist": []})
+                _cs["iter"] = d.get("iter", _cs["iter"])
+                if _pc is not None:
+                    _cs["pass"] = _pc
+                    _cs["hist"].append(_pc)
+                _cs["fail"] = d.get("fail_count", _cs["fail"])
+                _cs["frontier"] = d.get("frontier_size", _cs["frontier"])
+                _cs["stall"] = d.get("stall", _cs["stall"])
 
     out["current_fn"] = in_flight_fn
     if in_flight_fn:
@@ -597,23 +613,32 @@ def _phase_c_panel_rows(state: dict[str, Any]) -> list[str]:
 
     # TDD trajectory — the headline "are we converging" overview: passing /
     # failing tests over iterations, the active frontier, and stall budget.
-    _tp = state.get("tdd_pass")
-    if _tp is not None:
-        _tf = state.get("tdd_fail")
-        _hist = state.get("tdd_pass_hist") or []
-        _trend = ""
-        if len(_hist) >= 2:
-            _delta = _hist[-1] - _hist[-2]
-            _trend = (green(f" ↑{_delta}") if _delta > 0
-                      else red(f" ↓{-_delta}") if _delta < 0 else dim(" ="))
-        _fr = state.get("tdd_frontier")
-        _stall = state.get("tdd_stall")
-        _it = state.get("tdd_iter")
-        rows.append(f"           tdd      iter={_it}  "
-                    f"{green(f'pass={_tp}')}{_trend}  {red(f'fail={_tf}')}  "
-                    f"frontier={_fr}  stall={_stall}")
-        if len(_hist) >= 2:
-            rows.append(f"           pass→    {dim('→ '.join(str(x) for x in _hist[-8:]))}")
+    _by_cl = state.get("tdd_by_cluster") or {}
+    if _by_cl:
+        rows.append("           tdd      "
+                    + dim("per-cluster passes (each cluster resets its own floor):"))
+        _order = [c for c in (_baked_cluster_order() or list(_by_cl))
+                  if c in _by_cl]
+        _done = set(state.get("clusters_done") or [])
+        _active = state.get("cluster")
+        for _cn in _order:
+            _cs = _by_cl[_cn]
+            _p, _f = _cs.get("pass"), _cs.get("fail")
+            _h = _cs.get("hist") or []
+            _tr = ""
+            if len(_h) >= 2:
+                _dd = _h[-1] - _h[-2]
+                _tr = (green(f" ↑{_dd}") if _dd > 0
+                       else red(f" ↓{-_dd}") if _dd < 0 else dim(" ="))
+            _mark = (cyan("▶") if _cn == _active
+                     else green("✓") if _cn in _done else dim("·"))
+            _short = _cn.replace("anyhow_", "")[:14].ljust(14)
+            _line = (f"             {_mark} {_short} {green(f'pass={_p}')}{_tr}  "
+                     f"{red(f'fail={_f}')}  iter={_cs.get('iter')}  "
+                     f"stall={_cs.get('stall')}")
+            if len(_h) >= 2:
+                _line += "  " + dim("→".join(str(x) for x in _h[-8:]))
+            rows.append(_line)
 
     # Current error class — what the model is fighting right now.
     _ec = state.get("last_error_code")
