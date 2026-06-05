@@ -980,7 +980,17 @@ class VLLMBackend(LLMBackend):
         # disabled so it doesn't re-reason. Mirrors the Ollama/compat followup paths.
         if not result and thinking_chunks:
             _thinking_text = "".join(thinking_chunks)
-            _thinking_tail = _thinking_text[-6000:] if len(_thinking_text) > 6000 else _thinking_text
+            # Keep the whole reasoning chain — thinking is disabled on the followup, so
+            # length can't re-trigger reasoning, and vLLM's ctx (~131072) has ample room.
+            # Only trim (from the front, preserving the conclusion) if it wouldn't leave
+            # room for a usable code-output budget.
+            _base_input = _actual_prompt_tokens or _estimated_input_tokens
+            _cpt = max(3.0, _vllm_cpt)
+            _output_reserve = min(max_tokens, 8192)
+            _think_tok_budget = max(512, _ctx - _base_input - _output_reserve - 512)
+            _think_char_budget = int(_think_tok_budget * _cpt)
+            _thinking_tail = (_thinking_text[-_think_char_budget:]
+                              if len(_thinking_text) > _think_char_budget else _thinking_text)
             _fu_messages = messages + [
                 {"role": "assistant", "content": f"<think>\n{_thinking_tail}\n</think>"},
                 {"role": "user", "content": (
@@ -992,9 +1002,10 @@ class VLLMBackend(LLMBackend):
                 "chat_template_kwargs": {"enable_thinking": False},
                 "repetition_penalty": _rep_penalty,
             }
-            _fu_input_tok = (_actual_prompt_tokens or _estimated_input_tokens) + len(_thinking_tail) // 3 + 64
+            _fu_input_tok = _base_input + int(len(_thinking_tail) / _cpt) + 64
             _fu_max = min(max_tokens, max(512, _ctx - _fu_input_tok - 512))
-            _dbg(f"FOLLOWUP vllm model={served_model} thinking_len={len(_thinking_text)} fu_max={_fu_max}")
+            _dbg(f"FOLLOWUP vllm model={served_model} thinking_len={len(_thinking_text)} "
+                 f"tail_len={len(_thinking_tail)} fu_max={_fu_max}")
             _fu_chunks: list[str] = []
             _fu_cbuf = ""
             _fu_blk_tracking = False
