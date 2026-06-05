@@ -436,3 +436,15 @@ feeds the compiler output and asks for general structural-methodology rules. The
 | fix (proposed) | thread `failure_type` into `validate_task4_output`; for `failure_type=="build"` **drop the identifier-intersection requirement** (incompatible with the build prompt's general-rules mandate). KEEP stall (no-change) + shrank (removed-content) + dedup (verbatim-paragraph) checks — those are real corruption signals regardless of type. Single call site (pipeline.py:21313). |
 | why not a positive build-signal | requiring structural keywords (module/layout/entry-point/compile…) would just reintroduce the same false-positive class against a heavily-constrained prompt. For build failures, stall/shrank/dedup are the honest anti-corruption set. |
 | validation | ●● — a unit test can drive `validate_task4_output(..., failure_type="build")` with a general (identifier-free) update and assert it's accepted; full propagation (coverage_strategy regen → fewer build spins) wants a live run. |
+
+
+Important Todos:
+* We just worked on a two fixes that: propagated a logic used for the ollama implementation into the llvm: whenever a context for think is exhausted, take the output before overwriting and loop it into a loop. This logic was not into vllm. So we need to abstract the way hard implementations work and fix it once at a higher level. vllm or ollama should have no busines logic, only communications with the drivers. the controller at a higher level.
+* once the previous point is implemented we must generalize a logic for ensuring think from llm is never capped or detected and followed up, this must work with vllm ollama whatever, because we're moving it to a higher level
+* second fix we did, allowed us to identify in t2c an issue in to the context size capping for think. The fix was "extend ctx-budget-aware logic to every hard coded context size cap" this todo is about searching again the whole pipeline for places where we still hard cap the context size. we should use the ctx-budgate-aware logic.
+
+* We refactored the whole pipeline, still everything is hardcoded into pipeline.py that is huge. we must:
+* extract comming logic into specific modules like "error handling", "context aware logic", "loops for fixing errors with retrospective" these logics should be generic enough to be used in any task.
+* then finally extract tasks. tasks have no specific logic but only control what is happening
+
+* 

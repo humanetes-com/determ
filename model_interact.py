@@ -798,7 +798,13 @@ class VLLMBackend(LLMBackend):
     def __init__(self):
         self._base_url = os.getenv("VLLM_BASE_URL", "http://localhost:8000/v1")
         self._model_name = os.getenv("VLLM_MODEL_NAME", MODEL)
-        self._thinking_budget = int(os.getenv("VLLM_THINKING_BUDGET", "8192"))
+        # Budgets sized from the measured demand distribution (logs/thinking + llm.response
+        # events): both thinking and content reach a censored p99.9 of ~13–16K tok, so each
+        # is set to the next pow2 (16384). Total 32768 + input ≈ 28% of a 131072 ctx; the
+        # empty/length followup below catches the residual tail. NOT derived from
+        # OLLAMA_NUM_CTX (an Ollama-only knob that was throttling vLLM to 8192 content).
+        self._thinking_budget = int(os.getenv("VLLM_THINKING_BUDGET", "16384"))
+        self._content_budget = int(os.getenv("VLLM_CONTENT_BUDGET", "16384"))
 
     def ask(self, prompt, system, model, max_tokens, think=None):
         import re as _re
@@ -834,6 +840,11 @@ class VLLMBackend(LLMBackend):
         _ctx = int(os.getenv("VLLM_MAX_MODEL_LEN", "65536"))
         _msg_chars = sum(len(m["content"]) for m in messages)
         _thinking_reserve = self._thinking_budget if _enable_thinking else 0
+        # Content budget = the larger of what the caller asked for and the data-driven
+        # floor. Raising the ceiling is safe: the mod gen_*/<FILE> early-stop detectors
+        # terminate generation as soon as the block closes, so small responses still stop
+        # early — only the large tail (p99 ~8K tok) benefits from the headroom.
+        _content_cap = max(max_tokens, self._content_budget)
 
         def _cap(input_tok_est: int, content_budget: int) -> int:
             """Compute final max_tokens to send (caps content, then adds thinking bump)."""
@@ -851,16 +862,18 @@ class VLLMBackend(LLMBackend):
         # The old floor of 2.0 overestimated input tokens for large prompts, causing
         # safe() to hit its 512 minimum and leaving almost no content output budget.
         _estimated_input_tokens = max(1, int(_msg_chars / max(3.0, _vllm_cpt)))
-        _request_max_tokens = _cap(_estimated_input_tokens, max_tokens)
+        _request_max_tokens = _cap(_estimated_input_tokens, _content_cap)
 
         chunks: list[str] = []
         thinking_chunks: list[str] = []
         _actual_prompt_tokens: int | None = None
+        _finish_reason: str | None = None
 
         for _attempt in range(3):
             chunks = []
             thinking_chunks = []
             _actual_prompt_tokens = None
+            _finish_reason = None
             _cbuf = ""
             _blk_tracking = False
             _blk_depth = 0
@@ -882,6 +895,12 @@ class VLLMBackend(LLMBackend):
                             _actual_prompt_tokens = chunk.usage.prompt_tokens
                         if not chunk.choices:
                             continue
+                        # finish_reason=="length" ⇒ vLLM hit max_tokens (truncated);
+                        # "stop" ⇒ natural EOS. Captured here so the post-loop recovery
+                        # can tell a deliberate stop from a budget cut.
+                        _fr = chunk.choices[0].finish_reason
+                        if _fr:
+                            _finish_reason = _fr
                         delta = chunk.choices[0].delta
                         # Collect reasoning tokens separately for logging/debugging.
                         reasoning = getattr(delta, "reasoning", None) or getattr(delta, "reasoning_content", None)
@@ -941,10 +960,10 @@ class VLLMBackend(LLMBackend):
                         _vllm_cpt = (1 - _vllm_cpt_alpha) * _vllm_cpt + _vllm_cpt_alpha * _measured_cpt
                         _guard("vllm/400_retry",
                                f"attempt={_attempt} real_input={_real_input}tok "
-                               f"new_req_max={_cap(_real_input, max_tokens)} "
+                               f"new_req_max={_cap(_real_input, _content_cap)} "
                                f"cpt_ewm={_prev_cpt:.2f}→{_vllm_cpt:.2f}")
                     _estimated_input_tokens = _real_input
-                    _request_max_tokens = _cap(_real_input, max_tokens)
+                    _request_max_tokens = _cap(_real_input, _content_cap)
                     continue
                 raise
             except (httpx.ReadTimeout, httpx.ConnectError, httpx.RemoteProtocolError) as _e:
@@ -974,11 +993,20 @@ class VLLMBackend(LLMBackend):
         # Defensive: strip any <think>...</think> that leaked through content.
         result = _re.sub(r'<think>.*?</think>\s*', '', result, flags=_re.DOTALL).strip()
 
-        # Thinking-budget exhausted: the model spent its whole output budget reasoning
-        # and emitted no content (all tokens went to reasoning_content). Re-feed the
-        # final reasoning as an assistant turn and ask for code only, with thinking
-        # disabled so it doesn't re-reason. Mirrors the Ollama/compat followup paths.
-        if not result and thinking_chunks:
+        # finish_reason=="length" means vLLM cut generation at max_tokens. (Early-stop
+        # breaks abandon the stream before the final chunk, so _finish_reason stays None
+        # on a clean block close — "length" therefore flags a genuine truncation.)
+        _length_truncated = _finish_reason == "length"
+        if _length_truncated:
+            _guard("vllm/length_truncated",
+                   f"model={served_model} hit max_tokens={_request_max_tokens} "
+                   f"(content={len(result)} chars, thinking={sum(len(t) for t in thinking_chunks)} chars)")
+
+        # Budget exhausted on reasoning: either no content emitted at all (all tokens →
+        # reasoning_content) or the stream was length-truncated mid-output. Re-feed the
+        # reasoning as an assistant turn and ask for code only, thinking disabled so it
+        # doesn't re-reason. Mirrors the Ollama/compat followup paths.
+        if thinking_chunks and (not result or _length_truncated):
             _thinking_text = "".join(thinking_chunks)
             # Keep the whole reasoning chain — thinking is disabled on the followup, so
             # length can't re-trigger reasoning, and vLLM's ctx (~131072) has ample room.
@@ -986,7 +1014,7 @@ class VLLMBackend(LLMBackend):
             # room for a usable code-output budget.
             _base_input = _actual_prompt_tokens or _estimated_input_tokens
             _cpt = max(3.0, _vllm_cpt)
-            _output_reserve = min(max_tokens, 8192)
+            _output_reserve = self._content_budget
             _think_tok_budget = max(512, _ctx - _base_input - _output_reserve - 512)
             _think_char_budget = int(_think_tok_budget * _cpt)
             _thinking_tail = (_thinking_text[-_think_char_budget:]
@@ -1003,7 +1031,7 @@ class VLLMBackend(LLMBackend):
                 "repetition_penalty": _rep_penalty,
             }
             _fu_input_tok = _base_input + int(len(_thinking_tail) / _cpt) + 64
-            _fu_max = min(max_tokens, max(512, _ctx - _fu_input_tok - 512))
+            _fu_max = min(_content_cap, max(512, _ctx - _fu_input_tok - 512))
             _dbg(f"FOLLOWUP vllm model={served_model} thinking_len={len(_thinking_text)} "
                  f"tail_len={len(_thinking_tail)} fu_max={_fu_max}")
             _fu_chunks: list[str] = []
