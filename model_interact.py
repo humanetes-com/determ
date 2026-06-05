@@ -974,6 +974,76 @@ class VLLMBackend(LLMBackend):
         # Defensive: strip any <think>...</think> that leaked through content.
         result = _re.sub(r'<think>.*?</think>\s*', '', result, flags=_re.DOTALL).strip()
 
+        # Thinking-budget exhausted: the model spent its whole output budget reasoning
+        # and emitted no content (all tokens went to reasoning_content). Re-feed the
+        # final reasoning as an assistant turn and ask for code only, with thinking
+        # disabled so it doesn't re-reason. Mirrors the Ollama/compat followup paths.
+        if not result and thinking_chunks:
+            _thinking_text = "".join(thinking_chunks)
+            _thinking_tail = _thinking_text[-6000:] if len(_thinking_text) > 6000 else _thinking_text
+            _fu_messages = messages + [
+                {"role": "assistant", "content": f"<think>\n{_thinking_tail}\n</think>"},
+                {"role": "user", "content": (
+                    "You have already reasoned through this problem above. "
+                    "Now write the code block. Do not re-explain — output only the code."
+                )},
+            ]
+            _fu_extra = {
+                "chat_template_kwargs": {"enable_thinking": False},
+                "repetition_penalty": _rep_penalty,
+            }
+            _fu_input_tok = (_actual_prompt_tokens or _estimated_input_tokens) + len(_thinking_tail) // 3 + 64
+            _fu_max = min(max_tokens, max(512, _ctx - _fu_input_tok - 512))
+            _dbg(f"FOLLOWUP vllm model={served_model} thinking_len={len(_thinking_text)} fu_max={_fu_max}")
+            _fu_chunks: list[str] = []
+            _fu_cbuf = ""
+            _fu_blk_tracking = False
+            _fu_blk_depth = 0
+            _sock_open(f"vllm-followup model={served_model} think=False")
+            _sock_write("\n[FOLLOWUP — thinking budget exhausted, requesting code]\n")
+            try:
+                with client.chat.completions.create(  # type: ignore[call-overload,union-attr]
+                    model=served_model,
+                    messages=_fu_messages,  # type: ignore[arg-type]
+                    max_tokens=_fu_max,
+                    extra_body=_fu_extra,
+                    stream=True,
+                ) as stream:
+                    for chunk in stream:
+                        if not chunk.choices:
+                            continue
+                        text = getattr(chunk.choices[0].delta, "content", None)
+                        if not text:
+                            continue
+                        _fu_chunks.append(text)
+                        _sock_write(text)
+                        _fu_cbuf += text
+                        if not _fu_blk_tracking:
+                            _mg = _fu_cbuf.find('mod gen_')
+                            if _mg != -1:
+                                _ob = _fu_cbuf.find('{', _mg)
+                                if _ob != -1:
+                                    _fu_blk_tracking = True
+                                    for _ch in _fu_cbuf[_ob:]:
+                                        if _ch == '{': _fu_blk_depth += 1
+                                        elif _ch == '}': _fu_blk_depth -= 1
+                                    if _fu_blk_depth <= 0:
+                                        _sock_write("\n[BLOCK_CLOSED]\n")
+                                        break
+                        else:
+                            for _ch in text:
+                                if _ch == '{': _fu_blk_depth += 1
+                                elif _ch == '}': _fu_blk_depth -= 1
+                            if _fu_blk_depth <= 0:
+                                _sock_write("\n[BLOCK_CLOSED]\n")
+                                break
+            except (httpx.ReadTimeout, httpx.ConnectError, httpx.RemoteProtocolError) as _e:
+                _guard("vllm/followup_network", f"err={type(_e).__name__}: {_e}")
+            result = "".join(_fu_chunks)
+            result = _re.sub(r'<think>.*?</think>\s*', '', result, flags=_re.DOTALL).strip()
+            _guard("vllm/followup",
+                   f"model={served_model} thinking_len={len(_thinking_text)} result_len={len(result)}")
+
         # Persist the model's reasoning (thinking) keyed by the response content
         # sha — the SAME sha the pipeline stores the response under — so callers
         # can read WHY the model produced what it did. Previously discarded; only
