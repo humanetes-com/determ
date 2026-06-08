@@ -21,6 +21,7 @@ import contextlib
 import json
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -215,45 +216,65 @@ def _dbg_response(label: str, raw: str) -> None:
 # Per-call stream file handle. Overwritten at the start of each call so any
 # number of readers (monitor, logger, etc.) can open and tail the file
 # simultaneously without socket-ownership conflicts.
-_stream_fh = None
+# Per-thread stream handle. PHASE_C_PARALLELISM>1 runs N concurrent ask()
+# workers; one shared handle would interleave their token streams and
+# re-truncate the file on every worker's _sock_open. Each thread owns its own
+# file so the live logs stay coherent.
+_stream_tl = threading.local()
+
+
+def _stream_path_for_thread() -> str:
+    """Main thread → the base stream log (so `tail -f stream.log` still works);
+    worker threads → a sibling file keyed by thread name."""
+    if not _STREAM_LOG:
+        return ""
+    t = threading.current_thread()
+    if t is threading.main_thread():
+        return _STREAM_LOG
+    safe = t.name.replace("/", "_").replace(" ", "_")
+    root, dot, ext = _STREAM_LOG.rpartition(".")
+    return f"{root}.{safe}.{ext}" if dot else f"{_STREAM_LOG}.{safe}"
 
 
 def _sock_open(label: str = "") -> None:
-    """Open the stream log for this call (overwrite). Silently skip on error."""
-    global _stream_fh
+    """Open this thread's stream log for this call (overwrite). Skip on error."""
     import time as _time
-    if _stream_fh:
+    fh = getattr(_stream_tl, "fh", None)
+    if fh:
         with contextlib.suppress(Exception):
-            _stream_fh.close()
-    if not _STREAM_LOG:
-        _stream_fh = None
+            fh.close()
+    _stream_tl.fh = None
+    path = _stream_path_for_thread()
+    if not path:
         return
     try:
-        _stream_fh = open(_STREAM_LOG, "w", buffering=1)  # line-buffered flush
-        _stream_fh.write(f"[CALL_START: {_time.time():.3f}]\n")
+        fh = open(path, "w", buffering=1)  # line-buffered flush
+        fh.write(f"[CALL_START: {_time.time():.3f}]\n")
         if label:
-            _stream_fh.write(f"[CALL: {label}]\n")
-        _stream_fh.flush()
+            fh.write(f"[CALL: {label}]\n")
+        fh.flush()
+        _stream_tl.fh = fh
     except Exception:
-        _stream_fh = None
+        _stream_tl.fh = None
 
 
 def _sock_write(text: str) -> None:
-    if not _stream_fh or not text:
+    fh = getattr(_stream_tl, "fh", None)
+    if not fh or not text:
         return
     try:
-        _stream_fh.write(text)
-        _stream_fh.flush()
+        fh.write(text)
+        fh.flush()
     except Exception:
         pass
 
 
 def _sock_close() -> None:
-    global _stream_fh
-    if _stream_fh:
+    fh = getattr(_stream_tl, "fh", None)
+    if fh:
         with contextlib.suppress(Exception):
-            _stream_fh.close()
-        _stream_fh = None
+            fh.close()
+    _stream_tl.fh = None
 
 
 def _timed_iter(it, timeout: int):

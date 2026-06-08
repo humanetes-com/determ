@@ -9682,12 +9682,27 @@ def _task2_fill_fns_one_by_one(
         progress_this_pass = 0
         filled_this_pass: list[tuple[str, str]] = []  # [(file_rel, fn_name)]
 
-        # P4: queue of (idx, rec) pairs consumed by workers. Sequential mode
-        # = 1 worker; parallel mode = N workers concurrently. Workers exit
-        # when the queue is empty.
+        # P4: per-level work queue consumed by workers. Re-created per
+        # priority level in the dispatch loop below; the worker reads it as a
+        # closure free-var. Sequential mode = 1 worker; parallel mode = N
+        # workers concurrently. Workers exit when the queue is empty.
         _work_queue: _queue_mod.Queue = _queue_mod.Queue()
+
+        # P8: priority-level batching. `stubs` is already leaf-first sorted
+        # (descending ref-count), so equal-priority stubs are contiguous.
+        # Group them into levels; the dispatch loop runs each level in
+        # parallel with a barrier between levels, so a more-referenced
+        # (callee) level always completes before the level depending on it —
+        # each fill sees real sibling bodies in deterministic order,
+        # independent of worker scheduling.
+        _levels: list[list[tuple[int, dict]]] = []
+        _prev_key: object = object()
         for _i, _r in enumerate(stubs, 1):
-            _work_queue.put((_i, _r))
+            _key = leaf_name_counts.get(_r["fn_name"], 0) if leaf_name_counts else 0
+            if _key != _prev_key:
+                _levels.append([])
+                _prev_key = _key
+            _levels[-1].append((_i, _r))
 
         def _worker():
             nonlocal attempts, fns_filled, progress_this_pass
@@ -10257,20 +10272,26 @@ def _task2_fill_fns_one_by_one(
                 progress_this_pass += 1
                 filled_this_pass.append((rel_file, fn_name))
 
-        # P4 dispatch: spawn N workers or run inline. Workers exit when the
-        # queue is empty. Sequential (parallelism=1) uses a single worker
-        # which is functionally identical to the previous for-loop path.
-        if _parallelism > 1:
-            _workers = [
-                _threading.Thread(target=_worker, name=f"per-fn-worker-{i}")
-                for i in range(_parallelism)
-            ]
-            for _t in _workers:
-                _t.start()
-            for _t in _workers:
-                _t.join()
-        else:
-            _worker()
+        # P8 dispatch: process priority levels in order, barrier between them.
+        # Within a level, spawn min(P, level size) workers (concurrency
+        # self-bounds for small levels); join before the next level so the
+        # callee level is fully filled before its callers start.
+        for _level in _levels:
+            _work_queue = _queue_mod.Queue()
+            for _item in _level:
+                _work_queue.put(_item)
+            _nw = min(_parallelism, len(_level))
+            if _nw > 1:
+                _workers = [
+                    _threading.Thread(target=_worker, name=f"per-fn-worker-{i}")
+                    for i in range(_nw)
+                ]
+                for _t in _workers:
+                    _t.start()
+                for _t in _workers:
+                    _t.join()
+            else:
+                _worker()
 
         # === Per-pass cargo test ===
         # Always run at end of every pass, even when filled_this_pass is empty

@@ -1,6 +1,13 @@
 See autopilot.md for autopilot behavior rules.
 
-Past session handovers: see handover/HANDOVERS.md.
+Past session handovers: see HANDOVERS.md (repo root).
+
+Handover convention (do NOT re-inspect the file to recall this):
+- File: `HANDOVERS.md` at repo root. One file, newest session PREPENDED at the top, older sessions below, separated by a `---` line.
+- New entry: Read the current first line (the latest `# Handover — session N — …`), then Edit-prepend a new `# Handover — session N+1 — <headline>` block above it (bump N).
+- Required sections, in this order: `## State at handover` (branch, HEAD short-sha, working-tree clean/dirty, on-disk md5 of pipeline.py + model_interact.py, who-commits), `## What shipped this session` (commits + one-line each), `## ON RETURN — how to evaluate` (concrete: which logs/grep patterns, GOOD vs BAD per change), then any plan/decision sections, then `## Key facts`.
+- Style: compact structured (tables/symbolic), per the LLM-output rules below. It is a reference doc for future-me, so completeness > brevity here (the 2-line chat rule does NOT apply to file content).
+- Write it when the user asks to hand over, or at the end of a substantial unit of work.
 
 Do not use RemoteTrigger, ScheduleWakeup, or create remote schedule routines. No code or data should be sent to Anthropic's cloud servers via scheduled agents.
 
