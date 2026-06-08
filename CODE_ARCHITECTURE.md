@@ -439,12 +439,58 @@ feeds the compiler output and asks for general structural-methodology rules. The
 
 
 Important Todos:
-* We just worked on a two fixes that: propagated a logic used for the ollama implementation into the llvm: whenever a context for think is exhausted, take the output before overwriting and loop it into a loop. This logic was not into vllm. So we need to abstract the way hard implementations work and fix it once at a higher level. vllm or ollama should have no busines logic, only communications with the drivers. the controller at a higher level.
-* once the previous point is implemented we must generalize a logic for ensuring think from llm is never capped or detected and followed up, this must work with vllm ollama whatever, because we're moving it to a higher level
-* second fix we did, allowed us to identify in t2c an issue in to the context size capping for think. The fix was "extend ctx-budget-aware logic to every hard coded context size cap" this todo is about searching again the whole pipeline for places where we still hard cap the context size. we should use the ctx-budgate-aware logic.
 
+#### W1+W2 — backend→transport + unified think-recovery controller  ✅ SHIPPED (●●● awaits live run)
+The first two todos below are done. All recovery/capping/followup/retry policy moved out of the
+backends into one controller in `pipeline_core/llm/` (foundational facade, outside the layer contract):
+| module | owns |
+|---|---|
+| `events.py` | `Transport` Protocol + `Delta`/`StreamMeta` + typed errors (`InputTooLong`/`TransportUnavailable`/`TransportTimeout`) |
+| `detect.py` | `StopDetector` — structural early-stop (`mod gen_*` brace-balance, `<FILE>` close) |
+| `thinktag.py` | `InlineThinkSplitter` — incremental `<think>` demux for inline-reasoning wires |
+| `cleanup.py` | boundary/role-token strip (pure; returns guard events) |
+| `budget.py` | `request_max_tokens` — the ONE ctx-budget-aware cap (content + thinking reserve, ctx-capped) + adaptive cpt EWM |
+| `controller.py` | `LLMController.run` — stream-consume + think-cap-with-recovery + length-truncation followup + 400/network retry + reasoning persist; I/O via injected `Hooks` |
+
+`model_interact.py` backends are now THIN `*Transport`s (Ollama/vLLM/SGLang/HF/Claude): connect, stream
+normalized `Delta`s, declare a `BudgetSpec`. No private caps, no followup. `ask()` unchanged → routes
+through `LLMController`. Tests: `tests/test_llm_controller.py` (16, fake transport drives followup /
+length-trunc / think-cap / early-stop / 400-retry / persist). check.sh green.
+Generalization wins (todo #2): SGLang/HF previously had NO recovery — SGLang now captures
+`reasoning_content` + gets followup; the ollama-compat followup's hardcoded `min(.,16384)` is now
+ctx-budget-aware. Behaviour parity for the active vLLM path is intended-identical; ●●● ⇒ needs a live run.
+NOTE (minor): ollama-compat no longer emits raw `<think>`/`</think>` to stream.log (splitter strips them);
+vLLM never did, so monitor's think-phase display is unaffected for the active backend.
+NEXT (W3): sweep pipeline.py for remaining hardcoded output/think caps (e.g. `_RETRO_MAX_TOKENS`) and
+route them through the budget logic; W5: extract generic error/ctx/retro-loop modules then thin the tasks.
+
+* We just worked on a two fixes that: propagated a logic used for the ollama implementation into the llvm: whenever a context for think is exhausted, take the output before overwriting and loop it into a loop. This logic was not into vllm. So we need to abstract the way hard implementations work and fix it once at a higher level. vllm or ollama should have no busines logic, only communications with the drivers. the controller at a higher level.  ✅ W1
+* once the previous point is implemented we must generalize a logic for ensuring think from llm is never capped or detected and followed up, this must work with vllm ollama whatever, because we're moving it to a higher level  ✅ W2
+* second fix we did, allowed us to identify in t2c an issue in to the context size capping for think. The fix was "extend ctx-budget-aware logic to every hard coded context size cap" this todo is about searching again the whole pipeline for places where we still hard cap the context size. we should use the ctx-budgate-aware logic.  🔄 W3 (budget.request_max_tokens is the home; sweep pending)
+* For example I just debugged T4 and the think was just capped. stream simply interrupted. We're interrupting thinking everywhere!  🔄 W3
 * We refactored the whole pipeline, still everything is hardcoded into pipeline.py that is huge. we must:
 * extract comming logic into specific modules like "error handling", "context aware logic", "loops for fixing errors with retrospective" these logics should be generic enough to be used in any task.
 * then finally extract tasks. tasks have no specific logic but only control what is happening
 
-* 
+* I read in t4 reasoning from the LLM "The user is asking to generate a genesis for solving a bug in the unit test. The genesis is more generic right? analyze in functional requirements what genesis is referring too
+
+* So the t4 fix was already covered and is now also more correct:
+  - t4's capped thinking is fixed by the global thinking_budget 8192→16384 (thinking is one backend knob, shared by all
+  tasks).
+  - The retro's explicit max_tokens=6144 content bound is now honored, not overridden — _content_cap only substitutes the
+  data-driven floor when the caller used the mis-derived global default (MAX_TOKENS), leaving deliberate per-call bounds
+  intact.
+
+  Net: every task (including t4 retro/diagnosis) now reasons with the full 16384-token budget, while explicit content
+  bounds like the retro's 6144 stay as their authors intended.
+
+ search the same issue in the whole pipeline every place where we interact with llm we could be capping things       
+
+*I did a copy of stream.log into codeLLm_Architecture_log.md. I see a couple of inconsistencies:Looking at think in t3 I think the LLM could have some knowledge about AnyHow outside of our repository. So we should indicate specifically in anystep where it is looking at the code "The repo is called {AnyHow} but considering the implementation is completely done from scratch by us, the implementation is completely different than the repository knowne as {AnyHow} where {Anyhow}=ModelName. The structure of the message may change.
+the LL
+
+comments regarding initial t0a generation:
+we instruct the prompt defailt is cargo test. but we hav e multiple clusn't that wrong to instruct default? shouldn't we add to search for pre-compiler instructions like nightly?
+* regarding compact covberage strategy reference: is this generated .md passed in the next steps? I'd like a review task by task about what are we sending(validate we're actually sending the content)
+* I read a comment "Wait, the prompt template has double braces `{{ }}` for formatting? The user provided" where are we passing {{ }}?
+
