@@ -461,8 +461,28 @@ Generalization wins (todo #2): SGLang/HF previously had NO recovery — SGLang n
 ctx-budget-aware. Behaviour parity for the active vLLM path is intended-identical; ●●● ⇒ needs a live run.
 NOTE (minor): ollama-compat no longer emits raw `<think>`/`</think>` to stream.log (splitter strips them);
 vLLM never did, so monitor's think-phase display is unaffected for the active backend.
-NEXT (W3): sweep pipeline.py for remaining hardcoded output/think caps (e.g. `_RETRO_MAX_TOKENS`) and
-route them through the budget logic; W5: extract generic error/ctx/retro-loop modules then thin the tasks.
+#### W3 — ctx-budget-aware sweep of hardcoded caps  ✅ SHIPPED (●● tests; live run for full effect)
+Audit result: OUTPUT/think capping is already centralized by W1+W2 — the ONLY explicit `max_tokens` in
+pipeline.py is the retro's deliberate `_RETRO_MAX_TOKENS=6144` CONTENT bound, which the controller now
+honors while giving thinking its own 16384 reserve (so retro/T4 reasoning is no longer cut). No other
+hardcoded output/think cap remains. INPUT side: the budget-derived cap family (`_FIX_ERR_CAP` =
+`max(2000, SINGLE_CALL_CHAR_LIMIT//10)`, `_FAILED_BODY_CAP`, `_SRC_SNIP_CAP`, …) already existed; the sweep
+routed the *escaped literals* through it so they scale with context (and shrink on small windows) instead
+of freezing:
+| site | was | now |
+|---|---|---|
+| `_focus_cargo_errors` default + the `3000` caller | `4000`/`3000` | `_FIX_ERR_CAP` (auto-scales all default callers) |
+| retro-diagnosis error excerpt | `[:4000]` | `[:_FIX_ERR_CAP]` |
+| failure-classifier test_out tail | `[-6000:]` | `[-_FIX_ERR_CAP:]` |
+| model-notes extraction (body/err/fixed) | `[:1500]×3` | `_FAILED_BODY_CAP`/`_FIX_ERR_CAP` |
+| task0c coverage-retry existing-block | `[:2000]` | `[:_SRC_SNIP_CAP]` (already injected) |
+KEPT (justified, not context throttles): `lib_rs[:4000]` (top-of-file `#![no_std]` scan), the per-attempt
+history compacts `_ERROR_EXCERPT_MAX_CHARS=600`/`_PRIOR_BODY_CAP=320`/`_PRIOR_ERR_CAP=180` (N-attempt
+blocks — small by design), and post-hoc log/display snippets. check.sh green.
+
+NEXT — W4 (prompt-correctness: from-scratch disclaimer, genesis clarification, T0a nightly detection,
+coverage_strategy passing audit, `{{ }}` source); W5 (extract generic error/ctx/retro-loop modules, then
+thin the tasks to orchestration-only).
 
 * We just worked on a two fixes that: propagated a logic used for the ollama implementation into the llvm: whenever a context for think is exhausted, take the output before overwriting and loop it into a loop. This logic was not into vllm. So we need to abstract the way hard implementations work and fix it once at a higher level. vllm or ollama should have no busines logic, only communications with the drivers. the controller at a higher level.  ✅ W1
 * once the previous point is implemented we must generalize a logic for ensuring think from llm is never capped or detected and followed up, this must work with vllm ollama whatever, because we're moving it to a higher level  ✅ W2

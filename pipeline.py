@@ -6453,9 +6453,9 @@ def _extract_self_note(
     if not failed_body or not error_excerpt:
         return None
     prompt = _NOTE_EXTRACTION_PROMPT.format(
-        failed_body=failed_body[:1500],
-        error_excerpt=error_excerpt[:1500],
-        fixed_body=fixed_body[:1500] if fixed_body else "(no fixed body — fix loop exhausted)",
+        failed_body=failed_body[:_FAILED_BODY_CAP],
+        error_excerpt=error_excerpt[:_FIX_ERR_CAP],
+        fixed_body=fixed_body[:_FAILED_BODY_CAP] if fixed_body else "(no fixed body — fix loop exhausted)",
     )
     # Two-attempt ladder for extraction: default (thinking on) then think=False
     # fallback. Mirrors the body-extraction recovery — Qwen3.6 occasionally
@@ -7471,7 +7471,7 @@ def _whole_tree_retrospective(
         f"You are diagnosing why fix-loop `{name}` has stopped reducing\n"
         f"the rustc error count across multiple attempts.\n\n"
         f"Recent attempts:\n{history_block}\n"
-        f"Current error excerpt:\n```\n{error_excerpt[:4000]}\n```\n"
+        f"Current error excerpt:\n```\n{error_excerpt[:_FIX_ERR_CAP]}\n```\n"
         f"{prior_block}\n"
         "Output EXACTLY two lines:\n"
         "  CATEGORY: <one short tag — e.g. WRONG_FILE_TARGETED, "
@@ -7595,8 +7595,9 @@ def _classify_phase_c_test_failures(
         return {}
 
     # Budget the test_out excerpt: classifier needs to see error blocks but
-    # has no need for the full multi-MB cargo output.
-    excerpt = test_out[-6000:] if len(test_out) > 6000 else test_out
+    # has no need for the full multi-MB cargo output. Ctx-budget-aware (scales
+    # with the model's context, floored for small windows) — not a frozen literal.
+    excerpt = test_out[-_FIX_ERR_CAP:] if len(test_out) > _FIX_ERR_CAP else test_out
 
     filled_lines = "\n".join(f"  - {r}::{f}" for r, f in filled_this_pass[:60])
     failing_lines = "\n".join(f"  - {t}" for t in failed_tests[:30])
@@ -7835,7 +7836,7 @@ def _strip_cargo_warnings(output: str) -> str:
     return "\n".join(out)
 
 
-def _focus_cargo_errors(output: str, file_rel: str, max_chars: int = 4000) -> str:
+def _focus_cargo_errors(output: str, file_rel: str, max_chars: int = _FIX_ERR_CAP) -> str:
     """Extract a focused error excerpt from cargo output.
 
     P3.7 tiered output. Two groups of error blocks:
@@ -17205,7 +17206,7 @@ def _task3_inline_retry(
                 continue
             sig_t = sloc[0]
             cur_body = cur_text[sloc[2]:sloc[3]]
-            err_excerpt = _focus_cargo_errors(output, rel_f, max_chars=3000)
+            err_excerpt = _focus_cargo_errors(output, rel_f, max_chars=_FIX_ERR_CAP)
             prompt = _build_per_fn_fix_prompt(
                 file_text=cur_text, fn_name=fn, sig_text=sig_t,
                 test_blocks=[], module_name=project_dir.name,

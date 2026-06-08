@@ -1291,7 +1291,7 @@ project-specific import paths, type construction patterns, and hard constraints.
                         f"Source (uncovered lines marked):\n```rust\n"
                         f"{_annotate_uncovered(existing_text, uncov_lines)[:_SRC_SNIP_CAP]}\n```\n\n"
                         f"Existing test block (already on disk — do NOT duplicate):\n```rust\n"
-                        f"{_old_block[:2000] if _old_block else '(none)'}\n```\n\n"
+                        f"{_old_block[:_SRC_SNIP_CAP] if _old_block else '(none)'}\n```\n\n"
                         f"Output ONLY the new mod block wrapped in <FILE path=\"{rel_path}\">...</FILE>."
                     )
                     _retry_resp = ask(_retry_prompt, model=_TASK0C_MODEL,
