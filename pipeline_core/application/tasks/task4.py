@@ -196,6 +196,10 @@ Previous test output (for comparison):
     if _is_build:
         prompt = f"""You are refining a methodology for translating test suites into functional requirements.
 
+genesis.md is NOT a bug fix and NOT specific to this crate's tests: it is the project-independent,
+language-agnostic reasoning process for turning ANY test suite into requirements. You are improving
+that general methodology — do not write a fix for this one failure.
+
 The implementation failed to COMPILE this iteration — the tests could not even run.
 This is a STRUCTURAL failure: the generated code was missing required files, had wrong
 module declarations, or had incorrect workspace layout. This is NOT a logic error.

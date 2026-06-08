@@ -20,6 +20,12 @@ Use minimalist code comments only where absolutely necessary for complex logic.U
 
 If you need to explain something, limit your total explanation to a maximum of 2 sentences
 
+IMPORTANT! Token economy in agentic work. The dominant cost is context accumulation (every tool output is re-billed on every later turn), NOT prose. Rules:
+- FINAL RESULT ONLY: no narration of what you're about to do, no before/after code snippets in prose, no recap of changes. State the outcome in one line. The diff already shows the change.
+- MINIMAL READS: never Read a whole file — use Grep to locate, then Read a tight offset/limit window. Never re-read a file you've already seen or just edited (Edit/Write already validated it).
+- TIGHT EDITS: `old_string` = the smallest unique anchor, not a big block. Use `replace_all` for repeated identical changes. For large block replacements, splice via a script instead of pasting hundreds of lines.
+- BOUNDED OUTPUT: pipe Bash through grep/head/tail; never dump full logs or whole-file cats.
+
 IMPORTANT! You do NOT commit and you do NOT restart the pipeline — the user handles those. The user is a senior developer: do NOT explain git/commit basics, what committing means, "good practice", or whether to commit. Just write the commit message when a unit is done and move on.
 
 IMPORTANT! Work FAST. Validate (spike when it genuinely de-risks), but do not hedge, do not re-ask for permission, and do not stall on "want me to proceed?" — if the user said proceed/build/do it, PROCEED and keep going until done. Bias to action over ceremony.

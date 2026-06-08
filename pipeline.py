@@ -457,6 +457,27 @@ def _phase(prefix: str, **fields):
         _emit(f"{prefix}.done", **merged)
 
 
+# Set once per run by _register_run; used to build the from-scratch disclaimer.
+_CRATE_DISPLAY_NAME = ""
+
+
+def _from_scratch_disclaimer() -> str:
+    """Anti-leakage system note: our impl is independent of any public crate of the same name.
+
+    Local models often 'know' a popular crate (anyhow, serde, …) and silently reconstruct
+    its real internals from memory. That defeats tests-only reconstruction. Stated on every
+    call so any code-viewing step is reminded the bytes it sees are ours, not upstream's.
+    """
+    name = _CRATE_DISPLAY_NAME or "this crate"
+    return (
+        f"This project reuses the name `{name}`, but the implementation has been written "
+        f"entirely from scratch and is COMPLETELY DIFFERENT from any public library known as "
+        f"`{name}`. Do NOT assume types, signatures, internal structure, or behavior from the "
+        f"upstream `{name}`. Reason ONLY from the code, signatures, and tests shown to you; "
+        f"the structure of names and modules may differ from what you remember."
+    )
+
+
 def ask(prompt: str, system: str | None = None, model: str | None = None,
         max_tokens: int | None = None, think: bool | None = None) -> str:
     """Drop-in wrapper around model_interact.ask that enforces context limits.
@@ -477,6 +498,8 @@ def ask(prompt: str, system: str | None = None, model: str | None = None,
     TAIL_KEEP = MODEL_CONTEXT_CHARS // 8
     MARGIN = 1_000  # small safety buffer only — prompt builders handle their own budgets
 
+    _disclaimer = _from_scratch_disclaimer()
+    system = f"{_disclaimer}\n\n{system}" if system else _disclaimer
     sys_len = len(system) if system else 0
     total = sys_len + len(prompt)
 
@@ -847,6 +870,13 @@ def _resolve_stdout_path() -> str | None:
 def _register_run(project_dir: Path) -> None:
     """Write this run's coordinates to the shared registry so monitor.py can
     auto-discover it. Idempotent: also prunes dead pids."""
+    global _CRATE_DISPLAY_NAME
+    _name = project_dir.name
+    for _suffix in ("-master", "-main", "-trunk"):
+        if _name.endswith(_suffix):
+            _name = _name[: -len(_suffix)]
+            break
+    _CRATE_DISPLAY_NAME = _name
     try:
         pid = os.getpid()
         stdout_log = _resolve_stdout_path()
@@ -3506,6 +3536,10 @@ Rules:
 - Output only the command on one line. No explanation, no markdown fences, no alternatives.
 - If multiple test commands exist, pick the one that runs all tests.
 - If Cargo.toml is present, default is `cargo test` unless the README or Makefile says otherwise.
+- If a rust-toolchain.toml / rust-toolchain file or the README pins a channel (e.g. nightly),
+  prefix it: `cargo +nightly test`. Likewise include any global flag the docs say is REQUIRED
+  to compile the tests at all (e.g. `--all-features`). Do NOT add per-feature/per-cfg variants —
+  those are handled separately per build configuration.
 - If package.json is present with a "test" script, use `npm test`.
 
 {readme_block}{context_block}
