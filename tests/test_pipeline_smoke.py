@@ -2769,3 +2769,13 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+def test_tag_block_shapes():
+    # slice 8a: the one wrapper for optional prompt sections — pins the exact
+    # legacy rendering (leading/trailing newlines, prefix/suffix placement).
+    import pipeline as p
+    assert p._tag_block("X", "") == ""
+    assert p._tag_block("X", "c") == "\n<X>\nc\n</X>\n"
+    assert (p._tag_block("X", "c", prefix="h:\n", suffix="\n```")
+            == "\n<X>\nh:\nc\n```\n</X>\n")

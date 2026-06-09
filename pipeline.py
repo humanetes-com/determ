@@ -6831,6 +6831,17 @@ def _gotchas_for_error(error_excerpt: str) -> str:
     return "\n\n".join(parts)
 
 
+def _tag_block(tag: str, content: str, *, prefix: str = "", suffix: str = "") -> str:
+    """Render one optional prompt section:
+    `\\n<TAG>\\n{prefix}{content}{suffix}\\n</TAG>\\n`, or "" when content is
+    empty. Slice 8a: the one wrapper for every optional section — previously
+    re-implemented inline per builder, which is how builders drifted apart
+    (a section added to one but not the others)."""
+    if not content:
+        return ""
+    return f"\n<{tag}>\n{prefix}{content}{suffix}\n</{tag}>\n"
+
+
 def _format_impl_block_for_prompt(
     block: dict,
     mark_target: bool = True,
@@ -6931,36 +6942,27 @@ def _build_per_impl_prompt(
                          "— they may be invoked indirectly via macros or "
                          "sibling fns)")
 
-    notes_block = f"\n<MODEL_NOTES>\n{notes_section}\n</MODEL_NOTES>\n" if notes_section else ""
-    types_block = f"\n<TYPES_IN_SCOPE>\n{types_section}\n</TYPES_IN_SCOPE>\n" if types_section else ""
-    invariants_block = (
-        f"\n<CLUSTER_INVARIANTS>\n{invariants_section}\n</CLUSTER_INVARIANTS>\n"
-        if invariants_section else ""
-    )
-    _trait_text = _trait_contract_for(container)
-    trait_block = f"\n<TRAIT_CONTRACT>\n{_trait_text}\n</TRAIT_CONTRACT>\n" if _trait_text else ""
-    _recurring = _promoted_error_rules(fr_path)
-    recurring_block = f"\n<RECURRING_ERRORS>\n{_recurring}\n</RECURRING_ERRORS>\n" if _recurring else ""
-    retro_block = (
-        f"\n<RETROSPECTIVE_GUIDANCE>\nThe previous attempt at this impl "
-        f"block did not reduce the error count. Apply this strategy "
-        f"differently this time:\n{retrospective_guidance}\n"
-        "</RETROSPECTIVE_GUIDANCE>\n" if retrospective_guidance else ""
-    )
+    notes_block = _tag_block("MODEL_NOTES", notes_section)
+    types_block = _tag_block("TYPES_IN_SCOPE", types_section)
+    invariants_block = _tag_block("CLUSTER_INVARIANTS", invariants_section)
+    trait_block = _tag_block("TRAIT_CONTRACT", _trait_contract_for(container))
+    recurring_block = _tag_block("RECURRING_ERRORS", _promoted_error_rules(fr_path))
+    retro_block = _tag_block(
+        "RETROSPECTIVE_GUIDANCE", retrospective_guidance,
+        prefix="The previous attempt at this impl block did not reduce the "
+               "error count. Apply this strategy differently this time:\n")
     # Crate idioms — patterns extracted from already-filled fns in THIS
     # file. Surfaces e.g. anyhow's `Self::construct_from_*(arg, None)`
     # constructor family, its `ContextError { context, error }` wrapper,
     # its vtable fn-pointer dispatch syntax. Generic detectors (no
     # per-crate knowledge); the content the model sees is specific
     # because it's extracted from the live source.
-    idioms_block = (
-        f"\n<CRATE_IDIOMS>\nPatterns this file already uses — design new "
-        "fns to MATCH these idioms whenever your fn's situation matches "
-        "one of them. Do NOT invent a new approach when one of these "
-        "patterns clearly applies.\n"
-        f"{crate_idioms_section}\n"
-        "</CRATE_IDIOMS>\n" if crate_idioms_section else ""
-    )
+    idioms_block = _tag_block(
+        "CRATE_IDIOMS", crate_idioms_section,
+        prefix="Patterns this file already uses — design new fns to MATCH "
+               "these idioms whenever your fn's situation matches one of "
+               "them. Do NOT invent a new approach when one of these "
+               "patterns clearly applies.\n")
 
     # Output protocol example.
     output_example: list[str] = []
@@ -7050,36 +7052,30 @@ def _build_per_fn_prompt(
         tests_section = ("(no tests directly reference this fn — it may be "
                          "invoked indirectly via a macro; consult MACROS below)")
     annotated = _annotate_file_view(file_text, fn_name)
-    notes_block = f"\n<MODEL_NOTES>\n{notes_section}\n</MODEL_NOTES>\n" if notes_section else ""
-    macros_block = f"\n<MACROS>\n{macros_section}\n</MACROS>\n" if macros_section else ""
+    notes_block = _tag_block("MODEL_NOTES", notes_section)
+    macros_block = _tag_block("MACROS", macros_section)
     # P5.1: type definitions for types the fn touches. The model often
     # confuses Own/Ref/ErrorImpl fields with methods (writes self.ptr.as_ref
     # instead of self.ptr.as_ref()); listing each type's actual fields and
     # methods makes this unambiguous.
-    types_block = f"\n<TYPES_IN_SCOPE>\n{types_section}\n</TYPES_IN_SCOPE>\n" if types_section else ""
+    types_block = _tag_block("TYPES_IN_SCOPE", types_section)
     # Cluster-aware macro invariants: which arm of each cfg-gated macro
     # is active for THIS cluster. Without this the model defends against
     # cases that can't occur (e.g. `unwrap_or(&default)` when the active
     # macro always returns Some).
-    invariants_block = (
-        f"\n<CLUSTER_INVARIANTS>\n{invariants_section}\n</CLUSTER_INVARIANTS>\n"
-        if invariants_section else ""
-    )
+    invariants_block = _tag_block("CLUSTER_INVARIANTS", invariants_section)
     # FR-024 sibling reference (initial-prompt variant).
-    siblings_block = (
-        f"\n<SIBLING_REFERENCE>\nFns with the same name `{fn_name}` in "
-        f"OTHER impl blocks of this file (already filled — your TARGET "
-        f"should follow the same structural pattern):\n```rust\n"
-        f"{siblings_section}\n```\n</SIBLING_REFERENCE>\n"
-        if siblings_section else ""
-    )
+    siblings_block = _tag_block(
+        "SIBLING_REFERENCE", siblings_section,
+        prefix=f"Fns with the same name `{fn_name}` in OTHER impl blocks of "
+               "this file (already filled — your TARGET should follow the "
+               "same structural pattern):\n```rust\n",
+        suffix="\n```")
     # P5.3: when impl-ing a known stdlib trait, inject its contract.
-    _trait_text = _trait_contract_for(container)
-    trait_block = f"\n<TRAIT_CONTRACT>\n{_trait_text}\n</TRAIT_CONTRACT>\n" if _trait_text else ""
+    trait_block = _tag_block("TRAIT_CONTRACT", _trait_contract_for(container))
     # P5.5: promoted recurring errors (E0xxx codes seen 3+ times this run).
     # P6.4: pass fr_path so past notes tagged with active codes get surfaced.
-    _recurring = _promoted_error_rules(fr_path)
-    recurring_block = f"\n<RECURRING_ERRORS>\n{_recurring}\n</RECURRING_ERRORS>\n" if _recurring else ""
+    recurring_block = _tag_block("RECURRING_ERRORS", _promoted_error_rules(fr_path))
     container_line = f"In: {container}\n" if container else ""
     return f"""Implement ONE Rust function so its tests pass.
 
@@ -8045,43 +8041,31 @@ def _build_per_fn_fix_prompt(
     else:
         tests_section = "(no tests directly reference this fn — see MACROS)"
     annotated = _annotate_file_view(file_text, fn_name)
-    notes_block = f"\n<MODEL_NOTES>\n{notes_section}\n</MODEL_NOTES>\n" if notes_section else ""
-    macros_block = f"\n<MACROS>\n{macros_section}\n</MACROS>\n" if macros_section else ""
+    notes_block = _tag_block("MODEL_NOTES", notes_section)
+    macros_block = _tag_block("MACROS", macros_section)
     # P3.2: full detail block for gotchas matching the current error.
-    gotcha_detail = _gotchas_for_error(error_excerpt)
-    gotchas_block = (
-        f"\n<RUST_GOTCHAS_DETAIL>\n{gotcha_detail}\n</RUST_GOTCHAS_DETAIL>\n"
-        if gotcha_detail else ""
-    )
+    gotchas_block = _tag_block("RUST_GOTCHAS_DETAIL", _gotchas_for_error(error_excerpt))
     container_line = f"In: {container}\n" if container else ""
-    types_block = f"\n<TYPES_IN_SCOPE>\n{types_section}\n</TYPES_IN_SCOPE>\n" if types_section else ""
-    invariants_block = (
-        f"\n<CLUSTER_INVARIANTS>\n{invariants_section}\n</CLUSTER_INVARIANTS>\n"
-        if invariants_section else ""
-    )
+    types_block = _tag_block("TYPES_IN_SCOPE", types_section)
+    invariants_block = _tag_block("CLUSTER_INVARIANTS", invariants_section)
     # FR-024 retrospective guidance: surfaced FIRST in the prompt when
     # available — the prior diagnosis is the highest-signal hint.
-    retro_block = (
-        f"\n<RETROSPECTIVE_GUIDANCE>\nPrior diagnosis of this fn's "
-        f"compile failures (act on this — do NOT repeat the previous "
-        f"approach):\n{retrospective_guidance}\n</RETROSPECTIVE_GUIDANCE>\n"
-        if retrospective_guidance else ""
-    )
+    retro_block = _tag_block(
+        "RETROSPECTIVE_GUIDANCE", retrospective_guidance,
+        prefix="Prior diagnosis of this fn's compile failures (act on this "
+               "— do NOT repeat the previous approach):\n")
     # FR-024 sibling reference: when the same fn name has a sibling impl
     # already filled correctly in this file, hoist it to the top of the
     # prompt. Best source-of-truth for "what does a body for this fn look
     # like" — pattern-matching beats reasoning from scratch.
-    siblings_block = (
-        f"\n<SIBLING_REFERENCE>\nFns with the same name `{fn_name}` in OTHER "
-        f"impl blocks of this file (already filled — your TARGET should "
-        f"follow the same structural pattern):\n```rust\n{siblings_section}\n"
-        f"```\n</SIBLING_REFERENCE>\n"
-        if siblings_section else ""
-    )
-    _trait_text2 = _trait_contract_for(container)
-    trait_block = f"\n<TRAIT_CONTRACT>\n{_trait_text2}\n</TRAIT_CONTRACT>\n" if _trait_text2 else ""
-    _recurring2 = _promoted_error_rules(fr_path)
-    recurring_block = f"\n<RECURRING_ERRORS>\n{_recurring2}\n</RECURRING_ERRORS>\n" if _recurring2 else ""
+    siblings_block = _tag_block(
+        "SIBLING_REFERENCE", siblings_section,
+        prefix=f"Fns with the same name `{fn_name}` in OTHER impl blocks of "
+               "this file (already filled — your TARGET should follow the "
+               "same structural pattern):\n```rust\n",
+        suffix="\n```")
+    trait_block = _tag_block("TRAIT_CONTRACT", _trait_contract_for(container))
+    recurring_block = _tag_block("RECURRING_ERRORS", _promoted_error_rules(fr_path))
     # P2: prior-attempts block. Show up to the last 3 distinct attempts
     # with their compact error signature, so the model can see the search
     # space it has already explored. Budget capped to keep prompt lean.
