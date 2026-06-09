@@ -301,25 +301,19 @@ impl VisitMut for SkeletonVisitor {
             syn::parse_quote!(#![allow(unused, dead_code, non_snake_case, clippy::all)]);
         node.attrs.insert(0, allow_attr);
 
-        // Drop `#[cfg(test)] mod ...` items at file level.
-        let before = node.items.len();
-        node.items.retain(|item| match item {
-            Item::Mod(m) => !Self::has_test_cfg(&m.attrs),
-            _ => true,
-        });
-        self.test_mods_dropped += before - node.items.len();
+        // KEEP `#[cfg(test)] mod ...` — the original inline tests ARE the oracle
+        // (FR-018: strip removes implementation AND keeps tests). visit_item_mod_mut
+        // guards each test mod from being recursed-into (so its test bodies are
+        // never stubbed) and from being dropped.
         visit_mut::visit_file_mut(self, node);
     }
 
     fn visit_item_mod_mut(&mut self, node: &mut ItemMod) {
-        // Drop nested `#[cfg(test)] mod ...` items too.
-        if let Some((_, items)) = node.content.as_mut() {
-            let before = items.len();
-            items.retain(|item| match item {
-                Item::Mod(m) => !Self::has_test_cfg(&m.attrs),
-                _ => true,
-            });
-            self.test_mods_dropped += before - items.len();
+        // A `#[cfg(test)]` mod is the original test code — leave it ENTIRELY intact:
+        // do not recurse (its test fn bodies must stay real, not `unimplemented!()`)
+        // and do not drop it. It survives strip in place as the reconstruction oracle.
+        if Self::has_test_cfg(&node.attrs) {
+            return;
         }
         visit_mut::visit_item_mod_mut(self, node);
     }

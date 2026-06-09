@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# Shared "restart from <stage>" mechanism — sourced by restart_from.sh (anyhow,
+# launches via continue.sh) and run_microcrate.sh (microcrate, launches pipeline
+# directly). Keeps the stage→phase-key mapping in ONE place so the two callers
+# can never drift. Pure state manipulation; does NOT stop or launch the pipeline
+# (each caller owns its process lifecycle).
+
+# restart_from_keys <stage> — print the space-separated phase-entry keys to clear
+# (the stage + every stage after it). Returns 2 on an unknown stage.
+#   task1   → re-run FR synthesis + the whole reconstruct loop
+#   task2/task2a → re-run the loop (per-cluster fill → merge → merged-fill → test → genesis)
+#   task2b/task2c → skip the expensive per-cluster fill (kept in .skeleton-filled/)
+#   task3/task4   → keep all fills done; straight to test/fix
+# task0c/strip and earlier need the original source → use redo.sh (Hard Rule 11).
+restart_from_keys() {
+    case "$1" in
+        task1)         echo "task1 task2a task2b task2c task2-4" ;;
+        task2|task2a)  echo "task2a task2b task2c task2-4" ;;
+        task2b|task2c) echo "task2b task2c task2-4" ;;
+        task3|task4)   echo "task2-4" ;;
+        *)             return 2 ;;
+    esac
+}
+
+# restart_from_clear <project_dir> <key>... — delete passing-* lock tags (when the
+# reconstruct loop is re-entered) and remove the chosen `[<key>...]` lines from
+# pipeline_state.md so generate() no longer treats those phases as done.
+restart_from_clear() {
+    local project_dir="$1"; shift
+    local keys=("$@")
+
+    if printf '%s\n' "${keys[@]}" | grep -q 'task2-4'; then
+        if [[ -d "$project_dir/.git" ]]; then
+            local tags
+            tags=$(git -C "$project_dir" tag -l "passing-*" 2>/dev/null || true)
+            if [[ -n "$tags" ]]; then
+                echo "[restart-from] deleting locked tags: $(echo "$tags" | tr '\n' ' ')"
+                echo "$tags" | xargs -r -I{} git -C "$project_dir" tag -d {} >/dev/null 2>&1 || true
+            fi
+        fi
+    fi
+
+    local state="$project_dir/pipeline_state.md"
+    if [[ -f "$state" ]]; then
+        echo "[restart-from] clearing ${keys[*]} entries from $state"
+        python3 - "$state" "${keys[@]}" << 'PYEOF'
+import re, sys
+path = sys.argv[1]; keys = sys.argv[2:]
+with open(path) as f:
+    lines = f.read().splitlines()
+alt = "|".join(re.escape(k) for k in keys)
+pat = re.compile(rf"^\[(?:{alt})(?:/[^\]]*)?\]")
+kept, removed = [], 0
+for ln in lines:
+    if pat.match(ln):
+        removed += 1
+        continue
+    if ln.startswith("current:"):
+        ln = "current: "
+    kept.append(ln)
+with open(path, "w") as f:
+    f.write("\n".join(kept) + "\n")
+print(f"  removed {removed} phase line(s)")
+PYEOF
+    fi
+}

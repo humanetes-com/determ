@@ -5180,13 +5180,18 @@ def _splice_fn_body_at(file_path: Path, body_byte_start: int, body_byte_end: int
 
     Returns (success, bytes_delta).
     """
+    # The offsets are BYTE offsets from the syn enumerator. They MUST be applied
+    # in byte space: a `str` from read_text() is indexed by CHARACTERS, so any
+    # multibyte UTF-8 char before the span (e.g. an em-dash `—` = 3 bytes/1 char
+    # in a doc comment) shifts char-index past byte-offset and the slice eats the
+    # closing `}` / next item. Work on raw bytes; decode only the small spans.
     try:
-        text = file_path.read_text(encoding="utf-8")
+        raw = file_path.read_bytes()
     except Exception:
         return False, 0
-    if body_byte_end > len(text) or body_byte_start > body_byte_end:
+    if body_byte_end > len(raw) or body_byte_start > body_byte_end:
         return False, 0
-    cur_body = text[body_byte_start:body_byte_end]
+    cur_body = raw[body_byte_start:body_byte_end].decode("utf-8", errors="replace")
     if not allow_nonstub and not _is_unimplemented_body(cur_body):
         return False, 0
     nb = new_body.strip()
@@ -5196,9 +5201,9 @@ def _splice_fn_body_at(file_path: Path, body_byte_start: int, body_byte_end: int
         return False, 0
     # Re-indent the body to match the fn's existing indentation. Find the
     # column of the fn declaration by walking back to the previous newline.
-    line_start = text.rfind("\n", 0, body_byte_start) + 1
+    line_start = raw.rfind(b"\n", 0, body_byte_start) + 1
     base_indent = ""
-    for ch in text[line_start:body_byte_start]:
+    for ch in raw[line_start:body_byte_start].decode("utf-8", errors="replace"):
         if ch in (" ", "\t"):
             base_indent += ch
         else:
@@ -5207,9 +5212,9 @@ def _splice_fn_body_at(file_path: Path, body_byte_start: int, body_byte_end: int
     nb_indented = "\n" + "\n".join(
         (inner_indent + ln) if ln.strip() else "" for ln in nb.splitlines()
     ) + "\n" + base_indent
-    new_text = text[:body_byte_start] + nb_indented + text[body_byte_end:]
-    file_path.write_text(new_text, encoding="utf-8")
-    return True, len(new_text) - len(text)
+    new_raw = raw[:body_byte_start] + nb_indented.encode("utf-8") + raw[body_byte_end:]
+    file_path.write_bytes(new_raw)
+    return True, len(new_raw) - len(raw)
 
 
 def _splice_fn_body(file_path: Path, fn_name: str, new_body: str,
@@ -5346,20 +5351,23 @@ def _splice_fn_with_where(
     sig_byte_start, body_byte_start, body_byte_end, sig_text = loc
 
     # If a where-clause patch is supplied, splice it into the signature.
-    # The signature spans [sig_byte_start, opening-brace-of-body). We
-    # insert `\n    where <clause>` before the opening brace.
-    text = file_path.read_text(encoding="utf-8")
-    brace_pos = text.rfind("{", sig_byte_start, body_byte_start + 1)
-    if where_clause and brace_pos != -1:
-        # Don't double-add a where clause if the sig already has one.
-        sig_slice = text[sig_byte_start:brace_pos]
-        if "where" not in sig_slice:
-            insert = f"\n    {where_clause}\n"
-            text = text[:brace_pos] + insert + text[brace_pos:]
-            shift = len(insert)
-            body_byte_start += shift
-            body_byte_end += shift
-            file_path.write_text(text, encoding="utf-8")
+    # BYTE space (offsets are byte offsets from the enumerator — see
+    # _splice_fn_body_at; a char-indexed str would mis-slice on multibyte UTF-8).
+    # The signature spans [sig_byte_start, opening-brace-of-body); insert
+    # `\n    <clause>` before the opening brace.
+    if where_clause:
+        raw = file_path.read_bytes()
+        brace_pos = raw.rfind(b"{", sig_byte_start, body_byte_start + 1)
+        if brace_pos != -1:
+            # Don't double-add a where clause if the sig already has one.
+            sig_slice = raw[sig_byte_start:brace_pos].decode("utf-8", errors="replace")
+            if "where" not in sig_slice:
+                insert = f"\n    {where_clause}\n".encode()
+                raw = raw[:brace_pos] + insert + raw[brace_pos:]
+                shift = len(insert)
+                body_byte_start += shift
+                body_byte_end += shift
+                file_path.write_bytes(raw)
 
     ok, delta = _splice_fn_body_at(file_path, body_byte_start, body_byte_end, body,
                                    allow_nonstub=allow_nonstub)
@@ -8358,6 +8366,22 @@ def _u2_test_gate(
     return frozenset(_still), _msg
 
 
+def _failure_hit_unfilled_stub(detail: str) -> bool:
+    """True when a test FAILURE is a panic from a still-unfilled `unimplemented!()`
+    / `todo!()` stub rather than a real assertion mismatch.
+
+    Used by the per-fn fill loop (#3): a multi-fn test attributed to fn A can fail
+    because a SIBLING fn it also calls is still a stub — not because A is wrong.
+    Runtime panic attribution is first-panic-order, so we can't tell from the
+    frontier alone; the panic MESSAGE is the reliable signal. The fn just filled
+    is non-stub (splice rejects stub bodies), so a "not implemented" panic here
+    came from another, still-unfilled fn → keep A's compiling body and defer the
+    verdict to the outer TDD loop. An assertion mismatch means A is wrong → don't.
+    """
+    d = detail or ""
+    return ("not implemented" in d) or ("not yet implemented" in d)
+
+
 def _build_test_cmd(test_stems: list[str], cluster: "BuildCluster | None") -> str:
     """Build `cargo test --no-fail-fast --test stem1 --test stem2 ...` honoring
     the cluster toolchain."""
@@ -10067,6 +10091,20 @@ def _task2_fill_fns_one_by_one(
                         tdd_test_cmd, target_src_dir, cluster_env)
                     if _g is not None:
                         _u2_fail_sig, cargo_out = _g
+                        # #3 co-dependency: this fn COMPILES but an attributed test
+                        # still fails BECAUSE a sibling it also calls is an unfilled
+                        # stub (panic "not implemented") — not this fn's fault. Keep
+                        # the compiling body and defer to the outer TDD loop (which
+                        # re-runs once the whole pass fills); reverting to a stub
+                        # would be strictly worse. An assertion mismatch is real →
+                        # fall through to the normal fix path.
+                        if _u2_fail_sig and _failure_hit_unfilled_stub(cargo_out):
+                            _ctx2 = f" [{container}]" if container else ""
+                            _log(f"  [phase-c/per-fn] {idx}/{len(stubs)} kept "
+                                 f"{rel_file}::{fn_name}{_ctx2} (compiles; attributed "
+                                 "test blocked by an unfilled sibling stub — deferred "
+                                 "to outer loop).")
+                            _u2_fail_sig = None
                 if rc == 0 and _u2_fail_sig is None:
                     _splice_check_lock.release()
                     _lock_released = True

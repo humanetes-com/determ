@@ -324,25 +324,45 @@ top of every per-file prompt.
 
 ---
 
-## FR-018 — TASK 0c must reach 100% coverage before any module proceeds to TASK 1
+## FR-018 — TASK 0c must reach the configured coverage target; existing tests are preserved unconditionally
 
-**Decision:** The pipeline MUST NOT proceed to TASK 1 for any module unless TASK 0c
-has achieved 100% line coverage for that module. This is a hard block, not a warning.
-Exception: proc-macro crates, where tarpaulin cannot measure coverage (they are treated
-as 100% by convention).
+**Formal definition of "sufficient coverage".** "High enough" is defined ONLY by the env
+value `COVERAGE_AUGMENTATION_TARGET` (`.env`; default 98) — never a hardcoded 100 or any
+other inline constant. It is the single source of truth for the threshold.
 
-**Why:** TASK 1 extracts behavioral requirements from the test suite. A test suite at
-less than 100% coverage means some code paths have no tests, and therefore no behavioral
-specification. TASK 1 will produce thin or missing requirements for those paths, causing
-TASK 2 to generate incorrect or incomplete implementations. The entire pipeline is only as
-good as the specification extracted by TASK 1 — and that specification is only as good as
-the coverage feeding it. Any shortcut here cascades into every downstream task.
+**Decision:** The pipeline MUST NOT proceed to TASK 1 for any module until TASK 0c has
+achieved at least `COVERAGE_AUGMENTATION_TARGET` percent line coverage for that module.
+This is a hard block, not a warning. TASK 0c augments tests until coverage REACHES the
+target; once coverage is at or beyond the target it MAY stop augmenting — i.e. stop ADDING
+new tests (there is no benefit to chasing the residual llvm-cov-artifact / cfg-edge lines
+past the target). Exception: proc-macro crates, where tarpaulin cannot measure coverage
+(treated as meeting the target by convention).
 
-**Implementation:** In the main module loop, after `task0c_augment_module()` returns,
-if `cov < 100.0` and `crate_type != "proc-macro"`:
+**Tests are the oracle — preservation is UNCONDITIONAL.** "Stop augmenting once the target
+is reached" means stop ADDING tests. It NEVER means dropping, skipping, or failing to keep
+the tests that already exist. Every original `#[cfg(test)]` unit test AND every augmented
+test MUST survive strip — extracted into kept `gen_tests` siblings — so it serves as the
+reconstruction oracle in TASK 2/3. Skeletonise deliberately drops `#[cfg(test)] mod` from
+the implementation scaffold (so it never stubs a test body); therefore those tests MUST be
+preserved elsewhere FIRST. This preservation is NOT gated on whether augmentation adds new
+tests: a module already at/above the target still has its existing tests kept. Silently
+losing an original test shrinks the oracle and lets TASK 2 reconstruct wrong behaviour that
+still "passes" — exactly the fraudulent-success failure Hard Rule 11 / FR-022 exist to
+prevent. (Bug that motivated this: a module already at target had its inline unit tests
+dropped at skeletonise because preservation was coupled to augmentation running.)
+
+**Why:** TASK 1 extracts behavioral requirements from the test suite; TASK 2/3 reconstruct
+and validate against it. Coverage below the target means code paths with no test → no
+behavioral specification → thin/incorrect requirements → wrong implementations. The pipeline
+is only as good as the oracle feeding it; any shortcut cascades into every downstream task.
+
+**Implementation:** In the main module loop, after `task0c_augment_module()` returns, if
+`cov < COVERAGE_AUGMENTATION_TARGET` and `crate_type != "proc-macro"`:
 - Retry up to 10 times (clear the augmented sentinel, skip module, retry next outer pass).
 - After 10 failed attempts: `sys.exit(1)` with a clear message.
-Never proceed to strip or TASK 1 with coverage below 100%.
+Never proceed to strip or TASK 1 with coverage below `COVERAGE_AUGMENTATION_TARGET`. The
+existing-test preservation invariant above holds regardless of the coverage value (including
+when the module is already at/above target and augmentation is skipped).
 
 ---
 

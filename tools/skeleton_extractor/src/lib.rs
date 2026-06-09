@@ -71,11 +71,15 @@ mod tests {
     }
 
     #[test]
-    fn drops_cfg_test_mod() {
-        let src = "pub fn a() {} #[cfg(test)] mod tests { fn t() {} }";
+    fn keeps_cfg_test_mod_unstubbed() {
+        // FR-018: a #[cfg(test)] mod is the original tests (oracle) — kept in place,
+        // its bodies NOT stubbed; only the real impl fn is stubbed.
+        let src = "pub fn a() -> u32 { 1 } \
+                   #[cfg(test)] mod tests { #[test] fn t() { assert_eq!(super::a(), 1); } }";
         let out = skeletonise_str(src);
-        assert!(!out.contains("mod tests"));
-        assert!(out.contains("fn a"));
+        assert!(out.contains("mod tests"), "test mod kept: {out}");
+        assert!(out.contains("assert_eq"), "test body intact (not stubbed): {out}");
+        assert!(out.contains("unimplemented"), "impl fn `a` IS stubbed: {out}");
     }
 
     #[test]
