@@ -9514,6 +9514,29 @@ def _phase_c_fill_impl_blocks(
     }
 
 
+def _group_priority_levels(
+    stubs: list[dict], leaf_name_counts: dict[str, int] | None,
+) -> list[list[tuple[int, dict]]]:
+    """Group leaf-first-sorted `stubs` into contiguous equal-ref-count LEVELS.
+
+    Each level is a list of `(1-based index, stub)`. `stubs` is already sorted
+    descending by ref-count, so equal-priority stubs are contiguous; a key change
+    starts a new level. The dispatch loop runs each level with a barrier between
+    them, so a more-referenced (callee) level always completes before the level
+    that depends on it — every fill sees real sibling bodies in a scheduling-
+    independent order (R11.3 determinism). Pure: no engine/closure state.
+    """
+    levels: list[list[tuple[int, dict]]] = []
+    prev_key: object = object()
+    for i, r in enumerate(stubs, 1):
+        key = leaf_name_counts.get(r["fn_name"], 0) if leaf_name_counts else 0
+        if key != prev_key:
+            levels.append([])
+            prev_key = key
+        levels[-1].append((i, r))
+    return levels
+
+
 def _task2_fill_fns_one_by_one(
     project_dir: Path,
     target_src_dir: Path,
@@ -9746,14 +9769,7 @@ def _task2_fill_fns_one_by_one(
         # (callee) level always completes before the level depending on it —
         # each fill sees real sibling bodies in deterministic order,
         # independent of worker scheduling.
-        _levels: list[list[tuple[int, dict]]] = []
-        _prev_key: object = object()
-        for _i, _r in enumerate(stubs, 1):
-            _key = leaf_name_counts.get(_r["fn_name"], 0) if leaf_name_counts else 0
-            if _key != _prev_key:
-                _levels.append([])
-                _prev_key = _key
-            _levels[-1].append((_i, _r))
+        _levels = _group_priority_levels(stubs, leaf_name_counts)
 
         def _worker():
             nonlocal attempts, fns_filled, progress_this_pass
