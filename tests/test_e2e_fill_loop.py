@@ -1,0 +1,165 @@
+"""End-to-end harness tests for the per-fn fill loop (`_task2_fill_fns_one_by_one`
+→ `_process_one_stub`) — the net the FixLoop dedup (slice 8a) is built against.
+
+Scripted model + scripted cargo via tests/harness.py; the extractor seams are
+forced to their no-binary fallbacks so the loop runs the text-scan stub path.
+Each test drives the REAL engine on a real temp workspace: real splice, real
+revert, real FloorStall gauge, real annotated-stub exhaustion path.
+"""
+from __future__ import annotations
+
+import dataclasses
+from pathlib import Path
+
+import pipeline
+from pipeline_core.domain.enums import FillUnit
+from tests.harness import install_scripted_cargo, install_scripted_model
+
+STUB_LIB = """pub fn answer() -> u32 {
+    unimplemented!()
+}
+"""
+
+ERR = ("error[{code}]: {msg}\n --> src/lib.rs:2:5\n"
+       "error: aborting due to previous error\n")
+
+
+def _setup(monkeypatch, tmp_path: Path) -> Path:
+    ws = tmp_path / "ws"
+    (ws / "src").mkdir(parents=True)
+    (ws / "src" / "lib.rs").write_text(STUB_LIB)
+    # Per-fn unit (skip the per-impl path) without touching the frozen Settings.
+    monkeypatch.setattr(
+        pipeline, "SETTINGS",
+        dataclasses.replace(pipeline.SETTINGS, phase_c_fill_unit=FillUnit.FN))
+    # Extractor-absent fallbacks: name-only stub scan, no type/fn records.
+    monkeypatch.setattr(pipeline, "_scan_unimplemented_records_for_cluster",
+                        lambda *a, **k: None)
+    monkeypatch.setattr(pipeline, "_enumerate_types_via_extractor",
+                        lambda *a, **k: [])
+    monkeypatch.setattr(pipeline, "_enumerate_fns_via_extractor",
+                        lambda *a, **k: None)
+    return ws
+
+
+def _run(ws: Path) -> dict:
+    return pipeline._task2_fill_fns_one_by_one(
+        project_dir=ws,
+        target_src_dir=ws / "src",
+        tests_dir_files=[],
+        module_name="m",
+        cluster_name="t",
+        cluster=None,
+        check_cmd="cargo check",
+        cluster_env={},
+        max_passes=1,
+        fr_path=None,
+        skip_end_pass_test=True,
+    )
+
+
+def test_fill_first_try_success(monkeypatch, tmp_path):
+    ws = _setup(monkeypatch, tmp_path)
+    install_scripted_model(monkeypatch, per_fn_body="42")
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []), run=(0, "ok"))
+    res = _run(ws)
+    text = (ws / "src" / "lib.rs").read_text()
+    assert res["fns_filled"] == 1 and res["remaining"] == 0
+    assert "42" in text and "unimplemented!()" not in text
+
+
+def test_fix_loop_recovers_on_second_attempt(monkeypatch, tmp_path):
+    ws = _setup(monkeypatch, tmp_path)
+    bodies = iter(["0", "42"])
+    install_scripted_model(monkeypatch,
+                           per_fn_body=lambda _fn: next(bodies, "42"))
+    install_scripted_cargo(
+        monkeypatch, check_diag=(0, "", []),
+        run=[(101, ERR.format(code="E0308", msg="mismatched types")),
+             (0, "ok")])
+    res = _run(ws)
+    text = (ws / "src" / "lib.rs").read_text()
+    assert res["fns_filled"] == 1
+    assert res["attempts"] == 2          # one failure, one recovery
+    assert "42" in text and "unimplemented!()" not in text
+
+
+def test_repeated_error_signature_stops_after_two_attempts(monkeypatch, tmp_path):
+    ws = _setup(monkeypatch, tmp_path)
+    install_scripted_model(monkeypatch, per_fn_body="0")
+    # Same E-code (same sig) every time → FloorStall.repeated fires on attempt 2.
+    install_scripted_cargo(
+        monkeypatch, check_diag=(0, "", []),
+        run=(101, ERR.format(code="E0308", msg="mismatched types")))
+    res = _run(ws)
+    text = (ws / "src" / "lib.rs").read_text()
+    assert res["fns_filled"] == 0 and res["remaining"] == 1
+    assert res["attempts"] == 2
+    assert "unimplemented!()" in text    # annotated stub restored
+
+
+def test_floor_stall_exhaustion_restores_annotated_stub(monkeypatch, tmp_path):
+    ws = _setup(monkeypatch, tmp_path)
+    install_scripted_model(monkeypatch, per_fn_body="0")
+    # Distinct E-code each attempt (sig never repeats), constant error count
+    # → the floor never improves; stall budget (3) exhausts on attempt 4.
+    codes = iter(["E0308", "E0425", "E0277", "E0599", "E0061"])
+    install_scripted_cargo(
+        monkeypatch, check_diag=(0, "", []),
+        run=lambda: (101, ERR.format(code=next(codes, "E0999"), msg="x")))
+    res = _run(ws)
+    text = (ws / "src" / "lib.rs").read_text()
+    assert res["fns_filled"] == 0 and res["remaining"] == 1
+    assert res["attempts"] == 4          # observe(improved) + 3 stalls
+    assert "unimplemented!()" in text
+
+
+# --- Plan 10 U2 routing through the per-fn loop (FixLoop plan, pre-f2 pins) ---
+
+
+def test_u2_assertion_failure_routes_to_fix_loop(monkeypatch, tmp_path):
+    # Compiles, but the fn's own attributed test FAILS with a real assertion
+    # → must route through the fix loop like a compile error, then accept
+    # when the gate passes on attempt 2.
+    ws = _setup(monkeypatch, tmp_path)
+    bodies = iter(["0", "42"])
+    install_scripted_model(monkeypatch,
+                           per_fn_body=lambda _fn: next(bodies, "42"))
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []), run=(0, "ok"))
+    gates = iter([(frozenset({"t_answer"}),
+                   "test t_answer FAILED: assertion `left == right` failed"),
+                  None])
+    monkeypatch.setattr(pipeline, "_u2_test_gate",
+                        lambda *a, **k: next(gates, None))
+    res = pipeline._task2_fill_fns_one_by_one(
+        project_dir=ws, target_src_dir=ws / "src", tests_dir_files=[],
+        module_name="m", cluster_name="t", cluster=None,
+        check_cmd="cargo check", cluster_env={}, max_passes=1, fr_path=None,
+        skip_end_pass_test=True,
+        tdd_frontier_tests={("lib.rs", "answer"): {"t_answer"}},
+        tdd_test_cmd="cargo test")
+    assert res["fns_filled"] == 1
+    assert res["attempts"] == 2
+    assert "42" in (ws / "src" / "lib.rs").read_text()
+
+
+def test_u2_codependent_stub_panic_keeps_body(monkeypatch, tmp_path):
+    # Compiles, attributed test fails with a "not implemented" panic — a
+    # SIBLING stub's fault (#3 co-dependency) → keep the body, no fix loop.
+    ws = _setup(monkeypatch, tmp_path)
+    install_scripted_model(monkeypatch, per_fn_body="42")
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []), run=(0, "ok"))
+    monkeypatch.setattr(
+        pipeline, "_u2_test_gate",
+        lambda *a, **k: (frozenset({"t_answer"}),
+                         "thread 't_answer' panicked at 'not implemented'"))
+    res = pipeline._task2_fill_fns_one_by_one(
+        project_dir=ws, target_src_dir=ws / "src", tests_dir_files=[],
+        module_name="m", cluster_name="t", cluster=None,
+        check_cmd="cargo check", cluster_env={}, max_passes=1, fr_path=None,
+        skip_end_pass_test=True,
+        tdd_frontier_tests={("lib.rs", "answer"): {"t_answer"}},
+        tdd_test_cmd="cargo test")
+    assert res["fns_filled"] == 1
+    assert res["attempts"] == 1
+    assert "42" in (ws / "src" / "lib.rs").read_text()

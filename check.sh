@@ -32,12 +32,15 @@ echo "Checking task-extraction invariants (deps fields declared==provided==consu
 "$SCRIPT_DIR/.venv/bin/python" tools/check_extraction_invariants.py || exit 1
 
 echo ""
-echo "Running pytest + domain coverage floor (cargo coverage tests skip unless SMOKE_FULL=1)..."
-# Gate the DOMAIN layer's coverage — it is the stable, OSS-facing contract and currently
-# ~98%; the floor stops it regressing. The application/ engine is mid-migration and not gated
-# here (its real coverage comes later via the fill-replay harness, backlog R4.3).
+echo "Running pytest + coverage ratchet (cargo coverage tests skip unless SMOKE_FULL=1)..."
+# Slice 13: coverage is gated on EVERYTHING under refactor — pipeline.py (the engine
+# being decomposed) and all of pipeline_core (where refactored code lands) — via a
+# per-target ratchet (.coverage_ratchet.json): floors initialize from the first run,
+# auto-raise when new tests land, and FAIL any change that loses coverage.
+# domain/ keeps its absolute 95% minimum inside the ratchet (MIN_FLOORS).
 "$SCRIPT_DIR/.venv/bin/python" -m pytest \
-    --cov=pipeline_core.domain --cov-report=term-missing:skip-covered --cov-fail-under=95
+    --cov=pipeline --cov=pipeline_core --cov-report=
+"$SCRIPT_DIR/.venv/bin/python" tools/coverage_ratchet.py || { echo "coverage ratchet failed (see above)"; exit 1; }
 
 echo ""
 echo "Done."

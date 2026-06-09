@@ -296,6 +296,49 @@ slice needs a dedicated live-run validation window; ceremony-free per §2):
    Each engine: extract verbatim from the richest copy, port the other sites one per
    commit, fakes-deps test per engine. GATE like slice 10: the FixLoop port-overs touch
    the live engine — validate per-site against a live-run log, not just check.sh.
+
+   DONE so far: FloorStall (3 sites), _fn_container_index + _gather_fn_fix_context
+   (4 prompt sites + improvements: task3-retry gained notes/tests, P5.4 container filter),
+   _tag_block (3 builders), fill-loop e2e harness (tests/test_e2e_fill_loop.py: success /
+   recover / repeated-sig / floor-stall on the REAL engine), coverage ratchet in check.sh.
+
+   ### FixLoop dedup plan (the ~500-line one; planned 2026-06-09)
+   Inventory: TWO drivers already exist (`_improvement_loop`+LoopState in pipeline.py —
+   used by generate_fix_loop & task3-inline-retry; `run_refine_loop` in pipeline_core) and
+   TWO hand-rolled loops (A: per-fn inner loop in `_process_one_stub` ~300L; B: per-impl
+   loop in `_phase_c_fill_impl_blocks` ~280L) plus C: the post-pass test-retry
+   (~10396, `test_fix_attempt` budget, no revert — splices kept). End state: ONE driver.
+
+   Shape: `FixUnit` protocol owning what A/B genuinely differ on; the driver owns what
+   they share (attempt counter, FloorStall observe + stall/repeat exits, history record,
+   `loop.iter` emit, recovered/exhausted note hooks):
+     locate() → still-a-target?            (stub check / race detection)
+     prompt(state) → str                   (initial vs fix; gather ctx inside)
+     apply(response) → splice delta        (single splice + lock dance | multi-member)
+     verify() → ok | (err_sig, count, excerpt)  (cargo gate + U2 test gate + acceptance)
+     accept() / revert() / exhaust(history)     (annotated stub + retro | B3 partial keep)
+   Subtleties that MUST survive (each pinned by a harness test before its port):
+   _splice_check_lock acquire/release points (A); U2 co-dependency keep (compiles but
+   sibling stub blocks test → accept); B3 (FR-029) non-regressing partial accept mid-loop
+   (B); sig-change hatch attempt≥5 non-pub (A); race_lost vs splice_rejected; per-loop
+   event namespaces (phase_c.per_fn / phase_c.impl.*); notes extraction on recovered
+   (attempt>1) and exhausted; retros-cache guidance injection.
+
+   Port order (one commit each, check.sh + ratchet green; live-run telemetry diff at the
+   end of the series, at a run boundary):
+   f1. extend the harness to drive loop B (scripted block records via
+       `_collect_impl_blocks` seam): success / B3 keep / stall / repeated tests.
+   f2. `FixLoop` driver + `FnFixUnit` — port A; existing 4 fill-loop tests must pass
+       byte-identically; add sig-change-hatch + U2-routing tests.
+   f3. `ImplFixUnit` — port B against f1's net.
+   f4. fold C onto the driver (metric = failing-test count, no-revert policy flag).
+   f5. unify `_improvement_loop` with `run_refine_loop` (one driver in
+       pipeline_core/application); decide with f4's evidence whether FixLoop sits atop it
+       or stays a sibling (inner compile loop vs outer measure loop may be 2 real shapes).
+   f6. live anyhow run: diff loop.iter events + floor/stall log lines + fills-per-pass
+       against the previous run before declaring the series done.
+   Expected: A ~300→~80 (unit) and B ~280→~90, C ~120→~40, shared driver ~120 — net
+   ≈ −450 lines and ONE termination policy for every fix loop in the pipeline.
 8. `prompts/` — move ALL prompt builders + section formatters verbatim
    (`_build_per_fn_prompt`, `_build_per_fn_fix_prompt`, `_build_per_impl_prompt`,
    `_build_task0c_prompt_sections`, `_format_type_for_prompt`, `_types_section_for_fix`,
