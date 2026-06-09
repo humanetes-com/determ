@@ -9219,19 +9219,8 @@ def _phase_c_fill_impl_blocks(
         # so without the container its definition is never injected.
         _block_container = block.get("container") or ""
         _block_where = _extract_impl_where_clause(snapshot, _block_container)
-        types_for_block_text = " ".join(
-            [(m.get("sig_text") or "") for m in block["members"]]
-            + [_block_container, _block_where])
-        types_records = _types_referenced_in_text(
-            types_for_block_text, _crate_type_records)
-        # Plan 9 F1/F2: budget-derive (was hardcoded 12 types).
-        types_records = types_records[:_TYPES_COUNT_CAP]
-        _types_full = "\n\n".join(_format_type_for_prompt(t) for t in types_records)
-        types_section = _types_full[:_TYPES_SECTION_CAP]
-        if len(_types_full) > _TYPES_SECTION_CAP:  # Plan 9 F5
-            _guard("phase-c/impl/types_truncated",
-                   f"{block.get('container','')[:50]}: type context "
-                   f"{len(_types_full):,} > cap {_TYPES_SECTION_CAP:,}")
+        _member_sigs_text = " ".join(
+            (m.get("sig_text") or "") for m in block["members"])
         # Crate idioms — surfaces THIS file's repeating patterns (Self::
         # constructor family, vtable dispatch, wrapper construction,
         # unsafe chains) from already-filled fn bodies. The target
@@ -9283,18 +9272,13 @@ def _phase_c_fill_impl_blocks(
             fix_attempt += 1
             attempts_total += 1
             _check_graceful_stop(f"per-impl attempt {fix_attempt} for {block_id}")
-            # Plan 9 F4: on fix attempts, also surface the definitions of any
-            # type/trait NAMED IN THE CURRENT ERROR (E0277/E0599/E0046/E0053
-            # routinely name a trait the impl block's signatures don't mention).
-            _types_section_eff = types_section
-            if last_error_excerpt:
-                _err_types = _types_referenced_in_text(last_error_excerpt, _crate_type_records)
-                _base_names = {r.name for r in types_records}
-                _extra = [r for r in _err_types if r.name not in _base_names]
-                if _extra:
-                    _aug = _types_full + "\n\n" + "\n\n".join(
-                        _format_type_for_prompt(r) for r in _extra[:_TYPES_COUNT_CAP])
-                    _types_section_eff = _aug[:_TYPES_SECTION_CAP]
+            # Slice 8a: TYPES_IN_SCOPE re-selected each attempt from the
+            # member sigs + impl header + where clause + the current error
+            # (Plan 9 F4: E0277/E0599/E0046/E0053 routinely name a trait
+            # the impl block's signatures don't mention).
+            _types_section_eff = _types_section_for_fix(
+                _member_sigs_text, "", last_error_excerpt or "",
+                _block_container, _block_where, _crate_type_records)
             prompt = _build_per_impl_prompt(
                 block=block,
                 related_blocks=related_blocks,
@@ -9863,34 +9847,6 @@ def _task2_fill_fns_one_by_one(
                 file_rel=rel_file, src_dir=_src_for_macros,
                 container=container,
             )
-            # P5.1: pick type records that the fn's signature OR container
-            # name mentions. These get inserted as <TYPES_IN_SCOPE> so the
-            # model knows fields vs methods on Own/Ref/ErrorImpl/etc.
-            # Also include the enclosing impl's WHERE CLAUSE in the
-            # search. The syn extractor records the container as
-            # `impl Context<T, E> for Result<T, E>` without the where
-            # clause, but bounds like `where E: ext::StdError` reveal
-            # which trait's methods are usable on E. Without them,
-            # `ext::StdError` would never make it into TYPES_IN_SCOPE
-            # and the model can't see the helper methods it should
-            # delegate to. `snapshot` is the initial file text read at
-            # the top of this per-stub function — use that since
-            # `cur_text` isn't bound until inside the fix loop.
-            _impl_where = _extract_impl_where_clause(snapshot, container)
-            _type_search_text = f"{sig_text}\n{container}\n{_impl_where}"
-            _types_for_fn = _types_referenced_in_text(
-                _type_search_text, _crate_type_records)
-            # Plan 9 F1/F2: budget-derive the type/trait context — it is the
-            # highest-value context for reconstruction. Count cap is a safety
-            # net only; the char cap governs.
-            _types_for_fn = _types_for_fn[:_TYPES_COUNT_CAP]
-            _types_full = "\n\n".join(
-                _format_type_for_prompt(r) for r in _types_for_fn)
-            types_section = _types_full[:_TYPES_SECTION_CAP]
-            if len(_types_full) > _TYPES_SECTION_CAP:  # Plan 9 F5: surface starvation
-                _guard("phase-c/types_truncated",
-                       f"{container[:50]}: type context {len(_types_full):,} > "
-                       f"cap {_TYPES_SECTION_CAP:,} ({len(_types_for_fn)} types)")
             _fn_t0 = time.monotonic()
             _emit("phase_c.fn.fill.start", data={
                 "cluster": cluster_name, "pass_n": pass_n,
@@ -9928,27 +9884,20 @@ def _task2_fill_fns_one_by_one(
                     attempts += 1
                 _check_graceful_stop(f"per-fn fix attempt {fix_attempt} for {fn_name}")
                 cur_text = file_path.read_text(encoding="utf-8")
-                # P3.4: re-filter notes each iteration using the LATEST
-                # cargo error so error-code/keyword matches bubble up.
-                if fr_path is not None:
-                    notes_section = _filter_model_notes_for_prompt(
-                        fr_path, file_rel=rel_file, fn_name=fn_name,
-                        file_text=cur_text,
-                        current_error=error_excerpt,
-                    )
-                # Plan 9 F4: on fix attempts, also surface the definitions of any
-                # type/trait NAMED IN THE CURRENT ERROR (E0277/E0599/E0046/E0053
-                # routinely name a trait/type the signature doesn't mention).
-                # Re-selected each attempt so the retry is informed, not a guess.
-                _types_section_eff = types_section
-                if error_excerpt:
-                    _err_types = _types_referenced_in_text(error_excerpt, _crate_type_records)
-                    _base_names = {r.name for r in _types_for_fn}
-                    _extra = [r for r in _err_types if r.name not in _base_names]
-                    if _extra:
-                        _aug = _types_full + "\n\n" + "\n\n".join(
-                            _format_type_for_prompt(r) for r in _extra[:_TYPES_COUNT_CAP])
-                        _types_section_eff = _aug[:_TYPES_SECTION_CAP]
+                # Slice 8a: one gather per attempt — notes re-filtered with the
+                # LATEST cargo error (P3.4), TYPES_IN_SCOPE re-selected from
+                # sig + container + where + the PREVIOUS BODY (types the last
+                # attempt actually manipulated — new) + the current error
+                # (Plan 9 F4: E0277/E0599/E0046/E0053 routinely name a
+                # trait/type the signature doesn't mention).
+                _fn_ctx = _gather_fn_fix_context(
+                    file_text=cur_text, file_rel=rel_file, fn_name=fn_name,
+                    sig_text=sig_text, body_text=last_body,
+                    error_excerpt=error_excerpt, container=container,
+                    type_records=_crate_type_records, fr_path=fr_path,
+                )
+                notes_section = _fn_ctx.notes_section
+                _types_section_eff = _fn_ctx.types_section
                 if fix_attempt == 1:
                     prompt = _build_per_fn_prompt(
                         file_text=cur_text, fn_name=fn_name, sig_text=sig_text,
@@ -10579,10 +10528,6 @@ def _task2_fill_fns_one_by_one(
                             cur_body = cur_text[sloc[2]:sloc[3]]
                             error_excerpt_test = _focus_cargo_errors(
                                 test_out, rel_f, max_chars=_FIX_ERR_CAP)
-                            t_blocks = _find_tests_for_fn(
-                                tests_dir_files, fn,
-                                file_rel=rel_f, src_dir=_src_for_macros,
-                            )
                             _ctx = _gather_fn_fix_context(
                                 file_text=cur_text, file_rel=rel_f, fn_name=fn,
                                 sig_text=sig_t, body_text=cur_body,
@@ -10590,6 +10535,14 @@ def _task2_fill_fns_one_by_one(
                                 container=_retry_containers.get((rel_f, fn), ""),
                                 type_records=_crate_type_records,
                                 fr_path=fr_path,
+                            )
+                            # P5.4: container filter disambiguates tests for
+                            # generic fn names (fmt/new/source) — the container
+                            # is known here now, so use it.
+                            t_blocks = _find_tests_for_fn(
+                                tests_dir_files, fn,
+                                file_rel=rel_f, src_dir=_src_for_macros,
+                                container=_ctx.container,
                             )
                             prompt = _build_per_fn_fix_prompt(
                                 file_text=cur_text, fn_name=fn, sig_text=sig_t,
@@ -11316,8 +11269,12 @@ def _types_section_for_fix(
         body_text or "", error_excerpt or "",
     ])
     recs = _types_referenced_in_text(search, type_records)[:_TYPES_COUNT_CAP]
-    return "\n\n".join(
-        _format_type_for_prompt(r) for r in recs)[:_TYPES_SECTION_CAP]
+    full = "\n\n".join(_format_type_for_prompt(r) for r in recs)
+    if len(full) > _TYPES_SECTION_CAP:  # Plan 9 F5: surface starvation
+        _guard("phase-c/types_truncated",
+               f"{(container or sig_text)[:50]}: type context {len(full):,} > "
+               f"cap {_TYPES_SECTION_CAP:,} ({len(recs)} types)")
+    return full[:_TYPES_SECTION_CAP]
 
 
 def _fn_container_index(src_dir: Path) -> dict[tuple[str, str], str]:
@@ -17464,6 +17421,13 @@ def _task3_inline_retry(
     _retry_type_recs = _cluster_filter_type_methods(
         _enumerate_types_via_extractor(src_root) or [], cluster)
     _retry_containers = _fn_container_index(src_root)
+    # Model-notes recall + relevant tests (slice 8a improvement): these fix
+    # prompts previously carried neither. Resolve the module FR doc when
+    # unambiguous (single-module case: exactly one functional_requirements_*.md;
+    # multi-module would need a per-file module map — left as today's None).
+    _fr_candidates = sorted(project_dir.glob("functional_requirements_*.md"))
+    _retry_fr_path = _fr_candidates[0] if len(_fr_candidates) == 1 else None
+    _retry_tests_dir_files = list((project_dir / "tests").rglob("*.rs"))
 
     def _apply_per_fn_fixes(refs: list[tuple[str, str]], output: str) -> int:
         # Re-ask the model for each (file, fn) body and splice it. Frozen tests
@@ -17494,14 +17458,20 @@ def _task3_inline_retry(
                 error_excerpt=err_excerpt,
                 container=_retry_containers.get((_src_rel, fn), ""),
                 type_records=_retry_type_recs,
+                fr_path=_retry_fr_path,
             )
+            t_blocks = _find_tests_for_fn(
+                _retry_tests_dir_files, fn, file_rel=rel_f,
+                src_dir=src_root, container=_ctx.container)
             prompt = _build_per_fn_fix_prompt(
                 file_text=cur_text, fn_name=fn, sig_text=sig_t,
-                test_blocks=[], module_name=project_dir.name,
+                test_blocks=t_blocks, module_name=project_dir.name,
                 cluster_name=_cluster_label, file_rel=rel_f,
                 prev_body=cur_body, error_excerpt=err_excerpt,
                 container=_ctx.container,
                 types_section=_ctx.types_section,
+                notes_section=_ctx.notes_section,
+                fr_path=_retry_fr_path,  # P6.4 past-note recall by error code
             )
             new_body, _ = _ask_per_fn_body(prompt, fn, [], sig_text=sig_t)
             if not new_body:
