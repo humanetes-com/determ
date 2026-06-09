@@ -15932,9 +15932,17 @@ class StaticSkeletonTask2Generator(Task2Generator):
                         detail=f"{len(clusters)} cluster(s)")
 
         # === task2b — cross-cluster merge into project_dir/src/ (RESUMABLE).
-        # Skipped only if marked done AND the merged tree still exists (task4's
-        # delete-and-retry clears this marker, forcing a re-merge). ===
-        if _phase_valid(project_dir, f"task2b/{module}") and (project_dir / "src").exists():
+        # Skipped only if marked done AND the merged tree is intact: every
+        # file in the saved manifest still on disk. A bare `src/ exists`
+        # check is defeated by the workspace stub (the startup wipe leaves a
+        # stub lib.rs), which let phase C run against an empty tree. (task4's
+        # delete-and-retry clears this marker, forcing a re-merge.) ===
+        _merged_tree_intact = False
+        if _phase_valid(project_dir, f"task2b/{module}"):
+            _mf = load_manifest(manifest_path) if manifest_path else []
+            _merged_tree_intact = bool(_mf) and all(
+                (project_dir / rel).exists() for rel in _mf)
+        if _merged_tree_intact:
             _log("  [skeleton-merge] task2b (merge) already done — skipping.")
         else:
             _set_current(project_dir,
@@ -21163,7 +21171,12 @@ def main():
             _total = sum(len(v) for v in saved_gen_blocks.values())
             _log(f"  Saved {_total} gen_tests sibling(s) from {len(saved_gen_blocks)} file(s) for reattachment.")
 
-        # Wipe any previously generated files for this module (interrupted run).
+        # Wipe any previously generated files for this module (interrupted
+        # run) — ONLY when the merge (task2b) is not marked done. When task2b
+        # will rerun it regenerates src/ from .skeleton-filled/, so wiping is
+        # safe; when task2b IS done, src/ is the resumable product and t2c's
+        # fills live only there — wiping while the skip-markers stand left
+        # phase C running against the stub tree (the t2c→t3 fall-through bug).
         # Skip:
         #  - scratch/cache directories (dot-dirs: .skeleton/, .skeleton-filled/,
         #    .task1_partials/, .cluster_augmented/, etc.)
@@ -21173,7 +21186,8 @@ def main():
         #    these breaks dependency compilation in mysterious ways)
         # Only wipe regenerated source files, not anything cargo manages.
         _wipe_skip_dirs = {"target"}
-        if module_dir.exists():
+        if module_dir.exists() and not _phase_valid(
+                project_dir, f"task2b/{module_name}"):
             wiped = []
             for src_file in sorted(module_dir.rglob("*.rs")):
                 rel = str(src_file.relative_to(project_dir))
