@@ -10574,6 +10574,16 @@ def _task2_fill_fns_one_by_one(
                             fns_to_retry = list(filled_this_pass)
 
                         any_progress = False
+                        # P5.1 parity: this fix prompt previously carried no
+                        # TYPES_IN_SCOPE and no container. Map (file, fn) →
+                        # container via the syn enumerator so the self-type's
+                        # definition gets injected (cf. the BoxedError gap).
+                        _retry_containers: dict[tuple[str, str], str] = {}
+                        for _rr in (_enumerate_fns_via_extractor(
+                                target_src_dir) or []):
+                            _retry_containers.setdefault(
+                                (_rr.get("file", ""), _rr.get("fn_name", "")),
+                                _rr.get("container", ""))
                         for rel_f, fn in fns_to_retry:
                             fp = target_src_dir / rel_f
                             try:
@@ -10598,6 +10608,7 @@ def _task2_fill_fns_one_by_one(
                                     file_text=cur_text,
                                     current_error=error_excerpt_test,
                                 )
+                            _rt_container = _retry_containers.get((rel_f, fn), "")
                             prompt = _build_per_fn_fix_prompt(
                                 file_text=cur_text, fn_name=fn, sig_text=sig_t,
                                 test_blocks=t_blocks, module_name=module_name,
@@ -10605,6 +10616,12 @@ def _task2_fill_fns_one_by_one(
                                 prev_body=cur_body, error_excerpt=error_excerpt_test,
                                 macros_section=macros_section,
                                 notes_section=notes_t,
+                                container=_rt_container,
+                                types_section=_types_section_for_fix(
+                                    sig_t, cur_body, error_excerpt_test,
+                                    _rt_container,
+                                    _extract_impl_where_clause(cur_text, _rt_container),
+                                    _crate_type_records),
                                 invariants_section=invariants_section,
                                 fr_path=fr_path,  # P6.4 note recall
                                 attempt_history=test_fix_history.get(  # P2
@@ -11305,6 +11322,28 @@ def _format_type_for_prompt(rec: TypeRecord) -> str:
                     rest = rest[:197] + "..."
                 lines.append(f"    // also: {rest}")
     return "\n".join(lines)
+
+
+def _types_section_for_fix(
+    sig_text: str,
+    body_text: str,
+    error_excerpt: str,
+    container: str,
+    impl_where: str,
+    type_records: "list[TypeRecord]",
+) -> str:
+    """TYPES_IN_SCOPE for retry/fix prompts (P5.1 parity). Selects from
+    everything that can name a type at fix time — the signature, the
+    enclosing impl header (+ where clause), the CURRENT body (names the
+    types the previous attempt actually manipulated), and the error
+    text — then formats and caps like the initial-fill path."""
+    search = "\n".join([
+        sig_text or "", container or "", impl_where or "",
+        body_text or "", error_excerpt or "",
+    ])
+    recs = _types_referenced_in_text(search, type_records)[:_TYPES_COUNT_CAP]
+    return "\n\n".join(
+        _format_type_for_prompt(r) for r in recs)[:_TYPES_SECTION_CAP]
 
 
 def _extract_impl_where_clause(file_text: str, container: str) -> str:
@@ -17379,6 +17418,18 @@ def _task3_inline_retry(
             with suppress(Exception):
                 snapshot[p] = p.read_bytes()
 
+    # P5.1 parity: fix prompts here previously carried no TYPES_IN_SCOPE and
+    # no container — the model had to guess struct fields. Enumerate from the
+    # current (reconstructed) src; cluster-filter so only methods that compile
+    # under THIS cluster are advertised (Hard Rule 8).
+    _retry_type_recs = _cluster_filter_type_methods(
+        _enumerate_types_via_extractor(src_root) or [], cluster)
+    _retry_containers: dict[tuple[str, str], str] = {}
+    for _rr in (_enumerate_fns_via_extractor(src_root) or []):
+        _retry_containers.setdefault(
+            (_rr.get("file", ""), _rr.get("fn_name", "")),
+            _rr.get("container", ""))
+
     def _apply_per_fn_fixes(refs: list[tuple[str, str]], output: str) -> int:
         # Re-ask the model for each (file, fn) body and splice it. Frozen tests
         # are never rewritten — skip tests/ and gen_tests siblings even if a
@@ -17400,11 +17451,19 @@ def _task3_inline_retry(
             sig_t = sloc[0]
             cur_body = cur_text[sloc[2]:sloc[3]]
             err_excerpt = _focus_cargo_errors(output, rel_f, max_chars=_FIX_ERR_CAP)
+            # Container map keys are rel to src/, rel_f is rel to project_dir.
+            _src_rel = rel_f[4:] if rel_f.startswith("src/") else rel_f
+            _container = _retry_containers.get((_src_rel, fn), "")
             prompt = _build_per_fn_fix_prompt(
                 file_text=cur_text, fn_name=fn, sig_text=sig_t,
                 test_blocks=[], module_name=project_dir.name,
                 cluster_name=_cluster_label, file_rel=rel_f,
                 prev_body=cur_body, error_excerpt=err_excerpt,
+                container=_container,
+                types_section=_types_section_for_fix(
+                    sig_t, cur_body, err_excerpt, _container,
+                    _extract_impl_where_clause(cur_text, _container),
+                    _retry_type_recs),
             )
             new_body, _ = _ask_per_fn_body(prompt, fn, [], sig_text=sig_t)
             if not new_body:
