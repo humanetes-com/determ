@@ -42,7 +42,29 @@ class Task3Deps:
     test_timeout: int
 
 
-def task3(project_dir, test_command, iteration, output_dir, genesis_path, deps: Task3Deps):
+def _should_reverify(primary_output: str, retry_output: str, retry_passed: bool,
+                     budget_remaining: int) -> bool:
+    """Whether to re-run TASK 3 across all clusters after an inline retry.
+
+    Gate on STABLE test COUNTS, never raw cargo text: cargo output is not
+    byte-deterministic (test ordering/timing), so a no-op retry "changes" the
+    text — the old `retry_output != primary_test_output` check then recursed
+    forever (RecursionError). Re-verify only on genuine progress (retry passed,
+    or more tests pass, or fewer fail — the last covers a build-fix that makes
+    the tree compile so more tests run) AND while the budget lasts. Exhausted
+    budget → caller falls through to the FAIL verdict → TASK 4.
+    """
+    if budget_remaining <= 0:
+        return False
+    if retry_passed:
+        return True
+    init_p, init_f, _ = _parse_test_counts(primary_output)
+    new_p, new_f, _ = _parse_test_counts(retry_output)
+    return new_p > init_p or new_f < init_f
+
+
+def task3(project_dir, test_command, iteration, output_dir, genesis_path, deps: Task3Deps,
+          _reverify_remaining: int = 2):
     """TASK 3 — per-cluster strict-verdict test runner.
 
     FR-024: SUCCESS only when every test in every cluster genuinely runs
@@ -200,13 +222,14 @@ def task3(project_dir, test_command, iteration, output_dir, genesis_path, deps: 
                 initial_test_output=primary_test_output,
                 cluster=primary_cluster,
             )
-            if retry_passed or retry_output != primary_test_output:
-                # Re-run all clusters to verify the retry's fixes hold
-                # across the corpus, not just the primary failing cluster.
-                # Recurse once.
+            # Re-verify across all clusters ONLY on genuine progress, and only
+            # while the budget lasts (see _should_reverify).
+            if _should_reverify(primary_test_output, retry_output, retry_passed,
+                                _reverify_remaining):
                 return task3(
                     project_dir, test_command, iteration,
                     output_dir, genesis_path, deps,
+                    _reverify_remaining=_reverify_remaining - 1,
                 )
 
         done["data"] = {
