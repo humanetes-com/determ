@@ -45,6 +45,9 @@ def _setup(monkeypatch, tmp_path: Path) -> Path:
     ws = tmp_path / "ws"
     (ws / "src").mkdir(parents=True)
     (ws / "src" / "lib.rs").write_text(IMPL_LIB)
+    # B3 is env-driven and .env sets it ON for live runs — pin it OFF here so
+    # the revert-path tests are environment-independent; the B3 test pins it ON.
+    monkeypatch.setenv("PHASE_C_KEEP_NONREGRESSING", "0")
     monkeypatch.setattr(pipeline, "_collect_impl_blocks_for_cluster",
                         lambda *a, **k: [_block()])
     monkeypatch.setattr(pipeline, "_scan_unimplemented_records_for_cluster",
