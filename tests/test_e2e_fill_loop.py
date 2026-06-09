@@ -163,3 +163,51 @@ def test_u2_codependent_stub_panic_keeps_body(monkeypatch, tmp_path):
     assert res["fns_filled"] == 1
     assert res["attempts"] == 1
     assert "42" in (ws / "src" / "lib.rs").read_text()
+
+
+def test_sig_change_hatch_applies_on_attempt_five(monkeypatch, tmp_path):
+    # P3.1 pin (pre-f2): after 4 compile failures with IMPROVING error counts
+    # (so neither floor-stall nor repeated-sig exits first), attempt 5 opens
+    # the sig-change hatch — a <SIGNATURE> block from a non-pub fn is applied
+    # before the body splice. The hatch reads the RAW response, so this test
+    # scripts `_ask_per_fn_body` directly instead of the harness model seam.
+    ws = tmp_path / "ws"
+    (ws / "src").mkdir(parents=True)
+    # Non-pub on purpose: _replace_fn_signature refuses pub fns.
+    (ws / "src" / "lib.rs").write_text(
+        "fn answer() -> u32 {\n    unimplemented!()\n}\n")
+    monkeypatch.setattr(pipeline, "SETTINGS",
+                        dataclasses.replace(pipeline.SETTINGS,
+                                            phase_c_fill_unit=FillUnit.FN))
+    monkeypatch.setattr(pipeline, "_scan_unimplemented_records_for_cluster",
+                        lambda *a, **k: None)
+    monkeypatch.setattr(pipeline, "_enumerate_types_via_extractor",
+                        lambda *a, **k: [])
+    monkeypatch.setattr(pipeline, "_enumerate_fns_via_extractor",
+                        lambda *a, **k: None)
+
+    raw_with_sig = ("<SIGNATURE>fn answer() -> u64</SIGNATURE>\n"
+                    "<BODY>42</BODY>")
+    asks = {"n": 0}
+
+    def fake_ask(prompt, fn, *a, **k):
+        asks["n"] += 1
+        return ("42", raw_with_sig) if asks["n"] >= 5 else ("0", "<BODY>0</BODY>")
+
+    monkeypatch.setattr(pipeline, "_ask_per_fn_body", fake_ask)
+    # Attempts 1-4: strictly DECREASING distinct-E-code counts (improving
+    # floor → no stall, different sigs → no repeated-exit). Attempt 5: ok.
+    fails = iter([
+        (101, "error[E0308]: a\nerror[E0425]: b\nerror[E0277]: c\nerror[E0599]: d\n --> src/lib.rs:2:5"),
+        (101, "error[E0308]: a\nerror[E0425]: b\nerror[E0277]: c\n --> src/lib.rs:2:5"),
+        (101, "error[E0308]: a\nerror[E0425]: b\n --> src/lib.rs:2:5"),
+        (101, "error[E0308]: a\n --> src/lib.rs:2:5"),
+        (0, "ok"),
+    ])
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []),
+                           run=lambda: next(fails, (0, "ok")))
+    res = _run(ws)
+    text = (ws / "src" / "lib.rs").read_text()
+    assert res["fns_filled"] == 1
+    assert res["attempts"] == 5
+    assert "u64" in text and "42" in text and "unimplemented!()" not in text
