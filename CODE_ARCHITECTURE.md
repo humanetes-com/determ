@@ -437,6 +437,57 @@ feeds the compiler output and asks for general structural-methodology rules. The
 | why not a positive build-signal | requiring structural keywords (module/layout/entry-point/compile…) would just reintroduce the same false-positive class against a heavily-constrained prompt. For build failures, stall/shrank/dedup are the honest anti-corruption set. |
 | validation | ●● — a unit test can drive `validate_task4_output(..., failure_type="build")` with a general (identifier-free) update and assert it's accepted; full propagation (coverage_strategy regen → fewer build spins) wants a live run. |
 
+### R10 — e2e validation harness: kill the "●●● await live run" tax  ⬜ DESIGN  (P0 · the dev-cycle bottleneck)
+Problem: every orchestration change is tagged ●●● and gated on a live run, but the only live target is
+**anyhow** — huge AND it triggers the unconverged-cluster bugs, so a single-module run ran 5h and stalled
+(session 57). Root mis-classification: most ●●● items validate **orchestration logic** (reacts to model+cargo
+*output*), not **model quality** — they don't need a live model at all. Split validation into layers, fastest
+first; only the genuine "does the model converge" question pays for a model, and never on anyhow.
+
+| layer | what | speed | model? | cargo? | status |
+|---|---|---|---|---|---|
+| L0 | `check.sh`: ruff/mypy/import-linter + fake-transport (`test_llm_controller`) + fill-replay (`test_fill_replay`) | sub-sec | no | no | ✅ have |
+| L1 | **scripted-model integration** + **fault-injection fixtures**: monkeypatch `pipeline._ask_raw`→canned responder; tiny fixture crate; drive each failure mode deliberately (non-compiling `<FN>`, length-trunc, cfg-dead method) and assert the routing/keep-revert/cap decision | seconds | scripted | cached/real | ⬜ |
+| L2 | **cassette replay**: replay a recorded real run — `ask()` hits a `{prompt_sha→response}` cassette, cargo memoized by tree-hash. A prompt-changing edit shows **cassette MISSES at exactly the altered prompts** = precise blast radius, re-record only those | minutes | recorded | memoized | ⬜ |
+| L3 | **micro fixture crate, REAL model**: purpose-built 1-module/2–3-fn crate that *converges in minutes* — the "smoke in tmp" reborn as a committed fixture. Validates model-in-loop happy path | minutes | live | real | ⬜ |
+| L4 | full anyhow | hours | live | real | ⬜ release gate, background only |
+
+Seam + seed (both verified to exist, session 58):
+- **Injection seam = `pipeline._ask_raw`** (pipeline.py:596). `ask()` does all context-guard/budget work then calls the rebindable module global `_ask_raw = model_interact.ask`; a harness swaps it → scripted/cassette responder with zero changes to model_interact / controller / transport. One seam serves L1+L2.
+- **Cassette seed already on disk.** `logs/events.jsonl` (7.9k `llm.request` / 7.7k `llm.response`) + `logs/prompts/` (content-addressed sha256 store of **both** prompts and responses). A builder walks events, pairs request→response, resolves shas to `logs/prompts/{sha}.txt`. No re-run needed to seed.
+
+| # | step | Pri | Eff | Risk | status |
+|---|---|---|---|---|---|
+| R10.0 | **response-correlation one-liner** ✅: `llm.response` emit (pipeline.py:599) now carries `prompt_sha` (= the request's `_prompt_meta["sha256"]`), so cassette pairing is exact regardless of parallelism. Older recordings without it fall back to emission-order pairing (exact at p=1). | P0 | S | ● | ✅ |
+| R10.1 | **scripted-seam harness** `tests/harness.py` — `install_scripted_model` (`_ask_per_fn_body`/`_ask_raw`), `install_scripted_cargo` (`_run_cargo`/`_run_cargo_check_diag`/`_frontier_from_diags`), `install_scripted_attribution` (`_attribute_failures`), `diag()` builds real domain Diagnostics; scripted values = constant/list/callable. **Micro fixture crate** (real cargo, L3) NOT yet — logic tests use a temp `unimplemented!()` stub tree, no cargo. | P0 | M | ●● | 🔄 harness ✅, crate ⬜ |
+| R10.2 | **fault-injection cases** retiring the ●●● tax — `tests/test_e2e_routing.py`: R9.1 BUILD-mode fix path; R9.2 keep/revert in **both** BUILD mode (error-count worsens→revert / compiles→keep) and TEST mode (broke_build: ran→not-ran→revert). `tests/test_e2e_budget.py`: W3/W4(e) — sentinel-override vs explicit-bound, ctx-shrink, thinking-reserve-on-top. cfg-filter already had `test_cluster_filter_type_methods_drops_cfg_dead_methods` (session 56). Scheduling determinism ⬜. | P0 | M | ●● | 🔄 routing+budget ✅ |
+| R10.3 | **cassette builder + replay runner** ✅: `tests/cassette.py` — `build_cassette` (events.jsonl + prompts/ → `{prompt_sha→response}`, prefers R10.0 `prompt_sha`, falls back to order-pairing; product/pipeline_sha filter), `install_cassette` (patches `_ask_raw`; strict→`CassetteMiss` or lenient→""; records misses = blast radius). Offline test `tests/test_cassette.py` (synthetic seed). Verified on real log: 128 entries from the 789ba6c p=1 tail. NOT yet wired to a full-run replay harness (needs the L3 fixture-crate run or cargo memoization R10.4). | P1 | M | ●● | 🔄 builder/replay ✅, full-run wiring ⬜ |
+| R10.4 | **cargo memoization** for replay: `(tree_hash,cmd)→(rc,out)` cache so replay is near-pure-CPU (replayed fills are byte-identical → cargo results reproducible) | P1 | M | ●● | ⬜ |
+| R10.5 | L3 micro-crate as the on-demand real-model convergence smoke (nightly/manual, not per-change); anyhow demoted to L4 release gate | P2 | S | ●● | ⬜ |
+
+Reclassification: R10.1+R10.2 landed (session 58) — the logic ●●● items (**R9.1, R9.2, W3, W4(e)**, session-56
+cfg-filter) are now covered by L1 deterministically, no live run needed. Remaining ●●●: W1/W2 vLLM parity +
+scheduling determinism (need R10.3 cassette or the L3 micro-crate); "does the local model converge on real code"
+stays genuinely live, on L3's micro-crate, not anyhow.
+FINDING (session 58, while wiring R10.2): `_apply_per_fn_fixes` (pipeline.py:17351) calls `_splice_fn_body`
+WITHOUT `allow_nonstub=True`, so the build-fix retry can only re-fill `unimplemented!()` stubs — a fn that
+already has a (wrong, non-compiling) body cannot be re-fixed by the inline retry. Possible real R9.1 limitation;
+flagged for separate review.
+
+### R11 — phase-c determinism & cluster-correctness (sessions 55–56)  ✅ SHIPPED (●●● convergence effect awaits live run)
+Three changes from the convergence-diagnosis sessions, undocumented until now. R11.2 is **uncommitted** at
+session-57 handover (commit message written, user commits); R11.1 + R11.3 are in `789ba6c`.
+
+| # | change | root cause | fix | where | status |
+|---|---|---|---|---|---|
+| R11.1 | **stream.log thread-local race fix** | under `PHASE_C_PARALLELISM`>1 the W1/W2 backends shared one stream-log file handle → garbled token-salad interleave | `_sock_*` made thread-local: workers write `logs/stream.<threadname>.log`, the main thread keeps `logs/stream.log`. `_sock_open`'s `open("w")` truncation is per-handle so each stream is clean | model_interact.py / pipeline.py stream sink | ✅ committed (789ba6c) |
+| R11.2 | **cluster-aware TYPES_IN_SCOPE (cfg-filter dead methods)** [Hard Rule 8] | TYPES_IN_SCOPE advertised EVERY method regardless of cluster cfg → in `anyhow_no_core_error` the model reached for std-gated ctors (`construct_from_context`, `new`, `from_boxed`) that are cfg-dead → trait-bound error every attempt; the correct `construct_from_display` was buried past the 10-method cap | extractor: `MethodRecord.cfg_predicates` = enclosing impl/trait cfg ∪ method cfg (impl- and trait-method paths). `models.py`: schema + round-trip. `pipeline.py`: `_cluster_filter_type_methods` drops methods whose cfg is definitively False for the cluster (undecidable kept = conservative, matches `_fn_belongs_to_cluster`), applied at both `_crate_type_records` sites. `_eval_cfg_pred` now **normalizes** comparison sets (else spaced `feature = "X"` never matched → silent no-op on the exact anyhow case) | model.rs, enumerate.rs, domain/models.py, pipeline.py (~9059, ~9582) | 🔄 **uncommitted** |
+| R11.3 | **priority-level fill batching** [Hard Rule 9] | phase-c per-fn dispatch drained the whole frontier with a free-for-all queue → nondeterministic completion order → fill A changes B's file-context → unreproducible | `stubs` is leaf-first sorted; equal-ref-count stubs grouped into LEVELS; each level runs `min(P, level_size)` workers with a **barrier between levels** → callee level lands on disk before caller level → deterministic, scheduling-independent | pipeline.py:~10260 | ✅ committed (789ba6c) |
+
+Residual: within-level snapshot race remains under p>1; `PHASE_C_PARALLELISM=1` (uncommitted `.env`) removes it
+entirely during diagnosis. R11.2's full convergence effect (no_core impls reaching "tests pass" instead of "floor
+stalled → reverted") is ●●● — exactly the kind of item R10's L1/L2 would let us validate without a live anyhow run.
+Extractor binary must be rebuilt for R11.2 (`cargo build --release`); pipeline reads it live.
 
 Important Todos:
 

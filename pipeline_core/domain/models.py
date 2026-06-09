@@ -47,13 +47,17 @@ class MethodRecord:
     name: str = ""
     sig: str = ""
     is_pub: bool = False
+    cfg_predicates: tuple[str, ...] = ()
 
     @classmethod
     def from_dict(cls, d: dict) -> MethodRecord:
-        return cls(name=d.get("name", ""), sig=d.get("sig", ""), is_pub=bool(d.get("is_pub", False)))
+        return cls(name=d.get("name", ""), sig=d.get("sig", ""),
+                   is_pub=bool(d.get("is_pub", False)),
+                   cfg_predicates=_strs(d.get("cfg_predicates")))
 
     def to_dict(self) -> dict:
-        return {"name": self.name, "sig": self.sig, "is_pub": self.is_pub}
+        return {"name": self.name, "sig": self.sig, "is_pub": self.is_pub,
+                "cfg_predicates": list(self.cfg_predicates)}
 
 
 @dataclass(frozen=True, slots=True)

@@ -55,6 +55,26 @@ def _setup_workspace(name: str = "fixture-tiny-test") -> Path:
 
 # ─── Pure-Python phase ──────────────────────────────────────────────────────
 
+def test_effective_stalls_passthrough_and_focus(monkeypatch) -> None:
+    """Pass-through collapses every module's stall budget except the converge module."""
+    import pipeline
+
+    # Mode off → budget unchanged.
+    monkeypatch.setattr(pipeline, "_PASS_THROUGH", False)
+    assert pipeline._effective_stalls(3, "error") == 3
+
+    # Mode on → non-focus modules collapse to PASS_THROUGH_STALLS.
+    monkeypatch.setattr(pipeline, "_PASS_THROUGH", True)
+    monkeypatch.setattr(pipeline, "_PASS_THROUGH_STALLS", 1)
+    monkeypatch.setattr(pipeline, "_CONVERGE_MODULE", "context")
+    assert pipeline._effective_stalls(3, "error") == 1
+    assert pipeline._effective_stalls(3, None) == 1
+    # Focus module keeps the full budget → converges for real.
+    assert pipeline._effective_stalls(3, "context") == 3
+    # Collapse never raises the budget above full.
+    assert pipeline._effective_stalls(0, "error") == 0
+
+
 def test_gen_tests_helpers() -> None:
     """Verify gen_tests sibling-file write / read / revert / strip semantics."""
     import pipeline
@@ -2345,11 +2365,13 @@ def test_slice6_models() -> None:
     ty_wire = {
         "file": "src/lib.rs", "kind": "struct", "name": "Error", "generics": "", "definition": "struct Error",
         "fields": [{"name": "inner", "ty": "Own<ErrorImpl>", "is_pub": False}],
-        "variants": [], "methods": [{"name": "new", "sig": "fn new() -> Self", "is_pub": True}], "is_pub": True,
+        "variants": [], "methods": [{"name": "new", "sig": "fn new() -> Self", "is_pub": True,
+                                     "cfg_predicates": ["feature = \"std\""]}], "is_pub": True,
     }
     tr = TypeRecord.from_dict(ty_wire)
     assert isinstance(tr.fields[0], FieldRecord) and tr.fields[0].ty == "Own<ErrorImpl>"
     assert isinstance(tr.methods[0], MethodRecord) and tr.methods[0].sig == "fn new() -> Self"
+    assert tr.methods[0].cfg_predicates == ("feature = \"std\"",)
     assert tr.to_dict() == ty_wire
 
     mod = ModRecord.from_dict({"name": "error", "file": "error.rs", "cfg_predicates": [], "declared_in": "lib.rs"})
@@ -2705,6 +2727,31 @@ def test_revert_gen_tests_pass_reconciles_all_siblings() -> None:
         assert not sib1.exists()
         assert not sib2.exists(), "sib2 orphaned — reconciliation missed it"
         print("  OK  _revert_gen_tests_pass reconciles all dropped siblings (R9.6)")
+
+
+def test_cluster_filter_type_methods_drops_cfg_dead_methods():
+    """TYPES_IN_SCOPE must advertise only methods that compile in the cluster
+    (Hard Rule 8). In a no_core cluster, a constructor gated
+    `any(feature="std", not(anyhow_no_core_error))` must be dropped, while an
+    ungated one and an undecidable-cfg one are kept."""
+    import pipeline
+    from pipeline_core.domain.models import MethodRecord, TypeRecord
+    err = TypeRecord(name="Error", kind="struct", methods=(
+        MethodRecord(name="construct_from_display", sig="fn construct_from_display(...)"),
+        MethodRecord(name="new", sig="fn new(...)",
+                     cfg_predicates=("any(feature = \"std\", not(anyhow_no_core_error))",)),
+        MethodRecord(name="provide", sig="fn provide(...)",
+                     cfg_predicates=("error_generic_member_access",)),  # undecidable → keep
+    ))
+    cluster = pipeline.BuildCluster(
+        name="anyhow_no_core_error", env_extra={}, tarpaulin_exclude_files=[],
+        excluded_cfg=["std"], active_cfg=["anyhow_no_core_error"],
+        prompt_nightly_rule="")
+    [out] = pipeline._cluster_filter_type_methods([err], cluster)
+    kept = {m.name for m in out.methods}
+    assert kept == {"construct_from_display", "provide"}, kept
+    # None cluster → unchanged identity.
+    assert pipeline._cluster_filter_type_methods([err], None) == [err]
 
 
 # ─── Driver ─────────────────────────────────────────────────────────────────

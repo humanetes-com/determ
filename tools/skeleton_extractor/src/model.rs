@@ -54,6 +54,10 @@ pub struct MethodRecord {
     pub name: String,
     pub sig: String, // sig text up to but excluding `{`
     pub is_pub: bool,
+    // Effective cfg predicates: the enclosing impl/trait block's cfgs unioned
+    // with the method's own. Lets the pipeline drop methods that don't compile
+    // in a given cluster's cfg-set (cluster-aware TYPES_IN_SCOPE).
+    pub cfg_predicates: Vec<String>,
 }
 
 /// One module declaration in a crate root file (lib.rs or main.rs).

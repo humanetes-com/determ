@@ -331,12 +331,16 @@ pub(crate) fn collect_types_and_methods(
                 );
                 let definition = quote::quote!(#tr).to_string();
                 let mut methods = Vec::new();
+                let tr_cfgs = extract_cfg_predicates(&tr.attrs);
                 for ti in &tr.items {
                     if let TraitItem::Fn(itf) = ti {
+                        let mut cfgs = tr_cfgs.clone();
+                        cfgs.extend(extract_cfg_predicates(trait_item_attrs(ti)));
                         methods.push(MethodRecord {
                             name: itf.sig.ident.to_string(),
                             sig: render_type(&itf.sig).trim().to_string(),
                             is_pub: false,
+                            cfg_predicates: cfgs,
                         });
                     }
                 }
@@ -372,8 +376,11 @@ pub(crate) fn collect_types_and_methods(
                     methods: Vec::new(),
                     is_pub: false,
                 });
+                let impl_cfgs = extract_cfg_predicates(&ii.attrs);
                 for impl_item in &ii.items {
                     if let ImplItem::Fn(item_fn) = impl_item {
+                        let mut cfgs = impl_cfgs.clone();
+                        cfgs.extend(extract_cfg_predicates(impl_item_attrs(impl_item)));
                         entry.methods.push(MethodRecord {
                             name: item_fn.sig.ident.to_string(),
                             sig: render_type(&item_fn.sig).trim().to_string(),
@@ -381,6 +388,7 @@ pub(crate) fn collect_types_and_methods(
                                 item_fn.vis,
                                 syn::Visibility::Public(_) | syn::Visibility::Restricted(_)
                             ),
+                            cfg_predicates: cfgs,
                         });
                     }
                 }

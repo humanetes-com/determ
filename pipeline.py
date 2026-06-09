@@ -7,6 +7,7 @@ Usage:
 """
 
 import argparse
+import dataclasses
 import hashlib
 import json
 import os
@@ -595,7 +596,8 @@ def ask(prompt: str, system: str | None = None, model: str | None = None,
             _response = _ask_raw(prompt, system, **kwargs)
             _dur_ms = int((time.monotonic() - _t0) * 1000)
             _emit("llm.response", duration_ms=_dur_ms,
-                  data={"response": _store_prompt_content(_response or "")})
+                  data={"prompt_sha": _prompt_meta["sha256"],
+                        "response": _store_prompt_content(_response or "")})
             return _response
         except Exception as _e:
             _ename = type(_e).__name__
@@ -4230,9 +4232,13 @@ def _eval_cfg_pred(pred: str, cfg_true: set[str], cfg_false: set[str]) -> "bool 
     """
     s = pred.strip()
     norm = _normalize_cfg_pred(s)
-    if norm in cfg_true:
+    # Normalize the comparison sets too: source predicates spell features as
+    # `feature = "std"` (spaced) while the cluster sets may hold either form.
+    # Without this, space-sensitive membership made every `feature = "X"`
+    # predicate undecidable (the filter silently no-op'd).
+    if norm in {_normalize_cfg_pred(x) for x in cfg_true}:
         return True
-    if norm in cfg_false:
+    if norm in {_normalize_cfg_pred(x) for x in cfg_false}:
         return False
     # Operators
     for op in ("not", "all", "any"):
@@ -7277,6 +7283,45 @@ _PER_PASS_TEST_FIX_HARD_CAP = int(os.getenv(
     os.getenv("PHASE_C_FIX_CAP_PER_PASS", "10000"),
 ))
 
+# Pass-through / focus-convergence smoke mode. With PIPELINE_PASS_THROUGH=1 every
+# phase-c stall budget collapses to PIPELINE_PASS_THROUGH_STALLS (default 1): each
+# fn/impl/test-fix loop does a couple of attempts then reverts-to-stub and moves on,
+# giving an end-to-end run for controller/routing telemetry without grinding to
+# convergence. PIPELINE_CONVERGE_MODULE names ONE module exempt from the collapse —
+# it keeps full budgets and converges for real (the deterministic R3/R9 baseline).
+_PASS_THROUGH = os.getenv("PIPELINE_PASS_THROUGH", "0") == "1"
+_PASS_THROUGH_STALLS = int(os.getenv("PIPELINE_PASS_THROUGH_STALLS", "1"))
+_CONVERGE_MODULE = os.getenv("PIPELINE_CONVERGE_MODULE", "").strip()
+
+
+def _effective_stalls(full_budget: int, module: str | None) -> int:
+    """Stall budget for a phase-c loop, honoring pass-through/focus mode. Normal
+    runs return full_budget unchanged. Under pass-through every module collapses to
+    PIPELINE_PASS_THROUGH_STALLS EXCEPT the designated converge module, which keeps
+    full_budget so it reaches real convergence."""
+    if not _PASS_THROUGH:
+        return full_budget
+    if module and _CONVERGE_MODULE and module == _CONVERGE_MODULE:
+        return full_budget
+    return min(full_budget, _PASS_THROUGH_STALLS)
+
+
+def _module_of(rel_file: str) -> str:
+    """Rust module identity of a source file: 'src/ptr.rs' -> 'ptr'. This is the
+    granularity PIPELINE_CONVERGE_MODULE names: phase-c fills operate per-file, so
+    the converge exemption must key on the file under fill, not the crate dir."""
+    return Path(rel_file).stem
+
+
+def _converge_in_cluster(cluster: "BuildCluster | None") -> str | None:
+    """_CONVERGE_MODULE if its source file is active (not gated) in this cluster,
+    else None. Cluster-scoped loops (TDD / per-pass test-fix) run whole-cluster, so
+    they keep full budget whenever the converge module's tests live in the cluster."""
+    if not _CONVERGE_MODULE:
+        return None
+    gated = {_module_of(f) for f in (cluster.gated_files or [])} if cluster else set()
+    return _CONVERGE_MODULE if _CONVERGE_MODULE not in gated else None
+
 # P4: directory under each project workspace where Phase C test-fix
 # iterations are archived for post-hoc retrospective. Per-iter file:
 # tmp/{project}/.phase_c_logs/{cluster}/pass_{n}/fix_{iter}.txt
@@ -8723,7 +8768,8 @@ def _run_phase_c_tdd(
     test_timeout = int(os.getenv("PHASE_C_TEST_TIMEOUT", "120"))
     # max_iters is legacy — only the 10k backstop in the loop body honors it.
     # The real terminator is floor-stall on pass_count (max_stalls below).
-    max_stalls = int(os.getenv("TDD_MAX_STALLS", "3"))
+    max_stalls = _effective_stalls(int(os.getenv("TDD_MAX_STALLS", "3")),
+                                   _converge_in_cluster(cluster) or module)
 
     _log(f"  {tag} [phase-c/tdd] driver=tdd, "
          f"max_stalls={max_stalls}, timeout={test_timeout}s, "
@@ -8772,7 +8818,7 @@ def _run_phase_c_tdd(
     # Hard cap removed — the sole non-success terminator is `stall >=
     # max_stalls` on the pass_count floor. The 10k backstop here mirrors
     # `_improvement_loop`'s safety net and should never fire in practice.
-    _tdd_backstop = 10_000
+    _tdd_backstop = int(os.getenv("PHASE_C_TDD_BACKSTOP", "10000"))
     while True:
         iter_n += 1
         if iter_n > _tdd_backstop:
@@ -9056,7 +9102,8 @@ def _phase_c_fill_impl_blocks(
     _no_std_invariant = _detect_crate_no_std_invariant(target_src_dir)
     invariants_section = "\n\n".join(
         s for s in (_no_std_invariant, _macro_invariants) if s)
-    _crate_type_records = _enumerate_types_via_extractor(target_src_dir) or []
+    _crate_type_records = _cluster_filter_type_methods(
+        _enumerate_types_via_extractor(target_src_dir) or [], cluster)
 
     # Dispatch families (FR-027): autoref-specialization trait sets dispatched
     # by a macro. Their correctness is a cross-impl invariant, so when a block
@@ -9090,10 +9137,12 @@ def _phase_c_fill_impl_blocks(
 
     retros_cache = _load_retrospectives(project_dir)
 
-    block_max_stalls = int(os.getenv("PHASE_C_IMPL_MAX_STALLS", "3"))
+    _impl_full_stalls = int(os.getenv("PHASE_C_IMPL_MAX_STALLS", "3"))
 
     for block in viable_blocks:
         block_id = _impl_block_id(block["file"], block["container"])
+        # Per-file converge keying: only the converge module keeps full budget.
+        block_max_stalls = _effective_stalls(_impl_full_stalls, _module_of(block["file"]))
         file_path = target_src_dir / block["file"]
         if not file_path.exists():
             continue
@@ -9579,7 +9628,9 @@ def _task2_fill_fns_one_by_one(
     # P5.1: crate-wide type records (struct/enum/type/trait with fields +
     # method names). Used per-fn to inject only the types the fn's signature
     # actually mentions. Cached across passes; file set doesn't change.
-    _crate_type_records = _enumerate_types_via_extractor(target_src_dir) or []
+    # Cluster-aware: drop methods cfg-gated out of this cluster (Hard Rule 8).
+    _crate_type_records = _cluster_filter_type_methods(
+        _enumerate_types_via_extractor(target_src_dir) or [], cluster)
 
     # P7.6: floor-stall against (remaining_stubs + last_pass_failures) across
     # passes. max_passes becomes the hard cap. A pass that strictly decreases
@@ -10086,7 +10137,7 @@ def _task2_fill_fns_one_by_one(
                     "improved": fn_stall == 0,
                     "stalled": fn_stall,
                 })
-                if fn_stall >= _PER_FN_FIX_MAX_STALLS:
+                if fn_stall >= _effective_stalls(_PER_FN_FIX_MAX_STALLS, _module_of(rel_file)):
                     if not _lock_released:
                         _splice_check_lock.release()
                         _lock_released = True
@@ -10581,7 +10632,9 @@ def _task2_fill_fns_one_by_one(
                              f"{test_fix_attempt}: "
                              f"{cur_fail_count}→{new_fail_count} failures "
                              f"(floor={best_fail_count}, stall={stall}).")
-                        if stall >= _PER_PASS_TEST_FIX_MAX_STALLS:
+                        if stall >= _effective_stalls(
+                                _PER_PASS_TEST_FIX_MAX_STALLS,
+                                _converge_in_cluster(cluster) or module_name):
                             _log(f"  [phase-c/per-fn] pass {pass_n}: failure "
                                  f"floor stalled at {best_fail_count} for "
                                  f"{stall} iter(s) — stopping test-fix loop.")
@@ -11105,6 +11158,31 @@ def _enumerate_types_via_extractor(src_dir: Path) -> list[TypeRecord] | None:
     variants[], methods[], is_pub.
     """
     return ADAPTERS.extractor.enumerate_types(src_dir)  # slice 5a: via Extractor adapter
+
+
+def _cluster_filter_type_methods(
+    records: list[TypeRecord],
+    cluster: "BuildCluster | None",
+) -> list[TypeRecord]:
+    """Drop methods whose cfg is excluded by `cluster` so TYPES_IN_SCOPE
+    advertises only what compiles here (Hard Rule 8). A method is kept unless
+    one of its cfg predicates evaluates definitively False; undecidable
+    predicates are kept (conservative — matches _fn_belongs_to_cluster).
+    Fields/variants carry no cfg today and pass through unchanged."""
+    if cluster is None:
+        return records
+    cfg_true = set(cluster.cfg_true)
+    cfg_false = set(cluster.cfg_false)
+    out: list[TypeRecord] = []
+    for r in records:
+        kept = tuple(
+            m for m in r.methods
+            if not any(_eval_cfg_pred(p, cfg_true, cfg_false) is False
+                       for p in m.cfg_predicates)
+        )
+        out.append(dataclasses.replace(r, methods=kept)
+                   if len(kept) != len(r.methods) else r)
+    return out
 
 
 def _format_type_for_prompt(rec: TypeRecord) -> str:
