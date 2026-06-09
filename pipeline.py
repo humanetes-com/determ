@@ -9212,9 +9212,15 @@ def _phase_c_fill_impl_blocks(
                     tests_dir_files, fn_name, max_blocks=2):
                 if not any(p == path_str for p, _ in test_blocks):
                     test_blocks.append((path_str, txt))
-        # Types in scope: union over all stub signatures in this block.
+        # Types in scope: union over all stub signatures in this block,
+        # plus the impl header and its where clause — the self-type
+        # (e.g. `impl Display for BoxedError`) appears in no member sig,
+        # so without the container its definition is never injected.
+        _block_container = block.get("container") or ""
+        _block_where = _extract_impl_where_clause(snapshot, _block_container)
         types_for_block_text = " ".join(
-            (m.get("sig_text") or "") for m in block["members"])
+            [(m.get("sig_text") or "") for m in block["members"]]
+            + [_block_container, _block_where])
         types_records = _types_referenced_in_text(
             types_for_block_text, _crate_type_records)
         # Plan 9 F1/F2: budget-derive (was hardcoded 12 types).

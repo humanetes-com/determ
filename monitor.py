@@ -637,7 +637,7 @@ def _phase_c_panel_rows(state: dict[str, Any]) -> list[str]:
                      f"{red(f'fail={_f}')}  iter={_cs.get('iter')}  "
                      f"stall={_cs.get('stall')}")
             if len(_h) >= 2:
-                _line += "  " + dim("→".join(str(x) for x in _h[-8:]))
+                _line += "  " + dim("→ ".join(str(x) for x in _h[-8:]))
             rows.append(_line)
 
     # Current error class — what the model is fighting right now.
@@ -1175,7 +1175,7 @@ def pipeline_status():
             cur_pct = -1.0
         if proj_pct - cur_pct >= 0.05:   # only show if a meaningful uplift
             proj_col = green if proj_pct >= 80 else yellow
-            _proj_str = dim("(→") + proj_col(f"{proj_pct:.1f}%") + dim(")")
+            _proj_str = dim("(→ ") + proj_col(f"{proj_pct:.1f}%") + dim(")")
     rows.append(
         f"{status_str}  cov={cov_col(bold(cov))}{_proj_str}{dim(_lines_str)}  "
         f"age={age_s}  errors={prog['errors']}"
