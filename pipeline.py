@@ -10565,12 +10565,7 @@ def _task2_fill_fns_one_by_one(
                         # TYPES_IN_SCOPE and no container. Map (file, fn) →
                         # container via the syn enumerator so the self-type's
                         # definition gets injected (cf. the BoxedError gap).
-                        _retry_containers: dict[tuple[str, str], str] = {}
-                        for _rr in (_enumerate_fns_via_extractor(
-                                target_src_dir) or []):
-                            _retry_containers.setdefault(
-                                (_rr.get("file", ""), _rr.get("fn_name", "")),
-                                _rr.get("container", ""))
+                        _retry_containers = _fn_container_index(target_src_dir)
                         for rel_f, fn in fns_to_retry:
                             fp = target_src_dir / rel_f
                             try:
@@ -10588,27 +10583,23 @@ def _task2_fill_fns_one_by_one(
                                 tests_dir_files, fn,
                                 file_rel=rel_f, src_dir=_src_for_macros,
                             )
-                            notes_t = ""
-                            if fr_path is not None:
-                                notes_t = _filter_model_notes_for_prompt(
-                                    fr_path, file_rel=rel_f, fn_name=fn,
-                                    file_text=cur_text,
-                                    current_error=error_excerpt_test,
-                                )
-                            _rt_container = _retry_containers.get((rel_f, fn), "")
+                            _ctx = _gather_fn_fix_context(
+                                file_text=cur_text, file_rel=rel_f, fn_name=fn,
+                                sig_text=sig_t, body_text=cur_body,
+                                error_excerpt=error_excerpt_test,
+                                container=_retry_containers.get((rel_f, fn), ""),
+                                type_records=_crate_type_records,
+                                fr_path=fr_path,
+                            )
                             prompt = _build_per_fn_fix_prompt(
                                 file_text=cur_text, fn_name=fn, sig_text=sig_t,
                                 test_blocks=t_blocks, module_name=module_name,
                                 cluster_name=cluster_name, file_rel=rel_f,
                                 prev_body=cur_body, error_excerpt=error_excerpt_test,
                                 macros_section=macros_section,
-                                notes_section=notes_t,
-                                container=_rt_container,
-                                types_section=_types_section_for_fix(
-                                    sig_t, cur_body, error_excerpt_test,
-                                    _rt_container,
-                                    _extract_impl_where_clause(cur_text, _rt_container),
-                                    _crate_type_records),
+                                notes_section=_ctx.notes_section,
+                                container=_ctx.container,
+                                types_section=_ctx.types_section,
                                 invariants_section=invariants_section,
                                 fr_path=fr_path,  # P6.4 note recall
                                 attempt_history=test_fix_history.get(  # P2
@@ -11327,6 +11318,63 @@ def _types_section_for_fix(
     recs = _types_referenced_in_text(search, type_records)[:_TYPES_COUNT_CAP]
     return "\n\n".join(
         _format_type_for_prompt(r) for r in recs)[:_TYPES_SECTION_CAP]
+
+
+def _fn_container_index(src_dir: Path) -> dict[tuple[str, str], str]:
+    """(file_rel_to_src, fn_name) → container ("impl … for …" / "trait …" / "").
+
+    Slice 8a (FnContext): the syn enumerator is the one source of truth for
+    which impl owns a fn — every retry site needs this to resolve the
+    self-type whose definition must be injected (the BoxedError gap). First
+    record wins for duplicate names, matching the previous inline builders.
+    """
+    idx: dict[tuple[str, str], str] = {}
+    for rec in (_enumerate_fns_via_extractor(src_dir) or []):
+        idx.setdefault((rec.get("file", ""), rec.get("fn_name", "")),
+                       rec.get("container", ""))
+    return idx
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class _FnPromptContext:
+    """Per-fn prompt context assembled by `_gather_fn_fix_context` — one
+    place that derives every injectable section, so a site can't silently
+    omit one (slice 8a companion to the slice-8 PromptContext records)."""
+    container: str
+    impl_where: str
+    types_section: str
+    notes_section: str
+
+
+def _gather_fn_fix_context(
+    *,
+    file_text: str,
+    file_rel: str,
+    fn_name: str,
+    sig_text: str,
+    body_text: str,
+    error_excerpt: str,
+    container: str,
+    type_records: "list[TypeRecord]",
+    fr_path: "Path | None" = None,
+) -> _FnPromptContext:
+    """Assemble the fix-prompt context for one fn: impl where-clause from the
+    file, TYPES_IN_SCOPE from everything that names a type at fix time, and
+    the relevance-filtered model notes (empty when `fr_path` is None)."""
+    impl_where = _extract_impl_where_clause(file_text, container)
+    types_section = _types_section_for_fix(
+        sig_text, body_text, error_excerpt, container, impl_where,
+        type_records)
+    notes_section = ""
+    if fr_path is not None:
+        notes_section = _filter_model_notes_for_prompt(
+            fr_path, file_rel=file_rel, fn_name=fn_name,
+            file_text=file_text, current_error=error_excerpt,
+        )
+    return _FnPromptContext(
+        container=container, impl_where=impl_where,
+        types_section=types_section, notes_section=notes_section,
+    )
 
 
 def _extract_impl_where_clause(file_text: str, container: str) -> str:
@@ -17415,11 +17463,7 @@ def _task3_inline_retry(
     # under THIS cluster are advertised (Hard Rule 8).
     _retry_type_recs = _cluster_filter_type_methods(
         _enumerate_types_via_extractor(src_root) or [], cluster)
-    _retry_containers: dict[tuple[str, str], str] = {}
-    for _rr in (_enumerate_fns_via_extractor(src_root) or []):
-        _retry_containers.setdefault(
-            (_rr.get("file", ""), _rr.get("fn_name", "")),
-            _rr.get("container", ""))
+    _retry_containers = _fn_container_index(src_root)
 
     def _apply_per_fn_fixes(refs: list[tuple[str, str]], output: str) -> int:
         # Re-ask the model for each (file, fn) body and splice it. Frozen tests
@@ -17442,19 +17486,22 @@ def _task3_inline_retry(
             sig_t = sloc[0]
             cur_body = cur_text[sloc[2]:sloc[3]]
             err_excerpt = _focus_cargo_errors(output, rel_f, max_chars=_FIX_ERR_CAP)
-            # Container map keys are rel to src/, rel_f is rel to project_dir.
+            # Container index keys are rel to src/, rel_f is rel to project_dir.
             _src_rel = rel_f[4:] if rel_f.startswith("src/") else rel_f
-            _container = _retry_containers.get((_src_rel, fn), "")
+            _ctx = _gather_fn_fix_context(
+                file_text=cur_text, file_rel=rel_f, fn_name=fn,
+                sig_text=sig_t, body_text=cur_body,
+                error_excerpt=err_excerpt,
+                container=_retry_containers.get((_src_rel, fn), ""),
+                type_records=_retry_type_recs,
+            )
             prompt = _build_per_fn_fix_prompt(
                 file_text=cur_text, fn_name=fn, sig_text=sig_t,
                 test_blocks=[], module_name=project_dir.name,
                 cluster_name=_cluster_label, file_rel=rel_f,
                 prev_body=cur_body, error_excerpt=err_excerpt,
-                container=_container,
-                types_section=_types_section_for_fix(
-                    sig_t, cur_body, err_excerpt, _container,
-                    _extract_impl_where_clause(cur_text, _container),
-                    _retry_type_recs),
+                container=_ctx.container,
+                types_section=_ctx.types_section,
             )
             new_body, _ = _ask_per_fn_body(prompt, fn, [], sig_text=sig_t)
             if not new_body:
