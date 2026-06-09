@@ -8,7 +8,7 @@ loops are migrated against.
 from __future__ import annotations
 
 from pipeline_core.application.refine_loop import run_refine_loop
-from pipeline_core.domain.refine import Attempt, LoopState
+from pipeline_core.domain.refine import Attempt, FloorStall, LoopState
 
 
 class _Scripted:
@@ -90,3 +90,56 @@ def test_driver_assigns_iteration_and_recomputes_improved() -> None:
     state = run_refine_loop(s, max_stalls=1)
     assert [a.iteration for a in state.attempts] == [1, 2]           # driver-assigned, not 999
     assert [a.improved for a in state.attempts] == [True, False]     # 5 < 10 → not improved
+
+
+# --- FloorStall (slice 8a) — pins the legacy best/stall/prev_sig semantics ---
+
+
+def test_floorstall_strict_decrease_resets_stall():
+    g = FloorStall()
+    assert g.observe(5) is True          # first observation sets the floor
+    assert (g.best, g.stalls) == (5, 0)
+    assert g.observe(5) is False         # equal count = stall (strict decrease only)
+    assert (g.best, g.stalls) == (5, 1)
+    assert g.observe(7) is False         # regression = stall, floor unchanged
+    assert (g.best, g.stalls) == (5, 2)
+    assert g.observe(3) is True          # improvement resets
+    assert (g.best, g.stalls) == (3, 0)
+
+
+def test_floorstall_stalled_threshold():
+    g = FloorStall()
+    g.observe(2)
+    g.observe(2)
+    assert not g.stalled(2)
+    g.observe(2)
+    assert g.stalled(2)
+
+
+def test_floorstall_repeated_signature_needs_two_observations():
+    # Legacy guard `fix_attempt > 1`: the first observation never counts as
+    # repeated, even against the per-impl init value (empty frozenset).
+    g = FloorStall()
+    g.observe(1, signature=frozenset())
+    assert g.repeated is False
+    g.observe(1, signature=frozenset())
+    assert g.repeated is True
+
+
+def test_floorstall_repeated_tracks_consecutive_only():
+    g = FloorStall()
+    g.observe(3, signature=frozenset({"a"}))
+    g.observe(3, signature=frozenset({"b"}))
+    assert g.repeated is False
+    g.observe(3, signature=frozenset({"b"}))
+    assert g.repeated is True
+    g.observe(2, signature=frozenset({"c"}))
+    assert g.repeated is False           # improvement with new sig clears it
+
+
+def test_floorstall_no_signature_never_repeated():
+    # Pass-level gauge passes no signature; repeated must stay False.
+    g = FloorStall()
+    g.observe(4)
+    g.observe(4)
+    assert g.repeated is False

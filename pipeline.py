@@ -113,6 +113,7 @@ from pipeline_core.domain.models import (
 from pipeline_core.domain.refine import (
     Attempt as _Attempt,
 )
+from pipeline_core.domain.refine import FloorStall as _FloorStall
 from pipeline_core.domain.refine import (
     LoopState as _LoopState,
 )
@@ -9252,9 +9253,7 @@ def _phase_c_fill_impl_blocks(
                 fr_path, file_rel=block["file"], fn_name=stub_fn_names[0] if stub_fn_names else "",
                 file_text=snapshot, current_error="",
             )
-        prev_err_sig: frozenset = frozenset()
-        best_err_count: int | None = None
-        block_stall = 0
+        block_gauge = _FloorStall()  # slice 8a: floor-stall + repeated-sig gauge
         fix_attempt = 0
         last_error_excerpt = ""
         last_response = ""
@@ -9448,31 +9447,26 @@ def _phase_c_fill_impl_blocks(
                 cur_err_sig = (_u2_impl[0] if _u2_impl is not None
                                else _cargo_err_sig_from_diagnostics(diagnostics))
                 cur_err_count = max(1, len(cur_err_sig))  # rc-honest minimum
-                if best_err_count is None or cur_err_count < best_err_count:
-                    best_err_count = cur_err_count
-                    block_stall = 0
-                else:
-                    block_stall += 1
+                block_gauge.observe(cur_err_count, signature=cur_err_sig)
                 last_error_excerpt = _focus_cargo_errors(cargo_out, block["file"])
                 _record_error_codes_seen(cargo_out)
                 _log(f"  [phase-c/impl] {block_id}: compile failed "
                      f"(attempt {fix_attempt}); errs={cur_err_count} "
-                     f"floor={best_err_count} stall={block_stall}.")
+                     f"floor={block_gauge.best} stall={block_gauge.stalls}.")
                 # Reaching here means the fill regressed (a new error, or an
                 # error on the filled fns) — B3 (FR-029) already kept and broke
                 # out for non-regressing fills above. Revert and let the next
                 # iter try with the error context.
                 file_path.write_text(snapshot, encoding="utf-8")
-                if block_stall >= block_max_stalls:
+                if block_gauge.stalled(block_max_stalls):
                     _log(f"  [phase-c/impl] {block_id}: floor stalled "
-                         f"at {best_err_count} for {block_stall} iter(s) "
+                         f"at {block_gauge.best} for {block_gauge.stalls} iter(s) "
                          "— stopping this block.")
                     break
-                if cur_err_sig == prev_err_sig and fix_attempt > 1:
+                if block_gauge.repeated:
                     _log(f"  [phase-c/impl] {block_id}: identical errors "
                          f"after attempt {fix_attempt} — stopping.")
                     break
-                prev_err_sig = cur_err_sig
         if members_filled_this_block == 0:
             impls_failed += 1
             errors.append(f"{block['file']}::{block['container']}: "
@@ -9690,8 +9684,7 @@ def _task2_fill_fns_one_by_one(
     # the metric resets the stall counter; otherwise we increment. The legacy
     # `progress_this_pass == 0` early exit is preserved as a fast path.
     _pass_max_stalls = int(os.getenv("PHASE_C_PASS_MAX_STALLS", "2"))
-    _pass_best_metric: int | None = None
-    _pass_stall = 0
+    _pass_gauge = _FloorStall()  # slice 8a
     _pass_last_fail_count = 0
 
     for pass_n in range(1, max_passes + 1):
@@ -9915,7 +9908,6 @@ def _task2_fill_fns_one_by_one(
 
             # === Inner fix loop ===
             success = False
-            prev_err_sig: frozenset | None = None
             last_response = ""
             last_body = ""
             error_excerpt = ""
@@ -9927,9 +9919,9 @@ def _task2_fill_fns_one_by_one(
             # Surfaced to the model in subsequent fix prompts so it sees the
             # search space it has already explored.
             per_fn_history: list[dict] = []
-            # P7.2: failure-floor stall tracking for the inner loop.
-            best_err_count: int | None = None
-            fn_stall = 0
+            # P7.2: failure-floor stall tracking for the inner loop (slice 8a:
+            # FloorStall gauge — floor + stall + repeated-error-sig in one).
+            fn_gauge = _FloorStall()
             while fix_attempt < _PER_FN_FIX_CAP:
                 fix_attempt += 1
                 with _counters_lock:
@@ -10182,37 +10174,32 @@ def _task2_fill_fns_one_by_one(
                 # P7.2: floor-stall against rustc error count. Reset stall
                 # when count strictly decreases; increment otherwise.
                 cur_err_count = len(cur_err_sig)
-                if best_err_count is None or cur_err_count < best_err_count:
-                    best_err_count = cur_err_count
-                    fn_stall = 0
-                else:
-                    fn_stall += 1
+                fn_gauge.observe(cur_err_count, signature=cur_err_sig)
                 _emit("loop.iter", data={
                     "name": "phase_c.per_fn",
                     "cluster": cluster_name, "pass_n": pass_n,
                     "file": rel_file, "fn": fn_name,
                     "iter": fix_attempt,
                     "metric_new": cur_err_count,
-                    "metric_best": best_err_count,
-                    "improved": fn_stall == 0,
-                    "stalled": fn_stall,
+                    "metric_best": fn_gauge.best,
+                    "improved": fn_gauge.stalls == 0,
+                    "stalled": fn_gauge.stalls,
                 })
-                if fn_stall >= _effective_stalls(_PER_FN_FIX_MAX_STALLS, _module_of(rel_file)):
+                if fn_gauge.stalled(_effective_stalls(_PER_FN_FIX_MAX_STALLS, _module_of(rel_file))):
                     if not _lock_released:
                         _splice_check_lock.release()
                         _lock_released = True
                     _log(f"  [phase-c/per-fn] {fn_name}: floor stalled at "
-                         f"{best_err_count} errors for {fn_stall} iter(s) — "
+                         f"{fn_gauge.best} errors for {fn_gauge.stalls} iter(s) — "
                          f"stopping fix loop (attempt {fix_attempt}).")
                     break
-                if cur_err_sig == prev_err_sig and fix_attempt > 1:
+                if fn_gauge.repeated:
                     if not _lock_released:
                         _splice_check_lock.release()
                         _lock_released = True
                     _log(f"  [phase-c/per-fn] {fn_name}: same error set after "
                          f"attempt {fix_attempt} — stopping fix loop.")
                     break
-                prev_err_sig = cur_err_sig
                 last_body = body
                 error_excerpt = _focus_cargo_errors(cargo_out, rel_file)
                 # Revert to snapshot before next attempt; the model will see
@@ -10728,11 +10715,7 @@ def _task2_fill_fns_one_by_one(
         _remaining_pass = len(_scan_unimplemented_for_cluster(
             target_src_dir, cluster))
         _pass_metric = _remaining_pass + _pass_last_fail_count
-        if _pass_best_metric is None or _pass_metric < _pass_best_metric:
-            _pass_best_metric = _pass_metric
-            _pass_stall = 0
-        else:
-            _pass_stall += 1
+        _pass_gauge.observe(_pass_metric)
         _emit("phase_c.pass.done", duration_ms=int(
                 (time.monotonic() - _pass_t0) * 1000),
               data={
@@ -10740,15 +10723,15 @@ def _task2_fill_fns_one_by_one(
             "fns_filled": progress_this_pass, "errors_so_far": len(errors),
             "remaining": _remaining_pass,
             "pass_metric": _pass_metric,
-            "pass_metric_best": _pass_best_metric,
-            "pass_stalled": _pass_stall,
+            "pass_metric_best": _pass_gauge.best,
+            "pass_stalled": _pass_gauge.stalls,
         })
         if progress_this_pass == 0:
             _log(f"  [phase-c/per-fn] pass {pass_n} made no progress; stopping.")
             break
-        if _pass_stall >= _pass_max_stalls:
+        if _pass_gauge.stalled(_pass_max_stalls):
             _log(f"  [phase-c/per-fn] cluster {cluster_name}: pass-level floor "
-                 f"stalled at metric={_pass_best_metric} for {_pass_stall} "
+                 f"stalled at metric={_pass_gauge.best} for {_pass_gauge.stalls} "
                  f"pass(es) — stopping early at pass {pass_n}/{max_passes}.")
             break
 

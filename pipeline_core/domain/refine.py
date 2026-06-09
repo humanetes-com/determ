@@ -84,3 +84,46 @@ class LoopState:
         if retro:
             lines.append(f"Latest retrospective: {retro}")
         return "\n".join(lines) + "\n"
+
+
+@dataclass
+class FloorStall:
+    """Floor-stall gauge for lower-is-better counts (rustc error count, remaining
+    stubs + last-pass failures). One `observe(count, signature=...)` per iteration:
+    a strict decrease of the floor resets the stall counter, anything else
+    increments it. `signature` is an equality-comparable snapshot of the errors
+    (e.g. a frozenset of "file:code" strings); `repeated` is True when two
+    consecutive observations carried the same non-None signature — the
+    "identical errors two attempts running" early exit the fix loops share.
+
+    Replaces the hand-rolled best/stall/prev_sig triples in the per-fn inner
+    loop, the per-impl block loop, and the pass-level gauge (slice 8a).
+    `LoopState` above is the full meta-awareness history for loops driven by
+    `run_refine_loop`; FloorStall is the minimal gauge for inner loops that
+    keep their own history/prompt machinery.
+    """
+    best: int | None = None
+    stalls: int = 0
+    observations: int = 0
+    repeated: bool = False
+    _prev_sig: object = None
+
+    def observe(self, count: int, signature: object = None) -> bool:
+        """Record one iteration's count; returns True when the floor improved."""
+        self.observations += 1
+        improved = self.best is None or count < self.best
+        if improved:
+            self.best = count
+            self.stalls = 0
+        else:
+            self.stalls += 1
+        self.repeated = (
+            self.observations > 1
+            and signature is not None
+            and signature == self._prev_sig
+        )
+        self._prev_sig = signature
+        return improved
+
+    def stalled(self, max_stalls: int) -> bool:
+        return self.stalls >= max_stalls

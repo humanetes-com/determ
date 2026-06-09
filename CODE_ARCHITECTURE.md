@@ -257,6 +257,80 @@ dataclass together, never ad-hoc dict mutation.
    touches the whole lib surface for little architectural gain over the split; left as a focused
    later pass. `Cfg` newtype (§3) similarly deferred; `CfgSet` already encapsulates predicate eval.
 
+## 5b. Migration plan — remaining slices (planned 2026-06-09, session: wipe-vs-resume fix)
+
+What is still in `pipeline.py` (21.7k lines, 397 top-level defs). Biggest residents:
+
+| Lines | Item | Target layer |
+|---|---|---|
+| 1346 | `main()` | application/orchestrator (slice 12) |
+| 1204+544+495+283+245+599 | fill engine (`_task2_fill_fns_one_by_one`, `_process_one_stub`, `_phase_c_fill_impl_blocks`, `_run_phase_c_tdd`, `_task2_fill_groups`, `generate_fix_loop`) | application/reconstruct (slice 10) |
+| 773+384+245+167 | `Task2Generator` family | application/generators (slice 11) |
+| 486+254 | `Task1Synthesizer` family | application/generators (slice 11) |
+| ~1200 total | `_build_*_prompt` + section formatters | prompts/ (slice 8) |
+| ~400 | state file + wipe/stub/reattach lifecycle | adapters/state + application/workspace_lifecycle (slice 9) |
+| 218+178 | DependencyGraph family | application (slice 11, tail) |
+
+Slice order (rationale: verbatim-move slices first — safe between live runs; the engine
+slice needs a dedicated live-run validation window; ceremony-free per §2):
+
+8a. COMMONALITY-FIRST (do BEFORE the layer moves — turns slices 10–12 into mostly
+   deletions). Standing rule: when N sites hand-roll the same operation, extract ONE
+   general engine and parameterize; divergent copies are where the bugs live (evidence:
+   the `allow_nonstub` no-op retry, the three fix-prompt sites with different context
+   completeness, the twice-written `(file,fn)→container` map).
+   - `FixLoop` engine (application/): the run-cargo → focus-errors → build-fix-prompt →
+     ask → splice → re-run loop, parameterized by (target-locator, prompt-builder,
+     splicer, progress-metric). Replaces ≥6 hand-rolled copies: `generate_fix_loop`
+     (599L), per-fn loop in `_process_one_stub`, per-impl loop, post-pass test-retry,
+     `_task3_inline_retry`, task0c fix pass. Same move as `refine_loop`, one level deeper.
+   - `FnContext.gather(file, fn, error, records)` — ONE assembly of
+     types/notes/macros/invariants/container/where-clause for a target fn, used by every
+     prompt builder. Companion to slice 8's PromptContext: 8 makes a missing section
+     visible, this makes it impossible.
+   - `StallBudget` (domain/) — the improved/stall-n-of-m/floor/hard-cap state machine
+     (~83 cap sites, 39 floor sites, ~20 stall sites today) as one ~40-line dataclass;
+     post-merge fill, inner loops, task3 retry, improvement_loop consume it.
+   - attempt-history recording — one `AttemptLog` shape feeding fix prompts,
+     retrospectives, and model-notes extraction (22 scattered sites, 3 shapes today).
+   Each engine: extract verbatim from the richest copy, port the other sites one per
+   commit, fakes-deps test per engine. GATE like slice 10: the FixLoop port-overs touch
+   the live engine — validate per-site against a live-run log, not just check.sh.
+8. `prompts/` — move ALL prompt builders + section formatters verbatim
+   (`_build_per_fn_prompt`, `_build_per_fn_fix_prompt`, `_build_per_impl_prompt`,
+   `_build_task0c_prompt_sections`, `_format_type_for_prompt`, `_types_section_for_fix`,
+   `_gotchas_summary`, `_trait_contract_for`, model-notes filter). Pure text→text, no I/O.
+   Per prompt family: one frozen `*PromptContext` dataclass enumerating every injected
+   section — makes a missing injection (the BoxedError TYPES_IN_SCOPE gap, the empty
+   retry-prompt gaps) a VISIBLE hole in a record, not an absent kwarg. pipeline.py keeps
+   re-export shims. Unit-test: each builder renders every section when its field is set.
+9. state + workspace lifecycle — `_read_state/_mark_phase/_phase_valid/_set_current`
+   → `adapters/state.py` behind a `PipelineState` port; the module-start save/wipe/stub/
+   reattach sequence → `application/workspace_lifecycle.py`. Codify THE invariant that
+   broke (wipe ⟺ the phase that regenerates the wiped artefact will rerun) as one
+   function with unit tests pairing each wipe with its phase-marker guard.
+10. engine pass (deferred tail of slice 6 — the only slice that is NOT verbatim):
+    `Stub`/`ImplBlock`/`FillResult`/`FixAttempt` domain models; thread `FnRecord` through
+    (kills `"fn"` vs `"fn_name"`); split `_task2_fill_fns_one_by_one` into frontier
+    selection / per-stub fill / fix loop / post-pass test-retry units under
+    `application/reconstruct/`. GATE: validated by a live anyhow run compared on
+    pass/fail/frontier counts per iter against the pre-refactor log — check.sh alone is
+    insufficient (doc'd in slice 6). Schedule in a window where no run is active.
+11. generator/synthesizer families → `application/generators/` (already ABC-shaped;
+    move + constructor-inject; shims stay). DependencyGraph + WorkspaceScanner same
+    pattern as the tail.
+12. `main()` decomposition: module loop → `application/orchestrator.py`; `pipeline.py`
+    ends as composition root + argparse + shims (<~1k lines). Only after 10/11 (it
+    orchestrates what they define).
+13. guardrails in CI: `import-linter` layer contract (§1 table); check.sh gains a
+    pipeline.py line-count ratchet (fails if it GROWS); mypy strict on `pipeline_core/`.
+14. Rust tail kept from slice 7: thiserror at the lib edge, `Cfg` newtype.
+
+Standing rules for every slice: strangler-fig (move verbatim, shim, behaviour identical);
+check.sh green per step; one slice = one commit; never land slices 10/12 while a pipeline
+run is mid-flight (restart boundary = deploy boundary); no new regex in moved code —
+factor regex behind injected predicates as in Group E.
+
 #### R9.6 — orphan gen_tests siblings resurrected under a guessed cfg gate  ✅ SHIPPED (P1 propagation + P2 atomicity) + tests (full effect ●● awaits live run)
 Resolves session-51's open "24-vs-23 manifest gap". Ground truth from the live workspace:
 
