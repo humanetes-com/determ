@@ -469,10 +469,13 @@ Reclassification: R10.1+R10.2 landed (session 58) — the logic ●●● items 
 cfg-filter) are now covered by L1 deterministically, no live run needed. Remaining ●●●: W1/W2 vLLM parity +
 scheduling determinism (need R10.3 cassette or the L3 micro-crate); "does the local model converge on real code"
 stays genuinely live, on L3's micro-crate, not anyhow.
-FINDING (session 58, while wiring R10.2): `_apply_per_fn_fixes` (pipeline.py:17351) calls `_splice_fn_body`
-WITHOUT `allow_nonstub=True`, so the build-fix retry can only re-fill `unimplemented!()` stubs — a fn that
-already has a (wrong, non-compiling) body cannot be re-fixed by the inline retry. Possible real R9.1 limitation;
-flagged for separate review.
+BUG FOUND + FIXED (session 58, via R10.2 harness): `_apply_per_fn_fixes` (pipeline.py:17351) called
+`_splice_fn_body` WITHOUT `allow_nonstub=True`, so the inline build/test retry could only re-fill
+`unimplemented!()` stubs. But a stub COMPILES — a build/test failure always comes from a fn with a wrong,
+already-filled (non-stub) body, which `_splice_fn_body` then refused → `no_fns_spliced` → abort. So R9.1's
+inline retry was a **silent no-op for exactly its intended case**. Fix: pass `allow_nonstub=True`, matching every
+other fix-loop site (17001/17100) and the `_splice_fn_body` docstring. Pinned by
+`test_build_failure_respices_nonstub_body` — the harness's first real catch (a live-run-only bug before R10).
 
 ### R11 — phase-c determinism & cluster-correctness (sessions 55–56)  ✅ SHIPPED (●●● convergence effect awaits live run)
 Three changes from the convergence-diagnosis sessions, undocumented until now. R11.2 is **uncommitted** at

@@ -113,3 +113,35 @@ def test_test_mode_reverts_when_fix_breaks_build(monkeypatch) -> None:
         assert passed is False
         assert lib.read_text(encoding="utf-8") == _SRC  # reverted from snapshot
         assert out == _FAILING  # revert returns the initial output
+
+
+# A fn with a WRONG, already-filled (non-stub) body — the real shape of a build
+# failure (a stub `unimplemented!()` compiles, so it never causes one).
+_SRC_NONSTUB = "pub fn foo() -> i32 { 999 }\n"
+
+
+def test_build_failure_respices_nonstub_body(monkeypatch) -> None:
+    """Regression: `_apply_per_fn_fixes` must re-fill a non-stub body (it now
+    passes allow_nonstub=True, like every other fix-loop site). Before the fix
+    `_splice_fn_body` refused the non-stub body → 'no_fns_spliced' → no-op."""
+    monkeypatch.setenv("TASK3_INLINE_MAX_STALLS", "2")
+    with tempfile.TemporaryDirectory() as td:
+        proj = _project(td)
+        lib = proj / "src" / "lib.rs"
+        lib.write_text(_SRC_NONSTUB, encoding="utf-8")
+
+        def check_diag(*_a, **_k):
+            fixed = "1" in lib.read_text(encoding="utf-8") and "999" not in lib.read_text(encoding="utf-8")
+            if fixed:
+                return (0, "ok", [])
+            return (101, "error: boom", [diag("src/lib.rs"), diag("src/lib.rs")])
+
+        install_scripted_model(monkeypatch, per_fn_body="{ 1 }")
+        install_scripted_cargo(monkeypatch, check_diag=check_diag,
+                               frontier={("src/lib.rs", "foo"): {"<compile>"}})
+
+        passed, out = pipeline._task3_inline_retry(proj, "cargo test", 1, "")
+
+        body = lib.read_text(encoding="utf-8")
+        assert "999" not in body  # the wrong non-stub body was replaced
+        assert "1" in body

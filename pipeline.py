@@ -17365,7 +17365,12 @@ def _task3_inline_retry(
             new_body, _ = _ask_per_fn_body(prompt, fn, [], sig_text=sig_t)
             if not new_body:
                 continue
-            ok2, _ = _splice_fn_body(fp, fn, new_body)
+            # allow_nonstub: a build/test failure comes from a fn with a WRONG,
+            # already-filled (non-stub) body — like every other fix-loop site
+            # (cf. 17001/17100). A bare `unimplemented!()` stub compiles, so it
+            # never causes the failure; without allow_nonstub `_splice_fn_body`
+            # refused every real target and the inline retry was a silent no-op.
+            ok2, _ = _splice_fn_body(fp, fn, new_body, allow_nonstub=True)
             if ok2:
                 fixed_count += 1
                 _log(f"  [task3-retry] re-spliced {rel_f}::{fn}.")
