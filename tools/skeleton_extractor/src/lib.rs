@@ -38,7 +38,6 @@ pub use skeleton::*;
 mod tests {
     #![allow(clippy::unwrap_used)] // tests should panic on unexpected None/Err
     use super::*;
-    use quote::quote;
     use syn::parse_file;
     use syn::visit_mut::VisitMut;
 
@@ -46,7 +45,7 @@ mod tests {
         let mut ast: syn::File = parse_file(source).unwrap();
         let mut v = SkeletonVisitor::default();
         v.visit_file_mut(&mut ast);
-        render_tokens(&quote!(#ast))
+        prettyplease::unparse(&ast)
     }
 
     #[test]
@@ -98,7 +97,7 @@ mod tests {
         let mut ast: syn::File = parse_file(source).unwrap();
         CfgFilterVisitor::new(cfg).visit_file_mut(&mut ast);
         SkeletonVisitor::default().visit_file_mut(&mut ast);
-        render_tokens(&quote!(#ast))
+        prettyplease::unparse(&ast)
     }
 
     #[test]

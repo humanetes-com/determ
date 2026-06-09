@@ -4,8 +4,6 @@
 use crate::cfg::*;
 use crate::error::{ExtractError, Result};
 use crate::model::*;
-use proc_macro2::TokenStream;
-use quote::quote;
 use std::path::{Path, PathBuf};
 use syn::visit_mut::{self, VisitMut};
 use syn::{
@@ -103,11 +101,17 @@ pub fn extract_file_with_cfg(
     let mut visitor = SkeletonVisitor::default();
     visitor.visit_file_mut(&mut ast);
 
-    // Re-emit the AST. quote! preserves doc-comments and most attribute text;
-    // it does NOT preserve original spacing/comments. The skeleton's purpose
-    // is compilability + structural signal, not byte-for-byte fidelity.
-    let tokens: TokenStream = quote!(#ast);
-    let rendered = render_tokens(&tokens);
+    // Re-emit the AST as properly-formatted Rust via prettyplease (already a
+    // dependency; merge.rs uses the same path). The old naive token dump
+    // (`render_tokens` over `quote!`/`to_string`) produced single-line bodies
+    // like `{ :: core :: unimplemented ! () }` and `# ! [doc = ...]`; the
+    // text-based per-fn splicer miscut those offsets → dropped the model's body,
+    // left `{ ::`, "unclosed delimiter" → false GENUINELY_HARD reverts (the
+    // phase-c non-convergence root cause). FR-033: normalise multi-line docs
+    // first so prettyplease keeps them as `///`/`//!` (no `/** */` switch).
+    crate::merge::normalize_doc_attrs(&mut ast.attrs);
+    crate::merge::normalize_doc_attrs_in_items(&mut ast.items);
+    let rendered = prettyplease::unparse(&ast);
 
     let rel = input_path.strip_prefix(input_dir).unwrap_or(input_path);
     let out_path: PathBuf = output_dir.join(rel);
@@ -123,52 +127,6 @@ pub fn extract_file_with_cfg(
         bytes_in,
         bytes_out: rendered.len(),
     })
-}
-
-/// Render a TokenStream to a String. We add line breaks between top-level
-/// items so the output is at least readable; we do not invoke `rustfmt`
-/// here because it would be one more required tool. The pipeline's
-/// `cargo check` is the real validator.
-pub(crate) fn render_tokens(tokens: &TokenStream) -> String {
-    // Naive but works: insert a blank line after every closing brace at column 0.
-    // The output compiles regardless — formatting is best-effort.
-    let raw = tokens.to_string();
-    let mut out = String::with_capacity(raw.len() + raw.len() / 4);
-    let mut depth: i32 = 0;
-    let mut last_was_brace = false;
-    for ch in raw.chars() {
-        match ch {
-            '{' => {
-                depth += 1;
-                out.push(ch);
-                last_was_brace = false;
-            }
-            '}' => {
-                depth -= 1;
-                out.push(ch);
-                if depth == 0 {
-                    out.push('\n');
-                    out.push('\n');
-                    last_was_brace = true;
-                } else {
-                    last_was_brace = false;
-                }
-            }
-            ';' => {
-                out.push(ch);
-                if depth == 0 {
-                    out.push('\n');
-                }
-                last_was_brace = false;
-            }
-            _ => {
-                out.push(ch);
-                last_was_brace = false;
-            }
-        }
-    }
-    let _ = last_was_brace;
-    out
 }
 
 /// Visitor that drops items whose `#[cfg(...)]` attributes evaluate to false

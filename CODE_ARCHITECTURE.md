@@ -492,6 +492,16 @@ entirely during diagnosis. R11.2's full convergence effect (no_core impls reachi
 stalled → reverted") is ●●● — exactly the kind of item R10's L1/L2 would let us validate without a live anyhow run.
 Extractor binary must be rebuilt for R11.2 (`cargo build --release`); pipeline reads it live.
 
+### R12 — skeleton emitted as raw token-stream → phase-c splice mangles bodies  ✅ FIXED (microcrate-validated; anyhow effect ●●● awaits live run)
+**The microcrate L3 smoke (R10.1) earned its existence on first use** — a 5-min run surfaced the bug that 5h anyhow runs (sessions 55–57) could not isolate.
+| aspect | finding |
+|---|---|
+| symptom | phase-c marked the *trivial* fixture fns (`add`=`a+b`, `bump`, `parse_pair`) `GENUINELY_HARD` and reverted; only converged because task3's inline retry (a different splice path) rescued all 4 |
+| evidence | failure artifact: model returned a CORRECT body `<BODY>a.wrapping_add(b)</BODY>`, but the on-disk stub was `pub fn add (a : i32 , b : i32) -> i32 { :: core :: unimplemented ! () }` on ONE line; post-splice → `… -> i32 { :: ` + "unclosed delimiter" (body dropped) |
+| root cause | `skeleton.rs` emitted the skeleton via `render_tokens(&quote!(#ast))` = `TokenStream::to_string()` — a naive token dump (`{ :: core :: unimplemented ! () }`, `# ! [doc = …]`, whole file ~one line). The text-based per-fn splicer (`_locate_fn`/`_splice_fn_body`) miscomputes byte offsets on that format → drops the model's body. The skeleton's doc comment literally contains `unimplemented!()`, compounding locator confusion. **This is the phase-c non-convergence ("floor stalled → reverted") root cause sessions 55–57 chased.** |
+| fix | `skeletonise` now emits via `prettyplease::unparse(&ast)` (already a dep; `merge.rs` uses the same path) with FR-033 `normalize_doc_attrs` first (multi-line `//!`→one `//!`/line). Output is proper multi-line Rust: `pub fn add(a: i32, b: i32) -> i32 {\n    ::core::unimplemented!()\n}`. Deleted the buggy `render_tokens` + its `quote`/`TokenStream` imports; the two `#[cfg(test)]` callers in `lib.rs` switched to `prettyplease::unparse`. Binary rebuilt. |
+| validation | extractor: 17 tests + clippy `-D warnings` green; skeletonised fixture verified formatted, **0 `{ ::`**. Full effect = a fresh microcrate run converging in phase-c WITHOUT the task3-retry rescue → `bash run_microcrate.sh` (rebuilds binary, vLLM preflight, fresh `tmp/microcrate`, own log). Then anyhow. ●●● for anyhow until that run. |
+
 Important Todos:
 
 #### W1+W2 — backend→transport + unified think-recovery controller  ✅ SHIPPED (●●● awaits live run)
