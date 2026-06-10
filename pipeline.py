@@ -9086,6 +9086,7 @@ def _drive_fix_loop(
     on_failure: "Callable[[int, _FixOutcome, _FloorStall], None] | None" = None,
     on_stall: "Callable[[int, _FloorStall], None] | None" = None,
     on_repeated: "Callable[[int, _FloorStall], None] | None" = None,
+    initial_floor: "int | None" = None,
 ) -> tuple[bool, int]:
     """THE fix-loop driver (slice 8a f2). Owns the loop skeleton every fix
     loop hand-rolled — attempt counting, graceful-stop checks, FloorStall
@@ -9098,6 +9099,11 @@ def _drive_fix_loop(
     (f4) port onto this same driver. Returns (accepted, attempts_used).
     """
     gauge = _FloorStall()
+    if initial_floor is not None:
+        # Seed the floor with the metric the loop ENTERED with (loop C / f4):
+        # a first iteration that fails to improve on the entry state counts
+        # as a stall, instead of getting a free baseline observation.
+        gauge.observe(initial_floor)
     attempt_n = 0
     while attempt_n < hard_cap:
         attempt_n += 1
@@ -9879,6 +9885,7 @@ def _task2_fill_fns_one_by_one(
         })
         progress_this_pass = 0
         filled_this_pass: list[tuple[str, str]] = []  # [(file_rel, fn_name)]
+        pass_fail_floor = 0  # P7.6: this pass's failing-test floor (test phase sets it)
 
         # P4: per-level work queue consumed by workers — created per priority
         # level in the dispatch loop below and passed to each worker
@@ -10552,36 +10559,46 @@ def _task2_fill_fns_one_by_one(
                     _log(f"  [phase-c/per-fn] pass {pass_n}: cargo test FAILED "
                          f"(rc={rc}).")
                     # === Per-pass test fix loop ===
-                    # P1: stall budget against the failure-floor — keep iterating
-                    # while the minimum failure count keeps decreasing. The
-                    # numeric count cap is reinterpreted as a runaway-safety
-                    # hard ceiling; the real exit is "no new minimum for K iters".
-                    test_fix_attempt = 0
-                    prev_test_sig: frozenset | None = None
-                    best_fail_count: int | None = None
-                    stall = 0
+                    # Slice 8a f4: `_attempt_test_fix` unit on `_drive_fix_loop`.
+                    # Loop-C contract (pinned in tests/test_e2e_test_retry.py):
+                    # NO revert — splices kept on every exit; metric = failing-
+                    # test count with the floor SEEDED by the entry count
+                    # (initial_floor), so a non-improving first iteration
+                    # already stalls; no repeated-signature exit (no signature
+                    # is passed). The dead `prev_test_sig` diagnostic of the
+                    # hand-rolled loop is gone.
                     # P2: per-(file, fn) attempt history maintained across
                     # this pass's test-fix iterations. Surfaced to the model
                     # so it can see what bodies it has already tried for the
                     # same fn rather than re-deriving from scratch.
                     test_fix_history: dict[tuple[str, str], list[dict]] = {}
-                    while test_fix_attempt < _PER_PASS_TEST_FIX_HARD_CAP:
-                        test_fix_attempt += 1
-                        _check_graceful_stop(f"test fix attempt {test_fix_attempt}")
+                    _entry_fail_count = len(_parse_failed_tests(test_out))
+                    # Gauge mirror — the unit reads the running stall count
+                    # (classifier escalation) and the floor (per-iter log
+                    # file); updated in `_on_test_fix_failure` after each
+                    # driver observation.
+                    _stall_seen = {"best": _entry_fail_count, "stalls": 0}
+                    _iter_ctx: dict = {"cur": 0, "fns": []}
+
+                    def _attempt_test_fix(test_fix_attempt: int, *,
+                                          pass_n: int = pass_n,
+                                          filled_this_pass=filled_this_pass,
+                                          test_cmd=test_cmd,
+                                          test_fix_history=test_fix_history,
+                                          _stall_seen=_stall_seen,
+                                          _iter_ctx=_iter_ctx) -> _FixOutcome:
+                        nonlocal attempts, rc, test_out
                         failed_tests = _parse_failed_tests(test_out)
                         if not failed_tests:
-                            break  # rc!=0 but no parseable failed tests; bail
-                        # Seed the floor with the count we entered the iter with.
+                            return _FixOutcome("stop")  # rc!=0 but no parseable failed tests; bail
                         cur_fail_count = len(failed_tests)
-                        if best_fail_count is None:
-                            best_fail_count = cur_fail_count
                         # P3: classifier-driven retry candidates. Normally
                         # fires only after one naive iteration stalls. But when
                         # filled_this_pass is empty (pre-filled cluster), there
                         # IS no naive baseline — the token-match path produces
                         # nothing — so the classifier must fire on iter 1.
                         classification: dict[str, dict] = {}
-                        if stall >= 1 or not filled_this_pass:
+                        if _stall_seen["stalls"] >= 1 or not filled_this_pass:
                             classification = _classify_phase_c_test_failures(
                                 test_out=test_out,
                                 filled_this_pass=filled_this_pass,
@@ -10737,7 +10754,7 @@ def _task2_fill_fns_one_by_one(
                         if not any_progress:
                             _log(f"  [phase-c/per-fn] pass {pass_n}: no fn could "
                                  f"be re-spliced for failing tests — stopping.")
-                            break
+                            return _FixOutcome("stop")
 
                         # Re-run cargo check (cheap) then cargo test.
                         rc_c, out_c = _run_cargo(check_cmd, target_src_dir,
@@ -10745,13 +10762,13 @@ def _task2_fill_fns_one_by_one(
                         if rc_c != 0:
                             _log(f"  [phase-c/per-fn] pass {pass_n}: test-fix "
                                  f"broke cargo check; leaving for next pass.")
-                            break
+                            return _FixOutcome("stop")
                         rc, test_out = _run_cargo(test_cmd, target_src_dir,
                                                   cluster_env, timeout=300)
                         if rc == 0:
                             _log(f"  [phase-c/per-fn] pass {pass_n}: cargo test "
                                  f"PASSED after test-fix attempt {test_fix_attempt}.")
-                            break
+                            return _FixOutcome("accepted")
                         new_fail_count = len(_parse_failed_tests(test_out))
                         # P4: persist this iter's cargo test output for post-hoc.
                         _write_phase_c_test_fix_log(
@@ -10764,51 +10781,64 @@ def _task2_fill_fns_one_by_one(
                             fns_retried=fns_to_retry,
                             cur_fail_count=cur_fail_count,
                             new_fail_count=new_fail_count,
-                            best_fail_count=min(
-                                best_fail_count,
-                                new_fail_count),
-                            stall=stall,  # value before the update below
+                            best_fail_count=min(_stall_seen["best"], new_fail_count),
+                            stall=_stall_seen["stalls"],  # value before this iter's observation
                         )
-                        # P1: did this iter beat the failure floor?
-                        if new_fail_count < best_fail_count:
-                            improved = True
-                            best_fail_count = new_fail_count
-                            stall = 0
-                        else:
-                            improved = False
-                            stall += 1
+                        _iter_ctx["cur"] = cur_fail_count
+                        _iter_ctx["fns"] = list(fns_to_retry)
+                        return _FixOutcome("failed", err_count=new_fail_count)
+
+                    def _on_test_fix_failure(attempt_n: int, outcome: _FixOutcome,
+                                             gauge: _FloorStall, *,
+                                             pass_n: int = pass_n,
+                                             _stall_seen=_stall_seen,
+                                             _iter_ctx=_iter_ctx) -> None:
                         # P5: expose the signal as an event for retro tooling.
                         _emit("phase_c.test_fix.iter", data={
                             "cluster": cluster_name, "pass_n": pass_n,
-                            "iter": test_fix_attempt,
-                            "prev_fail_count": cur_fail_count,
-                            "new_fail_count": new_fail_count,
-                            "delta": new_fail_count - cur_fail_count,
-                            "best": best_fail_count,
-                            "improved": improved,
-                            "stalled": stall,
-                            "fns_retried": [f"{r}::{f}" for r, f in fns_to_retry],
+                            "iter": attempt_n,
+                            "prev_fail_count": _iter_ctx["cur"],
+                            "new_fail_count": outcome.err_count,
+                            "delta": outcome.err_count - _iter_ctx["cur"],
+                            "best": gauge.best,
+                            "improved": gauge.stalls == 0,
+                            "stalled": gauge.stalls,
+                            "fns_retried": [f"{r}::{f}" for r, f in _iter_ctx["fns"]],
                         })
                         _log(f"  [phase-c/per-fn] pass {pass_n} test-fix iter "
-                             f"{test_fix_attempt}: "
-                             f"{cur_fail_count}→{new_fail_count} failures "
-                             f"(floor={best_fail_count}, stall={stall}).")
-                        if stall >= _effective_stalls(
-                                _PER_PASS_TEST_FIX_MAX_STALLS,
-                                _converge_in_cluster(cluster) or module_name):
-                            _log(f"  [phase-c/per-fn] pass {pass_n}: failure "
-                                 f"floor stalled at {best_fail_count} for "
-                                 f"{stall} iter(s) — stopping test-fix loop.")
-                            break
-                        # Keep prev_test_sig for diagnostic logging only — no
-                        # longer an exit condition (the floor budget governs).
-                        prev_test_sig = (_cargo_err_sig(test_out)
-                                         | frozenset(_parse_failed_tests(test_out)))
+                             f"{attempt_n}: "
+                             f"{_iter_ctx['cur']}→{outcome.err_count} failures "
+                             f"(floor={gauge.best}, stall={gauge.stalls}).")
+                        _stall_seen["best"] = gauge.best
+                        _stall_seen["stalls"] = gauge.stalls
+
+                    def _on_test_fix_stall(attempt_n: int, gauge: _FloorStall, *,
+                                           pass_n: int = pass_n) -> None:
+                        _log(f"  [phase-c/per-fn] pass {pass_n}: failure "
+                             f"floor stalled at {gauge.best} for "
+                             f"{gauge.stalls} iter(s) — stopping test-fix loop.")
+
+                    _drive_fix_loop(
+                        _attempt_test_fix,
+                        hard_cap=_PER_PASS_TEST_FIX_HARD_CAP,
+                        max_stalls=_effective_stalls(
+                            _PER_PASS_TEST_FIX_MAX_STALLS,
+                            _converge_in_cluster(cluster) or module_name),
+                        stop_context="test fix",
+                        on_failure=_on_test_fix_failure,
+                        on_stall=_on_test_fix_stall,
+                        initial_floor=_entry_fail_count,
+                    )
+                    # P7.6 floor for the pass-level gauge: 0 once the tests
+                    # pass, else the best (lowest) failure count seen. Replaces
+                    # the locals()-probe of the old loop, which also leaked a
+                    # stale count into LATER passes whose tests passed outright.
+                    pass_fail_floor = 0 if rc == 0 else int(_stall_seen["best"] or 0)
 
         # P7.6: capture last-pass failure count for the pass-level floor.
         # If the test phase ran, `best_fail_count` reflects the last cargo
         # test outcome of this pass; otherwise zero (no failing tests yet).
-        _pass_last_fail_count = locals().get("best_fail_count") or 0
+        _pass_last_fail_count = pass_fail_floor
         _remaining_pass = len(_scan_unimplemented_for_cluster(
             target_src_dir, cluster))
         _pass_metric = _remaining_pass + _pass_last_fail_count
