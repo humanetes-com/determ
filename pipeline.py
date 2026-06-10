@@ -9802,7 +9802,9 @@ def _task2_fill_fns_one_by_one(
                                             r.get("file", ""))]
             if cluster is not None:
                 _all_recs = [r for r in _all_recs
-                              if _fn_belongs_to_cluster(target_src_dir, r["file"], r["fn_name"], cluster)]
+                              if _fn_belongs_to_cluster(
+                                  target_src_dir, r["file"], r["fn_name"], cluster,
+                                  fn_cfg_predicates=list(r.get("cfg_predicates") or []))]
             _total_fns_in_cluster = len(_all_recs)
         except Exception:
             _total_fns_in_cluster = len(stubs)  # fallback
@@ -12229,7 +12231,9 @@ def _collect_impl_blocks_for_cluster(
     for b in blocks:
         kept_stubs = [
             m for m in b["stub_members"]
-            if _fn_belongs_to_cluster(target_src_dir, b["file"], m["fn_name"], cluster)
+            if _fn_belongs_to_cluster(
+                target_src_dir, b["file"], m["fn_name"], cluster,
+                fn_cfg_predicates=list(m.get("cfg_predicates") or []))
         ]
         if not kept_stubs:
             continue
@@ -12255,7 +12259,9 @@ def _scan_unimplemented_records_for_cluster(
     out: list[dict] = []
     skipped = 0
     for r in recs:
-        if _fn_belongs_to_cluster(target_src_dir, r["file"], r["fn_name"], cluster):
+        if _fn_belongs_to_cluster(
+                target_src_dir, r["file"], r["fn_name"], cluster,
+                fn_cfg_predicates=list(r.get("cfg_predicates") or [])):
             out.append(r)
         else:
             skipped += 1
@@ -12671,6 +12677,12 @@ _CFG_INLINE_RE = re.compile(r"#\s*\[\s*cfg\s*\(([^]]+)\)\s*\]")
 def _fn_cfg_predicates(file_text: str, fn_name: str) -> list[str]:
     """Return all `#[cfg(...)]` predicates that gate `fn_name` in `file_text`.
 
+    FALLBACK ONLY (R7.4a): callers holding extractor records must pass the
+    record's `cfg_predicates` to `_fn_belongs_to_cluster` instead — this
+    regex's backward window (previous blank line → decl) can over-capture
+    a PRECEDING fn's cfg attrs when fns are not blank-line separated, and
+    it only ever finds the FIRST same-named fn in the file.
+
     Walks BACKWARD from the fn's declaration line, collecting consecutive
     `#[cfg(...)]` and `#[...]` attribute lines. Stops at the first
     non-attribute, non-blank line. Returns just the cfg predicates
@@ -12881,6 +12893,7 @@ def _fn_belongs_to_cluster(
     file_rel: str,
     fn_name: str,
     cluster: "BuildCluster",
+    fn_cfg_predicates: "list[str] | None" = None,
 ) -> bool:
     """True when the fn (or its enclosing file) is active in `cluster`.
 
@@ -12888,6 +12901,13 @@ def _fn_belongs_to_cluster(
       - The file's parent-mod cfg (if any)
       - The fn's own cfg attrs (if any)
     against the cluster's cfg_true / cfg_false sets.
+
+    `fn_cfg_predicates` (R7.4a): the syn extractor's cfg list for THIS fn
+    record — callers that hold extractor records pass it ([] = extractor
+    says ungated, trusted as-is). Only when None does the legacy regex
+    text-walk run (extractor-absent text-scan path); its backward window
+    can over-capture a preceding fn's cfgs, which is exactly why record
+    callers must not fall through to it.
 
     Conservative on uncertainty: when a predicate is undecidable, defaults
     to True (include the stub) so the per-fn fill loop sees it — better
@@ -12899,12 +12919,15 @@ def _fn_belongs_to_cluster(
     file_pred = _file_cfg_predicate(target_src_dir, file_rel)
     if file_pred:
         preds.append(file_pred)
-    try:
-        text = (target_src_dir / file_rel).read_text(encoding="utf-8")
-    except Exception:
-        text = ""
-    if text:
-        preds.extend(_fn_cfg_predicates(text, fn_name))
+    if fn_cfg_predicates is not None:
+        preds.extend(fn_cfg_predicates)
+    else:
+        try:
+            text = (target_src_dir / file_rel).read_text(encoding="utf-8")
+        except Exception:
+            text = ""
+        if text:
+            preds.extend(_fn_cfg_predicates(text, fn_name))
     if not preds:
         return True  # no cfg gating → exists in every cluster
     for p in preds:

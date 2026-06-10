@@ -2804,3 +2804,34 @@ def test_per_impl_prompt_macros_and_siblings_sections():
     assert "<SIBLING_REFERENCE>" in full and "{ 7 }" in full
     bare = p._build_per_impl_prompt(**kw)
     assert "<MACROS>" not in bare and "<SIBLING_REFERENCE>" not in bare
+
+
+def test_fn_belongs_to_cluster_record_cfg_path(tmp_path):
+    # R7.4a: callers holding extractor records pass the record's
+    # cfg_predicates — syn-accurate, per-record. The legacy regex
+    # backward-window runs ONLY when no record data is given, and its
+    # over-capture (preceding fn's cfg bleeding onto an ungated neighbour
+    # when fns are not blank-line separated) is exactly why.
+    import pipeline
+    cluster = pipeline.BuildCluster(
+        name="no_std", env_extra={}, tarpaulin_exclude_files=[],
+        excluded_cfg=['feature = "std"'], active_cfg=[],
+        prompt_nightly_rule="",
+    )
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "lib.rs").write_text(
+        '#[cfg(feature = "std")]\n'
+        'pub fn gated() {}\n'
+        'pub fn open_fn() {}\n'
+    )
+    b = pipeline._fn_belongs_to_cluster
+    # Record path: extractor says open_fn is ungated → in every cluster.
+    assert b(src, "lib.rs", "open_fn", cluster, fn_cfg_predicates=[]) is True
+    # Record path: gated() carries the std cfg → excluded from no_std.
+    assert b(src, "lib.rs", "gated", cluster,
+             fn_cfg_predicates=['feature = "std"']) is False
+    # Legacy fallback (no record data): the window over-captures gated()'s
+    # cfg for open_fn → wrongly excluded. Documents the bug the record
+    # path fixes; if the fallback regex is ever fixed, update this line.
+    assert b(src, "lib.rs", "open_fn", cluster) is False
