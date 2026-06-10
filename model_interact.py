@@ -248,7 +248,7 @@ def _sock_open(label: str = "") -> None:
     if not path:
         return
     try:
-        fh = open(path, "w", buffering=1)  # line-buffered flush
+        fh = open(path, "w", buffering=1)  # noqa: SIM115 — long-lived per-thread stream-log handle; closed on next _sock_open / _sock_close
         fh.write(f"[CALL_START: {_time.time():.3f}]\n")
         if label:
             fh.write(f"[CALL: {label}]\n")

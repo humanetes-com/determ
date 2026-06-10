@@ -300,7 +300,8 @@ def _parse_coverage_json(project_dir):
     for path in sorted(_main_paths, key=os.path.getmtime, reverse=True)[:1]:
         try:
             main_mtime = os.path.getmtime(path)
-            data = _json.load(open(path))
+            with open(path) as _f:
+                data = _json.load(_f)
             for sf in data.get("source_files", []):
                 name      = sf.get("name", "")
                 cov       = sf.get("coverage", [])
@@ -315,7 +316,9 @@ def _parse_coverage_json(project_dir):
     for _qpath in [p for p in glob.glob("/tmp/grcov_filecache_*.json")
                    if _run_start == 0.0 or os.path.getmtime(p) >= _run_start]:
         try:
-            for _rel, _d in _json.load(open(_qpath)).items():
+            with open(_qpath) as _f:
+                _qdata = _json.load(_f)
+            for _rel, _d in _qdata.items():
                 if _d.get("ts", 0) > main_mtime and _d.get("coverable", 0) > 0:
                     result[_rel] = (_d["covered"], _d["coverable"])
         except Exception:
@@ -329,7 +332,8 @@ def _parse_coverage_json(project_dir):
                    if _run_start == 0.0 or os.path.getmtime(p) >= _run_start]
     for path in sorted(_tarp_paths, key=os.path.getmtime, reverse=True)[:1]:
         try:
-            data = _json.load(open(path))
+            with open(path) as _f:
+                data = _json.load(_f)
             for f in data.get("files", []):
                 parts     = f.get("path", [])
                 name      = os.path.join(*parts) if parts else ""
@@ -785,7 +789,8 @@ def _parse_pipeline_state(project_dir):
     if not project_dir:
         return r
     try:
-        text = open(os.path.join(project_dir, "pipeline_state.md")).read()
+        with open(os.path.join(project_dir, "pipeline_state.md")) as _f:
+            text = _f.read()
     except Exception:
         return r
     m = re.search(r'\d+ clusters?: ([^\n]+)', text)
@@ -820,9 +825,10 @@ def _current_stage_label() -> str:
     if not pd:
         return ""
     try:
-        for line in open(os.path.join(pd, "pipeline_state.md")):
-            if line.startswith("current:"):
-                return line.split(":", 1)[1].strip()
+        with open(os.path.join(pd, "pipeline_state.md")) as _f:
+            for line in _f:
+                if line.startswith("current:"):
+                    return line.split(":", 1)[1].strip()
     except Exception:
         pass
     return ""
@@ -837,12 +843,13 @@ def _phase_bar() -> list[str]:
     cur = ""
     if pd:
         try:
-            for line in open(os.path.join(pd, "pipeline_state.md")):
-                m = re.match(r"\[([^\]/]+)(?:/[^\]]*)?\]\s+done\b", line)
-                if m:
-                    done_keys.add(m.group(1))
-                if line.startswith("current:"):
-                    cur = line.split(":", 1)[1].strip()
+            with open(os.path.join(pd, "pipeline_state.md")) as _f:
+                for line in _f:
+                    m = re.match(r"\[([^\]/]+)(?:/[^\]]*)?\]\s+done\b", line)
+                    if m:
+                        done_keys.add(m.group(1))
+                    if line.startswith("current:"):
+                        cur = line.split(":", 1)[1].strip()
         except Exception:
             pass
     # The combined reconstruct marker means the whole loop finished.
@@ -1364,10 +1371,11 @@ _THINK_CAP_CHARS = 40_000
 
 def _read_backend() -> str:
     try:
-        for line in open(os.path.join(SCRIPT_DIR, ".env")):
-            m = re.match(r'^\s*BACKEND\s*=\s*(\S+)', line)
-            if m:
-                return m.group(1).strip().lower()
+        with open(os.path.join(SCRIPT_DIR, ".env")) as _f:
+            for line in _f:
+                m = re.match(r'^\s*BACKEND\s*=\s*(\S+)', line)
+                if m:
+                    return m.group(1).strip().lower()
     except Exception:
         pass
     return "ollama"
@@ -1422,7 +1430,8 @@ def _vllm_status() -> list[str]:
             cid = ""
             cid_file = "/tmp/vllm_container.id"
             if os.path.exists(cid_file):
-                cid = open(cid_file).read().strip()
+                with open(cid_file) as _f:
+                    cid = _f.read().strip()
             if not cid:
                 cid = subprocess.check_output(
                     ["docker", "ps", "--filter", "ancestor=vllm/vllm-openai:latest",

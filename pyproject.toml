@@ -18,9 +18,9 @@ ignore = [
     # SIM102 (collapsible nested if): stylistic; one site needs a risky reindent in the
     # untested engine. Tracked.
     "SIM102",
-    # SIM115 (open without context manager): mixed — several are legitimate long-lived
-    # handles (e.g. the line-buffered stream log). A resource-handling audit, not a gate.
-    "SIM115",
+    # SIM115 audited & fixed (2026-06-10): monitor.py reads → context managers;
+    # the one legitimate long-lived handle (model_interact stream log) carries a
+    # justified noqa. The rule now GATES.
 ]
 
 [tool.mypy]
