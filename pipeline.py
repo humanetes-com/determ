@@ -10710,7 +10710,13 @@ def _task2_fill_fns_one_by_one(
                             new_body, _ = _ask_per_fn_body(prompt, fn, attempts_log_t, sig_text=sig_t)
                             if not new_body:
                                 continue
-                            ok2, _ = _splice_fn_body(fp, fn, new_body)
+                            # allow_nonstub: every test-retry candidate is an
+                            # already-FILLED fn — without it the splice is
+                            # always rejected and the whole loop is a silent
+                            # no-op (same bug class as the session-58
+                            # _apply_per_fn_fixes find; caught by the f4 pins).
+                            ok2, _ = _splice_fn_body(fp, fn, new_body,
+                                                     allow_nonstub=True)
                             if ok2:
                                 any_progress = True
                                 _log(f"  [phase-c/per-fn] test-fix: re-spliced "
