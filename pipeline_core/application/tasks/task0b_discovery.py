@@ -26,7 +26,7 @@ from ...retry import with_retry
 _NON_SOURCE_DIRS = frozenset({".skeleton", ".skeleton-filled", "target", ".git"})
 
 
-def _iter_source_rs(project_dir: Path) -> "Iterator[Path]":
+def _iter_source_rs(project_dir: Path) -> Iterator[Path]:
     """Yield real source `*.rs` files under `project_dir`, pruning pipeline scratch
     and build directories (see `_NON_SOURCE_DIRS`). Used by both the hash loop and
     the content loop so neither sees phantom files."""
@@ -56,7 +56,7 @@ class Task0bDeps:
     task0_model: str
 
 
-def task0b_discovery(strategy_path: Path, project_dir: Path, test_files: "Any",
+def task0b_discovery(strategy_path: Path, project_dir: Path, test_files: Any,
                      readme_text: str, profile_content: str,
                      deps: Task0bDeps,
                      clusters: list | None = None,
@@ -249,7 +249,7 @@ content here
 </FILE>
 """
 
-    def attempt() -> "str | bool":
+    def attempt() -> str | bool:
         response = deps.ask(prompt, model=deps.task0_model)
         files = extract_files(response)
         if "coverage_strategy.md" not in files:

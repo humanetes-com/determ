@@ -979,8 +979,8 @@ project-specific import paths, type construction patterns, and hard constraints.
                                rel_path: str = rel_path, existing_text: str = existing_text,
                                pub_symbols: str = pub_symbols,
                                cargo_toml_content: str = cargo_toml_content,
-                               integration_tests: "Any" = integration_tests,
-                               relevant_siblings: "Any" = relevant_siblings,
+                               integration_tests: Any = integration_tests,
+                               relevant_siblings: Any = relevant_siblings,
                                attempt_history: str = attempt_history,
                                _old_block: str = _old_block,
                                _scaffold_template: str = _scaffold_template,
@@ -1030,8 +1030,8 @@ project-specific import paths, type construction patterns, and hard constraints.
                     _log(f"  [{module_name}] Could not save stream log: {_e}")
 
             def _finalize_and_commit(raw_block: str, pass_n: int, base_text: str, *,
-                                     rel_path: str = rel_path, abs_path: "Path" = abs_path,
-                                     attempt: int = attempt, uncov_lines: "set[int]" = uncov_lines,
+                                     rel_path: str = rel_path, abs_path: Path = abs_path,
+                                     attempt: int = attempt, uncov_lines: set[int] = uncov_lines,
                                      secs: dict = secs,
                                      _file_constraints_section: str = _file_constraints_section,
                                      ) -> tuple[str, str]:

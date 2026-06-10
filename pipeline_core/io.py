@@ -14,13 +14,13 @@ from __future__ import annotations
 from pathlib import Path
 
 
-def read(path: "Path | str") -> str:
+def read(path: Path | str) -> str:
     try:
         return Path(path).read_text()
     except FileNotFoundError:
         return ""
 
 
-def write(path: "Path | str", content: str) -> None:
+def write(path: Path | str, content: str) -> None:
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     Path(path).write_text(content)

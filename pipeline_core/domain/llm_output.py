@@ -77,7 +77,7 @@ def extract_files(text: str) -> dict[str, str]:
     return files
 
 
-def _extract_genesis(text: str) -> "str | None":
+def _extract_genesis(text: str) -> str | None:
     """
     Extract genesis.md content from Task 4 response.
     1. Primary: content between GENESIS_DELIM_START / GENESIS_DELIM_END.

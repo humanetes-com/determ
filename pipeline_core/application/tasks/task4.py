@@ -41,12 +41,12 @@ class Task4Deps:
     single_call_char_limit: int
 
 
-def task4(genesis_path: "Path", functional_req_path: "Path", test_output: str,
-          iteration: "int | str", output_dir: "Path | str",
+def task4(genesis_path: Path, functional_req_path: Path, test_output: str,
+          iteration: int | str, output_dir: Path | str,
           deps: Task4Deps,
           failure_type: str = "test", failure_log: str = "",
           prev_pass_count: int = 0, prev_test_output: str = "",
-          source_context: str = "", api_surface: str = "") -> "tuple[bool, int]":
+          source_context: str = "", api_surface: str = "") -> tuple[bool, int]:
     """
     Analyze failures and update genesis.md.
 
