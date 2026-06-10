@@ -12454,6 +12454,29 @@ def _extract_tdd_compile_frontier(
     return frontier
 
 
+def _compile_error_frontier(
+    output: str, project_dir: Path, check_cmd: str,
+    env: dict, timeout: int,
+) -> Frontier:
+    """Structured-first compile-error frontier (R8.3): re-run the derived
+    check-only command for JSON diagnostics and attribute errors→fns via
+    `_frontier_from_diags`. Regex-parsing `output` remains only as the
+    fallback when no structured diagnostics came back (cargo unavailable /
+    JSON parse failure). rc==0 means the crate compiles — no compile
+    frontier, regardless of what `output` (e.g. test failures) contains.
+    """
+    try:
+        rc, _rendered, diags = _run_cargo_check_diag(
+            _derive_check_only_cmd(check_cmd), project_dir, env, timeout)
+        if rc == 0:
+            return {}
+        if diags:
+            return _frontier_from_diags(diags, project_dir)
+    except Exception as e:
+        _log(f"  [fix loop] structured frontier failed ({e}) → text fallback")
+    return _extract_tdd_compile_frontier(output, project_dir)
+
+
 def _frontier_from_diags(
     diagnostics: list[Diagnostic], src_dir: Path,
 ) -> Frontier:
@@ -17290,7 +17313,8 @@ Output nothing else."""
             return {"abort": True, "reason": "check_timeout", "summary": "check timed out"}
         try:
             _log_compile_overview(output, len(history))
-            frontier = _extract_tdd_compile_frontier(output, project_dir)
+            frontier = _compile_error_frontier(
+                output, project_dir, check_cmd, env, timeout)
             if not frontier:
                 return _do_fix(output, history, retro=retro)
             recs = _enumerate_fns_via_extractor(project_dir) or []
@@ -17333,7 +17357,8 @@ Output nothing else."""
             return {"abort": True, "reason": "check_timeout", "summary": "check timed out"}
         try:
             _log_compile_overview(output, len(history))
-            frontier = _extract_tdd_compile_frontier(output, project_dir)
+            frontier = _compile_error_frontier(
+                output, project_dir, check_cmd, env, timeout)
             if not frontier:
                 return _do_fix(output, history, retro=retro)
             blocks = _collect_impl_blocks(project_dir)
