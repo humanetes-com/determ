@@ -10,6 +10,7 @@ behind injected helpers; only the incidental fence fallback is replaced with
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Any
 
@@ -36,9 +37,9 @@ class Task1Deps:
     task1_model: str
 
 
-def _task1_proc_macro(project_dir, genesis_path, functional_req_path, test_files,
-                      readme_text, project_profile, deps: Task1Deps, crate_name: str = "",
-                      project_context: str = "", api_surface: str = ""):
+def _task1_proc_macro(project_dir: "Path", genesis_path: "Path", functional_req_path: "Path",
+                      test_files: "Any", readme_text: str, project_profile: str, deps: Task1Deps, crate_name: str = "",
+                      project_context: str = "", api_surface: str = "") -> bool:
     """
     Specialised TASK 1 for proc-macro crates.
     Instead of extracting runtime API contracts, extracts the proc-macro interface:
@@ -151,10 +152,11 @@ that is NOT a proc-macro derive or attribute provided by this crate.
     return True
 
 
-def task1(project_dir, genesis_path, functional_req_path, test_files, readme_text,
+def task1(project_dir: "Path", genesis_path: "Path", functional_req_path: "Path",
+          test_files: "Any", readme_text: str,
           deps: Task1Deps,
           project_profile: str = "", crate_type: str = "", module_name: str = "",
-          project_context: str = "", coverage_strategy: str = ""):
+          project_context: str = "", coverage_strategy: str = "") -> bool:
     log("\nTASK 1: Analyzing tests + README, building functional_requirements.md")
 
     # Pre-strip API surface snapshot (signatures + type defs of the original

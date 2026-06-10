@@ -60,7 +60,7 @@ def _looks_like_prose(content: str, path: str) -> bool:
     return any(first_line.lower().startswith(p) for p in prose_starters)
 
 
-def extract_files(text):
+def extract_files(text: str) -> dict[str, str]:
     """Parse all <FILE path="...">...</FILE> blocks from model output."""
     from .text import strip_markdown_fences
     text = _normalize_file_markers(text)
@@ -77,7 +77,7 @@ def extract_files(text):
     return files
 
 
-def _extract_genesis(text: str):
+def _extract_genesis(text: str) -> "str | None":
     """
     Extract genesis.md content from Task 4 response.
     1. Primary: content between GENESIS_DELIM_START / GENESIS_DELIM_END.

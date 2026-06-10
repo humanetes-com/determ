@@ -72,7 +72,7 @@ corrected content here
 {GENESIS_DELIM_END}
 """
 
-    def attempt():
+    def attempt() -> "str | bool":
         response = deps.ask(prompt, model=deps.model)
         if 'AUDIT_CLEAN' in response:
             log("  Genesis audit: no issues found.")

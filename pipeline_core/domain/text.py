@@ -59,7 +59,7 @@ def trim_to_line(text: str, cap: int, marker: str = "\n// ... (truncated)") -> s
     return text[:cut if cut != -1 else cap] + marker
 
 
-def smart_truncate(text, total_limit=8000, head=2000, tail=6000):
+def smart_truncate(text: str, total_limit: int = 8000, head: int = 2000, tail: int = 6000) -> str:
     """
     Keep the beginning (build errors, first failures) and end (summary) of
     output. Truncating from the middle avoids losing either signal.

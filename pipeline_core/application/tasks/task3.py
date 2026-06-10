@@ -63,8 +63,9 @@ def _should_reverify(primary_output: str, retry_output: str, retry_passed: bool,
     return new_p > init_p or new_f < init_f
 
 
-def task3(project_dir, test_command, iteration, output_dir, genesis_path, deps: Task3Deps,
-          _reverify_remaining: int = 2):
+def task3(project_dir: "Path", test_command: str, iteration: "int | str",
+          output_dir: "Path | str", genesis_path: "Path", deps: Task3Deps,
+          _reverify_remaining: int = 2) -> "Any":
     """TASK 3 — per-cluster strict-verdict test runner.
 
     FR-024: SUCCESS only when every test in every cluster genuinely runs

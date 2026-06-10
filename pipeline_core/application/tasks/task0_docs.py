@@ -36,7 +36,7 @@ class Task0DocsDeps:
     project_context_name: str  # filename invalidated when the profile regenerates
 
 
-def task0_project_profile(profile_path: Path, test_files, readme_text: str, deps: Task0DocsDeps) -> str:
+def task0_project_profile(profile_path: Path, test_files: "Any", readme_text: str, deps: Task0DocsDeps) -> str:
     """
     Run once at startup. Identifies the project's language, build system, and
     workspace/module structure from README + test file paths + content excerpts.
@@ -97,7 +97,7 @@ content here
 </FILE>
 """
 
-    def attempt():
+    def attempt() -> "str | bool":
         response = deps.ask(prompt, model=deps.task0_model)
         files = extract_files(response)
         if "project_profile.md" not in files:
@@ -126,7 +126,7 @@ content here
     return str(result)
 
 
-def task0_project_context(context_path: Path, test_files, readme_text: str,
+def task0_project_context(context_path: Path, test_files: "Any", readme_text: str,
                           profile_content: str, deps: Task0DocsDeps) -> str:
     """
     Synthesize a behavioral summary of the project from test content + README + profile.
@@ -190,7 +190,7 @@ content here
 </FILE>
 """
 
-    def attempt():
+    def attempt() -> "str | bool":
         response = deps.ask(prompt, model=deps.task0_model)
         files = extract_files(response)
         if "project_context.md" not in files:

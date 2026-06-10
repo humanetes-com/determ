@@ -53,8 +53,8 @@ layers = [
 
 [[tool.mypy.overrides]]
 # The extracted package is new and clean — hold it to strict-optional (catches real
-# Optional bugs). `disallow_untyped_defs` is deferred (backlog R1.3b): the verbatim-moved
-# task bodies carry many trivial inner closures whose annotation is churn-without-bug-value;
-# enable it after those are cleaned up.
+# Optional bugs) AND disallow_untyped_defs (R1.3b done 2026-06-10: every def is
+# annotated; pass-through params honestly Any). New untyped defs now FAIL the gate.
 module = "pipeline_core.*"
 strict_optional = true
+disallow_untyped_defs = true

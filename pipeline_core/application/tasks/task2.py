@@ -39,12 +39,13 @@ class Task2Deps:
     genesis_cap: int
 
 
-def task2(project_dir, genesis_path, functional_req_path, manifest_path, existing_test_files,
+def task2(project_dir: "Path", genesis_path: "Path", functional_req_path: "Path",
+          manifest_path: "Path", existing_test_files: "Any",
           deps: Task2Deps,
           project_profile: str = "", workspace_structure: str = "", build_error: str = "",
           locked_dep_context: str = "", current_module: str = "", module_dir_rel: str = "",
           whole_project_context: str = "", coverage_strategy: str = "", api_surface: str = "",
-          prev_source_context: str = ""):
+          prev_source_context: str = "") -> "Any":
     """
     Generate source files from functional requirements.
     Implementation is selected by TASK2_GENERATOR in .env (default: static).
@@ -60,12 +61,13 @@ def task2(project_dir, genesis_path, functional_req_path, manifest_path, existin
     )
 
 
-def task2_inner_loop(project_dir, genesis_path, functional_req_path, manifest_path,
-                     existing_test_files, project_profile, workspace_structure,
-                     build_check_cmd, deps: Task2Deps, locked_dep_context: str = "",
+def task2_inner_loop(project_dir: "Path", genesis_path: "Path", functional_req_path: "Path",
+                     manifest_path: "Path", existing_test_files: "Any",
+                     project_profile: str, workspace_structure: str,
+                     build_check_cmd: "str | None", deps: Task2Deps, locked_dep_context: str = "",
                      current_module: str = "", module_dir_rel: str = "",
                      whole_project_context: str = "", coverage_strategy: str = "",
-                     api_surface: str = "", prev_source_context: str = ""):
+                     api_surface: str = "", prev_source_context: str = "") -> bool:
     """
     Inner loop: TASK 2 (code generation) followed by a compile-only check.
     If the build check fails, feeds the compiler error back into TASK 2 and retries.

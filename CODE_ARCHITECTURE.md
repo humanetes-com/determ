@@ -431,7 +431,7 @@ work; docs last). R5 (Rust) is independent and can run in parallel from the star
 | R1.4 | Rust: `cargo clippy -D warnings` (20 fixed → 0) + `cargo fmt`. | P0 | S | ● | ✅ |
 | R1.5 | CI workflow (`.github/workflows/ci.yml`): py = ruff+mypy+invariants+smoke; rust = fmt+clippy(-D)+test. Linters pinned (ruff 0.15.15, mypy 2.1.0). | P0 | M | ● | ✅ |
 | R1.1b | **B023** (82, loop-var capture) — DEFERRED & ignored-with-note: almost all in the threaded fill ENGINE; audit needs the R4 test net. Also `SIM102`/`SIM115` ignored (stylistic / legit long-lived handles). | P1 | M | ●●● | ⬜ after R4 |
-| R1.3b | mypy `disallow_untyped_defs` on `pipeline_core` (26 missing annotations, mostly trivial inner closures) — deferred; completeness not bugs. | P2 | M | ● | ⬜ |
+| R1.3b | mypy `disallow_untyped_defs` on `pipeline_core` — DONE (2026-06-10): ~31 defs annotated across 11 files (task fns, attempt closures, io/text/llm_output/retry; pass-through params honestly `Any`); enabled in the `pipeline_core.*` override so it gates. model_interact.py stays out of scope. | P2 | M | ● | ✅ |
 | R1.x | import-linter contract (layer rules) → folded into **R2.3**. pytest adoption → **R4.1**. | — | — | — | — |
 
 ### R4 — Behavioral test suite  🔄 MOSTLY DONE  (P0 · unblocks safe engine refactors)

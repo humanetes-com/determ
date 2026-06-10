@@ -935,10 +935,10 @@ project-specific import paths, type construction patterns, and hard constraints.
             # only called within this iteration today; binding makes that
             # permanent instead of incidental). Same for the three below.
             def _render_prompt(_secs: dict, _cov_status: str, *,
-                               rel_path=rel_path, mod_name=mod_name,
-                               _env_section=_env_section,
-                               _file_constraints_section=_file_constraints_section,
-                               output_format=output_format) -> str:
+                               rel_path: str = rel_path, mod_name: str = mod_name,
+                               _env_section: str = _env_section,
+                               _file_constraints_section: str = _file_constraints_section,
+                               output_format: str = output_format) -> str:
                 return f"""You are writing Rust unit tests that specify the behavioral contract of source code.
 {_TASK0C_THINKING_DIRECTIVE}{_secs['strategy']}{_secs['history']}{_secs['what_worked']}{_secs['retrospective']}{_secs['context']}{_cov_status}
 Target file: {rel_path}
@@ -976,15 +976,15 @@ project-specific import paths, type construction patterns, and hard constraints.
             prompt = _render_prompt(secs, _coverage_status)
 
             def _subset_prompt(_subset_lines: set[int], *,
-                               rel_path=rel_path, existing_text=existing_text,
-                               pub_symbols=pub_symbols,
-                               cargo_toml_content=cargo_toml_content,
-                               integration_tests=integration_tests,
-                               relevant_siblings=relevant_siblings,
-                               attempt_history=attempt_history,
-                               _old_block=_old_block,
-                               _scaffold_template=_scaffold_template,
-                               _coverage_status_probe=_coverage_status_probe) -> str:
+                               rel_path: str = rel_path, existing_text: str = existing_text,
+                               pub_symbols: str = pub_symbols,
+                               cargo_toml_content: str = cargo_toml_content,
+                               integration_tests: "Any" = integration_tests,
+                               relevant_siblings: "Any" = relevant_siblings,
+                               attempt_history: str = attempt_history,
+                               _old_block: str = _old_block,
+                               _scaffold_template: str = _scaffold_template,
+                               _coverage_status_probe: str = _coverage_status_probe) -> str:
                 """Render a generation prompt targeting only a subset of the
                 file's uncovered lines (split-and-merge). Same file context as
                 the full prompt; only the fn_bodies/target section narrows, so
@@ -1013,7 +1013,7 @@ project-specific import paths, type construction patterns, and hard constraints.
             # On retry, send a short explicit follow-up instead of the full prompt again:
             # repeating the same large prompt produces the same empty result.
             def _save_stream_log(gen_attempt: int, query: str, resp: str, reason: str, *,
-                                 rel_path=rel_path, attempt=attempt) -> None:
+                                 rel_path: str = rel_path, attempt: int = attempt) -> None:
                 _fname = rel_path.replace("/", "_").replace(".", "_")
                 _path = Path(f"/tmp/stream_loop_{attempt}_{_fname}_gen{gen_attempt}.log")
                 try:
@@ -1030,10 +1030,10 @@ project-specific import paths, type construction patterns, and hard constraints.
                     _log(f"  [{module_name}] Could not save stream log: {_e}")
 
             def _finalize_and_commit(raw_block: str, pass_n: int, base_text: str, *,
-                                     rel_path=rel_path, abs_path=abs_path,
-                                     attempt=attempt, uncov_lines=uncov_lines,
-                                     secs=secs,
-                                     _file_constraints_section=_file_constraints_section,
+                                     rel_path: str = rel_path, abs_path: "Path" = abs_path,
+                                     attempt: int = attempt, uncov_lines: "set[int]" = uncov_lines,
+                                     secs: dict = secs,
+                                     _file_constraints_section: str = _file_constraints_section,
                                      ) -> tuple[str, str]:
                 """Inject allow-line + prelude into a raw gen_tests block, reject
                 blocks with no #[test] fns, then write it as sibling `pass_n` on

@@ -28,7 +28,7 @@ def configure(*, max_retries: int, rate_limit_wait: int, model: str) -> None:
     MODEL = model
 
 
-def is_rate_limit_error(e) -> bool:
+def is_rate_limit_error(e: BaseException) -> bool:
     """Return True (and sleep) if e is a provider rate-limit error."""
     if MODEL.startswith("claude"):
         try:
