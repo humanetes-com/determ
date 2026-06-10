@@ -6901,6 +6901,8 @@ def _build_per_impl_prompt(
     retrospective_guidance: str = "",
     crate_idioms_section: str = "",
     dispatch_family_section: str = "",
+    macros_section: str = "",
+    siblings_section: str = "",
 ) -> str:
     """Per-impl-block prompt — fills every stub fn in `block` and (when
     `related_blocks` is non-empty) jointly designs sibling impls of the
@@ -6940,10 +6942,19 @@ def _build_per_impl_prompt(
         tests_section = "\n\n".join(parts)
     else:
         tests_section = ("(no tests directly reference fns in this block "
-                         "— they may be invoked indirectly via macros or "
-                         "sibling fns)")
+                         "— they may be invoked indirectly via macros "
+                         "(consult MACROS below) or sibling fns)")
 
     notes_block = _tag_block("MODEL_NOTES", notes_section)
+    macros_block = _tag_block("MACROS", macros_section)
+    # FR-024 sibling reference (per-impl variant): already-filled fns
+    # elsewhere in this file sharing a stub member's name.
+    siblings_block = _tag_block(
+        "SIBLING_REFERENCE", siblings_section,
+        prefix="Already-filled fns in OTHER impl blocks of this file with "
+               "the same name as a TARGET stub — follow the same "
+               "structural pattern:\n```rust\n",
+        suffix="\n```")
     types_block = _tag_block("TYPES_IN_SCOPE", types_section)
     invariants_block = _tag_block("CLUSTER_INVARIANTS", invariants_section)
     trait_block = _tag_block("TRAIT_CONTRACT", _trait_contract_for(container))
@@ -6991,13 +7002,13 @@ Stubs to fill in this response: {stub_names}
 <RUST_GOTCHAS>
 {_gotchas_summary()}
 </RUST_GOTCHAS>
-{retro_block}{trait_block}{types_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{dispatch_family_section}{related_section}
+{retro_block}{siblings_block}{trait_block}{types_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{dispatch_family_section}{related_section}
 <TARGET_IMPL_BLOCK file="{file_rel}">
 ```rust
 {target_render}
 ```
 </TARGET_IMPL_BLOCK>
-
+{macros_block}
 Tests (read-only):
 {tests_section}
 
@@ -9173,6 +9184,7 @@ def _phase_c_fill_impl_blocks(
         s for s in (_no_std_invariant, _macro_invariants) if s)
     _crate_type_records = _cluster_filter_type_methods(
         _enumerate_types_via_extractor(target_src_dir) or [], cluster)
+    macros_section = _collect_crate_macros(_src_for_macros)
 
     # Dispatch families (FR-027): autoref-specialization trait sets dispatched
     # by a macro. Their correctness is a cross-impl invariant, so when a block
@@ -9277,6 +9289,15 @@ def _phase_c_fill_impl_blocks(
             target_sig_text=_target_sig_concat,
             max_idioms=5,
         )
+        # FR-024 sibling reference: union over stub member names so e.g.
+        # a stub `fmt` sees an already-filled `fmt` from another impl.
+        _sib_parts: list[str] = []
+        for fn_name in stub_fn_names[:4]:
+            _s = _collect_sibling_filled_bodies(
+                snapshot, fn_name, block.get("container") or "")
+            if _s:
+                _sib_parts.append(_s)
+        siblings_section = "\n\n".join(_sib_parts)
         prior_retro = retros_cache.get(
             _retro_key(block["file"], "*impl*", block["container"]), {}
         ).get("guidance", "")
@@ -9336,6 +9357,8 @@ def _phase_c_fill_impl_blocks(
                 retrospective_guidance=prior_retro,
                 crate_idioms_section=crate_idioms_section,
                 dispatch_family_section=dispatch_family_section,
+                macros_section=macros_section,
+                siblings_section=siblings_section,
             )
             try:
                 response = ask(prompt, model=_TASK2_MODEL)

@@ -33,7 +33,7 @@ IMPORTANT! Token economy in agentic work. The dominant cost is context accumulat
 - TIGHT EDITS: `old_string` = the smallest unique anchor, not a big block. Use `replace_all` for repeated identical changes. For large block replacements, splice via a script instead of pasting hundreds of lines.
 - BOUNDED OUTPUT: pipe Bash through grep/head/tail; never dump full logs or whole-file cats.
 
-IMPORTANT! You do NOT commit and you do NOT restart the pipeline — the user handles those. The user is a senior developer: do NOT explain git/commit basics, what committing means, "good practice", or whether to commit. Just write the commit message when a unit is done and move on.
+IMPORTANT! You do NOT commit and you do NOT restart the pipeline — the user handles those. The user is a senior developer: do NOT explain git/commit basics, what committing means, "good practice", or whether to commit. Just write the commit message when a unit is done and move on. Do NOT check whether something is committed (no git status/log inspection for commit state) — commit tracking is entirely the user's concern; never mention uncommitted work.
 
 IMPORTANT! Work FAST. Validate (spike when it genuinely de-risks), but do not hedge, do not re-ask for permission, and do not stall on "want me to proceed?" — if the user said proceed/build/do it, PROCEED and keep going until done. Bias to action over ceremony.
 
