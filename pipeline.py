@@ -20,6 +20,7 @@ import sys
 import time
 import tomllib
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
@@ -9032,6 +9033,65 @@ import threading as _threading_mod
 _splice_check_lock = _threading_mod.Lock()
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class _FixOutcome:
+    """One fix-loop attempt's result, returned by a unit's attempt callable.
+
+    kind: "accepted" — the unit accepted and finalized the fill;
+          "stop"     — protocol dead-end (empty response, splice rejected,
+                       race lost, LLM error): retrying cannot help;
+          "failed"   — compile/test failure: the driver's gauge decides
+                       whether to retry (err_sig/err_count feed FloorStall).
+    """
+    kind: str
+    err_sig: frozenset = frozenset()
+    err_count: int = 0
+
+
+def _drive_fix_loop(
+    one_attempt: "Callable[[int], _FixOutcome]",
+    *,
+    hard_cap: int,
+    max_stalls: int,
+    stop_context: str,
+    on_failure: "Callable[[int, _FixOutcome, _FloorStall], None] | None" = None,
+    on_stall: "Callable[[int, _FloorStall], None] | None" = None,
+    on_repeated: "Callable[[int, _FloorStall], None] | None" = None,
+) -> tuple[bool, int]:
+    """THE fix-loop driver (slice 8a f2). Owns the loop skeleton every fix
+    loop hand-rolled — attempt counting, graceful-stop checks, FloorStall
+    observation, and the stall / repeated-signature terminations. The unit
+    owns everything domain-specific inside `one_attempt` (context gathering,
+    prompt, splice + locking, verification, acceptance, revert); callbacks
+    carry the unit's telemetry (loop.iter emit, stop logs).
+
+    Consumers: per-fn loop (f2). Per-impl (f3) and the post-pass test retry
+    (f4) port onto this same driver. Returns (accepted, attempts_used).
+    """
+    gauge = _FloorStall()
+    attempt_n = 0
+    while attempt_n < hard_cap:
+        attempt_n += 1
+        _check_graceful_stop(f"{stop_context} attempt {attempt_n}")
+        outcome = one_attempt(attempt_n)
+        if outcome.kind == "accepted":
+            return True, attempt_n
+        if outcome.kind == "stop":
+            return False, attempt_n
+        gauge.observe(outcome.err_count, signature=outcome.err_sig)
+        if on_failure is not None:
+            on_failure(attempt_n, outcome, gauge)
+        if gauge.stalled(max_stalls):
+            if on_stall is not None:
+                on_stall(attempt_n, gauge)
+            return False, attempt_n
+        if gauge.repeated:
+            if on_repeated is not None:
+                on_repeated(attempt_n, gauge)
+            return False, attempt_n
+    return False, attempt_n
+
+
 def _phase_c_fill_impl_blocks(
     project_dir: Path,
     target_src_dir: Path,
@@ -9846,12 +9906,14 @@ def _task2_fill_fns_one_by_one(
             # error codes / keywords match.
             notes_section = ""
 
-            # === Inner fix loop ===
+            # === Inner fix loop (slice 8a f2: unit fn + _drive_fix_loop —
+            # the driver owns attempt counting, the FloorStall gauge, and the
+            # stall/repeated terminations; this unit owns prompt/splice/lock/
+            # verify/accept/revert) ===
             success = False
             last_response = ""
             last_body = ""
             error_excerpt = ""
-            fix_attempt = 0
             attempts_log: list[str] = []
             first_failed_body = ""
             first_error_excerpt = ""
@@ -9859,14 +9921,13 @@ def _task2_fill_fns_one_by_one(
             # Surfaced to the model in subsequent fix prompts so it sees the
             # search space it has already explored.
             per_fn_history: list[dict] = []
-            # P7.2: failure-floor stall tracking for the inner loop (slice 8a:
-            # FloorStall gauge — floor + stall + repeated-error-sig in one).
-            fn_gauge = _FloorStall()
-            while fix_attempt < _PER_FN_FIX_CAP:
-                fix_attempt += 1
+
+            def _attempt_fn_fill(fix_attempt: int) -> _FixOutcome:
+                nonlocal attempts, sig_text, notes_section, last_response, \
+                    last_body, error_excerpt, first_failed_body, \
+                    first_error_excerpt
                 with _counters_lock:
                     attempts += 1
-                _check_graceful_stop(f"per-fn fix attempt {fix_attempt} for {fn_name}")
                 cur_text = file_path.read_text(encoding="utf-8")
                 # Slice 8a: one gather per attempt — notes re-filtered with the
                 # LATEST cargo error (P3.4), TYPES_IN_SCOPE re-selected from
@@ -9937,7 +9998,7 @@ def _task2_fill_fns_one_by_one(
                         "fix_attempt": fix_attempt,
                         "reason": "empty_response",
                     })
-                    break
+                    return _FixOutcome("stop")
 
                 # P3.1: if the model proposed a sig change, try it FIRST so
                 # the body splice operates on the updated sig. Rolls back if
@@ -10008,7 +10069,7 @@ def _task2_fill_fns_one_by_one(
                         "fix_attempt": fix_attempt, "body_chars": len(body),
                         "reason": "race_lost" if _race_detected else "splice_rejected",
                     })
-                    break
+                    return _FixOutcome("stop")
 
                 rc, cargo_out = _run_cargo(check_cmd, target_src_dir, cluster_env)
                 # Plan 10 U2: compile is only a pre-gate — accept the fn only if
@@ -10039,7 +10100,6 @@ def _task2_fill_fns_one_by_one(
                 if rc == 0 and _u2_fail_sig is None:
                     _splice_check_lock.release()
                     _lock_released = True
-                    success = True
                     _ctx = f" [{container}]" if container else ""
                     _log(f"  [phase-c/per-fn] {idx}/{len(stubs)} filled "
                          f"{rel_file}::{fn_name}{_ctx} "
@@ -10078,7 +10138,7 @@ def _task2_fill_fns_one_by_one(
                                 "file": rel_file, "fn": fn_name,
                                 "kind": "recovered", "preview": note[:200],
                             })
-                    break
+                    return _FixOutcome("accepted")
 
                 # Capture first-failure context for note extraction later.
                 if fix_attempt == 1:
@@ -10104,46 +10164,58 @@ def _task2_fill_fns_one_by_one(
                     "error_sig": _focused,
                     "outcome": "compile_fail",
                 })
-                # P7.2: floor-stall against rustc error count. Reset stall
-                # when count strictly decreases; increment otherwise.
+                # P7.2: floor-stall metric — rustc error count (the driver's
+                # FloorStall observes it and owns the stall/repeated exits).
                 cur_err_count = len(cur_err_sig)
-                fn_gauge.observe(cur_err_count, signature=cur_err_sig)
-                _emit("loop.iter", data={
-                    "name": "phase_c.per_fn",
-                    "cluster": cluster_name, "pass_n": pass_n,
-                    "file": rel_file, "fn": fn_name,
-                    "iter": fix_attempt,
-                    "metric_new": cur_err_count,
-                    "metric_best": fn_gauge.best,
-                    "improved": fn_gauge.stalls == 0,
-                    "stalled": fn_gauge.stalls,
-                })
-                if fn_gauge.stalled(_effective_stalls(_PER_FN_FIX_MAX_STALLS, _module_of(rel_file))):
-                    if not _lock_released:
-                        _splice_check_lock.release()
-                        _lock_released = True
-                    _log(f"  [phase-c/per-fn] {fn_name}: floor stalled at "
-                         f"{fn_gauge.best} errors for {fn_gauge.stalls} iter(s) — "
-                         f"stopping fix loop (attempt {fix_attempt}).")
-                    break
-                if fn_gauge.repeated:
-                    if not _lock_released:
-                        _splice_check_lock.release()
-                        _lock_released = True
-                    _log(f"  [phase-c/per-fn] {fn_name}: same error set after "
-                         f"attempt {fix_attempt} — stopping fix loop.")
-                    break
                 last_body = body
                 error_excerpt = _focus_cargo_errors(cargo_out, rel_file)
-                # Revert to snapshot before next attempt; the model will see
+                # Revert to snapshot before returning; the model will see
                 # the file as unimplemented again but with last_body + errors
-                # in the prompt.
+                # in the prompt. (Reverting unconditionally — the exhaustion
+                # block below restores + annotates anyway, so the end state
+                # on a stall/repeated exit is identical to the old in-loop
+                # ordering.)
                 file_path.write_text(snapshot, encoding="utf-8")
                 if not _lock_released:
                     _splice_check_lock.release()
                     _lock_released = True
                 _log(f"  [phase-c/per-fn] {fn_name}: compile failed "
                      f"(attempt {fix_attempt}); re-prompting with errors.")
+                return _FixOutcome("failed", err_sig=cur_err_sig,
+                                   err_count=cur_err_count)
+
+            def _on_fn_failure(attempt_n: int, outcome: _FixOutcome,
+                               gauge: _FloorStall) -> None:
+                _emit("loop.iter", data={
+                    "name": "phase_c.per_fn",
+                    "cluster": cluster_name, "pass_n": pass_n,
+                    "file": rel_file, "fn": fn_name,
+                    "iter": attempt_n,
+                    "metric_new": outcome.err_count,
+                    "metric_best": gauge.best,
+                    "improved": gauge.stalls == 0,
+                    "stalled": gauge.stalls,
+                })
+
+            def _on_fn_stall(attempt_n: int, gauge: _FloorStall) -> None:
+                _log(f"  [phase-c/per-fn] {fn_name}: floor stalled at "
+                     f"{gauge.best} errors for {gauge.stalls} iter(s) — "
+                     f"stopping fix loop (attempt {attempt_n}).")
+
+            def _on_fn_repeated(attempt_n: int, gauge: _FloorStall) -> None:
+                _log(f"  [phase-c/per-fn] {fn_name}: same error set after "
+                     f"attempt {attempt_n} — stopping fix loop.")
+
+            success, fix_attempt = _drive_fix_loop(
+                _attempt_fn_fill,
+                hard_cap=_PER_FN_FIX_CAP,
+                max_stalls=_effective_stalls(
+                    _PER_FN_FIX_MAX_STALLS, _module_of(rel_file)),
+                stop_context=f"per-fn fix for {fn_name}",
+                on_failure=_on_fn_failure,
+                on_stall=_on_fn_stall,
+                on_repeated=_on_fn_repeated,
+            )
 
             if not success:
                 # Restore the snapshot first (clears whatever broken body the
