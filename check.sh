@@ -22,7 +22,7 @@ trap 'rm -rf "$GATE_TMP"' EXIT
 "$SCRIPT_DIR/.venv/bin/mypy" "${PY_TARGETS[@]}" --no-error-summary \
     > "$GATE_TMP/mypy.out" 2>&1 &
 PID_MYPY=$!
-"$SCRIPT_DIR/.venv/bin/ruff" check "${PY_TARGETS[@]}" tools --no-cache --quiet \
+"$SCRIPT_DIR/.venv/bin/ruff" check "${PY_TARGETS[@]}" tools tests --no-cache --quiet \
     > "$GATE_TMP/ruff.out" 2>&1 &
 PID_RUFF=$!
 "$SCRIPT_DIR/.venv/bin/lint-imports" --config pyproject.toml \

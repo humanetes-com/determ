@@ -42,11 +42,12 @@ addopts = "-q"
 root_package = "pipeline_core"
 
 [[tool.importlinter.contracts]]
-name = "Layers: adapters > application > ports > domain"
+name = "Layers: adapters > application > prompts > ports > domain"
 type = "layers"
 layers = [
     "pipeline_core.adapters",
     "pipeline_core.application",
+    "pipeline_core.prompts",
     "pipeline_core.ports",
     "pipeline_core.domain",
 ]

@@ -12,6 +12,7 @@ import sys
 import termios
 import time
 import tty
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
@@ -351,6 +352,61 @@ def _parse_coverage_json(project_dir):
     return result
 
 
+def _read_recent_events(want: Callable[[str], bool]) -> list[dict]:
+    """Tail events.jsonl (last 1 MB) → this run's records whose event name passes `want`.
+
+    Records older than the most recent pipeline start are dropped so panels
+    reflect the live run, not historical noise.
+    """
+    if not os.path.exists(EVENTS_LOG):
+        return []
+    try:
+        run_start = _pipeline_start_time()
+    except Exception:
+        run_start = 0
+    try:
+        with open(EVENTS_LOG, "rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            fh.seek(max(0, size - 1024 * 1024))  # last 1 MB
+            raw = fh.read()
+    except Exception:
+        return []
+    events: list[dict] = []
+    for line in raw.decode("utf-8", errors="replace").splitlines():
+        try:
+            rec = _json.loads(line)
+        except Exception:
+            continue
+        if not want(rec.get("event", "")):
+            continue
+        if run_start > 0:
+            try:
+                ts = datetime.fromisoformat(rec["ts"].replace("Z", "+00:00")).timestamp()
+                if ts < run_start:
+                    continue
+            except Exception:
+                pass
+        events.append(rec)
+    return events
+
+
+def _coverage_from_events() -> str:
+    """Latest module coverage from the structured coverage.measured event (R8.4).
+
+    Returns e.g. "83.9%" or "" when this run has emitted no measurement yet
+    (callers fall back to the legacy text scrapes for old logs).
+    """
+    evs = _read_recent_events(lambda n: n == "coverage.measured")
+    if not evs:
+        return ""
+    pct = (evs[-1].get("data") or {}).get("pct")
+    try:
+        return f"{float(pct):.1f}%" if pct is not None else ""
+    except (TypeError, ValueError):
+        return ""
+
+
 def _phase_c_state() -> dict[str, Any]:
     """Roll up Phase C per-fn events into a dashboard summary.
 
@@ -409,37 +465,8 @@ def _phase_c_state() -> dict[str, Any]:
         "clusters_seen": [], "clusters_done": [], "last_error_code": None,
         "err_codes": {},
     }
-    if not os.path.exists(EVENTS_LOG):
-        return out
-    try:
-        run_start = _pipeline_start_time()
-    except Exception:
-        run_start = 0
-    try:
-        with open(EVENTS_LOG, "rb") as fh:
-            fh.seek(0, 2)
-            size = fh.tell()
-            fh.seek(max(0, size - 1024 * 1024))  # last 1 MB
-            raw = fh.read()
-    except Exception:
-        return out
-    events: list[dict] = []
-    for line in raw.decode("utf-8", errors="replace").splitlines():
-        try:
-            rec = _json.loads(line)
-        except Exception:
-            continue
-        _evn = rec.get("event", "")
-        if not (_evn.startswith("phase_c.") or _evn == "cluster.done"):
-            continue
-        if run_start > 0:
-            try:
-                ts = datetime.fromisoformat(rec["ts"].replace("Z", "+00:00")).timestamp()
-                if ts < run_start:
-                    continue
-            except Exception:
-                pass
-        events.append(rec)
+    events = _read_recent_events(
+        lambda n: n.startswith("phase_c.") or n == "cluster.done")
 
     if not events:
         return out
@@ -1142,9 +1169,9 @@ def pipeline_status():
     if not os.path.exists(PIPELINE_LOG):
         return [f"{status_str}   {red('log not found')}"]
 
-    # Coverage: pipeline_state.md is authoritative (updated after every measurement);
-    # fall back to log scan only if state has no value yet.
-    cov = state["coverage"] or prog["coverage"] or "?"
+    # Coverage: the structured coverage.measured event is authoritative (R8.4);
+    # the pipeline_state.md / log-text scrapes remain only for legacy logs.
+    cov = _coverage_from_events() or state["coverage"] or prog["coverage"] or "?"
     try:    cov_col = green if float(cov.rstrip("%")) >= 80 else yellow
     except: cov_col = dim
 

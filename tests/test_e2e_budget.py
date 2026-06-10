@@ -20,12 +20,12 @@ _SENTINEL = 999_999  # the mis-derived global MAX_TOKENS default
 
 
 def _spec(**over) -> BudgetSpec:
-    base = dict(
-        ctx_len=32_768, content_budget=16_384, thinking_budget=16_384,
-        margin=512, cpt_floor=3.0, adaptive_cpt=False,
-        add_thinking_to_request=True, cap_by_ctx=True, send_max_tokens=True,
-        thinking_char_cap=None,
-    )
+    base = {
+        "ctx_len": 32_768, "content_budget": 16_384, "thinking_budget": 16_384,
+        "margin": 512, "cpt_floor": 3.0, "adaptive_cpt": False,
+        "add_thinking_to_request": True, "cap_by_ctx": True, "send_max_tokens": True,
+        "thinking_char_cap": None,
+    }
     base.update(over)
     return BudgetSpec(**base)
 

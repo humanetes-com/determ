@@ -320,9 +320,10 @@ pub fn bar(x: u32) -> u32 {
 def test_prune_redundant_clusters() -> None:
     """Plan 4 + cluster pruning: drop clusters that duplicate defaults or
     gate too few items."""
-    import pipeline
     import tempfile
     from pathlib import Path
+
+    import pipeline
 
     with tempfile.TemporaryDirectory() as td:
         src = Path(td) / "src"
@@ -373,7 +374,8 @@ def test_prune_redundant_clusters() -> None:
 
 def test_filter_tests_for_cluster() -> None:
     """Plan 4: top-level #![cfg(...)] filter on test files."""
-    import pipeline, dataclasses
+
+    import pipeline
 
     cluster_stable = pipeline.BuildCluster(
         name="stable", env_extra={}, tarpaulin_exclude_files=[],
@@ -472,8 +474,9 @@ def test_cluster_gate_predicate_is_satisfiable() -> None:
     """FR-032: a cluster activated by `--cfg N` must get a gate that's true
     under that cfg. The old `all(N, feature="N", …)` was unsatisfiable (feature
     off) → divergent items vanished from the merge → E0046."""
-    import pipeline
     from types import SimpleNamespace
+
+    import pipeline
     # no_core cluster: activated by --cfg anyhow_no_core_error, excludes egma
     c = SimpleNamespace(
         active_cfg=["anyhow_no_core_error"],
@@ -521,7 +524,9 @@ def test_run_scoped_tests() -> None:
 def test_generate_in_parallel() -> None:
     """Plan 8: split-and-merge fans out one concurrent ask() per subset prompt,
     returns responses index-aligned, and survives a failing request."""
-    import pipeline, threading
+    import threading
+
+    import pipeline
     _orig = pipeline.ask
     seen_lock = threading.Lock()
     calls = []
@@ -691,8 +696,9 @@ def test_parse_test_counts() -> None:
 
 def test_build_test_reverse_map() -> None:
     """FR-024 reverse map: each #[test] fn maps to fns it could reach."""
-    import pipeline
     import tempfile
+
+    import pipeline
     if not pipeline._SKELETON_EXTRACTOR_BIN.exists():
         print("  SKIP _build_test_reverse_map (extractor missing)")
         return
@@ -741,9 +747,10 @@ def test_ast_cluster_merge_preserves_trait_structure() -> None:
     impl body differs and asserts that the merged output keeps the impl
     bodies INSIDE the impl block (no orphan items) AND compiles cleanly.
     """
-    import pipeline
     import subprocess
     import tempfile
+
+    import pipeline
 
     if not pipeline._SKELETON_EXTRACTOR_BIN.exists():
         print("  SKIP _ast_cluster_merge (extractor binary missing)")
@@ -920,9 +927,9 @@ def test_file_cfg_predicate_adjacent_mod_decls() -> None:
     forever at `unimplemented!()` because the pipeline never queued
     those fns.
     """
-    import pipeline
     import tempfile
-    import os
+
+    import pipeline
     with tempfile.TemporaryDirectory(prefix="cfg_pred_test_") as td:
         root = Path(td)
         src = root / "src"
@@ -1490,7 +1497,6 @@ def test_module_augment_state() -> None:
 
 def test_model_context_chars() -> None:
     """_model_context_chars returns sensible values for different env configs."""
-    import importlib
     import pipeline
 
     orig_env = {k: os.environ.get(k) for k in ("BACKEND", "OLLAMA_NUM_CTX", "VLLM_MAX_MODEL_LEN", "MODEL")}
@@ -1585,6 +1591,7 @@ def test_event_log() -> None:
     """_emit writes JSONL with fixed schema; _store_prompt_content content-addresses."""
     import json as _json
     import tempfile
+
     import pipeline
 
     with tempfile.TemporaryDirectory() as td:
@@ -1647,6 +1654,44 @@ def test_event_log() -> None:
             pipeline._RUN_CONTEXT.update(orig_ctx)
 
     print("  OK  event log (_emit, _store_prompt_content)")
+
+
+def test_monitor_coverage_from_events() -> None:
+    """R8.4: the header coverage figure comes from the structured
+    coverage.measured event (latest wins, legacy one-decimal shape);
+    no event / no pct → "" so the legacy text scrapes take over."""
+    import json
+    import tempfile
+
+    import monitor
+
+    with tempfile.TemporaryDirectory() as td:
+        ev = os.path.join(td, "events.jsonl")
+        old_log, old_start = monitor.EVENTS_LOG, monitor._pipeline_start_time
+        monitor.EVENTS_LOG = ev
+        monitor._pipeline_start_time = lambda: 0.0
+        try:
+            assert monitor._coverage_from_events() == ""  # no file yet
+            with open(ev, "w") as fh:
+                fh.write(json.dumps({"ts": "2026-06-10T00:00:00+00:00",
+                                     "event": "coverage.measured",
+                                     "data": {"pct": 83.87096}}) + "\n")
+                fh.write("not json\n")  # garbage line tolerated
+                fh.write(json.dumps({"ts": "2026-06-10T00:01:00+00:00",
+                                     "event": "phase_c.pass.start", "data": {}}) + "\n")
+                fh.write(json.dumps({"ts": "2026-06-10T00:02:00+00:00",
+                                     "event": "coverage.measured",
+                                     "data": {"pct": 97.2704}}) + "\n")
+            assert monitor._coverage_from_events() == "97.3%"
+            with open(ev, "w") as fh:
+                fh.write(json.dumps({"ts": "2026-06-10T00:00:00+00:00",
+                                     "event": "coverage.measured",
+                                     "data": {}}) + "\n")
+            assert monitor._coverage_from_events() == ""  # pct missing → fallback
+        finally:
+            monitor.EVENTS_LOG = old_log
+            monitor._pipeline_start_time = old_start
+    print("  OK  monitor coverage from events")
 
 
 def test_monitor_task_pipeline_parser() -> None:
@@ -1893,8 +1938,10 @@ def test_derive_check_only_cmd() -> None:
 def test_splice_fn_body_allow_nonstub() -> None:
     """per_fn fix strategy: re-fill an already-filled (wrong) fn body. Default
     splice refuses a non-stub; allow_nonstub=True overwrites it."""
-    import pipeline, tempfile
+    import tempfile
     from pathlib import Path
+
+    import pipeline
     src = (
         "impl Foo {\n"
         "    fn as_ref(&self) -> u32 {\n"
@@ -2009,9 +2056,12 @@ def test_sig_tighten_guard_and_where_parse() -> None:
 def test_domain_enums_and_model_caps() -> None:
     """pipeline_core domain: StrEnum coerce + pure model-caps math (strangler slice 1)."""
     from pipeline_core.domain.enums import (
-        Backend, CoverageBackend, FillUnit, ModelTier,
+        Backend,
+        CoverageBackend,
+        FillUnit,
+        ModelTier,
     )
-    from pipeline_core.domain.model_caps import model_tier, model_context_chars
+    from pipeline_core.domain.model_caps import model_context_chars, model_tier
 
     # StrEnum members compare equal to their token → drop-in for string literals.
     assert Backend.OLLAMA == "ollama"
@@ -2055,9 +2105,9 @@ def test_domain_enums_and_model_caps() -> None:
     # Settings owns the derived char budgets; pipeline constants are single-sourced from it.
     from pipeline_core.domain.model_caps import safe_input_char_limit
     s = pipeline.SETTINGS
-    assert pipeline.SINGLE_CALL_CHAR_LIMIT == s.single_call_char_limit
-    assert pipeline._SAFE_INPUT_CHAR_LIMIT == s.safe_input_char_limit
-    assert pipeline._SAFE_INPUT_CHAR_LIMIT_TASK0C == s.safe_input_char_limit_task0c
+    assert s.single_call_char_limit == pipeline.SINGLE_CALL_CHAR_LIMIT
+    assert s.safe_input_char_limit == pipeline._SAFE_INPUT_CHAR_LIMIT
+    assert s.safe_input_char_limit_task0c == pipeline._SAFE_INPUT_CHAR_LIMIT_TASK0C
     assert s.single_call_char_limit == min(s.safe_input_char_limit, s.model_context_chars * 3 // 4)
     assert s.intermediate_char_limit == s.model_context_chars // 2
     assert s.model == pipeline.MODEL
@@ -2069,8 +2119,8 @@ def test_domain_enums_and_model_caps() -> None:
     from pipeline_core.settings import TaskModels
     tm = s.task_models
     assert isinstance(tm, TaskModels)
-    assert pipeline._TASK0_MODEL == tm.task0 and pipeline._TASK4_MODEL == tm.task4
-    assert pipeline._TASK0C_MODEL == tm.task0c and pipeline._TASK2_MODEL == tm.task2
+    assert tm.task0 == pipeline._TASK0_MODEL and tm.task4 == pipeline._TASK4_MODEL
+    assert tm.task0c == pipeline._TASK0C_MODEL and tm.task2 == pipeline._TASK2_MODEL
     # default fallback: a task with no env override resolves to the global model.
     import os as _os
     if "TASK1_MODEL" not in _os.environ:
@@ -2081,11 +2131,12 @@ def test_domain_enums_and_model_caps() -> None:
 def test_adapters_satisfy_ports() -> None:
     """Slice 4a: LLM / Extractor / Cargo adapters structurally satisfy their ports,
     and the composition root builds them on `pipeline.ADAPTERS`."""
-    from pipeline_core.ports import LLM, Extractor, Cargo, ProcessResult
-    from pipeline_core.adapters import build_adapters, Adapters, CargoCli, CliExtractor, ModelInteractLLM
-    from pipeline_core.adapters.cargo import Process
-    from pipeline_core.settings import Settings
     from pathlib import Path
+
+    from pipeline_core.adapters import Adapters, CargoCli, CliExtractor, ModelInteractLLM, build_adapters
+    from pipeline_core.adapters.cargo import Process
+    from pipeline_core.ports import LLM, Cargo, Extractor, ProcessResult
+    from pipeline_core.settings import Settings
 
     a = build_adapters(Settings.from_env(), extractor_bin=Path("/nonexistent/bin"), model="m")
     assert isinstance(a, Adapters)
@@ -2113,14 +2164,16 @@ def test_coverage_workspace_adapters() -> None:
     """Slice 4b: relocated coverage parse paths + GitWorkspace behave identically,
     and pipeline's shims delegate to the adapters. No cargo needed — exercises the
     transcription-risk pure logic (lcov parse, grcov-json parse, git read/write/commit)."""
-    import os
     import json as _json
+    import os
     import subprocess
     import tempfile
     from pathlib import Path
-    from pipeline_core.adapters import coverage as cov, workspace as ws
-    from pipeline_core.ports import Coverage, Workspace
+
+    from pipeline_core.adapters import coverage as cov
+    from pipeline_core.adapters import workspace as ws
     from pipeline_core.domain.enums import CoverageBackend
+    from pipeline_core.ports import Coverage, Workspace
 
     deps = cov.CoverageDeps(
         log=lambda m: None, cargo_env=lambda: {}, cluster=lambda: None,
@@ -2179,12 +2232,13 @@ def test_slice5a_shims_delegate_to_adapters() -> None:
     subprocess logic), and _run_cargo preserves the legacy (rc, text) contract."""
     import types
     from pathlib import Path
+
     import pipeline
     from pipeline_core.adapters.cargo import Process
 
     calls: list[tuple] = []
 
-    from pipeline_core.domain.models import FnRecord, TypeRecord, ModRecord
+    from pipeline_core.domain.models import FnRecord, ModRecord, TypeRecord
 
     class _FakeExtractor:
         # slice 6: the adapter contract returns typed records, not dicts.
@@ -2232,8 +2286,8 @@ def test_slice5b_task0_docs() -> None:
     """Slice 5b: extracted task0 profile/context doc tasks generate + write via fakes,
     and the fence-fallback path uses strip_markdown_fences (no regex in the clean layer)."""
     from pathlib import Path
-    from pipeline_core.application.tasks.task0_docs import (
-        task0_project_profile, task0_project_context, Task0DocsDeps)
+
+    from pipeline_core.application.tasks.task0_docs import Task0DocsDeps, task0_project_context, task0_project_profile
 
     written: dict = {}
     marked: list = []
@@ -2267,7 +2321,8 @@ def test_slice5b_task0b_discovery() -> None:
     the fence fallback uses strip_markdown_fences (no regex in the clean layer)."""
     import tempfile
     from pathlib import Path
-    from pipeline_core.application.tasks.task0b_discovery import task0b_discovery, Task0bDeps
+
+    from pipeline_core.application.tasks.task0b_discovery import Task0bDeps, task0b_discovery
 
     written: dict = {}
     deps = Task0bDeps(
@@ -2292,9 +2347,10 @@ def test_slice5b_task0b_discovery() -> None:
 def test_slice5b_task1() -> None:
     """Slice 5b: extracted TASK 1 dispatches to the synthesizer, and the proc-macro path
     builds requirements via fakes (Rust-source regex stays injected from pipeline)."""
-    from types import SimpleNamespace
     from pathlib import Path
-    from pipeline_core.application.tasks.task1 import task1, Task1Deps
+    from types import SimpleNamespace
+
+    from pipeline_core.application.tasks.task1 import Task1Deps, task1
 
     calls: dict = {}
 
@@ -2328,9 +2384,10 @@ def test_slice5b_task0c() -> None:
     """Slice 5b: extracted task0c engine — verbatim body behind a rebind-prelude. Exercise the
     early-skip path (augmentor not applicable) with all-stub deps; confirm pipeline builds the
     real _TASK0C_DEPS (which validates all injected names resolve)."""
-    from types import SimpleNamespace
     from pathlib import Path
-    from pipeline_core.application.tasks.task0c import task0c_augment_module, Task0cDeps
+    from types import SimpleNamespace
+
+    from pipeline_core.application.tasks.task0c import Task0cDeps, task0c_augment_module
 
     stub = {f: (lambda *a, **k: None) for f in Task0cDeps.__dataclass_fields__}
     stub["test_augmentor_factory"] = lambda: SimpleNamespace(is_applicable=lambda ct: False)
@@ -2348,8 +2405,7 @@ def test_slice6_models() -> None:
     """Slice 6: domain dataclasses for the Rust↔Python extractor seam. Verify tolerant
     from_dict (missing keys default, nested records parse, extra keys ignored) and that
     to_dict round-trips the exact wire shape (the seam is sacred — CODE_ARCHITECTURE.md §4)."""
-    from pipeline_core.domain.models import (
-        FnRecord, TypeRecord, FieldRecord, MethodRecord, ModRecord, DispatchFamily)
+    from pipeline_core.domain.models import DispatchFamily, FieldRecord, FnRecord, MethodRecord, ModRecord, TypeRecord
 
     # FnRecord wire dict (every field as the Rust extractor emits it).
     fn_wire = {
@@ -2406,9 +2462,10 @@ def test_slice6_models() -> None:
 def test_slice6_models_seam_wiring() -> None:
     """Slice 6: the Extractor adapter parses JSON into typed records; the pipeline.py fns
     wrapper re-serialises to dicts via to_dict so the dict-based fill engine is unchanged."""
+    from pathlib import Path
+
     from pipeline_core.adapters.extractor import CliExtractor
     from pipeline_core.domain.models import FnRecord
-    from pathlib import Path
 
     # Missing binary → None (not a crash), preserved from the dict era.
     ext = CliExtractor(Path("/nonexistent/skeleton-extractor"))
@@ -2417,7 +2474,6 @@ def test_slice6_models_seam_wiring() -> None:
 
     # The adapter's parse step yields typed records from wire dicts.
     rec = FnRecord.from_dict({"fn_name": "f", "file": "a.rs"})
-    import pipeline
     # The pipeline wrapper hands the engine dicts (to_dict), not dataclasses.
     assert rec.to_dict()["fn_name"] == "f"
     print("  OK  extractor seam typed; engine still dict-fed (slice 6)")
@@ -2426,10 +2482,10 @@ def test_slice6_models_seam_wiring() -> None:
 def test_slice5b_task2() -> None:
     """Slice 5b: extracted TASK 2 dispatcher + inner loop (no-build-check path) + fix loop
     (empty manifest) behave with fakes; generation engine stays injected from pipeline."""
-    from types import SimpleNamespace
     from pathlib import Path
-    from pipeline_core.application.tasks.task2 import (
-        task2, task2_inner_loop, task2_fix_loop, Task2Deps)
+    from types import SimpleNamespace
+
+    from pipeline_core.application.tasks.task2 import Task2Deps, task2, task2_fix_loop, task2_inner_loop
 
     gen = SimpleNamespace(generate=lambda *a, **k: True)
     deps = Task2Deps(
@@ -2454,12 +2510,13 @@ def test_slice5b_task3_task4() -> None:
     """Slice 5b: extracted TASK 3 (test runner) + TASK 4 (failure analysis) drive their
     branches correctly with injected fakes — no cargo, no LLM."""
     from contextlib import contextmanager
-    from types import SimpleNamespace
     from pathlib import Path
+    from types import SimpleNamespace
+
     import pipeline_core.application.tasks.task3 as t3mod
-    from pipeline_core.application.tasks.task3 import task3, Task3Deps
-    from pipeline_core.application.tasks.task4 import task4, Task4Deps
-    from pipeline_core.domain.llm_output import GENESIS_DELIM_START, GENESIS_DELIM_END
+    from pipeline_core.application.tasks.task3 import Task3Deps, task3
+    from pipeline_core.application.tasks.task4 import Task4Deps, task4
+    from pipeline_core.domain.llm_output import GENESIS_DELIM_END, GENESIS_DELIM_START
 
     @contextmanager
     def fake_phase(*a, **k):
@@ -2519,8 +2576,9 @@ def test_slice5b_genesis_audit_task() -> None:
     """Slice 5b: extracted genesis_audit use case behaves per-branch with injected deps,
     and pipeline's shim + deps record are wired."""
     from pathlib import Path
-    from pipeline_core.application.tasks.genesis_audit import genesis_audit, GenesisAuditDeps
-    from pipeline_core.domain.llm_output import GENESIS_DELIM_START, GENESIS_DELIM_END
+
+    from pipeline_core.application.tasks.genesis_audit import GenesisAuditDeps, genesis_audit
+    from pipeline_core.domain.llm_output import GENESIS_DELIM_END, GENESIS_DELIM_START
 
     written: dict = {}
 
@@ -2572,7 +2630,8 @@ def test_slice5b_genesis_audit_task() -> None:
     assert txt.trim_to_line("a\nbb\nccc", 4) == "a" + "\n// ... (truncated)"
 
     # 5b infra: log + retry seams. pipeline re-exports with_retry; sinks wired to _log/_emit.
-    from pipeline_core import log as pclog, retry as pcretry
+    from pipeline_core import log as pclog
+    from pipeline_core import retry as pcretry
     assert pipeline.with_retry is pcretry.with_retry
     assert pclog._log_sink is pipeline._log and pclog._emit_sink is pipeline._emit
     assert pcretry.MAX_RETRIES == pipeline.MAX_RETRIES and pcretry.MODEL == pipeline.MODEL
@@ -2795,8 +2854,8 @@ def test_per_impl_prompt_macros_and_siblings_sections():
                 "has_unimplemented_body": True}]
     block = {"file": "lib.rs", "container": "impl Foo",
              "members": members, "stub_members": members}
-    kw = dict(block=block, related_blocks=[], test_blocks=[],
-              module_name="m", cluster_name="t")
+    kw = {"block": block, "related_blocks": [], "test_blocks": [],
+          "module_name": "m", "cluster_name": "t"}
     full = p._build_per_impl_prompt(
         macros_section="macro_rules! mk { () => {} }",
         siblings_section="fn kind(&self) -> u32 { 7 }", **kw)
@@ -2842,12 +2901,12 @@ def test_per_fn_prompts_carry_crate_idioms():
     # per-impl-only; both per-fn builders must render it when provided
     # and omit it when empty.
     import pipeline
-    common = dict(
-        file_text="fn target() { unimplemented!() }",
-        fn_name="target", sig_text="fn target()",
-        test_blocks=[], module_name="m", cluster_name="t",
-        file_rel="lib.rs",
-    )
+    common = {
+        "file_text": "fn target() { unimplemented!() }",
+        "fn_name": "target", "sig_text": "fn target()",
+        "test_blocks": [], "module_name": "m", "cluster_name": "t",
+        "file_rel": "lib.rs",
+    }
     idiom = "# Self::construct_from_display family\nSelf::construct_from_display(arg, None)"
     full = pipeline._build_per_fn_prompt(crate_idioms_section=idiom, **common)
     assert "<CRATE_IDIOMS>" in full and "construct_from_display" in full

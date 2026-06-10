@@ -101,7 +101,7 @@ for file_rel, fn_name in cases:
     import re
     tib = re.search(r'<TARGET_IMPL_BLOCK[^>]*>(.*?)</TARGET_IMPL_BLOCK>', prompt, re.DOTALL)
     if tib:
-        print(f"   TARGET preview:")
+        print("   TARGET preview:")
         for ln in tib.group(1).strip().splitlines()[:10]:
             print(f"     {ln}")
 

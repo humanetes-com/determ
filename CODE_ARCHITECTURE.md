@@ -343,19 +343,46 @@ slice needs a dedicated live-run validation window; ceremony-free per §2):
        against the previous run before declaring the series done.
    Expected: A ~300→~80 (unit) and B ~280→~90, C ~120→~40, shared driver ~120 — net
    ≈ −450 lines and ONE termination policy for every fix loop in the pipeline.
-8. `prompts/` — move ALL prompt builders + section formatters verbatim
-   (`_build_per_fn_prompt`, `_build_per_fn_fix_prompt`, `_build_per_impl_prompt`,
-   `_build_task0c_prompt_sections`, `_format_type_for_prompt`, `_types_section_for_fix`,
-   `_gotchas_summary`, `_trait_contract_for`, model-notes filter). Pure text→text, no I/O.
-   Per prompt family: one frozen `*PromptContext` dataclass enumerating every injected
-   section — makes a missing injection (the BoxedError TYPES_IN_SCOPE gap, the empty
-   retry-prompt gaps) a VISIBLE hole in a record, not an absent kwarg. pipeline.py keeps
-   re-export shims. Unit-test: each builder renders every section when its field is set.
-9. state + workspace lifecycle — `_read_state/_mark_phase/_phase_valid/_set_current`
-   → `adapters/state.py` behind a `PipelineState` port; the module-start save/wipe/stub/
-   reattach sequence → `application/workspace_lifecycle.py`. Codify THE invariant that
-   broke (wipe ⟺ the phase that regenerates the wiped artefact will rerun) as one
-   function with unit tests pairing each wipe with its phase-marker guard.
+8. 🔄 `prompts/` — MOVED (2026-06-10): `pipeline_core/prompts/` = `sections.py` (pure:
+   `tag_block`, `format_impl_block_for_prompt`, `format_type_for_prompt`,
+   `build_dispatch_family_section(family, *, single_call_char_limit)`, `RUST_GOTCHAS`+
+   `gotchas_summary/for_error`, `TRAIT_CONTRACTS`+`trait_contract_for`,
+   `extract_trait_from_container`), `per_fn.py` (`build_per_fn_prompt`,
+   `build_per_fn_fix_prompt`), `per_impl.py` (`build_per_impl_prompt`), `runtime.py`
+   (settable facade, log.py pattern, for the two impure collaborators that stay in
+   pipeline.py: `_annotate_file_view` (regex) + `_promoted_error_rules` (run-state+I/O);
+   wired at import in pipeline.py). pipeline.py keeps `_`-alias shims (all call sites +
+   smoke pins unchanged); `prompts` added to the import-linter layers (application >
+   prompts > ports). FIX exposed by the move: `extract_trait_from_container` rewritten
+   regex-free — the old regex required whitespace after `impl` and stopped generics at
+   the first `>`, so EVERY `impl<T> Trait for X` and nested-generic impl silently got
+   no TRAIT_CONTRACT; pins in tests/test_prompts_package.py.
+   BOUNDARY DECISION (stay in pipeline.py — selectors over pipeline state, moving =
+   relocated-not-decoupled): `_types_section_for_fix` (regex relevance-match + _guard),
+   `_build_task0c_prompt_sections` (regex + _guard + char-cap globals),
+   `_filter_model_notes_for_prompt` (FR-file I/O + caches). The moved layer holds only
+   pure renderers.
+   REMAINING (deferred to a session with runnable pytest — pin-heavy, behavior-neutral):
+   per-family frozen `*PromptContext` dataclass with NO field defaults, enumerating every
+   injected section — makes a missing injection (the BoxedError TYPES_IN_SCOPE gap, the
+   empty retry-prompt gaps) a VISIBLE hole in a record, not an absent kwarg. Requires
+   rewriting every builder call site + smoke pin in one pass; gate on the full suite.
+9. ✅ state + workspace lifecycle (2026-06-10) — `adapters/state.py` owns the
+   pipeline_state.md store (`state_path/read_state/write_state/mark_phase/set_current/
+   phase_valid/log_state_summary`, `PIPELINE_STATE_NAME`); bodies verbatim EXCEPT the
+   line parser, rewritten regex-free (`_parse_phase_line`, semantics pinned against the
+   old pattern in tests/test_state_adapter.py). `PipelineState` Protocol added to ports.
+   pipeline.py keeps `_`-alias shims; `_commit_and_mark` (git orchestration) and
+   `_source_hash` (what-counts-as-source policy, uses `_strip_gen_tests_decls`) stay.
+   `application/workspace_lifecycle.py` owns the module-start save→maybe-wipe→stub
+   sequence; THE invariant (wipe ⟺ the regenerating phase will rerun, session-59 bug)
+   is codified as `may_wipe_regenerated` and `wipe_module_sources` refuses to wipe
+   unless it holds (tests/test_workspace_lifecycle.py pairs each wipe with its phase
+   guard). Filename regex stays behind the injected `_is_gen_tests_file` predicate.
+   DEFERRED from this slice: the post-task2 gen_tests REATTACH block (main() ~20460) —
+   cluster-engine logic over `_clusters`/origin-manifest/cfg-gates, R9.6-adjacent and
+   awaiting live validation; extracting it needs a ~10-field deps record today
+   (relocated-not-decoupled). It belongs to the engine pass (slice 10/12).
 10. engine pass (deferred tail of slice 6 — the only slice that is NOT verbatim):
     `Stub`/`ImplBlock`/`FillResult`/`FixAttempt` domain models; thread `FnRecord` through
     (kills `"fn"` vs `"fn_name"`); split `_task2_fill_fns_one_by_one` into frontier

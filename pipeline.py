@@ -23,6 +23,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
+from functools import partial as _partial
 from pathlib import Path
 from typing import TypeVar
 
@@ -39,6 +40,7 @@ from pipeline_core import log as _pclog
 from pipeline_core import retry as _pcretry
 from pipeline_core.adapters import build_adapters
 from pipeline_core.adapters import coverage as _covmod
+from pipeline_core.adapters import state as _state_mod
 from pipeline_core.adapters import workspace as _wsmod
 from pipeline_core.adapters.coverage import CoverageDeps
 from pipeline_core.adapters.workspace import WorkspaceDeps
@@ -82,6 +84,12 @@ from pipeline_core.application.tasks.task3 import Task3Deps
 from pipeline_core.application.tasks.task3 import task3 as _task3_impl
 from pipeline_core.application.tasks.task4 import Task4Deps
 from pipeline_core.application.tasks.task4 import task4 as _task4_impl
+from pipeline_core.application.workspace_lifecycle import (
+    save_gen_tests_siblings as _wl_save_gen_tests_siblings,
+)
+from pipeline_core.application.workspace_lifecycle import (
+    wipe_module_sources as _wl_wipe_module_sources,
+)
 from pipeline_core.domain.enums import (
     Backend,
     CoverageBackend,
@@ -135,6 +143,31 @@ from pipeline_core.domain.text import (
     strip_markdown_fences as _strip_markdown_fences,
 )
 from pipeline_core.io import read, write
+from pipeline_core.prompts import runtime as _prompts_runtime
+from pipeline_core.prompts.per_fn import (
+    build_per_fn_fix_prompt as _build_per_fn_fix_prompt,
+)
+from pipeline_core.prompts.per_fn import (
+    build_per_fn_prompt as _build_per_fn_prompt,
+)
+from pipeline_core.prompts.per_impl import (
+    build_per_impl_prompt as _build_per_impl_prompt,
+)
+from pipeline_core.prompts.sections import (
+    build_dispatch_family_section as _build_dispatch_family_section_pure,
+)
+from pipeline_core.prompts.sections import (
+    format_type_for_prompt as _format_type_for_prompt,
+)
+from pipeline_core.prompts.sections import (
+    gotchas_for_error as _gotchas_for_error,
+)
+from pipeline_core.prompts.sections import (
+    gotchas_summary as _gotchas_summary,
+)
+from pipeline_core.prompts.sections import (
+    tag_block as _tag_block,
+)
 from pipeline_core.retry import with_retry
 from pipeline_core.settings import Settings
 from strip_to_tests import detect_language, process_rust
@@ -145,6 +178,7 @@ from strip_to_tests import detect_language, process_rust
 __all__ = [
     "count_passing_tests", "validate_task3_output_strict", "extract_test_output_from_file",
     "GENESIS_DELIM_START", "GENESIS_DELIM_END", "_extract_genesis",
+    "_tag_block",
 ]
 
 _mi_mtime: float = os.path.getmtime(_mi.__file__)
@@ -797,7 +831,7 @@ PROJECT_INPUTS_HASH_NAME = "project_profile.inputs_hash"
 # Discovery pass output: import paths, type construction patterns, feature flags (BL-001).
 COVERAGE_STRATEGY_NAME = "coverage_strategy.md"
 COVERAGE_STRATEGY_HASH_NAME = "coverage_strategy.inputs_hash"
-PIPELINE_STATE_NAME = "pipeline_state.md"
+PIPELINE_STATE_NAME = _state_mod.PIPELINE_STATE_NAME  # single-sourced (slice 9)
 
 # Workspace directory for cloned/copied project repos (relative to pipeline root).
 WORKSPACE_DIR = "tmp"
@@ -6231,127 +6265,6 @@ def _filter_model_notes_for_prompt(
     return "\n".join(out_lines)
 
 
-# P5.3: standard library trait contracts. When a fn is being implemented
-# inside `impl Trait for X`, inject the trait's documented behavior so the
-# model knows what's expected (return type semantics, format conventions,
-# etc.). Hardcoded for the most common stdlib traits — covers ~90% of impl
-# blocks in typical Rust crates.
-_TRAIT_CONTRACTS: dict[str, str] = {
-    "Display": (
-        "Display::fmt(&self, f: &mut Formatter) -> fmt::Result\n"
-        "  - Produces user-facing string representation via `write!(f, \"...\", ...)`.\n"
-        "  - Return value of `write!(...)` IS the return value of fmt.\n"
-        "  - Do NOT use {:?} or include type names in the output."
-    ),
-    "Debug": (
-        "Debug::fmt(&self, f: &mut Formatter) -> fmt::Result\n"
-        "  - Produces developer-facing representation, typically via\n"
-        "    f.debug_struct(\"Name\").field(\"k\", &v).finish() OR\n"
-        "    write!(f, \"Name({:?}, {:?})\", a, b)\n"
-        "  - For structs: use debug_struct/debug_tuple/debug_list/debug_map.\n"
-        "  - Return value of the helper IS the return value of fmt."
-    ),
-    "Error": (
-        "std::error::Error has these methods (all default to None / no-op):\n"
-        "  source(&self) -> Option<&(dyn Error + 'static)>  — return cause if any\n"
-        "  provide(&'_ self, request: &mut Request<'_>)     — nightly only\n"
-        "Most impls override `source` to return Some(&self.inner_error) or None."
-    ),
-    "Hash": (
-        "Hash::hash<H: Hasher>(&self, state: &mut H)\n"
-        "  - Feed each field into state.write_*() or call field.hash(state).\n"
-        "  - Must be consistent with Eq: a == b ⟹ hash(a) == hash(b)."
-    ),
-    "PartialEq": (
-        "PartialEq::eq(&self, other: &Self) -> bool\n"
-        "  - Compare each meaningful field; return true iff all match.\n"
-        "  - Reflexive in most cases (a == a); doesn't need transitivity."
-    ),
-    "Eq": "Eq is a marker trait extending PartialEq — no methods to impl.",
-    "PartialOrd": (
-        "PartialOrd::partial_cmp(&self, other: &Self) -> Option<Ordering>\n"
-        "  - Return Some(Less/Equal/Greater) or None if incomparable.\n"
-        "  - Often delegates: `self.field.partial_cmp(&other.field)`."
-    ),
-    "Ord": (
-        "Ord::cmp(&self, other: &Self) -> Ordering\n"
-        "  - Total ordering: always returns Less/Equal/Greater.\n"
-        "  - Often delegates to inner field's .cmp()."
-    ),
-    "Clone": (
-        "Clone::clone(&self) -> Self\n"
-        "  - Construct a new value structurally identical to self.\n"
-        "  - Often: Self { field1: self.field1.clone(), ... }"
-    ),
-    "Default": (
-        "Default::default() -> Self\n"
-        "  - Construct a sensible empty/zero value.\n"
-        "  - Often: Self { field1: Default::default(), ... }"
-    ),
-    "From": (
-        "From<T>::from(value: T) -> Self\n"
-        "  - Convert from T into Self. Should be infallible.\n"
-        "  - Self::from(x) is also reachable via x.into()."
-    ),
-    "Into": "Into<T> is auto-implemented from From<U> — implement From instead.",
-    "Deref": (
-        "Deref::deref(&self) -> &Self::Target\n"
-        "  - Return a reference to the inner / wrapped value.\n"
-        "  - Often: &self.inner_field"
-    ),
-    "DerefMut": (
-        "DerefMut::deref_mut(&mut self) -> &mut Self::Target\n"
-        "  - Mutable counterpart of Deref. Often: &mut self.inner_field"
-    ),
-    "Drop": (
-        "Drop::drop(&mut self)\n"
-        "  - Cleanup when value goes out of scope.\n"
-        "  - Manually drop fields needing custom dispose; primitives auto-drop."
-    ),
-    "Iterator": (
-        "Iterator has `type Item;` and `fn next(&mut self) -> Option<Self::Item>`.\n"
-        "  - Return Some(item) until exhausted; then None forever after.\n"
-        "  - Other methods (map, filter, ...) are provided via defaults."
-    ),
-    "AsRef": (
-        "AsRef<T>::as_ref(&self) -> &T\n"
-        "  - Return a borrowed reference to T. Should be cheap (no allocation)."
-    ),
-    "AsMut": (
-        "AsMut<T>::as_mut(&mut self) -> &mut T\n"
-        "  - Mutable counterpart of AsRef."
-    ),
-    "FromStr": (
-        "FromStr::from_str(s: &str) -> Result<Self, Self::Err>\n"
-        "  - Parse Self from a string. Return Err on parse failure."
-    ),
-}
-
-
-def _extract_trait_from_container(container: str) -> str | None:
-    """Pull the trait name out of an `impl Trait for X` container string.
-    Returns None for inherent impls (no trait) or unsupported forms.
-    """
-    if not container:
-        return None
-    # Match: impl <Generics>? TraitPath::Tail for ...
-    m = re.match(r"\s*impl\s+(?:<[^>]*>\s+)?([A-Za-z_][\w:]*)(?:<[^>]*>)?\s+for\s+",
-                 container)
-    if not m:
-        return None
-    path = m.group(1)
-    # Take the last path segment as the trait name (e.g. "fmt::Display" → "Display").
-    return path.rsplit("::", 1)[-1]
-
-
-def _trait_contract_for(container: str) -> str:
-    """Return the standard contract text for the trait this fn implements,
-    or empty string if no matching contract is known. P5.3.
-    """
-    name = _extract_trait_from_container(container)
-    if not name:
-        return ""
-    return _TRAIT_CONTRACTS.get(name, "")
 
 
 _NOTE_HASH_CACHE: dict[Path, set[str]] = {}
@@ -6540,605 +6453,6 @@ def _extract_self_note(
     return candidate[:300]
 
 
-# Six Rust confusion classes seen recurrently in overnight runs (P3.2).
-# Each has a one-line summary (always shown in the prompt) and a fuller
-# detail block (injected only when the current cargo error trips the
-# gotcha's trigger keyword/code, via _gotchas_for_error).
-_RUST_GOTCHAS: list[dict] = [
-    {
-        # FR-040: the vtable / shared-machinery class. You fill fn BODIES only —
-        # you cannot introduce a new top-level item — so a referenced-but-
-        # undefined module-level symbol can never resolve. Build it inline.
-        "id": "undefined_symbol_build_inline",
-        "summary": "`cannot find value/function X` → X is undefined and you CANNOT add a new top-level item. Build what you need INLINE from in-scope items; never reference an undefined module-level const/static/helper.",
-        "triggers": {"E0425", "E0433", "cannot find value", "cannot find function", "in this scope"},
-        "detail": (
-            "You are filling a fn BODY. You may NOT add new top-level items\n"
-            "(no new `static`, `const`, free fn, or `use`), so referencing a\n"
-            "module-level symbol that doesn't already exist can never compile.\n"
-            "  WRONG (invents an external constant that nothing defines):\n"
-            "    unsafe { Self::construct(value, &ADHOC_VTABLE, backtrace) }   // E0425\n"
-            "  RIGHT (construct the value you need INLINE, from in-scope items):\n"
-            "    let vtable = &SomeInScopeType { /* fields from items shown to you */ };\n"
-            "    unsafe { Self::construct(value, vtable, backtrace) }\n"
-            "Use ONLY names shown in TYPES_IN_SCOPE / the impl + its siblings. If\n"
-            "several fns need the same value, build it the SAME way in each (do\n"
-            "not invent a shared external name — there is no place to define it).\n"
-            "Do not guess a path like `core::alloc::Global`; if an allocator or\n"
-            "helper isn't in scope, use one that is (e.g. `Box`)."
-        ),
-    },
-    {
-        # Archetype map (concrete generic examples; NOT crate source). Built
-        # from the dominant fix-loop errors. Each shows WRONG → RIGHT so the
-        # model learns the transformation, not an abstract rule.
-        "id": "missing_trait_bound",
-        "summary": "`T doesn't implement Display/Debug/...` → the generic has NO such bound (that's the spec). Do NOT add it; don't call that trait on T.",
-        "triggers": {"E0277", "doesn't implement", "is not satisfied", "the trait bound"},
-        "detail": (
-            "`T doesn't implement Display` (or Debug/PartialEq/...) means the generic\n"
-            "carries no such bound. Unlike `T: Sized`, this bound is the CALLER's\n"
-            "contract — you may NOT add it.\n"
-            "  WRONG (assumes T: Display):\n"
-            "    fn label<T>(x: T) -> String { format!(\"{}\", x) }   // E0277\n"
-            "  RIGHT only if the REAL signature already declares it:\n"
-            "    fn label<T: Display>(x: T) -> String { format!(\"{}\", x) }\n"
-            "  If the signature does NOT grant Display, the body must not format T at\n"
-            "  all — the function was never meant to. Build/return the value another\n"
-            "  way using only the traits the bounds already provide."
-        ),
-    },
-    {
-        "id": "unsafe_call_block",
-        "summary": "Calling an unsafe fn needs `unsafe { ... }` — unless the enclosing fn is itself `unsafe fn` (then the body is already an unsafe context).",
-        "triggers": {"E0133", "call to unsafe", "requires unsafe", "unsafe function or block"},
-        "detail": (
-            "  WRONG (safe fn calls an unsafe fn bare):\n"
-            "    fn first(p: *const u8) -> u8 { core::ptr::read(p) }   // E0133\n"
-            "  RIGHT (wrap the unsafe call):\n"
-            "    fn first(p: *const u8) -> u8 { unsafe { core::ptr::read(p) } }\n"
-            "  If the signature is `unsafe fn first(...)`, the WHOLE body is already\n"
-            "  unsafe — do NOT add a redundant inner `unsafe {}`. Rule: bare unsafe\n"
-            "  call only inside an `unsafe fn`; otherwise wrap each call in `unsafe {}`."
-        ),
-    },
-    {
-        "id": "name_not_in_scope",
-        "summary": "`cannot find X in scope` → X is not a real name here. Use ONLY items shown in TYPES_IN_SCOPE; never invent a helper or constructor.",
-        "triggers": {"E0425", "E0433", "cannot find", "not found in this scope"},
-        "detail": (
-            "The body used a name that doesn't exist.\n"
-            "  WRONG (invented constructor):\n"
-            "    let w = Wrapper::from_raw(p);   // E0425 — no such fn\n"
-            "  RIGHT — only use the real fields/methods TYPES_IN_SCOPE lists:\n"
-            "    let w = Wrapper { ptr: p };\n"
-            "Never guess function or type names. If you can't build the value from the\n"
-            "items in scope, you're constructing it the wrong way — re-read the type's\n"
-            "actual fields and methods."
-        ),
-    },
-    {
-        "id": "typeid_static",
-        "summary": "TypeId::of::<T>() requires T: 'static. If T is generic without that bound and the signature is locked, you cannot use TypeId::of in the body.",
-        "triggers": {"E0310", "E0311", "typeid"},
-        "detail": (
-            "If T is a generic parameter without a 'static bound, TypeId::of::<T>() "
-            "will not compile. You can NOT just add the bound when the signature is "
-            "locked — you need a different approach: pattern-match on a runtime "
-            "TypeId stored elsewhere (e.g. a vtable field), or use the surrounding "
-            "context to get the comparison value without invoking TypeId::of."
-        ),
-    },
-    {
-        "id": "dyn_parens",
-        "summary": "&dyn Trait + Bounds needs parentheses → &(dyn Trait + Bounds). Same for *const, Box, etc.",
-        "triggers": {"ambiguous", "&dyn", "dyn"},
-        "detail": (
-            "Rust parses `&dyn Trait + Bound` as `(&dyn Trait) + Bound` which is "
-            "an arithmetic + on a type. Always wrap the dyn portion in parens: "
-            "`&(dyn Trait + Bound)`, `*const (dyn Trait + Send)`, "
-            "`Box<dyn Trait + Send + Sync>` (Box's generics already do the parens)."
-        ),
-    },
-    {
-        "id": "unsized_value",
-        "summary": "Trait objects (&dyn X, *const dyn X) are unsized. Cannot store by value; format with {:?} not {}.",
-        "triggers": {"E0277", "doesn't have a size known at compile-time", "unsized", "display"},
-        "detail": (
-            "Sized requirement: trait objects don't have known sizes, so they can "
-            "only live behind a pointer (&, Box, Rc, etc.). `let x: dyn Trait = ...` "
-            "fails. Also, &dyn Debug does NOT implement Display — use {:?} for "
-            "trait objects, not {}."
-        ),
-    },
-    {
-        "id": "wrapper_field",
-        "summary": "Wrapper struct (Own<T>, Ref<T>): if wrapper.method() fails, try wrapper.field.method() or wrapper.as_ptr().method().",
-        "triggers": {"E0599", "no method"},
-        "detail": (
-            "Many wrapper types in anyhow (Own<T>, Ref<T>) don't auto-delegate "
-            "methods to their inner pointer. If `wrapper.foo()` reports "
-            "'no method foo', access the inner field directly: "
-            "`wrapper.inner.foo()`, `wrapper.as_ptr()`, or "
-            "`unsafe { (*wrapper.as_ptr()).foo() }`."
-        ),
-    },
-    {
-        "id": "generic_field",
-        "summary": "Generic params have no fields. `(*this).field` where this: *const E (E generic) is rejected; cast to a concrete type first.",
-        "triggers": {"E0609", "unknown field"},
-        "detail": (
-            "Rust does not know the layout of an unbounded generic parameter, so "
-            "field access is rejected. If you have `*const E` and you know the "
-            "concrete wrapping struct is `ErrorImpl<E>`, cast first: "
-            "`let p = ptr as *const ErrorImpl<E>; (*p).known_field`."
-        ),
-    },
-    {
-        "id": "nonnull_ref",
-        "summary": "NonNull<T> doesn't auto-deref. Get a reference via unsafe { ptr.as_ref() }. Construct via NonNull::from(&val) or NonNull::new_unchecked(raw).",
-        "triggers": {"E0308", "NonNull", "expected `&", "mismatched types"},
-        "detail": (
-            "NonNull<T> is a raw pointer wrapper, not Deref. Conversion table:\n"
-            "  NonNull<T> → &T          : `unsafe { ptr.as_ref() }`\n"
-            "  NonNull<T> → *mut T      : `ptr.as_ptr()`\n"
-            "  &T → NonNull<T>          : `NonNull::from(&val)`\n"
-            "  *mut T → NonNull<T>      : `unsafe { NonNull::new_unchecked(raw) }`\n"
-            "Don't pass NonNull where &T is expected. Don't call constructors\n"
-            "like `Ref::new(non_null_value)` — read the constructor's signature\n"
-            "from TYPES_IN_SCOPE first."
-        ),
-    },
-    {
-        "id": "fn_ptr_field",
-        "summary": "Function-pointer FIELDS need parens to call: (s.callback)(args), NOT s.callback(args). Method-style fails because the field isn't a method.",
-        "triggers": {"E0599", "no method", "is not a method", "is a field", "callback", "vtable"},
-        "detail": (
-            "When a struct field holds a function pointer (e.g. `fn(X) -> Y`),\n"
-            "you cannot invoke it with method syntax. Wrap the field access in\n"
-            "parens before the call:\n"
-            "  WRONG: vtable.object_downcast(this, target)\n"
-            "  RIGHT: (vtable.object_downcast)(this, target)\n"
-            "This is the standard Rust idiom for vtable dispatch. anyhow's\n"
-            "`ErrorVTable` exposes its dispatch fns as fields, not methods."
-        ),
-    },
-    {
-        "id": "match_move_borrow",
-        "summary": "`match self.field { ... }` moves the field. To match without moving use `match &self.field { ... }`, `match self { Foo { ref field, .. } => ... }`, or destructure with `ref`.",
-        "triggers": {"E0507", "cannot move out", "moved here", "behind a shared reference"},
-        "detail": (
-            "Pattern matching against `self.field` consumes (moves) the field.\n"
-            "When you only have `&self`, this fails with E0507. Three fixes:\n"
-            "  1. Borrow the scrutinee: `match &self.field { Foo { x } => ... }`.\n"
-            "     The bindings will be `&T` references.\n"
-            "  2. Use `ref`: `match self { Foo { ref field } => ... }`.\n"
-            "  3. Re-borrow inside arms: `Buffered { rest } => rest.iter().len()`\n"
-            "     instead of `rest.len()` if `rest` itself is owned-by-binding.\n"
-            "Pick (1) for most cases — least invasive."
-        ),
-    },
-    {
-        # Two `impl AsRef<T1> for X` and `impl AsRef<T2> for X` blocks must
-        # remain SEPARATE. Collapsing them into one impl produces E0201
-        # (duplicate method) — Rust has no overloading.
-        "id": "split_trait_impl",
-        "summary": "Two `impl Trait<A> for X` and `impl Trait<B> for X` blocks must stay SEPARATE — never merge into one impl block. Rust has no method overloading; same-named methods in one impl is E0201.",
-        "triggers": {"E0201", "duplicate definitions", "duplicate definition"},
-        "detail": (
-            "If rustc reports `duplicate definitions with name`, the two same-named\n"
-            "methods belong in TWO distinct trait impls, each with its own header:\n"
-            "  WRONG:\n"
-            "    impl AsRef<dyn StdError + Send + Sync> for Error {\n"
-            "        fn as_ref(&self) -> &(dyn StdError + Send + Sync + 'static) { ... }\n"
-            "        fn as_ref(&self) -> &(dyn StdError + 'static) { ... }  // E0201\n"
-            "    }\n"
-            "  RIGHT:\n"
-            "    impl AsRef<dyn StdError + Send + Sync> for Error {\n"
-            "        fn as_ref(&self) -> &(dyn StdError + Send + Sync + 'static) { ... }\n"
-            "    }\n"
-            "    impl AsRef<dyn StdError> for Error {\n"
-            "        fn as_ref(&self) -> &(dyn StdError + 'static) { ... }\n"
-            "    }\n"
-            "Cross-check against FR / SIBLING_REFERENCE for the exact list of\n"
-            "trait headers — never invent overloads under one header."
-        ),
-    },
-    {
-        # The trait header's generic parameter IS the return type — they must
-        # match character-for-character including Send/Sync/'static bounds.
-        "id": "trait_header_signature",
-        "summary": "For `impl AsRef<T> for X`, the fn return type must match `T` exactly — including `+ Send + Sync + 'static` bounds. Mismatch is E0053.",
-        "triggers": {"E0053", "incompatible type for trait", "expected signature"},
-        "detail": (
-            "E0053 means the impl's fn signature does not match the trait's\n"
-            "expected signature. Read the rustc note carefully:\n"
-            "  = note: expected signature `fn(&Error) -> &(dyn ... + Send + Sync + 'static)`\n"
-            "                  found signature `fn(&Error) -> &(dyn ... + 'static)`\n"
-            "The fix: align the fn's return type with what the trait header demands.\n"
-            "Common case: `impl AsRef<dyn Trait + Send + Sync> for X` requires the\n"
-            "fn to return `&(dyn Trait + Send + Sync + 'static)`, NOT `&(dyn Trait + 'static)`.\n"
-            "Before writing, copy the trait header's generic parameter verbatim into\n"
-            "the fn return position."
-        ),
-    },
-    {
-        # A fn returning T by value cannot inherit T: ?Sized from its impl
-        # block — by-value return requires a known size at compile time.
-        "id": "unsized_by_value_return",
-        "summary": "A fn returning `T` by value cannot inherit `T: ?Sized` from its enclosing impl. Either add `where T: Sized` to that fn, or change return to `&T`/`Box<T>`/`*const T`.",
-        "triggers": {"E0277", "doesn't have a size known at compile-time", "?Sized", "statically known size"},
-        "detail": (
-            "When an `impl<T> X<T> where T: ?Sized` contains a fn whose return\n"
-            "type is bare `T` (by value), rustc rejects it: the return slot needs\n"
-            "a known size at compile time.\n"
-            "  WRONG:\n"
-            "    impl<'a, T> Mut<'a, T> where T: ?Sized {\n"
-            "        pub unsafe fn read(self) -> T { ... }  // E0277\n"
-            "    }\n"
-            "  RIGHT (tighten just this fn):\n"
-            "    impl<'a, T> Mut<'a, T> where T: ?Sized {\n"
-            "        pub unsafe fn read(self) -> T where T: Sized { ... }\n"
-            "    }\n"
-            "Or change the return type to a pointer/reference (`&T`, `*const T`,\n"
-            "`Box<T>`) if the API genuinely supports unsized values. Removing the\n"
-            "`?Sized` bound from the impl block is usually wrong — other fns rely on it."
-        ),
-    },
-    {
-        # Rule C: when a target API takes M: Display, pass the value
-        # directly — do NOT format!() to a string first. format!() needs
-        # an allocator (std or alloc::format) and may not be in scope,
-        # particularly in no_std clusters.
-        "id": "display_passthrough",
-        "summary": "If a target API takes `M: Display`, pass the Display value DIRECTLY. Don't `format!(\"{}\", x)` first — `format!` needs an allocator and is often out of scope. `Error::msg(value)` works when `value: impl Display`.",
-        "triggers": {"format", "cannot find macro", "not found in scope"},
-        "detail": (
-            "Many anyhow APIs accept any Display value:\n"
-            "  pub fn Error::msg<M: Display + Debug + Send + Sync + 'static>(message: M)\n"
-            "Pass the Display value straight through. Don't materialise it\n"
-            "to a String first.\n"
-            "  WRONG: Error::msg(format!(\"{}\", context))   // needs alloc::format\n"
-            "  RIGHT: Error::msg(context)                    // context: impl Display\n"
-            "Only fall back to `format!` when concatenating multiple values —\n"
-            "and even then prefer `core::fmt::Write` on a buffer."
-        ),
-    },
-]
-
-
-def _gotchas_summary() -> str:
-    """Compact one-line-per-gotcha cheatsheet (always shown)."""
-    return "\n".join(f"- {g['summary']}" for g in _RUST_GOTCHAS)
-
-
-def _gotchas_for_error(error_excerpt: str) -> str:
-    """Full detail blocks for whichever gotchas the current error triggers.
-
-    Selective injection: empty string when no trigger matches. Keeps the
-    prompt small for unrelated errors and adds detailed guidance only when
-    the model is actually fighting one of these confusion classes.
-    """
-    if not error_excerpt:
-        return ""
-    low = error_excerpt.lower()
-    matched: list[dict] = []
-    for g in _RUST_GOTCHAS:
-        for trig in g["triggers"]:
-            if trig.lower() in low:
-                matched.append(g)
-                break
-    if not matched:
-        return ""
-    parts = []
-    for g in matched:
-        parts.append(f"## {g['summary']}\n{g['detail']}")
-    return "\n\n".join(parts)
-
-
-def _tag_block(tag: str, content: str, *, prefix: str = "", suffix: str = "") -> str:
-    """Render one optional prompt section:
-    `\\n<TAG>\\n{prefix}{content}{suffix}\\n</TAG>\\n`, or "" when content is
-    empty. Slice 8a: the one wrapper for every optional section — previously
-    re-implemented inline per builder, which is how builders drifted apart
-    (a section added to one but not the others)."""
-    if not content:
-        return ""
-    return f"\n<{tag}>\n{prefix}{content}{suffix}\n</{tag}>\n"
-
-
-def _format_impl_block_for_prompt(
-    block: dict,
-    mark_target: bool = True,
-) -> str:
-    """Render an impl block in TARGET form: the impl header followed by every
-    member's signature + a one-line body status. Stub members are tagged
-    [STUB] so the model knows which to fill; already-filled members carry a
-    shortened body preview so the model can mirror their structural shape
-    when designing the new ones.
-
-    `block` is a record produced by `_collect_impl_blocks`.
-    """
-    container = block.get("container", "")
-    lines: list[str] = []
-    if container:
-        # Trim the {fns…} body from the container header — we render each fn
-        # explicitly below. The extractor's container string captures the
-        # entire impl header up to the opening brace; some variants tack on
-        # the first fn signature. Cut at the first newline or `{` to keep
-        # just the header.
-        header = container
-        brace_pos = header.find("{")
-        if brace_pos != -1:
-            header = header[:brace_pos].rstrip()
-        lines.append(f"{header} {{")
-    else:
-        lines.append("// free fns at file level")
-    for m in block.get("members", []):
-        sig = (m.get("sig_text") or "").strip()
-        is_stub = bool(m.get("has_unimplemented_body"))
-        if is_stub:
-            tag = " // [STUB] — fill in this response" if mark_target else " // [STUB]"
-            lines.append(f"    {sig} {tag}")
-        else:
-            body = (m.get("body_text") or "").strip()
-            preview = body
-            if len(preview) > 200:
-                preview = preview[:200].rsplit("\n", 1)[0] + " /* ... */"
-            preview = preview.replace("\n", "\n    ")
-            lines.append(f"    {sig} {{ /* FILLED */ {preview} }}")
-    if container:
-        lines.append("}")
-    return "\n".join(lines)
-
-
-def _build_per_impl_prompt(
-    block: dict,
-    related_blocks: "list[dict]",
-    test_blocks: list[tuple[str, str]],
-    module_name: str,
-    cluster_name: str,
-    types_section: str = "",
-    invariants_section: str = "",
-    notes_section: str = "",
-    fr_path: "Path | None" = None,
-    retrospective_guidance: str = "",
-    crate_idioms_section: str = "",
-    dispatch_family_section: str = "",
-    macros_section: str = "",
-    siblings_section: str = "",
-) -> str:
-    """Per-impl-block prompt — fills every stub fn in `block` and (when
-    `related_blocks` is non-empty) jointly designs sibling impls of the
-    same trait so the model can see all trait-header variants at once.
-
-    `block` is a record from `_collect_impl_blocks`. `related_blocks` are
-    other impl blocks in the same file whose trait name matches (used to
-    surface the `impl AsRef<T1>` + `impl AsRef<T2>` case that per-fn
-    prompts cannot show together).
-    """
-    file_rel = block.get("file", "")
-    container = block.get("container", "")
-    stub_members = block.get("stub_members", [])
-    target_render = _format_impl_block_for_prompt(block, mark_target=True)
-    related_renders = []
-    for rb in related_blocks:
-        related_renders.append(
-            _format_impl_block_for_prompt(rb, mark_target=False))
-    related_section = ""
-    if related_renders:
-        related_section = (
-            "\n<RELATED_IMPL_BLOCKS>\nThese impl blocks live in the SAME "
-            "file as TARGET and implement the same trait name with "
-            "DIFFERENT generic parameters. They MUST stay in separate impl "
-            "blocks (Rust has no overloading). Design every fn together so "
-            "each impl's body matches its trait header's expected return / "
-            "argument types verbatim.\n```rust\n"
-            + "\n\n".join(related_renders)
-            + "\n```\n</RELATED_IMPL_BLOCKS>\n"
-        )
-
-    tests_section = ""
-    if test_blocks:
-        parts = []
-        for path, txt in test_blocks:
-            parts.append(f'<TEST path="{path}">\n{txt}\n</TEST>')
-        tests_section = "\n\n".join(parts)
-    else:
-        tests_section = ("(no tests directly reference fns in this block "
-                         "— they may be invoked indirectly via macros "
-                         "(consult MACROS below) or sibling fns)")
-
-    notes_block = _tag_block("MODEL_NOTES", notes_section)
-    macros_block = _tag_block("MACROS", macros_section)
-    # FR-024 sibling reference (per-impl variant): already-filled fns
-    # elsewhere in this file sharing a stub member's name.
-    siblings_block = _tag_block(
-        "SIBLING_REFERENCE", siblings_section,
-        prefix="Already-filled fns in OTHER impl blocks of this file with "
-               "the same name as a TARGET stub — follow the same "
-               "structural pattern:\n```rust\n",
-        suffix="\n```")
-    types_block = _tag_block("TYPES_IN_SCOPE", types_section)
-    invariants_block = _tag_block("CLUSTER_INVARIANTS", invariants_section)
-    trait_block = _tag_block("TRAIT_CONTRACT", _trait_contract_for(container))
-    recurring_block = _tag_block("RECURRING_ERRORS", _promoted_error_rules(fr_path))
-    retro_block = _tag_block(
-        "RETROSPECTIVE_GUIDANCE", retrospective_guidance,
-        prefix="The previous attempt at this impl block did not reduce the "
-               "error count. Apply this strategy differently this time:\n")
-    # Crate idioms — patterns extracted from already-filled fns in THIS
-    # file. Surfaces e.g. anyhow's `Self::construct_from_*(arg, None)`
-    # constructor family, its `ContextError { context, error }` wrapper,
-    # its vtable fn-pointer dispatch syntax. Generic detectors (no
-    # per-crate knowledge); the content the model sees is specific
-    # because it's extracted from the live source.
-    idioms_block = _tag_block(
-        "CRATE_IDIOMS", crate_idioms_section,
-        prefix="Patterns this file already uses — design new fns to MATCH "
-               "these idioms whenever your fn's situation matches one of "
-               "them. Do NOT invent a new approach when one of these "
-               "patterns clearly applies.\n")
-
-    # Output protocol example.
-    output_example: list[str] = []
-    for m in stub_members[:2]:  # show up to 2 worked examples in the
-                                # output format
-        output_example.append(
-            f'<FN name="{m["fn_name"]}" block="{container}">\n'
-            "  // body (no outer braces, no signature)\n"
-            "</FN>"
-        )
-    output_example_str = "\n".join(output_example) if output_example else (
-        '<FN name="..." block="...">\nbody\n</FN>')
-
-    stub_names = ", ".join(m["fn_name"] for m in stub_members)
-    return f"""Implement the marked [STUB] fns in this Rust impl block so the
-tests pass. The unit of work is the IMPL BLOCK — design every member
-together; each fn must respect the impl header's generic parameters,
-where-clauses, and trait header. A fn may add a TIGHTER where-clause if
-its body needs it (e.g. `where T: Sized` on a fn returning `T` by value
-when the impl block declares `T: ?Sized`).
-
-Crate: {module_name} | Cluster: {cluster_name} | File: {file_rel}
-Stubs to fill in this response: {stub_names}
-
-<RUST_GOTCHAS>
-{_gotchas_summary()}
-</RUST_GOTCHAS>
-{retro_block}{siblings_block}{trait_block}{types_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{dispatch_family_section}{related_section}
-<TARGET_IMPL_BLOCK file="{file_rel}">
-```rust
-{target_render}
-```
-</TARGET_IMPL_BLOCK>
-{macros_block}
-Tests (read-only):
-{tests_section}
-
-Output protocol — emit ONE `<FN>` block per stub. Match `block` to the
-TARGET impl header verbatim so the splicer can route each body to the
-correct impl. Multiple `<FN>` blocks per response are required when the
-TARGET (or any RELATED impl) has multiple stubs you are filling.
-
-Each `<FN>` body may optionally start with a `where` clause on its own
-line to TIGHTEN the impl-level bounds for that fn alone — useful when a
-fn returns T by value in an `impl<T: ?Sized>` block.
-
-Format:
-{output_example_str}
-
-Rules:
-- Body only — no fn signature, no outer braces around the body.
-- Use fully-qualified paths (`std::fmt::Write`, `crate::Error`) for
-  symbols not in this file's `use` block.
-- No `unimplemented!()` / `todo!()` / panic-only bodies. Omit an `<FN>`
-  block if you cannot implement that fn; a later pass retries.
-- Each fn you emit MUST appear in the TARGET (or a RELATED) block above.
-  Emitting an `<FN>` for a fn name not in the block is rejected.
-"""
-
-
-def _build_per_fn_prompt(
-    file_text: str,
-    fn_name: str,
-    sig_text: str,
-    test_blocks: list[tuple[str, str]],
-    module_name: str,
-    cluster_name: str,
-    file_rel: str,
-    macros_section: str = "",
-    notes_section: str = "",
-    container: str = "",
-    types_section: str = "",
-    fr_path: "Path | None" = None,
-    invariants_section: str = "",
-    siblings_section: str = "",
-    crate_idioms_section: str = "",
-) -> str:
-    """Small focused prompt for one fn fill. No crate-wide signature index,
-    no full FR, no genesis — only what the model needs to implement THIS fn.
-    """
-    tests_section = ""
-    if test_blocks:
-        parts = []
-        for path, txt in test_blocks:
-            parts.append(f'<TEST path="{path}">\n{txt}\n</TEST>')
-        tests_section = "\n\n".join(parts)
-    else:
-        tests_section = ("(no tests directly reference this fn — it may be "
-                         "invoked indirectly via a macro; consult MACROS below)")
-    annotated = _annotate_file_view(file_text, fn_name)
-    notes_block = _tag_block("MODEL_NOTES", notes_section)
-    macros_block = _tag_block("MACROS", macros_section)
-    # P5.1: type definitions for types the fn touches. The model often
-    # confuses Own/Ref/ErrorImpl fields with methods (writes self.ptr.as_ref
-    # instead of self.ptr.as_ref()); listing each type's actual fields and
-    # methods makes this unambiguous.
-    types_block = _tag_block("TYPES_IN_SCOPE", types_section)
-    # Cluster-aware macro invariants: which arm of each cfg-gated macro
-    # is active for THIS cluster. Without this the model defends against
-    # cases that can't occur (e.g. `unwrap_or(&default)` when the active
-    # macro always returns Some).
-    invariants_block = _tag_block("CLUSTER_INVARIANTS", invariants_section)
-    # FR-024 sibling reference (initial-prompt variant).
-    siblings_block = _tag_block(
-        "SIBLING_REFERENCE", siblings_section,
-        prefix=f"Fns with the same name `{fn_name}` in OTHER impl blocks of "
-               "this file (already filled — your TARGET should follow the "
-               "same structural pattern):\n```rust\n",
-        suffix="\n```")
-    # P5.3: when impl-ing a known stdlib trait, inject its contract.
-    trait_block = _tag_block("TRAIT_CONTRACT", _trait_contract_for(container))
-    # Crate idioms — recurring patterns mined from already-filled fns in
-    # THIS file (same section the per-impl prompt carries).
-    idioms_block = _tag_block(
-        "CRATE_IDIOMS", crate_idioms_section,
-        prefix="Patterns this file already uses — design your fn to MATCH "
-               "these idioms whenever its situation matches one of them. Do "
-               "NOT invent a new approach when one clearly applies.\n")
-    # P5.5: promoted recurring errors (E0xxx codes seen 3+ times this run).
-    # P6.4: pass fr_path so past notes tagged with active codes get surfaced.
-    recurring_block = _tag_block("RECURRING_ERRORS", _promoted_error_rules(fr_path))
-    container_line = f"In: {container}\n" if container else ""
-    return f"""Implement ONE Rust function so its tests pass.
-
-Crate: {module_name} | Cluster: {cluster_name} | File: {file_rel} | Fn: {fn_name}
-{container_line}Signature (verbatim, do not change):
-{sig_text}
-
-<RUST_GOTCHAS>
-{_gotchas_summary()}
-</RUST_GOTCHAS>
-{siblings_block}{trait_block}{types_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}
-FILE — stubs are annotated. SKELETON STUB = will be filled later (rely on
-the signature). TARGET = implement now.
-
-<FILE path="{file_rel}">
-{annotated}
-</FILE>
-{macros_block}
-Tests (read-only):
-
-{tests_section}
-
-Output:
-  <BODY>
-  body without surrounding braces
-  </BODY>
-
-Rules:
-- Body only — no sig, no markdown, no use statements inside body.
-- Use fully-qualified paths (std::fmt::Write, crate::Error) for symbols
-  not in this file's `use` block.
-- No unimplemented!()/todo!()/panic-only bodies. Omit <BODY> if you can't
-  implement; a later pass retries.
-- SKELETON STUB fns are part of the CONTRACT. If a SKELETON STUB fn's
-  signature matches what you need, CALL it — that is the intended path,
-  not a hint you should reinvent. The pipeline will fill the stub
-  separately. Reinventing what a sibling stub already promises is the
-  most common cause of fix-loop divergence.
-"""
 
 
 # P5.5: track Exxxx error codes seen across the current run. When a code
@@ -7283,6 +6597,22 @@ def _promoted_error_rules(fr_path: "Path | None" = None) -> str:
         return ""
     return ("These errors keep recurring in this run; address them proactively:\n"
             + "\n".join(promoted))
+
+
+# Slice 8: the prompt builders moved to pipeline_core/prompts/ (pure
+# text→text). Their two impure collaborators stay here — the regex-based
+# file-view annotator and the run-state promoted-error rules — and are wired
+# into the prompts runtime facade once at import time.
+_prompts_runtime.configure(
+    annotate_file_view=_annotate_file_view,
+    promoted_error_rules=_promoted_error_rules,
+)
+
+
+def _build_dispatch_family_section(family: DispatchFamily) -> str:
+    """Shim: render via pipeline_core.prompts with the Settings-derived cap."""
+    return _build_dispatch_family_section_pure(
+        family, single_call_char_limit=SINGLE_CALL_CHAR_LIMIT)
 
 
 _GRACEFUL_SENTINEL_PATH = Path("/tmp/pipeline_graceful_stop")
@@ -8019,160 +7349,6 @@ def _focus_cargo_errors(output: str, file_rel: str, max_chars: int = _FIX_ERR_CA
     return "\n".join(parts)[:max_chars]
 
 
-def _build_per_fn_fix_prompt(
-    file_text: str,
-    fn_name: str,
-    sig_text: str,
-    test_blocks: list[tuple[str, str]],
-    module_name: str,
-    cluster_name: str,
-    file_rel: str,
-    prev_body: str,
-    error_excerpt: str,
-    macros_section: str = "",
-    notes_section: str = "",
-    container: str = "",
-    types_section: str = "",
-    allow_sig_change: bool = False,
-    fr_path: "Path | None" = None,
-    attempt_history: "list[dict] | None" = None,
-    invariants_section: str = "",
-    retrospective_guidance: str = "",
-    siblings_section: str = "",
-    crate_idioms_section: str = "",
-) -> str:
-    """Re-prompt for a fn whose previous fill broke `cargo check`.
-
-    When `allow_sig_change` is True (P3.1, fired by the per-fn loop after
-    attempt 5), the prompt invites the model to optionally return a
-    <SIGNATURE>...</SIGNATURE> block proposing a new sig (e.g. adding a
-    `T: 'static` bound). The loop applies it only when the fn is non-pub.
-
-    P2: `attempt_history` is a list of dicts (oldest first), each of:
-        {"attempt": int, "body": str, "error_sig": str, "outcome": str}
-    Rendered as a <PRIOR_ATTEMPTS> block so the model sees what it has
-    already tried (and what failed) rather than re-deriving from scratch.
-    """
-    tests_section = ""
-    if test_blocks:
-        parts = [f'<TEST path="{p}">\n{t}\n</TEST>' for p, t in test_blocks]
-        tests_section = "\n\n".join(parts)
-    else:
-        tests_section = "(no tests directly reference this fn — see MACROS)"
-    annotated = _annotate_file_view(file_text, fn_name)
-    notes_block = _tag_block("MODEL_NOTES", notes_section)
-    macros_block = _tag_block("MACROS", macros_section)
-    # P3.2: full detail block for gotchas matching the current error.
-    gotchas_block = _tag_block("RUST_GOTCHAS_DETAIL", _gotchas_for_error(error_excerpt))
-    container_line = f"In: {container}\n" if container else ""
-    types_block = _tag_block("TYPES_IN_SCOPE", types_section)
-    invariants_block = _tag_block("CLUSTER_INVARIANTS", invariants_section)
-    # FR-024 retrospective guidance: surfaced FIRST in the prompt when
-    # available — the prior diagnosis is the highest-signal hint.
-    retro_block = _tag_block(
-        "RETROSPECTIVE_GUIDANCE", retrospective_guidance,
-        prefix="Prior diagnosis of this fn's compile failures (act on this "
-               "— do NOT repeat the previous approach):\n")
-    # FR-024 sibling reference: when the same fn name has a sibling impl
-    # already filled correctly in this file, hoist it to the top of the
-    # prompt. Best source-of-truth for "what does a body for this fn look
-    # like" — pattern-matching beats reasoning from scratch.
-    siblings_block = _tag_block(
-        "SIBLING_REFERENCE", siblings_section,
-        prefix=f"Fns with the same name `{fn_name}` in OTHER impl blocks of "
-               "this file (already filled — your TARGET should follow the "
-               "same structural pattern):\n```rust\n",
-        suffix="\n```")
-    trait_block = _tag_block("TRAIT_CONTRACT", _trait_contract_for(container))
-    # Crate idioms — same section the per-impl / per-fn initial prompts carry.
-    idioms_block = _tag_block(
-        "CRATE_IDIOMS", crate_idioms_section,
-        prefix="Patterns this file already uses — design your fn to MATCH "
-               "these idioms whenever its situation matches one of them. Do "
-               "NOT invent a new approach when one clearly applies.\n")
-    recurring_block = _tag_block("RECURRING_ERRORS", _promoted_error_rules(fr_path))
-    # P2: prior-attempts block. Show up to the last 3 distinct attempts
-    # with their compact error signature, so the model can see the search
-    # space it has already explored. Budget capped to keep prompt lean.
-    prior_block = ""
-    if attempt_history:
-        _PRIOR_MAX_ITEMS = 3
-        _PRIOR_BODY_CAP = 320
-        _PRIOR_ERR_CAP = 180
-        recent = attempt_history[-_PRIOR_MAX_ITEMS:]
-        rendered: list[str] = []
-        for h in recent:
-            body_excerpt = (h.get("body") or "").strip()
-            if len(body_excerpt) > _PRIOR_BODY_CAP:
-                body_excerpt = body_excerpt[:_PRIOR_BODY_CAP] + "..."
-            err_excerpt = (h.get("error_sig") or "").strip()
-            if len(err_excerpt) > _PRIOR_ERR_CAP:
-                err_excerpt = err_excerpt[:_PRIOR_ERR_CAP] + "..."
-            outcome = h.get("outcome", "fail")
-            attempt_n = h.get("attempt", "?")
-            rendered.append(
-                f"attempt {attempt_n} → {outcome}\n"
-                f"body:\n{body_excerpt}\n"
-                f"errors:\n{err_excerpt}"
-            )
-        if rendered:
-            prior_block = (
-                "\n<PRIOR_ATTEMPTS>\n"
-                "These bodies have already been tried for THIS fn and failed.\n"
-                "Do not repeat them — try a structurally different approach.\n\n"
-                + "\n---\n".join(rendered)
-                + "\n</PRIOR_ATTEMPTS>\n"
-            )
-    return f"""RE-implement ONE Rust function. Previous attempt broke cargo check.
-Diagnose the errors, return a corrected body. Don't repeat the previous body.
-
-Crate: {module_name} | Cluster: {cluster_name} | File: {file_rel} | Fn: {fn_name}
-{container_line}Signature (verbatim, do not change):
-{sig_text}
-
-<RUST_GOTCHAS>
-{_gotchas_summary()}
-</RUST_GOTCHAS>
-{retro_block}{siblings_block}{gotchas_block}{trait_block}{types_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{prior_block}
-FILE (previous attempt reverted; stubs annotated):
-<FILE path="{file_rel}">
-{annotated}
-</FILE>
-{macros_block}
-<PREVIOUS_BODY>
-{prev_body}
-</PREVIOUS_BODY>
-
-<COMPILE_ERRORS>
-{error_excerpt}
-</COMPILE_ERRORS>
-
-Tests:
-{tests_section}
-
-Output:
-  <BODY>
-  corrected body without surrounding braces
-  </BODY>
-{
-("\nIf the fix REQUIRES a signature change (e.g. adding `T: 'static`, "
- "tightening lifetimes, or relaxing a generic bound), AND the function is "
- "private (not pub), include a `<SIGNATURE>` block AFTER your `<BODY>`:\n"
- "  <SIGNATURE>\n"
- "  unsafe fn " + fn_name + "<E: 'static>(e: Own<ErrorImpl>, target: TypeId) {{\n"
- "  </SIGNATURE>\n"
- "The signature line must end at the opening brace `{{`. We will splice it "
- "in place of the current signature. This option is available only after "
- "multiple failed attempts; use it only when the body cannot be made to "
- "compile under the existing signature."
- if allow_sig_change else "")
-}
-Rules:
-- Body only — no sig in the BODY block.
-- Use fully-qualified paths for symbols not in the file's `use` block.
-- No unimplemented!()/todo!()/panic-only. Omit <BODY> if you cannot fix.
-{("- Public fns: signature MUST remain verbatim (tests depend on it).\n"
-  if allow_sig_change else "")}"""
 
 
 def _run_cargo(cmd: str, cwd: Path, env: dict, timeout: int = 180) -> tuple[int, str]:
@@ -11376,66 +10552,6 @@ def _cluster_filter_type_methods(
     return out
 
 
-def _format_type_for_prompt(rec: TypeRecord) -> str:
-    """Render a type record as a compact Rust-like definition for prompts.
-
-    P5.2 includes a field-vs-method annotation: each name is shown with `.x`
-    for fields and `.x()` for methods so the model doesn't confuse them.
-
-    P6.1: methods are shown with their FULL SIGNATURE so the model knows
-    exactly what each takes/returns. Without this it kept calling e.g.
-    `Ref::new(NonNull<T>)` when `Ref::new` actually takes `&T` — visible
-    method NAME but invisible argument types.
-    """
-    kind = rec.kind or "?"
-    name = rec.name or "?"
-    generics = rec.generics or ""
-    fields = rec.fields
-    variants = rec.variants
-    methods = rec.methods
-    lines = [f"{kind} {name}{generics}"]
-    if fields:
-        lines.append("  fields (access with .name):")
-        for f in fields:
-            pub = "pub " if f.is_pub else ""
-            lines.append(f"    {pub}{f.name}: {f.ty}")
-    if variants:
-        lines.append("  variants:")
-        for v in variants[:8]:
-            lines.append(f"    {v}")
-        if len(variants) > 8:
-            lines.append(f"    ... ({len(variants) - 8} more)")
-    if methods:
-        # Dedup by method name (same fn can appear in multiple impl blocks);
-        # keep the first sig we saw. Then render WITH SIGNATURE (P6.1).
-        seen: set[str] = set()
-        sigs: list[tuple[str, str, bool]] = []  # (name, sig, is_pub)
-        for m in methods:
-            mn = m.name
-            if mn and mn not in seen:
-                seen.add(mn)
-                sig = m.sig or ""
-                # Trim verbose where-clauses to fit the prompt; keep up to
-                # 120 chars of the sig (covers virtually all real fn sigs).
-                if len(sig) > 120:
-                    sig = sig[:117] + "..."
-                sigs.append((mn, sig.strip(), bool(m.is_pub)))
-        if sigs:
-            lines.append("  methods (sig shown; call with .name(args)):")
-            # Cap to top 10 methods to keep prompts compact for types with
-            # many. The first 10 are typically the most-used.
-            for mn, sig, is_pub in sigs[:10]:
-                vis = "pub " if is_pub else ""
-                if sig:
-                    lines.append(f"    {vis}{sig}")
-                else:
-                    lines.append(f"    {vis}fn {mn}(...)  // sig unknown")
-            if len(sigs) > 10:
-                rest = ", ".join(n for n, _, _ in sigs[10:])
-                if len(rest) > 200:
-                    rest = rest[:197] + "..."
-                lines.append(f"    // also: {rest}")
-    return "\n".join(lines)
 
 
 def _types_section_for_fix(
@@ -11669,57 +10785,6 @@ def _feature_gate_cfgs_via_extractor(src_dir: Path) -> list[str] | None:
     return ADAPTERS.extractor.enumerate_feature_gate_cfgs(src_dir)  # slice 5a: via adapter
 
 
-def _build_dispatch_family_section(family: DispatchFamily) -> str:
-    """Render the <DISPATCH_FAMILY> prompt block: the family's traits, the
-    dispatch method, and the dispatching macro_rules! source — the behavioural
-    spec the co-design fill must satisfy. Macro defs are capped so the section
-    can't dominate the budget."""
-    traits = ", ".join(family.traits)
-    method = family.method
-    macros = ", ".join(family.macros)
-    chained = ", ".join(family.chained_methods)
-    defs = list(family.macro_defs)
-    _cap = max(2000, SINGLE_CALL_CHAR_LIMIT // 8)
-    macro_text = "\n\n".join(defs)
-    if len(macro_text) > _cap:
-        macro_text = macro_text[:_cap] + "\n/* … macro truncated … */"
-    tag_list = family.return_types
-    trait_list = family.traits
-    # Concrete WRONG→RIGHT examples (generic placeholder names, NOT crate
-    # source) — the model acts on examples, not on "autoref-specialization"
-    # jargon. Two examples so the pattern generalises.
-    ex = (
-        "Each trait's `" + (method or "kind") + "` returns ITS OWN distinct tag; "
-        "the macro chains a builder on that tag. Get any one tag/return wrong and "
-        "the macro silently resolves to the wrong branch everywhere.\n"
-        "  WRONG (two impls return the SAME tag → dispatch collapses):\n"
-        "    impl KindA for A { fn kind(self) -> TagA { TagA } }\n"
-        "    impl KindB for B { fn kind(self) -> TagA { TagA } }   // should be TagB\n"
-        "  RIGHT (each returns its OWN tag; builders match per tag):\n"
-        "    impl KindA for A { fn kind(self) -> TagA { TagA } }\n"
-        "    impl KindB for B { fn kind(self) -> TagB { TagB } }\n"
-        "    impl TagA { fn build(self, x: A) -> Out { /* A-specific */ } }\n"
-        "    impl TagB { fn build(self, x: B) -> Out { /* B-specific */ } }\n"
-        "  WRONG (inventing one shared name across impls — there is no such item):\n"
-        "    fn kind(self) -> Tag { SHARED_TAG }                   // E0425, undefined\n"
-        "  RIGHT (return the per-impl tag value directly):\n"
-        "    fn kind(self) -> TagA { TagA }\n"
-    )
-    _map = ""
-    if trait_list and tag_list and len(trait_list) == len(tag_list):
-        _map = ("In THIS family map each trait to its own tag: "
-                + ", ".join(f"`{t}`→`{g}`" for t, g in zip(trait_list, tag_list, strict=False))
-                + (f", then `.{chained}(...)` builds the result on that tag. "
-                   if chained else ". "))
-    return (
-        "\n<DISPATCH_FAMILY>\n"
-        f"`{traits}` are dispatched together by macro(s) `{macros}` "
-        f"(`x.{method}()" + (f".{chained}()" if chained else "") + "...`) — fill "
-        "them in this one response, consistently.\n"
-        f"{ex}{_map}"
-        "The dispatching macro (the behaviour these must satisfy):\n```rust\n"
-        f"{macro_text}\n```\n</DISPATCH_FAMILY>\n"
-    )
 
 
 def _scan_unimplemented_records(src_dir: Path) -> list[dict] | None:
@@ -13703,100 +12768,17 @@ def _source_hash(project_dir: Path) -> str:
     return hashlib.sha256("".join(parts).encode()).hexdigest()[:16]
 
 
-def _state_path(project_dir: Path) -> Path:
-    return project_dir / PIPELINE_STATE_NAME
+# Slice 9: the pipeline_state.md store moved to pipeline_core/adapters/state.py
+# (regex-free line parser; same file format, locking, atomic replace). Aliases
+# keep every call site + the task-deps records unchanged.
+_state_path = _state_mod.state_path
+_read_state = _state_mod.read_state
+_write_state = _state_mod.write_state
+_mark_phase = _state_mod.mark_phase
+_set_current = _state_mod.set_current
+_phase_valid = _state_mod.phase_valid
+_log_state_summary = _state_mod.log_state_summary
 
-
-def _read_state(project_dir: Path) -> dict:
-    """Return {'phases': {key: {status, hash, detail}}, 'current': str}."""
-    import re as _re
-    state: dict = {"phases": {}, "current": ""}
-    p = _state_path(project_dir)
-    if not p.exists():
-        return state
-    for line in p.read_text().splitlines():
-        m = _re.match(r'\[([^\]]+)\]\s+(\S+)\s+hash=(\S+)\s*(.*)', line.strip())
-        if m:
-            state["phases"][m.group(1)] = {
-                "status": m.group(2),
-                "hash":   m.group(3),
-                "detail": m.group(4).strip(),
-            }
-        if line.startswith("current:"):
-            state["current"] = line[len("current:"):].strip()
-    return state
-
-
-def _write_state(project_dir: Path, state: dict) -> None:
-    """Atomic write: render to a sibling tempfile, fsync, then os.replace.
-    Guarantees readers never see a partially-written state file even if
-    the process is killed mid-write or another pipeline races us.
-    """
-    from datetime import datetime as _dt
-    lines = [
-        f"# pipeline_state — {project_dir.name}",
-        f"# {_dt.now().strftime('%Y-%m-%d %H:%M:%S')}",
-        "",
-    ]
-    for key, v in state["phases"].items():
-        status = v.get("status", "pending")
-        h      = v.get("hash", "-")
-        detail = v.get("detail", "")
-        lines.append(f"[{key}]  {status:<12}  hash={h}  {detail}")
-    lines.append("")
-    lines.append(f"current: {state.get('current', '')}")
-    body = "\n".join(lines) + "\n"
-    target = _state_path(project_dir)
-    tmp = target.with_suffix(target.suffix + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(body)
-        f.flush()
-        with suppress(OSError):
-            os.fsync(f.fileno())
-    os.replace(tmp, target)
-
-
-def _mark_phase(project_dir: Path, phase_key: str, status: str,
-                detail: str = "", source_hash: str | None = None) -> None:
-    """Update a single phase entry and rewrite the state file.
-
-    Holds an fcntl advisory lock on `{project_dir}/.pipeline_state.lock`
-    around the read-modify-write so concurrent pipeline processes can't
-    clobber each other's updates. The atomic os.replace in `_write_state`
-    is the second line of defence.
-    """
-    lock_path = project_dir / ".pipeline_state.lock"
-    try:
-        lock_path.touch(exist_ok=True)
-        import fcntl as _fcntl
-        with open(lock_path, "w") as _lf:
-            _fcntl.flock(_lf.fileno(), _fcntl.LOCK_EX)
-            state = _read_state(project_dir)
-            state["phases"][phase_key] = {
-                "status": status,
-                "hash":   source_hash or "-",
-                "detail": detail,
-            }
-            _write_state(project_dir, state)
-    except Exception:
-        # Lock unavailable (e.g. /tmp on read-only FS, exotic env). Fall
-        # back to unlocked write — preserves legacy behaviour and the
-        # atomic os.replace keeps the file consistent even without the
-        # cross-process lock.
-        state = _read_state(project_dir)
-        state["phases"][phase_key] = {
-            "status": status,
-            "hash":   source_hash or "-",
-            "detail": detail,
-        }
-        _write_state(project_dir, state)
-
-
-def _set_current(project_dir: Path, current: str) -> None:
-    """Update the 'current:' line without changing any phase entry."""
-    state = _read_state(project_dir)
-    state["current"] = current
-    _write_state(project_dir, state)
 
 
 def _commit_and_mark(
@@ -13835,44 +12817,6 @@ def _commit_and_mark(
     _mark_phase(project_dir, phase_key, status,
                 detail=detail, source_hash=source_hash)
 
-
-def _phase_valid(project_dir: Path, phase_key: str, current_hash: str | None = None) -> bool:
-    """Return True if phase is marked done in pipeline_state.md.
-
-    pipeline_state.md is the single source of truth for which phases are
-    complete. We do NOT compare against an input hash — test files can change
-    legitimately (task0c augments them, the user edits them) without
-    invalidating the structural artifacts task0a/0b produce. `current_hash` is
-    accepted as a backward-compat shim and ignored.
-    """
-    state = _read_state(project_dir)
-    p = state["phases"].get(phase_key, {})
-    return bool(p.get("status") == "done")
-
-
-def _log_state_summary(project_dir: Path, current_hash: str) -> None:
-    """Log the state file at startup so the user sees what's valid/stale."""
-    state = _read_state(project_dir)
-    if not state["phases"]:
-        _log("  Pipeline state: no state file found — fresh run.")
-        return
-    _log("  Pipeline state:")
-    for key, v in state["phases"].items():
-        h      = v.get("hash", "-")
-        status = v.get("status", "pending")
-        detail = v.get("detail", "")
-        if status == "done":
-            valid = "valid  " if h == current_hash else "STALE  "
-            symbol = "✓" if h == current_hash else "✗"
-        elif status == "in_progress":
-            valid = "resumed"
-            symbol = "~"
-        else:
-            valid = "pending"
-            symbol = " "
-        _log(f"    [{symbol}] {key:<22}  {valid}  {detail}")
-    if state.get("current"):
-        _log(f"    last position: {state['current']}")
 
 
 # slice 5b: deps for the extracted task0 doc tasks (profile + context).
@@ -21380,67 +20324,19 @@ def main():
             if is_multi_module else build_check_cmd
         )
 
-        # Save any gen_tests siblings + their declarations BEFORE wiping.
-        # TASK 0c writes test code to foo.gen_tests_N.rs siblings; TASK 2 regenerates
-        # source files. We reattach siblings + decls after each TASK 2 write so TASK 3
-        # can actually run the tests.
-        # Schema: rel_path of parent → list of (pass_n, sibling_body)
-        saved_gen_blocks: dict[str, list[tuple[int, str]]] = {}
-        if module_dir.exists():
-            for src_file in sorted(module_dir.rglob("*.rs")):
-                rel = str(src_file.relative_to(project_dir))
-                if rel in existing_test_files:
-                    continue
-                if re.search(r'\.gen_tests_\d+\.rs$', src_file.name):
-                    continue  # siblings handled via their parent
-                try:
-                    siblings = _gen_tests_siblings(src_file)
-                    if siblings:
-                        saved_gen_blocks[rel] = [
-                            (n, p.read_text(encoding="utf-8"))
-                            for n, p in siblings
-                        ]
-                except Exception:
-                    pass
-        if saved_gen_blocks:
-            _total = sum(len(v) for v in saved_gen_blocks.values())
-            _log(f"  Saved {_total} gen_tests sibling(s) from {len(saved_gen_blocks)} file(s) for reattachment.")
-
-        # Wipe any previously generated files for this module (interrupted
-        # run) — ONLY when the merge (task2b) is not marked done. When task2b
-        # will rerun it regenerates src/ from .skeleton-filled/, so wiping is
-        # safe; when task2b IS done, src/ is the resumable product and t2c's
-        # fills live only there — wiping while the skip-markers stand left
-        # phase C running against the stub tree (the t2c→t3 fall-through bug).
-        # Skip:
-        #  - scratch/cache directories (dot-dirs: .skeleton/, .skeleton-filled/,
-        #    .task1_partials/, .cluster_augmented/, etc.)
-        #  - target/ (cargo's build output; contains dependency build-script
-        #    outputs like target/debug/build/thiserror-xxx/out/private.rs
-        #    that cargo expects to find on subsequent compiles — deleting
-        #    these breaks dependency compilation in mysterious ways)
-        # Only wipe regenerated source files, not anything cargo manages.
-        _wipe_skip_dirs = {"target"}
-        if module_dir.exists() and not _phase_valid(
-                project_dir, f"task2b/{module_name}"):
-            wiped = []
-            for src_file in sorted(module_dir.rglob("*.rs")):
-                rel = str(src_file.relative_to(project_dir))
-                if rel in existing_test_files:
-                    continue
-                # Skip scratch dirs (any component starting with '.') and
-                # cargo's target/ tree.
-                parts = src_file.parts
-                if any(p.startswith(".") for p in parts):
-                    continue
-                if any(p in _wipe_skip_dirs for p in parts):
-                    continue
-                src_file.unlink()
-                wiped.append(rel)
-            if wiped:
-                _log(f"  Wiped {len(wiped)} leftover generated file(s): {', '.join(wiped)}")
-            # Stub so workspace parses while we generate.
-            _write_workspace_stub(crate_type, module_dir)
+        # Slice 9: module-start lifecycle (save siblings → maybe-wipe → stub)
+        # lives in application/workspace_lifecycle.py; the wipe is gated by
+        # the codified wipe⟺rerun invariant (session-59 t2c→t3 fall-through).
+        saved_gen_blocks: dict[str, list[tuple[int, str]]] = \
+            _wl_save_gen_tests_siblings(
+                module_dir, project_dir, existing_test_files,
+                gen_tests_siblings=_gen_tests_siblings,
+                is_gen_tests_file=_is_gen_tests_file)
+        _wl_wipe_module_sources(
+            module_dir, project_dir, existing_test_files,
+            regenerating_phase_done=_phase_valid(
+                project_dir, f"task2b/{module_name}"),
+            write_stub=_partial(_write_workspace_stub, crate_type, module_dir))
 
         if not module_has_tests:
             _log(f"  '{module_name}' has 0 test files — will use whole-project context in TASK 2.")
