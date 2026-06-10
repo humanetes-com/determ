@@ -9073,7 +9073,12 @@ class _FixOutcome:
                        whether to retry (err_sig/err_count feed FloorStall).
     """
     kind: str
-    err_sig: frozenset = frozenset()
+    # None = "this unit has no error signature" → the driver's repeated-
+    # signature exit never fires (loop C / f4: failing-test counts carry no
+    # rustc sig). An EMPTY frozenset is a real signature: two consecutive
+    # empty sigs (rc!=0, zero parsed diagnostics) trigger the repeated exit,
+    # as the hand-rolled per-fn/per-impl loops always did.
+    err_sig: "frozenset | None" = None
     err_count: int = 0
 
 
