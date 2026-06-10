@@ -332,9 +332,13 @@ slice needs a dedicated live-run validation window; ceremony-free per §2):
        byte-identically; add sig-change-hatch + U2-routing tests.
    f3. `ImplFixUnit` — port B against f1's net.
    f4. fold C onto the driver (metric = failing-test count, no-revert policy flag).
-   f5. unify `_improvement_loop` with `run_refine_loop` (one driver in
-       pipeline_core/application); decide with f4's evidence whether FixLoop sits atop it
-       or stays a sibling (inner compile loop vs outer measure loop may be 2 real shapes).
+   f5. ✅ `_improvement_loop` is now an ADAPTER over `run_refine_loop` (callback→
+       RefineStrategy; pins in tests/test_improvement_loop.py). DECISION: two real
+       shapes — `_drive_fix_loop` stays a sibling (outcome kinds + repeated-sig exit
+       don't fit a metric strategy). Port CORRECTED two lag artifacts: attempts are
+       re-measured immediately (was: pre-fix metric recorded one iter late → spurious
+       iter-1 stall) and a stalled loop's final fix is measured instead of discarded
+       (cost: +1 run_check on stall exits). Fix-counts per budget unchanged.
    f6. live anyhow run: diff loop.iter events + floor/stall log lines + fills-per-pass
        against the previous run before declaring the series done.
    Expected: A ~300→~80 (unit) and B ~280→~90, C ~120→~40, shared driver ~120 — net

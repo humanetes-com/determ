@@ -42,6 +42,7 @@ from pipeline_core.adapters import coverage as _covmod
 from pipeline_core.adapters import workspace as _wsmod
 from pipeline_core.adapters.coverage import CoverageDeps
 from pipeline_core.adapters.workspace import WorkspaceDeps
+from pipeline_core.application.refine_loop import run_refine_loop as _run_refine_loop
 from pipeline_core.application.tasks.genesis_audit import (
     GenesisAuditDeps,
     genesis_audit,
@@ -7374,137 +7375,131 @@ def _improvement_loop(
                                   # strategy guidance shown to do_fix on stall
     max_stalls: int = 3,
     hard_cap: int = 10_000,       # backstop against runaway only; the real
-                                  # terminator is `stall >= max_stalls`
+                                  # terminator is the stall budget
     on_iter=None,                 # optional (record: dict) -> None — archival
 ) -> tuple[bool, str, list[dict]]:
-    """Canonical pipeline fix-loop primitive. Every fix loop in this file
-    should go through this function — same definition of "improvement",
-    same exit rule.
+    """Canonical pipeline fix-loop wrapper — adapts the run_check/do_fix/
+    do_retro callback convention onto THE refine driver
+    (`pipeline_core.application.run_refine_loop`, slice 8a f5), so outer
+    measure loops share one termination policy with task0c augmentation.
+    (`_drive_fix_loop` stays a sibling: inner compile loops have outcome
+    kinds and a repeated-signature exit that don't fit a metric strategy.)
 
-    Semantics:
-      - improvement = strict decrease in `best_metric` (the minimum metric
-        observed so far). If a fresh check produces a new minimum, `stall`
-        resets to 0; otherwise it increments.
-      - the loop exits when `stall >= max_stalls` (real terminator) or when
-        `run_check` returns ok=True (success). `hard_cap` is a 10k-iter
-        backstop against runaway behaviour, not a feature.
-      - `do_retro` is the strategy hook. It fires whenever the previous iter
-        did NOT improve (the loop is currently stalled). Its output — a
-        short "try X instead" string — is passed to `do_fix` as the keyword
-        argument `retro`. `do_fix` is expected to inject `retro` into the
-        prompt or otherwise incorporate it.
-      - history records carry the per-iter `retro`, `metric`, `post_fix_metric`,
-        plus whatever fields `do_fix` returned. Subsequent iters can read
-        prior retros from `history` if they want compounding diagnosis.
+    Semantics: improvement = strict decrease of the best metric; exit on
+    run_check ok, `{"abort": ...}` from do_fix, the stall budget, or the
+    hard-cap backstop. Each attempt is RE-MEASURED immediately (run_check
+    after do_fix) — the retired hand-rolled loop recorded the pre-fix
+    metric one iteration late, which burned a spurious stall on iteration
+    1 and exited a stalled loop without measuring its final fix
+    (discarding a possible improvement). Fix-attempt counts per stall
+    budget are unchanged.
 
-    `do_fix(output, history, *, retro)` signature is required — pass
-    `retro=""` when no guidance applies. Legacy 2-arg callables are still
-    accepted (introspected at call time); new callers should accept retro.
-    Returning `{"abort": True, "reason": ...}` short-circuits the loop.
-
-    Emits `loop.iter` events for monitor.py.
+    `do_fix(output, history, *, retro)` — `retro` carries
+    `LoopState.context()` (trajectory + stall count + latest retro);
+    legacy 2-arg callables are still accepted. `do_retro` fires before an
+    attempt whenever the loop is stalled. Emits `loop.iter` per attempt;
+    history records carry `metric` (pre-fix) and `post_fix_metric`
+    (measured, no longer a hint).
     """
     import inspect as _inspect
     try:
-        _do_fix_accepts_retro = "retro" in _inspect.signature(do_fix).parameters
+        _accepts_retro = "retro" in _inspect.signature(do_fix).parameters
     except (TypeError, ValueError):
-        _do_fix_accepts_retro = False
+        _accepts_retro = False
 
-    # Stall/best/iteration bookkeeping is delegated to the shared LoopState
-    # domain type (pipeline_core.domain.refine) so every loop that runs through
-    # _improvement_loop shares ONE definition of improvement/stall AND gets the
-    # same cumulative meta-awareness (`state.context()` — iteration, consecutive
-    # stalls, per-attempt trajectory, latest retro) handed to its fix attempts.
-    # Metric is "lower is better" here (error/uncovered-line count); LoopState is
-    # "higher is better", so we carry the negated metric internally.
-    state = _LoopState()
     history: list[dict] = []
-    last_output = ""
-    iter_n = 0
 
-    while iter_n < hard_cap:
-        ok, output, metric = run_check()
-        last_output = output
-        if ok:
-            return True, output, history
-        if not state.attempts:
-            state.best_metric = float(-metric)   # seed with iter-1 pre-fix floor
+    class _CallbackStrategy:
+        """RefineStrategy over the callback convention. Metric here is
+        lower-is-better; LoopState is higher-is-better, so the negated
+        metric flows through the driver."""
 
-        # Stall-triggered retro: fires when the prior iter did not move the
-        # floor. First iter has no prior to compare and never runs retro.
-        retro = ""
-        if state.attempts and state.stalls >= 1 and do_retro is not None:
+        def __init__(self) -> None:
+            self.ok = False
+            self.aborted = False
+            self.output = ""
+            self.metric = 0
+            self.iter_n = 0
+
+        def _check(self) -> None:
+            self.ok, self.output, self.metric = run_check()
+
+        def measure(self) -> float:
+            self._check()
+            return float(-self.metric)
+
+        def is_done(self, metric: float) -> bool:
+            return self.ok or self.aborted
+
+        def retrospect(self, state: "_LoopState") -> str:
+            if do_retro is None:
+                return ""
             try:
-                retro = do_retro(output, history) or ""
+                return do_retro(self.output, history) or ""
             except Exception as e:
                 _log(f"  [improvement_loop/{name}] do_retro failed: {e}")
-                retro = ""
-        state.pending_retro = retro
-        # Cumulative meta-awareness for THIS fix attempt: trajectory + stall
-        # count + latest retro. Empty on the first iter (no history yet), so
-        # first-attempt behaviour is unchanged.
-        fix_guidance = state.context()
+                return ""
 
-        iter_n += 1
-        try:
-            if _do_fix_accepts_retro:
-                record = do_fix(output, history, retro=fix_guidance) or {}
-            else:
-                record = do_fix(output, history) or {}
-        except Exception as e:
-            _log(f"  [improvement_loop/{name}] do_fix raised: {e}")
-            record = {"abort": True, "reason": f"do_fix_exception: {e}"}
-
-        # Re-measure metric AFTER the fix so the next iter's check decides
-        # whether stall increments. We must run run_check again here to
-        # observe the post-fix state — record may carry a fresh `metric`
-        # hint, but we let run_check be the source of truth on the next
-        # iter. The current iter just bookkeeps the pre-fix metric.
-        new_metric = record.get("post_fix_metric", metric)
-        improved = float(-new_metric) > state.best_metric
-        state.record(_Attempt(
-            metric=float(-new_metric),
-            iteration=state.iteration,
-            improved=improved,
-            error=output[:2000],
-            retro=retro,
-        ))
-
-        ev = {
-            "name": name,
-            "iter": iter_n,
-            "metric_prev": metric,
-            "metric_new": new_metric,
-            "metric_best": int(-state.best_metric),
-            "improved": improved,
-            "stalled": state.stalls,
-            "fix_summary": record.get("summary", ""),
-            "retro_chars": len(fix_guidance),
-        }
-        with suppress(Exception):
-            _emit("loop.iter", data=ev)
-        if on_iter is not None:
+        def attempt(self, state: "_LoopState") -> _Attempt:
+            fix_guidance = state.context()
+            retro = state.pending_retro
+            pre_metric = self.metric
+            output = self.output
+            self.iter_n += 1
             try:
-                on_iter(ev | {"output": output, "record": record,
-                              "retro": retro})
+                if _accepts_retro:
+                    record = do_fix(output, history, retro=fix_guidance) or {}
+                else:
+                    record = do_fix(output, history) or {}
             except Exception as e:
-                _log(f"  [improvement_loop/{name}] on_iter raised: {e}")
+                _log(f"  [improvement_loop/{name}] do_fix raised: {e}")
+                record = {"abort": True, "reason": f"do_fix_exception: {e}"}
+            if record.get("abort"):
+                self.aborted = True
+                new_metric = pre_metric          # no re-measure on abort
+            else:
+                self._check()                    # post-fix truth
+                new_metric = self.metric
+            improved = float(-new_metric) > state.best_metric
+            ev = {
+                "name": name,
+                "iter": self.iter_n,
+                "metric_prev": pre_metric,
+                "metric_new": new_metric,
+                "metric_best": int(min(-state.best_metric, float(new_metric))),
+                "improved": improved,
+                "stalled": 0 if improved else state.stalls + 1,
+                "fix_summary": record.get("summary", ""),
+                "retro_chars": len(fix_guidance),
+            }
+            with suppress(Exception):
+                _emit("loop.iter", data=ev)
+            if on_iter is not None:
+                try:
+                    on_iter(ev | {"output": output, "record": record,
+                                  "retro": retro})
+                except Exception as e:
+                    _log(f"  [improvement_loop/{name}] on_iter raised: {e}")
+            history.append({"iter": self.iter_n, **record, "retro": retro,
+                            "metric": pre_metric, "post_fix_metric": new_metric})
+            if self.aborted:
+                _log(f"  [improvement_loop/{name}] aborted at iter "
+                     f"{self.iter_n}: {record.get('reason', 'unknown')}")
+            return _Attempt(metric=float(-new_metric), error=output[:2000],
+                            retro=retro)
 
-        history.append({"iter": iter_n, **record, "retro": retro,
-                        "metric": metric, "post_fix_metric": new_metric})
-
-        if record.get("abort"):
-            _log(f"  [improvement_loop/{name}] aborted at iter {iter_n}: "
-                 f"{record.get('reason', 'unknown')}")
-            return False, last_output, history
+    strat = _CallbackStrategy()
+    state = _run_refine_loop(strat, max_stalls=max_stalls, hard_cap=hard_cap)
+    if strat.ok:
+        return True, strat.output, history
+    if not strat.aborted:
         if state.stalls >= max_stalls:
             _log(f"  [improvement_loop/{name}] floor stalled at "
                  f"{int(-state.best_metric)} for {state.stalls} iter(s) — stopping.")
-            return False, last_output, history
-
-    _log(f"  [improvement_loop/{name}] hard cap {hard_cap} reached "
-         "(should never happen — stall budget should fire first).")
-    return False, last_output, history
+        else:
+            _log(f"  [improvement_loop/{name}] hard cap {hard_cap} reached "
+                 "(should never happen — stall budget should fire first).")
+    return False, strat.output, history
 
 
 # Retro/diagnosis calls MUST run with think=True (FR-028). The served
