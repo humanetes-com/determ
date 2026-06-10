@@ -9238,19 +9238,23 @@ def _phase_c_fill_impl_blocks(
 
     _impl_full_stalls = int(os.getenv("PHASE_C_IMPL_MAX_STALLS", "3"))
 
-    for block in viable_blocks:
+    def _fill_one_block(block: dict) -> None:
+        """One impl block's fill: context assembly, the `_attempt_impl_fill`
+        unit on `_drive_fix_loop` (slice 8a f3 — replaces the hand-rolled
+        while loop), and exhausted-block bookkeeping (retro + fail emit)."""
+        nonlocal attempts_total, fns_filled_total, impls_filled, impls_failed
         block_id = _impl_block_id(block["file"], block["container"])
         # Per-file converge keying: only the converge module keeps full budget.
         block_max_stalls = _effective_stalls(_impl_full_stalls, _module_of(block["file"]))
         file_path = target_src_dir / block["file"]
         if not file_path.exists():
-            continue
+            return
         # Honor cross-iter exhaustion — if a prior retrospective marked
         # this block GENUINELY_HARD it's skipped.
         if _is_fn_fully_exhausted(retros_cache, block["file"], "*impl*", block["container"]):
             _log(f"  [phase-c/impl] {block_id}: skipped (prior retro "
                  "marked exhausted).")
-            continue
+            return
         # Related blocks (same trait, different generic) for the prompt.
         all_blocks_by_id = {_impl_block_id(b["file"], b["container"]): b for b in blocks}
         related_blocks: list[dict] = []
@@ -9325,8 +9329,6 @@ def _phase_c_fill_impl_blocks(
                 fr_path, file_rel=block["file"], fn_name=stub_fn_names[0] if stub_fn_names else "",
                 file_text=snapshot, current_error="",
             )
-        block_gauge = _FloorStall()  # slice 8a: floor-stall + repeated-sig gauge
-        fix_attempt = 0
         last_error_excerpt = ""
         last_response = ""
         members_filled_this_block = 0
@@ -9351,10 +9353,11 @@ def _phase_c_fill_impl_blocks(
             "container": block["container"],
             "stub_count": len(block["stub_members"]),
         })
-        while fix_attempt < _PER_FN_FIX_CAP:
-            fix_attempt += 1
+
+        def _attempt_impl_fill(fix_attempt: int) -> _FixOutcome:
+            nonlocal attempts_total, fns_filled_total, impls_filled, \
+                last_error_excerpt, last_response, members_filled_this_block
             attempts_total += 1
-            _check_graceful_stop(f"per-impl attempt {fix_attempt} for {block_id}")
             # Slice 8a: TYPES_IN_SCOPE re-selected each attempt from the
             # member sigs + impl header + where clause + the current error
             # (Plan 9 F4: E0277/E0599/E0046/E0053 routinely name a trait
@@ -9382,13 +9385,13 @@ def _phase_c_fill_impl_blocks(
                 response = ask(prompt, model=_TASK2_MODEL)
             except Exception as e:
                 _log(f"  [phase-c/impl] {block_id}: LLM error: {e}")
-                break
+                return _FixOutcome("stop")
             last_response = response
             parsed = extract_fn_bodies(response)
             if not parsed:
                 _log(f"  [phase-c/impl] {block_id}: empty/no FN blocks "
                      f"(attempt {fix_attempt}).")
-                break
+                return _FixOutcome("stop")
             # Hold the global splice+cargo lock while we mutate and check.
             with _splice_check_lock:
                 # Splice each parsed body into the impl indicated by its
@@ -9435,7 +9438,7 @@ def _phase_c_fill_impl_blocks(
                 if spliced_now == 0:
                     _log(f"  [phase-c/impl] {block_id}: nothing spliced "
                          f"(attempt {fix_attempt}).")
-                    break
+                    return _FixOutcome("stop")
                 # Run cargo check via the structured-diagnostics wrapper
                 # so error counts come from rustc's own classification
                 # (JSON `compiler-message`s with `level == "error"`) and
@@ -9443,6 +9446,10 @@ def _phase_c_fill_impl_blocks(
                 # produced false zeros for non-E-coded failures (linker,
                 # build script, cargo wrapper) — the source of the
                 # recurring "compile failed but errs=0" stall bug.
+                # Run cargo check via the structured-diagnostics wrapper
+                # so error counts come from rustc's own classification
+                # (JSON `compiler-message`s with `level == "error"`) and
+                # not from regex over rendered text.
                 rc, cargo_out, diagnostics = _run_cargo_check_diag(
                     check_cmd, target_src_dir, cluster_env)
                 if rc == 0:
@@ -9473,7 +9480,7 @@ def _phase_c_fill_impl_blocks(
                             "members_failed": 0,
                             "fix_attempts": fix_attempt,
                         })
-                    break
+                    return _FixOutcome("accepted")
                 # B3 (FR-029): keep a NON-REGRESSING fill even when the crate
                 # doesn't fully compile — it adds no error beyond baseline and
                 # none on the filled fns, so it's a correct prerequisite of the
@@ -9506,36 +9513,49 @@ def _phase_c_fill_impl_blocks(
                                 "b3_kept": True,
                                 "crate_errs_remaining": len(_cur_sig),
                             })
-                        break
+                        return _FixOutcome("accepted")
                 if _u2_impl is not None:
                     cargo_out = _u2_impl[1]   # route test-failure detail as the error
-                # Compile failed (or U2 test failure). Use the structured
-                # diagnostics for the error signature; for a U2 test failure use
-                # the failing-test set so the floor-stall works (test output has
-                # no rustc E-codes). rc != 0 establishes a minimum count of 1.
+                # Compile failed (or U2 test failure). Structured diagnostics
+                # give the error signature; a U2 test failure uses the
+                # failing-test set (test output has no rustc E-codes).
+                # rc != 0 establishes a minimum count of 1.
                 cur_err_sig = (_u2_impl[0] if _u2_impl is not None
                                else _cargo_err_sig_from_diagnostics(diagnostics))
                 cur_err_count = max(1, len(cur_err_sig))  # rc-honest minimum
-                block_gauge.observe(cur_err_count, signature=cur_err_sig)
                 last_error_excerpt = _focus_cargo_errors(cargo_out, block["file"])
                 _record_error_codes_seen(cargo_out)
-                _log(f"  [phase-c/impl] {block_id}: compile failed "
-                     f"(attempt {fix_attempt}); errs={cur_err_count} "
-                     f"floor={block_gauge.best} stall={block_gauge.stalls}.")
-                # Reaching here means the fill regressed (a new error, or an
-                # error on the filled fns) — B3 (FR-029) already kept and broke
-                # out for non-regressing fills above. Revert and let the next
-                # iter try with the error context.
+                # The fill regressed (a new error, or an error on the filled
+                # fns) — B3 (FR-029) already accepted non-regressing fills
+                # above. Revert; the driver decides whether to retry.
                 file_path.write_text(snapshot, encoding="utf-8")
-                if block_gauge.stalled(block_max_stalls):
-                    _log(f"  [phase-c/impl] {block_id}: floor stalled "
-                         f"at {block_gauge.best} for {block_gauge.stalls} iter(s) "
-                         "— stopping this block.")
-                    break
-                if block_gauge.repeated:
-                    _log(f"  [phase-c/impl] {block_id}: identical errors "
-                         f"after attempt {fix_attempt} — stopping.")
-                    break
+                return _FixOutcome("failed", err_sig=cur_err_sig,
+                                   err_count=cur_err_count)
+
+        def _on_impl_failure(attempt_n: int, outcome: _FixOutcome,
+                             gauge: _FloorStall) -> None:
+            _log(f"  [phase-c/impl] {block_id}: compile failed "
+                 f"(attempt {attempt_n}); errs={outcome.err_count} "
+                 f"floor={gauge.best} stall={gauge.stalls}.")
+
+        def _on_impl_stall(attempt_n: int, gauge: _FloorStall) -> None:
+            _log(f"  [phase-c/impl] {block_id}: floor stalled "
+                 f"at {gauge.best} for {gauge.stalls} iter(s) "
+                 "— stopping this block.")
+
+        def _on_impl_repeated(attempt_n: int, gauge: _FloorStall) -> None:
+            _log(f"  [phase-c/impl] {block_id}: identical errors "
+                 f"after attempt {attempt_n} — stopping.")
+
+        _, fix_attempt = _drive_fix_loop(
+            _attempt_impl_fill,
+            hard_cap=_PER_FN_FIX_CAP,
+            max_stalls=block_max_stalls,
+            stop_context=f"per-impl fix for {block_id}",
+            on_failure=_on_impl_failure,
+            on_stall=_on_impl_stall,
+            on_repeated=_on_impl_repeated,
+        )
         if members_filled_this_block == 0:
             impls_failed += 1
             errors.append(f"{block['file']}::{block['container']}: "
@@ -9593,6 +9613,9 @@ def _phase_c_fill_impl_blocks(
                 _save_retrospectives(project_dir, retros_cache)
             except Exception as _re:
                 _log(f"  [phase-c/impl/retro] {block_id}: {_re}")
+
+    for block in viable_blocks:
+        _fill_one_block(block)
     bytes_after = sum(p.stat().st_size for p in target_src_dir.rglob("*.rs"))
     remaining_records = _scan_unimplemented_records_for_cluster(target_src_dir, cluster)
     # None = extractor absent → text-scan fallback; 0 here would make the
