@@ -70,8 +70,8 @@ Equal → the running process has the current on-disk code (a restart would chan
 ## Never create tools in /tmp
 Throwaway scripts, benchmarks, probes, one-off analysis tools — none of these go in `/tmp`. They are deleted on reboot and lost for future reuse. Put every tool under `determ/tools/` so it is versioned and reusable. `/tmp` is for transient data artifacts (logs, caches, intermediate output), never for code we might want again.
 
-## Static analysis after every Python edit
-After modifying any `.py` file, run `bash check.sh` and fix **all** reported errors — including pre-existing ones unrelated to your change. Never leave check.sh failing.
+## Verification is check.sh, and the USER runs it
+The autopilot runs NO verification commands — no pytest, no ruff/mypy/py_compile, no check.sh, not even "targeted" runs of its own edit. For each step it ensures the verification is COVERED BY `check.sh` (tests live in tests/ and are picked up by check.sh's pytest run; static gates are already in check.sh); then the USER runs `bash check.sh` and reports results. When check.sh reports errors, fix **all** of them — including pre-existing ones unrelated to your change. Never leave check.sh failing.
 
 ## IMPORTANT: Right solution > fast fix. We are not lazy.
 When presenting options, never bias toward the smaller-change option for its

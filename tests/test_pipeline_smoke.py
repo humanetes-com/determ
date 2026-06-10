@@ -413,6 +413,12 @@ def test_eval_cfg_pred() -> None:
     assert e('not(feature = "alloc")', true_set, false_set) is True
     assert e('something_unknown', true_set, false_set) is None
     assert e('all(nightly, something_unknown)', true_set, false_set) is None
+    # R7.4b: syn renders operators with a space — `all (…)`, `not (…)`.
+    # These were silently undecidable (None) → wrong cluster membership.
+    assert e('not (nightly)', true_set, false_set) is False
+    assert e('all (nightly, feature = "std")', true_set, false_set) is True
+    assert e('any (feature = "alloc", nightly)', true_set, false_set) is True
+    assert e('not (all (nightly, feature = "std"))', true_set, false_set) is False
     print("  OK  _eval_cfg_pred")
 
 
@@ -2779,3 +2785,22 @@ def test_tag_block_shapes():
     assert p._tag_block("X", "c") == "\n<X>\nc\n</X>\n"
     assert (p._tag_block("X", "c", prefix="h:\n", suffix="\n```")
             == "\n<X>\nh:\nc\n```\n</X>\n")
+
+
+def test_per_impl_prompt_macros_and_siblings_sections():
+    # Per-impl/per-fn prompt parity: MACROS + SIBLING_REFERENCE render when
+    # provided and vanish when empty (the per-impl builder lacked both).
+    import pipeline as p
+    members = [{"fn_name": "kind", "sig_text": "fn kind (& self) -> u32",
+                "has_unimplemented_body": True}]
+    block = {"file": "lib.rs", "container": "impl Foo",
+             "members": members, "stub_members": members}
+    kw = dict(block=block, related_blocks=[], test_blocks=[],
+              module_name="m", cluster_name="t")
+    full = p._build_per_impl_prompt(
+        macros_section="macro_rules! mk { () => {} }",
+        siblings_section="fn kind(&self) -> u32 { 7 }", **kw)
+    assert "<MACROS>" in full and "macro_rules! mk" in full
+    assert "<SIBLING_REFERENCE>" in full and "{ 7 }" in full
+    bare = p._build_per_impl_prompt(**kw)
+    assert "<MACROS>" not in bare and "<SIBLING_REFERENCE>" not in bare

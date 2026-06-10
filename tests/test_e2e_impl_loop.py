@@ -89,6 +89,7 @@ def test_impl_block_filled_in_one_call(monkeypatch, tmp_path):
     text = (ws / "src" / "lib.rs").read_text()
     assert res["impls_filled"] == 1 and res["fns_filled"] == 2
     assert "self.tag" in text and "unimplemented!()" not in text
+    assert res["remaining"] == 0
 
 
 def test_impl_floor_stall_reverts_block(monkeypatch, tmp_path):
@@ -106,6 +107,9 @@ def test_impl_floor_stall_reverts_block(monkeypatch, tmp_path):
     assert res["impls_filled"] == 0 and res["impls_failed"] == 1
     assert res["attempts"] == 4
     assert text == IMPL_LIB              # reverted to pristine stubs
+    # Extractor seam returns None → remaining must come from the text-scan
+    # fallback (was 0, silently skipping the caller's per-fn cleanup pass).
+    assert res["remaining"] == 2
 
 
 def test_impl_repeated_error_signature_stops_after_two(monkeypatch, tmp_path):

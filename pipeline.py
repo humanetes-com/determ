@@ -4242,10 +4242,13 @@ def _eval_cfg_pred(pred: str, cfg_true: set[str], cfg_false: set[str]) -> "bool 
         return True
     if norm in {_normalize_cfg_pred(x) for x in cfg_false}:
         return False
-    # Operators
+    # Operators — parse the NORMALIZED form: syn renders `all (…)`/`not (…)`
+    # with a space (R7.4b), which made every extractor-emitted operator
+    # predicate silently undecidable. Inner parts are recursively normalized
+    # again, so slicing from `norm` is safe.
     for op in ("not", "all", "any"):
-        if s.startswith(op + "(") and s.endswith(")"):
-            inner = s[len(op) + 1:-1]
+        if norm.startswith(op + "(") and norm.endswith(")"):
+            inner = norm[len(op) + 1:-1]
             parts = _split_top_level_commas(inner)
             evaluated = [_eval_cfg_pred(p, cfg_true, cfg_false) for p in parts]
             if op == "not":
@@ -9577,7 +9580,10 @@ def _phase_c_fill_impl_blocks(
                 _log(f"  [phase-c/impl/retro] {block_id}: {_re}")
     bytes_after = sum(p.stat().st_size for p in target_src_dir.rglob("*.rs"))
     remaining_records = _scan_unimplemented_records_for_cluster(target_src_dir, cluster)
-    remaining_n = len(remaining_records) if remaining_records is not None else 0
+    # None = extractor absent → text-scan fallback; 0 here would make the
+    # caller skip the per-fn cleanup pass entirely.
+    remaining_n = (len(remaining_records) if remaining_records is not None
+                   else len(_scan_unimplemented_for_cluster(target_src_dir, cluster)))
     return {
         "fns_filled": fns_filled_total,
         "bytes_filled": max(0, bytes_after - bytes_before),
