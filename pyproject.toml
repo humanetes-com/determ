@@ -12,10 +12,9 @@ extend-exclude = [".venv", "tmp", "tools/skeleton_extractor/target"]
 # B=bugbear, SIM=simplify, plus high-signal individual E codes.
 select = ["F", "I", "UP", "C4", "B", "SIM", "E711", "E714", "E741"]
 ignore = [
-    # B023 (closure captures loop var): 82 hits, almost all in the threaded fill
-    # ENGINE; auditing them safely needs the behavioural test net (backlog R4) — tracked
-    # as a dedicated pass, not blanket-fixed blind. See CODE_ARCHITECTURE.md §8 R1.1.
-    "B023",
+    # B023 audited & fixed (R1.1b, 2026-06-10): loop vars bound as keyword-only
+    # defaults at def time; the per-fn worker takes its level queue explicitly.
+    # The rule now GATES so the capture class cannot recur.
     # SIM102 (collapsible nested if): stylistic; one site needs a risky reindent in the
     # untested engine. Tracked.
     "SIM102",

@@ -9838,11 +9838,10 @@ def _task2_fill_fns_one_by_one(
         progress_this_pass = 0
         filled_this_pass: list[tuple[str, str]] = []  # [(file_rel, fn_name)]
 
-        # P4: per-level work queue consumed by workers. Re-created per
-        # priority level in the dispatch loop below; the worker reads it as a
-        # closure free-var. Sequential mode = 1 worker; parallel mode = N
-        # workers concurrently. Workers exit when the queue is empty.
-        _work_queue: _queue_mod.Queue = _queue_mod.Queue()
+        # P4: per-level work queue consumed by workers — created per priority
+        # level in the dispatch loop below and passed to each worker
+        # explicitly. Sequential mode = 1 worker; parallel mode = N workers
+        # concurrently. Workers exit when the queue is empty.
 
         # P8: priority-level batching. `stubs` is already leaf-first sorted
         # (descending ref-count), so equal-priority stubs are contiguous.
@@ -9853,11 +9852,14 @@ def _task2_fill_fns_one_by_one(
         # independent of worker scheduling.
         _levels = _group_priority_levels(stubs, leaf_name_counts)
 
-        def _worker():
+        def _worker(work_queue: "_queue_mod.Queue"):
+            # B023: the per-LEVEL queue is passed explicitly — the old
+            # free-var read of `_work_queue` relied on late binding across
+            # the level loop, exactly the capture class B023 flags.
             nonlocal attempts, fns_filled, progress_this_pass
             while True:
                 try:
-                    idx, rec = _work_queue.get_nowait()
+                    idx, rec = work_queue.get_nowait()
                 except _queue_mod.Empty:
                     return
                 try:
@@ -9878,7 +9880,14 @@ def _task2_fill_fns_one_by_one(
         # the rest of the corpus.
         _retros_cache = _load_retrospectives(project_dir)
 
-        def _process_one_stub(idx, rec):
+        # B023: per-pass loop vars bound at def time (the def re-executes
+        # each pass, so each pass's closure sees its own values; workers are
+        # joined within the pass, but binding makes that explicit, not
+        # incidental). `filled_this_pass` is bound by IDENTITY — appends in
+        # here are read by the end-of-pass test phase.
+        def _process_one_stub(idx, rec, *, _retros_cache=_retros_cache,
+                              stubs=stubs, pass_n=pass_n,
+                              filled_this_pass=filled_this_pass):
             nonlocal attempts, fns_filled, progress_this_pass
             rel_file = rec["file"]
             fn_name = rec["fn_name"]
@@ -10411,13 +10420,14 @@ def _task2_fill_fns_one_by_one(
         # self-bounds for small levels); join before the next level so the
         # callee level is fully filled before its callers start.
         for _level in _levels:
-            _work_queue = _queue_mod.Queue()
+            _work_queue: _queue_mod.Queue = _queue_mod.Queue()
             for _item in _level:
                 _work_queue.put(_item)
             _nw = min(_parallelism, len(_level))
             if _nw > 1:
                 _workers = [
-                    _threading.Thread(target=_worker, name=f"per-fn-worker-{i}")
+                    _threading.Thread(target=_worker, args=(_work_queue,),
+                                      name=f"per-fn-worker-{i}")
                     for i in range(_nw)
                 ]
                 for _t in _workers:
@@ -10425,7 +10435,7 @@ def _task2_fill_fns_one_by_one(
                 for _t in _workers:
                     _t.join()
             else:
-                _worker()
+                _worker(_work_queue)
 
         # === Per-pass cargo test ===
         # Always run at end of every pass, even when filled_this_pass is empty
@@ -11023,7 +11033,11 @@ def _task2_fill_groups(
                                     head=_fr_cap // 3, tail=2 * _fr_cap // 3)
 
         # P3.5: few-shot examples included from attempt 2 onward.
-        def _build_prompt(include_examples: bool) -> str:
+        # B023: per-group loop vars bound at def time.
+        def _build_prompt(include_examples: bool, *, gname=gname, g=g,
+                          skeleton_index=skeleton_index, _fr_capped=_fr_capped,
+                          test_blocks=test_blocks,
+                          _genesis_capped=_genesis_capped) -> str:
             examples_block = ""
             if include_examples and successful_examples:
                 ex_parts = ["Example successful fills from earlier groups in this run:"]
@@ -15608,7 +15622,8 @@ RULES:
             # contained in, or starts with `test_<file_stem>`. Exact-equality
             # is too strict — `test_chain.rs` should bind to `error.rs` when
             # error.rs defines the Chain type.
-            def _is_primary_test(rel: str) -> bool:
+            def _is_primary_test(rel: str, *, _is_entry=_is_entry,
+                                 _file_stem=_file_stem) -> bool:  # B023
                 if _is_entry and rel.startswith("tests/"):
                     return True
                 test_stem = Path(rel).name.split('.')[0]
@@ -15727,7 +15742,8 @@ Generate the implementation for `{file_path}` (this call writes ONLY that file).
             _symbol_names = re.findall(r'\b(?:fn|struct|enum|trait|type|const)\s+([A-Za-z_]\w*)',
                                        _primary_api or "")
             _symbol_set = set(_symbol_names)
-            def _relevance_score(item: tuple[str, str]) -> tuple[int, str]:
+            def _relevance_score(item: tuple[str, str], *,
+                                 _symbol_set=_symbol_set) -> tuple[int, str]:  # B023
                 _, content = item
                 if not _symbol_set:
                     return (0, item[0])
