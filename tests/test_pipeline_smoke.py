@@ -2835,3 +2835,25 @@ def test_fn_belongs_to_cluster_record_cfg_path(tmp_path):
     # cfg for open_fn → wrongly excluded. Documents the bug the record
     # path fixes; if the fallback regex is ever fixed, update this line.
     assert b(src, "lib.rs", "open_fn", cluster) is False
+
+
+def test_per_fn_prompts_carry_crate_idioms():
+    # Parity: CRATE_IDIOMS (patterns mined from already-filled fns) was
+    # per-impl-only; both per-fn builders must render it when provided
+    # and omit it when empty.
+    import pipeline
+    common = dict(
+        file_text="fn target() { unimplemented!() }",
+        fn_name="target", sig_text="fn target()",
+        test_blocks=[], module_name="m", cluster_name="t",
+        file_rel="lib.rs",
+    )
+    idiom = "# Self::construct_from_display family\nSelf::construct_from_display(arg, None)"
+    full = pipeline._build_per_fn_prompt(crate_idioms_section=idiom, **common)
+    assert "<CRATE_IDIOMS>" in full and "construct_from_display" in full
+    assert "<CRATE_IDIOMS>" not in pipeline._build_per_fn_prompt(**common)
+    fix = pipeline._build_per_fn_fix_prompt(
+        prev_body="1", error_excerpt="E0308", crate_idioms_section=idiom, **common)
+    assert "<CRATE_IDIOMS>" in fix and "construct_from_display" in fix
+    assert "<CRATE_IDIOMS>" not in pipeline._build_per_fn_fix_prompt(
+        prev_body="1", error_excerpt="E0308", **common)

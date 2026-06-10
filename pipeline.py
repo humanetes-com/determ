@@ -7053,6 +7053,7 @@ def _build_per_fn_prompt(
     fr_path: "Path | None" = None,
     invariants_section: str = "",
     siblings_section: str = "",
+    crate_idioms_section: str = "",
 ) -> str:
     """Small focused prompt for one fn fill. No crate-wide signature index,
     no full FR, no genesis — only what the model needs to implement THIS fn.
@@ -7088,6 +7089,13 @@ def _build_per_fn_prompt(
         suffix="\n```")
     # P5.3: when impl-ing a known stdlib trait, inject its contract.
     trait_block = _tag_block("TRAIT_CONTRACT", _trait_contract_for(container))
+    # Crate idioms — recurring patterns mined from already-filled fns in
+    # THIS file (same section the per-impl prompt carries).
+    idioms_block = _tag_block(
+        "CRATE_IDIOMS", crate_idioms_section,
+        prefix="Patterns this file already uses — design your fn to MATCH "
+               "these idioms whenever its situation matches one of them. Do "
+               "NOT invent a new approach when one clearly applies.\n")
     # P5.5: promoted recurring errors (E0xxx codes seen 3+ times this run).
     # P6.4: pass fr_path so past notes tagged with active codes get surfaced.
     recurring_block = _tag_block("RECURRING_ERRORS", _promoted_error_rules(fr_path))
@@ -7101,7 +7109,7 @@ Crate: {module_name} | Cluster: {cluster_name} | File: {file_rel} | Fn: {fn_name
 <RUST_GOTCHAS>
 {_gotchas_summary()}
 </RUST_GOTCHAS>
-{siblings_block}{trait_block}{types_block}{invariants_block}{recurring_block}{notes_block}
+{siblings_block}{trait_block}{types_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}
 FILE — stubs are annotated. SKELETON STUB = will be filled later (rely on
 the signature). TARGET = implement now.
 
@@ -8036,6 +8044,7 @@ def _build_per_fn_fix_prompt(
     invariants_section: str = "",
     retrospective_guidance: str = "",
     siblings_section: str = "",
+    crate_idioms_section: str = "",
 ) -> str:
     """Re-prompt for a fn whose previous fill broke `cargo check`.
 
@@ -8080,6 +8089,12 @@ def _build_per_fn_fix_prompt(
                "same structural pattern):\n```rust\n",
         suffix="\n```")
     trait_block = _tag_block("TRAIT_CONTRACT", _trait_contract_for(container))
+    # Crate idioms — same section the per-impl / per-fn initial prompts carry.
+    idioms_block = _tag_block(
+        "CRATE_IDIOMS", crate_idioms_section,
+        prefix="Patterns this file already uses — design your fn to MATCH "
+               "these idioms whenever its situation matches one of them. Do "
+               "NOT invent a new approach when one clearly applies.\n")
     recurring_block = _tag_block("RECURRING_ERRORS", _promoted_error_rules(fr_path))
     # P2: prior-attempts block. Show up to the last 3 distinct attempts
     # with their compact error signature, so the model can see the search
@@ -8123,7 +8138,7 @@ Crate: {module_name} | Cluster: {cluster_name} | File: {file_rel} | Fn: {fn_name
 <RUST_GOTCHAS>
 {_gotchas_summary()}
 </RUST_GOTCHAS>
-{retro_block}{siblings_block}{gotchas_block}{trait_block}{types_block}{invariants_block}{recurring_block}{notes_block}{prior_block}
+{retro_block}{siblings_block}{gotchas_block}{trait_block}{types_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{prior_block}
 FILE (previous attempt reverted; stubs annotated):
 <FILE path="{file_rel}">
 {annotated}
@@ -9789,6 +9804,10 @@ def _task2_fill_fns_one_by_one(
                 _reordered.append(matches[taken])
                 _seen[tup] = taken + 1
         stubs = _reordered
+        # Crate idioms source: impl-block records snapshot for this pass —
+        # already-filled bodies feed <CRATE_IDIOMS> in the per-fn prompts
+        # (same section the per-impl path carries). [] when extractor absent.
+        _idiom_blocks = _collect_impl_blocks(target_src_dir) or []
         # Count total fns in the cluster (regardless of body state). Used by
         # monitor to render a CUMULATIVE progress bar across restarts —
         # filled = total - stubs_at_pass_start + pass_fills_done.
@@ -9887,7 +9906,8 @@ def _task2_fill_fns_one_by_one(
         # here are read by the end-of-pass test phase.
         def _process_one_stub(idx, rec, *, _retros_cache=_retros_cache,
                               stubs=stubs, pass_n=pass_n,
-                              filled_this_pass=filled_this_pass):
+                              filled_this_pass=filled_this_pass,
+                              _idiom_blocks=_idiom_blocks):
             nonlocal attempts, fns_filled, progress_this_pass
             rel_file = rec["file"]
             fn_name = rec["fn_name"]
@@ -9930,6 +9950,11 @@ def _task2_fill_fns_one_by_one(
                 tests_dir_files, fn_name,
                 file_rel=rel_file, src_dir=_src_for_macros,
                 container=container,
+            )
+            # Crate idioms ranked by THIS fn's signature tokens.
+            crate_idioms_section = _extract_crate_idioms(
+                _idiom_blocks, rel_file, target_sig_text=sig_text,
+                max_idioms=5,
             )
             _fn_t0 = time.monotonic()
             _emit("phase_c.fn.fill.start", data={
@@ -9997,6 +10022,7 @@ def _task2_fill_fns_one_by_one(
                         siblings_section=_collect_sibling_filled_bodies(
                             cur_text, fn_name, container,
                         ),
+                        crate_idioms_section=crate_idioms_section,
                     )
                 else:
                     prompt = _build_per_fn_fix_prompt(
@@ -10027,6 +10053,7 @@ def _task2_fill_fns_one_by_one(
                         siblings_section=_collect_sibling_filled_bodies(
                             cur_text, fn_name, container,
                         ),
+                        crate_idioms_section=crate_idioms_section,
                     )
 
                 body, last_response = _ask_per_fn_body(prompt, fn_name, attempts_log, sig_text=sig_text)
