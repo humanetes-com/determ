@@ -677,8 +677,18 @@ genesis (prose + `genesis_rules_read` structured rules) + API surface. USER DECI
 | caps | `_REPO_SPEC_CAP` = max(2500, SCCL//10) per-fn/per-impl; `_REPO_SPEC_CAP_WIDE` = max(5000, SCCL//5) whole-file |
 | NOT injected | task0c (t0, pre-strip test augmentation), skeleton-A structural check |
 | **no-wipe repair iterations** | main() retry block: `delete_source_files` + task2b/2c invalidation REMOVED — tree kept, markers stay done (`phase_valid` is status-only), next iter skips t2 → t3 + fix loop repairs the kept tree with updated docs in prompts. Old wipe rationale (fresh measurement of doc quality) retired: the active generator never read the docs, so regen was a constant function (15-iter 67/123 plateau, session 63) |
-| tests | tests/test_repo_spec.py (renderer relevance/budget/empty, provider fail-safe + notes-strip, builders carry the block, fr_path=None inert) |
-| validation | ●●● live run: expect `<REPOSITORY_SPECIFICATIONS>` in logs/prompts per-fn prompts; `Keeping '{module}' tree for repair iteration` instead of `Cleaning up`; t3 pass counts should now be MONOTONE across iterations (repair compounds) — BAD = pass count drops (fix loop regressing a kept tree) |
+| **best-tree ratchet** | `workspace_lifecycle.{save,restore}_best_tree` + `best_tree_pass_count` (`.best_tree/` snapshot + `_meta.json`; in SKIP_DIR_NAMES + task0b `_NON_SOURCE_DIRS` — R9.3 class): retry block snapshots on new-best t3 pass count (`ratchet.save` event), restores when an iteration ends below best — regressed fix or broken build (`ratchet.restore`). Outer-loop FloorStall: repair may experiment, can never END below the floor. Equal-pass trees kept (lateral moves allowed) |
+| tests | tests/test_repo_spec.py (renderer relevance/budget/empty, provider fail-safe + notes-strip, builders carry the block, fr_path=None inert); test_workspace_lifecycle.py ratchet roundtrip |
+| validation | ●●● live run: expect `<REPOSITORY_SPECIFICATIONS>` in logs/prompts per-fn prompts; `Keeping '{module}' tree for repair iteration` instead of `Cleaning up`; `[ratchet]` lines + ratchet.save/restore events; t3 pass counts MONOTONE-from-floor across iterations — BAD = repeated ratchet.restore every iter (repair never beats the floor → same plateau, now visible) |
+
+**STANDING RULE — the canonical failure loop (user requirement, session 63).** Every cargo
+check/compile/test failure path MUST run on one of the two drivers — `_drive_fix_loop` (inner,
+compile-sig units) or `_improvement_loop`/`run_refine_loop` (outer, metric units) — which embody:
+(1) inject what just happened (errors + trajectory context `LoopState.context()`), (2) retro
+analysis on stall (`do_retro` — now wired on generate_fix_loop's inner per-fn AND per-impl loops,
+not just whole-file), (3) the feed GROWS per attempt (history/PRIOR_ATTEMPTS + RepoSpec), (4) a
+no-improvement stall budget terminates, (5) exhaustion action = unit revert-to-stub (inner) /
+best-tree restore (outer). New fix sites must not hand-roll this loop.
 
 ### R13 (original framing) — measure, then wire  (kept for the metrics steps)
 Goal restated: the pipeline's deliverable is `functional_requirements_{crate}.md` + `genesis.md` such that

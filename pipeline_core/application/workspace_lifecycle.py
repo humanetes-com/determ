@@ -117,3 +117,77 @@ def wipe_module_sources(
     # Stub so workspace parses while we generate.
     write_stub()
     return wiped
+
+
+# --- Best-tree ratchet (2026-06-11, no-wipe repair iterations) ---------------
+# Iterations repair the kept tree instead of wiping (R13/RepoSpec). The
+# ratchet bounds cross-iteration damage: snapshot the source tree whenever
+# the t3 pass count sets a new best; if an iteration ends BELOW the best
+# (regressed fix, broken build → pass count 0), restore the best tree before
+# the next iteration. Repair may experiment but can never end below the
+# floor — the outer-loop analog of FloorStall.
+
+BEST_TREE_DIR = ".best_tree"
+_BEST_META = "_meta.json"
+
+
+def best_tree_pass_count(project_dir: Path) -> int | None:
+    """Pass count of the snapshotted best tree, or None if no snapshot."""
+    import json
+    meta = project_dir / BEST_TREE_DIR / _BEST_META
+    try:
+        return int(json.loads(meta.read_text(encoding="utf-8"))["pass_count"])
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def save_best_tree(
+    project_dir: Path, rel_files: Collection[str], pass_count: int,
+    iteration: int = 0,
+) -> int:
+    """Snapshot `rel_files` (source files, tests excluded by the caller) into
+    .best_tree/ with their pass count. Returns files saved."""
+    import json
+    import shutil
+    best = project_dir / BEST_TREE_DIR
+    if best.exists():
+        shutil.rmtree(best)
+    saved = 0
+    for rel in rel_files:
+        src = project_dir / rel
+        if not src.is_file():
+            continue
+        dst = best / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+        saved += 1
+    if saved:
+        best.mkdir(exist_ok=True)
+        (best / _BEST_META).write_text(
+            json.dumps({"pass_count": pass_count, "iteration": iteration}),
+            encoding="utf-8")
+        log(f"  [ratchet] best tree snapshotted: {saved} file(s), "
+            f"{pass_count} passing (iter {iteration}).")
+    return saved
+
+
+def restore_best_tree(project_dir: Path) -> list[str]:
+    """Copy the snapshotted best tree back over the working tree. Returns the
+    restored relative paths ([] if no snapshot)."""
+    best = project_dir / BEST_TREE_DIR
+    if not best.is_dir():
+        return []
+    import shutil
+    restored: list[str] = []
+    for src in sorted(best.rglob("*")):
+        if not src.is_file() or src.name == _BEST_META:
+            continue
+        rel = str(src.relative_to(best))
+        dst = project_dir / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+        restored.append(rel)
+    if restored:
+        log(f"  [ratchet] restored best tree ({len(restored)} file(s), "
+            f"{best_tree_pass_count(project_dir)} passing) — iteration ended below the floor.")
+    return restored

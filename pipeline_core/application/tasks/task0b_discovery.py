@@ -23,7 +23,8 @@ from ...retry import with_retry
 # Pipeline scratch + build dirs that are NOT project source. rglob over project_dir
 # otherwise pulls in `.skeleton`/`.skeleton-filled` (each has its own `src/` + nested
 # `target/.../out/*.rs` build-script output) and bloats the discovery budget (R9.3).
-_NON_SOURCE_DIRS = frozenset({".skeleton", ".skeleton-filled", "target", ".git"})
+_NON_SOURCE_DIRS = frozenset(
+    {".skeleton", ".skeleton-filled", ".best_tree", "target", ".git"})
 
 
 def _iter_source_rs(project_dir: Path) -> Iterator[Path]:

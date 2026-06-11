@@ -85,6 +85,11 @@ from pipeline_core.application.tasks.task3 import task3 as _task3_impl
 from pipeline_core.application.tasks.task4 import Task4Deps
 from pipeline_core.application.tasks.task4 import task4 as _task4_impl
 from pipeline_core.application.workspace_lifecycle import (
+    best_tree_pass_count,
+    restore_best_tree,
+    save_best_tree,
+)
+from pipeline_core.application.workspace_lifecycle import (
     save_gen_tests_siblings as _wl_save_gen_tests_siblings,
 )
 from pipeline_core.application.workspace_lifecycle import (
@@ -870,6 +875,7 @@ SKIP_DIR_NAMES = {
     "dist", "build", ".build",        # Generic build output
     ".tox", ".eggs",                   # Python test infra artifacts
     ".skeleton", ".skeleton-filled",  # TASK 2 skeleton backend scratch dirs
+    ".best_tree",                      # best-tree ratchet snapshot
     ".original_structure",             # pre-strip API snapshot
     ".chunk_cache", ".task1_partials", # task1 caches
     ".phase_c_logs",                   # Phase C test-fix iteration archives (P4)
@@ -16366,6 +16372,7 @@ Output nothing else."""
 
         _log(f"  [fix loop/fn] fixing {rel}::{fn} (inner cargo check loop)")
         _improvement_loop(name=f"fn:{rel}::{fn}", run_check=_run_check, do_fix=_do,
+                          do_retro=_do_retro,
                           max_stalls=int(os.getenv("FIX_LOOP_PER_FN_MAX_STALLS", "2")))
         return changed
 
@@ -16473,7 +16480,7 @@ Output nothing else."""
 
         _log(f"  [fix loop/impl] fixing {rel}::{container[:50]} (inner cargo check loop)")
         _improvement_loop(name=f"impl:{rel}::{container[:40]}", run_check=_run_check,
-                          do_fix=_do,
+                          do_fix=_do, do_retro=_do_retro,
                           max_stalls=int(os.getenv("FIX_LOOP_PER_FN_MAX_STALLS", "2")))
         return changed
 
@@ -20970,6 +20977,23 @@ This is a Rust procedural macro crate. Strict rules apply:
             # REPOSITORY_SPECIFICATIONS prompt section, and repair compounds
             # on the kept tree. task2a/2b/2c markers stay done → the module
             # loop skips t2 and goes straight to t3 + fix loop.
+            #
+            # Best-tree ratchet: snapshot on a new-best pass count; if this
+            # iteration ended BELOW the best (regressed fix / broken build →
+            # 0 passing), restore the best tree so the next iteration starts
+            # at the floor, never beneath it.
+            _src_rel = [rel for rel in load_manifest(module_manifest)
+                        if rel not in existing_test_files]
+            _best = best_tree_pass_count(project_dir)
+            if current_pass > (_best if _best is not None else -1):
+                _saved_n = save_best_tree(project_dir, _src_rel, current_pass,
+                                          iteration=module_iter)
+                _emit("ratchet.save", data={"pass_count": current_pass,
+                                            "files": _saved_n, "iter": module_iter})
+            elif _best is not None and current_pass < _best:
+                _restored = restore_best_tree(project_dir)
+                _emit("ratchet.restore", data={"best": _best, "current": current_pass,
+                                               "files": len(_restored), "iter": module_iter})
             _log(f"\n  Keeping '{module_name}' tree for repair iteration "
                  f"{module_iter + 1} (no wipe — docs updated, fix loop continues).")
 

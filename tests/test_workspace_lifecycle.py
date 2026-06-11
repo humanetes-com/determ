@@ -94,3 +94,30 @@ def test_wipe_when_phase_reruns(tmp_path: Path) -> None:
     assert (proj / "target" / "debug" / "gen.rs").exists()
     assert stubbed == [True]    # stub written whenever the wipe branch ran
     print("  OK  wipe when phase reruns")
+
+
+def test_best_tree_ratchet_roundtrip(tmp_path) -> None:
+    """Ratchet: snapshot on new best, restore overwrites regressed files,
+    no snapshot → no-op. Meta carries the floor pass count."""
+    from pipeline_core.application.workspace_lifecycle import (
+        best_tree_pass_count,
+        restore_best_tree,
+        save_best_tree,
+    )
+    assert best_tree_pass_count(tmp_path) is None
+    assert restore_best_tree(tmp_path) == []
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src/lib.rs").write_text("good body")
+    (tmp_path / "src/error.rs").write_text("good error")
+    n = save_best_tree(tmp_path, ["src/lib.rs", "src/error.rs", "src/ghost.rs"], 67, iteration=3)
+    assert n == 2  # ghost skipped
+    assert best_tree_pass_count(tmp_path) == 67
+    (tmp_path / "src/lib.rs").write_text("REGRESSED")
+    restored = restore_best_tree(tmp_path)
+    assert sorted(restored) == ["src/error.rs", "src/lib.rs"]
+    assert (tmp_path / "src/lib.rs").read_text() == "good body"
+    # A higher pass count replaces the snapshot wholesale.
+    (tmp_path / "src/lib.rs").write_text("better body")
+    save_best_tree(tmp_path, ["src/lib.rs"], 80, iteration=4)
+    assert best_tree_pass_count(tmp_path) == 80
+    assert restore_best_tree(tmp_path) == ["src/lib.rs"]
