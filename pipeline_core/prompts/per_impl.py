@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pipeline_core.prompts.runtime import promoted_error_rules
+from pipeline_core.prompts.runtime import promoted_error_rules, repo_spec_section
 from pipeline_core.prompts.sections import (
     format_impl_block_for_prompt,
     gotchas_summary,
@@ -88,6 +88,12 @@ def build_per_impl_prompt(
     invariants_block = tag_block("CLUSTER_INVARIANTS", invariants_section)
     trait_block = tag_block("TRAIT_CONTRACT", trait_contract_for(container))
     recurring_block = tag_block("RECURRING_ERRORS", promoted_error_rules(fr_path))
+    repo_spec_block = tag_block(
+        "REPOSITORY_SPECIFICATIONS",
+        repo_spec_section(fr_path, file_rel=file_rel, container=container),
+        prefix="The crate's own specification documents (functional "
+               "requirements, build rules, API ground truth). When your plan "
+               "conflicts with them, follow the spec.\n")
     retro_block = tag_block(
         "RETROSPECTIVE_GUIDANCE", retrospective_guidance,
         prefix="The previous attempt at this impl block did not reduce the "
@@ -131,7 +137,7 @@ Stubs to fill in this response: {stub_names}
 <RUST_GOTCHAS>
 {gotchas_summary()}
 </RUST_GOTCHAS>
-{retro_block}{siblings_block}{trait_block}{types_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{dispatch_family_section}{related_section}
+{repo_spec_block}{retro_block}{siblings_block}{trait_block}{types_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{dispatch_family_section}{related_section}
 <TARGET_IMPL_BLOCK file="{file_rel}">
 ```rust
 {target_render}

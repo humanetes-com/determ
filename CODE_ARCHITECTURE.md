@@ -663,7 +663,24 @@ The R12 fix made the skeleton clean but the next microcrate run STILL corrupted 
 #### R12.2 — TASK 3 re-verify recursed unbounded → RecursionError  ✅ FIXED + test
 Surfaced by the same run (once partial progress became possible). `task3.py` re-invoked `task3()` whenever the inline retry merely CHANGED the cargo text; cargo output isn't byte-deterministic (ordering/timing) → a no-op retry "changed" it → 981-frame `RecursionError`. Fix: `_should_reverify` gates on stable test COUNTS (passed / fewer-fail / more-pass) + a hard budget (2) → always terminates → falls through to TASK 4. Pinned by `tests/test_task3_reverify.py` (5 cases incl. the exact bug: same counts, different text → no recurse).
 
-### R13 — FR/genesis efficacy: measure, then wire into phase-c  ⬜ PLANNED (P1 · the docs are the product; their effect is unmeasured)
+### R13 — FR/genesis efficacy  🔄 SUPERSEDED BY REPOSITORY SPECIFICATIONS (2026-06-11, user decision: wire now, skip the R13.1 gate)
+
+**Repository Specifications (RepoSpec)** = the crate's spec-document set: functional requirements +
+genesis (prose + `genesis_rules_read` structured rules) + API surface. USER DECISION (session 63):
+(a) every code-producing prompt from t2 onward carries it; (b) iterations REPAIR, they don't wipe.
+
+| piece | where |
+|---|---|
+| pure renderer | `pipeline_core/prompts/repo_spec.py` — `RepoSpecDocs` + `render_repo_spec` (relevance: FR paragraphs + cross-file API sections matching `identifiers_for_target(fn, container, file)`; budget-tiered: rules → FR excerpt → genesis → API; own-file API section excluded — it's already the prompt's file view) |
+| provider | pipeline.py `_repo_spec_section` (fr_path → project/module; mtime-cached `_load_repo_spec_docs`; FR's `## Model Notes` stripped — has its own channel; fail-safe ""), wired via `prompts/runtime.py` facade `repo_spec_section` (3rd configure slot, inert default) |
+| injected into | per-fn initial + fix, per-impl (builders call the facade — covers phase-c, test-retry loop C, `_apply_per_fn_fixes`/t3-inline-retry); `generate_fix_loop` per-fn/per-impl inner prompts + whole-file prompt (genesis-rules complement; FR already in `_spec_block`), `fr_path` threaded from task2.py |
+| caps | `_REPO_SPEC_CAP` = max(2500, SCCL//10) per-fn/per-impl; `_REPO_SPEC_CAP_WIDE` = max(5000, SCCL//5) whole-file |
+| NOT injected | task0c (t0, pre-strip test augmentation), skeleton-A structural check |
+| **no-wipe repair iterations** | main() retry block: `delete_source_files` + task2b/2c invalidation REMOVED — tree kept, markers stay done (`phase_valid` is status-only), next iter skips t2 → t3 + fix loop repairs the kept tree with updated docs in prompts. Old wipe rationale (fresh measurement of doc quality) retired: the active generator never read the docs, so regen was a constant function (15-iter 67/123 plateau, session 63) |
+| tests | tests/test_repo_spec.py (renderer relevance/budget/empty, provider fail-safe + notes-strip, builders carry the block, fr_path=None inert) |
+| validation | ●●● live run: expect `<REPOSITORY_SPECIFICATIONS>` in logs/prompts per-fn prompts; `Keeping '{module}' tree for repair iteration` instead of `Cleaning up`; t3 pass counts should now be MONOTONE across iterations (repair compounds) — BAD = pass count drops (fix loop regressing a kept tree) |
+
+### R13 (original framing) — measure, then wire  (kept for the metrics steps)
 Goal restated: the pipeline's deliverable is `functional_requirements_{crate}.md` + `genesis.md` such that
 a fresh run converges in as few iterations as possible. Today the hypothesis "richer docs → fewer
 iterations" is (a) unmeasured and (b) structurally weak: t2c phase-c per-fn/per-impl — the dominant

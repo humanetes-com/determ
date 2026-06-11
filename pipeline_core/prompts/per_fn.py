@@ -8,7 +8,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pipeline_core.prompts.runtime import annotate_file_view, promoted_error_rules
+from pipeline_core.prompts.runtime import (
+    annotate_file_view,
+    promoted_error_rules,
+    repo_spec_section,
+)
 from pipeline_core.prompts.sections import (
     gotchas_for_error,
     gotchas_summary,
@@ -78,6 +82,15 @@ def build_per_fn_prompt(
     # P5.5: promoted recurring errors (E0xxx codes seen 3+ times this run).
     # P6.4: pass fr_path so past notes tagged with active codes get surfaced.
     recurring_block = tag_block("RECURRING_ERRORS", promoted_error_rules(fr_path))
+    # Repository Specifications: FR + genesis + API, relevance-selected and
+    # budget-capped — every code-producing prompt carries the crate's specs.
+    repo_spec_block = tag_block(
+        "REPOSITORY_SPECIFICATIONS",
+        repo_spec_section(fr_path, file_rel=file_rel, fn_name=fn_name,
+                          container=container),
+        prefix="The crate's own specification documents (functional "
+               "requirements, build rules, API ground truth). When your plan "
+               "conflicts with them, follow the spec.\n")
     container_line = f"In: {container}\n" if container else ""
     return f"""Implement ONE Rust function so its tests pass.
 
@@ -88,7 +101,7 @@ Crate: {module_name} | Cluster: {cluster_name} | File: {file_rel} | Fn: {fn_name
 <RUST_GOTCHAS>
 {gotchas_summary()}
 </RUST_GOTCHAS>
-{siblings_block}{trait_block}{types_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}
+{repo_spec_block}{siblings_block}{trait_block}{types_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}
 FILE — stubs are annotated. SKELETON STUB = will be filled later (rely on
 the signature). TARGET = implement now.
 
@@ -191,6 +204,13 @@ def build_per_fn_fix_prompt(
                "these idioms whenever its situation matches one of them. Do "
                "NOT invent a new approach when one clearly applies.\n")
     recurring_block = tag_block("RECURRING_ERRORS", promoted_error_rules(fr_path))
+    repo_spec_block = tag_block(
+        "REPOSITORY_SPECIFICATIONS",
+        repo_spec_section(fr_path, file_rel=file_rel, fn_name=fn_name,
+                          container=container),
+        prefix="The crate's own specification documents (functional "
+               "requirements, build rules, API ground truth). When your plan "
+               "conflicts with them, follow the spec.\n")
     # P2: prior-attempts block. Show up to the last 3 distinct attempts
     # with their compact error signature, so the model can see the search
     # space it has already explored. Budget capped to keep prompt lean.
@@ -233,7 +253,7 @@ Crate: {module_name} | Cluster: {cluster_name} | File: {file_rel} | Fn: {fn_name
 <RUST_GOTCHAS>
 {gotchas_summary()}
 </RUST_GOTCHAS>
-{retro_block}{siblings_block}{gotchas_block}{trait_block}{types_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{prior_block}
+{repo_spec_block}{retro_block}{siblings_block}{gotchas_block}{trait_block}{types_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{prior_block}
 FILE (previous attempt reverted; stubs annotated):
 <FILE path="{file_rel}">
 {annotated}

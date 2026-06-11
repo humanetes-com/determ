@@ -162,6 +162,7 @@ def task2_inner_loop(project_dir: Path, genesis_path: Path, functional_req_path:
             timeout=deps.build_timeout,
             allowed_dir_prefix=module_dir_rel,
             functional_req=_fix_loop_fr,
+            fr_path=functional_req_path,
         )
         if build_ok:
             log("  Build check PASSED.")
@@ -281,4 +282,5 @@ def task2_fix_loop(
         max_fix_attempts=deps.task2_fix_retries,
         timeout=deps.test_timeout,
         functional_req=functional_req,
+        fr_path=functional_req_path,
     )

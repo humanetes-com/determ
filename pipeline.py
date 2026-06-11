@@ -155,6 +155,11 @@ from pipeline_core.prompts.per_fn import (
 from pipeline_core.prompts.per_impl import (
     build_per_impl_prompt as _build_per_impl_prompt,
 )
+from pipeline_core.prompts.repo_spec import (
+    RepoSpecDocs,
+    identifiers_for_target,
+    render_repo_spec,
+)
 from pipeline_core.prompts.sections import (
     build_dispatch_family_section as _build_dispatch_family_section_pure,
 )
@@ -682,6 +687,8 @@ _README_CAP    = max(3_000, SINGLE_CALL_CHAR_LIMIT // 20)   # ~5% of budget
 _PROFILE_CAP   = max(2_000, SINGLE_CALL_CHAR_LIMIT // 30)   # ~3% of budget
 _GENESIS_CAP   = max(3_000, SINGLE_CALL_CHAR_LIMIT // 20)   # methodology doc
 _FIX_ERR_CAP   = max(2_000, SINGLE_CALL_CHAR_LIMIT // 10)   # per-attempt error in fix loop
+_REPO_SPEC_CAP = max(2_500, SINGLE_CALL_CHAR_LIMIT // 10)   # REPOSITORY_SPECIFICATIONS in per-fn/per-impl prompts
+_REPO_SPEC_CAP_WIDE = max(5_000, SINGLE_CALL_CHAR_LIMIT // 5)  # …in whole-file fix prompts (bigger budget)
 _STRATEGY_CAP  = max(4_000, SINGLE_CALL_CHAR_LIMIT // 15)   # coverage strategy doc
 _SIBLING_CAP   = max(3_000, SINGLE_CALL_CHAR_LIMIT // 30)   # per-sibling condensed source
 _SRC_SNIP_CAP  = max(4_000, SINGLE_CALL_CHAR_LIMIT // 10)   # source snippet in task0c prompts
@@ -6601,13 +6608,83 @@ def _promoted_error_rules(fr_path: "Path | None" = None) -> str:
             + "\n".join(promoted))
 
 
+# Repository Specifications (2026-06-11): the crate's spec-document set —
+# functional requirements + genesis (prose + structured rules) + API surface
+# — injected into EVERY code-producing prompt from t2 onward via the prompts
+# runtime facade. Loaded here (I/O + mtime cache), rendered by the pure
+# pipeline_core.prompts.repo_spec selector.
+_REPO_SPEC_CACHE: dict[str, tuple[tuple, RepoSpecDocs]] = {}
+_FR_PREFIX = "functional_requirements_"
+
+
+def _strip_model_notes_section(fr_text: str) -> str:
+    """Drop '## Model Notes …' from the FR copy used for repo-spec excerpts —
+    the notes already reach prompts via the dedicated MODEL_NOTES filter."""
+    idx = fr_text.find("## Model Notes")
+    if idx == -1:
+        return fr_text
+    nxt = fr_text.find("\n## ", idx + 1)
+    return fr_text[:idx] + (fr_text[nxt + 1:] if nxt != -1 else "")
+
+
+def _load_repo_spec_docs(project_dir: Path, module_name: str) -> RepoSpecDocs:
+    genesis_p = project_dir / "genesis.md"
+    fr_p = project_dir / f"{_FR_PREFIX}{module_name}.md"
+    api_p = _api_surface_path(project_dir, module_name)
+    mtimes = tuple(p.stat().st_mtime if p.exists() else 0.0
+                   for p in (genesis_p, fr_p, api_p))
+    key = str(project_dir / module_name)
+    cached = _REPO_SPEC_CACHE.get(key)
+    if cached and cached[0] == mtimes:
+        return cached[1]
+    def _read(p: Path) -> str:
+        try:
+            return p.read_text(encoding="utf-8") if p.exists() else ""
+        except OSError:
+            return ""
+    docs = RepoSpecDocs(
+        genesis_rules=genesis_rules_read(project_dir, module_scope=module_name or "*"),
+        genesis=_read(genesis_p),
+        functional_req=_strip_model_notes_section(_read(fr_p)),
+        api_surface=_read(api_p),
+    )
+    _REPO_SPEC_CACHE[key] = (mtimes, docs)
+    return docs
+
+
+def _repo_spec_section(
+    fr_path: "Path | None" = None, *, file_rel: str = "", fn_name: str = "",
+    container: str = "", char_budget: "int | None" = None,
+) -> str:
+    """Provider behind prompts.runtime.repo_spec_section. Derives project_dir
+    and module from fr_path (functional_requirements_{module}.md). Fail-safe:
+    any problem → "" (prompt renders without the section)."""
+    try:
+        if fr_path is None:
+            return ""
+        fr_path = Path(fr_path)
+        if not fr_path.name.startswith(_FR_PREFIX) or not fr_path.name.endswith(".md"):
+            return ""
+        module = fr_path.name[len(_FR_PREFIX):-3]
+        docs = _load_repo_spec_docs(fr_path.parent, module)
+        return render_repo_spec(
+            docs, file_rel=file_rel,
+            identifiers=identifiers_for_target(fn_name, container, file_rel),
+            char_budget=char_budget or _REPO_SPEC_CAP,
+        )
+    except Exception:
+        return ""
+
+
 # Slice 8: the prompt builders moved to pipeline_core/prompts/ (pure
-# text→text). Their two impure collaborators stay here — the regex-based
-# file-view annotator and the run-state promoted-error rules — and are wired
-# into the prompts runtime facade once at import time.
+# text→text). Their impure collaborators stay here — the regex-based
+# file-view annotator, the run-state promoted-error rules, and the
+# repo-spec loader — and are wired into the prompts runtime facade once
+# at import time.
 _prompts_runtime.configure(
     annotate_file_view=_annotate_file_view,
     promoted_error_rules=_promoted_error_rules,
+    repo_spec_section=_repo_spec_section,
 )
 
 
@@ -15891,9 +15968,15 @@ def generate_fix_loop(
     timeout: int = BUILD_TIMEOUT,
     allowed_dir_prefix: str = "",
     functional_req: str = "",
+    fr_path: "Path | None" = None,
 ) -> tuple[bool, str]:
     """
     Shared iterative fix loop for any code generation step.
+
+    fr_path (functional_requirements_{module}.md) keys the Repository
+    Specifications section (FR + genesis + API) injected into every fix
+    prompt this loop builds — the per-fn/per-impl inner loops and the
+    whole-file rewrite path.
 
     Pattern:
       1. Run check_cmd (compile check or test run).
@@ -16093,9 +16176,15 @@ Current source files:
                                              head=_err_cap // 4, tail=3 * _err_cap // 4)
         _source_block_capped = smart_truncate(source_block, total_limit=_src_cap,
                                               head=_src_cap // 3, tail=2 * _src_cap // 3)
+        # Repository Specifications complement: genesis rules + methodology
+        # (the FR is already in _spec_block; no target identifiers here, so
+        # the FR-excerpt/API parts of the section stay empty by design).
+        _repo_block = _tag_block(
+            "REPOSITORY_SPECIFICATIONS",
+            _repo_spec_section(fr_path, char_budget=_REPO_SPEC_CAP_WIDE))
         prompt = f"""Code generation produced files that fail the check below.
 {_FIX_THINKING_DIRECTIVE}Fix ONLY the files causing the failure — do NOT regenerate correct files.
-{_history_section}{_spec_block}{_retro_block}{_gotchas_block}
+{_history_section}{_spec_block}{_repo_block}{_retro_block}{_gotchas_block}
 Error output:
 ```
 {_last_output_capped}
@@ -16230,6 +16319,10 @@ Current source files:
                 "you MAY add it by making the FIRST body line a `where` clause "
                 "(e.g. `where T: Sized`).\n"
             ) if allow_where else "Signature (do NOT change it):\n"
+            _repo_block = _tag_block(
+                "REPOSITORY_SPECIFICATIONS",
+                _repo_spec_section(fr_path, file_rel=_rel, fn_name=_fn,
+                                   container=fn_container or ""))
             prompt = f"""ONE Rust function does not compile. Return ONLY its corrected body.
 {_FIX_THINKING_DIRECTIVE}File: {_rel} | Fn: {_fn}
 {sig_rule}{sig_text}
@@ -16243,7 +16336,7 @@ Compiler errors:
 ```
 {errs}
 ```
-{rblock}{_gotchas_block_for(out)}{_tests_for_names({_fn})}
+{_repo_block}{rblock}{_gotchas_block_for(out)}{_tests_for_names({_fn})}
 Return the corrected body as EXACTLY one block (statements only — no fn
 signature, no outer braces):
 <FN name="{_fn}" block="any">
@@ -16329,6 +16422,9 @@ Output nothing else."""
                 '<FN name="read" block="impl">\nwhere T: Sized\n... body ...\n</FN>\n'
                 "Do not otherwise change any signature. Never add a bound to a `pub` fn.\n"
             ) if allow_where else "Do NOT change any signature.\n"
+            _repo_block = _tag_block(
+                "REPOSITORY_SPECIFICATIONS",
+                _repo_spec_section(fr_path, file_rel=rel, container=container))
             prompt = f"""A Rust impl block fails to compile. Fix the function BODIES so the
 whole block compiles. Change ONLY what the errors require; leave already-correct
 functions untouched. {where_rule}
@@ -16342,7 +16438,7 @@ Compiler errors:
 ```
 {errs}
 ```
-{rblock}{_gotchas_block_for(out)}{_tests_for_names(member_names)}
+{_repo_block}{rblock}{_gotchas_block_for(out)}{_tests_for_names(member_names)}
 For EACH function you change, return one block (body statements only — no fn
 signature line, no outer braces). Use the function name verbatim:
 <FN name="FUNCTION_NAME" block="impl">
@@ -20864,19 +20960,18 @@ This is a Rust procedural macro crate. Strict rules apply:
             # can compare against what failed rather than starting blind.
             prev_task2_source = t4_source_context
 
-            # Clean generated files; restore stub so workspace stays parseable.
-            _log(f"\n  Cleaning up '{module_name}' generated files for retry...")
-            delete_source_files(project_dir, module_manifest,
-                                module_dir=module_dir,
-                                existing_test_files=existing_test_files)
-            # The merged tree is gone → invalidate task2b/task2c so the next
-            # iteration re-merges + re-fills. task2a (per-cluster fills in
-            # .skeleton-filled/) survives, so per-cluster reconstruction is NOT
-            # repeated across retries — granular resume saves that cost.
-            _mark_phase(project_dir, f"task2b/{module_name}", "pending")
-            _mark_phase(project_dir, f"task2c/{module_name}", "pending")
-            if is_multi_module:
-                _write_workspace_stub(crate_type, module_dir)
+            # Repair iterations (2026-06-11): the tree is KEPT — no wipe, no
+            # re-merge, no re-fill from scratch. The wipe-and-regenerate loop
+            # measured "are the docs good enough for a clean generation?",
+            # but the active skeleton/TDD generator never read those docs
+            # (R13), so every regeneration landed on the same plateau while
+            # discarding the fix loop's progress. Now t4's genesis update and
+            # the FR reach the NEXT iteration's t3 fix loop through the
+            # REPOSITORY_SPECIFICATIONS prompt section, and repair compounds
+            # on the kept tree. task2a/2b/2c markers stay done → the module
+            # loop skips t2 and goes straight to t3 + fix loop.
+            _log(f"\n  Keeping '{module_name}' tree for repair iteration "
+                 f"{module_iter + 1} (no wipe — docs updated, fix loop continues).")
 
             module_iter += 1
 
