@@ -16590,7 +16590,7 @@ Output nothing else."""
                 # Stubs that compile but fail tests: direct one-shot fill.
                 # _fix_single_fn is wrong here — its inner compile loop exits
                 # immediately (ok=True) because the stub has no compile errors.
-                changed: list[str] = []
+                tdd_changed: list[str] = []
                 for (rel, fn) in sorted(tdd_frontier.keys()):
                     if rel in existing_test_files:
                         continue
@@ -16626,16 +16626,15 @@ Output nothing else."""
                     )
                     body = blk.get("body") if blk else None
                     if body:
-                        ok_s, reason, delta = _splice_fn_with_where(
-                            path, "", fn, body, allow_nonstub=True)
+                        ok_s, delta = _splice_fn_body(path, fn, body, allow_nonstub=True)
                         if ok_s:
-                            changed.append(f"{rel}::{fn}")
+                            tdd_changed.append(f"{rel}::{fn}")
                             _log(f"  [fix loop/tdd-stub] spliced {rel}::{fn} ({delta:+d} bytes)")
                         else:
-                            _log(f"  [fix loop/tdd-stub] splice rejected {rel}::{fn} ({reason})")
+                            _log(f"  [fix loop/tdd-stub] splice rejected {rel}::{fn}")
                 _err_preview = output[-_FIX_ERR_CAP:] if len(output) > _FIX_ERR_CAP else output
-                return {"summary": f"tdd_stub changed={len(changed)}",
-                        "files_changed_str": ", ".join(changed[:4]) if changed else "no files changed",
+                return {"summary": f"tdd_stub changed={len(tdd_changed)}",
+                        "files_changed_str": ", ".join(tdd_changed[:4]) if tdd_changed else "no files changed",
                         "error_preview": _err_preview, "error_sig": _err_preview}
             blocks = _collect_impl_blocks(project_dir)
             if not blocks:

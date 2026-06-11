@@ -56,7 +56,7 @@ def _run(ws: Path) -> None:
         fr_path=None,
         skip_end_pass_test=True,
         # U2 gate inputs: "add" must pass "test_add"
-        tdd_frontier_tests={("src/lib.rs", "add"): {"test_add"}},
+        tdd_frontier_tests={("lib.rs", "add"): {"test_add"}},
         tdd_test_cmd="cargo test",
     )
 
