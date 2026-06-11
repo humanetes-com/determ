@@ -793,14 +793,18 @@ def _latest_compile_file_stats() -> dict[str, Any] | None:
 
 def _latest_test_file_stats() -> dict[str, Any] | None:
     """Most recent tests.file_stats event payload (per-file pass/fail), or None."""
-    evs = _read_recent_events(lambda n: n == "tests.file_stats")
-    return (evs[-1].get("data") or None) if evs else None
+    if not (evs := _read_recent_events(lambda n: n == "tests.file_stats")):
+        return None
+    data = evs[-1].get("data")
+    return data if isinstance(data, dict) else None
 
 
 def _latest_flow_audit() -> dict[str, Any] | None:
     """Most recent flow_audit.report payload (pipeline --audit), or None."""
-    evs = _read_recent_events(lambda n: n == "flow_audit.report")
-    return (evs[-1].get("data") or None) if evs else None
+    if not (evs := _read_recent_events(lambda n: n == "flow_audit.report")):
+        return None
+    data = evs[-1].get("data")
+    return data if isinstance(data, dict) else None
 
 
 def _flow_audit_rows(data: dict[str, Any]) -> list[str]:
@@ -1351,7 +1355,8 @@ def pipeline_status():
         if p + f == 0:
             return ""
         cell = f"tests {p}/{p + f}"
-        return green(cell) if f == 0 else red(cell)
+        colored: str = green(cell) if f == 0 else red(cell)
+        return colored
 
     _tmap = {fd["file"]: fd for fd in (_test_stats or {}).get("files", [])}
     if _compile_stats and _in_fix_phase:

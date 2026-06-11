@@ -200,9 +200,9 @@ fi
 # ---------------------------------------------------------------------------
 # Start the pipeline
 # ---------------------------------------------------------------------------
-_PIPELINE_ARGS="--project anyhow"
-[[ "$_WIPE" == true ]]           && _PIPELINE_ARGS="--repo https://github.com/dtolnay/anyhow --clean"
-[[ "$_KEEP_AUGMENTED" == true ]] && _PIPELINE_ARGS="--project anyhow --restart-from-augmented"
+_PIPELINE_ARGS="--project anyhow --audit"
+[[ "$_WIPE" == true ]]           && _PIPELINE_ARGS="--repo https://github.com/dtolnay/anyhow --clean --audit"
+[[ "$_KEEP_AUGMENTED" == true ]] && _PIPELINE_ARGS="--project anyhow --restart-from-augmented --audit"
 
 # Final guard against a duplicate slipping in despite the flock (e.g. if
 # someone bypassed the lock or pgrep was momentarily wrong above).

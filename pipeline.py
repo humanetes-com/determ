@@ -16963,20 +16963,20 @@ def _emit_per_file_test_overview(project_dir: Path, output: str, *, context: str
         return
     if not stats:
         return
-    rows = [{"file": f, **s} for f, s in stats.items()]
-    rows.sort(key=lambda r: (-r["failed"], r["file"]))
-    tot_p = sum(r["passed"] for r in rows)
-    tot_t = sum(r["passed"] + r["failed"] for r in rows)
+    ordered = sorted(stats.items(), key=lambda kv: (-kv[1]["failed"], kv[0]))
+    tot_p = sum(s["passed"] for _, s in ordered)
+    tot_t = sum(s["passed"] + s["failed"] for _, s in ordered)
     _log(f"  [test overview] {context} — {tot_p}/{tot_t} tests passing:")
-    name_w = max(len(r["file"].split("/")[-1]) for r in rows)
-    for r in rows:
-        short = r["file"].split("/")[-1]
-        total = r["passed"] + r["failed"]
-        mark = "✓" if r["failed"] == 0 and total else "✗"
-        ign = f"  ({r['ignored']} ignored)" if r["ignored"] else ""
-        _log(f"    {short.ljust(name_w)}  {mark} tests {r['passed']}/{total}{ign}")
+    name_w = max(len(f.split("/")[-1]) for f, _ in ordered)
+    for f, s in ordered:
+        short = f.split("/")[-1]
+        total = s["passed"] + s["failed"]
+        mark = "✓" if s["failed"] == 0 and total else "✗"
+        ign = f"  ({s['ignored']} ignored)" if s["ignored"] else ""
+        _log(f"    {short.ljust(name_w)}  {mark} tests {s['passed']}/{total}{ign}")
     _emit("tests.file_stats", data={
-        "context": context, "passed": tot_p, "total": tot_t, "files": rows,
+        "context": context, "passed": tot_p, "total": tot_t,
+        "files": [{"file": f, **s} for f, s in ordered],
     })
 
 
