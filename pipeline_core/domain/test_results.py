@@ -126,3 +126,88 @@ def extract_test_output_from_file(file_content: str) -> str:
     if idx == -1:
         return file_content
     return file_content[idx + len(marker):]
+
+
+def _resolve_test_file(module_path: list[str], known_files: set[str]) -> str:
+    """Resolve a unit-test module path (e.g. ['context', 'gen_tests_1']) to a
+    source file in `known_files` (forward-slash relative paths). Tries, deepest
+    first: the slash-path module file, then the dotted #[path] sibling
+    (`src/context.gen_tests_1.rs`), then shallower prefixes (inline `mod tests`
+    lands on the parent file). No module path → src/lib.rs."""
+    if not module_path:
+        return "src/lib.rs" if "src/lib.rs" in known_files else ""
+    for depth in range(len(module_path), 0, -1):
+        prefix = module_path[:depth]
+        slash = "src/" + "/".join(prefix) + ".rs"
+        if slash in known_files:
+            return slash
+        if depth >= 2:
+            dotted = "src/" + "/".join(prefix[:-1]) + "." + prefix[-1] + ".rs"
+            if dotted in known_files:
+                return dotted
+    return "src/lib.rs" if "src/lib.rs" in known_files else ""
+
+
+def per_file_test_stats(
+    test_output: str,
+    known_files: set[str],
+    test_name_index: dict[str, str] | None = None,
+) -> dict[str, dict[str, int]]:
+    """Attribute cargo-test result lines to source/test files. Returns
+    {relative_file: {"passed": n, "failed": n, "ignored": n}}.
+
+    Attribution is per test NAME (interleaving-proof: cargo binary outputs can
+    interleave on stdout, so section↔binary-header pairing by order is NOT
+    reliable — observed live). Order tried:
+      1. `test_name_index` — bare name → tests/*.rs file (caller builds it from
+         file contents); "" in the index marks an ambiguous name (same fn name
+         in several test files) → "(unmapped)".
+      2. doc-tests — name starts with a known file path ("src/lib.rs - … (line N)").
+      3. module path — `context::gen_tests_1::test_x` via _resolve_test_file.
+      4. bare name with no index hit → "(unmapped)" (never guess lib.rs).
+    """
+    index = test_name_index or {}
+    stats: dict[str, dict[str, int]] = {}
+    for raw in test_output.splitlines():
+        line = raw.strip()
+        if not (line.startswith("test ") and " ... " in line):
+            continue
+        if line.startswith("test result:"):
+            continue
+        name, _, status = line[len("test "):].partition(" ... ")
+        name = name.strip()
+        status = status.split(",")[0].split(" ")[0]  # "ignored, reason" → "ignored"
+        if status not in ("ok", "FAILED", "ignored"):
+            continue
+        if name in index:
+            file = index[name]
+        elif " - " in name and name.split(" - ", 1)[0] in known_files:
+            file = name.split(" - ", 1)[0]          # doc-test
+        elif "::" in name:
+            file = _resolve_test_file(name.split("::")[:-1], known_files)
+        else:
+            file = ""
+        rec = stats.setdefault(file or "(unmapped)",
+                               {"passed": 0, "failed": 0, "ignored": 0})
+        rec[{"ok": "passed", "FAILED": "failed", "ignored": "ignored"}[status]] += 1
+    return stats
+
+
+def build_test_name_index(file_texts: dict[str, str]) -> dict[str, str]:
+    """{relative_path: file_text} for tests/*.rs → {fn_name: path} for bare
+    cargo test names. Collects every `fn name(` (over-collection of helpers is
+    harmless — only actual test names are looked up). A name defined in more
+    than one file maps to "" (ambiguous → caller buckets it "(unmapped)")."""
+    index: dict[str, str] = {}
+    for path, text in file_texts.items():
+        for raw in text.splitlines():
+            line = raw.strip()
+            for prefix in ("pub ", "async ", "unsafe ", "const ", "extern \"C\" "):
+                if line.startswith(prefix):
+                    line = line[len(prefix):]
+            if not line.startswith("fn "):
+                continue
+            name = line[3:].split("(")[0].strip()
+            if name.isidentifier():
+                index[name] = "" if index.get(name, path) != path else path
+    return index

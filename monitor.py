@@ -791,6 +791,12 @@ def _latest_compile_file_stats() -> dict[str, Any] | None:
         return None
 
 
+def _latest_test_file_stats() -> dict[str, Any] | None:
+    """Most recent tests.file_stats event payload (per-file pass/fail), or None."""
+    evs = _read_recent_events(lambda n: n == "tests.file_stats")
+    return (evs[-1].get("data") or None) if evs else None
+
+
 def _find_project_dir():
     """Return path to the most-recently-active workspace in tmp/, or None."""
     tmp = os.path.join(SCRIPT_DIR, "tmp")
@@ -1307,26 +1313,64 @@ def pipeline_status():
 
     # Task2/fix-loop: show per-file compile error stats instead of coverage.
     _compile_stats = _latest_compile_file_stats()
+    _test_stats = _latest_test_file_stats()
     _in_fix_phase = (tp["states"].get("task2") == "in_progress"
                      or tp["states"].get("task3") == "in_progress")
+
+    def _tests_marker(file_stats: dict | None) -> str:
+        """`tests 3/5` cell for one file's tests.file_stats row; "" if no data."""
+        if not file_stats:
+            return ""
+        p, f = file_stats.get("passed", 0), file_stats.get("failed", 0)
+        if p + f == 0:
+            return ""
+        cell = f"tests {p}/{p + f}"
+        return green(cell) if f == 0 else red(cell)
+
+    _tmap = {fd["file"]: fd for fd in (_test_stats or {}).get("files", [])}
     if _compile_stats and _in_fix_phase:
         files = _compile_stats.get("files", [])
         clean = _compile_stats.get("clean", 0)
         total = _compile_stats.get("total", 0)
         attempt_n = _compile_stats.get("attempt", "?")
         rows.append(dim(f"  {'─' * max(4, min(w - 2, 60))}"))
-        rows.append(f"  compile overview — {green(str(clean))}/{total} clean  (attempt {attempt_n})")
+        hdr = f"  compile overview — {green(str(clean))}/{total} clean  (attempt {attempt_n})"
+        if _test_stats:
+            tp_, tt_ = _test_stats.get("passed", 0), _test_stats.get("total", 0)
+            hdr += f"  tests {(green if tp_ == tt_ else red)(f'{tp_}/{tt_}')} passing"
+        rows.append(hdr)
         max_name = max((len(f["file"].split("/")[-1]) for f in files), default=10)
+        shown = set()
         for fd in sorted(files, key=lambda f: (-f["errors"], f["file"])):
             short = fd["file"].split("/")[-1]
             errs  = fd["errors"]
             lines = fd["lines"]
             fns   = fd["fns"]
+            shown.add(fd["file"])
             marker = green("✓ clean") if errs == 0 else red("█" * min(errs, 6)) + f" {errs}"
-            rows.append(f"  {short.ljust(max_name)}  {str(lines).rjust(4)}L  {str(fns).rjust(3)}fn  {marker}")
+            tcell = _tests_marker(_tmap.get(fd["file"])) if errs == 0 else ""
+            rows.append(f"  {short.ljust(max_name)}  {str(lines).rjust(4)}L  {str(fns).rjust(3)}fn  {marker}  {tcell}".rstrip())
+        # Test-bearing files outside the compile table (tests/*.rs, doc-tests).
+        for f in sorted(_tmap.keys() - shown):
+            tcell = _tests_marker(_tmap[f])
+            if tcell:
+                rows.append(f"  {f.split('/')[-1].ljust(max_name)}  {' ' * 11}  {tcell}")
+    elif _test_stats and _in_fix_phase:
+        # No compile stats yet (e.g. first t3 run passed straight through the
+        # fix loop) — show the test overview on its own.
+        tp_, tt_ = _test_stats.get("passed", 0), _test_stats.get("total", 0)
+        ctx = _test_stats.get("context", "")
+        rows.append(dim(f"  {'─' * max(4, min(w - 2, 60))}"))
+        rows.append(f"  test overview — {(green if tp_ == tt_ else red)(f'{tp_}/{tt_}')} passing  ({ctx})")
+        tfiles = sorted(_tmap.values(), key=lambda r: (-r.get("failed", 0), r["file"]))
+        max_name = max((len(r["file"].split("/")[-1]) for r in tfiles), default=10)
+        for r in tfiles:
+            tcell = _tests_marker(r)
+            if tcell:
+                rows.append(f"  {r['file'].split('/')[-1].ljust(max_name)}  {tcell}")
 
     cov_data = _parse_coverage_json(proj_dir)
-    if cov_data and not (_compile_stats and _in_fix_phase):
+    if cov_data and not ((_compile_stats or _test_stats) and _in_fix_phase):
         cur_base = os.path.basename(prog["current_file"]) if prog["current_file"] != "?" else ""
         # For non-default clusters, restrict to files the cluster is actually targeting.
         # If the cluster hasn't processed any files yet (e.g. harness fix running), show all.

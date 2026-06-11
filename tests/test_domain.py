@@ -112,3 +112,39 @@ def test_extract_test_output_from_file_strips_genesis_header() -> None:
     assert test_results.extract_test_output_from_file(blob) == "real cargo output here"
     # No separator → return the content unchanged.
     assert test_results.extract_test_output_from_file("just output") == "just output"
+
+
+def test_per_file_test_stats_name_attribution() -> None:
+    """Per-file test attribution is name-based (binary outputs interleave on
+    stdout, so section↔header order-pairing is unreliable — observed live):
+    module paths → src files (incl. dotted gen_tests siblings), bare names →
+    the caller-built index, doc-tests → their own path, ambiguous/unknown →
+    (unmapped). Ignored tests counted separately."""
+    known = {"src/lib.rs", "src/context.rs", "src/context.gen_tests_1.rs",
+             "tests/test_fmt.rs", "tests/test_macros.rs"}
+    index = test_results.build_test_name_index({
+        "tests/test_fmt.rs": "fn helper() {}\n#[test]\nfn test_display() {}\n",
+        "tests/test_macros.rs": "pub fn test_ensure() {}\nfn test_display() {}\n",
+    })
+    assert index["test_ensure"] == "tests/test_macros.rs"
+    assert index["test_display"] == ""  # defined in both files → ambiguous
+    out = "\n".join([
+        "running 3 tests",  # headers/sections deliberately NOT consistent
+        "test context::gen_tests_1::test_a ... ok",
+        "test context::tests::test_b ... FAILED",
+        "test test_ensure ... ok",
+        "test test_display ... ok",
+        "test ui ... ignored, requires nightly",
+        "test src/lib.rs - Error (line 10) ... ok",
+        "test result: FAILED. 3 passed; 1 failed; 1 ignored",
+        "--- stderr ---",
+        "     Running unittests src/lib.rs (target/debug/deps/x-abc)",
+    ])
+    stats = test_results.per_file_test_stats(out, known, index)
+    assert stats["src/context.gen_tests_1.rs"] == {"passed": 1, "failed": 0, "ignored": 0}
+    assert stats["src/context.rs"] == {"passed": 0, "failed": 1, "ignored": 0}  # inline mod tests
+    assert stats["tests/test_macros.rs"] == {"passed": 1, "failed": 0, "ignored": 0}
+    assert stats["src/lib.rs"] == {"passed": 1, "failed": 0, "ignored": 0}  # doc-test
+    # ambiguous bare name + unknown bare name ("ui" not indexed) → unmapped
+    assert stats["(unmapped)"] == {"passed": 1, "failed": 0, "ignored": 1}
+    assert test_results.per_file_test_stats("no tests here", known, index) == {}

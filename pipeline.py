@@ -130,8 +130,10 @@ from pipeline_core.domain.refine import (
 from pipeline_core.domain.test_results import (
     OUTPUT_SEPARATOR,
     _parse_test_counts,
+    build_test_name_index,
     count_passing_tests,
     extract_test_output_from_file,
+    per_file_test_stats,
     validate_task3_output_strict,
 )
 from pipeline_core.domain.text import (
@@ -15966,6 +15968,10 @@ def generate_fix_loop(
         _emit("compile.file_stats", data={
             "attempt": attempt_n, "clean": clean, "total": total, "files": rows_data,
         })
+        # When the check command runs tests (t3 fix loop), publish per-file
+        # test results alongside the compile stats.
+        _emit_per_file_test_overview(
+            project_dir, output, context=f"fix attempt {attempt_n}")
 
     env = _cargo_env()
     _fl_max_stalls = int(os.getenv("GENERATE_FIX_LOOP_MAX_STALLS", "3"))
@@ -16784,9 +16790,58 @@ def _task3_inline_retry(
     return False, last_out
 
 
+def _emit_per_file_test_overview(project_dir: Path, output: str, *, context: str) -> None:
+    """Attribute the latest cargo-test output to files (domain
+    per_file_test_stats; name-based, interleaving-proof) and publish the
+    per-file pass/total table to the log + a tests.file_stats event, which
+    the monitor merges into its compile overview. No test lines → no-op."""
+    try:
+        project_dir = Path(project_dir)
+        known = {
+            str(p.relative_to(project_dir)).replace(os.sep, "/")
+            for d in ("src", "tests") if (project_dir / d).is_dir()
+            for p in (project_dir / d).rglob("*.rs")
+        }
+        texts: dict[str, str] = {}
+        if (project_dir / "tests").is_dir():
+            for p in (project_dir / "tests").rglob("*.rs"):
+                with suppress(OSError):
+                    texts[str(p.relative_to(project_dir)).replace(os.sep, "/")] = (
+                        p.read_text(encoding="utf-8", errors="replace")
+                    )
+        stats = per_file_test_stats(output, known, build_test_name_index(texts))
+    except Exception as exc:
+        _log(f"  [test overview] skipped: {exc}")
+        return
+    if not stats:
+        return
+    rows = [{"file": f, **s} for f, s in stats.items()]
+    rows.sort(key=lambda r: (-r["failed"], r["file"]))
+    tot_p = sum(r["passed"] for r in rows)
+    tot_t = sum(r["passed"] + r["failed"] for r in rows)
+    _log(f"  [test overview] {context} — {tot_p}/{tot_t} tests passing:")
+    name_w = max(len(r["file"].split("/")[-1]) for r in rows)
+    for r in rows:
+        short = r["file"].split("/")[-1]
+        total = r["passed"] + r["failed"]
+        mark = "✓" if r["failed"] == 0 and total else "✗"
+        ign = f"  ({r['ignored']} ignored)" if r["ignored"] else ""
+        _log(f"    {short.ljust(name_w)}  {mark} tests {r['passed']}/{total}{ign}")
+    _emit("tests.file_stats", data={
+        "context": context, "passed": tot_p, "total": tot_t, "files": rows,
+    })
+
+
 def task3(project_dir, test_command, iteration, output_dir, genesis_path):
     # slice 5b: extracted to pipeline_core.application.tasks.task3; thin shim binding deps.
-    return _task3_impl(project_dir, test_command, iteration, output_dir, genesis_path, _TASK3_DEPS)
+    passed, test_output = _task3_impl(
+        project_dir, test_command, iteration, output_dir, genesis_path, _TASK3_DEPS
+    )
+    _emit_per_file_test_overview(
+        Path(project_dir), extract_test_output_from_file(test_output),
+        context=f"task3 iter {iteration}",
+    )
+    return passed, test_output
 
 
 def _task3_legacy_single(
