@@ -714,7 +714,7 @@ _FAILED_BODY_CAP   = max(2_000, SINGLE_CALL_CHAR_LIMIT // 12)  # prior failed bo
 # same fix loop as compile errors. Default OFF — identical to legacy behavior —
 # so it can be validated live before enabling. Fail-safe: any error in the test
 # check falls back to compile-based acceptance.
-_UNIFIED_FILL_LOOP = os.getenv("UNIFIED_FILL_LOOP", "0").strip() == "1"
+_UNIFIED_FILL_LOOP = os.getenv("UNIFIED_FILL_LOOP", "1").strip() == "1"
 _U2_TEST_TIMEOUT   = int(os.getenv("U2_TEST_TIMEOUT", "120"))
 
 
@@ -16584,7 +16584,59 @@ Output nothing else."""
             frontier = _compile_error_frontier(
                 output, project_dir, check_cmd, env, timeout)
             if not frontier:
-                return _do_fix(output, history, retro=retro)
+                tdd_frontier = _extract_tdd_frontier(output, project_dir)
+                if not tdd_frontier:
+                    return _do_fix(output, history, retro=retro)
+                # Stubs that compile but fail tests: direct one-shot fill.
+                # _fix_single_fn is wrong here — its inner compile loop exits
+                # immediately (ok=True) because the stub has no compile errors.
+                changed: list[str] = []
+                for (rel, fn) in sorted(tdd_frontier.keys()):
+                    if rel in existing_test_files:
+                        continue
+                    if allowed_dir_prefix and not rel.startswith(allowed_dir_prefix):
+                        continue
+                    path = project_dir / rel
+                    if not path.exists():
+                        continue
+                    file_text = path.read_text(encoding="utf-8", errors="replace")
+                    loc = _locate_fn(file_text, fn)
+                    if loc is None:
+                        continue
+                    sig_text, _ss, _bs, _be = loc
+                    cur_body = file_text[_bs:_be]
+                    errs = output[-_FIX_ERR_CAP:] if len(output) > _FIX_ERR_CAP else output
+                    prompt = (
+                        f"ONE Rust function has an unimplemented body — fill it.\n"
+                        f"{_FIX_THINKING_DIRECTIVE}"
+                        f"File: {rel} | Fn: {fn}\n"
+                        f"Signature (do NOT change it):\n{sig_text}\n\n"
+                        f"Current body (unimplemented — replace it):\n{{{{\n{cur_body}\n}}}}\n\n"
+                        f"Test failure output:\n```\n{errs}\n```\n"
+                        f"Return the corrected body as EXACTLY one block "
+                        f"(statements only — no fn signature, no outer braces):\n"
+                        f'<FN name="{fn}" block="any">\n...body...\n</FN>\n'
+                        f"Output nothing else."
+                    )
+                    resp = ask(prompt, model=model)
+                    bodies = extract_fn_bodies(resp)
+                    blk = next(
+                        (b for b in bodies if b.get("fn_name") == fn),
+                        bodies[0] if bodies else None,
+                    )
+                    body = blk.get("body") if blk else None
+                    if body:
+                        ok_s, reason, delta = _splice_fn_with_where(
+                            path, "", fn, body, allow_nonstub=True)
+                        if ok_s:
+                            changed.append(f"{rel}::{fn}")
+                            _log(f"  [fix loop/tdd-stub] spliced {rel}::{fn} ({delta:+d} bytes)")
+                        else:
+                            _log(f"  [fix loop/tdd-stub] splice rejected {rel}::{fn} ({reason})")
+                _err_preview = output[-_FIX_ERR_CAP:] if len(output) > _FIX_ERR_CAP else output
+                return {"summary": f"tdd_stub changed={len(changed)}",
+                        "files_changed_str": ", ".join(changed[:4]) if changed else "no files changed",
+                        "error_preview": _err_preview, "error_sig": _err_preview}
             blocks = _collect_impl_blocks(project_dir)
             if not blocks:
                 return _do_fix_per_fn(output, history, retro=retro)
