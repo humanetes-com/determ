@@ -105,5 +105,7 @@ fi
 
 PID=$!
 echo "Pipeline started (PID $PID). Following the log — Ctrl-C stops the TAIL, not the run."
+echo "After the run, audit flow invariants (doc channel / floor / plateau / wipes):"
+echo "  .venv/bin/python tools/flow_audit.py --log $LOG --project $WS"
 echo "----------------------------------------------------------------------"
 tail -f "$LOG"
