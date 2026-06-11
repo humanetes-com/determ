@@ -6616,6 +6616,7 @@ def _build_dispatch_family_section(family: DispatchFamily) -> str:
 
 
 _GRACEFUL_SENTINEL_PATH = Path("/tmp/pipeline_graceful_stop")
+_SHUTDOWN_SENTINEL_PATH = Path("/tmp/pipeline_shutdown_on_finish")
 # P7.2: per-fn cargo-check inner loop is now governed by a failure-floor
 # stall budget against rustc error count. Hard cap was a counter — the
 # user's "no hard limits" principle replaced that with floor-stall as the
@@ -20841,5 +20842,34 @@ This is a Rust procedural macro crate. Strict rules apply:
         sys.exit(1)
 
 
+def _shutdown_on_finish_enabled() -> bool:
+    """Runtime authority for power-off-on-finish: the sentinel file (written
+    "1"/"0" by the monitor's [p] toggle) overrides .env SHUTDOWN_ON_FINISH.
+    No sentinel → .env default. /tmp clears on reboot → back to .env."""
+    try:
+        return _SHUTDOWN_SENTINEL_PATH.read_text(encoding="utf-8").strip() == "1"
+    except OSError:
+        return os.getenv("SHUTDOWN_ON_FINISH", "0").strip() == "1"
+
+
+def _poweroff_on_finish() -> None:
+    """Power off when the run ends on its own (any sys.exit or crash). Not on
+    Ctrl-C; not on SIGTERM (restart.sh kill terminates the process before the
+    finally block runs). Gated by _shutdown_on_finish_enabled — toggleable
+    live from the monitor, like graceful stop."""
+    if not _shutdown_on_finish_enabled():
+        return
+    _log("shutdown-on-finish enabled — powering off (sudo -n systemctl poweroff).")
+    subprocess.run(["sudo", "-n", "systemctl", "poweroff"], check=False)
+
+
 if __name__ == "__main__":
-    main()
+    _interrupted = False
+    try:
+        main()
+    except KeyboardInterrupt:
+        _interrupted = True
+        raise
+    finally:
+        if not _interrupted:
+            _poweroff_on_finish()

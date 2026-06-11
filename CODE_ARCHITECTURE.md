@@ -663,6 +663,21 @@ The R12 fix made the skeleton clean but the next microcrate run STILL corrupted 
 #### R12.2 — TASK 3 re-verify recursed unbounded → RecursionError  ✅ FIXED + test
 Surfaced by the same run (once partial progress became possible). `task3.py` re-invoked `task3()` whenever the inline retry merely CHANGED the cargo text; cargo output isn't byte-deterministic (ordering/timing) → a no-op retry "changed" it → 981-frame `RecursionError`. Fix: `_should_reverify` gates on stable test COUNTS (passed / fewer-fail / more-pass) + a hard budget (2) → always terminates → falls through to TASK 4. Pinned by `tests/test_task3_reverify.py` (5 cases incl. the exact bug: same counts, different text → no recurse).
 
+### R13 — FR/genesis efficacy: measure, then wire into phase-c  ⬜ PLANNED (P1 · the docs are the product; their effect is unmeasured)
+Goal restated: the pipeline's deliverable is `functional_requirements_{crate}.md` + `genesis.md` such that
+a fresh run converges in as few iterations as possible. Today the hypothesis "richer docs → fewer
+iterations" is (a) unmeasured and (b) structurally weak: t2c phase-c per-fn/per-impl — the dominant
+iterating path — reads NEITHER doc (per_fn.py:38 by design); only filtered Model Notes +
+`RECURRING_ERRORS` promoted rules reach it, and `genesis_rules_read` is never called there.
+Order: R13.1 gates R13.2 (don't enrich a channel before proving the channel matters).
+
+| # | step | what | Pri | Eff | Risk | status |
+|---|---|---|---|---|---|---|
+| R13.1 | **A/B efficacy run** | L3 microcrate (R10.1), two runs: (A) enriched FR+genesis from a prior converged run, (B) blank stubs. Metric = iterations-to-converge + total fix-loop attempts + phase-c revert count. Uses the R10 harness; cassette optional. Verdict: docs help / don't / mixed-per-channel. | P1 | M | ●● | ⬜ |
+| R13.2 | **per-fn FR excerpt + genesis rules into phase-c** | only if R13.1 shows effect: relevance-selected FR paragraphs (match fn's type/trait/symbols — same selector family as `_filter_model_notes_for_prompt`) as a budget-capped `<FR_EXCERPT>` block in `build_per_fn_prompt`/`build_per_impl_prompt`; `genesis_rules_read(module_scope)` injected alongside. Keeps the no-full-FR budget stance. | P1 | M | ●●● | ⬜ gated on R13.1 |
+| R13.3 | **instrument the loop** | emit per-iteration `docs.richness` (FR chars, notes count, genesis rules count) + iteration outcome into `events.jsonl` so doc-growth vs convergence is trendable across runs; monitor surfaces it. | P2 | S | ● | ⬜ |
+| R13.4 | **audit the existing conduit** | the notes relevance-filter + rule promotion are load-bearing (sole learning path into phase-c today): pin with tests what gets selected/dropped for a known fn; check cap behaviour under bloat. | P2 | S | ● | ⬜ |
+
 Important Todos:
 
 #### W1+W2 — backend→transport + unified think-recovery controller  ✅ SHIPPED (●●● awaits live run)

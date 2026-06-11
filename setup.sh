@@ -83,6 +83,29 @@ else
     skip "apt packages already present"
 fi
 
+# ── 1b. passwordless poweroff (for SHUTDOWN_ON_FINISH in .env) ────────────────
+echo ""
+echo "-- Passwordless poweroff --"
+SUDOERS_POWEROFF=/etc/sudoers.d/50-pipeline-poweroff
+POWEROFF_RULE="$USER ALL=(root) NOPASSWD: /usr/bin/systemctl poweroff"
+if sudo -n true 2>/dev/null; then
+    if sudo grep -qsF "$POWEROFF_RULE" "$SUDOERS_POWEROFF"; then
+        skip "sudoers poweroff rule already present"
+    else
+        echo "$POWEROFF_RULE" | sudo tee "$SUDOERS_POWEROFF" >/dev/null
+        sudo chmod 440 "$SUDOERS_POWEROFF"
+        if sudo visudo -c -f "$SUDOERS_POWEROFF" >/dev/null; then
+            ok "sudoers rule installed ($SUDOERS_POWEROFF)"
+        else
+            sudo rm -f "$SUDOERS_POWEROFF"
+            echo "[warn] sudoers rule failed visudo check — removed"
+        fi
+    fi
+else
+    echo "[warn] Cannot sudo non-interactively. Run manually:"
+    echo "       echo '$POWEROFF_RULE' | sudo tee $SUDOERS_POWEROFF && sudo chmod 440 $SUDOERS_POWEROFF"
+fi
+
 # ── 2. Rust ───────────────────────────────────────────────────────────────────
 echo ""
 echo "-- Rust / cargo --"

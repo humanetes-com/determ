@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pipeline / GPU monitor.  Keys: 1/2/3 views  c/g/r/s actions  ↑↓ navigate  q quit"""
+"""Pipeline / GPU monitor.  Keys: 1/2/3 views  c/g/r/s/p actions  ↑↓ navigate  q quit"""
 import contextlib
 import glob
 import json as _json
@@ -1592,8 +1592,32 @@ def _detach(cmd):
     )
 _view        = "monitor"      # "monitor" | "pipeline" | "stream" | "events"
 _scroll      = {"pipeline": 0, "stream": 0, "events": 0}   # lines scrolled up from bottom (0=bottom)
-_confirm          = None   # pending confirmation: "continue" | "wipe" | "stop" | None
+_confirm          = None   # pending confirmation: "continue" | "wipe" | "stop" | "poweroff" | None
 _graceful_pending = os.path.exists("/tmp/pipeline_graceful_stop")  # survives monitor restart
+
+# Power-off-on-finish toggle: sentinel ("1"/"0") overrides .env SHUTDOWN_ON_FINISH,
+# mirroring pipeline._shutdown_on_finish_enabled. Monitor reads it every frame.
+_SHUTDOWN_SENTINEL = "/tmp/pipeline_shutdown_on_finish"
+
+def _shutdown_armed() -> bool:
+    try:
+        with open(_SHUTDOWN_SENTINEL) as f:
+            return f.read().strip() == "1"
+    except OSError:
+        pass
+    try:
+        with open(os.path.join(SCRIPT_DIR, ".env")) as f:
+            for line in f:
+                key, sep, val = line.strip().partition("=")
+                if sep and key.strip() == "SHUTDOWN_ON_FINISH":
+                    return val.strip() == "1"
+    except OSError:
+        pass
+    return False
+
+def _set_shutdown_armed(on: bool) -> None:
+    with open(_SHUTDOWN_SENTINEL, "w") as f:
+        f.write("1" if on else "0")
 _term_settings = None         # saved terminal settings for cooked-mode URL prompt
 
 # --demo: auto-cycle through views 1→2→3 (Monitor → Pipeline Log → Stream Log)
@@ -1679,6 +1703,7 @@ def _bottom_bar():
         cyan("[g]raceful"),
         yellow("[w]ipe"),
         s_col("[s]top"),
+        red("[p]⏻armed") if _shutdown_armed() else dim("[p]oweroff"),
         dim("[↑↓/PgUp/PgDn]"),
         dim("[q]uit"),
     ]
@@ -2025,6 +2050,14 @@ def _run_action(key):
             _action_msg = dim("graceful cancelled")
         _confirm = None
         return
+    if _confirm == "poweroff":
+        if key == "y":
+            _set_shutdown_armed(True)
+            _action_msg = red("⏻ power-off on finish ARMED")
+        else:
+            _action_msg = dim("power-off arm cancelled")
+        _confirm = None
+        return
     if key == "c":
         if _pipeline_running():
             _confirm    = "continue"
@@ -2059,6 +2092,13 @@ def _run_action(key):
     elif key == "s":
         _confirm    = "stop"
         _action_msg = red("■ stop pipeline — confirm? [y/n]")
+    elif key == "p":
+        if _shutdown_armed():
+            _set_shutdown_armed(False)
+            _action_msg = dim("⏻ power-off on finish disabled")
+        else:
+            _confirm    = "poweroff"
+            _action_msg = red("⏻ power off machine when the run finishes — confirm? [y/n]")
     elif key in ("1", "2", "3", "4"):
         _view = {"1": "monitor", "2": "pipeline", "3": "stream", "4": "events"}[key]
         global _prev_buf
@@ -2125,6 +2165,8 @@ def main():
                 )
             elif _confirm == "stop":
                 _action_msg = red("■ stop pipeline — confirm? [y/n]")
+            elif _confirm == "poweroff":
+                _action_msg = red("⏻ power off machine when the run finishes — confirm? [y/n]")
             else:
                 _action_msg = ""
 

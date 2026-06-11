@@ -1694,6 +1694,49 @@ def test_monitor_coverage_from_events() -> None:
     print("  OK  monitor coverage from events")
 
 
+def test_shutdown_on_finish_toggle() -> None:
+    """Power-off-on-finish: the monitor-written sentinel ("1"/"0") overrides
+    .env SHUTDOWN_ON_FINISH; no sentinel falls back to the env default;
+    pipeline._shutdown_on_finish_enabled and monitor._shutdown_armed agree."""
+    import tempfile
+
+    import monitor
+    import pipeline
+
+    with tempfile.TemporaryDirectory() as td:
+        sentinel = os.path.join(td, "shutdown_sentinel")
+        old_path, old_mon = pipeline._SHUTDOWN_SENTINEL_PATH, monitor._SHUTDOWN_SENTINEL
+        old_script_dir = monitor.SCRIPT_DIR
+        old_env = os.environ.get("SHUTDOWN_ON_FINISH")
+        pipeline._SHUTDOWN_SENTINEL_PATH = Path(sentinel)
+        monitor._SHUTDOWN_SENTINEL = sentinel
+        monitor.SCRIPT_DIR = td  # no .env here → monitor falls back to False
+        try:
+            os.environ["SHUTDOWN_ON_FINISH"] = "1"
+            assert pipeline._shutdown_on_finish_enabled()      # env default applies
+            monitor._set_shutdown_armed(False)                 # monitor disable wins
+            assert not pipeline._shutdown_on_finish_enabled()
+            assert not monitor._shutdown_armed()
+            monitor._set_shutdown_armed(True)                  # monitor re-arm wins
+            assert pipeline._shutdown_on_finish_enabled()
+            assert monitor._shutdown_armed()
+            os.unlink(sentinel)
+            os.environ["SHUTDOWN_ON_FINISH"] = "0"
+            assert not pipeline._shutdown_on_finish_enabled()  # back to env default
+            with open(os.path.join(td, ".env"), "w") as fh:    # monitor's .env fallback
+                fh.write("OTHER=x\nSHUTDOWN_ON_FINISH=1\n")
+            assert monitor._shutdown_armed()
+        finally:
+            pipeline._SHUTDOWN_SENTINEL_PATH = old_path
+            monitor._SHUTDOWN_SENTINEL = old_mon
+            monitor.SCRIPT_DIR = old_script_dir
+            if old_env is None:
+                os.environ.pop("SHUTDOWN_ON_FINISH", None)
+            else:
+                os.environ["SHUTDOWN_ON_FINISH"] = old_env
+    print("  OK  shutdown-on-finish toggle (sentinel overrides env)")
+
+
 def test_monitor_task_pipeline_parser() -> None:
     """_parse_task_pipeline reconstructs task progression from log lines."""
     import monitor
