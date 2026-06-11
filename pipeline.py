@@ -1001,11 +1001,56 @@ def init_log(root: Path, nolog: bool = False, progress_mode: bool = False):
         ).strip()
     except Exception:
         pass
+    global _RUN_STARTED_ISO
+    _RUN_STARTED_ISO = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S")
     _log(f"  PIPELINE STARTED — {datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S')} UTC  pipeline.py={_py_hash}{_git_hash}")
     _log(f"  CMD: {sys.executable} {' '.join(sys.argv)}")
     _log(f"{'=' * 60}")
     _log(f"{'=' * 60}")
     _register_run(root)
+
+
+# --- flow self-audit (--audit) ----------------------------------------------
+# Runs pipeline_core.audit (the tools/flow_audit.py core) over THIS run's own
+# records at iteration boundaries + on a timer; verdicts go to the log and a
+# flow_audit.report event the monitor renders. Read-only and fail-safe — it
+# observes the run, never steers it.
+_AUDIT_ENABLED = False
+_RUN_STARTED_ISO = ""                 # set by init_log; scopes verdicts to this run
+_AUDIT_PROJECT_DIR: "Path | None" = None
+
+
+def _run_flow_audit(context: str) -> None:
+    if not _AUDIT_ENABLED:
+        return
+    try:
+        from pipeline_core.audit import FAIL, audit
+        verdicts = audit(Path(_EVENTS_LOG), _PROMPTS_DIR, _log_path,
+                         _AUDIT_PROJECT_DIR, _RUN_STARTED_ISO,
+                         int(os.getenv("AUDIT_PLATEAU_N", "3")))
+        _log(f"  [audit] flow invariants ({context}):")
+        for v in verdicts:
+            _log(f"    {v.check.ljust(22)} {v.status:4s} {v.evidence}")
+        _emit("flow_audit.report", data={
+            "context": context,
+            "failed": sum(1 for v in verdicts if v.status == FAIL),
+            "verdicts": [{"check": v.check, "status": v.status,
+                          "evidence": v.evidence} for v in verdicts],
+        })
+    except Exception as exc:
+        _log(f"  [audit] skipped: {exc}")
+
+
+def _start_audit_thread() -> None:
+    import threading as _t
+    interval = int(os.getenv("AUDIT_INTERVAL_SEC", "900"))
+
+    def _loop() -> None:
+        while True:
+            time.sleep(interval)
+            _run_flow_audit(f"periodic/{interval}s")
+
+    _t.Thread(target=_loop, name="flow-audit", daemon=True).start()
 
 
 # ---------------------------------------------------------------------------
@@ -19738,6 +19783,15 @@ def main():
                             "re-run from scratch with the augmented test suite. "
                             "Single-module workspaces only for now."
                         ))
+    parser.add_argument("--audit", action="store_true",
+                        help=(
+                            "Self-audit: run the flow auditor (pipeline_core.audit — "
+                            "doc-channel / floor / plateau / no-wipe / ratchet "
+                            "invariants) at every iteration boundary and every "
+                            "AUDIT_INTERVAL_SEC (default 900) in the background; "
+                            "verdicts go to the log ([audit] lines) and to "
+                            "events.jsonl (flow_audit.report) for the monitor."
+                        ))
     parser.add_argument("--phase-a-only", action="store_true",
                         help=(
                             "Standalone bake: discover clusters from live source, "
@@ -19805,6 +19859,15 @@ def main():
 
     init_log(root, nolog=args.nolog, progress_mode=args.progress)
     init_events(product=project_dir.name)
+
+    # --audit: periodic + iteration-boundary flow self-audit (read-only).
+    global _AUDIT_ENABLED, _AUDIT_PROJECT_DIR
+    _AUDIT_ENABLED = bool(args.audit)
+    _AUDIT_PROJECT_DIR = project_dir
+    if _AUDIT_ENABLED:
+        _start_audit_thread()
+        _log(f"  --audit: flow self-audit active (every iteration + every "
+             f"{os.getenv('AUDIT_INTERVAL_SEC', '900')}s).")
 
     # P3.13: scan gen_tests siblings inherited from prior runs; quarantine
     # any with unbalanced delimiters and strip their decls from the parent
@@ -20996,6 +21059,7 @@ This is a Rust procedural macro crate. Strict rules apply:
                                                "files": len(_restored), "iter": module_iter})
             _log(f"\n  Keeping '{module_name}' tree for repair iteration "
                  f"{module_iter + 1} (no wipe — docs updated, fix loop continues).")
+            _run_flow_audit(f"iter {module_iter}")
 
             module_iter += 1
 

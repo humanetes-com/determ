@@ -797,6 +797,27 @@ def _latest_test_file_stats() -> dict[str, Any] | None:
     return (evs[-1].get("data") or None) if evs else None
 
 
+def _latest_flow_audit() -> dict[str, Any] | None:
+    """Most recent flow_audit.report payload (pipeline --audit), or None."""
+    evs = _read_recent_events(lambda n: n == "flow_audit.report")
+    return (evs[-1].get("data") or None) if evs else None
+
+
+def _flow_audit_rows(data: dict[str, Any]) -> list[str]:
+    """Compact verdict row(s): `audit: C1✓ C2! C3✓ …` + first FAIL evidence."""
+    icons = {"PASS": green("✓"), "FAIL": red("✗"), "WARN": yellow("!"), "SKIP": dim("·")}
+    cells, first_fail = [], ""
+    for v in data.get("verdicts", []):
+        tag = v.get("check", "?").split(" ")[0]
+        cells.append(f"{tag}{icons.get(v.get('status'), '?')}")
+        if not first_fail and v.get("status") == "FAIL":
+            first_fail = v.get("evidence", "")
+    rows = [f"  audit: {'  '.join(cells)}  ({data.get('context', '')})"]
+    if first_fail:
+        rows.append(red(f"    ✗ {first_fail[:100]}"))
+    return rows
+
+
 def _find_project_dir():
     """Return path to the most-recently-active workspace in tmp/, or None."""
     tmp = os.path.join(SCRIPT_DIR, "tmp")
@@ -1310,6 +1331,11 @@ def pipeline_status():
 
     # ── Files overview ──────────────────────────────────────────────────────
     proj_dir = _find_project_dir()
+
+    # Flow self-audit verdicts (pipeline --audit) — shown whenever present.
+    _audit_data = _latest_flow_audit()
+    if _audit_data:
+        rows.extend(_flow_audit_rows(_audit_data))
 
     # Task2/fix-loop: show per-file compile error stats instead of coverage.
     _compile_stats = _latest_compile_file_stats()

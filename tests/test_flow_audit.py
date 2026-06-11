@@ -106,3 +106,29 @@ def test_run_start_parsing_scopes_events(tmp_path: Path) -> None:
     ev, pdir, lg = _write_run(tmp_path, events, log=log)
     run = flow_audit.load_run(ev, pdir, lg, "")
     assert flow_audit.iteration_series(run) == [("2026-06-11T07:00:00", 1, 20)]
+
+
+def test_monitor_renders_flow_audit_row(tmp_path: Path) -> None:
+    """Monitor reads the latest flow_audit.report and renders compact verdicts."""
+    import monitor
+
+    ev = tmp_path / "events.jsonl"
+    ev.write_text(json.dumps({
+        "ts": "2026-06-11T10:00:00+00:00", "event": "flow_audit.report",
+        "data": {"context": "iter 2", "failed": 1, "verdicts": [
+            {"check": "C1 repo-spec-channel", "status": "PASS", "evidence": "ok"},
+            {"check": "C5 no-wipe", "status": "FAIL", "evidence": "2 retry wipes"},
+        ]},
+    }) + "\n")
+    old_log, old_start = monitor.EVENTS_LOG, monitor._pipeline_start_time
+    monitor.EVENTS_LOG = str(ev)
+    monitor._pipeline_start_time = lambda: 0.0
+    try:
+        data = monitor._latest_flow_audit()
+        assert data and data["failed"] == 1
+        rows = monitor._flow_audit_rows(data)
+        plain = "\n".join(rows)
+        assert "C1" in plain and "C5" in plain and "2 retry wipes" in plain
+    finally:
+        monitor.EVENTS_LOG = old_log
+        monitor._pipeline_start_time = old_start
