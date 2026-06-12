@@ -22,3 +22,11 @@ fn counter_from_default() {
     let mut c = Counter::default();
     assert_eq!(c.bump(), 1);
 }
+
+#[cfg(any(extra_cap, feature = "extra_cap"))]
+#[test]
+fn capability_composes() {
+    use microcrate::{capacity_hint, clamp_add, clamp_add_report};
+    assert_eq!(clamp_add(capacity_hint(), 1), capacity_hint());
+    assert!(clamp_add_report(capacity_hint(), 1).clamped);
+}

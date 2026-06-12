@@ -158,3 +158,36 @@ def test_cluster_coverage_verdict(tmp_path: Path) -> None:
     ev, pdir, lg = _write_run(tmp_path / "skip", [])
     vs = {v.check: v for v in flow_audit.audit(ev, pdir, lg, None, "", 3)}
     assert vs["C7 cluster-coverage"].status == "SKIP"
+
+
+def test_harness_fix_effect_verdict(tmp_path: Path) -> None:
+    """C8: a claimed harness fix attempt that sent 0 prompts is a no-op loop → FAIL."""
+    noop = {"ts": "2026-06-11T01:00:00", "event": "task0c.harness_fix.attempt",
+            "data": {"module": "anyhow", "attempt": 1,
+                     "broken_files": 3, "files_prompted": 0}}
+    acted = {"ts": "2026-06-11T01:01:00", "event": "task0c.harness_fix.attempt",
+             "data": {"module": "anyhow", "attempt": 2,
+                      "broken_files": 3, "files_prompted": 2}}
+
+    ev, pdir, lg = _write_run(tmp_path / "fail", [noop, acted])
+    vs = {v.check: v for v in flow_audit.audit(ev, pdir, lg, None, "", 3)}
+    assert vs["C8 harness-fix-effect"].status == "FAIL"
+    assert "0 prompts" in vs["C8 harness-fix-effect"].evidence
+
+    ev, pdir, lg = _write_run(tmp_path / "pass", [acted])
+    vs = {v.check: v for v in flow_audit.audit(ev, pdir, lg, None, "", 3)}
+    assert vs["C8 harness-fix-effect"].status == "PASS"
+
+    ev, pdir, lg = _write_run(tmp_path / "skip", [])
+    vs = {v.check: v for v in flow_audit.audit(ev, pdir, lg, None, "", 3)}
+    assert vs["C8 harness-fix-effect"].status == "SKIP"
+
+
+def test_strict_mode_fails_on_skip(tmp_path: Path) -> None:
+    """--strict: SKIP = FAIL (full-evidence gate); --allow-skip exempts explicitly."""
+    ev, pdir, lg = _write_run(tmp_path, [])   # empty run → everything SKIPs
+    base = ["--events", str(ev), "--prompts", str(pdir), "--log", str(lg)]
+    assert flow_audit.main(base) == 0                       # lenient: SKIPs pass
+    assert flow_audit.main([*base, "--strict"]) == 1        # strict: SKIPs fail
+    allow_all = "C1,C2,C3,C4,C5,C6,C7,C8"
+    assert flow_audit.main([*base, "--strict", "--allow-skip", allow_all]) == 0

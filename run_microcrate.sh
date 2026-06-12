@@ -47,7 +47,7 @@ if [[ -z "$FROM" ]]; then
     echo "[full] wiping tmp/microcrate for a from-scratch run ..."
     rm -rf "$WS"
     echo "[full] launching microcrate pipeline → $LOG"
-    nohup .venv/bin/python pipeline.py --repo tests/fixtures/microcrate > "$LOG" 2>&1 &
+    nohup .venv/bin/python pipeline.py --repo tests/fixtures/microcrate --audit > "$LOG" 2>&1 &
 else
     # ===================== FAST --from run ==================================
     # shellcheck source=lib/restart_from_lib.sh
@@ -100,12 +100,26 @@ else
         rm -rf "$WS/.skeleton-filled"
     fi
     echo "[fast] resuming microcrate pipeline → $LOG"
-    nohup .venv/bin/python pipeline.py --project microcrate > "$LOG" 2>&1 &
+    nohup .venv/bin/python pipeline.py --project microcrate --audit > "$LOG" 2>&1 &
 fi
 
 PID=$!
-echo "Pipeline started (PID $PID). Following the log — Ctrl-C stops the TAIL, not the run."
-echo "After the run, audit flow invariants (doc channel / floor / plateau / wipes):"
-echo "  .venv/bin/python tools/flow_audit.py --log $LOG --project $WS"
+echo "Pipeline started (PID $PID). Following the log until the run exits"
+echo "(Ctrl-C stops the tail AND skips the audit gate — the run keeps going)."
 echo "----------------------------------------------------------------------"
-tail -f "$LOG"
+tail --pid="$PID" -f "$LOG" || true
+wait "$PID" 2>/dev/null || true
+
+# --- audit gate: the smoke is green ONLY if every invariant has evidence -----
+# --strict: SKIP = FAIL (a check with nothing to verify is an alarm, not a
+# pass — this is how the session-65 failures slipped past the auditor).
+# Add explicit exemptions via --allow-skip 'C2,C6' if a check is proven
+# inapplicable to the fixture — never silently.
+echo "======================================================================"
+echo "FLOW AUDIT (strict — SKIP counts as FAIL):"
+if .venv/bin/python tools/flow_audit.py --strict --log "$LOG" --project "$WS"; then
+    echo "SMOKE GREEN — every invariant verified with evidence."
+else
+    echo "SMOKE RED — fix the FAILs (or add an explicit --allow-skip) before any real run."
+    exit 1
+fi

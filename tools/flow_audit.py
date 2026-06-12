@@ -61,15 +61,33 @@ def main(argv: list[str] | None = None) -> int:
                     help="workspace dir (enables genesis-propagation probe)")
     ap.add_argument("--since", default="", help="ISO ts; default: last PIPELINE STARTED in --log")
     ap.add_argument("--plateau", type=int, default=3)
+    ap.add_argument("--strict", action="store_true",
+                    help="full-evidence gate: SKIP counts as FAIL — a check that "
+                         "found nothing to verify is an alarm, not a pass. For "
+                         "smoke runs (run_microcrate.sh) that must exercise every "
+                         "invariant.")
+    ap.add_argument("--allow-skip", default="",
+                    help="comma-separated check prefixes (e.g. 'C2,C6') whose SKIP "
+                         "is tolerated under --strict — an EXPLICIT, visible "
+                         "exemption instead of a silent one")
     args = ap.parse_args(argv)
 
+    allow_skip = {s.strip() for s in args.allow_skip.split(",") if s.strip()}
     verdicts = audit(args.events, args.prompts, args.log,
                      args.project, args.since, args.plateau)
     width = max(len(v.check) for v in verdicts)
     failed = False
     for v in verdicts:
-        print(f"{v.check.ljust(width)}  {v.status:4s}  {v.evidence}")
-        failed |= v.status == FAIL
+        note = ""
+        if v.status == FAIL:
+            failed = True
+        elif v.status == SKIP and args.strict:
+            if any(v.check.startswith(p) for p in allow_skip):
+                note = "  [skip allowed]"
+            else:
+                failed = True
+                note = "  [strict: no evidence = FAIL]"
+        print(f"{v.check.ljust(width)}  {v.status:4s}  {v.evidence}{note}")
     return 1 if failed else 0
 
 

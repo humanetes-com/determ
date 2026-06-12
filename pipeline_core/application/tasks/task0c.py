@@ -297,6 +297,7 @@ def task0c_augment_module(
             # Pass 1: ask LLM to fix each broken file — preserve as much generated
             # test code as possible rather than discarding it immediately.
             # gen_tests siblings are fixable here; only original tests are not.
+            _files_prompted = 0
             for src_file in broken_files:
                 if _is_protected_test_file(src_file):
                     continue
@@ -330,12 +331,23 @@ corrected content here
 </FILE>
 """
                 response = ask(prompt, model=_TASK0C_MODEL)
+                _files_prompted += 1
                 files = extract_files(response)
                 if rel in files:
                     write(project_dir / rel, files[rel])
                     _log(f"    LLM fixed test code in {rel}")
                 else:
                     _log(f"    LLM produced no output for {rel}")
+
+            # Intent-vs-effect record: the attempt was CLAIMED above ("sending
+            # compile error to LLM") — record how many prompts actually went
+            # out so the auditor (C8) can flag a no-op loop (observed live:
+            # 11 claimed attempts, 0 prompts — every broken file was filtered).
+            _emit("task0c.harness_fix.attempt", data={
+                "module": module_name, "attempt": fix_attempt,
+                "broken_files": len(broken_files),
+                "files_prompted": _files_prompted,
+            })
 
             harness_ok, compile_err_out = augmentor.test_harness_compiles(project_dir, module_name)
             if harness_ok:

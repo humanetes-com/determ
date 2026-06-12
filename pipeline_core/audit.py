@@ -253,6 +253,26 @@ def check_cluster_coverage(run: RunData) -> Verdict:
                    f"{len(done)} task0c completion(s), none at 0%")
 
 
+def check_harness_fix_effect(run: RunData) -> Verdict:
+    """C8 (intent-vs-effect): every CLAIMED harness fix attempt must have
+    acted — sent at least one prompt. A claimed attempt with 0 prompts is a
+    no-op loop: the log says "sending compile error to LLM" but every broken
+    file was filtered out (the class behind the nightly-cluster 0%)."""
+    attempts = run.named("task0c.harness_fix.attempt")
+    if not attempts:
+        return Verdict("C8 harness-fix-effect", SKIP, "no harness fix attempts in run")
+    noops = [e for e in attempts
+             if int((e.get("data") or {}).get("files_prompted", 0)) == 0]
+    if noops:
+        d = noops[0].get("data") or {}
+        return Verdict("C8 harness-fix-effect", FAIL,
+                       f"{len(noops)}/{len(attempts)} claimed attempt(s) sent 0 prompts "
+                       f"(first: module={d.get('module')} attempt={d.get('attempt')} "
+                       f"broken_files={d.get('broken_files')})")
+    return Verdict("C8 harness-fix-effect", PASS,
+                   f"{len(attempts)} attempt(s), all sent ≥1 prompt")
+
+
 def audit(events_path: Path, prompts_dir: Path | None, log_path: Path | None,
           project_dir: Path | None, since: str, plateau_n: int) -> list[Verdict]:
     run = load_run(events_path, prompts_dir, log_path, since)
@@ -264,6 +284,7 @@ def audit(events_path: Path, prompts_dir: Path | None, log_path: Path | None,
         check_no_wipe(run),
         check_ratchet_sanity(run),
         check_cluster_coverage(run),
+        check_harness_fix_effect(run),
     ]
 
 
