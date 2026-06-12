@@ -391,8 +391,25 @@ class ModuleAugmentState:
         return 'retry'
 
 
+@dataclass(frozen=True, slots=True)
+class FillResult:
+    """Outcome of one per-fn fill unit (R3.1; P2 de-closure of
+    `_process_one_stub`). The unit returns this instead of mutating the
+    pass's counters through a closure — the dispatcher aggregates under its
+    own lock.
+
+    attempts counts the LLM attempts this fn consumed (0 when skipped before
+    any model call). `error` carries the exhaustion message destined for the
+    pass's errors list; None for success, skips, and silent early exits."""
+    file: str = ""
+    fn_name: str = ""
+    filled: bool = False
+    attempts: int = 0
+    error: str | None = None
+
+
 __all__ = [
     "FieldRecord", "MethodRecord", "TypeRecord",
     "FnRecord", "ModRecord", "ConstRecord", "DispatchFamily", "Diagnostic",
-    "BuildCluster", "ModuleAugmentState",
+    "BuildCluster", "ModuleAugmentState", "FillResult",
 ]
