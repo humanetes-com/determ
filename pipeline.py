@@ -5284,58 +5284,21 @@ def _extract_signature_block(response: str) -> str | None:
     return txt or None
 
 
+# Byte splice + syn locator relocated to application/reconstruct/splice.py
+# (P2 slice 3). Thin late-binding shims (NOT partials): the e2e harness
+# monkeypatches `pipeline._enumerate_fns_via_extractor`, so the enumerator
+# must be resolved at CALL time.
 def _splice_fn_body_at(file_path: Path, body_byte_start: int, body_byte_end: int,
-                        new_body: str, allow_nonstub: bool = False) -> tuple[bool, int]:
-    """Splice `new_body` between bytes [body_byte_start, body_byte_end) in
-    `file_path`. Replaces an explicit byte range — used when the caller has
-    canonical offsets from the syn enumerator. By default refuses to
-    overwrite a body that isn't currently a stub.
+                       new_body: str, allow_nonstub: bool = False) -> tuple[bool, int]:
+    return _reconstruct_splice.splice_fn_body_at(
+        file_path, body_byte_start, body_byte_end, new_body,
+        allow_nonstub=allow_nonstub)
 
-    The body content between [start, end) is whatever currently sits between
-    the fn's `{` and `}`. If that text doesn't look like an unimplemented
-    stub, the splice is rejected so we never clobber a real body — UNLESS
-    `allow_nonstub=True` (the fix-loop per_fn strategy, which re-fills a fn
-    whose previous body was filled but wrong). When re-filling a non-stub,
-    the caller MUST re-enumerate offsets before each splice, since every
-    write shifts the byte ranges of later fns in the same file.
 
-    Returns (success, bytes_delta).
-    """
-    # The offsets are BYTE offsets from the syn enumerator. They MUST be applied
-    # in byte space: a `str` from read_text() is indexed by CHARACTERS, so any
-    # multibyte UTF-8 char before the span (e.g. an em-dash `—` = 3 bytes/1 char
-    # in a doc comment) shifts char-index past byte-offset and the slice eats the
-    # closing `}` / next item. Work on raw bytes; decode only the small spans.
-    try:
-        raw = file_path.read_bytes()
-    except Exception:
-        return False, 0
-    if body_byte_end > len(raw) or body_byte_start > body_byte_end:
-        return False, 0
-    cur_body = raw[body_byte_start:body_byte_end].decode("utf-8", errors="replace")
-    if not allow_nonstub and not _is_unimplemented_body(cur_body):
-        return False, 0
-    nb = new_body.strip()
-    if nb.startswith("{") and nb.endswith("}"):
-        nb = nb[1:-1].strip()
-    if not nb or _is_unimplemented_body(nb):
-        return False, 0
-    # Re-indent the body to match the fn's existing indentation. Find the
-    # column of the fn declaration by walking back to the previous newline.
-    line_start = raw.rfind(b"\n", 0, body_byte_start) + 1
-    base_indent = ""
-    for ch in raw[line_start:body_byte_start].decode("utf-8", errors="replace"):
-        if ch in (" ", "\t"):
-            base_indent += ch
-        else:
-            break
-    inner_indent = base_indent + "    "
-    nb_indented = "\n" + "\n".join(
-        (inner_indent + ln) if ln.strip() else "" for ln in nb.splitlines()
-    ) + "\n" + base_indent
-    new_raw = raw[:body_byte_start] + nb_indented.encode("utf-8") + raw[body_byte_end:]
-    file_path.write_bytes(new_raw)
-    return True, len(new_raw) - len(raw)
+def _locate_fn_by_record(file_path: Path, name: str, container: str,
+                         sig_text: str) -> "tuple[int, int, int, str] | None":
+    return _reconstruct_splice.locate_fn_by_record(
+        _enumerate_fns_via_extractor, file_path, name, container, sig_text)
 
 
 def _splice_fn_body(file_path: Path, fn_name: str, new_body: str,
@@ -6574,17 +6537,14 @@ def _record_error_codes_seen(output: str) -> None:
         _ERROR_CODE_COUNTS = _Counter_PY()
     if not output:
         return
-    codes = set(re.findall(r"\bE\d{3,4}\b", output))
+    codes = _ecodes_in_text(output)
     for c in codes:
         _ERROR_CODE_COUNTS[c] += 1
         # Capture an excerpt: the error[Exxxx]: line + its few surrounding
         # lines. Per-code list is capped to N excerpts (FIFO).
-        m = re.search(
-            r"error\[" + re.escape(c) + r"\][^\n]*\n(?:[^\n]*\n){0,6}",
-            output,
-        )
-        if m:
-            excerpt = m.group(0).strip()[:_ERROR_EXCERPT_MAX_CHARS]
+        excerpt = _excerpt_for_code(output, c,
+                                    max_chars=_ERROR_EXCERPT_MAX_CHARS)
+        if excerpt:
             bucket = _ERROR_CODE_EXCERPTS.setdefault(c, [])
             bucket.append(excerpt)
             if len(bucket) > _ERROR_EXCERPT_MAX_PER_CODE:
@@ -7391,109 +7351,23 @@ def _run_cargo_check_diag(
         return -1, f"FILE NOT FOUND: {e}", []
 
 
-def _strip_cargo_warnings(output: str) -> str:
-    """Drop `warning:` blocks from cargo output. A block runs from the
-    `warning:` header until the next blank line (rustc separates each block
-    with a blank line). Used as a defensive filter — the model should never
-    see warnings, only errors.
-    """
-    out: list[str] = []
-    skip = False
-    for ln in output.splitlines():
-        if ln.startswith("warning:") or ln.startswith("warning["):
-            skip = True
-            continue
-        if skip:
-            if ln.strip() == "":
-                # blank line terminates the warning block
-                skip = False
-            # while skipping, drop every non-blank line of the block
-            continue
-        out.append(ln)
-    return "\n".join(out)
+# Cargo error-text shaping relocated to application/reconstruct/cargo_errors.py
+# (P2 slice 4, regex-free-ified on the way per the R7 standing rule).
+from pipeline_core.application.reconstruct.cargo_errors import (  # noqa: E402
+    ecodes_in_text as _ecodes_in_text,
+)
+from pipeline_core.application.reconstruct.cargo_errors import (  # noqa: E402
+    excerpt_for_code as _excerpt_for_code,
+)
+from pipeline_core.application.reconstruct.cargo_errors import (  # noqa: E402
+    strip_cargo_warnings as _strip_cargo_warnings,
+)
 
 
-def _focus_cargo_errors(output: str, file_rel: str, max_chars: int = _FIX_ERR_CAP) -> str:
-    """Extract a focused error excerpt from cargo output.
-
-    P3.7 tiered output. Two groups of error blocks:
-      - In-target-file: blocks whose `-->` mentions `file_rel`'s basename
-      - Cross-file: blocks whose `-->` mentions any other .rs file
-    Returned with a header demarcating the two. Budget split 60/40 in favour
-    of in-target. Warnings dropped first.
-
-    A bad fill in error.rs can break compilation in lib.rs (downstream
-    consumer of error.rs). Without the cross-file slice, the model would
-    not see the real symptom — only the absence of expected errors in its
-    own file.
-    """
-    output = _strip_cargo_warnings(output)
-    base = file_rel.rsplit("/", 1)[-1]
-    in_blocks: list[list[str]] = []
-    cross_blocks: list[list[str]] = []
-    in_err_block = False
-    cur_block: list[str] = []
-    has_target = False
-    has_any_loc = False
-    for ln in output.splitlines():
-        if ln.startswith("error[") or ln.startswith("error: ") or re.match(r"^error\b", ln):
-            if in_err_block and cur_block:
-                if has_target:
-                    in_blocks.append(cur_block)
-                elif has_any_loc:
-                    cross_blocks.append(cur_block)
-            cur_block = [ln]
-            in_err_block = True
-            has_target = False
-            has_any_loc = False
-        elif in_err_block:
-            cur_block.append(ln)
-            if base in ln:
-                has_target = True
-            if re.search(r"\.rs:\d+", ln):
-                has_any_loc = True
-            if ln.strip() == "" and cur_block:
-                if has_target:
-                    in_blocks.append(cur_block)
-                elif has_any_loc:
-                    cross_blocks.append(cur_block)
-                cur_block = []
-                in_err_block = False
-                has_target = False
-                has_any_loc = False
-    if in_err_block and cur_block:
-        if has_target:
-            in_blocks.append(cur_block)
-        elif has_any_loc:
-            cross_blocks.append(cur_block)
-
-    if not in_blocks and not cross_blocks:
-        return output[:max_chars]
-
-    in_budget = int(max_chars * 0.6)
-    cross_budget = max_chars - in_budget
-    parts: list[str] = []
-    if in_blocks:
-        parts.append("# Errors in target file:")
-        used = 0
-        for b in in_blocks:
-            txt = "\n".join(b)
-            if used + len(txt) + 1 > in_budget:
-                break
-            parts.append(txt)
-            used += len(txt) + 1
-    if cross_blocks:
-        parts.append("# Errors elsewhere in the crate (likely downstream of the target):")
-        used = 0
-        for b in cross_blocks:
-            txt = "\n".join(b)
-            if used + len(txt) + 1 > cross_budget:
-                break
-            parts.append(txt)
-            used += len(txt) + 1
-    return "\n".join(parts)[:max_chars]
-
-
+def _focus_cargo_errors(output: str, file_rel: str,
+                        max_chars: "int | None" = None) -> str:
+    return _reconstruct_cargo_errors.focus_cargo_errors(
+        output, file_rel, max_chars if max_chars is not None else _FIX_ERR_CAP)
 
 
 def _run_cargo(cmd: str, cwd: Path, env: dict, timeout: int = 180) -> tuple[int, str]:
@@ -8869,6 +8743,9 @@ def _phase_c_fill_impl_blocks(
     }
 
 
+import pipeline_core.application.reconstruct.cargo_errors as _reconstruct_cargo_errors  # noqa: E402
+import pipeline_core.application.reconstruct.splice as _reconstruct_splice  # noqa: E402
+
 # Per-fn pass scheduling + ctx + early-exit result live in the application
 # layer (P2); aliases keep the engine body + harness/scheduling pins unchanged.
 from pipeline_core.application.reconstruct import (  # noqa: E402
@@ -9174,8 +9051,7 @@ def _fill_one_stub(idx: int, rec: dict, *, ctx: _PerFnPassCtx) -> FillResult:
                 # P6.4: tag the note with the error codes from the
                 # original failure so it can be surfaced next time
                 # any of those codes recurs.
-                _ecodes = set(re.findall(r"\bE\d{3,4}\b",
-                                          first_error_excerpt or ""))
+                _ecodes = _ecodes_in_text(first_error_excerpt or "")
                 if note and _append_model_note(ctx.fr_path, note,
                                                error_codes=_ecodes):
                     _log(f"  [model-notes] +1 note (recovered): {note[:80]}...")
@@ -9300,10 +9176,8 @@ def _fill_one_stub(idx: int, rec: dict, *, ctx: _PerFnPassCtx) -> FillResult:
             )
             # P6.4: tag exhausted-fail notes with the codes seen
             # across the run so they re-surface for the same code.
-            _ecodes2 = set(re.findall(r"\bE\d{3,4}\b",
-                                       (error_excerpt or "")
-                                       + " "
-                                       + (first_error_excerpt or "")))
+            _ecodes2 = _ecodes_in_text((error_excerpt or "")
+                                       + " " + (first_error_excerpt or ""))
             if note and _append_model_note(ctx.fr_path, note,
                                            error_codes=_ecodes2):
                 _log(f"  [model-notes] +1 note (exhausted): {note[:80]}...")
@@ -10518,70 +10392,6 @@ _SKELETON_EXTRACTOR_BIN = (
     Path(__file__).parent / "tools" / "skeleton_extractor"
     / "target" / "release" / "skeleton-extractor"
 )
-
-
-def _locate_fn_by_record(file_path: Path, name: str, container: str, sig_text: str) -> tuple[int, int, int, str] | None:
-    """Re-enumerate `file_path` and return (sig_byte_start, body_byte_start,
-    body_byte_end, fresh_sig_text) for the fn matching (name, container,
-    sig_text). Used by the per-fn loop to splice by EXACT byte offset
-    instead of regex-locating by name (which collides when a file has
-    multiple fns sharing a name — e.g. Display::fmt vs Debug::fmt).
-
-    Re-enumeration is required because byte offsets shift after any prior
-    splice in the same file. ~30 ms via the syn binary; negligible vs the
-    LLM call cost.
-
-    Disambiguation order (each tier narrows the candidate set):
-      1. fn name match
-      2. container match (e.g. "impl Display for X")
-      3. signature similarity (exact, else normalised whitespace)
-    """
-    src_dir = file_path.parent
-    # The extractor walks a directory tree; we want one file. Easiest path:
-    # enumerate the parent directory and filter to records from this file.
-    # For large crates that's wasteful; for our scale (12 files) it's fine.
-    recs = _enumerate_fns_via_extractor(src_dir.parent
-                                         if src_dir.name == "src" else src_dir)
-    if recs is None:
-        return None
-    file_rel_candidates = {
-        str(file_path.name),
-        str(file_path).split("/src/", 1)[-1] if "/src/" in str(file_path) else str(file_path.name),
-        f"src/{file_path.name}",
-    }
-    file_recs = [r for r in recs if r.get("file") in file_rel_candidates
-                  or r.get("file", "").endswith("/" + file_path.name)
-                  or r.get("file", "") == file_path.name]
-    if not file_recs:
-        return None
-    cands = [r for r in file_recs if r.get("fn_name") == name]
-    if not cands:
-        return None
-    if container:
-        narrowed = [r for r in cands if r.get("container") == container]
-        if narrowed:
-            cands = narrowed
-    if sig_text:
-        exact = [r for r in cands if r.get("sig_text") == sig_text]
-        if exact:
-            cands = exact
-        else:
-            norm = " ".join(sig_text.split())
-            close = [r for r in cands if " ".join(r.get("sig_text", "").split()) == norm]
-            if close:
-                cands = close
-    if len(cands) != 1:
-        # Ambiguous still — pick the first stub-bodied one (more likely to
-        # be the one we want to fill).
-        stubs = [r for r in cands if r.get("has_unimplemented_body")]
-        cands = [stubs[0]] if stubs else [cands[0]]
-    r = cands[0]
-    return (
-        int(r["sig_byte_start"]),
-        int(r["body_byte_start"]),
-        int(r["body_byte_end"]),
-        r.get("sig_text", ""),
-    )
 
 
 def _enumerate_types_via_extractor(src_dir: Path) -> list[TypeRecord] | None:
