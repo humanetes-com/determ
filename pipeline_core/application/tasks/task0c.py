@@ -109,7 +109,7 @@ def task0c_augment_module(
     existing_test_files: set | None = None,
     project_context: str = "",
     coverage_strategy: str = "",
-) -> tuple[float, int, bool]:
+) -> tuple[float, int, bool, str]:
     """
     Generate unit tests (#[cfg(test)] blocks appended inline) for a module
     until tarpaulin reports 100% coverage or MAX_RETRIES is exhausted.
@@ -213,7 +213,7 @@ def task0c_augment_module(
 
     if not augmentor.is_applicable(crate_type):
         _log(f"  [{module_name}] crate type '{crate_type}' not applicable for augmentation — skipping.")
-        return 100.0, 0, False  # treat as done
+        return 100.0, 0, False, ""  # treat as done
 
     # Pre-flight: two-stage compile check.
     # Stage 1: library only — if broken, skip (not TASK 0c's job to fix implementation).
@@ -248,7 +248,7 @@ def task0c_augment_module(
                 err_snippet = lib_err[:400]
                 _log(f"  [{module_name}] Library does not compile in write-protected files — skipping.")
                 _log(f"    Error: {err_snippet}")
-                return 0.0, 0, False
+                return 0.0, 0, False, "harness_broken_in_protected_files"
             _log(f"  [{module_name}] Library compile failure in writable source — routing to harness fix loop.")
         else:
             _log(f"  [{module_name}] Library compile failure in gen_* block — routing to harness fix loop.")
@@ -256,6 +256,15 @@ def task0c_augment_module(
     def _error_signatures(cargo_output: str) -> frozenset:
         """Extract stable error signatures — error code + message, no file/line numbers."""
         return _error_signatures_from_output(cargo_output)  # type: ignore[no-any-return]
+
+    def _is_protected_test_file(p: Path) -> bool:
+        """Original test files we must never rewrite or strip — they are the
+        oracle (FR-018). Pipeline-generated gen_tests siblings are NOT
+        protected: the harness fix loop owns them and may rewrite or delete
+        them. (Filtering them with plain is_test_file made the loop a no-op
+        whenever the breakage was in a sibling — zero prompts sent, zero
+        strips — observed live on the nightly cluster.)"""
+        return is_test_file(p, project_dir) and _match_gen_tests_sibling(p.name) is None
 
     harness_ok, compile_err_out = augmentor.test_harness_compiles(project_dir, module_name)
     if not harness_ok:
@@ -283,12 +292,13 @@ def task0c_augment_module(
 
             if not broken_files:
                 _log(f"  [{module_name}] Cannot identify broken file — skipping augmentation.")
-                return 0.0, 0, False
+                return 0.0, 0, False, "harness_broken_file_unidentified"
 
             # Pass 1: ask LLM to fix each broken file — preserve as much generated
             # test code as possible rather than discarding it immediately.
+            # gen_tests siblings are fixable here; only original tests are not.
             for src_file in broken_files:
-                if is_test_file(src_file, project_dir):
+                if _is_protected_test_file(src_file):
                     continue
                 try:
                     current_content = src_file.read_text(encoding="utf-8")
@@ -378,7 +388,7 @@ corrected content here
 
                 any_stripped = False
                 for src_file in broken_files:
-                    if is_test_file(src_file, project_dir):
+                    if _is_protected_test_file(src_file):
                         continue
                     if _strip_broken_gen_blocks(src_file, compile_err_out):
                         any_stripped = True
@@ -389,7 +399,7 @@ corrected content here
                     # Fall through to a full strip of ALL gen_tests artifacts from broken files.
                     _log(f"  [{module_name}] Targeted strip insufficient — doing full gen_tests strip.")
                     for src_file in broken_files:
-                        if is_test_file(src_file, project_dir):
+                        if _is_protected_test_file(src_file):
                             continue
                         # Skip gen_tests siblings (already deleted in targeted pass).
                         if _is_gen_tests_file(src_file.name):
@@ -430,7 +440,7 @@ corrected content here
                                 _log(f"  [{module_name}] Source restored — harness now compiles.")
                                 break
                     _log(f"  [{module_name}] Harness still broken after targeted strip — skipping augmentation.")
-                    return 0.0, 0, False
+                    return 0.0, 0, False, "harness_broken_after_strip"
                 _log(f"  [{module_name}] Harness fixed by targeted strip.")
                 break
 
@@ -1487,7 +1497,7 @@ project-specific import paths, type construction patterns, and hard constraints.
                 retro_note = f"\n      retrospective: {retro[:300]}" if retro else ""
                 _log(f"    {sf}: {n_uncov} uncovered lines. Last attempts:\n{history}{retro_note}")
             _log("  Action required: improve the generation prompt or add manual tests for these files.")
-            return coverage, covered_lines, False
+            return coverage, covered_lines, False, ""
 
         # --- Graceful stop check ---
         # If /tmp/pipeline_graceful_stop exists, finish this attempt cleanly and exit.
@@ -1515,4 +1525,4 @@ project-specific import paths, type construction patterns, and hard constraints.
         _log(f"  [{module_name}/{_cluster_label}] mutation-harden pass skipped ({_me}).")
 
     _log(f"  [{module_name}/{_cluster_label}] Finished augmentation: {coverage:.1f}% coverage after {attempt} attempt(s).")
-    return coverage, covered_lines, _at_ceiling
+    return coverage, covered_lines, _at_ceiling, ""

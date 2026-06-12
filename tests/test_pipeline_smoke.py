@@ -2436,8 +2436,8 @@ def test_slice5b_task0c() -> None:
     stub["test_augmentor_factory"] = lambda: SimpleNamespace(is_applicable=lambda ct: False)
     stub["get_current_cluster"] = lambda: None
     deps = Task0cDeps(**stub)
-    # crate type not applicable → returns (100.0, 0, False) before any cargo/LLM work.
-    assert task0c_augment_module(Path("."), "m", Path("."), deps, crate_type="proc-macro") == (100.0, 0, False)
+    # crate type not applicable → returns (100.0, 0, False, "") before any cargo/LLM work.
+    assert task0c_augment_module(Path("."), "m", Path("."), deps, crate_type="proc-macro") == (100.0, 0, False, "")
 
     import pipeline
     assert isinstance(pipeline._TASK0C_DEPS, Task0cDeps)

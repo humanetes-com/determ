@@ -231,6 +231,28 @@ def check_ratchet_sanity(run: RunData) -> Verdict:
                    f"{len(saves)} save(s) strictly improving, {len(restores)} restore(s) valid")
 
 
+def check_cluster_coverage(run: RunData) -> Verdict:
+    """C7: no task0c cluster pass may end at 0% coverage. A 0% cluster means
+    its augmentation was skipped wholesale (e.g. broken harness) — the test
+    oracle for that cluster's cfg-gated code is then missing, silently
+    weakening FR-018."""
+    done = run.task_done("task0c")
+    if not done:
+        return Verdict("C7 cluster-coverage", SKIP, "no task0c completions in run")
+    zeros = []
+    for e in done:
+        d = e.get("data") or {}
+        pct = float(d.get("coverage_pct", -1))
+        if pct == 0.0:
+            zeros.append(f"{e.get('cluster', '?')}/{e.get('module', '?')}"
+                         + (f" ({d.get('blocked_reason')})" if d.get("blocked_reason") else ""))
+    if zeros:
+        return Verdict("C7 cluster-coverage", FAIL,
+                       f"{len(zeros)} task0c pass(es) at 0%: {', '.join(zeros[:4])}")
+    return Verdict("C7 cluster-coverage", PASS,
+                   f"{len(done)} task0c completion(s), none at 0%")
+
+
 def audit(events_path: Path, prompts_dir: Path | None, log_path: Path | None,
           project_dir: Path | None, since: str, plateau_n: int) -> list[Verdict]:
     run = load_run(events_path, prompts_dir, log_path, since)
@@ -241,6 +263,7 @@ def audit(events_path: Path, prompts_dir: Path | None, log_path: Path | None,
         check_plateau(run, plateau_n),
         check_no_wipe(run),
         check_ratchet_sanity(run),
+        check_cluster_coverage(run),
     ]
 
 

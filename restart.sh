@@ -96,7 +96,7 @@ fi
 
 cd "$SCRIPT_DIR"
 echo "Starting pipeline with repo: $_REPO"
-nohup .venv/bin/python pipeline.py --repo "$_REPO" --clean > "$LOG_DIR/pipeline_anyhow.log" 2>&1 &
+nohup .venv/bin/python pipeline.py --repo "$_REPO" --clean --audit > "$LOG_DIR/pipeline_anyhow.log" 2>&1 &
 echo "Pipeline started (PID $!) — backend: $BACKEND"
 echo "Pipeline log : tail -f $LOG_DIR/pipeline_anyhow.log"
 echo "Server log   : tail -f $LOG_DIR/server.log"

@@ -193,6 +193,51 @@ def per_file_test_stats(
     return stats
 
 
+def failing_test_names(test_output: str) -> list[str]:
+    """Names of FAILED tests from cargo-test result lines, in output order,
+    deduplicated. Names keep their full form (module path or doc-test label)."""
+    names: list[str] = []
+    seen: set[str] = set()
+    for raw in test_output.splitlines():
+        line = raw.strip()
+        if not (line.startswith("test ") and " ... " in line):
+            continue
+        if line.startswith("test result:"):
+            continue
+        name, _, status = line[len("test "):].partition(" ... ")
+        name = name.strip()
+        if status.split(",")[0].split(" ")[0] == "FAILED" and name not in seen:
+            seen.add(name)
+            names.append(name)
+    return names
+
+
+_IDENT_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
+
+
+def identifiers_in(text: str) -> set[str]:
+    """Every identifier-shaped token in `text` (manual scan, no regex).
+    Used to attribute a failing test to the source fns it exercises by
+    intersecting with the known fn-name set."""
+    out: set[str] = set()
+    start = -1
+    for i, ch in enumerate(text):
+        if ch in _IDENT_CHARS:
+            if start < 0:
+                start = i
+        elif start >= 0:
+            tok = text[start:i]
+            if not tok[0].isdigit():
+                out.add(tok)
+            start = -1
+    if start >= 0:
+        tok = text[start:]
+        if not tok[0].isdigit():
+            out.add(tok)
+    return out
+
+
 def build_test_name_index(file_texts: dict[str, str]) -> dict[str, str]:
     """{relative_path: file_text} for tests/*.rs → {fn_name: path} for bare
     cargo test names. Collects every `fn name(` (over-collection of helpers is

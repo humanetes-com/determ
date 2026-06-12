@@ -138,6 +138,8 @@ from pipeline_core.domain.test_results import (
     build_test_name_index,
     count_passing_tests,
     extract_test_output_from_file,
+    failing_test_names,
+    identifiers_in,
     per_file_test_stats,
     validate_task3_output_strict,
 )
@@ -3373,7 +3375,7 @@ def is_test_file(path: Path, project_dir: Path) -> bool:
         return True
 
     # Pipeline-generated gen_tests siblings: foo.gen_tests_3.rs
-    return bool(re.search(r'\.gen_tests_\d+\.rs$', path.name))
+    return _match_gen_tests_sibling(path.name) is not None
 
 
 def collect_test_files(project_dir: Path):
@@ -3982,6 +3984,11 @@ def _profile_inputs_hash(readme_text: str, test_files: list) -> str:
 # Read by _cargo_env() and _run_tarpaulin() so every subprocess call inherits
 # the cluster's env and exclusion list without touching every call site.
 _current_cluster: "BuildCluster | None" = None
+
+# Full cluster list from the cfg scan — set by main() alongside _current_cluster.
+# Read by _cluster_cfg_attr() so the default cluster's gen_tests can be gated
+# with the NEGATION of every other cluster's cfg flags.
+_all_clusters: "list[BuildCluster]" = []
 
 # True when the project_dir is a git-managed workspace (--repo or auto-detected).
 # Enables git commits at key pipeline transitions.
@@ -7836,13 +7843,22 @@ def _retrospectives_path(project_dir: Path) -> Path:
 def _load_retrospectives(project_dir: Path) -> dict:
     """Load the on-disk retrospective record. Returns {} on first run or
     when the file is malformed (caller treats missing entries as 'no
-    prior retrospective')."""
+    prior retrospective'). Keys written before container canonicalisation
+    are re-keyed on load so old records keep matching."""
     p = _retrospectives_path(project_dir)
     if not p.exists():
         return {}
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
+        if not isinstance(data, dict):
+            return {}
+        rekeyed: dict = {}
+        for key, rec in data.items():
+            parts = key.split("::", 2)
+            if len(parts) == 3:
+                key = _retro_key(parts[0], parts[1], parts[2])
+            rekeyed[key] = rec
+        return rekeyed
     except Exception:
         return {}
 
@@ -7853,10 +7869,58 @@ def _save_retrospectives(project_dir: Path, data: dict) -> None:
             json.dumps(data, indent=2), encoding="utf-8")
 
 
+def _canon_container(container: str) -> str:
+    """Canonical container form for keying. The extractor's fn records and
+    the impl-block manifest render the same impl differently (token-spaced
+    `impl Context < T , E > for Result < T , E >` vs pretty-printed
+    `impl<T, E> Context<T, E> for Result<T, E>\\nwhere\\n    E: ...`), which
+    used to split one impl across two retrospective keys. Reduce both to
+    `<Trait>for<SelfTy>`: drop a leading impl-generics list, drop the
+    where-clause, drop all whitespace."""
+    s = " ".join(container.split())
+    if s.startswith("impl"):
+        s = s[4:].lstrip()
+        if s.startswith("<"):
+            depth = 0
+            for i, ch in enumerate(s):
+                if ch == "<":
+                    depth += 1
+                elif ch == ">":
+                    depth -= 1
+                    if depth == 0:
+                        s = s[i + 1:]
+                        break
+    if s.endswith(" where"):
+        s = s[: -len(" where")]
+    s = s.split(" where ")[0]
+    return "".join(s.split())
+
+
 def _retro_key(file_rel: str, fn_name: str, container: str) -> str:
     """Stable key for the retrospective dict. Container is included so
-    overloaded `fn new` impls (Adhoc/Trait/Boxed) track independently."""
-    return f"{file_rel}::{fn_name}::{container}"
+    overloaded `fn new` impls (Adhoc/Trait/Boxed) track independently;
+    it is canonicalised so different renderings of one impl share a key."""
+    return f"{file_rel}::{fn_name}::{_canon_container(container)}"
+
+
+def _reset_exhaustion_flags(project_dir: Path, reason: str) -> int:
+    """Clear every `fully_exhausted` flag (keep the lessons — category,
+    guidance, history all stay) at a phase boundary where the evidence
+    context changed (e.g. the merged tree landed dozens of fills). FR-024's
+    cross-iter skip was written against a narrower tree; one fresh, note-
+    informed attempt per boundary is exactly D3's re-entry rule applied
+    across phases. Returns the number of flags cleared."""
+    retros = _load_retrospectives(project_dir)
+    cleared = 0
+    for rec in retros.values():
+        if isinstance(rec, dict) and rec.get("fully_exhausted"):
+            rec["fully_exhausted"] = False
+            cleared += 1
+    if cleared:
+        _save_retrospectives(project_dir, retros)
+        _log(f"  [phase-c] reset {cleared} fully_exhausted flag(s) — {reason}")
+        _emit("phase_c.exhaustion.reset", data={"cleared": cleared, "reason": reason})
+    return cleared
 
 
 def _phase_c_retrospective(
@@ -11709,6 +11773,62 @@ def _extract_tdd_frontier(
             key = (rel, rec["fn_name"])
             frontier.setdefault(key, set()).add(test_name)
     return frontier
+
+
+def _behavior_frontier(
+    test_output: str, project_dir: Path, existing_test_files: set,
+) -> "tuple[Frontier, dict[str, tuple[str, str]]]":
+    """Attribute behavioral test failures (harness compiles, no stub panics —
+    assertion failures etc.) to the src fns they exercise, so the fix loop can
+    repair fn bodies instead of falling back to whole-file rewrites.
+
+    For each FAILED test: locate its source via the test-name index, collect
+    the identifiers its text mentions, and intersect with the extractor's fn
+    records. A fn name shared by several records is attributed only to records
+    whose container also shares a token with the test text.
+
+    Returns ({(file_rel, fn): {test names}}, {test name: (test_rel, test_src)}).
+    """
+    failed = failing_test_names(test_output)
+    if not failed:
+        return {}, {}
+    texts: dict[str, str] = {}
+    for trel in sorted(existing_test_files):
+        tp = project_dir / trel
+        if tp.exists():
+            with suppress(Exception):
+                texts[trel] = tp.read_text(encoding="utf-8", errors="replace")
+    if not texts:
+        return {}, {}
+    index = build_test_name_index(texts)
+    by_name: dict[str, list[dict]] = {}
+    for r in _enumerate_fns_via_extractor(project_dir) or []:
+        f_rel = r.get("file", "")
+        if f_rel in existing_test_files or _is_gen_tests_file(Path(f_rel).name):
+            continue
+        by_name.setdefault(r.get("fn_name", ""), []).append(r)
+    frontier: Frontier = {}
+    test_srcs: dict[str, tuple[str, str]] = {}
+    for tname in failed:
+        bare = tname.split("::")[-1].strip()
+        trel = index.get(bare, "")
+        if not trel or trel not in texts:
+            continue
+        loc = _locate_fn(texts[trel], bare)
+        if loc is None:
+            continue
+        sig_text, _ss, _bs, _be = loc
+        tsrc = f"{sig_text} {{{texts[trel][_bs:_be]}}}"
+        idents = identifiers_in(tsrc)
+        test_srcs[tname] = (trel, tsrc)
+        for fn_name in idents & set(by_name):
+            recs = by_name[fn_name]
+            for rec in recs:
+                if len(recs) > 1 and not (
+                        identifiers_in(rec.get("container", "")) & idents):
+                    continue
+                frontier.setdefault((rec["file"], fn_name), set()).add(tname)
+    return frontier, test_srcs
 
 
 def _extract_tdd_compile_frontier(
@@ -15774,6 +15894,9 @@ class StaticSkeletonTask2Generator(Task2Generator):
             test_reverse_map = {}
 
         permanently_exhausted: set[tuple[str, str]] = set()
+        # The merge landed every cluster's fills — D3's "other fills landed"
+        # criterion holds globally, so cross-iter exhaustion gets one reset.
+        _reset_exhaustion_flags(project_dir, "post-merge: merged tree is new context")
         recently_filled: list[tuple[str, str]] = []
         recently_filled_max = int(os.getenv("TDD_RECENTLY_FILLED_MAX", "50"))
         stall = 0
@@ -16585,8 +16708,24 @@ Output nothing else."""
                 output, project_dir, check_cmd, env, timeout)
             if not frontier:
                 tdd_frontier = _extract_tdd_frontier(output, project_dir)
+                kind = "tdd-stub"
+                behavior_srcs: dict[str, tuple[str, str]] = {}
                 if not tdd_frontier:
-                    return _do_fix(output, history, retro=retro)
+                    # Behavioral failures (assertions, wrong values): attribute
+                    # failing tests to the fns they exercise and repair those
+                    # bodies — the whole-file rewrite is the LAST resort (it
+                    # regresses: observed live introducing 24 compile errors).
+                    tdd_frontier, behavior_srcs = _behavior_frontier(
+                        output, project_dir, existing_test_files)
+                    kind = "behavior"
+                    if not tdd_frontier:
+                        return _do_fix(output, history, retro=retro)
+                    _beh_cap = int(os.getenv("FIX_BEHAVIOR_MAX_FNS", "8"))
+                    if len(tdd_frontier) > _beh_cap:
+                        # Most-failing-tests first; name tiebreak for determinism.
+                        tdd_frontier = dict(sorted(
+                            tdd_frontier.items(),
+                            key=lambda kv: (-len(kv[1]), kv[0]))[:_beh_cap])
                 # Stubs that compile but fail tests: direct one-shot fill.
                 # _fix_single_fn is wrong here — its inner compile loop exits
                 # immediately (ok=True) because the stub has no compile errors.
@@ -16606,18 +16745,40 @@ Output nothing else."""
                     sig_text, _ss, _bs, _be = loc
                     cur_body = file_text[_bs:_be]
                     errs = output[-_FIX_ERR_CAP:] if len(output) > _FIX_ERR_CAP else output
-                    prompt = (
-                        f"ONE Rust function has an unimplemented body — fill it.\n"
-                        f"{_FIX_THINKING_DIRECTIVE}"
-                        f"File: {rel} | Fn: {fn}\n"
-                        f"Signature (do NOT change it):\n{sig_text}\n\n"
-                        f"Current body (unimplemented — replace it):\n{{{{\n{cur_body}\n}}}}\n\n"
-                        f"Test failure output:\n```\n{errs}\n```\n"
-                        f"Return the corrected body as EXACTLY one block "
-                        f"(statements only — no fn signature, no outer braces):\n"
-                        f'<FN name="{fn}" block="any">\n...body...\n</FN>\n'
-                        f"Output nothing else."
-                    )
+                    if kind == "behavior":
+                        _tests_block = ""
+                        for _tn in sorted(tdd_frontier[(rel, fn)]):
+                            _trel, _tsrc = behavior_srcs.get(_tn, ("", ""))
+                            if _tsrc and len(_tests_block) + len(_tsrc) <= _SRC_SNIP_CAP:
+                                _tests_block += f"// {_trel} :: {_tn}\n{_tsrc}\n\n"
+                        prompt = (
+                            f"ONE Rust function compiles but FAILS its tests — "
+                            f"its behaviour is wrong. Correct the body.\n"
+                            f"{_FIX_THINKING_DIRECTIVE}"
+                            f"File: {rel} | Fn: {fn}\n"
+                            f"Signature (do NOT change it):\n{sig_text}\n\n"
+                            f"Current body (wrong — replace it):\n{{{{\n{cur_body}\n}}}}\n\n"
+                            f"Failing test source (the behaviour the body must satisfy):\n"
+                            f"```\n{_tests_block}```\n"
+                            f"Test failure output:\n```\n{errs}\n```\n"
+                            f"Return the corrected body as EXACTLY one block "
+                            f"(statements only — no fn signature, no outer braces):\n"
+                            f'<FN name="{fn}" block="any">\n...body...\n</FN>\n'
+                            f"Output nothing else."
+                        )
+                    else:
+                        prompt = (
+                            f"ONE Rust function has an unimplemented body — fill it.\n"
+                            f"{_FIX_THINKING_DIRECTIVE}"
+                            f"File: {rel} | Fn: {fn}\n"
+                            f"Signature (do NOT change it):\n{sig_text}\n\n"
+                            f"Current body (unimplemented — replace it):\n{{{{\n{cur_body}\n}}}}\n\n"
+                            f"Test failure output:\n```\n{errs}\n```\n"
+                            f"Return the corrected body as EXACTLY one block "
+                            f"(statements only — no fn signature, no outer braces):\n"
+                            f'<FN name="{fn}" block="any">\n...body...\n</FN>\n'
+                            f"Output nothing else."
+                        )
                     resp = ask(prompt, model=model)
                     bodies = extract_fn_bodies(resp)
                     blk = next(
@@ -16629,11 +16790,12 @@ Output nothing else."""
                         ok_s, delta = _splice_fn_body(path, fn, body, allow_nonstub=True)
                         if ok_s:
                             tdd_changed.append(f"{rel}::{fn}")
-                            _log(f"  [fix loop/tdd-stub] spliced {rel}::{fn} ({delta:+d} bytes)")
+                            _log(f"  [fix loop/{kind}] spliced {rel}::{fn} ({delta:+d} bytes)")
                         else:
-                            _log(f"  [fix loop/tdd-stub] splice rejected {rel}::{fn}")
+                            _log(f"  [fix loop/{kind}] splice rejected {rel}::{fn}")
                 _err_preview = output[-_FIX_ERR_CAP:] if len(output) > _FIX_ERR_CAP else output
-                return {"summary": f"tdd_stub changed={len(tdd_changed)}",
+                _kind_tag = "tdd_stub" if kind == "tdd-stub" else "behavior"
+                return {"summary": f"{_kind_tag} changed={len(tdd_changed)}",
                         "files_changed_str": ", ".join(tdd_changed[:4]) if tdd_changed else "no files changed",
                         "error_preview": _err_preview, "error_sig": _err_preview}
             blocks = _collect_impl_blocks(project_dir)
@@ -17698,15 +17860,18 @@ def _strip_gen_tests_decls(src_text: str) -> str:
 
 
 def _is_gen_tests_file(name: str) -> bool:
-    """True if `name` is a pipeline-generated `*.gen_tests_<N>.rs` sibling.
-    Keeps this filename regex in pipeline.py (Option 1) so the clean layer stays regex-free."""
-    return bool(re.search(r"\.gen_tests_\d+\.rs$", name))
+    """True if `name` is a pipeline-generated `*.gen_tests_<N>.rs` sibling."""
+    return _match_gen_tests_sibling(name) is not None
 
 
 def _match_gen_tests_sibling(name: str) -> "tuple[str, int] | None":
-    """Parse a `<stem>.gen_tests_<N>.rs` filename → (stem, N), or None. (Regex in pipeline.)"""
-    m = re.match(r'^(.+)\.gen_tests_(\d+)\.rs$', name)
-    return (m.group(1), int(m.group(2))) if m else None
+    """Parse a `<stem>.gen_tests_<N>.rs` filename → (stem, N), or None."""
+    if not name.endswith(".rs"):
+        return None
+    stem, sep, n_str = name[:-3].rpartition(".gen_tests_")
+    if not sep or not stem or not n_str.isdigit():
+        return None
+    return stem, int(n_str)
 
 
 def _strip_gen_tests_decl_n(parent_text: str, pass_n: int) -> str:
@@ -17843,14 +18008,30 @@ def _is_gen_tests_decl_only_src(content: str) -> bool:
 def _cluster_cfg_attr(cluster) -> str:
     """Return the cfg predicate string that gates code to this cluster.
 
-    Empty string for the default (stable) cluster — no extra gate needed.
     Each active cfg `N` becomes `any(N, feature = "N")` (FR-032): a cluster may
     be switched on by either `--cfg N` (RUSTFLAGS) or `--features N`, and this
     gate must be true under whichever form the cluster uses. Multiple flags
     combine via `all(...)`.
+
+    The default (stable) cluster is gated by the NEGATION of every other
+    cluster's flags: stable's gen_tests were only ever validated under the
+    default build, and ungated they compile under nightly's cfg-set, where
+    they can break that cluster's harness (observed live: nightly task0c
+    aborted at 0% on stable's siblings). No other clusters → no gate.
     """
-    if cluster is None or getattr(cluster, "is_default", True):
+    if cluster is None:
         return ""
+    if getattr(cluster, "is_default", True):
+        other_flags: set[str] = set()
+        for c in _all_clusters:
+            if c is cluster or getattr(c, "is_default", True):
+                continue
+            other_flags.update(getattr(c, "active_cfg", []) or [])
+        if not other_flags:
+            return ""
+        terms = [t for f in sorted(other_flags)
+                 for t in (f, f'feature = "{f}"')]
+        return "not(any(" + ", ".join(terms) + "))"
     flags = list(getattr(cluster, "active_cfg", []) or [])
     if not flags:
         return ""
@@ -19099,7 +19280,7 @@ def task0c_augment_module(
     existing_test_files: set | None = None,
     project_context: str = "",
     coverage_strategy: str = "",
-) -> tuple[float, int, bool]:
+) -> tuple[float, int, bool, str]:
     # slice 5b: extracted to application.tasks.task0c; thin shim binding deps.
     return _task0c_impl(
         project_dir, module_name, module_dir, _TASK0C_DEPS,
@@ -20045,8 +20226,9 @@ def main():
 
     # Cluster scan is pure static analysis (no LLM) — run first so all downstream
     # LLM tasks (discover_test_command, task0b) have cluster context available.
-    global _current_cluster
+    global _current_cluster, _all_clusters
     _clusters = task0_cfg_scan(project_dir)
+    _all_clusters = list(_clusters)
     _log(f"\nCompiler clusters identified: {len(_clusters)}")
     for _c in _clusters:
         _env_desc = ", ".join(f"{k}+={v}" for k, v in _c.env_extra.items()) if _c.env_extra else "default build"
@@ -20271,7 +20453,7 @@ def main():
             _emit("task.start", task="task0c", cluster=_cluster.name, module=_mod_name)
 
             _etf_pre = {rel for rel, _ in collect_test_files(project_dir)}
-            _cov, _covered, _at_ceiling = task0c_augment_module(
+            _cov, _covered, _at_ceiling, _blocked_reason = task0c_augment_module(
                 project_dir, _mod_name, _mod_dir, _crate_type,
                 existing_test_files=_etf_pre,
                 project_context=project_context,
@@ -20281,7 +20463,7 @@ def main():
             _emit("task.done", task="task0c", cluster=_cluster.name, module=_mod_name,
                   duration_ms=int((time.monotonic() - _task0c_t0) * 1000),
                   data={"coverage_pct": _cov, "covered_lines": _covered,
-                        "at_ceiling": _at_ceiling})
+                        "at_ceiling": _at_ceiling, "blocked_reason": _blocked_reason})
             _mark_phase(project_dir, f"task0c/{_cluster.name}/{_mod_name}",
                         "done" if _cov >= COVERAGE_AUGMENTATION_TARGET else "in_progress",
                         detail=f"{_cov:.1f}%", source_hash=_src_hash)
@@ -20293,6 +20475,19 @@ def main():
             )
             _state.record_pass(_cov, _covered, _at_ceiling)
             _status = _state.status(_crate_type)
+
+            # A blocked pass is deterministic: the harness survived the LLM fix
+            # attempts AND a full gen_tests strip (or is broken in protected
+            # files), so re-entering augmentation from the identical tree state
+            # cannot end differently. Accept and move on instead of burning
+            # STALL_LIMIT identical retries (observed live: nightly ×10 no-ops).
+            if _blocked_reason and _status not in ('done', 'ceiling'):
+                _log(
+                    f"  HARD BLOCK (FR-018): '{_mod_name}' [{_cluster.name}] augmentation "
+                    f"blocked — {_blocked_reason}. Retry would be a deterministic no-op; "
+                    f"accepting and moving on."
+                )
+                _status = 'hard_block'
 
             if _status in ('done', 'ceiling', 'hard_block'):
                 if _status == 'ceiling':

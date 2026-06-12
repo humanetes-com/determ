@@ -132,3 +132,29 @@ def test_monitor_renders_flow_audit_row(tmp_path: Path) -> None:
     finally:
         monitor.EVENTS_LOG = old_log
         monitor._pipeline_start_time = old_start
+
+
+def test_cluster_coverage_verdict(tmp_path: Path) -> None:
+    """C7: a task0c cluster pass ending at 0% coverage (skipped augmentation —
+    e.g. broken harness) must FAIL; healthy passes PASS; no passes SKIP."""
+    ok = {"ts": "2026-06-11T01:00:00", "event": "task.done", "task": "task0c",
+          "cluster": "stable", "module": "anyhow",
+          "data": {"coverage_pct": 98.1, "covered_lines": 791, "at_ceiling": False}}
+    zero = {"ts": "2026-06-11T02:00:00", "event": "task.done", "task": "task0c",
+            "cluster": "nightly", "module": "anyhow",
+            "data": {"coverage_pct": 0.0, "covered_lines": 0, "at_ceiling": False,
+                     "blocked_reason": "harness_broken_after_strip"}}
+
+    ev, pdir, lg = _write_run(tmp_path / "fail", [ok, zero])
+    vs = {v.check: v for v in flow_audit.audit(ev, pdir, lg, None, "", 3)}
+    assert vs["C7 cluster-coverage"].status == "FAIL"
+    assert "nightly/anyhow" in vs["C7 cluster-coverage"].evidence
+    assert "harness_broken_after_strip" in vs["C7 cluster-coverage"].evidence
+
+    ev, pdir, lg = _write_run(tmp_path / "pass", [ok])
+    vs = {v.check: v for v in flow_audit.audit(ev, pdir, lg, None, "", 3)}
+    assert vs["C7 cluster-coverage"].status == "PASS"
+
+    ev, pdir, lg = _write_run(tmp_path / "skip", [])
+    vs = {v.check: v for v in flow_audit.audit(ev, pdir, lg, None, "", 3)}
+    assert vs["C7 cluster-coverage"].status == "SKIP"
