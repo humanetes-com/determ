@@ -21,6 +21,7 @@ from typing import Any
 
 from ...domain.refine import Attempt, LoopState
 from ...log import emit, log
+from ..fix_loop import FixOutcome, drive_fix_loop
 
 
 @dataclass(frozen=True, slots=True)
@@ -269,16 +270,22 @@ def task0c_augment_module(
 
     harness_ok, compile_err_out = augmentor.test_harness_compiles(project_dir, module_name)
     if not harness_ok:
+        # P1 FixLoop port: the LLM repair attempts run on the shared driver
+        # (the old hand-rolled `while True` never terminated when error
+        # signatures kept CHANGING without resolving — floor-stall + the
+        # backstop now bound it). The strip ladder runs once on exhaustion,
+        # exactly where the old loop escalated on identical signatures.
         compile_err = compile_err_out
         prev_signatures: frozenset[str] = frozenset()
-        fix_attempt = 0
+        broken_files: list[Path] = []
+        harness_unidentified = False
 
-        while True:
-            fix_attempt += 1
+        def _attempt_harness_fix(fix_attempt: int) -> FixOutcome:
+            nonlocal compile_err, prev_signatures, broken_files, harness_unidentified
             _log(f"  [{module_name}] Harness fix attempt {fix_attempt} — sending compile error to LLM.")
 
             # Find source files mentioned in the error that belong to this module.
-            broken_files: list[Path] = []
+            broken_files = []
             for src_file in sorted(module_dir.rglob("*.rs")):
                 rel = str(src_file.relative_to(project_dir))
                 if rel in compile_err or src_file.name in compile_err:
@@ -293,7 +300,8 @@ def task0c_augment_module(
 
             if not broken_files:
                 _log(f"  [{module_name}] Cannot identify broken file — skipping augmentation.")
-                return 0.0, 0, False, "harness_broken_file_unidentified"
+                harness_unidentified = True
+                return FixOutcome("stop")
 
             # Pass 1: ask LLM to fix each broken file — preserve as much generated
             # test code as possible rather than discarding it immediately.
@@ -350,115 +358,132 @@ corrected content here
                 "files_prompted": _files_prompted,
             })
 
-            harness_ok, compile_err_out = augmentor.test_harness_compiles(project_dir, module_name)
-            if harness_ok:
+            ok, out = augmentor.test_harness_compiles(project_dir, module_name)
+            if ok:
                 _log(f"  [{module_name}] Harness fixed by LLM after {fix_attempt} attempt(s).")
-                break
+                return FixOutcome("accepted")
 
-            new_signatures = _error_signatures(compile_err_out)
+            new_signatures = _error_signatures(out)
             resolved = prev_signatures - new_signatures
             _log(f"  [{module_name}] Still broken — {len(new_signatures)} error signature(s), "
                  f"{len(resolved)} resolved since last attempt.")
+            prev_signatures = new_signatures
+            compile_err = out
+            return FixOutcome("failed", err_sig=new_signatures,
+                              err_count=max(1, len(new_signatures)))
 
-            if new_signatures == prev_signatures:
-                # Truly stuck — LLM made no progress.
-                # Targeted strip: remove only the specific gen_* block(s) whose line
-                # ranges overlap with error lines — preserving all other gen_* blocks.
-                _log(f"  [{module_name}] No error improvement — targeted strip of broken gen_* block(s).")
+        _harness_fixed, _hf_attempts = drive_fix_loop(
+            _attempt_harness_fix,
+            # Same convention as every other loop: floor-stall is the real
+            # terminator, the hard cap is a runaway backstop.
+            hard_cap=int(os.getenv("TASK0C_HARNESS_HARD_CAP", "10000")),
+            max_stalls=int(os.getenv("TASK0C_HARNESS_MAX_STALLS", "3")),
+            stop_context=f"task0c harness fix {module_name}",
+            on_repeated=lambda _n, _g: _log(
+                f"  [{module_name}] No error improvement — targeted strip of broken gen_* block(s)."),
+            on_stall=lambda _n, _g: _log(
+                f"  [{module_name}] Harness error floor stalled at {_g.best} for "
+                f"{_g.stalls} attempt(s) — escalating to targeted strip."),
+        )
+        if not _harness_fixed:
+            if harness_unidentified:
+                return 0.0, 0, False, "harness_broken_file_unidentified"
+            # Escalation ladder (unchanged from the hand-rolled loop): targeted
+            # strip → full strip → git-restore probe; operates on the LAST
+            # attempt's broken_files + compile error.
+            compile_err_out = compile_err
 
-                def _strip_broken_gen_blocks(src_file: Path, error_text: str) -> bool:
-                    """Remove gen_tests artifacts that cover broken code. Returns True if changed.
+            def _strip_broken_gen_blocks(src_file: Path, error_text: str) -> bool:
+                """Remove gen_tests artifacts that cover broken code. Returns True if changed.
 
-                    With the sibling-file design, each `foo.gen_tests_N.rs` IS one block.
-                    If src_file is a sibling, delete it and remove its parent's decl.
-                    If src_file is a real source file, strip all its gen_tests artifacts
-                    (siblings + decls) — we can no longer target an individual block within
-                    a source file because none live there anymore.
-                    """
-                    sibling_match = _match_gen_tests_sibling(src_file.name)
-                    if sibling_match:
-                        parent_stem, pass_n = sibling_match
-                        parent = src_file.with_name(f"{parent_stem}.rs")
-                        try:
-                            src_file.unlink()
-                        except OSError:
-                            return False
-                        if parent.exists():
-                            ptxt = parent.read_text(encoding="utf-8")
-                            cleaned = _strip_gen_tests_decl_n(ptxt, pass_n)
-                            if cleaned != ptxt:
-                                parent.write_text(cleaned, encoding="utf-8")
-                        _log(f"  [{module_name}] Deleted broken sibling "
-                             f"{src_file.relative_to(project_dir)} (gen_tests_{pass_n}).")
-                        return True
-                    # Real source file — strip all gen_tests artifacts.
-                    n = _strip_all_gen_tests_artifacts(src_file)
-                    if n > 0:
-                        _log(f"  [{module_name}] Stripped {n} gen_tests sibling(s) for "
-                             f"{src_file.relative_to(project_dir)}.")
-                        return True
-                    return False
+                With the sibling-file design, each `foo.gen_tests_N.rs` IS one block.
+                If src_file is a sibling, delete it and remove its parent's decl.
+                If src_file is a real source file, strip all its gen_tests artifacts
+                (siblings + decls) — we can no longer target an individual block within
+                a source file because none live there anymore.
+                """
+                sibling_match = _match_gen_tests_sibling(src_file.name)
+                if sibling_match:
+                    parent_stem, pass_n = sibling_match
+                    parent = src_file.with_name(f"{parent_stem}.rs")
+                    try:
+                        src_file.unlink()
+                    except OSError:
+                        return False
+                    if parent.exists():
+                        ptxt = parent.read_text(encoding="utf-8")
+                        cleaned = _strip_gen_tests_decl_n(ptxt, pass_n)
+                        if cleaned != ptxt:
+                            parent.write_text(cleaned, encoding="utf-8")
+                    _log(f"  [{module_name}] Deleted broken sibling "
+                         f"{src_file.relative_to(project_dir)} (gen_tests_{pass_n}).")
+                    return True
+                # Real source file — strip all gen_tests artifacts.
+                n = _strip_all_gen_tests_artifacts(src_file)
+                if n > 0:
+                    _log(f"  [{module_name}] Stripped {n} gen_tests sibling(s) for "
+                         f"{src_file.relative_to(project_dir)}.")
+                    return True
+                return False
 
-                any_stripped = False
+            any_stripped = False
+            for src_file in broken_files:
+                if _is_protected_test_file(src_file):
+                    continue
+                if _strip_broken_gen_blocks(src_file, compile_err_out):
+                    any_stripped = True
+
+            harness_ok, _broken_err = augmentor.test_harness_compiles(project_dir, module_name)
+            if not harness_ok and any_stripped:
+                # Targeted strip removed some blocks but harness is still broken.
+                # Fall through to a full strip of ALL gen_tests artifacts from broken files.
+                _log(f"  [{module_name}] Targeted strip insufficient — doing full gen_tests strip.")
                 for src_file in broken_files:
                     if _is_protected_test_file(src_file):
                         continue
-                    if _strip_broken_gen_blocks(src_file, compile_err_out):
-                        any_stripped = True
-
+                    # Skip gen_tests siblings (already deleted in targeted pass).
+                    if _is_gen_tests_file(src_file.name):
+                        continue
+                    try:
+                        n_removed = _strip_all_gen_tests_artifacts(src_file)
+                        if n_removed > 0:
+                            _log(f"    Full strip: {src_file.relative_to(project_dir)} "
+                                 f"({n_removed} sibling(s))")
+                    except Exception:
+                        pass
                 harness_ok, _broken_err = augmentor.test_harness_compiles(project_dir, module_name)
-                if not harness_ok and any_stripped:
-                    # Targeted strip removed some blocks but harness is still broken.
-                    # Fall through to a full strip of ALL gen_tests artifacts from broken files.
-                    _log(f"  [{module_name}] Targeted strip insufficient — doing full gen_tests strip.")
-                    for src_file in broken_files:
-                        if _is_protected_test_file(src_file):
+            if not harness_ok:
+                # Check if even `cargo build` (no tests) fails — means LLM damaged source.
+                _lib_only = subprocess.run(
+                    ["cargo", "build", "-p", module_name],
+                    cwd=project_dir, capture_output=True, text=True,
+                    timeout=BUILD_TIMEOUT, env=_cargo_env(),
+                )
+                if _lib_only.returncode != 0:
+                    _log(f"  [{module_name}] Source files damaged by LLM fix attempts — restoring from git HEAD.")
+                    # Restore non-test source files from git HEAD (not test files — those we own).
+                    _restore_ok = True
+                    for _sf in sorted(module_dir.rglob("*.rs")):
+                        if is_test_file(_sf, project_dir):
                             continue
-                        # Skip gen_tests siblings (already deleted in targeted pass).
-                        if _is_gen_tests_file(src_file.name):
-                            continue
-                        try:
-                            n_removed = _strip_all_gen_tests_artifacts(src_file)
-                            if n_removed > 0:
-                                _log(f"    Full strip: {src_file.relative_to(project_dir)} "
-                                     f"({n_removed} sibling(s))")
-                        except Exception:
-                            pass
-                    harness_ok, _broken_err = augmentor.test_harness_compiles(project_dir, module_name)
+                        _rel = str(_sf.relative_to(project_dir))
+                        _r = subprocess.run(
+                            ["git", "checkout", "HEAD", "--", _rel],
+                            cwd=project_dir, capture_output=True, text=True,
+                        )
+                        if _r.returncode != 0:
+                            _log(f"    git restore failed for {_rel}: {_r.stderr[:100]}")
+                            _restore_ok = False
+                    if _restore_ok:
+                        harness_ok, _ = augmentor.test_harness_compiles(project_dir, module_name)
+                        if harness_ok:
+                            _log(f"  [{module_name}] Source restored — harness now compiles.")
                 if not harness_ok:
-                    # Check if even `cargo build` (no tests) fails — means LLM damaged source.
-                    _lib_only = subprocess.run(
-                        ["cargo", "build", "-p", module_name],
-                        cwd=project_dir, capture_output=True, text=True,
-                        timeout=BUILD_TIMEOUT, env=_cargo_env(),
-                    )
-                    if _lib_only.returncode != 0:
-                        _log(f"  [{module_name}] Source files damaged by LLM fix attempts — restoring from git HEAD.")
-                        # Restore non-test source files from git HEAD (not test files — those we own).
-                        _restore_ok = True
-                        for _sf in sorted(module_dir.rglob("*.rs")):
-                            if is_test_file(_sf, project_dir):
-                                continue
-                            _rel = str(_sf.relative_to(project_dir))
-                            _r = subprocess.run(
-                                ["git", "checkout", "HEAD", "--", _rel],
-                                cwd=project_dir, capture_output=True, text=True,
-                            )
-                            if _r.returncode != 0:
-                                _log(f"    git restore failed for {_rel}: {_r.stderr[:100]}")
-                                _restore_ok = False
-                        if _restore_ok:
-                            harness_ok, _ = augmentor.test_harness_compiles(project_dir, module_name)
-                            if harness_ok:
-                                _log(f"  [{module_name}] Source restored — harness now compiles.")
-                                break
                     _log(f"  [{module_name}] Harness still broken after targeted strip — skipping augmentation.")
                     return 0.0, 0, False, "harness_broken_after_strip"
+            else:
                 _log(f"  [{module_name}] Harness fixed by targeted strip.")
-                break
 
-            prev_signatures = new_signatures
-            compile_err = compile_err_out
 
     # Derive allow attributes and prelude imports from project source — no LLM.
     _allow_line, _prelude_block = _derive_gentest_prelude(project_dir)
@@ -1073,13 +1098,67 @@ project-specific import paths, type construction patterns, and hard constraints.
                          f"skipping write (no productive content).")
                     _log_task0c_attempt(project_dir, rel_path, attempt, block, "", "no_tests_in_block")
                     return "no_tests", block
-                _prev_sigs: frozenset[str] = frozenset()
-                _fix_attempt = 0
                 _sib = _gen_tests_path(abs_path, pass_n)
                 _decl = _build_gen_tests_decl(_sib.name, pass_n, _allow_line,
                                               cluster_cfg_attr=_cluster_cfg_attr(_current_cluster))
                 _src_with_decl = base_text.rstrip() + _decl
-                while True:
+                # P1 FixLoop port: verify→LLM-fix cycle on the shared driver.
+                # The old hand-rolled loop terminated only on identical error
+                # signatures — floor-stall + the backstop now also bound the
+                # "signatures keep changing but never resolve" case.
+                _fc: dict[str, Any] = {"compile_err": "", "sigs": frozenset(), "reverted": False}
+
+                def _attempt_block_fix(_fix_n: int) -> FixOutcome:
+                    nonlocal block, _pass_had_work
+                    compile_err = _fc["compile_err"]
+                    if _fix_n > 1:
+                        _log(f"  [{module_name}] Compile error in {rel_path} "
+                             f"(fix attempt {_fix_n - 1}) — sending to LLM.")
+                        _fix_history = _get_task0c_history(project_dir, rel_path)
+                        _fix_history_section = (f"\n{_fix_history}\n") if _fix_history.strip() else ""
+                        _compile_err_capped = compile_err[-3_000:] if len(compile_err) > 3_000 else compile_err
+                        _fix_extra = len(_compile_err_capped) + len(block) + len(_fix_history_section) + 4000
+                        _fix_core = secs['cargo'] + secs['full_source'] + secs['fn_bodies'] + secs['symbols']
+                        _fix_optional = secs['integ_tests'] + secs['siblings']
+                        _FIX_CHAR_LIMIT = TASK0C_PROMPT_CHAR_CAP
+                        _fix_ctx = _fix_core + (_fix_optional if len(_fix_core) + len(_fix_optional) + _fix_extra < _FIX_CHAR_LIMIT else "")
+                        fix_prompt = f"""The Rust test block you generated for `{rel_path}` does not compile.
+    {_TASK0C_FIX_THINKING_DIRECTIVE}Fix ONLY the test block so it compiles. Return the corrected <FILE path="gen_tests_block"> block.
+    {_fix_history_section}
+    Compile error (read carefully — this is the ONLY thing to fix):
+    {_compile_err_capped}
+
+    Current test block (fix this):
+    {block}
+
+    --- Full context below — same constraints apply as when you generated the block ---
+    {_fix_ctx}
+    Rust rules:
+    - Each `#[test]` fn must have ZERO arguments.
+    - Use `use super::*;` to access module items.
+    - Read field types from the struct definitions in the source file — match EXACTLY.
+
+    INTERNAL MODULE RULES — these tests live inside the source file, not in an external test crate:
+    - Do NOT write `use <crate_name>::...` — you are already inside the crate.
+    - The template prelude already imports: {_prelude_names} — use them directly.
+    - Do NOT use `#[macro_export]` macros inside this module — they cannot be imported from within the crate.
+      Construct values through direct API calls instead.
+    - Do NOT use `assert_eq!` or `assert_ne!` on types that do not implement `PartialEq`.
+      Use `format!("{{}}",  val)`, boolean checks, or `matches!()` instead.
+    {_nightly_rules_for_cluster()}
+    See the IMPORTS, PITFALLS, and RULES sections of coverage_strategy.md (shown above) for
+    project-specific import paths, type construction patterns, and hard constraints.
+    {_file_constraints_section}"""
+                        fix_response = ask(fix_prompt, model=_TASK0C_MODEL, think=None)
+                        fixed = extract_test_mod(fix_response)
+                        if fixed:
+                            block = _strip_trailing_file_tag(fixed)
+                            block = _inject_allow_before_gen_mod(block, _allow_line)
+                        else:
+                            _log(f"  [{module_name}] LLM returned no fix — reverting {rel_path}.")
+                            _revert_gen_tests_pass(abs_path, base_text, _sib)
+                            _fc["reverted"] = True
+                            return FixOutcome("stop")
                     abs_path.write_text(_src_with_decl, encoding="utf-8")
                     _sib.write_text(_extract_gen_tests_body(block), encoding="utf-8")
                     check = subprocess.run(
@@ -1088,75 +1167,44 @@ project-specific import paths, type construction patterns, and hard constraints.
                         timeout=BUILD_TIMEOUT, env=_cargo_env(),
                     )
                     if check.returncode == 0:
-                        _log_task0c_attempt(project_dir, rel_path, attempt + _fix_attempt, block, "", "success")
+                        _log_task0c_attempt(project_dir, rel_path, attempt + _fix_n - 1, block, "", "success")
                         _log(f"  [{module_name}] Appended gen_tests_{pass_n} to {rel_path} "
                              f"({len(uncov_lines)} uncovered lines targeted)")
                         _pass_had_work = True
-                        return "committed", block
+                        return FixOutcome("accepted")
                     compile_err = (check.stdout + check.stderr).strip()
                     cur_sigs = _error_signatures_from_output(compile_err)
                     if "unclosed delimiter" in compile_err or "mismatched closing delimiter" in compile_err:
                         _log(f"  [{module_name}] Unclosed delimiter — reverting {rel_path}.")
                         _revert_gen_tests_pass(abs_path, base_text, _sib)
-                        return "failed", block
-                    if _fix_attempt > 0:
-                        resolved = _prev_sigs - cur_sigs
-                        if cur_sigs == _prev_sigs:
-                            _log(f"  [{module_name}] No error improvement in {rel_path} — reverting.")
-                            _log_task0c_attempt(project_dir, rel_path, attempt + _fix_attempt, block, compile_err, "compile_error")
-                            _revert_gen_tests_pass(abs_path, base_text, _sib)
-                            return "failed", block
+                        _fc["reverted"] = True
+                        return FixOutcome("stop")
+                    if _fix_n > 1:
+                        resolved = _fc["sigs"] - cur_sigs
                         _log(f"  [{module_name}] {len(resolved)} error(s) resolved in {rel_path}, "
                              f"{len(cur_sigs)} remaining — continuing.")
-                    _fix_attempt += 1
-                    _prev_sigs = cur_sigs
-                    _log(f"  [{module_name}] Compile error in {rel_path} "
-                         f"(fix attempt {_fix_attempt}) — sending to LLM.")
-                    _log_task0c_attempt(project_dir, rel_path, attempt + _fix_attempt, block, compile_err, "compile_error")
-                    _fix_history = _get_task0c_history(project_dir, rel_path)
-                    _fix_history_section = (f"\n{_fix_history}\n") if _fix_history.strip() else ""
-                    _compile_err_capped = compile_err[-3_000:] if len(compile_err) > 3_000 else compile_err
-                    _fix_extra = len(_compile_err_capped) + len(block) + len(_fix_history_section) + 4000
-                    _fix_core = secs['cargo'] + secs['full_source'] + secs['fn_bodies'] + secs['symbols']
-                    _fix_optional = secs['integ_tests'] + secs['siblings']
-                    _FIX_CHAR_LIMIT = TASK0C_PROMPT_CHAR_CAP
-                    _fix_ctx = _fix_core + (_fix_optional if len(_fix_core) + len(_fix_optional) + _fix_extra < _FIX_CHAR_LIMIT else "")
-                    fix_prompt = f"""The Rust test block you generated for `{rel_path}` does not compile.
-{_TASK0C_FIX_THINKING_DIRECTIVE}Fix ONLY the test block so it compiles. Return the corrected <FILE path="gen_tests_block"> block.
-{_fix_history_section}
-Compile error (read carefully — this is the ONLY thing to fix):
-{_compile_err_capped}
+                    _log_task0c_attempt(project_dir, rel_path, attempt + _fix_n - 1, block, compile_err, "compile_error")
+                    _fc["compile_err"] = compile_err
+                    _fc["sigs"] = cur_sigs
+                    return FixOutcome("failed", err_sig=cur_sigs,
+                                      err_count=max(1, len(cur_sigs)))
 
-Current test block (fix this):
-{block}
-
---- Full context below — same constraints apply as when you generated the block ---
-{_fix_ctx}
-Rust rules:
-- Each `#[test]` fn must have ZERO arguments.
-- Use `use super::*;` to access module items.
-- Read field types from the struct definitions in the source file — match EXACTLY.
-
-INTERNAL MODULE RULES — these tests live inside the source file, not in an external test crate:
-- Do NOT write `use <crate_name>::...` — you are already inside the crate.
-- The template prelude already imports: {_prelude_names} — use them directly.
-- Do NOT use `#[macro_export]` macros inside this module — they cannot be imported from within the crate.
-  Construct values through direct API calls instead.
-- Do NOT use `assert_eq!` or `assert_ne!` on types that do not implement `PartialEq`.
-  Use `format!("{{}}",  val)`, boolean checks, or `matches!()` instead.
-{_nightly_rules_for_cluster()}
-See the IMPORTS, PITFALLS, and RULES sections of coverage_strategy.md (shown above) for
-project-specific import paths, type construction patterns, and hard constraints.
-{_file_constraints_section}"""
-                    fix_response = ask(fix_prompt, model=_TASK0C_MODEL, think=None)
-                    fixed = extract_test_mod(fix_response)
-                    if fixed:
-                        block = _strip_trailing_file_tag(fixed)
-                        block = _inject_allow_before_gen_mod(block, _allow_line)
-                    else:
-                        _log(f"  [{module_name}] LLM returned no fix — reverting {rel_path}.")
-                        _revert_gen_tests_pass(abs_path, base_text, _sib)
-                        return "failed", block
+                _committed, _ = drive_fix_loop(
+                    _attempt_block_fix,
+                    hard_cap=int(os.getenv("TASK0C_BLOCK_FIX_HARD_CAP", "10000")),
+                    max_stalls=int(os.getenv("TASK0C_BLOCK_FIX_MAX_STALLS", "3")),
+                    stop_context=f"task0c gen_tests fix {rel_path}",
+                    on_repeated=lambda _rn, _rg: _log(
+                        f"  [{module_name}] No error improvement in {rel_path} — reverting."),
+                    on_stall=lambda _sn, _sg: _log(
+                        f"  [{module_name}] Error floor stalled in {rel_path} at {_sg.best} "
+                        f"for {_sg.stalls} attempt(s) — reverting."),
+                )
+                if _committed:
+                    return "committed", block
+                if not _fc["reverted"]:
+                    _revert_gen_tests_pass(abs_path, base_text, _sib)
+                return "failed", block
 
             block = ""
             _block_committed = False
