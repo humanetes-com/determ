@@ -536,11 +536,12 @@ pub fn enumerate_mods_in_file(path: &Path, root: &Path) -> Result<Vec<ModRecord>
     Ok(out)
 }
 
-/// Walk a directory tree, locate each crate root (src/lib.rs or src/main.rs),
-/// and emit ModRecord entries for every external mod declaration. Used by the
-/// pipeline to determine which files are gated by which `#[cfg(...)]` and
-/// therefore active under a given cluster. Replaces a regex-based scan that
-/// could conflate adjacent mod declarations' cfgs.
+/// Walk a directory tree and emit ModRecord entries for every external mod
+/// declaration in every `.rs` file — not just the crate roots: intermediate
+/// files declare submodules too (`mod deep;` in counter.rs), and the pipeline
+/// follows the full declaration CHAIN to decide which files are gated by
+/// which `#[cfg(...)]` and therefore active under a given cluster. Replaces
+/// a regex-based scan that could conflate adjacent mod declarations' cfgs.
 pub fn enumerate_mods_in_tree(input_dir: &Path) -> Result<Vec<ModRecord>> {
     let mut out = Vec::new();
     for entry in walkdir::WalkDir::new(input_dir)
@@ -555,7 +556,7 @@ pub fn enumerate_mods_in_tree(input_dir: &Path) -> Result<Vec<ModRecord>> {
             Some(n) => n,
             None => continue,
         };
-        if name != "lib.rs" && name != "main.rs" {
+        if !name.ends_with(".rs") {
             continue;
         }
         let rel = p.strip_prefix(input_dir).unwrap_or(p);

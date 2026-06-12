@@ -63,6 +63,77 @@ def _should_reverify(primary_output: str, retry_output: str, retry_passed: bool,
     return new_p > init_p or new_f < init_f
 
 
+def run_clusters_strict(project_dir: Path, clusters: list,
+                        deps: Task3Deps) -> tuple[bool, str, list[dict]]:
+    """Run every baked cluster under its own toolchain + env_extra and apply
+    the FR-024 strict verdict (`validate_task3_output_strict`, including the
+    expected-count "incomplete" case). THE single authority for "all tests
+    pass": task3 and the post-task3 fix loop's check both gate here —
+    validating with one bare cargo command is the false-SUCCESS bug
+    (2026-06-12 microcrate: default cluster green, extra_cap 3 failing).
+
+    Returns (all_pass, aggregated_output, per_cluster_results). Each result
+    dict carries the cluster's raw `output`; callers strip that key before
+    emitting events.
+    """
+    per_cluster_results: list[dict] = []
+    aggregated_output_chunks: list[str] = []
+    all_pass = True
+    for cluster in sorted(clusters, key=lambda c: c.name):
+        cmd_parts = ["cargo"]
+        if cluster.toolchain:
+            cmd_parts.append(f"+{cluster.toolchain}")
+        cmd_parts += ["test", "--no-fail-fast"]
+        cluster_cmd = shlex.join(cmd_parts)
+        cluster_env = deps.cargo_env()
+        cluster_env.update(cluster.env_extra or {})
+        log(f"  [task3/{cluster.name}] running {cluster_cmd}")
+        t_c = time.monotonic()
+        try:
+            result = subprocess.run(
+                deps.parse_cmd(cluster_cmd),
+                cwd=project_dir, capture_output=True, text=True,
+                timeout=deps.test_timeout, env=cluster_env,
+            )
+            rc = result.returncode
+            stdout = result.stdout or ""
+            stderr = result.stderr or ""
+        except subprocess.TimeoutExpired:
+            rc = -1
+            stdout = ""
+            stderr = (f"TIMEOUT: cluster '{cluster.name}' tests exceeded "
+                      f"{deps.test_timeout}s")
+            log(f"  [task3/{cluster.name}] {stderr}")
+        dt = time.monotonic() - t_c
+        output = stdout + ("\n--- stderr ---\n" + stderr if stderr else "")
+        pass_n, fail_n, ign_n = _parse_test_counts(output)
+        expected_n = deps.count_active_tests_for_cluster(project_dir, cluster)
+        status, reason = validate_task3_output_strict(
+            pass_n, fail_n, ign_n, expected_n, cluster.name,
+        )
+        log(f"  [task3/{cluster.name}] {status}: {reason} "
+            f"(rc={rc}, {dt:.1f}s)")
+        per_cluster_results.append({
+            "cluster": cluster.name,
+            "status": status,
+            "rc": rc,
+            "pass": pass_n,
+            "fail": fail_n,
+            "ignored": ign_n,
+            "expected": expected_n,
+            "duration_s": dt,
+            "output": output,
+        })
+        aggregated_output_chunks.append(
+            f"=== cluster: {cluster.name} (rc={rc}, "
+            f"{status}, {pass_n}/{expected_n} passed, {fail_n} failed, "
+            f"{ign_n} ignored) ===\n{output}\n"
+        )
+        if status != "pass":
+            all_pass = False
+    return all_pass, "".join(aggregated_output_chunks), per_cluster_results
+
+
 def task3(project_dir: Path, test_command: str, iteration: int | str,
           output_dir: Path | str, genesis_path: Path, deps: Task3Deps,
           _reverify_remaining: int = 2) -> Any:
@@ -104,78 +175,28 @@ def task3(project_dir: Path, test_command: str, iteration: int | str,
                    "clusters": [c.name for c in clusters]})
         _t_start = time.monotonic()
 
-        per_cluster_results: list[dict] = []
-        aggregated_output_chunks: list[str] = []
-        any_failed = False
-        any_incomplete = False
-        agg_pass = agg_fail = agg_ignored = agg_expected = 0
+        _all_pass, aggregated_output, cluster_results = run_clusters_strict(
+            project_dir, clusters, deps)
+        # Strip the raw per-cluster output before anything event-shaped.
+        per_cluster_results = [
+            {k: v for k, v in r.items() if k != "output"} for r in cluster_results]
+        any_failed = any(r["status"] == "fail" for r in cluster_results)
+        any_incomplete = any(r["status"] == "incomplete" for r in cluster_results)
+        agg_pass = sum(r["pass"] for r in cluster_results)
+        agg_fail = sum(r["fail"] for r in cluster_results)
+        agg_ignored = sum(r["ignored"] for r in cluster_results)
+        agg_expected = sum(r["expected"] for r in cluster_results)
+        # Primary = first non-pass cluster: its output has the actionable signal,
+        # and the inline retry must rebuild under ITS toolchain/env to reproduce
+        # the failure (R9).
         primary_test_output = ""
         primary_cluster = None
-
-        for cluster in sorted(clusters, key=lambda c: c.name):
-            cmd_parts = ["cargo"]
-            if cluster.toolchain:
-                cmd_parts.append(f"+{cluster.toolchain}")
-            cmd_parts += ["test", "--no-fail-fast"]
-            cluster_cmd = shlex.join(cmd_parts)
-            cluster_env = deps.cargo_env()
-            cluster_env.update(cluster.env_extra or {})
-            log(f"  [task3/{cluster.name}] running {cluster_cmd}")
-            t_c = time.monotonic()
-            try:
-                result = subprocess.run(
-                    deps.parse_cmd(cluster_cmd),
-                    cwd=project_dir, capture_output=True, text=True,
-                    timeout=deps.test_timeout, env=cluster_env,
-                )
-                rc = result.returncode
-                stdout = result.stdout or ""
-                stderr = result.stderr or ""
-            except subprocess.TimeoutExpired:
-                rc = -1
-                stdout = ""
-                stderr = (f"TIMEOUT: cluster '{cluster.name}' tests exceeded "
-                          f"{deps.test_timeout}s")
-                log(f"  [task3/{cluster.name}] {stderr}")
-            dt = time.monotonic() - t_c
-            output = stdout + ("\n--- stderr ---\n" + stderr if stderr else "")
-            pass_n, fail_n, ign_n = _parse_test_counts(output)
-            expected_n = deps.count_active_tests_for_cluster(project_dir, cluster)
-            status, reason = validate_task3_output_strict(
-                pass_n, fail_n, ign_n, expected_n, cluster.name,
-            )
-            log(f"  [task3/{cluster.name}] {status}: {reason} "
-                f"(rc={rc}, {dt:.1f}s)")
-            per_cluster_results.append({
-                "cluster": cluster.name,
-                "status": status,
-                "rc": rc,
-                "pass": pass_n,
-                "fail": fail_n,
-                "ignored": ign_n,
-                "expected": expected_n,
-                "duration_s": dt,
-            })
-            aggregated_output_chunks.append(
-                f"=== cluster: {cluster.name} (rc={rc}, "
-                f"{status}, {pass_n}/{expected_n} passed, {fail_n} failed, "
-                f"{ign_n} ignored) ===\n{output}\n"
-            )
-            agg_pass += pass_n
-            agg_fail += fail_n
-            agg_ignored += ign_n
-            agg_expected += expected_n
-            if status != "pass":
-                any_failed = any_failed or status == "fail"
-                any_incomplete = any_incomplete or status == "incomplete"
-                # Keep this cluster's output AND identity as primary for the inline
-                # retry — it has the actionable signal, and the retry must rebuild
-                # under THIS cluster's toolchain/env to reproduce its failure (R9).
-                if not primary_test_output:
-                    primary_test_output = output
-                    primary_cluster = cluster
-
-        aggregated_output = "".join(aggregated_output_chunks)
+        _cluster_by_name = {c.name: c for c in clusters}
+        for r in cluster_results:
+            if r["status"] != "pass":
+                primary_test_output = r["output"]
+                primary_cluster = _cluster_by_name[r["cluster"]]
+                break
         genesis = deps.read(genesis_path)
         deps.write(output_file,
                    f"=== genesis.md (iteration {iteration}) ===\n{genesis}\n"
@@ -227,11 +248,21 @@ def task3(project_dir: Path, test_command: str, iteration: int | str,
             # while the budget lasts (see _should_reverify).
             if _should_reverify(primary_test_output, retry_output, retry_passed,
                                 _reverify_remaining):
-                return task3(
+                r_passed, r_output = task3(
                     project_dir, test_command, iteration,
                     output_dir, genesis_path, deps,
                     _reverify_remaining=_reverify_remaining - 1,
                 )
+                # The recursion emitted its own fully-populated task.done; this
+                # level's event must still carry the verdict — a task.done with
+                # no `passed` key reads as passed=None to the auditor (C9).
+                r_pass, r_fail, _r_ign = _parse_test_counts(r_output)
+                done["data"] = {
+                    "passed": r_passed, "reverified": True,
+                    "pass_count": r_pass, "fail_count": r_fail,
+                    "expected_count": agg_expected,
+                }
+                return r_passed, r_output
 
         done["data"] = {
             "passed": False, "pass_count": agg_pass,

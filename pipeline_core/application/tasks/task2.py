@@ -37,6 +37,10 @@ class Task2Deps:
     task2_fix_retries: int
     single_call_char_limit: int
     genesis_cap: int
+    # Builds the per-cluster strict check for the post-task3 fix loop:
+    # factory(project_dir) → check_fn running EVERY baked cluster, or None
+    # when the workspace has no baked clusters (legacy single-command path).
+    cluster_check_factory: Callable[[Path], Callable[[], tuple[bool, str]] | None] | None = None
 
 
 def task2(project_dir: Path, genesis_path: Path, functional_req_path: Path,
@@ -272,9 +276,16 @@ def task2_fix_loop(
 
     extra = _genesis_section + _test_section
 
+    # Verdict authority: the per-cluster strict runner, when baked clusters
+    # exist. The bare test_command sees only the default cluster — validating
+    # with it alone is the false-SUCCESS bug (2026-06-12 microcrate).
+    check_fn = (deps.cluster_check_factory(project_dir)
+                if deps.cluster_check_factory else None)
+
     return deps.generate_fix_loop(
         project_dir=project_dir,
         check_cmd=test_command,
+        check_fn=check_fn,
         source_paths=source_paths,
         existing_test_files=existing_test_files,
         extra_context=extra,

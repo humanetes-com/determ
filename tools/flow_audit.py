@@ -17,6 +17,10 @@ Checks
   C4 plateau             N+ consecutive identical pass counts flagged
   C5 no-wipe             no "Cleaning up ... for retry" after run start
   C6 ratchet-sanity      ratchet.save strictly improves; restore only below best
+  C7 cluster-coverage    no task0c cluster pass ends at 0% coverage
+  C8 harness-fix-effect  every claimed harness fix attempt sent ≥1 prompt
+  C9 success-evidence    a SUCCESS claim in the log is backed by a passing
+                         (per-cluster strict) task3 task.done event
 
 Usage:
   python tools/flow_audit.py [--events logs/events.jsonl] [--prompts logs/prompts]

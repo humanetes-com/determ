@@ -51,6 +51,9 @@ IMPORTANT! Coverage target & test preservation (FR-018). "Sufficient/HIGH covera
 
 # Engineering principles
 
+## Microcrate first — every escaped bug improves the smoke
+We have a fast end-to-end fixture: `tests/fixtures/microcrate` + `bash run_microcrate.sh` (L3 smoke: full pipeline run in minutes, `--audit` in-process, ends with `tools/flow_audit.py --strict` where SKIP=FAIL). Rule: whenever a bug is found in a real run (anyhow) that the microcrate smoke did NOT catch, the FIRST fix is to extend the microcrate/auditor so the smoke reproduces or detects that bug class — then fix the pipeline. The fixture grows traps (e.g. per-cluster `capacity_hint`), the auditor grows checks (C1–C8); silent gaps are closed with evidence, never with an assumption. No `restart.sh --y` until the smoke ends SMOKE GREEN; strict-mode SKIPs are exempted only explicitly via `--allow-skip`.
+
 ## Never install dependencies manually
 Every new tool, binary, or Python package must be added to `setup.sh` (and `requirements.txt` for Python deps). Never run `pip install`, `cargo install`, or `rustup component add` directly — those are one-off fixes that break reproducibility. The correct action is always: add to setup, then run setup.
 

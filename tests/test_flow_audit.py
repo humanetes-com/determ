@@ -189,5 +189,49 @@ def test_strict_mode_fails_on_skip(tmp_path: Path) -> None:
     base = ["--events", str(ev), "--prompts", str(pdir), "--log", str(lg)]
     assert flow_audit.main(base) == 0                       # lenient: SKIPs pass
     assert flow_audit.main([*base, "--strict"]) == 1        # strict: SKIPs fail
-    allow_all = "C1,C2,C3,C4,C5,C6,C7,C8"
+    allow_all = "C1,C2,C3,C4,C5,C6,C7,C8,C9"
     assert flow_audit.main([*base, "--strict", "--allow-skip", allow_all]) == 0
+
+
+def _t3done(ts: str, passed: bool, **data) -> dict:
+    return {"ts": ts, "event": "task.done", "task": "task3",
+            "data": {"passed": passed, **data}}
+
+
+def test_success_evidence_verdicts(tmp_path: Path) -> None:
+    """C9 (intent-vs-effect): a 'SUCCESS: all tests passed' claim in the log
+    must be backed by the LAST task3 task.done having passed=true. Pins the
+    2026-06-12 microcrate run: task3 failed per-cluster (21/24), the fix loop
+    validated single-cluster, and the run printed SUCCESS and exited 0."""
+    claim_log = ("PIPELINE STARTED — 2026-06-12 04:32:38 UTC\n"
+                 "TASK 3 result: fail — 3 failed\n"
+                 "SUCCESS: all tests passed after fix loop.\n")
+
+    # The false-SUCCESS shape: claim present, last task3 failed → FAIL.
+    ev, pdir, lg = _write_run(
+        tmp_path / "false", [_t3done("2026-06-12T05:00:00", False,
+                                     pass_count=21, fail_count=3)],
+        log=claim_log)
+    vs = {v.check: v for v in flow_audit.audit(ev, pdir, lg, None, "", 3)}
+    assert vs["C9 success-evidence"].status == "FAIL"
+
+    # Claim with NO task3 completion at all → FAIL (claim without evidence).
+    ev, pdir, lg = _write_run(tmp_path / "noev", [], log=claim_log)
+    vs = {v.check: v for v in flow_audit.audit(ev, pdir, lg, None, "", 3)}
+    assert vs["C9 success-evidence"].status == "FAIL"
+
+    # Genuine success: a later task3 passed=true backs the claim → PASS.
+    ev, pdir, lg = _write_run(
+        tmp_path / "true",
+        [_t3done("2026-06-12T05:00:00", False, pass_count=21, fail_count=3),
+         _t3done("2026-06-12T05:30:00", True, pass_count=26, fail_count=0)],
+        log=claim_log)
+    vs = {v.check: v for v in flow_audit.audit(ev, pdir, lg, None, "", 3)}
+    assert vs["C9 success-evidence"].status == "PASS"
+
+    # No claim in the log (run still going / failed honestly) → SKIP.
+    ev, pdir, lg = _write_run(
+        tmp_path / "none", [_t3done("2026-06-12T05:00:00", False)],
+        log="PIPELINE STARTED — 2026-06-12 04:32:38 UTC\nTASK 3 result: fail\n")
+    vs = {v.check: v for v in flow_audit.audit(ev, pdir, lg, None, "", 3)}
+    assert vs["C9 success-evidence"].status == "SKIP"

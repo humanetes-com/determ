@@ -80,7 +80,7 @@ from pipeline_core.application.tasks.task2 import (
 from pipeline_core.application.tasks.task2 import (
     task2_inner_loop as _task2_inner_impl,
 )
-from pipeline_core.application.tasks.task3 import Task3Deps
+from pipeline_core.application.tasks.task3 import Task3Deps, run_clusters_strict
 from pipeline_core.application.tasks.task3 import task3 as _task3_impl
 from pipeline_core.application.tasks.task4 import Task4Deps
 from pipeline_core.application.tasks.task4 import task4 as _task4_impl
@@ -141,6 +141,7 @@ from pipeline_core.domain.test_results import (
     failing_test_names,
     identifiers_in,
     per_file_test_stats,
+    resolve_task3_verdict,
     validate_task3_output_strict,
 )
 from pipeline_core.domain.text import (
@@ -3029,31 +3030,6 @@ def validate_task2_api_surface_conformance(
     return False, report
 
 
-def validate_task3_output(pass_count: int, fail_count: int,
-                          module_has_tests: bool) -> tuple[str, str]:
-    """
-    Anti-corruption check on test results — LEGACY non-strict variant kept
-    for the few call sites that have no cluster context. The current TASK 3
-    path uses `validate_task3_output_strict` below.
-
-    Returns (status, reason) where status is one of:
-      'pass'      — all tests passed, lock the module
-      'fail'      — tests ran but failed, continue to TASK 4
-      'no_tests'  — 0 tests ran despite test files existing (structural problem)
-      'no_files'  — module has no test files (expected — lock on build success)
-    """
-    if pass_count > 0 and fail_count == 0:
-        return "pass", f"{pass_count} tests passed"
-    if not module_has_tests and pass_count == 0 and fail_count == 0:
-        return "no_files", "module has no test files — lock on build success"
-    if pass_count == 0 and fail_count == 0:
-        return "no_tests", (
-            "0 tests ran despite test files existing — "
-            "test binary may be empty, harness may not compile, or test filter excludes everything"
-        )
-    return "fail", f"{pass_count} passed, {fail_count} failed"
-
-
 _TEST_ATTR_RE = re.compile(
     r"#\s*\[\s*(?:test|tokio::test|async_std::test|"
     r"serial_test::serial|rstest|parameterized|test_case)\s*[\s\],(]",
@@ -3132,6 +3108,46 @@ def _count_test_fns_cfg_aware(
     return count
 
 
+def _file_active_for_cluster(
+    src_dir: Path,
+    file_path: Path,
+    cfg_true: set[str],
+    cfg_false: set[str],
+    _depth: int = 0,
+) -> bool:
+    """Whether `file_path` is COMPILED under the cluster cfg: evaluate every
+    cfg predicate along its mod-declaration chain up to the crate root
+    (lib.rs/main.rs), via the syn extractor's ModRecords. A file whose chain
+    is decidably False never compiles — counting its tests inflated the
+    expected count and made the cluster permanently 'incomplete' (microcrate:
+    cap.rs counted under stable although `mod cap;` is extra_cap-gated).
+
+    Undecidable predicates and unmatched files count as ACTIVE — this helper
+    may under-exclude but never over-exclude (the strict verdict must not
+    silently shrink the oracle, FR-018)."""
+    stem = file_path.stem
+    if stem in ("lib", "main") or _depth > 32:
+        return True
+    recs = _mod_records_cached(src_dir)
+    if recs is None:
+        # Extractor unavailable: single-level gate (AST-less environments).
+        pred = _file_cfg_predicate(src_dir, file_path.name)
+        return pred is None or _eval_cfg_pred(pred, cfg_true, cfg_false) is not False
+    matches = [r for r in recs if r.name == stem or r.file == file_path.name]
+    if not matches:
+        return True
+    # Dual-form decls (`#[cfg(X)] mod m;` / `#[cfg(not(X))] mod m;`): the file
+    # is active if ANY declaration chain is active.
+    for rec in matches:
+        if any(_eval_cfg_pred(p, cfg_true, cfg_false) is False
+               for p in rec.cfg_predicates):
+            continue
+        if _file_active_for_cluster(src_dir, Path(rec.declared_in),
+                                    cfg_true, cfg_false, _depth + 1):
+            return True
+    return False
+
+
 def _count_active_tests_for_cluster(
     project_dir: Path,
     cluster: "BuildCluster | None",
@@ -3186,6 +3202,10 @@ def _count_active_tests_for_cluster(
     for parent in src_dir.glob("*.rs"):
         if re.search(r"\.gen_tests_\d+\.rs$", parent.name):
             continue
+        # A parent file that never compiles under this cluster (mod-decl chain
+        # cfg'd out) takes its gen_tests siblings with it.
+        if not _file_active_for_cluster(src_dir, parent, cfg_true, cfg_false):
+            continue
         try:
             ptext = parent.read_text(encoding="utf-8", errors="replace")
         except Exception:
@@ -3213,6 +3233,8 @@ def _count_active_tests_for_cluster(
     # 3. src/**/*.rs (excluding gen_tests siblings) — inline test mods.
     for srf in src_dir.rglob("*.rs"):
         if re.search(r"\.gen_tests_\d+\.rs$", srf.name):
+            continue
+        if not _file_active_for_cluster(src_dir, srf, cfg_true, cfg_false):
             continue
         try:
             stext = srf.read_text(encoding="utf-8", errors="replace")
@@ -12203,6 +12225,18 @@ def _public_api_from_source(content: str) -> str:
 _MOD_RECORDS_CACHE: dict[str, list[ModRecord]] = {}
 
 
+def _mod_records_cached(src_dir: Path) -> "list[ModRecord] | None":
+    """ModRecords for `src_dir` via the syn extractor, cached per dir
+    (see _MOD_RECORDS_CACHE). None when the extractor is unavailable."""
+    key = str(src_dir.resolve())
+    if key not in _MOD_RECORDS_CACHE:
+        recs = _enumerate_mods_via_extractor(src_dir)
+        if recs is None:
+            return None
+        _MOD_RECORDS_CACHE[key] = recs
+    return _MOD_RECORDS_CACHE[key]
+
+
 def _file_cfg_predicate(target_src_dir: Path, file_rel: str) -> str | None:
     """Return the cfg predicate (if any) under which `file_rel` is compiled.
 
@@ -12216,14 +12250,11 @@ def _file_cfg_predicate(target_src_dir: Path, file_rel: str) -> str | None:
     stem = Path(file_rel).stem
     if stem in ("lib", "main"):
         return None
-    key = str(target_src_dir.resolve())
-    if key not in _MOD_RECORDS_CACHE:
-        recs = _enumerate_mods_via_extractor(target_src_dir)
-        if recs is None:
-            return _file_cfg_predicate_regex_fallback(target_src_dir, file_rel)
-        _MOD_RECORDS_CACHE[key] = recs
+    recs = _mod_records_cached(target_src_dir)
+    if recs is None:
+        return _file_cfg_predicate_regex_fallback(target_src_dir, file_rel)
     file_name = Path(file_rel).name
-    for r in _MOD_RECORDS_CACHE[key]:
+    for r in recs:
         if r.name == stem or r.file == file_name:
             preds: list[str] = list(r.cfg_predicates)
             if not preds:
@@ -16143,9 +16174,16 @@ def generate_fix_loop(
     allowed_dir_prefix: str = "",
     functional_req: str = "",
     fr_path: "Path | None" = None,
+    check_fn: "Callable[[], tuple[bool, str]] | None" = None,
 ) -> tuple[bool, str]:
     """
     Shared iterative fix loop for any code generation step.
+
+    check_fn, when given, REPLACES check_cmd as the verdict authority — the
+    post-task3 fix loop passes the per-cluster strict runner here so a fix is
+    validated under EVERY baked cluster's toolchain/env_extra. A bare
+    check_cmd sees only the default cluster and instantly "passes" while a
+    cfg-gated cluster is failing (the 2026-06-12 false SUCCESS).
 
     fr_path (functional_requirements_{module}.md) keys the Repository
     Specifications section (FR + genesis + API) injected into every fix
@@ -16246,15 +16284,20 @@ def generate_fix_loop(
             _log("  [fix loop] Graceful stop requested — exiting cleanly.")
             sys.exit(0)
         try:
-            result = subprocess.run(
-                _parse_cmd(check_cmd), cwd=project_dir,
-                capture_output=True, text=True, timeout=timeout, env=env,
-            )
-            output = result.stdout + (
-                "\n--- stderr ---\n" + result.stderr if result.stderr else ""
-            )
-            if result.returncode == 0:
-                return True, output, 0
+            if check_fn is not None:
+                ok, output = check_fn()
+                if ok:
+                    return True, output, 0
+            else:
+                result = subprocess.run(
+                    _parse_cmd(check_cmd), cwd=project_dir,
+                    capture_output=True, text=True, timeout=timeout, env=env,
+                )
+                output = result.stdout + (
+                    "\n--- stderr ---\n" + result.stderr if result.stderr else ""
+                )
+                if result.returncode == 0:
+                    return True, output, 0
         except subprocess.TimeoutExpired:
             return False, f"TIMEOUT after {timeout}s", 10**9
         metric = len(_error_sigs(output))
@@ -16865,6 +16908,23 @@ def task2_fix_loop(
     )
 
 
+def _cluster_check_factory(project_dir: Path) -> "Callable[[], tuple[bool, str]] | None":
+    """check_fn for the post-task3 fix loop: the per-cluster strict runner
+    (run_clusters_strict), so a fix only counts as passing when EVERY baked
+    cluster passes under its own toolchain/env_extra. None when no baked
+    clusters exist — legacy single-command pipelines keep the check_cmd path."""
+    clusters = _load_baked_clusters(project_dir)
+    if not clusters:
+        return None
+
+    def _check() -> tuple[bool, str]:
+        all_pass, output, _results = run_clusters_strict(
+            project_dir, clusters, _TASK3_DEPS)
+        return all_pass, output
+
+    return _check
+
+
 # slice 5b: deps for the extracted TASK 2 (defined after generate_fix_loop, its latest dep).
 _TASK2_DEPS = Task2Deps(
     generator_factory=_task2_generator_factory,
@@ -16882,6 +16942,7 @@ _TASK2_DEPS = Task2Deps(
     task2_fix_retries=TASK2_FIX_RETRIES,
     single_call_char_limit=SINGLE_CALL_CHAR_LIMIT,
     genesis_cap=_GENESIS_CAP,
+    cluster_check_factory=_cluster_check_factory,
 )
 
 
@@ -21112,9 +21173,12 @@ This is a Rust procedural macro crate. Strict rules apply:
                         )
                     pass_count, fail_count, _ = _parse_test_counts(test_output)
 
-                    # Anti-corruption: classify the test result before deciding what to do.
-                    t3_status, t3_reason = validate_task3_output(
-                        pass_count, fail_count, module_has_tests
+                    # Anti-corruption: task3's strict per-cluster boolean is the
+                    # verdict authority; the lenient classifier only subtypes
+                    # failures. Re-deriving "pass" from counts let an INCOMPLETE
+                    # cluster (24 passed / 0 failed / 26 expected) exit 0.
+                    t3_status, t3_reason = resolve_task3_verdict(
+                        passed, pass_count, fail_count, module_has_tests
                     )
                     _log(f"  TASK 3 result: {t3_status} — {t3_reason}")
 
@@ -21195,16 +21259,34 @@ This is a Rust procedural macro crate. Strict rules apply:
                             module_dir_rel=module_dir_rel,
                         )
                         if fix_passed:
-                            pass_count, fail_count, _ = _parse_test_counts(test_output)
-                            t3_status, _ = validate_task3_output(
-                                pass_count, fail_count, module_has_tests
+                            # The fix loop's own check passed — but the ONLY
+                            # authority for SUCCESS is the per-cluster strict
+                            # runner. Re-run TASK 3 so the verdict (and its
+                            # task.done passed=true evidence event, audit C9)
+                            # comes from the same gate as a normal pass.
+                            # Parsing counts out of the fix loop's output let a
+                            # default-cluster-only pass exit 0 while extra_cap
+                            # was failing (2026-06-12 false SUCCESS).
+                            reverified, test_output = task3(
+                                project_dir, module_test_cmd,
+                                f"{label}-fixverify", project_dir, genesis_path,
                             )
-                            if t3_status == "pass":
+                            if reverified:
+                                _commit_and_mark(
+                                    project_dir, f"task2-4/{module_name}", "done",
+                                    commit_message=f"pipeline: task3 iter {module_iter} — {module_name} tests pass (fix loop)",
+                                    tag=f"passing-{module_name}-{module_iter}",
+                                    detail=f"iteration {module_iter} (fix loop)",
+                                    source_hash=_src_hash,
+                                )
+                                _set_current(project_dir, f"task2-4/{module_name} / LOCKED iter {module_iter}")
                                 if is_multi_module:
                                     lock_module(project_dir, module_name, module_dir, module_manifest)
                                     locked_modules.add(module_name)
+                                    git_commit(project_dir, f"pipeline: locked — {module_name}")
                                 else:
                                     _log("\nSUCCESS: all tests passed after fix loop.")
+                                    git_commit(project_dir, f"pipeline: complete — all tests pass iter {module_iter}")
                                     sys.exit(0)
                                 break
 

@@ -273,6 +273,32 @@ def check_harness_fix_effect(run: RunData) -> Verdict:
                    f"{len(attempts)} attempt(s), all sent ≥1 prompt")
 
 
+def check_success_evidence(run: RunData) -> Verdict:
+    """C9 (intent-vs-effect): a 'SUCCESS: all tests passed' claim in the log
+    must be backed by the LAST task3 task.done event having passed=true —
+    i.e. the per-cluster strict verdict, not a re-parse of some other
+    command's output. Catches the 2026-06-12 microcrate false SUCCESS:
+    task3 failed per-cluster (21/24), the post-task3 fix loop validated with
+    the single default-cluster command, and the run printed SUCCESS and
+    exited 0 with zero fix events in between."""
+    claims = [ln for ln in run.log_lines if "SUCCESS: all tests passed" in ln]
+    if not claims:
+        return Verdict("C9 success-evidence", SKIP, "no success claim in log")
+    t3 = run.task_done("task3")
+    if not t3:
+        return Verdict("C9 success-evidence", FAIL,
+                       "log claims success but no task3 completion recorded")
+    last = t3[-1].get("data") or {}
+    if not last.get("passed"):
+        return Verdict("C9 success-evidence", FAIL,
+                       f"log claims success but last task3 has passed="
+                       f"{last.get('passed')} (pass={last.get('pass_count')}, "
+                       f"fail={last.get('fail_count')})")
+    return Verdict("C9 success-evidence", PASS,
+                   f"success claim backed by task3 pass "
+                   f"({last.get('pass_count')}/{last.get('expected_count')} expected)")
+
+
 def audit(events_path: Path, prompts_dir: Path | None, log_path: Path | None,
           project_dir: Path | None, since: str, plateau_n: int) -> list[Verdict]:
     run = load_run(events_path, prompts_dir, log_path, since)
@@ -285,6 +311,7 @@ def audit(events_path: Path, prompts_dir: Path | None, log_path: Path | None,
         check_ratchet_sanity(run),
         check_cluster_coverage(run),
         check_harness_fix_effect(run),
+        check_success_evidence(run),
     ]
 
 

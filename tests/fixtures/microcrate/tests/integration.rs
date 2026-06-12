@@ -23,6 +23,18 @@ fn counter_from_default() {
     assert_eq!(c.bump(), 1);
 }
 
+#[test]
+fn tag_wire_format_is_pinned() {
+    // The codec scheme is the implementation's choice ONLY up to this pin:
+    // these exact strings define the wire format both fns must agree on.
+    use microcrate::{decode_tag, encode_tag};
+    assert_eq!(encode_tag(0), "t0");
+    assert_eq!(encode_tag(42), "t42");
+    assert_eq!(decode_tag("t7"), Some(7));
+    assert_eq!(decode_tag(""), None);
+    assert_eq!(decode_tag("42"), None);
+}
+
 #[cfg(any(extra_cap, feature = "extra_cap"))]
 #[test]
 fn capability_composes() {

@@ -11,11 +11,13 @@
 //! Bodies are real here; the pipeline strips them to `unimplemented!()` and
 //! reconstructs from the signatures + the tests.
 
+mod codec;
 mod counter;
 mod parse;
 #[cfg(any(extra_cap, feature = "extra_cap"))]
 mod cap;
 
+pub use codec::{decode_tag, encode_tag};
 pub use counter::Counter;
 pub use parse::parse_pair;
 #[cfg(any(extra_cap, feature = "extra_cap"))]

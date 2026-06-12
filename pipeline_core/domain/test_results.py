@@ -115,6 +115,53 @@ def validate_task3_output_strict(
     )
 
 
+def validate_task3_output(pass_count: int, fail_count: int,
+                          module_has_tests: bool) -> tuple[str, str]:
+    """
+    Anti-corruption check on test results — LEGACY non-strict variant kept
+    for the few call sites that have no cluster context. The current TASK 3
+    path uses `validate_task3_output_strict` above; verdicts that already
+    have task3's strict boolean must go through `resolve_task3_verdict`.
+
+    Returns (status, reason) where status is one of:
+      'pass'      — all tests passed, lock the module
+      'fail'      — tests ran but failed, continue to TASK 4
+      'no_tests'  — 0 tests ran despite test files existing (structural problem)
+      'no_files'  — module has no test files (expected — lock on build success)
+    """
+    if pass_count > 0 and fail_count == 0:
+        return "pass", f"{pass_count} tests passed"
+    if not module_has_tests and pass_count == 0 and fail_count == 0:
+        return "no_files", "module has no test files — lock on build success"
+    if pass_count == 0 and fail_count == 0:
+        return "no_tests", (
+            "0 tests ran despite test files existing — "
+            "test binary may be empty, harness may not compile, or test filter excludes everything"
+        )
+    return "fail", f"{pass_count} passed, {fail_count} failed"
+
+
+def resolve_task3_verdict(passed: bool, pass_count: int, fail_count: int,
+                          module_has_tests: bool) -> tuple[str, str]:
+    """task3's strict per-cluster boolean is the verdict AUTHORITY; the
+    lenient count-based classifier only subtypes failures for TASK 4 routing
+    (fail / no_tests / no_files) and may NEVER upgrade them to 'pass'.
+
+    Re-deriving the verdict from parsed counts let an INCOMPLETE run
+    (24 passed, 0 failed, 26 expected — a cluster's binary never compiled)
+    reclassify as 'pass' and exit 0 (2026-06-12 microcrate false SUCCESS).
+    """
+    if passed:
+        return "pass", f"{pass_count} tests passed"
+    status, reason = validate_task3_output(pass_count, fail_count, module_has_tests)
+    if status == "pass":
+        return "fail", (
+            f"strict per-cluster verdict failed despite {pass_count} passed, "
+            f"{fail_count} failed — a cluster is incomplete or missing tests"
+        )
+    return status, reason
+
+
 def extract_test_output_from_file(file_content: str) -> str:
     """
     tests_output_N.txt contains a genesis snapshot followed by OUTPUT_SEPARATOR
