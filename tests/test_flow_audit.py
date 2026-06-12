@@ -189,7 +189,7 @@ def test_strict_mode_fails_on_skip(tmp_path: Path) -> None:
     base = ["--events", str(ev), "--prompts", str(pdir), "--log", str(lg)]
     assert flow_audit.main(base) == 0                       # lenient: SKIPs pass
     assert flow_audit.main([*base, "--strict"]) == 1        # strict: SKIPs fail
-    allow_all = "C1,C2,C3,C4,C5,C6,C7,C8,C9"
+    allow_all = "C1,C2,C3,C4,C5,C6,C7,C8,C9,C10"
     assert flow_audit.main([*base, "--strict", "--allow-skip", allow_all]) == 0
 
 
@@ -235,3 +235,73 @@ def test_success_evidence_verdicts(tmp_path: Path) -> None:
         log="PIPELINE STARTED — 2026-06-12 04:32:38 UTC\nTASK 3 result: fail\n")
     vs = {v.check: v for v in flow_audit.audit(ev, pdir, lg, None, "", 3)}
     assert vs["C9 success-evidence"].status == "SKIP"
+
+
+def _llm(ts: str, event: str, thread: str) -> dict:
+    return {"ts": ts, "event": event, "thread": thread}
+
+
+def test_parallel_stream_integrity_verdicts(tmp_path: Path) -> None:
+    """C10: concurrent llm calls on distinctly-named threads PASS; two live
+    calls under ONE thread name (the per-thread stream file collision shape —
+    e.g. two parallel clusters both spawning 'per-fn-worker-0') FAIL; a fully
+    sequential run SKIPs (parallelism never exercised)."""
+    # 4-way overlap, distinct thread names → PASS.
+    par4 = []
+    for i in range(4):
+        par4.append(_llm(f"2026-06-12T05:00:0{i}", "llm.request", f"w{i}"))
+    for i in range(4):
+        par4.append(_llm(f"2026-06-12T05:01:0{i}", "llm.response", f"w{i}"))
+    ev, pdir, lg = _write_run(tmp_path / "ok", par4)
+    vs = {v.check: v for v in flow_audit.audit(ev, pdir, lg, None, "", 3)}
+    assert vs["C10 parallel-streams"].status == "PASS"
+    assert "max 4 concurrent" in vs["C10 parallel-streams"].evidence
+
+    # Same-name overlap: second request on w0 before its response → FAIL.
+    collide = [
+        _llm("2026-06-12T05:00:00", "llm.request", "w0"),
+        _llm("2026-06-12T05:00:01", "llm.request", "w0"),
+        _llm("2026-06-12T05:00:02", "llm.response", "w0"),
+        _llm("2026-06-12T05:00:03", "llm.response", "w0"),
+    ]
+    ev, pdir, lg = _write_run(tmp_path / "collide", collide)
+    vs = {v.check: v for v in flow_audit.audit(ev, pdir, lg, None, "", 3)}
+    assert vs["C10 parallel-streams"].status == "FAIL"
+
+    # llm.error closes a call like a response (network failure path).
+    errok = [
+        _llm("2026-06-12T05:00:00", "llm.request", "w0"),
+        _llm("2026-06-12T05:00:01", "llm.request", "w1"),
+        _llm("2026-06-12T05:00:02", "llm.error", "w0"),
+        _llm("2026-06-12T05:00:03", "llm.request", "w0"),
+        _llm("2026-06-12T05:00:04", "llm.response", "w0"),
+        _llm("2026-06-12T05:00:05", "llm.response", "w1"),
+    ]
+    ev, pdir, lg = _write_run(tmp_path / "err", errok)
+    vs = {v.check: v for v in flow_audit.audit(ev, pdir, lg, None, "", 3)}
+    assert vs["C10 parallel-streams"].status == "PASS"
+
+    # Strictly sequential calls → SKIP (no parallel evidence).
+    seq = [
+        _llm("2026-06-12T05:00:00", "llm.request", "MainThread"),
+        _llm("2026-06-12T05:00:01", "llm.response", "MainThread"),
+        _llm("2026-06-12T05:00:02", "llm.request", "MainThread"),
+        _llm("2026-06-12T05:00:03", "llm.response", "MainThread"),
+    ]
+    ev, pdir, lg = _write_run(tmp_path / "seq", seq)
+    vs = {v.check: v for v in flow_audit.audit(ev, pdir, lg, None, "", 3)}
+    assert vs["C10 parallel-streams"].status == "SKIP"
+
+    # Events without a thread field (pre-parallelism run) → SKIP, not crash.
+    ev, pdir, lg = _write_run(
+        tmp_path / "old", [{"ts": "2026-06-12T05:00:00", "event": "llm.request"}])
+    vs = {v.check: v for v in flow_audit.audit(ev, pdir, lg, None, "", 3)}
+    assert vs["C10 parallel-streams"].status == "SKIP"
+
+    # Torn events.jsonl line under parallelism → WARN with the count.
+    ev, pdir, lg = _write_run(tmp_path / "torn", par4)
+    with ev.open("a") as fh:
+        fh.write('{"ts": "2026-06-12T05:02:00", "event": "llm.requ\n')
+    vs = {v.check: v for v in flow_audit.audit(ev, pdir, lg, None, "", 3)}
+    assert vs["C10 parallel-streams"].status == "WARN"
+    assert "1 torn" in vs["C10 parallel-streams"].evidence

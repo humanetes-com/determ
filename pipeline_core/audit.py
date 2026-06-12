@@ -27,6 +27,7 @@ class RunData:
     prompts_dir: Path | None = None
     log_lines: list[str] = field(default_factory=list)
     since: str = ""
+    corrupt_event_lines: int = 0  # unparseable events.jsonl lines (torn writes)
 
     def named(self, name: str) -> list[dict]:
         return [e for e in self.events if e.get("event") == name]
@@ -80,11 +81,15 @@ def load_run(events_path: Path, prompts_dir: Path | None,
     if not since and log_lines:
         since = parse_run_start(log_lines)
     events: list[dict] = []
+    corrupt = 0
     if events_path.exists():
         for line in events_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if not line.strip():
+                continue
             try:
                 rec = json.loads(line)
             except ValueError:
+                corrupt += 1
                 continue
             if since and rec.get("ts", "") < since:
                 continue
@@ -96,7 +101,8 @@ def load_run(events_path: Path, prompts_dir: Path | None,
                 log_lines = log_lines[i:]
                 break
     return RunData(events=events, prompts_dir=prompts_dir,
-                   log_lines=log_lines, since=since)
+                   log_lines=log_lines, since=since,
+                   corrupt_event_lines=corrupt)
 
 
 def iteration_series(run: RunData) -> list[tuple[str, int, int]]:
@@ -299,6 +305,55 @@ def check_success_evidence(run: RunData) -> Verdict:
                    f"({last.get('pass_count')}/{last.get('expected_count')} expected)")
 
 
+def check_parallel_stream_integrity(run: RunData) -> Verdict:
+    """C10: concurrent LLM calls must each own a distinctly-named thread.
+
+    Per-thread stream files (model_interact._stream_path_for_thread) and the
+    event `thread` field both key on the thread NAME. Two live calls sharing a
+    name (e.g. two parallel clusters each spawning 'per-fn-worker-0') silently
+    truncate/interleave one stream file. From events.jsonl that collision is
+    visible as broken request→response alternation within one thread name:
+    a real thread blocks for the duration of its call, so back-to-back
+    llm.request events under one name with no llm.response/llm.error between
+    them mean two threads wrote under that name (or a call vanished — also a
+    failure). Torn events.jsonl lines (concurrent appends) are reported too.
+    SKIPs when the run never overlapped two calls — no parallelism exercised,
+    nothing verified."""
+    calls = [e for e in run.events
+             if e.get("event") in ("llm.request", "llm.response", "llm.error")]
+    if not calls:
+        return Verdict("C10 parallel-streams", SKIP, "no llm events in run")
+    if not any(e.get("thread") for e in calls):
+        return Verdict("C10 parallel-streams", SKIP,
+                       "events carry no thread field (pre-parallelism pipeline)")
+    open_threads: set = set()
+    violations: list[str] = []
+    max_concurrent = 0
+    for e in calls:
+        t = e.get("thread", "?")
+        if e["event"] == "llm.request":
+            if t in open_threads:
+                violations.append(f"{t} @ {e.get('ts', '?')}")
+            open_threads.add(t)
+            max_concurrent = max(max_concurrent, len(open_threads))
+        else:
+            open_threads.discard(t)
+    if violations:
+        return Verdict("C10 parallel-streams", FAIL,
+                       f"{len(violations)} same-thread overlap(s) — stream file "
+                       f"collision (first: {violations[0]})")
+    if run.corrupt_event_lines:
+        return Verdict("C10 parallel-streams", WARN,
+                       f"no stream collisions, but {run.corrupt_event_lines} "
+                       f"torn events.jsonl line(s)")
+    if max_concurrent < 2:
+        return Verdict("C10 parallel-streams", SKIP,
+                       "no concurrent llm calls observed (parallelism not exercised)")
+    return Verdict("C10 parallel-streams", PASS,
+                   f"{len(calls)} llm event(s), max {max_concurrent} concurrent, "
+                   f"every overlap on a distinct thread")
+
+
 def audit(events_path: Path, prompts_dir: Path | None, log_path: Path | None,
           project_dir: Path | None, since: str, plateau_n: int) -> list[Verdict]:
     run = load_run(events_path, prompts_dir, log_path, since)
@@ -312,6 +367,7 @@ def audit(events_path: Path, prompts_dir: Path | None, log_path: Path | None,
         check_cluster_coverage(run),
         check_harness_fix_effect(run),
         check_success_evidence(run),
+        check_parallel_stream_integrity(run),
     ]
 
 

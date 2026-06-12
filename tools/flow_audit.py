@@ -21,6 +21,9 @@ Checks
   C8 harness-fix-effect  every claimed harness fix attempt sent ≥1 prompt
   C9 success-evidence    a SUCCESS claim in the log is backed by a passing
                          (per-cluster strict) task3 task.done event
+  C10 parallel-streams   concurrent llm calls never share a thread name
+                         (per-thread stream files would collide); torn
+                         events.jsonl lines reported
 
 Usage:
   python tools/flow_audit.py [--events logs/events.jsonl] [--prompts logs/prompts]

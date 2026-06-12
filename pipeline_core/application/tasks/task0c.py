@@ -197,17 +197,18 @@ def task0c_augment_module(
     # Cluster label for log messages — shows which compiler configuration is active.
     _cluster_label = _current_cluster.name if _current_cluster else "stable"
 
-    # TASK0C_SPLIT_N: split-and-merge degree for per-file generation. 1 = legacy
+    # Split-and-merge degree for per-file generation, from the single global
+    # PIPELINE_PARALLELISM knob (legacy TASK0C_SPLIT_N is dead). 1 = legacy
     # single-shot. >1 = partition the file's uncovered functions into N disjoint
     # subsets, generate a test block for each CONCURRENTLY (shared-prefix prompts
     # batch on the GPU), then commit each block through the normal compile-fix
     # loop so survivors accumulate (additive coverage). Generation is parallel;
     # every cargo/coverage call stays serial (no shared-target/ race). Coverage
     # (quick-cov) runs once on the merged result. See _partition_uncovered_lines.
-    _split_n = max(1, int(os.getenv("TASK0C_SPLIT_N", "1")))
+    _split_n = max(1, int(os.getenv("PIPELINE_PARALLELISM", "1")))
     if _split_n > 1:
         _log(f"  [{module_name}/{_cluster_label}] split-and-merge generation enabled: "
-             f"TASK0C_SPLIT_N={_split_n} (subset blocks concurrent; compile+cov serial).")
+             f"PIPELINE_PARALLELISM={_split_n} (subset blocks concurrent; compile+cov serial).")
 
     augmentor = _test_augmentor_factory()
 

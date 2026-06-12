@@ -18,6 +18,11 @@ LOG=/tmp/pipeline_micro.log
 WS="$SCRIPT_DIR/tmp/microcrate"
 BIN="$SCRIPT_DIR/tools/skeleton_extractor/target/release/skeleton-extractor"
 
+# The smoke always runs PARALLEL (exported env wins over .env): the C10
+# parallel-streams audit needs concurrent-call evidence, and a serial smoke
+# would never exercise the per-thread stream / per-tree lock machinery.
+export PIPELINE_PARALLELISM="${PIPELINE_PARALLELISM:-4}"
+
 FROM=""; FORCE=false
 for arg in "$@"; do
     case "$arg" in

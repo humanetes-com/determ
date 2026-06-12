@@ -216,7 +216,7 @@ def _dbg_response(label: str, raw: str) -> None:
 # Per-call stream file handle. Overwritten at the start of each call so any
 # number of readers (monitor, logger, etc.) can open and tail the file
 # simultaneously without socket-ownership conflicts.
-# Per-thread stream handle. PHASE_C_PARALLELISM>1 runs N concurrent ask()
+# Per-thread stream handle. PIPELINE_PARALLELISM>1 runs N concurrent ask()
 # workers; one shared handle would interleave their token streams and
 # re-truncate the file on every worker's _sock_open. Each thread owns its own
 # file so the live logs stay coherent.

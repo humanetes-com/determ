@@ -11,7 +11,7 @@ Keying: `_store_prompt_content` (pipeline.py:404) hashes the prompt AFTER the
 context-guard trims it, and `_ask_raw` receives that same trimmed prompt — so
 `sha256(prompt_arg) == the recorded prompt sha`. Pairing prefers the explicit
 `prompt_sha` on the response event (R10.0); for older recordings that lack it,
-it falls back to emission-order pairing (exact at PHASE_C_PARALLELISM=1).
+it falls back to emission-order pairing (exact at PIPELINE_PARALLELISM=1).
 """
 from __future__ import annotations
 

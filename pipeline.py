@@ -17,6 +17,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 import tomllib
 from abc import ABC, abstractmethod
@@ -410,6 +411,30 @@ def _guard(location: str, msg: str) -> None:
     _emit("guard.fired", data={"location": location, "msg": msg})
 
 
+def _pipeline_parallelism() -> int:
+    """Single global parallelism knob: PIPELINE_PARALLELISM (default 1).
+
+    Governs every concurrent unit in the run — task0c split-and-merge degree,
+    phase-C per-fn fill workers, and task2a concurrent clusters. Only LLM
+    calls and per-cluster cargo (isolated target dirs) overlap; splice+cargo
+    within one source tree stays serialised via _splice_lock_for().
+
+    The legacy per-step knobs (PHASE_C_PARALLELISM, TASK0C_SPLIT_N) are dead;
+    warn when set so a stale .env doesn't silently configure nothing.
+    """
+    global _legacy_parallelism_warned
+    if not _legacy_parallelism_warned:
+        for _legacy in ("PHASE_C_PARALLELISM", "TASK0C_SPLIT_N"):
+            if os.getenv(_legacy) is not None:
+                _guard("parallelism/legacy_knob_ignored",
+                       f"{_legacy} is ignored — set PIPELINE_PARALLELISM instead")
+        _legacy_parallelism_warned = True
+    return max(1, int(os.getenv("PIPELINE_PARALLELISM", "1")))
+
+
+_legacy_parallelism_warned = False
+
+
 # ── Structured event log ───────────────────────────────────────────────────────
 # Append-only JSONL at logs/events.jsonl. One JSON object per line. Cheap to
 # write, crash-safe, tail-friendly, easy to ingest into SQLite later.
@@ -469,6 +494,9 @@ def _emit(event: str, **fields) -> None:
             "product": _RUN_CONTEXT.get("product", "unknown"),
             "pipeline_sha": _RUN_CONTEXT.get("pipeline_sha", "unknown"),
             "event": event,
+            # Emitting thread — per-thread stream logs key on this name, so
+            # the C10 audit can prove concurrent calls never shared a stream.
+            "thread": threading.current_thread().name,
         }
         for k, v in fields.items():
             if v is not None:
@@ -1008,9 +1036,11 @@ def init_log(root: Path, nolog: bool = False, progress_mode: bool = False):
     _RUN_STARTED_ISO = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S")
     _log(f"  PIPELINE STARTED — {datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S')} UTC  pipeline.py={_py_hash}{_git_hash}")
     _log(f"  CMD: {sys.executable} {' '.join(sys.argv)}")
+    _log(f"  PIPELINE_PARALLELISM={_pipeline_parallelism()}")
     _log(f"{'=' * 60}")
     _log(f"{'=' * 60}")
     _register_run(root)
+    _emit("parallelism.config", data={"parallelism": _pipeline_parallelism()})
 
 
 # --- flow self-audit (--audit) ----------------------------------------------
@@ -8438,16 +8468,26 @@ def _run_phase_c_tdd(
 # the only block likely to exceed this in practice.
 _PER_IMPL_MAX_STUBS = int(os.getenv("PHASE_C_IMPL_MAX_STUBS", "12"))
 
-# Module-level splice+cargo lock. Originally a local in
-# `_task2_fill_fns_one_by_one`, hoisted because the per-impl path also
-# needs to serialise its splice + cargo invocations against any other
-# worker mutating the same cluster's source tree. cargo's own target/
-# .cargo-lock blocks concurrent invocations anyway, but holding our own
-# lock keeps file mutations deterministic across the per-impl + per-fn
-# fallback path interaction.
+# Per-source-tree splice+cargo locks. Originally one global lock (hoisted
+# from `_task2_fill_fns_one_by_one` because the per-impl path also needs to
+# serialise splice + cargo against any other worker mutating the same
+# cluster's source tree). With PIPELINE_PARALLELISM driving clusters
+# concurrently the lock must be PER TREE: workers inside one cluster still
+# serialise (deterministic file mutations; cargo's target/.cargo-lock blocks
+# concurrent invocations in one dir anyway), while distinct clusters —
+# distinct .skeleton-filled/{c}/ trees with their own target/ — proceed in
+# parallel.
 import threading as _threading_mod
 
-_splice_check_lock = _threading_mod.Lock()
+_splice_locks: "dict[str, _threading_mod.Lock]" = {}
+_splice_locks_guard = _threading_mod.Lock()
+
+
+def _splice_lock_for(tree: Path) -> "_threading_mod.Lock":
+    """The splice+cargo lock owned by `tree` (one per resolved source tree)."""
+    key = str(Path(tree).resolve())
+    with _splice_locks_guard:
+        return _splice_locks.setdefault(key, _threading_mod.Lock())
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -8555,6 +8595,8 @@ def _phase_c_fill_impl_blocks(
     if cluster_env is None:
         cluster_env = _cargo_env()
     target_src_dir.mkdir(parents=True, exist_ok=True)
+    # This tree's splice+cargo lock (per-tree: parallel clusters don't share).
+    _splice_check_lock = _splice_lock_for(target_src_dir)
     bytes_before = sum(p.stat().st_size for p in target_src_dir.rglob("*.rs"))
     impls_filled = 0
     impls_failed = 0
@@ -9134,20 +9176,21 @@ def _task2_fill_fns_one_by_one(
     bytes_before = sum(p.stat().st_size for p in target_src_dir.rglob("*.rs"))
     fns_filled = 0
     attempts = 0
-    # P4: PHASE_C_PARALLELISM env knob.
+    # P4: PIPELINE_PARALLELISM (global knob).
     #   1 = strictly sequential — single worker, identical quality.
     #  >1 = up to N concurrent fn-fills via worker threads. LLM calls
-    #       overlap; splice + cargo check is serialised through a global
+    #       overlap; splice + cargo check is serialised through this tree's
     #       lock (cargo's own target/.cargo-lock blocks concurrent invocations
     #       anyway, and we want predictable file mutations).
-    _parallelism = max(1, int(os.getenv("PHASE_C_PARALLELISM", "1")))
+    _parallelism = _pipeline_parallelism()
     if _parallelism > 1:
         _log(f"  [phase-c/per-fn] parallelism={_parallelism} (LLM calls "
-             f"concurrent; splice+cargo serialised).")
+             f"concurrent; splice+cargo serialised per tree).")
     import queue as _queue_mod
     import threading as _threading
-    # _splice_check_lock is now module-level (used by both per-impl and
-    # per-fn paths so they don't race on the same file).
+    # Per-tree splice+cargo lock, shared with the per-impl path so the two
+    # fill paths never race on the same file; parallel clusters get their own.
+    _splice_check_lock = _splice_lock_for(target_src_dir)
     _counters_lock = _threading.Lock()
     errors: list[str] = []
 
@@ -9875,9 +9918,13 @@ def _task2_fill_fns_one_by_one(
                 _work_queue.put(_item)
             _nw = min(_parallelism, len(_level))
             if _nw > 1:
+                # Name carries the cluster: parallel clusters each spawn worker
+                # 0..N and the per-thread stream files key on thread name — a
+                # bare "per-fn-worker-0" in two clusters would silently share
+                # (and re-truncate) one stream file. C10 audits this.
                 _workers = [
                     _threading.Thread(target=_worker, args=(_work_queue,),
-                                      name=f"per-fn-worker-{i}")
+                                      name=f"per-fn-{cluster_name}-w{i}")
                     for i in range(_nw)
                 ]
                 for _t in _workers:
@@ -15359,22 +15406,47 @@ class StaticSkeletonTask2Generator(Task2Generator):
             cluster_summaries = [{"cluster": c.name, "ok": True} for c in clusters]
         else:
             _set_current(project_dir, f"task2a/{module} / per-cluster reconstruction (0/{len(clusters)})")
-            for _ci, cluster in enumerate(clusters):
+
+            def _run_one_cluster(cluster: "BuildCluster") -> dict:
                 tag = f"[{cluster.name}]"
-                _set_current(project_dir,
-                             f"task2a/{module} / cluster {cluster.name} ({_ci + 1}/{len(clusters)})")
                 _log(f"\n  {tag} === cluster start ===")
-                res = self._generate_one_cluster(
-                    project_dir=project_dir,
-                    cluster=cluster,
-                    module=module,
-                    all_test_pairs=all_test_pairs,
-                    genesis=genesis,
-                    functional_req=functional_req,
-                )
-                cluster_summaries.append({"cluster": cluster.name, **res})
+                try:
+                    res = self._generate_one_cluster(
+                        project_dir=project_dir,
+                        cluster=cluster,
+                        module=module,
+                        all_test_pairs=all_test_pairs,
+                        genesis=genesis,
+                        functional_req=functional_req,
+                    )
+                except Exception as _ce:
+                    _log(f"  {tag} cluster crashed: {type(_ce).__name__}: {_ce}")
+                    res = {"ok": False, "reason": f"exception: {type(_ce).__name__}: {_ce}"}
                 if not res.get("ok"):
                     _log(f"  {tag} cluster aborted: {res.get('reason', 'unknown')}")
+                return {"cluster": cluster.name, **res}
+
+            # PIPELINE_PARALLELISM>1: clusters run concurrently — each owns
+            # isolated scratch trees (.skeleton/{c}, .skeleton-filled/{c})
+            # with their own target/, splice locks are per tree, ask() is
+            # thread-safe, and the event log is append-only. Summaries stay
+            # index-aligned to `clusters`. 1 = historical serial behavior.
+            _t2a_par = min(_pipeline_parallelism(), len(clusters))
+            if _t2a_par > 1:
+                _log(f"  [skeleton] task2a parallelism={_t2a_par} "
+                     f"({len(clusters)} cluster(s) concurrent).")
+                _set_current(project_dir,
+                             f"task2a/{module} / {len(clusters)} cluster(s) in parallel (x{_t2a_par})")
+                from concurrent.futures import ThreadPoolExecutor
+                with ThreadPoolExecutor(
+                        max_workers=_t2a_par,
+                        thread_name_prefix=f"task2a-{module}") as _pool:
+                    cluster_summaries = list(_pool.map(_run_one_cluster, clusters))
+            else:
+                for _ci, cluster in enumerate(clusters):
+                    _set_current(project_dir,
+                                 f"task2a/{module} / cluster {cluster.name} ({_ci + 1}/{len(clusters)})")
+                    cluster_summaries.append(_run_one_cluster(cluster))
             _mark_phase(project_dir, f"task2a/{module}", "done",
                         detail=f"{len(clusters)} cluster(s)")
 
