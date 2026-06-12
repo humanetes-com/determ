@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from .budget import BudgetSpec, BudgetState
@@ -69,7 +69,7 @@ class Transport(Protocol):
 
     def stream(
         self,
-        messages: list[dict],
+        messages: list[dict[str, Any]],
         *,
         model: str,
         max_tokens: int | None,
@@ -79,8 +79,8 @@ class Transport(Protocol):
         """Yield normalized deltas. Raise InputTooLong / TransportUnavailable / TransportTimeout."""
         ...
 
-    def followup_messages(self, base_messages: list[dict], reasoning_text: str,
-                          *, model: str) -> list[dict]:
+    def followup_messages(self, base_messages: list[dict[str, Any]], reasoning_text: str,
+                          *, model: str) -> list[dict[str, Any]]:
         """Build the messages for the code-only recovery turn (assistant-turn format varies)."""
         ...
 

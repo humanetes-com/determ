@@ -15,6 +15,7 @@ import os
 from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from pipeline_core.log import log
 
@@ -53,9 +54,9 @@ def _parse_phase_line(line: str) -> tuple[str, str, str, str] | None:
     return key, fields[0], hash_, detail
 
 
-def read_state(project_dir: Path) -> dict:
+def read_state(project_dir: Path) -> dict[str, Any]:
     """Return {'phases': {key: {status, hash, detail}}, 'current': str}."""
-    state: dict = {"phases": {}, "current": ""}
+    state: dict[str, Any] = {"phases": {}, "current": ""}
     p = state_path(project_dir)
     if not p.exists():
         return state
@@ -73,7 +74,7 @@ def read_state(project_dir: Path) -> dict:
     return state
 
 
-def write_state(project_dir: Path, state: dict) -> None:
+def write_state(project_dir: Path, state: dict[str, Any]) -> None:
     """Atomic write: render to a sibling tempfile, fsync, then os.replace.
     Guarantees readers never see a partially-written state file even if
     the process is killed mid-write or another pipeline races us.

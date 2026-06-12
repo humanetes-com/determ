@@ -28,8 +28,8 @@ class Task1Deps:
     ask: Callable[..., str]
     write_fr_preserving_notes: Callable[[Any, str], None]
     synthesizer_factory: Callable[[], Any]
-    filter_proc_macro_test_files: Callable[[list, str], list]   # keeps the derive/attr regex
-    proc_macro_fallback_requirements: Callable[[list, str], str]  # keeps the fallback regex
+    filter_proc_macro_test_files: Callable[[list[Any], str], list[Any]]  # keeps the derive/attr regex
+    proc_macro_fallback_requirements: Callable[[list[Any], str], str]  # keeps the fallback regex
     format_api_surface_section: Callable[[str], str]
     file_format_instruction: str
     single_call_char_limit: int

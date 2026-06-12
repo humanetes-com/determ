@@ -9,6 +9,8 @@ extraction — they are this module's public entry points).
 
 from __future__ import annotations
 
+from typing import Any
+
 from pipeline_core.domain.models import DispatchFamily, TypeRecord
 
 # P5.3: standard library trait contracts. When a fn is being implemented
@@ -179,7 +181,7 @@ def trait_contract_for(container: str) -> str:
 # Each has a one-line summary (always shown in the prompt) and a fuller
 # detail block (injected only when the current cargo error trips the
 # gotcha's trigger keyword/code, via gotchas_for_error).
-RUST_GOTCHAS: list[dict] = [
+RUST_GOTCHAS: list[dict[str, Any]] = [
     {
         # FR-040: the vtable / shared-machinery class. You fill fn BODIES only —
         # you cannot introduce a new top-level item — so a referenced-but-
@@ -457,7 +459,7 @@ def gotchas_for_error(error_excerpt: str) -> str:
     if not error_excerpt:
         return ""
     low = error_excerpt.lower()
-    matched: list[dict] = []
+    matched: list[dict[str, Any]] = []
     for g in RUST_GOTCHAS:
         for trig in g["triggers"]:
             if trig.lower() in low:
@@ -483,7 +485,7 @@ def tag_block(tag: str, content: str, *, prefix: str = "", suffix: str = "") -> 
 
 
 def format_impl_block_for_prompt(
-    block: dict,
+    block: dict[str, Any],
     mark_target: bool = True,
 ) -> str:
     """Render an impl block in TARGET form: the impl header followed by every

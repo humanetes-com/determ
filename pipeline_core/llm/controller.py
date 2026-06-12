@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
+from typing import Any
 
 from .budget import BudgetSpec, BudgetState, Plan, request_max_tokens
 from .detect import StopDetector
@@ -82,7 +83,7 @@ class LLMController:
         spec = transport.spec()
         state = transport.budget_state()
 
-        messages: list[dict] = []
+        messages: list[dict[str, Any]] = []
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
@@ -199,7 +200,7 @@ class LLMController:
                     break
         return cap
 
-    def _followup(self, transport: Transport, messages: list[dict], reasoning_text: str,
+    def _followup(self, transport: Transport, messages: list[dict[str, Any]], reasoning_text: str,
                   model: str, max_tokens: int) -> str:
         spec = transport.spec()
         state = transport.budget_state()

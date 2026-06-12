@@ -11,6 +11,8 @@ picks up the reloaded function automatically.
 
 from __future__ import annotations
 
+from typing import Any
+
 import model_interact as mi
 
 
@@ -22,7 +24,7 @@ class ModelInteractLLM:
         self._max_tokens = default_max_tokens
 
     def ask(self, prompt: str, *, system: str | None = None, think: bool | None = None) -> str:
-        kwargs: dict = {"system": system, "model": self._model, "think": think}
+        kwargs: dict[str, Any] = {"system": system, "model": self._model, "think": think}
         if self._max_tokens is not None:
             kwargs["max_tokens"] = self._max_tokens
         return mi.ask(prompt, **kwargs)

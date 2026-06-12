@@ -60,7 +60,7 @@ class Task0bDeps:
 def task0b_discovery(strategy_path: Path, project_dir: Path, test_files: Any,
                      readme_text: str, profile_content: str,
                      deps: Task0bDeps,
-                     clusters: list | None = None,
+                     clusters: list[Any] | None = None,
                      force: bool = False) -> str:
     """
     BL-001: Discovery pass — produce coverage_strategy.md before TASK 0c.

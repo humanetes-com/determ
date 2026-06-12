@@ -53,9 +53,18 @@ layers = [
 ]
 
 [[tool.mypy.overrides]]
-# The extracted package is new and clean — hold it to strict-optional (catches real
-# Optional bugs) AND disallow_untyped_defs (R1.3b done 2026-06-10: every def is
-# annotated; pass-through params honestly Any). New untyped defs now FAIL the gate.
+# The extracted package is new and clean — held to the strict flag set (P0 of the
+# FINAL-RESULT PLAN). `strict = true` isn't valid in a per-module override, so the
+# flags are enumerated. Deliberately NOT enabled: no_implicit_reexport (pipeline.py
+# consumes the package through re-export shims until P5 deletes them).
 module = "pipeline_core.*"
 strict_optional = true
 disallow_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_any_generics = true
+disallow_untyped_calls = true
+disallow_untyped_decorators = true
+disallow_subclassing_any = true
+no_implicit_optional = true
+warn_unused_ignores = true
+strict_equality = true

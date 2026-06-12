@@ -23,9 +23,9 @@ class Task2Deps:
     """Collaborators TASK 2 needs, injected by the composition root."""
 
     generator_factory: Callable[[], Any]
-    load_manifest: Callable[[Any], list]
+    load_manifest: Callable[[Any], list[str]]
     read: Callable[[Any], str]
-    generate_fix_loop: Callable[..., tuple]
+    generate_fix_loop: Callable[..., tuple[Any, ...]]
     store_prompt_content: Callable[[str], Any]
     is_proc_macro_crate: Callable[[str], bool]     # keeps the Cargo.toml regex
     count_error_codes: Callable[[str], int]        # keeps the rustc-error regex
@@ -213,7 +213,7 @@ def task2_inner_loop(project_dir: Path, genesis_path: Path, functional_req_path:
 def task2_fix_loop(
     project_dir: Path,
     manifest_path: Path,
-    existing_test_files: set,
+    existing_test_files: set[str],
     test_output: str,
     test_command: str,
     functional_req_path: Path,

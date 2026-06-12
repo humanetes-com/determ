@@ -7,6 +7,7 @@ come from :mod:`pipeline_core.prompts.runtime`.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from pipeline_core.prompts.runtime import promoted_error_rules, repo_spec_section
 from pipeline_core.prompts.sections import (
@@ -18,8 +19,8 @@ from pipeline_core.prompts.sections import (
 
 
 def build_per_impl_prompt(
-    block: dict,
-    related_blocks: list[dict],
+    block: dict[str, Any],
+    related_blocks: list[dict[str, Any]],
     test_blocks: list[tuple[str, str]],
     module_name: str,
     cluster_name: str,

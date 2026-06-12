@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 PASS, FAIL, WARN, SKIP = "PASS", "FAIL", "WARN", "SKIP"
 
@@ -23,16 +24,16 @@ class Verdict:
 
 @dataclass
 class RunData:
-    events: list[dict] = field(default_factory=list)
+    events: list[dict[str, Any]] = field(default_factory=list)
     prompts_dir: Path | None = None
     log_lines: list[str] = field(default_factory=list)
     since: str = ""
     corrupt_event_lines: int = 0  # unparseable events.jsonl lines (torn writes)
 
-    def named(self, name: str) -> list[dict]:
+    def named(self, name: str) -> list[dict[str, Any]]:
         return [e for e in self.events if e.get("event") == name]
 
-    def task_done(self, task: str) -> list[dict]:
+    def task_done(self, task: str) -> list[dict[str, Any]]:
         return [e for e in self.events
                 if e.get("event") == "task.done" and e.get("task") == task]
 
@@ -80,7 +81,7 @@ def load_run(events_path: Path, prompts_dir: Path | None,
         log_lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
     if not since and log_lines:
         since = parse_run_start(log_lines)
-    events: list[dict] = []
+    events: list[dict[str, Any]] = []
     corrupt = 0
     if events_path.exists():
         for line in events_path.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -326,7 +327,7 @@ def check_parallel_stream_integrity(run: RunData) -> Verdict:
     if not any(e.get("thread") for e in calls):
         return Verdict("C10 parallel-streams", SKIP,
                        "events carry no thread field (pre-parallelism pipeline)")
-    open_threads: set = set()
+    open_threads: set[str] = set()
     violations: list[str] = []
     max_concurrent = 0
     for e in calls:

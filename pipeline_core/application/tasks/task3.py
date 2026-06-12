@@ -30,10 +30,10 @@ class Task3Deps:
     """Pipeline-coupled collaborators TASK 3 needs, injected by the composition root."""
 
     phase: Callable[..., Any]                       # _phase context-manager factory
-    load_baked_clusters: Callable[[Path], list]     # _load_baked_clusters
+    load_baked_clusters: Callable[[Path], list[Any]]  # _load_baked_clusters
     task3_legacy_single: Callable[..., Any]         # _task3_legacy_single fallback
-    cargo_env: Callable[[], dict]                   # _cargo_env
-    parse_cmd: Callable[[str], list]                # _parse_cmd
+    cargo_env: Callable[[], dict[str, str]]         # _cargo_env
+    parse_cmd: Callable[[str], list[str]]           # _parse_cmd
     count_active_tests_for_cluster: Callable[[Path, Any], int]
     store_prompt_content: Callable[[str], Any]      # _store_prompt_content
     task3_inline_retry: Callable[..., Any]          # _task3_inline_retry
@@ -63,8 +63,8 @@ def _should_reverify(primary_output: str, retry_output: str, retry_passed: bool,
     return new_p > init_p or new_f < init_f
 
 
-def run_clusters_strict(project_dir: Path, clusters: list,
-                        deps: Task3Deps) -> tuple[bool, str, list[dict]]:
+def run_clusters_strict(project_dir: Path, clusters: list[Any],
+                        deps: Task3Deps) -> tuple[bool, str, list[dict[str, Any]]]:
     """Run every baked cluster under its own toolchain + env_extra and apply
     the FR-024 strict verdict (`validate_task3_output_strict`, including the
     expected-count "incomplete" case). THE single authority for "all tests
@@ -76,7 +76,7 @@ def run_clusters_strict(project_dir: Path, clusters: list,
     dict carries the cluster's raw `output`; callers strip that key before
     emitting events.
     """
-    per_cluster_results: list[dict] = []
+    per_cluster_results: list[dict[str, Any]] = []
     aggregated_output_chunks: list[str] = []
     all_pass = True
     for cluster in sorted(clusters, key=lambda c: c.name):

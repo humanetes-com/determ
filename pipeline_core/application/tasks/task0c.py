@@ -106,7 +106,7 @@ def task0c_augment_module(
     module_dir: Path,
     deps: Task0cDeps,
     crate_type: str = "",
-    existing_test_files: set | None = None,
+    existing_test_files: set[str] | None = None,
     project_context: str = "",
     coverage_strategy: str = "",
 ) -> tuple[float, int, bool, str]:
@@ -254,7 +254,7 @@ def task0c_augment_module(
         else:
             _log(f"  [{module_name}] Library compile failure in gen_* block — routing to harness fix loop.")
 
-    def _error_signatures(cargo_output: str) -> frozenset:
+    def _error_signatures(cargo_output: str) -> frozenset[str]:
         """Extract stable error signatures — error code + message, no file/line numbers."""
         return _error_signatures_from_output(cargo_output)  # type: ignore[no-any-return]
 
@@ -270,7 +270,7 @@ def task0c_augment_module(
     harness_ok, compile_err_out = augmentor.test_harness_compiles(project_dir, module_name)
     if not harness_ok:
         compile_err = compile_err_out
-        prev_signatures: frozenset = frozenset()
+        prev_signatures: frozenset[str] = frozenset()
         fix_attempt = 0
 
         while True:
@@ -497,7 +497,7 @@ corrected content here
     coverage = 0.0
     covered_lines = 0
     coverable_lines = 0
-    files_data: list[dict] = []
+    files_data: list[dict[str, Any]] = []
     _skip_first_measure = False
     # On resume, reload coverage from the previous run's grcov JSON + filecache
     # to avoid an expensive full re-run before the first gen attempt.
@@ -529,7 +529,7 @@ corrected content here
     RETRO_DEEP_AT_STALL = int(os.getenv("TASK0C_RETRO_DEEP_AT_STALL", "1"))
     file_stall_counts: dict[str, int] = {}   # consecutive no-improvement attempts per file
     file_best_uncov: dict[str, int] = {}     # fewest uncovered lines seen per file
-    file_prev_uncov_lines: dict[str, set] = {}  # uncov_lines snapshot from previous attempt per file
+    file_prev_uncov_lines: dict[str, set[int]] = {}  # uncov_lines snapshot from previous attempt per file
     skipped_files: set[str] = set()          # files permanently skipped due to stall
     file_what_worked: dict[str, str] = {}    # confirmed-working patterns per file (from improving attempts)
     file_retrospectives: dict[str, str] = {} # per-file classification of why coverage stalled
@@ -957,7 +957,7 @@ project-specific import paths, type construction patterns, and hard constraints.
             # B023: bind per-file loop vars at def time (these closures are
             # only called within this iteration today; binding makes that
             # permanent instead of incidental). Same for the three below.
-            def _render_prompt(_secs: dict, _cov_status: str, *,
+            def _render_prompt(_secs: dict[str, str], _cov_status: str, *,
                                rel_path: str = rel_path, mod_name: str = mod_name,
                                _env_section: str = _env_section,
                                _file_constraints_section: str = _file_constraints_section,
@@ -1055,7 +1055,7 @@ project-specific import paths, type construction patterns, and hard constraints.
             def _finalize_and_commit(raw_block: str, pass_n: int, base_text: str, *,
                                      rel_path: str = rel_path, abs_path: Path = abs_path,
                                      attempt: int = attempt, uncov_lines: set[int] = uncov_lines,
-                                     secs: dict = secs,
+                                     secs: dict[str, str] = secs,
                                      _file_constraints_section: str = _file_constraints_section,
                                      ) -> tuple[str, str]:
                 """Inject allow-line + prelude into a raw gen_tests block, reject
@@ -1073,7 +1073,7 @@ project-specific import paths, type construction patterns, and hard constraints.
                          f"skipping write (no productive content).")
                     _log_task0c_attempt(project_dir, rel_path, attempt, block, "", "no_tests_in_block")
                     return "no_tests", block
-                _prev_sigs: frozenset = frozenset()
+                _prev_sigs: frozenset[str] = frozenset()
                 _fix_attempt = 0
                 _sib = _gen_tests_path(abs_path, pass_n)
                 _decl = _build_gen_tests_decl(_sib.name, pass_n, _allow_line,

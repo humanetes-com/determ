@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from typing import Any
 
 from ..domain.models import ConstRecord, DispatchFamily, FnRecord, ModRecord, TypeRecord
 
@@ -43,7 +44,7 @@ class CliExtractor:
         cfg_false: tuple[str, ...],
         *,
         timeout: int = 60,
-    ) -> list | None:
+    ) -> list[Any] | None:
         if not self._bin.exists():
             return None
         cmd = [str(self._bin), subcmd, "--input", str(src_dir), *_cfg_args(cfg_true, cfg_false)]
@@ -84,7 +85,7 @@ class CliExtractor:
         return None if rows is None else [ConstRecord.from_dict(r) for r in rows]
 
     # ── skeletonise : --input/--output tree, structured report dict ───────────
-    def skeletonise(self, input_dir: Path, output_dir: Path, *, cfg_true: tuple[str, ...] = (), cfg_false: tuple[str, ...] = ()) -> dict:
+    def skeletonise(self, input_dir: Path, output_dir: Path, *, cfg_true: tuple[str, ...] = (), cfg_false: tuple[str, ...] = ()) -> dict[str, Any]:
         if not self._bin.exists():
             return {"ok": False, "reports": [], "stderr": f"skeleton-extractor binary missing at {self._bin}. Run `bash setup.sh` to build it."}
         Path(output_dir).mkdir(parents=True, exist_ok=True)

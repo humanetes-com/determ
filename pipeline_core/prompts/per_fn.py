@@ -7,6 +7,7 @@ come from :mod:`pipeline_core.prompts.runtime`.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from pipeline_core.prompts.runtime import (
     annotate_file_view,
@@ -148,7 +149,7 @@ def build_per_fn_fix_prompt(
     types_section: str = "",
     allow_sig_change: bool = False,
     fr_path: Path | None = None,
-    attempt_history: list[dict] | None = None,
+    attempt_history: list[dict[str, Any]] | None = None,
     invariants_section: str = "",
     retrospective_guidance: str = "",
     siblings_section: str = "",

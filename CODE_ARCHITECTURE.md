@@ -3,6 +3,36 @@
 Target *code* structure for the two codebases (the existing `ARCHITECTURE.md` covers the
 *experiment/methodology* — different concern, untouched).
 
+---
+
+## 0. FINAL-RESULT PLAN (approved 2026-06-12) — supersedes the slice list below as the roadmap
+
+End state: `pipeline.py` < ~800 lines (argparse + composition root only); everything else in
+`pipeline_core/` per the §1 layers; idiomatic Python (no `_`-prefixed public API, typed seams,
+one fix-loop driver); Rust already library-grade (R5/R12). Earlier slices/R-groups remain as
+the detailed reference; this table is the execution order. Standing gates: one slice = one
+commit; check.sh green per step; engine phases only at run boundaries, validated by the L3
+microcrate strict smoke (+ one anyhow L4 diff per engine phase).
+
+| Phase | What | Source plan | Eff | Status |
+|---|---|---|---|---|
+| P0 | guardrails: pipeline.py/monitor.py/model_interact.py LOC ratchet in check.sh; mypy strict on pipeline_core | slice 13 | S | 🔄 |
+| P1 | FixLoop unification: ONE driver + `FixUnit` protocol; port per-fn loop, per-impl loop, post-pass test-retry (one commit each, harness-pinned: U2 keep, B3 partial accept, sig-hatch, lock points) | 8a f1–f4 | M | ⬜ |
+| P2 | engine pass: `Stub`/`ImplBlock`/`FillResult` models; thread `FnRecord` (kills `"fn"` vs `"fn_name"`); split `_task2_fill_fns_one_by_one`+`_process_one_stub` into `application/reconstruct/` units | R3.1–R3.3 | L | ⬜ |
+| P3 | task0c self-containment: move the 7 `_task0c_*` helpers in, DROP from `Task0cDeps` (75→~15) | R3.4 | M | ⬜ |
+| P4 | verbatim moves: Task1Synthesizer/Task2Generator families, DependencyGraph, WorkspaceScanner, gen_tests reattach block → `application/` | slice 11 | M | ⬜ |
+| P5 | `main()` → `application/orchestrator.py` (phase state machine over ports); delete dead `_`-shims; drop `_` prefixes on promoted public entries | slice 12 / R2.2 / R6.5 | L | ⬜ |
+| P6 | dissolve remaining god-files: transports → `adapters/llm_transports/` (model_interact.py = shim); monitor.py split data-vs-rendering → thin TUI adapter | new | M | ⬜ |
+| P7 | frozen per-family `*PromptContext` dataclasses (no defaults — missing section = visible hole) | slice 8 tail | M | ⬜ |
+| P8 | OSS finish: installable package + console-script; naming sweep; CHANGELOG/versioning; R7.4 live validation + R8.4; docs aligned | R6/R7/R8 tails | M | ⬜ |
+
+Throughout: the canonical-failure-loop rule (R13) holds for every new fix site; any touched
+code containing a regex migrates to the structured parser as part of the touch (R7 standing
+rule); deps records that only re-inject what a module could import are a smell to remove, not
+relocate.
+
+---
+
 - **Python** — `pipeline.py` orchestration (the LLM-driven reconstruction loop).
 - **Rust** — `tools/skeleton_extractor` (syn-based AST extraction).
 

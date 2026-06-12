@@ -34,10 +34,10 @@ class FieldRecord:
     is_pub: bool = False
 
     @classmethod
-    def from_dict(cls, d: dict) -> FieldRecord:
+    def from_dict(cls, d: dict[str, Any]) -> FieldRecord:
         return cls(name=d.get("name", ""), ty=d.get("ty", ""), is_pub=bool(d.get("is_pub", False)))
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {"name": self.name, "ty": self.ty, "is_pub": self.is_pub}
 
 
@@ -50,12 +50,12 @@ class MethodRecord:
     cfg_predicates: tuple[str, ...] = ()
 
     @classmethod
-    def from_dict(cls, d: dict) -> MethodRecord:
+    def from_dict(cls, d: dict[str, Any]) -> MethodRecord:
         return cls(name=d.get("name", ""), sig=d.get("sig", ""),
                    is_pub=bool(d.get("is_pub", False)),
                    cfg_predicates=_strs(d.get("cfg_predicates")))
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {"name": self.name, "sig": self.sig, "is_pub": self.is_pub,
                 "cfg_predicates": list(self.cfg_predicates)}
 
@@ -74,7 +74,7 @@ class TypeRecord:
     is_pub: bool = False
 
     @classmethod
-    def from_dict(cls, d: dict) -> TypeRecord:
+    def from_dict(cls, d: dict[str, Any]) -> TypeRecord:
         return cls(
             file=d.get("file", ""),
             kind=d.get("kind", ""),
@@ -87,7 +87,7 @@ class TypeRecord:
             is_pub=bool(d.get("is_pub", False)),
         )
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "file": self.file,
             "kind": self.kind,
@@ -117,7 +117,7 @@ class FnRecord:
     has_unimplemented_body: bool = False
 
     @classmethod
-    def from_dict(cls, d: dict) -> FnRecord:
+    def from_dict(cls, d: dict[str, Any]) -> FnRecord:
         return cls(
             file=d.get("file", ""),
             fn_name=d.get("fn_name", ""),
@@ -132,7 +132,7 @@ class FnRecord:
             has_unimplemented_body=bool(d.get("has_unimplemented_body", False)),
         )
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "file": self.file,
             "fn_name": self.fn_name,
@@ -157,7 +157,7 @@ class ModRecord:
     declared_in: str = ""
 
     @classmethod
-    def from_dict(cls, d: dict) -> ModRecord:
+    def from_dict(cls, d: dict[str, Any]) -> ModRecord:
         return cls(
             name=d.get("name", ""),
             file=d.get("file", ""),
@@ -165,7 +165,7 @@ class ModRecord:
             declared_in=d.get("declared_in", ""),
         )
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
             "file": self.file,
@@ -183,7 +183,7 @@ class ConstRecord:
     is_pub: bool = False
 
     @classmethod
-    def from_dict(cls, d: dict) -> ConstRecord:
+    def from_dict(cls, d: dict[str, Any]) -> ConstRecord:
         return cls(
             file=d.get("file", ""),
             name=d.get("name", ""),
@@ -191,7 +191,7 @@ class ConstRecord:
             is_pub=bool(d.get("is_pub", False)),
         )
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {"file": self.file, "name": self.name, "ty": self.ty, "is_pub": self.is_pub}
 
 
@@ -208,7 +208,7 @@ class DispatchFamily:
     member_files: tuple[str, ...] = ()
 
     @classmethod
-    def from_dict(cls, d: dict) -> DispatchFamily:
+    def from_dict(cls, d: dict[str, Any]) -> DispatchFamily:
         return cls(
             method=d.get("method", ""),
             traits=_strs(d.get("traits")),
@@ -220,7 +220,7 @@ class DispatchFamily:
             member_files=_strs(d.get("member_files")),
         )
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "method": self.method,
             "traits": list(self.traits),
@@ -253,7 +253,7 @@ class Diagnostic:
     rendered: str = ""       # rustc's own rendered text (may carry ANSI)
 
     @classmethod
-    def from_dict(cls, d: dict) -> Diagnostic:
+    def from_dict(cls, d: dict[str, Any]) -> Diagnostic:
         return cls(
             code=d.get("code", ""),
             file=d.get("file", ""),
@@ -262,7 +262,7 @@ class Diagnostic:
             rendered=d.get("rendered", ""),
         )
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "code": self.code,
             "file": self.file,
@@ -282,16 +282,16 @@ class BuildCluster:
     may use either; the extractor's CfgSet ignores keys that match no real predicate.
     """
     name: str                           # short identifier used in logs and state keys
-    env_extra: dict                     # env vars merged into _cargo_env() for this cluster
-    tarpaulin_exclude_files: list       # --exclude-files patterns for tarpaulin
-    excluded_cfg: list                  # cfg predicates inactive in this cluster
-    active_cfg: list                    # cfg predicates active (on top of default)
+    env_extra: dict[str, str]           # env vars merged into _cargo_env() for this cluster
+    tarpaulin_exclude_files: list[str]  # --exclude-files patterns for tarpaulin
+    excluded_cfg: list[str]             # cfg predicates inactive in this cluster
+    active_cfg: list[str]               # cfg predicates active (on top of default)
     prompt_nightly_rule: str            # nightly boundary sentence(s) for generation prompts
     is_default: bool = True             # True for the baseline stable cluster
-    gated_files: set | None = None      # source files (rel paths) gated behind excluded_cfg — skip augmentation
+    gated_files: set[str] | None = None  # source files (rel paths) gated behind excluded_cfg — skip augmentation
     requires_nightly: bool = False      # cluster needs nightly toolchain (set at runtime when E0554 detected)
 
-    def _expand(self, preds: list) -> list[str]:
+    def _expand(self, preds: list[str]) -> list[str]:
         out: list[str] = []
         for pred in (preds or []):
             out.append(pred)

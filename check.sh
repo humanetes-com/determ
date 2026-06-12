@@ -31,6 +31,9 @@ PID_LAYERS=$!
 "$SCRIPT_DIR/.venv/bin/python" tools/check_extraction_invariants.py \
     > "$GATE_TMP/extraction.out" 2>&1 &
 PID_EXTRACTION=$!
+"$SCRIPT_DIR/.venv/bin/python" tools/loc_ratchet.py \
+    > "$GATE_TMP/loc.out" 2>&1 &
+PID_LOC=$!
 
 FAILED=0
 gate() {  # gate <name> <pid> <outfile>
@@ -49,6 +52,7 @@ gate "mypy" "$PID_MYPY" "$GATE_TMP/mypy.out"
 gate "ruff" "$PID_RUFF" "$GATE_TMP/ruff.out"
 gate "layer contract (adapters > application > ports > domain)" "$PID_LAYERS" "$GATE_TMP/layers.out"
 gate "extraction invariants" "$PID_EXTRACTION" "$GATE_TMP/extraction.out"
+gate "LOC ratchet (god-files only shrink)" "$PID_LOC" "$GATE_TMP/loc.out"
 [ "$FAILED" -eq 0 ] || exit 1
 
 echo ""
