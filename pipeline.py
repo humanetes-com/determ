@@ -5082,59 +5082,20 @@ def _fallback_groups_per_file(test_files: list[tuple[str, str]]) -> list[dict]:
     return groups
 
 
-_FAILED_ATTEMPT_SENTINEL = "// SKELETON_STUB_FAILED_ATTEMPT"
-
-
-def _is_unimplemented_body(body_text: str) -> bool:
-    """True if a function body looks like our `unimplemented!()` stub.
-
-    Recognises two forms:
-      1. Plain stub: contains `unimplemented` and body < 60 chars
-      2. Annotated stub: contains the SKELETON_STUB_FAILED_ATTEMPT sentinel
-         (used by the fix-loop exhaustion path to preserve the failed attempt
-         and cargo error as comments while keeping the fn callable)
-    """
-    stripped = body_text.strip().strip("{").strip("}").strip()
-    if _FAILED_ATTEMPT_SENTINEL in stripped:
-        return True
-    return "unimplemented" in stripped and len(stripped) < 60
-
-
-def _make_failed_attempt_body(attempted_body: str, error_excerpt: str,
-                               fix_attempts: int) -> str:
-    """Build a fn body that documents a failed fill attempt as comments and
-    ends in `unimplemented!()` so the crate still compiles.
-
-    The body carries the SKELETON_STUB_FAILED_ATTEMPT sentinel so a later
-    pass's `_scan_unimplemented_functions` re-discovers this fn as still
-    needing a fill — but the model sees the failure history in context.
-    """
-    ts = int(time.time())
-    lines = [
-        _FAILED_ATTEMPT_SENTINEL,
-        f"// Previous attempt failed compilation after {fix_attempts} fix-loop "
-        "attempts.",
-        "// Body reverted to `unimplemented!()` so the crate compiles. A later",
-        "// pass will retry — by then more sibling functions in this file will",
-        "// be implemented, giving the model richer context.",
-        "//",
-        "// ATTEMPTED BODY:",
-    ]
-    if attempted_body:
-        for ln in attempted_body.splitlines()[:60]:
-            lines.append(f"//   {ln}")
-    else:
-        lines.append("//   (no body captured)")
-    lines.append("//")
-    lines.append("// CARGO ERROR (focused excerpt):")
-    if error_excerpt:
-        for ln in error_excerpt.splitlines()[:30]:
-            lines.append(f"//   {ln}")
-    else:
-        lines.append("//   (no error captured)")
-    lines.append(f"// Timestamp: {ts}")
-    lines.append("unimplemented!()")
-    return "\n".join(lines)
+# Per-fn fill rules relocated to application/reconstruct/fill_rules.py (P2);
+# aliases keep engine call sites + pins unchanged.
+from pipeline_core.application.reconstruct.fill_rules import (  # noqa: E402
+    failure_hit_unfilled_stub as _failure_hit_unfilled_stub,
+)
+from pipeline_core.application.reconstruct.fill_rules import (  # noqa: E402
+    is_unimplemented_body as _is_unimplemented_body,
+)
+from pipeline_core.application.reconstruct.fill_rules import (  # noqa: E402
+    make_failed_attempt_body as _make_failed_attempt_body,
+)
+from pipeline_core.application.reconstruct.fill_rules import (  # noqa: E402
+    module_of as _module_of,
+)
 
 
 def _extract_fn_blocks(response: str) -> dict[str, str]:
@@ -6856,13 +6817,6 @@ def _effective_stalls(full_budget: int, module: str | None) -> int:
     return min(full_budget, _PASS_THROUGH_STALLS)
 
 
-def _module_of(rel_file: str) -> str:
-    """Rust module identity of a source file: 'src/ptr.rs' -> 'ptr'. This is the
-    granularity PIPELINE_CONVERGE_MODULE names: phase-c fills operate per-file, so
-    the converge exemption must key on the file under fill, not the crate dir."""
-    return Path(rel_file).stem
-
-
 def _converge_in_cluster(cluster: "BuildCluster | None") -> str | None:
     """_CONVERGE_MODULE if its source file is active (not gated) in this cluster,
     else None. Cluster-scoped loops (TDD / per-pass test-fix) run whole-cluster, so
@@ -7743,22 +7697,6 @@ def _u2_test_gate(
     return frozenset(_still), _msg
 
 
-def _failure_hit_unfilled_stub(detail: str) -> bool:
-    """True when a test FAILURE is a panic from a still-unfilled `unimplemented!()`
-    / `todo!()` stub rather than a real assertion mismatch.
-
-    Used by the per-fn fill loop (#3): a multi-fn test attributed to fn A can fail
-    because a SIBLING fn it also calls is still a stub — not because A is wrong.
-    Runtime panic attribution is first-panic-order, so we can't tell from the
-    frontier alone; the panic MESSAGE is the reliable signal. The fn just filled
-    is non-stub (splice rejects stub bodies), so a "not implemented" panic here
-    came from another, still-unfilled fn → keep A's compiling body and defer the
-    verdict to the outer TDD loop. An assertion mismatch means A is wrong → don't.
-    """
-    d = detail or ""
-    return ("not implemented" in d) or ("not yet implemented" in d)
-
-
 def _build_test_cmd(test_stems: list[str], cluster: "BuildCluster | None") -> str:
     """Build `cargo test --no-fail-fast --test stem1 --test stem2 ...` honoring
     the cluster toolchain."""
@@ -7884,96 +7822,26 @@ def _collect_sibling_filled_bodies(
     return "\n\n".join(out)
 
 
-def _retrospectives_path(project_dir: Path) -> Path:
-    """Path to the per-fn retrospectives JSON. Keyed by (file, fn, container)
-    so same-named fns in different impls track independently. Survives
-    across module iterations — that's the point: learning compounds."""
-    d = project_dir / ".phase_c_logs"
-    d.mkdir(parents=True, exist_ok=True)
-    return d / "retrospectives.json"
-
-
-def _load_retrospectives(project_dir: Path) -> dict:
-    """Load the on-disk retrospective record. Returns {} on first run or
-    when the file is malformed (caller treats missing entries as 'no
-    prior retrospective'). Keys written before container canonicalisation
-    are re-keyed on load so old records keep matching."""
-    p = _retrospectives_path(project_dir)
-    if not p.exists():
-        return {}
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            return {}
-        rekeyed: dict = {}
-        for key, rec in data.items():
-            parts = key.split("::", 2)
-            if len(parts) == 3:
-                key = _retro_key(parts[0], parts[1], parts[2])
-            rekeyed[key] = rec
-        return rekeyed
-    except Exception:
-        return {}
-
-
-def _save_retrospectives(project_dir: Path, data: dict) -> None:
-    with suppress(Exception):
-        _retrospectives_path(project_dir).write_text(
-            json.dumps(data, indent=2), encoding="utf-8")
-
-
-def _canon_container(container: str) -> str:
-    """Canonical container form for keying. The extractor's fn records and
-    the impl-block manifest render the same impl differently (token-spaced
-    `impl Context < T , E > for Result < T , E >` vs pretty-printed
-    `impl<T, E> Context<T, E> for Result<T, E>\\nwhere\\n    E: ...`), which
-    used to split one impl across two retrospective keys. Reduce both to
-    `<Trait>for<SelfTy>`: drop a leading impl-generics list, drop the
-    where-clause, drop all whitespace."""
-    s = " ".join(container.split())
-    if s.startswith("impl"):
-        s = s[4:].lstrip()
-        if s.startswith("<"):
-            depth = 0
-            for i, ch in enumerate(s):
-                if ch == "<":
-                    depth += 1
-                elif ch == ">":
-                    depth -= 1
-                    if depth == 0:
-                        s = s[i + 1:]
-                        break
-    if s.endswith(" where"):
-        s = s[: -len(" where")]
-    s = s.split(" where ")[0]
-    return "".join(s.split())
-
-
-def _retro_key(file_rel: str, fn_name: str, container: str) -> str:
-    """Stable key for the retrospective dict. Container is included so
-    overloaded `fn new` impls (Adhoc/Trait/Boxed) track independently;
-    it is canonicalised so different renderings of one impl share a key."""
-    return f"{file_rel}::{fn_name}::{_canon_container(container)}"
-
-
-def _reset_exhaustion_flags(project_dir: Path, reason: str) -> int:
-    """Clear every `fully_exhausted` flag (keep the lessons — category,
-    guidance, history all stay) at a phase boundary where the evidence
-    context changed (e.g. the merged tree landed dozens of fills). FR-024's
-    cross-iter skip was written against a narrower tree; one fresh, note-
-    informed attempt per boundary is exactly D3's re-entry rule applied
-    across phases. Returns the number of flags cleared."""
-    retros = _load_retrospectives(project_dir)
-    cleared = 0
-    for rec in retros.values():
-        if isinstance(rec, dict) and rec.get("fully_exhausted"):
-            rec["fully_exhausted"] = False
-            cleared += 1
-    if cleared:
-        _save_retrospectives(project_dir, retros)
-        _log(f"  [phase-c] reset {cleared} fully_exhausted flag(s) — {reason}")
-        _emit("phase_c.exhaustion.reset", data={"cleared": cleared, "reason": reason})
-    return cleared
+# Retrospectives store relocated to pipeline_core/adapters/retros.py (P2);
+# aliases keep engine call sites + smoke pins unchanged.
+from pipeline_core.adapters.retros import (  # noqa: E402
+    canon_container as _canon_container,  # noqa: F401  (smoke pin: test_canon_container_unifies_renderings)
+)
+from pipeline_core.adapters.retros import (  # noqa: E402
+    is_fn_fully_exhausted as _is_fn_fully_exhausted,
+)
+from pipeline_core.adapters.retros import (  # noqa: E402
+    load_retrospectives as _load_retrospectives,
+)
+from pipeline_core.adapters.retros import (  # noqa: E402
+    reset_exhaustion_flags as _reset_exhaustion_flags,
+)
+from pipeline_core.adapters.retros import (  # noqa: E402
+    retro_key as _retro_key,
+)
+from pipeline_core.adapters.retros import (  # noqa: E402
+    save_retrospectives as _save_retrospectives,
+)
 
 
 def _phase_c_retrospective(
@@ -8091,23 +7959,6 @@ def _phase_c_retrospective(
         "guidance": guid,
         "signal": "ok" if (cat or guid) else "unparseable",
     }
-
-
-def _is_fn_fully_exhausted(
-    retros: dict, file_rel: str, fn_name: str, container: str,
-) -> bool:
-    """FR-024 cross-iter skip: progress-gated. A fn is permanently skipped
-    only when (a) the LLM classified it GENUINELY_HARD, or (b) a
-    retrospective fired AND the next-best error count did NOT improve over
-    the prior best (`fully_exhausted` flag set at write time). No hard
-    retrospective-count cap — as long as each retro reduces errors, the
-    loop is free to continue. `retrospective_count` is kept only for
-    telemetry."""
-    key = _retro_key(file_rel, fn_name, container)
-    rec = retros.get(key)
-    if not rec:
-        return False
-    return bool(rec.get("fully_exhausted"))
 
 
 def _count_relevant_notes(fr_path: Path | None,
