@@ -16,6 +16,7 @@ from pathlib import Path
 
 from pipeline_core.application.reconstruct.cargo_errors import diagnostics_from_json
 from pipeline_core.domain.models import Diagnostic
+from pipeline_core.domain.test_results import parse_failed_tests
 from pipeline_core.ports import Cargo
 
 _MSG_FMT = "--message-format=json-diagnostic-rendered-ansi"
@@ -42,6 +43,33 @@ def run_cargo(
     if p.returncode == -1:
         return -1, p.stderr
     return p.returncode, _combined(p.stdout, p.stderr)
+
+
+def run_scoped_tests(
+    cargo: Cargo,
+    test_cmd: str,
+    cwd: Path,
+    env: dict[str, str],
+    *,
+    timeout: int = 120,
+    err_cap: int,
+) -> tuple[bool, int, str, set[str]]:
+    """Plan 10 U1 — the reusable test-validation step (runtime analog of a
+    compile check). Runs `test_cmd` via the port and returns
+    (passed, fail_count, detail, failed_names).
+
+    `passed` is True only when cargo reports rc==0 with zero failing tests.
+    `detail` is the failing-test output tail (capped at `err_cap`) for the next
+    prompt. On timeout the caller gets (False, -1, …, set()) and should treat it
+    as INCONCLUSIVE — fall back to compile-based acceptance rather than block.
+    """
+    rc, out = run_cargo(cargo, test_cmd, cwd, env, timeout=timeout)
+    if rc == -1:
+        return False, -1, "scoped test run timed out", set()
+    failed = parse_failed_tests(out)
+    passed = rc == 0 and len(failed) == 0
+    detail = "" if passed else out[-err_cap:]
+    return passed, len(failed), detail, failed
 
 
 def run_check_diag(

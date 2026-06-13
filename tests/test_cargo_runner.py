@@ -7,7 +7,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from pipeline_core.application.reconstruct.cargo_runner import run_cargo, run_check_diag
+from pipeline_core.application.reconstruct.cargo_runner import (
+    run_cargo,
+    run_check_diag,
+    run_scoped_tests,
+)
 
 
 @dataclass
@@ -81,3 +85,28 @@ def test_run_cargo_combined_layout() -> None:
     # rc=-1 → bare stderr message, no combine
     fake3 = _FakeCargo(_Proc(-1, "", "FILE NOT FOUND: cargo"))
     assert run_cargo(fake3, "cargo build", Path("."), {}) == (-1, "FILE NOT FOUND: cargo")
+
+
+def test_run_scoped_tests_pass_fail_timeout() -> None:
+    # all pass: rc==0, no FAILED lines
+    fake = _FakeCargo(_Proc(0, "test a ... ok\ntest b ... ok", ""))
+    assert run_scoped_tests(fake, "cargo test", Path("."), {}, err_cap=500) == (
+        True, 0, "", set())
+    # failures: rc!=0 + FAILED rows → not passed, detail tail, names parsed
+    out = "test a ... ok\ntest b ... FAILED\npanic: boom"
+    passed, n, detail, names = run_scoped_tests(fake_fail := _FakeCargo(_Proc(101, out, "")),
+                                                "cargo test", Path("."), {}, err_cap=500)
+    assert passed is False and n == 1 and names == {"b"} and detail.endswith("panic: boom")
+    assert fake_fail.seen_cmd == "cargo test"
+    # rc==0 but a FAILED line present → still not passed (defensive)
+    mixed = _FakeCargo(_Proc(0, "test x ... FAILED", ""))
+    p2, n2, _, names2 = run_scoped_tests(mixed, "cargo test", Path("."), {}, err_cap=500)
+    assert p2 is False and n2 == 1 and names2 == {"x"}
+    # timeout sentinel → inconclusive
+    to = _FakeCargo(_Proc(-1, "", "TIMEOUT after 120s"))
+    assert run_scoped_tests(to, "cargo test", Path("."), {}, err_cap=500) == (
+        False, -1, "scoped test run timed out", set())
+    # err_cap truncates the detail tail
+    long = _FakeCargo(_Proc(101, "x" * 100 + "\ntest z ... FAILED", ""))
+    _, _, d, _ = run_scoped_tests(long, "cargo test", Path("."), {}, err_cap=10)
+    assert len(d) == 10

@@ -7394,26 +7394,9 @@ def _attribute_failures(
 def _run_scoped_tests(
     test_cmd: str, cwd: Path, env: dict, *, timeout: int = 120,
 ) -> "tuple[bool, int, str, set[str]]":
-    """Plan 10 U1 — reusable test-validation step (the runtime analog of a
-    compile check). Runs `test_cmd` (scoped to the relevant test stems via
-    _build_test_cmd) and returns (passed, fail_count, detail, failed_names).
-
-    `passed` is True only when cargo reports rc==0 with zero failing tests.
-    `detail` is the failing-test output tail (panic / assertion / expected-vs-
-    actual) for feeding back into the next generation prompt. `failed_names` is
-    the set of failing test names (same format as _parse_failed_tests) so a
-    caller can check whether a SPECIFIC unit's tests pass. On timeout the caller
-    gets (False, -1, ..., set()) and should treat it as INCONCLUSIVE — fall back
-    to compile-based acceptance rather than block. Single place the pipeline
-    runs tests, so every loop validates identically.
-    """
-    rc, out = _run_cargo(test_cmd, cwd, env, timeout=timeout)
-    if rc == -1:
-        return False, -1, "scoped test run timed out", set()
-    failed = _parse_failed_tests(out)
-    passed = (rc == 0 and len(failed) == 0)
-    detail = "" if passed else out[-_FIX_ERR_CAP:]
-    return passed, len(failed), detail, failed
+    # Port-composed runner (P2 slice 9): see cargo_runner.run_scoped_tests.
+    return _reconstruct_cargo_runner.run_scoped_tests(
+        ADAPTERS.cargo, test_cmd, cwd, env, timeout=timeout, err_cap=_FIX_ERR_CAP)
 
 
 def _u2_test_gate(
