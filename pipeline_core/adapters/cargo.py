@@ -18,16 +18,15 @@ from pathlib import Path
 
 @dataclass(frozen=True, slots=True)
 class Process:
-    """A finished subprocess. Satisfies the ports.ProcessResult Protocol."""
+    """A finished subprocess. Satisfies the ports.ProcessResult Protocol.
+
+    The stdout+stderr "combined" layout legacy callers wanted now lives in
+    application/reconstruct/cargo_runner (`_combined`), built from these plain
+    fields — the port stays a pure result record."""
 
     returncode: int
     stdout: str
     stderr: str
-
-    @property
-    def combined(self) -> str:
-        """stdout + stderr in the legacy ``_run_cargo`` layout (for drop-in callers)."""
-        return self.stdout + ("\n--- stderr ---\n" + self.stderr if self.stderr else "")
 
 
 class CargoCli:

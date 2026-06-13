@@ -22,6 +22,28 @@ _MSG_FMT = "--message-format=json-diagnostic-rendered-ansi"
 _KNOWN_SUBS = {"check", "test", "build", "run", "doc", "clippy"}
 
 
+def _combined(stdout: str, stderr: str) -> str:
+    """stdout + stderr in the legacy `_run_cargo` layout — built from the
+    port's plain stdout/stderr (keeps the port a pure result record)."""
+    return stdout + ("\n--- stderr ---\n" + stderr if stderr else "")
+
+
+def run_cargo(
+    cargo: Cargo,
+    cmd: str,
+    cwd: Path,
+    env: dict[str, str],
+    timeout: int = 180,
+) -> tuple[int, str]:
+    """Run one cargo command via the port; return (rc, combined_output).
+    rc=-1 (timeout / binary-not-found) keeps the bare message (in stderr);
+    otherwise the stdout+stderr-block combined layout (legacy parity)."""
+    p = cargo.run(cmd, cwd, env=env, timeout=timeout)
+    if p.returncode == -1:
+        return -1, p.stderr
+    return p.returncode, _combined(p.stdout, p.stderr)
+
+
 def run_check_diag(
     cargo: Cargo,
     cmd: str,
@@ -50,7 +72,7 @@ def run_check_diag(
     if proc.returncode == -1:
         # timeout / binary-not-found: stderr carries the bare message
         return -1, proc.stderr, []
-    raw = proc.stdout + ("\n--- stderr ---\n" + proc.stderr if proc.stderr else "")
+    raw = _combined(proc.stdout, proc.stderr)
     diagnostics = diagnostics_from_json(raw) or []
     rendered_parts: list[str] = []
     for ln in raw.splitlines():

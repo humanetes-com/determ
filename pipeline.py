@@ -7256,16 +7256,9 @@ def _focus_cargo_errors(output: str, file_rel: str,
 
 
 def _run_cargo(cmd: str, cwd: Path, env: dict, timeout: int = 180) -> tuple[int, str]:
-    """Run a cargo command and return (rc, combined_output). rc=-1 on timeout.
-
-    slice 5a: delegates to the Cargo adapter. rc=-1 (timeout / binary-not-found) keeps the
-    bare message in stderr (parity with the legacy form); otherwise the stdout+stderr-block
-    combined layout.
-    """
-    p = ADAPTERS.cargo.run(cmd, cwd, env=env, timeout=timeout)
-    if p.returncode == -1:
-        return -1, p.stderr
-    return p.returncode, p.combined
+    # Port-composed runner (P2 slice 8): see application/reconstruct/cargo_runner.run_cargo.
+    return _reconstruct_cargo_runner.run_cargo(
+        ADAPTERS.cargo, cmd, cwd, env, timeout)
 
 
 # FR-024: every cargo test invocation must be wrapped in an improvement-driven

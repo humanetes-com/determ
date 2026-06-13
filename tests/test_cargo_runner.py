@@ -7,7 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from pipeline_core.application.reconstruct.cargo_runner import run_check_diag
+from pipeline_core.application.reconstruct.cargo_runner import run_cargo, run_check_diag
 
 
 @dataclass
@@ -70,3 +70,14 @@ def test_timeout_and_not_found_parity() -> None:
     fake = _FakeCargo(_Proc(-1, "", "TIMEOUT after 180s"))
     rc, text, diags = run_check_diag(fake, "cargo check", Path("."), {})
     assert (rc, text, diags) == (-1, "TIMEOUT after 180s", [])
+
+
+def test_run_cargo_combined_layout() -> None:
+    fake = _FakeCargo(_Proc(0, "out text", "warn text"))
+    assert run_cargo(fake, "cargo build", Path("."), {}) == (0, "out text\n--- stderr ---\nwarn text")
+    # no stderr → no separator block
+    fake2 = _FakeCargo(_Proc(101, "only out", ""))
+    assert run_cargo(fake2, "cargo build", Path("."), {}) == (101, "only out")
+    # rc=-1 → bare stderr message, no combine
+    fake3 = _FakeCargo(_Proc(-1, "", "FILE NOT FOUND: cargo"))
+    assert run_cargo(fake3, "cargo build", Path("."), {}) == (-1, "FILE NOT FOUND: cargo")
