@@ -1174,9 +1174,12 @@ def test_describe_test_environment() -> None:
 def test_retrospective_prompt_includes_failed_attempts() -> None:
     """When unproductive_blocks is non-empty, the retrospective prompt must
     surface them as concrete evidence so the LLM can revise a TESTABLE call.
-    We don't actually call the LLM — we monkey-patch `ask` and inspect the
-    prompt string the retrospective would have sent."""
-    import pipeline
+    We don't actually call the LLM — we inject a fake `ask` via deps and inspect
+    the prompt string the retrospective would have sent. (P3.3: the helper now
+    lives in task0c.py; ask is injected, no longer the patchable pipeline global.)"""
+    from types import SimpleNamespace
+
+    from pipeline_core.application.tasks.task0c import _engine_retrospective
 
     captured: dict = {}
 
@@ -1184,22 +1187,26 @@ def test_retrospective_prompt_includes_failed_attempts() -> None:
         captured['prompt'] = prompt
         return "FUNCTION foo: UNREACHABLE — based on the prior failed attempts.\n"
 
-    original_ask = pipeline.ask
-    pipeline.ask = fake_ask
-    try:
-        result = pipeline._task0c_retrospective(
-            rel_path="src/foo.rs",
-            existing_text="pub fn foo() {\n    // !! UNCOVERED\n}\n",
-            fn_bodies="pub fn foo() {\n    // !! UNCOVERED\n}\n",
-            old_block="mod gen_tests_1 { #[test] fn t() { foo(); } }",
-            module_name="tiny",
-            unproductive_blocks=[
-                'mod gen_tests_1 { #[test] fn a() { std::env::set_var("X", "1"); } }',
-                'mod gen_tests_2 { #[test] fn b() { std::env::set_var("X", "1"); } }',
-            ],
-        )
-    finally:
-        pipeline.ask = original_ask
+    deps = SimpleNamespace(
+        ask=fake_ask,
+        SRC_SNIP_CAP=4000,
+        TASK0C_MODEL="m",
+        extract_branch_guard=lambda lines, lno: "",
+        describe_test_environment=lambda: "Test env: cargo test\n",
+    )
+
+    result = _engine_retrospective(
+        deps,
+        rel_path="src/foo.rs",
+        existing_text="pub fn foo() {\n    // !! UNCOVERED\n}\n",
+        fn_bodies="pub fn foo() {\n    // !! UNCOVERED\n}\n",
+        old_block="mod gen_tests_1 { #[test] fn t() { foo(); } }",
+        module_name="tiny",
+        unproductive_blocks=[
+            'mod gen_tests_1 { #[test] fn a() { std::env::set_var("X", "1"); } }',
+            'mod gen_tests_2 { #[test] fn b() { std::env::set_var("X", "1"); } }',
+        ],
+    )
 
     prompt = captured['prompt']
     assert "PRIOR FAILED ATTEMPTS" in prompt
@@ -1211,17 +1218,14 @@ def test_retrospective_prompt_includes_failed_attempts() -> None:
 
     # Without unproductive_blocks, no PRIOR FAILED ATTEMPTS section.
     captured.clear()
-    pipeline.ask = fake_ask
-    try:
-        pipeline._task0c_retrospective(
-            rel_path="src/foo.rs",
-            existing_text="pub fn foo() {}\n",
-            fn_bodies="pub fn foo() {}\n",
-            old_block="",
-            module_name="tiny",
-        )
-    finally:
-        pipeline.ask = original_ask
+    _engine_retrospective(
+        deps,
+        rel_path="src/foo.rs",
+        existing_text="pub fn foo() {}\n",
+        fn_bodies="pub fn foo() {}\n",
+        old_block="",
+        module_name="tiny",
+    )
     assert "PRIOR FAILED ATTEMPTS" not in captured['prompt']
 
     print("  OK  retrospective_prompt_includes_failed_attempts")

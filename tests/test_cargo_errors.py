@@ -11,6 +11,7 @@ from pipeline_core.application.reconstruct.cargo_errors import (
     err_sig,
     err_sig_from_diagnostics,
     err_sig_from_text,
+    error_type_signals,
     excerpt_for_code,
     focus_cargo_errors,
     has_rs_line_loc,
@@ -121,3 +122,33 @@ def test_strip_cargo_warnings_drops_blocks() -> None:
     out = "warning: w\n  --> a.rs:1:1\n\nerror: e\nkeep\n"
     # the terminating blank line is consumed with the block (verbatim behavior)
     assert strip_cargo_warnings(out) == "error: e\nkeep"
+
+
+def test_error_type_signals_extracts_blamed_types() -> None:
+    """P3.6: word-aware type-name extraction from rendered rustc errors."""
+    err = (
+        "error[E0308]: mismatched types\n"
+        "  expected type `MyStruct`, found `OtherType`\n"
+        "  no method named foo found for struct Widget\n"
+    )
+    sigs = dict(error_type_signals(err))
+    assert "MyStruct" in sigs            # after `mismatched types` … `expected type`
+    assert "Widget" in sigs              # after bare `struct`
+    # each value is the char index of that name in the text
+    for name, idx in error_type_signals(err):
+        assert err[idx:idx + len(name)] == name
+
+
+def test_error_type_signals_no_substring_false_positive() -> None:
+    """P3.6 (the bug the old regex had): bare `struct` must NOT match inside the
+    word `reconstruct` — word-boundary aware."""
+    assert error_type_signals("could not reconstruct Foo from bytes") == []
+    # but a real `struct Foo` is caught
+    assert error_type_signals("a real struct Foo here")[0] == ("Foo", 14)
+
+
+def test_error_type_signals_requires_capitalized_ident() -> None:
+    """P3.6: lowercase / single-char names are ignored (old `[A-Z][a-zA-Z0-9]+`)."""
+    assert error_type_signals("expected type foo") == []      # lowercase
+    assert error_type_signals("expected type `X`") == []      # single char (<2)
+    assert dict(error_type_signals("expected type `Xy`")) == {"Xy": 15}

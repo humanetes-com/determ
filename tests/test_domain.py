@@ -244,3 +244,50 @@ def test_parse_retrospective_matches_old_regex() -> None:
     ]
     for c in cases:
         assert llm_output.parse_retrospective(c) == old(c), repr(c)
+
+
+def test_extract_code_blocks_matches_old_regex() -> None:
+    r"""P3.4: fenced code-block extractor equals the old inline
+    re.findall(r'```[a-zA-Z0-9_-]*\n(.*?)```', resp, re.DOTALL)."""
+    import re
+    old = re.compile(r'```[a-zA-Z0-9_-]*\n(.*?)```', re.DOTALL)
+    samples = [
+        "before ```rust\nlet x = 1;\n``` after",
+        "```\nno lang\n```",
+        "```py-3_2\na\nb\n```rest```c\n```",
+        "no fences here",
+        "```rust missing newline after lang``` x",
+        "text ```\nfirst\n``` mid ```rs\nsecond\n``` end",
+    ]
+    for s in samples:
+        assert llm_output.extract_code_blocks(s) == old.findall(s), s
+
+
+def test_strip_uncovered_markers_matches_old_regex() -> None:
+    r"""P3.4: marker strip equals old re.sub(r'\s*//\s*!!\s*UNCOVERED[^\n]*', '', t)."""
+    import re
+    old = re.compile(r'\s*//\s*!!\s*UNCOVERED[^\n]*')
+    samples = [
+        "pub fn a() {}  // !! UNCOVERED\n",
+        "let x = 1;  // !! UNCOVERED guarded by `y > 0`\nlet z = 2;\n",
+        "no markers at all\n",
+        "code //  !!  UNCOVERED extra spaces\n",
+        "a  // !! UNCOVERED\nb  // !! UNCOVERED\n",
+    ]
+    for s in samples:
+        assert llm_output.strip_uncovered_markers(s) == old.sub('', s), s
+
+
+def test_strip_think_blocks_matches_old_regex() -> None:
+    r"""P3.7: think-block strip equals old re.sub(r'<think>.*?</think>', '', t, DOTALL)."""
+    import re
+    old = re.compile(r'<think>.*?</think>', re.DOTALL)
+    cases = [
+        "<think>reason</think>\nanswer",
+        "a<think>x\ny\nz</think>b<think>w</think>c",
+        "no think here",
+        "<think>only</think>",
+        "unclosed <think>tag stays",
+    ]
+    for c in cases:
+        assert text.strip_think_blocks(c) == old.sub('', c), c

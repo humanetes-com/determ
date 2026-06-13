@@ -51,6 +51,12 @@ def extract_code_content(text: str) -> str:
     return cleaned
 
 
+def strip_think_blocks(text: str) -> str:
+    """Remove `<think>…</think>` reasoning blocks some models leak into output
+    (caller strips surrounding whitespace as needed)."""
+    return re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+
+
 def trim_to_line(text: str, cap: int, marker: str = "\n// ... (truncated)") -> str:
     """Truncate text at the last newline before cap — never mid-line. FR-020."""
     if len(text) <= cap:

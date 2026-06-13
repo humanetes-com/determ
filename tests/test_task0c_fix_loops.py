@@ -13,6 +13,7 @@ established slice-5b pattern); a sentinel exception in `read_state` marks
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -168,3 +169,303 @@ def test_harness_fix_llm_heals_and_augmentation_proceeds(tmp_path: Path) -> None
         task0c_augment_module(ws, "m", ws, deps, crate_type="lib")
     assert checks["ask"] == 1          # one LLM fix pass healed it
     assert checks["n"] == 3            # broken → healed → precheck
+
+
+def test_engine_get_history_formats_jsonl(tmp_path: Path) -> None:
+    """P3.1: relocated `_engine_get_history` reads the per-project JSONL attempt
+    log and renders success (committed) vs failure entries, capping the stored
+    compile error at deps.FIX_ERR_CAP from the front (tail kept)."""
+    from pipeline_core.application.tasks.task0c import (
+        TASK0C_ATTEMPTS_LOG,
+        _engine_get_history,
+    )
+
+    log = tmp_path / TASK0C_ATTEMPTS_LOG
+    rows = [
+        {"file": "src/a.rs", "attempt": 1, "block_preview": "fn t();",
+         "compile_error": "X" * 50 + "TAILERR", "outcome": "compile_error"},
+        {"file": "src/a.rs", "attempt": 2, "block_preview": "", "compile_error": "",
+         "outcome": "success"},
+        {"file": "src/other.rs", "attempt": 1, "block_preview": "z",
+         "compile_error": "nope", "outcome": "compile_error"},
+    ]
+    log.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+    deps = SimpleNamespace(FIX_ERR_CAP=10)
+    out = _engine_get_history(deps, tmp_path, "src/a.rs")
+
+    assert "Attempt history for `src/a.rs` (2 attempts)" in out
+    assert "COMMITTED TO DISK" in out          # success label
+    assert "FAILED (compile_error)" in out     # failure label
+    assert "TAILERR" in out and "X" * 11 not in out  # err capped to last 10 chars
+    assert "src/other.rs" not in out           # filtered by rel_path
+
+    # No log file → empty string.
+    assert _engine_get_history(deps, tmp_path / "none", "src/a.rs") == ""
+
+
+def test_engine_get_history_imported_not_injected() -> None:
+    """P3.1 invariant: get_task0c_history is no longer a Task0cDeps field
+    (the helper now lives in the module, not injected back)."""
+    assert "get_task0c_history" not in Task0cDeps.__dataclass_fields__
+
+
+def test_engine_pragma_pass_writes_and_compiles(tmp_path: Path) -> None:
+    """P3.2: relocated `_engine_pragma_pass` annotates uncovered lines, asks the
+    LLM for a pragma'd file, and persists it only if the recompile succeeds."""
+    from pipeline_core.application.tasks.task0c import _engine_pragma_pass
+
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    f = src_dir / "x.rs"
+    f.write_text("pub fn a() {}\npub fn b() {}\n")
+    rel = "src/x.rs"
+
+    captured: dict = {}
+
+    def fake_ask(prompt, **_kw):
+        captured["prompt"] = prompt
+        return f'<FILE path="{rel}">\npub fn a() {{}}  // IGN\npub fn b() {{}}\n</FILE>'
+
+    deps = SimpleNamespace(
+        BUILD_TIMEOUT=30,
+        coverage_ignore_pragma="// IGN",
+        annotate_uncovered=lambda s, lines: s,
+        cargo_env=lambda: {},
+        ask=fake_ask,
+        extract_files=lambda r: {rel: "pub fn a() {}  // IGN\npub fn b() {}\n"},
+        is_test_file=lambda p, d: False,
+        subprocess=SimpleNamespace(run=lambda *a, **k: SimpleNamespace(returncode=0)),
+    )
+    files_data = [{"abs_path": str(f),
+                   "traces": [{"line": 1, "stats": {"Line": 0}}]}]
+
+    _engine_pragma_pass(deps, tmp_path, "x", src_dir, files_data, "m")
+
+    assert "uncovered" in captured["prompt"].lower()
+    assert "// IGN" in f.read_text()       # pragma persisted (compile passed)
+
+
+def test_engine_pragma_pass_reverts_on_compile_fail(tmp_path: Path) -> None:
+    """P3.2: if the pragma'd file no longer compiles, the original is restored."""
+    from pipeline_core.application.tasks.task0c import _engine_pragma_pass
+
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    f = src_dir / "x.rs"
+    original = "pub fn a() {}\n"
+    f.write_text(original)
+    rel = "src/x.rs"
+
+    deps = SimpleNamespace(
+        BUILD_TIMEOUT=30,
+        coverage_ignore_pragma="// IGN",
+        annotate_uncovered=lambda s, lines: s,
+        cargo_env=lambda: {},
+        ask=lambda prompt, **k: "x",
+        extract_files=lambda r: {rel: "this is not valid rust // IGN\n"},
+        is_test_file=lambda p, d: False,
+        subprocess=SimpleNamespace(run=lambda *a, **k: SimpleNamespace(returncode=1)),
+    )
+    files_data = [{"abs_path": str(f),
+                   "traces": [{"line": 1, "stats": {"Line": 0}}]}]
+
+    _engine_pragma_pass(deps, tmp_path, "x", src_dir, files_data, "m")
+    assert f.read_text() == original       # reverted
+
+
+def test_looks_like_fn_decl_matches_old_regex() -> None:
+    """P3.3 R7 equivalence pin: the regex-free fn-decl detector matches the old
+    re.match(r'\\s*(pub\\s+)?fn\\s+', ln) it replaced, across edge cases."""
+    import re as _re
+
+    from pipeline_core.application.tasks.task0c import _looks_like_fn_decl
+    old = _re.compile(r'\s*(pub\s+)?fn\s+')
+    cases = [
+        "fn foo()", "pub fn foo()", "  fn bar() {", "    pub fn baz<T>() {",
+        "fn", "pub fn", "fnfoo()", "pubfn foo()", "xpub fn y()", "", "   ",
+        "pub  fn  spaced()", "struct S", "// fn comment", "let fn_x = 1;",
+        "pub(crate) fn q()",
+    ]
+    for c in cases:
+        assert _looks_like_fn_decl(c) == bool(old.match(c)), c
+
+
+def _tpragma_deps(**over: Any) -> SimpleNamespace:
+    base = {
+        "BUILD_TIMEOUT": 30,
+        "coverage_ignore_pragma": "// IGN",
+        "annotate_uncovered": lambda s, lines: s,
+        "cargo_env": lambda: {},
+        "ask": lambda prompt, **k: "x",
+        "extract_files": lambda r: {},
+        "strip_gen_tests_decls": lambda s: s,
+        "subprocess": SimpleNamespace(run=lambda *a, **k: SimpleNamespace(returncode=0)),
+    }
+    base.update(over)
+    return SimpleNamespace(**base)
+
+
+def test_engine_targeted_pragma_writes_on_compile(tmp_path: Path) -> None:
+    """P3.4: relocated `_engine_targeted_pragma` writes the LLM's pragma'd file
+    when it recompiles, and reports success."""
+    from pipeline_core.application.tasks.task0c import _engine_targeted_pragma
+
+    f = tmp_path / "src" ; f.mkdir()
+    src = f / "x.rs"
+    src.write_text("pub fn a() {}\npub fn b() {}\n")
+    rel = "src/x.rs"
+    deps = _tpragma_deps(
+        ask=lambda p, **k: f'<FILE path="{rel}">\npub fn a() {{}}  // IGN\npub fn b() {{}}\n</FILE>',
+        extract_files=lambda r: {rel: "pub fn a() {}  // IGN\npub fn b() {}\n"},
+    )
+    ok = _engine_targeted_pragma(deps, tmp_path, "x", rel, {1}, ["a"], "m")
+    assert ok is True
+    assert "// IGN" in src.read_text()
+
+
+def test_engine_targeted_pragma_codeblock_fallback(tmp_path: Path) -> None:
+    """P3.4: when no <FILE> tag is returned, it falls back to the largest fenced
+    code block (the relocated extract_code_blocks helper)."""
+    from pipeline_core.application.tasks.task0c import _engine_targeted_pragma
+
+    f = tmp_path / "src" ; f.mkdir()
+    src = f / "x.rs"
+    src.write_text("pub fn a() {}\n")
+    rel = "src/x.rs"
+    big = "pub fn a() {}  // IGN\n" + "// padding line\n" * 10
+    deps = _tpragma_deps(
+        ask=lambda p, **k: f"here you go:\n```rust\n{big}```\n",
+        extract_files=lambda r: {},
+    )
+    ok = _engine_targeted_pragma(deps, tmp_path, "x", rel, {1}, ["a"], "m")
+    assert ok is True
+    assert "// IGN" in src.read_text()
+
+
+def test_engine_mutation_pass_persists_hardening(tmp_path: Path, monkeypatch) -> None:
+    """P3.5: relocated `_engine_mutation_pass` is opt-in (env-gated) and, when on,
+    persists generated hardening tests as the next gen_tests sibling."""
+    from pipeline_core.application.tasks.task0c import _engine_mutation_pass
+
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    f = src_dir / "x.rs"
+    f.write_text("pub fn a() {}\n")
+    sib = src_dir / "x.gen_tests_1.rs"
+
+    deps = SimpleNamespace(
+        mutation_harden_file=lambda pd, mn, cl, rel: "    #[test]\n    fn k() {}\n",
+        gen_tests_siblings=lambda src: [],
+        gen_tests_path=lambda src, n: sib,
+    )
+
+    # Off by default → no work.
+    monkeypatch.delenv("TASK0C_MUTATION_HARDEN", raising=False)
+    assert _engine_mutation_pass(deps, tmp_path, "x", None, ["src/x.rs"]) == 0
+    assert not sib.exists()
+
+    # On → hardens and writes the sibling.
+    monkeypatch.setenv("TASK0C_MUTATION_HARDEN", "1")
+    assert _engine_mutation_pass(deps, tmp_path, "x", None, ["src/x.rs"]) == 1
+    assert sib.exists() and "fn k()" in sib.read_text()
+
+
+def test_engine_log_attempt_writes_jsonl_and_type_signals(tmp_path: Path) -> None:
+    """P3.6: relocated `_engine_log_attempt` appends a JSONL record and, on a
+    compile_error, feeds blamed type names to the injected type_signals_write."""
+    from pipeline_core.application.tasks.task0c import (
+        TASK0C_ATTEMPTS_LOG,
+        _engine_log_attempt,
+    )
+
+    signals: list = []
+    deps = SimpleNamespace(
+        condense_rust_to_signatures=lambda block, filename: "fn t();",
+        type_signals_write=lambda pd, rel, name, difficulty, pattern: signals.append((name, pattern)),
+    )
+    _engine_log_attempt(
+        deps, tmp_path, "src/a.rs", 1, "mod gen_tests_1 {}",
+        "expected type `MyType`, found `Other`", "compile_error",
+    )
+    rows = (tmp_path / TASK0C_ATTEMPTS_LOG).read_text().splitlines()
+    assert len(rows) == 1
+    rec = json.loads(rows[0])
+    assert rec["file"] == "src/a.rs" and rec["outcome"] == "compile_error"
+    assert any(name == "MyType" for name, _ in signals)   # type signal recorded
+
+
+def test_engine_extract_existing_tests() -> None:
+    """P3.7: relocated pure helper extracts `mod tests` but not `mod gen_tests`."""
+    from pipeline_core.application.tasks.task0c import _extract_existing_tests
+
+    src = "pub fn f() {}\n#[cfg(test)]\nmod tests {\n    #[test] fn t() {}\n}\n"
+    assert _extract_existing_tests(src).startswith("#[cfg(test)]\nmod tests")
+    assert _extract_existing_tests("#[cfg(test)]\nmod gen_tests_1 {}") == ""
+    assert _extract_existing_tests("pub fn f() {}") == ""
+
+
+def test_engine_build_prompt_sections_assembles(tmp_path: Path) -> None:
+    """P3.7: relocated `_engine_build_prompt_sections` assembles the section dict,
+    strips <think> from the strategy, and surfaces the existing inline tests."""
+    from pipeline_core.application.tasks.task0c import _engine_build_prompt_sections
+
+    guards: list = []
+    deps = SimpleNamespace(
+        TASK0C_PROMPT_CHAR_CAP=100_000,
+        guard=lambda *a: guards.append(a),
+    )
+    existing = ("pub fn f() {}\n#[cfg(test)]\nmod tests {\n"
+                "    #[test] fn t() { f(); }\n}\n")
+    secs = _engine_build_prompt_sections(
+        deps,
+        rel_path="src/x.rs",
+        existing_text=existing,
+        fn_bodies="pub fn f() {}  // !! UNCOVERED\n",
+        pub_symbols="pub fn f();",
+        cargo_toml_content="[package]\nname='x'",
+        integration_tests=[],
+        sibling_files=[],
+        coverage_strategy="<think>reasoning here</think>\nUse builder pattern.",
+        attempt_history="",
+        project_context="a small crate",
+    )
+    assert set(secs) >= {"cargo", "full_source", "fn_bodies", "symbols",
+                         "strategy", "examples", "context"}
+    assert "reasoning here" not in secs["strategy"]   # <think> stripped
+    assert "Use builder pattern." in secs["strategy"]
+    assert "mod tests" in secs["examples"]            # existing inline tests surfaced
+    assert "a small crate" in secs["context"]
+
+
+def test_engine_build_prompt_sections_budget_truncation() -> None:
+    """P3.7: tight budget exercises the source/fn truncation + drop paths and
+    both _guard calls (source_cap + budget-dropped)."""
+    from pipeline_core.application.tasks.task0c import _engine_build_prompt_sections
+
+    guards: list = []
+    deps = SimpleNamespace(
+        TASK0C_PROMPT_CHAR_CAP=10_000,   # budget = 10000 - 8000 = 2000
+        guard=lambda *a: guards.append(a[0]),
+    )
+    big_src = "// header\n" + "let x = 1;\n" * 200          # > 50% budget → capped
+    big_fns = ("pub fn f() {}\n\n// --- next function ---\n\n" * 60)  # > 40% → truncated
+    secs = _engine_build_prompt_sections(
+        deps,
+        rel_path="src/x.rs",
+        existing_text=big_src,
+        fn_bodies=big_fns,
+        pub_symbols="pub fn f();",
+        cargo_toml_content="",
+        integration_tests=[("tests/a.rs", "x" * 5000)],
+        sibling_files=[("src/y.rs", "y" * 5000)],
+        coverage_strategy="strat " * 500,
+        attempt_history="hist " * 500,
+        project_context="ctx " * 500,
+        old_block="old " * 500,
+        what_worked="ww " * 500,
+        retrospective="retro " * 500,
+    )
+    assert "source truncated" in secs["full_source"]
+    assert "fn_bodies truncated" in secs["fn_bodies"]
+    assert "task0c/source_cap" in guards and "task0c/budget" in guards

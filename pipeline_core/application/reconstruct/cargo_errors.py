@@ -34,6 +34,48 @@ def has_rs_line_loc(ln: str) -> bool:
         i += 4
 
 
+_TYPE_ERROR_TRIGGERS = (
+    "expected type", "mismatched types", "cannot find type",
+    "no method named", "struct", "enum",
+)
+
+
+def error_type_signals(text: str) -> list[tuple[str, int]]:
+    r"""Type names blamed in a rendered rustc error, each with its char index (so
+    the caller can grab surrounding context). Regex-free, word-aware replacement
+    for the old r'(?:expected type|…|struct|enum)\s+`?([A-Z][a-zA-Z0-9]+)`?' scan
+    — which falsely matched the bare word `struct` *inside* e.g. `reconstruct`.
+    For each trigger at a left word boundary, followed by whitespace, an optional
+    backtick, then a CamelCase identifier ([A-Z] + ≥1 ascii-alnum), the name is
+    recorded once (first occurrence wins)."""
+    found: dict[str, int] = {}
+    n = len(text)
+    for trig in _TYPE_ERROR_TRIGGERS:
+        start = 0
+        while True:
+            s = text.find(trig, start)
+            if s == -1:
+                break
+            start = s + len(trig)
+            if s > 0 and (text[s - 1].isalnum() or text[s - 1] == "_"):
+                continue  # trigger is a substring of a larger word
+            j = s + len(trig)
+            if j >= n or not text[j].isspace():
+                continue
+            while j < n and text[j].isspace():
+                j += 1
+            if j < n and text[j] == "`":
+                j += 1
+            if j >= n or not (text[j].isascii() and text[j].isupper()):
+                continue
+            k = j + 1
+            while k < n and text[k].isascii() and text[k].isalnum():
+                k += 1
+            if k - j >= 2:  # [A-Z][a-zA-Z0-9]+ (≥2 chars)
+                found.setdefault(text[j:k], j)
+    return list(found.items())
+
+
 def ecodes_in_text(text: str) -> set[str]:
     """All rustc error codes (`E0308`-style: E + 3-4 digits at word
     boundaries) in `text` — regex-free scan."""

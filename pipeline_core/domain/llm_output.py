@@ -20,6 +20,12 @@ _FILE_PATTERN_SQ = re.compile(r"<FILE path='([^']+)'>(.*?)</FILE>", re.DOTALL)
 # Fallback: models sometimes use <path/to/file> ... or ```lang blocks. We only support the
 # canonical FILE format; this pattern detects the wrong format so we can warn usefully.
 _BAD_FILE_PATTERN = re.compile(r'<([^>]+\.[a-zA-Z0-9]+)>')
+# Fenced ```lang … ``` code blocks (fallback when no <FILE> tag) and the prompt-only
+# `// !! UNCOVERED` markers models sometimes copy back into their output. Both are
+# model-output protocol parsing (same class as FILE_PATTERN), kept here so the
+# application layer (task0c) stays regex-free.
+_CODE_BLOCK_PATTERN = re.compile(r'```[a-zA-Z0-9_-]*\n(.*?)```', re.DOTALL)
+_UNCOVERED_MARKER_PATTERN = re.compile(r'\s*//\s*!!\s*UNCOVERED[^\n]*')
 
 GENESIS_DELIM_START = "===GENESIS_START==="
 GENESIS_DELIM_END = "===GENESIS_END==="
@@ -58,6 +64,17 @@ def _looks_like_prose(content: str, path: str) -> bool:
         'the following', 'below is', 'here is', 'as outlined', 'per the',
     )
     return any(first_line.lower().startswith(p) for p in prose_starters)
+
+
+def extract_code_blocks(text: str) -> list[str]:
+    """Return the contents of every fenced ```lang … ``` block in model output."""
+    return _CODE_BLOCK_PATTERN.findall(text)
+
+
+def strip_uncovered_markers(text: str) -> str:
+    """Remove `// !! UNCOVERED` annotation markers the model copied back from an
+    annotated prompt into its output (prompt-only markers must not persist in source)."""
+    return _UNCOVERED_MARKER_PATTERN.sub('', text)
 
 
 def extract_files(text: str) -> dict[str, str]:

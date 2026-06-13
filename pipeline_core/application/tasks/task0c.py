@@ -11,23 +11,32 @@ pipeline.py.
 from __future__ import annotations
 
 import contextlib
+import functools
 import json
 import os
 import sys
 import time
+from contextlib import suppress
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from ...domain.llm_output import extract_code_blocks, strip_uncovered_markers
 from ...domain.refine import Attempt, LoopState
+from ...domain.text import strip_think_blocks
 from ...log import emit, log
 from ..fix_loop import FixOutcome, drive_fix_loop
+from ..reconstruct.cargo_errors import error_type_signals
+
+TASK0C_ATTEMPTS_LOG = ".task0c_attempts.jsonl"
 
 
 @dataclass(frozen=True, slots=True)
 class Task0cDeps:
     BUILD_TIMEOUT: Any
     COVERAGE_TARGET: Any
+    coverage_ignore_pragma: Any
     TASK0C_PROMPT_CHAR_CAP: Any
     FIX_ERR_CAP: Any
     SIBLING_CAP: Any
@@ -39,7 +48,6 @@ class Task0cDeps:
     annotate_uncovered: Any
     block_is_prose: Any
     build_gen_tests_decl: Any
-    build_task0c_prompt_sections: Any
     cargo_env: Any
     cluster_cfg_attr: Any
     condense_rust_to_signatures: Any
@@ -54,9 +62,9 @@ class Task0cDeps:
     filter_cfg_excluded_lines: Any
     filter_cfg_incompatible_lines: Any
     flags_unreachable: Any
-    gen_tests_count: Any
     gen_tests_path: Any
-    get_task0c_history: Any
+    gen_tests_siblings: Any
+    mutation_harden_file: Any
     has_nonempty_test_body: Any
     inject_allow_before_any_mod: Any
     inject_allow_before_gen_mod: Any
@@ -64,7 +72,6 @@ class Task0cDeps:
     is_gen_tests_file: Any
     is_structural_line: Any
     load_file_constraints: Any
-    log_task0c_attempt: Any
     mark_phase: Any
     match_gen_tests_sibling: Any
     next_gen_tests_n: Any
@@ -84,14 +91,12 @@ class Task0cDeps:
     strip_gen_tests_decl_n: Any
     strip_gen_tests_decls: Any
     strip_trailing_file_tag: Any
-    task0c_mutation_pass: Any
-    task0c_pragma_pass: Any
-    task0c_retrospective: Any
-    task0c_targeted_pragma: Any
     test_augmentor_factory: Any
+    type_signals_write: Any
     ask: Any
     extract_files: Any
     extract_test_mod: Any
+    guard: Any
     generate_fix_loop: Any
     generate_in_parallel: Any
     is_test_file: Any
@@ -99,6 +104,736 @@ class Task0cDeps:
     subprocess: Any
     get_current_cluster: Any
     coverage_provider: Any
+
+
+def _engine_get_history(deps: Task0cDeps, project_dir: Path, rel_path: str, max_entries: int = 5) -> str:
+    """BL-002/BL-016: Return formatted prior-attempt history for rel_path, most recent first.
+
+    BL-016: Shows the full compile error (no cap). Block preview is already compressed
+    to signatures by _log_task0c_attempt, so this doesn't re-truncate it.
+    """
+    _FIX_ERR_CAP = deps.FIX_ERR_CAP
+    log_path = project_dir / TASK0C_ATTEMPTS_LOG
+    if not log_path.exists():
+        return ""
+    entries = []
+    try:
+        for line in log_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+                if entry.get("file") == rel_path:
+                    entries.append(entry)
+            except json.JSONDecodeError:
+                pass
+    except Exception:
+        return ""
+    if not entries:
+        return ""
+    recent = entries[-max_entries:]
+    n = len(recent)
+    has_successes = any(e.get("outcome") == "success" for e in recent)
+    parts = [f"Attempt history for `{rel_path}` ({n} attempt{'s' if n != 1 else ''}):"]
+    for e in recent:
+        outcome = e.get("outcome", "unknown")
+        err = e.get("compile_error", "")
+        preview = e.get("block_preview", "")
+        result_label = "compiled and is COMMITTED TO DISK" if outcome == "success" else f"FAILED ({outcome})"
+        entry_lines = [f"Attempt {e.get('attempt', '?')}: → {result_label}"]
+        if preview:
+            entry_lines.append(f"Test signatures:\n{preview}")
+        if err:
+            err_capped = err[-_FIX_ERR_CAP:] if len(err) > _FIX_ERR_CAP else err
+            entry_lines.append(f"Compiler said:\n{err_capped}")
+        if outcome == "success":
+            entry_lines.append(
+                "→ These tests ARE ALREADY COMMITTED as a gen_tests_N module on disk. "
+                "Do NOT include them in your new block — they are already active as gen_tests_N modules."
+            )
+        else:
+            entry_lines.append("→ This approach did not work. Do NOT repeat it.")
+        parts.append("\n".join(entry_lines))
+    if has_successes:
+        parts.append(
+            "The committed tests above are already on disk as gen_tests_N modules. "
+            "Do NOT copy or repeat them. Write ONLY NEW test functions "
+            "targeting the uncovered lines shown in fn_bodies below."
+        )
+    else:
+        parts.append("Write a new attempt that avoids every failure pattern above.")
+    return "\n\n".join(parts)
+
+
+def _engine_pragma_pass(
+    deps: Task0cDeps,
+    project_dir: Path,
+    module_name: str,
+    module_dir: Path,
+    files_data: list[dict[str, Any]],
+    model: str,
+) -> None:
+    """
+    Called when coverage stalls: ask the LLM to add `// # tarpaulin coverage ignore`
+    to lines that are genuinely unreachable from inline #[cfg(test)] blocks
+    (cfg-gated nightly code, unsafe vtable dispatch, unreachable!() arms, etc.).
+
+    This is legitimate — production codebases routinely exclude intrinsically
+    unreachable paths from coverage measurement. Tarpaulin honours the pragma and
+    stops counting those lines, allowing coverage to reach 100% on the coverable
+    portion.
+    """
+    BUILD_TIMEOUT = deps.BUILD_TIMEOUT
+    COVERAGE_IGNORE_PRAGMA = deps.coverage_ignore_pragma
+    _annotate_uncovered = deps.annotate_uncovered
+    _cargo_env = deps.cargo_env
+    _log = log
+    ask = deps.ask
+    extract_files = deps.extract_files
+    is_test_file = deps.is_test_file
+    subprocess = deps.subprocess
+    mod_prefix = str(module_dir) + "/"
+
+    # Build map: abs_path → set of uncovered line numbers
+    uncovered_by_file: dict[Path, set[int]] = {}
+    for fdata in files_data:
+        abs_path = Path(fdata["abs_path"]) if "abs_path" in fdata else Path(os.sep.join(fdata["path"]))
+        if not str(abs_path).startswith(mod_prefix):
+            continue
+        if is_test_file(abs_path, project_dir):
+            continue
+        if abs_path.name == "build.rs":
+            continue
+        lines_uncov = {
+            t["line"] for t in fdata.get("traces", [])
+            if t["stats"].get("Line", 1) == 0
+        }
+        if lines_uncov:
+            uncovered_by_file[abs_path] = lines_uncov
+
+    if not uncovered_by_file:
+        return
+
+    for abs_path, uncov_lines in uncovered_by_file.items():
+        rel = str(abs_path.relative_to(project_dir))
+        try:
+            source = abs_path.read_text(encoding="utf-8")
+        except Exception:
+            continue
+
+        annotated = _annotate_uncovered(source, uncov_lines)
+        prompt = f"""The following Rust source file has lines that remain uncovered after multiple
+test-generation attempts. These lines may be genuinely unreachable from inline
+`#[cfg(test)]` unit tests — for example:
+- Code behind `#[cfg(error_generic_member_access)]` or other non-default cfg flags
+- `unsafe` functions only called via vtable dispatch (never called directly in tests)
+- `unreachable!()` arms in exhaustive matches
+- Lines only reachable via OS-level error conditions
+
+Your task: add `{COVERAGE_IGNORE_PRAGMA}` to each line that is intrinsically
+unreachable from a `#[cfg(test)] mod gen_tests {{ use super::*; }}` block.
+
+Rules:
+- ONLY add the pragma to lines marked `// !! UNCOVERED` that you can confirm are
+  unreachable from inline unit tests. Do NOT add it to lines that could be covered
+  by a test.
+- Do NOT modify any existing test code or logic.
+- If a line is coverable (just needs a better test), do NOT add the pragma — leave
+  it for the next generation attempt.
+- Output the complete corrected file.
+
+File: {rel}
+```rust
+{annotated}
+```
+
+<FILE path="{rel}">
+corrected content here
+</FILE>
+"""
+        response = ask(prompt, model=model)
+        files_out = extract_files(response)
+        if rel in files_out:
+            new_content = files_out[rel]
+            # Sanity: must still compile before writing.
+            tmp = abs_path.with_suffix(".pragma_tmp.rs")
+            try:
+                tmp.write_text(new_content, encoding="utf-8")
+                tmp.rename(abs_path)
+                check = subprocess.run(
+                    ["cargo", "test", "--no-run", "-p", module_name],
+                    cwd=project_dir, capture_output=True, text=True,
+                    timeout=BUILD_TIMEOUT, env=_cargo_env(),
+                )
+                if check.returncode != 0:
+                    _log(f"  [pragma-pass] {rel}: compile failed after pragma addition — reverting.")
+                    abs_path.write_text(source, encoding="utf-8")
+                else:
+                    added = new_content.count(COVERAGE_IGNORE_PRAGMA) - source.count(COVERAGE_IGNORE_PRAGMA)
+                    _log(f"  [pragma-pass] {rel}: added {added} coverage ignore pragma(s).")
+            except Exception as e:
+                _log(f"  [pragma-pass] {rel}: error — {e}. Reverting.")
+                with suppress(Exception):
+                    abs_path.write_text(source, encoding="utf-8")
+        else:
+            _log(f"  [pragma-pass] {rel}: LLM returned no output — skipping.")
+
+
+def _looks_like_fn_decl(ln: str) -> bool:
+    """R7 (regex-free): does this line start a Rust fn declaration?
+    Equivalent to the old re.match(r'\\s*(pub\\s+)?fn\\s+', ln) used to count
+    uncovered functions: optional leading ws, optional `pub`, then `fn` followed
+    by whitespace and at least a name token."""
+    toks = ln.split()
+    if toks[:1] == ["fn"]:
+        return len(toks) > 1
+    if toks[:2] == ["pub", "fn"]:
+        return len(toks) > 2
+    return False
+
+
+def _engine_retrospective(
+    deps: Task0cDeps,
+    rel_path: str,
+    existing_text: str,
+    fn_bodies: str,
+    old_block: str,
+    module_name: str,
+    attempt_history: str = "",
+    uncov_lines: set[int] | None = None,
+    unproductive_blocks: list[str] | None = None,
+    consecutive_giveups: int = 0,
+) -> str:
+    """Ask LLM to classify why remaining uncovered functions can't be reached.
+
+    Returns a structured per-function classification to inject into the next attempt
+    so the model knows whether to try a different approach or skip with a pragma.
+
+    When `unproductive_blocks` is non-empty, the classifier is told that those
+    specific gen_tests blocks have already been written, compiled and run, and
+    did NOT improve coverage of the targeted lines. The LLM is then asked to
+    revise any earlier TESTABLE call -- if multiple concrete attempts failed
+    to move the metric, the line is probably structurally unreachable in this
+    test environment.
+    """
+    _SRC_SNIP_CAP = deps.SRC_SNIP_CAP
+    _TASK0C_MODEL = deps.TASK0C_MODEL
+    _describe_test_environment = deps.describe_test_environment
+    _extract_branch_guard = deps.extract_branch_guard
+    ask = deps.ask
+    if not fn_bodies.strip():
+        return ""
+    # Count the distinct function names so we can require all to be classified.
+    _fn_count = sum(1 for ln in fn_bodies.splitlines() if _looks_like_fn_decl(ln))
+    _src_snippet = existing_text[:_SRC_SNIP_CAP]
+    _block_snippet = old_block[:_SRC_SNIP_CAP // 2] if old_block else "(no previous block)"
+    _history_section = (
+        f"Compile error history for this file (what went wrong in previous attempts):\n{attempt_history}\n\n"
+    ) if attempt_history.strip() else ""
+    _count_line = (
+        f"There are {_fn_count} function(s) with uncovered lines. "
+        f"You MUST output exactly one FUNCTION line for EVERY function — do not skip any.\n\n"
+    ) if _fn_count > 0 else ""
+    # Build branch-guard hints for each uncovered line so the retrospective LLM
+    # knows exactly what condition guards each line — improves TESTABLE vs UNREACHABLE accuracy.
+    _guard_section = ""
+    if uncov_lines:
+        _src_lines = existing_text.splitlines()
+        _guard_hints = []
+        for _lno in sorted(uncov_lines):
+            g = _extract_branch_guard(_src_lines, _lno)
+            if g:
+                _guard_hints.append(f"  line {_lno}: guarded by `{g}`")
+        if _guard_hints:
+            _guard_section = "Branch conditions for uncovered lines:\n" + "\n".join(_guard_hints) + "\n\n"
+    # When called with evidence of prior failed attempts, surface them and ask
+    # for reclassification with that evidence in mind.
+    _unproductive_section = ""
+    if unproductive_blocks:
+        _BLOCK_CAP = max(800, _SRC_SNIP_CAP // 4)
+        _shown = []
+        for i, blk in enumerate(unproductive_blocks, 1):
+            _shown.append(f"--- attempt {i} (compiled, ran, did NOT improve coverage of the targeted lines) ---\n"
+                          f"{blk[:_BLOCK_CAP]}")
+        _unproductive_section = (
+            "PRIOR FAILED ATTEMPTS — these blocks compiled and ran but did NOT increase\n"
+            "coverage of the still-uncovered lines. Treat them as concrete evidence that\n"
+            "the strategy used to write them does NOT work in this test environment. If\n"
+            "the same target was previously classified TESTABLE, the classification was\n"
+            f"wrong — revise it now.\n\n{chr(10).join(_shown)}\n\n"
+        )
+    # The test-generation model itself has repeatedly declared these lines unreachable. That is
+    # the strongest signal there's no public-API test path — weigh it heavily toward UNREACHABLE.
+    _giveup_section = ""
+    if consecutive_giveups >= 2:
+        _giveup_section = (
+            f"STRONG SIGNAL: the test-generation model has, on {consecutive_giveups} consecutive "
+            "attempts, judged these lines to have NO reachable test path (it returned an empty "
+            "block citing unreachability). If you cannot point to a concrete public-API call that "
+            "would execute a line, classify it UNREACHABLE — do not keep it TESTABLE.\n\n"
+        )
+    _env_section = _describe_test_environment()
+    prompt = (
+        f"You generated tests for `{rel_path}` but some lines remain uncovered.\n"
+        f"{_count_line}"
+        f"For each function still marked `// !! UNCOVERED` below, classify it and suggest what to try.\n\n"
+        f"{_env_section}\n"
+        f"{_guard_section}"
+        f"{_history_section}"
+        f"{_unproductive_section}"
+        f"{_giveup_section}"
+        f"Previous test block (already committed):\n```rust\n{_block_snippet}\n```\n\n"
+        f"Still-uncovered functions:\n```rust\n{fn_bodies}\n```\n\n"
+        f"Source context:\n```rust\n{_src_snippet}\n```\n\n"
+        f"For each uncovered function, output exactly one line:\n"
+        f"FUNCTION <name>: <category> — <one sentence reason or concrete suggestion>\n\n"
+        f"Categories:\n"
+        f"(a) TESTABLE — coverable with a different approach; describe the specific approach\n"
+        f"(b) CFG_GATED — inside #[cfg(feature=...)] or excluded by the test environment above; untestable in this run\n"
+        f"(c) UNREACHABLE — unreachable!() arm, dead branch, or intrinsically dead code; add tarpaulin ignore\n"
+        f"(d) NEEDS_INTERNALS — requires private state, unsafe vtable dispatch, env vars not set in the parent process, or internal construction not accessible from inline tests\n"
+    )
+    result = ask(prompt, model=_TASK0C_MODEL, think=None)
+    lines = [ln.strip() for ln in result.splitlines() if ln.strip().startswith("FUNCTION")]
+    return "\n".join(lines) if lines else result[:600].strip()
+
+
+def _engine_targeted_pragma(
+    deps: Task0cDeps,
+    project_dir: Path,
+    module_name: str,
+    rel_path: str,
+    uncov_lines: set[int],
+    pragma_functions: list[str],
+    model: str,
+) -> bool:
+    """Add tarpaulin ignore pragmas to specific classified-unreachable functions.
+
+    Reads the current file state (including any committed gen_tests block), asks the
+    LLM to add pragmas only to the listed functions, then compile-checks before
+    writing.  Returns True on success.
+    """
+    BUILD_TIMEOUT = deps.BUILD_TIMEOUT
+    COVERAGE_IGNORE_PRAGMA = deps.coverage_ignore_pragma
+    _annotate_uncovered = deps.annotate_uncovered
+    _cargo_env = deps.cargo_env
+    _log = log
+    _strip_gen_tests_decls = deps.strip_gen_tests_decls
+    ask = deps.ask
+    extract_files = deps.extract_files
+    subprocess = deps.subprocess
+    abs_path = project_dir / rel_path
+    try:
+        current_source = abs_path.read_text(encoding="utf-8")
+    except Exception:
+        return False
+
+    # Strip gen_* blocks before sending to LLM — files can become very large after many
+    # augmentation rounds, causing the LLM to fail to return the complete file.
+    # We reattach the stripped suffix after the LLM edits only the core source.
+    # gen_tests bodies now live in sibling files (foo.gen_tests_N.rs); the source
+    # file only contains short `mod gen_tests_N;` path-mod declarations. Strip those
+    # before sending to the LLM and reattach the exact same bytes afterwards.
+    _core_source = _strip_gen_tests_decls(current_source).rstrip() + "\n"
+    _gen_suffix   = current_source[len(_core_source.rstrip("\n")):]
+
+    annotated = _annotate_uncovered(_core_source, uncov_lines)
+    fn_list = "\n".join(f"- {fn}" for fn in pragma_functions)
+
+    prompt = (
+        f"The following functions in `{rel_path}` have been classified as intrinsically "
+        f"unreachable from inline `#[cfg(test)]` unit tests "
+        f"(compile-time dispatch markers, cfg-gated nightly code, dead branches):\n"
+        f"{fn_list}\n\n"
+        f"Add `{COVERAGE_IGNORE_PRAGMA}` to ONLY the lines marked `// !! UNCOVERED` "
+        f"that belong to these specific functions. "
+        f"Do NOT add the pragma to any other line. Do NOT change any other code.\n\n"
+        f"Source file (gen_* test blocks omitted for brevity):\n```rust\n{annotated}\n```\n\n"
+        f"Output the COMPLETE corrected source (without the gen_* blocks) wrapped exactly "
+        f"like this — no other text:\n"
+        f'<FILE path="{rel_path}">\n'
+        f"(complete file content here)\n"
+        f"</FILE>"
+    )
+
+    response = ask(prompt, model=model, think=None)
+    files_out = extract_files(response)
+    if rel_path not in files_out:
+        # Fallback: extract from the largest ```rust ... ``` code block.
+        code_blocks = extract_code_blocks(response)
+        if code_blocks:
+            candidate = max(code_blocks, key=len).strip()
+            if len(candidate) > 100:
+                files_out = {rel_path: candidate}
+                _log(f"  [targeted-pragma] {rel_path}: fell back to code-block extraction.")
+    if rel_path not in files_out:
+        # Last-resort: programmatically insert pragma on the exact uncovered lines.
+        _lines = _core_source.splitlines(keepends=True)
+        _added = 0
+        for _lno in sorted(uncov_lines):
+            if 1 <= _lno <= len(_lines) and COVERAGE_IGNORE_PRAGMA not in _lines[_lno - 1]:
+                _lines[_lno - 1] = _lines[_lno - 1].rstrip("\n") + f"  {COVERAGE_IGNORE_PRAGMA}\n"
+                _added += 1
+        if _added:
+            files_out = {rel_path: "".join(_lines)}
+            _log(f"  [targeted-pragma] {rel_path}: LLM failed — applied {_added} pragma(s) directly.")
+        else:
+            _log(f"  [targeted-pragma] {rel_path}: LLM returned no output.")
+            return False
+
+    # Strip any // !! UNCOVERED annotations the LLM may have copied from the annotated
+    # prompt back into the output — these are prompt-only markers and must not persist
+    # in the source file.
+    _raw_llm_out = files_out[rel_path]
+    _cleaned_out = strip_uncovered_markers(_raw_llm_out)
+    if _cleaned_out != _raw_llm_out:
+        files_out[rel_path] = _cleaned_out
+        _log(f"  [targeted-pragma] {rel_path}: stripped leaked // !! UNCOVERED annotations from LLM output.")
+
+    # Ensure all uncov_lines actually have the pragma — the LLM sometimes returns the
+    # file unchanged.  Apply any missing pragmas programmatically to the LLM's output.
+    _out_lines = files_out[rel_path].splitlines(keepends=True)
+    _missed = 0
+    for _lno in sorted(uncov_lines):
+        if 1 <= _lno <= len(_out_lines) and COVERAGE_IGNORE_PRAGMA not in _out_lines[_lno - 1]:
+            _out_lines[_lno - 1] = _out_lines[_lno - 1].rstrip("\n") + f"  {COVERAGE_IGNORE_PRAGMA}\n"
+            _missed += 1
+    if _missed:
+        files_out[rel_path] = "".join(_out_lines)
+        _log(f"  [targeted-pragma] {rel_path}: LLM missed {_missed} pragma(s) — added programmatically.")
+
+    # Reattach gen_* suffix so no accumulated tests are lost.
+    _core_out = files_out[rel_path].rstrip("\n") + "\n"
+    new_content = _core_out + _gen_suffix
+    abs_path.write_text(new_content, encoding="utf-8")
+    check = subprocess.run(
+        ["cargo", "test", "--no-run", "-p", module_name],
+        cwd=project_dir, capture_output=True, text=True,
+        timeout=BUILD_TIMEOUT, env=_cargo_env(),
+    )
+    if check.returncode != 0:
+        _log(f"  [targeted-pragma] {rel_path}: compile failed after pragma addition — reverting.")
+        abs_path.write_text(current_source, encoding="utf-8")
+        return False
+
+    added = new_content.count(COVERAGE_IGNORE_PRAGMA) - current_source.count(COVERAGE_IGNORE_PRAGMA)
+    _log(f"  [targeted-pragma] {rel_path}: added {added} pragma(s) for {len(pragma_functions)} classified function(s).")
+    return True
+
+
+def _engine_mutation_pass(
+    deps: Task0cDeps,
+    project_dir: Path,
+    module_name: str,
+    cluster: Any,
+    rel_files: list[str],
+) -> int:
+    """M4: behaviour-hardening pass over a cluster's source files. For each file
+    with surviving mutants, generate black-box tests (M3) and persist the kept
+    ones as a gen_tests sibling so they survive strip and reattach per-cluster
+    (FR-038). Opt-in via TASK0C_MUTATION_HARDEN=1 (mutation-kill as the strength
+    metric on top of coverage). Returns the number of files hardened.
+    """
+    _gen_tests_path = deps.gen_tests_path
+    _gen_tests_siblings = deps.gen_tests_siblings
+    _log = log
+    _mutation_harden_file = deps.mutation_harden_file
+    if os.getenv("TASK0C_MUTATION_HARDEN", "0").strip() in ("", "0", "false"):
+        return 0
+    hardened = 0
+    for rel in rel_files:
+        src = project_dir / rel
+        if not src.exists():
+            continue
+        try:
+            code = _mutation_harden_file(project_dir, module_name, cluster, rel)
+        except Exception as e:
+            _log(f"  [mut-harden] {rel}: skipped ({e})")
+            continue
+        if not code.strip():
+            continue
+        # persist as the next gen_tests sibling of this file
+        existing = _gen_tests_siblings(src)
+        n = (max((k for k, _ in existing), default=0)) + 1
+        sib = _gen_tests_path(src, n)
+        sib.write_text(
+            f"// mutation-hardening tests (M4) — behaviour, not coverage\n"
+            f"#[cfg(test)]\nmod gen_tests_{n} {{\n    use super::*;\n{code}\n}}\n",
+            encoding="utf-8")
+        hardened += 1
+        _log(f"  [mut-harden] {rel}: persisted hardening tests as gen_tests_{n}")
+    return hardened
+
+
+def _engine_log_attempt(
+    deps: Task0cDeps,
+    project_dir: Path, rel_path: str, attempt_n: int,
+    block: str, compile_error: str, outcome: str,
+) -> None:
+    """BL-002/BL-016: Append one TASK 0c attempt record to the per-project JSONL log.
+
+    BL-016: Compress the failed test block to function signatures only (saves space)
+    so the full compile error can be stored uncapped.
+    """
+    _condense_rust_to_signatures = deps.condense_rust_to_signatures
+    type_signals_write = deps.type_signals_write
+    log_path = project_dir / TASK0C_ATTEMPTS_LOG
+    # BL-016: compress block to signatures — frees budget for full compile error.
+    block_preview = ""
+    if block:
+        condensed = _condense_rust_to_signatures(block, filename="gen_tests.rs")
+        block_preview = condensed[:600] if condensed else block[:300]
+    entry = {
+        "file": rel_path,
+        "attempt": attempt_n,
+        "block_preview": block_preview,
+        "compile_error": compile_error,  # BL-016: no cap — full error stored
+        "outcome": outcome,  # "success", "compile_error", "no_block", "reverted"
+        "ts": datetime.now(UTC).isoformat(),
+    }
+    try:
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception:
+        pass
+
+    # BL-022: if this is a compile error, extract type names for type_signals.
+    if outcome == "compile_error" and compile_error:
+        for type_name, _idx in error_type_signals(compile_error):
+            pattern = compile_error[max(0, _idx - 30):_idx + 80].strip()
+            type_signals_write(project_dir, rel_path, type_name, difficulty=1, pattern=pattern)
+
+
+def _extract_existing_tests(source_text: str) -> str:
+    """Extract the existing #[cfg(test)] mod tests block from a source file.
+
+    Showing the existing tests as an example prevents the model from inventing
+    types that don't exist: it can see exactly how to construct e.g. CommandInfo
+    by looking at test code that already compiles correctly.
+
+    Only extracts `mod tests` (the original hand-written tests), NOT `mod gen_tests`
+    (our generated block) — gen_tests may contain broken code that would teach the
+    model to hallucinate wrong types if used as an example.
+    """
+    # Find `mod tests {` specifically, not `mod gen_tests`.
+    # Return the full block — a truncated example ends mid-function and teaches the model
+    # wrong patterns, causing compile failures in generated tests.
+    for marker in ("#[cfg(test)]\nmod tests", "#[cfg(test)]\npub mod tests"):
+        if marker in source_text:
+            idx = source_text.index(marker)
+            return source_text[idx:].strip()
+    return ""
+
+
+def _engine_build_prompt_sections(
+    deps: Task0cDeps,
+    rel_path: str,
+    existing_text: str,
+    fn_bodies: str,
+    pub_symbols: str,
+    cargo_toml_content: str,
+    integration_tests: list[Any],
+    sibling_files: list[Any],
+    coverage_strategy: str,
+    attempt_history: str,
+    project_context: str,
+    old_block: str = "",
+    what_worked: str = "",
+    retrospective: str = "",
+    uncov_lines: set[int] | None = None,
+    scaffold_chars: int = 0,
+) -> dict[str, Any]:
+    """
+    BL-007: Build context sections for one TASK 0c per-file prompt.
+
+    Prioritized degradation — if total exceeds budget, drop lowest-priority sections first:
+      1. Always: Cargo.toml + full source + uncovered fn bodies + public symbols
+      2. Add if fits: coverage_strategy, attempt_history, existing inline tests, project context
+      3. Add if fits: integration tests (shortest first)
+      4. Add if fits: sibling source files (shortest first)
+
+    Returns dict of section_name -> content string.
+
+    `scaffold_chars` (optional): caller-measured size of the wrapping prompt
+    text excluding section content. When supplied, used directly as the
+    overhead — eliminates the magic 8_000 fallback.
+    """
+    TASK0C_PROMPT_CHAR_CAP = deps.TASK0C_PROMPT_CHAR_CAP
+    _guard = deps.guard
+    OVERHEAD = scaffold_chars if scaffold_chars > 0 else 8_000
+    budget = TASK0C_PROMPT_CHAR_CAP - OVERHEAD
+    dropped: list[str] = []
+
+    # --- Always-included (priority 1) ---
+    cargo_section = (
+        f"\nCargo.toml (available dependencies — ONLY use what is listed here):\n"
+        f"```toml\n{cargo_toml_content}\n```\n"
+    ) if cargo_toml_content.strip() else ""
+
+    # Cap full source at 50% of budget — macro-heavy files (ensure.rs 50k, error.rs 35k)
+    # otherwise consume the entire budget leaving no room for siblings or fn_bodies.
+    # The fn_bodies section already captures all uncovered code; full source adds import
+    # and type context. Truncation preserves the top of the file (imports, type defs).
+    _src_cap = int(budget * 0.50)
+    if len(existing_text) > _src_cap:
+        _guard("task0c/source_cap", f"{rel_path}: {len(existing_text):,} chars → capped at {_src_cap:,} (50% budget)")
+    if len(existing_text) <= _src_cap:
+        _src_text = existing_text
+    else:
+        _cut = existing_text.rfind("\n", 0, _src_cap)
+        _src_text = existing_text[:_cut if _cut != -1 else _src_cap] + "\n// ... (source truncated — see fn_bodies below for uncovered code)\n"
+    full_source_section = (
+        f"\nFull source file `{rel_path}` (file you are augmenting — note all `use` statements):\n"
+        f"```rust\n{_src_text}\n```\n"
+    )
+
+    _fn_cap = int(budget * 0.40)
+    if len(fn_bodies) <= _fn_cap:
+        _fn_text = fn_bodies
+    else:
+        _sep = "\n\n// --- next function ---\n\n"
+        _cutoff = fn_bodies.rfind(_sep, 0, _fn_cap)
+        if _cutoff == -1:
+            # Only one function and it's over budget — truncate at last newline
+            _cutoff = fn_bodies.rfind("\n", 0, _fn_cap)
+        _fn_text = fn_bodies[:_cutoff] + "\n\n// ... (fn_bodies truncated — remaining functions omitted)\n"
+    fn_bodies_section = (
+        f"\nFunctions with uncovered lines (complete bodies, `// !! UNCOVERED` marks gaps):\n"
+        f"```rust\n{_fn_text}\n```\n"
+    ) if fn_bodies.strip() else ""
+
+    symbols_section = (
+        f"\nPublic API of `{rel_path}` (use ONLY these — do not invent types or functions):\n"
+        f"```rust\n{pub_symbols}\n```\n"
+    ) if pub_symbols.strip() else ""
+
+    used = len(cargo_section) + len(full_source_section) + len(fn_bodies_section) + len(symbols_section)
+    remaining = budget - used
+
+    # --- Optional sections (priority 2) ---
+    # History first — most valuable feedback; strategy is generic guidance.
+    history_section = ""
+    if attempt_history.strip():
+        s = f"\n{attempt_history}\n"
+        if len(s) <= remaining:
+            history_section = s
+            remaining -= len(s)
+        else:
+            dropped.append("attempt_history")
+
+    what_worked_section = ""
+    if what_worked.strip():
+        s = f"\nPatterns that achieved coverage improvement in previous attempts (reuse these constructs):\n{what_worked}\n"
+        if len(s) <= remaining:
+            what_worked_section = s
+            remaining -= len(s)
+        else:
+            dropped.append("what_worked")
+
+    retrospective_section = ""
+    if retrospective.strip():
+        s = f"\nRetrospective — why previous attempt did not improve coverage (act on this):\n{retrospective}\n"
+        if len(s) <= remaining:
+            retrospective_section = s
+            remaining -= len(s)
+        else:
+            dropped.append("retrospective")
+
+    strategy_section = ""
+    if coverage_strategy.strip():
+        # Strip raw <think>...</think> blocks — the strategy may have been produced by a
+        # thinking model and the reasoning tokens must not occupy the budget slot.
+        _strategy_clean = strip_think_blocks(coverage_strategy).strip()
+        s = f"\nProject coverage strategy (import paths, type construction, test conventions):\n{_strategy_clean}\n"
+        if len(s) <= remaining:
+            strategy_section = s
+            remaining -= len(s)
+        else:
+            dropped.append("coverage_strategy")
+
+    existing_tests = _extract_existing_tests(existing_text)
+    examples_section = ""
+    if existing_tests.strip():
+        s = (f"\nExisting tests in this file "
+             f"(reference for correct type construction and coding style):\n"
+             f"```rust\n{existing_tests}\n```\n")
+        if len(s) <= remaining:
+            examples_section = s
+            remaining -= len(s)
+        else:
+            dropped.append("existing_inline_tests")
+
+    context_section = ""
+    if project_context.strip():
+        s = f"\nProject context:\n{project_context}\n"
+        if len(s) <= remaining:
+            context_section = s
+            remaining -= len(s)
+        else:
+            dropped.append("project_context")
+
+    old_block_section = ""
+    if old_block.strip():
+        s = (
+            f"\nExisting test module(s) for this file — ALREADY COMMITTED TO DISK AND COMPILE."
+            f" Do NOT copy, repeat, or modify any test from them."
+            f" Write ONLY new test functions that cover the uncovered lines in fn_bodies below:\n```rust\n{old_block}\n```\n"
+        )
+        if len(s) <= remaining:
+            old_block_section = s
+            remaining -= len(s)
+        else:
+            dropped.append("old_block")
+
+    # --- Sibling source files (priority 3, planner relevance order) ---
+    # Moved before integration tests: wrong type construction causes more failures than
+    # wrong test style. Planner-ranked siblings (e.g. error.rs overlap 3-4) must fit.
+    sib_parts: list[str] = []
+    for (srel, scontent) in sibling_files:  # order from _select_relevant_siblings (most relevant first)
+        s = f"\n// --- {srel} ---\n{scontent}"
+        if len(s) <= remaining:
+            sib_parts.append(s)
+            remaining -= len(s)
+        else:
+            dropped.append(f"sibling:{srel}")
+    sib_section = (
+        "\nSibling source files in this module (type definitions and signatures):\n"
+        "```rust\n" + "\n\n".join(sib_parts) + "\n```"
+    ) if sib_parts else ""
+
+    # --- Integration tests (priority 4, shortest first) ---
+    integ_parts: list[str] = []
+    for (irel, icontent) in sorted(integration_tests, key=lambda x: len(x[1])):
+        s = f'\n<TESTFILE path="{irel}">\n{icontent}\n</TESTFILE>\n'
+        if len(s) <= remaining:
+            integ_parts.append(s)
+            remaining -= len(s)
+        else:
+            dropped.append(f"integ_test:{irel}")
+    integ_section = (
+        "\nIntegration test files (already compile and pass — use as pattern reference):\n"
+        + "".join(integ_parts)
+    ) if integ_parts else ""
+
+    if dropped:
+        _guard("task0c/budget", f"{rel_path}: dropped {', '.join(dropped)}")
+
+    return {
+        "cargo": cargo_section,
+        "full_source": full_source_section,
+        "fn_bodies": fn_bodies_section,
+        "symbols": symbols_section,
+        "history": history_section,
+        "what_worked": what_worked_section,
+        "retrospective": retrospective_section,
+        "old_block": old_block_section,
+        "strategy": strategy_section,
+        "examples": examples_section,
+        "context": context_section,
+        "siblings": sib_section,
+        "integ_tests": integ_section,
+    }
 
 
 def task0c_augment_module(
@@ -130,7 +865,7 @@ def task0c_augment_module(
     _annotate_uncovered = deps.annotate_uncovered
     _block_is_prose = deps.block_is_prose
     _build_gen_tests_decl = deps.build_gen_tests_decl
-    _build_task0c_prompt_sections = deps.build_task0c_prompt_sections
+    _build_task0c_prompt_sections = functools.partial(_engine_build_prompt_sections, deps)
     _cargo_env = deps.cargo_env
     _cluster_cfg_attr = deps.cluster_cfg_attr
     _condense_rust_to_signatures = deps.condense_rust_to_signatures
@@ -145,9 +880,8 @@ def task0c_augment_module(
     _filter_cfg_excluded_lines = deps.filter_cfg_excluded_lines
     _filter_cfg_incompatible_lines = deps.filter_cfg_incompatible_lines
     _flags_unreachable = deps.flags_unreachable
-    _gen_tests_count = deps.gen_tests_count
     _gen_tests_path = deps.gen_tests_path
-    _get_task0c_history = deps.get_task0c_history
+    _get_task0c_history = functools.partial(_engine_get_history, deps)
     _has_nonempty_test_body = deps.has_nonempty_test_body
     _inject_allow_before_any_mod = deps.inject_allow_before_any_mod
     _inject_allow_before_gen_mod = deps.inject_allow_before_gen_mod
@@ -155,7 +889,7 @@ def task0c_augment_module(
     _is_gen_tests_file = deps.is_gen_tests_file
     _is_structural_line = deps.is_structural_line
     _load_file_constraints = deps.load_file_constraints
-    _log_task0c_attempt = deps.log_task0c_attempt
+    _log_task0c_attempt = functools.partial(_engine_log_attempt, deps)
     _mark_phase = deps.mark_phase
     _match_gen_tests_sibling = deps.match_gen_tests_sibling
     _next_gen_tests_n = deps.next_gen_tests_n
@@ -175,10 +909,10 @@ def task0c_augment_module(
     _strip_gen_tests_decl_n = deps.strip_gen_tests_decl_n
     _strip_gen_tests_decls = deps.strip_gen_tests_decls
     _strip_trailing_file_tag = deps.strip_trailing_file_tag
-    _task0c_mutation_pass = deps.task0c_mutation_pass
-    _task0c_pragma_pass = deps.task0c_pragma_pass
-    _task0c_retrospective = deps.task0c_retrospective
-    _task0c_targeted_pragma = deps.task0c_targeted_pragma
+    _task0c_mutation_pass = functools.partial(_engine_mutation_pass, deps)
+    _task0c_pragma_pass = functools.partial(_engine_pragma_pass, deps)
+    _task0c_retrospective = functools.partial(_engine_retrospective, deps)
+    _task0c_targeted_pragma = functools.partial(_engine_targeted_pragma, deps)
     _test_augmentor_factory = deps.test_augmentor_factory
     ask = deps.ask
     extract_files = deps.extract_files
