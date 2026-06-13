@@ -259,6 +259,32 @@ def failing_test_names(test_output: str) -> list[str]:
     return names
 
 
+def parse_failed_tests(output: str) -> set[str]:
+    """Names of FAILED tests, capturing BOTH cargo-test forms (regex-free):
+
+        test foo::bar ... FAILED      → 'foo::bar'
+        ---- foo::bar stdout ----     → 'foo::bar'
+
+    The set superset of `failing_test_names`: the `---- … stdout ----` section
+    headers catch a failure even when its summary `test … FAILED` line is
+    absent. Parity with the old `^test\\s+(\\S+)\\s+\\.\\.\\.\\s+FAILED` /
+    `^----\\s+(\\S+)\\s+stdout\\s+----` regexes: the line must START with the
+    keyword token (no leading whitespace), and the name is a single
+    whitespace-free token (doc-test labels with spaces don't match — same as
+    the regexes).
+    """
+    failed: set[str] = set()
+    for ln in output.splitlines():
+        toks = ln.split()
+        if (ln[:4] == "test" and len(toks) >= 4
+                and toks[0] == "test" and toks[2] == "..." and toks[3] == "FAILED"):
+            failed.add(toks[1])
+        if (ln[:4] == "----" and len(toks) >= 4
+                and toks[0] == "----" and toks[2] == "stdout" and toks[3] == "----"):
+            failed.add(toks[1])
+    return failed
+
+
 _IDENT_CHARS = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
 

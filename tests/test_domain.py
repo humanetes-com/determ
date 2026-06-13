@@ -148,3 +148,34 @@ def test_per_file_test_stats_name_attribution() -> None:
     # ambiguous bare name + unknown bare name ("ui" not indexed) → unmapped
     assert stats["(unmapped)"] == {"passed": 1, "failed": 0, "ignored": 1}
     assert test_results.per_file_test_stats("no tests here", known, index) == {}
+
+
+def test_parse_failed_tests_matches_old_regex() -> None:
+    import re
+
+    def old(output: str) -> set[str]:
+        failed: set[str] = set()
+        for ln in output.splitlines():
+            m = re.match(r"^test\s+(\S+)\s+\.\.\.\s+FAILED", ln)
+            if m:
+                failed.add(m.group(1))
+            m = re.match(r"^----\s+(\S+)\s+stdout\s+----", ln)
+            if m:
+                failed.add(m.group(1))
+        return failed
+
+    cases = [
+        "test foo::bar ... FAILED\ntest baz ... ok\n---- foo::bar stdout ----",
+        "  test indented ... FAILED",            # leading ws → no match (both)
+        "test multi word ... FAILED",            # name has space → no match
+        "test x ... FAILED trailing junk",       # trailing after FAILED ok
+        "testfoo ... FAILED",                    # no ws after 'test' → no match
+        "---- only::section stdout ----",        # section header only
+        "----  pad::name  stdout  ----",         # multi-space separators
+        "test a ... ok\ntest b ... FAILED\n---- b stdout ----\n---- c stdout ----",
+        "test result: FAILED. 1 passed",         # summary line, not a test row
+        "",
+        "test doc/lib.rs - thing (line 2) ... FAILED",  # doc-test name w/ spaces
+    ]
+    for c in cases:
+        assert test_results.parse_failed_tests(c) == old(c), c

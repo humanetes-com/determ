@@ -146,6 +146,9 @@ from pipeline_core.domain.test_results import (
     resolve_task3_verdict,
     validate_task3_output_strict,
 )
+from pipeline_core.domain.test_results import (
+    parse_failed_tests as _parse_failed_tests,
+)
 from pipeline_core.domain.text import (
     extract_code_content,
     smart_truncate,
@@ -7463,25 +7466,6 @@ def _build_test_cmd(test_stems: list[str], cluster: "BuildCluster | None") -> st
     for s in test_stems:
         parts += ["--test", s]
     return shlex.join(parts)
-
-
-def _parse_failed_tests(output: str) -> set[str]:
-    """Extract names of failed test fns from cargo test output.
-
-    Matches lines like:
-        test foo::bar ... FAILED
-        ---- foo::bar stdout ----
-    Returns set of unqualified-or-qualified test fn names ('foo::bar').
-    """
-    failed: set[str] = set()
-    for ln in output.splitlines():
-        m = re.match(r"^test\s+(\S+)\s+\.\.\.\s+FAILED", ln)
-        if m:
-            failed.add(m.group(1))
-        m = re.match(r"^----\s+(\S+)\s+stdout\s+----", ln)
-        if m:
-            failed.add(m.group(1))
-    return failed
 
 
 def _ask_per_fn_body(
