@@ -107,11 +107,20 @@ class PipelineState(Protocol):
 
 @runtime_checkable
 class ProcessResult(Protocol):
-    """Result of a cargo/git subprocess invocation."""
+    """Result of a cargo/git subprocess invocation.
 
-    returncode: int
-    stdout: str
-    stderr: str
+    Read-only members (declared as properties): a finished process is
+    immutable, and read-only protocol members let a frozen-dataclass adapter
+    result (`adapters.cargo.Process`) structurally satisfy the port — mutable
+    `x: int` members would reject it, since frozen fields aren't settable.
+    """
+
+    @property
+    def returncode(self) -> int: ...
+    @property
+    def stdout(self) -> str: ...
+    @property
+    def stderr(self) -> str: ...
 
 
 @runtime_checkable

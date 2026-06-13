@@ -7211,9 +7211,10 @@ def _check_graceful_stop(context: str) -> None:
 # Cargo diagnostic parsing relocated to application/reconstruct/cargo_errors.py
 # (P2 slice 5, regex-free): the rendered-text error-signature fallback is now
 # the structured `err_sig_from_text` scan (R7 standing rule).
-from pipeline_core.application.reconstruct.cargo_errors import (  # noqa: E402
-    diagnostics_from_json as _cargo_diagnostics_from_json,
-)
+# JSON-diagnostic cargo check relocated to application/reconstruct/cargo_runner.py
+# (P2 slice 6): composes the Cargo PORT + diagnostics_from_json, per the port
+# docstring ("JSON-diagnostic checks compose on top in the application layer").
+import pipeline_core.application.reconstruct.cargo_runner as _reconstruct_cargo_runner  # noqa: E402
 from pipeline_core.application.reconstruct.cargo_errors import (  # noqa: E402
     err_sig as _cargo_err_sig,
 )
@@ -7228,63 +7229,8 @@ def _run_cargo_check_diag(
     env: dict,
     timeout: int = 180,
 ) -> "tuple[int, str, list[Diagnostic]]":
-    """Run a cargo check / build / test command with
-    `--message-format=json-diagnostic-rendered-ansi` so the caller gets
-    BOTH a rendered text view (for prompts / logs) AND structured
-    diagnostics (for error counting / file attribution). The flag is
-    appended automatically when the command doesn't already include
-    `--message-format`.
-
-    Returns (rc, rendered_text, diagnostics). Diagnostics is the list
-    returned by `_cargo_diagnostics_from_json` over the JSON output, or
-    [] if cargo emitted no compiler messages. The rendered text is
-    reconstructed from the JSON `message.rendered` fields plus any
-    non-JSON lines, so it mirrors what a plain `cargo check` would print
-    without --message-format.
-
-    Use this in place of `_run_cargo` when the caller needs to count or
-    locate errors — it eliminates the regex false-positive class.
-    """
-    argv = shlex.split(cmd)
-    if not any(a.startswith("--message-format") for a in argv):
-        # Insert after the cargo SUBCOMMAND (check / test / build / etc.),
-        # not after `cargo` itself — the cmd may be `cargo +nightly check`
-        # (3 tokens) or `cargo check` (2 tokens). Find the first token
-        # that is a known subcommand name and insert right after it.
-        _known_subs = {"check", "test", "build", "run", "doc", "clippy"}
-        _insert_at = len(argv)  # fallback: append at end
-        for i, a in enumerate(argv):
-            if a in _known_subs:
-                _insert_at = i + 1
-                break
-        argv.insert(_insert_at,
-                    "--message-format=json-diagnostic-rendered-ansi")
-    try:
-        r = subprocess.run(
-            argv, cwd=cwd, capture_output=True, text=True,
-            timeout=timeout, env=env,
-        )
-        raw = (r.stdout or "") + ("\n--- stderr ---\n" + r.stderr if r.stderr else "")
-        diagnostics = _cargo_diagnostics_from_json(raw) or []
-        # Reconstruct a rendered text view: prefer message.rendered when
-        # we have it (it's the same string cargo would have printed),
-        # plus any non-JSON lines from stderr (linker errors, etc.).
-        rendered_parts: list[str] = []
-        for ln in raw.splitlines():
-            s = ln.strip()
-            if s.startswith("{"):
-                continue
-            rendered_parts.append(ln)
-        for d in diagnostics:
-            r_text = d.rendered or ""
-            if r_text:
-                rendered_parts.append(r_text)
-        rendered = "\n".join(rendered_parts)
-        return r.returncode, rendered, diagnostics
-    except subprocess.TimeoutExpired:
-        return -1, f"TIMEOUT after {timeout}s", []
-    except FileNotFoundError as e:
-        return -1, f"FILE NOT FOUND: {e}", []
+    return _reconstruct_cargo_runner.run_check_diag(
+        ADAPTERS.cargo, cmd, cwd, env, timeout)
 
 
 # Cargo error-text shaping relocated to application/reconstruct/cargo_errors.py
