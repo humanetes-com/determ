@@ -1577,10 +1577,6 @@ def test_model_context_chars() -> None:
         v = _call(BACKEND="ollama", OLLAMA_NUM_CTX="6000")
         assert v == max((6000 - 6_000), 4_000) * 4, f"ollama 6000 floor → {v}"
 
-        # Claude backend → 200k token budget.
-        v = _call(BACKEND="claude", OLLAMA_NUM_CTX=None)
-        assert v == (200_000 - 6_000) * 4, f"claude backend → {v}"
-
         # Unknown backend, no env var → safe fallback 8192.
         v = _call(BACKEND="unknown_backend", OLLAMA_NUM_CTX=None, VLLM_MAX_MODEL_LEN=None)
         assert v == (8_192 - 6_000) * 4, f"fallback → {v}"
@@ -2225,26 +2221,23 @@ def test_domain_enums_and_model_caps() -> None:
 
     # coerce: case-insensitive, typed fallback, None → default.
     assert Backend.coerce("VLLM", Backend.OLLAMA) is Backend.VLLM
-    assert Backend.coerce("  ollama ", Backend.CLAUDE) is Backend.OLLAMA
+    assert Backend.coerce("  ollama ", Backend.VLLM) is Backend.OLLAMA
     assert Backend.coerce("nonsense", Backend.OLLAMA) is Backend.OLLAMA
-    assert Backend.coerce(None, Backend.CLAUDE) is Backend.CLAUDE
+    assert Backend.coerce(None, Backend.VLLM) is Backend.VLLM
     assert CoverageBackend.coerce("llvm-cov", CoverageBackend.TARPAULIN) is CoverageBackend.LLVM_COV
 
     # backend → context-length env var mapping.
     assert Backend.OLLAMA.max_len_env_var == "OLLAMA_NUM_CTX"
-    assert Backend.CLAUDE.max_len_env_var is None
+    assert Backend.HUGGINGFACE.max_len_env_var is None
 
     # model_tier classification (pure).
     assert model_tier("qwen3:32b") is ModelTier.MID
-    assert model_tier("claude-opus") is ModelTier.MID
     assert model_tier("random-13b") is ModelTier.WEAK
     assert model_tier("x/llama-3.3-70b") is ModelTier.MID
 
     # model_context_chars budget math (pure).
     assert model_context_chars("qwen3", Backend.OLLAMA, 32768) == (32768 - 6_000) * 4
     assert model_context_chars("qwen3", Backend.OLLAMA, 6000) == 4_000 * 4  # floor
-    assert model_context_chars("x", Backend.CLAUDE, None) == (200_000 - 6_000) * 4
-    assert model_context_chars("claude-x", Backend.OLLAMA, None) == (200_000 - 6_000) * 4
     assert model_context_chars("x", Backend.OLLAMA, None) == (8_192 - 6_000) * 4
 
     # Slice 2: module-level knobs are wired to the enum types, not bare strings.
@@ -2854,7 +2847,7 @@ def test_slice5b_genesis_audit_task() -> None:
     from pipeline_core import retry as pcretry
     assert pipeline.with_retry is pcretry.with_retry
     assert pclog._log_sink is pipeline._log and pclog._emit_sink is pipeline._emit
-    assert pcretry.MAX_RETRIES == pipeline.MAX_RETRIES and pcretry.MODEL == pipeline.MODEL
+    assert pcretry.MAX_RETRIES == pipeline.MAX_RETRIES
     # with_retry contract: returns first non-False result; returns False if all attempts fail.
     assert pcretry.with_retry(lambda: "ok", retries=2) == "ok"
     _n = [0]

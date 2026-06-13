@@ -55,8 +55,8 @@ by `cargo fmt --check`, `clippy -D warnings`, `cargo test`, `cargo doc`. CI runs
 # 1. Activate the virtual environment
 source .venv/bin/activate
 
-# 2. Configure your model in .env (Ollama or Claude)
-cp .env.example .env   # then edit MODEL= and optionally ANTHROPIC_API_KEY=
+# 2. Configure your local model in .env (Ollama / vLLM / SGLang)
+cp .env.example .env   # then edit MODEL=
 
 # 3. Strip a project down to tests only
 python strip_to_tests.py <project_dir>
@@ -106,7 +106,7 @@ two inputs alone -- no additional hints are needed or provided.
 ## Files
 
     deterministic_process.md       -- full description of the experiment and loop
-    model_interact.py              -- model wrapper (Anthropic or Ollama, auto-selected)
+    model_interact.py              -- model wrapper (Ollama / vLLM / SGLang / HF)
     pipeline.py                 -- orchestrates the full loop
     strip_to_tests.py              -- strips a project down to test code only
     requirements.txt               -- Python dependencies
@@ -140,12 +140,8 @@ Copy the example env file:
 
 Then edit .env to choose your model:
 
-    # To use Ollama locally (free, no API key needed):
+    # Ollama locally (free, no API key needed):
     MODEL=qwen2.5-coder:7b
-
-    # To use AI (requires API key from console.anthropic.com):
-    MODEL=claude-haiku-4-5-20251001
-    ANTHROPIC_API_KEY=your_key_here
 
 If using Ollama, install it from ollama.com and pull the model first:
 

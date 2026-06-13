@@ -3,9 +3,11 @@
 Send a prompt to a language model and return the response.
 
 Backend is selected via the BACKEND environment variable (or .env file):
-  - BACKEND=claude        (or MODEL starting with "claude") → Anthropic API
   - BACKEND=huggingface                                     → HuggingFace transformers
+  - BACKEND=vllm / sglang                                   → vLLM / SGLang OpenAI API
   - BACKEND=ollama        (default)                         → Ollama local API
+
+This pipeline is self-hosted only (Hard Rule 7): no external/cloud LLM backend.
 
 Usage:
   python model_interact.py "your prompt here"
@@ -48,7 +50,6 @@ load_dotenv(Path(__file__).parent / ".env")
 
 # Model is read from .env (MODEL=...) or falls back to this default.
 # For Ollama: MODEL=qwen2.5-coder:7b
-# For Claude: MODEL=claude-haiku-4-5-20251001
 # For HuggingFace: set BACKEND=huggingface and HF_MODEL=Qwen/Qwen2.5-Coder-32B-Instruct
 MODEL = os.getenv("MODEL", "qwen2.5-coder:7b")
 
@@ -110,7 +111,7 @@ def _model_use_native_ollama(model: str) -> bool:
 # never reintroduce a private max_tokens cap or its own followup.
 # ---------------------------------------------------------------------------
 
-# Big context default for transports that don't cap by ctx (SGLang/HF/Claude).
+# Big context default for transports that don't cap by ctx (SGLang/HF).
 _UNBOUNDED_CTX = 131072
 
 
@@ -138,34 +139,6 @@ class _BaseTransport:
 
     def wait_until_ready(self) -> None:
         return None
-
-
-class ClaudeTransport(_BaseTransport):
-    def spec(self) -> BudgetSpec:
-        return BudgetSpec(
-            ctx_len=_UNBOUNDED_CTX, content_budget=0, thinking_budget=0, margin=0,
-            cpt_floor=3.0, adaptive_cpt=False, add_thinking_to_request=False,
-            cap_by_ctx=False, send_max_tokens=True, thinking_char_cap=None,
-        )
-
-    def stream(self, messages, *, model, max_tokens, enable_thinking, meta: StreamMeta):
-        import anthropic
-        client = anthropic.Anthropic()
-        self.served_model = model
-        kwargs: dict = {
-            "model": model,
-            "max_tokens": max_tokens,
-            "messages": [{"role": "user", "content": m["content"]}
-                         for m in messages if m["role"] != "system"],
-        }
-        _sys = [m["content"] for m in messages if m["role"] == "system"]
-        if _sys:
-            kwargs["system"] = _sys[0]
-        with client.messages.stream(**kwargs) as stream:  # type: ignore[arg-type]
-            block = stream.get_final_message().content[0]
-            text = block.text if hasattr(block, "text") else ""  # type: ignore[union-attr]
-        if text:
-            yield Delta(content=text)
 
 
 _LOG_DIR          = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
@@ -698,8 +671,6 @@ def _backend_factory() -> Transport:
         return SGLangTransport()
     if backend_env == "vllm":
         return VLLMTransport()
-    if backend_env == "claude" or MODEL.startswith("claude"):
-        return ClaudeTransport()
     return OllamaTransport()
 
 

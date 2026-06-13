@@ -168,15 +168,20 @@ def test_chunked_cache_hit_skips_model(configured, tmp_path):
 
 
 def test_chunked_partial_file_reuse(configured, tmp_path):
-    # First run writes per-chunk partial files; second run reads them back.
+    # Pre-existing per-chunk partial files are read back instead of re-calling the model.
     t1.configure(SINGLE_CALL_CHAR_LIMIT=10)
     genesis, fr = _paths(tmp_path)
-    args = {"test_files": [("a.rs", "fn a(){}"), ("b.rs", "fn b(){}")], "readme_text": "r"}
-    assert StaticTask1Synthesizer().synthesize(tmp_path, genesis, fr, **args) is True
-    n_first = len(configured["ask"])
-    assert StaticTask1Synthesizer().synthesize(tmp_path, genesis, fr, **args) is True
-    # Second run reuses both partial files → only the final synthesis call is new.
-    assert len(configured["ask"]) == n_first + 1
+    partials = tmp_path / ".task1_partials"
+    partials.mkdir()
+    (partials / "chunk_001_of_002.txt").write_text("=== chunk 1 ===\nreq one")
+    (partials / "chunk_002_of_002.txt").write_text("=== chunk 2 ===\nreq two")
+    ok = StaticTask1Synthesizer().synthesize(
+        tmp_path, genesis, fr,
+        test_files=[("a.rs", "fn a(){}"), ("b.rs", "fn b(){}")], readme_text="r",
+    )
+    assert ok is True
+    # Both chunks served from disk → only the final synthesis call hits ask().
+    assert len(configured["ask"]) == 1
 
 
 def test_no_file_markers_raw_fallback(configured, tmp_path):

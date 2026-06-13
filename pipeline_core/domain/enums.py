@@ -35,7 +35,6 @@ class Backend(_Coercible):
     VLLM = "vllm"
     SGLANG = "sglang"
     HUGGINGFACE = "huggingface"
-    CLAUDE = "claude"
 
     @property
     def max_len_env_var(self) -> str | None:

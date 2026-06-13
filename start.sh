@@ -106,7 +106,7 @@ echo "-------------------------------------------"
 
 if [ ! -f "$ENV_FILE" ]; then
     echo "[error] .env not found at $ENV_FILE"
-    echo "        Run: cp $SCRIPT_DIR/.env.example $ENV_FILE  then edit MODEL= and optionally ANTHROPIC_API_KEY="
+    echo "        Run: cp $SCRIPT_DIR/.env.example $ENV_FILE  then edit MODEL="
     exit 1
 fi
 echo "[ok] .env found."
@@ -132,7 +132,7 @@ else
     # Check that required packages are importable.
     MISSING=()
     source "$VENV/bin/activate"
-    for pkg in anthropic openai dotenv; do
+    for pkg in openai dotenv; do
         if ! python -c "import $pkg" 2>/dev/null; then
             MISSING+=("$pkg")
         fi
@@ -146,7 +146,7 @@ else
             echo "       [ok] Dependencies installed."
         fi
     else
-        echo "[ok] Python dependencies present (anthropic, openai, dotenv)."
+        echo "[ok] Python dependencies present (openai, dotenv)."
     fi
 fi
 
@@ -403,23 +403,6 @@ fi
 MODEL=$(env_get "MODEL")
 if [ -z "$MODEL" ]; then
     echo "[skip] MODEL not set in .env — skipping model availability check."
-elif [[ "$MODEL" == claude-* ]]; then
-    echo "[ok] Claude API model '$MODEL' — no local pull needed."
-    # Check API key is set
-    API_KEY=$(env_get "ANTHROPIC_API_KEY")
-    if [ -z "$API_KEY" ]; then
-        if confirm \
-            "MODEL=$MODEL requires ANTHROPIC_API_KEY but it is not set in .env." \
-            "Add ANTHROPIC_API_KEY=sk-ant-... to .env"
-        then
-            echo ""
-            printf "       Paste your API key: "
-            read -r key
-            env_set "ANTHROPIC_API_KEY" "$key"
-        fi
-    else
-        echo "[ok] ANTHROPIC_API_KEY is set."
-    fi
 else
     TAGS=$(curl -sf --max-time 3 "$OLLAMA_HOST/api/tags" 2>/dev/null || echo "")
     if echo "$TAGS" | grep -q "\"${MODEL}\""; then

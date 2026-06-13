@@ -780,7 +780,7 @@ backends into one controller in `pipeline_core/llm/` (foundational facade, outsi
 | `budget.py` | `request_max_tokens` — the ONE ctx-budget-aware cap (content + thinking reserve, ctx-capped) + adaptive cpt EWM |
 | `controller.py` | `LLMController.run` — stream-consume + think-cap-with-recovery + length-truncation followup + 400/network retry + reasoning persist; I/O via injected `Hooks` |
 
-`model_interact.py` backends are now THIN `*Transport`s (Ollama/vLLM/SGLang/HF/Claude): connect, stream
+`model_interact.py` backends are now THIN `*Transport`s (Ollama/vLLM/SGLang/HF): connect, stream
 normalized `Delta`s, declare a `BudgetSpec`. No private caps, no followup. `ask()` unchanged → routes
 through `LLMController`. Tests: `tests/test_llm_controller.py` (16, fake transport drives followup /
 length-trunc / think-cap / early-stop / 400-retry / persist). check.sh green.

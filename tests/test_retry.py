@@ -1,4 +1,4 @@
-"""Unit tests for pipeline_core.retry — with_retry control flow + rate-limit guard.
+"""Unit tests for pipeline_core.retry — with_retry control flow.
 
 Covers the network-error backoff/re-raise branches and the failure-exhaustion
 path. time.sleep is monkeypatched so the backoff branches don't actually wait.
@@ -13,8 +13,6 @@ from pipeline_core import retry
 @pytest.fixture(autouse=True)
 def _fast_retry(monkeypatch):
     monkeypatch.setattr(retry, "MAX_RETRIES", 3)
-    monkeypatch.setattr(retry, "RATE_LIMIT_WAIT", 0)
-    monkeypatch.setattr(retry, "MODEL", "qwen")
     monkeypatch.setattr(retry.time, "sleep", lambda *_: None)
 
 
@@ -63,14 +61,3 @@ def test_explicit_retries_override():
 
     assert retry.with_retry(always_fail, retries=1) is False
     assert calls["n"] == 1
-
-
-def test_is_rate_limit_error_non_claude_is_false():
-    assert retry.is_rate_limit_error(Exception("x")) is False
-
-
-def test_is_rate_limit_error_claude_without_anthropic(monkeypatch):
-    # MODEL=claude but anthropic import unavailable → guard returns False (ImportError path).
-    monkeypatch.setattr(retry, "MODEL", "claude-opus")
-    monkeypatch.setitem(__import__("sys").modules, "anthropic", None)
-    assert retry.is_rate_limit_error(Exception("x")) is False

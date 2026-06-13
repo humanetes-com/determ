@@ -377,7 +377,6 @@ MAX_RETRIES = 3
 #
 # Hardware reference:
 #   RTX 3090 24 GB, qwen3:32b Q4_K_M (~20 GB): OLLAMA_NUM_CTX=32768 → ~104k chars budget
-#   Claude API (200k tokens):                                         → ~776k chars budget
 #   Fallback (8192 tokens):                                           → ~26k chars budget
 
 def _model_context_chars() -> int:
@@ -854,7 +853,7 @@ BUILD_CHECK_RETRIES = int(os.getenv("BUILD_CHECK_RETRIES", "10000"))
 TASK2_FIX_RETRIES = 2
 
 # Max chars for genesis.md and functional_requirements.md when passed to task4.
-# Set high enough that truncation never occurs in practice on Claude's 200k context.
+# Set high enough that truncation never occurs in practice on a large local context.
 TASK4_DOC_LIMIT = 200_000
 
 # Failure log: running record of every iteration's outcome. Fed into TASK 4.
@@ -3198,8 +3197,6 @@ def delete_source_files(project_dir: Path, manifest_path: Path,
 # Retry helper
 # ---------------------------------------------------------------------------
 
-RATE_LIMIT_WAIT = 60  # seconds to wait when hitting a rate limit
-
 # slice 5b infra: relocated to pipeline_core.retry (imported at top).
 
 
@@ -3511,7 +3508,7 @@ ADAPTERS = build_adapters(SETTINGS, extractor_bin=SKELETON_EXTRACTOR_BIN, model=
 # slice by slice (5b); for now it bundles the resolved settings + adapters.
 # Wire the cross-cutting infra seams to the pipeline's concrete sinks/config (slice 5b).
 _pclog.set_sinks(_log, _emit)
-_pcretry.configure(max_retries=MAX_RETRIES, rate_limit_wait=RATE_LIMIT_WAIT, model=MODEL)
+_pcretry.configure(max_retries=MAX_RETRIES)
 
 
 def _prune_redundant_clusters(
@@ -17519,9 +17516,7 @@ def main():
     _log(f"  pipeline.py [{_ph}]  monitor.py [{_mh}]  params: {' '.join(_params) or '(none)'}")
 
     _backend = SETTINGS.backend
-    if MODEL.startswith("claude") or _backend is Backend.CLAUDE:
-        provider = "Claude (Anthropic API)"
-    elif _backend is Backend.VLLM:
+    if _backend is Backend.VLLM:
         provider = f"vLLM ({os.getenv('VLLM_MODEL_NAME', MODEL)})"
     elif _backend is Backend.SGLANG:
         provider = f"SGLang ({os.getenv('SGLANG_MODEL_NAME', MODEL)})"

@@ -8,8 +8,8 @@ actually serves the tokens.
 Backends (in ``model_interact.py``) are reduced to *transports*: they only know how
 to open a connection, stream normalized :class:`Delta` events, and report their own
 budget shape. They carry no recovery or capping policy. The :class:`LLMController`
-owns all of that and drives any transport identically — Ollama, vLLM, SGLang,
-HuggingFace or Claude.
+owns all of that and drives any transport identically — Ollama, vLLM, SGLang
+or HuggingFace.
 
 This module is a foundational facade (like ``log``/``retry``/``io``), not one of the
 architecture layers, so it is intentionally outside the import-linter layer contract.

@@ -14,13 +14,11 @@ _MID_TIER_PREFIXES: tuple[str, ...] = (
     "qwen3", "qwen2.5-72",
     "llama-3.3-70", "llama-3.1-70", "llama-3.1-405",
     "mistral-large", "mixtral-8x22",
-    "claude", "gpt-4", "gemini-1.5", "gemini-2",
 )
 
 # Headroom (tokens) reserved for the system prompt + generation; the rest is content.
 _CONTEXT_HEADROOM_TOKENS = 6_000
 _MIN_CONTENT_TOKENS = 4_000
-_CLAUDE_CONTEXT_TOKENS = 200_000
 _FALLBACK_CONTEXT_TOKENS = 8_192
 _CHARS_PER_TOKEN = 4
 
@@ -64,6 +62,4 @@ def model_context_chars(
     """
     if max_len_tokens is not None:
         return max(max_len_tokens - _CONTEXT_HEADROOM_TOKENS, _MIN_CONTENT_TOKENS) * _CHARS_PER_TOKEN
-    if model.startswith("claude") or backend is Backend.CLAUDE:
-        return (_CLAUDE_CONTEXT_TOKENS - _CONTEXT_HEADROOM_TOKENS) * _CHARS_PER_TOKEN
     return (_FALLBACK_CONTEXT_TOKENS - _CONTEXT_HEADROOM_TOKENS) * _CHARS_PER_TOKEN

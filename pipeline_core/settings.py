@@ -93,7 +93,7 @@ def _resolve_ctx_thinking(backend: Backend) -> tuple[int, int]:
         return int(os.getenv("SGLANG_MAX_MODEL_LEN", "65536")), int(os.getenv("SGLANG_THINKING_BUDGET", "0"))
     if backend is Backend.OLLAMA:
         return int(os.getenv("OLLAMA_NUM_CTX", "8192")), 0
-    return 8_192, 0  # claude / huggingface / unrecognised → safe fallback
+    return 8_192, 0  # huggingface / unrecognised → safe fallback
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,4 +1,3 @@
-anthropic
 openai
 python-dotenv
 mypy==2.1.0
