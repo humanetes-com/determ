@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Pipeline / GPU monitor.  Keys: 1/2/3 views  c/g/r/s/p actions  ↑↓ navigate  q quit"""
 import contextlib
-import glob
 import json as _json
 import os
 import re
@@ -93,6 +92,7 @@ _GUARDS_LOG  = os.getenv("PIPELINE_GUARD_LOG", _pick_log(
 # file keeps the renderer + live loop. `_`-aliases preserve the in-file call sites.
 # (Tests point the readers via pipeline_core.monitor.events_data.configure / globals.)
 from pipeline_core.monitor import events_data as _ed  # noqa: E402
+from pipeline_core.monitor import run_data as _rd  # noqa: E402
 
 _ed.configure(events_log=EVENTS_LOG)
 _pipeline_start_time = _ed.pipeline_start_time
@@ -102,6 +102,22 @@ _phase_c_state = _ed.phase_c_state
 _latest_compile_file_stats = _ed.latest_compile_file_stats
 _latest_test_file_stats = _ed.latest_test_file_stats
 _latest_flow_audit = _ed.latest_flow_audit
+
+_rd.configure(script_dir=os.path.dirname(os.path.abspath(__file__)),
+              pipeline_log=PIPELINE_LOG, guards_log=_GUARDS_LOG)
+_parse_coverage_json = _rd.parse_coverage_json
+_baked_cluster_order = _rd.baked_cluster_order
+_find_project_dir = _rd.find_project_dir
+_parse_pipeline_state = _rd.parse_pipeline_state
+_current_stage_label = _rd.current_stage_label
+_parse_pipeline_log = _rd.parse_pipeline_log
+_read_log_tail = _rd.read_log_tail
+_parse_task_pipeline = _rd.parse_task_pipeline
+_read_backend = _rd.read_backend
+_parse_max_tokens = _rd.parse_max_tokens
+_parse_vllm_cpt = _rd.parse_vllm_cpt
+_pipeline_running = _rd.pipeline_running
+_detect_cached_repo_url = _rd.detect_cached_repo_url
 
 _GPU_BW = {"3090": 936.2, "3080": 760.0, "4090": 1008.0, "4080": 716.8,
            "A100": 2000.0, "H100": 3350.0}
@@ -283,73 +299,6 @@ def gpu():
     return rows
 
 
-def _parse_coverage_json(project_dir):
-    """Read per-file coverage from the most recent grcov/tarpaulin JSON output.
-    Returns {rel_path: (covered, coverable)}, e.g. {'src/error.rs': (248, 285)}.
-    Files older than the current pipeline process start time are ignored (stale from prior run)."""
-    result: dict[str, tuple[int, int]] = {}
-    main_mtime: float = 0.0
-    _run_start = _pipeline_start_time()
-
-    # grcov coveralls JSON (pipeline writes /tmp/grcov_{module}.json).
-    # Exclude quick/filecache variants — those are not full measurements.
-    _main_paths = [p for p in glob.glob("/tmp/grcov_*.json")
-                   if not os.path.basename(p).startswith(("grcov_quick_", "grcov_filecache_"))
-                   and (_run_start == 0.0 or os.path.getmtime(p) >= _run_start)]
-    for path in sorted(_main_paths, key=os.path.getmtime, reverse=True)[:1]:
-        try:
-            main_mtime = os.path.getmtime(path)
-            with open(path) as _f:
-                data = _json.load(_f)
-            for sf in data.get("source_files", []):
-                name      = sf.get("name", "")
-                cov       = sf.get("coverage", [])
-                covered   = sum(1 for c in cov if isinstance(c, int) and c > 0)
-                coverable = sum(1 for c in cov if c is not None)
-                if coverable > 0 and name:
-                    result[name] = (covered, coverable)
-        except Exception:
-            pass
-
-    # Merge per-file quick-cov updates that are newer than the last full measurement.
-    for _qpath in [p for p in glob.glob("/tmp/grcov_filecache_*.json")
-                   if _run_start == 0.0 or os.path.getmtime(p) >= _run_start]:
-        try:
-            with open(_qpath) as _f:
-                _qdata = _json.load(_f)
-            for _rel, _d in _qdata.items():
-                if _d.get("ts", 0) > main_mtime and _d.get("coverable", 0) > 0:
-                    result[_rel] = (_d["covered"], _d["coverable"])
-        except Exception:
-            pass
-
-    if result:
-        return result
-
-    # tarpaulin JSON fallback (pipeline writes /tmp/tarp_{module}/tarpaulin-report.json)
-    _tarp_paths = [p for p in glob.glob("/tmp/tarp_*/tarpaulin-report.json")
-                   if _run_start == 0.0 or os.path.getmtime(p) >= _run_start]
-    for path in sorted(_tarp_paths, key=os.path.getmtime, reverse=True)[:1]:
-        try:
-            with open(path) as _f:
-                data = _json.load(_f)
-            for f in data.get("files", []):
-                parts     = f.get("path", [])
-                name      = os.path.join(*parts) if parts else ""
-                if project_dir and name.startswith(str(project_dir) + os.sep):
-                    name = os.path.relpath(name, project_dir)
-                covered   = f.get("covered", 0)
-                coverable = f.get("coverable", 0)
-                if coverable > 0 and name:
-                    result[name] = (covered, coverable)
-            if result:
-                return result
-        except Exception:
-            pass
-
-    return result
-
-
 def _docs_richness_row() -> str:
     """One-line latest doc-richness vs convergence (R13.3 docs.richness event).
 
@@ -364,22 +313,6 @@ def _docs_richness_row() -> str:
     return (f"  docs  fr={d.get('fr_chars', 0)}c  notes={d.get('notes', 0)}  "
             f"rules={d.get('genesis_rules', 0)}  "
             f"pass={d.get('prev_pass_count', 0)}→{d.get('pass_count', 0)} {arrow}")
-
-
-def _baked_cluster_order() -> list[str]:
-    """Authoritative cluster list+order from the pipeline log's
-    'loaded N baked cluster(s): a, b, c' line. [] if unavailable — the panel
-    then falls back to clusters seen in events so far."""
-    try:
-        with open(PIPELINE_LOG, encoding="utf-8", errors="replace") as f:
-            txt = f.read()
-    except Exception:
-        return []
-    _matches = list(re.finditer(r"loaded \d+ baked cluster\(s\):\s*([^\n]+)", txt))
-    last = _matches[-1] if _matches else None
-    if not last:
-        return []
-    return [c.strip() for c in last.group(1).split(",") if c.strip()]
 
 
 _ERR_NAMES = {
@@ -553,74 +486,8 @@ def _flow_audit_rows(data: dict[str, Any]) -> list[str]:
     return rows
 
 
-def _find_project_dir():
-    """Return path to the most-recently-active workspace in tmp/, or None."""
-    tmp = os.path.join(SCRIPT_DIR, "tmp")
-    if not os.path.isdir(tmp):
-        return None
-    best = None
-    for name in os.listdir(tmp):
-        p = os.path.join(tmp, name, "pipeline_state.md")
-        if os.path.isfile(p):
-            mtime = os.path.getmtime(p)
-            if best is None or mtime > best[0]:
-                best = (mtime, os.path.join(tmp, name))
-    return best[1] if best else None
-
-
-def _parse_pipeline_state(project_dir):
-    """Parse pipeline_state.md → cluster list, done set, current cluster, latest coverage."""
-    clusters: list[str] = []
-    done: set[str] = set()
-    current = ""
-    coverage = ""
-    r: dict[str, object] = {"clusters": clusters, "done": done, "current": current, "coverage": coverage}
-    if not project_dir:
-        return r
-    try:
-        with open(os.path.join(project_dir, "pipeline_state.md")) as _f:
-            text = _f.read()
-    except Exception:
-        return r
-    m = re.search(r'\d+ clusters?: ([^\n]+)', text)
-    if m:
-        clusters[:] = [c.strip() for c in m.group(1).split(",")]
-    for line in text.splitlines():
-        m = re.match(r'\[task0c/(\w+)\]\s+(done|in_progress)', line)
-        if m and m.group(1) in clusters:
-            if m.group(2) == "done":
-                done.add(m.group(1))
-            elif m.group(2) == "in_progress" and not current:
-                current = m.group(1)
-                r["current"] = current
-    # Most recent coverage: scan state lines in reverse for first task0c entry with a %
-    for line in reversed(text.splitlines()):
-        if "task0c" in line:
-            cv = re.search(r'(\d+\.\d+)%', line)
-            if cv:
-                r["coverage"] = cv.group(1) + "%"
-                break
-    return r
-
-
 _PHASE_SEQ = ["task0a", "task0b", "task0c", "strip", "task1",
               "task2a", "task2b", "task2c", "task3", "task4"]
-
-
-def _current_stage_label() -> str:
-    """Raw `current:` line from pipeline_state.md, e.g.
-    'task2c/anyhow / merged-tree fill'. '' if unavailable."""
-    pd = _find_project_dir()
-    if not pd:
-        return ""
-    try:
-        with open(os.path.join(pd, "pipeline_state.md")) as _f:
-            for line in _f:
-                if line.startswith("current:"):
-                    return line.split(":", 1)[1].strip()
-    except Exception:
-        pass
-    return ""
 
 
 def _phase_bar() -> list[str]:
@@ -661,264 +528,6 @@ def _phase_bar() -> list[str]:
     if _detail and _detail != cur:
         rows.append("           " + dim(_detail))
     return rows
-
-
-def _parse_pipeline_log():
-    """Parse PIPELINE_LOG → attempt, file progress, uncovered-lines history."""
-    attempt = "?"
-    max_attempt = "?"
-    errors = 0
-    current_file = "?"
-    files_this_pass: list[str] = []
-    all_files: list[str] = []
-    cluster_files: list[str] = []
-    file_history: dict[str, list[int]] = {}
-    queue_history: dict[str, list[int]] = {}
-    quick_cov_history: dict[str, list[float]] = {}
-    current_cluster = ""
-    coverage = ""
-    last_line = ""
-    age: float = 0.0
-    inner_retry: str = "?"
-    inner_retry_max: str = "?"
-
-    def _r() -> dict[str, object]:
-        return {
-            "attempt": attempt, "max_attempt": max_attempt, "errors": errors,
-            "current_file": current_file, "files_this_pass": files_this_pass,
-            "all_files": all_files, "cluster_files": cluster_files,
-            "file_history": file_history, "queue_history": queue_history,
-            "current_cluster": current_cluster, "coverage": coverage,
-            "last_line": last_line, "age": age,
-            "quick_cov_history": quick_cov_history,
-            "inner_retry": inner_retry, "inner_retry_max": inner_retry_max,
-        }
-
-    if not os.path.exists(PIPELINE_LOG):
-        return _r()
-    try:
-        age = time.time() - os.path.getmtime(PIPELINE_LOG)
-        # Read only the last 512 KB — the log can grow to many GB.
-        _TAIL_BYTES = 512 * 1024
-        with open(PIPELINE_LOG, "rb") as _fh:
-            _fh.seek(0, 2)
-            _size = _fh.tell()
-            _fh.seek(max(0, _size - _TAIL_BYTES))
-            _raw = _fh.read()
-        lines = _raw.decode("utf-8", errors="replace").splitlines()
-        if _size > _TAIL_BYTES:
-            lines = lines[1:]  # drop potentially partial first line
-    except Exception:
-        return _r()
-    last_line = next((ln.strip() for ln in reversed(lines) if ln.strip()), "")
-    this_pass: list[str] = []
-    _cluster_files: list[str] = []
-    for line in lines:
-        # Fresh pipeline start — reset all accumulated state so the previous run's
-        # data in the log tail does not bleed into the current run's display.
-        if "PIPELINE STARTED" in line:
-            attempt = "?"
-            max_attempt = "?"
-            errors = 0
-            current_cluster = ""
-            coverage = ""
-            this_pass = []
-            _cluster_files = []
-            all_files.clear()
-        if m := re.search(r'Attempt\s+(\d+)/(\d+)', line):
-            attempt, max_attempt = m.group(1), m.group(2)
-            this_pass = []
-            inner_retry = "?"; inner_retry_max = "?"
-        if "Compile error" in line:
-            errors += 1
-        if m := re.search(r'Starting compiler cluster:\s*(\w+)', line):
-            new_cl = m.group(1)
-            if new_cl != current_cluster:
-                current_cluster = new_cl
-                _cluster_files = []
-        if m := re.search(r'\[task0c planner\]\s+(src/\S+\.rs):', line):
-            f = m.group(1)
-            if f not in this_pass:
-                this_pass.append(f)
-            if f not in all_files:
-                all_files.append(f)
-            if f not in _cluster_files:
-                _cluster_files.append(f)
-            current_file = f
-        # "File X/Y: src/..." — every file processed in a pass, including skipped ones
-        if m := re.search(r'File \d+/\d+: (src/\S+\.rs)', line):
-            f = m.group(1)
-            if f not in _cluster_files:
-                _cluster_files.append(f)
-            current_file = f
-            inner_retry = "?"; inner_retry_max = "?"
-        if m := re.search(r'quick-retry\s+(\d+)/(\d+)\s+—', line):
-            inner_retry, inner_retry_max = m.group(1), m.group(2)
-        if m := re.search(r'Quick-retry \d+: (?:improvement|no improvement)', line):
-            inner_retry = "?"; inner_retry_max = "?"
-        if m := re.search(r'Appended gen_tests\S* to (src/\S+\.rs)\s+\((\d+) uncovered', line):
-            f, n = m.group(1), int(m.group(2))
-            if f not in file_history:
-                file_history[f] = []
-            file_history[f].append(n)
-        if m := re.search(r'(src/\S+\.rs)\s+quick-cov:\s*\d+/\d+\s+\(([\d.]+)%\)', line):
-            f, pct = m.group(1), float(m.group(2))
-            if f not in quick_cov_history:
-                quick_cov_history[f] = []
-            # Only append if value changed
-            if not quick_cov_history[f] or quick_cov_history[f][-1] != pct:
-                quick_cov_history[f].append(pct)
-        if m := re.search(r'Coverage:\s*([\d.]+)%', line):
-            coverage = m.group(1) + "%"
-        if m := re.search(r'Queue: \d+ file\(s\) — (.+)', line):
-            for fm in re.finditer(r'(\w+\.rs)\((\d+)\)', m.group(1)):
-                fname, count = fm.group(1), int(fm.group(2))
-                if fname not in queue_history:
-                    queue_history[fname] = []
-                queue_history[fname].append(count)
-    files_this_pass[:] = this_pass
-    cluster_files[:] = _cluster_files
-    return _r()
-
-
-# ── Top-level task pipeline (task0a → 0b → 0c → strip → 1 → 2 → 3 → 4) ─────────
-#
-# Tracks the overall progression of the pipeline across all top-level tasks, not
-# just task0c. Used to render a "phases" row at the top of the monitor display
-# so it is obvious which task is currently active and which have completed.
-
-_TASKS_ORDER: list[str] = [
-    "task0a", "task0b", "task0c", "strip",
-    "task1", "task2", "task3", "task4",
-]
-_TASK_SHORT: dict[str, str] = {
-    "task0a": "0a", "task0b": "0b", "task0c": "0c", "strip": "strip",
-    "task1": "T1", "task2": "T2", "task3": "T3", "task4": "T4",
-}
-
-def _read_log_tail() -> list[str]:
-    """Read the last 512 KB of PIPELINE_LOG as a list of lines. Empty if missing."""
-    if not os.path.exists(PIPELINE_LOG):
-        return []
-    try:
-        _TAIL_BYTES = 512 * 1024
-        with open(PIPELINE_LOG, "rb") as _fh:
-            _fh.seek(0, 2)
-            _size = _fh.tell()
-            _fh.seek(max(0, _size - _TAIL_BYTES))
-            _raw = _fh.read()
-        lines = _raw.decode("utf-8", errors="replace").splitlines()
-        if _size > _TAIL_BYTES:
-            lines = lines[1:]  # drop potentially partial first line
-        return lines
-    except Exception:
-        return []
-
-
-def _parse_task_pipeline(lines: list[str]) -> dict[str, Any]:
-    """Scan log lines and return overall task progression.
-
-    Returns:
-        {
-          "states":  {task_name: "done"|"in_progress"|"pending"},
-          "current": str | None,        # current task name
-          "iteration": int | None,      # most recent ITERATION number
-          "module":  str | None,        # most recent MODULE name
-          "task0c_clusters_done": int,  # count of task0c/{cluster} commits
-          "task3_pass": bool | None,    # last task3 outcome
-        }
-    """
-    states: dict[str, str] = dict.fromkeys(_TASKS_ORDER, "pending")
-    current: str | None = None
-    iteration: int | None = None
-    module: str | None = None
-    task0c_clusters_done: int = 0
-    task3_pass: bool | None = None
-
-    def _start(name: str) -> None:
-        nonlocal current
-        states[name] = "in_progress"
-        current = name
-
-    def _done(name: str) -> None:
-        states[name] = "done"
-
-    for line in lines:
-        # Pipeline reset clears all task state.
-        if "PIPELINE STARTED" in line:
-            for t in _TASKS_ORDER:
-                states[t] = "pending"
-            current = None
-            iteration = None
-            module = None
-            task0c_clusters_done = 0
-            task3_pass = None
-            continue
-
-        if m := re.search(r'MODULE\s+(\S+)\s+[—-]\s+ITERATION\s+(\d+)', line):
-            module = m.group(1)
-            iteration = int(m.group(2))
-            # New iteration → task2/task3/task4 reset to pending. task1 is
-            # per-module not per-iteration — its requirements file persists across
-            # iterations (the LLM call short-circuits with "already extracted").
-            for t in ("task2", "task3", "task4"):
-                states[t] = "pending"
-            current = None
-            continue
-
-        if "TASK 0a:" in line or "TASK 0a (context):" in line:
-            _start("task0a")
-        elif "TASK 0b" in line:
-            _done("task0a")
-            _start("task0b")
-        elif re.search(r'TASK 0c \[', line):
-            _done("task0b")
-            _start("task0c")
-        elif re.search(r'pipeline: task0c/', line) and "[git] committed" in line:
-            task0c_clusters_done += 1
-        elif re.search(r'pipeline: stripped', line) and "[git] committed" in line:
-            _done("task0c")
-            _done("strip")
-        elif "TASK 1:" in line and "TASK 1.5" not in line:
-            # "TASK 1: requirements for ... already extracted — skipping" → already done
-            if "already extracted" in line:
-                _done("task1")
-            else:
-                _start("task1")
-        elif "TASK 1.5:" in line:
-            pass  # treat as part of task1
-        elif re.search(r'pipeline: task1 ', line) and "[git] committed" in line or "TASK 1 output validated OK" in line:
-            _done("task1")
-        elif re.search(r'TASK 2:', line):
-            _start("task2")
-        elif "TASK 2 inner loop exhausted" in line:
-            # task2 failed → task4 will run next
-            pass
-        elif re.search(r'pipeline: task2 ', line) and "[git] committed" in line:
-            _done("task2")
-        elif re.search(r'TASK 3:', line):
-            _done("task2")
-            _start("task3")
-            task3_pass = None
-        elif re.search(r'Tests PASSED', line):
-            _done("task3")
-            task3_pass = True
-        elif re.search(r'Tests FAILED', line):
-            states["task3"] = "done"
-            task3_pass = False
-        elif re.search(r'TASK 4:', line):
-            _start("task4")
-        elif "genesis.md updated" in line:
-            _done("task4")
-
-    return {
-        "states":  states,
-        "current": current,
-        "iteration": iteration,
-        "module":  module,
-        "task0c_clusters_done": task0c_clusters_done,
-        "task3_pass": task3_pass,
-    }
 
 
 def pipeline_status():
@@ -1206,17 +815,6 @@ def pipeline_status():
 _prev_len        = 0
 _THINK_CAP_CHARS = 40_000
 
-def _read_backend() -> str:
-    try:
-        with open(os.path.join(SCRIPT_DIR, ".env")) as _f:
-            for line in _f:
-                m = re.match(r'^\s*BACKEND\s*=\s*(\S+)', line)
-                if m:
-                    return m.group(1).strip().lower()
-    except Exception:
-        pass
-    return "ollama"
-
 _vllm_cache: tuple[float, list[str]] = (0.0, [])
 
 def _vllm_status() -> list[str]:
@@ -1288,33 +886,6 @@ def _vllm_status() -> list[str]:
 
     _vllm_cache = (now, rows)
     return rows
-
-def _parse_max_tokens():
-    try:
-        with open(_GUARDS_LOG) as f:
-            lines = f.readlines()
-        for line in reversed(lines):
-            if m := re.search(r'max_tokens \d+ → (\d+)', line):
-                return int(m.group(1))
-    except Exception:
-        pass
-    return None
-
-def _parse_vllm_cpt():
-    retries, cpt = 0, None
-    try:
-        with open(_GUARDS_LOG) as f:
-            lines = f.readlines()
-        for line in lines:
-            if "vllm/400_retry" in line:
-                retries += 1
-        for line in reversed(lines):
-            if m := re.search(r'(?:ewm|cpt_ewm)=[\d.]+→([\d.]+)', line):
-                cpt = float(m.group(1))
-                break
-    except Exception:
-        pass
-    return cpt, retries
 
 def _fmt_eta(secs):
     if secs < 60:   return f"{int(secs)}s"
@@ -1442,35 +1013,6 @@ VIEWS = [
     ("stream",   "3", "Stream Log"),
     ("events",   "4", "Events"),
 ]
-
-def _pipeline_running() -> bool:
-    try:
-        subprocess.check_output(["pgrep", "-f", "pipeline.py"], stderr=subprocess.DEVNULL)
-        return True
-    except subprocess.CalledProcessError:
-        return False
-
-
-def _detect_cached_repo_url() -> str:
-    """Return the remote origin URL of the first git repo found in tmp/, or ''."""
-    tmp_dir = os.path.join(SCRIPT_DIR, "tmp")
-    if not os.path.isdir(tmp_dir):
-        return ""
-    for name in sorted(os.listdir(tmp_dir)):
-        candidate = os.path.join(tmp_dir, name)
-        if not os.path.isdir(os.path.join(candidate, ".git")):
-            continue
-        try:
-            url = subprocess.check_output(
-                ["git", "remote", "get-url", "origin"],
-                cwd=candidate, stderr=subprocess.DEVNULL
-            ).decode().strip()
-            if url:
-                return url
-        except Exception:
-            pass
-    return ""
-
 
 def _prompt_url() -> str:
     """Temporarily restore cooked terminal mode, read a URL from the user, return it.

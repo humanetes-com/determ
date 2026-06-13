@@ -10,6 +10,7 @@ path at startup and tests can point the readers at a fixture file.
 """
 from __future__ import annotations
 
+from . import run_data
 from .events_data import (
     configure,
     coverage_from_events,
@@ -30,4 +31,5 @@ __all__ = [
     "phase_c_state",
     "pipeline_start_time",
     "read_recent_events",
+    "run_data",
 ]

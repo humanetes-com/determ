@@ -69,11 +69,60 @@ def test_phase_c_state_rollup(tmp_path, monkeypatch):
     assert s["hot_fn"] == ("b", 3)  # most cumulative attempts
 
 
+def test_phase_c_state_tdd_skip_passdone_test_clusterdone(tmp_path, monkeypatch):
+    ev = tmp_path / "events.jsonl"
+    _write(
+        ev,
+        {"ts": "2026-06-10T00:00:00+00:00", "event": "phase_c.fn.fill.start",
+         "data": {"fn": "inflight", "cluster": "nightly"}},
+        {"ts": "2026-06-10T00:00:01+00:00", "event": "phase_c.fn.fill.skip", "data": {}},
+        {"ts": "2026-06-10T00:00:02+00:00", "event": "phase_c.pass.done",
+         "data": {"remaining": 7}},
+        {"ts": "2026-06-10T00:00:03+00:00", "event": "phase_c.pass.test",
+         "data": {"rc": 1, "failed_tests": ["t1", "t2"]}},
+        {"ts": "2026-06-10T00:00:04+00:00", "event": "phase_c.tdd.iter",
+         "data": {"cluster": "nightly", "iter": 2, "pass_count": 9,
+                  "fail_count": 3, "frontier_size": 5, "stall": 1, "kind": "outer"}},
+        {"ts": "2026-06-10T00:00:05+00:00", "event": "cluster.done", "cluster": "nightly"},
+        # A trailing fill.start with no matching done → stays in-flight.
+        {"ts": "2026-06-10T00:00:06+00:00", "event": "phase_c.fn.fill.start",
+         "data": {"fn": "inflight", "cluster": "nightly"}},
+    )
+    _patch(monkeypatch, ev)
+    s = ed.phase_c_state()
+    assert s["fills_skipped"] == 1 and s["stubs_remaining"] == 7
+    assert s["last_test_rc"] == 1 and s["last_test_failed"] == 2
+    assert s["tdd_iter"] == 2 and s["tdd_pass"] == 9 and s["tdd_fail"] == 3
+    assert s["tdd_by_cluster"]["nightly"]["pass"] == 9
+    assert "nightly" in s["clusters_done"]
+    assert s["current_fn"] == "inflight" and s["current_attempt"] == 0
+
+
 def test_phase_c_state_empty(tmp_path, monkeypatch):
     ev = tmp_path / "events.jsonl"
     _write(ev, {"ts": "2026-06-10T00:00:00+00:00", "event": "other", "data": {}})
     _patch(monkeypatch, ev)
     assert ed.phase_c_state()["active"] is False
+
+
+def test_read_recent_events_no_file(tmp_path, monkeypatch):
+    _patch(monkeypatch, tmp_path / "does-not-exist.jsonl")
+    assert ed.read_recent_events(lambda n: True) == []
+    assert ed.coverage_from_events() == ""
+    assert ed.phase_c_state()["active"] is False
+
+
+def test_latest_compile_file_stats(tmp_path, monkeypatch):
+    ev = tmp_path / "events.jsonl"
+    _write(
+        ev,
+        {"ts": "2026-06-10T00:00:00+00:00", "event": "compile.file_stats",
+         "data": {"src/a.rs": [3, 1]}},
+        {"ts": "2026-06-10T00:00:01+00:00", "event": "compile.file_stats",
+         "data": {"src/a.rs": [4, 0]}},  # latest wins
+    )
+    _patch(monkeypatch, ev)
+    assert ed.latest_compile_file_stats() == {"src/a.rs": [4, 0]}
 
 
 def test_latest_test_and_flow_audit(tmp_path, monkeypatch):
