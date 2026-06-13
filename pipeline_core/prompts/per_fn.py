@@ -9,6 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from pipeline_core.prompts.context import PerFnFixSections, PerFnSections
 from pipeline_core.prompts.runtime import (
     annotate_file_view,
     promoted_error_rules,
@@ -30,18 +31,23 @@ def build_per_fn_prompt(
     module_name: str,
     cluster_name: str,
     file_rel: str,
-    macros_section: str = "",
-    notes_section: str = "",
-    container: str = "",
-    types_section: str = "",
+    sections: PerFnSections,
+    *,
     fr_path: Path | None = None,
-    invariants_section: str = "",
-    siblings_section: str = "",
-    crate_idioms_section: str = "",
 ) -> str:
     """Small focused prompt for one fn fill. No crate-wide signature index,
     no full FR, no genesis — only what the model needs to implement THIS fn.
+
+    `sections` (P7): every injected section as a frozen no-default record — a
+    forgotten section is a TypeError at construction, not a silent "".
     """
+    macros_section = sections.macros
+    notes_section = sections.notes
+    container = sections.container
+    types_section = sections.types
+    invariants_section = sections.invariants
+    siblings_section = sections.siblings
+    crate_idioms_section = sections.crate_idioms
     tests_section = ""
     if test_blocks:
         parts = []
@@ -143,17 +149,11 @@ def build_per_fn_fix_prompt(
     file_rel: str,
     prev_body: str,
     error_excerpt: str,
-    macros_section: str = "",
-    notes_section: str = "",
-    container: str = "",
-    types_section: str = "",
+    sections: PerFnFixSections,
+    *,
     allow_sig_change: bool = False,
     fr_path: Path | None = None,
     attempt_history: list[dict[str, Any]] | None = None,
-    invariants_section: str = "",
-    retrospective_guidance: str = "",
-    siblings_section: str = "",
-    crate_idioms_section: str = "",
 ) -> str:
     """Re-prompt for a fn whose previous fill broke `cargo check`.
 
@@ -166,7 +166,17 @@ def build_per_fn_fix_prompt(
         {"attempt": int, "body": str, "error_sig": str, "outcome": str}
     Rendered as a <PRIOR_ATTEMPTS> block so the model sees what it has
     already tried (and what failed) rather than re-deriving from scratch.
+
+    `sections` (P7): every injected section as a frozen no-default record.
     """
+    macros_section = sections.macros
+    notes_section = sections.notes
+    container = sections.container
+    types_section = sections.types
+    invariants_section = sections.invariants
+    retrospective_guidance = sections.retrospective_guidance
+    siblings_section = sections.siblings
+    crate_idioms_section = sections.crate_idioms
     tests_section = ""
     if test_blocks:
         parts = [f'<TEST path="{p}">\n{t}\n</TEST>' for p, t in test_blocks]

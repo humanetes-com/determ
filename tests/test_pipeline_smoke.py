@@ -3017,18 +3017,27 @@ def test_per_impl_prompt_macros_and_siblings_sections():
     # provided and vanish when empty (the per-impl builder lacked both).
     import pipeline as p
     from pipeline_core.domain.models import FnRecord, ImplBlock
+    from pipeline_core.prompts.context import PerImplSections
     members = (FnRecord(file="lib.rs", fn_name="kind", container="impl Foo",
                         sig_text="fn kind (& self) -> u32", has_unimplemented_body=True),)
     block = ImplBlock(file="lib.rs", container="impl Foo",
                       members=members, stub_members=members)
     kw = {"block": block, "related_blocks": [], "test_blocks": [],
           "module_name": "m", "cluster_name": "t"}
+
+    def _impl_sections(**over):
+        base = {"types": "", "invariants": "", "notes": "", "crate_idioms": "",
+                "dispatch_family": "", "macros": "", "siblings": "",
+                "retrospective_guidance": ""}
+        base.update(over)
+        return PerImplSections(**base)
+
     full = p._build_per_impl_prompt(
-        macros_section="macro_rules! mk { () => {} }",
-        siblings_section="fn kind(&self) -> u32 { 7 }", **kw)
+        sections=_impl_sections(macros="macro_rules! mk { () => {} }",
+                                siblings="fn kind(&self) -> u32 { 7 }"), **kw)
     assert "<MACROS>" in full and "macro_rules! mk" in full
     assert "<SIBLING_REFERENCE>" in full and "{ 7 }" in full
-    bare = p._build_per_impl_prompt(**kw)
+    bare = p._build_per_impl_prompt(sections=_impl_sections(), **kw)
     assert "<MACROS>" not in bare and "<SIBLING_REFERENCE>" not in bare
 
 
@@ -3068,18 +3077,28 @@ def test_per_fn_prompts_carry_crate_idioms():
     # per-impl-only; both per-fn builders must render it when provided
     # and omit it when empty.
     import pipeline
+    from pipeline_core.prompts.context import PerFnFixSections, PerFnSections
     common = {
         "file_text": "fn target() { unimplemented!() }",
         "fn_name": "target", "sig_text": "fn target()",
         "test_blocks": [], "module_name": "m", "cluster_name": "t",
         "file_rel": "lib.rs",
     }
+    base = {"macros": "", "notes": "", "container": "", "types": "",
+            "invariants": "", "siblings": ""}
+
+    def _fn(crate_idioms=""):
+        return PerFnSections(crate_idioms=crate_idioms, **base)
+
+    def _fix(crate_idioms=""):
+        return PerFnFixSections(crate_idioms=crate_idioms, retrospective_guidance="", **base)
+
     idiom = "# Self::construct_from_display family\nSelf::construct_from_display(arg, None)"
-    full = pipeline._build_per_fn_prompt(crate_idioms_section=idiom, **common)
+    full = pipeline._build_per_fn_prompt(sections=_fn(idiom), **common)
     assert "<CRATE_IDIOMS>" in full and "construct_from_display" in full
-    assert "<CRATE_IDIOMS>" not in pipeline._build_per_fn_prompt(**common)
+    assert "<CRATE_IDIOMS>" not in pipeline._build_per_fn_prompt(sections=_fn(), **common)
     fix = pipeline._build_per_fn_fix_prompt(
-        prev_body="1", error_excerpt="E0308", crate_idioms_section=idiom, **common)
+        prev_body="1", error_excerpt="E0308", sections=_fix(idiom), **common)
     assert "<CRATE_IDIOMS>" in fix and "construct_from_display" in fix
     assert "<CRATE_IDIOMS>" not in pipeline._build_per_fn_fix_prompt(
-        prev_body="1", error_excerpt="E0308", **common)
+        prev_body="1", error_excerpt="E0308", sections=_fix(), **common)

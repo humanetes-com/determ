@@ -96,6 +96,10 @@ from pipeline_core.application.workspace_lifecycle import (
 from pipeline_core.application.workspace_lifecycle import (
     wipe_module_sources as _wl_wipe_module_sources,
 )
+from pipeline_core.domain.cargo_toml import cargo_default_features as _domain_cargo_default_features
+from pipeline_core.domain.cargo_toml import cargo_is_proc_macro as _domain_cargo_is_proc_macro
+from pipeline_core.domain.cargo_toml import cargo_package_name as _domain_cargo_package_name
+from pipeline_core.domain.cargo_toml import load_cargo_toml as _domain_load_cargo_toml
 from pipeline_core.domain.enums import (
     Backend,
     CoverageBackend,
@@ -164,6 +168,11 @@ from pipeline_core.domain.text import (
 )
 from pipeline_core.io import read, write
 from pipeline_core.prompts import runtime as _prompts_runtime
+from pipeline_core.prompts.context import (
+    PerFnFixSections,
+    PerFnSections,
+    PerImplSections,
+)
 from pipeline_core.prompts.per_fn import (
     build_per_fn_fix_prompt as _build_per_fn_fix_prompt,
 )
@@ -1736,34 +1745,12 @@ class WorkspaceScanner(ABC):
         """Return a markdown string, or empty string if nothing found."""
 
 
-# Cargo.toml is TOML — parse it with the stdlib parser, never regex (CODE_ARCHITECTURE.md §8
-# R8: a structured format scraped with regex is a recurring bug source — comments, quoting,
-# inline tables, and multi-line all break the patterns).
-def _load_cargo_toml(text: str) -> dict:
-    """Parse Cargo.toml content via tomllib. Returns {} on malformed/unparseable input."""
-    try:
-        return tomllib.loads(text)
-    except (tomllib.TOMLDecodeError, ValueError, TypeError):
-        return {}
-
-
-def _cargo_package_name(text: str) -> str:
-    """The [package] name, or "" if absent/unparseable."""
-    pkg = _load_cargo_toml(text).get("package", {})
-    return str(pkg.get("name", "") or "") if isinstance(pkg, dict) else ""
-
-
-def _cargo_is_proc_macro(text: str) -> bool:
-    """True iff `[lib] proc-macro = true`."""
-    lib = _load_cargo_toml(text).get("lib", {})
-    return isinstance(lib, dict) and lib.get("proc-macro", False) is True
-
-
-def _cargo_default_features(text: str) -> list[str]:
-    """The `[features] default = [...]` list (empty if absent)."""
-    feats = _load_cargo_toml(text).get("features", {})
-    default = feats.get("default", []) if isinstance(feats, dict) else []
-    return [str(x) for x in default] if isinstance(default, list) else []
+# Cargo.toml accessors live in domain/cargo_toml.py (pure, tomllib — R8). Re-exported
+# here under the legacy `_`-names so the ~15 call sites stay unchanged.
+_load_cargo_toml = _domain_load_cargo_toml
+_cargo_package_name = _domain_cargo_package_name
+_cargo_is_proc_macro = _domain_cargo_is_proc_macro
+_cargo_default_features = _domain_cargo_default_features
 
 
 class StaticWorkspaceScanner(WorkspaceScanner):
@@ -2190,10 +2177,10 @@ class StaticDependencyGraph(DependencyGraph):
         # Falls back to regex parser for environments without cargo or network access.
         if self._try_cargo_metadata():
             return
-        _log("  [dep graph] cargo metadata unavailable — using regex parser.")
-        self._parse_regex()
+        _log("  [dep graph] cargo metadata unavailable — using tomllib parser.")
+        self._parse_manifests()
 
-    def _parse_regex(self):
+    def _parse_manifests(self):
         cargo_tomls = sorted(self._project_dir.rglob("Cargo.toml"))
         if not cargo_tomls:
             return
@@ -2226,18 +2213,14 @@ class StaticDependencyGraph(DependencyGraph):
             else:
                 self._crate_types[pkg_name] = "lib"
 
+            # tomllib (R8: never scrape a structured format with regex). The
+            # dep NAMES are the table keys — handles inline-table, workspace-
+            # inherited (`name.workspace = true`), and quoted forms uniformly.
             dep_names: set[str] = set()
-            for section_pat in (r'\[dependencies\](.*?)(?=\n\[|\Z)',
-                                r'\[dev-dependencies\](.*?)(?=\n\[|\Z)'):
-                for sec_m in re.finditer(section_pat, text, re.DOTALL):
-                    block = sec_m.group(1)
-                    # Match both inline (`name = ...` / `name { ...`) and
-                    # workspace-inherited (`name.workspace = true`) dep syntax.
-                    for name_m in re.finditer(
-                        r'^([a-zA-Z0-9_-]+)(?:\s*[=\{]|\.[a-zA-Z_]+\s*=)',
-                        block, re.MULTILINE
-                    ):
-                        raw = name_m.group(1)
+            for section in ("dependencies", "dev-dependencies"):
+                sec = data.get(section, {})
+                if isinstance(sec, dict):
+                    for raw in sec:
                         dep_names.add(raw)
                         dep_names.add(raw.replace("-", "_"))
             self._deps[pkg_name] = dep_names
@@ -8169,15 +8152,12 @@ def _phase_c_fill_impl_blocks(
                 test_blocks=test_blocks,
                 module_name=module_name,
                 cluster_name=cluster_name,
-                types_section=_types_section_eff,
-                invariants_section=invariants_section,
-                notes_section=notes_section,
+                sections=PerImplSections(
+                    types=_types_section_eff, invariants=invariants_section,
+                    notes=notes_section, retrospective_guidance=prior_retro,
+                    crate_idioms=crate_idioms_section, macros=macros_section,
+                    dispatch_family=dispatch_family_section, siblings=siblings_section),
                 fr_path=fr_path,
-                retrospective_guidance=prior_retro,
-                crate_idioms_section=crate_idioms_section,
-                dispatch_family_section=dispatch_family_section,
-                macros_section=macros_section,
-                siblings_section=siblings_section,
             )
             try:
                 response = ask(prompt, model=_TASK2_MODEL)
@@ -8557,16 +8537,13 @@ def _fill_one_stub(idx: int, rec: Stub, *, ctx: _PerFnPassCtx) -> FillResult:
                 file_text=cur_text, fn_name=fn_name, sig_text=sig_text,
                 test_blocks=test_blocks, module_name=ctx.module_name,
                 cluster_name=ctx.cluster_name, file_rel=rel_file,
-                macros_section=ctx.macros_section,
-                notes_section=notes_section,
-                container=container,
-                types_section=_types_section_eff,
-                invariants_section=ctx.invariants_section,
+                sections=PerFnSections(
+                    macros=ctx.macros_section, notes=notes_section,
+                    container=container, types=_types_section_eff,
+                    invariants=ctx.invariants_section,
+                    siblings=_collect_sibling_filled_bodies(cur_text, fn_name, container),
+                    crate_idioms=crate_idioms_section),
                 fr_path=ctx.fr_path,
-                siblings_section=_collect_sibling_filled_bodies(
-                    cur_text, fn_name, container,
-                ),
-                crate_idioms_section=crate_idioms_section,
             )
         else:
             prompt = _build_per_fn_fix_prompt(
@@ -8574,30 +8551,24 @@ def _fill_one_stub(idx: int, rec: Stub, *, ctx: _PerFnPassCtx) -> FillResult:
                 test_blocks=test_blocks, module_name=ctx.module_name,
                 cluster_name=ctx.cluster_name, file_rel=rel_file,
                 prev_body=last_body, error_excerpt=error_excerpt,
-                macros_section=ctx.macros_section,
-                notes_section=notes_section,
-                container=container,
-                types_section=_types_section_eff,
-                invariants_section=ctx.invariants_section,
+                sections=PerFnFixSections(
+                    macros=ctx.macros_section, notes=notes_section,
+                    container=container, types=_types_section_eff,
+                    invariants=ctx.invariants_section,
+                    # FR-024: prior retrospective guidance — start from "what to
+                    # try instead" rather than naive retry-with-errors.
+                    retrospective_guidance=(ctx.retros_cache.get(
+                        _retro_key(rel_file, fn_name, container), {}).get("guidance", "")),
+                    # FR-024 fix 3: hoist already-filled sibling fn impls (same
+                    # name, different container) — best target-body source.
+                    siblings=_collect_sibling_filled_bodies(cur_text, fn_name, container),
+                    crate_idioms=crate_idioms_section),
                 # P3.1: open the sig-change escape hatch after multiple
                 # compile failures. The model can return an additional
                 # <SIGNATURE> block; we splice it only when fn is non-pub.
                 allow_sig_change=(fix_attempt >= 5),
                 fr_path=ctx.fr_path,
                 attempt_history=per_fn_history,  # P2
-                # FR-024: inject prior retrospective guidance (if any)
-                # so the fix attempt starts from "what to try instead"
-                # rather than naive retry-with-errors.
-                retrospective_guidance=(ctx.retros_cache.get(
-                    _retro_key(rel_file, fn_name, container), {}
-                ).get("guidance", "")),
-                # FR-024 fix 3: hoist sibling fn impls (same name,
-                # different container) that are already filled —
-                # best source of truth for the target body shape.
-                siblings_section=_collect_sibling_filled_bodies(
-                    cur_text, fn_name, container,
-                ),
-                crate_idioms_section=crate_idioms_section,
             )
 
         body, last_response = _ask_per_fn_body(prompt, fn_name, attempts_log, sig_text=sig_text)
@@ -9519,11 +9490,13 @@ def _task2_fill_fns_one_by_one(
                                 test_blocks=t_blocks, module_name=module_name,
                                 cluster_name=cluster_name, file_rel=rel_f,
                                 prev_body=cur_body, error_excerpt=error_excerpt_test,
-                                macros_section=macros_section,
-                                notes_section=_ctx.notes_section,
-                                container=_ctx.container,
-                                types_section=_ctx.types_section,
-                                invariants_section=invariants_section,
+                                sections=PerFnFixSections(
+                                    macros=macros_section, notes=_ctx.notes_section,
+                                    container=_ctx.container, types=_ctx.types_section,
+                                    invariants=invariants_section,
+                                    # P7: this test-retry path injects none of
+                                    # these — explicit (was a silent "").
+                                    retrospective_guidance="", siblings="", crate_idioms=""),
                                 fr_path=fr_path,  # P6.4 note recall
                                 attempt_history=test_fix_history.get(  # P2
                                     (rel_f, fn), []),
@@ -16184,9 +16157,12 @@ def _task3_inline_retry(
                 test_blocks=t_blocks, module_name=project_dir.name,
                 cluster_name=_cluster_label, file_rel=rel_f,
                 prev_body=cur_body, error_excerpt=err_excerpt,
-                container=_ctx.container,
-                types_section=_ctx.types_section,
-                notes_section=_ctx.notes_section,
+                sections=PerFnFixSections(
+                    container=_ctx.container, types=_ctx.types_section,
+                    notes=_ctx.notes_section,
+                    # P7: the task3-retry path injects none of these (silent "").
+                    macros="", invariants="", retrospective_guidance="",
+                    siblings="", crate_idioms=""),
                 fr_path=_retry_fr_path,  # P6.4 past-note recall by error code
             )
             new_body, _ = _ask_per_fn_body(prompt, fn, [], sig_text=sig_t)
@@ -17968,7 +17944,6 @@ def _load_file_constraints(project_dir: Path) -> dict[str, str]:
     The TOML file has [stable] and [nightly] tables; the nightly table entries override
     stable when a non-default cluster is active.
     """
-    import tomllib
     config_path = Path(__file__).parent / "project_configs" / f"{project_dir.name}.constraints.toml"
     if not config_path.exists():
         return {}

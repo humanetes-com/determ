@@ -9,6 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from pipeline_core.domain.models import ImplBlock
+from pipeline_core.prompts.context import PerImplSections
 from pipeline_core.prompts.runtime import promoted_error_rules, repo_spec_section
 from pipeline_core.prompts.sections import (
     format_impl_block_for_prompt,
@@ -24,15 +25,9 @@ def build_per_impl_prompt(
     test_blocks: list[tuple[str, str]],
     module_name: str,
     cluster_name: str,
-    types_section: str = "",
-    invariants_section: str = "",
-    notes_section: str = "",
+    sections: PerImplSections,
+    *,
     fr_path: Path | None = None,
-    retrospective_guidance: str = "",
-    crate_idioms_section: str = "",
-    dispatch_family_section: str = "",
-    macros_section: str = "",
-    siblings_section: str = "",
 ) -> str:
     """Per-impl-block prompt — fills every stub fn in `block` and (when
     `related_blocks` is non-empty) jointly designs sibling impls of the
@@ -42,7 +37,17 @@ def build_per_impl_prompt(
     other impl blocks in the same file whose trait name matches (used to
     surface the `impl AsRef<T1>` + `impl AsRef<T2>` case that per-fn
     prompts cannot show together).
+
+    `sections` (P7): every injected section as a frozen no-default record.
     """
+    types_section = sections.types
+    invariants_section = sections.invariants
+    notes_section = sections.notes
+    retrospective_guidance = sections.retrospective_guidance
+    crate_idioms_section = sections.crate_idioms
+    dispatch_family_section = sections.dispatch_family
+    macros_section = sections.macros
+    siblings_section = sections.siblings
     file_rel = block.file
     container = block.container
     stub_members = block.stub_members

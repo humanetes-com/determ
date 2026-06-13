@@ -88,6 +88,7 @@ def test_pipeline_provider_loads_and_fails_safe(tmp_path: Path) -> None:
 def test_builders_carry_repository_specifications(tmp_path: Path) -> None:
     import pipeline  # noqa: F401  — configures the prompts runtime facade
     from pipeline_core.prompts import runtime
+    from pipeline_core.prompts.context import PerFnFixSections, PerFnSections
     from pipeline_core.prompts.per_fn import (
         build_per_fn_fix_prompt,
         build_per_fn_prompt,
@@ -99,14 +100,17 @@ def test_builders_carry_repository_specifications(tmp_path: Path) -> None:
     common = {"file_text": "fn parse() { unimplemented!() }", "fn_name": "parse",
               "sig_text": "fn parse()", "test_blocks": [], "module_name": "mycrate",
               "cluster_name": "stable", "file_rel": "src/lib.rs", "fr_path": fr}
-    initial = build_per_fn_prompt(**common)
-    fix = build_per_fn_fix_prompt(**common, prev_body="1", error_excerpt="E")
+    empty = {"macros": "", "notes": "", "container": "", "types": "",
+             "invariants": "", "siblings": "", "crate_idioms": ""}
+    initial = build_per_fn_prompt(**common, sections=PerFnSections(**empty))
+    fix = build_per_fn_fix_prompt(**common, prev_body="1", error_excerpt="E",
+                                  sections=PerFnFixSections(**empty, retrospective_guidance=""))
     for prompt in (initial, fix):
         assert "<REPOSITORY_SPECIFICATIONS>" in prompt
         assert "FR-020" in prompt
     # No fr_path → section absent (inert default preserved for old pins).
     assert "<REPOSITORY_SPECIFICATIONS>" not in build_per_fn_prompt(
-        **{**common, "fr_path": None})
+        **{**common, "fr_path": None}, sections=PerFnSections(**empty))
     # Facade restore safety: configure is idempotent with pipeline's provider.
     runtime.configure(
         annotate_file_view=pipeline._annotate_file_view,
