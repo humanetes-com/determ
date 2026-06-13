@@ -293,6 +293,24 @@ def test_parallel_stream_integrity_verdicts(tmp_path: Path) -> None:
     vs = {v.check: v for v in flow_audit.audit(ev, pdir, lg, None, "", 3)}
     assert vs["C10 parallel-streams"].status == "SKIP"
 
+    # Regression: the anyhow shape (debt #6) — a long-running MainThread call
+    # left OPEN while a burst of other calls fires under the SAME 'MainThread'
+    # name (concurrent/reentrant emit sharing one per-thread stream file).
+    # The long call's response arrives LAST; the burst overlaps it → FAIL, and
+    # the offending thread surfaces in the evidence.
+    anyhow_shape = [
+        _llm("2026-06-13T13:52:09.348", "llm.request", "MainThread"),   # B: long, opens
+        _llm("2026-06-13T13:53:18.870", "llm.request", "MainThread"),   # burst overlaps B
+        _llm("2026-06-13T13:53:18.936", "llm.request", "MainThread"),
+        _llm("2026-06-13T13:53:18.937", "llm.response", "MainThread"),
+        _llm("2026-06-13T13:53:18.938", "llm.response", "MainThread"),
+        _llm("2026-06-13T13:53:32.344", "llm.response", "MainThread"),  # B closes last
+    ]
+    ev, pdir, lg = _write_run(tmp_path / "anyhow", anyhow_shape)
+    vs = {v.check: v for v in flow_audit.audit(ev, pdir, lg, None, "", 3)}
+    assert vs["C10 parallel-streams"].status == "FAIL"
+    assert "MainThread" in vs["C10 parallel-streams"].evidence
+
     # Events without a thread field (pre-parallelism run) → SKIP, not crash.
     ev, pdir, lg = _write_run(
         tmp_path / "old", [{"ts": "2026-06-12T05:00:00", "event": "llm.request"}])
