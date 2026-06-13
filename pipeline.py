@@ -7208,82 +7208,18 @@ def _check_graceful_stop(context: str) -> None:
         sys.exit(0)
 
 
-def _cargo_err_sig(output: str) -> frozenset:
-    """LEGACY regex-based fallback. Prefer `_cargo_diagnostics_from_json`
-    (the JSON-format parse) when cargo is invoked with
-    `--message-format=json-diagnostic-rendered-ansi` — the regex path
-    misses non-E-coded failures (linker, build-script, cargo wrapper) and
-    is the source of the recurring "compile failed but errs=0" false
-    positive.
-
-    This wrapper inspects `output` for JSON `compiler-message` lines and
-    routes to the structured path when present. Otherwise falls back to
-    the regex over rendered text (with a guard so the rc-honest counter
-    can be derived by the caller).
-    """
-    diags = _cargo_diagnostics_from_json(output)
-    if diags is not None:
-        return _cargo_err_sig_from_diagnostics(diags)
-    return (
-        frozenset(re.findall(r"error\[E\d+\]: .+", output))
-        | frozenset(re.findall(r"^error: .+", output, re.MULTILINE))
-    )
-
-
-def _cargo_diagnostics_from_json(output: str) -> "list[Diagnostic] | None":
-    """Walk `output` line-by-line, parse JSON cargo messages, return the
-    `compiler-message`s with `level == "error"` as structured records:
-
-        [{"code": "E0277" | "", "file": "src/error.rs" | "",
-          "line": int | 0, "message": str, "rendered": str}, …]
-
-    Returns None if the output contains no JSON cargo messages — caller
-    falls back to regex. Empty list means "JSON present, zero errors"
-    (an actual signal: a JSON cargo check that returned cleanly).
-    """
-    json_seen = False
-    out: list[Diagnostic] = []
-    for ln in output.splitlines():
-        ln = ln.strip()
-        if not ln.startswith("{"):
-            continue
-        try:
-            obj = json.loads(ln)
-        except Exception:
-            continue
-        if obj.get("reason") != "compiler-message":
-            json_seen = True  # JSON present even if not an error
-            continue
-        msg = obj.get("message") or {}
-        if msg.get("level") != "error":
-            json_seen = True
-            continue
-        json_seen = True
-        code_field = msg.get("code") or {}
-        code = (code_field.get("code") or "") if isinstance(code_field, dict) else ""
-        spans = msg.get("spans") or []
-        primary = next((s for s in spans if s.get("is_primary")), spans[0] if spans else {})
-        out.append(Diagnostic(
-            code=code,
-            file=(primary.get("file_name") or "") if isinstance(primary, dict) else "",
-            line=int(primary.get("line_start") or 0) if isinstance(primary, dict) else 0,
-            message=msg.get("message") or "",
-            rendered=msg.get("rendered") or "",
-        ))
-    return out if json_seen else None
-
-
-def _cargo_err_sig_from_diagnostics(diagnostics: "list[Diagnostic]") -> frozenset:
-    """Build the stable error signature directly from structured
-    diagnostics. Sig is `code:message` (or just `message` when no code) —
-    same disambiguation power as the regex sig but produced from
-    rustc's own classification rather than guessed from rendered text."""
-    sigs: set[str] = set()
-    for d in diagnostics:
-        code = d.code or ""
-        msg = (d.message or "").strip()
-        sigs.add(f"{code}:{msg}" if code else msg)
-    return frozenset(sigs)
+# Cargo diagnostic parsing relocated to application/reconstruct/cargo_errors.py
+# (P2 slice 5, regex-free): the rendered-text error-signature fallback is now
+# the structured `err_sig_from_text` scan (R7 standing rule).
+from pipeline_core.application.reconstruct.cargo_errors import (  # noqa: E402
+    diagnostics_from_json as _cargo_diagnostics_from_json,
+)
+from pipeline_core.application.reconstruct.cargo_errors import (  # noqa: E402
+    err_sig as _cargo_err_sig,
+)
+from pipeline_core.application.reconstruct.cargo_errors import (  # noqa: E402
+    err_sig_from_diagnostics as _cargo_err_sig_from_diagnostics,
+)
 
 
 def _run_cargo_check_diag(

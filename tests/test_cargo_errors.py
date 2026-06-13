@@ -6,13 +6,72 @@ from __future__ import annotations
 import re
 
 from pipeline_core.application.reconstruct.cargo_errors import (
+    diagnostics_from_json,
     ecodes_in_text,
+    err_sig,
+    err_sig_from_diagnostics,
+    err_sig_from_text,
     excerpt_for_code,
     focus_cargo_errors,
     has_rs_line_loc,
     is_error_header,
     strip_cargo_warnings,
 )
+from pipeline_core.domain.models import Diagnostic
+
+
+def _old_err_sig_text(output: str) -> frozenset:
+    return (
+        frozenset(re.findall(r"error\[E\d+\]: .+", output))
+        | frozenset(re.findall(r"^error: .+", output, re.MULTILINE))
+    )
+
+
+def test_err_sig_from_text_matches_old_regex() -> None:
+    cases = [
+        "error[E0308]: mismatched types",
+        "error: aborting due to previous error",
+        "  --> src/lib.rs:1:1\nerror[E0277]: trait not satisfied\nnote: x",
+        "xerror[E0599]: no method named foo",   # marker mid-line
+        "error[E0308]: ",                         # no trailing char → no match
+        "error: ",                                # no trailing char → no match
+        "error[EABC]: bad code",                  # non-digit code → no match
+        "error[E12]: short\nerror[E0061]: a, error[E0062]: b",  # one per line, greedy
+        "",
+        "warning: unused",
+    ]
+    for c in cases:
+        assert err_sig_from_text(c) == _old_err_sig_text(c), c
+
+
+def test_err_sig_prefers_json_then_text_fallback() -> None:
+    # No JSON present → text scan.
+    assert err_sig("error[E0308]: x") == err_sig_from_text("error[E0308]: x")
+    # JSON present → structured sig (code:message); text-only error ignored.
+    j = '{"reason":"compiler-message","message":{"level":"error","code":{"code":"E0277"},"message":"trait","spans":[],"rendered":"r"}}'
+    assert err_sig(j) == frozenset({"E0277:trait"})
+
+
+def test_diagnostics_and_err_sig_from_diagnostics() -> None:
+    j = (
+        '{"reason":"compiler-message","message":{"level":"error",'
+        '"code":{"code":"E0308"},"message":"mismatched","spans":'
+        '[{"is_primary":true,"file_name":"src/e.rs","line_start":10}],"rendered":"R"}}\n'
+        '{"reason":"compiler-message","message":{"level":"warning","message":"w"}}\n'
+    )
+    diags = diagnostics_from_json(j)
+    assert diags is not None and len(diags) == 1
+    d = diags[0]
+    assert (d.code, d.file, d.line, d.message) == ("E0308", "src/e.rs", 10, "mismatched")
+    assert err_sig_from_diagnostics(diags) == frozenset({"E0308:mismatched"})
+    # No JSON at all → None (caller falls back to text).
+    assert diagnostics_from_json("plain text, no json") is None
+    # JSON present but no errors → empty list (a real "clean" signal).
+    assert diagnostics_from_json('{"reason":"build-finished","success":true}') == []
+    # Diagnostic without code → bare message sig.
+    assert err_sig_from_diagnostics([Diagnostic(code="", file="", line=0,
+                                                message="linker failed", rendered="")]) \
+        == frozenset({"linker failed"})
 
 
 def test_is_error_header_matches_old_regex() -> None:

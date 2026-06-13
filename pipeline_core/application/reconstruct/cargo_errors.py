@@ -7,6 +7,10 @@ these helpers shape arbitrary captured TEXT where they don't).
 
 from __future__ import annotations
 
+import json
+
+from pipeline_core.domain.models import Diagnostic
+
 
 def is_error_header(ln: str) -> bool:
     """True for a rustc error-block header line: `error`, `error:`,
@@ -167,3 +171,94 @@ def focus_cargo_errors(output: str, file_rel: str, max_chars: int) -> str:
             parts.append(txt)
             used += len(txt) + 1
     return "\n".join(parts)[:max_chars]
+
+
+def diagnostics_from_json(output: str) -> list[Diagnostic] | None:
+    """Walk `output` line-by-line, parse JSON cargo messages, return the
+    `compiler-message`s with `level == "error"` as structured records.
+
+    Returns None if the output contains no JSON cargo messages — caller
+    falls back to the rendered-text scan. Empty list means "JSON present,
+    zero errors" (an actual signal: a JSON cargo check that returned
+    cleanly).
+    """
+    json_seen = False
+    out: list[Diagnostic] = []
+    for ln in output.splitlines():
+        ln = ln.strip()
+        if not ln.startswith("{"):
+            continue
+        try:
+            obj = json.loads(ln)
+        except Exception:
+            continue
+        if obj.get("reason") != "compiler-message":
+            json_seen = True  # JSON present even if not an error
+            continue
+        msg = obj.get("message") or {}
+        if msg.get("level") != "error":
+            json_seen = True
+            continue
+        json_seen = True
+        code_field = msg.get("code") or {}
+        code = (code_field.get("code") or "") if isinstance(code_field, dict) else ""
+        spans = msg.get("spans") or []
+        primary = next((s for s in spans if s.get("is_primary")), spans[0] if spans else {})
+        out.append(Diagnostic(
+            code=code,
+            file=(primary.get("file_name") or "") if isinstance(primary, dict) else "",
+            line=int(primary.get("line_start") or 0) if isinstance(primary, dict) else 0,
+            message=msg.get("message") or "",
+            rendered=msg.get("rendered") or "",
+        ))
+    return out if json_seen else None
+
+
+def err_sig_from_diagnostics(diagnostics: list[Diagnostic]) -> frozenset[str]:
+    """Build the stable error signature directly from structured
+    diagnostics. Sig is `code:message` (or just `message` when no code) —
+    same disambiguation power as the text sig but produced from rustc's own
+    classification rather than guessed from rendered text."""
+    sigs: set[str] = set()
+    for d in diagnostics:
+        code = d.code or ""
+        msg = (d.message or "").strip()
+        sigs.add(f"{code}:{msg}" if code else msg)
+    return frozenset(sigs)
+
+
+def err_sig_from_text(output: str) -> frozenset[str]:
+    """Regex-free form of the legacy rendered-text error signature
+    (`error\\[E\\d+\\]: .+`  |  `^error: .+`). For each line: an
+    `error[E<digits>]: <≥1 char>` marker anywhere in the line contributes
+    the substring from that marker to end-of-line; a line that STARTS with
+    `error: <≥1 char>` contributes the whole line."""
+    sigs: set[str] = set()
+    for ln in output.splitlines():
+        # error[E<digits>]: <≥1 char>  — anywhere, first marker wins (greedy .+ to EOL)
+        i = ln.find("error[")
+        while i != -1:
+            j = i + len("error[")
+            if j < len(ln) and ln[j] == "E":
+                k = j + 1
+                while k < len(ln) and ln[k].isdigit():
+                    k += 1
+                if k > j + 1 and ln[k:k + 3] == "]: " and len(ln) > k + 3:
+                    sigs.add(ln[i:])
+                    break
+            i = ln.find("error[", i + len("error["))
+        # ^error: <≥1 char>
+        if ln.startswith("error: ") and len(ln) > len("error: "):
+            sigs.add(ln)
+    return frozenset(sigs)
+
+
+def err_sig(output: str) -> frozenset[str]:
+    """Stable error signature for `output`. Prefers the structured JSON
+    diagnostics (catches non-E-coded failures: linker, build-script, cargo
+    wrapper — the recurring "compile failed but errs=0" false positive);
+    falls back to the regex-free rendered-text scan when no JSON is present."""
+    diags = diagnostics_from_json(output)
+    if diags is not None:
+        return err_sig_from_diagnostics(diags)
+    return err_sig_from_text(output)
