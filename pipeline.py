@@ -109,6 +109,8 @@ from pipeline_core.domain.llm_output import (
     GENESIS_DELIM_START,
     _extract_genesis,
     extract_files,
+    parse_retrospective,
+    parse_self_note,
 )
 from pipeline_core.domain.model_caps import (
     model_context_chars as _model_context_chars_pure,
@@ -6485,19 +6487,7 @@ def _extract_self_note(
         except Exception as e:
             _log(f"  [model-notes] extraction failed (think=False): {e}")
             return None
-    if not resp:
-        return None
-    txt = resp.strip()
-    # Pull just the last non-empty line if model wrote multiple lines.
-    lines = [ln.strip() for ln in txt.splitlines() if ln.strip()]
-    if not lines:
-        return None
-    candidate = lines[-1]
-    # Strip surrounding quotes / fences.
-    candidate = candidate.strip("`").strip("\"'")
-    if candidate.upper() == "NONE" or len(candidate) < 20:
-        return None
-    return candidate[:300]
+    return parse_self_note(resp)
 
 
 
@@ -7410,20 +7400,12 @@ def _u2_test_gate(
         text to feed back into the next prompt.
     Fail-safe: any error → None (fall back to compile-based acceptance).
     """
-    if not (_UNIFIED_FILL_LOOP and test_cmd and fn_tests):
-        return None
-    try:
-        _passed, _fc, _detail, _failed = _run_scoped_tests(
-            test_cmd, target_src_dir, cluster_env or {}, timeout=_U2_TEST_TIMEOUT)
-    except Exception as _e:
-        _guard("phase-c/u2_skip", f"{type(_e).__name__}: {_e}")
-        return None
-    _still = set(fn_tests) & _failed
-    if not _still:
-        return None
-    _msg = (f"This compiled, but these tests still FAIL: {sorted(_still)}\n\n"
-            "Fix the BEHAVIOR so they pass.\n" + _detail)
-    return frozenset(_still), _msg
+    # P2 slice 11: gate logic crossed to cargo_runner; shim injects the patchable
+    # `_run_cargo` seam + `_guard` and the config (resolved at call time).
+    return _reconstruct_cargo_runner.u2_test_gate(
+        _run_cargo, fn_tests, test_cmd, target_src_dir, cluster_env,
+        enabled=_UNIFIED_FILL_LOOP, timeout=_U2_TEST_TIMEOUT,
+        err_cap=_FIX_ERR_CAP, guard=_guard)
 
 
 def _build_test_cmd(test_stems: list[str], cluster: "BuildCluster | None") -> str:
@@ -7630,45 +7612,8 @@ def _phase_c_retrospective(
     if not (result or "").strip():
         _log(f"  [phase-c/retro] LLM returned empty content for {fn_name}")
         return {"category": "", "guidance": "", "signal": "empty_response"}
-    cat = ""
-    guid = ""
-    # Tolerant parsing: model may emit "CATEGORY:", "category:", "**CATEGORY**:",
-    # or bullet-prefix variants. Strip markdown-ish decorations and match
-    # case-insensitively. GUIDANCE may span multiple lines — collect them all.
-    lines = (result or "").splitlines()
-    guidance_lines: list[str] = []
-    in_guidance = False
-    for ln in lines:
-        s = ln.strip().lstrip("*").lstrip("-").lstrip("•").strip()
-        s_clean = re.sub(r"^\*+\s*|\s*\*+$", "", s)  # strip markdown bold
-        m = re.match(r"(?i)^category\s*[:=]\s*(\S+)", s_clean)
-        if m:
-            cat = m.group(1).strip().rstrip(".,;").upper()
-            in_guidance = False
-            continue
-        m = re.match(r"(?i)^guidance\s*[:=]\s*(.+)$", s_clean)
-        if m:
-            guidance_lines = [m.group(1).strip()]
-            in_guidance = True
-            continue
-        if in_guidance and s_clean:
-            # Multi-line guidance continuation (stop on blank or new label).
-            if re.match(r"(?i)^(category|guidance|note|reason)\s*[:=]", s_clean):
-                in_guidance = False
-            else:
-                guidance_lines.append(s_clean)
-    guid = " ".join(guidance_lines).strip()
-    # Fallback: if neither field parsed, but the response is non-empty,
-    # treat the whole response as guidance and leave category blank. This
-    # still gives the next attempt useful "what to try" text in the
-    # retrospective block, even if our structured parser missed.
-    if not cat and not guid and (result or "").strip():
-        guid = (result or "").strip()[:1200]
-    return {
-        "category": cat,
-        "guidance": guid,
-        "signal": "ok" if (cat or guid) else "unparseable",
-    }
+    # P2 slice 13: tolerant CATEGORY/GUIDANCE parse crossed to domain (regex-free).
+    return parse_retrospective(result)
 
 
 def _count_relevant_notes(fr_path: Path | None,

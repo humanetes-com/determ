@@ -179,3 +179,68 @@ def test_parse_failed_tests_matches_old_regex() -> None:
     ]
     for c in cases:
         assert test_results.parse_failed_tests(c) == old(c), c
+
+
+def test_parse_self_note() -> None:
+    p = llm_output.parse_self_note
+    # last non-empty line, stripped of fences/quotes
+    assert p("blah\n  `the real note about lifetimes here`  ") == "the real note about lifetimes here"
+    assert p('"a sufficiently long quoted correction note"') == "a sufficiently long quoted correction note"
+    # declined / too short / empty → None
+    assert p("NONE") is None
+    assert p("none") is None
+    assert p("too short") is None
+    assert p("") is None
+    assert p("   \n  \n") is None
+    # cap at max_len
+    assert len(p("x" * 500)) == 300
+    # multi-line: only the last non-empty line is taken
+    assert p("first long enough line here\nsecond final note long enough") == "second final note long enough"
+
+
+def test_parse_retrospective_matches_old_regex() -> None:
+    import re
+
+    def old(result: str) -> dict:
+        cat = ""
+        lines = (result or "").splitlines()
+        guidance_lines: list[str] = []
+        in_guidance = False
+        for ln in lines:
+            s = ln.strip().lstrip("*").lstrip("-").lstrip("•").strip()
+            s_clean = re.sub(r"^\*+\s*|\s*\*+$", "", s)
+            m = re.match(r"(?i)^category\s*[:=]\s*(\S+)", s_clean)
+            if m:
+                cat = m.group(1).strip().rstrip(".,;").upper()
+                in_guidance = False
+                continue
+            m = re.match(r"(?i)^guidance\s*[:=]\s*(.+)$", s_clean)
+            if m:
+                guidance_lines = [m.group(1).strip()]
+                in_guidance = True
+                continue
+            if in_guidance and s_clean:
+                if re.match(r"(?i)^(category|guidance|note|reason)\s*[:=]", s_clean):
+                    in_guidance = False
+                else:
+                    guidance_lines.append(s_clean)
+        guid = " ".join(guidance_lines).strip()
+        if not cat and not guid and (result or "").strip():
+            guid = (result or "").strip()[:1200]
+        return {"category": cat, "guidance": guid,
+                "signal": "ok" if (cat or guid) else "unparseable"}
+
+    cases = [
+        "",
+        "CATEGORY: WRONG_TYPE_CHOICE\nGUIDANCE: use NonNull instead of Box",
+        "category = api_hallucination.\nguidance = the method foo() does not exist",
+        "**CATEGORY**: TRAIT_BOUND_VIOLATION\n**GUIDANCE**: add where T: Sized\nmore detail here",
+        "- CATEGORY: GENUINELY_HARD\n- GUIDANCE: multiple issues\nNOTE: stop",
+        "just some freeform text with no labels at all",
+        "GUIDANCE: first line\nsecond line\nREASON: x",
+        "category:\nguidance:",  # no tokens — both regexes fail
+        "CATEGORY: WRONG_DEREF_PATTERN",  # category only
+        "x" * 1500,  # cap fallback
+    ]
+    for c in cases:
+        assert llm_output.parse_retrospective(c) == old(c), repr(c)

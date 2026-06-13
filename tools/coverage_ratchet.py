@@ -11,6 +11,13 @@ gates each target against `.coverage_ratchet.json` (repo root, committed):
 So newly tested code (e.g. the fill-loop harness) permanently raises the
 floor, and a refactor that drops tests cannot pass. MIN_FLOORS are absolute
 minima that apply even before a baseline exists.
+
+`pipeline_all` (pipeline.py + pipeline_core/*) is the RELOCATION-INVARIANT
+gate: moving covered code out of the pipeline.py god-file into pipeline_core
+does NOT change the combined number, so the strangler-fig refactor isn't
+penalised for shrinking pipeline.py — only a genuine coverage loss drops it.
+(A pipeline.py-only floor wrongly falls every time covered code relocates; the
+god-file's shrinking is already enforced by the LOC ratchet, not here.)
 """
 from __future__ import annotations
 
@@ -25,7 +32,7 @@ TOLERANCE = 0.2  # percentage points — guards against line-count jitter
 
 # label → coverage include-glob
 TARGETS: dict[str, str] = {
-    "pipeline": "pipeline.py",
+    "pipeline_all": "pipeline.py,pipeline_core/*",  # relocation-invariant combined gate
     "pipeline_core": "pipeline_core/*",
     "pipeline_core.domain": "pipeline_core/domain/*",
 }

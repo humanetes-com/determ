@@ -11,6 +11,7 @@ from pipeline_core.application.reconstruct.cargo_runner import (
     run_cargo,
     run_check_diag,
     run_scoped_tests,
+    u2_test_gate,
 )
 
 
@@ -119,3 +120,47 @@ def test_run_scoped_tests_pass_fail_timeout() -> None:
     _, _, d, _ = run_scoped_tests(_const_run_cargo(101, "x" * 100 + "\ntest z ... FAILED"),
                                   "cargo test", Path("."), {}, err_cap=10)
     assert len(d) == 10
+
+
+def _gate(run_cargo_fn, fn_tests, test_cmd="cargo test", enabled=True, guard=None):
+    return u2_test_gate(
+        run_cargo_fn, fn_tests, test_cmd, Path("."), {},
+        enabled=enabled, timeout=120, err_cap=500,
+        guard=guard or (lambda *_: None))
+
+
+def test_u2_gate_accepts_when_disabled_or_no_tests() -> None:
+    boom = _const_run_cargo(101, "test a ... FAILED")
+    assert _gate(boom, {"a"}, enabled=False) is None      # gate off
+    assert _gate(boom, set()) is None                     # no fn_tests
+    assert _gate(boom, {"a"}, test_cmd=None) is None       # no cmd
+
+
+def test_u2_gate_accepts_when_tests_pass() -> None:
+    assert _gate(_const_run_cargo(0, "test a ... ok"), {"a"}) is None
+
+
+def test_u2_gate_blocks_on_own_failing_test() -> None:
+    out = "test a ... ok\ntest b ... FAILED\nassert failed"
+    res = _gate(_const_run_cargo(101, out), {"a", "b"})
+    assert res is not None
+    sig, msg = res
+    assert sig == frozenset({"b"}) and "still FAIL" in msg and msg.endswith("assert failed")
+
+
+def test_u2_gate_ignores_unrelated_failures() -> None:
+    # a failing test NOT in fn_tests must not block this unit
+    assert _gate(_const_run_cargo(101, "test other ... FAILED"), {"a"}) is None
+
+
+def test_u2_gate_failsafe_and_inconclusive() -> None:
+    # run_cargo raises → guard fires, accept (None)
+    fired = []
+
+    def _raise(*_a, **_k):
+        raise RuntimeError("cargo blew up")
+
+    assert _gate(_raise, {"a"}, guard=lambda loc, m: fired.append(loc)) is None
+    assert fired == ["phase-c/u2_skip"]
+    # timeout (rc=-1) → empty failed set → accept
+    assert _gate(_const_run_cargo(-1, ""), {"a"}) is None

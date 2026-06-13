@@ -75,6 +75,60 @@ def test_effective_stalls_passthrough_and_focus(monkeypatch) -> None:
     assert pipeline._effective_stalls(0, "error") == 0
 
 
+def _fake_run_cargo(rc: int, out: str):
+    """Fake `pipeline._run_cargo`: records cmds, returns canned (rc, out)."""
+    calls: list[str] = []
+
+    def _fn(cmd, cwd, env, *, timeout=180):
+        calls.append(cmd)
+        return rc, out
+
+    _fn.calls = calls  # type: ignore[attr-defined]
+    return _fn
+
+
+def test_run_scoped_tests_shim_routes_through_run_cargo(monkeypatch, tmp_path) -> None:
+    """Slice-9 seam: the _run_scoped_tests shim MUST go through pipeline._run_cargo
+    (the monkeypatchable attr), not ADAPTERS.cargo."""
+    import pipeline
+
+    fake = _fake_run_cargo(0, "test a ... ok\ntest b ... ok")
+    monkeypatch.setattr(pipeline, "_run_cargo", fake)
+    assert pipeline._run_scoped_tests("cargo test", tmp_path, {}) == (True, 0, "", set())
+    assert fake.calls == ["cargo test"]  # routed through the seam
+
+
+def test_u2_test_gate_shim_routes_and_blocks(monkeypatch, tmp_path) -> None:
+    """Slice-11 seam: the _u2_test_gate shim composes via pipeline._run_cargo + _guard."""
+    import pipeline
+
+    fake = _fake_run_cargo(101, "test b ... FAILED\nassertion failed")
+    monkeypatch.setattr(pipeline, "_run_cargo", fake)
+    monkeypatch.setattr(pipeline, "_UNIFIED_FILL_LOOP", True)
+    res = pipeline._u2_test_gate({"b"}, "cargo test", tmp_path, {})
+    assert res is not None
+    sig, msg = res
+    assert sig == frozenset({"b"}) and "still FAIL" in msg
+    assert fake.calls  # routed through the patchable seam
+    # gate disabled → accept regardless
+    monkeypatch.setattr(pipeline, "_UNIFIED_FILL_LOOP", False)
+    assert pipeline._u2_test_gate({"b"}, "cargo test", tmp_path, {}) is None
+
+
+def test_extract_self_note_shim(monkeypatch) -> None:
+    """Slice-12: the _extract_self_note shim runs the ask ladder + parse_self_note."""
+    import pipeline
+
+    note = "this is a sufficiently long self-correction note about lifetimes"
+    monkeypatch.setattr(pipeline, "ask", lambda *a, **k: note)
+    assert pipeline._extract_self_note("failbody", "err excerpt", "fixbody") == note
+    # model declines → None
+    monkeypatch.setattr(pipeline, "ask", lambda *a, **k: "NONE")
+    assert pipeline._extract_self_note("failbody", "err excerpt", "fixbody") is None
+    # empty inputs short-circuit before any ask
+    assert pipeline._extract_self_note("", "err", "fix") is None
+
+
 def test_gen_tests_helpers() -> None:
     """Verify gen_tests sibling-file write / read / revert / strip semantics."""
     import pipeline

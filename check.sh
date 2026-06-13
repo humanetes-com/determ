@@ -61,7 +61,10 @@ echo "Running pytest (xdist, all cores) + coverage ratchet (cargo coverage tests
 # being decomposed) and all of pipeline_core (where refactored code lands) — via a
 # per-target ratchet (.coverage_ratchet.json): floors initialize from the first run,
 # auto-raise when new tests land, and FAIL any change that loses coverage.
-# domain/ keeps its absolute 95% minimum inside the ratchet (MIN_FLOORS).
+# domain/ keeps its absolute 95% minimum inside the ratchet (MIN_FLOORS). The
+# `pipeline_all` target (pipeline.py + pipeline_core combined) is relocation-invariant:
+# moving covered code out of the pipeline.py god-file can't drop it (LOC ratchet
+# enforces the shrinking instead).
 "$SCRIPT_DIR/.venv/bin/python" -m pytest -n auto --dist loadfile \
     --cov=pipeline --cov=pipeline_core --cov-report=
 "$SCRIPT_DIR/.venv/bin/python" tools/coverage_ratchet.py || { echo "coverage ratchet failed (see above)"; exit 1; }

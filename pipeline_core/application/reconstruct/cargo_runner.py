@@ -79,6 +79,46 @@ def run_scoped_tests(
     return passed, len(failed), detail, failed
 
 
+def u2_test_gate(
+    run_cargo_fn: RunCargo,
+    fn_tests: set[str],
+    test_cmd: str | None,
+    target_src_dir: Path,
+    cluster_env: dict[str, str] | None,
+    *,
+    enabled: bool,
+    timeout: int,
+    err_cap: int,
+    guard: Callable[[str, str], None],
+) -> tuple[frozenset[str], str] | None:
+    """Plan 10 — the SINGLE reusable test-acceptance gate, called by every fill
+    loop (per-fn, per-impl, post-merge) at the point a unit compiles.
+
+    Runs the unit's own tests (`fn_tests`) via `run_scoped_tests` and decides:
+      - None  → ACCEPT (tests pass, gate off, no tests, or inconclusive run —
+        never block on uncertainty).
+      - (fail_sig, detail) → DO NOT ACCEPT: compiled but its own tests fail.
+        `fail_sig` is the failing-test set (stall signature → loop terminates),
+        `detail` is the assertion/panic text for the next prompt.
+    Fail-safe: any error → None (fall back to compile-based acceptance).
+    """
+    if not (enabled and test_cmd and fn_tests):
+        return None
+    try:
+        _passed, _fc, detail, failed = run_scoped_tests(
+            run_cargo_fn, test_cmd, target_src_dir, cluster_env or {},
+            timeout=timeout, err_cap=err_cap)
+    except Exception as e:  # noqa: BLE001 — fail-safe to compile-based accept
+        guard("phase-c/u2_skip", f"{type(e).__name__}: {e}")
+        return None
+    still = set(fn_tests) & failed
+    if not still:
+        return None
+    msg = (f"This compiled, but these tests still FAIL: {sorted(still)}\n\n"
+           "Fix the BEHAVIOR so they pass.\n" + detail)
+    return frozenset(still), msg
+
+
 def run_check_diag(
     cargo: Cargo,
     cmd: str,

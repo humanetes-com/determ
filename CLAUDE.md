@@ -9,6 +9,8 @@ Handover convention (do NOT re-inspect the files to recall this):
 - Style: compact structured (tables/symbolic), per the LLM-output rules below. It is a reference doc for future-me, so completeness > brevity here (the 2-line chat rule does NOT apply to file content).
 - Write it when the user asks to hand over, or at the end of a substantial unit of work.
 
+Technical debt: whenever you spot a low-quality part, latent bug, inefficiency, or cleanup while doing other work, append it to `technical_debt.md` (repo root, newest at top) — do NOT fix it inline unless asked. Surface it in chat too.
+
 Do not use RemoteTrigger, ScheduleWakeup, or create remote schedule routines. No code or data should be sent to Anthropic's cloud servers via scheduled agents.
 
 IMPORTANT: Always produce compact structured output instead of markdown prose when generating guides, strategy docs, or rule sets for LLM consumption. Use tables, symbolic notation, and abbreviated rules rather than verbose English paragraphs. Prose is an inefficient token format for conveying structured rules to an LLM.
