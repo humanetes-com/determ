@@ -520,6 +520,28 @@ class SGLangTransport(_BaseTransport):
         ]
 
 
+def _parse_input_token_overflow(msg: str) -> int | None:
+    """Extract N from vLLM's 'prompt contains at least N input tokens' BadRequest.
+
+    Regex-free replacement for ``prompt contains at least (\\d+) input tokens``:
+    locate the head phrase, read the leading digit run, and require the exact
+    ' input tokens' tail (so a partial/garbled message yields None, matching the
+    old non-match → InputTooLong(None) behaviour). Hard Rule: no regex.
+    """
+    head = "prompt contains at least "
+    tail = " input tokens"
+    p = msg.find(head)
+    if p == -1:
+        return None
+    start = p + len(head)
+    i = start
+    while i < len(msg) and msg[i].isdigit():
+        i += 1
+    if i == start or not msg[i:].startswith(tail):
+        return None
+    return int(msg[start:i])
+
+
 class VLLMTransport(_BaseTransport):
     """vLLM via its OpenAI-compatible /v1/chat/completions endpoint.
 
@@ -558,8 +580,6 @@ class VLLMTransport(_BaseTransport):
         return base and self._thinking_budget > 0
 
     def stream(self, messages, *, model, max_tokens, enable_thinking, meta: StreamMeta):
-        import re as _re
-
         from openai import BadRequestError, OpenAI
         client = OpenAI(base_url=self._base_url, api_key="vllm",
                         timeout=httpx.Timeout(connect=30, read=900, write=30, pool=30))
@@ -592,8 +612,7 @@ class VLLMTransport(_BaseTransport):
                     if text:
                         yield Delta(content=text)
         except BadRequestError as exc:
-            _m = _re.search(r'prompt contains at least (\d+) input tokens', str(exc))
-            raise InputTooLong(int(_m.group(1)) if _m else None) from exc
+            raise InputTooLong(_parse_input_token_overflow(str(exc))) from exc
         except (httpx.ReadTimeout, httpx.ConnectError, httpx.RemoteProtocolError) as exc:
             raise TransportUnavailable(str(exc)) from exc
 

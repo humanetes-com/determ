@@ -152,6 +152,7 @@ from pipeline_core.domain.refine import FloorStall as _FloorStall
 from pipeline_core.domain.refine import (
     LoopState as _LoopState,
 )
+from pipeline_core.domain.rust_scan import count_cfg_attrs, item_names
 from pipeline_core.domain.test_results import (
     OUTPUT_SEPARATOR,
     _parse_test_counts,
@@ -694,31 +695,51 @@ def ask(prompt: str, system: str | None = None, model: str | None = None,
                f"prompt {_prompt_len:,} chars = "
                f"{_prompt_len * 100 // max(1, SINGLE_CALL_CHAR_LIMIT)}% of "
                f"SINGLE_CALL_CHAR_LIMIT ({SINGLE_CALL_CHAR_LIMIT:,})")
+    # prompt_sha on the REQUEST (not just the response) makes every call
+    # self-correlating: request↔response/error pair by sha, independent of the
+    # thread-name heuristic the flow-audit C10 uses (debt #6).
     _emit("llm.request", data={
         "model": model or MODEL,
         "prompt": _prompt_meta,
+        "prompt_sha": _prompt_meta["sha256"],
         "system": _system_meta,
         "max_tokens": max_tokens,
     })
     _t0 = time.monotonic()
-    for _net_attempt in range(3):
-        try:
-            _response = _ask_raw(prompt, system, **kwargs)
-            _dur_ms = int((time.monotonic() - _t0) * 1000)
-            _emit("llm.response", duration_ms=_dur_ms,
-                  data={"prompt_sha": _prompt_meta["sha256"],
-                        "response": _store_prompt_content(_response or "")})
-            return _response
-        except Exception as _e:
-            _ename = type(_e).__name__
-            if _net_attempt < 2 and any(w in _ename for w in ("Timeout", "Connect", "Protocol", "Network")):
-                _guard("ask/network_retry", f"attempt={_net_attempt} err={_ename}: {_e}")
-                time.sleep(10)
-                continue
+    # Guarantee a terminal event for every request: if the loop exits without
+    # emitting an llm.response/llm.error (e.g. a BaseException or unexpected
+    # control-flow escape), the finally emits one. A request left "open" on its
+    # thread is exactly what C10 reports as a vanished response / stream
+    # collision — this makes that impossible (debt #6).
+    _terminal = False
+    try:
+        for _net_attempt in range(3):
+            try:
+                _response = _ask_raw(prompt, system, **kwargs)
+                _dur_ms = int((time.monotonic() - _t0) * 1000)
+                _emit("llm.response", duration_ms=_dur_ms,
+                      data={"prompt_sha": _prompt_meta["sha256"],
+                            "response": _store_prompt_content(_response or "")})
+                _terminal = True
+                return _response
+            except Exception as _e:
+                _ename = type(_e).__name__
+                if _net_attempt < 2 and any(w in _ename for w in ("Timeout", "Connect", "Protocol", "Network")):
+                    _guard("ask/network_retry", f"attempt={_net_attempt} err={_ename}: {_e}")
+                    time.sleep(10)
+                    continue
+                _emit("llm.error", duration_ms=int((time.monotonic() - _t0) * 1000),
+                      data={"prompt_sha": _prompt_meta["sha256"],
+                            "error_type": _ename, "error_msg": str(_e)[:500]})
+                _terminal = True
+                raise
+        raise RuntimeError("ask: retry loop exhausted")
+    finally:
+        if not _terminal:
             _emit("llm.error", duration_ms=int((time.monotonic() - _t0) * 1000),
-                  data={"error_type": _ename, "error_msg": str(_e)[:500]})
-            raise
-    raise RuntimeError("ask: retry loop exhausted")
+                  data={"prompt_sha": _prompt_meta["sha256"],
+                        "error_type": "Unpaired",
+                        "error_msg": "ask() exited without a terminal llm event"})
 
 
 # Maximum safe input chars, derived mathematically from the KV cache budget.
@@ -12730,9 +12751,7 @@ Generate the implementation for `{file_path}` (this call writes ONLY that file).
             # score = number of times the file's API-surface item names appear
             # in the test file (proxy for "this test exercises the current file").
             # Tie-break alphabetically for stability.
-            _symbol_names = re.findall(r'\b(?:fn|struct|enum|trait|type|const)\s+([A-Za-z_]\w*)',
-                                       _primary_api or "")
-            _symbol_set = set(_symbol_names)
+            _symbol_set = set(item_names(_primary_api or ""))
             def _relevance_score(item: tuple[str, str], *,
                                  _symbol_set=_symbol_set) -> tuple[int, str]:  # B023
                 _, content = item
@@ -12967,10 +12986,10 @@ def _merge_cluster_outputs(project_dir: Path,
         # for the post-merge log line.
         try:
             text_out = out_path.read_text(encoding="utf-8")
-            cfg_gated_fns += len(re.findall(
-                r"#\[cfg\([^)]*(error_generic_member_access|anyhow_no_core_error)",
+            cfg_gated_fns += count_cfg_attrs(
                 text_out,
-            ))
+                ("error_generic_member_access", "anyhow_no_core_error"),
+            )
         except Exception:
             pass
 
