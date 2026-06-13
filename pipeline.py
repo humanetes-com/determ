@@ -9162,8 +9162,7 @@ def _task2_fill_fns_one_by_one(
         try:
             _all_recs = _enumerate_fns_via_extractor(target_src_dir) or []
             _all_recs = [r for r in _all_recs
-                          if not re.search(r"\.gen_tests_\d+\.rs$",
-                                            r.get("file", ""))]
+                          if not _is_gen_tests_file(r.get("file", ""))]
             if cluster is not None:
                 _all_recs = [r for r in _all_recs
                               if _fn_belongs_to_cluster(

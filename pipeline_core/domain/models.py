@@ -452,8 +452,52 @@ class Stub:
         return (self.file, self.fn_name)
 
 
+@dataclass(frozen=True, slots=True)
+class ImplBlock:
+    """One impl/trait/free-fn container grouped for the per-impl fill path (R3.2),
+    mirroring the dict `_collect_impl_blocks` builds. `members`/`stub_members` are
+    `FnRecord`s (threading the typed record through the impl engine — kills the
+    raw-dict member access); `stub_members` is the subset with an unimplemented
+    body. `container` is the FULL impl header text (incl. where-clauses, "" for
+    free fns); `related_containers` are sibling blocks in the same file sharing
+    this block's trait name.
+
+    `from_dict` parses members tolerantly (FnRecord.from_dict per member), so it
+    accepts the legacy block dict unchanged; `to_dict` round-trips the exact wire
+    shape the existing consumers read."""
+    file: str = ""
+    container: str = ""
+    members: tuple[FnRecord, ...] = ()
+    stub_members: tuple[FnRecord, ...] = ()
+    related_containers: tuple[str, ...] = ()
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> ImplBlock:
+        return cls(
+            file=d.get("file", ""),
+            container=d.get("container", "") or "",
+            members=tuple(FnRecord.from_dict(m) for m in (d.get("members") or [])),
+            stub_members=tuple(FnRecord.from_dict(m) for m in (d.get("stub_members") or [])),
+            related_containers=_strs(d.get("related_containers")),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "file": self.file,
+            "container": self.container,
+            "members": [m.to_dict() for m in self.members],
+            "stub_members": [m.to_dict() for m in self.stub_members],
+            "related_containers": list(self.related_containers),
+        }
+
+    @property
+    def id(self) -> str:
+        """Stable hashable id (file::container) — the per-block lock / frontier key."""
+        return f"{self.file}::{self.container}"
+
+
 __all__ = [
     "FieldRecord", "MethodRecord", "TypeRecord",
     "FnRecord", "ModRecord", "ConstRecord", "DispatchFamily", "Diagnostic",
-    "BuildCluster", "ModuleAugmentState", "FillResult", "Stub",
+    "BuildCluster", "ModuleAugmentState", "FillResult", "Stub", "ImplBlock",
 ]

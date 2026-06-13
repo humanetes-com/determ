@@ -2611,6 +2611,39 @@ def test_stub_model() -> None:
     print("  OK  Stub model: tolerant from_dict / from_record / key (R3.2)")
 
 
+def test_impl_block_model() -> None:
+    """R3.2: ImplBlock mirrors the _collect_impl_blocks dict. from_dict parses
+    members/stub_members as FnRecords (typed threading); to_dict round-trips the
+    exact wire shape; id = file::container (the per-block lock key)."""
+    from pipeline_core.domain.models import FnRecord, ImplBlock
+
+    # Members are full FnRecord wire dicts (what _collect_impl_blocks groups).
+    fmt = FnRecord(file="src/error.rs", fn_name="fmt", container="impl Display for Error",
+                   sig_text="fn fmt(&self, f: &mut Formatter) -> Result",
+                   has_unimplemented_body=True).to_dict()
+    helper = FnRecord(file="src/error.rs", fn_name="helper",
+                      container="impl Display for Error").to_dict()
+    wire = {
+        "file": "src/error.rs",
+        "container": "impl Display for Error",
+        "members": [fmt, helper],
+        "stub_members": [fmt],
+        "related_containers": ["impl Debug for Error"],
+    }
+    blk = ImplBlock.from_dict(wire)
+    assert blk.file == "src/error.rs" and blk.container == "impl Display for Error"
+    assert isinstance(blk.members[0], FnRecord) and blk.members[0].fn_name == "fmt"
+    assert isinstance(blk.stub_members[0], FnRecord) and blk.stub_members[0].has_unimplemented_body
+    assert blk.related_containers == ("impl Debug for Error",)
+    assert blk.id == "src/error.rs::impl Display for Error"
+    assert blk.to_dict() == wire, "ImplBlock round-trip must equal the wire dict"
+
+    # tolerant: empty / missing member lists → all-default block, no crash.
+    blank = ImplBlock.from_dict({"file": "a.rs"})
+    assert blank.members == () and blank.stub_members == () and blank.related_containers == ()
+    print("  OK  ImplBlock model: typed members + round-trip + id (R3.2)")
+
+
 def test_slice5b_task2() -> None:
     """Slice 5b: extracted TASK 2 dispatcher + inner loop (no-build-check path) + fix loop
     (empty manifest) behave with fakes; generation engine stays injected from pipeline."""
