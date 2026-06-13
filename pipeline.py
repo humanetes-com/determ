@@ -32,8 +32,6 @@ _RT = TypeVar("_RT")
 
 import importlib
 
-from dotenv import load_dotenv
-
 import model_interact as _mi
 from model_interact import MODEL
 from model_interact import ask as _ask_raw
@@ -49,6 +47,12 @@ from pipeline_core.adapters.workspace import WorkspaceDeps
 from pipeline_core.adapters.workspace_scan import (
     _dependency_graph_factory,
     _workspace_scanner_factory,
+)
+from pipeline_core.application.generators import task1_synthesizer as _task1_synth
+from pipeline_core.application.generators.task1_synthesizer import (
+    LLMTask1Synthesizer,
+    StaticTask1Synthesizer,
+    Task1Synthesizer,
 )
 from pipeline_core.application.refine_loop import run_refine_loop as _run_refine_loop
 from pipeline_core.application.tasks.genesis_audit import (
@@ -239,7 +243,8 @@ def _hot_reload_mi() -> None:
     except Exception as e:
         _log(f"  [hot-reload] reload failed: {e}")
 
-load_dotenv(Path(__file__).parent / ".env")
+# .env is already loaded at model_interact import (above) — no second load needed
+# (Debt #1). load_dotenv does not override already-set vars anyway.
 
 # Composition root: resolve all env-driven knobs once into one typed object.
 # Everything downstream reads SETTINGS rather than os.environ for these values.
@@ -5988,7 +5993,6 @@ _SHUTDOWN_SENTINEL_PATH = Path("/tmp/pipeline_shutdown_on_finish")
 # operators who want to clamp behaviour explicitly.
 _PER_FN_FIX_HARD_CAP = SETTINGS.fix_caps.per_fn_fix_hard_cap
 _PER_FN_FIX_MAX_STALLS = SETTINGS.fix_caps.per_fn_fix_max_stalls
-_PER_FN_FIX_CAP = _PER_FN_FIX_HARD_CAP  # back-compat alias
 # P1: per-pass test-fix loop now governed by a failure-floor stall budget,
 # not a flat count. Iterate as long as the minimum failure count keeps
 # decreasing. Break when N consecutive iterations make no new minimum, or
@@ -7695,7 +7699,7 @@ def _phase_c_fill_impl_blocks(
 
         _, fix_attempt = _drive_fix_loop(
             _attempt_impl_fill,
-            hard_cap=_PER_FN_FIX_CAP,
+            hard_cap=_PER_FN_FIX_HARD_CAP,
             max_stalls=block_max_stalls,
             stop_context=f"per-impl fix for {block_id}",
             on_failure=_on_impl_failure,
@@ -8157,7 +8161,7 @@ def _fill_one_stub(idx: int, rec: Stub, *, ctx: _PerFnPassCtx) -> FillResult:
 
     success, fix_attempt = _drive_fix_loop(
         _attempt_fn_fill,
-        hard_cap=_PER_FN_FIX_CAP,
+        hard_cap=_PER_FN_FIX_HARD_CAP,
         max_stalls=_effective_stalls(
             _PER_FN_FIX_MAX_STALLS, _module_of(rel_file)),
         stop_context=f"per-fn fix for {fn_name}",
@@ -11812,773 +11816,24 @@ def _format_api_surface_section(api_surface: str) -> str:
     )
 
 
-class Task1Synthesizer(ABC):
-    """Analyze test files and produce functional_requirements.md (TASK 1)."""
-
-    @abstractmethod
-    def synthesize(
-        self,
-        project_dir: Path,
-        genesis_path: Path,
-        functional_req_path: Path,
-        test_files: list,
-        readme_text: str,
-        project_profile: str = "",
-        project_context: str = "",
-        coverage_strategy: str = "",
-        api_surface: str = "",
-    ) -> bool:
-        """Write functional_requirements.md (and genesis stub if absent). Returns True on success.
-
-        api_surface (when provided) is the pre-strip structural skeleton of the module —
-        public signatures, type definitions, function bodies elided. It is structural
-        ground truth: TASK 1 should derive BEHAVIOR from the tests, but not invent
-        signatures or types that conflict with this skeleton.
-        """
-
-
-class StaticTask1Synthesizer(Task1Synthesizer):
-    """
-    Current implementation: extract behavioral requirements in natural language,
-    then synthesize into functional_requirements.md.
-    Uses a single LLM call for small projects and a chunked+hierarchical approach
-    for large ones.
-    """
-
-    def synthesize(self, project_dir, genesis_path, functional_req_path, test_files,
-                   readme_text, project_profile="", project_context="", coverage_strategy="",
-                   api_surface=""):
-        existing_genesis = read(genesis_path)
-        total_chars = sum(len(c) for _, c in test_files)
-
-        if total_chars <= SINGLE_CALL_CHAR_LIMIT:
-            ok = with_retry(lambda: self._single(
-                genesis_path, functional_req_path, test_files, readme_text,
-                existing_genesis, project_profile,
-                project_context=project_context,
-                coverage_strategy=coverage_strategy,
-                api_surface=api_surface,
-            ))
-        else:
-            ok = self._chunked(
-                genesis_path, functional_req_path, test_files, readme_text,
-                existing_genesis, project_profile,
-                project_context=project_context,
-                coverage_strategy=coverage_strategy,
-                api_surface=api_surface,
-            )
-        return ok
-
-    def _single(self, genesis_path, functional_req_path, test_files, readme_text,
-                existing_genesis, project_profile="", project_context="",
-                coverage_strategy="", api_surface=""):
-        genesis_exists = bool(existing_genesis.strip())
-        _full_tests_section = format_test_files(test_files)
-        profile_section = (f"\n--- Project profile (language, build system, workspace layout) ---\n"
-                           f"{project_profile}\n") if project_profile.strip() else ""
-        context_section = (f"\n--- Project context (behavioral summary) ---\n"
-                           f"{project_context}\n") if project_context.strip() else ""
-
-        if not genesis_exists and not genesis_path.exists():
-            write(genesis_path, "# genesis.md\n\n(populated by TASK 4 after first iteration)\n")
-
-        # Budget the tests_section against the actual prompt overhead. The
-        # single-call path is taken when tests are expected to fit, but
-        # measure to be safe — overflow would otherwise hit the context
-        # guard's middle-trim, which can split a test file mid-content.
-        _probe = self._single_prompt(
-            "", readme_text, profile_section, existing_genesis,
-            coverage_strategy=coverage_strategy, api_surface=api_surface,
-            context_section=context_section,
-        )
-        _tests_budget = max(2_000, SINGLE_CALL_CHAR_LIMIT - len(_probe))
-        tests_section = smart_truncate(_full_tests_section, total_limit=_tests_budget,
-                                       head=_tests_budget // 3,
-                                       tail=2 * _tests_budget // 3)
-
-        prompt = self._single_prompt(
-            tests_section, readme_text, profile_section, existing_genesis,
-            coverage_strategy=coverage_strategy, api_surface=api_surface,
-            context_section=context_section,
-        )
-        response = ask(prompt, model=_TASK1_MODEL)
-        files = extract_files(response)
-        if "functional_requirements.md" in files:
-            _write_fr_preserving_notes(functional_req_path, files["functional_requirements.md"])
-            return True
-        # Fallback: model returned content without FILE markers.
-        stripped = response.strip()
-        if stripped and len(stripped) > 200:
-            _log("  WARNING: no FILE markers — using raw response as requirements.")
-            _write_fr_preserving_notes(functional_req_path, stripped)
-            return True
-        _log(f"  ERROR: {MODEL} did not return functional_requirements.md.")
-        _log(f"  Raw response snippet: {response[:500]}")
-        return False
-
-    def _single_prompt(self, tests_section: str, readme_text: str, profile_section: str,
-                       existing_genesis: str, coverage_strategy: str = "",
-                       api_surface: str = "", context_section: str = "") -> str:
-        """Return the prompt for single-call requirements extraction (overridable)."""
-        strategy_section = (
-            f"\n--- Coverage strategy (import patterns, type construction, test conventions) ---\n"
-            f"{trim_to_line(coverage_strategy, _STRATEGY_CAP, "\n... (strategy truncated)")}\n"
-        ) if coverage_strategy.strip() else ""
-        api_section = _format_api_surface_section(api_surface)
-        # genesis.md is always shown — when empty it carries a placeholder so the
-        # LLM understands it is the document that will accumulate retrospective
-        # findings across iterations and should be respected even before first fill.
-        if existing_genesis.strip():
-            genesis_section = (
-                f"\n--- genesis.md (methodology — read-only here; do not output or modify) ---\n"
-                f"{existing_genesis}\n"
-            )
-        else:
-            genesis_section = (
-                "\n--- genesis.md (methodology — empty for now; will be filled by retrospectives in later iterations) ---\n"
-                "(empty)\n"
-            )
-        return f"""You are working on a deterministic AI-driven software reconstruction experiment.
-{_TASK1_THINKING_DIRECTIVE}{FILE_FORMAT_INSTRUCTION}
-Your output MUST be the file `functional_requirements.md` wrapped in the FILE markers above.
-
-The goal: given a project's test files and README, produce functional requirements precise
-enough that any implementation satisfying them will make all tests pass.
-
-Use the methodology in genesis.md below to guide your analysis (it may be empty on the
-first iteration — that is expected; it accumulates retrospective findings across loops).
-Use the README, project profile, project context, and test files to understand the
-language, framework, and project structure.
-
-README.md:
-{readme_text[:_README_CAP]}
-{profile_section}{context_section}{strategy_section}{api_section}
-Test files:
-{tests_section}
-{genesis_section}
-Your task: produce functional_requirements.md. Requirements must be complete enough that
-any implementation satisfying them will pass all tests.
-
-For each public function, method, or trait implementation, capture ALL of the following
-(not just the signature):
-- What it returns: the format, structure, and content of the return value.
-- Behavioral invariants: what must always be true of the output?
-- Any concrete examples visible in test assertions (copy them verbatim if present).
-A requirement like `fn generate() -> String` is insufficient. A requirement like
-`fn generate() -> String — returns a shell completion script string; tests assert it
-contains flag names and descriptions in the expected format` is actionable.
-
-CRITICAL: Every requirement must trace directly to a test call or assertion in the files above.
-Do NOT add items based on general knowledge of the crate, language, or domain.
-If no test calls it, do not include it.
-
-Test helpers vs. production API:
-- Do NOT include `fn test_*` or `#[test]` functions — these are the tests, not the code under test.
-  Extract the APIs that the test functions CALL (the production symbols being exercised).
-- Do NOT include test fixtures, mock builders, or helper utilities defined in the test files.
-  Only extract the real production API the tests depend on.
-"""
-
-    def _synthesize_group(self, group_partials: list[str], group_idx: int, total_groups: int,
-                          readme_text: str, profile_section: str, genesis: str = "",
-                          coverage_strategy: str = "", api_surface: str = "") -> str | None:
-        """
-        Stage-1 hierarchical synthesis: merge a group of raw chunk partials into a
-        single condensed intermediate summary. Called once per group.
-        Returns the summary text, or None on failure.
-        """
-        genesis_section = (
-            f"\n--- genesis.md (methodology — apply when merging requirements) ---\n"
-            f"{genesis}\n"
-        ) if genesis.strip() else ""
-        api_section = _format_api_surface_section(api_surface)
-
-        # Fill-down: render the scaffold with sized sections empty so the
-        # overhead is exact (no hardcoded estimate).
-        _readme_cap_str = readme_text[:_README_CAP]
-        _merge_scaffold = f"""You are merging a group of partial functional requirements extracted from test files.
-
-This is group {group_idx} of {total_groups}. Each entry was extracted independently from a chunk
-of test files. Your task: produce a single, deduplicated, concise summary of all requirements
-in this group. Preserve all specific types, function signatures, error conditions, and invariants.
-Remove duplicate entries. Do not invent new requirements not present in the input.
-
-README.md (for language/framework context):
-{_readme_cap_str}
-
-Partial requirements to merge:
-
-
-Output a plain structured list of the merged requirements. No filler, no code, no headers.
-"""
-        _fixed_overhead = (
-            len(_merge_scaffold) + len(profile_section)
-            + len(genesis_section) + len(api_section)
-        )
-        _combined_cap = max(10_000, SINGLE_CALL_CHAR_LIMIT - _fixed_overhead)
-        _combined_raw = "\n\n".join(group_partials)
-        combined = smart_truncate(_combined_raw, total_limit=_combined_cap,
-                                  head=_combined_cap // 3, tail=2 * _combined_cap // 3)
-
-        prompt = f"""You are merging a group of partial functional requirements extracted from test files.
-
-This is group {group_idx} of {total_groups}. Each entry was extracted independently from a chunk
-of test files. Your task: produce a single, deduplicated, concise summary of all requirements
-in this group. Preserve all specific types, function signatures, error conditions, and invariants.
-Remove duplicate entries. Do not invent new requirements not present in the input.
-{profile_section}{genesis_section}{api_section}
-README.md (for language/framework context):
-{_readme_cap_str}
-
-Partial requirements to merge:
-{combined}
-
-Output a plain structured list of the merged requirements. No filler, no code, no headers.
-"""
-
-        def attempt():
-            result = ask(prompt, model=_TASK1_MODEL)
-            if not result or not result.strip():
-                return False
-            return result
-
-        raw = with_retry(attempt)
-        return str(raw) if raw is not False else None
-
-    def _chunked(self, genesis_path, functional_req_path, test_files, readme_text,
-                 existing_genesis, project_profile="", project_context="",
-                 coverage_strategy="", api_surface=""):
-        _fixed = (
-            min(len(readme_text), 2_000)
-            + min(len(project_profile), 2_000)
-            + min(len(project_context), 2_000)
-            + min(len(existing_genesis), 3_000)
-            + min(len(coverage_strategy), 4_000)
-            + 300   # type manifest header
-            + 600   # static instruction text
-        )
-        _chunk_content_budget = prompt_budget(" " * _fixed)
-        chunks = chunk_test_files_by_file(test_files, _chunk_content_budget)
-        total_chunks = len(chunks)
-        _log(f"  Extracting requirements file-by-file: {total_chunks} file(s) → one call each.")
-        _log("  Calibration in progress, progress estimations will be available soon...")
-
-        root = genesis_path.parent
-        partials_dir = root / ".task1_partials"
-        cache_dir = root / CHUNK_CACHE_DIR
-        partials_dir.mkdir(exist_ok=True)
-        cache_dir.mkdir(exist_ok=True)
-
-        partial_requirements = []
-        progress = ChunkProgress(total=total_chunks)
-        cache_hits = 0
-        # BL-018: running type manifest — accumulate extracted types across chunks
-        # so each chunk knows what has already been described and won't duplicate it.
-        accumulated_types: set[str] = set()
-
-        existing_genesis = read(genesis_path)
-        genesis_hash = hashlib.sha256(existing_genesis.encode()).hexdigest()[:8]
-
-        for i, chunk in enumerate(chunks, 1):
-            partial_file = partials_dir / f"chunk_{i:03d}_of_{total_chunks:03d}.txt"
-            tests_section = format_test_files(chunk)
-            # Include genesis hash so cache is invalidated when TASK 4 updates genesis.md.
-            h = _chunk_hash(tests_section + genesis_hash)
-
-            if partial_file.exists():
-                entry = partial_file.read_text()
-                # Still update the manifest from cached entries.
-                accumulated_types |= _extract_type_names_from_requirements(entry)
-                partial_requirements.append(entry)
-                progress.finish_chunk(i)
-                continue
-
-            cached = _load_cached_chunk(cache_dir, h)
-            if cached:
-                cache_hits += 1
-                accumulated_types |= _extract_type_names_from_requirements(cached)
-                partial_file.write_text(cached)
-                partial_requirements.append(cached)
-                _log(f"  Chunk {i}/{total_chunks}: cache hit (skipping model call).")
-                progress.finish_chunk(i)
-                continue
-
-            # BL-018: build type manifest header for this chunk.
-            type_manifest_header = ""
-            if accumulated_types:
-                type_list = ", ".join(sorted(accumulated_types)[:40])
-                type_manifest_header = (
-                    f"\nTypes already extracted in previous chunks (do NOT re-describe these — "
-                    f"only add NEW requirements not yet covered): {type_list}\n"
-                )
-
-            profile_header = (f"\nProject profile:\n{project_profile}\n") if project_profile.strip() else ""
-            context_header = (f"\nProject context (behavioral summary):\n{project_context}\n"
-                              ) if project_context.strip() else ""
-            prompt = self._chunk_prompt(i, total_chunks, readme_text, tests_section,
-                                       profile_header + context_header + type_manifest_header,
-                                       genesis=existing_genesis, coverage_strategy=coverage_strategy,
-                                       api_surface=api_surface)
-
-            def chunk_attempt(p=prompt):
-                result = ask(p)
-                if not result or not result.strip():
-                    return False
-                return result
-
-            progress.start_chunk()
-            partial = with_retry(chunk_attempt)
-            if partial is False:
-                _log(f"  ERROR: failed to extract requirements from chunk {i} after all retries.")
-                return False
-            progress.finish_chunk(i)
-
-            entry = f"=== Requirements from chunk {i}/{total_chunks} ===\n{partial}"
-            partial_file.write_text(entry)
-            _save_cached_chunk(cache_dir, h, entry)
-            # BL-018: update running type manifest from this chunk's output.
-            accumulated_types |= _extract_type_names_from_requirements(partial)
-            partial_requirements.append(entry)
-
-        progress.finish()
-
-        if cache_hits:
-            _log(f"  Cache: {cache_hits}/{total_chunks} chunks reused from previous iterations.")
-
-        genesis_exists = bool(existing_genesis.strip())
-        profile_section = (f"\n--- Project profile (language, build system, workspace layout) ---\n"
-                           f"{project_profile}\n") if project_profile.strip() else ""
-        context_section_chunked = (f"\n--- Project context (behavioral summary) ---\n"
-                                   f"{project_context}\n") if project_context.strip() else ""
-        # Concatenate profile + context so synthesizers downstream see both as one
-        # passed-through section (avoids changing every call signature).
-        profile_section = profile_section + context_section_chunked
-
-        groups = [partial_requirements[i:i + SYNTHESIS_GROUP_SIZE]
-                  for i in range(0, len(partial_requirements), SYNTHESIS_GROUP_SIZE)]
-        total_groups = len(groups)
-        intermediates: list[str] = []
-
-        if total_groups > 1:
-            _log(f"  Stage 1: merging {total_chunks} partials into {total_groups} intermediate groups...")
-            for g_idx, group in enumerate(groups, 1):
-                inter_file = partials_dir / f"intermediate_{g_idx:03d}_of_{total_groups:03d}.txt"
-
-                if inter_file.exists():
-                    _log(f"  Group {g_idx}/{total_groups}: already done, loading from disk.")
-                    intermediates.append(inter_file.read_text())
-                    continue
-
-                _log(f"  Merging group {g_idx}/{total_groups} ({len(group)} partials)...")
-                summary = self._synthesize_group(group, g_idx, total_groups, readme_text, profile_section,
-                                                genesis=existing_genesis, coverage_strategy=coverage_strategy,
-                                                api_surface=api_surface)
-                if summary is False or not summary:
-                    _log(f"  ERROR: group {g_idx} merge failed after all retries.")
-                    return False
-
-                inter_file.write_text(summary)
-                intermediates.append(summary)
-
-            all_for_synthesis = "\n\n".join(
-                f"=== Group {i+1}/{total_groups} ===\n{s}" for i, s in enumerate(intermediates)
-            )
-            _log(f"  Stage 1 complete. Intermediate total: {len(all_for_synthesis):,} chars.")
-        else:
-            all_for_synthesis = "\n\n".join(partial_requirements)
-
-        _log("  Stage 2: final synthesis into output documents...")
-
-        if not genesis_exists and not genesis_path.exists():
-            write(genesis_path, "# genesis.md\n\n(populated by TASK 4 after first iteration)\n")
-
-        synthesis_prompt = self._synthesis_prompt(
-            readme_text, profile_section, existing_genesis, all_for_synthesis,
-            coverage_strategy=coverage_strategy,
-            project_dir=genesis_path.parent,
-            api_surface=api_surface,
-        )
-
-        def synthesis_attempt():
-            response = ask(synthesis_prompt, model=_TASK1_MODEL)
-            files = extract_files(response)
-            if "functional_requirements.md" in files:
-                _write_fr_preserving_notes(functional_req_path, files["functional_requirements.md"])
-                return True
-            # Fallback: model returned content without FILE markers.
-            # Accept the raw response if it's non-empty and looks like requirements
-            # (not an error message). The model produces correct content — wrong format.
-            stripped = response.strip()
-            if stripped and len(stripped) > 200:
-                _log("  WARNING: no FILE markers in synthesis response — using raw response as requirements.")
-                _write_fr_preserving_notes(functional_req_path, stripped)
-                return True
-            _log("  ERROR: synthesis returned empty or unusable response.")
-            _log(f"  Raw response snippet: {response[:300]}")
-            return False
-
-        ok = with_retry(synthesis_attempt)
-        if ok:
-            for f in partials_dir.glob("*.txt"):
-                f.unlink()
-            with suppress(OSError):
-                partials_dir.rmdir()
-        return ok
-
-    def _synthesis_prompt(self, readme_text: str, profile_section: str,
-                          existing_genesis: str, all_for_synthesis: str,
-                          coverage_strategy: str = "",
-                          project_dir: Path | None = None,
-                          api_surface: str = "") -> str:
-        """Return the Stage-2 synthesis prompt (overridable by subclasses)."""
-        strategy_section = (
-            f"\n--- Coverage strategy (import patterns, type construction, test conventions) ---\n"
-            f"{trim_to_line(coverage_strategy, _STRATEGY_CAP, "\n... (strategy truncated)")}\n"
-        ) if coverage_strategy.strip() else ""
-        api_section = _format_api_surface_section(api_surface)
-
-        # BL-022: inject type difficulty signals so synthesis focuses on hard types.
-        type_signals_section = ""
-        if project_dir is not None:
-            type_signals_text = type_signals_read(project_dir)
-            if type_signals_text:
-                type_signals_section = (
-                    f"\n--- Type difficulty signals from test coverage (prioritize these) ---\n"
-                    f"{type_signals_text}\n"
-                )
-
-        _synthesis_cap = int(SINGLE_CALL_CHAR_LIMIT * 0.60)
-        _capped_synthesis = smart_truncate(all_for_synthesis, total_limit=_synthesis_cap,
-                                           head=_synthesis_cap // 3, tail=2 * _synthesis_cap // 3)
-
-        genesis_exists = bool(existing_genesis.strip())
-        if genesis_exists:
-            return f"""You are synthesizing requirements into a final requirements document.
-{FILE_FORMAT_INSTRUCTION}
-Your output MUST be the file `functional_requirements.md` wrapped in the FILE markers above.
-
-Use the methodology in genesis.md below to guide synthesis.
-Derive the language and framework from the README and requirements below.
-
-README.md:
-{readme_text[:_README_CAP]}
-{profile_section}{strategy_section}{api_section}{type_signals_section}
---- genesis.md (read-only -- do not output or modify it) ---
-{existing_genesis}
-
-Requirements (merged from all test chunks):
-{_capped_synthesis}
-
-Your task: produce functional_requirements.md -- the complete, deduplicated, final
-requirements for this specific project.
-
-CRITICAL: Only include items present in the chunk extractions above.
-Do NOT add requirements based on general knowledge of the project or language.
-"""
-        return f"""You are synthesizing requirements into a final requirements document.
-{FILE_FORMAT_INSTRUCTION}
-Your output MUST be the file `functional_requirements.md` wrapped in the FILE markers above.
-
-Derive the language and framework from the README and requirements below.
-
-README.md:
-{readme_text[:_README_CAP]}
-{profile_section}{strategy_section}{api_section}{type_signals_section}
-Requirements (merged from all test chunks):
-{_capped_synthesis}
-
-Your task: produce functional_requirements.md -- the complete, deduplicated, final
-requirements for this specific project.
-
-CRITICAL: Only include items present in the chunk extractions above.
-Do NOT add requirements based on general knowledge of the project or language.
-"""
-
-    def _chunk_prompt(self, chunk_idx: int, total_chunks: int, readme_text: str,
-                      tests_section: str, profile_header: str, genesis: str = "",
-                      coverage_strategy: str = "", api_surface: str = "") -> str:
-        """Return the per-chunk extraction prompt (overridable by subclasses)."""
-        genesis_section = (
-            f"\n--- genesis.md (methodology — apply when extracting requirements) ---\n"
-            f"{genesis}\n"
-        ) if genesis.strip() else ""
-        strategy_section = (
-            f"\n--- Coverage strategy (import patterns, type construction, test conventions) ---\n"
-            f"{trim_to_line(coverage_strategy, _STRATEGY_CAP, "\n... (strategy truncated)")}\n"
-        ) if coverage_strategy.strip() else ""
-        api_section = _format_api_surface_section(api_surface)
-        return f"""You are extracting functional requirements from a subset of test files for a software project.
-{_TASK1_THINKING_DIRECTIVE}This is chunk {chunk_idx} of {total_chunks} -- there are more test files not shown here.
-All chunks will be synthesized into one complete requirements document after all chunks are processed.
-Focus only on what you can directly observe in the tests below -- do not invent behavior.
-{profile_header}{genesis_section}{strategy_section}{api_section}
-README.md:
-{readme_text[:_README_CAP]}
-
-Test files (chunk {chunk_idx}/{total_chunks}):
-{tests_section}
-
-From these tests extract every behavior, interface, data structure, error condition, and invariant
-that a correct implementation must satisfy. Be exhaustive but grounded -- only extract what the
-tests explicitly verify. Output a plain structured list only -- no code, no filler, just requirements.
-Derive the language, types, and function signatures from what you read.
-"""
-
-
-class LLMTask1Synthesizer(StaticTask1Synthesizer):
-    """
-    Contract-first / TDD implementation.
-
-    All three extraction points are upgraded to emit API contracts rather than
-    behavioral descriptions:
-
-      _single_prompt()      — small project path (one LLM call): extracts contracts
-                              directly from the full test set.
-      _chunk_prompt()       — chunked path per-chunk: extracts contracts per chunk.
-      _synthesize_group()   — Stage-1 merge: deduplicates contracts, flags conflicts.
-      _synthesis_prompt()   — Stage-2 final synthesis: produces functional_requirements.md
-                              as a contract document (module paths, signatures, types,
-                              invariants) rather than behavioral prose.
-
-    The pipeline infrastructure (caching, chunking, retry, disk management)
-    is inherited from StaticTask1Synthesizer unchanged.
-    """
-
-    def _single_prompt(self, tests_section: str, readme_text: str, profile_section: str,
-                       existing_genesis: str, coverage_strategy: str = "",
-                       api_surface: str = "", context_section: str = "") -> str:
-        # genesis is always shown — empty placeholder on first iteration so the
-        # LLM knows this is the document accumulating retrospective findings.
-        if existing_genesis.strip():
-            genesis_section = (f"\n--- genesis.md (methodology — read-only here; do not output or modify) ---\n"
-                               f"{existing_genesis}\n")
-        else:
-            genesis_section = ("\n--- genesis.md (methodology — empty for now; will be filled by retrospectives in later iterations) ---\n"
-                               "(empty)\n")
-        strategy_section = (
-            f"\n--- Coverage strategy (import patterns, type construction, test conventions) ---\n"
-            f"{trim_to_line(coverage_strategy, _STRATEGY_CAP, "\n... (strategy truncated)")}\n"
-        ) if coverage_strategy.strip() else ""
-        api_section = _format_api_surface_section(api_surface)
-        return f"""You are performing contract extraction from test files as part of a
-contract-first TDD reconstruction experiment.
-{_TASK1_THINKING_DIRECTIVE}{FILE_FORMAT_INSTRUCTION}
-Your output MUST be the file `functional_requirements.md` wrapped in the FILE markers above.
-Do not output anything outside those markers.
-{profile_section}{context_section}{strategy_section}{api_section}
-README.md:
-{readme_text[:_README_CAP]}
-{genesis_section}
-Test files:
-{tests_section}
-
-Your task: produce functional_requirements.md as a precise API contract document.
-For every function, method, struct, enum, trait, or module that the tests call or assert:
-  - Exact module path or import (e.g. `crate_name::function_name`, `crate_name::TypeName`)
-  - Full function/method signature: name, argument names and types, return type
-  - Struct/enum/trait definition: fields with types, variants, trait methods with signatures
-  - Error types returned or matched
-  - Invariants explicitly asserted (e.g. field equals X, output matches Y)
-  - For functions returning strings: list every `assert!(output.contains("..."))` substring verbatim.
-    A signature like `fn generate() -> String` is INCOMPLETE without the expected output content.
-    Example of complete requirement:
-      `Bash::generate(cmd_name, cmd) -> String`
-      Output must contain: `cmd="<cmd_name>_<subcmd>"`, `opts="--flag -f"`, `cmds="sub1 sub2"`
-
-Rules:
-  - Only include what the tests literally call or assert — do not invent.
-  - Use exact names, types, and paths as written in the tests.
-  - Include concrete type parameters where generics appear in the tests.
-  - Group by module/crate. Use concise structured notation, not prose.
-  - Do NOT include `fn test_*` or `#[test]` functions — these are the tests themselves, not the code under test.
-    Extract the APIs that the test functions CALL (e.g. `Bash::generate(...)`, not `fn test_bash_generator()`).
-  - Do NOT include `make_mock_command` or other test helpers — extract the real production API being tested.
-  - For every `assert!(result.contains("..."))` or `assert_eq!(result, "...")` in the tests,
-    copy the expected string verbatim into the requirements as a behavioral constraint.
-"""
-
-    def _synthesis_prompt(self, readme_text: str, profile_section: str,
-                          existing_genesis: str, all_for_synthesis: str,
-                          coverage_strategy: str = "",
-                          project_dir: "Path | None" = None,
-                          api_surface: str = "") -> str:
-        genesis_exists = bool(existing_genesis.strip())
-        genesis_section = (f"\n--- genesis.md (read-only — do not output or modify it) ---\n"
-                           f"{existing_genesis}\n") if genesis_exists else ""
-        strategy_section = (
-            f"\n--- Coverage strategy (import patterns, type construction, test conventions) ---\n"
-            f"{trim_to_line(coverage_strategy, _STRATEGY_CAP, "\n... (strategy truncated)")}\n"
-        ) if coverage_strategy.strip() else ""
-        api_section = _format_api_surface_section(api_surface)
-        _readme_cap_str = readme_text[:_README_CAP]
-        _contract_synthesis_scaffold = f"""You are producing the final API contract document from contract extractions
-across all test chunks. This is the last step of a contract-first TDD reconstruction.
-{FILE_FORMAT_INSTRUCTION}
-Your output MUST be the file `functional_requirements.md` wrapped in the FILE markers above.
-Do not output anything outside those markers.
-
-README.md:
-{_readme_cap_str}
-
-Contract extractions (merged from all test chunks):
-
-
-Your task: produce functional_requirements.md as the complete, deduplicated API contract.
-For every function, method, struct, enum, trait, or module extracted above:
-  - Exact module path or import
-  - Full signature: name, argument names and types, return type
-  - Struct/enum/trait definitions with fields, variants, trait method signatures
-  - Error types
-  - Invariants explicitly asserted in the tests
-
-Rules:
-  - Deduplicate: same symbol + same signature = one entry.
-  - Conflicts (same name, different signature): keep all variants, annotate "(conflict)".
-  - Do not add, invent, or generalise beyond what is in the extractions above.
-  - Group by module/crate. Use concise structured notation, not prose.
-"""
-        _fixed_contract_overhead = (
-            len(_contract_synthesis_scaffold) + len(profile_section)
-            + len(strategy_section) + len(api_section) + len(existing_genesis)
-        )
-        _synthesis_cap = max(10_000, SINGLE_CALL_CHAR_LIMIT - _fixed_contract_overhead)
-        _capped_synthesis = smart_truncate(all_for_synthesis, total_limit=_synthesis_cap,
-                                           head=_synthesis_cap // 3, tail=2 * _synthesis_cap // 3)
-        return f"""You are producing the final API contract document from contract extractions
-across all test chunks. This is the last step of a contract-first TDD reconstruction.
-{FILE_FORMAT_INSTRUCTION}
-Your output MUST be the file `functional_requirements.md` wrapped in the FILE markers above.
-Do not output anything outside those markers.
-{profile_section}{strategy_section}{api_section}
-README.md:
-{readme_text[:_README_CAP]}
-{genesis_section}
-Contract extractions (merged from all test chunks):
-{_capped_synthesis}
-
-Your task: produce functional_requirements.md as the complete, deduplicated API contract.
-For every function, method, struct, enum, trait, or module extracted above:
-  - Exact module path or import
-  - Full signature: name, argument names and types, return type
-  - Struct/enum/trait definitions with fields, variants, trait method signatures
-  - Error types
-  - Invariants explicitly asserted in the tests
-
-Rules:
-  - Deduplicate: same symbol + same signature = one entry.
-  - Conflicts (same name, different signature): keep all variants, annotate "(conflict)".
-  - Do not add, invent, or generalise beyond what is in the extractions above.
-  - Group by module/crate. Use concise structured notation, not prose.
-"""
-
-    def _chunk_prompt(self, chunk_idx: int, total_chunks: int, readme_text: str,
-                      tests_section: str, profile_header: str, genesis: str = "",
-                      coverage_strategy: str = "", api_surface: str = "") -> str:
-        genesis_section = (
-            f"\n--- genesis.md (methodology — apply when extracting contracts) ---\n"
-            f"{genesis}\n"
-        ) if genesis.strip() else ""
-        strategy_section = (
-            f"\n--- Coverage strategy (import patterns, type construction, test conventions) ---\n"
-            f"{trim_to_line(coverage_strategy, _STRATEGY_CAP, "\n... (strategy truncated)")}\n"
-        ) if coverage_strategy.strip() else ""
-        api_section = _format_api_surface_section(api_surface)
-        return f"""You are performing contract extraction from test files as the first step of
-a contract-first TDD reconstruction experiment.
-{_TASK1_THINKING_DIRECTIVE}This is chunk {chunk_idx} of {total_chunks}. All chunks will be combined into a single
-implementation contract document.
-{profile_header}{genesis_section}{strategy_section}{api_section}
-README.md:
-{readme_text[:_README_CAP]}
-
-Test files (chunk {chunk_idx}/{total_chunks}):
-{tests_section}
-
-Your task: extract every concrete API element that these tests call or depend on.
-For each item, record:
-  - The exact module path or import (e.g. `argh::from_env`, `argh_derive::ArghParser`)
-  - The full function/method signature: name, all argument names and types, return type
-  - Any struct, enum, or trait definition used (fields, variants, trait methods)
-  - Any error type returned or matched
-  - Any invariant explicitly asserted (e.g. output equals X, field must be Y)
-
-Rules:
-  - Only extract what the tests literally call or assert — do not invent.
-  - Use the exact names, types, and paths as written in the tests.
-  - If a type is generic, include the concrete type parameter used in the test.
-  - Output a plain structured list only. No prose, no examples, no filler.
-"""
-
-    def _synthesize_group(self, group_partials: list[str], group_idx: int, total_groups: int,
-                          readme_text: str, profile_section: str, genesis: str = "",
-                          coverage_strategy: str = "", api_surface: str = "") -> str | None:
-        """
-        Merge a group of contract partials into a deduplicated intermediate contract list.
-        Overrides the behavioral merge prompt with a contract-aware one.
-        """
-        genesis_section = (
-            f"\n--- genesis.md (methodology — apply when merging contracts) ---\n"
-            f"{genesis}\n"
-        ) if genesis.strip() else ""
-        api_section = _format_api_surface_section(api_surface)
-
-        _readme_cap_str = readme_text[:_README_CAP]
-        _contract_merge_scaffold = f"""You are merging contract extractions from multiple test file chunks.
-
-This is group {group_idx} of {total_groups}. Each entry lists API contracts extracted
-from a subset of test files. Your task: produce a single deduplicated contract list.
-
-Rules:
-  - Preserve exact module paths, function signatures, types, and invariants.
-  - Merge duplicate entries (same symbol, same signature) into one.
-  - Do not add, invent, or generalise — only what is present in the input.
-  - If two entries conflict (same name, different signature), keep both and annotate with "(conflict)".
-
-README.md (for language/framework context):
-{_readme_cap_str}
-
-Contract partials to merge:
-
-
-Output a plain structured list of the merged contracts. No prose, no code blocks, no headers.
-"""
-        _fixed_overhead = (
-            len(_contract_merge_scaffold) + len(profile_section)
-            + len(genesis_section) + len(api_section)
-        )
-        _combined_cap = max(10_000, SINGLE_CALL_CHAR_LIMIT - _fixed_overhead)
-        _combined_raw = "\n\n".join(group_partials)
-        combined = smart_truncate(_combined_raw, total_limit=_combined_cap,
-                                  head=_combined_cap // 3, tail=2 * _combined_cap // 3)
-
-        prompt = f"""You are merging contract extractions from multiple test file chunks.
-
-This is group {group_idx} of {total_groups}. Each entry lists API contracts extracted
-from a subset of test files. Your task: produce a single deduplicated contract list.
-
-Rules:
-  - Preserve exact module paths, function signatures, types, and invariants.
-  - Merge duplicate entries (same symbol, same signature) into one.
-  - Do not add, invent, or generalise — only what is present in the input.
-  - If two entries conflict (same name, different signature), keep both and annotate with "(conflict)".
-{profile_section}{genesis_section}{api_section}
-README.md (for language/framework context):
-{readme_text[:_README_CAP]}
-
-Contract partials to merge:
-{combined}
-
-Output a plain structured list of the merged contracts. No prose, no code blocks, no headers.
-"""
-
-        def attempt():
-            result = ask(prompt, model=_TASK1_MODEL)
-            if not result or not result.strip():
-                return False
-            return result
-
-        raw = with_retry(attempt)
-        return str(raw) if raw is not False else None
+# --- TASK 1 synthesizer engine relocated to application/generators (P4). Classes
+# imported at the top; pipeline-bound collaborators + config are injected here via
+# configure() (all defined above this point). --------------------------------------
+_task1_synth.configure(
+    ask=ask, prompt_budget=prompt_budget, format_test_files=format_test_files,
+    chunk_test_files_by_file=chunk_test_files_by_file, _chunk_hash=_chunk_hash,
+    _load_cached_chunk=_load_cached_chunk, _save_cached_chunk=_save_cached_chunk,
+    ChunkProgress=ChunkProgress,
+    _extract_type_names_from_requirements=_extract_type_names_from_requirements,
+    _format_api_surface_section=_format_api_surface_section,
+    _write_fr_preserving_notes=_write_fr_preserving_notes,
+    type_signals_read=type_signals_read,
+    MODEL=MODEL, SINGLE_CALL_CHAR_LIMIT=SINGLE_CALL_CHAR_LIMIT,
+    SYNTHESIS_GROUP_SIZE=SYNTHESIS_GROUP_SIZE, _README_CAP=_README_CAP,
+    _STRATEGY_CAP=_STRATEGY_CAP, _TASK1_MODEL=_TASK1_MODEL,
+    _TASK1_THINKING_DIRECTIVE=_TASK1_THINKING_DIRECTIVE,
+    CHUNK_CACHE_DIR=CHUNK_CACHE_DIR, FILE_FORMAT_INSTRUCTION=FILE_FORMAT_INSTRUCTION,
+)
 
 
 def _filter_proc_macro_test_files(test_files, crate_name: str = ""):
@@ -13130,6 +12385,7 @@ Generate the file: `{file_path}` (this call writes ONLY that file).
         return True
 
 
+
 def _crate_entry_point(cargo_toml_path: Path, module_dir_rel: str,
                         file_path_set: set) -> str | None:
     """Return the crate entry point path (relative to project root) from Cargo.toml."""
@@ -13172,6 +12428,8 @@ def _split_api_surface_by_file(api_surface: str) -> list[tuple[str, str]]:
     for m in re.finditer(r'<FILE path="([^"]+)">(.*?)</FILE>', api_surface, re.DOTALL):
         result.append((m.group(1), m.group(0)))
     return result
+
+
 
 
 class StaticFileListTask2Generator(Task2Generator):
@@ -13720,6 +12978,7 @@ def _merge_cluster_outputs(project_dir: Path,
             pass
 
     return {"files_written": files_written, "cfg_gated_fns": cfg_gated_fns}
+
 
 
 class StaticSkeletonTask2Generator(Task2Generator):
@@ -17803,6 +17062,8 @@ def load_original_structure(project_dir: Path, module_name: str) -> list[str]:
     return []
 
 
+
+
 # slice 5b foundation: relocated to pipeline_core.domain.test_results (imported at top).
 
 
@@ -19001,7 +18262,7 @@ This is a Rust procedural macro crate. Strict rules apply:
                         for _c in _per_cluster_filled:
                             _cdir = _filled_root / _c.name
                             for _sf in sorted(_cdir.rglob("*.rs")):
-                                if re.search(r'\.gen_tests_\d+\.rs$', _sf.name):
+                                if _is_gen_tests_file(_sf.name):  # R7: structured parser, was regex
                                     continue
                                 _rel = str(_sf.relative_to(_cdir))
                                 if _rel in existing_test_files:

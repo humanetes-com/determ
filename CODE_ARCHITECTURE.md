@@ -32,6 +32,35 @@ code containing a regex migrates to the structured parser as part of the touch (
 rule); deps records that only re-inject what a module could import are a smell to remove, not
 relocate.
 
+### 0a. Execution inventory — microcrate-gated vs not (2026-06-13, pipeline.py=19471 LOC)
+
+The `pipeline.py` < ~800 LOC end state is reached ONLY after the engine phases run; most of
+the remaining ~18.7k lines move in P4/P5/R3.3. Boundary rule: a **verbatim relocation behind
+a re-export shim** is check.sh-executable now (imports/types/contract proven; runtime
+re-confirmed at the USER's next microcrate/anyhow run — the session-70 P4 scanner precedent).
+**Restructuring live control flow** (decompose/rewire the reconstruction loop) needs a run.
+
+| status | item | where (pipeline.py) | ~LOC out of pipeline.py | gate |
+|---|---|---|---|---|
+| ⬜ no-run | P4 — Task1Synthesizer family | 11815–12662 | ~848 | check.sh (verbatim move → `application/`) |
+| ⬜ no-run | P4 — Task2Generator family (5 classes) | 12663–~14000 | ~1340 | check.sh (verbatim move) |
+| ⬜ no-run | P4 — gen_tests reattach block (inline in `main()`) | ~18975–19130 | ~150 | check.sh (verbatim move) |
+| ⬜ no-run | P6-transports — `*Transport` → `adapters/llm_transports/` | (model_interact.py, NOT pipeline.py) | 0 here | check.sh; vLLM streaming re-validated next run |
+| ⬜ no-run | Debt #1 delete redundant `load_dotenv` | 217 | ~1 | static |
+| ⬜ no-run | Debt #2 stale `_UNIFIED_FILL_LOOP` docstring | tests/test_e2e_u2_gate.py | 0 | static |
+| ⬜ no-run | Debt #3 drop dead `_PER_FN_FIX_CAP` alias (if unused) | — | ~1 | static |
+| ⬜ no-run | P0 tighten mypy-strict flags / extend ratchets | pyproject.toml | 0 | static |
+| ⬜ no-run | coverage — tests for under-covered pipeline_core | tests/ | 0 | static |
+| ⬜ no-run | R6.5 (partial) drop `_` on already-public entries | — | 0 | static (LOW value, churn — better with P5) |
+| 🔒 RUN | R3.3 — split `_task2_fill_fns_one_by_one` (708 LOC) into reconstruct/ units | function body | ~700 | microcrate (control-flow decompose) |
+| 🔒 RUN | P5 — `main()` → orchestrator state machine | main() loop | ~1400 | microcrate + anyhow L4 |
+| 🔒 RUN | R7.4 / R13.1-2 / P1-f6 telemetry diff / C10 (debt #6) | various | — | live run |
+
+Reality on the 800 goal: doing ALL no-run items takes pipeline.py ~19.5k→~17k (P4 ≈2.3k is the
+only no-run reducer; P6-transports shrinks model_interact.py not pipeline.py). The remaining
+~16k requires P5 + R3.3, which are run-gated. So the autopilot can prep+land P4 and the static
+items green-on-check.sh, but cannot reach the headline LOC target without microcrate/anyhow runs.
+
 ---
 
 - **Python** — `pipeline.py` orchestration (the LLM-driven reconstruction loop).

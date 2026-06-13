@@ -107,3 +107,4 @@ disallow_subclassing_any = true
 no_implicit_optional = true
 warn_unused_ignores = true
 strict_equality = true
+extra_checks = true

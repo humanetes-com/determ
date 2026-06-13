@@ -2,16 +2,12 @@
 but fails its attributed tests, and the fill loop must retry until the correct
 body is found.
 
-The gate is already built (Plan 10 U2, _u2_test_gate) but disabled by default
-via _UNIFIED_FILL_LOOP = os.getenv("UNIFIED_FILL_LOOP", "0").  The fix is
-changing the default to "1".
+The gate (Plan 10 U2, _u2_test_gate) is enabled by default —
+_UNIFIED_FILL_LOOP = os.getenv("UNIFIED_FILL_LOOP", "1") == "1".
 
 Observable: without the gate, the wrong-but-compiling body (a - b) is accepted
-on compile check alone and stays in the file.  With the gate, it is rejected,
-the loop retries, and the correct body (a + b) is written.
-
-Test FAILS before the fix (gate off → wrong fill accepted).
-Test PASSES after the fix (gate on → wrong fill rejected, correct fill accepted).
+on compile check alone and stays in the file.  With the gate (the default), it
+is rejected, the loop retries, and the correct body (a + b) is written.
 """
 from __future__ import annotations
 
@@ -65,10 +61,8 @@ def test_wrong_compiling_fill_rejected_by_u2_gate(monkeypatch, tmp_path):
     """A fill that compiles but fails the fn's attributed test must be rejected
     and retried until the correct implementation is found.
 
-    Currently FAILS: _UNIFIED_FILL_LOOP defaults to False → gate returns None
-    → wrong fill (a - b) accepted on compile check alone.
-    After fix (_UNIFIED_FILL_LOOP default → True): gate runs → (101, FAILED)
-    for wrong body → fill rejected → retry → correct body (a + b) accepted.
+    With _UNIFIED_FILL_LOOP enabled (default): gate runs → (101, FAILED) for the
+    wrong body (a - b) → fill rejected → retry → correct body (a + b) accepted.
     """
     ws, lib = _setup(monkeypatch, tmp_path)
 
@@ -94,16 +88,13 @@ def test_wrong_compiling_fill_rejected_by_u2_gate(monkeypatch, tmp_path):
 
     monkeypatch.setattr(pipeline, "_run_cargo", _cargo_run)
 
-    # NOTE: _UNIFIED_FILL_LOOP is NOT patched here — we use the default (False).
-    # The test currently fails because the gate is skipped.
-    # The fix is to change the default in pipeline.py to "1".
+    # _UNIFIED_FILL_LOOP is NOT patched here — we rely on the default (enabled).
 
     _run(ws)
 
     text = lib.read_text(encoding="utf-8")
     assert "a + b" in text, (
-        "U2 gate should have rejected the wrong fill (a - b) and retried; "
-        "gate is currently disabled (_UNIFIED_FILL_LOOP=0 default)."
+        "U2 gate should have rejected the wrong fill (a - b) and retried."
     )
     assert "a - b" not in text
     assert "unimplemented!" not in text
