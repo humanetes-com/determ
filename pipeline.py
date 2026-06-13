@@ -18136,59 +18136,6 @@ def task0c_augment_module(
 
 
 # ---------------------------------------------------------------------------
-# Coverage sentinel helpers
-# ---------------------------------------------------------------------------
-
-def _sentinel_module_coverage(sentinel_path: Path) -> dict[str, float]:
-    """
-    Parse per-module coverage from .coverage_augmented.
-    Returns {module_name: pct} for all non-'overall' lines.
-    """
-    result: dict[str, float] = {}
-    if not sentinel_path.exists():
-        return result
-    try:
-        text = sentinel_path.read_text()
-    except Exception:
-        return result
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("overall:"):
-            continue
-        m = re.match(r"^([\w\-]+):\s*([\d.]+)%", line)
-        if m:
-            result[m.group(1)] = float(m.group(2))
-    return result
-
-
-def _sentinel_coverage(sentinel_path: Path) -> float:
-    """
-    Read the overall coverage percentage from .coverage_augmented.
-    Returns the overall value if present, else the average of per-module lines.
-    Returns 0.0 if the file is missing or unparseable.
-    """
-    if not sentinel_path.exists():
-        return 0.0
-    try:
-        text = sentinel_path.read_text()
-    except Exception:
-        return 0.0
-    for line in text.splitlines():
-        line = line.strip()
-        if line.startswith("overall:"):
-            m = re.search(r"([\d.]+)%", line)
-            if m:
-                return float(m.group(1))
-    # Legacy format without overall line: average the per-module values.
-    values = []
-    for line in text.splitlines():
-        m = re.search(r"([\d.]+)%", line)
-        if m:
-            values.append(float(m.group(1)))
-    return sum(values) / len(values) if values else 0.0
-
-
-# ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
 

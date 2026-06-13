@@ -10,9 +10,10 @@ Target *code* structure for the two codebases (the existing `ARCHITECTURE.md` co
 End state: `pipeline.py` < ~800 lines (argparse + composition root only); everything else in
 `pipeline_core/` per the §1 layers; idiomatic Python (no `_`-prefixed public API, typed seams,
 one fix-loop driver); Rust already library-grade (R5/R12). Earlier slices/R-groups remain as
-the detailed reference; this table is the execution order. Standing gates: one slice = one
-commit; check.sh green per step; engine phases only at run boundaries, validated by the L3
-microcrate strict smoke (+ one anyhow L4 diff per engine phase).
+the detailed reference; this table is the execution order. Standing gates: check.sh green
+per step; engine phases only at run boundaries, validated by the L3 microcrate strict smoke
+(+ one anyhow L4 diff per engine phase). Commit granularity is the user's call — independent
+slices MAY be batched into one commit (the "one slice = one commit" gate is retired).
 
 | Phase | What | Source plan | Eff | Status |
 |---|---|---|---|---|
@@ -431,7 +432,7 @@ slice needs a dedicated live-run validation window; ceremony-free per §2):
 14. Rust tail kept from slice 7: thiserror at the lib edge, `Cfg` newtype.
 
 Standing rules for every slice: strangler-fig (move verbatim, shim, behaviour identical);
-check.sh green per step; one slice = one commit; never land slices 10/12 while a pipeline
+check.sh green per step; never land slices 10/12 while a pipeline
 run is mid-flight (restart boundary = deploy boundary); no new regex in moved code —
 factor regex behind injected predicates as in Group E.
 
