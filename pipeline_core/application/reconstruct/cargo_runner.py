@@ -12,12 +12,19 @@ caller both a rendered-text view (prompts / logs) and structured diagnostics
 from __future__ import annotations
 
 import shlex
+from collections.abc import Callable
 from pathlib import Path
 
 from pipeline_core.application.reconstruct.cargo_errors import diagnostics_from_json
 from pipeline_core.domain.models import Diagnostic
 from pipeline_core.domain.test_results import parse_failed_tests
 from pipeline_core.ports import Cargo
+
+# A "run one cargo command → (rc, combined_output)" operation. The production
+# binding is `pipeline._run_cargo` (itself port-composed, slice 8); injecting it
+# as a callable — rather than calling `run_cargo` directly — keeps the e2e/smoke
+# harness's `monkeypatch pipeline._run_cargo` seam intact.
+RunCargo = Callable[..., "tuple[int, str]"]
 
 _MSG_FMT = "--message-format=json-diagnostic-rendered-ansi"
 _KNOWN_SUBS = {"check", "test", "build", "run", "doc", "clippy"}
@@ -46,7 +53,7 @@ def run_cargo(
 
 
 def run_scoped_tests(
-    cargo: Cargo,
+    run_cargo_fn: RunCargo,
     test_cmd: str,
     cwd: Path,
     env: dict[str, str],
@@ -55,7 +62,7 @@ def run_scoped_tests(
     err_cap: int,
 ) -> tuple[bool, int, str, set[str]]:
     """Plan 10 U1 — the reusable test-validation step (runtime analog of a
-    compile check). Runs `test_cmd` via the port and returns
+    compile check). Runs `test_cmd` via the injected `run_cargo_fn` and returns
     (passed, fail_count, detail, failed_names).
 
     `passed` is True only when cargo reports rc==0 with zero failing tests.
@@ -63,7 +70,7 @@ def run_scoped_tests(
     prompt. On timeout the caller gets (False, -1, …, set()) and should treat it
     as INCONCLUSIVE — fall back to compile-based acceptance rather than block.
     """
-    rc, out = run_cargo(cargo, test_cmd, cwd, env, timeout=timeout)
+    rc, out = run_cargo_fn(test_cmd, cwd, env, timeout=timeout)
     if rc == -1:
         return False, -1, "scoped test run timed out", set()
     failed = parse_failed_tests(out)

@@ -49,6 +49,42 @@ class TaskModels:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class FixLoopCaps:
+    """Fix/test loop caps + stall budgets, single-sourced from env. The matching
+    pipeline.py module globals mirror these (so the e2e/smoke harness can still
+    monkeypatch the patchable seam, e.g. ``pipeline._PASS_THROUGH``); this is the
+    env-reading source of truth, not the patch point."""
+
+    fix_err_cap: int            # per-attempt error excerpt cap in the fix loop
+    unified_fill_loop: bool     # U2 post-fill test gate enabled
+    u2_test_timeout: int        # U2 gate scoped-test timeout (s)
+    per_fn_fix_hard_cap: int    # runaway backstop for per-fn fix attempts
+    per_fn_fix_max_stalls: int  # consecutive no-progress attempts before give-up
+    per_pass_test_fix_hard_cap: int
+    per_pass_test_fix_max_stalls: int
+    pass_through: bool          # smoke mode: collapse every stall budget
+    pass_through_stalls: int    # collapsed budget under pass-through
+    converge_module: str        # one module exempt from pass-through collapse
+
+    @classmethod
+    def from_env(cls, single_call_char_limit: int) -> FixLoopCaps:
+        return cls(
+            fix_err_cap=max(2_000, single_call_char_limit // 10),
+            unified_fill_loop=os.getenv("UNIFIED_FILL_LOOP", "1").strip() == "1",
+            u2_test_timeout=int(os.getenv("U2_TEST_TIMEOUT", "120")),
+            per_fn_fix_hard_cap=int(os.getenv(
+                "PHASE_C_FN_HARD_CAP", os.getenv("PHASE_C_FIX_CAP_PER_FN", "10000"))),
+            per_fn_fix_max_stalls=int(os.getenv("PHASE_C_FN_MAX_STALLS", "3")),
+            per_pass_test_fix_hard_cap=int(os.getenv(
+                "PHASE_C_TEST_FIX_HARD_CAP", os.getenv("PHASE_C_FIX_CAP_PER_PASS", "10000"))),
+            per_pass_test_fix_max_stalls=int(os.getenv("PHASE_C_TEST_FIX_MAX_STALLS", "3")),
+            pass_through=os.getenv("PIPELINE_PASS_THROUGH", "0") == "1",
+            pass_through_stalls=int(os.getenv("PIPELINE_PASS_THROUGH_STALLS", "1")),
+            converge_module=os.getenv("PIPELINE_CONVERGE_MODULE", "").strip(),
+        )
+
+
 def _resolve_ctx_thinking(backend: Backend) -> tuple[int, int]:
     """Backend context length + thinking-budget tokens, with the legacy defaults."""
     if backend is Backend.VLLM:
@@ -78,6 +114,7 @@ class Settings:
     single_call_char_limit: int
     intermediate_char_limit: int
     task_models: TaskModels
+    fix_caps: FixLoopCaps
 
     @classmethod
     def from_env(cls, model: str = "") -> Settings:
@@ -90,6 +127,7 @@ class Settings:
         ctx, thinking = _resolve_ctx_thinking(backend)
         safe = safe_input_char_limit(ctx, thinking, _MIN_CONTENT_TOKENS_GENERAL)
         safe_t0c = safe_input_char_limit(ctx, thinking, _MIN_CONTENT_TOKENS_TASK0C)
+        single_call = min(safe, mcc * 3 // 4)
 
         return cls(
             backend=backend,
@@ -106,7 +144,8 @@ class Settings:
             model_context_chars=mcc,
             safe_input_char_limit=safe,
             safe_input_char_limit_task0c=safe_t0c,
-            single_call_char_limit=min(safe, mcc * 3 // 4),
+            single_call_char_limit=single_call,
             intermediate_char_limit=mcc // 2,
             task_models=TaskModels.from_env(model),
+            fix_caps=FixLoopCaps.from_env(single_call),
         )

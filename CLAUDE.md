@@ -1,10 +1,10 @@
 See autopilot.md for autopilot behavior rules.
 
-Past session handovers: see HANDOVERS.md (repo root).
+Past session handovers: latest in `handover.md`, archive in `previous_handovers.md` (both repo root).
 
-Handover convention (do NOT re-inspect the file to recall this):
-- File: `HANDOVERS.md` at repo root. One file, newest session PREPENDED at the top, older sessions below, separated by a `---` line.
-- New entry: Read the current first line (the latest `# Handover — session N — …`), then Edit-prepend a new `# Handover — session N+1 — <headline>` block above it (bump N).
+Handover convention (do NOT re-inspect the files to recall this):
+- Two files at repo root. `handover.md` = ONLY the latest session (load this each session — keeps tokens low). `previous_handovers.md` = archive, older sessions appended to the END, separated by `---` lines (do NOT load unless you need history).
+- New entry: read `handover.md` (the current latest, `# Handover — session N — …`), APPEND its full content to the end of `previous_handovers.md` (with a `---` separator), then OVERWRITE `handover.md` with the new `# Handover — session N+1 — <headline>` block (bump N).
 - Required sections, in this order: `## State at handover` (branch, HEAD short-sha, working-tree clean/dirty, on-disk md5 of pipeline.py + model_interact.py, who-commits), `## What shipped this session` (commits + one-line each), `## ON RETURN — how to evaluate` (concrete: which logs/grep patterns, GOOD vs BAD per change), then any plan/decision sections, then `## Key facts`.
 - Style: compact structured (tables/symbolic), per the LLM-output rules below. It is a reference doc for future-me, so completeness > brevity here (the 2-line chat rule does NOT apply to file content).
 - Write it when the user asks to hand over, or at the end of a substantial unit of work.

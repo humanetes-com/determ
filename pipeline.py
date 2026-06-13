@@ -726,7 +726,7 @@ SINGLE_CALL_CHAR_LIMIT        = SETTINGS.single_call_char_limit
 _README_CAP    = max(3_000, SINGLE_CALL_CHAR_LIMIT // 20)   # ~5% of budget
 _PROFILE_CAP   = max(2_000, SINGLE_CALL_CHAR_LIMIT // 30)   # ~3% of budget
 _GENESIS_CAP   = max(3_000, SINGLE_CALL_CHAR_LIMIT // 20)   # methodology doc
-_FIX_ERR_CAP   = max(2_000, SINGLE_CALL_CHAR_LIMIT // 10)   # per-attempt error in fix loop
+_FIX_ERR_CAP   = SETTINGS.fix_caps.fix_err_cap             # per-attempt error in fix loop
 _REPO_SPEC_CAP = max(2_500, SINGLE_CALL_CHAR_LIMIT // 10)   # REPOSITORY_SPECIFICATIONS in per-fn/per-impl prompts
 _REPO_SPEC_CAP_WIDE = max(5_000, SINGLE_CALL_CHAR_LIMIT // 5)  # …in whole-file fix prompts (bigger budget)
 _STRATEGY_CAP  = max(4_000, SINGLE_CALL_CHAR_LIMIT // 15)   # coverage strategy doc
@@ -749,8 +749,8 @@ _FAILED_BODY_CAP   = max(2_000, SINGLE_CALL_CHAR_LIMIT // 12)  # prior failed bo
 # same fix loop as compile errors. Default OFF — identical to legacy behavior —
 # so it can be validated live before enabling. Fail-safe: any error in the test
 # check falls back to compile-based acceptance.
-_UNIFIED_FILL_LOOP = os.getenv("UNIFIED_FILL_LOOP", "1").strip() == "1"
-_U2_TEST_TIMEOUT   = int(os.getenv("U2_TEST_TIMEOUT", "120"))
+_UNIFIED_FILL_LOOP = SETTINGS.fix_caps.unified_fill_loop
+_U2_TEST_TIMEOUT   = SETTINGS.fix_caps.u2_test_timeout
 
 
 def prompt_budget(*fixed_parts: str) -> int:
@@ -6738,24 +6738,17 @@ _SHUTDOWN_SENTINEL_PATH = Path("/tmp/pipeline_shutdown_on_finish")
 # `PHASE_C_FN_MAX_STALLS` is the real terminator. Legacy env vars
 # `PHASE_C_FN_HARD_CAP` and `PHASE_C_FIX_CAP_PER_FN` still work for
 # operators who want to clamp behaviour explicitly.
-_PER_FN_FIX_HARD_CAP = int(os.getenv(
-    "PHASE_C_FN_HARD_CAP",
-    os.getenv("PHASE_C_FIX_CAP_PER_FN", "10000"),
-))
-_PER_FN_FIX_MAX_STALLS = int(os.getenv("PHASE_C_FN_MAX_STALLS", "3"))
+_PER_FN_FIX_HARD_CAP = SETTINGS.fix_caps.per_fn_fix_hard_cap
+_PER_FN_FIX_MAX_STALLS = SETTINGS.fix_caps.per_fn_fix_max_stalls
 _PER_FN_FIX_CAP = _PER_FN_FIX_HARD_CAP  # back-compat alias
 # P1: per-pass test-fix loop now governed by a failure-floor stall budget,
 # not a flat count. Iterate as long as the minimum failure count keeps
 # decreasing. Break when N consecutive iterations make no new minimum, or
 # when the absolute hard cap fires (runaway safety). `PHASE_C_FIX_CAP_PER_PASS`
 # is the legacy alias for the hard cap; kept for backward compatibility.
-_PER_PASS_TEST_FIX_MAX_STALLS = int(os.getenv("PHASE_C_TEST_FIX_MAX_STALLS", "3"))
-# Hard cap raised to a backstop value (10k) — floor-stall is the real exit.
-# Operators can clamp explicitly via env if needed.
-_PER_PASS_TEST_FIX_HARD_CAP = int(os.getenv(
-    "PHASE_C_TEST_FIX_HARD_CAP",
-    os.getenv("PHASE_C_FIX_CAP_PER_PASS", "10000"),
-))
+_PER_PASS_TEST_FIX_MAX_STALLS = SETTINGS.fix_caps.per_pass_test_fix_max_stalls
+# Hard cap is a backstop value (10k) — floor-stall is the real exit.
+_PER_PASS_TEST_FIX_HARD_CAP = SETTINGS.fix_caps.per_pass_test_fix_hard_cap
 
 # Pass-through / focus-convergence smoke mode. With PIPELINE_PASS_THROUGH=1 every
 # phase-c stall budget collapses to PIPELINE_PASS_THROUGH_STALLS (default 1): each
@@ -6763,9 +6756,9 @@ _PER_PASS_TEST_FIX_HARD_CAP = int(os.getenv(
 # giving an end-to-end run for controller/routing telemetry without grinding to
 # convergence. PIPELINE_CONVERGE_MODULE names ONE module exempt from the collapse —
 # it keeps full budgets and converges for real (the deterministic R3/R9 baseline).
-_PASS_THROUGH = os.getenv("PIPELINE_PASS_THROUGH", "0") == "1"
-_PASS_THROUGH_STALLS = int(os.getenv("PIPELINE_PASS_THROUGH_STALLS", "1"))
-_CONVERGE_MODULE = os.getenv("PIPELINE_CONVERGE_MODULE", "").strip()
+_PASS_THROUGH = SETTINGS.fix_caps.pass_through
+_PASS_THROUGH_STALLS = SETTINGS.fix_caps.pass_through_stalls
+_CONVERGE_MODULE = SETTINGS.fix_caps.converge_module
 
 
 def _effective_stalls(full_budget: int, module: str | None) -> int:
@@ -7394,9 +7387,10 @@ def _attribute_failures(
 def _run_scoped_tests(
     test_cmd: str, cwd: Path, env: dict, *, timeout: int = 120,
 ) -> "tuple[bool, int, str, set[str]]":
-    # Port-composed runner (P2 slice 9): see cargo_runner.run_scoped_tests.
+    # P2 slice 9: pass `_run_cargo` (the patchable seam) so the e2e/smoke
+    # harness's `monkeypatch pipeline._run_cargo` still intercepts test runs.
     return _reconstruct_cargo_runner.run_scoped_tests(
-        ADAPTERS.cargo, test_cmd, cwd, env, timeout=timeout, err_cap=_FIX_ERR_CAP)
+        _run_cargo, test_cmd, cwd, env, timeout=timeout, err_cap=_FIX_ERR_CAP)
 
 
 def _u2_test_gate(
