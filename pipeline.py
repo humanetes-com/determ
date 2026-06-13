@@ -127,6 +127,7 @@ from pipeline_core.domain.models import (
     Frontier,
     ModRecord,
     ModuleAugmentState,
+    Stub,
     TypeRecord,
 )
 from pipeline_core.domain.refine import (
@@ -8441,16 +8442,16 @@ from pipeline_core.application.reconstruct import (  # noqa: E402
 )
 
 
-def _fill_one_stub(idx: int, rec: dict, *, ctx: _PerFnPassCtx) -> FillResult:
+def _fill_one_stub(idx: int, rec: Stub, *, ctx: _PerFnPassCtx) -> FillResult:
     """Fill ONE stub fn via the per-fn fix loop — the engine unit behind
     phase-c's per-fn path, extracted from its closure (P2/R3.3 first move).
-    Pure-by-shape: reads `rec` + `ctx`, mutates only the target tree (under
-    ctx.splice_check_lock) and the shared retros cache, and reports the
+    Pure-by-shape: reads `rec` (a `Stub`) + `ctx`, mutates only the target tree
+    (under ctx.splice_check_lock) and the shared retros cache, and reports the
     outcome as a `FillResult` for the dispatcher to aggregate."""
-    rel_file = rec["file"]
-    fn_name = rec["fn_name"]
-    container = rec.get("container", "")
-    sig_text = rec.get("sig_text", "")
+    rel_file = rec.file
+    fn_name = rec.fn_name
+    container = rec.container
+    sig_text = rec.sig_text
     attempts = 0   # LLM attempts this fn consumed — returned in FillResult
     if _is_fn_fully_exhausted(ctx.retros_cache, rel_file, fn_name, container):
         _log(f"  [phase-c/per-fn] {idx}/{ctx.total} skipped "
@@ -9118,9 +9119,9 @@ def _task2_fill_fns_one_by_one(
         # Falls back to name-only tuples when the extractor isn't available.
         recs = _scan_unimplemented_records_for_cluster(target_src_dir, cluster)
         if recs is not None:
-            stubs = recs
+            stubs = [Stub.from_dict(r) for r in recs]
         else:
-            stubs = [{"file": f, "fn_name": fn, "container": "", "sig_text": ""}
+            stubs = [Stub(file=f, fn_name=fn)
                      for f, fn in _scan_unimplemented_for_cluster(target_src_dir, cluster)]
         # True remaining stub count BEFORE the frontier filter — used by
         # the progress log so "already filled" reflects actual disk state,
@@ -9130,20 +9131,19 @@ def _task2_fill_fns_one_by_one(
         # Plan 4 — when TDD driver supplies a frontier, restrict this pass
         # to fns it nominated. Avoids walking fns no test reaches.
         if tdd_frontier_keys is not None:
-            stubs = [s for s in stubs
-                     if (s["file"], s["fn_name"]) in tdd_frontier_keys]
+            stubs = [s for s in stubs if s.key in tdd_frontier_keys]
         if not stubs:
             break
         # D: leaf-first order — most-referenced fns first.
-        _tuples = [(r["file"], r["fn_name"]) for r in stubs]
+        _tuples = [r.key for r in stubs]
         _ordered_tuples = _leaf_first_fn_order(_tuples, leaf_name_counts)
         # Reorder records to match the leaf-first tuple order. When the same
         # (file, fn_name) appears multiple times (same-named fns), preserve
         # their relative order.
         _seen: dict[tuple[str, str], int] = {}
-        _reordered: list[dict] = []
+        _reordered: list[Stub] = []
         for tup in _ordered_tuples:
-            matches = [r for r in stubs if (r["file"], r["fn_name"]) == tup]
+            matches = [r for r in stubs if r.key == tup]
             taken = _seen.get(tup, 0)
             if taken < len(matches):
                 _reordered.append(matches[taken])
@@ -9256,9 +9256,9 @@ def _task2_fill_fns_one_by_one(
                     # Isolate worker failures so a single bad fn doesn't
                     # kill the worker thread (others keep draining the queue).
                     _log(f"  [phase-c/per-fn] worker error on "
-                         f"{rec.get('file')}::{rec.get('fn_name')}: {_e}")
+                         f"{rec.file}::{rec.fn_name}: {_e}")
                     with _counters_lock:
-                        errors.append(f"{rec.get('file')}::{rec.get('fn_name')}: "
+                        errors.append(f"{rec.file}::{rec.fn_name}: "
                                       f"worker exception: {_e}")
                     continue
                 with _counters_lock:

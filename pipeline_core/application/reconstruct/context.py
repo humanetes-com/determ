@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from pipeline_core.domain.models import FillResult, Frontier
+from pipeline_core.domain.models import FillResult, Frontier, Stub
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,7 +39,7 @@ class PerFnPassCtx:
     total: int
 
 
-def fill_skip(rec: dict[str, Any], attempts: int) -> FillResult:
+def fill_skip(rec: Stub, attempts: int) -> FillResult:
     """Early-exit result for the fill unit (skip/race/read-failure paths)."""
-    return FillResult(file=rec.get("file", ""), fn_name=rec.get("fn_name", ""),
+    return FillResult(file=rec.file, fn_name=rec.fn_name,
                       filled=False, attempts=attempts)

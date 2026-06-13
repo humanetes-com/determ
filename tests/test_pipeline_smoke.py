@@ -2580,6 +2580,37 @@ def test_slice6_models_seam_wiring() -> None:
     print("  OK  extractor seam typed; engine still dict-fed (slice 6)")
 
 
+def test_stub_model() -> None:
+    """R3.2: Stub is the per-fn fill unit's input. from_dict is tolerant of BOTH
+    a full FnRecord.to_dict() (extra keys ignored) and the hand-built 4-key
+    fallback; from_record projects an FnRecord; key is the (file, fn_name)
+    identity used for frontier/ordering."""
+    from pipeline_core.domain.models import FnRecord, Stub
+
+    # From a full FnRecord wire dict — extra keys (sig_byte_start, body_text, …) ignored.
+    fr = FnRecord.from_dict({
+        "file": "src/error.rs", "fn_name": "backtrace", "container": "impl Error",
+        "sig_text": "pub fn backtrace(&self) -> &Backtrace", "body_text": "unimplemented!()",
+        "sig_byte_start": 10, "has_unimplemented_body": True,
+    })
+    s = Stub.from_dict(fr.to_dict())
+    assert s.file == "src/error.rs" and s.fn_name == "backtrace"
+    assert s.container == "impl Error" and s.sig_text.startswith("pub fn backtrace")
+    assert s.key == ("src/error.rs", "backtrace")
+    assert s.to_dict() == {"file": "src/error.rs", "fn_name": "backtrace",
+                           "container": "impl Error", "sig_text": "pub fn backtrace(&self) -> &Backtrace"}
+
+    # From the hand-built fallback dict (no container/sig_text) — None coerces to "".
+    s2 = Stub.from_dict({"file": "a.rs", "fn_name": "f", "container": None, "sig_text": None})
+    assert s2.container == "" and s2.sig_text == "" and s2.key == ("a.rs", "f")
+
+    # from_record projects exactly the four fields.
+    assert Stub.from_record(fr) == s
+    # tolerant: empty dict → all-default Stub, no crash.
+    assert Stub.from_dict({}).key == ("", "")
+    print("  OK  Stub model: tolerant from_dict / from_record / key (R3.2)")
+
+
 def test_slice5b_task2() -> None:
     """Slice 5b: extracted TASK 2 dispatcher + inner loop (no-build-check path) + fix loop
     (empty manifest) behave with fakes; generation engine stays injected from pipeline."""

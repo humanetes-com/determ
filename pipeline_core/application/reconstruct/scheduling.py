@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any
+from pipeline_core.domain.models import Stub
 
 
 def group_priority_levels(
-    stubs: list[dict[str, Any]], leaf_name_counts: dict[str, int] | None,
-) -> list[list[tuple[int, dict[str, Any]]]]:
+    stubs: list[Stub], leaf_name_counts: dict[str, int] | None,
+) -> list[list[tuple[int, Stub]]]:
     """Group leaf-first-sorted `stubs` into contiguous equal-ref-count LEVELS.
 
     Each level is a list of `(1-based index, stub)`. `stubs` is already sorted
@@ -17,10 +17,10 @@ def group_priority_levels(
     that depends on it — every fill sees real sibling bodies in a scheduling-
     independent order (R11.3 determinism). Pure: no engine/closure state.
     """
-    levels: list[list[tuple[int, dict[str, Any]]]] = []
+    levels: list[list[tuple[int, Stub]]] = []
     prev_key: object = object()
     for i, r in enumerate(stubs, 1):
-        key = leaf_name_counts.get(r["fn_name"], 0) if leaf_name_counts else 0
+        key = leaf_name_counts.get(r.fn_name, 0) if leaf_name_counts else 0
         if key != prev_key:
             levels.append([])
             prev_key = key

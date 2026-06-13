@@ -408,8 +408,52 @@ class FillResult:
     error: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class Stub:
+    """The input to one per-fn fill unit (R3.2): an `unimplemented!()` body to
+    reconstruct, identified by location + signature. A narrower projection than
+    `FnRecord` — the fill engine only needs these four fields to locate, prompt,
+    and splice. Threading this instead of bare dicts kills the `"fn"` vs
+    `"fn_name"` key drift across the engine.
+
+    `from_dict` is tolerant of BOTH a `FnRecord.to_dict()` (extra keys ignored)
+    and the hand-built `{file, fn_name, container, sig_text}` fallback dict, so
+    it accepts either stub-source path unchanged."""
+    file: str = ""
+    fn_name: str = ""
+    container: str = ""
+    sig_text: str = ""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> Stub:
+        return cls(
+            file=d.get("file", ""),
+            fn_name=d.get("fn_name", ""),
+            container=d.get("container", "") or "",
+            sig_text=d.get("sig_text", "") or "",
+        )
+
+    @classmethod
+    def from_record(cls, r: FnRecord) -> Stub:
+        return cls(file=r.file, fn_name=r.fn_name,
+                   container=r.container, sig_text=r.sig_text)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "file": self.file,
+            "fn_name": self.fn_name,
+            "container": self.container,
+            "sig_text": self.sig_text,
+        }
+
+    @property
+    def key(self) -> tuple[str, str]:
+        """The (file, fn_name) identity used as a frontier / ordering key."""
+        return (self.file, self.fn_name)
+
+
 __all__ = [
     "FieldRecord", "MethodRecord", "TypeRecord",
     "FnRecord", "ModRecord", "ConstRecord", "DispatchFamily", "Diagnostic",
-    "BuildCluster", "ModuleAugmentState", "FillResult",
+    "BuildCluster", "ModuleAugmentState", "FillResult", "Stub",
 ]
