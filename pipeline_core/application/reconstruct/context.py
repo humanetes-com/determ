@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from pipeline_core.domain.models import FillResult, Frontier, Stub
+from pipeline_core.domain.models import FillResult, Frontier, ImplBlock, Stub
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,7 +34,7 @@ class PerFnPassCtx:
     tdd_test_cmd: str | None
     splice_check_lock: threading.Lock
     retros_cache: dict[str, Any]
-    idiom_blocks: list[dict[str, Any]]
+    idiom_blocks: list[ImplBlock]
     pass_n: int
     total: int
 

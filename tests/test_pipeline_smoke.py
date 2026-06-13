@@ -2084,8 +2084,9 @@ def test_render_impl_block() -> None:
         "fn free() {}\n"
     )
     sig = "    fn as_ref(&self) -> &T {"
-    member = {"fn_name": "as_ref", "sig_byte_start": src.index(sig),
-              "sig_text": "fn as_ref(&self) -> &T"}
+    from pipeline_core.domain.models import FnRecord
+    member = FnRecord(fn_name="as_ref", sig_byte_start=src.index(sig),
+                      sig_text="fn as_ref(&self) -> &T")
     rendered = pipeline._render_impl_block(src, [member])
     assert rendered.startswith("impl<T> AsRef<T> for Wrap<T> where T: ?Sized"), rendered
     assert "fn as_ref" in rendered and rendered.rstrip().endswith("}"), rendered
@@ -3015,10 +3016,11 @@ def test_per_impl_prompt_macros_and_siblings_sections():
     # Per-impl/per-fn prompt parity: MACROS + SIBLING_REFERENCE render when
     # provided and vanish when empty (the per-impl builder lacked both).
     import pipeline as p
-    members = [{"fn_name": "kind", "sig_text": "fn kind (& self) -> u32",
-                "has_unimplemented_body": True}]
-    block = {"file": "lib.rs", "container": "impl Foo",
-             "members": members, "stub_members": members}
+    from pipeline_core.domain.models import FnRecord, ImplBlock
+    members = (FnRecord(file="lib.rs", fn_name="kind", container="impl Foo",
+                        sig_text="fn kind (& self) -> u32", has_unimplemented_body=True),)
+    block = ImplBlock(file="lib.rs", container="impl Foo",
+                      members=members, stub_members=members)
     kw = {"block": block, "related_blocks": [], "test_blocks": [],
           "module_name": "m", "cluster_name": "t"}
     full = p._build_per_impl_prompt(

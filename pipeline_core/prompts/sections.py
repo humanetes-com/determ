@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pipeline_core.domain.models import DispatchFamily, TypeRecord
+from pipeline_core.domain.models import DispatchFamily, ImplBlock, TypeRecord
 
 # P5.3: standard library trait contracts. When a fn is being implemented
 # inside `impl Trait for X`, inject the trait's documented behavior so the
@@ -485,7 +485,7 @@ def tag_block(tag: str, content: str, *, prefix: str = "", suffix: str = "") -> 
 
 
 def format_impl_block_for_prompt(
-    block: dict[str, Any],
+    block: ImplBlock,
     mark_target: bool = True,
 ) -> str:
     """Render an impl block in TARGET form: the impl header followed by every
@@ -494,9 +494,9 @@ def format_impl_block_for_prompt(
     shortened body preview so the model can mirror their structural shape
     when designing the new ones.
 
-    `block` is a record produced by `_collect_impl_blocks`.
+    `block` is an `ImplBlock` produced by `_collect_impl_blocks`.
     """
-    container = block.get("container", "")
+    container = block.container
     lines: list[str] = []
     if container:
         # Trim the {fns…} body from the container header — we render each fn
@@ -511,14 +511,14 @@ def format_impl_block_for_prompt(
         lines.append(f"{header} {{")
     else:
         lines.append("// free fns at file level")
-    for m in block.get("members", []):
-        sig = (m.get("sig_text") or "").strip()
-        is_stub = bool(m.get("has_unimplemented_body"))
+    for m in block.members:
+        sig = m.sig_text.strip()
+        is_stub = m.has_unimplemented_body
         if is_stub:
             tag = " // [STUB] — fill in this response" if mark_target else " // [STUB]"
             lines.append(f"    {sig} {tag}")
         else:
-            body = (m.get("body_text") or "").strip()
+            body = m.body_text.strip()
             preview = body
             if len(preview) > 200:
                 preview = preview[:200].rsplit("\n", 1)[0] + " /* ... */"

@@ -21,7 +21,7 @@ import threading
 import time
 import tomllib
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from functools import partial as _partial
@@ -124,7 +124,9 @@ from pipeline_core.domain.models import (
     Diagnostic,
     DispatchFamily,
     FillResult,
+    FnRecord,
     Frontier,
+    ImplBlock,
     ModRecord,
     ModuleAugmentState,
     Stub,
@@ -178,6 +180,9 @@ from pipeline_core.prompts.repo_spec import (
 )
 from pipeline_core.prompts.sections import (
     build_dispatch_family_section as _build_dispatch_family_section_pure,
+)
+from pipeline_core.prompts.sections import (
+    extract_trait_from_container,
 )
 from pipeline_core.prompts.sections import (
     format_type_for_prompt as _format_type_for_prompt,
@@ -7967,20 +7972,20 @@ def _phase_c_fill_impl_blocks(
     # If a TDD frontier is provided, narrow to blocks whose stub_members
     # intersect the frontier. Otherwise process all blocks with stubs.
     if tdd_frontier_keys is not None:
-        narrowed: list[dict] = []
+        narrowed: list[ImplBlock] = []
         for b in blocks:
-            stub_keys = {(b["file"], m["fn_name"]) for m in b["stub_members"]}
+            stub_keys = {(b.file, m.fn_name) for m in b.stub_members}
             if stub_keys & tdd_frontier_keys:
                 narrowed.append(b)
         blocks = narrowed
 
     # Drop empty / free-fn / oversized blocks (handled by per-fn fallback).
-    def _viable(b: dict) -> bool:
-        if not b["container"]:
+    def _viable(b: ImplBlock) -> bool:
+        if not b.container:
             return False
-        if not b["stub_members"]:
+        if not b.stub_members:
             return False
-        return not len(b["stub_members"]) > _PER_IMPL_MAX_STUBS
+        return not len(b.stub_members) > _PER_IMPL_MAX_STUBS
     viable_blocks = [b for b in blocks if _viable(b)]
     _log(f"  [phase-c/impl] cluster {cluster_name}: "
          f"{len(viable_blocks)} impl block(s) viable "
@@ -8031,52 +8036,52 @@ def _phase_c_fill_impl_blocks(
 
     _impl_full_stalls = int(os.getenv("PHASE_C_IMPL_MAX_STALLS", "3"))
 
-    def _fill_one_block(block: dict) -> None:
+    def _fill_one_block(block: ImplBlock) -> None:
         """One impl block's fill: context assembly, the `_attempt_impl_fill`
         unit on `_drive_fix_loop` (slice 8a f3 — replaces the hand-rolled
         while loop), and exhausted-block bookkeeping (retro + fail emit)."""
         nonlocal attempts_total, fns_filled_total, impls_filled, impls_failed
-        block_id = _impl_block_id(block["file"], block["container"])
+        block_id = _impl_block_id(block.file, block.container)
         # Per-file converge keying: only the converge module keeps full budget.
-        block_max_stalls = _effective_stalls(_impl_full_stalls, _module_of(block["file"]))
-        file_path = target_src_dir / block["file"]
+        block_max_stalls = _effective_stalls(_impl_full_stalls, _module_of(block.file))
+        file_path = target_src_dir / block.file
         if not file_path.exists():
             return
         # Honor cross-iter exhaustion — if a prior retrospective marked
         # this block GENUINELY_HARD it's skipped.
-        if _is_fn_fully_exhausted(retros_cache, block["file"], "*impl*", block["container"]):
+        if _is_fn_fully_exhausted(retros_cache, block.file, "*impl*", block.container):
             _log(f"  [phase-c/impl] {block_id}: skipped (prior retro "
                  "marked exhausted).")
             return
         # Related blocks (same trait, different generic) for the prompt.
-        all_blocks_by_id = {_impl_block_id(b["file"], b["container"]): b for b in blocks}
-        related_blocks: list[dict] = []
-        for rc in block.get("related_containers", []):
-            rb = all_blocks_by_id.get(_impl_block_id(block["file"], rc))
+        all_blocks_by_id = {_impl_block_id(b.file, b.container): b for b in blocks}
+        related_blocks: list[ImplBlock] = []
+        for rc in block.related_containers:
+            rb = all_blocks_by_id.get(_impl_block_id(block.file, rc))
             if rb is not None:
                 related_blocks.append(rb)
         # Dispatch-family co-design: if this block implements a family trait,
         # surface EVERY family-trait block (not just same-name relatives) plus
         # the dispatching macro, so the model designs the family consistently.
-        _family = _family_for_container(block["container"])
+        _family = _family_for_container(block.container)
         dispatch_family_section = ""
         if _family is not None:
             _fam_names = set(_family.traits) | set(_family.return_types)
-            _seen = {_impl_block_id(block["file"], block["container"])}
-            _seen |= {_impl_block_id(rb["file"], rb["container"]) for rb in related_blocks}
+            _seen = {_impl_block_id(block.file, block.container)}
+            _seen |= {_impl_block_id(rb.file, rb.container) for rb in related_blocks}
             for b2 in blocks:
-                bid = _impl_block_id(b2["file"], b2["container"])
+                bid = _impl_block_id(b2.file, b2.container)
                 if bid in _seen:
                     continue
                 # Pull in every block of this family — the dispatch traits AND
                 # the tag types' inherent impls (where the chained `new` lives).
-                if _container_names(b2["container"]) & _fam_names:
+                if _container_names(b2.container) & _fam_names:
                     related_blocks.append(b2)
                     _seen.add(bid)
             dispatch_family_section = _build_dispatch_family_section(_family)
         snapshot = file_path.read_text(encoding="utf-8")
         # Per-block context.
-        stub_fn_names = [m["fn_name"] for m in block["stub_members"]]
+        stub_fn_names = [m.fn_name for m in block.stub_members]
         test_blocks: list[tuple[str, str]] = []
         # Reuse the per-fn test finder by unioning tests touching any stub.
         for fn_name in stub_fn_names[:4]:
@@ -8088,19 +8093,19 @@ def _phase_c_fill_impl_blocks(
         # plus the impl header and its where clause — the self-type
         # (e.g. `impl Display for BoxedError`) appears in no member sig,
         # so without the container its definition is never injected.
-        _block_container = block.get("container") or ""
+        _block_container = block.container
         _block_where = _extract_impl_where_clause(snapshot, _block_container)
         _member_sigs_text = " ".join(
-            (m.get("sig_text") or "") for m in block["members"])
+            (m.sig_text) for m in block.members)
         # Crate idioms — surfaces THIS file's repeating patterns (Self::
         # constructor family, vtable dispatch, wrapper construction,
         # unsafe chains) from already-filled fn bodies. The target
         # sig_text drives the relevance ranking so the model sees the
         # patterns most likely to apply to the fns it's about to write.
         _target_sig_concat = " ".join(
-            (m.get("sig_text") or "") for m in block["stub_members"])
+            (m.sig_text) for m in block.stub_members)
         crate_idioms_section = _extract_crate_idioms(
-            blocks, block["file"],
+            blocks, block.file,
             target_sig_text=_target_sig_concat,
             max_idioms=5,
         )
@@ -8109,17 +8114,17 @@ def _phase_c_fill_impl_blocks(
         _sib_parts: list[str] = []
         for fn_name in stub_fn_names[:4]:
             _s = _collect_sibling_filled_bodies(
-                snapshot, fn_name, block.get("container") or "")
+                snapshot, fn_name, block.container)
             if _s:
                 _sib_parts.append(_s)
         siblings_section = "\n\n".join(_sib_parts)
         prior_retro = retros_cache.get(
-            _retro_key(block["file"], "*impl*", block["container"]), {}
+            _retro_key(block.file, "*impl*", block.container), {}
         ).get("guidance", "")
         notes_section = ""
         if fr_path is not None:
             notes_section = _filter_model_notes_for_prompt(
-                fr_path, file_rel=block["file"], fn_name=stub_fn_names[0] if stub_fn_names else "",
+                fr_path, file_rel=block.file, fn_name=stub_fn_names[0] if stub_fn_names else "",
                 file_text=snapshot, current_error="",
             )
         last_error_excerpt = ""
@@ -8142,9 +8147,9 @@ def _phase_c_fill_impl_blocks(
         _t0 = time.monotonic()
         _emit("phase_c.impl.fill.start", data={
             "cluster": cluster_name,
-            "file": block["file"],
-            "container": block["container"],
-            "stub_count": len(block["stub_members"]),
+            "file": block.file,
+            "container": block.container,
+            "stub_count": len(block.stub_members),
         })
 
         def _attempt_impl_fill(fix_attempt: int) -> _FixOutcome:
@@ -8193,20 +8198,20 @@ def _phase_c_fill_impl_blocks(
                 routed: list[tuple[dict, str]] = []  # (fn_data, container)
                 for fn_data in parsed:
                     container = fn_data["block"]
-                    if container == block["container"]:
-                        routed.append((fn_data, block["container"]))
+                    if container == block.container:
+                        routed.append((fn_data, block.container))
                         continue
                     matched = False
                     for rb in related_blocks:
-                        if container == rb["container"]:
-                            routed.append((fn_data, rb["container"]))
+                        if container == rb.container:
+                            routed.append((fn_data, rb.container))
                             matched = True
                             break
                     if not matched:
                         # Loose match: header prefix only.
                         for cand in [block, *related_blocks]:
-                            if container.split("{", 1)[0].strip() == cand["container"].split("{", 1)[0].strip():
-                                routed.append((fn_data, cand["container"]))
+                            if container.split("{", 1)[0].strip() == cand.container.split("{", 1)[0].strip():
+                                routed.append((fn_data, cand.container))
                                 matched = True
                                 break
                     if not matched:
@@ -8218,7 +8223,7 @@ def _phase_c_fill_impl_blocks(
                 # sequence keeps byte offsets consistent because we
                 # re-locate after each splice via the syn enumerator.
                 for fn_data, container in routed:
-                    target_file = target_src_dir / block["file"]
+                    target_file = target_src_dir / block.file
                     ok, reason, delta = _splice_fn_with_where(
                         target_file, container, fn_data["fn_name"],
                         fn_data["body"], fn_data["where_clause"],
@@ -8249,9 +8254,9 @@ def _phase_c_fill_impl_blocks(
                     # Plan 10 U2 (shared gate): accept the block only if its
                     # members' own tests pass too — not just compile.
                     _block_tests: set = set()
-                    for _bm in block["stub_members"]:
+                    for _bm in block.stub_members:
                         _block_tests |= (tdd_frontier_tests or {}).get(
-                            (block["file"], _bm.get("fn_name", "")), set())
+                            (block.file, _bm.fn_name), set())
                     _u2_impl = _u2_test_gate(_block_tests, tdd_test_cmd,
                                              target_src_dir, cluster_env)
                 else:
@@ -8267,8 +8272,8 @@ def _phase_c_fill_impl_blocks(
                         (time.monotonic() - _t0) * 1000),
                         data={
                             "cluster": cluster_name,
-                            "file": block["file"],
-                            "container": block["container"],
+                            "file": block.file,
+                            "container": block.container,
                             "members_filled": spliced_now,
                             "members_failed": 0,
                             "fix_attempts": fix_attempt,
@@ -8285,7 +8290,7 @@ def _phase_c_fill_impl_blocks(
                     _new_errs = _cur_sig - _baseline_sig
                     _frontier = _frontier_from_diags(diagnostics, target_src_dir)
                     _filled = {fd["fn_name"] for fd, _ in routed}
-                    _on_fill = any(f == block["file"] and fn in _filled
+                    _on_fill = any(f == block.file and fn in _filled
                                    for (f, fn) in _frontier)
                     if not _new_errs and not _on_fill:
                         members_filled_this_block = spliced_now
@@ -8298,8 +8303,8 @@ def _phase_c_fill_impl_blocks(
                             (time.monotonic() - _t0) * 1000),
                             data={
                                 "cluster": cluster_name,
-                                "file": block["file"],
-                                "container": block["container"],
+                                "file": block.file,
+                                "container": block.container,
                                 "members_filled": spliced_now,
                                 "members_failed": 0,
                                 "fix_attempts": fix_attempt,
@@ -8316,7 +8321,7 @@ def _phase_c_fill_impl_blocks(
                 cur_err_sig = (_u2_impl[0] if _u2_impl is not None
                                else _cargo_err_sig_from_diagnostics(diagnostics))
                 cur_err_count = max(1, len(cur_err_sig))  # rc-honest minimum
-                last_error_excerpt = _focus_cargo_errors(cargo_out, block["file"])
+                last_error_excerpt = _focus_cargo_errors(cargo_out, block.file)
                 _record_error_codes_seen(cargo_out)
                 # The fill regressed (a new error, or an error on the filled
                 # fns) — B3 (FR-029) already accepted non-regressing fills
@@ -8351,15 +8356,15 @@ def _phase_c_fill_impl_blocks(
         )
         if members_filled_this_block == 0:
             impls_failed += 1
-            errors.append(f"{block['file']}::{block['container']}: "
+            errors.append(f"{block.file}::{block.container}: "
                           f"impl-fill failed after {fix_attempt} attempt(s)")
             _emit("phase_c.impl.fill.fail", duration_ms=int(
                 (time.monotonic() - _t0) * 1000),
                 data={
                     "cluster": cluster_name,
-                    "file": block["file"],
-                    "container": block["container"],
-                    "members_failed": len(block["stub_members"]),
+                    "file": block.file,
+                    "container": block.container,
+                    "members_failed": len(block.stub_members),
                     "fix_attempts": fix_attempt,
                     "last_error_preview": last_error_excerpt[:200],
                 })
@@ -8370,13 +8375,13 @@ def _phase_c_fill_impl_blocks(
             try:
                 cur_errs = len(_cargo_err_sig(last_error_excerpt))
                 prior = retros_cache.get(
-                    _retro_key(block["file"], "*impl*", block["container"]), {})
+                    _retro_key(block.file, "*impl*", block.container), {})
                 prior_best = prior.get("best_error_count")
                 retro = _phase_c_retrospective(
                     fn_name="*impl*",
-                    sig_text=block["container"],
-                    container=block["container"],
-                    file_rel=block["file"],
+                    sig_text=block.container,
+                    container=block.container,
+                    file_rel=block.file,
                     cluster_name=cluster_name,
                     last_body=last_response[:_FAILED_BODY_CAP],
                     error_excerpt=last_error_excerpt,
@@ -8393,7 +8398,7 @@ def _phase_c_fill_impl_blocks(
                     retro.get("category") == "GENUINELY_HARD"
                     or (prior_best is not None and not improved)
                 )
-                retros_cache[_retro_key(block["file"], "*impl*", block["container"])] = {
+                retros_cache[_retro_key(block.file, "*impl*", block.container)] = {
                     "category": retro.get("category", ""),
                     "guidance": retro.get("guidance", ""),
                     "signal": retro.get("signal", ""),
@@ -10547,7 +10552,7 @@ def _parse_impl_block_ranges(source: str) -> "list[dict]":
     return out
 
 
-def _collect_impl_blocks(src_dir: Path) -> list[dict] | None:
+def _collect_impl_blocks(src_dir: Path) -> list[ImplBlock] | None:
     """Group every fn record into its impl/trait/mod container.
 
     Disambiguation: blocks are keyed by the FULL impl header (text from
@@ -10623,23 +10628,18 @@ def _collect_impl_blocks(src_dir: Path) -> list[dict] | None:
         key = (rel, header_text)
         groups.setdefault(key, []).append(r)
 
-    # Step 3 — render block records. `related_containers` lookup uses
-    # the trait-name regex against the header text.
-    blocks: list[dict] = []
-    # We want the TRAIT NAME (`impl Trait<T> for Type`), not the
-    # `Type` — use a stricter pattern for related grouping. Two impls
-    # are "related" iff they share the same trait name AND target type.
-    trait_with_for_re = re.compile(
-        r"\bimpl\s*(?:<[^>]*>)?\s+([A-Za-z_:][\w:]*)\s*(?:<[^>]*>)?\s+for\b"
-    )
+    # Step 3 — render block records. Related grouping: two trait impls in the
+    # same file are "related" iff they share the same trait name. Trait name is
+    # extracted regex-free via extract_trait_from_container (R7) — it returns
+    # None for inherent impls / free fns, matching the old `for`-requiring regex.
+    blocks: list[ImplBlock] = []
     file_to_trait_containers: dict[str, dict[str, list[str]]] = {}
     for (file_rel, container), _members in groups.items():
         if not container:
             continue
-        m = trait_with_for_re.search(container)
-        if not m:
+        trait_name = extract_trait_from_container(container)
+        if not trait_name:
             continue
-        trait_name = m.group(1)
         file_to_trait_containers.setdefault(file_rel, {}).setdefault(
             trait_name, []).append(container)
     for (file_rel, container), members in groups.items():
@@ -10647,18 +10647,17 @@ def _collect_impl_blocks(src_dir: Path) -> list[dict] | None:
         stub_members = [m for m in members_sorted if m.get("has_unimplemented_body")]
         related: list[str] = []
         if container:
-            m = trait_with_for_re.search(container)
-            if m:
-                trait_name = m.group(1)
+            trait_name = extract_trait_from_container(container)
+            if trait_name:
                 same_trait = file_to_trait_containers.get(file_rel, {}).get(trait_name, [])
                 related = [c for c in same_trait if c != container]
-        blocks.append({
-            "file": file_rel,
-            "container": container,
-            "members": members_sorted,
-            "stub_members": stub_members,
-            "related_containers": related,
-        })
+        blocks.append(ImplBlock(
+            file=file_rel,
+            container=container,
+            members=tuple(FnRecord.from_dict(r) for r in members_sorted),
+            stub_members=tuple(FnRecord.from_dict(r) for r in stub_members),
+            related_containers=tuple(related),
+        ))
     return blocks
 
 
@@ -10706,30 +10705,30 @@ _IDIOM_UNSAFE_CHAIN_RE = re.compile(
 )
 
 
-def _extract_filled_fn_bodies(impl_blocks: "list[dict]", file_rel: str) -> "list[dict]":
+def _extract_filled_fn_bodies(impl_blocks: "list[ImplBlock]", file_rel: str) -> "list[dict]":
     """Return [{fn_name, container, body}] for every FILLED fn in `file_rel`,
     pulled from the impl block records. Free fns are dropped (they have no
     container). Used by `_extract_crate_idioms` to scan for patterns."""
     out: list[dict] = []
     for b in impl_blocks:
-        if b.get("file") != file_rel:
+        if b.file != file_rel:
             continue
-        for m in b.get("members", []):
-            if m.get("has_unimplemented_body"):
+        for m in b.members:
+            if m.has_unimplemented_body:
                 continue
-            body = (m.get("body_text") or "").strip()
+            body = m.body_text.strip()
             if not body:
                 continue
             out.append({
-                "fn_name": m.get("fn_name", ""),
-                "container": b.get("container", ""),
+                "fn_name": m.fn_name,
+                "container": b.container,
                 "body": body,
             })
     return out
 
 
 def _extract_crate_idioms(
-    impl_blocks: "list[dict]",
+    impl_blocks: "list[ImplBlock]",
     file_rel: str,
     target_sig_text: str = "",
     max_idioms: int = 5,
@@ -10886,63 +10885,10 @@ def _extract_crate_idioms(
     return "\n\n".join(chosen)
 
 
-def _group_frontier_by_impl_block(
-    frontier: "Frontier",
-    impl_blocks: "list[dict]",
-) -> "list[dict]":
-    """Map a per-fn frontier into a per-impl-block fill plan.
-
-    The TDD loop attributes failures to `(file, fn_name)` keys. The
-    per-impl path widens each entry to the WHOLE impl block containing
-    that fn — if any member of an impl block is on the frontier, the
-    block becomes one fill unit covering all its still-stub members
-    (not just the trapped one).
-
-    Returns a list of `{block: impl_block_record, fns_in_frontier:
-    set[str], related_blocks: list[impl_block_record]}` records, ordered
-    by the position the first frontier fn appears (so TDD's leaf
-    ordering carries through).
-    """
-    # Index impl blocks by (file, container) for quick lookup, and by
-    # member fn key for the inverse mapping.
-    file_container_to_block: dict[tuple[str, str], dict] = {}
-    fn_to_block: dict[tuple[str, str], dict] = {}
-    for b in impl_blocks:
-        file_container_to_block[(b["file"], b["container"])] = b
-        for m in b["members"]:
-            fn_to_block[(b["file"], m["fn_name"])] = b
-    plan: list[dict] = []
-    seen_block_ids: set[str] = set()
-    for (file_rel, fn_name), _tests in frontier.items():
-        block = fn_to_block.get((file_rel, fn_name))
-        if block is None:
-            continue
-        bid = _impl_block_id(file_rel, block["container"])
-        if bid in seen_block_ids:
-            # Already added this block — record the additional frontier fn.
-            for entry in plan:
-                if _impl_block_id(entry["block"]["file"], entry["block"]["container"]) == bid:
-                    entry["fns_in_frontier"].add(fn_name)
-                    break
-            continue
-        seen_block_ids.add(bid)
-        related_blocks = []
-        for rc in block.get("related_containers", []):
-            rb = file_container_to_block.get((file_rel, rc))
-            if rb is not None:
-                related_blocks.append(rb)
-        plan.append({
-            "block": block,
-            "fns_in_frontier": {fn_name},
-            "related_blocks": related_blocks,
-        })
-    return plan
-
-
 def _collect_impl_blocks_for_cluster(
     target_src_dir: Path,
     cluster: "BuildCluster | None",
-) -> list[dict] | None:
+) -> list[ImplBlock] | None:
     """Cluster-aware variant of `_collect_impl_blocks`. A block is included
     iff at least one of its STUB members is active under this cluster's
     cfg-set. Stub members not active in the cluster are dropped from
@@ -10953,17 +10899,17 @@ def _collect_impl_blocks_for_cluster(
         return None
     if cluster is None:
         return blocks
-    out: list[dict] = []
+    out: list[ImplBlock] = []
     for b in blocks:
-        kept_stubs = [
-            m for m in b["stub_members"]
+        kept_stubs = tuple(
+            m for m in b.stub_members
             if _fn_belongs_to_cluster(
-                target_src_dir, b["file"], m["fn_name"], cluster,
-                fn_cfg_predicates=list(m.get("cfg_predicates") or []))
-        ]
+                target_src_dir, b.file, m.fn_name, cluster,
+                fn_cfg_predicates=list(m.cfg_predicates))
+        )
         if not kept_stubs:
             continue
-        out.append({**b, "stub_members": kept_stubs})
+        out.append(dataclasses.replace(b, stub_members=kept_stubs))
     return out
 
 
@@ -15310,18 +15256,18 @@ def task2_inner_loop(project_dir, genesis_path, functional_req_path, manifest_pa
     )
 
 
-def _render_impl_block(file_text: str, members: list[dict]) -> str:
+def _render_impl_block(file_text: str, members: "Sequence[FnRecord]") -> str:
     """Verbatim source of the impl block containing `members` (header +
     where-clause + all bodies), via byte-range parse. Used by the per_impl fix
     unit to give the model the whole impl block as context. Falls back to
     listing member signatures if the byte range can't be resolved."""
     if not members:
         return ""
-    anchor = members[0].get("sig_byte_start", 0)
+    anchor = members[0].sig_byte_start
     for r in _parse_impl_block_ranges(file_text):
         if r["body_open"] <= anchor < r["body_close"]:
             return file_text[r["header_start"]:r["body_close"] + 1]
-    return "\n".join(m.get("sig_text", "") for m in members)
+    return "\n".join(m.sig_text for m in members)
 
 
 def generate_fix_loop(
@@ -15749,7 +15695,7 @@ Output nothing else."""
                           max_stalls=int(os.getenv("FIX_LOOP_PER_FN_MAX_STALLS", "2")))
         return changed
 
-    def _fix_impl_block(rel: str, container: str, block: dict) -> list[str]:
+    def _fix_impl_block(rel: str, container: str, block: ImplBlock) -> list[str]:
         """Inner cargo-check loop that re-fills a WHOLE impl block in one prompt
         (the model sees the header, where-clauses, every member body, and any
         sibling impl of the same trait). Each returned body is spliced into the
@@ -15761,9 +15707,9 @@ Output nothing else."""
         if not path.exists():
             return changed
         inner_cmd = _derive_check_only_cmd(check_cmd)
-        members = block.get("members", [])
-        member_names = {m.get("fn_name") for m in members if m.get("fn_name")}
-        siblings = block.get("related_containers", []) or []
+        members = block.members
+        member_names = {m.fn_name for m in members if m.fn_name}
+        siblings = list(block.related_containers)
 
         def _run_check(_rel=rel, _names=tuple(member_names)) -> tuple[bool, str, int]:
             rc, rendered, diags = _run_cargo_check_diag(inner_cmd, project_dir, env, timeout)
@@ -16006,12 +15952,12 @@ Output nothing else."""
             blocks = _collect_impl_blocks(project_dir)
             if not blocks:
                 return _do_fix_per_fn(output, history, retro=retro)
-            fn_to_block: dict[tuple[str, str], dict] = {}
+            fn_to_block: dict[tuple[str, str], ImplBlock] = {}
             for b in blocks:
-                for m in b.get("members", []):
-                    fn_to_block[(b["file"], m.get("fn_name"))] = b
+                for m in b.members:
+                    fn_to_block[(b.file, m.fn_name)] = b
             changed: list[str] = []
-            impl_groups: dict[tuple[str, str], dict] = {}
+            impl_groups: dict[tuple[str, str], ImplBlock] = {}
             free_fns: list[tuple[str, str]] = []
             for (rel, fn) in frontier:
                 if rel in existing_test_files:
@@ -16019,10 +15965,10 @@ Output nothing else."""
                 if allowed_dir_prefix and not rel.startswith(allowed_dir_prefix):
                     continue
                 b = fn_to_block.get((rel, fn))
-                if b is None or not b.get("container"):
+                if b is None or not b.container:
                     free_fns.append((rel, fn))
                 else:
-                    impl_groups[(b["file"], b["container"])] = b
+                    impl_groups[(b.file, b.container)] = b
             for (f2, cont) in sorted(impl_groups.keys()):
                 changed += _fix_impl_block(f2, cont, impl_groups[(f2, cont)])
             for (rel, fn) in sorted(set(free_fns)):

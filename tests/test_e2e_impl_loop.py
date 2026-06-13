@@ -12,6 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pipeline
+from pipeline_core.domain.models import FnRecord, ImplBlock
 from tests.harness import diag, install_scripted_cargo
 
 IMPL_LIB = """pub struct Foo { tag: u32 }
@@ -32,13 +33,15 @@ RESPONSE_BOTH = (
 )
 
 
-def _block() -> dict:
-    members = [
-        {"fn_name": "kind", "sig_text": "fn kind (& self) -> u32"},
-        {"fn_name": "name", "sig_text": "fn name (& self) -> u32"},
-    ]
-    return {"file": "lib.rs", "container": "impl Foo",
-            "members": members, "stub_members": list(members)}
+def _block() -> ImplBlock:
+    members = (
+        FnRecord(file="lib.rs", fn_name="kind", container="impl Foo",
+                 sig_text="fn kind (& self) -> u32", has_unimplemented_body=True),
+        FnRecord(file="lib.rs", fn_name="name", container="impl Foo",
+                 sig_text="fn name (& self) -> u32", has_unimplemented_body=True),
+    )
+    return ImplBlock(file="lib.rs", container="impl Foo",
+                     members=members, stub_members=members)
 
 
 def _setup(monkeypatch, tmp_path: Path) -> Path:

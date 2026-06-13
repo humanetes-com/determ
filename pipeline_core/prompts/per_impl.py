@@ -7,8 +7,8 @@ come from :mod:`pipeline_core.prompts.runtime`.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
+from pipeline_core.domain.models import ImplBlock
 from pipeline_core.prompts.runtime import promoted_error_rules, repo_spec_section
 from pipeline_core.prompts.sections import (
     format_impl_block_for_prompt,
@@ -19,8 +19,8 @@ from pipeline_core.prompts.sections import (
 
 
 def build_per_impl_prompt(
-    block: dict[str, Any],
-    related_blocks: list[dict[str, Any]],
+    block: ImplBlock,
+    related_blocks: list[ImplBlock],
     test_blocks: list[tuple[str, str]],
     module_name: str,
     cluster_name: str,
@@ -43,9 +43,9 @@ def build_per_impl_prompt(
     surface the `impl AsRef<T1>` + `impl AsRef<T2>` case that per-fn
     prompts cannot show together).
     """
-    file_rel = block.get("file", "")
-    container = block.get("container", "")
-    stub_members = block.get("stub_members", [])
+    file_rel = block.file
+    container = block.container
+    stub_members = block.stub_members
     target_render = format_impl_block_for_prompt(block, mark_target=True)
     related_renders = []
     for rb in related_blocks:
@@ -117,14 +117,14 @@ def build_per_impl_prompt(
     for m in stub_members[:2]:  # show up to 2 worked examples in the
                                 # output format
         output_example.append(
-            f'<FN name="{m["fn_name"]}" block="{container}">\n'
+            f'<FN name="{m.fn_name}" block="{container}">\n'
             "  // body (no outer braces, no signature)\n"
             "</FN>"
         )
     output_example_str = "\n".join(output_example) if output_example else (
         '<FN name="..." block="...">\nbody\n</FN>')
 
-    stub_names = ", ".join(m["fn_name"] for m in stub_members)
+    stub_names = ", ".join(m.fn_name for m in stub_members)
     return f"""Implement the marked [STUB] fns in this Rust impl block so the
 tests pass. The unit of work is the IMPL BLOCK — design every member
 together; each fn must respect the impl header's generic parameters,
