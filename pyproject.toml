@@ -1,6 +1,45 @@
-# Tooling config home for the Python side (ruff + mypy). Deps still live in the
-# requirements-*.txt files consumed by setup.sh; this file is config-only for now.
+# Tooling config home for the Python side (ruff + mypy) AND the installable-package
+# metadata (P8). The heavy backend deps (vllm/transformers) still install via setup.sh
+# from the requirements-*.txt files; the `[project]` deps below are the minimal runtime
+# floor so `pip install .` yields a working CLI + console scripts.
 # `bash check.sh` is the gate; it invokes ruff/mypy which read the sections below.
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "determ"
+version = "0.1.0"
+description = "Deterministic tests-only library reconstruction pipeline (self-hosted LLM)."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "python-dotenv",
+    "openai",        # OpenAI-compatible client for the self-hosted vLLM/SGLang endpoints
+    "huggingface_hub",
+]
+
+[project.optional-dependencies]
+dev = [
+    "mypy==2.1.0",
+    "ruff==0.15.15",
+    "pytest==8.4.2",
+    "pytest-cov==7.0.0",
+    "pytest-xdist==3.8.0",
+    "import-linter==2.5",
+]
+
+[project.scripts]
+determ = "pipeline:main"
+determ-monitor = "monitor:main"
+
+[tool.setuptools]
+py-modules = ["pipeline", "monitor", "model_interact"]
+
+[tool.setuptools.packages.find]
+include = ["pipeline_core*"]
 
 [tool.ruff]
 line-length = 120          # generous; E501 is intentionally NOT enforced on the legacy module

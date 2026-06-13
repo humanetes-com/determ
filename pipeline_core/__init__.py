@@ -12,6 +12,8 @@ root, so `import pipeline_core` stays side-effect-free.
 
 from __future__ import annotations
 
+__version__ = "0.1.0"
+
 from .domain.models import (
     BuildCluster,
     Diagnostic,
@@ -35,4 +37,5 @@ __all__ = [
     "Settings",
     # port interfaces (Protocols)
     "LLM", "Extractor", "Cargo", "Coverage", "Workspace",
+    "__version__",
 ]

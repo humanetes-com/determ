@@ -1630,6 +1630,21 @@ def genesis_rules_read(project_dir: Path, module_scope: str = "*",
         return ""
 
 
+def genesis_rules_count(project_dir: Path, module_scope: str = "*") -> int:
+    """Total structured genesis rules recorded for a module scope (richness signal)."""
+    try:
+        conn = _pipeline_db(project_dir)
+        args: list = [_db_project_name(project_dir)]
+        ph = "?" if module_scope == "*" else "?,?"
+        args += ["*"] if module_scope == "*" else [module_scope, "*"]
+        n = conn.execute(f"SELECT COUNT(*) FROM genesis_rules WHERE project=? "
+                         f"AND module_scope IN ({ph})", args).fetchone()[0]
+        conn.close()
+        return int(n)
+    except Exception:
+        return 0
+
+
 def module_status_write(project_dir: Path, module: str, iteration: int,
                          outcome: str, pass_count: int = 0,
                          fail_count: int = 0) -> None:
@@ -19345,6 +19360,7 @@ This is a Rust procedural macro crate. Strict rules apply:
                 failure_log_path, label, failure_type_logged,
                 current_pass, prev_pass_count, t4_summary,
             )
+            _prev_pass_before = prev_pass_count
             if current_pass > prev_pass_count:
                 no_improvement_streak = 0
             else:
@@ -19394,6 +19410,14 @@ This is a Rust procedural macro crate. Strict rules apply:
             _log(f"\n  Keeping '{module_name}' tree for repair iteration "
                  f"{module_iter + 1} (no wipe — docs updated, fix loop continues).")
             _run_flow_audit(f"iter {module_iter}")
+
+            # R13.3: per-iteration doc-richness vs convergence → trendable across runs.
+            _emit("docs.richness", module=module_name, iteration=module_iter, data={
+                "fr_chars": module_req_path.stat().st_size if module_req_path.exists() else 0,
+                "notes": len(_load_model_notes(module_req_path)),
+                "genesis_rules": genesis_rules_count(project_dir, module_name),
+                "pass_count": current_pass, "prev_pass_count": _prev_pass_before,
+                "improved": current_pass > _prev_pass_before})
 
             module_iter += 1
 

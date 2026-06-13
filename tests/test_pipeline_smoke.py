@@ -1722,12 +1722,13 @@ def test_monitor_coverage_from_events() -> None:
     import tempfile
 
     import monitor
+    from pipeline_core.monitor import events_data
 
     with tempfile.TemporaryDirectory() as td:
         ev = os.path.join(td, "events.jsonl")
-        old_log, old_start = monitor.EVENTS_LOG, monitor._pipeline_start_time
-        monitor.EVENTS_LOG = ev
-        monitor._pipeline_start_time = lambda: 0.0
+        old_log, old_start = events_data.EVENTS_LOG, events_data.pipeline_start_time
+        events_data.EVENTS_LOG = ev
+        events_data.pipeline_start_time = lambda: 0.0
         try:
             assert monitor._coverage_from_events() == ""  # no file yet
             with open(ev, "w") as fh:
@@ -1747,9 +1748,62 @@ def test_monitor_coverage_from_events() -> None:
                                      "data": {}}) + "\n")
             assert monitor._coverage_from_events() == ""  # pct missing → fallback
         finally:
-            monitor.EVENTS_LOG = old_log
-            monitor._pipeline_start_time = old_start
+            events_data.EVENTS_LOG = old_log
+            events_data.pipeline_start_time = old_start
     print("  OK  monitor coverage from events")
+
+
+def test_genesis_rules_count() -> None:
+    """R13.3: genesis_rules_count totals rules for a scope (module + '*'),
+    independent of genesis_rules_read's LIMIT 20 render cap."""
+    import tempfile
+    from pathlib import Path
+
+    import pipeline
+
+    with tempfile.TemporaryDirectory() as td:
+        pd = Path(td)
+        assert pipeline.genesis_rules_count(pd, "error") == 0
+        for i in range(25):
+            pipeline.genesis_rules_write(pd, "error", "build", f"rule {i}")
+        pipeline.genesis_rules_write(pd, "*", "build", "global rule")
+        pipeline.genesis_rules_write(pd, "other", "build", "other-scope rule")
+        # error scope sees its 25 + the global '*' rule, not the other module's.
+        assert pipeline.genesis_rules_count(pd, "error") == 26
+        assert pipeline.genesis_rules_count(pd, "*") == 1  # '*' scope alone
+    print("  OK  genesis_rules_count")
+
+
+def test_monitor_docs_richness_row() -> None:
+    """R13.3: the docs-richness row renders the latest docs.richness event
+    (fr/notes/rules + pass delta); no event → "" (row hidden)."""
+    import json
+    import tempfile
+
+    import monitor
+    from pipeline_core.monitor import events_data
+
+    with tempfile.TemporaryDirectory() as td:
+        ev = os.path.join(td, "events.jsonl")
+        old_log, old_start = events_data.EVENTS_LOG, events_data.pipeline_start_time
+        events_data.EVENTS_LOG = ev
+        events_data.pipeline_start_time = lambda: 0.0
+        try:
+            assert monitor._docs_richness_row() == ""  # no file yet
+            with open(ev, "w") as fh:
+                fh.write(json.dumps({"ts": "2026-06-10T00:00:00+00:00",
+                                     "event": "docs.richness",
+                                     "data": {"fr_chars": 1200, "notes": 3,
+                                              "genesis_rules": 5, "pass_count": 7,
+                                              "prev_pass_count": 4,
+                                              "improved": True}}) + "\n")
+            row = monitor._plain(monitor._docs_richness_row())
+            assert "fr=1200c" in row and "notes=3" in row and "rules=5" in row
+            assert "4→7" in row
+        finally:
+            events_data.EVENTS_LOG = old_log
+            events_data.pipeline_start_time = old_start
+    print("  OK  monitor docs richness row")
 
 
 def test_shutdown_on_finish_toggle() -> None:

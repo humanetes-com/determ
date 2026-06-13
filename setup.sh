@@ -294,6 +294,9 @@ info "Upgrading pip..."
 
 info "Installing Python dependencies..."
 "$VENV_PIP" install -r "$SCRIPT_DIR/requirements.txt" --quiet
+# Editable install of the determ package itself (P8) — wires the `determ` /
+# `determ-monitor` console scripts and pipeline_core onto the path.
+"$VENV_PIP" install -e "$SCRIPT_DIR" --quiet --no-deps
 ok "Python deps installed ($("$VENV_PYTHON" --version))"
 
 # ── 8. vLLM (only when BACKEND=vllm) ─────────────────────────────────────────
