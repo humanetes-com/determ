@@ -11,7 +11,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pipeline
+import pipeline  # noqa: F401  — import triggers workspace_scan.configure() at the composition root
+from pipeline_core.adapters import workspace_scan as ws_mod
+from pipeline_core.adapters.workspace_scan import (
+    LLMDependencyGraph,
+    LLMWorkspaceScanner,
+    StaticDependencyGraph,
+    StaticWorkspaceScanner,
+)
 
 
 def _workspace(tmp_path: Path) -> Path:
@@ -33,12 +40,12 @@ def _workspace(tmp_path: Path) -> Path:
     return ws
 
 
-def _graph(tmp_path, monkeypatch) -> pipeline.StaticDependencyGraph:
+def _graph(tmp_path, monkeypatch) -> StaticDependencyGraph:
     ws = _workspace(tmp_path)
     # Force the tomllib fallback (don't depend on a real cargo binary/workspace).
-    monkeypatch.setattr(pipeline.StaticDependencyGraph, "_try_cargo_metadata",
+    monkeypatch.setattr(StaticDependencyGraph, "_try_cargo_metadata",
                         lambda self: False)
-    return pipeline.StaticDependencyGraph(ws)
+    return StaticDependencyGraph(ws)
 
 
 def test_static_dep_graph_modules_types_and_deps(tmp_path, monkeypatch) -> None:
@@ -74,11 +81,60 @@ def test_static_dep_graph_module_commands(tmp_path, monkeypatch) -> None:
 
 def test_static_workspace_scanner_markdown(tmp_path) -> None:
     ws = _workspace(tmp_path)
-    out = pipeline.StaticWorkspaceScanner().scan(ws)
+    out = StaticWorkspaceScanner().scan(ws)
     assert "Crate `crate_a`" in out and "Crate `crate_b`" in out
     assert "lib target" in out          # crate_a
     assert "proc-macro target" in out   # crate_b
     # crate_a's external dep is surfaced under its dependencies block.
     assert "serde" in out
     # Empty project → empty string.
-    assert pipeline.StaticWorkspaceScanner().scan(tmp_path / "nonexistent") == ""
+    assert StaticWorkspaceScanner().scan(tmp_path / "nonexistent") == ""
+
+
+def test_llm_workspace_scanner_uses_injected_ask(tmp_path, monkeypatch) -> None:
+    """The LLM scanner collects manifests and wraps the model's reply; `ask` is
+    the injected facade (configure()), faked here so no live model is needed."""
+    ws = _workspace(tmp_path)
+    seen = {}
+    monkeypatch.setattr(ws_mod, "ask",
+                        lambda prompt, **k: seen.setdefault("p", prompt) and "" or "**Package `crate_a`**: src/lib.rs")
+    out = LLMWorkspaceScanner().scan(ws)
+    assert "Workspace structure" in out and "**Package `crate_a`**" in out
+    # The collected manifests were fed to the model.
+    assert "Cargo.toml" in seen["p"]
+    # No manifests → empty string (no model call needed).
+    assert LLMWorkspaceScanner().scan(tmp_path / "nonexistent") == ""
+
+
+def test_llm_dep_graph_parses_model_response(tmp_path) -> None:
+    """`_parse_response` turns the structured model reply into the graph: module
+    list, pruned intra-workspace deps, topo order, and command templates."""
+    g = LLMDependencyGraph(tmp_path / "empty")  # no manifests → no model call
+    parsed = g._parse_response(
+        "MODULE: name=crate_a dir=crate_a type=lib deps=\n"
+        "MODULE: name=crate_b dir=crate_b type=proc-macro deps=crate_a,serde\n"
+        "TOPO_ORDER: crate_a crate_b\n"
+        "MODULE_TEST_CMD: cargo test -p {module}\n"
+        "MODULE_BUILD_CHECK: NONE\n"
+    )
+    assert parsed is not None
+    modules, deps, types, topo, test_tpl, check_tpl = parsed
+    assert set(modules) == {"crate_a", "crate_b"}
+    assert types["crate_b"] == "proc-macro"
+    assert deps["crate_b"] == {"crate_a"}      # external `serde` pruned
+    assert topo == ["crate_a", "crate_b"]
+    assert test_tpl == "cargo test -p {module}"
+    assert check_tpl == ""                       # NONE → empty
+    # Unparseable reply → None (caller falls back to whole-workspace mode).
+    assert g._parse_response("no modules here") is None
+
+
+def test_scanner_factories_honor_env(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("WORKSPACE_SCANNER", "static")
+    assert isinstance(ws_mod._workspace_scanner_factory(), StaticWorkspaceScanner)
+    monkeypatch.setenv("WORKSPACE_SCANNER", "llm")
+    assert isinstance(ws_mod._workspace_scanner_factory(), LLMWorkspaceScanner)
+    monkeypatch.setenv("DEPENDENCY_GRAPH", "static")
+    assert isinstance(ws_mod._dependency_graph_factory(tmp_path / "x"), StaticDependencyGraph)
+    monkeypatch.setenv("DEPENDENCY_GRAPH", "llm")
+    assert isinstance(ws_mod._dependency_graph_factory(tmp_path / "x"), LLMDependencyGraph)
