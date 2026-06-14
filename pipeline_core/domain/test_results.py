@@ -141,6 +141,20 @@ def validate_task3_output(pass_count: int, fail_count: int,
     return "fail", f"{pass_count} passed, {fail_count} failed"
 
 
+def insert_no_run(test_command: str) -> str:
+    """Insert ``--no-run`` after the first ``cargo test`` so a zero-tests-ran
+    result can be reclassified (build error vs harness issue). Regex-free
+    (replaces the legacy ``\\bcargo\\s+test\\b`` sub): token-scan for an adjacent
+    ``cargo`` ``test`` pair and splice ``--no-run`` after it. Returns the command
+    unchanged when no such pair exists."""
+    toks = test_command.split()
+    for i in range(len(toks) - 1):
+        if toks[i] == "cargo" and toks[i + 1] == "test":
+            toks.insert(i + 2, "--no-run")
+            return " ".join(toks)
+    return test_command
+
+
 def resolve_task3_verdict(passed: bool, pass_count: int, fail_count: int,
                           module_has_tests: bool) -> tuple[str, str]:
     """task3's strict per-cluster boolean is the verdict AUTHORITY; the

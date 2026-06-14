@@ -68,6 +68,27 @@ def test_happy_path_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
                      "commit_and_mark", "set_current"]
 
 
+def test_low_coverage_warns_then_proceeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        strip_bake.subprocess, "run",
+        lambda *a, **k: subprocess.CompletedProcess(a[0], 0, " M x\n", ""))
+    logs: list[str] = []
+    calls: list[str] = []
+    deps = _deps(calls)
+    # tarpaulin "exists" + sentinel below target → low-coverage WARNING branch.
+    tarp = tmp_path / "tarpaulin"
+    tarp.write_text("", encoding="utf-8")
+    (tmp_path / ".aug_m").write_text("50%", encoding="utf-8")
+    deps = StripBakeDeps(**{**deps.__dict__, "tarpaulin_bin": tarp,
+                            "log": lambda m: logs.append(m)})
+    strip_and_bake_module(tmp_path, "m", tmp_path / "m", crate_type="lib",
+                          from_spec=False, src_hash="abc", deps=deps)
+    assert any("coverage is 50.0%" in m for m in logs)
+    assert calls[:2] == ["capture", "bake"]  # proceeded past the warning
+
+
 def test_bake_failure_aborts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         strip_bake.subprocess, "run",

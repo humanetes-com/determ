@@ -25,7 +25,7 @@ from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from functools import partial as _partial
 from pathlib import Path
-from typing import TypeVar
+from typing import Any, TypeVar
 
 _RT = TypeVar("_RT")
 
@@ -53,15 +53,17 @@ from pipeline_core.application import orchestrator as _orchestrator
 from pipeline_core.application.gen_tests_reattach import (
     ReattachDeps,
 )
-from pipeline_core.application.gen_tests_reattach import (
-    reattach_gen_tests as _reattach_gen_tests,
-)
 from pipeline_core.application.generators import task1_synthesizer as _task1_synth
 from pipeline_core.application.generators.task1_synthesizer import (
     LLMTask1Synthesizer,
     StaticTask1Synthesizer,
     Task1Synthesizer,
 )
+from pipeline_core.application.reconstruct.failure_analysis import FailureAnalysisStep
+from pipeline_core.application.reconstruct.module_reconstructor import ModuleReconstructor
+from pipeline_core.application.reconstruct.reconstruction_step import ReconstructionStep
+from pipeline_core.application.reconstruct.requirements_phase import RequirementsPhase
+from pipeline_core.application.reconstruct.run_context import RunContext
 from pipeline_core.application.refine_loop import run_refine_loop as _run_refine_loop
 from pipeline_core.application.strip_bake import (
     StripBakeDeps,
@@ -179,8 +181,8 @@ from pipeline_core.domain.test_results import (
     extract_test_output_from_file,
     failing_test_names,
     identifiers_in,
+    insert_no_run,
     per_file_test_stats,
-    resolve_task3_verdict,
     validate_task3_output_strict,
 )
 from pipeline_core.domain.test_results import (
@@ -17199,6 +17201,203 @@ _LOCK_DEPS = _orchestrator.LockDeps(
 )
 
 
+class _ReconstructAdapter:
+    """Composition-root adapter: binds pipeline.py's concrete functions to the
+    role-based reconstruction ports (pipeline_core.ports.reconstruct). The
+    reconstruction use-cases receive it through their NARROW port types (ISP) —
+    this one object is the boundary implementation, not a god-deps."""
+
+    # --- Telemetry ---
+    def log(self, msg: str) -> None:
+        _log(msg)
+
+    def emit(self, event: str, **fields: Any) -> None:
+        _emit(event, **fields)
+
+    def set_current(self, project_dir: Path, label: str) -> None:
+        _set_current(project_dir, label)
+
+    # --- PhaseGate ---
+    def phase_valid(self, project_dir: Path, phase_key: str) -> bool:
+        return _phase_valid(project_dir, phase_key)
+
+    def commit_and_mark(self, project_dir: Path, phase_key: str, status: str, *,
+                        commit_message: str, tag: "str | None" = None,
+                        detail: str = "", source_hash: "str | None" = None) -> None:
+        _commit_and_mark(project_dir, phase_key, status, commit_message=commit_message,
+                         tag=tag, detail=detail, source_hash=source_hash)
+
+    # --- RequirementsService ---
+    def task1(self, project_dir, genesis_path, functional_req_path, test_files,
+              readme_text, *, project_profile="", crate_type="", module_name="",
+              project_context="", coverage_strategy=""):
+        return task1(project_dir, genesis_path, functional_req_path, test_files,
+                     readme_text, project_profile=project_profile, crate_type=crate_type,
+                     module_name=module_name, project_context=project_context,
+                     coverage_strategy=coverage_strategy)
+
+    def validate_task1_output(self, req_path, test_files):
+        return validate_task1_output(req_path, test_files)
+
+    # --- Generator ---
+    def task2_inner_loop(self, project_dir, genesis_path, functional_req_path,
+                         manifest_path, existing_test_files, project_profile,
+                         workspace_structure, build_check_cmd, *, locked_dep_context="",
+                         current_module="", module_dir_rel="", whole_project_context="",
+                         coverage_strategy="", api_surface="", prev_source_context=""):
+        return task2_inner_loop(
+            project_dir, genesis_path, functional_req_path, manifest_path,
+            existing_test_files, project_profile, workspace_structure, build_check_cmd,
+            locked_dep_context=locked_dep_context, current_module=current_module,
+            module_dir_rel=module_dir_rel, whole_project_context=whole_project_context,
+            coverage_strategy=coverage_strategy, api_surface=api_surface,
+            prev_source_context=prev_source_context)
+
+    def load_original_structure(self, project_dir, module_name):
+        return load_original_structure(project_dir, module_name)
+
+    def validate_task2_output(self, project_dir, expected_paths, *, req_path):
+        return validate_task2_output(project_dir, expected_paths, req_path=req_path)
+
+    def validate_api_conformance(self, project_dir, module_name, module_dir):
+        return validate_task2_api_surface_conformance(project_dir, module_name, module_dir)
+
+    # --- TestRunner ---
+    def task3(self, project_dir, test_command, iteration, output_dir, genesis_path):
+        return task3(project_dir, test_command, iteration, output_dir, genesis_path)
+
+    # --- Fixer ---
+    def task2_fix_loop(self, project_dir, manifest_path, existing_test_files, test_output,
+                       test_command, functional_req_path, *, genesis_path=None,
+                       module_dir_rel=""):
+        return task2_fix_loop(project_dir, manifest_path, existing_test_files, test_output,
+                              test_command, functional_req_path, genesis_path=genesis_path,
+                              module_dir_rel=module_dir_rel)
+
+    def classify_failure(self, test_output: str) -> str:
+        return classify_failure(test_output)
+
+    def diagnose_no_tests(self, project_dir: Path, test_command: str, reason: str,
+                          test_output: str) -> "tuple[str, str]":
+        """Reclassify a zero-tests-ran result: a failing ``--no-run`` means a
+        build error (not a harness issue). Returns (failure_type, test_output)."""
+        _log(f"  WARNING: no_tests — {reason}. Running --no-run to diagnose.")
+        no_run_cmd = insert_no_run(test_command)
+        try:
+            nr = subprocess.run(no_run_cmd, shell=True, cwd=str(project_dir),
+                                capture_output=True, text=True, timeout=120)
+            if nr.returncode != 0:
+                _log("  --no-run failed: build error causes zero tests.")
+                return "build", test_output + (
+                    f"\n\nDIAGNOSIS (--no-run): build failed — {nr.stderr[:_FIX_ERR_CAP]}")
+            return "no_tests", test_output + f"\n\nDIAGNOSIS: {reason}"
+        except Exception as nr_err:
+            _log(f"  --no-run check failed: {nr_err}")
+            return "no_tests", test_output + f"\n\nDIAGNOSIS: {reason}"
+
+    # --- Analyst ---
+    def task4(self, genesis_path, functional_req_path, test_output, iteration, output_dir,
+              *, failure_type="test", failure_log="", prev_pass_count=0, prev_test_output="",
+              source_context="", api_surface=""):
+        return task4(genesis_path, functional_req_path, test_output, iteration, output_dir,
+                     failure_type=failure_type, failure_log=failure_log,
+                     prev_pass_count=prev_pass_count, prev_test_output=prev_test_output,
+                     source_context=source_context, api_surface=api_surface)
+
+    def validate_task4_output(self, genesis_before, genesis_after, test_output, failure_type):
+        return validate_task4_output(genesis_before, genesis_after, test_output, failure_type)
+
+    def genesis_audit(self, genesis_path):
+        return task_genesis_audit(genesis_path)
+
+    # --- FailureJournal ---
+    def load_failure_log(self, log_path):
+        return load_failure_log(log_path)
+
+    def append_failure_log(self, log_path, iteration, failure_type, current_pass,
+                           prev_pass_count, summary):
+        append_failure_log(log_path, iteration, failure_type, current_pass,
+                           prev_pass_count, summary)
+
+    # --- Ratchet ---
+    def best_tree_pass_count(self, project_dir):
+        return best_tree_pass_count(project_dir)
+
+    def save_best_tree(self, project_dir, files, pass_count, *, iteration):
+        return save_best_tree(project_dir, files, pass_count, iteration=iteration)
+
+    def restore_best_tree(self, project_dir):
+        return restore_best_tree(project_dir)
+
+    # --- Artifacts ---
+    def read(self, path):
+        return read(path)
+
+    def load_api_surface(self, project_dir, module_name):
+        return load_api_surface(project_dir, module_name)
+
+    def load_manifest(self, manifest_path):
+        return load_manifest(manifest_path)
+
+    def load_locked_source_context(self, project_dir, dep_names):
+        return load_locked_source_context(project_dir, dep_names)
+
+    def format_whole_project_context(self, test_files, reason):
+        return _format_whole_project_context(test_files, reason)
+
+    def collect_source_context(self, project_dir, manifest_path, exclude):
+        out = ""
+        for rel in load_manifest(manifest_path):
+            if rel in exclude:
+                continue
+            sp = project_dir / rel
+            if sp.exists():
+                out += f'\n<FILE path="{rel}">\n{sp.read_text(encoding="utf-8")}\n</FILE>\n'
+        return out
+
+    # --- CoverageDocs ---
+    def regenerate(self, project_dir, test_files, readme_text, project_profile, clusters):
+        return task0b_discovery(project_dir / COVERAGE_STRATEGY_NAME, project_dir,
+                                test_files, readme_text, project_profile,
+                                clusters=clusters, force=True)
+
+    # --- FlowAudit ---
+    def run(self, context: str) -> None:
+        _run_flow_audit(context)
+
+    # --- DocsMetrics ---
+    def model_notes(self, fr_path):
+        return _load_model_notes(fr_path)
+
+    def genesis_rules_count(self, project_dir, module_scope):
+        return genesis_rules_count(project_dir, module_scope)
+
+
+_RECONSTRUCT_ADAPTER = _ReconstructAdapter()
+
+# P5: reconstruction use-cases — each depends on narrow role slices of the adapter.
+_REQUIREMENTS_PHASE = RequirementsPhase(
+    requirements=_RECONSTRUCT_ADAPTER, gate=_RECONSTRUCT_ADAPTER,
+    telemetry=_RECONSTRUCT_ADAPTER, analyst=_RECONSTRUCT_ADAPTER,
+    journal=_RECONSTRUCT_ADAPTER, artifacts=_RECONSTRUCT_ADAPTER,
+)
+_RECONSTRUCTION_STEP = ReconstructionStep(
+    generator=_RECONSTRUCT_ADAPTER, tests=_RECONSTRUCT_ADAPTER, fixer=_RECONSTRUCT_ADAPTER,
+    artifacts=_RECONSTRUCT_ADAPTER, telemetry=_RECONSTRUCT_ADAPTER,
+    lock_deps=_LOCK_DEPS, reattach_deps=_REATTACH_DEPS,
+    no_improvement_threshold=NO_IMPROVEMENT_THRESHOLD,
+)
+_FAILURE_ANALYSIS = FailureAnalysisStep(
+    analyst=_RECONSTRUCT_ADAPTER, journal=_RECONSTRUCT_ADAPTER, ratchet=_RECONSTRUCT_ADAPTER,
+    artifacts=_RECONSTRUCT_ADAPTER, coverage_docs=_RECONSTRUCT_ADAPTER,
+    audit=_RECONSTRUCT_ADAPTER, docs=_RECONSTRUCT_ADAPTER, telemetry=_RECONSTRUCT_ADAPTER,
+    genesis_audit_interval=GENESIS_AUDIT_INTERVAL,
+)
+_MODULE_RECONSTRUCTOR = ModuleReconstructor(
+    step=_RECONSTRUCTION_STEP, analysis=_FAILURE_ANALYSIS, telemetry=_RECONSTRUCT_ADAPTER,
+)
+
+
 def main():
     parser = _orchestrator.build_arg_parser()
     args = parser.parse_args()
@@ -17731,7 +17930,6 @@ def main():
         module_iter = 1
         prev_pass_count = 0
         prev_test_output = ""
-        prev_task2_source = ""  # generated source from previous iteration (for TASK 2 context)
 
         t1_input = module_test_files if module_has_tests else test_files
         if not module_has_tests:
@@ -17757,66 +17955,17 @@ def main():
                      f"from {_fr_root.name} ({_fr_root.stat().st_size} chars).")
             else:
                 _log(f"  [from-spec] {module_req_path.name} already present — leaving as-is.")
-            t1_valid = True
-        else:
-            t1_valid = False
 
-        # TASK 1 with anti-corruption retry (max 2 retries after initial attempt).
-        T1_MAX_RETRIES = 2
-        _task1_t0 = time.monotonic()
-        if not _from_spec:
-            _emit("task.start", task="task1", module=module_name)
-        for t1_attempt in (range(0) if _from_spec else range(T1_MAX_RETRIES + 1)):
-            if _phase_valid(project_dir, f"task1/{module_name}") and module_req_path.exists() and t1_attempt == 0:
-                _log(f"\nTASK 1: requirements for '{module_name}' already done — skipping.")
-            else:
-                if t1_attempt > 0:
-                    _log(f"\nTASK 1: retry {t1_attempt}/{T1_MAX_RETRIES} for '{module_name}'.")
-                    module_req_path.unlink(missing_ok=True)
-                if not task1(project_dir, genesis_path, module_req_path, t1_input,
-                             readme_text, project_profile, crate_type=crate_type,
-                             module_name=module_name, project_context=project_context,
-                             coverage_strategy=coverage_strategy):
-                    _log(f"  TASK 1 failed for '{module_name}' — skipping module.")
-                    _emit("task.done", task="task1", module=module_name,
-                          duration_ms=int((time.monotonic() - _task1_t0) * 1000),
-                          data={"ok": False, "reason": "task1_failed"})
-                    break
-
-            ok, reason = validate_task1_output(module_req_path, t1_input)
-            if ok:
-                _log("  TASK 1 output validated OK.")
-                t1_valid = True
-                _commit_and_mark(
-                    project_dir, f"task1/{module_name}", "done",
-                    commit_message=f"pipeline: task1 — {module_name}",
-                    detail=f"{module_req_path.stat().st_size} chars",
-                    source_hash=_src_hash,
-                )
-                _set_current(project_dir, f"task1/{module_name} / done")
-                _emit("task.done", task="task1", module=module_name,
-                      duration_ms=int((time.monotonic() - _task1_t0) * 1000),
-                      data={"ok": True, "retries": t1_attempt,
-                            "req_chars": module_req_path.stat().st_size})
-                break
-            _log(f"  TASK 1 anti-corruption FAILED: {reason}")
-            if t1_attempt >= T1_MAX_RETRIES:
-                _log(f"  TASK 1 failed validation after {T1_MAX_RETRIES} retries — "
-                     f"escalating to TASK 4 with failure_type='requirements_failure'.")
-                genesis_before = read(genesis_path)
-                failure_log_content = load_failure_log(failure_log_path)
-                _t4_api_surface = load_api_surface(project_dir, module_name)
-                task4(
-                    genesis_path, module_req_path,
-                    f"TASK 1 produced invalid requirements after {T1_MAX_RETRIES} retries. "
-                    f"Last rejection reason: {reason}",
-                    module_iter, project_dir,
-                    failure_type="requirements_failure",
-                    failure_log=failure_log_content,
-                    prev_pass_count=prev_pass_count, prev_test_output=prev_test_output,
-                    api_surface=_t4_api_surface,
-                )
-                break  # do not set t1_valid; fall through to `if not t1_valid: continue`
+        # TASK 1: generate → validate → retry → escalate (P5 — RequirementsPhase use-case).
+        t1_valid = _REQUIREMENTS_PHASE.run(
+            project_dir, module_name=module_name, module_req_path=module_req_path,
+            genesis_path=genesis_path, failure_log_path=failure_log_path,
+            t1_input=t1_input, readme_text=readme_text, project_profile=project_profile,
+            project_context=project_context, coverage_strategy=coverage_strategy,
+            crate_type=crate_type, from_spec=_from_spec, src_hash=_src_hash,
+            iteration=module_iter, prev_pass_count=prev_pass_count,
+            prev_test_output=prev_test_output,
+        )
 
         if not t1_valid:
             continue
@@ -17848,338 +17997,22 @@ def main():
         if not module_has_tests:
             _log(f"  '{module_name}' has 0 test files — will use whole-project context in TASK 2.")
 
-        # --- TASK 2-4: reconstruction loop ---
-        module_iter = 1  # reset in case task1 incremented it during escalation
-        prev_pass_count = 0
-        prev_test_output = ""
-        no_improvement_streak = 0
-
-        while True:
-            _log(f"\n{'=' * 50}")
-            _log(f"MODULE {module_name} — ITERATION {module_iter}")
-            _log(f"{'=' * 50}")
-
-            locked_dep_context = ""
-            if is_multi_module and workspace_deps:
-                locked_dep_context = load_locked_source_context(
-                    project_dir, workspace_deps & locked_modules
-                )
-
-            label: int | str = f"{module_name}_{module_iter}" if is_multi_module else module_iter
-
-            # Whole-project context: zero-test modules or stuck modules.
-            if not module_has_tests:
-                wpc_reason = (
-                    f"Module '{module_name}' has no tests. "
-                    f"Infer its public interface from how dependent modules import and use it."
-                )
-                whole_project_context = _format_whole_project_context(test_files, wpc_reason)
-            elif no_improvement_streak >= NO_IMPROVEMENT_THRESHOLD:
-                wpc_reason = (
-                    f"No improvement for {no_improvement_streak} iterations on '{module_name}'. "
-                    f"Full project test suite provided for additional signal."
-                )
-                whole_project_context = _format_whole_project_context(test_files, wpc_reason)
-                _log(f"  Escalating to whole-project context ({no_improvement_streak} iters no improvement).")
-            else:
-                whole_project_context = ""
-
-            # Append crate-type-specific constraints so the LLM generates valid code.
-            if "proc-macro" in crate_type.lower():
-                whole_project_context += """
---- RUST PROC-MACRO CRATE CONSTRAINTS (mandatory) ---
-This is a Rust procedural macro crate. Strict rules apply:
-
-1. lib.rs MUST ONLY export functions tagged with #[proc_macro_derive], #[proc_macro_attribute],
-   or #[proc_macro]. NO pub structs, enums, traits, or type aliases at the crate root.
-
-2. Proc-macro entry functions MUST use `proc_macro::TokenStream` (the stdlib crate),
-   NOT `proc_macro2::TokenStream`, for their input and return types:
-   CORRECT: pub fn my_derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream
-   WRONG:   pub fn my_derive(input: proc_macro2::TokenStream) -> proc_macro2::TokenStream
-
-3. All helper types (structs, enums, traits) MUST live in private submodules (e.g. parse_attrs.rs,
-   errors.rs). They should NOT be pub in lib.rs.
-
-4. Inside private submodules, proc_macro2::TokenStream is fine for token manipulation.
---- END PROC-MACRO CONSTRAINTS ---
-"""
-
-            # TASK 2: generate source files.
-            if not task2_inner_loop(
-                project_dir, genesis_path, module_req_path, module_manifest,
-                existing_test_files, project_profile, workspace_structure,
-                module_build_check, locked_dep_context=locked_dep_context,
-                current_module=module_name if is_multi_module else "",
-                module_dir_rel=module_dir_rel,
-                whole_project_context=whole_project_context,
-                coverage_strategy=coverage_strategy,
-                api_surface=load_api_surface(project_dir, module_name),
-                prev_source_context=prev_task2_source,
-            ):
-                _log("TASK 2 inner loop exhausted — escalating to TASK 4.")
-                test_output = "BUILD FAILED: inner loop exhausted all retries."
-                failure_type = "build"
-            else:
-                # Anti-corruption: verify expected files are present before running tests.
-                expected_paths = load_original_structure(project_dir, module_name)
-                t2_ok, t2_reason = validate_task2_output(project_dir, expected_paths, req_path=module_req_path)
-                if not t2_ok:
-                    _log(f"  TASK 2 anti-corruption FAILED: {t2_reason} — treating as build failure.")
-                    test_output = f"BUILD FAILED: {t2_reason}"
-                    failure_type = "build"
-                else:
-                    # Reattach preserved gen_tests siblings + decls onto regenerated source,
-                    # then validate (P5-S3 — extracted to application/gen_tests_reattach.py).
-                    _reattach_gen_tests(
-                        project_dir, module_name, clusters=_clusters,
-                        saved_gen_blocks=saved_gen_blocks,
-                        existing_test_files=existing_test_files, deps=_REATTACH_DEPS,
-                    )
-                    
-                    # API surface conformance: soft check — log drift but don't
-                    # block. The report is appended to test_output below if
-                    # TASK 3 fails, so TASK 4 sees structural drift alongside
-                    # cargo's failure.
-                    api_conformance_ok, api_conformance_report = (
-                        validate_task2_api_surface_conformance(
-                            project_dir, module_name, module_dir
-                        )
-                    )
-                    if not api_conformance_ok:
-                        _log(f"  ⚠️  {api_conformance_report}")
-
-                    # TASK 3: run tests.
-                    _set_current(project_dir, f"task3/{module_name} / running tests (iter {module_iter})")
-                    passed, test_output = task3(
-                        project_dir, module_test_cmd, label, project_dir, genesis_path
-                    )
-                    if not api_conformance_ok:
-                        test_output = (
-                            test_output
-                            + "\n\n--- API surface drift (pre-test) ---\n"
-                            + api_conformance_report
-                            + "\n"
-                        )
-                    pass_count, fail_count, _ = _parse_test_counts(test_output)
-
-                    # Anti-corruption: task3's strict per-cluster boolean is the
-                    # verdict authority; the lenient classifier only subtypes
-                    # failures. Re-deriving "pass" from counts let an INCOMPLETE
-                    # cluster (24 passed / 0 failed / 26 expected) exit 0.
-                    t3_status, t3_reason = resolve_task3_verdict(
-                        passed, pass_count, fail_count, module_has_tests
-                    )
-                    _log(f"  TASK 3 result: {t3_status} — {t3_reason}")
-
-                    if t3_status == "pass":
-                        _orchestrator.lock_or_complete(
-                            project_dir, module_name, module_dir, module_manifest,
-                            is_multi_module=is_multi_module, locked_modules=locked_modules,
-                            src_hash=_src_hash,
-                            commit_message=f"pipeline: task3 iter {module_iter} — {module_name} tests pass",
-                            tag=f"passing-{module_name}-{module_iter}",
-                            detail=f"iteration {module_iter}",
-                            set_current_label=f"task2-4/{module_name} / LOCKED iter {module_iter}",
-                            locked_commit_msg=f"pipeline: locked — {module_name}",
-                            success_log=f"\nSUCCESS: all tests passed on iteration {module_iter}.",
-                            complete_commit_msg=f"pipeline: complete — all tests pass iter {module_iter}",
-                            deps=_LOCK_DEPS,
-                        )
-                        break
-
-                    elif t3_status == "no_files":
-                        # Module has no test files — lock on build success.
-                        _log("  Module has no test files — locking on build success.")
-                        _orchestrator.lock_or_complete(
-                            project_dir, module_name, module_dir, module_manifest,
-                            is_multi_module=is_multi_module, locked_modules=locked_modules,
-                            src_hash=_src_hash,
-                            commit_message=f"pipeline: build passed (no tests) — {module_name} iter {module_iter}",
-                            detail=f"no tests iter {module_iter}",
-                            set_current_label=f"task2-4/{module_name} / LOCKED (no tests)",
-                            locked_commit_msg=f"pipeline: locked (no tests) — {module_name}",
-                            success_log="\nSUCCESS: build passed with no module tests.",
-                            deps=_LOCK_DEPS,
-                        )
-                        break
-
-                    elif t3_status == "no_tests":
-                        # Tests exist but 0 ran — check if the binary even compiles.
-                        # If `--no-run` fails, the root cause is a build error, not a test
-                        # harness issue; reclassify so TASK 4 gets accurate failure_type.
-                        _log(f"  WARNING: no_tests — {t3_reason}. Running --no-run to diagnose.")
-                        no_run_cmd = re.sub(
-                            r'\bcargo\s+test\b',
-                            'cargo test --no-run',
-                            module_test_cmd, count=1
-                        )
-                        try:
-                            nr_result = subprocess.run(
-                                no_run_cmd, shell=True, cwd=str(project_dir),
-                                capture_output=True, text=True, timeout=120
-                            )
-                            if nr_result.returncode != 0:
-                                _log("  --no-run failed: build error causes zero tests.")
-                                failure_type = "build"
-                                test_output += (
-                                    f"\n\nDIAGNOSIS (--no-run): build failed — "
-                                    f"{nr_result.stderr[:_FIX_ERR_CAP]}"
-                                )
-                            else:
-                                failure_type = "no_tests"
-                                test_output += f"\n\nDIAGNOSIS: {t3_reason}"
-                        except Exception as nr_err:
-                            _log(f"  --no-run check failed: {nr_err}")
-                            failure_type = "no_tests"
-                            test_output += f"\n\nDIAGNOSIS: {t3_reason}"
-
-                    else:  # "fail"
-                        # Try targeted fix loop before full regeneration.
-                        fix_passed, test_output = task2_fix_loop(
-                            project_dir, module_manifest, existing_test_files,
-                            test_output, module_test_cmd, module_req_path,
-                            genesis_path=genesis_path,
-                            module_dir_rel=module_dir_rel,
-                        )
-                        if fix_passed:
-                            # The fix loop's own check passed — but the ONLY
-                            # authority for SUCCESS is the per-cluster strict
-                            # runner. Re-run TASK 3 so the verdict (and its
-                            # task.done passed=true evidence event, audit C9)
-                            # comes from the same gate as a normal pass.
-                            # Parsing counts out of the fix loop's output let a
-                            # default-cluster-only pass exit 0 while extra_cap
-                            # was failing (2026-06-12 false SUCCESS).
-                            reverified, test_output = task3(
-                                project_dir, module_test_cmd,
-                                f"{label}-fixverify", project_dir, genesis_path,
-                            )
-                            if reverified:
-                                _orchestrator.lock_or_complete(
-                                    project_dir, module_name, module_dir, module_manifest,
-                                    is_multi_module=is_multi_module, locked_modules=locked_modules,
-                                    src_hash=_src_hash,
-                                    commit_message=f"pipeline: task3 iter {module_iter} — {module_name} tests pass (fix loop)",
-                                    tag=f"passing-{module_name}-{module_iter}",
-                                    detail=f"iteration {module_iter} (fix loop)",
-                                    set_current_label=f"task2-4/{module_name} / LOCKED iter {module_iter}",
-                                    locked_commit_msg=f"pipeline: locked — {module_name}",
-                                    success_log="\nSUCCESS: all tests passed after fix loop.",
-                                    complete_commit_msg=f"pipeline: complete — all tests pass iter {module_iter}",
-                                    deps=_LOCK_DEPS,
-                                )
-                                break
-
-                        failure_type = classify_failure(test_output)
-
-            # TASK 4: analyze failure, update genesis.md.
-            _log(f"  Failure classification: {failure_type}")
-            genesis_before = read(genesis_path)
-            failure_log_content = load_failure_log(failure_log_path)
-            # Build source context: give TASK 4 the generated files so it can distinguish
-            # a requirements gap (model was told the wrong thing) from a generation error
-            # (model was told the right thing but produced wrong code).
-            t4_source_context = ""
-            for rel in load_manifest(module_manifest):
-                if rel in existing_test_files:
-                    continue
-                sp = project_dir / rel
-                if sp.exists():
-                    t4_source_context += f'\n<FILE path="{rel}">\n{sp.read_text(encoding="utf-8")}\n</FILE>\n'
-            _set_current(project_dir, f"task4/{module_name} / genesis update (iter {module_iter})")
-            t4_ok, current_pass = task4(
-                genesis_path, module_req_path, test_output, module_iter, project_dir,
-                failure_type=failure_type, failure_log=failure_log_content,
-                prev_pass_count=prev_pass_count, prev_test_output=prev_test_output,
-                source_context=t4_source_context,
-                api_surface=load_api_surface(project_dir, module_name),
-            )
-            genesis_after = read(genesis_path)
-
-            # Anti-corruption: detect genesis stall (TASK 4 produced no update).
-            t4_valid, t4_reason = validate_task4_output(genesis_before, genesis_after, test_output, failure_type)
-            if not t4_valid:
-                _log(f"  TASK 4 anti-corruption: {t4_reason}")
-                t4_summary = f"genesis_stall: {t4_reason}"
-                failure_type_logged = "genesis_stall"
-            else:
-                t4_summary = "genesis.md updated."
-                failure_type_logged = failure_type
-                # Genesis grew — regenerate coverage_strategy.md so TASK 0c and TASK 1
-                # prompts reflect lessons learned this iteration. force=True bypasses
-                # the hash cache (genesis update isn't captured in the inputs hash).
-                _log("  Regenerating coverage_strategy.md after genesis update...")
-                strategy_path = project_dir / COVERAGE_STRATEGY_NAME
-                coverage_strategy = task0b_discovery(
-                    strategy_path, project_dir, test_files, readme_text, project_profile,
-                    clusters=_clusters, force=True,
-                )
-
-            append_failure_log(
-                failure_log_path, label, failure_type_logged,
-                current_pass, prev_pass_count, t4_summary,
-            )
-            _prev_pass_before = prev_pass_count
-            if current_pass > prev_pass_count:
-                no_improvement_streak = 0
-            else:
-                no_improvement_streak += 1
-            prev_pass_count = current_pass
-            prev_test_output = test_output
-            total_iters += 1
-
-            regression = current_pass < prev_pass_count
-            if regression or total_iters % GENESIS_AUDIT_INTERVAL == 0:
-                _log("\nGenesis audit triggered"
-                     + (" (regression)" if regression else f" (every {GENESIS_AUDIT_INTERVAL} iters)"))
-                task_genesis_audit(genesis_path)
-
-            # Capture generated source for next iteration's TASK 2 (prev_source_context).
-            # t4_source_context was already built from manifest; reuse it here so TASK 2
-            # can compare against what failed rather than starting blind.
-            prev_task2_source = t4_source_context
-
-            # Repair iterations (2026-06-11): the tree is KEPT — no wipe, no
-            # re-merge, no re-fill from scratch. The wipe-and-regenerate loop
-            # measured "are the docs good enough for a clean generation?",
-            # but the active skeleton/TDD generator never read those docs
-            # (R13), so every regeneration landed on the same plateau while
-            # discarding the fix loop's progress. Now t4's genesis update and
-            # the FR reach the NEXT iteration's t3 fix loop through the
-            # REPOSITORY_SPECIFICATIONS prompt section, and repair compounds
-            # on the kept tree. task2a/2b/2c markers stay done → the module
-            # loop skips t2 and goes straight to t3 + fix loop.
-            #
-            # Best-tree ratchet: snapshot on a new-best pass count; if this
-            # iteration ended BELOW the best (regressed fix / broken build →
-            # 0 passing), restore the best tree so the next iteration starts
-            # at the floor, never beneath it.
-            _src_rel = [rel for rel in load_manifest(module_manifest)
-                        if rel not in existing_test_files]
-            _best = best_tree_pass_count(project_dir)
-            if current_pass > (_best if _best is not None else -1):
-                _saved_n = save_best_tree(project_dir, _src_rel, current_pass,
-                                          iteration=module_iter)
-                _emit("ratchet.save", data={"pass_count": current_pass,
-                                            "files": _saved_n, "iter": module_iter})
-            elif _best is not None and current_pass < _best:
-                _restored = restore_best_tree(project_dir)
-                _emit("ratchet.restore", data={"best": _best, "current": current_pass,
-                                               "files": len(_restored), "iter": module_iter})
-            _log(f"\n  Keeping '{module_name}' tree for repair iteration "
-                 f"{module_iter + 1} (no wipe — docs updated, fix loop continues).")
-            _run_flow_audit(f"iter {module_iter}")
-
-            # R13.3: per-iteration doc-richness vs convergence → trendable across runs.
-            _emit("docs.richness", module=module_name, iteration=module_iter, data={
-                "fr_chars": module_req_path.stat().st_size if module_req_path.exists() else 0,
-                "notes": len(_load_model_notes(module_req_path)),
-                "genesis_rules": genesis_rules_count(project_dir, module_name),
-                "pass_count": current_pass, "prev_pass_count": _prev_pass_before,
-                "improved": current_pass > _prev_pass_before})
-
-            module_iter += 1
+        # --- TASK 2-4: reconstruction loop (P5 — ModuleReconstructor use-case). ---
+        run_ctx = RunContext(
+            project_dir=project_dir, module_name=module_name, module_dir=module_dir,
+            crate_type=crate_type, module_manifest=module_manifest,
+            module_dir_rel=module_dir_rel, module_test_cmd=module_test_cmd,
+            module_build_check=module_build_check, module_has_tests=module_has_tests,
+            module_req_path=module_req_path, genesis_path=genesis_path,
+            failure_log_path=failure_log_path, is_multi_module=is_multi_module,
+            src_hash=_src_hash, workspace_deps=workspace_deps, locked_modules=locked_modules,
+            workspace_structure=workspace_structure, project_profile=project_profile,
+            project_context=project_context, readme_text=readme_text,
+            test_files=test_files, existing_test_files=existing_test_files,
+            clusters=_clusters, saved_gen_blocks=saved_gen_blocks,
+        )
+        total_iters, coverage_strategy = _MODULE_RECONSTRUCTOR.run(
+            run_ctx, total_iters=total_iters, coverage_strategy=coverage_strategy)
 
     # -----------------------------------------------------------------------
     # Final: run full test suite to validate the integrated workspace.
