@@ -409,6 +409,44 @@ class FillResult:
 
 
 @dataclass(frozen=True, slots=True)
+class FnFixContext:
+    """The per-fn prompt context the fill engine assembles before each model
+    call (P2): the impl where-clause, the TYPES_IN_SCOPE section, and the
+    relevance-filtered model notes. A pure value object so the fill use-cases
+    can type the `PromptContext.gather(...)` port result without importing the
+    static-analysis machinery that derives it (that lives behind the port)."""
+    container: str = ""
+    impl_where: str = ""
+    types_section: str = ""
+    notes_section: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ClusterFillResult:
+    """Outcome of one cluster's phase-C fill (P2 de-monolith of
+    `_task2_fill_fns_one_by_one`). `to_dict` round-trips the exact key set the
+    legacy function returned, so every call site reads it unchanged."""
+    fns_filled: int = 0
+    bytes_filled: int = 0
+    attempts: int = 0
+    errors: tuple[str, ...] = ()
+    remaining: int = 0
+    impls_filled: int = 0
+    impls_failed: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "fns_filled": self.fns_filled,
+            "bytes_filled": self.bytes_filled,
+            "attempts": self.attempts,
+            "errors": list(self.errors),
+            "remaining": self.remaining,
+            "impls_filled": self.impls_filled,
+            "impls_failed": self.impls_failed,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class Stub:
     """The input to one per-fn fill unit (R3.2): an `unimplemented!()` body to
     reconstruct, identified by location + signature. A narrower projection than
@@ -500,4 +538,5 @@ __all__ = [
     "FieldRecord", "MethodRecord", "TypeRecord",
     "FnRecord", "ModRecord", "ConstRecord", "DispatchFamily", "Diagnostic",
     "BuildCluster", "ModuleAugmentState", "FillResult", "Stub", "ImplBlock",
+    "FnFixContext", "ClusterFillResult",
 ]

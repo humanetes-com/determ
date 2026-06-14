@@ -14,7 +14,8 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 SCRIPT_DIR="$(pwd)"
 
-LOG=/tmp/pipeline_micro.log
+LOG="$SCRIPT_DIR/logs/pipeline_micro_$(date -u +%Y%m%d-%H%M%S).log"
+mkdir -p "$SCRIPT_DIR/logs"
 WS="$SCRIPT_DIR/tmp/microcrate"
 BIN="$SCRIPT_DIR/tools/skeleton_extractor/target/release/skeleton-extractor"
 

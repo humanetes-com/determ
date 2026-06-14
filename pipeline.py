@@ -156,13 +156,11 @@ from pipeline_core.domain.models import (
     ConstRecord,
     Diagnostic,
     DispatchFamily,
-    FillResult,
     FnRecord,
     Frontier,
     ImplBlock,
     ModRecord,
     ModuleAugmentState,
-    Stub,
     TypeRecord,
 )
 from pipeline_core.domain.refine import (
@@ -200,14 +198,10 @@ from pipeline_core.io import read, write
 from pipeline_core.prompts import runtime as _prompts_runtime
 from pipeline_core.prompts.context import (
     PerFnFixSections,
-    PerFnSections,
     PerImplSections,
 )
 from pipeline_core.prompts.per_fn import (
     build_per_fn_fix_prompt as _build_per_fn_fix_prompt,
-)
-from pipeline_core.prompts.per_fn import (
-    build_per_fn_prompt as _build_per_fn_prompt,
 )
 from pipeline_core.prompts.per_impl import (
     build_per_impl_prompt as _build_per_impl_prompt,
@@ -4273,13 +4267,7 @@ def _fallback_groups_per_file(test_files: list[tuple[str, str]]) -> list[dict]:
 # Per-fn fill rules relocated to application/reconstruct/fill_rules.py (P2);
 # aliases keep engine call sites + pins unchanged.
 from pipeline_core.application.reconstruct.fill_rules import (  # noqa: E402
-    failure_hit_unfilled_stub as _failure_hit_unfilled_stub,
-)
-from pipeline_core.application.reconstruct.fill_rules import (  # noqa: E402
     is_unimplemented_body as _is_unimplemented_body,
-)
-from pipeline_core.application.reconstruct.fill_rules import (  # noqa: E402
-    make_failed_attempt_body as _make_failed_attempt_body,
 )
 from pipeline_core.application.reconstruct.fill_rules import (  # noqa: E402
     module_of as _module_of,
@@ -7706,547 +7694,260 @@ def _phase_c_fill_impl_blocks(
 import pipeline_core.application.reconstruct.cargo_errors as _reconstruct_cargo_errors  # noqa: E402
 import pipeline_core.application.reconstruct.splice as _reconstruct_splice  # noqa: E402
 
-# Per-fn pass scheduling + ctx + early-exit result live in the application
-# layer (P2); aliases keep the engine body + harness/scheduling pins unchanged.
-from pipeline_core.application.reconstruct import (  # noqa: E402
-    PerFnPassCtx as _PerFnPassCtx,
-)
-from pipeline_core.application.reconstruct import (  # noqa: E402
-    fill_skip as _fill_skip,
-)
-from pipeline_core.application.reconstruct import (  # noqa: E402
-    group_priority_levels as _group_priority_levels,
-)
+# Leaf-first GROUP ordering stays aliased (used by the per-impl path); the per-fn
+# pass ctx / scheduling / early-exit helpers are now consumed inside the
+# application-layer use-cases, not here (P2).
 from pipeline_core.application.reconstruct import (  # noqa: E402
     leaf_first_group_order as _leaf_first_group_order,
 )
 
+# ===========================================================================
+# P2 / R3.3 — phase-C fill engine composition root.
+#
+# The per-fn fill unit (`FillOneFn`) and the per-cluster coordinator
+# (`PhaseCFillEngine`) live in `application/reconstruct/`. `pipeline.py` is the
+# composition root: `_PhaseCFillAdapter` binds the concrete engine helpers
+# below to the narrow `ports.fill_engine` roles, and `_task2_fill_fns_one_by_one`
+# becomes a thin shim that assembles the use-cases and runs them. The adapter
+# methods call the module-level `_func`s BY NAME so test monkeypatches
+# (scripted cargo/model, extractor-absent fallbacks) are honoured at call time.
+# ===========================================================================
+from pipeline_core.application.reconstruct.fill_one_fn import (  # noqa: E402
+    FillCaps,
+    FillOneFn,
+)
 
-def _fill_one_stub(idx: int, rec: Stub, *, ctx: _PerFnPassCtx) -> FillResult:
-    """Fill ONE stub fn via the per-fn fix loop — the engine unit behind
-    phase-c's per-fn path, extracted from its closure (P2/R3.3 first move).
-    Pure-by-shape: reads `rec` (a `Stub`) + `ctx`, mutates only the target tree
-    (under ctx.splice_check_lock) and the shared retros cache, and reports the
-    outcome as a `FillResult` for the dispatcher to aggregate."""
-    rel_file = rec.file
-    fn_name = rec.fn_name
-    container = rec.container
-    sig_text = rec.sig_text
-    attempts = 0   # LLM attempts this fn consumed — returned in FillResult
-    if _is_fn_fully_exhausted(ctx.retros_cache, rel_file, fn_name, container):
-        _log(f"  [phase-c/per-fn] {idx}/{ctx.total} skipped "
-             f"{rel_file}::{fn_name} [{container}] — fully exhausted "
-             "across iters (retrospective marked GENUINELY_HARD or "
-             ">=2 prior retrospectives).")
-        _emit("phase_c.fn.fill.skip", data={
-            "cluster": ctx.cluster_name, "pass_n": ctx.pass_n,
-            "file": rel_file, "fn": fn_name,
-            "reason": "fully_exhausted",
-        })
-        return _fill_skip(rec, attempts)
-    _check_graceful_stop(f"per-fn pass {ctx.pass_n} fn {fn_name}")
-    file_path = ctx.target_src_dir / rel_file
-    try:
-        snapshot = file_path.read_text(encoding="utf-8")
-    except Exception:
-        return _fill_skip(rec, attempts)
-    # Resolve current offsets — file may have been modified by prior
-    # fills in this pass, shifting byte positions. Re-enumerate to
-    # find this specific record's current location.
-    loc_at = _locate_fn_by_record(file_path, fn_name, container, sig_text)
-    if loc_at is None:
-        # Fall back to regex locator (for tests-fixture path where
-        # the extractor binary isn't built).
-        loc = _locate_fn(snapshot, fn_name)
-        if loc is None:
-            return _fill_skip(rec, attempts)
-        sig_text = sig_text or loc[0]
-        loc_sig_start = loc[1]
-        loc_body_start = loc[2]
-        loc_body_end = loc[3]
-    else:
-        loc_sig_start, loc_body_start, loc_body_end, sig_text = loc_at
-    test_blocks = _find_tests_for_fn(
-        ctx.tests_dir_files, fn_name,
-        file_rel=rel_file, src_dir=ctx.src_for_macros,
-        container=container,
-    )
-    # Crate idioms ranked by THIS fn's signature tokens.
-    crate_idioms_section = _extract_crate_idioms(
-        ctx.idiom_blocks, rel_file, target_sig_text=sig_text,
-        max_idioms=5,
-    )
-    _fn_t0 = time.monotonic()
-    _emit("phase_c.fn.fill.start", data={
-        "cluster": ctx.cluster_name, "pass_n": ctx.pass_n,
-        "file": rel_file, "fn": fn_name,
-        "tests_attached": len(test_blocks),
-        "sig_chars": len(sig_text),
-    })
+# Back-compat re-export seams: these moved into the fill-engine use-cases (P2),
+# but the unit suites pin them via `pipeline._x` — keep the aliases.
+from pipeline_core.application.reconstruct.fill_rules import (
+    failure_hit_unfilled_stub as _failure_hit_unfilled_stub,  # noqa: E402,F401
+)
+from pipeline_core.application.reconstruct.phase_c_engine import (  # noqa: E402
+    EngineConfig,
+    PhaseCFillEngine,
+)
+from pipeline_core.application.reconstruct.scheduling import (
+    group_priority_levels as _group_priority_levels,  # noqa: E402,F401
+)
+from pipeline_core.domain.models import FnFixContext as _FnFixContext  # noqa: E402
+from pipeline_core.prompts.per_fn import build_per_fn_prompt as _build_per_fn_prompt  # noqa: E402,F401
 
-    # Notes loaded inside the fix-loop on every iteration so that
-    # (a) notes added during this fn's own fix loop become visible
-    # to later iterations, and (b) the relevance filter (P3.4) can
-    # use the CURRENT cargo error excerpt to prioritise notes whose
-    # error codes / keywords match.
-    notes_section = ""
 
-    # === Inner fix loop (slice 8a f2: unit fn + _drive_fix_loop —
-    # the driver owns attempt counting, the FloorStall gauge, and the
-    # stall/repeated terminations; this unit owns prompt/splice/lock/
-    # verify/accept/revert) ===
-    success = False
-    last_response = ""
-    last_body = ""
-    error_excerpt = ""
-    attempts_log: list[str] = []
-    first_failed_body = ""
-    first_error_excerpt = ""
-    # P2: history of (body, error_sig, outcome) for THIS fn's fix loop.
-    # Surfaced to the model in subsequent fix prompts so it sees the
-    # search space it has already explored.
-    per_fn_history: list[dict] = []
+class _PhaseCFillAdapter:
+    """Binds concrete pipeline.py engine helpers to the `ports.fill_engine`
+    roles. One object satisfies every role (the use-cases each receive only the
+    narrow slice they declare); methods late-bind the module globals."""
 
-    def _attempt_fn_fill(fix_attempt: int) -> _FixOutcome:
-        nonlocal attempts, sig_text, notes_section, last_response, \
-            last_body, error_excerpt, first_failed_body, \
-            first_error_excerpt
-        attempts += 1
-        cur_text = file_path.read_text(encoding="utf-8")
-        # Slice 8a: one gather per attempt — notes re-filtered with the
-        # LATEST cargo error (P3.4), TYPES_IN_SCOPE re-selected from
-        # sig + container + where + the PREVIOUS BODY (types the last
-        # attempt actually manipulated — new) + the current error
-        # (Plan 9 F4: E0277/E0599/E0046/E0053 routinely name a
-        # trait/type the signature doesn't mention).
-        _fn_ctx = _gather_fn_fix_context(
-            file_text=cur_text, file_rel=rel_file, fn_name=fn_name,
-            sig_text=sig_text, body_text=last_body,
-            error_excerpt=error_excerpt, container=container,
-            type_records=ctx.crate_type_records, fr_path=ctx.fr_path,
-        )
-        notes_section = _fn_ctx.notes_section
-        _types_section_eff = _fn_ctx.types_section
-        if fix_attempt == 1:
-            prompt = _build_per_fn_prompt(
-                file_text=cur_text, fn_name=fn_name, sig_text=sig_text,
-                test_blocks=test_blocks, module_name=ctx.module_name,
-                cluster_name=ctx.cluster_name, file_rel=rel_file,
-                sections=PerFnSections(
-                    macros=ctx.macros_section, notes=notes_section,
-                    container=container, types=_types_section_eff,
-                    invariants=ctx.invariants_section,
-                    siblings=_collect_sibling_filled_bodies(cur_text, fn_name, container),
-                    crate_idioms=crate_idioms_section),
-                fr_path=ctx.fr_path,
-            )
+    # --- EngineTelemetry ---
+    def log(self, msg):
+        _log(msg)
+
+    def emit(self, event, *, duration_ms=None, data=None):
+        if duration_ms is None:
+            _emit(event, data=data)
         else:
-            prompt = _build_per_fn_fix_prompt(
-                file_text=cur_text, fn_name=fn_name, sig_text=sig_text,
-                test_blocks=test_blocks, module_name=ctx.module_name,
-                cluster_name=ctx.cluster_name, file_rel=rel_file,
-                prev_body=last_body, error_excerpt=error_excerpt,
-                sections=PerFnFixSections(
-                    macros=ctx.macros_section, notes=notes_section,
-                    container=container, types=_types_section_eff,
-                    invariants=ctx.invariants_section,
-                    # FR-024: prior retrospective guidance — start from "what to
-                    # try instead" rather than naive retry-with-errors.
-                    retrospective_guidance=(ctx.retros_cache.get(
-                        _retro_key(rel_file, fn_name, container), {}).get("guidance", "")),
-                    # FR-024 fix 3: hoist already-filled sibling fn impls (same
-                    # name, different container) — best target-body source.
-                    siblings=_collect_sibling_filled_bodies(cur_text, fn_name, container),
-                    crate_idioms=crate_idioms_section),
-                # P3.1: open the sig-change escape hatch after multiple
-                # compile failures. The model can return an additional
-                # <SIGNATURE> block; we splice it only when fn is non-pub.
-                allow_sig_change=(fix_attempt >= 5),
-                fr_path=ctx.fr_path,
-                attempt_history=per_fn_history,  # P2
-            )
+            _emit(event, duration_ms=duration_ms, data=data)
 
-        body, last_response = _ask_per_fn_body(prompt, fn_name, attempts_log, sig_text=sig_text)
-        if body is None:
-            # Model gave no usable response — stop retrying this fn.
-            _emit("phase_c.fn.fill.skip", data={
-                "cluster": ctx.cluster_name, "pass_n": ctx.pass_n,
-                "file": rel_file, "fn": fn_name,
-                "fix_attempt": fix_attempt,
-                "reason": "empty_response",
-            })
-            return _FixOutcome("stop")
+    def check_stop(self, context):
+        _check_graceful_stop(context)
 
-        # P3.1: if the model proposed a sig change, try it FIRST so
-        # the body splice operates on the updated sig. Rolls back if
-        # the resulting cargo check still fails (revert via snapshot).
-        if fix_attempt >= 5:
-            proposed_sig = _extract_signature_block(last_response)
-            if proposed_sig and _replace_fn_signature(file_path, fn_name, proposed_sig):
-                # Refresh sig_text so subsequent prompts use the new one.
-                new_loc = _locate_fn(file_path.read_text(encoding="utf-8"), fn_name)
-                if new_loc is not None:
-                    sig_text = new_loc[0]
-                _log(f"  [phase-c/per-fn] {fn_name}: sig swapped (attempt "
-                     f"{fix_attempt}): {sig_text}")
+    # --- Mutator ---
+    def locate_fn_by_record(self, file_path, name, container, sig_text):
+        return _locate_fn_by_record(file_path, name, container, sig_text)
 
-        # Splice by exact byte offset. Re-enumerate just before
-        # splicing because prior fills (or our sig swap above) may
-        # have shifted offsets. When a fn's name is duplicated in a
-        # file (Display::fmt vs Debug::fmt), we disambiguate by
-        # container + sig_text in _locate_fn_by_record.
-        # P4: hold _splice_check_lock from splice through cargo check
-        # through the revert (if applicable). Other workers wait so
-        # we don't corrupt target/ with concurrent cargo invocations.
-        ctx.splice_check_lock.acquire()
-        _lock_released = False
-        _splice_loc = _locate_fn_by_record(
-            file_path, fn_name, container, sig_text)
-        if _splice_loc is not None:
-            _, _bs, _be, _ = _splice_loc
-            ok, delta = _splice_fn_body_at(file_path, _bs, _be, body)
-        else:
-            # Fallback: regex-based locator. Less accurate for
-            # same-name collisions but acceptable when the syn
-            # binary isn't available.
-            ok, delta = _splice_fn_body(file_path, fn_name, body)
-        if not ok:
-            ctx.splice_check_lock.release()
-            _lock_released = True
-            # splice rejected — usually because another worker filled
-            # this fn between our read and our splice (race) OR
-            # because the body was no longer `unimplemented!()` for
-            # some other reason. Distinguish via a quick re-read.
-            _race_detected = False
-            try:
-                _cur_text = file_path.read_text(encoding="utf-8")
-                _race_loc = _locate_fn_by_record(
-                    file_path, fn_name, container, sig_text)
-                if _race_loc is not None:
-                    _, _race_bs, _race_be, _ = _race_loc
-                    _race_cur_body = _cur_text[_race_bs:_race_be]
-                    if not _is_unimplemented_body(_race_cur_body):
-                        _race_detected = True
-            except Exception:
-                pass
-            _ctx = f" [{container}]" if container else ""
-            if _race_detected:
-                _log(f"  [phase-c/per-fn] GUARD POSSIBLE RACE — "
-                     f"{rel_file}::{fn_name}{_ctx} already filled by "
-                     "another worker; this worker's LLM output "
-                     "discarded.")
-            else:
-                _log(f"  [phase-c/per-fn] splice rejected for "
-                     f"{rel_file}::{fn_name}{_ctx} (body no longer "
-                     "a stub).")
-            _emit("phase_c.fn.fill.skip", data={
-                "cluster": ctx.cluster_name, "pass_n": ctx.pass_n,
-                "file": rel_file, "fn": fn_name,
-                "container": container,
-                "fix_attempt": fix_attempt, "body_chars": len(body),
-                "reason": "race_lost" if _race_detected else "splice_rejected",
-            })
-            return _FixOutcome("stop")
+    def locate_fn(self, text, name):
+        return _locate_fn(text, name)
 
-        rc, cargo_out = _run_cargo(ctx.check_cmd, ctx.target_src_dir, ctx.cluster_env)
-        # Plan 10 U2: compile is only a pre-gate — accept the fn only if
-        # its OWN tests pass. The SHARED _u2_test_gate decides; on a test
-        # failure it routes through the same fix loop as a compile error
-        # (failing-test set as the stall signature).
-        _u2_fail_sig: frozenset | None = None
-        if rc == 0:
-            _g = _u2_test_gate(
-                (ctx.tdd_frontier_tests or {}).get((rel_file, fn_name), set()),
-                ctx.tdd_test_cmd, ctx.target_src_dir, ctx.cluster_env)
-            if _g is not None:
-                _u2_fail_sig, cargo_out = _g
-                # #3 co-dependency: this fn COMPILES but an attributed test
-                # still fails BECAUSE a sibling it also calls is an unfilled
-                # stub (panic "not implemented") — not this fn's fault. Keep
-                # the compiling body and defer to the outer TDD loop (which
-                # re-runs once the whole pass fills); reverting to a stub
-                # would be strictly worse. An assertion mismatch is real →
-                # fall through to the normal fix path.
-                if _u2_fail_sig and _failure_hit_unfilled_stub(cargo_out):
-                    _ctx2 = f" [{container}]" if container else ""
-                    _log(f"  [phase-c/per-fn] {idx}/{ctx.total} kept "
-                         f"{rel_file}::{fn_name}{_ctx2} (compiles; attributed "
-                         "test blocked by an unfilled sibling stub — deferred "
-                         "to outer loop).")
-                    _u2_fail_sig = None
-        if rc == 0 and _u2_fail_sig is None:
-            ctx.splice_check_lock.release()
-            _lock_released = True
-            _ctx = f" [{container}]" if container else ""
-            _log(f"  [phase-c/per-fn] {idx}/{ctx.total} filled "
-                 f"{rel_file}::{fn_name}{_ctx} "
-                 f"(+{delta} bytes, body={len(body)}"
-                 + (f", fix-attempts={fix_attempt}" if fix_attempt > 1 else "")
-                 + ")")
-            _emit("phase_c.fn.fill.done", duration_ms=int(
-                    (time.monotonic() - _fn_t0) * 1000),
-                  data={
-                "cluster": ctx.cluster_name, "pass_n": ctx.pass_n,
-                "file": rel_file, "fn": fn_name,
-                "body_chars": len(body), "bytes_delta": delta,
-                "fix_attempts": fix_attempt,
-                "recovered": fix_attempt > 1,
-                "success": True,
-            })
-            # Recovered fix-loop → extract a self-note (model writes
-            # for itself). High-signal moment: we know the lesson
-            # actually worked.
-            if fix_attempt > 1 and ctx.fr_path is not None and first_failed_body:
-                note = _extract_self_note(
-                    failed_body=first_failed_body,
-                    error_excerpt=first_error_excerpt,
-                    fixed_body=body,
-                )
-                # P6.4: tag the note with the error codes from the
-                # original failure so it can be surfaced next time
-                # any of those codes recurs.
-                _ecodes = _ecodes_in_text(first_error_excerpt or "")
-                if note and _append_model_note(ctx.fr_path, note,
-                                               error_codes=_ecodes):
-                    _log(f"  [model-notes] +1 note (recovered): {note[:80]}...")
-                    _emit("phase_c.note.added", data={
-                        "cluster": ctx.cluster_name, "pass_n": ctx.pass_n,
-                        "file": rel_file, "fn": fn_name,
-                        "kind": "recovered", "preview": note[:200],
-                    })
-            return _FixOutcome("accepted")
+    def splice_fn_body_at(self, file_path, body_byte_start, body_byte_end,
+                          new_body, allow_nonstub=False):
+        return _splice_fn_body_at(file_path, body_byte_start, body_byte_end,
+                                  new_body, allow_nonstub=allow_nonstub)
 
-        # Capture first-failure context for note extraction later.
-        if fix_attempt == 1:
-            first_failed_body = body
-            first_error_excerpt = _focus_cargo_errors(cargo_out, rel_file)
+    def splice_fn_body(self, file_path, name, new_body, allow_nonstub=False):
+        return _splice_fn_body(file_path, name, new_body,
+                               allow_nonstub=allow_nonstub)
 
-        # P5.5: track error codes seen so we can promote recurring
-        # ones to every subsequent prompt.
-        _record_error_codes_seen(cargo_out)
-        # Plan 10 U2: when the failure is a TEST failure (not compile),
-        # the stall signature is the failing-test set so floor-stall
-        # works (a test output has no E-codes → _cargo_err_sig would be
-        # empty and never stall).
-        cur_err_sig = (_u2_fail_sig if _u2_fail_sig is not None
-                       else _cargo_err_sig(cargo_out))
-        # P2: record this failed attempt for the prior-attempts block.
-        # We store the focused excerpt (already tier-sliced) so the
-        # next prompt sees what really failed without re-paying budget.
-        _focused = _focus_cargo_errors(cargo_out, rel_file, max_chars=_FIX_ERR_CAP)
-        per_fn_history.append({
-            "attempt": fix_attempt,
-            "body": body,
-            "error_sig": _focused,
-            "outcome": "compile_fail",
-        })
-        # P7.2: floor-stall metric — rustc error count (the driver's
-        # FloorStall observes it and owns the stall/repeated exits).
-        cur_err_count = len(cur_err_sig)
-        last_body = body
-        error_excerpt = _focus_cargo_errors(cargo_out, rel_file)
-        # Revert to snapshot before returning; the model will see
-        # the file as unimplemented again but with last_body + errors
-        # in the prompt. (Reverting unconditionally — the exhaustion
-        # block below restores + annotates anyway, so the end state
-        # on a stall/repeated exit is identical to the old in-loop
-        # ordering.)
-        file_path.write_text(snapshot, encoding="utf-8")
-        if not _lock_released:
-            ctx.splice_check_lock.release()
-            _lock_released = True
-        _log(f"  [phase-c/per-fn] {fn_name}: compile failed "
-             f"(attempt {fix_attempt}); re-prompting with errors.")
-        return _FixOutcome("failed", err_sig=cur_err_sig,
-                           err_count=cur_err_count)
+    def replace_fn_signature(self, file_path, name, new_sig):
+        return _replace_fn_signature(file_path, name, new_sig)
 
-    def _on_fn_failure(attempt_n: int, outcome: _FixOutcome,
-                       gauge: _FloorStall) -> None:
-        _emit("loop.iter", data={
-            "name": "phase_c.per_fn",
-            "cluster": ctx.cluster_name, "pass_n": ctx.pass_n,
-            "file": rel_file, "fn": fn_name,
-            "iter": attempt_n,
-            "metric_new": outcome.err_count,
-            "metric_best": gauge.best,
-            "improved": gauge.stalls == 0,
-            "stalled": gauge.stalls,
-        })
+    def extract_signature_block(self, response):
+        return _extract_signature_block(response)
 
-    def _on_fn_stall(attempt_n: int, gauge: _FloorStall) -> None:
-        _log(f"  [phase-c/per-fn] {fn_name}: floor stalled at "
-             f"{gauge.best} errors for {gauge.stalls} iter(s) — "
-             f"stopping fix loop (attempt {attempt_n}).")
+    def lock_for(self, tree):
+        return _splice_lock_for(tree)
 
-    def _on_fn_repeated(attempt_n: int, gauge: _FloorStall) -> None:
-        _log(f"  [phase-c/per-fn] {fn_name}: same error set after "
-             f"attempt {attempt_n} — stopping fix loop.")
+    # --- Cargo ---
+    def run(self, cmd, cwd, env, timeout=180):
+        return _run_cargo(cmd, cwd, env, timeout)
 
-    success, fix_attempt = _drive_fix_loop(
-        _attempt_fn_fill,
-        hard_cap=_PER_FN_FIX_HARD_CAP,
-        max_stalls=_effective_stalls(
-            _PER_FN_FIX_MAX_STALLS, _module_of(rel_file)),
-        stop_context=f"per-fn fix for {fn_name}",
-        on_failure=_on_fn_failure,
-        on_stall=_on_fn_stall,
-        on_repeated=_on_fn_repeated,
+    def build_test_cmd(self, test_stems, cluster):
+        return _build_test_cmd(test_stems, cluster)
+
+    def u2_test_gate(self, fn_tests, test_cmd, target_src_dir, cluster_env):
+        return _u2_test_gate(fn_tests, test_cmd, target_src_dir, cluster_env)
+
+    def focus_errors(self, output, file_rel, max_chars=None):
+        return _focus_cargo_errors(output, file_rel, max_chars=max_chars)
+
+    def env(self):
+        return _cargo_env()
+
+    # --- PromptContext ---
+    def ask_per_fn_body(self, prompt, fn_name, attempts_log, sig_text=""):
+        return _ask_per_fn_body(prompt, fn_name, attempts_log, sig_text=sig_text)
+
+    def gather(self, *, file_text, file_rel, fn_name, sig_text, body_text,
+               error_excerpt, container, type_records, fr_path=None):
+        c = _gather_fn_fix_context(
+            file_text=file_text, file_rel=file_rel, fn_name=fn_name,
+            sig_text=sig_text, body_text=body_text, error_excerpt=error_excerpt,
+            container=container, type_records=type_records, fr_path=fr_path)
+        return _FnFixContext(container=c.container, impl_where=c.impl_where,
+                             types_section=c.types_section,
+                             notes_section=c.notes_section)
+
+    def collect_sibling_filled_bodies(self, file_text, target_fn_name,
+                                      target_container):
+        return _collect_sibling_filled_bodies(file_text, target_fn_name,
+                                              target_container)
+
+    def extract_crate_idioms(self, impl_blocks, file_rel, target_sig_text="",
+                             max_idioms=5):
+        return _extract_crate_idioms(impl_blocks, file_rel,
+                                     target_sig_text=target_sig_text,
+                                     max_idioms=max_idioms)
+
+    def collect_crate_macros(self, src_dir):
+        return _collect_crate_macros(src_dir)
+
+    def compute_cluster_macro_invariants(self, src_dir, cluster):
+        return _compute_cluster_macro_invariants(src_dir, cluster)
+
+    def detect_crate_no_std_invariant(self, src_dir):
+        return _detect_crate_no_std_invariant(src_dir)
+
+    # --- WorkspaceModel ---
+    def scan_stub_records(self, target_src_dir, cluster):
+        return _scan_unimplemented_records_for_cluster(target_src_dir, cluster)
+
+    def scan_stub_tuples(self, target_src_dir, cluster):
+        return _scan_unimplemented_for_cluster(target_src_dir, cluster)
+
+    def enumerate_fns(self, src_dir):
+        return _enumerate_fns_via_extractor(src_dir)
+
+    def enumerate_types(self, src_dir):
+        return _enumerate_types_via_extractor(src_dir)
+
+    def collect_impl_blocks(self, src_dir):
+        return _collect_impl_blocks(src_dir)
+
+    def fn_container_index(self, src_dir):
+        return _fn_container_index(src_dir)
+
+    def fn_belongs_to_cluster(self, target_src_dir, file_rel, fn_name, cluster,
+                              fn_cfg_predicates=None):
+        return _fn_belongs_to_cluster(target_src_dir, file_rel, fn_name, cluster,
+                                      fn_cfg_predicates=fn_cfg_predicates)
+
+    def cluster_filter_type_methods(self, records, cluster):
+        return _cluster_filter_type_methods(records, cluster)
+
+    def is_gen_tests_file(self, name):
+        return _is_gen_tests_file(name)
+
+    def leaf_first_fn_order(self, tuples, leaf_name_counts):
+        return _leaf_first_fn_order(tuples, leaf_name_counts)
+
+    # --- Retros ---
+    def load(self, project_dir):
+        return _load_retrospectives(project_dir)
+
+    def save(self, project_dir, retros):
+        _save_retrospectives(project_dir, retros)
+
+    def retro_key(self, file_rel, fn_name, container):
+        return _retro_key(file_rel, fn_name, container)
+
+    def is_fn_fully_exhausted(self, cache, file_rel, fn_name, container):
+        return _is_fn_fully_exhausted(cache, file_rel, fn_name, container)
+
+    def diagnose(self, *, fn_name, sig_text, container, file_rel, cluster_name,
+                 last_body, error_excerpt, fix_attempts, prior_retrospective=""):
+        return _phase_c_retrospective(
+            fn_name=fn_name, sig_text=sig_text, container=container,
+            file_rel=file_rel, cluster_name=cluster_name, last_body=last_body,
+            error_excerpt=error_excerpt, fix_attempts=fix_attempts,
+            prior_retrospective=prior_retrospective)
+
+    def append_note(self, fr_path, note, error_codes=None):
+        return _append_model_note(fr_path, note, error_codes=error_codes)
+
+    def extract_self_note(self, failed_body, error_excerpt, fixed_body):
+        return _extract_self_note(failed_body, error_excerpt, fixed_body)
+
+    def record_error_codes(self, output):
+        _record_error_codes_seen(output)
+
+    # --- TestLinker ---
+    def find_tests_for_fn(self, tests_dir_files, fn_name, *, file_rel="",
+                          src_dir=None, container=""):
+        return _find_tests_for_fn(tests_dir_files, fn_name, file_rel=file_rel,
+                                  src_dir=src_dir, container=container)
+
+    def classify_failures(self, test_out, filled_this_pass, failed_tests,
+                          cluster_name):
+        return _classify_phase_c_test_failures(test_out, filled_this_pass,
+                                               failed_tests, cluster_name)
+
+    def write_test_fix_log(self, *, project_dir, cluster_name, pass_n, fix_iter,
+                           test_out, failed_tests, fns_retried, cur_fail_count,
+                           new_fail_count, best_fail_count, stall):
+        _write_phase_c_test_fix_log(
+            project_dir=project_dir, cluster_name=cluster_name, pass_n=pass_n,
+            fix_iter=fix_iter, test_out=test_out, failed_tests=failed_tests,
+            fns_retried=fns_retried, cur_fail_count=cur_fail_count,
+            new_fail_count=new_fail_count, best_fail_count=best_fail_count,
+            stall=stall)
+
+    # --- StallPolicy ---
+    def effective_stalls(self, full_budget, module):
+        return _effective_stalls(full_budget, module)
+
+    def converge_in_cluster(self, cluster):
+        return _converge_in_cluster(cluster)
+
+    # --- ImplFillPath ---
+    def fill_impl_blocks(self, **kw):
+        return _phase_c_fill_impl_blocks(**kw)
+
+
+_PHASE_C_FILL_ADAPTER = _PhaseCFillAdapter()
+
+
+def _build_phase_c_engine() -> "PhaseCFillEngine":
+    """Composition root: bind the concrete helpers to the fill-engine ports and
+    assemble the use-cases. Built per call so monkeypatched SETTINGS /
+    parallelism (tests) are honoured at call time."""
+    a = _PHASE_C_FILL_ADAPTER
+    caps = FillCaps(
+        per_fn_fix_hard_cap=_PER_FN_FIX_HARD_CAP,
+        per_fn_fix_max_stalls=_PER_FN_FIX_MAX_STALLS,
+        fix_err_cap=_FIX_ERR_CAP,
     )
-
-    if not success:
-        # Restore the snapshot first (clears whatever broken body the
-        # loop left in place), then splice an annotated stub that
-        # preserves the last attempt + cargo error as comments. The
-        # fn stays callable (unimplemented!() at the end) and a later
-        # pass will retry — by then more siblings in the file will be
-        # implemented, giving richer context. Lock the file-write
-        # phase against concurrent workers.
-        with ctx.splice_check_lock:
-            file_path.write_text(snapshot, encoding="utf-8")
-            annotated_body = _make_failed_attempt_body(
-                attempted_body=last_body or first_failed_body or "",
-                error_excerpt=error_excerpt or first_error_excerpt or "",
-                fix_attempts=fix_attempt,
-            )
-            _splice_fn_body(file_path, fn_name, annotated_body)
-        exhaust_error = (f"{rel_file}::{fn_name}: fix loop exhausted "
-                         f"after {fix_attempt} attempt(s)")
-        _emit("phase_c.fn.fill.fail", duration_ms=int(
-                (time.monotonic() - _fn_t0) * 1000),
-              data={
-            "cluster": ctx.cluster_name, "pass_n": ctx.pass_n,
-            "file": rel_file, "fn": fn_name,
-            "fix_attempts": fix_attempt,
-            "last_error_chars": len(error_excerpt),
-            "last_error_preview": error_excerpt[:200],
-        })
-        # Exhausted fix-loop — extract a "what didn't work" note so the
-        # model doesn't repeat the same dead-end approach on the next pass.
-        if ctx.fr_path is not None and (first_failed_body or last_body):
-            note = _extract_self_note(
-                failed_body=last_body or first_failed_body,
-                error_excerpt=error_excerpt or first_error_excerpt,
-                fixed_body="",  # no fixed body — fix loop exhausted
-            )
-            # P6.4: tag exhausted-fail notes with the codes seen
-            # across the run so they re-surface for the same code.
-            _ecodes2 = _ecodes_in_text((error_excerpt or "")
-                                       + " " + (first_error_excerpt or ""))
-            if note and _append_model_note(ctx.fr_path, note,
-                                           error_codes=_ecodes2):
-                _log(f"  [model-notes] +1 note (exhausted): {note[:80]}...")
-                _emit("phase_c.note.added", data={
-                    "cluster": ctx.cluster_name, "pass_n": ctx.pass_n,
-                    "file": rel_file, "fn": fn_name,
-                    "kind": "exhausted", "preview": note[:200],
-                })
-
-        # FR-024 retrospective: actively diagnose why the fix
-        # loop exhausted and prescribe a different strategy for
-        # the next attempt. Persisted across module iterations.
-        #
-        # Exhaustion is PROGRESS-GATED — no hard cap on the number
-        # of retros. A retro fires; if the next-best error count
-        # is strictly lower than the prior best (real improvement),
-        # the fn stays eligible. If it isn't, the fn is marked
-        # fully exhausted on the spot.
-        try:
-            _retros = _load_retrospectives(ctx.project_dir)
-            _retro_k = _retro_key(rel_file, fn_name, container)
-            _prior = _retros.get(_retro_k, {})
-            _prior_count = int(_prior.get("retrospective_count", 0))
-            _prior_best = _prior.get("best_error_count")
-            _prior_guidance = _prior.get("guidance", "")
-            _retro = _phase_c_retrospective(
-                fn_name=fn_name, sig_text=sig_text,
-                container=container, file_rel=rel_file,
-                cluster_name=ctx.cluster_name,
-                last_body=last_body or first_failed_body or "",
-                error_excerpt=error_excerpt or first_error_excerpt or "",
-                fix_attempts=fix_attempt,
-                prior_retrospective=_prior_guidance,
-            )
-            # Transient empties (llm_error / empty_response) don't
-            # update state — we never saw a real fix attempt's
-            # outcome, so they cannot count toward exhaustion.
-            _signal = _retro.get("signal", "")
-            _transient = _signal in ("llm_error", "empty_response")
-            if not _transient:
-                _cur_errs = len(_cargo_err_sig(
-                    error_excerpt or first_error_excerpt or ""
-                ))
-                # First retro for this fn establishes a baseline —
-                # no prior to compare, so we never exhaust on
-                # round 1. Subsequent retros exhaust unless
-                # current count is strictly lower than prior best.
-                if _prior_best is None:
-                    _new_best = _cur_errs
-                    _improved = True
-                else:
-                    _new_best = min(int(_prior_best), _cur_errs)
-                    _improved = _cur_errs < int(_prior_best)
-                _new_count = _prior_count + 1
-                _full_exhaust = (
-                    _retro.get("category") == "GENUINELY_HARD"
-                    or (_prior_best is not None and not _improved)
-                )
-                _retros[_retro_k] = {
-                    "category": _retro.get("category", ""),
-                    "guidance": _retro.get("guidance", ""),
-                    "signal": _signal,
-                    "retrospective_count": _new_count,
-                    "error_count": _cur_errs,
-                    "best_error_count": _new_best,
-                    "fully_exhausted": _full_exhaust,
-                    "last_error_preview": (error_excerpt or "")[:240],
-                }
-                _save_retrospectives(ctx.project_dir, _retros)
-                _log(f"  [phase-c/retro] {fn_name} "
-                     f"[{_retro.get('category','?')}] "
-                     f"signal={_signal} "
-                     f"errs={_cur_errs} "
-                     f"(prior_best={_prior_best}, "
-                     f"improved={_improved}, "
-                     f"exhausted={_full_exhaust}): "
-                     f"{_retro.get('guidance','')[:120]}...")
-                _emit("phase_c.retrospective", data={
-                    "cluster": ctx.cluster_name, "pass_n": ctx.pass_n,
-                    "file": rel_file, "fn": fn_name,
-                    "category": _retro.get("category", ""),
-                    "signal": _signal,
-                    "retrospective_count": _new_count,
-                    "error_count": _cur_errs,
-                    "best_error_count": _new_best,
-                    "improved": _improved,
-                    "fully_exhausted": _full_exhaust,
-                    "preview": _retro.get("guidance", "")[:200],
-                })
-        except Exception as _re:
-            _log(f"  [phase-c/retro] failed for {fn_name}: {_re}")
-        try:
-            ts = int(time.time())
-            fpath = ctx.failures_dir / f"{fn_name}-{ts}.txt"
-            fpath.write_text(
-                f"# fn: {rel_file}::{fn_name}\n"
-                f"# fix_attempts: {fix_attempt}\n"
-                f"# last_response_chars: {len(last_response)}\n"
-                f"# last_error_excerpt: {error_excerpt[:500]}\n"
-                f"{'=' * 60}\n## ATTEMPTS LOG\n{'=' * 60}\n"
-                + "\n".join(attempts_log) + "\n"
-                f"{'=' * 60}\n## LAST RESPONSE\n{'=' * 60}\n{last_response}\n"
-                f"{'=' * 60}\n## LAST ERROR EXCERPT\n{'=' * 60}\n{error_excerpt}\n",
-                encoding="utf-8",
-            )
-        except Exception:
-            pass
-        _log(f"  [phase-c/per-fn] {idx}/{ctx.total} {rel_file}::{fn_name}: "
-             f"reverted after {fix_attempt} attempt(s).")
-        return FillResult(file=rel_file, fn_name=fn_name, filled=False,
-                          attempts=attempts, error=exhaust_error)
-
-    return FillResult(file=rel_file, fn_name=fn_name, filled=True,
-                      attempts=attempts)
-
+    fill_one = FillOneFn(tel=a, mut=a, cargo=a, prompt=a, retros=a,
+                         tests=a, stall=a, caps=caps)
+    cfg = EngineConfig(
+        parallelism=_pipeline_parallelism(),
+        fill_unit=SETTINGS.phase_c_fill_unit,
+        per_pass_test_fix_hard_cap=_PER_PASS_TEST_FIX_HARD_CAP,
+        per_pass_test_fix_max_stalls=_PER_PASS_TEST_FIX_MAX_STALLS,
+        pass_max_stalls=int(os.getenv("PHASE_C_PASS_MAX_STALLS", "2")),
+        fix_err_cap=_FIX_ERR_CAP,
+    )
+    return PhaseCFillEngine(tel=a, mut=a, cargo=a, prompt=a, ws=a, retros=a,
+                            tests=a, stall=a, impl_path=a, fill_one=fill_one,
+                            config=cfg)
 
 
 def _task2_fill_fns_one_by_one(
@@ -8261,700 +7962,24 @@ def _task2_fill_fns_one_by_one(
     max_passes: int = 3,
     leaf_name_counts: dict[str, int] | None = None,
     fr_path: Path | None = None,
-    # Plan 4 — TDD-scoped driver knobs.
     tdd_frontier_keys: "set[tuple[str, str]] | None" = None,
     skip_end_pass_test: bool = False,
-    # Plan 10 U2 — per-fn test-based acceptance: {(file, fn): {test names}}
-    # the fn must make pass, plus the cluster test command to run.
     tdd_frontier_tests: "Frontier | None" = None,
     tdd_test_cmd: str | None = None,
 ) -> dict:
-    """Phase C — Flavour B with full validation loops.
-
-    For each pass:
-      For each unimplemented fn:
-        Snapshot the file.
-        Ask LLM → splice → cargo check.
-        On compile failure: revert, re-prompt with focused errors, retry.
-        Loop while the error signature CHANGES (model making progress).
-        Stop on identical-errors-twice or PER_FN_FIX_CAP attempts.
-        On exhaustion: revert, leave fn as stub for next pass.
-      After all fns in the pass: cargo test on test files referenced by
-      this pass's fills. On assertion failure: re-prompt the responsible
-      fns with the test output, loop while progress.
-
-    Returns {'fns_filled', 'bytes_filled', 'attempts', 'errors', 'remaining'}.
-    """
-    if cluster_env is None:
-        cluster_env = _cargo_env()
-    # P5 — per-impl-block path. New default unit of work: fill all stubs of
-    # one impl block in one LLM call. Solves the class of failures where the
-    # right fn body depends on a constraint declared at the impl level that
-    # per-fn prompts cannot show. The per-impl path delegates free fns and
-    # oversized blocks back to the per-fn path below, which continues to
-    # exist as a fallback. Toggle via `PHASE_C_FILL_UNIT=fn`.
-    _fill_unit = SETTINGS.phase_c_fill_unit
-    if _fill_unit is FillUnit.IMPL:
-        _impl_stats = _phase_c_fill_impl_blocks(
-            project_dir=project_dir,
-            target_src_dir=target_src_dir,
-            tests_dir_files=tests_dir_files,
-            module_name=module_name,
-            cluster_name=cluster_name,
-            cluster=cluster,
-            check_cmd=check_cmd,
-            cluster_env=cluster_env,
-            fr_path=fr_path,
-            tdd_frontier_keys=tdd_frontier_keys,
-            tdd_frontier_tests=tdd_frontier_tests,   # Plan 10 U2
-            tdd_test_cmd=tdd_test_cmd,               # Plan 10 U2
-        )
-        # If there are still stub members the per-impl path didn't cover
-        # (free fns or oversized blocks), fall through to the per-fn path
-        # to clean those up. We keep impl_stats counters around so the
-        # caller can see both populations.
-        if _impl_stats["remaining"] == 0:
-            return _impl_stats
-        # Carry the impl-pass numbers into the combined stats by stashing
-        # them; the per-fn path below will overlay its own numbers.
-        _carryover = {
-            "impls_filled": _impl_stats.get("impls_filled", 0),
-            "impls_failed": _impl_stats.get("impls_failed", 0),
-            "fns_filled_via_impl": _impl_stats.get("fns_filled", 0),
-        }
-    else:
-        _carryover = {}
-    target_src_dir.mkdir(parents=True, exist_ok=True)
-    bytes_before = sum(p.stat().st_size for p in target_src_dir.rglob("*.rs"))
-    fns_filled = 0
-    attempts = 0
-    # P4: PIPELINE_PARALLELISM (global knob).
-    #   1 = strictly sequential — single worker, identical quality.
-    #  >1 = up to N concurrent fn-fills via worker threads. LLM calls
-    #       overlap; splice + cargo check is serialised through this tree's
-    #       lock (cargo's own target/.cargo-lock blocks concurrent invocations
-    #       anyway, and we want predictable file mutations).
-    _parallelism = _pipeline_parallelism()
-    if _parallelism > 1:
-        _log(f"  [phase-c/per-fn] parallelism={_parallelism} (LLM calls "
-             f"concurrent; splice+cargo serialised per tree).")
-    import queue as _queue_mod
-    import threading as _threading
-    # Per-tree splice+cargo lock, shared with the per-impl path so the two
-    # fill paths never race on the same file; parallel clusters get their own.
-    _splice_check_lock = _splice_lock_for(target_src_dir)
-    _counters_lock = _threading.Lock()
-    errors: list[str] = []
-
-    failures_dir = project_dir / ".skeleton" / "_failures"
-    failures_dir.mkdir(parents=True, exist_ok=True)
-
-    # C: crate-wide macros (cached across passes — file set doesn't change).
-    _src_for_macros = target_src_dir / "src" if (target_src_dir / "src").exists() else target_src_dir
-    macros_section = _collect_crate_macros(_src_for_macros)
-    # Per-cluster macro invariants: which arm of each cfg-gated macro is
-    # active under this cluster. Cached per call — small set, cheap to
-    # recompute, but constant for the duration of this Phase C loop.
-    # Plus crate-level no_std warning when applicable (A).
-    _macro_invariants = _compute_cluster_macro_invariants(
-        _src_for_macros, cluster)
-    _no_std_invariant = _detect_crate_no_std_invariant(target_src_dir)
-    invariants_section = "\n\n".join(
-        s for s in (_no_std_invariant, _macro_invariants) if s)
-    # P5.1: crate-wide type records (struct/enum/type/trait with fields +
-    # method names). Used per-fn to inject only the types the fn's signature
-    # actually mentions. Cached across passes; file set doesn't change.
-    # Cluster-aware: drop methods cfg-gated out of this cluster (Hard Rule 8).
-    _crate_type_records = _cluster_filter_type_methods(
-        _enumerate_types_via_extractor(target_src_dir) or [], cluster)
-
-    # P7.6: floor-stall against (remaining_stubs + last_pass_failures) across
-    # passes. max_passes becomes the hard cap. A pass that strictly decreases
-    # the metric resets the stall counter; otherwise we increment. The legacy
-    # `progress_this_pass == 0` early exit is preserved as a fast path.
-    _pass_max_stalls = int(os.getenv("PHASE_C_PASS_MAX_STALLS", "2"))
-    _pass_gauge = _FloorStall()  # slice 8a
-    _pass_last_fail_count = 0
-
-    for pass_n in range(1, max_passes + 1):
-        _check_graceful_stop(f"per-fn pass {pass_n}")
-        # Note: every pass scans for stubs fresh. Fns that failed their
-        # fix-loop in earlier passes are now annotated stubs (sentinel +
-        # commented failure history) and re-appear here, so passes 2/3
-        # retry them with the new context of siblings filled meanwhile.
-        # Cluster-aware filter: skip stubs whose enclosing cfg doesn't
-        # match the current cluster's cfg_set (P5 focused fix). Avoids
-        # wasted fills of e.g. nightly-only fns from the stable cluster.
-        # Prefer record-based scan (syn enumerator gives container + sig_text
-        # which disambiguates same-named fns like Display::fmt vs Debug::fmt).
-        # Falls back to name-only tuples when the extractor isn't available.
-        recs = _scan_unimplemented_records_for_cluster(target_src_dir, cluster)
-        if recs is not None:
-            stubs = [Stub.from_dict(r) for r in recs]
-        else:
-            stubs = [Stub(file=f, fn_name=fn)
-                     for f, fn in _scan_unimplemented_for_cluster(target_src_dir, cluster)]
-        # True remaining stub count BEFORE the frontier filter — used by
-        # the progress log so "already filled" reflects actual disk state,
-        # not the TDD-narrowed pass list (which would over-report progress
-        # since the frontier is only the subset tests have reached).
-        _all_stubs_count = len(stubs)
-        # Plan 4 — when TDD driver supplies a frontier, restrict this pass
-        # to fns it nominated. Avoids walking fns no test reaches.
-        if tdd_frontier_keys is not None:
-            stubs = [s for s in stubs if s.key in tdd_frontier_keys]
-        if not stubs:
-            break
-        # D: leaf-first order — most-referenced fns first.
-        _tuples = [r.key for r in stubs]
-        _ordered_tuples = _leaf_first_fn_order(_tuples, leaf_name_counts)
-        # Reorder records to match the leaf-first tuple order. When the same
-        # (file, fn_name) appears multiple times (same-named fns), preserve
-        # their relative order.
-        _seen: dict[tuple[str, str], int] = {}
-        _reordered: list[Stub] = []
-        for tup in _ordered_tuples:
-            matches = [r for r in stubs if r.key == tup]
-            taken = _seen.get(tup, 0)
-            if taken < len(matches):
-                _reordered.append(matches[taken])
-                _seen[tup] = taken + 1
-        stubs = _reordered
-        # Crate idioms source: impl-block records snapshot for this pass —
-        # already-filled bodies feed <CRATE_IDIOMS> in the per-fn prompts
-        # (same section the per-impl path carries). [] when extractor absent.
-        _idiom_blocks = _collect_impl_blocks(target_src_dir) or []
-        # Count total fns in the cluster (regardless of body state). Used by
-        # monitor to render a CUMULATIVE progress bar across restarts —
-        # filled = total - stubs_at_pass_start + pass_fills_done.
-        # Excludes `.gen_tests_*.rs` siblings: those are test fns (not
-        # reconstruction work) and inflate the denominator misleadingly.
-        _total_fns_in_cluster = 0
-        try:
-            _all_recs = _enumerate_fns_via_extractor(target_src_dir) or []
-            _all_recs = [r for r in _all_recs
-                          if not _is_gen_tests_file(r.get("file", ""))]
-            if cluster is not None:
-                _all_recs = [r for r in _all_recs
-                              if _fn_belongs_to_cluster(
-                                  target_src_dir, r["file"], r["fn_name"], cluster,
-                                  fn_cfg_predicates=list(r.get("cfg_predicates") or []))]
-            _total_fns_in_cluster = len(_all_recs)
-        except Exception:
-            _total_fns_in_cluster = len(stubs)  # fallback
-        # Progress numbers — use the TRUE remaining stubs (pre-frontier)
-        # so "already filled" reflects disk state. When the TDD driver
-        # narrows this pass, surface "K in frontier" separately so the
-        # log shows both the actionable size and the global stub count.
-        _filled_count = max(0, _total_fns_in_cluster - _all_stubs_count)
-        _frontier_suffix = (
-            f", {len(stubs)} in frontier this pass"
-            if tdd_frontier_keys is not None and len(stubs) != _all_stubs_count
-            else ""
-        )
-        _log(f"  [phase-c/per-fn] pass {pass_n}/{max_passes}: "
-             f"{_all_stubs_count} stub(s) remaining in cluster "
-             f"'{cluster_name}' "
-             f"({_filled_count}/{_total_fns_in_cluster} already filled"
-             f"{_frontier_suffix}).")
-        _pass_t0 = time.monotonic()
-        _emit("phase_c.pass.start", data={
-            "pass_n": pass_n, "cluster": cluster_name, "stubs": len(stubs),
-            "max_passes": max_passes,
-            "total_fns_in_cluster": _total_fns_in_cluster,
-            # Disambiguate "all stubs in cluster" vs "frontier size in stubs".
-            # `stubs` is the per-pass workload (frontier when TDD driver
-            # narrows it). `all_stubs_remaining` is the cluster-scope count
-            # the monitor needs to compute "filled / total" correctly.
-            "all_stubs_remaining": _all_stubs_count,
-            "filled_count": _filled_count,
-        })
-        progress_this_pass = 0
-        filled_this_pass: list[tuple[str, str]] = []  # [(file_rel, fn_name)]
-        pass_fail_floor = 0  # P7.6: this pass's failing-test floor (test phase sets it)
-
-        # P4: per-level work queue consumed by workers — created per priority
-        # level in the dispatch loop below and passed to each worker
-        # explicitly. Sequential mode = 1 worker; parallel mode = N workers
-        # concurrently. Workers exit when the queue is empty.
-
-        # P8: priority-level batching. `stubs` is already leaf-first sorted
-        # (descending ref-count), so equal-priority stubs are contiguous.
-        # Group them into levels; the dispatch loop runs each level in
-        # parallel with a barrier between levels, so a more-referenced
-        # (callee) level always completes before the level depending on it —
-        # each fill sees real sibling bodies in deterministic order,
-        # independent of worker scheduling.
-        _levels = _group_priority_levels(stubs, leaf_name_counts)
-
-        # FR-024 cross-iter exhausted skip: load the retrospectives map
-        # once per pass (cheap JSON read) and use it to skip fns the LLM
-        # has classified as GENUINELY_HARD or that have exhausted >=2
-        # retrospectives. Saves compute and lets the pipeline complete
-        # the rest of the corpus.
-        _retros_cache = _load_retrospectives(project_dir)
-
-        # P2 de-closure: per-pass ctx for the module-level `_fill_one_stub`
-        # unit (was the `_process_one_stub` closure capturing all of this).
-        _pass_ctx = _PerFnPassCtx(
-            project_dir=project_dir, target_src_dir=target_src_dir,
-            module_name=module_name, cluster_name=cluster_name,
-            check_cmd=check_cmd, cluster_env=cluster_env, fr_path=fr_path,
-            tests_dir_files=tests_dir_files, macros_section=macros_section,
-            invariants_section=invariants_section,
-            crate_type_records=_crate_type_records,
-            src_for_macros=_src_for_macros, failures_dir=failures_dir,
-            tdd_frontier_tests=tdd_frontier_tests, tdd_test_cmd=tdd_test_cmd,
-            splice_check_lock=_splice_check_lock, retros_cache=_retros_cache,
-            idiom_blocks=_idiom_blocks, pass_n=pass_n, total=len(stubs),
-        )
-
-        def _worker(work_queue: "_queue_mod.Queue", *,
-                    _pass_ctx=_pass_ctx, filled_this_pass=filled_this_pass):
-            # B023: the per-LEVEL queue AND the per-pass ctx/list are passed
-            # explicitly — free-var reads would rely on late binding across
-            # the pass loop, exactly the capture class B023 flags.
-            nonlocal attempts, fns_filled, progress_this_pass
-            while True:
-                try:
-                    idx, rec = work_queue.get_nowait()
-                except _queue_mod.Empty:
-                    return
-                try:
-                    res = _fill_one_stub(idx, rec, ctx=_pass_ctx)
-                except Exception as _e:
-                    # Isolate worker failures so a single bad fn doesn't
-                    # kill the worker thread (others keep draining the queue).
-                    _log(f"  [phase-c/per-fn] worker error on "
-                         f"{rec.file}::{rec.fn_name}: {_e}")
-                    with _counters_lock:
-                        errors.append(f"{rec.file}::{rec.fn_name}: "
-                                      f"worker exception: {_e}")
-                    continue
-                with _counters_lock:
-                    attempts += res.attempts
-                    if res.filled:
-                        fns_filled += 1
-                        progress_this_pass += 1
-                        filled_this_pass.append((res.file, res.fn_name))
-                    if res.error:
-                        errors.append(res.error)
-
-        # P8 dispatch: process priority levels in order, barrier between them.
-        # Within a level, spawn min(P, level size) workers (concurrency
-        # self-bounds for small levels); join before the next level so the
-        # callee level is fully filled before its callers start.
-        for _level in _levels:
-            _work_queue: _queue_mod.Queue = _queue_mod.Queue()
-            for _item in _level:
-                _work_queue.put(_item)
-            _nw = min(_parallelism, len(_level))
-            if _nw > 1:
-                # Name carries the cluster: parallel clusters each spawn worker
-                # 0..N and the per-thread stream files key on thread name — a
-                # bare "per-fn-worker-0" in two clusters would silently share
-                # (and re-truncate) one stream file. C10 audits this.
-                _workers = [
-                    _threading.Thread(target=_worker, args=(_work_queue,),
-                                      name=f"per-fn-{cluster_name}-w{i}")
-                    for i in range(_nw)
-                ]
-                for _t in _workers:
-                    _t.start()
-                for _t in _workers:
-                    _t.join()
-            else:
-                _worker(_work_queue)
-
-        # === Per-pass cargo test ===
-        # Always run at end of every pass, even when filled_this_pass is empty
-        # (e.g. cluster fully filled from a prior run). A pre-filled cluster
-        # without a test run silently passes through to Phase D — masking any
-        # breakage introduced by other clusters' fills or by previously-stalled
-        # fix loops. Run unconditionally so we always have signal.
-        # Plan 4 — TDD driver runs the cluster test in its OUTER loop; the
-        # per-pass run would be redundant. Skip when the caller asked us to.
-        if not skip_end_pass_test:
-            _check_graceful_stop(f"per-fn pass {pass_n} test phase")
-            # Build the union of test files referenced by ANY fn filled this pass.
-            # Only keep paths under the project's `tests/` directory — those are
-            # the actual `cargo test --test {stem}` targets. Filter out anything
-            # else (e.g. src/*.gen_tests_*.rs siblings, which are imported via
-            # `#[path]` from src files, NOT compiled as separate test binaries —
-            # passing them to `--test` makes cargo fail at command-parse time
-            # with rc=101, which is what was breaking the per-pass test loop).
-            test_paths: set[Path] = set()
-            for rel_f, fn in filled_this_pass:
-                for tf in _find_tests_for_fn(
-                    tests_dir_files, fn,
-                    file_rel=rel_f, src_dir=_src_for_macros,
-                ):
-                    p = Path(tf[0])
-                    # Only direct children of `tests/` are cargo --test
-                    # targets. Files under `tests/ui/`, `tests/common/`,
-                    # etc. are trybuild fixtures or shared helpers, not
-                    # standalone test binaries — passing them to `--test`
-                    # makes cargo fail rc=101 at command-parse time.
-                    if p.parent.name == "tests":
-                        test_paths.add(p)
-            # When nothing was filled this pass (or no test could be linked to
-            # the fills), fall back to the cluster's complete tests/ surface so
-            # we still get pass/fail signal for the whole cluster.
-            if not test_paths:
-                for p in tests_dir_files:
-                    # Only direct children of `tests/` are cargo --test
-                    # targets. Files under `tests/ui/`, `tests/common/`,
-                    # etc. are trybuild fixtures or shared helpers, not
-                    # standalone test binaries — passing them to `--test`
-                    # makes cargo fail rc=101 at command-parse time.
-                    if p.parent.name == "tests":
-                        test_paths.add(p)
-            test_stems = sorted({p.stem for p in test_paths})
-            if test_stems:
-                test_cmd = _build_test_cmd(test_stems, cluster)
-                _log(f"  [phase-c/per-fn] pass {pass_n}: cargo test "
-                     f"{len(test_stems)} test file(s): {', '.join(test_stems[:5])}"
-                     + ("..." if len(test_stems) > 5 else ""))
-                _test_t0 = time.monotonic()
-                rc, test_out = _run_cargo(test_cmd, target_src_dir, cluster_env,
-                                          timeout=300)
-                _test_dur_ms = int((time.monotonic() - _test_t0) * 1000)
-                _emit("phase_c.pass.test", duration_ms=_test_dur_ms, data={
-                    "cluster": cluster_name, "pass_n": pass_n,
-                    "stems": test_stems, "rc": rc,
-                    "failed_tests": sorted(_parse_failed_tests(test_out))
-                                    if rc != 0 else [],
-                })
-                if rc == 0:
-                    _log(f"  [phase-c/per-fn] pass {pass_n}: cargo test PASSED.")
-                else:
-                    _log(f"  [phase-c/per-fn] pass {pass_n}: cargo test FAILED "
-                         f"(rc={rc}).")
-                    # === Per-pass test fix loop ===
-                    # Slice 8a f4: `_attempt_test_fix` unit on `_drive_fix_loop`.
-                    # Loop-C contract (pinned in tests/test_e2e_test_retry.py):
-                    # NO revert — splices kept on every exit; metric = failing-
-                    # test count with the floor SEEDED by the entry count
-                    # (initial_floor), so a non-improving first iteration
-                    # already stalls; no repeated-signature exit (no signature
-                    # is passed). The dead `prev_test_sig` diagnostic of the
-                    # hand-rolled loop is gone.
-                    # P2: per-(file, fn) attempt history maintained across
-                    # this pass's test-fix iterations. Surfaced to the model
-                    # so it can see what bodies it has already tried for the
-                    # same fn rather than re-deriving from scratch.
-                    test_fix_history: dict[tuple[str, str], list[dict]] = {}
-                    _entry_fail_count = len(_parse_failed_tests(test_out))
-                    # Gauge mirror — the unit reads the running stall count
-                    # (classifier escalation) and the floor (per-iter log
-                    # file); updated in `_on_test_fix_failure` after each
-                    # driver observation.
-                    _stall_seen = {"best": _entry_fail_count, "stalls": 0}
-                    _iter_ctx: dict = {"cur": 0, "fns": []}
-
-                    def _attempt_test_fix(test_fix_attempt: int, *,
-                                          pass_n: int = pass_n,
-                                          filled_this_pass=filled_this_pass,
-                                          test_cmd=test_cmd,
-                                          test_fix_history=test_fix_history,
-                                          _stall_seen=_stall_seen,
-                                          _iter_ctx=_iter_ctx) -> _FixOutcome:
-                        nonlocal attempts, rc, test_out
-                        failed_tests = _parse_failed_tests(test_out)
-                        if not failed_tests:
-                            return _FixOutcome("stop")  # rc!=0 but no parseable failed tests; bail
-                        cur_fail_count = len(failed_tests)
-                        # P3: classifier-driven retry candidates. Normally
-                        # fires only after one naive iteration stalls. But when
-                        # filled_this_pass is empty (pre-filled cluster), there
-                        # IS no naive baseline — the token-match path produces
-                        # nothing — so the classifier must fire on iter 1.
-                        classification: dict[str, dict] = {}
-                        if _stall_seen["stalls"] >= 1 or not filled_this_pass:
-                            classification = _classify_phase_c_test_failures(
-                                test_out=test_out,
-                                filled_this_pass=filled_this_pass,
-                                failed_tests=sorted(failed_tests),
-                                cluster_name=cluster_name,
-                            )
-                        fns_to_retry: list[tuple[str, str]] = []
-                        if classification:
-                            # Collect fn= refs only from actionable categories.
-                            wanted: set[tuple[str, str]] = set()
-                            for _test, info in classification.items():
-                                if info["category"] not in (
-                                        "BAD_FILL", "TEST_PRECONDITION_MISSING"):
-                                    continue
-                                ref = info["fn"]
-                                if "::" in ref:
-                                    rel_f, fn = ref.split("::", 1)
-                                    wanted.add((rel_f.strip(), fn.strip()))
-                            # When we filled something this pass, restrict to
-                            # that scope (classifier may hallucinate). When
-                            # nothing was filled, accept any fn the classifier
-                            # names that actually exists in the workspace —
-                            # the resolve happens in _locate_fn below.
-                            if filled_this_pass:
-                                in_scope = set(filled_this_pass)
-                                fns_to_retry = [p for p in wanted if p in in_scope]
-                            else:
-                                fns_to_retry = list(wanted)
-                            # Log a one-line summary of categories.
-                            _cat_counts = _Counter_PY(
-                                v["category"] for v in classification.values())
-                            _log(f"  [phase-c/classifier] pass {pass_n} iter "
-                                 f"{test_fix_attempt}: "
-                                 + ", ".join(f"{c}={n}"
-                                             for c, n in _cat_counts.items()))
-                        if not fns_to_retry and filled_this_pass:
-                            # Naive fallback: token match in test output.
-                            for (rel_f, fn) in filled_this_pass:
-                                if any(fn in t for t in failed_tests) or fn in test_out:
-                                    fns_to_retry.append((rel_f, fn))
-                        if not fns_to_retry and not filled_this_pass:
-                            # Reverse-lookup fallback: for each failing test
-                            # binary, enumerate fns it exercises via
-                            # _find_tests_for_fn and feed those as candidates.
-                            test_fname_set = {
-                                t.split("::")[0].split("__")[0]
-                                for t in failed_tests
-                            }
-                            for rs in target_src_dir.rglob("*.rs"):
-                                rel_path = str(rs.relative_to(target_src_dir))
-                                try:
-                                    txt = rs.read_text(encoding="utf-8")
-                                except Exception:
-                                    continue
-                                for m in re.finditer(
-                                    r"\bfn\s+([A-Za-z_]\w*)", txt
-                                ):
-                                    fn = m.group(1)
-                                    tfs = _find_tests_for_fn(
-                                        tests_dir_files, fn,
-                                        file_rel=rel_path,
-                                        src_dir=_src_for_macros,
-                                    )
-                                    for tf in tfs:
-                                        if Path(tf[0]).stem in test_fname_set:
-                                            fns_to_retry.append(
-                                                (rel_path, fn))
-                                            break
-                            # Dedupe.
-                            fns_to_retry = list(dict.fromkeys(fns_to_retry))
-                        if not fns_to_retry:
-                            # Conservative: retry all fns filled this pass.
-                            fns_to_retry = list(filled_this_pass)
-
-                        any_progress = False
-                        # P5.1 parity: this fix prompt previously carried no
-                        # TYPES_IN_SCOPE and no container. Map (file, fn) →
-                        # container via the syn enumerator so the self-type's
-                        # definition gets injected (cf. the BoxedError gap).
-                        _retry_containers = _fn_container_index(target_src_dir)
-                        for rel_f, fn in fns_to_retry:
-                            fp = target_src_dir / rel_f
-                            try:
-                                cur_text = fp.read_text(encoding="utf-8")
-                            except Exception:
-                                continue
-                            sloc = _locate_fn(cur_text, fn)
-                            if sloc is None:
-                                continue
-                            sig_t = sloc[0]
-                            cur_body = cur_text[sloc[2]:sloc[3]]
-                            error_excerpt_test = _focus_cargo_errors(
-                                test_out, rel_f, max_chars=_FIX_ERR_CAP)
-                            _ctx = _gather_fn_fix_context(
-                                file_text=cur_text, file_rel=rel_f, fn_name=fn,
-                                sig_text=sig_t, body_text=cur_body,
-                                error_excerpt=error_excerpt_test,
-                                container=_retry_containers.get((rel_f, fn), ""),
-                                type_records=_crate_type_records,
-                                fr_path=fr_path,
-                            )
-                            # P5.4: container filter disambiguates tests for
-                            # generic fn names (fmt/new/source) — the container
-                            # is known here now, so use it.
-                            t_blocks = _find_tests_for_fn(
-                                tests_dir_files, fn,
-                                file_rel=rel_f, src_dir=_src_for_macros,
-                                container=_ctx.container,
-                            )
-                            prompt = _build_per_fn_fix_prompt(
-                                file_text=cur_text, fn_name=fn, sig_text=sig_t,
-                                test_blocks=t_blocks, module_name=module_name,
-                                cluster_name=cluster_name, file_rel=rel_f,
-                                prev_body=cur_body, error_excerpt=error_excerpt_test,
-                                sections=PerFnFixSections(
-                                    macros=macros_section, notes=_ctx.notes_section,
-                                    container=_ctx.container, types=_ctx.types_section,
-                                    invariants=invariants_section,
-                                    # P7: this test-retry path injects none of
-                                    # these — explicit (was a silent "").
-                                    retrospective_guidance="", siblings="", crate_idioms=""),
-                                fr_path=fr_path,  # P6.4 note recall
-                                attempt_history=test_fix_history.get(  # P2
-                                    (rel_f, fn), []),
-                            )
-                            attempts += 1
-                            attempts_log_t: list[str] = []
-                            new_body, _ = _ask_per_fn_body(prompt, fn, attempts_log_t, sig_text=sig_t)
-                            if not new_body:
-                                continue
-                            # allow_nonstub: every test-retry candidate is an
-                            # already-FILLED fn — without it the splice is
-                            # always rejected and the whole loop is a silent
-                            # no-op (same bug class as the session-58
-                            # _apply_per_fn_fixes find; caught by the f4 pins).
-                            ok2, _ = _splice_fn_body(fp, fn, new_body,
-                                                     allow_nonstub=True)
-                            if ok2:
-                                any_progress = True
-                                _log(f"  [phase-c/per-fn] test-fix: re-spliced "
-                                     f"{rel_f}::{fn} (attempt {test_fix_attempt}).")
-                                # P2: record this attempt's body + the error
-                                # excerpt that PROMPTED the retry. We can't
-                                # bind the new error until after the test run
-                                # below; bind a placeholder now and update
-                                # with the real outcome later.
-                                test_fix_history.setdefault(
-                                    (rel_f, fn), []).append({
-                                        "attempt": test_fix_attempt,
-                                        "body": new_body,
-                                        "error_sig": _focus_cargo_errors(
-                                            test_out, rel_f, max_chars=_FIX_ERR_CAP),
-                                        "outcome": "test_fail",
-                                    })
-                        if not any_progress:
-                            _log(f"  [phase-c/per-fn] pass {pass_n}: no fn could "
-                                 f"be re-spliced for failing tests — stopping.")
-                            return _FixOutcome("stop")
-
-                        # Re-run cargo check (cheap) then cargo test.
-                        rc_c, out_c = _run_cargo(check_cmd, target_src_dir,
-                                                 cluster_env)
-                        if rc_c != 0:
-                            _log(f"  [phase-c/per-fn] pass {pass_n}: test-fix "
-                                 f"broke cargo check; leaving for next pass.")
-                            return _FixOutcome("stop")
-                        rc, test_out = _run_cargo(test_cmd, target_src_dir,
-                                                  cluster_env, timeout=300)
-                        if rc == 0:
-                            _log(f"  [phase-c/per-fn] pass {pass_n}: cargo test "
-                                 f"PASSED after test-fix attempt {test_fix_attempt}.")
-                            return _FixOutcome("accepted")
-                        new_fail_count = len(_parse_failed_tests(test_out))
-                        # P4: persist this iter's cargo test output for post-hoc.
-                        _write_phase_c_test_fix_log(
-                            project_dir=project_dir,
-                            cluster_name=cluster_name,
-                            pass_n=pass_n,
-                            fix_iter=test_fix_attempt,
-                            test_out=test_out,
-                            failed_tests=sorted(_parse_failed_tests(test_out)),
-                            fns_retried=fns_to_retry,
-                            cur_fail_count=cur_fail_count,
-                            new_fail_count=new_fail_count,
-                            best_fail_count=min(_stall_seen["best"], new_fail_count),
-                            stall=_stall_seen["stalls"],  # value before this iter's observation
-                        )
-                        _iter_ctx["cur"] = cur_fail_count
-                        _iter_ctx["fns"] = list(fns_to_retry)
-                        return _FixOutcome("failed", err_count=new_fail_count)
-
-                    def _on_test_fix_failure(attempt_n: int, outcome: _FixOutcome,
-                                             gauge: _FloorStall, *,
-                                             pass_n: int = pass_n,
-                                             _stall_seen=_stall_seen,
-                                             _iter_ctx=_iter_ctx) -> None:
-                        # P5: expose the signal as an event for retro tooling.
-                        _emit("phase_c.test_fix.iter", data={
-                            "cluster": cluster_name, "pass_n": pass_n,
-                            "iter": attempt_n,
-                            "prev_fail_count": _iter_ctx["cur"],
-                            "new_fail_count": outcome.err_count,
-                            "delta": outcome.err_count - _iter_ctx["cur"],
-                            "best": gauge.best,
-                            "improved": gauge.stalls == 0,
-                            "stalled": gauge.stalls,
-                            "fns_retried": [f"{r}::{f}" for r, f in _iter_ctx["fns"]],
-                        })
-                        _log(f"  [phase-c/per-fn] pass {pass_n} test-fix iter "
-                             f"{attempt_n}: "
-                             f"{_iter_ctx['cur']}→{outcome.err_count} failures "
-                             f"(floor={gauge.best}, stall={gauge.stalls}).")
-                        _stall_seen["best"] = gauge.best
-                        _stall_seen["stalls"] = gauge.stalls
-
-                    def _on_test_fix_stall(attempt_n: int, gauge: _FloorStall, *,
-                                           pass_n: int = pass_n) -> None:
-                        _log(f"  [phase-c/per-fn] pass {pass_n}: failure "
-                             f"floor stalled at {gauge.best} for "
-                             f"{gauge.stalls} iter(s) — stopping test-fix loop.")
-
-                    _drive_fix_loop(
-                        _attempt_test_fix,
-                        hard_cap=_PER_PASS_TEST_FIX_HARD_CAP,
-                        max_stalls=_effective_stalls(
-                            _PER_PASS_TEST_FIX_MAX_STALLS,
-                            _converge_in_cluster(cluster) or module_name),
-                        stop_context="test fix",
-                        on_failure=_on_test_fix_failure,
-                        on_stall=_on_test_fix_stall,
-                        initial_floor=_entry_fail_count,
-                    )
-                    # P7.6 floor for the pass-level gauge: 0 once the tests
-                    # pass, else the best (lowest) failure count seen. Replaces
-                    # the locals()-probe of the old loop, which also leaked a
-                    # stale count into LATER passes whose tests passed outright.
-                    pass_fail_floor = 0 if rc == 0 else int(_stall_seen["best"] or 0)
-
-        # P7.6: capture last-pass failure count for the pass-level floor.
-        # If the test phase ran, `best_fail_count` reflects the last cargo
-        # test outcome of this pass; otherwise zero (no failing tests yet).
-        _pass_last_fail_count = pass_fail_floor
-        _remaining_pass = len(_scan_unimplemented_for_cluster(
-            target_src_dir, cluster))
-        _pass_metric = _remaining_pass + _pass_last_fail_count
-        _pass_gauge.observe(_pass_metric)
-        _emit("phase_c.pass.done", duration_ms=int(
-                (time.monotonic() - _pass_t0) * 1000),
-              data={
-            "pass_n": pass_n, "cluster": cluster_name,
-            "fns_filled": progress_this_pass, "errors_so_far": len(errors),
-            "remaining": _remaining_pass,
-            "pass_metric": _pass_metric,
-            "pass_metric_best": _pass_gauge.best,
-            "pass_stalled": _pass_gauge.stalls,
-        })
-        if progress_this_pass == 0:
-            _log(f"  [phase-c/per-fn] pass {pass_n} made no progress; stopping.")
-            break
-        if _pass_gauge.stalled(_pass_max_stalls):
-            _log(f"  [phase-c/per-fn] cluster {cluster_name}: pass-level floor "
-                 f"stalled at metric={_pass_gauge.best} for {_pass_gauge.stalls} "
-                 f"pass(es) — stopping early at pass {pass_n}/{max_passes}.")
-            break
-
-    bytes_after = sum(p.stat().st_size for p in target_src_dir.rglob("*.rs"))
-    remaining = len(_scan_unimplemented_for_cluster(target_src_dir, cluster))
-    _emit("phase_c.cluster.done", data={
-        "cluster": cluster_name,
-        "fns_filled": fns_filled,
-        "bytes_filled": bytes_after - bytes_before,
-        "llm_calls": attempts,
-        "remaining_stubs": remaining,
-        "errors": len(errors),
-    })
-    return {
-        "fns_filled": fns_filled + _carryover.get("fns_filled_via_impl", 0),
-        "bytes_filled": bytes_after - bytes_before,
-        "attempts": attempts,
-        "errors": errors,
-        "remaining": remaining,
-        "impls_filled": _carryover.get("impls_filled", 0),
-        "impls_failed": _carryover.get("impls_failed", 0),
-    }
+    """Phase C — the per-cluster fill engine. Thin composition-root shim over
+    `application.reconstruct.phase_c_engine.PhaseCFillEngine` (P2/R3.3): for each
+    pass, scan stubs → leaf-first priority levels → worker pool (each worker
+    drives `FillOneFn`) → per-pass cargo test + test-fix loop → pass-level
+    floor-stall. Returns {'fns_filled','bytes_filled','attempts','errors',
+    'remaining','impls_filled','impls_failed'}."""
+    return _build_phase_c_engine().run(
+        project_dir, target_src_dir, tests_dir_files, module_name, cluster_name,
+        cluster=cluster, check_cmd=check_cmd, cluster_env=cluster_env,
+        max_passes=max_passes, leaf_name_counts=leaf_name_counts, fr_path=fr_path,
+        tdd_frontier_keys=tdd_frontier_keys, skip_end_pass_test=skip_end_pass_test,
+        tdd_frontier_tests=tdd_frontier_tests, tdd_test_cmd=tdd_test_cmd,
+    )
 
 
 def _merge_fills_preserving_existing(disk_text: str, model_text: str) -> str:
