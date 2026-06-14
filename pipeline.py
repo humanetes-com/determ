@@ -63,6 +63,12 @@ from pipeline_core.application.generators.task1_synthesizer import (
     Task1Synthesizer,
 )
 from pipeline_core.application.refine_loop import run_refine_loop as _run_refine_loop
+from pipeline_core.application.strip_bake import (
+    StripBakeDeps,
+)
+from pipeline_core.application.strip_bake import (
+    strip_and_bake_module as _strip_and_bake_module,
+)
 from pipeline_core.application.tasks.genesis_audit import (
     GenesisAuditDeps,
     genesis_audit,
@@ -17175,6 +17181,17 @@ _REATTACH_DEPS = ReattachDeps(
     has_gen_tests_decl=_has_gen_tests_decl, cargo_env=_cargo_env,
 )
 
+# P5-S3: deps for the extracted strip/bake/commit pre-step (per-block injection).
+_STRIP_BAKE_DEPS = StripBakeDeps(
+    log=_log, phase_valid=_phase_valid, module_augmented_path=_module_augmented_path,
+    capture_api_surface=_capture_api_surface,
+    bake_skeleton_artifacts=_bake_skeleton_artifacts,
+    git_commit=git_commit, git_tag=git_tag,
+    strip_module_source=strip_module_source, commit_and_mark=_commit_and_mark,
+    set_current=_set_current, tarpaulin_bin=TARPAULIN_BIN,
+    coverage_target=COVERAGE_AUGMENTATION_TARGET,
+)
+
 
 def main():
     parser = _orchestrator.build_arg_parser()
@@ -17686,79 +17703,13 @@ def main():
         module_has_tests = len(module_test_files) > 0
         _log(f"  Module test files: {len(module_test_files)} (before strip)")
 
-        # --- Strip: remove ONLY this module's implementation source ---
-        # !IMPORTANT CAN'T STRIP CODE IF COVERAGE <100%, IF <100% go back to task 0c
-        # Only strip once — if already stripped, the original structure file list
-        # is intact and the implementation is already gone.
-        # FORWARD MODE: no source to strip — the workspace starts with src/ empty
-        # (or absent). The user-provided API file at .original_structure/{name}.api.md
-        # already serves as structural ground truth.
-        if _from_spec:
-            _log(f"  [from-spec] Skipping strip for '{module_name}'.")
-        else:
-            if _phase_valid(project_dir, f"strip/{module_name}"):
-                _log(f"  '{module_name}' already stripped — skipping.")
-            else:
-                if crate_type != "proc-macro" and TARPAULIN_BIN.exists():
-                    _sentinel_path = _module_augmented_path(project_dir, module_name)
-                    try:
-                        _strip_cov = float(_sentinel_path.read_text().strip().rstrip('%'))
-                    except (ValueError, OSError):
-                        _strip_cov = 0.0
-                    if _strip_cov < COVERAGE_AUGMENTATION_TARGET:
-                        _log(
-                            f"\n  WARNING at strip: '{module_name}' coverage is {_strip_cov:.1f}% "
-                            f"— stripping anyway. Reconstruction may be incomplete."
-                        )
-                # Capture API surface BEFORE strip — structural ground truth for
-                # TASK 1. The .original_structure/ dir survives strip (lives at the
-                # project root, not under src/), so TASK 1 can read it post-strip.
-                _capture_api_surface(project_dir, module_dir, module_name)
-                # Hard Rule 11: bake the skeleton + leaf-first ordering +
-                # cluster manifest from live source BEFORE strip. After
-                # strip these artefacts are the only source-derived inputs
-                # any downstream phase is allowed to read.
-                _bake_res = _bake_skeleton_artifacts(project_dir, module_name)
-                if not _bake_res.get("ok"):
-                    _log(f"  [ABORT] skeleton bake failed for '{module_name}': "
-                         f"{_bake_res.get('reason', 'unknown')} — refusing to strip.")
-                    raise RuntimeError(
-                        f"skeleton bake failed for {module_name}: "
-                        f"{_bake_res.get('reason', 'unknown')}")
-                _log(f"  Baked skeleton for {len(_bake_res['clusters'])} cluster(s): "
-                     f"{', '.join(_bake_res['clusters'])}")
-                # The bake's outputs (.skeleton/) are tracked in git. When
-                # resuming from a task0c-augmented-{module} tag, the
-                # rebake produces byte-identical files → nothing to
-                # commit. That is success, not failure — the augmented
-                # state IS already captured by the existing tag.
-                _porc = subprocess.run(
-                    ["git", "status", "--porcelain"],
-                    cwd=project_dir, capture_output=True, text=True, timeout=10,
-                ).stdout.strip()
-                if _porc:
-                    if not git_commit(project_dir,
-                                      f"pipeline: task0c augmentation complete — "
-                                      f"all unit tests added for {module_name}"):
-                        _log(f"  [ABORT] augmentation commit failed for '{module_name}' — refusing to strip. Fix git state and retry.")
-                        raise RuntimeError(f"augmentation commit failed for {module_name}")
-                else:
-                    _log("  [augmentation] tree already clean — augmented state preserved from prior run.")
-                git_tag(project_dir, f"task0c-augmented-{module_name}")
-                strip_module_source(project_dir, module_dir)
-                # ATOMIC: commit the stripped tree FIRST, then mark state
-                # done. Reverse of the legacy order — protects against
-                # the lost-commit bug where a process dying between mark
-                # and commit lost the strip commit forever.
-                _commit_and_mark(
-                    project_dir,
-                    f"strip/{module_name}",
-                    "done",
-                    commit_message=f"pipeline: stripped — {module_name}",
-                    source_hash=_src_hash,
-                )
-                _set_current(project_dir, f"strip/{module_name} / done")
-
+        # Strip this module's source after baking Hard-Rule-11 artefacts
+        # (P5-S3 — extracted to application/strip_bake.py).
+        _strip_and_bake_module(
+            project_dir, module_name, module_dir, crate_type=crate_type,
+            from_spec=_from_spec, src_hash=_src_hash, deps=_STRIP_BAKE_DEPS,
+        )
+        
         # Re-collect after strip — picks up any tests generated by TASK 0c.
         # test_files: full read set for TASK 1 (includes inline test blocks in src/)
         # existing_test_files: write-protection set for TASK 2 (pure test files only)
