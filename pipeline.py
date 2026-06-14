@@ -6,7 +6,6 @@ Usage:
   python pipeline.py --project <subfolder>
 """
 
-import argparse
 import dataclasses
 import hashlib
 import json
@@ -48,6 +47,7 @@ from pipeline_core.adapters.workspace_scan import (
     _dependency_graph_factory,
     _workspace_scanner_factory,
 )
+from pipeline_core.application import orchestrator as _orchestrator
 from pipeline_core.application.generators import task1_synthesizer as _task1_synth
 from pipeline_core.application.generators.task1_synthesizer import (
     LLMTask1Synthesizer,
@@ -152,7 +152,7 @@ from pipeline_core.domain.refine import FloorStall as _FloorStall
 from pipeline_core.domain.refine import (
     LoopState as _LoopState,
 )
-from pipeline_core.domain.rust_scan import count_cfg_attrs, item_names
+from pipeline_core.domain.rust_scan import count_cfg_attrs, item_names, mod_decls
 from pipeline_core.domain.test_results import (
     OUTPUT_SEPARATOR,
     _parse_test_counts,
@@ -7819,6 +7819,9 @@ from pipeline_core.application.reconstruct import (  # noqa: E402
 from pipeline_core.application.reconstruct import (  # noqa: E402
     group_priority_levels as _group_priority_levels,
 )
+from pipeline_core.application.reconstruct import (  # noqa: E402
+    leaf_first_group_order as _leaf_first_group_order,
+)
 
 
 def _fill_one_stub(idx: int, rec: Stub, *, ctx: _PerFnPassCtx) -> FillResult:
@@ -9136,32 +9139,6 @@ def _merge_fills_preserving_existing(disk_text: str, model_text: str) -> str:
             continue  # model didn't return this function
         out = out[:body_start] + new_body + out[body_end:]
     return out
-
-
-def _leaf_first_group_order(groups: list[dict]) -> list[dict]:
-    """Sort groups so leaf groups (fewest cross-group symbol overlaps) come first.
-
-    A group with many shared target_symbols depends on more "other" groups'
-    work, so should be filled later.
-    """
-    all_other_syms: list[set[str]] = []
-    for g in groups:
-        all_other_syms.append(set(g.get("target_symbols", [])))
-
-    def overlap_count(idx: int) -> int:
-        mine = set(groups[idx].get("target_symbols", []))
-        if not mine:
-            return 0
-        count = 0
-        for j, others in enumerate(all_other_syms):
-            if j == idx:
-                continue
-            count += len(mine & others)
-        return count
-
-    indexed = list(range(len(groups)))
-    indexed.sort(key=lambda i: (overlap_count(i), groups[i].get("name", "")))
-    return [groups[i] for i in indexed]
 
 
 def _task2_fill_groups(
@@ -12436,7 +12413,7 @@ def _topo_sort_files(file_paths: list, known_content: dict) -> list:
     stems = {Path(p).stem: p for p in file_paths}
     deps: dict[str, set] = {p: set() for p in file_paths}
     for path, content in known_content.items():
-        for mod_name in re.findall(r'\bmod\s+(\w+)\s*;', content):
+        for mod_name in mod_decls(content):
             sub = stems.get(mod_name)
             if sub and sub != path and sub in path_set:
                 deps[sub].add(path)  # sub must come after path (path declares it)
@@ -17341,88 +17318,7 @@ _TASK0C_DEPS = Task0cDeps(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Deterministic process pipeline.")
-    parser.add_argument("--project", default="agave",
-                        help="Project subfolder name (default: agave)")
-    parser.add_argument("--clean", action="store_true",
-                        help="Delete all generated state and start from scratch")
-    parser.add_argument("--progress", action="store_true",
-                        help="Compact terminal progress bar (\\r-rewriting) instead of one line per chunk")
-    parser.add_argument("--nolog", action="store_true",
-                        help="Print to stdout only — do not write to run.log")
-    parser.add_argument("--augment-tests", action="store_true",
-                        help=(
-                            "Force TASK 0c even if .coverage_augmented already exists. "
-                            "Normally TASK 0c runs automatically when the sentinel is absent."
-                        ))
-    parser.add_argument("--repo", default=None,
-                        help="Git URL or local path — cloned/copied into tmp/, git-managed")
-    parser.add_argument("--best-models-list", action="store_true",
-                        help="Fetch and display top open-source coding models from HuggingFace")
-    parser.add_argument("--vram-gb", type=float, default=32.0,
-                        help="Total GPU VRAM in GB used to annotate model fit (default: 32)")
-    parser.add_argument("--from-spec", action="store_true",
-                        help=(
-                            "Forward (spec-driven) mode. Skip task0a/0b/0c/strip/task1. "
-                            "Requires functional_requirements.md at the project root. "
-                            "API surface (if present at .original_structure/{name}.api.md) "
-                            "is used by TASK 2. Goes directly to module iteration loop "
-                            "(TASK 2 → TASK 3 → TASK 4)."
-                        ))
-    parser.add_argument("--restart-from-augmented", action="store_true",
-                        help=(
-                            "Restore the workspace to the task0c augmentation commit "
-                            "(tag: task0c-augmented-{module}) and clear only iteration "
-                            "state (strip sentinels, FR file, tests_output, manifest, "
-                            "failure log). Keeps task0a/0b/0c outputs. Strip + task1+ "
-                            "re-run from scratch with the augmented test suite. "
-                            "Single-module workspaces only for now."
-                        ))
-    parser.add_argument("--audit", action="store_true",
-                        help=(
-                            "Self-audit: run the flow auditor (pipeline_core.audit — "
-                            "doc-channel / floor / plateau / no-wipe / ratchet "
-                            "invariants) at every iteration boundary and every "
-                            "AUDIT_INTERVAL_SEC (default 900) in the background; "
-                            "verdicts go to the log ([audit] lines) and to "
-                            "events.jsonl (flow_audit.report) for the monitor."
-                        ))
-    parser.add_argument("--phase-a-only", action="store_true",
-                        help=(
-                            "Standalone bake: discover clusters from live source, "
-                            "run the Rust skeleton extractor per cluster, save the "
-                            "skeleton + leaf-first ordering under "
-                            "tmp/{project}/.skeleton/{cluster}/. Refuses to run if "
-                            "strip has already happened (no source to read)."
-                        ))
-    parser.add_argument("--phase-b-only", action="store_true",
-                        help=(
-                            "TASK 2 skeleton backend, Phase A + B: run Phase A then ask "
-                            "the LLM to group the project's test files into cohesive units. "
-                            "Writes the validated group manifest to "
-                            "tmp/{project}/.skeleton/groups.json and reports group counts. "
-                            "For testing the planner before wiring up Phase C/D."
-                        ))
-    parser.add_argument("--phase-c-only", action="store_true",
-                        help=(
-                            "TASK 2 skeleton backend, Phase A + B + C: run A and B, then "
-                            "fill the skeleton group-by-group (leaf-first). Filled source "
-                            "lands at tmp/{project}/.skeleton-filled/. Reports bytes filled "
-                            "per group. No final compile/test run."
-                        ))
-    parser.add_argument("--phase-d-only", action="store_true",
-                        help=(
-                            "TASK 2 skeleton backend, Phase A + B + C + D: full skeleton "
-                            "pipeline including the residual-cleanup pass. Reports stubs "
-                            "filled vs left untouched."
-                        ))
-    parser.add_argument("--skeleton-backend", action="store_true",
-                        help=(
-                            "Invoke StaticSkeletonTask2Generator.generate() directly "
-                            "(per-cluster Plan 4 flow). Reads functional_requirements.md "
-                            "and genesis.md from the project, runs Phase A→D per cluster, "
-                            "then merges into project_dir/src/. Standalone test path."
-                        ))
+    parser = _orchestrator.build_arg_parser()
     args = parser.parse_args()
 
     if args.best_models_list:
@@ -17474,25 +17370,15 @@ def main():
     except Exception as _e:
         _log(f"  [gen_tests] startup quarantine scan failed: {_e}")
 
-    if args.phase_a_only:
-        rc = _cmd_phase_a_only(project_dir)
-        sys.exit(rc)
-
-    if args.phase_b_only:
-        rc = _cmd_phase_b_only(project_dir)
-        sys.exit(rc)
-
-    if args.phase_c_only:
-        rc = _cmd_phase_c_only(project_dir)
-        sys.exit(rc)
-
-    if args.phase_d_only:
-        rc = _cmd_phase_d_only(project_dir)
-        sys.exit(rc)
-
-    if args.skeleton_backend:
-        rc = _cmd_skeleton_backend(project_dir)
-        sys.exit(rc)
+    _sub_rc = _orchestrator.run_phase_subcommand(args, project_dir, {
+        "phase_a_only": _cmd_phase_a_only,
+        "phase_b_only": _cmd_phase_b_only,
+        "phase_c_only": _cmd_phase_c_only,
+        "phase_d_only": _cmd_phase_d_only,
+        "skeleton_backend": _cmd_skeleton_backend,
+    })
+    if _sub_rc is not None:
+        sys.exit(_sub_rc)
 
     # Forward (spec-driven) mode: skip reconstruction-phase tasks. The user
     # provides functional_requirements.md (+ optional API surface) and tests;

@@ -1,0 +1,123 @@
+"""Orchestrator — the pipeline's composition/phase plumbing extracted from the
+`main()` god-function (P5). Grown strangler-fig: pure, engine-independent pieces
+cross first (CLI parser), then the phase blocks behind explicit ports as their
+dependency surface shrinks. `pipeline.py:main()` stays the entrypoint and calls
+into here.
+"""
+
+from __future__ import annotations
+
+import argparse
+from collections.abc import Callable, Mapping
+from pathlib import Path
+
+# The --phase-*-only / --skeleton-backend standalone subcommands, in dispatch
+# order. Each maps an `args` flag attribute to a handler keyed by the same name.
+_PHASE_SUBCOMMAND_FLAGS = (
+    "phase_a_only", "phase_b_only", "phase_c_only", "phase_d_only", "skeleton_backend",
+)
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    """Construct the pipeline CLI parser. Pure — no parsing, no I/O."""
+    parser = argparse.ArgumentParser(description="Deterministic process pipeline.")
+    parser.add_argument("--project", default="agave",
+                        help="Project subfolder name (default: agave)")
+    parser.add_argument("--clean", action="store_true",
+                        help="Delete all generated state and start from scratch")
+    parser.add_argument("--progress", action="store_true",
+                        help="Compact terminal progress bar (\\r-rewriting) instead of one line per chunk")
+    parser.add_argument("--nolog", action="store_true",
+                        help="Print to stdout only — do not write to run.log")
+    parser.add_argument("--augment-tests", action="store_true",
+                        help=(
+                            "Force TASK 0c even if .coverage_augmented already exists. "
+                            "Normally TASK 0c runs automatically when the sentinel is absent."
+                        ))
+    parser.add_argument("--repo", default=None,
+                        help="Git URL or local path — cloned/copied into tmp/, git-managed")
+    parser.add_argument("--best-models-list", action="store_true",
+                        help="Fetch and display top open-source coding models from HuggingFace")
+    parser.add_argument("--vram-gb", type=float, default=32.0,
+                        help="Total GPU VRAM in GB used to annotate model fit (default: 32)")
+    parser.add_argument("--from-spec", action="store_true",
+                        help=(
+                            "Forward (spec-driven) mode. Skip task0a/0b/0c/strip/task1. "
+                            "Requires functional_requirements.md at the project root. "
+                            "API surface (if present at .original_structure/{name}.api.md) "
+                            "is used by TASK 2. Goes directly to module iteration loop "
+                            "(TASK 2 → TASK 3 → TASK 4)."
+                        ))
+    parser.add_argument("--restart-from-augmented", action="store_true",
+                        help=(
+                            "Restore the workspace to the task0c augmentation commit "
+                            "(tag: task0c-augmented-{module}) and clear only iteration "
+                            "state (strip sentinels, FR file, tests_output, manifest, "
+                            "failure log). Keeps task0a/0b/0c outputs. Strip + task1+ "
+                            "re-run from scratch with the augmented test suite. "
+                            "Single-module workspaces only for now."
+                        ))
+    parser.add_argument("--audit", action="store_true",
+                        help=(
+                            "Self-audit: run the flow auditor (pipeline_core.audit — "
+                            "doc-channel / floor / plateau / no-wipe / ratchet "
+                            "invariants) at every iteration boundary and every "
+                            "AUDIT_INTERVAL_SEC (default 900) in the background; "
+                            "verdicts go to the log ([audit] lines) and to "
+                            "events.jsonl (flow_audit.report) for the monitor."
+                        ))
+    parser.add_argument("--phase-a-only", action="store_true",
+                        help=(
+                            "Standalone bake: discover clusters from live source, "
+                            "run the Rust skeleton extractor per cluster, save the "
+                            "skeleton + leaf-first ordering under "
+                            "tmp/{project}/.skeleton/{cluster}/. Refuses to run if "
+                            "strip has already happened (no source to read)."
+                        ))
+    parser.add_argument("--phase-b-only", action="store_true",
+                        help=(
+                            "TASK 2 skeleton backend, Phase A + B: run Phase A then ask "
+                            "the LLM to group the project's test files into cohesive units. "
+                            "Writes the validated group manifest to "
+                            "tmp/{project}/.skeleton/groups.json and reports group counts. "
+                            "For testing the planner before wiring up Phase C/D."
+                        ))
+    parser.add_argument("--phase-c-only", action="store_true",
+                        help=(
+                            "TASK 2 skeleton backend, Phase A + B + C: run A and B, then "
+                            "fill the skeleton group-by-group (leaf-first). Filled source "
+                            "lands at tmp/{project}/.skeleton-filled/. Reports bytes filled "
+                            "per group. No final compile/test run."
+                        ))
+    parser.add_argument("--phase-d-only", action="store_true",
+                        help=(
+                            "TASK 2 skeleton backend, Phase A + B + C + D: full skeleton "
+                            "pipeline including the residual-cleanup pass. Reports stubs "
+                            "filled vs left untouched."
+                        ))
+    parser.add_argument("--skeleton-backend", action="store_true",
+                        help=(
+                            "Invoke StaticSkeletonTask2Generator.generate() directly "
+                            "(per-cluster Plan 4 flow). Reads functional_requirements.md "
+                            "and genesis.md from the project, runs Phase A→D per cluster, "
+                            "then merges into project_dir/src/. Standalone test path."
+                        ))
+    return parser
+
+
+def run_phase_subcommand(
+    args: argparse.Namespace,
+    project_dir: Path,
+    handlers: Mapping[str, Callable[[Path], int]],
+) -> int | None:
+    """If a `--phase-*-only` / `--skeleton-backend` flag is set, run its handler
+    and return the process exit code; otherwise return None (normal pipeline).
+
+    Dispatch order is fixed (`_PHASE_SUBCOMMAND_FLAGS`); each handler takes the
+    project dir and returns an exit code — the routing the orchestrator owns,
+    the work stays in the injected handlers.
+    """
+    for flag in _PHASE_SUBCOMMAND_FLAGS:
+        if getattr(args, flag):
+            return handlers[flag](project_dir)
+    return None

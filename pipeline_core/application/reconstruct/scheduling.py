@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from pipeline_core.domain.models import Stub
 
 
@@ -26,3 +28,28 @@ def group_priority_levels(
             prev_key = key
         levels[-1].append((i, r))
     return levels
+
+
+def leaf_first_group_order(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Sort groups so leaf groups (fewest cross-group symbol overlaps) come first.
+
+    A group sharing many `target_symbols` with others depends on more "other"
+    groups' work, so should be filled later. Ties broken by group name for
+    determinism (R11.3). Pure: no engine state.
+    """
+    all_other_syms: list[set[str]] = [set(g.get("target_symbols", []) or []) for g in groups]
+
+    def overlap_count(idx: int) -> int:
+        mine = set(groups[idx].get("target_symbols", []) or [])
+        if not mine:
+            return 0
+        count = 0
+        for j, others in enumerate(all_other_syms):
+            if j == idx:
+                continue
+            count += len(mine & others)
+        return count
+
+    indexed = list(range(len(groups)))
+    indexed.sort(key=lambda i: (overlap_count(i), str(groups[i].get("name", ""))))
+    return [groups[i] for i in indexed]

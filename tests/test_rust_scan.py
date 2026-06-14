@@ -6,9 +6,30 @@ from __future__ import annotations
 
 import re
 
-from pipeline_core.domain.rust_scan import count_cfg_attrs, item_names
+from pipeline_core.domain.rust_scan import count_cfg_attrs, item_names, mod_decls
 
 _OLD_SYMBOL_RE = re.compile(r'\b(?:fn|struct|enum|trait|type|const)\s+([A-Za-z_]\w*)')
+_OLD_MOD_RE = re.compile(r'\bmod\s+(\w+)\s*;')
+
+
+def test_mod_decls_matches_old_regex():
+    samples = [
+        "mod foo;",
+        "pub mod bar;",
+        "mod  spaced ;\nmod two;",
+        "mod inline { fn x() {} }",          # inline module → no decl
+        "mod a;\nmod b { }\nmod c ;",
+        "pub(crate) mod nested;",
+        "let xmod = 1; modfoo();",            # not the keyword token
+        "",
+        "mod foo;bar baz",                    # `;` mid-token after name
+    ]
+    for s in samples:
+        assert mod_decls(s) == _OLD_MOD_RE.findall(s), s
+
+
+def test_mod_decls_excludes_inline_modules():
+    assert mod_decls("mod a;\nmod b {\n    fn f() {}\n}\nmod c;") == ["a", "c"]
 
 
 def test_item_names_basic_items():

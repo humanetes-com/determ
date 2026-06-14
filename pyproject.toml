@@ -68,6 +68,7 @@ ignore = [
 ignore_missing_imports = true
 check_untyped_defs = true
 warn_return_any = true
+warn_redundant_casts = true  # global-only flag; catches no-op casts everywhere
 strict_optional = false
 
 [tool.pytest.ini_options]
@@ -108,3 +109,4 @@ no_implicit_optional = true
 warn_unused_ignores = true
 strict_equality = true
 extra_checks = true
+warn_unreachable = true  # beyond strict: dead branches (e.g. impossible isinstance) are bugs

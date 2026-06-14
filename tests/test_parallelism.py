@@ -47,7 +47,7 @@ def test_per_thread_stream_files_4_workers(tmp_path: Path, monkeypatch) -> None:
     """4 concurrent calls → 4 stream files, each containing ONLY its own
     call's header + tokens, in order. This is the invariant C10 audits from
     events: one live call per thread name, so per-thread files never collide."""
-    import model_interact as mi
+    from pipeline_core.adapters import llm_transports as mi  # transports' new home
 
     stream_log = tmp_path / "stream.log"
     monkeypatch.setattr(mi, "_STREAM_LOG", str(stream_log))

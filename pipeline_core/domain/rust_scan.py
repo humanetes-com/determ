@@ -48,6 +48,41 @@ def item_names(text: str) -> list[str]:
     return names
 
 
+def mod_decls(text: str) -> list[str]:
+    """Names from ``mod NAME;`` declarations (NOT inline ``mod NAME { ... }``).
+
+    Char-scan replacement for ``\\bmod\\s+(\\w+)\\s*;``: a ``mod`` token (word
+    boundary before), then ``\\s+``, an identifier (``\\w+``), optional
+    whitespace, then ``;``. An inline module (``mod m {``) lacks that ``;`` and
+    is excluded, matching the regex exactly. Order-preserving.
+    """
+    n = len(text)
+    names: list[str] = []
+    i = 0
+    while True:
+        p = text.find("mod", i)
+        if p == -1:
+            return names
+        i = p + 3
+        if p > 0 and text[p - 1] in _IDENT_CHARS:  # \b: not a word boundary
+            continue
+        j = p + 3
+        if j >= n or not text[j].isspace():         # \s+ (at least one)
+            continue
+        while j < n and text[j].isspace():
+            j += 1
+        k = j
+        while k < n and text[k] in _IDENT_CHARS:     # \w+
+            k += 1
+        if k == j:
+            continue
+        m = k
+        while m < n and text[m].isspace():           # \s*
+            m += 1
+        if m < n and text[m] == ";":
+            names.append(text[j:k])
+
+
 def count_cfg_attrs(text: str, needles: Sequence[str]) -> int:
     """Count ``#[cfg(...)]`` attributes whose predicate (up to the first ``)``)
     contains any of ``needles``.

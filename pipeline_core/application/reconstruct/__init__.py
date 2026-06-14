@@ -6,6 +6,9 @@ as their helper surface shrinks enough for honest (small-record) injection.
 """
 
 from pipeline_core.application.reconstruct.context import PerFnPassCtx, fill_skip
-from pipeline_core.application.reconstruct.scheduling import group_priority_levels
+from pipeline_core.application.reconstruct.scheduling import (
+    group_priority_levels,
+    leaf_first_group_order,
+)
 
-__all__ = ["PerFnPassCtx", "fill_skip", "group_priority_levels"]
+__all__ = ["PerFnPassCtx", "fill_skip", "group_priority_levels", "leaf_first_group_order"]
