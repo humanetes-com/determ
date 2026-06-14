@@ -74,3 +74,25 @@ def smart_truncate(text: str, total_limit: int = 8000, head: int = 2000, tail: i
         return text
     omitted = len(text) - head - tail
     return text[:head] + f"\n\n[... {omitted:,} chars omitted ...]\n\n" + text[-tail:]
+
+
+def strip_list_marker(line: str) -> str:
+    """Strip a leading list/enumeration marker from `line` (regex-free, R7).
+
+    Removes a leading run of `-`, `*`, or digits, an optional single `.`, `)`,
+    or `:`, then any following whitespace — the shapes the LLM uses when it
+    returns a file list as a bulleted/numbered list (`- src/x.rs`, `1. x.rs`,
+    `2) x.rs`). Lines without such a prefix (`src/lib.rs`) are returned
+    unchanged. Equivalent to the former `re.sub(r'^[\\-\\*\\d]+[\\.\\):]?\\s*', '', line)`.
+    """
+    n = len(line)
+    j = 0
+    while j < n and (line[j] in "-*" or line[j].isdigit()):
+        j += 1
+    if j == 0:
+        return line  # no marker run → unchanged
+    if j < n and line[j] in ".):":
+        j += 1
+    while j < n and line[j].isspace():
+        j += 1
+    return line[j:]
