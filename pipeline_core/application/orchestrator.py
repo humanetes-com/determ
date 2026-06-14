@@ -215,7 +215,7 @@ class LockDeps:
     """Collaborators for the lock/complete transition (per-block injection)."""
     commit_and_mark: Callable[..., None]
     set_current: Callable[[Path, str], None]
-    lock_module: Callable[[Path, str, Path, Path], None]
+    lock_module: Callable[[Path, str, Path, Path], object]  # returns int; ignored
     git_commit: Callable[[Path, str], bool]
     log: Callable[[str], None]
     sys_exit: Callable[[int], None]
