@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 # The --phase-*-only / --skeleton-backend standalone subcommands, in dispatch
 # order. Each maps an `args` flag attribute to a handler keyed by the same name.
@@ -121,3 +123,100 @@ def run_phase_subcommand(
         if getattr(args, flag):
             return handlers[flag](project_dir)
     return None
+
+
+class DepGraphView(Protocol):
+    """The slice of the dependency graph the per-module loop needs (structural —
+    every `workspace_scan` graph backend satisfies it without inheritance)."""
+
+    def crate_dir(self, module_name: str) -> Path: ...
+    def crate_type(self, module_name: str) -> str: ...
+    def workspace_deps(self, module_name: str) -> set[str]: ...
+    def module_test_command(self, test_command: str, module_name: str) -> str: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ModuleDescriptor:
+    """Per-module loop-invariant facts derived once at the top of each iteration."""
+    module_dir: Path
+    crate_type: str
+    workspace_deps: set[str]
+    module_test_cmd: str
+    module_manifest: Path
+    module_dir_rel: str
+
+
+def module_descriptor(
+    module_name: str,
+    *,
+    dep_graph: DepGraphView,
+    is_multi_module: bool,
+    project_dir: Path,
+    test_command: str,
+) -> ModuleDescriptor:
+    """Resolve a module's dir/type/deps/test-cmd/manifest/rel-path. Single-module
+    workspaces short-circuit to the project root + `lib` defaults (no graph)."""
+    module_dir = dep_graph.crate_dir(module_name) if is_multi_module else project_dir
+    crate_type = dep_graph.crate_type(module_name) if is_multi_module else "lib"
+    workspace_deps = dep_graph.workspace_deps(module_name) if is_multi_module else set()
+    module_test_cmd = (dep_graph.module_test_command(test_command, module_name)
+                       if is_multi_module else test_command)
+    module_dir_rel = (
+        str(module_dir.relative_to(project_dir)) + "/"
+        if is_multi_module and module_dir != project_dir else ""
+    )
+    return ModuleDescriptor(
+        module_dir=module_dir,
+        crate_type=crate_type,
+        workspace_deps=workspace_deps,
+        module_test_cmd=module_test_cmd,
+        module_manifest=project_dir / f".generated_files_{module_name}.txt",
+        module_dir_rel=module_dir_rel,
+    )
+
+
+_EXAMPLE_USAGE_HEADER = (
+    "// !!!! TASK 1 NOTE: This file is from the project's `examples/` directory.\n"
+    "// !!!! It demonstrates idiomatic API usage. It is NOT a test and contains\n"
+    "// !!!! no assertions to enforce. Use it to understand HOW the public API is\n"
+    "// !!!! invoked, but do not derive requirements from it unless the same\n"
+    "// !!!! behavior is also asserted by a test in the test suite.\n\n"
+)
+
+
+def with_example_usage_signal(
+    t1_input: list[tuple[str, str]], examples: list[tuple[str, str]],
+) -> list[tuple[str, str]]:
+    """Append `examples/*.rs` files to the TASK 1 input as usage signal — each
+    prefixed with a header marking it non-assertional so the model doesn't derive
+    requirements from example-only behaviour. Unchanged input when no examples."""
+    if not examples:
+        return t1_input
+    return t1_input + [(rel, _EXAMPLE_USAGE_HEADER + content) for rel, content in examples]
+
+
+def next_module(
+    modules: list[str], locked_modules: set[str], module_coverage: Mapping[str, float],
+) -> str | None:
+    """The next unprocessed module to reconstruct: the unlocked one with the
+    highest coverage (ties broken by `modules` order via a stable sort). No
+    topological constraint — unprocessed modules keep real source on disk, so the
+    crate compiles in any order. Returns None when all modules are locked."""
+    candidates = [(module_coverage.get(m, 0.0), m)
+                  for m in modules if m not in locked_modules]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    return candidates[0][1]
+
+
+def filter_module_test_files(
+    all_test_files: list[tuple[str, str]], module_dir_rel: str,
+) -> list[tuple[str, str]]:
+    """This module's `(rel_path, content)` test files: all of them filtered to the
+    module's dir prefix, or all of them for a single-module/root workspace
+    (``module_dir_rel == ""``)."""
+    if not module_dir_rel:
+        return all_test_files
+    return [(rel, content) for rel, content in all_test_files
+            if rel.startswith(module_dir_rel)]

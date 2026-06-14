@@ -1,0 +1,28 @@
+"""Strip adapter (P5-S2): original-structure recording + language guard."""
+from __future__ import annotations
+
+from pathlib import Path
+
+from pipeline_core.adapters import strip
+
+
+def test_save_original_structure_records_rs_files(tmp_path: Path) -> None:
+    mod = tmp_path / "crate"
+    (mod / "src").mkdir(parents=True)
+    (mod / "src" / "lib.rs").write_text("pub fn f() {}", encoding="utf-8")
+    (mod / "src" / "util.rs").write_text("pub fn g() {}", encoding="utf-8")
+    (mod / "target").mkdir()
+    (mod / "target" / "junk.rs").write_text("x", encoding="utf-8")  # skip-dir
+
+    strip.save_original_structure(tmp_path, mod)
+
+    manifest = (tmp_path / strip.ORIGINAL_STRUCTURE_DIR / "crate.txt").read_text()
+    recorded = set(manifest.splitlines())
+    assert recorded == {"crate/src/lib.rs", "crate/src/util.rs"}
+
+
+def test_strip_module_source_skips_non_rust(tmp_path: Path) -> None:
+    # No Cargo.toml → detect_language != "rust" → no mutation, no manifest.
+    (tmp_path / "main.py").write_text("print(1)", encoding="utf-8")
+    strip.strip_module_source(tmp_path, tmp_path)
+    assert not (tmp_path / strip.ORIGINAL_STRUCTURE_DIR).exists()

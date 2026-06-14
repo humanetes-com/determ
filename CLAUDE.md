@@ -62,6 +62,13 @@ Every new tool, binary, or Python package must be added to `setup.sh` (and `requ
 ## Pipeline restart timestamps
 Each restart is logged as `PIPELINE STARTED — <timestamp> UTC  pipeline.py=<md5_8>  git=<sha>` in `logs/pipeline_anyhow.log`.
 
+## Self-validating a slice via the continuous microcrate watcher (TOKEN-CHEAP)
+`watch_microcrate.sh` runs `run_microcrate.sh` in a continuous loop (run → `sleep 300` → recurse; log `LOG=/tmp/pipeline_micro.log`, ends in `SMOKE GREEN`/`RED`). To validate a slice the autopilot does NOT ask the user to run — it self-checks:
+1. ON-DEMAND SINGLE CHECK FIRST (default, no background process): one `grep` of `/tmp/pipeline_micro.log` — compare its `PIPELINE STARTED … pipeline.py=<md5_8>` to the on-disk `pipeline.py` md5, and look for `complete — all tests pass`/`SUCCESS`. md5-match+complete → analyze now; md5-match+not-complete → my run is in progress, just wait; no match → my edit lands next cycle.
+2. ONLY IF NOT READY: launch ONE SILENT background poller (`run_in_background`) that sleeps+checks and prints NOTHING until it matches (no per-iteration echo — echoes cost tokens when read back). Never run a chatty always-on poller.
+3. Sleeping costs no tokens; reading a poller's accumulated stdout does — so prefer the single check, fall back to a silent poller. HARD RULE (unchanged): NEVER use remote/cloud cron / RemoteTrigger / ScheduleWakeup to wait — only local `sleep`+check.
+4. ⚠️ GUARD COLLISION — a long-lived poller MUST NOT contain `python … pipeline.py` in its command line. `run_microcrate.sh` refuses to start if `pgrep -f "[p]ython.*pipeline.py"` matches, and a poller that hashes via `python3 -c "...open('pipeline.py')..."` keeps that string in its argv for the whole sleep loop → the watcher sees a "running pipeline" and SKIPS every cycle (looks blocked). Hash with `md5sum pipeline.py | cut -c1-8` (no `python`), and keep `python`+`pipeline.py` out of any backgrounded/sleeping command. (A one-shot foreground `python3` hash is fine — it exits in ~1s.)
+
 ## Which code is running — check the HASH, not the commit
 The pipeline runs `pipeline.py` from DISK at startup; commit status is irrelevant. To know whether the RUNNING process has a given edit, compare the on-disk hash to the one it logged:
 ```bash

@@ -38,7 +38,9 @@ from pipeline_core import log as _pclog
 from pipeline_core import retry as _pcretry
 from pipeline_core.adapters import build_adapters
 from pipeline_core.adapters import coverage as _covmod
+from pipeline_core.adapters import discovery as _discovery
 from pipeline_core.adapters import state as _state_mod
+from pipeline_core.adapters import strip as _strip_mod
 from pipeline_core.adapters import workspace as _wsmod
 from pipeline_core.adapters import workspace_scan as _workspace_scan
 from pipeline_core.adapters.coverage import CoverageDeps
@@ -48,6 +50,12 @@ from pipeline_core.adapters.workspace_scan import (
     _workspace_scanner_factory,
 )
 from pipeline_core.application import orchestrator as _orchestrator
+from pipeline_core.application.gen_tests_reattach import (
+    ReattachDeps,
+)
+from pipeline_core.application.gen_tests_reattach import (
+    reattach_gen_tests as _reattach_gen_tests,
+)
 from pipeline_core.application.generators import task1_synthesizer as _task1_synth
 from pipeline_core.application.generators.task1_synthesizer import (
     LLMTask1Synthesizer,
@@ -106,6 +114,7 @@ from pipeline_core.application.workspace_lifecycle import (
     wipe_module_sources as _wl_wipe_module_sources,
 )
 from pipeline_core.domain.cargo_toml import cargo_default_features as _domain_cargo_default_features
+from pipeline_core.domain.cargo_toml import cargo_entry_point_paths as _domain_cargo_entry_point_paths
 from pipeline_core.domain.cargo_toml import cargo_is_proc_macro as _domain_cargo_is_proc_macro
 from pipeline_core.domain.cargo_toml import cargo_package_name as _domain_cargo_package_name
 from pipeline_core.domain.cargo_toml import load_cargo_toml as _domain_load_cargo_toml
@@ -124,6 +133,9 @@ from pipeline_core.domain.llm_output import (
     extract_files,
     parse_retrospective,
     parse_self_note,
+)
+from pipeline_core.domain.llm_output import (
+    split_api_surface_by_file as _domain_split_api_surface_by_file,
 )
 from pipeline_core.domain.model_caps import (
     model_context_chars as _model_context_chars_pure,
@@ -217,7 +229,6 @@ from pipeline_core.prompts.sections import (
 )
 from pipeline_core.retry import with_retry
 from pipeline_core.settings import Settings
-from strip_to_tests import detect_language, process_rust
 
 # Names re-exported through pipeline.py for backward-compatible call sites + the smoke
 # suite (which references them as pipeline.X). Declaring them here documents the public
@@ -946,25 +957,10 @@ MODULE_STRIPPED_DIR    = ".module_stripped"
 
 # Per-file attempt log for TASK 0c: JSONL, one entry per generation attempt (BL-002).
 
-# Directory names that conventionally contain test files, across languages.
-TEST_DIR_NAMES = {"tests", "test", "spec", "specs", "__tests__", "testing"}
-
-# Directory names to skip entirely when scanning for test files.
-SKIP_DIR_NAMES = {
-    ".git", ".hg", ".svn",           # VCS internals
-    "target",                          # Rust / Maven build output
-    "node_modules",                    # Node.js dependencies
-    "vendor",                          # Go / PHP / Ruby vendored deps
-    ".venv", "venv", "env",           # Python virtual environments
-    "__pycache__", ".mypy_cache",     # Python caches
-    "dist", "build", ".build",        # Generic build output
-    ".tox", ".eggs",                   # Python test infra artifacts
-    ".skeleton", ".skeleton-filled",  # TASK 2 skeleton backend scratch dirs
-    ".best_tree",                      # best-tree ratchet snapshot
-    ".original_structure",             # pre-strip API snapshot
-    ".chunk_cache", ".task1_partials", # task1 caches
-    ".phase_c_logs",                   # Phase C test-fix iteration archives (P4)
-}
+# Test/example file discovery moved to pipeline_core.adapters.discovery (P5).
+# Re-exported here so existing references keep working through the shim.
+TEST_DIR_NAMES = _discovery.TEST_DIR_NAMES
+SKIP_DIR_NAMES = _discovery.SKIP_DIR_NAMES
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -2689,118 +2685,12 @@ def detect_resume_point(root: Path, project_dir: Path, manifest_path: Path,
 # Test file collection -- language agnostic
 # ---------------------------------------------------------------------------
 
-def is_test_file(path: Path, project_dir: Path) -> bool:
-    """
-    Determine if a file is a test file using path and name conventions that
-    apply across languages. Does not inspect file contents.
-    """
-    rel = path.relative_to(project_dir)
-
-    # Any directory component is a well-known test directory name.
-    if any(part.lower() in TEST_DIR_NAMES for part in rel.parts[:-1]):
-        return True
-
-    stem = path.stem           # filename without final extension, case preserved
-    stem_lower = stem.lower()
-
-    # Files named exactly "test" or "spec" in any language.
-    if stem_lower in {"test", "spec", "tests", "specs"}:
-        return True
-
-    # snake_case conventions: test_foo.py, foo_test.go
-    if stem_lower.startswith("test_") or stem_lower.endswith("_test"):
-        return True
-
-    # CamelCase conventions: FooTest.java, FooSpec.rb, FooTests.php
-    if stem.endswith(("Test", "Tests", "Spec", "Specs")):
-        return True
-
-    # Dot-separated conventions: foo.test.js, foo.spec.ts
-    if len(path.suffixes) >= 2 and path.suffixes[-2].lower() in (".test", ".spec"):
-        return True
-
-    # Pipeline-generated gen_tests siblings: foo.gen_tests_3.rs
-    return _match_gen_tests_sibling(path.name) is not None
-
-
-def collect_test_files(project_dir: Path):
-    """Return (rel_path, content) pairs for every file containing test code.
-
-    Used by TASK 1 to read the full test spec. Includes:
-    - Pure test files: identified by name/location (is_test_file) — e.g. tests/*.rs
-    - Rust source files with inline test blocks (#[cfg(test)] or #[test]) — e.g. src/lib.rs
-      after stripping, these contain the test spec that TASK 1 must read.
-
-    NOTE: this is the READ set for TASK 1. For the WRITE protection set (files TASK 2
-    must never overwrite), use collect_protected_test_files() instead — it excludes
-    inline test files in src/ so TASK 2 can regenerate them with new implementation.
-    """
-    result = []
-    for p in sorted(project_dir.rglob("*")):
-        if not p.is_file():
-            continue
-        rel = p.relative_to(project_dir)
-        if any(part in SKIP_DIR_NAMES for part in rel.parts):
-            continue
-        try:
-            content = p.read_text()
-        except Exception:
-            continue
-        if is_test_file(p, project_dir):
-            result.append((str(rel), content))
-        elif p.suffix == ".rs" and ("#[cfg(test)]" in content or "#[test]" in content):
-            # Skip stripped source files that contain only gen_tests path-mod
-            # declarations — their actual test content lives in sibling files
-            # (which are picked up separately by is_test_file).
-            if _is_gen_tests_decl_only_src(content):
-                continue
-            result.append((str(rel), content))
-    return result
-
-
-def collect_examples(project_dir: Path, module_dir: Path | None = None) -> list[tuple[str, str]]:
-    """Return (rel_path, content) for example source files.
-
-    Examples sit in <crate>/examples/ and demonstrate idiomatic API usage. They
-    are not assertions — TASK 1 should treat them as usage signal, not as
-    compliance targets. Filtered to module_dir when supplied (multi-crate
-    workspaces).
-    """
-    roots = [project_dir] if module_dir is None else [module_dir]
-    result: list[tuple[str, str]] = []
-    for root in roots:
-        ex_dir = root / "examples"
-        if not ex_dir.is_dir():
-            continue
-        for p in sorted(ex_dir.rglob("*.rs")):
-            if any(part in SKIP_DIR_NAMES for part in p.relative_to(project_dir).parts):
-                continue
-            try:
-                content = p.read_text(encoding="utf-8")
-            except OSError:
-                continue
-            result.append((str(p.relative_to(project_dir)), content))
-    return result
-
-
-def collect_protected_test_files(project_dir: Path) -> set[str]:
-    """Return rel paths of files TASK 2 must NEVER overwrite.
-
-    Only pure test files: those in tests/ directories or named like test files.
-    Excludes source files (src/lib.rs, src/foo.rs) that happen to contain inline
-    #[cfg(test)] blocks — those must be regeneratable by TASK 2 so it can write
-    the implementation back into them alongside the test blocks.
-    """
-    result = set()
-    for p in sorted(project_dir.rglob("*")):
-        if not p.is_file():
-            continue
-        rel = p.relative_to(project_dir)
-        if any(part in SKIP_DIR_NAMES for part in rel.parts):
-            continue
-        if is_test_file(p, project_dir):
-            result.add(str(rel))
-    return result
+# Discovery moved to pipeline_core.adapters.discovery (P5). Shims preserve the
+# module-level names existing call sites and configure() wiring reference.
+is_test_file = _discovery.is_test_file
+collect_test_files = _discovery.collect_test_files
+collect_examples = _discovery.collect_examples
+collect_protected_test_files = _discovery.collect_protected_test_files
 
 
 def format_test_files(test_files):
@@ -12391,12 +12281,8 @@ def _crate_entry_point(cargo_toml_path: Path, module_dir_rel: str,
     candidates = []
     if cargo_toml_path.exists():
         text = cargo_toml_path.read_text(encoding="utf-8")
-        for pattern in [r'\[lib\].*?path\s*=\s*"([^"]+)"',
-                        r'\[\[bin\]\].*?path\s*=\s*"([^"]+)"']:
-            m = re.search(pattern, text, re.DOTALL)
-            if m:
-                rel = m.group(1)
-                candidates.append(str(Path(module_dir_rel) / rel) if module_dir_rel else rel)
+        for rel in _domain_cargo_entry_point_paths(text):
+            candidates.append(str(Path(module_dir_rel) / rel) if module_dir_rel else rel)
     for default in ("src/lib.rs", "src/main.rs"):
         candidates.append(str(Path(module_dir_rel) / default) if module_dir_rel else default)
     return next((c for c in candidates if c in file_path_set), None)
@@ -12422,11 +12308,9 @@ def _topo_sort_files(file_paths: list, known_content: dict) -> list:
 
 
 def _split_api_surface_by_file(api_surface: str) -> list[tuple[str, str]]:
-    """Parse monolithic API surface doc into (path, full_section_text) pairs."""
-    result = []
-    for m in re.finditer(r'<FILE path="([^"]+)">(.*?)</FILE>', api_surface, re.DOTALL):
-        result.append((m.group(1), m.group(0)))
-    return result
+    """Parse monolithic API surface doc into (path, full_section_text) pairs.
+    Regex-free domain scan (R8.5)."""
+    return _domain_split_api_surface_by_file(api_surface)
 
 
 
@@ -15594,14 +15478,8 @@ def _is_gen_tests_file(name: str) -> bool:
     return _match_gen_tests_sibling(name) is not None
 
 
-def _match_gen_tests_sibling(name: str) -> "tuple[str, int] | None":
-    """Parse a `<stem>.gen_tests_<N>.rs` filename → (stem, N), or None."""
-    if not name.endswith(".rs"):
-        return None
-    stem, sep, n_str = name[:-3].rpartition(".gen_tests_")
-    if not sep or not stem or not n_str.isdigit():
-        return None
-    return stem, int(n_str)
+# Sibling-name parser moved to discovery (P5); shim keeps the private name.
+_match_gen_tests_sibling = _discovery.match_gen_tests_sibling
 
 
 def _strip_gen_tests_decl_n(parent_text: str, pass_n: int) -> str:
@@ -15733,6 +15611,10 @@ def _is_gen_tests_decl_only_src(content: str) -> bool:
     no_line_comments = re.sub(r'//[^\n]*', '', no_decls)
     no_block_comments = re.sub(r'/\*.*?\*/', '', no_line_comments, flags=re.DOTALL)
     return no_block_comments.strip() == ""
+
+
+# Wire the gen_tests-semantics predicate into the discovery adapter (P5).
+_discovery.configure(is_gen_tests_decl_only=_is_gen_tests_decl_only_src)
 
 
 def _cluster_cfg_attr(cluster) -> str:
@@ -16906,42 +16788,10 @@ def mark_module_augmented(project_dir: Path, module_name: str, coverage: float) 
     p.write_text(f"{coverage:.1f}%\n")
 
 
-def strip_module_source(project_dir: Path, module_dir: Path) -> None:
-    """
-    Strip implementation source from a single module directory, leaving test
-    content intact. Equivalent to running strip_to_tests on just this subtree.
-    Other modules on disk are not touched — their real source remains available.
-
-    Saves the original source file list to .original_structure/<module>/files.txt
-    BEFORE stripping, so TASK 2 can use it as a deterministic file plan instead
-    of asking the LLM to guess what files to create.
-    """
-    lang = detect_language(project_dir)
-    if lang == "rust":
-        # Save original file list before any files are deleted.
-        _save_original_structure(project_dir, module_dir)
-        _log(f"  Stripping source from {module_dir.relative_to(project_dir)}/...")
-        process_rust(module_dir, dry_run=False)
-    else:
-        _log(f"  WARNING: strip not supported for language '{lang}' — skipping.")
-
-
-ORIGINAL_STRUCTURE_DIR = ".original_structure"
-
-
-def _save_original_structure(project_dir: Path, module_dir: Path) -> None:
-    """Save list of .rs source files in module_dir before stripping."""
-    module_rel = str(module_dir.relative_to(project_dir))
-    out_dir = project_dir / ORIGINAL_STRUCTURE_DIR
-    out_dir.mkdir(exist_ok=True)
-    files = sorted(
-        str(p.relative_to(project_dir))
-        for p in module_dir.rglob("*.rs")
-        if not any(part in SKIP_DIR_NAMES for part in p.relative_to(project_dir).parts)
-        and p.is_file()
-    )
-    (out_dir / f"{module_rel}.txt").write_text("\n".join(files))
-    _log(f"  Saved original structure: {len(files)} source file(s) recorded.")
+# Strip subsystem moved to pipeline_core.adapters.strip (P5-S2). Shims keep the
+# module-level names existing call sites reference.
+strip_module_source = _strip_mod.strip_module_source
+ORIGINAL_STRUCTURE_DIR = _strip_mod.ORIGINAL_STRUCTURE_DIR
 
 
 def _api_surface_path(project_dir: Path, module_name: str) -> Path:
@@ -17316,6 +17166,15 @@ _TASK0C_DEPS = Task0cDeps(
     coverage_provider=_coverage_provider,
 )
 
+# P5-S3: deps for the extracted gen_tests reattach block (per-block injection).
+_REATTACH_DEPS = ReattachDeps(
+    log=_log, emit=_emit, derive_gentest_prelude=_derive_gentest_prelude,
+    is_gen_tests_file=_is_gen_tests_file, gen_tests_siblings=_gen_tests_siblings,
+    load_gen_tests_origin=_load_gen_tests_origin, gen_tests_path=_gen_tests_path,
+    build_gen_tests_decl=_build_gen_tests_decl, cluster_cfg_attr=_cluster_cfg_attr,
+    has_gen_tests_decl=_has_gen_tests_decl, cargo_env=_cargo_env,
+)
+
 
 def main():
     parser = _orchestrator.build_arg_parser()
@@ -17588,20 +17447,6 @@ def main():
     # Coverage-first: richest test spec → easiest reconstruction → best context for later modules.
     module_coverage = _measure_baseline_coverage(project_dir, modules, dep_graph)
 
-    def _next_module() -> str | None:
-        """Pick the unlocked module with highest coverage.
-        No topological constraint: unprocessed modules keep their real source on
-        disk, so compilation always works regardless of processing order.
-        """
-        candidates = [
-            (module_coverage.get(m, 0.0), m)
-            for m in modules if m not in locked_modules
-        ]
-        if not candidates:
-            return None
-        candidates.sort(key=lambda x: x[0], reverse=True)
-        return candidates[0][1]
-
     if is_multi_module and module_coverage:
         _log("\nProcessing order (coverage-descending, topology respected):")
         for m in modules:
@@ -17785,19 +17630,20 @@ def main():
 
     total_iters = 0
     while True:
-        module_name = _next_module() if is_multi_module else (modules[0] if modules else None)
+        module_name = (_orchestrator.next_module(modules, locked_modules, module_coverage)
+                       if is_multi_module else (modules[0] if modules else None))
         if module_name is None:
             break
 
-        module_dir = dep_graph.crate_dir(module_name) if is_multi_module else project_dir
-        crate_type = dep_graph.crate_type(module_name) if is_multi_module else "lib"
-        workspace_deps = dep_graph.workspace_deps(module_name) if is_multi_module else set()
-        module_test_cmd = dep_graph.module_test_command(test_command, module_name) if is_multi_module else test_command
-        module_manifest = project_dir / f".generated_files_{module_name}.txt"
-        module_dir_rel = (
-            str(module_dir.relative_to(project_dir)) + "/"
-            if is_multi_module and module_dir != project_dir else ""
-        )
+        _desc = _orchestrator.module_descriptor(
+            module_name, dep_graph=dep_graph, is_multi_module=is_multi_module,
+            project_dir=project_dir, test_command=test_command)
+        module_dir = _desc.module_dir
+        crate_type = _desc.crate_type
+        workspace_deps = _desc.workspace_deps
+        module_test_cmd = _desc.module_test_cmd
+        module_manifest = _desc.module_manifest
+        module_dir_rel = _desc.module_dir_rel
 
         _log(f"\n{'=' * 60}")
         _log(f"MODULE: {module_name}  [{crate_type}]")
@@ -17835,10 +17681,8 @@ def main():
         # to this module. Strip removes implementation source but test content in
         # lib.rs would also be gone if we checked after.
         test_files_pre_strip = collect_test_files(project_dir)
-        module_test_files = [
-            (rel, content) for rel, content in test_files_pre_strip
-            if rel.startswith(module_dir_rel)
-        ] if module_dir_rel else test_files_pre_strip
+        module_test_files = _orchestrator.filter_module_test_files(
+            test_files_pre_strip, module_dir_rel)
         module_has_tests = len(module_test_files) > 0
         _log(f"  Module test files: {len(module_test_files)} (before strip)")
 
@@ -17940,17 +17784,8 @@ def main():
         # assertions — the inline header makes that explicit so the LLM doesn't
         # derive requirements from example-only behavior.
         _t1_examples = collect_examples(project_dir, module_dir=module_dir if is_multi_module else None)
+        t1_input = _orchestrator.with_example_usage_signal(t1_input, _t1_examples)
         if _t1_examples:
-            _EXAMPLE_HEADER = (
-                "// !!!! TASK 1 NOTE: This file is from the project's `examples/` directory.\n"
-                "// !!!! It demonstrates idiomatic API usage. It is NOT a test and contains\n"
-                "// !!!! no assertions to enforce. Use it to understand HOW the public API is\n"
-                "// !!!! invoked, but do not derive requirements from it unless the same\n"
-                "// !!!! behavior is also asserted by a test in the test suite.\n\n"
-            )
-            t1_input = t1_input + [
-                (rel, _EXAMPLE_HEADER + content) for rel, content in _t1_examples
-            ]
             _log(f"  Appended {len(_t1_examples)} example file(s) to TASK 1 input as usage signal.")
 
         # FORWARD MODE: copy the user-provided FR into the per-module slot so
@@ -18137,202 +17972,14 @@ This is a Rust procedural macro crate. Strict rules apply:
                     test_output = f"BUILD FAILED: {t2_reason}"
                     failure_type = "build"
                 else:
-                    # Reattach saved gen_tests siblings to generated source files.
-                    # Idempotent: for each saved (pass_n, body) we ensure
-                    #   (a) the sibling file exists with the saved body, and
-                    #   (b) the source file contains a path-mod decl for it.
-                    # The previous guard ("skip if any sibling already on disk")
-                    # was a no-op once strip started preserving sibling files,
-                    # leaving them orphaned by the regenerated source.
-                    _reattached: list[tuple[Path, Path, int]] = []
-                    # FR-038: source gen_tests PER-CLUSTER so a test's content and
-                    # its cfg gate never separate. A gen_test generated under one
-                    # cluster (e.g. nightly's `request_ref`) must be gated to THAT
-                    # cluster and excluded from others. Emit ONE ungated sibling only
-                    # when the identical test is present in EVERY cluster; otherwise
-                    # emit one gated sibling per present cluster with a cluster-unique
-                    # name (so neither the file content nor the decl collapses in the
-                    # merge, and a single-cluster test stays fenced to its cluster).
-                    _filled_root = project_dir / ".skeleton-filled"
-                    _per_cluster_filled = [
-                        c for c in _clusters
-                        if (_filled_root / c.name).exists()
-                    ]
-                    if _per_cluster_filled:
-                        _reattach_allow_line, _ = _derive_gentest_prelude(project_dir)
-                        # (rel, n) -> {cluster_name: body}
-                        _gt: dict[tuple[str, int], dict[str, str]] = {}
-                        _cl_by_name = {c.name: c for c in _per_cluster_filled}
-                        for _c in _per_cluster_filled:
-                            _cdir = _filled_root / _c.name
-                            for _sf in sorted(_cdir.rglob("*.rs")):
-                                if _is_gen_tests_file(_sf.name):  # R7: structured parser, was regex
-                                    continue
-                                _rel = str(_sf.relative_to(_cdir))
-                                if _rel in existing_test_files:
-                                    continue
-                                for _n, _p in _gen_tests_siblings(_sf):
-                                    try:
-                                        _gt.setdefault((_rel, _n), {})[_c.name] = \
-                                            _p.read_text(encoding="utf-8")
-                                    except OSError:
-                                        continue
-                        _appends: dict[str, list[str]] = {}
-                        _all_cluster_names = {c.name for c in _clusters}
-                        _gt_origin = _load_gen_tests_origin(project_dir)
-                        for (_rel, _n), _bodies in sorted(_gt.items()):
-                            _tgt = project_dir / _rel
-                            if not _tgt.exists():
-                                continue
-                            _origin_gate = _gt_origin.get(f"{_tgt.stem}.gen_tests_{_n}")
-                            if _origin_gate is not None:
-                                # Origin-cfg path (deterministic): one sibling gated by
-                                # the cluster that GENERATED the test ('' = default/stable
-                                # → ungated). A nightly-only test carries
-                                # `#[cfg(error_generic_member_access)]` → excluded from
-                                # stable/no_core, compiled in nightly. Bodies are copied
-                                # verbatim across clusters, so any is representative.
-                                _body = next(iter(_bodies.values()))
-                                _sib = _gen_tests_path(_tgt, _n)
-                                _sib.write_text(_body, encoding="utf-8")
-                                _appends.setdefault(_rel, []).append(
-                                    _build_gen_tests_decl(
-                                        _sib.name, _n, _reattach_allow_line, _origin_gate))
-                                _reattached.append((_tgt, _sib, _n))
-                            elif (len(set(_bodies.values())) == 1
-                                    and set(_bodies) == _all_cluster_names):
-                                # Fallback (no origin manifest): present in EVERY cluster
-                                # AND identical → safe ungated. A body found in only a
-                                # subset (e.g. nightly-only `request_ref`) must NOT land
-                                # here — it would compile under the other clusters' test
-                                # build and break them.
-                                _body = next(iter(_bodies.values()))
-                                _sib = _gen_tests_path(_tgt, _n)
-                                _sib.write_text(_body, encoding="utf-8")
-                                _appends.setdefault(_rel, []).append(
-                                    _build_gen_tests_decl(_sib.name, _n, _reattach_allow_line))
-                                _reattached.append((_tgt, _sib, _n))
-                            else:
-                                # Fallback: divergent → per-cluster gated siblings, unique names
-                                for _cname, _body in sorted(_bodies.items()):
-                                    _gate = _cluster_cfg_attr(_cl_by_name.get(_cname))
-                                    _sib = _tgt.with_name(
-                                        f"{_tgt.stem}.gen_tests_{_n}_{_cname}.rs")
-                                    _sib.write_text(_body, encoding="utf-8")
-                                    _appends.setdefault(_rel, []).append(
-                                        _build_gen_tests_decl(
-                                            _sib.name, f"{_n}_{_cname}",
-                                            _reattach_allow_line, _gate))
-                                    _reattached.append((_tgt, _sib, _n))
-                        for _rel, _decls in _appends.items():
-                            _tgt = project_dir / _rel
-                            _txt = _tgt.read_text(encoding="utf-8").rstrip()
-                            _added = 0
-                            for _d in _decls:
-                                _path_line = _d.split("#[path = ")[-1].split("]")[0]
-                                if _path_line not in _txt:
-                                    _txt += _d
-                                    _added += 1
-                            if _added:
-                                _tgt.write_text(_txt, encoding="utf-8")
-                                _log(f"  Reattached {_added} per-cluster gen_tests "
-                                     f"decl(s) to {_rel}.")
-                    elif saved_gen_blocks:
-                        # Non-cluster fallback (single tree): original behaviour.
-                        _reattach_allow_line, _ = _derive_gentest_prelude(project_dir)
-                        for rel, blocks in saved_gen_blocks.items():
-                            src_path = project_dir / rel
-                            if not src_path.exists():
-                                continue
-                            content = src_path.read_text(encoding="utf-8")
-                            new_text = content.rstrip()
-                            added_decls = 0
-                            for pass_n, body in blocks:
-                                sibling = _gen_tests_path(src_path, pass_n)
-                                if not sibling.exists() or sibling.read_text(encoding="utf-8") != body:
-                                    sibling.write_text(body, encoding="utf-8")
-                                if not _has_gen_tests_decl(new_text, pass_n):
-                                    new_text += _build_gen_tests_decl(
-                                        sibling.name, pass_n, _reattach_allow_line
-                                    )
-                                    added_decls += 1
-                                _reattached.append((src_path, sibling, pass_n))
-                            if added_decls > 0:
-                                src_path.write_text(new_text, encoding="utf-8")
-                                _log(f"  Reattached {added_decls} gen_tests decl(s) to {rel}.")
-                    if _reattached:
-
-                        # Validate reattached gen_tests against the regenerated
-                        # source. Compile failures are signal that the
-                        # reconstruction is wrong, NOT that the gen_test is
-                        # broken (gen_tests were validated at task0c time
-                        # against the original). Log the names but leave them
-                        # in place — Phase C / TDD picks up compile errors via
-                        # the compile-frontier extractor and drives fills.
-                        # Opt back into permanent quarantine with
-                        # GEN_TESTS_REATTACH_QUARANTINE=1.
-                        if _reattached:
-                            try:
-                                _vchk = subprocess.run(
-                                    ["cargo", "check", "--tests"],
-                                    cwd=project_dir, capture_output=True,
-                                    text=True, timeout=300, env=_cargo_env(),
-                                )
-                            except Exception as _e:
-                                _log(f"  [reattach] validate cargo check failed: {_e}")
-                                _vchk = None
-                            _legacy_quarantine = os.getenv(
-                                "GEN_TESTS_REATTACH_QUARANTINE", "0",
-                            ) == "1"
-                            if _vchk is not None and _vchk.returncode != 0:
-                                _out = (_vchk.stdout or "") + (_vchk.stderr or "")
-                                _failing = [
-                                    (sp, sb, pn) for sp, sb, pn in _reattached
-                                    if sb.name in _out
-                                ]
-                                if _failing and not _legacy_quarantine:
-                                    _names = ", ".join(sb.name for _, sb, _ in _failing)
-                                    _log(f"  [reattach] {len(_failing)} gen_tests sibling(s) "
-                                         f"fail compile against regenerated source: {_names}. "
-                                         "Leaving in place so Phase C compile-frontier can act.")
-                                    _emit("gen_tests.reattach_compile_fail", data={
-                                        "module": module_name,
-                                        "count": len(_failing),
-                                        "files": [sb.name for _, sb, _ in _failing],
-                                    })
-                                elif _failing and _legacy_quarantine:
-                                    quarantined = 0
-                                    for src_path, sibling, pass_n in _failing:
-                                        try:
-                                            ptext = src_path.read_text(encoding="utf-8")
-                                            decl_re = re.compile(
-                                                r"\n*(?:#\[cfg\([^)]*\)\]\s*)?"
-                                                r"#\s*\[\s*allow\s*\([^)]*\)\s*\][^\n]*\n*"
-                                                r"#\s*\[\s*path\s*=\s*\""
-                                                + re.escape(sibling.name)
-                                                + r"\"\s*\][^\n]*\n*"
-                                                r"(?:pub\s+)?mod\s+gen_tests_"
-                                                + str(pass_n) + r"\s*;\s*",
-                                            )
-                                            ptext_new = decl_re.sub("\n", ptext)
-                                            if ptext_new != ptext:
-                                                src_path.write_text(ptext_new, encoding="utf-8")
-                                        except Exception:
-                                            pass
-                                        try:
-                                            sibling.rename(sibling.with_suffix(".rs.broken"))
-                                        except Exception:
-                                            with suppress(Exception):
-                                                sibling.unlink()
-                                        quarantined += 1
-                                    if quarantined:
-                                        _log(f"  [reattach] quarantined {quarantined} "
-                                             "gen_tests sibling(s) (legacy mode).")
-                                        _emit("gen_tests.reattach_quarantine", data={
-                                            "module": module_name,
-                                            "quarantined": quarantined,
-                                        })
-
+                    # Reattach preserved gen_tests siblings + decls onto regenerated source,
+                    # then validate (P5-S3 — extracted to application/gen_tests_reattach.py).
+                    _reattach_gen_tests(
+                        project_dir, module_name, clusters=_clusters,
+                        saved_gen_blocks=saved_gen_blocks,
+                        existing_test_files=existing_test_files, deps=_REATTACH_DEPS,
+                    )
+                    
                     # API surface conformance: soft check — log drift but don't
                     # block. The report is appended to test_output below if
                     # TASK 3 fails, so TASK 4 sees structural drift alongside

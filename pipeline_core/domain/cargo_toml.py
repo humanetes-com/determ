@@ -27,6 +27,23 @@ def cargo_is_proc_macro(text: str) -> bool:
     return isinstance(lib, dict) and lib.get("proc-macro", False) is True
 
 
+def cargo_entry_point_paths(text: str) -> list[str]:
+    """Explicit crate entry-point source paths declared in Cargo.toml, in
+    precedence order: `[lib] path`, then each `[[bin]] path`. Regex-free (R8 —
+    replaces the `\\[lib\\].*?path` / `\\[\\[bin\\]\\].*?path` DOTALL regexes)."""
+    data = load_cargo_toml(text)
+    out: list[str] = []
+    lib = data.get("lib")
+    if isinstance(lib, dict) and isinstance(lib.get("path"), str):
+        out.append(lib["path"])
+    bins = data.get("bin")
+    if isinstance(bins, list):
+        for b in bins:
+            if isinstance(b, dict) and isinstance(b.get("path"), str):
+                out.append(b["path"])
+    return out
+
+
 def cargo_default_features(text: str) -> list[str]:
     """The `[features] default = [...]` list (empty if absent)."""
     feats = load_cargo_toml(text).get("features", {})

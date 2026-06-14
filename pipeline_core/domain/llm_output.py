@@ -94,6 +94,34 @@ def extract_files(text: str) -> dict[str, str]:
     return files
 
 
+def split_api_surface_by_file(api_surface: str) -> list[tuple[str, str]]:
+    """Parse a monolithic API-surface doc into `(path, full_section_text)` pairs,
+    where the section text INCLUDES its `<FILE path="…">…</FILE>` framing.
+
+    Regex-free (R8.5) replacement for `<FILE path="([^"]+)">(.*?)</FILE>` (DOTALL,
+    non-greedy): require the literal `<FILE path="` open, read the path up to the
+    next `"`, require the `">` that closes the open tag, then the nearest
+    `</FILE>`. A block missing any of those is skipped, matching a regex non-match.
+    """
+    out: list[tuple[str, str]] = []
+    open_tag, close_tag = '<FILE path="', "</FILE>"
+    i = 0
+    while True:
+        s = api_surface.find(open_tag, i)
+        if s == -1:
+            return out
+        p = s + len(open_tag)
+        q = api_surface.find('"', p)
+        if q in (-1, p) or api_surface[q + 1:q + 2] != ">":  # -1: no close; p: empty path
+            i = p
+            continue
+        e = api_surface.find(close_tag, q)
+        if e == -1:
+            return out
+        out.append((api_surface[p:q], api_surface[s:e + len(close_tag)]))
+        i = e + len(close_tag)
+
+
 _RETRO_LABELS = ("category", "guidance", "note", "reason")
 
 
