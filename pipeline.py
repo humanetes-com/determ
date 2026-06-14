@@ -502,17 +502,6 @@ def init_events(product: str) -> None:
         _PROMPTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def _caller_site(depth: int = 2) -> str:
-    """`qualname (file:lineno)` of the frame `depth` levels up — used to tag
-    llm.request with WHO issued it, so a C10 same-thread overlap can be traced
-    to the concurrent/reentrant call site instead of guessed (debt #6)."""
-    try:
-        f = sys._getframe(depth)
-        return f"{f.f_code.co_qualname} ({f.f_code.co_filename.rsplit('/', 1)[-1]}:{f.f_lineno})"
-    except Exception:
-        return "?"
-
-
 def _store_prompt_content(text: str) -> dict[str, int | str]:
     """Content-address a prompt/response. Returns {sha256, char_count}.
 
@@ -539,6 +528,9 @@ def _emit(event: str, **fields) -> None:
             # Emitting thread — per-thread stream logs key on this name, so
             # the C10 audit can prove concurrent calls never shared a stream.
             "thread": threading.current_thread().name,
+            # OS thread identity — lets C10 tell a real two-threads-share-a-name
+            # collision (different tid) from benign same-thread reentrancy. debt #6.
+            "tid": threading.get_ident(),
         }
         for k, v in fields.items():
             if v is not None:
@@ -715,7 +707,7 @@ def ask(prompt: str, system: str | None = None, model: str | None = None,
         "prompt_sha": _prompt_meta["sha256"],
         "system": _system_meta,
         "max_tokens": max_tokens,
-        "caller": _caller_site(),
+        "caller": _pclog.caller_site(),
     })
     _t0 = time.monotonic()
     # Guarantee a terminal event for every request: if the loop exits without

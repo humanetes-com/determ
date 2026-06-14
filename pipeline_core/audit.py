@@ -312,14 +312,15 @@ def check_parallel_stream_integrity(run: RunData) -> Verdict:
     Per-thread stream files (model_interact._stream_path_for_thread) and the
     event `thread` field both key on the thread NAME. Two live calls sharing a
     name (e.g. two parallel clusters each spawning 'per-fn-worker-0') silently
-    truncate/interleave one stream file. From events.jsonl that collision is
-    visible as broken request→response alternation within one thread name:
-    a real thread blocks for the duration of its call, so back-to-back
-    llm.request events under one name with no llm.response/llm.error between
-    them mean two threads wrote under that name (or a call vanished — also a
-    failure). Torn events.jsonl lines (concurrent appends) are reported too.
-    SKIPs when the run never overlapped two calls — no parallelism exercised,
-    nothing verified."""
+    truncate/interleave one stream file. The collision REQUIRES two distinct OS
+    threads under one name; an overlap on a SINGLE thread (reentrant or
+    out-of-order emission — e.g. a retrospective ask logged before its own
+    response) shares no stream and is benign. So a same-NAME overlap is flagged
+    only when the two open requests carry a different `tid` (os thread id);
+    events without `tid` (pre-instrumentation) fall back to the original
+    name-only rule. Torn events.jsonl lines (concurrent appends) are reported
+    too. SKIPs when the run never overlapped two distinct threads — no
+    parallelism exercised, nothing verified."""
     calls = [e for e in run.events
              if e.get("event") in ("llm.request", "llm.response", "llm.error")]
     if not calls:
@@ -327,18 +328,32 @@ def check_parallel_stream_integrity(run: RunData) -> Verdict:
     if not any(e.get("thread") for e in calls):
         return Verdict("C10 parallel-streams", SKIP,
                        "events carry no thread field (pre-parallelism pipeline)")
-    open_threads: set[str] = set()
+    # Per thread-NAME, the stack of currently-open request tids. A request whose
+    # tid differs from one already open under its name = two OS threads on one
+    # stream file = collision. Missing tid → a per-event unique sentinel, so the
+    # pre-instrumentation behaviour (any same-name overlap flagged) is preserved.
+    open_by_name: dict[str, list[object]] = {}
     violations: list[str] = []
     max_concurrent = 0
     for e in calls:
         t = e.get("thread", "?")
+        tid: object = e["tid"] if e.get("tid") is not None else ("notid", id(e))
         if e["event"] == "llm.request":
-            if t in open_threads:
+            stack = open_by_name.setdefault(t, [])
+            if any(o != tid for o in stack):
                 violations.append(f"{t} @ {e.get('ts', '?')}")
-            open_threads.add(t)
-            max_concurrent = max(max_concurrent, len(open_threads))
+            stack.append(tid)
+            live = {o for lst in open_by_name.values() for o in lst}
+            max_concurrent = max(max_concurrent, len(live))
         else:
-            open_threads.discard(t)
+            closing = open_by_name.get(t)
+            if closing:
+                if tid in closing:
+                    closing.remove(tid)
+                else:
+                    closing.pop()
+                if not closing:
+                    open_by_name.pop(t, None)
     if violations:
         return Verdict("C10 parallel-streams", FAIL,
                        f"{len(violations)} same-thread overlap(s) — stream file "

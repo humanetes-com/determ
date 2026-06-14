@@ -238,8 +238,11 @@ def test_success_evidence_verdicts(tmp_path: Path) -> None:
     assert vs["C9 success-evidence"].status == "SKIP"
 
 
-def _llm(ts: str, event: str, thread: str) -> dict:
-    return {"ts": ts, "event": event, "thread": thread}
+def _llm(ts: str, event: str, thread: str, tid: int | None = None) -> dict:
+    rec = {"ts": ts, "event": event, "thread": thread}
+    if tid is not None:
+        rec["tid"] = tid
+    return rec
 
 
 def test_parallel_stream_integrity_verdicts(tmp_path: Path) -> None:
@@ -293,11 +296,9 @@ def test_parallel_stream_integrity_verdicts(tmp_path: Path) -> None:
     vs = {v.check: v for v in flow_audit.audit(ev, pdir, lg, None, "", 3)}
     assert vs["C10 parallel-streams"].status == "SKIP"
 
-    # Regression: the anyhow shape (debt #6) — a long-running MainThread call
-    # left OPEN while a burst of other calls fires under the SAME 'MainThread'
-    # name (concurrent/reentrant emit sharing one per-thread stream file).
-    # The long call's response arrives LAST; the burst overlaps it → FAIL, and
-    # the offending thread surfaces in the evidence.
+    # Pre-instrumentation fallback (debt #6): the anyhow shape — a MainThread
+    # call left OPEN while a burst overlaps it under the SAME name — has NO tid
+    # to prove it's one OS thread, so C10 conservatively FAILs it (old events).
     anyhow_shape = [
         _llm("2026-06-13T13:52:09.348", "llm.request", "MainThread"),   # B: long, opens
         _llm("2026-06-13T13:53:18.870", "llm.request", "MainThread"),   # burst overlaps B
@@ -310,6 +311,31 @@ def test_parallel_stream_integrity_verdicts(tmp_path: Path) -> None:
     vs = {v.check: v for v in flow_audit.audit(ev, pdir, lg, None, "", 3)}
     assert vs["C10 parallel-streams"].status == "FAIL"
     assert "MainThread" in vs["C10 parallel-streams"].evidence
+
+    # With tid: the SAME shape on ONE OS thread (same tid) is benign reentrant/
+    # out-of-order emission — no stream collision possible → not a C10 failure.
+    # (the real micro-run shape: _ask_retrospective overlapping a fix-loop ask).
+    reentrant = [
+        _llm("2026-06-13T13:52:09.348", "llm.request", "MainThread", tid=1),
+        _llm("2026-06-13T13:53:18.870", "llm.request", "MainThread", tid=1),
+        _llm("2026-06-13T13:53:18.937", "llm.response", "MainThread", tid=1),
+        _llm("2026-06-13T13:53:32.344", "llm.response", "MainThread", tid=1),
+    ]
+    ev, pdir, lg = _write_run(tmp_path / "reentrant", reentrant)
+    vs = {v.check: v for v in flow_audit.audit(ev, pdir, lg, None, "", 3)}
+    assert vs["C10 parallel-streams"].status != "FAIL"
+
+    # With tid: same NAME but DIFFERENT tid overlapping = two OS threads on one
+    # stream file = the genuine collision C10 exists to catch → FAIL.
+    real_collision = [
+        _llm("2026-06-12T05:00:00", "llm.request", "per-fn-w0", tid=11),
+        _llm("2026-06-12T05:00:01", "llm.request", "per-fn-w0", tid=22),
+        _llm("2026-06-12T05:00:02", "llm.response", "per-fn-w0", tid=11),
+        _llm("2026-06-12T05:00:03", "llm.response", "per-fn-w0", tid=22),
+    ]
+    ev, pdir, lg = _write_run(tmp_path / "realcol", real_collision)
+    vs = {v.check: v for v in flow_audit.audit(ev, pdir, lg, None, "", 3)}
+    assert vs["C10 parallel-streams"].status == "FAIL"
 
     # Events without a thread field (pre-parallelism run) → SKIP, not crash.
     ev, pdir, lg = _write_run(
