@@ -4,14 +4,83 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import pytest
+
 from pipeline_core.application.orchestrator import (
+    LockDeps,
     build_arg_parser,
     filter_module_test_files,
+    lock_or_complete,
     module_descriptor,
     next_module,
     run_phase_subcommand,
     with_example_usage_signal,
 )
+
+
+def _lock_deps(log: list[str]) -> tuple[LockDeps, list[str]]:
+    events: list[str] = []
+
+    def exit_(code: int) -> None:
+        raise SystemExit(code)
+
+    deps = LockDeps(
+        commit_and_mark=lambda *a, **k: events.append(f"commit_and_mark:{k.get('commit_message')}"),
+        set_current=lambda _pd, label: events.append(f"set_current:{label}"),
+        lock_module=lambda *a: events.append("lock_module"),
+        git_commit=lambda _pd, msg: events.append(f"git_commit:{msg}") or True,
+        log=lambda m: log.append(m),
+        sys_exit=exit_,
+    )
+    return deps, events
+
+
+def test_lock_or_complete_multi_module_locks_no_exit() -> None:
+    log: list[str] = []
+    deps, events = _lock_deps(log)
+    locked: set[str] = set()
+    lock_or_complete(
+        Path("/p"), "mymod", Path("/p/mymod"), Path("/p/.gen"),
+        is_multi_module=True, locked_modules=locked, src_hash="h",
+        commit_message="cm", detail="d", set_current_label="scl",
+        locked_commit_msg="locked-mymod", success_log="SUCCESS",
+        tag="t", complete_commit_msg="complete", deps=deps,
+    )
+    assert "mymod" in locked
+    assert "lock_module" in events
+    assert "git_commit:locked-mymod" in events
+    assert "SUCCESS" not in log  # success/exit path not taken in multi-module
+
+
+def test_lock_or_complete_single_module_exits() -> None:
+    log: list[str] = []
+    deps, events = _lock_deps(log)
+    with pytest.raises(SystemExit) as exc:
+        lock_or_complete(
+            Path("/p"), "mymod", Path("/p"), Path("/p/.gen"),
+            is_multi_module=False, locked_modules=set(), src_hash="h",
+            commit_message="cm", detail="d", set_current_label="scl",
+            locked_commit_msg="locked", success_log="SUCCESS-DONE",
+            complete_commit_msg="pipeline: complete", deps=deps,
+        )
+    assert exc.value.code == 0
+    assert "SUCCESS-DONE" in log
+    assert "git_commit:pipeline: complete" in events
+    assert "lock_module" not in events
+
+
+def test_lock_or_complete_single_module_no_complete_commit() -> None:
+    log: list[str] = []
+    deps, events = _lock_deps(log)
+    with pytest.raises(SystemExit):
+        lock_or_complete(
+            Path("/p"), "m", Path("/p"), Path("/p/.gen"),
+            is_multi_module=False, locked_modules=set(), src_hash=None,
+            commit_message="cm", detail="d", set_current_label="scl",
+            locked_commit_msg="locked", success_log="ok",
+            deps=deps,  # complete_commit_msg defaults to None
+        )
+    assert not any(e.startswith("git_commit:") for e in events)  # no completion commit
 
 
 def test_returns_parser_with_defaults() -> None:

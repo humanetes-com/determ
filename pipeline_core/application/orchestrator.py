@@ -210,6 +210,57 @@ def next_module(
     return candidates[0][1]
 
 
+@dataclass(frozen=True)
+class LockDeps:
+    """Collaborators for the lock/complete transition (per-block injection)."""
+    commit_and_mark: Callable[..., None]
+    set_current: Callable[[Path, str], None]
+    lock_module: Callable[[Path, str, Path, Path], None]
+    git_commit: Callable[[Path, str], bool]
+    log: Callable[[str], None]
+    sys_exit: Callable[[int], None]
+
+
+def lock_or_complete(
+    project_dir: Path,
+    module_name: str,
+    module_dir: Path,
+    module_manifest: Path,
+    *,
+    is_multi_module: bool,
+    locked_modules: set[str],
+    src_hash: str | None,
+    commit_message: str,
+    detail: str,
+    set_current_label: str,
+    locked_commit_msg: str,
+    success_log: str,
+    tag: str | None = None,
+    complete_commit_msg: str | None = None,
+    deps: LockDeps,
+) -> None:
+    """Commit+mark a passing module, then either LOCK it (multi-module: record
+    in `locked_modules`, commit the lock) or COMPLETE the run (single-module:
+    optionally commit the completion, then exit 0). Single-module mode does not
+    return — `deps.sys_exit(0)` raises. The three call sites (t3 pass, no_files
+    build-pass, fix-loop reverified pass) differ only in the message/label/tag
+    arguments; the skeleton is identical."""
+    deps.commit_and_mark(
+        project_dir, f"task2-4/{module_name}", "done",
+        commit_message=commit_message, tag=tag, detail=detail, source_hash=src_hash,
+    )
+    deps.set_current(project_dir, set_current_label)
+    if is_multi_module:
+        deps.lock_module(project_dir, module_name, module_dir, module_manifest)
+        locked_modules.add(module_name)
+        deps.git_commit(project_dir, locked_commit_msg)
+    else:
+        deps.log(success_log)
+        if complete_commit_msg is not None:
+            deps.git_commit(project_dir, complete_commit_msg)
+        deps.sys_exit(0)
+
+
 def filter_module_test_files(
     all_test_files: list[tuple[str, str]], module_dir_rel: str,
 ) -> list[tuple[str, str]]:

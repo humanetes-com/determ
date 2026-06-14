@@ -17192,6 +17192,12 @@ _STRIP_BAKE_DEPS = StripBakeDeps(
     coverage_target=COVERAGE_AUGMENTATION_TARGET,
 )
 
+# P5-S3: deps for the lock/complete transition (dedups 3 call sites).
+_LOCK_DEPS = _orchestrator.LockDeps(
+    commit_and_mark=_commit_and_mark, set_current=_set_current,
+    lock_module=lock_module, git_commit=git_commit, log=_log, sys_exit=sys.exit,
+)
+
 
 def main():
     parser = _orchestrator.build_arg_parser()
@@ -17967,41 +17973,35 @@ This is a Rust procedural macro crate. Strict rules apply:
                     _log(f"  TASK 3 result: {t3_status} — {t3_reason}")
 
                     if t3_status == "pass":
-                        _commit_and_mark(
-                            project_dir, f"task2-4/{module_name}", "done",
+                        _orchestrator.lock_or_complete(
+                            project_dir, module_name, module_dir, module_manifest,
+                            is_multi_module=is_multi_module, locked_modules=locked_modules,
+                            src_hash=_src_hash,
                             commit_message=f"pipeline: task3 iter {module_iter} — {module_name} tests pass",
                             tag=f"passing-{module_name}-{module_iter}",
                             detail=f"iteration {module_iter}",
-                            source_hash=_src_hash,
+                            set_current_label=f"task2-4/{module_name} / LOCKED iter {module_iter}",
+                            locked_commit_msg=f"pipeline: locked — {module_name}",
+                            success_log=f"\nSUCCESS: all tests passed on iteration {module_iter}.",
+                            complete_commit_msg=f"pipeline: complete — all tests pass iter {module_iter}",
+                            deps=_LOCK_DEPS,
                         )
-                        _set_current(project_dir, f"task2-4/{module_name} / LOCKED iter {module_iter}")
-                        if is_multi_module:
-                            lock_module(project_dir, module_name, module_dir, module_manifest)
-                            locked_modules.add(module_name)
-                            git_commit(project_dir, f"pipeline: locked — {module_name}")
-                        else:
-                            _log(f"\nSUCCESS: all tests passed on iteration {module_iter}.")
-                            git_commit(project_dir, f"pipeline: complete — all tests pass iter {module_iter}")
-                            sys.exit(0)
                         break
 
                     elif t3_status == "no_files":
                         # Module has no test files — lock on build success.
                         _log("  Module has no test files — locking on build success.")
-                        _commit_and_mark(
-                            project_dir, f"task2-4/{module_name}", "done",
+                        _orchestrator.lock_or_complete(
+                            project_dir, module_name, module_dir, module_manifest,
+                            is_multi_module=is_multi_module, locked_modules=locked_modules,
+                            src_hash=_src_hash,
                             commit_message=f"pipeline: build passed (no tests) — {module_name} iter {module_iter}",
                             detail=f"no tests iter {module_iter}",
-                            source_hash=_src_hash,
+                            set_current_label=f"task2-4/{module_name} / LOCKED (no tests)",
+                            locked_commit_msg=f"pipeline: locked (no tests) — {module_name}",
+                            success_log="\nSUCCESS: build passed with no module tests.",
+                            deps=_LOCK_DEPS,
                         )
-                        _set_current(project_dir, f"task2-4/{module_name} / LOCKED (no tests)")
-                        if is_multi_module:
-                            lock_module(project_dir, module_name, module_dir, module_manifest)
-                            locked_modules.add(module_name)
-                            git_commit(project_dir, f"pipeline: locked (no tests) — {module_name}")
-                        else:
-                            _log("\nSUCCESS: build passed with no module tests.")
-                            sys.exit(0)
                         break
 
                     elif t3_status == "no_tests":
@@ -18056,22 +18056,19 @@ This is a Rust procedural macro crate. Strict rules apply:
                                 f"{label}-fixverify", project_dir, genesis_path,
                             )
                             if reverified:
-                                _commit_and_mark(
-                                    project_dir, f"task2-4/{module_name}", "done",
+                                _orchestrator.lock_or_complete(
+                                    project_dir, module_name, module_dir, module_manifest,
+                                    is_multi_module=is_multi_module, locked_modules=locked_modules,
+                                    src_hash=_src_hash,
                                     commit_message=f"pipeline: task3 iter {module_iter} — {module_name} tests pass (fix loop)",
                                     tag=f"passing-{module_name}-{module_iter}",
                                     detail=f"iteration {module_iter} (fix loop)",
-                                    source_hash=_src_hash,
+                                    set_current_label=f"task2-4/{module_name} / LOCKED iter {module_iter}",
+                                    locked_commit_msg=f"pipeline: locked — {module_name}",
+                                    success_log="\nSUCCESS: all tests passed after fix loop.",
+                                    complete_commit_msg=f"pipeline: complete — all tests pass iter {module_iter}",
+                                    deps=_LOCK_DEPS,
                                 )
-                                _set_current(project_dir, f"task2-4/{module_name} / LOCKED iter {module_iter}")
-                                if is_multi_module:
-                                    lock_module(project_dir, module_name, module_dir, module_manifest)
-                                    locked_modules.add(module_name)
-                                    git_commit(project_dir, f"pipeline: locked — {module_name}")
-                                else:
-                                    _log("\nSUCCESS: all tests passed after fix loop.")
-                                    git_commit(project_dir, f"pipeline: complete — all tests pass iter {module_iter}")
-                                    sys.exit(0)
                                 break
 
                         failure_type = classify_failure(test_output)
