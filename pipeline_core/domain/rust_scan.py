@@ -50,6 +50,81 @@ def use_imports_symbol(block: str, prefixes: Sequence[str], symbol: str) -> bool
     return False
 
 
+def find_mod_opener(text: str, *, gen_only: bool) -> tuple[int, int] | None:
+    """Locate the FIRST `[pub ]mod <name> {` opener (regex-free, R7; mirrors
+    `(?:pub\\s+)?mod\\s+(?:gen_)?\\w+\\s*\\{`). Returns `(start, brace)` where
+    `start` is the insert-before index (the `pub` if present, else `mod`) and
+    `brace` is the index of `{`; None when absent. `gen_only` requires the module
+    name to start with `gen_` (and have ≥1 char after). Arbitrary inter-token
+    whitespace is allowed."""
+    i = 0
+    n = len(text)
+    while (m := text.find("mod", i)) >= 0:
+        i = m + 3
+        after = m + 3
+        if m > 0 and text[m - 1] in _IDENT_CHARS:      # tail of a longer ident
+            continue
+        if after >= n or not text[after].isspace():     # need \s+ after `mod`
+            continue
+        j = after
+        while j < n and text[j].isspace():
+            j += 1
+        k = j
+        while k < n and text[k] in _IDENT_CHARS:
+            k += 1
+        name = text[j:k]
+        if not name or (gen_only and not (name.startswith("gen_") and len(name) > 4)):
+            continue
+        b = k
+        while b < n and text[b].isspace():
+            b += 1
+        if b >= n or text[b] != "{":
+            continue
+        start = m
+        head = text[:m].rstrip()                        # `pub` + \s+ before `mod`?
+        if len(head) < m and head.endswith("pub") and (
+                len(head) == 3 or head[-4] not in _IDENT_CHARS):
+            start = len(head) - 3
+        return start, b
+    return None
+
+
+def after_brace_newline(text: str, brace_idx: int) -> int | None:
+    """Index just past the last newline in the whitespace run following the `{`
+    at `brace_idx` (mirrors greedy `\\{\\s*\\n`), or None when no newline follows
+    through whitespace only."""
+    n = len(text)
+    j = brace_idx + 1
+    last_nl = -1
+    while j < n and text[j].isspace():
+        if text[j] == "\n":
+            last_nl = j
+        j += 1
+    return last_nl + 1 if last_nl >= 0 else None
+
+
+def count_test_attrs(block: str) -> int:
+    """Number of `#[test]` attributes, incl. path-qualified `#[tokio::test]`
+    (regex-free, R7; mirrors `#\\[(?:\\w+::)*test\\]`)."""
+    count = 0
+    i = 0
+    while (k := block.find("#[", i)) >= 0:
+        i = k + 2
+        j = k + 2
+        while True:                       # consume zero or more `<ident>::` segments
+            seg = j
+            while j < len(block) and block[j] in _IDENT_CHARS:
+                j += 1
+            if j > seg and block[j:j + 2] == "::":
+                j += 2
+                continue
+            j = seg
+            break
+        if block[j:j + 5] == "test]":
+            count += 1
+    return count
+
+
 def _leading_ident(token: str) -> str:
     """The leading Rust identifier of ``token`` (``foo(`` → ``foo``, ``Bar<T>`` → ``Bar``)."""
     out: list[str] = []

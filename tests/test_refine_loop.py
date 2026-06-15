@@ -143,3 +143,25 @@ def test_floorstall_no_signature_never_repeated():
     g.observe(4)
     g.observe(4)
     assert g.repeated is False
+
+
+def test_parse_retrospective_function_matches_old_regex():
+    import re
+
+    from pipeline_core.domain.refine import parse_retrospective_function
+    OLD = re.compile(r'FUNCTION\s+([^:]+(?:::[^:]+)*):\s*(?:\([a-d]\)\s*)?(\w+)')
+
+    def old(line):
+        m = OLD.match(line)
+        return (m.group(1).rstrip(':'), m.group(2)) if m else None
+
+    cases = [
+        "FUNCTION AdhocKind::anyhow_kind: (c) UNREACHABLE — reason",
+        "FUNCTION foo: TESTABLE",
+        "FUNCTION a::b::c: (a) CFG_GATED extra",
+        "FUNCTION   spaced  :  NEEDS_INTERNALS",
+        "FUNCTION bad:::x KW", "FUNCTION nocolon TESTABLE",
+        "NOT a function line", "FUNCTION x: (z) KW",
+    ]
+    for line in cases:
+        assert parse_retrospective_function(line) == old(line), repr(line)

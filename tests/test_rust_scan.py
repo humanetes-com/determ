@@ -103,3 +103,25 @@ def test_use_imports_symbol_matches_old_regex():
         old = re.compile(pat)
         for b in blocks:
             assert use_imports_symbol(b, prefixes, symbol) == bool(old.search(b)), (b, symbol)
+
+
+def test_find_mod_opener_and_after_brace_newline():
+    from pipeline_core.domain.rust_scan import after_brace_newline, find_mod_opener
+    # gen-only finds the gen_ module; insert-before index is the `pub`/`mod` start.
+    block = "fn f(){}\npub mod gen_tests_1 {\n    body\n}"
+    s, b = find_mod_opener(block, gen_only=True)
+    assert block[s:s + 3] == "pub" and block[b] == "{"
+    assert find_mod_opener("mod helper {}", gen_only=True) is None      # not gen_
+    assert find_mod_opener("model gen_x {}", gen_only=False) is None    # `mod` not a keyword
+    # after-brace newline points just past the `{ … \n`.
+    ins = after_brace_newline(block, b)
+    assert block[:ins].endswith("{\n")
+    assert after_brace_newline("mod gen_x { no nl }", 9) is None
+
+
+def test_count_test_attrs_matches_old_regex():
+    from pipeline_core.domain.rust_scan import count_test_attrs
+    old = lambda b: len(re.findall(r'#\[(?:\w+::)*test\]', b))  # noqa: E731
+    for b in ["#[test]", "#[tokio::test]\n#[test]", "#[a::b::test] #[cfg(test)]",
+              "#[test_helper]", "no attrs", "#[test] #[test]"]:
+        assert count_test_attrs(b) == old(b), b

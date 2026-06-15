@@ -169,7 +169,16 @@ from pipeline_core.domain.refine import FloorStall as _FloorStall
 from pipeline_core.domain.refine import (
     LoopState as _LoopState,
 )
-from pipeline_core.domain.rust_scan import count_cfg_attrs, use_imports_symbol
+from pipeline_core.domain.refine import (
+    parse_retrospective_function as _parse_retrospective_function,
+)
+from pipeline_core.domain.rust_scan import (
+    after_brace_newline,
+    count_cfg_attrs,
+    count_test_attrs,
+    find_mod_opener,
+    use_imports_symbol,
+)
 from pipeline_core.domain.test_results import (
     OUTPUT_SEPARATOR,
     _parse_test_counts,
@@ -179,6 +188,7 @@ from pipeline_core.domain.test_results import (
     failing_test_names,
     identifiers_in,
     insert_no_run,
+    parse_rustc_compile_errors,
     per_file_test_stats,
     rustc_error_signatures,
     validate_task3_output_strict,
@@ -191,6 +201,7 @@ from pipeline_core.domain.text import (
 )
 from pipeline_core.domain.text import (
     smart_truncate,
+    strip_trailing_file_tag,
     trim_to_line,
 )
 from pipeline_core.domain.text import (
@@ -9212,12 +9223,6 @@ _PANIC_HEADER_RE = re.compile(
 )
 _TEST_STDOUT_HEADER_RE = re.compile(r"^----\s+(\S+)\s+stdout\s+----\s*$",
                                      re.MULTILINE)
-_COMPILE_ERROR_RE = re.compile(
-    r"^error(?:\[E\d+\])?:\s+([^\n]+)\n\s*-->\s*([^:]+):(\d+)(?::\d+)?",
-    re.MULTILINE,
-)
-
-
 def _line_to_fn_record(
     file_text: str, line_no: int, fn_records: list[dict],
     col_no: int | None = None,
@@ -9401,12 +9406,7 @@ def _extract_tdd_compile_frontier(
         return frontier
     fn_records_by_file: dict[str, list[dict]] = {}
     file_text_cache: dict[str, str] = {}
-    for m in _COMPILE_ERROR_RE.finditer(build_output):
-        _msg, file_path, line_str = m.group(1, 2, 3)
-        try:
-            line_no = int(line_str)
-        except ValueError:
-            continue
+    for _msg, file_path, line_no in parse_rustc_compile_errors(build_output):
         p_abs = Path(file_path)
         if not p_abs.is_absolute():
             p_abs = (src_dir / file_path).resolve()
@@ -13153,23 +13153,28 @@ _GEN_PRELUDE_ITEMS: list[tuple[str, tuple[str, ...], str]] = [
 ]
 
 
-def _inject_allow_before_gen_mod(block: str, allow_line: str) -> str:
-    """Insert `allow_line` immediately before the `mod gen_*` opener. (Regex in pipeline.)"""
+def _inject_allow_before_mod(block: str, allow_line: str, *, gen_only: bool) -> str:
+    """Insert `allow_line` immediately before the first `[gen_]mod` opener.
+    (R7: structured mod-opener scan — see domain.rust_scan.find_mod_opener.)"""
     if allow_line in block:
         return block
-    return re.sub(r'((?:pub\s+)?mod\s+gen_\w+\s*\{)', f'{allow_line}\n\\1', block, count=1)
+    opener = find_mod_opener(block, gen_only=gen_only)
+    if opener is None:
+        return block
+    return block[:opener[0]] + f"{allow_line}\n" + block[opener[0]:]
+
+
+def _inject_allow_before_gen_mod(block: str, allow_line: str) -> str:
+    return _inject_allow_before_mod(block, allow_line, gen_only=True)
 
 
 def _inject_allow_before_any_mod(block: str, allow_line: str) -> str:
-    """Insert `allow_line` before the first `mod <name>` opener (any name). (Regex in pipeline.)"""
-    if allow_line in block:
-        return block
-    return re.sub(r'((?:pub\s+)?mod\s+\w+\s*\{)', f'{allow_line}\n\\1', block, count=1)
+    return _inject_allow_before_mod(block, allow_line, gen_only=False)
 
 
 def _inject_gen_prelude_imports(block: str) -> str:
     """Inject any missing std prelude imports into a generated test module.
-    (R7: structured presence check — see domain.rust_scan.use_imports_symbol.)"""
+    (R7: structured presence + mod-opener scans — see domain.rust_scan.)"""
     missing = [stmt for stmt, prefixes, symbol in _GEN_PRELUDE_ITEMS
                if not use_imports_symbol(block, prefixes, symbol)]
     if not missing:
@@ -13177,17 +13182,23 @@ def _inject_gen_prelude_imports(block: str) -> str:
     inject = "\n    ".join(missing)
     if "use super::*;" in block:
         return block.replace("use super::*;", f"use super::*;\n    {inject}", 1)
-    return re.sub(r'((?:pub\s+)?mod\s+gen_\w+\s*\{\s*\n)', f'\\1    {inject}\n', block, count=1)
+    opener = find_mod_opener(block, gen_only=True)
+    if opener is None:
+        return block
+    insert_at = after_brace_newline(block, opener[1])  # after `{ … \n`
+    if insert_at is None:
+        return block
+    return block[:insert_at] + f"    {inject}\n" + block[insert_at:]
 
 
 def _count_test_attrs(block: str) -> int:
-    """Number of `#[test]` (incl. path-qualified) attributes in a block. (Regex in pipeline.)"""
-    return len(re.findall(r'#\[(?:\w+::)*test\]', block))
+    """Count `#[test]` attrs (R7: domain.rust_scan.count_test_attrs)."""
+    return count_test_attrs(block)
 
 
 def _strip_trailing_file_tag(text: str) -> str:
-    """Strip a trailing `</FILE>` tag (+ surrounding whitespace) and strip. (Regex in pipeline.)"""
-    return re.sub(r'\s*</FILE>\s*$', '', text).strip()
+    """Strip a trailing `</FILE>` tag (R7: domain.text.strip_trailing_file_tag)."""
+    return strip_trailing_file_tag(text)
 
 
 def _block_is_prose(block: str) -> bool:
@@ -14108,14 +14119,12 @@ def _parse_retrospective_categories(retrospective: str) -> dict[str, list[str]]:
     }
     for line in retrospective.splitlines():
         line = line.strip()
-        if not line.startswith("FUNCTION"):
-            continue
         # e.g. "FUNCTION AdhocKind::anyhow_kind: (c) UNREACHABLE — reason"
-        m = re.match(r'FUNCTION\s+([^:]+(?:::[^:]+)*):\s*(?:\([a-d]\)\s*)?(\w+)', line)
-        if not m:
+        # (R7: structured parse — see domain.refine.parse_retrospective_function.)
+        parsed = _parse_retrospective_function(line)
+        if parsed is None:
             continue
-        fn_name = m.group(1).rstrip(':')
-        keyword = m.group(2).upper()
+        fn_name, keyword = parsed[0], parsed[1].upper()
         for known in cats:
             if known in keyword:
                 cats[known].append(fn_name)

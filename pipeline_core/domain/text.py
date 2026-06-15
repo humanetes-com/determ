@@ -96,3 +96,14 @@ def strip_list_marker(line: str) -> str:
     while j < n and line[j].isspace():
         j += 1
     return line[j:]
+
+
+def strip_trailing_file_tag(text: str) -> str:
+    """Strip a trailing `</FILE>` tag (with surrounding whitespace) and `.strip()`
+    the result (regex-free, R7). Equivalent to `re.sub(r'\\s*</FILE>\\s*$', '', text)`
+    then `.strip()`: only the single trailing tag at end-of-text is removed."""
+    tag = "</FILE>"
+    stripped = text.rstrip()              # \s*$
+    if stripped.endswith(tag):
+        stripped = stripped[:-len(tag)]   # the \s* before the tag is handled by .strip()
+    return stripped.strip()

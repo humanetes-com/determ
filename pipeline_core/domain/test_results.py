@@ -299,6 +299,47 @@ def parse_failed_tests(output: str) -> set[str]:
     return failed
 
 
+def parse_rustc_compile_errors(build_output: str) -> list[tuple[str, str, int]]:
+    """`(message, file, line)` for each rustc `error[...]: <msg>` line immediately
+    followed by a `--> <file>:<line>[:col]` location line (regex-free, R7; mirrors
+    `^error(?:\\[E\\d+\\])?:\\s+([^\\n]+)\\n\\s*-->\\s*([^:]+):(\\d+)(?::\\d+)?`,
+    MULTILINE). The `error` keyword must start the line — same ANSI sensitivity as
+    the old regex; the structured cargo-JSON frontier is the primary path and this
+    is only the text fallback."""
+    out: list[tuple[str, str, int]] = []
+    lines = build_output.split("\n")
+    for i, line in enumerate(lines):
+        if not line.startswith("error"):
+            continue
+        rest = line[len("error"):]
+        if rest.startswith("[E"):                 # optional [E<digits>]
+            j = 2
+            while j < len(rest) and rest[j].isdigit():
+                j += 1
+            if j == 2 or j >= len(rest) or rest[j] != "]":
+                continue
+            rest = rest[j + 1:]
+        if not rest.startswith(":") or len(rest) < 2 or not rest[1].isspace():
+            continue                               # `:` then `\s+`
+        msg = rest[1:].lstrip()                    # `\s+` consumed, `[^\n]+` = rest of line
+        if not msg or i + 1 >= len(lines):
+            continue
+        arrow = lines[i + 1].lstrip()              # `\n\s*-->`
+        if not arrow.startswith("-->"):
+            continue
+        loc = arrow[3:].lstrip()                   # `-->\s*`
+        colon = loc.find(":")                      # `([^:]+):`
+        if colon <= 0:
+            continue
+        digits = 0
+        while digits < len(loc) - colon - 1 and loc[colon + 1 + digits].isdigit():
+            digits += 1
+        if digits == 0:                            # `(\d+)`
+            continue
+        out.append((msg, loc[:colon], int(loc[colon + 1:colon + 1 + digits])))
+    return out
+
+
 def rustc_error_signatures(cargo_output: str) -> frozenset[str]:
     """Stable rustc error signatures (`error[E<code>]: <message>`, no file/line),
     regex-free (R7). Equivalent to `re.findall(r'error\\[E\\d+\\]: .+', output)`:

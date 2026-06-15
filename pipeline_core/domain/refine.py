@@ -127,3 +127,44 @@ class FloorStall:
 
     def stalled(self, max_stalls: int) -> bool:
         return self.stalls >= max_stalls
+
+
+def parse_retrospective_function(line: str) -> tuple[str, str] | None:
+    """Parse a retrospective `FUNCTION <name>: [(x) ]<KEYWORD> …` line into
+    `(fn_name, keyword)` (regex-free, R7; mirrors
+    `FUNCTION\\s+([^:]+(?:::[^:]+)*):\\s*(?:\\([a-d]\\)\\s*)?(\\w+)`). The name may
+    contain `::` path separators but ends at the first single `:`. Returns None
+    when the line is not a parseable FUNCTION line."""
+    if not line.startswith("FUNCTION"):
+        return None
+    n = len(line)
+    i = len("FUNCTION")
+    j = i
+    while j < n and line[j].isspace():        # \s+
+        j += 1
+    if j == i or j >= n or line[j] == ":":    # need \s+ then [^:]+ (≥1 non-colon)
+        return None
+    name_start = j
+    while j < n:                              # [^:]+(?:::[^:]+)*
+        if line[j] != ":":
+            j += 1
+        elif line[j:j + 2] == "::" and j + 2 < n and line[j + 2] != ":":
+            j += 2                            # `::` path separator → keep going
+        else:
+            break                             # single colon → name ends
+    if j >= n or line[j] != ":":
+        return None
+    name = line[name_start:j]
+    j += 1
+    while j < n and line[j].isspace():        # \s*
+        j += 1
+    if j + 2 < n and line[j] == "(" and line[j + 1] in "abcd" and line[j + 2] == ")":
+        j += 3                                # optional (a|b|c|d) tag
+        while j < n and line[j].isspace():    # \s*
+            j += 1
+    k = j
+    while k < n and (line[k].isalnum() or line[k] == "_"):  # (\w+)
+        k += 1
+    if k == j:
+        return None
+    return name.rstrip(":"), line[j:k]

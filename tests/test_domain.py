@@ -305,3 +305,25 @@ def test_rustc_error_signatures_matches_old_regex() -> None:
     ]
     for c in cases:
         assert test_results.rustc_error_signatures(c) == old(c), c
+
+
+def test_parse_rustc_compile_errors_matches_old_regex() -> None:
+    import re
+    OLD = re.compile(r"^error(?:\[E\d+\])?:\s+([^\n]+)\n\s*-->\s*([^:]+):(\d+)(?::\d+)?",
+                     re.MULTILINE)
+    old = lambda o: [(m.group(1), m.group(2), int(m.group(3))) for m in OLD.finditer(o)]  # noqa: E731
+    cases = [
+        "error[E0277]: trait bound\n   --> src/a.rs:12:5\n",
+        "error: mismatched types\n  --> src/b.rs:3\n",
+        "error[E0599]: m\n --> lib.rs:1:1\nerror[E0277]: x\n --> lib.rs:2\n",
+        "error[E0277]: no arrow\nblah", "error[Eabc]: bad\n --> a:1", "no errors",
+    ]
+    for c in cases:
+        assert test_results.parse_rustc_compile_errors(c) == old(c), c
+
+
+def test_strip_trailing_file_tag_matches_old_regex() -> None:
+    import re
+    old = lambda t: re.sub(r'\s*</FILE>\s*$', '', t).strip()  # noqa: E731
+    for t in ["code\n</FILE>\n", "code</FILE>", "a</FILE>b</FILE>", "plain", "  sp  ", "</FILE>"]:
+        assert text.strip_trailing_file_tag(t) == old(t), repr(t)
