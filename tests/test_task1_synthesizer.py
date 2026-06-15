@@ -37,10 +37,10 @@ class _Progress:
 
 @dataclass
 class FakeAdapter:
-    """Satisfies Task1LLM/PromptShaping/ChunkCache/Progress/Requirements."""
+    """Satisfies Task1LLM/PromptShaping/Progress/Requirements (the chunk cache is a
+    pure foundational module imported directly — not a port)."""
     asks: list[str] = field(default_factory=list)
     ask_fn: Callable[[str], str] | None = None
-    load_fn: Callable[[Path, str], str | None] | None = None
 
     # Task1LLM
     def ask(self, prompt: str, *, model: str | None = None) -> str:
@@ -59,16 +59,6 @@ class FakeAdapter:
 
     def format_api_surface_section(self, api_surface: str) -> str:
         return ""
-
-    # ChunkCache
-    def chunk_hash(self, chunk_text: str) -> str:
-        return str(hash(chunk_text) & 0xffffffff)
-
-    def load(self, cache_dir: Path, chunk_hash: str) -> str | None:
-        return self.load_fn(cache_dir, chunk_hash) if self.load_fn else None
-
-    def save(self, cache_dir: Path, chunk_hash: str, content: str) -> None:
-        pass
 
     # Progress
     def make_progress(self, total: int) -> _Progress:
@@ -96,7 +86,7 @@ def _cfg(**over: Any) -> Task1Config:
 
 
 def _make(cls: type[Task1Synthesizer], fake: FakeAdapter, cfg: Task1Config) -> Task1Synthesizer:
-    return cls(llm=fake, shaping=fake, cache=fake, progress=fake,  # type: ignore[call-arg]
+    return cls(llm=fake, shaping=fake, progress=fake,  # type: ignore[call-arg]
                requirements=fake, cfg=cfg)
 
 
@@ -175,11 +165,23 @@ def test_group_merge_failure_returns_false(tmp_path: Path) -> None:
 
 
 def test_chunked_cache_hit_skips_model(tmp_path: Path) -> None:
+    import hashlib
+
+    from pipeline_core.chunk_cache import chunk_hash
     genesis, fr = _paths(tmp_path)
-    fake = FakeAdapter(load_fn=lambda d, h: "CACHED requirement entry")
+    fake = FakeAdapter()
+    tfs = [("a.rs", "fn a(){}"), ("b.rs", "fn b(){}")]
+    # Seed the real content-addressed cache so both chunks hit it. The key is
+    # chunk_hash(format_test_files([tf]) + sha256(existing_genesis)[:8]); genesis
+    # is absent → existing_genesis == "".
+    cache_dir = tmp_path / ".chunk_cache"
+    cache_dir.mkdir()
+    gh = hashlib.sha256(b"").hexdigest()[:8]
+    for tf in tfs:
+        h = chunk_hash(fake.format_test_files([tf]) + gh)
+        (cache_dir / f"{h}.txt").write_text("CACHED requirement entry")
     ok = _make(StaticTask1Synthesizer, fake, _cfg(single_call_char_limit=10)).synthesize(
-        tmp_path, genesis, fr,
-        test_files=[("a.rs", "fn a(){}"), ("b.rs", "fn b(){}")], readme_text="r")
+        tmp_path, genesis, fr, test_files=tfs, readme_text="r")
     assert ok is True
     assert len(fake.asks) == 1  # 2 chunks from cache → only final synthesis hits ask
 

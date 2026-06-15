@@ -2,10 +2,11 @@
 
 `application.generators.task1_synthesizer` use-cases depend on these narrow ROLE
 Protocols (ISP) instead of the older `configure()` module-global injection seam.
-`pipeline.py` binds the concrete functions at the composition root (`_Task1Adapter`);
-tests pass fakes. Pure helpers (domain text/output, retry, io, log) stay direct
-imports — only the LLM call, the prompt-shaping/chunk-cache machinery, the progress
-widget, and the requirements-doc I/O (all `pipeline.py`-resident) cross a port.
+`pipeline.py` binds the concrete functions at the composition root (the single
+`_Task2Adapter`); tests pass fakes. Pure helpers (domain text/output, retry, io, log,
+`chunk_cache`) stay direct imports — only the LLM call, the prompt-shaping machinery,
+the progress widget, and the requirements-doc I/O (all `pipeline.py`-resident) cross
+a port.
 """
 from __future__ import annotations
 
@@ -31,15 +32,6 @@ class PromptShaping(Protocol):
         self, test_files: Any, file_char_limit: int,
     ) -> list[Any]: ...
     def format_api_surface_section(self, api_surface: str) -> str: ...
-
-
-@runtime_checkable
-class ChunkCache(Protocol):
-    """Content-addressed cache of per-chunk partial requirements."""
-
-    def chunk_hash(self, chunk_text: str) -> str: ...
-    def load(self, cache_dir: Path, chunk_hash: str) -> str | None: ...
-    def save(self, cache_dir: Path, chunk_hash: str, content: str) -> None: ...
 
 
 @runtime_checkable

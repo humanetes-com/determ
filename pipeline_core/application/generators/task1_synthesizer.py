@@ -19,13 +19,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from ...chunk_cache import chunk_hash as _chunk_hash
+from ...chunk_cache import load_cached_chunk as _load_cached_chunk
+from ...chunk_cache import save_cached_chunk as _save_cached_chunk
 from ...domain.generation import Task1Config
 from ...domain.llm_output import extract_files
 from ...domain.text import smart_truncate, trim_to_line
 from ...io import read, write
 from ...log import log as _log
 from ...ports.synthesizer import (
-    ChunkCache,
     Progress,
     PromptShaping,
     Requirements,
@@ -69,7 +71,6 @@ class StaticTask1Synthesizer(Task1Synthesizer):
     """
     llm: Task1LLM
     shaping: PromptShaping
-    cache: ChunkCache
     progress: Progress
     requirements: Requirements
     cfg: Task1Config
@@ -307,10 +308,7 @@ Output a plain structured list of the merged requirements. No filler, no code, n
         SYNTHESIS_GROUP_SIZE = self.cfg.synthesis_group_size
         _TASK1_MODEL = self.cfg.task1_model
         ChunkProgress = self.progress.make_progress
-        _chunk_hash = self.cache.chunk_hash
         _extract_type_names_from_requirements = self.requirements.extract_type_names
-        _load_cached_chunk = self.cache.load
-        _save_cached_chunk = self.cache.save
         _write_fr_preserving_notes = self.requirements.write_fr_preserving_notes
         ask = self.llm.ask
         chunk_test_files_by_file = self.shaping.chunk_test_files_by_file

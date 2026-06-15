@@ -2081,23 +2081,6 @@ def classify_failure(test_output: str) -> str:
 # Chunk extraction cache
 # ---------------------------------------------------------------------------
 
-def _chunk_hash(chunk_text: str) -> str:
-    """SHA-256 of the formatted chunk content used as cache key."""
-    return hashlib.sha256(chunk_text.encode()).hexdigest()[:16]
-
-
-def _load_cached_chunk(cache_dir: Path, chunk_hash: str) -> str | None:
-    """Return cached partial text if it exists, else None."""
-    p = cache_dir / f"{chunk_hash}.txt"
-    return p.read_text() if p.exists() else None
-
-
-def _save_cached_chunk(cache_dir: Path, chunk_hash: str, content: str):
-    """Persist a chunk extraction result to the cache."""
-    cache_dir.mkdir(exist_ok=True)
-    (cache_dir / f"{chunk_hash}.txt").write_text(content)
-
-
 # ---------------------------------------------------------------------------
 # Failure log
 # ---------------------------------------------------------------------------
@@ -10734,60 +10717,9 @@ def _format_api_surface_section(api_surface: str) -> str:
 
 # --- TASK 1 synthesizer engine relocated to application/generators (P4). The
 # synthesizers are use-cases over the narrow `ports.synthesizer` roles (debt #14:
-# replaced the old `configure()` global-injection seam). pipeline.py is the
-# COMPOSITION ROOT: `_Task1Adapter` binds the concrete helpers below (methods
-# late-bind the module globals so test/scripted-harness monkeypatches intercept at
-# call time), and `_build_task1_config()` resolves the constants into a VO. --------
-class _Task1Adapter:
-    """Binds concrete pipeline.py helpers to the `ports.synthesizer` roles. One
-    object satisfies every role; synthesizers receive only the slices they declare.
-    Methods late-bind the module globals (test seams stay live)."""
-
-    # --- Task1LLM ---
-    def ask(self, prompt, *, model=None):
-        return ask(prompt, model=model)
-
-    # --- PromptShaping ---
-    def prompt_budget(self, *fixed_parts):
-        return prompt_budget(*fixed_parts)
-
-    def format_test_files(self, test_files):
-        return format_test_files(test_files)
-
-    def chunk_test_files_by_file(self, test_files, file_char_limit):
-        return chunk_test_files_by_file(test_files, file_char_limit)
-
-    def format_api_surface_section(self, api_surface):
-        return _format_api_surface_section(api_surface)
-
-    # --- ChunkCache ---
-    def chunk_hash(self, chunk_text):
-        return _chunk_hash(chunk_text)
-
-    def load(self, cache_dir, chunk_hash):
-        return _load_cached_chunk(cache_dir, chunk_hash)
-
-    def save(self, cache_dir, chunk_hash, content):
-        _save_cached_chunk(cache_dir, chunk_hash, content)
-
-    # --- Progress ---
-    def make_progress(self, total):
-        return ChunkProgress(total)
-
-    # --- Requirements ---
-    def extract_type_names(self, text):
-        return _extract_type_names_from_requirements(text)
-
-    def write_fr_preserving_notes(self, path, new_content):
-        _write_fr_preserving_notes(path, new_content)
-
-    def type_signals_read(self, project_dir):
-        return type_signals_read(project_dir)
-
-
-_TASK1_ADAPTER = _Task1Adapter()
-
-
+# replaced the old `configure()` global-injection seam). The SINGLE composition-root
+# adapter `_Task2Adapter`/`_TASK2_ADAPTER` (below) binds BOTH the TASK-2 and TASK-1
+# roles; `_build_task1_config()` resolves the constants into a VO. -----------------
 def _build_task1_config() -> "Task1Config":
     """Resolve the TASK-1 prompt constants/budgets into a Task1Config VO."""
     return Task1Config(
@@ -10849,14 +10781,14 @@ def _proc_macro_fallback_requirements(relevant, crate_name: str = "") -> str:
 
 
 def _new_static_task1_synthesizer() -> StaticTask1Synthesizer:
-    a = _TASK1_ADAPTER
-    return StaticTask1Synthesizer(llm=a, shaping=a, cache=a, progress=a,
+    a = _TASK2_ADAPTER  # the single composition-root adapter satisfies Task1 roles too
+    return StaticTask1Synthesizer(llm=a, shaping=a, progress=a,
                                   requirements=a, cfg=_build_task1_config())
 
 
 def _new_llm_task1_synthesizer() -> LLMTask1Synthesizer:
-    a = _TASK1_ADAPTER
-    return LLMTask1Synthesizer(llm=a, shaping=a, cache=a, progress=a,
+    a = _TASK2_ADAPTER
+    return LLMTask1Synthesizer(llm=a, shaping=a, progress=a,
                                requirements=a, cfg=_build_task1_config())
 
 
@@ -11103,6 +11035,29 @@ class _Task2Adapter:
 
     def rust_delimiters_balanced(self, text):
         return _rust_delimiters_balanced(text)
+
+    # --- TASK-1 synthesizer roles (ports.synthesizer; ask + format_api_surface_section
+    #     above already serve Task1LLM + PromptShaping.format_api_surface_section) ---
+    def prompt_budget(self, *fixed_parts):
+        return prompt_budget(*fixed_parts)
+
+    def format_test_files(self, test_files):
+        return format_test_files(test_files)
+
+    def chunk_test_files_by_file(self, test_files, file_char_limit):
+        return chunk_test_files_by_file(test_files, file_char_limit)
+
+    def make_progress(self, total):
+        return ChunkProgress(total)
+
+    def extract_type_names(self, text):
+        return _extract_type_names_from_requirements(text)
+
+    def write_fr_preserving_notes(self, path, new_content):
+        _write_fr_preserving_notes(path, new_content)
+
+    def type_signals_read(self, project_dir):
+        return type_signals_read(project_dir)
 
 
 _TASK2_ADAPTER = _Task2Adapter()
