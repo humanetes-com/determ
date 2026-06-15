@@ -55,6 +55,34 @@ def test_notes_filter_tier_ordering(tmp_path) -> None:
     assert lines.index(fmt_note) < lines.index(generic), "fn-name note (t3) before generic (t5)"
 
 
+def test_notes_filter_symbol_match_outranks_generic(tmp_path) -> None:
+    """A note naming a symbol defined in `file_text` (tier 4) outranks a generic
+    recency-only note (tier 5) — pins the `item_names`-driven symbol relevance."""
+    generic = "generic recency only note about delegation and ownership"
+    sym_note = "the MyWidget value must be cloned before the closure captures it"
+    fr = _write_fr(tmp_path, [generic, sym_note])
+    out = pipeline._filter_model_notes_for_prompt(
+        fr, "src/core.rs", "render",
+        file_text="pub struct MyWidget { }\npub fn helper() {}",
+    )
+    lines = [ln[2:] for ln in out.splitlines()]
+    assert lines.index(sym_note) < lines.index(generic), "symbol note (t4) before generic (t5)"
+
+
+def test_notes_filter_fn_specific_selection_and_drop(tmp_path) -> None:
+    """A note naming fn `alpha` is tier-3 (selected first) when filtering for alpha,
+    but drops to generic for beta — so the beta-specific note wins for beta."""
+    alpha_note = "in alpha remember to clear the state before returning"
+    beta_note = "in beta the index starts at one not zero"
+    fr = _write_fr(tmp_path, [alpha_note, beta_note])
+
+    first_for = lambda fn: [  # noqa: E731
+        ln[2:] for ln in pipeline._filter_model_notes_for_prompt(fr, "src/widget.rs", fn).splitlines()
+    ][0]
+    assert first_for("alpha") == alpha_note  # selected for alpha
+    assert first_for("beta") == beta_note    # alpha-note dropped to generic → beta-note wins
+
+
 def test_notes_filter_caps_at_bullet_boundary(tmp_path) -> None:
     """Under bloat the block is capped at max_chars and never emits a partial bullet."""
     notes = [f"note {i} about lifetimes generics sized bounds padding padding" for i in range(50)]

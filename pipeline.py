@@ -177,6 +177,7 @@ from pipeline_core.domain.rust_scan import (
     count_cfg_attrs,
     count_test_attrs,
     find_mod_opener,
+    item_names,
     use_imports_symbol,
 )
 from pipeline_core.domain.test_results import (
@@ -5445,16 +5446,13 @@ def _filter_model_notes_for_prompt(
     if not notes:
         return ""
     base = Path(file_rel).stem if file_rel else ""
-    symbols: set[str] = set()
-    if file_text:
-        for m in re.finditer(r"\b(?:fn|struct|enum|trait|type)\s+([A-Za-z_]\w*)",
-                              file_text):
-            symbols.add(m.group(1))
-    # Extract error context (codes + keywords) for tier 1/2 matching.
+    # R7: item names via the syn-shaped token scan; error codes via the cargo-text
+    # scan — both structured, replacing the on-source / on-output regexes.
+    symbols: set[str] = set(item_names(file_text)) if file_text else set()
     err_codes: set[str] = set()
     err_keywords: set[str] = set()
     if current_error:
-        err_codes = set(re.findall(r"\bE\d{3,4}\b", current_error))
+        err_codes = _ecodes_in_text(current_error)
         low_err = current_error.lower()
         err_keywords = {k for k in _NOTE_SIGNATURE_KEYWORDS if k in low_err}
 

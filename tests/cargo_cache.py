@@ -13,6 +13,7 @@ replay mode serves it.
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Callable
 from pathlib import Path
 
@@ -72,3 +73,16 @@ def install_cargo_cache(monkeypatch, cache: CargoCache) -> CargoCache:
     real = pipeline._run_cargo
     monkeypatch.setattr(pipeline, "_run_cargo", cache.wrap(real))
     return cache
+
+
+def save_cargo_cache(cache: CargoCache, path: str | Path) -> None:
+    """Persist the `(tree_hash, cmd) → (rc, out)` memo as JSON so a record run's
+    cargo verdicts can be replayed later (the keys are tuples, so we store rows)."""
+    rows = [[h, cmd, rc, out] for (h, cmd), (rc, out) in cache.cache.items()]
+    Path(path).write_text(json.dumps(rows), encoding="utf-8")
+
+
+def load_cargo_cache(path: str | Path) -> dict[tuple[str, str], tuple[int, str]]:
+    """Inverse of :func:`save_cargo_cache` — restore the memo for replay mode."""
+    rows = json.loads(Path(path).read_text(encoding="utf-8"))
+    return {(h, cmd): (rc, out) for h, cmd, rc, out in rows}
