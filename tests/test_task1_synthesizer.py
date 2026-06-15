@@ -1,83 +1,114 @@
-"""Fakes-deps tests for the relocated TASK 1 synthesizer engine (P4).
+"""Fake-adapter tests for the TASK-1 synthesizer engine (debt #14 — ports migration).
 
-Drive StaticTask1Synthesizer / LLMTask1Synthesizer through configure()-injected
-fakes — no pipeline import, no LLM, no cargo. Covers the single-call path, the
-chunked+hierarchical path, and the no-FILE-markers raw fallback.
-"""
+Drive StaticTask1Synthesizer / LLMTask1Synthesizer over a fake satisfying the 5
+`ports.synthesizer` roles + a `Task1Config` VO — no pipeline import, no LLM, no
+cargo. Covers the single-call path, the chunked+hierarchical path, the multi-group
+Stage-1 merge, the cache-hit / partial-file reuse skips, and the failure/raw-fallback
+branches (the configure()-seam suite this replaces). Every `# debt #14` per-method
+local-binding preamble is exercised end-to-end (a missed binding = NameError here)."""
 from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass, field, replace
+from pathlib import Path
+from typing import Any
 
 import pytest
 
-from pipeline_core.application.generators import task1_synthesizer as t1
 from pipeline_core.application.generators.task1_synthesizer import (
     LLMTask1Synthesizer,
     StaticTask1Synthesizer,
+    Task1Synthesizer,
 )
+from pipeline_core.domain.generation import Task1Config
 
-_INJECTED = [
-    "ask", "prompt_budget", "format_test_files", "chunk_test_files_by_file",
-    "_chunk_hash", "_load_cached_chunk", "_save_cached_chunk", "ChunkProgress",
-    "_extract_type_names_from_requirements", "_format_api_surface_section",
-    "_write_fr_preserving_notes", "type_signals_read", "MODEL",
-    "SINGLE_CALL_CHAR_LIMIT", "SYNTHESIS_GROUP_SIZE", "_README_CAP", "_STRATEGY_CAP",
-    "_TASK1_MODEL", "_TASK1_THINKING_DIRECTIVE", "CHUNK_CACHE_DIR",
-    "FILE_FORMAT_INSTRUCTION",
-]
+_FILE_RESP = '<FILE path="functional_requirements.md">\nFR_BODY\n</FILE>'
 
 
 class _Progress:
-    def __init__(self, total: int = 0) -> None: ...
+    def __init__(self) -> None:
+        self.done = False
+
     def start_chunk(self) -> None: ...
-    def finish_chunk(self, i: int) -> None: ...
-    def finish(self) -> None: ...
+    def finish_chunk(self, current: int) -> None: ...
+    def finish(self) -> None:
+        self.done = True
 
 
-@pytest.fixture
-def configured(monkeypatch):
-    """Snapshot the module's injected globals, install fakes, restore after."""
-    saved = {n: getattr(t1, n) for n in _INJECTED}
+@dataclass
+class FakeAdapter:
+    """Satisfies Task1LLM/PromptShaping/ChunkCache/Progress/Requirements."""
+    asks: list[str] = field(default_factory=list)
+    ask_fn: Callable[[str], str] | None = None
+    load_fn: Callable[[Path, str], str | None] | None = None
 
-    calls: dict[str, list] = {"ask": []}
+    # Task1LLM
+    def ask(self, prompt: str, *, model: str | None = None) -> str:
+        self.asks.append(prompt)
+        return self.ask_fn(prompt) if self.ask_fn else _FILE_RESP
 
-    def fake_ask(prompt, system=None, model=None, **k):
-        calls["ask"].append(prompt)
-        return '<FILE path="functional_requirements.md">\nFR_BODY\n</FILE>'
+    # PromptShaping
+    def prompt_budget(self, *fixed_parts: str) -> int:
+        return 50_000
 
-    t1.configure(
-        ask=fake_ask,
-        prompt_budget=lambda *a: 50_000,
-        format_test_files=lambda tf: "\n".join(f"// {n}\n{c}" for n, c in tf),
-        chunk_test_files_by_file=lambda tf, lim: [[t] for t in tf],
-        _chunk_hash=lambda s: str(hash(s)),
-        _load_cached_chunk=lambda d, h: None,
-        _save_cached_chunk=lambda d, h, c: None,
-        ChunkProgress=_Progress,
-        _extract_type_names_from_requirements=lambda s: set(),
-        _format_api_surface_section=lambda s: "",
-        _write_fr_preserving_notes=lambda p, c: t1.write(p, c),
-        type_signals_read=lambda d: "",
-        MODEL="fake-model",
-        SINGLE_CALL_CHAR_LIMIT=100_000,
-        SYNTHESIS_GROUP_SIZE=20,
-        _README_CAP=2_000,
-        _STRATEGY_CAP=2_000,
-        _TASK1_MODEL="fake-task1",
-        _TASK1_THINKING_DIRECTIVE="",
-        CHUNK_CACHE_DIR=".chunk_cache",
-        FILE_FORMAT_INSTRUCTION="<<FMT>>",
+    def format_test_files(self, test_files: Any) -> str:
+        return "\n".join(f"// {n}\n{c}" for n, c in test_files)
+
+    def chunk_test_files_by_file(self, test_files: Any, file_char_limit: int) -> list[Any]:
+        return [[t] for t in test_files]
+
+    def format_api_surface_section(self, api_surface: str) -> str:
+        return ""
+
+    # ChunkCache
+    def chunk_hash(self, chunk_text: str) -> str:
+        return str(hash(chunk_text) & 0xffffffff)
+
+    def load(self, cache_dir: Path, chunk_hash: str) -> str | None:
+        return self.load_fn(cache_dir, chunk_hash) if self.load_fn else None
+
+    def save(self, cache_dir: Path, chunk_hash: str, content: str) -> None:
+        pass
+
+    # Progress
+    def make_progress(self, total: int) -> _Progress:
+        return _Progress()
+
+    # Requirements
+    def extract_type_names(self, text: str) -> set[str]:
+        return set()
+
+    def write_fr_preserving_notes(self, path: Path, new_content: str) -> None:
+        path.write_text(new_content, encoding="utf-8")
+
+    def type_signals_read(self, project_dir: Path) -> str:
+        return ""
+
+
+def _cfg(**over: Any) -> Task1Config:
+    base = Task1Config(
+        model="fake-model", task1_model="fake-task1", thinking_directive="",
+        file_format_instruction="<<FMT>>", single_call_char_limit=100_000,
+        synthesis_group_size=20, readme_cap=2_000, strategy_cap=2_000,
+        chunk_cache_dir=".chunk_cache",
     )
-    yield calls
-    t1.configure(**saved)
+    return replace(base, **over)
 
 
-def _paths(tmp_path):
+def _make(cls: type[Task1Synthesizer], fake: FakeAdapter, cfg: Task1Config) -> Task1Synthesizer:
+    return cls(llm=fake, shaping=fake, cache=fake, progress=fake,  # type: ignore[call-arg]
+               requirements=fake, cfg=cfg)
+
+
+def _paths(tmp_path: Path) -> tuple[Path, Path]:
     return tmp_path / "genesis.md", tmp_path / "functional_requirements.md"
 
 
 @pytest.mark.parametrize("cls", [StaticTask1Synthesizer, LLMTask1Synthesizer])
-def test_single_call_path(configured, tmp_path, cls):
+def test_single_call_path(tmp_path: Path, cls: type[Task1Synthesizer]) -> None:
     genesis, fr = _paths(tmp_path)
-    ok = cls().synthesize(
+    fake = FakeAdapter()
+    ok = _make(cls, fake, _cfg()).synthesize(
         tmp_path, genesis, fr,
         test_files=[("tests/a.rs", "#[test] fn t() { add(1,2); }")],
         readme_text="readme", api_surface="fn add(a,b)->i32",
@@ -85,116 +116,93 @@ def test_single_call_path(configured, tmp_path, cls):
     assert ok is True
     assert "FR_BODY" in fr.read_text()
     assert genesis.exists()  # genesis stub written when absent
-    assert len(configured["ask"]) == 1
+    assert len(fake.asks) == 1
 
 
 @pytest.mark.parametrize("cls", [StaticTask1Synthesizer, LLMTask1Synthesizer])
-def test_chunked_path(configured, tmp_path, cls):
-    # Force the chunked branch: tiny single-call budget so total_chars exceeds it.
-    t1.configure(SINGLE_CALL_CHAR_LIMIT=10)
+def test_chunked_path(tmp_path: Path, cls: type[Task1Synthesizer]) -> None:
     genesis, fr = _paths(tmp_path)
-    ok = cls().synthesize(
+    fake = FakeAdapter()
+    ok = _make(cls, fake, _cfg(single_call_char_limit=10)).synthesize(
         tmp_path, genesis, fr,
         test_files=[("tests/a.rs", "fn one(){}"), ("tests/b.rs", "fn two(){}")],
         readme_text="readme",
     )
     assert ok is True
     assert "FR_BODY" in fr.read_text()
-    # one ask per chunk (2) + final synthesis (1); single group → no stage-1 merge.
-    assert len(configured["ask"]) == 3
+    assert len(fake.asks) == 3  # 2 chunks + 1 synthesis; single group → no merge
 
 
 @pytest.mark.parametrize("cls", [StaticTask1Synthesizer, LLMTask1Synthesizer])
-def test_chunked_multigroup_hierarchical(configured, tmp_path, cls):
-    # group size 1 + 3 chunks → 3 stage-1 group merges, then final synthesis.
-    t1.configure(SINGLE_CALL_CHAR_LIMIT=10, SYNTHESIS_GROUP_SIZE=1)
+def test_chunked_multigroup_hierarchical(tmp_path: Path, cls: type[Task1Synthesizer]) -> None:
     genesis, fr = _paths(tmp_path)
-    ok = cls().synthesize(
+    fake = FakeAdapter()
+    ok = _make(cls, fake, _cfg(single_call_char_limit=10, synthesis_group_size=1)).synthesize(
         tmp_path, genesis, fr,
         test_files=[("a.rs", "fn a(){}"), ("b.rs", "fn b(){}"), ("c.rs", "fn c(){}")],
         readme_text="readme",
     )
     assert ok is True
     assert "FR_BODY" in fr.read_text()
-    # 3 chunk extractions + 3 group merges + 1 final synthesis.
-    assert len(configured["ask"]) == 7
+    assert len(fake.asks) == 7  # 3 chunk extractions + 3 group merges + 1 final
 
 
-def test_single_call_failure_returns_false(configured, tmp_path):
-    t1.configure(ask=lambda *a, **k: "too short")  # <200 chars, no FILE markers
+def test_single_call_failure_returns_false(tmp_path: Path) -> None:
     genesis, fr = _paths(tmp_path)
-    ok = StaticTask1Synthesizer().synthesize(
-        tmp_path, genesis, fr,
-        test_files=[("a.rs", "fn t(){}")], readme_text="r",
-    )
+    fake = FakeAdapter(ask_fn=lambda p: "too short")  # <200 chars, no FILE markers
+    ok = _make(StaticTask1Synthesizer, fake, _cfg()).synthesize(
+        tmp_path, genesis, fr, test_files=[("a.rs", "fn t(){}")], readme_text="r")
     assert ok is False
     assert not fr.exists()
 
 
-def test_chunk_extraction_failure_returns_false(configured, tmp_path):
-    t1.configure(SINGLE_CALL_CHAR_LIMIT=10, ask=lambda *a, **k: "")  # empty → retries exhaust
+def test_chunk_extraction_failure_returns_false(tmp_path: Path) -> None:
     genesis, fr = _paths(tmp_path)
-    ok = StaticTask1Synthesizer().synthesize(
-        tmp_path, genesis, fr,
-        test_files=[("a.rs", "fn a(){}")], readme_text="r",
-    )
+    fake = FakeAdapter(ask_fn=lambda p: "")  # empty → retries exhaust
+    ok = _make(StaticTask1Synthesizer, fake, _cfg(single_call_char_limit=10)).synthesize(
+        tmp_path, genesis, fr, test_files=[("a.rs", "fn a(){}")], readme_text="r")
     assert ok is False
 
 
-def test_group_merge_failure_returns_false(configured, tmp_path):
-    def picky_ask(prompt, *a, **k):
-        return "" if "merging a group" in prompt else "chunk requirement"
-
-    t1.configure(SINGLE_CALL_CHAR_LIMIT=10, SYNTHESIS_GROUP_SIZE=1, ask=picky_ask)
+def test_group_merge_failure_returns_false(tmp_path: Path) -> None:
     genesis, fr = _paths(tmp_path)
-    ok = StaticTask1Synthesizer().synthesize(
+    fake = FakeAdapter(ask_fn=lambda p: "" if "merging a group" in p else "chunk requirement")
+    ok = _make(StaticTask1Synthesizer, fake,
+               _cfg(single_call_char_limit=10, synthesis_group_size=1)).synthesize(
         tmp_path, genesis, fr,
-        test_files=[("a.rs", "fn a(){}"), ("b.rs", "fn b(){}")], readme_text="r",
-    )
+        test_files=[("a.rs", "fn a(){}"), ("b.rs", "fn b(){}")], readme_text="r")
     assert ok is False
 
 
-def test_chunked_cache_hit_skips_model(configured, tmp_path):
-    t1.configure(SINGLE_CALL_CHAR_LIMIT=10,
-                 _load_cached_chunk=lambda d, h: "CACHED requirement entry")
+def test_chunked_cache_hit_skips_model(tmp_path: Path) -> None:
     genesis, fr = _paths(tmp_path)
-    ok = StaticTask1Synthesizer().synthesize(
+    fake = FakeAdapter(load_fn=lambda d, h: "CACHED requirement entry")
+    ok = _make(StaticTask1Synthesizer, fake, _cfg(single_call_char_limit=10)).synthesize(
         tmp_path, genesis, fr,
-        test_files=[("a.rs", "fn a(){}"), ("b.rs", "fn b(){}")], readme_text="r",
-    )
+        test_files=[("a.rs", "fn a(){}"), ("b.rs", "fn b(){}")], readme_text="r")
     assert ok is True
-    # 2 chunks served from cache → only the final synthesis call hits ask().
-    assert len(configured["ask"]) == 1
+    assert len(fake.asks) == 1  # 2 chunks from cache → only final synthesis hits ask
 
 
-def test_chunked_partial_file_reuse(configured, tmp_path):
-    # Pre-existing per-chunk partial files are read back instead of re-calling the model.
-    t1.configure(SINGLE_CALL_CHAR_LIMIT=10)
+def test_chunked_partial_file_reuse(tmp_path: Path) -> None:
     genesis, fr = _paths(tmp_path)
     partials = tmp_path / ".task1_partials"
     partials.mkdir()
     (partials / "chunk_001_of_002.txt").write_text("=== chunk 1 ===\nreq one")
     (partials / "chunk_002_of_002.txt").write_text("=== chunk 2 ===\nreq two")
-    ok = StaticTask1Synthesizer().synthesize(
+    fake = FakeAdapter()
+    ok = _make(StaticTask1Synthesizer, fake, _cfg(single_call_char_limit=10)).synthesize(
         tmp_path, genesis, fr,
-        test_files=[("a.rs", "fn a(){}"), ("b.rs", "fn b(){}")], readme_text="r",
-    )
+        test_files=[("a.rs", "fn a(){}"), ("b.rs", "fn b(){}")], readme_text="r")
     assert ok is True
-    # Both chunks served from disk → only the final synthesis call hits ask().
-    assert len(configured["ask"]) == 1
+    assert len(fake.asks) == 1  # both chunks from disk → only final synthesis hits ask
 
 
-def test_no_file_markers_raw_fallback(configured, tmp_path):
-    long_text = "behavioral requirement line. " * 20  # > 200 chars, no FILE markers
-
-    def raw_ask(prompt, system=None, model=None, **k):
-        return long_text
-
-    t1.configure(ask=raw_ask)
+def test_no_file_markers_raw_fallback(tmp_path: Path) -> None:
     genesis, fr = _paths(tmp_path)
-    ok = StaticTask1Synthesizer().synthesize(
-        tmp_path, genesis, fr,
-        test_files=[("tests/a.rs", "fn t(){}")], readme_text="r",
-    )
+    long_text = "behavioral requirement line. " * 20  # > 200 chars, no FILE markers
+    fake = FakeAdapter(ask_fn=lambda p: long_text)
+    ok = _make(StaticTask1Synthesizer, fake, _cfg()).synthesize(
+        tmp_path, genesis, fr, test_files=[("tests/a.rs", "fn t(){}")], readme_text="r")
     assert ok is True
     assert long_text.strip() in fr.read_text()

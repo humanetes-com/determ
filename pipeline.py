@@ -53,7 +53,6 @@ from pipeline_core.application import orchestrator as _orchestrator
 from pipeline_core.application.gen_tests_reattach import (
     ReattachDeps,
 )
-from pipeline_core.application.generators import task1_synthesizer as _task1_synth
 from pipeline_core.application.generators.task1_synthesizer import (
     LLMTask1Synthesizer,
     StaticTask1Synthesizer,
@@ -7800,13 +7799,11 @@ class _PhaseCFillAdapter:
 
     def gather(self, *, file_text, file_rel, fn_name, sig_text, body_text,
                error_excerpt, container, type_records, fr_path=None):
-        c = _gather_fn_fix_context(
+        # Returns the domain FnFixContext directly (debt #13 — no per-attempt remap).
+        return _gather_fn_fix_context(
             file_text=file_text, file_rel=file_rel, fn_name=fn_name,
             sig_text=sig_text, body_text=body_text, error_excerpt=error_excerpt,
             container=container, type_records=type_records, fr_path=fr_path)
-        return _FnFixContext(container=c.container, impl_where=c.impl_where,
-                             types_section=c.types_section,
-                             notes_section=c.notes_section)
 
     def collect_sibling_filled_bodies(self, file_text, target_fn_name,
                                       target_container):
@@ -8430,17 +8427,6 @@ def _fn_container_index(src_dir: Path) -> dict[tuple[str, str], str]:
     return idx
 
 
-@dataclasses.dataclass(frozen=True, slots=True)
-class _FnPromptContext:
-    """Per-fn prompt context assembled by `_gather_fn_fix_context` — one
-    place that derives every injectable section, so a site can't silently
-    omit one (slice 8a companion to the slice-8 PromptContext records)."""
-    container: str
-    impl_where: str
-    types_section: str
-    notes_section: str
-
-
 def _gather_fn_fix_context(
     *,
     file_text: str,
@@ -8452,10 +8438,16 @@ def _gather_fn_fix_context(
     container: str,
     type_records: "list[TypeRecord]",
     fr_path: "Path | None" = None,
-) -> _FnPromptContext:
+) -> _FnFixContext:
     """Assemble the fix-prompt context for one fn: impl where-clause from the
     file, TYPES_IN_SCOPE from everything that names a type at fix time, and
-    the relevance-filtered model notes (empty when `fr_path` is None)."""
+    the relevance-filtered model notes (empty when `fr_path` is None).
+
+    Returns the domain `FnFixContext` directly (debt #13): this composition-root
+    helper stays in pipeline.py — it's prompts-layer + fr_path I/O — but its
+    result is the pure VO the fill use-cases consume, so the adapter no longer
+    remaps a pipeline-local twin per attempt. One place still derives every
+    injectable section, so a site can't silently omit one."""
     impl_where = _extract_impl_where_clause(file_text, container)
     types_section = _types_section_for_fix(
         sig_text, body_text, error_excerpt, container, impl_where,
@@ -8466,7 +8458,7 @@ def _gather_fn_fix_context(
             fr_path, file_rel=file_rel, fn_name=fn_name,
             file_text=file_text, current_error=error_excerpt,
         )
-    return _FnPromptContext(
+    return _FnFixContext(
         container=container, impl_where=impl_where,
         types_section=types_section, notes_section=notes_section,
     )
@@ -10740,24 +10732,75 @@ def _format_api_surface_section(api_surface: str) -> str:
     )
 
 
-# --- TASK 1 synthesizer engine relocated to application/generators (P4). Classes
-# imported at the top; pipeline-bound collaborators + config are injected here via
-# configure() (all defined above this point). --------------------------------------
-_task1_synth.configure(
-    ask=ask, prompt_budget=prompt_budget, format_test_files=format_test_files,
-    chunk_test_files_by_file=chunk_test_files_by_file, _chunk_hash=_chunk_hash,
-    _load_cached_chunk=_load_cached_chunk, _save_cached_chunk=_save_cached_chunk,
-    ChunkProgress=ChunkProgress,
-    _extract_type_names_from_requirements=_extract_type_names_from_requirements,
-    _format_api_surface_section=_format_api_surface_section,
-    _write_fr_preserving_notes=_write_fr_preserving_notes,
-    type_signals_read=type_signals_read,
-    MODEL=MODEL, SINGLE_CALL_CHAR_LIMIT=SINGLE_CALL_CHAR_LIMIT,
-    SYNTHESIS_GROUP_SIZE=SYNTHESIS_GROUP_SIZE, _README_CAP=_README_CAP,
-    _STRATEGY_CAP=_STRATEGY_CAP, _TASK1_MODEL=_TASK1_MODEL,
-    _TASK1_THINKING_DIRECTIVE=_TASK1_THINKING_DIRECTIVE,
-    CHUNK_CACHE_DIR=CHUNK_CACHE_DIR, FILE_FORMAT_INSTRUCTION=FILE_FORMAT_INSTRUCTION,
-)
+# --- TASK 1 synthesizer engine relocated to application/generators (P4). The
+# synthesizers are use-cases over the narrow `ports.synthesizer` roles (debt #14:
+# replaced the old `configure()` global-injection seam). pipeline.py is the
+# COMPOSITION ROOT: `_Task1Adapter` binds the concrete helpers below (methods
+# late-bind the module globals so test/scripted-harness monkeypatches intercept at
+# call time), and `_build_task1_config()` resolves the constants into a VO. --------
+class _Task1Adapter:
+    """Binds concrete pipeline.py helpers to the `ports.synthesizer` roles. One
+    object satisfies every role; synthesizers receive only the slices they declare.
+    Methods late-bind the module globals (test seams stay live)."""
+
+    # --- Task1LLM ---
+    def ask(self, prompt, *, model=None):
+        return ask(prompt, model=model)
+
+    # --- PromptShaping ---
+    def prompt_budget(self, *fixed_parts):
+        return prompt_budget(*fixed_parts)
+
+    def format_test_files(self, test_files):
+        return format_test_files(test_files)
+
+    def chunk_test_files_by_file(self, test_files, file_char_limit):
+        return chunk_test_files_by_file(test_files, file_char_limit)
+
+    def format_api_surface_section(self, api_surface):
+        return _format_api_surface_section(api_surface)
+
+    # --- ChunkCache ---
+    def chunk_hash(self, chunk_text):
+        return _chunk_hash(chunk_text)
+
+    def load(self, cache_dir, chunk_hash):
+        return _load_cached_chunk(cache_dir, chunk_hash)
+
+    def save(self, cache_dir, chunk_hash, content):
+        _save_cached_chunk(cache_dir, chunk_hash, content)
+
+    # --- Progress ---
+    def make_progress(self, total):
+        return ChunkProgress(total)
+
+    # --- Requirements ---
+    def extract_type_names(self, text):
+        return _extract_type_names_from_requirements(text)
+
+    def write_fr_preserving_notes(self, path, new_content):
+        _write_fr_preserving_notes(path, new_content)
+
+    def type_signals_read(self, project_dir):
+        return type_signals_read(project_dir)
+
+
+_TASK1_ADAPTER = _Task1Adapter()
+
+
+def _build_task1_config() -> "Task1Config":
+    """Resolve the TASK-1 prompt constants/budgets into a Task1Config VO."""
+    return Task1Config(
+        model=MODEL,
+        task1_model=_TASK1_MODEL,
+        thinking_directive=_TASK1_THINKING_DIRECTIVE,
+        file_format_instruction=FILE_FORMAT_INSTRUCTION,
+        single_call_char_limit=SINGLE_CALL_CHAR_LIMIT,
+        synthesis_group_size=SYNTHESIS_GROUP_SIZE,
+        readme_cap=_README_CAP,
+        strategy_cap=_STRATEGY_CAP,
+        chunk_cache_dir=CHUNK_CACHE_DIR,
+    )
 
 
 def _filter_proc_macro_test_files(test_files, crate_name: str = ""):
@@ -10805,11 +10848,23 @@ def _proc_macro_fallback_requirements(relevant, crate_name: str = "") -> str:
     return req_content
 
 
+def _new_static_task1_synthesizer() -> StaticTask1Synthesizer:
+    a = _TASK1_ADAPTER
+    return StaticTask1Synthesizer(llm=a, shaping=a, cache=a, progress=a,
+                                  requirements=a, cfg=_build_task1_config())
+
+
+def _new_llm_task1_synthesizer() -> LLMTask1Synthesizer:
+    a = _TASK1_ADAPTER
+    return LLMTask1Synthesizer(llm=a, shaping=a, cache=a, progress=a,
+                               requirements=a, cfg=_build_task1_config())
+
+
 def _task1_synthesizer_factory() -> Task1Synthesizer:
     backend = os.getenv("TASK1_SYNTHESIZER", "llm").lower()
     if backend == "static":
-        return StaticTask1Synthesizer()
-    return LLMTask1Synthesizer()
+        return _new_static_task1_synthesizer()
+    return _new_llm_task1_synthesizer()
 
 
 # slice 5b: _task1_proc_macro moved to application.tasks.task1.
@@ -10863,6 +10918,7 @@ from pipeline_core.application.generators.task2_generator import (  # noqa: E402
 from pipeline_core.domain.generation import (
     GenerationRequest,  # noqa: E402
     SkeletonConfig,  # noqa: E402
+    Task1Config,  # noqa: E402
     Task2Config,  # noqa: E402
 )
 

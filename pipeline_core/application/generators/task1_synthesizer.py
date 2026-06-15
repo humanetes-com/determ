@@ -15,82 +15,23 @@ from __future__ import annotations
 import hashlib
 from abc import ABC, abstractmethod
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 
+from ...domain.generation import Task1Config
 from ...domain.llm_output import extract_files
 from ...domain.text import smart_truncate, trim_to_line
 from ...io import read, write
 from ...log import log as _log
+from ...ports.synthesizer import (
+    ChunkCache,
+    Progress,
+    PromptShaping,
+    Requirements,
+    Task1LLM,
+)
 from ...retry import with_retry
-
-# --- injected at the composition root (configure); method bodies resolve these
-# as module globals at CALL time, so configure()'s reassignment is seen ---------
-MODEL: str = ""
-SINGLE_CALL_CHAR_LIMIT: int = 0
-SYNTHESIS_GROUP_SIZE: int = 0
-_README_CAP: int = 0
-_STRATEGY_CAP: int = 0
-_TASK1_MODEL: str = ""
-_TASK1_THINKING_DIRECTIVE: str = ""
-CHUNK_CACHE_DIR: Any = None
-FILE_FORMAT_INSTRUCTION: str = ""
-
-
-def ask(*a: Any, **k: Any) -> str:  # replaced by configure()
-    return ""
-
-
-def prompt_budget(*fixed_parts: str) -> int:  # replaced by configure()
-    return 0
-
-
-def format_test_files(test_files: Any) -> str:  # replaced by configure()
-    return ""
-
-
-def chunk_test_files_by_file(test_files: Any, file_char_limit: int) -> Any:  # configure()
-    return []
-
-
-def _chunk_hash(chunk_text: str) -> str:  # replaced by configure()
-    return ""
-
-
-def _load_cached_chunk(cache_dir: Any, chunk_hash: str) -> Any:  # configure()
-    return None
-
-
-def _save_cached_chunk(cache_dir: Any, chunk_hash: str, content: str) -> None:  # configure()
-    return None
-
-
-class ChunkProgress:  # replaced by configure() — interface mirrors pipeline.ChunkProgress
-    def __init__(self, *a: Any, **k: Any) -> None: ...
-    def start_chunk(self) -> None: ...
-    def finish_chunk(self, i: int) -> None: ...
-    def finish(self) -> None: ...
-
-
-def _extract_type_names_from_requirements(text: str) -> set[str]:  # configure()
-    return set()
-
-
-def _format_api_surface_section(api_surface: str) -> str:  # configure()
-    return ""
-
-
-def _write_fr_preserving_notes(path: Any, new_content: str) -> None:  # configure()
-    return None
-
-
-def type_signals_read(project_dir: Any) -> str:  # configure()
-    return ""
-
-
-def configure(**kw: Any) -> None:
-    """Wire pipeline-bound collaborators + config constants (called once at import)."""
-    globals().update(kw)
 
 
 class Task1Synthesizer(ABC):
@@ -118,6 +59,7 @@ class Task1Synthesizer(ABC):
         """
 
 
+@dataclass(frozen=True, slots=True)
 class StaticTask1Synthesizer(Task1Synthesizer):
     """
     Current implementation: extract behavioral requirements in natural language,
@@ -125,11 +67,20 @@ class StaticTask1Synthesizer(Task1Synthesizer):
     Uses a single LLM call for small projects and a chunked+hierarchical approach
     for large ones.
     """
+    llm: Task1LLM
+    shaping: PromptShaping
+    cache: ChunkCache
+    progress: Progress
+    requirements: Requirements
+    cfg: Task1Config
+
 
     def synthesize(self, project_dir: Path, genesis_path: Path, functional_req_path: Path,
                    test_files: list[tuple[str, str]], readme_text: str,
                    project_profile: str = "", project_context: str = "",
                    coverage_strategy: str = "", api_surface: str = "") -> bool:
+        # debt #14: injected collaborators/config bound locally (bodies verbatim).
+        SINGLE_CALL_CHAR_LIMIT = self.cfg.single_call_char_limit
         existing_genesis = read(genesis_path)
         total_chars = sum(len(c) for _, c in test_files)
 
@@ -155,6 +106,13 @@ class StaticTask1Synthesizer(Task1Synthesizer):
                 test_files: list[tuple[str, str]], readme_text: str, existing_genesis: str,
                 project_profile: str = "", project_context: str = "",
                 coverage_strategy: str = "", api_surface: str = "") -> bool:
+        # debt #14: injected collaborators/config bound locally (bodies verbatim).
+        MODEL = self.cfg.model
+        SINGLE_CALL_CHAR_LIMIT = self.cfg.single_call_char_limit
+        _TASK1_MODEL = self.cfg.task1_model
+        _write_fr_preserving_notes = self.requirements.write_fr_preserving_notes
+        ask = self.llm.ask
+        format_test_files = self.shaping.format_test_files
         genesis_exists = bool(existing_genesis.strip())
         _full_tests_section = format_test_files(test_files)
         profile_section = (f"\n--- Project profile (language, build system, workspace layout) ---\n"
@@ -203,6 +161,12 @@ class StaticTask1Synthesizer(Task1Synthesizer):
                        existing_genesis: str, coverage_strategy: str = "",
                        api_surface: str = "", context_section: str = "") -> str:
         """Return the prompt for single-call requirements extraction (overridable)."""
+        # debt #14: injected collaborators/config bound locally (bodies verbatim).
+        FILE_FORMAT_INSTRUCTION = self.cfg.file_format_instruction
+        _README_CAP = self.cfg.readme_cap
+        _STRATEGY_CAP = self.cfg.strategy_cap
+        _TASK1_THINKING_DIRECTIVE = self.cfg.thinking_directive
+        _format_api_surface_section = self.shaping.format_api_surface_section
         strategy_section = (
             f"\n--- Coverage strategy (import patterns, type construction, test conventions) ---\n"
             f"{trim_to_line(coverage_strategy, _STRATEGY_CAP, "\n... (strategy truncated)")}\n"
@@ -270,6 +234,12 @@ Test helpers vs. production API:
         single condensed intermediate summary. Called once per group.
         Returns the summary text, or None on failure.
         """
+        # debt #14: injected collaborators/config bound locally (bodies verbatim).
+        SINGLE_CALL_CHAR_LIMIT = self.cfg.single_call_char_limit
+        _README_CAP = self.cfg.readme_cap
+        _TASK1_MODEL = self.cfg.task1_model
+        _format_api_surface_section = self.shaping.format_api_surface_section
+        ask = self.llm.ask
         genesis_section = (
             f"\n--- genesis.md (methodology — apply when merging requirements) ---\n"
             f"{genesis}\n"
@@ -332,6 +302,20 @@ Output a plain structured list of the merged requirements. No filler, no code, n
                  test_files: list[tuple[str, str]], readme_text: str, existing_genesis: str,
                  project_profile: str = "", project_context: str = "",
                  coverage_strategy: str = "", api_surface: str = "") -> bool:
+        # debt #14: injected collaborators/config bound locally (bodies verbatim).
+        CHUNK_CACHE_DIR = self.cfg.chunk_cache_dir
+        SYNTHESIS_GROUP_SIZE = self.cfg.synthesis_group_size
+        _TASK1_MODEL = self.cfg.task1_model
+        ChunkProgress = self.progress.make_progress
+        _chunk_hash = self.cache.chunk_hash
+        _extract_type_names_from_requirements = self.requirements.extract_type_names
+        _load_cached_chunk = self.cache.load
+        _save_cached_chunk = self.cache.save
+        _write_fr_preserving_notes = self.requirements.write_fr_preserving_notes
+        ask = self.llm.ask
+        chunk_test_files_by_file = self.shaping.chunk_test_files_by_file
+        format_test_files = self.shaping.format_test_files
+        prompt_budget = self.shaping.prompt_budget
         _fixed = (
             min(len(readme_text), 2_000)
             + min(len(project_profile), 2_000)
@@ -515,6 +499,13 @@ Output a plain structured list of the merged requirements. No filler, no code, n
                           project_dir: Path | None = None,
                           api_surface: str = "") -> str:
         """Return the Stage-2 synthesis prompt (overridable by subclasses)."""
+        # debt #14: injected collaborators/config bound locally (bodies verbatim).
+        FILE_FORMAT_INSTRUCTION = self.cfg.file_format_instruction
+        SINGLE_CALL_CHAR_LIMIT = self.cfg.single_call_char_limit
+        _README_CAP = self.cfg.readme_cap
+        _STRATEGY_CAP = self.cfg.strategy_cap
+        _format_api_surface_section = self.shaping.format_api_surface_section
+        type_signals_read = self.requirements.type_signals_read
         strategy_section = (
             f"\n--- Coverage strategy (import patterns, type construction, test conventions) ---\n"
             f"{trim_to_line(coverage_strategy, _STRATEGY_CAP, "\n... (strategy truncated)")}\n"
@@ -582,6 +573,11 @@ Do NOT add requirements based on general knowledge of the project or language.
                       tests_section: str, profile_header: str, genesis: str = "",
                       coverage_strategy: str = "", api_surface: str = "") -> str:
         """Return the per-chunk extraction prompt (overridable by subclasses)."""
+        # debt #14: injected collaborators/config bound locally (bodies verbatim).
+        _README_CAP = self.cfg.readme_cap
+        _STRATEGY_CAP = self.cfg.strategy_cap
+        _TASK1_THINKING_DIRECTIVE = self.cfg.thinking_directive
+        _format_api_surface_section = self.shaping.format_api_surface_section
         genesis_section = (
             f"\n--- genesis.md (methodology — apply when extracting requirements) ---\n"
             f"{genesis}\n"
@@ -609,6 +605,7 @@ Derive the language, types, and function signatures from what you read.
 """
 
 
+@dataclass(frozen=True, slots=True)
 class LLMTask1Synthesizer(StaticTask1Synthesizer):
     """
     Contract-first / TDD implementation.
@@ -633,6 +630,12 @@ class LLMTask1Synthesizer(StaticTask1Synthesizer):
                        api_surface: str = "", context_section: str = "") -> str:
         # genesis is always shown — empty placeholder on first iteration so the
         # LLM knows this is the document accumulating retrospective findings.
+        # debt #14: injected collaborators/config bound locally (bodies verbatim).
+        FILE_FORMAT_INSTRUCTION = self.cfg.file_format_instruction
+        _README_CAP = self.cfg.readme_cap
+        _STRATEGY_CAP = self.cfg.strategy_cap
+        _TASK1_THINKING_DIRECTIVE = self.cfg.thinking_directive
+        _format_api_surface_section = self.shaping.format_api_surface_section
         if existing_genesis.strip():
             genesis_section = (f"\n--- genesis.md (methodology — read-only here; do not output or modify) ---\n"
                                f"{existing_genesis}\n")
@@ -686,6 +689,12 @@ Rules:
                           coverage_strategy: str = "",
                           project_dir: Path | None = None,
                           api_surface: str = "") -> str:
+        # debt #14: injected collaborators/config bound locally (bodies verbatim).
+        FILE_FORMAT_INSTRUCTION = self.cfg.file_format_instruction
+        SINGLE_CALL_CHAR_LIMIT = self.cfg.single_call_char_limit
+        _README_CAP = self.cfg.readme_cap
+        _STRATEGY_CAP = self.cfg.strategy_cap
+        _format_api_surface_section = self.shaping.format_api_surface_section
         genesis_exists = bool(existing_genesis.strip())
         genesis_section = (f"\n--- genesis.md (read-only — do not output or modify it) ---\n"
                            f"{existing_genesis}\n") if genesis_exists else ""
@@ -758,6 +767,11 @@ Rules:
     def _chunk_prompt(self, chunk_idx: int, total_chunks: int, readme_text: str,
                       tests_section: str, profile_header: str, genesis: str = "",
                       coverage_strategy: str = "", api_surface: str = "") -> str:
+        # debt #14: injected collaborators/config bound locally (bodies verbatim).
+        _README_CAP = self.cfg.readme_cap
+        _STRATEGY_CAP = self.cfg.strategy_cap
+        _TASK1_THINKING_DIRECTIVE = self.cfg.thinking_directive
+        _format_api_surface_section = self.shaping.format_api_surface_section
         genesis_section = (
             f"\n--- genesis.md (methodology — apply when extracting contracts) ---\n"
             f"{genesis}\n"
@@ -800,6 +814,12 @@ Rules:
         Merge a group of contract partials into a deduplicated intermediate contract list.
         Overrides the behavioral merge prompt with a contract-aware one.
         """
+        # debt #14: injected collaborators/config bound locally (bodies verbatim).
+        SINGLE_CALL_CHAR_LIMIT = self.cfg.single_call_char_limit
+        _README_CAP = self.cfg.readme_cap
+        _TASK1_MODEL = self.cfg.task1_model
+        _format_api_surface_section = self.shaping.format_api_surface_section
+        ask = self.llm.ask
         genesis_section = (
             f"\n--- genesis.md (methodology — apply when merging contracts) ---\n"
             f"{genesis}\n"

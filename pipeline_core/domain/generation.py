@@ -29,6 +29,21 @@ class Task2Config:
 
 
 @dataclass(frozen=True, slots=True)
+class Task1Config:
+    """Prompt scaffolding constants + char budgets for the TASK-1 synthesizers
+    (resolved from `SETTINGS`/pipeline.py globals at the composition root)."""
+    model: str
+    task1_model: str | None
+    thinking_directive: str
+    file_format_instruction: str
+    single_call_char_limit: int
+    synthesis_group_size: int
+    readme_cap: int
+    strategy_cap: int
+    chunk_cache_dir: str
+
+
+@dataclass(frozen=True, slots=True)
 class SkeletonConfig:
     """Runtime knobs for the 4-phase skeleton generator (resolved from
     `SETTINGS`/env at the composition root). `phase_c_per_fn`/`phase_c_tdd`
