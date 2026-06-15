@@ -98,6 +98,65 @@ def strip_list_marker(line: str) -> str:
     return line[j:]
 
 
+def tagged_path_block_spans(text: str, tag: str) -> list[tuple[int, int]]:
+    """`(start, end)` spans of each `\\n<tag path="…">…</tag>` block, in order
+    (regex-free, R7; mirrors `\\n<tag path="[^"]*">.*?</tag>` with DOTALL —
+    non-greedy: each block ends at its nearest `</tag>`)."""
+    open_lead = f'\n<{tag} path="'
+    close = f"</{tag}>"
+    spans: list[tuple[int, int]] = []
+    i = 0
+    while (s := text.find(open_lead, i)) >= 0:
+        q = text.find('"', s + len(open_lead))     # [^"]* then closing quote
+        if q < 0:
+            break
+        if text[q + 1:q + 2] != ">":                # require `">` immediately after
+            i = s + len(open_lead)
+            continue
+        e = text.find(close, q + 2)
+        if e < 0:
+            break
+        spans.append((s, e + len(close)))
+        i = e + len(close)
+    return spans
+
+
+def sibling_comment_block_spans(text: str) -> list[tuple[int, int]]:
+    """`(start, end)` spans of each `\\n// --- <name> ---\\n<body>` block, where the
+    body runs (non-slash) up to the next `\\n// ---` header or end-of-text
+    (regex-free, R7; mirrors `\\n// --- [^\\n]+ ---\\n[^/]*?(?=\\n// ---|$)`)."""
+    header = "\n// --- "
+    spans: list[tuple[int, int]] = []
+    i = 0
+    while (s := text.find(header, i)) >= 0:
+        nl = text.find("\n", s + len(header))       # end of the `// --- name ---` line
+        # the header line must contain a closing ` ---`
+        line = text[s + 1:nl] if nl >= 0 else text[s + 1:]
+        if not (line.startswith("// --- ") and line.rstrip().endswith(" ---")):
+            i = s + len(header)
+            continue
+        body_start = nl + 1 if nl >= 0 else len(text)
+        # body = [^/]*? up to the next `\n// ---` header or end ($). The `[^/]`
+        # means a body containing `/` can never reach the lookahead → no match
+        # (faithful to the original, which thus rarely fires on real Rust).
+        j = body_start
+        n = len(text)
+        matched = False
+        while j < n:
+            if text.startswith("\n// ---", j):
+                matched = True
+                break
+            if text[j] == "/":
+                break
+            j += 1
+        else:
+            matched = True  # ran to end-of-text ($)
+        if matched:
+            spans.append((s, j))
+        i = j if j > body_start else s + len(header)
+    return spans
+
+
 def strip_trailing_file_tag(text: str) -> str:
     """Strip a trailing `</FILE>` tag (with surrounding whitespace) and `.strip()`
     the result (regex-free, R7). Equivalent to `re.sub(r'\\s*</FILE>\\s*$', '', text)`

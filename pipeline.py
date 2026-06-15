@@ -200,8 +200,10 @@ from pipeline_core.domain.text import (
     extract_code_content as extract_code_content,  # noqa: PLC0414 (test seam re-export)
 )
 from pipeline_core.domain.text import (
+    sibling_comment_block_spans,
     smart_truncate,
     strip_trailing_file_tag,
+    tagged_path_block_spans,
     trim_to_line,
 )
 from pipeline_core.domain.text import (
@@ -653,30 +655,25 @@ def ask(prompt: str, system: str | None = None, model: str | None = None,
 
         trimmed = prompt
 
-        # Pass 1: drop <TESTFILE> blocks (whole blocks) starting from the last one.
+        # Pass 1: drop <TESTFILE> blocks (whole blocks) from the last one (R7 scan).
         if not _prompt_fits(trimmed):
-            testfile_re = re.compile(r'\n<TESTFILE path="[^"]*">.*?</TESTFILE>', re.DOTALL)
-            blocks = list(testfile_re.finditer(trimmed))
-            for blk in reversed(blocks):
-                trimmed = trimmed[:blk.start()] + trimmed[blk.end():]
+            for s, e in reversed(tagged_path_block_spans(trimmed, "TESTFILE")):
+                trimmed = trimmed[:s] + trimmed[e:]
                 if _prompt_fits(trimmed):
                     break
 
         # Pass 2: drop `// --- sibling_file ---\n...` blocks (end to start).
         if not _prompt_fits(trimmed):
-            sib_re = re.compile(r'\n// --- [^\n]+ ---\n[^/]*?(?=\n// ---|$)', re.DOTALL)
-            sib_blocks = list(sib_re.finditer(trimmed))
-            for blk in reversed(sib_blocks):
-                trimmed = trimmed[:blk.start()] + trimmed[blk.end():]
+            for s, e in reversed(sibling_comment_block_spans(trimmed)):
+                trimmed = trimmed[:s] + trimmed[e:]
                 if _prompt_fits(trimmed):
                     break
 
         # Pass 3: drop middle <FILE> blocks (keep first and last, drop intermediates).
         if not _prompt_fits(trimmed):
-            file_re = re.compile(r'\n<FILE path="[^"]*">.*?</FILE>', re.DOTALL)
-            file_blocks = list(file_re.finditer(trimmed))
-            for blk in file_blocks[1:-1]:  # skip first and last
-                trimmed = trimmed[:blk.start()] + trimmed[blk.end():]
+            file_blocks = tagged_path_block_spans(trimmed, "FILE")
+            for s, e in file_blocks[1:-1]:  # skip first and last
+                trimmed = trimmed[:s] + trimmed[e:]
                 if _prompt_fits(trimmed):
                     break
 
@@ -2254,10 +2251,16 @@ def validate_task2_output(project_dir: Path, expected_paths: list[str],
         named_types = set(re.findall(r'\b([A-Z][a-zA-Z0-9]{2,})\b', req_content))
         named_types -= {"README", "TODO", "FIXME", "API", "URL", "CLI", "LLM", "AI"}
         if named_types:
-            missing_types = [
-                t for t in sorted(named_types)
-                if not re.search(rf'\b(?:struct|enum|trait)\s+{re.escape(t)}\b', all_source)
-            ]
+            # syn DEFINITIONS in the generated files (scoped to expected_paths to
+            # match the old all_source search); regex fallback when no binary.
+            _type_recs = _enumerate_types_via_extractor(project_dir)
+            if _type_recs is not None:
+                _defined = {r.name for r in _type_recs
+                            if r.kind in ("struct", "enum", "trait") and r.file in set(expected_paths)}
+                missing_types = [t for t in sorted(named_types) if t not in _defined]
+            else:
+                missing_types = [t for t in sorted(named_types)
+                                 if not re.search(rf'\b(?:struct|enum|trait)\s+{re.escape(t)}\b', all_source)]
             # Only fail if more than half the named types are absent — allows for
             # types that are re-exported or defined via macros.
             if len(missing_types) > max(1, len(named_types) // 2):
@@ -2508,8 +2511,7 @@ def _count_active_tests_for_cluster(
     if not src_dir.is_dir():
         return total
 
-    # 2. gen_tests siblings — gated by their parent file's #[path] decl.
-    # (R7: structured decl scan — see domain.generation.gen_tests_decl_blocks.)
+    # 2. gen_tests siblings — gated by their parent #[path] decl (R7: decl scan).
     for parent in src_dir.glob("*.rs"):
         if _is_gen_tests_file(parent.name):
             continue
@@ -9937,6 +9939,13 @@ def _implicated_fns_from_cargo_errors(
     cargo_output = _strip_cargo_warnings(cargo_output)
     pairs: list[tuple[str, str]] = []
     seen: set[tuple[str, str]] = set()
+    # Enclosing-fn attribution via the syn extractor (byte-span lookup); the
+    # backward `fn` regex walk is the no-binary fallback. (`-->` parse = cargo output.)
+    _all_recs = _enumerate_fns_via_extractor(target_src_dir)
+    _recs_by_file: dict[str, list[dict]] = {}
+    if _all_recs is not None:
+        for _r in _all_recs:
+            _recs_by_file.setdefault(_r.get("file", ""), []).append(_r)
     loc_re = re.compile(r"-->\s+([^:\s]+\.rs):(\d+):\d+")
     for m in loc_re.finditer(cargo_output):
         file_str = m.group(1)
@@ -9962,22 +9971,21 @@ def _implicated_fns_from_cargo_errors(
             text = src_path.read_text(encoding="utf-8")
         except Exception:
             continue
-        # Walk backward from line_no to find the enclosing fn declaration.
-        lines = text.splitlines()
-        if line_no > len(lines):
-            line_no = len(lines)
-        fn_re = re.compile(
-            r"\bfn\s+([A-Za-z_]\w*)",
-        )
+        # Enclosing fn: prefer the extractor's byte-span records (handles impl
+        # methods / cfg'd fns / inline decls); fall back to the backward regex walk.
         fn_name: str | None = None
-        for i in range(line_no - 1, -1, -1):
-            fm = fn_re.search(lines[i])
-            if fm:
-                # Make sure this fn line is actually a declaration (has fn
-                # followed by name and parens/generics later in the line OR
-                # within the next few lines).
-                fn_name = fm.group(1)
-                break
+        _recs = _recs_by_file.get(rel_p)
+        if _recs:
+            _rec = _line_to_fn_record(text, line_no, _recs)
+            if _rec:
+                fn_name = _rec["fn_name"]
+        if fn_name is None:
+            lines = text.splitlines()
+            fn_re = re.compile(r"\bfn\s+([A-Za-z_]\w*)")
+            for i in range(min(line_no, len(lines)) - 1, -1, -1):
+                if fm := fn_re.search(lines[i]):
+                    fn_name = fm.group(1)
+                    break
         if not fn_name:
             continue
         key = (rel_p, fn_name)
@@ -13113,8 +13121,7 @@ def _read_all_gen_tests(src_file: Path) -> str:
 
 
 def _strip_gen_tests_decls(src_text: str) -> str:
-    """Remove all gen_tests path-mod declarations from a source file's text.
-    (R7: structured domain scan — see domain.generation.strip_all_gen_tests_decls.)"""
+    """Remove all gen_tests path-mod decls (R7: generation.strip_all_gen_tests_decls)."""
     return _strip_all_gen_tests_decls(src_text)
 
 
@@ -13128,21 +13135,18 @@ _match_gen_tests_sibling = _discovery.match_gen_tests_sibling
 
 
 def _strip_gen_tests_decl_n(parent_text: str, pass_n: int) -> str:
-    """Remove the `#[cfg(test)] … mod gen_tests_<N>;` decl for one pass.
-    (R7: structured domain scan — see domain.generation.strip_gen_tests_decl_n.)"""
+    """Remove the gen_tests_<N> decl for one pass (R7: generation.strip_gen_tests_decl_n)."""
     return _domain_strip_gen_tests_decl_n(parent_text, pass_n)
 
 
 def _error_signatures_from_output(cargo_output: str) -> frozenset:
-    """Extract stable rustc error signatures (code + message, no file/line).
-    (R7: structured domain scan — see domain.test_results.rustc_error_signatures.)"""
+    """Stable rustc error signatures (R7: test_results.rustc_error_signatures)."""
     return rustc_error_signatures(cargo_output)
 
 
 # Prelude imports injected into generated test modules when absent. Each row is
-# (import_stmt, accepted `use`-prefixes, required symbol token): the import is
-# considered already present when a `use <prefix>…<symbol>…` statement exists.
-# (R7: structured presence check — see domain.rust_scan.use_imports_symbol.)
+# (import_stmt, accepted `use`-prefixes, required symbol token): present when a
+# `use <prefix>…<symbol>…` statement exists (R7: rust_scan.use_imports_symbol).
 _GEN_PRELUDE_ITEMS: list[tuple[str, tuple[str, ...], str]] = [
     ("use std::string::{String, ToString};", ("std::", "alloc::"),      "String"),
     ("use std::vec::Vec;",                    ("std::", "alloc::"),      "Vec"),
@@ -13154,8 +13158,7 @@ _GEN_PRELUDE_ITEMS: list[tuple[str, tuple[str, ...], str]] = [
 
 
 def _inject_allow_before_mod(block: str, allow_line: str, *, gen_only: bool) -> str:
-    """Insert `allow_line` immediately before the first `[gen_]mod` opener.
-    (R7: structured mod-opener scan — see domain.rust_scan.find_mod_opener.)"""
+    """Insert `allow_line` before the first `[gen_]mod` opener (R7: find_mod_opener)."""
     if allow_line in block:
         return block
     opener = find_mod_opener(block, gen_only=gen_only)
@@ -13173,8 +13176,7 @@ def _inject_allow_before_any_mod(block: str, allow_line: str) -> str:
 
 
 def _inject_gen_prelude_imports(block: str) -> str:
-    """Inject any missing std prelude imports into a generated test module.
-    (R7: structured presence + mod-opener scans — see domain.rust_scan.)"""
+    """Inject missing std prelude imports into a generated test module (R7: rust_scan)."""
     missing = [stmt for stmt, prefixes, symbol in _GEN_PRELUDE_ITEMS
                if not use_imports_symbol(block, prefixes, symbol)]
     if not missing:
@@ -14118,10 +14120,8 @@ def _parse_retrospective_categories(retrospective: str) -> dict[str, list[str]]:
         "UNREACHABLE": [], "CFG_GATED": [], "TESTABLE": [], "NEEDS_INTERNALS": [],
     }
     for line in retrospective.splitlines():
-        line = line.strip()
-        # e.g. "FUNCTION AdhocKind::anyhow_kind: (c) UNREACHABLE — reason"
-        # (R7: structured parse — see domain.refine.parse_retrospective_function.)
-        parsed = _parse_retrospective_function(line)
+        # e.g. "FUNCTION AdhocKind::anyhow_kind: (c) UNREACHABLE" (R7: refine parse)
+        parsed = _parse_retrospective_function(line.strip())
         if parsed is None:
             continue
         fn_name, keyword = parsed[0], parsed[1].upper()
