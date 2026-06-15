@@ -7,8 +7,10 @@ from pipeline_core.domain.generation import (
     parse_gen_tests_filename,
     strip_gen_tests_decl,
     strip_test_prefix,
-    testfile_paths,
     topo_sort_files,
+)
+from pipeline_core.domain.generation import (
+    testfile_paths as _testfile_paths,  # aliased: bare name would be collected as a test
 )
 
 
@@ -41,8 +43,8 @@ def test_strip_test_prefix() -> None:
 
 def test_testfile_paths() -> None:
     text = '<TESTFILE path="a.rs">x</TESTFILE><TESTFILE path="b/c.rs">'
-    assert testfile_paths(text) == ["a.rs", "b/c.rs"]
-    assert testfile_paths('<TESTFILE path="">') == []   # empty skipped (regex `+`)
+    assert _testfile_paths(text) == ["a.rs", "b/c.rs"]
+    assert _testfile_paths('<TESTFILE path="">') == []   # empty skipped (regex `+`)
 
 
 def test_topo_sort_files() -> None:
