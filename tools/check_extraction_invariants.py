@@ -146,9 +146,11 @@ def main() -> int:
                 if isinstance(n, ast.FunctionDef)
                 and any(a.arg == "deps" for a in n.args.posonlyargs + n.args.args + n.args.kwonlyargs)
             ]
-            consumed: set[str] = set()
-            for fn in deps_fns:
-                consumed |= _deps_reads(fn)
+            # Consumed = every `deps.<field>` read anywhere in the module (the
+            # documented contract is module-wide). An extracted use-case may rebind
+            # `deps = ctx.deps` and read fields there (e.g. `_run_phase_c` over
+            # `_PhaseCCtx`), so consumption is not confined to the deps-parameter fn.
+            consumed: set[str] = _deps_reads(tree)
 
             dead = field_set - consumed
             undeclared = consumed - field_set
