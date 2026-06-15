@@ -2207,6 +2207,45 @@ project-specific import paths, type construction patterns, and hard constraints.
     return _PhaseCOutcome("continue")
 
 
+def _diagnose_and_fix_regression(
+    *,
+    project_dir: Path,
+    module_name: str,
+    module_source_paths: list[Path],
+    existing_test_files: set[str],
+    delta_lines: int,
+    cargo_env: Callable[[], dict[str, str]],
+    subprocess: Any,
+    build_timeout: int,
+    generate_fix_loop: Callable[..., Any],
+    model: str,
+    log: Callable[[str], None],
+) -> None:
+    """A large coverage drop usually means a generated test now fails at runtime
+    and corrupts grcov profraw data. Run the tests to confirm, and if they fail,
+    repair them before generating more (which would only pile failures on top).
+    Extracted from the augmentation loop (W5 thinning, slice 2)."""
+    log(f"  [{module_name}] Coverage regression {delta_lines:+d} lines — running tests to detect runtime failures.")
+    reg_result = subprocess.run(
+        ["cargo", "test", "-p", module_name, "--no-fail-fast", "--", "--test-threads=1", "--no-capture"],
+        cwd=project_dir, capture_output=True, text=True,
+        timeout=build_timeout, env=cargo_env(),
+    )
+    if reg_result.returncode != 0:
+        log(f"  [{module_name}] Test failures confirmed — running runtime fix loop.")
+        generate_fix_loop(
+            project_dir=project_dir,
+            check_cmd=f"cargo test -p {module_name} -- --test-threads=1",
+            source_paths=module_source_paths,
+            existing_test_files=existing_test_files,
+            model=model,
+            max_fix_attempts=3,
+            timeout=build_timeout,
+        )
+    else:
+        log(f"  [{module_name}] Tests pass but coverage regressed — likely stale profraw; retrying.")
+
+
 def task0c_augment_module(
     project_dir: Path,
     module_name: str,
@@ -2476,27 +2515,19 @@ def task0c_augment_module(
         # runtime failures that corrupt grcov profraw data.  Diagnose and fix before
         # generating more tests (which would only pile more failing tests on top). ---
         if prev_covered > 0 and delta_lines < -50:
-            _log(f"  [{module_name}] Coverage regression {delta_lines:+d} lines — running tests to detect runtime failures.")
-            _reg_env = _cargo_env()
-            _reg_result = subprocess.run(
-                ["cargo", "test", "-p", module_name, "--no-fail-fast", "--", "--test-threads=1", "--no-capture"],
-                cwd=project_dir, capture_output=True, text=True,
-                timeout=BUILD_TIMEOUT, env=_reg_env,
+            _diagnose_and_fix_regression(
+                project_dir=project_dir,
+                module_name=module_name,
+                module_source_paths=module_source_paths,
+                existing_test_files=existing_test_files,
+                delta_lines=delta_lines,
+                cargo_env=_cargo_env,
+                subprocess=subprocess,
+                build_timeout=BUILD_TIMEOUT,
+                generate_fix_loop=generate_fix_loop,
+                model=_TASK0C_MODEL,
+                log=_log,
             )
-            if _reg_result.returncode != 0:
-                _reg_output = (_reg_result.stdout + "\n" + _reg_result.stderr)[-_FIX_ERR_CAP:]
-                _log(f"  [{module_name}] Test failures confirmed — running runtime fix loop.")
-                generate_fix_loop(
-                    project_dir=project_dir,
-                    check_cmd=f"cargo test -p {module_name} -- --test-threads=1",
-                    source_paths=module_source_paths,
-                    existing_test_files=existing_test_files,
-                    model=_TASK0C_MODEL,
-                    max_fix_attempts=3,
-                    timeout=BUILD_TIMEOUT,
-                )
-            else:
-                _log(f"  [{module_name}] Tests pass but coverage regressed — likely stale profraw; retrying.")
             prev_covered = covered_lines
             continue  # skip Phase C (no new tests until runtime failures are resolved)
 
