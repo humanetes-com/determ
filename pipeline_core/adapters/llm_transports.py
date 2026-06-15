@@ -34,6 +34,7 @@ from pipeline_core.llm import (
 )
 from pipeline_core.llm.cleanup import strip_chat_boundaries, strip_think
 from pipeline_core.llm.thinktag import InlineThinkSplitter
+from pipeline_core.log import emit as _emit_event  # debt#7: structured event sink
 
 MODEL = os.getenv("MODEL", "qwen2.5-coder:7b")
 
@@ -677,6 +678,7 @@ def _make_hooks() -> Hooks:
         guard=_guard,
         dbg=_dbg,
         persist_thinking=_persist_thinking,
+        emit=lambda event, data: _emit_event(event, data=data),
     )
 
 

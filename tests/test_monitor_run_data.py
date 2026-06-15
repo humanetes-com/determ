@@ -8,36 +8,6 @@ import json
 from pipeline_core.monitor import run_data as rd
 
 
-def test_parse_task_pipeline_progression():
-    lines = [
-        "PIPELINE STARTED — x",
-        "TASK 0a: context",
-        "TASK 0b discovery",
-        "TASK 0c [planner]",
-        "pipeline: task0c/stable — [git] committed",
-        "pipeline: stripped — [git] committed",
-        "MODULE anyhow — ITERATION 3",
-        "TASK 1: requirements",
-        "TASK 1 output validated OK",
-        "TASK 2: generate",
-        "TASK 3: run",
-        "Tests FAILED",
-        "TASK 4: analyze",
-    ]
-    tp = rd.parse_task_pipeline(lines)
-    assert tp["module"] == "anyhow" and tp["iteration"] == 3
-    assert tp["states"]["task0c"] == "done" and tp["states"]["strip"] == "done"
-    assert tp["states"]["task1"] == "done"
-    assert tp["task3_pass"] is False
-    assert tp["current"] == "task4"
-
-
-def test_parse_task_pipeline_reset_on_restart():
-    tp = rd.parse_task_pipeline(["TASK 0a:", "PIPELINE STARTED — fresh"])
-    assert all(v == "pending" for v in tp["states"].values())
-    assert tp["current"] is None
-
-
 def test_parse_pipeline_state(tmp_path, monkeypatch):
     pd = tmp_path / "ws"
     pd.mkdir()
@@ -55,50 +25,18 @@ def test_parse_pipeline_state(tmp_path, monkeypatch):
     assert rd.parse_pipeline_state(None)["clusters"] == []
 
 
-def test_parse_pipeline_log_tail(tmp_path, monkeypatch):
+def test_log_tail_meta(tmp_path, monkeypatch):
     log = tmp_path / "p.log"
-    log.write_text(
-        "PIPELINE STARTED — x\n"
-        "Attempt 2/5\n"
-        "Starting compiler cluster: stable\n"
-        "File 1/3: src/error.rs\n"
-        "Compile error: boom\n"
-        "Coverage: 91.2%\n"
-    )
+    log.write_text("first line\n\n  Queue: 2 file(s) — error.rs(4)\n\n")
     monkeypatch.setattr(rd, "PIPELINE_LOG", str(log))
-    p = rd.parse_pipeline_log()
-    assert p["attempt"] == "2" and p["max_attempt"] == "5"
-    assert p["current_cluster"] == "stable"
-    assert p["errors"] == 1 and p["coverage"] == "91.2%"
-    assert "src/error.rs" in p["cluster_files"]
+    m = rd.log_tail_meta()
+    assert m["last_line"] == "Queue: 2 file(s) — error.rs(4)"  # last non-empty, stripped
+    assert m["age"] >= 0.0
 
 
-def test_parse_pipeline_log_rich(tmp_path, monkeypatch):
-    log = tmp_path / "p.log"
-    log.write_text(
-        "PIPELINE STARTED — x\n"
-        "Attempt 1/3\n"
-        "[task0c planner] src/lib.rs: planning\n"
-        "quick-retry 2/4 — retrying\n"
-        "Appended gen_tests_3 to src/lib.rs (12 uncovered lines)\n"
-        "src/lib.rs quick-cov: 50/60 (83.3%)\n"
-        "src/lib.rs quick-cov: 55/60 (91.6%)\n"
-        "Queue: 2 file(s) — error.rs(4)  lib.rs(2)\n"
-    )
-    monkeypatch.setattr(rd, "PIPELINE_LOG", str(log))
-    p = rd.parse_pipeline_log()
-    assert "src/lib.rs" in p["all_files"] and p["current_file"] == "src/lib.rs"
-    assert p["inner_retry"] == "2" and p["inner_retry_max"] == "4"
-    assert p["file_history"]["src/lib.rs"] == [12]
-    assert p["quick_cov_history"]["src/lib.rs"] == [83.3, 91.6]
-    assert p["queue_history"]["error.rs"] == [4]
-    assert p["last_line"].startswith("Queue:")
-
-
-def test_parse_pipeline_log_missing(tmp_path, monkeypatch):
+def test_log_tail_meta_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(rd, "PIPELINE_LOG", str(tmp_path / "nope.log"))
-    assert rd.parse_pipeline_log()["attempt"] == "?"
-    assert rd.read_log_tail() == []
+    assert rd.log_tail_meta() == {"last_line": "", "age": 0.0}
 
 
 def test_find_project_dir_and_stage(tmp_path, monkeypatch):
@@ -140,20 +78,6 @@ def test_read_backend(tmp_path, monkeypatch):
     assert rd.read_backend() == "vllm"
 
 
-def test_parse_max_tokens_and_cpt(tmp_path, monkeypatch):
-    g = tmp_path / "g.log"
-    g.write_text(
-        "guard: max_tokens 8000 → 4096\n"
-        "vllm/400_retry triggered\n"
-        "vllm/400_retry triggered\n"
-        "cpt_ewm=3.1→3.4\n"
-    )
-    monkeypatch.setattr(rd, "GUARDS_LOG", str(g))
-    assert rd.parse_max_tokens() == 4096
-    cpt, retries = rd.parse_vllm_cpt()
-    assert cpt == 3.4 and retries == 2
-
-
 def test_parse_coverage_json_grcov(tmp_path, monkeypatch):
     monkeypatch.setattr(rd.events_data, "pipeline_start_time", lambda: 0.0)
     gj = tmp_path / "grcov_unit.json"
@@ -170,6 +94,5 @@ def test_parse_coverage_json_grcov(tmp_path, monkeypatch):
 def test_configure_sets_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(rd, "SCRIPT_DIR", "x")
     monkeypatch.setattr(rd, "PIPELINE_LOG", "x")
-    monkeypatch.setattr(rd, "GUARDS_LOG", "x")
-    rd.configure(script_dir="/s", pipeline_log="/p", guards_log="/g")
-    assert (rd.SCRIPT_DIR, rd.PIPELINE_LOG, rd.GUARDS_LOG) == ("/s", "/p", "/g")
+    rd.configure(script_dir="/s", pipeline_log="/p")
+    assert (rd.SCRIPT_DIR, rd.PIPELINE_LOG) == ("/s", "/p")

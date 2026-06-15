@@ -262,6 +262,16 @@ def test_analysis_regression_restores_best(tmp_path: Path) -> None:
                             total_iters=0, coverage_strategy="x")
     assert "restore_best" in fa.calls                 # current 1 < best 5
     assert res.total_iters == 1
+    assert "genesis_audit" in fa.calls                # debt#12: regression fires audit off-interval
+
+
+def test_analysis_no_regression_off_interval_skips_audit(tmp_path: Path) -> None:
+    # current 4 ≥ prev 2 (no regression) and total_iters 1 % interval 5 ≠ 0 → no audit.
+    fa = FakeAdapter(task4=(True, 4), validate_task4=(True, ""), best=None)
+    _analysis(fa).run(_ctx(tmp_path), IterationState(prev_pass_count=2),
+                      StepOutcome(False, "test", "o"),
+                      total_iters=0, coverage_strategy="x")
+    assert "genesis_audit" not in fa.calls
 
 
 # --- ModuleReconstructor ----------------------------------------------------

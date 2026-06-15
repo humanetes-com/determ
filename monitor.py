@@ -85,8 +85,6 @@ STREAM_LOG   = os.getenv("LLM_STREAM_LOG", os.getenv("OLLAMA_STREAM_LOG", _pick_
     _DISCOVERED, "stream_log", os.path.join(_LOG_DIR, "stream.log"))))
 EVENTS_LOG   = os.getenv("PIPELINE_EVENTS_LOG", _pick_log(
     _DISCOVERED, "events_log", os.path.join(_LOG_DIR, "events.jsonl")))
-_GUARDS_LOG  = os.getenv("PIPELINE_GUARD_LOG", _pick_log(
-    _DISCOVERED, "guard_log", os.path.join(_LOG_DIR, "pipeline_guards.log")))
 
 # P6 data-vs-render split: the events.jsonl readers live in the data module; this
 # file keeps the renderer + live loop. `_`-aliases preserve the in-file call sites.
@@ -104,19 +102,17 @@ _latest_test_file_stats = _ed.latest_test_file_stats
 _latest_flow_audit = _ed.latest_flow_audit
 
 _rd.configure(script_dir=os.path.dirname(os.path.abspath(__file__)),
-              pipeline_log=PIPELINE_LOG, guards_log=_GUARDS_LOG)
+              pipeline_log=PIPELINE_LOG)
 _parse_coverage_json = _rd.parse_coverage_json
 _baked_cluster_order = _rd.baked_cluster_order
 _find_project_dir = _rd.find_project_dir
 _parse_pipeline_state = _rd.parse_pipeline_state
 _current_stage_label = _rd.current_stage_label
-_parse_pipeline_log = _rd.parse_pipeline_log
-_read_log_tail = _rd.read_log_tail
-_parse_task_pipeline = _rd.parse_task_pipeline
-_task_progression = _ed.task_progression  # debt#7: structured-event source
+_task_progression = _ed.task_progression       # debt#7: structured-event sources
+_pipeline_log_facts = _ed.pipeline_log_facts
+_vllm_runtime = _ed.vllm_runtime
+_log_tail_meta = _rd.log_tail_meta
 _read_backend = _rd.read_backend
-_parse_max_tokens = _rd.parse_max_tokens
-_parse_vllm_cpt = _rd.parse_vllm_cpt
 _pipeline_running = _rd.pipeline_running
 _detect_cached_repo_url = _rd.detect_cached_repo_url
 
@@ -532,7 +528,8 @@ def _phase_bar() -> list[str]:
 
 
 def pipeline_status():
-    prog  = _parse_pipeline_log()
+    prog  = _pipeline_log_facts()       # debt#7: task0c progress from structured events
+    prog.update(_log_tail_meta())       # + raw-log presentation (last_line, age)
     state = _parse_pipeline_state(_find_project_dir())
     running   = _pipeline_running()
     status_str = green("RUNNING") if running else red("STOPPED")
@@ -543,7 +540,7 @@ def pipeline_status():
 
     # Coverage: the structured coverage.measured event is authoritative (R8.4);
     # the pipeline_state.md / log-text scrapes remain only for legacy logs.
-    cov = _coverage_from_events() or state["coverage"] or prog["coverage"] or "?"
+    cov = _coverage_from_events() or state["coverage"] or "?"
     try:    cov_col = green if float(cov.rstrip("%")) >= 80 else yellow
     except: cov_col = dim
 
@@ -590,9 +587,8 @@ def pipeline_status():
     # (The old log-parsed "phases" line was removed — the state-driven
     # _phase_bar() above is the single, granular phase display. tp is still
     # parsed below for the fix-phase detection further down.)
-    # debt#7: prefer the structured-event progression; fall back to the log scrape
-    # until the next live run confirms the event path drives the TUI identically.
-    tp = _task_progression() or _parse_task_pipeline(_read_log_tail())
+    # debt#7: task progression is now derived purely from structured events.
+    tp = _task_progression()
 
     # ── P3.11: Phase C per-fn panel (visible when the skeleton backend
     # is running). Pulls structured data from logs/events.jsonl.
@@ -928,6 +924,7 @@ def generation():
     elif in_think:                                                  phase = yellow("THINKING")
     elif had_think or ("[CALL:" in content and cur_chars > 60):     phase = green("CODE")
     else:                                                           phase = yellow("THINKING")
+    _vr = _vllm_runtime()  # debt#7: {max_tokens, cpt, retries} from structured events
     progress_rows = []
     if in_think:
         tc   = max(0, cur_chars - content.find('<think>') - 7)
@@ -937,7 +934,7 @@ def generation():
             f"  think [{bar(pct, 20)}] {pct:4.0f}%  {tc:,}/{_THINK_CAP_CHARS:,} chars"
             f"  {rate_str}  ETA {eta}  elapsed {ela_s}")
     else:
-        max_tok = _parse_max_tokens()
+        max_tok = _vr["max_tokens"]
         tg      = cur_chars / 4
         if max_tok:
             pct = min(100, tg / max_tok * 100)
@@ -952,7 +949,7 @@ def generation():
             break
     w      = _w() - 4
     dlines = [ln for ln in display.splitlines() if ln.strip()][-5:]
-    cpt, retries = _parse_vllm_cpt()
+    cpt, retries = _vr["cpt"], _vr["retries"]
     cpt_s    = f"cpt={cpt:.2f}" if cpt else dim("cpt=?")
     retry_s  = f"  {red(f'400-retries={retries}')}" if retries else ""
     rows  = [f"phase={phase}   {cur_chars:,} chars   last-tok {age_s} ago   {rate_str}   {cpt_s}{retry_s}"]

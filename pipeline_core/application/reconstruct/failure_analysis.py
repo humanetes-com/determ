@@ -95,12 +95,17 @@ class FailureAnalysisStep:
         improved = state.improved_over_prev(current_pass)
         total_iters += 1
 
-        # NOTE: the original `regression = current_pass < prev_pass_count` was
-        # evaluated AFTER prev_pass_count had already been set to current_pass, so
-        # it was always False (dead branch — see technical_debt). Behaviour is the
-        # interval trigger only; preserved verbatim here.
-        if total_iters % self._genesis_audit_interval == 0:
-            self._tel.log(f"\nGenesis audit triggered (every {self._genesis_audit_interval} iters)")
+        # debt#12: regression-triggered genesis audit. `state` is still the
+        # PRE-update iteration here (next_state.advance happens below), so
+        # `state.prev_pass_count` is last iteration's count — a drop below it is a
+        # real regression. Audit fires on a regression OR on the fixed interval.
+        regression = current_pass < state.prev_pass_count
+        if regression or total_iters % self._genesis_audit_interval == 0:
+            _why = ("regression "
+                    f"({current_pass} < {state.prev_pass_count} prev passes)"
+                    if regression
+                    else f"every {self._genesis_audit_interval} iters")
+            self._tel.log(f"\nGenesis audit triggered ({_why})")
             self._analyst.genesis_audit(ctx.genesis_path)
 
         # Best-tree ratchet: snapshot on a new-best pass count; restore the best

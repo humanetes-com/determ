@@ -42,6 +42,7 @@ def _noop_close() -> None: ...
 def _noop_guard(location: str, msg: str) -> None: ...
 def _noop_dbg(msg: str) -> None: ...
 def _noop_persist(result: str, thinking: str) -> None: ...
+def _noop_emit(event: str, data: dict[str, Any]) -> None: ...
 
 
 @dataclass(slots=True)
@@ -54,6 +55,8 @@ class Hooks:
     guard: Callable[[str, str], None] = field(default=_noop_guard)
     dbg: Callable[[str], None] = field(default=_noop_dbg)
     persist_thinking: Callable[[str, str], None] = field(default=_noop_persist)
+    # debt#7: structured vLLM-runtime events for the monitor (replaces guard-log scrapes).
+    emit: Callable[[str, dict[str, Any]], None] = field(default=_noop_emit)
 
 
 @dataclass(slots=True)
@@ -97,6 +100,9 @@ class LLMController:
             default_sentinel=self._sentinel,
             enable_thinking=enable_thinking,
         )
+        # debt#7: announce the adaptive token budget so the monitor's budget bar is
+        # live during this call (not just after a cpt update lands).
+        self._h.emit("vllm.budget", {"request_max": plan.request_max})
 
         meta = StreamMeta()
         cap: _Captured | None = None
@@ -126,6 +132,8 @@ class LLMController:
                 self._h.guard("vllm/400_retry",
                               f"attempt={attempt} real_input={exc.real_tokens}tok "
                               f"new_req_max={plan.request_max} cpt_ewm={prev:.2f}→{new:.2f}")
+                self._h.emit("vllm.input_retry",
+                             {"request_max": plan.request_max, "cpt": new})
                 continue
             except TransportUnavailable as exc:
                 self._h.sock_close()
@@ -153,6 +161,7 @@ class LLMController:
             self._h.guard("vllm/cpt_update",
                           f"actual={meta.prompt_tokens}tok est={plan.est_input_tokens}tok "
                           f"ewm={prev:.2f}→{new:.2f}")
+            self._h.emit("vllm.cpt_update", {"cpt": new, "request_max": plan.request_max})
 
         # Thinking exhausted (no content) or stream length-truncated mid-output:
         # re-feed the reasoning and ask for code only, thinking disabled.

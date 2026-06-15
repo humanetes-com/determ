@@ -1309,6 +1309,7 @@ corrected content here
     while attempt < max_attempts:
         attempt += 1
         _log(f"  [{module_name}/{_cluster_label}] Attempt {attempt}/{max_attempts}")
+        _emit("task0c.attempt", data={"attempt": attempt, "max_attempt": max_attempts})  # debt#7
 
         # --- Phase A: compile check + targeted fix ---
         # Use generate_fix_loop: run compile check, if it fails ask LLM to fix
@@ -1501,6 +1502,9 @@ corrected content here
             if rel not in skipped_files
         )
         _log(f"  [{module_name}] Queue: {len([r for r,_ in _ordered_files if r not in skipped_files])} file(s) — {_queue_summary} (raw=pre-filter grcov count)")
+        _emit("task0c.queue", data={"files": [  # debt#7
+            [rel.split("/")[-1], len(unc)]
+            for rel, (_, unc) in _ordered_files if rel not in skipped_files]})
 
         _active_files = [r for r, _ in _ordered_files if r not in skipped_files]
         attempt_n_within_outer = 0
@@ -1514,6 +1518,7 @@ corrected content here
 
             _file_idx = _active_files.index(rel_path) + 1 if rel_path in _active_files else attempt_n_within_outer
             _log(f"  [{module_name}] File {_file_idx}/{len(_active_files)}: {rel_path} ({len(uncov_lines)} raw uncovered lines)")
+            _emit("task0c.file", file=rel_path, data={"idx": _file_idx, "total": len(_active_files)})  # debt#7
 
             abs_path = project_dir / rel_path
             # _raw_text = current on-disk content (including existing gen_tests decls).
@@ -1848,6 +1853,7 @@ project-specific import paths, type construction patterns, and hard constraints.
                     if _fix_n > 1:
                         _log(f"  [{module_name}] Compile error in {rel_path} "
                              f"(fix attempt {_fix_n - 1}) — sending to LLM.")
+                        _emit("task0c.compile_error", file=rel_path)  # debt#7
                         _fix_history = _get_task0c_history(project_dir, rel_path)
                         _fix_history_section = (f"\n{_fix_history}\n") if _fix_history.strip() else ""
                         _compile_err_capped = compile_err[-3_000:] if len(compile_err) > 3_000 else compile_err
@@ -1904,6 +1910,8 @@ project-specific import paths, type construction patterns, and hard constraints.
                         _log_task0c_attempt(project_dir, rel_path, attempt + _fix_n - 1, block, "", "success")
                         _log(f"  [{module_name}] Appended gen_tests_{pass_n} to {rel_path} "
                              f"({len(uncov_lines)} uncovered lines targeted)")
+                        _emit("task0c.gen_tests_appended", file=rel_path,  # debt#7
+                              data={"pass_n": pass_n, "uncovered": len(uncov_lines)})
                         _pass_had_work = True
                         return FixOutcome("accepted")
                     compile_err = (check.stdout + check.stderr).strip()
@@ -2054,6 +2062,8 @@ project-specific import paths, type construction patterns, and hard constraints.
                     _qcov_after = _qcov
                     _qpct = (_qcov / _qcov_able * 100.0) if _qcov_able else 0.0
                     _log(f"  [{module_name}] {rel_path} quick-cov: {_qcov}/{_qcov_able} ({_qpct:.1f}%)")
+                    _emit("task0c.quick_cov", file=rel_path,  # debt#7
+                          data={"covered": _qcov, "coverable": _qcov_able, "pct": _qpct})
                     # Persist result so the monitor can merge it into the files overview.
                     _qcache = Path("/tmp") / f"grcov_filecache_{module_name}.json"
                     try:
@@ -2104,6 +2114,8 @@ project-specific import paths, type construction patterns, and hard constraints.
                 ) if _guard_hints else ""
 
                 for _ir in range(_INNER_RETRY_LIMIT):
+                    _emit("task0c.quick_retry", file=rel_path,  # debt#7
+                          data={"retry": _ir + 1, "max": _INNER_RETRY_LIMIT})
                     _log(f"  [{module_name}] {rel_path} quick-retry {_ir + 1}/{_INNER_RETRY_LIMIT} "
                          f"— {len(uncov_lines)} line(s) still uncovered.")
                     _mod_name_retry = f"gen_tests_retry{attempt}_{_ir}"
@@ -2168,6 +2180,7 @@ project-specific import paths, type construction patterns, and hard constraints.
                             break
                     else:
                         break
+                _emit("task0c.quick_retry_done", file=rel_path)  # debt#7: clear retry counter
 
             # Per-file stall detection: track whether uncovered line count improved.
             prev_best = file_best_uncov.get(rel_path, len(uncov_lines) + 1)

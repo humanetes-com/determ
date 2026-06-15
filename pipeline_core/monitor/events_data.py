@@ -10,6 +10,7 @@ resolve it at call time, so monkeypatching `events_data.EVENTS_LOG` /
 """
 from __future__ import annotations
 
+import contextlib
 import json as _json
 import os
 import re
@@ -49,21 +50,18 @@ def pipeline_start_time() -> float:
 _TASKS_ORDER = ("task0a", "task0b", "task0c", "strip", "task1", "task2", "task3", "task4")
 
 
-def task_progression() -> dict[str, Any] | None:
+def task_progression() -> dict[str, Any]:
     """debt#7: derive the overall task-progression from STRUCTURED events — the
-    event-based replacement for `run_data.parse_task_pipeline`'s log regex-scrape.
+    sole source (replaced `run_data.parse_task_pipeline`'s log regex-scrape).
 
     Replays this run's `task.start`/`task.done`/`module.iter`/`cluster.done` records
-    into the same shape the log parser returns: {states, current, iteration, module,
-    task0c_clusters_done, task3_pass}. Returns None when no stage events exist yet
-    (the pipeline predates the emit, or none have landed) so the caller can fall back
-    to the log scrape. Linear-pipeline model: a `task.start` marks that task
-    in_progress and every canonical predecessor done; `module.iter` resets the
-    per-iteration tasks (task2/3/4)."""
+    into the shape the monitor consumes: {states, current, iteration, module,
+    task0c_clusters_done, task3_pass}. When no stage events exist yet (run just
+    started, or none landed) returns the all-pending baseline. Linear-pipeline
+    model: a `task.start` marks that task in_progress and every canonical
+    predecessor done; `module.iter` resets the per-iteration tasks (task2/3/4)."""
     evs = read_recent_events(
         lambda n: n in ("task.start", "task.done", "module.iter", "cluster.done"))
-    if not evs:
-        return None
     states: dict[str, str] = dict.fromkeys(_TASKS_ORDER, "pending")
     current: str | None = None
     iteration: int | None = None
@@ -100,6 +98,104 @@ def task_progression() -> dict[str, Any] | None:
         "module": module, "task0c_clusters_done": task0c_clusters_done,
         "task3_pass": task3_pass,
     }
+
+
+_PIPELINE_LOG_FACT_EVENTS = (
+    "task0c.attempt", "task0c.compile_error", "compiler.cluster.start",
+    "task0c.planner", "task0c.file", "task0c.quick_retry",
+    "task0c.quick_retry_done", "task0c.gen_tests_appended",
+    "task0c.quick_cov", "task0c.queue",
+)
+
+
+def pipeline_log_facts() -> dict[str, Any]:
+    """debt#7: the task0c progress facts the monitor's loop panels consume,
+    replayed from STRUCTURED events (replaces run_data.parse_pipeline_log's regex
+    scrapes of the free-form log). `read_recent_events` already scopes to this run,
+    so no PIPELINE-STARTED reset is needed. `last_line`/`age` are NOT facts — they
+    are raw-log presentation and stay in run_data.log_tail_meta()."""
+    attempt = max_attempt = "?"
+    errors = 0
+    current_file = "?"
+    files_this_pass: list[str] = []
+    all_files: list[str] = []
+    cluster_files: list[str] = []
+    file_history: dict[str, list[int]] = {}
+    queue_history: dict[str, list[int]] = {}
+    quick_cov_history: dict[str, list[float]] = {}
+    current_cluster = ""
+    inner_retry = inner_retry_max = "?"
+
+    for ev in read_recent_events(lambda n: n in _PIPELINE_LOG_FACT_EVENTS):
+        name = ev.get("event", "")
+        d = ev.get("data") or {}
+        f = ev.get("file")
+        if name == "task0c.attempt":
+            attempt, max_attempt = str(d.get("attempt", "?")), str(d.get("max_attempt", "?"))
+            files_this_pass = []
+            inner_retry = inner_retry_max = "?"
+        elif name == "task0c.compile_error":
+            errors += 1
+        elif name == "compiler.cluster.start":
+            cl = ev.get("cluster") or ""
+            if cl and cl != current_cluster:
+                current_cluster = cl
+                cluster_files = []
+        elif name == "task0c.planner" and f:
+            for bucket in (files_this_pass, all_files, cluster_files):
+                if f not in bucket:
+                    bucket.append(f)
+            current_file = f
+        elif name == "task0c.file":
+            if f:
+                if f not in cluster_files:
+                    cluster_files.append(f)
+                current_file = f
+            inner_retry = inner_retry_max = "?"
+        elif name == "task0c.quick_retry":
+            inner_retry, inner_retry_max = str(d.get("retry", "?")), str(d.get("max", "?"))
+        elif name == "task0c.quick_retry_done":
+            inner_retry = inner_retry_max = "?"
+        elif name == "task0c.gen_tests_appended" and f is not None:
+            file_history.setdefault(f, []).append(int(d.get("uncovered", 0)))
+        elif name == "task0c.quick_cov" and f is not None:
+            pct = float(d.get("pct", 0.0))
+            hist = quick_cov_history.setdefault(f, [])
+            if not hist or hist[-1] != pct:
+                hist.append(pct)
+        elif name == "task0c.queue":
+            for fname, count in d.get("files", []):
+                queue_history.setdefault(fname, []).append(int(count))
+
+    return {
+        "attempt": attempt, "max_attempt": max_attempt, "errors": errors,
+        "current_file": current_file, "files_this_pass": files_this_pass,
+        "all_files": all_files, "cluster_files": cluster_files,
+        "file_history": file_history, "queue_history": queue_history,
+        "current_cluster": current_cluster, "quick_cov_history": quick_cov_history,
+        "inner_retry": inner_retry, "inner_retry_max": inner_retry_max,
+    }
+
+
+def vllm_runtime() -> dict[str, Any]:
+    """debt#7: vLLM runtime facts (adaptive token budget, chars-per-token EWM,
+    400-retry count) from STRUCTURED events — replaces run_data.parse_max_tokens /
+    parse_vllm_cpt's guard-log scrapes. Returns {max_tokens, cpt, retries}."""
+    max_tokens: int | None = None
+    cpt: float | None = None
+    retries = 0
+    for ev in read_recent_events(lambda n: n in ("vllm.budget", "vllm.cpt_update", "vllm.input_retry")):
+        name = ev.get("event", "")
+        d = ev.get("data") or {}
+        if name == "vllm.input_retry":
+            retries += 1
+        if "request_max" in d:
+            with contextlib.suppress(TypeError, ValueError):
+                max_tokens = int(d["request_max"])
+        if "cpt" in d:
+            with contextlib.suppress(TypeError, ValueError):
+                cpt = float(d["cpt"])
+    return {"max_tokens": max_tokens, "cpt": cpt, "retries": retries}
 
 
 def read_recent_events(want: Callable[[str], bool]) -> list[dict[str, Any]]:

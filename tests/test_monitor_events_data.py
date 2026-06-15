@@ -77,11 +77,91 @@ def test_task_progression_resets_per_iteration(tmp_path, monkeypatch):
     assert tp["states"]["task3"] == "pending"
 
 
-def test_task_progression_none_without_events(tmp_path, monkeypatch):
+def test_task_progression_baseline_without_events(tmp_path, monkeypatch):
+    # debt#7: events are now the sole source — no events → all-pending baseline.
     ev = tmp_path / "events.jsonl"
     _write(ev, {"event": "llm.request", "model": "m"})  # unrelated event only
     _patch(monkeypatch, ev, run_start=0.0)
-    assert ed.task_progression() is None
+    tp = ed.task_progression()
+    assert tp["current"] is None and tp["iteration"] is None
+    assert all(v == "pending" for v in tp["states"].values())
+
+
+def test_pipeline_log_facts_replay(tmp_path, monkeypatch):
+    # debt#7: task0c progress facts derived from structured events (no log scrape).
+    ev = tmp_path / "events.jsonl"
+    _write(
+        ev,
+        {"event": "compiler.cluster.start", "cluster": "stable"},
+        {"event": "task0c.attempt", "data": {"attempt": 2, "max_attempt": 5}},
+        {"event": "task0c.planner", "file": "src/lib.rs"},
+        {"event": "task0c.file", "file": "src/error.rs", "data": {"idx": 1, "total": 3}},
+        {"event": "task0c.compile_error", "file": "src/error.rs"},
+        {"event": "task0c.quick_retry", "file": "src/lib.rs", "data": {"retry": 2, "max": 4}},
+        {"event": "task0c.gen_tests_appended", "file": "src/lib.rs",
+         "data": {"pass_n": 3, "uncovered": 12}},
+        {"event": "task0c.quick_cov", "file": "src/lib.rs",
+         "data": {"covered": 50, "coverable": 60, "pct": 83.3}},
+        {"event": "task0c.quick_cov", "file": "src/lib.rs",
+         "data": {"covered": 55, "coverable": 60, "pct": 91.6}},
+        {"event": "task0c.queue", "data": {"files": [["error.rs", 4], ["lib.rs", 2]]}},
+    )
+    _patch(monkeypatch, ev, run_start=0.0)
+    p = ed.pipeline_log_facts()
+    assert p["attempt"] == "2" and p["max_attempt"] == "5"
+    assert p["current_cluster"] == "stable"
+    assert p["errors"] == 1
+    assert "src/lib.rs" in p["all_files"]
+    assert "src/error.rs" in p["cluster_files"] and "src/lib.rs" in p["cluster_files"]
+    assert p["current_file"] == "src/error.rs"      # last task0c.file wins
+    assert p["inner_retry"] == "2" and p["inner_retry_max"] == "4"
+    assert p["file_history"]["src/lib.rs"] == [12]
+    assert p["quick_cov_history"]["src/lib.rs"] == [83.3, 91.6]
+    assert p["queue_history"]["error.rs"] == [4]
+
+
+def test_pipeline_log_facts_resets(tmp_path, monkeypatch):
+    # task0c.attempt clears files_this_pass + inner_retry; task0c.file clears retry;
+    # quick_retry_done clears the retry counter; new cluster clears cluster_files.
+    ev = tmp_path / "events.jsonl"
+    _write(
+        ev,
+        {"event": "compiler.cluster.start", "cluster": "stable"},
+        {"event": "task0c.planner", "file": "src/a.rs"},
+        {"event": "compiler.cluster.start", "cluster": "nightly"},  # resets cluster_files
+        {"event": "task0c.quick_retry", "file": "src/b.rs", "data": {"retry": 1, "max": 2}},
+        {"event": "task0c.quick_retry_done", "file": "src/b.rs"},   # clears counter
+        {"event": "task0c.attempt", "data": {"attempt": 1, "max_attempt": 3}},
+    )
+    _patch(monkeypatch, ev, run_start=0.0)
+    p = ed.pipeline_log_facts()
+    assert p["current_cluster"] == "nightly"
+    assert p["cluster_files"] == []          # cleared on the nightly cluster.start
+    assert p["files_this_pass"] == []        # cleared on task0c.attempt
+    assert p["inner_retry"] == "?" and p["inner_retry_max"] == "?"
+
+
+def test_vllm_runtime_replay(tmp_path, monkeypatch):
+    ev = tmp_path / "events.jsonl"
+    _write(
+        ev,
+        {"event": "vllm.budget", "data": {"request_max": 8000}},
+        {"event": "vllm.input_retry", "data": {"request_max": 4096, "cpt": 3.1}},
+        {"event": "vllm.input_retry", "data": {"request_max": 4096, "cpt": 3.2}},
+        {"event": "vllm.cpt_update", "data": {"cpt": 3.4, "request_max": 4096}},
+    )
+    _patch(monkeypatch, ev, run_start=0.0)
+    vr = ed.vllm_runtime()
+    assert vr["max_tokens"] == 4096      # latest request_max
+    assert vr["cpt"] == 3.4              # latest cpt
+    assert vr["retries"] == 2           # two input_retry events
+
+
+def test_vllm_runtime_empty(tmp_path, monkeypatch):
+    ev = tmp_path / "events.jsonl"
+    _write(ev, {"event": "other", "data": {}})
+    _patch(monkeypatch, ev, run_start=0.0)
+    assert ed.vllm_runtime() == {"max_tokens": None, "cpt": None, "retries": 0}
 
 
 def test_coverage_from_events_latest_wins(tmp_path, monkeypatch):

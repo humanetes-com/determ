@@ -13754,6 +13754,7 @@ def _select_relevant_siblings(
     top = [(srel, score) for srel, _sc, score in scored if score > 0][:4]
     _log(f"  [task0c planner] {target_rel}: ranked {len(all_siblings)} siblings by type overlap"
          f" (top: {top if top else 'none matched'})")
+    _emit("task0c.planner", file=target_rel)  # debt#7: monitor file-progress source
     return [(srel, sc) for srel, sc, _score in scored]
 
 
@@ -15318,6 +15319,7 @@ def main():
         _cluster_t0 = time.monotonic()
         _log(f"\n{'━' * 60}")
         _log(f"  Starting compiler cluster: {_cluster.name}")
+        _emit("compiler.cluster.start", cluster=_cluster.name)  # debt#7
         _ceiling_pct, _ceiling_excl, _ceiling_total = _estimate_cluster_ceiling(project_dir, _cluster)
         _emit("cluster.start", cluster=_cluster.name,
               data={"ceiling_pct": _ceiling_pct,
