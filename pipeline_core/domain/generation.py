@@ -28,6 +28,23 @@ class Task2Config:
 
 
 @dataclass(frozen=True, slots=True)
+class SkeletonConfig:
+    """Runtime knobs for the 4-phase skeleton generator (resolved from
+    `SETTINGS`/env at the composition root). `phase_c_per_fn`/`phase_c_tdd`
+    are the two mode flags; the remaining ints are loop budgets."""
+    task2_model: str | None
+    parallelism: int
+    phase_c_per_fn: bool
+    phase_c_tdd: bool
+    phase_c_max_passes: int = 3
+    validate_iters: int = 3
+    post_merge_max_stalls: int = 3
+    post_merge_hard_cap: int = 10_000
+    post_merge_test_timeout: int = 180
+    recently_filled_max: int = 50
+
+
+@dataclass(frozen=True, slots=True)
 class GenerationRequest:
     """One TASK-2 generation request — the inputs every generator's `generate`
     consumes. `existing_test_files` is the cluster's read-only test spec (a list
@@ -59,6 +76,20 @@ def strip_test_prefix(stem: str) -> str:
         if stem.startswith(p):
             return stem[len(p):]
     return stem
+
+
+def parse_gen_tests_filename(name: str) -> tuple[str, int] | None:
+    """Parse a `<stem>.gen_tests_<N>.rs` sibling filename → (stem, N), or None.
+    Accepts an optional trailing `.broken` quarantine suffix (regex-free, R7).
+    Equivalent to `^(.+?)\\.gen_tests_(\\d+)\\.rs(?:\\.broken)?$` — `partition`
+    takes the first `.gen_tests_` to mirror the non-greedy stem capture."""
+    rest = name[: -len(".broken")] if name.endswith(".broken") else name
+    if not rest.endswith(".rs"):
+        return None
+    stem, sep, n_str = rest[:-3].partition(".gen_tests_")
+    if not sep or not stem or not n_str.isdigit():
+        return None
+    return stem, int(n_str)
 
 
 def testfile_paths(text: str) -> list[str]:

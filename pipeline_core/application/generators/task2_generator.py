@@ -13,27 +13,48 @@ surface is bound behind ports.
 """
 from __future__ import annotations
 
+import json
+import os
+import shlex
+import shutil
+import time
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ...application.reconstruct.fill_rules import is_unimplemented_body
 from ...domain.generation import (
+    SkeletonConfig,
     Task2Config,
+    parse_gen_tests_filename,
     strip_test_prefix,
     testfile_paths,
     topo_sort_files,
 )
 from ...domain.llm_output import extract_files
+from ...domain.models import BuildCluster
 from ...domain.rust_scan import item_names
+from ...domain.test_results import _parse_test_counts
 from ...domain.text import (
     extract_code_content,
     smart_truncate,
     strip_list_marker,
     trim_to_line,
 )
-from ...ports.generator import LLM, ContextDocs, Telemetry, Workspace
+from ...ports.generator import (
+    LLM,
+    Cargo,
+    Clusters,
+    ContextDocs,
+    FillEngine,
+    GenTests,
+    SourceScan,
+    Telemetry,
+    Workspace,
+)
 from ...retry import with_retry
 
 # Prompt fragment for proc-macro crates (syn 2.0, default features) — pure text,
@@ -890,3 +911,793 @@ Generate the implementation for `{file_path}` (this call writes ONLY that file).
         written = self.ws.write_source_files(all_files, project_dir, manifest_path, existing_test_files)
         self.tel.log(f"  {written} source file(s) written.")
         return True
+
+
+@dataclass(frozen=True, slots=True)
+class StaticSkeletonTask2Generator(Task2Generator):
+    """4-phase reconstruction: mechanical skeleton → LLM grouping → per-group
+    fill → cleanup.
+
+    Phase A:  Load the skeleton (signatures + types + macros + `unimplemented!()`
+              bodies) baked from live source before strip (`_bake_skeleton_artifacts`).
+              No LLM. cargo check verifies the cached skeleton still compiles under
+              this cluster's env.
+    Phase B:  One LLM call to group test files into cohesive units. Validated.
+    Phase C:  Per-group LLM call that fills `unimplemented!()` bodies the group's
+              tests transitively need. Leaf-first ordering. Merge preserves bodies
+              already filled by prior groups.
+    Phase D:  Single cleanup pass for test-exercised stubs left untouched.
+
+    Phase A and B results cached on disk; Phase C and D re-run per iteration.
+    """
+    tel: Telemetry
+    cargo: Cargo
+    fill: FillEngine
+    clusters: Clusters
+    gentests: GenTests
+    scan: SourceScan
+    ws: Workspace
+    cfg: SkeletonConfig
+
+    def generate(
+        self, project_dir: Path, genesis_path: Path, functional_req_path: Path,
+        manifest_path: Path, existing_test_files: Any, project_profile: str = "",
+        workspace_structure: str = "", build_error: str = "", locked_dep_context: str = "",
+        current_module: str = "", module_dir_rel: str = "", whole_project_context: str = "",
+        coverage_strategy: str = "", api_surface: str = "", prev_source_context: str = "",
+    ) -> bool:
+        self.tel.log("\nTASK 2: Implementing source code (skeleton backend, per-cluster)")
+        module = current_module or project_dir.name
+
+        # Load clusters from the bake artefact written before strip (Hard Rule 11:
+        # no source access post-strip). If absent, abort — there is no live source
+        # to discover from at this point.
+        clusters = self.clusters.load_baked(project_dir)
+        if not clusters:
+            self.tel.log("  [skeleton] FATAL: no baked clusters at "
+                         f"{project_dir}/.skeleton/_clusters.json. The skeleton bake "
+                         "step (pre-strip) must run before TASK 2.")
+            return False
+        clusters = sorted(clusters, key=lambda c: c.name)
+        self.tel.log(f"  [skeleton] loaded {len(clusters)} baked cluster(s): "
+                     f"{', '.join(c.name for c in clusters)}")
+
+        genesis = self.ws.read(genesis_path) if genesis_path.exists() else ""
+        functional_req = self.ws.read(functional_req_path) if functional_req_path.exists() else ""
+        all_test_pairs: list[tuple[str, str]] = []
+        for rel in sorted(existing_test_files):
+            tp = project_dir / rel
+            if tp.exists():
+                try:
+                    all_test_pairs.append((rel, tp.read_text(encoding="utf-8")))
+                except Exception:
+                    continue
+        if not all_test_pairs:
+            self.tel.log("  [skeleton] no test files; cannot proceed.")
+            return False
+
+        # === task2a — per-cluster Phase A→D (RESUMABLE). The per-cluster
+        # .skeleton-filled/ trees persist, so once this stage is marked done it
+        # is skipped on resume / retry; restart_from.sh task2a re-runs it. ===
+        cluster_summaries: list[dict[str, Any]] = []
+        if self.tel.phase_valid(project_dir, f"task2a/{module}"):
+            self.tel.log("  [skeleton] task2a (per-cluster reconstruction) already done — "
+                         "skipping (fills persist in .skeleton-filled/).")
+            cluster_summaries = [{"cluster": c.name, "ok": True} for c in clusters]
+        else:
+            self.tel.set_current(project_dir,
+                                 f"task2a/{module} / per-cluster reconstruction (0/{len(clusters)})")
+
+            def _run_one_cluster(cluster: BuildCluster) -> dict[str, Any]:
+                tag = f"[{cluster.name}]"
+                self.tel.log(f"\n  {tag} === cluster start ===")
+                try:
+                    res = self._generate_one_cluster(
+                        project_dir=project_dir,
+                        cluster=cluster,
+                        module=module,
+                        all_test_pairs=all_test_pairs,
+                        genesis=genesis,
+                        functional_req=functional_req,
+                    )
+                except Exception as _ce:
+                    self.tel.log(f"  {tag} cluster crashed: {type(_ce).__name__}: {_ce}")
+                    res = {"ok": False, "reason": f"exception: {type(_ce).__name__}: {_ce}"}
+                if not res.get("ok"):
+                    self.tel.log(f"  {tag} cluster aborted: {res.get('reason', 'unknown')}")
+                return {"cluster": cluster.name, **res}
+
+            # PIPELINE_PARALLELISM>1: clusters run concurrently — each owns
+            # isolated scratch trees (.skeleton/{c}, .skeleton-filled/{c}) with
+            # their own target/, splice locks are per tree, ask() is thread-safe,
+            # and the event log is append-only. Summaries stay index-aligned to
+            # `clusters`. 1 = historical serial behavior.
+            _t2a_par = min(self.cfg.parallelism, len(clusters))
+            if _t2a_par > 1:
+                self.tel.log(f"  [skeleton] task2a parallelism={_t2a_par} "
+                             f"({len(clusters)} cluster(s) concurrent).")
+                self.tel.set_current(
+                    project_dir,
+                    f"task2a/{module} / {len(clusters)} cluster(s) in parallel (x{_t2a_par})")
+                with ThreadPoolExecutor(
+                        max_workers=_t2a_par,
+                        thread_name_prefix=f"task2a-{module}") as _pool:
+                    cluster_summaries = list(_pool.map(_run_one_cluster, clusters))
+            else:
+                for _ci, cluster in enumerate(clusters):
+                    self.tel.set_current(
+                        project_dir,
+                        f"task2a/{module} / cluster {cluster.name} ({_ci + 1}/{len(clusters)})")
+                    cluster_summaries.append(_run_one_cluster(cluster))
+            self.tel.mark_phase(project_dir, f"task2a/{module}", "done",
+                                detail=f"{len(clusters)} cluster(s)")
+
+        # === task2b — cross-cluster merge into project_dir/src/ (RESUMABLE).
+        # Skipped only if marked done AND the merged tree is intact: every file
+        # in the saved manifest still on disk. A bare `src/ exists` check is
+        # defeated by the workspace stub (the startup wipe leaves a stub lib.rs),
+        # which let phase C run against an empty tree. (task4's delete-and-retry
+        # clears this marker, forcing a re-merge.) ===
+        _merged_tree_intact = False
+        if self.tel.phase_valid(project_dir, f"task2b/{module}"):
+            _mf = self.ws.load_manifest(manifest_path) if manifest_path else []
+            _merged_tree_intact = bool(_mf) and all(
+                (project_dir / rel).exists() for rel in _mf)
+        if _merged_tree_intact:
+            self.tel.log("  [skeleton-merge] task2b (merge) already done — skipping.")
+        else:
+            self.tel.set_current(
+                project_dir,
+                f"task2b/{module} / merging {len(cluster_summaries)} cluster output(s)")
+            self.tel.log(f"\n  [skeleton-merge] composing {len(cluster_summaries)} cluster output(s) "
+                         f"into {project_dir}/src/")
+            merge_stats = self.fill.merge_cluster_outputs(
+                project_dir=project_dir,
+                cluster_specs={c.name: c for c in clusters},
+                successes=[s for s in cluster_summaries if s.get("ok")],
+            )
+            self.tel.log(f"  [skeleton-merge] {merge_stats['files_written']} file(s) written, "
+                         f"{merge_stats['cfg_gated_fns']} cfg-gated divergence(s).")
+            self.tel.mark_phase(project_dir, f"task2b/{module}", "done",
+                                detail=f"{merge_stats['files_written']} file(s)")
+
+        # Post-merge fill pass: per-cluster Phase C drove fills against each
+        # cluster's filtered cfg view of the code. After the AST merge, the
+        # default-cfg view of `project_dir/src/` may expose fns that none of the
+        # per-cluster Phase Cs reached (typically the stable variants of cfg-
+        # divergent code paths). Without this step, TASK 3 panics at
+        # `unimplemented!()` on fns Phase C never queued.
+        #
+        # Strategy: run cargo test --no-fail-fast on the merged tree, extract the
+        # panic frontier with the same syn-based mapper Phase C uses, fill those
+        # fns via the per-fn machinery, repeat until the frontier is empty or the
+        # stall budget is exhausted. Always uses --no-fail-fast so panics from
+        # every binary surface, not just the first one to crash.
+        # === task2c — merged-tree fill (RESUMABLE). This is where U2 test-
+        # acceptance does most of its work. restart_from.sh task2c re-runs ONLY
+        # this stage (per-cluster + merge skipped if their markers stand). ===
+        if self.tel.phase_valid(project_dir, f"task2c/{module}"):
+            self.tel.log("  task2c (merged-tree fill) already done — skipping.")
+        else:
+            self.tel.set_current(project_dir, f"task2c/{module} / merged-tree fill")
+            self._post_merge_fill_pass(
+                project_dir=project_dir,
+                clusters=clusters,
+                module=module,
+                functional_req=functional_req,
+            )
+            self.tel.mark_phase(project_dir, f"task2c/{module}", "done")
+
+        # Update the manifest so downstream task3/4 see the generated files.
+        if manifest_path:
+            generated = [str(p.relative_to(project_dir))
+                         for p in (project_dir / "src").rglob("*.rs")
+                         if str(p.relative_to(project_dir)) not in existing_test_files]
+            if generated:
+                self.ws.save_manifest(manifest_path, generated)
+                self.tel.log(f"  [skeleton] manifest written: {len(generated)} source file(s).")
+
+        return True
+
+    def _generate_one_cluster(
+        self,
+        project_dir: Path,
+        cluster: BuildCluster,
+        module: str,
+        all_test_pairs: list[tuple[str, str]],
+        genesis: str,
+        functional_req: str,
+    ) -> dict[str, Any]:
+        """Run Phase A + B + C + D for a single cluster, returning a stats dict.
+
+        All artifacts land under `.skeleton/{cluster}/` (skeleton + groups +
+        failure dumps) and `.skeleton-filled/{cluster}/src/` (filled output).
+        Cargo invocations honour `cluster.env_extra` end-to-end.
+        """
+        tag = f"[{cluster.name}]"
+        skeleton_dir = project_dir / ".skeleton" / cluster.name
+        filled_dir = project_dir / ".skeleton-filled" / cluster.name
+
+        # Phase A — load the pre-baked skeleton from disk. Hard Rule 11: the
+        # original source is gone after strip, so the skeleton MUST have been
+        # produced earlier by `_bake_skeleton_artifacts`. If absent here, that
+        # step did not run — fail loud.
+        if not (skeleton_dir / "src").exists() or not any(skeleton_dir.rglob("*.rs")):
+            self.tel.log(f"  {tag} [skeleton-A] FATAL: no baked skeleton at "
+                         f"{skeleton_dir}. The pre-strip bake step did not run "
+                         "for this cluster.")
+            return {"ok": False, "reason": "no_baked_skeleton"}
+        self.tel.log(f"  {tag} [skeleton-A] using baked skeleton at {skeleton_dir}.")
+
+        # cargo check on the skeleton with cluster env. Fix-loop on failure.
+        _cargo_toml = project_dir / "Cargo.toml"
+        if _cargo_toml.exists() and not (skeleton_dir / "Cargo.toml").exists():
+            shutil.copy(_cargo_toml, skeleton_dir / "Cargo.toml")
+        check_cmd = self._cluster_check_cmd(cluster)
+        # P3.8 diagnostic: log toolchain + final check_cmd so we can verify the
+        # nightly cluster is actually using +nightly.
+        self.tel.log(f"  {tag} [skeleton-A] cluster.toolchain={cluster.toolchain!r} "
+                     f"requires_nightly={getattr(cluster, 'requires_nightly', False)}")
+        self.tel.log(f"  {tag} [skeleton-A] cargo check ({check_cmd})...")
+        rc, _out, _err = self.cargo.run_raw(
+            shlex.split(check_cmd), skeleton_dir, self._cluster_env(cluster), 180)
+        if rc == -1:
+            self.tel.log(f"  {tag} [skeleton-A] cargo check timed out; proceeding anyway.")
+        # P3.8: detect E0554 (nightly feature on stable channel) and retry with
+        # nightly toolchain. The cluster's requires_nightly flag is set by an
+        # earlier TASK 0 phase only when its cargo build hits E0554; the skeleton
+        # backend's Phase A may run BEFORE that phase, so we need a local catch.
+        if (rc not in (-1, 0)
+                and "E0554" in (_err or "") + (_out or "")
+                and not cluster.requires_nightly):
+            self.tel.log(f"  {tag} [skeleton-A] detected E0554 — promoting cluster to nightly.")
+            cluster.requires_nightly = True
+            check_cmd = self._cluster_check_cmd(cluster)
+            rc, _out, _err = self.cargo.run_raw(
+                shlex.split(check_cmd), skeleton_dir, self._cluster_env(cluster), 180)
+            if rc == -1:
+                self.tel.log(f"  {tag} [skeleton-A] cargo +nightly check timed out.")
+            else:
+                self.tel.log(f"  {tag} [skeleton-A] retry with +nightly: rc={rc}")
+        if rc not in (-1, 0):
+            self.tel.log(f"  {tag} [skeleton-A] cargo check FAILED; invoking fix-loop.")
+            _skel_sources = list((skeleton_dir / "src").rglob("*.rs"))
+            ok, _ = self.fill.generate_fix_loop(
+                project_dir=skeleton_dir,
+                check_cmd=check_cmd,
+                source_paths=_skel_sources,
+                existing_test_files=set(),
+                model=self.cfg.task2_model,
+                max_fix_attempts=3,
+                timeout=180,
+            )
+            if not ok:
+                return {"ok": False, "reason": "skeleton_fix_loop_exhausted"}
+
+        # Per-cluster test scoping.
+        cluster_tests = self.clusters.filter_tests_for_cluster(all_test_pairs, cluster)
+        self.tel.log(f"  {tag} [skeleton-B] tests for this cluster: "
+                     f"{len(cluster_tests)}/{len(all_test_pairs)}")
+        if not cluster_tests:
+            return {"ok": True, "phase_c": None, "phase_d": None,
+                    "note": "no tests apply to this cluster"}
+
+        # Mode selection for Phase B+C: per-group (default) or per-fn TDD
+        # (Flavour B, smaller prompts, one call per fn, no LLM grouping).
+        per_fn_mode = self.cfg.phase_c_per_fn
+
+        # Seed filled_dir from skeleton state (idempotent) regardless of mode.
+        filled_dir.mkdir(parents=True, exist_ok=True)
+        for src in skeleton_dir.rglob("*.rs"):
+            rel = src.relative_to(skeleton_dir)
+            dst = filled_dir / rel
+            if not dst.exists():
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+
+        # Propagate gen_tests siblings from project_dir/src/ into filled_dir/src/.
+        # task0c commits these as cluster-specific unit-test specs; the bake step
+        # emits only the structural skeleton. Without this propagation Phase C
+        # runs cargo test against integration tests only and gen_tests are
+        # invisible. `.broken` suffixes (left over from the legacy reattach
+        # quarantine path) are treated as live — they were renamed because earlier
+        # LLM-regenerated source didn't satisfy them, not because they are broken
+        # in themselves.
+        _proj_src = project_dir / "src"
+        _filled_src = filled_dir / "src"
+        if _proj_src.exists() and _filled_src.exists():
+            _gt_allow_line, _ = self.gentests.derive_prelude(project_dir)
+            # Gate each sibling by the cfg of the cluster that GENERATED it
+            # (origin), not the current cluster — `cluster_cfg_attr(cluster)` is
+            # always-active in its own build and gives no protection, so a
+            # nightly-only test would compile (and E0658) in stable/no_core.
+            # Origin cfg excludes it there and keeps it only where it belongs.
+            # Fallback to current cluster if the manifest is missing (older runs).
+            _gt_origin = self.gentests.load_origin(project_dir)
+            _gt_cur_attr = self.clusters.cluster_cfg_attr(cluster)
+            _gt_propagated = 0
+            for gt in sorted(_proj_src.iterdir()):
+                if not gt.is_file():
+                    continue
+                _parsed = parse_gen_tests_filename(gt.name)  # R7: structured parse
+                if not _parsed:
+                    continue
+                _parent_stem, _pass_n = _parsed
+                # R9.6: skip + quarantine undeclared orphans (on disk but absent
+                # from a non-empty origin manifest) — they were never coverage-
+                # validated and must not be resurrected under a guessed gate.
+                if not self.gentests.propagate_or_quarantine_sibling(
+                        gt, _gt_origin, _parent_stem, _pass_n, tag):
+                    continue
+                _dst_name = f"{_parent_stem}.gen_tests_{_pass_n}.rs"
+                _dst = _filled_src / _dst_name
+                _parent_path = _filled_src / f"{_parent_stem}.rs"
+                if not _parent_path.exists():
+                    continue
+                try:
+                    _body = gt.read_text(encoding="utf-8")
+                except Exception as _e:
+                    self.tel.log(f"  {tag} [skeleton-C] gen_tests read failed {gt.name}: {_e}")
+                    continue
+                if not self.scan.rust_delimiters_balanced(_body):
+                    continue
+                if not _dst.exists() or _dst.read_text(encoding="utf-8") != _body:
+                    _dst.write_text(_body, encoding="utf-8")
+                _ptext = _parent_path.read_text(encoding="utf-8")
+                if not self.gentests.has_decl(_ptext, _pass_n):
+                    _gt_attr = _gt_origin.get(
+                        f"{_parent_stem}.gen_tests_{_pass_n}", _gt_cur_attr)
+                    _decl = self.gentests.build_decl(
+                        _dst_name, _pass_n, _gt_allow_line,
+                        cluster_cfg_attr=_gt_attr,
+                    )
+                    _parent_path.write_text(_ptext.rstrip() + _decl, encoding="utf-8")
+                    _gt_propagated += 1
+            if _gt_propagated:
+                self.tel.log(f"  {tag} [skeleton-C] propagated {_gt_propagated} "
+                             f"gen_tests decl(s) into filled tree.")
+
+        c_result: dict[str, Any]
+        if per_fn_mode:
+            self.tel.log(f"  {tag} [skeleton-C] per-fn mode (Flavour B): scanning stubs...")
+            # Make filled_dir a runnable crate root so cargo check/test work:
+            # copy Cargo.toml + symlink tests/. Idempotent.
+            if _cargo_toml.exists() and not (filled_dir / "Cargo.toml").exists():
+                shutil.copy(_cargo_toml, filled_dir / "Cargo.toml")
+            _proj_tests = project_dir / "tests"
+            _filled_tests = filled_dir / "tests"
+            if _proj_tests.exists() and not _filled_tests.exists():
+                try:
+                    os.symlink(_proj_tests, _filled_tests)
+                except OSError as e:
+                    self.tel.log(f"  {tag} [skeleton-C] tests symlink failed: {e}")
+
+            # Deterministic cluster-leak guard. A gen_test that belongs to another
+            # cluster (e.g. nightly's `request_ref`) must not be ACTIVE in this
+            # cluster. With correct origin gating it is cfg-excluded and invisible
+            # here; if any gen_tests file still produces an unstable-feature error
+            # (E0658/E0554) under this cluster's stable toolchain, its origin gate
+            # is missing/wrong — surface it loudly and quarantine the sibling so it
+            # can't poison phase-c as undifferentiated reconstruction noise. The
+            # skeleton's unimplemented!() bodies compile, so unrelated fill gaps
+            # don't false-trigger (we act only on gen_tests-attributed diags).
+            _has_gt = _filled_src.exists() and any(
+                self.gentests.is_gen_tests_file(p.name)
+                for p in _filled_src.iterdir() if p.is_file())
+            if _has_gt:
+                _norun = (f"cargo +{cluster.toolchain} test --no-run"
+                          if cluster.toolchain else "cargo test --no-run")
+                _lrc, _ltxt, _ldiags = self.cargo.run_check_diag(
+                    _norun, filled_dir, self._cluster_env(cluster), 300)
+                _leaks = sorted({
+                    d.file for d in _ldiags
+                    if ".gen_tests_" in d.file
+                    and (d.code in ("E0658", "E0554") or "unstable" in d.message.lower())
+                })
+                if _leaks:
+                    self.tel.log(f"  {tag} [skeleton-C] ⛔ CLUSTER LEAK in '{cluster.name}': "
+                                 f"{len(_leaks)} gen_tests file(s) use nightly-only API but are "
+                                 f"active under this cluster's stable toolchain "
+                                 f"(origin-cfg gate missing/wrong): {', '.join(_leaks)}. "
+                                 f"Quarantining so phase-c is not poisoned.")
+                    for _bf in _leaks:
+                        _name = Path(_bf).name
+                        if _name.endswith(".rs") and ".gen_tests_" in _name:
+                            _stem, _rest = _name.rsplit(".gen_tests_", 1)
+                            _ns = _rest[:-3]  # strip ".rs"
+                            if _ns.isdigit():
+                                _pp = _filled_src / f"{_stem}.rs"
+                                if _pp.exists():
+                                    _pp.write_text(
+                                        self.gentests.strip_decl_n(
+                                            _pp.read_text(encoding="utf-8"), int(_ns)),
+                                        encoding="utf-8")
+                        _sp = filled_dir / _bf
+                        if _sp.exists():
+                            _sp.rename(_sp.with_name(_sp.name + ".broken"))
+            tests_dir_files: list[Path] = []
+            for trel, _ in cluster_tests:
+                tp = project_dir / trel
+                if tp.exists():
+                    tests_dir_files.append(tp)
+            # Leaf-first ordering counts come from the bake artefact (computed
+            # against live source pre-strip). Falls back to alphabetical when absent.
+            _leaf_counts = self.clusters.load_baked_leaf_order(project_dir, cluster.name)
+            if not _leaf_counts:
+                self.tel.log(f"  {tag} [skeleton-C] no leaf-order artefact "
+                             f"({skeleton_dir}/_leaf_order.json); falling back to "
+                             "alphabetical fn ordering.")
+            # Per-crate FR is the home for model self-correction notes.
+            _fr_for_notes = project_dir / f"functional_requirements_{module}.md"
+            # Plan 4 — PHASE_C_DRIVER=tdd switches to the TDD outer loop (cargo
+            # test → frontier → fill). Default `fn_walk` keeps the legacy per-fn-
+            # walk driver.
+            if self.cfg.phase_c_tdd:
+                self.tel.log(f"  {tag} [skeleton-C] PHASE_C_DRIVER=tdd — using TDD outer loop")
+                c_result = self.fill.run_phase_c_tdd(
+                    project_dir=project_dir,
+                    target_src_dir=filled_dir,
+                    tests_dir_files=tests_dir_files,
+                    cluster_tests=cluster_tests,
+                    module=module,
+                    cluster=cluster,
+                    check_cmd=self._cluster_check_cmd(cluster),
+                    cluster_env=self._cluster_env(cluster),
+                    leaf_counts=_leaf_counts,
+                    fr_path=_fr_for_notes,
+                    test_cmd_builder=lambda stems: self.cargo.build_test_cmd(stems, cluster),
+                    tag=tag,
+                )
+            else:
+                c_result = self.fill.fill_fns_one_by_one(
+                    project_dir=project_dir,
+                    target_src_dir=filled_dir,
+                    tests_dir_files=tests_dir_files,
+                    module_name=module,
+                    cluster_name=cluster.name,
+                    cluster=cluster,
+                    check_cmd=self._cluster_check_cmd(cluster),
+                    cluster_env=self._cluster_env(cluster),
+                    max_passes=self.cfg.phase_c_max_passes,
+                    leaf_name_counts=_leaf_counts,
+                    fr_path=_fr_for_notes,
+                )
+            self.tel.log(f"  {tag} [skeleton-C] {c_result['fns_filled']} fn(s) filled, "
+                         f"{c_result['bytes_filled']:,} bytes net, "
+                         f"{c_result['attempts']} LLM call(s), "
+                         f"{c_result['remaining']} stub(s) remaining, "
+                         f"{len(c_result['errors'])} error(s).")
+        else:
+            # Phase B — grouping (cached per cluster).
+            groups_path = skeleton_dir / "groups.json"
+            groups: list[dict[str, Any]] | None = None
+            if groups_path.exists():
+                try:
+                    groups = json.loads(groups_path.read_text(encoding="utf-8"))
+                    self.tel.log(f"  {tag} [skeleton-B] cached manifest: {len(groups)} group(s).")
+                except Exception:
+                    groups = None
+            if groups is None:
+                self.tel.log(f"  {tag} [skeleton-B] grouping...")
+                groups = self.fill.group_tests(skeleton_dir, cluster_tests,
+                                                cluster_name=cluster.name, module_name=module)
+
+            # Phase C — per-group fill into cluster-specific scratch dir.
+            self.tel.log(f"  {tag} [skeleton-C] filling {len(groups)} group(s) into {filled_dir}/")
+            c_result = self.fill.fill_groups(skeleton_dir, filled_dir, groups, project_dir,
+                                             cluster_name=cluster.name, module_name=module,
+                                             functional_req=functional_req, genesis=genesis,
+                                             cluster=cluster)
+            self.tel.log(f"  {tag} [skeleton-C] {c_result['groups_processed']} group(s), "
+                         f"{c_result['bytes_filled']:,} bytes filled, "
+                         f"{len(c_result['errors'])} error(s).")
+
+        # Phase D — residual cleanup (per cluster).
+        # Plan 4 — under driver=tdd, the outer loop fills exactly the fns
+        # reachable from failing tests. Residuals are by-design unreachable from
+        # any test → leaving them `unimplemented!()` is correct under tests-only
+        # reconstruction. Skip Phase D.
+        d_result: dict[str, Any]
+        if self.cfg.phase_c_tdd:
+            self.tel.log(f"  {tag} [skeleton-D] skipped (driver=tdd; residual stubs "
+                         "are correctly left unimplemented).")
+            d_result = {"stubs_total": 0, "stubs_exercised": 0,
+                        "files_updated": 0, "stubs_remaining": 0}
+        else:
+            self.tel.log(f"  {tag} [skeleton-D] scanning for residual stubs...")
+            d_result = self.fill.cleanup_residuals(filled_dir, project_dir, functional_req,
+                                                   cluster_tests, module_name=module)
+            self.tel.log(f"  {tag} [skeleton-D] {d_result['stubs_total']} stubs, "
+                         f"{d_result['stubs_exercised']} test-exercised, "
+                         f"{d_result['files_updated']} updated, "
+                         f"{d_result['stubs_remaining']} remaining.")
+
+        # Per-cluster intermediate validation: cargo check the filled output.
+        if _cargo_toml.exists() and not (filled_dir / "Cargo.toml").exists():
+            shutil.copy(_cargo_toml, filled_dir / "Cargo.toml")
+        # P3.12: end-of-cluster validation with a fix-loop. The per-fn check
+        # catches errors as they happen, but bodies that pass at splice-time can
+        # still break integration when all fills are in place (cross-fn semantic
+        # issues, stale fills from prior runs). When this cargo check fails,
+        # identify the implicated fns from the error output, revert their bodies
+        # to unimplemented!() so they re-appear as stubs, then re-enter the per-fn
+        # fill loop targeting only those fns. Loop up to PHASE_C_VALIDATE_ITERS.
+        max_validate_iters = self.cfg.validate_iters
+        validate_ok = False
+        _vr_out = ""
+        for v_iter in range(1, max_validate_iters + 1):
+            self.tel.check_stop(f"skeleton-validate iter {v_iter}")
+            self.tel.log(f"  {tag} [skeleton-validate] cargo check on filled output "
+                         f"(iter {v_iter}/{max_validate_iters})...")
+            rc, _vo, _ve = self.cargo.run_raw(
+                shlex.split(check_cmd), filled_dir, self._cluster_env(cluster), 180)
+            if rc == -1:
+                self.tel.log(f"  {tag} [skeleton-validate] cargo check timed out.")
+                validate_ok = False
+                break
+            _vr_out = (_vo or "") + "\n" + (_ve or "")
+            validate_ok = (rc == 0)
+
+            if validate_ok:
+                if v_iter > 1:
+                    self.tel.log(f"  {tag} [skeleton-validate] PASSED after "
+                                 f"{v_iter} iteration(s).")
+                break
+
+            # Failure path. Identify implicated fns.
+            self.tel.log(f"  {tag} [skeleton-validate] cargo check FAILED "
+                         f"(rc={rc}). First errors:")
+            for line in _vr_out.splitlines()[:10]:
+                self.tel.log(f"    {line}")
+            implicated = self.cargo.implicated_fns_from_cargo_errors(_vr_out, filled_dir)
+            if not implicated:
+                self.tel.log(f"  {tag} [skeleton-validate] no implicated fns parsed "
+                             f"— cannot retry, giving up.")
+                break
+            self.tel.log(f"  {tag} [skeleton-validate] implicated fns: "
+                         f"{', '.join(f'{f}::{fn}' for f, fn in implicated[:6])}"
+                         + ("..." if len(implicated) > 6 else ""))
+            # Revert each implicated fn to unimplemented!() so the per-fn loop
+            # picks them up again as stubs.
+            reverted = 0
+            for rel_f, fn in implicated:
+                fp = filled_dir / rel_f
+                try:
+                    text = fp.read_text(encoding="utf-8")
+                except Exception:
+                    continue
+                loc = self.scan.locate_fn(text, fn)
+                if loc is None:
+                    continue
+                _sig, _ss, body_start, body_end = loc
+                cur_body = text[body_start:body_end]
+                if is_unimplemented_body(cur_body):
+                    continue  # already a stub — nothing to revert
+                # Re-indent unimplemented!() like a normal body.
+                line_start = text.rfind("\n", 0, _ss) + 1
+                indent = ""
+                for ch in text[line_start:_ss]:
+                    if ch in (" ", "\t"):
+                        indent += ch
+                    else:
+                        break
+                inner = indent + "    "
+                new_body = "\n" + inner + "unimplemented!()\n" + indent
+                fp.write_text(
+                    text[:body_start] + new_body + text[body_end:],
+                    encoding="utf-8",
+                )
+                reverted += 1
+            self.tel.log(f"  {tag} [skeleton-validate] reverted {reverted} fn(s) "
+                         f"to stubs; re-entering per-fn fill loop.")
+            self.tel.emit("phase_c.cluster.validate_retry", data={
+                "cluster": cluster.name, "iter": v_iter,
+                "implicated": [{"file": f, "fn": fn} for f, fn in implicated],
+                "reverted": reverted,
+            })
+            # Re-enter the per-fn fill loop for ONE pass over just the reverted
+            # stubs. Use the cargo error excerpt as initial prompting context
+            # (the fix loop will refresh per attempt).
+            _ = self.fill.fill_fns_one_by_one(
+                project_dir=project_dir,
+                target_src_dir=filled_dir,
+                tests_dir_files=[project_dir / trel
+                                 for trel, _ in cluster_tests
+                                 if (project_dir / trel).exists()],
+                module_name=module,
+                cluster_name=cluster.name,
+                cluster=cluster,
+                check_cmd=check_cmd,
+                cluster_env=self._cluster_env(cluster),
+                max_passes=1,  # one pass through the reverted set
+                leaf_name_counts=self.clusters.load_baked_leaf_order(project_dir, cluster.name),
+                fr_path=_fr_for_notes,
+            )
+
+        return {"ok": True, "phase_c": c_result, "phase_d": d_result,
+                "validates": validate_ok}
+
+    def _post_merge_fill_pass(
+        self,
+        project_dir: Path,
+        clusters: list[BuildCluster],
+        module: str,
+        functional_req: str,
+    ) -> None:
+        """FR-024 improvement-driven loop on the merged tree.
+
+        Runs cargo test on `project_dir`, attributes failures via the full chain
+        (runtime/compile/classifier/recently_filled/reverse_map), fills, repeats.
+        Exits when pass count stalls for `max_stalls` consecutive iters AND there
+        is no actionable frontier — never on a fixed iter count alone. Closes the
+        per-cluster / merged-view mismatch where Phase C declares done but the
+        merged source still has unfilled stubs under the default cfg TASK 3 runs
+        under.
+        """
+        max_stalls = self.cfg.post_merge_max_stalls
+        # Hard cap is now a runaway-safety backstop only — floor-stall
+        # (max_stalls) is the real terminator. Set to 0 to skip the pass entirely
+        # (legacy behaviour preserved).
+        hard_cap = self.cfg.post_merge_hard_cap
+        if hard_cap <= 0:
+            return
+        tag = "[skeleton-merge]"
+        tests_dir_files: list[Path] = list((project_dir / "tests").rglob("*.rs"))
+        fr_path = project_dir / f"functional_requirements_{module}.md"
+        leaf_counts: dict[str, int] = {}
+        for c in clusters:
+            for fn_name_k, v in (self.clusters.load_baked_leaf_order(project_dir, c.name) or {}).items():
+                leaf_counts[fn_name_k] = max(leaf_counts.get(fn_name_k, 0), int(v))
+        test_cmd = "cargo test --no-fail-fast"
+        test_timeout = self.cfg.post_merge_test_timeout
+        try:
+            test_reverse_map = self.fill.build_test_reverse_map(tests_dir_files, project_dir)
+        except Exception as _e:
+            self.tel.log(f"  {tag} post-merge reverse-map build failed: {_e}")
+            test_reverse_map = {}
+
+        permanently_exhausted: set[tuple[str, str]] = set()
+        # The merge landed every cluster's fills — D3's "other fills landed"
+        # criterion holds globally, so cross-iter exhaustion gets one reset.
+        self.fill.reset_exhaustion_flags(project_dir, "post-merge: merged tree is new context")
+        recently_filled: list[tuple[str, str]] = []
+        recently_filled_max = self.cfg.recently_filled_max
+        stall = 0
+        best_pass = -1
+        best_fail = None
+        iter_n = 0
+        while iter_n < hard_cap:
+            iter_n += 1
+            self.tel.check_stop(f"post-merge fill iter {iter_n}")
+            self.tel.log(f"\n  {tag} post-merge fill iter {iter_n}: "
+                         f"running cargo test on merged tree...")
+            t0 = time.monotonic()
+            rc, output = self.cargo.run(test_cmd, project_dir, self.cargo.env(),
+                                        timeout=test_timeout)
+            dt = time.monotonic() - t0
+            pass_count, fail_count, _ignored = _parse_test_counts(output)
+            if rc == 0:
+                self.tel.log(f"  {tag} post-merge cargo test PASSED "
+                             f"({pass_count} passed, {dt:.1f}s).")
+                self.tel.emit("post_merge.fill.iter", data={
+                    "iter": iter_n, "rc": 0, "frontier_size": 0, "kind": "pass",
+                    "pass_count": pass_count, "fail_count": fail_count,
+                })
+                return
+            if rc == -1:
+                self.tel.log(f"  {tag} post-merge cargo test TIMED OUT. Stopping.")
+                self.tel.emit("post_merge.fill.iter", data={
+                    "iter": iter_n, "rc": -1, "frontier_size": 0, "kind": "timeout",
+                    "pass_count": pass_count, "fail_count": fail_count,
+                })
+                return
+
+            improved = pass_count > best_pass
+            if improved:
+                best_pass = pass_count
+                best_fail = fail_count
+                stall = 0
+            else:
+                stall += 1
+
+            frontier, kind = self.cargo.attribute_failures(
+                output, project_dir, recently_filled, test_reverse_map, "merged",
+            )
+            eligible = {k: v for k, v in frontier.items()
+                        if k not in permanently_exhausted}
+            # Stall on pass_count is the sole real terminator. A non-empty
+            # frontier with a stuck fn must not override it — same fix as
+            # _run_phase_c_tdd: pass_count plateau is the only "no real
+            # improvement" signal that captures cluster-level progress.
+            if stall >= max_stalls:
+                self.tel.log(f"  {tag} post-merge iter {iter_n}: pass_count plateau "
+                             f"{stall} iter(s) at best={best_pass}; stopping "
+                             f"({len(eligible)} fn(s) still on frontier — marking "
+                             "exhausted). best pass="
+                             f"{best_pass} fail={best_fail}.")
+                for _stuck_key in eligible:
+                    permanently_exhausted.add(_stuck_key)
+                self.tel.emit("post_merge.fill.iter", data={
+                    "iter": iter_n, "rc": rc, "frontier_size": len(eligible),
+                    "kind": "stall_exit",
+                    "pass_count": pass_count, "fail_count": fail_count,
+                    "improved": improved, "stall": stall,
+                })
+                return
+            if not eligible:
+                self.tel.log(f"  {tag} post-merge iter {iter_n}: no actionable "
+                             f"frontier (stall={stall}/{max_stalls}); continuing.")
+                self.tel.emit("post_merge.fill.iter", data={
+                    "iter": iter_n, "rc": rc, "frontier_size": 0,
+                    "kind": "no_frontier_continue",
+                    "pass_count": pass_count, "fail_count": fail_count,
+                    "improved": improved, "stall": stall,
+                })
+                continue
+
+            self.tel.log(f"  {tag} post-merge iter {iter_n}: cargo test rc={rc} "
+                         f"({dt:.1f}s); pass={pass_count} fail={fail_count} "
+                         f"(improved={improved}, stall={stall}/{max_stalls}); "
+                         f"frontier={len(eligible)} fn(s) ({kind}).")
+            self.tel.emit("post_merge.fill.iter", data={
+                "iter": iter_n, "rc": rc,
+                "frontier_size": len(eligible), "kind": kind,
+                "pass_count": pass_count, "fail_count": fail_count,
+                "improved": improved, "stall": stall,
+            })
+            sub = self.fill.fill_fns_one_by_one(
+                project_dir=project_dir,
+                target_src_dir=project_dir,
+                tests_dir_files=tests_dir_files,
+                module_name=module,
+                cluster_name="merged",
+                cluster=None,
+                check_cmd="cargo check",
+                cluster_env=self.cargo.env(),
+                max_passes=1,
+                leaf_name_counts=leaf_counts,
+                fr_path=fr_path,
+                tdd_frontier_keys=set(eligible.keys()),
+                tdd_frontier_tests=eligible,   # Plan 10 U2
+                tdd_test_cmd=test_cmd,         # Plan 10 U2
+                skip_end_pass_test=True,
+            )
+            cur_stubs = set(self.fill.scan_unimplemented_functions(project_dir / "src"))
+            newly_filled: list[tuple[str, str]] = [
+                k for k in eligible
+                if k not in cur_stubs
+                and (k[0].split("/")[-1], k[1]) not in cur_stubs
+            ]
+            for k in newly_filled:
+                recently_filled.append(k)
+            if len(recently_filled) > recently_filled_max:
+                recently_filled = recently_filled[-recently_filled_max:]
+            for key in eligible:
+                if key in cur_stubs or (key[0].split("/")[-1], key[1]) in cur_stubs:
+                    permanently_exhausted.add(key)
+            self.tel.log(f"  {tag} post-merge iter {iter_n}: "
+                         f"{sub.get('fns_filled', 0)} fn(s) filled, "
+                         f"{sub.get('attempts', 0)} attempt(s).")
+        self.tel.log(f"  {tag} post-merge hard cap {hard_cap} reached (safety net).")
+
+    @staticmethod
+    def _cluster_check_cmd(cluster: BuildCluster) -> str:
+        """Build the cargo check command. Cluster-specific flags are passed via
+        env_extra (RUSTFLAGS etc.), not via --features — that distinction depends
+        on which cfg names are real Cargo features vs --cfg flags, and
+        task0_cfg_scan has already encoded the right form in env_extra. Toolchain
+        is applied via `cargo +nightly` when required."""
+        # Default message format (not --message-format=short) so the model sees
+        # rustc's `note:` and `help:` hints alongside the bare error, which often
+        # points directly at the fix (e.g. "consider importing one of these
+        # traits: ...").
+        parts = ["cargo", "check"]
+        if cluster.toolchain:
+            parts = ["cargo", f"+{cluster.toolchain}"] + parts[1:]
+        return shlex.join(parts)
+
+    def _cluster_env(self, cluster: BuildCluster) -> dict[str, str]:
+        """Cargo env with cluster's env_extra merged in."""
+        env = self.cargo.env()
+        env.update(cluster.env_extra or {})
+        return env

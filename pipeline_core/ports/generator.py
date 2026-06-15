@@ -15,6 +15,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+from ..domain.models import BuildCluster, Diagnostic, Frontier
+
 
 @runtime_checkable
 class Telemetry(Protocol):
@@ -26,7 +28,8 @@ class Telemetry(Protocol):
              data: dict[str, Any] | None = ...) -> None: ...
     def check_stop(self, context: str) -> None: ...
     def set_current(self, project_dir: Path, label: str) -> None: ...
-    def mark_phase(self, project_dir: Path, key: str, status: str) -> None: ...
+    def mark_phase(self, project_dir: Path, key: str, status: str,
+                   detail: str = ...) -> None: ...
     def phase_valid(self, project_dir: Path, key: str) -> bool: ...
 
 
@@ -76,3 +79,134 @@ class ContextDocs(Protocol):
     def split_api_surface_by_file(
         self, api_surface: str,
     ) -> list[tuple[str, str]]: ...
+
+
+# --- Ports for the 4-phase StaticSkeletonTask2Generator (P4 slice 4) ---------
+# The skeleton generator orchestrates cargo, the LLM fill engines, the baked
+# cluster artefacts, the gen_tests sibling machinery, and the source scanners —
+# all `pipeline.py`-resident or adapter-layer. Each crosses one of the roles
+# below; `_Task2Adapter` binds the concrete functions at the composition root.
+
+
+@runtime_checkable
+class Cargo(Protocol):
+    """The cargo subprocess + its error-attribution helpers."""
+
+    def run_raw(
+        self, cmd: list[str], cwd: Path, env: dict[str, str], timeout: int,
+    ) -> tuple[int, str, str]: ...
+    def run(
+        self, cmd: str, cwd: Path, env: dict[str, str], timeout: int = ...,
+    ) -> tuple[int, str]: ...
+    def run_check_diag(
+        self, cmd: str, cwd: Path, env: dict[str, str], timeout: int = ...,
+    ) -> tuple[int, str, list[Diagnostic]]: ...
+    def build_test_cmd(
+        self, test_stems: list[str], cluster: BuildCluster | None,
+    ) -> str: ...
+    def env(self) -> dict[str, str]: ...
+    def implicated_fns_from_cargo_errors(
+        self, cargo_output: str, target_src_dir: Path,
+    ) -> list[tuple[str, str]]: ...
+    def attribute_failures(
+        self, test_output: str, src_dir: Path,
+        recently_filled: list[tuple[str, str]],
+        test_reverse_map: dict[str, set[tuple[str, str]]], cluster_name: str,
+    ) -> tuple[Frontier, str]: ...
+
+
+@runtime_checkable
+class FillEngine(Protocol):
+    """The LLM-driven Phase B/C/D fill engines + the cross-cluster merge and the
+    shared fix-loop (all reach the model — Hard Rule 7: local only)."""
+
+    def run_phase_c_tdd(
+        self, *, project_dir: Path, target_src_dir: Path,
+        tests_dir_files: list[Path], cluster_tests: list[tuple[str, str]],
+        module: str, cluster: BuildCluster, check_cmd: str,
+        cluster_env: dict[str, str], leaf_counts: dict[str, int] | None,
+        fr_path: Path | None, test_cmd_builder: Any, tag: str,
+    ) -> dict[str, Any]: ...
+    def fill_fns_one_by_one(
+        self, *, project_dir: Path, target_src_dir: Path,
+        tests_dir_files: list[Path], module_name: str, cluster_name: str,
+        cluster: BuildCluster | None = ..., check_cmd: str = ...,
+        cluster_env: dict[str, str] | None = ..., max_passes: int = ...,
+        leaf_name_counts: dict[str, int] | None = ..., fr_path: Path | None = ...,
+        tdd_frontier_keys: set[tuple[str, str]] | None = ...,
+        skip_end_pass_test: bool = ..., tdd_frontier_tests: Frontier | None = ...,
+        tdd_test_cmd: str | None = ...,
+    ) -> dict[str, Any]: ...
+    def fill_groups(
+        self, skeleton_dir: Path, target_src_dir: Path, groups: list[dict[str, Any]],
+        project_dir: Path, *, cluster_name: str, module_name: str,
+        functional_req: str, genesis: str, cluster: BuildCluster | None = ...,
+    ) -> dict[str, Any]: ...
+    def group_tests(
+        self, skeleton_dir: Path, test_files: list[tuple[str, str]], *,
+        cluster_name: str, module_name: str,
+    ) -> list[dict[str, Any]]: ...
+    def cleanup_residuals(
+        self, target_src_dir: Path, project_dir: Path, functional_req: str,
+        test_files: list[tuple[str, str]], *, module_name: str,
+    ) -> dict[str, Any]: ...
+    def scan_unimplemented_functions(
+        self, src_dir: Path,
+    ) -> list[tuple[str, str]]: ...
+    def merge_cluster_outputs(
+        self, *, project_dir: Path, cluster_specs: dict[str, BuildCluster],
+        successes: list[dict[str, Any]],
+    ) -> dict[str, Any]: ...
+    def generate_fix_loop(
+        self, *, project_dir: Path, check_cmd: str, source_paths: list[Path],
+        existing_test_files: set[str], model: str | None = ...,
+        max_fix_attempts: int = ..., timeout: int = ...,
+    ) -> tuple[bool, str]: ...
+    def reset_exhaustion_flags(self, project_dir: Path, reason: str) -> None: ...
+    def build_test_reverse_map(
+        self, test_files: list[Path], src_dir: Path,
+    ) -> dict[str, set[tuple[str, str]]]: ...
+
+
+@runtime_checkable
+class Clusters(Protocol):
+    """The baked pre-strip cluster artefacts + cluster-scoped test filtering."""
+
+    def load_baked(self, project_dir: Path) -> list[BuildCluster]: ...
+    def load_baked_leaf_order(
+        self, project_dir: Path, cluster_name: str,
+    ) -> dict[str, int]: ...
+    def filter_tests_for_cluster(
+        self, test_files: list[tuple[str, str]], cluster: BuildCluster | None,
+    ) -> list[tuple[str, str]]: ...
+    def cluster_cfg_attr(self, cluster: BuildCluster) -> str: ...
+
+
+@runtime_checkable
+class GenTests(Protocol):
+    """The `*.gen_tests_<N>.rs` sibling-declaration machinery + its origin
+    manifest (which sibling belongs to which cluster cfg)."""
+
+    def build_decl(
+        self, sibling_name: str, n: int | str, allow_line: str,
+        cluster_cfg_attr: str = ...,
+    ) -> str: ...
+    def has_decl(self, src_text: str, pass_n: int) -> bool: ...
+    def strip_decl_n(self, parent_text: str, pass_n: int) -> str: ...
+    def derive_prelude(self, project_dir: Path) -> tuple[str, str]: ...
+    def load_origin(self, project_dir: Path) -> dict[str, str]: ...
+    def propagate_or_quarantine_sibling(
+        self, gt: Path, origin_manifest: dict[str, str], parent_stem: str,
+        pass_n: int, tag: str = ...,
+    ) -> bool: ...
+    def is_gen_tests_file(self, name: str) -> bool: ...
+
+
+@runtime_checkable
+class SourceScan(Protocol):
+    """Pure structural source scanners (`pipeline.py`-resident syn-backed)."""
+
+    def locate_fn(
+        self, file_text: str, fn_name: str,
+    ) -> tuple[str, int, int, int] | None: ...
+    def rust_delimiters_balanced(self, text: str) -> bool: ...

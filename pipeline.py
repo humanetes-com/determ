@@ -10208,7 +10208,7 @@ def _cmd_skeleton_backend(project_dir: Path) -> int:
     if not genesis_path.exists():
         genesis_path.write_text("# (no genesis.md available)\n", encoding="utf-8")
     existing_test_files = collect_protected_test_files(project_dir)
-    backend = StaticSkeletonTask2Generator()
+    backend = _new_skeleton_task2_generator()
     ok = backend.generate(
         project_dir=project_dir,
         genesis_path=genesis_path,
@@ -10856,11 +10856,13 @@ def task1(project_dir, genesis_path, functional_req_path, test_files, readme_tex
 from pipeline_core.application.generators.task2_generator import (  # noqa: E402
     LLMTask2Generator,
     StaticFileListTask2Generator,
+    StaticSkeletonTask2Generator,
     StaticTask2Generator,
     Task2Generator,
 )
 from pipeline_core.domain.generation import (
     GenerationRequest,  # noqa: E402,F401
+    SkeletonConfig,  # noqa: E402
     Task2Config,  # noqa: E402
 )
 
@@ -10886,8 +10888,8 @@ class _Task2Adapter:
     def set_current(self, project_dir, label):
         _set_current(project_dir, label)
 
-    def mark_phase(self, project_dir, key, status):
-        _mark_phase(project_dir, key, status)
+    def mark_phase(self, project_dir, key, status, detail=""):
+        _mark_phase(project_dir, key, status, detail=detail)
 
     def phase_valid(self, project_dir, key):
         return _phase_valid(project_dir, key)
@@ -10939,6 +10941,113 @@ class _Task2Adapter:
     def split_api_surface_by_file(self, api_surface):
         return _split_api_surface_by_file(api_surface)
 
+    # --- Cargo (skeleton backend, P4 slice 4) ---
+    def run_raw(self, cmd, cwd, env, timeout):
+        try:
+            r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
+                               timeout=timeout, env=env)
+            return r.returncode, r.stdout or "", r.stderr or ""
+        except subprocess.TimeoutExpired:
+            return -1, "", ""  # -1 = timeout sentinel (matches _run_cargo)
+
+    def run(self, cmd, cwd, env, timeout=180):
+        return _run_cargo(cmd, cwd, env, timeout)
+
+    def run_check_diag(self, cmd, cwd, env, timeout=180):
+        return _run_cargo_check_diag(cmd, cwd, env, timeout)
+
+    def build_test_cmd(self, test_stems, cluster):
+        return _build_test_cmd(test_stems, cluster)
+
+    def env(self):
+        return _cargo_env()
+
+    def implicated_fns_from_cargo_errors(self, cargo_output, target_src_dir):
+        return _implicated_fns_from_cargo_errors(cargo_output, target_src_dir)
+
+    def attribute_failures(self, test_output, src_dir, recently_filled,
+                           test_reverse_map, cluster_name):
+        return _attribute_failures(test_output, src_dir, recently_filled,
+                                   test_reverse_map, cluster_name)
+
+    # --- FillEngine (LLM-driven Phase B/C/D + merge + fix loop) ---
+    def run_phase_c_tdd(self, **kw):
+        return _run_phase_c_tdd(**kw)
+
+    def fill_fns_one_by_one(self, **kw):
+        return _task2_fill_fns_one_by_one(**kw)
+
+    def fill_groups(self, skeleton_dir, target_src_dir, groups, project_dir, **kw):
+        return _task2_fill_groups(skeleton_dir, target_src_dir, groups, project_dir, **kw)
+
+    def group_tests(self, skeleton_dir, test_files, **kw):
+        return _task2_group_tests(skeleton_dir, test_files, **kw)
+
+    def cleanup_residuals(self, target_src_dir, project_dir, functional_req,
+                          test_files, **kw):
+        return _task2_cleanup_residuals(target_src_dir, project_dir, functional_req,
+                                        test_files, **kw)
+
+    def scan_unimplemented_functions(self, src_dir):
+        return _scan_unimplemented_functions(src_dir)
+
+    def merge_cluster_outputs(self, **kw):
+        return _merge_cluster_outputs(**kw)
+
+    def generate_fix_loop(self, **kw):
+        return generate_fix_loop(**kw)
+
+    def reset_exhaustion_flags(self, project_dir, reason):
+        _reset_exhaustion_flags(project_dir, reason)
+
+    def build_test_reverse_map(self, test_files, src_dir):
+        return _build_test_reverse_map(test_files, src_dir)
+
+    # --- Clusters (baked artefacts + cluster-scoped filtering) ---
+    def load_baked(self, project_dir):
+        return _load_baked_clusters(project_dir)
+
+    def load_baked_leaf_order(self, project_dir, cluster_name):
+        return _load_baked_leaf_order(project_dir, cluster_name)
+
+    def filter_tests_for_cluster(self, test_files, cluster):
+        return _filter_tests_for_cluster(test_files, cluster)
+
+    def cluster_cfg_attr(self, cluster):
+        return _cluster_cfg_attr(cluster)
+
+    # --- GenTests (sibling decl machinery + origin manifest) ---
+    def build_decl(self, sibling_name, n, allow_line, cluster_cfg_attr=""):
+        return _build_gen_tests_decl(sibling_name, n, allow_line,
+                                     cluster_cfg_attr=cluster_cfg_attr)
+
+    def has_decl(self, src_text, pass_n):
+        return _has_gen_tests_decl(src_text, pass_n)
+
+    def strip_decl_n(self, parent_text, pass_n):
+        return _strip_gen_tests_decl_n(parent_text, pass_n)
+
+    def derive_prelude(self, project_dir):
+        return _derive_gentest_prelude(project_dir)
+
+    def load_origin(self, project_dir):
+        return _load_gen_tests_origin(project_dir)
+
+    def propagate_or_quarantine_sibling(self, gt, origin_manifest, parent_stem,
+                                        pass_n, tag=""):
+        return _propagate_or_quarantine_sibling(gt, origin_manifest, parent_stem,
+                                                pass_n, _log, tag)
+
+    def is_gen_tests_file(self, name):
+        return _is_gen_tests_file(name)
+
+    # --- SourceScan (pure structural scanners) ---
+    def locate_fn(self, file_text, fn_name):
+        return _locate_fn(file_text, fn_name)
+
+    def rust_delimiters_balanced(self, text):
+        return _rust_delimiters_balanced(text)
+
 
 _TASK2_ADAPTER = _Task2Adapter()
 
@@ -10970,6 +11079,29 @@ def _new_llm_task2_generator() -> LLMTask2Generator:
 def _new_filelist_task2_generator() -> StaticFileListTask2Generator:
     a = _TASK2_ADAPTER
     return StaticFileListTask2Generator(tel=a, llm=a, ws=a, docs=a, cfg=_build_task2_config())
+
+
+def _build_skeleton_config() -> "SkeletonConfig":
+    """Resolve the skeleton generator's runtime knobs (SETTINGS + env) into a VO."""
+    return SkeletonConfig(
+        task2_model=_TASK2_MODEL,
+        parallelism=_pipeline_parallelism(),
+        phase_c_per_fn=SETTINGS.phase_c_mode is PhaseCMode.PER_FN,
+        phase_c_tdd=SETTINGS.phase_c_driver is PhaseCDriver.TDD,
+        phase_c_max_passes=int(os.getenv("PHASE_C_MAX_PASSES", "3")),
+        validate_iters=int(os.getenv("PHASE_C_VALIDATE_ITERS", "3")),
+        post_merge_max_stalls=int(os.getenv("POST_MERGE_MAX_STALLS", "3")),
+        post_merge_hard_cap=int(os.getenv("POST_MERGE_HARD_CAP", "10000")),
+        post_merge_test_timeout=int(os.getenv("POST_MERGE_TEST_TIMEOUT", "180")),
+        recently_filled_max=int(os.getenv("TDD_RECENTLY_FILLED_MAX", "50")),
+    )
+
+
+def _new_skeleton_task2_generator() -> StaticSkeletonTask2Generator:
+    a = _TASK2_ADAPTER
+    return StaticSkeletonTask2Generator(
+        tel=a, cargo=a, fill=a, clusters=a, gentests=a, scan=a, ws=a,
+        cfg=_build_skeleton_config())
 
 
 def _crate_entry_point(cargo_toml_path: Path, module_dir_rel: str,
@@ -11153,810 +11285,6 @@ def _merge_cluster_outputs(project_dir: Path,
     return {"files_written": files_written, "cfg_gated_fns": cfg_gated_fns}
 
 
-
-class StaticSkeletonTask2Generator(Task2Generator):
-    """4-phase reconstruction: mechanical skeleton → LLM grouping → per-group fill → cleanup.
-
-    Phase A:  Load the skeleton (signatures + types + macros +
-              `unimplemented!()` bodies) baked from live source before strip
-              (see `_bake_skeleton_artifacts`). No LLM. cargo check verifies
-              the cached skeleton still compiles under this cluster's env.
-    Phase B:  One LLM call to group test files into cohesive units. Validated.
-    Phase C:  Per-group LLM call that fills `unimplemented!()` bodies the group's
-              tests transitively need. Leaf-first ordering. Merge preserves bodies
-              already filled by prior groups.
-    Phase D:  Single cleanup pass for test-exercised stubs left untouched.
-
-    Phase A and B results cached on disk; Phase C and D re-run per iteration.
-    """
-
-    def generate(self, project_dir, genesis_path, functional_req_path, manifest_path,
-                 existing_test_files, project_profile="", workspace_structure="", build_error="",
-                 locked_dep_context="", current_module="", module_dir_rel="",
-                 whole_project_context="", coverage_strategy="", api_surface="",
-                 prev_source_context=""):
-        _log("\nTASK 2: Implementing source code (skeleton backend, per-cluster)")
-        module = current_module or project_dir.name
-
-        # Load clusters from the bake artefact written before strip
-        # (Hard Rule 11: no source access post-strip). If absent, abort —
-        # there is no live source to discover from at this point.
-        clusters = _load_baked_clusters(project_dir)
-        if not clusters:
-            _log("  [skeleton] FATAL: no baked clusters at "
-                 f"{project_dir}/.skeleton/_clusters.json. The skeleton bake "
-                 "step (pre-strip) must run before TASK 2.")
-            return False
-        clusters = sorted(clusters, key=lambda c: c.name)
-        _log(f"  [skeleton] loaded {len(clusters)} baked cluster(s): "
-             f"{', '.join(c.name for c in clusters)}")
-
-        genesis = read(genesis_path) if genesis_path.exists() else ""
-        functional_req = read(functional_req_path) if functional_req_path.exists() else ""
-        all_test_pairs: list[tuple[str, str]] = []
-        for rel in sorted(existing_test_files):
-            tp = project_dir / rel
-            if tp.exists():
-                try:
-                    all_test_pairs.append((rel, tp.read_text(encoding="utf-8")))
-                except Exception:
-                    continue
-        if not all_test_pairs:
-            _log("  [skeleton] no test files; cannot proceed.")
-            return False
-
-        # === task2a — per-cluster Phase A→D (RESUMABLE). The per-cluster
-        # .skeleton-filled/ trees persist, so once this stage is marked done it
-        # is skipped on resume / retry; restart_from.sh task2a re-runs it. ===
-        cluster_summaries: list[dict] = []
-        if _phase_valid(project_dir, f"task2a/{module}"):
-            _log("  [skeleton] task2a (per-cluster reconstruction) already done — "
-                 "skipping (fills persist in .skeleton-filled/).")
-            cluster_summaries = [{"cluster": c.name, "ok": True} for c in clusters]
-        else:
-            _set_current(project_dir, f"task2a/{module} / per-cluster reconstruction (0/{len(clusters)})")
-
-            def _run_one_cluster(cluster: "BuildCluster") -> dict:
-                tag = f"[{cluster.name}]"
-                _log(f"\n  {tag} === cluster start ===")
-                try:
-                    res = self._generate_one_cluster(
-                        project_dir=project_dir,
-                        cluster=cluster,
-                        module=module,
-                        all_test_pairs=all_test_pairs,
-                        genesis=genesis,
-                        functional_req=functional_req,
-                    )
-                except Exception as _ce:
-                    _log(f"  {tag} cluster crashed: {type(_ce).__name__}: {_ce}")
-                    res = {"ok": False, "reason": f"exception: {type(_ce).__name__}: {_ce}"}
-                if not res.get("ok"):
-                    _log(f"  {tag} cluster aborted: {res.get('reason', 'unknown')}")
-                return {"cluster": cluster.name, **res}
-
-            # PIPELINE_PARALLELISM>1: clusters run concurrently — each owns
-            # isolated scratch trees (.skeleton/{c}, .skeleton-filled/{c})
-            # with their own target/, splice locks are per tree, ask() is
-            # thread-safe, and the event log is append-only. Summaries stay
-            # index-aligned to `clusters`. 1 = historical serial behavior.
-            _t2a_par = min(_pipeline_parallelism(), len(clusters))
-            if _t2a_par > 1:
-                _log(f"  [skeleton] task2a parallelism={_t2a_par} "
-                     f"({len(clusters)} cluster(s) concurrent).")
-                _set_current(project_dir,
-                             f"task2a/{module} / {len(clusters)} cluster(s) in parallel (x{_t2a_par})")
-                from concurrent.futures import ThreadPoolExecutor
-                with ThreadPoolExecutor(
-                        max_workers=_t2a_par,
-                        thread_name_prefix=f"task2a-{module}") as _pool:
-                    cluster_summaries = list(_pool.map(_run_one_cluster, clusters))
-            else:
-                for _ci, cluster in enumerate(clusters):
-                    _set_current(project_dir,
-                                 f"task2a/{module} / cluster {cluster.name} ({_ci + 1}/{len(clusters)})")
-                    cluster_summaries.append(_run_one_cluster(cluster))
-            _mark_phase(project_dir, f"task2a/{module}", "done",
-                        detail=f"{len(clusters)} cluster(s)")
-
-        # === task2b — cross-cluster merge into project_dir/src/ (RESUMABLE).
-        # Skipped only if marked done AND the merged tree is intact: every
-        # file in the saved manifest still on disk. A bare `src/ exists`
-        # check is defeated by the workspace stub (the startup wipe leaves a
-        # stub lib.rs), which let phase C run against an empty tree. (task4's
-        # delete-and-retry clears this marker, forcing a re-merge.) ===
-        _merged_tree_intact = False
-        if _phase_valid(project_dir, f"task2b/{module}"):
-            _mf = load_manifest(manifest_path) if manifest_path else []
-            _merged_tree_intact = bool(_mf) and all(
-                (project_dir / rel).exists() for rel in _mf)
-        if _merged_tree_intact:
-            _log("  [skeleton-merge] task2b (merge) already done — skipping.")
-        else:
-            _set_current(project_dir,
-                         f"task2b/{module} / merging {len(cluster_summaries)} cluster output(s)")
-            _log(f"\n  [skeleton-merge] composing {len(cluster_summaries)} cluster output(s) "
-                 f"into {project_dir}/src/")
-            merge_stats = _merge_cluster_outputs(
-                project_dir=project_dir,
-                cluster_specs={c.name: c for c in clusters},
-                successes=[s for s in cluster_summaries if s.get("ok")],
-            )
-            _log(f"  [skeleton-merge] {merge_stats['files_written']} file(s) written, "
-                 f"{merge_stats['cfg_gated_fns']} cfg-gated divergence(s).")
-            _mark_phase(project_dir, f"task2b/{module}", "done",
-                        detail=f"{merge_stats['files_written']} file(s)")
-
-        # Post-merge fill pass: per-cluster Phase C drove fills against each
-        # cluster's filtered cfg view of the code. After the AST merge, the
-        # default-cfg view of `project_dir/src/` may expose fns that none of
-        # the per-cluster Phase Cs reached (typically the stable variants of
-        # cfg-divergent code paths). Without this step, TASK 3 panics at
-        # `unimplemented!()` on fns Phase C never queued.
-        #
-        # Strategy: run cargo test --no-fail-fast on the merged tree, extract
-        # panic frontier with the same syn-based mapper Phase C uses, fill
-        # those fns via the per-fn machinery, repeat until frontier is empty
-        # or stall budget exhausted. Always uses --no-fail-fast so panics
-        # from every binary surface, not just the first one to crash.
-        # === task2c — merged-tree fill (RESUMABLE). This is where U2 test-
-        # acceptance does most of its work. restart_from.sh task2c re-runs ONLY
-        # this stage (per-cluster + merge skipped if their markers stand). ===
-        if _phase_valid(project_dir, f"task2c/{module}"):
-            _log("  task2c (merged-tree fill) already done — skipping.")
-        else:
-            _set_current(project_dir, f"task2c/{module} / merged-tree fill")
-            self._post_merge_fill_pass(
-                project_dir=project_dir,
-                clusters=clusters,
-                module=module,
-                functional_req=functional_req,
-            )
-            _mark_phase(project_dir, f"task2c/{module}", "done")
-
-        # Update the manifest so downstream task3/4 see the generated files.
-        if manifest_path:
-            generated = [str(p.relative_to(project_dir))
-                         for p in (project_dir / "src").rglob("*.rs")
-                         if str(p.relative_to(project_dir)) not in existing_test_files]
-            if generated:
-                save_manifest(manifest_path, generated)
-                _log(f"  [skeleton] manifest written: {len(generated)} source file(s).")
-
-        return True
-
-    def _generate_one_cluster(
-        self,
-        project_dir: Path,
-        cluster: "BuildCluster",
-        module: str,
-        all_test_pairs: list[tuple[str, str]],
-        genesis: str,
-        functional_req: str,
-    ) -> dict:
-        """Run Phase A + B + C + D for a single cluster, returning a stats dict.
-
-        All artifacts land under `.skeleton/{cluster}/` (skeleton + groups +
-        failure dumps) and `.skeleton-filled/{cluster}/src/` (filled output).
-        Cargo invocations honour `cluster.env_extra` end-to-end.
-        """
-        tag = f"[{cluster.name}]"
-        skeleton_dir = project_dir / ".skeleton" / cluster.name
-        filled_dir = project_dir / ".skeleton-filled" / cluster.name
-
-        # Phase A — load the pre-baked skeleton from disk. Hard Rule 11:
-        # the original source is gone after strip, so the skeleton MUST
-        # have been produced earlier by `_bake_skeleton_artifacts`. If
-        # absent here, that step did not run — fail loud.
-        if not (skeleton_dir / "src").exists() or not any(skeleton_dir.rglob("*.rs")):
-            _log(f"  {tag} [skeleton-A] FATAL: no baked skeleton at "
-                 f"{skeleton_dir}. The pre-strip bake step did not run "
-                 "for this cluster.")
-            return {"ok": False, "reason": "no_baked_skeleton"}
-        _log(f"  {tag} [skeleton-A] using baked skeleton at {skeleton_dir}.")
-
-        # cargo check on the skeleton with cluster env. Fix-loop on failure.
-        _cargo_toml = project_dir / "Cargo.toml"
-        if _cargo_toml.exists() and not (skeleton_dir / "Cargo.toml").exists():
-            shutil.copy(_cargo_toml, skeleton_dir / "Cargo.toml")
-        check_cmd = self._cluster_check_cmd(cluster)
-        # P3.8 diagnostic: log toolchain + final check_cmd so we can verify
-        # the nightly cluster is actually using +nightly.
-        _log(f"  {tag} [skeleton-A] cluster.toolchain={cluster.toolchain!r} "
-             f"requires_nightly={getattr(cluster, 'requires_nightly', False)}")
-        _log(f"  {tag} [skeleton-A] cargo check ({check_cmd})...")
-        try:
-            _r = subprocess.run(
-                shlex.split(check_cmd),
-                cwd=skeleton_dir, capture_output=True, text=True, timeout=180,
-                env=self._cluster_env(cluster),
-            )
-        except subprocess.TimeoutExpired:
-            _log(f"  {tag} [skeleton-A] cargo check timed out; proceeding anyway.")
-            _r = None
-        # P3.8: detect E0554 (nightly feature on stable channel) and retry
-        # with nightly toolchain. The cluster's requires_nightly flag is set
-        # by an earlier TASK 0 phase only when its cargo build hits E0554;
-        # the skeleton backend's Phase A may run BEFORE that phase, so we
-        # need a local catch.
-        if (_r is not None and _r.returncode != 0
-                and "E0554" in (_r.stderr or "") + (_r.stdout or "")
-                and not cluster.requires_nightly):
-            _log(f"  {tag} [skeleton-A] detected E0554 — promoting cluster to nightly.")
-            cluster.requires_nightly = True
-            check_cmd = self._cluster_check_cmd(cluster)
-            try:
-                _r = subprocess.run(
-                    shlex.split(check_cmd),
-                    cwd=skeleton_dir, capture_output=True, text=True, timeout=180,
-                    env=self._cluster_env(cluster),
-                )
-                _log(f"  {tag} [skeleton-A] retry with +nightly: rc={_r.returncode}")
-            except subprocess.TimeoutExpired:
-                _log(f"  {tag} [skeleton-A] cargo +nightly check timed out.")
-                _r = None
-        if _r is not None and _r.returncode != 0:
-            _log(f"  {tag} [skeleton-A] cargo check FAILED; invoking fix-loop.")
-            _skel_sources = list((skeleton_dir / "src").rglob("*.rs"))
-            ok, _ = generate_fix_loop(
-                project_dir=skeleton_dir,
-                check_cmd=check_cmd,
-                source_paths=_skel_sources,
-                existing_test_files=set(),
-                model=_TASK2_MODEL,
-                max_fix_attempts=3,
-                timeout=180,
-            )
-            if not ok:
-                return {"ok": False, "reason": "skeleton_fix_loop_exhausted"}
-
-        # Per-cluster test scoping.
-        cluster_tests = _filter_tests_for_cluster(all_test_pairs, cluster)
-        _log(f"  {tag} [skeleton-B] tests for this cluster: "
-             f"{len(cluster_tests)}/{len(all_test_pairs)}")
-        if not cluster_tests:
-            return {"ok": True, "phase_c": None, "phase_d": None,
-                    "note": "no tests apply to this cluster"}
-
-        # Mode selection for Phase B+C: per-group (default, current behaviour)
-        # or per-fn TDD (Flavour B, smaller prompts, one call per fn, no
-        # LLM grouping). Switched via env var PHASE_C_MODE=per_fn.
-        per_fn_mode = SETTINGS.phase_c_mode is PhaseCMode.PER_FN
-
-        # Seed filled_dir from skeleton state (idempotent) regardless of mode.
-        filled_dir.mkdir(parents=True, exist_ok=True)
-        for src in skeleton_dir.rglob("*.rs"):
-            rel = src.relative_to(skeleton_dir)
-            dst = filled_dir / rel
-            if not dst.exists():
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                dst.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
-
-        # Propagate gen_tests siblings from project_dir/src/ into filled_dir/src/.
-        # task0c commits these as cluster-specific unit-test specs; the bake step
-        # emits only the structural skeleton. Without this propagation Phase C
-        # runs cargo test against integration tests only and gen_tests are
-        # invisible. `.broken` suffixes (left over from the legacy reattach
-        # quarantine path) are treated as live — they were renamed because
-        # earlier LLM-regenerated source didn't satisfy them, not because they
-        # are broken in themselves.
-        _proj_src = project_dir / "src"
-        _filled_src = filled_dir / "src"
-        if _proj_src.exists() and _filled_src.exists():
-            _gt_re = re.compile(r"^(.+?)\.gen_tests_(\d+)\.rs(?:\.broken)?$")
-            _gt_allow_line, _ = _derive_gentest_prelude(project_dir)
-            # Gate each sibling by the cfg of the cluster that GENERATED it (origin),
-            # not the current cluster — `_cluster_cfg_attr(cluster)` is always-active
-            # in its own build and gives no protection, so a nightly-only test would
-            # compile (and E0658) in stable/no_core. Origin cfg excludes it there and
-            # keeps it only where it belongs. Fallback to current cluster if the
-            # manifest is missing (older runs).
-            _gt_origin = _load_gen_tests_origin(project_dir)
-            _gt_cur_attr = _cluster_cfg_attr(cluster)
-            _gt_propagated = 0
-            for gt in sorted(_proj_src.iterdir()):
-                if not gt.is_file():
-                    continue
-                _m = _gt_re.match(gt.name)
-                if not _m:
-                    continue
-                _parent_stem = _m.group(1)
-                _pass_n = int(_m.group(2))
-                # R9.6: skip + quarantine undeclared orphans (on disk but absent from
-                # a non-empty origin manifest) — they were never coverage-validated and
-                # must not be resurrected under a guessed gate.
-                if not _propagate_or_quarantine_sibling(
-                        gt, _gt_origin, _parent_stem, _pass_n, _log, tag):
-                    continue
-                _dst_name = f"{_parent_stem}.gen_tests_{_pass_n}.rs"
-                _dst = _filled_src / _dst_name
-                _parent_path = _filled_src / f"{_parent_stem}.rs"
-                if not _parent_path.exists():
-                    continue
-                try:
-                    _body = gt.read_text(encoding="utf-8")
-                except Exception as _e:
-                    _log(f"  {tag} [skeleton-C] gen_tests read failed {gt.name}: {_e}")
-                    continue
-                if not _rust_delimiters_balanced(_body):
-                    continue
-                if not _dst.exists() or _dst.read_text(encoding="utf-8") != _body:
-                    _dst.write_text(_body, encoding="utf-8")
-                _ptext = _parent_path.read_text(encoding="utf-8")
-                if not _has_gen_tests_decl(_ptext, _pass_n):
-                    _gt_attr = _gt_origin.get(
-                        f"{_parent_stem}.gen_tests_{_pass_n}", _gt_cur_attr)
-                    _decl = _build_gen_tests_decl(
-                        _dst_name, _pass_n, _gt_allow_line,
-                        cluster_cfg_attr=_gt_attr,
-                    )
-                    _parent_path.write_text(_ptext.rstrip() + _decl, encoding="utf-8")
-                    _gt_propagated += 1
-            if _gt_propagated:
-                _log(f"  {tag} [skeleton-C] propagated {_gt_propagated} "
-                     f"gen_tests decl(s) into filled tree.")
-
-        if per_fn_mode:
-            _log(f"  {tag} [skeleton-C] per-fn mode (Flavour B): scanning stubs...")
-            # Make filled_dir a runnable crate root so cargo check/test work:
-            # copy Cargo.toml + symlink tests/. Idempotent.
-            if _cargo_toml.exists() and not (filled_dir / "Cargo.toml").exists():
-                shutil.copy(_cargo_toml, filled_dir / "Cargo.toml")
-            _proj_tests = project_dir / "tests"
-            _filled_tests = filled_dir / "tests"
-            if _proj_tests.exists() and not _filled_tests.exists():
-                try:
-                    os.symlink(_proj_tests, _filled_tests)
-                except OSError as e:
-                    _log(f"  {tag} [skeleton-C] tests symlink failed: {e}")
-
-            # Deterministic cluster-leak guard. A gen_test that belongs to another
-            # cluster (e.g. nightly's `request_ref`) must not be ACTIVE in this
-            # cluster. With correct origin gating it is cfg-excluded and invisible
-            # here; if any gen_tests file still produces an unstable-feature error
-            # (E0658/E0554) under this cluster's stable toolchain, its origin gate
-            # is missing/wrong — surface it loudly and quarantine the sibling so it
-            # can't poison phase-c as undifferentiated reconstruction noise. The
-            # skeleton's unimplemented!() bodies compile, so unrelated fill gaps
-            # don't false-trigger (we act only on gen_tests-attributed diags).
-            _has_gt = _filled_src.exists() and any(
-                _is_gen_tests_file(p.name) for p in _filled_src.iterdir() if p.is_file())
-            if _has_gt:
-                _norun = (f"cargo +{cluster.toolchain} test --no-run"
-                          if cluster.toolchain else "cargo test --no-run")
-                _lrc, _ltxt, _ldiags = _run_cargo_check_diag(
-                    _norun, filled_dir, self._cluster_env(cluster), timeout=300)
-                _leaks = sorted({
-                    d.file for d in _ldiags
-                    if ".gen_tests_" in d.file
-                    and (d.code in ("E0658", "E0554") or "unstable" in d.message.lower())
-                })
-                if _leaks:
-                    _log(f"  {tag} [skeleton-C] ⛔ CLUSTER LEAK in '{cluster.name}': "
-                         f"{len(_leaks)} gen_tests file(s) use nightly-only API but are "
-                         f"active under this cluster's stable toolchain "
-                         f"(origin-cfg gate missing/wrong): {', '.join(_leaks)}. "
-                         f"Quarantining so phase-c is not poisoned.")
-                    for _bf in _leaks:
-                        _name = Path(_bf).name
-                        if _name.endswith(".rs") and ".gen_tests_" in _name:
-                            _stem, _rest = _name.rsplit(".gen_tests_", 1)
-                            _ns = _rest[:-3]  # strip ".rs"
-                            if _ns.isdigit():
-                                _pp = _filled_src / f"{_stem}.rs"
-                                if _pp.exists():
-                                    _pp.write_text(
-                                        _strip_gen_tests_decl_n(
-                                            _pp.read_text(encoding="utf-8"), int(_ns)),
-                                        encoding="utf-8")
-                        _sp = filled_dir / _bf
-                        if _sp.exists():
-                            _sp.rename(_sp.with_name(_sp.name + ".broken"))
-            tests_dir_files: list[Path] = []
-            for trel, _ in cluster_tests:
-                tp = project_dir / trel
-                if tp.exists():
-                    tests_dir_files.append(tp)
-            # Leaf-first ordering counts come from the bake artefact
-            # (computed against live source pre-strip). Falls back to
-            # alphabetical when absent.
-            _leaf_counts = _load_baked_leaf_order(project_dir, cluster.name)
-            if not _leaf_counts:
-                _log(f"  {tag} [skeleton-C] no leaf-order artefact "
-                     f"({skeleton_dir}/_leaf_order.json); falling back to "
-                     "alphabetical fn ordering.")
-            # Per-crate FR is the home for model self-correction notes.
-            _fr_for_notes = project_dir / f"functional_requirements_{module}.md"
-            # Plan 4 — PHASE_C_DRIVER=tdd switches to the TDD outer loop
-            # (cargo test → frontier → fill). Default `fn_walk` keeps the
-            # legacy per-fn-walk driver.
-            _driver = SETTINGS.phase_c_driver
-            if _driver is PhaseCDriver.TDD:
-                _log(f"  {tag} [skeleton-C] PHASE_C_DRIVER=tdd — using TDD outer loop")
-                c_result = _run_phase_c_tdd(
-                    project_dir=project_dir,
-                    target_src_dir=filled_dir,
-                    tests_dir_files=tests_dir_files,
-                    cluster_tests=cluster_tests,
-                    module=module,
-                    cluster=cluster,
-                    check_cmd=self._cluster_check_cmd(cluster),
-                    cluster_env=self._cluster_env(cluster),
-                    leaf_counts=_leaf_counts,
-                    fr_path=_fr_for_notes,
-                    test_cmd_builder=lambda stems: _build_test_cmd(stems, cluster),
-                    tag=tag,
-                )
-            else:
-                c_result = _task2_fill_fns_one_by_one(
-                    project_dir=project_dir,
-                    target_src_dir=filled_dir,
-                    tests_dir_files=tests_dir_files,
-                    module_name=module,
-                    cluster_name=cluster.name,
-                    cluster=cluster,
-                    check_cmd=self._cluster_check_cmd(cluster),
-                    cluster_env=self._cluster_env(cluster),
-                    max_passes=int(os.getenv("PHASE_C_MAX_PASSES", "3")),
-                    leaf_name_counts=_leaf_counts,
-                    fr_path=_fr_for_notes,
-                )
-            _log(f"  {tag} [skeleton-C] {c_result['fns_filled']} fn(s) filled, "
-                 f"{c_result['bytes_filled']:,} bytes net, "
-                 f"{c_result['attempts']} LLM call(s), "
-                 f"{c_result['remaining']} stub(s) remaining, "
-                 f"{len(c_result['errors'])} error(s).")
-        else:
-            # Phase B — grouping (cached per cluster).
-            groups_path = skeleton_dir / "groups.json"
-            groups: list[dict] | None = None
-            if groups_path.exists():
-                try:
-                    groups = json.loads(groups_path.read_text(encoding="utf-8"))
-                    _log(f"  {tag} [skeleton-B] cached manifest: {len(groups)} group(s).")
-                except Exception:
-                    groups = None
-            if groups is None:
-                _log(f"  {tag} [skeleton-B] grouping...")
-                groups = _task2_group_tests(skeleton_dir, cluster_tests,
-                                             cluster_name=cluster.name, module_name=module)
-
-            # Phase C — per-group fill into cluster-specific scratch dir.
-            _log(f"  {tag} [skeleton-C] filling {len(groups)} group(s) into {filled_dir}/")
-            c_result = _task2_fill_groups(skeleton_dir, filled_dir, groups, project_dir,
-                                           cluster_name=cluster.name, module_name=module,
-                                           functional_req=functional_req, genesis=genesis,
-                                           cluster=cluster)
-            _log(f"  {tag} [skeleton-C] {c_result['groups_processed']} group(s), "
-                 f"{c_result['bytes_filled']:,} bytes filled, "
-                 f"{len(c_result['errors'])} error(s).")
-
-        # Phase D — residual cleanup (per cluster).
-        # Plan 4 — under driver=tdd, the outer loop fills exactly the fns
-        # reachable from failing tests. Residuals are by-design unreachable
-        # from any test → leaving them `unimplemented!()` is correct under
-        # tests-only reconstruction. Skip Phase D.
-        if _driver == "tdd":
-            _log(f"  {tag} [skeleton-D] skipped (driver=tdd; residual stubs "
-                 "are correctly left unimplemented).")
-            d_result = {"stubs_total": 0, "stubs_exercised": 0,
-                         "files_updated": 0, "stubs_remaining": 0}
-        else:
-            _log(f"  {tag} [skeleton-D] scanning for residual stubs...")
-            d_result = _task2_cleanup_residuals(filled_dir, project_dir, functional_req,
-                                                 cluster_tests, module_name=module)
-            _log(f"  {tag} [skeleton-D] {d_result['stubs_total']} stubs, "
-                 f"{d_result['stubs_exercised']} test-exercised, "
-                 f"{d_result['files_updated']} updated, "
-                 f"{d_result['stubs_remaining']} remaining.")
-
-        # Per-cluster intermediate validation: cargo check the filled output.
-        if _cargo_toml.exists() and not (filled_dir / "Cargo.toml").exists():
-            shutil.copy(_cargo_toml, filled_dir / "Cargo.toml")
-        # P3.12: end-of-cluster validation with a fix-loop. The per-fn
-        # check catches errors as they happen, but bodies that pass at
-        # splice-time can still break integration when all fills are in
-        # place (cross-fn semantic issues, stale fills from prior runs).
-        # When this cargo check fails, identify the implicated fns from
-        # the error output, revert their bodies to unimplemented!() so
-        # they re-appear as stubs, then re-enter the per-fn fill loop
-        # targeting only those fns. Loop up to PHASE_C_VALIDATE_ITERS
-        # times.
-        max_validate_iters = int(
-            os.getenv("PHASE_C_VALIDATE_ITERS", "3"))
-        validate_ok = False
-        _vr_out = ""
-        for v_iter in range(1, max_validate_iters + 1):
-            _check_graceful_stop(f"skeleton-validate iter {v_iter}")
-            _log(f"  {tag} [skeleton-validate] cargo check on filled output "
-                 f"(iter {v_iter}/{max_validate_iters})...")
-            try:
-                _vr = subprocess.run(
-                    shlex.split(check_cmd),
-                    cwd=filled_dir, capture_output=True, text=True,
-                    timeout=180, env=self._cluster_env(cluster),
-                )
-                _vr_out = (_vr.stdout or "") + "\n" + (_vr.stderr or "")
-                validate_ok = (_vr.returncode == 0)
-            except subprocess.TimeoutExpired:
-                _log(f"  {tag} [skeleton-validate] cargo check timed out.")
-                validate_ok = False
-                break
-
-            if validate_ok:
-                if v_iter > 1:
-                    _log(f"  {tag} [skeleton-validate] PASSED after "
-                         f"{v_iter} iteration(s).")
-                break
-
-            # Failure path. Identify implicated fns.
-            _log(f"  {tag} [skeleton-validate] cargo check FAILED "
-                 f"(rc={_vr.returncode}). First errors:")
-            for line in _vr_out.splitlines()[:10]:
-                _log(f"    {line}")
-            implicated = _implicated_fns_from_cargo_errors(
-                _vr_out, filled_dir)
-            if not implicated:
-                _log(f"  {tag} [skeleton-validate] no implicated fns parsed "
-                     f"— cannot retry, giving up.")
-                break
-            _log(f"  {tag} [skeleton-validate] implicated fns: "
-                 f"{', '.join(f'{f}::{fn}' for f, fn in implicated[:6])}"
-                 + ("..." if len(implicated) > 6 else ""))
-            # Revert each implicated fn to unimplemented!() so the
-            # per-fn loop picks them up again as stubs.
-            reverted = 0
-            for rel_f, fn in implicated:
-                fp = filled_dir / rel_f
-                try:
-                    text = fp.read_text(encoding="utf-8")
-                except Exception:
-                    continue
-                loc = _locate_fn(text, fn)
-                if loc is None:
-                    continue
-                _sig, _ss, body_start, body_end = loc
-                cur_body = text[body_start:body_end]
-                if _is_unimplemented_body(cur_body):
-                    continue  # already a stub — nothing to revert
-                # Re-indent unimplemented!() like a normal body.
-                line_start = text.rfind("\n", 0, _ss) + 1
-                indent = ""
-                for ch in text[line_start:_ss]:
-                    if ch in (" ", "\t"):
-                        indent += ch
-                    else:
-                        break
-                inner = indent + "    "
-                new_body = "\n" + inner + "unimplemented!()\n" + indent
-                fp.write_text(
-                    text[:body_start] + new_body + text[body_end:],
-                    encoding="utf-8",
-                )
-                reverted += 1
-            _log(f"  {tag} [skeleton-validate] reverted {reverted} fn(s) "
-                 f"to stubs; re-entering per-fn fill loop.")
-            _emit("phase_c.cluster.validate_retry", data={
-                "cluster": cluster.name, "iter": v_iter,
-                "implicated": [{"file": f, "fn": fn}
-                               for f, fn in implicated],
-                "reverted": reverted,
-            })
-            # Re-enter the per-fn fill loop for ONE pass over just the
-            # reverted stubs. Use the cargo error excerpt as initial
-            # prompting context (the fix loop will refresh per attempt).
-            _ = _task2_fill_fns_one_by_one(
-                project_dir=project_dir,
-                target_src_dir=filled_dir,
-                tests_dir_files=[project_dir / trel
-                                  for trel, _ in cluster_tests
-                                  if (project_dir / trel).exists()],
-                module_name=module,
-                cluster_name=cluster.name,
-                cluster=cluster,
-                check_cmd=check_cmd,
-                cluster_env=self._cluster_env(cluster),
-                max_passes=1,  # one pass through the reverted set
-                leaf_name_counts=_load_baked_leaf_order(project_dir, cluster.name),
-                fr_path=_fr_for_notes,
-            )
-
-        return {"ok": True, "phase_c": c_result, "phase_d": d_result,
-                "validates": validate_ok}
-
-    def _post_merge_fill_pass(
-        self,
-        project_dir: Path,
-        clusters: list["BuildCluster"],
-        module: str,
-        functional_req: str,
-    ) -> None:
-        """FR-024 improvement-driven loop on the merged tree.
-
-        Runs cargo test on `project_dir`, attributes failures via the full
-        chain (runtime/compile/classifier/recently_filled/reverse_map),
-        fills, repeats. Exits when pass count stalls for `max_stalls`
-        consecutive iters AND there's no actionable frontier — never on
-        a fixed iter count alone. Closes the per-cluster / merged-view
-        mismatch where Phase C declares done but the merged source still
-        has unfilled stubs under the default cfg TASK 3 runs under.
-        """
-        max_stalls = int(os.getenv("POST_MERGE_MAX_STALLS", "3"))
-        # Hard cap is now a runaway-safety backstop only — floor-stall
-        # (max_stalls) is the real terminator. Set to 0 to skip the pass
-        # entirely (legacy behaviour preserved).
-        hard_cap = int(os.getenv("POST_MERGE_HARD_CAP", "10000"))
-        if hard_cap <= 0:
-            return
-        tag = "[skeleton-merge]"
-        tests_dir_files: list[Path] = list(
-            (project_dir / "tests").rglob("*.rs"))
-        fr_path = project_dir / f"functional_requirements_{module}.md"
-        leaf_counts: dict[str, int] = {}
-        for c in clusters:
-            for fn_name_k, v in (_load_baked_leaf_order(project_dir, c.name) or {}).items():
-                leaf_counts[fn_name_k] = max(leaf_counts.get(fn_name_k, 0), int(v))
-        test_cmd = "cargo test --no-fail-fast"
-        test_timeout = int(os.getenv("POST_MERGE_TEST_TIMEOUT", "180"))
-        try:
-            test_reverse_map = _build_test_reverse_map(
-                tests_dir_files, project_dir)
-        except Exception as _e:
-            _log(f"  {tag} post-merge reverse-map build failed: {_e}")
-            test_reverse_map = {}
-
-        permanently_exhausted: set[tuple[str, str]] = set()
-        # The merge landed every cluster's fills — D3's "other fills landed"
-        # criterion holds globally, so cross-iter exhaustion gets one reset.
-        _reset_exhaustion_flags(project_dir, "post-merge: merged tree is new context")
-        recently_filled: list[tuple[str, str]] = []
-        recently_filled_max = int(os.getenv("TDD_RECENTLY_FILLED_MAX", "50"))
-        stall = 0
-        best_pass = -1
-        best_fail = None
-        iter_n = 0
-        while iter_n < hard_cap:
-            iter_n += 1
-            _check_graceful_stop(f"post-merge fill iter {iter_n}")
-            _log(f"\n  {tag} post-merge fill iter {iter_n}: "
-                 f"running cargo test on merged tree...")
-            t0 = time.monotonic()
-            rc, output = _run_cargo(test_cmd, project_dir, _cargo_env(),
-                                     timeout=test_timeout)
-            dt = time.monotonic() - t0
-            pass_count, fail_count, _ignored = _parse_test_counts(output)
-            if rc == 0:
-                _log(f"  {tag} post-merge cargo test PASSED "
-                     f"({pass_count} passed, {dt:.1f}s).")
-                _emit("post_merge.fill.iter", data={
-                    "iter": iter_n, "rc": 0, "frontier_size": 0,
-                    "kind": "pass",
-                    "pass_count": pass_count, "fail_count": fail_count,
-                })
-                return
-            if rc == -1:
-                _log(f"  {tag} post-merge cargo test TIMED OUT. Stopping.")
-                _emit("post_merge.fill.iter", data={
-                    "iter": iter_n, "rc": -1, "frontier_size": 0,
-                    "kind": "timeout",
-                    "pass_count": pass_count, "fail_count": fail_count,
-                })
-                return
-
-            improved = pass_count > best_pass
-            if improved:
-                best_pass = pass_count
-                best_fail = fail_count
-                stall = 0
-            else:
-                stall += 1
-
-            frontier, kind = _attribute_failures(
-                output, project_dir, recently_filled,
-                test_reverse_map, "merged",
-            )
-            eligible = {k: v for k, v in frontier.items()
-                         if k not in permanently_exhausted}
-            # Stall on pass_count is the sole real terminator. A non-empty
-            # frontier with a stuck fn must not override it — same fix as
-            # _run_phase_c_tdd: pass_count plateau is the only "no real
-            # improvement" signal that captures cluster-level progress.
-            if stall >= max_stalls:
-                _log(f"  {tag} post-merge iter {iter_n}: pass_count plateau "
-                     f"{stall} iter(s) at best={best_pass}; stopping "
-                     f"({len(eligible)} fn(s) still on frontier — marking "
-                     "exhausted). best pass="
-                     f"{best_pass} fail={best_fail}.")
-                for _stuck_key in eligible:
-                    permanently_exhausted.add(_stuck_key)
-                _emit("post_merge.fill.iter", data={
-                    "iter": iter_n, "rc": rc,
-                    "frontier_size": len(eligible),
-                    "kind": "stall_exit",
-                    "pass_count": pass_count, "fail_count": fail_count,
-                    "improved": improved, "stall": stall,
-                })
-                return
-            if not eligible:
-                _log(f"  {tag} post-merge iter {iter_n}: no actionable "
-                     f"frontier (stall={stall}/{max_stalls}); continuing.")
-                _emit("post_merge.fill.iter", data={
-                    "iter": iter_n, "rc": rc, "frontier_size": 0,
-                    "kind": "no_frontier_continue",
-                    "pass_count": pass_count, "fail_count": fail_count,
-                    "improved": improved, "stall": stall,
-                })
-                continue
-
-            _log(f"  {tag} post-merge iter {iter_n}: cargo test rc={rc} "
-                 f"({dt:.1f}s); pass={pass_count} fail={fail_count} "
-                 f"(improved={improved}, stall={stall}/{max_stalls}); "
-                 f"frontier={len(eligible)} fn(s) ({kind}).")
-            _emit("post_merge.fill.iter", data={
-                "iter": iter_n, "rc": rc,
-                "frontier_size": len(eligible), "kind": kind,
-                "pass_count": pass_count, "fail_count": fail_count,
-                "improved": improved, "stall": stall,
-            })
-            sub = _task2_fill_fns_one_by_one(
-                project_dir=project_dir,
-                target_src_dir=project_dir,
-                tests_dir_files=tests_dir_files,
-                module_name=module,
-                cluster_name="merged",
-                cluster=None,
-                check_cmd="cargo check",
-                cluster_env=_cargo_env(),
-                max_passes=1,
-                leaf_name_counts=leaf_counts,
-                fr_path=fr_path,
-                tdd_frontier_keys=set(eligible.keys()),
-                tdd_frontier_tests=eligible,   # Plan 10 U2
-                tdd_test_cmd=test_cmd,         # Plan 10 U2
-                skip_end_pass_test=True,
-            )
-            cur_stubs = set(_scan_unimplemented_functions(project_dir / "src"))
-            newly_filled: list[tuple[str, str]] = [
-                k for k in eligible
-                if k not in cur_stubs
-                and (k[0].split("/")[-1], k[1]) not in cur_stubs
-            ]
-            for k in newly_filled:
-                recently_filled.append(k)
-            if len(recently_filled) > recently_filled_max:
-                recently_filled = recently_filled[-recently_filled_max:]
-            for key in eligible:
-                if key in cur_stubs or (key[0].split("/")[-1], key[1]) in cur_stubs:
-                    permanently_exhausted.add(key)
-            _log(f"  {tag} post-merge iter {iter_n}: "
-                 f"{sub.get('fns_filled', 0)} fn(s) filled, "
-                 f"{sub.get('attempts', 0)} attempt(s).")
-        _log(f"  {tag} post-merge hard cap {hard_cap} reached (safety net).")
-
-    @staticmethod
-    def _cluster_check_cmd(cluster: "BuildCluster") -> str:
-        """Build the cargo check command. Cluster-specific flags are passed
-        via env_extra (RUSTFLAGS etc.), not via --features — that distinction
-        depends on which cfg names are real Cargo features vs --cfg flags,
-        and task0_cfg_scan has already encoded the right form in env_extra.
-        Toolchain is applied via `cargo +nightly` when required."""
-        # Default message format (not --message-format=short) so the model
-        # sees rustc's `note:` and `help:` hints alongside the bare error,
-        # which often points directly at the fix (e.g. "consider importing
-        # one of these traits: ...").
-        parts = ["cargo", "check"]
-        if cluster.toolchain:
-            parts = ["cargo", f"+{cluster.toolchain}"] + parts[1:]
-        return shlex.join(parts)
-
-    @staticmethod
-    def _cluster_env(cluster: "BuildCluster") -> dict:
-        """Cargo env with cluster's env_extra merged in."""
-        env = _cargo_env()
-        env.update(cluster.env_extra or {})
-        return env
-
-
 def _is_proc_macro_crate(cargo_toml_text: str) -> bool:
     """True if Cargo.toml declares `proc-macro = true`. (Regex kept in pipeline — Option 1.)"""
     return _cargo_is_proc_macro(cargo_toml_text)
@@ -11975,7 +11303,7 @@ def _task2_generator_factory() -> Task2Generator:
     if backend == "static":
         return _new_static_task2_generator()
     if backend == "skeleton":
-        return StaticSkeletonTask2Generator()
+        return _new_skeleton_task2_generator()
     return _new_filelist_task2_generator()  # default: filelist
 
 
