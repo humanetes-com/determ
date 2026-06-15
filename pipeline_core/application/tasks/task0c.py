@@ -16,6 +16,7 @@ import json
 import os
 import sys
 import time
+from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -837,121 +838,61 @@ def _engine_build_prompt_sections(
     }
 
 
-def task0c_augment_module(
+@dataclass(frozen=True, slots=True)
+class _PreflightCtx:
+    """Collaborators for the pre-augmentation harness compile-and-repair phase."""
+
+    log: Callable[[str], None]
+    emit: Callable[..., None]
+    is_test_file: Callable[[Path, Path], bool]
+    ask: Callable[..., str]
+    write: Callable[[Path, str], None]
+    extract_files: Callable[[str], dict[str, str]]
+    subprocess: Any
+    build_timeout: int
+    fix_thinking_directive: str
+    task0c_model: str
+    cargo_env: Callable[[], dict[str, str]]
+    match_gen_tests_sibling: Callable[[str], Any]
+    strip_gen_tests_decl_n: Callable[[str, int], str]
+    strip_all_gen_tests_artifacts: Callable[[Path], int]
+    is_gen_tests_file: Callable[[str], bool]
+    error_signatures_from_output: Callable[[str], frozenset[str]]
+    check_stop: Callable[[str], None]
+
+
+def _run_harness_preflight(
+    *,
     project_dir: Path,
     module_name: str,
     module_dir: Path,
-    deps: Task0cDeps,
-    crate_type: str = "",
-    existing_test_files: set[str] | None = None,
-    project_context: str = "",
-    coverage_strategy: str = "",
-) -> tuple[float, int, bool, str]:
+    augmentor: Any,
+    ctx: _PreflightCtx,
+) -> tuple[float, int, bool, str] | None:
+    """Ensure the module's test harness compiles before augmentation.
+
+    Two-stage check (lib, then full harness), an LLM repair fix-loop, and the
+    targeted→full→git-restore strip escalation ladder. Returns an early-exit
+    result tuple when augmentation must be skipped, or ``None`` to proceed.
+    Body moved VERBATIM from ``task0c_augment_module`` (W5 thinning, slice 1).
     """
-    Generate unit tests (#[cfg(test)] blocks appended inline) for a module
-    until tarpaulin reports 100% coverage or MAX_RETRIES is exhausted.
-    Returns final coverage percentage.
-    """
-    # slice 5b: rebind injected collaborators as locals so the body below is verbatim.
-    BUILD_TIMEOUT = deps.BUILD_TIMEOUT
-    _COVERAGE_TARGET = deps.COVERAGE_TARGET
-    TASK0C_PROMPT_CHAR_CAP = deps.TASK0C_PROMPT_CHAR_CAP
-    _FIX_ERR_CAP = deps.FIX_ERR_CAP
-    _SIBLING_CAP = deps.SIBLING_CAP
-    _SRC_SNIP_CAP = deps.SRC_SNIP_CAP
-    _TASK0C_FIX_THINKING_DIRECTIVE = deps.TASK0C_FIX_THINKING_DIRECTIVE
-    _TASK0C_MODEL = deps.TASK0C_MODEL
-    _TASK0C_THINKING_DIRECTIVE = deps.TASK0C_THINKING_DIRECTIVE
-    _WORKING_CAP = deps.WORKING_CAP
-    _annotate_uncovered = deps.annotate_uncovered
-    _block_is_prose = deps.block_is_prose
-    _build_gen_tests_decl = deps.build_gen_tests_decl
-    _build_task0c_prompt_sections = functools.partial(_engine_build_prompt_sections, deps)
-    _cargo_env = deps.cargo_env
-    _cluster_cfg_attr = deps.cluster_cfg_attr
-    _condense_rust_to_signatures = deps.condense_rust_to_signatures
-    _count_test_attrs = deps.count_test_attrs
-    _derive_gentest_prelude = deps.derive_gentest_prelude
-    _describe_test_environment = deps.describe_test_environment
-    _error_signatures_from_output = deps.error_signatures_from_output
-    _extract_branch_guard = deps.extract_branch_guard
-    _extract_gen_tests_body = deps.extract_gen_tests_body
-    _extract_public_symbols = deps.extract_public_symbols
-    _extract_uncovered_functions = deps.extract_uncovered_functions
-    _filter_cfg_excluded_lines = deps.filter_cfg_excluded_lines
-    _filter_cfg_incompatible_lines = deps.filter_cfg_incompatible_lines
-    _flags_unreachable = deps.flags_unreachable
-    _gen_tests_path = deps.gen_tests_path
-    _get_task0c_history = functools.partial(_engine_get_history, deps)
-    _has_nonempty_test_body = deps.has_nonempty_test_body
-    _inject_allow_before_any_mod = deps.inject_allow_before_any_mod
-    _inject_allow_before_gen_mod = deps.inject_allow_before_gen_mod
-    _inject_gen_prelude_imports = deps.inject_gen_prelude_imports
-    _is_gen_tests_file = deps.is_gen_tests_file
-    _is_structural_line = deps.is_structural_line
-    _load_file_constraints = deps.load_file_constraints
-    _log_task0c_attempt = functools.partial(_engine_log_attempt, deps)
-    _mark_phase = deps.mark_phase
-    _match_gen_tests_sibling = deps.match_gen_tests_sibling
-    _next_gen_tests_n = deps.next_gen_tests_n
-    _nightly_rules_for_cluster = deps.nightly_rules_for_cluster
-    _parse_attempt_number = deps.parse_attempt_number
-    _parse_retrospective_categories = deps.parse_retrospective_categories
-    _partition_uncovered_lines = deps.partition_uncovered_lines
-    _prelude_import_names = deps.prelude_import_names
-    _quick_file_coverage = deps.quick_file_coverage
-    _read_all_gen_tests = deps.read_all_gen_tests
-    _read_state = deps.read_state
-    _revert_gen_tests_pass = deps.revert_gen_tests_pass
-    _select_relevant_siblings = deps.select_relevant_siblings
-    _set_current = deps.set_current
-    _source_hash = deps.source_hash
-    _strip_all_gen_tests_artifacts = deps.strip_all_gen_tests_artifacts
-    _strip_gen_tests_decl_n = deps.strip_gen_tests_decl_n
-    _strip_gen_tests_decls = deps.strip_gen_tests_decls
-    _strip_trailing_file_tag = deps.strip_trailing_file_tag
-    _check_stop = deps.check_stop
-    _task0c_mutation_pass = functools.partial(_engine_mutation_pass, deps)
-    _task0c_pragma_pass = functools.partial(_engine_pragma_pass, deps)
-    _task0c_retrospective = functools.partial(_engine_retrospective, deps)
-    _task0c_targeted_pragma = functools.partial(_engine_targeted_pragma, deps)
-    _test_augmentor_factory = deps.test_augmentor_factory
-    ask = deps.ask
-    extract_files = deps.extract_files
-    extract_test_mod = deps.extract_test_mod
-    generate_fix_loop = deps.generate_fix_loop
-    generate_in_parallel = deps.generate_in_parallel
-    is_test_file = deps.is_test_file
-    write = deps.write
-    subprocess = deps.subprocess
-    _current_cluster = deps.get_current_cluster()
-    _coverage_provider = deps.coverage_provider
-    _log = log
-    _emit = emit
-    if existing_test_files is None:
-        existing_test_files = set()
-
-    # Cluster label for log messages — shows which compiler configuration is active.
-    _cluster_label = _current_cluster.name if _current_cluster else "stable"
-
-    # Split-and-merge degree for per-file generation, from the single global
-    # PIPELINE_PARALLELISM knob (legacy TASK0C_SPLIT_N is dead). 1 = legacy
-    # single-shot. >1 = partition the file's uncovered functions into N disjoint
-    # subsets, generate a test block for each CONCURRENTLY (shared-prefix prompts
-    # batch on the GPU), then commit each block through the normal compile-fix
-    # loop so survivors accumulate (additive coverage). Generation is parallel;
-    # every cargo/coverage call stays serial (no shared-target/ race). Coverage
-    # (quick-cov) runs once on the merged result. See _partition_uncovered_lines.
-    _split_n = max(1, int(os.getenv("PIPELINE_PARALLELISM", "1")))
-    if _split_n > 1:
-        _log(f"  [{module_name}/{_cluster_label}] split-and-merge generation enabled: "
-             f"PIPELINE_PARALLELISM={_split_n} (subset blocks concurrent; compile+cov serial).")
-
-    augmentor = _test_augmentor_factory()
-
-    if not augmentor.is_applicable(crate_type):
-        _log(f"  [{module_name}] crate type '{crate_type}' not applicable for augmentation — skipping.")
-        return 100.0, 0, False, ""  # treat as done
+    _log = ctx.log
+    _emit = ctx.emit
+    is_test_file = ctx.is_test_file
+    ask = ctx.ask
+    write = ctx.write
+    extract_files = ctx.extract_files
+    subprocess = ctx.subprocess
+    BUILD_TIMEOUT = ctx.build_timeout
+    _TASK0C_FIX_THINKING_DIRECTIVE = ctx.fix_thinking_directive
+    _TASK0C_MODEL = ctx.task0c_model
+    _cargo_env = ctx.cargo_env
+    _match_gen_tests_sibling = ctx.match_gen_tests_sibling
+    _strip_gen_tests_decl_n = ctx.strip_gen_tests_decl_n
+    _strip_all_gen_tests_artifacts = ctx.strip_all_gen_tests_artifacts
+    _is_gen_tests_file = ctx.is_gen_tests_file
+    _error_signatures_from_output = ctx.error_signatures_from_output
+    _check_stop = ctx.check_stop
 
     # Pre-flight: two-stage compile check.
     # Stage 1: library only — if broken, skip (not TASK 0c's job to fix implementation).
@@ -993,7 +934,7 @@ def task0c_augment_module(
 
     def _error_signatures(cargo_output: str) -> frozenset[str]:
         """Extract stable error signatures — error code + message, no file/line numbers."""
-        return _error_signatures_from_output(cargo_output)  # type: ignore[no-any-return]
+        return _error_signatures_from_output(cargo_output)
 
     def _is_protected_test_file(p: Path) -> bool:
         """Original test files we must never rewrite or strip — they are the
@@ -1221,6 +1162,152 @@ corrected content here
             else:
                 _log(f"  [{module_name}] Harness fixed by targeted strip.")
 
+    return None
+
+
+def task0c_augment_module(
+    project_dir: Path,
+    module_name: str,
+    module_dir: Path,
+    deps: Task0cDeps,
+    crate_type: str = "",
+    existing_test_files: set[str] | None = None,
+    project_context: str = "",
+    coverage_strategy: str = "",
+) -> tuple[float, int, bool, str]:
+    """
+    Generate unit tests (#[cfg(test)] blocks appended inline) for a module
+    until tarpaulin reports 100% coverage or MAX_RETRIES is exhausted.
+    Returns final coverage percentage.
+    """
+    # slice 5b: rebind injected collaborators as locals so the body below is verbatim.
+    BUILD_TIMEOUT = deps.BUILD_TIMEOUT
+    _COVERAGE_TARGET = deps.COVERAGE_TARGET
+    TASK0C_PROMPT_CHAR_CAP = deps.TASK0C_PROMPT_CHAR_CAP
+    _FIX_ERR_CAP = deps.FIX_ERR_CAP
+    _SIBLING_CAP = deps.SIBLING_CAP
+    _SRC_SNIP_CAP = deps.SRC_SNIP_CAP
+    _TASK0C_FIX_THINKING_DIRECTIVE = deps.TASK0C_FIX_THINKING_DIRECTIVE
+    _TASK0C_MODEL = deps.TASK0C_MODEL
+    _TASK0C_THINKING_DIRECTIVE = deps.TASK0C_THINKING_DIRECTIVE
+    _WORKING_CAP = deps.WORKING_CAP
+    _annotate_uncovered = deps.annotate_uncovered
+    _block_is_prose = deps.block_is_prose
+    _build_gen_tests_decl = deps.build_gen_tests_decl
+    _build_task0c_prompt_sections = functools.partial(_engine_build_prompt_sections, deps)
+    _cargo_env = deps.cargo_env
+    _cluster_cfg_attr = deps.cluster_cfg_attr
+    _condense_rust_to_signatures = deps.condense_rust_to_signatures
+    _count_test_attrs = deps.count_test_attrs
+    _derive_gentest_prelude = deps.derive_gentest_prelude
+    _describe_test_environment = deps.describe_test_environment
+    _error_signatures_from_output = deps.error_signatures_from_output
+    _extract_branch_guard = deps.extract_branch_guard
+    _extract_gen_tests_body = deps.extract_gen_tests_body
+    _extract_public_symbols = deps.extract_public_symbols
+    _extract_uncovered_functions = deps.extract_uncovered_functions
+    _filter_cfg_excluded_lines = deps.filter_cfg_excluded_lines
+    _filter_cfg_incompatible_lines = deps.filter_cfg_incompatible_lines
+    _flags_unreachable = deps.flags_unreachable
+    _gen_tests_path = deps.gen_tests_path
+    _get_task0c_history = functools.partial(_engine_get_history, deps)
+    _has_nonempty_test_body = deps.has_nonempty_test_body
+    _inject_allow_before_any_mod = deps.inject_allow_before_any_mod
+    _inject_allow_before_gen_mod = deps.inject_allow_before_gen_mod
+    _inject_gen_prelude_imports = deps.inject_gen_prelude_imports
+    _is_gen_tests_file = deps.is_gen_tests_file
+    _is_structural_line = deps.is_structural_line
+    _load_file_constraints = deps.load_file_constraints
+    _log_task0c_attempt = functools.partial(_engine_log_attempt, deps)
+    _mark_phase = deps.mark_phase
+    _match_gen_tests_sibling = deps.match_gen_tests_sibling
+    _next_gen_tests_n = deps.next_gen_tests_n
+    _nightly_rules_for_cluster = deps.nightly_rules_for_cluster
+    _parse_attempt_number = deps.parse_attempt_number
+    _parse_retrospective_categories = deps.parse_retrospective_categories
+    _partition_uncovered_lines = deps.partition_uncovered_lines
+    _prelude_import_names = deps.prelude_import_names
+    _quick_file_coverage = deps.quick_file_coverage
+    _read_all_gen_tests = deps.read_all_gen_tests
+    _read_state = deps.read_state
+    _revert_gen_tests_pass = deps.revert_gen_tests_pass
+    _select_relevant_siblings = deps.select_relevant_siblings
+    _set_current = deps.set_current
+    _source_hash = deps.source_hash
+    _strip_all_gen_tests_artifacts = deps.strip_all_gen_tests_artifacts
+    _strip_gen_tests_decl_n = deps.strip_gen_tests_decl_n
+    _strip_gen_tests_decls = deps.strip_gen_tests_decls
+    _strip_trailing_file_tag = deps.strip_trailing_file_tag
+    _check_stop = deps.check_stop
+    _task0c_mutation_pass = functools.partial(_engine_mutation_pass, deps)
+    _task0c_pragma_pass = functools.partial(_engine_pragma_pass, deps)
+    _task0c_retrospective = functools.partial(_engine_retrospective, deps)
+    _task0c_targeted_pragma = functools.partial(_engine_targeted_pragma, deps)
+    _test_augmentor_factory = deps.test_augmentor_factory
+    ask = deps.ask
+    extract_files = deps.extract_files
+    extract_test_mod = deps.extract_test_mod
+    generate_fix_loop = deps.generate_fix_loop
+    generate_in_parallel = deps.generate_in_parallel
+    is_test_file = deps.is_test_file
+    write = deps.write
+    subprocess = deps.subprocess
+    _current_cluster = deps.get_current_cluster()
+    _coverage_provider = deps.coverage_provider
+    _log = log
+    _emit = emit
+    if existing_test_files is None:
+        existing_test_files = set()
+
+    # Cluster label for log messages — shows which compiler configuration is active.
+    _cluster_label = _current_cluster.name if _current_cluster else "stable"
+
+    # Split-and-merge degree for per-file generation, from the single global
+    # PIPELINE_PARALLELISM knob (legacy TASK0C_SPLIT_N is dead). 1 = legacy
+    # single-shot. >1 = partition the file's uncovered functions into N disjoint
+    # subsets, generate a test block for each CONCURRENTLY (shared-prefix prompts
+    # batch on the GPU), then commit each block through the normal compile-fix
+    # loop so survivors accumulate (additive coverage). Generation is parallel;
+    # every cargo/coverage call stays serial (no shared-target/ race). Coverage
+    # (quick-cov) runs once on the merged result. See _partition_uncovered_lines.
+    _split_n = max(1, int(os.getenv("PIPELINE_PARALLELISM", "1")))
+    if _split_n > 1:
+        _log(f"  [{module_name}/{_cluster_label}] split-and-merge generation enabled: "
+             f"PIPELINE_PARALLELISM={_split_n} (subset blocks concurrent; compile+cov serial).")
+
+    augmentor = _test_augmentor_factory()
+
+    if not augmentor.is_applicable(crate_type):
+        _log(f"  [{module_name}] crate type '{crate_type}' not applicable for augmentation — skipping.")
+        return 100.0, 0, False, ""  # treat as done
+
+    _preflight = _run_harness_preflight(
+        project_dir=project_dir,
+        module_name=module_name,
+        module_dir=module_dir,
+        augmentor=augmentor,
+        ctx=_PreflightCtx(
+            log=_log,
+            emit=_emit,
+            is_test_file=is_test_file,
+            ask=ask,
+            write=write,
+            extract_files=extract_files,
+            subprocess=subprocess,
+            build_timeout=BUILD_TIMEOUT,
+            fix_thinking_directive=_TASK0C_FIX_THINKING_DIRECTIVE,
+            task0c_model=_TASK0C_MODEL,
+            cargo_env=_cargo_env,
+            match_gen_tests_sibling=_match_gen_tests_sibling,
+            strip_gen_tests_decl_n=_strip_gen_tests_decl_n,
+            strip_all_gen_tests_artifacts=_strip_all_gen_tests_artifacts,
+            is_gen_tests_file=_is_gen_tests_file,
+            error_signatures_from_output=_error_signatures_from_output,
+            check_stop=_check_stop,
+        ),
+    )
+    if _preflight is not None:
+        return _preflight
 
     # Derive allow attributes and prelude imports from project source — no LLM.
     _allow_line, _prelude_block = _derive_gentest_prelude(project_dir)
