@@ -93,10 +93,9 @@ layers = [
 ]
 
 [[tool.mypy.overrides]]
-# The extracted package is new and clean — held to the strict flag set (P0 of the
-# FINAL-RESULT PLAN). `strict = true` isn't valid in a per-module override, so the
-# flags are enumerated. Deliberately NOT enabled: no_implicit_reexport (pipeline.py
-# consumes the package through re-export shims until P5 deletes them).
+# The extracted package is new and clean — held to the FULL strict flag set (P0 of
+# the FINAL-RESULT PLAN). `strict = true` isn't valid in a per-module override, so
+# the flags are enumerated. This is now the complete `--strict` set for the package.
 module = "pipeline_core.*"
 strict_optional = true
 disallow_untyped_defs = true
@@ -109,4 +108,7 @@ no_implicit_optional = true
 warn_unused_ignores = true
 strict_equality = true
 extra_checks = true
+no_implicit_reexport = true  # P0 complete (P5 done): every cross-module name must be
+                             # an explicit re-export; pipeline.py still imports only
+                             # names the package genuinely defines/re-exports.
 warn_unreachable = true  # beyond strict: dead branches (e.g. impossible isinstance) are bugs

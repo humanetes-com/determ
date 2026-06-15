@@ -10209,14 +10209,14 @@ def _cmd_skeleton_backend(project_dir: Path) -> int:
         genesis_path.write_text("# (no genesis.md available)\n", encoding="utf-8")
     existing_test_files = collect_protected_test_files(project_dir)
     backend = _new_skeleton_task2_generator()
-    ok = backend.generate(
+    ok = backend.generate(GenerationRequest(
         project_dir=project_dir,
         genesis_path=genesis_path,
         functional_req_path=fr_path,
         manifest_path=manifest_path,
         existing_test_files=existing_test_files,
         current_module=project_dir.name,
-    )
+    ))
     return 0 if ok else 8
 
 
@@ -10861,7 +10861,7 @@ from pipeline_core.application.generators.task2_generator import (  # noqa: E402
     Task2Generator,
 )
 from pipeline_core.domain.generation import (
-    GenerationRequest,  # noqa: E402,F401
+    GenerationRequest,  # noqa: E402
     SkeletonConfig,  # noqa: E402
     Task2Config,  # noqa: E402
 )

@@ -27,6 +27,7 @@ from typing import Any
 
 from ...application.reconstruct.fill_rules import is_unimplemented_body
 from ...domain.generation import (
+    GenerationRequest,
     SkeletonConfig,
     Task2Config,
     parse_gen_tests_filename,
@@ -134,30 +135,13 @@ class Task2Generator(ABC):
         return profile, workspace, build_err, locked_dep
 
     @abstractmethod
-    def generate(
-        self,
-        project_dir: Path,
-        genesis_path: Path,
-        functional_req_path: Path,
-        manifest_path: Path,
-        existing_test_files: Any,
-        project_profile: str = "",
-        workspace_structure: str = "",
-        build_error: str = "",
-        locked_dep_context: str = "",
-        current_module: str = "",
-        module_dir_rel: str = "",
-        whole_project_context: str = "",
-        coverage_strategy: str = "",
-        api_surface: str = "",
-        prev_source_context: str = "",
-    ) -> bool:
+    def generate(self, req: GenerationRequest) -> bool:
         """Write source files to disk. Returns True on success.
 
-        api_surface (when provided) is the pre-strip public-API skeleton. TASK 1
-        already received it; passing it here too prevents loss-in-translation if
-        TASK 1's requirements doc dropped any signature — TASK 2 sees the ground
-        truth directly.
+        `req` bundles every generation input (see `domain.generation.GenerationRequest`).
+        `req.api_surface` (when provided) is the pre-strip public-API skeleton: TASK 1
+        already received it; passing it here too prevents loss-in-translation if TASK 1's
+        requirements doc dropped any signature — TASK 2 sees the ground truth directly.
         """
 
 
@@ -171,13 +155,18 @@ class StaticTask2Generator(Task2Generator):
     docs: ContextDocs
     cfg: Task2Config
 
-    def generate(
-        self, project_dir: Path, genesis_path: Path, functional_req_path: Path,
-        manifest_path: Path, existing_test_files: Any, project_profile: str = "",
-        workspace_structure: str = "", build_error: str = "", locked_dep_context: str = "",
-        current_module: str = "", module_dir_rel: str = "", whole_project_context: str = "",
-        coverage_strategy: str = "", api_surface: str = "", prev_source_context: str = "",
-    ) -> bool:
+    def generate(self, req: GenerationRequest) -> bool:
+        (project_dir, genesis_path, functional_req_path, manifest_path,
+         existing_test_files) = (req.project_dir, req.genesis_path,
+                                 req.functional_req_path, req.manifest_path,
+                                 req.existing_test_files)
+        (project_profile, workspace_structure, build_error, locked_dep_context) = (
+            req.project_profile, req.workspace_structure, req.build_error,
+            req.locked_dep_context)
+        (current_module, module_dir_rel, whole_project_context, api_surface,
+         prev_source_context) = (
+            req.current_module, req.module_dir_rel, req.whole_project_context,
+            req.api_surface, req.prev_source_context)
         self.tel.log("\nTASK 2: Implementing source code from functional requirements")
         genesis = self.ws.read(genesis_path)
         functional_req = self.ws.read(functional_req_path)
@@ -304,13 +293,17 @@ class LLMTask2Generator(Task2Generator):
     docs: ContextDocs
     cfg: Task2Config
 
-    def generate(
-        self, project_dir: Path, genesis_path: Path, functional_req_path: Path,
-        manifest_path: Path, existing_test_files: Any, project_profile: str = "",
-        workspace_structure: str = "", build_error: str = "", locked_dep_context: str = "",
-        current_module: str = "", module_dir_rel: str = "", whole_project_context: str = "",
-        coverage_strategy: str = "", api_surface: str = "", prev_source_context: str = "",
-    ) -> bool:
+    def generate(self, req: GenerationRequest) -> bool:
+        (project_dir, genesis_path, functional_req_path, manifest_path,
+         existing_test_files) = (req.project_dir, req.genesis_path,
+                                 req.functional_req_path, req.manifest_path,
+                                 req.existing_test_files)
+        (project_profile, workspace_structure, build_error, locked_dep_context) = (
+            req.project_profile, req.workspace_structure, req.build_error,
+            req.locked_dep_context)
+        (current_module, module_dir_rel, whole_project_context, api_surface) = (
+            req.current_module, req.module_dir_rel, req.whole_project_context,
+            req.api_surface)
         self.tel.log("\nTASK 2: Implementing source code from functional requirements (file-by-file)")
         genesis = self.ws.read(genesis_path)
         functional_req = self.ws.read(functional_req_path)
@@ -592,13 +585,18 @@ class StaticFileListTask2Generator(Task2Generator):
     docs: ContextDocs
     cfg: Task2Config
 
-    def generate(
-        self, project_dir: Path, genesis_path: Path, functional_req_path: Path,
-        manifest_path: Path, existing_test_files: Any, project_profile: str = "",
-        workspace_structure: str = "", build_error: str = "", locked_dep_context: str = "",
-        current_module: str = "", module_dir_rel: str = "", whole_project_context: str = "",
-        coverage_strategy: str = "", api_surface: str = "", prev_source_context: str = "",
-    ) -> bool:
+    def generate(self, req: GenerationRequest) -> bool:
+        (project_dir, genesis_path, functional_req_path, manifest_path,
+         existing_test_files) = (req.project_dir, req.genesis_path,
+                                 req.functional_req_path, req.manifest_path,
+                                 req.existing_test_files)
+        (project_profile, workspace_structure, build_error, locked_dep_context) = (
+            req.project_profile, req.workspace_structure, req.build_error,
+            req.locked_dep_context)
+        (current_module, module_dir_rel, whole_project_context, coverage_strategy,
+         api_surface) = (
+            req.current_module, req.module_dir_rel, req.whole_project_context,
+            req.coverage_strategy, req.api_surface)
         self.tel.log("\nTASK 2: Implementing source code (static file list)")
         genesis = self.ws.read(genesis_path)
         functional_req = self.ws.read(functional_req_path)
@@ -608,14 +606,12 @@ class StaticFileListTask2Generator(Task2Generator):
 
         if not file_paths:
             self.tel.log("  No saved file structure — falling back to LLM file-list generator.")
+            # Pass the full request through — the VO migration intentionally drops the
+            # old positional-call's accidental omission of api_surface/prev_source_context
+            # (those default-"" only because the fallback predates those fields).
             return LLMTask2Generator(
                 tel=self.tel, llm=self.llm, ws=self.ws, docs=self.docs, cfg=self.cfg,
-            ).generate(
-                project_dir, genesis_path, functional_req_path, manifest_path,
-                existing_test_files, project_profile, workspace_structure, build_error,
-                locked_dep_context, current_module, module_dir_rel, whole_project_context,
-                coverage_strategy=coverage_strategy,
-            )
+            ).generate(req)
 
         # Filter to module scope and exclude pure test files.
         if module_dir_rel:
@@ -939,13 +935,12 @@ class StaticSkeletonTask2Generator(Task2Generator):
     ws: Workspace
     cfg: SkeletonConfig
 
-    def generate(
-        self, project_dir: Path, genesis_path: Path, functional_req_path: Path,
-        manifest_path: Path, existing_test_files: Any, project_profile: str = "",
-        workspace_structure: str = "", build_error: str = "", locked_dep_context: str = "",
-        current_module: str = "", module_dir_rel: str = "", whole_project_context: str = "",
-        coverage_strategy: str = "", api_surface: str = "", prev_source_context: str = "",
-    ) -> bool:
+    def generate(self, req: GenerationRequest) -> bool:
+        (project_dir, genesis_path, functional_req_path, manifest_path,
+         existing_test_files) = (req.project_dir, req.genesis_path,
+                                 req.functional_req_path, req.manifest_path,
+                                 req.existing_test_files)
+        current_module = req.current_module
         self.tel.log("\nTASK 2: Implementing source code (skeleton backend, per-cluster)")
         module = current_module or project_dir.name
 

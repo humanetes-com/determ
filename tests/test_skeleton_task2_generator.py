@@ -9,7 +9,7 @@ resume skips, abort guards, the validate-revert loop, and the post-merge loop
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +18,7 @@ import pytest
 from pipeline_core.application.generators.task2_generator import (
     StaticSkeletonTask2Generator,
 )
-from pipeline_core.domain.generation import SkeletonConfig
+from pipeline_core.domain.generation import GenerationRequest, SkeletonConfig
 from pipeline_core.domain.models import BuildCluster
 
 
@@ -251,13 +251,18 @@ def _gen(fake: FakeAdapter, cfg: SkeletonConfig) -> StaticSkeletonTask2Generator
         scan=fake, ws=fake, cfg=cfg)
 
 
-def _run(pd: Path, gen: StaticSkeletonTask2Generator) -> bool:
-    return gen.generate(
+def _req(pd: Path, **over: Any) -> GenerationRequest:
+    base = GenerationRequest(
         project_dir=pd, genesis_path=pd / "genesis.md",
         functional_req_path=pd / "functional_requirements.md",
         manifest_path=pd / "manifest.json",
         existing_test_files=["tests/it.rs"], current_module="crate",
     )
+    return replace(base, **over)
+
+
+def _run(pd: Path, gen: StaticSkeletonTask2Generator) -> bool:
+    return gen.generate(_req(pd))
 
 
 def test_abort_when_no_baked_clusters(tmp_path: Path) -> None:
@@ -272,12 +277,7 @@ def test_abort_when_no_test_files(tmp_path: Path) -> None:
     fake = FakeAdapter(clusters_list=[c])
     pd = _make_project(tmp_path, [c])
     ok = _gen(fake, _cfg(per_fn=True, tdd=True)).generate(
-        project_dir=pd, genesis_path=pd / "genesis.md",
-        functional_req_path=pd / "functional_requirements.md",
-        manifest_path=pd / "manifest.json",
-        existing_test_files=[],  # none on disk
-        current_module="crate",
-    )
+        _req(pd, existing_test_files=[]))  # none on disk
     assert ok is False
 
 

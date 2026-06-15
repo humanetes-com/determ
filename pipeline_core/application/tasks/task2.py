@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ...domain.generation import GenerationRequest
 from ...domain.text import trim_to_line
 from ...log import emit, log
 
@@ -54,15 +55,16 @@ def task2(project_dir: Path, genesis_path: Path, functional_req_path: Path,
     Generate source files from functional requirements.
     Implementation is selected by TASK2_GENERATOR in .env (default: static).
     """
-    return deps.generator_factory().generate(
-        project_dir, genesis_path, functional_req_path, manifest_path,
-        existing_test_files, project_profile, workspace_structure, build_error,
-        locked_dep_context, current_module, module_dir_rel,
-        whole_project_context=whole_project_context,
-        coverage_strategy=coverage_strategy,
-        api_surface=api_surface,
+    return deps.generator_factory().generate(GenerationRequest(
+        project_dir=project_dir, genesis_path=genesis_path,
+        functional_req_path=functional_req_path, manifest_path=manifest_path,
+        existing_test_files=existing_test_files, project_profile=project_profile,
+        workspace_structure=workspace_structure, build_error=build_error,
+        locked_dep_context=locked_dep_context, current_module=current_module,
+        module_dir_rel=module_dir_rel, whole_project_context=whole_project_context,
+        coverage_strategy=coverage_strategy, api_surface=api_surface,
         prev_source_context=prev_source_context,
-    )
+    ))
 
 
 def task2_inner_loop(project_dir: Path, genesis_path: Path, functional_req_path: Path,

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,7 +55,7 @@ class GenerationRequest:
     genesis_path: Path
     functional_req_path: Path
     manifest_path: Path
-    existing_test_files: object  # list[str] | set[str] — caller's collection, passed through
+    existing_test_files: Any  # list[str] | set[str] — caller's collection, passed through
     project_profile: str = ""
     workspace_structure: str = ""
     build_error: str = ""
