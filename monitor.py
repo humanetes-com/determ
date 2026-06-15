@@ -113,6 +113,7 @@ _current_stage_label = _rd.current_stage_label
 _parse_pipeline_log = _rd.parse_pipeline_log
 _read_log_tail = _rd.read_log_tail
 _parse_task_pipeline = _rd.parse_task_pipeline
+_task_progression = _ed.task_progression  # debt#7: structured-event source
 _read_backend = _rd.read_backend
 _parse_max_tokens = _rd.parse_max_tokens
 _parse_vllm_cpt = _rd.parse_vllm_cpt
@@ -589,7 +590,9 @@ def pipeline_status():
     # (The old log-parsed "phases" line was removed — the state-driven
     # _phase_bar() above is the single, granular phase display. tp is still
     # parsed below for the fix-phase detection further down.)
-    tp = _parse_task_pipeline(_read_log_tail())
+    # debt#7: prefer the structured-event progression; fall back to the log scrape
+    # until the next live run confirms the event path drives the TUI identically.
+    tp = _task_progression() or _parse_task_pipeline(_read_log_tail())
 
     # ── P3.11: Phase C per-fn panel (visible when the skeleton backend
     # is running). Pulls structured data from logs/events.jsonl.

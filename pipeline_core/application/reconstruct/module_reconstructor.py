@@ -34,6 +34,9 @@ class ModuleReconstructor:
             self._tel.log(f"\n{'=' * 50}")
             self._tel.log(f"MODULE {ctx.module_name} — ITERATION {state.iteration}")
             self._tel.log(f"{'=' * 50}")
+            # debt#7: structured module/iteration boundary (monitor reads this instead
+            # of scraping the "MODULE … — ITERATION …" log line).
+            self._tel.emit("module.iter", module=ctx.module_name, iteration=state.iteration)
 
             outcome = self._step.run(ctx, state, coverage_strategy=coverage_strategy)
             if outcome.locked:

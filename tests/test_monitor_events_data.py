@@ -33,6 +33,57 @@ def test_read_recent_events_filters_name_and_run_start(tmp_path, monkeypatch):
     assert len(got) == 1 and got[0]["data"]["n"] == 1
 
 
+def test_task_progression_from_events(tmp_path, monkeypatch):
+    # debt#7: stage progression derived from structured events (no log scrape).
+    ev = tmp_path / "events.jsonl"
+    _write(
+        ev,
+        {"event": "task.start", "task": "task0a"},
+        {"event": "task.start", "task": "task0b"},
+        {"event": "cluster.done", "cluster": "stable"},
+        {"event": "cluster.done", "cluster": "extra_cap"},
+        {"event": "module.iter", "module": "microcrate", "iteration": 0},
+        {"event": "task.start", "task": "task1"},
+        {"event": "task.start", "task": "task2"},
+        {"event": "task.start", "task": "task3"},
+        {"event": "task.done", "task": "task3", "data": {"passed": True}},
+        {"event": "task.start", "task": "task4"},
+    )
+    _patch(monkeypatch, ev, run_start=0.0)
+    tp = ed.task_progression()
+    assert tp is not None
+    assert tp["module"] == "microcrate" and tp["iteration"] == 0
+    assert tp["task0c_clusters_done"] == 2
+    assert tp["task3_pass"] is True
+    assert tp["current"] == "task4"
+    s = tp["states"]
+    assert all(s[t] == "done" for t in
+               ("task0a", "task0b", "task0c", "strip", "task1", "task2", "task3"))
+    assert s["task4"] == "in_progress"
+
+
+def test_task_progression_resets_per_iteration(tmp_path, monkeypatch):
+    ev = tmp_path / "events.jsonl"
+    _write(
+        ev,
+        {"event": "task.start", "task": "task2"},
+        {"event": "task.done", "task": "task3", "data": {"passed": False}},
+        {"event": "module.iter", "module": "m", "iteration": 1},  # new iter resets t2/3/4
+    )
+    _patch(monkeypatch, ev, run_start=0.0)
+    tp = ed.task_progression()
+    assert tp is not None and tp["iteration"] == 1
+    assert tp["states"]["task2"] == "pending"  # reset by module.iter
+    assert tp["states"]["task3"] == "pending"
+
+
+def test_task_progression_none_without_events(tmp_path, monkeypatch):
+    ev = tmp_path / "events.jsonl"
+    _write(ev, {"event": "llm.request", "model": "m"})  # unrelated event only
+    _patch(monkeypatch, ev, run_start=0.0)
+    assert ed.task_progression() is None
+
+
 def test_coverage_from_events_latest_wins(tmp_path, monkeypatch):
     ev = tmp_path / "events.jsonl"
     _write(

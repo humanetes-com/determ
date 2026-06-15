@@ -46,6 +46,62 @@ def pipeline_start_time() -> float:
     return 0.0
 
 
+_TASKS_ORDER = ("task0a", "task0b", "task0c", "strip", "task1", "task2", "task3", "task4")
+
+
+def task_progression() -> dict[str, Any] | None:
+    """debt#7: derive the overall task-progression from STRUCTURED events — the
+    event-based replacement for `run_data.parse_task_pipeline`'s log regex-scrape.
+
+    Replays this run's `task.start`/`task.done`/`module.iter`/`cluster.done` records
+    into the same shape the log parser returns: {states, current, iteration, module,
+    task0c_clusters_done, task3_pass}. Returns None when no stage events exist yet
+    (the pipeline predates the emit, or none have landed) so the caller can fall back
+    to the log scrape. Linear-pipeline model: a `task.start` marks that task
+    in_progress and every canonical predecessor done; `module.iter` resets the
+    per-iteration tasks (task2/3/4)."""
+    evs = read_recent_events(
+        lambda n: n in ("task.start", "task.done", "module.iter", "cluster.done"))
+    if not evs:
+        return None
+    states: dict[str, str] = dict.fromkeys(_TASKS_ORDER, "pending")
+    current: str | None = None
+    iteration: int | None = None
+    module: str | None = None
+    task0c_clusters_done = 0
+    task3_pass: bool | None = None
+    for ev in evs:
+        name = ev.get("event", "")
+        if name == "module.iter":
+            module = ev.get("module", module)
+            it = ev.get("iteration")
+            if it is not None:
+                iteration = int(it)
+            for rt in ("task2", "task3", "task4"):
+                states[rt] = "pending"
+            current = None
+        elif name == "task.start":
+            t = ev.get("task")
+            if t in states:
+                for pred in _TASKS_ORDER[:_TASKS_ORDER.index(t)]:
+                    states[pred] = "done"
+                states[t] = "in_progress"
+                current = t
+        elif name == "task.done":
+            t = ev.get("task")
+            if t in states:
+                states[t] = "done"
+            if t == "task3":
+                task3_pass = bool((ev.get("data") or {}).get("passed"))
+        elif name == "cluster.done":
+            task0c_clusters_done += 1
+    return {
+        "states": states, "current": current, "iteration": iteration,
+        "module": module, "task0c_clusters_done": task0c_clusters_done,
+        "task3_pass": task3_pass,
+    }
+
+
 def read_recent_events(want: Callable[[str], bool]) -> list[dict[str, Any]]:
     """Tail events.jsonl (last 1 MB) → this run's records whose event name passes `want`.
 

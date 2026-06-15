@@ -65,7 +65,7 @@ def strip_and_bake_module(
     if crate_type != "proc-macro" and d.tarpaulin_bin.exists():
         _sentinel_path = d.module_augmented_path(project_dir, module_name)
         try:
-            _strip_cov = float(_sentinel_path.read_text().strip().rstrip('%'))
+            _strip_cov = float(_sentinel_path.read_text().strip())  # R8.4: numeric sentinel
         except (ValueError, OSError):
             _strip_cov = 0.0
         if _strip_cov < d.coverage_target:

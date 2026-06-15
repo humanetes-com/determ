@@ -3345,7 +3345,7 @@ def is_cluster_augmented(project_dir: Path, cluster_name: str, module_name: str)
 def mark_cluster_augmented(project_dir: Path, cluster_name: str, module_name: str, cov: float) -> None:
     p = _cluster_augmented_path(project_dir, cluster_name, module_name)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(f"{cov:.1f}%\n")
+    p.write_text(f"{cov:.1f}\n")  # R8.4: bare numeric (no '%' text round-trip)
 
 
 def _nightly_rules_for_cluster() -> str:
@@ -10805,6 +10805,7 @@ def _task1_synthesizer_factory() -> Task1Synthesizer:
 def task1(project_dir, genesis_path, functional_req_path, test_files, readme_text,
           project_profile: str = "", crate_type: str = "", module_name: str = "",
           project_context: str = "", coverage_strategy: str = ""):
+    _emit("task.start", task="task1")  # debt#7: structured stage event (monitor reads these)
     # slice 5b: extracted to application.tasks.task1; thin shim binding deps.
     return _task1_impl(
         project_dir, genesis_path, functional_req_path, test_files, readme_text, _TASK1_DEPS,
@@ -11357,6 +11358,7 @@ def task2_inner_loop(project_dir, genesis_path, functional_req_path, manifest_pa
                      current_module: str = "", module_dir_rel: str = "",
                      whole_project_context: str = "", coverage_strategy: str = "",
                      api_surface: str = "", prev_source_context: str = ""):
+    _emit("task.start", task="task2")  # debt#7: structured stage event
     # slice 5b: extracted to application.tasks.task2; thin shim binding deps.
     return _task2_inner_impl(
         project_dir, genesis_path, functional_req_path, manifest_path, existing_test_files,
@@ -12478,10 +12480,12 @@ def _emit_per_file_test_overview(project_dir: Path, output: str, *, context: str
 
 
 def task3(project_dir, test_command, iteration, output_dir, genesis_path):
+    _emit("task.start", task="task3")  # debt#7: structured stage event
     # slice 5b: extracted to pipeline_core.application.tasks.task3; thin shim binding deps.
     passed, test_output = _task3_impl(
         project_dir, test_command, iteration, output_dir, genesis_path, _TASK3_DEPS
     )
+    _emit("task.done", task="task3", data={"passed": bool(passed)})  # debt#7: aggregate verdict
     _emit_per_file_test_overview(
         Path(project_dir), extract_test_output_from_file(test_output),
         context=f"task3 iter {iteration}",
@@ -12583,6 +12587,7 @@ def task4(genesis_path, functional_req_path, test_output, iteration, output_dir,
           failure_type: str = "test", failure_log: str = "",
           prev_pass_count: int = 0, prev_test_output: str = "",
           source_context: str = "", api_surface: str = ""):
+    _emit("task.start", task="task4")  # debt#7: structured stage event
     # slice 5b: extracted to pipeline_core.application.tasks.task4; thin shim binding deps.
     return _task4_impl(
         genesis_path, functional_req_path, test_output, iteration, output_dir, _TASK4_DEPS,
@@ -14416,7 +14421,7 @@ def is_module_augmented(project_dir: Path, module_name: str) -> bool:
 def mark_module_augmented(project_dir: Path, module_name: str, coverage: float) -> None:
     p = _module_augmented_path(project_dir, module_name)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(f"{coverage:.1f}%\n")
+    p.write_text(f"{coverage:.1f}\n")  # R8.4: bare numeric (no '%' text round-trip)
 
 
 # Strip subsystem moved to pipeline_core.adapters.strip (P5-S2). Shims keep the
@@ -15226,6 +15231,7 @@ def main():
         # This is the "big picture" document injected into every task — especially TASK 0c
         # which currently receives no project-level context. Works even without README.
         context_path = project_dir / PROJECT_CONTEXT_NAME
+        _emit("task.start", task="task0a")  # debt#7: structured stage event
         project_context = task0_project_context(context_path, test_files, readme_text, project_profile)
 
         # TASK 0b (discovery): produce coverage_strategy.md — import idioms, type construction
@@ -15233,6 +15239,7 @@ def main():
         # Skip if either pipeline_state marks task0b done, or the artifact already
         # exists from a prior run that predates state tracking (auto-backfill).
         strategy_path = project_dir / COVERAGE_STRATEGY_NAME
+        _emit("task.start", task="task0b")  # debt#7: structured stage event
         if _phase_valid(project_dir, "task0b"):
             coverage_strategy = strategy_path.read_text().strip() if strategy_path.exists() else ""
             _log(f"  task0b already done — loading coverage_strategy.md ({len(coverage_strategy):,} chars).")
@@ -15346,7 +15353,7 @@ def main():
                 if _is_last_cluster and not is_module_augmented(project_dir, _m):
                     _cov_str = _cluster_augmented_path(project_dir, _cluster.name, _m).read_text().strip()
                     try:
-                        _cov_val = float(_cov_str.rstrip("%"))
+                        _cov_val = float(_cov_str)  # R8.4: numeric sentinel
                     except ValueError:
                         _cov_val = 0.0
                     mark_module_augmented(project_dir, _m, _cov_val)
@@ -15460,7 +15467,7 @@ def main():
               duration_ms=int((time.monotonic() - _cluster_t0) * 1000),
               data={"modules_done": sorted(_cluster_done)})
         _cov_summary = ", ".join(
-            f"{_m}:{_cluster_augmented_path(project_dir, _cluster.name, _m).read_text().strip()}"
+            f"{_m}:{_cluster_augmented_path(project_dir, _cluster.name, _m).read_text().strip()}%"
             for _m in _cluster_done
             if _cluster_augmented_path(project_dir, _cluster.name, _m).exists()
         )
@@ -15512,7 +15519,7 @@ def main():
         if crate_type != "proc-macro" and TARPAULIN_BIN.exists():
             _sentinel_path = _module_augmented_path(project_dir, module_name)
             try:
-                _final_cov = float(_sentinel_path.read_text().strip().rstrip('%'))
+                _final_cov = float(_sentinel_path.read_text().strip())  # R8.4: numeric sentinel
             except (ValueError, OSError):
                 _final_cov = 0.0
             if _final_cov < COVERAGE_AUGMENTATION_TARGET:
