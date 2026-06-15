@@ -18,6 +18,38 @@ _IDENT_START = frozenset(string.ascii_letters + "_")
 _IDENT_CHARS = _IDENT_START | frozenset(string.digits)
 
 
+def _has_word(text: str, word: str) -> bool:
+    """True when `word` occurs in `text` as a whole identifier token (regex `\\bword\\b`):
+    neither neighbour is an identifier char."""
+    start = 0
+    while (k := text.find(word, start)) >= 0:
+        before = text[k - 1] if k > 0 else ""
+        after = text[k + len(word)] if k + len(word) < len(text) else ""
+        if before not in _IDENT_CHARS and after not in _IDENT_CHARS:
+            return True
+        start = k + 1
+    return False
+
+
+def use_imports_symbol(block: str, prefixes: Sequence[str], symbol: str) -> bool:
+    """True when `block` already has a `use <prefix>…<symbol>…` import — the
+    presence check the gen-prelude injector uses to avoid double-importing
+    (regex-free, R7; replaces `use (?:std|alloc)::[^;]*\\bSymbol\\b`-style patterns).
+    Scans each `use ` occurrence, requires the text right after `use ` to start
+    with one of `prefixes`, and `symbol` to appear as a whole identifier token
+    within that statement (up to its terminating `;`)."""
+    needle = "use "
+    pos = 0
+    while (u := block.find(needle, pos)) >= 0:
+        semi = block.find(";", u)
+        stmt = block[u: semi if semi >= 0 else len(block)]
+        body = stmt[len(needle):]
+        if any(body.startswith(p) for p in prefixes) and _has_word(stmt, symbol):
+            return True
+        pos = u + len(needle)
+    return False
+
+
 def _leading_ident(token: str) -> str:
     """The leading Rust identifier of ``token`` (``foo(`` → ``foo``, ``Bar<T>`` → ``Bar``)."""
     out: list[str] = []

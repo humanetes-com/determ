@@ -436,6 +436,7 @@ class FillOneFn:
             on_failure=_on_fn_failure,
             on_stall=_on_fn_stall,
             on_repeated=_on_fn_repeated,
+            check_stop=self.tel.check_stop,
         )
 
         if not success:

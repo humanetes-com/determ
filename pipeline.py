@@ -169,7 +169,7 @@ from pipeline_core.domain.refine import FloorStall as _FloorStall
 from pipeline_core.domain.refine import (
     LoopState as _LoopState,
 )
-from pipeline_core.domain.rust_scan import count_cfg_attrs
+from pipeline_core.domain.rust_scan import count_cfg_attrs, use_imports_symbol
 from pipeline_core.domain.test_results import (
     OUTPUT_SEPARATOR,
     _parse_test_counts,
@@ -180,6 +180,7 @@ from pipeline_core.domain.test_results import (
     identifiers_in,
     insert_no_run,
     per_file_test_stats,
+    rustc_error_signatures,
     validate_task3_output_strict,
 )
 from pipeline_core.domain.test_results import (
@@ -2497,15 +2498,9 @@ def _count_active_tests_for_cluster(
         return total
 
     # 2. gen_tests siblings — gated by their parent file's #[path] decl.
-    decl_re = re.compile(
-        r"(?:#\[cfg\(([^)]+)\)\][^\n]*\n)?"
-        r"\s*#\[cfg\(test\)\][^\n]*\n"
-        r"(?:\s*#\[[^\n]*\][^\n]*\n)*"
-        r'\s*#\[path\s*=\s*"([^"]+\.gen_tests_\d+\.rs)"\][^\n]*\n'
-        r"\s*mod\s+gen_tests_\d+\s*;",
-    )
+    # (R7: structured decl scan — see domain.generation.gen_tests_decl_blocks.)
     for parent in src_dir.glob("*.rs"):
-        if re.search(r"\.gen_tests_\d+\.rs$", parent.name):
+        if _is_gen_tests_file(parent.name):
             continue
         # A parent file that never compiles under this cluster (mod-decl chain
         # cfg'd out) takes its gen_tests siblings with it.
@@ -2515,9 +2510,9 @@ def _count_active_tests_for_cluster(
             ptext = parent.read_text(encoding="utf-8", errors="replace")
         except Exception:
             continue
-        for m in decl_re.finditer(ptext):
-            gate = (m.group(1) or "").strip()
-            sib_name = m.group(2)
+        for decl in _gen_tests_decl_blocks(ptext):
+            gate = decl.gate.strip()
+            sib_name = decl.sibling_name or ""
             if gate:
                 v = _eval_cfg_pred(gate, cfg_true, cfg_false)
                 if v is False:
@@ -2537,7 +2532,7 @@ def _count_active_tests_for_cluster(
 
     # 3. src/**/*.rs (excluding gen_tests siblings) — inline test mods.
     for srf in src_dir.rglob("*.rs"):
-        if re.search(r"\.gen_tests_\d+\.rs$", srf.name):
+        if _is_gen_tests_file(srf.name):
             continue
         if not _file_active_for_cluster(src_dir, srf, cfg_true, cfg_false):
             continue
@@ -7161,15 +7156,12 @@ def _splice_lock_for(tree: Path) -> "_threading_mod.Lock":
 
 # THE fix-loop driver — relocated to the application layer (P1) so task0c
 # can drive it too; these aliases keep every call site + test pin unchanged.
-import pipeline_core.application.fix_loop as _pcfix_loop  # noqa: E402
 from pipeline_core.application.fix_loop import (  # noqa: E402
     FixOutcome as _FixOutcome,
 )
 from pipeline_core.application.fix_loop import (  # noqa: E402
     drive_fix_loop as _drive_fix_loop,
 )
-
-_pcfix_loop.configure(check_stop=_check_graceful_stop)
 
 
 def _phase_c_fill_impl_blocks(
@@ -7605,6 +7597,7 @@ def _phase_c_fill_impl_blocks(
             on_failure=_on_impl_failure,
             on_stall=_on_impl_stall,
             on_repeated=_on_impl_repeated,
+            check_stop=_check_graceful_stop,
         )
         if members_filled_this_block == 0:
             impls_failed += 1
@@ -10862,6 +10855,21 @@ from pipeline_core.domain.generation import (
     Task1Config,  # noqa: E402
     Task2Config,  # noqa: E402
 )
+from pipeline_core.domain.generation import (
+    gen_tests_decl_blocks as _gen_tests_decl_blocks,  # noqa: E402
+)
+from pipeline_core.domain.generation import (
+    parse_gen_tests_filename as _parse_gen_tests_filename,  # noqa: E402
+)
+from pipeline_core.domain.generation import (
+    strip_all_gen_tests_decls as _strip_all_gen_tests_decls,  # noqa: E402
+)
+from pipeline_core.domain.generation import (
+    strip_gen_tests_decl as _strip_gen_tests_decl,  # noqa: E402
+)
+from pipeline_core.domain.generation import (
+    strip_gen_tests_decl_n as _domain_strip_gen_tests_decl_n,  # noqa: E402
+)
 
 
 class _Task2Adapter:
@@ -13061,14 +13069,6 @@ _coverage_provider: _covmod.CoverageProvider = _covmod.make_coverage_provider(
 # markers wrapping inline test blocks.
 # ─────────────────────────────────────────────────────────────────────────────
 
-GEN_TESTS_DECL_RE = re.compile(
-    r'\n*#\[cfg\(test\)\][\s\n]*'
-    r'(?:#\[[^\]]*\][\s\n]*)*'
-    r'#\[path\s*=\s*"[^"]+\.gen_tests_\d+\.rs"\][\s\n]*'
-    r'mod\s+gen_tests_\d+\s*;',
-)
-
-
 def _gen_tests_siblings(src_file: Path) -> list[tuple[int, Path]]:
     """Return [(N, path)] for all foo.gen_tests_N.rs siblings of src_file, sorted by N."""
     stem = src_file.stem
@@ -13113,8 +13113,9 @@ def _read_all_gen_tests(src_file: Path) -> str:
 
 
 def _strip_gen_tests_decls(src_text: str) -> str:
-    """Remove all gen_tests path-mod declarations from a source file's text."""
-    return GEN_TESTS_DECL_RE.sub("", src_text)
+    """Remove all gen_tests path-mod declarations from a source file's text.
+    (R7: structured domain scan — see domain.generation.strip_all_gen_tests_decls.)"""
+    return _strip_all_gen_tests_decls(src_text)
 
 
 def _is_gen_tests_file(name: str) -> bool:
@@ -13127,28 +13128,28 @@ _match_gen_tests_sibling = _discovery.match_gen_tests_sibling
 
 
 def _strip_gen_tests_decl_n(parent_text: str, pass_n: int) -> str:
-    """Remove the `#[cfg(test)] … mod gen_tests_<N>;` decl for one pass. (Regex in pipeline.)"""
-    decl_re = re.compile(
-        r'\n*#\[cfg\(test\)\][\s\n]*(?:#\[[^\]]*\][\s\n]*)*'
-        r'#\[path\s*=\s*"[^"]+"\][\s\n]*'
-        rf'mod\s+gen_tests_{pass_n}\s*;',
-    )
-    return decl_re.sub("", parent_text)
+    """Remove the `#[cfg(test)] … mod gen_tests_<N>;` decl for one pass.
+    (R7: structured domain scan — see domain.generation.strip_gen_tests_decl_n.)"""
+    return _domain_strip_gen_tests_decl_n(parent_text, pass_n)
 
 
 def _error_signatures_from_output(cargo_output: str) -> frozenset:
-    """Extract stable rustc error signatures (code + message, no file/line). (Regex in pipeline.)"""
-    return frozenset(re.findall(r'error\[E\d+\]: .+', cargo_output))
+    """Extract stable rustc error signatures (code + message, no file/line).
+    (R7: structured domain scan — see domain.test_results.rustc_error_signatures.)"""
+    return rustc_error_signatures(cargo_output)
 
 
-# Prelude imports injected into generated test modules when absent (item, presence-regex).
-_GEN_PRELUDE_ITEMS = [
-    ("use std::string::{String, ToString};", r'use (?:std|alloc)::[^;]*\bString\b'),
-    ("use std::vec::Vec;",                   r'use (?:std|alloc)::[^;]*\bVec\b'),
-    ("use std::boxed::Box;",                 r'use (?:std|alloc)::[^;]*\bBox\b'),
-    ("use std::format;",                     r'use (?:std|alloc)::[^;]*\bformat\b'),
-    ("use std::error::Error as StdError;",   r'use std::error::Error'),
-    ("use std::fmt::{self, Display, Debug};", r'use (?:std|core)::fmt'),
+# Prelude imports injected into generated test modules when absent. Each row is
+# (import_stmt, accepted `use`-prefixes, required symbol token): the import is
+# considered already present when a `use <prefix>…<symbol>…` statement exists.
+# (R7: structured presence check — see domain.rust_scan.use_imports_symbol.)
+_GEN_PRELUDE_ITEMS: list[tuple[str, tuple[str, ...], str]] = [
+    ("use std::string::{String, ToString};", ("std::", "alloc::"),      "String"),
+    ("use std::vec::Vec;",                    ("std::", "alloc::"),      "Vec"),
+    ("use std::boxed::Box;",                  ("std::", "alloc::"),      "Box"),
+    ("use std::format;",                      ("std::", "alloc::"),      "format"),
+    ("use std::error::Error as StdError;",    ("std::error::Error",),    "Error"),
+    ("use std::fmt::{self, Display, Debug};", ("std::fmt", "core::fmt"), "fmt"),
 ]
 
 
@@ -13167,8 +13168,10 @@ def _inject_allow_before_any_mod(block: str, allow_line: str) -> str:
 
 
 def _inject_gen_prelude_imports(block: str) -> str:
-    """Inject any missing std prelude imports into a generated test module. (Regex in pipeline.)"""
-    missing = [stmt for stmt, pat in _GEN_PRELUDE_ITEMS if not re.search(pat, block)]
+    """Inject any missing std prelude imports into a generated test module.
+    (R7: structured presence check — see domain.rust_scan.use_imports_symbol.)"""
+    missing = [stmt for stmt, prefixes, symbol in _GEN_PRELUDE_ITEMS
+               if not use_imports_symbol(block, prefixes, symbol)]
     if not missing:
         return block
     inject = "\n    ".join(missing)
@@ -13572,27 +13575,16 @@ def _quarantine_broken_gen_tests(project_dir: Path) -> int:
         if _rust_delimiters_balanced(text):
             continue
         # Identify the parent src file (foo.gen_tests_N.rs → foo.rs).
-        m = re.match(r"^(.*?)\.gen_tests_(\d+)\.rs$", src.name)
-        if not m:
+        parsed = _parse_gen_tests_filename(src.name)
+        if parsed is None:
             continue
-        parent_name = m.group(1) + ".rs"
-        pass_n = int(m.group(2))
-        parent = src.parent / parent_name
-        # Strip the decl block from the parent (best-effort).
+        stem, pass_n = parsed
+        parent = src.parent / f"{stem}.rs"
+        # Strip the decl block from the parent (best-effort, R7: structured scan).
         try:
             if parent.exists():
                 ptext = parent.read_text(encoding="utf-8")
-                # Match the gen_tests_N decl block: optional cfg + path
-                # attribute + mod statement.
-                decl_re = re.compile(
-                    r"\n*(?:#\[cfg\([^)]*\)\]\s*)?"
-                    r"#\s*\[\s*allow\s*\([^)]*\)\s*\][^\n]*\n*"
-                    r"#\s*\[\s*path\s*=\s*\"" + re.escape(src.name)
-                    + r"\"\s*\][^\n]*\n*"
-                    r"(?:pub\s+)?mod\s+gen_tests_" + str(pass_n)
-                    + r"\s*;\s*",
-                )
-                ptext_new = decl_re.sub("\n", ptext)
+                ptext_new = _strip_gen_tests_decl(ptext, src.name, pass_n)
                 if ptext_new != ptext:
                     parent.write_text(ptext_new, encoding="utf-8")
         except Exception:
@@ -14804,7 +14796,7 @@ def _ensure_vllm_ready(root: Path) -> None:
 _TASK0C_DEPS = Task0cDeps(
     BUILD_TIMEOUT=BUILD_TIMEOUT, COVERAGE_TARGET=COVERAGE_AUGMENTATION_TARGET, coverage_ignore_pragma=COVERAGE_IGNORE_PRAGMA, TASK0C_PROMPT_CHAR_CAP=TASK0C_PROMPT_CHAR_CAP, FIX_ERR_CAP=_FIX_ERR_CAP, SIBLING_CAP=_SIBLING_CAP, SRC_SNIP_CAP=_SRC_SNIP_CAP, TASK0C_FIX_THINKING_DIRECTIVE=_TASK0C_FIX_THINKING_DIRECTIVE, TASK0C_MODEL=_TASK0C_MODEL, TASK0C_THINKING_DIRECTIVE=_TASK0C_THINKING_DIRECTIVE, WORKING_CAP=_WORKING_CAP, annotate_uncovered=_annotate_uncovered, block_is_prose=_block_is_prose, build_gen_tests_decl=_build_gen_tests_decl, guard=_guard, cargo_env=_cargo_env, cluster_cfg_attr=_cluster_cfg_attr, condense_rust_to_signatures=_condense_rust_to_signatures, count_test_attrs=_count_test_attrs, derive_gentest_prelude=_derive_gentest_prelude, describe_test_environment=_describe_test_environment, error_signatures_from_output=_error_signatures_from_output, extract_branch_guard=_extract_branch_guard, extract_gen_tests_body=_extract_gen_tests_body, extract_public_symbols=_extract_public_symbols, extract_uncovered_functions=_extract_uncovered_functions, filter_cfg_excluded_lines=_filter_cfg_excluded_lines, filter_cfg_incompatible_lines=_filter_cfg_incompatible_lines, flags_unreachable=_flags_unreachable, gen_tests_path=_gen_tests_path, has_nonempty_test_body=_has_nonempty_test_body, inject_allow_before_any_mod=_inject_allow_before_any_mod, inject_allow_before_gen_mod=_inject_allow_before_gen_mod, inject_gen_prelude_imports=_inject_gen_prelude_imports, is_gen_tests_file=_is_gen_tests_file, is_structural_line=_is_structural_line, load_file_constraints=_load_file_constraints, type_signals_write=type_signals_write, mark_phase=_mark_phase, match_gen_tests_sibling=_match_gen_tests_sibling, next_gen_tests_n=_next_gen_tests_n, nightly_rules_for_cluster=_nightly_rules_for_cluster, parse_attempt_number=_parse_attempt_number, parse_retrospective_categories=_parse_retrospective_categories, partition_uncovered_lines=_partition_uncovered_lines, prelude_import_names=_prelude_import_names, quick_file_coverage=_quick_file_coverage, read_all_gen_tests=_read_all_gen_tests, read_state=_read_state, revert_gen_tests_pass=_revert_gen_tests_pass, select_relevant_siblings=_select_relevant_siblings, set_current=_set_current, source_hash=_source_hash, strip_all_gen_tests_artifacts=_strip_all_gen_tests_artifacts, strip_gen_tests_decl_n=_strip_gen_tests_decl_n, strip_gen_tests_decls=_strip_gen_tests_decls, strip_trailing_file_tag=_strip_trailing_file_tag, mutation_harden_file=_mutation_harden_file, gen_tests_siblings=_gen_tests_siblings, test_augmentor_factory=_test_augmentor_factory, ask=ask, extract_files=extract_files, extract_test_mod=extract_test_mod, generate_fix_loop=generate_fix_loop, generate_in_parallel=generate_in_parallel, is_test_file=is_test_file, write=write,
     subprocess=subprocess, get_current_cluster=lambda: _current_cluster,
-    coverage_provider=_coverage_provider,
+    coverage_provider=_coverage_provider, check_stop=_check_graceful_stop,
 )
 
 # P5-S3: deps for the extracted gen_tests reattach block (per-block injection).

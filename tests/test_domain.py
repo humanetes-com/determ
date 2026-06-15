@@ -291,3 +291,17 @@ def test_strip_think_blocks_matches_old_regex() -> None:
     ]
     for c in cases:
         assert text.strip_think_blocks(c) == old.sub('', c), c
+
+
+def test_rustc_error_signatures_matches_old_regex() -> None:
+    import re
+    old = lambda o: frozenset(re.findall(r'error\[E\d+\]: .+', o))  # noqa: E731
+    cases = [
+        "error[E0277]: the trait bound is not satisfied\n  --> src/a.rs:1",
+        "warning: x\nerror[E0599]: no method\nerror[E0277]: bound",
+        "error[Eabc]: malformed then error[E12]: real",
+        "error[E0001]: ",          # empty message → the greedy `.+` fails
+        "no errors", "",
+    ]
+    for c in cases:
+        assert test_results.rustc_error_signatures(c) == old(c), c

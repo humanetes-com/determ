@@ -79,3 +79,27 @@ def test_count_cfg_attrs_matches_old_regex():
 
 def test_count_cfg_attrs_no_needles():
     assert count_cfg_attrs("#[cfg(feature = \"x\")]", ()) == 0
+
+
+_PRELUDE_CASES = [
+    (("std::", "alloc::"), "String", r'use (?:std|alloc)::[^;]*\bString\b'),
+    (("std::", "alloc::"), "Vec", r'use (?:std|alloc)::[^;]*\bVec\b'),
+    (("std::error::Error",), "Error", r'use std::error::Error'),
+    (("std::fmt", "core::fmt"), "fmt", r'use (?:std|core)::fmt'),
+]
+
+
+def test_use_imports_symbol_matches_old_regex():
+    from pipeline_core.domain.rust_scan import use_imports_symbol
+    blocks = [
+        "use super::*;\nuse std::string::String;\n",
+        "use alloc::vec::Vec;\nuse core::fmt::Display;",
+        "let s: MyString = x;",            # MyString is not a `String` word match
+        "use std::error::Error as E;",
+        "fn t() { let v: Vec<u8> = vec![]; }",  # Vec used but not imported
+        "reuse std::vec::Vec;",            # `use ` found inside `reuse ` (regex parity)
+    ]
+    for prefixes, symbol, pat in _PRELUDE_CASES:
+        old = re.compile(pat)
+        for b in blocks:
+            assert use_imports_symbol(b, prefixes, symbol) == bool(old.search(b)), (b, symbol)

@@ -104,6 +104,7 @@ class Task0cDeps:
     subprocess: Any
     get_current_cluster: Any
     coverage_provider: Any
+    check_stop: Any   # graceful-stop hook for the fix loops (#14: was a fix_loop global)
 
 
 def _engine_get_history(deps: Task0cDeps, project_dir: Path, rel_path: str, max_entries: int = 5) -> str:
@@ -909,6 +910,7 @@ def task0c_augment_module(
     _strip_gen_tests_decl_n = deps.strip_gen_tests_decl_n
     _strip_gen_tests_decls = deps.strip_gen_tests_decls
     _strip_trailing_file_tag = deps.strip_trailing_file_tag
+    _check_stop = deps.check_stop
     _task0c_mutation_pass = functools.partial(_engine_mutation_pass, deps)
     _task0c_pragma_pass = functools.partial(_engine_pragma_pass, deps)
     _task0c_retrospective = functools.partial(_engine_retrospective, deps)
@@ -1113,6 +1115,7 @@ corrected content here
             hard_cap=int(os.getenv("TASK0C_HARNESS_HARD_CAP", "10000")),
             max_stalls=int(os.getenv("TASK0C_HARNESS_MAX_STALLS", "3")),
             stop_context=f"task0c harness fix {module_name}",
+            check_stop=_check_stop,
             on_repeated=lambda _n, _g: _log(
                 f"  [{module_name}] No error improvement — targeted strip of broken gen_* block(s)."),
             on_stall=lambda _n, _g: _log(
@@ -1936,6 +1939,7 @@ project-specific import paths, type construction patterns, and hard constraints.
                     hard_cap=int(os.getenv("TASK0C_BLOCK_FIX_HARD_CAP", "10000")),
                     max_stalls=int(os.getenv("TASK0C_BLOCK_FIX_MAX_STALLS", "3")),
                     stop_context=f"task0c gen_tests fix {rel_path}",
+                    check_stop=_check_stop,
                     on_repeated=lambda _rn, _rg: _log(
                         f"  [{module_name}] No error improvement in {rel_path} — reverting."),
                     on_stall=lambda _sn, _sg: _log(

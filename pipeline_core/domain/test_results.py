@@ -299,6 +299,27 @@ def parse_failed_tests(output: str) -> set[str]:
     return failed
 
 
+def rustc_error_signatures(cargo_output: str) -> frozenset[str]:
+    """Stable rustc error signatures (`error[E<code>]: <message>`, no file/line),
+    regex-free (R7). Equivalent to `re.findall(r'error\\[E\\d+\\]: .+', output)`:
+    per line, the first `error[E<digits>]: ` with ≥1 trailing char, captured to
+    end of line (the greedy `.+` consumes the remainder → one per line)."""
+    marker = "error[E"
+    sigs: set[str] = set()
+    for line in cargo_output.splitlines():
+        pos = 0
+        while (k := line.find(marker, pos)) >= 0:
+            rest = line[k + len(marker):]
+            d = 0
+            while d < len(rest) and rest[d].isdigit():
+                d += 1
+            if d and rest[d:d + 3] == "]: " and len(rest) > d + 3:
+                sigs.add(line[k:])      # error[E<code>]: <rest of line>
+                break                   # `.+` consumed the rest of this line
+            pos = k + len(marker)       # malformed code → try the next occurrence
+    return frozenset(sigs)
+
+
 _IDENT_CHARS = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
 

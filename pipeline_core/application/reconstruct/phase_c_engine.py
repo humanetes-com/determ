@@ -578,6 +578,7 @@ class PhaseCFillEngine:
                             on_failure=_on_test_fix_failure,
                             on_stall=_on_test_fix_stall,
                             initial_floor=_entry_fail_count,
+                            check_stop=self.tel.check_stop,
                         )
                         # P7.6 floor for the pass-level gauge.
                         pass_fail_floor = 0 if rc == 0 else int(_stall_seen["best"] or 0)

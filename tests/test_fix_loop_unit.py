@@ -4,7 +4,6 @@ initial_floor seeding, the callbacks, and the check_stop hook. The driver is pur
 (domain FloorStall gauge + injected `one_attempt`), so fake callables drive it."""
 from __future__ import annotations
 
-from pipeline_core.application import fix_loop
 from pipeline_core.application.fix_loop import FixOutcome, drive_fix_loop
 
 
@@ -75,9 +74,10 @@ def test_initial_floor_seeds_stall() -> None:
     assert res == (False, 1)
 
 
-def test_check_stop_hook_invoked(monkeypatch) -> None:
+def test_check_stop_hook_invoked() -> None:
+    # #14: check_stop is now an explicit per-call parameter (was a module global).
     contexts: list[str] = []
-    monkeypatch.setattr(fix_loop, "_check_stop", lambda ctx: contexts.append(ctx))
     one, _ = _runner([FixOutcome("accepted")])
-    drive_fix_loop(one, hard_cap=2, max_stalls=2, stop_context="ctxlabel")
+    drive_fix_loop(one, hard_cap=2, max_stalls=2, stop_context="ctxlabel",
+                   check_stop=contexts.append)
     assert contexts == ["ctxlabel attempt 1"]

@@ -18,7 +18,6 @@ from __future__ import annotations
 import glob
 import json as _json
 import os
-import re
 import subprocess
 import time
 from typing import Any
@@ -108,17 +107,27 @@ def parse_coverage_json(project_dir: str | None) -> dict[str, tuple[int, int]]:
 def baked_cluster_order() -> list[str]:
     """Authoritative cluster list+order from the pipeline log's
     'loaded N baked cluster(s): a, b, c' line. [] if unavailable — the panel
-    then falls back to clusters seen in events so far."""
+    then falls back to clusters seen in events so far. (R7: structured line scan,
+    equivalent to `loaded \\d+ baked cluster\\(s\\):\\s*([^\\n]+)`, last match wins.)"""
     try:
         with open(PIPELINE_LOG, encoding="utf-8", errors="replace") as f:
-            txt = f.read()
+            lines = f.read().splitlines()
     except Exception:
         return []
-    _matches = list(re.finditer(r"loaded \d+ baked cluster\(s\):\s*([^\n]+)", txt))
-    last = _matches[-1] if _matches else None
-    if not last:
+    marker = " baked cluster(s):"
+    found: str | None = None
+    for line in lines:
+        i = line.find(marker)
+        if i < 0:
+            continue
+        before = line[:i]
+        li = before.rfind("loaded ")
+        if li < 0 or not before[li + len("loaded "):].isdigit():
+            continue
+        found = line[i + len(marker):].lstrip()  # \s* after the colon
+    if found is None:
         return []
-    return [c.strip() for c in last.group(1).split(",") if c.strip()]
+    return [c.strip() for c in found.split(",") if c.strip()]
 
 
 def find_project_dir() -> str | None:
@@ -136,6 +145,61 @@ def find_project_dir() -> str | None:
     return best[1] if best else None
 
 
+def _cluster_list_value(text: str) -> str | None:
+    """The CSV after `<N> cluster[s]: ` (regex-free, equivalent to
+    `\\d+ clusters?: ([^\\n]+)` — first line, ≥1 char captured), else None."""
+    for line in text.splitlines():
+        for kw in ("clusters:", "cluster:"):  # greedy `s?` → prefer the plural
+            i = line.find(kw)
+            if i <= 0 or line[i - 1] != " ":   # `\d+ ` → one space before the keyword
+                continue
+            if not line[:i - 1] or not line[:i - 1][-1].isdigit():
+                continue
+            rest = line[i + len(kw):]
+            if rest.startswith(" ") and rest[1:]:  # `: ` then ([^\n]+)
+                return rest[1:]
+    return None
+
+
+def _task0c_state_line(line: str) -> tuple[str, str] | None:
+    """`(cluster, status)` from a `[task0c/<name>] <done|in_progress>` line
+    (regex-free, equivalent to `\\[task0c/(\\w+)\\]\\s+(done|in_progress)`), else None."""
+    prefix = "[task0c/"
+    if not line.startswith(prefix):
+        return None
+    rest = line[len(prefix):]
+    k = 0
+    while k < len(rest) and (rest[k].isalnum() or rest[k] == "_"):  # \w+
+        k += 1
+    if k == 0 or not rest[k:].startswith("]"):
+        return None
+    after = rest[k + 1:]
+    stripped = after.lstrip()
+    if stripped == after:  # \s+ requires ≥1 whitespace char
+        return None
+    for status in ("done", "in_progress"):
+        if stripped.startswith(status):
+            return rest[:k], status
+    return None
+
+
+def _decimal_percent(line: str) -> str | None:
+    """The first `\\d+\\.\\d+` immediately before a `%` (regex-free), else None."""
+    i = 0
+    while (p := line.find("%", i)) >= 0:
+        frac = p
+        while frac > 0 and line[frac - 1].isdigit():
+            frac -= 1
+        if frac < p and frac > 0 and line[frac - 1] == ".":
+            whole = frac - 1
+            while whole > 0 and line[whole - 1].isdigit():
+                whole -= 1
+            if whole < frac - 1:  # ≥1 integer digit
+                return line[whole:p]
+        i = p + 1
+    return None
+
+
 def parse_pipeline_state(project_dir: str | None) -> dict[str, Any]:
     """Parse pipeline_state.md → cluster list, done set, current cluster, latest coverage."""
     clusters: list[str] = []
@@ -150,23 +214,27 @@ def parse_pipeline_state(project_dir: str | None) -> dict[str, Any]:
             text = _f.read()
     except Exception:
         return r
-    m = re.search(r'\d+ clusters?: ([^\n]+)', text)
-    if m:
-        clusters[:] = [c.strip() for c in m.group(1).split(",")]
+    cluster_csv = _cluster_list_value(text)  # `\d+ clusters?: ([^\n]+)`
+    if cluster_csv is not None:
+        clusters[:] = [c.strip() for c in cluster_csv.split(",")]
     for line in text.splitlines():
-        m = re.match(r'\[task0c/(\w+)\]\s+(done|in_progress)', line)
-        if m and m.group(1) in clusters:
-            if m.group(2) == "done":
-                done.add(m.group(1))
-            elif m.group(2) == "in_progress" and not current:
-                current = m.group(1)
-                r["current"] = current
+        parsed = _task0c_state_line(line)  # `\[task0c/(\w+)\]\s+(done|in_progress)`
+        if parsed is None:
+            continue
+        name, status = parsed
+        if name not in clusters:
+            continue
+        if status == "done":
+            done.add(name)
+        elif status == "in_progress" and not current:
+            current = name
+            r["current"] = current
     # Most recent coverage: scan state lines in reverse for first task0c entry with a %
     for line in reversed(text.splitlines()):
         if "task0c" in line:
-            cv = re.search(r'(\d+\.\d+)%', line)
-            if cv:
-                r["coverage"] = cv.group(1) + "%"
+            pct = _decimal_percent(line)  # `(\d+\.\d+)%`
+            if pct is not None:
+                r["coverage"] = pct + "%"
                 break
     return r
 
@@ -210,13 +278,20 @@ def log_tail_meta() -> dict[str, Any]:
 
 
 def read_backend() -> str:
-    """The BACKEND value from .env (lowercased), defaulting to 'ollama'."""
+    """The BACKEND value from .env (lowercased), defaulting to 'ollama'.
+    (R7: structured key=value scan, equivalent to `^\\s*BACKEND\\s*=\\s*(\\S+)`.)"""
     try:
         with open(os.path.join(SCRIPT_DIR, ".env")) as _f:
             for line in _f:
-                m = re.match(r'^\s*BACKEND\s*=\s*(\S+)', line)
-                if m:
-                    return m.group(1).strip().lower()
+                s = line.lstrip()                  # ^\s*
+                if not s.startswith("BACKEND"):
+                    continue
+                after = s[len("BACKEND"):].lstrip()  # \s*
+                if not after.startswith("="):
+                    continue
+                value = after[1:].split()           # = \s* then (\S+) = first token
+                if value:
+                    return value[0].lower()
     except Exception:
         pass
     return "ollama"

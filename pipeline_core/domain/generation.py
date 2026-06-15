@@ -10,6 +10,7 @@ Pure domain: stdlib only, no I/O.
 """
 from __future__ import annotations
 
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -108,42 +109,114 @@ def parse_gen_tests_filename(name: str) -> tuple[str, int] | None:
     return stem, int(n_str)
 
 
-def strip_gen_tests_decl(parent_text: str, sibling_name: str, pass_n: int) -> str:
-    """Remove ONE gen_tests path-mod declaration block from a parent source file's
-    text — structurally (regex-free, R7), matching the fixed format the pipeline's
-    own decl builder emits:
+# --- gen_tests path-mod declaration toolkit (R7: structured, replaces the four
+# `decl_re` regexes that did string surgery on the pipeline's OWN fixed format) ---
+#
+# The decl builder emits, for each augmentation sibling:
+#
+#     [#[cfg(<gate>)]]      ← optional cluster gate (nightly etc.)
+#     #[cfg(test)]
+#     [#[allow(...)] ...]   ← zero or more further attributes
+#     #[path = "<stem>.gen_tests_<N>.rs"]
+#     [pub ]mod gen_tests_<N>;
+#
+# Everything below is a pure structural line-scan anchored on the `mod` line.
 
-        [#[cfg(<attr>)]]
-        #[cfg(test)]
-        [#[allow(...)]]
-        #[path = "<sibling_name>"]
-        [pub ]mod gen_tests_<pass_n>;
 
-    The block is anchored on the `mod gen_tests_<pass_n>;` line whose contiguous
-    preceding attribute run contains `#[path = "<sibling_name>"]`; the whole run
-    (attributes + the mod line) is dropped. Returns `parent_text` unchanged when
-    no matching block is present. Replaces the legacy reattach-quarantine regex."""
-    lines = parent_text.splitlines()
-    target = f"mod gen_tests_{pass_n};"
-    path_attr = f'"{sibling_name}"'
+@dataclass(frozen=True, slots=True)
+class GenTestsDecl:
+    """One `[pub ]mod gen_tests_<N>;` path-mod declaration block. `start`/`end` are
+    the inclusive line-index span of the whole block — its contiguous leading
+    `#[...]` attribute run through the `mod` line."""
+    pass_n: int
+    sibling_name: str | None   # value of `#[path = "..."]`, or None when absent
+    gate: str                  # leading non-test `#[cfg(<gate>)]` predicate, or ""
+    start: int
+    end: int
+
+
+def _mod_gen_tests_pass(stripped_line: str) -> int | None:
+    """Pass N from a `[pub ]mod gen_tests_<N>;` line (already `.strip()`ed), else None."""
+    body = stripped_line.removeprefix("pub ")
+    if not (body.startswith("mod gen_tests_") and body.endswith(";")):
+        return None
+    n_str = body[len("mod gen_tests_"):-1].strip()
+    return int(n_str) if n_str.isdigit() else None
+
+
+def _attr_path_value(stripped_attr: str) -> str | None:
+    """The quoted value of a `#[path = "..."]` attribute line, or None."""
+    open_q = stripped_attr.find('"')
+    if open_q < 0:
+        return None
+    close_q = stripped_attr.find('"', open_q + 1)
+    return stripped_attr[open_q + 1:close_q] if close_q > open_q else None
+
+
+def iter_gen_tests_decls(text: str) -> Iterator[GenTestsDecl]:
+    """Yield every gen_tests path-mod decl block in `text`, scanning each
+    `mod gen_tests_<N>;` anchor and walking back over its contiguous `#[...]`
+    attribute run. Pure structural scan of the pipeline's own fixed format (R7)."""
+    lines = text.splitlines()
     for i, line in enumerate(lines):
-        s = line.strip()
-        if s != target and s != f"pub {target}":
+        pass_n = _mod_gen_tests_pass(line.strip())
+        if pass_n is None:
             continue
+        sibling_name: str | None = None
+        gate = ""
         start = i
-        saw_path = False
         j = i - 1
-        while j >= 0 and lines[j].strip().startswith("#["):
-            if lines[j].strip().startswith("#[path") and path_attr in lines[j]:
-                saw_path = True
+        while j >= 0 and lines[j].lstrip().startswith("#["):
+            attr = lines[j].strip()
+            if attr.startswith("#[path"):
+                sibling_name = _attr_path_value(attr)
+            elif attr.startswith("#[cfg(") and attr != "#[cfg(test)]":
+                inner = attr[len("#[cfg("):].rsplit(")]", 1)[0]
+                if inner != "test":
+                    gate = inner
             start = j
             j -= 1
-        if not saw_path:
-            continue
-        del lines[start:i + 1]
-        out = "\n".join(lines)
-        return out + "\n" if parent_text.endswith("\n") else out
-    return parent_text
+        yield GenTestsDecl(pass_n, sibling_name, gate, start, i)
+
+
+def _is_gen_tests_sibling(name: str | None) -> bool:
+    return name is not None and parse_gen_tests_filename(name) is not None
+
+
+def _strip_decls(text: str, keep: Callable[[GenTestsDecl], bool]) -> str:
+    """Drop every decl block for which `keep` is False; preserve the rest verbatim."""
+    spans = [(d.start, d.end) for d in iter_gen_tests_decls(text) if not keep(d)]
+    if not spans:
+        return text
+    lines = text.splitlines()
+    for start, end in sorted(spans, reverse=True):  # bottom-up: indices stay valid
+        del lines[start:end + 1]
+    out = "\n".join(lines)
+    return out + "\n" if text.endswith("\n") else out
+
+
+def strip_gen_tests_decl(parent_text: str, sibling_name: str, pass_n: int) -> str:
+    """Remove the one decl block whose `#[path]` is `sibling_name` and pass is
+    `pass_n`; leave all others untouched. (#9: replaces the reattach-quarantine regex.)"""
+    return _strip_decls(
+        parent_text,
+        keep=lambda d: not (d.pass_n == pass_n and d.sibling_name == sibling_name))
+
+
+def strip_gen_tests_decl_n(parent_text: str, pass_n: int) -> str:
+    """Remove the decl block for pass `pass_n` (any sibling)."""
+    return _strip_decls(parent_text, keep=lambda d: d.pass_n != pass_n)
+
+
+def strip_all_gen_tests_decls(text: str) -> str:
+    """Remove every gen_tests path-mod decl block (path is a `*.gen_tests_<N>.rs`)."""
+    return _strip_decls(text, keep=lambda d: not _is_gen_tests_sibling(d.sibling_name))
+
+
+def gen_tests_decl_blocks(text: str) -> list[GenTestsDecl]:
+    """Every gen_tests-sibling decl block, in source order — for cluster gating
+    (each block's `gate` predicate + `sibling_name`)."""
+    return [d for d in iter_gen_tests_decls(text) if _is_gen_tests_sibling(d.sibling_name)]
 
 
 def testfile_paths(text: str) -> list[str]:

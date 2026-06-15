@@ -11,9 +11,10 @@ stop logs).
 Consumers: phase-c per-fn loop (f2), per-impl loop (f3), post-pass test
 retry (f4), task0c harness-fix + gen_tests compile-fix loops (P1 tail).
 
-`check_stop` is a settable hook (log.py facade pattern): the composition
-root wires pipeline.py's graceful-stop sentinel check; the default no-op
-keeps the module import-safe and tests hermetic.
+`check_stop` is an explicit per-call hook (#14: was a module-global wired via
+`configure()`): each caller passes its graceful-stop check — the use-cases their
+`Telemetry.check_stop`, the composition root pipeline.py's sentinel check. The
+default no-op keeps the loop import-safe and tests hermetic.
 """
 
 from __future__ import annotations
@@ -23,13 +24,9 @@ from dataclasses import dataclass
 
 from pipeline_core.domain.refine import FloorStall
 
-_check_stop: Callable[[str], None] = lambda _context: None
 
-
-def configure(*, check_stop: Callable[[str], None]) -> None:
-    """Wire the graceful-stop hook. Called once at the composition root."""
-    global _check_stop
-    _check_stop = check_stop
+def _no_stop(_context: str) -> None:
+    """Default graceful-stop hook: never interrupts."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,9 +59,11 @@ def drive_fix_loop(
     on_stall: Callable[[int, FloorStall], None] | None = None,
     on_repeated: Callable[[int, FloorStall], None] | None = None,
     initial_floor: int | None = None,
+    check_stop: Callable[[str], None] = _no_stop,
 ) -> tuple[bool, int]:
     """Run `one_attempt` until accepted / dead-end / stall / repeated sig /
-    hard cap. Returns (accepted, attempts_used)."""
+    hard cap. Returns (accepted, attempts_used). `check_stop` is invoked once per
+    attempt with the stop context (graceful-shutdown hook; #14: per-call, was global)."""
     gauge = FloorStall()
     if initial_floor is not None:
         # Seed the floor with the metric the loop ENTERED with (loop C / f4):
@@ -74,7 +73,7 @@ def drive_fix_loop(
     attempt_n = 0
     while attempt_n < hard_cap:
         attempt_n += 1
-        _check_stop(f"{stop_context} attempt {attempt_n}")
+        check_stop(f"{stop_context} attempt {attempt_n}")
         outcome = one_attempt(attempt_n)
         if outcome.kind == "accepted":
             return True, attempt_n

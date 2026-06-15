@@ -4,8 +4,12 @@ gen_tests decl-strip (#9). All assert equivalence to the legacy regex behaviour.
 from __future__ import annotations
 
 from pipeline_core.domain.generation import (
+    gen_tests_decl_blocks,
+    iter_gen_tests_decls,
     parse_gen_tests_filename,
+    strip_all_gen_tests_decls,
     strip_gen_tests_decl,
+    strip_gen_tests_decl_n,
     strip_test_prefix,
     topo_sort_files,
 )
@@ -91,3 +95,42 @@ def test_strip_gen_tests_decl_preserves_trailing_newline() -> None:
     with_nl = "a\n" + _decl("m.gen_tests_1.rs", 1)
     out = strip_gen_tests_decl(with_nl, "m.gen_tests_1.rs", 1)
     assert out.endswith("\n") and "gen_tests_1" not in out
+
+
+# --- decl toolkit (R7 migration of the four legacy decl regexes) ---
+
+def test_iter_gen_tests_decls_captures_gate_name_pass() -> None:
+    text = ("pub fn f() {}\n"
+            + _decl("m.gen_tests_1.rs", 1)
+            + _decl("m.gen_tests_2.rs", 2, cfg="error_generic_member_access",
+                    allow="#[allow(unused)]", pub=True))
+    decls = list(iter_gen_tests_decls(text))
+    assert [(d.pass_n, d.sibling_name, d.gate) for d in decls] == [
+        (1, "m.gen_tests_1.rs", ""),
+        (2, "m.gen_tests_2.rs", "error_generic_member_access"),
+    ]
+
+
+def test_strip_all_gen_tests_decls() -> None:
+    text = ("use super::*;\n"
+            + _decl("m.gen_tests_1.rs", 1)
+            + _decl("m.gen_tests_2.rs", 2, cfg="nightly"))
+    out = strip_all_gen_tests_decls(text)
+    assert "gen_tests_1" not in out and "gen_tests_2" not in out
+    assert "nightly" not in out and out.startswith("use super::*;")
+    # A `mod` decl whose path is NOT a gen_tests sibling is left alone.
+    keep = "#[path = \"other.rs\"]\nmod gen_tests_9;\n"
+    assert strip_all_gen_tests_decls(keep) == keep  # path not a *.gen_tests_<N>.rs
+
+
+def test_strip_gen_tests_decl_n_any_sibling() -> None:
+    text = "x\n" + _decl("m.gen_tests_1.rs", 1) + _decl("m.gen_tests_2.rs", 2)
+    out = strip_gen_tests_decl_n(text, 2)
+    assert "gen_tests_2" not in out and "gen_tests_1" in out
+
+
+def test_gen_tests_decl_blocks_only_real_siblings() -> None:
+    text = (_decl("m.gen_tests_1.rs", 1)
+            + "#[path = \"hand_written.rs\"]\nmod gen_tests_5;\n")  # not a sibling path
+    blocks = gen_tests_decl_blocks(text)
+    assert [b.pass_n for b in blocks] == [1]  # the non-sibling decl is excluded
