@@ -2070,18 +2070,21 @@ def test_render_impl_block() -> None:
 def test_strip_ansi_and_diag_frontier() -> None:
     """Inner fix-loop check must read STRUCTURED diags, not ANSI-rendered text.
     Regression: _run_cargo_check_diag emits json-diagnostic-rendered-ansi, and
-    the plain-text _COMPILE_ERROR_RE can't parse colour codes — so re-parsing
+    the plain-text fallback parser can't parse colour codes — so re-parsing
     rendered text gave an empty frontier and the inner loop never asked the
-    model (0 splices). The structured path is ANSI-immune."""
+    model (0 splices). The structured cargo-JSON path is ANSI-immune."""
     import pipeline
     ansi = ("\x1b[0m\x1b[1m\x1b[38;5;9merror[E0201]\x1b[0m\x1b[1m: dup\x1b[0m\n"
             "  \x1b[38;5;12m-->\x1b[0m src/error.rs:1634:5")
     plain = pipeline._strip_ansi(ansi)
     assert "\x1b[" not in plain and "error[E0201]" in plain, plain
-    # The plain-text regex matches only the de-ANSI'd text — proving why the
-    # rendered-text path silently failed.
-    assert not pipeline._COMPILE_ERROR_RE.search(ansi)
-    assert pipeline._COMPILE_ERROR_RE.search(plain)
+    # The text-fallback parser (parse_rustc_compile_errors, migrated from the old
+    # `_COMPILE_ERROR_RE` per R7) needs the `error` keyword at line start, so it
+    # matches only the de-ANSI'd text — proving why the rendered-text path
+    # silently failed; the structured cargo-JSON frontier below is the ANSI-immune
+    # primary path.
+    assert not pipeline.parse_rustc_compile_errors(ansi)
+    assert pipeline.parse_rustc_compile_errors(plain)
     # Structured-diag frontier never touches rendered text; empty/garbage in →
     # empty out (no crash), and it ignores ANSI entirely.
     assert pipeline._frontier_from_diags([], pipeline.Path(".")) == {}
