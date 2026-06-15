@@ -14,13 +14,13 @@ per-block-Deps pattern — NOT a loop-wide god-object).
 from __future__ import annotations
 
 import os
-import re
 import subprocess
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
+from pipeline_core.domain.generation import strip_gen_tests_decl
 from pipeline_core.domain.models import BuildCluster
 
 
@@ -221,16 +221,8 @@ def reattach_gen_tests(
                     for src_path, sibling, pass_n in _failing:
                         try:
                             ptext = src_path.read_text(encoding="utf-8")
-                            decl_re = re.compile(
-                                r"\n*(?:#\[cfg\([^)]*\)\]\s*)?"
-                                r"#\s*\[\s*allow\s*\([^)]*\)\s*\][^\n]*\n*"
-                                r"#\s*\[\s*path\s*=\s*\""
-                                + re.escape(sibling.name)
-                                + r"\"\s*\][^\n]*\n*"
-                                r"(?:pub\s+)?mod\s+gen_tests_"
-                                + str(pass_n) + r"\s*;\s*",
-                            )
-                            ptext_new = decl_re.sub("\n", ptext)
+                            # #9: structured decl-strip (regex-free, R7).
+                            ptext_new = strip_gen_tests_decl(ptext, sibling.name, pass_n)
                             if ptext_new != ptext:
                                 src_path.write_text(ptext_new, encoding="utf-8")
                         except Exception:

@@ -111,9 +111,9 @@ def test_builders_carry_repository_specifications(tmp_path: Path) -> None:
     # No fr_path → section absent (inert default preserved for old pins).
     assert "<REPOSITORY_SPECIFICATIONS>" not in build_per_fn_prompt(
         **{**common, "fr_path": None}, sections=PerFnSections(**empty))
-    # Facade restore safety: configure is idempotent with pipeline's provider.
-    runtime.configure(
+    # Facade restore safety: bind is idempotent with pipeline's provider.
+    runtime.bind(runtime.PromptRuntimeDeps(
         annotate_file_view=pipeline._annotate_file_view,
         promoted_error_rules=pipeline._promoted_error_rules,
         repo_spec_section=pipeline._repo_spec_section,
-    )
+    ))

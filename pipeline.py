@@ -1773,10 +1773,10 @@ _cargo_default_features = _domain_cargo_default_features
 
 # Workspace/dependency scanners live in adapters/workspace_scan.py (P4). Wire the
 # pipeline-bound collaborators into that module here at the composition root.
-_workspace_scan.configure(
+# #14: explicit constructor injection (was workspace_scan.configure() globals).
+_WS_SCAN_DEPS = _workspace_scan.WorkspaceScanDeps(
     ask=ask, task0_model=_TASK0_MODEL,
-    skip_dir_names=SKIP_DIR_NAMES, parse_cmd=_parse_cmd,
-)
+    skip_dir_names=frozenset(SKIP_DIR_NAMES), parse_cmd=_parse_cmd)
 
 
 def scan_downstream_api(project_dir: Path, module_name: str) -> str:
@@ -1888,7 +1888,7 @@ def scan_workspace_structure(project_dir: Path) -> str:
     Produce a markdown workspace map for TASK 2.
     Implementation is selected by WORKSPACE_SCANNER in .env (default: llm).
     """
-    return _workspace_scanner_factory().scan(project_dir)
+    return _workspace_scanner_factory(_WS_SCAN_DEPS).scan(project_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -2674,7 +2674,15 @@ def detect_resume_point(root: Path, project_dir: Path, manifest_path: Path,
 # Discovery moved to pipeline_core.adapters.discovery (P5). Shims preserve the
 # module-level names existing call sites and configure() wiring reference.
 is_test_file = _discovery.is_test_file
-collect_test_files = _discovery.collect_test_files
+
+
+def collect_test_files(project_dir: "Path") -> list[tuple[str, str]]:
+    """#14: pass the gen_tests-decl predicate explicitly (was discovery.configure);
+    `_is_gen_tests_decl_only_src` is late-bound (defined below) at call time."""
+    return _discovery.collect_test_files(
+        project_dir, is_gen_tests_decl_only=_is_gen_tests_decl_only_src)
+
+
 collect_examples = _discovery.collect_examples
 collect_protected_test_files = _discovery.collect_protected_test_files
 
@@ -5861,11 +5869,11 @@ def _repo_spec_section(
 # file-view annotator, the run-state promoted-error rules, and the
 # repo-spec loader — and are wired into the prompts runtime facade once
 # at import time.
-_prompts_runtime.configure(
+_prompts_runtime.bind(_prompts_runtime.PromptRuntimeDeps(
     annotate_file_view=_annotate_file_view,
     promoted_error_rules=_promoted_error_rules,
     repo_spec_section=_repo_spec_section,
-)
+))
 
 
 def _build_dispatch_family_section(family: DispatchFamily) -> str:
@@ -13249,10 +13257,6 @@ def _is_gen_tests_decl_only_src(content: str) -> bool:
     return no_block_comments.strip() == ""
 
 
-# Wire the gen_tests-semantics predicate into the discovery adapter (P5).
-_discovery.configure(is_gen_tests_decl_only=_is_gen_tests_decl_only_src)
-
-
 def _cluster_cfg_attr(cluster) -> str:
     """Return the cfg predicate string that gates code to this cluster.
 
@@ -15263,7 +15267,7 @@ def main():
 
     # TASK 0b: build dependency graph for bottom-up module integration.
     # Implementation selected by DEPENDENCY_GRAPH in .env (default: static).
-    dep_graph = _dependency_graph_factory(project_dir)
+    dep_graph = _dependency_graph_factory(project_dir, _WS_SCAN_DEPS)
     modules = dep_graph.topological_order()
     is_multi_module = len(modules) > 1
 

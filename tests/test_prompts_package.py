@@ -46,23 +46,20 @@ def test_trait_contract_lookup() -> None:
     print("  OK  trait_contract_for")
 
 
-def test_runtime_defaults_and_configure() -> None:
-    old_afv, old_per = runtime._annotate_file_view, runtime._promoted_error_rules
+def test_runtime_defaults_and_bind() -> None:
+    old = runtime._DEPS
     try:
-        runtime._annotate_file_view = runtime._annotate_file_view_default
-        runtime._promoted_error_rules = runtime._promoted_error_rules_default
-        # Inert defaults: render without the pipeline wired.
+        runtime.bind(runtime.PromptRuntimeDeps())  # inert defaults
         assert runtime.annotate_file_view("fn a() {}", "a") == "fn a() {}"
         assert runtime.promoted_error_rules(Path("/nonexistent")) == ""
-        runtime.configure(
+        runtime.bind(runtime.PromptRuntimeDeps(
             annotate_file_view=lambda text, fn: f"ANNOTATED:{fn}",
             promoted_error_rules=lambda fr_path=None: "RULES",
-        )
+        ))
         assert runtime.annotate_file_view("x", "f") == "ANNOTATED:f"
         assert runtime.promoted_error_rules() == "RULES"
     finally:
-        runtime._annotate_file_view = old_afv
-        runtime._promoted_error_rules = old_per
+        runtime.bind(old)  # frozen deps → restore the pipeline-bound instance
     print("  OK  prompts runtime facade")
 
 

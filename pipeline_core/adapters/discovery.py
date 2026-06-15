@@ -1,13 +1,18 @@
 """Test/example file discovery (ADAPTER: pure filesystem walks). Moved verbatim
 from pipeline.py (P5). The skip-dir / test-dir conventions and the gen_tests
 sibling-name parser live here; the one gen_tests-semantics predicate
-(`is_gen_tests_decl_only`) is injected once at the composition root via
-`configure()` so the gen_tests family stays in pipeline.py.
+(`is_gen_tests_decl_only`) is passed explicitly by the caller (composition root)
+to the single function that needs it, so the gen_tests family stays in pipeline.py
+and this adapter holds no injected module state (#14).
 """
 from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
+
+# Default predicate for `collect_test_files`'s gen_tests-decl filter — overridden
+# by the composition root, which passes the real pipeline implementation.
+_NO_GEN_TESTS_DECL: Callable[[str], bool] = lambda _content: False
 
 # Directory names skipped by every walk: VCS internals, build output, vendored
 # deps, language caches, and the pipeline's own scratch dirs.
@@ -29,18 +34,6 @@ SKIP_DIR_NAMES: frozenset[str] = frozenset({
 
 TEST_DIR_NAMES: frozenset[str] = frozenset(
     {"tests", "test", "spec", "specs", "__tests__", "testing"})
-
-# Injected at the composition root (configure) — resolved at CALL time so the
-# reassignment is seen. Returns True when a stripped .rs source file consists
-# only of gen_tests path-mod decls (+ whitespace/comments) and carries no test
-# semantics of its own.
-is_gen_tests_decl_only: Callable[[str], bool] = lambda _content: False
-
-
-def configure(*, is_gen_tests_decl_only: Callable[[str], bool]) -> None:
-    """Wire the pipeline-bound gen_tests predicate into this adapter."""
-    globals()["is_gen_tests_decl_only"] = is_gen_tests_decl_only
-
 
 def match_gen_tests_sibling(name: str) -> tuple[str, int] | None:
     """Parse a `<stem>.gen_tests_<N>.rs` filename → (stem, N), or None."""
@@ -84,12 +77,20 @@ def is_test_file(path: Path, project_dir: Path) -> bool:
     return match_gen_tests_sibling(path.name) is not None
 
 
-def collect_test_files(project_dir: Path) -> list[tuple[str, str]]:
+def collect_test_files(
+    project_dir: Path,
+    *,
+    is_gen_tests_decl_only: Callable[[str], bool] = _NO_GEN_TESTS_DECL,
+) -> list[tuple[str, str]]:
     """Return (rel_path, content) pairs for every file containing test code.
 
     Used by TASK 1 to read the full test spec. Includes:
     - Pure test files: identified by name/location (is_test_file) — e.g. tests/*.rs
     - Rust source files with inline test blocks (#[cfg(test)] or #[test]) — e.g. src/lib.rs
+
+    `is_gen_tests_decl_only` (#14: explicit dep, was module-injected): returns True
+    when a stripped .rs file consists only of gen_tests path-mod decls and carries
+    no test semantics of its own — those are skipped (their content lives in siblings).
 
     NOTE: this is the READ set for TASK 1. For the WRITE protection set (files TASK 2
     must never overwrite), use collect_protected_test_files() instead — it excludes

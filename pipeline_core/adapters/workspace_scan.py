@@ -2,7 +2,8 @@
 fs walks, the `cargo metadata` subprocess, and the LLM scan). Moved verbatim
 from pipeline.py (P4). Domain/log/retry are imported; the pipeline-bound
 collaborators (`ask`, the task0 model, the skip-dir set, the shell-split helper)
-are injected once at the composition root via `configure()`.
+are passed explicitly via the frozen `WorkspaceScanDeps` to each scanner/graph
+constructor and the two factories (#14: constructor injection, no module state).
 
 Backend selection: WORKSPACE_SCANNER / DEPENDENCY_GRAPH in .env (llm | static).
 """
@@ -11,39 +12,34 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import subprocess
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from pipeline_core.adapters.discovery import SKIP_DIR_NAMES as _DEFAULT_SKIP
 from pipeline_core.domain.cargo_toml import cargo_is_proc_macro as _cargo_is_proc_macro
 from pipeline_core.domain.cargo_toml import load_cargo_toml as _load_cargo_toml
 from pipeline_core.log import log as _log
 from pipeline_core.retry import with_retry
 
-# --- injected at the composition root (configure); method bodies resolve these
-# as module globals at CALL time, so configure()'s reassignment is seen --------
-SKIP_DIR_NAMES: frozenset[str] = frozenset()
-_TASK0_MODEL: str = ""
 
-
-def ask(*a: Any, **k: Any) -> str:  # replaced by configure()
+def _default_ask(*a: object, **k: object) -> str:
     return ""
 
 
-def _parse_cmd(cmd: str) -> list[str]:  # replaced by configure()
-    return cmd.split()
-
-
-def configure(*, ask: Callable[..., str], task0_model: str,
-              skip_dir_names: Any, parse_cmd: Callable[[str], list[str]]) -> None:
-    """Wire the pipeline-bound collaborators (called once at pipeline import)."""
-    g = globals()
-    g["ask"] = ask
-    g["_TASK0_MODEL"] = task0_model
-    g["SKIP_DIR_NAMES"] = frozenset(skip_dir_names)
-    g["_parse_cmd"] = parse_cmd
+@dataclass(frozen=True, slots=True)
+class WorkspaceScanDeps:
+    """The pipeline-bound collaborators the scanners need (#14: was injected into
+    module globals via configure()). Defaults make the adapters self-contained for
+    tests; the composition root passes the real `ask`/model/shell-split."""
+    ask: Callable[..., str] = _default_ask
+    task0_model: str = ""
+    skip_dir_names: frozenset[str] = field(default_factory=lambda: _DEFAULT_SKIP)
+    parse_cmd: Callable[[str], list[str]] = shlex.split
 
 
 class WorkspaceScanner(ABC):
@@ -60,6 +56,9 @@ class StaticWorkspaceScanner(WorkspaceScanner):
     Fast, no LLM call, but requires per-language code for each new ecosystem.
     """
 
+    def __init__(self, deps: WorkspaceScanDeps | None = None) -> None:
+        self._deps = deps or WorkspaceScanDeps()
+
     def scan(self, project_dir: Path) -> str:
         lines = ["## Workspace structure (read from existing build files — follow exactly)\n"]
 
@@ -70,7 +69,7 @@ class StaticWorkspaceScanner(WorkspaceScanner):
 
             for ct in cargo_tomls:
                 rel = ct.relative_to(project_dir)
-                if rel.parts[0] in SKIP_DIR_NAMES:
+                if rel.parts[0] in self._deps.skip_dir_names:
                     continue
                 try:
                     text = ct.read_text()
@@ -179,6 +178,9 @@ class LLMWorkspaceScanner(WorkspaceScanner):
         "CMakeLists.txt", "mix.exs", "pubspec.yaml",
     }
 
+    def __init__(self, deps: WorkspaceScanDeps | None = None) -> None:
+        self._deps = deps or WorkspaceScanDeps()
+
     def scan(self, project_dir: Path) -> str:
         manifests = self._collect_manifests(project_dir)
         if not manifests:
@@ -203,7 +205,7 @@ class LLMWorkspaceScanner(WorkspaceScanner):
             "Do not include explanations — only the structured list."
         )
 
-        response = ask(prompt, model=_TASK0_MODEL)
+        response = self._deps.ask(prompt, model=self._deps.task0_model)
         if not response or not response.strip():
             return ""
         return "## Workspace structure (derived from build manifests — follow exactly)\n\n" + response.strip()
@@ -214,7 +216,7 @@ class LLMWorkspaceScanner(WorkspaceScanner):
             if path.name not in self._MANIFEST_NAMES:
                 continue
             rel = path.relative_to(project_dir)
-            if any(part in SKIP_DIR_NAMES for part in rel.parts):
+            if any(part in self._deps.skip_dir_names for part in rel.parts):
                 continue
             try:
                 content = path.read_text(errors="replace")
@@ -224,11 +226,12 @@ class LLMWorkspaceScanner(WorkspaceScanner):
         return results
 
 
-def _workspace_scanner_factory() -> WorkspaceScanner:
+def _workspace_scanner_factory(deps: WorkspaceScanDeps | None = None) -> WorkspaceScanner:
+    deps = deps or WorkspaceScanDeps()
     backend = os.getenv("WORKSPACE_SCANNER", "llm").lower()
     if backend == "static":
-        return StaticWorkspaceScanner()
-    return LLMWorkspaceScanner()
+        return StaticWorkspaceScanner(deps)
+    return LLMWorkspaceScanner(deps)
 
 
 class DependencyGraph(ABC):
@@ -276,8 +279,9 @@ class StaticDependencyGraph(DependencyGraph):
     Returns an empty module list for non-Cargo projects.
     """
 
-    def __init__(self, project_dir: Path) -> None:
+    def __init__(self, project_dir: Path, wsdeps: WorkspaceScanDeps | None = None) -> None:
         self._project_dir = project_dir
+        self._wsdeps = wsdeps or WorkspaceScanDeps()
         self._modules: dict[str, Path] = {}
         self._deps: dict[str, set[str]] = {}
         self._crate_types: dict[str, str] = {}
@@ -364,7 +368,7 @@ class StaticDependencyGraph(DependencyGraph):
 
         for ct in cargo_tomls:
             rel = ct.relative_to(self._project_dir)
-            if any(part in SKIP_DIR_NAMES for part in rel.parts):
+            if any(part in self._wsdeps.skip_dir_names for part in rel.parts):
                 continue
             # Skip test-fixture crates: publish=false crates living under tests/ or
             # test-helpers/ directories are auxiliary and not pipeline modules.
@@ -464,7 +468,7 @@ class StaticDependencyGraph(DependencyGraph):
         cmd = test_command.strip()
         if not cmd.startswith("cargo"):
             return test_command
-        parts = _parse_cmd(cmd)
+        parts = self._wsdeps.parse_cmd(cmd)
         insert_at = 1
         for i in range(1, len(parts)):
             if not parts[i].startswith("-"):
@@ -504,8 +508,9 @@ class LLMDependencyGraph(DependencyGraph):
         "CMakeLists.txt", "mix.exs", "pubspec.yaml",
     }
 
-    def __init__(self, project_dir: Path) -> None:
+    def __init__(self, project_dir: Path, wsdeps: WorkspaceScanDeps | None = None) -> None:
         self._project_dir = project_dir
+        self._wsdeps = wsdeps or WorkspaceScanDeps()
         self._modules: dict[str, Path] = {}
         self._deps: dict[str, set[str]] = {}
         self._crate_types: dict[str, str] = {}
@@ -520,7 +525,7 @@ class LLMDependencyGraph(DependencyGraph):
             if path.name not in self._MANIFEST_NAMES:
                 continue
             rel = path.relative_to(self._project_dir)
-            if any(part in SKIP_DIR_NAMES for part in rel.parts):
+            if any(part in self._wsdeps.skip_dir_names for part in rel.parts):
                 continue
             try:
                 content = path.read_text(errors="replace")
@@ -563,7 +568,7 @@ Rules:
 """
 
         def attempt() -> Any:
-            response = ask(prompt, model=_TASK0_MODEL)
+            response = self._wsdeps.ask(prompt, model=self._wsdeps.task0_model)
             parsed = self._parse_response(response)
             return parsed if parsed else False
 
@@ -665,8 +670,10 @@ Rules:
         return build_cmd
 
 
-def _dependency_graph_factory(project_dir: Path) -> DependencyGraph:
+def _dependency_graph_factory(project_dir: Path,
+                              deps: WorkspaceScanDeps | None = None) -> DependencyGraph:
+    deps = deps or WorkspaceScanDeps()
     backend = os.getenv("DEPENDENCY_GRAPH", "static").lower()
     if backend == "llm":
-        return LLMDependencyGraph(project_dir)
-    return StaticDependencyGraph(project_dir)
+        return LLMDependencyGraph(project_dir, deps)
+    return StaticDependencyGraph(project_dir, deps)

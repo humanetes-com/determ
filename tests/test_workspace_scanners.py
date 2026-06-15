@@ -11,13 +11,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pipeline  # noqa: F401  — import triggers workspace_scan.configure() at the composition root
 from pipeline_core.adapters import workspace_scan as ws_mod
 from pipeline_core.adapters.workspace_scan import (
     LLMDependencyGraph,
     LLMWorkspaceScanner,
     StaticDependencyGraph,
     StaticWorkspaceScanner,
+    WorkspaceScanDeps,
 )
 
 
@@ -91,19 +91,23 @@ def test_static_workspace_scanner_markdown(tmp_path) -> None:
     assert StaticWorkspaceScanner().scan(tmp_path / "nonexistent") == ""
 
 
-def test_llm_workspace_scanner_uses_injected_ask(tmp_path, monkeypatch) -> None:
+def test_llm_workspace_scanner_uses_injected_ask(tmp_path) -> None:
     """The LLM scanner collects manifests and wraps the model's reply; `ask` is
-    the injected facade (configure()), faked here so no live model is needed."""
+    passed via WorkspaceScanDeps (#14), faked here so no live model is needed."""
     ws = _workspace(tmp_path)
     seen = {}
-    monkeypatch.setattr(ws_mod, "ask",
-                        lambda prompt, **k: seen.setdefault("p", prompt) and "" or "**Package `crate_a`**: src/lib.rs")
-    out = LLMWorkspaceScanner().scan(ws)
+
+    def fake_ask(prompt, **k):
+        seen["p"] = prompt
+        return "**Package `crate_a`**: src/lib.rs"
+
+    deps = WorkspaceScanDeps(ask=fake_ask, task0_model="m")
+    out = LLMWorkspaceScanner(deps).scan(ws)
     assert "Workspace structure" in out and "**Package `crate_a`**" in out
     # The collected manifests were fed to the model.
     assert "Cargo.toml" in seen["p"]
     # No manifests → empty string (no model call needed).
-    assert LLMWorkspaceScanner().scan(tmp_path / "nonexistent") == ""
+    assert LLMWorkspaceScanner(deps).scan(tmp_path / "nonexistent") == ""
 
 
 def test_llm_dep_graph_parses_model_response(tmp_path) -> None:

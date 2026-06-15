@@ -108,6 +108,44 @@ def parse_gen_tests_filename(name: str) -> tuple[str, int] | None:
     return stem, int(n_str)
 
 
+def strip_gen_tests_decl(parent_text: str, sibling_name: str, pass_n: int) -> str:
+    """Remove ONE gen_tests path-mod declaration block from a parent source file's
+    text — structurally (regex-free, R7), matching the fixed format the pipeline's
+    own decl builder emits:
+
+        [#[cfg(<attr>)]]
+        #[cfg(test)]
+        [#[allow(...)]]
+        #[path = "<sibling_name>"]
+        [pub ]mod gen_tests_<pass_n>;
+
+    The block is anchored on the `mod gen_tests_<pass_n>;` line whose contiguous
+    preceding attribute run contains `#[path = "<sibling_name>"]`; the whole run
+    (attributes + the mod line) is dropped. Returns `parent_text` unchanged when
+    no matching block is present. Replaces the legacy reattach-quarantine regex."""
+    lines = parent_text.splitlines()
+    target = f"mod gen_tests_{pass_n};"
+    path_attr = f'"{sibling_name}"'
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if s != target and s != f"pub {target}":
+            continue
+        start = i
+        saw_path = False
+        j = i - 1
+        while j >= 0 and lines[j].strip().startswith("#["):
+            if lines[j].strip().startswith("#[path") and path_attr in lines[j]:
+                saw_path = True
+            start = j
+            j -= 1
+        if not saw_path:
+            continue
+        del lines[start:i + 1]
+        out = "\n".join(lines)
+        return out + "\n" if parent_text.endswith("\n") else out
+    return parent_text
+
+
 def testfile_paths(text: str) -> list[str]:
     """Every `path` in `<TESTFILE path="...">` markers within `text`, in order
     (regex-free, R7). Equivalent to `re.findall(r'<TESTFILE path="([^"]+)"', text)`

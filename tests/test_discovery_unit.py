@@ -65,14 +65,13 @@ def test_collect_test_and_protected_files(tmp_path: Path) -> None:
 
 def test_collect_test_files_skips_decl_only_src(tmp_path: Path) -> None:
     """A stripped src file holding only gen_tests decls is dropped via the
-    injected predicate; the real test content lives in the sibling."""
+    explicitly-passed predicate (#14); the real test content lives in the sibling."""
     decl_only = ('#[cfg(test)]\n#[path = "lib.gen_tests_1.rs"]\nmod gen_tests_1;')
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "lib.rs").write_text(decl_only, encoding="utf-8")
 
-    discovery.configure(is_gen_tests_decl_only=lambda c: c == decl_only)
-    try:
-        out = dict(discovery.collect_test_files(tmp_path))
-        assert "src/lib.rs" not in out
-    finally:
-        discovery.configure(is_gen_tests_decl_only=lambda _c: False)
+    out = dict(discovery.collect_test_files(
+        tmp_path, is_gen_tests_decl_only=lambda c: c == decl_only))
+    assert "src/lib.rs" not in out
+    # Default predicate keeps it (no injected module state to reset).
+    assert "src/lib.rs" in dict(discovery.collect_test_files(tmp_path))
