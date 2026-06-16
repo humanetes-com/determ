@@ -30,9 +30,9 @@ def test_hardcrate_compiles_and_passes() -> None:
         ["cargo", "test"], cwd=_CRATE, capture_output=True, text=True, timeout=180,
     )
     assert res.returncode == 0, res.stdout + res.stderr
-    # 11 unit (3 lib + 2 round + 3 merge + 2 textsum + 1 counter) + 5 integration.
+    # 14 unit (4 lib + 2 round + 3 merge + 2 textsum + 1 counter + 2 wire) + 6 integration.
     passed = res.stdout.count(" ... ok")
-    assert passed == 16, f"expected 16 passing tests, saw {passed}\n{res.stdout}"
+    assert passed == 20, f"expected 20 passing tests, saw {passed}\n{res.stdout}"
 
 
 @needs_cargo
@@ -44,9 +44,10 @@ def test_hardcrate_extra_cap_cluster_passes() -> None:
         cwd=_CRATE, capture_output=True, text=True, timeout=180, env=env,
     )
     assert res.returncode == 0, res.stdout + res.stderr
-    # +1 unit (cap) +1 integration over the default cluster.
+    # +1 unit (cap) +1 integration over the default cluster (the cap_limit dual-form
+    # unit test swaps default↔extra but stays 1, so the net is +2 → 22).
     passed = res.stdout.count(" ... ok")
-    assert passed == 18, f"expected 18 passing tests, saw {passed}\n{res.stdout}"
+    assert passed == 22, f"expected 22 passing tests, saw {passed}\n{res.stdout}"
 
 
 def test_each_trap_carries_its_distinguishing_case() -> None:
@@ -72,3 +73,17 @@ def test_each_trap_carries_its_distinguishing_case() -> None:
     cap_src = src("src/cap.rs")
     # wrapping distinguisher: a plain sum overflow-panics; 200+100 must wrap to 44.
     assert "wrapping_total(&[200, 100]), 44" in cap_src
+
+    # T5 cross-fn codec: the EXACT wire format lives ONLY in the integration test
+    # (the unit tests check round-trip alone), so per-fn fills can't see it without
+    # the holistic pin — the lever meant to push recovery to task4.
+    wire_unit = src("src/wire.rs")
+    assert "decode_id(&encode_id(id))" in wire_unit          # unit = round-trip only
+    assert '"002a"' not in wire_unit                          # exact format NOT in the unit
+    integ = src("tests/wire.rs")                              # per-trap integration file
+    assert 'encode_id(42), "002a"' in integ                   # pinned only here
+
+    # dual-form cap_limit is what makes extra_cap a detected 2nd cluster (fix for
+    # the single-cluster miscalibration that surfaced debt #15).
+    lib_src = src("src/lib.rs")
+    assert "#[cfg(not(any(extra_cap" in lib_src and "fn cap_limit()" in lib_src

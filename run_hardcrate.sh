@@ -23,6 +23,19 @@ mkdir -p "$SCRIPT_DIR/logs"
 
 export PIPELINE_PARALLELISM="${PIPELINE_PARALLELISM:-4}"
 
+# --complexity=N (default = max defined): assemble a crate with traps of level ≤ N.
+# 0 = baseline (microcrate-equivalent), 1 = current traps, 2..10 = harder (future).
+COMPLEXITY=""
+for arg in "$@"; do
+    case "$arg" in
+        --complexity=*) COMPLEXITY="${arg#--complexity=}" ;;
+        *) echo "unknown arg: $arg  (usage: run_hardcrate.sh [--complexity=N])"; exit 2 ;;
+    esac
+done
+FIXTURE="$SCRIPT_DIR/tests/fixtures/hardcrate"
+STAGED="$SCRIPT_DIR/tmp/hardcrate_src/hardcrate"   # --repo basename → workspace tmp/hardcrate
+LEVEL="${COMPLEXITY:-$(.venv/bin/python -c 'import tools.hardcrate_select as h; print(h.max_level())')}"
+
 # --- guards (shared process guard + vLLM health, like run_microcrate.sh) ----
 if pgrep -f "[p]ython.*pipeline.py" > /dev/null 2>&1; then
     echo "A pipeline.py is already running — stop it before the hardcrate smoke."
@@ -35,10 +48,12 @@ fi
 
 echo "[hard] rebuilding skeleton-extractor ..."
 ( cd tools/skeleton_extractor && cargo build --release 2>&1 | tail -2 )
+echo "[hard] assembling complexity=$LEVEL crate → $STAGED"
+.venv/bin/python tools/hardcrate_select.py --crate "$STAGED" --from "$FIXTURE" --max-level "$LEVEL"
 echo "[hard] wiping tmp/hardcrate for a from-scratch recovery run ..."
 rm -rf "$WS"
-echo "[hard] launching hardcrate pipeline → $LOG"
-nohup .venv/bin/python pipeline.py --repo tests/fixtures/hardcrate --audit > "$LOG" 2>&1 &
+echo "[hard] launching hardcrate (complexity=$LEVEL) pipeline → $LOG"
+nohup .venv/bin/python pipeline.py --repo "$STAGED" --audit > "$LOG" 2>&1 &
 PID=$!
 echo "Pipeline started (PID $PID). Following the log until it exits (Ctrl-C only stops the tail)."
 echo "----------------------------------------------------------------------"
@@ -66,8 +81,8 @@ else
     CONVERGED="RED"
 fi
 GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo '-')"
-printf '%s recovered=%d/5 converged=%s git=%s log=%s\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$RECOVERED" "$CONVERGED" "$GIT_SHA" "$(basename "$LOG")" \
+printf '%s complexity=%s recovered=%d/5 converged=%s git=%s log=%s\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$LEVEL" "$RECOVERED" "$CONVERGED" "$GIT_SHA" "$(basename "$LOG")" \
     | tee -a "$LEDGER"
 
 # --- ratchet: recovery capability may only go UP ----------------------------

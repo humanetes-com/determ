@@ -1496,27 +1496,29 @@ def test_api_surface_capture() -> None:
 
 def test_module_augment_state() -> None:
     """Cover every transition in the augmentation state machine."""
-    import pipeline
+    # ModuleAugmentState lives in the domain; pipeline.py no longer re-exports it
+    # since the cluster-augment loop moved to application.cluster_augment (R2.2).
+    from pipeline_core.domain.models import ModuleAugmentState
 
     # 1. Done — coverage hits 100.
-    s = pipeline.ModuleAugmentState("m", "stable")
+    s = ModuleAugmentState("m", "stable")
     s.record_pass(100.0, 50, False)
     assert s.status("lib") == "done"
 
     # 2. Done — proc-macro crates short-circuit regardless of coverage.
-    s = pipeline.ModuleAugmentState("m", "stable")
+    s = ModuleAugmentState("m", "stable")
     s.record_pass(12.0, 1, False)
     assert s.status("proc-macro") == "done"
 
     # 3. Ceiling — requires CEILING_CONFIRM (2) consecutive at_ceiling passes.
-    s = pipeline.ModuleAugmentState("m", "stable")
+    s = ModuleAugmentState("m", "stable")
     s.record_pass(45.0, 12, True)
     assert s.status("lib") == "retry", "single at_ceiling should not yet trigger ceiling"
     s.record_pass(45.0, 12, True)
     assert s.status("lib") == "ceiling", "two consecutive at_ceiling passes should trigger ceiling"
 
     # 3b. Ceiling counter resets on a non-ceiling pass.
-    s = pipeline.ModuleAugmentState("m", "stable")
+    s = ModuleAugmentState("m", "stable")
     s.record_pass(45.0, 12, True)
     s.record_pass(45.0, 12, False)   # resets ceiling_passes
     s.record_pass(45.0, 12, True)
@@ -1525,7 +1527,7 @@ def test_module_augment_state() -> None:
     assert s.status("lib") == "ceiling"
 
     # 4. Retry — first non-improving pass below ceiling, still under stall limit.
-    s = pipeline.ModuleAugmentState("m", "stable")
+    s = ModuleAugmentState("m", "stable")
     s.record_pass(80.0, 80, False)   # baseline
     s.record_pass(80.0, 80, False)   # no improvement; stall=1
     assert s.status("lib") == "retry"
@@ -1538,16 +1540,16 @@ def test_module_augment_state() -> None:
     assert s.best_covered_lines == 82
 
     # 6. Hard block — STALL_LIMIT consecutive no-improvement passes.
-    s = pipeline.ModuleAugmentState("m", "stable")
+    s = ModuleAugmentState("m", "stable")
     s.record_pass(80.0, 80, False)
-    for _ in range(pipeline.ModuleAugmentState.STALL_LIMIT):
+    for _ in range(ModuleAugmentState.STALL_LIMIT):
         s.record_pass(80.0, 80, False)
-    assert s.stall_passes == pipeline.ModuleAugmentState.STALL_LIMIT
+    assert s.stall_passes == ModuleAugmentState.STALL_LIMIT
     assert s.status("lib") == "hard_block"
 
     # 7. Coverage reaching 100 wins over hard_block (done takes precedence).
-    s = pipeline.ModuleAugmentState("m", "stable")
-    for _ in range(pipeline.ModuleAugmentState.STALL_LIMIT + 1):
+    s = ModuleAugmentState("m", "stable")
+    for _ in range(ModuleAugmentState.STALL_LIMIT + 1):
         s.record_pass(99.0, 99, False)
     assert s.status("lib") == "hard_block"
     s.record_pass(100.0, 100, False)

@@ -15,6 +15,7 @@ mod merge;
 mod round;
 mod textsum;
 mod counter;
+mod wire;
 #[cfg(any(extra_cap, feature = "extra_cap"))]
 mod cap;
 
@@ -22,8 +23,24 @@ pub use counter::Counter;
 pub use merge::merge_first_wins;
 pub use round::divide_round;
 pub use textsum::{sum_csv, SumError};
+pub use wire::{decode_id, encode_id};
 #[cfg(any(extra_cap, feature = "extra_cap"))]
 pub use cap::wrapping_total;
+
+/// Capability buffer limit — larger when the `extra_cap` capability is compiled in.
+/// The dual `#[cfg]`/`#[cfg(not)]` form is what makes `extra_cap` a 2-state TOGGLE,
+/// so the cluster scan identifies it as a second compiler cluster (the single-form
+/// gating in the first cut left it undetected → 1 cluster → the test-count bug #15).
+#[cfg(any(extra_cap, feature = "extra_cap"))]
+pub fn cap_limit() -> usize {
+    255
+}
+
+/// Capability buffer limit — default build.
+#[cfg(not(any(extra_cap, feature = "extra_cap")))]
+pub fn cap_limit() -> usize {
+    64
+}
 
 /// Sum two integers. (Baseline — fills first try; lets the pass count climb as the
 /// traps recover, giving the ratchet/plateau audits a rising series.)
@@ -72,5 +89,17 @@ mod tests {
     #[test]
     fn display_formats_error() {
         assert_eq!(MathError::DivByZero.to_string(), "division by zero");
+    }
+
+    #[cfg(not(any(extra_cap, feature = "extra_cap")))]
+    #[test]
+    fn default_cap_limit() {
+        assert_eq!(cap_limit(), 64);
+    }
+
+    #[cfg(any(extra_cap, feature = "extra_cap"))]
+    #[test]
+    fn extra_cap_limit() {
+        assert_eq!(cap_limit(), 255);
     }
 }
