@@ -142,3 +142,62 @@ def test_scanner_factories_honor_env(monkeypatch, tmp_path) -> None:
     assert isinstance(ws_mod._dependency_graph_factory(tmp_path / "x"), StaticDependencyGraph)
     monkeypatch.setenv("DEPENDENCY_GRAPH", "llm")
     assert isinstance(ws_mod._dependency_graph_factory(tmp_path / "x"), LLMDependencyGraph)
+
+
+def test_try_cargo_metadata_parses_workspace(tmp_path, monkeypatch) -> None:
+    """The authoritative cargo-metadata path (workspace_scan.py:304-354): faked
+    `cargo metadata` JSON populates modules/crate-types and resolves intra-workspace
+    deps, dropping externals + tests-fixture + out-of-tree + hyphen/underscore variants."""
+    import json
+    from types import SimpleNamespace
+
+    ws = tmp_path / "ws"
+    for sub in ("a", "b", "c", "x_y", "tests/helper"):
+        (ws / sub).mkdir(parents=True)
+
+    def mf(sub: str) -> str:
+        return str(ws / sub / "Cargo.toml")
+
+    payload = {
+        "workspace_members": ["a", "b", "c", "x_y", "thelper", "missing", "outside"],
+        "packages": [
+            # a: lib, depends on workspace `b` + external serde (dropped) + `x-y` (hyphen variant).
+            {"id": "a", "name": "a", "manifest_path": mf("a"), "targets": [{"kind": ["lib"]}],
+             "dependencies": [{"name": "b"}, {"name": "serde"}, {"name": "x-y"}]},
+            {"id": "b", "name": "b", "manifest_path": mf("b"),
+             "targets": [{"kind": ["proc-macro"]}], "dependencies": []},
+            {"id": "c", "name": "c", "manifest_path": mf("c"),
+             "targets": [{"kind": ["bin"]}], "dependencies": []},
+            {"id": "x_y", "name": "x_y", "manifest_path": mf("x_y"),
+             "targets": [{"kind": ["lib"]}], "dependencies": []},
+            # under tests/ → skipped.
+            {"id": "thelper", "name": "helper", "manifest_path": mf("tests/helper"),
+             "targets": [{"kind": ["lib"]}], "dependencies": []},
+            # manifest outside project_dir → relative_to ValueError → skipped.
+            {"id": "outside", "name": "outside", "manifest_path": "/elsewhere/Cargo.toml",
+             "targets": [{"kind": ["lib"]}], "dependencies": []},
+            # "missing" has no package entry → continue.
+        ],
+    }
+    monkeypatch.setattr(ws_mod.subprocess, "run",
+                        lambda *a, **k: SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr=""))
+    g = StaticDependencyGraph(ws)
+    assert sorted(g.modules()) == ["a", "b", "c", "x_y"]      # helper/outside/missing excluded
+    assert g.crate_type("a") == "lib"
+    assert g.crate_type("b") == "proc-macro"
+    assert g.crate_type("c") == "bin"
+    assert g.workspace_deps("a") == {"b", "x_y"}              # serde dropped; x-y → x_y resolved
+    assert g.workspace_deps("b") == set()
+
+
+def test_try_cargo_metadata_failure_falls_back(tmp_path, monkeypatch) -> None:
+    """Non-zero cargo / bad JSON / no members → returns False so _parse uses the
+    tomllib manifest parser instead (workspace_scan.py:298-302, 340-341)."""
+    from types import SimpleNamespace
+
+    ws = _workspace(tmp_path)  # has real Cargo.toml files for the fallback parser
+    monkeypatch.setattr(ws_mod.subprocess, "run",
+                        lambda *a, **k: SimpleNamespace(returncode=1, stdout="", stderr="no cargo"))
+    g = StaticDependencyGraph(ws)
+    # Fallback tomllib parser still found the crates.
+    assert sorted(g.modules()) == ["crate_a", "crate_b"]

@@ -6,8 +6,11 @@ Pins the regex-free line parser against the legacy pattern's semantics
 
 from pathlib import Path
 
+import pytest
+
 from pipeline_core.adapters.state import (
     _parse_phase_line,
+    log_state_summary,
     mark_phase,
     phase_valid,
     read_state,
@@ -79,3 +82,46 @@ def test_write_state_atomic_no_tmp_left(tmp_path: Path) -> None:
     assert not list(proj.glob("*.tmp"))             # os.replace consumed it
     assert read_state(proj)["phases"]["k"]["status"] == "done"
     print("  OK  state atomic write")
+
+
+def test_mark_phase_lock_failure_falls_back_to_unlocked_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the advisory lock is unavailable (flock raises) the write still lands —
+    the atomic os.replace is the second line of defence (state.py:127-138)."""
+    proj = tmp_path / "p"
+    proj.mkdir()
+    monkeypatch.setattr("fcntl.flock", lambda *a, **k: (_ for _ in ()).throw(OSError("no lock")))
+    mark_phase(proj, "task0a", "done", detail="d", source_hash="h1")
+    assert read_state(proj)["phases"]["task0a"] == {"status": "done", "hash": "h1", "detail": "d"}
+
+
+def test_log_state_summary_all_branches(tmp_path: Path) -> None:
+    """log_state_summary renders valid/STALE/resumed/pending symbols + the last
+    position line; empty state reports a fresh run (state.py:164-184)."""
+    proj = tmp_path / "p"
+    proj.mkdir()
+    captured: list[str] = []
+    import pipeline_core.log as log_mod
+    orig_log, orig_emit = log_mod._log_sink, log_mod._emit_sink
+    log_mod.set_sinks(captured.append, orig_emit)
+    try:
+        # Empty state → fresh-run line.
+        log_state_summary(proj, current_hash="X")
+        assert any("fresh run" in m for m in captured)
+        captured.clear()
+
+        write_state(proj, {"phases": {
+            "task0a": {"status": "done", "hash": "X", "detail": "valid one"},
+            "task0b": {"status": "done", "hash": "OLD", "detail": "stale one"},
+            "task1":  {"status": "in_progress", "hash": "-", "detail": "resuming"},
+            "task2":  {"status": "pending", "hash": "-", "detail": "later"},
+        }, "current": "task1/mod"})
+        log_state_summary(proj, current_hash="X")
+        blob = "\n".join(captured)
+        assert "valid" in blob and "STALE" in blob          # hash match vs mismatch
+        assert "resumed" in blob and "pending" in blob       # in_progress + pending
+        assert "✓" in blob and "✗" in blob and "~" in blob   # the symbol set
+        assert "last position: task1/mod" in blob
+    finally:
+        log_mod.set_sinks(orig_log, orig_emit)
