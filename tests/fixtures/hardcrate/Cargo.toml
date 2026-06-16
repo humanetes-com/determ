@@ -1,0 +1,21 @@
+[package]
+name = "hardcrate"
+version = "0.1.0"
+edition = "2021"
+
+# L3-RECOVERY fixture (CODE_ARCHITECTURE.md R10.7). Unlike the microcrate (happy
+# path, converges iter 1), this crate is HARD ON PURPOSE: several fns whose OBVIOUS
+# implementation compiles and runs but returns the WRONG value, caught only by the
+# tests. The naive fill fails t3 → forces task4 (genesis) → regen across ≥3
+# iterations — the failure-recovery loop the microcrate never exercises (flow-audit
+# C1/C2/C3/C4/C6 flip SKIP→PASS). Every trap is FULLY TEST-DETERMINED: a careful
+# human reading only the tests derives the unique correct rule (FR-022 boundary) —
+# so a non-recovery is a PIPELINE gap to fix, never an unsolvable ambiguity.
+# NON-GATING: RED = "the pipeline can't yet win this class of repo → next task",
+# tracked by the recovery ratchet, not a build break.
+#
+# TWO clusters (default, --cfg extra_cap) like the microcrate, so cluster-aware
+# recovery is exercised too.
+
+[lib]
+path = "src/lib.rs"
