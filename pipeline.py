@@ -50,6 +50,10 @@ from pipeline_core.adapters.workspace_scan import (
     _workspace_scanner_factory,
 )
 from pipeline_core.application import orchestrator as _orchestrator
+from pipeline_core.application.cluster_augment import (
+    AugmentContext,
+    ClusterAugmentor,
+)
 from pipeline_core.application.gen_tests_reattach import (
     ReattachDeps,
 )
@@ -159,7 +163,6 @@ from pipeline_core.domain.models import (
     Frontier,
     ImplBlock,
     ModRecord,
-    ModuleAugmentState,
     TypeRecord,
 )
 from pipeline_core.domain.refine import (
@@ -15030,6 +15033,86 @@ _MODULE_RECONSTRUCTOR = ModuleReconstructor(
 )
 
 
+class _AugmentAdapter:
+    """Composition-root adapter for the TASK 0c cluster-augmentation phase (R2.2):
+    binds pipeline.py's concrete sentinel/engine/telemetry functions to the narrow
+    role ports in pipeline_core.ports.augment. The ClusterAugmentor use-case receives
+    it through those ISP slices — this one object is the boundary implementation."""
+
+    # --- AugmentTelemetry ---
+    def log(self, msg: str) -> None:
+        _log(msg)
+
+    def emit(self, event: str, **fields: Any) -> None:
+        _emit(event, **fields)
+
+    def mark_phase(self, project_dir: Path, phase_key: str, status: str, *,
+                   detail: str = "", source_hash: "str | None" = None) -> None:
+        _mark_phase(project_dir, phase_key, status, detail=detail, source_hash=source_hash)
+
+    def set_current(self, project_dir: Path, label: str) -> None:
+        _set_current(project_dir, label)
+
+    # --- ClusterScope ---
+    def set_active(self, cluster: "BuildCluster | None") -> None:
+        global _current_cluster
+        _current_cluster = cluster
+
+    # --- AugmentStore ---
+    def is_cluster_augmented(self, project_dir: Path, cluster_name: str, module_name: str) -> bool:
+        return is_cluster_augmented(project_dir, cluster_name, module_name)
+
+    def mark_cluster_augmented(self, project_dir: Path, cluster_name: str, module_name: str, cov: float) -> None:
+        mark_cluster_augmented(project_dir, cluster_name, module_name, cov)
+
+    def cluster_augmented_value(self, project_dir: Path, cluster_name: str, module_name: str) -> float:
+        try:
+            return float(_cluster_augmented_path(project_dir, cluster_name, module_name).read_text().strip())
+        except (ValueError, OSError):
+            return 0.0
+
+    def is_module_augmented(self, project_dir: Path, module_name: str) -> bool:
+        return is_module_augmented(project_dir, module_name)
+
+    def mark_module_augmented(self, project_dir: Path, module_name: str, cov: float) -> None:
+        mark_module_augmented(project_dir, module_name, cov)
+
+    def clear_module_sentinel(self, project_dir: Path, module_name: str) -> None:
+        _module_augmented_path(project_dir, module_name).unlink(missing_ok=True)
+
+    # --- AugmentEngine ---
+    def estimate_ceiling(self, project_dir: Path, cluster: "BuildCluster") -> "tuple[float, int, int]":
+        return _estimate_cluster_ceiling(project_dir, cluster)
+
+    def pre_check(self, project_dir: Path, module_name: str, cluster: "BuildCluster") -> bool:
+        return _cluster_pre_check(project_dir, module_name, cluster)
+
+    def collect_test_rels(self, project_dir: Path) -> "set[str]":
+        return {rel for rel, _ in collect_test_files(project_dir)}
+
+    def augment_module(self, project_dir: Path, module_name: str, module_dir: Path,
+                       crate_type: str, *, existing_test_files: "set[str]",
+                       project_context: str, coverage_strategy: str) -> "tuple[float, int, bool, str]":
+        return task0c_augment_module(
+            project_dir, module_name, module_dir, crate_type,
+            existing_test_files=existing_test_files,
+            project_context=project_context, coverage_strategy=coverage_strategy)
+
+    # --- CommitGate ---
+    def commit_and_mark(self, project_dir: Path, phase_key: str, status: str, *,
+                        commit_message: str, detail: str = "",
+                        source_hash: "str | None" = None) -> None:
+        _commit_and_mark(project_dir, phase_key, status, commit_message=commit_message,
+                         detail=detail, source_hash=source_hash)
+
+
+_AUGMENT_ADAPTER = _AugmentAdapter()
+_CLUSTER_AUGMENTOR = ClusterAugmentor(
+    telemetry=_AUGMENT_ADAPTER, scope=_AUGMENT_ADAPTER, store=_AUGMENT_ADAPTER,
+    engine=_AUGMENT_ADAPTER, gate=_AUGMENT_ADAPTER,
+)
+
+
 def main():
     parser = _orchestrator.build_arg_parser()
     args = parser.parse_args()
@@ -15317,173 +15400,20 @@ def main():
     if _from_spec:
         _log("  [from-spec] Skipping task0c cluster loop (no test augmentation needed).")
         _clusters = []  # ensure the loop below is a no-op
-    for _cluster in _clusters:
-        _current_cluster = _cluster
-        _cluster_t0 = time.monotonic()
-        _log(f"\n{'━' * 60}")
-        _log(f"  Starting compiler cluster: {_cluster.name}")
-        _emit("compiler.cluster.start", cluster=_cluster.name)  # debt#7
-        _ceiling_pct, _ceiling_excl, _ceiling_total = _estimate_cluster_ceiling(project_dir, _cluster)
-        _emit("cluster.start", cluster=_cluster.name,
-              data={"ceiling_pct": _ceiling_pct,
-                    "ceiling_excl": _ceiling_excl,
-                    "ceiling_total": _ceiling_total,
-                    "active_cfg": list(_cluster.active_cfg or []),
-                    "excluded_cfg": list(_cluster.excluded_cfg or []),
-                    "gated_files": sorted(_cluster.gated_files or [])})
-        if _ceiling_excl > 0:
-            _log(f"  Cluster ceiling estimate: ~{_ceiling_pct:.1f}% "
-                 f"({_ceiling_excl} of {_ceiling_total} source lines inside excluded-cfg blocks — "
-                 f"unreachable in this cluster)")
-        _log(f"{'━' * 60}")
-        if _cluster.gated_files:
-            _log(f"  [cluster] Skipping {len(_cluster.gated_files)} gated file(s) not compiled in this cluster: "
-                 f"{', '.join(sorted(_cluster.gated_files))}")
-        _mark_phase(project_dir, f"task0c/{_cluster.name}", "in_progress",
-                    detail="starting", source_hash=_src_hash)
-        _set_current(project_dir, f"task0c/{_cluster.name} / starting")
-
-        _module_states: dict[str, ModuleAugmentState] = {}
-        _cluster_done: set[str] = set()
-
-        # Pre-load which modules are already done for this cluster (resume support).
-        _is_last_cluster = (_cluster == _clusters[-1])
-        for _m in modules:
-            if is_cluster_augmented(project_dir, _cluster.name, _m):
-                _cluster_done.add(_m)
-                _log(f"  cluster/{_cluster.name}: '{_m}' already done — skipping.")
-                # Crash-recovery: if this is the last cluster and the main module sentinel
-                # is missing (pipeline crashed after writing cluster sentinel but before
-                # mark_module_augmented), write it now from the cluster sentinel value.
-                if _is_last_cluster and not is_module_augmented(project_dir, _m):
-                    _cov_str = _cluster_augmented_path(project_dir, _cluster.name, _m).read_text().strip()
-                    try:
-                        _cov_val = float(_cov_str)  # R8.4: numeric sentinel
-                    except ValueError:
-                        _cov_val = 0.0
-                    mark_module_augmented(project_dir, _m, _cov_val)
-                    _log(f"  cluster/{_cluster.name}: recovery — wrote main sentinel for '{_m}' ({_cov_val:.1f}%)")
-
-        # Pre-check: verify base library compiles under this cluster's env.
-        # Handles E0554 (nightly feature on stable) by auto-installing nightly toolchain.
-        if _cluster_done != set(modules):
-            _pc_mod = next((m for m in modules if m not in _cluster_done), modules[0])
-            if not _cluster_pre_check(project_dir, _pc_mod, _cluster):
-                _log(f"  cluster/{_cluster.name}: pre-check failed — skipping all modules.")
-                _mark_phase(project_dir, f"task0c/{_cluster.name}", "error",
-                            detail="pre-check failed — cluster skipped", source_hash=_src_hash)
-                for _m in modules:
-                    if _m not in _cluster_done:
-                        mark_cluster_augmented(project_dir, _cluster.name, _m, 0.0)
-                        if _is_last_cluster:
-                            mark_module_augmented(project_dir, _m, 0.0)
-                        _cluster_done.add(_m)
-
-        while True:
-            # Pick next module not yet done for this cluster, highest coverage first.
-            _pending = [_m for _m in modules if _m not in _cluster_done]
-            if not _pending:
-                break
-            _mod_name = max(_pending, key=lambda _m: module_coverage.get(_m, 0.0))
-            _mod_dir = dep_graph.crate_dir(_mod_name) if is_multi_module else project_dir
-            _crate_type = dep_graph.crate_type(_mod_name) if is_multi_module else "lib"
-
-            if not TARPAULIN_BIN.exists():
-                raise RuntimeError(
-                    f"HARD STOP: cargo-tarpaulin not found at {TARPAULIN_BIN}. "
-                    "Install with: cargo install cargo-tarpaulin"
-                )
-
-            _log(f"\nTASK 0c [{_cluster.name}]: Augmenting '{_mod_name}' to 100% coverage...")
-            _mark_phase(project_dir, f"task0c/{_cluster.name}/{_mod_name}", "in_progress",
-                        detail="starting", source_hash=_src_hash)
-            _set_current(project_dir, f"task0c/{_cluster.name}/{_mod_name} / starting")
-            _task0c_t0 = time.monotonic()
-            _emit("task.start", task="task0c", cluster=_cluster.name, module=_mod_name)
-
-            _etf_pre = {rel for rel, _ in collect_test_files(project_dir)}
-            _cov, _covered, _at_ceiling, _blocked_reason = task0c_augment_module(
-                project_dir, _mod_name, _mod_dir, _crate_type,
-                existing_test_files=_etf_pre,
-                project_context=project_context,
-                coverage_strategy=coverage_strategy,
-            )
-            _log(f"  TASK 0c [{_cluster.name}]: '{_mod_name}' coverage: {_cov:.1f}%")
-            _emit("task.done", task="task0c", cluster=_cluster.name, module=_mod_name,
-                  duration_ms=int((time.monotonic() - _task0c_t0) * 1000),
-                  data={"coverage_pct": _cov, "covered_lines": _covered,
-                        "at_ceiling": _at_ceiling, "blocked_reason": _blocked_reason})
-            _mark_phase(project_dir, f"task0c/{_cluster.name}/{_mod_name}",
-                        "done" if _cov >= COVERAGE_AUGMENTATION_TARGET else "in_progress",
-                        detail=f"{_cov:.1f}%", source_hash=_src_hash)
-            _set_current(project_dir, f"task0c/{_cluster.name}/{_mod_name} / {_cov:.1f}%")
-
-            _state = _module_states.setdefault(
-                _mod_name, ModuleAugmentState(_mod_name, _cluster.name,
-                                              target_pct=COVERAGE_AUGMENTATION_TARGET)
-            )
-            _state.record_pass(_cov, _covered, _at_ceiling)
-            _status = _state.status(_crate_type)
-
-            # A blocked pass is deterministic: the harness survived the LLM fix
-            # attempts AND a full gen_tests strip (or is broken in protected
-            # files), so re-entering augmentation from the identical tree state
-            # cannot end differently. Accept and move on instead of burning
-            # STALL_LIMIT identical retries (observed live: nightly ×10 no-ops).
-            if _blocked_reason and _status not in ('done', 'ceiling'):
-                _log(
-                    f"  HARD BLOCK (FR-018): '{_mod_name}' [{_cluster.name}] augmentation "
-                    f"blocked — {_blocked_reason}. Retry would be a deterministic no-op; "
-                    f"accepting and moving on."
-                )
-                _status = 'hard_block'
-
-            if _status in ('done', 'ceiling', 'hard_block'):
-                if _status == 'ceiling':
-                    _log(
-                        f"  CEILING [{_cluster.name}]: '{_mod_name}' at {_cov:.1f}% — all remaining "
-                        f"uncovered lines are cfg-filtered or LLVM artifacts. No further passes possible "
-                        f"in this cluster. Accepting and moving on."
-                    )
-                elif _status == 'hard_block':
-                    _log(
-                        f"  HARD BLOCK (FR-018): '{_mod_name}' [{_cluster.name}] coverage stuck "
-                        f"at {_cov:.1f}% (stall {_state.stall_passes}/{ModuleAugmentState.STALL_LIMIT}, "
-                        f"total {_state.total_passes}). Accepting and moving on."
-                    )
-                mark_cluster_augmented(project_dir, _cluster.name, _mod_name, _cov)
-                # Also write the main module sentinel when the last cluster finishes,
-                # so the strip/task1-4 loop sees it as done.
-                if _cluster == _clusters[-1]:
-                    mark_module_augmented(project_dir, _mod_name, _cov)
-                _cluster_done.add(_mod_name)
-            else:
-                _log(
-                    f"  HARD RULE (FR-018): '{_mod_name}' [{_cluster.name}] coverage {_cov:.1f}% < {COVERAGE_AUGMENTATION_TARGET:.0f}% "
-                    f"(stall {_state.stall_passes}/{ModuleAugmentState.STALL_LIMIT}, "
-                    f"total {_state.total_passes}, best covered {_state.best_covered_lines} lines). "
-                    f"Retrying."
-                )
-                _module_augmented_path(project_dir, _mod_name).unlink(missing_ok=True)
-                continue
-
-        _log(f"\n  cluster/{_cluster.name} complete — {len(_cluster_done)} module(s) done.")
-        _emit("cluster.done", cluster=_cluster.name,
-              duration_ms=int((time.monotonic() - _cluster_t0) * 1000),
-              data={"modules_done": sorted(_cluster_done)})
-        _cov_summary = ", ".join(
-            f"{_m}:{_cluster_augmented_path(project_dir, _cluster.name, _m).read_text().strip()}%"
-            for _m in _cluster_done
-            if _cluster_augmented_path(project_dir, _cluster.name, _m).exists()
-        )
-        _commit_and_mark(
-            project_dir, f"task0c/{_cluster.name}", "done",
-            commit_message=f"pipeline: task0c/{_cluster.name} — {_cov_summary}",
-            detail=f"{len(_cluster_done)} modules",
-            source_hash=_src_hash,
-        )
-
-    _current_cluster = None
+    # TASK 0c cluster augmentation (R2.2 — application.cluster_augment.ClusterAugmentor).
+    # Per-module crate dir/type resolved up front; _from_spec leaves _clusters empty so
+    # the use-case is a no-op (it still clears the active cluster on exit).
+    _module_dirs = {m: (dep_graph.crate_dir(m) if is_multi_module else project_dir)
+                    for m in modules}
+    _module_types = {m: (dep_graph.crate_type(m) if is_multi_module else "lib")
+                     for m in modules}
+    _CLUSTER_AUGMENTOR.run(AugmentContext(
+        project_dir=project_dir, clusters=_clusters, modules=modules,
+        module_coverage=module_coverage, module_dirs=_module_dirs,
+        module_types=_module_types, src_hash=_src_hash,
+        project_context=project_context, coverage_strategy=coverage_strategy,
+        target_pct=COVERAGE_AUGMENTATION_TARGET, tarpaulin_bin=TARPAULIN_BIN,
+    ))
 
     total_iters = 0
     while True:
