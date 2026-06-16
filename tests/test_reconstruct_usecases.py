@@ -291,3 +291,29 @@ def test_reconstructor_iterates_then_locks(tmp_path: Path) -> None:
     coord = ModuleReconstructor(step=_step(fa), analysis=_analysis(fa), telemetry=fa)
     total, _ = coord.run(_ctx(tmp_path), total_iters=0, coverage_strategy="s")
     assert total == 1 and "task4" in fa.calls         # one failure → analysis → lock
+
+
+def test_reconstructor_plateau_aborts_nonconverging(tmp_path: Path) -> None:
+    """debt #16 follow-up: a module that never improves (constant 0-pass fail) must
+    NOT loop forever — the fixed-point terminator breaks after `plateau_abort`
+    consecutive non-improving iterations, emitting module.nonconverged."""
+    fa = FakeAdapter(task2=True, fix=(False, "x"), validate_task4=(True, ""), best=None,
+                     task3=(False, "test result: FAILED. 0 passed; 1 failed;"))
+    coord = ModuleReconstructor(step=_step(fa), analysis=_analysis(fa),
+                                telemetry=fa, plateau_abort=3)
+    coord.run(_ctx(tmp_path), total_iters=0, coverage_strategy="s")
+    assert "module.nonconverged" in fa.events     # terminated, not hung
+    # iter 1 establishes the baseline (0→N counts as improvement); then 3
+    # consecutive non-improving iters trip the cap → 4 iterations total.
+    assert fa.events.count("module.iter") == 4
+
+
+def test_reconstructor_plateau_disabled_by_default(tmp_path: Path) -> None:
+    """plateau_abort=0 (default) keeps the legacy behavior: a converging run still
+    locks normally without the terminator firing."""
+    fa = FakeAdapter(task2=True, fix=(False, "x"), validate_task4=(True, ""), best=None,
+                     task3_seq=[(False, "test result: FAILED. 0 passed; 1 failed;"),
+                                (True, "test result: ok. 1 passed; 0 failed;")])
+    coord = ModuleReconstructor(step=_step(fa), analysis=_analysis(fa), telemetry=fa)
+    coord.run(_ctx(tmp_path), total_iters=0, coverage_strategy="s")
+    assert "module.nonconverged" not in fa.events

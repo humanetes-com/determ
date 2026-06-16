@@ -17,9 +17,19 @@ from typing import Any
 from pipeline_core.application.reconstruct.fill_rules import is_unimplemented_body
 
 
+def _norm_cfg_set(preds: Any) -> frozenset[str]:
+    """Whitespace-INSENSITIVE set of an fn's cfg predicates for cfg-variant
+    matching: the extractor renders syn spacing (`not (any (extra_cap , ...))`)
+    while a caller may pass the compact form (`not(any(extra_cap,...))`). cfg
+    tokens carry no significant internal whitespace, so strip it all."""
+    return frozenset("".join(str(p).split()) for p in (preds or ()))
+
+
 def locate_fn_by_record(enumerate_fns: Callable[[Path], list[dict[str, Any]] | None],
                         file_path: Path, name: str, container: str,
-                        sig_text: str) -> tuple[int, int, int, str] | None:
+                        sig_text: str,
+                        cfg_predicates: tuple[str, ...] | None = None,
+                        ) -> tuple[int, int, int, str] | None:
     """Re-enumerate `file_path` and return (sig_byte_start, body_byte_start,
     body_byte_end, fresh_sig_text) for the fn matching (name, container,
     sig_text). Used by the per-fn loop to splice by EXACT byte offset
@@ -34,6 +44,10 @@ def locate_fn_by_record(enumerate_fns: Callable[[Path], list[dict[str, Any]] | N
       1. fn name match
       2. container match (e.g. "impl Display for X")
       3. signature similarity (exact, else normalised whitespace)
+      4. cfg predicates (debt #17a) — two same-name same-sig free fns that
+         differ ONLY by `#[cfg]` (the `cap_limit` toggle pair) are otherwise
+         indistinguishable; when the caller knows the target's cfg, prefer the
+         record whose cfg matches so the right cfg-variant is spliced.
     """
     src_dir = file_path.parent
     # The extractor walks a directory tree; we want one file. Easiest path:
@@ -68,6 +82,11 @@ def locate_fn_by_record(enumerate_fns: Callable[[Path], list[dict[str, Any]] | N
             close = [r for r in cands if " ".join(r.get("sig_text", "").split()) == norm]
             if close:
                 cands = close
+    if cfg_predicates is not None and len(cands) > 1:
+        want = _norm_cfg_set(cfg_predicates)
+        cfg_match = [r for r in cands if _norm_cfg_set(r.get("cfg_predicates")) == want]
+        if cfg_match:
+            cands = cfg_match
     if len(cands) != 1:
         # Ambiguous still — pick the first stub-bodied one (more likely to
         # be the one we want to fill).

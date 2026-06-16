@@ -65,6 +65,31 @@ def test_locate_ambiguous_picks_stub() -> None:
     assert out is not None and out[0] == 2
 
 
+def test_locate_cfg_tier_disambiguates_variant_pair() -> None:
+    """debt #17a: two same-name same-sig fns differing only by #[cfg] are
+    distinguished when the caller passes the target's cfg_predicates."""
+    extra = 'any (extra_cap , feature = "extra_cap")'
+    stable = 'not (any (extra_cap , feature = "extra_cap"))'
+    recs = [_rec(cfg_predicates=[extra], has_unimplemented_body=False, sig_byte_start=1),
+            _rec(cfg_predicates=[stable], has_unimplemented_body=False, sig_byte_start=2)]
+    # Target the stable variant (whitespace-insensitive match).
+    out = locate_fn_by_record(lambda _p: recs, Path("/x/src/lib.rs"), "f", "", "fn f()",
+                              ("not(any(extra_cap, feature = \"extra_cap\"))",))
+    assert out is not None and out[0] == 2
+    # Target the extra_cap variant.
+    out2 = locate_fn_by_record(lambda _p: recs, Path("/x/src/lib.rs"), "f", "", "fn f()",
+                               ('any(extra_cap, feature = "extra_cap")',))
+    assert out2 is not None and out2[0] == 1
+
+
+def test_locate_cfg_tier_absent_keeps_legacy_behavior() -> None:
+    """No cfg passed → unchanged (stub-preference) behavior."""
+    recs = [_rec(cfg_predicates=["a"], has_unimplemented_body=False, sig_byte_start=1),
+            _rec(cfg_predicates=["b"], has_unimplemented_body=True, sig_byte_start=2)]
+    out = _loc(recs)  # cfg=None → falls through to stub-preference
+    assert out is not None and out[0] == 2
+
+
 def test_splice_read_failure_returns_false() -> None:
     ok, delta = splice_fn_body_at(Path("/no/such/file.rs"), 0, 1, "x")
     assert ok is False and delta == 0

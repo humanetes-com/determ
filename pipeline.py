@@ -4546,9 +4546,12 @@ def _splice_fn_body_at(file_path: Path, body_byte_start: int, body_byte_end: int
 
 
 def _locate_fn_by_record(file_path: Path, name: str, container: str,
-                         sig_text: str) -> "tuple[int, int, int, str] | None":
+                         sig_text: str,
+                         cfg_predicates: "tuple[str, ...] | None" = None,
+                         ) -> "tuple[int, int, int, str] | None":
     return _reconstruct_splice.locate_fn_by_record(
-        _enumerate_fns_via_extractor, file_path, name, container, sig_text)
+        _enumerate_fns_via_extractor, file_path, name, container, sig_text,
+        cfg_predicates)
 
 
 def _splice_fn_body(file_path: Path, fn_name: str, new_body: str,
@@ -6494,7 +6497,50 @@ def _build_test_reverse_map(
     return out
 
 
+def _is_test_fn_record(r: dict) -> bool:
+    """True when an extractor fn record is a test (carries a `test` cfg from an
+    enclosing `#[cfg(test)]` mod, or `#[test]`/`#[cfg(test)]` directly). The test
+    oracle is immutable (FR-018 / Hard Rule 11) — it must never be a fill target."""
+    return "test" in (r.get("cfg_predicates") or [])
+
+
+def _filter_test_targets(frontier: Frontier, src_dir: Path) -> Frontier:
+    """Drop `(file, fn)` frontier keys that resolve to a test fn. A fill/fix
+    target is a broken PRODUCTION fn; splicing a `#[cfg(test)]`/`#[test]` body
+    rewrites the oracle (the `extra_cap_limit` 255→512 corruption, debt #17).
+    Enforced once at the attribution hub + the fix dispatchers so every
+    attribution path (runtime/compile/classifier/recently-filled/reverse-map)
+    inherits the guard."""
+    if not frontier:
+        return frontier
+    test_keys = {
+        (r.get("file", ""), r.get("fn_name", ""))
+        for r in (_enumerate_fns_via_extractor(src_dir) or [])
+        if _is_test_fn_record(r)
+    }
+    if not test_keys:
+        return frontier
+    kept = {k: v for k, v in frontier.items() if k not in test_keys}
+    for k in frontier.keys() - kept.keys():
+        _log(f"  [fix] skipping test-oracle target {k[0]}::{k[1]} (immutable, FR-018)")
+    return kept
+
+
 def _attribute_failures(
+    test_output: str,
+    src_dir: Path,
+    recently_filled: list[tuple[str, str]],
+    test_reverse_map: dict[str, set[tuple[str, str]]],
+    cluster_name: str,
+) -> tuple[Frontier, str]:
+    """Attribute failures to PRODUCTION fns, then strip any test-oracle targets
+    (FR-018) before returning — the per-path logic lives in `_attribute_failures_impl`."""
+    frontier, kind = _attribute_failures_impl(
+        test_output, src_dir, recently_filled, test_reverse_map, cluster_name)
+    return _filter_test_targets(frontier, src_dir), kind
+
+
+def _attribute_failures_impl(
     test_output: str,
     src_dir: Path,
     recently_filled: list[tuple[str, str]],
@@ -7778,8 +7824,8 @@ class _PhaseCFillAdapter:
         _check_graceful_stop(context)
 
     # --- Mutator ---
-    def locate_fn_by_record(self, file_path, name, container, sig_text):
-        return _locate_fn_by_record(file_path, name, container, sig_text)
+    def locate_fn_by_record(self, file_path, name, container, sig_text, cfg_predicates=None):
+        return _locate_fn_by_record(file_path, name, container, sig_text, cfg_predicates)
 
     def locate_fn(self, text, name):
         return _locate_fn(text, name)
@@ -9398,6 +9444,8 @@ def _behavior_frontier(
         f_rel = r.get("file", "")
         if f_rel in existing_test_files or _is_gen_tests_file(Path(f_rel).name):
             continue
+        if _is_test_fn_record(r):  # inline #[cfg(test)] fns are the oracle, never targets (FR-018)
+            continue
         by_name.setdefault(r.get("fn_name", ""), []).append(r)
     frontier: Frontier = {}
     test_srcs: dict[str, tuple[str, str]] = {}
@@ -10368,8 +10416,6 @@ def task0_cfg_scan(project_dir: Path) -> "list[BuildCluster]":
     interesting: list[tuple[str, str]] = []  # (predicate, kind) where kind in ('feature', 'custom')
 
     for pred, line_count in predicate_lines.items():
-        if line_count < 5:
-            continue  # noise threshold
         # Check if it's a known-stable prefix
         base = pred.split('=')[0].strip()
         if base in _STABLE_KNOWN:
@@ -10377,8 +10423,17 @@ def task0_cfg_scan(project_dir: Path) -> "list[BuildCluster]":
         if pred in cargo_features:
             if pred in default_features:
                 continue  # always active, not a separate cluster
+            if line_count < 5:
+                continue  # noise threshold — avoid a cluster per trivial opt-in feature
             interesting.append((pred, 'feature'))
         else:
+            # Custom RUSTFLAGS `--cfg` toggle: a deliberate, author-defined
+            # compile-time switch (e.g. `extra_cap`, `anyhow_no_core_error`),
+            # not in the builtin/platform set. ALWAYS cluster it — the noise
+            # threshold does NOT apply (debt #15): un-clustered, the code it
+            # gates is reconstructed/tested in NO cluster (a silent coverage
+            # hole + the strict-count confusion). Customs are rare and explicit,
+            # so this can't cause feature-style cluster explosion.
             interesting.append((pred, 'custom'))
 
     # --- Step 4b: find files whose entire module is gated behind a single predicate ---
@@ -11979,6 +12034,7 @@ Output nothing else."""
             _log_compile_overview(output, len(history))
             frontier = _compile_error_frontier(
                 output, project_dir, check_cmd, env, timeout)
+            frontier = _filter_test_targets(frontier, project_dir)
             if not frontier:
                 return _do_fix(output, history, retro=retro)
             recs = _enumerate_fns_via_extractor(project_dir) or []
@@ -12023,8 +12079,10 @@ Output nothing else."""
             _log_compile_overview(output, len(history))
             frontier = _compile_error_frontier(
                 output, project_dir, check_cmd, env, timeout)
+            frontier = _filter_test_targets(frontier, project_dir)
             if not frontier:
-                tdd_frontier = _extract_tdd_frontier(output, project_dir)
+                tdd_frontier = _filter_test_targets(
+                    _extract_tdd_frontier(output, project_dir), project_dir)
                 kind = "tdd-stub"
                 behavior_srcs: dict[str, tuple[str, str]] = {}
                 if not tdd_frontier:
@@ -12034,6 +12092,7 @@ Output nothing else."""
                     # regresses: observed live introducing 24 compile errors).
                     tdd_frontier, behavior_srcs = _behavior_frontier(
                         output, project_dir, existing_test_files)
+                    tdd_frontier = _filter_test_targets(tdd_frontier, project_dir)
                     kind = "behavior"
                     if not tdd_frontier:
                         return _do_fix(output, history, retro=retro)
@@ -12420,7 +12479,7 @@ def _task3_inline_retry(
             compile_cmd, project_dir, _env(), timeout=TEST_TIMEOUT)
         if not diags:
             return {"abort": True, "reason": "no_compile_errors"}
-        frontier = _frontier_from_diags(diags, project_dir)
+        frontier = _filter_test_targets(_frontier_from_diags(diags, project_dir), project_dir)
         refs: list[tuple[str, str]] = list(frontier.keys())
         if not refs:
             return {"abort": True, "reason": "unattributed_compile_errors"}
@@ -15057,6 +15116,9 @@ _FAILURE_ANALYSIS = FailureAnalysisStep(
 )
 _MODULE_RECONSTRUCTOR = ModuleReconstructor(
     step=_RECONSTRUCTION_STEP, analysis=_FAILURE_ANALYSIS, telemetry=_RECONSTRUCT_ADAPTER,
+    # debt #16 follow-up: bound the outer repair loop. Must exceed
+    # NO_IMPROVEMENT_THRESHOLD (whole-project escalation) so escalation acts first.
+    plateau_abort=int(os.getenv("MODULE_PLATEAU_ABORT", "10")),
 )
 
 

@@ -44,6 +44,7 @@ class Mutator(Protocol):
 
     def locate_fn_by_record(
         self, file_path: Path, name: str, container: str, sig_text: str,
+        cfg_predicates: tuple[str, ...] | None = ...,
     ) -> tuple[int, int, int, str] | None: ...
     def locate_fn(
         self, text: str, name: str,
