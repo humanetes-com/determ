@@ -2379,6 +2379,7 @@ def _count_test_fns_cfg_aware(
     text: str,
     cfg_true: set[str],
     cfg_false: set[str],
+    default_features: "frozenset[str] | set[str]" = frozenset(),
 ) -> int:
     """Count `#[test]`-attributed fn declarations in `text` whose surrounding
     `#[cfg(...)]` attributes evaluate true (or undecidable) under the given
@@ -2423,15 +2424,11 @@ def _count_test_fns_cfg_aware(
             for cm in cfg_inline_re.finditer(lines[j]):
                 gates.append(cm.group(1).strip())
             j -= 1
-        # If any gate is definitively False, skip this test.
-        excluded = False
-        for g in gates:
-            v = _eval_cfg_pred(g, cfg_true, cfg_false)
-            if v is False:
-                excluded = True
-                break
-        if not excluded:
-            count += 1
+        # If any gate keeps cargo from running this test, skip it. cargo-faithful:
+        # a custom `--cfg`/non-default feature off here = the test never runs.
+        if any(_cfg_false_for_cargo(g, cfg_true, cfg_false, default_features) for g in gates):
+            continue
+        count += 1
     return count
 
 
@@ -2441,6 +2438,7 @@ def _file_active_for_cluster(
     cfg_true: set[str],
     cfg_false: set[str],
     _depth: int = 0,
+    default_features: "frozenset[str] | set[str]" = frozenset(),
 ) -> bool:
     """Whether `file_path` is COMPILED under the cluster cfg: evaluate every
     cfg predicate along its mod-declaration chain up to the crate root
@@ -2459,18 +2457,18 @@ def _file_active_for_cluster(
     if recs is None:
         # Extractor unavailable: single-level gate (AST-less environments).
         pred = _file_cfg_predicate(src_dir, file_path.name)
-        return pred is None or _eval_cfg_pred(pred, cfg_true, cfg_false) is not False
+        return pred is None or not _cfg_false_for_cargo(pred, cfg_true, cfg_false, default_features)
     matches = [r for r in recs if r.name == stem or r.file == file_path.name]
     if not matches:
         return True
     # Dual-form decls (`#[cfg(X)] mod m;` / `#[cfg(not(X))] mod m;`): the file
     # is active if ANY declaration chain is active.
     for rec in matches:
-        if any(_eval_cfg_pred(p, cfg_true, cfg_false) is False
+        if any(_cfg_false_for_cargo(p, cfg_true, cfg_false, default_features)
                for p in rec.cfg_predicates):
             continue
         if _file_active_for_cluster(src_dir, Path(rec.declared_in),
-                                    cfg_true, cfg_false, _depth + 1):
+                                    cfg_true, cfg_false, _depth + 1, default_features):
             return True
     return False
 
@@ -2503,6 +2501,17 @@ def _count_active_tests_for_cluster(
         cfg_true = set(getattr(cluster, "cfg_true", []) or [])
         cfg_false = set(getattr(cluster, "cfg_false", []) or [])
 
+    # Crate default features — a `feature = "X"` that IS a default is ON even when
+    # the cluster sets don't list it, so it must NOT be force-excluded (FR-018).
+    cargo_toml = project_dir / "Cargo.toml"
+    default_features: frozenset[str] = frozenset()
+    if cargo_toml.exists():
+        try:
+            default_features = frozenset(
+                _cargo_default_features(cargo_toml.read_text(encoding="utf-8", errors="replace")))
+        except Exception:
+            default_features = frozenset()
+
     total = 0
     # 1. tests/**/*.rs — cfg-filtered per-test.
     tests_dir = project_dir / "tests"
@@ -2512,7 +2521,7 @@ def _count_active_tests_for_cluster(
                 text = tp.read_text(encoding="utf-8", errors="replace")
             except Exception:
                 continue
-            total += _count_test_fns_cfg_aware(text, cfg_true, cfg_false)
+            total += _count_test_fns_cfg_aware(text, cfg_true, cfg_false, default_features)
 
     src_dir = project_dir / "src"
     if not src_dir.is_dir():
@@ -2524,7 +2533,7 @@ def _count_active_tests_for_cluster(
             continue
         # A parent file that never compiles under this cluster (mod-decl chain
         # cfg'd out) takes its gen_tests siblings with it.
-        if not _file_active_for_cluster(src_dir, parent, cfg_true, cfg_false):
+        if not _file_active_for_cluster(src_dir, parent, cfg_true, cfg_false, 0, default_features):
             continue
         try:
             ptext = parent.read_text(encoding="utf-8", errors="replace")
@@ -2548,19 +2557,19 @@ def _count_active_tests_for_cluster(
             # individual #[test] fns (they're written by task0c, which
             # doesn't emit per-test cfgs), so cfg-aware vs naive count
             # produces the same result here.
-            total += _count_test_fns_cfg_aware(stext, cfg_true, cfg_false)
+            total += _count_test_fns_cfg_aware(stext, cfg_true, cfg_false, default_features)
 
     # 3. src/**/*.rs (excluding gen_tests siblings) — inline test mods.
     for srf in src_dir.rglob("*.rs"):
         if _is_gen_tests_file(srf.name):
             continue
-        if not _file_active_for_cluster(src_dir, srf, cfg_true, cfg_false):
+        if not _file_active_for_cluster(src_dir, srf, cfg_true, cfg_false, 0, default_features):
             continue
         try:
             stext = srf.read_text(encoding="utf-8", errors="replace")
         except Exception:
             continue
-        total += _count_test_fns_cfg_aware(stext, cfg_true, cfg_false)
+        total += _count_test_fns_cfg_aware(stext, cfg_true, cfg_false, default_features)
     return total
 
 
@@ -3630,6 +3639,64 @@ def _split_top_level_commas(s: str) -> list[str]:
     if buf:
         parts.append("".join(buf).strip())
     return parts
+
+
+# Built-in cfg identifiers cargo evaluates from the build TARGET (not from a
+# `--cfg`/feature flag). Undecidable to the pipeline's cfg sets, but cargo MAY
+# run them, so the expected-test count must keep counting them (never over-exclude).
+# Everything else that is a bare ident is a custom `--cfg NAME` flag, default OFF.
+_BUILTIN_CFG_IDENTS = frozenset({
+    "unix", "windows", "test", "debug_assertions", "doc", "doctest", "miri",
+    "proc_macro", "overflow_checks",
+})
+
+
+def _cfg_leaf_atoms(pred: str) -> set[str]:
+    """All leaf (non-operator) atoms of a cfg predicate, normalized (no spaces).
+    `any(extra_cap, feature = "extra_cap")` → {`extra_cap`, `feature="extra_cap"`}."""
+    norm = _normalize_cfg_pred(pred)
+    for op in ("not", "all", "any"):
+        if norm.startswith(op + "(") and norm.endswith(")"):
+            out: set[str] = set()
+            for part in _split_top_level_commas(norm[len(op) + 1:-1]):
+                out |= _cfg_leaf_atoms(part)
+            return out
+    return {norm} if norm else set()
+
+
+def _cfg_atom_is_off_for_cargo(atom: str, cfg_true_norm: set[str],
+                               default_features: "frozenset[str] | set[str]") -> bool:
+    """True when `atom` is a CUSTOM cfg cargo leaves OFF in this cluster: a bare
+    `--cfg NAME` flag enabled in no cluster, or a `feature = "X"` that is neither
+    enabled here nor a crate default. Builtin/target cfgs (`unix`, `target_os=…`)
+    and unknown `key = "v"` forms return False — we never force-exclude what cargo
+    might run (the strict verdict must not under-count, FR-018)."""
+    if atom in cfg_true_norm:
+        return False                                   # enabled in this cluster
+    if "=" in atom:
+        key, _, val = atom.partition("=")
+        if key == "feature":
+            return val.strip('"') not in default_features
+        return False                                   # target_os=… / unknown key → leave to cargo
+    return atom not in _BUILTIN_CFG_IDENTS              # custom bare --cfg flag → OFF
+
+
+def _cfg_false_for_cargo(pred: str, cfg_true: set[str], cfg_false: set[str],
+                         default_features: "frozenset[str] | set[str]" = frozenset()) -> bool:
+    """cargo-faithful "does this cfg keep the item from compiling/running here?".
+
+    Fixes the over-count bug (2026-06-16 hardcrate): a `#[cfg(extra_cap)]` whose
+    predicate is in NEITHER cfg_true nor cfg_false (e.g. a toggle that defined no
+    cluster) was `_eval_cfg_pred → None` (undecidable) and so COUNTED, but cargo
+    never sets `extra_cap` in the default build → 16 ran / 18 expected → false
+    'incomplete'. We add the provably-off custom atoms to the false-set, then
+    evaluate — builtin atoms stay undecidable so we never over-exclude."""
+    cfg_true_norm = {_normalize_cfg_pred(x) for x in cfg_true}
+    aug_false = set(cfg_false)
+    for atom in _cfg_leaf_atoms(pred):
+        if _cfg_atom_is_off_for_cargo(atom, cfg_true_norm, default_features):
+            aug_false.add(atom)
+    return _eval_cfg_pred(pred, cfg_true, aug_false) is False
 
 
 def _cluster_extractor_args(cluster: "BuildCluster | None") -> list[str]:

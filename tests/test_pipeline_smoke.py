@@ -680,22 +680,25 @@ def test_count_test_fns_cfg_aware() -> None:
         "\n"
         "#[cfg(unknown_predicate)]\n#[test]\nfn t_unknown() {}\n"
     )
-    # Stable: error_generic_member_access ∈ cfg_false → t_nightly_only
-    # excluded. t_unknown undecidable → kept. t_always always. t_std_or_default
-    # has any() with `not(anyhow_no_core_error)` true → kept.
+    # Stable: error_generic_member_access ∈ cfg_false → t_nightly_only excluded.
+    # t_unknown is a CUSTOM `--cfg` flag set in NO cluster → cargo never runs it
+    # → excluded (the 2026-06-16 hardcrate over-count fix; was wrongly "kept" via
+    # undecidable). t_always counted; t_std_or_default kept (`not(anyhow_no_core_error)`
+    # is true — that custom cfg is off by default). → 2.
     n_stable = pipeline._count_test_fns_cfg_aware(
         text,
         cfg_true=set(),
         cfg_false={"error_generic_member_access", "anyhow_no_core_error"},
     )
-    assert n_stable == 3, f"stable count expected 3, got {n_stable}"
-    # Nightly: error_generic_member_access ∈ cfg_true → t_nightly_only kept.
+    assert n_stable == 2, f"stable count expected 2, got {n_stable}"
+    # Nightly: error_generic_member_access ∈ cfg_true → t_nightly_only kept;
+    # t_unknown still excluded (custom flag, off). → 3.
     n_nightly = pipeline._count_test_fns_cfg_aware(
         text,
         cfg_true={"error_generic_member_access"},
         cfg_false=set(),
     )
-    assert n_nightly == 4, f"nightly count expected 4, got {n_nightly}"
+    assert n_nightly == 3, f"nightly count expected 3, got {n_nightly}"
     print("  OK  _count_test_fns_cfg_aware (FR-024)")
 
 
