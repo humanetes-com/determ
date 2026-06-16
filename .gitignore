@@ -9,6 +9,8 @@ __pycache__
 logs/
 tmp
 handover/
+handover.md
+previous_handovers.md
 functional_requirements_*.md
 failure_log.md
 tests_output_*.txt

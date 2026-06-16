@@ -412,3 +412,69 @@ def test_strip_trailing_file_tag_matches_old_regex() -> None:
     old = lambda t: re.sub(r'\s*</FILE>\s*$', '', t).strip()  # noqa: E731
     for t in ["code\n</FILE>\n", "code</FILE>", "a</FILE>b</FILE>", "plain", "  sp  ", "</FILE>"]:
         assert text.strip_trailing_file_tag(t) == old(t), repr(t)
+
+
+def test_strip_list_marker_matches_old_regex() -> None:
+    """Regex-free list-marker strip == the former `^[-*\\d]+[.):]?\\s*` sub (R7)."""
+    old = lambda line: re.sub(r'^[\-\*\d]+[\.\):]?\s*', '', line)  # noqa: E731
+    cases = [
+        "- src/x.rs", "* a.rs", "1. file.rs", "2) y.rs", "3: z.rs", "10. ten.rs",
+        "src/lib.rs",            # no marker → unchanged
+        "-*-* weird", "--- dashes", "5.no-space", "  leading", "", "-", "1.", "42",
+        "*", "-.x", "7)tab\tafter",
+    ]
+    for c in cases:
+        assert text.strip_list_marker(c) == old(c), repr(c)
+
+
+def test_tagged_path_block_spans_matches_old_regex() -> None:
+    """Regex-free span finder == `\\n<tag path="[^"]*">.*?</tag>` (DOTALL, R7)."""
+    def old(t: str, tag: str) -> list[tuple[int, int]]:
+        pat = re.compile(r'\n<' + re.escape(tag) + r' path="[^"]*">.*?</' + re.escape(tag) + r'>',
+                         re.DOTALL)
+        return [m.span() for m in pat.finditer(t)]
+    cases = [
+        '\n<FILE path="a.rs">body</FILE>',
+        'pre\n<FILE path="a.rs">x</FILE>\n<FILE path="b.rs">y</FILE>post',
+        '\n<FILE path="multi\nline">a\nb\nc</FILE>',          # DOTALL body
+        '\n<FILE path="a.rs">x</FILE>',
+        '<FILE path="nolead.rs">x</FILE>',                    # no leading \n → no match
+        '\n<FILE path="unterminated">no close here',          # missing </FILE>
+        '\n<FILE path="noquoteclose>x</FILE>',                # missing closing quote
+        '\n<FILE path="a">first</FILE>\n<FILE path="b">second</FILE>',
+        'nothing here', '',
+    ]
+    for t in cases:
+        assert text.tagged_path_block_spans(t, "FILE") == old(t, "FILE"), repr(t)
+
+
+def test_tagged_path_block_spans_requires_gt_after_quote() -> None:
+    """A `path="…"` not immediately followed by `>` is not a block opener; the
+    scanner advances past the false start and finds the next real block."""
+    t = '\n<FILE path="x" extra="y">body</FILE>\n<FILE path="z">ok</FILE>'
+    spans = text.tagged_path_block_spans(t, "FILE")
+    # only the well-formed second block matches (`">` immediately after the quote)
+    assert len(spans) == 1
+    s, e = spans[0]
+    assert t[s:e] == '\n<FILE path="z">ok</FILE>'
+
+
+def test_sibling_comment_block_spans_matches_old_regex() -> None:
+    """Regex-free `// --- name ---` block finder == the former
+    `\\n// --- [^\\n]+ ---\\n[^/]*?(?=\\n// ---|$)` (R7)."""
+    def old(t: str) -> list[tuple[int, int]]:
+        pat = re.compile(r'\n// --- [^\n]+ ---\n[^/]*?(?=\n// ---|$)', re.DOTALL)
+        return [m.span() for m in pat.finditer(t)]
+    cases = [
+        "\n// --- alpha ---\nbody one\n// --- beta ---\nbody two",
+        "\n// --- one ---\nplain body to end",
+        "\n// --- has slash ---\nbody with / slash stops",   # `/` in body → no match
+        "\n// --- nobody ---\n",
+        "// --- no leading newline ---\nx",                  # no leading \n
+        "\n// --- missing close\nbody",                      # header has no ` ---`
+        "\n// --- a ---\naaa\n// --- b ---\nbbb\n// --- c ---\nccc",
+        "no markers at all", "",
+        "\n// --- x ---\n",                                  # empty body to end
+    ]
+    for t in cases:
+        assert text.sibling_comment_block_spans(t) == old(t), repr(t)
