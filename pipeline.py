@@ -44,6 +44,7 @@ from pipeline_core.adapters import strip as _strip_mod
 from pipeline_core.adapters import workspace as _wsmod
 from pipeline_core.adapters import workspace_scan as _workspace_scan
 from pipeline_core.adapters.coverage import CoverageDeps
+from pipeline_core.adapters.structure import CliStructureReader
 from pipeline_core.adapters.workspace import WorkspaceDeps
 from pipeline_core.adapters.workspace_scan import (
     _dependency_graph_factory,
@@ -221,6 +222,7 @@ from pipeline_core.domain.text import (
     strip_markdown_fences as _strip_markdown_fences,
 )
 from pipeline_core.io import read, write
+from pipeline_core.ports import structure as _structure_port
 from pipeline_core.prompts import runtime as _prompts_runtime
 from pipeline_core.prompts.context import (
     PerFnFixSections,
@@ -3437,6 +3439,8 @@ SKELETON_EXTRACTOR_BIN = Path(__file__).parent / "tools" / "skeleton_extractor" 
 # (CODE_ARCHITECTURE.md §1), so it owns construction; call sites migrate onto ADAPTERS
 # one task at a time (slice 5). Adapters wrap real primitives and never import back here.
 ADAPTERS = build_adapters(SETTINGS, extractor_bin=SKELETON_EXTRACTOR_BIN, model=MODEL)
+# P1: the real StructureReader — injected into the fill engine (no monkeypatch seam).
+_STRUCTURE = CliStructureReader(ADAPTERS.extractor)
 # The application-layer composition context. main()'s task dispatch migrates onto it
 # slice by slice (5b); for now it bundles the resolved settings + adapters.
 # Wire the cross-cutting infra seams to the pipeline's concrete sinks/config (slice 5b).
@@ -7774,7 +7778,12 @@ from pipeline_core.prompts.per_fn import build_per_fn_prompt as _build_per_fn_pr
 class _PhaseCFillAdapter:
     """Binds concrete pipeline.py engine helpers to the `ports.fill_engine`
     roles. One object satisfies every role (the use-cases each receive only the
-    narrow slice they declare); methods late-bind the module globals."""
+    narrow slice they declare). P1: structure reads come from a CONSTRUCTOR-
+    INJECTED `StructureReader` (tests pass a fake — no module-global monkeypatch);
+    the remaining methods still late-bind module globals pending P2–P4."""
+
+    def __init__(self, *, structure: "_structure_port.StructureReader" = _STRUCTURE) -> None:
+        self._structure = structure
 
     # --- EngineTelemetry ---
     def log(self, msg):
@@ -7870,10 +7879,10 @@ class _PhaseCFillAdapter:
         return _scan_unimplemented_for_cluster(target_src_dir, cluster)
 
     def enumerate_fns(self, src_dir):
-        return _enumerate_fns_via_extractor(src_dir)
+        return self._structure.enumerate_fns(src_dir)
 
     def enumerate_types(self, src_dir):
-        return _enumerate_types_via_extractor(src_dir)
+        return self._structure.enumerate_types(src_dir)
 
     def collect_impl_blocks(self, src_dir):
         return _collect_impl_blocks(src_dir)
@@ -7961,11 +7970,13 @@ class _PhaseCFillAdapter:
 _PHASE_C_FILL_ADAPTER = _PhaseCFillAdapter()
 
 
-def _build_phase_c_engine() -> "PhaseCFillEngine":
+def _build_phase_c_engine(adapter: "_PhaseCFillAdapter | None" = None) -> "PhaseCFillEngine":
     """Composition root: bind the concrete helpers to the fill-engine ports and
     assemble the use-cases. Built per call so monkeypatched SETTINGS /
-    parallelism (tests) are honoured at call time."""
-    a = _PHASE_C_FILL_ADAPTER
+    parallelism (tests) are honoured at call time. `adapter` lets a test inject a
+    `_PhaseCFillAdapter(structure=fake)` (P1 constructor-DI seam) instead of
+    monkeypatching the enumerate globals."""
+    a = adapter or _PHASE_C_FILL_ADAPTER
     caps = FillCaps(
         per_fn_fix_hard_cap=_PER_FN_FIX_HARD_CAP,
         per_fn_fix_max_stalls=_PER_FN_FIX_MAX_STALLS,
@@ -8002,14 +8013,16 @@ def _task2_fill_fns_one_by_one(
     skip_end_pass_test: bool = False,
     tdd_frontier_tests: "Frontier | None" = None,
     tdd_test_cmd: str | None = None,
+    adapter: "_PhaseCFillAdapter | None" = None,
 ) -> dict:
     """Phase C — the per-cluster fill engine. Thin composition-root shim over
     `application.reconstruct.phase_c_engine.PhaseCFillEngine` (P2/R3.3): for each
     pass, scan stubs → leaf-first priority levels → worker pool (each worker
     drives `FillOneFn`) → per-pass cargo test + test-fix loop → pass-level
-    floor-stall. Returns {'fns_filled','bytes_filled','attempts','errors',
+    floor-stall. `adapter` is the P1 test-injection seam (fake StructureReader).
+    Returns {'fns_filled','bytes_filled','attempts','errors',
     'remaining','impls_filled','impls_failed'}."""
-    return _build_phase_c_engine().run(
+    return _build_phase_c_engine(adapter).run(
         project_dir, target_src_dir, tests_dir_files, module_name, cluster_name,
         cluster=cluster, check_cmd=check_cmd, cluster_env=cluster_env,
         max_passes=max_passes, leaf_name_counts=leaf_name_counts, fr_path=fr_path,
@@ -8393,7 +8406,7 @@ def _enumerate_types_via_extractor(src_dir: Path) -> list[TypeRecord] | None:
     Each record has: file, kind, name, generics, definition, fields[],
     variants[], methods[], is_pub.
     """
-    return ADAPTERS.extractor.enumerate_types(src_dir)  # slice 5a: via Extractor adapter
+    return _STRUCTURE.enumerate_types(src_dir)  # slice 5a: via Extractor adapter
 
 
 def _cluster_filter_type_methods(
@@ -8603,25 +8616,9 @@ def _types_referenced_in_text(text: str, all_types: list[TypeRecord]) -> list[Ty
 
 
 def _enumerate_fns_via_extractor(src_dir: Path) -> list[dict] | None:
-    """Invoke the syn-based extractor's --enumerate-fns subcommand.
-
-    The adapter now returns typed :class:`FnRecord`s (the seam is typed, slice 6).
-    This wrapper feeds the dict-based per-fn / per-impl fill engine, so it serialises
-    each record back to its wire dict via the model's own ``to_dict`` — keeping the
-    engine (``_process_one_stub``, ``_collect_impl_blocks``, the hand-built fallback
-    stub dicts) byte-identical. Each dict:
-        file (str, rel path from src_dir)
-        fn_name (str)
-        sig_text (str)
-        body_text (str)
-        sig_byte_start (int), body_byte_start (int), body_byte_end (int)
-        cfg_predicates (list[str])
-        is_pub (bool)
-        container (str): "" for free fn, "impl ..." or "trait ..."
-        has_unimplemented_body (bool)
-    """
-    recs = ADAPTERS.extractor.enumerate_fns(src_dir)  # typed FnRecords (slice 6)
-    return None if recs is None else [r.to_dict() for r in recs]
+    """Fn wire-dicts for the not-yet-decomposed engine call sites (P2–P4 will route
+    them through the injected `StructureReader`). Logic + dict shape: CliStructureReader."""
+    return _STRUCTURE.enumerate_fns(src_dir)
 
 
 def _dispatch_families_via_extractor(src_dir: Path) -> list[DispatchFamily] | None:
@@ -8635,7 +8632,7 @@ def _dispatch_families_via_extractor(src_dir: Path) -> list[DispatchFamily] | No
     Dispatch correctness is a cross-impl invariant (FR-027), so the whole
     family is co-designed in one prompt context.
     """
-    return ADAPTERS.extractor.enumerate_dispatch_families(src_dir)  # slice 5a: via adapter
+    return _STRUCTURE.enumerate_dispatch_families(src_dir)  # slice 5a: via adapter
 
 
 def _feature_gate_cfgs_via_extractor(src_dir: Path) -> list[str] | None:
@@ -9737,14 +9734,14 @@ def _enumerate_mods_via_extractor(src_dir: Path) -> list[ModRecord] | None:
     Rust correctly and never conflates an adjacent mod's cfg with the
     target mod's cfg.
     """
-    return ADAPTERS.extractor.enumerate_mods(src_dir)  # slice 5a: via Extractor adapter
+    return _STRUCTURE.enumerate_mods(src_dir)  # slice 5a: via Extractor adapter
 
 
 def _enumerate_consts_via_extractor(src_dir: Path) -> list[ConstRecord] | None:
     """Invoke the syn-based extractor's --enumerate-consts subcommand: pub/private
     `const` and `static` items (name, type, is_pub). Replaces regex scans of source
     for `pub const`/`pub static` (Hard Rule: no regex on Rust source — use syn)."""
-    return ADAPTERS.extractor.enumerate_consts(src_dir)
+    return _STRUCTURE.enumerate_consts(src_dir)
 
 
 def _public_api_from_source(content: str) -> str:
