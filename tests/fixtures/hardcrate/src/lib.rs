@@ -16,6 +16,7 @@ mod round;
 mod textsum;
 mod counter;
 mod wire;
+mod framing;
 #[cfg(any(extra_cap, feature = "extra_cap"))]
 mod cap;
 
@@ -24,6 +25,7 @@ pub use merge::merge_first_wins;
 pub use round::divide_round;
 pub use textsum::{sum_csv, SumError};
 pub use wire::{decode_id, encode_id};
+pub use framing::{deframe, frame};
 #[cfg(any(extra_cap, feature = "extra_cap"))]
 pub use cap::wrapping_total;
 

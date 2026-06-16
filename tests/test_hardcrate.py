@@ -30,9 +30,9 @@ def test_hardcrate_compiles_and_passes() -> None:
         ["cargo", "test"], cwd=_CRATE, capture_output=True, text=True, timeout=180,
     )
     assert res.returncode == 0, res.stdout + res.stderr
-    # 14 unit (4 lib + 2 round + 3 merge + 2 textsum + 1 counter + 2 wire) + 6 integration.
+    # max complexity (level 2). 16 unit (+2 framing over level 1) + 7 integration (+1 framing).
     passed = res.stdout.count(" ... ok")
-    assert passed == 20, f"expected 20 passing tests, saw {passed}\n{res.stdout}"
+    assert passed == 23, f"expected 23 passing tests, saw {passed}\n{res.stdout}"
 
 
 @needs_cargo
@@ -45,9 +45,9 @@ def test_hardcrate_extra_cap_cluster_passes() -> None:
     )
     assert res.returncode == 0, res.stdout + res.stderr
     # +1 unit (cap) +1 integration over the default cluster (the cap_limit dual-form
-    # unit test swaps default↔extra but stays 1, so the net is +2 → 22).
+    # unit test swaps default↔extra but stays 1, so the net is +2 → 25).
     passed = res.stdout.count(" ... ok")
-    assert passed == 22, f"expected 22 passing tests, saw {passed}\n{res.stdout}"
+    assert passed == 25, f"expected 25 passing tests, saw {passed}\n{res.stdout}"
 
 
 def test_each_trap_carries_its_distinguishing_case() -> None:
@@ -87,3 +87,12 @@ def test_each_trap_carries_its_distinguishing_case() -> None:
     # the single-cluster miscalibration that surfaced debt #15).
     lib_src = src("src/lib.rs")
     assert "#[cfg(not(any(extra_cap" in lib_src and "fn cap_limit()" in lib_src
+
+    # T6 (level 2) frame protocol: exact wire bytes + validation pinned ONLY in the
+    # integration file; the unit checks round-trip alone.
+    framing_unit = src("src/framing.rs")
+    assert "deframe(&frame(&p))" in framing_unit              # unit = round-trip only
+    assert "vec![3, 1, 2, 3, 0]" not in framing_unit           # exact bytes NOT in the unit
+    framing_integ = src("tests/framing.rs")
+    assert "frame(&[1, 2, 3]), vec![3, 1, 2, 3, 0]" in framing_integ   # pinned here
+    assert "deframe(&[1, 5, 6]), None" in framing_integ        # bad-checksum reject (tension)

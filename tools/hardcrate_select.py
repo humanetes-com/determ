@@ -36,6 +36,11 @@ TRAPS: dict[str, dict] = {
                 "lib": ["mod wire;", "pub use wire::{decode_id, encode_id};"]},
     "cap":     {"level": 1, "src": "src/cap.rs", "test": "tests/cap.rs",
                 "lib": ["mod cap;", "pub use cap::wrapping_total;"]},
+    # level 2 — harder than the level-1 codec (T5): a cross-fn protocol with three
+    # interacting rules whose accept/reject pins pull deframe in tension, meant to
+    # need ≥3 outer iterations (C3/C4).
+    "framing": {"level": 2, "src": "src/framing.rs", "test": "tests/framing.rs",
+                "lib": ["mod framing;", "pub use framing::{deframe, frame};"]},
 }
 
 
