@@ -1,7 +1,7 @@
 """TASK 3 — per-cluster strict-verdict test runner (validation use case).
 
 Extracted from pipeline.py (slice 5b). Body verbatim; cross-cutting infra (log/emit) and
-the pure domain helpers (`_parse_test_counts`, `validate_task3_output_strict`,
+the pure domain helpers (`parse_test_counts`, `validate_task3_output_strict`,
 `OUTPUT_SEPARATOR`) are imported, while the genuinely pipeline-coupled collaborators
 (phase tracking, cluster loading, cargo env, the inline-retry fix loop, the legacy path)
 are injected via :class:`Task3Deps`. No import of pipeline.py.
@@ -19,7 +19,7 @@ from typing import Any
 
 from ...domain.test_results import (
     OUTPUT_SEPARATOR,
-    _parse_test_counts,
+    parse_test_counts,
     validate_task3_output_strict,
 )
 from ...log import emit, log
@@ -58,8 +58,8 @@ def _should_reverify(primary_output: str, retry_output: str, retry_passed: bool,
         return False
     if retry_passed:
         return True
-    init_p, init_f, _ = _parse_test_counts(primary_output)
-    new_p, new_f, _ = _parse_test_counts(retry_output)
+    init_p, init_f, _ = parse_test_counts(primary_output)
+    new_p, new_f, _ = parse_test_counts(retry_output)
     return new_p > init_p or new_f < init_f
 
 
@@ -106,7 +106,7 @@ def run_clusters_strict(project_dir: Path, clusters: list[Any],
             log(f"  [task3/{cluster.name}] {stderr}")
         dt = time.monotonic() - t_c
         output = stdout + ("\n--- stderr ---\n" + stderr if stderr else "")
-        pass_n, fail_n, ign_n = _parse_test_counts(output)
+        pass_n, fail_n, ign_n = parse_test_counts(output)
         expected_n = deps.count_active_tests_for_cluster(project_dir, cluster)
         status, reason = validate_task3_output_strict(
             pass_n, fail_n, ign_n, expected_n, cluster.name,
@@ -256,7 +256,7 @@ def task3(project_dir: Path, test_command: str, iteration: int | str,
                 # The recursion emitted its own fully-populated task.done; this
                 # level's event must still carry the verdict — a task.done with
                 # no `passed` key reads as passed=None to the auditor (C9).
-                r_pass, r_fail, _r_ign = _parse_test_counts(r_output)
+                r_pass, r_fail, _r_ign = parse_test_counts(r_output)
                 done["data"] = {
                     "passed": r_passed, "reverified": True,
                     "pass_count": r_pass, "fail_count": r_fail,

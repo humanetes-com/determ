@@ -38,7 +38,7 @@ from ...domain.generation import (
 from ...domain.llm_output import extract_files
 from ...domain.models import BuildCluster
 from ...domain.rust_scan import item_names
-from ...domain.test_results import _parse_test_counts
+from ...domain.test_results import parse_test_counts
 from ...domain.text import (
     extract_code_content,
     smart_truncate,
@@ -1570,7 +1570,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
             rc, output = self.cargo.run(test_cmd, project_dir, self.cargo.env(),
                                         timeout=test_timeout)
             dt = time.monotonic() - t0
-            pass_count, fail_count, _ignored = _parse_test_counts(output)
+            pass_count, fail_count, _ignored = parse_test_counts(output)
             if rc == 0:
                 self.tel.log(f"  {tag} post-merge cargo test PASSED "
                              f"({pass_count} passed, {dt:.1f}s).")
