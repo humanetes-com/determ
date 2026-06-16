@@ -10,19 +10,17 @@ through the :mod:`pipeline_core.log` facade; the genesis-format text helper
 from __future__ import annotations
 
 import re
+from typing import Any
 
 from .. import log as _log
 from .text import extract_code_content
 
-FILE_PATTERN = re.compile(r'<FILE path="([^"]+)">(.*?)</FILE>', re.DOTALL)
-# Single-quote variant: <FILE path='foo'>
-_FILE_PATTERN_SQ = re.compile(r"<FILE path='([^']+)'>(.*?)</FILE>", re.DOTALL)
-# Fallback: models sometimes use <path/to/file> ... or ```lang blocks. We only support the
-# canonical FILE format; this pattern detects the wrong format so we can warn usefully.
-_BAD_FILE_PATTERN = re.compile(r'<([^>]+\.[a-zA-Z0-9]+)>')
+# R8.5: the `<FILE path="…">…</FILE>` model-protocol parser is a tolerant,
+# regex-free state machine (`_find_file_blocks` / `_bad_file_marker` below).
 # Fenced ```lang … ``` code blocks (fallback when no <FILE> tag) and the prompt-only
 # `// !! UNCOVERED` markers models sometimes copy back into their output. Both are
-# model-output protocol parsing (same class as FILE_PATTERN), kept here so the
+# model-output protocol parsing (fenced-block / comment-marker class, distinct
+# from the `<FILE>`/`<FN>` block protocol migrated under R8.5), kept here so the
 # application layer (task0c) stays regex-free.
 _CODE_BLOCK_PATTERN = re.compile(r'```[a-zA-Z0-9_-]*\n(.*?)```', re.DOTALL)
 _UNCOVERED_MARKER_PATTERN = re.compile(r'\s*//\s*!!\s*UNCOVERED[^\n]*')
@@ -31,20 +29,109 @@ GENESIS_DELIM_START = "===GENESIS_START==="
 GENESIS_DELIM_END = "===GENESIS_END==="
 
 
+def _find_file_blocks(text: str) -> list[tuple[str, str]]:
+    """Regex-free, byte-equivalent replacement for `<FILE path="([^"]+)">(.*?)
+    </FILE>` (DOTALL findall): (path, body) per well-formed block, in order. The
+    body is the nearest-`</FILE>` span; a malformed/unterminated block is skipped
+    exactly as a regex non-match would skip it (retry at the next open tag).
+    Single-quoted paths are folded to this canonical form first by
+    `_rewrite_sq_file_blocks` (in `_normalize_file_markers`)."""
+    out: list[tuple[str, str]] = []
+    lead, close_tag = '<FILE path="', "</FILE>"
+    i = 0
+    while True:
+        s = text.find(lead, i)
+        if s == -1:
+            return out
+        v = s + len(lead)
+        end = text.find('"', v)                   # path = `[^"]+`
+        if end in (-1, v):                        # need a closing quote AND ≥1 char
+            i = s + 1
+            continue
+        if text[end + 1:end + 2] != ">":          # the `">` that closes the open tag
+            i = s + 1
+            continue
+        body_start = end + 2
+        e = text.find(close_tag, body_start)
+        if e == -1:
+            i = s + 1
+            continue
+        out.append((text[v:end], text[body_start:e]))
+        i = e + len(close_tag)
+
+
+def _rewrite_sq_file_blocks(text: str) -> str:
+    """Regex-free, byte-equivalent replacement for
+    ``re.sub(r"<FILE path='([^']+)'>(.*?)</FILE>", '<FILE path="\\1">\\2</FILE>', text)``
+    (DOTALL): rewrite every single-quoted `<FILE path='…'>…</FILE>` block to the
+    canonical double-quoted form, copying unmatched text verbatim. Same
+    non-greedy nearest-`</FILE>` and skip-on-malformed semantics as the finder."""
+    open_tag, close_tag = "<FILE path='", "</FILE>"
+    out: list[str] = []
+    i = last = 0
+    while True:
+        s = text.find(open_tag, i)
+        if s == -1:
+            out.append(text[last:])
+            return "".join(out)
+        v = s + len(open_tag)
+        end = text.find("'", v)
+        if end in (-1, v) or text[end + 1:end + 2] != ">":
+            i = s + 1
+            continue
+        body_start = end + 2
+        e = text.find(close_tag, body_start)
+        if e == -1:
+            i = s + 1
+            continue
+        out.append(text[last:s])
+        out.append(f'<FILE path="{text[v:end]}">{text[body_start:e]}</FILE>')
+        i = last = e + len(close_tag)
+
+
+def _is_ascii_alnum(c: str) -> bool:
+    return c.isascii() and c.isalnum()
+
+
+def _bad_file_marker(text: str) -> bool:
+    """Regex-free `<([^>]+\\.[a-zA-Z0-9]+)>` detector: a `<…>` whose inner text
+    (no `>`) ends with `.<ascii-alnum>+` — the wrong `<path/to/file.ext>` shape
+    a model uses instead of the canonical `<FILE path="…">`. Used only to warn."""
+    i = 0
+    while (lt := text.find("<", i)) != -1:
+        gt = text.find(">", lt + 1)
+        if gt == -1:
+            return False                          # no `>` after → no later `<` can match either
+        inner = text[lt + 1:gt]                    # `[^>]+`
+        j = len(inner)
+        while j > 0 and _is_ascii_alnum(inner[j - 1]):   # trailing `[a-zA-Z0-9]+`
+            j -= 1
+        if j >= 2 and j < len(inner) and inner[j - 1] == ".":  # `.` preceded by ≥1 char
+            return True
+        i = lt + 1
+    return False
+
+
 def _normalize_file_markers(text: str) -> str:
     """
     Small models frequently prefix <FILE ...> tags with markdown artefacts:
       ### <FILE path="x">   ->  <FILE path="x">
       ### FILE path="x">    ->  <FILE path="x">
       <FILE path='x'>       ->  <FILE path="x">
-    Normalise these so the primary regex can match them.
+    Normalise these so `_find_file_blocks` sees the canonical double-quoted tag.
+
+    The two `#`-prefix passes are text-cleanup heuristics over malformed model
+    output (not structured-fact extraction), so per R7.6 they legitimately stay
+    as `re.sub` — replicating `#{1,6}`'s greedy backtracking char-by-char buys no
+    fidelity. The single-quote→double-quote pass IS structured (`_rewrite_sq_file_blocks`,
+    regex-free, R8.5); the canonical-tag *extraction* is the state machine above.
     """
     # Strip leading `###` (or `##`, `#`) before a <FILE ... > tag on the same line.
     text = re.sub(r'#{1,6}\s*(<FILE\s)', r'\1', text)
     # Handle `### FILE path=` (missing opening `<`)
     text = re.sub(r'#{1,6}\s*FILE\s+path=', '<FILE path=', text)
     # Single-quote to double-quote: <FILE path='x'> -> <FILE path="x">
-    text = _FILE_PATTERN_SQ.sub(lambda m: f'<FILE path="{m.group(1)}">{m.group(2)}</FILE>', text)
+    text = _rewrite_sq_file_blocks(text)
     return text
 
 
@@ -82,13 +169,13 @@ def extract_files(text: str) -> dict[str, str]:
     from .text import strip_markdown_fences
     text = _normalize_file_markers(text)
     files = {}
-    for path, content in FILE_PATTERN.findall(text):
+    for path, content in _find_file_blocks(text):
         content = strip_markdown_fences(content)
         if _looks_like_prose(content, path):
             _log.log(f"  WARNING: model wrote prose instead of code for `{path}` — skipping.")
             continue
         files[path] = content
-    if not files and _BAD_FILE_PATTERN.search(text):
+    if not files and _bad_file_marker(text):
         _log.log("  WARNING: model used wrong file format (e.g. <path/to/file> instead of "
                  '<FILE path="path/to/file">). Retrying so it uses the correct format.')
     return files
@@ -219,3 +306,134 @@ def _extract_genesis(text: str) -> str | None:
     if content and len(content) > 100:
         return content
     return None
+
+
+# ---------------------------------------------------------------------------
+# R8.5: <FN name="X" block="Y">body</FN> model-protocol parsers — tolerant,
+# regex-free state machines (NOT model-JSON; local models adhere poorly to it).
+# Same model-output concern as the <FILE> block parser above.
+# ---------------------------------------------------------------------------
+
+
+def _skip_ws(text: str, pos: int) -> int:
+    """Advance past `\\s*` from `pos` (str.isspace mirrors regex `\\s` for ASCII)."""
+    n = len(text)
+    while pos < n and text[pos].isspace():
+        pos += 1
+    return pos
+
+
+def _read_quoted_attr(text: str, pos: int, name: str) -> tuple[str, int] | None:
+    """If `text[pos:]` opens with `name="<value>"` (value = `[^"]+`, i.e. ≥1
+    non-quote char), return (value, pos-after-closing-quote); else None."""
+    lead = name + '="'
+    if not text.startswith(lead, pos):
+        return None
+    v = pos + len(lead)
+    end = text.find('"', v)
+    if end in (-1, v):                       # need a closing quote AND ≥1 char
+        return None
+    return text[v:end], end + 1
+
+
+def _find_fn_close(text: str, start: int) -> tuple[int, int] | None:
+    """Nearest `</FN\\s*>` at/after `start`. Returns (close_start, pos_after_`>`)."""
+    j = start
+    while True:
+        c = text.find("</FN", j)
+        if c == -1:
+            return None
+        k = _skip_ws(text, c + 4)
+        if k < len(text) and text[k] == ">":
+            return c, k + 1
+        j = c + 1
+
+
+def _find_fn_blocks(text: str) -> list[tuple[str, str, str]]:
+    """Tolerant, regex-free replacement for
+    `<FN\\s+name="([^"]+)"\\s+block="([^"]+)"\\s*>(.*?)</FN\\s*>` (DOTALL findall):
+    (name, block, body) per well-formed block, in order. A malformed header or an
+    unterminated block is skipped exactly as a regex non-match would skip it
+    (retry at the next `<FN`); the body is the nearest-close `.*?` span."""
+    out: list[tuple[str, str, str]] = []
+    n = len(text)
+    i = 0
+    while True:
+        s = text.find("<FN", i)
+        if s == -1:
+            return out
+        p = _skip_ws(text, s + 3)
+        if p == s + 3:                       # `\s+` needs ≥1 whitespace
+            i = s + 1; continue
+        name = _read_quoted_attr(text, p, "name")
+        if name is None:
+            i = s + 1; continue
+        nm_val, p = name
+        q = _skip_ws(text, p)
+        if q == p:                           # `\s+` between attrs
+            i = s + 1; continue
+        block = _read_quoted_attr(text, q, "block")
+        if block is None:
+            i = s + 1; continue
+        bl_val, p = block
+        p = _skip_ws(text, p)                # `\s*` before `>`
+        if p >= n or text[p] != ">":
+            i = s + 1; continue
+        body_start = p + 1
+        close = _find_fn_close(text, body_start)
+        if close is None:
+            i = s + 1; continue
+        body_end, after = close
+        out.append((nm_val, bl_val, text[body_start:body_end]))
+        i = after
+
+
+def _split_leading_where(body: str) -> tuple[str | None, str]:
+    """Mirror `^\\s*(where\\s[^\\n]+)\\n` matched on `body + "\\n"`: an optional
+    leading `where` clause on the body's first line. Returns (clause|None,
+    remaining_body) — the splicer rewrites the fn signature when a clause is present."""
+    t = body + "\n"
+    k = _skip_ws(t, 0)
+    if not t.startswith("where", k):
+        return None, body
+    w = k + 5
+    if w >= len(t) or not t[w].isspace():    # the single `\s` after `where`
+        return None, body
+    r = w + 1
+    while r < len(t) and t[r] != "\n":       # `[^\n]+`
+        r += 1
+    if r == w + 1:                           # needs ≥1 non-newline char
+        return None, body
+    return t[k:r].strip(), body[r:].lstrip()
+
+
+def extract_fn_bodies(text: str) -> list[dict[str, Any]]:
+    """Parse `<FN name="X" block="...">body</FN>` blocks from a model
+    response. Returns a list of records:
+        {"fn_name": str, "block": str, "where_clause": str | None,
+         "body": str}
+    The order in the response is preserved. Bodies are stripped of
+    surrounding fences if present.
+    """
+    out: list[dict[str, Any]] = []
+    for fn_name, block_header, body in _find_fn_blocks(text or ""):
+        body_stripped = body.strip()
+        # Strip outermost code fence if the model wrapped the body.
+        if body_stripped.startswith("```"):
+            lines = body_stripped.splitlines()
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            body_stripped = "\n".join(lines).strip()
+        if not body_stripped:
+            continue
+        # Detect an optional leading `where ...` clause used to tighten bounds.
+        where_clause, body_stripped = _split_leading_where(body_stripped)
+        out.append({
+            "fn_name": fn_name.strip(),
+            "block": block_header.strip(),
+            "where_clause": where_clause,
+            "body": body_stripped,
+        })
+    return out

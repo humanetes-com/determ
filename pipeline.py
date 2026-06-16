@@ -142,8 +142,15 @@ from pipeline_core.domain.llm_output import (
     GENESIS_DELIM_START,
     _extract_genesis,
     extract_files,
+    extract_fn_bodies,
     parse_retrospective,
     parse_self_note,
+)
+from pipeline_core.domain.llm_output import (
+    _find_fn_blocks as _find_fn_blocks,  # R8.5 parsers — re-export for call sites/tests
+)
+from pipeline_core.domain.llm_output import (
+    _split_leading_where as _split_leading_where,
 )
 from pipeline_core.domain.llm_output import (
     split_api_surface_by_file as _domain_split_api_surface_by_file,
@@ -932,11 +939,7 @@ COVERAGE_IGNORE_PRAGMA = (
 )
 
 # <FILE>-extraction + genesis delimiters relocated to domain.llm_output (slice 5b);
-# imported at top. _CODE_BLOCK_FILE_PATTERN stays here (its only consumer is local).
-_CODE_BLOCK_FILE_PATTERN = re.compile(
-    r'```[^\n]*\n(?:(?://|#|--)\s*FILE\s+path=["\']?([^\s"\'>\n]+)["\']?\s*\n)(.*?)```',
-    re.DOTALL,
-)
+# imported at top. (R8.5: the dead `_CODE_BLOCK_FILE_PATTERN` — never consumed — removed.)
 
 # Separator written into tests_output_N.txt between genesis snapshot and output.
 
@@ -4535,52 +4538,9 @@ def _splice_fn_body(file_path: Path, fn_name: str, new_body: str,
 # block per stub. The parser collects them keyed by (block_container,
 # fn_name) so the splicer can route each body to the correct impl.
 
-_FN_BLOCK_RE = re.compile(
-    r'<FN\s+name="([^"]+)"\s+block="([^"]+)"\s*>(.*?)</FN\s*>',
-    re.DOTALL,
-)
-
-# A body may start with an optional `where ...` clause (on its own line) used
-# to tighten the impl-level bounds for this fn alone. Match it greedily to
-# the end of the line; the splicer rewrites the fn signature when present.
-_WHERE_CLAUSE_RE = re.compile(r'^\s*(where\s[^\n]+)\n', re.MULTILINE)
-
-
-def extract_fn_bodies(text: str) -> list[dict]:
-    """Parse `<FN name="X" block="...">body</FN>` blocks from a model
-    response. Returns a list of records:
-        {"fn_name": str, "block": str, "where_clause": str | None,
-         "body": str}
-    The order in the response is preserved. Bodies are stripped of
-    surrounding fences if present.
-    """
-    out: list[dict] = []
-    for fn_name, block_header, body in _FN_BLOCK_RE.findall(text or ""):
-        body_stripped = body.strip()
-        # Strip outermost code fence if the model wrapped the body.
-        if body_stripped.startswith("```"):
-            lines = body_stripped.splitlines()
-            if lines and lines[0].startswith("```"):
-                lines = lines[1:]
-            if lines and lines[-1].strip() == "```":
-                lines = lines[:-1]
-            body_stripped = "\n".join(lines).strip()
-        if not body_stripped:
-            continue
-        # Detect an optional leading `where ...` clause used to tighten
-        # bounds. Remove it from the body and surface separately.
-        where_clause: str | None = None
-        m = _WHERE_CLAUSE_RE.match(body_stripped + "\n")
-        if m:
-            where_clause = m.group(1).strip()
-            body_stripped = body_stripped[m.end() - 1:].lstrip()
-        out.append({
-            "fn_name": fn_name.strip(),
-            "block": block_header.strip(),
-            "where_clause": where_clause,
-            "body": body_stripped,
-        })
-    return out
+# R8.5: the `<FN …>`/`<FILE …>` model-protocol parsers (`extract_fn_bodies`,
+# `_find_fn_blocks`, `_split_leading_where`, …) live in domain.llm_output;
+# imported at top. `_FN_RE_GLOBAL`/`_locate_fn` above stay (Rust-SOURCE, R7.6).
 
 
 def _splice_fn_with_where(

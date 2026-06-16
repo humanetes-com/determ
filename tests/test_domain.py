@@ -7,6 +7,10 @@ so they get real input -> output assertions here rather than fakes-wiring smoke 
 
 from __future__ import annotations
 
+import re
+
+import pytest
+
 from pipeline_core.domain import llm_output, test_results, text
 
 # --------------------------------------------------------------------------- text
@@ -66,7 +70,88 @@ def test_extract_files_strips_inner_fence_and_rejects_prose() -> None:
 def test_normalize_file_markers() -> None:
     assert llm_output._normalize_file_markers('### <FILE path="x">c</FILE>') == '<FILE path="x">c</FILE>'
     assert llm_output._normalize_file_markers('### FILE path="x">c</FILE>') == '<FILE path="x">c</FILE>'
+    # R8.5: single→double quote is now the regex-free _rewrite_sq_file_blocks pass.
     assert llm_output._normalize_file_markers("<FILE path='x'>c</FILE>") == '<FILE path="x">c</FILE>'
+
+
+# --------------------------------------------------------- R8.5 <FILE>/<FN> parsers
+
+
+_OLD_FILE_RE = re.compile(r'<FILE path="([^"]+)">(.*?)</FILE>', re.DOTALL)
+_OLD_FILE_SQ_RE = re.compile(r"<FILE path='([^']+)'>(.*?)</FILE>", re.DOTALL)
+_OLD_BAD_FILE_RE = re.compile(r'<([^>]+\.[a-zA-Z0-9]+)>')
+_OLD_FN_RE = re.compile(
+    r'<FN\s+name="([^"]+)"\s+block="([^"]+)"\s*>(.*?)</FN\s*>', re.DOTALL)
+
+
+@pytest.mark.parametrize("text", [
+    '<FILE path="a.rs">fn x(){}</FILE>',
+    '<FILE path="a.rs">A</FILE><FILE path="b.rs">B</FILE>',
+    '<FILE path="a">X<FILE path="b">Y</FILE>',           # non-greedy crosses inner open
+    '<FILE path="">empty</FILE>',                         # empty path → no match
+    '<FILE path="a.rs">unterminated',                    # no close → no match
+    'noise <FILE path="c.rs">\nmulti\nline\n</FILE> tail',
+    '',
+])
+def test_find_file_blocks_matches_old_regex(text: str) -> None:
+    assert llm_output._find_file_blocks(text) == _OLD_FILE_RE.findall(text)
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("<path/to/file.rs>", True),
+    ("<a.rs>", True),
+    ("<no_extension>", False),
+    ("<trailing.>", False),                               # dot then no alnum
+    ("<unterminated.rs", False),
+    ("plain text", False),
+    ('<FILE path="a.rs">x</FILE>', False),                # `.rs"` then `>` (not `.rs>`) → no match
+    ("text <src/mod.rs> more", True),                     # mid-string match
+])
+def test_bad_file_marker_matches_old_regex(text: str, expected: bool) -> None:
+    assert llm_output._bad_file_marker(text) == bool(_OLD_BAD_FILE_RE.search(text))
+
+
+@pytest.mark.parametrize("text", [
+    '<FN name="f" block="impl A">  body  </FN>',
+    '<FN name="f" block="b">x</FN><FN name="g" block="c">y</FN>',
+    '<FN  name="f"  block="b" >spaced</FN >',             # \s+ / \s* tolerance
+    '<FN name="f">missing block</FN>',                    # no block attr → no match
+    '<FN name="f" block="b">unterminated',               # no close
+    '<FN name="" block="b">empty name</FN>',             # [^"]+ needs ≥1
+    'pre <FN name="f" block="b">B</FN> post',
+    '',
+])
+def test_find_fn_blocks_matches_old_regex(text: str) -> None:
+    from pipeline import _find_fn_blocks
+    assert _find_fn_blocks(text) == _OLD_FN_RE.findall(text)
+
+
+_OLD_WHERE_RE = re.compile(r'^\s*(where\s[^\n]+)\n', re.MULTILINE)
+
+
+@pytest.mark.parametrize("body", [
+    "where T: Clone\nfn impl",                            # leading where, multi-line body
+    "where T: Clone",                                      # where-only (single line)
+    "no where here\nstuff",                              # no where → unchanged
+    "wherever I go",                                       # 'where' not followed by \s + token
+    "where  spaced",                                       # where + ws + token
+    "",
+])
+def test_split_leading_where_matches_old_regex(body: str) -> None:
+    from pipeline import _split_leading_where
+    m = _OLD_WHERE_RE.match(body + "\n")
+    old = (m.group(1).strip(), body[m.end() - 1:].lstrip()) if m else (None, body)
+    assert _split_leading_where(body) == old
+
+
+def test_rewrite_sq_file_blocks_matches_old_sub() -> None:
+    old = re.compile(r"<FILE path='([^']+)'>(.*?)</FILE>", re.DOTALL)
+    for s in ("<FILE path='a.rs'>code</FILE>",
+              "x <FILE path='a'>A</FILE> y <FILE path='b'>B</FILE>",
+              "<FILE path='a'>X<FILE path='b'>Y</FILE>",   # non-greedy crosses inner open
+              "no blocks here", ""):
+        want = old.sub(lambda m: f'<FILE path="{m.group(1)}">{m.group(2)}</FILE>', s)
+        assert llm_output._rewrite_sq_file_blocks(s) == want
 
 
 def test_looks_like_prose() -> None:
