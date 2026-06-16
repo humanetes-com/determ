@@ -68,3 +68,28 @@ def test_replay_mode_raises_on_miss() -> None:
         proj = _crate(td, "fn x() {}\n")
         with pytest.raises(KeyError):
             runner("cargo test", proj)
+
+
+def test_wrap_check_memoises_structured_diags() -> None:
+    from pipeline_core.domain.models import Diagnostic
+    calls = {"n": 0}
+
+    def fake_check(cmd, cwd, *a, **k):
+        calls["n"] += 1
+        return (101, "error[E0277]\n", [Diagnostic(code="E0277", file="src/lib.rs", line=2)])
+
+    cache = CargoCache(record=True)
+    check = cache.wrap_check(fake_check)
+    with tempfile.TemporaryDirectory() as td:
+        proj = _crate(td, "fn x() {}\n")
+        r1 = check("cargo check", proj, {}, 180)
+        r2 = check("cargo check", proj, {}, 180)  # same tree+cmd → cached
+    assert r1 == r2 and calls["n"] == 1
+    assert r1[2][0].code == "E0277"
+    # replay mode raises on an unseen tree.
+    replay = CargoCache(record=False, check_cache=dict(cache.check_cache))
+    rcheck = replay.wrap_check(lambda *a, **k: (_ for _ in ()).throw(AssertionError("ran")))
+    with tempfile.TemporaryDirectory() as td2:
+        proj2 = _crate(td2, "fn other() {}\n")
+        with pytest.raises(KeyError):
+            rcheck("cargo check", proj2, {}, 180)

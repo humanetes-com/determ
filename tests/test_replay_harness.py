@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 
 import pipeline
+from pipeline_core.domain.models import Diagnostic
 from tests.cargo_cache import CargoCache, load_cargo_cache, save_cargo_cache, tree_hash
 from tests.cassette import CassetteMiss, _sha
 from tests.replay import build_replay, install_replay
@@ -32,12 +33,17 @@ def test_cargo_cache_save_load_round_trips(tmp_path) -> None:
     cache = CargoCache(record=True)
     cache.cache[("treehash1", "cargo test")] = (0, "ok\n")
     cache.cache[("treehash2", "cargo build")] = (101, "error[E0001]\n")
+    # the structured check-diag seam round-trips too (Diagnostics serialised).
+    cache.check_cache[("treehash3", "cargo check")] = (
+        101, "error[E0277]\n", [Diagnostic(code="E0277", file="src/lib.rs", line=2)])
     path = tmp_path / "cargo_cache.json"
     save_cargo_cache(cache, path)
     restored = load_cargo_cache(path)
-    assert restored == cache.cache
+    assert restored.cache == cache.cache
+    assert restored.check_cache == cache.check_cache
+    assert restored.record is False
     # The persisted form is plain JSON rows (auditable / diffable).
-    assert json.loads(path.read_text())[0][:2] == ["treehash1", "cargo test"]
+    assert json.loads(path.read_text())["run"][0][:2] == ["treehash1", "cargo test"]
 
 
 def test_build_replay_assembles_cassette_and_cargo(tmp_path) -> None:

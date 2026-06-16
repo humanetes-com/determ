@@ -54,8 +54,7 @@ def build_replay(
     when `cargo_cache_path` is given (else cargo runs live / is patched separately)."""
     cassette = build_cassette(
         events_path, prompts_dir, product=product, pipeline_sha=pipeline_sha)
-    cargo = (CargoCache(load_cargo_cache(cargo_cache_path), record=False)
-             if cargo_cache_path is not None else None)
+    cargo = load_cargo_cache(cargo_cache_path) if cargo_cache_path is not None else None
     return Replay(cassette=cassette, cargo=cargo)
 
 
