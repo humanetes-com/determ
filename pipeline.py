@@ -63,6 +63,7 @@ from pipeline_core.application.generators.task1_synthesizer import (
     StaticTask1Synthesizer,
     Task1Synthesizer,
 )
+from pipeline_core.application.reconstruct import attribution as _attribution
 from pipeline_core.application.reconstruct.failure_analysis import FailureAnalysisStep
 from pipeline_core.application.reconstruct.module_reconstructor import ModuleReconstructor
 from pipeline_core.application.reconstruct.reconstruction_step import ReconstructionStep
@@ -125,6 +126,7 @@ from pipeline_core.application.workspace_lifecycle import (
 from pipeline_core.application.workspace_lifecycle import (
     wipe_module_sources as _wl_wipe_module_sources,
 )
+from pipeline_core.domain import attribution as _domain_attribution
 from pipeline_core.domain.cargo_toml import cargo_default_features as _domain_cargo_default_features
 from pipeline_core.domain.cargo_toml import cargo_entry_point_paths as _domain_cargo_entry_point_paths
 from pipeline_core.domain.cargo_toml import cargo_is_proc_macro as _domain_cargo_is_proc_macro
@@ -197,10 +199,7 @@ from pipeline_core.domain.test_results import (
     build_test_name_index,
     count_passing_tests,
     extract_test_output_from_file,
-    failing_test_names,
-    identifiers_in,
     insert_no_run,
-    parse_rustc_compile_errors,
     per_file_test_stats,
     rustc_error_signatures,
     validate_task3_output_strict,
@@ -3441,6 +3440,29 @@ SKELETON_EXTRACTOR_BIN = Path(__file__).parent / "tools" / "skeleton_extractor" 
 ADAPTERS = build_adapters(SETTINGS, extractor_bin=SKELETON_EXTRACTOR_BIN, model=MODEL)
 # P1: the real StructureReader — injected into the fill engine (no monkeypatch seam).
 _STRUCTURE = CliStructureReader(ADAPTERS.extractor)
+
+
+class _LateStructure:
+    """P2 backward-compat: late-binds `_enumerate_fns_via_extractor` so existing tests
+    that monkeypatch that pipeline shim are still honoured by the attribution use-case.
+    New tests inject a real `StructureReader` fake via `AttributionDeps.structure`."""
+
+    def enumerate_fns(self, src_dir: Path) -> "list[dict] | None":
+        return _enumerate_fns_via_extractor(src_dir)
+
+
+# P2: composition root for the attribution use-case. Collaborators are late-bound
+# (lambdas resolve the module globals at call time) so every existing monkeypatch
+# seam keeps working; the AttributionDeps record is the clean DI rail a fake can fill.
+_ATTR_DEPS = _attribution.AttributionDeps(
+    structure=_LateStructure(),
+    classify=lambda *a, **k: _classify_phase_c_test_failures(*a, **k),
+    locate_fn=lambda *a, **k: _locate_fn(*a, **k),
+    run_check_diag=lambda *a, **k: _run_cargo_check_diag(*a, **k),
+    derive_check_only_cmd=lambda c: _derive_check_only_cmd(c),
+    is_gen_tests_file=lambda n: _is_gen_tests_file(n),
+    log=lambda m: _log(m),
+)
 # The application-layer composition context. main()'s task dispatch migrates onto it
 # slice by slice (5b); for now it bundles the resolved settings + adapters.
 # Wire the cross-cutting infra seams to the pipeline's concrete sinks/config (slice 5b).
@@ -6456,48 +6478,8 @@ def _build_test_reverse_map(
     test_files: list[Path],
     src_dir: Path,
 ) -> dict[str, set[tuple[str, str]]]:
-    """Return {test_name: set[(file_rel, fn_name)]} — for each #[test] fn in
-    the test files, the set of fn records in `src_dir` whose names appear
-    textually in the test's body. Best-effort static analysis used as the
-    last-resort attribution path when panics/compile errors/classifier
-    all fail to identify a fn to fix.
-
-    Coarse: matches any identifier whose name equals a src fn name, even
-    if it's a comment or string. Acceptable — over-attribution just
-    queues a few extra fns for refill; the per-fn fix loop will skip
-    fns that are already filled correctly.
-    """
-    fn_index = _enumerate_fns_via_extractor(src_dir) or []
-    if not fn_index:
-        return {}
-    # name → list[(file, fn_name)] (a name may map to multiple impls)
-    by_name: dict[str, list[tuple[str, str]]] = {}
-    for r in fn_index:
-        name = r.get("fn_name", "")
-        f = r.get("file", "")
-        if name and f:
-            by_name.setdefault(name, []).append((f, name))
-    out: dict[str, set[tuple[str, str]]] = {}
-    test_fn_re = re.compile(
-        r"#\s*\[\s*test\s*\][^\n]*\n[^\n]*?fn\s+(\w+)\s*\(",
-    )
-    for tp in test_files:
-        try:
-            text = tp.read_text(encoding="utf-8", errors="replace")
-        except Exception:
-            continue
-        ids = set(re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\b", text))
-        # Match each #[test] fn's name; pair it with all fn records whose
-        # identifier appears anywhere in the test file. This is file-level
-        # not fn-body-level (cheaper, captures helper fns the test calls).
-        for m in test_fn_re.finditer(text):
-            test_name = m.group(1)
-            candidates: set[tuple[str, str]] = set()
-            for ident in ids:
-                if ident in by_name:
-                    candidates.update(by_name[ident])
-            out[test_name] = candidates
-    return out
+    """P2: delegates to _attribution.build_test_reverse_map (logic relocated)."""
+    return _attribution.build_test_reverse_map(_ATTR_DEPS, test_files, src_dir)
 
 
 def _filter_test_targets(frontier: Frontier, src_dir: Path) -> Frontier:
@@ -6513,78 +6495,8 @@ def _attribute_failures(
     test_reverse_map: dict[str, set[tuple[str, str]]],
     cluster_name: str,
 ) -> tuple[Frontier, str]:
-    """Robust failure-to-fn attribution chain. Returns (frontier, kind). Callers
-    pass the result through `_filter_test_targets` (FR-018) — same as the fix
-    dispatchers — so a test-oracle fn is never spliced.
-    Tries each path until one yields a non-empty frontier:
-    Tries each path until one yields a non-empty frontier:
-      1. Runtime panics (unimplemented stubs) — `_extract_tdd_frontier`
-      2. Compile errors — `_extract_tdd_compile_frontier`
-      3. LLM classifier — `_classify_phase_c_test_failures` (P4.5)
-      4. Recently-filled fallback — most recent fills are likely culprits
-         for new assertion failures
-      5. Test-reverse-map fallback — every fn the failing tests could reach
-
-    Empty frontier means all paths exhausted — caller should let the
-    stall budget exit the loop. Kind tells the caller which path produced
-    the frontier (for logs/events).
-    """
-    # 1. Runtime panics.
-    frontier = _extract_tdd_frontier(test_output, src_dir)
-    if frontier:
-        return frontier, "runtime"
-    # 2. Compile errors.
-    frontier = _extract_tdd_compile_frontier(test_output, src_dir)
-    if frontier:
-        return frontier, "compile"
-    # 3. LLM classifier — turn off via PHASE_C_TDD_USE_CLASSIFIER=0.
-    if os.getenv("PHASE_C_TDD_USE_CLASSIFIER", "1") != "0":
-        failing = sorted(_parse_failed_tests(test_output))
-        if failing:
-            classification = _classify_phase_c_test_failures(
-                test_out=test_output, filled_this_pass=[],
-                failed_tests=failing, cluster_name=cluster_name,
-            )
-            synth: Frontier = {}
-            for tname, info in classification.items():
-                if info.get("category") not in (
-                        "BAD_FILL", "TEST_PRECONDITION_MISSING"):
-                    continue
-                ref = info.get("fn") or ""
-                if "::" in ref:
-                    fp, fn = ref.split("::", 1)
-                    key = (fp.strip(), fn.strip())
-                    if key[0] and key[1]:
-                        synth.setdefault(key, set()).add(tname)
-            if synth:
-                return synth, "classifier"
-    # 4. Recently-filled fallback. If new assertion failures appeared
-    # after recent fills, the recent fills are the most likely cause.
-    # Queue them in reverse-filled order (newest first).
-    if recently_filled:
-        failing = sorted(_parse_failed_tests(test_output))
-        if failing:
-            recent_synth: Frontier = {}
-            for key in reversed(recently_filled):
-                recent_synth.setdefault(key, set()).update(failing)
-            return recent_synth, "recently_filled"
-    # 5. Test-reverse-map. For each failing test, queue every fn it
-    # could reach according to the static reverse map. Over-attribution
-    # is tolerable here — per-fn splice guards reject overwriting
-    # non-stub bodies, so already-correct fills aren't clobbered.
-    if test_reverse_map:
-        failing = sorted(_parse_failed_tests(test_output))
-        if failing:
-            reverse_synth: Frontier = {}
-            for tname in failing:
-                # Strip module prefix if cargo formats as `module::test_name`.
-                bare = tname.split("::")[-1]
-                cands = test_reverse_map.get(bare) or test_reverse_map.get(tname) or set()
-                for key in cands:
-                    reverse_synth.setdefault(key, set()).add(tname)
-            if reverse_synth:
-                return reverse_synth, "reverse_map"
-    return {}, "no_frontier"
+    """P2: delegates to _attribution.attribute_failures (logic relocated)."""
+    return _attribution.attribute_failures(_ATTR_DEPS, test_output, src_dir, recently_filled, test_reverse_map, cluster_name)
 
 
 def _run_scoped_tests(
@@ -9251,287 +9163,50 @@ def _scan_unimplemented_records_for_cluster(
 # ---------------------------------------------------------------------------
 
 
-_PANIC_HEADER_RE = re.compile(
-    # Modern Rust prints `thread 'NAME' (TID) panicked at FILE:LINE:COL:`
-    # with an optional `(THREAD_ID)` after the name. Older Rust just has
-    # `thread 'NAME' panicked at ...`. Match both. We capture the column
-    # too — the skeleton extractor produces compact one-line-per-item
-    # output, so multiple fns can live on the same line and only the
-    # column disambiguates which one panicked.
-    r"thread '([^']+)'(?:\s+\(\d+\))?\s+panicked at ([^:]+):(\d+)(?::(\d+))?:\s*\n([^\n]*)"
-)
 _TEST_STDOUT_HEADER_RE = re.compile(r"^----\s+(\S+)\s+stdout\s+----\s*$",
                                      re.MULTILINE)
 def _line_to_fn_record(
     file_text: str, line_no: int, fn_records: list[dict],
     col_no: int | None = None,
 ) -> dict | None:
-    """Given file text and a 1-based (line, col), return the fn record
-    whose body spans that position. Returns None if no fn contains it.
-
-    `fn_records` should be the syn extractor's enumerate-fns output for
-    the file (caller is responsible for filtering to one file's records).
-
-    The skeleton extractor produces compact one-line-per-item output, so
-    a single line can hold several fns. Without `col_no` we pick the
-    FIRST fn whose body range overlaps the line — usually fine but can
-    misattribute in dense files. With `col_no`, we resolve precisely.
-    """
-    if line_no < 1 or not fn_records:
-        return None
-    lines_iter = file_text.splitlines(keepends=True)
-    if line_no > len(lines_iter):
-        return None
-    line_start = sum(len(ln) for ln in lines_iter[:line_no - 1])
-    line_end = line_start + len(lines_iter[line_no - 1])
-    if col_no is not None and col_no >= 1:
-        byte_offset = line_start + col_no - 1
-        for rec in fn_records:
-            s = rec.get("sig_byte_start", 0)
-            e = rec.get("body_byte_end", 0)
-            if s <= byte_offset < e:
-                return rec
-    # Fallback: pick the first fn whose body overlaps the line range.
-    for rec in fn_records:
-        s = rec.get("sig_byte_start", 0)
-        e = rec.get("body_byte_end", 0)
-        if max(s, line_start) < min(e, line_end):
-            return rec
-    return None
+    """P2: delegates to _domain_attribution.line_to_fn_record (logic relocated)."""
+    return _domain_attribution.line_to_fn_record(file_text, line_no, fn_records, col_no)
 
 
 def _extract_tdd_frontier(
     test_output: str, src_dir: Path,
 ) -> Frontier:
-    """Parse cargo test output → frontier dict.
-
-    Keys are (file_rel, fn_name), values are sets of test names that
-    panicked inside that fn. Only `not yet implemented` panics are
-    included by default — they map cleanly to a still-unfilled fn.
-    Assertion-failure attribution is handled in a separate pass (see
-    `_extract_tdd_assertion_frontier`).
-
-    Returns {} when no panics could be parsed (e.g. cargo build failed
-    before any test ran).
-    """
-    frontier: Frontier = {}
-    if not test_output:
-        return frontier
-    # Per-file fn records cache.
-    fn_records_by_file: dict[str, list[dict]] = {}
-    file_text_cache: dict[str, str] = {}
-    # Split output into per-test stdout sections. Each section holds the
-    # panic header for that test's failures.
-    sections = _TEST_STDOUT_HEADER_RE.split(test_output)
-    # _TEST_STDOUT_HEADER_RE.split returns [pre, test1, body1, test2, body2, ...].
-    if len(sections) < 3:
-        # No per-test sections — try parsing the whole output as a single
-        # block (some cargo versions don't emit `---- N stdout ----` headers
-        # for single-test runs).
-        sections = ["", "unknown_test", test_output]
-    for i in range(1, len(sections) - 1, 2):
-        test_name = sections[i].strip()
-        body = sections[i + 1]
-        for m in _PANIC_HEADER_RE.finditer(body):
-            _thread, file_path, line_str, col_str, _panic_msg = m.group(
-                1, 2, 3, 4, 5)
-            # Accept every panic whose path resolves to a fn in src/. The
-            # skeleton extractor replaced every fn body with
-            # `unimplemented!()`, so any panic inside src/ IS from a stub.
-            # Test-file panics (tests/foo.rs:N) get rejected later by the
-            # fn-lookup, since we only enumerate src/ fns.
-            try:
-                line_no = int(line_str)
-            except ValueError:
-                continue
-            # Resolve file_path relative to src_dir.
-            p_abs = Path(file_path)
-            if not p_abs.is_absolute():
-                p_abs = (src_dir / file_path).resolve()
-            try:
-                rel = str(p_abs.relative_to(src_dir.resolve()))
-            except ValueError:
-                # File outside src_dir — skip (likely a panic from std).
-                continue
-            # Look up fn at this line.
-            if rel not in fn_records_by_file:
-                _all_recs = _enumerate_fns_via_extractor(src_dir) or []
-                fn_records_by_file[rel] = [r for r in _all_recs
-                                            if r.get("file") == rel]
-            recs = fn_records_by_file[rel]
-            if not recs:
-                continue
-            if rel not in file_text_cache:
-                try:
-                    file_text_cache[rel] = p_abs.read_text(encoding="utf-8")
-                except Exception:
-                    continue
-            col_no = int(col_str) if col_str else None
-            rec = _line_to_fn_record(file_text_cache[rel], line_no, recs,
-                                      col_no=col_no)
-            if rec is None:
-                continue
-            key = (rel, rec["fn_name"])
-            frontier.setdefault(key, set()).add(test_name)
-    return frontier
+    """P2: delegates to _attribution.extract_tdd_frontier (logic relocated)."""
+    return _attribution.extract_tdd_frontier(_ATTR_DEPS, test_output, src_dir)
 
 
 def _behavior_frontier(
     test_output: str, project_dir: Path, existing_test_files: set,
 ) -> "tuple[Frontier, dict[str, tuple[str, str]]]":
-    """Attribute behavioral test failures (harness compiles, no stub panics —
-    assertion failures etc.) to the src fns they exercise, so the fix loop can
-    repair fn bodies instead of falling back to whole-file rewrites.
-
-    For each FAILED test: locate its source via the test-name index, collect
-    the identifiers its text mentions, and intersect with the extractor's fn
-    records. A fn name shared by several records is attributed only to records
-    whose container also shares a token with the test text.
-
-    Returns ({(file_rel, fn): {test names}}, {test name: (test_rel, test_src)}).
-    """
-    failed = failing_test_names(test_output)
-    if not failed:
-        return {}, {}
-    texts: dict[str, str] = {}
-    for trel in sorted(existing_test_files):
-        tp = project_dir / trel
-        if tp.exists():
-            with suppress(Exception):
-                texts[trel] = tp.read_text(encoding="utf-8", errors="replace")
-    if not texts:
-        return {}, {}
-    index = build_test_name_index(texts)
-    by_name: dict[str, list[dict]] = {}
-    for r in _enumerate_fns_via_extractor(project_dir) or []:
-        f_rel = r.get("file", "")
-        if f_rel in existing_test_files or _is_gen_tests_file(Path(f_rel).name):
-            continue
-        if _reconstruct_test_targets.is_test_fn_record(r):  # inline #[cfg(test)] = oracle, never a target (FR-018)
-            continue
-        by_name.setdefault(r.get("fn_name", ""), []).append(r)
-    frontier: Frontier = {}
-    test_srcs: dict[str, tuple[str, str]] = {}
-    for tname in failed:
-        bare = tname.split("::")[-1].strip()
-        trel = index.get(bare, "")
-        if not trel or trel not in texts:
-            continue
-        loc = _locate_fn(texts[trel], bare)
-        if loc is None:
-            continue
-        sig_text, _ss, _bs, _be = loc
-        tsrc = f"{sig_text} {{{texts[trel][_bs:_be]}}}"
-        idents = identifiers_in(tsrc)
-        test_srcs[tname] = (trel, tsrc)
-        for fn_name in idents & set(by_name):
-            recs = by_name[fn_name]
-            for rec in recs:
-                if len(recs) > 1 and not (
-                        identifiers_in(rec.get("container", "")) & idents):
-                    continue
-                frontier.setdefault((rec["file"], fn_name), set()).add(tname)
-    return frontier, test_srcs
+    """P2: delegates to _attribution.behavior_frontier (logic relocated)."""
+    return _attribution.behavior_frontier(_ATTR_DEPS, test_output, project_dir, existing_test_files)
 
 
 def _extract_tdd_compile_frontier(
     build_output: str, src_dir: Path,
 ) -> Frontier:
-    """When cargo test fails because cargo BUILD failed (compile errors,
-    not panics), parse error[Exxxx] messages → fn records. Same shape as
-    `_extract_tdd_frontier` but with test names replaced by "<compile>"
-    so the caller can distinguish.
-    """
-    frontier: Frontier = {}
-    if not build_output:
-        return frontier
-    fn_records_by_file: dict[str, list[dict]] = {}
-    file_text_cache: dict[str, str] = {}
-    for _msg, file_path, line_no in parse_rustc_compile_errors(build_output):
-        p_abs = Path(file_path)
-        if not p_abs.is_absolute():
-            p_abs = (src_dir / file_path).resolve()
-        try:
-            rel = str(p_abs.relative_to(src_dir.resolve()))
-        except ValueError:
-            continue
-        if rel not in fn_records_by_file:
-            _all_recs = _enumerate_fns_via_extractor(src_dir) or []
-            fn_records_by_file[rel] = [r for r in _all_recs
-                                        if r.get("file") == rel]
-        recs = fn_records_by_file[rel]
-        if not recs:
-            continue
-        if rel not in file_text_cache:
-            try:
-                file_text_cache[rel] = p_abs.read_text(encoding="utf-8")
-            except Exception:
-                continue
-        rec = _line_to_fn_record(file_text_cache[rel], line_no, recs)
-        if rec is None:
-            continue
-        frontier.setdefault((rel, rec["fn_name"]), set()).add("<compile>")
-    return frontier
+    """P2: delegates to _attribution.extract_tdd_compile_frontier (logic relocated)."""
+    return _attribution.extract_tdd_compile_frontier(_ATTR_DEPS, build_output, src_dir)
 
 
 def _compile_error_frontier(
     output: str, project_dir: Path, check_cmd: str,
     env: dict, timeout: int,
 ) -> Frontier:
-    """Structured-first compile-error frontier (R8.3): re-run the derived
-    check-only command for JSON diagnostics and attribute errors→fns via
-    `_frontier_from_diags`. Regex-parsing `output` remains only as the
-    fallback when no structured diagnostics came back (cargo unavailable /
-    JSON parse failure). rc==0 means the crate compiles — no compile
-    frontier, regardless of what `output` (e.g. test failures) contains.
-    """
-    try:
-        rc, _rendered, diags = _run_cargo_check_diag(
-            _derive_check_only_cmd(check_cmd), project_dir, env, timeout)
-        if rc == 0:
-            return {}
-        if diags:
-            return _frontier_from_diags(diags, project_dir)
-    except Exception as e:
-        _log(f"  [fix loop] structured frontier failed ({e}) → text fallback")
-    return _extract_tdd_compile_frontier(output, project_dir)
+    """P2: delegates to _attribution.compile_error_frontier (logic relocated)."""
+    return _attribution.compile_error_frontier(_ATTR_DEPS, output, project_dir, check_cmd, env, timeout)
 
 
 def _frontier_from_diags(
     diagnostics: list[Diagnostic], src_dir: Path,
 ) -> Frontier:
-    """Same (file, fn) → {"<compile>"} frontier as
-    `_extract_tdd_compile_frontier`, but built from STRUCTURED cargo
-    diagnostics (each has file/line/code) instead of regex-parsing rendered
-    text. Use this when the diagnostics come from `_run_cargo_check_diag`,
-    whose rendered text carries ANSI colour codes that the plain-text
-    `_COMPILE_ERROR_RE` cannot match — re-parsing that text yields an empty
-    frontier and silently defeats any "is this fn still broken?" check.
-    """
-    frontier: Frontier = {}
-    fn_records_by_file: dict[str, list[dict]] = {}
-    file_text_cache: dict[str, str] = {}
-    for d in diagnostics or []:
-        rel = d.file or ""
-        line_no = int(d.line or 0)
-        if not rel or line_no < 1:
-            continue
-        if rel not in fn_records_by_file:
-            _all_recs = _enumerate_fns_via_extractor(src_dir) or []
-            fn_records_by_file[rel] = [r for r in _all_recs if r.get("file") == rel]
-        recs = fn_records_by_file[rel]
-        if not recs:
-            continue
-        if rel not in file_text_cache:
-            try:
-                file_text_cache[rel] = (src_dir / rel).read_text(encoding="utf-8")
-            except Exception:
-                continue
-        rec = _line_to_fn_record(file_text_cache[rel], line_no, recs)
-        if rec is None:
-            continue
-        frontier.setdefault((rel, rec["fn_name"]), set()).add("<compile>")
-    return frontier
+    """P2: delegates to _attribution.frontier_from_diags (logic relocated)."""
+    return _attribution.frontier_from_diags(_ATTR_DEPS, diagnostics, src_dir)
 
 
 # "cannot find …" diagnostics — an undefined value/fn/type/macro referenced but

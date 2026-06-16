@@ -2079,6 +2079,7 @@ def test_strip_ansi_and_diag_frontier() -> None:
     rendered text gave an empty frontier and the inner loop never asked the
     model (0 splices). The structured cargo-JSON path is ANSI-immune."""
     import pipeline
+    from pipeline_core.domain.test_results import parse_rustc_compile_errors
     ansi = ("\x1b[0m\x1b[1m\x1b[38;5;9merror[E0201]\x1b[0m\x1b[1m: dup\x1b[0m\n"
             "  \x1b[38;5;12m-->\x1b[0m src/error.rs:1634:5")
     plain = pipeline._strip_ansi(ansi)
@@ -2088,8 +2089,8 @@ def test_strip_ansi_and_diag_frontier() -> None:
     # matches only the de-ANSI'd text — proving why the rendered-text path
     # silently failed; the structured cargo-JSON frontier below is the ANSI-immune
     # primary path.
-    assert not pipeline.parse_rustc_compile_errors(ansi)
-    assert pipeline.parse_rustc_compile_errors(plain)
+    assert not parse_rustc_compile_errors(ansi)
+    assert parse_rustc_compile_errors(plain)
     # Structured-diag frontier never touches rendered text; empty/garbage in →
     # empty out (no crash), and it ignores ANSI entirely.
     assert pipeline._frontier_from_diags([], pipeline.Path(".")) == {}
