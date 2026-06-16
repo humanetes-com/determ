@@ -227,6 +227,79 @@ mod tests {
     }
 
     #[test]
+    fn merge_keeps_cfg_variant_fns_distinct() {
+        // Regression (hardcrate cap trap, 2026-06-16): two fns sharing name+sig
+        // but differing by their OWN #[cfg] are DISTINCT. The merge must keep two
+        // separate gated defs — each with the FILLED body from the cluster where
+        // its cfg is live — never collapse them into one with cfgs OR-combined
+        // (`any(x, not(x))`), bodies swapped, and a leftover `unimplemented!()`.
+        let stable = r#"
+            #[cfg(any(extra_cap, feature = "extra_cap"))]
+            pub fn cap_limit() -> usize { ::core::unimplemented!() }
+            #[cfg(not(any(extra_cap, feature = "extra_cap")))]
+            pub fn cap_limit() -> usize { 64 }
+        "#;
+        let extra = r#"
+            #[cfg(any(extra_cap, feature = "extra_cap"))]
+            pub fn cap_limit() -> usize { 255 }
+            #[cfg(not(any(extra_cap, feature = "extra_cap")))]
+            pub fn cap_limit() -> usize { ::core::unimplemented!() }
+        "#;
+        let out = merge_cluster_files(vec![
+            ClusterFile {
+                name: "stable".into(),
+                source: stable.into(),
+                cfg_gate: "not(any(extra_cap, feature = \"extra_cap\"))".into(),
+            },
+            ClusterFile {
+                name: "extra_cap".into(),
+                source: extra.into(),
+                cfg_gate: "any(extra_cap, feature = \"extra_cap\")".into(),
+            },
+        ])
+        .unwrap();
+        // Exactly two cap_limit defs survive.
+        assert_eq!(out.matches("fn cap_limit").count(), 2, "two cfg-variant defs: {out}");
+        // The filled body from each live cluster is kept; no stub survives.
+        assert!(out.contains("255"), "extra_cap body kept: {out}");
+        assert!(out.contains("64"), "stable body kept: {out}");
+        assert!(!out.contains("unimplemented"), "no stub may survive merge: {out}");
+        // No OR-combined garbage cfg, and the correct per-variant gates are present.
+        assert!(!out.replace(' ', "").contains("any(any("), "no any(x, not(x)) garbage: {out}");
+        assert!(out.contains("not(any(extra_cap"), "not-variant gate kept: {out}");
+    }
+
+    #[test]
+    fn merge_preserves_cfg_gated_test_bodies() {
+        // FR-018 oracle immutability: cfg-gated #[test] fns (the reconstruction
+        // oracle) must survive merge byte-for-byte — never reconciled/overwritten
+        // (the hardcrate run corrupted `default_cap_limit`'s body to `255`).
+        let tests_src = r#"
+            #[cfg(test)]
+            mod tests {
+                #[cfg(not(any(extra_cap, feature = "extra_cap")))]
+                #[test]
+                fn default_cap_limit() { assert_eq!(cap_limit(), 64); }
+                #[cfg(any(extra_cap, feature = "extra_cap"))]
+                #[test]
+                fn extra_cap_limit() { assert_eq!(cap_limit(), 255); }
+            }
+        "#;
+        let out = merge_cluster_files(vec![
+            ClusterFile { name: "stable".into(), source: tests_src.into(),
+                          cfg_gate: "not(any(extra_cap, feature = \"extra_cap\"))".into() },
+            ClusterFile { name: "extra_cap".into(), source: tests_src.into(),
+                          cfg_gate: "any(extra_cap, feature = \"extra_cap\")".into() },
+        ])
+        .unwrap();
+        let flat = out.replace([' ', '\n'], "");
+        assert!(flat.contains("assert_eq!(cap_limit(),64)"), "default oracle intact: {out}");
+        assert!(flat.contains("assert_eq!(cap_limit(),255)"), "extra_cap oracle intact: {out}");
+        assert_eq!(out.matches("fn default_cap_limit").count(), 1);
+        assert_eq!(out.matches("fn extra_cap_limit").count(), 1);
+    }
+
+    #[test]
     fn merge_normalizes_multiline_doc_to_uniform_line_docs() {
         // FR-033: a doc example must not render with mixed /// and /** */ —
         // that splits the ``` fence and drops `# struct Foo;` from the doctest.

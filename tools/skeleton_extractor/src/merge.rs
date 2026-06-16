@@ -51,7 +51,14 @@ impl ClusterFile {
 /// Identity key for an item — items with the same key from different
 /// clusters are considered the "same" item and get merged. Items with
 /// different keys are emitted as separate, gated entries.
-pub(crate) type ItemKey = (String, String);
+///
+/// `(kind, name, own_cfg)`. The third field is the item's OWN `#[cfg(...)]`
+/// predicate: two same-named items differing only by cfg (a cfg-variant pair
+/// like `#[cfg(x)] fn f` / `#[cfg(not(x))] fn f`) are DISTINCT items and must
+/// merge into two separate gated defs — never collapse into one with their
+/// cfgs OR-combined (the bug that produced `#[cfg(any(x, not(x)))]` garbage,
+/// swapped bodies, and a leftover `unimplemented!()` on merge).
+pub(crate) type ItemKey = (String, String, String);
 
 pub(crate) fn token_hash(ts: &TokenStream) -> String {
     // Stable string repr of a token stream, normalized by syn re-rendering.
@@ -60,6 +67,11 @@ pub(crate) fn token_hash(ts: &TokenStream) -> String {
 }
 
 pub(crate) fn item_key(item: &syn::Item) -> ItemKey {
+    let (kind, name) = item_kind_name(item);
+    (kind, name, own_cfg_pred(item_attrs(item)))
+}
+
+fn item_kind_name(item: &syn::Item) -> (String, String) {
     match item {
         syn::Item::Fn(f) => ("fn".to_string(), f.sig.ident.to_string()),
         syn::Item::Struct(s) => ("struct".to_string(), s.ident.to_string()),
@@ -119,24 +131,26 @@ pub(crate) fn item_key(item: &syn::Item) -> ItemKey {
 
 /// Identity key for items inside a trait body (associated items).
 pub(crate) fn trait_item_key(item: &syn::TraitItem) -> ItemKey {
-    match item {
+    let (kind, name) = match item {
         syn::TraitItem::Fn(f) => ("trait_fn".to_string(), f.sig.ident.to_string()),
         syn::TraitItem::Const(c) => ("trait_const".to_string(), c.ident.to_string()),
         syn::TraitItem::Type(t) => ("trait_type".to_string(), t.ident.to_string()),
         syn::TraitItem::Macro(m) => ("trait_macro".to_string(), quote!(#m).to_string()),
         _ => ("trait_other".to_string(), quote!(#item).to_string()),
-    }
+    };
+    (kind, name, own_cfg_pred(trait_item_attrs(item)))
 }
 
 /// Identity key for items inside an impl body.
 pub(crate) fn impl_item_key(item: &syn::ImplItem) -> ItemKey {
-    match item {
+    let (kind, name) = match item {
         syn::ImplItem::Fn(f) => ("impl_fn".to_string(), f.sig.ident.to_string()),
         syn::ImplItem::Const(c) => ("impl_const".to_string(), c.ident.to_string()),
         syn::ImplItem::Type(t) => ("impl_type".to_string(), t.ident.to_string()),
         syn::ImplItem::Macro(m) => ("impl_macro".to_string(), quote!(#m).to_string()),
         _ => ("impl_other".to_string(), quote!(#item).to_string()),
-    }
+    };
+    (kind, name, own_cfg_pred(impl_item_attrs(item)))
 }
 
 /// Parse a cfg-predicate string ("not(foo), feature = \"bar\"") into a
@@ -215,6 +229,87 @@ pub(crate) fn impl_item_attrs_mut(item: &mut syn::ImplItem) -> Option<&mut Vec<s
     })
 }
 
+// ── cfg-variant identity + filled-body preference (read-only side) ─────────────
+
+/// Read-only attribute slice for a top-level item (empty for kinds we don't gate).
+pub(crate) fn item_attrs(item: &syn::Item) -> &[syn::Attribute] {
+    match item {
+        syn::Item::Fn(f) => &f.attrs,
+        syn::Item::Struct(s) => &s.attrs,
+        syn::Item::Enum(e) => &e.attrs,
+        syn::Item::Union(u) => &u.attrs,
+        syn::Item::Trait(t) => &t.attrs,
+        syn::Item::TraitAlias(t) => &t.attrs,
+        syn::Item::Type(t) => &t.attrs,
+        syn::Item::Const(c) => &c.attrs,
+        syn::Item::Static(s) => &s.attrs,
+        syn::Item::Mod(m) => &m.attrs,
+        syn::Item::Macro(m) => &m.attrs,
+        syn::Item::Impl(i) => &i.attrs,
+        syn::Item::Use(u) => &u.attrs,
+        syn::Item::ExternCrate(e) => &e.attrs,
+        syn::Item::ForeignMod(f) => &f.attrs,
+        _ => &[],
+    }
+}
+
+pub(crate) fn trait_item_attrs(item: &syn::TraitItem) -> &[syn::Attribute] {
+    match item {
+        syn::TraitItem::Fn(f) => &f.attrs,
+        syn::TraitItem::Const(c) => &c.attrs,
+        syn::TraitItem::Type(t) => &t.attrs,
+        syn::TraitItem::Macro(m) => &m.attrs,
+        _ => &[],
+    }
+}
+
+pub(crate) fn impl_item_attrs(item: &syn::ImplItem) -> &[syn::Attribute] {
+    match item {
+        syn::ImplItem::Fn(f) => &f.attrs,
+        syn::ImplItem::Const(c) => &c.attrs,
+        syn::ImplItem::Type(t) => &t.attrs,
+        syn::ImplItem::Macro(m) => &m.attrs,
+        _ => &[],
+    }
+}
+
+/// The item's OWN `#[cfg(...)]` predicate(s), each rendered canonically and
+/// joined by ` & ` (sorted, so attribute order is irrelevant); "" when none.
+/// Forms the third component of [`ItemKey`] so cfg-variant siblings stay distinct.
+pub(crate) fn own_cfg_pred(attrs: &[syn::Attribute]) -> String {
+    let mut preds: Vec<String> = Vec::new();
+    for a in attrs {
+        if a.path().is_ident("cfg")
+            && let syn::Meta::List(ml) = &a.meta
+        {
+            preds.push(ml.tokens.to_string());
+        }
+    }
+    preds.sort();
+    preds.join(" & ")
+}
+
+/// True when a fn-like body is just an `unimplemented!()`/`todo!()`/`panic!()`
+/// skeleton stub. When the SAME cfg-variant item is filled in its live cluster
+/// but left a stub in a cfg-dead cluster, the merge must keep the FILLED body.
+fn body_tokens_are_stub(rendered: &str) -> bool {
+    let t: String = rendered.chars().filter(|c| !c.is_whitespace()).collect();
+    t.contains("unimplemented!()") || t.contains("todo!()") || t.contains("panic!(")
+}
+
+fn item_is_stub(item: &syn::Item) -> bool {
+    matches!(item, syn::Item::Fn(f) if body_tokens_are_stub(&quote!(#f).to_string()))
+}
+
+fn impl_item_is_stub(item: &syn::ImplItem) -> bool {
+    matches!(item, syn::ImplItem::Fn(f) if body_tokens_are_stub(&quote!(#f).to_string()))
+}
+
+fn trait_item_is_stub(item: &syn::TraitItem) -> bool {
+    matches!(item, syn::TraitItem::Fn(f) if f.default.is_some()
+        && body_tokens_are_stub(&quote!(#f).to_string()))
+}
+
 /// Recursive merge for trait body items. Returns the merged list of
 /// associated items: identical entries across all clusters appear once;
 /// divergent entries appear once per cluster, each gated with that cluster's
@@ -251,6 +346,15 @@ pub(crate) fn merge_trait_items(
         if by_content.len() == 1 && bucket.len() == total_clusters {
             let item = bucket[0].2.clone();
             out.push(item);
+            continue;
+        }
+        // Self-gated cfg-variant assoc item → emit once (filled body), no cluster gate.
+        if !key.2.is_empty() {
+            let rep = bucket
+                .iter()
+                .find(|(_, _, it)| !trait_item_is_stub(it))
+                .unwrap_or(&bucket[0]);
+            out.push(rep.2.clone());
             continue;
         }
         // Otherwise: emit each unique content with cluster cfg gates joined by `any(...)`.
@@ -298,6 +402,15 @@ pub(crate) fn merge_impl_items(
         }
         if by_content.len() == 1 && bucket.len() == total_clusters {
             out.push(bucket[0].2.clone());
+            continue;
+        }
+        // Self-gated cfg-variant assoc item → emit once (filled body), no cluster gate.
+        if !key.2.is_empty() {
+            let rep = bucket
+                .iter()
+                .find(|(_, _, it)| !impl_item_is_stub(it))
+                .unwrap_or(&bucket[0]);
+            out.push(rep.2.clone());
             continue;
         }
         for (_h, entries) in by_content {
@@ -383,6 +496,15 @@ pub(crate) fn merge_top_items(cluster_files: &[(String, String, syn::File)]) -> 
         }
         if by_content.len() == 1 && bucket.len() == total_clusters {
             out.push(bucket[0].2.clone());
+            continue;
+        }
+        // Self-gated cfg-variant item (it carries its OWN #[cfg]): the cfg
+        // already gates it per cluster, so emit it ONCE — never stack a
+        // cluster gate (that yields any(x, not(x)) garbage). The live cluster
+        // filled it; cfg-dead clusters left a stub → keep the filled body.
+        if !key.2.is_empty() {
+            let rep = bucket.iter().find(|(_, _, it)| !item_is_stub(it)).unwrap_or(&bucket[0]);
+            out.push(rep.2.clone());
             continue;
         }
         for (_h, entries) in by_content {

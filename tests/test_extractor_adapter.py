@@ -195,3 +195,34 @@ def test_merge_clusters_nonzero_rc_false(tmp_path: Path, monkeypatch: pytest.Mon
 def test_merge_clusters_exception_false(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(ext.subprocess, "run", _FakeRun(raises=OSError("x")))
     assert CliExtractor(_bin(tmp_path)).merge_clusters(tmp_path / "m.rs", []) is False
+
+
+# --------------------------------------------------------------------------- real-binary merge pin
+
+_REAL_BIN = Path(__file__).resolve().parent.parent / "tools" / "skeleton_extractor" / "target" / "release" / "skeleton-extractor"
+
+
+@pytest.mark.skipif(not _REAL_BIN.exists(), reason="skeleton-extractor binary not built (bash setup.sh)")
+def test_real_merge_keeps_cfg_variant_fns_distinct(tmp_path: Path) -> None:
+    """End-to-end pin through the real binary (hardcrate cap-trap regression): two
+    cfg-variant `cap_limit` fns must merge into two distinct gated defs with the
+    filled body each, never an `any(x, not(x))` collapse with a leftover stub."""
+    gate_extra = 'any(extra_cap, feature = "extra_cap")'
+    gate_stable = f"not({gate_extra})"
+    stable = tmp_path / "stable.rs"
+    stable.write_text(
+        f"#[cfg({gate_extra})]\npub fn cap_limit() -> usize {{ ::core::unimplemented!() }}\n"
+        f"#[cfg({gate_stable})]\npub fn cap_limit() -> usize {{ 64 }}\n")
+    extra = tmp_path / "extra.rs"
+    extra.write_text(
+        f"#[cfg({gate_extra})]\npub fn cap_limit() -> usize {{ 255 }}\n"
+        f"#[cfg({gate_stable})]\npub fn cap_limit() -> usize {{ ::core::unimplemented!() }}\n")
+    out_path = tmp_path / "merged.rs"
+    ok = CliExtractor(_REAL_BIN).merge_clusters(
+        out_path, [("stable", stable, gate_stable), ("extra_cap", extra, gate_extra)])
+    assert ok is True
+    out = out_path.read_text()
+    assert out.count("fn cap_limit") == 2, out
+    assert "255" in out and "64" in out, out
+    assert "unimplemented" not in out, out
+    assert "any(any(" not in out.replace(" ", ""), out
