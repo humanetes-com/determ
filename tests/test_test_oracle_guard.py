@@ -9,6 +9,7 @@ from __future__ import annotations
 import pytest
 
 import pipeline
+from pipeline_core.application.reconstruct.test_targets import is_test_fn_record
 
 
 def _recs() -> list[dict]:
@@ -22,9 +23,9 @@ def _recs() -> list[dict]:
 
 
 def test_is_test_fn_record() -> None:
-    assert pipeline._is_test_fn_record({"cfg_predicates": ["test", "x"]}) is True
-    assert pipeline._is_test_fn_record({"cfg_predicates": ["any (x)"]}) is False
-    assert pipeline._is_test_fn_record({}) is False
+    assert is_test_fn_record({"cfg_predicates": ["test", "x"]}) is True
+    assert is_test_fn_record({"cfg_predicates": ["any (x)"]}) is False
+    assert is_test_fn_record({}) is False
 
 
 def test_filter_test_targets_drops_test_keys(monkeypatch: pytest.MonkeyPatch) -> None:
