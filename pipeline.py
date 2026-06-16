@@ -64,6 +64,7 @@ from pipeline_core.application.generators.task1_synthesizer import (
     Task1Synthesizer,
 )
 from pipeline_core.application.reconstruct import attribution as _attribution
+from pipeline_core.application.reconstruct import fix_diagnostics as _fix_diag
 from pipeline_core.application.reconstruct.failure_analysis import FailureAnalysisStep
 from pipeline_core.application.reconstruct.module_reconstructor import ModuleReconstructor
 from pipeline_core.application.reconstruct.reconstruction_step import ReconstructionStep
@@ -11169,46 +11170,10 @@ def generate_fix_loop(
 
     Returns (passed, final_output).
     """
-    def _error_sigs(output: str) -> frozenset:
-        return frozenset(re.findall(r'error\[E\d+\]: .+', output))
-
-    def _errors_by_file(output: str) -> dict[str, int]:
-        """Count primary error locations per file from rustc output."""
-        counts: dict[str, int] = {}
-        # Each error block: error[Exxxx] line followed by --> src/file.rs:line:col
-        in_error = False
-        for line in output.splitlines():
-            if re.match(r'^error\[E\d+\]', line):
-                in_error = True
-            elif in_error:
-                m = re.match(r'\s+-->\s+(\S+\.rs):\d+', line)
-                if m:
-                    f = m.group(1).lstrip("./")
-                    counts[f] = counts.get(f, 0) + 1
-                    in_error = False
-        return counts
-
-    def _file_stats(paths: list[Path]) -> dict[str, dict]:
-        """Return lines and fn count per file (relative path → {lines, fns})."""
-        stats: dict[str, dict] = {}
-        fn_re = re.compile(r'^\s*(?:pub\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+\w')
-        for p in paths:
-            if not p.exists():
-                continue
-            try:
-                text = p.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                continue
-            rel = str(p.relative_to(project_dir))
-            lines = text.count("\n") + 1
-            fns = sum(1 for ln in text.splitlines() if fn_re.match(ln))
-            stats[rel] = {"lines": lines, "fns": fns}
-        return stats
-
     def _log_compile_overview(output: str, attempt_n: int) -> None:
         """Log per-file error table and emit compile.file_stats event."""
-        err_by_file = _errors_by_file(output)
-        fstats = _file_stats(source_paths)
+        err_by_file = _fix_diag.errors_by_file(output)
+        fstats = _fix_diag.file_stats(source_paths, project_dir)
         all_files = sorted({*fstats.keys(), *err_by_file.keys()})
         clean = sum(1 for f in all_files if err_by_file.get(f, 0) == 0 and f in fstats)
         total = len(all_files)
@@ -11264,7 +11229,7 @@ def generate_fix_loop(
                     return True, output, 0
         except subprocess.TimeoutExpired:
             return False, f"TIMEOUT after {timeout}s", 10**9
-        metric = len(_error_sigs(output))
+        metric = len(_fix_diag.error_sigs(output))
         return False, output, metric
 
     def _do_fix(output: str, history: list[dict], *, retro: str) -> dict:
