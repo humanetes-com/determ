@@ -51,6 +51,7 @@ from pipeline_core.adapters.artifacts import (
 from pipeline_core.adapters.artifacts import (
     api_surface_path as _api_surface_path,
 )
+from pipeline_core.adapters.cargo import CargoEnv
 from pipeline_core.adapters.coverage import CoverageDeps
 from pipeline_core.adapters.failure_journal import FileFailureJournal
 from pipeline_core.adapters.ratchet import BestTreeRatchet
@@ -3135,6 +3136,10 @@ def _profile_inputs_hash(readme_text: str, test_files: list) -> str:
 # `_SCOPE.active` at call time (e.g. _cargo_env); the augment loop activates each
 # cluster via `_SCOPE` (it satisfies ports.augment.ClusterScope).
 _SCOPE = ClusterScope()
+
+# Cargo env builder (cluster-aware): pipeline_core.adapters.cargo.CargoEnv reads the
+# active cluster from _SCOPE at call time. Zero-arg callable seam every cargo call binds.
+_cargo_env = CargoEnv(_SCOPE)
 
 # True when the project_dir is a git-managed workspace (--repo or auto-detected).
 # Enables git commits at key pipeline transitions.
@@ -10986,33 +10991,7 @@ def task_genesis_audit(genesis_path: Path) -> bool:
 # Trigger: pipeline.py --augment-tests
 # ---------------------------------------------------------------------------
 
-def _cargo_env() -> dict:
-    env = os.environ.copy()
-    env["PATH"] = str(Path.home() / ".cargo" / "bin") + ":" + env.get("PATH", "")
-    # Suppress all Rust compiler warnings — only errors appear in output.
-    # Keeps LLM error context clean and eliminates false-positive noise.
-    env["RUSTFLAGS"] = "-A warnings"
-    env["CARGO_TERM_COLOR"] = "never"
-    # Do NOT force RUST_BACKTRACE=1 here. It used to be set so tarpaulin would
-    # instrument backtrace-conditional code paths (e.g. fmt.rs's debug formatter),
-    # but it also makes legitimate library tests fail when they assert on Debug
-    # output — for example anyhow's tests/test_fmt.rs:83 compares against a
-    # backtrace-free string. With RUST_BACKTRACE=1 the test panics, cargo-test
-    # exits non-zero, and cargo-llvm-cov aborts before writing lcov, leaving the
-    # pipeline measuring 0/0 lines on every pass. If you ever need backtrace
-    # coverage for tarpaulin, set RUST_BACKTRACE only inside TarpaulinProvider.
-    # Apply cluster-specific env overrides (e.g. RUSTFLAGS=--cfg error_generic_member_access).
-    # RUSTFLAGS entries are appended to avoid clobbering the base -A warnings flag.
-    if _SCOPE.active and _SCOPE.active.env_extra:
-        for k, v in _SCOPE.active.env_extra.items():
-            if k == "RUSTFLAGS":
-                env["RUSTFLAGS"] = env["RUSTFLAGS"] + " " + v
-            else:
-                env[k] = v
-    # If this cluster requires nightly, tell rustup to use nightly toolchain.
-    if _SCOPE.active and _SCOPE.active.requires_nightly:
-        env["RUSTUP_TOOLCHAIN"] = "nightly"
-    return env
+# _cargo_env (cluster-aware cargo env) is defined near _SCOPE above.
 
 
 # slice 5b: deps records for the extracted TASK 3 / TASK 4. Defined here, after every

@@ -10,10 +10,55 @@ string and signalled timeout with rc=-1), this keeps the streams separate in a t
 
 from __future__ import annotations
 
+import os
 import shlex
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+
+from ..domain.cluster_scope import ClusterScope
+from ..domain.models import BuildCluster
+
+
+def base_cargo_env() -> dict[str, str]:
+    """The static cargo env: cargo on PATH, warnings suppressed (clean error
+    context for the LLM), no terminal colour. Cluster overrides layer on top."""
+    env = os.environ.copy()
+    env["PATH"] = str(Path.home() / ".cargo" / "bin") + ":" + env.get("PATH", "")
+    env["RUSTFLAGS"] = "-A warnings"
+    env["CARGO_TERM_COLOR"] = "never"
+    # Deliberately NOT setting RUST_BACKTRACE=1: it makes Debug-asserting tests
+    # panic, which aborts cargo-llvm-cov before it writes lcov (0/0 coverage).
+    return env
+
+
+def apply_cluster_env(env: dict[str, str], cluster: BuildCluster | None) -> None:
+    """Layer a cluster's env contribution onto ``env`` in place: its ``env_extra``
+    (RUSTFLAGS is APPENDED so the base ``-A warnings`` survives; others set), and
+    ``RUSTUP_TOOLCHAIN=nightly`` when the cluster requires the nightly toolchain."""
+    if cluster and cluster.env_extra:
+        for k, v in cluster.env_extra.items():
+            if k == "RUSTFLAGS":
+                env["RUSTFLAGS"] = env["RUSTFLAGS"] + " " + v
+            else:
+                env[k] = v
+    if cluster and cluster.requires_nightly:
+        env["RUSTUP_TOOLCHAIN"] = "nightly"
+
+
+class CargoEnv:
+    """Builds the cargo subprocess env for the *currently active* cluster. A
+    ``Callable[[], dict[str, str]]`` (the zero-arg seam every cargo call binds),
+    reading the active cluster from an injected :class:`ClusterScope` at call
+    time — so a mid-run cluster activation is reflected without a global."""
+
+    def __init__(self, scope: ClusterScope) -> None:
+        self._scope = scope
+
+    def __call__(self) -> dict[str, str]:
+        env = base_cargo_env()
+        apply_cluster_env(env, self._scope.active)
+        return env
 
 
 @dataclass(frozen=True, slots=True)
