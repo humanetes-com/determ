@@ -43,6 +43,14 @@ from pipeline_core.adapters import state as _state_mod
 from pipeline_core.adapters import strip as _strip_mod
 from pipeline_core.adapters import workspace as _wsmod
 from pipeline_core.adapters import workspace_scan as _workspace_scan
+from pipeline_core.adapters.artifacts import (
+    WorkspaceArtifacts,
+    load_api_surface,
+    load_manifest,
+)
+from pipeline_core.adapters.artifacts import (
+    api_surface_path as _api_surface_path,
+)
 from pipeline_core.adapters.coverage import CoverageDeps
 from pipeline_core.adapters.failure_journal import FileFailureJournal
 from pipeline_core.adapters.ratchet import BestTreeRatchet
@@ -143,6 +151,9 @@ from pipeline_core.domain.enums import (
     FixStrategy,
     PhaseCDriver,
     PhaseCMode,
+)
+from pipeline_core.domain.failure_classification import (
+    classify_failure as _classify_failure,
 )
 from pipeline_core.domain.llm_output import (
     GENESIS_DELIM_END,
@@ -921,7 +932,8 @@ TASK4_DOC_LIMIT = 200_000
 FAILURE_LOG_NAME = "failure_log.md"
 
 # Directory for locked module source backups (bottom-up integration).
-LOCKED_MODULES_DIR = ".locked_modules"
+# Layout vocabulary now lives in pipeline_core.domain.workspace_layout.
+from pipeline_core.domain.workspace_layout import LOCKED_MODULES_DIR  # noqa: E402
 
 # Sentinel file written by TASK 0c when coverage augmentation is complete.
 COVERAGE_AUGMENT_SENTINEL = ".coverage_augmented"
@@ -1965,41 +1977,7 @@ def lock_module(project_dir: Path, module_name: str, module_dir: Path,
     return locked_count
 
 
-def load_locked_source_context(project_dir: Path, dep_names: set[str]) -> str:
-    """
-    Build the locked-source context string for TASK 2: the actual source of all
-    locked dependency modules, injected into the prompt so the model uses exact
-    types and function signatures instead of inventing them.
-
-    Returns an empty string if no locked dependencies exist.
-    """
-    if not dep_names:
-        return ""
-
-    parts: list[str] = []
-    for dep_name in sorted(dep_names):
-        lock_dir = project_dir / LOCKED_MODULES_DIR / dep_name
-        if not lock_dir.exists():
-            continue
-        for f in sorted(lock_dir.rglob("*")):
-            if not f.is_file() or f.name == "locked.txt":
-                continue
-            rel = f.relative_to(lock_dir)
-            try:
-                content = f.read_text()
-                parts.append(f"=== {dep_name}/{rel} ===\n{content}")
-            except Exception:
-                continue
-
-    if not parts:
-        return ""
-
-    return (
-        "--- Locked dependency source (already generated and tests passing — "
-        "use these exact types, signatures, and module paths in your implementation) ---\n\n"
-        + "\n\n".join(parts)
-    )
-
+# load_locked_source_context → pipeline_core.adapters.artifacts.WorkspaceArtifacts.
 
 # ---------------------------------------------------------------------------
 # Workspace stub helpers
@@ -2027,72 +2005,7 @@ def _write_workspace_stub(crate_type: str, module_dir: Path) -> Path:
 # Failure classification (build error vs test logic failure)
 # ---------------------------------------------------------------------------
 
-def classify_failure(test_output: str) -> str:
-    """
-    BL-019: Classify a test/build failure into a specific category.
-
-    Returns one of:
-      "build"     — code did not compile (drives TASK 2 inner loop)
-      "assertion" — tests ran, assertion failed (wrong return value / behavior)
-      "panic"     — runtime panic not from an assertion (logic error / unwrap)
-      "timeout"   — test runner timed out
-      "no_tests"  — no tests ran (test harness misconfiguration)
-      "test"      — catch-all for other test failures
-
-    TASK 4 uses the sub-categories to produce more targeted genesis updates.
-    """
-    build_signals = [
-        "error[E",
-        "error: could not compile",
-        "failed to compile",
-        "failed to load manifest",
-        "failed to parse manifest",
-        "error: aborting due to",
-        "cannot find",
-        "unresolved import",
-        "module not found",
-        "ModuleNotFoundError",
-        "SyntaxError",
-        "Cannot find module",
-        "TSError",
-        "build failed",
-        "BUILD FAILED",
-        "CompilationError",
-    ]
-
-    output_lower = test_output.lower()
-    build_score = sum(1 for s in build_signals if s.lower() in output_lower)
-
-    if build_score > 0:
-        return "build"
-
-    if "timeout" in output_lower or "timed out" in output_lower:
-        return "timeout"
-
-    if "0 tests" in output_lower or "running 0 tests" in output_lower:
-        return "no_tests"
-
-    # Distinguish assertion failures from other panics.
-    has_panic = "panicked at" in output_lower or "panicked at '" in output_lower
-    has_assertion = (
-        "assertion" in output_lower
-        or "assert_eq" in output_lower
-        or "assert_ne" in output_lower
-        or "left ==" in output_lower
-        or "left: " in output_lower
-    )
-
-    if has_panic and has_assertion:
-        return "assertion"
-    if has_panic:
-        return "panic"
-
-    test_signals = ["FAILED", "test result: FAILED", "failures:", "FAIL\t",
-                    "AssertionError", "pytest"]
-    if any(s.lower() in output_lower for s in test_signals):
-        return "test"
-
-    return "test"
+# classify_failure → pipeline_core.domain.failure_classification (FailureCategory).
 
 
 # ---------------------------------------------------------------------------
@@ -2971,11 +2884,7 @@ def save_manifest(manifest_path: Path, files: list):
     write(manifest_path, "\n".join(files))
 
 
-def load_manifest(manifest_path: Path) -> list:
-    content = read(manifest_path)
-    if not content:
-        return []
-    return [line for line in content.splitlines() if line.strip()]
+# load_manifest → pipeline_core.adapters.artifacts (imported above).
 
 
 def write_source_files(files_dict: dict, project_dir: Path, manifest_path: Path,
@@ -9780,21 +9689,7 @@ def _task2_generator_factory() -> Task2Generator:
     return _new_filelist_task2_generator()  # default: filelist
 
 
-def _format_whole_project_context(test_files: list, reason: str = "") -> str:
-    """
-    Format all test files as a context block for TASK 2.
-    Used when isolated module context is insufficient:
-      - module has 0 tests (whole-project is the only available spec)
-      - no improvement after NO_IMPROVEMENT_THRESHOLD iterations (isolated signal exhausted)
-    """
-    if not test_files:
-        return ""
-    header = reason or "Full project test suite provided for additional context."
-    parts = [f"\n--- WHOLE-PROJECT CONTEXT: {header} ---"]
-    for rel, content in test_files:
-        parts.append(f'\n<TESTFILE path="{rel}">\n{content}\n</TESTFILE>')
-    parts.append("\n--- END WHOLE-PROJECT CONTEXT ---\n")
-    return "\n".join(parts)
+# _format_whole_project_context → pipeline_core.adapters.artifacts.WorkspaceArtifacts.
 
 
 def task2(project_dir, genesis_path, functional_req_path, manifest_path, existing_test_files,
@@ -12842,9 +12737,7 @@ strip_module_source = _strip_mod.strip_module_source
 ORIGINAL_STRUCTURE_DIR = _strip_mod.ORIGINAL_STRUCTURE_DIR
 
 
-def _api_surface_path(project_dir: Path, module_name: str) -> Path:
-    """Path where the pre-strip API surface for a module is saved."""
-    return project_dir / ORIGINAL_STRUCTURE_DIR / f"{module_name}.api.md"
+# _api_surface_path → pipeline_core.adapters.artifacts (imported above as _api_surface_path).
 
 
 def _capture_api_surface(project_dir: Path, module_dir: Path, module_name: str) -> Path | None:
@@ -12913,15 +12806,7 @@ def _capture_api_surface(project_dir: Path, module_dir: Path, module_name: str) 
     return out_path
 
 
-def load_api_surface(project_dir: Path, module_name: str) -> str:
-    """Load the saved API surface for a module. Returns '' if not present."""
-    p = _api_surface_path(project_dir, module_name)
-    if not p.exists():
-        return ""
-    try:
-        return p.read_text(encoding="utf-8")
-    except OSError:
-        return ""
+# load_api_surface → pipeline_core.adapters.artifacts (imported above).
 
 
 # slice 5b: deps for the extracted TASK 1 (defined after load_api_surface, its latest dep).
@@ -13315,7 +13200,7 @@ class _ReconstructAdapter:
                               module_dir_rel=module_dir_rel)
 
     def classify_failure(self, test_output: str) -> str:
-        return classify_failure(test_output)
+        return _classify_failure(test_output)
 
     def diagnose_no_tests(self, project_dir: Path, test_command: str, reason: str,
                           test_output: str) -> "tuple[str, str]":
@@ -13356,31 +13241,8 @@ class _ReconstructAdapter:
     # --- Ratchet: now a real adapter (pipeline_core.adapters.ratchet.BestTreeRatchet),
     #     injected directly into FailureAnalysisStep. ---
 
-    # --- Artifacts ---
-    def read(self, path):
-        return read(path)
-
-    def load_api_surface(self, project_dir, module_name):
-        return load_api_surface(project_dir, module_name)
-
-    def load_manifest(self, manifest_path):
-        return load_manifest(manifest_path)
-
-    def load_locked_source_context(self, project_dir, dep_names):
-        return load_locked_source_context(project_dir, dep_names)
-
-    def format_whole_project_context(self, test_files, reason):
-        return _format_whole_project_context(test_files, reason)
-
-    def collect_source_context(self, project_dir, manifest_path, exclude):
-        out = ""
-        for rel in load_manifest(manifest_path):
-            if rel in exclude:
-                continue
-            sp = project_dir / rel
-            if sp.exists():
-                out += f'\n<FILE path="{rel}">\n{sp.read_text(encoding="utf-8")}\n</FILE>\n'
-        return out
+    # --- Artifacts: now a real adapter (pipeline_core.adapters.artifacts.WorkspaceArtifacts),
+    #     injected directly into the reconstruction use-cases. ---
 
     # --- CoverageDocs ---
     def regenerate(self, project_dir, test_files, readme_text, project_profile, clusters):
@@ -13404,20 +13266,21 @@ _RECONSTRUCT_ADAPTER = _ReconstructAdapter()
 
 # P5: reconstruction use-cases — each depends on narrow role slices of the adapter.
 _FAILURE_JOURNAL = FileFailureJournal()
+_WORKSPACE_ARTIFACTS = WorkspaceArtifacts()
 _REQUIREMENTS_PHASE = RequirementsPhase(
     requirements=_RECONSTRUCT_ADAPTER, gate=_RECONSTRUCT_ADAPTER,
     telemetry=_RECONSTRUCT_ADAPTER, analyst=_RECONSTRUCT_ADAPTER,
-    journal=_FAILURE_JOURNAL, artifacts=_RECONSTRUCT_ADAPTER,
+    journal=_FAILURE_JOURNAL, artifacts=_WORKSPACE_ARTIFACTS,
 )
 _RECONSTRUCTION_STEP = ReconstructionStep(
     generator=_RECONSTRUCT_ADAPTER, tests=_RECONSTRUCT_ADAPTER, fixer=_RECONSTRUCT_ADAPTER,
-    artifacts=_RECONSTRUCT_ADAPTER, telemetry=_RECONSTRUCT_ADAPTER,
+    artifacts=_WORKSPACE_ARTIFACTS, telemetry=_RECONSTRUCT_ADAPTER,
     lock_deps=_LOCK_DEPS, reattach_deps=_REATTACH_DEPS,
     no_improvement_threshold=NO_IMPROVEMENT_THRESHOLD,
 )
 _FAILURE_ANALYSIS = FailureAnalysisStep(
     analyst=_RECONSTRUCT_ADAPTER, journal=_FAILURE_JOURNAL, ratchet=BestTreeRatchet(),
-    artifacts=_RECONSTRUCT_ADAPTER, coverage_docs=_RECONSTRUCT_ADAPTER,
+    artifacts=_WORKSPACE_ARTIFACTS, coverage_docs=_RECONSTRUCT_ADAPTER,
     audit=_RECONSTRUCT_ADAPTER, docs=_RECONSTRUCT_ADAPTER, telemetry=_RECONSTRUCT_ADAPTER,
     genesis_audit_interval=GENESIS_AUDIT_INTERVAL,
 )
