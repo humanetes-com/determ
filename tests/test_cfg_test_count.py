@@ -65,3 +65,24 @@ def test_count_test_fns_excludes_custom_gated_only() -> None:
     # when extra_cap IS the active cluster, the gated test counts and not() drops.
     assert pipeline._count_test_fns_cfg_aware(
         txt, {"extra_cap"}, {"feature=\"extra_cap\""}) == 3
+
+
+def test_file_level_cfg_gate_excludes_whole_file() -> None:
+    # A file-level `#![cfg(P)]` with P false for the cluster gates EVERY test in
+    # the file (cargo compiles it to an empty binary). Regression for the
+    # hardcrate `tests/cap.rs` phantom: expected-count must match cargo-runs,
+    # else the cluster is permanently 'incomplete' and the fix loop churns.
+    txt = (
+        "#![cfg(any(extra_cap, feature = \"extra_cap\"))]\n"
+        "#[test]\nfn a() {}\n#[test]\nfn b() {}\n"
+    )
+    # stable cluster: extra_cap + feature both false → whole file excluded → 0.
+    assert pipeline._count_test_fns_cfg_aware(
+        txt, set(), {"extra_cap", "feature = \"extra_cap\""}) == 0
+    # extra_cap cluster: predicate true → both tests counted.
+    assert pipeline._count_test_fns_cfg_aware(
+        txt, {"extra_cap", "feature = \"extra_cap\""}, set()) == 2
+    # no top-level gate → unaffected (both counted).
+    assert pipeline._count_test_fns_cfg_aware(
+        "#[test]\nfn a() {}\n#[test]\nfn b() {}\n", set(),
+        {"extra_cap", "feature = \"extra_cap\""}) == 2

@@ -248,6 +248,18 @@ from pipeline_core.prompts import runtime as _prompts_runtime
 from pipeline_core.prompts.context import (
     PerFnFixSections,
 )
+from pipeline_core.prompts.fix_prompts import (
+    build_behavior_fix_prompt as _build_behavior_fix_prompt,
+)
+from pipeline_core.prompts.fix_prompts import (
+    build_fn_fix_prompt as _build_fn_fix_prompt,
+)
+from pipeline_core.prompts.fix_prompts import (
+    build_impl_fix_prompt as _build_impl_fix_prompt,
+)
+from pipeline_core.prompts.fix_prompts import (
+    build_tdd_stub_fill_prompt as _build_tdd_stub_fill_prompt,
+)
 from pipeline_core.prompts.per_fn import (
     build_per_fn_fix_prompt as _build_per_fn_fix_prompt,
 )
@@ -2291,6 +2303,15 @@ def _count_test_fns_cfg_aware(
     them evaluates false under (cfg_true, cfg_false), drop the fn.
     Otherwise count it (true or undecidable predicates → still counted).
     """
+    # A file-level inner attribute `#![cfg(P)]` gates the WHOLE file (idiomatic
+    # for integration-test files). When P is false for this cluster cargo
+    # compiles the file to an EMPTY test binary, so NONE of its `#[test]` fns
+    # run — they must not inflate the expected count, else the cluster is
+    # permanently 'incomplete' and the post-task3 fix loop churns on a phantom
+    # test (hardcrate `tests/cap.rs` under `stable`). Same decidable-false
+    # semantics as the runner-side file filter, so the count matches cargo.
+    if _file_top_cfg_excluded(text, cfg_true, cfg_false):
+        return 0
     lines = text.splitlines()
     test_attr_re = re.compile(
         r"^\s*#\s*\[\s*(?:test|tokio::test|async_std::test|"
@@ -9649,8 +9670,9 @@ def generate_fix_loop(
                     return True, output, 0
         except subprocess.TimeoutExpired:
             return False, f"TIMEOUT after {timeout}s", 10**9
-        metric = len(_fix_diag.error_sigs(output))
-        return False, output, metric
+        # Floor metric: compile-error sigs while it won't compile, then failing
+        # -test count (so the stall budget senses behavioral repair). See docstring.
+        return False, output, _fix_diag.floor_metric(output)
 
     def _do_fix(output: str, history: list[dict], *, retro: str) -> dict:
         if output.startswith("TIMEOUT after "):
@@ -9889,26 +9911,12 @@ Current source files:
                 "REPOSITORY_SPECIFICATIONS",
                 _repo_spec_section(fr_path, file_rel=_rel, fn_name=_fn,
                                    container=fn_container or ""))
-            prompt = f"""ONE Rust function does not compile. Return ONLY its corrected body.
-{_FIX_THINKING_DIRECTIVE}File: {_rel} | Fn: {_fn}
-{sig_rule}{sig_text}
-
-Current body (it does NOT compile):
-{{
-{cur_body}
-}}
-
-Compiler errors:
-```
-{errs}
-```
-{_repo_block}{rblock}{_gotchas_block_for(out)}{_tests_for_names({_fn})}
-Return the corrected body as EXACTLY one block (statements only — no fn
-signature, no outer braces):
-<FN name="{_fn}" block="any">
-...corrected body...
-</FN>
-Output nothing else."""
+            prompt = _build_fn_fix_prompt(
+                thinking_directive=_FIX_THINKING_DIRECTIVE, file_rel=_rel,
+                fn_name=_fn, sig_rule=sig_rule, sig_text=sig_text,
+                cur_body=cur_body, errs=errs, repo_block=_repo_block,
+                retro_block=rblock, gotchas_block=_gotchas_block_for(out),
+                tests_block=_tests_for_names({_fn}))
             resp = ask(prompt, model=model)
             bodies = extract_fn_bodies(resp)
             blk = next((b for b in bodies if b.get("fn_name") == _fn),
@@ -9992,26 +10000,12 @@ Output nothing else."""
             _repo_block = _tag_block(
                 "REPOSITORY_SPECIFICATIONS",
                 _repo_spec_section(fr_path, file_rel=rel, container=container))
-            prompt = f"""A Rust impl block fails to compile. Fix the function BODIES so the
-whole block compiles. Change ONLY what the errors require; leave already-correct
-functions untouched. {where_rule}
-{_FIX_THINKING_DIRECTIVE}File: {rel}
-Impl block:
-```rust
-{block_src}
-```
-{sib_block}
-Compiler errors:
-```
-{errs}
-```
-{_repo_block}{rblock}{_gotchas_block_for(out)}{_tests_for_names(member_names)}
-For EACH function you change, return one block (body statements only — no fn
-signature line, no outer braces). Use the function name verbatim:
-<FN name="FUNCTION_NAME" block="impl">
-...corrected body...
-</FN>
-Output nothing else."""
+            prompt = _build_impl_fix_prompt(
+                thinking_directive=_FIX_THINKING_DIRECTIVE, file_rel=rel,
+                where_rule=where_rule, block_src=block_src, sib_block=sib_block,
+                errs=errs, repo_block=_repo_block, retro_block=rblock,
+                gotchas_block=_gotchas_block_for(out),
+                tests_block=_tests_for_names(member_names))
             resp = ask(prompt, model=model)
             fn_blocks = extract_fn_bodies(resp)
             spliced = 0
@@ -10147,34 +10141,15 @@ Output nothing else."""
                             _trel, _tsrc = behavior_srcs.get(_tn, ("", ""))
                             if _tsrc and len(_tests_block) + len(_tsrc) <= _SRC_SNIP_CAP:
                                 _tests_block += f"// {_trel} :: {_tn}\n{_tsrc}\n\n"
-                        prompt = (
-                            f"ONE Rust function compiles but FAILS its tests — "
-                            f"its behaviour is wrong. Correct the body.\n"
-                            f"{_FIX_THINKING_DIRECTIVE}"
-                            f"File: {rel} | Fn: {fn}\n"
-                            f"Signature (do NOT change it):\n{sig_text}\n\n"
-                            f"Current body (wrong — replace it):\n{{{{\n{cur_body}\n}}}}\n\n"
-                            f"Failing test source (the behaviour the body must satisfy):\n"
-                            f"```\n{_tests_block}```\n"
-                            f"Test failure output:\n```\n{errs}\n```\n"
-                            f"Return the corrected body as EXACTLY one block "
-                            f"(statements only — no fn signature, no outer braces):\n"
-                            f'<FN name="{fn}" block="any">\n...body...\n</FN>\n'
-                            f"Output nothing else."
-                        )
+                        prompt = _build_behavior_fix_prompt(
+                            thinking_directive=_FIX_THINKING_DIRECTIVE,
+                            file_rel=rel, fn_name=fn, sig_text=sig_text,
+                            cur_body=cur_body, tests_block=_tests_block, errs=errs)
                     else:
-                        prompt = (
-                            f"ONE Rust function has an unimplemented body — fill it.\n"
-                            f"{_FIX_THINKING_DIRECTIVE}"
-                            f"File: {rel} | Fn: {fn}\n"
-                            f"Signature (do NOT change it):\n{sig_text}\n\n"
-                            f"Current body (unimplemented — replace it):\n{{{{\n{cur_body}\n}}}}\n\n"
-                            f"Test failure output:\n```\n{errs}\n```\n"
-                            f"Return the corrected body as EXACTLY one block "
-                            f"(statements only — no fn signature, no outer braces):\n"
-                            f'<FN name="{fn}" block="any">\n...body...\n</FN>\n'
-                            f"Output nothing else."
-                        )
+                        prompt = _build_tdd_stub_fill_prompt(
+                            thinking_directive=_FIX_THINKING_DIRECTIVE,
+                            file_rel=rel, fn_name=fn, sig_text=sig_text,
+                            cur_body=cur_body, errs=errs)
                     resp = ask(prompt, model=model)
                     bodies = extract_fn_bodies(resp)
                     blk = next(

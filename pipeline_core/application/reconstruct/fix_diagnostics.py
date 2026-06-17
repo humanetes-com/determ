@@ -11,6 +11,12 @@ import re
 from pathlib import Path
 from typing import Any
 
+from pipeline_core.domain.test_results import parse_failed_tests
+
+# A single compile error outranks any plausible failing-test count, so the
+# combined metric stays monotonic across the compile→test transition.
+_COMPILE_WEIGHT = 10_000
+
 _ERROR_SIG_RE = re.compile(r"error\[E\d+\]: .+")
 _ERROR_HEAD_RE = re.compile(r"^error\[E\d+\]")
 _ERROR_LOC_RE = re.compile(r"\s+-->\s+(\S+\.rs):\d+")
@@ -20,6 +26,19 @@ _FN_DECL_RE = re.compile(r"^\s*(?:pub\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+\w")
 def error_sigs(output: str) -> frozenset[str]:
     """The distinct `error[Exxxx]: …` signature lines in rustc output."""
     return frozenset(_ERROR_SIG_RE.findall(output))
+
+
+def floor_metric(output: str) -> int:
+    """Lower-is-better fix-loop floor metric spanning BOTH repair phases.
+
+    While the code fails to COMPILE, compile-error signatures dominate (weighted
+    so any error outranks any test count); once it compiles (0 sigs) the metric
+    becomes the FAILING-TEST count. Without the test term a test-run check sits
+    at 0 forever (no compile errors) so the floor-stall can't sense behavioral
+    repair — it burns the full stall budget every round. Compile-only output
+    (no `test … FAILED`/`---- … stdout ----` lines) → test term 0 → the ordering
+    of a build-check loop is unchanged (just scaled)."""
+    return len(error_sigs(output)) * _COMPILE_WEIGHT + len(parse_failed_tests(output))
 
 
 def errors_by_file(output: str) -> dict[str, int]:
