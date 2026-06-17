@@ -44,6 +44,8 @@ from pipeline_core.adapters import strip as _strip_mod
 from pipeline_core.adapters import workspace as _wsmod
 from pipeline_core.adapters import workspace_scan as _workspace_scan
 from pipeline_core.adapters.coverage import CoverageDeps
+from pipeline_core.adapters.failure_journal import FileFailureJournal
+from pipeline_core.adapters.ratchet import BestTreeRatchet
 from pipeline_core.adapters.structure import CliStructureReader
 from pipeline_core.adapters.workspace import WorkspaceDeps
 from pipeline_core.adapters.workspace_scan import (
@@ -120,11 +122,6 @@ from pipeline_core.application.tasks.task3 import Task3Deps, run_clusters_strict
 from pipeline_core.application.tasks.task3 import task3 as _task3_impl
 from pipeline_core.application.tasks.task4 import Task4Deps
 from pipeline_core.application.tasks.task4 import task4 as _task4_impl
-from pipeline_core.application.workspace_lifecycle import (
-    best_tree_pass_count,
-    restore_best_tree,
-    save_best_tree,
-)
 from pipeline_core.application.workspace_lifecycle import (
     save_gen_tests_siblings as _wl_save_gen_tests_siblings,
 )
@@ -2106,35 +2103,8 @@ def classify_failure(test_output: str) -> str:
 # Failure log
 # ---------------------------------------------------------------------------
 
-def append_failure_log(log_path: Path, iteration: int | str, failure_type: str,
-                       pass_count: int, prev_pass_count: int, summary: str):
-    """
-    Append a structured entry to failure_log.md after each iteration.
-    This log is fed into TASK 4 so the model can avoid repeating failed approaches.
-    """
-    delta = pass_count - prev_pass_count
-    trend = (f"+{delta} improvement" if delta > 0
-             else f"{delta} regression" if delta < 0
-             else "no change")
-
-    entry = (
-        f"\n## Iteration {iteration}\n"
-        f"- **Failure type:** {failure_type}\n"
-        f"- **Tests passing:** {pass_count} (was {prev_pass_count}, {trend})\n"
-        f"- **Summary:** {summary}\n"
-    )
-    with log_path.open("a") as f:
-        if log_path.stat().st_size == 0:
-            f.write("# Failure Log\n\nRunning record of every iteration. "
-                    "Most recent entry is at the bottom.\n")
-        f.write(entry)
-
-
-def load_failure_log(log_path: Path, max_chars: int = 0) -> str:
-    """Return the full failure log. Each entry is ~100-150 chars; 100 iterations ≈ 15k chars,
-    well within any model context. max_chars is ignored but kept for call-site compatibility."""
-    return read(log_path)
-
+# append_failure_log / load_failure_log → pipeline_core.adapters.failure_journal
+# (FileFailureJournal), injected into the reconstruction use-cases directly.
 
 # slice 5b foundation: relocated to pipeline_core.domain.test_results (imported at top).
 
@@ -13380,24 +13350,11 @@ class _ReconstructAdapter:
     def genesis_audit(self, genesis_path):
         return task_genesis_audit(genesis_path)
 
-    # --- FailureJournal ---
-    def load_failure_log(self, log_path):
-        return load_failure_log(log_path)
+    # --- FailureJournal: now a real adapter (pipeline_core.adapters.failure_journal),
+    #     injected directly into the use-cases — no longer bound here. ---
 
-    def append_failure_log(self, log_path, iteration, failure_type, current_pass,
-                           prev_pass_count, summary):
-        append_failure_log(log_path, iteration, failure_type, current_pass,
-                           prev_pass_count, summary)
-
-    # --- Ratchet ---
-    def best_tree_pass_count(self, project_dir):
-        return best_tree_pass_count(project_dir)
-
-    def save_best_tree(self, project_dir, files, pass_count, *, iteration):
-        return save_best_tree(project_dir, files, pass_count, iteration=iteration)
-
-    def restore_best_tree(self, project_dir):
-        return restore_best_tree(project_dir)
+    # --- Ratchet: now a real adapter (pipeline_core.adapters.ratchet.BestTreeRatchet),
+    #     injected directly into FailureAnalysisStep. ---
 
     # --- Artifacts ---
     def read(self, path):
@@ -13446,10 +13403,11 @@ class _ReconstructAdapter:
 _RECONSTRUCT_ADAPTER = _ReconstructAdapter()
 
 # P5: reconstruction use-cases — each depends on narrow role slices of the adapter.
+_FAILURE_JOURNAL = FileFailureJournal()
 _REQUIREMENTS_PHASE = RequirementsPhase(
     requirements=_RECONSTRUCT_ADAPTER, gate=_RECONSTRUCT_ADAPTER,
     telemetry=_RECONSTRUCT_ADAPTER, analyst=_RECONSTRUCT_ADAPTER,
-    journal=_RECONSTRUCT_ADAPTER, artifacts=_RECONSTRUCT_ADAPTER,
+    journal=_FAILURE_JOURNAL, artifacts=_RECONSTRUCT_ADAPTER,
 )
 _RECONSTRUCTION_STEP = ReconstructionStep(
     generator=_RECONSTRUCT_ADAPTER, tests=_RECONSTRUCT_ADAPTER, fixer=_RECONSTRUCT_ADAPTER,
@@ -13458,7 +13416,7 @@ _RECONSTRUCTION_STEP = ReconstructionStep(
     no_improvement_threshold=NO_IMPROVEMENT_THRESHOLD,
 )
 _FAILURE_ANALYSIS = FailureAnalysisStep(
-    analyst=_RECONSTRUCT_ADAPTER, journal=_RECONSTRUCT_ADAPTER, ratchet=_RECONSTRUCT_ADAPTER,
+    analyst=_RECONSTRUCT_ADAPTER, journal=_FAILURE_JOURNAL, ratchet=BestTreeRatchet(),
     artifacts=_RECONSTRUCT_ADAPTER, coverage_docs=_RECONSTRUCT_ADAPTER,
     audit=_RECONSTRUCT_ADAPTER, docs=_RECONSTRUCT_ADAPTER, telemetry=_RECONSTRUCT_ADAPTER,
     genesis_audit_interval=GENESIS_AUDIT_INTERVAL,
