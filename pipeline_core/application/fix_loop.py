@@ -1,32 +1,130 @@
-"""THE fix-loop driver (slice 8a f2; relocated from pipeline.py in P1 of the
-FINAL-RESULT PLAN so application-layer tasks can drive it too).
+"""THE single fix-loop driver (P3 unification, FINAL-RESULT PLAN).
 
-Owns the loop skeleton every fix loop used to hand-roll — attempt counting,
-graceful-stop checks, FloorStall observation, and the stall / repeated-
-signature terminations. The unit owns everything domain-specific inside
-`one_attempt` (context gathering, prompt, splice + locking, verification,
-acceptance, revert); callbacks carry the unit's telemetry (loop.iter emit,
-stop logs).
+One loop engine — :func:`run_fix_loop` — owns the shape every fix loop used to
+hand-roll: iterate up to a hard cap, run one attempt, and exit on
+accept / dead-end / stall-budget / repeated-signature. Two *views* ride it,
+because the pipeline genuinely needs both and the union loses neither:
 
-Consumers: phase-c per-fn loop (f2), per-impl loop (f3), post-pass test
-retry (f4), task0c harness-fix + gen_tests compile-fix loops (P1 tail).
+* the **outcome view** (:func:`drive_fix_loop`): an attempt reports a
+  :class:`FixOutcome` (``accepted`` / ``stop`` / ``failed`` + an error
+  signature). Built for inner compile loops where the signal is structured —
+  a ``stop`` is a protocol dead-end (retrying can't help) and two identical
+  error signatures in a row is churn worth bailing on. The gauge is the
+  lower-is-better :class:`FloorStall`.
+
+* the **metric view** (:func:`pipeline_core.application.refine_loop.run_refine_loop`):
+  an attempt reports a higher-is-better metric (coverage %, pass count,
+  −error count) and the loop layers retrospective-on-stall + the
+  :class:`LoopState` meta-awareness narrative. Built for outer "keep improving
+  a number" loops. The gauge is :class:`LoopState` itself.
+
+Both views are thin facades; the iterate/stall/repeated/budget policy lives
+once, in :func:`run_fix_loop`. The gauge is injected (a :class:`StallGauge` —
+both ``FloorStall`` and ``LoopState`` satisfy it); the engine only *reads*
+``stalls`` / ``repeated`` and owns the exit arithmetic, while each view's
+``attempt`` closure owns the mutation (``FloorStall.observe`` /
+``LoopState.record``) and the I/O.
 
 `check_stop` is an explicit per-call hook (#14: was a module-global wired via
-`configure()`): each caller passes its graceful-stop check — the use-cases their
-`Telemetry.check_stop`, the composition root pipeline.py's sentinel check. The
-default no-op keeps the loop import-safe and tests hermetic.
+`configure()`): each caller passes its graceful-stop check. The default no-op
+keeps the loop import-safe and tests hermetic.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import StrEnum
+from typing import Protocol
 
 from pipeline_core.domain.refine import FloorStall
 
 
 def _no_stop(_context: str) -> None:
     """Default graceful-stop hook: never interrupts."""
+
+
+def _noop(_attempt: int) -> None:
+    """Default per-attempt hook: does nothing."""
+
+
+class StallGauge(Protocol):
+    """The minimal gauge :func:`run_fix_loop` reads to make its exit decisions.
+
+    Both :class:`FloorStall` (lower-is-better count gauge) and
+    :class:`LoopState` (higher-is-better metric history) satisfy it. The engine
+    never mutates the gauge — the view's ``attempt`` closure does (observe /
+    record) — it only reads these two fields after each attempt."""
+
+    @property
+    def stalls(self) -> int:
+        """Consecutive non-improving attempts so far."""
+        ...
+
+    @property
+    def repeated(self) -> bool:
+        """True when the last two attempts carried the same non-None signature."""
+        ...
+
+
+class StepStatus(StrEnum):
+    """What one attempt tells the engine to do next.
+
+    CONTINUE  — a failed/measured attempt; the engine consults the gauge for
+                stall / repeated exits, else loops.
+    ACCEPTED  — success (compiles / tests pass / metric target reached); the
+                metric view has already recorded this attempt before returning.
+    DEAD_END  — protocol dead-end (empty response, splice rejected, race lost):
+                exit now, retrying cannot help.
+    """
+
+    CONTINUE = "continue"
+    ACCEPTED = "accepted"
+    DEAD_END = "dead_end"
+
+
+@dataclass(frozen=True, slots=True)
+class LoopOutcome:
+    """Why :func:`run_fix_loop` stopped, and after how many attempts."""
+
+    attempts: int
+    reason: str  # "accepted" | "dead_end" | "stalled" | "repeated" | "hard_cap" | "done"
+
+
+def run_fix_loop(
+    attempt: Callable[[int], StepStatus],
+    gauge: StallGauge,
+    *,
+    hard_cap: int,
+    max_stalls: int,
+    before_attempt: Callable[[int], None] = _noop,
+    initial_done: bool = False,
+) -> LoopOutcome:
+    """Run ``attempt`` until it accepts / dead-ends / the gauge stalls out /
+    the gauge reports a repeated signature / the hard-cap backstop fires.
+
+    `initial_done` short-circuits with zero attempts (the metric view's
+    "already at target" case). `before_attempt(n)` runs once per attempt before
+    it (graceful-stop check for the outcome view; pending-retro setup for the
+    metric view). The stall / repeated checks read the gauge AFTER the attempt —
+    in that order, matching the legacy per-fn/per-impl loops — so the attempt's
+    own mutation (observe / record) is visible to the exit decision."""
+    if initial_done:
+        return LoopOutcome(0, "done")
+    n = 0
+    while n < hard_cap:
+        n += 1
+        before_attempt(n)
+        status = attempt(n)
+        if status is StepStatus.DEAD_END:
+            return LoopOutcome(n, "dead_end")
+        if status is StepStatus.ACCEPTED:
+            return LoopOutcome(n, "accepted")
+        if gauge.stalls >= max_stalls:
+            return LoopOutcome(n, "stalled")
+        if gauge.repeated:
+            return LoopOutcome(n, "repeated")
+    return LoopOutcome(n, "hard_cap")
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,33 +159,36 @@ def drive_fix_loop(
     initial_floor: int | None = None,
     check_stop: Callable[[str], None] = _no_stop,
 ) -> tuple[bool, int]:
-    """Run `one_attempt` until accepted / dead-end / stall / repeated sig /
-    hard cap. Returns (accepted, attempts_used). `check_stop` is invoked once per
-    attempt with the stop context (graceful-shutdown hook; #14: per-call, was global)."""
+    """Outcome-view facade over :func:`run_fix_loop`. Run `one_attempt` until
+    accepted / dead-end / stall / repeated sig / hard cap; returns
+    (accepted, attempts_used). The :class:`FloorStall` gauge is seeded with
+    `initial_floor` (the metric the loop ENTERED with — a first attempt that
+    fails to beat it counts as a stall, not a free baseline). `check_stop` is
+    invoked once per attempt with the stop context (graceful-shutdown hook)."""
     gauge = FloorStall()
     if initial_floor is not None:
-        # Seed the floor with the metric the loop ENTERED with (loop C / f4):
-        # a first iteration that fails to improve on the entry state counts
-        # as a stall, instead of getting a free baseline observation.
         gauge.observe(initial_floor)
-    attempt_n = 0
-    while attempt_n < hard_cap:
-        attempt_n += 1
-        check_stop(f"{stop_context} attempt {attempt_n}")
-        outcome = one_attempt(attempt_n)
+    accepted = False
+
+    def attempt(n: int) -> StepStatus:
+        nonlocal accepted
+        outcome = one_attempt(n)
         if outcome.kind == "accepted":
-            return True, attempt_n
+            accepted = True
+            return StepStatus.ACCEPTED
         if outcome.kind == "stop":
-            return False, attempt_n
+            return StepStatus.DEAD_END
         gauge.observe(outcome.err_count, signature=outcome.err_sig)
         if on_failure is not None:
-            on_failure(attempt_n, outcome, gauge)
-        if gauge.stalled(max_stalls):
-            if on_stall is not None:
-                on_stall(attempt_n, gauge)
-            return False, attempt_n
-        if gauge.repeated:
-            if on_repeated is not None:
-                on_repeated(attempt_n, gauge)
-            return False, attempt_n
-    return False, attempt_n
+            on_failure(n, outcome, gauge)
+        return StepStatus.CONTINUE
+
+    result = run_fix_loop(
+        attempt, gauge, hard_cap=hard_cap, max_stalls=max_stalls,
+        before_attempt=lambda n: check_stop(f"{stop_context} attempt {n}"),
+    )
+    if result.reason == "stalled" and on_stall is not None:
+        on_stall(result.attempts, gauge)
+    if result.reason == "repeated" and on_repeated is not None:
+        on_repeated(result.attempts, gauge)
+    return accepted, result.attempts

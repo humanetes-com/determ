@@ -6,7 +6,7 @@ and measuring the final fix of a stalled loop.
 """
 from __future__ import annotations
 
-import pipeline
+from pipeline_core.application.refine_loop import run_callback_loop
 
 
 class _Seq:
@@ -29,7 +29,7 @@ def test_success_exit_returns_passing_output():
         fixes.append(retro)
         return {"summary": "f1"}
 
-    ok, out, hist = pipeline._improvement_loop(
+    ok, out, hist = run_callback_loop(
         name="t", run_check=check, do_fix=do_fix, max_stalls=3)
     assert ok and out == "all green"
     assert check.calls == 2 and len(fixes) == 1 and len(hist) == 1
@@ -48,7 +48,7 @@ def test_stall_budget_is_fix_count_and_measures_last_fix():
         fixes.append(1)
         return {"summary": "f"}
 
-    ok, out, hist = pipeline._improvement_loop(
+    ok, out, hist = run_callback_loop(
         name="t", run_check=check, do_fix=do_fix, max_stalls=3)
     assert not ok
     assert len(fixes) == 3 and len(hist) == 3
@@ -68,7 +68,7 @@ def test_improvement_on_final_stall_iteration_continues():
         fixes.append(1)
         return {}
 
-    ok, _, hist = pipeline._improvement_loop(
+    ok, _, hist = run_callback_loop(
         name="t", run_check=check, do_fix=do_fix, max_stalls=2)
     assert not ok
     # f1 stalls (10→10), f2 improves (→9, reset), f3+f4 stall out the budget.
@@ -81,7 +81,7 @@ def test_abort_short_circuits_without_remeasure():
     def do_fix(output, history, *, retro):
         return {"abort": True, "reason": "check_timeout"}
 
-    ok, out, hist = pipeline._improvement_loop(
+    ok, out, hist = run_callback_loop(
         name="t", run_check=check, do_fix=do_fix, max_stalls=3)
     assert not ok and out == "err"
     assert check.calls == 1                    # no post-fix measure on abort
@@ -101,7 +101,7 @@ def test_retro_fires_only_when_stalled_and_reaches_do_fix():
         guidance_seen.append(retro)
         return {}
 
-    pipeline._improvement_loop(
+    run_callback_loop(
         name="t", run_check=check, do_fix=do_fix, do_retro=do_retro,
         max_stalls=2)
     # attempt 1: not stalled → no retro; attempt 2: stalled → retro fires
@@ -117,6 +117,6 @@ def test_legacy_two_arg_do_fix_still_accepted():
     def do_fix(output, history):
         return {"summary": "legacy"}
 
-    ok, _, hist = pipeline._improvement_loop(
+    ok, _, hist = run_callback_loop(
         name="t", run_check=check, do_fix=do_fix)
     assert ok and hist[0]["summary"] == "legacy"

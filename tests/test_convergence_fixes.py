@@ -88,7 +88,7 @@ def test_default_cluster_gen_tests_gated_against_other_clusters(monkeypatch) -> 
     stable = _cluster("stable", [], True)
     nightly = _cluster("nightly", ["error_generic_member_access"], False)
     no_core = _cluster("anyhow_no_core_error", ["anyhow_no_core_error"], False)
-    monkeypatch.setattr(pipeline, "_all_clusters", [stable, nightly, no_core])
+    monkeypatch.setattr(pipeline._SCOPE, "all", [stable, nightly, no_core])
 
     gate = pipeline._cluster_cfg_attr(stable)
     assert gate.startswith("not(any(")
@@ -98,7 +98,7 @@ def test_default_cluster_gen_tests_gated_against_other_clusters(monkeypatch) -> 
     assert pipeline._cluster_cfg_attr(nightly) == \
         'any(error_generic_member_access, feature = "error_generic_member_access")'
     # Single-cluster project: default stays ungated.
-    monkeypatch.setattr(pipeline, "_all_clusters", [stable])
+    monkeypatch.setattr(pipeline._SCOPE, "all", [stable])
     assert pipeline._cluster_cfg_attr(stable) == ""
     assert pipeline._cluster_cfg_attr(None) == ""
 

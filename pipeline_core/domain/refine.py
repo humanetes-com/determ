@@ -42,6 +42,13 @@ class LoopState:
         """1-based index of the attempt about to run."""
         return len(self.attempts) + 1
 
+    @property
+    def repeated(self) -> bool:
+        """Metric loops have no repeated-signature exit (that is the outcome
+        view's churn guard). Present so `LoopState` satisfies the
+        `StallGauge` protocol the unified loop engine reads."""
+        return False
+
     def record(self, attempt: Attempt) -> None:
         self.attempts.append(attempt)
         if attempt.improved:

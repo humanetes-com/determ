@@ -85,7 +85,7 @@ from pipeline_core.application.reconstruct.module_reconstructor import ModuleRec
 from pipeline_core.application.reconstruct.reconstruction_step import ReconstructionStep
 from pipeline_core.application.reconstruct.requirements_phase import RequirementsPhase
 from pipeline_core.application.reconstruct.run_context import RunContext
-from pipeline_core.application.refine_loop import run_refine_loop as _run_refine_loop
+from pipeline_core.application.refine_loop import run_callback_loop as _improvement_loop
 from pipeline_core.application.strip_bake import (
     StripBakeDeps,
 )
@@ -204,12 +204,6 @@ from pipeline_core.domain.models import (
     ImplBlock,
     ModRecord,
     TypeRecord,
-)
-from pipeline_core.domain.refine import (
-    Attempt as _Attempt,
-)
-from pipeline_core.domain.refine import (
-    LoopState as _LoopState,
 )
 from pipeline_core.domain.refine import (
     parse_retrospective_function as _parse_retrospective_function,
@@ -550,7 +544,8 @@ _legacy_parallelism_warned = False
 
 _EVENTS_LOG  = os.getenv("PIPELINE_EVENTS_LOG",
                          str(Path(__file__).parent / "logs" / "events.jsonl"))
-_PROMPTS_DIR = Path(__file__).parent / "logs" / "prompts"
+_PROMPTS_DIR = Path(os.getenv("PIPELINE_PROMPTS_DIR",
+                              str(Path(__file__).parent / "logs" / "prompts")))
 _RUN_CONTEXT: dict[str, str] = {"product": "unknown", "pipeline_sha": "unknown"}
 
 
@@ -5731,149 +5726,10 @@ def _converge_in_cluster(cluster: "BuildCluster | None") -> str | None:
 _PHASE_C_LOGS_DIRNAME = ".phase_c_logs"
 
 
-# P7.1: shared improvement-driven loop primitive. Every fix/retry loop in
-# the pipeline converges on the same shape — run a check, if it fails feed
-# the output to a fix step, repeat while the failure metric keeps falling.
-# Numeric caps survive only as runaway-safety hard ceilings; the real exit
-# is "no new minimum for K consecutive iterations".
-#
-# Used by Phase C per-fn (L1), task3 inline retry (L5), generate_fix_loop
-# (L6), task2 build retries (L4), Phase C pass loop (L2), task0c (L3).
-
-def _improvement_loop(
-    *,
-    name: str,
-    run_check,                    # () -> (ok: bool, output: str, metric: int)
-    do_fix,                       # (output, history, *, retro: str) -> dict
-    do_retro=None,                # optional (output, history) -> str — produces
-                                  # strategy guidance shown to do_fix on stall
-    max_stalls: int = 3,
-    hard_cap: int = 10_000,       # backstop against runaway only; the real
-                                  # terminator is the stall budget
-    on_iter=None,                 # optional (record: dict) -> None — archival
-) -> tuple[bool, str, list[dict]]:
-    """Canonical pipeline fix-loop wrapper — adapts the run_check/do_fix/
-    do_retro callback convention onto THE refine driver
-    (`pipeline_core.application.run_refine_loop`, slice 8a f5), so outer
-    measure loops share one termination policy with task0c augmentation.
-    (`_drive_fix_loop` stays a sibling: inner compile loops have outcome
-    kinds and a repeated-signature exit that don't fit a metric strategy.)
-
-    Semantics: improvement = strict decrease of the best metric; exit on
-    run_check ok, `{"abort": ...}` from do_fix, the stall budget, or the
-    hard-cap backstop. Each attempt is RE-MEASURED immediately (run_check
-    after do_fix) — the retired hand-rolled loop recorded the pre-fix
-    metric one iteration late, which burned a spurious stall on iteration
-    1 and exited a stalled loop without measuring its final fix
-    (discarding a possible improvement). Fix-attempt counts per stall
-    budget are unchanged.
-
-    `do_fix(output, history, *, retro)` — `retro` carries
-    `LoopState.context()` (trajectory + stall count + latest retro);
-    legacy 2-arg callables are still accepted. `do_retro` fires before an
-    attempt whenever the loop is stalled. Emits `loop.iter` per attempt;
-    history records carry `metric` (pre-fix) and `post_fix_metric`
-    (measured, no longer a hint).
-    """
-    import inspect as _inspect
-    try:
-        _accepts_retro = "retro" in _inspect.signature(do_fix).parameters
-    except (TypeError, ValueError):
-        _accepts_retro = False
-
-    history: list[dict] = []
-
-    class _CallbackStrategy:
-        """RefineStrategy over the callback convention. Metric here is
-        lower-is-better; LoopState is higher-is-better, so the negated
-        metric flows through the driver."""
-
-        def __init__(self) -> None:
-            self.ok = False
-            self.aborted = False
-            self.output = ""
-            self.metric = 0
-            self.iter_n = 0
-
-        def _check(self) -> None:
-            self.ok, self.output, self.metric = run_check()
-
-        def measure(self) -> float:
-            self._check()
-            return float(-self.metric)
-
-        def is_done(self, metric: float) -> bool:
-            return self.ok or self.aborted
-
-        def retrospect(self, state: "_LoopState") -> str:
-            if do_retro is None:
-                return ""
-            try:
-                return do_retro(self.output, history) or ""
-            except Exception as e:
-                _log(f"  [improvement_loop/{name}] do_retro failed: {e}")
-                return ""
-
-        def attempt(self, state: "_LoopState") -> _Attempt:
-            fix_guidance = state.context()
-            retro = state.pending_retro
-            pre_metric = self.metric
-            output = self.output
-            self.iter_n += 1
-            try:
-                if _accepts_retro:
-                    record = do_fix(output, history, retro=fix_guidance) or {}
-                else:
-                    record = do_fix(output, history) or {}
-            except Exception as e:
-                _log(f"  [improvement_loop/{name}] do_fix raised: {e}")
-                record = {"abort": True, "reason": f"do_fix_exception: {e}"}
-            if record.get("abort"):
-                self.aborted = True
-                new_metric = pre_metric          # no re-measure on abort
-            else:
-                self._check()                    # post-fix truth
-                new_metric = self.metric
-            improved = float(-new_metric) > state.best_metric
-            ev = {
-                "name": name,
-                "iter": self.iter_n,
-                "metric_prev": pre_metric,
-                "metric_new": new_metric,
-                "metric_best": int(min(-state.best_metric, float(new_metric))),
-                "improved": improved,
-                "stalled": 0 if improved else state.stalls + 1,
-                "fix_summary": record.get("summary", ""),
-                "retro_chars": len(fix_guidance),
-            }
-            with suppress(Exception):
-                _emit("loop.iter", data=ev)
-            if on_iter is not None:
-                try:
-                    on_iter(ev | {"output": output, "record": record,
-                                  "retro": retro})
-                except Exception as e:
-                    _log(f"  [improvement_loop/{name}] on_iter raised: {e}")
-            history.append({"iter": self.iter_n, **record, "retro": retro,
-                            "metric": pre_metric, "post_fix_metric": new_metric})
-            if self.aborted:
-                _log(f"  [improvement_loop/{name}] aborted at iter "
-                     f"{self.iter_n}: {record.get('reason', 'unknown')}")
-            return _Attempt(metric=float(-new_metric), error=output[:2000],
-                            retro=retro)
-
-    strat = _CallbackStrategy()
-    state = _run_refine_loop(strat, max_stalls=max_stalls, hard_cap=hard_cap)
-    if strat.ok:
-        return True, strat.output, history
-    if not strat.aborted:
-        if state.stalls >= max_stalls:
-            _log(f"  [improvement_loop/{name}] floor stalled at "
-                 f"{int(-state.best_metric)} for {state.stalls} iter(s) — stopping.")
-        else:
-            _log(f"  [improvement_loop/{name}] hard cap {hard_cap} reached "
-                 "(should never happen — stall budget should fire first).")
-    return False, strat.output, history
+# _improvement_loop (the callback->RefineStrategy adapter) was relocated to
+# pipeline_core.application.refine_loop.run_callback_loop (P3.3) and is
+# imported above as _improvement_loop. The 4 in-file callers (generate_fix_loop
+# closures, _task3_inline_retry) move onto it directly in P3.4/P3.5.
 
 
 # Retro/diagnosis calls MUST run with think=True (FR-028). The served

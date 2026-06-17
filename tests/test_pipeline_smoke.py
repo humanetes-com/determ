@@ -1154,9 +1154,9 @@ def test_describe_test_environment() -> None:
     assert "cargo test" in desc
 
     # When a cluster is active, the cluster's cfg state should appear.
-    original_cluster = pipeline._current_cluster
+    original_cluster = pipeline._SCOPE.active
     try:
-        pipeline._current_cluster = pipeline.BuildCluster(
+        pipeline._SCOPE.active = pipeline.BuildCluster(
             name="nightly",
             env_extra={},
             tarpaulin_exclude_files=[],
@@ -1169,7 +1169,7 @@ def test_describe_test_environment() -> None:
         assert "error_generic_member_access" in desc2
         assert "excluded cfg predicates" in desc2
     finally:
-        pipeline._current_cluster = original_cluster
+        pipeline._SCOPE.active = original_cluster
 
     print("  OK  _describe_test_environment")
 
