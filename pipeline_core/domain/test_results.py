@@ -12,6 +12,38 @@ extractor. No new patterns are authored; the bodies are moved as-is.
 from __future__ import annotations
 
 import re
+from enum import StrEnum
+
+
+class ClusterStatus(StrEnum):
+    """The strict per-cluster TASK 3 verdict (FR-024). A `StrEnum` so existing
+    ``status == "pass"`` comparisons keep working while the vocabulary is now
+    explicit and exhaustive."""
+
+    PASS = "pass"
+    FAIL = "fail"              # tests ran and ≥1 failed — a repairable defect
+    INCOMPLETE = "incomplete"  # fewer tests reported than statically expected
+
+
+def cluster_failure_is_actionable(status: str, rc: int, fail_count: int) -> bool:
+    """Can the code-fix loop actually repair this non-pass cluster?
+
+    True only when the output carries a concrete defect to act on:
+      - FAIL (``fail_count > 0``): failing-test diagnostics — fixable.
+      - INCOMPLETE with ``rc != 0``: a test binary failed to compile/link or
+        panicked before reporting — compiler diagnostics are present — fixable.
+
+    A *clean-exit shortfall* (INCOMPLETE, ``rc == 0``, ``fail_count == 0``:
+    cargo ran fine but fewer ``#[test]``s reported than statically expected) has
+    NO repair signal. Routing it to the fix loop only churns (the loop sees no
+    compile error and no failing test → its floor metric is 0). It is a
+    count/oracle mismatch to SURFACE, not a code defect to repair."""
+    if status == ClusterStatus.FAIL:
+        return True
+    if status == ClusterStatus.INCOMPLETE:
+        return rc != 0
+    return False
+
 
 # Format marker between the genesis snapshot and the real test output in
 # tests_output_N.txt. Owned here because extract_test_output_from_file parses it.
@@ -99,24 +131,24 @@ def validate_task3_output_strict(
     """
     reported = pass_count + fail_count + ignored_count
     if fail_count > 0:
-        return "fail", (
+        return ClusterStatus.FAIL, (
             f"cluster '{cluster_name}': {fail_count} failed, "
             f"{pass_count} passed, {ignored_count} ignored "
             f"(expected {expected_count})"
         )
     if expected_count <= 0 and pass_count == 0:
-        return "incomplete", (
+        return ClusterStatus.INCOMPLETE, (
             f"cluster '{cluster_name}': no tests detected statically and "
             "none ran — corpus appears empty for this cluster"
         )
     if reported < expected_count:
-        return "incomplete", (
+        return ClusterStatus.INCOMPLETE, (
             f"cluster '{cluster_name}': {reported} tests reported "
             f"({pass_count} pass + {fail_count} fail + {ignored_count} ignored), "
             f"but {expected_count} expected — some binary failed to compile "
             "or crashed before reporting all tests"
         )
-    return "pass", (
+    return ClusterStatus.PASS, (
         f"cluster '{cluster_name}': {pass_count} passed, "
         f"{ignored_count} ignored (expected {expected_count})"
     )

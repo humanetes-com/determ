@@ -54,6 +54,59 @@ def test_resolve_verdict_failure_subtypes_preserved() -> None:
     assert resolve_task3_verdict(False, 0, 0, True)[0] == "no_tests"
 
 
+def test_cluster_failure_actionability() -> None:
+    """A non-pass cluster is actionable by the code-fix loop only when its
+    output carries a repairable signal — failing tests, or a nonzero exit with
+    compiler diagnostics. A clean-exit shortfall (rc==0, fail==0, fewer tests
+    reported than expected) is a count/oracle mismatch, NOT a code defect."""
+    from pipeline_core.domain.test_results import ClusterStatus
+    from pipeline_core.domain.test_results import (
+        cluster_failure_is_actionable as act,
+    )
+    assert act(ClusterStatus.FAIL, 101, 2) is True       # failing tests
+    assert act(ClusterStatus.FAIL, 0, 2) is True         # failures even if rc parsed 0
+    assert act(ClusterStatus.INCOMPLETE, 101, 0) is True  # binary failed to compile
+    assert act(ClusterStatus.INCOMPLETE, 0, 0) is False   # clean shortfall — phantom
+    assert act(ClusterStatus.PASS, 0, 0) is False
+
+
+def test_clean_shortfall_skips_code_fix_retry(tmp_path: Path, monkeypatch) -> None:
+    """A cluster that exits cleanly (rc==0, 0 fail) but reports fewer tests than
+    expected must NOT be routed to the inline code-fix retry — that loop has no
+    signal to act on and would churn (the hardcrate pass=N plateau). The retry
+    must be skipped; the run still fails (never a false SUCCESS)."""
+    from pipeline_core.application.tasks.task3 import Task3Deps, task3
+    monkeypatch.setattr(pclog, "_log_sink", lambda m: None)
+    monkeypatch.setattr(pclog, "_emit_sink", lambda e, **f: None)
+
+    @contextmanager
+    def fake_phase(kind: str, **kw):
+        d: dict = {}
+        yield d
+
+    retry_calls: list[dict] = []
+    deps = Task3Deps(
+        phase=fake_phase,
+        load_baked_clusters=lambda p: [SimpleNamespace(
+            name="stable", toolchain="", env_extra={})],
+        task3_legacy_single=lambda *a, **k: (False, ""),
+        # Clean run: rc=0, "2 passed; 0 failed"; but expected=3 → shortfall.
+        cargo_env=lambda: {"PATH": "/usr/bin:/bin"},
+        parse_cmd=lambda cmd: [
+            "sh", "-c", 'echo "test result: ok. 2 passed; 0 failed; 0 ignored"'],
+        count_active_tests_for_cluster=lambda p, c: 3,
+        store_prompt_content=lambda s: "",
+        task3_inline_retry=lambda **k: retry_calls.append(k) or (True, "x"),
+        read=lambda p: "",
+        write=lambda p, s: None,
+        test_timeout=30,
+    )
+    passed, _out = task3(tmp_path, "cargo test", 1, tmp_path,
+                         tmp_path / "genesis.md", deps)
+    assert passed is False                 # never a false SUCCESS
+    assert retry_calls == []               # the churn-prone retry was skipped
+
+
 # --- B: every task3 task.done carries the verdict -------------------------
 
 

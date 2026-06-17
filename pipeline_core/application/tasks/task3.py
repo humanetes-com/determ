@@ -19,6 +19,7 @@ from typing import Any
 
 from ...domain.test_results import (
     OUTPUT_SEPARATOR,
+    cluster_failure_is_actionable,
     parse_test_counts,
     validate_task3_output_strict,
 )
@@ -186,17 +187,33 @@ def task3(project_dir: Path, test_command: str, iteration: int | str,
         agg_fail = sum(r["fail"] for r in cluster_results)
         agg_ignored = sum(r["ignored"] for r in cluster_results)
         agg_expected = sum(r["expected"] for r in cluster_results)
-        # Primary = first non-pass cluster: its output has the actionable signal,
-        # and the inline retry must rebuild under ITS toolchain/env to reproduce
-        # the failure (R9).
+        # Primary = first ACTIONABLE non-pass cluster: one whose output carries a
+        # repairable signal (failing tests, or a nonzero exit with compiler
+        # diagnostics). The inline retry must rebuild under ITS toolchain/env to
+        # reproduce the failure (R9). A clean-exit shortfall (rc==0, fail==0, but
+        # fewer #[test]s than statically expected) is NOT actionable — sending it
+        # to the fix loop only churns (no compile error, no failing test → floor
+        # metric 0). When EVERY non-pass cluster is such a shortfall we skip the
+        # retry and surface a count/oracle mismatch instead of burning LLM calls.
         primary_test_output = ""
         primary_cluster = None
         _cluster_by_name = {c.name: c for c in clusters}
+        _unactionable_shortfalls = [
+            r for r in cluster_results if r["status"] != "pass"
+            and not cluster_failure_is_actionable(r["status"], r["rc"], r["fail"])
+        ]
         for r in cluster_results:
-            if r["status"] != "pass":
+            if r["status"] != "pass" and cluster_failure_is_actionable(
+                    r["status"], r["rc"], r["fail"]):
                 primary_test_output = r["output"]
                 primary_cluster = _cluster_by_name[r["cluster"]]
                 break
+        if primary_cluster is None and _unactionable_shortfalls:
+            for r in _unactionable_shortfalls:
+                log(f"  [task3/{r['cluster']}] count/oracle mismatch — clean run "
+                    f"({r['pass']} pass, rc={r['rc']}) but {r['expected']} expected; "
+                    "NOT a code defect, skipping the code-fix retry (would churn). "
+                    "Check expected-count derivation or a genuinely missing test.")
         genesis = deps.read(genesis_path)
         deps.write(output_file,
                    f"=== genesis.md (iteration {iteration}) ===\n{genesis}\n"
@@ -229,8 +246,10 @@ def task3(project_dir: Path, test_command: str, iteration: int | str,
                    "pass_count": agg_pass, "fail_count": agg_fail,
                    "ignored_count": agg_ignored,
                    "expected_count": agg_expected,
-                   "reason": "incomplete" if any_incomplete and not any_failed
-                             else "failed_tests",
+                   "reason": ("incomplete_shortfall_unactionable"
+                              if _unactionable_shortfalls and primary_cluster is None
+                              else "incomplete" if any_incomplete and not any_failed
+                              else "failed_tests"),
                    "output": deps.store_prompt_content(aggregated_output)})
 
         # FR-024 inline retry on the primary failing cluster. Uses the
