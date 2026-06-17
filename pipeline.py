@@ -145,6 +145,7 @@ from pipeline_core.domain.cargo_toml import cargo_entry_point_paths as _domain_c
 from pipeline_core.domain.cargo_toml import cargo_is_proc_macro as _domain_cargo_is_proc_macro
 from pipeline_core.domain.cargo_toml import cargo_package_name as _domain_cargo_package_name
 from pipeline_core.domain.cargo_toml import load_cargo_toml as _domain_load_cargo_toml
+from pipeline_core.domain.cluster_scope import ClusterScope
 from pipeline_core.domain.enums import (
     Backend,
     CoverageBackend,
@@ -3128,15 +3129,12 @@ def _profile_inputs_hash(readme_text: str, test_files: list) -> str:
 # imported at the top of this module and re-exported for unchanged call sites.
 
 
-# Active cluster during task0c — set by main() before each cluster pass.
-# Read by _cargo_env() and _run_tarpaulin() so every subprocess call inherits
-# the cluster's env and exclusion list without touching every call site.
-_current_cluster: "BuildCluster | None" = None
-
-# Full cluster list from the cfg scan — set by main() alongside _current_cluster.
-# Read by _cluster_cfg_attr() so the default cluster's gen_tests can be gated
-# with the NEGATION of every other cluster's cfg flags.
-_all_clusters: "list[BuildCluster]" = []
+# Run-state: which compilation cluster is active + the full plan. Explicit,
+# injectable object (pipeline_core.domain.cluster_scope.ClusterScope) replacing
+# the former _current_cluster/_all_clusters module globals. Engine code reads
+# `_SCOPE.active` at call time (e.g. _cargo_env); the augment loop activates each
+# cluster via `_SCOPE` (it satisfies ports.augment.ClusterScope).
+_SCOPE = ClusterScope()
 
 # True when the project_dir is a git-managed workspace (--repo or auto-detected).
 # Enables git commits at key pipeline transitions.
@@ -3283,10 +3281,10 @@ def _nightly_rules_for_cluster() -> str:
     Default/stable cluster: derived from the cluster's excluded_cfg list.
     Returns empty string if no exclusions apply.
     """
-    if _current_cluster and not _current_cluster.is_default:
-        return _current_cluster.prompt_nightly_rule
-    if _current_cluster and _current_cluster.excluded_cfg:
-        predicates = ", ".join(f"`{p}`" for p in sorted(_current_cluster.excluded_cfg))
+    if _SCOPE.active and not _SCOPE.active.is_default:
+        return _SCOPE.active.prompt_nightly_rule
+    if _SCOPE.active and _SCOPE.active.excluded_cfg:
+        predicates = ", ".join(f"`{p}`" for p in sorted(_SCOPE.active.excluded_cfg))
         return (
             f"- Do NOT write tests for code gated behind these excluded cfg predicates: {predicates}.\n"
             f"  Skip any source lines inside their `#[cfg(...)]` blocks — they are untestable on this toolchain."
@@ -11005,14 +11003,14 @@ def _cargo_env() -> dict:
     # coverage for tarpaulin, set RUST_BACKTRACE only inside TarpaulinProvider.
     # Apply cluster-specific env overrides (e.g. RUSTFLAGS=--cfg error_generic_member_access).
     # RUSTFLAGS entries are appended to avoid clobbering the base -A warnings flag.
-    if _current_cluster and _current_cluster.env_extra:
-        for k, v in _current_cluster.env_extra.items():
+    if _SCOPE.active and _SCOPE.active.env_extra:
+        for k, v in _SCOPE.active.env_extra.items():
             if k == "RUSTFLAGS":
                 env["RUSTFLAGS"] = env["RUSTFLAGS"] + " " + v
             else:
                 env[k] = v
     # If this cluster requires nightly, tell rustup to use nightly toolchain.
-    if _current_cluster and _current_cluster.requires_nightly:
+    if _SCOPE.active and _SCOPE.active.requires_nightly:
         env["RUSTUP_TOOLCHAIN"] = "nightly"
     return env
 
@@ -11080,9 +11078,9 @@ def _describe_test_environment() -> str:
             "logging, backtrace capture, etc.) are unreachable from this test run."
         )
 
-    if _current_cluster is not None:
-        active = ", ".join(_current_cluster.active_cfg) if _current_cluster.active_cfg else "(none)"
-        excluded = ", ".join(_current_cluster.excluded_cfg) if _current_cluster.excluded_cfg else "(none)"
+    if _SCOPE.active is not None:
+        active = ", ".join(_SCOPE.active.active_cfg) if _SCOPE.active.active_cfg else "(none)"
+        excluded = ", ".join(_SCOPE.active.excluded_cfg) if _SCOPE.active.excluded_cfg else "(none)"
         lines.append(f"  active cfg predicates: {active}")
         lines.append(f"  excluded cfg predicates: {excluded}")
 
@@ -11107,7 +11105,7 @@ def _crate_name_from_toml(module_dir: Path, fallback: str) -> str:
 _COV_DEPS = CoverageDeps(
     log=_log,
     cargo_env=_cargo_env,
-    cluster=lambda: _current_cluster,
+    cluster=_SCOPE.get_active,
     tarpaulin_bin=TARPAULIN_BIN,
     grcov_bin=GRCOV_BIN,
     build_timeout=BUILD_TIMEOUT,
@@ -11299,7 +11297,7 @@ def _measure_coverage(project_dir: Path, module_name: str) -> tuple[float, list[
     pct, files_data, covered, coverable = _coverage_provider.measure(project_dir, module_name)
     _emit("coverage.measured",
           module=module_name,
-          cluster=_current_cluster.name if _current_cluster is not None else None,
+          cluster=_SCOPE.active.name if _SCOPE.active is not None else None,
           duration_ms=int((time.monotonic() - _t0) * 1000),
           data={"pct": pct, "covered": covered, "coverable": coverable,
                 "backend": COVERAGE_BACKEND, "file_count": len(files_data)})
@@ -11540,7 +11538,7 @@ def _cluster_cfg_attr(cluster) -> str:
         return ""
     if getattr(cluster, "is_default", True):
         other_flags: set[str] = set()
-        for c in _all_clusters:
+        for c in _SCOPE.all:
             if c is cluster or getattr(c, "is_default", True):
                 continue
             other_flags.update(getattr(c, "active_cfg", []) or [])
@@ -12353,7 +12351,7 @@ def _load_file_constraints(project_dir: Path) -> dict[str, str]:
     except Exception as _e:
         _log(f"  WARNING: could not load file constraints from {config_path}: {_e}")
         return {}
-    is_nightly = _current_cluster is not None and not _current_cluster.is_default
+    is_nightly = _SCOPE.active is not None and not _SCOPE.active.is_default
     result: dict[str, str] = dict(data.get("stable", {}))
     if is_nightly:
         result.update(data.get("nightly", {}))
@@ -13043,7 +13041,7 @@ def _ensure_vllm_ready(root: Path) -> None:
 # getter (mutable global); coverage provider as a value.
 _TASK0C_DEPS = Task0cDeps(
     BUILD_TIMEOUT=BUILD_TIMEOUT, COVERAGE_TARGET=COVERAGE_AUGMENTATION_TARGET, coverage_ignore_pragma=COVERAGE_IGNORE_PRAGMA, TASK0C_PROMPT_CHAR_CAP=TASK0C_PROMPT_CHAR_CAP, FIX_ERR_CAP=_FIX_ERR_CAP, SIBLING_CAP=_SIBLING_CAP, SRC_SNIP_CAP=_SRC_SNIP_CAP, TASK0C_FIX_THINKING_DIRECTIVE=_TASK0C_FIX_THINKING_DIRECTIVE, TASK0C_MODEL=_TASK0C_MODEL, TASK0C_THINKING_DIRECTIVE=_TASK0C_THINKING_DIRECTIVE, WORKING_CAP=_WORKING_CAP, annotate_uncovered=_annotate_uncovered, block_is_prose=_block_is_prose, build_gen_tests_decl=_build_gen_tests_decl, guard=_guard, cargo_env=_cargo_env, cluster_cfg_attr=_cluster_cfg_attr, condense_rust_to_signatures=_condense_rust_to_signatures, count_test_attrs=_count_test_attrs, derive_gentest_prelude=_derive_gentest_prelude, describe_test_environment=_describe_test_environment, error_signatures_from_output=_error_signatures_from_output, extract_branch_guard=_extract_branch_guard, extract_gen_tests_body=_extract_gen_tests_body, extract_public_symbols=_extract_public_symbols, extract_uncovered_functions=_extract_uncovered_functions, filter_cfg_excluded_lines=_filter_cfg_excluded_lines, filter_cfg_incompatible_lines=_filter_cfg_incompatible_lines, flags_unreachable=_flags_unreachable, gen_tests_path=_gen_tests_path, has_nonempty_test_body=_has_nonempty_test_body, inject_allow_before_any_mod=_inject_allow_before_any_mod, inject_allow_before_gen_mod=_inject_allow_before_gen_mod, inject_gen_prelude_imports=_inject_gen_prelude_imports, is_gen_tests_file=_is_gen_tests_file, is_structural_line=_is_structural_line, load_file_constraints=_load_file_constraints, type_signals_write=type_signals_write, mark_phase=_mark_phase, match_gen_tests_sibling=_match_gen_tests_sibling, next_gen_tests_n=_next_gen_tests_n, nightly_rules_for_cluster=_nightly_rules_for_cluster, parse_attempt_number=_parse_attempt_number, parse_retrospective_categories=_parse_retrospective_categories, partition_uncovered_lines=_partition_uncovered_lines, prelude_import_names=_prelude_import_names, quick_file_coverage=_quick_file_coverage, read_all_gen_tests=_read_all_gen_tests, read_state=_read_state, revert_gen_tests_pass=_revert_gen_tests_pass, select_relevant_siblings=_select_relevant_siblings, set_current=_set_current, source_hash=_source_hash, strip_all_gen_tests_artifacts=_strip_all_gen_tests_artifacts, strip_gen_tests_decl_n=_strip_gen_tests_decl_n, strip_gen_tests_decls=_strip_gen_tests_decls, strip_trailing_file_tag=_strip_trailing_file_tag, mutation_harden_file=_mutation_harden_file, gen_tests_siblings=_gen_tests_siblings, test_augmentor_factory=_test_augmentor_factory, ask=ask, extract_files=extract_files, extract_test_mod=extract_test_mod, generate_fix_loop=generate_fix_loop, generate_in_parallel=generate_in_parallel, is_test_file=is_test_file, write=write,
-    subprocess=subprocess, get_current_cluster=lambda: _current_cluster,
+    subprocess=subprocess, get_current_cluster=_SCOPE.get_active,
     coverage_provider=_coverage_provider, check_stop=_check_graceful_stop,
 )
 
@@ -13253,10 +13251,8 @@ class _AugmentAdapter:
     def set_current(self, project_dir: Path, label: str) -> None:
         _set_current(project_dir, label)
 
-    # --- ClusterScope ---
-    def set_active(self, cluster: "BuildCluster | None") -> None:
-        global _current_cluster
-        _current_cluster = cluster
+    # --- ClusterScope: `_SCOPE` (domain.cluster_scope.ClusterScope) satisfies the
+    #     port directly and is injected into ClusterAugmentor — no binding needed. ---
 
     # --- AugmentStore ---
     def is_cluster_augmented(self, project_dir: Path, cluster_name: str, module_name: str) -> bool:
@@ -13308,7 +13304,7 @@ class _AugmentAdapter:
 
 _AUGMENT_ADAPTER = _AugmentAdapter()
 _CLUSTER_AUGMENTOR = ClusterAugmentor(
-    telemetry=_AUGMENT_ADAPTER, scope=_AUGMENT_ADAPTER, store=_AUGMENT_ADAPTER,
+    telemetry=_AUGMENT_ADAPTER, scope=_SCOPE, store=_AUGMENT_ADAPTER,
     engine=_AUGMENT_ADAPTER, gate=_AUGMENT_ADAPTER,
 )
 
@@ -13469,9 +13465,8 @@ def main():
 
     # Cluster scan is pure static analysis (no LLM) — run first so all downstream
     # LLM tasks (discover_test_command, task0b) have cluster context available.
-    global _current_cluster, _all_clusters
     _clusters = task0_cfg_scan(project_dir)
-    _all_clusters = list(_clusters)
+    _SCOPE.reset(_clusters)
     _log(f"\nCompiler clusters identified: {len(_clusters)}")
     for _c in _clusters:
         _env_desc = ", ".join(f"{k}+={v}" for k, v in _c.env_extra.items()) if _c.env_extra else "default build"
