@@ -11,10 +11,15 @@ over-excludes — FR-018)."""
 from __future__ import annotations
 
 import pipeline
+from pipeline_core.domain import cfg as _cfg
 
 
 def _excludes(pred, cfg_true=frozenset(), cfg_false=frozenset(), defaults=frozenset()):
     return pipeline._cfg_false_for_cargo(pred, set(cfg_true), set(cfg_false), frozenset(defaults))
+
+
+def _leaf_atoms(pred):
+    return {a.normalized for a in _cfg.parse_cfg_pred(pred).atoms()}
 
 
 def test_custom_off_toggle_is_excluded_like_cargo() -> None:
@@ -44,9 +49,9 @@ def test_non_default_feature_off_is_excluded() -> None:
 
 
 def test_leaf_atoms_flattens_operators() -> None:
-    assert pipeline._cfg_leaf_atoms('any(extra_cap, feature = "extra_cap")') == {
+    assert _leaf_atoms('any(extra_cap, feature = "extra_cap")') == {
         "extra_cap", 'feature="extra_cap"'}
-    assert pipeline._cfg_leaf_atoms("not(all(unix, nightly))") == {"unix", "nightly"}
+    assert _leaf_atoms("not(all(unix, nightly))") == {"unix", "nightly"}
 
 
 def test_count_test_fns_excludes_custom_gated_only() -> None:

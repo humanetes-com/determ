@@ -643,6 +643,89 @@ pub fn enumerate_consts_in_tree(input_dir: &Path) -> Result<Vec<ConstRecord>> {
     Ok(out)
 }
 
+// ---------------------------------------------------------------------------
+// Cfg occurrences — P5: replaces the Python regex scan of `#[cfg(...)]` /
+// `#[cfg_attr(...)]` predicates in `task0_cfg_scan`. A `syn::visit::Visit` walk
+// reaches EVERY attribute (items, fields, variants, statements, inner `#![cfg]`),
+// so cluster derivation no longer guesses predicates from line text.
+// ---------------------------------------------------------------------------
+
+struct CfgCollector {
+    file: String,
+    occurrences: Vec<CfgOccurrence>,
+}
+
+impl CfgCollector {
+    fn handle_attr(&mut self, attr: &syn::Attribute) {
+        let mut atoms: Vec<CfgAtomWire> = Vec::new();
+        if attr.path().is_ident("cfg") {
+            // `#[cfg(COND)]` — meta tokens are the single condition meta.
+            if let syn::Meta::List(list) = &attr.meta
+                && let Ok(cond) = syn::parse2::<syn::Meta>(list.tokens.clone())
+            {
+                cfg_meta_atoms(&cond, &mut atoms);
+            }
+        } else if attr.path().is_ident("cfg_attr") {
+            // `#[cfg_attr(COND, applied...)]` — only COND (the first nested meta)
+            // gates compilation; the applied attrs do not name clusters.
+            if let syn::Meta::List(list) = &attr.meta
+                && let Ok(nested) = syn::parse2::<NestedMetaList>(list.tokens.clone())
+                && let Some(cond) = nested.items.first()
+            {
+                cfg_meta_atoms(cond, &mut atoms);
+            }
+        }
+        if !atoms.is_empty() {
+            self.occurrences.push(CfgOccurrence {
+                file: self.file.clone(),
+                atoms,
+            });
+        }
+    }
+}
+
+impl<'ast> syn::visit::Visit<'ast> for CfgCollector {
+    fn visit_attribute(&mut self, attr: &'ast syn::Attribute) {
+        self.handle_attr(attr);
+        syn::visit::visit_attribute(self, attr);
+    }
+}
+
+/// Walk a tree and emit one [`CfgOccurrence`] per `#[cfg(...)]` /
+/// `#[cfg_attr(COND, ...)]` attribute, with the leaf atoms of its condition.
+pub fn enumerate_cfgs_in_tree(input_dir: &Path) -> Result<Vec<CfgOccurrence>> {
+    let mut out = Vec::new();
+    for entry in walkdir::WalkDir::new(input_dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let p = entry.path();
+        if !p.is_file() || p.extension().and_then(|s| s.to_str()) != Some("rs") {
+            continue;
+        }
+        let rel = p.strip_prefix(input_dir).unwrap_or(p);
+        if rel.components().any(|c| {
+            let s = c.as_os_str().to_string_lossy();
+            s.starts_with('.') || s == "target"
+        }) {
+            continue;
+        }
+        let Ok(source) = std::fs::read_to_string(p) else {
+            continue;
+        };
+        let Ok(ast) = parse_file(&source) else {
+            continue;
+        };
+        let mut c = CfgCollector {
+            file: rel.to_string_lossy().to_string(),
+            occurrences: Vec::new(),
+        };
+        syn::visit::Visit::visit_file(&mut c, &ast);
+        out.append(&mut c.occurrences);
+    }
+    Ok(out)
+}
+
 /// Walk a macro body's token stream and collect every method name invoked as
 /// `.method(...)` — i.e. a `.` punct, then an ident, then a parenthesised
 /// group. Recurses into all delimiter groups. AST/token walk, no regex.

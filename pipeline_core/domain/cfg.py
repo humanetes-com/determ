@@ -1,0 +1,279 @@
+"""Cfg predicate domain — a typed, algebraic model of `#[cfg(...)]` (CODE_ARCHITECTURE.md §4 P5).
+
+This replaces the string-slicing cfg helpers that used to live in ``pipeline.py``
+(``_eval_cfg_pred``, ``_cfg_leaf_atoms``, ``_cfg_false_for_cargo``,
+``_cfg_atom_is_off_for_cargo``, ``_normalize_cfg_pred``) with an explicit model:
+
+  * a leaf condition is a :class:`CfgAtom` — a bare ident (``unix``, ``nightly``)
+    or a ``key = "value"`` (``feature = "std"``, ``target_os = "linux"``);
+  * a full ``#[cfg(...)]`` condition is a :class:`CfgPred` tree —
+    :class:`All` / :class:`Any` / :class:`Not` over leaves;
+  * a cluster's cfg context is a :class:`CfgSet` — the predicates known true,
+    the predicates known false, and the crate's default features.
+
+Evaluation is a clean recursive ``match`` over the tree instead of substring
+slicing, which is what the old code did and what made the space-sensitivity and
+operator bugs (R7.4b) possible. The whole-string membership pre-check at every
+node is preserved, so behaviour is byte-identical to ``_eval_cfg_pred``.
+
+Pure domain: stdlib only, no I/O, no regex (predicates are parsed with a
+char-scan splitter, never ``re``).
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterable
+from dataclasses import dataclass
+
+# Built-in cfg identifiers cargo evaluates from the build TARGET (not from a
+# `--cfg`/feature flag). Undecidable to a cluster's cfg sets, but cargo MAY set
+# them, so cargo-faithful exclusion must never force them off (never over-exclude,
+# FR-018). Everything else that is a bare ident is a custom `--cfg NAME`, default OFF.
+BUILTIN_CFG_IDENTS: frozenset[str] = frozenset({
+    "unix", "windows", "test", "debug_assertions", "doc", "doctest", "miri",
+    "proc_macro", "overflow_checks",
+})
+
+
+def normalize_pred(pred: str) -> str:
+    """Canonical form for set comparison: strip all spaces (``feature = "x"`` →
+    ``feature="x"``, ``all (a, b)`` → ``all(a,b)``). Matches the legacy
+    ``_normalize_cfg_pred`` exactly, including its whitespace-in-string-values
+    limitation (cfg values practically never contain spaces)."""
+    return pred.replace(" ", "")
+
+
+def split_top_level_commas(s: str) -> list[str]:
+    """Split ``s`` on commas that are not nested inside parentheses."""
+    parts: list[str] = []
+    depth = 0
+    buf: list[str] = []
+    for ch in s:
+        if ch == "(":
+            depth += 1
+            buf.append(ch)
+        elif ch == ")":
+            depth -= 1
+            buf.append(ch)
+        elif ch == "," and depth == 0:
+            parts.append("".join(buf).strip())
+            buf = []
+        else:
+            buf.append(ch)
+    if buf:
+        parts.append("".join(buf).strip())
+    return parts
+
+
+@dataclass(frozen=True, slots=True)
+class CfgAtom:
+    """A leaf cfg condition. ``value is None`` → bare ident (``nightly``);
+    otherwise ``key = value`` where ``value`` keeps its source quoting
+    (``feature`` → ``value == '"std"'``)."""
+
+    key: str
+    value: str | None = None
+
+    @staticmethod
+    def parse(token: str) -> CfgAtom:
+        """Parse one already-normalized (space-free) leaf token into an atom."""
+        key, eq, val = token.partition("=")
+        return CfgAtom(key=key, value=val if eq else None)
+
+    @property
+    def normalized(self) -> str:
+        return f"{self.key}={self.value}" if self.value is not None else self.key
+
+    @property
+    def is_feature(self) -> bool:
+        return self.key == "feature" and self.value is not None
+
+    @property
+    def feature_name(self) -> str | None:
+        """The bare feature name (``feature = "std"`` → ``std``), else None."""
+        return self.value.strip('"') if self.is_feature and self.value else None
+
+    @property
+    def cluster_key(self) -> str | None:
+        """The predicate name this atom contributes to cluster derivation: the
+        feature name for ``feature = "X"``, the bare ident for ``nightly``, and
+        ``None`` for ``target_os = "linux"`` / other ``key = "v"`` forms (a build
+        target facet, never its own cluster)."""
+        if self.is_feature:
+            return self.feature_name
+        return self.key if self.value is None else None
+
+    def is_off_for_cargo(self, cfg_true_norm: frozenset[str],
+                         default_features: frozenset[str]) -> bool:
+        """True when cargo leaves this leaf OFF in the cluster: a custom ``--cfg``
+        flag enabled nowhere, or a non-default ``feature = "X"`` not enabled here.
+        Builtin/target cfgs and unknown ``key = "v"`` forms return False — never
+        force-exclude what cargo might set (FR-018)."""
+        if self.normalized in cfg_true_norm:
+            return False
+        if self.value is not None:
+            if self.key == "feature":
+                return (self.feature_name or "") not in default_features
+            return False                       # target_os=… / unknown key → leave to cargo
+        return self.key not in BUILTIN_CFG_IDENTS
+
+
+class CfgPred:
+    """Base of the parsed cfg-condition tree. Subclasses: :class:`Leaf`,
+    :class:`Not`, :class:`All`, :class:`Any`."""
+
+    @property
+    def normalized(self) -> str:  # pragma: no cover - overridden
+        raise NotImplementedError
+
+    def atoms(self) -> frozenset[CfgAtom]:  # pragma: no cover - overridden
+        raise NotImplementedError
+
+    def evaluate(self, ctx: CfgSet) -> bool | None:  # pragma: no cover - overridden
+        raise NotImplementedError
+
+
+@dataclass(frozen=True, slots=True)
+class Leaf(CfgPred):
+    atom: CfgAtom
+
+    @property
+    def normalized(self) -> str:
+        return self.atom.normalized
+
+    def atoms(self) -> frozenset[CfgAtom]:
+        return frozenset({self.atom})
+
+    def evaluate(self, ctx: CfgSet) -> bool | None:
+        return ctx.membership(self.normalized)
+
+
+@dataclass(frozen=True, slots=True)
+class Not(CfgPred):
+    child: CfgPred
+
+    @property
+    def normalized(self) -> str:
+        return f"not({self.child.normalized})"
+
+    def atoms(self) -> frozenset[CfgAtom]:
+        return self.child.atoms()
+
+    def evaluate(self, ctx: CfgSet) -> bool | None:
+        decided = ctx.membership(self.normalized)
+        if decided is not None:
+            return decided
+        v = self.child.evaluate(ctx)
+        return None if v is None else (not v)
+
+
+@dataclass(frozen=True, slots=True)
+class All(CfgPred):
+    parts: tuple[CfgPred, ...]
+
+    @property
+    def normalized(self) -> str:
+        return "all(" + ",".join(p.normalized for p in self.parts) + ")"
+
+    def atoms(self) -> frozenset[CfgAtom]:
+        return frozenset().union(*(p.atoms() for p in self.parts)) if self.parts else frozenset()
+
+    def evaluate(self, ctx: CfgSet) -> bool | None:
+        decided = ctx.membership(self.normalized)
+        if decided is not None:
+            return decided
+        vals = [p.evaluate(ctx) for p in self.parts]
+        if any(v is None for v in vals):
+            return None
+        return all(vals)
+
+
+@dataclass(frozen=True, slots=True)
+class Any(CfgPred):
+    parts: tuple[CfgPred, ...]
+
+    @property
+    def normalized(self) -> str:
+        return "any(" + ",".join(p.normalized for p in self.parts) + ")"
+
+    def atoms(self) -> frozenset[CfgAtom]:
+        return frozenset().union(*(p.atoms() for p in self.parts)) if self.parts else frozenset()
+
+    def evaluate(self, ctx: CfgSet) -> bool | None:
+        decided = ctx.membership(self.normalized)
+        if decided is not None:
+            return decided
+        vals = [p.evaluate(ctx) for p in self.parts]
+        if any(v is None for v in vals):
+            return None
+        return any(vals)
+
+
+_OPS = {"not": Not, "all": All, "any": Any}
+
+
+def parse_cfg_pred(pred: str) -> CfgPred:
+    """Parse a ``#[cfg(...)]`` condition string into a typed :class:`CfgPred`.
+    Normalizes whitespace first, so ``all (a, b)`` and ``all(a,b)`` parse alike."""
+    return _parse(normalize_pred(pred))
+
+
+def _parse(s: str) -> CfgPred:
+    for op in ("not", "all", "any"):
+        if s.startswith(op + "(") and s.endswith(")"):
+            parts = [_parse(p) for p in split_top_level_commas(s[len(op) + 1:-1])]
+            if op == "not":
+                # `not()` with no inner is degenerate → evaluates undecidable.
+                return Not(parts[0] if parts else Leaf(CfgAtom("")))
+            return All(tuple(parts)) if op == "all" else Any(tuple(parts))
+    return Leaf(CfgAtom.parse(s))
+
+
+@dataclass(frozen=True, slots=True)
+class CfgSet:
+    """A cluster's cfg evaluation context: predicates known true / known false
+    (both stored already-normalized) plus the crate's default features.
+
+    ``of`` is the constructor callers use; it normalizes the raw predicate
+    strings once. Use :meth:`evaluate` for plain truth and
+    :meth:`excludes_for_cargo` for the cargo-faithful "does this gate keep the
+    item out of THIS build?" question."""
+
+    true: frozenset[str]
+    false: frozenset[str]
+    default_features: frozenset[str] = frozenset()
+
+    @classmethod
+    def of(cls, cfg_true: Iterable[str] = (), cfg_false: Iterable[str] = (),
+           default_features: Iterable[str] = ()) -> CfgSet:
+        return cls(
+            true=frozenset(normalize_pred(x) for x in cfg_true),
+            false=frozenset(normalize_pred(x) for x in cfg_false),
+            default_features=frozenset(default_features),
+        )
+
+    def membership(self, normalized: str) -> bool | None:
+        if normalized in self.true:
+            return True
+        if normalized in self.false:
+            return False
+        return None
+
+    def evaluate(self, pred: str | CfgPred) -> bool | None:
+        """Truth of a cfg predicate: True / False if fully decidable, else None."""
+        tree = pred if isinstance(pred, CfgPred) else parse_cfg_pred(pred)
+        return tree.evaluate(self)
+
+    def excludes_for_cargo(self, pred: str | CfgPred) -> bool:
+        """cargo-faithful: does this cfg keep the gated item from compiling/running
+        in this cluster? Provably-off custom atoms (a `--cfg` enabled nowhere, a
+        non-default feature) are added to the false-set, then the tree is
+        evaluated — builtin/target atoms stay undecidable so we never over-exclude."""
+        tree = pred if isinstance(pred, CfgPred) else parse_cfg_pred(pred)
+        aug_false = set(self.false)
+        for atom in tree.atoms():
+            if atom.is_off_for_cargo(self.true, self.default_features):
+                aug_false.add(atom.normalized)
+        aug = CfgSet(true=self.true, false=frozenset(aug_false),
+                     default_features=self.default_features)
+        return tree.evaluate(aug) is False

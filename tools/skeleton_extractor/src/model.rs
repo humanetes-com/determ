@@ -74,6 +74,26 @@ pub struct ModRecord {
     pub declared_in: String,
 }
 
+/// One leaf of a `#[cfg(...)]` condition: a bare ident (`value: None`, e.g.
+/// `nightly`) or a `key = "value"` (`feature = "std"` → key `feature`, value
+/// `"std"` with quotes, spaces stripped). The Python side counts these to derive
+/// compiler clusters (`feature` leaves by feature name, bare leaves by ident).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CfgAtomWire {
+    pub key: String,
+    pub value: Option<String>,
+}
+
+/// One `#[cfg(...)]` / `#[cfg_attr(COND, ...)]` occurrence anywhere in a file
+/// (item, field, statement, …), with the leaf atoms of its condition. Emitted by
+/// `--enumerate-cfgs`. Replaces the Python regex scan of `#[cfg(...)]` predicates
+/// in `task0_cfg_scan` (Hard Rule: no regex on Rust source — use syn).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CfgOccurrence {
+    pub file: String,
+    pub atoms: Vec<CfgAtomWire>,
+}
+
 /// A `const` or `static` item (public-API surface), enumerated by `--enumerate-consts`.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ConstRecord {

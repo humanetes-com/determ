@@ -80,6 +80,7 @@ from pipeline_core.application.strip_bake import (
 from pipeline_core.application.strip_bake import (
     strip_and_bake_module as _strip_and_bake_module,
 )
+from pipeline_core.application.tasks import cfg_scan as _cfg_scan
 from pipeline_core.application.tasks.genesis_audit import (
     GenesisAuditDeps,
     genesis_audit,
@@ -131,6 +132,8 @@ from pipeline_core.application.workspace_lifecycle import (
     wipe_module_sources as _wl_wipe_module_sources,
 )
 from pipeline_core.domain import attribution as _domain_attribution
+from pipeline_core.domain import cfg as _cfg
+from pipeline_core.domain import cluster_plan as _cluster_plan
 from pipeline_core.domain.cargo_toml import cargo_default_features as _domain_cargo_default_features
 from pipeline_core.domain.cargo_toml import cargo_entry_point_paths as _domain_cargo_entry_point_paths
 from pipeline_core.domain.cargo_toml import cargo_is_proc_macro as _domain_cargo_is_proc_macro
@@ -3586,8 +3589,9 @@ def _filter_tests_for_cluster(test_files: list[tuple[str, str]],
 
 
 def _normalize_cfg_pred(p: str) -> str:
-    """Normalize a cfg predicate for set comparison (strip spaces)."""
-    return p.replace(" ", "")
+    """Normalize a cfg predicate for set comparison (strip spaces).
+    Thin shim → domain (`pipeline_core.domain.cfg`)."""
+    return _cfg.normalize_pred(p)
 
 
 def _file_top_cfg_excluded(content: str, cfg_true: set[str], cfg_false: set[str]) -> bool:
@@ -3607,123 +3611,16 @@ def _file_top_cfg_excluded(content: str, cfg_true: set[str], cfg_false: set[str]
 
 
 def _eval_cfg_pred(pred: str, cfg_true: set[str], cfg_false: set[str]) -> "bool | None":
-    """Evaluate a cfg predicate string (the part inside `cfg(...)`).
-
-    Supports `not(X)`, `all(X, Y)`, `any(X, Y)`, bare ident, `feature = "X"`.
-    Returns True/False if fully decidable, None if any inner key is unknown.
-    """
-    s = pred.strip()
-    norm = _normalize_cfg_pred(s)
-    # Normalize the comparison sets too: source predicates spell features as
-    # `feature = "std"` (spaced) while the cluster sets may hold either form.
-    # Without this, space-sensitive membership made every `feature = "X"`
-    # predicate undecidable (the filter silently no-op'd).
-    if norm in {_normalize_cfg_pred(x) for x in cfg_true}:
-        return True
-    if norm in {_normalize_cfg_pred(x) for x in cfg_false}:
-        return False
-    # Operators — parse the NORMALIZED form: syn renders `all (…)`/`not (…)`
-    # with a space (R7.4b), which made every extractor-emitted operator
-    # predicate silently undecidable. Inner parts are recursively normalized
-    # again, so slicing from `norm` is safe.
-    for op in ("not", "all", "any"):
-        if norm.startswith(op + "(") and norm.endswith(")"):
-            inner = norm[len(op) + 1:-1]
-            parts = _split_top_level_commas(inner)
-            evaluated = [_eval_cfg_pred(p, cfg_true, cfg_false) for p in parts]
-            if op == "not":
-                if not evaluated or evaluated[0] is None:
-                    return None
-                return not evaluated[0]
-            if op == "all":
-                if any(e is None for e in evaluated):
-                    return None
-                return all(evaluated)
-            if op == "any":
-                if any(e is None for e in evaluated):
-                    return None
-                return any(evaluated)
-    return None  # undecidable
-
-
-def _split_top_level_commas(s: str) -> list[str]:
-    """Split `s` on commas not inside parens."""
-    parts: list[str] = []
-    depth = 0
-    buf: list[str] = []
-    for ch in s:
-        if ch == "(":
-            depth += 1
-            buf.append(ch)
-        elif ch == ")":
-            depth -= 1
-            buf.append(ch)
-        elif ch == "," and depth == 0:
-            parts.append("".join(buf).strip())
-            buf = []
-        else:
-            buf.append(ch)
-    if buf:
-        parts.append("".join(buf).strip())
-    return parts
-
-
-# Built-in cfg identifiers cargo evaluates from the build TARGET (not from a
-# `--cfg`/feature flag). Undecidable to the pipeline's cfg sets, but cargo MAY
-# run them, so the expected-test count must keep counting them (never over-exclude).
-# Everything else that is a bare ident is a custom `--cfg NAME` flag, default OFF.
-_BUILTIN_CFG_IDENTS = frozenset({
-    "unix", "windows", "test", "debug_assertions", "doc", "doctest", "miri",
-    "proc_macro", "overflow_checks",
-})
-
-
-def _cfg_leaf_atoms(pred: str) -> set[str]:
-    """All leaf (non-operator) atoms of a cfg predicate, normalized (no spaces).
-    `any(extra_cap, feature = "extra_cap")` → {`extra_cap`, `feature="extra_cap"`}."""
-    norm = _normalize_cfg_pred(pred)
-    for op in ("not", "all", "any"):
-        if norm.startswith(op + "(") and norm.endswith(")"):
-            out: set[str] = set()
-            for part in _split_top_level_commas(norm[len(op) + 1:-1]):
-                out |= _cfg_leaf_atoms(part)
-            return out
-    return {norm} if norm else set()
-
-
-def _cfg_atom_is_off_for_cargo(atom: str, cfg_true_norm: set[str],
-                               default_features: "frozenset[str] | set[str]") -> bool:
-    """True when `atom` is a CUSTOM cfg cargo leaves OFF in this cluster: a bare
-    `--cfg NAME` flag enabled in no cluster, or a `feature = "X"` that is neither
-    enabled here nor a crate default. Builtin/target cfgs (`unix`, `target_os=…`)
-    and unknown `key = "v"` forms return False — we never force-exclude what cargo
-    might run (the strict verdict must not under-count, FR-018)."""
-    if atom in cfg_true_norm:
-        return False                                   # enabled in this cluster
-    if "=" in atom:
-        key, _, val = atom.partition("=")
-        if key == "feature":
-            return val.strip('"') not in default_features
-        return False                                   # target_os=… / unknown key → leave to cargo
-    return atom not in _BUILTIN_CFG_IDENTS              # custom bare --cfg flag → OFF
+    """Evaluate a cfg predicate (`not/all/any`, bare ident, `feature = "X"`).
+    Thin shim → `pipeline_core.domain.cfg.CfgSet.evaluate`."""
+    return _cfg.CfgSet.of(cfg_true, cfg_false).evaluate(pred)
 
 
 def _cfg_false_for_cargo(pred: str, cfg_true: set[str], cfg_false: set[str],
                          default_features: "frozenset[str] | set[str]" = frozenset()) -> bool:
     """cargo-faithful "does this cfg keep the item from compiling/running here?".
-
-    Fixes the over-count bug (2026-06-16 hardcrate): a `#[cfg(extra_cap)]` whose
-    predicate is in NEITHER cfg_true nor cfg_false (e.g. a toggle that defined no
-    cluster) was `_eval_cfg_pred → None` (undecidable) and so COUNTED, but cargo
-    never sets `extra_cap` in the default build → 16 ran / 18 expected → false
-    'incomplete'. We add the provably-off custom atoms to the false-set, then
-    evaluate — builtin atoms stay undecidable so we never over-exclude."""
-    cfg_true_norm = {_normalize_cfg_pred(x) for x in cfg_true}
-    aug_false = set(cfg_false)
-    for atom in _cfg_leaf_atoms(pred):
-        if _cfg_atom_is_off_for_cargo(atom, cfg_true_norm, default_features):
-            aug_false.add(atom)
-    return _eval_cfg_pred(pred, cfg_true, aug_false) is False
+    Thin shim → `pipeline_core.domain.cfg.CfgSet.excludes_for_cargo`."""
+    return _cfg.CfgSet.of(cfg_true, cfg_false, default_features).excludes_for_cargo(pred)
 
 
 def _cluster_extractor_args(cluster: "BuildCluster | None") -> list[str]:
@@ -9023,199 +8920,16 @@ def _cmd_phase_b_only(project_dir: Path) -> int:
 
 
 def task0_cfg_scan(project_dir: Path) -> "list[BuildCluster]":
+    """Derive compiler clusters from project source — no LLM, pure static scan.
+
+    Thin orchestrator over the P5 use-case: the `#[cfg]` facts come from the syn
+    extractor (no regex on source), the classification/`BuildCluster` build is the
+    pure `domain.cluster_plan`, and `build_configs.md` is written here for humans.
+    See `pipeline_core.application.tasks.cfg_scan` / `pipeline_core.domain.cluster_plan`.
     """
-    Derive compiler clusters from project source — no LLM, pure static scan.
-
-    Algorithm:
-    1. Parse Cargo.toml [features] to know which predicates are cargo features.
-    2. Scan src/**/*.rs for all #[cfg(...)] predicates (flattened from any()/all()/not()).
-    3. Classify each predicate:
-       - Skip: test, doc, debug_assertions, standard target/platform predicates
-       - Cargo feature AND in default = [] → always active, skip
-       - Cargo feature AND NOT default → potential cluster (--features X)
-       - Unknown/custom (not in known-stable set, not Cargo feature) → RUSTFLAGS --cfg X cluster
-    4. Count lines gated per predicate; skip if < 5 (noise).
-    5. Return [stable_cluster, ...one per interesting predicate].
-    6. Write build_configs.md.
-    """
-    # --- Step 1: parse Cargo.toml features ---
-    cargo_toml = project_dir / "Cargo.toml"
-    cargo_features: set[str] = set()
-    default_features: set[str] = set()
-    if cargo_toml.exists():
-        _feats = _load_cargo_toml(cargo_toml.read_text(errors="replace")).get("features", {})
-        if isinstance(_feats, dict):
-            cargo_features = set(_feats.keys())   # all feature names (incl. "default", as before)
-            _def = _feats.get("default", [])
-            default_features = {str(x) for x in _def} if isinstance(_def, list) else set()
-
-    # --- Step 2: collect cfg predicates from src/**/*.rs ---
-    # Match entire #[cfg(...)] or #[cfg_attr(..., ...)] attribute contents.
-    _PREDICATE_RE = re.compile(r'#\[cfg(?:_attr)?\(([^)]+(?:\([^)]*\)[^)]*)*)\)')
-    # Extract feature="X" values (the actual feature name, not the word "feature").
-    _FEATURE_VAL_RE = re.compile(r'\bfeature\s*=\s*"([^"]*)"')
-    # Extract bare cfg identifiers (not followed by ="...") — custom/platform predicates.
-    _BARE_CFG_RE = re.compile(r'\b([a-z_]\w*)(?!\s*=)')
-    _SKIP_KEYWORDS = {'any', 'all', 'not', 'cfg', 'cfg_attr', 'feature'}
-
-    # Known stable predicates — never warrant their own cluster
-    _STABLE_KNOWN = {
-        'test', 'doc', 'debug_assertions', 'proc_macro',
-        'unix', 'windows',
-        'target_os', 'target_arch', 'target_env', 'target_family',
-        'target_pointer_width', 'target_endian', 'target_vendor',
-        'target_has_atomic', 'target_thread_local',
-        'panic',
-    }
-
-    predicate_lines: dict[str, int] = {}  # predicate → line count gating it
-
-    src_dir = project_dir / "src"
-    rs_files = list(src_dir.rglob("*.rs")) if src_dir.exists() else []
-
-    for rs_file in rs_files:
-        try:
-            text = rs_file.read_text(errors="replace")
-        except Exception:
-            continue
-        for m in _PREDICATE_RE.finditer(text):
-            inner = m.group(1)
-            # 1. Extract feature="X" → record X as a Cargo-feature predicate
-            for feat_m in _FEATURE_VAL_RE.finditer(inner):
-                feat = feat_m.group(1)
-                if feat:
-                    predicate_lines[feat] = predicate_lines.get(feat, 0) + 1
-            # 2. Extract bare cfg names — remove feature="X" first to avoid
-            #    the regex matching a prefix of "feature" before the =.
-            bare_inner = _FEATURE_VAL_RE.sub('', inner)
-            for bare_m in _BARE_CFG_RE.finditer(bare_inner):
-                name = bare_m.group(1)
-                if name in _SKIP_KEYWORDS:
-                    continue
-                predicate_lines[name] = predicate_lines.get(name, 0) + 1
-
-    # --- Step 3 & 4: classify and filter ---
-    interesting: list[tuple[str, str]] = []  # (predicate, kind) where kind in ('feature', 'custom')
-
-    for pred, line_count in predicate_lines.items():
-        # Check if it's a known-stable prefix
-        base = pred.split('=')[0].strip()
-        if base in _STABLE_KNOWN:
-            continue
-        if pred in cargo_features:
-            if pred in default_features:
-                continue  # always active, not a separate cluster
-            if line_count < 5:
-                continue  # noise threshold — avoid a cluster per trivial opt-in feature
-            interesting.append((pred, 'feature'))
-        else:
-            # Custom RUSTFLAGS `--cfg` toggle (not builtin/platform): ALWAYS
-            # cluster, no noise threshold (debt #15) — un-clustered, its gated
-            # code is reconstructed in NO cluster. Customs are rare → no explosion.
-            interesting.append((pred, 'custom'))
-
-    # --- Step 4b: find files whose entire module is gated behind a single predicate ---
-    # Parse lib.rs / main.rs for:  #[cfg(pred)]  mod filename;
-    # These files are only compiled when `pred` is active, so they must not be
-    # augmented in clusters where `pred` is excluded.
-    _MOD_CFG_RE = re.compile(
-        r'#\[cfg\(([^)]+)\)\]\s*(?:pub\s+)?mod\s+(\w+)\s*;',
-        re.MULTILINE,
-    )
-    pred_to_gated_files: dict[str, set[str]] = {}  # pred → {rel_path, ...}
-    for entry_file in ("src/lib.rs", "src/main.rs"):
-        entry_path = project_dir / entry_file
-        if not entry_path.exists():
-            continue
-        text = entry_path.read_text(errors="replace")
-        for m in _MOD_CFG_RE.finditer(text):
-            cfg_arg, mod_name = m.group(1).strip(), m.group(2)
-            # Only handle simple single-predicate gates (no any/all/not nesting)
-            if any(kw in cfg_arg for kw in ('any(', 'all(', 'not(')):
-                continue
-            # Strip feature="" wrapper if present, else use bare name
-            feat_m = re.search(r'feature\s*=\s*"([^"]*)"', cfg_arg)
-            pred = feat_m.group(1) if feat_m else cfg_arg
-            rel = f"src/{mod_name}.rs"
-            pred_to_gated_files.setdefault(pred, set()).add(rel)
-
-    def _gated_files_for_excluded(excluded: list[str]) -> set:
-        result: set[str] = set()
-        for p in excluded:
-            result |= pred_to_gated_files.get(p, set())
-        return result
-
-    # --- Step 5: build clusters ---
-    # FR-030: cfgs that switch on a nightly `#![feature(...)]`. Any cluster
-    # whose active cfg-set intersects this needs the nightly toolchain — set
-    # requires_nightly statically here rather than relying on a runtime E0554
-    # retry that doesn't persist to TASK 3.
-    _feature_gate_cfgs = set(_feature_gate_cfgs_via_extractor(src_dir) or [])
-    stable_tarpaulin_exclude = ["*/nightly.rs"]
-    stable_excluded_cfg = [p for p, _ in interesting]
-
-    stable_cluster = BuildCluster(
-        name="stable",
-        env_extra={},
-        tarpaulin_exclude_files=stable_tarpaulin_exclude,
-        excluded_cfg=stable_excluded_cfg,
-        active_cfg=[],
-        prompt_nightly_rule=(
-            "- Do NOT use `error_generic_member_access`, `.provide()`, `Request`, or import `crate::nightly`\n"
-            "  — these are nightly-only features unavailable on the stable test toolchain. Skip any source\n"
-            "  lines inside `#[cfg(error_generic_member_access)]` blocks — they are untestable on stable.\n"
-            "- Do NOT use `FormattingOptions` — it is nightly-only. Skip source lines that use it."
-        ),
-        is_default=True,
-        gated_files=_gated_files_for_excluded(stable_excluded_cfg),
-    )
-    clusters: list[BuildCluster] = [stable_cluster]
-
-    for pred, kind in interesting:
-        if kind == 'feature':
-            env_extra = {}
-            cluster_name = f"feature/{pred}"
-            tarpaulin_excl: list[str] = []
-            active = [pred]
-            excl = [p for p, _ in interesting if p != pred]
-            pr = (
-                f"- COMPILER CLUSTER: {cluster_name}\n"
-                f"  Cargo feature `{pred}` IS enabled. Code inside `#[cfg(feature=\"{pred}\")]` IS active.\n"
-                f"  Focus your tests on lines inside these cfg blocks."
-            )
-        else:
-            # custom cfg → RUSTFLAGS --cfg
-            env_extra = {"RUSTFLAGS": f"--cfg {pred}"}
-            cluster_name = _cfg_to_cluster_name(pred)
-            tarpaulin_excl = []
-            active = [pred]
-            excl = [p for p, _ in interesting if p != pred]
-            pr = (
-                f"- COMPILER CLUSTER: {cluster_name}\n"
-                f"  `{pred}` IS active (RUSTFLAGS=--cfg {pred}). All `#[cfg({pred})]` blocks ARE compiled.\n"
-                f"  You MAY use any symbols gated behind `#[cfg({pred})]`.\n"
-                f"  Only write tests for lines inside `#[cfg({pred})]` blocks — stable lines are already covered."
-            )
-        _bc = BuildCluster(
-            name=cluster_name,
-            env_extra=env_extra,
-            tarpaulin_exclude_files=tarpaulin_excl,
-            excluded_cfg=excl,
-            active_cfg=active,
-            prompt_nightly_rule=pr,
-            is_default=False,
-            gated_files=_gated_files_for_excluded(excl),
-        )
-        # FR-030: this cluster activates a nightly feature attr → needs +nightly.
-        if set(active) & _feature_gate_cfgs:
-            _bc.requires_nightly = True
-            _log(f"  cluster/{cluster_name}: requires nightly toolchain "
-                 f"(active cfg gates #![feature(...)]).")
-        clusters.append(_bc)
-
-    # --- Step 6: write build_configs.md ---
-    _write_build_configs(project_dir, clusters, predicate_lines)
-    return clusters
+    scan = _cfg_scan.scan_build_clusters(project_dir, ADAPTERS.extractor)
+    _write_build_configs(project_dir, scan.clusters, scan.predicate_counts)
+    return scan.clusters
 
 
 def _cluster_pre_check(project_dir: Path, module_name: str, cluster: "BuildCluster") -> bool:
@@ -9274,18 +8988,9 @@ def _cluster_pre_check(project_dir: Path, module_name: str, cluster: "BuildClust
 
 
 def _cfg_to_cluster_name(pred: str) -> str:
-    """Map a custom cfg predicate to a short cluster name."""
-    # Well-known mappings
-    _KNOWN = {
-        'error_generic_member_access': 'nightly',
-        'backtrace_in_std': 'nightly',
-        'provide_any': 'nightly',
-    }
-    if pred in _KNOWN:
-        return _KNOWN[pred]
-    # Generic: strip known prefixes, truncate
-    name = pred.replace('_feature', '').replace('_enabled', '').replace('_support', '')
-    return name[:32]
+    """Map a custom cfg predicate to a short cluster name.
+    Thin shim → `pipeline_core.domain.cluster_plan`."""
+    return _cluster_plan.cluster_name_for_custom(pred)
 
 
 def _write_build_configs(project_dir: Path, clusters: list, predicate_lines: dict) -> None:

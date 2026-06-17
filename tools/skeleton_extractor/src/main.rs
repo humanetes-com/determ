@@ -51,6 +51,10 @@ struct Cli {
     #[arg(long = "enumerate-feature-gate-cfgs")]
     enumerate_feature_cfgs: bool,
 
+    /// Emit JSON array of CfgOccurrence (`#[cfg(...)]` condition leaf atoms) to stdout.
+    #[arg(long = "enumerate-cfgs")]
+    enumerate_cfgs: bool,
+
     /// Merge per-cluster trees into one cfg-gated source file.
     #[arg(long)]
     merge_clusters: bool,
@@ -142,6 +146,11 @@ fn main() -> Result<()> {
     }
     if cli.enumerate_feature_cfgs {
         let records = skeleton_extractor::enumerate_feature_gate_cfgs_in_tree(&input)?;
+        println!("{}", serde_json::to_string(&records)?);
+        return Ok(());
+    }
+    if cli.enumerate_cfgs {
+        let records = skeleton_extractor::enumerate_cfgs_in_tree(&input)?;
         println!("{}", serde_json::to_string(&records)?);
         return Ok(());
     }

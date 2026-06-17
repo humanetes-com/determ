@@ -132,6 +132,36 @@ pub(crate) fn extract_cfg_predicates(attrs: &[syn::Attribute]) -> Vec<String> {
     }
     out
 }
+/// Collect the leaf atoms of a `#[cfg(...)]`-style condition meta as structured
+/// (key, value) pairs, descending through `all(...)`/`any(...)`/`not(...)`. A
+/// bare ident (`nightly`) yields `(nightly, None)`; a `feature = "std"` yields
+/// `(feature, Some("\"std\""))` with spaces stripped so it matches the Python
+/// domain's normalised form. Unknown list forms are ignored. Used by
+/// `--enumerate-cfgs` to derive compiler clusters without regex.
+pub(crate) fn cfg_meta_atoms(meta: &syn::Meta, out: &mut Vec<crate::model::CfgAtomWire>) {
+    use crate::model::CfgAtomWire;
+    match meta {
+        syn::Meta::Path(p) => out.push(CfgAtomWire {
+            key: path_to_string(p),
+            value: None,
+        }),
+        syn::Meta::NameValue(nv) => out.push(CfgAtomWire {
+            key: path_to_string(&nv.path),
+            value: Some(nv.value.to_token_stream().to_string().replace(' ', "")),
+        }),
+        syn::Meta::List(list) => {
+            let name = path_to_string(&list.path);
+            if matches!(name.as_str(), "all" | "any" | "not")
+                && let Ok(nested) = syn::parse2::<NestedMetaList>(list.tokens.clone())
+            {
+                for m in &nested.items {
+                    cfg_meta_atoms(m, out);
+                }
+            }
+        }
+    }
+}
+
 /// Collect the leaf cfg predicates of a `#[cfg(...)]`-style condition meta
 /// (e.g. `error_generic_member_access`, `feature = "std"`), descending through
 /// `all(...)`/`any(...)`/`not(...)`. Used to learn which cfgs, when active,

@@ -10,7 +10,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from ..domain.models import ConstRecord, DispatchFamily, FnRecord, ModRecord, TypeRecord
+from ..domain.models import (
+    CfgOccurrence,
+    ConstRecord,
+    DispatchFamily,
+    FnRecord,
+    ModRecord,
+    TypeRecord,
+)
 from ..domain.refine import Attempt, LoopState
 
 
@@ -43,6 +50,7 @@ class Extractor(Protocol):
     def enumerate_feature_gate_cfgs(self, src_dir: Path, *, cfg_true: tuple[str, ...] = ..., cfg_false: tuple[str, ...] = ...) -> list[str] | None: ...
     def enumerate_mods(self, src_dir: Path, *, cfg_true: tuple[str, ...] = ..., cfg_false: tuple[str, ...] = ...) -> list[ModRecord] | None: ...
     def enumerate_consts(self, src_dir: Path, *, cfg_true: tuple[str, ...] = ..., cfg_false: tuple[str, ...] = ...) -> list[ConstRecord] | None: ...
+    def enumerate_cfgs(self, src_dir: Path, *, cfg_true: tuple[str, ...] = ..., cfg_false: tuple[str, ...] = ...) -> list[CfgOccurrence] | None: ...
     def skeletonise(self, input_dir: Path, output_dir: Path, *, cfg_true: tuple[str, ...] = ..., cfg_false: tuple[str, ...] = ...) -> dict[str, Any]: ...
     def merge_clusters(self, out_path: Path, cluster_files: list[tuple[str, Path, str]]) -> bool: ...
 

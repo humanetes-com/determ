@@ -2771,7 +2771,8 @@ def test_slice5b_genesis_audit_task() -> None:
     from pipeline_core.domain import text as txt
     assert pipeline._strip_markdown_fences is txt.strip_markdown_fences
     assert pipeline.extract_code_content is txt.extract_code_content
-    assert pipeline.trim_to_line is txt.trim_to_line
+    # trim_to_line: no longer used in pipeline.py (moved to group_fill in P4) → not re-exported;
+    # it lives in domain.text and call sites import it there directly.
     assert pipeline.smart_truncate is txt.smart_truncate
     assert txt.strip_markdown_fences("```rust\nlet x = 1;\n```") == "let x = 1;"
     assert txt.smart_truncate("abcdef", total_limit=4, head=2, tail=2).startswith("ab")

@@ -18,6 +18,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from pipeline_core.domain.cfg import CfgAtom
+
 
 def _strs(v: Any) -> tuple[str, ...]:
     """Coerce a JSON list (or None) into a tuple of strings."""
@@ -171,6 +173,31 @@ class ModRecord:
             "file": self.file,
             "cfg_predicates": list(self.cfg_predicates),
             "declared_in": self.declared_in,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class CfgOccurrence:
+    """One `#[cfg(...)]` / `#[cfg_attr(COND, ...)]` occurrence and the leaf atoms
+    of its condition (model.rs CfgOccurrence). Emitted by `--enumerate-cfgs`;
+    consumed by `domain.cluster_plan` to derive compiler clusters."""
+    file: str = ""
+    atoms: tuple[CfgAtom, ...] = ()
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> CfgOccurrence:
+        return cls(
+            file=d.get("file", ""),
+            atoms=tuple(
+                CfgAtom(key=a.get("key", ""), value=a.get("value"))
+                for a in (d.get("atoms") or [])
+            ),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "file": self.file,
+            "atoms": [{"key": a.key, "value": a.value} for a in self.atoms],
         }
 
 
