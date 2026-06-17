@@ -158,6 +158,7 @@ from pipeline_core.domain.enums import (
 from pipeline_core.domain.failure_classification import (
     classify_failure as _classify_failure,
 )
+from pipeline_core.domain.fix_report import FixReport as _FixReport
 from pipeline_core.domain.llm_output import (
     GENESIS_DELIM_END,
     GENESIS_DELIM_START,
@@ -9676,8 +9677,8 @@ def generate_fix_loop(
 
     def _do_fix(output: str, history: list[dict], *, retro: str) -> dict:
         if output.startswith("TIMEOUT after "):
-            return {"abort": True, "reason": "check_timeout",
-                    "summary": "check timed out"}
+            return _FixReport.aborted(
+                reason="check_timeout", summary="check timed out").as_record()
         _log_compile_overview(output, len(history))
         # Build source context — read current content from disk in full.
         source_block = ""
@@ -9789,9 +9790,8 @@ Current source files:
         if not fixed:
             _log(f"  [fix loop] LLM produced no fixes on iter {len(history) + 1}.")
             _err_preview = output[-_FIX_ERR_CAP:] if len(output) > _FIX_ERR_CAP else output
-            return {"summary": "no_fixes_produced",
-                    "files_changed_str": "no files changed",
-                    "error_preview": _err_preview}
+            return _FixReport.unchanged(
+                summary="no_fixes_produced", error_preview=_err_preview).as_record()
         # Whole-file rewrites (legacy strategy — the model returns each broken
         # file in full and we overwrite it).
         for rel, content in fixed.items():
@@ -9823,12 +9823,10 @@ Current source files:
                     example=output[:200],
                     fix_hint=f"fixed in {_fix_hint}",
                 )
-        return {
-            "summary": f"rewrote={len(_all_changed)}",
-            "files_changed_str": ", ".join(_all_changed[:4]) if _all_changed else "no files changed",
-            "error_preview": _err_preview,
-            "error_sig": _err_preview,
-        }
+        return _FixReport.changed(
+            summary=f"rewrote={len(_all_changed)}",
+            files_changed_str=", ".join(_all_changed[:4]) if _all_changed else "no files changed",
+            error_preview=_err_preview, error_sig=_err_preview).as_record()
 
     def _do_retro(output: str, history: list[dict]) -> str:
         return _whole_tree_retrospective(
@@ -9891,7 +9889,7 @@ Current source files:
             file_text = _path.read_text(encoding="utf-8", errors="replace")
             loc = _locate_fn(file_text, _fn)
             if loc is None:
-                return {"abort": True, "reason": "fn_not_located"}
+                return _FixReport.aborted(reason="fn_not_located").as_record()
             sig_text, _ss, _bs, _be = loc
             cur_body = file_text[_bs:_be]
             errs = out[-_FIX_ERR_CAP:] if len(out) > _FIX_ERR_CAP else out
@@ -9923,8 +9921,8 @@ Current source files:
                        bodies[0] if bodies else None)
             body = blk.get("body") if blk else None
             if not body:
-                return {"summary": "no_body", "files_changed_str": "no files changed",
-                        "error_preview": out[-_FIX_ERR_CAP:]}
+                return _FixReport.unchanged(
+                    summary="no_body", error_preview=out[-_FIX_ERR_CAP:]).as_record()
             wc = blk.get("where_clause") if blk else None
             use_wc = wc if (allow_where and wc) else None
             ok_s, reason, delta = _splice_fn_with_where(
@@ -9935,8 +9933,9 @@ Current source files:
                      f"{' +where' if use_wc else ''} ({delta:+d} bytes)")
             else:
                 _log(f"  [fix loop/fn] splice rejected {_rel}::{_fn} ({reason})")
-            return {"summary": f"fn {_rel}::{_fn}", "files_changed_str": f"{_rel}::{_fn}",
-                    "error_preview": out[-_FIX_ERR_CAP:]}
+            return _FixReport.changed(
+                summary=f"fn {_rel}::{_fn}", files_changed_str=f"{_rel}::{_fn}",
+                error_preview=out[-_FIX_ERR_CAP:]).as_record()
 
         _log(f"  [fix loop/fn] fixing {rel}::{fn} (inner cargo check loop)")
         _improvement_loop(name=f"fn:{rel}::{fn}", run_check=_run_check, do_fix=_do,
@@ -10026,11 +10025,12 @@ Current source files:
                 else:
                     _log(f"  [fix loop/impl] splice rejected {rel}::{nm} ({reason})")
             if spliced == 0:
-                return {"summary": "no_splice", "files_changed_str": "no files changed",
-                        "error_preview": out[-_FIX_ERR_CAP:]}
-            return {"summary": f"impl {rel} ({spliced} fn)",
-                    "files_changed_str": f"{rel}::{container[:40]}",
-                    "error_preview": out[-_FIX_ERR_CAP:]}
+                return _FixReport.unchanged(
+                    summary="no_splice", error_preview=out[-_FIX_ERR_CAP:]).as_record()
+            return _FixReport.changed(
+                summary=f"impl {rel} ({spliced} fn)",
+                files_changed_str=f"{rel}::{container[:40]}",
+                error_preview=out[-_FIX_ERR_CAP:]).as_record()
 
         _log(f"  [fix loop/impl] fixing {rel}::{container[:50]} (inner cargo check loop)")
         _improvement_loop(name=f"impl:{rel}::{container[:40]}", run_check=_run_check,
@@ -10043,7 +10043,8 @@ Current source files:
         its own inner cargo-check loop. Ambiguous (same-name sibling impls) and
         non-compile failures → legacy whole-file. Fail-safe → legacy."""
         if output.startswith("TIMEOUT after "):
-            return {"abort": True, "reason": "check_timeout", "summary": "check timed out"}
+            return _FixReport.aborted(
+                reason="check_timeout", summary="check timed out").as_record()
         try:
             _log_compile_overview(output, len(history))
             frontier = _compile_error_frontier(
@@ -10074,9 +10075,10 @@ Current source files:
                     _log("  [fix loop/fn] file-level errors remain → whole-file fallback")
                     _do_fix(rendered, history, retro=retro)
             _err_preview = output[-_FIX_ERR_CAP:] if len(output) > _FIX_ERR_CAP else output
-            return {"summary": f"per_fn changed={len(changed)}",
-                    "files_changed_str": ", ".join(changed[:4]) if changed else "no files changed",
-                    "error_preview": _err_preview, "error_sig": _err_preview}
+            return _FixReport.changed(
+                summary=f"per_fn changed={len(changed)}",
+                files_changed_str=", ".join(changed[:4]) if changed else "no files changed",
+                error_preview=_err_preview, error_sig=_err_preview).as_record()
         except Exception as e:
             _log(f"  [fix loop/fn] unexpected error ({e}) → legacy whole-file fallback")
             return _do_fix(output, history, retro=retro)
@@ -10088,7 +10090,8 @@ Current source files:
         impls that per-fn cannot. Free functions fall to the per-fn path; the
         extractor being unavailable or a non-compile failure → fall back."""
         if output.startswith("TIMEOUT after "):
-            return {"abort": True, "reason": "check_timeout", "summary": "check timed out"}
+            return _FixReport.aborted(
+                reason="check_timeout", summary="check timed out").as_record()
         try:
             _log_compile_overview(output, len(history))
             frontier = _compile_error_frontier(
@@ -10166,9 +10169,10 @@ Current source files:
                             _log(f"  [fix loop/{kind}] splice rejected {rel}::{fn}")
                 _err_preview = output[-_FIX_ERR_CAP:] if len(output) > _FIX_ERR_CAP else output
                 _kind_tag = "tdd_stub" if kind == "tdd-stub" else "behavior"
-                return {"summary": f"{_kind_tag} changed={len(tdd_changed)}",
-                        "files_changed_str": ", ".join(tdd_changed[:4]) if tdd_changed else "no files changed",
-                        "error_preview": _err_preview, "error_sig": _err_preview}
+                return _FixReport.changed(
+                    summary=f"{_kind_tag} changed={len(tdd_changed)}",
+                    files_changed_str=", ".join(tdd_changed[:4]) if tdd_changed else "no files changed",
+                    error_preview=_err_preview, error_sig=_err_preview).as_record()
             blocks = _collect_impl_blocks(project_dir)
             if not blocks:
                 return _do_fix_per_fn(output, history, retro=retro)
@@ -10194,9 +10198,10 @@ Current source files:
             for (rel, fn) in sorted(set(free_fns)):
                 changed += _fix_single_fn(rel, fn)
             _err_preview = output[-_FIX_ERR_CAP:] if len(output) > _FIX_ERR_CAP else output
-            return {"summary": f"per_impl changed={len(changed)}",
-                    "files_changed_str": ", ".join(changed[:4]) if changed else "no files changed",
-                    "error_preview": _err_preview, "error_sig": _err_preview}
+            return _FixReport.changed(
+                summary=f"per_impl changed={len(changed)}",
+                files_changed_str=", ".join(changed[:4]) if changed else "no files changed",
+                error_preview=_err_preview, error_sig=_err_preview).as_record()
         except Exception as e:
             _log(f"  [fix loop/impl] unexpected error ({e}) → legacy whole-file fallback")
             return _do_fix(output, history, retro=retro)
