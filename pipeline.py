@@ -55,6 +55,7 @@ from pipeline_core.adapters.coverage import CoverageDeps
 from pipeline_core.adapters.failure_journal import FileFailureJournal
 from pipeline_core.adapters.ratchet import BestTreeRatchet
 from pipeline_core.adapters.structure import CliStructureReader
+from pipeline_core.adapters.telemetry import LogTelemetry
 from pipeline_core.adapters.workspace import WorkspaceDeps
 from pipeline_core.adapters.workspace_scan import (
     _dependency_graph_factory,
@@ -178,6 +179,18 @@ from pipeline_core.domain.model_caps import (
 )
 from pipeline_core.domain.model_caps import (
     model_tier as _model_tier_pure,
+)
+from pipeline_core.domain.model_notes import (
+    parse_note_bullets as _parse_note_bullets,
+)
+from pipeline_core.domain.model_notes import (
+    preserve_model_notes as _preserve_model_notes,
+)
+from pipeline_core.domain.model_notes import (
+    render_with_notes as _render_with_notes,
+)
+from pipeline_core.domain.model_notes import (
+    slice_model_notes as _slice_model_notes,
 )
 from pipeline_core.domain.models import (
     BuildCluster,
@@ -5159,100 +5172,35 @@ def _leaf_first_fn_order(
 # anti-hallucination notes".
 # ---------------------------------------------------------------------------
 
-_MODEL_NOTES_HEADER = "## Model Notes — Confusions to Avoid"
 _MODEL_NOTES_MAX_CHARS = 4000  # cap on the notes section in any one prompt
 _MODEL_NOTES_MAX_ENTRIES = 80  # hard cap; older entries dropped LRU on overflow
-
-
-def _slice_model_notes(fr_text: str) -> tuple[str, str]:
-    """Split FR text into (body_without_notes, notes_section_inclusive).
-
-    notes_section_inclusive starts at the `## Model Notes` header line and
-    extends to the next top-level `##` heading or EOF. Returns empty notes
-    string when the section is absent.
-    """
-    if _MODEL_NOTES_HEADER not in fr_text:
-        return fr_text, ""
-    idx = fr_text.index(_MODEL_NOTES_HEADER)
-    body = fr_text[:idx].rstrip() + "\n"
-    rest = fr_text[idx:]
-    # Find the next top-level heading after the notes header (skip the
-    # notes header itself).
-    m = re.search(r"\n##\s", rest[len(_MODEL_NOTES_HEADER):])
-    if m:
-        end = len(_MODEL_NOTES_HEADER) + m.start() + 1  # keep the '\n'
-        notes = rest[:end]
-        body += rest[end:]
-    else:
-        notes = rest
-    return body, notes.rstrip() + "\n"
-
-
-def _preserve_model_notes(old_fr_text: str | None, new_fr_text: str) -> str:
-    """Re-append the `## Model Notes` section from old_fr_text to new_fr_text.
-
-    Used at every TASK 1 write site so regenerating FR never wipes the
-    model's accumulated self-corrections.
-    """
-    if not old_fr_text or _MODEL_NOTES_HEADER not in old_fr_text:
-        return new_fr_text
-    _, notes_section = _slice_model_notes(old_fr_text)
-    if not notes_section.strip():
-        return new_fr_text
-    # If the new FR happens to already include a notes header (it shouldn't
-    # but be defensive), strip it first.
-    new_body, _ = _slice_model_notes(new_fr_text)
-    return new_body.rstrip() + "\n\n" + notes_section
+# _MODEL_NOTES_HEADER / _slice_model_notes / _preserve_model_notes →
+# pipeline_core.domain.model_notes (imported above). Parsing has no regex now.
 
 
 def _load_model_notes(fr_path: Path) -> list[str]:
-    """Return the list of note bullets currently in FR. Each bullet is the
-    text after `- ` on a single logical entry (multi-line entries joined)."""
+    """The note bullets currently in FR (thin: read file → domain parse)."""
     try:
         fr_text = fr_path.read_text(encoding="utf-8")
-    except Exception:
+    except OSError:
         return []
     _, notes_section = _slice_model_notes(fr_text)
-    if not notes_section.strip():
-        return []
-    notes: list[str] = []
-    cur: list[str] = []
-    for ln in notes_section.splitlines():
-        if ln.startswith("- "):
-            if cur:
-                notes.append(" ".join(cur).strip())
-                cur = []
-            cur.append(ln[2:].strip())
-        elif cur and ln.startswith("  "):
-            cur.append(ln.strip())
-        elif cur and not ln.strip():
-            notes.append(" ".join(cur).strip())
-            cur = []
-    if cur:
-        notes.append(" ".join(cur).strip())
-    return [n for n in notes if n]
+    return _parse_note_bullets(notes_section)
 
 
 def _save_model_notes(fr_path: Path, notes: list[str]) -> None:
     """Rewrite the `## Model Notes` section in FR with the given bullets.
     Creates the FR file (with just the section) if it doesn't exist.
     """
-    if fr_path.exists():
-        try:
-            fr_text = fr_path.read_text(encoding="utf-8")
-        except Exception:
-            fr_text = ""
-    else:
+    try:
+        fr_text = fr_path.read_text(encoding="utf-8") if fr_path.exists() else ""
+    except OSError:
         fr_text = ""
-    body, _ = _slice_model_notes(fr_text)
-    if not body.strip():
-        body = "# Functional Requirements\n\n"
-    section = _MODEL_NOTES_HEADER + "\n\n" + "\n".join(f"- {n}" for n in notes) + "\n"
-    out = body.rstrip() + "\n\n" + section
+    out = _render_with_notes(fr_text, notes)
     try:
         fr_path.parent.mkdir(parents=True, exist_ok=True)
         fr_path.write_text(out, encoding="utf-8")
-    except Exception as e:
+    except OSError as e:
         _log(f"  [model-notes] write failed: {e}")
 
 
@@ -13132,15 +13080,8 @@ class _ReconstructAdapter:
     reconstruction use-cases receive it through their NARROW port types (ISP) —
     this one object is the boundary implementation, not a god-deps."""
 
-    # --- Telemetry ---
-    def log(self, msg: str) -> None:
-        _log(msg)
-
-    def emit(self, event: str, **fields: Any) -> None:
-        _emit(event, **fields)
-
-    def set_current(self, project_dir: Path, label: str) -> None:
-        _set_current(project_dir, label)
+    # --- Telemetry: now a real adapter (pipeline_core.adapters.telemetry.LogTelemetry),
+    #     injected directly into the reconstruction use-cases. ---
 
     # --- PhaseGate ---
     def phase_valid(self, project_dir: Path, phase_key: str) -> bool:
@@ -13267,25 +13208,26 @@ _RECONSTRUCT_ADAPTER = _ReconstructAdapter()
 # P5: reconstruction use-cases — each depends on narrow role slices of the adapter.
 _FAILURE_JOURNAL = FileFailureJournal()
 _WORKSPACE_ARTIFACTS = WorkspaceArtifacts()
+_TELEMETRY = LogTelemetry()
 _REQUIREMENTS_PHASE = RequirementsPhase(
     requirements=_RECONSTRUCT_ADAPTER, gate=_RECONSTRUCT_ADAPTER,
-    telemetry=_RECONSTRUCT_ADAPTER, analyst=_RECONSTRUCT_ADAPTER,
+    telemetry=_TELEMETRY, analyst=_RECONSTRUCT_ADAPTER,
     journal=_FAILURE_JOURNAL, artifacts=_WORKSPACE_ARTIFACTS,
 )
 _RECONSTRUCTION_STEP = ReconstructionStep(
     generator=_RECONSTRUCT_ADAPTER, tests=_RECONSTRUCT_ADAPTER, fixer=_RECONSTRUCT_ADAPTER,
-    artifacts=_WORKSPACE_ARTIFACTS, telemetry=_RECONSTRUCT_ADAPTER,
+    artifacts=_WORKSPACE_ARTIFACTS, telemetry=_TELEMETRY,
     lock_deps=_LOCK_DEPS, reattach_deps=_REATTACH_DEPS,
     no_improvement_threshold=NO_IMPROVEMENT_THRESHOLD,
 )
 _FAILURE_ANALYSIS = FailureAnalysisStep(
     analyst=_RECONSTRUCT_ADAPTER, journal=_FAILURE_JOURNAL, ratchet=BestTreeRatchet(),
     artifacts=_WORKSPACE_ARTIFACTS, coverage_docs=_RECONSTRUCT_ADAPTER,
-    audit=_RECONSTRUCT_ADAPTER, docs=_RECONSTRUCT_ADAPTER, telemetry=_RECONSTRUCT_ADAPTER,
+    audit=_RECONSTRUCT_ADAPTER, docs=_RECONSTRUCT_ADAPTER, telemetry=_TELEMETRY,
     genesis_audit_interval=GENESIS_AUDIT_INTERVAL,
 )
 _MODULE_RECONSTRUCTOR = ModuleReconstructor(
-    step=_RECONSTRUCTION_STEP, analysis=_FAILURE_ANALYSIS, telemetry=_RECONSTRUCT_ADAPTER,
+    step=_RECONSTRUCTION_STEP, analysis=_FAILURE_ANALYSIS, telemetry=_TELEMETRY,
     # debt #18: bound the outer repair loop (> NO_IMPROVEMENT_THRESHOLD so escalation acts first).
     plateau_abort=int(os.getenv("MODULE_PLATEAU_ABORT", "10")),
 )
