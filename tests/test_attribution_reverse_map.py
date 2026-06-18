@@ -9,6 +9,7 @@ from typing import Any
 
 from pipeline_core.application.reconstruct.attribution import (
     AttributionDeps,
+    attribute_failures,
     build_test_reverse_map,
 )
 
@@ -71,3 +72,53 @@ def test_no_src_tests_yields_empty(tmp_path: Path) -> None:
     (src / "lib.rs").write_bytes(b"pub fn f() {}\n")
     recs = [{"file": "lib.rs", "fn_name": "f", "cfg_predicates": []}]
     assert build_test_reverse_map(_deps(recs), [], src) == {}
+
+
+def test_assertion_panic_falls_through_to_reverse_map(
+    tmp_path: Path, monkeypatch: Any,
+) -> None:
+    """An assertion failure panics at the inline test's OWN line, so path 1
+    (runtime panics) resolves to the immutable test fn. The per-path oracle
+    strip must drop it and let the chain fall through to the reverse-map,
+    attributing the failure to the production fn `cap_limit`."""
+    monkeypatch.setenv("PHASE_C_TDD_USE_CLASSIFIER", "0")
+    src = tmp_path / "src"
+    src.mkdir()
+    lines = [
+        "pub fn cap_limit(n: u32) -> u32 { n.min(255) }\n",
+        "#[cfg(test)]\n",
+        "mod tests {\n",
+        "    use super::*;\n",
+        "    #[test]\n",
+        "    fn extra_cap_limit() { assert_eq!(cap_limit(999), 512); }\n",
+        "}\n",
+    ]
+    body = "".join(lines)
+    raw = body.encode("utf-8")
+    abs_lib = src / "lib.rs"
+    abs_lib.write_bytes(raw)
+
+    line6_start = len("".join(lines[:5]))
+    recs = [
+        {"file": "lib.rs", "fn_name": "cap_limit", "cfg_predicates": [],
+         "sig_byte_start": 0, "body_byte_end": len(lines[0])},
+        {"file": "lib.rs", "fn_name": "extra_cap_limit",
+         "cfg_predicates": ["test"],
+         "sig_byte_start": line6_start, "body_byte_end": line6_start + len(lines[5])},
+    ]
+    output = (
+        "running 2 tests\n"
+        "test extra_cap_limit ... FAILED\n\n"
+        "failures:\n\n"
+        f"---- extra_cap_limit stdout ----\n"
+        f"thread 'extra_cap_limit' panicked at {abs_lib}:6:9:\n"
+        "assertion `left == right` failed\n"
+    )
+    reverse_map = {"extra_cap_limit": {("lib.rs", "cap_limit")}}
+
+    frontier, _kind = attribute_failures(
+        _deps(recs), output, src, recently_filled=[],
+        test_reverse_map=reverse_map, cluster_name="stable")
+
+    assert ("lib.rs", "cap_limit") in frontier
+    assert ("lib.rs", "extra_cap_limit") not in frontier

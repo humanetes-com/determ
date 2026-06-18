@@ -21,7 +21,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from pipeline_core.application.reconstruct.test_targets import is_test_fn_record
+from pipeline_core.application.reconstruct.test_targets import (
+    is_test_fn_record,
+    test_fn_keys,
+)
 from pipeline_core.domain.attribution import (
     AttributionResult,
     FailureKind,
@@ -389,13 +392,26 @@ def attribute_failures(
     Empty frontier means all paths exhausted — caller should let the
     stall budget exit the loop. Kind tells the caller which path produced
     the frontier (for logs/events).
+
+    The `#[test]`-oracle filter (FR-018) is applied to EACH path's frontier
+    here, not just to the final result by the caller: an assertion failure
+    panics at the test's OWN line, so path 1 (runtime panics) would otherwise
+    resolve to the immutable test fn, short-circuit the chain, then be emptied
+    by the caller → `no_actionable_refs`. Stripping test keys per-path lets a
+    test-only frontier fall through to the reverse-map, which attributes the
+    failure to the production fn the test exercises.
     """
+    _test_keys = test_fn_keys(deps.structure.enumerate_fns(src_dir) or [])
+
+    def _strip(fr: Frontier) -> Frontier:
+        return {k: v for k, v in fr.items() if k not in _test_keys} if _test_keys else fr
+
     # 1. Runtime panics.
-    frontier = extract_tdd_frontier(deps, test_output, src_dir)
+    frontier = _strip(extract_tdd_frontier(deps, test_output, src_dir))
     if frontier:
         return AttributionResult(frontier, FailureKind.RUNTIME)
     # 2. Compile errors.
-    frontier = extract_tdd_compile_frontier(deps, test_output, src_dir)
+    frontier = _strip(extract_tdd_compile_frontier(deps, test_output, src_dir))
     if frontier:
         return AttributionResult(frontier, FailureKind.COMPILE)
     # 3. LLM classifier — turn off via PHASE_C_TDD_USE_CLASSIFIER=0.
@@ -417,6 +433,7 @@ def attribute_failures(
                     key = (fp.strip(), fn.strip())
                     if key[0] and key[1]:
                         synth.setdefault(key, set()).add(tname)
+            synth = _strip(synth)
             if synth:
                 return AttributionResult(synth, FailureKind.CLASSIFIER)
     # 4. Recently-filled fallback. If new assertion failures appeared
@@ -428,7 +445,9 @@ def attribute_failures(
             recent_synth: Frontier = {}
             for key in reversed(recently_filled):
                 recent_synth.setdefault(key, set()).update(failing)
-            return AttributionResult(recent_synth, FailureKind.RECENTLY_FILLED)
+            recent_synth = _strip(recent_synth)
+            if recent_synth:
+                return AttributionResult(recent_synth, FailureKind.RECENTLY_FILLED)
     # 5. Test-reverse-map. For each failing test, queue every fn it
     # could reach according to the static reverse map. Over-attribution
     # is tolerable here — per-fn splice guards reject overwriting
@@ -443,6 +462,7 @@ def attribute_failures(
                 cands = test_reverse_map.get(bare) or test_reverse_map.get(tname) or set()
                 for key in cands:
                     reverse_synth.setdefault(key, set()).add(tname)
+            reverse_synth = _strip(reverse_synth)
             if reverse_synth:
                 return AttributionResult(reverse_synth, FailureKind.REVERSE_MAP)
     return AttributionResult({}, FailureKind.NO_FRONTIER)
