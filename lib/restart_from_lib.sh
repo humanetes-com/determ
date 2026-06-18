@@ -13,7 +13,12 @@
 #   task3/task4   → keep all fills done; straight to test/fix
 # task0c/strip and earlier need the original source → use redo.sh (Hard Rule 11).
 restart_from_keys() {
-    case "$1" in
+    # Accept the monitor's short labels too (t1, t2, t2a, t2b, t2c, t3, t4): a
+    # leading `t<digit>` normalises to `task<digit>` so callers (run_hardcrate
+    # `--from t2c`) share one vocabulary with the docs.
+    local s="$1"
+    [[ "$s" =~ ^t[0-9] ]] && s="task${s#t}"
+    case "$s" in
         task1)         echo "task1 task2a task2b task2c task2-4" ;;
         task2|task2a)  echo "task2a task2b task2c task2-4" ;;
         task2b|task2c) echo "task2b task2c task2-4" ;;

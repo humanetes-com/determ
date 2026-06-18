@@ -26,10 +26,15 @@ export PIPELINE_PARALLELISM="${PIPELINE_PARALLELISM:-4}"
 # --complexity=N (default = max defined): assemble a crate with traps of level ≤ N.
 # 0 = baseline (microcrate-equivalent), 1 = current traps, 2..10 = harder (future).
 COMPLEXITY=""
+FROM_STAGE=""
 for arg in "$@"; do
     case "$arg" in
         --complexity=*) COMPLEXITY="${arg#--complexity=}" ;;
-        *) echo "unknown arg: $arg  (usage: run_hardcrate.sh [--complexity=N])"; exit 2 ;;
+        --from=*)       FROM_STAGE="${arg#--from=}" ;;
+        *) echo "unknown arg: $arg  (usage: run_hardcrate.sh [--complexity=N] [--from=STAGE])"
+           echo "  --from=STAGE  resume the EXISTING tmp/hardcrate run from that step"
+           echo "                (preserves fills); STAGE ∈ t1|t2|t2a|t2b|t2c|t3|t4"
+           exit 2 ;;
     esac
 done
 FIXTURE="$SCRIPT_DIR/tests/fixtures/hardcrate"
@@ -46,15 +51,37 @@ if ! curl -sf http://localhost:8000/health > /dev/null 2>&1; then
     exit 1
 fi
 
-echo "[hard] rebuilding skeleton-extractor ..."
-( cd tools/skeleton_extractor && cargo build --release 2>&1 | tail -2 )
-echo "[hard] assembling complexity=$LEVEL crate → $STAGED"
-.venv/bin/python tools/hardcrate_select.py --crate "$STAGED" --from "$FIXTURE" --max-level "$LEVEL"
-echo "[hard] wiping tmp/hardcrate for a from-scratch recovery run ..."
-rm -rf "$WS"
-echo "[hard] launching hardcrate (complexity=$LEVEL) pipeline → $LOG"
-nohup .venv/bin/python pipeline.py --repo "$STAGED" --audit > "$LOG" 2>&1 &
-PID=$!
+if [[ -n "$FROM_STAGE" ]]; then
+    # --from STAGE: resume the EXISTING workspace from that step — no wipe, no
+    # crate re-assembly (that would overwrite the fills with fresh stubs). Clear
+    # the chosen phase entries + passing tags via the shared lib, then resume
+    # with --project (auto-detects the git workspace at tmp/hardcrate).
+    if [[ ! -d "$WS" ]]; then
+        echo "ERROR: no tmp/hardcrate workspace to resume — run without --from first."
+        exit 1
+    fi
+    # shellcheck source=lib/restart_from_lib.sh
+    source "$SCRIPT_DIR/lib/restart_from_lib.sh"
+    if ! KEYS_STR=$(restart_from_keys "$FROM_STAGE"); then
+        echo "ERROR: unknown stage '$FROM_STAGE' (t1|t2|t2a|t2b|t2c|t3|t4)"; exit 2
+    fi
+    read -ra KEYS <<< "$KEYS_STR"
+    echo "[hard] resume from $FROM_STAGE → clearing phase entries: ${KEYS[*]}"
+    restart_from_clear "$WS" "${KEYS[@]}"
+    echo "[hard] resuming hardcrate pipeline (from $FROM_STAGE) → $LOG"
+    nohup .venv/bin/python pipeline.py --project hardcrate --audit > "$LOG" 2>&1 &
+    PID=$!
+else
+    echo "[hard] rebuilding skeleton-extractor ..."
+    ( cd tools/skeleton_extractor && cargo build --release 2>&1 | tail -2 )
+    echo "[hard] assembling complexity=$LEVEL crate → $STAGED"
+    .venv/bin/python tools/hardcrate_select.py --crate "$STAGED" --from "$FIXTURE" --max-level "$LEVEL"
+    echo "[hard] wiping tmp/hardcrate for a from-scratch recovery run ..."
+    rm -rf "$WS"
+    echo "[hard] launching hardcrate (complexity=$LEVEL) pipeline → $LOG"
+    nohup .venv/bin/python pipeline.py --repo "$STAGED" --audit > "$LOG" 2>&1 &
+    PID=$!
+fi
 echo "Pipeline started (PID $PID). Following the log until it exits (Ctrl-C only stops the tail)."
 echo "----------------------------------------------------------------------"
 tail --pid="$PID" -f "$LOG" || true
