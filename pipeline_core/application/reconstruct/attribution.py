@@ -308,9 +308,16 @@ def build_test_reverse_map(
     fn_index = deps.structure.enumerate_fns(src_dir) or []
     if not fn_index:
         return {}
-    # name → list[(file, fn_name)] (a name may map to multiple impls)
+    # name → list[(file, fn_name)] for PRODUCTION fns only. A failing test is
+    # only ever attributed to a fixable production fn, never to another test
+    # (the test-oracle is immutable — FR-018), so test fns are excluded as
+    # candidates and instead indexed as KEYS by the inline pass below.
     by_name: dict[str, list[tuple[str, str]]] = {}
+    src_test_recs: list[dict[str, Any]] = []
     for r in fn_index:
+        if is_test_fn_record(r):
+            src_test_recs.append(r)
+            continue
         name = r.get("fn_name", "")
         f = r.get("file", "")
         if name and f:
@@ -333,6 +340,30 @@ def build_test_reverse_map(
                 if ident in by_name:
                     candidates.update(by_name[ident])
             out[test_name] = candidates
+    # Inline `#[cfg(test)]` unit tests live in src/ (not under tests/), so the
+    # loop above never sees them — without this pass a failing inline test like
+    # `extra_cap_limit` has NO production target and the fix loop dies with
+    # `no_actionable_refs` (the test-oracle filter strips its only frontier key).
+    # Index each inline test by the production fns its OWN body references —
+    # byte-span slice from the extractor + `identifiers_in` (structured, no regex).
+    src_bytes: dict[str, bytes] = {}
+    for r in src_test_recs:
+        test_name = r.get("fn_name", "")
+        f = r.get("file", "")
+        s = r.get("sig_byte_start", 0)
+        e = r.get("body_byte_end", 0)
+        if not (test_name and f and e > s):
+            continue
+        if f not in src_bytes:
+            try:
+                src_bytes[f] = (src_dir / f).read_bytes()
+            except Exception:
+                src_bytes[f] = b""
+        body = src_bytes[f][s:e].decode("utf-8", "replace")
+        candidates = out.setdefault(test_name, set())
+        for ident in identifiers_in(body):
+            if ident in by_name:
+                candidates.update(by_name[ident])
     return out
 
 def attribute_failures(
