@@ -14,10 +14,11 @@ from __future__ import annotations
 
 import hashlib
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 from ...chunk_cache import chunk_hash as _chunk_hash
 from ...chunk_cache import load_cached_chunk as _load_cached_chunk
@@ -51,6 +52,7 @@ class Task1Synthesizer(ABC):
         project_context: str = "",
         coverage_strategy: str = "",
         api_surface: str = "",
+        known_types: list[str] | tuple[str, ...] = (),
     ) -> bool:
         """Write functional_requirements.md (and genesis stub if absent). Returns True on success.
 
@@ -58,6 +60,11 @@ class Task1Synthesizer(ABC):
         public signatures, type definitions, function bodies elided. It is structural
         ground truth: TASK 1 should derive BEHAVIOR from the tests, but not invent
         signatures or types that conflict with this skeleton.
+
+        known_types (when provided) is the pre-strip, syn-extracted list of every
+        struct/enum/type-alias/trait name in the module — deterministic ground truth
+        for "what types exist", used to stop the chunked path re-describing the same
+        type in every chunk without needing to guess it from prior LLM output.
         """
 
 
@@ -79,7 +86,8 @@ class StaticTask1Synthesizer(Task1Synthesizer):
     def synthesize(self, project_dir: Path, genesis_path: Path, functional_req_path: Path,
                    test_files: list[tuple[str, str]], readme_text: str,
                    project_profile: str = "", project_context: str = "",
-                   coverage_strategy: str = "", api_surface: str = "") -> bool:
+                   coverage_strategy: str = "", api_surface: str = "",
+                   known_types: list[str] | tuple[str, ...] = ()) -> bool:
         # debt #14: injected collaborators/config bound locally (bodies verbatim).
         SINGLE_CALL_CHAR_LIMIT = self.cfg.single_call_char_limit
         existing_genesis = read(genesis_path)
@@ -100,6 +108,7 @@ class StaticTask1Synthesizer(Task1Synthesizer):
                 project_context=project_context,
                 coverage_strategy=coverage_strategy,
                 api_surface=api_surface,
+                known_types=known_types,
             )
         return ok
 
@@ -302,13 +311,14 @@ Output a plain structured list of the merged requirements. No filler, no code, n
     def _chunked(self, genesis_path: Path, functional_req_path: Path,
                  test_files: list[tuple[str, str]], readme_text: str, existing_genesis: str,
                  project_profile: str = "", project_context: str = "",
-                 coverage_strategy: str = "", api_surface: str = "") -> bool:
+                 coverage_strategy: str = "", api_surface: str = "",
+                 known_types: list[str] | tuple[str, ...] = ()) -> bool:
         # debt #14: injected collaborators/config bound locally (bodies verbatim).
         CHUNK_CACHE_DIR = self.cfg.chunk_cache_dir
         SYNTHESIS_GROUP_SIZE = self.cfg.synthesis_group_size
         _TASK1_MODEL = self.cfg.task1_model
+        _PARALLELISM = max(1, self.cfg.parallelism)
         ChunkProgress = self.progress.make_progress
-        _extract_type_names_from_requirements = self.requirements.extract_type_names
         _write_fr_preserving_notes = self.requirements.write_fr_preserving_notes
         ask = self.llm.ask
         chunk_test_files_by_file = self.shaping.chunk_test_files_by_file
@@ -326,7 +336,8 @@ Output a plain structured list of the merged requirements. No filler, no code, n
         _chunk_content_budget = prompt_budget(" " * _fixed)
         chunks = chunk_test_files_by_file(test_files, _chunk_content_budget)
         total_chunks = len(chunks)
-        _log(f"  Extracting requirements file-by-file: {total_chunks} file(s) → one call each.")
+        _log(f"  Extracting requirements file-by-file: {total_chunks} file(s) → one call each "
+             f"(parallelism={_PARALLELISM}).")
         _log("  Calibration in progress, progress estimations will be available soon...")
 
         root = genesis_path.parent
@@ -335,16 +346,35 @@ Output a plain structured list of the merged requirements. No filler, no code, n
         partials_dir.mkdir(exist_ok=True)
         cache_dir.mkdir(exist_ok=True)
 
-        partial_requirements = []
         progress = ChunkProgress(total=total_chunks)
         cache_hits = 0
-        # BL-018: running type manifest — accumulate extracted types across chunks
-        # so each chunk knows what has already been described and won't duplicate it.
-        accumulated_types: set[str] = set()
+        # Deterministic, syn-extracted type manifest (baked pre-strip — see
+        # _capture_api_surface) — known up front, so every chunk gets the SAME
+        # header instead of an LLM-output-guessed one accumulated chunk-by-chunk.
+        # That accumulation was the only thing forcing chunks to run in sequence
+        # (debt #22); a fixed header lets every chunk needing a model call run
+        # concurrently.
+        type_manifest_header = ""
+        if known_types:
+            type_list = ", ".join(sorted(known_types)[:40])
+            type_manifest_header = (
+                f"\nTypes defined in this module (do NOT re-describe these in full — "
+                f"only add NEW requirements not yet covered): {type_list}\n"
+            )
 
         existing_genesis = read(genesis_path)
         genesis_hash = hashlib.sha256(existing_genesis.encode()).hexdigest()[:8]
 
+        profile_header = (f"\nProject profile:\n{project_profile}\n") if project_profile.strip() else ""
+        context_header = (f"\nProject context (behavioral summary):\n{project_context}\n"
+                          ) if project_context.strip() else ""
+        chunk_extra_header = profile_header + context_header + type_manifest_header
+
+        partial_requirements: list[str | None] = [None] * total_chunks
+        pending: list[tuple[int, str, Path, str]] = []
+
+        # Pass 1 (sequential, no LLM): resolve partial-file / cache hits — cheap,
+        # and must run before dispatching model calls so cache state is settled.
         for i, chunk in enumerate(chunks, 1):
             partial_file = partials_dir / f"chunk_{i:03d}_of_{total_chunks:03d}.txt"
             tests_section = format_test_files(chunk)
@@ -352,37 +382,29 @@ Output a plain structured list of the merged requirements. No filler, no code, n
             h = _chunk_hash(tests_section + genesis_hash)
 
             if partial_file.exists():
-                entry = partial_file.read_text()
-                # Still update the manifest from cached entries.
-                accumulated_types |= _extract_type_names_from_requirements(entry)
-                partial_requirements.append(entry)
+                partial_requirements[i - 1] = partial_file.read_text()
                 progress.finish_chunk(i)
                 continue
 
             cached = _load_cached_chunk(cache_dir, h)
             if cached:
                 cache_hits += 1
-                accumulated_types |= _extract_type_names_from_requirements(cached)
                 partial_file.write_text(cached)
-                partial_requirements.append(cached)
+                partial_requirements[i - 1] = cached
                 _log(f"  Chunk {i}/{total_chunks}: cache hit (skipping model call).")
                 progress.finish_chunk(i)
                 continue
 
-            # BL-018: build type manifest header for this chunk.
-            type_manifest_header = ""
-            if accumulated_types:
-                type_list = ", ".join(sorted(accumulated_types)[:40])
-                type_manifest_header = (
-                    f"\nTypes already extracted in previous chunks (do NOT re-describe these — "
-                    f"only add NEW requirements not yet covered): {type_list}\n"
-                )
+            pending.append((i, tests_section, partial_file, h))
 
-            profile_header = (f"\nProject profile:\n{project_profile}\n") if project_profile.strip() else ""
-            context_header = (f"\nProject context (behavioral summary):\n{project_context}\n"
-                              ) if project_context.strip() else ""
+        # Pass 2 (concurrent, bounded): every remaining chunk needs a model call.
+        # No cross-chunk data dependency now that the type manifest is fixed up
+        # front, so these can run in parallel — same pattern as task2a cluster
+        # concurrency (PIPELINE_PARALLELISM).
+        def _run_chunk(item: tuple[int, str, Path, str]) -> tuple[int, str | None]:
+            i, tests_section, partial_file, h = item
             prompt = self._chunk_prompt(i, total_chunks, readme_text, tests_section,
-                                       profile_header + context_header + type_manifest_header,
+                                       chunk_extra_header,
                                        genesis=existing_genesis, coverage_strategy=coverage_strategy,
                                        api_surface=api_surface)
 
@@ -394,17 +416,25 @@ Output a plain structured list of the merged requirements. No filler, no code, n
 
             progress.start_chunk()
             partial = with_retry(chunk_attempt)
+            progress.finish_chunk(i)
             if partial is False:
                 _log(f"  ERROR: failed to extract requirements from chunk {i} after all retries.")
-                return False
-            progress.finish_chunk(i)
+                return i, None
 
             entry = f"=== Requirements from chunk {i}/{total_chunks} ===\n{partial}"
             partial_file.write_text(entry)
             _save_cached_chunk(cache_dir, h, entry)
-            # BL-018: update running type manifest from this chunk's output.
-            accumulated_types |= _extract_type_names_from_requirements(partial)
-            partial_requirements.append(entry)
+            return i, entry
+
+        if pending:
+            workers = min(_PARALLELISM, len(pending))
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="task1-chunk") as pool:
+                for i, entry in pool.map(_run_chunk, pending):
+                    partial_requirements[i - 1] = entry
+
+        if any(entry is None for entry in partial_requirements):
+            return False
+        final_requirements: list[str] = [cast(str, e) for e in partial_requirements]
 
         progress.finish()
 
@@ -420,8 +450,8 @@ Output a plain structured list of the merged requirements. No filler, no code, n
         # passed-through section (avoids changing every call signature).
         profile_section = profile_section + context_section_chunked
 
-        groups = [partial_requirements[i:i + SYNTHESIS_GROUP_SIZE]
-                  for i in range(0, len(partial_requirements), SYNTHESIS_GROUP_SIZE)]
+        groups = [final_requirements[i:i + SYNTHESIS_GROUP_SIZE]
+                  for i in range(0, len(final_requirements), SYNTHESIS_GROUP_SIZE)]
         total_groups = len(groups)
         intermediates: list[str] = []
 
@@ -451,7 +481,7 @@ Output a plain structured list of the merged requirements. No filler, no code, n
             )
             _log(f"  Stage 1 complete. Intermediate total: {len(all_for_synthesis):,} chars.")
         else:
-            all_for_synthesis = "\n\n".join(partial_requirements)
+            all_for_synthesis = "\n\n".join(final_requirements)
 
         _log("  Stage 2: final synthesis into output documents...")
 

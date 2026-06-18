@@ -51,6 +51,12 @@ from pipeline_core.adapters.artifacts import (
 from pipeline_core.adapters.artifacts import (
     api_surface_path as _api_surface_path,
 )
+from pipeline_core.adapters.artifacts import (
+    load_type_names as _load_type_names,
+)
+from pipeline_core.adapters.artifacts import (
+    type_manifest_path as _type_manifest_path,
+)
 from pipeline_core.adapters.cargo import CargoEnv
 from pipeline_core.adapters.coverage import CoverageDeps
 from pipeline_core.adapters.failure_journal import FileFailureJournal
@@ -1239,29 +1245,31 @@ class ChunkProgress:
         self.total = total
         self.window = rolling_window
         self._times: list[float] = []   # recent chunk durations
-        self._chunk_start: float = 0.0
+        self._local = threading.local()  # per-thread start time (concurrent chunks)
+        self._lock = threading.Lock()     # guards _times/_last_line_len/print
         self._last_line_len: int = 0    # for \r padding in progress mode
 
     def start_chunk(self):
-        self._chunk_start = time.monotonic()
+        self._local.chunk_start = time.monotonic()
 
     def finish_chunk(self, current: int):
-        elapsed = time.monotonic() - self._chunk_start
-        self._times.append(elapsed)
-        if len(self._times) > self.window:
-            self._times.pop(0)
-        avg = sum(self._times) / len(self._times) if self._times else None
+        elapsed = time.monotonic() - getattr(self._local, "chunk_start", time.monotonic())
+        with self._lock:
+            self._times.append(elapsed)
+            if len(self._times) > self.window:
+                self._times.pop(0)
+            avg = sum(self._times) / len(self._times) if self._times else None
 
-        line = _render_progress(current, self.total, avg)
+            line = _render_progress(current, self.total, avg)
 
-        if _progress_mode:
-            # Overwrite previous line in terminal.
-            padded = line.ljust(self._last_line_len)
-            print(f"\r{padded}", end="", flush=True)
-            self._last_line_len = len(line)
-        else:
-            # New line — works in log files and when tailing.
-            _log(f"  {line}")
+            if _progress_mode:
+                # Overwrite previous line in terminal.
+                padded = line.ljust(self._last_line_len)
+                print(f"\r{padded}", end="", flush=True)
+                self._last_line_len = len(line)
+            else:
+                # New line — works in log files and when tailing.
+                _log(f"  {line}")
 
     def finish(self):
         """Print a final newline when in --progress mode."""
@@ -1787,10 +1795,6 @@ def _extract_test_assertions(test_files: list, module_dir_rel: str = "",
             + "\n".join(results))
 
 
-# ---------------------------------------------------------------------------
-# BL-018: Type name extractor for cross-chunk manifest
-# ---------------------------------------------------------------------------
-
 def _categorize_compile_error(error_output: str) -> str:
     """Classify a compile error into a short category tag for compile_patterns."""
     o = error_output.lower()
@@ -1813,12 +1817,6 @@ def _categorize_compile_error(error_output: str) -> str:
     return "compile_error"
 
 
-def _extract_type_names_from_requirements(text: str) -> set[str]:
-    """
-    Extract likely type names (CamelCase identifiers) from a requirements chunk.
-    Used to build the cross-chunk type manifest in TASK 1.
-    """
-    return set(re.findall(r'\b([A-Z][a-zA-Z0-9]{2,})\b', text))
 # Cargo.toml accessors live in domain/cargo_toml.py (pure, tomllib — R8). Re-exported
 # under the legacy `_`-names so the ~15 call sites stay unchanged.
 _load_cargo_toml = _domain_load_cargo_toml
@@ -8917,6 +8915,7 @@ def _build_task1_config() -> "Task1Config":
         readme_cap=_README_CAP,
         strategy_cap=_STRATEGY_CAP,
         chunk_cache_dir=CHUNK_CACHE_DIR,
+        parallelism=_pipeline_parallelism(),
     )
 
 
@@ -9251,9 +9250,6 @@ class _Task2Adapter:
 
     def make_progress(self, total):
         return ChunkProgress(total)
-
-    def extract_type_names(self, text):
-        return _extract_type_names_from_requirements(text)
 
     def write_fr_preserving_notes(self, path, new_content):
         _write_fr_preserving_notes(path, new_content)
@@ -12301,6 +12297,17 @@ def _capture_api_surface(project_dir: Path, module_dir: Path, module_name: str) 
     out_path.write_text("\n".join(parts), encoding="utf-8")
     _log(f"  Captured API surface: {file_count} file(s) → "
          f"{out_path.relative_to(project_dir)} ({out_path.stat().st_size:,} chars).")
+
+    # Deterministic type-name manifest (syn-extracted, same walk_root) — lets
+    # TASK 1 know "what types exist" up front instead of guessing it
+    # incrementally from its own previous LLM output (debt #22).
+    type_records = ADAPTERS.extractor.enumerate_types(walk_root) or []
+    type_names = sorted({t.name for t in type_records if t.name})
+    if type_names:
+        types_path = _type_manifest_path(project_dir, module_name)
+        types_path.write_text(json.dumps(type_names, indent=2), encoding="utf-8")
+        _log(f"  Captured type manifest: {len(type_names)} type(s) → "
+             f"{types_path.relative_to(project_dir)}.")
     return out_path
 
 
@@ -12310,6 +12317,7 @@ def _capture_api_surface(project_dir: Path, module_dir: Path, module_name: str) 
 # slice 5b: deps for the extracted TASK 1 (defined after load_api_surface, its latest dep).
 _TASK1_DEPS = Task1Deps(
     load_api_surface=load_api_surface,
+    load_type_names=_load_type_names,
     read=read,
     ask=ask,
     write_fr_preserving_notes=_write_fr_preserving_notes,

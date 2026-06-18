@@ -65,9 +65,6 @@ class FakeAdapter:
         return _Progress()
 
     # Requirements
-    def extract_type_names(self, text: str) -> set[str]:
-        return set()
-
     def write_fr_preserving_notes(self, path: Path, new_content: str) -> None:
         path.write_text(new_content, encoding="utf-8")
 

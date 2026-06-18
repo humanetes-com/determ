@@ -24,6 +24,7 @@ class Task1Deps:
     """Collaborators TASK 1 needs, injected by the composition root."""
 
     load_api_surface: Callable[..., str]
+    load_type_names: Callable[[Path, str], list[str]]
     read: Callable[[Any], str]
     ask: Callable[..., str]
     write_fr_preserving_notes: Callable[[Any, str], None]
@@ -165,6 +166,9 @@ def task1(project_dir: Path, genesis_path: Path, functional_req_path: Path,
     api_surface = deps.load_api_surface(project_dir, module_name) if module_name else ""
     if api_surface:
         log(f"  Loaded API surface: {len(api_surface):,} chars (pre-strip skeleton).")
+    known_types = deps.load_type_names(project_dir, module_name) if module_name else []
+    if known_types:
+        log(f"  Loaded type manifest: {len(known_types)} type(s) (pre-strip, syn-extracted).")
 
     # For proc-macro crates with no own tests, extract proc-macro interface
     # (derive macros, helper attributes) from how they're used in the test suite.
@@ -188,7 +192,7 @@ def task1(project_dir: Path, genesis_path: Path, functional_req_path: Path,
     ok = synthesizer.synthesize(
         project_dir, genesis_path, functional_req_path, test_files, readme_text,
         project_profile, project_context=project_context, coverage_strategy=coverage_strategy,
-        api_surface=api_surface,
+        api_surface=api_surface, known_types=known_types,
     )
 
     if not ok:

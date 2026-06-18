@@ -2441,7 +2441,8 @@ def test_slice5b_task1() -> None:
     def mk(synth_ok=True, ask_resp="") -> Task1Deps:
         synth = SimpleNamespace(synthesize=lambda *a, **k: calls.setdefault("synth", True) or synth_ok)
         return Task1Deps(
-            load_api_surface=lambda d, m: "", read=lambda p: "",
+            load_api_surface=lambda d, m: "", load_type_names=lambda d, m: [],
+            read=lambda p: "",
             ask=lambda prompt, model=None: ask_resp,
             write_fr_preserving_notes=lambda p, c: calls.__setitem__("fr", c),
             synthesizer_factory=lambda: synth,

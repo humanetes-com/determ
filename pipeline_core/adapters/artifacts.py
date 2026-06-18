@@ -11,6 +11,7 @@ Adapter layer: file I/O only; imports stdlib + domain/strip layout vocabulary,
 never pipeline.py."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,25 @@ def load_api_surface(project_dir: Path, module_name: str) -> str:
         return p.read_text(encoding="utf-8")
     except OSError:
         return ""
+
+
+def type_manifest_path(project_dir: Path, module_name: str) -> Path:
+    """Path where the pre-strip deterministic type-name manifest is saved."""
+    return project_dir / ORIGINAL_STRUCTURE_DIR / f"{module_name}.types.json"
+
+
+def load_type_names(project_dir: Path, module_name: str) -> list[str]:
+    """The saved pre-strip type-name list for a module (struct/enum/type/trait
+    names, syn-extracted), or [] if absent. Deterministic ground truth for any
+    prompt that needs to know 'what types exist' without guessing from LLM text."""
+    p = type_manifest_path(project_dir, module_name)
+    if not p.exists():
+        return []
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return [str(x) for x in data] if isinstance(data, list) else []
 
 
 def load_locked_source_context(project_dir: Path, dep_names: set[str]) -> str:

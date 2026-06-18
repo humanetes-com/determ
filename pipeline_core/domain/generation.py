@@ -42,6 +42,7 @@ class Task1Config:
     readme_cap: int
     strategy_cap: int
     chunk_cache_dir: str
+    parallelism: int = 1
 
 
 @dataclass(frozen=True, slots=True)
