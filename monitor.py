@@ -162,25 +162,22 @@ def bar(pct, width=18, label: str = ""):
 # ── Flicker-free diff renderer ────────────────────────────────────────────────
 
 _buf: list[str] = []
-_prev_buf: list[str] = []
 
 def _ln(s=""):
     _buf.append(s)
 
 def _flush_frame():
-    global _prev_buf
-    out = []
+    # Repaint in place: home the cursor, write every visible line clearing to
+    # end-of-line, then clear from the cursor to end-of-screen. Overwriting in
+    # place means no flicker, and clearing per-line + below means a shorter or
+    # shifted frame never leaves stale/duplicated rows behind (a line-diff by
+    # index does — when content shifts it can skip a row it thinks is unchanged).
     h = _h()
-    for i, line in enumerate(_buf[:h]):
-        prev = _prev_buf[i] if i < len(_prev_buf) else None
-        if line != prev:
-            out.append(f"\033[{i+1};1H{line}\033[K")
-    for i in range(len(_buf), min(len(_prev_buf), h)):
-        out.append(f"\033[{i+1};1H\033[K")
-    if out:
-        sys.stdout.write("".join(out))
-        sys.stdout.flush()
-    _prev_buf = list(_buf)
+    # Join with newlines but emit none after the last row — a trailing newline
+    # on the terminal's bottom row scrolls the whole screen up.
+    body = "\n".join(f"{line}\033[K" for line in _buf[:h])
+    sys.stdout.write(f"\033[H{body}\033[J")
+    sys.stdout.flush()
     _buf.clear()
 
 # ── Box helpers ───────────────────────────────────────────────────────────────
@@ -1461,8 +1458,6 @@ def _run_action(key):
             _action_msg = red("⏻ power off machine when the run finishes — confirm? [y/n]")
     elif key in ("1", "2", "3", "4"):
         _view = {"1": "monitor", "2": "pipeline", "3": "stream", "4": "events"}[key]
-        global _prev_buf
-        _prev_buf = []   # force full redraw on next frame — clears previous view's artifacts
     elif key == "UP"   and _view in _scroll: _scroll[_view] += SCROLL_STEP
     elif key == "DOWN" and _view in _scroll: _scroll[_view] = max(0, _scroll[_view] - SCROLL_STEP)
     elif key == "PGUP" and _view in _scroll: _scroll[_view] += available_lines()

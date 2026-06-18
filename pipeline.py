@@ -81,6 +81,11 @@ from pipeline_core.application.reconstruct import group_fill as _group_fill
 from pipeline_core.application.reconstruct import impl_fill as _impl_fill
 from pipeline_core.application.reconstruct import phase_c_tdd as _phase_c_tdd
 from pipeline_core.application.reconstruct.failure_analysis import FailureAnalysisStep
+from pipeline_core.application.reconstruct.fix_unit import FixUnitDeps
+from pipeline_core.application.reconstruct.generate_fix import (
+    GenerateFixDeps,
+    run_generate_fix,
+)
 from pipeline_core.application.reconstruct.module_reconstructor import ModuleReconstructor
 from pipeline_core.application.reconstruct.reconstruction_step import ReconstructionStep
 from pipeline_core.application.reconstruct.requirements_phase import RequirementsPhase
@@ -147,11 +152,10 @@ from pipeline_core.domain.cargo_toml import cargo_is_proc_macro as _domain_cargo
 from pipeline_core.domain.cargo_toml import cargo_package_name as _domain_cargo_package_name
 from pipeline_core.domain.cargo_toml import load_cargo_toml as _domain_load_cargo_toml
 from pipeline_core.domain.cluster_scope import ClusterScope
+from pipeline_core.domain.compile_probe import CompileProbe
 from pipeline_core.domain.enums import (
     Backend,
     CoverageBackend,
-    FillUnit,
-    FixStrategy,
     PhaseCDriver,
     PhaseCMode,
 )
@@ -159,12 +163,12 @@ from pipeline_core.domain.failure_classification import (
     classify_failure as _classify_failure,
 )
 from pipeline_core.domain.fix_report import FixReport as _FixReport
+from pipeline_core.domain.fix_session import FixSession
 from pipeline_core.domain.llm_output import (
     GENESIS_DELIM_END,
     GENESIS_DELIM_START,
     _extract_genesis,
     extract_files,
-    extract_fn_bodies,
     parse_retrospective,
     parse_self_note,
 )
@@ -173,6 +177,9 @@ from pipeline_core.domain.llm_output import (
 )
 from pipeline_core.domain.llm_output import (
     _split_leading_where as _split_leading_where,
+)
+from pipeline_core.domain.llm_output import (
+    extract_fn_bodies as extract_fn_bodies,  # R8.5 parser — re-export for call sites/tests
 )
 from pipeline_core.domain.llm_output import (
     split_api_surface_by_file as _domain_split_api_surface_by_file,
@@ -209,6 +216,12 @@ from pipeline_core.domain.models import (
 from pipeline_core.domain.refine import (
     parse_retrospective_function as _parse_retrospective_function,
 )
+from pipeline_core.domain.retry_outcome import (
+    RetryMode,
+    RetryVerdict,
+    build_verdict,
+    failing_test_verdict,
+)
 from pipeline_core.domain.rust_scan import (
     after_brace_newline,
     count_cfg_attrs,
@@ -217,6 +230,7 @@ from pipeline_core.domain.rust_scan import (
     item_names,
     use_imports_symbol,
 )
+from pipeline_core.domain.source_snapshot import SourceSnapshot
 from pipeline_core.domain.test_results import (
     OUTPUT_SEPARATOR,
     _parse_test_counts,
@@ -248,18 +262,6 @@ from pipeline_core.ports import structure as _structure_port
 from pipeline_core.prompts import runtime as _prompts_runtime
 from pipeline_core.prompts.context import (
     PerFnFixSections,
-)
-from pipeline_core.prompts.fix_prompts import (
-    build_behavior_fix_prompt as _build_behavior_fix_prompt,
-)
-from pipeline_core.prompts.fix_prompts import (
-    build_fn_fix_prompt as _build_fn_fix_prompt,
-)
-from pipeline_core.prompts.fix_prompts import (
-    build_impl_fix_prompt as _build_impl_fix_prompt,
-)
-from pipeline_core.prompts.fix_prompts import (
-    build_tdd_stub_fill_prompt as _build_tdd_stub_fill_prompt,
 )
 from pipeline_core.prompts.per_fn import (
     build_per_fn_fix_prompt as _build_per_fn_fix_prompt,
@@ -9675,10 +9677,12 @@ def generate_fix_loop(
         # -test count (so the stall budget senses behavioral repair). See docstring.
         return False, output, _fix_diag.floor_metric(output)
 
-    def _do_fix(output: str, history: list[dict], *, retro: str) -> dict:
+    def _do_fix(output: str, history: list[dict], *, retro: str) -> _FixReport:
+        """Legacy whole-file rewrite strategy. Returns a typed FixReport (the
+        composition root passes this as generate_fix's `whole_file_fix`)."""
         if output.startswith("TIMEOUT after "):
             return _FixReport.aborted(
-                reason="check_timeout", summary="check timed out").as_record()
+                reason="check_timeout", summary="check timed out")
         _log_compile_overview(output, len(history))
         # Build source context — read current content from disk in full.
         source_block = ""
@@ -9791,7 +9795,7 @@ Current source files:
             _log(f"  [fix loop] LLM produced no fixes on iter {len(history) + 1}.")
             _err_preview = output[-_FIX_ERR_CAP:] if len(output) > _FIX_ERR_CAP else output
             return _FixReport.unchanged(
-                summary="no_fixes_produced", error_preview=_err_preview).as_record()
+                summary="no_fixes_produced", error_preview=_err_preview)
         # Whole-file rewrites (legacy strategy — the model returns each broken
         # file in full and we overwrite it).
         for rel, content in fixed.items():
@@ -9826,7 +9830,7 @@ Current source files:
         return _FixReport.changed(
             summary=f"rewrote={len(_all_changed)}",
             files_changed_str=", ".join(_all_changed[:4]) if _all_changed else "no files changed",
-            error_preview=_err_preview, error_sig=_err_preview).as_record()
+            error_preview=_err_preview, error_sig=_err_preview)
 
     def _do_retro(output: str, history: list[dict]) -> str:
         return _whole_tree_retrospective(
@@ -9861,367 +9865,102 @@ Current source files:
             block += f"<RELEVANT_GOTCHAS_DETAIL>\n{gd}\n</RELEVANT_GOTCHAS_DETAIL>\n"
         return block
 
-    def _fix_single_fn(rel: str, fn: str) -> list[str]:
-        """Inner cargo-check loop that re-fills ONE fn by body splice. Returns
-        the changed unit ids (0 or 1)."""
-        changed: list[str] = []
-        path = project_dir / rel
-        if not path.exists():
-            return changed
-        inner_cmd = _derive_check_only_cmd(check_cmd)
-        fn_container = ""
-        for _r in (_enumerate_fns_via_extractor(project_dir) or []):
-            if _r.get("file") == rel and _r.get("fn_name") == fn:
-                fn_container = _r.get("container") or ""
-                break
+    # P3.C: the two inner cargo-check loops are now the FnFixUnit / ImplFixUnit
+    # use-case (application.reconstruct.fix_unit). pipeline.py is the composition
+    # root — these thin adapters satisfy the ISP role ports over the resident
+    # check/model/splice/prompt helpers; the loop policy and the prompt+splice
+    # live in pipeline_core and are unit-tested with fakes.
+    class _FixChecker:
+        def probe(self, cmd, cwd, env_, timeout_):
+            rc, rendered, diags = _run_cargo_check_diag(cmd, cwd, env_, timeout_)
+            ebf: dict[str, int] = {}
+            for d in diags:
+                f = d.file or ""
+                if f:
+                    ebf[f] = ebf.get(f, 0) + 1
+            return CompileProbe(rc=rc, rendered=_strip_ansi(rendered),
+                                frontier=_frontier_from_diags(diags, project_dir),
+                                errors_by_file=ebf)
 
-        def _run_check(_rel=rel, _fn=fn) -> tuple[bool, str, int]:
-            rc, rendered, diags = _run_cargo_check_diag(inner_cmd, project_dir, env, timeout)
-            # Build the frontier from STRUCTURED diags, not the ANSI-rendered
-            # text (the plain-text regex can't parse colour codes → empty).
-            fr = _frontier_from_diags(diags, project_dir)
-            file_errs = sum(1 for d in diags if (d.file or "") == _rel)
-            ok = (rc == 0) or ((_rel, _fn) not in fr)
-            return ok, _strip_ansi(rendered), file_errs
+    class _FixModel:
+        def ask(self, prompt):
+            return ask(prompt, model=model)
 
-        def _do(out: str, hist: list[dict], *, retro: str = "",
-                _rel=rel, _fn=fn, _path=path) -> dict:
-            file_text = _path.read_text(encoding="utf-8", errors="replace")
-            loc = _locate_fn(file_text, _fn)
-            if loc is None:
-                return _FixReport.aborted(reason="fn_not_located").as_record()
-            sig_text, _ss, _bs, _be = loc
-            cur_body = file_text[_bs:_be]
-            errs = out[-_FIX_ERR_CAP:] if len(out) > _FIX_ERR_CAP else out
-            rblock = (f"\n<RETROSPECTIVE_GUIDANCE>\n{retro}\n</RETROSPECTIVE_GUIDANCE>\n"
-                      if retro.strip() else "")
-            # After a body-only attempt stalled, a PRIVATE fn may tighten its
-            # bounds (unsized-T class: returns `T` by value but `T` is `?Sized`
-            # → needs `where T: Sized`). Only a leading `where …` may be added.
-            allow_where = len(hist) >= 1 and not _is_pub_fn(file_text, _fn)
-            sig_rule = (
-                "Signature is FIXED — except, if this fn fails because a type "
-                "parameter needs a tighter bound (E0277 'size cannot be known'), "
-                "you MAY add it by making the FIRST body line a `where` clause "
-                "(e.g. `where T: Sized`).\n"
-            ) if allow_where else "Signature (do NOT change it):\n"
-            _repo_block = _tag_block(
-                "REPOSITORY_SPECIFICATIONS",
-                _repo_spec_section(fr_path, file_rel=_rel, fn_name=_fn,
-                                   container=fn_container or ""))
-            prompt = _build_fn_fix_prompt(
-                thinking_directive=_FIX_THINKING_DIRECTIVE, file_rel=_rel,
-                fn_name=_fn, sig_rule=sig_rule, sig_text=sig_text,
-                cur_body=cur_body, errs=errs, repo_block=_repo_block,
-                retro_block=rblock, gotchas_block=_gotchas_block_for(out),
-                tests_block=_tests_for_names({_fn}))
-            resp = ask(prompt, model=model)
-            bodies = extract_fn_bodies(resp)
-            blk = next((b for b in bodies if b.get("fn_name") == _fn),
-                       bodies[0] if bodies else None)
-            body = blk.get("body") if blk else None
-            if not body:
-                return _FixReport.unchanged(
-                    summary="no_body", error_preview=out[-_FIX_ERR_CAP:]).as_record()
-            wc = blk.get("where_clause") if blk else None
-            use_wc = wc if (allow_where and wc) else None
-            ok_s, reason, delta = _splice_fn_with_where(
-                _path, fn_container, _fn, body, where_clause=use_wc, allow_nonstub=True)
-            if ok_s:
-                changed.append(f"{_rel}::{_fn}")
-                _log(f"  [fix loop/fn] spliced {_rel}::{_fn}"
-                     f"{' +where' if use_wc else ''} ({delta:+d} bytes)")
-            else:
-                _log(f"  [fix loop/fn] splice rejected {_rel}::{_fn} ({reason})")
-            return _FixReport.changed(
-                summary=f"fn {_rel}::{_fn}", files_changed_str=f"{_rel}::{_fn}",
-                error_preview=out[-_FIX_ERR_CAP:]).as_record()
+    class _FixSplicer:
+        def locate_fn(self, text, name):
+            return _locate_fn(text, name)
 
-        _log(f"  [fix loop/fn] fixing {rel}::{fn} (inner cargo check loop)")
-        _improvement_loop(name=f"fn:{rel}::{fn}", run_check=_run_check, do_fix=_do,
-                          do_retro=_do_retro,
-                          max_stalls=int(os.getenv("FIX_LOOP_PER_FN_MAX_STALLS", "2")))
-        return changed
+        def is_pub_fn(self, text, name):
+            return _is_pub_fn(text, name)
 
-    def _fix_impl_block(rel: str, container: str, block: ImplBlock) -> list[str]:
-        """Inner cargo-check loop that re-fills a WHOLE impl block in one prompt
-        (the model sees the header, where-clauses, every member body, and any
-        sibling impl of the same trait). Each returned body is spliced into the
-        CORRECT impl via container-aware location — so two same-name methods in
-        different impls (E0201/E0053 as_ref) are disambiguated. Returns changed
-        unit ids."""
-        changed: list[str] = []
-        path = project_dir / rel
-        if not path.exists():
-            return changed
-        inner_cmd = _derive_check_only_cmd(check_cmd)
-        members = block.members
-        member_names = {m.fn_name for m in members if m.fn_name}
-        siblings = list(block.related_containers)
+        def render_impl_block(self, text, members):
+            return _render_impl_block(text, members)
 
-        def _run_check(_rel=rel, _names=tuple(member_names)) -> tuple[bool, str, int]:
-            rc, rendered, diags = _run_cargo_check_diag(inner_cmd, project_dir, env, timeout)
-            # Frontier from STRUCTURED diags (ANSI-rendered text defeats the
-            # plain-text regex → empty frontier → the loop would think the
-            # block is clean and never ask the model).
-            fr = _frontier_from_diags(diags, project_dir)
-            group_errs = sum(1 for (f2, fn2) in fr if f2 == _rel and fn2 in _names)
-            file_errs = sum(1 for d in diags if (d.file or "") == _rel)
-            ok = (rc == 0) or (group_errs == 0)
-            return ok, _strip_ansi(rendered), file_errs
+        def splice_fn(self, file_path, container, name, body, *,
+                      where_clause=None, allow_nonstub=False):
+            return _splice_fn_with_where(file_path, container, name, body,
+                                         where_clause=where_clause,
+                                         allow_nonstub=allow_nonstub)
 
-        def _do(out: str, hist: list[dict], *, retro: str = "") -> dict:
-            file_text = path.read_text(encoding="utf-8", errors="replace")
-            block_src = _render_impl_block(file_text, members)
-            errs = out[-_FIX_ERR_CAP:] if len(out) > _FIX_ERR_CAP else out
-            sib_block = (
-                "\nSibling impl blocks of the same trait in this file — keep them "
-                "mutually consistent (e.g. matching return types / bounds):\n"
-                + "\n".join(f"- {s}" for s in siblings) + "\n"
-            ) if siblings else ""
-            rblock = (f"\n<RETROSPECTIVE_GUIDANCE>\n{retro}\n</RETROSPECTIVE_GUIDANCE>\n"
-                      if retro.strip() else "")
-            # After a body-only attempt has stalled, allow the model to tighten a
-            # PRIVATE fn's bounds — the unsized-T class (e.g. `read(self) -> T`
-            # needing `where T: Sized`) cannot be fixed by a body alone. Only a
-            # leading `where …` may be added; the rest of the signature is fixed
-            # and public fns are never touched (API surface). Spliced via the
-            # syn extractor's byte range — no anchor matching.
-            allow_where = len(hist) >= 1
-            where_rule = (
-                "\nIf — and ONLY if — a PRIVATE (non-`pub`) fn fails because a type "
-                "parameter needs a tighter bound (e.g. E0277 'size cannot be known': "
-                "the fn returns `T` by value but `T` is `?Sized`), you MAY add a bound "
-                "by making the FIRST line of that fn's body a `where` clause:\n"
-                '<FN name="read" block="impl">\nwhere T: Sized\n... body ...\n</FN>\n'
-                "Do not otherwise change any signature. Never add a bound to a `pub` fn.\n"
-            ) if allow_where else "Do NOT change any signature.\n"
-            _repo_block = _tag_block(
-                "REPOSITORY_SPECIFICATIONS",
-                _repo_spec_section(fr_path, file_rel=rel, container=container))
-            prompt = _build_impl_fix_prompt(
-                thinking_directive=_FIX_THINKING_DIRECTIVE, file_rel=rel,
-                where_rule=where_rule, block_src=block_src, sib_block=sib_block,
-                errs=errs, repo_block=_repo_block, retro_block=rblock,
-                gotchas_block=_gotchas_block_for(out),
-                tests_block=_tests_for_names(member_names))
-            resp = ask(prompt, model=model)
-            fn_blocks = extract_fn_bodies(resp)
-            spliced = 0
-            for fb in fn_blocks:
-                nm = fb.get("fn_name"); body = fb.get("body")
-                if not nm or not body:
-                    continue
-                # Honour a where-clause only for PRIVATE fns (API surface guard).
-                wc = fb.get("where_clause")
-                use_wc = wc if (allow_where and wc and not _is_pub_fn(file_text, nm)) else None
-                ok_s, reason, delta = _splice_fn_with_where(
-                    path, container, nm, body, where_clause=use_wc, allow_nonstub=True)
-                if ok_s:
-                    spliced += 1
-                    changed.append(f"{rel}::{nm}")
-                    _log(f"  [fix loop/impl] spliced {rel}::{nm}"
-                         f"{' +where' if use_wc else ''} ({delta:+d} bytes)")
-                else:
-                    _log(f"  [fix loop/impl] splice rejected {rel}::{nm} ({reason})")
-            if spliced == 0:
-                return _FixReport.unchanged(
-                    summary="no_splice", error_preview=out[-_FIX_ERR_CAP:]).as_record()
-            return _FixReport.changed(
-                summary=f"impl {rel} ({spliced} fn)",
-                files_changed_str=f"{rel}::{container[:40]}",
-                error_preview=out[-_FIX_ERR_CAP:]).as_record()
+        def splice_body(self, file_path, name, body, *, allow_nonstub=False):
+            return _splice_fn_body(file_path, name, body,
+                                   allow_nonstub=allow_nonstub)
 
-        _log(f"  [fix loop/impl] fixing {rel}::{container[:50]} (inner cargo check loop)")
-        _improvement_loop(name=f"impl:{rel}::{container[:40]}", run_check=_run_check,
-                          do_fix=_do, do_retro=_do_retro,
-                          max_stalls=int(os.getenv("FIX_LOOP_PER_FN_MAX_STALLS", "2")))
-        return changed
+    class _FixPrompts:
+        def repo_spec_block(self, *, file_rel="", fn_name="", container=""):
+            return _tag_block("REPOSITORY_SPECIFICATIONS", _repo_spec_section(
+                fr_path, file_rel=file_rel, fn_name=fn_name, container=container))
 
-    def _do_fix_per_fn(output: str, history: list[dict], *, retro: str) -> dict:
-        """unit=fn: group compile errors by enclosing fn, fix each unique fn in
-        its own inner cargo-check loop. Ambiguous (same-name sibling impls) and
-        non-compile failures → legacy whole-file. Fail-safe → legacy."""
-        if output.startswith("TIMEOUT after "):
-            return _FixReport.aborted(
-                reason="check_timeout", summary="check timed out").as_record()
-        try:
-            _log_compile_overview(output, len(history))
-            frontier = _compile_error_frontier(
-                output, project_dir, check_cmd, env, timeout)
-            frontier = _filter_test_targets(frontier, project_dir)
-            if not frontier:
-                return _do_fix(output, history, retro=retro)
-            recs = _enumerate_fns_via_extractor(project_dir) or []
-            name_count: dict[tuple[str, str], int] = {}
-            for r in recs:
-                k = (r.get("file", ""), r.get("fn_name", ""))
-                name_count[k] = name_count.get(k, 0) + 1
-            changed: list[str] = []
-            deferred = False
-            for (rel, fn) in sorted(frontier.keys()):
-                if rel in existing_test_files:
-                    continue
-                if allowed_dir_prefix and not rel.startswith(allowed_dir_prefix):
-                    continue
-                if name_count.get((rel, fn), 0) != 1:
-                    deferred = True
-                    continue
-                changed += _fix_single_fn(rel, fn)
-            if deferred:
-                rc, rendered, _ = _run_cargo_check_diag(
-                    _derive_check_only_cmd(check_cmd), project_dir, env, timeout)
-                if rc != 0:
-                    _log("  [fix loop/fn] file-level errors remain → whole-file fallback")
-                    _do_fix(rendered, history, retro=retro)
-            _err_preview = output[-_FIX_ERR_CAP:] if len(output) > _FIX_ERR_CAP else output
-            return _FixReport.changed(
-                summary=f"per_fn changed={len(changed)}",
-                files_changed_str=", ".join(changed[:4]) if changed else "no files changed",
-                error_preview=_err_preview, error_sig=_err_preview).as_record()
-        except Exception as e:
-            _log(f"  [fix loop/fn] unexpected error ({e}) → legacy whole-file fallback")
-            return _do_fix(output, history, retro=retro)
+        def gotchas_block(self, output):
+            return _gotchas_block_for(output)
 
-    def _do_fix_per_impl(output: str, history: list[dict], *, retro: str) -> dict:
-        """unit=impl (default, mirrors PHASE_C_FILL_UNIT): group compile errors by
-        their enclosing impl block and fix the whole block in one inner
-        cargo-check loop — the model sees impl-level constraints and sibling
-        impls that per-fn cannot. Free functions fall to the per-fn path; the
-        extractor being unavailable or a non-compile failure → fall back."""
-        if output.startswith("TIMEOUT after "):
-            return _FixReport.aborted(
-                reason="check_timeout", summary="check timed out").as_record()
-        try:
-            _log_compile_overview(output, len(history))
-            frontier = _compile_error_frontier(
-                output, project_dir, check_cmd, env, timeout)
-            frontier = _filter_test_targets(frontier, project_dir)
-            if not frontier:
-                tdd_frontier = _filter_test_targets(
-                    _extract_tdd_frontier(output, project_dir), project_dir)
-                kind = "tdd-stub"
-                behavior_srcs: dict[str, tuple[str, str]] = {}
-                if not tdd_frontier:
-                    # Behavioral failures (assertions, wrong values): attribute
-                    # failing tests to the fns they exercise and repair those
-                    # bodies — the whole-file rewrite is the LAST resort (it
-                    # regresses: observed live introducing 24 compile errors).
-                    tdd_frontier, behavior_srcs = _behavior_frontier(
-                        output, project_dir, existing_test_files)
-                    tdd_frontier = _filter_test_targets(tdd_frontier, project_dir)
-                    kind = "behavior"
-                    if not tdd_frontier:
-                        return _do_fix(output, history, retro=retro)
-                    _beh_cap = int(os.getenv("FIX_BEHAVIOR_MAX_FNS", "8"))
-                    if len(tdd_frontier) > _beh_cap:
-                        # Most-failing-tests first; name tiebreak for determinism.
-                        tdd_frontier = dict(sorted(
-                            tdd_frontier.items(),
-                            key=lambda kv: (-len(kv[1]), kv[0]))[:_beh_cap])
-                # Stubs that compile but fail tests: direct one-shot fill.
-                # _fix_single_fn is wrong here — its inner compile loop exits
-                # immediately (ok=True) because the stub has no compile errors.
-                tdd_changed: list[str] = []
-                for (rel, fn) in sorted(tdd_frontier.keys()):
-                    if rel in existing_test_files:
-                        continue
-                    if allowed_dir_prefix and not rel.startswith(allowed_dir_prefix):
-                        continue
-                    path = project_dir / rel
-                    if not path.exists():
-                        continue
-                    file_text = path.read_text(encoding="utf-8", errors="replace")
-                    loc = _locate_fn(file_text, fn)
-                    if loc is None:
-                        continue
-                    sig_text, _ss, _bs, _be = loc
-                    cur_body = file_text[_bs:_be]
-                    errs = output[-_FIX_ERR_CAP:] if len(output) > _FIX_ERR_CAP else output
-                    if kind == "behavior":
-                        _tests_block = ""
-                        for _tn in sorted(tdd_frontier[(rel, fn)]):
-                            _trel, _tsrc = behavior_srcs.get(_tn, ("", ""))
-                            if _tsrc and len(_tests_block) + len(_tsrc) <= _SRC_SNIP_CAP:
-                                _tests_block += f"// {_trel} :: {_tn}\n{_tsrc}\n\n"
-                        prompt = _build_behavior_fix_prompt(
-                            thinking_directive=_FIX_THINKING_DIRECTIVE,
-                            file_rel=rel, fn_name=fn, sig_text=sig_text,
-                            cur_body=cur_body, tests_block=_tests_block, errs=errs)
-                    else:
-                        prompt = _build_tdd_stub_fill_prompt(
-                            thinking_directive=_FIX_THINKING_DIRECTIVE,
-                            file_rel=rel, fn_name=fn, sig_text=sig_text,
-                            cur_body=cur_body, errs=errs)
-                    resp = ask(prompt, model=model)
-                    bodies = extract_fn_bodies(resp)
-                    blk = next(
-                        (b for b in bodies if b.get("fn_name") == fn),
-                        bodies[0] if bodies else None,
-                    )
-                    body = blk.get("body") if blk else None
-                    if body:
-                        ok_s, delta = _splice_fn_body(path, fn, body, allow_nonstub=True)
-                        if ok_s:
-                            tdd_changed.append(f"{rel}::{fn}")
-                            _log(f"  [fix loop/{kind}] spliced {rel}::{fn} ({delta:+d} bytes)")
-                        else:
-                            _log(f"  [fix loop/{kind}] splice rejected {rel}::{fn}")
-                _err_preview = output[-_FIX_ERR_CAP:] if len(output) > _FIX_ERR_CAP else output
-                _kind_tag = "tdd_stub" if kind == "tdd-stub" else "behavior"
-                return _FixReport.changed(
-                    summary=f"{_kind_tag} changed={len(tdd_changed)}",
-                    files_changed_str=", ".join(tdd_changed[:4]) if tdd_changed else "no files changed",
-                    error_preview=_err_preview, error_sig=_err_preview).as_record()
-            blocks = _collect_impl_blocks(project_dir)
-            if not blocks:
-                return _do_fix_per_fn(output, history, retro=retro)
-            fn_to_block: dict[tuple[str, str], ImplBlock] = {}
-            for b in blocks:
-                for m in b.members:
-                    fn_to_block[(b.file, m.fn_name)] = b
-            changed: list[str] = []
-            impl_groups: dict[tuple[str, str], ImplBlock] = {}
-            free_fns: list[tuple[str, str]] = []
-            for (rel, fn) in frontier:
-                if rel in existing_test_files:
-                    continue
-                if allowed_dir_prefix and not rel.startswith(allowed_dir_prefix):
-                    continue
-                b = fn_to_block.get((rel, fn))
-                if b is None or not b.container:
-                    free_fns.append((rel, fn))
-                else:
-                    impl_groups[(b.file, b.container)] = b
-            for (f2, cont) in sorted(impl_groups.keys()):
-                changed += _fix_impl_block(f2, cont, impl_groups[(f2, cont)])
-            for (rel, fn) in sorted(set(free_fns)):
-                changed += _fix_single_fn(rel, fn)
-            _err_preview = output[-_FIX_ERR_CAP:] if len(output) > _FIX_ERR_CAP else output
-            return _FixReport.changed(
-                summary=f"per_impl changed={len(changed)}",
-                files_changed_str=", ".join(changed[:4]) if changed else "no files changed",
-                error_preview=_err_preview, error_sig=_err_preview).as_record()
-        except Exception as e:
-            _log(f"  [fix loop/impl] unexpected error ({e}) → legacy whole-file fallback")
-            return _do_fix(output, history, retro=retro)
+        def tests_block(self, names):
+            return _tests_for_names(set(names))
 
-    _fix_strategy = SETTINGS.fix_loop_strategy
-    _fix_unit = SETTINGS.fix_loop_unit
-    if _fix_strategy is FixStrategy.PER_FN:
-        _chosen_do_fix = _do_fix_per_impl if _fix_unit is FillUnit.IMPL else _do_fix_per_fn
-    else:
-        _chosen_do_fix = _do_fix
-    _log(f"  [fix loop] strategy={_fix_strategy} unit={_fix_unit}")
+    _fix_session = FixSession.for_check_cmd(
+        project_dir=project_dir, check_cmd=check_cmd,
+        derive_check_only=_derive_check_only_cmd, env=env, timeout=timeout,
+        model=model, fr_path=fr_path,
+        existing_test_files=frozenset(existing_test_files),
+        allowed_dir_prefix=allowed_dir_prefix)
+    _fix_unit_deps = FixUnitDeps(
+        checker=_FixChecker(), model=_FixModel(), splicer=_FixSplicer(),
+        prompts=_FixPrompts(), log=_log, do_retro=_do_retro,
+        thinking_directive=_FIX_THINKING_DIRECTIVE, err_cap=_FIX_ERR_CAP,
+        per_fn_max_stalls=int(os.getenv("FIX_LOOP_PER_FN_MAX_STALLS", "2")))
 
-    ok, last_output, _hist = _improvement_loop(
-        name="generate_fix_loop",
-        run_check=_run_check,
-        do_fix=_chosen_do_fix,
-        do_retro=_do_retro,
-        max_stalls=_fl_max_stalls,
-    )
-    return ok, last_output
+    # P3.C: the per-fn / per-impl / whole-file dispatch is now the typed strategy
+    # set in application.reconstruct.generate_fix, run by its driver. This frontier
+    # adapter satisfies the FrontierBuilder port (test-oracle-filtered, FR-018).
+    class _Frontiers:
+        def compile_frontier(self, output):
+            return _filter_test_targets(
+                _compile_error_frontier(output, project_dir, check_cmd, env, timeout),
+                project_dir)
+
+        def tdd_frontier(self, output):
+            return _filter_test_targets(
+                _extract_tdd_frontier(output, project_dir), project_dir)
+
+        def behavior_frontier(self, output):
+            fr, srcs = _behavior_frontier(output, project_dir, existing_test_files)
+            return _filter_test_targets(fr, project_dir), srcs
+
+    _gen_fix_deps = GenerateFixDeps(
+        unit=_fix_unit_deps,
+        frontiers=_Frontiers(),
+        enumerate_fns=lambda: _enumerate_fns_via_extractor(project_dir) or [],
+        collect_impl_blocks=lambda: _collect_impl_blocks(project_dir) or [],
+        log_overview=_log_compile_overview,
+        whole_file_fix=lambda o, h, r: _do_fix(o, h, retro=r),
+        behavior_max_fns=int(os.getenv("FIX_BEHAVIOR_MAX_FNS", "8")),
+        src_snip_cap=_SRC_SNIP_CAP)
+
+    return run_generate_fix(
+        session=_fix_session, deps=_gen_fix_deps,
+        strategy=SETTINGS.fix_loop_strategy, unit=SETTINGS.fix_loop_unit,
+        run_check=_run_check, do_retro=_do_retro,
+        max_stalls=_fl_max_stalls, log=_log)
 
 
 def task2_fix_loop(
@@ -10331,7 +10070,8 @@ def _task3_inline_retry(
     # running them so a 0-test "incomplete" cluster yields real error diagnostics.
     failed = sorted(_parse_failed_tests(initial_test_output))
     compile_cmd = test_command if "--no-run" in test_command else test_command + " --no-run"
-    build_mode = not failed
+    mode = RetryMode.BUILD if not failed else RetryMode.TEST
+    build_mode = mode is RetryMode.BUILD
     if build_mode:
         _, _, _init_diags = _run_cargo_check_diag(
             compile_cmd, project_dir, _env(), timeout=TEST_TIMEOUT)
@@ -10345,15 +10085,10 @@ def _task3_inline_retry(
         initial_count = len(failed)
         _log(f"  [task3-retry] entering inline retry: {initial_count} failing test(s).")
 
-    # Snapshot every .rs file under project_dir/src — only files we might
-    # touch. Excluding tests/ keeps the snapshot cheap. Use bytes to handle
-    # any odd encodings without surprise.
-    snapshot: dict[Path, bytes] = {}
+    # Snapshot every .rs under src/ (the files a retry might touch; tests/ is
+    # excluded by the root → cheap) so a regressing retry can be reverted.
     src_root = project_dir / "src"
-    if src_root.is_dir():
-        for p in src_root.rglob("*.rs"):
-            with suppress(Exception):
-                snapshot[p] = p.read_bytes()
+    snapshot = SourceSnapshot.capture(src_root)
 
     # P5.1 parity: fix prompts here previously carried no TYPES_IN_SCOPE and
     # no container — the model had to guess struct fields. Enumerate from the
@@ -10507,14 +10242,14 @@ def _task3_inline_retry(
         _, _, fin_diags = _run_cargo_check_diag(
             compile_cmd, project_dir, _env(), timeout=TEST_TIMEOUT)
         final_err = len(fin_diags)
-        if snapshot and final_err > initial_count:
+        verdict = build_verdict(initial_errors=initial_count,
+                                final_errors=final_err, has_snapshot=bool(snapshot))
+        if verdict is RetryVerdict.REVERT:
             _log(f"  [task3-retry] build-fix worsened compile ({final_err} > "
                  f"{initial_count}) — reverting from snapshot.")
-            for p, data in snapshot.items():
-                with suppress(Exception):
-                    p.write_bytes(data)
+            snapshot.restore()
             return False, initial_test_output
-        if final_err < initial_count:
+        if verdict is RetryVerdict.RECURSE:
             _log(f"  [task3-retry] build-fix progress: {final_err} compile "
                  f"error(s) (initial {initial_count}) — re-running TASK 3.")
             return False, last_out
@@ -10535,14 +10270,16 @@ def _task3_inline_retry(
     fin_p, fin_f, _ = _parse_test_counts(last_out)
     init_ran = (init_p + init_f) > 0
     final_ran = (fin_p + fin_f) > 0
-    broke_build = init_ran and not final_ran
-    if snapshot and (broke_build or len(final_failed) > initial_count):
-        reason = ("retry broke the build (tests no longer run)" if broke_build
+    verdict = failing_test_verdict(
+        passed=False, initial_failures=initial_count,
+        final_failures=len(final_failed), initially_ran=init_ran,
+        finally_ran=final_ran, has_snapshot=bool(snapshot))
+    if verdict is RetryVerdict.REVERT:
+        reason = ("retry broke the build (tests no longer run)"
+                  if (init_ran and not final_ran)
                   else f"result {len(final_failed)} > initial {initial_count}")
         _log(f"  [task3-retry] {reason} — reverting from snapshot.")
-        for p, data in snapshot.items():
-            with suppress(Exception):
-                p.write_bytes(data)
+        snapshot.restore()
         return False, initial_test_output
     _log(f"  [task3-retry] stopped at {len(final_failed)} failing tests "
          f"(initial {initial_count}). Keeping partial progress.")
