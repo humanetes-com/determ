@@ -18,7 +18,6 @@ import subprocess
 import sys
 import threading
 import time
-import tomllib
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Sequence
 from contextlib import contextmanager, suppress
@@ -66,6 +65,7 @@ from pipeline_core.adapters.cargo import CargoEnv
 from pipeline_core.adapters.commit_gate import CallableCommitGate
 from pipeline_core.adapters.coverage import CoverageDeps
 from pipeline_core.adapters.failure_journal import FileFailureJournal
+from pipeline_core.adapters.file_constraints import FileConstraintsReader
 from pipeline_core.adapters.fill_engine_roles import (
     CargoFillAdapter,
     EngineTelemetryAdapter,
@@ -263,7 +263,7 @@ from pipeline_core.domain.models import (
     TypeRecord,
 )
 from pipeline_core.domain.refine import (
-    parse_retrospective_function as _parse_retrospective_function,
+    parse_retrospective_categories as _parse_retrospective_categories,
 )
 from pipeline_core.domain.retry_outcome import (
     RetryMode,
@@ -8740,6 +8740,9 @@ from pipeline_core.domain.generation import (
     parse_gen_tests_filename as _parse_gen_tests_filename,  # noqa: E402
 )
 from pipeline_core.domain.generation import (
+    prelude_import_names as _prelude_import_names,  # noqa: E402
+)
+from pipeline_core.domain.generation import (
     strip_all_gen_tests_decls as _strip_all_gen_tests_decls,  # noqa: E402
 )
 from pipeline_core.domain.generation import (
@@ -11293,90 +11296,10 @@ def _derive_gentest_prelude(project_dir: Path) -> tuple[str, str]:
     return allow_line, prelude_block
 
 
-def _prelude_import_names(prelude_block: str) -> str:
-    """Extract comma-separated short names from `use ...;` lines in the prelude block.
-
-    Used in task0c prompts so the INTERNAL MODULE RULES list reflects whatever
-    the project's prelude actually provides (instead of hardcoding anyhow's set).
-    """
-    names: list[str] = []
-    for line in prelude_block.splitlines():
-        line = line.strip().rstrip(";")
-        if not line.startswith("use "):
-            continue
-        # Take the last path segment of each import; expand {A, B} groups.
-        # Examples:
-        #   "use std::string::{String, ToString}" → ["String", "ToString"]
-        #   "use std::vec::Vec"                   → ["Vec"]
-        #   "use std::error::Error as StdError"   → ["StdError"]
-        path = line[len("use "):].strip()
-        m = re.match(r'(.*)::\{(.+)\}$', path)
-        if m:
-            for raw in m.group(2).split(","):
-                raw = raw.strip()
-                if " as " in raw:
-                    raw = raw.split(" as ", 1)[1].strip()
-                if raw:
-                    names.append(raw)
-        else:
-            last = path.split("::")[-1].strip()
-            if " as " in last:
-                last = last.split(" as ", 1)[1].strip()
-            if last:
-                names.append(last)
-    # Deduplicate while preserving order.
-    seen: set[str] = set()
-    ordered: list[str] = []
-    for n in names:
-        if n not in seen:
-            seen.add(n)
-            ordered.append(n)
-    return ", ".join(ordered)
 
 
-def _load_file_constraints(project_dir: Path) -> dict[str, str]:
-    """Load per-file generation constraints from project_configs/{project}.constraints.toml.
-
-    Keys are source file basenames (e.g. "error.rs"). Values are constraint text injected
-    into the generation prompt after INTERNAL MODULE RULES. Returns {} if no config exists.
-
-    The TOML file has [stable] and [nightly] tables; the nightly table entries override
-    stable when a non-default cluster is active.
-    """
-    config_path = Path(__file__).parent / "project_configs" / f"{project_dir.name}.constraints.toml"
-    if not config_path.exists():
-        return {}
-    try:
-        data = tomllib.loads(config_path.read_text(encoding="utf-8"))
-    except Exception as _e:
-        _log(f"  WARNING: could not load file constraints from {config_path}: {_e}")
-        return {}
-    is_nightly = _SCOPE.active is not None and not _SCOPE.active.is_default
-    result: dict[str, str] = dict(data.get("stable", {}))
-    if is_nightly:
-        result.update(data.get("nightly", {}))
-    return result
 
 
-def _parse_retrospective_categories(retrospective: str) -> dict[str, list[str]]:
-    """Parse retrospective FUNCTION lines into category → [fn_names] dict.
-
-    Handles both the abbreviated form '(c) UNREACHABLE' and the bare keyword form.
-    """
-    cats: dict[str, list[str]] = {
-        "UNREACHABLE": [], "CFG_GATED": [], "TESTABLE": [], "NEEDS_INTERNALS": [],
-    }
-    for line in retrospective.splitlines():
-        # e.g. "FUNCTION AdhocKind::anyhow_kind: (c) UNREACHABLE" (R7: refine parse)
-        parsed = _parse_retrospective_function(line.strip())
-        if parsed is None:
-            continue
-        fn_name, keyword = parsed[0], parsed[1].upper()
-        for known in cats:
-            if known in keyword:
-                cats[known].append(fn_name)
-                break
-    return cats
 
 
 def _partition_uncovered_lines(content: str, uncovered: "set[int]", n_groups: int) -> "list[set[int]]":
@@ -11841,11 +11764,19 @@ def cmd_best_models(vram_gb: float = 32.0) -> None:
     print(_model_report.LEGEND)
 
 
+# P6: per-file generation constraints reader (config TOML I/O) — focused adapter,
+# composition-injected with the configs dir + the active-cluster predicate + log.
+_FILE_CONSTRAINTS = FileConstraintsReader(
+    configs_dir=Path(__file__).parent / "project_configs",
+    is_nightly=lambda: _SCOPE.active is not None and not _SCOPE.active.is_default,
+    log=_log,
+)
+
 # slice 5b: deps for the extracted TASK 0c engine (defined before main(), after every
 # collaborator). subprocess/git injected as the module; _current_cluster via a call-time
 # getter (mutable global); coverage provider as a value.
 _TASK0C_DEPS = Task0cDeps(
-    BUILD_TIMEOUT=BUILD_TIMEOUT, COVERAGE_TARGET=COVERAGE_AUGMENTATION_TARGET, coverage_ignore_pragma=COVERAGE_IGNORE_PRAGMA, TASK0C_PROMPT_CHAR_CAP=TASK0C_PROMPT_CHAR_CAP, FIX_ERR_CAP=_FIX_ERR_CAP, SIBLING_CAP=_SIBLING_CAP, SRC_SNIP_CAP=_SRC_SNIP_CAP, TASK0C_FIX_THINKING_DIRECTIVE=_TASK0C_FIX_THINKING_DIRECTIVE, TASK0C_MODEL=_TASK0C_MODEL, TASK0C_THINKING_DIRECTIVE=_TASK0C_THINKING_DIRECTIVE, WORKING_CAP=_WORKING_CAP, annotate_uncovered=_annotate_uncovered, block_is_prose=_block_is_prose, build_gen_tests_decl=_build_gen_tests_decl, guard=_guard, cargo_env=_cargo_env, cluster_gate_for=_cluster_gate_for_sibling, condense_rust_to_signatures=_condense_rust_to_signatures, count_test_attrs=_count_test_attrs, derive_gentest_prelude=_derive_gentest_prelude, describe_test_environment=_describe_test_environment, error_signatures_from_output=_error_signatures_from_output, extract_branch_guard=_extract_branch_guard, extract_gen_tests_body=_extract_gen_tests_body, extract_public_symbols=_extract_public_symbols, extract_uncovered_functions=_extract_uncovered_functions, filter_cfg_excluded_lines=_filter_cfg_excluded_lines, filter_cfg_incompatible_lines=_filter_cfg_incompatible_lines, flags_unreachable=_flags_unreachable, gen_tests_path=_gen_tests_path, has_nonempty_test_body=_has_nonempty_test_body, inject_allow_before_any_mod=_inject_allow_before_any_mod, inject_allow_before_gen_mod=_inject_allow_before_gen_mod, inject_gen_prelude_imports=_inject_gen_prelude_imports, is_gen_tests_file=_is_gen_tests_file, is_structural_line=_is_structural_line, load_file_constraints=_load_file_constraints, type_signals_write=type_signals_write, mark_phase=_mark_phase, match_gen_tests_sibling=_match_gen_tests_sibling, next_gen_tests_n=_next_gen_tests_n, nightly_rules_for_cluster=_nightly_rules_for_cluster, parse_attempt_number=_parse_attempt_number, parse_retrospective_categories=_parse_retrospective_categories, partition_uncovered_lines=_partition_uncovered_lines, prelude_import_names=_prelude_import_names, quick_file_coverage=_quick_file_coverage, read_all_gen_tests=_read_all_gen_tests, read_state=_read_state, revert_gen_tests_pass=_revert_gen_tests_pass, select_relevant_siblings=_select_relevant_siblings, set_current=_set_current, source_hash=_source_hash, strip_all_gen_tests_artifacts=_strip_all_gen_tests_artifacts, strip_gen_tests_decl_n=_strip_gen_tests_decl_n, strip_gen_tests_decls=_strip_gen_tests_decls, strip_trailing_file_tag=_strip_trailing_file_tag, mutation_harden_file=_mutation_harden_file, gen_tests_siblings=_gen_tests_siblings, test_augmentor_factory=_test_augmentor_factory, ask=ask, extract_files=extract_files, extract_test_mod=extract_test_mod, generate_fix_loop=generate_fix_loop, generate_in_parallel=generate_in_parallel, is_test_file=is_test_file, write=write,
+    BUILD_TIMEOUT=BUILD_TIMEOUT, COVERAGE_TARGET=COVERAGE_AUGMENTATION_TARGET, coverage_ignore_pragma=COVERAGE_IGNORE_PRAGMA, TASK0C_PROMPT_CHAR_CAP=TASK0C_PROMPT_CHAR_CAP, FIX_ERR_CAP=_FIX_ERR_CAP, SIBLING_CAP=_SIBLING_CAP, SRC_SNIP_CAP=_SRC_SNIP_CAP, TASK0C_FIX_THINKING_DIRECTIVE=_TASK0C_FIX_THINKING_DIRECTIVE, TASK0C_MODEL=_TASK0C_MODEL, TASK0C_THINKING_DIRECTIVE=_TASK0C_THINKING_DIRECTIVE, WORKING_CAP=_WORKING_CAP, annotate_uncovered=_annotate_uncovered, block_is_prose=_block_is_prose, build_gen_tests_decl=_build_gen_tests_decl, guard=_guard, cargo_env=_cargo_env, cluster_gate_for=_cluster_gate_for_sibling, condense_rust_to_signatures=_condense_rust_to_signatures, count_test_attrs=_count_test_attrs, derive_gentest_prelude=_derive_gentest_prelude, describe_test_environment=_describe_test_environment, error_signatures_from_output=_error_signatures_from_output, extract_branch_guard=_extract_branch_guard, extract_gen_tests_body=_extract_gen_tests_body, extract_public_symbols=_extract_public_symbols, extract_uncovered_functions=_extract_uncovered_functions, filter_cfg_excluded_lines=_filter_cfg_excluded_lines, filter_cfg_incompatible_lines=_filter_cfg_incompatible_lines, flags_unreachable=_flags_unreachable, gen_tests_path=_gen_tests_path, has_nonempty_test_body=_has_nonempty_test_body, inject_allow_before_any_mod=_inject_allow_before_any_mod, inject_allow_before_gen_mod=_inject_allow_before_gen_mod, inject_gen_prelude_imports=_inject_gen_prelude_imports, is_gen_tests_file=_is_gen_tests_file, is_structural_line=_is_structural_line, load_file_constraints=_FILE_CONSTRAINTS.load, type_signals_write=type_signals_write, mark_phase=_mark_phase, match_gen_tests_sibling=_match_gen_tests_sibling, next_gen_tests_n=_next_gen_tests_n, nightly_rules_for_cluster=_nightly_rules_for_cluster, parse_attempt_number=_parse_attempt_number, parse_retrospective_categories=_parse_retrospective_categories, partition_uncovered_lines=_partition_uncovered_lines, prelude_import_names=_prelude_import_names, quick_file_coverage=_quick_file_coverage, read_all_gen_tests=_read_all_gen_tests, read_state=_read_state, revert_gen_tests_pass=_revert_gen_tests_pass, select_relevant_siblings=_select_relevant_siblings, set_current=_set_current, source_hash=_source_hash, strip_all_gen_tests_artifacts=_strip_all_gen_tests_artifacts, strip_gen_tests_decl_n=_strip_gen_tests_decl_n, strip_gen_tests_decls=_strip_gen_tests_decls, strip_trailing_file_tag=_strip_trailing_file_tag, mutation_harden_file=_mutation_harden_file, gen_tests_siblings=_gen_tests_siblings, test_augmentor_factory=_test_augmentor_factory, ask=ask, extract_files=extract_files, extract_test_mod=extract_test_mod, generate_fix_loop=generate_fix_loop, generate_in_parallel=generate_in_parallel, is_test_file=is_test_file, write=write,
     subprocess=subprocess, get_current_cluster=_SCOPE.get_active,
     coverage_provider=_coverage_provider, check_stop=_check_graceful_stop,
 )

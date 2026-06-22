@@ -353,3 +353,40 @@ def topo_sort_files(file_paths: list[str], known_content: dict[str, str]) -> lis
                 deps[sub].add(path)  # sub must come after path (path declares it)
     ts: TopologicalSorter[str] = TopologicalSorter(deps)
     return list(ts.static_order())
+
+
+def prelude_import_names(prelude_block: str) -> str:
+    """Comma-separated short names imported by the `use …;` lines of a gen_tests
+    prelude block (regex-free, R7). Expands `use a::b::{X, Y as Z}` groups, takes
+    the last path segment (or the rename target) of each, dedups preserving order.
+
+    Lets task0c prompts reflect whatever the project's prelude actually provides
+    instead of hardcoding a fixed set."""
+    def _short(seg: str) -> str:
+        seg = seg.strip()
+        if " as " in seg:
+            seg = seg.split(" as ", 1)[1].strip()
+        return seg
+
+    names: list[str] = []
+    for raw_line in prelude_block.splitlines():
+        line = raw_line.strip().rstrip(";")
+        if not line.startswith("use "):
+            continue
+        path = line[len("use "):].strip()
+        # Grouped import `prefix::{A, B}` → expand each member to its short name.
+        if path.endswith("}") and "::{" in path:
+            inner = path[path.rindex("::{") + 3:-1]
+            names.extend(s for member in inner.split(",") if (s := _short(member)))
+        else:
+            last = _short(path.split("::")[-1])
+            if last:
+                names.append(last)
+
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for n in names:
+        if n not in seen:
+            seen.add(n)
+            ordered.append(n)
+    return ", ".join(ordered)

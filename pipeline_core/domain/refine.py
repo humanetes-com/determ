@@ -175,3 +175,23 @@ def parse_retrospective_function(line: str) -> tuple[str, str] | None:
     if k == j:
         return None
     return name.rstrip(":"), line[j:k]
+
+
+def parse_retrospective_categories(retrospective: str) -> dict[str, list[str]]:
+    """Parse retrospective FUNCTION lines into a category → [fn_names] map.
+
+    Handles both the abbreviated form '(c) UNREACHABLE' and the bare keyword form;
+    each function is filed under the first known category its keyword contains."""
+    cats: dict[str, list[str]] = {
+        "UNREACHABLE": [], "CFG_GATED": [], "TESTABLE": [], "NEEDS_INTERNALS": [],
+    }
+    for line in retrospective.splitlines():
+        parsed = parse_retrospective_function(line.strip())
+        if parsed is None:
+            continue
+        fn_name, keyword = parsed[0], parsed[1].upper()
+        for known in cats:
+            if known in keyword:
+                cats[known].append(fn_name)
+                break
+    return cats
