@@ -58,10 +58,55 @@ def test_evaluate_decidable_and_undecidable() -> None:
     assert ctx.evaluate("not(windows)") is True
     assert ctx.evaluate("all(nightly, windows)") is False     # one false → false
     assert ctx.evaluate("any(windows, windows)") is False     # all known false → false
-    # Conservative: any undecidable part makes all()/any() undecidable (no True/False
-    # short-circuit) — preserved legacy `_eval_cfg_pred` semantics.
-    assert ctx.evaluate("any(nightly, unix)") is None
-    assert ctx.evaluate("all(nightly, unix)") is None
+    # Truth-dominant (#19): a decided operand wins over undecidable arms.
+    assert ctx.evaluate("any(nightly, unix)") is True         # one true → true
+    assert ctx.evaluate("all(windows, unix)") is False        # one false → false
+    # Only undecided-WITHOUT a dominating operand stays None.
+    assert ctx.evaluate("all(nightly, unix)") is None         # true + undecidable → unknown
+    assert ctx.evaluate("any(windows, unix)") is None         # false + undecidable → unknown
+
+
+def test_excluded_uncovered_lines_active_and_excluded_blocks() -> None:
+    src = (
+        "fn always() {\n"                         # 1-2
+        "    body();\n"
+        "}\n"                                      # 3
+        '#[cfg(error_generic_member_access)]\n'    # 4  excluded under stable
+        "fn egma() {\n"                            # 5
+        "    nightly_only();\n"                    # 6
+        "}\n"                                      # 7
+        "#[cfg(not(error_generic_member_access))]\n"  # 8  compiled-out under nightly
+        "fn fallback() {\n"                        # 9
+        "    stable_only();\n"                     # 10
+        "}\n"                                      # 11
+    )
+    all_lines = set(range(1, 12))
+    # Stable: egma excluded → its block lines dropped; fallback (not(egma)) kept.
+    stable = CfgSet.of(cfg_false=["error_generic_member_access"])
+    assert stable.excluded_uncovered_lines(src, all_lines) == {4, 5, 6, 7}
+    # Nightly: egma active → the not(egma) fallback block is compiled out.
+    nightly = CfgSet.of(cfg_true=["error_generic_member_access"])
+    assert nightly.excluded_uncovered_lines(src, all_lines) == {8, 9, 10, 11}
+    # Only intersect with the supplied uncovered set.
+    assert stable.excluded_uncovered_lines(src, {6}) == {6}
+    assert stable.excluded_uncovered_lines(src, set()) == set()
+
+
+def test_lines_are_cluster_specific() -> None:
+    from pipeline_core.domain.cfg import lines_are_cluster_specific
+    src = (
+        "fn always() { body(); }\n"                # 1  agnostic
+        "#[cfg(error_generic_member_access)]\n"    # 2
+        "fn egma() { x(); }\n"                      # 3  nightly-only
+    )
+    stable = CfgSet.of(cfg_false=["error_generic_member_access"])
+    nightly = CfgSet.of(cfg_true=["error_generic_member_access"])
+    ctxs = [stable, nightly]
+    # Line 1 compiles in both clusters → agnostic → shareable.
+    assert lines_are_cluster_specific(src, {1}, ctxs) is False
+    # Line 3 is compiled out under stable → cluster-specific → must stay gated.
+    assert lines_are_cluster_specific(src, {3}, ctxs) is True
+    assert lines_are_cluster_specific(src, set(), ctxs) is False
 
 
 def test_excludes_for_cargo_custom_off_and_nondefault_feature() -> None:

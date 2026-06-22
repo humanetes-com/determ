@@ -51,7 +51,7 @@ class Task0cDeps:
     block_is_prose: Any
     build_gen_tests_decl: Any
     cargo_env: Any
-    cluster_cfg_attr: Any
+    cluster_gate_for: Any        # #26: (cluster, source_text, uncov_lines) → sibling cfg gate
     condense_rust_to_signatures: Any
     count_test_attrs: Any
     derive_gentest_prelude: Any
@@ -1243,7 +1243,7 @@ def _run_phase_c(
     _build_gen_tests_decl = deps.build_gen_tests_decl
     _build_task0c_prompt_sections = functools.partial(_engine_build_prompt_sections, deps)
     _cargo_env = deps.cargo_env
-    _cluster_cfg_attr = deps.cluster_cfg_attr
+    _cluster_gate_for = deps.cluster_gate_for
     _condense_rust_to_signatures = deps.condense_rust_to_signatures
     _count_test_attrs = deps.count_test_attrs
     _describe_test_environment = deps.describe_test_environment
@@ -1717,6 +1717,7 @@ project-specific import paths, type construction patterns, and hard constraints.
         def _finalize_and_commit(raw_block: str, pass_n: int, base_text: str, *,
                                  rel_path: str = rel_path, abs_path: Path = abs_path,
                                  attempt: int = attempt, uncov_lines: set[int] = uncov_lines,
+                                 existing_text: str = existing_text,
                                  secs: dict[str, str] = secs,
                                  _file_constraints_section: str = _file_constraints_section,
                                  ) -> tuple[str, str]:
@@ -1737,7 +1738,7 @@ project-specific import paths, type construction patterns, and hard constraints.
                 return "no_tests", block
             _sib = _gen_tests_path(abs_path, pass_n)
             _decl = _build_gen_tests_decl(_sib.name, pass_n, _allow_line,
-                                          cluster_cfg_attr=_cluster_cfg_attr(_current_cluster))
+                                          cluster_cfg_attr=_cluster_gate_for(_current_cluster, existing_text, uncov_lines))
             _src_with_decl = base_text.rstrip() + _decl
             # P1 FixLoop port: verify→LLM-fix cycle on the shared driver.
             # The old hand-rolled loop terminated only on identical error
@@ -2059,7 +2060,7 @@ project-specific import paths, type construction patterns, and hard constraints.
                 _retry_pass_n = _next_gen_tests_n(abs_path)
                 _retry_sibling = _gen_tests_path(abs_path, _retry_pass_n)
                 _retry_decl = _build_gen_tests_decl(_retry_sibling.name, _retry_pass_n, _allow_line,
-                                                    cluster_cfg_attr=_cluster_cfg_attr(_current_cluster))
+                                                    cluster_cfg_attr=_cluster_gate_for(_current_cluster, existing_text, uncov_lines))
                 _retry_sibling.write_text(_extract_gen_tests_body(_retry_block), encoding="utf-8")
                 abs_path.write_text(_current_text.rstrip() + _retry_decl, encoding="utf-8")
                 _retry_check = subprocess.run(
@@ -2292,7 +2293,7 @@ def task0c_augment_module(
     _build_gen_tests_decl = deps.build_gen_tests_decl
     _build_task0c_prompt_sections = functools.partial(_engine_build_prompt_sections, deps)
     _cargo_env = deps.cargo_env
-    _cluster_cfg_attr = deps.cluster_cfg_attr
+    _cluster_gate_for = deps.cluster_gate_for
     _condense_rust_to_signatures = deps.condense_rust_to_signatures
     _count_test_attrs = deps.count_test_attrs
     _derive_gentest_prelude = deps.derive_gentest_prelude

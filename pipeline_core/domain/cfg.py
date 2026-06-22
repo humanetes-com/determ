@@ -182,10 +182,14 @@ class All(CfgPred):
         decided = ctx.membership(self.normalized)
         if decided is not None:
             return decided
+        # Truth-dominant: one False makes the whole `all(...)` False even when
+        # other arms are undecidable; only undecided-without-a-False is None.
         vals = [p.evaluate(ctx) for p in self.parts]
+        if any(v is False for v in vals):
+            return False
         if any(v is None for v in vals):
             return None
-        return all(vals)
+        return True
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,10 +207,30 @@ class Any(CfgPred):
         decided = ctx.membership(self.normalized)
         if decided is not None:
             return decided
+        # Truth-dominant: one True makes the whole `any(...)` True even when
+        # other arms are undecidable; only undecided-without-a-True is None.
         vals = [p.evaluate(ctx) for p in self.parts]
+        if any(v is True for v in vals):
+            return True
         if any(v is None for v in vals):
             return None
-        return any(vals)
+        return False
+
+
+def lines_are_cluster_specific(
+    source_text: str, lines: set[int], contexts: Iterable[CfgSet],
+) -> bool:
+    """True if any of ``lines`` is compiled OUT under at least one cluster context
+    (#26) — i.e. the lines live inside a cluster-specific `#[cfg]` region, so a test
+    covering them cannot be safely shared across clusters and must stay gated.
+
+    When every line is compiled in under every context the test is cluster-agnostic
+    and may be emitted UNGATED so a later cluster sees those lines already covered
+    (no re-augmentation). This is exactly the criterion that keeps a `not(X)`
+    stable-only test gated to stable while letting an always-compiled test be shared
+    — the documented failure mode where ungating stable's `not(egma)` siblings broke
+    the nightly harness."""
+    return any(ctx.excluded_uncovered_lines(source_text, lines) for ctx in contexts)
 
 
 _OPS = {"not": Not, "all": All, "any": Any}
@@ -263,6 +287,45 @@ class CfgSet:
         """Truth of a cfg predicate: True / False if fully decidable, else None."""
         tree = pred if isinstance(pred, CfgPred) else parse_cfg_pred(pred)
         return tree.evaluate(self)
+
+    def excluded_uncovered_lines(self, source_text: str, uncov_lines: set[int]) -> set[int]:
+        """The subset of ``uncov_lines`` that sit inside a single-line-`#[cfg(P)]`
+        block whose predicate ``P`` is DECIDABLY false under this context — i.e.
+        compiled out in this cluster, so no test could ever cover them.
+
+        Replaces the two regex line-scanners ``_filter_cfg_incompatible_lines``
+        (``not(X)`` for active X) and ``_filter_cfg_excluded_lines`` (bare X for
+        excluded X) with one structured pass over the typed predicate tree (#20):
+        build a ``CfgSet`` with the cluster's active cfgs in ``true`` and excluded
+        cfgs in ``false`` and both cases reduce to ``evaluate(P) is False``. Plain
+        ``evaluate`` (not ``excludes_for_cargo``) — only explicit true/false atoms
+        decide, so undecidable target/feature atoms never over-exclude a coverable
+        line. The block span is found by brace depth (regex-free)."""
+        if not uncov_lines:
+            return set()
+        lines = source_text.splitlines()
+        n = len(lines)
+        excluded: set[int] = set()
+        i = 0
+        while i < n:
+            stripped = lines[i].strip()
+            if stripped.startswith("#[cfg(") and stripped.endswith(")]"):
+                pred = stripped[len("#[cfg("):-len(")]")]
+                if self.evaluate(pred) is False:
+                    depth = 0
+                    started = False
+                    for j in range(i, min(n, i + 500)):
+                        depth += lines[j].count("{") - lines[j].count("}")
+                        if "{" in lines[j]:
+                            started = True
+                        if started and depth <= 0:
+                            for lno in range(i + 1, j + 2):
+                                if lno in uncov_lines:
+                                    excluded.add(lno)
+                            i = j
+                            break
+            i += 1
+        return excluded
 
     def excludes_for_cargo(self, pred: str | CfgPred) -> bool:
         """cargo-faithful: does this cfg keep the gated item from compiling/running

@@ -57,6 +57,7 @@ from pipeline_core.adapters.artifacts import (
 from pipeline_core.adapters.artifacts import (
     type_manifest_path as _type_manifest_path,
 )
+from pipeline_core.adapters.build_script import CargoBuildScriptReader
 from pipeline_core.adapters.cargo import CargoEnv
 from pipeline_core.adapters.coverage import CoverageDeps
 from pipeline_core.adapters.failure_journal import FileFailureJournal
@@ -3334,7 +3335,11 @@ def _estimate_cluster_ceiling(project_dir: Path, cluster: "BuildCluster") -> tup
             continue
         lines = text.splitlines()
         n = len(lines)
-        excl = _filter_cfg_excluded_lines(text, set(range(1, n + 1)), cluster.excluded_cfg)
+        # #20: one CfgSet evaluates BOTH sides (excluded-X and active-not(X)) so the
+        # estimate matches the runtime filter (task0c subtracts both) — fixes the
+        # P5 divergence where the ceiling used only the excluded side.
+        ctx = _cfg.CfgSet.of(cfg_true=cluster.cfg_true, cfg_false=cluster.cfg_false)
+        excl = ctx.excluded_uncovered_lines(text, set(range(1, n + 1)))
         total += n
         excluded += len(excl)
     if total == 0:
@@ -3356,6 +3361,8 @@ SKELETON_EXTRACTOR_BIN = Path(__file__).parent / "tools" / "skeleton_extractor" 
 ADAPTERS = build_adapters(SETTINGS, extractor_bin=SKELETON_EXTRACTOR_BIN, model=MODEL)
 # P1: the real StructureReader — injected into the fill engine (no monkeypatch seam).
 _STRUCTURE = CliStructureReader(ADAPTERS.extractor)
+# #23: build.rs cfg authority — prunes phantom clusters from source `#[cfg]` atoms.
+_BUILD_SCRIPT_READER = CargoBuildScriptReader()
 
 
 class _LateStructure:
@@ -8635,7 +8642,7 @@ def task0_cfg_scan(project_dir: Path) -> "list[BuildCluster]":
     pure `domain.cluster_plan`, and `build_configs.md` is written here for humans.
     See `pipeline_core.application.tasks.cfg_scan` / `pipeline_core.domain.cluster_plan`.
     """
-    scan = _cfg_scan.scan_build_clusters(project_dir, ADAPTERS.extractor)
+    scan = _cfg_scan.scan_build_clusters(project_dir, ADAPTERS.extractor, _BUILD_SCRIPT_READER)
     _write_build_configs(project_dir, scan.clusters, scan.predicate_counts)
     return scan.clusters
 
@@ -11104,6 +11111,25 @@ def _cluster_cfg_attr(cluster) -> str:
     return "all(" + ", ".join(terms) + ")"
 
 
+def _cluster_gate_for_sibling(cluster, source_text: str, uncov_lines) -> str:
+    """#26: the cfg gate to stamp on a gen_tests sibling. Gate it to its cluster
+    only when the lines it targets are cluster-SPECIFIC (live inside a `#[cfg]`
+    region that some cluster compiles out); a cluster-agnostic test is emitted
+    UNGATED so a later cluster sees those lines already covered and skips
+    re-augmenting them (kills the cross-cluster duplication). Only the default
+    (stable) cluster shares — a non-default cluster keeps its gate (it runs after
+    stable, so its agnostic lines are already covered; its real work is the gated
+    delta). This is the documented-safe criterion: a `not(egma)` stable-only test
+    stays gated to stable, never leaking into the nightly harness."""
+    base_gate = _cluster_cfg_attr(cluster)
+    if not base_gate or not getattr(cluster, "is_default", False):
+        return base_gate
+    contexts = [_cfg.CfgSet.of(cfg_true=c.cfg_true, cfg_false=c.cfg_false) for c in _SCOPE.all]
+    if _cfg.lines_are_cluster_specific(source_text, set(uncov_lines or ()), contexts):
+        return base_gate
+    return ""   # cluster-agnostic → shareable across clusters
+
+
 def _build_gen_tests_decl(sibling_name: str, n: "int | str", allow_line: str,
                            cluster_cfg_attr: str = "") -> str:
     """Build the one-line-ish `#[cfg(test)] ... mod gen_tests_N;` declaration.
@@ -11626,43 +11652,14 @@ def _filter_cfg_incompatible_lines(
 
     A block is incompatible when its cfg attribute contains not(X) where X is in active_cfgs.
     These lines can never be covered by tests in this cluster regardless of what the LLM writes.
+
+    #20: regex-free — delegates to the typed `CfgSet` (active cfgs in `true`, so a
+    `not(X)` block evaluates False → excluded).
     """
-    if not active_cfgs or not uncov_lines:
+    if not active_cfgs:
         return set()
-
-    active_set = set(active_cfgs)
-
-    def _is_incompatible(cfg_expr: str) -> bool:
-        return any(re.search(rf'\bnot\s*\(\s*{re.escape(pred)}\s*\)', cfg_expr) for pred in active_set)
-
-    code_lines = source_text.splitlines()
-    n = len(code_lines)
-    incompatible: set[int] = set()
-
-    i = 0
-    while i < n:
-        stripped = code_lines[i].strip()
-        cfg_m = re.match(r'#\[cfg\((.+)\)\]\s*$', stripped)
-        if cfg_m and _is_incompatible(cfg_m.group(1)):
-            # Found an incompatible cfg — walk forward to find and span the block.
-            depth = 0
-            block_started = False
-            for j in range(i, min(n, i + 500)):
-                opens  = code_lines[j].count('{')
-                closes = code_lines[j].count('}')
-                if opens > 0:
-                    block_started = True
-                depth += opens - closes
-                if block_started and depth <= 0:
-                    # Lines i..j (1-indexed: i+1..j+1) are inside this incompatible block.
-                    for lno in range(i + 1, j + 2):
-                        if lno in uncov_lines:
-                            incompatible.add(lno)
-                    i = j
-                    break
-        i += 1
-
-    return incompatible
+    ctx = _cfg.CfgSet.of(cfg_true=[t for p in active_cfgs for t in (p, f'feature = "{p}"')])
+    return ctx.excluded_uncovered_lines(source_text, uncov_lines)
 
 
 def _filter_cfg_excluded_lines(
@@ -11678,48 +11675,15 @@ def _filter_cfg_excluded_lines(
 
     Unlike _filter_cfg_incompatible_lines (which targets not(X) blocks for active clusters),
     this function targets direct X blocks for excluded clusters.
+
+    #20: regex-free — delegates to the typed `CfgSet` (excluded cfgs in `false`, so
+    a bare `#[cfg(X)]` block evaluates False → excluded; a `not(X)` block is True →
+    kept, matching the old not()-guard).
     """
-    if not excluded_cfgs or not uncov_lines:
+    if not excluded_cfgs:
         return set()
-
-    excluded_set = set(excluded_cfgs)
-
-    def _is_excluded_block(cfg_expr: str) -> bool:
-        for pred in excluded_set:
-            if not re.search(rf'\b{re.escape(pred)}\b', cfg_expr):
-                continue
-            # Make sure it's not wrapped in not(...) — that would be a stable-compatible block
-            if re.search(rf'\bnot\s*\(\s*{re.escape(pred)}\s*\)', cfg_expr):
-                continue
-            return True
-        return False
-
-    code_lines = source_text.splitlines()
-    n = len(code_lines)
-    excluded: set[int] = set()
-
-    i = 0
-    while i < n:
-        stripped = code_lines[i].strip()
-        cfg_m = re.match(r'#\[cfg\((.+)\)\]\s*$', stripped)
-        if cfg_m and _is_excluded_block(cfg_m.group(1)):
-            depth = 0
-            block_started = False
-            for j in range(i, min(n, i + 500)):
-                opens  = code_lines[j].count('{')
-                closes = code_lines[j].count('}')
-                if opens > 0:
-                    block_started = True
-                depth += opens - closes
-                if block_started and depth <= 0:
-                    for lno in range(i + 1, j + 2):
-                        if lno in uncov_lines:
-                            excluded.add(lno)
-                    i = j
-                    break
-        i += 1
-
-    return excluded
+    ctx = _cfg.CfgSet.of(cfg_false=[t for p in excluded_cfgs for t in (p, f'feature = "{p}"')])
+    return ctx.excluded_uncovered_lines(source_text, uncov_lines)
 
 
 def _extract_public_symbols(content: str) -> str:
@@ -12600,7 +12564,7 @@ def _ensure_vllm_ready(root: Path) -> None:
 # collaborator). subprocess/git injected as the module; _current_cluster via a call-time
 # getter (mutable global); coverage provider as a value.
 _TASK0C_DEPS = Task0cDeps(
-    BUILD_TIMEOUT=BUILD_TIMEOUT, COVERAGE_TARGET=COVERAGE_AUGMENTATION_TARGET, coverage_ignore_pragma=COVERAGE_IGNORE_PRAGMA, TASK0C_PROMPT_CHAR_CAP=TASK0C_PROMPT_CHAR_CAP, FIX_ERR_CAP=_FIX_ERR_CAP, SIBLING_CAP=_SIBLING_CAP, SRC_SNIP_CAP=_SRC_SNIP_CAP, TASK0C_FIX_THINKING_DIRECTIVE=_TASK0C_FIX_THINKING_DIRECTIVE, TASK0C_MODEL=_TASK0C_MODEL, TASK0C_THINKING_DIRECTIVE=_TASK0C_THINKING_DIRECTIVE, WORKING_CAP=_WORKING_CAP, annotate_uncovered=_annotate_uncovered, block_is_prose=_block_is_prose, build_gen_tests_decl=_build_gen_tests_decl, guard=_guard, cargo_env=_cargo_env, cluster_cfg_attr=_cluster_cfg_attr, condense_rust_to_signatures=_condense_rust_to_signatures, count_test_attrs=_count_test_attrs, derive_gentest_prelude=_derive_gentest_prelude, describe_test_environment=_describe_test_environment, error_signatures_from_output=_error_signatures_from_output, extract_branch_guard=_extract_branch_guard, extract_gen_tests_body=_extract_gen_tests_body, extract_public_symbols=_extract_public_symbols, extract_uncovered_functions=_extract_uncovered_functions, filter_cfg_excluded_lines=_filter_cfg_excluded_lines, filter_cfg_incompatible_lines=_filter_cfg_incompatible_lines, flags_unreachable=_flags_unreachable, gen_tests_path=_gen_tests_path, has_nonempty_test_body=_has_nonempty_test_body, inject_allow_before_any_mod=_inject_allow_before_any_mod, inject_allow_before_gen_mod=_inject_allow_before_gen_mod, inject_gen_prelude_imports=_inject_gen_prelude_imports, is_gen_tests_file=_is_gen_tests_file, is_structural_line=_is_structural_line, load_file_constraints=_load_file_constraints, type_signals_write=type_signals_write, mark_phase=_mark_phase, match_gen_tests_sibling=_match_gen_tests_sibling, next_gen_tests_n=_next_gen_tests_n, nightly_rules_for_cluster=_nightly_rules_for_cluster, parse_attempt_number=_parse_attempt_number, parse_retrospective_categories=_parse_retrospective_categories, partition_uncovered_lines=_partition_uncovered_lines, prelude_import_names=_prelude_import_names, quick_file_coverage=_quick_file_coverage, read_all_gen_tests=_read_all_gen_tests, read_state=_read_state, revert_gen_tests_pass=_revert_gen_tests_pass, select_relevant_siblings=_select_relevant_siblings, set_current=_set_current, source_hash=_source_hash, strip_all_gen_tests_artifacts=_strip_all_gen_tests_artifacts, strip_gen_tests_decl_n=_strip_gen_tests_decl_n, strip_gen_tests_decls=_strip_gen_tests_decls, strip_trailing_file_tag=_strip_trailing_file_tag, mutation_harden_file=_mutation_harden_file, gen_tests_siblings=_gen_tests_siblings, test_augmentor_factory=_test_augmentor_factory, ask=ask, extract_files=extract_files, extract_test_mod=extract_test_mod, generate_fix_loop=generate_fix_loop, generate_in_parallel=generate_in_parallel, is_test_file=is_test_file, write=write,
+    BUILD_TIMEOUT=BUILD_TIMEOUT, COVERAGE_TARGET=COVERAGE_AUGMENTATION_TARGET, coverage_ignore_pragma=COVERAGE_IGNORE_PRAGMA, TASK0C_PROMPT_CHAR_CAP=TASK0C_PROMPT_CHAR_CAP, FIX_ERR_CAP=_FIX_ERR_CAP, SIBLING_CAP=_SIBLING_CAP, SRC_SNIP_CAP=_SRC_SNIP_CAP, TASK0C_FIX_THINKING_DIRECTIVE=_TASK0C_FIX_THINKING_DIRECTIVE, TASK0C_MODEL=_TASK0C_MODEL, TASK0C_THINKING_DIRECTIVE=_TASK0C_THINKING_DIRECTIVE, WORKING_CAP=_WORKING_CAP, annotate_uncovered=_annotate_uncovered, block_is_prose=_block_is_prose, build_gen_tests_decl=_build_gen_tests_decl, guard=_guard, cargo_env=_cargo_env, cluster_gate_for=_cluster_gate_for_sibling, condense_rust_to_signatures=_condense_rust_to_signatures, count_test_attrs=_count_test_attrs, derive_gentest_prelude=_derive_gentest_prelude, describe_test_environment=_describe_test_environment, error_signatures_from_output=_error_signatures_from_output, extract_branch_guard=_extract_branch_guard, extract_gen_tests_body=_extract_gen_tests_body, extract_public_symbols=_extract_public_symbols, extract_uncovered_functions=_extract_uncovered_functions, filter_cfg_excluded_lines=_filter_cfg_excluded_lines, filter_cfg_incompatible_lines=_filter_cfg_incompatible_lines, flags_unreachable=_flags_unreachable, gen_tests_path=_gen_tests_path, has_nonempty_test_body=_has_nonempty_test_body, inject_allow_before_any_mod=_inject_allow_before_any_mod, inject_allow_before_gen_mod=_inject_allow_before_gen_mod, inject_gen_prelude_imports=_inject_gen_prelude_imports, is_gen_tests_file=_is_gen_tests_file, is_structural_line=_is_structural_line, load_file_constraints=_load_file_constraints, type_signals_write=type_signals_write, mark_phase=_mark_phase, match_gen_tests_sibling=_match_gen_tests_sibling, next_gen_tests_n=_next_gen_tests_n, nightly_rules_for_cluster=_nightly_rules_for_cluster, parse_attempt_number=_parse_attempt_number, parse_retrospective_categories=_parse_retrospective_categories, partition_uncovered_lines=_partition_uncovered_lines, prelude_import_names=_prelude_import_names, quick_file_coverage=_quick_file_coverage, read_all_gen_tests=_read_all_gen_tests, read_state=_read_state, revert_gen_tests_pass=_revert_gen_tests_pass, select_relevant_siblings=_select_relevant_siblings, set_current=_set_current, source_hash=_source_hash, strip_all_gen_tests_artifacts=_strip_all_gen_tests_artifacts, strip_gen_tests_decl_n=_strip_gen_tests_decl_n, strip_gen_tests_decls=_strip_gen_tests_decls, strip_trailing_file_tag=_strip_trailing_file_tag, mutation_harden_file=_mutation_harden_file, gen_tests_siblings=_gen_tests_siblings, test_augmentor_factory=_test_augmentor_factory, ask=ask, extract_files=extract_files, extract_test_mod=extract_test_mod, generate_fix_loop=generate_fix_loop, generate_in_parallel=generate_in_parallel, is_test_file=is_test_file, write=write,
     subprocess=subprocess, get_current_cluster=_SCOPE.get_active,
     coverage_provider=_coverage_provider, check_stop=_check_graceful_stop,
 )

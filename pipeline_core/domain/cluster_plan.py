@@ -99,10 +99,35 @@ def mod_gate_map(mod_records: Iterable[ModRecord]) -> dict[str, set[str]]:
     return out
 
 
+def _custom_cfg_is_reachable(
+    pred: str, bs_set_default: frozenset[str],
+    bs_set_nightly: frozenset[str], bs_declared: frozenset[str],
+) -> bool:
+    """Does a custom `--cfg` predicate correspond to a REACHABLE build (#23)?
+
+    The crate's `build.rs` is the authority on which custom cfgs it sets, captured
+    per available toolchain:
+      * set under the DEFAULT build → intrinsic to stable, not a separate toggle → DROP;
+      * set only under NIGHTLY → a real toolchain-switched cluster → KEEP;
+      * DECLARED (`rustc-check-cfg`) but set on no available toolchain → build-script
+        controlled and off (e.g. anyhow's old-rustc / probe-only / CI-only cfgs) → DROP;
+      * not mentioned by `build.rs` at all → a user-supplied `--cfg` knob → KEEP.
+    When no build-script facts exist (no `build.rs`), every custom pred is KEPT —
+    preserving the pre-#23 behaviour exactly."""
+    if pred in bs_set_default:
+        return False
+    if pred in bs_set_nightly:
+        return True
+    return pred not in bs_declared    # declared-but-unset ⇒ unreachable; unmentioned ⇒ user knob
+
+
 def _classify(counts: Mapping[str, int], cargo_features: frozenset[str],
-              default_features: frozenset[str]) -> list[tuple[str, str]]:
+              default_features: frozenset[str], *,
+              bs_set_default: frozenset[str] = frozenset(),
+              bs_set_nightly: frozenset[str] = frozenset(),
+              bs_declared: frozenset[str] = frozenset()) -> list[tuple[str, str]]:
     """Predicates that earn a cluster, as (predicate, kind) with kind in
-    {"feature", "custom"}; build-target/default/noise predicates are dropped."""
+    {"feature", "custom"}; build-target/default/noise/unreachable predicates dropped."""
     interesting: list[tuple[str, str]] = []
     for pred, count in counts.items():
         if pred in STABLE_KNOWN:
@@ -111,8 +136,8 @@ def _classify(counts: Mapping[str, int], cargo_features: frozenset[str],
             if pred in default_features or count < NOISE_THRESHOLD:
                 continue                      # always-on default, or below noise floor
             interesting.append((pred, "feature"))
-        else:
-            interesting.append((pred, "custom"))   # custom --cfg toggle: always a cluster
+        elif _custom_cfg_is_reachable(pred, bs_set_default, bs_set_nightly, bs_declared):
+            interesting.append((pred, "custom"))   # reachable custom --cfg toggle
     return interesting
 
 
@@ -122,10 +147,24 @@ def plan_clusters(
     cargo_features: Iterable[str],
     default_features: Iterable[str],
     feature_gate_cfgs: Iterable[str],
+    *,
+    bs_set_default: Iterable[str] = (),
+    bs_set_nightly: Iterable[str] = (),
+    bs_declared: Iterable[str] = (),
 ) -> list[BuildCluster]:
-    """Build the stable cluster plus one cluster per interesting predicate."""
-    interesting = _classify(counts, frozenset(cargo_features), frozenset(default_features))
-    nightly_gates = frozenset(feature_gate_cfgs)
+    """Build the stable cluster plus one cluster per interesting predicate.
+
+    ``bs_*`` are the build-script cfg facts (#23): cfgs `build.rs` sets under the
+    default toolchain, sets only under nightly, and merely declares — used to drop
+    custom `--cfg` atoms that no reachable build actually turns on. Empty (the
+    default) ⇒ pre-#23 behaviour (every custom atom is a cluster)."""
+    bs_nightly = frozenset(bs_set_nightly)
+    interesting = _classify(
+        counts, frozenset(cargo_features), frozenset(default_features),
+        bs_set_default=frozenset(bs_set_default),
+        bs_set_nightly=bs_nightly,
+        bs_declared=frozenset(bs_declared))
+    nightly_gates = frozenset(feature_gate_cfgs) | bs_nightly
 
     def gated_for(excluded: list[str]) -> set[str]:
         out: set[str] = set()

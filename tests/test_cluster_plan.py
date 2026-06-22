@@ -99,3 +99,43 @@ def test_gated_files_attach_to_stable_excluded_cfg() -> None:
 def test_cluster_name_for_custom_known_and_sanitized() -> None:
     assert cluster_name_for_custom("provide_any") == "nightly"
     assert cluster_name_for_custom("io_uring_support") == "io_uring"
+
+
+# --- #23: build-script reachability prunes phantom clusters ---
+
+def test_bs_declared_but_unset_custom_cfg_is_dropped() -> None:
+    # anyhow shape: 4 cfgs DECLARED via rustc-check-cfg but set on no available
+    # toolchain (old-rustc / probe-only / CI-only) → no clusters; egma is set
+    # under nightly → the one real extra cluster.
+    counts = {"anyhow_no_core_error": 9, "anyhow_build_probe": 8,
+              "anyhow_nightly_testing": 7, "error_generic_member_access": 6}
+    declared = frozenset({"anyhow_no_core_error", "anyhow_build_probe",
+                          "anyhow_nightly_testing", "error_generic_member_access"})
+    clusters = plan_clusters(
+        counts, {}, cargo_features=[], default_features=[], feature_gate_cfgs=[],
+        bs_set_default=frozenset(), bs_set_nightly=frozenset({"error_generic_member_access"}),
+        bs_declared=declared)
+    assert [c.name for c in clusters] == ["stable", "nightly"]
+    assert clusters[1].active_cfg == ["error_generic_member_access"]
+    assert clusters[1].requires_nightly is True       # set-only-under-nightly ⇒ nightly
+
+
+def test_bs_set_under_default_cfg_is_intrinsic_not_a_cluster() -> None:
+    # On an OLD rustc build.rs sets no_core_error by default → it's part of stable,
+    # never a separate toggle.
+    counts = {"anyhow_no_core_error": 9}
+    clusters = plan_clusters(
+        counts, {}, cargo_features=[], default_features=[], feature_gate_cfgs=[],
+        bs_set_default=frozenset({"anyhow_no_core_error"}),
+        bs_declared=frozenset({"anyhow_no_core_error"}))
+    assert [c.name for c in clusters] == ["stable"]
+    assert clusters[0].excluded_cfg == []
+
+
+def test_bs_unmentioned_custom_cfg_stays_a_cluster() -> None:
+    # A `--cfg` the build script never mentions = a user knob → keep (pre-#23).
+    counts = {"extra_cap": 1}
+    clusters = plan_clusters(
+        counts, {}, cargo_features=[], default_features=[], feature_gate_cfgs=[],
+        bs_declared=frozenset({"some_other_cfg"}))
+    assert [c.name for c in clusters] == ["stable", "extra_cap"]

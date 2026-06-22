@@ -16,15 +16,33 @@ from pathlib import Path
 from typing import NamedTuple
 
 from ...domain import cluster_plan
+from ...domain.build_script import BuildScriptCfg
 from ...domain.cargo_toml import load_cargo_toml
 from ...domain.models import BuildCluster
 from ...log import log
+from ...ports.build_script import BuildScriptReader
 from ...ports.cluster_facts import ClusterFactReader
 
 
 class ClusterScan(NamedTuple):
     clusters: list[BuildCluster]
     predicate_counts: dict[str, int]
+
+
+def _build_script_facts(
+    project_dir: Path, build_script: BuildScriptReader | None,
+) -> tuple[frozenset[str], frozenset[str], frozenset[str]]:
+    """(set-under-default, set-only-under-nightly, declared) cfgs from `build.rs`,
+    captured under the available toolchains. Empty when no reader / no build script
+    — the planner then keeps every custom atom (pre-#23 behaviour)."""
+    if build_script is None:
+        return frozenset(), frozenset(), frozenset()
+    default = build_script.emitted_cfgs(project_dir, None) or BuildScriptCfg.empty()
+    nightly = build_script.emitted_cfgs(project_dir, "nightly") or BuildScriptCfg.empty()
+    set_default = default.set_cfgs
+    set_nightly = nightly.set_cfgs - set_default
+    declared = default.declared_cfgs | nightly.declared_cfgs
+    return set_default, set_nightly, declared
 
 
 def _cargo_features(project_dir: Path) -> tuple[set[str], set[str]]:
@@ -40,19 +58,24 @@ def _cargo_features(project_dir: Path) -> tuple[set[str], set[str]]:
     return set(feats.keys()), default_set
 
 
-def scan_build_clusters(project_dir: Path, reader: ClusterFactReader) -> ClusterScan:
-    """Derive the cluster plan for ``project_dir`` from its source cfg facts."""
+def scan_build_clusters(project_dir: Path, reader: ClusterFactReader,
+                        build_script: BuildScriptReader | None = None) -> ClusterScan:
+    """Derive the cluster plan for ``project_dir`` from its source cfg facts,
+    pruned by what ``build.rs`` actually emits (#23) when a ``build_script`` reader
+    is supplied (else every custom cfg atom is kept — pre-#23 behaviour)."""
     src_dir = project_dir / "src"
     cargo_features, default_features = _cargo_features(project_dir)
 
     occurrences = reader.enumerate_cfgs(src_dir) or []
     mod_records = reader.enumerate_mods(src_dir) or []
     feature_gate_cfgs = set(reader.enumerate_feature_gate_cfgs(src_dir) or [])
+    bs_set_default, bs_set_nightly, bs_declared = _build_script_facts(project_dir, build_script)
 
     counts = cluster_plan.predicate_counts(occurrences)
     gates = cluster_plan.mod_gate_map(mod_records)
     clusters = cluster_plan.plan_clusters(
-        counts, gates, cargo_features, default_features, feature_gate_cfgs)
+        counts, gates, cargo_features, default_features, feature_gate_cfgs,
+        bs_set_default=bs_set_default, bs_set_nightly=bs_set_nightly, bs_declared=bs_declared)
 
     for c in clusters:
         if c.requires_nightly:
