@@ -57,6 +57,7 @@ from pipeline_core.adapters.artifacts import (
 from pipeline_core.adapters.artifacts import (
     type_manifest_path as _type_manifest_path,
 )
+from pipeline_core.adapters.augment_store import FileAugmentStore
 from pipeline_core.adapters.build_script import CargoBuildScriptReader
 from pipeline_core.adapters.cargo import CargoEnv
 from pipeline_core.adapters.coverage import CoverageDeps
@@ -965,7 +966,11 @@ FAILURE_LOG_NAME = "failure_log.md"
 
 # Directory for locked module source backups (bottom-up integration).
 # Layout vocabulary now lives in pipeline_core.domain.workspace_layout.
-from pipeline_core.domain.workspace_layout import LOCKED_MODULES_DIR  # noqa: E402
+from pipeline_core.domain.workspace_layout import (  # noqa: E402
+    CLUSTER_AUGMENTED_DIR,
+    LOCKED_MODULES_DIR,
+    MODULE_AUGMENTED_DIR,
+)
 
 # Sentinel file written by TASK 0c when coverage augmentation is complete.
 COVERAGE_AUGMENT_SENTINEL = ".coverage_augmented"
@@ -1015,9 +1020,8 @@ WORKSPACE_DIR = "tmp"
 # Compiler cluster plan — derived from source, written once per project.
 BUILD_CONFIGS_NAME = "build_configs.md"
 
-# Per-cluster per-module augmentation sentinels (parallel to MODULE_AUGMENTED_DIR).
-CLUSTER_AUGMENTED_DIR  = ".cluster_augmented"
-MODULE_AUGMENTED_DIR   = ".module_augmented"
+# Augmentation sentinel dir names: single source of truth in domain vocabulary
+# (CLUSTER_AUGMENTED_DIR / MODULE_AUGMENTED_DIR imported above; used by clean_state).
 MODULE_STRIPPED_DIR    = ".module_stripped"
 
 # Per-file attempt log for TASK 0c: JSONL, one entry per generation attempt (BL-002).
@@ -3284,20 +3288,6 @@ def setup_workspace(repo: str, workspace_dir: Path, force_fresh: bool = False) -
     return dest
 
 
-def _cluster_augmented_path(project_dir: Path, cluster_name: str, module_name: str) -> Path:
-    return project_dir / CLUSTER_AUGMENTED_DIR / f"{cluster_name}__{module_name}"
-
-
-def is_cluster_augmented(project_dir: Path, cluster_name: str, module_name: str) -> bool:
-    return _cluster_augmented_path(project_dir, cluster_name, module_name).exists()
-
-
-def mark_cluster_augmented(project_dir: Path, cluster_name: str, module_name: str, cov: float) -> None:
-    p = _cluster_augmented_path(project_dir, cluster_name, module_name)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(f"{cov:.1f}\n")  # R8.4: bare numeric (no '%' text round-trip)
-
-
 def _nightly_rules_for_cluster() -> str:
     """Return the nightly boundary rules to inject into generation prompts.
     Non-default cluster: cluster-specific override from prompt_nightly_rule.
@@ -3363,6 +3353,8 @@ ADAPTERS = build_adapters(SETTINGS, extractor_bin=SKELETON_EXTRACTOR_BIN, model=
 _STRUCTURE = CliStructureReader(ADAPTERS.extractor)
 # #23: build.rs cfg authority — prunes phantom clusters from source `#[cfg]` atoms.
 _BUILD_SCRIPT_READER = CargoBuildScriptReader()
+# P6: TASK 0c augmentation sentinels (injected into ClusterAugmentor + strip/bake).
+_AUGMENT_STORE = FileAugmentStore()
 
 
 class _LateStructure:
@@ -12175,20 +12167,6 @@ def clean_state(root: Path, project_dir: Path, manifest_path: Path,
 # Per-module pipeline helpers
 # ---------------------------------------------------------------------------
 
-def _module_augmented_path(project_dir: Path, module_name: str) -> Path:
-    return project_dir / MODULE_AUGMENTED_DIR / module_name
-
-
-def is_module_augmented(project_dir: Path, module_name: str) -> bool:
-    return _module_augmented_path(project_dir, module_name).exists()
-
-
-def mark_module_augmented(project_dir: Path, module_name: str, coverage: float) -> None:
-    p = _module_augmented_path(project_dir, module_name)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(f"{coverage:.1f}\n")  # R8.4: bare numeric (no '%' text round-trip)
-
-
 # Strip subsystem moved to pipeline_core.adapters.strip (P5-S2). Shims keep the
 # module-level names existing call sites reference.
 strip_module_source = _strip_mod.strip_module_source
@@ -12580,7 +12558,7 @@ _REATTACH_DEPS = ReattachDeps(
 
 # P5-S3: deps for the extracted strip/bake/commit pre-step (per-block injection).
 _STRIP_BAKE_DEPS = StripBakeDeps(
-    log=_log, phase_valid=_phase_valid, module_augmented_path=_module_augmented_path,
+    log=_log, phase_valid=_phase_valid, module_augmented_path=_AUGMENT_STORE.module_path,
     capture_api_surface=_capture_api_surface,
     bake_skeleton_artifacts=_bake_skeleton_artifacts,
     git_commit=git_commit, git_tag=git_tag,
@@ -12777,28 +12755,8 @@ class _AugmentAdapter:
 
     # --- ClusterScope: `_SCOPE` (domain.cluster_scope.ClusterScope) satisfies the
     #     port directly and is injected into ClusterAugmentor — no binding needed. ---
-
-    # --- AugmentStore ---
-    def is_cluster_augmented(self, project_dir: Path, cluster_name: str, module_name: str) -> bool:
-        return is_cluster_augmented(project_dir, cluster_name, module_name)
-
-    def mark_cluster_augmented(self, project_dir: Path, cluster_name: str, module_name: str, cov: float) -> None:
-        mark_cluster_augmented(project_dir, cluster_name, module_name, cov)
-
-    def cluster_augmented_value(self, project_dir: Path, cluster_name: str, module_name: str) -> float:
-        try:
-            return float(_cluster_augmented_path(project_dir, cluster_name, module_name).read_text().strip())
-        except (ValueError, OSError):
-            return 0.0
-
-    def is_module_augmented(self, project_dir: Path, module_name: str) -> bool:
-        return is_module_augmented(project_dir, module_name)
-
-    def mark_module_augmented(self, project_dir: Path, module_name: str, cov: float) -> None:
-        mark_module_augmented(project_dir, module_name, cov)
-
-    def clear_module_sentinel(self, project_dir: Path, module_name: str) -> None:
-        _module_augmented_path(project_dir, module_name).unlink(missing_ok=True)
+    # --- AugmentStore: `FileAugmentStore` (adapters.augment_store) satisfies the
+    #     port directly and is injected as `store=` — no binding needed. ---
 
     # --- AugmentEngine ---
     def estimate_ceiling(self, project_dir: Path, cluster: "BuildCluster") -> "tuple[float, int, int]":
@@ -12828,7 +12786,7 @@ class _AugmentAdapter:
 
 _AUGMENT_ADAPTER = _AugmentAdapter()
 _CLUSTER_AUGMENTOR = ClusterAugmentor(
-    telemetry=_AUGMENT_ADAPTER, scope=_SCOPE, store=_AUGMENT_ADAPTER,
+    telemetry=_AUGMENT_ADAPTER, scope=_SCOPE, store=_AUGMENT_STORE,
     engine=_AUGMENT_ADAPTER, gate=_AUGMENT_ADAPTER,
 )
 
@@ -13163,7 +13121,7 @@ def main():
         # outer loop above. This block just verifies the sentinel and proceeds.
         # FORWARD MODE: skip — there is no augmentation phase in spec-driven mode.
         if not _from_spec:
-            if not is_module_augmented(project_dir, module_name):
+            if not _AUGMENT_STORE.is_module_augmented(project_dir, module_name):
                 _log(f"  WARNING: '{module_name}' has no augmentation sentinel — proceeding anyway.")
             _log(f"  TASK 0c: '{module_name}' all clusters done — proceeding to strip.")
 
@@ -13171,11 +13129,7 @@ def main():
         # A hard stop here would abort the pipeline on coverage tool failures (bad sentinel,
         # grcov error, etc.) even when the test suite is intact.
         if crate_type != "proc-macro" and TARPAULIN_BIN.exists():
-            _sentinel_path = _module_augmented_path(project_dir, module_name)
-            try:
-                _final_cov = float(_sentinel_path.read_text().strip())  # R8.4: numeric sentinel
-            except (ValueError, OSError):
-                _final_cov = 0.0
+            _final_cov = _AUGMENT_STORE.module_augmented_value(project_dir, module_name)
             if _final_cov < COVERAGE_AUGMENTATION_TARGET:
                 _log(
                     f"\n  WARNING: '{module_name}' coverage is {_final_cov:.1f}% — "
