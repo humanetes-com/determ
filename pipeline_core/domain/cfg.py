@@ -340,3 +340,27 @@ class CfgSet:
         aug = CfgSet(true=self.true, false=frozenset(aug_false),
                      default_features=self.default_features)
         return tree.evaluate(aug) is False
+
+
+def cluster_gate_predicate(active_cfg: list[str], excluded_cfg: list[str]) -> str:
+    """Build the cfg predicate body (without `#[cfg(...)]` wrapping) that is true
+    for this cluster and false for all others — the gate used when several
+    clusters have divergent versions of the same item (FR-032).
+
+    Each cfg may be activated EITHER as a bare ``--cfg N`` (RUSTFLAGS) OR as a
+    cargo ``feature = "N"``, and a cluster sets only ONE of the two. So each
+    active predicate becomes ``any(N, feature = "N")`` (true under whichever form
+    this cluster uses) and each excluded predicate becomes ``not(any(...))``; the
+    whole gate ANDs them. Built from active/excluded bare names — never the
+    double ``all(N, feature = "N")`` form, which is unsatisfiable for a
+    ``--cfg``-activated cluster (the feature is off)."""
+    def _either(pred: str) -> str:
+        return f'any({pred}, feature = "{pred}")'
+
+    terms: list[str] = [_either(p) for p in (active_cfg or [])]
+    terms += [f"not({_either(p)})" for p in (excluded_cfg or [])]
+    if not terms:
+        return ""
+    if len(terms) == 1:
+        return terms[0]
+    return "all(" + ", ".join(terms) + ")"

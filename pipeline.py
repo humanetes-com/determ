@@ -63,6 +63,7 @@ from pipeline_core.adapters.augment_engine import CargoAugmentEngine
 from pipeline_core.adapters.augment_store import FileAugmentStore
 from pipeline_core.adapters.build_script import CargoBuildScriptReader
 from pipeline_core.adapters.cargo import CargoEnv
+from pipeline_core.adapters.cluster_merge import ClusterMerger
 from pipeline_core.adapters.commit_gate import CallableCommitGate
 from pipeline_core.adapters.coverage import CoverageDeps
 from pipeline_core.adapters.failure_journal import FileFailureJournal
@@ -78,6 +79,7 @@ from pipeline_core.adapters.fill_engine_roles import (
     TestLinkerAdapter,
     WorkspaceModelAdapter,
 )
+from pipeline_core.adapters.mutation import MutationTester
 from pipeline_core.adapters.ratchet import BestTreeRatchet
 from pipeline_core.adapters.reconstruct_roles import (
     AnalystAdapter,
@@ -136,9 +138,18 @@ from pipeline_core.application.reconstruct.generate_fix import (
     GenerateFixDeps,
     run_generate_fix,
 )
+from pipeline_core.application.reconstruct.impl_blocks import (
+    collect_impl_blocks as _collect_impl_blocks_impl,
+)
 from pipeline_core.application.reconstruct.module_reconstructor import ModuleReconstructor
 from pipeline_core.application.reconstruct.reconstruction_step import ReconstructionStep
 from pipeline_core.application.reconstruct.requirements_phase import RequirementsPhase
+from pipeline_core.application.reconstruct.retrospective import (
+    PhaseCRetroDeps,
+)
+from pipeline_core.application.reconstruct.retrospective import (
+    diagnose_phase_c as _diagnose_phase_c,
+)
 from pipeline_core.application.reconstruct.run_context import RunContext
 from pipeline_core.application.refine_loop import run_callback_loop as _improvement_loop
 from pipeline_core.application.strip_bake import (
@@ -221,12 +232,12 @@ from pipeline_core.domain.failure_classification import (
 )
 from pipeline_core.domain.fix_report import FixReport as _FixReport
 from pipeline_core.domain.fix_session import FixSession
+from pipeline_core.domain.impl_block_ranges import parse_impl_block_ranges
 from pipeline_core.domain.llm_output import (
     GENESIS_DELIM_END,
     GENESIS_DELIM_START,
     _extract_genesis,
     extract_files,
-    parse_retrospective,
     parse_self_note,
 )
 from pipeline_core.domain.llm_output import (
@@ -281,7 +292,6 @@ from pipeline_core.domain.retry_outcome import (
 )
 from pipeline_core.domain.rust_scan import (
     after_brace_newline,
-    count_cfg_attrs,
     count_test_attrs,
     find_mod_opener,
     item_names,
@@ -339,9 +349,6 @@ from pipeline_core.prompts.sections import (
     build_dispatch_family_section as _build_dispatch_family_section_pure,
 )
 from pipeline_core.prompts.sections import (
-    extract_trait_from_container,
-)
-from pipeline_core.prompts.sections import (
     format_type_for_prompt as _format_type_for_prompt,
 )
 from pipeline_core.prompts.sections import (
@@ -362,7 +369,7 @@ from pipeline_core.settings import Settings
 __all__ = [
     "count_passing_tests", "validate_task3_output_strict", "extract_test_output_from_file",
     "GENESIS_DELIM_START", "GENESIS_DELIM_END", "_extract_genesis",
-    "_tag_block", "with_retry",
+    "_tag_block", "with_retry", "_strip_markdown_fences",
 ]
 
 _mi_mtime: float = os.path.getmtime(_mi.__file__)
@@ -6043,63 +6050,17 @@ def _phase_c_retrospective(
     'GENUINELY_HARD' signals the caller should mark the fn as
     fully-exhausted and skip on subsequent iters.
     """
-    if not last_body and not error_excerpt:
-        return {"category": "", "guidance": "", "signal": "no_data"}
-    # #2' (FR-037): if EVERY error is downstream (in other files, none in the
-    # target file), this fn is probably fine and the crate is broken elsewhere.
-    # Running a target retro here misattributes the cause and writes a WRONG
-    # anti-hallucination note (e.g. blaming `construct_from_boxed` for a doc
-    # parse error in lib.rs). Skip it; let the blocking fn's own loop fix it.
-    _exc = error_excerpt or ""
-    if "Errors elsewhere in the crate" in _exc and "Errors in target file" not in _exc:
-        return {"category": "DOWNSTREAM", "guidance": "", "signal": "downstream_only"}
-    prior_section = (
-        f"\nPrior retrospective for this fn (you said this LAST time it failed; "
-        f"if the same approach still failed, escalate to GENUINELY_HARD):\n"
-        f"{prior_retrospective}\n"
-    ) if prior_retrospective.strip() else ""
-    siblings_section = (
-        f"\nSibling impls of `{fn_name}` already filled correctly in this file "
-        f"(use as reference):\n{sibling_bodies}\n"
-    ) if sibling_bodies.strip() else ""
-    prompt = (
-        f"You are diagnosing why a reconstruction attempt for fn `{fn_name}` "
-        f"in `{file_rel}` (impl: `{container}`, cluster: `{cluster_name}`) "
-        f"could not be made to compile after {fix_attempts} attempt(s).\n\n"
-        f"Signature:\n```rust\n{sig_text}\n```\n\n"
-        f"Last attempted body (failed to compile):\n```rust\n{last_body[:_FAILED_BODY_CAP]}\n```\n\n"
-        f"Compile errors from that attempt:\n```\n{error_excerpt[:_FIX_ERR_CAP]}\n```\n"
-        f"{prior_section}"
-        f"{siblings_section}\n"
-        "Classify the root cause in ONE of these categories:\n"
-        "  WRONG_TYPE_CHOICE       — used wrong wrapper/type (e.g. Box vs NonNull vs Own)\n"
-        "  WRONG_DEREF_PATTERN     — *ptr vs .as_ref() vs .deref(); name the correct chain\n"
-        "  MISSING_UNSAFE_PRIMITIVE— body needs unsafe { Self::X() } or similar; name X\n"
-        "  TRAIT_BOUND_VIOLATION   — generic bounds or where-clause mismatch; name the bound\n"
-        "  API_HALLUCINATION       — model called a method that does not exist; name it\n"
-        "  NEEDS_VTABLE_ACCESS     — requires reading the ErrorVTable; layout is needed\n"
-        "  GENUINELY_HARD          — multiple categories or fundamental layout unknown; flag for skip\n\n"
-        "Output EXACTLY two lines:\n"
-        "  CATEGORY: <one of the above>\n"
-        "  GUIDANCE: <one paragraph: what to try instead, specific to this fn>\n\n"
-        "The GUIDANCE should be a concrete instruction (e.g. \"Use "
-        "`self.inner.by_ref().as_ref()` to traverse the NonNull wrapper "
-        "instead of `*self.inner`\"), NOT a generic 'try harder' platitude."
+    return _diagnose_phase_c(
+        fn_name, sig_text, container, file_rel, cluster_name, last_body,
+        error_excerpt, fix_attempts, _PHASE_C_RETRO_DEPS,
+        prior_retrospective=prior_retrospective, sibling_bodies=sibling_bodies,
     )
-    # FR-028: retro runs think=True with a bounded output budget. think=False
-    # returns empty content on the vLLM reasoning-parser endpoint; the OUTPUT
-    # cap (not a context-budget cap) keeps reasoning from running away. One
-    # retry on empty is handled inside _ask_retrospective.
-    try:
-        result = _ask_retrospective(prompt)
-    except Exception as e:
-        _log(f"  [phase-c/retro] LLM call failed: {e}")
-        return {"category": "", "guidance": "", "signal": "llm_error"}
-    if not (result or "").strip():
-        _log(f"  [phase-c/retro] LLM returned empty content for {fn_name}")
-        return {"category": "", "guidance": "", "signal": "empty_response"}
-    # P2 slice 13: tolerant CATEGORY/GUIDANCE parse crossed to domain (regex-free).
-    return parse_retrospective(result)
+
+
+_PHASE_C_RETRO_DEPS = PhaseCRetroDeps(
+    ask_retrospective=_ask_retrospective, log=_log,
+    failed_body_cap=_FAILED_BODY_CAP, fix_err_cap=_FIX_ERR_CAP,
+)
 
 
 def _count_relevant_notes(fr_path: Path | None,
@@ -6864,286 +6825,11 @@ def _scan_unimplemented_records(src_dir: Path) -> list[dict] | None:
 # that per-fn prompts cannot show.
 
 
-def _parse_impl_block_ranges(source: str) -> "list[dict]":
-    """Source-aware scan of a Rust file for impl block byte ranges.
-
-    Returns one record per impl block:
-        {
-            "header_start": int,   # byte offset of the `impl` keyword
-            "body_open":    int,   # byte offset of the `{` that opens the body
-            "body_close":   int,   # byte offset of the matching `}`
-        }
-
-    The scanner respects comments (line and block, including nested),
-    string literals (regular and raw), char literals, and lifetime
-    tokens — so braces inside any of those don't confuse the
-    depth counter. Used by `_collect_impl_blocks` to assign each fn
-    record to the SPECIFIC impl block whose body range contains the
-    fn's `sig_byte_start`, which disambiguates two impls that share an
-    identical container string but differ in their where-clauses
-    (e.g. `impl<'a, T> Mut<'a, T> where T: ?Sized` vs the unsized
-    `impl<'a, T> Mut<'a, T>`).
-    """
-    n = len(source)
-    out: list[dict] = []
-
-    def _skip_line_comment(i: int) -> int:
-        while i < n and source[i] != "\n":
-            i += 1
-        return i
-
-    def _skip_block_comment(i: int) -> int:
-        # Rust permits nested `/* … */` blocks.
-        depth = 1
-        i += 2
-        while i < n and depth > 0:
-            if source[i] == "/" and i + 1 < n and source[i+1] == "*":
-                depth += 1; i += 2
-            elif source[i] == "*" and i + 1 < n and source[i+1] == "/":
-                depth -= 1; i += 2
-            else:
-                i += 1
-        return i
-
-    def _skip_string(i: int) -> int:
-        # Cursor is on the opening `"`.
-        i += 1
-        while i < n and source[i] != '"':
-            if source[i] == "\\" and i + 1 < n:
-                i += 2
-            else:
-                i += 1
-        return i + 1 if i < n else i
-
-    def _skip_raw_string(i: int) -> int:
-        # Cursor is on `r`. Match `r#…#"…"#…#`.
-        j = i + 1
-        hashes = 0
-        while j < n and source[j] == "#":
-            hashes += 1; j += 1
-        if j >= n or source[j] != '"':
-            return i + 1  # not a raw string, just consume `r`
-        end_pat = '"' + ("#" * hashes)
-        pos = source.find(end_pat, j + 1)
-        return pos + len(end_pat) if pos != -1 else n
-
-    def _skip_char_or_lifetime(i: int) -> int:
-        # Cursor is on `'`. Could be `'x'` (char) or `'a` (lifetime).
-        j = i + 1
-        if j < n and (source[j].isalpha() or source[j] == "_"):
-            k = j
-            while k < n and (source[k].isalnum() or source[k] == "_"):
-                k += 1
-            if k < n and source[k] == "'":
-                return k + 1  # char literal `'A'`
-            return k  # lifetime `'a` — already past
-        # Escaped char or symbol literal.
-        if j < n and source[j] == "\\" and j + 1 < n:
-            j += 2
-        elif j < n:
-            j += 1
-        if j < n and source[j] == "'":
-            return j + 1
-        return j
-
-    def _is_word_boundary(i: int) -> bool:
-        if i == 0:
-            return True
-        prev = source[i - 1]
-        return not (prev.isalnum() or prev == "_")
-
-    i = 0
-    while i < n:
-        ch = source[i]
-        # Whitespace.
-        if ch.isspace():
-            i += 1; continue
-        # Comments.
-        if ch == "/" and i + 1 < n and source[i+1] == "/":
-            i = _skip_line_comment(i); continue
-        if ch == "/" and i + 1 < n and source[i+1] == "*":
-            i = _skip_block_comment(i); continue
-        # Strings.
-        if ch == '"':
-            i = _skip_string(i); continue
-        if ch == "r" and i + 1 < n and source[i+1] in ('"', "#"):
-            i = _skip_raw_string(i); continue
-        # Char / lifetime.
-        if ch == "'":
-            i = _skip_char_or_lifetime(i); continue
-        # Impl keyword.
-        if (ch == "i" and source.startswith("impl", i)
-                and _is_word_boundary(i)
-                and (i + 4 >= n
-                     or not (source[i+4].isalnum() or source[i+4] == "_"))):
-            header_start = i
-            j = i + 4
-            # Walk to the `{` that opens the impl body — same scanner so
-            # `<…>` and `where … { … }` clauses (in generics' const
-            # expressions, theoretical) don't fool us.
-            body_open = -1
-            while j < n:
-                cj = source[j]
-                if cj.isspace(): j += 1; continue
-                if cj == "/" and j + 1 < n and source[j+1] == "/":
-                    j = _skip_line_comment(j); continue
-                if cj == "/" and j + 1 < n and source[j+1] == "*":
-                    j = _skip_block_comment(j); continue
-                if cj == '"':
-                    j = _skip_string(j); continue
-                if cj == "r" and j + 1 < n and source[j+1] in ('"', "#"):
-                    j = _skip_raw_string(j); continue
-                if cj == "'":
-                    j = _skip_char_or_lifetime(j); continue
-                if cj == "{":
-                    body_open = j; break
-                if cj == ";":
-                    # `impl X;` is not valid Rust; abort this candidate.
-                    body_open = -1; break
-                j += 1
-            if body_open == -1:
-                i = j; continue
-            # Walk to matching `}`.
-            depth = 1
-            k = body_open + 1
-            while k < n and depth > 0:
-                ck = source[k]
-                if ck == "/" and k + 1 < n and source[k+1] == "/":
-                    k = _skip_line_comment(k); continue
-                if ck == "/" and k + 1 < n and source[k+1] == "*":
-                    k = _skip_block_comment(k); continue
-                if ck == '"':
-                    k = _skip_string(k); continue
-                if ck == "r" and k + 1 < n and source[k+1] in ('"', "#"):
-                    k = _skip_raw_string(k); continue
-                if ck == "'":
-                    k = _skip_char_or_lifetime(k); continue
-                if ck == "{": depth += 1; k += 1; continue
-                if ck == "}":
-                    depth -= 1; k += 1
-                    if depth == 0:
-                        out.append({
-                            "header_start": header_start,
-                            "body_open": body_open,
-                            "body_close": k - 1,
-                        })
-                        i = k; break
-                    continue
-                k += 1
-            else:
-                i = k
-            continue
-        i += 1
-    return out
-
-
 def _collect_impl_blocks(src_dir: Path) -> list[ImplBlock] | None:
-    """Group every fn record into its impl/trait/mod container.
-
-    Disambiguation: blocks are keyed by the FULL impl header (text from
-    source between the `impl` keyword and the opening `{`), not by the
-    container string the extractor records. Two impls with identical
-    `impl Foo<T>` heads but different `where T: …` clauses are now
-    separate blocks instead of collapsing into one — this fixes the
-    Mut::read class of failure where the impl-level `T: ?Sized` was
-    invisible to the model.
-
-    Returns one record per (file, header_text) pair:
-        {
-            "file": str,
-            "container": str,            # FULL impl header text including
-                                          # where-clauses (or "" for free
-                                          # fns / fallback when source
-                                          # parsing failed).
-            "members": [fn_record, …],   # ordered by source byte position
-            "stub_members": [fn_record, …],  # subset where body is unimplemented
-            "related_containers": [str, …],  # other impl blocks in the SAME
-                                              # file whose trait name matches
-                                              # this block's (lets the prompt
-                                              # show e.g. both impl AsRef<T1>
-                                              # and impl AsRef<T2> for X side
-                                              # by side).
-        }
-
-    Returns None when the extractor binary isn't available.
-    """
-    recs = _enumerate_fns_via_extractor(src_dir)
-    if recs is None:
-        return None
-
-    # Step 1 — per file: parse the source to get impl block byte ranges,
-    # then assign each fn record to the block whose body range contains
-    # its sig_byte_start. Caches parsed ranges so we don't re-parse the
-    # same file once per fn record.
-    file_to_source: dict[str, str] = {}
-    file_to_impl_ranges: dict[str, list[dict]] = {}
-    def _source_for(rel: str) -> str:
-        if rel not in file_to_source:
-            p = src_dir / rel
-            try:
-                file_to_source[rel] = p.read_text(encoding="utf-8")
-            except Exception:
-                file_to_source[rel] = ""
-        return file_to_source[rel]
-    def _ranges_for(rel: str) -> "list[dict]":
-        if rel not in file_to_impl_ranges:
-            file_to_impl_ranges[rel] = _parse_impl_block_ranges(_source_for(rel))
-        return file_to_impl_ranges[rel]
-
-    # Step 2 — group fns by (file, header_text). header_text is the
-    # actual source slice for the impl block — includes generics,
-    # where-clauses, `for Trait` headers verbatim.
-    groups: dict[tuple[str, str], list[dict]] = {}
-    for r in recs:
-        rel = r.get("file", "")
-        sig_start = int(r.get("sig_byte_start", 0))
-        # Find the impl block whose body range contains this sig.
-        header_text = ""
-        for rng in _ranges_for(rel):
-            if rng["body_open"] < sig_start < rng["body_close"]:
-                src = _source_for(rel)
-                # Header slice = [impl keyword .. opening `{`).
-                header_text = src[rng["header_start"]:rng["body_open"]].rstrip()
-                break
-        if not header_text:
-            # Fallback to the extractor's container string when source
-            # parsing missed (e.g. fn in a trait, free fn, or our
-            # scanner failed). Keeps legacy behaviour for those cases.
-            header_text = r.get("container", "") or ""
-        key = (rel, header_text)
-        groups.setdefault(key, []).append(r)
-
-    # Step 3 — render block records. Related grouping: two trait impls in the
-    # same file are "related" iff they share the same trait name. Trait name is
-    # extracted regex-free via extract_trait_from_container (R7) — it returns
-    # None for inherent impls / free fns, matching the old `for`-requiring regex.
-    blocks: list[ImplBlock] = []
-    file_to_trait_containers: dict[str, dict[str, list[str]]] = {}
-    for (file_rel, container), _members in groups.items():
-        if not container:
-            continue
-        trait_name = extract_trait_from_container(container)
-        if not trait_name:
-            continue
-        file_to_trait_containers.setdefault(file_rel, {}).setdefault(
-            trait_name, []).append(container)
-    for (file_rel, container), members in groups.items():
-        members_sorted = sorted(members, key=lambda r: int(r.get("sig_byte_start", 0)))
-        stub_members = [m for m in members_sorted if m.get("has_unimplemented_body")]
-        related: list[str] = []
-        if container:
-            trait_name = extract_trait_from_container(container)
-            if trait_name:
-                same_trait = file_to_trait_containers.get(file_rel, {}).get(trait_name, [])
-                related = [c for c in same_trait if c != container]
-        blocks.append(ImplBlock(
-            file=file_rel,
-            container=container,
-            members=tuple(FnRecord.from_dict(r) for r in members_sorted),
-            stub_members=tuple(FnRecord.from_dict(r) for r in stub_members),
-            related_containers=tuple(related),
-        ))
-    return blocks
+    """Group fn records into impl/trait/mod containers. Thin shim over the
+    relocated use-case (`application.reconstruct.impl_blocks`); the extractor
+    seam is injected. Name kept for the monkeypatch test seam."""
+    return _collect_impl_blocks_impl(src_dir, enumerate_fns=_enumerate_fns_via_extractor)
 
 
 def _impl_block_id(file_rel: str, container: str) -> str:
@@ -8669,6 +8355,16 @@ _GEN_CARGO = CargoBackendAdapter(
     attribute_failures_fn=lambda to, sd, rf, trm, cn: _attribute_failures(to, sd, rf, trm, cn),
     filter_test_targets_fn=lambda fr, sd: _filter_test_targets(fr, sd),
 )
+# P6: cross-cluster skeleton merge — focused adapter, composition-injected.
+_CLUSTER_MERGER = ClusterMerger(extractor_bin=_SKELETON_EXTRACTOR_BIN, log=_log)
+
+# P6: mutation-testing behaviour hardening — focused adapter, composition-injected
+# (ask late-bound so a test monkeypatching pipeline.ask still intercepts).
+_MUTATION = MutationTester(
+    cargo_env=_cargo_env, ask=lambda *a, **k: ask(*a, **k), log=_log,
+    task0c_model=_TASK0C_MODEL, single_call_char_limit=SINGLE_CALL_CHAR_LIMIT,
+)
+
 _GEN_FILL = FillEngineAdapter(
     run_phase_c_tdd_fn=lambda **kw: _run_phase_c_tdd(**kw),
     fill_fns_one_by_one_fn=lambda **kw: _task2_fill_fns_one_by_one(**kw),
@@ -8676,7 +8372,7 @@ _GEN_FILL = FillEngineAdapter(
     group_tests_fn=lambda sd, tf, **kw: _task2_group_tests(sd, tf, **kw),
     cleanup_residuals_fn=lambda tsd, pd, fr, tf, **kw: _task2_cleanup_residuals(tsd, pd, fr, tf, **kw),
     scan_unimplemented_fn=lambda sd: _scan_unimplemented_functions(sd),
-    merge_cluster_outputs_fn=lambda **kw: _merge_cluster_outputs(**kw),
+    merge_cluster_outputs_fn=lambda **kw: _CLUSTER_MERGER.merge_cluster_outputs(**kw),
     generate_fix_loop_fn=lambda **kw: generate_fix_loop(**kw),
     reset_exhaustion_flags_fn=lambda pd, reason: _reset_exhaustion_flags(pd, reason),
     build_test_reverse_map_fn=lambda tf, sd: _build_test_reverse_map(tf, sd),
@@ -8786,166 +8482,6 @@ def _split_api_surface_by_file(api_surface: str) -> list[tuple[str, str]]:
 
 
 
-def _cluster_cfg_predicate_for_gate(cluster) -> str:
-    """Build the cfg predicate body (without `#[cfg(...)]` wrapping) that's
-    true for this cluster and false for all others — used as the gate when
-    multiple clusters have divergent versions of the same item.
-
-    FR-032: each cfg may be activated EITHER as a bare `--cfg N` (RUSTFLAGS)
-    OR as a cargo `feature = "N"`, and a given cluster sets only ONE of the
-    two. So each active predicate becomes `any(N, feature = "N")` (true under
-    whichever form this cluster uses) and each excluded predicate becomes
-    `not(any(N, feature = "N"))`. The whole gate ANDs these together.
-
-    The previous version read `cfg_true`/`cfg_false`, which list BOTH forms as
-    separate AND terms — `all(N, feature = "N", …)`. That is unsatisfiable for
-    a `--cfg`-activated cluster (the feature is off), so every divergent item
-    gated this way vanished under that cluster → E0046 in the merged tree.
-    Built from active_cfg/excluded_cfg (bare names) to avoid that double form.
-    """
-    if cluster is None:
-        return ""
-
-    def _either(pred: str) -> str:
-        # Active if the bare cfg OR its cargo-feature form is set.
-        return f'any({pred}, feature = "{pred}")'
-
-    terms: list[str] = []
-    for p in (getattr(cluster, "active_cfg", []) or []):
-        terms.append(_either(p))
-    for p in (getattr(cluster, "excluded_cfg", []) or []):
-        terms.append(f"not({_either(p)})")
-    if not terms:
-        return ""
-    if len(terms) == 1:
-        return terms[0]
-    return "all(" + ", ".join(terms) + ")"
-
-
-def _ast_merge_files(out_path: Path,
-                     cluster_files: list[tuple[str, Path, str]]) -> bool:
-    """Invoke the syn-based merger on a single file. `cluster_files` is a
-    list of (cluster_name, source_path, cfg_predicate). Writes the merged
-    output to `out_path`. Returns True on success.
-
-    Replaces the regex-based item splicer that broke down on trait/impl
-    bodies (each method's textual splice produced orphan declarations
-    outside its trait/impl when bodies diverged across clusters).
-    """
-    if not _SKELETON_EXTRACTOR_BIN.exists():
-        return False
-    cmd: list[str] = [
-        str(_SKELETON_EXTRACTOR_BIN),
-        "--merge-clusters",
-        "--merge-output", str(out_path),
-    ]
-    for name, src_path, cfg_pred in cluster_files:
-        cmd += ["--cluster", f"{name}:{src_path}:{cfg_pred}"]
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-    except Exception as e:
-        _log(f"  [skeleton-merge] extractor invocation failed: {e}")
-        return False
-    if r.returncode != 0:
-        _log(f"  [skeleton-merge] extractor returned rc={r.returncode}: "
-             f"{(r.stderr or '').strip()[:240]}")
-        return False
-    return True
-
-
-def _merge_cluster_outputs(project_dir: Path,
-                            cluster_specs: dict,
-                            successes: list[dict]) -> dict:
-    """Cross-cluster merge: compose per-cluster filled source dirs into
-    project_dir/src/ with cfg-gated divergence for conflicting fills.
-
-    AST-based via the syn extractor's --merge-clusters subcommand. For
-    each file present in any cluster's `.skeleton-filled/{c}/src/`:
-      - The extractor parses each cluster's version into a syn::File.
-      - It walks items in parallel: identical token streams collapse to
-        one entry; divergent items get emitted as gated copies (with
-        their cluster cfg attribute) AT THEIR NATURAL POSITION (inside
-        trait body, impl block, etc — recursively).
-      - The merge respects nested items, which the previous regex-based
-        textual splicer could not.
-
-    Returns {'files_written': int, 'cfg_gated_fns': int}. The
-    `cfg_gated_fns` value is approximate — derived from a post-merge
-    grep — since the AST merger doesn't currently report it back.
-    """
-    cluster_dirs: dict[str, Path] = {}
-    for s in successes:
-        cname = s["cluster"]
-        d = project_dir / ".skeleton-filled" / cname
-        if d.exists():
-            cluster_dirs[cname] = d
-    if not cluster_dirs:
-        return {"files_written": 0, "cfg_gated_fns": 0}
-
-    # Collect every file path across all cluster outputs.
-    all_paths: set[str] = set()
-    for d in cluster_dirs.values():
-        for p in (d / "src").rglob("*.rs"):
-            all_paths.add(str(p.relative_to(d)))
-
-    files_written = 0
-    cfg_gated_fns = 0
-    extractor_available = _SKELETON_EXTRACTOR_BIN.exists()
-    if not extractor_available:
-        _log("  [skeleton-merge] WARN: extractor binary missing; falling "
-             "back to base-cluster passthrough (no divergence handling).")
-
-    for rel in sorted(all_paths):
-        if ".gen_tests_" in rel:
-            continue
-        # Gather (cluster_name, path, cfg_predicate) for every cluster
-        # that has this file. Lexicographic order means a stable cluster
-        # is base when present, which keeps merge output deterministic.
-        cluster_files: list[tuple[str, Path, str]] = []
-        for cname in sorted(cluster_dirs.keys()):
-            p = cluster_dirs[cname] / rel
-            if not p.exists():
-                continue
-            cluster_obj = cluster_specs.get(cname)
-            cfg_pred = _cluster_cfg_predicate_for_gate(cluster_obj)
-            cluster_files.append((cname, p, cfg_pred))
-        if not cluster_files:
-            continue
-
-        out_path = project_dir / rel
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-
-        merged_ok = False
-        if extractor_available:
-            merged_ok = _ast_merge_files(out_path, cluster_files)
-        if not merged_ok:
-            # Fallback: copy the base cluster's file verbatim. Loses
-            # divergence handling but never corrupts the output. Only
-            # exercised when the extractor binary is missing or its
-            # invocation fails on a specific file.
-            base_path = cluster_files[0][1]
-            try:
-                out_path.write_text(base_path.read_text(encoding="utf-8"),
-                                     encoding="utf-8")
-            except Exception as e:
-                _log(f"  [skeleton-merge] copy fallback failed for {rel}: {e}")
-                continue
-        files_written += 1
-        # Approximate cfg_gated_fns by counting #[cfg(... )] attributes
-        # in the merged output that match our cluster gates. Used only
-        # for the post-merge log line.
-        try:
-            text_out = out_path.read_text(encoding="utf-8")
-            cfg_gated_fns += count_cfg_attrs(
-                text_out,
-                ("error_generic_member_access", "anyhow_no_core_error"),
-            )
-        except Exception:
-            pass
-
-    return {"files_written": files_written, "cfg_gated_fns": cfg_gated_fns}
-
-
 def _is_proc_macro_crate(cargo_toml_text: str) -> bool:
     """True if Cargo.toml declares `proc-macro = true`. (Regex kept in pipeline — Option 1.)"""
     return _cargo_is_proc_macro(cargo_toml_text)
@@ -9013,9 +8549,9 @@ def _render_impl_block(file_text: str, members: "Sequence[FnRecord]") -> str:
     if not members:
         return ""
     anchor = members[0].sig_byte_start
-    for r in _parse_impl_block_ranges(file_text):
-        if r["body_open"] <= anchor < r["body_close"]:
-            return file_text[r["header_start"]:r["body_close"] + 1]
+    for r in parse_impl_block_ranges(file_text):
+        if r.body_open <= anchor < r.body_close:
+            return file_text[r.header_start:r.body_close + 1]
     return "\n".join(m.sig_text for m in members)
 
 
@@ -10116,175 +9652,6 @@ _COV_DEPS = CoverageDeps(
 def _run_tarpaulin(project_dir: Path, module_name: str) -> tuple[float, list[dict], int, int]:
     # Thin shim until call sites migrate (slice 5).
     return _covmod.run_tarpaulin(_COV_DEPS, project_dir, module_name)
-
-
-def _mutation_survivors(
-    project_dir: Path,
-    cluster: "BuildCluster | None" = None,
-    file_rel: "str | None" = None,
-    timeout: int = 1200,
-) -> "list[str] | None":
-    """Run cargo-mutants and return the SURVIVING ("missed") mutants — the
-    behaviour changes the current test suite is BLIND to (M1, behaviour
-    hardening, FR-039). Each entry is the mutant description, e.g.
-    `src/fmt.rs:87:25: replace > with >= in <impl Write for Indented>::write_str`.
-
-    Uses the cluster's toolchain (`+nightly`) and env so survivors reflect that
-    cluster's real build. Returns None when cargo-mutants is unavailable or no
-    report was produced. cargo-mutants exits non-zero when mutants survive, so
-    the report (mutants.out/missed.txt) is read regardless of exit code.
-    """
-    if not (Path.home() / ".cargo" / "bin" / "cargo-mutants").exists() \
-            and shutil.which("cargo-mutants") is None:
-        return None
-    cmd = ["cargo"]
-    tc = getattr(cluster, "toolchain", None) if cluster is not None else None
-    if tc:
-        cmd.append(f"+{tc}")
-    cmd += ["mutants", "--no-shuffle"]
-    if file_rel:
-        cmd += ["--file", file_rel]
-    try:
-        subprocess.run(cmd, cwd=project_dir, capture_output=True, text=True,
-                       timeout=timeout, env=_cargo_env())
-    except Exception:
-        return None
-    missed = project_dir / "mutants.out" / "missed.txt"
-    if not missed.exists():
-        return None
-    try:
-        return [ln.strip() for ln in missed.read_text(encoding="utf-8").splitlines()
-                if ln.strip()]
-    except OSError:
-        return None
-
-
-def _mutation_kill_check(
-    project_dir: Path,
-    cluster: "BuildCluster | None",
-    survivor: str,
-    test_code: str,
-    target_rel: str,
-    timeout: int = 900,
-) -> "tuple[bool, bool]":
-    """M2 discrimination harness. Returns (real_passes, kills_survivor).
-
-    Temporarily attaches `test_code` as a test module to `target_rel`, runs the
-    real suite (the test MUST pass on the correct code), then re-runs
-    cargo-mutants scoped to the survivor's file and checks the survivor moved
-    missed→caught. Always restores the file. Black-box: operates on test code
-    and observable behaviour only — never the mutant diff (FR-036).
-    """
-    surv_file = survivor.split(":", 1)[0] if survivor else None
-    tgt = project_dir / target_rel
-    if not tgt.exists():
-        return (False, False)
-    sib = tgt.with_name(f"{tgt.stem}.mut_candidate.rs")
-    decl = f'\n#[cfg(test)]\n#[allow(clippy::all, unused)]\n#[path = "{sib.name}"]\nmod mut_candidate;\n'
-    orig = tgt.read_text(encoding="utf-8")
-    tc = getattr(cluster, "toolchain", None) if cluster is not None else None
-    try:
-        sib.write_text(test_code, encoding="utf-8")
-        tgt.write_text(orig.rstrip() + decl, encoding="utf-8")
-        cmd = ["cargo"] + ([f"+{tc}"] if tc else []) + ["test", "--quiet"]
-        r = subprocess.run(cmd, cwd=project_dir, capture_output=True, text=True,
-                           timeout=timeout, env=_cargo_env())
-        if r.returncode != 0:
-            return (False, False)            # invalid test (won't compile/pass)
-        if not surv_file:
-            return (True, False)
-        remaining = _mutation_survivors(project_dir, cluster, file_rel=surv_file,
-                                        timeout=timeout)
-        killed = remaining is not None and survivor not in remaining
-        return (True, killed)
-    except Exception:
-        return (False, False)
-    finally:
-        tgt.write_text(orig, encoding="utf-8")
-        try:
-            if sib.exists():
-                sib.unlink()
-        except OSError:
-            pass
-
-
-def _mutation_harden_file(
-    project_dir: Path,
-    module_name: str,
-    cluster: "BuildCluster | None",
-    file_rel: str,
-    max_rounds: int = 3,
-    timeout: int = 900,
-) -> str:
-    """M3: generate BLACK-BOX behaviour tests (public API only, FR-036) that
-    reduce the surviving mutants for `file_rel`. The LLM never sees source
-    bodies or mutant diffs — only the crate's public API surface. Tests are
-    accepted only when they (a) compile + pass on the correct code and (b)
-    actually lower the surviving-mutant count. Returns the accumulated kept
-    test code ("" if nothing helped or no survivors).
-    """
-    baseline = _mutation_survivors(project_dir, cluster, file_rel, timeout)
-    if not baseline:
-        return ""
-    tgt = project_dir / file_rel
-    if not tgt.exists():
-        return ""
-    api = (load_api_surface(project_dir, module_name) or "")[: SINGLE_CALL_CHAR_LIMIT // 3]
-    sib = tgt.with_name(f"{tgt.stem}.mut_hardening.rs")
-    decl = (f'\n#[cfg(test)]\n#[allow(clippy::all, unused)]\n'
-            f'#[path = "{sib.name}"]\nmod mut_hardening;\n')
-    orig = tgt.read_text(encoding="utf-8")
-    tc = getattr(cluster, "toolchain", None) if cluster is not None else None
-    kept: list[str] = []
-    cur = set(baseline)
-    try:
-        for _r in range(max_rounds):
-            if not cur:
-                break
-            prompt = (
-                "Write Rust `#[test]` functions that exercise and ASSERT the exact "
-                "observable behaviour of this crate's PUBLIC API — return values, "
-                "panics/Err, and precise formatted output (Display/Debug). Cover "
-                "edge cases and boundaries; pin exact strings/values with "
-                "`assert_eq!`. Use ONLY the public API below — do not reference "
-                "internal items. The current suite still misses subtle behaviour "
-                "changes; make your assertions tight enough to catch them.\n"
-                f'<PUBLIC_API crate="{module_name}">\n{api}\n</PUBLIC_API>\n'
-                "Output ONLY the test code (no prose, no explanation)."
-            )
-            try:
-                resp = ask(prompt, model=_TASK0C_MODEL)
-            except Exception:
-                break
-            code = _strip_markdown_fences(resp or "").strip()
-            if not code:
-                continue
-            sib.write_text("\n\n".join(kept + [code]), encoding="utf-8")
-            tgt.write_text(orig.rstrip() + decl, encoding="utf-8")
-            cmd = ["cargo"] + ([f"+{tc}"] if tc else []) + ["test", "--quiet"]
-            try:
-                rr = subprocess.run(cmd, cwd=project_dir, capture_output=True,
-                                    text=True, timeout=timeout, env=_cargo_env())
-            except Exception:
-                continue
-            if rr.returncode != 0:
-                continue   # invalid tests — discard this round
-            remaining = _mutation_survivors(project_dir, cluster, file_rel, timeout)
-            if remaining is None:
-                continue
-            if len(remaining) < len(cur):
-                kept.append(code)
-                cur = set(remaining)
-                _log(f"  [mut-harden] {file_rel}: survivors "
-                     f"{len(baseline)}→{len(cur)} (kept round {_r + 1})")
-        return "\n\n".join(kept)
-    finally:
-        tgt.write_text(orig, encoding="utf-8")
-        try:
-            if sib.exists():
-                sib.unlink()
-        except OSError:
-            pass
 
 
 def _quick_file_coverage(project_dir: Path, module_name: str, rel_path: str) -> tuple[int, int] | None:
@@ -11508,7 +10875,7 @@ _FILE_CONSTRAINTS = FileConstraintsReader(
 # collaborator). subprocess/git injected as the module; _current_cluster via a call-time
 # getter (mutable global); coverage provider as a value.
 _TASK0C_DEPS = Task0cDeps(
-    BUILD_TIMEOUT=BUILD_TIMEOUT, COVERAGE_TARGET=COVERAGE_AUGMENTATION_TARGET, coverage_ignore_pragma=COVERAGE_IGNORE_PRAGMA, TASK0C_PROMPT_CHAR_CAP=TASK0C_PROMPT_CHAR_CAP, FIX_ERR_CAP=_FIX_ERR_CAP, SIBLING_CAP=_SIBLING_CAP, SRC_SNIP_CAP=_SRC_SNIP_CAP, TASK0C_FIX_THINKING_DIRECTIVE=_TASK0C_FIX_THINKING_DIRECTIVE, TASK0C_MODEL=_TASK0C_MODEL, TASK0C_THINKING_DIRECTIVE=_TASK0C_THINKING_DIRECTIVE, WORKING_CAP=_WORKING_CAP, annotate_uncovered=_annotate_uncovered, block_is_prose=_block_is_prose, build_gen_tests_decl=_build_gen_tests_decl, guard=_guard, cargo_env=_cargo_env, cluster_gate_for=_cluster_gate_for_sibling, condense_rust_to_signatures=_condense_rust_to_signatures, count_test_attrs=_count_test_attrs, derive_gentest_prelude=_derive_gentest_prelude, describe_test_environment=_describe_test_environment, error_signatures_from_output=_error_signatures_from_output, extract_branch_guard=_extract_branch_guard, extract_gen_tests_body=_extract_gen_tests_body, extract_public_symbols=_extract_public_symbols, extract_uncovered_functions=_extract_uncovered_functions, filter_cfg_excluded_lines=_filter_cfg_excluded_lines, filter_cfg_incompatible_lines=_filter_cfg_incompatible_lines, flags_unreachable=_flags_unreachable, gen_tests_path=_gen_tests_path, has_nonempty_test_body=_has_nonempty_test_body, inject_allow_before_any_mod=_inject_allow_before_any_mod, inject_allow_before_gen_mod=_inject_allow_before_gen_mod, inject_gen_prelude_imports=_inject_gen_prelude_imports, is_gen_tests_file=_is_gen_tests_file, is_structural_line=_is_structural_line, load_file_constraints=_FILE_CONSTRAINTS.load, type_signals_write=type_signals_write, mark_phase=_mark_phase, match_gen_tests_sibling=_match_gen_tests_sibling, next_gen_tests_n=_next_gen_tests_n, nightly_rules_for_cluster=_nightly_rules_for_cluster, parse_attempt_number=_parse_attempt_number, parse_retrospective_categories=_parse_retrospective_categories, partition_uncovered_lines=_partition_uncovered_lines, prelude_import_names=_prelude_import_names, quick_file_coverage=_quick_file_coverage, read_all_gen_tests=_read_all_gen_tests, read_state=_read_state, revert_gen_tests_pass=_revert_gen_tests_pass, select_relevant_siblings=_select_relevant_siblings, set_current=_set_current, source_hash=_source_hash, strip_all_gen_tests_artifacts=_strip_all_gen_tests_artifacts, strip_gen_tests_decl_n=_strip_gen_tests_decl_n, strip_gen_tests_decls=_strip_gen_tests_decls, strip_trailing_file_tag=_strip_trailing_file_tag, mutation_harden_file=_mutation_harden_file, gen_tests_siblings=_gen_tests_siblings, test_augmentor_factory=_test_augmentor_factory, ask=ask, extract_files=extract_files, extract_test_mod=extract_test_mod, generate_fix_loop=generate_fix_loop, generate_in_parallel=generate_in_parallel, is_test_file=is_test_file, write=write,
+    BUILD_TIMEOUT=BUILD_TIMEOUT, COVERAGE_TARGET=COVERAGE_AUGMENTATION_TARGET, coverage_ignore_pragma=COVERAGE_IGNORE_PRAGMA, TASK0C_PROMPT_CHAR_CAP=TASK0C_PROMPT_CHAR_CAP, FIX_ERR_CAP=_FIX_ERR_CAP, SIBLING_CAP=_SIBLING_CAP, SRC_SNIP_CAP=_SRC_SNIP_CAP, TASK0C_FIX_THINKING_DIRECTIVE=_TASK0C_FIX_THINKING_DIRECTIVE, TASK0C_MODEL=_TASK0C_MODEL, TASK0C_THINKING_DIRECTIVE=_TASK0C_THINKING_DIRECTIVE, WORKING_CAP=_WORKING_CAP, annotate_uncovered=_annotate_uncovered, block_is_prose=_block_is_prose, build_gen_tests_decl=_build_gen_tests_decl, guard=_guard, cargo_env=_cargo_env, cluster_gate_for=_cluster_gate_for_sibling, condense_rust_to_signatures=_condense_rust_to_signatures, count_test_attrs=_count_test_attrs, derive_gentest_prelude=_derive_gentest_prelude, describe_test_environment=_describe_test_environment, error_signatures_from_output=_error_signatures_from_output, extract_branch_guard=_extract_branch_guard, extract_gen_tests_body=_extract_gen_tests_body, extract_public_symbols=_extract_public_symbols, extract_uncovered_functions=_extract_uncovered_functions, filter_cfg_excluded_lines=_filter_cfg_excluded_lines, filter_cfg_incompatible_lines=_filter_cfg_incompatible_lines, flags_unreachable=_flags_unreachable, gen_tests_path=_gen_tests_path, has_nonempty_test_body=_has_nonempty_test_body, inject_allow_before_any_mod=_inject_allow_before_any_mod, inject_allow_before_gen_mod=_inject_allow_before_gen_mod, inject_gen_prelude_imports=_inject_gen_prelude_imports, is_gen_tests_file=_is_gen_tests_file, is_structural_line=_is_structural_line, load_file_constraints=_FILE_CONSTRAINTS.load, type_signals_write=type_signals_write, mark_phase=_mark_phase, match_gen_tests_sibling=_match_gen_tests_sibling, next_gen_tests_n=_next_gen_tests_n, nightly_rules_for_cluster=_nightly_rules_for_cluster, parse_attempt_number=_parse_attempt_number, parse_retrospective_categories=_parse_retrospective_categories, partition_uncovered_lines=_partition_uncovered_lines, prelude_import_names=_prelude_import_names, quick_file_coverage=_quick_file_coverage, read_all_gen_tests=_read_all_gen_tests, read_state=_read_state, revert_gen_tests_pass=_revert_gen_tests_pass, select_relevant_siblings=_select_relevant_siblings, set_current=_set_current, source_hash=_source_hash, strip_all_gen_tests_artifacts=_strip_all_gen_tests_artifacts, strip_gen_tests_decl_n=_strip_gen_tests_decl_n, strip_gen_tests_decls=_strip_gen_tests_decls, strip_trailing_file_tag=_strip_trailing_file_tag, mutation_harden_file=lambda *a, **k: _MUTATION.harden_file(*a, **k), gen_tests_siblings=_gen_tests_siblings, test_augmentor_factory=_test_augmentor_factory, ask=ask, extract_files=extract_files, extract_test_mod=extract_test_mod, generate_fix_loop=generate_fix_loop, generate_in_parallel=generate_in_parallel, is_test_file=is_test_file, write=write,
     subprocess=subprocess, get_current_cluster=_SCOPE.get_active,
     coverage_provider=_coverage_provider, check_stop=_check_graceful_stop,
 )

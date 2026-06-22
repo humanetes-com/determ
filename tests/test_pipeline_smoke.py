@@ -528,24 +528,18 @@ def test_cluster_gate_predicate_is_satisfiable() -> None:
     """FR-032: a cluster activated by `--cfg N` must get a gate that's true
     under that cfg. The old `all(N, feature="N", …)` was unsatisfiable (feature
     off) → divergent items vanished from the merge → E0046."""
-    from types import SimpleNamespace
+    from pipeline_core.domain.cfg import cluster_gate_predicate
 
-    import pipeline
     # no_core cluster: activated by --cfg anyhow_no_core_error, excludes egma
-    c = SimpleNamespace(
-        active_cfg=["anyhow_no_core_error"],
-        excluded_cfg=["error_generic_member_access"],
-    )
-    g = pipeline._cluster_cfg_predicate_for_gate(c)
+    g = cluster_gate_predicate(["anyhow_no_core_error"], ["error_generic_member_access"])
     # each cfg is OR'd with its feature form → satisfiable by the bare --cfg
     assert 'any(anyhow_no_core_error, feature = "anyhow_no_core_error")' in g, g
     assert 'not(any(error_generic_member_access' in g, g
     # must NOT require the feature form via a bare AND term
     assert ', feature = "anyhow_no_core_error",' not in g, f"feature AND'd: {g}"
     # default (no active/excluded) → empty gate
-    assert pipeline._cluster_cfg_predicate_for_gate(
-        SimpleNamespace(active_cfg=[], excluded_cfg=[])) == ""
-    print("  OK  _cluster_cfg_predicate_for_gate (FR-032)")
+    assert cluster_gate_predicate([], []) == ""
+    print("  OK  cluster_gate_predicate (FR-032)")
 
 
 def test_run_scoped_tests() -> None:
