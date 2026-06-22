@@ -70,3 +70,41 @@ def test_impl_semicolon_aborted():
     ranges = parse_impl_block_ranges(src)
     assert len(ranges) == 1
     assert src[ranges[0].header_start:ranges[0].body_open] == "impl Y "
+
+
+def test_raw_string_with_hashes_braces_ignored():
+    src = 'impl Foo {\n    fn a() { let s = r#"} { unbalanced "#; }\n}\n'
+    ranges = parse_impl_block_ranges(src)
+    assert len(ranges) == 1
+    assert _slice(src, ranges[0]).endswith("}")
+
+
+def test_string_escape_quote_ignored():
+    src = 'impl Foo {\n    fn a() { let s = "a \\" } still in string"; }\n}\n'
+    ranges = parse_impl_block_ranges(src)
+    assert len(ranges) == 1
+
+
+def test_unterminated_body_yields_no_range():
+    # `{` opens but never closes → depth never returns to 0 → no range emitted.
+    src = "impl Foo {\n    fn a() {\n"
+    assert parse_impl_block_ranges(src) == []
+
+
+def test_char_literal_with_escape():
+    src = "impl Foo {\n    fn a() { let c = '\\}'; }\n}\n"
+    ranges = parse_impl_block_ranges(src)
+    assert len(ranges) == 1
+
+
+def test_multiple_impls_and_comment_with_impl_word():
+    src = (
+        "// impl NotReal {\n"
+        "impl A {}\n"
+        "/* impl AlsoNot */\n"
+        "impl B {}\n"
+    )
+    ranges = parse_impl_block_ranges(src)
+    assert len(ranges) == 2
+    heads = [src[r.header_start:r.body_open] for r in ranges]
+    assert heads == ["impl A ", "impl B "]

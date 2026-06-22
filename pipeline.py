@@ -774,8 +774,11 @@ SINGLE_CALL_CHAR_LIMIT        = SETTINGS.single_call_char_limit
 # P6: guarded LLM ask client — focused adapter, composition-injected. `ask_raw`
 # is late-bound because `_hot_reload_mi` rebinds the module global on disk change.
 _ASK_CLIENT = AskClient(
-    ask_raw=lambda *a, **k: _ask_raw(*a, **k), hot_reload=_hot_reload_mi,
-    emit=_emit, guard=_guard, store_prompt_content=_store_prompt_content,
+    ask_raw=lambda *a, **k: _ask_raw(*a, **k),
+    hot_reload=lambda: _hot_reload_mi(),
+    emit=lambda *a, **k: _emit(*a, **k),
+    guard=_guard,
+    store_prompt_content=lambda s: _store_prompt_content(s),
     caller_site=_pclog.caller_site, disclaimer=_from_scratch_disclaimer,
     model_name=MODEL, context_chars=MODEL_CONTEXT_CHARS,
     single_call_char_limit=SINGLE_CALL_CHAR_LIMIT,
