@@ -39,8 +39,10 @@ from pipeline_core import retry as _pcretry
 from pipeline_core.adapters import build_adapters
 from pipeline_core.adapters import coverage as _covmod
 from pipeline_core.adapters import discovery as _discovery
+from pipeline_core.adapters import model_catalog as _model_catalog
 from pipeline_core.adapters import state as _state_mod
 from pipeline_core.adapters import strip as _strip_mod
+from pipeline_core.adapters import vllm_bootstrap as _vllm_bootstrap
 from pipeline_core.adapters import workspace as _wsmod
 from pipeline_core.adapters import workspace_scan as _workspace_scan
 from pipeline_core.adapters.artifacts import (
@@ -192,6 +194,7 @@ from pipeline_core.application.workspace_lifecycle import (
 from pipeline_core.domain import attribution as _domain_attribution
 from pipeline_core.domain import cfg as _cfg
 from pipeline_core.domain import cluster_plan as _cluster_plan
+from pipeline_core.domain import model_report as _model_report
 from pipeline_core.domain.cargo_toml import cargo_default_features as _domain_cargo_default_features
 from pipeline_core.domain.cargo_toml import cargo_entry_point_paths as _domain_cargo_entry_point_paths
 from pipeline_core.domain.cargo_toml import cargo_is_proc_macro as _domain_cargo_is_proc_macro
@@ -11810,225 +11813,32 @@ def _measure_baseline_coverage(project_dir: Path, modules: list[str],
     return result
 
 
-def _extract_params_b(model_info) -> float | None:
-    """Return parameter count in billions from HF ModelInfo, or None if unknown."""
-    st = getattr(model_info, "safetensors", None)
-    if st:
-        total = getattr(st, "total", None)
-        if isinstance(total, (int, float)) and total > 1e8:
-            return total / 1e9
-        pc = getattr(st, "parameter_count", None)
-        if isinstance(pc, dict):
-            s = sum(pc.values())
-            if s > 1e8:
-                return s / 1e9
-    m = re.search(r'[/_\-](\d+(?:\.\d+)?)[Bb](?:[/_\-]|$)', model_info.id)
-    if m:
-        return float(m.group(1))
-    m = re.search(r'(\d+(?:\.\d+)?)[Bb]$', model_info.id)
-    if m:
-        return float(m.group(1))
-    return None
-
-
-# Top coding models available via Ollama (ollama pull <name>), ranked by quality.
-# Params are approximate; VRAM is estimated at Q4_K_M quantization.
-_OLLAMA_MODELS = [
-    ("qwen3:72b",            72, "Best coding+reasoning 2026"),
-    ("qwen2.5-coder:72b",    72, "Code-specialized, excellent"),
-    ("deepseek-r1:70b",      70, "Strong reasoning for code"),
-    ("llama3.3:70b",         70, "Solid general + code"),
-    ("glm4.7:latest",        20, "89% LiveCodeBench, top score"),
-    ("qwen3:35b-a3b",        35, "73% SWE-bench, MoE efficient"),
-    ("qwen3:32b",            32, "Best dense 32B available"),
-    ("qwen2.5-coder:32b",    32, "Proven, strong baseline"),
-    ("deepseek-coder-v2:16b",16, "Fast, good quality"),
-    ("gemma4:27b",           27, "Google, strong code"),
-    ("qwen3:14b",            14, "81.1 MMLU, punches above weight"),
-    ("llama4:scout-17b",     17, "Meta, long context"),
-    ("deepseek-r1:32b",      32, "Reasoning distill, good code"),
-    ("phi4:14b",             14, "Microsoft, efficient"),
-    ("qwen3:8b",              8, "Best small model for code"),
-    ("mistral-small3.1:24b", 24, "Fast, strong instruction following"),
-    ("qwen2.5-coder:7b",      7, "Lightweight fallback"),
-]
-
-
-def _fit_label(vram_4bit: float, vram_gb: float) -> str:
-    if vram_4bit <= vram_gb:
-        return "✓ full"
-    elif vram_4bit <= vram_gb * 1.35:
-        return "~ RAM"
-    return "✗"
-
-
-def _print_model_table(rows: list[dict], title: str) -> None:
-    print(f"\n{title}\n")
-    hdr = f"{'#':>3}  {'Model':<45} {'Params':>7}  {'4-bit':>6}  {'Fits':>7}"
-    extra = "  Notes" if "notes" in rows[0] else f"  {'DL/mo':>9}  {'Likes':>6}"
-    print(hdr + extra)
-    print("─" * (len(hdr) + len(extra)))
-    for i, r in enumerate(rows, 1):
-        label = r["id"]
-        if len(label) > 45:
-            label = "…" + label[-44:]
-        line = f"{i:>3}  {label:<45} {r['params']:>6.1f}B  {r['vram_4bit']:>5.1f}G  {r['fit']:>7}"
-        if "notes" in r:
-            line += f"  {r['notes']}"
-        else:
-            line += f"  {r['downloads']:>9,}  {r['likes']:>6,}"
-        print(line)
-
-
 def cmd_best_models(vram_gb: float = 32.0) -> None:
-    """Print best models from both HuggingFace and Ollama, annotated for VRAM budget."""
-    _legend = (
-        "\nLegend:  ✓ full = fits entirely in GPU VRAM\n"
-        "         ~ RAM  = fits with partial CPU-RAM offload (~20–35% slower)\n"
-        "         ✗      = exceeds VRAM + 35% RAM headroom"
-    )
+    """Print best coding models (Ollama + HuggingFace) annotated for a VRAM budget.
 
-    # --- Ollama section (curated list, no network needed) ---
-    ollama_rows = []
-    for name, params, notes in _OLLAMA_MODELS:
-        vram_4bit = round(params * 0.55 + 2.5, 1)
-        ollama_rows.append({
-            "id": name,
-            "params": float(params),
-            "vram_4bit": vram_4bit,
-            "fit": _fit_label(vram_4bit, vram_gb),
-            "notes": notes,
-        })
-    order = {"✓ full": 0, "~ RAM": 1, "✗": 2}
-    def _ollama_sort_key(r: dict) -> tuple:
-        fit: str = str(r["fit"])
-        rid: str = str(r["id"])
-        rparams: int = int(float(str(r["params"])))
-        rnotes: str = str(r["notes"])
-        short_id = rid.rsplit(":", 1)[0] if rid.count(":") > 1 else rid
-        entry = (short_id, rparams, rnotes)
-        orig_idx = _OLLAMA_MODELS.index(entry) if entry in _OLLAMA_MODELS else 99
-        return (order.get(fit, 99), orig_idx)
-    ollama_rows.sort(key=_ollama_sort_key)
-
-    # Check which are locally installed
-    installed = set()
-    try:
-        import json as _json
-        import urllib.request
-        with urllib.request.urlopen("http://localhost:11434/api/tags", timeout=2) as resp:
-            data = _json.loads(resp.read())
-        installed = {m["name"].split(":")[0] for m in data.get("models", [])}
-    except Exception:
-        pass
-
-    for r in ollama_rows:
-        base = str(r["id"]).split(":")[0]
-        if base in installed:
-            r["notes"] = "✔ installed  " + str(r["notes"])
-
-    _print_model_table(ollama_rows, f"── Ollama  (ollama pull <name>)  |  VRAM budget: {vram_gb:.0f} GB")
+    Composition root: live catalog reads (`adapters.model_catalog`) + pure
+    ranking/rendering (`domain.model_report`)."""
+    ollama = _model_report.annotate_installed(
+        _model_report.build_ollama_rows(vram_gb),
+        _model_catalog.ollama_installed_bases())
+    print(_model_report.format_model_table(
+        ollama, f"\u2500\u2500 Ollama  (ollama pull <name>)  |  VRAM budget: {vram_gb:.0f} GB"))
     print("  Benchmark scores: https://livecodebench.github.io/leaderboard.html")
 
-    # --- HuggingFace section ---
     try:
-        from huggingface_hub import list_models
+        import huggingface_hub  # noqa: F401  (capability probe; the read is in the adapter)
     except ImportError:
-        print("\nERROR: huggingface_hub not installed — skipping HF section.  Run: pip install huggingface_hub")
-        print(_legend)
+        print("\nERROR: huggingface_hub not installed \u2014 skipping HF section.  Run: pip install huggingface_hub")
+        print(_model_report.LEGEND)
         return
 
-    print("\nFetching HuggingFace Hub top models …")
-    raw = list(list_models(
-        pipeline_tag="text-generation",
-        sort="likes",
-        limit=1000,
-        expand=["safetensors", "downloads", "likes"],
-    ))
-
-    hf_rows = []
-    for m in raw:
-        hf_params = _extract_params_b(m)
-        if hf_params is None or hf_params < 1:
-            continue
-        vram_4bit = round(hf_params * 0.55 + 2.5, 1)
-        hf_rows.append({
-            "id": m.id,
-            "params": hf_params,
-            "vram_4bit": vram_4bit,
-            "fit": _fit_label(vram_4bit, vram_gb),
-            "downloads": m.downloads or 0,
-            "likes": m.likes or 0,
-        })
-
-    hf_rows.sort(key=lambda r: (order.get(str(r["fit"]), 99), -int(r["likes"])))
-
-    seen = {}
-    deduped = []
-    for r in hf_rows:
-        base = re.sub(r'[-_](AWQ|GPTQ|GGUF|bnb|4bit|8bit|fp16|bf16|Int4|Int8|MLX|2507).*$', '', str(r["id"]), flags=re.IGNORECASE)
-        if base not in seen:
-            seen[base] = True
-            deduped.append(r)
-
-    _print_model_table(deduped[:30], f"── HuggingFace  (HF_MODEL=<id>)  |  VRAM budget: {vram_gb:.0f} GB")
+    print("\nFetching HuggingFace Hub top models \u2026")
+    hf = _model_catalog.hf_top_models(vram_gb)
+    deduped = _model_report.dedup_hf_rows(_model_report.rank_hf_rows(hf))
+    print(_model_report.format_model_table(
+        deduped[:30], f"\u2500\u2500 HuggingFace  (HF_MODEL=<id>)  |  VRAM budget: {vram_gb:.0f} GB"))
     print("  Benchmark scores: https://huggingface.co/spaces/bigcode/bigcodebench-leaderboard")
-
-    print(_legend)
-
-
-def _ensure_vllm_ready(root: Path) -> None:
-    """If BACKEND=vllm, auto-start docker_vllm.sh if the server is not responding,
-    then wait until the inference endpoint accepts requests (health passes before
-    CUDA graph compilation finishes, so an inference probe is required)."""
-    import urllib.error
-    import urllib.request
-
-    vllm_url = os.getenv("VLLM_BASE_URL", "http://localhost:8000/v1")
-    port = vllm_url.split(":")[-1].split("/")[0]
-    health_url = f"http://localhost:{port}/health"
-    infer_url  = f"http://localhost:{port}/v1/chat/completions"
-    model      = os.getenv("VLLM_MODEL_NAME", "")
-
-    def _health_ok() -> bool:
-        try:
-            urllib.request.urlopen(health_url, timeout=5)
-            return True
-        except Exception:
-            return False
-
-    if not _health_ok():
-        _log(f"  vLLM not responding at {health_url} — launching docker_vllm.sh ...")
-        script = root / "docker_vllm.sh"
-        result = subprocess.run(["bash", str(script)], cwd=str(root))
-        if result.returncode != 0:
-            _log(f"  [warn] docker_vllm.sh exited {result.returncode} — proceeding anyway")
-    else:
-        _log(f"  vLLM health OK at {health_url} — checking inference readiness ...")
-
-    payload = json.dumps({
-        "model": model,
-        "messages": [{"role": "user", "content": "hi"}],
-        "max_tokens": 1,
-    }).encode()
-    for i in range(1, 241):
-        try:
-            req = urllib.request.Request(
-                infer_url, data=payload,
-                headers={"Content-Type": "application/json"},
-            )
-            with urllib.request.urlopen(req, timeout=10):
-                pass
-            elapsed = i * 5
-            _log(f"  vLLM inference ready ({elapsed // 60}m {elapsed % 60}s).")
-            return
-        except Exception:
-            pass
-        time.sleep(5)
-        if i % 12 == 0:
-            _log(f"  ... vLLM inference not ready yet ({i * 5 // 60}m elapsed)")
-    _log("  [warn] vLLM inference not ready after 20 min — proceeding anyway")
-
+    print(_model_report.LEGEND)
 
 
 # slice 5b: deps for the extracted TASK 0c engine (defined before main(), after every
@@ -12253,7 +12063,7 @@ def main():
          f"INTERMEDIATE={INTERMEDIATE_CHAR_LIMIT:,})")
 
     if _backend is Backend.VLLM:
-        _ensure_vllm_ready(root)
+        _vllm_bootstrap.ensure_vllm_ready(root, _log)
 
     if args.clean and args.restart_from_augmented:
         _log("\n-- ERROR: --clean and --restart-from-augmented are mutually exclusive --")
