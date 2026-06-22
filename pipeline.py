@@ -65,8 +65,19 @@ from pipeline_core.adapters.commit_gate import CallableCommitGate
 from pipeline_core.adapters.coverage import CoverageDeps
 from pipeline_core.adapters.failure_journal import FileFailureJournal
 from pipeline_core.adapters.ratchet import BestTreeRatchet
+from pipeline_core.adapters.reconstruct_roles import (
+    AnalystAdapter,
+    CoverageDocsAdapter,
+    DocsMetricsAdapter,
+    FixerAdapter,
+    FlowAuditAdapter,
+    GeneratorAdapter,
+    PhaseGateAdapter,
+    RequirementsAdapter,
+)
 from pipeline_core.adapters.structure import CliStructureReader
 from pipeline_core.adapters.telemetry import LogTelemetry
+from pipeline_core.adapters.test_runner import CallableTestRunner
 from pipeline_core.adapters.workspace import WorkspaceDeps
 from pipeline_core.adapters.workspace_scan import (
     _dependency_graph_factory,
@@ -12282,156 +12293,46 @@ _LOCK_DEPS = _orchestrator.LockDeps(
 )
 
 
-class _ReconstructAdapter:
-    """Composition-root adapter: binds pipeline.py's concrete functions to the
-    role-based reconstruction ports (pipeline_core.ports.reconstruct). The
-    reconstruction use-cases receive it through their NARROW port types (ISP) —
-    this one object is the boundary implementation, not a god-deps."""
+# P6: the `_ReconstructAdapter` god-object is dissolved — each reconstruction
+# role is a focused adapter (adapters.reconstruct_roles), constructor-injected
+# with the resident task1-4/fix composition-wiring callables; the use-cases get
+# narrow role ports (ISP) instead of one multi-role binding object.
+_PHASE_GATE = PhaseGateAdapter(_phase_valid, _commit_and_mark)
+_REQUIREMENTS = RequirementsAdapter(task1, validate_task1_output)
+_GENERATOR = GeneratorAdapter(
+    task2_inner_loop, load_original_structure, validate_task2_output,
+    validate_task2_api_surface_conformance,
+)
+_FIXER = FixerAdapter(task2_fix_loop, _classify_failure, _log, insert_no_run, _FIX_ERR_CAP)
+_ANALYST = AnalystAdapter(task4, validate_task4_output, task_genesis_audit)
+_COVERAGE_DOCS = CoverageDocsAdapter(
+    lambda project_dir, test_files, readme_text, project_profile, clusters: task0b_discovery(
+        project_dir / COVERAGE_STRATEGY_NAME, project_dir, test_files, readme_text,
+        project_profile, clusters=clusters, force=True),
+)
+_FLOW_AUDIT = FlowAuditAdapter(_run_flow_audit)
+_DOCS_METRICS = DocsMetricsAdapter(_load_model_notes, genesis_rules_count)
 
-    # --- Telemetry: now a real adapter (pipeline_core.adapters.telemetry.LogTelemetry),
-    #     injected directly into the reconstruction use-cases. ---
-
-    # --- PhaseGate ---
-    def phase_valid(self, project_dir: Path, phase_key: str) -> bool:
-        return _phase_valid(project_dir, phase_key)
-
-    def commit_and_mark(self, project_dir: Path, phase_key: str, status: str, *,
-                        commit_message: str, tag: "str | None" = None,
-                        detail: str = "", source_hash: "str | None" = None) -> None:
-        _commit_and_mark(project_dir, phase_key, status, commit_message=commit_message,
-                         tag=tag, detail=detail, source_hash=source_hash)
-
-    # --- RequirementsService ---
-    def task1(self, project_dir, genesis_path, functional_req_path, test_files,
-              readme_text, *, project_profile="", crate_type="", module_name="",
-              project_context="", coverage_strategy=""):
-        return task1(project_dir, genesis_path, functional_req_path, test_files,
-                     readme_text, project_profile=project_profile, crate_type=crate_type,
-                     module_name=module_name, project_context=project_context,
-                     coverage_strategy=coverage_strategy)
-
-    def validate_task1_output(self, req_path, test_files):
-        return validate_task1_output(req_path, test_files)
-
-    # --- Generator ---
-    def task2_inner_loop(self, project_dir, genesis_path, functional_req_path,
-                         manifest_path, existing_test_files, project_profile,
-                         workspace_structure, build_check_cmd, *, locked_dep_context="",
-                         current_module="", module_dir_rel="", whole_project_context="",
-                         coverage_strategy="", api_surface="", prev_source_context=""):
-        return task2_inner_loop(
-            project_dir, genesis_path, functional_req_path, manifest_path,
-            existing_test_files, project_profile, workspace_structure, build_check_cmd,
-            locked_dep_context=locked_dep_context, current_module=current_module,
-            module_dir_rel=module_dir_rel, whole_project_context=whole_project_context,
-            coverage_strategy=coverage_strategy, api_surface=api_surface,
-            prev_source_context=prev_source_context)
-
-    def load_original_structure(self, project_dir, module_name):
-        return load_original_structure(project_dir, module_name)
-
-    def validate_task2_output(self, project_dir, expected_paths, *, req_path):
-        return validate_task2_output(project_dir, expected_paths, req_path=req_path)
-
-    def validate_api_conformance(self, project_dir, module_name, module_dir):
-        return validate_task2_api_surface_conformance(project_dir, module_name, module_dir)
-
-    # --- TestRunner ---
-    def task3(self, project_dir, test_command, iteration, output_dir, genesis_path):
-        return task3(project_dir, test_command, iteration, output_dir, genesis_path)
-
-    # --- Fixer ---
-    def task2_fix_loop(self, project_dir, manifest_path, existing_test_files, test_output,
-                       test_command, functional_req_path, *, genesis_path=None,
-                       module_dir_rel=""):
-        return task2_fix_loop(project_dir, manifest_path, existing_test_files, test_output,
-                              test_command, functional_req_path, genesis_path=genesis_path,
-                              module_dir_rel=module_dir_rel)
-
-    def classify_failure(self, test_output: str) -> str:
-        return _classify_failure(test_output)
-
-    def diagnose_no_tests(self, project_dir: Path, test_command: str, reason: str,
-                          test_output: str) -> "tuple[str, str]":
-        """Reclassify a zero-tests-ran result: a failing ``--no-run`` means a
-        build error (not a harness issue). Returns (failure_type, test_output)."""
-        _log(f"  WARNING: no_tests — {reason}. Running --no-run to diagnose.")
-        no_run_cmd = insert_no_run(test_command)
-        try:
-            nr = subprocess.run(no_run_cmd, shell=True, cwd=str(project_dir),
-                                capture_output=True, text=True, timeout=120)
-            if nr.returncode != 0:
-                _log("  --no-run failed: build error causes zero tests.")
-                return "build", test_output + (
-                    f"\n\nDIAGNOSIS (--no-run): build failed — {nr.stderr[:_FIX_ERR_CAP]}")
-            return "no_tests", test_output + f"\n\nDIAGNOSIS: {reason}"
-        except Exception as nr_err:
-            _log(f"  --no-run check failed: {nr_err}")
-            return "no_tests", test_output + f"\n\nDIAGNOSIS: {reason}"
-
-    # --- Analyst ---
-    def task4(self, genesis_path, functional_req_path, test_output, iteration, output_dir,
-              *, failure_type="test", failure_log="", prev_pass_count=0, prev_test_output="",
-              source_context="", api_surface=""):
-        return task4(genesis_path, functional_req_path, test_output, iteration, output_dir,
-                     failure_type=failure_type, failure_log=failure_log,
-                     prev_pass_count=prev_pass_count, prev_test_output=prev_test_output,
-                     source_context=source_context, api_surface=api_surface)
-
-    def validate_task4_output(self, genesis_before, genesis_after, test_output, failure_type):
-        return validate_task4_output(genesis_before, genesis_after, test_output, failure_type)
-
-    def genesis_audit(self, genesis_path):
-        return task_genesis_audit(genesis_path)
-
-    # --- FailureJournal: now a real adapter (pipeline_core.adapters.failure_journal),
-    #     injected directly into the use-cases — no longer bound here. ---
-
-    # --- Ratchet: now a real adapter (pipeline_core.adapters.ratchet.BestTreeRatchet),
-    #     injected directly into FailureAnalysisStep. ---
-
-    # --- Artifacts: now a real adapter (pipeline_core.adapters.artifacts.WorkspaceArtifacts),
-    #     injected directly into the reconstruction use-cases. ---
-
-    # --- CoverageDocs ---
-    def regenerate(self, project_dir, test_files, readme_text, project_profile, clusters):
-        return task0b_discovery(project_dir / COVERAGE_STRATEGY_NAME, project_dir,
-                                test_files, readme_text, project_profile,
-                                clusters=clusters, force=True)
-
-    # --- FlowAudit ---
-    def run(self, context: str) -> None:
-        _run_flow_audit(context)
-
-    # --- DocsMetrics ---
-    def model_notes(self, fr_path):
-        return _load_model_notes(fr_path)
-
-    def genesis_rules_count(self, project_dir, module_scope):
-        return genesis_rules_count(project_dir, module_scope)
-
-
-_RECONSTRUCT_ADAPTER = _ReconstructAdapter()
-
-# P5: reconstruction use-cases — each depends on narrow role slices of the adapter.
+# P5: reconstruction use-cases — each depends on narrow role slices.
 _FAILURE_JOURNAL = FileFailureJournal()
 _WORKSPACE_ARTIFACTS = WorkspaceArtifacts()
 _TELEMETRY = LogTelemetry()
+_TEST_RUNNER = CallableTestRunner(task3)
 _REQUIREMENTS_PHASE = RequirementsPhase(
-    requirements=_RECONSTRUCT_ADAPTER, gate=_RECONSTRUCT_ADAPTER,
-    telemetry=_TELEMETRY, analyst=_RECONSTRUCT_ADAPTER,
+    requirements=_REQUIREMENTS, gate=_PHASE_GATE,
+    telemetry=_TELEMETRY, analyst=_ANALYST,
     journal=_FAILURE_JOURNAL, artifacts=_WORKSPACE_ARTIFACTS,
 )
 _RECONSTRUCTION_STEP = ReconstructionStep(
-    generator=_RECONSTRUCT_ADAPTER, tests=_RECONSTRUCT_ADAPTER, fixer=_RECONSTRUCT_ADAPTER,
+    generator=_GENERATOR, tests=_TEST_RUNNER, fixer=_FIXER,
     artifacts=_WORKSPACE_ARTIFACTS, telemetry=_TELEMETRY,
     lock_deps=_LOCK_DEPS, reattach_deps=_REATTACH_DEPS,
     no_improvement_threshold=NO_IMPROVEMENT_THRESHOLD,
 )
 _FAILURE_ANALYSIS = FailureAnalysisStep(
-    analyst=_RECONSTRUCT_ADAPTER, journal=_FAILURE_JOURNAL, ratchet=BestTreeRatchet(),
-    artifacts=_WORKSPACE_ARTIFACTS, coverage_docs=_RECONSTRUCT_ADAPTER,
-    audit=_RECONSTRUCT_ADAPTER, docs=_RECONSTRUCT_ADAPTER, telemetry=_TELEMETRY,
+    analyst=_ANALYST, journal=_FAILURE_JOURNAL, ratchet=BestTreeRatchet(),
+    artifacts=_WORKSPACE_ARTIFACTS, coverage_docs=_COVERAGE_DOCS,
+    audit=_FLOW_AUDIT, docs=_DOCS_METRICS, telemetry=_TELEMETRY,
     genesis_audit_interval=GENESIS_AUDIT_INTERVAL,
 )
 _MODULE_RECONSTRUCTOR = ModuleReconstructor(
