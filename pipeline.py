@@ -107,6 +107,7 @@ from pipeline_core.adapters.task2_roles import (
 from pipeline_core.adapters.telemetry import LogTelemetry
 from pipeline_core.adapters.test_runner import CallableTestRunner
 from pipeline_core.adapters.workspace import WorkspaceDeps
+from pipeline_core.adapters.workspace_restore import RestoreFromAugmented
 from pipeline_core.adapters.workspace_scan import (
     _dependency_graph_factory,
     _workspace_scanner_factory,
@@ -1008,15 +1009,14 @@ TASK2_FIX_RETRIES = 2
 # Set high enough that truncation never occurs in practice on a large local context.
 TASK4_DOC_LIMIT = 200_000
 
-# Failure log: running record of every iteration's outcome. Fed into TASK 4.
-FAILURE_LOG_NAME = "failure_log.md"
-
 # Directory for locked module source backups (bottom-up integration).
 # Layout vocabulary now lives in pipeline_core.domain.workspace_layout.
 from pipeline_core.domain.workspace_layout import (  # noqa: E402
     CLUSTER_AUGMENTED_DIR,
+    FAILURE_LOG_NAME,
     LOCKED_MODULES_DIR,
     MODULE_AUGMENTED_DIR,
+    MODULE_STRIPPED_DIR,
 )
 
 # Sentinel file written by TASK 0c when coverage augmentation is complete.
@@ -1066,10 +1066,6 @@ WORKSPACE_DIR = "tmp"
 
 # Compiler cluster plan — derived from source, written once per project.
 BUILD_CONFIGS_NAME = "build_configs.md"
-
-# Augmentation sentinel dir names: single source of truth in domain vocabulary
-# (CLUSTER_AUGMENTED_DIR / MODULE_AUGMENTED_DIR imported above; used by clean_state).
-MODULE_STRIPPED_DIR    = ".module_stripped"
 
 # Per-file attempt log for TASK 0c: JSONL, one entry per generation attempt (BL-002).
 
@@ -11268,66 +11264,9 @@ def task0c_augment_module(
 
 def restart_from_augmented(root: Path, project_dir: Path) -> None:
     """Restore workspace to the task0c augmentation commit and clear only
-    iteration state (strip / task1+ artifacts). Task0a/0b/0c outputs are kept.
-
-    Single-module workspaces only. Errors loudly if the augmentation tag is
-    missing or the workspace has >1 module.
-    """
-    # Find the single augmentation tag — multi-module is out of scope for v1.
-    try:
-        tags = subprocess.run(
-            ["git", "tag", "-l", "task0c-augmented-*"],
-            cwd=project_dir, capture_output=True, text=True, check=True,
-        ).stdout.strip().splitlines()
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"git tag listing failed: {e}") from e
-    tags = [t for t in tags if t]
-    if not tags:
-        raise RuntimeError(
-            "No task0c-augmented-* tag in the workspace. "
-            "There is no augmented restore point — use --clean for a full wipe instead."
-        )
-    if len(tags) > 1:
-        raise RuntimeError(
-            f"Multi-module restore not supported in this version. Found tags: {tags}. "
-            "Use --clean for a full wipe."
-        )
-    restore_tag = tags[0]
-    module_name = restore_tag.split("-")[-1]
-
-    _log(f"  [restart-from-augmented] resetting workspace to {restore_tag}")
-    subprocess.run(["git", "reset", "--hard", restore_tag],
-                   cwd=project_dir, check=True, capture_output=True)
-
-    # Wipe iteration state — strip sentinels onward. Keep task0a/0b/0c outputs.
-    iteration_paths: list[Path] = [
-        project_dir / MODULE_STRIPPED_DIR,         # strip sentinel
-        project_dir / f"functional_requirements_{module_name}.md",
-        project_dir / FAILURE_LOG_NAME,
-        project_dir / ".task1_partials",
-    ]
-    iteration_paths += list(project_dir.glob(".generated_files_*.txt"))
-    iteration_paths += list(project_dir.glob("tests_output_*.txt"))
-    for p in iteration_paths:
-        if p.is_dir():
-            shutil.rmtree(p)
-            _log(f"  Deleted {p.relative_to(root) if p.is_relative_to(root) else p}/")
-        elif p.exists():
-            p.unlink()
-            _log(f"  Deleted {p.relative_to(root) if p.is_relative_to(root) else p}")
-
-    # Pipeline state file: clear strip/task1+ entries so they re-run; keep
-    # task0a/0b/0c entries so those tasks skip via sentinel check.
-    state = _read_state(project_dir)
-    iteration_prefixes = ("strip/", "task1/", "task2-4/", "task2/", "task3/", "task4/")
-    state["phases"] = {
-        k: v for k, v in state["phases"].items()
-        if not k.startswith(iteration_prefixes)
-    }
-    state["current"] = "restart-from-augmented"
-    _write_state(project_dir, state)
-    _log("  Cleared iteration entries from pipeline_state.md")
-    _log(f"  Workspace restored to {restore_tag}; task0a/0b/0c kept, strip + task1+ will re-run.")
+    iteration state (strip / task1+ artifacts). Thin shim over the relocated
+    adapter (`pipeline_core.adapters.workspace_restore`); deps bound below."""
+    _RESTORE_FROM_AUGMENTED.run(root, project_dir)
 
 
 def clean_state(root: Path, project_dir: Path, manifest_path: Path,
@@ -11590,6 +11529,11 @@ _API_SURFACE = ApiSurfaceCapture(
     strip_gen_tests_decls=_strip_gen_tests_decls,
     enumerate_types=ADAPTERS.extractor.enumerate_types,
     is_test_file=is_test_file, skip_dir_names=frozenset(SKIP_DIR_NAMES), log=_log,
+)
+
+# P6: --restart-from-augmented workspace restore — focused adapter, composition-injected.
+_RESTORE_FROM_AUGMENTED = RestoreFromAugmented(
+    read_state=_read_state, write_state=_write_state, log=_log,
 )
 
 # P5-S3: deps for the extracted strip/bake/commit pre-step (per-block injection).
