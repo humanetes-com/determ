@@ -11,7 +11,7 @@ import argparse
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 # The --phase-*-only / --skeleton-backend standalone subcommands, in dispatch
 # order. Each maps an `args` flag attribute to a handler keyed by the same name.
@@ -208,6 +208,32 @@ def next_module(
         return None
     candidates.sort(key=lambda x: x[0], reverse=True)
     return candidates[0][1]
+
+
+def measure_baseline_coverage(
+    modules: list[str], dep_graph: DepGraphView, *,
+    tarpaulin_available: bool,
+    run_tarpaulin: Callable[[Path, str], tuple[float, Any, Any, Any]],
+    project_dir: Path,
+    log: Callable[[str], None],
+) -> dict[str, float]:
+    """Measure each module's baseline coverage once to set processing order
+    (descending coverage = richer spec first). proc-macro crates report 100%
+    (tarpaulin can't instrument them). Returns {} when tarpaulin is unavailable
+    or there is only one module."""
+    result: dict[str, float] = {}
+    if not tarpaulin_available or len(modules) <= 1:
+        return result
+    log("\nMeasuring baseline coverage to determine processing order...")
+    for mod_name in modules:
+        crate_type = dep_graph.crate_type(mod_name)
+        if "proc-macro" in crate_type.lower():
+            cov = 100.0
+        else:
+            cov, _, _, _ = run_tarpaulin(project_dir, mod_name)
+        log(f"  {mod_name}: {cov:.1f}%")
+        result[mod_name] = cov
+    return result
 
 
 @dataclass(frozen=True)

@@ -1241,7 +1241,7 @@ def test_api_surface_conformance() -> None:
 
     workspace = _setup_workspace("smoke-api-conformance")
     module_name = "tiny"
-    pipeline._capture_api_surface(workspace, workspace, module_name)
+    pipeline._API_SURFACE.capture(workspace, workspace, module_name)
 
     # All pub items present → ok.
     ok, report = pipeline.validate_task2_api_surface_conformance(
@@ -1464,7 +1464,7 @@ def test_api_surface_capture() -> None:
 
     workspace = _setup_workspace("smoke-api-surface")
     module_name = "tiny"
-    out = pipeline._capture_api_surface(workspace, workspace, module_name)
+    out = pipeline._API_SURFACE.capture(workspace, workspace, module_name)
     assert out is not None, "API capture must return a path for the fixture"
     assert out.exists()
     assert out.parent.name == pipeline.ORIGINAL_STRUCTURE_DIR

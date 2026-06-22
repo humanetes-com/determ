@@ -44,6 +44,7 @@ from pipeline_core.adapters import strip as _strip_mod
 from pipeline_core.adapters import vllm_bootstrap as _vllm_bootstrap
 from pipeline_core.adapters import workspace as _wsmod
 from pipeline_core.adapters import workspace_scan as _workspace_scan
+from pipeline_core.adapters.api_surface import ApiSurfaceCapture
 from pipeline_core.adapters.artifacts import (
     WorkspaceArtifacts,
     load_api_surface,
@@ -146,6 +147,12 @@ from pipeline_core.application.strip_bake import (
     strip_and_bake_module as _strip_and_bake_module,
 )
 from pipeline_core.application.tasks import cfg_scan as _cfg_scan
+from pipeline_core.application.tasks.discover_test_command import (
+    DiscoverTestCommandDeps,
+)
+from pipeline_core.application.tasks.discover_test_command import (
+    discover_test_command as _discover_test_command_impl,
+)
 from pipeline_core.application.tasks.genesis_audit import (
     GenesisAuditDeps,
     genesis_audit,
@@ -354,7 +361,7 @@ from pipeline_core.settings import Settings
 __all__ = [
     "count_passing_tests", "validate_task3_output_strict", "extract_test_output_from_file",
     "GENESIS_DELIM_START", "GENESIS_DELIM_END", "_extract_genesis",
-    "_tag_block",
+    "_tag_block", "with_retry",
 ]
 
 _mi_mtime: float = os.path.getmtime(_mi.__file__)
@@ -2690,136 +2697,9 @@ chunk_test_files_by_file = _shaping.chunk_test_files_by_file
 # ---------------------------------------------------------------------------
 
 def discover_test_command(readme_text: str, project_dir: Path | None = None) -> str:
-    """
-    Ask the configured model to extract the primary test command from README.md,
-    Cargo.toml, and other project files. Falls back to inferred convention if none found.
-    Retries if the result is empty.
-    """
-    # Collect available project signals beyond the README.
-    extra_sections: list[str] = []
-    if project_dir:
-        for extra_path, label in [
-            (project_dir / "Cargo.toml", "Cargo.toml"),
-            (project_dir / ".cargo" / "config.toml", ".cargo/config.toml"),
-            (project_dir / "Makefile", "Makefile"),
-            (project_dir / "package.json", "package.json"),
-        ]:
-            if extra_path.exists():
-                try:
-                    content = extra_path.read_text(encoding="utf-8")[:_EXTRA_CAP]
-                    extra_sections.append(f"{label}:\n```\n{content}\n```")
-                except Exception:
-                    pass
-
-    context_block = ("\n\n" + "\n\n".join(extra_sections)) if extra_sections else ""
-
-    if readme_text.strip() or extra_sections:
-        _log(f"Initializing: asking {MODEL} to discover test command from project files...")
-        readme_block = f"README.md:\n{readme_text}\n" if readme_text.strip() else "README.md: (not present or empty)\n"
-        prompt = f"""Determine the single primary shell command used to run the full test suite for this project.
-
-Check all provided files — README.md may not mention testing; if so, use Cargo.toml, package.json, Makefile, or project-type conventions to infer the correct command.
-
-Rules:
-- Output only the command on one line. No explanation, no markdown fences, no alternatives.
-- If multiple test commands exist, pick the one that runs all tests.
-- If Cargo.toml is present, default is `cargo test` unless the README or Makefile says otherwise.
-- If a rust-toolchain.toml / rust-toolchain file or the README pins a channel (e.g. nightly),
-  prefix it: `cargo +nightly test`. Likewise include any global flag the docs say is REQUIRED
-  to compile the tests at all (e.g. `--all-features`). Do NOT add per-feature/per-cfg variants —
-  those are handled separately per build configuration.
-- If package.json is present with a "test" script, use `npm test`.
-
-{readme_block}{context_block}
-"""
-    else:
-        _log(f"Initializing: no project files found -- asking {MODEL} to infer test command from conventions...")
-        prompt = """No project files are available. Output the single most common shell command used to run
-the full test suite for a typical software project (e.g. `cargo test`, `pytest`, `npm test`).
-Output only the command on one line. No explanation, no markdown fences.
-"""
-
-    # Known command prefixes across common project types.
-    KNOWN_PREFIXES = (
-        "cargo", "pytest", "python", "npm", "npx", "yarn", "pnpm",
-        "go ", "mvn", "gradle", "gradlew", "make", "rake", "mix",
-        "dotnet", "swift", "stack", "cabal", "mix ", "jest", "mocha",
-    )
-
-    def _extract_cmd_from_response(response: str) -> str:
-        """
-        Extract the shell command from a model response that may contain prose.
-        Strategy:
-          1. If a backtick-quoted string on any line starts with a known prefix, use it.
-          2. Otherwise take the first non-fence line and strip leading prose up to ': '.
-          3. Strip leading `$ ` shell prompt markers.
-        """
-        # 1. Find backtick-quoted content that looks like a command.
-        for match in re.finditer(r'`([^`]+)`', response):
-            candidate = match.group(1).lstrip("$ ./")
-            first = candidate.split()[0].lower() if candidate.split() else ""
-            if any(first.startswith(p.strip()) for p in KNOWN_PREFIXES) or "/" in first:
-                return match.group(1).lstrip("$ ")
-        # 2. Take first non-fence line, strip any prose prefix before ': '.
-        lines = [ln.strip() for ln in response.splitlines()
-                 if ln.strip() and not ln.strip().startswith("```")]
-        if not lines:
-            return ""
-        line = lines[0]
-        if ": " in line:
-            # "The command is: cargo test" -> "cargo test"
-            after_colon = line.split(": ", 1)[1].strip().lstrip("`").rstrip("`")
-            if after_colon:
-                line = after_colon
-        return line.lstrip("$ ")
-
-    def attempt():
-        response = ask(prompt, model=_TASK0_MODEL).strip()
-        cmd = _extract_cmd_from_response(response)
-        if not cmd:
-            _log(f"  WARNING: {MODEL} returned an empty test command.")
-            return False
-        # Reject if it still looks like prose (no known command prefix).
-        first_word = cmd.split()[0].lower() if cmd.split() else ""
-        looks_like_cmd = (
-            any(first_word.startswith(p.strip()) for p in KNOWN_PREFIXES)
-            or "/" in first_word
-            or first_word.endswith(".sh")
-        )
-        if not looks_like_cmd:
-            _log(f"  WARNING: could not extract a command from response: {response[:120]!r}")
-            return False
-        return cmd
-
-    cmd = with_retry(attempt)
-    if cmd is False:
-        _log("ERROR: could not extract a test command from README.md after all retries.")
-        sys.exit(1)
-
-    # Normalize bare tool names that require a subcommand to be valid.
-    # e.g. "cargo" → "cargo test", "npm" → "npm test"
-    BARE_TOOL_DEFAULTS = {
-        "cargo": "cargo test",
-        "npm": "npm test",
-        "npx": "npx jest",
-        "yarn": "yarn test",
-        "pnpm": "pnpm test",
-    }
-    bare = cmd.strip().lower()
-    if bare in BARE_TOOL_DEFAULTS:
-        normalized = BARE_TOOL_DEFAULTS[bare]
-        _log(f"  Normalized bare tool name '{cmd}' → '{normalized}'")
-        cmd = normalized
-
-    # Sanity-check: if project is clearly Rust (has Cargo.toml) but command
-    # doesn't use cargo, reject and fall back to `cargo test`.
-    if project_dir and (project_dir / "Cargo.toml").exists() and not cmd.startswith("cargo"):
-        _log(f"  WARNING: extracted command '{cmd}' looks wrong for a Rust project — "
-             f"defaulting to 'cargo test'.")
-        cmd = "cargo test"
-
-    _log(f"Test command: {cmd}")
-    return str(cmd)
+    """Discover the project's primary test command. Thin shim over the relocated
+    use-case (`pipeline_core.application.tasks.discover_test_command`); deps bound below."""
+    return _discover_test_command_impl(readme_text, project_dir, _DISCOVER_TEST_CMD_DEPS)
 
 
 # ---------------------------------------------------------------------------
@@ -10618,6 +10498,14 @@ _TASK0B_DEPS = Task0bDeps(
     task0_model=_TASK0_MODEL,
 )
 
+_DISCOVER_TEST_CMD_DEPS = DiscoverTestCommandDeps(
+    ask=ask,
+    task0_model=_TASK0_MODEL,
+    model_name=MODEL,
+    extra_cap=_EXTRA_CAP,
+    sys_exit=sys.exit,
+)
+
 
 def _has_gen_tests_decl(src_text: str, pass_n: int) -> bool:
     """True if src_text contains a `mod gen_tests_<pass_n>;` declaration.
@@ -11595,81 +11483,6 @@ ORIGINAL_STRUCTURE_DIR = _strip_mod.ORIGINAL_STRUCTURE_DIR
 # _api_surface_path → pipeline_core.adapters.artifacts (imported above as _api_surface_path).
 
 
-def _capture_api_surface(project_dir: Path, module_dir: Path, module_name: str) -> Path | None:
-    """Snapshot the module's public API surface BEFORE strip.
-
-    Walks every non-test .rs file in module_dir, runs _condense_rust_to_signatures
-    on each (signatures + type definitions, function bodies elided), concatenates
-    them under <FILE path="..."> markers, and writes to
-    .original_structure/<module>.api.md. The directory survives strip (it lives at
-    the project root, not under src/), so TASK 1 can read it after strip as a
-    "structural ground truth" alongside the test-derived behavioral requirements.
-
-    Returns the file path on success, or None if nothing could be captured.
-    """
-    out_path = _api_surface_path(project_dir, module_name)
-    out_path.parent.mkdir(exist_ok=True)
-
-    parts: list[str] = [
-        f"# API surface — {module_name}",
-        "",
-        "Public-API skeleton captured before strip. Signatures and type definitions",
-        "only (function bodies are elided as `{ /* ... */ }`). This is structural",
-        "ground truth for TASK 1: any item NOT listed here did not exist in the",
-        "original source. The behavioral semantics are still derived from tests —",
-        "this document only defines the shape of the public API.",
-        "",
-    ]
-    file_count = 0
-    # Only walk the crate's src/ tree. examples/, benches/, tests/ are NOT
-    # part of the public API — they are consumers of it. Including them in
-    # the api_surface would tell TASK 1 to preserve signatures that don't
-    # actually exist in the implementation.
-    src_root = module_dir / "src"
-    walk_root = src_root if src_root.is_dir() else module_dir
-    for src_file in sorted(walk_root.rglob("*.rs")):
-        rel = src_file.relative_to(project_dir)
-        if any(part in SKIP_DIR_NAMES for part in rel.parts):
-            continue
-        if is_test_file(src_file, project_dir):
-            continue
-        # Defence in depth: skip example/bench/integration-test directories
-        # if walk_root somehow ended up at the module root.
-        if any(part in {"examples", "benches", "tests"} for part in rel.parts):
-            continue
-        try:
-            text = src_file.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        # Drop any gen_tests declarations the pipeline added — they aren't part
-        # of the original API surface.
-        text = _strip_gen_tests_decls(text)
-        condensed = _condense_rust_to_signatures(text, filename=src_file.name).rstrip()
-        if not condensed:
-            continue
-        parts.append(f'<FILE path="{rel}">')
-        parts.append(condensed)
-        parts.append("</FILE>")
-        parts.append("")
-        file_count += 1
-
-    if file_count == 0:
-        return None
-    out_path.write_text("\n".join(parts), encoding="utf-8")
-    _log(f"  Captured API surface: {file_count} file(s) → "
-         f"{out_path.relative_to(project_dir)} ({out_path.stat().st_size:,} chars).")
-
-    # Deterministic type-name manifest (syn-extracted, same walk_root) — lets
-    # TASK 1 know "what types exist" up front instead of guessing it
-    # incrementally from its own previous LLM output (debt #22).
-    type_records = ADAPTERS.extractor.enumerate_types(walk_root) or []
-    type_names = sorted({t.name for t in type_records if t.name})
-    if type_names:
-        types_path = _type_manifest_path(project_dir, module_name)
-        types_path.write_text(json.dumps(type_names, indent=2), encoding="utf-8")
-        _log(f"  Captured type manifest: {len(type_names)} type(s) → "
-             f"{types_path.relative_to(project_dir)}.")
-    return out_path
 
 
 # load_api_surface → pipeline_core.adapters.artifacts (imported above).
@@ -11714,26 +11527,6 @@ def load_original_structure(project_dir: Path, module_name: str) -> list[str]:
 # slice 5b foundation: relocated to pipeline_core.domain.test_results (imported at top).
 
 
-def _measure_baseline_coverage(project_dir: Path, modules: list[str],
-                                dep_graph) -> dict[str, float]:
-    """
-    Run tarpaulin on each module once to measure baseline coverage.
-    Used to determine per-module processing order (descending coverage = richer spec first).
-    Returns {module_name: pct}. Falls back to 0.0 if tarpaulin unavailable.
-    """
-    result: dict[str, float] = {}
-    if not TARPAULIN_BIN.exists() or len(modules) <= 1:
-        return result
-    _log("\nMeasuring baseline coverage to determine processing order...")
-    for mod_name in modules:
-        crate_type = dep_graph.crate_type(mod_name)
-        if "proc-macro" in crate_type.lower():
-            cov = 100.0
-        else:
-            cov, _, _, _ = _run_tarpaulin(project_dir, mod_name)
-        _log(f"  {mod_name}: {cov:.1f}%")
-        result[mod_name] = cov
-    return result
 
 
 def cmd_best_models(vram_gb: float = 32.0) -> None:
@@ -11790,10 +11583,19 @@ _REATTACH_DEPS = ReattachDeps(
     has_gen_tests_decl=_has_gen_tests_decl, cargo_env=_cargo_env,
 )
 
+# P6: pre-strip API-surface capture — focused adapter, composition-injected.
+_API_SURFACE = ApiSurfaceCapture(
+    api_surface_path=_api_surface_path, type_manifest_path=_type_manifest_path,
+    condense_to_signatures=_condense_rust_to_signatures,
+    strip_gen_tests_decls=_strip_gen_tests_decls,
+    enumerate_types=ADAPTERS.extractor.enumerate_types,
+    is_test_file=is_test_file, skip_dir_names=frozenset(SKIP_DIR_NAMES), log=_log,
+)
+
 # P5-S3: deps for the extracted strip/bake/commit pre-step (per-block injection).
 _STRIP_BAKE_DEPS = StripBakeDeps(
     log=_log, phase_valid=_phase_valid, module_augmented_path=_AUGMENT_STORE.module_path,
-    capture_api_surface=_capture_api_surface,
+    capture_api_surface=_API_SURFACE.capture,
     bake_skeleton_artifacts=_bake_skeleton_artifacts,
     git_commit=git_commit, git_tag=git_tag,
     strip_module_source=strip_module_source, commit_and_mark=_commit_and_mark,
@@ -12142,7 +11944,9 @@ def main():
 
     # Measure baseline coverage once to determine processing order.
     # Coverage-first: richest test spec → easiest reconstruction → best context for later modules.
-    module_coverage = _measure_baseline_coverage(project_dir, modules, dep_graph)
+    module_coverage = _orchestrator.measure_baseline_coverage(
+        modules, dep_graph, tarpaulin_available=TARPAULIN_BIN.exists(),
+        run_tarpaulin=_run_tarpaulin, project_dir=project_dir, log=_log)
 
     if is_multi_module and module_coverage:
         _log("\nProcessing order (coverage-descending, topology respected):")
