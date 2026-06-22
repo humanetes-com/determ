@@ -76,6 +76,20 @@ from pipeline_core.adapters.reconstruct_roles import (
     RequirementsAdapter,
 )
 from pipeline_core.adapters.structure import CliStructureReader
+from pipeline_core.adapters.task2_roles import (
+    CargoBackendAdapter,
+    ClustersAdapter,
+    ContextDocsAdapter,
+    FillEngineAdapter,
+    GeneratorTelemetryAdapter,
+    GenTestsAdapter,
+    LlmAskAdapter,
+    ProgressFactoryAdapter,
+    PromptShapingAdapter,
+    RequirementsDocAdapter,
+    SourceScanAdapter,
+    WorkspaceAdapter,
+)
 from pipeline_core.adapters.telemetry import LogTelemetry
 from pipeline_core.adapters.test_runner import CallableTestRunner
 from pipeline_core.adapters.workspace import WorkspaceDeps
@@ -8696,8 +8710,8 @@ def _format_api_surface_section(api_surface: str) -> str:
 
 # --- TASK 1 synthesizer engine relocated to application/generators (P4). The
 # synthesizers are use-cases over the narrow `ports.synthesizer` roles (debt #14:
-# replaced the old `configure()` global-injection seam). The SINGLE composition-root
-# adapter `_Task2Adapter`/`_TASK2_ADAPTER` (below) binds BOTH the TASK-2 and TASK-1
+# replaced the old `configure()` global-injection seam). The focused role adapters
+# (`adapters.task2_roles`, wired as `_GEN_*` below) bind BOTH the TASK-2 and TASK-1
 # roles; `_build_task1_config()` resolves the constants into a VO. -----------------
 def _build_task1_config() -> "Task1Config":
     """Resolve the TASK-1 prompt constants/budgets into a Task1Config VO."""
@@ -8761,15 +8775,13 @@ def _proc_macro_fallback_requirements(relevant, crate_name: str = "") -> str:
 
 
 def _new_static_task1_synthesizer() -> StaticTask1Synthesizer:
-    a = _TASK2_ADAPTER  # the single composition-root adapter satisfies Task1 roles too
-    return StaticTask1Synthesizer(llm=a, shaping=a, progress=a,
-                                  requirements=a, cfg=_build_task1_config())
+    return StaticTask1Synthesizer(llm=_GEN_LLM, shaping=_GEN_SHAPING, progress=_GEN_PROGRESS,
+                                  requirements=_GEN_REQUIREMENTS, cfg=_build_task1_config())
 
 
 def _new_llm_task1_synthesizer() -> LLMTask1Synthesizer:
-    a = _TASK2_ADAPTER
-    return LLMTask1Synthesizer(llm=a, shaping=a, progress=a,
-                               requirements=a, cfg=_build_task1_config())
+    return LLMTask1Synthesizer(llm=_GEN_LLM, shaping=_GEN_SHAPING, progress=_GEN_PROGRESS,
+                               requirements=_GEN_REQUIREMENTS, cfg=_build_task1_config())
 
 
 def _task1_synthesizer_factory() -> Task1Synthesizer:
@@ -8812,12 +8824,11 @@ def task1(project_dir, genesis_path, functional_req_path, test_files, readme_tex
 #
 # The Task2Generator family lives in
 # `pipeline_core/application/generators/task2_generator.py` as use-cases over
-# the narrow `ports.generator` roles. pipeline.py is the COMPOSITION ROOT:
-# `_Task2Adapter` binds the concrete helpers below to those roles (methods
-# late-bind the module globals so test/scripted-harness monkeypatches intercept
-# at call time), and `_task2_generator_factory` injects them. Strangler-fig:
-# generators move in slice by slice; the residents below still subclass the
-# imported ABC during the transition.
+# the narrow `ports.generator` roles. pipeline.py is the COMPOSITION ROOT: the
+# focused role adapters (`adapters.task2_roles`, wired as `_GEN_*` below) bind the
+# concrete helpers to those roles via late-binding lambdas (so test/scripted-harness
+# monkeypatches intercept at call time), and `_task2_generator_factory` injects
+# them. Each role is a narrow ISP port; the god-adapter `_Task2Adapter` is gone.
 #
 # Selected by TASK2_GENERATOR in .env: static | llm | skeleton | filelist (default).
 # ---------------------------------------------------------------------------
@@ -8850,211 +8861,89 @@ from pipeline_core.domain.generation import (
     strip_gen_tests_decl_n as _domain_strip_gen_tests_decl_n,  # noqa: E402
 )
 
-
-class _Task2Adapter:
-    """Binds concrete pipeline.py helpers to the `ports.generator` roles. One
-    object satisfies every role; generators receive only the slices they
-    declare. Methods late-bind the module globals (test seams stay live)."""
-
-    # --- Telemetry ---
-    def log(self, msg):
-        _log(msg)
-
-    def emit(self, event, *, duration_ms=None, data=None):
-        if duration_ms is None:
-            _emit(event, data=data)
-        else:
-            _emit(event, duration_ms=duration_ms, data=data)
-
-    def check_stop(self, context):
-        _check_graceful_stop(context)
-
-    def set_current(self, project_dir, label):
-        _set_current(project_dir, label)
-
-    def mark_phase(self, project_dir, key, status, detail=""):
-        _mark_phase(project_dir, key, status, detail=detail)
-
-    def phase_valid(self, project_dir, key):
-        return _phase_valid(project_dir, key)
-
-    # --- LLM ---
-    def ask(self, prompt, *, model=None):
-        return ask(prompt, model=model)
-
-    # --- Workspace ---
-    def read(self, path):
-        return read(path)
-
-    def write_source_files(self, files_dict, project_dir, manifest_path,
-                           existing_test_files):
-        return write_source_files(files_dict, project_dir, manifest_path,
-                                  existing_test_files)
-
-    def load_manifest(self, manifest_path):
-        return load_manifest(manifest_path)
-
-    def save_manifest(self, manifest_path, files):
-        save_manifest(manifest_path, files)
-
-    def load_original_structure(self, project_dir, module_name):
-        return load_original_structure(project_dir, module_name)
-
-    def crate_entry_point(self, cargo_toml_path, module_dir_rel, file_path_set):
-        return _crate_entry_point(cargo_toml_path, module_dir_rel, file_path_set)
-
-    def is_proc_macro_crate(self, cargo_toml_text):
-        return _cargo_is_proc_macro(cargo_toml_text)
-
-    # --- ContextDocs ---
-    def scan_downstream_api(self, project_dir, module_name):
-        return scan_downstream_api(project_dir, module_name)
-
-    def compile_patterns_read(self, project_dir, module):
-        return compile_patterns_read(project_dir, module)
-
-    def genesis_rules_read(self, project_dir, module_scope="*"):
-        return genesis_rules_read(project_dir, module_scope=module_scope)
-
-    def extract_test_assertions(self, test_files, module_dir_rel=""):
-        return _extract_test_assertions(test_files, module_dir_rel)
-
-    def format_api_surface_section(self, api_surface):
-        return _format_api_surface_section(api_surface)
-
-    def split_api_surface_by_file(self, api_surface):
-        return _split_api_surface_by_file(api_surface)
-
-    # --- Cargo (skeleton backend, P4 slice 4) ---
-    def run_raw(self, cmd, cwd, env, timeout):
-        try:
-            r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
-                               timeout=timeout, env=env)
-            return r.returncode, r.stdout or "", r.stderr or ""
-        except subprocess.TimeoutExpired:
-            return -1, "", ""  # -1 = timeout sentinel (matches _run_cargo)
-
-    def run(self, cmd, cwd, env, timeout=180):
-        return _run_cargo(cmd, cwd, env, timeout)
-
-    def run_check_diag(self, cmd, cwd, env, timeout=180):
-        return _run_cargo_check_diag(cmd, cwd, env, timeout)
-
-    def build_test_cmd(self, test_stems, cluster):
-        return _build_test_cmd(test_stems, cluster)
-
-    def env(self):
-        return _cargo_env()
-
-    def implicated_fns_from_cargo_errors(self, cargo_output, target_src_dir):
-        return _implicated_fns_from_cargo_errors(cargo_output, target_src_dir)
-
-    def attribute_failures(self, test_output, src_dir, recently_filled,
-                           test_reverse_map, cluster_name):
-        fr, kind = _attribute_failures(test_output, src_dir, recently_filled,
-                                       test_reverse_map, cluster_name)
-        return _filter_test_targets(fr, src_dir), kind
-
-    # --- FillEngine (LLM-driven Phase B/C/D + merge + fix loop) ---
-    def run_phase_c_tdd(self, **kw):
-        return _run_phase_c_tdd(**kw)
-
-    def fill_fns_one_by_one(self, **kw):
-        return _task2_fill_fns_one_by_one(**kw)
-
-    def fill_groups(self, skeleton_dir, target_src_dir, groups, project_dir, **kw):
-        return _task2_fill_groups(skeleton_dir, target_src_dir, groups, project_dir, **kw)
-
-    def group_tests(self, skeleton_dir, test_files, **kw):
-        return _task2_group_tests(skeleton_dir, test_files, **kw)
-
-    def cleanup_residuals(self, target_src_dir, project_dir, functional_req,
-                          test_files, **kw):
-        return _task2_cleanup_residuals(target_src_dir, project_dir, functional_req,
-                                        test_files, **kw)
-
-    def scan_unimplemented_functions(self, src_dir):
-        return _scan_unimplemented_functions(src_dir)
-
-    def merge_cluster_outputs(self, **kw):
-        return _merge_cluster_outputs(**kw)
-
-    def generate_fix_loop(self, **kw):
-        return generate_fix_loop(**kw)
-
-    def reset_exhaustion_flags(self, project_dir, reason):
-        _reset_exhaustion_flags(project_dir, reason)
-
-    def build_test_reverse_map(self, test_files, src_dir):
-        return _build_test_reverse_map(test_files, src_dir)
-
-    # --- Clusters (baked artefacts + cluster-scoped filtering) ---
-    def load_baked(self, project_dir):
-        return _load_baked_clusters(project_dir)
-
-    def load_baked_leaf_order(self, project_dir, cluster_name):
-        return _load_baked_leaf_order(project_dir, cluster_name)
-
-    def filter_tests_for_cluster(self, test_files, cluster):
-        return _filter_tests_for_cluster(test_files, cluster)
-
-    def cluster_cfg_attr(self, cluster):
-        return _cluster_cfg_attr(cluster)
-
-    # --- GenTests (sibling decl machinery + origin manifest) ---
-    def build_decl(self, sibling_name, n, allow_line, cluster_cfg_attr=""):
-        return _build_gen_tests_decl(sibling_name, n, allow_line,
-                                     cluster_cfg_attr=cluster_cfg_attr)
-
-    def has_decl(self, src_text, pass_n):
-        return _has_gen_tests_decl(src_text, pass_n)
-
-    def strip_decl_n(self, parent_text, pass_n):
-        return _strip_gen_tests_decl_n(parent_text, pass_n)
-
-    def derive_prelude(self, project_dir):
-        return _derive_gentest_prelude(project_dir)
-
-    def load_origin(self, project_dir):
-        return _load_gen_tests_origin(project_dir)
-
-    def propagate_or_quarantine_sibling(self, gt, origin_manifest, parent_stem,
-                                        pass_n, tag=""):
-        return _propagate_or_quarantine_sibling(gt, origin_manifest, parent_stem,
-                                                pass_n, _log, tag)
-
-    def is_gen_tests_file(self, name):
-        return _is_gen_tests_file(name)
-
-    # --- SourceScan (pure structural scanners) ---
-    def locate_fn(self, file_text, fn_name):
-        return _locate_fn(file_text, fn_name)
-
-    def rust_delimiters_balanced(self, text):
-        return _rust_delimiters_balanced(text)
-
-    # --- TASK-1 synthesizer roles (ports.synthesizer; ask + format_api_surface_section
-    #     above already serve Task1LLM + PromptShaping.format_api_surface_section) ---
-    def prompt_budget(self, *fixed_parts):
-        return prompt_budget(*fixed_parts)
-
-    def format_test_files(self, test_files):
-        return format_test_files(test_files)
-
-    def chunk_test_files_by_file(self, test_files, file_char_limit):
-        return chunk_test_files_by_file(test_files, file_char_limit)
-
-    def make_progress(self, total):
-        return ChunkProgress(total)
-
-    def write_fr_preserving_notes(self, path, new_content):
-        _write_fr_preserving_notes(path, new_content)
-
-    def type_signals_read(self, project_dir):
-        return type_signals_read(project_dir)
-
-
-_TASK2_ADAPTER = _Task2Adapter()
+# P6: the `_Task2Adapter` god-object is dissolved — each TASK-1/TASK-2 generator
+# role is a focused adapter (adapters.task2_roles), constructor-injected with
+# late-binding lambdas over the resident composition-root callables (so the
+# scripted-harness / test monkeypatches still intercept at call time). The
+# generator/synthesizer use-cases receive narrow role ports (ISP) instead of one
+# multi-role binding object.
+_GEN_TELEMETRY = GeneratorTelemetryAdapter(
+    log_fn=lambda msg: _log(msg),
+    emit_fn=lambda event, **kw: _emit(event, **kw),
+    check_stop_fn=lambda context: _check_graceful_stop(context),
+    set_current_fn=lambda pd, label: _set_current(pd, label),
+    mark_phase_fn=lambda pd, key, status, detail="": _mark_phase(pd, key, status, detail=detail),
+    phase_valid_fn=lambda pd, key: _phase_valid(pd, key),
+)
+_GEN_LLM = LlmAskAdapter(ask_fn=lambda prompt, *, model=None: ask(prompt, model=model))
+_GEN_WORKSPACE = WorkspaceAdapter(
+    read_fn=lambda path: read(path),
+    write_source_files_fn=lambda fd, pd, mp, etf: write_source_files(fd, pd, mp, etf),
+    load_manifest_fn=lambda mp: load_manifest(mp),
+    save_manifest_fn=lambda mp, files: save_manifest(mp, files),
+    load_original_structure_fn=lambda pd, mn: load_original_structure(pd, mn),
+    crate_entry_point_fn=lambda ctp, mdr, fps: _crate_entry_point(ctp, mdr, fps),
+    is_proc_macro_crate_fn=lambda txt: _cargo_is_proc_macro(txt),
+)
+_GEN_DOCS = ContextDocsAdapter(
+    scan_downstream_api_fn=lambda pd, mn: scan_downstream_api(pd, mn),
+    compile_patterns_read_fn=lambda pd, m: compile_patterns_read(pd, m),
+    genesis_rules_read_fn=lambda pd, module_scope="*": genesis_rules_read(pd, module_scope=module_scope),
+    extract_test_assertions_fn=lambda tf, mdr="": _extract_test_assertions(tf, mdr),
+    format_api_surface_section_fn=lambda api: _format_api_surface_section(api),
+    split_api_surface_by_file_fn=lambda api: _split_api_surface_by_file(api),
+)
+_GEN_CARGO = CargoBackendAdapter(
+    run_fn=lambda cmd, cwd, env, timeout=180: _run_cargo(cmd, cwd, env, timeout),
+    run_check_diag_fn=lambda cmd, cwd, env, timeout=180: _run_cargo_check_diag(cmd, cwd, env, timeout),
+    build_test_cmd_fn=lambda stems, cluster: _build_test_cmd(stems, cluster),
+    env_fn=lambda: _cargo_env(),
+    implicated_fns_fn=lambda out, tsd: _implicated_fns_from_cargo_errors(out, tsd),
+    attribute_failures_fn=lambda to, sd, rf, trm, cn: _attribute_failures(to, sd, rf, trm, cn),
+    filter_test_targets_fn=lambda fr, sd: _filter_test_targets(fr, sd),
+)
+_GEN_FILL = FillEngineAdapter(
+    run_phase_c_tdd_fn=lambda **kw: _run_phase_c_tdd(**kw),
+    fill_fns_one_by_one_fn=lambda **kw: _task2_fill_fns_one_by_one(**kw),
+    fill_groups_fn=lambda sd, tsd, groups, pd, **kw: _task2_fill_groups(sd, tsd, groups, pd, **kw),
+    group_tests_fn=lambda sd, tf, **kw: _task2_group_tests(sd, tf, **kw),
+    cleanup_residuals_fn=lambda tsd, pd, fr, tf, **kw: _task2_cleanup_residuals(tsd, pd, fr, tf, **kw),
+    scan_unimplemented_fn=lambda sd: _scan_unimplemented_functions(sd),
+    merge_cluster_outputs_fn=lambda **kw: _merge_cluster_outputs(**kw),
+    generate_fix_loop_fn=lambda **kw: generate_fix_loop(**kw),
+    reset_exhaustion_flags_fn=lambda pd, reason: _reset_exhaustion_flags(pd, reason),
+    build_test_reverse_map_fn=lambda tf, sd: _build_test_reverse_map(tf, sd),
+)
+_GEN_CLUSTERS = ClustersAdapter(
+    load_baked_fn=lambda pd: _load_baked_clusters(pd),
+    load_baked_leaf_order_fn=lambda pd, cn: _load_baked_leaf_order(pd, cn),
+    filter_tests_for_cluster_fn=lambda tf, cluster: _filter_tests_for_cluster(tf, cluster),
+    cluster_cfg_attr_fn=lambda cluster: _cluster_cfg_attr(cluster),
+)
+_GEN_GENTESTS = GenTestsAdapter(
+    build_decl_fn=lambda name, n, allow, cluster_cfg_attr="": _build_gen_tests_decl(name, n, allow, cluster_cfg_attr=cluster_cfg_attr),
+    has_decl_fn=lambda txt, pn: _has_gen_tests_decl(txt, pn),
+    strip_decl_n_fn=lambda txt, pn: _strip_gen_tests_decl_n(txt, pn),
+    derive_prelude_fn=lambda pd: _derive_gentest_prelude(pd),
+    load_origin_fn=lambda pd: _load_gen_tests_origin(pd),
+    propagate_fn=lambda gt, om, ps, pn, tag="": _propagate_or_quarantine_sibling(gt, om, ps, pn, _log, tag),
+    is_gen_tests_file_fn=lambda name: _is_gen_tests_file(name),
+)
+_GEN_SCAN = SourceScanAdapter(
+    locate_fn_fn=lambda txt, fn: _locate_fn(txt, fn),
+    rust_delimiters_balanced_fn=lambda txt: _rust_delimiters_balanced(txt),
+)
+_GEN_SHAPING = PromptShapingAdapter(
+    prompt_budget_fn=lambda *parts: prompt_budget(*parts),
+    format_test_files_fn=lambda tf: format_test_files(tf),
+    chunk_test_files_by_file_fn=lambda tf, limit: chunk_test_files_by_file(tf, limit),
+    format_api_surface_section_fn=lambda api: _format_api_surface_section(api),
+)
+_GEN_PROGRESS = ProgressFactoryAdapter(make_progress_fn=lambda total: ChunkProgress(total))
+_GEN_REQUIREMENTS = RequirementsDocAdapter(
+    write_fr_preserving_notes_fn=lambda path, content: _write_fr_preserving_notes(path, content),
+    type_signals_read_fn=lambda pd: type_signals_read(pd),
+)
 
 
 def _build_task2_config() -> "Task2Config":
@@ -9072,18 +8961,18 @@ def _build_task2_config() -> "Task2Config":
 
 
 def _new_static_task2_generator() -> StaticTask2Generator:
-    a = _TASK2_ADAPTER
-    return StaticTask2Generator(tel=a, llm=a, ws=a, docs=a, cfg=_build_task2_config())
+    return StaticTask2Generator(tel=_GEN_TELEMETRY, llm=_GEN_LLM, ws=_GEN_WORKSPACE,
+                                docs=_GEN_DOCS, cfg=_build_task2_config())
 
 
 def _new_llm_task2_generator() -> LLMTask2Generator:
-    a = _TASK2_ADAPTER
-    return LLMTask2Generator(tel=a, llm=a, ws=a, docs=a, cfg=_build_task2_config())
+    return LLMTask2Generator(tel=_GEN_TELEMETRY, llm=_GEN_LLM, ws=_GEN_WORKSPACE,
+                             docs=_GEN_DOCS, cfg=_build_task2_config())
 
 
 def _new_filelist_task2_generator() -> StaticFileListTask2Generator:
-    a = _TASK2_ADAPTER
-    return StaticFileListTask2Generator(tel=a, llm=a, ws=a, docs=a, cfg=_build_task2_config())
+    return StaticFileListTask2Generator(tel=_GEN_TELEMETRY, llm=_GEN_LLM, ws=_GEN_WORKSPACE,
+                                        docs=_GEN_DOCS, cfg=_build_task2_config())
 
 
 def _build_skeleton_config() -> "SkeletonConfig":
@@ -9103,9 +8992,9 @@ def _build_skeleton_config() -> "SkeletonConfig":
 
 
 def _new_skeleton_task2_generator() -> StaticSkeletonTask2Generator:
-    a = _TASK2_ADAPTER
     return StaticSkeletonTask2Generator(
-        tel=a, cargo=a, fill=a, clusters=a, gentests=a, scan=a, ws=a,
+        tel=_GEN_TELEMETRY, cargo=_GEN_CARGO, fill=_GEN_FILL, clusters=_GEN_CLUSTERS,
+        gentests=_GEN_GENTESTS, scan=_GEN_SCAN, ws=_GEN_WORKSPACE,
         cfg=_build_skeleton_config())
 
 

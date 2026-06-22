@@ -2,8 +2,8 @@
 
 `application.generators.task1_synthesizer` use-cases depend on these narrow ROLE
 Protocols (ISP) instead of the older `configure()` module-global injection seam.
-`pipeline.py` binds the concrete functions at the composition root (the single
-`_Task2Adapter`); tests pass fakes. Pure helpers (domain text/output, retry, io, log,
+`pipeline.py` binds the concrete functions at the composition root via the
+focused role adapters in `adapters.task2_roles` (ISP); tests pass fakes. Pure helpers (domain text/output, retry, io, log,
 `chunk_cache`) stay direct imports — only the LLM call, the prompt-shaping machinery,
 the progress widget, and the requirements-doc I/O (all `pipeline.py`-resident) cross
 a port.

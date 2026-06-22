@@ -2,7 +2,8 @@
 
 The `application.generators.task2_generator` use-cases depend on these narrow
 ROLE Protocols (ISP) instead of reaching into `pipeline.py` globals. `pipeline.py`
-binds the concrete functions at the composition root (`_Task2Adapter`); tests
+binds the concrete functions at the composition root via the focused role
+adapters in `adapters.task2_roles` (one narrow adapter per role, ISP); tests
 pass fakes.
 
 Pure helpers the generators also use (prompt-section text, file extraction,
@@ -85,7 +86,8 @@ class ContextDocs(Protocol):
 # The skeleton generator orchestrates cargo, the LLM fill engines, the baked
 # cluster artefacts, the gen_tests sibling machinery, and the source scanners —
 # all `pipeline.py`-resident or adapter-layer. Each crosses one of the roles
-# below; `_Task2Adapter` binds the concrete functions at the composition root.
+# below; the focused `adapters.task2_roles` adapters bind the concrete functions
+# at the composition root (one narrow adapter per role).
 
 
 @runtime_checkable

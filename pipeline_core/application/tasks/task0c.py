@@ -1882,8 +1882,13 @@ project-specific import paths, type construction patterns, and hard constraints.
                         _sibling_path = _gen_tests_path(abs_path, _pn)
                     _log(f"  [{module_name}] split-and-merge {rel_path}: "
                          f"{len(_raw_subs)} subset block(s) → 1 sibling ({_st})")
-                else:
-                    _base = _raw_text
+                # Per-subset fallback: name clash (no merge) OR the merged block
+                # failed compile-fix (file reverted → all subsets lost). Re-commit
+                # subsets individually so survivors accumulate (FR-018: never drop
+                # a passing test). Skip subsets already absorbed by a committed merge.
+                if _merged is None or not _block_committed:
+                    _reason = "name clash" if _merged is None else "merge failed"
+                    _base = abs_path.read_text(encoding="utf-8")
                     _n_ok = 0
                     for _raw_sub in _raw_subs:
                         _pn = _next_gen_tests_n(abs_path)
@@ -1893,7 +1898,7 @@ project-specific import paths, type construction patterns, and hard constraints.
                             _sibling_path = _gen_tests_path(abs_path, _pn)
                             _n_ok += 1
                     _block_committed = _n_ok > 0
-                    _log(f"  [{module_name}] split-and-merge {rel_path}: name clash — "
+                    _log(f"  [{module_name}] split-and-merge {rel_path}: {_reason} — "
                          f"kept {_n_ok}/{len(_raw_subs)} as separate sibling(s)")
         for _gen_attempt in range(2):
             if _did_split or block:

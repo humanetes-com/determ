@@ -4,8 +4,8 @@
 Each generator is a use-case that turns functional requirements + tests into
 source files, depending only on narrow role ports (`ports.generator`): the LLM,
 the workspace, the per-module context docs, telemetry. `pipeline.py` is the
-composition root (`_Task2Adapter` + `_task2_generator_factory`); tests inject
-fakes. Prompt-section text and file extraction stay pure (built here / imported
+composition root (the focused `adapters.task2_roles` adapters +
+`_task2_generator_factory`); tests inject fakes. Prompt-section text and file extraction stay pure (built here / imported
 from `domain`); the model call, file writes, and context reads cross ports.
 
 Grown strangler-fig: generators move in here one slice at a time as their helper
