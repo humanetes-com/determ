@@ -25,7 +25,7 @@ from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from functools import partial as _partial
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import TypeVar
 
 _RT = TypeVar("_RT")
 
@@ -57,9 +57,11 @@ from pipeline_core.adapters.artifacts import (
 from pipeline_core.adapters.artifacts import (
     type_manifest_path as _type_manifest_path,
 )
+from pipeline_core.adapters.augment_engine import CargoAugmentEngine
 from pipeline_core.adapters.augment_store import FileAugmentStore
 from pipeline_core.adapters.build_script import CargoBuildScriptReader
 from pipeline_core.adapters.cargo import CargoEnv
+from pipeline_core.adapters.commit_gate import CallableCommitGate
 from pipeline_core.adapters.coverage import CoverageDeps
 from pipeline_core.adapters.failure_journal import FileFailureJournal
 from pipeline_core.adapters.ratchet import BestTreeRatchet
@@ -3305,37 +3307,8 @@ def _nightly_rules_for_cluster() -> str:
     return ""
 
 
-def _estimate_cluster_ceiling(project_dir: Path, cluster: "BuildCluster") -> tuple[float, int, int]:
-    """Scan source files and estimate the maximum coverage % achievable in this cluster.
-
-    Returns (ceiling_pct, excluded_lines, total_lines). Uses source line count as a proxy
-    for grcov region count — the ratio is approximate but directionally correct.
-    """
-    if not cluster.excluded_cfg:
-        return 100.0, 0, 0
-    total = 0
-    excluded = 0
-    src_dir = project_dir / "src"
-    if not src_dir.exists():
-        return 100.0, 0, 0
-    for rs in sorted(src_dir.rglob("*.rs")):
-        try:
-            text = rs.read_text(encoding="utf-8")
-        except OSError:
-            continue
-        lines = text.splitlines()
-        n = len(lines)
-        # #20: one CfgSet evaluates BOTH sides (excluded-X and active-not(X)) so the
-        # estimate matches the runtime filter (task0c subtracts both) — fixes the
-        # P5 divergence where the ceiling used only the excluded side.
-        ctx = _cfg.CfgSet.of(cfg_true=cluster.cfg_true, cfg_false=cluster.cfg_false)
-        excl = ctx.excluded_uncovered_lines(text, set(range(1, n + 1)))
-        total += n
-        excluded += len(excl)
-    if total == 0:
-        return 100.0, 0, 0
-    ceiling = (1.0 - excluded / total) * 100.0
-    return ceiling, excluded, total
+# _estimate_cluster_ceiling + _cluster_pre_check relocated to
+# pipeline_core.adapters.augment_engine.CargoAugmentEngine (P6).
 
 
 # ---------------------------------------------------------------------------
@@ -8639,61 +8612,6 @@ def task0_cfg_scan(project_dir: Path) -> "list[BuildCluster]":
     return scan.clusters
 
 
-def _cluster_pre_check(project_dir: Path, module_name: str, cluster: "BuildCluster") -> bool:
-    """
-    Verify the base library (no gen_tests) compiles under the cluster's env.
-    If E0554 is detected (nightly feature on stable), attempt to install the nightly
-    toolchain via setup.sh and retry with RUSTUP_TOOLCHAIN=nightly.
-    Returns True if the cluster is buildable, False if it should be skipped.
-    """
-    result = subprocess.run(
-        ["cargo", "build", "-p", module_name],
-        cwd=project_dir, capture_output=True, text=True,
-        timeout=BUILD_TIMEOUT, env=_cargo_env(),
-    )
-    if result.returncode == 0:
-        return True
-
-    err = result.stderr + result.stdout
-    if "E0554" not in err and "may not be used on the stable release channel" not in err:
-        # Some other compile error — not a toolchain issue, let normal flow handle it.
-        return True
-
-    # E0554: nightly feature required. Try to install nightly toolchain.
-    _log(f"  cluster/{cluster.name}: E0554 detected — nightly toolchain required.")
-    _setup = project_dir.parent.parent / "setup.sh"  # determ/setup.sh
-    if not _setup.exists():
-        _setup = Path(__file__).parent / "setup.sh"
-    if _setup.exists():
-        _log(f"  cluster/{cluster.name}: running setup.sh rust nightly ...")
-        _r = subprocess.run(
-            ["bash", str(_setup), "rust", "nightly"],
-            capture_output=False, text=True, timeout=600,
-        )
-        if _r.returncode != 0:
-            _log(f"  cluster/{cluster.name}: setup.sh rust nightly failed — skipping cluster.")
-            return False
-    else:
-        _log(f"  cluster/{cluster.name}: setup.sh not found — cannot install nightly. Skipping cluster.")
-        return False
-
-    # Mark cluster as requiring nightly so _cargo_env sets RUSTUP_TOOLCHAIN=nightly.
-    cluster.requires_nightly = True
-
-    result2 = subprocess.run(
-        ["cargo", "build", "-p", module_name],
-        cwd=project_dir, capture_output=True, text=True,
-        timeout=BUILD_TIMEOUT, env=_cargo_env(),
-    )
-    if result2.returncode != 0:
-        _log(f"  cluster/{cluster.name}: still broken after nightly install — skipping cluster.")
-        _log(f"    {(result2.stderr + result2.stdout)[:300]}")
-        return False
-
-    _log(f"  cluster/{cluster.name}: nightly toolchain ready.")
-    return True
-
-
 def _cfg_to_cluster_name(pred: str) -> str:
     """Map a custom cfg predicate to a short cluster name.
     Thin shim → `pipeline_core.domain.cluster_plan`."""
@@ -12733,61 +12651,18 @@ _MODULE_RECONSTRUCTOR = ModuleReconstructor(
 )
 
 
-class _AugmentAdapter:
-    """Composition-root adapter for the TASK 0c cluster-augmentation phase (R2.2):
-    binds pipeline.py's concrete sentinel/engine/telemetry functions to the narrow
-    role ports in pipeline_core.ports.augment. The ClusterAugmentor use-case receives
-    it through those ISP slices — this one object is the boundary implementation."""
-
-    # --- AugmentTelemetry ---
-    def log(self, msg: str) -> None:
-        _log(msg)
-
-    def emit(self, event: str, **fields: Any) -> None:
-        _emit(event, **fields)
-
-    def mark_phase(self, project_dir: Path, phase_key: str, status: str, *,
-                   detail: str = "", source_hash: "str | None" = None) -> None:
-        _mark_phase(project_dir, phase_key, status, detail=detail, source_hash=source_hash)
-
-    def set_current(self, project_dir: Path, label: str) -> None:
-        _set_current(project_dir, label)
-
-    # --- ClusterScope: `_SCOPE` (domain.cluster_scope.ClusterScope) satisfies the
-    #     port directly and is injected into ClusterAugmentor — no binding needed. ---
-    # --- AugmentStore: `FileAugmentStore` (adapters.augment_store) satisfies the
-    #     port directly and is injected as `store=` — no binding needed. ---
-
-    # --- AugmentEngine ---
-    def estimate_ceiling(self, project_dir: Path, cluster: "BuildCluster") -> "tuple[float, int, int]":
-        return _estimate_cluster_ceiling(project_dir, cluster)
-
-    def pre_check(self, project_dir: Path, module_name: str, cluster: "BuildCluster") -> bool:
-        return _cluster_pre_check(project_dir, module_name, cluster)
-
-    def collect_test_rels(self, project_dir: Path) -> "set[str]":
-        return {rel for rel, _ in collect_test_files(project_dir)}
-
-    def augment_module(self, project_dir: Path, module_name: str, module_dir: Path,
-                       crate_type: str, *, existing_test_files: "set[str]",
-                       project_context: str, coverage_strategy: str) -> "tuple[float, int, bool, str]":
-        return task0c_augment_module(
-            project_dir, module_name, module_dir, crate_type,
-            existing_test_files=existing_test_files,
-            project_context=project_context, coverage_strategy=coverage_strategy)
-
-    # --- CommitGate ---
-    def commit_and_mark(self, project_dir: Path, phase_key: str, status: str, *,
-                        commit_message: str, detail: str = "",
-                        source_hash: "str | None" = None) -> None:
-        _commit_and_mark(project_dir, phase_key, status, commit_message=commit_message,
-                         detail=detail, source_hash=source_hash)
-
-
-_AUGMENT_ADAPTER = _AugmentAdapter()
+# P6: the `_AugmentAdapter` god-object is dissolved — each TASK 0c augmentation
+# role is now a real injected adapter (telemetry/store/engine) or the domain
+# ClusterScope; only the git-global-bound commit-and-mark stays a resident callable
+# behind a focused CommitGate.
+_AUGMENT_ENGINE = CargoAugmentEngine(
+    log=_log, cargo_env=_cargo_env, build_timeout=BUILD_TIMEOUT,
+    default_setup=Path(__file__).parent / "setup.sh",
+    collect_test_files=collect_test_files, augment_module=task0c_augment_module,
+)
 _CLUSTER_AUGMENTOR = ClusterAugmentor(
-    telemetry=_AUGMENT_ADAPTER, scope=_SCOPE, store=_AUGMENT_STORE,
-    engine=_AUGMENT_ADAPTER, gate=_AUGMENT_ADAPTER,
+    telemetry=_TELEMETRY, scope=_SCOPE, store=_AUGMENT_STORE,
+    engine=_AUGMENT_ENGINE, gate=CallableCommitGate(_commit_and_mark),
 )
 
 

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from ..log import emit, log
-from .state import set_current
+from .state import mark_phase, set_current
 
 
 class LogTelemetry:
@@ -22,3 +22,9 @@ class LogTelemetry:
 
     def set_current(self, project_dir: Path, label: str) -> None:
         set_current(project_dir, label)
+
+    def mark_phase(self, project_dir: Path, phase_key: str, status: str, *,
+                   detail: str = "", source_hash: str | None = None) -> None:
+        # Also satisfies ports.augment.AugmentTelemetry (one telemetry adapter for
+        # both the reconstruct and augment use-cases).
+        mark_phase(project_dir, phase_key, status, detail=detail, source_hash=source_hash)
