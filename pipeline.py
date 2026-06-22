@@ -291,6 +291,11 @@ from pipeline_core.domain.retry_outcome import (
     build_verdict,
     failing_test_verdict,
 )
+from pipeline_core.domain.rust_idents import (
+    camelcase_type_names,
+    defined_type_names,
+    fn_reference_counts,
+)
 from pipeline_core.domain.rust_scan import (
     after_brace_newline,
     count_test_attrs,
@@ -3224,19 +3229,9 @@ def _compute_fn_name_counts(src_dir: Path) -> dict[str, int]:
     text = "\n".join(text_parts)
     if not text:
         return {}
-    counts: dict[str, int] = {}
-    # Extract candidate fn names from `fn <name>` declarations. Counting
-    # those names across all files gives a usage-frequency map. This is
-    # an approximation — comments and string literals can inflate counts —
-    # but the order it produces (most-referenced first) is robust enough
-    # for leaf-first scheduling.
-    for m in re.finditer(r"\bfn\s+([A-Za-z_][A-Za-z0-9_]*)", text):
-        name = m.group(1)
-        if name in counts:
-            continue
-        counts[name] = len(re.findall(
-            r"\b" + re.escape(name) + r"\b", text))
-    return counts
+    # P7: the `fn <name>` declaration scan + per-name `\b<name>\b` reference
+    # count are now a pure identifier tokeniser (byte-equivalent), no regex.
+    return fn_reference_counts(text)
 
 
 def _bake_skeleton_artifacts(
@@ -10182,12 +10177,12 @@ def _select_relevant_siblings(
     if not all_siblings:
         return []
 
-    used_types: set[str] = set(re.findall(r'\b([A-Z][A-Za-z0-9]+)\b', target_source))
-    defined_re = re.compile(r'\b(?:struct|enum|trait|type|impl)\s+([A-Z][A-Za-z0-9]+)\b')
+    # P7: CamelCase type-name + `kw Name` definition scans → pure tokeniser
+    # (byte-equivalent), no regex on source.
+    used_types: set[str] = camelcase_type_names(target_source)
 
     def _overlap(content: str) -> int:
-        defined = {m.group(1) for m in defined_re.finditer(content)}
-        return len(used_types & defined)
+        return len(used_types & defined_type_names(content))
 
     scored = sorted(
         ((srel, sc, _overlap(sc)) for srel, sc in all_siblings),

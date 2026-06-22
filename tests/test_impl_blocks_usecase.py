@@ -37,12 +37,16 @@ def test_groups_fns_into_impl_block(tmp_path):
     assert len(blk.stub_members) == 1  # only fn b is unimplemented
 
 
-def test_fallback_to_container_when_range_missed(tmp_path):
-    # sig_byte_start outside any impl body → falls back to the extractor container.
+def test_free_fn_emitted_with_empty_container(tmp_path):
+    # A free fn (no impl body contains its sig, extractor container "") still
+    # gets its own block with container="" — its `related_containers` is empty.
     src = tmp_path / "src"
     src.mkdir()
     (src / "lib.rs").write_text("fn free() {}\n", encoding="utf-8")
     recs = [{"file": "lib.rs", "sig_byte_start": 0, "container": "",
              "sig_text": "fn free()", "has_unimplemented_body": False}]
     blocks = collect_impl_blocks(tmp_path / "src", enumerate_fns=lambda _sd: recs)
-    assert blocks == []  # empty container → not emitted as a block
+    assert blocks is not None and len(blocks) == 1
+    assert blocks[0].container == ""
+    assert blocks[0].related_containers == ()
+    assert len(blocks[0].members) == 1
