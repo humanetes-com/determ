@@ -35,6 +35,37 @@ def _word_spans(text: str) -> list[tuple[int, int]]:
     return spans
 
 
+def _kw_followed_by(text: str, keyword: str, target: str) -> bool:
+    """True iff a whole-word `keyword` token is followed — across one-or-more
+    whitespace — immediately by `target` ending on a word boundary. Byte-equivalent
+    to ``\\b<keyword>\\s+<target>\\b`` (so `unsafe extern fn` or `unsafe/*c*/fn` do
+    NOT match, matching the regex's adjacency)."""
+    n = len(text)
+    for s, e in _word_spans(text):
+        if text[s:e] != keyword:
+            continue
+        j = e
+        while j < n and text[j].isspace():
+            j += 1
+        if j == e:
+            continue  # `\s+` requires at least one whitespace char
+        if text.startswith(target, j):
+            k = j + len(target)
+            if k == n or not (text[k].isalnum() or text[k] == "_"):
+                return True
+    return False
+
+
+def is_unsafe_fn(sig: str) -> bool:
+    """True iff `sig` contains `unsafe fn` (``\\bunsafe\\s+fn\\b``)."""
+    return _kw_followed_by(sig, "unsafe", "fn")
+
+
+def declares_fn(sig: str, fn_name: str) -> bool:
+    """True iff `sig` declares `fn <fn_name>` (``\\bfn\\s+<fn_name>\\b``)."""
+    return _kw_followed_by(sig, "fn", fn_name)
+
+
 _TYPE_DEF_KEYWORDS = frozenset({"struct", "enum", "trait", "type", "impl"})
 
 

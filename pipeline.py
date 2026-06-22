@@ -293,8 +293,10 @@ from pipeline_core.domain.retry_outcome import (
 )
 from pipeline_core.domain.rust_idents import (
     camelcase_type_names,
+    declares_fn,
     defined_type_names,
     fn_reference_counts,
+    is_unsafe_fn,
 )
 from pipeline_core.domain.rust_scan import (
     after_brace_newline,
@@ -3973,7 +3975,7 @@ def _replace_fn_signature(file_path: Path, fn_name: str, new_sig: str) -> bool:
         pass
     if _is_pub_fn(text, fn_name):
         return False
-    if not re.search(r"\bfn\s+" + re.escape(fn_name) + r"\b", new_sig):
+    if not declares_fn(new_sig, fn_name):
         return False
     loc = _locate_fn(text, fn_name)
     if loc is None:
@@ -5797,9 +5799,7 @@ def _ask_per_fn_body(
     recommends lowering temperature for syntactically rigid code.
     """
     # Detect unsafe-fn context from the signature.
-    is_unsafe = bool(
-        sig_text and re.search(r"\bunsafe\s+fn\b", sig_text)
-    )
+    is_unsafe = bool(sig_text) and is_unsafe_fn(sig_text)
     unsafe_temp = float(os.getenv("PHASE_C_UNSAFE_TEMP", "0.1"))
     last_response = ""
     for think_off, label in [(False, "default"), (True, "think=False"),

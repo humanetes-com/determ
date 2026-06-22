@@ -10,8 +10,10 @@ import re
 
 from pipeline_core.domain.rust_idents import (
     camelcase_type_names,
+    declares_fn,
     defined_type_names,
     fn_reference_counts,
+    is_unsafe_fn,
 )
 
 
@@ -69,3 +71,28 @@ def test_defined_type_names_matches_regex():
     pat = re.compile(r"\b(?:struct|enum|trait|type|impl)\s+([A-Z][A-Za-z0-9]+)\b")
     for t in _TYPE_CASES:
         assert defined_type_names(t) == {m.group(1) for m in pat.finditer(t)}, t
+
+
+_UNSAFE_CASES = [
+    "unsafe fn foo()", "pub unsafe fn x()", "unsafe   fn y()",
+    "unsafe extern fn z()", "unsafe/*c*/fn w()", "fn safe()",
+    "myunsafe fn q()", "unsafefn r()", "async unsafe fn a()", "",
+]
+
+
+def test_is_unsafe_fn_matches_regex():
+    for s in _UNSAFE_CASES:
+        assert is_unsafe_fn(s) == bool(re.search(r"\bunsafe\s+fn\b", s)), s
+
+
+_DECL_CASES = [
+    ("fn foo(x:i32)", "foo"), ("pub fn foo()", "foo"), ("fn foobar()", "foo"),
+    ("fn  foo ()", "foo"), ("fn baz()", "foo"), ("fn/*c*/foo()", "foo"),
+    ("impl X { fn foo() {} }", "foo"), ("fn a()", "a"),
+]
+
+
+def test_declares_fn_matches_regex():
+    for s, name in _DECL_CASES:
+        expected = bool(re.search(r"\bfn\s+" + re.escape(name) + r"\b", s))
+        assert declares_fn(s, name) == expected, (s, name)
