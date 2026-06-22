@@ -30,8 +30,12 @@ def test_chunk_packs_small_files_under_limit() -> None:
 
 
 def test_split_at_semantic_boundaries_prefers_test_fn() -> None:
-    content = "#[test]\nfn test_a() { aaaa }\n#[test]\nfn test_b() { bbbb }\n"
-    parts = split_at_semantic_boundaries(content, 25)
-    assert len(parts) >= 2
+    # Two short lines accumulate, then a `#[test]` line sits at index>0 in the
+    # buffer when the long fn body overflows — so the backward scan breaks AT the
+    # `#[test]` boundary (not a hard mid-line split).
+    content = "a\nb\n#[test]\nfn t() { yyyyyyyyyy }\n"
+    parts = split_at_semantic_boundaries(content, 15)
     assert "".join(parts) == content                 # lossless
+    assert len(parts) == 2
+    assert parts[0] == "a\nb\n"
     assert parts[1].lstrip().startswith("#[test]")   # broke at the boundary
