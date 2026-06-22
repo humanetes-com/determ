@@ -59,6 +59,7 @@ from pipeline_core.adapters.artifacts import (
 from pipeline_core.adapters.artifacts import (
     type_manifest_path as _type_manifest_path,
 )
+from pipeline_core.adapters.ask_client import AskClient
 from pipeline_core.adapters.augment_engine import CargoAugmentEngine
 from pipeline_core.adapters.augment_store import FileAugmentStore
 from pipeline_core.adapters.build_script import CargoBuildScriptReader
@@ -319,10 +320,8 @@ from pipeline_core.domain.text import (
     extract_code_content as extract_code_content,  # noqa: PLC0414 (test seam re-export)
 )
 from pipeline_core.domain.text import (
-    sibling_comment_block_spans,
     smart_truncate,
     strip_trailing_file_tag,
-    tagged_path_block_spans,
 )
 from pipeline_core.domain.text import (
     strip_markdown_fences as _strip_markdown_fences,
@@ -740,150 +739,10 @@ def _from_scratch_disclaimer() -> str:
 
 def ask(prompt: str, system: str | None = None, model: str | None = None,
         max_tokens: int | None = None, think: bool | None = None) -> str:
-    """Drop-in wrapper around model_interact.ask that enforces context limits.
-
-    BL-015: Section-aware context guard.
-    When the prompt overflows MODEL_CONTEXT_CHARS, we first try to drop whole
-    low-priority sections (identified by their delimiter markers) before falling
-    back to blind middle-trimming. This preserves structural integrity — we drop
-    a complete integration-test file rather than cutting a source file in half.
-
-    Sections are dropped in reverse priority order:
-      1. <TESTFILE ...> blocks (integration tests — lowest priority in overflow)
-      2. `// --- filename ---` blocks (sibling source files)
-      3. <FILE ...> blocks that appear in the middle (not the last one — keep target)
-      4. Fall back to middle-trim if still over budget.
-    """
-    HEAD_KEEP = MODEL_CONTEXT_CHARS // 4
-    TAIL_KEEP = MODEL_CONTEXT_CHARS // 8
-    MARGIN = 1_000  # small safety buffer only — prompt builders handle their own budgets
-
-    _disclaimer = _from_scratch_disclaimer()
-    system = f"{_disclaimer}\n\n{system}" if system else _disclaimer
-    sys_len = len(system) if system else 0
-    total = sys_len + len(prompt)
-
-    if total > MODEL_CONTEXT_CHARS - MARGIN:
-        budget = MODEL_CONTEXT_CHARS - MARGIN - sys_len
-
-        # --- BL-015: section-aware dropping ---
-        def _prompt_fits(p: str) -> bool:
-            return sys_len + len(p) <= MODEL_CONTEXT_CHARS - MARGIN
-
-        trimmed = prompt
-
-        # Pass 1: drop <TESTFILE> blocks (whole blocks) from the last one (R7 scan).
-        if not _prompt_fits(trimmed):
-            for s, e in reversed(tagged_path_block_spans(trimmed, "TESTFILE")):
-                trimmed = trimmed[:s] + trimmed[e:]
-                if _prompt_fits(trimmed):
-                    break
-
-        # Pass 2: drop `// --- sibling_file ---\n...` blocks (end to start).
-        if not _prompt_fits(trimmed):
-            for s, e in reversed(sibling_comment_block_spans(trimmed)):
-                trimmed = trimmed[:s] + trimmed[e:]
-                if _prompt_fits(trimmed):
-                    break
-
-        # Pass 3: drop middle <FILE> blocks (keep first and last, drop intermediates).
-        if not _prompt_fits(trimmed):
-            file_blocks = tagged_path_block_spans(trimmed, "FILE")
-            for s, e in file_blocks[1:-1]:  # skip first and last
-                trimmed = trimmed[:s] + trimmed[e:]
-                if _prompt_fits(trimmed):
-                    break
-
-        if _prompt_fits(trimmed):
-            dropped_chars = len(prompt) - len(trimmed)
-            _guard("context-guard/section_removal",
-                   f"dropped {dropped_chars:,} chars via section removal "
-                   f"(prompt was {total:,} chars, limit {MODEL_CONTEXT_CHARS:,})")
-            prompt = trimmed
-        else:
-            # Fall back to middle-trimming.
-            if budget < HEAD_KEEP + TAIL_KEEP + 200:
-                budget = max(200, budget)
-                prompt = trimmed[:budget]
-                _guard("context-guard/severe", f"only {budget:,} chars available — hard-truncating prompt")
-            else:
-                head = trimmed[:HEAD_KEEP]
-                tail = trimmed[max(HEAD_KEEP, len(trimmed) - TAIL_KEEP):]
-                dropped = len(trimmed) - HEAD_KEEP - len(tail)
-                prompt = (
-                    head
-                    + f"\n\n[... {dropped:,} chars trimmed by context-guard to fit "
-                    f"{MODEL_CONTEXT_CHARS:,}-char context window ...]\n\n"
-                    + tail
-                )
-                _guard("context-guard/middle_trim",
-                       f"prompt {total:,} > effective limit {MODEL_CONTEXT_CHARS - MARGIN:,} (context={MODEL_CONTEXT_CHARS:,} margin={MARGIN:,}): dropped {dropped:,} chars from middle")
-
-    kwargs: dict = {}
-    if model is not None:
-        kwargs["model"] = model
-    if max_tokens is not None:
-        kwargs["max_tokens"] = max_tokens
-    if think is not None:
-        kwargs["think"] = think
-    _hot_reload_mi()
-
-    _prompt_meta = _store_prompt_content(prompt)
-    _system_meta = _store_prompt_content(system) if system else None
-    # Budget-utilization warning: flag prompts that consume most of the input
-    # window so silent overflows surface in logs.
-    _prompt_len = len(prompt) + (len(system) if system else 0)
-    if _prompt_len > SINGLE_CALL_CHAR_LIMIT * 90 // 100:
-        _guard("prompt/budget_high",
-               f"prompt {_prompt_len:,} chars = "
-               f"{_prompt_len * 100 // max(1, SINGLE_CALL_CHAR_LIMIT)}% of "
-               f"SINGLE_CALL_CHAR_LIMIT ({SINGLE_CALL_CHAR_LIMIT:,})")
-    # prompt_sha on the REQUEST (not just the response) makes every call
-    # self-correlating: request↔response/error pair by sha, independent of the
-    # thread-name heuristic the flow-audit C10 uses (debt #6).
-    _emit("llm.request", data={
-        "model": model or MODEL,
-        "prompt": _prompt_meta,
-        "prompt_sha": _prompt_meta["sha256"],
-        "system": _system_meta,
-        "max_tokens": max_tokens,
-        "caller": _pclog.caller_site(),
-    })
-    _t0 = time.monotonic()
-    # Guarantee a terminal event for every request: if the loop exits without
-    # emitting an llm.response/llm.error (e.g. a BaseException or unexpected
-    # control-flow escape), the finally emits one. A request left "open" on its
-    # thread is exactly what C10 reports as a vanished response / stream
-    # collision — this makes that impossible (debt #6).
-    _terminal = False
-    try:
-        for _net_attempt in range(3):
-            try:
-                _response = _ask_raw(prompt, system, **kwargs)
-                _dur_ms = int((time.monotonic() - _t0) * 1000)
-                _emit("llm.response", duration_ms=_dur_ms,
-                      data={"prompt_sha": _prompt_meta["sha256"],
-                            "response": _store_prompt_content(_response or "")})
-                _terminal = True
-                return _response
-            except Exception as _e:
-                _ename = type(_e).__name__
-                if _net_attempt < 2 and any(w in _ename for w in ("Timeout", "Connect", "Protocol", "Network")):
-                    _guard("ask/network_retry", f"attempt={_net_attempt} err={_ename}: {_e}")
-                    time.sleep(10)
-                    continue
-                _emit("llm.error", duration_ms=int((time.monotonic() - _t0) * 1000),
-                      data={"prompt_sha": _prompt_meta["sha256"],
-                            "error_type": _ename, "error_msg": str(_e)[:500]})
-                _terminal = True
-                raise
-        raise RuntimeError("ask: retry loop exhausted")
-    finally:
-        if not _terminal:
-            _emit("llm.error", duration_ms=int((time.monotonic() - _t0) * 1000),
-                  data={"prompt_sha": _prompt_meta["sha256"],
-                        "error_type": "Unpaired",
-                        "error_msg": "ask() exited without a terminal llm event"})
+    """Context-limit-enforcing model call. Thin shim over the relocated guarded
+    client (`pipeline_core.adapters.ask_client.AskClient`); kept as the
+    `pipeline.ask` name for the monkeypatch test seam + late-bind Deps."""
+    return _ASK_CLIENT.ask(prompt, system, model, max_tokens, think)
 
 
 # Maximum safe input chars, derived mathematically from the KV cache budget.
@@ -911,6 +770,16 @@ def ask(prompt: str, system: str | None = None, model: str | None = None,
 _SAFE_INPUT_CHAR_LIMIT        = SETTINGS.safe_input_char_limit
 _SAFE_INPUT_CHAR_LIMIT_TASK0C = SETTINGS.safe_input_char_limit_task0c
 SINGLE_CALL_CHAR_LIMIT        = SETTINGS.single_call_char_limit
+
+# P6: guarded LLM ask client — focused adapter, composition-injected. `ask_raw`
+# is late-bound because `_hot_reload_mi` rebinds the module global on disk change.
+_ASK_CLIENT = AskClient(
+    ask_raw=lambda *a, **k: _ask_raw(*a, **k), hot_reload=_hot_reload_mi,
+    emit=_emit, guard=_guard, store_prompt_content=_store_prompt_content,
+    caller_site=_pclog.caller_site, disclaimer=_from_scratch_disclaimer,
+    model_name=MODEL, context_chars=MODEL_CONTEXT_CHARS,
+    single_call_char_limit=SINGLE_CALL_CHAR_LIMIT,
+)
 
 # Supplementary material caps — scale with context so they don't freeze at
 # values tuned for an old (small) context window.
