@@ -136,3 +136,13 @@ def test_mod_body_nested_braces_and_absent():
     block = "pub mod gen_x {\n    fn f() { if true { g(); } }\n}"
     assert mod_body(block) == "fn f() { if true { g(); } }\n"
     assert mod_body("fn bare() {}") is None      # no `mod NAME {` opener
+
+
+def test_rust_delimiters_balanced():
+    from pipeline_core.domain.rust_scan import rust_delimiters_balanced
+    assert rust_delimiters_balanced("fn f() { let v = vec![1,2]; }") is True
+    assert rust_delimiters_balanced("") is True
+    assert rust_delimiters_balanced("fn f() { (a }") is False          # mismatched
+    assert rust_delimiters_balanced('let s = "{ unbalanced ( in string";') is True  # string opaque
+    assert rust_delimiters_balanced("// ) ] } all in a comment\n{}") is True
+    assert rust_delimiters_balanced("fn f() {") is False               # unclosed brace

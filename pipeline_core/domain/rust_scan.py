@@ -245,3 +245,82 @@ def count_cfg_attrs(text: str, needles: Sequence[str]) -> int:
         if any(n in segment for n in needles):
             count += 1
         i = p + len(marker)
+
+
+def rust_delimiters_balanced(text: str) -> bool:
+    """Best-effort syntactic sanity check: are ``{}``, ``[]``, ``()`` balanced in
+    ``text``? Respects string literals, char literals, and line/block comments.
+
+    Catches the most common LLM-output corruption (extra closing paren, missing
+    brace) without a full Rust parser. Used to validate gen_tests siblings before
+    committing them and to detect already-broken siblings at startup. Regex-free
+    char scan (R7)."""
+    if not text:
+        return True
+    pairs = {")": "(", "]": "[", "}": "{"}
+    stack: list[str] = []
+    in_str = False
+    in_chr = False
+    in_line_cmt = False
+    in_blk_cmt = 0
+    esc = False
+    i = 0
+    n = len(text)
+    while i < n:
+        c = text[i]
+        nxt = text[i + 1] if i + 1 < n else ""
+        if esc:
+            esc = False
+            i += 1
+            continue
+        if in_line_cmt:
+            if c == "\n":
+                in_line_cmt = False
+            i += 1
+            continue
+        if in_blk_cmt:
+            if c == "*" and nxt == "/":
+                in_blk_cmt -= 1
+                i += 2
+                continue
+            if c == "/" and nxt == "*":
+                in_blk_cmt += 1
+                i += 2
+                continue
+            i += 1
+            continue
+        if in_str:
+            if c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+            i += 1
+            continue
+        if in_chr:
+            if c == "\\":
+                esc = True
+            elif c == "'":
+                in_chr = False
+            i += 1
+            continue
+        if c == '"':
+            in_str = True
+            i += 1
+            continue
+        if c == "/" and nxt == "/":
+            in_line_cmt = True
+            i += 2
+            continue
+        if c == "/" and nxt == "*":
+            in_blk_cmt = 1
+            i += 2
+            continue
+        # char vs lifetime — treat both as opaque; good enough for balance.
+        if c in "([{":
+            stack.append(c)
+        elif c in ")]}":
+            if not stack or stack[-1] != pairs[c]:
+                return False
+            stack.pop()
+        i += 1
+    return not stack and not in_str and not in_chr and not in_blk_cmt
