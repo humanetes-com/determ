@@ -110,6 +110,101 @@ def parse_gen_tests_filename(name: str) -> tuple[str, int] | None:
     return stem, int(n_str)
 
 
+def coalesce_gen_tests_siblings(
+    files: list[tuple[str, str]],
+) -> list[tuple[str, str]]:
+    """Merge `<stem>.gen_tests_<N>.rs` augmentation siblings of the same module
+    into ONE logical test unit for requirements synthesis (TASK 1).
+
+    task0c split-and-merge writes one physical sibling per uncovered-line subset
+    per attempt per cluster, so a single module's tests fragment across dozens of
+    tiny files. Requirements are per-module, so feeding each fragment to its own
+    LLM call is pure fan-out. This collapses every group sharing a parent dir +
+    stem into one `(rel, content)` entry, emitted at the position of the group's
+    first member; fragments are ordered by N and prefixed with a `// gen_tests_<N>`
+    provenance marker. Non-sibling entries (real test files, base sources) pass
+    through unchanged and in order. Pure: no I/O, no regex, no disk mutation —
+    the physical siblings are untouched (attribution still resolves them).
+    """
+    groups: dict[tuple[str, str], list[tuple[int, str]]] = {}
+    order: list[tuple[str, str]] = []      # group key in first-appearance order
+    out: list[tuple[str, str]] = []        # passthrough entries, by key/sentinel
+    out_keys: list[tuple[str, str] | None] = []
+
+    for rel, content in files:
+        parsed = parse_gen_tests_filename(Path(rel).name)
+        if parsed is None:
+            out.append((rel, content))
+            out_keys.append(None)
+            continue
+        stem, n = parsed
+        key = (str(Path(rel).parent), stem)
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+            out.append(("", ""))          # placeholder; filled after grouping
+            out_keys.append(key)
+        groups[key].append((n, content))
+
+    merged: dict[tuple[str, str], tuple[str, str]] = {}
+    for key in order:
+        parent, stem = key
+        fragments = sorted(groups[key], key=lambda item: item[0])
+        body = "\n\n".join(f"// gen_tests_{n}\n{c}" for n, c in fragments)
+        rel = f"{parent}/{stem}.rs (augmented tests)" if parent not in ("", ".") \
+            else f"{stem}.rs (augmented tests)"
+        merged[key] = (rel, body)
+
+    result: list[tuple[str, str]] = []
+    for i, out_key in enumerate(out_keys):
+        result.append(merged[out_key] if out_key is not None else out[i])
+    return result
+
+
+def merge_gen_tests_blocks(blocks: list[str]) -> str | None:
+    """Combine the subset gen_tests blocks of ONE split-and-merge attempt into a
+    single block, so the attempt writes ONE `gen_tests_<N>` sibling instead of
+    one-per-subset (the fan-out that made TASK 1 grind ~140 files).
+
+    Each subset's body is unwrapped from its `mod gen_X { … }` shell, then the
+    bodies are concatenated flat under one fresh `mod gen_tests_merged { … }`
+    shell (the downstream `_finalize_and_commit` re-injects allow/prelude and
+    strips this shell exactly as for a single LLM block). Exact-duplicate `use`
+    lines collapse to one (the per-subset `use super::*;` + identical prelude
+    imports).
+
+    Returns None when any declared top-level item name occurs in more than one
+    subset — flattening into one module would then be an E0428/E0252 clash, so
+    the caller keeps the blocks as separate siblings (rare; correctness over
+    fewer files). Deterministic; never emits a block with a NEW name clash.
+    """
+    from .rust_scan import item_names, mod_body
+
+    if not blocks:
+        return None
+    bodies = [(mod_body(b) or b.strip() + "\n") for b in blocks]
+
+    seen_names: set[str] = set()
+    for body in bodies:
+        names = set(item_names(body))
+        if names & seen_names:
+            return None                  # cross-subset collision → don't flatten
+        seen_names |= names
+
+    out_lines: list[str] = []
+    seen_use: set[str] = set()
+    for body in bodies:
+        for ln in body.splitlines():
+            stripped = ln.strip()
+            if stripped.startswith("use ") and stripped.endswith(";"):
+                if stripped in seen_use:
+                    continue
+                seen_use.add(stripped)
+            out_lines.append(ln)
+    merged = "\n".join(out_lines).strip()
+    return f"mod gen_tests_merged {{\n{merged}\n}}\n"
+
+
 # --- gen_tests path-mod declaration toolkit (R7: structured, replaces the four
 # `decl_re` regexes that did string surgery on the pipeline's OWN fixed format) ---
 #

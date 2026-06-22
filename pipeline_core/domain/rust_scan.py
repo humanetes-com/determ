@@ -103,6 +103,42 @@ def after_brace_newline(text: str, brace_idx: int) -> int | None:
     return last_nl + 1 if last_nl >= 0 else None
 
 
+def mod_body(text: str) -> str | None:
+    """Dedented body of the FIRST `[pub ]mod NAME { ... }` block, or None when no
+    such block exists. The opener is located structurally (`find_mod_opener`);
+    the matching `}` is found by brace-depth over the raw text — mirroring the
+    established `_extract_gen_tests_body` scan (naive of string/char literals, as
+    that one is). Leading common indentation is stripped so the body can be
+    re-wrapped or concatenated flat."""
+    opener = find_mod_opener(text, gen_only=False)
+    if opener is None:
+        return None
+    brace = opener[1]
+    depth = 1
+    i = brace + 1
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                body = text[brace + 1:i]
+                lines = body.splitlines()
+                non_empty = [ln for ln in lines if ln.strip()]
+                if non_empty:
+                    indent = min(len(ln) - len(ln.lstrip()) for ln in non_empty)
+                    if indent > 0:
+                        body = "\n".join(
+                            (ln[indent:] if len(ln) >= indent and ln[:indent].isspace() else ln)
+                            for ln in lines
+                        )
+                return body.strip() + "\n"
+        i += 1
+    return None
+
+
 def count_test_attrs(block: str) -> int:
     """Number of `#[test]` attributes, incl. path-qualified `#[tokio::test]`
     (regex-free, R7; mirrors `#\\[(?:\\w+::)*test\\]`)."""

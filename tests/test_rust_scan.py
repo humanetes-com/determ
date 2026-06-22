@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import re
 
-from pipeline_core.domain.rust_scan import count_cfg_attrs, item_names, mod_decls
+from pipeline_core.domain.rust_scan import count_cfg_attrs, item_names, mod_body, mod_decls
 
 _OLD_SYMBOL_RE = re.compile(r'\b(?:fn|struct|enum|trait|type|const)\s+([A-Za-z_]\w*)')
 _OLD_MOD_RE = re.compile(r'\bmod\s+(\w+)\s*;')
@@ -125,3 +125,14 @@ def test_count_test_attrs_matches_old_regex():
     for b in ["#[test]", "#[tokio::test]\n#[test]", "#[a::b::test] #[cfg(test)]",
               "#[test_helper]", "no attrs", "#[test] #[test]"]:
         assert count_test_attrs(b) == old(b), b
+
+
+def test_mod_body_extracts_dedented_body():
+    block = "mod gen_tests_1 {\n    use super::*;\n    #[test]\n    fn t() {}\n}"
+    assert mod_body(block) == "use super::*;\n#[test]\nfn t() {}\n"
+
+
+def test_mod_body_nested_braces_and_absent():
+    block = "pub mod gen_x {\n    fn f() { if true { g(); } }\n}"
+    assert mod_body(block) == "fn f() { if true { g(); } }\n"
+    assert mod_body("fn bare() {}") is None      # no `mod NAME {` opener

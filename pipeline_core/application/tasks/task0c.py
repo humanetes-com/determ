@@ -23,6 +23,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from ...domain.generation import merge_gen_tests_blocks
 from ...domain.llm_output import extract_code_blocks, strip_uncovered_markers
 from ...domain.refine import Attempt, LoopState
 from ...domain.text import strip_think_blocks
@@ -1861,23 +1862,38 @@ project-specific import paths, type construction patterns, and hard constraints.
                 _did_split = True
                 _queries = [_subset_prompt(_p) for _p in _partitions]
                 _responses = generate_in_parallel(_queries, model=_TASK0C_MODEL, think=None)
-                _base = _raw_text
-                _n_ok = 0
+                _raw_subs: list[str] = []
                 for _resp in _responses:
                     _raw_sub = extract_test_mod(_resp)
                     if _raw_sub:
                         _raw_sub = _strip_trailing_file_tag(_raw_sub)
-                    if not _raw_sub:
-                        continue
+                    if _raw_sub:
+                        _raw_subs.append(_raw_sub)
+                # Combine the subset blocks into ONE sibling per attempt when
+                # their top-level item names are disjoint; only a genuine
+                # cross-subset name clash falls back to one-sibling-per-subset.
+                _merged = merge_gen_tests_blocks(_raw_subs) if _raw_subs else None
+                if _merged is not None:
                     _pn = _next_gen_tests_n(abs_path)
-                    _st, _ = _finalize_and_commit(_raw_sub, _pn, _base)
-                    if _st == "committed":
-                        _base = abs_path.read_text(encoding="utf-8")
+                    _st, _ = _finalize_and_commit(_merged, _pn, _raw_text)
+                    _block_committed = _st == "committed"
+                    if _block_committed:
                         _sibling_path = _gen_tests_path(abs_path, _pn)
-                        _n_ok += 1
-                _block_committed = _n_ok > 0
-                _log(f"  [{module_name}] split-and-merge {rel_path}: merged "
-                     f"{_n_ok}/{len(_partitions)} subset block(s)")
+                    _log(f"  [{module_name}] split-and-merge {rel_path}: "
+                         f"{len(_raw_subs)} subset block(s) → 1 sibling ({_st})")
+                else:
+                    _base = _raw_text
+                    _n_ok = 0
+                    for _raw_sub in _raw_subs:
+                        _pn = _next_gen_tests_n(abs_path)
+                        _st, _ = _finalize_and_commit(_raw_sub, _pn, _base)
+                        if _st == "committed":
+                            _base = abs_path.read_text(encoding="utf-8")
+                            _sibling_path = _gen_tests_path(abs_path, _pn)
+                            _n_ok += 1
+                    _block_committed = _n_ok > 0
+                    _log(f"  [{module_name}] split-and-merge {rel_path}: name clash — "
+                         f"kept {_n_ok}/{len(_raw_subs)} as separate sibling(s)")
         for _gen_attempt in range(2):
             if _did_split or block:
                 break  # split-and-merge ran (or single-shot already has a block)

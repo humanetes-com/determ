@@ -4,8 +4,10 @@ gen_tests decl-strip (#9). All assert equivalence to the legacy regex behaviour.
 from __future__ import annotations
 
 from pipeline_core.domain.generation import (
+    coalesce_gen_tests_siblings,
     gen_tests_decl_blocks,
     iter_gen_tests_decls,
+    merge_gen_tests_blocks,
     parse_gen_tests_filename,
     strip_all_gen_tests_decls,
     strip_gen_tests_decl,
@@ -36,6 +38,81 @@ def test_parse_gen_tests_filename() -> None:
     assert parse_gen_tests_filename("error.gen_tests_3.rs.broken") == ("error", 3)
     assert parse_gen_tests_filename("error.rs") is None
     assert parse_gen_tests_filename("error.gen_tests_x.rs") is None
+
+
+def test_coalesce_merges_siblings_in_n_order() -> None:
+    files = [
+        ("src/error.gen_tests_2.rs", "B"),
+        ("src/error.gen_tests_1.rs", "A"),
+        ("src/error.gen_tests_10.rs", "C"),  # numeric, not lexicographic, order
+    ]
+    out = coalesce_gen_tests_siblings(files)
+    assert len(out) == 1
+    rel, body = out[0]
+    assert rel == "src/error.rs (augmented tests)"
+    assert body == "// gen_tests_1\nA\n\n// gen_tests_2\nB\n\n// gen_tests_10\nC"
+
+
+def test_coalesce_passthrough_and_order_preserved() -> None:
+    files = [
+        ("tests/test_chain.rs", "chain"),
+        ("src/error.gen_tests_1.rs", "A"),
+        ("tests/test_fmt.rs", "fmt"),
+        ("src/error.gen_tests_2.rs", "B"),
+    ]
+    out = coalesce_gen_tests_siblings(files)
+    # Real test files pass through untouched; the merged unit lands at the
+    # position of its first fragment.
+    assert out == [
+        ("tests/test_chain.rs", "chain"),
+        ("src/error.rs (augmented tests)", "// gen_tests_1\nA\n\n// gen_tests_2\nB"),
+        ("tests/test_fmt.rs", "fmt"),
+    ]
+
+
+def test_coalesce_groups_by_parent_dir_and_stem() -> None:
+    files = [
+        ("src/error.gen_tests_1.rs", "a"),
+        ("src/sub/error.gen_tests_1.rs", "b"),   # same stem, different dir → distinct
+        ("src/ptr.gen_tests_1.rs", "c"),
+    ]
+    out = coalesce_gen_tests_siblings(files)
+    rels = [r for r, _ in out]
+    assert rels == [
+        "src/error.rs (augmented tests)",
+        "src/sub/error.rs (augmented tests)",
+        "src/ptr.rs (augmented tests)",
+    ]
+
+
+def test_coalesce_handles_broken_suffix_and_empty() -> None:
+    assert coalesce_gen_tests_siblings([]) == []
+    out = coalesce_gen_tests_siblings([("src/x.gen_tests_1.rs.broken", "q")])
+    assert out == [("src/x.rs (augmented tests)", "// gen_tests_1\nq")]
+
+
+def test_merge_blocks_flattens_disjoint_subsets() -> None:
+    a = "mod gen_tests_1 {\n    use super::*;\n    #[test]\n    fn test_a() { assert!(true); }\n}"
+    b = "mod gen_tests_2 {\n    use super::*;\n    #[test]\n    fn test_b() { assert!(true); }\n}"
+    merged = merge_gen_tests_blocks([a, b])
+    assert merged is not None
+    # One mod shell, both test fns, the duplicate `use super::*;` collapsed to one.
+    assert merged.count("use super::*;") == 1
+    assert "fn test_a()" in merged and "fn test_b()" in merged
+    assert merged.startswith("mod gen_tests_merged {")
+
+
+def test_merge_blocks_returns_none_on_name_clash() -> None:
+    a = "mod gen_tests_1 {\n    fn helper() {}\n    #[test]\n    fn test_a() {}\n}"
+    b = "mod gen_tests_2 {\n    fn helper() {}\n    #[test]\n    fn test_b() {}\n}"
+    assert merge_gen_tests_blocks([a, b]) is None      # `helper` clashes → keep separate
+
+
+def test_merge_blocks_single_and_empty() -> None:
+    assert merge_gen_tests_blocks([]) is None
+    one = "mod gen_tests_1 {\n    #[test]\n    fn test_a() {}\n}"
+    merged = merge_gen_tests_blocks([one])
+    assert merged is not None and "fn test_a()" in merged
 
 
 def test_strip_test_prefix() -> None:

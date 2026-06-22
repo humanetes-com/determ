@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ...domain.generation import coalesce_gen_tests_siblings
 from ...domain.llm_output import extract_files
 from ...domain.text import smart_truncate, strip_markdown_fences
 from ...log import log
@@ -169,6 +170,12 @@ def task1(project_dir: Path, genesis_path: Path, functional_req_path: Path,
     known_types = deps.load_type_names(project_dir, module_name) if module_name else []
     if known_types:
         log(f"  Loaded type manifest: {len(known_types)} type(s) (pre-strip, syn-extracted).")
+
+    # Collapse task0c gen_tests_<N> augmentation siblings of each module into one
+    # logical test unit — requirements are per-module, so one LLM call per physical
+    # fragment is pure fan-out (anyhow: 140 fragments → ~33 units). On-disk siblings
+    # are untouched; attribution still resolves them by their real paths.
+    test_files = coalesce_gen_tests_siblings(test_files)
 
     # For proc-macro crates with no own tests, extract proc-macro interface
     # (derive macros, helper attributes) from how they're used in the test suite.

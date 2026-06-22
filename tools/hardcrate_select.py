@@ -41,6 +41,16 @@ TRAPS: dict[str, dict] = {
     # need ≥3 outer iterations (C3/C4).
     "framing": {"level": 2, "src": "src/framing.rs", "test": "tests/framing.rs",
                 "lib": ["mod framing;", "pub use framing::{deframe, frame};"]},
+    # level 3 — the AUGMENTATION FAN-OUT reproducer: a WIDE surface (many small
+    # branchy pub fns) pinned on one path each, so reconstruction leaves a large
+    # uncovered set spanning many functions → TASK 0c augmentation accumulates many
+    # `sprawl.gen_tests_<N>.rs` siblings. Exercises the TASK 1 sibling-coalescing
+    # (Part A) and the one-sibling-per-split-and-merge-attempt fix (Part B).
+    "sprawl":  {"level": 3, "src": "src/sprawl.rs", "test": "tests/sprawl.rs",
+                "lib": ["mod sprawl;",
+                        "pub use sprawl::{abs_diff, clamp_u8, classify, count_set_bits, "
+                        "digit_sum, is_ascii_upper, max3, min3, nth_byte, parity, "
+                        "reverse_nibbles, saturating_sub_u8, sign, to_lower, Category};"]},
 }
 
 

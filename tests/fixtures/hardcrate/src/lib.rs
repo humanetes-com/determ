@@ -17,6 +17,7 @@ mod textsum;
 mod counter;
 mod wire;
 mod framing;
+mod sprawl;
 #[cfg(any(extra_cap, feature = "extra_cap"))]
 mod cap;
 
@@ -26,6 +27,7 @@ pub use round::divide_round;
 pub use textsum::{sum_csv, SumError};
 pub use wire::{decode_id, encode_id};
 pub use framing::{deframe, frame};
+pub use sprawl::{abs_diff, clamp_u8, classify, count_set_bits, digit_sum, is_ascii_upper, max3, min3, nth_byte, parity, reverse_nibbles, saturating_sub_u8, sign, to_lower, Category};
 #[cfg(any(extra_cap, feature = "extra_cap"))]
 pub use cap::wrapping_total;
 
