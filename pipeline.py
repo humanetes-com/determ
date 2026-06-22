@@ -64,6 +64,17 @@ from pipeline_core.adapters.cargo import CargoEnv
 from pipeline_core.adapters.commit_gate import CallableCommitGate
 from pipeline_core.adapters.coverage import CoverageDeps
 from pipeline_core.adapters.failure_journal import FileFailureJournal
+from pipeline_core.adapters.fill_engine_roles import (
+    CargoFillAdapter,
+    EngineTelemetryAdapter,
+    ImplFillPathAdapter,
+    MutatorAdapter,
+    PromptContextAdapter,
+    RetrosAdapter,
+    StallPolicyAdapter,
+    TestLinkerAdapter,
+    WorkspaceModelAdapter,
+)
 from pipeline_core.adapters.ratchet import BestTreeRatchet
 from pipeline_core.adapters.reconstruct_roles import (
     AnalystAdapter,
@@ -6403,11 +6414,12 @@ from pipeline_core.application.reconstruct import (  # noqa: E402
 #
 # The per-fn fill unit (`FillOneFn`) and the per-cluster coordinator
 # (`PhaseCFillEngine`) live in `application/reconstruct/`. `pipeline.py` is the
-# composition root: `_PhaseCFillAdapter` binds the concrete engine helpers
-# below to the narrow `ports.fill_engine` roles, and `_task2_fill_fns_one_by_one`
-# becomes a thin shim that assembles the use-cases and runs them. The adapter
-# methods call the module-level `_func`s BY NAME so test monkeypatches
-# (scripted cargo/model, extractor-absent fallbacks) are honoured at call time.
+# composition root: the focused `adapters.fill_engine_roles` adapters (wired as
+# `_FILL_*` below) bind the concrete engine helpers to the narrow
+# `ports.fill_engine` roles, and `_task2_fill_fns_one_by_one` becomes a thin shim
+# that assembles the use-cases and runs them. The adapters delegate via
+# late-binding lambdas so test monkeypatches (scripted cargo/model,
+# extractor-absent fallbacks) are honoured at call time.
 # ===========================================================================
 from pipeline_core.application.reconstruct.fill_one_fn import (  # noqa: E402
     FillCaps,
@@ -6429,216 +6441,89 @@ from pipeline_core.application.reconstruct.scheduling import (
 from pipeline_core.domain.models import FnFixContext as _FnFixContext  # noqa: E402
 from pipeline_core.prompts.per_fn import build_per_fn_prompt as _build_per_fn_prompt  # noqa: E402,F401
 
-
-class _PhaseCFillAdapter:
-    """Binds concrete pipeline.py engine helpers to the `ports.fill_engine`
-    roles. One object satisfies every role (the use-cases each receive only the
-    narrow slice they declare). P1: structure reads come from a CONSTRUCTOR-
-    INJECTED `StructureReader` (tests pass a fake — no module-global monkeypatch);
-    the remaining methods still late-bind module globals pending P2–P4."""
-
-    def __init__(self, *, structure: "_structure_port.StructureReader" = _STRUCTURE) -> None:
-        self._structure = structure
-
-    # --- EngineTelemetry ---
-    def log(self, msg):
-        _log(msg)
-
-    def emit(self, event, *, duration_ms=None, data=None):
-        if duration_ms is None:
-            _emit(event, data=data)
-        else:
-            _emit(event, duration_ms=duration_ms, data=data)
-
-    def check_stop(self, context):
-        _check_graceful_stop(context)
-
-    # --- Mutator ---
-    def locate_fn_by_record(self, file_path, name, container, sig_text, cfg_predicates=None):
-        return _locate_fn_by_record(file_path, name, container, sig_text, cfg_predicates)
-
-    def locate_fn(self, text, name):
-        return _locate_fn(text, name)
-
-    def splice_fn_body_at(self, file_path, body_byte_start, body_byte_end,
-                          new_body, allow_nonstub=False):
-        return _splice_fn_body_at(file_path, body_byte_start, body_byte_end,
-                                  new_body, allow_nonstub=allow_nonstub)
-
-    def splice_fn_body(self, file_path, name, new_body, allow_nonstub=False):
-        return _splice_fn_body(file_path, name, new_body,
-                               allow_nonstub=allow_nonstub)
-
-    def replace_fn_signature(self, file_path, name, new_sig):
-        return _replace_fn_signature(file_path, name, new_sig)
-
-    def extract_signature_block(self, response):
-        return _extract_signature_block(response)
-
-    def lock_for(self, tree):
-        return _splice_lock_for(tree)
-
-    # --- Cargo ---
-    def run(self, cmd, cwd, env, timeout=180):
-        return _run_cargo(cmd, cwd, env, timeout)
-
-    def build_test_cmd(self, test_stems, cluster):
-        return _build_test_cmd(test_stems, cluster)
-
-    def u2_test_gate(self, fn_tests, test_cmd, target_src_dir, cluster_env):
-        return _u2_test_gate(fn_tests, test_cmd, target_src_dir, cluster_env)
-
-    def focus_errors(self, output, file_rel, max_chars=None):
-        return _focus_cargo_errors(output, file_rel, max_chars=max_chars)
-
-    def env(self):
-        return _cargo_env()
-
-    # --- PromptContext ---
-    def ask_per_fn_body(self, prompt, fn_name, attempts_log, sig_text=""):
-        return _ask_per_fn_body(prompt, fn_name, attempts_log, sig_text=sig_text)
-
-    def gather(self, *, file_text, file_rel, fn_name, sig_text, body_text,
-               error_excerpt, container, type_records, fr_path=None):
-        # Returns the domain FnFixContext directly (debt #13 — no per-attempt remap).
-        return _gather_fn_fix_context(
-            file_text=file_text, file_rel=file_rel, fn_name=fn_name,
-            sig_text=sig_text, body_text=body_text, error_excerpt=error_excerpt,
-            container=container, type_records=type_records, fr_path=fr_path)
-
-    def collect_sibling_filled_bodies(self, file_text, target_fn_name,
-                                      target_container):
-        return _collect_sibling_filled_bodies(file_text, target_fn_name,
-                                              target_container)
-
-    def extract_crate_idioms(self, impl_blocks, file_rel, target_sig_text="",
-                             max_idioms=5):
-        return _extract_crate_idioms(impl_blocks, file_rel,
-                                     target_sig_text=target_sig_text,
-                                     max_idioms=max_idioms)
-
-    def collect_crate_macros(self, src_dir):
-        return _collect_crate_macros(src_dir)
-
-    def compute_cluster_macro_invariants(self, src_dir, cluster):
-        return _compute_cluster_macro_invariants(src_dir, cluster)
-
-    def detect_crate_no_std_invariant(self, src_dir):
-        return _detect_crate_no_std_invariant(src_dir)
-
-    # --- WorkspaceModel ---
-    def scan_stub_records(self, target_src_dir, cluster):
-        return _scan_unimplemented_records_for_cluster(target_src_dir, cluster)
-
-    def scan_stub_tuples(self, target_src_dir, cluster):
-        return _scan_unimplemented_for_cluster(target_src_dir, cluster)
-
-    def enumerate_fns(self, src_dir):
-        return self._structure.enumerate_fns(src_dir)
-
-    def enumerate_types(self, src_dir):
-        return self._structure.enumerate_types(src_dir)
-
-    def collect_impl_blocks(self, src_dir):
-        return _collect_impl_blocks(src_dir)
-
-    def fn_container_index(self, src_dir):
-        return _fn_container_index(src_dir)
-
-    def fn_belongs_to_cluster(self, target_src_dir, file_rel, fn_name, cluster,
-                              fn_cfg_predicates=None):
-        return _fn_belongs_to_cluster(target_src_dir, file_rel, fn_name, cluster,
-                                      fn_cfg_predicates=fn_cfg_predicates)
-
-    def cluster_filter_type_methods(self, records, cluster):
-        return _cluster_filter_type_methods(records, cluster)
-
-    def is_gen_tests_file(self, name):
-        return _is_gen_tests_file(name)
-
-    def leaf_first_fn_order(self, tuples, leaf_name_counts):
-        return _leaf_first_fn_order(tuples, leaf_name_counts)
-
-    # --- Retros ---
-    def load(self, project_dir):
-        return _load_retrospectives(project_dir)
-
-    def save(self, project_dir, retros):
-        _save_retrospectives(project_dir, retros)
-
-    def retro_key(self, file_rel, fn_name, container):
-        return _retro_key(file_rel, fn_name, container)
-
-    def is_fn_fully_exhausted(self, cache, file_rel, fn_name, container):
-        return _is_fn_fully_exhausted(cache, file_rel, fn_name, container)
-
-    def diagnose(self, *, fn_name, sig_text, container, file_rel, cluster_name,
-                 last_body, error_excerpt, fix_attempts, prior_retrospective=""):
-        return _phase_c_retrospective(
-            fn_name=fn_name, sig_text=sig_text, container=container,
-            file_rel=file_rel, cluster_name=cluster_name, last_body=last_body,
-            error_excerpt=error_excerpt, fix_attempts=fix_attempts,
-            prior_retrospective=prior_retrospective)
-
-    def append_note(self, fr_path, note, error_codes=None):
-        return _append_model_note(fr_path, note, error_codes=error_codes)
-
-    def extract_self_note(self, failed_body, error_excerpt, fixed_body):
-        return _extract_self_note(failed_body, error_excerpt, fixed_body)
-
-    def record_error_codes(self, output):
-        _record_error_codes_seen(output)
-
-    # --- TestLinker ---
-    def find_tests_for_fn(self, tests_dir_files, fn_name, *, file_rel="",
-                          src_dir=None, container=""):
-        return _find_tests_for_fn(tests_dir_files, fn_name, file_rel=file_rel,
-                                  src_dir=src_dir, container=container)
-
-    def classify_failures(self, test_out, filled_this_pass, failed_tests,
-                          cluster_name):
-        return _classify_phase_c_test_failures(test_out, filled_this_pass,
-                                               failed_tests, cluster_name)
-
-    def write_test_fix_log(self, *, project_dir, cluster_name, pass_n, fix_iter,
-                           test_out, failed_tests, fns_retried, cur_fail_count,
-                           new_fail_count, best_fail_count, stall):
-        _write_phase_c_test_fix_log(
-            project_dir=project_dir, cluster_name=cluster_name, pass_n=pass_n,
-            fix_iter=fix_iter, test_out=test_out, failed_tests=failed_tests,
-            fns_retried=fns_retried, cur_fail_count=cur_fail_count,
-            new_fail_count=new_fail_count, best_fail_count=best_fail_count,
-            stall=stall)
-
-    # --- StallPolicy ---
-    def effective_stalls(self, full_budget, module):
-        return _effective_stalls(full_budget, module)
-
-    def converge_in_cluster(self, cluster):
-        return _converge_in_cluster(cluster)
-
-    # --- ImplFillPath ---
-    def fill_impl_blocks(self, **kw):
-        return _phase_c_fill_impl_blocks(**kw)
+# P6: the `_PhaseCFillAdapter` god-object is dissolved — each fill-engine role is
+# a focused adapter (adapters.fill_engine_roles), constructor-injected with
+# late-binding lambdas over the resident engine helpers (so the scripted-cargo /
+# scripted-model test monkeypatches still intercept at call time). The
+# `WorkspaceModelAdapter` carries the P1 constructor-injected StructureReader; a
+# test swaps in a fake via `_build_phase_c_engine(structure=fake)`.
+_FILL_TEL = EngineTelemetryAdapter(
+    log_fn=lambda msg: _log(msg),
+    emit_fn=lambda event, **kw: _emit(event, **kw),
+    check_stop_fn=lambda context: _check_graceful_stop(context),
+)
+_FILL_MUT = MutatorAdapter(
+    locate_fn_by_record_fn=lambda fp, name, c, sig, cfgp=None: _locate_fn_by_record(fp, name, c, sig, cfgp),
+    locate_fn_fn=lambda text, name: _locate_fn(text, name),
+    splice_fn_body_at_fn=lambda fp, bs, be, nb, allow_nonstub=False: _splice_fn_body_at(fp, bs, be, nb, allow_nonstub=allow_nonstub),
+    splice_fn_body_fn=lambda fp, name, nb, allow_nonstub=False: _splice_fn_body(fp, name, nb, allow_nonstub=allow_nonstub),
+    replace_fn_signature_fn=lambda fp, name, sig: _replace_fn_signature(fp, name, sig),
+    extract_signature_block_fn=lambda resp: _extract_signature_block(resp),
+    lock_for_fn=lambda tree: _splice_lock_for(tree),
+)
+_FILL_CARGO = CargoFillAdapter(
+    run_fn=lambda cmd, cwd, env, timeout=180: _run_cargo(cmd, cwd, env, timeout),
+    build_test_cmd_fn=lambda stems, cluster: _build_test_cmd(stems, cluster),
+    u2_test_gate_fn=lambda ft, tc, tsd, ce: _u2_test_gate(ft, tc, tsd, ce),
+    focus_errors_fn=lambda out, fr, max_chars=None: _focus_cargo_errors(out, fr, max_chars=max_chars),
+    env_fn=lambda: _cargo_env(),
+)
+_FILL_PROMPT = PromptContextAdapter(
+    ask_per_fn_body_fn=lambda prompt, fn, alog, sig_text="": _ask_per_fn_body(prompt, fn, alog, sig_text=sig_text),
+    gather_fn=lambda **kw: _gather_fn_fix_context(**kw),
+    collect_sibling_filled_bodies_fn=lambda ft, tfn, tc: _collect_sibling_filled_bodies(ft, tfn, tc),
+    extract_crate_idioms_fn=lambda ib, fr, target_sig_text="", max_idioms=5: _extract_crate_idioms(ib, fr, target_sig_text=target_sig_text, max_idioms=max_idioms),
+    collect_crate_macros_fn=lambda sd: _collect_crate_macros(sd),
+    compute_cluster_macro_invariants_fn=lambda sd, cluster: _compute_cluster_macro_invariants(sd, cluster),
+    detect_crate_no_std_invariant_fn=lambda sd: _detect_crate_no_std_invariant(sd),
+)
+_FILL_WS = WorkspaceModelAdapter(
+    structure=_STRUCTURE,
+    scan_stub_records_fn=lambda tsd, cluster: _scan_unimplemented_records_for_cluster(tsd, cluster),
+    scan_stub_tuples_fn=lambda tsd, cluster: _scan_unimplemented_for_cluster(tsd, cluster),
+    collect_impl_blocks_fn=lambda sd: _collect_impl_blocks(sd),
+    fn_container_index_fn=lambda sd: _fn_container_index(sd),
+    fn_belongs_to_cluster_fn=lambda tsd, fr, fn, cluster, fn_cfg_predicates=None: _fn_belongs_to_cluster(tsd, fr, fn, cluster, fn_cfg_predicates=fn_cfg_predicates),
+    cluster_filter_type_methods_fn=lambda recs, cluster: _cluster_filter_type_methods(recs, cluster),
+    is_gen_tests_file_fn=lambda name: _is_gen_tests_file(name),
+    leaf_first_fn_order_fn=lambda tuples, lnc: _leaf_first_fn_order(tuples, lnc),
+)
+_FILL_RETROS = RetrosAdapter(
+    load_fn=lambda pd: _load_retrospectives(pd),
+    save_fn=lambda pd, retros: _save_retrospectives(pd, retros),
+    retro_key_fn=lambda fr, fn, c: _retro_key(fr, fn, c),
+    is_fn_fully_exhausted_fn=lambda cache, fr, fn, c: _is_fn_fully_exhausted(cache, fr, fn, c),
+    diagnose_fn=lambda **kw: _phase_c_retrospective(**kw),
+    append_note_fn=lambda fr_path, note, error_codes=None: _append_model_note(fr_path, note, error_codes=error_codes),
+    extract_self_note_fn=lambda fb, ee, fixed: _extract_self_note(fb, ee, fixed),
+    record_error_codes_fn=lambda out: _record_error_codes_seen(out),
+)
+_FILL_TESTS = TestLinkerAdapter(
+    find_tests_for_fn_fn=lambda tdf, fn, file_rel="", src_dir=None, container="": _find_tests_for_fn(tdf, fn, file_rel=file_rel, src_dir=src_dir, container=container),
+    classify_failures_fn=lambda to, ftp, ft, cn: _classify_phase_c_test_failures(to, ftp, ft, cn),
+    write_test_fix_log_fn=lambda **kw: _write_phase_c_test_fix_log(**kw),
+)
+_FILL_STALL = StallPolicyAdapter(
+    effective_stalls_fn=lambda budget, module: _effective_stalls(budget, module),
+    converge_in_cluster_fn=lambda cluster: _converge_in_cluster(cluster),
+)
+_FILL_IMPL = ImplFillPathAdapter(fill_impl_blocks_fn=lambda **kw: _phase_c_fill_impl_blocks(**kw))
 
 
-_PHASE_C_FILL_ADAPTER = _PhaseCFillAdapter()
-
-
-def _build_phase_c_engine(adapter: "_PhaseCFillAdapter | None" = None) -> "PhaseCFillEngine":
+def _build_phase_c_engine(*, structure: "_structure_port.StructureReader | None" = None) -> "PhaseCFillEngine":
     """Composition root: bind the concrete helpers to the fill-engine ports and
-    assemble the use-cases. Built per call so monkeypatched SETTINGS /
-    parallelism (tests) are honoured at call time. `adapter` lets a test inject a
-    `_PhaseCFillAdapter(structure=fake)` (P1 constructor-DI seam) instead of
-    monkeypatching the enumerate globals."""
-    a = adapter or _PHASE_C_FILL_ADAPTER
+    assemble the use-cases. Built per call so monkeypatched SETTINGS / parallelism
+    (tests) are honoured at call time. `structure` lets a test inject a fake
+    StructureReader (P1 constructor-DI seam) instead of monkeypatching the
+    enumerate globals — it is swapped into the WorkspaceModel adapter only."""
+    ws = _FILL_WS if structure is None else dataclasses.replace(_FILL_WS, structure=structure)
     caps = FillCaps(
         per_fn_fix_hard_cap=_PER_FN_FIX_HARD_CAP,
         per_fn_fix_max_stalls=_PER_FN_FIX_MAX_STALLS,
         fix_err_cap=_FIX_ERR_CAP,
     )
-    fill_one = FillOneFn(tel=a, mut=a, cargo=a, prompt=a, retros=a,
-                         tests=a, stall=a, caps=caps)
+    fill_one = FillOneFn(tel=_FILL_TEL, mut=_FILL_MUT, cargo=_FILL_CARGO, prompt=_FILL_PROMPT,
+                         retros=_FILL_RETROS, tests=_FILL_TESTS, stall=_FILL_STALL, caps=caps)
     cfg = EngineConfig(
         parallelism=_pipeline_parallelism(),
         fill_unit=SETTINGS.phase_c_fill_unit,
@@ -6647,9 +6532,9 @@ def _build_phase_c_engine(adapter: "_PhaseCFillAdapter | None" = None) -> "Phase
         pass_max_stalls=int(os.getenv("PHASE_C_PASS_MAX_STALLS", "2")),
         fix_err_cap=_FIX_ERR_CAP,
     )
-    return PhaseCFillEngine(tel=a, mut=a, cargo=a, prompt=a, ws=a, retros=a,
-                            tests=a, stall=a, impl_path=a, fill_one=fill_one,
-                            config=cfg)
+    return PhaseCFillEngine(tel=_FILL_TEL, mut=_FILL_MUT, cargo=_FILL_CARGO, prompt=_FILL_PROMPT,
+                            ws=ws, retros=_FILL_RETROS, tests=_FILL_TESTS, stall=_FILL_STALL,
+                            impl_path=_FILL_IMPL, fill_one=fill_one, config=cfg)
 
 
 def _task2_fill_fns_one_by_one(
@@ -6668,16 +6553,16 @@ def _task2_fill_fns_one_by_one(
     skip_end_pass_test: bool = False,
     tdd_frontier_tests: "Frontier | None" = None,
     tdd_test_cmd: str | None = None,
-    adapter: "_PhaseCFillAdapter | None" = None,
+    structure: "_structure_port.StructureReader | None" = None,
 ) -> dict:
     """Phase C — the per-cluster fill engine. Thin composition-root shim over
     `application.reconstruct.phase_c_engine.PhaseCFillEngine` (P2/R3.3): for each
     pass, scan stubs → leaf-first priority levels → worker pool (each worker
     drives `FillOneFn`) → per-pass cargo test + test-fix loop → pass-level
-    floor-stall. `adapter` is the P1 test-injection seam (fake StructureReader).
+    floor-stall. `structure` is the P1 test-injection seam (fake StructureReader).
     Returns {'fns_filled','bytes_filled','attempts','errors',
     'remaining','impls_filled','impls_failed'}."""
-    return _build_phase_c_engine(adapter).run(
+    return _build_phase_c_engine(structure=structure).run(
         project_dir, target_src_dir, tests_dir_files, module_name, cluster_name,
         cluster=cluster, check_cmd=check_cmd, cluster_env=cluster_env,
         max_passes=max_passes, leaf_name_counts=leaf_name_counts, fr_path=fr_path,

@@ -2,8 +2,9 @@
 
 Demonstrates the pattern CODE_ARCHITECTURE §4 P1 establishes: the real
 `CliStructureReader` wraps the `Extractor` seam (the `.to_dict()` logic that used to
-live in pipeline.py shims), and `_PhaseCFillAdapter` takes a `StructureReader` by
-CONSTRUCTOR so a test injects a fake — no `monkeypatch pipeline._enumerate_fns_via_extractor`.
+live in pipeline.py shims), and the fill-engine `WorkspaceModelAdapter` takes a
+`StructureReader` by CONSTRUCTOR so a test injects a fake (via
+`_build_phase_c_engine(structure=fake)`) — no `monkeypatch pipeline._enumerate_fns_via_extractor`.
 """
 from __future__ import annotations
 
@@ -63,22 +64,23 @@ class _FakeStructure:
     def enumerate_dispatch_families(self, src_dir: Path) -> None: return None
 
 
-def test_phase_c_adapter_uses_constructor_injected_structure() -> None:
-    """`_PhaseCFillAdapter(structure=fake)` routes enumerate reads through the FAKE —
-    no module-global monkeypatch. This is the reversed test-seam (debt: anti-pattern B)."""
+def test_phase_c_engine_uses_constructor_injected_structure() -> None:
+    """`_build_phase_c_engine(structure=fake)` swaps the fake StructureReader into
+    the WorkspaceModel adapter so enumerate reads route through it — no module-global
+    monkeypatch. This is the reversed test-seam (debt: anti-pattern B)."""
     import pipeline
     fake = _FakeStructure(fns=[{"fn_name": "answer", "file": "src/lib.rs"}])
-    adapter = pipeline._PhaseCFillAdapter(structure=fake)
-    assert adapter.enumerate_fns(Path("x")) == [{"fn_name": "answer", "file": "src/lib.rs"}]
-    assert adapter.enumerate_types(Path("x")) == []
+    engine = pipeline._build_phase_c_engine(structure=fake)
+    assert engine.ws.structure is fake                 # the injected instance is wired in
+    assert engine.ws.enumerate_fns(Path("x")) == [{"fn_name": "answer", "file": "src/lib.rs"}]
+    assert engine.ws.enumerate_types(Path("x")) == []
     assert fake.calls == ["fns", "types"]              # the injected instance was used
-    # And the engine builder threads that adapter (the injection point for tests).
-    engine = pipeline._build_phase_c_engine(adapter)
-    assert engine.ws is adapter and engine.mut is adapter
 
 
-def test_default_adapter_holds_the_real_reader() -> None:
+def test_default_workspace_adapter_holds_the_real_reader() -> None:
     """Composition root wires the real CliStructureReader by default."""
     import pipeline
-    assert isinstance(pipeline._PhaseCFillAdapter()._structure, CliStructureReader)
+    assert isinstance(pipeline._FILL_WS.structure, CliStructureReader)
     assert isinstance(pipeline._STRUCTURE, CliStructureReader)
+    # The default engine's WorkspaceModel adapter carries the real reader too.
+    assert isinstance(pipeline._build_phase_c_engine().ws.structure, CliStructureReader)

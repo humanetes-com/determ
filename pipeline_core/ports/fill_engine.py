@@ -3,8 +3,9 @@
 These are the DIP seams `application.reconstruct.fill_one_fn` and
 `application.reconstruct.phase_c_engine` depend on. Each Protocol is a narrow
 ROLE (ISP): a use-case receives only the roles it needs, never a god-deps.
-`pipeline.py` functions satisfy them structurally at the composition root
-(`_PhaseCFillAdapter`); tests pass fakes.
+`pipeline.py` functions satisfy them structurally at the composition root via the
+focused role adapters in `adapters.fill_engine_roles` (one narrow adapter per
+role, ISP); tests pass fakes.
 
 Pure helpers the engine also uses (splice math, fill rules, cargo-error
 parsing, the fix-loop driver, prompt builders) are NOT ports — they live in
