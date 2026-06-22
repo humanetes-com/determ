@@ -273,6 +273,7 @@ from pipeline_core.domain.text import (
 from pipeline_core.io import read, write
 from pipeline_core.ports import structure as _structure_port
 from pipeline_core.prompts import runtime as _prompts_runtime
+from pipeline_core.prompts import shaping as _shaping
 from pipeline_core.prompts.context import (
     PerFnFixSections,
 )
@@ -890,14 +891,9 @@ _U2_TEST_TIMEOUT   = SETTINGS.fix_caps.u2_test_timeout
 
 
 def prompt_budget(*fixed_parts: str) -> int:
-    """Chars remaining for dynamic content after fixed parts are accounted for.
-
-    Every prompt builder that injects dynamic content calls this to get the
-    available budget, then distributes it top-down (e.g. divide by num_files).
-    Never returns below 2,000 so there is always room for something useful.
-    """
-    used = sum(len(p) for p in fixed_parts)
-    return max(2_000, SINGLE_CALL_CHAR_LIMIT - used)
+    """Chars remaining for dynamic content (binds the configured char limit to the
+    relocated `prompts.shaping.prompt_budget`)."""
+    return _shaping.prompt_budget(SINGLE_CALL_CHAR_LIMIT, *fixed_parts)
 
 
 # task0c output is a small test block (~500-2000 chars), so reserve only 2000 chars
@@ -2641,144 +2637,13 @@ collect_examples = _discovery.collect_examples
 collect_protected_test_files = _discovery.collect_protected_test_files
 
 
-def format_test_files(test_files):
-    parts = []
-    for rel_path, content in test_files:
-        parts.append(f"=== {rel_path} ===\n{content}")
-    return "\n\n".join(parts)
+format_test_files = _shaping.format_test_files
+_split_at_semantic_boundaries = _shaping.split_at_semantic_boundaries
 
 
-def _split_at_semantic_boundaries(content: str, part_size: int) -> list[str]:
-    """
-    Split content into parts of at most part_size chars, preferring to break
-    at semantic boundaries in this order:
-      1. Test function boundaries (lines starting with #[test], def test_, it(, etc.)
-      2. Blank lines (paragraph boundaries)
-      3. Hard character split (last resort)
-
-    This ensures each part contains coherent, self-contained test logic rather
-    than an arbitrary fragment mid-function.
-    """
-    if len(content) <= part_size:
-        return [content]
-
-    # Detect test function boundary markers across languages.
-    BOUNDARY_RE = re.compile(
-        r'^(\s*#\[(?:test|cfg\(test\))\]'   # Rust: #[test], #[cfg(test)]
-        r'|\s*def test_'                      # Python
-        r'|\s*fn test_'                       # Rust (without attribute)
-        r'|\s*(?:it|test|describe)\s*\('      # JS/TS
-        r'|\s*func Test'                      # Go
-        r'|\s*@Test'                          # Java/Kotlin
-        r')',
-        re.MULTILINE,
-    )
-
-    lines = content.splitlines(keepends=True)
-    parts = []
-    current_chars = 0
-    current_lines: list[str] = []
-    i = 0
-
-    def emit():
-        if current_lines:
-            parts.append("".join(current_lines))
-            current_lines.clear()
-
-    while i < len(lines):
-        line = lines[i]
-        # Check if adding this line would overflow the part.
-        if current_lines and current_chars + len(line) > part_size:
-            # Try to find a semantic break in current_lines (scan backwards).
-            split_at = None
-            for j in range(len(current_lines) - 1, 0, -1):
-                if BOUNDARY_RE.match(current_lines[j]):
-                    split_at = j
-                    break
-            if split_at is None:
-                # No test boundary — try blank line.
-                for j in range(len(current_lines) - 1, 0, -1):
-                    if current_lines[j].strip() == "":
-                        split_at = j + 1
-                        break
-            if split_at is not None and split_at > 0:
-                # Emit up to split_at, keep the rest.
-                overflow = current_lines[split_at:]
-                del current_lines[split_at:]
-                emit()
-                current_lines.extend(overflow)
-                current_chars = sum(len(ln) for ln in current_lines)
-            else:
-                # Hard split — no good boundary found.
-                emit()
-                current_chars = 0
-
-        current_lines.append(line)
-        current_chars += len(line)
-        i += 1
-
-    emit()
-    return parts
-
-
-def chunk_test_files(test_files, char_limit):
-    """Split test files into groups where each group fits within char_limit.
-
-    Files larger than char_limit are split into labeled sub-chunks at semantic
-    boundaries (test function / blank line), not arbitrary character positions.
-    This ensures the model always receives complete, coherent test logic.
-    """
-    chunks = []
-    current: list[tuple[str, str]] = []
-    current_size = 0
-
-    def flush():
-        if current:
-            chunks.append(list(current))
-            current.clear()
-
-    for rel_path, content in test_files:
-        header_size = len(rel_path) + 10  # accounts for "=== path ===" wrapper
-        if len(content) + header_size > char_limit:
-            # File is too large to fit alone — split at semantic boundaries.
-            flush()
-            part_size = char_limit - header_size
-            parts = _split_at_semantic_boundaries(content, part_size)
-            total_parts = len(parts)
-            for idx, part in enumerate(parts, 1):
-                label = f"{rel_path} (part {idx}/{total_parts})"
-                chunks.append([(label, part)])
-        else:
-            entry_size = header_size + len(content)
-            if current and current_size + entry_size > char_limit:
-                flush()
-                current_size = 0
-            current.append((rel_path, content))
-            current_size += entry_size
-
-    flush()
-    return chunks
-
-
-def chunk_test_files_by_file(test_files, file_char_limit):
-    """One chunk per test file (FR-001). Files exceeding file_char_limit are split at
-    semantic boundaries (test function / blank line). This ensures the model always
-    processes one complete, coherent, named file per extraction call — independent of
-    context window size.
-    """
-    chunks = []
-    for rel_path, content in test_files:
-        header_size = len(rel_path) + 10
-        if len(content) + header_size > file_char_limit:
-            part_size = file_char_limit - header_size
-            parts = _split_at_semantic_boundaries(content, part_size)
-            total_parts = len(parts)
-            for idx, part in enumerate(parts, 1):
-                label = f"{rel_path} (part {idx}/{total_parts})"
-                chunks.append([(label, part)])
-        else:
-            chunks.append([(rel_path, content)])
-    return chunks
+# chunk_test_files + chunk_test_files_by_file relocated to prompts.shaping (P6).
+chunk_test_files = _shaping.chunk_test_files
+chunk_test_files_by_file = _shaping.chunk_test_files_by_file
 
 
 # ---------------------------------------------------------------------------
