@@ -236,6 +236,108 @@ def lines_are_cluster_specific(
 _OPS = {"not": Not, "all": All, "any": Any}
 
 
+# --- `#[cfg(...)]` ATTRIBUTE EXTRACTION from rendered source text (P7) ---
+# Structured replacements for the source regexes that pulled predicate strings out
+# of cfg attributes before handing them to `CfgSet.evaluate`. Each is byte-equivalent
+# to the exact regex it replaced (fuzz-verified). Naive of string literals, as the
+# regexes were.
+
+def cfg_inline_predicates(text: str) -> list[str]:
+    """Predicate string of every inline ``#[cfg(P)]`` — byte-equivalent to
+    ``[m.group(1) for m in re.finditer(r'#\\s*\\[\\s*cfg\\s*\\(([^]]+)\\)\\s*\\]', text)]``.
+    Flexible inter-token whitespace; capture runs to the ``)`` (whitespace allowed
+    before ``]``) that precedes the first ``]``."""
+    out: list[str] = []
+    n = len(text)
+    i = 0
+    while (h := text.find("#", i)) >= 0:
+        i = h + 1
+        p = h + 1
+        while p < n and text[p].isspace():  # \s*
+            p += 1
+        if p >= n or text[p] != "[":
+            continue
+        p += 1
+        while p < n and text[p].isspace():  # \s*
+            p += 1
+        if not text.startswith("cfg", p):
+            continue
+        p += 3
+        while p < n and text[p].isspace():  # \s*
+            p += 1
+        if p >= n or text[p] != "(":
+            continue
+        op = p
+        cb = text.find("]", op + 1)  # first ] ends the [^]]+ capture
+        if cb == -1:
+            continue
+        rp = cb - 1
+        while rp > op and text[rp].isspace():  # \s* between ) and ]
+            rp -= 1
+        if rp < op + 2 or text[rp] != ")":  # capture is [^]]+ (≥1) then )
+            continue
+        out.append(text[op + 1:rp])
+        i = cb + 1
+    return out
+
+
+def match_cfg_attr_line(line: str) -> str | None:
+    """If `line` is exactly a ``#[cfg(P)]`` attribute line (``[ \\t]`` indent, then
+    ``\\s*$``), return ``P``; else None — byte-equivalent to ``re.match(
+    r'^[ \\t]*#\\[cfg\\(([^\\]]+(?:\\([^\\]]*\\)[^\\]]*)*)\\)\\]\\s*$', line)``. ``#[cfg(`` is
+    matched literally; capture runs to the ``)`` directly before the first ``]``."""
+    n = len(line)
+    p = 0
+    while p < n and line[p] in " \t":  # [ \t]*
+        p += 1
+    if not line.startswith("#[cfg(", p):
+        return None
+    op = p + 5  # the '(' of "#[cfg("
+    cb = line.find("]", op + 1)
+    if cb == -1 or cb < op + 3 or line[cb - 1] != ")":  # \)\] adjacent; capture ≥1
+        return None
+    if any(not c.isspace() for c in line[cb + 1:]):  # \s*$
+        return None
+    return line[op + 1:cb - 1]
+
+
+def crate_cfg_predicates(text: str) -> list[str]:
+    """Predicate of every top-level ``#![cfg(P)]`` line — byte-equivalent to
+    ``[m.group(1) for m in re.finditer(r'^\\s*#!\\[cfg\\((.*?)\\)\\]\\s*$', text,
+    re.MULTILINE)]``. ``#![cfg(`` is literal; capture is non-greedy to the first
+    ``)]`` (no newline within); the line is whitespace-only around the attribute."""
+    out: list[str] = []
+    n = len(text)
+    i = 0
+    needle = "#![cfg("
+    while (h := text.find(needle, i)) >= 0:
+        i = h + 1
+        bol = text.rfind("\n", 0, h) + 1
+        if any(not c.isspace() for c in text[bol:h]):  # ^\s* (line lead all ws)
+            continue
+        cs = h + len(needle)
+        rb = -1
+        j = cs
+        while j < n - 1:  # (.*?)\)\] : first ")]" with no newline in the capture
+            if text[j] == "\n":
+                break
+            if text[j] == ")" and text[j + 1] == "]":
+                rb = j
+                break
+            j += 1
+        if rb < 0:
+            continue
+        after = rb + 2
+        eol = text.find("\n", after)
+        if eol == -1:
+            eol = n
+        if any(not c.isspace() for c in text[after:eol]):  # \s*$
+            continue
+        out.append(text[cs:rb])
+        i = rb + 2
+    return out
+
+
 def parse_cfg_pred(pred: str) -> CfgPred:
     """Parse a ``#[cfg(...)]`` condition string into a typed :class:`CfgPred`.
     Normalizes whitespace first, so ``all (a, b)`` and ``all(a,b)`` parse alike."""

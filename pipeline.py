@@ -3188,11 +3188,8 @@ def _file_top_cfg_excluded(content: str, cfg_true: set[str], cfg_false: set[str]
     We use a narrow regex match for the common case `#![cfg(PRED)]` rather
     than full AST parsing — test files are small and the pattern is common.
     """
-    # Match all top-level #![cfg(...)] occurrences (allow nested parens up to 3 deep).
-    pat = re.compile(r'^\s*#!\[cfg\((.*?)\)\]\s*$', re.MULTILINE)
-    for m in pat.finditer(content):
-        pred = m.group(1).strip()
-        if _eval_cfg_pred(pred, cfg_true, cfg_false) is False:
+    for pred in _cfg.crate_cfg_predicates(content):
+        if _eval_cfg_pred(pred.strip(), cfg_true, cfg_false) is False:
             return True
     return False
 
@@ -3491,10 +3488,8 @@ def _format_skeleton_index_for_cluster(
     cfg_true = {_normalize_cfg_pred(p) for p in cluster.cfg_true}
     cfg_false = {_normalize_cfg_pred(p) for p in cluster.cfg_false}
 
-    # Per-item cfg attr matcher: a leading `#[cfg(...)]` (or several) above
-    # the item declaration.
-    cfg_attr_re = re.compile(r'^[ \t]*#\[cfg\(([^\]]+(?:\([^\]]*\)[^\]]*)*)\)\]\s*$', re.MULTILINE)
-
+    # Per-item cfg attr matcher: a leading `#[cfg(...)]` (or several) above the
+    # item declaration — via domain.cfg.match_cfg_attr_line.
     filtered_files: list[tuple[str, str]] = []
     for rel, content in skeleton_files:
         # Walk the content line by line collecting leading #[cfg(...)] groups
@@ -3511,9 +3506,9 @@ def _format_skeleton_index_for_cluster(
             while i < len(lines):
                 line = lines[i]
                 stripped = line.strip()
-                m = cfg_attr_re.match(line)
-                if m:
-                    collected_cfgs.append(m.group(1).strip())
+                cfg_pred = _cfg.match_cfg_attr_line(line)
+                if cfg_pred is not None:
+                    collected_cfgs.append(cfg_pred.strip())
                     i += 1
                     continue
                 # Any other attribute / doc / blank line: keep walking.
@@ -7109,12 +7104,8 @@ def _scan_unimplemented_functions(src_dir: Path) -> list[tuple[str, str]]:
 # being scanned in the stable cluster). Pure static analysis, no LLM.
 # ---------------------------------------------------------------------------
 
-_CFG_ATTR_RE = re.compile(r"^\s*#\s*\[\s*cfg\s*\(([^]]+)\)\s*\]\s*$")
-# Inline form: matches `#[cfg(X)]` even when not on its own line. Used when
-# searching the lib.rs `mod foo;` declaration — the skeleton extractor
-# formats attributes with spaces (`# [cfg (X)] mod foo ;`) and may keep
-# them on the same line as the item.
-_CFG_INLINE_RE = re.compile(r"#\s*\[\s*cfg\s*\(([^]]+)\)\s*\]")
+# Inline `#[cfg(X)]` predicate extraction (incl. the spaced skeleton form
+# `# [cfg (X)] mod foo ;`) is done via domain.cfg.cfg_inline_predicates.
 
 
 def _fn_cfg_predicates(file_text: str, fn_name: str) -> list[str]:
@@ -7148,10 +7139,7 @@ def _fn_cfg_predicates(file_text: str, fn_name: str) -> list[str]:
     ws = file_text.rfind("\n\n", 0, decl_offset)
     window_start = ws + 2 if ws >= 0 else 0
     window = file_text[window_start:decl_offset + 1]
-    preds: list[str] = []
-    for cm in _CFG_INLINE_RE.finditer(window):
-        preds.append(cm.group(1).strip())
-    return preds
+    return [pred.strip() for pred in _cfg.cfg_inline_predicates(window)]
 
 
 def _enumerate_mods_via_extractor(src_dir: Path) -> list[ModRecord] | None:
@@ -7310,8 +7298,8 @@ def _file_cfg_predicate_regex_fallback(
         mod_idx = decl_line.find("mod ")
         if mod_idx < 0:
             mod_idx = len(decl_line)
-        for cm in _CFG_INLINE_RE.finditer(decl_line[:mod_idx]):
-            preds.append(cm.group(1).strip())
+        for pred in _cfg.cfg_inline_predicates(decl_line[:mod_idx]):
+            preds.append(pred.strip())
         decl_start = m.start() + (1 if text[m.start()] == "\n" else 0)
         head = text[:decl_start]
         for ln in reversed(head.splitlines()):
@@ -7324,9 +7312,9 @@ def _file_cfg_predicate_regex_fallback(
             # cfg attrs on such a line belong to ITS item, not ours.
             if contains_decl_keyword(s):
                 break
-            if _CFG_INLINE_RE.search(ln):
-                for cm in _CFG_INLINE_RE.finditer(ln):
-                    preds.append(cm.group(1).strip())
+            ln_preds = _cfg.cfg_inline_predicates(ln)
+            if ln_preds:
+                preds.extend(p.strip() for p in ln_preds)
                 continue
             if s.startswith("#["):
                 continue
