@@ -61,3 +61,41 @@ _JSON_FENCE_CASES = [
 def test_strip_simple_code_fence_matches_regex():
     for t in _JSON_FENCE_CASES:
         assert strip_simple_code_fence(t) == _old_simple_fence(t), t
+
+
+# --- P7: more regex-free text helpers (strip_markdown_fences, blank-line/asterisk) ---
+
+from pipeline_core.domain.text import (  # noqa: E402
+    collapse_blank_lines,
+    strip_markdown_fences,
+    strip_surrounding_asterisks,
+)
+
+
+def _old_strip_md_fences(content: str) -> str:
+    content = content.strip()
+    content = re.sub(r'^```[a-zA-Z0-9_-]*\s*\n', '', content)
+    content = re.sub(r'\n```\s*$', '', content)
+    content = re.sub(r'^```[a-zA-Z0-9_-]*\s*$', '', content, flags=re.MULTILINE)
+    return content.strip()
+
+
+def test_strip_markdown_fences_matches_regex():
+    cases = [
+        "```rust\nfn f() {}\n```", "```\ncode\n```\n```\ntail\n```", "no fences here",
+        "```py\nx\n```\n\n```\ny\n```", "```rust\nbody", "text\n```\nmore", "",
+        "```\n\n\n```", "```lang\n```", "  ```rust\nz\n```  ",
+    ]
+    for t in cases:
+        assert strip_markdown_fences(t) == _old_strip_md_fences(t), t
+
+
+def test_collapse_blank_lines_matches_regex():
+    for t in ["a\n\nb", "a\n \n \nb", "a\nb", "a\n\n\n\nb", "\n\n", "x\n\n ", "", "a\n \nb\n\nc"]:
+        assert collapse_blank_lines(t) == re.sub(r'\n\s*\n+', '\n', t), t
+
+
+def test_strip_surrounding_asterisks_matches_regex():
+    for s in ["**bold**", "* item", "trailing *", "***", "no stars", "* * *", "",
+              "*x", "x*", "**a* b**"]:
+        assert strip_surrounding_asterisks(s) == re.sub(r'^\*+\s*|\s*\*+$', '', s), s

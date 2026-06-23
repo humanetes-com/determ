@@ -1,20 +1,83 @@
 """Pure text helpers — LLM-output cleanup + prompt-budget truncation (pure domain).
 
-Relocated verbatim from pipeline.py (slice 5b foundation). No I/O, no pipeline deps — so
-tasks import them instead of carrying them in a deps record. The regex here operates on
-LLM response text / generic strings (fence stripping, think-block removal), not Rust
-source — source parsing stays on the syn extractor. Bodies moved as-is; no new patterns.
+Relocated from pipeline.py (slice 5b foundation). No I/O, no pipeline deps — so tasks
+import them instead of carrying them in a deps record. These operate on LLM response
+text / generic strings (fence stripping, think-block removal), not Rust source — source
+parsing stays on the syn extractor. Now fully regex-free (P7): deterministic char scans,
+each byte-equivalent to the pattern it replaced (pinned in tests/test_text_domain.py).
 """
 
 from __future__ import annotations
 
-import re
+
+def _strip_opening_fence(content: str) -> str:
+    """``re.sub(r'^```[a-zA-Z0-9_-]*\\s*\\n', '', content)`` — drop a leading fence
+    line; the greedy ``\\s*\\n`` consumes through the LAST newline of the run."""
+    if not content.startswith("```"):
+        return content
+    n = len(content)
+    p = 3
+    while p < n and _is_fence_lang_char(content[p]):
+        p += 1
+    w = p
+    while w < n and content[w].isspace():
+        w += 1
+    lnl = content.rfind("\n", p, w)
+    return content[lnl + 1:] if lnl != -1 else content
+
+
+def _strip_closing_fence(content: str) -> str:
+    """``re.sub(r'\\n```\\s*$', '', content)`` — drop a trailing ```` ``` ```` fence preceded
+    by a newline (trailing whitespace is the ``\\s*$``)."""
+    t = content.rstrip()
+    if t.endswith("```"):
+        bt = len(t) - 3
+        if bt > 0 and t[bt - 1] == "\n":
+            return content[:bt - 1]
+    return content
+
+
+def _standalone_fence_match_end(content: str, i: int, n: int) -> int | None:
+    """If ``^```[a-zA-Z0-9_-]*\\s*$`` matches at line-start `i`, return the match end
+    (the index of the terminating newline, or `n` at EOF), else None. The greedy
+    ``\\s*$`` places ``$`` at the last newline of the trailing whitespace run."""
+    p = i + 3
+    while p < n and _is_fence_lang_char(content[p]):
+        p += 1
+    w = p
+    while w < n and content[w].isspace():
+        w += 1
+    if w == n:
+        return n  # $ at end-of-string
+    lnl = content.rfind("\n", p, w)
+    return lnl if lnl != -1 else None  # $ sits before the last \n of the run
+
+
+def _strip_standalone_fence_lines(content: str) -> str:
+    """``re.sub(r'^```[a-zA-Z0-9_-]*\\s*$', '', content, flags=re.MULTILINE)`` — drop
+    any standalone fence line (``\\s*$`` may swallow following blank lines)."""
+    n = len(content)
+    out: list[str] = []
+    i = 0
+    at_line_start = True
+    while i < n:
+        if at_line_start and content.startswith("```", i):
+            me = _standalone_fence_match_end(content, i, n)
+            if me is not None:
+                i = me  # skip the matched span; the terminating \n (if any) stays
+                at_line_start = False
+                continue
+        c = content[i]
+        out.append(c)
+        at_line_start = c == "\n"
+        i += 1
+    return "".join(out)
 
 
 def strip_markdown_fences(content: str) -> str:
     """Remove markdown code fences that models sometimes include in file content.
 
-    Handles three cases:
+    Handles three cases (regex-free, byte-equivalent to the former 3 `re.sub`s):
     1. Opening fence at start:  ```rust\\ncode\\n```  →  code
     2. Closing fence at end (after opening already stripped)
     3. Orphaned standalone fence lines anywhere in the content (e.g. the model
@@ -22,13 +85,9 @@ def strip_markdown_fences(content: str) -> str:
     Rust doc-comment fences (/// ```) start with slashes so are unaffected.
     """
     content = content.strip()
-    # Strip opening fence: ```lang or ``` on its own line at the very start
-    content = re.sub(r'^```[a-zA-Z0-9_-]*\s*\n', '', content)
-    # Strip closing fence at the very end
-    content = re.sub(r'\n```\s*$', '', content)
-    # Strip any remaining standalone fence lines anywhere in the file
-    # (lines that are exactly ``` or ```lang with optional trailing whitespace)
-    content = re.sub(r'^```[a-zA-Z0-9_-]*\s*$', '', content, flags=re.MULTILINE)
+    content = _strip_opening_fence(content)
+    content = _strip_closing_fence(content)
+    content = _strip_standalone_fence_lines(content)
     return content.strip()
 
 
@@ -139,6 +198,49 @@ def smart_truncate(text: str, total_limit: int = 8000, head: int = 2000, tail: i
         return text
     omitted = len(text) - head - tail
     return text[:head] + f"\n\n[... {omitted:,} chars omitted ...]\n\n" + text[-tail:]
+
+
+def collapse_blank_lines(text: str) -> str:
+    """Collapse every run of ≥2 newlines (with interspersed whitespace) to a single
+    ``\\n`` — byte-equivalent to ``re.sub(r'\\n\\s*\\n+', '\\n', text)`` (trailing non-newline
+    whitespace of the run is preserved, since ``\\n+`` ends the match at the last newline)."""
+    n = len(text)
+    out: list[str] = []
+    i = 0
+    while i < n:
+        if text[i] == "\n":
+            w = i + 1
+            while w < n and text[w].isspace():  # \s* (greedy, incl newlines)
+                w += 1
+            last_nl = text.rfind("\n", i + 1, w)  # \n+ ends at the last newline
+            if last_nl != -1:  # ≥2 newlines in the run → collapse
+                out.append("\n")
+                i = last_nl + 1
+                continue
+        out.append(text[i])
+        i += 1
+    return "".join(out)
+
+
+def strip_surrounding_asterisks(s: str) -> str:
+    """Strip a leading ``*``-run+whitespace and a trailing whitespace+``*``-run —
+    byte-equivalent to ``re.sub(r'^\\*+\\s*|\\s*\\*+$', '', s)``."""
+    n = len(s)
+    i = 0
+    if i < n and s[i] == "*":  # ^\*+\s*
+        while i < n and s[i] == "*":
+            i += 1
+        while i < n and s[i].isspace():
+            i += 1
+    j = n  # \s*\*+$
+    k = n
+    while k > i and s[k - 1] == "*":
+        k -= 1
+    if k < n:  # there was a trailing *-run
+        while k > i and s[k - 1].isspace():
+            k -= 1
+        j = k
+    return s[i:j]
 
 
 def strip_list_marker(line: str) -> str:

@@ -365,6 +365,9 @@ from pipeline_core.domain.test_results import (
     parse_failed_tests as _parse_failed_tests,
 )
 from pipeline_core.domain.text import (
+    collapse_blank_lines as _collapse_blank_lines,
+)
+from pipeline_core.domain.text import (
     extract_code_content as extract_code_content,  # noqa: PLC0414 (test seam re-export)
 )
 from pipeline_core.domain.text import (
@@ -376,6 +379,9 @@ from pipeline_core.domain.text import (
 )
 from pipeline_core.domain.text import (
     strip_simple_code_fence as _strip_simple_code_fence,
+)
+from pipeline_core.domain.text import (
+    strip_surrounding_asterisks as _strip_surrounding_asterisks,
 )
 from pipeline_core.io import read, write
 from pipeline_core.ports import structure as _structure_port
@@ -2125,9 +2131,9 @@ def validate_task2_output(project_dir: Path, expected_paths: list[str],
         raw = fp.read_text(encoding="utf-8", errors="ignore")
         all_source += raw
         stripped = strip_comment_spans(raw)
-        stripped = re.sub(r'\s+', '', stripped)
+        stripped = "".join(stripped.split())
         placeholders_found = len(_PLACEHOLDER_RE.findall(raw))
-        non_placeholder_len = len(re.sub(r'\s+', '', _PLACEHOLDER_RE.sub("", stripped)))
+        non_placeholder_len = len("".join(_PLACEHOLDER_RE.sub("", stripped).split()))
         if placeholders_found > 0 and non_placeholder_len < 50:
             placeholder_files.append(p)
     if placeholder_files:
@@ -4350,7 +4356,7 @@ def _condense_doc_run(contents: "list[str]") -> str:
     if '.' in text:
         text = text[:text.index('.') + 1]
     text = strip_inline_md_links(text)   # [t](url) -> t
-    text = re.sub(r'\s+', ' ', text).strip()
+    text = " ".join(text.split())
     return text[:200].rstrip()
 
 
@@ -4613,7 +4619,7 @@ def _compute_cluster_macro_invariants(
             if compact.endswith("}"):
                 compact = compact[:-1].rstrip()
         # Collapse internal whitespace runs for compactness.
-        compact = re.sub(r"\n\s*\n+", "\n", compact)
+        compact = _collapse_blank_lines(compact)
         if len(compact) > 240:
             compact = compact[:237] + "..."
         cfg_note = f" [cfg={cfg}]" if cfg else " [always]"
@@ -4908,7 +4914,7 @@ _NOTE_SIGNATURE_KEYWORDS = {
 
 def _note_hash(text: str) -> str:
     """Exact-text hash for early-rejection of literal duplicates."""
-    norm = re.sub(r"\s+", " ", text.strip().lower())
+    norm = " ".join(text.lower().split())
     return hashlib.md5(norm.encode("utf-8")).hexdigest()[:16]
 
 
@@ -5455,7 +5461,7 @@ def _whole_tree_retrospective(
     in_guidance = False
     for ln in (result or "").splitlines():
         s = ln.strip().lstrip("*-• ").strip()
-        s = re.sub(r"^\*+\s*|\s*\*+$", "", s)
+        s = _strip_surrounding_asterisks(s)
         m = re.match(r"(?i)^category\s*[:=]\s*(\S+)", s)
         if m:
             cat = m.group(1).strip().rstrip(".,;").upper()
