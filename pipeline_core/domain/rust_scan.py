@@ -762,3 +762,56 @@ def attr_opener_end(text: str, i: int) -> tuple[bool, int] | None:
     if p < n and text[p] == "[":
         return is_bang, p + 1
     return None
+
+
+# --- P7: test-attribute line detection (replaces _count_test_fns_cfg_aware regexes) ---
+
+_TEST_ATTR_TOKENS = (
+    "test", "tokio::test", "async_std::test", "serial_test::serial",
+    "rstest", "parameterized", "test_case",
+)
+
+
+def is_attr_line(line: str) -> bool:
+    """True iff `line` (after leading ws) opens an attribute ``#[`` — byte-equivalent
+    to ``re.match(r'^\\s*#\\s*\\[', line)``."""
+    n = len(line)
+    i = 0
+    while i < n and line[i].isspace():
+        i += 1
+    if i >= n or line[i] != "#":
+        return False
+    i += 1
+    while i < n and line[i].isspace():
+        i += 1
+    return i < n and line[i] == "["
+
+
+def is_test_attr_line(line: str) -> bool:
+    """True iff `line` is a ``#[test]``-family attribute line — byte-equivalent to
+    ``re.search(r'^\\s*#\\s*\\[\\s*(?:test|tokio::test|async_std::test|serial_test::serial|'
+    ``rstest|parameterized|test_case)\\s*[\\s\\],(]', line)``. The token must be followed
+    by whitespace or one of ``] , (`` (so ``#[testing]`` does NOT match)."""
+    n = len(line)
+    i = 0
+    while i < n and line[i].isspace():  # ^\s*
+        i += 1
+    if i >= n or line[i] != "#":
+        return False
+    i += 1
+    while i < n and line[i].isspace():  # \s*
+        i += 1
+    if i >= n or line[i] != "[":
+        return False
+    i += 1
+    while i < n and line[i].isspace():  # \s*
+        i += 1
+    for tok in _TEST_ATTR_TOKENS:
+        if not line.startswith(tok, i):
+            continue
+        k = j = i + len(tok)
+        while k < n and line[k].isspace():  # \s*
+            k += 1
+        if k > j or (k < n and line[k] in "],("):  # [\s\],(] : whitespace consumed, or ]/,/(
+            return True
+    return False

@@ -335,8 +335,10 @@ from pipeline_core.domain.rust_scan import (
     find_mod_opener,
     has_no_std_attr,
     has_nonempty_test_fn,
+    is_attr_line,
     is_rust_item_boundary_line,
     is_structural_brace_line,
+    is_test_attr_line,
     is_type_decl_line,
     item_names,
     module_use_imports,
@@ -2302,23 +2304,13 @@ def _count_test_fns_cfg_aware(
     if _file_top_cfg_excluded(text, cfg_true, cfg_false):
         return 0
     lines = text.splitlines()
-    test_attr_re = re.compile(
-        r"^\s*#\s*\[\s*(?:test|tokio::test|async_std::test|"
-        r"serial_test::serial|rstest|parameterized|test_case)\s*[\s\],(]",
-    )
-    cfg_inline_re = re.compile(
-        r"#\s*\[\s*cfg\s*\(([^]]+)\)\s*\]",
-    )
-    attr_line_re = re.compile(r"^\s*#\s*\[")
     count = 0
     for i, line in enumerate(lines):
-        if not test_attr_re.search(line):
+        if not is_test_attr_line(line):
             continue
         # Walk backward across the attribute block above this #[test] to
         # collect cfg predicates that gate this fn.
-        gates: list[str] = []
-        for cm in cfg_inline_re.finditer(line):
-            gates.append(cm.group(1).strip())
+        gates: list[str] = [p.strip() for p in _cfg.cfg_inline_predicates(line)]
         j = i - 1
         while j >= 0:
             s = lines[j].strip()
@@ -2327,10 +2319,9 @@ def _count_test_fns_cfg_aware(
             if s.startswith("//") or s.startswith("/*"):
                 j -= 1
                 continue
-            if not attr_line_re.match(lines[j]):
+            if not is_attr_line(lines[j]):
                 break  # not an attribute line — chain ends
-            for cm in cfg_inline_re.finditer(lines[j]):
-                gates.append(cm.group(1).strip())
+            gates.extend(p.strip() for p in _cfg.cfg_inline_predicates(lines[j]))
             j -= 1
         # If any gate keeps cargo from running this test, skip it. cargo-faithful:
         # a custom `--cfg`/non-default feature off here = the test never runs.

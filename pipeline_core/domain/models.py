@@ -117,6 +117,7 @@ class FnRecord:
     is_pub: bool = False
     container: str = ""         # "" free fn | "impl X for Y" | "trait T"
     has_unimplemented_body: bool = False
+    is_test: bool = False       # carries a test attr (#[test]/#[tokio::test]/#[rstest]/…)
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> FnRecord:
@@ -132,6 +133,7 @@ class FnRecord:
             is_pub=bool(d.get("is_pub", False)),
             container=d.get("container", ""),
             has_unimplemented_body=bool(d.get("has_unimplemented_body", False)),
+            is_test=bool(d.get("is_test", False)),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -147,6 +149,7 @@ class FnRecord:
             "is_pub": self.is_pub,
             "container": self.container,
             "has_unimplemented_body": self.has_unimplemented_body,
+            "is_test": self.is_test,
         }
 
 

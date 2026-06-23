@@ -83,6 +83,26 @@ mod tests {
     }
 
     #[test]
+    fn detects_test_attributes() {
+        use syn::{parse_str, ItemFn};
+        let cases = [
+            ("#[test] fn t() {}", true),
+            ("#[tokio::test] async fn t() {}", true),
+            ("#[async_std::test] async fn t() {}", true),
+            ("#[rstest] fn t() {}", true),
+            ("#[serial_test::serial] fn t() {}", true),
+            ("#[test_case] fn t() {}", true),
+            ("fn t() {}", false),
+            ("#[inline] fn t() {}", false),
+            ("#[cfg(test)] fn t() {}", false),
+        ];
+        for (src, want) in cases {
+            let f: ItemFn = parse_str(src).unwrap();
+            assert_eq!(crate::enumerate::attrs_have_test(&f.attrs), want, "{src}");
+        }
+    }
+
+    #[test]
     fn preserves_const_value() {
         let src = "pub const X: u32 = 42;";
         let out = skeletonise_str(src);

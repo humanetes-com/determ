@@ -69,8 +69,8 @@ impl<'a> FnEnumerator<'a> {
         // `walk_items` before this fn is recorded), alongside any enclosing impl/mod/trait
         // cfgs. Re-adding `extract_cfg_predicates(attrs)` here double-counted the fn's own
         // predicate (e.g. a free `#[cfg(feature="std")] fn` reported it twice). Fixed: trust
-        // the stack. `attrs` is retained only for signature stability / future span use.
-        let _ = attrs;
+        // the stack. `attrs` is still read for the fn's own test-attribute detection.
+        let is_test = attrs_have_test(attrs);
         let cfgs = self.cfg_stack.clone();
         let container = self.container_stack.last().cloned().unwrap_or_default();
         self.records.push(FnRecord {
@@ -85,6 +85,7 @@ impl<'a> FnEnumerator<'a> {
             is_pub,
             container,
             has_unimplemented_body: body_looks_unimplemented(&body_text),
+            is_test,
         });
     }
 
@@ -173,6 +174,20 @@ impl<'a> FnEnumerator<'a> {
             }
         }
     }
+}
+
+/// True iff any attribute is a test attribute — the set the pipeline's former
+/// test-marker regex matched: `#[test]` / `#[tokio::test]` / `#[async_std::test]`
+/// (last path segment `test`), `#[rstest]`, `#[parameterized]`, `#[test_case]`,
+/// `#[serial_test::serial]` / `#[serial]`.
+pub(crate) fn attrs_have_test(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|a| {
+        a.path().segments.last().is_some_and(|seg| {
+            let id = seg.ident.to_string();
+            id == "test" || id == "rstest" || id == "parameterized" || id == "test_case"
+                || id == "serial"
+        })
+    })
 }
 
 pub(crate) fn impl_item_attrs(it: &ImplItem) -> &[syn::Attribute] {

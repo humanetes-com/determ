@@ -385,3 +385,23 @@ def test_attr_opener_end_matches_regex():
             m = pat.match(t, i)
             expected = (m.group(1) == '!', m.end()) if m else None
             assert attr_opener_end(t, i) == expected, (t, i)
+
+
+# --- P7: test-attribute line detection ---
+
+from pipeline_core.domain.rust_scan import is_attr_line, is_test_attr_line  # noqa: E402
+
+
+def test_is_attr_line_matches_regex():
+    pat = re.compile(r'^\s*#\s*\[')
+    for s in ["#[test]", "  # [ derive ]", "#![no_std]", "fn x", "#x", "# ", "", "#["]:
+        assert is_attr_line(s) == bool(pat.match(s)), s
+
+
+def test_is_test_attr_line_matches_regex():
+    pat = re.compile(r'^\s*#\s*\[\s*(?:test|tokio::test|async_std::test|serial_test::serial|'
+                     r'rstest|parameterized|test_case)\s*[\s\],(]')
+    for s in ["#[test]", "#[ test ]", "#[tokio::test]", "#[rstest]", "#[test_case]",
+              "#[testing]", "#[test_foo]", "  #[serial_test::serial]", "#[cfg(test)]",
+              "#[test(", "#[parameterized]", "fn t", "", "#[test"]:
+        assert is_test_attr_line(s) == bool(pat.search(s)), s

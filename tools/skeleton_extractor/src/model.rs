@@ -27,6 +27,7 @@ pub struct FnRecord {
     pub is_pub: bool,           // any pub visibility (incl pub(crate), pub(super))
     pub container: String, // "" for free fn, "impl X for Y" for inherent/trait impl, "trait T" for trait method
     pub has_unimplemented_body: bool, // body is a single `unimplemented!()` or annotated stub
+    pub is_test: bool, // fn carries a test attribute (#[test], #[tokio::test], #[rstest], …)
 }
 
 #[derive(serde::Serialize, Debug, Clone)]
