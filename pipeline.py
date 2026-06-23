@@ -222,6 +222,11 @@ from pipeline_core.domain.cargo_toml import cargo_package_name as _domain_cargo_
 from pipeline_core.domain.cargo_toml import load_cargo_toml as _domain_load_cargo_toml
 from pipeline_core.domain.cluster_scope import ClusterScope
 from pipeline_core.domain.compile_probe import CompileProbe
+from pipeline_core.domain.doc_render import (
+    doc_eq_value_offset,
+    is_link_ref_def,
+    strip_inline_md_links,
+)
 from pipeline_core.domain.enums import (
     Backend,
     CoverageBackend,
@@ -320,6 +325,7 @@ from pipeline_core.domain.rust_idioms import (
 from pipeline_core.domain.rust_macros import macro_definitions
 from pipeline_core.domain.rust_scan import (
     after_brace_newline,
+    attr_opener_end,
     branch_guard_label,
     contains_decl_keyword,
     contains_word,
@@ -4198,10 +4204,8 @@ def _extract_body_response(response: str) -> str | None:
     return response.strip() or None
 
 
-# Matches the start of an attribute: `#[`, `#![`, or any of those with
-# Rust-legal whitespace between the tokens (the baked skeleton emits the
-# spaced token form `# ! [ doc = ... ]`). Group 1 is the optional `!`.
-_ATTR_OPENER_RE = re.compile(r'#\s*(!?)\s*\[')
+# Attribute openers (`#[`, `#![`, incl. the spaced skeleton form `# ! [ doc … ]`)
+# are located structurally via domain.rust_scan.attr_opener_end.
 
 
 def _attr_span_end(text: str, open_idx: int) -> int:
@@ -4267,10 +4271,10 @@ def _strip_attrs_for_view(text: str, *, bang: bool, doc_only: bool) -> str:
     n = len(text)
     while i < n:
         if text[i] == '#':
-            m = _ATTR_OPENER_RE.match(text, i)
-            if m:
-                is_bang = m.group(1) == '!'
-                open_idx = m.end() - 1  # index of the `[`
+            res = attr_opener_end(text, i)
+            if res:
+                is_bang, _aend = res
+                open_idx = _aend - 1  # index of the `[`
                 end = _attr_span_end(text, open_idx)
                 if end != -1:
                     inner = text[open_idx + 1:end - 1].lstrip()
@@ -4310,10 +4314,10 @@ def _doc_attr_string(attr_inner: str) -> "str | None":
     """Given the text inside an attribute's brackets (e.g. `doc = " summary"`),
     return the doc string content, or None if this is not a `doc = "..."` attr.
     `#[doc(hidden)]` and other non-string doc attrs return "" (drop, no text)."""
-    m = re.match(r'doc\s*=\s*', attr_inner)
-    if not m:
+    off = doc_eq_value_offset(attr_inner)
+    if off is None:
         return None
-    rest = attr_inner[m.end():].lstrip()
+    rest = attr_inner[off:].lstrip()
     if not rest.startswith('"'):
         return ""  # doc(hidden) / doc(alias=...) etc — no prose to keep
     body = rest[1:]
@@ -4345,7 +4349,7 @@ def _condense_doc_run(contents: "list[str]") -> str:
             if summary:
                 break                  # blank line after prose ends the summary
             continue
-        if s.startswith('[![') or re.match(r'\[[^\]]+\]:', s):
+        if s.startswith('[![') or is_link_ref_def(s):
             continue                   # badge / link reference definition
         summary.append(s)
         if '.' in s:
@@ -4353,7 +4357,7 @@ def _condense_doc_run(contents: "list[str]") -> str:
     text = ' '.join(summary).strip()
     if '.' in text:
         text = text[:text.index('.') + 1]
-    text = re.sub(r'\[([^\]]+)\]\([^)]*\)', r'\1', text)   # [t](url) -> t
+    text = strip_inline_md_links(text)   # [t](url) -> t
     text = re.sub(r'\s+', ' ', text).strip()
     return text[:200].rstrip()
 
@@ -4389,10 +4393,10 @@ def _condense_doc_attrs(text: str) -> str:
     while i < n:
         c = text[i]
         if c == '#':
-            m = _ATTR_OPENER_RE.match(text, i)
-            if m:
-                is_bang = m.group(1) == '!'
-                open_idx = m.end() - 1
+            res = attr_opener_end(text, i)
+            if res:
+                is_bang, _aend = res
+                open_idx = _aend - 1
                 end = _attr_span_end(text, open_idx)
                 if end != -1:
                     inner = text[open_idx + 1:end - 1].strip()

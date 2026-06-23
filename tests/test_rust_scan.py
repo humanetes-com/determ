@@ -370,3 +370,18 @@ def test_strip_line_block_comments_matches_regex():
         t1 = re.sub(r'//[^\n]*', '', t)
         expected = re.sub(r'/\*.*?\*/', '', t1, flags=re.DOTALL)
         assert strip_line_block_comments(t) == expected, t
+
+
+# --- P7: attribute-opener scan ---
+
+from pipeline_core.domain.rust_scan import attr_opener_end  # noqa: E402
+
+
+def test_attr_opener_end_matches_regex():
+    pat = re.compile(r'#\s*(!?)\s*\[')
+    for t in ["#[derive]", "#![no_std]", "# ! [ doc ]", "#  [x]", "#!x", "not #",
+              "#", "#[", "#![", "## [", "#!![", ""]:
+        for i in range(len(t) + 1):
+            m = pat.match(t, i)
+            expected = (m.group(1) == '!', m.end()) if m else None
+            assert attr_opener_end(t, i) == expected, (t, i)

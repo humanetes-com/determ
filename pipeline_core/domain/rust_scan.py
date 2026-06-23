@@ -738,3 +738,27 @@ def strip_line_block_comments(text: str) -> str:
     — byte-equivalent to ``re.sub(r'/\\*.*?\\*/', '', re.sub(r'//[^\\n]*', '', text),
     flags=re.DOTALL)``."""
     return _strip_block_comments(_strip_line_comments(text))
+
+
+# --- P7: Rust attribute-opener scan (replaces _ATTR_OPENER_RE) ---
+
+def attr_opener_end(text: str, i: int) -> tuple[bool, int] | None:
+    """Match an attribute opener ``#\\s*(!?)\\s*\\[`` anchored at `i` — byte-equivalent
+    to ``_ATTR_OPENER_RE.match(text, i)``. Returns ``(is_bang, end)`` where `is_bang`
+    is True for ``#![`` (group 1 == ``!``) and `end` is the index just past the ``[``
+    (the old ``m.end()``); None when `text[i]` is not the start of an opener."""
+    n = len(text)
+    if i >= n or text[i] != "#":
+        return None
+    p = i + 1
+    while p < n and text[p].isspace():  # \s*
+        p += 1
+    is_bang = False
+    if p < n and text[p] == "!":  # (!?)
+        is_bang = True
+        p += 1
+    while p < n and text[p].isspace():  # \s*
+        p += 1
+    if p < n and text[p] == "[":
+        return is_bang, p + 1
+    return None
