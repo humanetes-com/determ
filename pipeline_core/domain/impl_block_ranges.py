@@ -185,3 +185,70 @@ def parse_impl_block_ranges(source: str) -> list[ImplRange]:
             continue
         i += 1
     return out
+
+
+def _norm_ws(s: str) -> str:
+    """Collapse every whitespace run to a single space and strip the ends —
+    the structural equivalent of ``re.sub(r"\\s+", " ", s).strip()``."""
+    return " ".join(s.split())
+
+
+def _strip_leading_generics(s: str) -> str:
+    """Drop a leading balanced ``<...>`` generic-parameter list (e.g. the impl's
+    own ``<T, E>``), returning the remainder. BALANCED ``<>`` matching — unlike the
+    old ``<[^>]*>`` regex it handles nested generics such as ``<T: Tr<X>>``."""
+    if not s.startswith("<"):
+        return s
+    depth = 0
+    for i, c in enumerate(s):
+        if c == "<":
+            depth += 1
+        elif c == ">":
+            depth -= 1
+            if depth == 0:
+                return s[i + 1:]
+    return s  # unbalanced — leave untouched
+
+
+def _where_suffix(text: str) -> str:
+    """Text after the first whole-word ``where`` in `text`, stripped of
+    surrounding whitespace and a trailing comma — i.e. the group(1) of
+    ``\\bwhere\\b(.*)$`` after ``.strip().rstrip(",").strip()``. ``""`` if absent."""
+    idx = 0
+    n = len(text)
+    while True:
+        k = text.find("where", idx)
+        if k == -1:
+            return ""
+        before_ok = k == 0 or not (text[k - 1].isalnum() or text[k - 1] == "_")
+        after = k + len("where")
+        after_ok = after >= n or not (text[after].isalnum() or text[after] == "_")
+        if before_ok and after_ok:
+            return text[after:].strip().rstrip(",").strip()
+        idx = k + 1
+
+
+def impl_where_clause(file_text: str, container: str) -> str:
+    """The ``where`` clause of the impl block in `file_text` whose header matches
+    `container` (the extractor's impl header with the impl's OWN generics stripped,
+    e.g. ``impl Context<T, E> for Result<T, E>``); ``""`` if absent or unmatched.
+
+    Structural rewrite of the old regex locator (P7): the impl blocks are found by
+    the comment/string-aware brace scanner, so an ``impl …`` mention inside a
+    comment or string can no longer be mistaken for a real impl, and the impl's
+    own generics are stripped with BALANCED ``<>`` (the old ``<[^>]*>`` regex
+    failed — returned ``""`` — for nested generics like ``<T: Tr<X>>``; this
+    matches them).
+    """
+    if not container or not container.startswith("impl"):
+        return ""
+    target = _norm_ws(container[len("impl"):])
+    if not target:
+        return ""
+    for r in parse_impl_block_ranges(file_text):
+        header = _norm_ws(file_text[r.header_start:r.body_open])  # "impl <gen>? target where…"
+        after_impl = header[len("impl"):].lstrip()
+        after_gen = _strip_leading_generics(after_impl).lstrip()
+        if after_gen.startswith(target):
+            return _where_suffix(after_gen[len(target):])
+    return ""

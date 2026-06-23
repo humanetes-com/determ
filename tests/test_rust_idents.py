@@ -9,11 +9,16 @@ from __future__ import annotations
 import re
 
 from pipeline_core.domain.rust_idents import (
+    attr_call_args,
     camelcase_type_names,
+    contains_fn_decl,
     declares_fn,
     defined_type_names,
+    first_fn_decl_name,
+    fn_decl_names,
     fn_reference_counts,
     is_unsafe_fn,
+    use_symbol_paths,
 )
 
 
@@ -96,3 +101,59 @@ def test_declares_fn_matches_regex():
     for s, name in _DECL_CASES:
         expected = bool(re.search(r"\bfn\s+" + re.escape(name) + r"\b", s))
         assert declares_fn(s, name) == expected, (s, name)
+
+
+# --- P7 step 1: source-regex→structured migrations (byte-equivalence pins) ---
+
+_FN_DECL_CASES = [
+    "fn foo() {}", "pub fn bar<T>() {}", "fn  baz ()", "fn(i32)->i32", "fn /*c*/ x()",
+    "fn 9z()", "let f: fn() = g;", "struct Foo; fn a(){} fn b<T:Clone>(){}",
+    "// fn c()", "fn", "fnord x", "myfn y()", "fn _under()", "fn T9<X>()", "fn  (x)", "",
+]
+
+
+def test_contains_fn_decl_matches_regex():
+    for t in _FN_DECL_CASES:
+        assert contains_fn_decl(t) == bool(re.search(r"\bfn\s+\w+", t)), t
+
+
+def test_fn_decl_names_matches_regex():
+    pat = re.compile(r"\bfn\s+([A-Za-z_]\w*)\s*[<(]")
+    for t in _FN_DECL_CASES:
+        assert fn_decl_names(t) == {m.group(1) for m in pat.finditer(t)}, t
+
+
+def test_first_fn_decl_name_matches_regex():
+    pat = re.compile(r"\bfn\s+([A-Za-z_]\w*)")
+    for t in _FN_DECL_CASES:
+        m = pat.search(t)
+        assert first_fn_decl_name(t) == (m.group(1) if m else None), t
+
+
+_USE_CASES = [
+    "use std::fmt;", "use foo::bar::{A, B, C};", "use a::b::Baz;", "use x;",
+    "use ::root::X;", "use  spaced :: thing ;", "use foo::{};", "use foo::{a};",
+    "used::nope; use real::X;", "use a::b::{C, D}; use e::F;", "use crate::{x::Y, z};",
+    "use\tw::Q;", "pub use re::X;", "use a::b::{c, use_d::E};", "usefoo::X;",
+    "use foo;", "use a::{b::{c}};", "use use b;", "",
+]
+
+
+def test_use_symbol_paths_matches_regex():
+    pat = re.compile(r"\buse\s+([\w:]+(?:::\{[^}]+\})?)\s*;")
+    for t in _USE_CASES:
+        assert use_symbol_paths(t) == [m.group(1) for m in pat.finditer(t)], t
+
+
+_ATTR_CASES = [
+    "#[derive(Debug)]", "#[derive(Debug, Clone, PartialEq)]", "#[derive()]", "#[derive(",
+    "#[derive(A)] #[derive(B,C)]", "foo #[derive(X)] bar", "#[serde(rename = \"x\")]",
+    "#[derive(Debug)]#[derive(Eq)]", "#[derive(Foo(Bar))]", "no attrs here", "",
+]
+
+
+def test_attr_call_args_matches_regex():
+    for t in _ATTR_CASES:
+        for name in ("derive", "serde", "my_crate"):
+            pat = re.compile(rf"#\[{re.escape(name)}\(([^)]+)\)")
+            assert attr_call_args(t, name) == [m.group(1) for m in pat.finditer(t)], (t, name)

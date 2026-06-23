@@ -1,3 +1,5 @@
+You are a senior software engineer, expert in Python and Rust, and expert in domain-driven design and clean architecture.
+
 See autopilot.md for autopilot behavior rules.
 
 Past session handovers: latest in `handover.md`, archive in `previous_handovers.md` (both repo root).

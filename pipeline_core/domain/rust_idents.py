@@ -56,6 +56,12 @@ def _kw_followed_by(text: str, keyword: str, target: str) -> bool:
     return False
 
 
+def _is_ascii_ident_start(c: str) -> bool:
+    """True iff `c` is an ASCII letter or underscore — the ``[A-Za-z_]`` of a
+    Rust fn-name lead char (ASCII-only, unlike Python's unicode ``\\w``)."""
+    return c == "_" or ("a" <= c <= "z") or ("A" <= c <= "Z")
+
+
 def is_unsafe_fn(sig: str) -> bool:
     """True iff `sig` contains `unsafe fn` (``\\bunsafe\\s+fn\\b``)."""
     return _kw_followed_by(sig, "unsafe", "fn")
@@ -126,3 +132,123 @@ def fn_reference_counts(text: str) -> dict[str, int]:
         if (name[0].isalpha() or name[0] == "_") and name not in counts:
             counts[name] = freq[name]
     return counts
+
+
+def contains_fn_decl(text: str) -> bool:
+    """True iff `text` contains a `fn <word>` declaration (``\\bfn\\s+\\w+``):
+    an `fn` token followed across one-or-more whitespace by a word char."""
+    spans = _word_spans(text)
+    for idx, (s, e) in enumerate(spans):
+        if text[s:e] != "fn" or idx + 1 >= len(spans):
+            continue
+        gap = text[e:spans[idx + 1][0]]
+        if gap and gap.isspace():
+            return True
+    return False
+
+
+def fn_decl_names(text: str) -> set[str]:
+    """Names declared as `fn <name>` immediately before a `<` or `(` — byte-equivalent
+    to ``re.findall(r'\\bfn\\s+([A-Za-z_]\\w*)\\s*[<(]')``. `fn`, whitespace, an
+    ASCII-led identifier, optional whitespace, then `<` or `(`."""
+    spans = _word_spans(text)
+    n = len(text)
+    out: set[str] = set()
+    for idx, (s, e) in enumerate(spans):
+        if text[s:e] != "fn" or idx + 1 >= len(spans):
+            continue
+        ns, ne = spans[idx + 1]
+        gap = text[e:ns]
+        if not (gap and gap.isspace()):
+            continue
+        name = text[ns:ne]
+        if not _is_ascii_ident_start(name[0]):
+            continue
+        j = ne
+        while j < n and text[j].isspace():
+            j += 1
+        if j < n and text[j] in "<(":
+            out.add(name)
+    return out
+
+
+def first_fn_decl_name(text: str) -> str | None:
+    """Name of the leftmost `fn <name>` declaration (``re.search(r'\\bfn\\s+([A-Za-z_]\\w*)')``),
+    or None. `fn`, whitespace, an ASCII-led identifier."""
+    spans = _word_spans(text)
+    for idx, (s, e) in enumerate(spans):
+        if text[s:e] != "fn" or idx + 1 >= len(spans):
+            continue
+        ns, ne = spans[idx + 1]
+        gap = text[e:ns]
+        if not (gap and gap.isspace()):
+            continue
+        name = text[ns:ne]
+        if _is_ascii_ident_start(name[0]):
+            return name
+    return None
+
+
+def use_symbol_paths(text: str) -> list[str]:
+    """Captured paths of every ``\\buse\\s+([\\w:]+(?:::\\{[^}]+\\})?)\\s*;`` — the
+    group(1) of each `use foo::bar;` / `use foo::{A, B};` statement, in source
+    order. Emulates the regex's greedy `[\\w:]+` + optional `::{…}` backtrack so
+    the brace-group form captures `foo::{A, B}` rather than `foo::`."""
+    spans = _word_spans(text)
+    n = len(text)
+    out: list[str] = []
+    for s, e in spans:
+        if text[s:e] != "use":
+            continue
+        q = e  # `\s+` after `use`
+        while q < n and text[q].isspace():
+            q += 1
+        if q == e:
+            continue
+        p = q  # maximal `[\w:]+`
+        while p < n and (text[p].isalnum() or text[p] == "_" or text[p] == ":"):
+            p += 1
+        if p == q:
+            continue
+        for k in range(p, q, -1):  # backtrack the `[\w:]+` end, greedy = largest first
+            if text[k:k + 2] == "::" and k + 2 < n and text[k + 2] == "{":
+                cb = text.find("}", k + 3)
+                if cb > k + 3:  # `[^}]+` requires ≥1 char
+                    j = cb + 1
+                    while j < n and text[j].isspace():
+                        j += 1
+                    if j < n and text[j] == ";":
+                        out.append(text[q:cb + 1])
+                        break
+            j = k  # optional group absent: `\s*;`
+            while j < n and text[j].isspace():
+                j += 1
+            if j < n and text[j] == ";":
+                out.append(text[q:k])
+                break
+    return out
+
+
+def attr_call_args(text: str, name: str) -> list[str]:
+    """Inner argument string of every ``#[<name>(...)]`` — group(1) of
+    ``#\\[<name>\\(([^)]+)\\)`` (literal `name`, args up to the first `)`, ≥1 char),
+    in source order. Used to scan tests for `#[derive(...)]` / helper-attr usage."""
+    needle = "#[" + name + "("
+    width = len(needle)
+    out: list[str] = []
+    i = 0
+    while True:
+        j = text.find(needle, i)
+        if j == -1:
+            break
+        k = text.find(")", j + width)
+        if k == -1:
+            i = j + width
+            continue
+        inner = text[j + width:k]
+        if inner:  # `[^)]+` requires ≥1 char
+            out.append(inner)
+            i = k + 1
+        else:
+            i = j + width
+    return out

@@ -233,7 +233,7 @@ from pipeline_core.domain.failure_classification import (
 )
 from pipeline_core.domain.fix_report import FixReport as _FixReport
 from pipeline_core.domain.fix_session import FixSession
-from pipeline_core.domain.impl_block_ranges import parse_impl_block_ranges
+from pipeline_core.domain.impl_block_ranges import impl_where_clause, parse_impl_block_ranges
 from pipeline_core.domain.llm_output import (
     GENESIS_DELIM_END,
     GENESIS_DELIM_START,
@@ -292,12 +292,18 @@ from pipeline_core.domain.retry_outcome import (
     failing_test_verdict,
 )
 from pipeline_core.domain.rust_idents import (
+    attr_call_args,
     camelcase_type_names,
+    contains_fn_decl,
     declares_fn,
     defined_type_names,
+    first_fn_decl_name,
+    fn_decl_names,
     fn_reference_counts,
     is_unsafe_fn,
+    use_symbol_paths,
 )
+from pipeline_core.domain.rust_macros import macro_definitions
 from pipeline_core.domain.rust_scan import (
     after_brace_newline,
     count_test_attrs,
@@ -1423,7 +1429,7 @@ def _condense_rust_to_signatures(source: str, filename: str = "code.rs") -> str:
             continue
 
         stripped = line.strip()
-        is_fn = bool(re.search(r'\bfn\s+\w+', stripped)) and not stripped.startswith('//')
+        is_fn = contains_fn_decl(stripped) and not stripped.startswith('//')
         is_type_kw = bool(re.match(
             r'\s*(?:pub(?:\([^)]*\))?\s+)?(?:struct|enum|trait|impl|type|macro_rules)\b', line
         ))
@@ -3583,10 +3589,8 @@ def _collect_skeleton_symbols(skeleton_files: list[tuple[str, str]]) -> set[str]
     intended to be precise.
     """
     syms: set[str] = set()
-    fn_re = re.compile(r'\bfn\s+([A-Za-z_]\w*)\s*[<(]')
     for _, content in skeleton_files:
-        for m in fn_re.finditer(content):
-            syms.add(m.group(1))
+        syms |= fn_decl_names(content)
     return syms
 
 
@@ -4505,9 +4509,11 @@ def _enumerate_macro_variants(
             text = p.read_text(encoding="utf-8")
         except Exception:
             continue
-        for m in re.finditer(r"macro_rules!\s+(\w+)\s*\{", text):
-            name = m.group(1)
-            start = m.start()
+        for md in macro_definitions(text):
+            if not md.balanced:  # original `if depth != 0: continue`
+                continue
+            name = md.name
+            start = md.decl_start
             # Walk backwards from the macro to find a leading #[cfg(...)]
             # attribute on the same item. Stop at a blank line or another
             # item — only attributes that immediately precede the macro
@@ -4519,21 +4525,7 @@ def _enumerate_macro_variants(
                     head, re.MULTILINE))):
                 cfg_pred = am.group(1).strip()
                 break
-            # Match balanced braces of the macro_rules! body.
-            i = text.find("{", start)
-            if i < 0:
-                continue
-            depth = 1
-            j = i + 1
-            while j < len(text) and depth > 0:
-                if text[j] == "{":
-                    depth += 1
-                elif text[j] == "}":
-                    depth -= 1
-                j += 1
-            if depth != 0:
-                continue
-            variants.append((name, cfg_pred, text[start:j], p.name))
+            variants.append((name, cfg_pred, text[start:md.body_close + 1], p.name))
     return variants
 
 
@@ -4615,9 +4607,12 @@ def _compute_cluster_macro_invariants(
         # Render compactly: strip the `macro_rules! NAME {` header and
         # outer `}` so the model sees just the arm(s).
         compact = body
-        head_match = re.search(r"macro_rules!\s+\w+\s*\{\s*", compact)
-        if head_match:
-            compact = compact[head_match.end():].rstrip()
+        defs = macro_definitions(compact)
+        if defs:
+            hb = defs[0].body_open + 1  # past the `{`, then the regex's trailing `\s*`
+            while hb < len(compact) and compact[hb].isspace():
+                hb += 1
+            compact = compact[hb:].rstrip()
             if compact.endswith("}"):
                 compact = compact[:-1].rstrip()
         # Collapse internal whitespace runs for compactness.
@@ -4648,24 +4643,12 @@ def _collect_crate_macros(src_dir: Path, max_chars: int = max(6_000, SINGLE_CALL
             text = p.read_text(encoding="utf-8")
         except Exception:
             continue
-        for m in re.finditer(r"(?:#\[macro_export\][^\n]*\n)?macro_rules!\s+(\w+)\s*\{",
-                              text):
-            start = m.start()
-            # Match balanced braces of the macro_rules! body.
-            i = text.find("{", start)
-            if i < 0:
+        for md in macro_definitions(text):
+            if not md.balanced:  # original `if depth != 0: continue`
                 continue
-            depth = 1
-            j = i + 1
-            while j < len(text) and depth > 0:
-                if text[j] == "{":
-                    depth += 1
-                elif text[j] == "}":
-                    depth -= 1
-                j += 1
-            if depth != 0:
-                continue
-            block = text[start:j]
+            # When `#[macro_export]` precedes the decl, include it in the block
+            # (the old regex captured it via the optional leading group).
+            block = text[md.export_start:md.body_close + 1]
             macros.append((p.name, f"// from {p.name}\n{block}"))
     if not macros:
         return ""
@@ -4767,8 +4750,8 @@ def _find_tests_for_fn(
         macro_names: set[str] = set()
         try:
             txt = fp.read_text(encoding="utf-8")
-            for m in re.finditer(r"macro_rules!\s+(\w+)\s*\{", txt):
-                macro_names.add(m.group(1))
+            for md in macro_definitions(txt):
+                macro_names.add(md.name)
         except Exception:
             pass
         if macro_names:
@@ -6542,39 +6525,10 @@ def _extract_impl_where_clause(file_text: str, container: str) -> str:
     for picking the right TYPES_IN_SCOPE entries — they tell us which
     trait's methods are callable on the generic parameter.
 
-    Best-effort string match: works for impls written on one line
-    (the skeleton extractor produces compact single-line items, so
-    nearly every impl will match).
+    Thin shim over `domain.impl_block_ranges.impl_where_clause` (P7: the
+    old regex locator was replaced by the comment/string-aware brace scanner).
     """
-    if not container or not container.startswith("impl"):
-        return ""
-    # The extractor's container string strips the impl's own generics:
-    # the file has `impl <T, E> Context<T, E> for Result<T, E>` but
-    # container is `impl Context<T, E> for Result<T, E>`. Match on the
-    # post-"impl" portion to bridge the gap.
-    body = container[len("impl"):].lstrip()  # e.g. "Context<T, E> for Result<T, E>"
-    if not body:
-        return ""
-    # Build a regex that allows optional `< ... >` generics after `impl`.
-    norm_target = re.sub(r"\s+", " ", body).strip()
-    norm_text = re.sub(r"\s+", " ", file_text)
-    # Escape regex specials in the body, then locate it preceded by
-    # `impl` and optional generics on the normalised text.
-    pat = re.compile(
-        r"impl\s*(?:<[^>]*>\s*)?" + re.escape(norm_target),
-    )
-    m = pat.search(norm_text)
-    if m is None:
-        return ""
-    start = m.start()
-    end = norm_text.find("{", m.end())
-    if end < 0:
-        return ""
-    header = norm_text[start:end]
-    wm = re.search(r"\bwhere\b(.*)$", header, re.DOTALL)
-    if wm:
-        return wm.group(1).strip().rstrip(",").strip()
-    return ""
+    return impl_where_clause(file_text, container)
 
 
 def _types_referenced_in_text(text: str, all_types: list[TypeRecord]) -> list[TypeRecord]:
@@ -7526,10 +7480,9 @@ def _implicated_fns_from_cargo_errors(
                 fn_name = _rec["fn_name"]
         if fn_name is None:
             lines = text.splitlines()
-            fn_re = re.compile(r"\bfn\s+([A-Za-z_]\w*)")
             for i in range(min(line_no, len(lines)) - 1, -1, -1):
-                if fm := fn_re.search(lines[i]):
-                    fn_name = fm.group(1)
+                if nm := first_fn_decl_name(lines[i]):
+                    fn_name = nm
                     break
         if not fn_name:
             continue
@@ -8062,17 +8015,16 @@ def _filter_proc_macro_test_files(test_files, crate_name: str = ""):
 
 def _proc_macro_fallback_requirements(relevant, crate_name: str = "") -> str:
     """Static fallback: scan tests for derive/attribute usage and synthesise minimal
-    proc-macro requirements. (Rust-source regex kept in pipeline.py — Option 1.)"""
+    proc-macro requirements via the structured `attr_call_args` scanner."""
     derives: set[str] = set()
     attrs: set[str] = set()
     _attr_name = (crate_name or "").replace("-", "_") or "derive"
-    _attr_re = re.compile(rf'#\[{re.escape(_attr_name)}\(([^)]+)\)')
     for _, content in relevant:
-        for m in re.finditer(r'#\[derive\(([^)]+)\)', content):
-            for d in m.group(1).split(','):
+        for inner in attr_call_args(content, "derive"):
+            for d in inner.split(','):
                 derives.add(d.strip())
-        for m in _attr_re.finditer(content):
-            attrs.add(m.group(1).strip())
+        for inner in attr_call_args(content, _attr_name):
+            attrs.add(inner.strip())
     req_content = "# Proc-macro interface\n\n"
     req_content += "## Derive macros\n"
     for d in sorted(derives):
@@ -9344,7 +9296,7 @@ def task1_static_audit(functional_req_path: Path, test_files: list) -> list[str]
     requirements. Callers should log a warning and optionally re-run TASK 1
     on the missing symbols.
 
-    No LLM call — pure regex. Runs in milliseconds.
+    No LLM call — structured `use`-path scan. Runs in milliseconds.
     """
     SKIP_PREFIXES = ('std::', 'core::', 'alloc::', 'super::', 'self::', 'crate::')
 
@@ -9355,8 +9307,7 @@ def task1_static_audit(functional_req_path: Path, test_files: list) -> list[str]
     found: set[str] = set()
     for _rel, content in test_files:
         # use foo::bar::{A, B, C};  or  use foo::bar::Baz;
-        for m in re.finditer(r'\buse\s+([\w:]+(?:::\{[^}]+\})?)\s*;', content):
-            raw = m.group(1)
+        for raw in use_symbol_paths(content):
             if '::' not in raw:
                 continue
             if '::{' in raw:
