@@ -14,9 +14,11 @@ from pipeline_core.domain.rust_idents import (
     contains_fn_decl,
     declares_fn,
     defined_type_names,
+    defines_type,
     first_fn_decl_name,
     fn_decl_names,
     fn_reference_counts,
+    is_fn_signature_line,
     is_unsafe_fn,
     use_symbol_paths,
 )
@@ -157,3 +159,33 @@ def test_attr_call_args_matches_regex():
         for name in ("derive", "serde", "my_crate"):
             pat = re.compile(rf"#\[{re.escape(name)}\(([^)]+)\)")
             assert attr_call_args(t, name) == [m.group(1) for m in pat.finditer(t)], (t, name)
+
+
+_DEFINES_CASES = [
+    "struct Foo;", "enum Bar { A }", "trait Baz {}", "pub struct Foo;",
+    "struct FooBar;", "mystruct Foo;", "struct  Foo;", "struct/*c*/Foo;",
+    "type Foo = X;", "impl Foo {}", "let x: Foo;", "fn struct_foo(){}",
+    "struct\nFoo;", "structFoo;", "trait Foo: Bar {}", "enum Foo<T> {}", "",
+]
+
+
+def test_defines_type_matches_regex():
+    for t in _DEFINES_CASES:
+        for name in ("Foo", "Bar", "Baz", "FooBar"):
+            expected = bool(re.search(rf"\b(?:struct|enum|trait)\s+{re.escape(name)}\b", t))
+            assert defines_type(t, name) == expected, (t, name)
+
+
+_FN_SIG_LINES = [
+    "fn foo() {", "pub fn foo() {", "async fn foo() {", "pub async fn foo() {",
+    "    fn foo() {", "  pub  async   fn  foo() {", "fn  foo()", "fnfoo()",
+    "public fn foo()", "pubfn foo()", "asyncfn foo()", "unsafe fn foo()",
+    "pub unsafe fn foo()", "let f: fn() = g;", "fn", "fn ", "  fn", "async  fn x",
+    "pub fn", "// fn foo", "struct Foo", "", "   ", "fnasync foo()",
+]
+
+
+def test_is_fn_signature_line_matches_regex():
+    pat = re.compile(r"^\s*(?:pub\s+)?(?:async\s+)?fn\s+")
+    for line in _FN_SIG_LINES:
+        assert is_fn_signature_line(line) == bool(pat.match(line)), line

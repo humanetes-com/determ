@@ -109,6 +109,55 @@ def defined_type_names(text: str) -> set[str]:
     return out
 
 
+_TYPE_DECL_KEYWORDS = frozenset({"struct", "enum", "trait"})
+
+
+def defines_type(text: str, name: str) -> bool:
+    """True iff `text` declares `struct`/`enum`/`trait` `<name>` — byte-equivalent
+    to ``re.search(rf'\\b(?:struct|enum|trait)\\s+{re.escape(name)}\\b', text)`` for
+    an identifier `name`. The keyword token must be followed across one-or-more
+    whitespace by a word-span equal to `name` exactly (so `struct FooBar` does NOT
+    satisfy name=`Foo`, and `mystruct Foo` never matches — `struct` is mid-word)."""
+    spans = _word_spans(text)
+    for idx in range(len(spans) - 1):
+        s, e = spans[idx]
+        if text[s:e] not in _TYPE_DECL_KEYWORDS:
+            continue
+        ns, ne = spans[idx + 1]
+        gap = text[e:ns]
+        if gap and gap.isspace() and text[ns:ne] == name:
+            return True
+    return False
+
+
+def _consume_opt_kw_ws(line: str, i: int, kw: str) -> int:
+    """If `line[i:]` starts with `kw` followed by ≥1 whitespace, return the index
+    past `kw` and all following whitespace (greedy ``\\s+``); else return `i`
+    unchanged — emulates an optional ``(?:<kw>\\s+)?`` group (backtracks to empty
+    when `kw` is not whitespace-terminated, e.g. `public` for kw=`pub`)."""
+    n = len(line)
+    if line.startswith(kw, i):
+        j = i + len(kw)
+        if j < n and line[j].isspace():
+            while j < n and line[j].isspace():
+                j += 1
+            return j
+    return i
+
+
+def is_fn_signature_line(line: str) -> bool:
+    """True iff `line` is a fn-signature line lead — byte-equivalent to
+    ``re.match(r'^\\s*(?:pub\\s+)?(?:async\\s+)?fn\\s+', line)``: leading whitespace,
+    an optional `pub`, an optional `async`, then `fn` followed by ≥1 whitespace."""
+    n = len(line)
+    i = 0
+    while i < n and line[i].isspace():  # ^\s*
+        i += 1
+    i = _consume_opt_kw_ws(line, i, "pub")
+    i = _consume_opt_kw_ws(line, i, "async")
+    return line.startswith("fn", i) and i + 2 < n and line[i + 2].isspace()
+
+
 def fn_reference_counts(text: str) -> dict[str, int]:
     """Map each `fn <name>` declaration's name to how many times that name word
     occurs anywhere in `text` — a usage-frequency map for leaf-first ordering.

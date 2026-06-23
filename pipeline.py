@@ -297,9 +297,11 @@ from pipeline_core.domain.rust_idents import (
     contains_fn_decl,
     declares_fn,
     defined_type_names,
+    defines_type,
     first_fn_decl_name,
     fn_decl_names,
     fn_reference_counts,
+    is_fn_signature_line,
     is_unsafe_fn,
     use_symbol_paths,
 )
@@ -2118,7 +2120,7 @@ def validate_task2_output(project_dir: Path, expected_paths: list[str],
                 missing_types = [t for t in sorted(named_types) if t not in _defined]
             else:
                 missing_types = [t for t in sorted(named_types)
-                                 if not re.search(rf'\b(?:struct|enum|trait)\s+{re.escape(t)}\b', all_source)]
+                                 if not defines_type(all_source, t)]
             # Only fail if more than half the named types are absent — allows for
             # types that are re-exported or defined via macros.
             if len(missing_types) > max(1, len(named_types) // 2):
@@ -10162,12 +10164,11 @@ def _extract_uncovered_functions(content: str, uncovered: set[int], max_fns: int
 
     code_lines = content.splitlines()
     n = len(code_lines)
-    fn_pattern = re.compile(r'^\s*(?:pub\s+)?(?:async\s+)?fn\s+')
     result_blocks: list[str] = []
 
     i = 0
     while i < n:
-        if fn_pattern.match(code_lines[i]):
+        if is_fn_signature_line(code_lines[i]):
             fn_start = i  # 0-indexed
             # Walk forward to find the matching closing brace
             depth = 0
@@ -10391,13 +10392,12 @@ def _partition_uncovered_lines(content: str, uncovered: "set[int]", n_groups: in
 
     code_lines = content.splitlines()
     n = len(code_lines)
-    fn_pattern = re.compile(r'^\s*(?:pub\s+)?(?:async\s+)?fn\s+')
     remaining = set(uncovered)
     units: list[set[int]] = []  # one per function that owns uncovered lines
 
     i = 0
     while i < n:
-        if fn_pattern.match(code_lines[i]):
+        if is_fn_signature_line(code_lines[i]):
             depth = 0
             fn_end = i
             for j in range(i, min(n, i + 300)):
