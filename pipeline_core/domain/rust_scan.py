@@ -324,3 +324,304 @@ def rust_delimiters_balanced(text: str) -> bool:
             stack.pop()
         i += 1
     return not stack and not in_str and not in_chr and not in_blk_cmt
+
+
+# --- P7: source-LINE classification (replaces _extract_branch_guard / ---
+# --- _is_structural_line / _has_nonempty_test_body source-regex scans) ---
+
+_GUARD_ITEM_KEYWORDS = ("impl", "struct", "enum", "trait")
+_FN_MODIFIERS = ("pub", "async", "unsafe")
+
+
+def _starts_word(s: str, kw: str) -> bool:
+    """`s` begins with `kw` ended on a ``\\b`` word boundary (next char non-ident
+    or end-of-string)."""
+    return s.startswith(kw) and (len(s) == len(kw) or s[len(kw)] not in _IDENT_CHARS)
+
+
+def is_rust_item_boundary_line(stripped: str) -> bool:
+    """True iff a left-stripped source line opens an item that ENDS a branch-guard
+    back-walk: a fn signature (``(?:pub\\s+|async\\s+|unsafe\\s+)*fn\\s+``) or an
+    ``impl``/``struct``/``enum``/``trait`` item (``^(?:impl|struct|enum|trait)\\b``).
+    Byte-equivalent to the two boundary ``re.match`` tests in `_extract_branch_guard`."""
+    for kw in _GUARD_ITEM_KEYWORDS:
+        if _starts_word(stripped, kw):
+            return True
+    n = len(stripped)
+    i = 0
+    while True:  # (?:pub\s+|async\s+|unsafe\s+)*
+        for m in _FN_MODIFIERS:
+            if stripped.startswith(m, i) and i + len(m) < n and stripped[i + len(m)].isspace():
+                j = i + len(m)
+                while j < n and stripped[j].isspace():
+                    j += 1
+                i = j
+                break
+        else:
+            break
+    return stripped.startswith("fn", i) and i + 2 < n and stripped[i + 2].isspace()
+
+
+def _consume_brace_else(s: str, i: int) -> int:
+    """Past an optional leading ``}`` + whitespace — emulates ``(?:\\}\\s*)?`` then
+    leaves `i` at the first char of the expected ``else``."""
+    n = len(s)
+    if i < n and s[i] == "}":
+        i += 1
+        while i < n and s[i].isspace():
+            i += 1
+    return i
+
+
+def branch_guard_label(stripped: str) -> str | None:
+    """Branch-guard description for a left-stripped line, or None — byte-equivalent
+    to the if / else-if / else / match-arm / while ladder in `_extract_branch_guard`
+    (same precedence)."""
+    n = len(stripped)
+    # ^(?:\}\s*)?else\s+if\b   OR   ^if\b
+    i = _consume_brace_else(stripped, 0)
+    else_if = False
+    if stripped.startswith("else", i):
+        j = i + 4
+        if j < n and stripped[j].isspace():
+            while j < n and stripped[j].isspace():
+                j += 1
+            else_if = _starts_word(stripped[j:], "if")
+    if else_if or _starts_word(stripped, "if"):
+        return stripped[:120]
+    # ^(?:\}\s*)?else\s*\{
+    i = _consume_brace_else(stripped, 0)
+    if stripped.startswith("else", i):
+        j = i + 4
+        while j < n and stripped[j].isspace():
+            j += 1
+        if j < n and stripped[j] == "{":
+            return "else branch"
+    # =>\s*\{?\s*$   (anchored at end; a trailing `{` is optional)
+    t = stripped.rstrip()
+    if t.endswith("=>") or (t.endswith("{") and t[:-1].rstrip().endswith("=>")):
+        return f"match arm: {stripped[:100]}"
+    if _starts_word(stripped, "while"):
+        return stripped[:120]
+    return None
+
+
+def is_structural_brace_line(text: str) -> bool:
+    """True for structural-only Rust lines (`}`, `} else {`, `};`, `},`) that LLVM
+    miscounts — byte-equivalent to ``re.match(r'^\\}(\\s*else\\s*\\{)?\\s*[;,]?\\s*$')``."""
+    n = len(text)
+    if n == 0 or text[0] != "}":
+        return False
+    i = 1
+    j = i  # optional (\s*else\s*\{)
+    while j < n and text[j].isspace():
+        j += 1
+    if text.startswith("else", j):
+        k = j + 4
+        while k < n and text[k].isspace():
+            k += 1
+        if k < n and text[k] == "{":
+            i = k + 1
+    while i < n and text[i].isspace():  # \s*
+        i += 1
+    if i < n and text[i] in ";,":  # [;,]?
+        i += 1
+    while i < n and text[i].isspace():  # \s*
+        i += 1
+    return i == n
+
+
+def has_nonempty_test_fn(block: str) -> bool:
+    """True iff `block` has a `#[test]` whose following ``{`` is matched by
+    ``[^}]*\\S`` — byte-equivalent to ``re.search(r'#\\[test\\][^{]*\\{[^}]*\\S', block,
+    re.DOTALL)``. (Quirk preserved: a `{}` qualifies because the closing `}` is itself
+    the ``\\S`` char — the regex matched empty bodies too.)"""
+    i = 0
+    while (k := block.find("#[test]", i)) >= 0:
+        i = k + 7
+        b = block.find("{", k + 7)
+        if b == -1:
+            continue
+        tail = block[b + 1:]
+        if "}" in tail or tail.strip():
+            return True
+    return False
+
+
+# --- P7: scan_downstream_api source scans (use-paths + ```rust fences) ---
+
+def module_use_imports(
+    text: str, module: str,
+) -> tuple[list[str], list[tuple[str, str]], list[tuple[str, str]]]:
+    """Parse `use <module>::…` imports from `text`. Returns three lists mirroring the
+    three regexes in `scan_downstream_api` (caller keeps the split/strip/filter):
+      - brace_groups: inner of ``use <module>::{INNER}``           (``\\{([^}]+)\\}``)
+      - submod_brace: (submod, inner) of ``use <module>::SUB::{INNER}``
+      - submod_single: (submod, item) of ``use <module>::SUB::ITEM`` (``(\\w+)::(\\w+)\\b``)
+    `module` is matched as a literal (the old patterns used ``re.escape(module)``).
+    Each list is built by an INDEPENDENT left-to-right pass — the three originals
+    were separate ``re.finditer`` calls, so their matches may overlap in the text
+    (e.g. a ``::SUB::ITEM`` that lies inside a ``{...}`` brace group)."""
+    prefix = "use " + module + "::"
+    plen = len(prefix)
+    n = len(text)
+
+    def _word_end(p: int) -> int:
+        while p < n and (text[p].isalnum() or text[p] == "_"):
+            p += 1
+        return p
+
+    # (a) use module::{INNER}
+    brace_groups: list[str] = []
+    i = 0
+    while (k := text.find(prefix, i)) >= 0:
+        i = k + 1
+        q = k + plen
+        if q < n and text[q] == "{":
+            close = text.find("}", q + 1)
+            if close > q + 1:  # [^}]+ requires ≥1 char
+                brace_groups.append(text[q + 1:close])
+                i = close + 1
+
+    # (b) use module::SUB::{INNER}
+    submod_brace: list[tuple[str, str]] = []
+    i = 0
+    while (k := text.find(prefix, i)) >= 0:
+        i = k + 1
+        q = k + plen
+        s = _word_end(q)
+        if s == q or text[s:s + 3] != "::{":
+            continue
+        close = text.find("}", s + 3)
+        if close > s + 3:
+            submod_brace.append((text[q:s], text[s + 3:close]))
+            i = close + 1
+
+    # (c) use module::SUB::ITEM
+    submod_single: list[tuple[str, str]] = []
+    i = 0
+    while (k := text.find(prefix, i)) >= 0:
+        i = k + 1
+        q = k + plen
+        s = _word_end(q)
+        if s == q or text[s:s + 2] != "::":
+            continue
+        t = _word_end(s + 2)
+        if t > s + 2:
+            submod_single.append((text[q:s], text[s + 2:t]))
+            i = t
+
+    return brace_groups, submod_brace, submod_single
+
+
+def rust_code_fences(text: str) -> list[str]:
+    """Bodies of every ```` ```rust `` fenced block in `text`, in source order —
+    byte-equivalent to ``re.finditer(r'```rust\\s*(.*?)```', text, re.DOTALL)``: the
+    capture starts after the leading whitespace and runs to the next ```` ``` ````."""
+    out: list[str] = []
+    needle = "```rust"
+    n = len(text)
+    i = 0
+    while (k := text.find(needle, i)) >= 0:
+        p = k + len(needle)
+        while p < n and text[p].isspace():  # \s*
+            p += 1
+        end = text.find("```", p)
+        if end == -1:  # unterminated fence → `.*?```` cannot match
+            break
+        out.append(text[p:end])
+        i = end + 3
+    return out
+
+
+# --- P7: more source line/token classifiers ---
+
+_TYPE_DECL_LINE_KEYWORDS = ("struct", "enum", "trait", "impl", "type", "macro_rules")
+_DECL_KEYWORDS = frozenset({
+    "mod", "fn", "struct", "enum", "trait", "impl", "use", "extern",
+    "static", "const", "type", "macro_rules", "pub", "unsafe",
+})
+
+
+def is_type_decl_line(line: str) -> bool:
+    """True iff `line` begins a type/item declaration — byte-equivalent to
+    ``re.match(r'\\s*(?:pub(?:\\([^)]*\\))?\\s+)?(?:struct|enum|trait|impl|type|macro_rules)\\b')``:
+    leading ws, an optional ``pub``/``pub(...)`` visibility, then one of the item
+    keywords on a word boundary."""
+    n = len(line)
+    i = 0
+    while i < n and line[i].isspace():  # \s*
+        i += 1
+    if line.startswith("pub", i):  # optional (?:pub(?:\([^)]*\))?\s+)
+        j = i + 3
+        if j < n and line[j] == "(":
+            close = line.find(")", j + 1)
+            if close != -1:
+                j = close + 1
+        if j < n and line[j].isspace():  # \s+ terminates the pub clause
+            while j < n and line[j].isspace():
+                j += 1
+            i = j
+    for kw in _TYPE_DECL_LINE_KEYWORDS:
+        if line.startswith(kw, i) and (i + len(kw) == n or line[i + len(kw)] not in _IDENT_CHARS):
+            return True
+    return False
+
+
+def starts_with_pub(sig: str) -> bool:
+    """True iff `sig` begins (after leading ws) with the `pub` keyword on a word
+    boundary — byte-equivalent to ``re.match(r'\\s*pub\\b', sig)``."""
+    i = 0
+    n = len(sig)
+    while i < n and sig[i].isspace():
+        i += 1
+    return sig.startswith("pub", i) and (i + 3 == n or sig[i + 3] not in _IDENT_CHARS)
+
+
+def contains_decl_keyword(text: str) -> bool:
+    """True iff any whole-word token of `text` is a declaration keyword (`mod`, `fn`,
+    `struct`, …, `macro_rules`, `pub`, `unsafe`) — byte-equivalent to
+    ``re.search(r'\\b(mod|fn|…|unsafe)\\b', text)``."""
+    n = len(text)
+    i = 0
+    while i < n:
+        if text[i] in _IDENT_CHARS:
+            j = i + 1
+            while j < n and text[j] in _IDENT_CHARS:
+                j += 1
+            if text[i:j] in _DECL_KEYWORDS:
+                return True
+            i = j
+        else:
+            i += 1
+    return False
+
+
+def has_no_std_attr(text: str) -> bool:
+    """True iff `text` contains a ``#![no_std]`` crate attribute (whitespace-tolerant)
+    — byte-equivalent to ``re.search(r'#\\s*!\\s*\\[\\s*no_std\\s*\\]', text)``."""
+    n = len(text)
+    i = 0
+    while (k := text.find("#", i)) >= 0:
+        i = k + 1
+        p = k + 1
+        while p < n and text[p].isspace():
+            p += 1
+        if p >= n or text[p] != "!":
+            continue
+        p += 1
+        while p < n and text[p].isspace():
+            p += 1
+        if p >= n or text[p] != "[":
+            continue
+        p += 1
+        while p < n and text[p].isspace():
+            p += 1
+        if not text.startswith("no_std", p):
+            continue
+        p += 6
+        while p < n and text[p].isspace():
+            p += 1
+        if p < n and text[p] == "]":
+            return True
+    return False

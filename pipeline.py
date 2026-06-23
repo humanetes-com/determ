@@ -305,14 +305,25 @@ from pipeline_core.domain.rust_idents import (
     impl_self_type,
     is_fn_signature_line,
     is_unsafe_fn,
+    mixed_case_identifiers,
     use_symbol_paths,
 )
 from pipeline_core.domain.rust_macros import macro_definitions
 from pipeline_core.domain.rust_scan import (
     after_brace_newline,
+    branch_guard_label,
+    contains_decl_keyword,
     count_test_attrs,
     find_mod_opener,
+    has_no_std_attr,
+    has_nonempty_test_fn,
+    is_rust_item_boundary_line,
+    is_structural_brace_line,
+    is_type_decl_line,
     item_names,
+    module_use_imports,
+    rust_code_fences,
+    starts_with_pub,
     use_imports_symbol,
 )
 from pipeline_core.domain.rust_scan import (
@@ -1434,9 +1445,7 @@ def _condense_rust_to_signatures(source: str, filename: str = "code.rs") -> str:
 
         stripped = line.strip()
         is_fn = contains_fn_decl(stripped) and not stripped.startswith('//')
-        is_type_kw = bool(re.match(
-            r'\s*(?:pub(?:\([^)]*\))?\s+)?(?:struct|enum|trait|impl|type|macro_rules)\b', line
-        ))
+        is_type_kw = is_type_decl_line(line)
 
         net = line.count('{') - line.count('}')
 
@@ -1795,26 +1804,24 @@ def scan_downstream_api(project_dir: Path, module_name: str) -> str:
         except Exception:
             continue
 
-        mod = re.escape(module_name)
+        brace_groups, submod_brace, submod_single = module_use_imports(text, module_name)
 
         # use module::{A, B, C}
-        for m in re.finditer(rf'use {mod}::\{{([^}}]+)\}}', text):
-            for item in m.group(1).split(','):
+        for inner in brace_groups:
+            for item in inner.split(','):
                 item = item.strip()
                 if item:
                     direct_imports.add(item)
 
         # use module::submod::{A, B}
-        for m in re.finditer(rf'use {mod}::(\w+)::\{{([^}}]+)\}}', text):
-            submod = m.group(1)
-            for item in m.group(2).split(','):
+        for submod, inner in submod_brace:
+            for item in inner.split(','):
                 item = item.strip()
                 if item:
                     submodule_imports.setdefault(submod, set()).add(item)
 
         # use module::submod::Item  (single item, no braces)
-        for m in re.finditer(rf'use {mod}::(\w+)::(\w+)\b', text):
-            submod, item = m.group(1), m.group(2)
+        for submod, item in submod_single:
             if submod[0].islower() and item[0].isupper():
                 submodule_imports.setdefault(submod, set()).add(item)
 
@@ -1827,11 +1834,9 @@ def scan_downstream_api(project_dir: Path, module_name: str) -> str:
             func_text = func_req_path.read_text(errors='replace')
             # Find type names in code blocks that are not imported from elsewhere
             # Look for PascalCase identifiers in Rust signatures inside ```rust blocks
-            for block in re.finditer(r'```rust\s*(.*?)```', func_text, re.DOTALL):
-                code = block.group(1)
+            for code in rust_code_fences(func_text):
                 # Find PascalCase identifiers
-                for m in re.finditer(r'\b([A-Z][A-Za-z0-9]+)\b', code):
-                    name = m.group(1)
+                for name in camelcase_type_names(code):
                     # Skip if it's a stdlib/known type or already in our direct/submodule imports
                     if name in ('Result', 'Option', 'String', 'Vec', 'Ok', 'Err', 'Some', 'None',
                                 'Box', 'Arc', 'Rc', 'Fn', 'FnMut', 'FnOnce', 'Send', 'Sync',
@@ -2024,7 +2029,7 @@ _META_PHRASES = [
 
 def _extract_identifiers(text: str) -> set[str]:
     """Extract CamelCase and snake_case identifiers from text, filtered by stop-words."""
-    raw = set(re.findall(r'\b([A-Z][a-zA-Z0-9]{1,}|[a-z][a-z0-9_]{2,}[a-z0-9])\b', text))
+    raw = mixed_case_identifiers(text)
     return {w for w in raw if w.lower() not in _STOP_WORDS}
 
 
@@ -3960,7 +3965,7 @@ def _is_pub_fn(file_text: str, fn_name: str) -> bool:
     if loc is None:
         return False
     sig = loc[0]
-    return bool(re.match(r"\s*pub\b", sig))
+    return starts_with_pub(sig)
 
 
 def _replace_fn_signature(file_path: Path, fn_name: str, new_sig: str) -> bool:
@@ -4550,7 +4555,7 @@ def _detect_crate_no_std_invariant(src_dir: Path) -> str:
         head = lib_rs.read_text(encoding="utf-8")[:4000]
     except Exception:
         return ""
-    if not re.search(r"#\s*!\s*\[\s*no_std\s*\]", head):
+    if not has_no_std_attr(head):
         return ""
     return (
         "crate is #![no_std]. `format!`, `vec!`, `print!`, `println!` "
@@ -7352,8 +7357,7 @@ def _file_cfg_predicate_regex_fallback(
                 continue
             # Stop on any line that contains a declaration keyword — the
             # cfg attrs on such a line belong to ITS item, not ours.
-            if re.search(r"\b(mod|fn|struct|enum|trait|impl|use|extern|"
-                          r"static|const|type|macro_rules|pub|unsafe)\b", s):
+            if contains_decl_keyword(s):
                 break
             if _CFG_INLINE_RE.search(ln):
                 for cm in _CFG_INLINE_RE.finditer(ln):
@@ -9640,8 +9644,8 @@ def _block_is_prose(block: str) -> bool:
 
 
 def _has_nonempty_test_body(block: str) -> bool:
-    """True if the block has at least one `#[test]` fn with a non-trivial body. (Regex in pipeline.)"""
-    return bool(re.search(r'#\[test\][^{]*\{[^}]*\S', block, re.DOTALL))
+    """True if the block has at least one `#[test]` fn with a non-trivial body."""
+    return has_nonempty_test_fn(block)
 
 
 def _flags_unreachable(text: str) -> bool:
@@ -9661,7 +9665,7 @@ def _parse_attempt_number(detail: str) -> "int | None":
 def _is_structural_line(text: str) -> bool:
     """True for structural-only Rust lines (`}`, `} else {`, etc.) that LLVM miscounts.
     (Regex in pipeline.)"""
-    return bool(re.match(r'^\}(\s*else\s*\{)?\s*[;,]?\s*$', text))
+    return is_structural_brace_line(text)
 
 
 # slice 5b: deps for the extracted TASK 0b discovery (defined after its parsers).
@@ -10044,21 +10048,11 @@ def _extract_branch_guard(lines: list[str], line_no: int) -> str | None:
         if not stripped:
             continue
         # Stop at function/impl/struct boundary — guard must be within the same function
-        if re.match(r'^(?:pub\s+|async\s+|unsafe\s+)*fn\s+', stripped):
+        if is_rust_item_boundary_line(stripped):
             break
-        if re.match(r'^(?:impl|struct|enum|trait)\b', stripped):
-            break
-        # if / else if / else
-        if re.match(r'^(?:\}\s*)?else\s+if\b', stripped) or re.match(r'^if\b', stripped):
-            return stripped[:120]
-        if re.match(r'^(?:\}\s*)?else\s*\{', stripped):
-            return "else branch"
-        # match arm: `Pattern => {`
-        if '=>' in stripped and re.search(r'=>\s*\{?\s*$', stripped):
-            return f"match arm: {stripped[:100]}"
-        # while loop
-        if re.match(r'^while\b', stripped):
-            return stripped[:120]
+        label = branch_guard_label(stripped)
+        if label is not None:
+            return label
     return None
 
 

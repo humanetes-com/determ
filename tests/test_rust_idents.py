@@ -22,6 +22,7 @@ from pipeline_core.domain.rust_idents import (
     impl_self_type,
     is_fn_signature_line,
     is_unsafe_fn,
+    mixed_case_identifiers,
     use_symbol_paths,
 )
 
@@ -239,3 +240,17 @@ def test_crate_lint_attr_args_matches_regex():
     pat = re.compile(r"#!\[(?:deny|forbid)\(([^)]+)\)\]")
     for t in _LINT_CASES:
         assert crate_lint_attr_args(t) == [m.group(1) for m in pat.finditer(t)], t
+
+
+_MIXED_CASES = [
+    "Foo bar baz_qux", "fooBar AB_CD Foo_bar", "snake_case_99 X1 _priv",
+    "camelCase HELLO a_b_c", "ab abc abcd", "a1b2 99 _under",
+    "Result Option my_func TypeName", "x y z", "", "trailing_", "_leading",
+    "Mixed123 under_score_end ALLCAPS",
+]
+
+
+def test_mixed_case_identifiers_matches_regex():
+    pat = re.compile(r"\b([A-Z][a-zA-Z0-9]{1,}|[a-z][a-z0-9_]{2,}[a-z0-9])\b")
+    for t in _MIXED_CASES:
+        assert mixed_case_identifiers(t) == set(pat.findall(t)), t

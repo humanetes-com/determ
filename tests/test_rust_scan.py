@@ -6,7 +6,18 @@ from __future__ import annotations
 
 import re
 
-from pipeline_core.domain.rust_scan import count_cfg_attrs, item_names, mod_body, mod_decls
+from pipeline_core.domain.rust_scan import (
+    branch_guard_label,
+    count_cfg_attrs,
+    has_nonempty_test_fn,
+    is_rust_item_boundary_line,
+    is_structural_brace_line,
+    item_names,
+    mod_body,
+    mod_decls,
+    module_use_imports,
+    rust_code_fences,
+)
 
 _OLD_SYMBOL_RE = re.compile(r'\b(?:fn|struct|enum|trait|type|const)\s+([A-Za-z_]\w*)')
 _OLD_MOD_RE = re.compile(r'\bmod\s+(\w+)\s*;')
@@ -146,3 +157,151 @@ def test_rust_delimiters_balanced():
     assert rust_delimiters_balanced('let s = "{ unbalanced ( in string";') is True  # string opaque
     assert rust_delimiters_balanced("// ) ] } all in a comment\n{}") is True
     assert rust_delimiters_balanced("fn f() {") is False               # unclosed brace
+
+
+# --- P7: source-LINE classification + scan_downstream_api source scans ---
+
+
+def _old_boundary(s: str) -> bool:
+    return bool(re.match(r'^(?:pub\s+|async\s+|unsafe\s+)*fn\s+', s)) or bool(
+        re.match(r'^(?:impl|struct|enum|trait)\b', s))
+
+
+def _old_guard_label(s: str) -> str | None:
+    if re.match(r'^(?:\}\s*)?else\s+if\b', s) or re.match(r'^if\b', s):
+        return s[:120]
+    if re.match(r'^(?:\}\s*)?else\s*\{', s):
+        return "else branch"
+    if '=>' in s and re.search(r'=>\s*\{?\s*$', s):
+        return f"match arm: {s[:100]}"
+    if re.match(r'^while\b', s):
+        return s[:120]
+    return None
+
+
+_GUARD_LINES = [
+    "fn foo() {", "pub fn foo() {", "pub async unsafe fn x() {", "unsafe fn y() {",
+    "impl Foo {", "struct S {", "enum E {", "trait T {", "impls Foo", "structural",
+    "if x > 0 {", "} else if y {", "else if z {", "} else {", "else {",
+    "Pattern => {", "Some(x) =>", "a => b => {", "x => { y }", "while cond {",
+    "let z = 1;", "fnord()", "iffy", "whilezzz", "", "} else x", "=>{",
+]
+
+
+def test_is_rust_item_boundary_line_matches_regex():
+    for s in _GUARD_LINES:
+        assert is_rust_item_boundary_line(s) == _old_boundary(s), s
+
+
+def test_branch_guard_label_matches_regex():
+    for s in _GUARD_LINES:
+        assert branch_guard_label(s) == _old_guard_label(s), s
+
+
+_STRUCT_LINES = ["}", "};", "},", "} else {", "}  ;  ", "} else { ;", "}x", "  }",
+                 "} else x", "}else{", "} , ", "else {", "", "}}"]
+
+
+def test_is_structural_brace_line_matches_regex():
+    pat = re.compile(r'^\}(\s*else\s*\{)?\s*[;,]?\s*$')
+    for t in _STRUCT_LINES:
+        assert is_structural_brace_line(t) == bool(pat.match(t)), t
+
+
+_TEST_BODIES = [
+    "#[test] fn t() { assert!(x); }", "#[test] fn t() {}", "#[test] fn t() {   }",
+    "#[test]\nfn t() {\n  let x = 1;\n}", "#[test] fn t()", "no test here",
+    "#[test] fn t() {", "#[test] fn a() {} #[test] fn b() { ok(); }", "#[test]{x",
+]
+
+
+def test_has_nonempty_test_fn_matches_regex():
+    pat = re.compile(r'#\[test\][^{]*\{[^}]*\S', re.DOTALL)
+    for b in _TEST_BODIES:
+        assert has_nonempty_test_fn(b) == bool(pat.search(b)), b
+
+
+def _old_uses(text, module):
+    mod = re.escape(module)
+    a = [m.group(1) for m in re.finditer(rf'use {mod}::\{{([^}}]+)\}}', text)]
+    b = [(m.group(1), m.group(2)) for m in re.finditer(rf'use {mod}::(\w+)::\{{([^}}]+)\}}', text)]
+    c = [(m.group(1), m.group(2)) for m in re.finditer(rf'use {mod}::(\w+)::(\w+)\b', text)]
+    return a, b, c
+
+
+_USE_TEXTS = [
+    "use argh_shared::{A, B, C};", "use argh_shared::sub::{X, Y};",
+    "use argh_shared::sub::Item;", "use argh_shared::{};",
+    "use argh_shared::a::{P}; use argh_shared::Q;",
+    "xuse argh_shared::{Z};", "use argh_shared::{A}; use argh_shared::b::C;",
+    "use argh_shared::{a::b}; use argh_shared::s::Item}", "no imports", "",
+]
+
+
+def test_module_use_imports_matches_regex():
+    for t in _USE_TEXTS:
+        assert module_use_imports(t, "argh_shared") == _old_uses(t, "argh_shared"), t
+
+
+_FENCE_TEXTS = [
+    "```rust\nfn f() {}\n```", "text ```rust  code ``` more", "```rust no close",
+    "```rust A ``` ```rust B ```", "```python x ```", "no fence", "",
+    "```rust\n```", "```rustcode```",
+]
+
+
+def test_rust_code_fences_matches_regex():
+    pat = re.compile(r'```rust\s*(.*?)```', re.DOTALL)
+    for t in _FENCE_TEXTS:
+        assert rust_code_fences(t) == [m.group(1) for m in pat.finditer(t)], t
+
+
+# --- P7: more source line/token classifiers ---
+
+from pipeline_core.domain.rust_scan import (  # noqa: E402
+    contains_decl_keyword,
+    has_no_std_attr,
+    is_type_decl_line,
+    starts_with_pub,
+)
+
+
+def test_is_type_decl_line_matches_regex():
+    pat = re.compile(r'\s*(?:pub(?:\([^)]*\))?\s+)?(?:struct|enum|trait|impl|type|macro_rules)\b')
+    cases = [
+        "struct S {", "pub struct S {", "pub(crate) struct S {", "  impl Foo {",
+        "pub(super) enum E {", "type Alias = u8;", "macro_rules! m {", "fn foo() {",
+        "public struct X", "pubstruct X", "pub (crate) struct X", "let x = 1;",
+        "trait T {}", "typedef", "pub(crate)struct X", "", "  ", "pub fn x()",
+    ]
+    for s in cases:
+        assert is_type_decl_line(s) == bool(pat.match(s)), s
+
+
+def test_starts_with_pub_matches_regex():
+    pat = re.compile(r'\s*pub\b')
+    for s in ["pub fn x", "  pub struct", "public", "pubfn", "pub", "fn pub", "", "pub(crate) x"]:
+        assert starts_with_pub(s) == bool(pat.match(s)), s
+
+
+def test_contains_decl_keyword_matches_regex():
+    pat = re.compile(r"\b(mod|fn|struct|enum|trait|impl|use|extern|"
+                     r"static|const|type|macro_rules|pub|unsafe)\b")
+    cases = [
+        "    fn foo() {", "let x = 1;", "mymod::thing()", "const_x = 2",
+        "macro_rules! m", "  pub unsafe fn", "use crate::x;", "no keywords here",
+        "extern crate", "typename", "a fn b", "", "#[cfg(test)]",
+    ]
+    for s in cases:
+        assert contains_decl_keyword(s) == bool(pat.search(s)), s
+
+
+def test_has_no_std_attr_matches_regex():
+    pat = re.compile(r"#\s*!\s*\[\s*no_std\s*\]")
+    cases = [
+        "#![no_std]", "# ! [ no_std ]", "#![ no_std ]", "#[no_std]",
+        "//#![no_std]\nfn x", "#![no_stdx]", "#![ nostd ]", "text #![no_std] more",
+        "#!", "#![no_std", "", "#!\t[\nno_std\t]",
+    ]
+    for s in cases:
+        assert has_no_std_attr(s) == bool(pat.search(s)), s

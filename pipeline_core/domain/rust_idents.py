@@ -248,6 +248,27 @@ def crate_lint_attr_args(text: str) -> list[str]:
     return out
 
 
+def _is_mixed_case_ident(w: str) -> bool:
+    """True iff `w` (a maximal word-span) matches one of the two alternatives of
+    ``[A-Z][a-zA-Z0-9]{1,}|[a-z][a-z0-9_]{2,}[a-z0-9]``: an ASCII CamelCase name
+    (upper-led, ≥2, no underscore) OR a lower_snake name (lower-led, ≥4, ASCII
+    ``[a-z0-9_]`` only, ending on ``[a-z0-9]``)."""
+    n = len(w)
+    alt1 = n >= 2 and "A" <= w[0] <= "Z" and all(
+        ("a" <= c <= "z") or ("A" <= c <= "Z") or ("0" <= c <= "9") for c in w)
+    alt2 = n >= 4 and "a" <= w[0] <= "z" and (("a" <= w[-1] <= "z") or ("0" <= w[-1] <= "9")) and all(
+        ("a" <= c <= "z") or ("0" <= c <= "9") or c == "_" for c in w)
+    return alt1 or alt2
+
+
+def mixed_case_identifiers(text: str) -> set[str]:
+    """CamelCase or lower_snake identifiers in `text` — byte-equivalent to
+    ``set(re.findall(r'\\b([A-Z][a-zA-Z0-9]{1,}|[a-z][a-z0-9_]{2,}[a-z0-9])\\b', text))``.
+    Each ``\\b…\\b`` match is exactly a maximal word-span (underscores are word chars,
+    so the regex can only match a whole span), classified by `_is_mixed_case_ident`."""
+    return {w for s, e in _word_spans(text) if _is_mixed_case_ident(w := text[s:e])}
+
+
 def fn_reference_counts(text: str) -> dict[str, int]:
     """Map each `fn <name>` declaration's name to how many times that name word
     occurs anywhere in `text` — a usage-frequency map for leaf-first ordering.
