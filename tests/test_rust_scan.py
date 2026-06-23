@@ -343,3 +343,30 @@ def test_count_macro_calls_matches_regex():
     for t in _MACRO_TEXTS:
         for w in ("foo", "vec"):
             assert count_macro_calls(t, w) == len(re.findall(r"\b" + re.escape(w) + r"\s*!", t)), (t, w)
+
+
+# --- P7: Rust comment stripping ---
+
+from pipeline_core.domain.rust_scan import (  # noqa: E402
+    strip_comment_spans,
+    strip_line_block_comments,
+)
+
+_COMMENT_TEXTS = [
+    "let x = 1; // trailing\ny", "/* block */ code", "a /* b // c */ d",
+    "/* // */ x", "# attr line\nfn f", "code /* no close", "// /* x */ still",
+    "no comments", "", "/*/", "#[derive(Debug)]\nstruct S;", "a//b\n/*c*/d",
+]
+
+
+def test_strip_comment_spans_matches_regex():
+    pat = re.compile(r'//[^\n]*|/\*.*?\*/|#[^\n]*', re.DOTALL)
+    for t in _COMMENT_TEXTS:
+        assert strip_comment_spans(t) == pat.sub("", t), t
+
+
+def test_strip_line_block_comments_matches_regex():
+    for t in _COMMENT_TEXTS:
+        t1 = re.sub(r'//[^\n]*', '', t)
+        expected = re.sub(r'/\*.*?\*/', '', t1, flags=re.DOTALL)
+        assert strip_line_block_comments(t) == expected, t

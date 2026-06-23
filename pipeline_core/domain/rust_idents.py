@@ -248,6 +248,45 @@ def crate_lint_attr_args(text: str) -> list[str]:
     return out
 
 
+def _ident_token_start(text: str, s: int, e: int) -> int:
+    """Within word-span ``[s, e)``, the index of the first ASCII ident-start char
+    (``[A-Za-z_]``) — the offset where ``re.findall(r'[A-Za-z_]\\w*')`` begins inside
+    a run, skipping leading digits — or `e` if the run is all digits."""
+    p = s
+    while p < e and not _is_ascii_ident_start(text[p]):
+        p += 1
+    return p
+
+
+def identifier_tokens(text: str) -> list[str]:
+    """Every ``[A-Za-z_]\\w*`` identifier token, in order — byte-equivalent to
+    ``re.findall(r'[A-Za-z_]\\w*', text)``. Each maximal word-run yields at most one
+    token (the suffix from its first letter/underscore to the run end); all-digit
+    runs yield nothing."""
+    out: list[str] = []
+    for s, e in _word_spans(text):
+        p = _ident_token_start(text, s, e)
+        if p < e:
+            out.append(text[p:e])
+    return out
+
+
+def mask_identifiers(text: str, repl: str = "X") -> str:
+    """`text` with every ``[A-Za-z_]\\w*`` identifier token replaced by `repl` —
+    byte-equivalent to ``re.sub(r'[A-Za-z_]\\w*', repl, text)`` (leading digits of a
+    run are NOT part of the match, so they survive)."""
+    out: list[str] = []
+    last = 0
+    for s, e in _word_spans(text):
+        p = _ident_token_start(text, s, e)
+        if p < e:
+            out.append(text[last:p])
+            out.append(repl)
+            last = e
+    out.append(text[last:])
+    return "".join(out)
+
+
 def _is_mixed_case_ident(w: str) -> bool:
     """True iff `w` (a maximal word-span) matches one of the two alternatives of
     ``[A-Z][a-zA-Z0-9]{1,}|[a-z][a-z0-9_]{2,}[a-z0-9]``: an ASCII CamelCase name

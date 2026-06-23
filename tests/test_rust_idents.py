@@ -19,9 +19,11 @@ from pipeline_core.domain.rust_idents import (
     first_fn_decl_name,
     fn_decl_names,
     fn_reference_counts,
+    identifier_tokens,
     impl_self_type,
     is_fn_signature_line,
     is_unsafe_fn,
+    mask_identifiers,
     mixed_case_identifiers,
     use_symbol_paths,
 )
@@ -254,3 +256,21 @@ def test_mixed_case_identifiers_matches_regex():
     pat = re.compile(r"\b([A-Z][a-zA-Z0-9]{1,}|[a-z][a-z0-9_]{2,}[a-z0-9])\b")
     for t in _MIXED_CASES:
         assert mixed_case_identifiers(t) == set(pat.findall(t)), t
+
+
+_TOKEN_TEXTS = [
+    "Foo::bar(x)", "9abc x9 _y", "Vec<Item>", "a_b_c 123 12d34",
+    "Self::method()", "->i32", "", "fooBar baz9", "_::A", "x.y.z",
+]
+
+
+def test_identifier_tokens_matches_regex():
+    pat = re.compile(r"[A-Za-z_]\w*")
+    for t in _TOKEN_TEXTS:
+        assert identifier_tokens(t) == pat.findall(t), t
+
+
+def test_mask_identifiers_matches_regex():
+    pat = re.compile(r"[A-Za-z_]\w*")
+    for t in _TOKEN_TEXTS:
+        assert mask_identifiers(t) == pat.sub("X", t), t

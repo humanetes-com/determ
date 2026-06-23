@@ -303,9 +303,11 @@ from pipeline_core.domain.rust_idents import (
     first_fn_decl_name,
     fn_decl_names,
     fn_reference_counts,
+    identifier_tokens,
     impl_self_type,
     is_fn_signature_line,
     is_unsafe_fn,
+    mask_identifiers,
     mixed_case_identifiers,
     use_symbol_paths,
 )
@@ -328,6 +330,8 @@ from pipeline_core.domain.rust_scan import (
     module_use_imports,
     rust_code_fences,
     starts_with_pub,
+    strip_comment_spans,
+    strip_line_block_comments,
     use_imports_symbol,
 )
 from pipeline_core.domain.rust_scan import (
@@ -2073,7 +2077,6 @@ _PLACEHOLDER_RE = re.compile(
     r'unimplemented!\s*\(\)|todo!\s*\(\)|#\s*TODO|#\s*FIXME|pass\s*$|raise\s+NotImplementedError',
     re.MULTILINE,
 )
-_COMMENT_RE = re.compile(r'//[^\n]*|/\*.*?\*/|#[^\n]*', re.DOTALL)
 
 
 def validate_task2_output(project_dir: Path, expected_paths: list[str],
@@ -2106,7 +2109,7 @@ def validate_task2_output(project_dir: Path, expected_paths: list[str],
             continue
         raw = fp.read_text(encoding="utf-8", errors="ignore")
         all_source += raw
-        stripped = _COMMENT_RE.sub("", raw)
+        stripped = strip_comment_spans(raw)
         stripped = re.sub(r'\s+', '', stripped)
         placeholders_found = len(_PLACEHOLDER_RE.findall(raw))
         non_placeholder_len = len(re.sub(r'\s+', '', _PLACEHOLDER_RE.sub("", stripped)))
@@ -6554,7 +6557,7 @@ def _types_referenced_in_text(text: str, all_types: list[TypeRecord]) -> list[Ty
             # string. Tokens like `Own`, `ErrorImpl`, `Backtrace` get
             # added; generics and primitives are dropped via the
             # by_name lookup (we only keep names that match real records).
-            for tok in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", ty):
+            for tok in identifier_tokens(ty):
                 if tok in seen_names:
                     continue
                 hop_rec = by_name.get(tok)
@@ -6733,7 +6736,7 @@ def _extract_crate_idioms(
     if not fns:
         return ""
 
-    target_tokens = set(re.findall(r"[A-Za-z_][\w]*", target_sig_text or ""))
+    target_tokens = set(identifier_tokens(target_sig_text or ""))
 
     # Per-axis collectors with rank score.
     candidates: list[tuple[float, str]] = []
@@ -6798,8 +6801,8 @@ def _extract_crate_idioms(
             if not chain:
                 continue
             # Shape = identifier-only with `.`s preserved.
-            shape = re.sub(r"[A-Za-z_][\w]*", "X", chain)
-            shape = re.sub(r"\s+", " ", shape).strip()
+            shape = mask_identifiers(chain)
+            shape = " ".join(shape.split())
             unsafe_counts[shape] = unsafe_counts.get(shape, 0) + 1
             unsafe_examples.setdefault(shape, (fn["fn_name"], chain))
     for shape in sorted(unsafe_counts, key=lambda s: -unsafe_counts[s])[:2]:
@@ -6810,7 +6813,7 @@ def _extract_crate_idioms(
             chain = chain[:140] + " …"
         rel_score = 1.0 + 0.05 * unsafe_counts[shape]
         # Bias if the chain mentions a target token (e.g. inner, vtable, ptr).
-        for t in re.findall(r"[A-Za-z_][\w]*", chain):
+        for t in identifier_tokens(chain):
             if t in target_tokens:
                 rel_score += 0.5
                 break
@@ -9681,9 +9684,7 @@ def _is_gen_tests_decl_only_src(content: str) -> bool:
         return True
     no_decls = _strip_gen_tests_decls(content)
     # Strip line and block comments before checking for remaining code.
-    no_line_comments = re.sub(r'//[^\n]*', '', no_decls)
-    no_block_comments = re.sub(r'/\*.*?\*/', '', no_line_comments, flags=re.DOTALL)
-    return no_block_comments.strip() == ""
+    return strip_line_block_comments(no_decls).strip() == ""
 
 
 def _cluster_cfg_attr(cluster) -> str:

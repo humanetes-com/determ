@@ -666,3 +666,75 @@ def has_no_std_attr(text: str) -> bool:
         if p < n and text[p] == "]":
             return True
     return False
+
+
+# --- P7: Rust comment stripping (two distinct algorithms — byte-equivalent) ---
+
+def strip_comment_spans(text: str) -> str:
+    """Remove ``//`` line comments, ``/* */`` block comments AND ``#`` line comments
+    in a SINGLE ordered-alternation pass — byte-equivalent to
+    ``re.sub(r'//[^\\n]*|/\\*.*?\\*/|#[^\\n]*', '', text, flags=re.DOTALL)``. A ``/*``
+    with no closing ``*/`` is NOT a comment (the ``/`` survives); the terminating
+    ``\\n`` of a line comment is kept (``[^\\n]*``)."""
+    out: list[str] = []
+    n = len(text)
+    i = 0
+    while i < n:
+        two = text[i:i + 2]
+        if two == "//":
+            j = text.find("\n", i)
+            i = j if j != -1 else n
+        elif two == "/*":
+            close = text.find("*/", i + 2)
+            if close != -1:
+                i = close + 2
+            else:
+                out.append(text[i])
+                i += 1
+        elif text[i] == "#":
+            j = text.find("\n", i)
+            i = j if j != -1 else n
+        else:
+            out.append(text[i])
+            i += 1
+    return "".join(out)
+
+
+def _strip_line_comments(text: str) -> str:
+    out: list[str] = []
+    n = len(text)
+    i = 0
+    while i < n:
+        if text[i:i + 2] == "//":  # //[^\n]*
+            j = text.find("\n", i)
+            i = j if j != -1 else n
+        else:
+            out.append(text[i])
+            i += 1
+    return "".join(out)
+
+
+def _strip_block_comments(text: str) -> str:
+    out: list[str] = []
+    n = len(text)
+    i = 0
+    while i < n:
+        if text[i:i + 2] == "/*":  # /\*.*?\*/ (DOTALL; first close)
+            close = text.find("*/", i + 2)
+            if close != -1:
+                i = close + 2
+            else:
+                out.append(text[i])
+                i += 1
+        else:
+            out.append(text[i])
+            i += 1
+    return "".join(out)
+
+
+def strip_line_block_comments(text: str) -> str:
+    """Remove ``//`` line comments THEN ``/* */`` block comments, in two SEQUENTIAL
+    passes (NOT a combined alternation — the order is observable, e.g. for ``/* // */``)
+    — byte-equivalent to ``re.sub(r'/\\*.*?\\*/', '', re.sub(r'//[^\\n]*', '', text),
+    flags=re.DOTALL)``."""
+    return _strip_block_comments(_strip_line_comments(text))
