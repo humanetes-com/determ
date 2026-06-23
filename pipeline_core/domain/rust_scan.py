@@ -18,9 +18,10 @@ _IDENT_START = frozenset(string.ascii_letters + "_")
 _IDENT_CHARS = _IDENT_START | frozenset(string.digits)
 
 
-def _has_word(text: str, word: str) -> bool:
+def contains_word(text: str, word: str) -> bool:
     """True when `word` occurs in `text` as a whole identifier token (regex `\\bword\\b`):
-    neither neighbour is an identifier char."""
+    neither neighbour is an identifier char. (`word` is an identifier, so its own ends
+    are word chars — only the neighbours decide the boundary.)"""
     start = 0
     while (k := text.find(word, start)) >= 0:
         before = text[k - 1] if k > 0 else ""
@@ -29,6 +30,46 @@ def _has_word(text: str, word: str) -> bool:
             return True
         start = k + 1
     return False
+
+
+def count_word(text: str, word: str) -> int:
+    """Count of whole-word occurrences of identifier `word` — byte-equivalent to
+    ``len(re.findall(r'\\bword\\b', text))`` (non-overlapping; resumes past each hit)."""
+    cnt = 0
+    start = 0
+    w = len(word)
+    n = len(text)
+    while (k := text.find(word, start)) >= 0:
+        before = text[k - 1] if k > 0 else ""
+        after = text[k + w] if k + w < n else ""
+        if before not in _IDENT_CHARS and after not in _IDENT_CHARS:
+            cnt += 1
+            start = k + w
+        else:
+            start = k + 1
+    return cnt
+
+
+def count_macro_calls(text: str, name: str) -> int:
+    """Count of ``name`` used as a macro invocation — byte-equivalent to
+    ``len(re.findall(r'\\bname\\s*!', text))``: a whole-word `name` followed across
+    optional whitespace by ``!`` (the ``\\s*!`` enforces the trailing boundary)."""
+    cnt = 0
+    start = 0
+    w = len(name)
+    n = len(text)
+    while (k := text.find(name, start)) >= 0:
+        before = text[k - 1] if k > 0 else ""
+        if before not in _IDENT_CHARS:  # \b before name (name[0] is an ident char)
+            q = k + w
+            while q < n and text[q].isspace():
+                q += 1
+            if q < n and text[q] == "!":
+                cnt += 1
+                start = q + 1
+                continue
+        start = k + 1
+    return cnt
 
 
 def use_imports_symbol(block: str, prefixes: Sequence[str], symbol: str) -> bool:
@@ -44,7 +85,7 @@ def use_imports_symbol(block: str, prefixes: Sequence[str], symbol: str) -> bool
         semi = block.find(";", u)
         stmt = block[u: semi if semi >= 0 else len(block)]
         body = stmt[len(needle):]
-        if any(body.startswith(p) for p in prefixes) and _has_word(stmt, symbol):
+        if any(body.startswith(p) for p in prefixes) and contains_word(stmt, symbol):
             return True
         pos = u + len(needle)
     return False

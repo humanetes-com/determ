@@ -305,3 +305,41 @@ def test_has_no_std_attr_matches_regex():
     ]
     for s in cases:
         assert has_no_std_attr(s) == bool(pat.search(s)), s
+
+
+# --- P7: whole-word presence / count / macro-call helpers ---
+
+from pipeline_core.domain.rust_scan import (  # noqa: E402
+    contains_word,
+    count_macro_calls,
+    count_word,
+)
+
+_WORD_TEXTS = [
+    "foo bar foo", "foobar foo", "xfoo foo_ foo", "Foo::foo()", "no match",
+    "foo!foo", "a foo b foo c", "", "foo", "_foo foo9 foo",
+]
+
+
+def test_contains_word_matches_regex():
+    for t in _WORD_TEXTS:
+        for w in ("foo", "bar", "Foo", "x"):
+            assert contains_word(t, w) == bool(re.search(r"\b" + re.escape(w) + r"\b", t)), (t, w)
+
+
+def test_count_word_matches_regex():
+    for t in _WORD_TEXTS:
+        for w in ("foo", "bar", "Foo"):
+            assert count_word(t, w) == len(re.findall(r"\b" + re.escape(w) + r"\b", t)), (t, w)
+
+
+_MACRO_TEXTS = [
+    "foo!()", "foo !()", "foo\t!()", "foobar!()", "xfoo!()", "foo() foo!()",
+    "vec![1] foo!{}", "no macro", "", "foo ! foo!",
+]
+
+
+def test_count_macro_calls_matches_regex():
+    for t in _MACRO_TEXTS:
+        for w in ("foo", "vec"):
+            assert count_macro_calls(t, w) == len(re.findall(r"\b" + re.escape(w) + r"\s*!", t)), (t, w)

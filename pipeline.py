@@ -291,6 +291,7 @@ from pipeline_core.domain.retry_outcome import (
     build_verdict,
     failing_test_verdict,
 )
+from pipeline_core.domain.rust_fn_headers import fn_headers, macro_headers
 from pipeline_core.domain.rust_idents import (
     attr_call_args,
     camelcase_type_names,
@@ -313,7 +314,10 @@ from pipeline_core.domain.rust_scan import (
     after_brace_newline,
     branch_guard_label,
     contains_decl_keyword,
+    contains_word,
+    count_macro_calls,
     count_test_attrs,
+    count_word,
     find_mod_opener,
     has_no_std_attr,
     has_nonempty_test_fn,
@@ -3544,25 +3548,14 @@ def _format_skeleton_index(skeleton_files: list[tuple[str, str]]) -> str:
     model knows what's exported, not the multi-KB rule definitions.
     """
     out_parts: list[str] = []
-    fn_re = re.compile(
-        r'((?:^|\n)[ \t]*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?'
-        r'(?:const\s+)?fn\s+[A-Za-z_]\w*[^{]*)\{',
-        re.MULTILINE,
-    )
-    # `macro_rules!` (with optional `#[macro_export]` etc. attributes lurking
-    # above on a separate line — we don't try to capture those, just the macro).
-    macro_re = re.compile(
-        r'((?:^|\n)[ \t]*(?:pub(?:\([^)]*\))?\s+)?macro_rules!\s+[A-Za-z_]\w*\s*)\{',
-        re.MULTILINE,
-    )
 
-    def _elide_bodies(text: str, regex: re.Pattern, terminator: str) -> str:
-        """Walk `regex` matches; for each, brace-match to find the body and
+    def _elide_bodies(text: str, headers: list, terminator: str) -> str:
+        """Walk header matches; for each, brace-match to find the body and
         replace it with `terminator`. Returns the rewritten text."""
         result_parts: list[str] = []
         last = 0
-        for m in regex.finditer(text):
-            body_start = m.end()
+        for h in headers:
+            body_start = h.brace_open + 1
             depth = 1
             i = body_start
             while i < len(text) and depth > 0:
@@ -3574,8 +3567,8 @@ def _format_skeleton_index(skeleton_files: list[tuple[str, str]]) -> str:
             if depth != 0:
                 continue
             body_end = i
-            result_parts.append(text[last:m.start(1)])
-            result_parts.append(m.group(1).rstrip())
+            result_parts.append(text[last:h.start])
+            result_parts.append(text[h.start:h.brace_open].rstrip())
             result_parts.append(terminator)
             last = body_end
         result_parts.append(text[last:])
@@ -3583,9 +3576,9 @@ def _format_skeleton_index(skeleton_files: list[tuple[str, str]]) -> str:
 
     for rel, content in skeleton_files:
         # Order matters: elide macros first (their bodies contain `fn` patterns
-        # in rule expansions that would otherwise confuse the fn regex).
-        condensed = _elide_bodies(content, macro_re, " { /* macro body elided — preserved verbatim on disk */ }")
-        condensed = _elide_bodies(condensed, fn_re, ";")
+        # in rule expansions that would otherwise confuse the fn scan).
+        condensed = _elide_bodies(content, macro_headers(content), " { /* macro body elided — preserved verbatim on disk */ }")
+        condensed = _elide_bodies(condensed, fn_headers(condensed, line_anchored=True), ";")
         out_parts.append(f'<FILE path="{rel}" mode="signatures-only">\n{condensed}\n</FILE>')
     return "\n\n".join(out_parts)
 
@@ -3875,14 +3868,10 @@ def _merge_fn_blocks_into_disk(disk_text: str, fn_blocks: dict[str, str]) -> str
     """
     if not fn_blocks:
         return disk_text
-    fn_re = re.compile(
-        r'((?<![A-Za-z_0-9])(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?'
-        r'(?:const\s+)?fn\s+[A-Za-z_]\w*[^{]*\{)',
-    )
     # Re-extract disk functions to find their bodies, then splice in.
     matches: list[tuple[str, int, int]] = []  # (sig, body_start, body_end)
-    for m in fn_re.finditer(disk_text):
-        body_start = m.end()
+    for h in fn_headers(disk_text, line_anchored=False):
+        body_start = h.brace_open + 1
         depth = 1
         i = body_start
         while i < len(disk_text) and depth > 0:
@@ -3897,7 +3886,7 @@ def _merge_fn_blocks_into_disk(disk_text: str, fn_blocks: dict[str, str]) -> str
         body_end = i - 1
         # Strip the trailing '{' so the sig matches the LLM's <FN sig="..."> key
         # (which is the signature without the opening brace).
-        sig_line = disk_text[m.start():body_start].rstrip("{ \t\n").strip()
+        sig_line = disk_text[h.start:body_start].rstrip("{ \t\n").strip()
         matches.append((sig_line, body_start, body_end))
 
     out = disk_text
@@ -3924,12 +3913,6 @@ def _merge_fn_blocks_into_disk(disk_text: str, fn_blocks: dict[str, str]) -> str
 # We own the splice site; the model returns only the body text.
 # ---------------------------------------------------------------------------
 
-_FN_RE_GLOBAL = re.compile(
-    r'((?<![A-Za-z_0-9])(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?'
-    r'(?:const\s+)?fn\s+([A-Za-z_]\w*)[^{]*\{)',
-)
-
-
 def _locate_fn(file_text: str, fn_name: str) -> tuple[str, int, int, int] | None:
     """Return (sig_text, sig_start, body_start, body_end) for the first fn whose
     name matches `fn_name`. body_start is just after the opening `{`; body_end
@@ -3937,11 +3920,11 @@ def _locate_fn(file_text: str, fn_name: str) -> tuple[str, int, int, int] | None
 
     Returns None if not found or braces are malformed.
     """
-    for m in _FN_RE_GLOBAL.finditer(file_text):
-        if m.group(2) != fn_name:
+    for h in fn_headers(file_text, line_anchored=False):
+        if h.name != fn_name:
             continue
-        sig_start = m.start()
-        body_start = m.end()
+        sig_start = h.start
+        body_start = h.brace_open + 1
         depth = 1
         i = body_start
         while i < len(file_text) and depth > 0:
@@ -4088,7 +4071,7 @@ def _splice_fn_body(file_path: Path, fn_name: str, new_body: str,
 
 # R8.5: the `<FN …>`/`<FILE …>` model-protocol parsers (`extract_fn_bodies`,
 # `_find_fn_blocks`, `_split_leading_where`, …) live in domain.llm_output;
-# imported at top. `_FN_RE_GLOBAL`/`_locate_fn` above stay (Rust-SOURCE, R7.6).
+# imported at top. `_locate_fn` (Rust-SOURCE) now scans via domain.rust_fn_headers.
 
 
 def _splice_fn_with_where(
@@ -4457,10 +4440,10 @@ def _annotate_file_view(file_text: str, target_fn: str) -> str:
         file_text = _strip_crate_attrs(file_text)   # drop only #![...] crate attrs
     out: list[str] = []
     last_fn_end = 0
-    for m in _FN_RE_GLOBAL.finditer(file_text):
-        fn_name = m.group(2)
-        sig_start = m.start()
-        body_start = m.end()
+    for h in fn_headers(file_text, line_anchored=False):
+        fn_name = h.name
+        sig_start = h.start
+        body_start = h.brace_open + 1
         depth = 1
         j = body_start
         while j < len(file_text) and depth > 0:
@@ -4712,13 +4695,12 @@ def _find_tests_for_fn(
         # "for X" of "impl Trait for X<...>", else "impl X<...>" (inherent).
         container_type = impl_self_type(container) or ""
     if fn_name in _GENERIC_FN_NAMES and container_type:
-        pat0 = re.compile(r"\b" + re.escape(container_type) + r"\b")
         for tf in tests_dir_files:
             try:
                 txt = tf.read_text(encoding="utf-8")
             except Exception:
                 continue
-            n = len(pat0.findall(txt))
+            n = count_word(txt, container_type)
             if n:
                 cur = scored.get(tf, (99, 0))
                 # Tier 0 = highest priority. Hit count = type mentions.
@@ -4726,13 +4708,12 @@ def _find_tests_for_fn(
 
     # Tier 1: direct name.
     if fn_name:
-        pat = re.compile(r"\b" + re.escape(fn_name) + r"\b")
         for tf in tests_dir_files:
             try:
                 txt = tf.read_text(encoding="utf-8")
             except Exception:
                 continue
-            n = len(pat.findall(txt))
+            n = count_word(txt, fn_name)
             if n:
                 cur = scored.get(tf, (99, 0))
                 scored[tf] = (min(cur[0], 1), max(cur[1], n))
@@ -4759,13 +4740,12 @@ def _find_tests_for_fn(
         except Exception:
             pass
         if macro_names:
-            pats = [re.compile(r"\b" + re.escape(n) + r"\s*!") for n in macro_names]
             for tf in tests_dir_files:
                 try:
                     ttxt = tf.read_text(encoding="utf-8")
                 except Exception:
                     continue
-                hits = sum(len(p.findall(ttxt)) for p in pats)
+                hits = sum(count_macro_calls(ttxt, n) for n in macro_names)
                 if hits:
                     cur = scored.get(tf, (99, 0))
                     scored[tf] = (min(cur[0], 3), max(cur[1], hits))
@@ -5823,11 +5803,11 @@ def _collect_sibling_filled_bodies(
     """
     out: list[str] = []
     count = 0
-    for m in _FN_RE_GLOBAL.finditer(file_text):
-        if m.group(2) != target_fn_name:
+    for h in fn_headers(file_text, line_anchored=False):
+        if h.name != target_fn_name:
             continue
-        sig_start = m.start()
-        body_start = m.end()
+        sig_start = h.start
+        body_start = h.brace_open + 1
         depth = 1
         i = body_start
         while i < len(file_text) and depth > 0:
@@ -6282,11 +6262,6 @@ def _merge_fills_preserving_existing(disk_text: str, model_text: str) -> str:
     given function (or returned it with `unimplemented!()` still), the disk
     body is kept — Phase D will pick up any residuals.
     """
-    fn_re = re.compile(
-        r'((?<![A-Za-z_0-9])(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?'
-        r'(?:const\s+)?fn\s+[A-Za-z_]\w*[^{]*\{)',
-    )
-
     def extract_fns(text: str) -> list[tuple[str, str, int, int]]:
         """Return [(signature_line, body, body_start, body_end), ...] for each fn.
 
@@ -6294,8 +6269,8 @@ def _merge_fills_preserving_existing(disk_text: str, model_text: str) -> str:
         body_end is the offset of the closing `}` itself (exclusive end of body).
         """
         out: list[tuple[str, str, int, int]] = []
-        for m in fn_re.finditer(text):
-            body_start = m.end()  # right after the opening `{`
+        for h in fn_headers(text, line_anchored=False):
+            body_start = h.brace_open + 1  # right after the opening `{`
             depth = 1
             i = body_start
             while i < len(text) and depth > 0:
@@ -6309,7 +6284,7 @@ def _merge_fills_preserving_existing(disk_text: str, model_text: str) -> str:
                 continue  # malformed; skip
             body_end = i - 1  # position of the matching '}'
             body = text[body_start:body_end]
-            sig_line = text[m.start():body_start].strip()
+            sig_line = text[h.start:body_start].strip()
             out.append((sig_line, body, body_start, body_end))
         return out
 
@@ -6563,7 +6538,7 @@ def _types_referenced_in_text(text: str, all_types: list[TypeRecord]) -> list[Ty
         name = rec.name
         if not name or name in seen_names:
             continue
-        if re.search(r"\b" + re.escape(name) + r"\b", text):
+        if contains_word(text, name):
             out.append(rec)
             seen_names.add(name)
 
@@ -7107,20 +7082,15 @@ def _scan_unimplemented_functions(src_dir: Path) -> list[tuple[str, str]]:
                 if r.get("has_unimplemented_body")]
     # Fallback: best-effort regex scan. Less robust but doesn't require
     # the Rust binary; kept for the tests-fixture path and for portability.
-    fn_re = re.compile(
-        r'(?<![A-Za-z_0-9])'
-        r'(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?'
-        r'(?:const\s+)?fn\s+([A-Za-z_]\w*)[^{]*\{',
-    )
     out: list[tuple[str, str]] = []
     for p in sorted(src_dir.rglob("*.rs")):
         try:
             text = p.read_text(encoding="utf-8")
         except Exception:
             continue
-        for m in fn_re.finditer(text):
-            fn_name = m.group(1)
-            body_start = m.end()
+        for h in fn_headers(text, line_anchored=False):
+            fn_name = h.name
+            body_start = h.brace_open + 1
             depth = 1
             i = body_start
             while i < len(text) and depth > 0:
@@ -7531,7 +7501,7 @@ def _filter_test_exercised(stubs: list[tuple[str, str]],
     test_blob = "\n".join(content for _, content in test_files)
     out: list[tuple[str, str]] = []
     for rel, name in stubs:
-        if re.search(rf'\b{re.escape(name)}\b', test_blob):
+        if contains_word(test_blob, name):
             out.append((rel, name))
     return out
 
@@ -7577,7 +7547,7 @@ def _task2_cleanup_residuals(
     # Surface only tests that mention any of the target functions (relevance filter).
     relevant_tests: list[str] = []
     for rel, content in test_files:
-        if any(re.search(rf'\b{re.escape(fn)}\b', content)
+        if any(contains_word(content, fn)
                for fns in by_file.values() for fn in fns):
             relevant_tests.append(f'<TESTFILE path="{rel}">\n{content}\n</TESTFILE>')
     tests_block = "\n\n".join(relevant_tests)
