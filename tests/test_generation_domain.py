@@ -211,3 +211,45 @@ def test_gen_tests_decl_blocks_only_real_siblings() -> None:
             + "#[path = \"hand_written.rs\"]\nmod gen_tests_5;\n")  # not a sibling path
     blocks = gen_tests_decl_blocks(text)
     assert [b.pass_n for b in blocks] == [1]  # the non-sibling decl is excluded
+
+
+# --- P7: gen_tests artifact-naming pins (byte-equivalent to the old regexes) ---
+
+import re  # noqa: E402
+
+from pipeline_core.domain.generation import (  # noqa: E402
+    gen_tests_sibling_number,
+    has_gen_tests_mod_decl,
+    is_gen_tests_sibling_name,
+    strip_mod_test_prefix,
+)
+
+
+def test_is_gen_tests_sibling_name_matches_regex() -> None:
+    pat = re.compile(r'\.gen_tests_\d+\.rs$')
+    for name in ["foo.gen_tests_1.rs", "foo.gen_tests_12.rs", "foo.gen_tests_1.rs.broken",
+                 "foo.rs", "foo.gen_tests_.rs", "foo.gen_tests_1a.rs", ".gen_tests_3.rs",
+                 "a.gen_tests_2.gen_tests_5.rs", "foo_gen_tests_1.rs", ""]:
+        assert is_gen_tests_sibling_name(name) == bool(pat.search(name)), name
+
+
+def test_gen_tests_sibling_number_matches_regex() -> None:
+    for stem in ["foo", "a.b", "mod"]:
+        pat = re.compile(rf'^{re.escape(stem)}\.gen_tests_(\d+)\.rs$')
+        for name in [f"{stem}.gen_tests_1.rs", f"{stem}.gen_tests_42.rs", f"{stem}.gen_tests_.rs",
+                     f"{stem}.gen_tests_1.rs.broken", "other.gen_tests_1.rs", f"{stem}.gen_tests_1a.rs"]:
+            m = pat.match(name)
+            assert gen_tests_sibling_number(name, stem) == (int(m.group(1)) if m else None), (name, stem)
+
+
+def test_has_gen_tests_mod_decl_matches_regex() -> None:
+    for n in [0, 3, 30]:
+        pat = re.compile(rf'\bmod\s+gen_tests_{n}\s*;')
+        for src in [f"mod gen_tests_{n};", f"pub mod gen_tests_{n} ;", "mod gen_tests_30;",
+                    f"amod gen_tests_{n};", f"mod  gen_tests_{n}\t;", "no decl", f"mod gen_tests_{n}x;"]:
+            assert has_gen_tests_mod_decl(src, n) == bool(pat.search(src)), (src, n)
+
+
+def test_strip_mod_test_prefix_matches_regex() -> None:
+    for s in ["mod_foo", "test_foo", "tests_foo", "modfoo", "test", "tests_", "foo", "mod_test_x", ""]:
+        assert strip_mod_test_prefix(s) == re.sub(r'^(mod|tests?)_', '', s), s

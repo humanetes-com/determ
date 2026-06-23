@@ -96,6 +96,67 @@ def strip_test_prefix(stem: str) -> str:
     return stem
 
 
+def is_gen_tests_sibling_name(name: str) -> bool:
+    """True iff `name` ends with a `.gen_tests_<digits>.rs` suffix — byte-equivalent
+    to ``bool(re.search(r'\\.gen_tests_\\d+\\.rs$', name))`` (looser than
+    `parse_gen_tests_filename`: no stem requirement, no `.broken`)."""
+    if not name.endswith(".rs"):
+        return False
+    core = name[:-3]
+    idx = core.rfind(".gen_tests_")
+    if idx == -1:
+        return False
+    digits = core[idx + len(".gen_tests_"):]
+    return bool(digits) and digits.isdigit()
+
+
+def gen_tests_sibling_number(name: str, stem: str) -> int | None:
+    """The N of `<stem>.gen_tests_<N>.rs` for this exact `stem`, else None —
+    byte-equivalent to ``re.match(rf'^{re.escape(stem)}\\.gen_tests_(\\d+)\\.rs$',
+    name)`` projected onto ``int(group(1))``."""
+    prefix = stem + ".gen_tests_"
+    if not name.startswith(prefix) or not name.endswith(".rs"):
+        return None
+    digits = name[len(prefix):-3]
+    return int(digits) if digits and digits.isdigit() else None
+
+
+def has_gen_tests_mod_decl(src_text: str, pass_n: int) -> bool:
+    """True iff `src_text` declares ``mod gen_tests_<pass_n>;`` — byte-equivalent to
+    ``bool(re.search(rf'\\bmod\\s+gen_tests_{pass_n}\\s*;', src_text))`` (the trailing
+    ``\\s*;`` enforces an exact N, so `gen_tests_3` never matches `gen_tests_30;`)."""
+    target = "gen_tests_" + str(pass_n)
+    n = len(src_text)
+    i = 0
+    while (k := src_text.find("mod", i)) >= 0:
+        i = k + 3
+        if k > 0 and (src_text[k - 1].isalnum() or src_text[k - 1] == "_"):
+            continue  # \bmod
+        p = k + 3
+        if p >= n or not src_text[p].isspace():  # \s+
+            continue
+        while p < n and src_text[p].isspace():
+            p += 1
+        if not src_text.startswith(target, p):
+            continue
+        q = p + len(target)
+        while q < n and src_text[q].isspace():  # \s*
+            q += 1
+        if q < n and src_text[q] == ";":
+            return True
+    return False
+
+
+def strip_mod_test_prefix(stem: str) -> str:
+    """Drop a leading `mod_`/`test_`/`tests_` prefix — byte-equivalent to
+    ``re.sub(r'^(mod|tests?)_', '', stem)`` (``tests?`` is greedy, so `tests_` is
+    tried before `test_`)."""
+    for p in ("mod_", "tests_", "test_"):
+        if stem.startswith(p):
+            return stem[len(p):]
+    return stem
+
+
 def parse_gen_tests_filename(name: str) -> tuple[str, int] | None:
     """Parse a `<stem>.gen_tests_<N>.rs` sibling filename → (stem, N), or None.
     Accepts an optional trailing `.broken` quarantine suffix (regex-free, R7).

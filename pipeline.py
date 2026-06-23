@@ -4730,7 +4730,7 @@ def _find_tests_for_fn(
     if file_rel:
         stem = Path(file_rel).stem.lower()
         # Strip common prefixes/suffixes that don't help matching:
-        stem = re.sub(r"^(mod|tests?)_", "", stem)
+        stem = _strip_mod_test_prefix(stem)
         for tf in tests_dir_files:
             tname = tf.stem.lower()
             if stem and (stem in tname or tname in stem):
@@ -7791,7 +7791,7 @@ def _source_hash(project_dir: Path) -> str:
         parts.append(cargo.read_text(errors="replace"))
     for p in sorted((project_dir / "src").glob("*.rs")) if (project_dir / "src").exists() else []:
         # Skip gen_tests sibling files entirely — pipeline-generated content.
-        if re.search(r'\.gen_tests_\d+\.rs$', p.name):
+        if _is_gen_tests_sibling_name(p.name):
             continue
         with suppress(Exception):
             parts.append(_strip_gen_tests_decls(p.read_text(errors="replace")))
@@ -8073,6 +8073,15 @@ from pipeline_core.domain.generation import (
 from pipeline_core.domain.generation import (
     gen_tests_decl_blocks as _gen_tests_decl_blocks,  # noqa: E402
 )
+from pipeline_core.domain.generation import (  # noqa: E402
+    gen_tests_sibling_number as _gen_tests_sibling_number,
+)
+from pipeline_core.domain.generation import (
+    has_gen_tests_mod_decl as _has_gen_tests_mod_decl,
+)
+from pipeline_core.domain.generation import (
+    is_gen_tests_sibling_name as _is_gen_tests_sibling_name,
+)
 from pipeline_core.domain.generation import (
     parse_gen_tests_filename as _parse_gen_tests_filename,  # noqa: E402
 )
@@ -8087,6 +8096,9 @@ from pipeline_core.domain.generation import (
 )
 from pipeline_core.domain.generation import (
     strip_gen_tests_decl_n as _domain_strip_gen_tests_decl_n,  # noqa: E402
+)
+from pipeline_core.domain.generation import (
+    strip_mod_test_prefix as _strip_mod_test_prefix,
 )
 
 # P6: the `_Task2Adapter` god-object is dissolved — each TASK-1/TASK-2 generator
@@ -9468,14 +9480,13 @@ _coverage_provider: _covmod.CoverageProvider = _covmod.make_coverage_provider(
 def _gen_tests_siblings(src_file: Path) -> list[tuple[int, Path]]:
     """Return [(N, path)] for all foo.gen_tests_N.rs siblings of src_file, sorted by N."""
     stem = src_file.stem
-    pattern = re.compile(rf'^{re.escape(stem)}\.gen_tests_(\d+)\.rs$')
     out: list[tuple[int, Path]] = []
     parent = src_file.parent
     if parent.exists():
         for f in parent.iterdir():
-            m = pattern.match(f.name)
-            if m:
-                out.append((int(m.group(1)), f))
+            num = _gen_tests_sibling_number(f.name, stem)
+            if num is not None:
+                out.append((num, f))
     out.sort()
     return out
 
@@ -9648,7 +9659,7 @@ def _has_gen_tests_decl(src_text: str, pass_n: int) -> bool:
     """True if src_text contains a `mod gen_tests_<pass_n>;` declaration.
     Used by the TASK 2 reattach path to detect when a sibling exists on disk
     but its declaration was dropped during regeneration of the source file."""
-    return bool(re.search(rf'\bmod\s+gen_tests_{pass_n}\s*;', src_text))
+    return _has_gen_tests_mod_decl(src_text, pass_n)
 
 
 def _is_gen_tests_decl_only_src(content: str) -> bool:
@@ -10512,7 +10523,7 @@ def clean_state(root: Path, project_dir: Path, manifest_path: Path,
     stripped_files = stripped_siblings = 0
     # Delete sibling files first so the parent loop doesn't re-read them.
     for sibling in sorted(project_dir.rglob("*.gen_tests_*.rs")):
-        if re.search(r'\.gen_tests_\d+\.rs$', sibling.name):
+        if _is_gen_tests_sibling_name(sibling.name):
             try:
                 sibling.unlink()
                 stripped_siblings += 1
