@@ -346,6 +346,7 @@ from pipeline_core.domain.rust_scan import (
     item_names,
     line_has_assertion,
     module_use_imports,
+    named_fn_decl_start,
     replace_elision_placeholders,
     rust_code_fences,
     starts_with_pub,
@@ -7117,16 +7118,10 @@ def _fn_cfg_predicates(file_text: str, fn_name: str) -> list[str]:
     non-attribute, non-blank line. Returns just the cfg predicates
     (the part inside `cfg(...)`).
     """
-    fn_pat = re.compile(
-        r"(?:^|\n)([ \t]*)(?:pub(?:\([^)]*\))?\s+)?"
-        r"(?:async\s+)?(?:unsafe\s+)?(?:const\s+)?"
-        r"fn\s+" + re.escape(fn_name) + r"\b",
-        re.MULTILINE,
-    )
-    m = fn_pat.search(file_text)
-    if not m:
+    m_start = named_fn_decl_start(file_text, fn_name)
+    if m_start is None:
         return []
-    decl_offset = m.start() + (1 if file_text[m.start()] == "\n" else 0)
+    decl_offset = m_start + (1 if file_text[m_start] == "\n" else 0)
     # Window: from the previous blank line (or start) to the fn decl.
     # Captures both same-line and above-line cfg attributes that the
     # skeleton extractor may emit (`# [cfg (X)] fn foo ...` or

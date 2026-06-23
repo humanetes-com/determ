@@ -909,3 +909,55 @@ def gen_mod_body_start(block: str) -> int | None:
         if b < n and block[b] == "{":
             return b + 1
     return None
+
+
+def _skip_fn_modifiers(text: str, p: int) -> int:
+    """Past an optional ``(pub(…)? )(async )(unsafe )(const )`` modifier run (each
+    keyword + ``\\s+`` whitespace, which may span newlines), starting at `p`."""
+    n = len(text)
+    if text.startswith("pub", p):  # pub(?:\([^)]*\))?\s+
+        q = p + 3
+        if q < n and text[q] == "(":
+            c = text.find(")", q + 1)
+            if c != -1:
+                q = c + 1
+        if q < n and text[q].isspace():
+            while q < n and text[q].isspace():
+                q += 1
+            p = q
+    for kw in ("async", "unsafe", "const"):  # <kw>\s+
+        if text.startswith(kw, p):
+            q = p + len(kw)
+            if q < n and text[q].isspace():
+                while q < n and text[q].isspace():
+                    q += 1
+                p = q
+    return p
+
+
+def named_fn_decl_start(text: str, fn_name: str) -> int | None:
+    r"""``m.start()`` of the first ``(?:^|\n)[ \t]*(mods)?fn <fn_name>\b`` declaration
+    (MULTILINE), or None — byte-equivalent to that regex's match start. The modifier
+    ``\s+`` may span newlines (``pub`` one line, ``fn`` the next), so the start can be
+    the ``\n`` of an earlier line."""
+    n = len(text)
+    line_start = 0
+    while line_start <= n:
+        p = line_start
+        while p < n and text[p] in " \t":  # [ \t]*
+            p += 1
+        p = _skip_fn_modifiers(text, p)
+        if text.startswith("fn", p):
+            q = p + 2
+            if q < n and text[q].isspace():  # fn\s+
+                while q < n and text[q].isspace():
+                    q += 1
+                if text.startswith(fn_name, q):
+                    e = q + len(fn_name)
+                    if e == n or text[e] not in _IDENT_CHARS:  # \b
+                        return line_start - 1 if line_start > 0 else 0
+        nl = text.find("\n", line_start)
+        if nl == -1:
+            break
+        line_start = nl + 1
+    return None

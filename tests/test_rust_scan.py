@@ -444,3 +444,19 @@ def test_gen_mod_body_start_matches_regex():
     for t in cases:
         m = pat.search(t)
         assert gen_mod_body_start(t) == (m.end() if m else None), t
+
+
+from pipeline_core.domain.rust_scan import named_fn_decl_start  # noqa: E402
+
+
+def test_named_fn_decl_start_matches_regex():
+    import random
+    toks = ["pub ", "pub(crate) ", "async ", "unsafe ", "const ", "fn ", "foo", "bar",
+            " ", "\t", "\n", "x", "fn foo", "(", ")"]
+    for _ in range(3000):
+        t = "".join(random.choice(toks) for _ in range(random.randint(0, 9)))
+        for nm in ("foo", "bar", "f"):
+            pat = re.compile(r"(?:^|\n)([ \t]*)(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?"
+                             r"(?:unsafe\s+)?(?:const\s+)?fn\s+" + re.escape(nm) + r"\b", re.M)
+            m = pat.search(t)
+            assert named_fn_decl_start(t, nm) == (m.start() if m else None), (t, nm)

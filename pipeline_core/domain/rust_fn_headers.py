@@ -132,6 +132,7 @@ def _match_macro_clause(text: str, c: int) -> tuple[str, int] | None:
 def _scan(
     text: str,
     clause: Callable[[str, int], tuple[str, int] | None],
+    lead_chars: frozenset[str],
     *,
     line_anchored: bool,
 ) -> list[HeaderMatch]:
@@ -139,6 +140,12 @@ def _scan(
     n = len(text)
     i = 0
     while i < n:
+        # Perf gate: a match can only begin at the first char of its leading keyword
+        # (`pub`/`async`/`unsafe`/`const`/`fn`, or `pub`/`macro_rules`). Skipping other
+        # positions is exact — `clause` would return None there anyway.
+        if text[i] not in lead_chars:
+            i += 1
+            continue
         # (?<![A-Za-z_0-9]) lookbehind for the non-line-anchored variant.
         if not line_anchored and i > 0 and text[i - 1] in _IDENT_CHARS:
             i += 1
@@ -172,10 +179,14 @@ def fn_headers(text: str, *, line_anchored: bool) -> list[HeaderMatch]:
     `_condense_rust_to_signatures` (group 1 includes the leading newline+indent);
     `False` mirrors the ``(?<![A-Za-z_0-9])…fn…\\{`` used by `_merge_fn_blocks_into_disk`
     and `_FN_RE_GLOBAL` (`start` = clause start)."""
-    return _scan(text, _match_fn_clause, line_anchored=line_anchored)
+    return _scan(text, _match_fn_clause, _FN_LEAD_CHARS, line_anchored=line_anchored)
+
+
+_FN_LEAD_CHARS = frozenset("paucf")     # pub / async / unsafe / const / fn
+_MACRO_LEAD_CHARS = frozenset("pm")     # pub / macro_rules
 
 
 def macro_headers(text: str) -> list[HeaderMatch]:
     """All ``macro_rules!`` header matches (line-anchored), mirroring the macro_re of
     `_condense_rust_to_signatures`."""
-    return _scan(text, _match_macro_clause, line_anchored=True)
+    return _scan(text, _match_macro_clause, _MACRO_LEAD_CHARS, line_anchored=True)

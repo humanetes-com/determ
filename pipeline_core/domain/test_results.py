@@ -572,6 +572,8 @@ def camelcase_type_tokens(text: str) -> list[str]:
 def strip_ansi(text: str) -> str:
     """Remove ANSI SGR colour escapes — byte-equivalent to
     ``re.sub(r'\\x1b\\[[0-9;]*m', '', text)``."""
+    if "\x1b" not in text:  # fast path: nothing to strip → no rebuild
+        return text
     n = len(text)
     out: list[str] = []
     i = 0
