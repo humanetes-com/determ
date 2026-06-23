@@ -12,12 +12,14 @@ from pipeline_core.domain.rust_idents import (
     attr_call_args,
     camelcase_type_names,
     contains_fn_decl,
+    crate_lint_attr_args,
     declares_fn,
     defined_type_names,
     defines_type,
     first_fn_decl_name,
     fn_decl_names,
     fn_reference_counts,
+    impl_self_type,
     is_fn_signature_line,
     is_unsafe_fn,
     use_symbol_paths,
@@ -189,3 +191,51 @@ def test_is_fn_signature_line_matches_regex():
     pat = re.compile(r"^\s*(?:pub\s+)?(?:async\s+)?fn\s+")
     for line in _FN_SIG_LINES:
         assert is_fn_signature_line(line) == bool(pat.match(line)), line
+
+
+def _old_impl_self_type(container: str) -> str | None:
+    m = re.search(r"\bfor\s+([A-Za-z_]\w*)", container)
+    if not m:
+        m = re.search(r"\bimpl\s+(?:<[^>]*>\s+)?([A-Za-z_]\w*)", container)
+    return m.group(1) if m else None
+
+
+_IMPL_CASES = [
+    "impl Foo", "impl Display for Foo", "impl Display for Foo<T>",
+    "impl<T> Trait for Bar<T>", "impl <T> Foo", "impl <T: Clone> Foo",
+    "impl Foo where T: Clone", "impl Trait for X where T: for<'a> Fn()",
+    "impl 9bad", "for X", "impl", "", "impl _Priv for Q",
+    "impl Tr<X> Foo", "impl for Foo",
+]
+
+
+def test_impl_self_type_no_regression_vs_regex():
+    # Wherever the old regex matched, the structural parser returns the same type.
+    for c in _IMPL_CASES:
+        old = _old_impl_self_type(c)
+        if old is not None:
+            assert impl_self_type(c) == old, (c, old, impl_self_type(c))
+
+
+def test_impl_self_type_fixes_nested_generics_and_spaceless():
+    # Old single-`>` `<[^>]*>` returned "" (None) for nested own-generics; fixed.
+    assert _old_impl_self_type("impl<T: Tr<X>> Foo") is None
+    assert impl_self_type("impl<T: Tr<X>> Foo") == "Foo"
+    # Old required `impl\s+` so a space-less `impl<T>` missed; fixed.
+    assert _old_impl_self_type("impl<T> Foo") is None
+    assert impl_self_type("impl<T> Foo") == "Foo"
+
+
+_LINT_CASES = [
+    "#![deny(warnings)]", "#![forbid(unsafe_code)]",
+    "#![deny(missing_docs, unused)]", "#![deny()]", "#![deny(x]",
+    "#![warn(unused)]", "#![deny(a)] #![forbid(b)]", "no attrs",
+    "#![deny(a) ]", "#! [deny(a)]", "x #![forbid(c, d)] y", "",
+    "#![deny(a)]#![forbid(b)]",
+]
+
+
+def test_crate_lint_attr_args_matches_regex():
+    pat = re.compile(r"#!\[(?:deny|forbid)\(([^)]+)\)\]")
+    for t in _LINT_CASES:
+        assert crate_lint_attr_args(t) == [m.group(1) for m in pat.finditer(t)], t

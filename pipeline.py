@@ -295,12 +295,14 @@ from pipeline_core.domain.rust_idents import (
     attr_call_args,
     camelcase_type_names,
     contains_fn_decl,
+    crate_lint_attr_args,
     declares_fn,
     defined_type_names,
     defines_type,
     first_fn_decl_name,
     fn_decl_names,
     fn_reference_counts,
+    impl_self_type,
     is_fn_signature_line,
     is_unsafe_fn,
     use_symbol_paths,
@@ -4702,13 +4704,8 @@ def _find_tests_for_fn(
     }
     container_type = ""
     if container:
-        # Match the "for X" part of "impl Trait for X<...>"; fall back to
-        # "impl X<...>" for inherent impls.
-        m = re.search(r"\bfor\s+([A-Za-z_]\w*)", container)
-        if not m:
-            m = re.search(r"\bimpl\s+(?:<[^>]*>\s+)?([A-Za-z_]\w*)", container)
-        if m:
-            container_type = m.group(1)
+        # "for X" of "impl Trait for X<...>", else "impl X<...>" (inherent).
+        container_type = impl_self_type(container) or ""
     if fn_name in _GENERIC_FN_NAMES and container_type:
         pat0 = re.compile(r"\b" + re.escape(container_type) + r"\b")
         for tf in tests_dir_files:
@@ -10346,8 +10343,8 @@ def _derive_gentest_prelude(project_dir: Path) -> tuple[str, str]:
     if lib_rs.exists():
         text = lib_rs.read_text(encoding="utf-8")
         # Collect all crate-level deny/forbid lints → gen_tests must allow them.
-        for m in re.finditer(r'#!\[(?:deny|forbid)\(([^)]+)\)\]', text):
-            for lint in m.group(1).split(","):
+        for args in crate_lint_attr_args(text):
+            for lint in args.split(","):
                 allow_lints.add(lint.strip())
 
     allow_line = f"#[allow({', '.join(sorted(allow_lints))})]"

@@ -158,6 +158,96 @@ def is_fn_signature_line(line: str) -> bool:
     return line.startswith("fn", i) and i + 2 < n and line[i + 2].isspace()
 
 
+def _skip_balanced_angles(text: str, i: int) -> int | None:
+    """`text[i]` is ``<``; return the index just past the matching ``>`` (nesting
+    honoured), or None if the angles never balance."""
+    depth = 0
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if c == "<":
+            depth += 1
+        elif c == ">":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return None
+
+
+def impl_self_type(container: str) -> str | None:
+    """Self/target type name of an impl signature: the type after `for` in
+    `impl Trait for X<…>`, else the head type in `impl X<…>` (inherent). Returns the
+    bare type identifier (generics stripped) or None.
+
+    Replaces ``\\bfor\\s+([A-Za-z_]\\w*)`` + ``\\bimpl\\s+(?:<[^>]*>\\s+)?([A-Za-z_]\\w*)``
+    (for-branch first, impl-branch fallback). Byte-equal to the old regexes wherever
+    they matched; additionally a structural fix — BALANCED own-generics so
+    `impl<T: Tr<X>> Foo` resolves to `Foo` (old single-`>` `<[^>]*>` returned ""), and
+    a space-less `impl<T> Foo` resolves (old required `impl\\s+`)."""
+    spans = _word_spans(container)
+    n = len(container)
+    # for-branch: first `for <ident>` (whitespace-gap, ASCII-led name).
+    for idx in range(len(spans) - 1):
+        s, e = spans[idx]
+        if container[s:e] != "for":
+            continue
+        ns, ne = spans[idx + 1]
+        gap = container[e:ns]
+        if gap and gap.isspace() and _is_ascii_ident_start(container[ns]):
+            return container[ns:ne]
+    # impl-branch: `impl [<generics>] <ident>`.
+    for s, e in spans:
+        if container[s:e] != "impl":
+            continue
+        p = e
+        while p < n and container[p].isspace():
+            p += 1
+        if p < n and container[p] == "<":
+            np = _skip_balanced_angles(container, p)
+            if np is None:
+                continue
+            p = np
+            while p < n and container[p].isspace():
+                p += 1
+        if p < n and _is_ascii_ident_start(container[p]):
+            q = p + 1
+            while q < n and (container[q].isalnum() or container[q] == "_"):
+                q += 1
+            return container[p:q]
+    return None
+
+
+_CRATE_LINT_KEYWORDS = ("deny", "forbid")
+
+
+def crate_lint_attr_args(text: str) -> list[str]:
+    """Inner argument strings of every ``#![deny(…)]`` / ``#![forbid(…)]`` crate
+    inner-attribute, in source order — group(1) of
+    ``#!\\[(?:deny|forbid)\\(([^)]+)\\)\\]``. Args run up to the first ``)`` (≥1 char)
+    and the attr must close ``)]``. The caller splits each on commas."""
+    out: list[str] = []
+    n = len(text)
+    i = 0
+    while True:
+        j = text.find("#![", i)
+        if j == -1:
+            break
+        k = j + 3
+        kw = next((w for w in _CRATE_LINT_KEYWORDS if text.startswith(w + "(", k)), None)
+        if kw is None:
+            i = j + 1
+            continue
+        op = k + len(kw) + 1  # past `(`
+        cp = text.find(")", op)
+        if cp > op and cp + 1 < n and text[cp + 1] == "]":  # `([^)]+)\)\]`
+            out.append(text[op:cp])
+            i = cp + 2
+        else:
+            i = j + 1
+    return out
+
+
 def fn_reference_counts(text: str) -> dict[str, int]:
     """Map each `fn <name>` declaration's name to how many times that name word
     occurs anywhere in `text` — a usage-frequency map for leaf-first ordering.
