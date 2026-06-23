@@ -311,6 +311,12 @@ from pipeline_core.domain.rust_idents import (
     mixed_case_identifiers,
     use_symbol_paths,
 )
+from pipeline_core.domain.rust_idioms import (
+    fn_pointer_field_calls,
+    self_constructor_calls,
+    struct_literals,
+    unsafe_block_chains,
+)
 from pipeline_core.domain.rust_macros import macro_definitions
 from pipeline_core.domain.rust_scan import (
     after_brace_newline,
@@ -6663,22 +6669,6 @@ def _impl_block_id(file_rel: str, container: str) -> str:
 # section is correspondingly shorter.
 
 
-_IDIOM_SELF_CALL_RE = re.compile(
-    r"\bSelf::([A-Za-z_][A-Za-z_0-9]*)\s*\(([^()]{0,200}?)\)",
-    re.DOTALL,
-)
-_IDIOM_FN_PTR_FIELD_RE = re.compile(
-    r"\(\s*([A-Za-z_][\w.]+?)\s*\)\s*\(",
-)
-_IDIOM_STRUCT_LITERAL_RE = re.compile(
-    r"\b([A-Z][A-Za-z0-9_]{2,40})\s*\{\s*([^{}]{1,400})\s*\}",
-    re.DOTALL,
-)
-_IDIOM_UNSAFE_CHAIN_RE = re.compile(
-    r"unsafe\s*\{\s*([^\n{}]{1,160})\s*\}",
-)
-
-
 def _extract_filled_fn_bodies(impl_blocks: "list[ImplBlock]", file_rel: str) -> "list[dict]":
     """Return [{fn_name, container, body}] for every FILLED fn in `file_rel`,
     pulled from the impl block records. Free fns are dropped (they have no
@@ -6745,10 +6735,9 @@ def _extract_crate_idioms(
     self_method_counts: dict[str, int] = {}
     self_method_examples: dict[str, tuple[str, str]] = {}  # name → (caller, snippet)
     for fn in fns:
-        for m in _IDIOM_SELF_CALL_RE.finditer(fn["body"]):
-            name = m.group(1)
+        for full, name in self_constructor_calls(fn["body"]):
             self_method_counts[name] = self_method_counts.get(name, 0) + 1
-            self_method_examples.setdefault(name, (fn["fn_name"], m.group(0)))
+            self_method_examples.setdefault(name, (fn["fn_name"], full))
     family_names = [n for n, c in self_method_counts.items() if c >= 2]
     if family_names:
         # One synthesised entry: "this file uses Self::X / Self::Y / Self::Z as constructors"
@@ -6771,8 +6760,8 @@ def _extract_crate_idioms(
     fnptr_counts: dict[str, int] = {}
     fnptr_examples: dict[str, tuple[str, str]] = {}
     for fn in fns:
-        for m in _IDIOM_FN_PTR_FIELD_RE.finditer(fn["body"]):
-            path = m.group(1).strip()
+        for raw_path in fn_pointer_field_calls(fn["body"]):
+            path = raw_path.strip()
             if "." not in path:
                 continue  # likely an arithmetic expression, not a vtable access
             base = path.rsplit(".", 1)[1]
@@ -6796,8 +6785,8 @@ def _extract_crate_idioms(
     unsafe_examples: dict[str, tuple[str, str]] = {}
     unsafe_counts: dict[str, int] = {}
     for fn in fns:
-        for m in _IDIOM_UNSAFE_CHAIN_RE.finditer(fn["body"]):
-            chain = " ".join(m.group(1).split())
+        for inner in unsafe_block_chains(fn["body"]):
+            chain = " ".join(inner.split())
             if not chain:
                 continue
             # Shape = identifier-only with `.`s preserved.
@@ -6828,13 +6817,12 @@ def _extract_crate_idioms(
     struct_examples: dict[str, tuple[str, str]] = {}
     struct_counts: dict[str, int] = {}
     for fn in fns:
-        for m in _IDIOM_STRUCT_LITERAL_RE.finditer(fn["body"]):
-            name = m.group(1)
+        for name, raw_inner in struct_literals(fn["body"]):
             # Skip stdlib-y names that are noise.
             if name in {"Self", "Some", "None", "Ok", "Err", "Box", "Vec",
                         "String", "Result", "Option"}:
                 continue
-            inner = " ".join(m.group(2).split())
+            inner = " ".join(raw_inner.split())
             if not inner or "," not in inner and ":" not in inner:
                 continue
             struct_counts[name] = struct_counts.get(name, 0) + 1
