@@ -2385,6 +2385,34 @@ def _file_active_for_cluster(
     return False
 
 
+def _count_test_fns_in_records(
+    records: "list[dict]",
+    cfg_true: set[str],
+    cfg_false: set[str],
+    default_features: "frozenset[str] | set[str]" = frozenset(),
+) -> int:
+    """Count test fns (`FnRecord.is_test`) from the syn extractor's typed records
+    whose accumulated `#[cfg(...)]` predicates don't gate them out of this cluster.
+
+    The extractor accumulates the WHOLE enclosing chain into `cfg_predicates`
+    (mod/impl/trait + the fn's own attrs), so an enclosing `#[cfg(test)] mod
+    tests` contributes `test` (a builtin cfg → never cargo-excluded) and a
+    `#[cfg(feature="x")] mod` contributes that gate — cargo-faithfully dropping
+    the test when the feature is off, which the line-walking marker scan
+    (contiguous attrs only) could miss. File-level inner `#![cfg(...)]` is NOT on
+    fn records (the enumerator walks items, not file attrs) — the caller still
+    applies `_file_top_cfg_excluded`."""
+    count = 0
+    for r in records:
+        if not r.get("is_test"):
+            continue
+        gates = r.get("cfg_predicates") or []
+        if any(_cfg_false_for_cargo(g, cfg_true, cfg_false, default_features) for g in gates):
+            continue
+        count += 1
+    return count
+
+
 def _count_active_tests_for_cluster(
     project_dir: Path,
     cluster: "BuildCluster | None",
@@ -2424,6 +2452,31 @@ def _count_active_tests_for_cluster(
         except Exception:
             default_features = frozenset()
 
+    # Typed-record path (FR-024 fraud-safety): count test fns off the syn
+    # extractor's FnRecords (is_test + accumulated cfg_predicates) rather than a
+    # line-level marker scan. Enumerated ONCE over the whole crate, indexed by
+    # crate-relative path. A file absent from the index (extractor unavailable,
+    # parse failure, or no fns) falls back to the marker scan — conservative:
+    # never undercount (an undercount manufactures TASK-3 SUCCESS, FR-022), and
+    # cargo can't run a file that doesn't parse anyway, so an over-count merely
+    # keeps the cluster 'incomplete'.
+    fn_recs = _enumerate_fns_via_extractor(project_dir)
+    by_file: dict[str, list[dict]] | None = None
+    if fn_recs is not None:
+        by_file = {}
+        for r in fn_recs:
+            by_file.setdefault(r.get("file", ""), []).append(r)
+
+    def _count_file(rel: str, text: str) -> int:
+        # File-level inner `#![cfg(P)]` gates the whole compilation unit and is
+        # not carried on fn records — apply it here (both paths agree below).
+        if _file_top_cfg_excluded(text, cfg_true, cfg_false):
+            return 0
+        if by_file is not None and rel in by_file:
+            return _count_test_fns_in_records(
+                by_file[rel], cfg_true, cfg_false, default_features)
+        return _count_test_fns_cfg_aware(text, cfg_true, cfg_false, default_features)
+
     total = 0
     # 1. tests/**/*.rs — cfg-filtered per-test.
     tests_dir = project_dir / "tests"
@@ -2433,7 +2486,7 @@ def _count_active_tests_for_cluster(
                 text = tp.read_text(encoding="utf-8", errors="replace")
             except Exception:
                 continue
-            total += _count_test_fns_cfg_aware(text, cfg_true, cfg_false, default_features)
+            total += _count_file(tp.relative_to(project_dir).as_posix(), text)
 
     src_dir = project_dir / "src"
     if not src_dir.is_dir():
@@ -2465,11 +2518,7 @@ def _count_active_tests_for_cluster(
                 stext = sib.read_text(encoding="utf-8", errors="replace")
             except Exception:
                 continue
-            # gen_tests bodies don't have additional cfg gates on
-            # individual #[test] fns (they're written by task0c, which
-            # doesn't emit per-test cfgs), so cfg-aware vs naive count
-            # produces the same result here.
-            total += _count_test_fns_cfg_aware(stext, cfg_true, cfg_false, default_features)
+            total += _count_file(sib.relative_to(project_dir).as_posix(), stext)
 
     # 3. src/**/*.rs (excluding gen_tests siblings) — inline test mods.
     for srf in src_dir.rglob("*.rs"):
@@ -2481,7 +2530,7 @@ def _count_active_tests_for_cluster(
             stext = srf.read_text(encoding="utf-8", errors="replace")
         except Exception:
             continue
-        total += _count_test_fns_cfg_aware(stext, cfg_true, cfg_false, default_features)
+        total += _count_file(srf.relative_to(project_dir).as_posix(), stext)
     return total
 
 
