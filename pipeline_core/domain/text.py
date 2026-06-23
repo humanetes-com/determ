@@ -32,6 +32,74 @@ def strip_markdown_fences(content: str) -> str:
     return content.strip()
 
 
+def _is_fence_lang_char(c: str) -> bool:
+    """A ``[a-zA-Z0-9_-]`` fence-info-string char (ASCII)."""
+    return ("a" <= c <= "z") or ("A" <= c <= "Z") or ("0" <= c <= "9") or c in "_-"
+
+
+def _remove_think_blocks(text: str, *, eat_trailing_ws: bool = False) -> str:
+    """Remove every ``<think>…</think>`` span (non-greedy, DOTALL) — byte-equivalent
+    to ``re.sub(r'<think>.*?</think>', '')`` (or ``…</think>\\s*`` when
+    `eat_trailing_ws`). A ``<think>`` with no closing tag is left as-is."""
+    out: list[str] = []
+    n = len(text)
+    i = 0
+    while True:
+        k = text.find("<think>", i)
+        if k == -1:
+            out.append(text[i:])
+            break
+        close = text.find("</think>", k + 7)
+        if close == -1:  # no close → .*? can't match → keep the rest verbatim
+            out.append(text[i:])
+            break
+        out.append(text[i:k])
+        i = close + 8
+        if eat_trailing_ws:
+            while i < n and text[i].isspace():  # trailing \s*
+                i += 1
+    return "".join(out)
+
+
+def _first_fenced_body(text: str) -> str | None:
+    """Body of the first ```` ```[lang]\\n … ``` ```` fence — byte-equivalent to the
+    group(1) of ``re.search(r'```[a-zA-Z0-9_-]*\\n(.*?)```', text, re.DOTALL)``."""
+    n = len(text)
+    i = 0
+    while (k := text.find("```", i)) >= 0:
+        p = k + 3
+        while p < n and _is_fence_lang_char(text[p]):  # [a-zA-Z0-9_-]*
+            p += 1
+        if p < n and text[p] == "\n":
+            body_start = p + 1
+            close = text.find("```", body_start)
+            if close != -1:
+                return text[body_start:close]
+        i = k + 1
+    return None
+
+
+def strip_simple_code_fence(txt: str) -> str:
+    """If `txt` is fenced (starts with ``` ``` ```), strip its leading ```` ```lang\\n ````
+    opener and trailing ```` \\n``` ```` closer; else return it unchanged. Byte-equivalent
+    to the guarded ``if txt.startswith('```'): re.sub(r'^```[a-zA-Z]*\\n?','') ;
+    re.sub(r'\\n?```\\s*$','')`` used to unwrap fenced JSON manifests."""
+    if not txt.startswith("```"):
+        return txt
+    n = len(txt)
+    p = 3  # ^```[a-zA-Z]*\n?
+    while p < n and (("a" <= txt[p] <= "z") or ("A" <= txt[p] <= "Z")):
+        p += 1
+    if p < n and txt[p] == "\n":
+        p += 1
+    txt = txt[p:]
+    t = txt.rstrip()  # \n?```\s*$
+    if t.endswith("```"):
+        bt = len(t) - 3
+        txt = t[:bt - 1] if bt > 0 and t[bt - 1] == "\n" else t[:bt]
+    return txt
+
+
 def extract_code_content(text: str) -> str:
     """Strip thinking blocks and outermost code fence, return bare code content.
 
@@ -43,18 +111,15 @@ def extract_code_content(text: str) -> str:
       2. Find the first code fence (```[lang]\\n...```) and return its body.
       3. If no fence, return the full text stripped of leading/trailing whitespace.
     """
-    import re as _re
-    cleaned = _re.sub(r'<think>.*?</think>\s*', '', text, flags=_re.DOTALL).strip()
-    fence = _re.search(r'```[a-zA-Z0-9_-]*\n(.*?)```', cleaned, flags=_re.DOTALL)
-    if fence:
-        return fence.group(1).strip()
-    return cleaned
+    cleaned = _remove_think_blocks(text, eat_trailing_ws=True).strip()
+    body = _first_fenced_body(cleaned)
+    return body.strip() if body is not None else cleaned
 
 
 def strip_think_blocks(text: str) -> str:
     """Remove `<think>…</think>` reasoning blocks some models leak into output
     (caller strips surrounding whitespace as needed)."""
-    return re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+    return _remove_think_blocks(text)
 
 
 def trim_to_line(text: str, cap: int, marker: str = "\n// ... (truncated)") -> str:

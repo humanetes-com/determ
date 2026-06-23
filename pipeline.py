@@ -374,6 +374,9 @@ from pipeline_core.domain.text import (
 from pipeline_core.domain.text import (
     strip_markdown_fences as _strip_markdown_fences,
 )
+from pipeline_core.domain.text import (
+    strip_simple_code_fence as _strip_simple_code_fence,
+)
 from pipeline_core.io import read, write
 from pipeline_core.ports import structure as _structure_port
 from pipeline_core.prompts import runtime as _prompts_runtime
@@ -3742,10 +3745,7 @@ def _split_oversized_groups(groups: list[dict], max_size: int = 3) -> list[dict]
 
 def _extract_groups_or_none(response: str) -> list[dict] | None:
     """Parse the LLM's JSON manifest into a groups list without validation."""
-    txt = response.strip()
-    if txt.startswith("```"):
-        txt = re.sub(r'^```[a-zA-Z]*\n?', '', txt)
-        txt = re.sub(r'\n?```\s*$', '', txt)
+    txt = _strip_simple_code_fence(response.strip())
     try:
         data = json.loads(txt)
     except json.JSONDecodeError:
@@ -3767,10 +3767,7 @@ def _parse_and_validate_groups(
         only when the failure was a coverage gap (not a structural error).
     """
     # Tolerate fenced JSON.
-    txt = response.strip()
-    if txt.startswith("```"):
-        txt = re.sub(r'^```[a-zA-Z]*\n?', '', txt)
-        txt = re.sub(r'\n?```\s*$', '', txt)
+    txt = _strip_simple_code_fence(response.strip())
     try:
         data = json.loads(txt)
     except json.JSONDecodeError as e:
