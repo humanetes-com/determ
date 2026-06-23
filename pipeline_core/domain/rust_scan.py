@@ -879,3 +879,33 @@ def line_has_assertion(line: str) -> bool:
                     return True
         k = line.find("assert", k + 1)
     return False
+
+
+def gen_mod_body_start(block: str) -> int | None:
+    r"""Index just past the ``{`` of the first ``mod gen_<name> {`` wrapper, or None —
+    byte-equivalent to the ``m.end()`` of ``re.search(
+    r'(?:#\[[^\]]*\]\s*\n)*\s*(?:pub\s+)?mod\s+gen_\w+\s*\{', block)``. (The optional
+    attr/pub prefix never changes which ``mod`` matches; ``mod`` is NOT word-bounded,
+    matching the regex.)"""
+    n = len(block)
+    i = 0
+    while (k := block.find("mod", i)) >= 0:
+        i = k + 3
+        p = k + 3
+        if p >= n or not block[p].isspace():  # \s+
+            continue
+        while p < n and block[p].isspace():
+            p += 1
+        if not block.startswith("gen_", p):  # gen_
+            continue
+        e = p + 4
+        while e < n and (block[e].isalnum() or block[e] == "_"):  # \w+
+            e += 1
+        if e == p + 4:  # need ≥1 word char after gen_
+            continue
+        b = e
+        while b < n and block[b].isspace():  # \s*
+            b += 1
+        if b < n and block[b] == "{":
+            return b + 1
+    return None

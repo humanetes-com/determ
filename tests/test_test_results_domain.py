@@ -50,3 +50,15 @@ def test_rustc_diagnostic_locations_matches_regex():
     ]
     for t in cases:
         assert rustc_diagnostic_locations(t) == [(m.group(1), int(m.group(2))) for m in pat.finditer(t)], t
+
+
+from pipeline_core.domain.test_results import parse_error_code_note  # noqa: E402
+
+
+def test_parse_error_code_note_matches_regex():
+    pat = re.compile(r"^\[((?:E\d{3,4})(?:,E\d{3,4})*)\]\s*(.+)$")
+    cases = ["[E0277] needs Sized", "[E0277,E0599] two codes", "[E12] short", "[E12345] long",
+             "[E0277]  spaced ", "[E0277]", "[E0277] ", "[Exxx] bad", "no bracket", "[E0277,X] y", ""]
+    for s in cases:
+        m = pat.match(s)
+        assert parse_error_code_note(s) == ((m.group(1), m.group(2).strip()) if m else None), s

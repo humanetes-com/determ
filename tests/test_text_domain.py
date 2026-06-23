@@ -164,3 +164,29 @@ def test_extract_response_code_fence_matches_regex():
     for t in ["```rust\nfn f(){}\n```", "```\ncode\n```", "```rs\nx\n```", "no fence",
               "```rust   \n  body  \n```", "```python\nx\n```", "", "text ```rust a```"]:
         assert extract_response_code_fence(t) == _old_fence(t), t
+
+
+# --- P7: label-line parsing (retrospective category/guidance) ---
+
+from pipeline_core.domain.text import label_value_offset, starts_with_label  # noqa: E402
+
+
+def test_label_value_offset_and_extraction_match_regex():
+    toks = ["category", "guidance", "CATEGORY", ":", "=", " ", "\t", "foo", "bar baz", ""]
+    import random as _r
+    for _ in range(2000):
+        s = "".join(_r.choice(toks) for _ in range(_r.randint(0, 5)))
+        mc = re.match(r"(?i)^category\s*[:=]\s*(\S+)", s)
+        off = label_value_offset(s, "category")
+        newcat = (parts[0] if off is not None and (parts := s[off:].split()) else None)
+        assert newcat == (mc.group(1) if mc else None), s
+        mg = re.match(r"(?i)^guidance\s*[:=]\s*(.+)$", s)
+        offg = label_value_offset(s, "guidance")
+        newg = (s[offg:].strip() if offg is not None and s[offg:] else None)
+        assert newg == (mg.group(1).strip() if mg else None), s
+
+
+def test_starts_with_label_matches_regex():
+    pat = re.compile(r"(?i)^(category|guidance|note)\s*[:=]")
+    for s in ["category:", "GUIDANCE =", "note : x", "Category", "other:", "category x", ""]:
+        assert starts_with_label(s, ("category", "guidance", "note")) == bool(pat.match(s)), s

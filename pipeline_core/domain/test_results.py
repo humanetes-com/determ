@@ -542,3 +542,36 @@ def build_test_name_index(file_texts: dict[str, str]) -> dict[str, str]:
             if name.isidentifier():
                 index[name] = "" if index.get(name, path) != path else path
     return index
+
+
+def parse_error_code_note(line: str) -> tuple[str, str] | None:
+    r"""Parse a ``[E0277,E0599] note text`` model-note line → ``(codes, body)``, else
+    None — equivalent to ``re.match(r'^\[((?:E\d{3,4})(?:,E\d{3,4})*)\]\s*(.+)$', line)``
+    projected onto ``(group(1), group(2).strip())`` (the consumer always strips the body;
+    codes is the raw comma list)."""
+    n = len(line)
+    if not line.startswith("["):
+        return None
+
+    def _code_end(p: int) -> int | None:  # E\d{3,4} at p → index past it, else None
+        if p < n and line[p] == "E":
+            d = p + 1
+            while d < n and line[d].isdigit():
+                d += 1
+            if 3 <= d - (p + 1) <= 4:
+                return d
+        return None
+
+    e = _code_end(1)
+    if e is None:
+        return None
+    while e < n and line[e] == ",":  # (,E\d{3,4})*
+        nxt = _code_end(e + 1)
+        if nxt is None:
+            break
+        e = nxt
+    if e >= n or line[e] != "]":
+        return None
+    codes = line[1:e]
+    rest = line[e + 1:]  # \s*(.+)$ matches iff rest non-empty; .+ reclaims leading ws
+    return (codes, rest.strip()) if rest else None

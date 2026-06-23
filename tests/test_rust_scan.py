@@ -429,3 +429,18 @@ def test_line_has_assertion_matches_regex():
     ]
     for s in cases:
         assert line_has_assertion(s) == bool(pat.search(s)), s
+
+
+from pipeline_core.domain.rust_scan import gen_mod_body_start  # noqa: E402
+
+
+def test_gen_mod_body_start_matches_regex():
+    pat = re.compile(r'(?:#\[[^\]]*\]\s*\n)*\s*(?:pub\s+)?mod\s+gen_\w+\s*\{')
+    cases = [
+        "mod gen_tests_1 { fn t() {} }", "pub mod gen_x {", "#[cfg(test)]\nmod gen_y {",
+        "code\nmod gen_z {\n}", "no gen mod", "mod gen_ {", "mod genx {",
+        "xmod gen_a {", "#[a]\n#[b]\npub mod gen_q   {", "",
+    ]
+    for t in cases:
+        m = pat.search(t)
+        assert gen_mod_body_start(t) == (m.end() if m else None), t

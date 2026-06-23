@@ -200,6 +200,39 @@ def smart_truncate(text: str, total_limit: int = 8000, head: int = 2000, tail: i
     return text[:head] + f"\n\n[... {omitted:,} chars omitted ...]\n\n" + text[-tail:]
 
 
+def label_value_offset(s: str, label: str) -> int | None:
+    """If `s` starts (case-insensitively) with ``<label> \\s* [:=]`` return the offset
+    JUST PAST the ``:``/``=`` (NOT consuming following whitespace — a trailing
+    ``\\s*(.+)`` regex lets ``.+`` reclaim that whitespace), else None. Mirrors the
+    prefix of ``re.match(r'(?i)^<label>\\s*[:=]', s)``. `label` must be lowercase."""
+    n = len(s)
+    plen = len(label)
+    if s[:plen].lower() != label:
+        return None
+    p = plen
+    while p < n and s[p].isspace():  # \s*
+        p += 1
+    if p >= n or s[p] not in ":=":
+        return None
+    return p + 1
+
+
+def starts_with_label(s: str, labels: tuple[str, ...]) -> bool:
+    """True iff `s` starts (case-insensitively) with one of `labels` then ``[:=]`` —
+    byte-equivalent to ``re.match(r'(?i)^(l1|l2|…)\\s*[:=]', s)``. `labels` lowercase."""
+    n = len(s)
+    for label in labels:
+        plen = len(label)
+        if s[:plen].lower() != label:
+            continue
+        p = plen
+        while p < n and s[p].isspace():
+            p += 1
+        if p < n and s[p] in ":=":
+            return True
+    return False
+
+
 def block_is_prose(block: str) -> bool:
     """True if a generated block looks like prose instructions, not code — the
     case-insensitive literal-phrase check the LLM-output guard uses."""

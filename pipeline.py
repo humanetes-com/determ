@@ -335,6 +335,7 @@ from pipeline_core.domain.rust_scan import (
     count_test_attrs,
     count_word,
     find_mod_opener,
+    gen_mod_body_start,
     has_no_std_attr,
     has_nonempty_test_fn,
     is_attr_line,
@@ -364,6 +365,7 @@ from pipeline_core.domain.test_results import (
     extract_test_output_from_file,
     insert_no_run,
     is_compiler_output_line,
+    parse_error_code_note,
     per_file_test_stats,
     rustc_diagnostic_locations,
     rustc_error_codes,
@@ -387,11 +389,17 @@ from pipeline_core.domain.text import (
     flags_unreachable as _flags_unreachable,
 )
 from pipeline_core.domain.text import (
+    label_value_offset as _label_value_offset,
+)
+from pipeline_core.domain.text import (
     parse_attempt_number as _parse_attempt_number,
 )
 from pipeline_core.domain.text import (
     smart_truncate,
     strip_trailing_file_tag,
+)
+from pipeline_core.domain.text import (
+    starts_with_label as _starts_with_label,
 )
 from pipeline_core.domain.text import (
     strip_markdown_fences as _strip_markdown_fences,
@@ -5177,14 +5185,13 @@ def _promoted_error_rules(fr_path: "Path | None" = None) -> str:
             stored = _load_model_notes(fr_path)
         except Exception:
             stored = []
-        tag_re = re.compile(r"^\[((?:E\d{3,4})(?:,E\d{3,4})*)\]\s*(.+)$")
         # Walk newest-first so the most recent rule wins per code.
-        for n in reversed(stored):
-            m = tag_re.match(n)
-            if not m:
+        for note in reversed(stored):
+            parsed = parse_error_code_note(note)
+            if parsed is None:
                 continue
-            body = m.group(2).strip()
-            for code in m.group(1).split(","):
+            code_list, body = parsed
+            for code in code_list.split(","):
                 bucket = code_to_notes.setdefault(code, [])
                 if body not in bucket:
                     bucket.append(body)
@@ -5462,18 +5469,18 @@ def _whole_tree_retrospective(
     for ln in (result or "").splitlines():
         s = ln.strip().lstrip("*-• ").strip()
         s = _strip_surrounding_asterisks(s)
-        m = re.match(r"(?i)^category\s*[:=]\s*(\S+)", s)
-        if m:
-            cat = m.group(1).strip().rstrip(".,;").upper()
+        off = _label_value_offset(s, "category")
+        if off is not None and (parts := s[off:].split()):
+            cat = parts[0].strip().rstrip(".,;").upper()
             in_guidance = False
             continue
-        m = re.match(r"(?i)^guidance\s*[:=]\s*(.+)$", s)
-        if m:
-            guidance_lines = [m.group(1).strip()]
+        off = _label_value_offset(s, "guidance")
+        if off is not None and s[off:]:
+            guidance_lines = [s[off:].strip()]
             in_guidance = True
             continue
         if in_guidance and s:
-            if re.match(r"(?i)^(category|guidance|note)\s*[:=]", s):
+            if _starts_with_label(s, ("category", "guidance", "note")):
                 in_guidance = False
             else:
                 guidance_lines.append(s)
@@ -9822,13 +9829,9 @@ def _extract_gen_tests_body(block: str) -> str:
     """Strip the outer `mod gen_X { ... }` wrapper from an LLM-generated block and
     return the dedented body. If the shape doesn't match (e.g. LLM returned bare
     test functions), return block unchanged so caller can still use it."""
-    m = re.search(
-        r'(?:#\[[^\]]*\]\s*\n)*\s*(?:pub\s+)?mod\s+gen_\w+\s*\{',
-        block,
-    )
-    if not m:
+    start = gen_mod_body_start(block)
+    if start is None:
         return block.strip() + "\n"
-    start = m.end()
     depth = 1
     i = start
     while i < len(block):
