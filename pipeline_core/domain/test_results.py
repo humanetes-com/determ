@@ -426,6 +426,47 @@ def identifiers_in(text: str) -> set[str]:
     return out
 
 
+def rustc_error_codes(text: str, letter: str) -> list[str]:
+    """Every ``<letter><3-4 digits>`` rustc error code as a whole word, in order —
+    byte-equivalent to ``re.findall(rf'\\b{letter}\\d{{3,4}}\\b', text)`` (`letter` is
+    ``E`` or ``e``). A code is a complete word-token: letter + 3 or 4 ASCII digits."""
+    out: list[str] = []
+    n = len(text)
+    i = 0
+    while i < n:
+        if text[i] in _IDENT_CHARS:
+            j = i + 1
+            while j < n and text[j] in _IDENT_CHARS:
+                j += 1
+            tok = text[i:j]
+            if tok[0] == letter and 4 <= len(tok) <= 5 and all(c in "0123456789" for c in tok[1:]):
+                out.append(tok)
+            i = j
+        else:
+            i += 1
+    return out
+
+
+def is_compiler_output_line(stripped: str) -> bool:
+    """True iff `stripped` begins like a rustc diagnostic — ``error[E123]:`` /
+    ``error:`` / ``warning[W1]:`` / ``warning:`` — byte-equivalent to
+    ``re.match(r'^error(\\[E\\d+\\])?:', s) or re.match(r'^warning(\\[W\\d+\\])?:', s)``."""
+    n = len(stripped)
+    for kw, code in (("error", "E"), ("warning", "W")):
+        if not stripped.startswith(kw):
+            continue
+        p = len(kw)
+        if p < n and stripped[p] == "[" and p + 1 < n and stripped[p + 1] == code:
+            d = p + 2  # \d+
+            while d < n and stripped[d].isdigit():
+                d += 1
+            if d > p + 2 and d < n and stripped[d] == "]":  # ≥1 digit, then ]
+                p = d + 1
+        if p < n and stripped[p] == ":":
+            return True
+    return False
+
+
 def build_test_name_index(file_texts: dict[str, str]) -> dict[str, str]:
     """{relative_path: file_text} for tests/*.rs → {fn_name: path} for bare
     cargo test names. Collects every `fn name(` (over-collection of helpers is

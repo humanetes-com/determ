@@ -99,3 +99,34 @@ def test_strip_surrounding_asterisks_matches_regex():
     for s in ["**bold**", "* item", "trailing *", "***", "no stars", "* * *", "",
               "*x", "x*", "**a* b**"]:
         assert strip_surrounding_asterisks(s) == re.sub(r'^\*+\s*|\s*\*+$', '', s), s
+
+
+# --- P7: model-output text predicates (moved from pipeline.py) ---
+
+from pipeline_core.domain.text import (  # noqa: E402
+    block_is_prose,
+    flags_unreachable,
+    parse_attempt_number,
+)
+
+
+def test_block_is_prose_matches_regex():
+    pat = re.compile(r"block to our Rust file|Here's how|You can add|here is", re.IGNORECASE)
+    for t in ["Here's how to add it", "BLOCK TO OUR RUST FILE", "fn main() {}",
+              "you can add this", "here IS the code", "", "no match prose"]:
+        assert block_is_prose(t) == bool(pat.search(t)), t
+
+
+def test_flags_unreachable_matches_regex():
+    pat = re.compile(r'dead.code|unreachable|genuinely|not coverable|cannot be covered|grcov artifact',
+                     re.IGNORECASE)
+    for t in ["this is dead code", "dead_code lint", "dead\ncode", "UNREACHABLE branch",
+              "genuinely impossible", "cannot be covered", "grcov artifact", "deadcode", "fine", ""]:
+        assert flags_unreachable(t) == bool(pat.search(t)), t
+
+
+def test_parse_attempt_number_matches_regex():
+    for d in ["attempt 3", "fix attempt 12 of 5", "attempt", "attempt x", "no counter",
+              "attempt 0", "", "attempt 7 attempt 9"]:
+        m = re.search(r"attempt (\d+)", d)
+        assert parse_attempt_number(d) == (int(m.group(1)) if m else None), d

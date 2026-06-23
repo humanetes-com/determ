@@ -357,7 +357,9 @@ from pipeline_core.domain.test_results import (
     count_passing_tests,
     extract_test_output_from_file,
     insert_no_run,
+    is_compiler_output_line,
     per_file_test_stats,
+    rustc_error_codes,
     rustc_error_signatures,
     validate_task3_output_strict,
 )
@@ -365,10 +367,19 @@ from pipeline_core.domain.test_results import (
     parse_failed_tests as _parse_failed_tests,
 )
 from pipeline_core.domain.text import (
+    block_is_prose as _block_is_prose,
+)
+from pipeline_core.domain.text import (
     collapse_blank_lines as _collapse_blank_lines,
 )
 from pipeline_core.domain.text import (
     extract_code_content as extract_code_content,  # noqa: PLC0414 (test seam re-export)
+)
+from pipeline_core.domain.text import (
+    flags_unreachable as _flags_unreachable,
+)
+from pipeline_core.domain.text import (
+    parse_attempt_number as _parse_attempt_number,
 )
 from pipeline_core.domain.text import (
     smart_truncate,
@@ -2942,9 +2953,9 @@ def setup_workspace(repo: str, workspace_dir: Path, force_fresh: bool = False) -
     # Normalize various GitHub URL forms to HTTPS (SSH requires a key; HTTPS works everywhere).
     # git@github.com:user/repo.git  →  https://github.com/user/repo
     # github.com/user/repo          →  https://github.com/user/repo
-    if re.match(r'^git@github\.com:', repo):
+    if repo.startswith("git@github.com:"):
         repo = "https://github.com/" + repo.split(":", 1)[1]
-    elif re.match(r'^github\.com/', repo):
+    elif repo.startswith("github.com/"):
         repo = "https://" + repo
 
     name = repo.rstrip("/").split("/")[-1]
@@ -4927,7 +4938,7 @@ def _note_signature(text: str) -> tuple[frozenset, frozenset]:
     where exact-hash dedup let all four through.
     """
     low = text.lower()
-    err_codes = frozenset(re.findall(r"\be\d{3,4}\b", low))
+    err_codes = frozenset(rustc_error_codes(low, "e"))
     keywords = frozenset(k for k in _NOTE_SIGNATURE_KEYWORDS if k in low)
     return err_codes, keywords
 
@@ -8280,7 +8291,7 @@ def _is_proc_macro_crate(cargo_toml_text: str) -> bool:
 def _count_rustc_error_codes(output: str) -> int:
     """Count distinct rustc error codes (E0001 etc.) in build output.
     (Tool-output regex kept in pipeline — Option 1.)"""
-    return len(set(re.findall(r"\bE\d{3,4}\b", output or "")))
+    return len(set(rustc_error_codes(output or "", "E")))
 
 
 def _task2_generator_factory() -> Task2Generator:
@@ -8581,7 +8592,7 @@ Current source files:
                 _log(f"  [fix loop] REJECTED {rel}: outside allowed dir '{allowed_dir_prefix}'.")
                 continue
             stripped = content.lstrip()
-            if re.match(r'^error(\[E\d+\])?:', stripped) or re.match(r'^warning(\[W\d+\])?:', stripped):
+            if is_compiler_output_line(stripped):
                 _log(f"  [fix loop] REJECTED {rel}: content looks like compiler output, not code.")
                 continue
             write(project_dir / rel, content)
@@ -9605,9 +9616,6 @@ def _strip_trailing_file_tag(text: str) -> str:
     return strip_trailing_file_tag(text)
 
 
-def _block_is_prose(block: str) -> bool:
-    """True if a generated block looks like prose instructions, not code. (Regex in pipeline.)"""
-    return bool(re.search(r'block to our Rust file|Here\'s how|You can add|here is', block, re.IGNORECASE))
 
 
 def _has_nonempty_test_body(block: str) -> bool:
@@ -9615,18 +9623,8 @@ def _has_nonempty_test_body(block: str) -> bool:
     return has_nonempty_test_fn(block)
 
 
-def _flags_unreachable(text: str) -> bool:
-    """True if the model declared the target genuinely uncoverable. (Regex in pipeline.)"""
-    return bool(re.search(
-        r'dead.code|unreachable|genuinely|not coverable|cannot be covered|grcov artifact',
-        text, re.IGNORECASE,
-    ))
 
 
-def _parse_attempt_number(detail: str) -> "int | None":
-    """Parse the `attempt N` counter from a saved phase detail string. (Regex in pipeline.)"""
-    m = re.search(r"attempt (\d+)", detail)
-    return int(m.group(1)) if m else None
 
 
 def _is_structural_line(text: str) -> bool:

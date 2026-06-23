@@ -200,6 +200,46 @@ def smart_truncate(text: str, total_limit: int = 8000, head: int = 2000, tail: i
     return text[:head] + f"\n\n[... {omitted:,} chars omitted ...]\n\n" + text[-tail:]
 
 
+def block_is_prose(block: str) -> bool:
+    """True if a generated block looks like prose instructions, not code — the
+    case-insensitive literal-phrase check the LLM-output guard uses."""
+    low = block.lower()
+    return any(p in low for p in (
+        "block to our rust file", "here's how", "you can add", "here is"))
+
+
+def flags_unreachable(text: str) -> bool:
+    """True if the model declared the target genuinely uncoverable — byte-equivalent
+    to a case-insensitive search for the phrases below, where ``dead.code`` keeps the
+    regex ``.`` semantics (``dead`` + any non-newline char + ``code``)."""
+    low = text.lower()
+    if any(p in low for p in (
+            "unreachable", "genuinely", "not coverable", "cannot be covered", "grcov artifact")):
+        return True
+    k = low.find("dead")
+    while k >= 0:
+        if k + 9 <= len(low) and low[k + 4] != "\n" and low[k + 5:k + 9] == "code":
+            return True
+        k = low.find("dead", k + 1)
+    return False
+
+
+def parse_attempt_number(detail: str) -> int | None:
+    """Parse the `attempt N` counter from a phase-detail string — byte-equivalent to
+    ``re.search(r'attempt (\\d+)', detail)`` projected onto ``int(group(1))``."""
+    n = len(detail)
+    k = detail.find("attempt ")
+    while k >= 0:
+        p = k + 8
+        d = p
+        while d < n and detail[d].isdigit():
+            d += 1
+        if d > p:
+            return int(detail[p:d])
+        k = detail.find("attempt ", k + 1)
+    return None
+
+
 def collapse_blank_lines(text: str) -> str:
     """Collapse every run of ≥2 newlines (with interspersed whitespace) to a single
     ``\\n`` — byte-equivalent to ``re.sub(r'\\n\\s*\\n+', '\\n', text)`` (trailing non-newline
