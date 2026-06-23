@@ -96,6 +96,22 @@ def strip_test_prefix(stem: str) -> str:
     return stem
 
 
+def tests_output_number(name: str) -> int | None:
+    """The N of a ``tests_output_<N>.txt`` filename, else None — byte-equivalent to
+    ``re.search(r'tests_output_(\\d+)\\.txt', name)`` projected onto ``int(group(1))``."""
+    pre = "tests_output_"
+    i = name.find(pre)
+    while i >= 0:
+        d = i + len(pre)
+        e = d
+        while e < len(name) and name[e].isdigit():
+            e += 1
+        if e > d and name[e:e + 4] == ".txt":
+            return int(name[d:e])
+        i = name.find(pre, i + 1)
+    return None
+
+
 def is_gen_tests_sibling_name(name: str) -> bool:
     """True iff `name` ends with a `.gen_tests_<digits>.rs` suffix — byte-equivalent
     to ``bool(re.search(r'\\.gen_tests_\\d+\\.rs$', name))`` (looser than

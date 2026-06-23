@@ -815,3 +815,27 @@ def is_test_attr_line(line: str) -> bool:
         if k > j or (k < n and line[k] in "],("):  # [\s\],(] : whitespace consumed, or ]/,/(
             return True
     return False
+
+
+def replace_elision_placeholders(content: str) -> str:
+    r"""Replace every ``{ ... }`` elision-placeholder body with ``{ todo!() }`` —
+    byte-equivalent to ``re.sub(r'\{\s*\.\.\.\s*\}', '{ todo!() }', content)``."""
+    n = len(content)
+    out: list[str] = []
+    i = 0
+    while i < n:
+        if content[i] == "{":
+            j = i + 1
+            while j < n and content[j].isspace():  # \s*
+                j += 1
+            if content[j:j + 3] == "...":
+                k = j + 3
+                while k < n and content[k].isspace():  # \s*
+                    k += 1
+                if k < n and content[k] == "}":
+                    out.append("{ todo!() }")
+                    i = k + 1
+                    continue
+        out.append(content[i])
+        i += 1
+    return "".join(out)

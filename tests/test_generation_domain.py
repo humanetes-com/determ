@@ -253,3 +253,11 @@ def test_has_gen_tests_mod_decl_matches_regex() -> None:
 def test_strip_mod_test_prefix_matches_regex() -> None:
     for s in ["mod_foo", "test_foo", "tests_foo", "modfoo", "test", "tests_", "foo", "mod_test_x", ""]:
         assert strip_mod_test_prefix(s) == re.sub(r'^(mod|tests?)_', '', s), s
+
+
+def test_tests_output_number_matches_regex() -> None:
+    from pipeline_core.domain.generation import tests_output_number
+    for name in ["tests_output_3.txt", "tests_output_12.txt", "tests_output_.txt",
+                 "x_tests_output_5.txt", "tests_output_5.log", "other.txt", "tests_output_5x.txt"]:
+        m = re.search(r"tests_output_(\d+)\.txt", name)
+        assert tests_output_number(name) == (int(m.group(1)) if m else None), name

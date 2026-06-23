@@ -31,3 +31,22 @@ def test_is_compiler_output_line_matches_regex():
     for s in cases:
         expected = bool(re.match(r'^error(\[E\d+\])?:', s) or re.match(r'^warning(\[W\d+\])?:', s))
         assert is_compiler_output_line(s) == expected, s
+
+
+from pipeline_core.domain.test_results import rustc_diagnostic_locations, strip_ansi  # noqa: E402
+
+
+def test_strip_ansi_matches_regex():
+    for t in ["\x1b[0mplain", "\x1b[31merror\x1b[0m", "no ansi", "\x1b[1;32mx",
+              "\x1b[m", "\x1bnotansi", "\x1b[", "", "a\x1b[33mb\x1b[0mc"]:
+        assert strip_ansi(t) == re.sub(r"\x1b\[[0-9;]*m", "", t), repr(t)
+
+
+def test_rustc_diagnostic_locations_matches_regex():
+    pat = re.compile(r"-->\s+([^:\s]+\.rs):(\d+):\d+")
+    cases = [
+        "  --> src/lib.rs:12:5\n", "--> a.rs:1:2 --> b.rs:3:4", "no location",
+        "--> notrs.txt:1:2", "--> x.rs:1", "-->\tsrc/m.rs:99:1", "--> a.rs:b:c",
+    ]
+    for t in cases:
+        assert rustc_diagnostic_locations(t) == [(m.group(1), int(m.group(2))) for m in pat.finditer(t)], t

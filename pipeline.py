@@ -342,6 +342,7 @@ from pipeline_core.domain.rust_scan import (
     is_type_decl_line,
     item_names,
     module_use_imports,
+    replace_elision_placeholders,
     rust_code_fences,
     starts_with_pub,
     strip_comment_spans,
@@ -361,8 +362,10 @@ from pipeline_core.domain.test_results import (
     insert_no_run,
     is_compiler_output_line,
     per_file_test_stats,
+    rustc_diagnostic_locations,
     rustc_error_codes,
     rustc_error_signatures,
+    strip_ansi,
     validate_task3_output_strict,
 )
 from pipeline_core.domain.test_results import (
@@ -2156,7 +2159,7 @@ def validate_task2_output(project_dir: Path, expected_paths: list[str],
     # struct/enum definitions in the generated code.
     if req_path and req_path.exists():
         req_content = req_path.read_text(encoding="utf-8", errors="ignore")
-        named_types = set(re.findall(r'\b([A-Z][a-zA-Z0-9]{2,})\b', req_content))
+        named_types = {w for w in camelcase_type_names(req_content) if len(w) >= 3}
         named_types -= {"README", "TODO", "FIXME", "API", "URL", "CLI", "LLM", "AI"}
         if named_types:
             # syn DEFINITIONS in the generated files (scoped to expected_paths to
@@ -2544,8 +2547,8 @@ def detect_resume_point(root: Path, project_dir: Path, manifest_path: Path,
     max_n = 0
     if existing:
         max_n = max(
-            int(re.search(r"tests_output_(\d+)\.txt", p.name).group(1))
-            for p in existing
+            (num for p in existing if (num := _tests_output_number(p.name)) is not None),
+            default=0,
         )
 
     has_functional = functional_req_path.exists()
@@ -2680,7 +2683,7 @@ def write_source_files(files_dict: dict, project_dir: Path, manifest_path: Path,
         # Replace `{ ... }` placeholder bodies with `{ todo!() }` so Rust code
         # compiles during the build check phase (model sometimes uses ... as a stub body).
         if Path(rel_path).suffix == '.rs' and '...' in content:
-            content = re.sub(r'\{\s*\.\.\.\s*\}', '{ todo!() }', content)
+            content = replace_elision_placeholders(content)
         if not rel_path:
             continue
         if rel_path in existing_test_files:
@@ -4159,13 +4162,12 @@ def _find_tests_referencing_fn(
     if not fn_name:
         return []
     ranked: list[tuple[int, Path]] = []
-    pat = re.compile(r"\b" + re.escape(fn_name) + r"\b")
     for tf in test_files:
         try:
             txt = tf.read_text(encoding="utf-8")
         except Exception:
             continue
-        n = len(pat.findall(txt))
+        n = count_word(txt, fn_name)
         if n:
             ranked.append((n, tf))
     ranked.sort(key=lambda x: -x[0])
@@ -6922,8 +6924,6 @@ def _scan_unimplemented_records_for_cluster(
 # ---------------------------------------------------------------------------
 
 
-_TEST_STDOUT_HEADER_RE = re.compile(r"^----\s+(\S+)\s+stdout\s+----\s*$",
-                                     re.MULTILINE)
 def _line_to_fn_record(
     file_text: str, line_no: int, fn_records: list[dict],
     col_no: int | None = None,
@@ -7022,12 +7022,9 @@ def _coupled_cofill_groups(
     return groups
 
 
-_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
-
-
 def _strip_ansi(text: str) -> str:
     """Drop ANSI SGR colour escapes (cargo's rendered-ansi diagnostics)."""
-    return _ANSI_RE.sub("", text or "")
+    return strip_ansi(text or "")
 
 
 def _order_frontier(
@@ -7406,10 +7403,7 @@ def _implicated_fns_from_cargo_errors(
     if _all_recs is not None:
         for _r in _all_recs:
             _recs_by_file.setdefault(_r.get("file", ""), []).append(_r)
-    loc_re = re.compile(r"-->\s+([^:\s]+\.rs):(\d+):\d+")
-    for m in loc_re.finditer(cargo_output):
-        file_str = m.group(1)
-        line_no = int(m.group(2))
+    for file_str, line_no in rustc_diagnostic_locations(cargo_output):
         # Normalise to rel path under target_src_dir.
         try:
             abs_p = (target_src_dir / file_str).resolve()
@@ -8104,6 +8098,9 @@ from pipeline_core.domain.generation import (
 )
 from pipeline_core.domain.generation import (
     strip_mod_test_prefix as _strip_mod_test_prefix,
+)
+from pipeline_core.domain.generation import (  # noqa: E402
+    tests_output_number as _tests_output_number,
 )
 
 # P6: the `_Task2Adapter` god-object is dissolved — each TASK-1/TASK-2 generator

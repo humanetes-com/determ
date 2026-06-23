@@ -467,6 +467,63 @@ def is_compiler_output_line(stripped: str) -> bool:
     return False
 
 
+def strip_ansi(text: str) -> str:
+    """Remove ANSI SGR colour escapes — byte-equivalent to
+    ``re.sub(r'\\x1b\\[[0-9;]*m', '', text)``."""
+    n = len(text)
+    out: list[str] = []
+    i = 0
+    while i < n:
+        if text[i] == "\x1b" and i + 1 < n and text[i + 1] == "[":
+            j = i + 2
+            while j < n and (text[j].isdigit() or text[j] == ";"):  # [0-9;]*
+                j += 1
+            if j < n and text[j] == "m":
+                i = j + 1
+                continue
+        out.append(text[i])
+        i += 1
+    return "".join(out)
+
+
+def rustc_diagnostic_locations(output: str) -> list[tuple[str, int]]:
+    """``(file, line)`` of every ``--> path.rs:LINE:COL`` cargo diagnostic location, in
+    order — byte-equivalent to the (group(1), int(group(2))) of
+    ``re.finditer(r'-->\\s+([^:\\s]+\\.rs):(\\d+):\\d+', output)``."""
+    out: list[tuple[str, int]] = []
+    n = len(output)
+    i = 0
+    while (k := output.find("-->", i)) >= 0:
+        i = k + 3
+        p = k + 3
+        if p >= n or not output[p].isspace():  # \s+
+            continue
+        while p < n and output[p].isspace():
+            p += 1
+        s = p  # ([^:\s]+\.rs)
+        while p < n and output[p] != ":" and not output[p].isspace():
+            p += 1
+        file = output[s:p]
+        if not file.endswith(".rs") or p == s or p >= n or output[p] != ":":
+            continue
+        p += 1
+        d1 = p  # (\d+)
+        while p < n and output[p].isdigit():
+            p += 1
+        if p == d1 or p >= n or output[p] != ":":
+            continue
+        line = int(output[d1:p])
+        p += 1
+        d2 = p  # \d+ (column)
+        while p < n and output[p].isdigit():
+            p += 1
+        if p == d2:
+            continue
+        out.append((file, line))
+        i = p
+    return out
+
+
 def build_test_name_index(file_texts: dict[str, str]) -> dict[str, str]:
     """{relative_path: file_text} for tests/*.rs → {fn_name: path} for bare
     cargo test names. Collects every `fn name(` (over-collection of helpers is

@@ -405,3 +405,12 @@ def test_is_test_attr_line_matches_regex():
               "#[testing]", "#[test_foo]", "  #[serial_test::serial]", "#[cfg(test)]",
               "#[test(", "#[parameterized]", "fn t", "", "#[test"]:
         assert is_test_attr_line(s) == bool(pat.search(s)), s
+
+
+from pipeline_core.domain.rust_scan import replace_elision_placeholders  # noqa: E402
+
+
+def test_replace_elision_placeholders_matches_regex():
+    for t in ["fn f() { ... }", "{...}", "{  ...  }", "no placeholder", "{ .. }",
+              "a { ... } b { ... }", "{ ... ", "", "{\n...\n}"]:
+        assert replace_elision_placeholders(t) == re.sub(r'\{\s*\.\.\.\s*\}', '{ todo!() }', t), t
