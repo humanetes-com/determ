@@ -153,6 +153,53 @@ def _looks_like_prose(content: str, path: str) -> bool:
     return any(first_line.lower().startswith(p) for p in prose_starters)
 
 
+def extract_tagged_block(text: str, tag: str) -> str | None:
+    """The inner text of the first ``<TAG> … </TAG>`` span (non-greedy, DOTALL), or
+    None — byte-equivalent to ``re.search(rf'<{tag}>(.*?)</{tag}>', text, re.DOTALL)``
+    projected onto ``group(1)`` (caller trims)."""
+    open_t, close_t = f"<{tag}>", f"</{tag}>"
+    i = text.find(open_t)
+    if i == -1:
+        return None
+    j = text.find(close_t, i + len(open_t))
+    if j == -1:
+        return None
+    return text[i + len(open_t):j]
+
+
+def extract_response_code_fence(text: str) -> str | None:
+    """The first non-empty fenced body trying ```` ```rust `` then ```` ```[rs] `` —
+    byte-equivalent to searching ``r'```rust\\s*(.*?)```'`` then
+    ``r'```(?:rs)?\\s*(.*?)```'`` (DOTALL), `.strip()`ped, first non-empty."""
+    for lang, optional in (("rust", False), ("rs", True)):
+        body = _scan_code_fence(text, lang, optional)
+        if body is not None:
+            stripped = body.strip()
+            if stripped:
+                return stripped
+    return None
+
+
+def _scan_code_fence(text: str, lang: str, optional: bool) -> str | None:
+    """First ```` ``` `` + (optional) `lang` + ``\\s*`` + capture-to-next-```` ``` ````."""
+    n = len(text)
+    i = 0
+    while (k := text.find("```", i)) >= 0:
+        p = k + 3
+        if text.startswith(lang, p):
+            p += len(lang)
+        elif not optional:
+            i = k + 1
+            continue
+        while p < n and text[p].isspace():  # \s*
+            p += 1
+        close = text.find("```", p)
+        if close != -1:
+            return text[p:close]
+        i = k + 1
+    return None
+
+
 def extract_code_blocks(text: str) -> list[str]:
     """Return the contents of every fenced ```lang … ``` block in model output."""
     return _CODE_BLOCK_PATTERN.findall(text)

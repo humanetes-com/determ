@@ -414,3 +414,18 @@ def test_replace_elision_placeholders_matches_regex():
     for t in ["fn f() { ... }", "{...}", "{  ...  }", "no placeholder", "{ .. }",
               "a { ... } b { ... }", "{ ... ", "", "{\n...\n}"]:
         assert replace_elision_placeholders(t) == re.sub(r'\{\s*\.\.\.\s*\}', '{ todo!() }', t), t
+
+
+from pipeline_core.domain.rust_scan import line_has_assertion  # noqa: E402
+
+
+def test_line_has_assertion_matches_regex():
+    pat = re.compile(r'\b(assert(?:_eq|_ne|_matches|_approx_eq)?!|assert!\s*\(|\.unwrap\(\)|\.expect\()')
+    cases = [
+        "assert!(x)", "assert_eq!(a, b)", "let y = z.unwrap();", "v.expect(\"msg\")",
+        "assert_ne!(1, 2)", "assert_matches!(x, Some(_))", ".unwrap()", ".expect(",
+        "xassert!(", "myassert_eq!", "assert_eqx!()", "let v = vec![1];", "// assert!(x)",
+        "assert! (y)", "a.unwrap()", "assert", "",
+    ]
+    for s in cases:
+        assert line_has_assertion(s) == bool(pat.search(s)), s

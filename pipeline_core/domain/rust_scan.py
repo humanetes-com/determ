@@ -839,3 +839,43 @@ def replace_elision_placeholders(content: str) -> str:
         out.append(content[i])
         i += 1
     return "".join(out)
+
+
+_ASSERT_SUFFIXES = ("_eq", "_ne", "_matches", "_approx_eq", "")
+
+
+def _word_before(line: str, k: int) -> bool:
+    """True iff `line[k-1]` is a word char (so a ``\\b`` sits at index `k`)."""
+    return k > 0 and (line[k - 1].isalnum() or line[k - 1] == "_")
+
+
+def line_has_assertion(line: str) -> bool:
+    r"""True iff `line` contains a Rust test assertion — byte-equivalent to
+    ``re.search(r'\b(assert(?:_eq|_ne|_matches|_approx_eq)?!|assert!\s*\(|\.unwrap\(\)|\.expect\()', line)``.
+    The ``\b`` precedes the WHOLE group: `assert…` must start at a word boundary, and
+    ``.unwrap()`` / ``.expect(`` require a word char immediately before the ``.``."""
+    n = len(line)
+    for needle in (".unwrap()", ".expect("):  # \b\.unwrap\(\) / \b\.expect\(  → '.' after a word char
+        k = line.find(needle)
+        while k >= 0:
+            if _word_before(line, k):
+                return True
+            k = line.find(needle, k + 1)
+    k = line.find("assert!")  # \bassert!\s*\(
+    while k >= 0:
+        if not _word_before(line, k):
+            q = k + 7
+            while q < n and line[q].isspace():
+                q += 1
+            if q < n and line[q] == "(":
+                return True
+        k = line.find("assert!", k + 1)
+    k = line.find("assert")  # \bassert(suffix)?!
+    while k >= 0:
+        if not _word_before(line, k):
+            p = k + 6
+            for suf in _ASSERT_SUFFIXES:
+                if line.startswith(suf, p) and line.startswith("!", p + len(suf)):
+                    return True
+        k = line.find("assert", k + 1)
+    return False

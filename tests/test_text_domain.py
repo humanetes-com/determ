@@ -130,3 +130,37 @@ def test_parse_attempt_number_matches_regex():
               "attempt 0", "", "attempt 7 attempt 9"]:
         m = re.search(r"attempt (\d+)", d)
         assert parse_attempt_number(d) == (int(m.group(1)) if m else None), d
+
+
+# --- P7: llm_output tagged-block + fence extractors ---
+
+from pipeline_core.domain.llm_output import (  # noqa: E402
+    extract_response_code_fence,
+    extract_tagged_block,
+)
+
+
+def test_extract_tagged_block_matches_regex():
+    for tag in ("SIGNATURE", "BODY"):
+        pat = re.compile(rf"<{tag}>(.*?)</{tag}>", re.DOTALL)
+        cases = [f"x<{tag}>inner</{tag}>y", f"<{tag}>a</{tag}><{tag}>b</{tag}>",
+                 f"<{tag}>unclosed", "no tag", f"<{tag}></{tag}>", f"<{tag}>multi\nline</{tag}>"]
+        for t in cases:
+            m = pat.search(t)
+            assert extract_tagged_block(t, tag) == (m.group(1) if m else None), (tag, t)
+
+
+def _old_fence(r):
+    for fence in (r"```rust\s*(.*?)```", r"```(?:rs)?\s*(.*?)```"):
+        m = re.search(fence, r, re.DOTALL)
+        if m:
+            c = m.group(1).strip()
+            if c:
+                return c
+    return None
+
+
+def test_extract_response_code_fence_matches_regex():
+    for t in ["```rust\nfn f(){}\n```", "```\ncode\n```", "```rs\nx\n```", "no fence",
+              "```rust   \n  body  \n```", "```python\nx\n```", "", "text ```rust a```"]:
+        assert extract_response_code_fence(t) == _old_fence(t), t

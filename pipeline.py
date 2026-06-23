@@ -244,6 +244,8 @@ from pipeline_core.domain.llm_output import (
     GENESIS_DELIM_START,
     _extract_genesis,
     extract_files,
+    extract_response_code_fence,
+    extract_tagged_block,
     parse_self_note,
 )
 from pipeline_core.domain.llm_output import (
@@ -341,6 +343,7 @@ from pipeline_core.domain.rust_scan import (
     is_test_attr_line,
     is_type_decl_line,
     item_names,
+    line_has_assertion,
     module_use_imports,
     replace_elision_placeholders,
     rust_code_fences,
@@ -1762,10 +1765,6 @@ def _extract_test_assertions(test_files: list, module_dir_rel: str = "",
     Returns a compact 'assertion manifest' that TASK 2 can use as ground truth.
     Only includes files relevant to the current module (if module_dir_rel given).
     """
-    assertion_re = re.compile(
-        r'\b(assert(?:_eq|_ne|_matches|_approx_eq)?!|assert!\s*\(|\.unwrap\(\)|\.expect\()',
-        re.MULTILINE,
-    )
     results: list[str] = []
 
     for rel, content in test_files:
@@ -1775,7 +1774,7 @@ def _extract_test_assertions(test_files: list, module_dir_rel: str = "",
         lines = content.splitlines()
         for i, line in enumerate(lines):
             stripped = line.strip()
-            if assertion_re.search(stripped) and not stripped.startswith('//'):
+            if line_has_assertion(stripped) and not stripped.startswith('//'):
                 # Include one line of context before (usually the `let` binding)
                 context_line = lines[i - 1].strip() if i > 0 else ""
                 entry = (f"  {context_line}  // context\n  {stripped}"
@@ -4008,10 +4007,10 @@ def _replace_fn_signature(file_path: Path, fn_name: str, new_sig: str) -> bool:
 def _extract_signature_block(response: str) -> str | None:
     """Pull `<SIGNATURE>...</SIGNATURE>` from an LLM response. Returns the
     trimmed body or None if absent."""
-    m = re.search(r"<SIGNATURE>(.*?)</SIGNATURE>", response, re.DOTALL)
-    if not m:
+    inner = extract_tagged_block(response, "SIGNATURE")
+    if inner is None:
         return None
-    txt = m.group(1).strip()
+    txt = inner.strip()
     return txt or None
 
 
@@ -4193,16 +4192,13 @@ def _extract_body_response(response: str) -> str | None:
     """
     if not response or not response.strip():
         return None
-    m = re.search(r"<BODY>(.*?)</BODY>", response, re.DOTALL)
-    if m:
-        candidate = m.group(1).strip()
+    inner = extract_tagged_block(response, "BODY")
+    if inner is not None:
+        candidate = inner.strip()
         return candidate or None
-    for fence in (r"```rust\s*(.*?)```", r"```(?:rs)?\s*(.*?)```"):
-        m = re.search(fence, response, re.DOTALL)
-        if m:
-            candidate = m.group(1).strip()
-            if candidate:
-                return candidate
+    fenced = extract_response_code_fence(response)
+    if fenced:
+        return fenced
     return response.strip() or None
 
 
@@ -7956,14 +7952,13 @@ def _build_task1_config() -> "Task1Config":
 
 def _filter_proc_macro_test_files(test_files, crate_name: str = ""):
     """Keep test files that use #[derive(...)] or the crate's own #[crate_name(...)]
-    attribute. Falls back to all files if none match. (Regex kept in pipeline.py — Option 1.)"""
-    attr_pattern = r'#\[derive\('
+    attribute. Falls back to all files if none match (literal substring scan)."""
+    needles = ["#[derive("]
     if crate_name:
-        safe = re.escape(crate_name.replace("-", "_"))
-        attr_pattern += rf'|#\[{safe}\('
+        needles.append(f"#[{crate_name.replace('-', '_')}(")
     relevant = [
         (rel, content) for rel, content in test_files
-        if re.search(attr_pattern, content)
+        if any(nd in content for nd in needles)
     ]
     return relevant or test_files
 
