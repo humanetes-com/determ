@@ -361,11 +361,13 @@ from pipeline_core.domain.test_results import (
     OUTPUT_SEPARATOR,
     _parse_test_counts,
     build_test_name_index,
+    camelcase_type_tokens,
     count_passing_tests,
     extract_test_output_from_file,
     insert_no_run,
     is_compiler_output_line,
     parse_error_code_note,
+    parse_phase_c_line,
     per_file_test_stats,
     rustc_diagnostic_locations,
     rustc_error_codes,
@@ -5140,10 +5142,6 @@ def _mine_common_tokens(excerpts: list[str], top_n: int = 3) -> list[tuple[str, 
     if not excerpts:
         return []
     tok: _Counter_PY[str] = _Counter_PY()
-    # Match `Foo`, `Foo<T>`, `Box<dyn StdError + Send + Sync>` etc.
-    type_re = re.compile(
-        r"\b([A-Z][A-Za-z0-9_]*(?:<[^<>\n]{1,60}>)?)\b"
-    )
     # Generic noise that's NOT useful type context.
     skip = {
         "Err", "Ok", "None", "Some", "Box", "Self", "T", "E", "C", "V",
@@ -5151,8 +5149,7 @@ def _mine_common_tokens(excerpts: list[str], top_n: int = 3) -> list[tuple[str, 
     }
     for ex in excerpts:
         seen_here: set[str] = set()
-        for m in type_re.finditer(ex):
-            t = m.group(1)
+        for t in camelcase_type_tokens(ex):
             # Filter: must be longer than 3 chars OR clearly composite.
             bare = t.split("<", 1)[0]
             if bare in skip:
@@ -5609,24 +5606,17 @@ def _classify_phase_c_test_failures(
         return {}
 
     out: dict[str, dict] = {}
-    line_re = re.compile(
-        r"^\s*TEST\s+(?P<test>\S+?)\s*:\s*"
-        r"(?P<cat>[A-Z_]+)\s*"
-        r"(?:\[fn=(?P<fn>[^\]]+)\])?\s*"
-        r"(?:—|-)\s*"
-        r"(?P<reason>.+?)\s*$"
-    )
     for ln in result.splitlines():
-        m = line_re.match(ln)
-        if not m:
+        parsed = parse_phase_c_line(ln)
+        if parsed is None:
             continue
-        cat = m.group("cat")
+        test, cat, fn, reason = parsed
         if cat not in _PHASE_C_CLASSIFIER_CATEGORIES:
             continue
-        out[m.group("test")] = {
+        out[test] = {
             "category": cat,
-            "fn": (m.group("fn") or "").strip(),
-            "reason": m.group("reason").strip(),
+            "fn": (fn or "").strip(),
+            "reason": reason,
         }
     return out
 

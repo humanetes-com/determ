@@ -62,3 +62,34 @@ def test_parse_error_code_note_matches_regex():
     for s in cases:
         m = pat.match(s)
         assert parse_error_code_note(s) == ((m.group(1), m.group(2).strip()) if m else None), s
+
+
+from pipeline_core.domain.test_results import camelcase_type_tokens  # noqa: E402
+
+
+def test_camelcase_type_tokens_matches_regex():
+    pat = re.compile(r"\b([A-Z][A-Za-z0-9_]*(?:<[^<>\n]{1,60}>)?)\b")
+    cases = [
+        "expected Foo found Bar", "Vec<u8> and Box<dyn Error>x", "Result<T, E>",
+        "Self::method", "a Vec<u8> b", "Foo<>", "T E C", "MyType_2<Inner>z",
+        "no types here", "", "Foo<bar baz>q",
+    ]
+    for t in cases:
+        assert camelcase_type_tokens(t) == [m.group(1) for m in pat.finditer(t)], t
+
+
+from pipeline_core.domain.test_results import parse_phase_c_line  # noqa: E402
+
+
+def test_parse_phase_c_line_matches_regex():
+    pat = re.compile(r"^\s*TEST\s+(?P<test>\S+?)\s*:\s*(?P<cat>[A-Z_]+)\s*"
+                     r"(?:\[fn=(?P<fn>[^\]]+)\])?\s*(?:—|-)\s*(?P<reason>.+?)\s*$")
+    cases = [
+        "TEST foo: FAIL — broken", "TEST bar : TIMEOUT [fn=run] - slow",
+        "TEST x::y: PANIC—index out of bounds  ", "TEST a: CAT", "not a test line",
+        "TEST n: LOWER - x", "  TEST z: OK [fn=f]   —   done  ", "TEST p: A—",
+    ]
+    for ln in cases:
+        m = pat.match(ln)
+        exp = (m.group("test"), m.group("cat"), m.group("fn"), m.group("reason").strip()) if m else None
+        assert parse_phase_c_line(ln) == exp, ln

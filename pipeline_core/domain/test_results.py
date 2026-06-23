@@ -467,6 +467,108 @@ def is_compiler_output_line(stripped: str) -> bool:
     return False
 
 
+def _phase_c_rest(ln: str, p: int, n: int) -> tuple[str, str | None, str] | None:
+    """Match ``\\s*:\\s*[A-Z_]+\\s*(\\[fn=…\\])?\\s*(—|-)\\s*.+?\\s*$`` from `p`; returns
+    ``(cat, fn_raw, reason_stripped)`` or None. Tries the optional ``[fn=…]`` group
+    present-then-absent (greedy ``?``)."""
+    while p < n and ln[p].isspace():  # \s*
+        p += 1
+    if p >= n or ln[p] != ":":
+        return None
+    p += 1
+    while p < n and ln[p].isspace():  # \s*
+        p += 1
+    cs = p
+    while p < n and (("A" <= ln[p] <= "Z") or ln[p] == "_"):  # [A-Z_]+
+        p += 1
+    if p == cs:
+        return None
+    cat = ln[cs:p]
+    for use_fn in (True, False):
+        q = p
+        fn: str | None = None
+        while q < n and ln[q].isspace():  # \s*
+            q += 1
+        if use_fn:
+            if not ln.startswith("[fn=", q):
+                continue
+            c = ln.find("]", q + 4)
+            if c == -1 or c <= q + 4:  # [^\]]+ needs ≥1
+                continue
+            fn = ln[q + 4:c]
+            q = c + 1
+        while q < n and ln[q].isspace():  # \s*
+            q += 1
+        if q >= n or ln[q] not in "—-":  # (?:—|-)
+            continue
+        q += 1
+        rest = ln[q:]  # \s*(.+?)\s*$ → matches iff non-empty; consumer reason = .strip()
+        if not rest:
+            continue
+        return (cat, fn, rest.strip())
+    return None
+
+
+def parse_phase_c_line(line: str) -> tuple[str, str, str | None, str] | None:
+    r"""Parse a phase-C classifier line ``TEST <name>: <CAT> [fn=<f>] — <reason>`` →
+    ``(test, cat, fn_or_none, reason_stripped)``, else None. Equivalent to
+    ``re.match(r'^\s*TEST\s+(?P<test>\S+?)\s*:\s*(?P<cat>[A-Z_]+)\s*(?:\[fn=(?P<fn>[^\]]+)\])?'``
+    ``r'\s*(?:—|-)\s*(?P<reason>.+?)\s*$', line)`` (`reason` pre-stripped as the consumer
+    does; the non-greedy ``\S+?`` test grows until `cat` can match)."""
+    n = len(line)
+    p = 0
+    while p < n and line[p].isspace():  # ^\s*
+        p += 1
+    if not line.startswith("TEST", p):
+        return None
+    p += 4
+    if p >= n or not line[p].isspace():  # \s+
+        return None
+    while p < n and line[p].isspace():
+        p += 1
+    start = p
+    run = start
+    while run < n and not line[run].isspace():  # the \S+ run
+        run += 1
+    for test_end in range(start + 1, run + 1):  # \S+? non-greedy: shortest that lets the rest match
+        rest = _phase_c_rest(line, test_end, n)
+        if rest is not None:
+            return (line[start:test_end], rest[0], rest[1], rest[2])
+    return None
+
+
+def camelcase_type_tokens(text: str) -> list[str]:
+    r"""CamelCase type tokens (optionally with a single ``<…>`` generic) mined from
+    cargo error text, in order — byte-equivalent to the group(1) of
+    ``re.finditer(r'\b([A-Z][A-Za-z0-9_]*(?:<[^<>\n]{1,60}>)?)\b', text)``. The
+    generic is included ONLY when the closing ``>`` is followed by a word char (the
+    trailing ``\b``); otherwise the bare name is captured."""
+    n = len(text)
+    out: list[str] = []
+    i = 0
+    while i < n:
+        c = text[i]
+        if "A" <= c <= "Z" and (i == 0 or not (text[i - 1].isalnum() or text[i - 1] == "_")):
+            e = i + 1  # [A-Z][A-Za-z0-9_]*
+            while e < n and (text[e].isalnum() or text[e] == "_"):
+                e += 1
+            end = e
+            if e < n and text[e] == "<":  # optional <[^<>\n]{1,60}> then \b
+                g = e + 1
+                cnt = 0
+                while g < n and text[g] not in "<>\n" and cnt < 60:
+                    g += 1
+                    cnt += 1
+                if g < n and text[g] == ">" and cnt >= 1 and g + 1 < n and (
+                        text[g + 1].isalnum() or text[g + 1] == "_"):
+                    end = g + 1
+            out.append(text[i:end])
+            i = end
+        else:
+            i += 1
+    return out
+
+
 def strip_ansi(text: str) -> str:
     """Remove ANSI SGR colour escapes — byte-equivalent to
     ``re.sub(r'\\x1b\\[[0-9;]*m', '', text)``."""
