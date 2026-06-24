@@ -146,6 +146,9 @@ from pipeline_core.application.reconstruct.failure_diagnosis import (
 from pipeline_core.application.reconstruct.failure_diagnosis import (
     record_tdd_regression as _record_tdd_regression_impl,
 )
+from pipeline_core.application.reconstruct.fill_merge import (
+    merge_fills_preserving_existing as _merge_fills_preserving_existing,
+)
 from pipeline_core.application.reconstruct.fix_unit import FixUnitDeps
 from pipeline_core.application.reconstruct.generate_fix import (
     GenerateFixDeps,
@@ -153,6 +156,9 @@ from pipeline_core.application.reconstruct.generate_fix import (
 )
 from pipeline_core.application.reconstruct.impl_blocks import (
     collect_impl_blocks as _collect_impl_blocks_impl,
+)
+from pipeline_core.application.reconstruct.macro_invariants import (
+    compute_cluster_macro_invariants as _compute_cluster_macro_invariants,
 )
 from pipeline_core.application.reconstruct.module_reconstructor import ModuleReconstructor
 from pipeline_core.application.reconstruct.reconstruction_step import ReconstructionStep
@@ -320,7 +326,7 @@ from pipeline_core.domain.retry_outcome import (
     build_verdict,
     failing_test_verdict,
 )
-from pipeline_core.domain.rust_fn_headers import fn_headers, macro_headers
+from pipeline_core.domain.rust_fn_headers import fn_headers
 from pipeline_core.domain.rust_idents import (
     attr_call_args,
     camelcase_type_names,
@@ -389,9 +395,6 @@ from pipeline_core.domain.text import (
     block_is_prose as _block_is_prose,
 )
 from pipeline_core.domain.text import (
-    collapse_blank_lines as _collapse_blank_lines,
-)
-from pipeline_core.domain.text import (
     extract_code_content as extract_code_content,  # noqa: PLC0414 (test seam re-export)
 )
 from pipeline_core.domain.text import (
@@ -454,6 +457,9 @@ from pipeline_core.prompts.sections import (
 )
 from pipeline_core.prompts.sections import (
     tag_block as _tag_block,
+)
+from pipeline_core.prompts.skeleton_index import (
+    format_skeleton_index_for_cluster as _format_skeleton_index_for_cluster,
 )
 from pipeline_core.retry import with_retry
 from pipeline_core.settings import Settings
@@ -3267,129 +3273,6 @@ def _format_skeleton_for_prompt(skeleton_files: list[tuple[str, str]]) -> str:
     return "\n\n".join(parts)
 
 
-def _format_skeleton_index_for_cluster(
-    skeleton_files: list[tuple[str, str]],
-    cluster: "BuildCluster | None",
-) -> str:
-    """Same as _format_skeleton_index but additionally elides items whose
-    `#[cfg(...)]` evaluates to false under the cluster's cfg-set.
-
-    Used in Phase C prompts so the model sees only items that compile in
-    THIS cluster — reduces cognitive load without affecting the on-disk
-    unfiltered skeleton (which Rust's own cfg eval handles correctly).
-
-    Items whose cfg is undecidable (unknown keys) are kept (safe default).
-    """
-    if cluster is None:
-        return _format_skeleton_index(skeleton_files)
-    cfg_true = {_normalize_cfg_pred(p) for p in cluster.cfg_true}
-    cfg_false = {_normalize_cfg_pred(p) for p in cluster.cfg_false}
-
-    # Per-item cfg attr matcher: a leading `#[cfg(...)]` (or several) above the
-    # item declaration — via domain.cfg.match_cfg_attr_line.
-    filtered_files: list[tuple[str, str]] = []
-    for rel, content in skeleton_files:
-        # Walk the content line by line collecting leading #[cfg(...)] groups
-        # before each top-level item; drop the item block if any cfg evaluates
-        # to false.
-        lines = content.split("\n")
-        out_lines: list[str] = []
-        i = 0
-        while i < len(lines):
-            # Collect attributes that precede the current item (any line
-            # starting with `#[...]` or `#![...]` or doc comment).
-            attr_start = i
-            collected_cfgs: list[str] = []
-            while i < len(lines):
-                line = lines[i]
-                stripped = line.strip()
-                cfg_pred = _cfg.match_cfg_attr_line(line)
-                if cfg_pred is not None:
-                    collected_cfgs.append(cfg_pred.strip())
-                    i += 1
-                    continue
-                # Any other attribute / doc / blank line: keep walking.
-                if stripped.startswith("#[") or stripped.startswith("#![") or stripped.startswith("///") or stripped.startswith("//!") or stripped == "":
-                    i += 1
-                    continue
-                break
-            # i now points to (probably) an item declaration. Evaluate cfgs.
-            keep = True
-            for pred in collected_cfgs:
-                if _eval_cfg_pred(pred, cfg_true, cfg_false) is False:
-                    keep = False
-                    break
-            if keep:
-                # Emit attr block + the item.
-                out_lines.extend(lines[attr_start:i + 1])
-                i += 1
-            else:
-                # Skip this item entirely — including its body if it has one.
-                # Simple heuristic: skip until brace depth returns to zero or
-                # we hit a `;` at depth zero (for body-less items like
-                # `pub use X;`).
-                if i >= len(lines):
-                    break
-                line = lines[i]
-                if "{" in line:
-                    depth = line.count("{") - line.count("}")
-                    i += 1
-                    while i < len(lines) and depth > 0:
-                        depth += lines[i].count("{") - lines[i].count("}")
-                        i += 1
-                else:
-                    # body-less item terminated by ';' on the same line
-                    i += 1
-        filtered_files.append((rel, "\n".join(out_lines)))
-    return _format_skeleton_index(filtered_files)
-
-
-def _format_skeleton_index(skeleton_files: list[tuple[str, str]]) -> str:
-    """Render skeleton as signatures-only index. Drops bodies (which are
-    `unimplemented!()` anyway), keeps type declarations + function signatures
-    + macro definitions for cross-reference. Used in Phase C prompts so we
-    don't waste input tokens on body stubs the model already knows about.
-
-    P3.11: macro_rules! bodies are also elided. Phase A preserves macros
-    verbatim on disk; the prompt's index just needs the macro NAMES so the
-    model knows what's exported, not the multi-KB rule definitions.
-    """
-    out_parts: list[str] = []
-
-    def _elide_bodies(text: str, headers: list, terminator: str) -> str:
-        """Walk header matches; for each, brace-match to find the body and
-        replace it with `terminator`. Returns the rewritten text."""
-        result_parts: list[str] = []
-        last = 0
-        for h in headers:
-            body_start = h.brace_open + 1
-            depth = 1
-            i = body_start
-            while i < len(text) and depth > 0:
-                if text[i] == "{":
-                    depth += 1
-                elif text[i] == "}":
-                    depth -= 1
-                i += 1
-            if depth != 0:
-                continue
-            body_end = i
-            result_parts.append(text[last:h.start])
-            result_parts.append(text[h.start:h.brace_open].rstrip())
-            result_parts.append(terminator)
-            last = body_end
-        result_parts.append(text[last:])
-        return "".join(result_parts)
-
-    for rel, content in skeleton_files:
-        # Order matters: elide macros first (their bodies contain `fn` patterns
-        # in rule expansions that would otherwise confuse the fn scan).
-        condensed = _elide_bodies(content, macro_headers(content), " { /* macro body elided — preserved verbatim on disk */ }")
-        condensed = _elide_bodies(condensed, fn_headers(condensed, line_anchored=True), ";")
-        out_parts.append(f'<FILE path="{rel}" mode="signatures-only">\n{condensed}\n</FILE>')
-    return "\n\n".join(out_parts)
-
-
 def _collect_skeleton_symbols(skeleton_files: list[tuple[str, str]]) -> set[str]:
     """Return the set of fn/method names declared in the skeleton.
 
@@ -4278,39 +4161,6 @@ def _annotate_file_view(file_text: str, target_fn: str) -> str:
     return "".join(out)
 
 
-def _enumerate_macro_variants(
-    src_dir: Path,
-) -> list[tuple[str, str, str, str]]:
-    """Scan all .rs files under `src_dir` for `macro_rules!` blocks and
-    return a list of `(macro_name, cfg_pred, body, source_file)` tuples.
-
-    `cfg_pred` is the predicate of the `#[cfg(...)]` attribute immediately
-    preceding the macro (empty string if no cfg gate). `body` is the full
-    `macro_rules! NAME { ... }` text. Used by
-    `_compute_cluster_macro_invariants` to decide which variant of a
-    multiply-defined macro is active under a given cluster.
-    """
-    variants: list[tuple[str, str, str, str]] = []
-    for p in sorted(src_dir.rglob("*.rs")):
-        try:
-            text = p.read_text(encoding="utf-8")
-        except Exception:
-            continue
-        for md in macro_definitions(text):
-            if not md.balanced:  # original `if depth != 0: continue`
-                continue
-            name = md.name
-            start = md.decl_start
-            # Walk backwards from the macro to find a leading #[cfg(...)]
-            # attribute on the same item. Stop at a blank line or another
-            # item — only attributes that immediately precede the macro
-            # gate it.
-            head = text[max(0, start - 800):start]
-            cfg_pred = _cfg.last_trailing_cfg_pred(head).strip()
-            variants.append((name, cfg_pred, text[start:md.body_close + 1], p.name))
-    return variants
-
-
 def _detect_crate_no_std_invariant(src_dir: Path) -> str:
     """Return a no_std-aware invariant string if the crate's lib.rs
     declares `#![no_std]`. Otherwise empty.
@@ -4339,77 +4189,6 @@ def _detect_crate_no_std_invariant(src_dir: Path) -> str:
         "use `alloc::format!` after `use alloc::format;` or "
         "`crate::__private::format` if the crate provides it."
     )
-
-
-def _compute_cluster_macro_invariants(
-    src_dir: Path, cluster: "BuildCluster | None",
-) -> str:
-    """For macros defined multiple times under different `#[cfg(...)]`,
-    select the variant active under `cluster`'s cfg-set and render a
-    compact "in this cluster, NAME!(...) expands to: <body>" line per
-    macro. Macros with a single variant are skipped (no ambiguity).
-
-    Without this section the model has to read every `#[cfg(...)]`
-    variant in the MACROS block and reason about which one applies —
-    leading to defensive fills (e.g. `unwrap_or(&DEFAULT)`) when the
-    active expansion in this cluster guarantees a `Some`.
-    """
-    if cluster is None:
-        return ""
-    variants = _enumerate_macro_variants(src_dir)
-    if not variants:
-        return ""
-    by_name: dict[str, list[tuple[str, str, str]]] = {}
-    for name, cfg, body, src in variants:
-        by_name.setdefault(name, []).append((cfg, body, src))
-    cfg_true = {_normalize_cfg_pred(p) for p in cluster.cfg_true}
-    cfg_false = {_normalize_cfg_pred(p) for p in cluster.cfg_false}
-    lines: list[str] = []
-    for name in sorted(by_name):
-        vs = by_name[name]
-        if len(vs) < 2:
-            continue
-        # Pick the variant whose cfg evaluates True. A variant with no cfg
-        # is treated as always-active fallback.
-        active: tuple[str, str, str] | None = None
-        unconditional: tuple[str, str, str] | None = None
-        for cfg, body, src in vs:
-            if not cfg:
-                unconditional = (cfg, body, src)
-                continue
-            v = _eval_cfg_pred(cfg, cfg_true, cfg_false)
-            if v is True:
-                active = (cfg, body, src)
-                break
-        if active is None and unconditional is not None:
-            active = unconditional
-        if active is None:
-            continue
-        cfg, body, src = active
-        # Render compactly: strip the `macro_rules! NAME {` header and
-        # outer `}` so the model sees just the arm(s).
-        compact = body
-        defs = macro_definitions(compact)
-        if defs:
-            hb = defs[0].body_open + 1  # past the `{`, then the regex's trailing `\s*`
-            while hb < len(compact) and compact[hb].isspace():
-                hb += 1
-            compact = compact[hb:].rstrip()
-            if compact.endswith("}"):
-                compact = compact[:-1].rstrip()
-        # Collapse internal whitespace runs for compactness.
-        compact = _collapse_blank_lines(compact)
-        if len(compact) > 240:
-            compact = compact[:237] + "..."
-        cfg_note = f" [cfg={cfg}]" if cfg else " [always]"
-        lines.append(f"{name}!(...){cfg_note} → {compact}")
-    if not lines:
-        return ""
-    header = (
-        "Macros with multiple #[cfg]-gated variants — only the active "
-        "expansion for this cluster is shown."
-    )
-    return header + "\n" + "\n".join(lines)
 
 
 def _collect_crate_macros(src_dir: Path, max_chars: int = max(6_000, SINGLE_CALL_CHAR_LIMIT // 25)) -> str:  # Plan 9 F1: budget-derived (was 6000)
@@ -5775,83 +5554,6 @@ def _task2_fill_fns_one_by_one(
         tdd_frontier_keys=tdd_frontier_keys, skip_end_pass_test=skip_end_pass_test,
         tdd_frontier_tests=tdd_frontier_tests, tdd_test_cmd=tdd_test_cmd,
     )
-
-
-def _merge_fills_preserving_existing(disk_text: str, model_text: str) -> str:
-    """Merge model-emitted file with the on-disk file.
-
-    Strategy: disk_text is the structural base (skeleton + any prior fills
-    + all imports/types/macros/attributes). We walk it function-by-function
-    and ONLY replace `unimplemented!()` bodies with the corresponding body
-    from model_text. Everything else from disk is preserved verbatim —
-    imports, type definitions, module declarations, attributes, comments.
-
-    This is the safe direction: the model can emit a thin file that drops
-    the surrounding context, but we never lose what's already on disk.
-    The model contributes function bodies only.
-
-    Matching is by function signature line. If the model didn't return a
-    given function (or returned it with `unimplemented!()` still), the disk
-    body is kept — Phase D will pick up any residuals.
-    """
-    def extract_fns(text: str) -> list[tuple[str, str, int, int]]:
-        """Return [(signature_line, body, body_start, body_end), ...] for each fn.
-
-        body_start is the offset of the first char inside the opening `{`.
-        body_end is the offset of the closing `}` itself (exclusive end of body).
-        """
-        out: list[tuple[str, str, int, int]] = []
-        for h in fn_headers(text, line_anchored=False):
-            body_start = h.brace_open + 1  # right after the opening `{`
-            depth = 1
-            i = body_start
-            while i < len(text) and depth > 0:
-                ch = text[i]
-                if ch == "{":
-                    depth += 1
-                elif ch == "}":
-                    depth -= 1
-                i += 1
-            if depth != 0:
-                continue  # malformed; skip
-            body_end = i - 1  # position of the matching '}'
-            body = text[body_start:body_end]
-            sig_line = text[h.start:body_start].strip()
-            out.append((sig_line, body, body_start, body_end))
-        return out
-
-    disk_fns = extract_fns(disk_text)
-    if not disk_fns:
-        # Disk has no functions to fill — either an empty or
-        # non-Rust-source-ish file. Don't risk overwriting structure;
-        # return disk verbatim.
-        return disk_text
-
-    # Build a map from signature → model's body, for any signature the
-    # model returned that ALSO doesn't look like a fresh unimplemented stub.
-    # (If the model regurgitated `unimplemented!()` for some function, that
-    # adds no value over what's already on disk.)
-    model_bodies: dict[str, str] = {}
-    for sig, body, _bs, _be in extract_fns(model_text):
-        if _is_unimplemented_body(body):
-            continue
-        model_bodies[sig] = body
-
-    if not model_bodies:
-        return disk_text  # model gave us nothing usable
-
-    # Walk disk fns IN REVERSE so character offsets stay valid as we splice.
-    # Replace body slice only when disk's body is unimplemented AND model
-    # has a real body for the same signature.
-    out = disk_text
-    for sig, body, body_start, body_end in reversed(disk_fns):
-        if not _is_unimplemented_body(body):
-            continue  # already filled — never overwrite
-        new_body = model_bodies.get(sig)
-        if new_body is None:
-            continue  # model didn't return this function
-        out = out[:body_start] + new_body + out[body_end:]
-    return out
 
 
 def _task2_fill_groups(skeleton_dir, target_src_dir, groups, project_dir, **kwargs):
