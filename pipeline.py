@@ -2271,24 +2271,6 @@ def validate_task2_api_surface_conformance(
     return False, report
 
 
-_TEST_ATTR_RE = re.compile(
-    r"#\s*\[\s*(?:test|tokio::test|async_std::test|"
-    r"serial_test::serial|rstest|parameterized|test_case)\s*[\s\],(]",
-)
-
-
-def _count_test_attrs_in_text(text: str) -> int:
-    """Count `#[test]`-family attribute occurrences in a Rust source string.
-    Naive but adequate: counts every macro-attribute that recognises as a
-    test marker. Used by the per-cluster expected_count computation.
-
-    Regex is deliberate here, NOT a no-regex-on-source violation: this counts markers in
-    generated test code that may not yet be valid Rust (mid-fill), where syn would fail to
-    parse and under-count. A robust marker count is the right tool. See CODE_ARCHITECTURE.md
-    §8 R7.3."""
-    return len(_TEST_ATTR_RE.findall(text or ""))
-
-
 def _count_test_fns_cfg_aware(
     text: str,
     cfg_true: set[str],
@@ -3168,25 +3150,14 @@ def _prune_redundant_clusters(
     pred_counts: dict[str, int] = {}
     src_dir = source_dir / "src"
     if src_dir.exists():
-        pred_re = re.compile(r'#\[cfg(?:_attr)?\(([^)]+(?:\([^)]*\)[^)]*)*)\)')
-        bare_re = re.compile(r'\b([a-z_]\w*)(?!\s*=)')
-        feat_re = re.compile(r'\bfeature\s*=\s*"([^"]*)"')
-        skip = {"any", "all", "not", "cfg", "cfg_attr", "feature"}
+        skip = frozenset({"any", "all", "not", "cfg", "cfg_attr", "feature"})
         for rs in src_dir.rglob("*.rs"):
             try:
                 txt = rs.read_text(errors="replace")
             except Exception:
                 continue
-            for m in pred_re.finditer(txt):
-                inner = m.group(1)
-                for fm in feat_re.finditer(inner):
-                    name = fm.group(1)
-                    if name:
-                        pred_counts[name] = pred_counts.get(name, 0) + 1
-                for bm in bare_re.finditer(feat_re.sub("", inner)):
-                    name = bm.group(1)
-                    if name and name not in skip:
-                        pred_counts[name] = pred_counts.get(name, 0) + 1
+            for name in _cfg.gated_predicate_names(txt, skip):
+                pred_counts[name] = pred_counts.get(name, 0) + 1
 
     keep: list[BuildCluster] = []
     dropped: list[tuple[str, str]] = []
@@ -4582,12 +4553,7 @@ def _enumerate_macro_variants(
             # item — only attributes that immediately precede the macro
             # gate it.
             head = text[max(0, start - 800):start]
-            cfg_pred = ""
-            for am in reversed(list(re.finditer(
-                    r"#\[cfg\(((?:[^()]|\([^()]*\))+)\)\]\s*$",
-                    head, re.MULTILINE))):
-                cfg_pred = am.group(1).strip()
-                break
+            cfg_pred = _cfg.last_trailing_cfg_pred(head).strip()
             variants.append((name, cfg_pred, text[start:md.body_close + 1], p.name))
     return variants
 
@@ -8135,6 +8101,9 @@ from pipeline_core.domain.generation import (
 from pipeline_core.domain.generation import (
     strip_mod_test_prefix as _strip_mod_test_prefix,
 )
+from pipeline_core.domain.generation import (
+    strip_trailing_legacy_gen_block as _strip_trailing_legacy_gen_block,  # noqa: E402
+)
 from pipeline_core.domain.generation import (  # noqa: E402
     tests_output_number as _tests_output_number,
 )
@@ -10537,10 +10506,6 @@ def clean_state(root: Path, project_dir: Path, manifest_path: Path,
     # Strip all gen_tests artifacts from source files: delete sibling files and
     # remove path-mod declarations. Also clean up legacy inline blocks (from
     # pre-sibling-file design) so an old workspace can be salvaged with --clean.
-    _legacy_inline_re = re.compile(
-        r'\n+(?:// GRCOV_EXCL_START\n)?#\[cfg\(test\)\](?:\n#\[[^\]]*\])*\n(?:pub )?mod gen_\w+\s*\{.*',
-        re.DOTALL,
-    )
     stripped_files = stripped_siblings = 0
     # Delete sibling files first so the parent loop doesn't re-read them.
     for sibling in sorted(project_dir.rglob("*.gen_tests_*.rs")):
@@ -10555,7 +10520,7 @@ def clean_state(root: Path, project_dir: Path, manifest_path: Path,
         try:
             raw = src.read_text(encoding="utf-8")
             cleaned = _strip_gen_tests_decls(raw)
-            cleaned = _legacy_inline_re.sub("", cleaned).rstrip() + "\n"
+            cleaned = _strip_trailing_legacy_gen_block(cleaned).rstrip() + "\n"
             if cleaned != raw:
                 src.write_text(cleaned, encoding="utf-8")
                 _log(f"  Stripped gen_tests artifacts from {src.relative_to(project_dir)}")

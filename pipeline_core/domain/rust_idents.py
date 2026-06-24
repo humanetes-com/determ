@@ -271,6 +271,24 @@ def identifier_tokens(text: str) -> list[str]:
     return out
 
 
+def ascii_word_tokens(text: str) -> list[str]:
+    """ASCII identifier tokens, in order — byte-equivalent to
+    ``re.findall(r'\\b([A-Za-z_][A-Za-z0-9_]*)\\b', text)``. A ``\\b…\\b`` match is
+    exactly a maximal ``\\w+`` run that is entirely ASCII ``[A-Za-z0-9_]`` and
+    letter/underscore-led; a run containing a non-ASCII word char (or starting with
+    a digit) has no internal boundary, so it yields nothing — unlike the unicode-`\\w`
+    `identifier_tokens`."""
+    out: list[str] = []
+    for s, e in _word_spans(text):
+        c = text[s]
+        if (("a" <= c <= "z") or ("A" <= c <= "Z") or c == "_") and all(
+            ("a" <= ch <= "z") or ("A" <= ch <= "Z") or ("0" <= ch <= "9") or ch == "_"
+            for ch in text[s:e]
+        ):
+            out.append(text[s:e])
+    return out
+
+
 def mask_identifiers(text: str, repl: str = "X") -> str:
     """`text` with every ``[A-Za-z_]\\w*`` identifier token replaced by `repl` —
     byte-equivalent to ``re.sub(r'[A-Za-z_]\\w*', repl, text)`` (leading digits of a
@@ -386,6 +404,169 @@ def first_fn_decl_name(text: str) -> str | None:
         if _is_ascii_ident_start(name[0]):
             return name
     return None
+
+
+def _consume_opt_pub(text: str, i: int) -> int:
+    """Emulate the optional ``(?:pub(?:\\([^)]*\\))?\\s+)?`` group: consume `pub`, an
+    optional ``(restriction)`` (no nested ``)``), then the required ``\\s+``. Returns
+    `i` unchanged when the trailing whitespace is absent — so `pub(crate) fn` and
+    `pub fn` consume through the gap, but `public`/`pub)`/`pub (x)` (space before the
+    paren) backtrack to no-pub, exactly as the regex's optional group does."""
+    n = len(text)
+    if not text.startswith("pub", i):
+        return i
+    base = i + 3
+    if base < n and text[base] == "(":            # greedy: try `(restriction)` first
+        cp = text.find(")", base + 1)             # `[^)]*` then `\)`
+        if cp != -1:
+            k = cp + 1
+            if k < n and text[k].isspace():        # `\s+`
+                while k < n and text[k].isspace():
+                    k += 1
+                return k
+    if base < n and text[base].isspace():          # paren-absent: `\s+` right after `pub`
+        k = base
+        while k < n and text[k].isspace():
+            k += 1
+        return k
+    return i
+
+
+def fn_names_with_body(text: str) -> set[str]:
+    """Names of every line-leading `fn` declaration that reaches a body ``{`` —
+    byte-equivalent to the MULTILINE finditer of
+    ``(?:^|\\n)[ \\t]*(?:pub(?:\\([^)]*\\))?\\s+)?(?:async\\s+)?(?:unsafe\\s+)?(?:const\\s+)?fn\\s+([A-Za-z_]\\w*)[^{]*\\{``
+    (the group_fill stub-skip scan). Matches begin at a line lead, allow the
+    `pub/async/unsafe/const` modifier run, then `fn <name>` up to the first ``{``;
+    non-overlapping, so a brace-less decl swallows a following one just as the regex
+    did (`[^{]*` spans newlines)."""
+    n = len(text)
+    out: set[str] = set()
+    starts = [0] + [k + 1 for k, c in enumerate(text) if c == "\n"]  # `(?:^|\n)` line leads
+    barrier = 0                                                       # finditer non-overlap
+    for bol in starts:
+        if bol < barrier:
+            continue
+        i = bol
+        while i < n and text[i] in " \t":          # `[ \t]*`
+            i += 1
+        i = _consume_opt_pub(text, i)
+        i = _consume_opt_kw_ws(text, i, "async")
+        i = _consume_opt_kw_ws(text, i, "unsafe")
+        i = _consume_opt_kw_ws(text, i, "const")
+        if not text.startswith("fn", i):
+            continue
+        j = i + 2
+        if j >= n or not text[j].isspace():          # `fn\s+`
+            continue
+        while j < n and text[j].isspace():
+            j += 1
+        if j >= n or not _is_ascii_ident_start(text[j]):  # `[A-Za-z_]`
+            continue
+        ns = j
+        j += 1
+        while j < n and (text[j].isalnum() or text[j] == "_"):  # `\w*`
+            j += 1
+        name = text[ns:j]
+        while j < n and text[j] != "{":              # `[^{]*`
+            j += 1
+        if j >= n:                                    # `\{` never reached → no match
+            continue
+        out.add(name)
+        barrier = j + 1
+    return out
+
+
+def is_fn_decl_line(line: str) -> bool:
+    """True iff `line` leads a fn declaration — byte-equivalent to
+    ``re.match(r'^\\s*(?:pub\\s+)?(?:async\\s+)?(?:unsafe\\s+)?fn\\s+\\w', line)``:
+    leading whitespace, optional `pub`/`async`/`unsafe` (each ``\\s+``-terminated),
+    then `fn`, ``\\s+``, and a word char. (Like `is_fn_signature_line` but with the
+    `unsafe` modifier and the trailing ``\\w`` requirement.)"""
+    n = len(line)
+    i = 0
+    while i < n and line[i].isspace():               # `^\s*`
+        i += 1
+    i = _consume_opt_kw_ws(line, i, "pub")
+    i = _consume_opt_kw_ws(line, i, "async")
+    i = _consume_opt_kw_ws(line, i, "unsafe")
+    if not line.startswith("fn", i):
+        return False
+    j = i + 2
+    if j >= n or not line[j].isspace():              # `fn\s+`
+        return False
+    while j < n and line[j].isspace():
+        j += 1
+    return j < n and (line[j].isalnum() or line[j] == "_")  # `\w`
+
+
+def test_fn_names(text: str) -> list[str]:
+    """Names of fns declared on the line immediately after a ``#[test]`` attribute,
+    in source order — byte-equivalent to the finditer of
+    ``#\\s*\\[\\s*test\\s*\\][^\\n]*\\n[^\\n]*?fn\\s+(\\w+)\\s*\\(``. A ``#[test]`` attr
+    (flexible inter-token whitespace, may span a newline before ``[``), then on the
+    NEXT line the first ``fn <name> (`` (lazy ``[^\\n]*?``); non-overlapping."""
+    out: list[str] = []
+    i = 0
+    while True:
+        h = text.find("#", i)
+        if h < 0:
+            break
+        m = _match_test_attr_fn(text, h)
+        if m is None:
+            i = h + 1
+            continue
+        name, end = m
+        out.append(name)
+        i = end
+    return out
+
+
+def _match_test_attr_fn(text: str, h: int) -> tuple[str, int] | None:
+    """Try the ``#[test]`` → next-line ``fn <name>(`` match starting at the `#` at
+    `h`; return `(name, end_offset)` or None. Helper for `test_fn_names`."""
+    n = len(text)
+    p = h + 1
+    while p < n and text[p].isspace():               # `\s*`
+        p += 1
+    if p >= n or text[p] != "[":
+        return None
+    p += 1
+    while p < n and text[p].isspace():               # `\s*`
+        p += 1
+    if not text.startswith("test", p):
+        return None
+    p += 4
+    while p < n and text[p].isspace():               # `\s*`
+        p += 1
+    if p >= n or text[p] != "]":
+        return None
+    p += 1
+    nl = text.find("\n", p)                           # `[^\n]*\n`
+    if nl < 0:
+        return None
+    ls = nl + 1
+    le = text.find("\n", ls)
+    line_end = n if le < 0 else le                    # `fn` must start on this next line
+    k = ls
+    while True:
+        f = text.find("fn", k)                        # lazy `[^\n]*?fn` (line-bound)
+        if f < 0 or f >= line_end:
+            return None
+        j = f + 2                                     # tail `\s+(\w+)\s*\(` may cross newlines
+        if j < n and text[j].isspace():               # `\s+`
+            while j < n and text[j].isspace():
+                j += 1
+            ns = j
+            while j < n and (text[j].isalnum() or text[j] == "_"):  # `(\w+)`
+                j += 1
+            if j > ns:
+                t = j
+                while t < n and text[t].isspace():    # `\s*`
+                    t += 1
+                if t < n and text[t] == "(":          # `\(`
+                    return text[ns:j], t + 1
+        k = f + 1
 
 
 def use_symbol_paths(text: str) -> list[str]:

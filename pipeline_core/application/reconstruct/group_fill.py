@@ -8,7 +8,6 @@ rebind-prelude (task0c pattern).
 """
 from __future__ import annotations
 
-import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -16,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from pipeline_core.domain.models import BuildCluster
+from pipeline_core.domain.rust_idents import fn_names_with_body
 from pipeline_core.domain.text import smart_truncate, trim_to_line
 
 
@@ -114,18 +114,12 @@ def task2_fill_groups(
         # Build set of ALL fn names in target_src_dir (filled + stubs).
         all_fn_names: set[str] = set()
         stub_fn_names: set[str] = set()
-        fn_re = re.compile(
-            r'(?:^|\n)[ \t]*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?'
-            r'(?:const\s+)?fn\s+([A-Za-z_]\w*)[^{]*\{',
-            re.MULTILINE,
-        )
         for p in target_src_dir.rglob("*.rs"):
             try:
                 text = p.read_text(encoding="utf-8")
             except Exception:
                 continue
-            for m in fn_re.finditer(text):
-                all_fn_names.add(m.group(1))
+            all_fn_names |= fn_names_with_body(text)
         for _rel, fn in _scan_unimplemented_functions(target_src_dir):
             stub_fn_names.add(fn)
         # How many target names map to ANY function (filled or unfilled)?

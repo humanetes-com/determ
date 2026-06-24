@@ -338,6 +338,172 @@ def crate_cfg_predicates(text: str) -> list[str]:
     return out
 
 
+def _capture_one_level(text: str, op: int) -> tuple[str, int] | None:
+    """Parse ``(?:[^()]|\\([^()]*\\))+`` starting just after the ``(`` at `op`; return
+    ``(inner, close)`` where `close` is the top-level ``)`` index, or None if the
+    one-or-more body is empty / a nested ``(`` breaks the single-level unit."""
+    n = len(text)
+    i = op + 1
+    start = i
+    got = False
+    while i < n:
+        c = text[i]
+        if c == "(":                       # `\([^()]*\)` unit (no nested parens)
+            j = i + 1
+            while j < n and text[j] not in "()":
+                j += 1
+            if j < n and text[j] == ")":
+                i = j + 1
+                got = True
+                continue
+            return None
+        if c == ")":                        # top-level close
+            break
+        i += 1                              # `[^()]` char
+        got = True
+    if not got or i >= n or text[i] != ")":
+        return None
+    return text[start:i], i
+
+
+def last_trailing_cfg_pred(text: str) -> str:
+    """Inner predicate of the LAST ``#[cfg(P)]`` alone on its line — byte-equivalent
+    to the final match of MULTILINE
+    ``#\\[cfg\\(((?:[^()]|\\([^()]*\\))+)\\)\\]\\s*$`` (one nested-paren level allowed;
+    the ``]`` is followed only by whitespace to the line end). ``""`` when none; the
+    caller strips the result."""
+    n = len(text)
+    found = ""
+    needle = "#[cfg("
+    i = 0
+    while (h := text.find(needle, i)) >= 0:
+        i = h + 1
+        cap = _capture_one_level(text, h + len(needle) - 1)  # index of the '('
+        if cap is None:
+            continue
+        inner, close = cap
+        if close + 1 >= n or text[close + 1] != "]":          # `\)\]`
+            continue
+        eol = text.find("\n", close + 2)                      # `\s*$` (MULTILINE)
+        if eol == -1:
+            eol = n
+        if any(not c.isspace() for c in text[close + 2:eol]):
+            continue
+        found = inner
+        i = close + 2
+    return found
+
+
+def _cfg_attr_inner_predicates(text: str) -> list[str]:
+    """Inner string of every ``#[cfg(...)]``/``#[cfg_attr(...)]`` — byte-equivalent to
+    ``re.finditer(r'#\\[cfg(?:_attr)?\\(([^)]+(?:\\([^)]*\\)[^)]*)*)\\)', text)``. The
+    greedy ``[^)]+`` stops at the first ``)`` (which trailing ``\\)`` then consumes),
+    so the capture is exactly the ≥1 chars from ``(`` to the first ``)``."""
+    out: list[str] = []
+    n = len(text)
+    i = 0
+    while (h := text.find("#[cfg", i)) >= 0:
+        p = h + 5
+        if text.startswith("_attr", p):
+            p += 5
+        if p < n and text[p] == "(":
+            cp = text.find(")", p + 1)
+            if cp != -1 and cp > p + 1:        # `[^)]+` ≥1 char
+                out.append(text[p + 1:cp])
+                i = cp + 1
+                continue
+        i = h + 1
+    return out
+
+
+def _scan_feature_matches(pred: str) -> list[tuple[int, int, str]]:
+    """``(start, end, value)`` of every ``\\bfeature\\s*=\\s*"([^"]*)"`` in `pred`,
+    non-overlapping in source order."""
+    res: list[tuple[int, int, str]] = []
+    n = len(pred)
+    i = 0
+    while (f := pred.find("feature", i)) >= 0:
+        if f > 0 and (pred[f - 1].isalnum() or pred[f - 1] == "_"):  # `\b` before
+            i = f + 1
+            continue
+        p = f + 7
+        while p < n and pred[p].isspace():    # `\s*`
+            p += 1
+        if p < n and pred[p] == "=":
+            p += 1
+            while p < n and pred[p].isspace():  # `\s*`
+                p += 1
+            if p < n and pred[p] == '"':
+                q = pred.find('"', p + 1)        # `"([^"]*)"`
+                if q != -1:
+                    res.append((f, q + 1, pred[p + 1:q]))
+                    i = q + 1
+                    continue
+        i = f + 1
+    return res
+
+
+def _feature_stripped(pred: str) -> str:
+    """`pred` with every ``feature = "…"`` pair removed — byte-equivalent to
+    ``feat_re.sub("", pred)``."""
+    spans = _scan_feature_matches(pred)
+    if not spans:
+        return pred
+    out: list[str] = []
+    last = 0
+    for s, e, _v in spans:
+        out.append(pred[last:s])
+        last = e
+    out.append(pred[last:])
+    return "".join(out)
+
+
+def _bare_flag_idents(s: str) -> list[str]:
+    """Lowercase/underscore-led idents in `s` NOT immediately followed by ``=`` —
+    byte-equivalent to ``re.finditer(r'\\b([a-z_]\\w*)(?!\\s*=)', s)``. One candidate
+    per maximal ``\\w+`` run (``\\b`` fires only at run edges); a run followed by
+    ``\\s*=`` forces the negative lookahead to drop the run's last char (or yields
+    nothing for a 1-char run)."""
+    out: list[str] = []
+    n = len(s)
+    i = 0
+    while i < n:
+        if s[i].isalnum() or s[i] == "_":
+            j = i + 1
+            while j < n and (s[j].isalnum() or s[j] == "_"):
+                j += 1
+            first = s[i]
+            if ("a" <= first <= "z") or first == "_":   # `[a-z_]` lead
+                p = j
+                while p < n and s[p].isspace():          # lookahead `\s*`
+                    p += 1
+                if not (p < n and s[p] == "="):
+                    out.append(s[i:j])
+                elif j - i >= 2:                          # backtrack one char off the run
+                    out.append(s[i:j - 1])
+            i = j
+        else:
+            i += 1
+    return out
+
+
+def gated_predicate_names(text: str, skip: frozenset[str]) -> list[str]:
+    """Feature values + bare cfg flags counted by the cluster-prune scan, in source
+    order — byte-equivalent to the `pred_re`/`feat_re`/`bare_re` loop in
+    `_prune_redundant_clusters`. Per ``#[cfg(...)]``/``#[cfg_attr(...)]``: each
+    non-empty ``feature = "X"`` value, then each bare ident (after the `feature`
+    pairs are stripped) that is not a structural keyword (`skip`)."""
+    out: list[str] = []
+    for inner in _cfg_attr_inner_predicates(text):
+        for _s, _e, v in _scan_feature_matches(inner):
+            if v:
+                out.append(v)
+        for name in _bare_flag_idents(_feature_stripped(inner)):
+            if name and name not in skip:
+                out.append(name)
+    return out
+
+
 def parse_cfg_pred(pred: str) -> CfgPred:
     """Parse a ``#[cfg(...)]`` condition string into a typed :class:`CfgPred`.
     Normalizes whitespace first, so ``all (a, b)`` and ``all(a,b)`` parse alike."""

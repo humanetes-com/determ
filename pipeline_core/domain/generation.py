@@ -386,6 +386,52 @@ def strip_all_gen_tests_decls(text: str) -> str:
     return _strip_decls(text, keep=lambda d: not _is_gen_tests_sibling(d.sibling_name))
 
 
+def strip_trailing_legacy_gen_block(text: str) -> str:
+    """Remove a trailing legacy inline ``#[cfg(test)] mod gen_*`` block (the
+    pre-sibling-file design) — byte-equivalent to ``re.sub(r'\\n+(?:// '
+    r'GRCOV_EXCL_START\\n)?#\\[cfg\\(test\\)\\](?:\\n#\\[[^\\]]*\\])*\\n(?:pub )?mod '
+    r'gen_\\w+\\s*\\{.*', '', text, flags=re.DOTALL)``: from the first qualifying
+    ``\\n+`` run through end-of-text. Returns `text` unchanged when absent."""
+    n = len(text)
+    i = 0
+    while i < n:
+        if text[i] != "\n":
+            i += 1
+            continue
+        run_start = i
+        while i < n and text[i] == "\n":               # `\n+` (greedy; can't backtrack here)
+            i += 1
+        p = i
+        if text.startswith("// GRCOV_EXCL_START\n", p):  # optional marker line
+            p += len("// GRCOV_EXCL_START\n")
+        if not text.startswith("#[cfg(test)]", p):
+            continue
+        p += len("#[cfg(test)]")
+        while text.startswith("\n#[", p):               # `(?:\n#\[[^\]]*\])*`
+            cb = text.find("]", p + 3)
+            if cb == -1:
+                break
+            p = cb + 1
+        if p >= n or text[p] != "\n":                   # `\n`
+            continue
+        p += 1
+        if text.startswith("pub ", p):                  # `(?:pub )?`
+            p += 4
+        if not text.startswith("mod gen_", p):
+            continue
+        p += len("mod gen_")
+        ws = p
+        while p < n and (text[p].isalnum() or text[p] == "_"):  # `\w+`
+            p += 1
+        if p == ws:
+            continue
+        while p < n and text[p].isspace():              # `\s*`
+            p += 1
+        if p < n and text[p] == "{":                    # `\{` then `.*` (DOTALL → EOF)
+            return text[:run_start]
+    return text
+
+
 def gen_tests_decl_blocks(text: str) -> list[GenTestsDecl]:
     """Every gen_tests-sibling decl block, in source order — for cluster gating
     (each block's `gate` predicate + `sibling_name`)."""

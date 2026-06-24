@@ -2,8 +2,9 @@
 `generate_fix_loop` monolith (P3 slice 1).
 
 `error_sigs`/`errors_by_file` parse CARGO OUTPUT (legitimate regex, R7). `file_stats`
-reads source files for the per-file overview table; its `fn …` line scan is a text
-heuristic over source (R7 migrate-to-syn = P7). Kept verbatim from the closures.
+reads source files for the per-file overview table; its fn-decl line scan is the
+structured `rust_idents.is_fn_decl_line` (P7 source-regex→tokeniser, byte-equivalent
+to the old `_FN_DECL_RE`).
 """
 from __future__ import annotations
 
@@ -11,6 +12,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from pipeline_core.domain.rust_idents import is_fn_decl_line
 from pipeline_core.domain.test_results import parse_failed_tests
 
 # A single compile error outranks any plausible failing-test count, so the
@@ -20,7 +22,6 @@ _COMPILE_WEIGHT = 10_000
 _ERROR_SIG_RE = re.compile(r"error\[E\d+\]: .+")
 _ERROR_HEAD_RE = re.compile(r"^error\[E\d+\]")
 _ERROR_LOC_RE = re.compile(r"\s+-->\s+(\S+\.rs):\d+")
-_FN_DECL_RE = re.compile(r"^\s*(?:pub\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+\w")
 
 
 def error_sigs(output: str) -> frozenset[str]:
@@ -69,6 +70,6 @@ def file_stats(paths: list[Path], root: Path) -> dict[str, dict[str, Any]]:
             continue
         rel = str(p.relative_to(root))
         lines = text.count("\n") + 1
-        fns = sum(1 for ln in text.splitlines() if _FN_DECL_RE.match(ln))
+        fns = sum(1 for ln in text.splitlines() if is_fn_decl_line(ln))
         stats[rel] = {"lines": lines, "fns": fns}
     return stats

@@ -31,6 +31,7 @@ from pipeline_core.domain.attribution import (
     line_to_fn_record,
 )
 from pipeline_core.domain.models import Diagnostic, Frontier
+from pipeline_core.domain.rust_idents import ascii_word_tokens, test_fn_names
 from pipeline_core.domain.test_results import (
     build_test_name_index,
     failing_test_names,
@@ -57,8 +58,6 @@ _PANIC_HEADER_RE = re.compile(
     r"thread '([^']+)'(?:\s+\(\d+\))?\s+panicked at ([^:]+):(\d+)(?::(\d+))?:\s*\n([^\n]*)"
 )
 _TEST_STDOUT_HEADER_RE = re.compile(r"^----\s+(\S+)\s+stdout\s+----\s*$", re.MULTILINE)
-_TEST_FN_RE = re.compile(r"#\s*\[\s*test\s*\][^\n]*\n[^\n]*?fn\s+(\w+)\s*\(")
-_IDENT_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\b")
 
 
 def extract_tdd_frontier(deps: AttributionDeps,
@@ -326,18 +325,16 @@ def build_test_reverse_map(
         if name and f:
             by_name.setdefault(name, []).append((f, name))
     out: dict[str, set[tuple[str, str]]] = {}
-    test_fn_re = _TEST_FN_RE
     for tp in test_files:
         try:
             text = tp.read_text(encoding="utf-8", errors="replace")
         except Exception:
             continue
-        ids = set(_IDENT_RE.findall(text))
+        ids = set(ascii_word_tokens(text))
         # Match each #[test] fn's name; pair it with all fn records whose
         # identifier appears anywhere in the test file. This is file-level
         # not fn-body-level (cheaper, captures helper fns the test calls).
-        for m in test_fn_re.finditer(text):
-            test_name = m.group(1)
+        for test_name in test_fn_names(text):
             candidates: set[tuple[str, str]] = set()
             for ident in ids:
                 if ident in by_name:
