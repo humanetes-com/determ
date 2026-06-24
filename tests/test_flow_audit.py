@@ -108,6 +108,22 @@ def test_run_start_parsing_scopes_events(tmp_path: Path) -> None:
     assert flow_audit.iteration_series(run) == [("2026-06-11T07:00:00", 1, 20)]
 
 
+def test_run_id_scopes_events_by_identity(tmp_path: Path) -> None:
+    # debt #21b: a concurrent process (distinct run_id) writing to the SHARED
+    # events.jsonl inside this run's ts window must be dropped by IDENTITY.
+    log = "  PIPELINE STARTED — 2026-06-11 06:09:25 UTC  pipeline.py=cccc git=dddd  run_id=999-abc\n"
+    assert flow_audit.parse_run_id(log.splitlines()) == "999-abc"
+    mine = {**_t4("2026-06-11T07:00:00", 1, 20), "run_id": "999-abc"}
+    foreign = {**_t4("2026-06-11T07:00:01", 1, 99), "run_id": "777-xyz"}  # xdist worker
+    legacy = _t4("2026-06-11T07:00:02", 2, 30)  # no run_id → ts fallback keeps it
+    ev, pdir, lg = _write_run(tmp_path, [mine, foreign, legacy], log=log)
+    run = flow_audit.load_run(ev, pdir, lg, "")
+    series = flow_audit.iteration_series(run)
+    assert ("2026-06-11T07:00:00", 1, 20) in series
+    assert ("2026-06-11T07:00:02", 2, 30) in series  # legacy event kept
+    assert all(c != 99 for _, _, c in series)         # foreign run dropped
+
+
 def test_monitor_renders_flow_audit_row(tmp_path: Path) -> None:
     """Monitor reads the latest flow_audit.report and renders compact verdicts."""
     import monitor

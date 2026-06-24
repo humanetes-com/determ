@@ -1738,7 +1738,9 @@ project-specific import paths, type construction patterns, and hard constraints.
                 return "no_tests", block
             _sib = _gen_tests_path(abs_path, pass_n)
             _decl = _build_gen_tests_decl(_sib.name, pass_n, _allow_line,
-                                          cluster_cfg_attr=_cluster_gate_for(_current_cluster, existing_text, uncov_lines))
+                                          cluster_cfg_attr=_cluster_gate_for(
+                                              _current_cluster, existing_text, uncov_lines,
+                                              block, project_dir))
             _src_with_decl = base_text.rstrip() + _decl
             # P1 FixLoop port: verify→LLM-fix cycle on the shared driver.
             # The old hand-rolled loop terminated only on identical error
@@ -2065,7 +2067,9 @@ project-specific import paths, type construction patterns, and hard constraints.
                 _retry_pass_n = _next_gen_tests_n(abs_path)
                 _retry_sibling = _gen_tests_path(abs_path, _retry_pass_n)
                 _retry_decl = _build_gen_tests_decl(_retry_sibling.name, _retry_pass_n, _allow_line,
-                                                    cluster_cfg_attr=_cluster_gate_for(_current_cluster, existing_text, uncov_lines))
+                                                    cluster_cfg_attr=_cluster_gate_for(
+                                                        _current_cluster, existing_text, uncov_lines,
+                                                        _retry_block, project_dir))
                 _retry_sibling.write_text(_extract_gen_tests_body(_retry_block), encoding="utf-8")
                 abs_path.write_text(_current_text.rstrip() + _retry_decl, encoding="utf-8")
                 _retry_check = subprocess.run(

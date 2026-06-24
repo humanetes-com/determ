@@ -2576,13 +2576,14 @@ def test_stub_model() -> None:
     assert s.container == "impl Error" and s.sig_text.startswith("pub fn backtrace")
     assert s.key == ("src/error.rs", "backtrace")
     assert s.to_dict() == {"file": "src/error.rs", "fn_name": "backtrace",
-                           "container": "impl Error", "sig_text": "pub fn backtrace(&self) -> &Backtrace"}
+                           "container": "impl Error", "sig_text": "pub fn backtrace(&self) -> &Backtrace",
+                           "cfg_predicates": []}
 
     # From the hand-built fallback dict (no container/sig_text) — None coerces to "".
     s2 = Stub.from_dict({"file": "a.rs", "fn_name": "f", "container": None, "sig_text": None})
     assert s2.container == "" and s2.sig_text == "" and s2.key == ("a.rs", "f")
 
-    # from_record projects exactly the four fields.
+    # from_record projects the location/sig fields + the cfg chain (debt #17).
     assert Stub.from_record(fr) == s
     # tolerant: empty dict → all-default Stub, no crash.
     assert Stub.from_dict({}).key == ("", "")

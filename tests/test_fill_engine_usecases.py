@@ -155,6 +155,18 @@ def test_fn_fix_context_defaults() -> None:
     assert (c.container, c.impl_where, c.types_section, c.notes_section) == ("", "", "", "")
 
 
+def test_stub_carries_cfg_predicates_for_variant_splice() -> None:
+    # debt #17 residual: the Stub must thread the fn's cfg chain so the splice's
+    # locate_fn_by_record cfg tier can pick the right one of two cfg-variant fns
+    # sharing file+name+container+sig (the cap_limit pair).
+    s = Stub.from_dict({"file": "lib.rs", "fn_name": "cap_limit",
+                        "cfg_predicates": ["extra_cap"]})
+    assert s.cfg_predicates == ("extra_cap",)
+    assert s.to_dict()["cfg_predicates"] == ["extra_cap"]
+    # Tolerant of a missing key (hand-built / AST-less fallback) → empty tuple.
+    assert Stub.from_dict({"file": "lib.rs", "fn_name": "x"}).cfg_predicates == ()
+
+
 # ---- FillOneFn branches ----
 
 def test_fill_one_fully_exhausted_skips(tmp_path: Path) -> None:

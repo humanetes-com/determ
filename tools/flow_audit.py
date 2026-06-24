@@ -54,6 +54,7 @@ from pipeline_core.audit import (  # noqa: E402,F401  (re-exported for tests)
     audit,
     iteration_series,
     load_run,
+    parse_run_id,
     parse_run_start,
 )
 

@@ -95,7 +95,8 @@ class FillOneFn:
         # Resolve current offsets — file may have been modified by prior
         # fills in this pass, shifting byte positions. Re-enumerate to
         # find this specific record's current location.
-        loc_at = self.mut.locate_fn_by_record(file_path, fn_name, container, sig_text)
+        loc_at = self.mut.locate_fn_by_record(file_path, fn_name, container, sig_text,
+                                               rec.cfg_predicates)
         if loc_at is None:
             # Fall back to regex locator (for tests-fixture path where
             # the extractor binary isn't built).
@@ -251,7 +252,7 @@ class FillOneFn:
             ctx.splice_check_lock.acquire()
             _lock_released = False
             _splice_loc = self.mut.locate_fn_by_record(
-                file_path, fn_name, container, sig_text)
+                file_path, fn_name, container, sig_text, rec.cfg_predicates)
             if _splice_loc is not None:
                 _, _bs, _be, _ = _splice_loc
                 ok, delta = self.mut.splice_fn_body_at(file_path, _bs, _be, body)
@@ -271,7 +272,7 @@ class FillOneFn:
                 try:
                     _cur_text = file_path.read_text(encoding="utf-8")
                     _race_loc = self.mut.locate_fn_by_record(
-                        file_path, fn_name, container, sig_text)
+                        file_path, fn_name, container, sig_text, rec.cfg_predicates)
                     if _race_loc is not None:
                         _, _race_bs, _race_be, _ = _race_loc
                         _race_cur_body = _cur_text[_race_bs:_race_be]

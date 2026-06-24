@@ -74,6 +74,23 @@ def parse_run_start(log_lines: list[str]) -> str:
     return stamp
 
 
+def parse_run_id(log_lines: list[str]) -> str:
+    """`run_id=<id>` of the LAST 'PIPELINE STARTED' line (debt #21b), or "" when
+    absent (older logs). When present, `load_run` scopes events by this identity
+    so a concurrent writer (e.g. an xdist worker on the SHARED events.jsonl) can
+    never leak into the run's audit window."""
+    marker = "PIPELINE STARTED — "
+    token = "run_id="
+    run_id = ""
+    for line in log_lines:
+        if marker not in line:
+            continue
+        j = line.find(token)
+        if j != -1:
+            run_id = line[j + len(token):].split()[0].strip()
+    return run_id
+
+
 def load_run(events_path: Path, prompts_dir: Path | None,
              log_path: Path | None, since: str) -> RunData:
     log_lines: list[str] = []
@@ -81,6 +98,11 @@ def load_run(events_path: Path, prompts_dir: Path | None,
         log_lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
     if not since and log_lines:
         since = parse_run_start(log_lines)
+    # debt #21b: when the run's log carries a run_id, scope events by IDENTITY.
+    # An event that carries a DIFFERENT run_id is another process (a concurrent
+    # xdist worker on the shared events.jsonl) and is dropped regardless of ts;
+    # an event with NO run_id (older format) falls back to the ts window.
+    run_id = parse_run_id(log_lines) if log_lines else ""
     events: list[dict[str, Any]] = []
     corrupt = 0
     if events_path.exists():
@@ -91,6 +113,9 @@ def load_run(events_path: Path, prompts_dir: Path | None,
                 rec = json.loads(line)
             except ValueError:
                 corrupt += 1
+                continue
+            rec_run = rec.get("run_id", "")
+            if run_id and rec_run and rec_run != run_id:
                 continue
             if since and rec.get("ts", "") < since:
                 continue

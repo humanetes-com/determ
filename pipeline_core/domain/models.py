@@ -492,6 +492,11 @@ class Stub:
     fn_name: str = ""
     container: str = ""
     sig_text: str = ""
+    # debt #17 residual: the fn's accumulated `#[cfg(...)]` chain — lets the
+    # splice's `locate_fn_by_record` cfg tier pick the RIGHT one of two
+    # cfg-variant fns that share file+name+container+sig (the cap_limit pair),
+    # so each variant fills into its own body instead of colliding on the first.
+    cfg_predicates: tuple[str, ...] = ()
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> Stub:
@@ -500,12 +505,14 @@ class Stub:
             fn_name=d.get("fn_name", ""),
             container=d.get("container", "") or "",
             sig_text=d.get("sig_text", "") or "",
+            cfg_predicates=tuple(d.get("cfg_predicates") or ()),
         )
 
     @classmethod
     def from_record(cls, r: FnRecord) -> Stub:
         return cls(file=r.file, fn_name=r.fn_name,
-                   container=r.container, sig_text=r.sig_text)
+                   container=r.container, sig_text=r.sig_text,
+                   cfg_predicates=tuple(r.cfg_predicates or ()))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -513,6 +520,7 @@ class Stub:
             "fn_name": self.fn_name,
             "container": self.container,
             "sig_text": self.sig_text,
+            "cfg_predicates": list(self.cfg_predicates),
         }
 
     @property

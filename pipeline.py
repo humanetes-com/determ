@@ -25,6 +25,7 @@ from datetime import UTC, datetime
 from functools import partial as _partial
 from pathlib import Path
 from typing import TypeVar
+from uuid import uuid4 as _uuid4
 
 _RT = TypeVar("_RT")
 
@@ -116,6 +117,7 @@ from pipeline_core.adapters.workspace_scan import (
     _workspace_scanner_factory,
 )
 from pipeline_core.application import orchestrator as _orchestrator
+from pipeline_core.application import test_count as _tc_app
 from pipeline_core.application.cluster_augment import (
     AugmentContext,
     ClusterAugmentor,
@@ -215,6 +217,7 @@ from pipeline_core.domain import attribution as _domain_attribution
 from pipeline_core.domain import cfg as _cfg
 from pipeline_core.domain import cluster_plan as _cluster_plan
 from pipeline_core.domain import model_report as _model_report
+from pipeline_core.domain import test_count as _tc
 from pipeline_core.domain.bound_methods import (
     format_bound_methods_section as _format_bound_methods_section,
 )
@@ -344,10 +347,8 @@ from pipeline_core.domain.rust_scan import (
     gen_mod_body_start,
     has_no_std_attr,
     has_nonempty_test_fn,
-    is_attr_line,
     is_rust_item_boundary_line,
     is_structural_brace_line,
-    is_test_attr_line,
     is_type_decl_line,
     item_names,
     line_has_assertion,
@@ -722,6 +723,14 @@ _EVENTS_LOG  = os.getenv("PIPELINE_EVENTS_LOG",
 _PROMPTS_DIR = Path(os.getenv("PIPELINE_PROMPTS_DIR",
                               str(Path(__file__).parent / "logs" / "prompts")))
 _RUN_CONTEXT: dict[str, str] = {"product": "unknown", "pipeline_sha": "unknown"}
+# Per-process run identity (debt #21b): tags every event so the C10 audit can
+# scope a run by IDENTITY, not just a `ts >=` window — a concurrent xdist worker
+# (distinct pid) writing to the SHARED events.jsonl no longer pollutes the
+# window. pid+uuid: pid distinguishes concurrent processes, uuid guards pid reuse
+# across sequential runs that read the same file. Echoed in the PIPELINE STARTED
+# log line so `audit.load_run` recovers it.
+_RUN_ID = f"{os.getpid()}-{_uuid4().hex[:8]}"
+_RUN_CONTEXT["run_id"] = _RUN_ID
 
 
 def init_events(product: str) -> None:
@@ -761,6 +770,8 @@ def _emit(event: str, **fields) -> None:
             "ts": datetime.now(UTC).isoformat(timespec="milliseconds"),
             "product": _RUN_CONTEXT.get("product", "unknown"),
             "pipeline_sha": _RUN_CONTEXT.get("pipeline_sha", "unknown"),
+            # Per-run identity (debt #21b) — audit scopes by this, not just ts.
+            "run_id": _RUN_CONTEXT.get("run_id", ""),
             "event": event,
             # Emitting thread — per-thread stream logs key on this name, so
             # the C10 audit can prove concurrent calls never shared a stream.
@@ -1168,7 +1179,7 @@ def init_log(root: Path, nolog: bool = False, progress_mode: bool = False):
         pass
     global _RUN_STARTED_ISO
     _RUN_STARTED_ISO = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S")
-    _log(f"  PIPELINE STARTED — {datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S')} UTC  pipeline.py={_py_hash}{_git_hash}")
+    _log(f"  PIPELINE STARTED — {datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S')} UTC  pipeline.py={_py_hash}{_git_hash}  run_id={_RUN_ID}")
     _log(f"  CMD: {sys.executable} {' '.join(sys.argv)}")
     _log(f"  PIPELINE_PARALLELISM={_pipeline_parallelism()}")
     _log(f"{'=' * 60}")
@@ -2277,59 +2288,26 @@ def validate_task2_api_surface_conformance(
     return False, report
 
 
+def _test_count_deps() -> "_tc_app.TestCountDeps":
+    """Bind the impure collaborators for the relocated cluster test-count
+    orchestration (debt #29). Late-bound — the extractor/mod-record/file-cfg
+    helpers are defined further down this module."""
+    return _tc_app.TestCountDeps(
+        enumerate_fns=_enumerate_fns_via_extractor,
+        mod_records=_mod_records_cached,
+        file_cfg_predicate=_file_cfg_predicate,
+        is_gen_tests_file=_is_gen_tests_file,
+    )
+
+
 def _count_test_fns_cfg_aware(
     text: str,
     cfg_true: set[str],
     cfg_false: set[str],
     default_features: "frozenset[str] | set[str]" = frozenset(),
 ) -> int:
-    """Count `#[test]`-attributed fn declarations in `text` whose surrounding
-    `#[cfg(...)]` attributes evaluate true (or undecidable) under the given
-    cluster cfg sets. A `#[test]` fn with a `#[cfg(X)]` where X is in
-    cfg_false is NOT counted — cargo won't compile it under this cluster
-    and we shouldn't expect it to report a verdict.
-
-    Pragmatic line-level walker: for each line containing `#[test]`,
-    look at the contiguous block of `#[...]` attribute lines around the
-    fn declaration. Collect every `#[cfg(...)]` predicate. If any of
-    them evaluates false under (cfg_true, cfg_false), drop the fn.
-    Otherwise count it (true or undecidable predicates → still counted).
-    """
-    # A file-level inner attribute `#![cfg(P)]` gates the WHOLE file (idiomatic
-    # for integration-test files). When P is false for this cluster cargo
-    # compiles the file to an EMPTY test binary, so NONE of its `#[test]` fns
-    # run — they must not inflate the expected count, else the cluster is
-    # permanently 'incomplete' and the post-task3 fix loop churns on a phantom
-    # test (hardcrate `tests/cap.rs` under `stable`). Same decidable-false
-    # semantics as the runner-side file filter, so the count matches cargo.
-    if _file_top_cfg_excluded(text, cfg_true, cfg_false):
-        return 0
-    lines = text.splitlines()
-    count = 0
-    for i, line in enumerate(lines):
-        if not is_test_attr_line(line):
-            continue
-        # Walk backward across the attribute block above this #[test] to
-        # collect cfg predicates that gate this fn.
-        gates: list[str] = [p.strip() for p in _cfg.cfg_inline_predicates(line)]
-        j = i - 1
-        while j >= 0:
-            s = lines[j].strip()
-            if not s:
-                break  # blank line ends the attribute block
-            if s.startswith("//") or s.startswith("/*"):
-                j -= 1
-                continue
-            if not is_attr_line(lines[j]):
-                break  # not an attribute line — chain ends
-            gates.extend(p.strip() for p in _cfg.cfg_inline_predicates(lines[j]))
-            j -= 1
-        # If any gate keeps cargo from running this test, skip it. cargo-faithful:
-        # a custom `--cfg`/non-default feature off here = the test never runs.
-        if any(_cfg_false_for_cargo(g, cfg_true, cfg_false, default_features) for g in gates):
-            continue
-        count += 1
-    return count
+    """Shim → `pipeline_core.domain.test_count.count_test_fns_cfg_aware` (#29)."""
+    return _tc.count_test_fns_cfg_aware(text, cfg_true, cfg_false, default_features)
 
 
 def _file_active_for_cluster(
@@ -2340,37 +2318,10 @@ def _file_active_for_cluster(
     _depth: int = 0,
     default_features: "frozenset[str] | set[str]" = frozenset(),
 ) -> bool:
-    """Whether `file_path` is COMPILED under the cluster cfg: evaluate every
-    cfg predicate along its mod-declaration chain up to the crate root
-    (lib.rs/main.rs), via the syn extractor's ModRecords. A file whose chain
-    is decidably False never compiles — counting its tests inflated the
-    expected count and made the cluster permanently 'incomplete' (microcrate:
-    cap.rs counted under stable although `mod cap;` is extra_cap-gated).
-
-    Undecidable predicates and unmatched files count as ACTIVE — this helper
-    may under-exclude but never over-exclude (the strict verdict must not
-    silently shrink the oracle, FR-018)."""
-    stem = file_path.stem
-    if stem in ("lib", "main") or _depth > 32:
-        return True
-    recs = _mod_records_cached(src_dir)
-    if recs is None:
-        # Extractor unavailable: single-level gate (AST-less environments).
-        pred = _file_cfg_predicate(src_dir, file_path.name)
-        return pred is None or not _cfg_false_for_cargo(pred, cfg_true, cfg_false, default_features)
-    matches = [r for r in recs if r.name == stem or r.file == file_path.name]
-    if not matches:
-        return True
-    # Dual-form decls (`#[cfg(X)] mod m;` / `#[cfg(not(X))] mod m;`): the file
-    # is active if ANY declaration chain is active.
-    for rec in matches:
-        if any(_cfg_false_for_cargo(p, cfg_true, cfg_false, default_features)
-               for p in rec.cfg_predicates):
-            continue
-        if _file_active_for_cluster(src_dir, Path(rec.declared_in),
-                                    cfg_true, cfg_false, _depth + 1, default_features):
-            return True
-    return False
+    """Shim → `pipeline_core.application.test_count.file_active_for_cluster` (#29)."""
+    return _tc_app.file_active_for_cluster(
+        src_dir, file_path, cfg_true, cfg_false, _test_count_deps(),
+        _depth, default_features)
 
 
 def _count_test_fns_in_records(
@@ -2379,147 +2330,19 @@ def _count_test_fns_in_records(
     cfg_false: set[str],
     default_features: "frozenset[str] | set[str]" = frozenset(),
 ) -> int:
-    """Count test fns (`FnRecord.is_test`) from the syn extractor's typed records
-    whose accumulated `#[cfg(...)]` predicates don't gate them out of this cluster.
-
-    The extractor accumulates the WHOLE enclosing chain into `cfg_predicates`
-    (mod/impl/trait + the fn's own attrs), so an enclosing `#[cfg(test)] mod
-    tests` contributes `test` (a builtin cfg → never cargo-excluded) and a
-    `#[cfg(feature="x")] mod` contributes that gate — cargo-faithfully dropping
-    the test when the feature is off, which the line-walking marker scan
-    (contiguous attrs only) could miss. File-level inner `#![cfg(...)]` is NOT on
-    fn records (the enumerator walks items, not file attrs) — the caller still
-    applies `_file_top_cfg_excluded`."""
-    count = 0
-    for r in records:
-        if not r.get("is_test"):
-            continue
-        gates = r.get("cfg_predicates") or []
-        if any(_cfg_false_for_cargo(g, cfg_true, cfg_false, default_features) for g in gates):
-            continue
-        count += 1
-    return count
+    """Shim → `pipeline_core.domain.test_count.count_test_fns_in_records` (#29)."""
+    return _tc.count_test_fns_in_records(records, cfg_true, cfg_false, default_features)
 
 
 def _count_active_tests_for_cluster(
     project_dir: Path,
     cluster: "BuildCluster | None",
 ) -> int:
-    """FR-024 strict-verdict helper: how many `#[test]` fns SHOULD have run
-    if cargo test compiles every test source active under `cluster`'s cfg.
-
-    Counts three sources, all cfg-filtered against the cluster's
-    (cfg_true, cfg_false) sets so cargo-cannot-compile tests don't inflate
-    the expected count:
-
-      1. `tests/**/*.rs` — integration tests; per-test cfg attrs filter.
-      2. `src/*.gen_tests_*.rs` — gen_tests siblings; included only if
-         the parent file's `#[path] mod gen_tests_N;` decl is active
-         under this cluster's cfg (the decl carries the gate).
-      3. `src/**/*.rs` (excluding gen_tests siblings) — per-test cfg
-         attrs filter, same as tests/.
-
-    Returns the cfg-aware total. Used to gate SUCCESS: cargo must report
-    at least this many tests across all binaries before TASK 3 accepts.
-    """
-    if cluster is None:
-        cfg_true: set[str] = set()
-        cfg_false: set[str] = set()
-    else:
-        cfg_true = set(getattr(cluster, "cfg_true", []) or [])
-        cfg_false = set(getattr(cluster, "cfg_false", []) or [])
-
-    # Crate default features — a `feature = "X"` that IS a default is ON even when
-    # the cluster sets don't list it, so it must NOT be force-excluded (FR-018).
-    cargo_toml = project_dir / "Cargo.toml"
-    default_features: frozenset[str] = frozenset()
-    if cargo_toml.exists():
-        try:
-            default_features = frozenset(
-                _cargo_default_features(cargo_toml.read_text(encoding="utf-8", errors="replace")))
-        except Exception:
-            default_features = frozenset()
-
-    # Typed-record path (FR-024 fraud-safety): count test fns off the syn
-    # extractor's FnRecords (is_test + accumulated cfg_predicates) rather than a
-    # line-level marker scan. Enumerated ONCE over the whole crate, indexed by
-    # crate-relative path. A file absent from the index (extractor unavailable,
-    # parse failure, or no fns) falls back to the marker scan — conservative:
-    # never undercount (an undercount manufactures TASK-3 SUCCESS, FR-022), and
-    # cargo can't run a file that doesn't parse anyway, so an over-count merely
-    # keeps the cluster 'incomplete'.
-    fn_recs = _enumerate_fns_via_extractor(project_dir)
-    by_file: dict[str, list[dict]] | None = None
-    if fn_recs is not None:
-        by_file = {}
-        for r in fn_recs:
-            by_file.setdefault(r.get("file", ""), []).append(r)
-
-    def _count_file(rel: str, text: str) -> int:
-        # File-level inner `#![cfg(P)]` gates the whole compilation unit and is
-        # not carried on fn records — apply it here (both paths agree below).
-        if _file_top_cfg_excluded(text, cfg_true, cfg_false):
-            return 0
-        if by_file is not None and rel in by_file:
-            return _count_test_fns_in_records(
-                by_file[rel], cfg_true, cfg_false, default_features)
-        return _count_test_fns_cfg_aware(text, cfg_true, cfg_false, default_features)
-
-    total = 0
-    # 1. tests/**/*.rs — cfg-filtered per-test.
-    tests_dir = project_dir / "tests"
-    if tests_dir.is_dir():
-        for tp in tests_dir.rglob("*.rs"):
-            try:
-                text = tp.read_text(encoding="utf-8", errors="replace")
-            except Exception:
-                continue
-            total += _count_file(tp.relative_to(project_dir).as_posix(), text)
-
-    src_dir = project_dir / "src"
-    if not src_dir.is_dir():
-        return total
-
-    # 2. gen_tests siblings — gated by their parent #[path] decl (R7: decl scan).
-    for parent in src_dir.glob("*.rs"):
-        if _is_gen_tests_file(parent.name):
-            continue
-        # A parent file that never compiles under this cluster (mod-decl chain
-        # cfg'd out) takes its gen_tests siblings with it.
-        if not _file_active_for_cluster(src_dir, parent, cfg_true, cfg_false, 0, default_features):
-            continue
-        try:
-            ptext = parent.read_text(encoding="utf-8", errors="replace")
-        except Exception:
-            continue
-        for decl in _gen_tests_decl_blocks(ptext):
-            gate = decl.gate.strip()
-            sib_name = decl.sibling_name or ""
-            if gate:
-                v = _eval_cfg_pred(gate, cfg_true, cfg_false)
-                if v is False:
-                    continue
-            sib = src_dir / sib_name
-            if not sib.exists():
-                continue
-            try:
-                stext = sib.read_text(encoding="utf-8", errors="replace")
-            except Exception:
-                continue
-            total += _count_file(sib.relative_to(project_dir).as_posix(), stext)
-
-    # 3. src/**/*.rs (excluding gen_tests siblings) — inline test mods.
-    for srf in src_dir.rglob("*.rs"):
-        if _is_gen_tests_file(srf.name):
-            continue
-        if not _file_active_for_cluster(src_dir, srf, cfg_true, cfg_false, 0, default_features):
-            continue
-        try:
-            stext = srf.read_text(encoding="utf-8", errors="replace")
-        except Exception:
-            continue
-        total += _count_file(srf.relative_to(project_dir).as_posix(), stext)
-    return total
+    """Shim → `pipeline_core.application.test_count.count_active_tests_for_cluster`
+    (#29). FR-024 strict-verdict gate; impure collaborators injected via
+    `_test_count_deps()`."""
+    return _tc_app.count_active_tests_for_cluster(
+        project_dir, cluster, _test_count_deps())
 
 
 # slice 5b foundation: relocated to pipeline_core.domain.test_results (imported at top).
@@ -3237,11 +3060,10 @@ def _file_top_cfg_excluded(content: str, cfg_true: set[str], cfg_false: set[str]
 
     File-level inner `#![cfg(...)]` predicates are read by the structured
     `_cfg.crate_cfg_predicates` char-scanner (regex-free since the P7 migration).
+
+    Shim → `pipeline_core.domain.test_count.file_top_cfg_excluded` (debt #29).
     """
-    for pred in _cfg.crate_cfg_predicates(content):
-        if _eval_cfg_pred(pred.strip(), cfg_true, cfg_false) is False:
-            return True
-    return False
+    return _tc.file_top_cfg_excluded(content, cfg_true, cfg_false)
 
 
 def _eval_cfg_pred(pred: str, cfg_true: set[str], cfg_false: set[str]) -> "bool | None":
@@ -7295,6 +7117,7 @@ def _invalidate_mod_records_cache() -> None:
     task2 regeneration). Cheap enough that callers should err on the side
     of invalidation."""
     _MOD_RECORDS_CACHE.clear()
+    _CLUSTER_SPECIFIC_SYMS_CACHE.clear()  # #26 residual: same invalidation lifecycle
 
 
 def _file_cfg_predicate_regex_fallback(
@@ -8096,9 +7919,6 @@ from pipeline_core.domain.generation import (
     SkeletonConfig,  # noqa: E402
     Task1Config,  # noqa: E402
     Task2Config,  # noqa: E402
-)
-from pipeline_core.domain.generation import (
-    gen_tests_decl_blocks as _gen_tests_decl_blocks,  # noqa: E402
 )
 from pipeline_core.domain.generation import (  # noqa: E402
     gen_tests_sibling_number as _gen_tests_sibling_number,
@@ -9735,7 +9555,28 @@ def _cluster_cfg_attr(cluster) -> str:
     return "all(" + ", ".join(terms) + ")"
 
 
-def _cluster_gate_for_sibling(cluster, source_text: str, uncov_lines) -> str:
+_CLUSTER_SPECIFIC_SYMS_CACHE: dict[str, frozenset[str]] = {}
+
+
+def _cluster_specific_symbols(project_dir: "Path | None",
+                              contexts: "list") -> frozenset[str]:
+    """Crate fn names compiled OUT under some cluster (#26 residual), cached per
+    project. Enumerated once via the syn extractor; the non-test fn cfg gates are
+    stable across a cluster's augmentation (added gen_tests siblings are
+    `#[cfg(test)]`-only → never cluster-specific), so caching is safe. Cleared
+    alongside `_MOD_RECORDS_CACHE`."""
+    if project_dir is None:
+        return frozenset()
+    key = str(project_dir)
+    if key not in _CLUSTER_SPECIFIC_SYMS_CACHE:
+        recs = _enumerate_fns_via_extractor(project_dir) or []
+        _CLUSTER_SPECIFIC_SYMS_CACHE[key] = _cfg.cluster_specific_symbol_names(recs, contexts)
+    return _CLUSTER_SPECIFIC_SYMS_CACHE[key]
+
+
+def _cluster_gate_for_sibling(cluster, source_text: str, uncov_lines,
+                              sibling_body: str = "",
+                              project_dir: "Path | None" = None) -> str:
     """#26: the cfg gate to stamp on a gen_tests sibling. Gate it to its cluster
     only when the lines it targets are cluster-SPECIFIC (live inside a `#[cfg]`
     region that some cluster compiles out); a cluster-agnostic test is emitted
@@ -9744,14 +9585,23 @@ def _cluster_gate_for_sibling(cluster, source_text: str, uncov_lines) -> str:
     (stable) cluster shares — a non-default cluster keeps its gate (it runs after
     stable, so its agnostic lines are already covered; its real work is the gated
     delta). This is the documented-safe criterion: a `not(egma)` stable-only test
-    stays gated to stable, never leaking into the nightly harness."""
+    stays gated to stable, never leaking into the nightly harness.
+
+    #26 residual: even when the TARGET lines are agnostic, a body that CALLS a
+    cluster-specific symbol (a fn compiled out under some cluster) would fail to
+    compile if shared ungated into that cluster's harness. So keep the gate when
+    `sibling_body` references any cluster-specific symbol — only a body that is
+    both line-agnostic AND symbol-agnostic is shared."""
     base_gate = _cluster_cfg_attr(cluster)
     if not base_gate or not getattr(cluster, "is_default", False):
         return base_gate
     contexts = [_cfg.CfgSet.of(cfg_true=c.cfg_true, cfg_false=c.cfg_false) for c in _SCOPE.all]
     if _cfg.lines_are_cluster_specific(source_text, set(uncov_lines or ()), contexts):
         return base_gate
-    return ""   # cluster-agnostic → shareable across clusters
+    if _cfg.body_uses_cluster_specific_symbol(
+            sibling_body, _cluster_specific_symbols(project_dir, contexts)):
+        return base_gate   # body touches a cluster-gated symbol → must stay gated
+    return ""   # cluster- AND symbol-agnostic → shareable across clusters
 
 
 def _build_gen_tests_decl(sibling_name: str, n: "int | str", allow_line: str,
