@@ -62,3 +62,23 @@ def line_to_fn_record(
         if max(s, line_start) < min(e, line_end):
             return rec
     return None
+
+
+def union_unattributed_stubs(
+    frontier: Frontier, remaining_stubs: list[tuple[str, str]],
+) -> Frontier:
+    """Add every remaining `unimplemented!()` stub to the frontier so a helper
+    that NO failing test attributes directly (a leaf called only transitively,
+    e.g. inside another fn's test) still gets filled in phase-c.
+
+    Without this, an un-attributed stub survives phase-c entirely — it never
+    enters the test→fn frontier, so it's only filled by the post-TASK3
+    whole-file sweep, while its tested callers thrash as "blocked by an unfilled
+    sibling stub" until the cluster plateaus. An un-attributed stub carries an
+    EMPTY test set (the u2 gate then accepts it on compile; the outer TDD loop
+    re-tests). Already-attributed keys keep their test set unchanged. Returns a
+    new dict; inputs are not mutated."""
+    merged: Frontier = {key: set(tests) for key, tests in frontier.items()}
+    for key in remaining_stubs:
+        merged.setdefault(key, set())
+    return merged

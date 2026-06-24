@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from pipeline_core.domain.attribution import union_unattributed_stubs
 from pipeline_core.domain.models import BuildCluster, Frontier
 from pipeline_core.domain.refine import Attempt, LoopState
 from pipeline_core.domain.test_results import parse_failed_tests, parse_test_counts
@@ -207,6 +208,15 @@ def run_phase_c_tdd(
             test_reverse_map, cluster.name,
         )
         frontier = deps.filter_test_targets(frontier, src_dir)
+
+        # Union remaining cluster-active stubs into the frontier so a helper
+        # that no failing test attributes directly (called only transitively)
+        # still fills in phase-c instead of surviving to the post-TASK3 sweep
+        # while its tested callers thrash as "blocked by an unfilled sibling
+        # stub". order_frontier sorts leaf-first so helpers fill ahead of their
+        # callers; the D3 filter + permanently_exhausted still bound re-entry.
+        frontier = union_unattributed_stubs(
+            frontier, deps.scan_unimplemented_for_cluster(target_src_dir, cluster))
 
         # D3 — re-entry filter for fns that already exhausted the per-fn
         # fix loop in a prior iter (avoid burning compute on the same fn
