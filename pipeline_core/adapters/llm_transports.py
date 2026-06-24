@@ -321,7 +321,7 @@ class OllamaTransport(_BaseTransport):
 
     def _stream_compat(self, messages: list[dict[str, Any]], model: str,
                        max_tokens: int | None, enable_thinking: bool) -> Iterator[Delta]:
-        from openai import OpenAI
+        from openai import APIConnectionError, OpenAI
         client = OpenAI(base_url=self._base_url, api_key="ollama", timeout=300)
         # Qwen3 compat layer has no think param — /no_think suppresses reasoning.
         if not enable_thinking and messages and messages[-1]["role"] == "user":
@@ -329,22 +329,30 @@ class OllamaTransport(_BaseTransport):
                 {**messages[-1], "content": "/no_think " + messages[-1]["content"]}
             ]
         splitter = InlineThinkSplitter()
-        with client.chat.completions.create(  # type: ignore[union-attr]
-            model=model,
-            messages=messages,  # type: ignore[arg-type]
-            max_tokens=max_tokens,
-            extra_body={"options": {"num_ctx": self._num_ctx}},
-            stream=True,
-        ) as stream:
-            for chunk in stream:
-                delta = chunk.choices[0].delta.content
-                if not delta:
-                    continue
-                c, r = splitter.feed(delta)
-                if r:
-                    yield Delta(reasoning=r)
-                if c:
-                    yield Delta(content=c)
+        # Route connection/timeout failures (httpx + the OpenAI SDK's own
+        # APIConnectionError wrapper) through TransportUnavailable so the
+        # controller's wait_until_ready() readiness poll absorbs a server
+        # restart/warmup instead of aborting the run (debt #30).
+        try:
+            with client.chat.completions.create(  # type: ignore[union-attr]
+                model=model,
+                messages=messages,  # type: ignore[arg-type]
+                max_tokens=max_tokens,
+                extra_body={"options": {"num_ctx": self._num_ctx}},
+                stream=True,
+            ) as stream:
+                for chunk in stream:
+                    delta = chunk.choices[0].delta.content
+                    if not delta:
+                        continue
+                    c, r = splitter.feed(delta)
+                    if r:
+                        yield Delta(reasoning=r)
+                    if c:
+                        yield Delta(content=c)
+        except (httpx.ReadTimeout, httpx.ConnectError, httpx.RemoteProtocolError,
+                APIConnectionError) as exc:
+            raise TransportUnavailable(str(exc)) from exc
         c, r = splitter.finish()
         if r:
             yield Delta(reasoning=r)
@@ -487,26 +495,33 @@ class SGLangTransport(_BaseTransport):
     def stream(self, messages: list[dict[str, Any]], *, model: str,
                max_tokens: int | None, enable_thinking: bool,
                meta: StreamMeta) -> Iterator[Delta]:
-        from openai import OpenAI
+        from openai import APIConnectionError, OpenAI
         client = OpenAI(base_url=self._base_url, api_key="sglang", timeout=120)
         extra_body: dict[str, Any] = {}
         if enable_thinking and self._thinking_budget > 0:
             extra_body["thinking_budget"] = self._thinking_budget
-        with client.chat.completions.create(  # type: ignore[union-attr]
-            model=self._model_name,
-            messages=messages,  # type: ignore[arg-type]
-            max_tokens=max_tokens,
-            extra_body=extra_body or None,
-            stream=True,
-        ) as stream:
-            for chunk in stream:
-                delta = chunk.choices[0].delta
-                reasoning = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None)
-                if reasoning:
-                    yield Delta(reasoning=reasoning)
-                text = getattr(delta, "content", None)
-                if text:
-                    yield Delta(content=text)
+        # See _stream_compat: wrap connection/timeout failures as
+        # TransportUnavailable so the controller's readiness poll handles a
+        # server restart/warmup rather than aborting the run (debt #30).
+        try:
+            with client.chat.completions.create(  # type: ignore[union-attr]
+                model=self._model_name,
+                messages=messages,  # type: ignore[arg-type]
+                max_tokens=max_tokens,
+                extra_body=extra_body or None,
+                stream=True,
+            ) as stream:
+                for chunk in stream:
+                    delta = chunk.choices[0].delta
+                    reasoning = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None)
+                    if reasoning:
+                        yield Delta(reasoning=reasoning)
+                    text = getattr(delta, "content", None)
+                    if text:
+                        yield Delta(content=text)
+        except (httpx.ReadTimeout, httpx.ConnectError, httpx.RemoteProtocolError,
+                APIConnectionError) as exc:
+            raise TransportUnavailable(str(exc)) from exc
 
     def followup_messages(self, base_messages: list[dict[str, Any]], reasoning_text: str,
                           *, model: str) -> list[dict[str, Any]]:

@@ -142,7 +142,8 @@ class ClusterAugmentor:
                         "Install with: cargo install cargo-tarpaulin"
                     )
 
-                tel.log(f"\nTASK 0c [{cluster.name}]: Augmenting '{mod_name}' to 100% coverage...")
+                tel.log(f"\nTASK 0c [{cluster.name}]: Augmenting '{mod_name}' "
+                        f"to {ctx.target_pct:.0f}% coverage...")
                 tel.mark_phase(project_dir, f"task0c/{cluster.name}/{mod_name}", "in_progress",
                                detail="starting", source_hash=src_hash)
                 tel.set_current(project_dir, f"task0c/{cluster.name}/{mod_name} / starting")

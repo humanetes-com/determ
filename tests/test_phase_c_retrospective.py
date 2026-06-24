@@ -11,6 +11,7 @@ from pipeline_core.application.reconstruct.retrospective import (
     PhaseCRetroDeps,
     diagnose_phase_c,
 )
+from pipeline_core.prompts.retrospective import build_phase_c_retro_prompt
 
 
 def _deps(answer=None, raises=False):
@@ -51,3 +52,32 @@ def test_happy_parse():
     out = _call(_deps(answer="CATEGORY: WRONG_TYPE_CHOICE\nGUIDANCE: use NonNull"))
     assert out["category"] == "WRONG_TYPE_CHOICE"
     assert "NonNull" in out["guidance"]
+
+
+def _retro_prompt() -> str:
+    return build_phase_c_retro_prompt(
+        "f", "fn f<E>() where E: Bound", "impl X", "src/x.rs", "c",
+        "let x = 1;", "E0277", 3, "", "",
+        failed_body_cap=2000, fix_err_cap=2000)
+
+
+def test_prompt_forbids_signature_edits_body_only():
+    # R1 (debt #28): the retro must constrain guidance to BODY-ONLY edits so it
+    # never proposes a frozen-signature/bound/where change → no re-submit thrash.
+    p = _retro_prompt()
+    assert "ONLY change the function BODY" in p
+    assert "FROZEN by the skeleton" in p
+    assert "`where` clause" in p
+
+
+def test_prompt_routes_unsatisfiable_bound_to_skip():
+    p = _retro_prompt()
+    # A bound that no in-scope body value can satisfy → GENUINELY_HARD skip.
+    assert "GENUINELY_HARD" in p
+    assert "NO in-scope value or call available to the body satisfies" in p
+
+
+def test_prompt_uses_wrong_right_examples():
+    # CLAUDE.md: injected guidance must show concrete WRONG→RIGHT, not jargon.
+    p = _retro_prompt()
+    assert "WRONG:" in p and "RIGHT:" in p

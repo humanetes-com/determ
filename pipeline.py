@@ -3229,8 +3229,8 @@ def _file_top_cfg_excluded(content: str, cfg_true: set[str], cfg_false: set[str]
     """Return True if the file has a top-level `#![cfg(...)]` that evaluates
     to false. Conservative: returns False (don't exclude) on any uncertainty.
 
-    We use a narrow regex match for the common case `#![cfg(PRED)]` rather
-    than full AST parsing — test files are small and the pattern is common.
+    File-level inner `#![cfg(...)]` predicates are read by the structured
+    `_cfg.crate_cfg_predicates` char-scanner (regex-free since the P7 migration).
     """
     for pred in _cfg.crate_cfg_predicates(content):
         if _eval_cfg_pred(pred.strip(), cfg_true, cfg_false) is False:
