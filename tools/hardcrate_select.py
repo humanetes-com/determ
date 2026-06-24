@@ -51,6 +51,13 @@ TRAPS: dict[str, dict] = {
                         "pub use sprawl::{abs_diff, clamp_u8, classify, count_set_bits, "
                         "digit_sum, is_ascii_upper, max3, min3, nth_byte, parity, "
                         "reverse_nibbles, saturating_sub_u8, sign, to_lower, Category};"]},
+    # level 4 — FROZEN-BOUND MISMATCH (R2/R3 / debt #28 reproducer): an impl with a
+    # frozen `where T: Describe` bound whose body must call the bound-provided
+    # `T::describe`; the Display/Debug attractors are un-carried bounds → E0277. Pins
+    # that the BOUND_METHODS prompt block lets the model fill via the bound method
+    # without thrash / a GENUINELY_HARD skip.
+    "label":   {"level": 4, "src": "src/label.rs", "test": "tests/label.rs",
+                "lib": ["mod label;", "pub use label::{Describe, Reason, Tagged};"]},
 }
 
 

@@ -68,6 +68,7 @@ from pipeline_core.adapters.cargo import CargoEnv
 from pipeline_core.adapters.cluster_merge import ClusterMerger
 from pipeline_core.adapters.commit_gate import CallableCommitGate
 from pipeline_core.adapters.coverage import CoverageDeps
+from pipeline_core.adapters.downstream_api import scan_downstream_api
 from pipeline_core.adapters.failure_journal import FileFailureJournal
 from pipeline_core.adapters.file_constraints import FileConstraintsReader
 from pipeline_core.adapters.fill_engine_roles import (
@@ -136,6 +137,15 @@ from pipeline_core.application.reconstruct import group_fill as _group_fill
 from pipeline_core.application.reconstruct import impl_fill as _impl_fill
 from pipeline_core.application.reconstruct import phase_c_tdd as _phase_c_tdd
 from pipeline_core.application.reconstruct.failure_analysis import FailureAnalysisStep
+from pipeline_core.application.reconstruct.failure_diagnosis import (
+    classify_phase_c_test_failures as _classify_phase_c_test_failures_impl,
+)
+from pipeline_core.application.reconstruct.failure_diagnosis import (
+    implicated_fns_from_cargo_errors as _implicated_fns_from_cargo_errors_impl,
+)
+from pipeline_core.application.reconstruct.failure_diagnosis import (
+    record_tdd_regression as _record_tdd_regression_impl,
+)
 from pipeline_core.application.reconstruct.fix_unit import FixUnitDeps
 from pipeline_core.application.reconstruct.generate_fix import (
     GenerateFixDeps,
@@ -154,6 +164,9 @@ from pipeline_core.application.reconstruct.retrospective import (
     diagnose_phase_c as _diagnose_phase_c,
 )
 from pipeline_core.application.reconstruct.run_context import RunContext
+from pipeline_core.application.reconstruct.test_locator import (
+    find_tests_for_fn as _find_tests_for_fn,
+)
 from pipeline_core.application.refine_loop import run_callback_loop as _improvement_loop
 from pipeline_core.application.strip_bake import (
     StripBakeDeps,
@@ -316,22 +329,13 @@ from pipeline_core.domain.rust_idents import (
     declares_fn,
     defined_type_names,
     defines_type,
-    first_fn_decl_name,
     fn_decl_names,
     fn_reference_counts,
     identifier_tokens,
-    impl_self_type,
     is_fn_signature_line,
     is_unsafe_fn,
-    mask_identifiers,
     mixed_case_identifiers,
     use_symbol_paths,
-)
-from pipeline_core.domain.rust_idioms import (
-    fn_pointer_field_calls,
-    self_constructor_calls,
-    struct_literals,
-    unsafe_block_chains,
 )
 from pipeline_core.domain.rust_macros import macro_definitions
 from pipeline_core.domain.rust_scan import (
@@ -340,7 +344,6 @@ from pipeline_core.domain.rust_scan import (
     branch_guard_label,
     contains_decl_keyword,
     contains_word,
-    count_macro_calls,
     count_test_attrs,
     count_word,
     find_mod_opener,
@@ -352,10 +355,8 @@ from pipeline_core.domain.rust_scan import (
     is_type_decl_line,
     item_names,
     line_has_assertion,
-    module_use_imports,
     named_fn_decl_start,
     replace_elision_placeholders,
-    rust_code_fences,
     starts_with_pub,
     strip_comment_spans,
     strip_line_block_comments,
@@ -375,9 +376,7 @@ from pipeline_core.domain.test_results import (
     insert_no_run,
     is_compiler_output_line,
     parse_error_code_note,
-    parse_phase_c_line,
     per_file_test_stats,
-    rustc_diagnostic_locations,
     rustc_error_codes,
     rustc_error_signatures,
     strip_ansi,
@@ -426,6 +425,9 @@ from pipeline_core.prompts import runtime as _prompts_runtime
 from pipeline_core.prompts import shaping as _shaping
 from pipeline_core.prompts.context import (
     PerFnFixSections,
+)
+from pipeline_core.prompts.crate_idioms import (
+    extract_crate_idioms as _extract_crate_idioms,
 )
 from pipeline_core.prompts.per_fn import (
     build_per_fn_fix_prompt as _build_per_fn_fix_prompt,
@@ -1857,106 +1859,6 @@ _WS_SCAN_DEPS = _workspace_scan.WorkspaceScanDeps(
     skip_dir_names=frozenset(SKIP_DIR_NAMES), parse_cmd=_parse_cmd)
 
 
-def scan_downstream_api(project_dir: Path, module_name: str) -> str:
-    """
-    Scan all .rs source files in the workspace for 'use <module_name>::...' imports.
-    Returns a formatted hint telling the model what the module must publicly export.
-    Used to give argh_shared (and similar leaf crates) context about their API contract
-    even though they have no upstream locked deps to learn from.
-    """
-    direct_imports: set[str] = set()
-    submodule_imports: dict[str, set[str]] = {}
-
-    for p in sorted(project_dir.rglob("*.rs")):
-        rel = p.relative_to(project_dir)
-        if any(part in SKIP_DIR_NAMES for part in rel.parts):
-            continue
-        try:
-            text = p.read_text(errors='replace')
-        except Exception:
-            continue
-
-        brace_groups, submod_brace, submod_single = module_use_imports(text, module_name)
-
-        # use module::{A, B, C}
-        for inner in brace_groups:
-            for item in inner.split(','):
-                item = item.strip()
-                if item:
-                    direct_imports.add(item)
-
-        # use module::submod::{A, B}
-        for submod, inner in submod_brace:
-            for item in inner.split(','):
-                item = item.strip()
-                if item:
-                    submodule_imports.setdefault(submod, set()).add(item)
-
-        # use module::submod::Item  (single item, no braces)
-        for submod, item in submod_single:
-            if submod[0].islower() and item[0].isupper():
-                submodule_imports.setdefault(submod, set()).add(item)
-
-    # Also scan functional_requirements.md for type names used in code blocks that look like
-    # internal types (not imported from outside). These must be defined in the module itself.
-    internal_types: set[str] = set()
-    func_req_path = project_dir / "functional_requirements.md"
-    if func_req_path.exists():
-        try:
-            func_text = func_req_path.read_text(errors='replace')
-            # Find type names in code blocks that are not imported from elsewhere
-            # Look for PascalCase identifiers in Rust signatures inside ```rust blocks
-            for code in rust_code_fences(func_text):
-                # Find PascalCase identifiers
-                for name in camelcase_type_names(code):
-                    # Skip if it's a stdlib/known type or already in our direct/submodule imports
-                    if name in ('Result', 'Option', 'String', 'Vec', 'Ok', 'Err', 'Some', 'None',
-                                'Box', 'Arc', 'Rc', 'Fn', 'FnMut', 'FnOnce', 'Send', 'Sync',
-                                'Self', 'Args', 'bool', 'usize', 'str'):
-                        continue
-                    if name in direct_imports:
-                        continue
-                    if any(name in v for v in submodule_imports.values()):
-                        continue
-                    internal_types.add(name)
-        except Exception:
-            pass
-
-    if not direct_imports and not submodule_imports and not internal_types:
-        return ""
-
-    lines = [
-        f"\n⚠️  REQUIRED PUBLIC API for `{module_name}` (inferred from workspace source files):",
-        f"Downstream crates import from `{module_name}` as follows — you MUST match these paths exactly:",
-    ]
-
-    if submodule_imports:
-        lines.append("")
-        lines.append("Sub-module paths (must be separate .rs files declared with `pub mod` in lib.rs):")
-        for submod in sorted(submodule_imports.keys()):
-            exports = ', '.join(sorted(submodule_imports[submod]))
-            lines.append(f"  {module_name}/src/{submod}.rs  →  pub mod {submod};  // exports: {exports}")
-        lines.append("")
-        lines.append("lib.rs MUST contain these exact pub mod declarations:")
-        for submod in sorted(submodule_imports.keys()):
-            lines.append(f"  pub mod {submod};")
-
-    if direct_imports:
-        lines.append("")
-        lines.append(f"Types imported directly from the crate root (`use {module_name}::TypeName`):")
-        for item in sorted(direct_imports):
-            lines.append(f"  pub use ...::{item};  // or define directly in lib.rs")
-
-    if internal_types:
-        lines.append("")
-        lines.append("Internal types referenced in functional requirements — MUST be defined in lib.rs at the crate root:")
-        lines.append("⚠️  DO NOT put these in submodules. Define them directly in lib.rs so all submodules can use `crate::TypeName`.")
-        for item in sorted(internal_types):
-            lines.append(f"  pub struct {item}; // define in lib.rs, NOT in submodules")
-
-    return '\n'.join(lines) + '\n'
-
-
 def scan_workspace_structure(project_dir: Path) -> str:
     """
     Produce a markdown workspace map for TASK 2.
@@ -2931,7 +2833,8 @@ class _LateStructure:
 # seam keeps working; the AttributionDeps record is the clean DI rail a fake can fill.
 _ATTR_DEPS = _attribution.AttributionDeps(
     structure=_LateStructure(),
-    classify=lambda *a, **k: _classify_phase_c_test_failures(*a, **k),
+    classify=lambda *a, **k: _classify_phase_c_test_failures_impl(
+        *a, **k, ask=ask, log=_log, model=_TASK0C_MODEL, err_cap=_FIX_ERR_CAP),
     locate_fn=lambda *a, **k: _locate_fn(*a, **k),
     run_check_diag=lambda *a, **k: _run_cargo_check_diag(*a, **k),
     derive_check_only_cmd=lambda c: _derive_check_only_cmd(c),
@@ -4515,116 +4418,6 @@ def _collect_crate_macros(src_dir: Path, max_chars: int = max(6_000, SINGLE_CALL
     return joined
 
 
-def _find_tests_for_fn(
-    tests_dir_files: list[Path],
-    fn_name: str,
-    file_rel: str = "",
-    src_dir: Path | None = None,
-    max_blocks: int = 4,
-    container: str = "",
-) -> list[tuple[str, str]]:
-    """Layered heuristic to find tests relevant to one fn.
-
-    Order of attempts (each adds to the candidate set):
-      0. Container-type filter (P5.4) — when fn_name is generic (`new`,
-         `fmt`, `source`, etc.), match by the type name extracted from
-         `container` rather than the fn name alone. Tests for
-         `impl Display for ContextError::fmt` only count when they
-         mention "ContextError".
-      1. Direct name reference — tests calling `fn_name` literally.
-      2. File-stem match — for fn in `src/ensure.rs`, include tests whose
-         filename contains "ensure".
-      3. Macro-aware — if `src_dir` is given and `file_rel`'s file defines
-         macros, include tests that call those macros by name.
-
-    Results ranked by relevance score (container > direct > stem > macro)
-    then by hit count. Returns up to `max_blocks` (path, content) tuples.
-    """
-    if not fn_name and not file_rel:
-        return []
-    # Build candidate set with scores.
-    scored: dict[Path, tuple[int, int]] = {}  # path → (tier, hits) — lower tier = better
-
-    # P5.4 Tier 0: when fn_name is generic (very common: new, fmt, source,
-    # clone, drop, default), filter by the container's TYPE NAME so we don't
-    # match every test that mentions e.g. "new". Falls back to the regular
-    # name-based search if the container doesn't yield a clear type name.
-    _GENERIC_FN_NAMES = {
-        "new", "fmt", "source", "clone", "default", "drop", "next",
-        "from", "into", "deref", "deref_mut", "as_ref", "as_mut",
-        "hash", "eq", "cmp", "partial_cmp", "from_str", "anyhow_kind",
-        "provide",
-    }
-    container_type = ""
-    if container:
-        # "for X" of "impl Trait for X<...>", else "impl X<...>" (inherent).
-        container_type = impl_self_type(container) or ""
-    if fn_name in _GENERIC_FN_NAMES and container_type:
-        for tf in tests_dir_files:
-            try:
-                txt = tf.read_text(encoding="utf-8")
-            except Exception:
-                continue
-            n = count_word(txt, container_type)
-            if n:
-                cur = scored.get(tf, (99, 0))
-                # Tier 0 = highest priority. Hit count = type mentions.
-                scored[tf] = (0, max(cur[1], n))
-
-    # Tier 1: direct name.
-    if fn_name:
-        for tf in tests_dir_files:
-            try:
-                txt = tf.read_text(encoding="utf-8")
-            except Exception:
-                continue
-            n = count_word(txt, fn_name)
-            if n:
-                cur = scored.get(tf, (99, 0))
-                scored[tf] = (min(cur[0], 1), max(cur[1], n))
-
-    # Tier 2: file-stem match.
-    if file_rel:
-        stem = Path(file_rel).stem.lower()
-        # Strip common prefixes/suffixes that don't help matching:
-        stem = _strip_mod_test_prefix(stem)
-        for tf in tests_dir_files:
-            tname = tf.stem.lower()
-            if stem and (stem in tname or tname in stem):
-                cur = scored.get(tf, (99, 0))
-                scored[tf] = (min(cur[0], 2), max(cur[1], 1))
-
-    # Tier 3: macro-aware.
-    if file_rel and src_dir is not None:
-        fp = src_dir / file_rel
-        macro_names: set[str] = set()
-        try:
-            txt = fp.read_text(encoding="utf-8")
-            for md in macro_definitions(txt):
-                macro_names.add(md.name)
-        except Exception:
-            pass
-        if macro_names:
-            for tf in tests_dir_files:
-                try:
-                    ttxt = tf.read_text(encoding="utf-8")
-                except Exception:
-                    continue
-                hits = sum(count_macro_calls(ttxt, n) for n in macro_names)
-                if hits:
-                    cur = scored.get(tf, (99, 0))
-                    scored[tf] = (min(cur[0], 3), max(cur[1], hits))
-
-    ranked = sorted(scored.items(), key=lambda kv: (kv[1][0], -kv[1][1]))[:max_blocks]
-    out: list[tuple[str, str]] = []
-    for path, _ in ranked:
-        try:
-            out.append((str(path), path.read_text(encoding="utf-8")))
-        except Exception:
-            continue
-    return out
-
-
 def _leaf_first_fn_order(
     stubs: list[tuple[str, str]],
     name_counts: dict[str, int] | None,
@@ -5379,92 +5172,6 @@ def _write_phase_c_test_fix_log(
 # the loop can target the right fn(s) instead of bluntly retrying everything
 # that was filled this pass.
 
-_PHASE_C_CLASSIFIER_CATEGORIES = (
-    "BAD_FILL", "TEST_PRECONDITION_MISSING",
-    "CFG_BOUNDARY", "PANIC_OR_TIMEOUT", "ENV_DEPENDENT",
-)
-
-
-def _classify_phase_c_test_failures(
-    test_out: str,
-    filled_this_pass: list[tuple[str, str]],
-    failed_tests: list[str],
-    cluster_name: str,
-) -> dict[str, dict]:
-    """Ask the LLM to classify each failing test. Returns
-        {test_name: {"category": str, "fn": "file::name" | "", "reason": str}}.
-    Empty dict on failure / no failing tests / classifier disabled.
-
-    This is a single short LLM call; one inference for the whole set, not
-    one per test. Output schema is strictly enforced by line-level parsing.
-    Unknown categories or unparseable lines are dropped (silently — we'd
-    rather fall back to the naive "retry everything" path than block the loop).
-    """
-    if not failed_tests:
-        return {}
-    if os.getenv("PHASE_C_TEST_FIX_USE_CLASSIFIER", "1") == "0":
-        return {}
-
-    # Budget the test_out excerpt: classifier needs to see error blocks but
-    # has no need for the full multi-MB cargo output. Ctx-budget-aware (scales
-    # with the model's context, floored for small windows) — not a frozen literal.
-    excerpt = test_out[-_FIX_ERR_CAP:] if len(test_out) > _FIX_ERR_CAP else test_out
-
-    filled_lines = "\n".join(f"  - {r}::{f}" for r, f in filled_this_pass[:60])
-    failing_lines = "\n".join(f"  - {t}" for t in failed_tests[:30])
-
-    prompt = (
-        f"You are diagnosing a Rust test failure in cluster `{cluster_name}` "
-        f"of a source-reconstruction pipeline. The fns listed below were filled "
-        f"this pass; the tests listed below failed. For each failing test, "
-        f"classify the most likely cause and (when applicable) name the fn that "
-        f"should be re-implemented.\n\n"
-        f"Categories:\n"
-        f"  BAD_FILL                  — a fn just filled this pass has a wrong "
-        f"body; name the fn (file::name).\n"
-        f"  TEST_PRECONDITION_MISSING — the failing test depends on a DIFFERENT "
-        f"fn that hasn't been filled correctly yet; name the suspect fn if you "
-        f"can identify it from the error.\n"
-        f"  CFG_BOUNDARY              — the failure points at code excluded "
-        f"from this cluster's cfg-set (different cluster owns it).\n"
-        f"  PANIC_OR_TIMEOUT          — the test compiled but panicked at runtime, "
-        f"or timed out. Include the panic site/frame if visible.\n"
-        f"  ENV_DEPENDENT             — failure stems from environment (missing "
-        f"file, env var, network), not the fill body.\n\n"
-        f"FNs filled this pass:\n{filled_lines}\n\n"
-        f"Failing tests:\n{failing_lines}\n\n"
-        f"Cargo test output (tail):\n```\n{excerpt}\n```\n\n"
-        f"Output one line PER failing test, EXACT format:\n"
-        f"  TEST <name>: <CATEGORY> [fn=<file::name>] — <one-sentence reason>\n"
-        f"The fn= field is required for BAD_FILL and TEST_PRECONDITION_MISSING; "
-        f"omit the [...] block for the other categories.\n"
-        f"Do not output anything else."
-    )
-
-    try:
-        # Use global MAX_TOKENS default — hardcoded caps risked content
-        # truncation under tight thinking-budget conditions.
-        result = ask(prompt, model=_TASK0C_MODEL, think=None)
-    except Exception as e:
-        _log(f"  [phase-c/classifier] LLM call failed: {e}")
-        return {}
-
-    out: dict[str, dict] = {}
-    for ln in result.splitlines():
-        parsed = parse_phase_c_line(ln)
-        if parsed is None:
-            continue
-        test, cat, fn, reason = parsed
-        if cat not in _PHASE_C_CLASSIFIER_CATEGORIES:
-            continue
-        out[test] = {
-            "category": cat,
-            "fn": (fn or "").strip(),
-            "reason": reason,
-        }
-    return out
-
-
 def _check_graceful_stop(context: str) -> None:
     """Exit cleanly when the graceful stop sentinel is set. Called from inside
     long-running loops so `bash continue.sh --graceful` is responsive."""
@@ -5508,9 +5215,6 @@ from pipeline_core.application.reconstruct.cargo_errors import (  # noqa: E402
 )
 from pipeline_core.application.reconstruct.cargo_errors import (  # noqa: E402
     excerpt_for_code as _excerpt_for_code,
-)
-from pipeline_core.application.reconstruct.cargo_errors import (  # noqa: E402
-    strip_cargo_warnings as _strip_cargo_warnings,
 )
 
 
@@ -5771,55 +5475,6 @@ def _count_relevant_notes(fr_path: Path | None,
     return section.count("\n- ") if section else 0
 
 
-def _record_tdd_regression(
-    fr_path: Path,
-    src_dir: Path,
-    filled_keys: "list[tuple[str, str]]",
-    broken_tests: "set[str]",
-    prev_best: int,
-    now_pass: int,
-) -> str:
-    """Hook 3 — turn a `14→11` pass-count regression into an ACTIONABLE note.
-
-    For each fn filled in the pass that just broke previously-passing tests,
-    write a concrete WRONG-body Model Note (file + fn + the broken test names +
-    the body that was applied) into the FR Model Notes channel, which the next
-    fill prompt for that fn injects automatically (relevance-ranked by file/fn).
-    The bare metric is unactionable; the body+broken-tests pair is the WRONG
-    example the model can react to.
-
-    Best-effort: never raises into the TDD loop. Returns a compact note (e.g.
-    "regressed t1, t2") to stamp on the LoopState trajectory, or "" if none.
-    """
-    try:
-        recs = _enumerate_fns_via_extractor(src_dir) or []
-    except Exception:
-        recs = []
-    by_name: dict[str, dict] = {}
-    for r in recs:
-        nm = r.get("fn_name", "")
-        if nm and nm not in by_name:
-            by_name[nm] = r
-    broken = ", ".join(sorted(broken_tests)[:6])
-    for key in filled_keys:
-        fn = key[1] if isinstance(key, tuple) and len(key) > 1 else str(key)
-        rec = by_name.get(fn)
-        if not rec:
-            continue
-        file_rel = rec.get("file", "")
-        body = (rec.get("body_text", "") or "").strip()
-        note = (
-            f"[regression] In {Path(file_rel).name or '?'}, the body just written for "
-            f"`{fn}` made previously-passing test(s) FAIL: {broken} (cluster pass "
-            f"count dropped {int(prev_best)}→{int(now_pass)}). WRONG (this body "
-            f"broke those tests):\n{body[:_FAILED_BODY_CAP]}\nRe-implement `{fn}` so "
-            f"{broken} keep passing; do not repeat that approach."
-        )
-        with suppress(Exception):
-            _append_model_note(fr_path, note)
-    return f"regressed {broken}" if broken else ""
-
-
 def _run_phase_c_tdd(**kwargs):
     """P4: delegates to application.reconstruct.phase_c_tdd (logic relocated)."""
     return _phase_c_tdd.run_phase_c_tdd(_PHASE_C_TDD_DEPS, **kwargs)
@@ -5836,7 +5491,9 @@ _PHASE_C_TDD_DEPS = _phase_c_tdd.PhaseCTddDeps(
     emit=lambda *a, **k: _emit(*a, **k),
     log=lambda m: _log(m),
     order_frontier=lambda *a, **k: _order_frontier(*a, **k),
-    record_tdd_regression=lambda *a, **k: _record_tdd_regression(*a, **k),
+    record_tdd_regression=lambda *a, **k: _record_tdd_regression_impl(
+        *a, **k, enumerate_fns=_enumerate_fns_via_extractor,
+        append_note=_append_model_note, body_cap=_FAILED_BODY_CAP),
     run_cargo=lambda *a, **k: _run_cargo(*a, **k),
     scan_unimplemented_for_cluster=lambda *a, **k: _scan_unimplemented_for_cluster(*a, **k),
     scan_unimplemented_functions=lambda *a, **k: _scan_unimplemented_functions(*a, **k),
@@ -6029,7 +5686,8 @@ _FILL_RETROS = RetrosAdapter(
 )
 _FILL_TESTS = TestLinkerAdapter(
     find_tests_for_fn_fn=lambda tdf, fn, file_rel="", src_dir=None, container="": _find_tests_for_fn(tdf, fn, file_rel=file_rel, src_dir=src_dir, container=container),
-    classify_failures_fn=lambda to, ftp, ft, cn: _classify_phase_c_test_failures(to, ftp, ft, cn),
+    classify_failures_fn=lambda to, ftp, ft, cn: _classify_phase_c_test_failures_impl(
+        to, ftp, ft, cn, ask=ask, log=_log, model=_TASK0C_MODEL, err_cap=_FIX_ERR_CAP),
     write_test_fix_log_fn=lambda **kw: _write_phase_c_test_fix_log(**kw),
 )
 _FILL_STALL = StallPolicyAdapter(
@@ -6508,208 +6166,6 @@ def _impl_block_id(file_rel: str, container: str) -> str:
     """Stable hashable id for an impl block (used as a dict key in the
     Phase C frontier mapping and as a per-block lock key)."""
     return f"{file_rel}::{container}"
-
-
-# --- Crate-internal idiom extraction --------------------------------------
-#
-# When the model is filling a stub, the gotchas section provides GENERIC
-# Rust patterns (NonNull deref, trait header signature matching, etc.). The
-# generic patterns are necessary but insufficient: each crate develops its
-# own internal idioms — e.g. anyhow's `Self::construct_from_*(arg, None)`
-# family, its `ContextError { context, error }` wrapper, its vtable
-# fn-pointer dispatch `(vtable.method)(this)` syntax. The model can only
-# discover those by seeing them used in already-filled fns of the same
-# file. `_extract_crate_idioms` scans the file's filled bodies, identifies
-# the highest-signal idioms, and renders a compact `<CRATE_IDIOMS>`
-# section the per-impl prompt injects so the model has a cheat-sheet of
-# THIS crate's patterns alongside the generic gotchas.
-#
-# Generic over crates: there is no anyhow-specific code in here. The
-# pattern detectors look for shapes (`Self::name(args)` recurrence,
-# `(field.subfield)(args)` fn-pointer calls, `unsafe { x.as_ref() }`
-# chains, `Struct { … }` literal construction). Anyhow happens to be a
-# rich source of all of these; smaller crates emit fewer idioms and the
-# section is correspondingly shorter.
-
-
-def _extract_filled_fn_bodies(impl_blocks: "list[ImplBlock]", file_rel: str) -> "list[dict]":
-    """Return [{fn_name, container, body}] for every FILLED fn in `file_rel`,
-    pulled from the impl block records. Free fns are dropped (they have no
-    container). Used by `_extract_crate_idioms` to scan for patterns."""
-    out: list[dict] = []
-    for b in impl_blocks:
-        if b.file != file_rel:
-            continue
-        for m in b.members:
-            if m.has_unimplemented_body:
-                continue
-            body = m.body_text.strip()
-            if not body:
-                continue
-            out.append({
-                "fn_name": m.fn_name,
-                "container": b.container,
-                "body": body,
-            })
-    return out
-
-
-def _extract_crate_idioms(
-    impl_blocks: "list[ImplBlock]",
-    file_rel: str,
-    target_sig_text: str = "",
-    max_idioms: int = 5,
-) -> str:
-    """Walk filled fn bodies in `file_rel` and surface up to `max_idioms`
-    distinctive patterns the model would benefit from seeing while filling
-    a stub in the same file.
-
-    The `_IDIOM_*` regex here mine recurring TEXT patterns (Self::call, struct literals,
-    fn-ptr field calls) to build a heuristic cheat-sheet — NOT a no-regex-on-source violation:
-    this is fuzzy pattern-mining, not structured-fact extraction (which goes through syn). See
-    CODE_ARCHITECTURE.md §8 R7.5.
-
-    Returned string is the body of a `<CRATE_IDIOMS>` section — empty
-    when no patterns clear the relevance bar. Each idiom is one line:
-
-        # Pattern label — used by `fn caller_name` in this file
-        <one-line code snippet>
-
-    Detection axes (each rendered at most twice):
-      1. Self::method(arg, None) family — recurrent constructor pattern.
-      2. (field.subfield)(args) — fn-pointer-via-field dispatch (vtable).
-      3. unsafe { … } single-line chains — pointer / NonNull manipulation.
-      4. StructName { field: …, … } — wrapper-type construction.
-
-    Relevance: prefer idioms whose symbols (Self::method name, struct
-    name, field name) appear in `target_sig_text` so the model sees
-    crate-specific patterns it's about to need.
-    """
-    fns = _extract_filled_fn_bodies(impl_blocks, file_rel)
-    if not fns:
-        return ""
-
-    target_tokens = set(identifier_tokens(target_sig_text or ""))
-
-    # Per-axis collectors with rank score.
-    candidates: list[tuple[float, str]] = []
-
-    # Axis 1 — Self:: family. Count occurrences per method name.
-    self_method_counts: dict[str, int] = {}
-    self_method_examples: dict[str, tuple[str, str]] = {}  # name → (caller, snippet)
-    for fn in fns:
-        for full, name in self_constructor_calls(fn["body"]):
-            self_method_counts[name] = self_method_counts.get(name, 0) + 1
-            self_method_examples.setdefault(name, (fn["fn_name"], full))
-    family_names = [n for n, c in self_method_counts.items() if c >= 2]
-    if family_names:
-        # One synthesised entry: "this file uses Self::X / Self::Y / Self::Z as constructors"
-        family_list = ", ".join(f"Self::{n}" for n in sorted(family_names))
-        # Show ONE concrete call from the highest-count family member.
-        top = max(family_names, key=lambda n: self_method_counts[n])
-        caller, snippet = self_method_examples[top]
-        snippet = " ".join(snippet.split())  # collapse whitespace
-        if len(snippet) > 140:
-            snippet = snippet[:140] + " …"
-        rel_score = 2.0 if any(n in target_tokens for n in family_names) else 1.0
-        candidates.append((
-            rel_score + 0.1 * sum(self_method_counts[n] for n in family_names),
-            f"# Self:: family — this file's constructors: {family_list}.\n"
-            f"# Example, from `fn {caller}`:\n"
-            f"#   {snippet}"
-        ))
-
-    # Axis 2 — fn-pointer field dispatch `(x.y)(args)`. Group by the path.
-    fnptr_counts: dict[str, int] = {}
-    fnptr_examples: dict[str, tuple[str, str]] = {}
-    for fn in fns:
-        for raw_path in fn_pointer_field_calls(fn["body"]):
-            path = raw_path.strip()
-            if "." not in path:
-                continue  # likely an arithmetic expression, not a vtable access
-            base = path.rsplit(".", 1)[1]
-            fnptr_counts[base] = fnptr_counts.get(base, 0) + 1
-            fnptr_examples.setdefault(base, (fn["fn_name"], path))
-    # Pick the 2 most frequent fn-pointer fields.
-    for name in sorted(fnptr_counts, key=lambda n: -fnptr_counts[n])[:2]:
-        if fnptr_counts[name] < 1:
-            continue
-        caller, path = fnptr_examples[name]
-        rel_score = 2.0 if name in target_tokens else 1.0
-        candidates.append((
-            rel_score + 0.05 * fnptr_counts[name],
-            f"# Fn-pointer field dispatch — call via the field, NOT via\n"
-            f"# method syntax. Used in `fn {caller}`:\n"
-            f"#   ({path})(args…)   // NOT  {path.split('.')[-1]}(args…)"
-        ))
-
-    # Axis 3 — unsafe { … } single-line chains. Surface the most common
-    # SHAPE of such a chain (collapsed by token-pattern, not exact text).
-    unsafe_examples: dict[str, tuple[str, str]] = {}
-    unsafe_counts: dict[str, int] = {}
-    for fn in fns:
-        for inner in unsafe_block_chains(fn["body"]):
-            chain = " ".join(inner.split())
-            if not chain:
-                continue
-            # Shape = identifier-only with `.`s preserved.
-            shape = mask_identifiers(chain)
-            shape = " ".join(shape.split())
-            unsafe_counts[shape] = unsafe_counts.get(shape, 0) + 1
-            unsafe_examples.setdefault(shape, (fn["fn_name"], chain))
-    for shape in sorted(unsafe_counts, key=lambda s: -unsafe_counts[s])[:2]:
-        if unsafe_counts[shape] < 1:
-            continue
-        caller, chain = unsafe_examples[shape]
-        if len(chain) > 140:
-            chain = chain[:140] + " …"
-        rel_score = 1.0 + 0.05 * unsafe_counts[shape]
-        # Bias if the chain mentions a target token (e.g. inner, vtable, ptr).
-        for t in identifier_tokens(chain):
-            if t in target_tokens:
-                rel_score += 0.5
-                break
-        candidates.append((
-            rel_score,
-            f"# Unsafe chain pattern — used in `fn {caller}`:\n"
-            f"#   unsafe {{ {chain} }}"
-        ))
-
-    # Axis 4 — Struct literal construction. Show wrapper types the file
-    # constructs that aren't trivial single-field types.
-    struct_examples: dict[str, tuple[str, str]] = {}
-    struct_counts: dict[str, int] = {}
-    for fn in fns:
-        for name, raw_inner in struct_literals(fn["body"]):
-            # Skip stdlib-y names that are noise.
-            if name in {"Self", "Some", "None", "Ok", "Err", "Box", "Vec",
-                        "String", "Result", "Option"}:
-                continue
-            inner = " ".join(raw_inner.split())
-            if not inner or "," not in inner and ":" not in inner:
-                continue
-            struct_counts[name] = struct_counts.get(name, 0) + 1
-            struct_examples.setdefault(name, (fn["fn_name"], inner))
-    for name in sorted(struct_counts, key=lambda n: -struct_counts[n])[:2]:
-        if struct_counts[name] < 1:
-            continue
-        caller, inner = struct_examples[name]
-        if len(inner) > 140:
-            inner = inner[:140] + " …"
-        rel_score = 2.0 if name in target_tokens else 1.0
-        candidates.append((
-            rel_score + 0.05 * struct_counts[name],
-            f"# Wrapper construction — used in `fn {caller}`:\n"
-            f"#   {name} {{ {inner} }}"
-        ))
-
-    if not candidates:
-        return ""
-    candidates.sort(key=lambda x: -x[0])
-    chosen = [snippet for _score, snippet in candidates[:max_idioms]]
-    return "\n\n".join(chosen)
-
-
 def _collect_impl_blocks_for_cluster(
     target_src_dir: Path,
     cluster: "BuildCluster | None",
@@ -7229,76 +6685,6 @@ def _fn_belongs_to_cluster(
             return False
         # v is None (undecidable) → conservatively keep
     return True
-
-
-def _implicated_fns_from_cargo_errors(
-    cargo_output: str,
-    target_src_dir: Path,
-) -> list[tuple[str, str]]:
-    """Parse cargo error output and return the (file_rel, fn_name) pairs the
-    errors implicate.
-
-    For each `error[...]` block: find the `--> file.rs:line:col` marker, then
-    walk backward in that file from `line` to find the enclosing fn. Dedup
-    by (file, fn). Used by P3.12 end-of-cluster fix loop to identify which
-    fns to revert + retry.
-    """
-    if not cargo_output:
-        return []
-    cargo_output = _strip_cargo_warnings(cargo_output)
-    pairs: list[tuple[str, str]] = []
-    seen: set[tuple[str, str]] = set()
-    # Enclosing-fn attribution via the syn extractor (byte-span lookup); the
-    # backward `fn` regex walk is the no-binary fallback. (`-->` parse = cargo output.)
-    _all_recs = _enumerate_fns_via_extractor(target_src_dir)
-    _recs_by_file: dict[str, list[dict]] = {}
-    if _all_recs is not None:
-        for _r in _all_recs:
-            _recs_by_file.setdefault(_r.get("file", ""), []).append(_r)
-    for file_str, line_no in rustc_diagnostic_locations(cargo_output):
-        # Normalise to rel path under target_src_dir.
-        try:
-            abs_p = (target_src_dir / file_str).resolve()
-            rel_p = str(abs_p.relative_to(target_src_dir.resolve()))
-        except Exception:
-            # cargo sometimes emits absolute paths; try suffix match.
-            cand = Path(file_str)
-            rel_p = None
-            for p in target_src_dir.rglob("*.rs"):
-                if str(p).endswith(file_str) or p.name == cand.name:
-                    rel_p = str(p.relative_to(target_src_dir))
-                    break
-            if rel_p is None:
-                continue
-        src_path = target_src_dir / rel_p
-        if not src_path.exists():
-            continue
-        try:
-            text = src_path.read_text(encoding="utf-8")
-        except Exception:
-            continue
-        # Enclosing fn: prefer the extractor's byte-span records (handles impl
-        # methods / cfg'd fns / inline decls); fall back to the backward regex walk.
-        fn_name: str | None = None
-        _recs = _recs_by_file.get(rel_p)
-        if _recs:
-            _rec = _line_to_fn_record(text, line_no, _recs)
-            if _rec:
-                fn_name = _rec["fn_name"]
-        if fn_name is None:
-            lines = text.splitlines()
-            for i in range(min(line_no, len(lines)) - 1, -1, -1):
-                if nm := first_fn_decl_name(lines[i]):
-                    fn_name = nm
-                    break
-        if not fn_name:
-            continue
-        key = (rel_p, fn_name)
-        if key in seen:
-            continue
-        seen.add(key)
-        pairs.append(key)
-    return pairs
 
 
 def _scan_unimplemented_for_cluster(
@@ -7945,9 +7331,6 @@ from pipeline_core.domain.generation import (
     strip_gen_tests_decl_n as _domain_strip_gen_tests_decl_n,  # noqa: E402
 )
 from pipeline_core.domain.generation import (
-    strip_mod_test_prefix as _strip_mod_test_prefix,
-)
-from pipeline_core.domain.generation import (
     strip_trailing_legacy_gen_block as _strip_trailing_legacy_gen_block,  # noqa: E402
 )
 from pipeline_core.domain.generation import (  # noqa: E402
@@ -7991,7 +7374,8 @@ _GEN_CARGO = CargoBackendAdapter(
     run_check_diag_fn=lambda cmd, cwd, env, timeout=180: _run_cargo_check_diag(cmd, cwd, env, timeout),
     build_test_cmd_fn=lambda stems, cluster: _build_test_cmd(stems, cluster),
     env_fn=lambda: _cargo_env(),
-    implicated_fns_fn=lambda out, tsd: _implicated_fns_from_cargo_errors(out, tsd),
+    implicated_fns_fn=lambda out, tsd: _implicated_fns_from_cargo_errors_impl(
+        out, tsd, enumerate_fns=_enumerate_fns_via_extractor),
     attribute_failures_fn=lambda to, sd, rf, trm, cn: _attribute_failures(to, sd, rf, trm, cn),
     filter_test_targets_fn=lambda fr, sd: _filter_test_targets(fr, sd),
 )
