@@ -459,6 +459,9 @@ from pipeline_core.prompts.sections import (
     tag_block as _tag_block,
 )
 from pipeline_core.prompts.skeleton_index import (
+    format_skeleton_index as _format_skeleton_index,
+)
+from pipeline_core.prompts.skeleton_index import (
     format_skeleton_index_for_cluster as _format_skeleton_index_for_cluster,
 )
 from pipeline_core.retry import with_retry
@@ -471,6 +474,7 @@ __all__ = [
     "count_passing_tests", "validate_task3_output_strict", "extract_test_output_from_file",
     "GENESIS_DELIM_START", "GENESIS_DELIM_END", "_extract_genesis",
     "_tag_block", "with_retry", "_strip_markdown_fences",
+    "_format_skeleton_index",  # re-export: smoke calls pipeline._format_skeleton_index (no internal caller)
 ]
 
 _mi_mtime: float = os.path.getmtime(_mi.__file__)
