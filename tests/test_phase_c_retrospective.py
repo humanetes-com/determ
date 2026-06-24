@@ -54,11 +54,12 @@ def test_happy_parse():
     assert "NonNull" in out["guidance"]
 
 
-def _retro_prompt() -> str:
+def _retro_prompt(bound_methods_section: str = "") -> str:
     return build_phase_c_retro_prompt(
         "f", "fn f<E>() where E: Bound", "impl X", "src/x.rs", "c",
         "let x = 1;", "E0277", 3, "", "",
-        failed_body_cap=2000, fix_err_cap=2000)
+        failed_body_cap=2000, fix_err_cap=2000,
+        bound_methods_section=bound_methods_section)
 
 
 def test_prompt_forbids_signature_edits_body_only():
@@ -72,9 +73,32 @@ def test_prompt_forbids_signature_edits_body_only():
 
 def test_prompt_routes_unsatisfiable_bound_to_skip():
     p = _retro_prompt()
-    # A bound that no in-scope body value can satisfy → GENUINELY_HARD skip.
+    # Corrected R2/R3 (debt #28): GENUINELY_HARD is now GATED on the frozen
+    # bound's trait offering no usable method (was: any bound mismatch → skip,
+    # which abandoned reconstructable fns like context.rs::context).
     assert "GENUINELY_HARD" in p
-    assert "NO in-scope value or call available to the body satisfies" in p
+    assert "frozen bound provides NO method usable here" in p
+
+
+def test_prompt_redirects_bound_mismatch_to_provider_method():
+    # Corrected R2/R3: a free constructor erroring E0277 because the generic
+    # lacks ITS bound must route to the FROZEN bound's own trait method, NOT to
+    # a skip. This is the de-thrash for the context.rs::context blocker.
+    p = _retro_prompt()
+    assert "BOUND-MISMATCH RULE" in p
+    assert "Route through that method" in p
+    assert "NOT GENUINELY_HARD" in p
+
+
+def test_prompt_injects_bound_methods_section_when_present():
+    p = _retro_prompt(bound_methods_section="trait `StdError` provides:\n"
+                      "    fn ext_context<C>(self, c: C) -> Error")
+    # The injected provider-method content is present.
+    assert "ext_context" in p
+    assert "trait `StdError` provides" in p
+    # Absent when empty — the rule TEXT still references <BOUND_METHODS> as a
+    # pointer, but the injected method content is gone.
+    assert "ext_context" not in _retro_prompt()
 
 
 def test_prompt_uses_wrong_right_examples():

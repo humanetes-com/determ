@@ -215,6 +215,12 @@ from pipeline_core.domain import attribution as _domain_attribution
 from pipeline_core.domain import cfg as _cfg
 from pipeline_core.domain import cluster_plan as _cluster_plan
 from pipeline_core.domain import model_report as _model_report
+from pipeline_core.domain.bound_methods import (
+    format_bound_methods_section as _format_bound_methods_section,
+)
+from pipeline_core.domain.bound_methods import (
+    select_bound_provider_traits as _select_bound_provider_traits,
+)
 from pipeline_core.domain.cargo_toml import cargo_default_features as _domain_cargo_default_features
 from pipeline_core.domain.cargo_toml import cargo_entry_point_paths as _domain_cargo_entry_point_paths
 from pipeline_core.domain.cargo_toml import cargo_is_proc_macro as _domain_cargo_is_proc_macro
@@ -5894,6 +5900,7 @@ def _phase_c_retrospective(
     fix_attempts: int,
     prior_retrospective: str = "",
     sibling_bodies: str = "",
+    bound_methods_section: str = "",
 ) -> dict:
     """Diagnose why the per-fn fix loop exhausted on this fn. Returns
     {category, guidance, signal} — a structured diagnosis used to shape
@@ -5912,6 +5919,7 @@ def _phase_c_retrospective(
         fn_name, sig_text, container, file_rel, cluster_name, last_body,
         error_excerpt, fix_attempts, _PHASE_C_RETRO_DEPS,
         prior_retrospective=prior_retrospective, sibling_bodies=sibling_bodies,
+        bound_methods_section=bound_methods_section,
     )
 
 
@@ -6088,6 +6096,7 @@ _IMPL_FILL_DEPS = _impl_fill.ImplFillDeps(
     splice_fn_with_where=lambda *a, **k: _splice_fn_with_where(*a, **k),
     splice_lock_for=lambda *a, **k: _splice_lock_for(*a, **k),
     types_section_for_fix=lambda *a, **k: _types_section_for_fix(*a, **k),
+    bound_methods_section_for=lambda *a, **k: _bound_methods_section_for(*a, **k),
     u2_test_gate=lambda *a, **k: _u2_test_gate(*a, **k),
     ask=lambda *a, **k: ask(*a, **k),
     failed_body_cap=_FAILED_BODY_CAP,
@@ -6481,6 +6490,21 @@ def _fn_container_index(src_dir: Path) -> dict[tuple[str, str], str]:
     return idx
 
 
+def _bound_methods_section_for(
+    impl_where: str, type_records: "list[TypeRecord]",
+) -> str:
+    """Corrected R2/R3 (debt #28): name the methods the fn's FROZEN where-bounds
+    make callable, so the body uses a bound-provided trait method instead of a
+    mis-bound free constructor. Resolves which in-scope TRAIT records the
+    `where` clause references (structured name match, not regex), filters to
+    provider traits, and renders via the pure domain formatter. "" when none."""
+    if not impl_where.strip() or not type_records:
+        return ""
+    referenced = _types_referenced_in_text(impl_where, type_records)
+    providers = _select_bound_provider_traits(referenced)
+    return _format_bound_methods_section(impl_where, providers)
+
+
 def _gather_fn_fix_context(
     *,
     file_text: str,
@@ -6506,6 +6530,7 @@ def _gather_fn_fix_context(
     types_section = _types_section_for_fix(
         sig_text, body_text, error_excerpt, container, impl_where,
         type_records)
+    bound_methods_section = _bound_methods_section_for(impl_where, type_records)
     notes_section = ""
     if fr_path is not None:
         notes_section = _filter_model_notes_for_prompt(
@@ -6515,6 +6540,7 @@ def _gather_fn_fix_context(
     return _FnFixContext(
         container=container, impl_where=impl_where,
         types_section=types_section, notes_section=notes_section,
+        bound_methods_section=bound_methods_section,
     )
 
 
@@ -8927,7 +8953,8 @@ def _task3_inline_retry(
                     notes=_ctx.notes_section,
                     # P7: the task3-retry path injects none of these (silent "").
                     macros="", invariants="", retrospective_guidance="",
-                    siblings="", crate_idioms=""),
+                    siblings="", crate_idioms="",
+                    bound_methods=_ctx.bound_methods_section),
                 fr_path=_retry_fr_path,  # P6.4 past-note recall by error code
             )
             new_body, _ = _ask_per_fn_body(prompt, fn, [], sig_text=sig_t)

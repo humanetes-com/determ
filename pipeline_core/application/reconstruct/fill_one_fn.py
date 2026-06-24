@@ -139,6 +139,10 @@ class FillOneFn:
         attempts_log: list[str] = []
         first_failed_body = ""
         first_error_excerpt = ""
+        # Corrected R2/R3 (debt #28): carry the bound-provided method inventory
+        # from the last gather so the exhaustion retro can redirect to a frozen
+        # bound's trait method instead of mis-routing to GENUINELY_HARD.
+        retro_bound_methods = ""
         # P2: history of (body, error_sig, outcome) for THIS fn's fix loop.
         # Surfaced to the model in subsequent fix prompts so it sees the
         # search space it has already explored.
@@ -147,7 +151,7 @@ class FillOneFn:
         def _attempt_fn_fill(fix_attempt: int) -> FixOutcome:
             nonlocal attempts, sig_text, last_response, \
                 last_body, error_excerpt, first_failed_body, \
-                first_error_excerpt
+                first_error_excerpt, retro_bound_methods
             attempts += 1
             cur_text = file_path.read_text(encoding="utf-8")
             # Slice 8a: one gather per attempt — notes re-filtered with the
@@ -164,6 +168,7 @@ class FillOneFn:
             )
             notes_section = _fn_ctx.notes_section
             _types_section_eff = _fn_ctx.types_section
+            retro_bound_methods = _fn_ctx.bound_methods_section
             if fix_attempt == 1:
                 prompt = build_per_fn_prompt(
                     file_text=cur_text, fn_name=fn_name, sig_text=sig_text,
@@ -175,7 +180,8 @@ class FillOneFn:
                         invariants=ctx.invariants_section,
                         siblings=self.prompt.collect_sibling_filled_bodies(
                             cur_text, fn_name, container),
-                        crate_idioms=crate_idioms_section),
+                        crate_idioms=crate_idioms_section,
+                        bound_methods=_fn_ctx.bound_methods_section),
                     fr_path=ctx.fr_path,
                 )
             else:
@@ -197,7 +203,8 @@ class FillOneFn:
                         # name, different container) — best target-body source.
                         siblings=self.prompt.collect_sibling_filled_bodies(
                             cur_text, fn_name, container),
-                        crate_idioms=crate_idioms_section),
+                        crate_idioms=crate_idioms_section,
+                        bound_methods=_fn_ctx.bound_methods_section),
                     # P3.1: open the sig-change escape hatch after multiple
                     # compile failures. The model can return an additional
                     # <SIGNATURE> block; we splice it only when fn is non-pub.
@@ -511,6 +518,7 @@ class FillOneFn:
                     error_excerpt=error_excerpt or first_error_excerpt or "",
                     fix_attempts=fix_attempt,
                     prior_retrospective=_prior_guidance,
+                    bound_methods_section=retro_bound_methods,
                 )
                 # Transient empties (llm_error / empty_response) don't
                 # update state — we never saw a real fix attempt's

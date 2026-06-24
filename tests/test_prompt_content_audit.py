@@ -93,7 +93,8 @@ def test_per_impl_prompt_carries_repo_spec_bundle(tmp_path: Path) -> None:
     block = ImplBlock(file="src/lib.rs", container="impl Display for X",
                       members=(stub,), stub_members=(stub,))
     empty = {"types": "", "invariants": "", "notes": "", "crate_idioms": "",
-             "dispatch_family": "", "macros": "", "siblings": "", "retrospective_guidance": ""}
+             "dispatch_family": "", "macros": "", "siblings": "", "retrospective_guidance": "",
+             "bound_methods": ""}
     prompt = build_per_impl_prompt(block, [], [], "mycrate", "stable",
                                    PerImplSections(**empty), fr_path=fr)
     assert "<REPOSITORY_SPECIFICATIONS>" in prompt

@@ -101,7 +101,8 @@ def test_builders_carry_repository_specifications(tmp_path: Path) -> None:
               "sig_text": "fn parse()", "test_blocks": [], "module_name": "mycrate",
               "cluster_name": "stable", "file_rel": "src/lib.rs", "fr_path": fr}
     empty = {"macros": "", "notes": "", "container": "", "types": "",
-             "invariants": "", "siblings": "", "crate_idioms": ""}
+             "invariants": "", "siblings": "", "crate_idioms": "",
+             "bound_methods": ""}
     initial = build_per_fn_prompt(**common, sections=PerFnSections(**empty))
     fix = build_per_fn_fix_prompt(**common, prev_body="1", error_excerpt="E",
                                   sections=PerFnFixSections(**empty, retrospective_guidance=""))

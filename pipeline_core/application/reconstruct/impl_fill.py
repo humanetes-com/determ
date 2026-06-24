@@ -62,6 +62,7 @@ class ImplFillDeps:
     splice_fn_with_where: Callable[..., Any]
     splice_lock_for: Callable[..., Any]
     types_section_for_fix: Callable[..., Any]
+    bound_methods_section_for: Callable[..., Any]
     u2_test_gate: Callable[..., Any]
     ask: Callable[..., Any]
     failed_body_cap: Any
@@ -141,6 +142,7 @@ def fill_impl_blocks(
     _splice_fn_with_where = deps.splice_fn_with_where
     _splice_lock_for = deps.splice_lock_for
     _types_section_for_fix = deps.types_section_for_fix
+    _bound_methods_section_for = deps.bound_methods_section_for
     _u2_test_gate = deps.u2_test_gate
     ask = deps.ask
     _FAILED_BODY_CAP = deps.failed_body_cap
@@ -371,7 +373,9 @@ def fill_impl_blocks(
                     types=_types_section_eff, invariants=invariants_section,
                     notes=notes_section, retrospective_guidance=prior_retro,
                     crate_idioms=crate_idioms_section, macros=macros_section,
-                    dispatch_family=dispatch_family_section, siblings=siblings_section),
+                    dispatch_family=dispatch_family_section, siblings=siblings_section,
+                    bound_methods=_bound_methods_section_for(
+                        _block_where, _crate_type_records)),
                 fr_path=fr_path,
             )
             try:

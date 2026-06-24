@@ -165,6 +165,7 @@ class Retros(Protocol):
         self, *, fn_name: str, sig_text: str, container: str, file_rel: str,
         cluster_name: str, last_body: str, error_excerpt: str,
         fix_attempts: int, prior_retrospective: str = ...,
+        bound_methods_section: str = ...,
     ) -> dict[str, Any]: ...
     def append_note(
         self, fr_path: Path, note: str,

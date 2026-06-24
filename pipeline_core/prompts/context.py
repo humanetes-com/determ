@@ -27,6 +27,9 @@ class PerFnSections:
     invariants: str
     siblings: str
     crate_idioms: str
+    # Methods the fn's FROZEN where-bounds make callable (corrected R2/R3,
+    # debt #28). "" when no generic param is bounded by an in-scope trait.
+    bound_methods: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,3 +51,6 @@ class PerImplSections:
     macros: str
     siblings: str
     retrospective_guidance: str
+    # Methods the impl's FROZEN where-bounds make callable (corrected R2/R3,
+    # debt #28). "" when no generic param is bounded by an in-scope trait.
+    bound_methods: str

@@ -449,6 +449,7 @@ class FnFixContext:
     impl_where: str = ""
     types_section: str = ""
     notes_section: str = ""
+    bound_methods_section: str = ""
 
 
 @dataclass(frozen=True, slots=True)

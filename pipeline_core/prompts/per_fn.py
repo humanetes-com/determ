@@ -65,6 +65,10 @@ def build_per_fn_prompt(
     # instead of self.ptr.as_ref()); listing each type's actual fields and
     # methods makes this unambiguous.
     types_block = tag_block("TYPES_IN_SCOPE", types_section)
+    # Corrected R2/R3 (debt #28): methods the fn's frozen where-bounds make
+    # callable — steer the body to a bound-provided trait method instead of a
+    # mis-bound free constructor (the E0277 thrash root).
+    bound_methods_block = tag_block("BOUND_METHODS", sections.bound_methods)
     # Cluster-aware macro invariants: which arm of each cfg-gated macro
     # is active for THIS cluster. Without this the model defends against
     # cases that can't occur (e.g. `unwrap_or(&default)` when the active
@@ -108,7 +112,7 @@ Crate: {module_name} | Cluster: {cluster_name} | File: {file_rel} | Fn: {fn_name
 <RUST_GOTCHAS>
 {gotchas_summary()}
 </RUST_GOTCHAS>
-{repo_spec_block}{siblings_block}{trait_block}{types_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}
+{repo_spec_block}{siblings_block}{trait_block}{types_block}{bound_methods_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}
 FILE — stubs are annotated. SKELETON STUB = will be filled later (rely on
 the signature). TARGET = implement now.
 
@@ -190,6 +194,9 @@ def build_per_fn_fix_prompt(
     gotchas_block = tag_block("RUST_GOTCHAS_DETAIL", gotchas_for_error(error_excerpt))
     container_line = f"In: {container}\n" if container else ""
     types_block = tag_block("TYPES_IN_SCOPE", types_section)
+    # Corrected R2/R3 (debt #28): bound-provided method inventory (see initial
+    # builder) — surfaced on the fix path where the E0277 thrash happens.
+    bound_methods_block = tag_block("BOUND_METHODS", sections.bound_methods)
     invariants_block = tag_block("CLUSTER_INVARIANTS", invariants_section)
     # FR-024 retrospective guidance: surfaced FIRST in the prompt when
     # available — the prior diagnosis is the highest-signal hint.
@@ -264,7 +271,7 @@ Crate: {module_name} | Cluster: {cluster_name} | File: {file_rel} | Fn: {fn_name
 <RUST_GOTCHAS>
 {gotchas_summary()}
 </RUST_GOTCHAS>
-{repo_spec_block}{retro_block}{siblings_block}{gotchas_block}{trait_block}{types_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{prior_block}
+{repo_spec_block}{retro_block}{siblings_block}{gotchas_block}{trait_block}{types_block}{bound_methods_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{prior_block}
 FILE (previous attempt reverted; stubs annotated):
 <FILE path="{file_rel}">
 {annotated}

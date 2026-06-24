@@ -3006,7 +3006,7 @@ def test_per_impl_prompt_macros_and_siblings_sections():
     def _impl_sections(**over):
         base = {"types": "", "invariants": "", "notes": "", "crate_idioms": "",
                 "dispatch_family": "", "macros": "", "siblings": "",
-                "retrospective_guidance": ""}
+                "retrospective_guidance": "", "bound_methods": ""}
         base.update(over)
         return PerImplSections(**base)
 
@@ -3063,7 +3063,7 @@ def test_per_fn_prompts_carry_crate_idioms():
         "file_rel": "lib.rs",
     }
     base = {"macros": "", "notes": "", "container": "", "types": "",
-            "invariants": "", "siblings": ""}
+            "invariants": "", "siblings": "", "bound_methods": ""}
 
     def _fn(crate_idioms=""):
         return PerFnSections(crate_idioms=crate_idioms, **base)

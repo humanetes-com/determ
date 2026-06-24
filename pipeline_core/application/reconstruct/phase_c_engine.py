@@ -476,7 +476,8 @@ class PhaseCFillEngine:
                                         macros=macros_section, notes=_ctx.notes_section,
                                         container=_ctx.container, types=_ctx.types_section,
                                         invariants=invariants_section,
-                                        retrospective_guidance="", siblings="", crate_idioms=""),
+                                        retrospective_guidance="", siblings="", crate_idioms="",
+                                        bound_methods=_ctx.bound_methods_section),
                                     fr_path=fr_path,  # P6.4 note recall
                                     attempt_history=test_fix_history.get((rel_f, fn), []),  # P2
                                 )

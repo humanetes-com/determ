@@ -91,6 +91,10 @@ def build_per_impl_prompt(
                "structural pattern:\n```rust\n",
         suffix="\n```")
     types_block = tag_block("TYPES_IN_SCOPE", types_section)
+    # Corrected R2/R3 (debt #28): methods the impl's frozen where-bounds make
+    # callable — prefer a bound-provided trait method over a mis-bound free
+    # constructor (the E0277 thrash root).
+    bound_methods_block = tag_block("BOUND_METHODS", sections.bound_methods)
     invariants_block = tag_block("CLUSTER_INVARIANTS", invariants_section)
     trait_block = tag_block("TRAIT_CONTRACT", trait_contract_for(container))
     recurring_block = tag_block("RECURRING_ERRORS", promoted_error_rules(fr_path))
@@ -143,7 +147,7 @@ Stubs to fill in this response: {stub_names}
 <RUST_GOTCHAS>
 {gotchas_summary()}
 </RUST_GOTCHAS>
-{repo_spec_block}{retro_block}{siblings_block}{trait_block}{types_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{dispatch_family_section}{related_section}
+{repo_spec_block}{retro_block}{siblings_block}{trait_block}{types_block}{bound_methods_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{dispatch_family_section}{related_section}
 <TARGET_IMPL_BLOCK file="{file_rel}">
 ```rust
 {target_render}
