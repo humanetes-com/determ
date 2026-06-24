@@ -470,6 +470,29 @@ __all__ = [
 _mi_mtime: float = os.path.getmtime(_mi.__file__)
 
 
+# Attribution-cluster deps-binding shims (P6): bodies live in failure_diagnosis;
+# these bind the resident module-globals at call time so the existing
+# `monkeypatch.setattr(pipeline, "_classify_phase_c_test_failures", …)` seams hold.
+def _classify_phase_c_test_failures(test_out: str, filled_this_pass: list[tuple[str, str]],
+                                    failed_tests: list[str], cluster_name: str) -> dict[str, dict]:
+    return _classify_phase_c_test_failures_impl(
+        test_out, filled_this_pass, failed_tests, cluster_name,
+        ask=ask, log=_log, model=_TASK0C_MODEL, err_cap=_FIX_ERR_CAP)
+
+
+def _record_tdd_regression(fr_path: Path, src_dir: Path, filled_keys: "list[tuple[str, str]]",
+                           broken_tests: "set[str]", prev_best: int, now_pass: int) -> str:
+    return _record_tdd_regression_impl(
+        fr_path, src_dir, filled_keys, broken_tests, prev_best, now_pass,
+        enumerate_fns=_enumerate_fns_via_extractor, append_note=_append_model_note,
+        body_cap=_FAILED_BODY_CAP)
+
+
+def _implicated_fns_from_cargo_errors(cargo_output: str, target_src_dir: Path) -> list[tuple[str, str]]:
+    return _implicated_fns_from_cargo_errors_impl(
+        cargo_output, target_src_dir, enumerate_fns=_enumerate_fns_via_extractor)
+
+
 def _hot_reload_mi() -> None:
     """Reload model_interact.py if it changed on disk since last ask() call."""
     global _ask_raw, _mi_mtime
@@ -2833,8 +2856,7 @@ class _LateStructure:
 # seam keeps working; the AttributionDeps record is the clean DI rail a fake can fill.
 _ATTR_DEPS = _attribution.AttributionDeps(
     structure=_LateStructure(),
-    classify=lambda *a, **k: _classify_phase_c_test_failures_impl(
-        *a, **k, ask=ask, log=_log, model=_TASK0C_MODEL, err_cap=_FIX_ERR_CAP),
+    classify=lambda *a, **k: _classify_phase_c_test_failures(*a, **k),
     locate_fn=lambda *a, **k: _locate_fn(*a, **k),
     run_check_diag=lambda *a, **k: _run_cargo_check_diag(*a, **k),
     derive_check_only_cmd=lambda c: _derive_check_only_cmd(c),
@@ -5491,9 +5513,7 @@ _PHASE_C_TDD_DEPS = _phase_c_tdd.PhaseCTddDeps(
     emit=lambda *a, **k: _emit(*a, **k),
     log=lambda m: _log(m),
     order_frontier=lambda *a, **k: _order_frontier(*a, **k),
-    record_tdd_regression=lambda *a, **k: _record_tdd_regression_impl(
-        *a, **k, enumerate_fns=_enumerate_fns_via_extractor,
-        append_note=_append_model_note, body_cap=_FAILED_BODY_CAP),
+    record_tdd_regression=lambda *a, **k: _record_tdd_regression(*a, **k),
     run_cargo=lambda *a, **k: _run_cargo(*a, **k),
     scan_unimplemented_for_cluster=lambda *a, **k: _scan_unimplemented_for_cluster(*a, **k),
     scan_unimplemented_functions=lambda *a, **k: _scan_unimplemented_functions(*a, **k),
@@ -5686,8 +5706,7 @@ _FILL_RETROS = RetrosAdapter(
 )
 _FILL_TESTS = TestLinkerAdapter(
     find_tests_for_fn_fn=lambda tdf, fn, file_rel="", src_dir=None, container="": _find_tests_for_fn(tdf, fn, file_rel=file_rel, src_dir=src_dir, container=container),
-    classify_failures_fn=lambda to, ftp, ft, cn: _classify_phase_c_test_failures_impl(
-        to, ftp, ft, cn, ask=ask, log=_log, model=_TASK0C_MODEL, err_cap=_FIX_ERR_CAP),
+    classify_failures_fn=lambda to, ftp, ft, cn: _classify_phase_c_test_failures(to, ftp, ft, cn),
     write_test_fix_log_fn=lambda **kw: _write_phase_c_test_fix_log(**kw),
 )
 _FILL_STALL = StallPolicyAdapter(
@@ -7374,8 +7393,7 @@ _GEN_CARGO = CargoBackendAdapter(
     run_check_diag_fn=lambda cmd, cwd, env, timeout=180: _run_cargo_check_diag(cmd, cwd, env, timeout),
     build_test_cmd_fn=lambda stems, cluster: _build_test_cmd(stems, cluster),
     env_fn=lambda: _cargo_env(),
-    implicated_fns_fn=lambda out, tsd: _implicated_fns_from_cargo_errors_impl(
-        out, tsd, enumerate_fns=_enumerate_fns_via_extractor),
+    implicated_fns_fn=lambda out, tsd: _implicated_fns_from_cargo_errors(out, tsd),
     attribute_failures_fn=lambda to, sd, rf, trm, cn: _attribute_failures(to, sd, rf, trm, cn),
     filter_test_targets_fn=lambda fr, sd: _filter_test_targets(fr, sd),
 )
