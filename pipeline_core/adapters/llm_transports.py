@@ -582,7 +582,7 @@ class VLLMTransport(_BaseTransport):
     def stream(self, messages: list[dict[str, Any]], *, model: str,
                max_tokens: int | None, enable_thinking: bool,
                meta: StreamMeta) -> Iterator[Delta]:
-        from openai import BadRequestError, OpenAI
+        from openai import APIConnectionError, BadRequestError, OpenAI
         client = OpenAI(base_url=self._base_url, api_key="vllm",
                         timeout=httpx.Timeout(connect=30, read=900, write=30, pool=30))
         extra_body: dict[str, Any] = {
@@ -615,7 +615,13 @@ class VLLMTransport(_BaseTransport):
                         yield Delta(content=text)
         except BadRequestError as exc:
             raise InputTooLong(_parse_input_token_overflow(str(exc))) from exc
-        except (httpx.ReadTimeout, httpx.ConnectError, httpx.RemoteProtocolError) as exc:
+        except (httpx.ReadTimeout, httpx.ConnectError, httpx.RemoteProtocolError,
+                APIConnectionError) as exc:
+            # The OpenAI SDK wraps httpx connection/timeout failures as its own
+            # APIConnectionError (and APITimeoutError subclass), which would
+            # otherwise escape this clause, bypass the controller's
+            # wait_until_ready() readiness poll, and abort the run on a transient
+            # vLLM restart/warmup. Route it through TransportUnavailable instead.
             raise TransportUnavailable(str(exc)) from exc
 
     def followup_messages(self, base_messages: list[dict[str, Any]], reasoning_text: str,
