@@ -879,11 +879,12 @@ def _from_scratch_disclaimer() -> str:
 
 
 def ask(prompt: str, system: str | None = None, model: str | None = None,
-        max_tokens: int | None = None, think: bool | None = None) -> str:
+        max_tokens: int | None = None, think: bool | None = None,
+        temperature: float | None = None) -> str:
     """Context-limit-enforcing model call. Thin shim over the relocated guarded
     client (`pipeline_core.adapters.ask_client.AskClient`); kept as the
     `pipeline.ask` name for the monkeypatch test seam + late-bind Deps."""
-    return _ASK_CLIENT.ask(prompt, system, model, max_tokens, think)
+    return _ASK_CLIENT.ask(prompt, system, model, max_tokens, think, temperature)
 
 
 # Maximum safe input chars, derived mathematically from the KV cache budget.
@@ -7532,66 +7533,81 @@ def _task3_inline_retry(
     _retry_fr_path = _fr_candidates[0] if len(_fr_candidates) == 1 else None
     _retry_tests_dir_files = list((project_dir / "tests").rglob("*.rs"))
 
+    def _fix_one_ref(rel_f: str, fn: str, output: str) -> bool:
+        """Re-ask the model for one (file, fn) body and splice it; True if spliced.
+
+        Frozen tests are never rewritten — tests/ and gen_tests siblings are
+        skipped even if a compile error's span lands inside one (Hard Rule: tests
+        are frozen). Benign no-ops (frozen file, missing path, fn not located,
+        empty model body) return False; real failures (transport/model/splice)
+        RAISE — the caller isolates them per-fn (B2)."""
+        if rel_f.startswith("tests/") or _is_gen_tests_file(Path(rel_f).name):
+            return False
+        fp = project_dir / rel_f
+        if not fp.exists():
+            return False  # classifier may have hallucinated a path
+        try:
+            cur_text = fp.read_text(encoding="utf-8")
+        except Exception:
+            return False
+        sloc = _locate_fn(cur_text, fn)
+        if sloc is None:
+            return False
+        sig_t = sloc[0]
+        cur_body = cur_text[sloc[2]:sloc[3]]
+        err_excerpt = _focus_cargo_errors(output, rel_f, max_chars=_FIX_ERR_CAP)
+        # Container index keys are rel to src/, rel_f is rel to project_dir.
+        _src_rel = rel_f[4:] if rel_f.startswith("src/") else rel_f
+        _ctx = _gather_fn_fix_context(
+            file_text=cur_text, file_rel=rel_f, fn_name=fn,
+            sig_text=sig_t, body_text=cur_body,
+            error_excerpt=err_excerpt,
+            container=_retry_containers.get((_src_rel, fn), ""),
+            type_records=_retry_type_recs,
+            fr_path=_retry_fr_path,
+        )
+        t_blocks = _find_tests_for_fn(
+            _retry_tests_dir_files, fn, file_rel=rel_f,
+            src_dir=src_root, container=_ctx.container)
+        prompt = _build_per_fn_fix_prompt(
+            file_text=cur_text, fn_name=fn, sig_text=sig_t,
+            test_blocks=t_blocks, module_name=project_dir.name,
+            cluster_name=_cluster_label, file_rel=rel_f,
+            prev_body=cur_body, error_excerpt=err_excerpt,
+            sections=PerFnFixSections(
+                container=_ctx.container, types=_ctx.types_section,
+                notes=_ctx.notes_section,
+                # P7: the task3-retry path injects none of these (silent "").
+                macros="", invariants="", retrospective_guidance="",
+                siblings="", crate_idioms="",
+                bound_methods=_ctx.bound_methods_section),
+            fr_path=_retry_fr_path,  # P6.4 past-note recall by error code
+        )
+        new_body, _ = _ask_per_fn_body(prompt, fn, [], sig_text=sig_t)
+        if not new_body:
+            return False
+        # allow_nonstub: a build/test failure comes from a fn with a WRONG,
+        # already-filled (non-stub) body — like every other fix-loop site
+        # (cf. 17001/17100). A bare `unimplemented!()` stub compiles, so it
+        # never causes the failure; without allow_nonstub `_splice_fn_body`
+        # refused every real target and the inline retry was a silent no-op.
+        ok2, _ = _splice_fn_body(fp, fn, new_body, allow_nonstub=True)
+        if ok2:
+            _log(f"  [task3-retry] re-spliced {rel_f}::{fn}.")
+            return True
+        return False
+
     def _apply_per_fn_fixes(refs: list[tuple[str, str]], output: str) -> int:
-        # Re-ask the model for each (file, fn) body and splice it. Frozen tests
-        # are never rewritten — skip tests/ and gen_tests siblings even if a
-        # compile error's span lands inside one (Hard Rule: tests are frozen).
+        # Re-ask + splice each (file, fn). B2: a single fn's transport/model/splice
+        # failure is logged and SKIPPED — it must never propagate up and abort the
+        # whole improvement pass, blinding it to the other fixable frontier fns.
         fixed_count = 0
         for rel_f, fn in refs:
-            if rel_f.startswith("tests/") or _is_gen_tests_file(Path(rel_f).name):
-                continue
-            fp = project_dir / rel_f
-            if not fp.exists():
-                continue  # classifier may have hallucinated a path
             try:
-                cur_text = fp.read_text(encoding="utf-8")
-            except Exception:
-                continue
-            sloc = _locate_fn(cur_text, fn)
-            if sloc is None:
-                continue
-            sig_t = sloc[0]
-            cur_body = cur_text[sloc[2]:sloc[3]]
-            err_excerpt = _focus_cargo_errors(output, rel_f, max_chars=_FIX_ERR_CAP)
-            # Container index keys are rel to src/, rel_f is rel to project_dir.
-            _src_rel = rel_f[4:] if rel_f.startswith("src/") else rel_f
-            _ctx = _gather_fn_fix_context(
-                file_text=cur_text, file_rel=rel_f, fn_name=fn,
-                sig_text=sig_t, body_text=cur_body,
-                error_excerpt=err_excerpt,
-                container=_retry_containers.get((_src_rel, fn), ""),
-                type_records=_retry_type_recs,
-                fr_path=_retry_fr_path,
-            )
-            t_blocks = _find_tests_for_fn(
-                _retry_tests_dir_files, fn, file_rel=rel_f,
-                src_dir=src_root, container=_ctx.container)
-            prompt = _build_per_fn_fix_prompt(
-                file_text=cur_text, fn_name=fn, sig_text=sig_t,
-                test_blocks=t_blocks, module_name=project_dir.name,
-                cluster_name=_cluster_label, file_rel=rel_f,
-                prev_body=cur_body, error_excerpt=err_excerpt,
-                sections=PerFnFixSections(
-                    container=_ctx.container, types=_ctx.types_section,
-                    notes=_ctx.notes_section,
-                    # P7: the task3-retry path injects none of these (silent "").
-                    macros="", invariants="", retrospective_guidance="",
-                    siblings="", crate_idioms="",
-                    bound_methods=_ctx.bound_methods_section),
-                fr_path=_retry_fr_path,  # P6.4 past-note recall by error code
-            )
-            new_body, _ = _ask_per_fn_body(prompt, fn, [], sig_text=sig_t)
-            if not new_body:
-                continue
-            # allow_nonstub: a build/test failure comes from a fn with a WRONG,
-            # already-filled (non-stub) body — like every other fix-loop site
-            # (cf. 17001/17100). A bare `unimplemented!()` stub compiles, so it
-            # never causes the failure; without allow_nonstub `_splice_fn_body`
-            # refused every real target and the inline retry was a silent no-op.
-            ok2, _ = _splice_fn_body(fp, fn, new_body, allow_nonstub=True)
-            if ok2:
-                fixed_count += 1
-                _log(f"  [task3-retry] re-spliced {rel_f}::{fn}.")
+                if _fix_one_ref(rel_f, fn, output):
+                    fixed_count += 1
+            except Exception as e:
+                _log(f"  [task3-retry] fn {rel_f}::{fn} skipped: {type(e).__name__}: {e}")
         return fixed_count
 
     def _run_check_test() -> tuple[bool, str, int]:

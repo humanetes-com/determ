@@ -295,19 +295,22 @@ class OllamaTransport(_BaseTransport):
 
     def stream(self, messages: list[dict[str, Any]], *, model: str,
                max_tokens: int | None, enable_thinking: bool,
-               meta: StreamMeta) -> Iterator[Delta]:
+               meta: StreamMeta, temperature: float | None = None) -> Iterator[Delta]:
         if _model_use_native_ollama(model):
-            yield from self._stream_native(messages, model, enable_thinking)
+            yield from self._stream_native(messages, model, enable_thinking, temperature)
         else:
-            yield from self._stream_compat(messages, model, max_tokens, enable_thinking)
+            yield from self._stream_compat(messages, model, max_tokens, enable_thinking, temperature)
 
     def _stream_native(self, messages: list[dict[str, Any]], model: str,
-                       enable_thinking: bool) -> Iterator[Delta]:
+                       enable_thinking: bool, temperature: float | None = None) -> Iterator[Delta]:
         import ollama as _ollama
+        options: dict[str, Any] = {"num_ctx": self._num_ctx}
+        if temperature is not None:
+            options["temperature"] = temperature
         try:
             for part in _timed_iter(
                 _ollama.chat(model=model, messages=messages, think=enable_thinking,
-                             stream=True, options={"num_ctx": self._num_ctx}),
+                             stream=True, options=options),
                 _CHUNK_TIMEOUT,
             ):
                 thinking = getattr(part.message, "thinking", None)
@@ -320,7 +323,8 @@ class OllamaTransport(_BaseTransport):
             raise TransportTimeout(str(exc)) from exc
 
     def _stream_compat(self, messages: list[dict[str, Any]], model: str,
-                       max_tokens: int | None, enable_thinking: bool) -> Iterator[Delta]:
+                       max_tokens: int | None, enable_thinking: bool,
+                       temperature: float | None = None) -> Iterator[Delta]:
         from openai import APIConnectionError, OpenAI
         client = OpenAI(base_url=self._base_url, api_key="ollama", timeout=300)
         # Qwen3 compat layer has no think param — /no_think suppresses reasoning.
@@ -334,12 +338,13 @@ class OllamaTransport(_BaseTransport):
         # controller's wait_until_ready() readiness poll absorbs a server
         # restart/warmup instead of aborting the run (debt #30).
         try:
-            with client.chat.completions.create(  # type: ignore[union-attr]
+            with client.chat.completions.create(  # type: ignore[call-overload]
                 model=model,
-                messages=messages,  # type: ignore[arg-type]
+                messages=messages,
                 max_tokens=max_tokens,
                 extra_body={"options": {"num_ctx": self._num_ctx}},
                 stream=True,
+                **({"temperature": temperature} if temperature is not None else {}),
             ) as stream:
                 for chunk in stream:
                     delta = chunk.choices[0].delta.content
@@ -444,7 +449,7 @@ class HuggingFaceTransport(_BaseTransport):
 
     def stream(self, messages: list[dict[str, Any]], *, model: str,
                max_tokens: int | None, enable_thinking: bool,
-               meta: StreamMeta) -> Iterator[Delta]:
+               meta: StreamMeta, temperature: float | None = None) -> Iterator[Delta]:
         self._load()
         import torch
 
@@ -453,11 +458,16 @@ class HuggingFaceTransport(_BaseTransport):
         )
         inputs = self._tokenizer([text], return_tensors="pt").to(self._model.device)
         _mnt = max_tokens if max_tokens is not None else self._max_new_tokens
+        # Greedy by default; an explicit temperature switches on sampling.
+        sample_kwargs: dict[str, Any] = (
+            {"do_sample": True, "temperature": temperature} if temperature is not None
+            else {"do_sample": False}
+        )
         with torch.no_grad():
             output_ids = self._model.generate(
                 **inputs,
                 max_new_tokens=min(_mnt, self._max_new_tokens),
-                do_sample=False,
+                **sample_kwargs,
                 pad_token_id=self._tokenizer.eos_token_id,
             )
         new_ids = output_ids[0][inputs["input_ids"].shape[1]:]
@@ -494,7 +504,7 @@ class SGLangTransport(_BaseTransport):
 
     def stream(self, messages: list[dict[str, Any]], *, model: str,
                max_tokens: int | None, enable_thinking: bool,
-               meta: StreamMeta) -> Iterator[Delta]:
+               meta: StreamMeta, temperature: float | None = None) -> Iterator[Delta]:
         from openai import APIConnectionError, OpenAI
         client = OpenAI(base_url=self._base_url, api_key="sglang", timeout=120)
         extra_body: dict[str, Any] = {}
@@ -504,12 +514,13 @@ class SGLangTransport(_BaseTransport):
         # TransportUnavailable so the controller's readiness poll handles a
         # server restart/warmup rather than aborting the run (debt #30).
         try:
-            with client.chat.completions.create(  # type: ignore[union-attr]
+            with client.chat.completions.create(  # type: ignore[call-overload]
                 model=self._model_name,
-                messages=messages,  # type: ignore[arg-type]
+                messages=messages,
                 max_tokens=max_tokens,
                 extra_body=extra_body or None,
                 stream=True,
+                **({"temperature": temperature} if temperature is not None else {}),
             ) as stream:
                 for chunk in stream:
                     delta = chunk.choices[0].delta
@@ -596,7 +607,7 @@ class VLLMTransport(_BaseTransport):
 
     def stream(self, messages: list[dict[str, Any]], *, model: str,
                max_tokens: int | None, enable_thinking: bool,
-               meta: StreamMeta) -> Iterator[Delta]:
+               meta: StreamMeta, temperature: float | None = None) -> Iterator[Delta]:
         from openai import APIConnectionError, BadRequestError, OpenAI
         client = OpenAI(base_url=self._base_url, api_key="vllm",
                         timeout=httpx.Timeout(connect=30, read=900, write=30, pool=30))
@@ -612,6 +623,7 @@ class VLLMTransport(_BaseTransport):
                 extra_body=extra_body,
                 stream=True,
                 stream_options={"include_usage": True},
+                **({"temperature": temperature} if temperature is not None else {}),
             ) as stream:
                 for chunk in stream:
                     if chunk.usage and chunk.usage.prompt_tokens:

@@ -75,8 +75,13 @@ class Transport(Protocol):
         max_tokens: int | None,
         enable_thinking: bool,
         meta: StreamMeta,
+        temperature: float | None = None,
     ) -> Iterator[Delta]:
-        """Yield normalized deltas. Raise InputTooLong / TransportUnavailable / TransportTimeout."""
+        """Yield normalized deltas. Raise InputTooLong / TransportUnavailable / TransportTimeout.
+
+        `temperature` overrides the server default sampling temperature when not
+        None; when None the request omits it so the payload stays byte-identical
+        to the pre-override behaviour."""
         ...
 
     def followup_messages(self, base_messages: list[dict[str, Any]], reasoning_text: str,

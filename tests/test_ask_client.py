@@ -67,8 +67,8 @@ class ConnectTimeout(Exception):  # name contains a network word → triggers re
 
 
 def test_network_error_retries_then_succeeds(monkeypatch):
-    import pipeline_core.adapters.ask_client as m
-    monkeypatch.setattr(m.time, "sleep", lambda *_: None)
+    import time as _time
+    monkeypatch.setattr(_time, "sleep", lambda *_: None)
     calls = {"n": 0}
     def flaky(*a, **k):
         calls["n"] += 1
@@ -83,14 +83,38 @@ def test_network_error_retries_then_succeeds(monkeypatch):
 
 
 def test_network_error_exhausts_to_terminal_error(monkeypatch):
-    import pipeline_core.adapters.ask_client as m
-    monkeypatch.setattr(m.time, "sleep", lambda *_: None)
+    import time as _time
+    monkeypatch.setattr(_time, "sleep", lambda *_: None)
     def always(*a, **k):
         raise ConnectTimeout("down")
     c, events, _ = _client(always)
     with pytest.raises(ConnectTimeout):
         c.ask("hi")
     assert _names(events) == ["llm.request", "llm.error"]
+
+
+# --- B1: temperature threads through to the transport (CODE_ARCHITECTURE §7.0a) ---
+
+def test_temperature_forwarded_to_transport_when_set():
+    seen = {}
+    def raw(prompt, system=None, **k):
+        seen.update(k)
+        return "ok"
+    c, _, _ = _client(raw)
+    assert c.ask("hi", temperature=0.1) == "ok"
+    assert seen.get("temperature") == 0.1
+
+
+def test_temperature_absent_when_none_keeps_request_byte_identical():
+    # When temperature is None the key must NOT be sent, so an unsafe-fn-free
+    # request is byte-identical to the pre-B1 behaviour (no cassette MISS).
+    seen = {}
+    def raw(prompt, system=None, **k):
+        seen.update(k)
+        return "ok"
+    c, _, _ = _client(raw)
+    c.ask("hi")
+    assert "temperature" not in seen
 
 
 def test_base_exception_emits_unpaired_terminal():

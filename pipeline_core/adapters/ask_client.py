@@ -42,7 +42,8 @@ class AskClient:
     single_call_char_limit: int
 
     def ask(self, prompt: str, system: str | None = None, model: str | None = None,
-            max_tokens: int | None = None, think: bool | None = None) -> str:
+            max_tokens: int | None = None, think: bool | None = None,
+            temperature: float | None = None) -> str:
         disclaimer = self.disclaimer()
         system = f"{disclaimer}\n\n{system}" if system else disclaimer
         sys_len = len(system)
@@ -59,6 +60,8 @@ class AskClient:
             kwargs["max_tokens"] = max_tokens
         if think is not None:
             kwargs["think"] = think
+        if temperature is not None:
+            kwargs["temperature"] = temperature
         self.hot_reload()
 
         prompt_meta = self.store_prompt_content(prompt)

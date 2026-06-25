@@ -82,6 +82,7 @@ class LLMController:
         model: str,
         max_tokens: int,
         want_think: bool | None = None,
+        temperature: float | None = None,
     ) -> str:
         spec = transport.spec()
         state = transport.budget_state()
@@ -112,7 +113,8 @@ class LLMController:
             try:
                 cap = self._consume(
                     transport.stream(messages, model=model, max_tokens=plan.request_max,
-                                     enable_thinking=enable_thinking, meta=meta),
+                                     enable_thinking=enable_thinking, meta=meta,
+                                     temperature=temperature),
                     spec.thinking_char_cap, model,
                 )
                 break

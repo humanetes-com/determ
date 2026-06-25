@@ -241,6 +241,56 @@ the Rust extractor (split, thiserror, merge cfg-variant-correct — debt #16); t
 P1–P8 reshape the god-file; these fix what the reconstruction LOOP *does*. Surfaced by live runs,
 not by static structure. Same gates (ruff/mypy/import-linter/LOC/offline-replay; no live gate).
 
+### 7.0 — ⚠️ HIGHEST PRIORITY — the repair loop is dead on anyhow's core (B1+B2 blocking R1–R3)
+
+**Evidence — anyhow run `28654` (2026-06-25, `pipeline.py=be0de6c5`, `--repo dtolnay/anyhow --clean --audit`):**
+FAILED after 2 iterations, plateaued (identical aggregate iter 1→2).
+`TASK 3 aggregate: 107/218 passed, 11 failed, 2 ignored — FAIL`.
+
+| Cluster | Result | Cause |
+|---|---|---|
+| `nightly` | **0/109** (`rc=101`, 0 tests reported) | ≥1 filled `error.rs` body won't compile → the whole test binary dies → 0 tests run |
+| `stable` | 107/109 compile+pass, **11 fail** | failures all in `error.rs` pointer/vtable paths: `test_chain 1/5`, `test_fmt 1/4`, `test_context 2/4`, `test_downcast 1/3`, `test_boxed 2/3`, `lib.rs 14/15`, `test_ensure 17/18` |
+
+**Two faults — the retrospective loop EXISTS and produces correct guidance, but cannot apply it:**
+
+The retro loop is real and working at the diagnosis level. Per-fn: `application/reconstruct/retrospective.py::diagnose_phase_c` asks the model *"here is the fn / last body / error / N attempts — diagnose WHY, give a concrete `try X`"*, returns `{category, guidance, signal}`, tracks `prior_best/improved/exhausted`, and feeds `prior_retrospective` into the next attempt's prompt. Whole-run: TASK 4 (`Analyzing failure [build] → genesis.md` + Model Notes) re-enters the fix loop. This run produced *correct* diagnoses — `Replace ErrorImpl<E> with ErrorInner<E>`, `Replace Request{demand:…} with Request::new(...)`, `WRONG_DEREF_PATTERN → self.0.source()`. The loop fails for two reasons, not because the retro is missing:
+
+| ID | Fault | Concrete evidence | Effect |
+|---|---|---|---|
+| **B1** | `ask()` rejects `temperature` — half-wired feature | `pipeline.py:4837` (`_ask_per_fn_body`) sets `kwargs["temperature"]=unsafe_temp` for **unsafe fns** then `ask(prompt,**kwargs)`; but `ask()` (`pipeline.py:880`) is `ask(prompt,system,model,max_tokens,think)` — no `temperature`, and `model_interact`/`llm_transports` have **zero** temperature support. Log: `do_fix raised: ask() got an unexpected keyword argument 'temperature'` (×4). | anyhow `error.rs` fns are `unsafe` (raw-ptr/vtable) ⇒ `is_unsafe=True` ⇒ every fix attempt on **exactly the hard fns** throws BEFORE reaching the model ⇒ `improvement_loop/task3.inline_retry] aborted at iter 1`. The repair loop is **dead on arrival** for the only fns that matter. NOT a refactor regression (single site 4837; `ask` never had the param). |
+| **B2** | one fn's transport error aborts the WHOLE improvement pass | `[improvement_loop/task3.inline_retry] aborted at iter 1: do_fix_exception` — a single `do_fix` raise kills the pass; the other ~10 fixable stable failures are never attempted. | even with B1 fixed, any per-fn exception blinds the loop. No fault isolation. |
+
+These BLOCK R1–R3: until B1+B2 land, **no repair iteration on anyhow's core ever executes**, so we cannot even measure whether the (correct) retro guidance converges. B1 is a plain bug; fix it first.
+
+### 7.0a — detailed fix plan (B1 → B2 → R1–R3)
+
+**B1 — thread `temperature` end-to-end (the unblock).** Eff S · Risk ● (offline-provable).
+1. `model_interact.py` / `pipeline_core/adapters/llm_transports.py`: add `temperature: float | None = None` to the transport `ask`/generate call; when not None, set it in the vLLM/Ollama sampling params (vLLM: `sampling_params.temperature`; Ollama: `options.temperature`). When None, preserve today's default (do NOT send the key → byte-identical request → existing cassettes unaffected).
+2. `pipeline.py:880 ask(...)`: add `temperature: float | None = None`; forward to `_ASK_CLIENT.ask(prompt, system, model, max_tokens, think, temperature)`. Keep positional contract; update the `_ASK_CLIENT` port/Protocol signature in lockstep.
+3. `pipeline.py:4837`: now valid — `_ask_per_fn_body`'s `unsafe_temp` path works (low-temp for rigid unsafe code, per Qwen3.6 guidance).
+4. Validate OFFLINE: unit test `temperature=None` ⇒ request bytes unchanged (cassette replay no MISS); `temperature=0.1` ⇒ param present. Add a transport-level test asserting the kwarg reaches sampling params. mypy/ruff/import-linter/replay green. No live gate.
+
+**B2 — per-fn fault isolation in the improvement loop.** Eff S · Risk ●● (replay-provable).
+1. Locate the `task3.inline_retry` / `do_fix` driver (`pipeline_core/application/reconstruct/{generate_fix,fix_unit}.py` + `application/refine_loop.py`). Wrap the per-fn `do_fix` call in a try/except that, on transport/model exception, logs `[task3-retry] fn <name> skipped: <exc>` and CONTINUES to the next frontier fn — instead of aborting the pass.
+2. A pass aborts only when ZERO fns made progress AND ZERO were skipped-for-other-reasons (genuine stall), not on the first exception.
+3. Distinguish "exception while fixing" from "fix produced no improvement" in the stall accounting so one throwing fn doesn't mask a stalling-floor signal.
+4. Validate: harness test driving a scripted `do_fix` that throws on fn #1 and succeeds on fn #2 ⇒ pass continues, fn #2 fixed, fn #1 logged-skipped. Replay green.
+
+**R1 — retrospective is BODY-ONLY; frozen-bound mismatch ⇒ clean `GENUINELY_HARD`.** Eff S · Risk ● (offline).
+- `prompts/retrospective.py`: forbid any guidance that edits a signature / `where` / bound / trait header (the skeleton freezes them); few-shot WRONG→RIGHT so the model proposes BODY edits only. When the only fix would change a frozen bound ⇒ classify `GENUINELY_HARD` (clean skip), not a 4-attempt grind. Pin prompt bytes (`tests/test_phase_c_retrospective.py`).
+- Stops the wasted thrash that B1 currently hides (`request_ref` reached attempt 4; `error.rs::error` reverted after 4).
+
+**R2 — bound-incompat frontier redirect.** Eff M · Risk ●● (replay).
+- In `application/reconstruct/attribution.py` per-fn frontier: from the typed records, detect when EVERY in-scope error-constructor bound ⊄ the impl's own frozen `where` — i.e. no body can compile at the call site. Redirect the frontier to the offending alias/type definition (e.g. `ext::StdError`) instead of looping the blameless call site. Necessary-not-sufficient (enables the real fix; doesn't guarantee it).
+
+**R3 — canonical trait symbol co-design (the RESOLVING fix).** Eff M · Risk ●● (replay).
+- Root cause: impl bound names `ext::StdError`; reconstructed constructors name `StdError` (= `core::error::Error`); the model built them as DIFFERENT traits ⇒ unsatisfiable. Enforce ONE canonical trait symbol across impl bounds AND constructor bounds at skeleton-bake / prompt time so the two names cannot diverge into two traits. R2 is its delivery rail; R1 just stops the waste while it lands.
+
+**Sequencing:** B1 (unblock) → B2 (isolation) → re-run anyhow to MEASURE the real residual → R1 (stop thrash) → R3 via R2 (resolve the bound mismatch). B1+B2 are pure bug/robustness fixes (no design risk); R1–R3 are the structural finale (detail + evidence: `technical_debt.md #28`).
+
+Status 2026-06-25: analysis only, unapproved (Hard Rule 5). B1 is a confirmed bug, not a refactor regression.
+
 | # | Where | Problem (concrete) | Move | Eff | Risk |
 |---|---|---|---|---|---|
 | R1 — retrospective body-only | `application/reconstruct/retrospective.py` `diagnose_phase_c` + `prompts/retrospective.py` | Classifier GUIDANCE proposes editing the frozen `where`/bound (`add E: StdError`), which body-fill cannot do ⇒ identical re-submit ⇒ "same error set after attempt N". Live: anyhow `context.rs::context` E0277, both clusters; category oscillates TRAIT_BOUND_VIOLATION↔API_HALLUCINATION. | Constrain category set + prompt to BODY-ONLY edits; forbid signature/bound/where suggestions (skeleton freezes them). Bound-mismatch ⇒ classify `GENUINELY_HARD` → clean skip, not thrash. Pin prompt bytes. | S | ● |
