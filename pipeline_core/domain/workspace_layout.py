@@ -22,6 +22,22 @@ MODULE_STRIPPED_DIR = ".module_stripped"
 # Failure log: running record of every iteration's outcome (fed into TASK 4).
 FAILURE_LOG_NAME = "failure_log.md"
 
+# Project profile: produced once at startup, stable across all iterations.
+PROJECT_PROFILE_NAME = "project_profile.md"
+
+# Behavioral context synthesized from test content (README substitute for README-less projects).
+PROJECT_CONTEXT_NAME = "project_context.md"
+
+# Hash file that invalidates the profile and context cache when project inputs change.
+PROJECT_INPUTS_HASH_NAME = "project_profile.inputs_hash"
+
+# Discovery pass output: import paths, type construction patterns, feature flags (BL-001).
+COVERAGE_STRATEGY_NAME = "coverage_strategy.md"
+COVERAGE_STRATEGY_HASH_NAME = "coverage_strategy.inputs_hash"
+
+# Persistent chunk cache (task1 chunked synthesis); only wiped on explicit --clean.
+CHUNK_CACHE_DIR = ".chunk_cache"
+
 # pipeline_state.md phase-key prefixes that belong to iteration state (strip /
 # task1+). A "restart from augmented" keeps task0a/0b/0c entries and drops these
 # so they re-run from the augmentation commit.

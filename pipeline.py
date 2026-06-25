@@ -113,6 +113,7 @@ from pipeline_core.adapters.task2_roles import (
 from pipeline_core.adapters.telemetry import LogTelemetry
 from pipeline_core.adapters.test_runner import CallableTestRunner
 from pipeline_core.adapters.workspace import WorkspaceDeps
+from pipeline_core.adapters.workspace_lifecycle import clean_state as _clean_state_impl
 from pipeline_core.adapters.workspace_restore import RestoreFromAugmented
 from pipeline_core.adapters.workspace_scan import (
     _dependency_graph_factory,
@@ -171,6 +172,7 @@ from pipeline_core.application.reconstruct.retrospective import (
     diagnose_phase_c as _diagnose_phase_c,
 )
 from pipeline_core.application.reconstruct.run_context import RunContext
+from pipeline_core.application.reconstruct.test_grouping import group_tests as _group_tests_impl
 from pipeline_core.application.reconstruct.test_locator import (
     find_tests_for_fn as _find_tests_for_fn,
 )
@@ -336,7 +338,6 @@ from pipeline_core.domain.rust_idents import (
     declares_fn,
     defined_type_names,
     defines_type,
-    fn_decl_names,
     fn_reference_counts,
     identifier_tokens,
     is_fn_signature_line,
@@ -373,6 +374,7 @@ from pipeline_core.domain.rust_scan import (
     rust_delimiters_balanced as _rust_delimiters_balanced,
 )
 from pipeline_core.domain.source_snapshot import SourceSnapshot
+from pipeline_core.domain.test_grouping import split_oversized_groups as _split_oversized_groups
 from pipeline_core.domain.test_results import (
     OUTPUT_SEPARATOR,
     _parse_test_counts,
@@ -416,9 +418,6 @@ from pipeline_core.domain.text import (
 )
 from pipeline_core.domain.text import (
     strip_markdown_fences as _strip_markdown_fences,
-)
-from pipeline_core.domain.text import (
-    strip_simple_code_fence as _strip_simple_code_fence,
 )
 from pipeline_core.domain.text import (
     strip_surrounding_asterisks as _strip_surrounding_asterisks,
@@ -465,6 +464,7 @@ from pipeline_core.prompts.skeleton_index import (
 from pipeline_core.prompts.skeleton_index import (
     format_skeleton_index_for_cluster as _format_skeleton_index_for_cluster,
 )
+from pipeline_core.prompts.test_grouping import format_skeleton_for_prompt as _format_skeleton_for_prompt
 from pipeline_core.retry import with_retry
 from pipeline_core.settings import Settings
 
@@ -476,6 +476,7 @@ __all__ = [
     "GENESIS_DELIM_START", "GENESIS_DELIM_END", "_extract_genesis",
     "_tag_block", "with_retry", "_strip_markdown_fences",
     "_format_skeleton_index",  # re-export: smoke calls pipeline._format_skeleton_index (no internal caller)
+    "_split_oversized_groups",  # re-export: smoke calls pipeline._split_oversized_groups (no internal caller)
 ]
 
 _mi_mtime: float = os.path.getmtime(_mi.__file__)
@@ -999,10 +1000,6 @@ INTERMEDIATE_CHAR_LIMIT = MODEL_CONTEXT_CHARS // 2
 # go directly to stage-2 (final synthesis). 20 covers argh (18 files) with no intermediate.
 SYNTHESIS_GROUP_SIZE = 20
 
-# Persistent cache directory for chunk extraction results.
-# Keyed by content hash — survives across iterations and restarts.
-CHUNK_CACHE_DIR = ".chunk_cache"
-
 # Timeout in seconds for the full test subprocess.
 TEST_TIMEOUT = 600
 
@@ -1031,11 +1028,12 @@ TASK4_DOC_LIMIT = 200_000
 # Directory for locked module source backups (bottom-up integration).
 # Layout vocabulary now lives in pipeline_core.domain.workspace_layout.
 from pipeline_core.domain.workspace_layout import (  # noqa: E402
-    CLUSTER_AUGMENTED_DIR,
+    CHUNK_CACHE_DIR,
+    COVERAGE_STRATEGY_NAME,
     FAILURE_LOG_NAME,
     LOCKED_MODULES_DIR,
-    MODULE_AUGMENTED_DIR,
-    MODULE_STRIPPED_DIR,
+    PROJECT_CONTEXT_NAME,
+    PROJECT_PROFILE_NAME,
 )
 
 # Sentinel file written by TASK 0c when coverage augmentation is complete.
@@ -1066,18 +1064,6 @@ MANIFEST_NAME = ".generated_files.txt"
 # Persistent log file written alongside the script.
 LOG_NAME = "run.log"
 
-# Project profile: produced once at startup, stable across all iterations.
-PROJECT_PROFILE_NAME = "project_profile.md"
-
-# Behavioral context synthesized from test content (README substitute for README-less projects).
-PROJECT_CONTEXT_NAME = "project_context.md"
-
-# Hash file that invalidates the profile and context cache when project inputs change.
-PROJECT_INPUTS_HASH_NAME = "project_profile.inputs_hash"
-
-# Discovery pass output: import paths, type construction patterns, feature flags (BL-001).
-COVERAGE_STRATEGY_NAME = "coverage_strategy.md"
-COVERAGE_STRATEGY_HASH_NAME = "coverage_strategy.inputs_hash"
 PIPELINE_STATE_NAME = _state_mod.PIPELINE_STATE_NAME  # single-sourced (slice 9)
 
 # Workspace directory for cloned/copied project repos (relative to pipeline root).
@@ -2572,6 +2558,14 @@ def delete_source_files(project_dir: Path, manifest_path: Path,
     _log(f"  Deleted {deleted} generated source file(s).")
 
 
+def clean_state(root: Path, project_dir: Path, manifest_path: Path,
+                genesis_path: Path, functional_req_path: Path) -> None:
+    """Composition-root shim: bind `delete_source_files` into the relocated
+    `adapters.workspace_lifecycle.clean_state` (P6)."""
+    _clean_state_impl(root, project_dir, manifest_path, genesis_path,
+                      functional_req_path, delete_source_files=delete_source_files)
+
+
 # ---------------------------------------------------------------------------
 # Retry helper
 # ---------------------------------------------------------------------------
@@ -3189,234 +3183,18 @@ def _load_skeleton_files(skeleton_dir: Path) -> list[tuple[str, str]]:
     return out
 
 
-def _format_skeleton_for_prompt(skeleton_files: list[tuple[str, str]]) -> str:
-    """Render the skeleton as a sequence of <FILE> blocks for prompt embedding."""
-    parts: list[str] = []
-    for rel, content in skeleton_files:
-        parts.append(f'<FILE path="{rel}">\n{content}\n</FILE>')
-    return "\n\n".join(parts)
-
-
-def _collect_skeleton_symbols(skeleton_files: list[tuple[str, str]]) -> set[str]:
-    """Return the set of fn/method names declared in the skeleton.
-
-    Used by Phase B validation: every target_symbol the LLM emits should exist
-    in this set. We use a coarse regex — sufficient for validation, not
-    intended to be precise.
-    """
-    syms: set[str] = set()
-    for _, content in skeleton_files:
-        syms |= fn_decl_names(content)
-    return syms
-
-
 def _task2_group_tests(
     skeleton_dir: Path,
     test_files: list[tuple[str, str]],
     cluster_name: str,
     module_name: str,
 ) -> list[dict]:
-    """Phase B: ask the LLM to group test files into cohesive units.
-
-    Returns a list of group dicts: {name, rationale, test_files, target_symbols}.
-    Falls back to one-group-per-test-file on LLM failure or validation failure.
-    Result is also written to skeleton_dir/groups.json.
-    """
-    out_path = skeleton_dir / "groups.json"
-    skeleton_files = _load_skeleton_files(skeleton_dir)
-    if not skeleton_files or not test_files:
-        groups = _fallback_groups_per_file(test_files)
-        out_path.write_text(json.dumps(groups, indent=2), encoding="utf-8")
-        return groups
-
-    skeleton_block = _format_skeleton_for_prompt(skeleton_files)
-    tests_block = "\n\n".join(
-        f'<TESTFILE path="{rel}">\n{content}\n</TESTFILE>'
-        for rel, content in test_files
-    )
-    sym_set = _collect_skeleton_symbols(skeleton_files)
-    test_paths = sorted({rel for rel, _ in test_files})
-
-    prompt = f"""You are planning a test-driven reconstruction of the `{module_name}` crate (cluster: {cluster_name}).
-
-The implementation skeleton below has all type definitions, signatures, and macros, but
-every function body is `unimplemented!()`. Your job is to group the test files into
-cohesive units. Each group should exercise a coherent piece of functionality so that one
-LLM call per group can fill the necessary `unimplemented!()` bodies and make that group's
-tests pass.
-
-Rules:
-  - Aim for 6-15 groups. Each group should contain 1-3 test files (smaller
-    groups → smaller per-call output → fewer empty responses from the model).
-  - Every test file appears in EXACTLY one group. Include compile-fail tests
-    (e.g. tests/compiletest.rs, trybuild harness files) — those are real
-    tests and must be assigned to a group too.
-  - target_symbols must be function/method names that exist in the skeleton.
-  - rationale: one sentence describing what the group tests.
-
-Test files you MUST cover (every entry here appears in exactly one group):
-{chr(10).join(f"  - {p}" for p in test_paths)}
-
-Implementation skeleton:
-{skeleton_block}
-
-Test files:
-{tests_block}
-
-Output a JSON object with this exact shape (no prose, no markdown fences):
-
-{{
-  "groups": [
-    {{
-      "name": "short_kebab_case_name",
-      "rationale": "one sentence",
-      "test_files": ["tests/foo.rs", "tests/bar.rs"],
-      "target_symbols": ["func_a", "Method::name", "Type::method"]
-    }}
-  ]
-}}
-"""
-
-    for attempt in range(2):
-        response = ask(prompt, model=_TASK1_MODEL)
-        groups, err, recoverable_missing = _parse_and_validate_groups(
-            response, test_paths, sym_set
-        )
-        if groups is not None:
-            # P3.6: post-process to enforce max group size = 3.
-            groups = _split_oversized_groups(groups, max_size=3)
-            _log(f"  [phase-b] LLM produced {len(groups)} group(s) (post-split).")
-            out_path.write_text(json.dumps(groups, indent=2), encoding="utf-8")
-            return groups
-        # Auto-recover small omissions (≤2 missing test files) by appending
-        # them to a "miscellaneous" group rather than burning another full LLM
-        # round-trip. Compile-fail tests (trybuild) tend to get silently
-        # dropped by the model.
-        if recoverable_missing and len(recoverable_missing) <= 2 and attempt == 0:
-            # Re-parse to get the partial groups (validator returned None when
-            # it rejected, but the parsed structure is still useful).
-            partial = _extract_groups_or_none(response)
-            if partial is not None:
-                partial.append({
-                    "name": "miscellaneous_auto_added",
-                    "rationale": "auto-appended test files omitted by LLM grouping",
-                    "test_files": sorted(recoverable_missing),
-                    "target_symbols": [],
-                })
-                # Apply P3.6 split even on the auto-recovered path so big
-                # groups still get chunked.
-                partial = _split_oversized_groups(partial, max_size=3)
-                _log(f"  [phase-b] auto-recovered {len(recoverable_missing)} "
-                     f"omitted test file(s) into a 'miscellaneous' group "
-                     f"({len(partial)} groups post-split).")
-                out_path.write_text(json.dumps(partial, indent=2), encoding="utf-8")
-                return partial
-        _log(f"  [phase-b] attempt {attempt + 1} rejected: {err}")
-
-    _log("  [phase-b] LLM grouping failed validation twice — falling back to per-file groups.")
-    groups = _fallback_groups_per_file(test_files)
-    out_path.write_text(json.dumps(groups, indent=2), encoding="utf-8")
-    return groups
-
-
-def _split_oversized_groups(groups: list[dict], max_size: int = 3) -> list[dict]:
-    """Split any group with >max_size test files into smaller chunks.
-
-    Each chunk inherits the parent's rationale + target_symbols, with the
-    name suffixed by a 1-based index. Keeps target_symbols on every chunk
-    so leaf-first ordering still works.
-    """
-    out: list[dict] = []
-    for g in groups:
-        tests = list(g.get("test_files", []))
-        if len(tests) <= max_size:
-            out.append(g)
-            continue
-        base_name = g.get("name", "group")
-        chunks: list[list[str]] = [tests[i:i + max_size] for i in range(0, len(tests), max_size)]
-        for idx, chunk in enumerate(chunks, 1):
-            out.append({
-                "name": f"{base_name}_{idx}of{len(chunks)}",
-                "rationale": f"{g.get('rationale', '')} (auto-split {idx}/{len(chunks)})",
-                "test_files": chunk,
-                "target_symbols": list(g.get("target_symbols", [])),
-            })
-    return out
-
-
-def _extract_groups_or_none(response: str) -> list[dict] | None:
-    """Parse the LLM's JSON manifest into a groups list without validation."""
-    txt = _strip_simple_code_fence(response.strip())
-    try:
-        data = json.loads(txt)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(data, dict) or "groups" not in data:
-        return None
-    g = data["groups"]
-    return g if isinstance(g, list) else None
-
-
-def _parse_and_validate_groups(
-    response: str, test_paths: list[str], known_symbols: set[str]
-) -> tuple[list[dict] | None, str, set[str]]:
-    """Parse the LLM's JSON manifest, validate coverage and symbol existence.
-
-    Returns (groups, error_message, recoverable_missing).
-      - groups is None on validation failure.
-      - recoverable_missing is the set of test files the LLM omitted; populated
-        only when the failure was a coverage gap (not a structural error).
-    """
-    # Tolerate fenced JSON.
-    txt = _strip_simple_code_fence(response.strip())
-    try:
-        data = json.loads(txt)
-    except json.JSONDecodeError as e:
-        return None, f"not valid JSON: {e}", set()
-    if not isinstance(data, dict) or "groups" not in data:
-        return None, "missing 'groups' key", set()
-    groups = data["groups"]
-    if not isinstance(groups, list) or not groups:
-        return None, "'groups' must be a non-empty list", set()
-
-    seen_tests: set[str] = set()
-    expected_tests = set(test_paths)
-    for i, g in enumerate(groups):
-        if not isinstance(g, dict):
-            return None, f"group #{i} is not an object", set()
-        for key in ("name", "rationale", "test_files", "target_symbols"):
-            if key not in g:
-                return None, f"group #{i} missing key '{key}'", set()
-        if not isinstance(g["test_files"], list) or not g["test_files"]:
-            return None, f"group '{g.get('name','?')}' has empty test_files", set()
-        for tf in g["test_files"]:
-            if tf in seen_tests:
-                return None, f"test file '{tf}' appears in multiple groups", set()
-            seen_tests.add(tf)
-        # Symbol existence is a soft check — warn but don't reject.
-        # (LLM may use slight name variations like `Self::method`.)
-
-    missing = expected_tests - seen_tests
-    extra = seen_tests - expected_tests
-    if missing:
-        return None, f"groups omit {len(missing)} test file(s); first: {sorted(missing)[:3]}", missing
-    if extra:
-        return None, f"groups include unknown test file(s): {sorted(extra)[:3]}", set()
-    return groups, "ok", set()
-
-
-def _fallback_groups_per_file(test_files: list[tuple[str, str]]) -> list[dict]:
-    """One group per test file — deterministic safe default."""
-    groups: list[dict] = []
-    for rel, _ in test_files:
-        stem = Path(rel).stem
-        groups.append({
-            "name": f"file_{stem}",
-            "rationale": f"single-file fallback grouping for {rel}",
-            "test_files": [rel],
-            "target_symbols": [],
-        })
-    return groups
+    """Composition-root shim: bind the model/log/skeleton-loader into the
+    relocated `application.reconstruct.test_grouping.group_tests` (P6). The `ask`
+    module-global is referenced here so its monkeypatch seam survives."""
+    return _group_tests_impl(
+        skeleton_dir, test_files, cluster_name, module_name,
+        ask=ask, model=_TASK1_MODEL, log=_log, load_skeleton_files=_load_skeleton_files)
 
 
 # Per-fn fill rules relocated to application/reconstruct/fill_rules.py (P2);
@@ -6975,9 +6753,6 @@ from pipeline_core.domain.generation import (
 from pipeline_core.domain.generation import (
     strip_gen_tests_decl_n as _domain_strip_gen_tests_decl_n,  # noqa: E402
 )
-from pipeline_core.domain.generation import (
-    strip_trailing_legacy_gen_block as _strip_trailing_legacy_gen_block,  # noqa: E402
-)
 from pipeline_core.domain.generation import (  # noqa: E402
     tests_output_number as _tests_output_number,
 )
@@ -9300,142 +9075,6 @@ def restart_from_augmented(root: Path, project_dir: Path) -> None:
     iteration state (strip / task1+ artifacts). Thin shim over the relocated
     adapter (`pipeline_core.adapters.workspace_restore`); deps bound below."""
     _RESTORE_FROM_AUGMENTED.run(root, project_dir)
-
-
-def clean_state(root: Path, project_dir: Path, manifest_path: Path,
-                genesis_path: Path, functional_req_path: Path):
-    """Delete all pipeline-generated state so the next run starts fresh."""
-    # Generated source files tracked in the manifest
-    if manifest_path.exists():
-        delete_source_files(project_dir, manifest_path)
-
-    # Per-iteration documents, the project profile, and synthesized context (all per-project)
-    profile_path       = project_dir / PROJECT_PROFILE_NAME
-    context_path       = project_dir / PROJECT_CONTEXT_NAME
-    hash_path          = project_dir / PROJECT_INPUTS_HASH_NAME
-    strategy_path      = project_dir / COVERAGE_STRATEGY_NAME
-    strategy_hash_path = project_dir / COVERAGE_STRATEGY_HASH_NAME
-    state_path         = _state_path(project_dir)
-    for p in [functional_req_path, genesis_path, profile_path, context_path, hash_path,
-              strategy_path, strategy_hash_path, state_path]:
-        if p.exists():
-            p.unlink()
-            _log(f"  Deleted {p.name}")
-
-    # Test output files
-    for p in project_dir.glob("tests_output_*.txt"):
-        p.unlink()
-        _log(f"  Deleted {p.name}")
-
-    # Chunk partials from interrupted chunked task1
-    partials_dir = project_dir / ".task1_partials"
-    if partials_dir.exists():
-        for p in partials_dir.glob("*.txt"):
-            p.unlink()
-        with suppress(OSError):
-            partials_dir.rmdir()
-        _log("  Deleted .task1_partials/")
-
-    # Failure log
-    failure_log_path = project_dir / FAILURE_LOG_NAME
-    if failure_log_path.exists():
-        failure_log_path.unlink()
-        _log(f"  Deleted {FAILURE_LOG_NAME}")
-
-    # Chunk cache (persistent across iterations — only wiped on explicit --clean)
-    cache_dir = root / CHUNK_CACHE_DIR
-    if cache_dir.exists():
-        deleted = 0
-        for p in cache_dir.glob("*.txt"):
-            p.unlink()
-            deleted += 1
-        with suppress(OSError):
-            cache_dir.rmdir()
-        _log(f"  Deleted {CHUNK_CACHE_DIR}/ ({deleted} cached chunks)")
-
-    # Cluster augmentation sentinels — must be wiped so task0c reruns on --clean
-    cluster_aug_dir = project_dir / CLUSTER_AUGMENTED_DIR
-    if cluster_aug_dir.exists():
-        shutil.rmtree(cluster_aug_dir)
-        _log(f"  Deleted {CLUSTER_AUGMENTED_DIR}/")
-
-    # Module augmentation and strip sentinels
-    for _sentinel_dir_name in (MODULE_AUGMENTED_DIR, MODULE_STRIPPED_DIR):
-        _sentinel_dir = project_dir / _sentinel_dir_name
-        if _sentinel_dir.exists():
-            shutil.rmtree(_sentinel_dir)
-            _log(f"  Deleted {_sentinel_dir_name}/")
-
-    # Locked module backups (bottom-up integration)
-    locked_dir = project_dir / LOCKED_MODULES_DIR
-    if locked_dir.exists():
-        shutil.rmtree(locked_dir)
-        _log(f"  Deleted {LOCKED_MODULES_DIR}/")
-
-    # Per-module generated-file manifests
-    for p in project_dir.glob(".generated_files_*.txt"):
-        p.unlink()
-        _log(f"  Deleted {p.name}")
-
-    # Stale per-run coverage artifacts in /tmp/ — these live outside the
-    # workspace dir, so they survive every wipe of tmp/{project}/. Without
-    # cleaning them, the monitor reads stale per-file coverage from
-    # /tmp/grcov_filecache_*.json (and the lcov / json outputs themselves)
-    # and shows misleading carry-over numbers until the next full coverage
-    # measurement overwrites them.
-    import glob as _glob
-    _tmp_patterns = [
-        "/tmp/grcov_*.json",
-        "/tmp/grcov_filecache_*.json",
-        "/tmp/llvmcov_*.lcov",
-        "/tmp/llvmcov_*.lcov.json",
-    ]
-    _tmp_deleted = 0
-    for _pat in _tmp_patterns:
-        for _p in _glob.glob(_pat):
-            try:
-                os.unlink(_p)
-                _tmp_deleted += 1
-            except OSError:
-                pass
-    for _tarp in _glob.glob("/tmp/tarp_*"):
-        try:
-            if os.path.isdir(_tarp):
-                shutil.rmtree(_tarp)
-                _tmp_deleted += 1
-        except OSError:
-            pass
-    if _tmp_deleted:
-        _log(f"  Deleted {_tmp_deleted} stale coverage artifact(s) from /tmp/")
-
-    # Strip all gen_tests artifacts from source files: delete sibling files and
-    # remove path-mod declarations. Also clean up legacy inline blocks (from
-    # pre-sibling-file design) so an old workspace can be salvaged with --clean.
-    stripped_files = stripped_siblings = 0
-    # Delete sibling files first so the parent loop doesn't re-read them.
-    for sibling in sorted(project_dir.rglob("*.gen_tests_*.rs")):
-        if _is_gen_tests_sibling_name(sibling.name):
-            try:
-                sibling.unlink()
-                stripped_siblings += 1
-                _log(f"  Deleted sibling {sibling.relative_to(project_dir)}")
-            except OSError:
-                pass
-    for src in sorted(project_dir.rglob("*.rs")):
-        try:
-            raw = src.read_text(encoding="utf-8")
-            cleaned = _strip_gen_tests_decls(raw)
-            cleaned = _strip_trailing_legacy_gen_block(cleaned).rstrip() + "\n"
-            if cleaned != raw:
-                src.write_text(cleaned, encoding="utf-8")
-                _log(f"  Stripped gen_tests artifacts from {src.relative_to(project_dir)}")
-                stripped_files += 1
-        except Exception:
-            pass
-    if stripped_files or stripped_siblings:
-        _log(f"  Removed {stripped_siblings} sibling file(s); cleaned {stripped_files} source file(s).")
-
-    _log("Clean complete. Starting from scratch.")
 
 
 # ---------------------------------------------------------------------------
