@@ -66,6 +66,7 @@ from pipeline_core.adapters.augment_store import FileAugmentStore
 from pipeline_core.adapters.build_script import CargoBuildScriptReader
 from pipeline_core.adapters.cargo import CargoEnv
 from pipeline_core.adapters.cluster_merge import ClusterMerger
+from pipeline_core.adapters.cluster_pruning import prune_redundant_clusters as _prune_redundant_clusters
 from pipeline_core.adapters.commit_gate import CallableCommitGate
 from pipeline_core.adapters.coverage import CoverageDeps
 from pipeline_core.adapters.downstream_api import scan_downstream_api
@@ -2878,87 +2879,6 @@ _ATTR_DEPS = _attribution.AttributionDeps(
 # Wire the cross-cutting infra seams to the pipeline's concrete sinks/config (slice 5b).
 _pclog.set_sinks(_log, _emit)
 _pcretry.configure(max_retries=MAX_RETRIES)
-
-
-def _prune_redundant_clusters(
-    clusters: list["BuildCluster"],
-    source_dir: Path,
-    cargo_toml_path: "Path | None" = None,
-    min_gated_items: int = 5,
-) -> list["BuildCluster"]:
-    """Drop clusters whose work is already covered by another cluster.
-
-    Two pruning strategies:
-      (P) Default-redundancy: if a cluster's distinguishing cfg_true is a
-          subset of Cargo.toml's `default = [...]` features, drop it —
-          the default build (cluster with no cfgs added) already covers
-          its activated set.
-      (Q) Empty-cluster: count items in `source_dir/src/` whose
-          `#[cfg(...)]` references the cluster's distinguishing predicate.
-          If fewer than `min_gated_items`, the cluster's contribution is
-          too small to justify its own LLM run. Drop it.
-
-    Always keep at least one cluster (the default). Returns the pruned
-    list. Logs each prune decision with reason.
-    """
-    if not clusters:
-        return clusters
-    # Parse Cargo.toml [features].default to get baseline-enabled features.
-    default_features: set[str] = set()
-    if cargo_toml_path is None:
-        cargo_toml_path = source_dir / "Cargo.toml"
-    if cargo_toml_path.exists():
-        default_features = set(_cargo_default_features(cargo_toml_path.read_text(errors="replace")))
-
-    # Count per-predicate gated items in source.
-    pred_counts: dict[str, int] = {}
-    src_dir = source_dir / "src"
-    if src_dir.exists():
-        skip = frozenset({"any", "all", "not", "cfg", "cfg_attr", "feature"})
-        for rs in src_dir.rglob("*.rs"):
-            try:
-                txt = rs.read_text(errors="replace")
-            except Exception:
-                continue
-            for name in _cfg.gated_predicate_names(txt, skip):
-                pred_counts[name] = pred_counts.get(name, 0) + 1
-
-    keep: list[BuildCluster] = []
-    dropped: list[tuple[str, str]] = []
-    # Sort clusters: stable/default first so we always retain a baseline.
-    ordered = sorted(clusters, key=lambda c: (not c.is_default, c.name))
-    has_baseline = False
-    for c in ordered:
-        distinguishing = list(c.active_cfg or [])
-        # (P) default-redundancy: drop if all distinguishing cfgs are in defaults.
-        if distinguishing and all(p in default_features for p in distinguishing):
-            if has_baseline:
-                dropped.append((c.name, f"all cfgs {distinguishing} are in default features"))
-                continue
-        # (Q) empty-cluster: drop if distinguishing predicates gate too little.
-        if distinguishing:
-            total_gated = sum(pred_counts.get(p, 0) for p in distinguishing)
-            if total_gated < min_gated_items and not c.is_default:
-                if has_baseline:
-                    dropped.append((c.name,
-                                    f"distinguishing cfgs gate only {total_gated} item(s) "
-                                    f"(< {min_gated_items})"))
-                    continue
-        keep.append(c)
-        if c.is_default or not distinguishing:
-            has_baseline = True
-
-    if not keep:
-        # Pathological: nothing survived. Keep the lex-first as safety baseline.
-        keep = [sorted(clusters, key=lambda c: c.name)[0]]
-        _log(f"  [prune] all clusters were redundant; keeping baseline '{keep[0].name}' as safety.")
-
-    if dropped:
-        for name, reason in dropped:
-            _log(f"  [prune] dropped cluster '{name}': {reason}")
-    else:
-        _log(f"  [prune] no redundant clusters; keeping all {len(keep)}.")
-    return keep
 
 
 def _filter_tests_for_cluster(test_files: list[tuple[str, str]],

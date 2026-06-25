@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 
+from pipeline_core import log as _log
 from pipeline_core.domain.cfg import Leaf, parse_cfg_pred
 from pipeline_core.domain.models import BuildCluster, CfgOccurrence, ModRecord
 
@@ -223,3 +224,66 @@ def plan_clusters(
         clusters.append(cluster)
 
     return clusters
+
+
+def prune_redundant_clusters(
+    clusters: list[BuildCluster],
+    default_features: set[str],
+    pred_counts: Mapping[str, int],
+    *,
+    min_gated_items: int = 5,
+) -> list[BuildCluster]:
+    """Drop clusters already covered by another cluster (pure decision).
+
+    Facts are pre-gathered by the caller (an adapter): ``default_features`` is
+    Cargo.toml's ``[features].default`` set; ``pred_counts`` maps each gated
+    predicate name to how many ``src/`` items reference it. Two strategies:
+
+      (P) Default-redundancy: a cluster whose distinguishing ``active_cfg`` is a
+          subset of ``default_features`` is already exercised by the baseline →
+          drop it.
+      (Q) Empty-cluster: a non-default cluster whose distinguishing predicates
+          gate fewer than ``min_gated_items`` items is too small to justify its
+          own LLM run → drop it.
+
+    Always keep at least one cluster (the baseline). Logs each prune decision.
+    """
+    if not clusters:
+        return clusters
+
+    keep: list[BuildCluster] = []
+    dropped: list[tuple[str, str]] = []
+    # Sort clusters: stable/default first so we always retain a baseline.
+    ordered = sorted(clusters, key=lambda c: (not c.is_default, c.name))
+    has_baseline = False
+    for c in ordered:
+        distinguishing = list(c.active_cfg or [])
+        # (P) default-redundancy: drop if all distinguishing cfgs are in defaults.
+        if distinguishing and all(p in default_features for p in distinguishing):
+            if has_baseline:
+                dropped.append((c.name, f"all cfgs {distinguishing} are in default features"))
+                continue
+        # (Q) empty-cluster: drop if distinguishing predicates gate too little.
+        if distinguishing:
+            total_gated = sum(pred_counts.get(p, 0) for p in distinguishing)
+            if total_gated < min_gated_items and not c.is_default:
+                if has_baseline:
+                    dropped.append((c.name,
+                                    f"distinguishing cfgs gate only {total_gated} item(s) "
+                                    f"(< {min_gated_items})"))
+                    continue
+        keep.append(c)
+        if c.is_default or not distinguishing:
+            has_baseline = True
+
+    if not keep:
+        # Pathological: nothing survived. Keep the lex-first as safety baseline.
+        keep = [sorted(clusters, key=lambda c: c.name)[0]]
+        _log.log(f"  [prune] all clusters were redundant; keeping baseline '{keep[0].name}' as safety.")
+
+    if dropped:
+        for name, reason in dropped:
+            _log.log(f"  [prune] dropped cluster '{name}': {reason}")
+    else:
+        _log.log(f"  [prune] no redundant clusters; keeping all {len(keep)}.")
+    return keep
