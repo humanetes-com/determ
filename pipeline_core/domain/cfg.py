@@ -649,6 +649,43 @@ class CfgSet:
         return tree.evaluate(aug) is False
 
 
+def filter_cfg_inactive_branches(text: str, cfg_set: CfgSet) -> str:
+    """Strip `#[cfg(P)]` blocks whose predicate evaluates decidably False under
+    ``cfg_set``. Prompt-render use only — the model sees the active variant of
+    each cfg-gated alternative (e.g. a single StdError definition) instead of
+    all three simultaneously, which confuses method resolution.
+
+    Each stripped unit is: the `#[cfg(P)]` line + any stacked attribute lines
+    that follow it + the governed item (brace-delimited block or single line).
+    Undecidable predicates (None) are left in place."""
+    lines = text.splitlines(keepends=True)
+    n = len(lines)
+    out: list[str] = []
+    i = 0
+    while i < n:
+        pred = match_cfg_attr_line(lines[i].rstrip("\n").rstrip("\r"))
+        if pred is not None and cfg_set.evaluate(pred) is False:
+            i += 1  # skip the inactive #[cfg(...)] line
+            # Skip stacked attribute lines that follow (e.g. #[allow(...)])
+            while i < n and lines[i].lstrip().startswith("#["):
+                i += 1
+            # Skip the governed item: brace block or single non-blank line
+            if i < n:
+                if "{" in lines[i]:
+                    depth = 0
+                    while i < n:
+                        depth += lines[i].count("{") - lines[i].count("}")
+                        i += 1
+                        if depth <= 0:
+                            break
+                else:
+                    i += 1
+        else:
+            out.append(lines[i])
+            i += 1
+    return "".join(out)
+
+
 def cluster_gate_predicate(active_cfg: list[str], excluded_cfg: list[str]) -> str:
     """Build the cfg predicate body (without `#[cfg(...)]` wrapping) that is true
     for this cluster and false for all others — the gate used when several

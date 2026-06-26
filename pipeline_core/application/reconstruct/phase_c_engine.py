@@ -26,6 +26,7 @@ from pipeline_core.application.fix_loop import FixOutcome, drive_fix_loop
 from pipeline_core.application.reconstruct.context import PerFnPassCtx
 from pipeline_core.application.reconstruct.fill_one_fn import FillOneFn
 from pipeline_core.application.reconstruct.scheduling import group_priority_levels
+from pipeline_core.domain.cfg import CfgSet
 from pipeline_core.domain.enums import FillUnit
 from pipeline_core.domain.models import (
     BuildCluster,
@@ -258,6 +259,10 @@ class PhaseCFillEngine:
                 tdd_frontier_tests=tdd_frontier_tests, tdd_test_cmd=tdd_test_cmd,
                 splice_check_lock=_splice_check_lock, retros_cache=_retros_cache,
                 idiom_blocks=_idiom_blocks, pass_n=pass_n, total=len(stubs),
+                cluster_cfg_set=(
+                    CfgSet.of(cluster.cfg_true, cluster.cfg_false)
+                    if cluster is not None else None
+                ),
             )
 
             def _worker(work_queue: _queue_mod.Queue[tuple[int, Stub]], *,

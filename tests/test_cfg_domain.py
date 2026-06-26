@@ -12,6 +12,7 @@ from pipeline_core.domain.cfg import (
     CfgSet,
     Leaf,
     Not,
+    filter_cfg_inactive_branches,
     normalize_pred,
     parse_cfg_pred,
     split_top_level_commas,
@@ -153,3 +154,66 @@ def test_excludes_for_cargo_never_over_excludes_builtins() -> None:
     assert empty.excludes_for_cargo('target_os = "linux"') is False
     # `not(custom-off)` RUNS in the default build → not excluded.
     assert empty.excludes_for_cargo("not(extra_cap)") is False
+
+
+# E/R3 — filter_cfg_inactive_branches tests
+_STABLE_CTX = CfgSet.of(cfg_true=["not(nightly)"], cfg_false=["nightly"])
+
+
+def test_filter_strips_inactive_use_statement() -> None:
+    src = (
+        '#[cfg(nightly)]\nuse nightly_only::Thing;\n'
+        'use std::error::Error as StdError;\n'
+    )
+    out = filter_cfg_inactive_branches(src, _STABLE_CTX)
+    assert "nightly_only" not in out
+    assert "StdError" in out
+
+
+def test_filter_strips_inactive_brace_block() -> None:
+    src = (
+        '#[cfg(nightly)]\ntrait StdError: Debug {\n    fn source(&self);\n}\n'
+        'use std::error::Error as StdError;\n'
+    )
+    out = filter_cfg_inactive_branches(src, _STABLE_CTX)
+    assert "fn source" not in out
+    assert "StdError" in out
+
+
+def test_filter_keeps_active_branch() -> None:
+    src = (
+        '#[cfg(not(nightly))]\nuse std::error::Error as StdError;\n'
+        'fn foo() {}\n'
+    )
+    out = filter_cfg_inactive_branches(src, _STABLE_CTX)
+    assert "StdError" in out
+    assert "fn foo" in out
+
+
+def test_filter_leaves_undecidable_branch_intact() -> None:
+    # unix is a builtin — CfgSet has no opinion → undecidable → kept
+    src = '#[cfg(unix)]\nuse unix_thing::X;\nfn bar() {}\n'
+    out = filter_cfg_inactive_branches(src, _STABLE_CTX)
+    assert "unix_thing" in out
+    assert "fn bar" in out
+
+
+def test_filter_handles_stacked_attributes() -> None:
+    src = (
+        '#[cfg(nightly)]\n'
+        '#[allow(dead_code)]\n'
+        'fn nightly_fn() { let x = 1; }\n'
+        'fn stable_fn() {}\n'
+    )
+    out = filter_cfg_inactive_branches(src, _STABLE_CTX)
+    assert "nightly_fn" not in out
+    assert "stable_fn" in out
+
+
+def test_filter_empty_text_returns_empty() -> None:
+    assert filter_cfg_inactive_branches("", _STABLE_CTX) == ""
+
+
+def test_filter_no_cfg_returns_text_unchanged() -> None:
+    src = 'fn foo() {}\nfn bar() {}\n'
+    assert filter_cfg_inactive_branches(src, _STABLE_CTX) == src

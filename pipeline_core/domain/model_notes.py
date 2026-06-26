@@ -80,6 +80,33 @@ def preserve_model_notes(old_fr_text: str | None, new_fr_text: str) -> str:
     return new_body.rstrip() + "\n\n" + notes_section
 
 
+# Pre-canned notes injected deterministically (not LLM-extracted) when a
+# specific structural pattern is detected. Each is a single bullet string
+# containing ≥2 WRONG→RIGHT pairs for few-shot variety (CLAUDE.md rule).
+
+_ERRORIMPL_OBJECT_NOTE = (
+    "ErrorImpl<E> stores the wrapped error in field `_object: E`, not `error` or "
+    "`inner`. "
+    "WRONG: `self.error.source()` (no field `error` → E0609) / "
+    "RIGHT: `self._object.source()`. "
+    "WRONG: `self.inner.source()` (no field `inner` → E0609) / "
+    "RIGHT: `self._object.source()`."
+)
+
+
+def is_errorimpl_container(container: str) -> bool:
+    """True when the impl container involves ErrorImpl — signals that the
+    `_object` field canned note should be appended on first compile failure."""
+    return "ErrorImpl" in container
+
+
+def errorimpl_object_note() -> str:
+    """Pre-canned WRONG→RIGHT note for ErrorImpl's `_object` field naming.
+    Appended on the first compile failure of any ErrorImpl fn so that
+    subsequent attempts see the note in MODEL_NOTES."""
+    return _ERRORIMPL_OBJECT_NOTE
+
+
 def render_with_notes(fr_text: str, notes: list[str]) -> str:
     """Rewrite the notes section of ``fr_text`` with ``notes`` as bullets,
     creating a minimal FR body when the input has none."""

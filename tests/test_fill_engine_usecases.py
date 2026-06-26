@@ -123,7 +123,7 @@ def _ctx(ws: Path) -> PerFnPassCtx:
         failures_dir=ws / ".skeleton" / "_failures",
         tdd_frontier_tests=None, tdd_test_cmd=None,
         splice_check_lock=threading.Lock(), retros_cache={}, idiom_blocks=[],
-        pass_n=1, total=1,
+        pass_n=1, total=1, cluster_cfg_set=None,
     )
 
 

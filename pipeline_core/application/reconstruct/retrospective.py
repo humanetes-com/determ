@@ -19,6 +19,18 @@ from ...domain.llm_output import parse_retrospective
 from ...prompts.retrospective import build_phase_c_retro_prompt
 
 
+def _is_vtable_dispatch_fn(sig_text: str, container: str) -> bool:
+    """True when the fn requires ErrorVTable layout access that the skeleton
+    does not expose: `unsafe fn` with `Own<ErrorImpl>` or `Ref<ErrorImpl>`
+    param and no `where E:` bound (which would open a normal dispatch path)."""
+    if "unsafe fn" not in sig_text:
+        return False
+    combined = sig_text + " " + container
+    if "Own<ErrorImpl" not in combined and "Ref<ErrorImpl" not in combined:
+        return False
+    return "where E:" not in sig_text
+
+
 @dataclass(frozen=True, slots=True)
 class PhaseCRetroDeps:
     """Collaborators the retrospective needs, injected by the composition root."""
@@ -45,6 +57,20 @@ def diagnose_phase_c(
     _exc = error_excerpt or ""
     if "Errors elsewhere in the crate" in _exc and "Errors in target file" not in _exc:
         return {"category": "DOWNSTREAM", "guidance": "", "signal": "downstream_only"}
+
+    # F/R4: unsafe vtable-dispatch fns cannot be reconstructed without the
+    # ErrorVTable struct layout. Skip the LLM call and mark GENUINELY_HARD
+    # immediately at ≥2 attempts — saves ~32 wasted model calls per anyhow run.
+    if fix_attempts >= 2 and _is_vtable_dispatch_fn(sig_text, container):
+        return {
+            "category": "GENUINELY_HARD",
+            "guidance": (
+                "fn requires ErrorVTable layout access via Own<ErrorImpl> or "
+                "Ref<ErrorImpl> without a where-bound. The vtable struct is not "
+                "exposed by the skeleton — do not retry."
+            ),
+            "signal": "vtable_fast_exit",
+        }
 
     prompt = build_phase_c_retro_prompt(
         fn_name, sig_text, container, file_rel, cluster_name, last_body,

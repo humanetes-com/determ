@@ -120,3 +120,92 @@ def test_prompt_uses_wrong_right_examples():
     # CLAUDE.md: injected guidance must show concrete WRONG→RIGHT, not jargon.
     p = _retro_prompt()
     assert "WRONG:" in p and "RIGHT:" in p
+
+
+# F/R4 — vtable dispatch fast-exit tests
+def _vtable_deps(answer: str = "CATEGORY: X\nGUIDANCE: y") -> PhaseCRetroDeps:
+    def ask(_prompt: str) -> str:
+        return answer
+    return PhaseCRetroDeps(ask_retrospective=ask, log=lambda *_: None,
+                           failed_body_cap=2000, fix_err_cap=2000)
+
+
+def test_vtable_fn_fast_exits_genuinely_hard_at_two_attempts() -> None:
+    called: list[str] = []
+
+    def ask(p: str) -> str:
+        called.append(p)
+        return "CATEGORY: X\nGUIDANCE: y"
+
+    deps = PhaseCRetroDeps(ask_retrospective=ask, log=lambda *_: None,
+                           failed_body_cap=2000, fix_err_cap=2000)
+    result = diagnose_phase_c(
+        "error",
+        "unsafe fn error(this: Ref<ErrorImpl>) -> &dyn StdError",
+        "impl ErrorImpl",
+        "src/error.rs", "stable",
+        "let x = 1;", "E0609", 2, deps,
+    )
+    assert result["category"] == "GENUINELY_HARD"
+    assert result["signal"] == "vtable_fast_exit"
+    assert not called  # LLM must NOT be called
+
+
+def test_vtable_fn_does_not_fast_exit_at_one_attempt() -> None:
+    called: list[str] = []
+
+    def ask(p: str) -> str:
+        called.append(p)
+        return "CATEGORY: WRONG_TYPE_CHOICE\nGUIDANCE: try NonNull"
+
+    deps = PhaseCRetroDeps(ask_retrospective=ask, log=lambda *_: None,
+                           failed_body_cap=2000, fix_err_cap=2000)
+    result = diagnose_phase_c(
+        "error",
+        "unsafe fn error(this: Ref<ErrorImpl>) -> &dyn StdError",
+        "impl ErrorImpl",
+        "src/error.rs", "stable",
+        "let x = 1;", "E0609", 1, deps,
+    )
+    assert called  # LLM WAS called
+    assert result["signal"] not in ("vtable_fast_exit",)
+
+
+def test_non_vtable_unsafe_fn_not_fast_exited() -> None:
+    # `unsafe fn` with raw-ptr param but no Own/Ref<ErrorImpl> → normal path
+    called: list[str] = []
+
+    def ask(p: str) -> str:
+        called.append(p)
+        return "CATEGORY: WRONG_DEREF_PATTERN\nGUIDANCE: use ptr.read()"
+
+    deps = PhaseCRetroDeps(ask_retrospective=ask, log=lambda *_: None,
+                           failed_body_cap=2000, fix_err_cap=2000)
+    result = diagnose_phase_c(
+        "read_at", "unsafe fn read_at<T: Copy>(p: *const T, i: isize) -> T",
+        "impl ReadHelper", "src/lib.rs", "stable",
+        "let x = 1;", "E0133", 3, deps,
+    )
+    assert called
+    assert result["signal"] != "vtable_fast_exit"
+
+
+def test_vtable_fn_with_where_bound_not_fast_exited() -> None:
+    # where E: bound opens a normal dispatch path — the fast-exit does not apply
+    called: list[str] = []
+
+    def ask(p: str) -> str:
+        called.append(p)
+        return "CATEGORY: TRAIT_BOUND_VIOLATION\nGUIDANCE: call via bound"
+
+    deps = PhaseCRetroDeps(ask_retrospective=ask, log=lambda *_: None,
+                           failed_body_cap=2000, fix_err_cap=2000)
+    result = diagnose_phase_c(
+        "downcast_ref",
+        "unsafe fn downcast_ref<E>(this: Ref<ErrorImpl<E>>) -> Option<&E> where E: Any",
+        "impl ErrorImpl",
+        "src/error.rs", "stable",
+        "let x = 1;", "E0277", 3, deps,
+    )
+    assert called
+    assert result["signal"] != "vtable_fast_exit"

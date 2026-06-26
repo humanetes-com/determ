@@ -6,6 +6,8 @@ from pipeline_core.domain.model_notes import (
     MODEL_NOTES_HEADER as H,
 )
 from pipeline_core.domain.model_notes import (
+    errorimpl_object_note,
+    is_errorimpl_container,
     parse_note_bullets,
     preserve_model_notes,
     render_with_notes,
@@ -55,3 +57,37 @@ def test_render_round_trips() -> None:
     assert out.count(H) == 1
     _, notes = slice_model_notes(out)
     assert parse_note_bullets(notes) == ["x", "y"]
+
+
+# D/R2 — ErrorImpl _object field note tests
+def test_errorimpl_container_detection_positive() -> None:
+    assert is_errorimpl_container("impl<E> StdError for ErrorImpl<E>")
+    assert is_errorimpl_container("impl ErrorImpl")
+    assert is_errorimpl_container("impl<E> ErrorImpl<E>")
+
+
+def test_errorimpl_container_detection_negative() -> None:
+    assert not is_errorimpl_container("impl Error for MyError")
+    assert not is_errorimpl_container("impl<E> Display for Wrapper<E>")
+    assert not is_errorimpl_container("")
+
+
+def test_errorimpl_note_has_two_or_more_wrong_right_pairs() -> None:
+    note = errorimpl_object_note()
+    assert note.count("WRONG:") >= 2
+    assert note.count("RIGHT:") >= 2
+
+
+def test_errorimpl_note_names_object_field() -> None:
+    note = errorimpl_object_note()
+    assert "_object" in note
+
+
+def test_errorimpl_note_round_trips_through_render() -> None:
+    note = errorimpl_object_note()
+    out = render_with_notes("# FR\n\nbody\n", [note])
+    _, notes_section = slice_model_notes(out)
+    bullets = parse_note_bullets(notes_section)
+    assert len(bullets) == 1
+    assert "_object" in bullets[0]
+    assert bullets[0].count("WRONG:") >= 2

@@ -30,6 +30,8 @@ from pipeline_core.application.reconstruct.fill_rules import (
     make_failed_attempt_body,
     module_of,
 )
+from pipeline_core.domain.cfg import filter_cfg_inactive_branches
+from pipeline_core.domain.model_notes import errorimpl_object_note, is_errorimpl_container
 from pipeline_core.domain.models import FillResult, Stub
 from pipeline_core.domain.refine import FloorStall
 from pipeline_core.ports.fill_engine import (
@@ -155,6 +157,10 @@ class FillOneFn:
                 first_error_excerpt, retro_bound_methods
             attempts += 1
             cur_text = file_path.read_text(encoding="utf-8")
+            # E/R3: strip inactive #[cfg] branches so the model sees only the
+            # active variant (e.g. one StdError definition, not three).
+            if ctx.cluster_cfg_set is not None:
+                cur_text = filter_cfg_inactive_branches(cur_text, ctx.cluster_cfg_set)
             # Slice 8a: one gather per attempt — notes re-filtered with the
             # LATEST cargo error (P3.4), TYPES_IN_SCOPE re-selected from
             # sig + container + where + the PREVIOUS BODY (types the last
@@ -372,6 +378,16 @@ class FillOneFn:
             if fix_attempt == 1:
                 first_failed_body = body
                 first_error_excerpt = self.cargo.focus_errors(cargo_out, rel_file)
+                # D/R2: eagerly append the canned _object field note for any
+                # ErrorImpl fn — available to attempt 2+ via the notes_section
+                # gather (loaded fresh every iteration).
+                if ctx.fr_path is not None and is_errorimpl_container(container):
+                    _obj_note = errorimpl_object_note()
+                    if self.retros.append_note(ctx.fr_path, _obj_note,
+                                               error_codes=["E0609"]):
+                        self.tel.log(
+                            f"  [model-notes] +1 note (ErrorImpl/_object): "
+                            f"{_obj_note[:80]}...")
 
             # P5.5: track error codes seen so we can promote recurring
             # ones to every subsequent prompt.
