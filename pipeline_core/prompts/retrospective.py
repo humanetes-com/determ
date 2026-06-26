@@ -24,10 +24,8 @@ def build_phase_c_retro_prompt(
         f"\nSibling impls of `{fn_name}` already filled correctly in this file "
         f"(use as reference):\n{sibling_bodies}\n"
     ) if sibling_bodies.strip() else ""
-    # Corrected R2/R3 (debt #28): when a generic param is bounded by an in-scope
-    # trait, that trait's methods ARE the in-scope calls that satisfy the FROZEN
-    # bound — surface them so the diagnosis redirects to them instead of
-    # mis-routing a bound-mismatch to GENUINELY_HARD.
+    # BOUND_METHODS surfaces the methods the frozen trait bound makes callable
+    # so the model routes through them rather than mis-classifying GENUINELY_HARD.
     bound_section = (
         f"\n<BOUND_METHODS>\n{bound_methods_section}\n</BOUND_METHODS>\n"
     ) if bound_methods_section.strip() else ""
@@ -59,11 +57,10 @@ def build_phase_c_retro_prompt(
         "`Error::new(value)` whose bound the frozen signature already satisfies.\"\n"
         "  RIGHT: \"Call `value.into()` inside the body instead of widening the "
         "generic bound.\"\n"
-        # Corrected R2/R3 (debt #28): a frozen bound is usually a TRAIT, and that
-        # trait's own methods ARE the in-scope calls that satisfy it. A constructor
-        # erroring with E0277 means it demands a DIFFERENT bound — route through the
-        # bound's trait method, do NOT skip. See <BOUND_METHODS> above for the exact
-        # signatures the frozen bound makes callable on the bounded value.
+        # A frozen bound is usually a TRAIT whose own methods ARE the in-scope calls.
+        # A constructor erroring E0277 means it demands a DIFFERENT bound — route
+        # through the frozen bound's trait method instead. Exception: raw-pointer or
+        # vtable-access patterns cannot be satisfied via trait methods → NEEDS_VTABLE_ACCESS.
         "BOUND-MISMATCH RULE: when a free constructor (`Type::make_from(v)`) errors "
         "E0277 because your generic does not satisfy ITS bound, the FROZEN `where` "
         "bound on that generic is itself a trait whose methods you CAN call on the "
@@ -71,7 +68,8 @@ def build_phase_c_retro_prompt(
         "`self.map_err(|v| v.bound_method(arg))` — this is TRAIT_BOUND_VIOLATION "
         "with a concrete fix, NOT GENUINELY_HARD. Only classify GENUINELY_HARD when "
         "the frozen bound provides NO method usable here AND no in-scope value/call "
-        "satisfies it.\n\n"
+        "satisfies it. Exception: if the error involves raw-pointer dereference or "
+        "vtable-layout access, classify as NEEDS_VTABLE_ACCESS instead.\n\n"
         "Classify the root cause in ONE of these categories:\n"
         "  WRONG_TYPE_CHOICE       — used wrong wrapper/type (e.g. Box vs NonNull vs Own)\n"
         "  WRONG_DEREF_PATTERN     — *ptr vs .as_ref() vs .deref(); name the correct chain\n"
@@ -80,7 +78,9 @@ def build_phase_c_retro_prompt(
         "value/call that satisfies it — usually a method the frozen bound's own trait "
         "provides (see <BOUND_METHODS>), NOT a bound to add. Only if truly none → GENUINELY_HARD\n"
         "  API_HALLUCINATION       — model called a method that does not exist; name it\n"
-        "  NEEDS_VTABLE_ACCESS     — requires reading the ErrorVTable; layout is needed\n"
+        "  NEEDS_VTABLE_ACCESS     — requires reading the ErrorVTable; layout is needed "
+        "→ classify as GENUINELY_HARD immediately; vtable layout cannot be satisfied via "
+        "trait methods alone, and the skeleton does not expose the vtable struct\n"
         "  GENUINELY_HARD          — unfixable within the frozen body: a bound/where/sig change "
         "is the ONLY route AND the frozen bound's trait offers no usable method (see "
         "<BOUND_METHODS>), or fundamental layout unknown; flag for skip\n\n"

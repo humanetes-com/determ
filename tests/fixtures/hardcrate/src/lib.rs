@@ -19,6 +19,7 @@ mod wire;
 mod framing;
 mod sprawl;
 mod label;
+mod unsafe_ptr;
 #[cfg(any(extra_cap, feature = "extra_cap"))]
 mod cap;
 
@@ -30,6 +31,7 @@ pub use wire::{decode_id, encode_id};
 pub use framing::{deframe, frame};
 pub use sprawl::{abs_diff, clamp_u8, classify, count_set_bits, digit_sum, is_ascii_upper, max3, min3, nth_byte, parity, reverse_nibbles, saturating_sub_u8, sign, to_lower, Category};
 pub use label::{Describe, Reason, Tagged};
+pub use unsafe_ptr::{copy_via_raw, ptr_distance, read_at, write_at};
 #[cfg(any(extra_cap, feature = "extra_cap"))]
 pub use cap::wrapping_total;
 

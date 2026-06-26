@@ -62,10 +62,11 @@ class FakeTransport:
     def resolve_thinking(self, model, want_think):
         return self._thinking if want_think is None else want_think
 
-    def stream(self, messages, *, model, max_tokens, enable_thinking, meta: StreamMeta) -> Iterator[Delta]:
+    def stream(self, messages, *, model, max_tokens, enable_thinking, meta: StreamMeta,
+               temperature: float | None = None) -> Iterator[Delta]:
         idx = len(self.calls)
         self.calls.append({"messages": messages, "max_tokens": max_tokens,
-                           "enable_thinking": enable_thinking})
+                           "enable_thinking": enable_thinking, "temperature": temperature})
         resp = self._responses[idx]
         if isinstance(resp, Exception):
             raise resp

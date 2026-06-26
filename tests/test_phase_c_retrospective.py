@@ -73,21 +73,36 @@ def test_prompt_forbids_signature_edits_body_only():
 
 def test_prompt_routes_unsatisfiable_bound_to_skip():
     p = _retro_prompt()
-    # Corrected R2/R3 (debt #28): GENUINELY_HARD is now GATED on the frozen
-    # bound's trait offering no usable method (was: any bound mismatch → skip,
-    # which abandoned reconstructable fns like context.rs::context).
+    # GENUINELY_HARD is gated on the frozen bound's trait offering no usable
+    # method — only then do we skip rather than route through bound methods.
     assert "GENUINELY_HARD" in p
     assert "frozen bound provides NO method usable here" in p
 
 
 def test_prompt_redirects_bound_mismatch_to_provider_method():
-    # Corrected R2/R3: a free constructor erroring E0277 because the generic
-    # lacks ITS bound must route to the FROZEN bound's own trait method, NOT to
-    # a skip. This is the de-thrash for the context.rs::context blocker.
+    # A free constructor erroring E0277 must route to the FROZEN bound's own
+    # trait method, NOT to a skip (unless vtable/raw-ptr pattern applies).
     p = _retro_prompt()
     assert "BOUND-MISMATCH RULE" in p
     assert "Route through that method" in p
     assert "NOT GENUINELY_HARD" in p
+
+
+def test_prompt_vtable_access_directs_to_genuinely_hard():
+    # NEEDS_VTABLE_ACCESS is a fast-exit to GENUINELY_HARD — vtable layout
+    # cannot be recovered via trait methods alone; the skeleton hides the struct.
+    p = _retro_prompt()
+    assert "NEEDS_VTABLE_ACCESS" in p
+    assert "classify as GENUINELY_HARD immediately" in p
+    assert "vtable layout cannot be satisfied via trait methods" in p
+
+
+def test_prompt_vtable_exception_in_bound_mismatch_rule():
+    # The BOUND-MISMATCH RULE must name the vtable exception so the model
+    # does not attempt bound-routing for pointer/vtable patterns.
+    p = _retro_prompt()
+    assert "NEEDS_VTABLE_ACCESS" in p
+    assert "raw-pointer dereference or" in p
 
 
 def test_prompt_injects_bound_methods_section_when_present():

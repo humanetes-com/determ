@@ -58,6 +58,13 @@ TRAPS: dict[str, dict] = {
     # without thrash / a GENUINELY_HARD skip.
     "label":   {"level": 4, "src": "src/label.rs", "test": "tests/label.rs",
                 "lib": ["mod label;", "pub use label::{Describe, Reason, Tagged};"]},
+    # level 5 — UNSAFE POINTER ARITHMETIC (V2 / §7.0b): raw-ptr read/write/offset fns
+    # that are `unsafe fn` with no trait bounds; the pipeline must route through
+    # _ask_per_fn_body with low temperature (B1 guard) and classify ≤2-attempt failures
+    # as GENUINELY_HARD (R4). Tests pin memory-round-trip correctness for each fn.
+    "unsafe_ptr": {"level": 5, "src": "src/unsafe_ptr.rs", "test": "tests/unsafe_ptr.rs",
+                   "lib": ["mod unsafe_ptr;",
+                           "pub use unsafe_ptr::{copy_via_raw, ptr_distance, read_at, write_at};"]},
 }
 
 
