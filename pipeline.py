@@ -487,7 +487,7 @@ def _classify_phase_c_test_failures(test_out: str, filled_this_pass: list[tuple[
                                     failed_tests: list[str], cluster_name: str) -> dict[str, dict]:
     return _classify_phase_c_test_failures_impl(
         test_out, filled_this_pass, failed_tests, cluster_name,
-        ask=ask, log=_log, model=_TASK0C_MODEL, err_cap=_FIX_ERR_CAP)
+        ask=_ASK_CLIENT.ask, log=_log, model=_TASK0C_MODEL, err_cap=_FIX_ERR_CAP)
 
 
 def _record_tdd_regression(fr_path: Path, src_dir: Path, filled_keys: "list[tuple[str, str]]",
@@ -876,13 +876,8 @@ def _from_scratch_disclaimer() -> str:
     )
 
 
-def ask(prompt: str, system: str | None = None, model: str | None = None,
-        max_tokens: int | None = None, think: bool | None = None,
-        temperature: float | None = None) -> str:
-    """Context-limit-enforcing model call. Thin shim over the relocated guarded
-    client (`pipeline_core.adapters.ask_client.AskClient`); kept as the
-    `pipeline.ask` name for the monkeypatch test seam + late-bind Deps."""
-    return _ASK_CLIENT.ask(prompt, system, model, max_tokens, think, temperature)
+# Public `ask` shim removed (G/P6). Entry point is _ASK_CLIENT.ask(...);
+# tests that intercept LLM calls patch pipeline._ask_raw (lower, stable seam).
 
 
 # Maximum safe input chars, derived mathematically from the KV cache budget.
@@ -1409,7 +1404,7 @@ def generate_in_parallel(
         return []
     if len(queries) == 1:
         try:
-            return [ask(queries[0], model=model, think=think)]
+            return [_ASK_CLIENT.ask(queries[0], model=model, think=think)]
         except Exception:
             return [""]
 
@@ -1418,7 +1413,7 @@ def generate_in_parallel(
 
     def _worker(i: int) -> None:
         try:
-            results[i] = ask(queries[i], model=model, think=think) or ""
+            results[i] = _ASK_CLIENT.ask(queries[i], model=model, think=think) or ""
         except Exception as _e:  # one bad request must not sink the batch
             _guard("task0c/candidate_error", f"request {i}: {type(_e).__name__}: {_e}")
             results[i] = ""
@@ -1874,7 +1869,7 @@ _cargo_default_features = _domain_cargo_default_features
 # pipeline-bound collaborators into that module here at the composition root.
 # #14: explicit constructor injection (was workspace_scan.configure() globals).
 _WS_SCAN_DEPS = _workspace_scan.WorkspaceScanDeps(
-    ask=ask, task0_model=_TASK0_MODEL,
+    ask=_ASK_CLIENT.ask, task0_model=_TASK0_MODEL,
     skip_dir_names=frozenset(SKIP_DIR_NAMES), parse_cmd=_parse_cmd)
 
 
@@ -3193,7 +3188,7 @@ def _task2_group_tests(
     module-global is referenced here so its monkeypatch seam survives."""
     return _group_tests_impl(
         skeleton_dir, test_files, cluster_name, module_name,
-        ask=ask, model=_TASK1_MODEL, log=_log, load_skeleton_files=_load_skeleton_files)
+        ask=_ASK_CLIENT.ask, model=_TASK1_MODEL, log=_log, load_skeleton_files=_load_skeleton_files)
 
 
 # Per-fn fill rules relocated to application/reconstruct/fill_rules.py (P2);
@@ -4207,12 +4202,12 @@ def _extract_self_note(
     # returns empty with think=False on small prompts and vice versa.
     resp = ""
     try:
-        resp = ask(prompt, model=_TASK2_MODEL)
+        resp = _ASK_CLIENT.ask(prompt, model=_TASK2_MODEL)
     except Exception as e:
         _log(f"  [model-notes] extraction failed (default): {e}")
     if not resp or not resp.strip():
         try:
-            resp = ask(prompt, model=_TASK2_MODEL, think=False)
+            resp = _ASK_CLIENT.ask(prompt, model=_TASK2_MODEL, think=False)
         except Exception as e:
             _log(f"  [model-notes] extraction failed (think=False): {e}")
             return None
@@ -4524,8 +4519,8 @@ def _ask_retrospective(prompt: str, model: str | None = None) -> str:
     Raising callers keep their own try/except for true LLM exceptions."""
     result = ""
     for _attempt in range(2):
-        result = ask(prompt, model=model or _TASK2_MODEL,
-                     think=True, max_tokens=_RETRO_MAX_TOKENS)
+        result = _ASK_CLIENT.ask(prompt, model=model or _TASK2_MODEL,
+                               think=True, max_tokens=_RETRO_MAX_TOKENS)
         if (result or "").strip():
             return result
     return result or ""
@@ -4834,7 +4829,7 @@ def _ask_per_fn_body(
             kwargs["think"] = False
         if is_unsafe:
             kwargs["temperature"] = unsafe_temp
-        last_response = ask(prompt, **kwargs)
+        last_response = _ASK_CLIENT.ask(prompt, **kwargs)
         body = _extract_body_response(last_response)
         if body and not _is_unimplemented_body(body):
             if label != "default":
@@ -5077,7 +5072,7 @@ _IMPL_FILL_DEPS = _impl_fill.ImplFillDeps(
     types_section_for_fix=lambda *a, **k: _types_section_for_fix(*a, **k),
     bound_methods_section_for=lambda *a, **k: _bound_methods_section_for(*a, **k),
     u2_test_gate=lambda *a, **k: _u2_test_gate(*a, **k),
-    ask=lambda *a, **k: ask(*a, **k),
+    ask=_ASK_CLIENT.ask,
     failed_body_cap=_FAILED_BODY_CAP,
     per_fn_fix_hard_cap=_PER_FN_FIX_HARD_CAP,
     per_impl_max_stubs=_PER_IMPL_MAX_STUBS,
@@ -5266,7 +5261,7 @@ def _task2_fill_groups(skeleton_dir, target_src_dir, groups, project_dir, **kwar
 
 _GROUP_FILL_DEPS = _group_fill.GroupFillDeps(
     log=lambda m: _log(m),
-    ask=lambda *a, **k: ask(*a, **k),
+    ask=_ASK_CLIENT.ask,
     extract_fn_blocks=lambda *a, **k: _extract_fn_blocks(*a, **k),
     format_skeleton_index_for_cluster=lambda *a, **k: _format_skeleton_index_for_cluster(*a, **k),
     leaf_first_group_order=lambda *a, **k: _leaf_first_group_order(*a, **k),
@@ -6220,7 +6215,7 @@ Output the source files you modified. Fill ONLY the functions listed above.
 Do NOT modify any function whose body is NOT `unimplemented!()`.
 Do NOT modify type definitions, imports, or any other items.
 """
-    response = ask(prompt, model=_TASK2_MODEL)
+    response = _ASK_CLIENT.ask(prompt, model=_TASK2_MODEL)
     files = extract_files(response)
     files_updated = 0
     for rel, model_text in files.items():
@@ -6517,7 +6512,7 @@ def _commit_and_mark(
 _TASK0_DOCS_DEPS = Task0DocsDeps(
     phase_valid=_phase_valid,
     mark_phase=_mark_phase,
-    ask=ask,
+    ask=_ASK_CLIENT.ask,
     write=write,
     prompt_budget=prompt_budget,
     task0_model=_TASK0_MODEL,
@@ -6770,7 +6765,7 @@ _GEN_TELEMETRY = GeneratorTelemetryAdapter(
     mark_phase_fn=lambda pd, key, status, detail="": _mark_phase(pd, key, status, detail=detail),
     phase_valid_fn=lambda pd, key: _phase_valid(pd, key),
 )
-_GEN_LLM = LlmAskAdapter(ask_fn=lambda prompt, *, model=None: ask(prompt, model=model))
+_GEN_LLM = LlmAskAdapter(ask_fn=lambda prompt, *, model=None: _ASK_CLIENT.ask(prompt, model=model))
 _GEN_WORKSPACE = WorkspaceAdapter(
     read_fn=lambda path: read(path),
     write_source_files_fn=lambda fd, pd, mp, etf: write_source_files(fd, pd, mp, etf),
@@ -6803,7 +6798,7 @@ _CLUSTER_MERGER = ClusterMerger(extractor_bin=_SKELETON_EXTRACTOR_BIN, log=_log)
 # P6: mutation-testing behaviour hardening — focused adapter, composition-injected
 # (ask late-bound so a test monkeypatching pipeline.ask still intercepts).
 _MUTATION = MutationTester(
-    cargo_env=_cargo_env, ask=lambda *a, **k: ask(*a, **k), log=_log,
+    cargo_env=_cargo_env, ask=_ASK_CLIENT.ask, log=_log,
     task0c_model=_TASK0C_MODEL, single_call_char_limit=SINGLE_CALL_CHAR_LIMIT,
 )
 
@@ -7215,7 +7210,7 @@ Current source files:
 {FILE_FORMAT_INSTRUCTION}
 {_TASK2_VERBOSITY_GUARD}"""
         _log(f"  [fix loop] iter {len(history) + 1} — asking LLM to fix specific failures.")
-        response = ask(prompt, model=model)
+        response = _ASK_CLIENT.ask(prompt, model=model)
         fixed = extract_files(response)
         if not fixed:
             _log(f"  [fix loop] LLM produced no fixes on iter {len(history) + 1}.")
@@ -7310,7 +7305,7 @@ Current source files:
 
     class _FixModel:
         def ask(self, prompt):
-            return ask(prompt, model=model)
+            return _ASK_CLIENT.ask(prompt, model=model)
 
     class _FixSplicer:
         def locate_fn(self, text, name):
@@ -7932,7 +7927,7 @@ NO_IMPROVEMENT_THRESHOLD = 3
 # slice 5b: genesis audit extracted to pipeline_core.application.tasks.genesis_audit.
 # Deps bind the pipeline's collaborators once; main() calls the shim below unchanged.
 _GENESIS_AUDIT_DEPS = GenesisAuditDeps(
-    ask=ask, read=read, write=write, model=_TASK4_MODEL,
+    ask=_ASK_CLIENT.ask, read=read, write=write, model=_TASK4_MODEL,
     verbosity_guard=_TASK4_VERBOSITY_GUARD,
 )
 
@@ -7968,7 +7963,7 @@ _TASK3_DEPS = Task3Deps(
     test_timeout=TEST_TIMEOUT,
 )
 _TASK4_DEPS = Task4Deps(
-    ask=ask,
+    ask=_ASK_CLIENT.ask,
     read=read,
     write=write,
     extract_and_store_rules=_task4_extract_and_store_rules,
@@ -8236,7 +8231,7 @@ def _is_structural_line(text: str) -> bool:
 
 # slice 5b: deps for the extracted TASK 0b discovery (defined after its parsers).
 _TASK0B_DEPS = Task0bDeps(
-    ask=ask,
+    ask=_ASK_CLIENT.ask,
     write=write,
     is_test_file=is_test_file,
     is_gen_tests_file=_is_gen_tests_file,
@@ -8249,7 +8244,7 @@ _TASK0B_DEPS = Task0bDeps(
 )
 
 _DISCOVER_TEST_CMD_DEPS = DiscoverTestCommandDeps(
-    ask=ask,
+    ask=_ASK_CLIENT.ask,
     task0_model=_TASK0_MODEL,
     model_name=MODEL,
     extra_cap=_EXTRA_CAP,
@@ -9058,7 +9053,7 @@ _TASK1_DEPS = Task1Deps(
     load_api_surface=load_api_surface,
     load_type_names=_load_type_names,
     read=read,
-    ask=ask,
+    ask=_ASK_CLIENT.ask,
     write_fr_preserving_notes=_write_fr_preserving_notes,
     synthesizer_factory=_task1_synthesizer_factory,
     filter_proc_macro_test_files=_filter_proc_macro_test_files,
@@ -9134,7 +9129,7 @@ _FILE_CONSTRAINTS = FileConstraintsReader(
 # collaborator). subprocess/git injected as the module; _current_cluster via a call-time
 # getter (mutable global); coverage provider as a value.
 _TASK0C_DEPS = Task0cDeps(
-    BUILD_TIMEOUT=BUILD_TIMEOUT, COVERAGE_TARGET=COVERAGE_AUGMENTATION_TARGET, coverage_ignore_pragma=COVERAGE_IGNORE_PRAGMA, TASK0C_PROMPT_CHAR_CAP=TASK0C_PROMPT_CHAR_CAP, FIX_ERR_CAP=_FIX_ERR_CAP, SIBLING_CAP=_SIBLING_CAP, SRC_SNIP_CAP=_SRC_SNIP_CAP, TASK0C_FIX_THINKING_DIRECTIVE=_TASK0C_FIX_THINKING_DIRECTIVE, TASK0C_MODEL=_TASK0C_MODEL, TASK0C_THINKING_DIRECTIVE=_TASK0C_THINKING_DIRECTIVE, WORKING_CAP=_WORKING_CAP, annotate_uncovered=_annotate_uncovered, block_is_prose=_block_is_prose, build_gen_tests_decl=_build_gen_tests_decl, guard=_guard, cargo_env=_cargo_env, cluster_gate_for=_cluster_gate_for_sibling, condense_rust_to_signatures=_condense_rust_to_signatures, count_test_attrs=_count_test_attrs, derive_gentest_prelude=_derive_gentest_prelude, describe_test_environment=_describe_test_environment, error_signatures_from_output=_error_signatures_from_output, extract_branch_guard=_extract_branch_guard, extract_gen_tests_body=_extract_gen_tests_body, extract_public_symbols=_extract_public_symbols, extract_uncovered_functions=_extract_uncovered_functions, filter_cfg_excluded_lines=_filter_cfg_excluded_lines, filter_cfg_incompatible_lines=_filter_cfg_incompatible_lines, flags_unreachable=_flags_unreachable, gen_tests_path=_gen_tests_path, has_nonempty_test_body=_has_nonempty_test_body, inject_allow_before_any_mod=_inject_allow_before_any_mod, inject_allow_before_gen_mod=_inject_allow_before_gen_mod, inject_gen_prelude_imports=_inject_gen_prelude_imports, is_gen_tests_file=_is_gen_tests_file, is_structural_line=_is_structural_line, load_file_constraints=_FILE_CONSTRAINTS.load, type_signals_write=type_signals_write, mark_phase=_mark_phase, match_gen_tests_sibling=_match_gen_tests_sibling, next_gen_tests_n=_next_gen_tests_n, nightly_rules_for_cluster=_nightly_rules_for_cluster, parse_attempt_number=_parse_attempt_number, parse_retrospective_categories=_parse_retrospective_categories, partition_uncovered_lines=_partition_uncovered_lines, prelude_import_names=_prelude_import_names, quick_file_coverage=_quick_file_coverage, read_all_gen_tests=_read_all_gen_tests, read_state=_read_state, revert_gen_tests_pass=_revert_gen_tests_pass, select_relevant_siblings=_select_relevant_siblings, set_current=_set_current, source_hash=_source_hash, strip_all_gen_tests_artifacts=_strip_all_gen_tests_artifacts, strip_gen_tests_decl_n=_strip_gen_tests_decl_n, strip_gen_tests_decls=_strip_gen_tests_decls, strip_trailing_file_tag=_strip_trailing_file_tag, mutation_harden_file=lambda *a, **k: _MUTATION.harden_file(*a, **k), gen_tests_siblings=_gen_tests_siblings, test_augmentor_factory=_test_augmentor_factory, ask=ask, extract_files=extract_files, extract_test_mod=extract_test_mod, generate_fix_loop=generate_fix_loop, generate_in_parallel=generate_in_parallel, is_test_file=is_test_file, write=write,
+    BUILD_TIMEOUT=BUILD_TIMEOUT, COVERAGE_TARGET=COVERAGE_AUGMENTATION_TARGET, coverage_ignore_pragma=COVERAGE_IGNORE_PRAGMA, TASK0C_PROMPT_CHAR_CAP=TASK0C_PROMPT_CHAR_CAP, FIX_ERR_CAP=_FIX_ERR_CAP, SIBLING_CAP=_SIBLING_CAP, SRC_SNIP_CAP=_SRC_SNIP_CAP, TASK0C_FIX_THINKING_DIRECTIVE=_TASK0C_FIX_THINKING_DIRECTIVE, TASK0C_MODEL=_TASK0C_MODEL, TASK0C_THINKING_DIRECTIVE=_TASK0C_THINKING_DIRECTIVE, WORKING_CAP=_WORKING_CAP, annotate_uncovered=_annotate_uncovered, block_is_prose=_block_is_prose, build_gen_tests_decl=_build_gen_tests_decl, guard=_guard, cargo_env=_cargo_env, cluster_gate_for=_cluster_gate_for_sibling, condense_rust_to_signatures=_condense_rust_to_signatures, count_test_attrs=_count_test_attrs, derive_gentest_prelude=_derive_gentest_prelude, describe_test_environment=_describe_test_environment, error_signatures_from_output=_error_signatures_from_output, extract_branch_guard=_extract_branch_guard, extract_gen_tests_body=_extract_gen_tests_body, extract_public_symbols=_extract_public_symbols, extract_uncovered_functions=_extract_uncovered_functions, filter_cfg_excluded_lines=_filter_cfg_excluded_lines, filter_cfg_incompatible_lines=_filter_cfg_incompatible_lines, flags_unreachable=_flags_unreachable, gen_tests_path=_gen_tests_path, has_nonempty_test_body=_has_nonempty_test_body, inject_allow_before_any_mod=_inject_allow_before_any_mod, inject_allow_before_gen_mod=_inject_allow_before_gen_mod, inject_gen_prelude_imports=_inject_gen_prelude_imports, is_gen_tests_file=_is_gen_tests_file, is_structural_line=_is_structural_line, load_file_constraints=_FILE_CONSTRAINTS.load, type_signals_write=type_signals_write, mark_phase=_mark_phase, match_gen_tests_sibling=_match_gen_tests_sibling, next_gen_tests_n=_next_gen_tests_n, nightly_rules_for_cluster=_nightly_rules_for_cluster, parse_attempt_number=_parse_attempt_number, parse_retrospective_categories=_parse_retrospective_categories, partition_uncovered_lines=_partition_uncovered_lines, prelude_import_names=_prelude_import_names, quick_file_coverage=_quick_file_coverage, read_all_gen_tests=_read_all_gen_tests, read_state=_read_state, revert_gen_tests_pass=_revert_gen_tests_pass, select_relevant_siblings=_select_relevant_siblings, set_current=_set_current, source_hash=_source_hash, strip_all_gen_tests_artifacts=_strip_all_gen_tests_artifacts, strip_gen_tests_decl_n=_strip_gen_tests_decl_n, strip_gen_tests_decls=_strip_gen_tests_decls, strip_trailing_file_tag=_strip_trailing_file_tag, mutation_harden_file=lambda *a, **k: _MUTATION.harden_file(*a, **k), gen_tests_siblings=_gen_tests_siblings, test_augmentor_factory=_test_augmentor_factory, ask=_ASK_CLIENT.ask, extract_files=extract_files, extract_test_mod=extract_test_mod, generate_fix_loop=generate_fix_loop, generate_in_parallel=generate_in_parallel, is_test_file=is_test_file, write=write,
     subprocess=subprocess, get_current_cluster=_SCOPE.get_active,
     coverage_provider=_coverage_provider, check_stop=_check_graceful_stop,
 )

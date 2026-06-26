@@ -120,10 +120,10 @@ def test_extract_self_note_shim(monkeypatch) -> None:
     import pipeline
 
     note = "this is a sufficiently long self-correction note about lifetimes"
-    monkeypatch.setattr(pipeline, "ask", lambda *a, **k: note)
+    monkeypatch.setattr(pipeline, "_ask_raw", lambda *a, **k: note)
     assert pipeline._extract_self_note("failbody", "err excerpt", "fixbody") == note
     # model declines → None
-    monkeypatch.setattr(pipeline, "ask", lambda *a, **k: "NONE")
+    monkeypatch.setattr(pipeline, "_ask_raw", lambda *a, **k: "NONE")
     assert pipeline._extract_self_note("failbody", "err excerpt", "fixbody") is None
     # empty inputs short-circuit before any ask
     assert pipeline._extract_self_note("", "err", "fix") is None
@@ -575,18 +575,18 @@ def test_generate_in_parallel() -> None:
     import threading
 
     import pipeline
-    _orig = pipeline.ask
+    _orig = pipeline._ask_raw
     seen_lock = threading.Lock()
     calls = []
 
-    def _fake_ask(query, model=None, think=None, **kw):
+    def _fake_ask(prompt, system=None, **kw):
         with seen_lock:
-            calls.append(query)
-        if "BOOM" in query:
+            calls.append(prompt)
+        if "BOOM" in prompt:
             raise RuntimeError("simulated request failure")
-        return f"resp:{query}"
+        return f"resp:{prompt}"
 
-    pipeline.ask = _fake_ask
+    pipeline._ask_raw = _fake_ask  # type: ignore[assignment]
     try:
         # empty / single short-circuit.
         assert pipeline.generate_in_parallel([]) == []
@@ -601,7 +601,7 @@ def test_generate_in_parallel() -> None:
         mixed = pipeline.generate_in_parallel(["A", "BOOM", "C"])
         assert mixed == ["resp:A", "", "resp:C"], mixed
     finally:
-        pipeline.ask = _orig
+        pipeline._ask_raw = _orig
     print("  OK  generate_in_parallel (Plan 8 split-and-merge)")
 
 
@@ -1193,7 +1193,7 @@ def test_retrospective_prompt_includes_failed_attempts() -> None:
     )
 
     result = _engine_retrospective(
-        deps,
+        deps,  # type: ignore[arg-type]
         rel_path="src/foo.rs",
         existing_text="pub fn foo() {\n    // !! UNCOVERED\n}\n",
         fn_bodies="pub fn foo() {\n    // !! UNCOVERED\n}\n",
@@ -1216,7 +1216,7 @@ def test_retrospective_prompt_includes_failed_attempts() -> None:
     # Without unproductive_blocks, no PRIOR FAILED ATTEMPTS section.
     captured.clear()
     _engine_retrospective(
-        deps,
+        deps,  # type: ignore[arg-type]
         rel_path="src/foo.rs",
         existing_text="pub fn foo() {}\n",
         fn_bodies="pub fn foo() {}\n",
@@ -1622,9 +1622,9 @@ def test_context_guard_section_removal() -> None:
         captured.append(prompt)
         return "ok"
 
-    pipeline._ask_raw = fake_ask
+    pipeline._ask_raw = fake_ask  # type: ignore[assignment]
     try:
-        pipeline.ask(base_prompt)
+        pipeline._ASK_CLIENT.ask(base_prompt)
     finally:
         pipeline._ask_raw = orig_ask
 
@@ -1861,9 +1861,9 @@ def test_context_guard_middle_trim() -> None:
         captured.append(prompt)
         return "ok"
 
-    pipeline._ask_raw = fake_ask
+    pipeline._ask_raw = fake_ask  # type: ignore[assignment]
     try:
-        pipeline.ask(big_prompt)
+        pipeline._ASK_CLIENT.ask(big_prompt)
     finally:
         pipeline._ask_raw = orig_ask
 
@@ -2285,7 +2285,7 @@ def test_coverage_workspace_adapters() -> None:
         assert isinstance(gw, Workspace)
         gw.write("hello.txt", "hi")
         assert gw.read("hello.txt") == "hi"
-        assert gw.commit("first") in (None,)  # commit returns None, must not raise
+        assert gw.commit("first") in (None,)  # type: ignore[func-returns-value]
         # second commit with no changes → underlying git_commit returns False (nothing staged)
         assert ws.git_commit(wsd, proj, "noop", managed=True) is False
         assert ws.git_commit(wsd, proj, "skip", managed=False) is False  # unmanaged guard
@@ -2330,7 +2330,7 @@ def test_slice5a_shims_delegate_to_adapters() -> None:
 
     orig = pipeline.ADAPTERS
     orig_struct = pipeline._STRUCTURE
-    pipeline.ADAPTERS = types.SimpleNamespace(extractor=_FakeExtractor(), cargo=_FakeCargo())
+    pipeline.ADAPTERS = types.SimpleNamespace(extractor=_FakeExtractor(), cargo=_FakeCargo())  # type: ignore[assignment]
     # P1: the fns/types/mods/dispatch shims now delegate through the injected
     # StructureReader (which wraps ADAPTERS.extractor), not ADAPTERS directly —
     # re-point it at the fake extractor. feature-gate-cfgs + skeletonise + cargo
@@ -2469,8 +2469,8 @@ def test_slice5b_task0c() -> None:
     from pipeline_core.application.tasks.task0c import Task0cDeps, task0c_augment_module
 
     stub = {f: (lambda *a, **k: None) for f in Task0cDeps.__dataclass_fields__}
-    stub["test_augmentor_factory"] = lambda: SimpleNamespace(is_applicable=lambda ct: False)
-    stub["get_current_cluster"] = lambda: None
+    stub["test_augmentor_factory"] = lambda: SimpleNamespace(is_applicable=lambda ct: False)  # type: ignore[misc, assignment]
+    stub["get_current_cluster"] = lambda: None  # type: ignore[misc]
     deps = Task0cDeps(**stub)
     # crate type not applicable → returns (100.0, 0, False, "") before any cargo/LLM work.
     assert task0c_augment_module(Path("."), "m", Path("."), deps, crate_type="proc-macro") == (100.0, 0, False, "")
@@ -2691,12 +2691,12 @@ def test_slice5b_task3_task4() -> None:
         read=lambda p: "genesis", write=lambda p, c: written.__setitem__("t3", c),
         test_timeout=5,
     )
-    orig_run = t3mod.subprocess.run
-    t3mod.subprocess.run = fake_run
+    orig_run = t3mod.subprocess.run  # type: ignore[attr-defined]
+    t3mod.subprocess.run = fake_run  # type: ignore[attr-defined]
     try:
         passed, agg = task3(Path("."), "cargo test", 1, ".", Path("g"), d_pass)
     finally:
-        t3mod.subprocess.run = orig_run
+        t3mod.subprocess.run = orig_run  # type: ignore[attr-defined]
     assert passed is True and "stable" in agg and "t3" in written
 
     # --- TASK 4: ask returns a genesis update → written + (True, current_pass) ---
@@ -3013,10 +3013,10 @@ def test_per_impl_prompt_macros_and_siblings_sections():
 
     full = p._build_per_impl_prompt(
         sections=_impl_sections(macros="macro_rules! mk { () => {} }",
-                                siblings="fn kind(&self) -> u32 { 7 }"), **kw)
+                                siblings="fn kind(&self) -> u32 { 7 }"), **kw)  # type: ignore[arg-type]
     assert "<MACROS>" in full and "macro_rules! mk" in full
     assert "<SIBLING_REFERENCE>" in full and "{ 7 }" in full
-    bare = p._build_per_impl_prompt(sections=_impl_sections(), **kw)
+    bare = p._build_per_impl_prompt(sections=_impl_sections(), **kw)  # type: ignore[arg-type]
     assert "<MACROS>" not in bare and "<SIBLING_REFERENCE>" not in bare
 
 
@@ -3073,11 +3073,11 @@ def test_per_fn_prompts_carry_crate_idioms():
         return PerFnFixSections(crate_idioms=crate_idioms, retrospective_guidance="", **base)
 
     idiom = "# Self::construct_from_display family\nSelf::construct_from_display(arg, None)"
-    full = pipeline._build_per_fn_prompt(sections=_fn(idiom), **common)
+    full = pipeline._build_per_fn_prompt(sections=_fn(idiom), **common)  # type: ignore[arg-type]
     assert "<CRATE_IDIOMS>" in full and "construct_from_display" in full
-    assert "<CRATE_IDIOMS>" not in pipeline._build_per_fn_prompt(sections=_fn(), **common)
+    assert "<CRATE_IDIOMS>" not in pipeline._build_per_fn_prompt(sections=_fn(), **common)  # type: ignore[arg-type]
     fix = pipeline._build_per_fn_fix_prompt(
-        prev_body="1", error_excerpt="E0308", sections=_fix(idiom), **common)
+        prev_body="1", error_excerpt="E0308", sections=_fix(idiom), **common)  # type: ignore[arg-type]
     assert "<CRATE_IDIOMS>" in fix and "construct_from_display" in fix
     assert "<CRATE_IDIOMS>" not in pipeline._build_per_fn_fix_prompt(
-        prev_body="1", error_excerpt="E0308", sections=_fix(), **common)
+        prev_body="1", error_excerpt="E0308", sections=_fix(), **common)  # type: ignore[arg-type]

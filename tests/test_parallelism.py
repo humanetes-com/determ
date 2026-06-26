@@ -102,11 +102,11 @@ def test_generate_in_parallel_truly_concurrent(monkeypatch) -> None:
 
     barrier = threading.Barrier(4, timeout=10)
 
-    def _fake_ask(query, model=None, think=None, **kw):
+    def _fake_ask(prompt, system=None, **kw):
         barrier.wait()               # raises BrokenBarrierError if not concurrent
-        return f"resp:{query}"
+        return f"resp:{prompt}"
 
-    monkeypatch.setattr(pipeline, "ask", _fake_ask)
+    monkeypatch.setattr(pipeline, "_ask_raw", _fake_ask)
     out = pipeline.generate_in_parallel(["A", "B", "C", "D"])
     assert out == ["resp:A", "resp:B", "resp:C", "resp:D"], out
     print("  OK  generate_in_parallel is genuinely 4-way concurrent")

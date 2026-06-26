@@ -64,13 +64,13 @@ def _setup(monkeypatch, tmp_path: Path) -> Path:
 
 def _install_model(monkeypatch, responses):
     seq = list(responses)
-    monkeypatch.setattr(pipeline, "ask",
+    monkeypatch.setattr(pipeline, "_ask_raw",
                         lambda *a, **k: seq.pop(0) if len(seq) > 1 else seq[0])
 
 
 def _run(ws: Path) -> dict:
     # target_src_dir is the dir block["file"] is relative to (lib.rs → src/).
-    return pipeline._phase_c_fill_impl_blocks(
+    return pipeline._phase_c_fill_impl_blocks(  # type: ignore[no-any-return]
         project_dir=ws,
         target_src_dir=ws / "src",
         tests_dir_files=[],

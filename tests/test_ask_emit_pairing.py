@@ -25,7 +25,7 @@ def _names(events):
 
 def test_success_pairs_request_response(captured, monkeypatch):
     monkeypatch.setattr(pipeline, "_ask_raw", lambda *a, **k: "ok")
-    assert pipeline.ask("hi") == "ok"
+    assert pipeline._ASK_CLIENT.ask("hi") == "ok"
     assert _names(captured) == ["llm.request", "llm.response"]
     assert all(k["data"]["prompt_sha"] == "abc123" for _, k in captured)
 
@@ -36,7 +36,7 @@ def test_exception_pairs_request_error(captured, monkeypatch):
 
     monkeypatch.setattr(pipeline, "_ask_raw", boom)
     with pytest.raises(ValueError, match="boom"):
-        pipeline.ask("hi")
+        pipeline._ASK_CLIENT.ask("hi")
     assert _names(captured) == ["llm.request", "llm.error"]
     assert all(k["data"]["prompt_sha"] == "abc123" for _, k in captured)
 
@@ -52,7 +52,7 @@ def test_base_exception_still_emits_terminal(captured, monkeypatch):
 
     monkeypatch.setattr(pipeline, "_ask_raw", abort)
     with pytest.raises(_Abort):
-        pipeline.ask("hi")
+        pipeline._ASK_CLIENT.ask("hi")
     names = _names(captured)
     assert names[0] == "llm.request"
     assert names[-1] == "llm.error"  # terminal event guaranteed by finally
