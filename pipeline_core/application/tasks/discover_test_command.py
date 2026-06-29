@@ -9,6 +9,7 @@ No import of pipeline.py; collaborators are injected via :class:`DiscoverTestCom
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -96,3 +97,42 @@ def discover_test_command(readme_text: str, project_dir: Path | None,
 
     log(f"Test command: {cmd}")
     return cmd
+
+
+def infer_build_check_command(test_command: str, project_dir: Path) -> str | None:
+    """
+    Infer a compile-only command from the test command and project layout.
+    Returns None if no suitable command can be determined.
+
+    The build check command runs BEFORE the full test suite and is used in the
+    inner loop: if compilation fails, TASK 2 is retried with the compiler error
+    rather than running the slow full test cycle.
+    """
+    cmd = test_command.strip().lower()
+
+    # Rust / Cargo
+    if cmd.startswith("cargo"):
+        return "cargo check --workspace"
+
+    # Python / pytest
+    if cmd.startswith("pytest") or cmd.startswith("python -m pytest"):
+        return None  # Python is interpreted; syntax errors surface at import time
+
+    # Node / npm
+    if cmd.startswith("npm ") or cmd.startswith("npx "):
+        # Only attempt if a build script is defined (avoid running tests again).
+        pkg_json = project_dir / "package.json"
+        if pkg_json.exists():
+            try:
+                scripts = json.loads(pkg_json.read_text()).get("scripts", {})
+                if "build" in scripts:
+                    return "npm run build"
+            except Exception:
+                pass
+        return None
+
+    # Go
+    if cmd.startswith("go test"):
+        return "go build ./..."
+
+    return None

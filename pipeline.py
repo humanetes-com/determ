@@ -225,6 +225,9 @@ from pipeline_core.application.tasks.discover_test_command import (
 from pipeline_core.application.tasks.discover_test_command import (
     discover_test_command as _discover_test_command_impl,
 )
+from pipeline_core.application.tasks.discover_test_command import (
+    infer_build_check_command as _infer_build_check_command,
+)
 from pipeline_core.application.tasks.genesis_audit import (
     GenesisAuditDeps,
     genesis_audit,
@@ -384,7 +387,7 @@ from pipeline_core.domain.rust_idents import (
     defined_type_names,
     fn_reference_counts,
     identifier_tokens,
-    use_symbol_paths,
+    use_path_requirement_gaps,
 )
 from pipeline_core.domain.rust_macros import macro_definitions
 from pipeline_core.domain.rust_scan import (
@@ -1976,22 +1979,7 @@ def lock_module(project_dir: Path, module_name: str, module_dir: Path,
 # Workspace stub helpers
 # ---------------------------------------------------------------------------
 
-def _write_workspace_stub(crate_type: str, module_dir: Path) -> Path:
-    """
-    Write a minimal entry-point stub so Cargo can parse the workspace.
-    Bin crates get `fn main() {}`, all others get an empty lib stub.
-    Always writes (creates or overwrites) so state is deterministic.
-    Returns the path written.
-    """
-    if "bin" in crate_type.lower() and "lib" not in crate_type.lower():
-        entry = module_dir / "src" / "main.rs"
-        content = "fn main() {}\n"
-    else:
-        entry = module_dir / "src" / "lib.rs"
-        content = "// pipeline workspace stub\n"
-    entry.parent.mkdir(parents=True, exist_ok=True)
-    entry.write_text(content)
-    return entry
+_write_workspace_stub = _wsmod.write_workspace_stub
 
 
 # ---------------------------------------------------------------------------
@@ -2389,45 +2377,6 @@ def clean_state(root: Path, project_dir: Path, manifest_path: Path,
 # Build check (compile-only, no tests)
 # ---------------------------------------------------------------------------
 
-def _infer_build_check_command(test_command: str, project_dir: Path) -> str | None:
-    """
-    Infer a compile-only command from the test command and project layout.
-    Returns None if no suitable command can be determined.
-
-    The build check command runs BEFORE the full test suite and is used in the
-    inner loop: if compilation fails, TASK 2 is retried with the compiler error
-    rather than running the slow full test cycle.
-    """
-    cmd = test_command.strip().lower()
-
-    # Rust / Cargo
-    if cmd.startswith("cargo"):
-        return "cargo check --workspace"
-
-    # Python / pytest
-    if cmd.startswith("pytest") or cmd.startswith("python -m pytest"):
-        return None  # Python is interpreted; syntax errors surface at import time
-
-    # Node / npm
-    if cmd.startswith("npm ") or cmd.startswith("npx "):
-        # Only attempt if a build script is defined (avoid running tests again).
-        pkg_json = project_dir / "package.json"
-        if pkg_json.exists():
-            try:
-                scripts = json.loads(pkg_json.read_text()).get("scripts", {})
-                if "build" in scripts:
-                    return "npm run build"
-            except Exception:
-                pass
-        return None
-
-    # Go
-    if cmd.startswith("go test"):
-        return "go build ./..."
-
-    return None
-
-
 def run_build_check(project_dir: Path, build_cmd: str) -> tuple[bool, str]:
     """
     Run the compile-only check command in project_dir.
@@ -2501,14 +2450,7 @@ _git_managed: bool = False
 # ---------------------------------------------------------------------------
 
 def _is_git_repo(path: Path) -> bool:
-    try:
-        subprocess.run(
-            ["git", "rev-parse", "--git-dir"],
-            cwd=path, check=True, capture_output=True,
-        )
-        return True
-    except Exception:
-        return False
+    return _wsmod.is_git_repo(path)
 
 
 # Slice 4b: git workspace I/O relocated to pipeline_core.adapters.workspace. These are
@@ -2534,86 +2476,9 @@ def git_clean_reset(project_dir: Path) -> None:
 
 
 def setup_workspace(repo: str, workspace_dir: Path, force_fresh: bool = False) -> Path:
-    """
-    Prepare a git-managed workspace for the given repo (URL or local path).
-
-    - URL       → git clone into workspace_dir/{name}
-    - local git → copy into workspace_dir/{name} (preserves history)
-    - local dir → copy into workspace_dir/{name}, git init + initial commit
-
-    In all cases, checks out (or creates) a 'pipeline' branch and returns
-    the workspace path.
-
-    If `force_fresh` is True AND the repo source is a URL, an existing
-    workspace is deleted and re-cloned. This is what --clean + --repo means:
-    nuke target/, stale gen_tests artifacts, half-applied LLM edits — start
-    from a true upstream HEAD. For local-path repos we never auto-delete the
-    user's source tree.
-    """
-    workspace_dir.mkdir(parents=True, exist_ok=True)
-
-    # Derive workspace name from repo
-    # Normalize various GitHub URL forms to HTTPS (SSH requires a key; HTTPS works everywhere).
-    # git@github.com:user/repo.git  →  https://github.com/user/repo
-    # github.com/user/repo          →  https://github.com/user/repo
-    if repo.startswith("git@github.com:"):
-        repo = "https://github.com/" + repo.split(":", 1)[1]
-    elif repo.startswith("github.com/"):
-        repo = "https://" + repo
-
-    name = repo.rstrip("/").split("/")[-1]
-    if name.endswith(".git"):
-        name = name[:-4]
-    dest = workspace_dir / name
-
-    _is_url = repo.startswith("http://") or repo.startswith("https://") \
-              or repo.startswith("git@") or repo.startswith("ssh://")
-
-    if dest.exists() and force_fresh and _is_url:
-        _log(f"  [git] --clean + URL repo: removing {dest} for fresh re-clone")
-        shutil.rmtree(dest)
-
-    if dest.exists():
-        _log(f"  [git] workspace exists at {dest} — resuming")
-    elif _is_url:
-        _log(f"  [git] cloning {repo} → {dest}")
-        subprocess.run(["git", "clone", repo, str(dest)], check=True)
-    else:
-        src = Path(repo).resolve()
-        if not src.exists():
-            raise RuntimeError(f"Repo path not found: {src}")
-        _log(f"  [git] copying {src} → {dest}")
-        shutil.copytree(str(src), str(dest))
-        if not (dest / ".git").exists():
-            _log("  [git] no .git found — initialising git repo")
-            subprocess.run(["git", "init"], cwd=dest, check=True, capture_output=True)
-            subprocess.run(["git", "add", "-A"], cwd=dest, check=True, capture_output=True)
-            subprocess.run(
-                ["git", "commit", "-m", "initial: source snapshot", "--no-gpg-sign"],
-                cwd=dest, check=True, capture_output=True,
-            )
-            _log("  [git] initial commit done")
-
-    # Checkout or create pipeline branch
-    current = subprocess.run(
-        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-        cwd=dest, capture_output=True, text=True,
-    ).stdout.strip()
-    if current != "pipeline":
-        branches = subprocess.run(
-            ["git", "branch", "--list", "pipeline"],
-            cwd=dest, capture_output=True, text=True,
-        ).stdout.strip()
-        if branches:
-            subprocess.run(["git", "checkout", "pipeline"],
-                           cwd=dest, check=True, capture_output=True)
-            _log("  [git] checked out existing pipeline branch")
-        else:
-            subprocess.run(["git", "checkout", "-b", "pipeline"],
-                           cwd=dest, check=True, capture_output=True)
-            _log("  [git] created pipeline branch")
-
-    return dest
+    """Composition-root shim → adapters.workspace.setup_workspace (clone/copy a
+    repo into tmp/ and check out the pipeline branch). I/O lives in the adapter."""
+    return _wsmod.setup_workspace(_WS_DEPS, repo, workspace_dir, force_fresh)
 
 
 def _nightly_rules_for_cluster() -> str:
@@ -7318,34 +7183,13 @@ def task1_static_audit(functional_req_path: Path, test_files: list) -> list[str]
 
     No LLM call — structured `use`-path scan. Runs in milliseconds.
     """
-    SKIP_PREFIXES = ('std::', 'core::', 'alloc::', 'super::', 'self::', 'crate::')
-
     reqs = read(functional_req_path)
     if not reqs.strip():
         return []
 
-    found: set[str] = set()
-    for _rel, content in test_files:
-        # use foo::bar::{A, B, C};  or  use foo::bar::Baz;
-        for raw in use_symbol_paths(content):
-            if '::' not in raw:
-                continue
-            if '::{' in raw:
-                prefix, items_str = raw.split('::{', 1)
-                for item in items_str.rstrip('}').split(','):
-                    item = item.strip()
-                    if item:
-                        found.add(f"{prefix}::{item}")
-            else:
-                found.add(raw)
+    found_count, gaps = use_path_requirement_gaps(reqs, test_files)
 
-    gaps = [
-        sym for sym in sorted(found)
-        if not any(sym.startswith(p) for p in SKIP_PREFIXES)
-        and sym not in reqs
-    ]
-
-    _log(f"\nTASK 1.5: {len(found)} use-paths in tests, {len(gaps)} missing from requirements.")
+    _log(f"\nTASK 1.5: {found_count} use-paths in tests, {len(gaps)} missing from requirements.")
     if gaps:
         for g in gaps[:10]:
             _log(f"  missing: {g}")

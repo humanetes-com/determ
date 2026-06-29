@@ -13,6 +13,7 @@ Two shapes are offered:
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -119,6 +120,120 @@ def git_clean_reset(deps: WorkspaceDeps, project_dir: Path) -> None:
         deps.log(f"  [git] reset to {default}, recreated pipeline branch")
     except Exception as e:
         deps.log(f"  [git] clean reset failed: {e}")
+
+
+def write_workspace_stub(crate_type: str, module_dir: Path) -> Path:
+    """
+    Write a minimal entry-point stub so Cargo can parse the workspace.
+    Bin crates get `fn main() {}`, all others get an empty lib stub.
+    Always writes (creates or overwrites) so state is deterministic.
+    Returns the path written.
+    """
+    if "bin" in crate_type.lower() and "lib" not in crate_type.lower():
+        entry = module_dir / "src" / "main.rs"
+        content = "fn main() {}\n"
+    else:
+        entry = module_dir / "src" / "lib.rs"
+        content = "// pipeline workspace stub\n"
+    entry.parent.mkdir(parents=True, exist_ok=True)
+    entry.write_text(content)
+    return entry
+
+
+def is_git_repo(path: Path) -> bool:
+    """True if `path` is inside a git working tree."""
+    try:
+        subprocess.run(
+            ["git", "rev-parse", "--git-dir"],
+            cwd=path, check=True, capture_output=True,
+        )
+        return True
+    except Exception:
+        return False
+
+
+def setup_workspace(deps: WorkspaceDeps, repo: str, workspace_dir: Path,
+                    force_fresh: bool = False) -> Path:
+    """
+    Prepare a git-managed workspace for the given repo (URL or local path).
+
+    - URL       → git clone into workspace_dir/{name}
+    - local git → copy into workspace_dir/{name} (preserves history)
+    - local dir → copy into workspace_dir/{name}, git init + initial commit
+
+    In all cases, checks out (or creates) a 'pipeline' branch and returns
+    the workspace path.
+
+    If `force_fresh` is True AND the repo source is a URL, an existing
+    workspace is deleted and re-cloned. This is what --clean + --repo means:
+    nuke target/, stale gen_tests artifacts, half-applied LLM edits — start
+    from a true upstream HEAD. For local-path repos we never auto-delete the
+    user's source tree.
+    """
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+
+    # Derive workspace name from repo
+    # Normalize various GitHub URL forms to HTTPS (SSH requires a key; HTTPS works everywhere).
+    # git@github.com:user/repo.git  →  https://github.com/user/repo
+    # github.com/user/repo          →  https://github.com/user/repo
+    if repo.startswith("git@github.com:"):
+        repo = "https://github.com/" + repo.split(":", 1)[1]
+    elif repo.startswith("github.com/"):
+        repo = "https://" + repo
+
+    name = repo.rstrip("/").split("/")[-1]
+    if name.endswith(".git"):
+        name = name[:-4]
+    dest = workspace_dir / name
+
+    _is_url = repo.startswith("http://") or repo.startswith("https://") \
+              or repo.startswith("git@") or repo.startswith("ssh://")
+
+    if dest.exists() and force_fresh and _is_url:
+        deps.log(f"  [git] --clean + URL repo: removing {dest} for fresh re-clone")
+        shutil.rmtree(dest)
+
+    if dest.exists():
+        deps.log(f"  [git] workspace exists at {dest} — resuming")
+    elif _is_url:
+        deps.log(f"  [git] cloning {repo} → {dest}")
+        subprocess.run(["git", "clone", repo, str(dest)], check=True)
+    else:
+        src = Path(repo).resolve()
+        if not src.exists():
+            raise RuntimeError(f"Repo path not found: {src}")
+        deps.log(f"  [git] copying {src} → {dest}")
+        shutil.copytree(str(src), str(dest))
+        if not (dest / ".git").exists():
+            deps.log("  [git] no .git found — initialising git repo")
+            subprocess.run(["git", "init"], cwd=dest, check=True, capture_output=True)
+            subprocess.run(["git", "add", "-A"], cwd=dest, check=True, capture_output=True)
+            subprocess.run(
+                ["git", "commit", "-m", "initial: source snapshot", "--no-gpg-sign"],
+                cwd=dest, check=True, capture_output=True,
+            )
+            deps.log("  [git] initial commit done")
+
+    # Checkout or create pipeline branch
+    current = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=dest, capture_output=True, text=True,
+    ).stdout.strip()
+    if current != "pipeline":
+        branches = subprocess.run(
+            ["git", "branch", "--list", "pipeline"],
+            cwd=dest, capture_output=True, text=True,
+        ).stdout.strip()
+        if branches:
+            subprocess.run(["git", "checkout", "pipeline"],
+                           cwd=dest, check=True, capture_output=True)
+            deps.log("  [git] checked out existing pipeline branch")
+        else:
+            subprocess.run(["git", "checkout", "-b", "pipeline"],
+                           cwd=dest, check=True, capture_output=True)
+            deps.log("  [git] created pipeline branch")
+
+    return dest
 
 
 class GitWorkspace:

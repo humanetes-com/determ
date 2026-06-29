@@ -668,3 +668,32 @@ _META_PHRASES: tuple[str, ...] = (
 def extract_identifiers(text: str) -> set[str]:
     """CamelCase + snake_case identifiers from `text`, filtered by stop-words."""
     return {w for w in mixed_case_identifiers(text) if w.lower() not in _STOP_WORDS}
+
+
+def use_path_requirement_gaps(
+    reqs_text: str, test_files: list[tuple[str, str]],
+) -> tuple[int, list[str]]:
+    """Static TASK-1.5 audit (pure): every `use` symbol path in the test files
+    that is absent from the requirements text. Returns (total_use_paths_found,
+    sorted_gaps). std/core/alloc/super/self/crate prefixes are never gaps."""
+    SKIP_PREFIXES = ('std::', 'core::', 'alloc::', 'super::', 'self::', 'crate::')
+    found: set[str] = set()
+    for _rel, content in test_files:
+        # use foo::bar::{A, B, C};  or  use foo::bar::Baz;
+        for raw in use_symbol_paths(content):
+            if '::' not in raw:
+                continue
+            if '::{' in raw:
+                prefix, items_str = raw.split('::{', 1)
+                for item in items_str.rstrip('}').split(','):
+                    item = item.strip()
+                    if item:
+                        found.add(f"{prefix}::{item}")
+            else:
+                found.add(raw)
+    gaps = [
+        sym for sym in sorted(found)
+        if not any(sym.startswith(p) for p in SKIP_PREFIXES)
+        and sym not in reqs_text
+    ]
+    return len(found), gaps
