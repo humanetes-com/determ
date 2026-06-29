@@ -370,15 +370,19 @@ Then `run_pipeline(args, deps)` holds the 478L orchestration; main() becomes a ~
 
 main()-direct-callee relocation ≠ file shrunk. The TRUE residual is **~200 resident helper bodies** (5,569 fn-lines across 262 top-level fns + ~2,800 module-level lines of deps-construction blocks/constants), most injected BY NAME into the big `*Deps` objects (task0c deps alone binds ~80 `_helper=_helper` fields). Reaching the ≤300–800 goal means relocating that whole helper mass, cluster by cohesive cluster, each its own gated slice. This is a MULTI-SESSION series, not a single pass.
 
-Done so far (session 110, all 5 gates GREEN per slice; pipeline.py 8974→8327 this session):
+Done so far (session 110, all 5 gates GREEN per slice; pipeline.py 8974→8327):
 | cluster | →home | lines |
 |---|---|---|
 | doc-view condensing: `_attr_span_end`/`_strip_attrs_for_view`/`_strip_doc_attrs`/`_strip_crate_attrs`/`_doc_attr_string`/`_condense_doc_run`/`_condense_doc_attrs` | `domain/doc_render.py` (where the doc helpers already live) | −213 |
 
+Done (session 111, all 5 gates GREEN per slice; pipeline.py 8273→~7669):
+| cluster | →home | lines |
+|---|---|---|
+| **model-notes** (`_filter_model_notes_for_prompt`/`_append_model_note`/`_promoted_error_rules`/`_record_error_codes_seen`/`_extract_self_note`/`_note_hash`/`_note_signature`/dedup/mine/rank + constants) | pure rules → `domain/model_notes.py`; FR-file I/O + run-state (the 3 ex-globals now instance fields) + LLM self-note → NEW `adapters/model_notes_store.py` (`FileModelNotesStore`). pipeline.py keeps thin name-preserving wrappers binding `_MODEL_NOTES_STORE`. `re.fullmatch(E\d{3,4})` → structured `is_wellformed_error_code` (R7). | −377 |
+| **pipeline-db** (`_pipeline_db`/`_init_pipeline_db`/`_db_project_name`/`type_signals_*`/`compile_patterns_*`/`genesis_rules_*`/`module_status_write` + `PIPELINE_DB_NAME`) | NEW `adapters/pipeline_db.py` (stateless SQLite knowledge store; module-of-functions = the adapter, no shared state to class-ify). pipeline.py imports the fns by name (wiring + `pipeline.genesis_rules_*` test attrs unchanged); `import sqlite3` dropped. NOTE: `_register_run` is the JSON run-registry (monitor discovery), a DIFFERENT concern — left in place, NOT part of this slice. | −~200 |
+
 NEXT cohesive clusters (largest movable masses, leaf-first; ⚠ = has a `monkeypatch.setattr(pipeline, "_x")` test seam → alias would break it, must repoint tests or keep a binding shim):
 - **source splice/locate** (`_locate_fn`⚠/`_is_pub_fn`/`_replace_fn_signature`/`_extract_signature_block`/`_render_impl_block`; the `_splice_*`/`_locate_fn_by_record` are ALREADY shims to `application/reconstruct/splice.py`) → finish folding into `splice.py` + a pure `domain` locator. ~150L.
-- **model-notes** (`_filter_model_notes_for_prompt`/`_append_model_note`/`_promoted_error_rules`/`_load`/`_save`/`_note_*`) → `domain/model_notes.py` (exists). ~250L.
-- **pipeline-db** (`_register_run`/`_init_pipeline_db`/`genesis_rules_*`/`_db_*`) → `adapters/pipeline_db.py`. ~200L.
 - **source-view/condense** (`_condense_rust_to_signatures`/`_types_referenced_in_text`/`_annotate_file_view`→application as it needs `is_unimplemented_body`). ~200L.
 - **workspace file I/O** (`write_source_files`/`delete_source_files`/`lock_module`/`_merge_fn_blocks_into_disk`/`_write_build_configs`) → `adapters/`. ~250L.
 - then the `*Deps`-construction blocks move WITH their use-case wiring, and finally main()→`run_pipeline` (§7.3).
