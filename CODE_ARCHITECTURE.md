@@ -366,6 +366,24 @@ Leaf relocations done this session (all 5 static gates GREEN, pipeline.py 8696�
 - `_AUDIT_ENABLED` / `_AUDIT_PROJECT_DIR` (set in main; read by `_start_audit_thread`/the audit thread) → same holder or pass into the audit-thread starter.
 Then `run_pipeline(args, deps)` holds the 478L orchestration; main() becomes a ~40L composition root (parse args → build deps binding the resident shims + holder → call). LOC ratchet then drops pipeline.py toward the ≤300 target. Validate offline (the e2e/replay suites already exercise the phases through the shims).
 
+#### 7.3a — HONEST scope correction (don't repeat the session-110 overclaim)
+
+main()-direct-callee relocation ≠ file shrunk. The TRUE residual is **~200 resident helper bodies** (5,569 fn-lines across 262 top-level fns + ~2,800 module-level lines of deps-construction blocks/constants), most injected BY NAME into the big `*Deps` objects (task0c deps alone binds ~80 `_helper=_helper` fields). Reaching the ≤300–800 goal means relocating that whole helper mass, cluster by cohesive cluster, each its own gated slice. This is a MULTI-SESSION series, not a single pass.
+
+Done so far (session 110, all 5 gates GREEN per slice; pipeline.py 8974→8327 this session):
+| cluster | →home | lines |
+|---|---|---|
+| doc-view condensing: `_attr_span_end`/`_strip_attrs_for_view`/`_strip_doc_attrs`/`_strip_crate_attrs`/`_doc_attr_string`/`_condense_doc_run`/`_condense_doc_attrs` | `domain/doc_render.py` (where the doc helpers already live) | −213 |
+
+NEXT cohesive clusters (largest movable masses, leaf-first; ⚠ = has a `monkeypatch.setattr(pipeline, "_x")` test seam → alias would break it, must repoint tests or keep a binding shim):
+- **source splice/locate** (`_locate_fn`⚠/`_is_pub_fn`/`_replace_fn_signature`/`_extract_signature_block`/`_render_impl_block`; the `_splice_*`/`_locate_fn_by_record` are ALREADY shims to `application/reconstruct/splice.py`) → finish folding into `splice.py` + a pure `domain` locator. ~150L.
+- **model-notes** (`_filter_model_notes_for_prompt`/`_append_model_note`/`_promoted_error_rules`/`_load`/`_save`/`_note_*`) → `domain/model_notes.py` (exists). ~250L.
+- **pipeline-db** (`_register_run`/`_init_pipeline_db`/`genesis_rules_*`/`_db_*`) → `adapters/pipeline_db.py`. ~200L.
+- **source-view/condense** (`_condense_rust_to_signatures`/`_types_referenced_in_text`/`_annotate_file_view`→application as it needs `is_unimplemented_body`). ~200L.
+- **workspace file I/O** (`write_source_files`/`delete_source_files`/`lock_module`/`_merge_fn_blocks_into_disk`/`_write_build_configs`) → `adapters/`. ~250L.
+- then the `*Deps`-construction blocks move WITH their use-case wiring, and finally main()→`run_pipeline` (§7.3).
+Estimate: ~6–8 more gated cluster-slices to reach the goal. Each: relocate bodies → import-alias or repoint the test seam → 5 static gates GREEN.
+
 ### 7.2 — `generate_fix_loop` decomposition plan (chunk H, next target) — analysis 2026-06-29
 
 **Finding:** the ENGINE is already extracted (P3.C). `run_generate_fix` + `GenerateFixDeps`/`FixUnitDeps`/`FixSession`/`CompileProbe` live in `pipeline_core`. The on-disk 390L (`pipeline.py:6715-7104`) is pure composition-root glue, NOT engine logic. So this is glue-collapse, not decomposition.

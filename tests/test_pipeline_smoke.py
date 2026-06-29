@@ -490,7 +490,7 @@ def test_eval_cfg_pred() -> None:
 
 def test_strip_doc_attrs() -> None:
     """FR-024 fix 1: doc attributes pollute prompt context."""
-    import pipeline
+    from pipeline_core.domain.doc_render import strip_doc_attrs
     text = (
         '# [doc = " /// Single-line doc"]\n'
         'pub fn foo() -> i32 { 1 }\n'
@@ -499,7 +499,7 @@ def test_strip_doc_attrs() -> None:
         'pub fn bar() -> i32 { 2 }\n'
         '#[cfg(test)]\nmod tests {}\n'
     )
-    out = pipeline._strip_doc_attrs(text)
+    out = strip_doc_attrs(text)
     assert "doc" not in out, f"doc attrs not stripped:\n{out}"
     assert "pub fn foo" in out
     assert "pub fn bar" in out
@@ -510,7 +510,7 @@ def test_strip_doc_attrs() -> None:
 def test_condense_doc_attrs() -> None:
     """FR-026: doc attrs condense to a one-line intent, not deleted, not dumped.
     Brackets inside doc content (markdown links/badges) must not desync."""
-    import pipeline
+    from pipeline_core.domain.doc_render import condense_doc_attrs
     text = (
         '# ! [doc = " [![badge]](http://x)&ensp;"]\n'
         '# ! [doc = " The crate does [a thing](http://y). More detail here."]\n'
@@ -522,7 +522,7 @@ def test_condense_doc_attrs() -> None:
         '# [doc = " ```"] '
         '# [cold] pub fn new < E > (e: E) -> Self { unimplemented!() } }\n'
     )
-    out = pipeline._condense_doc_attrs(text)
+    out = condense_doc_attrs(text)
     assert 'doc =' not in out, f"doc attrs survived:\n{out}"
     # crate intent kept as //! , first sentence only, link reduced to text
     assert '//! The crate does a thing.' in out, out

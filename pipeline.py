@@ -309,9 +309,10 @@ from pipeline_core.domain.coverage_annotation import (
     partition_uncovered_lines as _partition_uncovered_lines,
 )
 from pipeline_core.domain.doc_render import (
-    doc_eq_value_offset,
-    is_link_ref_def,
-    strip_inline_md_links,
+    condense_doc_attrs as _condense_doc_attrs,
+)
+from pipeline_core.domain.doc_render import (
+    strip_crate_attrs as _strip_crate_attrs,
 )
 from pipeline_core.domain.enums import (
     Backend,
@@ -386,13 +387,11 @@ from pipeline_core.domain.rust_idents import (
     declares_fn,
     defined_type_names,
     fn_reference_counts,
-    identifier_tokens,
     use_path_requirement_gaps,
 )
 from pipeline_core.domain.rust_macros import macro_definitions
 from pipeline_core.domain.rust_scan import (
     after_brace_newline,
-    attr_opener_end,
     contains_decl_keyword,
     contains_word,
     count_test_attrs,
@@ -457,6 +456,9 @@ from pipeline_core.domain.text import (
 )
 from pipeline_core.domain.text import (
     strip_surrounding_asterisks as _strip_surrounding_asterisks,
+)
+from pipeline_core.domain.type_refs import (
+    types_referenced_in_text as _types_referenced_in_text,
 )
 from pipeline_core.io import read, write
 from pipeline_core.ports import structure as _structure_port
@@ -3229,221 +3231,8 @@ def _find_tests_referencing_fn(
 # are located structurally via domain.rust_scan.attr_opener_end.
 
 
-def _attr_span_end(text: str, open_idx: int) -> int:
-    """Given `open_idx` = index of the `[` that opens an attribute, return the
-    index just past the matching `]`. Bracket depth is tracked ONLY outside
-    string literals, so `[`/`]` inside a doc string (markdown links, badges,
-    embedded code) do not corrupt the count. Returns -1 if unbalanced.
-
-    Handles normal (`"..."`, with `\\"` escapes) and raw (`r"..."`, `r#"..."#`)
-    string literals — the forms that appear inside `#[doc = ...]`.
-    """
-    n = len(text)
-    i = open_idx
-    depth = 0
-    while i < n:
-        c = text[i]
-        if c == '"':
-            # Possible raw string: count preceding `r` + `#`s.
-            hashes = 0
-            j = i - 1
-            while j >= 0 and text[j] == '#':
-                hashes += 1
-                j -= 1
-            is_raw = j >= 0 and text[j] == 'r'
-            i += 1
-            if is_raw:
-                closer = '"' + ('#' * hashes)
-                end = text.find(closer, i)
-                i = n if end == -1 else end + len(closer)
-            else:
-                while i < n:
-                    if text[i] == '\\':
-                        i += 2
-                        continue
-                    if text[i] == '"':
-                        i += 1
-                        break
-                    i += 1
-            continue
-        if c == '[':
-            depth += 1
-        elif c == ']':
-            depth -= 1
-            if depth == 0:
-                return i + 1
-        i += 1
-    return -1
-
-
-def _strip_attrs_for_view(text: str, *, bang: bool, doc_only: bool) -> str:
-    """Remove attributes from the PROMPT view only (on-disk file is untouched).
-
-    `bang=True`  → strip inner `#![...]` attributes (crate-level).
-    `bang=False` + `doc_only=True` → strip outer `#[doc...]` attributes.
-
-    Attribute spans are located string-literal-aware via `_attr_span_end`, so
-    `[`/`]` inside doc content can never desync the parser (the bug that leaked
-    bare doc text into the view). The trailing newline after a stripped
-    attribute is swallowed so no blank line is left behind.
-    """
-    out: list[str] = []
-    i = 0
-    n = len(text)
-    while i < n:
-        if text[i] == '#':
-            res = attr_opener_end(text, i)
-            if res:
-                is_bang, _aend = res
-                open_idx = _aend - 1  # index of the `[`
-                end = _attr_span_end(text, open_idx)
-                if end != -1:
-                    inner = text[open_idx + 1:end - 1].lstrip()
-                    want = (is_bang if bang
-                            else (not is_bang and (not doc_only
-                                                   or inner.startswith('doc'))))
-                    if want:
-                        i = end
-                        if i < n and text[i] == '\n':
-                            i += 1
-                        continue
-        out.append(text[i])
-        i += 1
-    return ''.join(out)
-
-
-def _strip_doc_attrs(text: str) -> str:
-    """Strip `#[doc = "..."]` attributes from the file view shown to the LLM.
-
-    anyhow's source embeds hundreds of chars of example code (with `[]`
-    markdown and embedded newlines) in `#[doc = "..."]` per public fn. They
-    eat prompt budget and don't help fill a body. Stripped from the PROMPT
-    view only — the on-disk file keeps them so `cargo doc` still works.
-    """
-    return _strip_attrs_for_view(text, bang=False, doc_only=True)
-
-
-def _strip_crate_attrs(text: str) -> str:
-    """Strip inner `#![...]` crate attributes from the file view shown to the
-    LLM (including the multi-line `#![doc = "..."]` module doc). PROMPT view
-    only — the on-disk file keeps them so cargo builds correctly.
-    """
-    return _strip_attrs_for_view(text, bang=True, doc_only=False)
-
-
-def _doc_attr_string(attr_inner: str) -> "str | None":
-    """Given the text inside an attribute's brackets (e.g. `doc = " summary"`),
-    return the doc string content, or None if this is not a `doc = "..."` attr.
-    `#[doc(hidden)]` and other non-string doc attrs return "" (drop, no text)."""
-    off = doc_eq_value_offset(attr_inner)
-    if off is None:
-        return None
-    rest = attr_inner[off:].lstrip()
-    if not rest.startswith('"'):
-        return ""  # doc(hidden) / doc(alias=...) etc — no prose to keep
-    body = rest[1:]
-    out: list[str] = []
-    i = 0
-    while i < len(body):
-        if body[i] == '\\' and i + 1 < len(body):
-            out.append(body[i + 1])
-            i += 2
-            continue
-        if body[i] == '"':
-            break
-        out.append(body[i])
-        i += 1
-    return ''.join(out)
-
-
-def _condense_doc_run(contents: "list[str]") -> str:
-    """Condense a run of consecutive doc-attr strings to a one-line summary:
-    first sentence of prose, with fenced code, badges, and link-refs dropped
-    and inline `[text](url)` reduced to `text`. Empty when the doc is all
-    examples/badges (nothing worth a line)."""
-    summary: list[str] = []
-    for raw in contents:
-        s = raw.strip()
-        if s.startswith('```'):
-            break                      # code example begins — stop the summary
-        if not s:
-            if summary:
-                break                  # blank line after prose ends the summary
-            continue
-        if s.startswith('[![') or is_link_ref_def(s):
-            continue                   # badge / link reference definition
-        summary.append(s)
-        if '.' in s:
-            break                      # sentence terminator reached
-    text = ' '.join(summary).strip()
-    if '.' in text:
-        text = text[:text.index('.') + 1]
-    text = strip_inline_md_links(text)   # [t](url) -> t
-    text = " ".join(text.split())
-    return text[:200].rstrip()
-
-
-def _condense_doc_attrs(text: str) -> str:
-    """Condense (not delete) doc comments in the prompt view: each run of
-    `#[doc=...]` / `#![doc=...]` attributes collapses to a single
-    `// <intent>` (or `//! <intent>`) line. Non-doc `#![...]` crate attrs are
-    dropped (they don't help fill a body). All other tokens pass through.
-
-    Deterministic Python (Hard Rule 9) — preserves the author's intent overview
-    at ~1 line instead of either dumping hundreds of chars of examples or
-    erasing the intent entirely (FR-026). String-literal-aware via
-    `_attr_span_end`, so `[]` inside doc content can never desync the parse.
-    """
-    out: list[str] = []
-    run: list[str] = []
-    run_bang = False
-    run_active = False
-
-    def _flush() -> None:
-        nonlocal run, run_active, run_bang
-        if run_active:
-            s = _condense_doc_run(run)
-            if s:
-                out.append(('//! ' if run_bang else '// ') + s + '\n')
-            run = []
-            run_active = False
-            run_bang = False
-
-    i = 0
-    n = len(text)
-    while i < n:
-        c = text[i]
-        if c == '#':
-            res = attr_opener_end(text, i)
-            if res:
-                is_bang, _aend = res
-                open_idx = _aend - 1
-                end = _attr_span_end(text, open_idx)
-                if end != -1:
-                    inner = text[open_idx + 1:end - 1].strip()
-                    doc_str = _doc_attr_string(inner)
-                    if doc_str is not None:           # a doc attr
-                        if not run_active:
-                            run_active = True
-                            run_bang = is_bang
-                        if doc_str:
-                            run.append(doc_str)
-                        i = end
-                        if i < n and text[i] == '\n':
-                            i += 1
-                        continue
-                    if is_bang:                       # non-doc crate attr → drop
-                        _flush()
-                        i = end
-                        if i < n and text[i] == '\n':
-                            i += 1
-                        continue
-        if not c.isspace():
-            _flush()
-        out.append(c)
-        i += 1
-    _flush()
-    return ''.join(out)
+# _attr_span_end / strip_*_attrs / _doc_attr_string / _condense_doc_run /
+# _condense_doc_attrs → pipeline_core.domain.doc_render (H/§7.3); imported above.
 
 
 # Below this file-view size, keep doc comments in FULL (their usage examples are
@@ -5044,62 +4833,6 @@ def _extract_impl_where_clause(file_text: str, container: str) -> str:
     old regex locator was replaced by the comment/string-aware brace scanner).
     """
     return impl_where_clause(file_text, container)
-
-
-def _types_referenced_in_text(text: str, all_types: list[TypeRecord]) -> list[TypeRecord]:
-    """Return type records that the fn's prompt should expose, with one
-    level of transitive expansion through fields.
-
-    Pass 1: direct text match — types whose `name` appears in `text` as a
-    standalone identifier. Picks up names mentioned in the fn signature
-    or container.
-
-    Pass 2: field-transitive expansion — for each type matched in pass 1,
-    parse the type names out of its fields' Rust type strings and pull
-    those records in too. This is what lets the model see `Own::by_ref()`
-    when the only direct match was `Error` (whose field is
-    `inner: Own<ErrorImpl>`). Without this step the model sees the field
-    type as a bare name with no API and starts inventing methods.
-
-    Word boundaries guard against `Boxed` matching when searching for
-    `Box`. Field expansion is one level only — going deeper would bloat
-    the prompt.
-    """
-    if not text or not all_types:
-        return []
-    by_name = {rec.name: rec for rec in all_types if rec.name}
-    out: list[TypeRecord] = []
-    seen_names: set[str] = set()
-    for rec in all_types:
-        name = rec.name
-        if not name or name in seen_names:
-            continue
-        if contains_word(text, name):
-            out.append(rec)
-            seen_names.add(name)
-
-    # Pass 2: expand by one field-hop. For each matched type, look at the
-    # type names appearing in its fields and pull those records in.
-    field_hop: list[TypeRecord] = []
-    for rec in list(out):
-        for f in rec.fields or ():
-            ty = f.ty or ""
-            if not ty:
-                continue
-            # Extract identifier-shaped tokens from the field's type
-            # string. Tokens like `Own`, `ErrorImpl`, `Backtrace` get
-            # added; generics and primitives are dropped via the
-            # by_name lookup (we only keep names that match real records).
-            for tok in identifier_tokens(ty):
-                if tok in seen_names:
-                    continue
-                hop_rec = by_name.get(tok)
-                if hop_rec is None:
-                    continue
-                field_hop.append(hop_rec)
-                seen_names.add(tok)
-    out.extend(field_hop)
-    return out
 
 
 def _enumerate_fns_via_extractor(src_dir: Path) -> list[dict] | None:
