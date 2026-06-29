@@ -26,15 +26,16 @@ def _write_fr(tmp_path, notes: list[str]):
 
 @contextlib.contextmanager
 def _error_counts(counts: dict[str, int], excerpts: dict[str, list[str]] | None = None):
-    """Temporarily set the run-global recurring-error accumulators."""
-    old_c, old_e = pipeline._ERROR_CODE_COUNTS, pipeline._ERROR_CODE_EXCERPTS
-    pipeline._ERROR_CODE_COUNTS = Counter(counts)
-    pipeline._ERROR_CODE_EXCERPTS = dict(excerpts or {})
+    """Temporarily set the store's run-scoped recurring-error accumulators."""
+    store = pipeline._MODEL_NOTES_STORE
+    old_c, old_e = store.error_code_counts, store.error_code_excerpts
+    store.error_code_counts = Counter(counts)
+    store.error_code_excerpts = dict(excerpts or {})
     try:
         yield
     finally:
-        pipeline._ERROR_CODE_COUNTS = old_c
-        pipeline._ERROR_CODE_EXCERPTS = old_e
+        store.error_code_counts = old_c
+        store.error_code_excerpts = old_e
 
 
 def test_notes_filter_tier_ordering(tmp_path) -> None:

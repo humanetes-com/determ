@@ -118,6 +118,9 @@ from pipeline_core.adapters.gen_tests_storage import (
 from pipeline_core.adapters.gen_tests_storage import (
     strip_all_gen_tests_artifacts as _strip_all_gen_tests_artifacts,
 )
+from pipeline_core.adapters.model_notes_store import (
+    FileModelNotesStore as _FileModelNotesStore,
+)
 from pipeline_core.adapters.mutation import MutationTester
 from pipeline_core.adapters.ratchet import BestTreeRatchet
 from pipeline_core.adapters.reconstruct_roles import (
@@ -332,7 +335,6 @@ from pipeline_core.domain.llm_output import (
     _extract_genesis,
     extract_files,
     extract_tagged_block,
-    parse_self_note,
 )
 from pipeline_core.domain.llm_output import (
     _find_fn_blocks as _find_fn_blocks,  # R8.5 parsers — re-export for call sites/tests
@@ -353,16 +355,10 @@ from pipeline_core.domain.model_caps import (
     model_tier as _model_tier_pure,
 )
 from pipeline_core.domain.model_notes import (
-    parse_note_bullets as _parse_note_bullets,
-)
-from pipeline_core.domain.model_notes import (
     preserve_model_notes as _preserve_model_notes,
 )
 from pipeline_core.domain.model_notes import (
-    render_with_notes as _render_with_notes,
-)
-from pipeline_core.domain.model_notes import (
-    slice_model_notes as _slice_model_notes,
+    strip_model_notes_section as _strip_model_notes_section,
 )
 from pipeline_core.domain.models import (
     BuildCluster,
@@ -401,7 +397,6 @@ from pipeline_core.domain.rust_scan import (
     has_nonempty_test_fn,
     is_structural_brace_line,
     is_type_decl_line,
-    item_names,
     line_has_assertion,
     named_fn_decl_start,
     replace_elision_placeholders,
@@ -417,12 +412,10 @@ from pipeline_core.domain.test_results import (
     OUTPUT_SEPARATOR,
     _parse_test_counts,
     build_test_name_index,
-    camelcase_type_tokens,
     count_passing_tests,
     extract_test_output_from_file,
     insert_no_run,
     is_compiler_output_line,
-    parse_error_code_note,
     per_file_test_stats,
     rustc_error_codes,
     rustc_error_signatures,
@@ -3396,34 +3389,24 @@ def _leaf_first_fn_order(
 
 _MODEL_NOTES_MAX_CHARS = 4000  # cap on the notes section in any one prompt
 _MODEL_NOTES_MAX_ENTRIES = 80  # hard cap; older entries dropped LRU on overflow
-# _MODEL_NOTES_HEADER / _slice_model_notes / _preserve_model_notes →
-# pipeline_core.domain.model_notes (imported above). Parsing has no regex now.
+# Section parse/render (_preserve_model_notes, strip, dedup/rank/promote rules) →
+# pipeline_core.domain.model_notes (regex-free). I/O + run-state → the store below.
 
 
-def _load_model_notes(fr_path: Path) -> list[str]:
-    """The note bullets currently in FR (thin: read file → domain parse)."""
-    try:
-        fr_text = fr_path.read_text(encoding="utf-8")
-    except OSError:
-        return []
-    _, notes_section = _slice_model_notes(fr_text)
-    return _parse_note_bullets(notes_section)
+# Model self-correction notes — the I/O + run-state + LLM-extraction engine now
+# lives in adapters/model_notes_store.py (pure rules in domain/model_notes.py).
+# The store is built at the composition root; pipeline.py keeps thin
+# name-preserving wrappers so the dep-injection sites and test seams are stable.
+_MODEL_NOTES_STORE = _FileModelNotesStore(
+    _ASK_CLIENT, _TASK2_MODEL, _log,
+    max_chars=_MODEL_NOTES_MAX_CHARS,
+    max_entries=_MODEL_NOTES_MAX_ENTRIES,
+    failed_body_cap=_FAILED_BODY_CAP,
+    fix_err_cap=_FIX_ERR_CAP,
+)
 
-
-def _save_model_notes(fr_path: Path, notes: list[str]) -> None:
-    """Rewrite the `## Model Notes` section in FR with the given bullets.
-    Creates the FR file (with just the section) if it doesn't exist.
-    """
-    try:
-        fr_text = fr_path.read_text(encoding="utf-8") if fr_path.exists() else ""
-    except OSError:
-        fr_text = ""
-    out = _render_with_notes(fr_text, notes)
-    try:
-        fr_path.parent.mkdir(parents=True, exist_ok=True)
-        fr_path.write_text(out, encoding="utf-8")
-    except OSError as e:
-        _log(f"  [model-notes] write failed: {e}")
+_load_model_notes = _MODEL_NOTES_STORE.load
+_save_model_notes = _MODEL_NOTES_STORE.save
 
 
 def _filter_model_notes_for_prompt(
@@ -3434,118 +3417,8 @@ def _filter_model_notes_for_prompt(
     current_error: str = "",
     max_chars: int = _MODEL_NOTES_MAX_CHARS,
 ) -> str:
-    """Pull notes from FR ranked by relevance for the current (file, fn).
-
-    P3.4 ranking tiers (lower number = higher priority):
-      1. Note mentions an error code present in `current_error` (E0xxx).
-      2. Note keyword overlap with `current_error`'s _note_signature keywords.
-      3. Note mentions the file's basename or fn name.
-      4. Note mentions any symbol (type/fn) appearing in `file_text`.
-      5. Otherwise (recency only).
-
-    Returns a single string ready to insert into a <MODEL_NOTES> block,
-    capped at `max_chars`. Empty string if no notes apply.
-    """
-    notes = _load_model_notes(fr_path)
-    if not notes:
-        return ""
-    base = Path(file_rel).stem if file_rel else ""
-    # R7: item names via the syn-shaped token scan; error codes via the cargo-text
-    # scan — both structured, replacing the on-source / on-output regexes.
-    symbols: set[str] = set(item_names(file_text)) if file_text else set()
-    err_codes: set[str] = set()
-    err_keywords: set[str] = set()
-    if current_error:
-        err_codes = _ecodes_in_text(current_error)
-        low_err = current_error.lower()
-        err_keywords = {k for k in _NOTE_SIGNATURE_KEYWORDS if k in low_err}
-
-    def tier(n: str) -> int:
-        lower = n.lower()
-        if err_codes and any(c in lower.upper() or c.lower() in lower
-                              for c in err_codes):
-            return 1
-        n_codes, n_kw = _note_signature(n)
-        if err_keywords and n_kw and len(err_keywords & n_kw) >= 2:
-            return 2
-        if (base and base.lower() in lower) or (fn_name and fn_name.lower() in lower):
-            return 3
-        if any(sym in n for sym in symbols):
-            return 4
-        return 5
-
-    indexed = list(enumerate(notes))
-    indexed.sort(key=lambda iv: (tier(iv[1]), -iv[0]))
-    out_lines: list[str] = []
-    total = 0
-    for _, n in indexed:
-        line = f"- {n}"
-        if total + len(line) + 1 > max_chars:
-            break
-        out_lines.append(line)
-        total += len(line) + 1
-    return "\n".join(out_lines)
-
-
-
-
-_NOTE_HASH_CACHE: dict[Path, set[str]] = {}
-
-# Curated set of Rust-load-bearing keywords that, when co-mentioned in two
-# notes, almost certainly mean the notes are about the same confusion.
-# Used by _note_signature for semantic dedup (P3.3).
-_NOTE_SIGNATURE_KEYWORDS = {
-    "typeid", "'static", "static", "&dyn", "dyn", "box", "nonnull",
-    "ptr", "as_ptr", "as_ref", "from_raw", "deref",
-    "unimplemented", "todo", "unsafe",
-    "trait", "impl", "generic", "lifetime", "sized", "unsized",
-    "format", "display", "debug",
-    "feature", "no_std", "core::", "std::",
-    "ref::", "wrapper", "delegation",
-}
-
-
-def _note_hash(text: str) -> str:
-    """Exact-text hash for early-rejection of literal duplicates."""
-    norm = " ".join(text.lower().split())
-    return hashlib.md5(norm.encode("utf-8")).hexdigest()[:16]
-
-
-def _note_signature(text: str) -> tuple[frozenset, frozenset]:
-    """Semantic signature: (error codes mentioned, keyword set).
-
-    P3.3: two notes are considered semantically duplicate when their
-    signatures' keyword sets overlap by >= 80%. Catches the 4-way
-    paraphrase of "TypeId::of::<T>() needs T: 'static" we saw overnight,
-    where exact-hash dedup let all four through.
-    """
-    low = text.lower()
-    err_codes = frozenset(rustc_error_codes(low, "e"))
-    keywords = frozenset(k for k in _NOTE_SIGNATURE_KEYWORDS if k in low)
-    return err_codes, keywords
-
-
-def _notes_are_semantic_dupes(a: str, b: str) -> bool:
-    """True when two notes mostly mean the same thing.
-
-    Two-tier check:
-      - Same error code set (non-empty) → dupe regardless of phrasing.
-      - Otherwise: keyword overlap >= 2 keywords AND >= 50% Jaccard.
-        50% catches the overnight TypeId-paraphrase set where shared
-        keywords are {typeid, static, generic} but each note adds one
-        unique extra ("impl", "lifetime", etc.).
-    """
-    a_err, a_kw = _note_signature(a)
-    b_err, b_kw = _note_signature(b)
-    if a_err and b_err and a_err == b_err:
-        return True
-    if not a_kw or not b_kw:
-        return False
-    inter = len(a_kw & b_kw)
-    union = len(a_kw | b_kw)
-    if inter < 2:
-        return False
-    return union > 0 and inter / union >= 0.5
+    return _MODEL_NOTES_STORE.filter_for_prompt(
+        fr_path, file_rel, fn_name, file_text, current_error, max_chars)
 
 
 def _append_model_note(
@@ -3553,251 +3426,21 @@ def _append_model_note(
     note: str,
     error_codes: "list[str] | set[str] | None" = None,
 ) -> bool:
-    """Append `note` to FR's model-notes section. Returns True if added,
-    False on dedup or empty/short input.
-
-    Dedup logic (P3.3 tightened):
-      1. Exact hash match → reject (literal duplicate)
-      2. Semantic match against any existing note → reject
-         (paraphrase of an already-known rule)
-
-    P6.4: when `error_codes` is given, prefix the stored note with a
-    `[E0xxx,E0yyy]` tag. This tag is readable to the LLM and lets us
-    later surface past notes tied to recurring error codes alongside
-    <RECURRING_ERRORS>.
-    """
-    note = (note or "").strip()
-    if not note or len(note) < 20:
-        return False
-    if note.startswith("- "):
-        note = note[2:].strip()
-    # P6.4: prepend error-code tag (deduped, sorted, only well-formed codes).
-    if error_codes:
-        clean = sorted({c for c in error_codes
-                        if isinstance(c, str) and re.fullmatch(r"E\d{3,4}", c)})
-        if clean and not note.startswith("[E"):
-            note = f"[{','.join(clean)}] {note}"
-    existing = _load_model_notes(fr_path)
-    existing_hashes = _NOTE_HASH_CACHE.get(fr_path)
-    if existing_hashes is None:
-        existing_hashes = {_note_hash(n) for n in existing}
-        _NOTE_HASH_CACHE[fr_path] = existing_hashes
-    h = _note_hash(note)
-    if h in existing_hashes:
-        return False
-    # P3.3: semantic dedup. Walk existing notes; reject if any is a paraphrase.
-    for prev in existing:
-        if _notes_are_semantic_dupes(prev, note):
-            return False
-    existing.append(note)
-    existing_hashes.add(h)
-    if len(existing) > _MODEL_NOTES_MAX_ENTRIES:
-        dropped = existing[:-_MODEL_NOTES_MAX_ENTRIES]
-        existing = existing[-_MODEL_NOTES_MAX_ENTRIES:]
-        for d in dropped:
-            existing_hashes.discard(_note_hash(d))
-    _save_model_notes(fr_path, existing)
-    return True
-
-
-_NOTE_EXTRACTION_PROMPT = """A model attempted to implement a Rust function and
-the first attempt did not compile. The second (or later) attempt did compile.
-
-Read the failed body, the cargo error from that failure, and the body that
-finally compiled. Then write a SINGLE short note to your future self, in
-first-person voice, that names the specific confusion and how to avoid it.
-
-Format guidance:
-  - Lead with what you tried that failed ("I tried X").
-  - Name the reason it failed in concrete terms ("because Y").
-  - State the correction as a rule ("Use Z, not X").
-  - Keep it to ONE sentence; ≤300 chars.
-  - Do NOT mention the function name, file name, or crate name — the note
-    should generalise. Focus on the language/library/type confusion.
-  - Output ONLY the note text, no preamble, no markdown, no quotes.
-
-If no general lesson can be extracted (e.g. the failure was just a typo),
-output the literal token NONE.
-
-<FAILED_BODY>
-{failed_body}
-</FAILED_BODY>
-
-<COMPILE_ERROR>
-{error_excerpt}
-</COMPILE_ERROR>
-
-<FIXED_BODY>
-{fixed_body}
-</FIXED_BODY>
-"""
+    return _MODEL_NOTES_STORE.append(fr_path, note, error_codes)
 
 
 def _extract_self_note(
     failed_body: str, error_excerpt: str, fixed_body: str,
-) -> str | None:
-    """One LLM call to author a self-correction note. Returns None when the
-    model declines (responds with NONE or empty).
-    """
-    if not failed_body or not error_excerpt:
-        return None
-    prompt = _NOTE_EXTRACTION_PROMPT.format(
-        failed_body=failed_body[:_FAILED_BODY_CAP],
-        error_excerpt=error_excerpt[:_FIX_ERR_CAP],
-        fixed_body=fixed_body[:_FAILED_BODY_CAP] if fixed_body else "(no fixed body — fix loop exhausted)",
-    )
-    # Two-attempt ladder for extraction: default (thinking on) then think=False
-    # fallback. Mirrors the body-extraction recovery — Qwen3.6 occasionally
-    # returns empty with think=False on small prompts and vice versa.
-    resp = ""
-    try:
-        resp = _ASK_CLIENT.ask(prompt, model=_TASK2_MODEL)
-    except Exception as e:
-        _log(f"  [model-notes] extraction failed (default): {e}")
-    if not resp or not resp.strip():
-        try:
-            resp = _ASK_CLIENT.ask(prompt, model=_TASK2_MODEL, think=False)
-        except Exception as e:
-            _log(f"  [model-notes] extraction failed (think=False): {e}")
-            return None
-    return parse_self_note(resp)
-
-
-
-
-# P5.5: track Exxxx error codes seen across the current run. When a code
-# fires 3+ times, auto-promote a short rule to every subsequent per-fn
-# prompt (as a <RECURRING_ERRORS> block). Catches when one class of
-# Rust gotcha keeps biting and one fix-loop's local note isn't enough.
-from collections import Counter as _Counter_PY
-
-_ERROR_CODE_COUNTS: "_Counter_PY | None" = None
-# P6.3: per-error-code accumulator of cargo-error excerpts (capped). When
-# an error code recurs, we mine these for common type tokens / file
-# locations and surface them in <RECURRING_ERRORS>.
-_ERROR_CODE_EXCERPTS: dict[str, list[str]] = {}
-_ERROR_EXCERPT_MAX_PER_CODE = 10  # keep at most N excerpts per code
-_ERROR_EXCERPT_MAX_CHARS = 600   # truncate each excerpt
-_ERROR_CODE_PROMOTED_THRESHOLD = 3
-_ERROR_CODE_HINTS: dict[str, str] = {
-    "E0277": "trait bound not satisfied — TWO opposite cases (see the matching gotcha for concrete examples): (a) by-value return/use of a possibly-unsized `T` (\"size cannot be known\") → you MAY add `where T: Sized` to THIS one fn, or return `&T`/`Box<T>`; (b) `T doesn't implement Display/Debug/...` → you may NOT add that bound (it is the caller's contract) — do not call that trait on `T`, build the value another way.",
-    "E0308": "mismatched types — check whether you're returning a Result vs Option, owned vs referenced, or wrong generic instantiation.",
-    "E0382": "use of moved value — clone, borrow, or use Cow/Arc if you need both old and new value.",
-    "E0507": "cannot move out of borrowed — use .clone(), .as_ref(), or destructure with `ref`.",
-    "E0599": "no method found — likely calling a method that doesn't exist on this type. Read TYPES_IN_SCOPE for the exact method names.",
-    "E0609": "no field — usually trying to access a method as if it were a field. Use .name() not .name. See TYPES_IN_SCOPE.",
-    "E0615": "took value of method instead of calling it — `.method` vs `.method()`. Add parens.",
-    "E0107": "wrong number of generic arguments — check the type's actual generic signature in TYPES_IN_SCOPE.",
-    "E0310": "type parameter may not live long enough — add a `'static` bound.",
-    "E0119": "conflicting impls — remove the duplicate or specialise via different generic params.",
-    "E0554": "feature attribute only on nightly — guard with #[cfg] or check that the nightly toolchain is active.",
-}
+) -> "str | None":
+    return _MODEL_NOTES_STORE.extract_self_note(failed_body, error_excerpt, fixed_body)
 
 
 def _record_error_codes_seen(output: str) -> None:
-    """Increment the global counter for each unique E0xxx code found in
-    `output`. Also accumulate a short excerpt per code for later mining
-    of recurring type-token context (P6.3)."""
-    global _ERROR_CODE_COUNTS
-    if _ERROR_CODE_COUNTS is None:
-        _ERROR_CODE_COUNTS = _Counter_PY()
-    if not output:
-        return
-    codes = _ecodes_in_text(output)
-    for c in codes:
-        _ERROR_CODE_COUNTS[c] += 1
-        # Capture an excerpt: the error[Exxxx]: line + its few surrounding
-        # lines. Per-code list is capped to N excerpts (FIFO).
-        excerpt = _excerpt_for_code(output, c,
-                                    max_chars=_ERROR_EXCERPT_MAX_CHARS)
-        if excerpt:
-            bucket = _ERROR_CODE_EXCERPTS.setdefault(c, [])
-            bucket.append(excerpt)
-            if len(bucket) > _ERROR_EXCERPT_MAX_PER_CODE:
-                bucket.pop(0)
-
-
-def _mine_common_tokens(excerpts: list[str], top_n: int = 3) -> list[tuple[str, int]]:
-    """From a list of cargo error excerpts, return the most common Rust
-    type-like tokens (CapitalisedCamelCase names, with possible generic
-    decoration). Used to enrich RECURRING_ERRORS with type context.
-    """
-    if not excerpts:
-        return []
-    tok: _Counter_PY[str] = _Counter_PY()
-    # Generic noise that's NOT useful type context.
-    skip = {
-        "Err", "Ok", "None", "Some", "Box", "Self", "T", "E", "C", "V",
-        "From", "Into", "Vec", "String", "Result", "Option",
-    }
-    for ex in excerpts:
-        seen_here: set[str] = set()
-        for t in camelcase_type_tokens(ex):
-            # Filter: must be longer than 3 chars OR clearly composite.
-            bare = t.split("<", 1)[0]
-            if bare in skip:
-                continue
-            if len(bare) < 4 and "<" not in t:
-                continue
-            if t in seen_here:
-                continue  # one count per excerpt
-            seen_here.add(t)
-            tok[t] += 1
-    return [(t, n) for t, n in tok.most_common(top_n) if n >= 2]
+    _MODEL_NOTES_STORE.record_error_codes_seen(output)
 
 
 def _promoted_error_rules(fr_path: "Path | None" = None) -> str:
-    """Return a compact block listing error codes that have recurred 3+
-    times this run, with their canonical fix hint and (P6.3) any shared
-    type-tokens mined from the error excerpts.
-
-    P6.4: when `fr_path` is provided, scan stored model notes for
-    `[E0xxx,...]` prefix tags and append up to 2 matching past notes
-    per promoted code (most-recent first, deduped). This gives the LLM
-    the exact rule it wrote for itself the previous time the same code
-    fired."""
-    if not _ERROR_CODE_COUNTS:
-        return ""
-    # Pre-build code → notes index from the FR file (P6.4).
-    code_to_notes: dict[str, list[str]] = {}
-    if fr_path is not None:
-        try:
-            stored = _load_model_notes(fr_path)
-        except Exception:
-            stored = []
-        # Walk newest-first so the most recent rule wins per code.
-        for note in reversed(stored):
-            parsed = parse_error_code_note(note)
-            if parsed is None:
-                continue
-            code_list, body = parsed
-            for code in code_list.split(","):
-                bucket = code_to_notes.setdefault(code, [])
-                if body not in bucket:
-                    bucket.append(body)
-
-    promoted: list[str] = []
-    for code, count in _ERROR_CODE_COUNTS.most_common():
-        if count < _ERROR_CODE_PROMOTED_THRESHOLD:
-            break
-        hint = _ERROR_CODE_HINTS.get(code,
-                                      f"recurring; rustc --explain {code} for details.")
-        # P6.3: mine common type tokens from the excerpts for this code.
-        common = _mine_common_tokens(_ERROR_CODE_EXCERPTS.get(code, []))
-        if common:
-            shared = ", ".join(f"`{t}`" for t, _ in common[:3])
-            promoted.append(
-                f"  {code} (seen {count}×, often on {shared}): {hint}")
-        else:
-            promoted.append(f"  {code} (seen {count}×): {hint}")
-        # P6.4: surface past notes tagged with this code.
-        for past in code_to_notes.get(code, [])[:2]:
-            past_short = past if len(past) <= 240 else past[:237] + "..."
-            promoted.append(f"    ↳ past note: {past_short}")
-    if not promoted:
-        return ""
-    return ("These errors keep recurring in this run; address them proactively:\n"
-            + "\n".join(promoted))
+    return _MODEL_NOTES_STORE.promoted_error_rules(fr_path)
 
 
 # Repository Specifications (2026-06-11): the crate's spec-document set —
@@ -3807,16 +3450,6 @@ def _promoted_error_rules(fr_path: "Path | None" = None) -> str:
 # pipeline_core.prompts.repo_spec selector.
 _REPO_SPEC_CACHE: dict[str, tuple[tuple, RepoSpecDocs]] = {}
 _FR_PREFIX = "functional_requirements_"
-
-
-def _strip_model_notes_section(fr_text: str) -> str:
-    """Drop '## Model Notes …' from the FR copy used for repo-spec excerpts —
-    the notes already reach prompts via the dedicated MODEL_NOTES filter."""
-    idx = fr_text.find("## Model Notes")
-    if idx == -1:
-        return fr_text
-    nxt = fr_text.find("\n## ", idx + 1)
-    return fr_text[:idx] + (fr_text[nxt + 1:] if nxt != -1 else "")
 
 
 def _load_repo_spec_docs(project_dir: Path, module_name: str) -> RepoSpecDocs:
@@ -4152,16 +3785,6 @@ def _run_cargo_check_diag(
 ) -> "tuple[int, str, list[Diagnostic]]":
     return _reconstruct_cargo_runner.run_check_diag(
         ADAPTERS.cargo, cmd, cwd, env, timeout)
-
-
-# Cargo error-text shaping relocated to application/reconstruct/cargo_errors.py
-# (P2 slice 4, regex-free-ified on the way per the R7 standing rule).
-from pipeline_core.application.reconstruct.cargo_errors import (  # noqa: E402
-    ecodes_in_text as _ecodes_in_text,
-)
-from pipeline_core.application.reconstruct.cargo_errors import (  # noqa: E402
-    excerpt_for_code as _excerpt_for_code,
-)
 
 
 def _focus_cargo_errors(output: str, file_rel: str,
