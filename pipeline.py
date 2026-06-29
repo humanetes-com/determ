@@ -314,7 +314,6 @@ from pipeline_core.domain.llm_output import (
     GENESIS_DELIM_START,
     _extract_genesis,
     extract_files,
-    extract_response_code_fence,
     extract_tagged_block,
     parse_self_note,
 )
@@ -379,7 +378,6 @@ from pipeline_core.domain.rust_idents import (
     defines_type,
     fn_reference_counts,
     identifier_tokens,
-    is_unsafe_fn,
     mixed_case_identifiers,
     use_symbol_paths,
 )
@@ -3576,27 +3574,7 @@ def _find_tests_referencing_fn(
     return out
 
 
-def _extract_body_response(response: str) -> str | None:
-    """Pull a function body out of the LLM response.
-
-    Accepts (in order):
-      - `<BODY> ... </BODY>` block
-      - ```rust ... ``` fenced block
-      - ``` ... ``` fenced block
-      - Raw response (last resort)
-
-    Returns the trimmed text, or None on empty.
-    """
-    if not response or not response.strip():
-        return None
-    inner = extract_tagged_block(response, "BODY")
-    if inner is not None:
-        candidate = inner.strip()
-        return candidate or None
-    fenced = extract_response_code_fence(response)
-    if fenced:
-        return fenced
-    return response.strip() or None
+# _extract_body_response relocated to pipeline_core.domain.llm_output (G/P6)
 
 
 # Attribute openers (`#[`, `#![`, incl. the spaced skeleton form `# ! [ doc … ]`)
@@ -4836,96 +4814,25 @@ def _build_test_cmd(test_stems: list[str], cluster: "BuildCluster | None") -> st
     return shlex.join(parts)
 
 
+# _ask_per_fn_body + _collect_sibling_filled_bodies relocated to pipeline_core (G/P6).
+# Tests that patch pipeline._ask_per_fn_body / pipeline._collect_sibling_filled_bodies
+# still work: the aliased names remain in this module's namespace.
+from pipeline_core.adapters.per_fn_ask import (  # noqa: E402
+    ask_per_fn_body as _ask_per_fn_body_impl,
+)
+from pipeline_core.application.reconstruct.sibling_context import (  # noqa: E402
+    collect_sibling_filled_bodies as _collect_sibling_filled_bodies,
+)
+
+
 def _ask_per_fn_body(
     prompt: str, fn_name: str, attempts_log: list[str],
     sig_text: str = "",
 ) -> tuple[str | None, str]:
-    """Run the 3-attempt response-extraction ladder for a per-fn prompt.
-
-    Returns (body or None, last_response). On None, the model's response was
-    unparseable or stub-only on all three tries.
-
-    For `unsafe` fns (rigid pointer/vtable manipulation), drops sampling
-    temperature to PHASE_C_UNSAFE_TEMP (default 0.1). High-temperature
-    creative sampling is the wrong mode for unsafe code — there's
-    typically one correct token sequence per body, not a range of valid
-    creative choices. The Qwen3.6 model documentation explicitly
-    recommends lowering temperature for syntactically rigid code.
-    """
-    # Detect unsafe-fn context from the signature.
-    is_unsafe = bool(sig_text) and is_unsafe_fn(sig_text)
-    unsafe_temp = float(os.getenv("PHASE_C_UNSAFE_TEMP", "0.1"))
-    last_response = ""
-    for think_off, label in [(False, "default"), (True, "think=False"),
-                             (True, "think=False+retry")]:
-        kwargs: dict = {"model": _TASK2_MODEL}
-        if think_off:
-            kwargs["think"] = False
-        if is_unsafe:
-            kwargs["temperature"] = unsafe_temp
-        last_response = _ASK_CLIENT.ask(prompt, **kwargs)
-        body = _extract_body_response(last_response)
-        if body and not _is_unimplemented_body(body):
-            if label != "default":
-                attempts_log.append(f"{fn_name}: recovered via {label}")
-            return body, last_response
-        attempts_log.append(f"{fn_name}: empty/stub from {label}")
-    return None, last_response
-
-
-def _collect_sibling_filled_bodies(
-    file_text: str, target_fn_name: str, target_container: str,
-    max_siblings: int = 3, max_body_chars: int = 800,
-) -> str:
-    """FR-024 fix 3: hoist already-filled sibling-impl bodies to the prompt.
-
-    Finds every fn with the same `target_fn_name` in `file_text` whose body
-    is NOT a stub, EXCLUDING the target itself (matched by container).
-    Returns a formatted block ready for `<SIBLING_REFERENCE>` injection.
-    Empty string when no usable siblings exist.
-
-    The model is much more likely to produce a working body for an
-    overloaded `fn as_ref` if a sibling `as_ref` impl in the same file
-    is already correct — it can pattern-match the structural template.
-    """
-    out: list[str] = []
-    count = 0
-    for h in fn_headers(file_text, line_anchored=False):
-        if h.name != target_fn_name:
-            continue
-        sig_start = h.start
-        body_start = h.brace_open + 1
-        depth = 1
-        i = body_start
-        while i < len(file_text) and depth > 0:
-            ch = file_text[i]
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-            i += 1
-        if depth != 0:
-            continue
-        body_end = i - 1
-        body = file_text[body_start:body_end].strip()
-        if not body or _is_unimplemented_body(body):
-            continue
-        # Skip the target fn itself — heuristic by container substring match
-        # since we don't have AST nodes here. The container fragment usually
-        # appears in the ~200 chars above the fn declaration.
-        if target_container:
-            context_above = file_text[max(0, sig_start - 200):sig_start]
-            if target_container.strip() in context_above:
-                # Likely the target — skip.
-                continue
-        sig = file_text[sig_start:body_start].strip().rstrip("{").rstrip()
-        if len(body) > max_body_chars:
-            body = body[:max_body_chars] + "\n    /* ...truncated... */"
-        out.append(f"{sig} {{\n{body}\n}}")
-        count += 1
-        if count >= max_siblings:
-            break
-    return "\n\n".join(out)
+    return _ask_per_fn_body_impl(
+        _ASK_CLIENT, prompt, fn_name, attempts_log,
+        sig_text=sig_text, model=_TASK2_MODEL,
+    )
 
 
 # Retrospectives store relocated to pipeline_core/adapters/retros.py (P2);

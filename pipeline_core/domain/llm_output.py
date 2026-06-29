@@ -180,6 +180,23 @@ def extract_response_code_fence(text: str) -> str | None:
     return None
 
 
+def extract_body_response(response: str) -> str | None:
+    """Pull a Rust function body out of an LLM response.
+
+    Priority: <BODY>…</BODY> tag → ```rust``` fence → raw response (last resort).
+    Returns None on empty/blank.
+    """
+    if not response or not response.strip():
+        return None
+    inner = extract_tagged_block(response, "BODY")
+    if inner is not None:
+        return inner.strip() or None
+    fenced = extract_response_code_fence(response)
+    if fenced:
+        return fenced
+    return response.strip() or None
+
+
 def _scan_code_fence(text: str, lang: str, optional: bool) -> str | None:
     """First ```` ``` `` + (optional) `lang` + ``\\s*`` + capture-to-next-```` ``` ````."""
     n = len(text)
