@@ -110,7 +110,8 @@ CID=$(docker run -d \
     --gpu-memory-utilization 0.90 \
     --enable-prefix-caching \
     --max-num-seqs 4 \
-    --reasoning-parser qwen3)
+    --reasoning-parser "$(_env VLLM_REASONING_PARSER)")
+
 
 echo "$CID" > "$CONTAINER_ID_FILE"
 echo "Container started ($CID)"

@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from pipeline_core.domain.rust_scan import gen_mod_body_start
+
 
 @dataclass(frozen=True, slots=True)
 class Task2Config:
@@ -513,3 +515,87 @@ def prelude_import_names(prelude_block: str) -> str:
             seen.add(n)
             ordered.append(n)
     return ", ".join(ordered)
+
+
+def extract_gen_tests_body(block: str) -> str:
+    """Strip the outer `mod gen_X { ... }` wrapper and return the dedented body.
+
+    If the block shape doesn't match (bare test functions), returns block unchanged.
+    """
+    start = gen_mod_body_start(block)
+    if start is None:
+        return block.strip() + "\n"
+    depth = 1
+    i = start
+    while i < len(block):
+        c = block[i]
+        if c == '{':
+            depth += 1
+        elif c == '}':
+            depth -= 1
+            if depth == 0:
+                body = block[start:i]
+                lines = body.splitlines()
+                non_empty = [ln for ln in lines if ln.strip()]
+                if non_empty:
+                    indent = min(len(ln) - len(ln.lstrip()) for ln in non_empty)
+                    if indent > 0:
+                        body = "\n".join(
+                            (ln[indent:] if len(ln) >= indent and ln[:indent].isspace() else ln)
+                            for ln in lines
+                        )
+                return body.strip() + "\n"
+        i += 1
+    return block.strip() + "\n"
+
+
+def build_gen_tests_decl(
+    sibling_name: str, n: int | str, allow_line: str, cluster_cfg_attr: str = ""
+) -> str:
+    """Build the `#[cfg(test)] ... mod gen_tests_N;` declaration block.
+
+    cluster_cfg_attr: optional cfg predicate gating this sibling to a specific cluster.
+    """
+    parts: list[str] = []
+    if cluster_cfg_attr:
+        parts.append(f"#[cfg({cluster_cfg_attr})]")
+    parts.append("#[cfg(test)]")
+    if allow_line:
+        parts.append(allow_line)
+    parts.append(f'#[path = "{sibling_name}"]')
+    return "\n" + "\n".join(parts) + f"\nmod gen_tests_{n};\n"
+
+
+def gen_tests_origin_cfgs(file_text: str) -> dict[int, str]:
+    """Map each `mod gen_tests_<n>;` decl to its cluster cfg predicate.
+
+    Returns {pass_n: cfg_predicate}; '' for the stable/default cluster.
+    Deterministic structural scan of the pipeline's own fixed decl format.
+    """
+    lines = file_text.splitlines()
+    out: dict[int, str] = {}
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if not (s.startswith("mod gen_tests_") and s.endswith(";")):
+            continue
+        try:
+            n = int(s[len("mod gen_tests_"):-1])
+        except ValueError:
+            continue
+        cfg = ""
+        j = i - 1
+        while j >= 0:
+            a = lines[j].strip()
+            if a.startswith("#["):
+                if a.startswith("#[cfg(") and a.endswith(")]") and a != "#[cfg(test)]":
+                    inner = a[len("#[cfg("):].rsplit(")]", 1)[0]
+                    if inner != "test":
+                        cfg = inner
+                j -= 1
+                continue
+            if a == "":
+                j -= 1
+                continue
+            break
+        out[n] = cfg
+    return out

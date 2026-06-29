@@ -1,0 +1,164 @@
+"""Unit tests for gen_tests_storage — filesystem I/O for gen_tests sibling files."""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from pipeline_core.adapters.gen_tests_storage import (
+    gen_tests_count,
+    gen_tests_path,
+    gen_tests_siblings,
+    load_gen_tests_origin,
+    next_gen_tests_n,
+    read_all_gen_tests,
+    revert_gen_tests_pass,
+    strip_all_gen_tests_artifacts,
+    write_gen_tests_pass,
+)
+from pipeline_core.domain.generation import (
+    has_gen_tests_mod_decl,
+    strip_all_gen_tests_decls,
+)
+
+
+def _src(tmp_path: Path, name: str = "lib.rs", content: str = "pub fn x() {}\n") -> Path:
+    p = tmp_path / name
+    p.write_text(content, encoding="utf-8")
+    return p
+
+
+# ── sibling enumeration ─────────────────────────────────────────────────────
+
+def test_siblings_empty(tmp_path: Path) -> None:
+    src = _src(tmp_path)
+    assert gen_tests_siblings(src) == []
+    assert gen_tests_count(src) == 0
+
+
+def test_siblings_sorted(tmp_path: Path) -> None:
+    src = _src(tmp_path)
+    (tmp_path / "lib.gen_tests_3.rs").write_text("// 3\n", encoding="utf-8")
+    (tmp_path / "lib.gen_tests_1.rs").write_text("// 1\n", encoding="utf-8")
+    (tmp_path / "lib.gen_tests_10.rs").write_text("// 10\n", encoding="utf-8")
+    result = gen_tests_siblings(src)
+    assert [n for n, _ in result] == [1, 3, 10]
+
+
+def test_count_and_next(tmp_path: Path) -> None:
+    src = _src(tmp_path)
+    (tmp_path / "lib.gen_tests_2.rs").write_text("", encoding="utf-8")
+    (tmp_path / "lib.gen_tests_5.rs").write_text("", encoding="utf-8")
+    assert gen_tests_count(src) == 2
+    assert next_gen_tests_n(src) == 6  # max existing + 1
+
+
+def test_next_n_when_no_siblings(tmp_path: Path) -> None:
+    src = _src(tmp_path)
+    assert next_gen_tests_n(src) == 1
+
+
+def test_gen_tests_path(tmp_path: Path) -> None:
+    src = tmp_path / "error.rs"
+    assert gen_tests_path(src, 3) == tmp_path / "error.gen_tests_3.rs"
+
+
+# ── read_all_gen_tests ───────────────────────────────────────────────────────
+
+def test_read_all_gen_tests_empty(tmp_path: Path) -> None:
+    src = _src(tmp_path)
+    assert read_all_gen_tests(src) == ""
+
+
+def test_read_all_gen_tests_concatenates(tmp_path: Path) -> None:
+    src = _src(tmp_path)
+    (tmp_path / "lib.gen_tests_1.rs").write_text("fn a() {}", encoding="utf-8")
+    (tmp_path / "lib.gen_tests_2.rs").write_text("fn b() {}", encoding="utf-8")
+    out = read_all_gen_tests(src)
+    assert "mod gen_tests_1" in out
+    assert "fn a()" in out
+    assert "mod gen_tests_2" in out
+    assert "fn b()" in out
+
+
+# ── load_gen_tests_origin ────────────────────────────────────────────────────
+
+def test_load_gen_tests_origin_missing(tmp_path: Path) -> None:
+    assert load_gen_tests_origin(tmp_path) == {}
+
+
+def test_load_gen_tests_origin_valid(tmp_path: Path) -> None:
+    skel = tmp_path / ".skeleton"
+    skel.mkdir()
+    (skel / "_gen_tests_origin.json").write_text(
+        json.dumps({"lib.gen_tests_1": "nightly", "lib.gen_tests_2": ""}),
+        encoding="utf-8",
+    )
+    result = load_gen_tests_origin(tmp_path)
+    assert result == {"lib.gen_tests_1": "nightly", "lib.gen_tests_2": ""}
+
+
+def test_load_gen_tests_origin_bad_json(tmp_path: Path) -> None:
+    skel = tmp_path / ".skeleton"
+    skel.mkdir()
+    (skel / "_gen_tests_origin.json").write_text("not-json", encoding="utf-8")
+    assert load_gen_tests_origin(tmp_path) == {}
+
+
+# ── write_gen_tests_pass ─────────────────────────────────────────────────────
+
+_VALID_BLOCK = "#[cfg(test)]\nmod gen_tests_1 {\n    fn t() {}\n}\n"
+_BARE_BLOCK = "fn t() {}"  # bare: no outer mod wrapper
+
+
+def test_write_gen_tests_pass_happy(tmp_path: Path) -> None:
+    src = _src(tmp_path, content="pub fn x() {}\n")
+    sibling = write_gen_tests_pass(src, "pub fn x() {}\n", _VALID_BLOCK, "", pass_n=1)
+    assert sibling.exists()
+    assert "fn t()" in sibling.read_text(encoding="utf-8")
+    parent_text = src.read_text(encoding="utf-8")
+    assert has_gen_tests_mod_decl(parent_text, 1)
+
+
+def test_write_gen_tests_pass_broken_delimiters_quarantined(tmp_path: Path) -> None:
+    src = _src(tmp_path, content="pub fn x() {}\n")
+    unbalanced = "fn t() { { { } }\n"  # extra opening brace
+    sibling = write_gen_tests_pass(src, "pub fn x() {}\n", unbalanced, "", pass_n=1)
+    assert not sibling.exists()
+    quarantine = sibling.with_suffix(".rs.broken")
+    assert quarantine.exists()
+    # parent must NOT have been updated
+    assert not has_gen_tests_mod_decl(src.read_text(encoding="utf-8"), 1)
+
+
+def test_write_gen_tests_pass_with_cluster_gate(tmp_path: Path) -> None:
+    src = _src(tmp_path, content="pub fn x() {}\n")
+    write_gen_tests_pass(src, "pub fn x() {}\n", _VALID_BLOCK, "", pass_n=1, cluster_cfg_attr="nightly")
+    parent_text = src.read_text(encoding="utf-8")
+    assert "#[cfg(nightly)]" in parent_text
+
+
+# ── revert_gen_tests_pass ────────────────────────────────────────────────────
+
+def test_revert_gen_tests_pass(tmp_path: Path) -> None:
+    original = "pub fn x() {}\n"
+    src = _src(tmp_path, content=original)
+    sibling = write_gen_tests_pass(src, original, _VALID_BLOCK, "", pass_n=1)
+    assert sibling.exists()
+    revert_gen_tests_pass(src, original, sibling)
+    assert src.read_text(encoding="utf-8") == original
+    assert not sibling.exists()
+
+
+# ── strip_all_gen_tests_artifacts ────────────────────────────────────────────
+
+def test_strip_all_gen_tests_artifacts(tmp_path: Path) -> None:
+    original = "pub fn x() {}\n"
+    src = _src(tmp_path, content=original)
+    write_gen_tests_pass(src, original, _VALID_BLOCK, "", pass_n=1)
+    write_gen_tests_pass(src, src.read_text(encoding="utf-8"), _VALID_BLOCK, "", pass_n=2)
+    count = strip_all_gen_tests_artifacts(src)
+    assert count == 2
+    siblings = gen_tests_siblings(src)
+    assert siblings == []
+    clean = src.read_text(encoding="utf-8")
+    assert strip_all_gen_tests_decls(clean) == clean
