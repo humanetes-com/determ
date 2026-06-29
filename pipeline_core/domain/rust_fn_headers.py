@@ -25,6 +25,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import NamedTuple
 
+from .rust_scan import starts_with_pub
+
 _IDENT_CHARS = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
 )
@@ -190,3 +192,38 @@ def macro_headers(text: str) -> list[HeaderMatch]:
     """All ``macro_rules!`` header matches (line-anchored), mirroring the macro_re of
     `_condense_rust_to_signatures`."""
     return _scan(text, _match_macro_clause, _MACRO_LEAD_CHARS, line_anchored=True)
+
+
+def locate_fn(file_text: str, fn_name: str) -> tuple[str, int, int, int] | None:
+    """Return ``(sig_text, sig_start, body_start, body_end)`` for the first fn
+    whose name matches ``fn_name``. ``body_start`` is just after the opening
+    ``{``; ``body_end`` is the position of the matching ``}`` (exclusive end of
+    body). ``None`` if not found or braces are malformed."""
+    for h in fn_headers(file_text, line_anchored=False):
+        if h.name != fn_name:
+            continue
+        sig_start = h.start
+        body_start = h.brace_open + 1
+        depth = 1
+        i = body_start
+        while i < len(file_text) and depth > 0:
+            ch = file_text[i]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+            i += 1
+        if depth != 0:
+            return None
+        body_end = i - 1
+        sig_text = file_text[sig_start:body_start].rstrip("{ \t\n").strip()
+        return sig_text, sig_start, body_start, body_end
+    return None
+
+
+def is_pub_fn(file_text: str, fn_name: str) -> bool:
+    """True if the fn declaration includes ``pub`` (any visibility variant)."""
+    loc = locate_fn(file_text, fn_name)
+    if loc is None:
+        return False
+    return starts_with_pub(loc[0])

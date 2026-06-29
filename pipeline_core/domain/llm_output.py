@@ -167,6 +167,15 @@ def extract_tagged_block(text: str, tag: str) -> str | None:
     return text[i + len(open_t):j]
 
 
+def extract_signature_block(response: str) -> str | None:
+    """Pull ``<SIGNATURE> … </SIGNATURE>`` from an LLM response; the trimmed
+    inner text or None if absent/empty."""
+    inner = extract_tagged_block(response, "SIGNATURE")
+    if inner is None:
+        return None
+    return inner.strip() or None
+
+
 def extract_response_code_fence(text: str) -> str | None:
     """The first non-empty fenced body trying ```` ```rust `` then ```` ```[rs] `` —
     byte-equivalent to searching ``r'```rust\\s*(.*?)```'`` then

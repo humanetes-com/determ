@@ -19,7 +19,7 @@ import sys
 import threading
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from functools import partial as _partial
@@ -327,13 +327,17 @@ from pipeline_core.domain.failure_classification import (
 )
 from pipeline_core.domain.fix_report import FixReport as _FixReport
 from pipeline_core.domain.fix_session import FixSession
-from pipeline_core.domain.impl_block_ranges import impl_where_clause, parse_impl_block_ranges
+from pipeline_core.domain.impl_block_ranges import (
+    impl_where_clause,
+)
+from pipeline_core.domain.impl_block_ranges import (
+    render_impl_block as _render_impl_block,
+)
 from pipeline_core.domain.llm_output import (
     GENESIS_DELIM_END,
     GENESIS_DELIM_START,
     _extract_genesis,
     extract_files,
-    extract_tagged_block,
 )
 from pipeline_core.domain.llm_output import (
     _find_fn_blocks as _find_fn_blocks,  # R8.5 parsers — re-export for call sites/tests
@@ -343,6 +347,9 @@ from pipeline_core.domain.llm_output import (
 )
 from pipeline_core.domain.llm_output import (
     extract_fn_bodies as extract_fn_bodies,  # R8.5 parser — re-export for call sites/tests
+)
+from pipeline_core.domain.llm_output import (
+    extract_signature_block as _extract_signature_block,
 )
 from pipeline_core.domain.llm_output import (
     split_api_surface_by_file as _domain_split_api_surface_by_file,
@@ -364,7 +371,6 @@ from pipeline_core.domain.models import (
     ConstRecord,
     Diagnostic,
     DispatchFamily,
-    FnRecord,
     Frontier,
     ImplBlock,
     ModRecord,
@@ -373,13 +379,20 @@ from pipeline_core.domain.models import (
 from pipeline_core.domain.refine import (
     parse_retrospective_categories as _parse_retrospective_categories,
 )
-from pipeline_core.domain.rust_fn_headers import fn_headers
+from pipeline_core.domain.rust_fn_headers import (
+    fn_headers,
+)
+from pipeline_core.domain.rust_fn_headers import (
+    is_pub_fn as _is_pub_fn,
+)
+from pipeline_core.domain.rust_fn_headers import (
+    locate_fn as _locate_fn,
+)
 from pipeline_core.domain.rust_idents import (
     attr_call_args,
     camelcase_type_names,
     contains_fn_decl,
     crate_lint_attr_args,
-    declares_fn,
     defined_type_names,
     fn_reference_counts,
     use_path_requirement_gaps,
@@ -399,7 +412,6 @@ from pipeline_core.domain.rust_scan import (
     line_has_assertion,
     named_fn_decl_start,
     replace_elision_placeholders,
-    starts_with_pub,
     strip_line_block_comments,
     use_imports_symbol,
 )
@@ -2737,94 +2749,11 @@ def _merge_fn_blocks_into_disk(disk_text: str, fn_blocks: dict[str, str]) -> str
 # We own the splice site; the model returns only the body text.
 # ---------------------------------------------------------------------------
 
-def _locate_fn(file_text: str, fn_name: str) -> tuple[str, int, int, int] | None:
-    """Return (sig_text, sig_start, body_start, body_end) for the first fn whose
-    name matches `fn_name`. body_start is just after the opening `{`; body_end
-    is the position of the matching `}` (exclusive end of body).
-
-    Returns None if not found or braces are malformed.
-    """
-    for h in fn_headers(file_text, line_anchored=False):
-        if h.name != fn_name:
-            continue
-        sig_start = h.start
-        body_start = h.brace_open + 1
-        depth = 1
-        i = body_start
-        while i < len(file_text) and depth > 0:
-            ch = file_text[i]
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-            i += 1
-        if depth != 0:
-            return None
-        body_end = i - 1
-        sig_text = file_text[sig_start:body_start].rstrip("{ \t\n").strip()
-        return sig_text, sig_start, body_start, body_end
-    return None
-
-
-def _is_pub_fn(file_text: str, fn_name: str) -> bool:
-    """True if the fn declaration includes `pub` (any visibility variant)."""
-    loc = _locate_fn(file_text, fn_name)
-    if loc is None:
-        return False
-    sig = loc[0]
-    return starts_with_pub(sig)
-
-
-def _replace_fn_signature(file_path: Path, fn_name: str, new_sig: str) -> bool:
-    """P3.1: replace the verbatim signature line(s) of `fn_name` with
-    `new_sig`. The body is left intact. Used only when the per-fn fix loop
-    has tried >= 5 attempts and the model proposes a signature change in
-    addition to a new body. Returns True if the splice was applied.
-
-    Constraints:
-      - target fn must exist in file
-      - target fn must NOT be `pub` (changing public sigs would break tests)
-      - new_sig must contain `fn {fn_name}` (sanity check; model can't rename)
-    """
-    try:
-        text = file_path.read_text(encoding="utf-8")
-    except Exception:
-        return False
-    if _is_pub_fn(text, fn_name) is not False:
-        # Only relax for private fns; pub fns are part of the test surface.
-        pass
-    if _is_pub_fn(text, fn_name):
-        return False
-    if not declares_fn(new_sig, fn_name):
-        return False
-    loc = _locate_fn(text, fn_name)
-    if loc is None:
-        return False
-    _old_sig, sig_start, body_start, _body_end = loc
-    # Find the start of the line that contains the sig.
-    line_start = text.rfind("\n", 0, sig_start) + 1
-    # New sig must end immediately before the opening brace (which body_start
-    # points just past). Compose: text[:line_start] + new_sig.rstrip() + " {" + text[body_start:]
-    cleaned = new_sig.strip().rstrip("{").rstrip()
-    new_text = text[:line_start] + cleaned + " {" + text[body_start:]
-    file_path.write_text(new_text, encoding="utf-8")
-    return True
-
-
-def _extract_signature_block(response: str) -> str | None:
-    """Pull `<SIGNATURE>...</SIGNATURE>` from an LLM response. Returns the
-    trimmed body or None if absent."""
-    inner = extract_tagged_block(response, "SIGNATURE")
-    if inner is None:
-        return None
-    txt = inner.strip()
-    return txt or None
-
-
-# Byte splice + syn locator relocated to application/reconstruct/splice.py
-# (P2 slice 3). Thin late-binding shims (NOT partials): the e2e harness
-# monkeypatches `pipeline._enumerate_fns_via_extractor`, so the enumerator
-# must be resolved at CALL time.
+# fn locate / pub-check / signature-block-extract are pure domain (imported as
+# _locate_fn / _is_pub_fn / _extract_signature_block at the top). The
+# file-MUTATING splices live in application/reconstruct/splice.py; pipeline.py
+# keeps thin late-binding shims (NOT partials) so the e2e harness's
+# `_enumerate_fns_via_extractor` monkeypatch is resolved at CALL time.
 def _splice_fn_body_at(file_path: Path, body_byte_start: int, body_byte_end: int,
                        new_body: str, allow_nonstub: bool = False) -> tuple[bool, int]:
     return _reconstruct_splice.splice_fn_body_at(
@@ -2839,63 +2768,14 @@ def _locate_fn_by_record(file_path: Path, name: str, container: str, sig_text: s
         _enumerate_fns_via_extractor, file_path, name, container, sig_text, cfg_predicates)
 
 
+def _replace_fn_signature(file_path: Path, fn_name: str, new_sig: str) -> bool:
+    return _reconstruct_splice.replace_fn_signature(file_path, fn_name, new_sig)
+
+
 def _splice_fn_body(file_path: Path, fn_name: str, new_body: str,
                     allow_nonstub: bool = False) -> tuple[bool, int]:
-    """Replace the body of `fn_name` in `file_path` with `new_body`.
-
-    By default only splices when the current body is an `unimplemented!()`
-    stub — never overwrites an already-filled function. Pass
-    `allow_nonstub=True` (fix-loop per_fn strategy) to re-fill a fn whose
-    previous body compiled wrong. The file is re-read here on every call, so
-    byte offsets are always fresh — safe to call repeatedly on the same file.
-    Returns (success, bytes_delta).
-    """
-    try:
-        text = file_path.read_text(encoding="utf-8")
-    except Exception:
-        return False, 0
-    loc = _locate_fn(text, fn_name)
-    if loc is None:
-        return False, 0
-    _sig, _sig_start, body_start, body_end = loc
-    cur_body = text[body_start:body_end]
-    if not allow_nonstub and not _is_unimplemented_body(cur_body):
-        return False, 0
-    # Normalise the body: model may have included extraneous braces or
-    # leading/trailing whitespace. Strip outer braces if present.
-    nb = new_body.strip()
-    if nb.startswith("{") and nb.endswith("}"):
-        nb = nb[1:-1].strip()
-    if not nb or _is_unimplemented_body(nb):
-        return False, 0
-    # Re-indent so the body sits cleanly inside the existing braces. Detect
-    # the indentation of the opening brace's line and use it +4 for body.
-    line_start = text.rfind("\n", 0, _sig_start) + 1
-    sig_line = text[line_start:_sig_start]
-    base_indent = ""
-    for ch in sig_line:
-        if ch in (" ", "\t"):
-            base_indent += ch
-        else:
-            break
-    inner_indent = base_indent + "    "
-    nb_indented = "\n" + "\n".join(
-        (inner_indent + ln) if ln.strip() else "" for ln in nb.splitlines()
-    ) + "\n" + base_indent
-    new_text = text[:body_start] + nb_indented + text[body_end:]
-    file_path.write_text(new_text, encoding="utf-8")
-    return True, len(new_text) - len(text)
-
-
-# --- Per-impl response parser + splice helpers --------------------------
-#
-# The per-impl prompt asks the model to emit one `<FN name="X" block="...">`
-# block per stub. The parser collects them keyed by (block_container,
-# fn_name) so the splicer can route each body to the correct impl.
-
-# R8.5: the `<FN …>`/`<FILE …>` model-protocol parsers (`extract_fn_bodies`,
-# `_find_fn_blocks`, `_split_leading_where`, …) live in domain.llm_output;
-# imported at top. `_locate_fn` (Rust-SOURCE) now scans via domain.rust_fn_headers.
+    return _reconstruct_splice.splice_fn_body(
+        file_path, fn_name, new_body, allow_nonstub=allow_nonstub)
 
 
 def _splice_fn_with_where(
@@ -2906,53 +2786,9 @@ def _splice_fn_with_where(
     where_clause: str | None = None,
     allow_nonstub: bool = False,
 ) -> tuple[bool, str, int]:
-    """Splice `body` into `fn_name` whose containing impl block matches
-    `container`. If `where_clause` is provided, insert it into the fn
-    signature (between sig and the opening brace).
-
-    `allow_nonstub=True` (fix-loop) re-fills a fn whose body is already
-    filled-but-wrong; default refuses non-stub bodies (build path).
-
-    Returns (success, reason, bytes_delta). `reason` is "ok" on success
-    or a short failure tag for telemetry / retro context.
-    """
-    if not file_path.exists():
-        return False, "file_missing", 0
-    loc = _locate_fn_by_record(file_path, fn_name, container, "")
-    if loc is None:
-        # Fallback: the extractor's container string sometimes includes
-        # the first member's signature. Match on the impl HEADER prefix
-        # only (everything before the first `{`).
-        loose_container = container.split("{", 1)[0].strip()
-        loc = _locate_fn_by_record(file_path, fn_name, loose_container, "")
-    if loc is None:
-        return False, "fn_not_found", 0
-    sig_byte_start, body_byte_start, body_byte_end, sig_text = loc
-
-    # If a where-clause patch is supplied, splice it into the signature.
-    # BYTE space (offsets are byte offsets from the enumerator — see
-    # _splice_fn_body_at; a char-indexed str would mis-slice on multibyte UTF-8).
-    # The signature spans [sig_byte_start, opening-brace-of-body); insert
-    # `\n    <clause>` before the opening brace.
-    if where_clause:
-        raw = file_path.read_bytes()
-        brace_pos = raw.rfind(b"{", sig_byte_start, body_byte_start + 1)
-        if brace_pos != -1:
-            # Don't double-add a where clause if the sig already has one.
-            sig_slice = raw[sig_byte_start:brace_pos].decode("utf-8", errors="replace")
-            if "where" not in sig_slice:
-                insert = f"\n    {where_clause}\n".encode()
-                raw = raw[:brace_pos] + insert + raw[brace_pos:]
-                shift = len(insert)
-                body_byte_start += shift
-                body_byte_end += shift
-                file_path.write_bytes(raw)
-
-    ok, delta = _splice_fn_body_at(file_path, body_byte_start, body_byte_end, body,
-                                   allow_nonstub=allow_nonstub)
-    if not ok:
-        return False, "splice_rejected", 0
-    return True, "ok", delta
+    return _reconstruct_splice.splice_fn_with_where(
+        _enumerate_fns_via_extractor, file_path, container, fn_name, body,
+        where_clause, allow_nonstub)
 
 
 def _find_tests_referencing_fn(
@@ -5690,20 +5526,6 @@ def task2_inner_loop(project_dir, genesis_path, functional_req_path, manifest_pa
         coverage_strategy=coverage_strategy, api_surface=api_surface,
         prev_source_context=prev_source_context,
     )
-
-
-def _render_impl_block(file_text: str, members: "Sequence[FnRecord]") -> str:
-    """Verbatim source of the impl block containing `members` (header +
-    where-clause + all bodies), via byte-range parse. Used by the per_impl fix
-    unit to give the model the whole impl block as context. Falls back to
-    listing member signatures if the byte range can't be resolved."""
-    if not members:
-        return ""
-    anchor = members[0].sig_byte_start
-    for r in parse_impl_block_ranges(file_text):
-        if r.body_open <= anchor < r.body_close:
-            return file_text[r.header_start:r.body_close + 1]
-    return "\n".join(m.sig_text for m in members)
 
 
 def generate_fix_loop(

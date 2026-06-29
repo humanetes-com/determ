@@ -1,11 +1,15 @@
 """Byte-exact fn-body splice + syn-record locator — the regex-free core of
-the per-fn fill engine's source mutation (P2 slice 3, relocated verbatim).
+the per-fn fill engine's source mutation (P2 slice 3; the name-match splice
+siblings folded in 2026-06-29 / source-splice cluster).
 
-The regex-based siblings (`_locate_fn`/`_splice_fn_body` name-match fallback,
-`_splice_fn_with_where`) deliberately STAY in pipeline.py: they are the
-extractor-absent fallback / model-protocol parsers (R7.6, R8.5 classes).
-`locate_fn_by_record` takes the fn enumerator as a plain injected callable so
-this layer never imports the extractor adapter (DIP without ceremony).
+Two locate strategies: `locate_fn_by_record` uses the syn enumerator (canonical
+byte offsets) and takes it as a plain injected callable, so this layer never
+imports the extractor adapter (DIP without ceremony); the name-match siblings
+(`replace_fn_signature`/`splice_fn_body`/`splice_fn_with_where`) use the pure
+`domain.rust_fn_headers.locate_fn` char-space scan (regex-free since P7) as the
+extractor-absent fallback. pipeline.py keeps thin late-binding shims over these
+so the e2e harness's `_enumerate_fns_via_extractor` monkeypatch is resolved at
+CALL time.
 """
 
 from __future__ import annotations
@@ -15,6 +19,8 @@ from pathlib import Path
 from typing import Any
 
 from pipeline_core.application.reconstruct.fill_rules import is_unimplemented_body
+from pipeline_core.domain.rust_fn_headers import is_pub_fn, locate_fn
+from pipeline_core.domain.rust_idents import declares_fn
 
 
 def _norm_cfg_set(preds: Any) -> frozenset[str]:
@@ -153,3 +159,111 @@ def splice_fn_body_at(file_path: Path, body_byte_start: int, body_byte_end: int,
     new_raw = raw[:body_byte_start] + nb_indented.encode("utf-8") + raw[body_byte_end:]
     file_path.write_bytes(new_raw)
     return True, len(new_raw) - len(raw)
+
+
+def replace_fn_signature(file_path: Path, fn_name: str, new_sig: str) -> bool:
+    """P3.1: replace the verbatim signature line(s) of ``fn_name`` with
+    ``new_sig``, leaving the body intact. Only for PRIVATE fns (changing a
+    ``pub`` sig would break the test surface) and only when ``new_sig`` still
+    declares ``fn_name`` (the model can't rename). Returns True iff applied."""
+    try:
+        text = file_path.read_text(encoding="utf-8")
+    except Exception:
+        return False
+    if is_pub_fn(text, fn_name):
+        return False
+    if not declares_fn(new_sig, fn_name):
+        return False
+    loc = locate_fn(text, fn_name)
+    if loc is None:
+        return False
+    _old_sig, sig_start, body_start, _body_end = loc
+    line_start = text.rfind("\n", 0, sig_start) + 1
+    cleaned = new_sig.strip().rstrip("{").rstrip()
+    new_text = text[:line_start] + cleaned + " {" + text[body_start:]
+    file_path.write_text(new_text, encoding="utf-8")
+    return True
+
+
+def splice_fn_body(file_path: Path, fn_name: str, new_body: str,
+                   allow_nonstub: bool = False) -> tuple[bool, int]:
+    """Replace the body of ``fn_name`` in ``file_path`` with ``new_body`` via a
+    name-match (char-space) locate. By default only splices an
+    ``unimplemented!()`` stub; ``allow_nonstub=True`` re-fills a wrong body. The
+    file is re-read every call so byte offsets stay fresh. Returns
+    ``(success, bytes_delta)``."""
+    try:
+        text = file_path.read_text(encoding="utf-8")
+    except Exception:
+        return False, 0
+    loc = locate_fn(text, fn_name)
+    if loc is None:
+        return False, 0
+    _sig, _sig_start, body_start, body_end = loc
+    cur_body = text[body_start:body_end]
+    if not allow_nonstub and not is_unimplemented_body(cur_body):
+        return False, 0
+    nb = new_body.strip()
+    if nb.startswith("{") and nb.endswith("}"):
+        nb = nb[1:-1].strip()
+    if not nb or is_unimplemented_body(nb):
+        return False, 0
+    line_start = text.rfind("\n", 0, _sig_start) + 1
+    sig_line = text[line_start:_sig_start]
+    base_indent = ""
+    for ch in sig_line:
+        if ch in (" ", "\t"):
+            base_indent += ch
+        else:
+            break
+    inner_indent = base_indent + "    "
+    nb_indented = "\n" + "\n".join(
+        (inner_indent + ln) if ln.strip() else "" for ln in nb.splitlines()
+    ) + "\n" + base_indent
+    new_text = text[:body_start] + nb_indented + text[body_end:]
+    file_path.write_text(new_text, encoding="utf-8")
+    return True, len(new_text) - len(text)
+
+
+def splice_fn_with_where(
+    enumerate_fns: Callable[[Path], list[dict[str, Any]] | None],
+    file_path: Path,
+    container: str,
+    fn_name: str,
+    body: str,
+    where_clause: str | None = None,
+    allow_nonstub: bool = False,
+) -> tuple[bool, str, int]:
+    """Splice ``body`` into ``fn_name`` whose containing impl matches
+    ``container`` (located via the syn enumerator). When ``where_clause`` is
+    given, insert it into the signature just before the body's opening brace
+    (byte space — offsets come from the enumerator). Returns
+    ``(success, reason, bytes_delta)``; ``reason`` is ``"ok"`` or a failure tag."""
+    if not file_path.exists():
+        return False, "file_missing", 0
+    loc = locate_fn_by_record(enumerate_fns, file_path, fn_name, container, "")
+    if loc is None:
+        loose_container = container.split("{", 1)[0].strip()
+        loc = locate_fn_by_record(enumerate_fns, file_path, fn_name, loose_container, "")
+    if loc is None:
+        return False, "fn_not_found", 0
+    sig_byte_start, body_byte_start, body_byte_end, _sig_text = loc
+
+    if where_clause:
+        raw = file_path.read_bytes()
+        brace_pos = raw.rfind(b"{", sig_byte_start, body_byte_start + 1)
+        if brace_pos != -1:
+            sig_slice = raw[sig_byte_start:brace_pos].decode("utf-8", errors="replace")
+            if "where" not in sig_slice:
+                insert = f"\n    {where_clause}\n".encode()
+                raw = raw[:brace_pos] + insert + raw[brace_pos:]
+                shift = len(insert)
+                body_byte_start += shift
+                body_byte_end += shift
+                file_path.write_bytes(raw)
+
+    ok, delta = splice_fn_body_at(file_path, body_byte_start, body_byte_end, body,
+                                  allow_nonstub=allow_nonstub)
+    if not ok:
+        return False, "splice_rejected", 0
+    return True, "ok", delta

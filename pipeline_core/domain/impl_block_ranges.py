@@ -15,7 +15,12 @@ differ in their where-clauses.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .models import FnRecord
 
 
 @dataclass(frozen=True, slots=True)
@@ -252,3 +257,16 @@ def impl_where_clause(file_text: str, container: str) -> str:
         if after_gen.startswith(target):
             return _where_suffix(after_gen[len(target):])
     return ""
+
+
+def render_impl_block(file_text: str, members: Sequence[FnRecord]) -> str:
+    """Verbatim source of the impl block containing ``members`` (header +
+    where-clause + all bodies), via byte-range parse. Falls back to listing
+    member signatures if the byte range can't be resolved."""
+    if not members:
+        return ""
+    anchor = members[0].sig_byte_start
+    for r in parse_impl_block_ranges(file_text):
+        if r.body_open <= anchor < r.body_close:
+            return file_text[r.header_start:r.body_close + 1]
+    return "\n".join(m.sig_text for m in members)
