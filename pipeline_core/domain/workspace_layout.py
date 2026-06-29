@@ -19,6 +19,34 @@ MODULE_AUGMENTED_DIR = ".module_augmented"
 # Strip sentinel dir: present once a module's source has been skeletonised.
 MODULE_STRIPPED_DIR = ".module_stripped"
 
+# Per-cluster build configuration dump (env_extra / cfg / tarpaulin excludes).
+BUILD_CONFIGS_NAME = "build_configs.md"
+
+# File extensions the model is allowed to create/overwrite — anything else on
+# disk (Cargo.toml, *.json, *.proto, …) is a protected non-source file. The
+# wide language set keeps the guard generic across non-Rust projects.
+SOURCE_EXTENSIONS: frozenset[str] = frozenset({
+    # Systems / compiled
+    ".rs", ".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx",
+    ".go", ".swift", ".kt", ".kts", ".java", ".cs", ".vb", ".fs", ".fsx",
+    ".d", ".nim", ".cr", ".zig", ".v", ".odin",
+    # Scripting
+    ".py", ".rb", ".pl", ".pm", ".php", ".php3", ".php4", ".php5", ".phtml",
+    ".lua", ".sh", ".bash", ".zsh", ".fish", ".tcl",
+    # JVM / functional
+    ".scala", ".sc", ".clj", ".cljs", ".cljc", ".groovy", ".gvy", ".gradle",
+    ".ex", ".exs", ".hs", ".lhs", ".ml", ".mli", ".mll", ".mly",
+    ".erl", ".hrl", ".elm", ".purs",
+    # Web / JS
+    ".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", ".tsx", ".jsx",
+    ".coffee", ".vue", ".svelte",
+    # Database / query
+    ".sql",
+    # Other
+    ".r", ".R", ".m", ".mm", ".f", ".f90", ".f95", ".f03", ".f08",
+    ".ada", ".adb", ".ads", ".pas", ".pp",
+})
+
 # Failure log: running record of every iteration's outcome (fed into TASK 4).
 FAILURE_LOG_NAME = "failure_log.md"
 

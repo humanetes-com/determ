@@ -87,3 +87,48 @@ def merge_fills_preserving_existing(disk_text: str, model_text: str) -> str:
             continue  # model didn't return this function
         out = out[:body_start] + new_body + out[body_end:]
     return out
+
+
+def merge_fn_blocks_into_disk(disk_text: str, fn_blocks: dict[str, str]) -> str:
+    """Merge ``{signature → body}`` into ``disk_text`` by replacing the body of
+    each disk fn whose signature key matches AND whose body is currently
+    ``unimplemented!()``. All non-function content is preserved verbatim — the
+    P3.2 partner of :func:`merge_fills_preserving_existing` for the per-function
+    output format (same safety guarantees, simpler input)."""
+    if not fn_blocks:
+        return disk_text
+    matches: list[tuple[str, int, int]] = []  # (sig, body_start, body_end)
+    for h in fn_headers(disk_text, line_anchored=False):
+        body_start = h.brace_open + 1
+        depth = 1
+        i = body_start
+        while i < len(disk_text) and depth > 0:
+            ch = disk_text[i]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+            i += 1
+        if depth != 0:
+            continue
+        body_end = i - 1
+        # Strip the trailing '{' so the sig matches the `<FN sig="...">` key.
+        sig_line = disk_text[h.start:body_start].rstrip("{ \t\n").strip()
+        matches.append((sig_line, body_start, body_end))
+
+    out = disk_text
+    for sig, body_start, body_end in reversed(matches):
+        if not is_unimplemented_body(out[body_start:body_end]):
+            continue  # already filled — never overwrite
+        new_body = fn_blocks.get(sig)
+        if new_body is None:
+            # Relaxed match: normalize whitespace and compare.
+            normalized_sig = " ".join(sig.split())
+            for k, v in fn_blocks.items():
+                if " ".join(k.split()) == normalized_sig:
+                    new_body = v
+                    break
+        if new_body is None:
+            continue
+        out = out[:body_start] + new_body + out[body_end:]
+    return out

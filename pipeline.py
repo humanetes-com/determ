@@ -39,6 +39,7 @@ from pipeline_core.adapters import state as _state_mod
 from pipeline_core.adapters import strip as _strip_mod
 from pipeline_core.adapters import vllm_bootstrap as _vllm_bootstrap
 from pipeline_core.adapters import workspace as _wsmod
+from pipeline_core.adapters import workspace_files as _wsfiles
 from pipeline_core.adapters import workspace_scan as _workspace_scan
 from pipeline_core.adapters.api_surface import ApiSurfaceCapture
 from pipeline_core.adapters.artifacts import (
@@ -188,6 +189,9 @@ from pipeline_core.application.reconstruct.failure_diagnosis import (
 )
 from pipeline_core.application.reconstruct.fill_merge import (
     merge_fills_preserving_existing as _merge_fills_preserving_existing,
+)
+from pipeline_core.application.reconstruct.fill_merge import (
+    merge_fn_blocks_into_disk as _merge_fn_blocks_into_disk,
 )
 from pipeline_core.application.reconstruct.fix_unit import FixUnitDeps
 from pipeline_core.application.reconstruct.generate_fix import (
@@ -409,7 +413,6 @@ from pipeline_core.domain.rust_scan import (
     is_structural_brace_line,
     line_has_assertion,
     named_fn_decl_start,
-    replace_elision_placeholders,
     strip_line_block_comments,
     use_imports_symbol,
 )
@@ -653,28 +656,6 @@ _TASK4_VERBOSITY_GUARD = (
 # Source code file extensions — the ONLY file types that may be created or overwritten
 # by the model. Everything else (Cargo.toml, *.toml, *.json, *.proto, *.yaml, …) is
 # unconditionally protected so the AI can never corrupt workspace config files.
-SOURCE_EXTENSIONS = {
-    # Systems / compiled
-    ".rs", ".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx",
-    ".go", ".swift", ".kt", ".kts", ".java", ".cs", ".vb", ".fs", ".fsx",
-    ".d", ".nim", ".cr", ".zig", ".v", ".odin",
-    # Scripting
-    ".py", ".rb", ".pl", ".pm", ".php", ".php3", ".php4", ".php5", ".phtml",
-    ".lua", ".sh", ".bash", ".zsh", ".fish", ".tcl",
-    # JVM / functional
-    ".scala", ".sc", ".clj", ".cljs", ".cljc", ".groovy", ".gvy", ".gradle",
-    ".ex", ".exs", ".hs", ".lhs", ".ml", ".mli", ".mll", ".mly",
-    ".erl", ".hrl", ".elm", ".purs",
-    # Web / JS
-    ".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", ".tsx", ".jsx",
-    ".coffee", ".vue", ".svelte",
-    # Database / query
-    ".sql",
-    # Other
-    ".r", ".R", ".m", ".mm", ".f", ".f90", ".f95", ".f03", ".f08",
-    ".ada", ".adb", ".ads", ".pas", ".pp",
-}
-
 MAX_RETRIES = 3
 
 # ---------------------------------------------------------------------------
@@ -1062,12 +1043,13 @@ TASK4_DOC_LIMIT = 200_000
 # Directory for locked module source backups (bottom-up integration).
 # Layout vocabulary now lives in pipeline_core.domain.workspace_layout.
 from pipeline_core.domain.workspace_layout import (  # noqa: E402
+    BUILD_CONFIGS_NAME,
     CHUNK_CACHE_DIR,
     COVERAGE_STRATEGY_NAME,
     FAILURE_LOG_NAME,
-    LOCKED_MODULES_DIR,
     PROJECT_CONTEXT_NAME,
     PROJECT_PROFILE_NAME,
+    SOURCE_EXTENSIONS,
 )
 
 # Sentinel file written by TASK 0c when coverage augmentation is complete.
@@ -1102,9 +1084,6 @@ PIPELINE_STATE_NAME = _state_mod.PIPELINE_STATE_NAME  # single-sourced (slice 9)
 
 # Workspace directory for cloned/copied project repos (relative to pipeline root).
 WORKSPACE_DIR = "tmp"
-
-# Compiler cluster plan — derived from source, written once per project.
-BUILD_CONFIGS_NAME = "build_configs.md"
 
 # Per-file attempt log for TASK 0c: JSONL, one entry per generation attempt (BL-002).
 
@@ -1490,12 +1469,6 @@ def _write_fr_preserving_notes(path, new_content: str) -> None:
     p.write_text(merged, encoding="utf-8")
 
 
-def delete(path):
-    p = Path(path)
-    if p.exists():
-        p.unlink()
-
-
 def _parse_cmd(cmd: str) -> list[str]:
     """Split a shell command string into a list, falling back to str.split on parse error."""
     try:
@@ -1641,58 +1614,6 @@ def scan_workspace_structure(project_dir: Path) -> str:
 # ---------------------------------------------------------------------------
 # Module lock management
 # ---------------------------------------------------------------------------
-
-def load_locked_modules(project_dir: Path) -> set[str]:
-    """Return the set of module names that have been locked (tests pass, files frozen)."""
-    p = project_dir / LOCKED_MODULES_DIR / "locked.txt"
-    if not p.exists():
-        return set()
-    return {line.strip() for line in p.read_text().splitlines() if line.strip()}
-
-
-def lock_module(project_dir: Path, module_name: str, module_dir: Path,
-                manifest_path: Path) -> int:
-    """
-    Lock a module: copy its generated files to .locked_modules/<name>/ as a
-    permanent backup, then record the module name in locked.txt.
-
-    The live files remain on disk so the compiler can use them as dependencies
-    when building subsequent modules. The backup is used to:
-      - Restore locked files if the project directory is cleaned between runs.
-      - Provide locked-source context when generating dependent modules.
-
-    Returns the number of files locked.
-    """
-    lock_dir = project_dir / LOCKED_MODULES_DIR / module_name
-    lock_dir.mkdir(parents=True, exist_ok=True)
-
-    module_rel = module_dir.relative_to(project_dir)
-    files = load_manifest(manifest_path)
-    locked_count = 0
-
-    for rel_path in files:
-        full = project_dir / rel_path
-        if not full.exists():
-            continue
-        try:
-            Path(rel_path).relative_to(module_rel)  # only files under this module's dir
-        except ValueError:
-            continue
-        dest = lock_dir / rel_path
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(full.read_text())
-        locked_count += 1
-
-    # Update locked.txt
-    locked = load_locked_modules(project_dir)
-    locked.add(module_name)
-    lock_txt = project_dir / LOCKED_MODULES_DIR / "locked.txt"
-    lock_txt.parent.mkdir(parents=True, exist_ok=True)
-    lock_txt.write_text("\n".join(sorted(locked)) + "\n")
-
-    _log(f"  LOCKED '{module_name}' ({locked_count} file(s) → {LOCKED_MODULES_DIR}/{module_name}/)")
-    return locked_count
-
 
 # load_locked_source_context → pipeline_core.adapters.artifacts.WorkspaceArtifacts.
 
@@ -1946,134 +1867,15 @@ def discover_test_command(readme_text: str, project_dir: Path | None = None) -> 
 # Source file manifest
 # ---------------------------------------------------------------------------
 
-def save_manifest(manifest_path: Path, files: list):
-    write(manifest_path, "\n".join(files))
-
-
-# load_manifest → pipeline_core.adapters.artifacts (imported above).
-
-
-def write_source_files(files_dict: dict, project_dir: Path, manifest_path: Path,
-                       existing_test_files: set) -> int:
-    """
-    Write source files to disk and record them in the manifest.
-    Skips any path that matches an existing test file or a protected project file
-    (README.md, LICENSE, etc.) that must never be overwritten.
-    Returns the number of files actually written.
-    """
-    # Files that must never be overwritten regardless of what the model generates.
-    PROTECTED = {"README.md", "readme.md", "README.rst", "LICENSE", "LICENSE.md",
-                 "LICENSE.txt", "Cargo.lock"}
-    written = []
-    skipped = []
-    RUST_SOURCE_DIRS = {'src', 'tests', 'benches', 'examples', 'build'}
-    for rel_path, content in files_dict.items():
-        # Strip leading slashes — model sometimes returns absolute-looking paths like
-        # /argh_derive/src/lib.rs instead of argh_derive/src/lib.rs. Python's Path /
-        # operator discards the left operand when the right side is absolute, which
-        # would escape the project directory entirely.
-        rel_path = rel_path.lstrip("/")
-        # Normalise Rust source paths: insert src/ if the file sits directly under a
-        # crate directory with no intermediate source-subdir component.
-        # e.g. "argh_shared/traits.rs" → "argh_shared/src/traits.rs"
-        if Path(rel_path).suffix == '.rs':
-            parts = Path(rel_path).parts
-            if len(parts) == 2 and parts[0] not in RUST_SOURCE_DIRS:
-                fixed = str(Path(parts[0]) / 'src' / parts[1])
-                _log(f"  PATH NORMALISED: {rel_path} → {fixed}")
-                rel_path = fixed
-            # For library crates the entry point must be lib.rs, not main.rs.
-            # If the model generates */src/main.rs but */src/lib.rs already exists
-            # (i.e. the workspace stub is there), treat this as a mislabelled lib.rs.
-            if rel_path.endswith('/src/main.rs') or rel_path == 'src/main.rs':
-                lib_path = rel_path[:-len('main.rs')] + 'lib.rs'
-                if (project_dir / lib_path).exists():
-                    _log(f"  PATH NORMALISED: {rel_path} → {lib_path} (lib crate stub present)")
-                    rel_path = lib_path
-        # Replace `{ ... }` placeholder bodies with `{ todo!() }` so Rust code
-        # compiles during the build check phase (model sometimes uses ... as a stub body).
-        if Path(rel_path).suffix == '.rs' and '...' in content:
-            content = replace_elision_placeholders(content)
-        if not rel_path:
-            continue
-        if rel_path in existing_test_files:
-            skipped.append(rel_path)
-            continue
-        # Block writing into any test directory — model must never create test files.
-        p_parts = Path(rel_path).parts
-        if any(part in TEST_DIR_NAMES for part in p_parts):
-            skipped.append(rel_path)
-            continue
-        # Protect top-level project files by name (any depth would be unusual, keep cheap).
-        if Path(rel_path).name in PROTECTED and (project_dir / rel_path).exists():
-            skipped.append(rel_path)
-            continue
-        # Protect any existing non-source file (Cargo.toml, *.toml, *.json, *.proto, etc.)
-        # The model must only create/overwrite source code files.
-        p = Path(rel_path)
-        if p.suffix not in SOURCE_EXTENSIONS and (project_dir / p).exists():
-            skipped.append(rel_path)
-            _log(f"  PROTECTED (non-source file): {rel_path}")
-            continue
-        full = project_dir / rel_path
-        write(full, content)
-        written.append(rel_path)
-        _log(f"  wrote {rel_path}")
-    if skipped:
-        _log(f"  SKIPPED (would overwrite test/config files): {', '.join(skipped)}")
-    # Merge with any files written in previous inner-loop attempts so the
-    # manifest always tracks the full accumulated set on disk.
-    existing = load_manifest(manifest_path)
-    merged = list(dict.fromkeys(existing + written))  # deduplicate, preserve order
-    save_manifest(manifest_path, merged)
-    return len(written)
-
-
-def delete_source_files(project_dir: Path, manifest_path: Path,
-                        module_dir: Path | None = None,
-                        existing_test_files: set | None = None):
-    """Delete model-generated files (tracked in the manifest).
-
-    If module_dir is provided, also sweeps that directory for any untracked
-    source files (ghost files written by the fix loop but never added to the
-    manifest) — these are deleted as well, provided they are not test files.
-    """
-    files = load_manifest(manifest_path)
-    deleted = 0
-    deleted_paths = set()
-    for rel_path in files:
-        full = project_dir / rel_path
-        if full.exists():
-            full.unlink()
-            deleted += 1
-            deleted_paths.add(str(full))
-    delete(manifest_path)
-
-    # Sweep module src/ for ghost files (written by fix loop, not in manifest).
-    if module_dir is not None:
-        src_dir = module_dir / "src"
-        if src_dir.exists():
-            for candidate in src_dir.rglob("*"):
-                if not candidate.is_file():
-                    continue
-                if candidate.suffix not in SOURCE_EXTENSIONS:
-                    continue
-                if str(candidate) in deleted_paths:
-                    continue
-                rel = str(candidate.relative_to(project_dir))
-                if existing_test_files and rel in existing_test_files:
-                    continue
-                # Only delete if the file has no test blocks — it's a ghost implementation file.
-                try:
-                    content = candidate.read_text(encoding="utf-8")
-                except OSError:
-                    continue
-                if "#[cfg(test)]" not in content and "#[test]" not in content:
-                    candidate.unlink()
-                    deleted += 1
-                    _log(f"  Deleted ghost file (untracked by manifest): {rel}")
-
-    _log(f"  Deleted {deleted} generated source file(s).")
+# Source-file lifecycle (write/delete/lock + manifest/locked ledgers) →
+# pipeline_core.adapters.workspace_files; re-bound here by name so the resident
+# callers + dep-wiring (e.g. save_manifest_fn) keep resolving unchanged.
+delete = _wsfiles.delete
+save_manifest = _wsfiles.save_manifest
+load_locked_modules = _wsfiles.load_locked_modules
+lock_module = _wsfiles.lock_module
+write_source_files = _wsfiles.write_source_files
+delete_source_files = _wsfiles.delete_source_files
 
 
 def clean_state(root: Path, project_dir: Path, manifest_path: Path,
@@ -2638,55 +2440,7 @@ def _extract_fn_blocks(response: str) -> dict[str, str]:
     return out
 
 
-def _merge_fn_blocks_into_disk(disk_text: str, fn_blocks: dict[str, str]) -> str:
-    """Merge dict of {signature → body} into disk_text by replacing the body
-    of each disk function whose signature key matches and whose body is
-    currently `unimplemented!()`.
-
-    All non-function content on disk is preserved verbatim. This is the
-    P3.2 partner of `_merge_fills_preserving_existing` for the per-function
-    output format — same safety guarantees, simpler input.
-    """
-    if not fn_blocks:
-        return disk_text
-    # Re-extract disk functions to find their bodies, then splice in.
-    matches: list[tuple[str, int, int]] = []  # (sig, body_start, body_end)
-    for h in fn_headers(disk_text, line_anchored=False):
-        body_start = h.brace_open + 1
-        depth = 1
-        i = body_start
-        while i < len(disk_text) and depth > 0:
-            ch = disk_text[i]
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-            i += 1
-        if depth != 0:
-            continue
-        body_end = i - 1
-        # Strip the trailing '{' so the sig matches the LLM's <FN sig="..."> key
-        # (which is the signature without the opening brace).
-        sig_line = disk_text[h.start:body_start].rstrip("{ \t\n").strip()
-        matches.append((sig_line, body_start, body_end))
-
-    out = disk_text
-    for sig, body_start, body_end in reversed(matches):
-        existing_body = out[body_start:body_end]
-        if not _is_unimplemented_body(existing_body):
-            continue  # already filled — never overwrite
-        new_body = fn_blocks.get(sig)
-        if new_body is None:
-            # Try a relaxed match: normalize whitespace and compare.
-            normalized_sig = " ".join(sig.split())
-            for k, v in fn_blocks.items():
-                if " ".join(k.split()) == normalized_sig:
-                    new_body = v
-                    break
-        if new_body is None:
-            continue
-        out = out[:body_start] + new_body + out[body_end:]
-    return out
+# _merge_fn_blocks_into_disk → application/reconstruct/fill_merge.py (imported above).
 
 
 # ---------------------------------------------------------------------------
