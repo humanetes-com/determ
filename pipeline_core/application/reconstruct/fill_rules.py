@@ -16,8 +16,10 @@ FAILED_ATTEMPT_SENTINEL = "// SKELETON_STUB_FAILED_ATTEMPT"
 def is_unimplemented_body(body_text: str) -> bool:
     """True if a function body looks like our `unimplemented!()` stub.
 
-    Recognises two forms:
-      1. Plain stub: contains `unimplemented` and body < 60 chars
+    Recognises three forms:
+      1. Plain stub: contains `unimplemented!`/`todo!` and body < 60 chars.
+         `todo!()` is the same "not implemented" panic the model can emit —
+         accepting it as a real fill is a false success.
       2. Annotated stub: contains the SKELETON_STUB_FAILED_ATTEMPT sentinel
          (used by the fix-loop exhaustion path to preserve the failed attempt
          and cargo error as comments while keeping the fn callable)
@@ -25,7 +27,8 @@ def is_unimplemented_body(body_text: str) -> bool:
     stripped = body_text.strip().strip("{").strip("}").strip()
     if FAILED_ATTEMPT_SENTINEL in stripped:
         return True
-    return "unimplemented" in stripped and len(stripped) < 60
+    return (("unimplemented" in stripped or "todo!" in stripped)
+            and len(stripped) < 60)
 
 
 def make_failed_attempt_body(attempted_body: str, error_excerpt: str,

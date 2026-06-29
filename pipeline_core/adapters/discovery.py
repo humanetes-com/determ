@@ -10,27 +10,14 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
+from pipeline_core.domain.workspace_layout import SKIP_DIR_NAMES
+
+# Re-export for callers that import from this module (backward-compat).
+__all__ = ["SKIP_DIR_NAMES", "TEST_DIR_NAMES", "match_gen_tests_sibling", "collect_test_files"]
+
 # Default predicate for `collect_test_files`'s gen_tests-decl filter — overridden
 # by the composition root, which passes the real pipeline implementation.
 _NO_GEN_TESTS_DECL: Callable[[str], bool] = lambda _content: False
-
-# Directory names skipped by every walk: VCS internals, build output, vendored
-# deps, language caches, and the pipeline's own scratch dirs.
-SKIP_DIR_NAMES: frozenset[str] = frozenset({
-    ".git", ".hg", ".svn",            # VCS internals
-    "target",                          # Rust / Maven build output
-    "node_modules",                    # Node.js dependencies
-    "vendor",                          # Go / PHP / Ruby vendored deps
-    ".venv", "venv", "env",           # Python virtual environments
-    "__pycache__", ".mypy_cache",     # Python caches
-    "dist", "build", ".build",        # Generic build output
-    ".tox", ".eggs",                   # Python test infra artifacts
-    ".skeleton", ".skeleton-filled",  # TASK 2 skeleton backend scratch dirs
-    ".best_tree",                      # best-tree ratchet snapshot
-    ".original_structure",             # pre-strip API snapshot
-    ".chunk_cache", ".task1_partials", # task1 caches
-    ".phase_c_logs",                   # Phase C test-fix iteration archives (P4)
-})
 
 TEST_DIR_NAMES: frozenset[str] = frozenset(
     {"tests", "test", "spec", "specs", "__tests__", "testing"})

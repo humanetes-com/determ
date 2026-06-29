@@ -375,10 +375,8 @@ from pipeline_core.domain.rust_idents import (
     crate_lint_attr_args,
     declares_fn,
     defined_type_names,
-    defines_type,
     fn_reference_counts,
     identifier_tokens,
-    mixed_case_identifiers,
     use_symbol_paths,
 )
 from pipeline_core.domain.rust_macros import macro_definitions
@@ -399,7 +397,6 @@ from pipeline_core.domain.rust_scan import (
     named_fn_decl_start,
     replace_elision_placeholders,
     starts_with_pub,
-    strip_comment_spans,
     strip_line_block_comments,
     use_imports_symbol,
 )
@@ -2015,225 +2012,42 @@ def _write_workspace_stub(crate_type: str, module_dir: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Step output validators (anti-corruption layer)
+# Step output validators (anti-corruption layer) — relocated to pipeline_core (H/P6)
 # ---------------------------------------------------------------------------
+# validate_task1_output + validate_task4_output → pipeline_core.application.validate
+# validate_task2_output + validate_task2_api_surface_conformance: thin wrappers below
+# that bind the impure extractor deps at the composition root.
+from pipeline_core.application.validate import (  # noqa: E402
+    Task2CheckerDeps as _Task2CheckerDeps,
+)
+from pipeline_core.application.validate import (  # noqa: E402
+    validate_task1_output,
+    validate_task4_output,
+)
+from pipeline_core.application.validate import (  # noqa: E402
+    validate_task2_api_surface_conformance as _validate_task2_api_impl,
+)
+from pipeline_core.application.validate import (  # noqa: E402
+    validate_task2_output as _validate_task2_output_impl,
+)
 
-# Words that appear in any English text and carry no signal about whether the
-# requirements document contains module-specific identifiers.
-_STOP_WORDS = {
-    "the", "and", "for", "are", "not", "use", "let", "mut", "pub", "fn",
-    "mod", "impl", "struct", "enum", "trait", "type", "this", "that",
-    "with", "from", "into", "self", "true", "false", "none", "some",
-    "return", "match", "where", "else", "then", "each", "when", "which",
-    "must", "should", "will", "can", "all", "any", "one", "new", "get",
-    "set", "add", "run", "has", "its", "if", "in", "of", "to", "at",
-    "as", "is", "it", "on", "do", "no", "be", "by", "or", "an", "a",
-    "always", "never", "only", "also", "both", "either", "every",
-    "given", "used", "list", "item", "value", "values", "name", "names",
-    "error", "result", "output", "input", "string", "number", "data",
-    "file", "path", "field", "method", "function", "module",
-    "crate", "test", "tests", "assert", "check", "build", "code",
-}
-
-_META_PHRASES = [
-    "this document describes",
-    "functional requirements are",
-    "the pipeline",
-    "this requirement",
-    "the following requirements",
-    "requirements document",
-    "requirement specification",
-    "the purpose of this",
-]
-
-
-def _extract_identifiers(text: str) -> set[str]:
-    """Extract CamelCase and snake_case identifiers from text, filtered by stop-words."""
-    raw = mixed_case_identifiers(text)
-    return {w for w in raw if w.lower() not in _STOP_WORDS}
-
-
-def validate_task1_output(req_path: Path, test_files: list) -> tuple[bool, str]:
-    """
-    Anti-corruption check before TASK 2.
-    Returns (ok, reason). All checks are deterministic — no LLM calls.
-    """
-    content = req_path.read_text(encoding="utf-8") if req_path.exists() else ""
-
-    if len(content) < 500:
-        return False, f"too short ({len(content)} chars, need ≥ 500)"
-
-    content_lower = content.lower()
-    for phrase in _META_PHRASES:
-        if phrase in content_lower:
-            return False, f"meta-commentary detected ('{phrase}')"
-
-    req_idents = _extract_identifiers(content)
-    test_idents: set[str] = set()
-    for _, tc in test_files:
-        test_idents.update(_extract_identifiers(tc))
-
-    overlap = req_idents & test_idents
-    if len(overlap) < 3:
-        sample = sorted(overlap)[:5]
-        return False, (
-            f"requirements too generic — only {len(overlap)} identifiers overlap "
-            f"with test files (need ≥ 3). Overlap: {sample}"
-        )
-
-    return True, "ok"
-
-
-# Regex patterns for TASK 2 placeholder detection.
-_PLACEHOLDER_RE = re.compile(
-    r'unimplemented!\s*\(\)|todo!\s*\(\)|#\s*TODO|#\s*FIXME|pass\s*$|raise\s+NotImplementedError',
-    re.MULTILINE,
+_VALIDATOR_DEPS = _Task2CheckerDeps(
+    enumerate_types=lambda p: _enumerate_types_via_extractor(p),
+    enumerate_fns=lambda p: _enumerate_fns_via_extractor(p),
+    load_api_surface=load_api_surface,
 )
 
 
-def validate_task2_output(project_dir: Path, expected_paths: list[str],
-                          req_path: Path | None = None) -> tuple[bool, str]:
-    """
-    Anti-corruption check before TASK 3.
-    Checks: all files present, none empty, none placeholder-only, named types exist in code.
-    """
-    if not expected_paths:
-        return True, "ok (no expected paths recorded)"
-
-    missing = [p for p in expected_paths if not (project_dir / p).exists()]
-    if missing:
-        return False, f"missing files: {', '.join(missing[:5])}"
-
-    tiny = [
-        p for p in expected_paths
-        if (project_dir / p).exists() and (project_dir / p).stat().st_size < 50
-    ]
-    if tiny:
-        return False, f"empty/stub files (< 50 bytes): {', '.join(tiny[:5])}"
-
-    # Placeholder check: reject files where all non-comment, non-whitespace content
-    # is unimplemented!()/todo!()/pass/etc. These compile but contain no real logic.
-    placeholder_files = []
-    all_source = ""
-    for p in expected_paths:
-        fp = project_dir / p
-        if not fp.exists():
-            continue
-        raw = fp.read_text(encoding="utf-8", errors="ignore")
-        all_source += raw
-        stripped = strip_comment_spans(raw)
-        stripped = "".join(stripped.split())
-        placeholders_found = len(_PLACEHOLDER_RE.findall(raw))
-        non_placeholder_len = len("".join(_PLACEHOLDER_RE.sub("", stripped).split()))
-        if placeholders_found > 0 and non_placeholder_len < 50:
-            placeholder_files.append(p)
-    if placeholder_files:
-        return False, f"placeholder-only files (all unimplemented!/todo!): {', '.join(placeholder_files[:3])}"
-
-    # Type-presence check: CamelCase types named in requirements must appear as
-    # struct/enum definitions in the generated code.
-    if req_path and req_path.exists():
-        req_content = req_path.read_text(encoding="utf-8", errors="ignore")
-        named_types = {w for w in camelcase_type_names(req_content) if len(w) >= 3}
-        named_types -= {"README", "TODO", "FIXME", "API", "URL", "CLI", "LLM", "AI"}
-        if named_types:
-            # syn DEFINITIONS in the generated files (scoped to expected_paths to
-            # match the old all_source search); regex fallback when no binary.
-            _type_recs = _enumerate_types_via_extractor(project_dir)
-            if _type_recs is not None:
-                _defined = {r.name for r in _type_recs
-                            if r.kind in ("struct", "enum", "trait") and r.file in set(expected_paths)}
-                missing_types = [t for t in sorted(named_types) if t not in _defined]
-            else:
-                missing_types = [t for t in sorted(named_types)
-                                 if not defines_type(all_source, t)]
-            # Only fail if more than half the named types are absent — allows for
-            # types that are re-exported or defined via macros.
-            if len(missing_types) > max(1, len(named_types) // 2):
-                return False, (
-                    f"types from requirements not defined in generated code "
-                    f"({len(missing_types)}/{len(named_types)} missing): "
-                    f"{', '.join(missing_types[:5])}"
-                )
-
-    return True, "ok"
-
-
-_PUB_ITEM_RE = re.compile(
-    r'\bpub(?:\([^)]*\))?\s+'
-    r'(?:unsafe\s+)?(?:async\s+)?(?:const\s+)?(?:default\s+)?'
-    r'(fn|struct|enum|trait|type|mod)\s+(\w+)',
-)
-
-
-def _extract_pub_items(text: str) -> set[tuple[str, str]]:
-    """Return {(kind, name)} for every pub item in the API-surface LISTING artifact.
-
-    NOTE: this parses the `_extract_public_symbols` *listing* (`pub struct X { ... }`,
-    `pub fn sig`, …), which is a summary artifact, NOT valid Rust source — so syn cannot
-    parse it and the regex is legitimate here (Hard Rule applies to Rust *source*). The
-    generated-source side uses `_pub_items_from_tree` (syn). See R7.2 in CODE_ARCHITECTURE.md.
-    """
-    return {(m.group(1), m.group(2)) for m in _PUB_ITEM_RE.finditer(text)}
-
-
-def _pub_items_from_tree(src_dir: Path) -> set[tuple[str, str]]:
-    """Return {(kind, name)} for pub struct/enum/trait/fn in a Rust source tree, via the syn
-    extractor (no regex on source). Excludes examples/benches/tests + scratch dirs by record
-    path. Only these kinds matter for the conformance check — the API-surface listing never
-    contains `type`/`mod`/`const` items."""
-    def _excluded(rel: str) -> bool:
-        parts = set(Path(rel).parts)
-        return bool(parts & {"examples", "benches", "tests"}) or bool(parts & SKIP_DIR_NAMES)
-
-    out: set[tuple[str, str]] = set()
-    for t in _enumerate_types_via_extractor(src_dir) or []:
-        if t.is_pub and t.kind in {"struct", "enum", "trait"} and not _excluded(t.file):
-            out.add((t.kind, t.name))
-    for f in _enumerate_fns_via_extractor(src_dir) or []:   # dicts (engine contract)
-        if f.get("is_pub") and not _excluded(f.get("file", "")):
-            out.add(("fn", f.get("fn_name", "")))
-    return out
+def validate_task2_output(
+    project_dir: Path, expected_paths: list[str], req_path: Path | None = None,
+) -> tuple[bool, str]:
+    return _validate_task2_output_impl(project_dir, expected_paths, req_path, _VALIDATOR_DEPS)
 
 
 def validate_task2_api_surface_conformance(
     project_dir: Path, module_name: str, module_dir: Path,
 ) -> tuple[bool, str]:
-    """Compare pub items in the regenerated source to those captured pre-strip
-    in the api_surface. Returns (ok, drift_report).
-
-    Soft check: missing pub items are reported but do NOT block the iteration.
-    The drift report is logged and (when present) appended to test_output before
-    TASK 4 so the methodology refinement sees both the cargo failure and the
-    contract violation in one prompt. Use this signal to spot "LLM ignored the
-    given api_surface" failures distinctly from "tests genuinely don't pass".
-    """
-    api_text = load_api_surface(project_dir, module_name)
-    if not api_text:
-        return True, "no api_surface captured — skipping conformance check"
-
-    api_items = _extract_pub_items(api_text)
-    if not api_items:
-        return True, "api_surface contained no pub items — skipping"
-
-    # Generated source — parsed with syn (the extractor walks the tree itself), NOT regex.
-    src_root = module_dir / "src"
-    walk_root = src_root if src_root.is_dir() else module_dir
-    gen_items = _pub_items_from_tree(walk_root)
-
-    missing = api_items - gen_items
-    if not missing:
-        return True, f"ok — all {len(api_items)} pub item(s) present in regenerated source"
-
-    by_kind: dict[str, list[str]] = {}
-    for kind, name in sorted(missing):
-        by_kind.setdefault(kind, []).append(name)
-    parts = [f"{kind}: {', '.join(names)}" for kind, names in sorted(by_kind.items())]
-    report = (
-        f"API drift — {len(missing)} of {len(api_items)} pub item(s) missing from "
-        f"regenerated source: " + "; ".join(parts)
-    )
-    return False, report
+    return _validate_task2_api_impl(project_dir, module_name, module_dir, _VALIDATOR_DEPS)
 
 
 def _test_count_deps() -> "_tc_app.TestCountDeps":
@@ -2294,42 +2108,7 @@ def _count_active_tests_for_cluster(
 
 
 # slice 5b foundation: relocated to pipeline_core.domain.test_results (imported at top).
-
-
-def validate_task4_output(genesis_before: str, genesis_after: str,
-                          test_output: str,
-                          failure_type: str = "test") -> tuple[bool, str]:
-    """
-    Anti-corruption check on genesis.md update.
-    Returns (ok, reason). A stall or duplicate is flagged but not fatal.
-    """
-    if genesis_after.strip() == genesis_before.strip():
-        return False, "genesis_stall — TASK 4 produced no update to genesis.md"
-
-    if len(genesis_after) <= len(genesis_before):
-        return False, "genesis shrank — TASK 4 may have removed content"
-
-    new_text = genesis_after[len(genesis_before):]
-
-    # R9.5: the identifier-overlap check is a TEST-failure heuristic. For BUILD
-    # failures test_output is compiler errors (project-specific idents) but the
-    # build prompt MANDATES general, identifier-free structural rules — so a correct
-    # update has empty intersection. Applying it there contradicts the prompt and
-    # falsely stalls legitimate updates. Skip it for build; keep stall/shrank/dedup.
-    if failure_type != "build":
-        # Verify new content references at least one identifier from the test output.
-        test_idents = _extract_identifiers(test_output)
-        new_idents = _extract_identifiers(new_text)
-        if test_idents and not (test_idents & new_idents):
-            return False, "genesis update contains no identifiers from the failing test output"
-
-    # Deduplication: flag if any substantial new paragraph already exists verbatim.
-    new_paragraphs = [p.strip() for p in new_text.split("\n\n") if len(p.strip()) > 100]
-    for para in new_paragraphs:
-        if para in genesis_before:
-            return False, "genesis update duplicates existing content (paragraph already present)"
-
-    return True, "ok"
+# validate_task4_output → pipeline_core.application.validate (H/P6), imported above.
 
 
 # ---------------------------------------------------------------------------

@@ -632,3 +632,39 @@ def attr_call_args(text: str, name: str) -> list[str]:
         else:
             i = j + width
     return out
+
+
+# ---------------------------------------------------------------------------
+# Identifier extraction for text analysis (requirement/genesis documents)
+# ---------------------------------------------------------------------------
+
+_STOP_WORDS: frozenset[str] = frozenset({
+    "the", "and", "for", "are", "not", "use", "let", "mut", "pub", "fn",
+    "mod", "impl", "struct", "enum", "trait", "type", "this", "that",
+    "with", "from", "into", "self", "true", "false", "none", "some",
+    "return", "match", "where", "else", "then", "each", "when", "which",
+    "must", "should", "will", "can", "all", "any", "one", "new", "get",
+    "set", "add", "run", "has", "its", "if", "in", "of", "to", "at",
+    "as", "is", "it", "on", "do", "no", "be", "by", "or", "an", "a",
+    "always", "never", "only", "also", "both", "either", "every",
+    "given", "used", "list", "item", "value", "values", "name", "names",
+    "error", "result", "output", "input", "string", "number", "data",
+    "file", "path", "field", "method", "function", "module",
+    "crate", "test", "tests", "assert", "check", "build", "code",
+})
+
+_META_PHRASES: tuple[str, ...] = (
+    "this document describes",
+    "functional requirements are",
+    "the pipeline",
+    "this requirement",
+    "the following requirements",
+    "requirements document",
+    "requirement specification",
+    "the purpose of this",
+)
+
+
+def extract_identifiers(text: str) -> set[str]:
+    """CamelCase + snake_case identifiers from `text`, filtered by stop-words."""
+    return {w for w in mixed_case_identifiers(text) if w.lower() not in _STOP_WORDS}

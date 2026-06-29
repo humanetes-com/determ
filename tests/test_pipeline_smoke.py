@@ -133,11 +133,21 @@ def test_gen_tests_helpers() -> None:
     """Verify gen_tests sibling-file write / read / revert / strip semantics."""
     import pipeline
 
+    # gen_tests_count / write_gen_tests_pass live only in their adapter (not
+    # re-exported into the composition root); the other helpers below are on
+    # pipeline because the engine uses them internally.
+    from pipeline_core.adapters.gen_tests_storage import (
+        gen_tests_count as _gen_tests_count,
+    )
+    from pipeline_core.adapters.gen_tests_storage import (
+        write_gen_tests_pass as _write_gen_tests_pass,
+    )
+
     workspace = _setup_workspace("smoke-gen-tests")
     src = workspace / "src" / "lib.rs"
     pristine = src.read_text()
 
-    assert pipeline._gen_tests_count(src) == 0, "expected zero siblings initially"
+    assert _gen_tests_count(src) == 0, "expected zero siblings initially"
     assert pipeline._next_gen_tests_n(src) == 1, "next-n should be 1 when empty"
 
     block_1 = """#[cfg(test)]
@@ -147,7 +157,7 @@ mod gen_tests_1 {
     #[test]
     fn t() { assert_eq!(add(1, 1), 2); }
 }"""
-    pipeline._write_gen_tests_pass(src, pristine, block_1, "#[allow(clippy::all)]", 1)
+    _write_gen_tests_pass(src, pristine, block_1, "#[allow(clippy::all)]", 1)
     sibling_1 = pipeline._gen_tests_path(src, 1)
     assert sibling_1.exists(), f"expected sibling {sibling_1}"
     assert sibling_1.name == "lib.gen_tests_1.rs"
@@ -161,7 +171,7 @@ mod gen_tests_1 {
     assert 'mod gen_tests_1;' in src_text
     assert '#[path = "lib.gen_tests_1.rs"]' in src_text
     assert "#[allow(clippy::all)]" in src_text
-    assert pipeline._gen_tests_count(src) == 1
+    assert _gen_tests_count(src) == 1
     assert pipeline._next_gen_tests_n(src) == 2
 
     # Read-all re-wraps for LLM context.
@@ -170,8 +180,8 @@ mod gen_tests_1 {
 
     # Add a second pass.
     block_2 = "mod gen_tests_2 {\n    use super::*;\n    #[test] fn u() {}\n}"
-    pipeline._write_gen_tests_pass(src, src.read_text(), block_2, "#[allow(clippy::all)]", 2)
-    assert pipeline._gen_tests_count(src) == 2
+    _write_gen_tests_pass(src, src.read_text(), block_2, "#[allow(clippy::all)]", 2)
+    assert _gen_tests_count(src) == 2
     assert pipeline._next_gen_tests_n(src) == 3
 
     # Strip decls from the source text (helper used in many places).
@@ -188,12 +198,12 @@ mod gen_tests_1 {
     sibling_2 = pipeline._gen_tests_path(src, 2)
     pipeline._revert_gen_tests_pass(src, src_before_pass_2, sibling_2)
     assert not sibling_2.exists()
-    assert pipeline._gen_tests_count(src) == 1
+    assert _gen_tests_count(src) == 1
 
     # Strip everything.
     n = pipeline._strip_all_gen_tests_artifacts(src)
     assert n == 1
-    assert pipeline._gen_tests_count(src) == 0
+    assert _gen_tests_count(src) == 0
     final = src.read_text()
     assert "mod gen_tests_1" not in final
     assert "pub fn add" in final
@@ -1434,6 +1444,7 @@ def test_pub_items_from_tree_via_syn() -> None:
     from pathlib import Path
 
     import pipeline
+    from pipeline_core.application.validate import _pub_items_from_tree
 
     with tempfile.TemporaryDirectory() as d:
         src = Path(d) / "src"
@@ -1445,7 +1456,7 @@ def test_pub_items_from_tree_via_syn() -> None:
         tests = Path(d) / "tests"
         tests.mkdir()
         (tests / "it.rs").write_text("pub fn should_not_appear() {}", encoding="utf-8")
-        items = pipeline._pub_items_from_tree(Path(d))
+        items = _pub_items_from_tree(Path(d), pipeline._VALIDATOR_DEPS)
     assert ("struct", "A") in items and ("enum", "E") in items and ("trait", "T") in items
     assert ("fn", "f") in items and ("fn", "g") in items
     assert not any(n == "Priv" for _, n in items)                 # private excluded by syn
@@ -1942,6 +1953,9 @@ def test_coverage_ignores_siblings() -> None:
     """Write a synthetic sibling that would inflate coverage if measured;
     confirm the coverage provider's ignore patterns exclude it."""
     import pipeline
+    from pipeline_core.adapters.gen_tests_storage import (
+        write_gen_tests_pass as _write_gen_tests_pass,
+    )
 
     workspace = _setup_workspace("smoke-cov-sibling")
     src = workspace / "src" / "lib.rs"
@@ -1957,7 +1971,7 @@ mod gen_tests_1 {
         let _ = divide(0, 0);
     }
 }"""
-    pipeline._write_gen_tests_pass(
+    _write_gen_tests_pass(
         src, src.read_text(), block, "#[allow(clippy::all)]", 1
     )
 

@@ -65,7 +65,11 @@ echo "Running pytest (xdist, all cores) + coverage ratchet (cargo coverage tests
 # `pipeline_all` target (pipeline.py + pipeline_core combined) is relocation-invariant:
 # moving covered code out of the pipeline.py god-file can't drop it (LOC ratchet
 # enforces the shrinking instead).
+# --timeout: a single hung/slow test (e.g. an offline test that reaches a real
+# backoff sleep) fails loudly in 60s instead of stalling the whole run for tens
+# of minutes. thread method works under xdist workers (signal does not).
 "$SCRIPT_DIR/.venv/bin/python" -m pytest -n auto --dist loadfile \
+    --timeout=60 --timeout-method=thread \
     --cov=pipeline --cov=pipeline_core --cov-report=
 "$SCRIPT_DIR/.venv/bin/python" tools/coverage_ratchet.py || { echo "coverage ratchet failed (see above)"; exit 1; }
 

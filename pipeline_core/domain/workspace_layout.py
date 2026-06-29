@@ -46,6 +46,23 @@ ITERATION_PHASE_PREFIXES: tuple[str, ...] = (
 )
 
 
+SKIP_DIR_NAMES: frozenset[str] = frozenset({
+    ".git", ".hg", ".svn",            # VCS internals
+    "target",                          # Rust / Maven build output
+    "node_modules",                    # Node.js dependencies
+    "vendor",                          # Go / PHP / Ruby vendored deps
+    ".venv", "venv", "env",           # Python virtual environments
+    "__pycache__", ".mypy_cache",     # Python caches
+    "dist", "build", ".build",        # Generic build output
+    ".tox", ".eggs",                   # Python test infra artifacts
+    ".skeleton", ".skeleton-filled",  # TASK 2 skeleton backend scratch dirs
+    ".best_tree",                      # best-tree ratchet snapshot
+    ".original_structure",             # pre-strip API snapshot
+    ".chunk_cache", ".task1_partials", # task1 caches
+    ".phase_c_logs",                   # Phase C test-fix iteration archives (P4)
+})
+
+
 def drop_iteration_phases(phases: dict[str, object]) -> dict[str, object]:
     """Return `phases` without the iteration entries (keys under
     :data:`ITERATION_PHASE_PREFIXES`); task0a/0b/0c entries are kept so those
