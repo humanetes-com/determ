@@ -212,7 +212,6 @@ from pipeline_core.application.reconstruct.test_grouping import group_tests as _
 from pipeline_core.application.reconstruct.test_locator import (
     find_tests_for_fn as _find_tests_for_fn,
 )
-from pipeline_core.application.refine_loop import run_callback_loop as _improvement_loop
 from pipeline_core.application.strip_bake import (
     StripBakeDeps,
 )
@@ -375,12 +374,6 @@ from pipeline_core.domain.models import (
 from pipeline_core.domain.refine import (
     parse_retrospective_categories as _parse_retrospective_categories,
 )
-from pipeline_core.domain.retry_outcome import (
-    RetryMode,
-    RetryVerdict,
-    build_verdict,
-    failing_test_verdict,
-)
 from pipeline_core.domain.rust_fn_headers import fn_headers
 from pipeline_core.domain.rust_idents import (
     attr_call_args,
@@ -417,7 +410,6 @@ from pipeline_core.domain.rust_scan import (
 from pipeline_core.domain.rust_scan import (
     rust_delimiters_balanced as _rust_delimiters_balanced,
 )
-from pipeline_core.domain.source_snapshot import SourceSnapshot
 from pipeline_core.domain.test_grouping import split_oversized_groups as _split_oversized_groups
 from pipeline_core.domain.test_results import (
     OUTPUT_SEPARATOR,
@@ -434,9 +426,6 @@ from pipeline_core.domain.test_results import (
     rustc_error_signatures,
     strip_ansi,
     validate_task3_output_strict,
-)
-from pipeline_core.domain.test_results import (
-    parse_failed_tests as _parse_failed_tests,
 )
 from pipeline_core.domain.text import (
     block_is_prose as _block_is_prose,
@@ -7073,219 +7062,51 @@ def _task3_inline_retry(
     initial_test_output: str,
     cluster: "BuildCluster | None" = None,
 ) -> tuple[bool, str]:
-    """Improvement-driven retry over a failed task3. Returns (passed, final_output).
-    If the retry cannot beat the initial failure floor, restores the source
-    tree from snapshot and returns (False, initial_output).
+    """Composition-root shim -> per_fn_retry.run_task3_inline_retry (chunk H).
+    Builds the deps fresh per call, binding the resident cargo / attribution /
+    enumeration / per-fn-fix collaborators by name so the scripted-cargo /
+    scripted-model monkeypatch seams (test_e2e_build_fix / test_e2e_routing)
+    still intercept at call time. The orchestration itself lives in pipeline_core.
     """
     if os.getenv("TASK3_INLINE_RETRY", "1") == "0":
         return False, initial_test_output
-
-    # R9 residual: be CLUSTER-AWARE. task3 runs each cluster with its own toolchain
-    # + env_extra (RUSTFLAGS/cfg); the failing cluster is threaded in so the retry
-    # reproduces THAT cluster's build under THAT env — the global `_cargo_env()` would
-    # use whatever `_current_cluster` is stale-set to, so a cluster-cfg-specific compile
-    # error (e.g. nightly-only) would not reproduce and BUILD mode would silently bail.
-    _cluster_label = cluster.name if cluster is not None else "task3"
-    if cluster is not None:
-        _parts = ["cargo"]
-        if cluster.toolchain:
-            _parts.append(f"+{cluster.toolchain}")
-        _parts += ["test", "--no-fail-fast"]
-        test_command = shlex.join(_parts)
-
-    def _env() -> dict:
-        # Mirror task3's per-cluster invocation: base cargo env, then the cluster's
-        # env_extra overlaid (its RUSTFLAGS/cfg win over the stale global cluster's).
-        e = _cargo_env()
-        if cluster is not None and cluster.env_extra:
-            e.update(cluster.env_extra)
-        return e
-
-    max_stalls = int(os.getenv("TASK3_INLINE_MAX_STALLS", "3"))
-    hard_cap = int(os.getenv("TASK3_INLINE_HARD_CAP", "10"))
-
-    # R9.1: two modes. TEST mode (some test FAILED) attributes via the test
-    # reverse-map/classifier. BUILD mode (zero FAILED lines because the tree did
-    # not COMPILE) attributes via structured cargo diagnostics and fixes the fns
-    # the compile errors point at — TASK 4 (a test-failure analyzer) cannot, since
-    # it has no failing-test identifiers. compile_cmd compiles the tests without
-    # running them so a 0-test "incomplete" cluster yields real error diagnostics.
-    failed = sorted(_parse_failed_tests(initial_test_output))
-    compile_cmd = test_command if "--no-run" in test_command else test_command + " --no-run"
-    mode = RetryMode.BUILD if not failed else RetryMode.TEST
-    build_mode = mode is RetryMode.BUILD
-    if build_mode:
-        _, _, _init_diags = _run_cargo_check_diag(
-            compile_cmd, project_dir, _env(), timeout=TEST_TIMEOUT)
-        if not _init_diags:
-            # No FAILED tests AND no reproducible compile errors under this env
-            # (e.g. the failure is cluster-cfg-specific) — nothing to act on here.
-            return False, initial_test_output
-        initial_count = len(_init_diags)
-        _log(f"  [task3-retry] build-failure mode: {initial_count} compile error(s).")
-    else:
-        initial_count = len(failed)
-        _log(f"  [task3-retry] entering inline retry: {initial_count} failing test(s).")
-
-    # Snapshot every .rs under src/ (the files a retry might touch; tests/ is
-    # excluded by the root → cheap) so a regressing retry can be reverted.
-    src_root = project_dir / "src"
-    snapshot = SourceSnapshot.capture(src_root)
-
-    # P5.1 parity: fix prompts here previously carried no TYPES_IN_SCOPE and
-    # no container — the model had to guess struct fields. Enumerate from the
-    # current (reconstructed) src; cluster-filter so only methods that compile
-    # under THIS cluster are advertised (Hard Rule 8).
-    _retry_type_recs = _cluster_filter_type_methods(
-        _enumerate_types_via_extractor(src_root) or [], cluster)
-    _retry_containers = _fn_container_index(src_root)
-    # Model-notes recall + relevant tests (slice 8a improvement): these fix
-    # prompts previously carried neither. Resolve the module FR doc when
-    # unambiguous (single-module case: exactly one functional_requirements_*.md;
-    # multi-module would need a per-file module map — left as today's None).
-    _fr_candidates = sorted(project_dir.glob("functional_requirements_*.md"))
-    _retry_fr_path = _fr_candidates[0] if len(_fr_candidates) == 1 else None
-    _retry_tests_dir_files = list((project_dir / "tests").rglob("*.rs"))
-
-    _retry_ctx = _per_fn_retry.RetryContext(
-        project_dir=project_dir,
-        src_root=src_root,
-        cluster_label=_cluster_label,
-        containers=_retry_containers,
-        type_recs=_retry_type_recs,
-        fr_path=_retry_fr_path,
-        tests_dir_files=_retry_tests_dir_files,
-    )
-    _retry_deps = _per_fn_retry.RetryDeps(
-        locate_fn=_locate_fn,
-        gather_fix_context=_gather_fn_fix_context,
-        build_per_fn_fix_prompt=_build_per_fn_fix_prompt,
-        ask_per_fn_body=_ask_per_fn_body,
-        splice_fn_body=_splice_fn_body,
-        find_tests_for_fn=_find_tests_for_fn,
-        focus_cargo_errors=lambda out, rel_f: _focus_cargo_errors(out, rel_f, max_chars=_FIX_ERR_CAP),
-        is_gen_tests_file=_is_gen_tests_file,
+    _deps = _per_fn_retry.Task3RetryDeps(
+        cargo=_per_fn_retry.Task3Cargo(
+            env=_cargo_env,
+            run=_run_cargo,
+            check_diag=_run_cargo_check_diag,
+        ),
+        attribution=_per_fn_retry.Task3Attribution(
+            attribute_failures=_attribute_failures,
+            build_test_reverse_map=_build_test_reverse_map,
+            frontier_from_diags=_frontier_from_diags,
+            filter_test_targets=_filter_test_targets,
+        ),
+        enumerator=_per_fn_retry.Task3Enumerate(
+            cluster_filter_type_methods=_cluster_filter_type_methods,
+            enumerate_types=_enumerate_types_via_extractor,
+            fn_container_index=_fn_container_index,
+        ),
+        retry_fix=_per_fn_retry.RetryDeps(
+            locate_fn=_locate_fn,
+            gather_fix_context=_gather_fn_fix_context,
+            build_per_fn_fix_prompt=_build_per_fn_fix_prompt,
+            ask_per_fn_body=_ask_per_fn_body,
+            splice_fn_body=_splice_fn_body,
+            find_tests_for_fn=_find_tests_for_fn,
+            focus_cargo_errors=lambda out, rel_f: _focus_cargo_errors(out, rel_f, max_chars=_FIX_ERR_CAP),
+            is_gen_tests_file=_is_gen_tests_file,
+            log=_log,
+        ),
         log=_log,
+        test_timeout=TEST_TIMEOUT,
     )
+    return _per_fn_retry.run_task3_inline_retry(
+        project_dir, test_command, iteration, initial_test_output, cluster,
+        max_stalls=int(os.getenv("TASK3_INLINE_MAX_STALLS", "3")),
+        hard_cap=int(os.getenv("TASK3_INLINE_HARD_CAP", "10")),
+        deps=_deps)
 
-    def _run_check_test() -> tuple[bool, str, int]:
-        rc, out = _run_cargo(test_command, project_dir, _env(),
-                             timeout=TEST_TIMEOUT)
-        f = _parse_failed_tests(out)
-        return rc == 0, out, len(f)
-
-    def _run_check_build() -> tuple[bool, str, int]:
-        rc, rendered, diags = _run_cargo_check_diag(
-            compile_cmd, project_dir, _env(), timeout=TEST_TIMEOUT)
-        # ok = the tree COMPILES; metric = remaining compile errors (lower better).
-        return rc == 0, _strip_ansi(rendered), len(diags)
-
-    def _do_fix_test(output: str, history: list[dict]) -> dict:
-        # FR-024: full attribution chain. The classifier is one step in a
-        # longer chain — when it returns no actionable refs, fall back to
-        # the test-reverse-map. Previously this gave up at classifier
-        # exhaustion; now it has more candidates to try.
-        fails_now = sorted(_parse_failed_tests(output))
-        if not fails_now:
-            return {"abort": True, "reason": "no_failed_tests"}
-        try:
-            tests_dir_files = list((project_dir / "tests").rglob("*.rs"))
-            test_reverse_map = _build_test_reverse_map(
-                tests_dir_files, project_dir)
-        except Exception:
-            test_reverse_map = {}
-        frontier, _kind = _attribute_failures(
-            output, project_dir,
-            recently_filled=[],  # task3 has no per-cluster fill history
-            test_reverse_map=test_reverse_map,
-            cluster_name=_cluster_label,
-        )
-        frontier = _filter_test_targets(frontier, project_dir)
-        refs: list[tuple[str, str]] = list(frontier.keys())
-        if not refs:
-            return {"abort": True, "reason": "no_actionable_refs"}
-        fixed_count = _per_fn_retry.apply_per_fn_fixes(refs, output, _retry_ctx, _retry_deps)
-        return {
-            "summary": f"fixed_{fixed_count}/{len(refs)}",
-            "fns_touched": refs,
-            "abort": fixed_count == 0,
-            "reason": "no_fns_spliced" if fixed_count == 0 else "",
-        }
-
-    def _do_fix_build(output: str, history: list[dict]) -> dict:
-        _, _, diags = _run_cargo_check_diag(
-            compile_cmd, project_dir, _env(), timeout=TEST_TIMEOUT)
-        if not diags:
-            return {"abort": True, "reason": "no_compile_errors"}
-        frontier = _filter_test_targets(_frontier_from_diags(diags, project_dir), project_dir)
-        refs: list[tuple[str, str]] = list(frontier.keys())
-        if not refs:
-            return {"abort": True, "reason": "unattributed_compile_errors"}
-        fixed_count = _per_fn_retry.apply_per_fn_fixes(refs, output, _retry_ctx, _retry_deps)
-        return {
-            "summary": f"fixed_{fixed_count}/{len(refs)}",
-            "fns_touched": refs,
-            "abort": fixed_count == 0,
-            "reason": "no_fns_spliced" if fixed_count == 0 else "",
-        }
-
-    passed, last_out, history = _improvement_loop(
-        name="task3.inline_retry",
-        run_check=_run_check_build if build_mode else _run_check_test,
-        do_fix=_do_fix_build if build_mode else _do_fix_test,
-        max_stalls=max_stalls,
-        hard_cap=hard_cap,
-    )
-
-    if build_mode:
-        # Re-measure compile errors. Revert if the retry INCREASED them; recurse
-        # (changed output) only on strict progress so task3's re-verification
-        # terminates — fewer errors each round, or back to the unchanged input.
-        _, _, fin_diags = _run_cargo_check_diag(
-            compile_cmd, project_dir, _env(), timeout=TEST_TIMEOUT)
-        final_err = len(fin_diags)
-        verdict = build_verdict(initial_errors=initial_count,
-                                final_errors=final_err, has_snapshot=bool(snapshot))
-        if verdict is RetryVerdict.REVERT:
-            _log(f"  [task3-retry] build-fix worsened compile ({final_err} > "
-                 f"{initial_count}) — reverting from snapshot.")
-            snapshot.restore()
-            return False, initial_test_output
-        if verdict is RetryVerdict.RECURSE:
-            _log(f"  [task3-retry] build-fix progress: {final_err} compile "
-                 f"error(s) (initial {initial_count}) — re-running TASK 3.")
-            return False, last_out
-        _log(f"  [task3-retry] build-fix made no progress ({final_err} error(s)) "
-             "— escalating to TASK 4.")
-        return False, initial_test_output
-
-    final_failed = _parse_failed_tests(last_out)
-    if passed:
-        _log(f"  [task3-retry] tests now PASS after {len(history)} iter(s).")
-        return True, last_out
-    # Decide whether to keep partial progress or revert. R9.2: a non-compiling tree
-    # emits NO `FAILED` lines, so `len(final_failed)` reads as 0 ("near success") even
-    # when a re-splice broke the build. Compile/ran-state is the real signal — if the
-    # tree ran tests before the retry but no longer does, the retry made it STRICTLY
-    # WORSE (a tree that won't compile is worse than N failing tests) → revert.
-    init_p, init_f, _ = _parse_test_counts(initial_test_output)
-    fin_p, fin_f, _ = _parse_test_counts(last_out)
-    init_ran = (init_p + init_f) > 0
-    final_ran = (fin_p + fin_f) > 0
-    verdict = failing_test_verdict(
-        passed=False, initial_failures=initial_count,
-        final_failures=len(final_failed), initially_ran=init_ran,
-        finally_ran=final_ran, has_snapshot=bool(snapshot))
-    if verdict is RetryVerdict.REVERT:
-        reason = ("retry broke the build (tests no longer run)"
-                  if (init_ran and not final_ran)
-                  else f"result {len(final_failed)} > initial {initial_count}")
-        _log(f"  [task3-retry] {reason} — reverting from snapshot.")
-        snapshot.restore()
-        return False, initial_test_output
-    _log(f"  [task3-retry] stopped at {len(final_failed)} failing tests "
-         f"(initial {initial_count}). Keeping partial progress.")
-    return False, last_out
 
 
 def _emit_per_file_test_overview(project_dir: Path, output: str, *, context: str) -> None:
