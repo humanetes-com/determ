@@ -79,6 +79,21 @@ from pipeline_core.adapters.fill_engine_roles import (
     TestLinkerAdapter,
     WorkspaceModelAdapter,
 )
+from pipeline_core.adapters.fix_loop_roles import (
+    FixCheckerAdapter as _FixCheckerAdapter,
+)
+from pipeline_core.adapters.fix_loop_roles import (
+    FixModelAdapter as _FixModelAdapter,
+)
+from pipeline_core.adapters.fix_loop_roles import (
+    FixPromptsAdapter as _FixPromptsAdapter,
+)
+from pipeline_core.adapters.fix_loop_roles import (
+    FixSplicerAdapter as _FixSplicerAdapter,
+)
+from pipeline_core.adapters.fix_loop_roles import (
+    FrontierBuilderAdapter as _FrontierBuilderAdapter,
+)
 from pipeline_core.adapters.gen_tests_storage import (
     gen_tests_path as _gen_tests_path,
 )
@@ -273,7 +288,6 @@ from pipeline_core.domain.cargo_toml import cargo_is_proc_macro as _domain_cargo
 from pipeline_core.domain.cargo_toml import cargo_package_name as _domain_cargo_package_name
 from pipeline_core.domain.cargo_toml import load_cargo_toml as _domain_load_cargo_toml
 from pipeline_core.domain.cluster_scope import ClusterScope
-from pipeline_core.domain.compile_probe import CompileProbe
 from pipeline_core.domain.coverage_annotation import (
     annotate_uncovered as _annotate_uncovered,
 )
@@ -492,6 +506,7 @@ from pipeline_core.prompts.skeleton_index import (
     format_skeleton_index_for_cluster as _format_skeleton_index_for_cluster,
 )
 from pipeline_core.prompts.test_grouping import format_skeleton_for_prompt as _format_skeleton_for_prompt
+from pipeline_core.prompts.whole_file_fix import build_whole_file_fix_prompt
 from pipeline_core.retry import with_retry
 from pipeline_core.settings import Settings
 
@@ -6834,101 +6849,23 @@ def generate_fix_loop(
             content = p.read_text(encoding="utf-8")
             source_block += f'\n<FILE path="{rel}">\n{content}\n</FILE>\n'
 
-        # Running narrative of prior fix attempts (from improvement-loop history).
-        _attempt_lines: list[str] = []
-        for rec in history:
-            iter_n = rec.get("iter", "?")
-            chg = rec.get("files_changed_str", "no files changed")
-            err_prev = rec.get("error_preview", "")
-            _attempt_lines.append(
-                f"Attempt {iter_n}: changed [{chg}] → still failing.\n"
-                f"Error was:\n{err_prev}"
-            )
-        _history_section = ""
-        if _attempt_lines:
-            n = len(_attempt_lines)
-            _history_section = (
-                f"You have already made {n} fix attempt{'s' if n != 1 else ''} in this loop. "
-                f"Here is what happened — do NOT repeat the same changes:\n\n"
-                + "\n\n".join(_attempt_lines)
-                + "\n\nNow make a different fix that avoids every approach above.\n"
-            )
-
-        # Strategy retrospective injected when prior iter didn't improve.
-        _retro_block = (
-            f"\n<RETROSPECTIVE_GUIDANCE>\nThe previous attempt did not reduce "
-            "the compile error count. Apply this strategy instead of repeating "
-            f"the prior approach:\n{retro}\n</RETROSPECTIVE_GUIDANCE>\n"
-            if retro.strip() else ""
-        )
-
-        _gotchas_brief    = _gotchas_summary()
-        _gotchas_specific = _gotchas_for_error(output)
-        _gotchas_block    = f"\n<RUST_GOTCHAS>\n{_gotchas_brief}\n</RUST_GOTCHAS>\n"
-        if _gotchas_specific:
-            _gotchas_block += (
-                f"\n<RELEVANT_GOTCHAS_DETAIL>\n{_gotchas_specific}\n"
-                "</RELEVANT_GOTCHAS_DETAIL>\n"
-            )
-        _spec_header = "\nFunctional requirements (the contract code must satisfy):\n" if functional_req else ""
-        _fl_scaffold = f"""Code generation produced files that fail the check below.
-{_FIX_THINKING_DIRECTIVE}Fix ONLY the files causing the failure — do NOT regenerate correct files.
-{_history_section}{_spec_header}{_retro_block}{_gotchas_block}
-Error output:
-```
-
-```
-
-Current source files:
-
-
-{FILE_FORMAT_INSTRUCTION}
-{_TASK2_VERBOSITY_GUARD}"""
-        _fl_overhead = len(_fl_scaffold)
-        _fl_min_err  = 10_000
-        _fl_min_src  = 30_000
-        _fl_min_spec = 8_000 if functional_req else 0
-        _extra_budget = max(0,
-            SINGLE_CALL_CHAR_LIMIT - _fl_overhead - _fl_min_err - _fl_min_src - _fl_min_spec)
-        _extra_ctx_capped = smart_truncate(extra_context, total_limit=_extra_budget,
-                                           head=_extra_budget // 3, tail=2 * _extra_budget // 3)
-        _after_extra = max(_fl_min_err + _fl_min_src + _fl_min_spec,
-                           SINGLE_CALL_CHAR_LIMIT - _fl_overhead - len(_extra_ctx_capped))
-        if functional_req:
-            _spec_cap = _after_extra // 4
-            _remaining = _after_extra - _spec_cap
-            _err_cap = _remaining // 3
-            _src_cap = _remaining * 2 // 3
-            _spec_capped = smart_truncate(functional_req, total_limit=_spec_cap,
-                                          head=_spec_cap // 3, tail=2 * _spec_cap // 3)
-            _spec_block = f"\nFunctional requirements (the contract code must satisfy):\n{_spec_capped}\n"
-        else:
-            _err_cap = _after_extra // 3
-            _src_cap = _after_extra * 2 // 3
-            _spec_block = ""
-        _last_output_capped = smart_truncate(output, total_limit=_err_cap,
-                                             head=_err_cap // 4, tail=3 * _err_cap // 4)
-        _source_block_capped = smart_truncate(source_block, total_limit=_src_cap,
-                                              head=_src_cap // 3, tail=2 * _src_cap // 3)
         # Repository Specifications complement: genesis rules + methodology
-        # (the FR is already in _spec_block; no target identifiers here, so
+        # (the FR is already in the spec block; no target identifiers here, so
         # the FR-excerpt/API parts of the section stay empty by design).
         _repo_block = _tag_block(
             "REPOSITORY_SPECIFICATIONS",
             _repo_spec_section(fr_path, char_budget=_REPO_SPEC_CAP_WIDE))
-        prompt = f"""Code generation produced files that fail the check below.
-{_FIX_THINKING_DIRECTIVE}Fix ONLY the files causing the failure — do NOT regenerate correct files.
-{_history_section}{_spec_block}{_repo_block}{_retro_block}{_gotchas_block}
-Error output:
-```
-{_last_output_capped}
-```
-
-Current source files:
-{_source_block_capped}
-{_extra_ctx_capped}
-{FILE_FORMAT_INSTRUCTION}
-{_TASK2_VERBOSITY_GUARD}"""
+        prompt = build_whole_file_fix_prompt(
+            thinking_directive=_FIX_THINKING_DIRECTIVE,
+            file_format_instruction=FILE_FORMAT_INSTRUCTION,
+            verbosity_guard=_TASK2_VERBOSITY_GUARD,
+            single_call_char_limit=SINGLE_CALL_CHAR_LIMIT,
+            output=output, history=history, retro=retro,
+            source_block=source_block, extra_context=extra_context,
+            functional_req=functional_req,
+            gotchas_brief=_gotchas_summary(),
+            gotchas_specific=_gotchas_for_error(output),
+            repo_block=_repo_block)
         _log(f"  [fix loop] iter {len(history) + 1} — asking LLM to fix specific failures.")
         response = _ASK_CLIENT.ask(prompt, model=model)
         fixed = extract_files(response)
@@ -7006,57 +6943,38 @@ Current source files:
             block += f"<RELEVANT_GOTCHAS_DETAIL>\n{gd}\n</RELEVANT_GOTCHAS_DETAIL>\n"
         return block
 
-    # P3.C: the two inner cargo-check loops are now the FnFixUnit / ImplFixUnit
-    # use-case (application.reconstruct.fix_unit). pipeline.py is the composition
-    # root — these thin adapters satisfy the ISP role ports over the resident
-    # check/model/splice/prompt helpers; the loop policy and the prompt+splice
-    # live in pipeline_core and are unit-tested with fakes.
-    class _FixChecker:
-        def probe(self, cmd, cwd, env_, timeout_):
-            rc, rendered, diags = _run_cargo_check_diag(cmd, cwd, env_, timeout_)
-            ebf: dict[str, int] = {}
-            for d in diags:
-                f = d.file or ""
-                if f:
-                    ebf[f] = ebf.get(f, 0) + 1
-            return CompileProbe(rc=rc, rendered=_strip_ansi(rendered),
-                                frontier=_frontier_from_diags(diags, project_dir),
-                                errors_by_file=ebf)
-
-    class _FixModel:
-        def ask(self, prompt):
-            return _ASK_CLIENT.ask(prompt, model=model)
-
-    class _FixSplicer:
-        def locate_fn(self, text, name):
-            return _locate_fn(text, name)
-
-        def is_pub_fn(self, text, name):
-            return _is_pub_fn(text, name)
-
-        def render_impl_block(self, text, members):
-            return _render_impl_block(text, members)
-
-        def splice_fn(self, file_path, container, name, body, *,
-                      where_clause=None, allow_nonstub=False):
-            return _splice_fn_with_where(file_path, container, name, body,
-                                         where_clause=where_clause,
-                                         allow_nonstub=allow_nonstub)
-
-        def splice_body(self, file_path, name, body, *, allow_nonstub=False):
-            return _splice_fn_body(file_path, name, body,
-                                   allow_nonstub=allow_nonstub)
-
-    class _FixPrompts:
-        def repo_spec_block(self, *, file_rel="", fn_name="", container=""):
-            return _tag_block("REPOSITORY_SPECIFICATIONS", _repo_spec_section(
-                fr_path, file_rel=file_rel, fn_name=fn_name, container=container))
-
-        def gotchas_block(self, output):
-            return _gotchas_block_for(output)
-
-        def tests_block(self, names):
-            return _tests_for_names(set(names))
+    # chunk H: the ISP role adapters (CompileChecker/FixModel/FixSplicer/
+    # FixPrompts/FrontierBuilder) now live in adapters/fix_loop_roles.py; the
+    # loop policy + prompt/splice live in application.reconstruct.{fix_unit,
+    # generate_fix}. pipeline.py is the composition root — it wires the resident
+    # check/model/splice/prompt/frontier helpers in via late-binding lambdas
+    # (preserves the _run_cargo/_splice_fn_body/ask monkeypatch seams).
+    _fix_checker = _FixCheckerAdapter(
+        run_cargo_check_diag=lambda c, cwd, e, t: _run_cargo_check_diag(c, cwd, e, t),
+        strip_ansi=_strip_ansi,
+        frontier_from_diags=lambda diags: _frontier_from_diags(diags, project_dir))
+    _fix_model = _FixModelAdapter(
+        ask_fn=lambda prompt: _ASK_CLIENT.ask(prompt, model=model))
+    _fix_splicer = _FixSplicerAdapter(
+        locate_fn_fn=_locate_fn, is_pub_fn_fn=_is_pub_fn,
+        render_impl_block_fn=_render_impl_block,
+        splice_fn_fn=_splice_fn_with_where, splice_body_fn=_splice_fn_body)
+    _fix_prompts = _FixPromptsAdapter(
+        repo_spec_block_fn=lambda *, file_rel="", fn_name="", container="":
+            _tag_block("REPOSITORY_SPECIFICATIONS", _repo_spec_section(
+                fr_path, file_rel=file_rel, fn_name=fn_name, container=container)),
+        gotchas_block_fn=_gotchas_block_for,
+        tests_block_fn=lambda names: _tests_for_names(set(names)))
+    def _behavior_frontier_filtered(output: str):
+        fr, srcs = _behavior_frontier(output, project_dir, existing_test_files)
+        return _filter_test_targets(fr, project_dir), srcs
+    _frontiers = _FrontierBuilderAdapter(
+        compile_frontier_fn=lambda output: _filter_test_targets(
+            _compile_error_frontier(output, project_dir, check_cmd, env, timeout),
+            project_dir),
+        tdd_frontier_fn=lambda output: _filter_test_targets(
+            _extract_tdd_frontier(output, project_dir), project_dir),
+        behavior_frontier_fn=_behavior_frontier_filtered)
 
     _fix_session = FixSession.for_check_cmd(
         project_dir=project_dir, check_cmd=check_cmd,
@@ -7065,31 +6983,14 @@ Current source files:
         existing_test_files=frozenset(existing_test_files),
         allowed_dir_prefix=allowed_dir_prefix)
     _fix_unit_deps = FixUnitDeps(
-        checker=_FixChecker(), model=_FixModel(), splicer=_FixSplicer(),
-        prompts=_FixPrompts(), log=_log, do_retro=_do_retro,
+        checker=_fix_checker, model=_fix_model, splicer=_fix_splicer,
+        prompts=_fix_prompts, log=_log, do_retro=_do_retro,
         thinking_directive=_FIX_THINKING_DIRECTIVE, err_cap=_FIX_ERR_CAP,
         per_fn_max_stalls=int(os.getenv("FIX_LOOP_PER_FN_MAX_STALLS", "2")))
 
-    # P3.C: the per-fn / per-impl / whole-file dispatch is now the typed strategy
-    # set in application.reconstruct.generate_fix, run by its driver. This frontier
-    # adapter satisfies the FrontierBuilder port (test-oracle-filtered, FR-018).
-    class _Frontiers:
-        def compile_frontier(self, output):
-            return _filter_test_targets(
-                _compile_error_frontier(output, project_dir, check_cmd, env, timeout),
-                project_dir)
-
-        def tdd_frontier(self, output):
-            return _filter_test_targets(
-                _extract_tdd_frontier(output, project_dir), project_dir)
-
-        def behavior_frontier(self, output):
-            fr, srcs = _behavior_frontier(output, project_dir, existing_test_files)
-            return _filter_test_targets(fr, project_dir), srcs
-
     _gen_fix_deps = GenerateFixDeps(
         unit=_fix_unit_deps,
-        frontiers=_Frontiers(),
+        frontiers=_frontiers,
         enumerate_fns=lambda: _enumerate_fns_via_extractor(project_dir) or [],
         collect_impl_blocks=lambda: _collect_impl_blocks(project_dir) or [],
         log_overview=_log_compile_overview,
