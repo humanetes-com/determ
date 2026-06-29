@@ -210,6 +210,12 @@ from pipeline_core.application.reconstruct.retrospective import (
     diagnose_phase_c as _diagnose_phase_c,
 )
 from pipeline_core.application.reconstruct.run_context import RunContext
+from pipeline_core.application.reconstruct.source_view import (
+    annotate_file_view as _annotate_file_view_impl,
+)
+from pipeline_core.application.reconstruct.source_view import (
+    condense_rust_to_signatures as _condense_rust_to_signatures,
+)
 from pipeline_core.application.reconstruct.test_grouping import group_tests as _group_tests_impl
 from pipeline_core.application.reconstruct.test_locator import (
     find_tests_for_fn as _find_tests_for_fn,
@@ -310,12 +316,6 @@ from pipeline_core.domain.coverage_annotation import (
 from pipeline_core.domain.coverage_annotation import (
     partition_uncovered_lines as _partition_uncovered_lines,
 )
-from pipeline_core.domain.doc_render import (
-    condense_doc_attrs as _condense_doc_attrs,
-)
-from pipeline_core.domain.doc_render import (
-    strip_crate_attrs as _strip_crate_attrs,
-)
 from pipeline_core.domain.enums import (
     Backend,
     CoverageBackend,
@@ -391,7 +391,6 @@ from pipeline_core.domain.rust_fn_headers import (
 from pipeline_core.domain.rust_idents import (
     attr_call_args,
     camelcase_type_names,
-    contains_fn_decl,
     crate_lint_attr_args,
     defined_type_names,
     fn_reference_counts,
@@ -408,7 +407,6 @@ from pipeline_core.domain.rust_scan import (
     has_no_std_attr,
     has_nonempty_test_fn,
     is_structural_brace_line,
-    is_type_decl_line,
     line_has_assertion,
     named_fn_decl_start,
     replace_elision_placeholders,
@@ -1541,59 +1539,6 @@ def _derive_check_only_cmd(check_cmd: str) -> str:
 # ---------------------------------------------------------------------------
 # BL-010: Rust source condenser — signatures and type definitions only
 # ---------------------------------------------------------------------------
-
-def _condense_rust_to_signatures(source: str, filename: str = "code.rs") -> str:
-    """
-    Reduce a Rust source file to structural declarations (type definitions +
-    function signatures). Function bodies are replaced with { /* ... */ }.
-    Used by TASK 0b (fits more files in context) and TASK 0c attempt history
-    (compresses failed test blocks to save space for the full compile error).
-
-    Uses grep-ast (tree-sitter) when available; falls back to brace-counting.
-    """
-    try:
-        from grep_ast import TreeContext
-        tc = TreeContext(filename, source, color=False, line_number=False,
-                         show_top_of_file_lines=0, margin=0)
-        # Mark all lines as of interest so we get the full structural skeleton.
-        tc.add_lines_of_interest(set(range(1, source.count('\n') + 2)))
-        tc.add_context()
-        result = tc.format()
-        if result and len(str(result).strip()) > 20:
-            return str(result)
-    except Exception:
-        pass
-
-    # Fallback: brace-counting line scanner.
-    lines = source.splitlines(keepends=True)
-    result_lines: list[str] = []
-    depth = 0
-    skip_until_depth: int | None = None
-
-    for line in lines:
-        if skip_until_depth is not None:
-            depth += line.count('{') - line.count('}')
-            if depth <= skip_until_depth:
-                skip_until_depth = None
-            continue
-
-        stripped = line.strip()
-        is_fn = contains_fn_decl(stripped) and not stripped.startswith('//')
-        is_type_kw = is_type_decl_line(line)
-
-        net = line.count('{') - line.count('}')
-
-        if is_fn and not is_type_kw and '{' in line and net > 0:
-            last_brace = line.rindex('{')
-            result_lines.append(line[:last_brace].rstrip() + ' { /* ... */ }\n')
-            skip_until_depth = depth
-            depth += net
-        else:
-            depth += net
-            result_lines.append(line)
-
-    return ''.join(result_lines)
-
 
 # ---------------------------------------------------------------------------
 # BL-021: SQLite pipeline knowledge store
@@ -2829,8 +2774,9 @@ def _find_tests_referencing_fn(
 # are located structurally via domain.rust_scan.attr_opener_end.
 
 
-# _attr_span_end / strip_*_attrs / _doc_attr_string / _condense_doc_run /
-# _condense_doc_attrs → pipeline_core.domain.doc_render (H/§7.3); imported above.
+# doc-attr helpers → pipeline_core.domain.doc_render (H/§7.3); the source/prompt
+# VIEWS (_condense_rust_to_signatures, _annotate_file_view) →
+# application/reconstruct/source_view.py (imported above).
 
 
 # Below this file-view size, keep doc comments in FULL (their usage examples are
@@ -2841,67 +2787,9 @@ _DOC_KEEP_FULL_LIMIT = SINGLE_CALL_CHAR_LIMIT // 6
 
 
 def _annotate_file_view(file_text: str, target_fn: str) -> str:
-    """Return a view of file_text where every unimplemented stub is prefixed
-    with a comment clarifying its status. The TARGET fn (the one being filled
-    in this call) is marked distinctly. Helps the model reason about which
-    fns are "to-be-filled later" vs the immediate target, instead of treating
-    the stubs as permanent missing pieces it must work around.
-
-    Doc comments are kept in FULL when the view fits comfortably in budget —
-    the crate's own usage examples are concrete WRONG/RIGHT guidance the model
-    learns from, so we never strip them from a small prompt (FR-026 amended).
-    Only when the file view is large enough to threaten the context budget do
-    we CONDENSE docs to a one-line intent. Non-doc crate attrs are always
-    dropped. PROMPT view only — the on-disk file is untouched.
-    """
-    # Keep examples when there's room; condense only big files.
-    if len(file_text) > _DOC_KEEP_FULL_LIMIT:
-        file_text = _condense_doc_attrs(file_text)
-    else:
-        file_text = _strip_crate_attrs(file_text)   # drop only #![...] crate attrs
-    out: list[str] = []
-    last_fn_end = 0
-    for h in fn_headers(file_text, line_anchored=False):
-        fn_name = h.name
-        sig_start = h.start
-        body_start = h.brace_open + 1
-        depth = 1
-        j = body_start
-        while j < len(file_text) and depth > 0:
-            c = file_text[j]
-            if c == "{":
-                depth += 1
-            elif c == "}":
-                depth -= 1
-            j += 1
-        if depth != 0:
-            continue
-        body_end = j - 1
-        body = file_text[body_start:body_end]
-        is_stub = _is_unimplemented_body(body)
-        # Find the indent of the fn's first line.
-        line_start = file_text.rfind("\n", 0, sig_start) + 1
-        indent = ""
-        for ch in file_text[line_start:sig_start]:
-            if ch in (" ", "\t"):
-                indent += ch
-            else:
-                break
-        # Emit everything before this fn from where we left off.
-        out.append(file_text[last_fn_end:sig_start])
-        if fn_name == target_fn:
-            annot = (f"{indent}// >>> TARGET — implement THIS function below; the body is "
-                     f"currently `unimplemented!()`. <<<\n")
-        elif is_stub:
-            annot = (f"{indent}// SKELETON STUB — body will be filled in a separate "
-                     f"call; you may rely on it existing (signature is fixed).\n")
-        else:
-            annot = ""
-        out.append(annot)
-        out.append(file_text[sig_start:j])
-        last_fn_end = j
-    out.append(file_text[last_fn_end:])
-    return "".join(out)
+    """Thin shim binding the budget limit; impl in source_view.annotate_file_view."""
+    return _annotate_file_view_impl(
+        file_text, target_fn, doc_keep_full_limit=_DOC_KEEP_FULL_LIMIT)
 
 
 def _detect_crate_no_std_invariant(src_dir: Path) -> str:
