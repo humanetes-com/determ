@@ -8,6 +8,7 @@ Usage:
 
 import dataclasses
 import hashlib
+import importlib
 import json
 import os
 import re
@@ -24,12 +25,7 @@ from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from functools import partial as _partial
 from pathlib import Path
-from typing import TypeVar
 from uuid import uuid4 as _uuid4
-
-_RT = TypeVar("_RT")
-
-import importlib
 
 import model_interact as _mi
 from model_interact import MODEL
@@ -82,6 +78,30 @@ from pipeline_core.adapters.fill_engine_roles import (
     StallPolicyAdapter,
     TestLinkerAdapter,
     WorkspaceModelAdapter,
+)
+from pipeline_core.adapters.gen_tests_storage import (
+    gen_tests_path as _gen_tests_path,
+)
+from pipeline_core.adapters.gen_tests_storage import (
+    gen_tests_siblings as _gen_tests_siblings,
+)
+from pipeline_core.adapters.gen_tests_storage import (
+    load_gen_tests_origin as _load_gen_tests_origin,
+)
+from pipeline_core.adapters.gen_tests_storage import (
+    next_gen_tests_n as _next_gen_tests_n,
+)
+from pipeline_core.adapters.gen_tests_storage import (
+    quarantine_broken_gen_tests as _quarantine_broken_gen_tests,
+)
+from pipeline_core.adapters.gen_tests_storage import (
+    read_all_gen_tests as _read_all_gen_tests,
+)
+from pipeline_core.adapters.gen_tests_storage import (
+    revert_gen_tests_pass as _revert_gen_tests_pass,
+)
+from pipeline_core.adapters.gen_tests_storage import (
+    strip_all_gen_tests_artifacts as _strip_all_gen_tests_artifacts,
 )
 from pipeline_core.adapters.mutation import MutationTester
 from pipeline_core.adapters.ratchet import BestTreeRatchet
@@ -254,6 +274,24 @@ from pipeline_core.domain.cargo_toml import cargo_package_name as _domain_cargo_
 from pipeline_core.domain.cargo_toml import load_cargo_toml as _domain_load_cargo_toml
 from pipeline_core.domain.cluster_scope import ClusterScope
 from pipeline_core.domain.compile_probe import CompileProbe
+from pipeline_core.domain.coverage_annotation import (
+    annotate_uncovered as _annotate_uncovered,
+)
+from pipeline_core.domain.coverage_annotation import (
+    extract_branch_guard as _extract_branch_guard,
+)
+from pipeline_core.domain.coverage_annotation import (
+    extract_uncovered_functions as _extract_uncovered_functions,
+)
+from pipeline_core.domain.coverage_annotation import (
+    filter_cfg_excluded_lines as _filter_cfg_excluded_lines,
+)
+from pipeline_core.domain.coverage_annotation import (
+    filter_cfg_incompatible_lines as _filter_cfg_incompatible_lines,
+)
+from pipeline_core.domain.coverage_annotation import (
+    partition_uncovered_lines as _partition_uncovered_lines,
+)
 from pipeline_core.domain.doc_render import (
     doc_eq_value_offset,
     is_link_ref_def,
@@ -341,7 +379,6 @@ from pipeline_core.domain.rust_idents import (
     defines_type,
     fn_reference_counts,
     identifier_tokens,
-    is_fn_signature_line,
     is_unsafe_fn,
     mixed_case_identifiers,
     use_symbol_paths,
@@ -350,16 +387,13 @@ from pipeline_core.domain.rust_macros import macro_definitions
 from pipeline_core.domain.rust_scan import (
     after_brace_newline,
     attr_opener_end,
-    branch_guard_label,
     contains_decl_keyword,
     contains_word,
     count_test_attrs,
     count_word,
     find_mod_opener,
-    gen_mod_body_start,
     has_no_std_attr,
     has_nonempty_test_fn,
-    is_rust_item_boundary_line,
     is_structural_brace_line,
     is_type_decl_line,
     item_names,
@@ -6717,14 +6751,20 @@ from pipeline_core.application.generators.task2_generator import (  # noqa: E402
     StaticTask2Generator,
     Task2Generator,
 )
-from pipeline_core.domain.generation import (
-    GenerationRequest,  # noqa: E402
-    SkeletonConfig,  # noqa: E402
-    Task1Config,  # noqa: E402
-    Task2Config,  # noqa: E402
+from pipeline_core.domain.generation import (  # noqa: E402
+    GenerationRequest,
+    SkeletonConfig,
+    Task1Config,
+    Task2Config,
 )
 from pipeline_core.domain.generation import (  # noqa: E402
-    gen_tests_sibling_number as _gen_tests_sibling_number,
+    build_gen_tests_decl as _build_gen_tests_decl,
+)
+from pipeline_core.domain.generation import (  # noqa: E402
+    extract_gen_tests_body as _extract_gen_tests_body,
+)
+from pipeline_core.domain.generation import (  # noqa: E402
+    gen_tests_origin_cfgs as _gen_tests_origin_cfgs,
 )
 from pipeline_core.domain.generation import (
     has_gen_tests_mod_decl as _has_gen_tests_mod_decl,
@@ -6733,16 +6773,10 @@ from pipeline_core.domain.generation import (
     is_gen_tests_sibling_name as _is_gen_tests_sibling_name,
 )
 from pipeline_core.domain.generation import (
-    parse_gen_tests_filename as _parse_gen_tests_filename,  # noqa: E402
-)
-from pipeline_core.domain.generation import (
     prelude_import_names as _prelude_import_names,  # noqa: E402
 )
 from pipeline_core.domain.generation import (
     strip_all_gen_tests_decls as _strip_all_gen_tests_decls,  # noqa: E402
-)
-from pipeline_core.domain.generation import (
-    strip_gen_tests_decl as _strip_gen_tests_decl,  # noqa: E402
 )
 from pipeline_core.domain.generation import (
     strip_gen_tests_decl_n as _domain_strip_gen_tests_decl_n,  # noqa: E402
@@ -8074,59 +8108,6 @@ _coverage_provider: _covmod.CoverageProvider = _covmod.make_coverage_provider(
 )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# gen_tests sibling-file storage
-#
-# Each LLM gen_tests pass for src/foo.rs writes its module body to a sibling
-# file src/foo.gen_tests_N.rs, and adds a one-line path-mod declaration to
-# foo.rs:
-#     #[cfg(test)] #[allow(...)] #[path = "foo.gen_tests_N.rs"] mod gen_tests_N;
-#
-# This avoids coverage-tool contamination (test code lives in its own file,
-# excluded by --ignore-filename-regex) and removes the need for GRCOV_EXCL_*
-# markers wrapping inline test blocks.
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _gen_tests_siblings(src_file: Path) -> list[tuple[int, Path]]:
-    """Return [(N, path)] for all foo.gen_tests_N.rs siblings of src_file, sorted by N."""
-    stem = src_file.stem
-    out: list[tuple[int, Path]] = []
-    parent = src_file.parent
-    if parent.exists():
-        for f in parent.iterdir():
-            num = _gen_tests_sibling_number(f.name, stem)
-            if num is not None:
-                out.append((num, f))
-    out.sort()
-    return out
-
-
-def _gen_tests_count(src_file: Path) -> int:
-    return len(_gen_tests_siblings(src_file))
-
-
-def _next_gen_tests_n(src_file: Path) -> int:
-    """Return the next free gen_tests pass number for src_file.
-    Uses max(existing) + 1 to skip over gaps from deleted siblings."""
-    siblings = _gen_tests_siblings(src_file)
-    return (siblings[-1][0] + 1) if siblings else 1
-
-
-def _gen_tests_path(src_file: Path, n: int) -> Path:
-    return src_file.with_name(f"{src_file.stem}.gen_tests_{n}.rs")
-
-
-def _read_all_gen_tests(src_file: Path) -> str:
-    """Concatenate gen_tests sibling bodies, each re-wrapped in `mod gen_tests_N { ... }`
-    for LLM prompt context (so the LLM sees the same shape it generates)."""
-    parts: list[str] = []
-    for n, sibling in _gen_tests_siblings(src_file):
-        try:
-            body = sibling.read_text(encoding="utf-8").rstrip()
-        except OSError:
-            continue
-        parts.append(f"#[cfg(test)]\nmod gen_tests_{n} {{\n{body}\n}}")
-    return "\n\n".join(parts)
 
 
 def _strip_gen_tests_decls(src_text: str) -> str:
@@ -8212,13 +8193,9 @@ def _strip_trailing_file_tag(text: str) -> str:
     return strip_trailing_file_tag(text)
 
 
-
-
 def _has_nonempty_test_body(block: str) -> bool:
     """True if the block has at least one `#[test]` fn with a non-trivial body."""
     return has_nonempty_test_fn(block)
-
-
 
 
 
@@ -8360,76 +8337,6 @@ def _cluster_gate_for_sibling(cluster, source_text: str, uncov_lines,
     return ""   # cluster- AND symbol-agnostic → shareable across clusters
 
 
-def _build_gen_tests_decl(sibling_name: str, n: "int | str", allow_line: str,
-                           cluster_cfg_attr: str = "") -> str:
-    """Build the one-line-ish `#[cfg(test)] ... mod gen_tests_N;` declaration.
-
-    cluster_cfg_attr (optional): cfg predicate gating this gen_tests mod to a
-    specific compiler cluster, e.g. "error_generic_member_access" for nightly.
-    When provided, the declaration is wrapped in #[cfg(<attr>)] so the sibling
-    file is silently excluded under any other cluster's flags. This is what
-    keeps task0c's per-cluster tests from breaking the harness when the next
-    cluster's pre-check runs.
-    """
-    lines: list[str] = []
-    if cluster_cfg_attr:
-        lines.append(f"#[cfg({cluster_cfg_attr})]")
-    lines.append("#[cfg(test)]")
-    if allow_line:
-        lines.append(allow_line)
-    lines.append(f'#[path = "{sibling_name}"]')
-    return "\n" + "\n".join(lines) + f"\nmod gen_tests_{n};\n"
-
-
-def _gen_tests_origin_cfgs(file_text: str) -> dict[int, str]:
-    """Map each `mod gen_tests_<n>;` decl in `file_text` to the cluster cfg
-    predicate that gates it — i.e. the `#[cfg(...)]` that is NOT `#[cfg(test)]`,
-    as stamped by `_build_gen_tests_decl(cluster_cfg_attr=...)` at task0c gen
-    time. Returns {pass_n: cfg_predicate}; '' when only `#[cfg(test)]` is present
-    (stable/default cluster). Deterministic structural scan of the pipeline's own
-    fixed decl format — not a source parse of arbitrary Rust."""
-    lines = file_text.splitlines()
-    out: dict[int, str] = {}
-    for i, line in enumerate(lines):
-        s = line.strip()
-        if not (s.startswith("mod gen_tests_") and s.endswith(";")):
-            continue
-        try:
-            n = int(s[len("mod gen_tests_"):-1])
-        except ValueError:
-            continue
-        cfg = ""
-        j = i - 1
-        while j >= 0:
-            a = lines[j].strip()
-            if a.startswith("#["):
-                if a.startswith("#[cfg(") and a.endswith(")]") and a != "#[cfg(test)]":
-                    inner = a[len("#[cfg("):].rsplit(")]", 1)[0]
-                    if inner != "test":
-                        cfg = inner
-                j -= 1
-                continue
-            if a == "":
-                j -= 1
-                continue
-            break
-        out[n] = cfg
-    return out
-
-
-def _load_gen_tests_origin(project_dir: Path) -> dict[str, str]:
-    """Load the gen_tests origin-cfg manifest baked pre-strip. Keyed by sibling
-    stem `"{parent_stem}.gen_tests_{n}"` → cluster cfg predicate ('' = default).
-    Empty dict if absent (older runs / pre-bake)."""
-    path = project_dir / ".skeleton" / "_gen_tests_origin.json"
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return {str(k): str(v) for k, v in data.items()}
-    except Exception:
-        return {}
-
 
 def _propagate_or_quarantine_sibling(
     gt: Path, origin_manifest: dict, parent_stem: str, pass_n: int,
@@ -8461,227 +8368,10 @@ def _propagate_or_quarantine_sibling(
     return True
 
 
-def _extract_gen_tests_body(block: str) -> str:
-    """Strip the outer `mod gen_X { ... }` wrapper from an LLM-generated block and
-    return the dedented body. If the shape doesn't match (e.g. LLM returned bare
-    test functions), return block unchanged so caller can still use it."""
-    start = gen_mod_body_start(block)
-    if start is None:
-        return block.strip() + "\n"
-    depth = 1
-    i = start
-    while i < len(block):
-        c = block[i]
-        if c == '{':
-            depth += 1
-        elif c == '}':
-            depth -= 1
-            if depth == 0:
-                body = block[start:i]
-                lines = body.splitlines()
-                non_empty = [ln for ln in lines if ln.strip()]
-                if non_empty:
-                    indent = min(len(ln) - len(ln.lstrip()) for ln in non_empty)
-                    if indent > 0:
-                        body = "\n".join(
-                            (ln[indent:] if len(ln) >= indent and ln[:indent].isspace() else ln)
-                            for ln in lines
-                        )
-                return body.strip() + "\n"
-        i += 1
-    return block.strip() + "\n"
 
 
-# _rust_delimiters_balanced relocated to pipeline_core.domain.rust_scan
-# (regex-free char scanner; imported as the module-level name above).
 
 
-def _write_gen_tests_pass(
-    src_file: Path,
-    src_text: str,
-    block: str,
-    allow_line: str,
-    pass_n: int,
-    cluster_cfg_attr: str = "",
-) -> Path:
-    """Write the sibling file with extracted body, and write src_file with the decl appended.
-
-    `src_text` is the source content WITHOUT this pass's declaration (caller-managed
-    revert target). `pass_n` is the 1-indexed pass number.
-    `cluster_cfg_attr` (optional): cfg predicate used to scope this gen_tests
-    mod to a specific compiler cluster — see _build_gen_tests_decl.
-    Returns the sibling file path.
-
-    Performs a delimiter-balance sanity check on the extracted body before
-    committing. When the body has unbalanced `()`/`[]`/`{}` (a common LLM-
-    corruption mode that propagates a syntax error into the test crate and
-    breaks subsequent cargo invocations), the sibling is written for
-    inspection but the parent src file is NOT updated with the decl —
-    making the bad pass a no-op at compile time. Returns the sibling path
-    regardless (caller's contract).
-    """
-    sibling = _gen_tests_path(src_file, pass_n)
-    body = _extract_gen_tests_body(block)
-    if not _rust_delimiters_balanced(body):
-        # Quarantine: still write the file (for debugging) but do NOT attach
-        # the decl to the parent. cargo will never see it; pipeline can
-        # inspect it offline.
-        quarantine = sibling.with_suffix(".rs.broken")
-        quarantine.write_text(body, encoding="utf-8")
-        with suppress(Exception):
-            _log(f"  [gen_tests] REJECTED pass {pass_n} for {src_file.name}: "
-                 f"delimiters unbalanced. Quarantined → {quarantine.name}")
-        return sibling  # parent decl unchanged
-    sibling.write_text(body, encoding="utf-8")
-    decl = _build_gen_tests_decl(sibling.name, pass_n, allow_line,
-                                  cluster_cfg_attr=cluster_cfg_attr)
-    src_file.write_text(src_text.rstrip() + decl, encoding="utf-8")
-    return sibling
-
-
-def _quarantine_broken_gen_tests(project_dir: Path) -> int:
-    """Scan all existing gen_tests siblings; rename any with unbalanced
-    delimiters to `.rs.broken` and strip their `#[path] mod gen_tests_N`
-    decl from the parent src file. Returns count of quarantined files.
-
-    Runs at pipeline startup as a recovery for state inherited from
-    earlier runs that committed broken gen_tests before this validation
-    existed.
-    """
-    moved = 0
-    for src in (project_dir / "src").rglob("*.gen_tests_*.rs"):
-        try:
-            text = src.read_text(encoding="utf-8")
-        except Exception:
-            continue
-        if _rust_delimiters_balanced(text):
-            continue
-        # Identify the parent src file (foo.gen_tests_N.rs → foo.rs).
-        parsed = _parse_gen_tests_filename(src.name)
-        if parsed is None:
-            continue
-        stem, pass_n = parsed
-        parent = src.parent / f"{stem}.rs"
-        # Strip the decl block from the parent (best-effort, R7: structured scan).
-        try:
-            if parent.exists():
-                ptext = parent.read_text(encoding="utf-8")
-                ptext_new = _strip_gen_tests_decl(ptext, src.name, pass_n)
-                if ptext_new != ptext:
-                    parent.write_text(ptext_new, encoding="utf-8")
-        except Exception:
-            pass
-        # Rename the broken file so cargo can't pick it up via stray paths.
-        try:
-            src.rename(src.with_suffix(".rs.broken"))
-            moved += 1
-        except Exception:
-            try:
-                src.unlink()
-                moved += 1
-            except Exception:
-                pass
-    if moved:
-        _log(f"  [gen_tests] quarantined {moved} broken sibling(s) at startup.")
-    return moved
-
-
-def _revert_gen_tests_pass(src_file: Path, src_text: str, sibling: Path) -> None:
-    """Restore src_file to src_text (no decl) and delete the sibling file.
-
-    R9.6 atomicity: restoring `src_text` (a snapshot) can drop the decls of MORE
-    than one sibling — e.g. a split/inner-retry added extra siblings since the
-    snapshot. Unlinking only the named `sibling` would orphan the rest (file on
-    disk, no decl). Enforce the invariant `sibling file ⟺ decl in parent`: after
-    the restore, delete every sibling of this parent whose decl the restore removed.
-    """
-    src_file.write_text(src_text, encoding="utf-8")
-    with suppress(OSError):
-        sibling.unlink()
-    for _n, _sib in _gen_tests_siblings(src_file):
-        if not _has_gen_tests_decl(src_text, _n):
-            with suppress(OSError):
-                _sib.unlink()
-
-
-def _strip_all_gen_tests_artifacts(src_file: Path) -> int:
-    """Delete all gen_tests siblings and remove all decls from src_file.
-    Returns the number of siblings deleted."""
-    count = 0
-    for _, sibling in _gen_tests_siblings(src_file):
-        try:
-            sibling.unlink()
-            count += 1
-        except OSError:
-            pass
-    if src_file.exists():
-        original = src_file.read_text(encoding="utf-8")
-        cleaned = _strip_gen_tests_decls(original)
-        if cleaned != original:
-            src_file.write_text(cleaned, encoding="utf-8")
-    return count
-
-
-def _extract_branch_guard(lines: list[str], line_no: int) -> str | None:
-    """Walk backward from line_no to find the nearest enclosing if/match-arm/while condition.
-
-    Returns a short string describing the condition that must be true for line_no to execute,
-    or None if no guard is found within the search window.
-    """
-    for i in range(line_no - 2, max(-1, line_no - 30), -1):
-        stripped = lines[i].strip()
-        if not stripped:
-            continue
-        # Stop at function/impl/struct boundary — guard must be within the same function
-        if is_rust_item_boundary_line(stripped):
-            break
-        label = branch_guard_label(stripped)
-        if label is not None:
-            return label
-    return None
-
-
-def _annotate_uncovered(content: str, uncovered: set[int]) -> str:
-    """Return source annotated with '!!' markers on uncovered lines, including branch guards."""
-    lines = content.splitlines()
-    out = []
-    for i, line in enumerate(lines, 1):
-        if i in uncovered:
-            guard = _extract_branch_guard(lines, i)
-            guard_hint = f" [guard: {guard}]" if guard else ""
-            marker = f"  // !! UNCOVERED{guard_hint}"
-        else:
-            marker = ""
-        out.append(f"{i:4d} | {line}{marker}")
-    return "\n".join(out)
-
-
-def _focused_annotation(content: str, uncovered: set[int], ctx: int = 4) -> str:
-    """Show only uncovered lines plus `ctx` lines of surrounding context.
-
-    Showing the full file floods the model's context window (225 lines = ~6k chars
-    for argh_shared alone), leaving little room for the generated test block and
-    causing truncated or hallucinated output. A focused view of just the uncovered
-    regions keeps the prompt small and the types visible.
-    """
-    lines = content.splitlines()
-    show: set[int] = set()
-    for u in uncovered:
-        for i in range(max(1, u - ctx), min(len(lines) + 1, u + ctx + 1)):
-            show.add(i)
-    result, prev = [], None
-    for i in sorted(show):
-        if prev is not None and i > prev + 1:
-            result.append("     | ...")
-        if i in uncovered:
-            guard = _extract_branch_guard(lines, i)
-            guard_hint = f" [guard: {guard}]" if guard else ""
-            marker = f"  // !! UNCOVERED{guard_hint}"
-        else:
-            marker = ""
-        result.append(f"{i:4d} | {lines[i - 1]}{marker}")
-        prev = i
-    return "\n".join(result)
 
 
 def _select_relevant_siblings(
@@ -8726,101 +8416,7 @@ def _select_relevant_siblings(
     return [(srel, sc) for srel, sc, _score in scored]
 
 
-def _extract_uncovered_functions(content: str, uncovered: set[int], max_fns: int = 0) -> str:
-    """Extract complete bodies of functions that contain uncovered lines.
 
-    The model needs the full function body — not just a narrow annotation — to write
-    a meaningful behavioral assertion. Seeing the full logic lets it know what the
-    function returns and under what conditions.
-
-    Falls back to _focused_annotation if no function bodies can be identified.
-    """
-    if not uncovered:
-        return _focused_annotation(content, uncovered)
-
-    code_lines = content.splitlines()
-    n = len(code_lines)
-    result_blocks: list[str] = []
-
-    i = 0
-    while i < n:
-        if is_fn_signature_line(code_lines[i]):
-            fn_start = i  # 0-indexed
-            # Walk forward to find the matching closing brace
-            depth = 0
-            fn_end = i
-            for j in range(i, min(n, i + 300)):
-                depth += code_lines[j].count('{') - code_lines[j].count('}')
-                fn_end = j
-                if j > i and depth <= 0:
-                    break
-            # 1-indexed line numbers that belong to this function
-            fn_line_nums = set(range(fn_start + 1, fn_end + 2))
-            if fn_line_nums & uncovered:
-                annotated = []
-                for k in range(fn_start, fn_end + 1):
-                    lineno = k + 1
-                    marker = "  // !! UNCOVERED" if lineno in uncovered else ""
-                    annotated.append(f"{lineno:4d} | {code_lines[k]}{marker}")
-                result_blocks.append("\n".join(annotated))
-            i = fn_end + 1
-        else:
-            i += 1
-
-    if not result_blocks:
-        return _focused_annotation(content, uncovered)
-
-    # When many uncovered lines span many functions, cap to the first max_fns bodies.
-    # A focused prompt (≤5 functions) produces better-targeted tests than a dump of
-    # 10+ bodies where the model picks the easiest paths and ignores the rest.
-    if max_fns and len(result_blocks) > max_fns:
-        result_blocks = result_blocks[:max_fns]
-
-    return "\n\n// --- next function ---\n\n".join(result_blocks)
-
-
-def _filter_cfg_incompatible_lines(
-    source_text: str,
-    uncov_lines: set[int],
-    active_cfgs: list[str],
-) -> set[int]:
-    """Return the subset of uncov_lines that are inside #[cfg(...)] blocks incompatible
-    with active_cfgs — i.e. blocks that are compiled OUT in the current cluster.
-
-    A block is incompatible when its cfg attribute contains not(X) where X is in active_cfgs.
-    These lines can never be covered by tests in this cluster regardless of what the LLM writes.
-
-    #20: regex-free — delegates to the typed `CfgSet` (active cfgs in `true`, so a
-    `not(X)` block evaluates False → excluded).
-    """
-    if not active_cfgs:
-        return set()
-    ctx = _cfg.CfgSet.of(cfg_true=[t for p in active_cfgs for t in (p, f'feature = "{p}"')])
-    return ctx.excluded_uncovered_lines(source_text, uncov_lines)
-
-
-def _filter_cfg_excluded_lines(
-    source_text: str,
-    uncov_lines: set[int],
-    excluded_cfgs: list[str],
-) -> set[int]:
-    """Return the subset of uncov_lines inside #[cfg(X)] blocks where X is in excluded_cfgs.
-
-    These lines are compiled only when X is active — in a cluster where X is excluded (e.g.
-    stable when error_generic_member_access is excluded), they are never compiled and can
-    never be covered regardless of what the LLM writes.
-
-    Unlike _filter_cfg_incompatible_lines (which targets not(X) blocks for active clusters),
-    this function targets direct X blocks for excluded clusters.
-
-    #20: regex-free — delegates to the typed `CfgSet` (excluded cfgs in `false`, so
-    a bare `#[cfg(X)]` block evaluates False → excluded; a `not(X)` block is True →
-    kept, matching the old not()-guard).
-    """
-    if not excluded_cfgs:
-        return set()
-    ctx = _cfg.CfgSet.of(cfg_false=[t for p in excluded_cfgs for t in (p, f'feature = "{p}"')])
-    return ctx.excluded_uncovered_lines(source_text, uncov_lines)
 
 
 def _extract_public_symbols(content: str) -> str:
@@ -8940,66 +8536,6 @@ def _derive_gentest_prelude(project_dir: Path) -> tuple[str, str]:
     prelude_block = "\n    ".join(prelude_lines)
 
     return allow_line, prelude_block
-
-
-
-
-
-
-
-
-def _partition_uncovered_lines(content: str, uncovered: "set[int]", n_groups: int) -> "list[set[int]]":
-    """Split a file's uncovered lines into up to `n_groups` disjoint buckets,
-    keeping each function's lines together.
-
-    Used by task0c split-and-merge so N concurrent generations each own a
-    distinct subset of the file's uncovered functions (additive coverage, no
-    redundant work). Functions are detected the same way _extract_uncovered_
-    functions does (scan for `fn`, brace-match to the closing `}`); each
-    function that contains uncovered lines becomes one unit, distributed
-    round-robin (largest-first) so buckets are roughly balanced. Uncovered
-    lines outside any function are pooled into one extra unit. Returns only
-    non-empty buckets (so the result length may be < n_groups, e.g. when the
-    file has fewer functions than groups).
-    """
-    n_groups = max(1, n_groups)
-    if not uncovered or n_groups == 1:
-        return [set(uncovered)] if uncovered else []
-
-    code_lines = content.splitlines()
-    n = len(code_lines)
-    remaining = set(uncovered)
-    units: list[set[int]] = []  # one per function that owns uncovered lines
-
-    i = 0
-    while i < n:
-        if is_fn_signature_line(code_lines[i]):
-            depth = 0
-            fn_end = i
-            for j in range(i, min(n, i + 300)):
-                depth += code_lines[j].count('{') - code_lines[j].count('}')
-                fn_end = j
-                if j > i and depth <= 0:
-                    break
-            fn_lines = set(range(i + 1, fn_end + 2)) & remaining  # 1-indexed
-            if fn_lines:
-                units.append(fn_lines)
-                remaining -= fn_lines
-            i = fn_end + 1
-        else:
-            i += 1
-    if remaining:  # uncovered lines outside any detected function
-        units.append(remaining)
-
-    if len(units) <= 1:
-        return units if units else [set(uncovered)]
-
-    # Distribute units largest-first into n_groups balanced buckets.
-    buckets: list[set[int]] = [set() for _ in range(min(n_groups, len(units)))]
-    for unit in sorted(units, key=len, reverse=True):
-        smallest = min(buckets, key=len)
-        smallest |= unit
-    return [b for b in buckets if b]
 
 
 def task0c_augment_module(
