@@ -37,7 +37,6 @@ from pipeline_core.adapters import strip as _strip_mod
 from pipeline_core.adapters import vllm_bootstrap as _vllm_bootstrap
 from pipeline_core.adapters import workspace as _wsmod
 from pipeline_core.adapters import workspace_files as _wsfiles
-from pipeline_core.adapters import workspace_scan as _workspace_scan
 from pipeline_core.adapters.api_surface import ApiSurfaceCapture
 from pipeline_core.adapters.artifacts import (
     WorkspaceArtifacts,
@@ -149,7 +148,6 @@ from pipeline_core.adapters.task2_roles import (
 from pipeline_core.adapters.telemetry import JsonlEventEmitter, LogTelemetry
 from pipeline_core.adapters.telemetry import emit_per_file_test_overview as _emit_per_file_test_overview
 from pipeline_core.adapters.test_runner import CallableTestRunner
-from pipeline_core.adapters.workspace import WorkspaceDeps
 from pipeline_core.adapters.workspace_lifecycle import clean_state as _clean_state_impl
 from pipeline_core.adapters.workspace_restore import RestoreFromAugmented
 from pipeline_core.adapters.workspace_scan import (
@@ -211,9 +209,6 @@ from pipeline_core.application.reconstruct.module_reconstructor import ModuleRec
 from pipeline_core.application.reconstruct.reconstruction_step import ReconstructionStep
 from pipeline_core.application.reconstruct.requirements_phase import RequirementsPhase
 from pipeline_core.application.reconstruct.retrospective import (
-    PhaseCRetroDeps,
-)
-from pipeline_core.application.reconstruct.retrospective import (
     diagnose_phase_c as _diagnose_phase_c,
 )
 from pipeline_core.application.reconstruct.retrospective import (
@@ -257,9 +252,6 @@ from pipeline_core.application.tasks.genesis_audit import (
     genesis_audit,
 )
 from pipeline_core.application.tasks.task0_docs import (
-    Task0DocsDeps,
-)
-from pipeline_core.application.tasks.task0_docs import (
     task0_project_context as _task0_context_impl,
 )
 from pipeline_core.application.tasks.task0_docs import (
@@ -289,7 +281,6 @@ from pipeline_core.application.tasks.task2 import (
 )
 from pipeline_core.application.tasks.task3 import Task3Deps, run_clusters_strict
 from pipeline_core.application.tasks.task3 import task3 as _task3_impl
-from pipeline_core.application.tasks.task4 import Task4Deps
 from pipeline_core.application.tasks.task4 import task4 as _task4_impl
 from pipeline_core.application.workspace_lifecycle import (
     save_gen_tests_siblings as _wl_save_gen_tests_siblings,
@@ -298,6 +289,7 @@ from pipeline_core.application.workspace_lifecycle import (
     wipe_module_sources as _wl_wipe_module_sources,
 )
 from pipeline_core.composition import CompositionConfig as _CompositionConfig
+from pipeline_core.composition import Helpers as _Helpers
 from pipeline_core.composition import Ports as _Ports
 from pipeline_core.composition import ReconstructRoles as _ReconstructRoles
 from pipeline_core.composition import build_app as _build_app
@@ -1276,11 +1268,6 @@ _cargo_default_features = _domain_cargo_default_features
 # Workspace/dependency scanners live in adapters/workspace_scan.py (P4). Wire the
 # pipeline-bound collaborators into that module here at the composition root.
 # #14: explicit constructor injection (was workspace_scan.configure() globals).
-_WS_SCAN_DEPS = _workspace_scan.WorkspaceScanDeps(
-    ask=_ASK_CLIENT.ask, task0_model=_TASK0_MODEL,
-    skip_dir_names=frozenset(SKIP_DIR_NAMES), parse_cmd=_parse_cmd)
-
-
 def scan_workspace_structure(project_dir: Path) -> str:
     """
     Produce a markdown workspace map for TASK 2.
@@ -1330,9 +1317,6 @@ _write_workspace_stub = _wsmod.write_workspace_stub
 # validate_task2_output + validate_task2_api_surface_conformance: thin wrappers below
 # that bind the impure extractor deps at the composition root.
 from pipeline_core.application.validate import (  # noqa: E402
-    Task2CheckerDeps as _Task2CheckerDeps,
-)
-from pipeline_core.application.validate import (  # noqa: E402
     validate_task1_output,
     validate_task4_output,
 )
@@ -1341,12 +1325,6 @@ from pipeline_core.application.validate import (  # noqa: E402
 )
 from pipeline_core.application.validate import (  # noqa: E402
     validate_task2_output as _validate_task2_output_impl,
-)
-
-_VALIDATOR_DEPS = _Task2CheckerDeps(
-    enumerate_types=lambda p: _enumerate_types_via_extractor(p),
-    enumerate_fns=lambda p: _enumerate_fns_via_extractor(p),
-    load_api_surface=load_api_surface,
 )
 
 
@@ -1521,7 +1499,7 @@ def _is_git_repo(path: Path) -> bool:
 # Slice 4b: git workspace I/O relocated to pipeline_core.adapters.workspace. These are
 # thin shims delegating to the adapter with injected log/emit and the live `_git_managed`
 # flag, until call sites migrate onto a GitWorkspace instance (slice 5).
-_WS_DEPS = WorkspaceDeps(log=_log, emit=_emit)
+# S3.5: WorkspaceDeps construction migrated into build_app; re-exported above as _APP.ws_deps.
 
 
 
@@ -1592,6 +1570,21 @@ _CFG = _CompositionConfig(
     task4_verbosity_guard=_TASK4_VERBOSITY_GUARD, extra_cap=_EXTRA_CAP,
     tarpaulin_bin=TARPAULIN_BIN, grcov_bin=GRCOV_BIN, build_timeout=BUILD_TIMEOUT,
     ignore_pragma=COVERAGE_IGNORE_PRAGMA,
+    skip_dir_names=frozenset(SKIP_DIR_NAMES),
+    intermediate_char_limit=INTERMEDIATE_CHAR_LIMIT,
+    single_call_char_limit=SINGLE_CALL_CHAR_LIMIT,
+    readme_cap=_README_CAP, profile_cap=_PROFILE_CAP,
+    project_context_name=PROJECT_CONTEXT_NAME,
+    failed_body_cap=_FAILED_BODY_CAP, fix_err_cap=_FIX_ERR_CAP,
+)
+# Phase 3 S3.5-10: resident pipeline helpers the migrated deps need, late-binding.
+_HELPERS = _Helpers(
+    parse_cmd=lambda *a, **k: _parse_cmd(*a, **k),
+    prompt_budget=lambda *a, **k: prompt_budget(*a, **k),
+    ask_retrospective=lambda *a, **k: _ask_retrospective(*a, **k),
+    extract_and_store_rules=lambda *a, **k: _task4_extract_and_store_rules(*a, **k),
+    enumerate_types=lambda *a, **k: _enumerate_types_via_extractor(*a, **k),
+    enumerate_fns=lambda *a, **k: _enumerate_fns_via_extractor(*a, **k),
 )
 # Phase 3 S3.4: TASK-1→4 reconstruction role callables, late-binding (the wrapped
 # fns are defined later in this module; lambdas resolve them at call time).
@@ -1612,9 +1605,14 @@ _ROLES = _ReconstructRoles(
     validate_task4_output=lambda *a, **k: validate_task4_output(*a, **k),
     task_genesis_audit=lambda *a, **k: task_genesis_audit(*a, **k),
 )
-_APP = _build_app(ADAPTERS, SETTINGS, _RUN, _SCOPE, _PORTS, _CFG, _ROLES)
+_APP = _build_app(ADAPTERS, SETTINGS, _RUN, _SCOPE, _PORTS, _CFG, _ROLES, _HELPERS)
 # P1: the real StructureReader — injected into the fill engine (no monkeypatch seam).
 _STRUCTURE = _APP.structure
+# S3.5/6/10: these deps are consumed only inside `def` bodies (lazy), so their
+# construction migrates into build_app and they're re-exported here by name.
+_WS_DEPS = _APP.ws_deps
+_WS_SCAN_DEPS = _APP.ws_scan_deps
+_VALIDATOR_DEPS = _APP.validator_deps
 # #23: build.rs cfg authority — prunes phantom clusters from source `#[cfg]` atoms.
 _BUILD_SCRIPT_READER = CargoBuildScriptReader()
 # P6: TASK 0c augmentation sentinels (injected into ClusterAugmentor + strip/bake).
@@ -2308,10 +2306,8 @@ def _phase_c_retrospective(
     )
 
 
-_PHASE_C_RETRO_DEPS = PhaseCRetroDeps(
-    ask_retrospective=_ask_retrospective, log=_log,
-    failed_body_cap=_FAILED_BODY_CAP, fix_err_cap=_FIX_ERR_CAP,
-)
+# S3.9: PhaseCRetroDeps construction migrated into build_app; re-export by name.
+_PHASE_C_RETRO_DEPS = _APP.phase_c_retro_deps
 
 
 def _count_relevant_notes(fr_path: Path | None,
@@ -3161,18 +3157,8 @@ def _commit_and_mark(
 
 
 # slice 5b: deps for the extracted task0 doc tasks (profile + context).
-_TASK0_DOCS_DEPS = Task0DocsDeps(
-    phase_valid=_phase_valid,
-    mark_phase=_mark_phase,
-    ask=_ASK_CLIENT.ask,
-    write=write,
-    prompt_budget=prompt_budget,
-    task0_model=_TASK0_MODEL,
-    model=MODEL,
-    readme_cap=_README_CAP,
-    profile_cap=_PROFILE_CAP,
-    project_context_name=PROJECT_CONTEXT_NAME,
-)
+# S3.8: Task0DocsDeps construction migrated into build_app; re-export by name.
+_TASK0_DOCS_DEPS = _APP.task0_docs_deps
 
 
 def task0_project_profile(profile_path: Path, test_files, readme_text: str) -> str:
@@ -4194,17 +4180,8 @@ _TASK3_DEPS = Task3Deps(
     write=write,
     test_timeout=TEST_TIMEOUT,
 )
-_TASK4_DEPS = Task4Deps(
-    ask=_ASK_CLIENT.ask,
-    read=read,
-    write=write,
-    extract_and_store_rules=_task4_extract_and_store_rules,
-    model=MODEL,
-    task4_model=_TASK4_MODEL,
-    verbosity_guard=_TASK4_VERBOSITY_GUARD,
-    intermediate_char_limit=INTERMEDIATE_CHAR_LIMIT,
-    single_call_char_limit=SINGLE_CALL_CHAR_LIMIT,
-)
+# S3.7: Task4Deps construction migrated into build_app; re-export by name.
+_TASK4_DEPS = _APP.task4_deps
 
 
 def _describe_test_environment() -> str:
