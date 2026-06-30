@@ -63,7 +63,6 @@ from pipeline_core.adapters.cluster_merge import ClusterMerger
 from pipeline_core.adapters.cluster_pruning import prune_redundant_clusters as _prune_redundant_clusters
 from pipeline_core.adapters.commit_gate import CallableCommitGate
 from pipeline_core.adapters.commit_gate import commit_and_mark as _commit_and_mark_impl
-from pipeline_core.adapters.coverage import CoverageDeps
 from pipeline_core.adapters.downstream_api import scan_downstream_api
 from pipeline_core.adapters.failure_journal import FileFailureJournal
 from pipeline_core.adapters.file_constraints import FileConstraintsReader
@@ -303,6 +302,7 @@ from pipeline_core.application.workspace_lifecycle import (
 from pipeline_core.application.workspace_lifecycle import (
     wipe_module_sources as _wl_wipe_module_sources,
 )
+from pipeline_core.composition import CompositionConfig as _CompositionConfig
 from pipeline_core.composition import Ports as _Ports
 from pipeline_core.composition import build_app as _build_app
 from pipeline_core.domain import cfg as _cfg
@@ -1592,8 +1592,12 @@ _PORTS = _Ports(
     guard=lambda loc, msg: _guard(loc, msg),
     cargo_env=lambda: _cargo_env(),
 )
-_APP = _build_app(ADAPTERS, SETTINGS, _RUN, _PORTS,
-                  task4_verbosity_guard=_TASK4_VERBOSITY_GUARD, extra_cap=_EXTRA_CAP)
+_CFG = _CompositionConfig(
+    task4_verbosity_guard=_TASK4_VERBOSITY_GUARD, extra_cap=_EXTRA_CAP,
+    tarpaulin_bin=TARPAULIN_BIN, grcov_bin=GRCOV_BIN, build_timeout=BUILD_TIMEOUT,
+    ignore_pragma=COVERAGE_IGNORE_PRAGMA,
+)
+_APP = _build_app(ADAPTERS, SETTINGS, _RUN, _SCOPE, _PORTS, _CFG)
 # P1: the real StructureReader — injected into the fill engine (no monkeypatch seam).
 _STRUCTURE = _APP.structure
 # #23: build.rs cfg authority — prunes phantom clusters from source `#[cfg]` atoms.
@@ -4204,15 +4208,8 @@ def _describe_test_environment() -> str:
 # the pipeline's log + cargo-env + live-cluster accessor + tool paths/timeout/pragma so the
 # adapter stays import-independent of pipeline.py. `cluster` is a callable (the active
 # cluster is reassigned across the run; resolve at call time = original global semantics).
-_COV_DEPS = CoverageDeps(
-    log=_log,
-    cargo_env=_cargo_env,
-    cluster=_SCOPE.get_active,
-    tarpaulin_bin=TARPAULIN_BIN,
-    grcov_bin=GRCOV_BIN,
-    build_timeout=BUILD_TIMEOUT,
-    ignore_pragma=COVERAGE_IGNORE_PRAGMA,
-)
+# Phase 3 S3 slice 3: constructed in composition.build_app; re-exported by name.
+_COV_DEPS = _APP.coverage_deps
 
 
 def _run_tarpaulin(project_dir: Path, module_name: str) -> tuple[float, list[dict], int, int]:

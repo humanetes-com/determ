@@ -13,11 +13,14 @@ from __future__ import annotations
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 from pipeline_core.adapters import Adapters
+from pipeline_core.adapters.coverage import CoverageDeps
 from pipeline_core.adapters.structure import CliStructureReader
 from pipeline_core.application.tasks.discover_test_command import DiscoverTestCommandDeps
 from pipeline_core.application.tasks.genesis_audit import GenesisAuditDeps
+from pipeline_core.domain.cluster_scope import ClusterScope
 from pipeline_core.domain.run_state import RunState
 from pipeline_core.io import read, write
 from pipeline_core.settings import Settings
@@ -39,6 +42,21 @@ class Ports:
 
 
 @dataclass(frozen=True)
+class CompositionConfig:
+    """Pipeline-level constants the wired deps need that don't (yet) live in
+    `Settings` — tool paths, timeouts, char caps, prompt fragments. Bundled so
+    `build_app`'s signature doesn't grow a kwarg per migrated block. Fold these
+    into `Settings` in a later slice."""
+
+    task4_verbosity_guard: str
+    extra_cap: int
+    tarpaulin_bin: Path
+    grcov_bin: Path
+    build_timeout: int
+    ignore_pragma: str
+
+
+@dataclass(frozen=True)
 class App:
     """The wired application: external ports + run-scoped state + boundary
     providers and use-case deps built from them. Grown one S3 slice at a time
@@ -47,42 +65,51 @@ class App:
     adapters: Adapters
     settings: Settings
     run_state: RunState
+    scope: ClusterScope
     ports: Ports
+    config: CompositionConfig
     # Syn-extractor boundary: the structured-source reader over `adapters.extractor`.
     structure: CliStructureReader
     # Migrated use-case deps:
     genesis_audit_deps: GenesisAuditDeps       # TASK-4 genesis audit (S3 slice 1)
     discover_test_cmd_deps: DiscoverTestCommandDeps  # test-command discovery (S3 slice 2)
+    coverage_deps: CoverageDeps                # coverage I/O (S3 slice 3)
 
 
 def build_app(
     adapters: Adapters,
     settings: Settings,
     run_state: RunState,
+    scope: ClusterScope,
     ports: Ports,
-    *,
-    task4_verbosity_guard: str,
-    extra_cap: int,
+    config: CompositionConfig,
 ) -> App:
-    """Assemble the App from its ports. Pure wiring (no I/O) — the place a test
-    passes fake adapters/ports to get a fake-backed App. (The remaining explicit
-    kwargs are pipeline-level constants not yet in `Settings`; fold them in later.)"""
+    """Assemble the App from its ports + run-scoped holders + config. Pure wiring
+    (no I/O) — the place a test passes fake adapters/ports to get a fake-backed App."""
+    cfg = config
     return App(
         adapters=adapters,
         settings=settings,
         run_state=run_state,
+        scope=scope,
         ports=ports,
+        config=config,
         structure=CliStructureReader(adapters.extractor),
         genesis_audit_deps=GenesisAuditDeps(
             ask=ports.ask, read=read, write=write,
             model=settings.task_models.task4,
-            verbosity_guard=task4_verbosity_guard,
+            verbosity_guard=cfg.task4_verbosity_guard,
         ),
         discover_test_cmd_deps=DiscoverTestCommandDeps(
             ask=ports.ask,
             task0_model=settings.task_models.task0,
             model_name=settings.model,
-            extra_cap=extra_cap,
+            extra_cap=cfg.extra_cap,
             sys_exit=sys.exit,
+        ),
+        coverage_deps=CoverageDeps(
+            log=ports.log, cargo_env=ports.cargo_env, cluster=scope.get_active,
+            tarpaulin_bin=cfg.tarpaulin_bin, grcov_bin=cfg.grcov_bin,
+            build_timeout=cfg.build_timeout, ignore_pragma=cfg.ignore_pragma,
         ),
     )
