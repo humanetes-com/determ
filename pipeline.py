@@ -4133,9 +4133,13 @@ GENESIS_AUDIT_INTERVAL = 5
 NO_IMPROVEMENT_THRESHOLD = 3
 
 
-# Phase 3 S3 slice 1: genesis-audit deps now constructed in composition.build_app.
+# Phase 3 S3 slice 1: genesis-audit deps now CONSTRUCTED in composition.build_app;
+# pipeline re-exports the name so call sites + tests are unchanged.
+_GENESIS_AUDIT_DEPS = _APP.genesis_audit_deps
+
+
 def task_genesis_audit(genesis_path: Path) -> bool:
-    return genesis_audit(genesis_path, _APP.genesis_audit_deps)
+    return genesis_audit(genesis_path, _GENESIS_AUDIT_DEPS)
 
 
 # ---------------------------------------------------------------------------
