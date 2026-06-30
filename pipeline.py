@@ -4639,10 +4639,6 @@ _TASK0C_DEPS = Task0cDeps(
     coverage_provider=_coverage_provider, check_stop=_check_graceful_stop,
 )
 
-# P5-S3: deps for the extracted gen_tests reattach block (per-block injection).
-# S3.12: ReattachDeps construction migrated into build_app; re-export by name.
-_REATTACH_DEPS = _APP.reattach_deps
-
 # P6: pre-strip API-surface capture — focused adapter, composition-injected.
 _API_SURFACE = ApiSurfaceCapture(
     api_surface_path=_api_surface_path, type_manifest_path=_type_manifest_path,
@@ -4668,31 +4664,12 @@ _STRIP_BAKE_DEPS = StripBakeDeps(
     coverage_target=COVERAGE_AUGMENTATION_TARGET,
 )
 
-# S3.11: LockDeps construction migrated into build_app; re-export by name.
-_LOCK_DEPS = _APP.lock_deps
-
-
-# P6: the `_ReconstructAdapter` god-object is dissolved — each reconstruction
-# role is a focused adapter (adapters.reconstruct_roles), constructor-injected
-# with the resident task1-4/fix composition-wiring callables; the use-cases get
-# narrow role ports (ISP) instead of one multi-role binding object.
-# S3.4: role-adapter construction migrated into build_app; re-export by name.
-_PHASE_GATE = _APP.phase_gate
-_REQUIREMENTS = _APP.requirements
-_GENERATOR = _APP.generator
-_FIXER = _APP.fixer
-_ANALYST = _APP.analyst
-# S3.13-20: reconstruction use-case spine migrated into build_app; re-export by name.
-_COVERAGE_DOCS = _APP.coverage_docs               # S15
-_FLOW_AUDIT = _APP.flow_audit                     # S16
-_DOCS_METRICS = _APP.docs_metrics                 # S16
-_FAILURE_JOURNAL = _APP.failure_journal           # S13
-_WORKSPACE_ARTIFACTS = _APP.workspace_artifacts   # S13
-# S23: _TELEMETRY built standalone above (injected into build_app).
-_TEST_RUNNER = _APP.test_runner                   # S14
+# S24: the role adapters (_PHASE_GATE/…/_ANALYST) + spine use-cases
+# (_LOCK_DEPS/_REATTACH_DEPS/_RECONSTRUCTION_STEP/_FAILURE_ANALYSIS/_COVERAGE_DOCS/
+# _FLOW_AUDIT/_DOCS_METRICS/_FAILURE_JOURNAL/_WORKSPACE_ARTIFACTS/_TEST_RUNNER) are
+# consumed only INSIDE build_app now → their pipeline re-exports were dead and deleted.
+# main() reads only these two:
 _REQUIREMENTS_PHASE = _APP.requirements_phase     # S17
-_RECONSTRUCTION_STEP = _APP.reconstruction_step   # S18
-_FAILURE_ANALYSIS = _APP.failure_analysis         # S19
 _MODULE_RECONSTRUCTOR = _APP.module_reconstructor # S20
 
 

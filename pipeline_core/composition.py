@@ -206,12 +206,6 @@ class App:
     discover_test_cmd_deps: DiscoverTestCommandDeps  # test-command discovery (S3 slice 2)
     coverage_deps: CoverageDeps                # coverage I/O (S3 slice 3)
     coverage_provider: CoverageProvider        # backend-selected coverage provider (S22)
-    # ISP reconstruction role adapters (S3 slice 4):
-    phase_gate: PhaseGateAdapter
-    requirements: RequirementsAdapter
-    generator: GeneratorAdapter
-    fixer: FixerAdapter
-    analyst: AnalystAdapter
     # S3 slices 5-10 — migrated use-case deps:
     ws_deps: WorkspaceDeps                      # git workspace I/O (S3 slice 5)
     ws_scan_deps: WorkspaceScanDeps            # workspace structure scan (S3 slice 6)
@@ -219,20 +213,13 @@ class App:
     task0_docs_deps: Task0DocsDeps             # TASK-0 profile/context docs (S3 slice 8)
     phase_c_retro_deps: PhaseCRetroDeps        # phase-C retrospective (S3 slice 9)
     validator_deps: Task2CheckerDeps           # TASK-2 output validators (S3 slice 10)
-    # Reconstruction use-case spine (S3 slices 11-20):
-    lock_deps: LockDeps                        # lock/complete transition (S11)
-    reattach_deps: ReattachDeps                # gen_tests reattach (S12)
-    failure_journal: FileFailureJournal        # (S13)
-    workspace_artifacts: WorkspaceArtifacts    # (S13)
-    telemetry: LogTelemetry                    # (S13)
-    test_runner: CallableTestRunner            # (S14)
-    coverage_docs: CoverageDocsAdapter         # (S15)
-    flow_audit: FlowAuditAdapter               # (S16)
-    docs_metrics: DocsMetricsAdapter           # (S16)
-    requirements_phase: RequirementsPhase      # (S17)
-    reconstruction_step: ReconstructionStep    # (S18)
-    failure_analysis: FailureAnalysisStep      # (S19)
-    module_reconstructor: ModuleReconstructor  # (S20)
+    # Reconstruction use-case spine (S3 slices 11-20). NB: the role adapters +
+    # lock/reattach/journal/artifacts/test_runner/coverage_docs/flow_audit/
+    # docs_metrics/reconstruction_step/failure_analysis are consumed only as
+    # build_app locals (to assemble the phase use-cases) → not exposed on App (S24).
+    telemetry: LogTelemetry                    # injected (S23)
+    requirements_phase: RequirementsPhase      # (S17) — read by main()
+    module_reconstructor: ModuleReconstructor  # (S20) — read by main()
 
 
 def build_app(
@@ -338,11 +325,6 @@ def build_app(
         ),
         coverage_deps=coverage_deps,
         coverage_provider=make_coverage_provider(settings.coverage_backend, coverage_deps),
-        phase_gate=phase_gate,
-        requirements=requirements,
-        generator=generator,
-        fixer=fixer,
-        analyst=analyst,
         ws_deps=WorkspaceDeps(log=ports.log, emit=ports.emit),
         ws_scan_deps=WorkspaceScanDeps(
             ask=ports.ask, task0_model=settings.task_models.task0,
@@ -370,17 +352,7 @@ def build_app(
             enumerate_types=helpers.enumerate_types, enumerate_fns=helpers.enumerate_fns,
             load_api_surface=load_api_surface,
         ),
-        lock_deps=lock_deps,
-        reattach_deps=reattach_deps,
-        failure_journal=failure_journal,
-        workspace_artifacts=workspace_artifacts,
         telemetry=telemetry,
-        test_runner=test_runner,
-        coverage_docs=coverage_docs,
-        flow_audit=flow_audit,
-        docs_metrics=docs_metrics,
         requirements_phase=requirements_phase,
-        reconstruction_step=reconstruction_step,
-        failure_analysis=failure_analysis,
         module_reconstructor=module_reconstructor,
     )
