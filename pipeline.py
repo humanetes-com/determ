@@ -145,6 +145,7 @@ from pipeline_core.adapters.workspace_scan import (
     _dependency_graph_factory,
     _workspace_scanner_factory,
 )
+from pipeline_core.application import fix_loop as _fix_loop
 from pipeline_core.application import orchestrator as _orchestrator
 from pipeline_core.application import test_count as _tc_app
 from pipeline_core.application.cluster_augment import (
@@ -320,7 +321,6 @@ from pipeline_core.domain.enums import (
 from pipeline_core.domain.failure_classification import (
     classify_failure as _classify_failure,
 )
-from pipeline_core.domain.fix_report import FixReport as _FixReport
 from pipeline_core.domain.fix_session import FixSession
 from pipeline_core.domain.impl_block_ranges import (
     impl_where_clause,
@@ -3636,268 +3636,12 @@ def generate_fix_loop(
     fr_path: "Path | None" = None,
     check_fn: "Callable[[], tuple[bool, str]] | None" = None,
 ) -> tuple[bool, str]:
-    """
-    Shared iterative fix loop for any code generation step.
-
-    check_fn, when given, REPLACES check_cmd as the verdict authority — the
-    post-task3 fix loop passes the per-cluster strict runner here so a fix is
-    validated under EVERY baked cluster's toolchain/env_extra. A bare
-    check_cmd sees only the default cluster and instantly "passes" while a
-    cfg-gated cluster is failing (the 2026-06-12 false SUCCESS).
-
-    fr_path (functional_requirements_{module}.md) keys the Repository
-    Specifications section (FR + genesis + API) injected into every fix
-    prompt this loop builds — the per-fn/per-impl inner loops and the
-    whole-file rewrite path.
-
-    Pattern:
-      1. Run check_cmd (compile check or test run).
-      2. If it passes → return (True, output).
-      3. If it fails → show LLM the error + current source files, ask it to fix
-         ONLY the broken files (preserve correct ones).
-      4. Write fixed files, re-run check.
-      5. Repeat up to max_fix_attempts times.
-
-    Used by:
-    - TASK 0c: fix unit tests that don't compile (compile check).
-    - TASK 2 inner loop: fix generated code that doesn't compile (build check).
-    - Post-TASK 3: fix generated code whose tests fail at runtime (test run).
-
-    Returns (passed, final_output).
-    """
-    def _log_compile_overview(output: str, attempt_n: int) -> None:
-        """Log per-file error table and emit compile.file_stats event."""
-        err_by_file = _fix_diag.errors_by_file(output)
-        fstats = _fix_diag.file_stats(source_paths, project_dir)
-        all_files = sorted({*fstats.keys(), *err_by_file.keys()})
-        clean = sum(1 for f in all_files if err_by_file.get(f, 0) == 0 and f in fstats)
-        total = len(all_files)
-        _log(f"  [fix loop] File overview — {clean}/{total} clean, attempt {attempt_n}:")
-        max_name = max((len(f.split('/')[-1]) for f in all_files), default=10)
-        rows_data = []
-        for f in sorted(all_files, key=lambda f: (-err_by_file.get(f, 0), f)):
-            errs = err_by_file.get(f, 0)
-            st = fstats.get(f, {})
-            lines = st.get("lines", 0)
-            fns = st.get("fns", 0)
-            short = f.split("/")[-1]
-            bar_s = "█" * min(errs, 8) if errs else "✓"
-            _log(f"    {short.ljust(max_name)}  {str(lines).rjust(4)}L  {str(fns).rjust(3)}fn  {bar_s} {errs or 'clean'}")
-            rows_data.append({"file": f, "lines": lines, "fns": fns, "errors": errs})
-        _emit("compile.file_stats", data={
-            "attempt": attempt_n, "clean": clean, "total": total, "files": rows_data,
-        })
-        # When the check command runs tests (t3 fix loop), publish per-file
-        # test results alongside the compile stats.
-        _emit_per_file_test_overview(
-            project_dir, output, context=f"fix attempt {attempt_n}")
-
-    env = _cargo_env()
-    _fl_max_stalls = int(os.getenv("GENERATE_FIX_LOOP_MAX_STALLS", "3"))
-    # `max_fix_attempts` retained as a kwarg for backward-compat but is no
-    # longer a counter cap — it's used only as a logging hint. Real exit is
-    # the floor-stall in `_improvement_loop`.
-    _ = max_fix_attempts
-
-    def _run_check() -> tuple[bool, str, int]:
-        # Graceful-stop check at the top of each iter.
-        _graceful_sentinel = Path("/tmp/pipeline_graceful_stop")
-        if _graceful_sentinel.exists():
-            with suppress(OSError):
-                _graceful_sentinel.unlink()
-            _log("  [fix loop] Graceful stop requested — exiting cleanly.")
-            sys.exit(0)
-        try:
-            if check_fn is not None:
-                ok, output = check_fn()
-                if ok:
-                    return True, output, 0
-            else:
-                result = subprocess.run(
-                    _parse_cmd(check_cmd), cwd=project_dir,
-                    capture_output=True, text=True, timeout=timeout, env=env,
-                )
-                output = result.stdout + (
-                    "\n--- stderr ---\n" + result.stderr if result.stderr else ""
-                )
-                if result.returncode == 0:
-                    return True, output, 0
-        except subprocess.TimeoutExpired:
-            return False, f"TIMEOUT after {timeout}s", 10**9
-        # Floor metric: compile-error sigs while it won't compile, then failing
-        # -test count (so the stall budget senses behavioral repair). See docstring.
-        return False, output, _fix_diag.floor_metric(output)
-
-    def _do_fix(output: str, history: list[dict], *, retro: str) -> _FixReport:
-        """Legacy whole-file rewrite strategy. Returns a typed FixReport (the
-        composition root passes this as generate_fix's `whole_file_fix`)."""
-        if output.startswith("TIMEOUT after "):
-            return _FixReport.aborted(
-                reason="check_timeout", summary="check timed out")
-        _log_compile_overview(output, len(history))
-        # Build source context — read current content from disk in full.
-        source_block = ""
-        for p in source_paths:
-            rel = str(p.relative_to(project_dir))
-            if rel in existing_test_files or not p.exists():
-                continue
-            content = p.read_text(encoding="utf-8")
-            source_block += f'\n<FILE path="{rel}">\n{content}\n</FILE>\n'
-
-        # Repository Specifications complement: genesis rules + methodology
-        # (the FR is already in the spec block; no target identifiers here, so
-        # the FR-excerpt/API parts of the section stay empty by design).
-        _repo_block = _tag_block(
-            "REPOSITORY_SPECIFICATIONS",
-            _repo_spec_section(fr_path, char_budget=_REPO_SPEC_CAP_WIDE))
-        prompt = build_whole_file_fix_prompt(
-            thinking_directive=_FIX_THINKING_DIRECTIVE,
-            file_format_instruction=FILE_FORMAT_INSTRUCTION,
-            verbosity_guard=_TASK2_VERBOSITY_GUARD,
-            single_call_char_limit=SINGLE_CALL_CHAR_LIMIT,
-            output=output, history=history, retro=retro,
-            source_block=source_block, extra_context=extra_context,
-            functional_req=functional_req,
-            gotchas_brief=_gotchas_summary(),
-            gotchas_specific=_gotchas_for_error(output),
-            repo_block=_repo_block)
-        _log(f"  [fix loop] iter {len(history) + 1} — asking LLM to fix specific failures.")
-        response = _ASK_CLIENT.ask(prompt, model=model)
-        fixed = extract_files(response)
-        if not fixed:
-            _log(f"  [fix loop] LLM produced no fixes on iter {len(history) + 1}.")
-            _err_preview = output[-_FIX_ERR_CAP:] if len(output) > _FIX_ERR_CAP else output
-            return _FixReport.unchanged(
-                summary="no_fixes_produced", error_preview=_err_preview)
-        # Whole-file rewrites (legacy strategy — the model returns each broken
-        # file in full and we overwrite it).
-        for rel, content in fixed.items():
-            if rel in existing_test_files:
-                continue
-            if Path(rel).suffix not in SOURCE_EXTENSIONS:
-                continue
-            if allowed_dir_prefix and not rel.startswith(allowed_dir_prefix):
-                _log(f"  [fix loop] REJECTED {rel}: outside allowed dir '{allowed_dir_prefix}'.")
-                continue
-            stripped = content.lstrip()
-            if is_compiler_output_line(stripped):
-                _log(f"  [fix loop] REJECTED {rel}: content looks like compiler output, not code.")
-                continue
-            write(project_dir / rel, content)
-            _log(f"  [fix loop] Fixed: {rel}")
-
-        _all_changed = sorted(fixed.keys())
-        _err_preview = output[-_FIX_ERR_CAP:] if len(output) > _FIX_ERR_CAP else output
-
-        # BL-025: log fix patterns for future prompts.
-        if _all_changed:
-            _bl025_module = allowed_dir_prefix.rstrip('/').split('/')[-2] if allowed_dir_prefix else ""
-            if _bl025_module:
-                _error_category = _categorize_compile_error(output)
-                _fix_hint = "; ".join(_all_changed[:3])
-                compile_patterns_write(
-                    project_dir, _bl025_module, _error_category,
-                    example=output[:200],
-                    fix_hint=f"fixed in {_fix_hint}",
-                )
-        return _FixReport.changed(
-            summary=f"rewrote={len(_all_changed)}",
-            files_changed_str=", ".join(_all_changed[:4]) if _all_changed else "no files changed",
-            error_preview=_err_preview, error_sig=_err_preview)
-
-    def _do_retro(output: str, history: list[dict]) -> str:
-        return _whole_tree_retrospective(
-            error_excerpt=output, history=history, name="generate_fix_loop",
-        )
-
-    # --- shared helpers for the per_fn strategy (unit = fn | impl) ----------
-    def _tests_for_names(names: "set[str]") -> str:
-        """Test files referencing any of `names`, budget-capped."""
-        parts: list[str] = []
-        used = 0
-        for trel in sorted(existing_test_files):
-            tp = project_dir / trel
-            if not tp.exists():
-                continue
-            try:
-                tc = tp.read_text(encoding="utf-8")
-            except OSError:
-                continue
-            if not any(n and n in tc for n in names):
-                continue
-            blk = f'<TEST path="{trel}">\n{tc}\n</TEST>'
-            if used + len(blk) > _TYPES_SECTION_CAP:
-                break
-            parts.append(blk); used += len(blk)
-        return ("\nTests this code must satisfy:\n" + "\n".join(parts) + "\n") if parts else ""
-
-    def _gotchas_block_for(out: str) -> str:
-        gd = _gotchas_for_error(out)
-        block = f"\n<RUST_GOTCHAS>\n{_gotchas_summary()}\n</RUST_GOTCHAS>\n"
-        if gd:
-            block += f"<RELEVANT_GOTCHAS_DETAIL>\n{gd}\n</RELEVANT_GOTCHAS_DETAIL>\n"
-        return block
-
-    # chunk H: the ISP role adapters (CompileChecker/FixModel/FixSplicer/
-    # FixPrompts/FrontierBuilder) now live in adapters/fix_loop_roles.py; the
-    # loop policy + prompt/splice live in application.reconstruct.{fix_unit,
-    # generate_fix}. pipeline.py is the composition root — it wires the resident
-    # check/model/splice/prompt/frontier helpers in via late-binding lambdas
-    # (preserves the _run_cargo/_splice_fn_body/ask monkeypatch seams).
-    _fix_checker = _FixCheckerAdapter(
-        run_cargo_check_diag=lambda c, cwd, e, t: _run_cargo_check_diag(c, cwd, e, t),
-        strip_ansi=_strip_ansi,
-        frontier_from_diags=lambda diags: _frontier_from_diags(diags, project_dir))
-    _fix_model = _FixModelAdapter(
-        ask_fn=lambda prompt: _ASK_CLIENT.ask(prompt, model=model))
-    _fix_splicer = _FixSplicerAdapter(
-        locate_fn_fn=_locate_fn, is_pub_fn_fn=_is_pub_fn,
-        render_impl_block_fn=_render_impl_block,
-        splice_fn_fn=_splice_fn_with_where, splice_body_fn=_splice_fn_body)
-    _fix_prompts = _FixPromptsAdapter(
-        repo_spec_block_fn=lambda *, file_rel="", fn_name="", container="":
-            _tag_block("REPOSITORY_SPECIFICATIONS", _repo_spec_section(
-                fr_path, file_rel=file_rel, fn_name=fn_name, container=container)),
-        gotchas_block_fn=_gotchas_block_for,
-        tests_block_fn=lambda names: _tests_for_names(set(names)))
-    def _behavior_frontier_filtered(output: str):
-        fr, srcs = _behavior_frontier(output, project_dir, existing_test_files)
-        return _filter_test_targets(fr, project_dir), srcs
-    _frontiers = _FrontierBuilderAdapter(
-        compile_frontier_fn=lambda output: _filter_test_targets(
-            _compile_error_frontier(output, project_dir, check_cmd, env, timeout),
-            project_dir),
-        tdd_frontier_fn=lambda output: _filter_test_targets(
-            _extract_tdd_frontier(output, project_dir), project_dir),
-        behavior_frontier_fn=_behavior_frontier_filtered)
-
-    _fix_session = FixSession.for_check_cmd(
-        project_dir=project_dir, check_cmd=check_cmd,
-        derive_check_only=_derive_check_only_cmd, env=env, timeout=timeout,
-        model=model, fr_path=fr_path,
-        existing_test_files=frozenset(existing_test_files),
-        allowed_dir_prefix=allowed_dir_prefix)
-    _fix_unit_deps = FixUnitDeps(
-        checker=_fix_checker, model=_fix_model, splicer=_fix_splicer,
-        prompts=_fix_prompts, log=_log, do_retro=_do_retro,
-        thinking_directive=_FIX_THINKING_DIRECTIVE, err_cap=_FIX_ERR_CAP,
-        per_fn_max_stalls=int(os.getenv("FIX_LOOP_PER_FN_MAX_STALLS", "2")))
-
-    _gen_fix_deps = GenerateFixDeps(
-        unit=_fix_unit_deps,
-        frontiers=_frontiers,
-        enumerate_fns=lambda: _enumerate_fns_via_extractor(project_dir) or [],
-        collect_impl_blocks=lambda: _collect_impl_blocks(project_dir) or [],
-        log_overview=_log_compile_overview,
-        whole_file_fix=lambda o, h, r: _do_fix(o, h, retro=r),
-        behavior_max_fns=int(os.getenv("FIX_BEHAVIOR_MAX_FNS", "8")),
-        src_snip_cap=_SRC_SNIP_CAP)
-
-    return run_generate_fix(
-        session=_fix_session, deps=_gen_fix_deps,
-        strategy=SETTINGS.fix_loop_strategy, unit=SETTINGS.fix_loop_unit,
-        run_check=_run_check, do_retro=_do_retro,
-        max_stalls=_fl_max_stalls, log=_log)
+    """S28: body relocated to fix_loop.generate_fix_loop; this shim binds deps."""
+    return _fix_loop.generate_fix_loop(
+        _GEN_FIX_LOOP_DEPS, project_dir, check_cmd, source_paths, existing_test_files,
+        extra_context=extra_context, model=model, max_fix_attempts=max_fix_attempts,
+        timeout=timeout, allowed_dir_prefix=allowed_dir_prefix, functional_req=functional_req,
+        fr_path=fr_path, check_fn=check_fn)
 
 
 def task2_fix_loop(
@@ -4647,6 +4391,67 @@ _FILE_CONSTRAINTS = FileConstraintsReader(
 # slice 5b: deps for the extracted TASK 0c engine (defined before main(), after every
 # collaborator). subprocess/git injected as the module; _current_cluster via a call-time
 # getter (mutable global); coverage provider as a value.
+
+# S28: deps for the relocated fix-loop body (fix_loop.generate_fix_loop).
+_GEN_FIX_LOOP_DEPS = _fix_loop.GenerateFixLoopDeps(
+    BUILD_TIMEOUT=BUILD_TIMEOUT,
+    FILE_FORMAT_INSTRUCTION=FILE_FORMAT_INSTRUCTION,
+    FixSession=FixSession,
+    FixUnitDeps=FixUnitDeps,
+    GenerateFixDeps=GenerateFixDeps,
+    MODEL=MODEL,
+    settings_now=lambda: SETTINGS,
+    SINGLE_CALL_CHAR_LIMIT=SINGLE_CALL_CHAR_LIMIT,
+    SOURCE_EXTENSIONS=SOURCE_EXTENSIONS,
+    ASK_CLIENT=_ASK_CLIENT,
+    FIX_ERR_CAP=_FIX_ERR_CAP,
+    FIX_THINKING_DIRECTIVE=_FIX_THINKING_DIRECTIVE,
+    FixCheckerAdapter=_FixCheckerAdapter,
+    FixModelAdapter=_FixModelAdapter,
+    FixPromptsAdapter=_FixPromptsAdapter,
+    FixSplicerAdapter=_FixSplicerAdapter,
+    FrontierBuilderAdapter=_FrontierBuilderAdapter,
+    REPO_SPEC_CAP_WIDE=_REPO_SPEC_CAP_WIDE,
+    SRC_SNIP_CAP=_SRC_SNIP_CAP,
+    TASK2_VERBOSITY_GUARD=_TASK2_VERBOSITY_GUARD,
+    TYPES_SECTION_CAP=_TYPES_SECTION_CAP,
+    behavior_frontier=lambda *a, **k: _behavior_frontier(*a, **k),
+    cargo_env=_cargo_env,
+    categorize_compile_error=_categorize_compile_error,
+    collect_impl_blocks=lambda *a, **k: _collect_impl_blocks(*a, **k),
+    compile_error_frontier=lambda *a, **k: _compile_error_frontier(*a, **k),
+    derive_check_only_cmd=_derive_check_only_cmd,
+    emit=lambda *a, **k: _emit(*a, **k),
+    emit_per_file_test_overview=_emit_per_file_test_overview,
+    # late-bind: the e2e harness monkeypatches pipeline._enumerate_fns_via_extractor,
+    # so resolve it from the module global at call time (not frozen at construction).
+    enumerate_fns_via_extractor=lambda *a, **k: _enumerate_fns_via_extractor(*a, **k),
+    extract_tdd_frontier=lambda *a, **k: _extract_tdd_frontier(*a, **k),
+    filter_test_targets=_filter_test_targets,
+    fix_diag=_fix_diag,
+    frontier_from_diags=lambda *a, **k: _frontier_from_diags(*a, **k),
+    gotchas_for_error=_gotchas_for_error,
+    gotchas_summary=_gotchas_summary,
+    is_pub_fn=_is_pub_fn,
+    locate_fn=_locate_fn,
+    log=_log,
+    parse_cmd=_parse_cmd,
+    render_impl_block=_render_impl_block,
+    repo_spec_section=_repo_spec_section,
+    run_cargo_check_diag=lambda *a, **k: _run_cargo_check_diag(*a, **k),
+    splice_fn_body=_splice_fn_body,
+    splice_fn_with_where=_splice_fn_with_where,
+    strip_ansi=_strip_ansi,
+    tag_block=_tag_block,
+    whole_tree_retrospective=_whole_tree_retrospective,
+    build_whole_file_fix_prompt=build_whole_file_fix_prompt,
+    compile_patterns_write=compile_patterns_write,
+    extract_files=extract_files,
+    is_compiler_output_line=is_compiler_output_line,
+    run_generate_fix=run_generate_fix,
+    write=write,
+)
+
 _TASK0C_DEPS = Task0cDeps(
     BUILD_TIMEOUT=BUILD_TIMEOUT, COVERAGE_TARGET=COVERAGE_AUGMENTATION_TARGET, coverage_ignore_pragma=COVERAGE_IGNORE_PRAGMA, TASK0C_PROMPT_CHAR_CAP=TASK0C_PROMPT_CHAR_CAP, FIX_ERR_CAP=_FIX_ERR_CAP, SIBLING_CAP=_SIBLING_CAP, SRC_SNIP_CAP=_SRC_SNIP_CAP, TASK0C_FIX_THINKING_DIRECTIVE=_TASK0C_FIX_THINKING_DIRECTIVE, TASK0C_MODEL=_TASK0C_MODEL, TASK0C_THINKING_DIRECTIVE=_TASK0C_THINKING_DIRECTIVE, WORKING_CAP=_WORKING_CAP, annotate_uncovered=_annotate_uncovered, block_is_prose=_block_is_prose, build_gen_tests_decl=_build_gen_tests_decl, guard=_guard, cargo_env=_cargo_env, cluster_gate_for=_cluster_gate_for_sibling, condense_rust_to_signatures=_condense_rust_to_signatures, count_test_attrs=_count_test_attrs, derive_gentest_prelude=_derive_gentest_prelude, describe_test_environment=_describe_test_environment, error_signatures_from_output=_error_signatures_from_output, extract_branch_guard=_extract_branch_guard, extract_gen_tests_body=_extract_gen_tests_body, extract_public_symbols=_extract_public_symbols, extract_uncovered_functions=_extract_uncovered_functions, filter_cfg_excluded_lines=_filter_cfg_excluded_lines, filter_cfg_incompatible_lines=_filter_cfg_incompatible_lines, flags_unreachable=_flags_unreachable, gen_tests_path=_gen_tests_path, has_nonempty_test_body=_has_nonempty_test_body, inject_allow_before_any_mod=_inject_allow_before_any_mod, inject_allow_before_gen_mod=_inject_allow_before_gen_mod, inject_gen_prelude_imports=_inject_gen_prelude_imports, is_gen_tests_file=_is_gen_tests_file, is_structural_line=_is_structural_line, load_file_constraints=_FILE_CONSTRAINTS.load, type_signals_write=type_signals_write, mark_phase=_mark_phase, match_gen_tests_sibling=_match_gen_tests_sibling, next_gen_tests_n=_next_gen_tests_n, nightly_rules_for_cluster=_nightly_rules_for_cluster, parse_attempt_number=_parse_attempt_number, parse_retrospective_categories=_parse_retrospective_categories, partition_uncovered_lines=_partition_uncovered_lines, prelude_import_names=_prelude_import_names, quick_file_coverage=_quick_file_coverage, read_all_gen_tests=_read_all_gen_tests, read_state=_read_state, revert_gen_tests_pass=_revert_gen_tests_pass, select_relevant_siblings=_select_relevant_siblings, set_current=_set_current, source_hash=_source_hash, strip_all_gen_tests_artifacts=_strip_all_gen_tests_artifacts, strip_gen_tests_decl_n=_strip_gen_tests_decl_n, strip_gen_tests_decls=_strip_gen_tests_decls, strip_trailing_file_tag=_strip_trailing_file_tag, mutation_harden_file=lambda *a, **k: _MUTATION.harden_file(*a, **k), gen_tests_siblings=_gen_tests_siblings, test_augmentor_factory=_test_augmentor_factory, ask=_ASK_CLIENT.ask, extract_files=extract_files, extract_test_mod=extract_test_mod, generate_fix_loop=generate_fix_loop, generate_in_parallel=generate_in_parallel, is_test_file=is_test_file, write=write,
     subprocess=subprocess, get_current_cluster=_SCOPE.get_active,
