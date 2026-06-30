@@ -256,7 +256,9 @@ def test_merge_fills_preserving_existing() -> None:
     (b) preserve all non-function content from disk (imports, types, attrs),
     and (c) never overwrite an already-filled body.
     """
-    import pipeline
+    from pipeline_core.application.reconstruct.fill_merge import (
+        merge_fills_preserving_existing as _merge_fills_preserving_existing,
+    )
 
     disk = """\
 #![allow(unused)]
@@ -281,7 +283,7 @@ pub fn stub_a(x: u32) -> u32 { x * 2 }
 
 pub fn stub_b() -> &'static str { "hello" }
 """
-    merged = pipeline._merge_fills_preserving_existing(disk, model)
+    merged = _merge_fills_preserving_existing(disk, model)
     # Preserved from disk:
     assert "#![allow(unused)]" in merged
     assert "use std::fmt::Debug;" in merged
@@ -298,14 +300,14 @@ pub fn stub_b() -> &'static str { "hello" }
     # Already-filled body is never overwritten by the model.
     disk2 = "pub fn already() -> u32 { 42 }\n"
     model2 = "pub fn already() -> u32 { 0 }\n"
-    merged2 = pipeline._merge_fills_preserving_existing(disk2, model2)
+    merged2 = _merge_fills_preserving_existing(disk2, model2)
     assert "42" in merged2
     assert "0 }" not in merged2
     print("  OK  _merge_fills_preserving_existing (preserves filled)")
 
     # Empty model output returns disk verbatim (we never lose structure).
     disk3 = "pub fn x() -> u32 { ::core::unimplemented!() }\n"
-    merged3 = pipeline._merge_fills_preserving_existing(disk3, "")
+    merged3 = _merge_fills_preserving_existing(disk3, "")
     assert merged3 == disk3
     print("  OK  _merge_fills_preserving_existing (empty model)")
 
