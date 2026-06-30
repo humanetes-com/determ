@@ -25,6 +25,35 @@ _GENERIC_FN_NAMES = {
 }
 
 
+def find_tests_referencing_fn(
+    test_files: list[Path],
+    fn_name: str,
+    max_blocks: int = 4,
+) -> list[tuple[str, str]]:
+    """Return up to `max_blocks` test files whose source text mentions `fn_name`,
+    ranked by reference count. Cheap textual heuristic — sufficient for Rust
+    tests that call the fn by name (most common)."""
+    if not fn_name:
+        return []
+    ranked: list[tuple[int, Path]] = []
+    for tf in test_files:
+        try:
+            txt = tf.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        n = count_word(txt, fn_name)
+        if n:
+            ranked.append((n, tf))
+    ranked.sort(key=lambda x: -x[0])
+    out: list[tuple[str, str]] = []
+    for _, tf in ranked[:max_blocks]:
+        try:
+            out.append((str(tf), tf.read_text(encoding="utf-8")))
+        except Exception:
+            continue
+    return out
+
+
 def find_tests_for_fn(
     tests_dir_files: list[Path],
     fn_name: str,

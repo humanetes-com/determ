@@ -15,7 +15,44 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from pipeline_core.domain.rust_scan import gen_mod_body_start
+from pipeline_core.domain.rust_scan import (
+    after_brace_newline,
+    find_mod_opener,
+    gen_mod_body_start,
+    use_imports_symbol,
+)
+
+# Std-prelude `use` statements injected into a generated test module when the
+# block doesn't already import the symbol. (stmt, prefixes-that-satisfy, symbol).
+GEN_PRELUDE_ITEMS: list[tuple[str, tuple[str, ...], str]] = [
+    ("use std::string::{String, ToString};", ("std::", "alloc::"),      "String"),
+    ("use std::vec::Vec;",                    ("std::", "alloc::"),      "Vec"),
+    ("use std::boxed::Box;",                  ("std::", "alloc::"),      "Box"),
+    ("use std::format;",                      ("std::", "alloc::"),      "format"),
+    ("use std::error::Error as StdError;",    ("std::error::Error",),    "Error"),
+    ("use std::fmt::{self, Display, Debug};", ("std::fmt", "core::fmt"), "fmt"),
+]
+
+
+def inject_gen_prelude_imports(block: str) -> str:
+    """Inject any missing std-prelude imports (GEN_PRELUDE_ITEMS) into a
+    generated test module. Inserts after `use super::*;` when present, else
+    just inside the gen mod opener. Returns `block` unchanged when nothing's
+    missing or no insertion point is found."""
+    missing = [stmt for stmt, prefixes, symbol in GEN_PRELUDE_ITEMS
+               if not use_imports_symbol(block, prefixes, symbol)]
+    if not missing:
+        return block
+    inject = "\n    ".join(missing)
+    if "use super::*;" in block:
+        return block.replace("use super::*;", f"use super::*;\n    {inject}", 1)
+    opener = find_mod_opener(block, gen_only=True)
+    if opener is None:
+        return block
+    insert_at = after_brace_newline(block, opener[1])  # after `{ … \n`
+    if insert_at is None:
+        return block
+    return block[:insert_at] + f"    {inject}\n" + block[insert_at:]
 
 
 @dataclass(frozen=True, slots=True)

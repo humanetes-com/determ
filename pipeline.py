@@ -233,6 +233,9 @@ from pipeline_core.application.reconstruct.test_grouping import group_tests as _
 from pipeline_core.application.reconstruct.test_locator import (
     find_tests_for_fn as _find_tests_for_fn,
 )
+from pipeline_core.application.reconstruct.test_locator import (
+    find_tests_referencing_fn as _find_tests_referencing_fn,
+)
 from pipeline_core.application.strip_bake import (
     StripBakeDeps,
 )
@@ -400,7 +403,6 @@ from pipeline_core.domain.rust_fn_headers import (
     locate_fn as _locate_fn,
 )
 from pipeline_core.domain.rust_idents import (
-    attr_call_args,
     camelcase_type_names,
     crate_lint_attr_args,
     defined_type_names,
@@ -408,16 +410,16 @@ from pipeline_core.domain.rust_idents import (
     use_path_requirement_gaps,
 )
 from pipeline_core.domain.rust_macros import macro_definitions
+from pipeline_core.domain.rust_macros import (
+    proc_macro_fallback_requirements as _proc_macro_fallback_requirements,
+)
 from pipeline_core.domain.rust_scan import (
-    after_brace_newline,
     count_test_attrs,
-    count_word,
     find_mod_opener,
     has_no_std_attr,
     has_nonempty_test_fn,
     is_structural_brace_line,
     strip_line_block_comments,
-    use_imports_symbol,
 )
 from pipeline_core.domain.rust_scan import (
     rust_delimiters_balanced as _rust_delimiters_balanced,
@@ -1228,6 +1230,9 @@ def _start_audit_thread() -> None:
 
 
 from pipeline_core.domain.generation import extract_test_mod  # noqa: E402
+from pipeline_core.domain.generation import (  # noqa: E402
+    inject_gen_prelude_imports as _inject_gen_prelude_imports,
+)
 
 
 def generate_in_parallel(
@@ -2127,35 +2132,6 @@ def _splice_fn_with_where(
         where_clause, allow_nonstub)
 
 
-def _find_tests_referencing_fn(
-    test_files: list[Path],
-    fn_name: str,
-    max_blocks: int = 4,
-) -> list[tuple[str, str]]:
-    """Return up to `max_blocks` test files whose source text mentions `fn_name`.
-
-    Cheap textual heuristic — sufficient for Rust tests that call the fn
-    by name (most common). Results are ranked by reference count.
-    """
-    if not fn_name:
-        return []
-    ranked: list[tuple[int, Path]] = []
-    for tf in test_files:
-        try:
-            txt = tf.read_text(encoding="utf-8")
-        except Exception:
-            continue
-        n = count_word(txt, fn_name)
-        if n:
-            ranked.append((n, tf))
-    ranked.sort(key=lambda x: -x[0])
-    out: list[tuple[str, str]] = []
-    for _, tf in ranked[:max_blocks]:
-        try:
-            out.append((str(tf), tf.read_text(encoding="utf-8")))
-        except Exception:
-            continue
-    return out
 
 
 # _extract_body_response relocated to pipeline_core.domain.llm_output (G/P6)
@@ -3730,34 +3706,6 @@ def _filter_proc_macro_test_files(test_files, crate_name: str = ""):
     return relevant or test_files
 
 
-def _proc_macro_fallback_requirements(relevant, crate_name: str = "") -> str:
-    """Static fallback: scan tests for derive/attribute usage and synthesise minimal
-    proc-macro requirements via the structured `attr_call_args` scanner."""
-    derives: set[str] = set()
-    attrs: set[str] = set()
-    _attr_name = (crate_name or "").replace("-", "_") or "derive"
-    for _, content in relevant:
-        for inner in attr_call_args(content, "derive"):
-            for d in inner.split(','):
-                derives.add(d.strip())
-        for inner in attr_call_args(content, _attr_name):
-            attrs.add(inner.strip())
-    req_content = "# Proc-macro interface\n\n"
-    req_content += "## Derive macros\n"
-    for d in sorted(derives):
-        req_content += f"- `#[derive({d})]` — implement the `{d}` trait on annotated types\n"
-    if attrs:
-        req_content += "\n## Helper attributes\n"
-        for a in sorted(attrs):
-            req_content += f"- `#[{_attr_name}({a})]`\n"
-    req_content += (
-        "\n## Entry points\n"
-        "Each derive macro must be registered with `#[proc_macro_derive(Name)]`.\n"
-        "Input: `proc_macro::TokenStream`, Output: `proc_macro::TokenStream`.\n"
-        "Parse input with `syn::parse_macro_input!(input as syn::DeriveInput)`.\n"
-        "Generate output with `quote::quote! { impl Name for #ident { ... } }`.\n"
-    )
-    return req_content
 
 
 def _new_static_task1_synthesizer() -> StaticTask1Synthesizer:
@@ -4813,14 +4761,6 @@ def _error_signatures_from_output(cargo_output: str) -> frozenset:
 # Prelude imports injected into generated test modules when absent. Each row is
 # (import_stmt, accepted `use`-prefixes, required symbol token): present when a
 # `use <prefix>…<symbol>…` statement exists (R7: rust_scan.use_imports_symbol).
-_GEN_PRELUDE_ITEMS: list[tuple[str, tuple[str, ...], str]] = [
-    ("use std::string::{String, ToString};", ("std::", "alloc::"),      "String"),
-    ("use std::vec::Vec;",                    ("std::", "alloc::"),      "Vec"),
-    ("use std::boxed::Box;",                  ("std::", "alloc::"),      "Box"),
-    ("use std::format;",                      ("std::", "alloc::"),      "format"),
-    ("use std::error::Error as StdError;",    ("std::error::Error",),    "Error"),
-    ("use std::fmt::{self, Display, Debug};", ("std::fmt", "core::fmt"), "fmt"),
-]
 
 
 def _inject_allow_before_mod(block: str, allow_line: str, *, gen_only: bool) -> str:
@@ -4841,22 +4781,6 @@ def _inject_allow_before_any_mod(block: str, allow_line: str) -> str:
     return _inject_allow_before_mod(block, allow_line, gen_only=False)
 
 
-def _inject_gen_prelude_imports(block: str) -> str:
-    """Inject missing std prelude imports into a generated test module (R7: rust_scan)."""
-    missing = [stmt for stmt, prefixes, symbol in _GEN_PRELUDE_ITEMS
-               if not use_imports_symbol(block, prefixes, symbol)]
-    if not missing:
-        return block
-    inject = "\n    ".join(missing)
-    if "use super::*;" in block:
-        return block.replace("use super::*;", f"use super::*;\n    {inject}", 1)
-    opener = find_mod_opener(block, gen_only=True)
-    if opener is None:
-        return block
-    insert_at = after_brace_newline(block, opener[1])  # after `{ … \n`
-    if insert_at is None:
-        return block
-    return block[:insert_at] + f"    {inject}\n" + block[insert_at:]
 
 
 def _count_test_attrs(block: str) -> int:

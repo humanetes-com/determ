@@ -15,8 +15,42 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from pipeline_core.domain.rust_idents import attr_call_args
+
 _MACRO_KW = "macro_rules!"
 _EXPORT_ATTR = "#[macro_export]"
+
+
+def proc_macro_fallback_requirements(
+    relevant: list[tuple[str, str]], crate_name: str = "",
+) -> str:
+    """Static fallback: scan test sources for derive/attribute usage and
+    synthesise minimal proc-macro requirements (markdown) via the structured
+    `attr_call_args` scanner. Pure text→text."""
+    derives: set[str] = set()
+    attrs: set[str] = set()
+    attr_name = (crate_name or "").replace("-", "_") or "derive"
+    for _, content in relevant:
+        for inner in attr_call_args(content, "derive"):
+            for d in inner.split(","):
+                derives.add(d.strip())
+        for inner in attr_call_args(content, attr_name):
+            attrs.add(inner.strip())
+    req = "# Proc-macro interface\n\n## Derive macros\n"
+    for d in sorted(derives):
+        req += f"- `#[derive({d})]` — implement the `{d}` trait on annotated types\n"
+    if attrs:
+        req += "\n## Helper attributes\n"
+        for a in sorted(attrs):
+            req += f"- `#[{attr_name}({a})]`\n"
+    req += (
+        "\n## Entry points\n"
+        "Each derive macro must be registered with `#[proc_macro_derive(Name)]`.\n"
+        "Input: `proc_macro::TokenStream`, Output: `proc_macro::TokenStream`.\n"
+        "Parse input with `syn::parse_macro_input!(input as syn::DeriveInput)`.\n"
+        "Generate output with `quote::quote! { impl Name for #ident { ... } }`.\n"
+    )
+    return req
 
 
 @dataclass(frozen=True, slots=True)
