@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from pipeline_core.domain.rust_idents import fn_decl_names
+from pipeline_core.domain.rust_scan import line_has_assertion
 from pipeline_core.domain.text import strip_simple_code_fence
 
 
@@ -126,3 +127,32 @@ def fallback_groups_per_file(test_files: list[tuple[str, str]]) -> list[dict[str
             "target_symbols": [],
         })
     return groups
+
+
+def extract_test_assertions(test_files: list[tuple[str, str]], module_dir_rel: str = "",
+                            max_assertions: int = 40) -> str:
+    """Extract assert_* lines with minimal surrounding context from test files.
+    Returns a compact 'assertion manifest' TASK 2 can use as ground truth. Only
+    includes files relevant to the current module (if module_dir_rel given)."""
+    results: list[str] = []
+    for rel, content in test_files:
+        if module_dir_rel and not (rel.startswith(module_dir_rel) or
+                                   f"/{module_dir_rel}" in rel):
+            continue
+        lines = content.splitlines()
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if line_has_assertion(stripped) and not stripped.startswith('//'):
+                context_line = lines[i - 1].strip() if i > 0 else ""
+                entry = (f"  {context_line}  // context\n  {stripped}"
+                         if context_line and context_line.startswith("let")
+                         else f"  {stripped}")
+                results.append(entry)
+                if len(results) >= max_assertions:
+                    break
+        if len(results) >= max_assertions:
+            break
+    if not results:
+        return ""
+    return ("Assertions the generated code must satisfy (from test files):\n"
+            + "\n".join(results))

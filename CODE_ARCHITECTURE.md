@@ -398,7 +398,9 @@ Done (session 112, all 5 gates GREEN; pipeline.py 6978→6509, −469):
 
 Dropped 6 now-orphan imports (`fn_headers`, `contains_decl_keyword`, `contains_word`, `named_fn_decl_start`, `merge_fills_preserving_existing`, `format_skeleton_for_prompt`).
 
-NEXT cohesive clusters (leaf clusters now exhausted; remaining is the coupled engine + the finale):
+**→ The full standing relocation plan now lives in `refactoring.md` (linked here as the single source of truth).** It classifies every remaining pipeline.py body into 12 leaf clusters (C1–C12) + the finale, with home/risk/gating per cluster and a refresh one-liner — consult it at session start instead of re-surveying. Update its STATUS column as slices land.
+
+NEXT cohesive clusters (leaf clusters now exhausted; remaining is the coupled engine + the finale; see `refactoring.md` for the full table):
 - `_bake_skeleton_artifacts` (134L) — the pre-strip source-read bake (HR11-sensitive); careful relocation to `application/`.
 - the cfg/test-count family (tech-debt #29 RESOLVED) + `_register_run` (59, JSON run-registry → adapter).
 - the `*Deps`-construction blocks move WITH their use-case wiring, then `main()` (478L) → `application/orchestrator.run_pipeline` (§7.3): gated on threading the run-globals (`_git_managed`, `_AUDIT_*`) via a holder so import-linter `application→pipeline` holds.

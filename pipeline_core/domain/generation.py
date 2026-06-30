@@ -599,3 +599,34 @@ def gen_tests_origin_cfgs(file_text: str) -> dict[int, str]:
             break
         out[n] = cfg
     return out
+
+
+def extract_test_mod(text: str) -> str:
+    """Brace-counter extraction of a gen_tests mod block.
+
+    Finds the first #[cfg(test)] in text, scans forward past any attribute
+    lines (#[allow(...)], etc.) to the opening brace of mod gen_*, then walks
+    character-by-character counting brace depth until the block closes.
+    Returns everything from #[cfg(test)] to the closing }, or "" if not found.
+    No regex — works regardless of what the model puts between cfg and mod.
+    """
+    cfg_pos = text.find('#[cfg(test)]')
+    if cfg_pos == -1:
+        return ""
+    mod_pos = text.find('mod gen_', cfg_pos)
+    if mod_pos == -1:
+        mod_pos = text.find('mod gen_tests', cfg_pos)
+    if mod_pos == -1:
+        return ""
+    brace_start = text.find('{', mod_pos)
+    if brace_start == -1:
+        return ""
+    depth = 0
+    for i, ch in enumerate(text[brace_start:], brace_start):
+        if ch == '{':
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0:
+                return text[cfg_pos:i + 1].strip()
+    return ""

@@ -304,3 +304,25 @@ def err_sig(output: str) -> frozenset[str]:
     if diags is not None:
         return err_sig_from_diagnostics(diags)
     return err_sig_from_text(output)
+
+
+def categorize_compile_error(error_output: str) -> str:
+    """Classify a compile error into a short category tag for compile_patterns."""
+    o = error_output.lower()
+    if "cannot find type" in o or "unresolved import" in o or "use of undeclared" in o:
+        return "missing_type"
+    if "module not found" in o or "no module named" in o or "mod " in o and "not found" in o:
+        return "module_declaration"
+    if "trait bound" in o or "does not implement" in o or "the trait" in o:
+        return "trait_bound"
+    if "mismatched types" in o or "expected" in o and "found" in o:
+        return "type_mismatch"
+    if "cannot borrow" in o or "borrow" in o and "conflict" in o:
+        return "borrow_checker"
+    if "lifetime" in o:
+        return "lifetime"
+    if "unused import" in o or "dead_code" in o:
+        return "lint_error"
+    if "proc-macro" in o or "proc_macro" in o:
+        return "proc_macro"
+    return "compile_error"

@@ -13,6 +13,8 @@ structured character scan (:func:`backtick_spans`) with byte-equivalent semantic
 
 from __future__ import annotations
 
+import shlex
+
 # Known command prefixes across common project types.
 KNOWN_PREFIXES: tuple[str, ...] = (
     "cargo", "pytest", "python", "npm", "npx", "yarn", "pnpm",
@@ -135,3 +137,35 @@ INFERENCE_PROMPT = """No project files are available. Output the single most com
 the full test suite for a typical software project (e.g. `cargo test`, `pytest`, `npm test`).
 Output only the command on one line. No explanation, no markdown fences.
 """
+
+
+def parse_cmd(cmd: str) -> list[str]:
+    """Split a shell command string into a list, falling back to str.split on error."""
+    try:
+        return shlex.split(cmd)
+    except ValueError:
+        return cmd.split()
+
+
+def derive_check_only_cmd(check_cmd: str) -> str:
+    """Derive a compile-only (`cargo check`) command from a caller's check_cmd:
+    swap the `test`/`build` subcommand → `check`, drop the test harness args
+    (anything after a bare `--`) and `--no-run`/`--no-fail-fast`.
+
+    Examples:
+      cargo test -p anyhow --no-run          → cargo check -p anyhow
+      cargo +nightly test -p x -- --threads  → cargo +nightly check -p x
+      cargo check -p x                       → cargo check -p x  (unchanged)
+    """
+    out_toks: list[str] = []
+    for t in parse_cmd(check_cmd):
+        if t == "--":
+            break
+        if t in ("test", "build"):
+            out_toks.append("check")
+            continue
+        if t in ("--no-run", "--no-fail-fast"):
+            continue
+        out_toks.append(t)
+    s = " ".join(out_toks).strip()
+    return s if "check" in s.split() else "cargo check"

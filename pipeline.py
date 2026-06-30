@@ -410,7 +410,6 @@ from pipeline_core.domain.rust_scan import (
     has_no_std_attr,
     has_nonempty_test_fn,
     is_structural_brace_line,
-    line_has_assertion,
     strip_line_block_comments,
     use_imports_symbol,
 )
@@ -1357,35 +1356,7 @@ class ChunkProgress:
 # (for large files where whole-file rewrites truncate). See generate_fix_loop.
 
 
-def extract_test_mod(text: str) -> str:
-    """Brace-counter extraction of a gen_tests mod block.
-
-    Finds the first #[cfg(test)] in text, scans forward past any attribute
-    lines (#[allow(...)], etc.) to the opening brace of mod gen_*, then walks
-    character-by-character counting brace depth until the block closes.
-    Returns everything from #[cfg(test)] to the closing }, or "" if not found.
-    No regex — works regardless of what the model puts between cfg and mod.
-    """
-    cfg_pos = text.find('#[cfg(test)]')
-    if cfg_pos == -1:
-        return ""
-    mod_pos = text.find('mod gen_', cfg_pos)
-    if mod_pos == -1:
-        mod_pos = text.find('mod gen_tests', cfg_pos)
-    if mod_pos == -1:
-        return ""
-    brace_start = text.find('{', mod_pos)
-    if brace_start == -1:
-        return ""
-    depth = 0
-    for i, ch in enumerate(text[brace_start:], brace_start):
-        if ch == '{':
-            depth += 1
-        elif ch == '}':
-            depth -= 1
-            if depth == 0:
-                return text[cfg_pos:i + 1].strip()
-    return ""
+from pipeline_core.domain.generation import extract_test_mod  # noqa: E402
 
 
 def generate_in_parallel(
@@ -1467,46 +1438,14 @@ def _parse_cmd(cmd: str) -> list[str]:
         return cmd.split()
 
 
-def _derive_check_only_cmd(check_cmd: str) -> str:
-    """Derive a compile-only (`cargo check`) command from a caller's check_cmd:
-    swap the `test`/`build` subcommand → `check`, drop the test harness args
-    (anything after a bare `--`) and `--no-run`/`--no-fail-fast`. Used as the
-    fast inner-loop check for the per_fn fix strategy — `cargo check` skips
-    codegen and test execution, and incremental compilation means a check
-    after editing one fn recompiles only that module + its dependents.
-
-    Examples:
-      cargo test -p anyhow --no-run          → cargo check -p anyhow
-      cargo +nightly test -p x -- --threads  → cargo +nightly check -p x
-      cargo check -p x                       → cargo check -p x  (unchanged)
-    """
-    out_toks: list[str] = []
-    for t in _parse_cmd(check_cmd):
-        if t == "--":
-            break
-        if t in ("test", "build"):
-            out_toks.append("check"); continue
-        if t in ("--no-run", "--no-fail-fast"):
-            continue
-        out_toks.append(t)
-    s = " ".join(out_toks).strip()
-    return s if "check" in s.split() else "cargo check"
-
-
 # slice 5b foundation: relocated to pipeline_core.domain.text (imported at top).
-
-
 # slice 5b foundation: relocated to pipeline_core.domain.text (imported at top).
-
-
 # ---------------------------------------------------------------------------
 # BL-010: Rust source condenser — signatures and type definitions only
 # ---------------------------------------------------------------------------
-
 # ---------------------------------------------------------------------------
 # BL-021: SQLite pipeline knowledge store
 # ---------------------------------------------------------------------------
-
 # Per-project SQLite knowledge store relocated to adapters/pipeline_db.py.
 from pipeline_core.adapters.pipeline_db import (  # noqa: E402
     compile_patterns_read,
@@ -1517,66 +1456,19 @@ from pipeline_core.adapters.pipeline_db import (  # noqa: E402
     type_signals_read,
     type_signals_write,
 )
+from pipeline_core.application.reconstruct.cargo_errors import (  # noqa: E402
+    categorize_compile_error as _categorize_compile_error,
+)
+from pipeline_core.domain.test_command import (  # noqa: E402
+    derive_check_only_cmd as _derive_check_only_cmd,
+)
 
 # ---------------------------------------------------------------------------
 # BL-023: Test assertion extractor for TASK 2
 # ---------------------------------------------------------------------------
-
-def _extract_test_assertions(test_files: list, module_dir_rel: str = "",
-                              max_assertions: int = 40) -> str:
-    """
-    Extract assert_* lines with minimal surrounding context from test files.
-    Returns a compact 'assertion manifest' that TASK 2 can use as ground truth.
-    Only includes files relevant to the current module (if module_dir_rel given).
-    """
-    results: list[str] = []
-
-    for rel, content in test_files:
-        if module_dir_rel and not (rel.startswith(module_dir_rel) or
-                                   f"/{module_dir_rel}" in rel):
-            continue
-        lines = content.splitlines()
-        for i, line in enumerate(lines):
-            stripped = line.strip()
-            if line_has_assertion(stripped) and not stripped.startswith('//'):
-                # Include one line of context before (usually the `let` binding)
-                context_line = lines[i - 1].strip() if i > 0 else ""
-                entry = (f"  {context_line}  // context\n  {stripped}"
-                         if context_line and context_line.startswith("let")
-                         else f"  {stripped}")
-                results.append(entry)
-                if len(results) >= max_assertions:
-                    break
-        if len(results) >= max_assertions:
-            break
-
-    if not results:
-        return ""
-    return ("Assertions the generated code must satisfy (from test files):\n"
-            + "\n".join(results))
-
-
-def _categorize_compile_error(error_output: str) -> str:
-    """Classify a compile error into a short category tag for compile_patterns."""
-    o = error_output.lower()
-    if "cannot find type" in o or "unresolved import" in o or "use of undeclared" in o:
-        return "missing_type"
-    if "module not found" in o or "no module named" in o or "mod " in o and "not found" in o:
-        return "module_declaration"
-    if "trait bound" in o or "does not implement" in o or "the trait" in o:
-        return "trait_bound"
-    if "mismatched types" in o or "expected" in o and "found" in o:
-        return "type_mismatch"
-    if "cannot borrow" in o or "borrow" in o and "conflict" in o:
-        return "borrow_checker"
-    if "lifetime" in o:
-        return "lifetime"
-    if "unused import" in o or "dead_code" in o:
-        return "lint_error"
-    if "proc-macro" in o or "proc_macro" in o:
-        return "proc_macro"
-    return "compile_error"
-
+from pipeline_core.domain.test_grouping import (  # noqa: E402
+    extract_test_assertions as _extract_test_assertions,
+)
 
 # Cargo.toml accessors live in domain/cargo_toml.py (pure, tomllib — R8). Re-exported
 # under the legacy `_`-names so the ~15 call sites stay unchanged.
@@ -2478,27 +2370,9 @@ def _collect_crate_macros(src_dir: Path, max_chars: int = max(6_000, SINGLE_CALL
     return joined
 
 
-def _leaf_first_fn_order(
-    stubs: list[tuple[str, str]],
-    name_counts: dict[str, int] | None,
-) -> list[tuple[str, str]]:
-    """Sort stubs so the most-referenced fns come first (likely call-graph
-    leaves — utility fns relied on by many others). Public-API entry points
-    end up last, where they can see real helper bodies on disk.
-
-    `name_counts` is the `{fn_name: ref_count}` map written during the
-    pre-strip bake step (`_bake_skeleton_artifacts`). When empty/None,
-    falls back to deterministic order (file, fn_name).
-    """
-    if not name_counts:
-        return sorted(stubs)
-    scores: dict[tuple[str, str], int] = {}
-    for s in stubs:
-        _, fn = s
-        scores[s] = name_counts.get(fn, 0) if fn else 0
-    # Higher refs = more depended on = fill earlier (leaf-first).
-    return sorted(stubs, key=lambda s: (-scores.get(s, 0), s[0], s[1]))
-
+from pipeline_core.application.reconstruct.scheduling import (  # noqa: E402
+    leaf_first_fn_order as _leaf_first_fn_order,
+)
 
 # ---------------------------------------------------------------------------
 # Model self-correction notes — stored in functional_requirements_{crate}.md
@@ -3685,32 +3559,9 @@ def _strip_ansi(text: str) -> str:
     return strip_ansi(text or "")
 
 
-def _order_frontier(
-    frontier: Frontier,
-    leaf_name_counts: dict[str, int] | None,
-    panic_depths: dict[tuple[str, str], int] | None = None,
-) -> list[tuple[tuple[str, str], set[str]]]:
-    """Order frontier entries by D2's rule: shallowest panic depth first,
-    then most-callers, then alphabetical (file, fn) for reproducibility.
-
-    `panic_depths` (optional) maps the same keys to integer panic stack
-    depths. Absent → all treated as same depth, the secondary sort wins.
-    Most-referenced fn (from `leaf_name_counts`) breaks final ties so the
-    pre-strip leaf-order metadata still influences scheduling.
-    """
-    panic_depths = panic_depths or {}
-    leaf_name_counts = leaf_name_counts or {}
-    items = list(frontier.items())
-
-    def _key(item: tuple[tuple[str, str], set[str]]):
-        (file_rel, fn_name), tests = item
-        return (
-            panic_depths.get((file_rel, fn_name), 0),  # shallowest first
-            -len(tests),                                # most tests first
-            -leaf_name_counts.get(fn_name, 0),          # most-referenced first
-            file_rel, fn_name,                          # alphabetical reproducible
-        )
-    return sorted(items, key=_key)
+from pipeline_core.application.reconstruct.scheduling import (  # noqa: E402
+    order_frontier as _order_frontier,
+)
 
 
 def _scan_unimplemented_functions(src_dir: Path) -> list[tuple[str, str]]:

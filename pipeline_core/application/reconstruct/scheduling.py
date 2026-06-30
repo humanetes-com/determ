@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pipeline_core.domain.models import Stub
+from pipeline_core.domain.models import Frontier, Stub
 
 
 def group_priority_levels(
@@ -53,3 +53,50 @@ def leaf_first_group_order(groups: list[dict[str, Any]]) -> list[dict[str, Any]]
     indexed = list(range(len(groups)))
     indexed.sort(key=lambda i: (overlap_count(i), str(groups[i].get("name", ""))))
     return [groups[i] for i in indexed]
+
+
+def leaf_first_fn_order(
+    stubs: list[tuple[str, str]],
+    name_counts: dict[str, int] | None,
+) -> list[tuple[str, str]]:
+    """Sort stubs so the most-referenced fns come first (likely call-graph
+    leaves — utility fns relied on by many others). Public-API entry points end
+    up last, where they can see real helper bodies on disk.
+
+    `name_counts` is the `{fn_name: ref_count}` map written during the pre-strip
+    bake step. When empty/None, falls back to deterministic order (file, fn)."""
+    if not name_counts:
+        return sorted(stubs)
+    scores: dict[tuple[str, str], int] = {}
+    for s in stubs:
+        _, fn = s
+        scores[s] = name_counts.get(fn, 0) if fn else 0
+    # Higher refs = more depended on = fill earlier (leaf-first).
+    return sorted(stubs, key=lambda s: (-scores.get(s, 0), s[0], s[1]))
+
+
+def order_frontier(
+    frontier: Frontier,
+    leaf_name_counts: dict[str, int] | None,
+    panic_depths: dict[tuple[str, str], int] | None = None,
+) -> list[tuple[tuple[str, str], set[str]]]:
+    """Order frontier entries by D2's rule: shallowest panic depth first, then
+    most-callers, then alphabetical (file, fn) for reproducibility.
+
+    `panic_depths` (optional) maps the same keys to integer panic stack depths.
+    Absent → all same depth, the secondary sort wins. Most-referenced fn (from
+    `leaf_name_counts`) breaks final ties so the pre-strip leaf-order metadata
+    still influences scheduling."""
+    panic_depths = panic_depths or {}
+    leaf_name_counts = leaf_name_counts or {}
+    items = list(frontier.items())
+
+    def _key(item: tuple[tuple[str, str], set[str]]) -> tuple[int, int, int, str, str]:
+        (file_rel, fn_name), tests = item
+        return (
+            panic_depths.get((file_rel, fn_name), 0),  # shallowest first
+            -len(tests),                                # most tests first
+            -leaf_name_counts.get(fn_name, 0),          # most-referenced first
+            file_rel, fn_name,                          # alphabetical reproducible
+        )
+    return sorted(items, key=_key)
