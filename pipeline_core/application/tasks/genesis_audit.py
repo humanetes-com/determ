@@ -20,8 +20,42 @@ from ...domain.llm_output import (
 from ...domain.llm_output import (
     _extract_genesis as extract_genesis,
 )
+from ...domain.text import extract_markdown_rules
 from ...log import log
 from ...retry import with_retry
+
+# BL-024: failure-type → genesis_rules category tag.
+_RULE_CATEGORY_BY_FAILURE = {
+    "build": "compile",
+    "assertion": "assertion",
+    "panic": "runtime_panic",
+    "timeout": "timeout",
+    "no_tests": "test_discovery",
+}
+
+
+def extract_and_store_rules(
+    project_dir: Path,
+    genesis_text: str,
+    module_scope: str,
+    failure_type: str,
+    iteration: int,
+    *,
+    genesis_rules_write: Callable[[Path, str, str, str, int], None],
+) -> None:
+    """BL-024: parse bullet/numbered rules from genesis.md (structured scan, no
+    regex) and persist up to 20 unique ones via the injected DB writer."""
+    category = _RULE_CATEGORY_BY_FAILURE.get(failure_type, "general")
+    rules = extract_markdown_rules(genesis_text, min_len=20)
+    stored_prefixes: set[str] = set()
+    for rule in rules[:20]:  # cap per iteration
+        prefix = rule[:40]
+        if prefix not in stored_prefixes:
+            stored_prefixes.add(prefix)
+            genesis_rules_write(project_dir, module_scope, category, rule, iteration)
+    if rules:
+        log(f"  [BL-024] Stored {len(stored_prefixes)} structured rules "
+            f"(category: {category}) from genesis update.")
 
 
 @dataclass(frozen=True, slots=True)

@@ -11,14 +11,12 @@ import hashlib
 import importlib
 import json
 import os
-import re
 import shlex
 import shutil
 import subprocess
 import sys
 import threading
 import time
-from abc import ABC, abstractmethod
 from collections.abc import Callable
 from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
@@ -58,7 +56,7 @@ from pipeline_core.adapters.artifacts import (
     type_manifest_path as _type_manifest_path,
 )
 from pipeline_core.adapters.ask_client import AskClient
-from pipeline_core.adapters.augment_engine import CargoAugmentEngine
+from pipeline_core.adapters.augment_engine import CargoAugmentEngine, StaticRustTestAugmentor
 from pipeline_core.adapters.augment_store import FileAugmentStore
 from pipeline_core.adapters.build_script import CargoBuildScriptReader
 from pipeline_core.adapters.cargo import CargoEnv
@@ -255,6 +253,9 @@ from pipeline_core.application.tasks.discover_test_command import (
 from pipeline_core.application.tasks.genesis_audit import (
     GenesisAuditDeps,
     genesis_audit,
+)
+from pipeline_core.application.tasks.genesis_audit import (
+    extract_and_store_rules as _extract_and_store_rules,
 )
 from pipeline_core.application.tasks.task0_docs import (
     Task0DocsDeps,
@@ -461,6 +462,7 @@ from pipeline_core.domain.type_refs import (
 )
 from pipeline_core.io import read, write
 from pipeline_core.ports import structure as _structure_port
+from pipeline_core.ports.augment import TestAugmentor
 from pipeline_core.prompts import runtime as _prompts_runtime
 from pipeline_core.prompts import shaping as _shaping
 from pipeline_core.prompts.crate_idioms import (
@@ -4544,35 +4546,9 @@ def task4(genesis_path, functional_req_path, test_output, iteration, output_dir,
 def _task4_extract_and_store_rules(project_dir: Path, genesis_text: str,
                                     module_scope: str, failure_type: str,
                                     iteration: int) -> None:
-    """BL-024: Parse bullet-point rules from genesis.md and write to genesis_rules table."""
-    # Map failure type to category tag.
-    category = {
-        "build": "compile",
-        "assertion": "assertion",
-        "panic": "runtime_panic",
-        "timeout": "timeout",
-        "no_tests": "test_discovery",
-    }.get(failure_type, "general")
-
-    # Extract lines that look like rules (bullet points or numbered items).
-    rule_re = re.compile(r'^\s*[-*•]\s+(.+)$|^\s*\d+\.\s+(.+)$', re.MULTILINE)
-    rules: list[str] = []
-    for m in rule_re.finditer(genesis_text):
-        rule = (m.group(1) or m.group(2) or "").strip()
-        if len(rule) > 20:  # skip trivially short lines
-            rules.append(rule)
-
-    # Store unique rules (deduplicate by content prefix).
-    stored_prefixes: set[str] = set()
-    for rule in rules[:20]:  # cap at 20 per iteration
-        prefix = rule[:40]
-        if prefix not in stored_prefixes:
-            stored_prefixes.add(prefix)
-            genesis_rules_write(project_dir, module_scope, category, rule, iteration)
-
-    if rules:
-        _log(f"  [BL-024] Stored {len(stored_prefixes)} structured rules "
-             f"(category: {category}) from genesis update.")
+    # C9: relocated to genesis_audit.extract_and_store_rules; shim binds the DB writer.
+    _extract_and_store_rules(project_dir, genesis_text, module_scope, failure_type,
+                             iteration, genesis_rules_write=genesis_rules_write)
 
 
 # ---------------------------------------------------------------------------
@@ -5031,73 +5007,19 @@ def _extract_public_symbols(content: str) -> str:
     return _public_api_from_source(content)
 
 
-# ---------------------------------------------------------------------------
-# TestAugmentor — language-agnostic ABC for coverage augmentation (FR-S5)
-#
-# Separates the Rust/Cargo/tarpaulin-specific mechanics from the orchestration
-# logic in task0c_augment_module. Adding support for a new language means
-# implementing a new concrete class; the orchestration loop stays unchanged.
-#
-# Selected by TEST_AUGMENTOR in .env:
-#   TEST_AUGMENTOR=static   (default — Rust/tarpaulin)
-# ---------------------------------------------------------------------------
-
-class TestAugmentor(ABC):
-    """Language-agnostic interface for per-module coverage augmentation."""
-
-    @abstractmethod
-    def lib_compiles(self, project_dir: Path, module_name: str) -> tuple[bool, str]:
-        """Check that the module's library target compiles. Returns (ok, error_output)."""
-
-    @abstractmethod
-    def test_harness_compiles(self, project_dir: Path, module_name: str) -> tuple[bool, str]:
-        """Check that the full test harness (lib + tests) compiles. Returns (ok, error_output)."""
-
-    @abstractmethod
-    def measure_coverage(
-        self, project_dir: Path, module_name: str, module_dir: Path
-    ) -> tuple[float, list, int, int]:
-        """Measure test coverage. Returns (coverage_pct, files_data, covered_lines, coverable_lines)."""
-
-    @abstractmethod
-    def is_applicable(self, crate_type: str) -> bool:
-        """Return False if this augmentor cannot handle the given crate type."""
-
-
-class StaticRustTestAugmentor(TestAugmentor):
-    """Rust-specific coverage augmentation using cargo and cargo-tarpaulin."""
-
-    def lib_compiles(self, project_dir: Path, module_name: str) -> tuple[bool, str]:
-        result = subprocess.run(
-            shlex.split(f"cargo build -p {module_name} --lib"),
-            cwd=project_dir, capture_output=True, text=True,
-            timeout=BUILD_TIMEOUT, env=_cargo_env(),
-        )
-        return result.returncode == 0, result.stdout + result.stderr
-
-    def test_harness_compiles(self, project_dir: Path, module_name: str) -> tuple[bool, str]:
-        result = subprocess.run(
-            shlex.split(f"cargo test -p {module_name} --no-run"),
-            cwd=project_dir, capture_output=True, text=True,
-            timeout=BUILD_TIMEOUT, env=_cargo_env(),
-        )
-        return result.returncode == 0, result.stdout + result.stderr
-
-    def measure_coverage(
-        self, project_dir: Path, module_name: str, module_dir: Path
-    ) -> tuple[float, list, int, int]:
-        return _measure_coverage(project_dir, module_name)
-
-    def is_applicable(self, crate_type: str) -> bool:
-        return "proc-macro" not in crate_type.lower()
+# TestAugmentor (ABC) → ports/augment.py; StaticRustTestAugmentor →
+# adapters/augment_engine.py (C10). The factory binds the cargo collaborators.
+def _new_static_rust_augmentor() -> TestAugmentor:
+    return StaticRustTestAugmentor(
+        cargo_env=_cargo_env, build_timeout=BUILD_TIMEOUT,
+        measure_coverage=_measure_coverage)
 
 
 def _test_augmentor_factory() -> TestAugmentor:
     backend = os.getenv("TEST_AUGMENTOR", "static").lower()
-    if backend == "static":
-        return StaticRustTestAugmentor()
-    _log(f"  WARNING: unknown TEST_AUGMENTOR='{backend}', falling back to static.")
-    return StaticRustTestAugmentor()
+    if backend != "static":
+        _log(f"  WARNING: unknown TEST_AUGMENTOR='{backend}', falling back to static.")
+    return _new_static_rust_augmentor()
 
 
 def _derive_gentest_prelude(project_dir: Path) -> tuple[str, str]:

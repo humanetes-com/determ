@@ -7,10 +7,34 @@ structurally at the composition root; tests pass fakes.
 """
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from pipeline_core.domain.models import BuildCluster
+
+
+class TestAugmentor(ABC):
+    """Language-agnostic interface for per-module coverage augmentation (FR-S5).
+    The concrete cargo/tarpaulin impl lives in `adapters.augment_engine`."""
+
+    @abstractmethod
+    def lib_compiles(self, project_dir: Path, module_name: str) -> tuple[bool, str]:
+        """Check that the module's library target compiles. Returns (ok, error_output)."""
+
+    @abstractmethod
+    def test_harness_compiles(self, project_dir: Path, module_name: str) -> tuple[bool, str]:
+        """Check that the full test harness (lib + tests) compiles. Returns (ok, error_output)."""
+
+    @abstractmethod
+    def measure_coverage(
+        self, project_dir: Path, module_name: str, module_dir: Path,
+    ) -> tuple[float, list[Any], int, int]:
+        """Measure test coverage. Returns (coverage_pct, files_data, covered_lines, coverable_lines)."""
+
+    @abstractmethod
+    def is_applicable(self, crate_type: str) -> bool:
+        """Return False if this augmentor cannot handle the given crate type."""
 
 
 @runtime_checkable

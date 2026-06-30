@@ -11,12 +11,55 @@ Relocated verbatim from the pipeline.py free fns + the `_AugmentAdapter` binding
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from ..domain.cfg import CfgSet
 from ..domain.models import BuildCluster
+from ..ports.augment import TestAugmentor
+
+
+class StaticRustTestAugmentor(TestAugmentor):
+    """Rust coverage augmentor using cargo + cargo-tarpaulin. The cargo env
+    builder, build timeout, and coverage measurer are constructor-injected
+    (composition root binds them); `is_applicable` is pure."""
+
+    def __init__(
+        self, *,
+        cargo_env: Callable[[], dict[str, str]],
+        build_timeout: int,
+        measure_coverage: Callable[[Path, str], tuple[float, list[Any], int, int]],
+    ) -> None:
+        self._cargo_env = cargo_env
+        self._build_timeout = build_timeout
+        self._measure_coverage = measure_coverage
+
+    def lib_compiles(self, project_dir: Path, module_name: str) -> tuple[bool, str]:
+        result = subprocess.run(
+            shlex.split(f"cargo build -p {module_name} --lib"),
+            cwd=project_dir, capture_output=True, text=True,
+            timeout=self._build_timeout, env=self._cargo_env(),
+        )
+        return result.returncode == 0, result.stdout + result.stderr
+
+    def test_harness_compiles(self, project_dir: Path, module_name: str) -> tuple[bool, str]:
+        result = subprocess.run(
+            shlex.split(f"cargo test -p {module_name} --no-run"),
+            cwd=project_dir, capture_output=True, text=True,
+            timeout=self._build_timeout, env=self._cargo_env(),
+        )
+        return result.returncode == 0, result.stdout + result.stderr
+
+    def measure_coverage(
+        self, project_dir: Path, module_name: str, module_dir: Path,
+    ) -> tuple[float, list[Any], int, int]:
+        return self._measure_coverage(project_dir, module_name)
+
+    def is_applicable(self, crate_type: str) -> bool:
+        return "proc-macro" not in crate_type.lower()
 
 
 class CargoAugmentEngine:

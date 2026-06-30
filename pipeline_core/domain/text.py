@@ -406,3 +406,32 @@ def strip_trailing_file_tag(text: str) -> str:
     if stripped.endswith(tag):
         stripped = stripped[:-len(tag)]   # the \s* before the tag is handled by .strip()
     return stripped.strip()
+
+
+def extract_markdown_rules(text: str, min_len: int = 0) -> list[str]:
+    """Bullet/numbered list items from a markdown block, longer than `min_len`
+    chars (regex-free, R7). Equivalent to
+    ``re.compile(r'^\\s*[-*•]\\s+(.+)$|^\\s*\\d+\\.\\s+(.+)$', re.M)`` then
+    `.strip()` + length filter: a marker (`-`/`*`/`•`, or digits + `.`) followed
+    by at least one space and a non-empty remainder, one rule per matching line."""
+    rules: list[str] = []
+    for raw in text.splitlines():
+        line = raw.lstrip(" \t")
+        rest: str | None = None
+        if line[:1] in ("-", "*", "•"):
+            rest = line[1:]
+        else:
+            i = 0
+            while i < len(line) and line[i].isdigit():
+                i += 1
+            if i > 0 and line[i:i + 1] == ".":
+                rest = line[i + 1:]
+        if rest is None:
+            continue
+        content = rest.lstrip(" \t")
+        if content == rest:        # no separating whitespace → not a list item
+            continue
+        content = content.strip()
+        if len(content) > min_len:
+            rules.append(content)
+    return rules
