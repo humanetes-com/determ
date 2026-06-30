@@ -246,6 +246,7 @@ def build_app(
     helpers: Helpers,
     structure: CliStructureReader,
     fill_roles: FillRoles,
+    telemetry: LogTelemetry,
 ) -> App:
     """Assemble the App from its ports + run-scoped holders + config. Pure wiring
     (no I/O) — the place a test passes fake adapters/ports to get a fake-backed App."""
@@ -266,7 +267,6 @@ def build_app(
     analyst = AnalystAdapter(
         roles.task4, roles.validate_task4_output, roles.task_genesis_audit,
     )
-    telemetry = LogTelemetry()
     failure_journal = FileFailureJournal()
     workspace_artifacts = WorkspaceArtifacts()
     lock_deps = LockDeps(

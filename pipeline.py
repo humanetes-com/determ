@@ -138,7 +138,7 @@ from pipeline_core.adapters.task2_roles import (
     SourceScanAdapter,
     WorkspaceAdapter,
 )
-from pipeline_core.adapters.telemetry import JsonlEventEmitter
+from pipeline_core.adapters.telemetry import JsonlEventEmitter, LogTelemetry
 from pipeline_core.adapters.telemetry import emit_per_file_test_overview as _emit_per_file_test_overview
 from pipeline_core.adapters.workspace_lifecycle import clean_state as _clean_state_impl
 from pipeline_core.adapters.workspace_restore import RestoreFromAugmented
@@ -1686,8 +1686,11 @@ _FILL_ROLES = _FillRoles(
     tel=_FILL_TEL, mut=_FILL_MUT, cargo=_FILL_CARGO, prompt=_FILL_PROMPT, ws=_FILL_WS,
     retros=_FILL_RETROS, tests=_FILL_TESTS, stall=_FILL_STALL, impl=_FILL_IMPL,
 )
+# S23: telemetry as a standalone injected value (so module-level consumers like
+# _CLUSTER_AUGMENTOR bind it without reading _APP — clears the last _APP-to-end blocker).
+_TELEMETRY = LogTelemetry()
 _APP = _build_app(ADAPTERS, SETTINGS, _RUN, _SCOPE, _PORTS, _CFG, _ROLES, _HELPERS,
-                  _STRUCTURE, _FILL_ROLES)
+                  _STRUCTURE, _FILL_ROLES, _TELEMETRY)
 # S3.5/6/10: these deps are consumed only inside `def` bodies (lazy), so their
 # construction migrates into build_app and they're re-exported here by name.
 _WS_DEPS = _APP.ws_deps
@@ -4685,7 +4688,7 @@ _FLOW_AUDIT = _APP.flow_audit                     # S16
 _DOCS_METRICS = _APP.docs_metrics                 # S16
 _FAILURE_JOURNAL = _APP.failure_journal           # S13
 _WORKSPACE_ARTIFACTS = _APP.workspace_artifacts   # S13
-_TELEMETRY = _APP.telemetry                       # S13
+# S23: _TELEMETRY built standalone above (injected into build_app).
 _TEST_RUNNER = _APP.test_runner                   # S14
 _REQUIREMENTS_PHASE = _APP.requirements_phase     # S17
 _RECONSTRUCTION_STEP = _APP.reconstruction_step   # S18
