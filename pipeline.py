@@ -135,7 +135,6 @@ from pipeline_core.adapters.reconstruct_roles import (
     RequirementsAdapter,
 )
 from pipeline_core.adapters.run_registry import FileRunRegistry
-from pipeline_core.adapters.structure import CliStructureReader
 from pipeline_core.adapters.structure import fn_name_counts as _fn_name_counts
 from pipeline_core.adapters.structure import load_baked_clusters as _load_baked_clusters_impl
 from pipeline_core.adapters.structure import source_hash as _source_hash_impl
@@ -261,11 +260,10 @@ from pipeline_core.application.tasks.discover_test_command import (
     infer_build_check_command as _infer_build_check_command,
 )
 from pipeline_core.application.tasks.genesis_audit import (
-    GenesisAuditDeps,
-    genesis_audit,
+    extract_and_store_rules as _extract_and_store_rules,
 )
 from pipeline_core.application.tasks.genesis_audit import (
-    extract_and_store_rules as _extract_and_store_rules,
+    genesis_audit,
 )
 from pipeline_core.application.tasks.task0_docs import (
     Task0DocsDeps,
@@ -308,6 +306,7 @@ from pipeline_core.application.workspace_lifecycle import (
 from pipeline_core.application.workspace_lifecycle import (
     wipe_module_sources as _wl_wipe_module_sources,
 )
+from pipeline_core.composition import build_app as _build_app
 from pipeline_core.domain import cfg as _cfg
 from pipeline_core.domain import model_report as _model_report
 from pipeline_core.domain import test_count as _tc
@@ -1583,8 +1582,13 @@ SKELETON_EXTRACTOR_BIN = Path(__file__).parent / "tools" / "skeleton_extractor" 
 # (CODE_ARCHITECTURE.md §1), so it owns construction; call sites migrate onto ADAPTERS
 # one task at a time (slice 5). Adapters wrap real primitives and never import back here.
 ADAPTERS = build_adapters(SETTINGS, extractor_bin=SKELETON_EXTRACTOR_BIN, model=MODEL)
+# Phase 3 S1: the composition factory. main() will route through this; for now it
+# owns the boundary providers (the extractor StructureReader) so subsequent stages
+# repoint call sites + tests onto `_APP.*` (see refactoring.md §Phase 3).
+_APP = _build_app(ADAPTERS, SETTINGS, _RUN,
+                  ask=_ASK_CLIENT.ask, task4_verbosity_guard=_TASK4_VERBOSITY_GUARD)
 # P1: the real StructureReader — injected into the fill engine (no monkeypatch seam).
-_STRUCTURE = CliStructureReader(ADAPTERS.extractor)
+_STRUCTURE = _APP.structure
 # #23: build.rs cfg authority — prunes phantom clusters from source `#[cfg]` atoms.
 _BUILD_SCRIPT_READER = CargoBuildScriptReader()
 # P6: TASK 0c augmentation sentinels (injected into ClusterAugmentor + strip/bake).
@@ -4129,16 +4133,9 @@ GENESIS_AUDIT_INTERVAL = 5
 NO_IMPROVEMENT_THRESHOLD = 3
 
 
-# slice 5b: genesis audit extracted to pipeline_core.application.tasks.genesis_audit.
-# Deps bind the pipeline's collaborators once; main() calls the shim below unchanged.
-_GENESIS_AUDIT_DEPS = GenesisAuditDeps(
-    ask=_ASK_CLIENT.ask, read=read, write=write, model=_TASK4_MODEL,
-    verbosity_guard=_TASK4_VERBOSITY_GUARD,
-)
-
-
+# Phase 3 S3 slice 1: genesis-audit deps now constructed in composition.build_app.
 def task_genesis_audit(genesis_path: Path) -> bool:
-    return genesis_audit(genesis_path, _GENESIS_AUDIT_DEPS)
+    return genesis_audit(genesis_path, _APP.genesis_audit_deps)
 
 
 # ---------------------------------------------------------------------------

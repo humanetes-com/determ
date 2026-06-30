@@ -27,6 +27,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 TASKS_DIR = ROOT / "pipeline_core" / "application" / "tasks"
 PIPELINE = ROOT / "pipeline.py"
+# The composition root spans pipeline.py + the build_app factory (Phase 3): a
+# `_*_DEPS` construction site may live in either as wiring migrates into build_app.
+COMPOSITION = ROOT / "pipeline_core" / "composition.py"
 
 
 def _deps_classes(tree: ast.Module) -> dict[str, list[str]]:
@@ -127,6 +130,7 @@ def _construction_kwargs(pipeline_tree: ast.Module, cls_name: str) -> set[str] |
 def main() -> int:
     failures: list[str] = []
     pipeline_tree = ast.parse(PIPELINE.read_text(encoding="utf-8"))
+    composition_tree = ast.parse(COMPOSITION.read_text(encoding="utf-8")) if COMPOSITION.exists() else None
 
     task_files = sorted(p for p in TASKS_DIR.glob("*.py") if p.name != "__init__.py")
     checked = 0
@@ -160,8 +164,10 @@ def main() -> int:
                 failures.append(f"{path.name}:{cls_name}: deps.<x> read but NOT declared (AttributeError risk): {sorted(undeclared)}")
 
             provided = _construction_kwargs(pipeline_tree, cls_name)
+            if provided is None and composition_tree is not None:
+                provided = _construction_kwargs(composition_tree, cls_name)
             if provided is None:
-                failures.append(f"pipeline.py: no `{cls_name}(...)` construction site found")
+                failures.append(f"pipeline.py/composition.py: no `{cls_name}(...)` construction site found")
             else:
                 missing = field_set - provided
                 extra = provided - field_set
