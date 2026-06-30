@@ -17,7 +17,7 @@ from pathlib import Path
 
 from pipeline_core.adapters import Adapters
 from pipeline_core.adapters.artifacts import WorkspaceArtifacts, load_api_surface
-from pipeline_core.adapters.coverage import CoverageDeps
+from pipeline_core.adapters.coverage import CoverageDeps, CoverageProvider, make_coverage_provider
 from pipeline_core.adapters.failure_journal import FileFailureJournal
 from pipeline_core.adapters.fill_engine_roles import (
     CargoFillAdapter,
@@ -205,6 +205,7 @@ class App:
     genesis_audit_deps: GenesisAuditDeps       # TASK-4 genesis audit (S3 slice 1)
     discover_test_cmd_deps: DiscoverTestCommandDeps  # test-command discovery (S3 slice 2)
     coverage_deps: CoverageDeps                # coverage I/O (S3 slice 3)
+    coverage_provider: CoverageProvider        # backend-selected coverage provider (S22)
     # ISP reconstruction role adapters (S3 slice 4):
     phase_gate: PhaseGateAdapter
     requirements: RequirementsAdapter
@@ -309,6 +310,11 @@ def build_app(
         step=reconstruction_step, analysis=failure_analysis, telemetry=telemetry,
         plateau_abort=cfg.module_plateau_abort,
     )
+    coverage_deps = CoverageDeps(
+        log=ports.log, cargo_env=ports.cargo_env, cluster=scope.get_active,
+        tarpaulin_bin=cfg.tarpaulin_bin, grcov_bin=cfg.grcov_bin,
+        build_timeout=cfg.build_timeout, ignore_pragma=cfg.ignore_pragma,
+    )
     return App(
         adapters=adapters,
         settings=settings,
@@ -330,11 +336,8 @@ def build_app(
             extra_cap=cfg.extra_cap,
             sys_exit=sys.exit,
         ),
-        coverage_deps=CoverageDeps(
-            log=ports.log, cargo_env=ports.cargo_env, cluster=scope.get_active,
-            tarpaulin_bin=cfg.tarpaulin_bin, grcov_bin=cfg.grcov_bin,
-            build_timeout=cfg.build_timeout, ignore_pragma=cfg.ignore_pragma,
-        ),
+        coverage_deps=coverage_deps,
+        coverage_provider=make_coverage_provider(settings.coverage_backend, coverage_deps),
         phase_gate=phase_gate,
         requirements=requirements,
         generator=generator,

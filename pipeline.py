@@ -4238,9 +4238,8 @@ def _measure_coverage(project_dir: Path, module_name: str) -> tuple[float, list[
 
 # ── Coverage provider (relocated to pipeline_core.adapters.coverage, slice 4b) ──
 # Built from _COV_DEPS at the composition root; selection keyed on COVERAGE_BACKEND.
-_coverage_provider: _covmod.CoverageProvider = _covmod.make_coverage_provider(
-    COVERAGE_BACKEND, _COV_DEPS,
-)
+# S22: coverage-provider construction migrated into build_app; re-export by name.
+_coverage_provider: _covmod.CoverageProvider = _APP.coverage_provider
 
 
 
