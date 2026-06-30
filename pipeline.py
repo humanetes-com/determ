@@ -14,10 +14,9 @@ import os
 import shlex
 import subprocess
 import sys
-import threading
 import time
 from collections.abc import Callable
-from contextlib import contextmanager, suppress
+from contextlib import suppress
 from datetime import UTC, datetime
 from functools import partial as _partial
 from pathlib import Path
@@ -63,6 +62,7 @@ from pipeline_core.adapters.cargo import run_build_check as _cargo_run_build_che
 from pipeline_core.adapters.cluster_merge import ClusterMerger
 from pipeline_core.adapters.cluster_pruning import prune_redundant_clusters as _prune_redundant_clusters
 from pipeline_core.adapters.commit_gate import CallableCommitGate
+from pipeline_core.adapters.commit_gate import commit_and_mark as _commit_and_mark_impl
 from pipeline_core.adapters.coverage import CoverageDeps
 from pipeline_core.adapters.downstream_api import scan_downstream_api
 from pipeline_core.adapters.failure_journal import FileFailureJournal
@@ -153,7 +153,7 @@ from pipeline_core.adapters.task2_roles import (
     SourceScanAdapter,
     WorkspaceAdapter,
 )
-from pipeline_core.adapters.telemetry import LogTelemetry
+from pipeline_core.adapters.telemetry import JsonlEventEmitter, LogTelemetry
 from pipeline_core.adapters.telemetry import emit_per_file_test_overview as _emit_per_file_test_overview
 from pipeline_core.adapters.test_runner import CallableTestRunner
 from pipeline_core.adapters.workspace import WorkspaceDeps
@@ -404,6 +404,7 @@ from pipeline_core.domain.models import (
 from pipeline_core.domain.refine import (
     parse_retrospective_categories as _parse_retrospective_categories,
 )
+from pipeline_core.domain.run_state import RunState
 from pipeline_core.domain.rust_fn_headers import (
     is_pub_fn as _is_pub_fn,
 )
@@ -804,61 +805,17 @@ def _store_prompt_content(text: str) -> dict[str, int | str]:
     return {"sha256": h, "char_count": len(text)}
 
 
+# C-finale: the events.jsonl sink + `_phase` relocated to
+# adapters.telemetry.JsonlEventEmitter; the emitter holds a live ref to
+# `_RUN_CONTEXT` (mutated by init_events). Shims keep every call site stable.
+_EVENT_EMITTER = JsonlEventEmitter(_EVENTS_LOG, _RUN_CONTEXT)
+
+
 def _emit(event: str, **fields) -> None:
-    """Append a structured event to logs/events.jsonl. Never raises."""
-    try:
-        record: dict = {
-            "ts": datetime.now(UTC).isoformat(timespec="milliseconds"),
-            "product": _RUN_CONTEXT.get("product", "unknown"),
-            "pipeline_sha": _RUN_CONTEXT.get("pipeline_sha", "unknown"),
-            # Per-run identity (debt #21b) — audit scopes by this, not just ts.
-            "run_id": _RUN_CONTEXT.get("run_id", ""),
-            "event": event,
-            # Emitting thread — per-thread stream logs key on this name, so
-            # the C10 audit can prove concurrent calls never shared a stream.
-            "thread": threading.current_thread().name,
-            # OS thread identity — lets C10 tell a real two-threads-share-a-name
-            # collision (different tid) from benign same-thread reentrancy. debt #6.
-            "tid": threading.get_ident(),
-        }
-        for k, v in fields.items():
-            if v is not None:
-                record[k] = v
-        with open(_EVENTS_LOG, "a") as fh:
-            fh.write(json.dumps(record, default=str) + "\n")
-    except Exception:
-        pass  # observability must never crash the pipeline
+    _EVENT_EMITTER.emit(event, **fields)
 
 
-@contextmanager
-def _phase(prefix: str, **fields):
-    """Emit `{prefix}.start` on enter and `{prefix}.done` on exit with auto duration_ms.
-
-    Yields a mutable dict the caller can update; the keys become extra fields on
-    `.done`. Top-level keys (task, cluster, module, attempt, data) merge with
-    `fields`; the `data` dict deep-merges so callers can add per-result info.
-
-    On exception, `.done` is still emitted with `data.error = <ExceptionName>` so
-    every `.start` has a matching `.done`. The exception is re-raised.
-    """
-    t0 = time.monotonic()
-    _emit(f"{prefix}.start", **fields)
-    extra: dict = {}
-    err: str | None = None
-    try:
-        yield extra
-    except BaseException as _e:
-        err = type(_e).__name__
-        raise
-    finally:
-        merged: dict = {**fields, **{k: v for k, v in extra.items() if k != "data"}}
-        merged_data: dict = {**(fields.get("data") or {}), **(extra.get("data") or {})}
-        if err is not None:
-            merged_data["error"] = err
-        if merged_data:
-            merged["data"] = merged_data
-        merged["duration_ms"] = int((time.monotonic() - t0) * 1000)
-        _emit(f"{prefix}.done", **merged)
+_phase = _EVENT_EMITTER.phase
 
 
 # Set once per run by _register_run; used to build the from-scratch disclaimer.
@@ -1080,9 +1037,9 @@ SKIP_DIR_NAMES = _discovery.SKIP_DIR_NAMES
 # Logging
 # ---------------------------------------------------------------------------
 
-_log_path: Path = None
-_nolog: bool = False        # --nolog: skip writing to run.log
-_progress_mode: bool = False  # --progress: compact \r-rewriting terminal progress
+# Per-run state (git-managed / audit / log paths / progress) — one injected
+# holder (the ClusterScope pattern) replacing the scattered run-globals.
+_RUN = RunState()
 
 
 def _log(msg: str):
@@ -1090,8 +1047,8 @@ def _log(msg: str):
     global _log_trim_counter
     print(msg)
     sys.stdout.flush()
-    if not _nolog and _log_path is not None:
-        with _log_path.open("a") as f:
+    if not _RUN.nolog and _RUN.log_path is not None:
+        with _RUN.log_path.open("a") as f:
             f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
     _log_trim_counter += 1
     if _log_trim_counter >= _LOG_TRIM_EVERY:
@@ -1127,7 +1084,7 @@ def _register_run(project_dir: Path) -> None:
         "project": project_dir.name,
         "project_dir": str(project_dir),
         "pipeline_log": _PIPELINE_LOG,
-        "run_log": (str(_log_path) if _log_path else None),
+        "run_log": (str(_RUN.log_path) if _RUN.log_path else None),
         "stdout_log": _resolve_stdout_path(),
         "stream_log": os.getenv("LLM_STREAM_LOG", os.getenv("OLLAMA_STREAM_LOG",
             str(Path(__file__).parent / "logs" / "stream.log"))),
@@ -1142,11 +1099,10 @@ def _register_run(project_dir: Path) -> None:
 
 
 def init_log(root: Path, nolog: bool = False, progress_mode: bool = False):
-    global _log_path, _nolog, _progress_mode
-    _nolog = nolog
-    _progress_mode = progress_mode
+    _RUN.nolog = nolog
+    _RUN.progress_mode = progress_mode
     if not nolog:
-        _log_path = root / LOG_NAME
+        _RUN.log_path = root / LOG_NAME
     Path(_GUARD_LOG).parent.mkdir(parents=True, exist_ok=True)
     _log(f"\n{'=' * 60}")
     _log(f"{'=' * 60}")
@@ -1160,8 +1116,7 @@ def init_log(root: Path, nolog: bool = False, progress_mode: bool = False):
         ).strip()
     except Exception:
         pass
-    global _RUN_STARTED_ISO
-    _RUN_STARTED_ISO = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S")
+    _RUN.run_started_iso = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S")
     _log(f"  PIPELINE STARTED — {datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S')} UTC  pipeline.py={_py_hash}{_git_hash}  run_id={_RUN_ID}")
     _log(f"  CMD: {sys.executable} {' '.join(sys.argv)}")
     _log(f"  PIPELINE_PARALLELISM={_pipeline_parallelism()}")
@@ -1176,18 +1131,13 @@ def init_log(root: Path, nolog: bool = False, progress_mode: bool = False):
 # records at iteration boundaries + on a timer; verdicts go to the log and a
 # flow_audit.report event the monitor renders. Read-only and fail-safe — it
 # observes the run, never steers it.
-_AUDIT_ENABLED = False
-_RUN_STARTED_ISO = ""                 # set by init_log; scopes verdicts to this run
-_AUDIT_PROJECT_DIR: "Path | None" = None
-
-
 def _run_flow_audit(context: str) -> None:
-    if not _AUDIT_ENABLED:
+    if not _RUN.audit_enabled:
         return
     try:
         from pipeline_core.audit import FAIL, audit
-        verdicts = audit(Path(_EVENTS_LOG), _PROMPTS_DIR, _log_path,
-                         _AUDIT_PROJECT_DIR, _RUN_STARTED_ISO,
+        verdicts = audit(Path(_EVENTS_LOG), _PROMPTS_DIR, _RUN.log_path,
+                         _RUN.audit_project_dir, _RUN.run_started_iso,
                          int(os.getenv("AUDIT_PLATEAU_N", "3")))
         _log(f"  [audit] flow invariants ({context}):")
         for v in verdicts:
@@ -1636,11 +1586,6 @@ _SCOPE = ClusterScope()
 # active cluster from _SCOPE at call time. Zero-arg callable seam every cargo call binds.
 _cargo_env = CargoEnv(_SCOPE)
 
-# True when the project_dir is a git-managed workspace (--repo or auto-detected).
-# Enables git commits at key pipeline transitions.
-_git_managed: bool = False
-
-
 # ---------------------------------------------------------------------------
 # Git workspace helpers
 # ---------------------------------------------------------------------------
@@ -1660,11 +1605,11 @@ def _git_default_branch(project_dir: Path) -> str:
 
 
 def git_commit(project_dir: Path, message: str) -> bool:
-    return _wsmod.git_commit(_WS_DEPS, project_dir, message, managed=_git_managed)
+    return _wsmod.git_commit(_WS_DEPS, project_dir, message, managed=_RUN.git_managed)
 
 
 def git_tag(project_dir: Path, tag: str) -> None:
-    _wsmod.git_tag(_WS_DEPS, project_dir, tag, managed=_git_managed)
+    _wsmod.git_tag(_WS_DEPS, project_dir, tag, managed=_RUN.git_managed)
 
 
 def git_clean_reset(project_dir: Path) -> None:
@@ -3279,11 +3224,12 @@ def _commit_and_mark(
 
     Returns nothing — failures are logged inside git_commit/git_tag.
     """
-    git_commit(project_dir, commit_message)
-    if tag:
-        git_tag(project_dir, tag)
-    _mark_phase(project_dir, phase_key, status,
-                detail=detail, source_hash=source_hash)
+    # C-finale: logic relocated to adapters.commit_gate.commit_and_mark; shim
+    # binds the git/state primitives (which read the live _RUN.git_managed).
+    _commit_and_mark_impl(
+        project_dir, phase_key, status, commit_message=commit_message, tag=tag,
+        detail=detail, source_hash=source_hash,
+        git_commit=git_commit, git_tag=git_tag, mark_phase=_mark_phase)
 
 
 
@@ -3587,7 +3533,7 @@ _GEN_SHAPING = PromptShapingAdapter(
     format_api_surface_section_fn=lambda api: _format_api_surface_section(api),
 )
 _GEN_PROGRESS = ProgressFactoryAdapter(
-    make_progress_fn=lambda total: ChunkProgress(total, progress_mode=_progress_mode))
+    make_progress_fn=lambda total: ChunkProgress(total, progress_mode=_RUN.progress_mode))
 _GEN_REQUIREMENTS = RequirementsDocAdapter(
     write_fr_preserving_notes_fn=lambda path, content: _write_fr_preserving_notes(path, content),
     type_signals_read_fn=lambda pd: type_signals_read(pd),
@@ -4939,7 +4885,6 @@ def main():
         cmd_best_models(vram_gb=args.vram_gb)
         sys.exit(0)
 
-    global _git_managed
     root = Path(__file__).parent
     workspace_dir = root / WORKSPACE_DIR
 
@@ -4947,12 +4892,12 @@ def main():
         # Full git-managed workspace: clone/copy into tmp/, checkout pipeline branch.
         project_dir = setup_workspace(args.repo, workspace_dir,
                                       force_fresh=args.clean)
-        _git_managed = True
+        _RUN.git_managed = True
     else:
         # --project: check tmp/ first, then root (backward compat).
         candidate = workspace_dir / args.project
         project_dir = candidate if candidate.exists() else root / args.project
-        _git_managed = _is_git_repo(project_dir)
+        _RUN.git_managed = _is_git_repo(project_dir)
 
     genesis_path = project_dir / "genesis.md"
     functional_req_path = project_dir / "functional_requirements.md"
@@ -4966,10 +4911,9 @@ def main():
     init_events(product=project_dir.name)
 
     # --audit: periodic + iteration-boundary flow self-audit (read-only).
-    global _AUDIT_ENABLED, _AUDIT_PROJECT_DIR
-    _AUDIT_ENABLED = bool(args.audit)
-    _AUDIT_PROJECT_DIR = project_dir
-    if _AUDIT_ENABLED:
+    _RUN.audit_enabled = bool(args.audit)
+    _RUN.audit_project_dir = project_dir
+    if _RUN.audit_enabled:
         _start_audit_thread()
         _log(f"  --audit: flow self-audit active (every iteration + every "
              f"{os.getenv('AUDIT_INTERVAL_SEC', '900')}s).")
@@ -5061,7 +5005,7 @@ def main():
 
     if args.clean:
         _log("\n-- --clean requested: wiping all generated state --")
-        if _git_managed:
+        if _RUN.git_managed:
             git_clean_reset(project_dir)
         clean_state(root, project_dir, manifest_path, genesis_path, functional_req_path)
         _state_path(project_dir).unlink(missing_ok=True)

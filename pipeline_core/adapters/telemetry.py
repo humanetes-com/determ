@@ -6,13 +6,76 @@ root's ``set_sinks``) and the state adapter. Replaces the `_ReconstructAdapter`
 telemetry pass-through methods so the use-cases receive a real adapter (DI)."""
 from __future__ import annotations
 
+import json
 import os
-from contextlib import suppress
+import threading
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from ..domain.test_results import build_test_name_index, per_file_test_stats
 from ..log import emit, log
+
+
+class JsonlEventEmitter:
+    """The structured-event sink: append one JSON record per event to
+    ``events.jsonl``. Relocated from pipeline.py's `_emit`/`_phase`. Holds a live
+    reference to the run-context dict (product / pipeline_sha / run_id), which the
+    composition root mutates via `init_events`. Never raises — observability must
+    not crash the pipeline."""
+
+    def __init__(self, events_log: str, run_context: dict[str, str]) -> None:
+        self._events_log = events_log
+        self._ctx = run_context
+
+    def emit(self, event: str, **fields: Any) -> None:
+        try:
+            record: dict[str, Any] = {
+                "ts": datetime.now(UTC).isoformat(timespec="milliseconds"),
+                "product": self._ctx.get("product", "unknown"),
+                "pipeline_sha": self._ctx.get("pipeline_sha", "unknown"),
+                "run_id": self._ctx.get("run_id", ""),
+                "event": event,
+                # Emitting thread — per-thread stream logs key on this name (C10 audit).
+                "thread": threading.current_thread().name,
+                # OS thread id — distinguishes a real name-collision from reentrancy (debt #6).
+                "tid": threading.get_ident(),
+            }
+            for k, v in fields.items():
+                if v is not None:
+                    record[k] = v
+            with open(self._events_log, "a") as fh:
+                fh.write(json.dumps(record, default=str) + "\n")
+        except Exception:
+            pass  # observability must never crash the pipeline
+
+    @contextmanager
+    def phase(self, prefix: str, **fields: Any) -> Iterator[dict[str, Any]]:
+        """Emit `{prefix}.start` on enter and `{prefix}.done` on exit with auto
+        duration_ms. Yields a mutable dict whose keys become extra `.done` fields
+        (`data` deep-merges). On exception, `.done` still fires with
+        `data.error = <ExceptionName>`, then the exception re-raises."""
+        t0 = time.monotonic()
+        self.emit(f"{prefix}.start", **fields)
+        extra: dict[str, Any] = {}
+        err: str | None = None
+        try:
+            yield extra
+        except BaseException as _e:
+            err = type(_e).__name__
+            raise
+        finally:
+            merged: dict[str, Any] = {**fields, **{k: v for k, v in extra.items() if k != "data"}}
+            merged_data: dict[str, Any] = {**(fields.get("data") or {}), **(extra.get("data") or {})}
+            if err is not None:
+                merged_data["error"] = err
+            if merged_data:
+                merged["data"] = merged_data
+            merged["duration_ms"] = int((time.monotonic() - t0) * 1000)
+            self.emit(f"{prefix}.done", **merged)
 from .state import mark_phase, set_current
 
 
