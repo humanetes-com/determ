@@ -952,7 +952,6 @@ TASK2_FIX_RETRIES = 2
 
 # Max chars for genesis.md and functional_requirements.md when passed to task4.
 # Set high enough that truncation never occurs in practice on a large local context.
-TASK4_DOC_LIMIT = 200_000
 
 # Directory for locked module source backups (bottom-up integration).
 # Layout vocabulary now lives in pipeline_core.domain.workspace_layout.
@@ -966,7 +965,6 @@ from pipeline_core.domain.workspace_layout import (  # noqa: E402
 )
 
 # Sentinel file written by TASK 0c when coverage augmentation is complete.
-COVERAGE_AUGMENT_SENTINEL = ".coverage_augmented"
 
 # Path to cargo-tarpaulin binary (installed via `cargo install cargo-tarpaulin`).
 # Resolve against SUDO_USER's home when running under sudo, so `sudo continue.sh`
@@ -993,7 +991,6 @@ MANIFEST_NAME = ".generated_files.txt"
 # Persistent log file written alongside the script.
 LOG_NAME = "run.log"
 
-PIPELINE_STATE_NAME = _state_mod.PIPELINE_STATE_NAME  # single-sourced (slice 9)
 
 # Workspace directory for cloned/copied project repos (relative to pipeline root).
 WORKSPACE_DIR = "tmp"
@@ -1002,7 +999,6 @@ WORKSPACE_DIR = "tmp"
 
 # Test/example file discovery moved to pipeline_core.adapters.discovery (P5).
 # Re-exported here so existing references keep working through the shim.
-TEST_DIR_NAMES = _discovery.TEST_DIR_NAMES
 SKIP_DIR_NAMES = _discovery.SKIP_DIR_NAMES
 
 # ---------------------------------------------------------------------------
@@ -1388,7 +1384,6 @@ collect_protected_test_files = _discovery.collect_protected_test_files
 
 
 format_test_files = _shaping.format_test_files
-_split_at_semantic_boundaries = _shaping.split_at_semantic_boundaries
 
 
 # chunk_test_files + chunk_test_files_by_file relocated to prompts.shaping (P6).
@@ -1978,7 +1973,6 @@ _MODEL_NOTES_STORE = _FileModelNotesStore(
 )
 
 _load_model_notes: Callable[..., list[str]] = _MODEL_NOTES_STORE.load
-_save_model_notes = _MODEL_NOTES_STORE.save
 
 
 def _filter_model_notes_for_prompt(
@@ -2958,7 +2952,6 @@ def _scan_unimplemented_functions(src_dir: Path) -> list[tuple[str, str]]:
 # `# [cfg (X)] mod foo ;`) is done via domain.cfg.cfg_inline_predicates.
 
 
-_fn_cfg_predicates = _membership.fn_cfg_predicates
 
 
 def _enumerate_mods_via_extractor(src_dir: Path) -> list[ModRecord] | None:
@@ -3024,7 +3017,6 @@ def _invalidate_mod_records_cache() -> None:
     _CLUSTER_SPECIFIC_SYMS_CACHE.clear()  # #26 residual: same invalidation lifecycle
 
 
-_file_cfg_predicate_regex_fallback = _membership.file_cfg_predicate_regex_fallback
 
 
 def _fn_belongs_to_cluster(
