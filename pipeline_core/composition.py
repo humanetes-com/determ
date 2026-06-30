@@ -10,15 +10,32 @@ state + the boundary providers derived from them. Later stages move the
 `_X_DEPS` use-case wiring and the `main` run-loop here (see refactoring.md §Phase 3)."""
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 
 from pipeline_core.adapters import Adapters
 from pipeline_core.adapters.structure import CliStructureReader
+from pipeline_core.application.tasks.discover_test_command import DiscoverTestCommandDeps
 from pipeline_core.application.tasks.genesis_audit import GenesisAuditDeps
 from pipeline_core.domain.run_state import RunState
 from pipeline_core.io import read, write
 from pipeline_core.settings import Settings
+
+
+@dataclass(frozen=True)
+class Ports:
+    """Late-binding callables for the cross-cutting boundaries (LLM ask, log,
+    event emit, truncation guard, cargo env). During migration the composition
+    root supplies lambdas over its module globals so the e2e test seam (which
+    patches those globals) is preserved; at the end they become bound adapter
+    methods. See the late-binding bridge in refactoring.md §Phase 3."""
+
+    ask: Callable[..., str]
+    log: Callable[[str], None]
+    emit: Callable[..., None]
+    guard: Callable[[str, str], None]
+    cargo_env: Callable[[], dict[str, str]]
 
 
 @dataclass(frozen=True)
@@ -30,31 +47,42 @@ class App:
     adapters: Adapters
     settings: Settings
     run_state: RunState
+    ports: Ports
     # Syn-extractor boundary: the structured-source reader over `adapters.extractor`.
     structure: CliStructureReader
-    # TASK-4 genesis-audit use-case deps (S3 slice 1).
-    genesis_audit_deps: GenesisAuditDeps
+    # Migrated use-case deps:
+    genesis_audit_deps: GenesisAuditDeps       # TASK-4 genesis audit (S3 slice 1)
+    discover_test_cmd_deps: DiscoverTestCommandDeps  # test-command discovery (S3 slice 2)
 
 
 def build_app(
     adapters: Adapters,
     settings: Settings,
     run_state: RunState,
+    ports: Ports,
     *,
-    ask: Callable[..., str],
     task4_verbosity_guard: str,
+    extra_cap: int,
 ) -> App:
     """Assemble the App from its ports. Pure wiring (no I/O) — the place a test
-    passes fake adapters/ports to get a fake-backed App. Boundary callables (e.g.
-    ``ask``) are passed late-binding so the migration preserves the test seam."""
+    passes fake adapters/ports to get a fake-backed App. (The remaining explicit
+    kwargs are pipeline-level constants not yet in `Settings`; fold them in later.)"""
     return App(
         adapters=adapters,
         settings=settings,
         run_state=run_state,
+        ports=ports,
         structure=CliStructureReader(adapters.extractor),
         genesis_audit_deps=GenesisAuditDeps(
-            ask=ask, read=read, write=write,
+            ask=ports.ask, read=read, write=write,
             model=settings.task_models.task4,
             verbosity_guard=task4_verbosity_guard,
+        ),
+        discover_test_cmd_deps=DiscoverTestCommandDeps(
+            ask=ports.ask,
+            task0_model=settings.task_models.task0,
+            model_name=settings.model,
+            extra_cap=extra_cap,
+            sys_exit=sys.exit,
         ),
     )

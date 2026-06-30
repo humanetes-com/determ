@@ -251,9 +251,6 @@ from pipeline_core.application.strip_bake import (
 )
 from pipeline_core.application.tasks import cfg_scan as _cfg_scan
 from pipeline_core.application.tasks.discover_test_command import (
-    DiscoverTestCommandDeps,
-)
-from pipeline_core.application.tasks.discover_test_command import (
     discover_test_command as _discover_test_command_impl,
 )
 from pipeline_core.application.tasks.discover_test_command import (
@@ -306,6 +303,7 @@ from pipeline_core.application.workspace_lifecycle import (
 from pipeline_core.application.workspace_lifecycle import (
     wipe_module_sources as _wl_wipe_module_sources,
 )
+from pipeline_core.composition import Ports as _Ports
 from pipeline_core.composition import build_app as _build_app
 from pipeline_core.domain import cfg as _cfg
 from pipeline_core.domain import model_report as _model_report
@@ -1585,8 +1583,17 @@ ADAPTERS = build_adapters(SETTINGS, extractor_bin=SKELETON_EXTRACTOR_BIN, model=
 # Phase 3 S1: the composition factory. main() will route through this; for now it
 # owns the boundary providers (the extractor StructureReader) so subsequent stages
 # repoint call sites + tests onto `_APP.*` (see refactoring.md §Phase 3).
-_APP = _build_app(ADAPTERS, SETTINGS, _RUN,
-                  ask=_ASK_CLIENT.ask, task4_verbosity_guard=_TASK4_VERBOSITY_GUARD)
+# Phase 3: cross-cutting boundary callables, late-binding (lambdas read the live
+# module globals so the e2e monkeypatch seam is preserved while wiring migrates).
+_PORTS = _Ports(
+    ask=lambda *a, **k: _ASK_CLIENT.ask(*a, **k),
+    log=lambda m: _log(m),
+    emit=lambda ev, **f: _emit(ev, **f),
+    guard=lambda loc, msg: _guard(loc, msg),
+    cargo_env=lambda: _cargo_env(),
+)
+_APP = _build_app(ADAPTERS, SETTINGS, _RUN, _PORTS,
+                  task4_verbosity_guard=_TASK4_VERBOSITY_GUARD, extra_cap=_EXTRA_CAP)
 # P1: the real StructureReader — injected into the fill engine (no monkeypatch seam).
 _STRUCTURE = _APP.structure
 # #23: build.rs cfg authority — prunes phantom clusters from source `#[cfg]` atoms.
@@ -4325,13 +4332,8 @@ _TASK0B_DEPS = Task0bDeps(
     task0_model=_TASK0_MODEL,
 )
 
-_DISCOVER_TEST_CMD_DEPS = DiscoverTestCommandDeps(
-    ask=_ASK_CLIENT.ask,
-    task0_model=_TASK0_MODEL,
-    model_name=MODEL,
-    extra_cap=_EXTRA_CAP,
-    sys_exit=sys.exit,
-)
+# Phase 3 S3 slice 2: constructed in composition.build_app; re-exported by name.
+_DISCOVER_TEST_CMD_DEPS = _APP.discover_test_cmd_deps
 
 
 def _has_gen_tests_decl(src_text: str, pass_n: int) -> bool:
