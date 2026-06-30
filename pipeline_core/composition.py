@@ -19,7 +19,7 @@ from pipeline_core.adapters import Adapters
 from pipeline_core.adapters.artifacts import WorkspaceArtifacts, load_api_surface
 from pipeline_core.adapters.augment_engine import CargoAugmentEngine
 from pipeline_core.adapters.augment_store import FileAugmentStore
-from pipeline_core.adapters.coverage import CoverageDeps, CoverageProvider, make_coverage_provider
+from pipeline_core.adapters.coverage import CoverageDeps, CoverageProvider
 from pipeline_core.adapters.failure_journal import FileFailureJournal
 from pipeline_core.adapters.fill_engine_roles import (
     CargoFillAdapter,
@@ -252,6 +252,8 @@ def build_app(
     fill_roles: FillRoles,
     telemetry: LogTelemetry,
     augment_roles: AugmentRoles,
+    coverage_deps: CoverageDeps,
+    coverage_provider: CoverageProvider,
 ) -> App:
     """Assemble the App from its ports + run-scoped holders + config. Pure wiring
     (no I/O) — the place a test passes fake adapters/ports to get a fake-backed App."""
@@ -315,11 +317,8 @@ def build_app(
         step=reconstruction_step, analysis=failure_analysis, telemetry=telemetry,
         plateau_abort=cfg.module_plateau_abort,
     )
-    coverage_deps = CoverageDeps(
-        log=ports.log, cargo_env=ports.cargo_env, cluster=scope.get_active,
-        tarpaulin_bin=cfg.tarpaulin_bin, grcov_bin=cfg.grcov_bin,
-        build_timeout=cfg.build_timeout, ignore_pragma=cfg.ignore_pragma,
-    )
+    # S26: coverage_deps + provider are injected pre-built (constructed standalone in
+    # pipeline.py before _APP) so module-level consumers reach them without _APP.
     return App(
         adapters=adapters,
         settings=settings,
@@ -343,7 +342,7 @@ def build_app(
             sys_exit=sys.exit,
         ),
         coverage_deps=coverage_deps,
-        coverage_provider=make_coverage_provider(settings.coverage_backend, coverage_deps),
+        coverage_provider=coverage_provider,
         ws_deps=WorkspaceDeps(log=ports.log, emit=ports.emit),
         ws_scan_deps=WorkspaceScanDeps(
             ask=ports.ask, task0_model=settings.task_models.task0,
