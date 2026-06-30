@@ -124,14 +124,9 @@ from pipeline_core.adapters.phase_c_log import write_phase_c_test_fix_log as _wr
 from pipeline_core.adapters.progress import ChunkProgress
 from pipeline_core.adapters.ratchet import BestTreeRatchet
 from pipeline_core.adapters.reconstruct_roles import (
-    AnalystAdapter,
     CoverageDocsAdapter,
     DocsMetricsAdapter,
-    FixerAdapter,
     FlowAuditAdapter,
-    GeneratorAdapter,
-    PhaseGateAdapter,
-    RequirementsAdapter,
 )
 from pipeline_core.adapters.run_registry import FileRunRegistry
 from pipeline_core.adapters.structure import fn_name_counts as _fn_name_counts
@@ -304,6 +299,7 @@ from pipeline_core.application.workspace_lifecycle import (
 )
 from pipeline_core.composition import CompositionConfig as _CompositionConfig
 from pipeline_core.composition import Ports as _Ports
+from pipeline_core.composition import ReconstructRoles as _ReconstructRoles
 from pipeline_core.composition import build_app as _build_app
 from pipeline_core.domain import cfg as _cfg
 from pipeline_core.domain import model_report as _model_report
@@ -1597,7 +1593,26 @@ _CFG = _CompositionConfig(
     tarpaulin_bin=TARPAULIN_BIN, grcov_bin=GRCOV_BIN, build_timeout=BUILD_TIMEOUT,
     ignore_pragma=COVERAGE_IGNORE_PRAGMA,
 )
-_APP = _build_app(ADAPTERS, SETTINGS, _RUN, _SCOPE, _PORTS, _CFG)
+# Phase 3 S3.4: TASK-1→4 reconstruction role callables, late-binding (the wrapped
+# fns are defined later in this module; lambdas resolve them at call time).
+_ROLES = _ReconstructRoles(
+    phase_valid=lambda *a, **k: _phase_valid(*a, **k),
+    commit_and_mark=lambda *a, **k: _commit_and_mark(*a, **k),
+    task1=lambda *a, **k: task1(*a, **k),
+    validate_task1_output=lambda *a, **k: validate_task1_output(*a, **k),
+    task2_inner_loop=lambda *a, **k: task2_inner_loop(*a, **k),
+    load_original_structure=lambda *a, **k: load_original_structure(*a, **k),
+    validate_task2_output=lambda *a, **k: validate_task2_output(*a, **k),
+    validate_task2_api_conformance=lambda *a, **k: validate_task2_api_surface_conformance(*a, **k),
+    task2_fix_loop=lambda *a, **k: task2_fix_loop(*a, **k),
+    classify_failure=lambda *a, **k: _classify_failure(*a, **k),
+    insert_no_run=lambda *a, **k: insert_no_run(*a, **k),
+    fix_err_cap=_FIX_ERR_CAP,
+    task4=lambda *a, **k: task4(*a, **k),
+    validate_task4_output=lambda *a, **k: validate_task4_output(*a, **k),
+    task_genesis_audit=lambda *a, **k: task_genesis_audit(*a, **k),
+)
+_APP = _build_app(ADAPTERS, SETTINGS, _RUN, _SCOPE, _PORTS, _CFG, _ROLES)
 # P1: the real StructureReader — injected into the fill engine (no monkeypatch seam).
 _STRUCTURE = _APP.structure
 # #23: build.rs cfg authority — prunes phantom clusters from source `#[cfg]` atoms.
@@ -3101,7 +3116,7 @@ _read_state = _state_mod.read_state
 _write_state = _state_mod.write_state
 _mark_phase = _state_mod.mark_phase
 _set_current = _state_mod.set_current
-_phase_valid = _state_mod.phase_valid
+_phase_valid: Callable[[Path, str], bool] = _state_mod.phase_valid
 _log_state_summary = _state_mod.log_state_summary
 
 
@@ -4680,14 +4695,12 @@ _LOCK_DEPS = _orchestrator.LockDeps(
 # role is a focused adapter (adapters.reconstruct_roles), constructor-injected
 # with the resident task1-4/fix composition-wiring callables; the use-cases get
 # narrow role ports (ISP) instead of one multi-role binding object.
-_PHASE_GATE = PhaseGateAdapter(_phase_valid, _commit_and_mark)
-_REQUIREMENTS = RequirementsAdapter(task1, validate_task1_output)
-_GENERATOR = GeneratorAdapter(
-    task2_inner_loop, load_original_structure, validate_task2_output,
-    validate_task2_api_surface_conformance,
-)
-_FIXER = FixerAdapter(task2_fix_loop, _classify_failure, _log, insert_no_run, _FIX_ERR_CAP)
-_ANALYST = AnalystAdapter(task4, validate_task4_output, task_genesis_audit)
+# S3.4: role-adapter construction migrated into build_app; re-export by name.
+_PHASE_GATE = _APP.phase_gate
+_REQUIREMENTS = _APP.requirements
+_GENERATOR = _APP.generator
+_FIXER = _APP.fixer
+_ANALYST = _APP.analyst
 _COVERAGE_DOCS = CoverageDocsAdapter(
     lambda project_dir, test_files, readme_text, project_profile, clusters: task0b_discovery(
         project_dir / COVERAGE_STRATEGY_NAME, project_dir, test_files, readme_text,

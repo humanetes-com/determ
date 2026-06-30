@@ -17,6 +17,13 @@ from pathlib import Path
 
 from pipeline_core.adapters import Adapters
 from pipeline_core.adapters.coverage import CoverageDeps
+from pipeline_core.adapters.reconstruct_roles import (
+    AnalystAdapter,
+    FixerAdapter,
+    GeneratorAdapter,
+    PhaseGateAdapter,
+    RequirementsAdapter,
+)
 from pipeline_core.adapters.structure import CliStructureReader
 from pipeline_core.application.tasks.discover_test_command import DiscoverTestCommandDeps
 from pipeline_core.application.tasks.genesis_audit import GenesisAuditDeps
@@ -57,6 +64,32 @@ class CompositionConfig:
 
 
 @dataclass(frozen=True)
+class ReconstructRoles:
+    """Late-binding callables for the TASK-1→4 reconstruction roles — the resident
+    composition-root task/validate fns the ISP role adapters (`PhaseGateAdapter`…
+    `AnalystAdapter`) wrap. Supplied as lambdas over pipeline globals so build_app
+    can construct the adapters at module-load time even though the wrapped fns are
+    defined later in pipeline.py, and the test seam stays live. See refactoring.md
+    §Phase 3 late-binding bridge."""
+
+    phase_valid: Callable[..., bool]
+    commit_and_mark: Callable[..., None]
+    task1: Callable[..., bool]
+    validate_task1_output: Callable[..., tuple[bool, str]]
+    task2_inner_loop: Callable[..., bool]
+    load_original_structure: Callable[..., list[str]]
+    validate_task2_output: Callable[..., tuple[bool, str]]
+    validate_task2_api_conformance: Callable[..., tuple[bool, str]]
+    task2_fix_loop: Callable[..., tuple[bool, str]]
+    classify_failure: Callable[[str], str]
+    insert_no_run: Callable[[str], str]
+    fix_err_cap: int
+    task4: Callable[..., tuple[bool, int]]
+    validate_task4_output: Callable[..., tuple[bool, str]]
+    task_genesis_audit: Callable[..., bool]
+
+
+@dataclass(frozen=True)
 class App:
     """The wired application: external ports + run-scoped state + boundary
     providers and use-case deps built from them. Grown one S3 slice at a time
@@ -74,6 +107,12 @@ class App:
     genesis_audit_deps: GenesisAuditDeps       # TASK-4 genesis audit (S3 slice 1)
     discover_test_cmd_deps: DiscoverTestCommandDeps  # test-command discovery (S3 slice 2)
     coverage_deps: CoverageDeps                # coverage I/O (S3 slice 3)
+    # ISP reconstruction role adapters (S3 slice 4):
+    phase_gate: PhaseGateAdapter
+    requirements: RequirementsAdapter
+    generator: GeneratorAdapter
+    fixer: FixerAdapter
+    analyst: AnalystAdapter
 
 
 def build_app(
@@ -83,6 +122,7 @@ def build_app(
     scope: ClusterScope,
     ports: Ports,
     config: CompositionConfig,
+    roles: ReconstructRoles,
 ) -> App:
     """Assemble the App from its ports + run-scoped holders + config. Pure wiring
     (no I/O) — the place a test passes fake adapters/ports to get a fake-backed App."""
@@ -111,5 +151,18 @@ def build_app(
             log=ports.log, cargo_env=ports.cargo_env, cluster=scope.get_active,
             tarpaulin_bin=cfg.tarpaulin_bin, grcov_bin=cfg.grcov_bin,
             build_timeout=cfg.build_timeout, ignore_pragma=cfg.ignore_pragma,
+        ),
+        phase_gate=PhaseGateAdapter(roles.phase_valid, roles.commit_and_mark),
+        requirements=RequirementsAdapter(roles.task1, roles.validate_task1_output),
+        generator=GeneratorAdapter(
+            roles.task2_inner_loop, roles.load_original_structure,
+            roles.validate_task2_output, roles.validate_task2_api_conformance,
+        ),
+        fixer=FixerAdapter(
+            roles.task2_fix_loop, roles.classify_failure, ports.log,
+            roles.insert_no_run, roles.fix_err_cap,
+        ),
+        analyst=AnalystAdapter(
+            roles.task4, roles.validate_task4_output, roles.task_genesis_audit,
         ),
     )
