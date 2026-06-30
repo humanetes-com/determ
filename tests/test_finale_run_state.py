@@ -26,7 +26,7 @@ def test_run_state_is_mutable_holder() -> None:
 def test_emitter_writes_jsonl_record(tmp_path: Path) -> None:
     log = tmp_path / "events.jsonl"
     ctx = {"product": "anyhow", "pipeline_sha": "abc", "run_id": "r1"}
-    em = JsonlEventEmitter(str(log), ctx)
+    em = JsonlEventEmitter(lambda: str(log), ctx)
     em.emit("task.start", task="t3", skip=None)  # None fields dropped
     rec = json.loads(log.read_text().strip())
     assert rec["event"] == "task.start" and rec["task"] == "t3"
@@ -36,19 +36,19 @@ def test_emitter_writes_jsonl_record(tmp_path: Path) -> None:
 
 def test_emitter_reads_context_live(tmp_path: Path) -> None:
     ctx = {"product": "unknown", "pipeline_sha": "x", "run_id": ""}
-    em = JsonlEventEmitter(str(tmp_path / "e.jsonl"), ctx)
+    em = JsonlEventEmitter(lambda: str(tmp_path / "e.jsonl"), ctx)
     ctx["product"] = "later"  # mutated after construction (init_events pattern)
     em.emit("x")
     assert json.loads((tmp_path / "e.jsonl").read_text().strip())["product"] == "later"
 
 
 def test_emitter_never_raises_on_bad_path() -> None:
-    JsonlEventEmitter("/nonexistent-dir/zzz/e.jsonl", {}).emit("x")  # no raise
+    JsonlEventEmitter(lambda: "/nonexistent-dir/zzz/e.jsonl", {}).emit("x")  # no raise
 
 
 def test_phase_emits_start_and_done(tmp_path: Path) -> None:
     log = tmp_path / "e.jsonl"
-    em = JsonlEventEmitter(str(log), {})
+    em = JsonlEventEmitter(lambda: str(log), {})
     with em.phase("task3", task="t") as extra:
         extra["data"] = {"passed": True}
     recs = [json.loads(line) for line in log.read_text().splitlines()]
@@ -58,7 +58,7 @@ def test_phase_emits_start_and_done(tmp_path: Path) -> None:
 
 def test_phase_done_carries_error_on_exception(tmp_path: Path) -> None:
     log = tmp_path / "e.jsonl"
-    em = JsonlEventEmitter(str(log), {})
+    em = JsonlEventEmitter(lambda: str(log), {})
     try:
         with em.phase("p"):
             raise ValueError("boom")

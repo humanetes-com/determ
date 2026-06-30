@@ -10,7 +10,7 @@ import json
 import os
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
@@ -27,7 +27,11 @@ class JsonlEventEmitter:
     composition root mutates via `init_events`. Never raises — observability must
     not crash the pipeline."""
 
-    def __init__(self, events_log: str, run_context: dict[str, str]) -> None:
+    def __init__(
+        self, events_log: Callable[[], str], run_context: dict[str, str],
+    ) -> None:
+        # Path resolved LIVE (a provider, not a captured string) so the
+        # composition root can rebind the sink — and tests redirect it.
         self._events_log = events_log
         self._ctx = run_context
 
@@ -47,7 +51,7 @@ class JsonlEventEmitter:
             for k, v in fields.items():
                 if v is not None:
                     record[k] = v
-            with open(self._events_log, "a") as fh:
+            with open(self._events_log(), "a") as fh:
                 fh.write(json.dumps(record, default=str) + "\n")
         except Exception:
             pass  # observability must never crash the pipeline

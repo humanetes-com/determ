@@ -177,6 +177,9 @@ from pipeline_core.application.generators.task1_synthesizer import (
     StaticTask1Synthesizer,
     Task1Synthesizer,
 )
+from pipeline_core.application.parallel import (
+    generate_in_parallel as _generate_in_parallel,
+)
 from pipeline_core.application.reconstruct import attribution as _attribution
 from pipeline_core.application.reconstruct import cleanup_residuals as _cleanup_residuals
 from pipeline_core.application.reconstruct import cluster_membership as _membership
@@ -305,9 +308,7 @@ from pipeline_core.application.workspace_lifecycle import (
 from pipeline_core.application.workspace_lifecycle import (
     wipe_module_sources as _wl_wipe_module_sources,
 )
-from pipeline_core.domain import attribution as _domain_attribution
 from pipeline_core.domain import cfg as _cfg
-from pipeline_core.domain import cluster_plan as _cluster_plan
 from pipeline_core.domain import model_report as _model_report
 from pipeline_core.domain import test_count as _tc
 from pipeline_core.domain.bound_methods import (
@@ -808,7 +809,7 @@ def _store_prompt_content(text: str) -> dict[str, int | str]:
 # C-finale: the events.jsonl sink + `_phase` relocated to
 # adapters.telemetry.JsonlEventEmitter; the emitter holds a live ref to
 # `_RUN_CONTEXT` (mutated by init_events). Shims keep every call site stable.
-_EVENT_EMITTER = JsonlEventEmitter(_EVENTS_LOG, _RUN_CONTEXT)
+_EVENT_EMITTER = JsonlEventEmitter(lambda: _EVENTS_LOG, _RUN_CONTEXT)
 
 
 def _emit(event: str, **fields) -> None:
@@ -1203,45 +1204,9 @@ def generate_in_parallel(
     model: "str | None" = None,
     think: "bool | None" = None,
 ) -> "list[str]":
-    """Fire one ask() per query concurrently; return responses index-aligned to
-    `queries`.
-
-    Used by task0c split-and-merge: the N subset prompts share their large file-
-    context prefix and differ only in the small "target these functions" tail, so
-    vLLM's prefix cache prefills the shared part once and the marginal KV per
-    extra request is just its tail — N requests batch on the GPU where N big
-    distinct prompts would thrash (measured: shared-prefix x4 clean, distinct x4
-    thrashed).
-
-    ask() is already thread-safe (per-call OpenAI client in model_interact;
-    content-addressed prompt store; append-only event log). A failed/empty call
-    contributes "" rather than aborting the batch. len<=1 short-circuits to a
-    single synchronous call (no threads).
-    """
-    if not queries:
-        return []
-    if len(queries) == 1:
-        try:
-            return [_ASK_CLIENT.ask(queries[0], model=model, think=think)]
-        except Exception:
-            return [""]
-
-    import threading as _t
-    results: list[str] = [""] * len(queries)
-
-    def _worker(i: int) -> None:
-        try:
-            results[i] = _ASK_CLIENT.ask(queries[i], model=model, think=think) or ""
-        except Exception as _e:  # one bad request must not sink the batch
-            _guard("task0c/candidate_error", f"request {i}: {type(_e).__name__}: {_e}")
-            results[i] = ""
-
-    threads = [_t.Thread(target=_worker, args=(i,), name=f"task0c-gen-{i}") for i in range(len(queries))]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-    return results
+    # C11: relocated to application.parallel.generate_in_parallel; shim binds ask + guard.
+    return _generate_in_parallel(
+        queries, ask=_ASK_CLIENT.ask, guard=_guard, model=model, think=think)
 
 
 # slice 5b foundation: relocated to pipeline_core.domain.text (imported at top).
@@ -1426,28 +1391,8 @@ def _count_test_fns_cfg_aware(
     return _tc.count_test_fns_cfg_aware(text, cfg_true, cfg_false, default_features)
 
 
-def _file_active_for_cluster(
-    src_dir: Path,
-    file_path: Path,
-    cfg_true: set[str],
-    cfg_false: set[str],
-    _depth: int = 0,
-    default_features: "frozenset[str] | set[str]" = frozenset(),
-) -> bool:
-    """Shim → `pipeline_core.application.test_count.file_active_for_cluster` (#29)."""
-    return _tc_app.file_active_for_cluster(
-        src_dir, file_path, cfg_true, cfg_false, _test_count_deps(),
-        _depth, default_features)
 
 
-def _count_test_fns_in_records(
-    records: "list[dict]",
-    cfg_true: set[str],
-    cfg_false: set[str],
-    default_features: "frozenset[str] | set[str]" = frozenset(),
-) -> int:
-    """Shim → `pipeline_core.domain.test_count.count_test_fns_in_records` (#29)."""
-    return _tc.count_test_fns_in_records(records, cfg_true, cfg_false, default_features)
 
 
 def _count_active_tests_for_cluster(
@@ -1551,20 +1496,6 @@ def run_build_check(project_dir: Path, build_cmd: str) -> tuple[bool, str]:
 # Tasks
 # ---------------------------------------------------------------------------
 
-def _profile_inputs_hash(readme_text: str, test_files: list) -> str:
-    """SHA-256 of (readme + pure test file paths + first 500 chars of each).
-
-    Only hashes files from tests/ directories — excludes src/*.rs files that
-    happen to contain inline #[cfg(test)] blocks. task0c appends gen_tests
-    blocks to those source files, which would otherwise change the hash on
-    every restart and force unnecessary re-runs of task0a and task0b.
-    """
-    stable = [(rel, content) for rel, content in test_files
-              if "tests/" in rel or rel.startswith("tests")]
-    paths_joined = "\n".join(rel for rel, _ in stable)
-    excerpts = "\n".join(content[:500] for _, content in stable[:25])
-    raw = (readme_text + paths_joined + excerpts).encode()
-    return hashlib.sha256(raw).hexdigest()[:16]
 
 
 # ---------------------------------------------------------------------------
@@ -1600,8 +1531,6 @@ def _is_git_repo(path: Path) -> bool:
 _WS_DEPS = WorkspaceDeps(log=_log, emit=_emit)
 
 
-def _git_default_branch(project_dir: Path) -> str:
-    return _wsmod.git_default_branch(project_dir)
 
 
 def git_commit(project_dir: Path, message: str) -> bool:
@@ -1696,22 +1625,8 @@ def _filter_tests_for_cluster(test_files: list[tuple[str, str]],
     return _membership.filter_tests_for_cluster(test_files, cluster)
 
 
-def _normalize_cfg_pred(p: str) -> str:
-    """Normalize a cfg predicate for set comparison (strip spaces).
-    Thin shim → domain (`pipeline_core.domain.cfg`)."""
-    return _cfg.normalize_pred(p)
 
 
-def _file_top_cfg_excluded(content: str, cfg_true: set[str], cfg_false: set[str]) -> bool:
-    """Return True if the file has a top-level `#![cfg(...)]` that evaluates
-    to false. Conservative: returns False (don't exclude) on any uncertainty.
-
-    File-level inner `#![cfg(...)]` predicates are read by the structured
-    `_cfg.crate_cfg_predicates` char-scanner (regex-free since the P7 migration).
-
-    Shim → `pipeline_core.domain.test_count.file_top_cfg_excluded` (debt #29).
-    """
-    return _tc.file_top_cfg_excluded(content, cfg_true, cfg_false)
 
 
 def _eval_cfg_pred(pred: str, cfg_true: set[str], cfg_false: set[str]) -> "bool | None":
@@ -1762,9 +1677,6 @@ def _extract_skeleton(input_dir: Path, output_dir: Path,
     return ADAPTERS.extractor.skeletonise(input_dir, output_dir, cfg_true=ct, cfg_false=cf)
 
 
-def _compute_fn_name_counts(src_dir: Path) -> dict[str, int]:
-    # C5: relocated to adapters.structure.fn_name_counts.
-    return _fn_name_counts(src_dir)
 
 
 def _bake_skeleton_artifacts(project_dir: Path, module_name: str) -> dict:
@@ -2940,12 +2852,6 @@ def _scan_unimplemented_records_for_cluster(
 # ---------------------------------------------------------------------------
 
 
-def _line_to_fn_record(
-    file_text: str, line_no: int, fn_records: list[dict],
-    col_no: int | None = None,
-) -> dict | None:
-    """P2: delegates to _domain_attribution.line_to_fn_record (logic relocated)."""
-    return _domain_attribution.line_to_fn_record(file_text, line_no, fn_records, col_no)
 
 
 def _extract_tdd_frontier(
@@ -2962,11 +2868,6 @@ def _behavior_frontier(
     return _attribution.behavior_frontier(_ATTR_DEPS, test_output, project_dir, existing_test_files)
 
 
-def _extract_tdd_compile_frontier(
-    build_output: str, src_dir: Path,
-) -> Frontier:
-    """P2: delegates to _attribution.extract_tdd_compile_frontier (logic relocated)."""
-    return _attribution.extract_tdd_compile_frontier(_ATTR_DEPS, build_output, src_dir)
 
 
 def _compile_error_frontier(
@@ -3150,10 +3051,6 @@ def task0_cfg_scan(project_dir: Path) -> "list[BuildCluster]":
     return scan.clusters
 
 
-def _cfg_to_cluster_name(pred: str) -> str:
-    """Map a custom cfg predicate to a short cluster name.
-    Thin shim → `pipeline_core.domain.cluster_plan`."""
-    return _cluster_plan.cluster_name_for_custom(pred)
 
 
 # _write_build_configs → pipeline_core.adapters.workspace_files (imported as _wsfiles).
@@ -4293,14 +4190,6 @@ def _describe_test_environment() -> str:
         active.excluded_cfg if active is not None else None)
 
 
-def _crate_name_from_toml(module_dir: Path, fallback: str) -> str:
-    """Extract `name` from Cargo.toml and normalise hyphens to underscores."""
-    toml = module_dir / "Cargo.toml"
-    if toml.exists():
-        name = _cargo_package_name(toml.read_text())
-        if name:
-            return name.replace("-", "_")
-    return fallback.replace("-", "_")
 
 
 # Slice 4b: coverage I/O relocated to pipeline_core.adapters.coverage. _COV_DEPS injects
