@@ -22,6 +22,10 @@ MODULE_STRIPPED_DIR = ".module_stripped"
 # Per-cluster build configuration dump (env_extra / cfg / tarpaulin excludes).
 BUILD_CONFIGS_NAME = "build_configs.md"
 
+# Phase C test-fix iteration archives (per-iteration cargo output) + the
+# per-fn retrospectives store. Single source of truth for the dir name.
+PHASE_C_LOGS_DIR = ".phase_c_logs"
+
 # File extensions the model is allowed to create/overwrite — anything else on
 # disk (Cargo.toml, *.json, *.proto, …) is a protected non-source file. The
 # wide language set keeps the guard generic across non-Rust projects.

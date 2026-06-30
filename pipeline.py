@@ -123,6 +123,8 @@ from pipeline_core.adapters.model_notes_store import (
     FileModelNotesStore as _FileModelNotesStore,
 )
 from pipeline_core.adapters.mutation import MutationTester
+from pipeline_core.adapters.phase_c_log import write_phase_c_test_fix_log as _write_phase_c_test_fix_log
+from pipeline_core.adapters.progress import ChunkProgress
 from pipeline_core.adapters.ratchet import BestTreeRatchet
 from pipeline_core.adapters.reconstruct_roles import (
     AnalystAdapter,
@@ -151,6 +153,7 @@ from pipeline_core.adapters.task2_roles import (
     WorkspaceAdapter,
 )
 from pipeline_core.adapters.telemetry import LogTelemetry
+from pipeline_core.adapters.telemetry import emit_per_file_test_overview as _emit_per_file_test_overview
 from pipeline_core.adapters.test_runner import CallableTestRunner
 from pipeline_core.adapters.workspace import WorkspaceDeps
 from pipeline_core.adapters.workspace_lifecycle import clean_state as _clean_state_impl
@@ -423,12 +426,10 @@ from pipeline_core.domain.test_grouping import split_oversized_groups as _split_
 from pipeline_core.domain.test_results import (
     OUTPUT_SEPARATOR,
     _parse_test_counts,
-    build_test_name_index,
     count_passing_tests,
     extract_test_output_from_file,
     insert_no_run,
     is_compiler_output_line,
-    per_file_test_stats,
     rustc_error_codes,
     rustc_error_signatures,
     strip_ansi,
@@ -1200,83 +1201,6 @@ def _start_audit_thread() -> None:
             _run_flow_audit(f"periodic/{interval}s")
 
     _t.Thread(target=_loop, name="flow-audit", daemon=True).start()
-
-
-# ---------------------------------------------------------------------------
-# Progress bar
-# ---------------------------------------------------------------------------
-
-def _fmt_duration(seconds: float) -> str:
-    """Format a duration in seconds to a human-readable string."""
-    seconds = int(seconds)
-    if seconds < 60:
-        return f"{seconds}s"
-    m, s = divmod(seconds, 60)
-    if m < 60:
-        return f"{m}m{s:02d}s"
-    h, m = divmod(m, 60)
-    return f"{h}h{m:02d}m"
-
-
-def _render_progress(current: int, total: int, avg_seconds: float | None,
-                     bar_width: int = 30) -> str:
-    """
-    Render a single-line progress bar string.
-    Example: [=====>    ] 45/276 (16%) | avg 2m04s/chunk | ETA ~7h21m
-    """
-    pct = current / total if total else 0
-    filled = int(bar_width * pct)
-    arrow = "=" * filled + (">" if filled < bar_width else "")
-    bar = f"[{arrow:<{bar_width}}]"
-    base = f"{bar} {current}/{total} ({pct:.0%})"
-    if avg_seconds and avg_seconds > 0:
-        remaining = avg_seconds * (total - current)
-        base += f" | avg {_fmt_duration(avg_seconds)}/chunk | ETA ~{_fmt_duration(remaining)}"
-    return base
-
-
-class ChunkProgress:
-    """
-    Tracks per-chunk timing and emits progress output after each chunk.
-
-    Default mode  : prints a new line per chunk (log-friendly).
-    --progress mode: overwrites the same terminal line with \\r (clean live view).
-    """
-
-    def __init__(self, total: int, rolling_window: int = 5):
-        self.total = total
-        self.window = rolling_window
-        self._times: list[float] = []   # recent chunk durations
-        self._local = threading.local()  # per-thread start time (concurrent chunks)
-        self._lock = threading.Lock()     # guards _times/_last_line_len/print
-        self._last_line_len: int = 0    # for \r padding in progress mode
-
-    def start_chunk(self):
-        self._local.chunk_start = time.monotonic()
-
-    def finish_chunk(self, current: int):
-        elapsed = time.monotonic() - getattr(self._local, "chunk_start", time.monotonic())
-        with self._lock:
-            self._times.append(elapsed)
-            if len(self._times) > self.window:
-                self._times.pop(0)
-            avg = sum(self._times) / len(self._times) if self._times else None
-
-            line = _render_progress(current, self.total, avg)
-
-            if _progress_mode:
-                # Overwrite previous line in terminal.
-                padded = line.ljust(self._last_line_len)
-                print(f"\r{padded}", end="", flush=True)
-                self._last_line_len = len(line)
-            else:
-                # New line — works in log files and when tailing.
-                _log(f"  {line}")
-
-    def finish(self):
-        """Print a final newline when in --progress mode."""
-        if _progress_mode and self._last_line_len:
-            print()  # move past the \r line
 
 
 # ---------------------------------------------------------------------------
@@ -2513,11 +2437,6 @@ def _converge_in_cluster(cluster: "BuildCluster | None") -> str | None:
     gated = {_module_of(f) for f in (cluster.gated_files or [])} if cluster else set()
     return _CONVERGE_MODULE if _CONVERGE_MODULE not in gated else None
 
-# P4: directory under each project workspace where Phase C test-fix
-# iterations are archived for post-hoc retrospective. Per-iter file:
-# tmp/{project}/.phase_c_logs/{cluster}/pass_{n}/fix_{iter}.txt
-_PHASE_C_LOGS_DIRNAME = ".phase_c_logs"
-
 
 # _improvement_loop (the callback->RefineStrategy adapter) was relocated to
 # pipeline_core.application.refine_loop.run_callback_loop (P3.3) and is
@@ -2561,47 +2480,6 @@ def _whole_tree_retrospective(
     return _whole_tree_retrospective_impl(
         error_excerpt, history, name=name,
         ask_retrospective=_ask_retrospective, log=_log, fix_err_cap=_FIX_ERR_CAP)
-
-
-def _write_phase_c_test_fix_log(
-    project_dir: Path,
-    cluster_name: str,
-    pass_n: int,
-    fix_iter: int,
-    test_out: str,
-    failed_tests: list[str],
-    fns_retried: list[tuple[str, str]],
-    cur_fail_count: int,
-    new_fail_count: int,
-    best_fail_count: int,
-    stall: int,
-) -> None:
-    """Archive one test-fix iteration to disk for post-hoc analysis (P4).
-    Failure to write is non-fatal: this is observability, not control flow.
-    """
-    try:
-        out_dir = (project_dir / _PHASE_C_LOGS_DIRNAME
-                   / cluster_name / f"pass_{pass_n}")
-        out_dir.mkdir(parents=True, exist_ok=True)
-        fp = out_dir / f"fix_{fix_iter:02d}.txt"
-        header = (
-            f"# Phase C test-fix iteration\n"
-            f"cluster: {cluster_name}\n"
-            f"pass:    {pass_n}\n"
-            f"iter:    {fix_iter}\n"
-            f"prev_fail_count: {cur_fail_count}\n"
-            f"new_fail_count:  {new_fail_count}\n"
-            f"best_fail_count: {best_fail_count}\n"
-            f"stalled:         {stall}\n"
-            f"failed_tests:\n"
-            + "".join(f"  - {t}\n" for t in failed_tests)
-            + "fns_retried:\n"
-            + "".join(f"  - {r}::{f}\n" for r, f in fns_retried)
-            + "\n=== cargo test output ===\n"
-        )
-        fp.write_text(header + test_out, encoding="utf-8")
-    except Exception as e:
-        _log(f"  [phase-c/per-fn] failed to write test-fix log: {e}")
 
 
 # P3: classification step run before each post-stall test-fix iteration.
@@ -4215,7 +4093,8 @@ _GEN_SHAPING = PromptShapingAdapter(
     chunk_test_files_by_file_fn=lambda tf, limit: chunk_test_files_by_file(tf, limit),
     format_api_surface_section_fn=lambda api: _format_api_surface_section(api),
 )
-_GEN_PROGRESS = ProgressFactoryAdapter(make_progress_fn=lambda total: ChunkProgress(total))
+_GEN_PROGRESS = ProgressFactoryAdapter(
+    make_progress_fn=lambda total: ChunkProgress(total, progress_mode=_progress_mode))
 _GEN_REQUIREMENTS = RequirementsDocAdapter(
     write_fr_preserving_notes_fn=lambda path, content: _write_fr_preserving_notes(path, content),
     type_signals_read_fn=lambda pd: type_signals_read(pd),
@@ -4744,49 +4623,6 @@ def _task3_inline_retry(
         max_stalls=int(os.getenv("TASK3_INLINE_MAX_STALLS", "3")),
         hard_cap=int(os.getenv("TASK3_INLINE_HARD_CAP", "10")),
         deps=_deps)
-
-
-
-def _emit_per_file_test_overview(project_dir: Path, output: str, *, context: str) -> None:
-    """Attribute the latest cargo-test output to files (domain
-    per_file_test_stats; name-based, interleaving-proof) and publish the
-    per-file pass/total table to the log + a tests.file_stats event, which
-    the monitor merges into its compile overview. No test lines → no-op."""
-    try:
-        project_dir = Path(project_dir)
-        known = {
-            str(p.relative_to(project_dir)).replace(os.sep, "/")
-            for d in ("src", "tests") if (project_dir / d).is_dir()
-            for p in (project_dir / d).rglob("*.rs")
-        }
-        texts: dict[str, str] = {}
-        if (project_dir / "tests").is_dir():
-            for p in (project_dir / "tests").rglob("*.rs"):
-                with suppress(OSError):
-                    texts[str(p.relative_to(project_dir)).replace(os.sep, "/")] = (
-                        p.read_text(encoding="utf-8", errors="replace")
-                    )
-        stats = per_file_test_stats(output, known, build_test_name_index(texts))
-    except Exception as exc:
-        _log(f"  [test overview] skipped: {exc}")
-        return
-    if not stats:
-        return
-    ordered = sorted(stats.items(), key=lambda kv: (-kv[1]["failed"], kv[0]))
-    tot_p = sum(s["passed"] for _, s in ordered)
-    tot_t = sum(s["passed"] + s["failed"] for _, s in ordered)
-    _log(f"  [test overview] {context} — {tot_p}/{tot_t} tests passing:")
-    name_w = max(len(f.split("/")[-1]) for f, _ in ordered)
-    for f, s in ordered:
-        short = f.split("/")[-1]
-        total = s["passed"] + s["failed"]
-        mark = "✓" if s["failed"] == 0 and total else "✗"
-        ign = f"  ({s['ignored']} ignored)" if s["ignored"] else ""
-        _log(f"    {short.ljust(name_w)}  {mark} tests {s['passed']}/{total}{ign}")
-    _emit("tests.file_stats", data={
-        "context": context, "passed": tot_p, "total": tot_t,
-        "files": [{"file": f, **s} for f, s in ordered],
-    })
 
 
 def task3(project_dir, test_command, iteration, output_dir, genesis_path):

@@ -11,6 +11,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
+from pipeline_core.domain.workspace_layout import PHASE_C_LOGS_DIR
 from pipeline_core.log import emit, log
 
 
@@ -18,7 +19,7 @@ def retrospectives_path(project_dir: Path) -> Path:
     """Path to the per-fn retrospectives JSON. Keyed by (file, fn, container)
     so same-named fns in different impls track independently. Survives
     across module iterations — that's the point: learning compounds."""
-    d = project_dir / ".phase_c_logs"
+    d = project_dir / PHASE_C_LOGS_DIR
     d.mkdir(parents=True, exist_ok=True)
     return d / "retrospectives.json"
 
