@@ -120,6 +120,7 @@ from pipeline_core.adapters.mutation import MutationTester
 from pipeline_core.adapters.phase_c_log import write_phase_c_test_fix_log as _write_phase_c_test_fix_log
 from pipeline_core.adapters.progress import ChunkProgress
 from pipeline_core.adapters.run_registry import FileRunRegistry
+from pipeline_core.adapters.structure import CliStructureReader as _CliStructureReader
 from pipeline_core.adapters.structure import fn_name_counts as _fn_name_counts
 from pipeline_core.adapters.structure import load_baked_clusters as _load_baked_clusters_impl
 from pipeline_core.adapters.structure import source_hash as _source_hash_impl
@@ -273,6 +274,7 @@ from pipeline_core.application.workspace_lifecycle import (
     wipe_module_sources as _wl_wipe_module_sources,
 )
 from pipeline_core.composition import CompositionConfig as _CompositionConfig
+from pipeline_core.composition import FillRoles as _FillRoles
 from pipeline_core.composition import Helpers as _Helpers
 from pipeline_core.composition import Ports as _Ports
 from pipeline_core.composition import ReconstructRoles as _ReconstructRoles
@@ -1612,9 +1614,80 @@ _ROLES = _ReconstructRoles(
     validate_task4_output=lambda *a, **k: validate_task4_output(*a, **k),
     task_genesis_audit=lambda *a, **k: task_genesis_audit(*a, **k),
 )
-_APP = _build_app(ADAPTERS, SETTINGS, _RUN, _SCOPE, _PORTS, _CFG, _ROLES, _HELPERS)
 # P1: the real StructureReader — injected into the fill engine (no monkeypatch seam).
-_STRUCTURE = _APP.structure
+_STRUCTURE = _CliStructureReader(ADAPTERS.extractor)
+# S21: fill-engine role adapters — focused `adapters.fill_engine_roles`, each
+# constructor-injected with late-binding lambdas over the resident engine helpers
+# (so the scripted-cargo / scripted-model test monkeypatches still intercept at
+# call time). `WorkspaceModelAdapter` carries the P1 constructor-injected
+# StructureReader; a test swaps in a fake via `_build_phase_c_engine(structure=fake)`.
+_FILL_TEL = EngineTelemetryAdapter(
+    log_fn=lambda msg: _log(msg),
+    emit_fn=lambda event, **kw: _emit(event, **kw),
+    check_stop_fn=lambda context: _check_graceful_stop(context),
+)
+_FILL_MUT = MutatorAdapter(
+    locate_fn_by_record_fn=lambda fp, name, c, sig, cfgp=None: _locate_fn_by_record(fp, name, c, sig, cfgp),
+    locate_fn_fn=lambda text, name: _locate_fn(text, name),
+    splice_fn_body_at_fn=lambda fp, bs, be, nb, allow_nonstub=False: _splice_fn_body_at(fp, bs, be, nb, allow_nonstub=allow_nonstub),
+    splice_fn_body_fn=lambda fp, name, nb, allow_nonstub=False: _splice_fn_body(fp, name, nb, allow_nonstub=allow_nonstub),
+    replace_fn_signature_fn=lambda fp, name, sig: _replace_fn_signature(fp, name, sig),
+    extract_signature_block_fn=lambda resp: _extract_signature_block(resp),
+    lock_for_fn=lambda tree: _splice_lock_for(tree),
+)
+_FILL_CARGO = CargoFillAdapter(
+    run_fn=lambda cmd, cwd, env, timeout=180: _run_cargo(cmd, cwd, env, timeout),
+    build_test_cmd_fn=lambda stems, cluster: _build_test_cmd(stems, cluster),
+    u2_test_gate_fn=lambda ft, tc, tsd, ce: _u2_test_gate(ft, tc, tsd, ce),
+    focus_errors_fn=lambda out, fr, max_chars=None: _focus_cargo_errors(out, fr, max_chars=max_chars),
+    env_fn=lambda: _cargo_env(),
+)
+_FILL_PROMPT = PromptContextAdapter(
+    ask_per_fn_body_fn=lambda prompt, fn, alog, sig_text="": _ask_per_fn_body(prompt, fn, alog, sig_text=sig_text),
+    gather_fn=lambda **kw: _gather_fn_fix_context(**kw),
+    collect_sibling_filled_bodies_fn=lambda ft, tfn, tc: _collect_sibling_filled_bodies(ft, tfn, tc),
+    extract_crate_idioms_fn=lambda ib, fr, target_sig_text="", max_idioms=5: _extract_crate_idioms(ib, fr, target_sig_text=target_sig_text, max_idioms=max_idioms),
+    collect_crate_macros_fn=lambda sd: _collect_crate_macros(sd),
+    compute_cluster_macro_invariants_fn=lambda sd, cluster: _compute_cluster_macro_invariants(sd, cluster),
+    detect_crate_no_std_invariant_fn=lambda sd: _detect_crate_no_std_invariant(sd),
+)
+_FILL_WS = WorkspaceModelAdapter(
+    structure=_STRUCTURE,
+    scan_stub_records_fn=lambda tsd, cluster: _scan_unimplemented_records_for_cluster(tsd, cluster),
+    scan_stub_tuples_fn=lambda tsd, cluster: _scan_unimplemented_for_cluster(tsd, cluster),
+    collect_impl_blocks_fn=lambda sd: _collect_impl_blocks(sd),
+    fn_container_index_fn=lambda sd: _fn_container_index(sd),
+    fn_belongs_to_cluster_fn=lambda tsd, fr, fn, cluster, fn_cfg_predicates=None: _fn_belongs_to_cluster(tsd, fr, fn, cluster, fn_cfg_predicates=fn_cfg_predicates),
+    cluster_filter_type_methods_fn=lambda recs, cluster: _cluster_filter_type_methods(recs, cluster),
+    is_gen_tests_file_fn=lambda name: _is_gen_tests_file(name),
+    leaf_first_fn_order_fn=lambda tuples, lnc: _leaf_first_fn_order(tuples, lnc),
+)
+_FILL_RETROS = RetrosAdapter(
+    load_fn=lambda pd: _load_retrospectives(pd),
+    save_fn=lambda pd, retros: _save_retrospectives(pd, retros),
+    retro_key_fn=lambda fr, fn, c: _retro_key(fr, fn, c),
+    is_fn_fully_exhausted_fn=lambda cache, fr, fn, c: _is_fn_fully_exhausted(cache, fr, fn, c),
+    diagnose_fn=lambda **kw: _phase_c_retrospective(**kw),
+    append_note_fn=lambda fr_path, note, error_codes=None: _append_model_note(fr_path, note, error_codes=error_codes),
+    extract_self_note_fn=lambda fb, ee, fixed: _extract_self_note(fb, ee, fixed),
+    record_error_codes_fn=lambda out: _record_error_codes_seen(out),
+)
+_FILL_TESTS = TestLinkerAdapter(
+    find_tests_for_fn_fn=lambda tdf, fn, file_rel="", src_dir=None, container="": _find_tests_for_fn(tdf, fn, file_rel=file_rel, src_dir=src_dir, container=container),
+    classify_failures_fn=lambda to, ftp, ft, cn: _classify_phase_c_test_failures(to, ftp, ft, cn),
+    write_test_fix_log_fn=lambda **kw: _write_phase_c_test_fix_log(**kw),
+)
+_FILL_STALL = StallPolicyAdapter(
+    effective_stalls_fn=lambda budget, module: _effective_stalls(budget, module),
+    converge_in_cluster_fn=lambda cluster: _converge_in_cluster(cluster),
+)
+_FILL_IMPL = ImplFillPathAdapter(fill_impl_blocks_fn=lambda **kw: _phase_c_fill_impl_blocks(**kw))
+_FILL_ROLES = _FillRoles(
+    tel=_FILL_TEL, mut=_FILL_MUT, cargo=_FILL_CARGO, prompt=_FILL_PROMPT, ws=_FILL_WS,
+    retros=_FILL_RETROS, tests=_FILL_TESTS, stall=_FILL_STALL, impl=_FILL_IMPL,
+)
+_APP = _build_app(ADAPTERS, SETTINGS, _RUN, _SCOPE, _PORTS, _CFG, _ROLES, _HELPERS,
+                  _STRUCTURE, _FILL_ROLES)
 # S3.5/6/10: these deps are consumed only inside `def` bodies (lazy), so their
 # construction migrates into build_app and they're re-exported here by name.
 _WS_DEPS = _APP.ws_deps
@@ -2487,73 +2560,10 @@ from pipeline_core.application.reconstruct.scheduling import (
 from pipeline_core.domain.models import FnFixContext as _FnFixContext  # noqa: E402
 from pipeline_core.prompts.per_fn import build_per_fn_prompt as _build_per_fn_prompt  # noqa: E402,F401
 
-# P6: the `_PhaseCFillAdapter` god-object is dissolved — each fill-engine role is
-# a focused adapter (adapters.fill_engine_roles), constructor-injected with
-# late-binding lambdas over the resident engine helpers (so the scripted-cargo /
-# scripted-model test monkeypatches still intercept at call time). The
-# `WorkspaceModelAdapter` carries the P1 constructor-injected StructureReader; a
-# test swaps in a fake via `_build_phase_c_engine(structure=fake)`.
-_FILL_TEL = EngineTelemetryAdapter(
-    log_fn=lambda msg: _log(msg),
-    emit_fn=lambda event, **kw: _emit(event, **kw),
-    check_stop_fn=lambda context: _check_graceful_stop(context),
-)
-_FILL_MUT = MutatorAdapter(
-    locate_fn_by_record_fn=lambda fp, name, c, sig, cfgp=None: _locate_fn_by_record(fp, name, c, sig, cfgp),
-    locate_fn_fn=lambda text, name: _locate_fn(text, name),
-    splice_fn_body_at_fn=lambda fp, bs, be, nb, allow_nonstub=False: _splice_fn_body_at(fp, bs, be, nb, allow_nonstub=allow_nonstub),
-    splice_fn_body_fn=lambda fp, name, nb, allow_nonstub=False: _splice_fn_body(fp, name, nb, allow_nonstub=allow_nonstub),
-    replace_fn_signature_fn=lambda fp, name, sig: _replace_fn_signature(fp, name, sig),
-    extract_signature_block_fn=lambda resp: _extract_signature_block(resp),
-    lock_for_fn=lambda tree: _splice_lock_for(tree),
-)
-_FILL_CARGO = CargoFillAdapter(
-    run_fn=lambda cmd, cwd, env, timeout=180: _run_cargo(cmd, cwd, env, timeout),
-    build_test_cmd_fn=lambda stems, cluster: _build_test_cmd(stems, cluster),
-    u2_test_gate_fn=lambda ft, tc, tsd, ce: _u2_test_gate(ft, tc, tsd, ce),
-    focus_errors_fn=lambda out, fr, max_chars=None: _focus_cargo_errors(out, fr, max_chars=max_chars),
-    env_fn=lambda: _cargo_env(),
-)
-_FILL_PROMPT = PromptContextAdapter(
-    ask_per_fn_body_fn=lambda prompt, fn, alog, sig_text="": _ask_per_fn_body(prompt, fn, alog, sig_text=sig_text),
-    gather_fn=lambda **kw: _gather_fn_fix_context(**kw),
-    collect_sibling_filled_bodies_fn=lambda ft, tfn, tc: _collect_sibling_filled_bodies(ft, tfn, tc),
-    extract_crate_idioms_fn=lambda ib, fr, target_sig_text="", max_idioms=5: _extract_crate_idioms(ib, fr, target_sig_text=target_sig_text, max_idioms=max_idioms),
-    collect_crate_macros_fn=lambda sd: _collect_crate_macros(sd),
-    compute_cluster_macro_invariants_fn=lambda sd, cluster: _compute_cluster_macro_invariants(sd, cluster),
-    detect_crate_no_std_invariant_fn=lambda sd: _detect_crate_no_std_invariant(sd),
-)
-_FILL_WS = WorkspaceModelAdapter(
-    structure=_STRUCTURE,
-    scan_stub_records_fn=lambda tsd, cluster: _scan_unimplemented_records_for_cluster(tsd, cluster),
-    scan_stub_tuples_fn=lambda tsd, cluster: _scan_unimplemented_for_cluster(tsd, cluster),
-    collect_impl_blocks_fn=lambda sd: _collect_impl_blocks(sd),
-    fn_container_index_fn=lambda sd: _fn_container_index(sd),
-    fn_belongs_to_cluster_fn=lambda tsd, fr, fn, cluster, fn_cfg_predicates=None: _fn_belongs_to_cluster(tsd, fr, fn, cluster, fn_cfg_predicates=fn_cfg_predicates),
-    cluster_filter_type_methods_fn=lambda recs, cluster: _cluster_filter_type_methods(recs, cluster),
-    is_gen_tests_file_fn=lambda name: _is_gen_tests_file(name),
-    leaf_first_fn_order_fn=lambda tuples, lnc: _leaf_first_fn_order(tuples, lnc),
-)
-_FILL_RETROS = RetrosAdapter(
-    load_fn=lambda pd: _load_retrospectives(pd),
-    save_fn=lambda pd, retros: _save_retrospectives(pd, retros),
-    retro_key_fn=lambda fr, fn, c: _retro_key(fr, fn, c),
-    is_fn_fully_exhausted_fn=lambda cache, fr, fn, c: _is_fn_fully_exhausted(cache, fr, fn, c),
-    diagnose_fn=lambda **kw: _phase_c_retrospective(**kw),
-    append_note_fn=lambda fr_path, note, error_codes=None: _append_model_note(fr_path, note, error_codes=error_codes),
-    extract_self_note_fn=lambda fb, ee, fixed: _extract_self_note(fb, ee, fixed),
-    record_error_codes_fn=lambda out: _record_error_codes_seen(out),
-)
-_FILL_TESTS = TestLinkerAdapter(
-    find_tests_for_fn_fn=lambda tdf, fn, file_rel="", src_dir=None, container="": _find_tests_for_fn(tdf, fn, file_rel=file_rel, src_dir=src_dir, container=container),
-    classify_failures_fn=lambda to, ftp, ft, cn: _classify_phase_c_test_failures(to, ftp, ft, cn),
-    write_test_fix_log_fn=lambda **kw: _write_phase_c_test_fix_log(**kw),
-)
-_FILL_STALL = StallPolicyAdapter(
-    effective_stalls_fn=lambda budget, module: _effective_stalls(budget, module),
-    converge_in_cluster_fn=lambda cluster: _converge_in_cluster(cluster),
-)
-_FILL_IMPL = ImplFillPathAdapter(fill_impl_blocks_fn=lambda **kw: _phase_c_fill_impl_blocks(**kw))
+# S21: the fill-engine role adapters (`_FILL_*`) + `_STRUCTURE` are built BEFORE
+# `_APP` (their lambdas are late-bound so order is irrelevant) and bundled into
+# `_APP.fill_roles` — construction stays here (the seam lambdas close over pipeline
+# globals); the engine factory below sources them from `_APP`. See composition.FillRoles.
 
 
 def _build_phase_c_engine(*, structure: "_structure_port.StructureReader | None" = None) -> "PhaseCFillEngine":

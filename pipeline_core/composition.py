@@ -19,6 +19,17 @@ from pipeline_core.adapters import Adapters
 from pipeline_core.adapters.artifacts import WorkspaceArtifacts, load_api_surface
 from pipeline_core.adapters.coverage import CoverageDeps
 from pipeline_core.adapters.failure_journal import FileFailureJournal
+from pipeline_core.adapters.fill_engine_roles import (
+    CargoFillAdapter,
+    EngineTelemetryAdapter,
+    ImplFillPathAdapter,
+    MutatorAdapter,
+    PromptContextAdapter,
+    RetrosAdapter,
+    StallPolicyAdapter,
+    TestLinkerAdapter,
+    WorkspaceModelAdapter,
+)
 from pipeline_core.adapters.ratchet import BestTreeRatchet
 from pipeline_core.adapters.reconstruct_roles import (
     AnalystAdapter,
@@ -155,6 +166,26 @@ class Helpers:
 
 
 @dataclass(frozen=True)
+class FillRoles:
+    """The 9 ISP fill-engine role adapters (`adapters.fill_engine_roles`).
+    Constructed pipeline-side from late-binding lambdas over the resident engine
+    helpers (the scripted-cargo/scripted-model TEST SEAM — these are genuine
+    boundaries, so the lambdas stay) and injected into `App` so the per-call
+    engine factory (`_build_phase_c_engine`) + the eventual `App.run` source them
+    from one place. Same inject-pre-built pattern as `Adapters`/`Ports`."""
+
+    tel: EngineTelemetryAdapter
+    mut: MutatorAdapter
+    cargo: CargoFillAdapter
+    prompt: PromptContextAdapter
+    ws: WorkspaceModelAdapter
+    retros: RetrosAdapter
+    tests: TestLinkerAdapter
+    stall: StallPolicyAdapter
+    impl: ImplFillPathAdapter
+
+
+@dataclass(frozen=True)
 class App:
     """The wired application: external ports + run-scoped state + boundary
     providers and use-case deps built from them. Grown one S3 slice at a time
@@ -168,6 +199,8 @@ class App:
     config: CompositionConfig
     # Syn-extractor boundary: the structured-source reader over `adapters.extractor`.
     structure: CliStructureReader
+    # Fill-engine ISP role adapters (S21) — see FillRoles.
+    fill_roles: FillRoles
     # Migrated use-case deps:
     genesis_audit_deps: GenesisAuditDeps       # TASK-4 genesis audit (S3 slice 1)
     discover_test_cmd_deps: DiscoverTestCommandDeps  # test-command discovery (S3 slice 2)
@@ -210,6 +243,8 @@ def build_app(
     config: CompositionConfig,
     roles: ReconstructRoles,
     helpers: Helpers,
+    structure: CliStructureReader,
+    fill_roles: FillRoles,
 ) -> App:
     """Assemble the App from its ports + run-scoped holders + config. Pure wiring
     (no I/O) — the place a test passes fake adapters/ports to get a fake-backed App."""
@@ -281,7 +316,8 @@ def build_app(
         scope=scope,
         ports=ports,
         config=config,
-        structure=CliStructureReader(adapters.extractor),
+        structure=structure,
+        fill_roles=fill_roles,
         genesis_audit_deps=GenesisAuditDeps(
             ask=ports.ask, read=read, write=write,
             model=settings.task_models.task4,
