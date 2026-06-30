@@ -8,10 +8,13 @@ into here.
 from __future__ import annotations
 
 import argparse
-from collections.abc import Callable, Mapping
+import shutil
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
+
+from pipeline_core.domain.generation import GenerationRequest
 
 # The --phase-*-only / --skeleton-backend standalone subcommands, in dispatch
 # order. Each maps an `args` flag attribute to a handler keyed by the same name.
@@ -123,6 +126,159 @@ def run_phase_subcommand(
         if getattr(args, flag):
             return handlers[flag](project_dir)
     return None
+
+
+@dataclass(frozen=True)
+class PhaseSubcommandDeps:
+    """Collaborators the standalone `--phase-*-only` / `--skeleton-backend`
+    handlers need. The composition root binds these to the resident pipeline
+    shims; the handlers below own only the phase-chain orchestration."""
+    log: Callable[[str], None]
+    bake_skeleton_artifacts: Callable[[Path, str], dict[str, Any]]
+    collect_test_files: Callable[[Path], Iterable[str]]
+    group_tests: Callable[..., list[dict[str, Any]]]
+    fill_groups: Callable[..., dict[str, Any]]
+    cleanup_residuals: Callable[..., dict[str, Any]]
+    new_skeleton_generator: Callable[[], Any]
+    manifest_name: str
+
+
+def _load_test_pairs(collect: Callable[[Path], Iterable[str]],
+                     project_dir: Path) -> list[tuple[str, str]]:
+    """Read each protected test file's (rel, content); skip unreadable ones."""
+    pairs: list[tuple[str, str]] = []
+    for rel in sorted(collect(project_dir)):
+        p = project_dir / rel
+        if p.exists():
+            try:
+                pairs.append((rel, p.read_text(encoding="utf-8")))
+            except Exception:
+                continue
+    return pairs
+
+
+def run_phase_a(deps: PhaseSubcommandDeps, project_dir: Path) -> int:
+    """Standalone Phase A: run the pre-strip skeleton bake on live source.
+
+    Per Hard Rule 11, the bake MUST run while the original source is still on
+    disk (before strip). Refuses to run if `src/` is missing or empty."""
+    deps.log(f"\n=== Phase A (skeleton bake) for {project_dir.name} ===")
+    src_dir = project_dir / "src"
+    if not src_dir.exists() or not any(src_dir.rglob("*.rs")):
+        deps.log(f"  [phase-a] no source at {src_dir} — strip already ran. "
+                 "Cannot bake skeleton from absent source (Hard Rule 11).")
+        return 2
+    res = deps.bake_skeleton_artifacts(project_dir, project_dir.name)
+    if not res.get("ok"):
+        deps.log(f"  [phase-a] bake FAILED: {res.get('reason', 'unknown')}")
+        return 3
+    deps.log(f"  [phase-a] baked {len(res['clusters'])} cluster(s): "
+             f"{', '.join(res['clusters'])}")
+    return 0
+
+
+def run_phase_b(deps: PhaseSubcommandDeps, project_dir: Path) -> int:
+    """Standalone Phase A + B: skeleton + LLM-driven test grouping."""
+    rc = run_phase_a(deps, project_dir)
+    if rc != 0:
+        return rc
+    deps.log(f"\n=== Phase B (test grouping) for {project_dir.name} ===")
+    skeleton_dir = project_dir / ".skeleton" / "_standalone"
+    pairs = _load_test_pairs(deps.collect_test_files, project_dir)
+    if not pairs:
+        deps.log("  [phase-b] no test files found.")
+        return 6
+    groups = deps.group_tests(skeleton_dir, pairs, cluster_name="default",
+                              module_name=project_dir.name)
+    deps.log(f"  [phase-b] manifest written to {skeleton_dir / 'groups.json'} "
+             f"({len(groups)} groups, "
+             f"{sum(len(g['test_files']) for g in groups)} test files covered).")
+    for g in groups:
+        deps.log(f"    - {g['name']}: {len(g['test_files'])} test(s); "
+                 f"{len(g.get('target_symbols', []))} target symbol(s)")
+    return 0
+
+
+def run_phase_c(deps: PhaseSubcommandDeps, project_dir: Path) -> int:
+    """Standalone Phase A + B + C: skeleton → grouping → per-group fill."""
+    rc = run_phase_a(deps, project_dir)
+    if rc != 0:
+        return rc
+    skeleton_dir = project_dir / ".skeleton" / "_standalone"
+    pairs = _load_test_pairs(deps.collect_test_files, project_dir)
+    if not pairs:
+        deps.log("  [phase-c] no test files found.")
+        return 6
+
+    deps.log(f"\n=== Phase B (test grouping) for {project_dir.name} ===")
+    groups = deps.group_tests(skeleton_dir, pairs, cluster_name="default",
+                              module_name=project_dir.name)
+    deps.log(f"  [phase-b] {len(groups)} groups produced.")
+
+    deps.log(f"\n=== Phase C (per-group fill) for {project_dir.name} ===")
+    target_src_dir = project_dir / ".skeleton-filled"
+    if target_src_dir.exists():
+        shutil.rmtree(target_src_dir)
+    fr_path = project_dir / "functional_requirements.md"
+    genesis_path = project_dir / "genesis.md"
+    fr = fr_path.read_text(encoding="utf-8") if fr_path.exists() else ""
+    genesis = genesis_path.read_text(encoding="utf-8") if genesis_path.exists() else ""
+
+    result = deps.fill_groups(skeleton_dir, target_src_dir, groups, project_dir,
+                              cluster_name="default", module_name=project_dir.name,
+                              functional_req=fr, genesis=genesis)
+    deps.log(f"  [phase-c] processed {result['groups_processed']} group(s), "
+             f"filled {result['bytes_filled']:,} bytes; "
+             f"{len(result['errors'])} error(s).")
+    for e in result["errors"]:
+        deps.log(f"    - {e}")
+    # Always return 0 so downstream callers (Phase D, the backend class) can
+    # perform residual cleanup regardless of per-group failures.
+    return 0
+
+
+def run_phase_d(deps: PhaseSubcommandDeps, project_dir: Path) -> int:
+    """Standalone Phase A + B + C + D."""
+    rc = run_phase_c(deps, project_dir)
+    if rc != 0:
+        return rc
+    deps.log(f"\n=== Phase D (residual cleanup) for {project_dir.name} ===")
+    target_src_dir = project_dir / ".skeleton-filled"
+    pairs = _load_test_pairs(deps.collect_test_files, project_dir)
+    fr_path = project_dir / "functional_requirements.md"
+    fr = fr_path.read_text(encoding="utf-8") if fr_path.exists() else ""
+
+    result = deps.cleanup_residuals(target_src_dir, project_dir, fr, pairs,
+                                    module_name=project_dir.name)
+    deps.log(f"  [phase-d] {result['stubs_total']} residual stubs, "
+             f"{result['stubs_exercised']} reachable from tests; "
+             f"{result['files_updated']} file(s) updated; "
+             f"{result['stubs_remaining']} stub(s) still remaining.")
+    return 0
+
+
+def run_skeleton_backend(deps: PhaseSubcommandDeps, project_dir: Path) -> int:
+    """Standalone harness invoking the static skeleton Task2 generator directly.
+    Drives the full per-cluster Plan 4 flow without task0c/strip/task1."""
+    deps.log(f"\n=== Skeleton backend (Plan 4 per-cluster) for {project_dir.name} ===")
+    fr_path = project_dir / "functional_requirements.md"
+    genesis_path = project_dir / "genesis.md"
+    manifest_path = project_dir / deps.manifest_name
+    if not fr_path.exists():
+        # No FR yet — synthesize an empty one so the backend can still run.
+        fr_path.write_text("# (no functional_requirements.md available)\n", encoding="utf-8")
+    if not genesis_path.exists():
+        genesis_path.write_text("# (no genesis.md available)\n", encoding="utf-8")
+    backend = deps.new_skeleton_generator()
+    ok = backend.generate(GenerationRequest(
+        project_dir=project_dir,
+        genesis_path=genesis_path,
+        functional_req_path=fr_path,
+        manifest_path=manifest_path,
+        existing_test_files=deps.collect_test_files(project_dir),
+        current_module=project_dir.name,
+    ))
+    return 0 if ok else 8
 
 
 class DepGraphView(Protocol):

@@ -3011,30 +3011,6 @@ _GROUP_FILL_DEPS = _group_fill.GroupFillDeps(
 )
 
 
-def _cmd_phase_a_only(project_dir: Path) -> int:
-    """Standalone Phase A: run the pre-strip skeleton bake on live source.
-
-    Per Hard Rule 11, the bake MUST run while the original source is still
-    on disk (i.e. before strip). This command refuses to run if `src/` is
-    missing or empty — strip has already happened and there is nothing to
-    extract from.
-
-    Returns 0 on success, non-zero on any failure step.
-    """
-    _log(f"\n=== Phase A (skeleton bake) for {project_dir.name} ===")
-    src_dir = project_dir / "src"
-    if not src_dir.exists() or not any(src_dir.rglob("*.rs")):
-        _log(f"  [phase-a] no source at {src_dir} — strip already ran. "
-             "Cannot bake skeleton from absent source (Hard Rule 11).")
-        return 2
-    module_name = project_dir.name
-    res = _bake_skeleton_artifacts(project_dir, module_name)
-    if not res.get("ok"):
-        _log(f"  [phase-a] bake FAILED: {res.get('reason', 'unknown')}")
-        return 3
-    _log(f"  [phase-a] baked {len(res['clusters'])} cluster(s): "
-         f"{', '.join(res['clusters'])}")
-    return 0
 
 
 _SKELETON_EXTRACTOR_BIN = (
@@ -3524,137 +3500,12 @@ def _task2_cleanup_residuals(
         deps=_CLEANUP_RESIDUALS_DEPS)
 
 
-def _cmd_phase_c_only(project_dir: Path) -> int:
-    """Standalone Phase A + B + C: skeleton → grouping → per-group fill."""
-    rc = _cmd_phase_a_only(project_dir)
-    if rc != 0:
-        return rc
-    skeleton_dir = project_dir / ".skeleton" / "_standalone"
-    test_files = collect_protected_test_files(project_dir)
-    pairs: list[tuple[str, str]] = []
-    for rel in sorted(test_files):
-        p = project_dir / rel
-        if p.exists():
-            try:
-                pairs.append((rel, p.read_text(encoding="utf-8")))
-            except Exception:
-                continue
-    if not pairs:
-        _log("  [phase-c] no test files found.")
-        return 6
-
-    _log(f"\n=== Phase B (test grouping) for {project_dir.name} ===")
-    groups = _task2_group_tests(skeleton_dir, pairs, cluster_name="default",
-                                 module_name=project_dir.name)
-    _log(f"  [phase-b] {len(groups)} groups produced.")
-
-    _log(f"\n=== Phase C (per-group fill) for {project_dir.name} ===")
-    target_src_dir = project_dir / ".skeleton-filled"
-    if target_src_dir.exists():
-        shutil.rmtree(target_src_dir)
-    fr_path = project_dir / "functional_requirements.md"
-    genesis_path = project_dir / "genesis.md"
-    fr = fr_path.read_text(encoding="utf-8") if fr_path.exists() else ""
-    genesis = genesis_path.read_text(encoding="utf-8") if genesis_path.exists() else ""
-
-    result = _task2_fill_groups(skeleton_dir, target_src_dir, groups, project_dir,
-                                 cluster_name="default", module_name=project_dir.name,
-                                 functional_req=fr, genesis=genesis)
-    _log(f"  [phase-c] processed {result['groups_processed']} group(s), "
-         f"filled {result['bytes_filled']:,} bytes; "
-         f"{len(result['errors'])} error(s).")
-    for e in result["errors"]:
-        _log(f"    - {e}")
-    # Always return 0 from Phase C so downstream callers (Phase D, the
-    # backend class) can perform residual cleanup regardless of per-group
-    # failures. Partial Phase C output is the recovery case Phase D exists for.
-    return 0
 
 
-def _cmd_skeleton_backend(project_dir: Path) -> int:
-    """Standalone harness invoking StaticSkeletonTask2Generator.generate()
-    directly. Drives the full per-cluster Plan 4 flow without needing
-    task0c/strip/task1 to have run."""
-    _log(f"\n=== Skeleton backend (Plan 4 per-cluster) for {project_dir.name} ===")
-    fr_path = project_dir / "functional_requirements.md"
-    genesis_path = project_dir / "genesis.md"
-    manifest_path = project_dir / MANIFEST_NAME
-    if not fr_path.exists():
-        # No FR yet — synthesize an empty one so the backend can still run.
-        fr_path.write_text("# (no functional_requirements.md available)\n", encoding="utf-8")
-    if not genesis_path.exists():
-        genesis_path.write_text("# (no genesis.md available)\n", encoding="utf-8")
-    existing_test_files = collect_protected_test_files(project_dir)
-    backend = _new_skeleton_task2_generator()
-    ok = backend.generate(GenerationRequest(
-        project_dir=project_dir,
-        genesis_path=genesis_path,
-        functional_req_path=fr_path,
-        manifest_path=manifest_path,
-        existing_test_files=existing_test_files,
-        current_module=project_dir.name,
-    ))
-    return 0 if ok else 8
 
 
-def _cmd_phase_d_only(project_dir: Path) -> int:
-    """Standalone Phase A + B + C + D."""
-    rc = _cmd_phase_c_only(project_dir)
-    if rc != 0:
-        return rc
-    _log(f"\n=== Phase D (residual cleanup) for {project_dir.name} ===")
-    target_src_dir = project_dir / ".skeleton-filled"
-    test_files = collect_protected_test_files(project_dir)
-    pairs: list[tuple[str, str]] = []
-    for rel in sorted(test_files):
-        p = project_dir / rel
-        if p.exists():
-            try:
-                pairs.append((rel, p.read_text(encoding="utf-8")))
-            except Exception:
-                continue
-    fr_path = project_dir / "functional_requirements.md"
-    fr = fr_path.read_text(encoding="utf-8") if fr_path.exists() else ""
-
-    result = _task2_cleanup_residuals(target_src_dir, project_dir, fr, pairs,
-                                       module_name=project_dir.name)
-    _log(f"  [phase-d] {result['stubs_total']} residual stubs, "
-         f"{result['stubs_exercised']} reachable from tests; "
-         f"{result['files_updated']} file(s) updated; "
-         f"{result['stubs_remaining']} stub(s) still remaining.")
-    return 0
 
 
-def _cmd_phase_b_only(project_dir: Path) -> int:
-    """Standalone Phase A + B: skeleton + LLM-driven test grouping."""
-    rc = _cmd_phase_a_only(project_dir)
-    if rc != 0:
-        return rc
-    _log(f"\n=== Phase B (test grouping) for {project_dir.name} ===")
-    skeleton_dir = project_dir / ".skeleton" / "_standalone"
-    test_files = collect_protected_test_files(project_dir)
-    # collect_protected_test_files returns set of relative paths; load contents.
-    pairs: list[tuple[str, str]] = []
-    for rel in sorted(test_files):
-        p = project_dir / rel
-        if p.exists():
-            try:
-                pairs.append((rel, p.read_text(encoding="utf-8")))
-            except Exception:
-                continue
-    if not pairs:
-        _log("  [phase-b] no test files found.")
-        return 6
-    # Use a synthetic cluster_name + the project name as module for a quick smoke.
-    groups = _task2_group_tests(skeleton_dir, pairs, cluster_name="default",
-                                 module_name=project_dir.name)
-    _log(f"  [phase-b] manifest written to {skeleton_dir / 'groups.json'} "
-         f"({len(groups)} groups, "
-         f"{sum(len(g['test_files']) for g in groups)} test files covered).")
-    for g in groups:
-        _log(f"    - {g['name']}: {len(g['test_files'])} test(s); "
-             f"{len(g.get('target_symbols', []))} target symbol(s)")
-    return 0
 
 
 def task0_cfg_scan(project_dir: Path) -> "list[BuildCluster]":
@@ -3975,7 +3826,6 @@ from pipeline_core.application.generators.task2_generator import (  # noqa: E402
     Task2Generator,
 )
 from pipeline_core.domain.generation import (  # noqa: E402
-    GenerationRequest,
     SkeletonConfig,
     Task1Config,
     Task2Config,
@@ -5600,6 +5450,19 @@ _CLUSTER_AUGMENTOR = ClusterAugmentor(
     engine=_AUGMENT_ENGINE, gate=CallableCommitGate(_commit_and_mark),
 )
 
+# C8: the standalone --phase-*-only / --skeleton-backend handlers live in the
+# orchestrator; this binds them to the resident pipeline shims.
+_PHASE_SUBCOMMAND_DEPS = _orchestrator.PhaseSubcommandDeps(
+    log=_log,
+    bake_skeleton_artifacts=_bake_skeleton_artifacts,
+    collect_test_files=collect_protected_test_files,
+    group_tests=_task2_group_tests,
+    fill_groups=_task2_fill_groups,
+    cleanup_residuals=_task2_cleanup_residuals,
+    new_skeleton_generator=_new_skeleton_task2_generator,
+    manifest_name=MANIFEST_NAME,
+)
+
 
 def main():
     parser = _orchestrator.build_arg_parser()
@@ -5655,11 +5518,11 @@ def main():
         _log(f"  [gen_tests] startup quarantine scan failed: {_e}")
 
     _sub_rc = _orchestrator.run_phase_subcommand(args, project_dir, {
-        "phase_a_only": _cmd_phase_a_only,
-        "phase_b_only": _cmd_phase_b_only,
-        "phase_c_only": _cmd_phase_c_only,
-        "phase_d_only": _cmd_phase_d_only,
-        "skeleton_backend": _cmd_skeleton_backend,
+        "phase_a_only": lambda pd: _orchestrator.run_phase_a(_PHASE_SUBCOMMAND_DEPS, pd),
+        "phase_b_only": lambda pd: _orchestrator.run_phase_b(_PHASE_SUBCOMMAND_DEPS, pd),
+        "phase_c_only": lambda pd: _orchestrator.run_phase_c(_PHASE_SUBCOMMAND_DEPS, pd),
+        "phase_d_only": lambda pd: _orchestrator.run_phase_d(_PHASE_SUBCOMMAND_DEPS, pd),
+        "skeleton_backend": lambda pd: _orchestrator.run_skeleton_backend(_PHASE_SUBCOMMAND_DEPS, pd),
     })
     if _sub_rc is not None:
         sys.exit(_sub_rc)
