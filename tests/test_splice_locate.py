@@ -27,6 +27,11 @@ def test_locate_fn_absent() -> None:
     assert locate_fn(SRC, "nope") is None
 
 
+def test_locate_fn_malformed_braces() -> None:
+    # opening brace never closes → depth != 0 → None
+    assert locate_fn("fn broken() { let x = 1;", "broken") is None
+
+
 def test_is_pub_fn() -> None:
     assert is_pub_fn(SRC, "get") is True
     assert is_pub_fn(SRC, "read") is False

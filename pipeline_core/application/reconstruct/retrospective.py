@@ -14,9 +14,18 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 from ...domain.llm_output import parse_retrospective
-from ...prompts.retrospective import build_phase_c_retro_prompt
+from ...domain.text import (
+    label_value_offset,
+    starts_with_label,
+    strip_surrounding_asterisks,
+)
+from ...prompts.retrospective import (
+    build_phase_c_retro_prompt,
+    build_whole_tree_retro_prompt,
+)
 
 
 def _is_vtable_dispatch_fn(sig_text: str, container: str) -> bool:
@@ -90,3 +99,58 @@ def diagnose_phase_c(
         deps.log(f"  [phase-c/retro] LLM returned empty content for {fn_name}")
         return {"category": "", "guidance": "", "signal": "empty_response"}
     return parse_retrospective(result)
+
+
+def whole_tree_retrospective(
+    error_excerpt: str,
+    history: list[dict[str, Any]],
+    *,
+    name: str,
+    ask_retrospective: Callable[[str], str],
+    log: Callable[[str], None],
+    fix_err_cap: int,
+) -> str:
+    """Strategy retrospective for whole-tree fix loops — the tree-wide partner of
+    `diagnose_phase_c`. Asks the model what categorically different approach to
+    take when the error floor stopped moving; returns ``[CATEGORY] guidance``
+    (or just guidance / ``[CATEGORY]``). Empty string on transient LLM failure."""
+    if not error_excerpt.strip():
+        return ""
+    prompt = build_whole_tree_retro_prompt(
+        error_excerpt, history, name=name, fix_err_cap=fix_err_cap)
+    try:
+        result = ask_retrospective(prompt)
+    except Exception as e:
+        log(f"  [retro/{name}] LLM call failed: {e}")
+        return ""
+    if not (result or "").strip():
+        log(f"  [retro/{name}] LLM returned empty content")
+        return ""
+    # Lightweight parse: everything after "GUIDANCE:" up to the next label.
+    cat = ""
+    guidance_lines: list[str] = []
+    in_guidance = False
+    for ln in (result or "").splitlines():
+        s = ln.strip().lstrip("*-• ").strip()
+        s = strip_surrounding_asterisks(s)
+        off = label_value_offset(s, "category")
+        if off is not None and (parts := s[off:].split()):
+            cat = parts[0].strip().rstrip(".,;").upper()
+            in_guidance = False
+            continue
+        off = label_value_offset(s, "guidance")
+        if off is not None and s[off:]:
+            guidance_lines = [s[off:].strip()]
+            in_guidance = True
+            continue
+        if in_guidance and s:
+            if starts_with_label(s, ("category", "guidance", "note")):
+                in_guidance = False
+            else:
+                guidance_lines.append(s)
+    guidance = " ".join(guidance_lines).strip()
+    if not cat and not guidance:
+        guidance = (result or "").strip()[:1200]
+    if cat:
+        return f"[{cat}] {guidance}" if guidance else f"[{cat}]"
+    return guidance

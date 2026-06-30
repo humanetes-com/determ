@@ -7,10 +7,22 @@ pipeline.py; `_`-prefixes dropped on promotion).
 
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
 
+from ... import log
+
 FAILED_ATTEMPT_SENTINEL = "// SKELETON_STUB_FAILED_ATTEMPT"
+
+# `(?s)` DOTALL so a body can span lines. The sig attribute value is in double
+# quotes (most common) or single quotes (sometimes used). This parses MODEL
+# OUTPUT (the `<FN sig="…">…</FN>` fill protocol), not Rust source — the no-regex
+# hard rule is scoped to source parsing (R7.3).
+_FN_BLOCK_PATTERN = re.compile(
+    r'<FN\s+sig\s*=\s*(?P<q>["\'])(?P<sig>.+?)(?P=q)\s*>(?P<body>.*?)</FN>',
+    re.DOTALL,
+)
 
 
 def is_unimplemented_body(body_text: str) -> bool:
@@ -29,6 +41,36 @@ def is_unimplemented_body(body_text: str) -> bool:
         return True
     return (("unimplemented" in stripped or "todo!" in stripped)
             and len(stripped) < 60)
+
+
+def extract_fn_blocks(response: str) -> dict[str, str]:
+    """Parse `<FN sig="...">body</FN>` blocks from the LLM response.
+
+    Returns {signature → body_text}. The body is the raw content between
+    the opening `<FN ...>` and closing `</FN>` markers, trimmed of leading/
+    trailing whitespace. The signature must include everything from "fn name"
+    to the opening `{` exclusive — matching how `merge_fills_preserving_existing`
+    keys its disk-function map.
+
+    Tolerates loosely-formatted responses (extra whitespace, mixed quoting on
+    the sig attribute).
+    """
+    out: dict[str, str] = {}
+    stubs_dropped = 0
+    for m in _FN_BLOCK_PATTERN.finditer(response):
+        sig = m.group("sig").strip()
+        body = m.group("body").strip()
+        if not sig or not body:
+            continue
+        # P3.10 enforcement: drop stub bodies so they don't appear successful.
+        if is_unimplemented_body(body) or body.strip() in ("todo!()", "todo!();"):
+            stubs_dropped += 1
+            continue
+        out[sig] = body
+    if stubs_dropped:
+        log.log(f"  [phase-c] dropped {stubs_dropped} stub <FN> block(s) "
+                f"from model output (model re-emitted unimplemented!).")
+    return out
 
 
 def make_failed_attempt_body(attempted_body: str, error_excerpt: str,

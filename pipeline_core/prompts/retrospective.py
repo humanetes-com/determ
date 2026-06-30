@@ -7,6 +7,8 @@ prompt that asks the model to classify the root cause and give concrete
 
 from __future__ import annotations
 
+from typing import Any
+
 
 def build_phase_c_retro_prompt(
     fn_name: str, sig_text: str, container: str, file_rel: str,
@@ -91,4 +93,50 @@ def build_phase_c_retro_prompt(
         "`self.inner.by_ref().as_ref()` to traverse the NonNull wrapper "
         "instead of `*self.inner`\"), never a signature/bound/where change and "
         "never a generic 'try harder' platitude."
+    )
+
+
+def build_whole_tree_retro_prompt(
+    error_excerpt: str, history: list[dict[str, Any]], *, name: str, fix_err_cap: int,
+) -> str:
+    """Tree-wide compile-error retrospective prompt: asks the model why fix-loop
+    ``name`` stopped reducing the rustc error count and what categorically
+    different approach to try next. Pure assembly (mirrors the per-fn prompt at
+    the whole-tree level)."""
+    recent = history[-3:] if history else []
+    history_block = ""
+    for h in recent:
+        summary = h.get("summary") or h.get("fix_summary") or ""
+        err = (h.get("error_sig") or "")[:600]
+        history_block += (
+            f"\nIter {h.get('iter','?')}: {summary}\n"
+            f"  metric_before={h.get('metric','?')} → "
+            f"metric_after={h.get('post_fix_metric','?')}\n"
+            f"  error_sig: {err}\n"
+        )
+    prior_retro = ""
+    for h in reversed(recent):
+        if h.get("retro"):
+            prior_retro = h["retro"]
+            break
+    prior_block = (
+        f"\nPrior retrospective said:\n{prior_retro}\n"
+        "If that guidance did not move the error floor, escalate to a\n"
+        "DIFFERENT strategy this time.\n"
+    ) if prior_retro else ""
+    return (
+        f"You are diagnosing why fix-loop `{name}` has stopped reducing\n"
+        f"the rustc error count across multiple attempts.\n\n"
+        f"Recent attempts:\n{history_block}\n"
+        f"Current error excerpt:\n```\n{error_excerpt[:fix_err_cap]}\n```\n"
+        f"{prior_block}\n"
+        "Output EXACTLY two lines:\n"
+        "  CATEGORY: <one short tag — e.g. WRONG_FILE_TARGETED, "
+        "TRAIT_HEADER_MISMATCH, UNSIZED_RETURN, DUPLICATE_IMPL, "
+        "GENUINELY_HARD>\n"
+        "  GUIDANCE: <one paragraph — what concretely different approach to "
+        "try next iter. Reference specific symbols, fns, or rustc error codes.>\n\n"
+        "GUIDANCE must be actionable, not 'try harder'. If two iters in a row\n"
+        "with non-trivial strategy changes both failed to move the floor,\n"
+        "set CATEGORY: GENUINELY_HARD."
     )

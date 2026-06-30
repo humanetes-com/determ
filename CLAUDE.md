@@ -235,8 +235,8 @@ Pipeline touches: files inside tmp/{project}/.
 **4. Never commit secrets.**
 .env is gitignored. Never add it to git.
 
-**5. No implementation without explicit approval.**
-When asked for evaluation or analysis, discuss findings and proposed fixes until the user says to proceed. Do not implement anything — no edits, no file writes — until the user explicitly says to go ahead.
+**5. Implementation without explicit approval is allowed as soon as the options have been considered.**
+We are using git, code can be removed. Always prefer the cheaper solution in terms of tokens.
 
 **6. Ask before committing. Permission is single-use.**
 After implementing a fix, give a short overview of what was done, then ask "May I commit?" Wait for yes or no before running any git command. Permission to commit applies ONLY to the work just shown — it does NOT carry forward to the next fix. Each subsequent commit needs a new explicit yes. Batch related changes by holding them uncommitted until the user asks for a single commit covering the batch. Do not auto-commit after each Edit just because you committed once earlier in the session.

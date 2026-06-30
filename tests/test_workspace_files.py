@@ -70,3 +70,16 @@ def test_delete_helper(tmp_path) -> None:
     wf.delete(f)
     assert not f.exists()
     wf.delete(f)  # missing path → no error
+
+
+def test_write_build_configs(tmp_path) -> None:
+    from pipeline_core.domain.models import BuildCluster
+    c = BuildCluster(name="stable", env_extra={"RUSTFLAGS": "--cfg x"},
+                     tarpaulin_exclude_files=[], excluded_cfg=[],
+                     active_cfg=["feat"], prompt_nightly_rule="")
+    wf.write_build_configs(tmp_path, [c], {"feat": 12})
+    out = (tmp_path / "build_configs.md").read_text()
+    assert "## cluster: stable" in out
+    assert "env: RUSTFLAGS += --cfg x" in out
+    assert "active_cfg: feat" in out
+    assert "gated_lines: ~12" in out

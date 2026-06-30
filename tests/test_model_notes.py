@@ -102,6 +102,7 @@ from pipeline_core.domain.model_notes import (
     is_wellformed_error_code,
     mine_common_tokens,
     note_hash,
+    note_signature,
     notes_are_semantic_dupes,
     prepare_note,
     rank_notes,
@@ -210,3 +211,133 @@ def test_strip_model_notes_section() -> None:
     assert "Model Notes" not in out
     assert "## Other" in out and "tail." in out
     assert strip_model_notes_section("# FR\nno notes\n") == "# FR\nno notes\n"
+
+
+# --- branch-completion tests (domain coverage ratchet) ---
+
+def test_is_wellformed_error_code_three_and_four_digits() -> None:
+    assert is_wellformed_error_code("E0001")   # 4 digits
+    assert is_wellformed_error_code("E001")    # 3 digits
+    assert not is_wellformed_error_code("E1")  # 1 digit
+
+
+def test_note_signature_direct() -> None:
+    codes, kw = note_signature("E0277 box ptr unsafe")
+    assert "e0277" in codes
+    assert {"box", "ptr", "unsafe"} <= kw
+
+
+def test_semantic_dupes_single_keyword_overlap_is_not_dupe() -> None:
+    # share exactly one keyword → inter < 2 → not a dupe
+    assert not notes_are_semantic_dupes("use box here for it", "box and the trait stuff")
+
+
+def test_semantic_dupes_low_jaccard_not_dupe() -> None:
+    # >=2 shared but <50% jaccard → not a dupe
+    a = "box ptr"                       # {box, ptr}
+    b = "box ptr trait impl generic"    # {box, ptr, trait, impl, generic}
+    assert not notes_are_semantic_dupes(a, b)  # 2/5 = 0.4 < 0.5
+
+
+def test_prepare_note_without_error_codes() -> None:
+    assert prepare_note("a plain note long enough to keep") == "a plain note long enough to keep"
+
+
+def test_prepare_note_all_codes_malformed_no_tag() -> None:
+    out = prepare_note("a long enough note with bad codes only", {"nope", "E1"})
+    assert out == "a long enough note with bad codes only"
+
+
+def test_dedup_append_rejects_semantic_dupe() -> None:
+    existing = ["TypeId::of needs T: 'static generic lifetime"]
+    hashes = {note_hash(existing[0])}
+    _, added = dedup_append(
+        "the generic must be 'static for typeid; lifetime bound",
+        list(existing), set(hashes), 80)
+    assert added is False
+
+
+def test_rank_notes_empty_returns_blank() -> None:
+    assert rank_notes([], file_rel="a.rs", fn_name="f", file_text="",
+                      current_error="", err_codes=set(), max_chars=100) == ""
+
+
+def test_rank_notes_keyword_tier_outranks_generic() -> None:
+    kw_note = "watch the lifetime and the generic sized bound on the box"   # ≥2 kw
+    generic = "a recency only note about delegation here"
+    out = rank_notes([generic, kw_note], file_rel="a.rs", fn_name="f", file_text="",
+                     current_error="E9999 lifetime generic sized box issue",
+                     err_codes=set(), max_chars=4000)
+    lines = [ln[2:] for ln in out.splitlines()]
+    assert lines.index(kw_note) < lines.index(generic)
+
+
+def test_rank_notes_symbol_tier_outranks_generic() -> None:
+    sym_note = "the MyWidget value must be cloned before capture"
+    generic = "a recency only note about ownership here"
+    out = rank_notes([generic, sym_note], file_rel="c.rs", fn_name="render",
+                     file_text="pub struct MyWidget { }", current_error="",
+                     err_codes=set(), max_chars=4000)
+    lines = [ln[2:] for ln in out.splitlines()]
+    assert lines.index(sym_note) < lines.index(generic)
+
+
+def test_mine_common_tokens_filters_skip_and_short() -> None:
+    # `Box`/`Vec` are in the skip set; `Foo` is <4 chars with no generic → dropped;
+    # `LongName` survives (≥2 across excerpts).
+    ex = ["Box Vec Foo LongName here", "LongName again with Box"]
+    common = mine_common_tokens(ex)
+    names = {t for t, _ in common}
+    assert "LongName" in names
+    assert "Box" not in names and "Vec" not in names and "Foo" not in names
+
+
+def test_mine_common_tokens_one_count_per_excerpt() -> None:
+    # `Widget` twice in ONE excerpt counts once → below the n>=2 threshold
+    assert mine_common_tokens(["Widget and Widget again"]) == []
+
+
+def test_build_promoted_rules_with_shared_tokens() -> None:
+    out = build_promoted_rules(
+        Counter({"E0599": 3}),
+        {"E0599": ["no method on MyType here", "MyType still wrong"]},
+        [])
+    assert "E0599" in out and "often on" in out and "`MyType`" in out
+
+
+def test_build_promoted_rules_truncates_long_past_note() -> None:
+    long_body = "x" * 300
+    out = build_promoted_rules(
+        Counter({"E0277": 3}), {}, [f"[E0277] {long_body}"])
+    assert "..." in out
+
+
+def test_build_promoted_rules_empty_and_below_threshold() -> None:
+    from collections import Counter as _C
+    assert build_promoted_rules(_C(), {}, []) == ""           # no counts
+    assert build_promoted_rules(_C({"E0277": 1}), {}, []) == ""  # all below threshold
+
+
+def test_strip_model_notes_section_at_eof() -> None:
+    fr = "# FR\n\nbody.\n\n## Model Notes — x\n\n- a note\n"   # notes is last section
+    out = strip_model_notes_section(fr)
+    assert "Model Notes" not in out and "body." in out
+
+
+def test_rank_notes_empty_file_rel() -> None:
+    out = rank_notes(["just one recency note here about things"], file_rel="",
+                     fn_name="", file_text="", current_error="", err_codes=set(),
+                     max_chars=4000)
+    assert out == "- just one recency note here about things"
+
+
+def test_build_promoted_rules_unknown_code_default_hint() -> None:
+    out = build_promoted_rules(Counter({"E9999": 3}), {}, [])
+    assert "E9999" in out and "rustc --explain E9999" in out
+
+
+def test_build_promoted_rules_skips_untagged_stored_note() -> None:
+    # an untagged stored note (parse_error_code_note → None) is ignored
+    out = build_promoted_rules(Counter({"E0277": 3}), {},
+                               ["a plain untagged note with no code prefix"])
+    assert "E0277" in out and "past note" not in out

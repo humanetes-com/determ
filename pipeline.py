@@ -172,11 +172,15 @@ from pipeline_core.application.generators.task1_synthesizer import (
     Task1Synthesizer,
 )
 from pipeline_core.application.reconstruct import attribution as _attribution
+from pipeline_core.application.reconstruct import cleanup_residuals as _cleanup_residuals
+from pipeline_core.application.reconstruct import cluster_membership as _membership
 from pipeline_core.application.reconstruct import fix_diagnostics as _fix_diag
 from pipeline_core.application.reconstruct import group_fill as _group_fill
 from pipeline_core.application.reconstruct import impl_fill as _impl_fill
 from pipeline_core.application.reconstruct import per_fn_retry as _per_fn_retry
 from pipeline_core.application.reconstruct import phase_c_tdd as _phase_c_tdd
+from pipeline_core.application.reconstruct import source_view as _source_view
+from pipeline_core.application.reconstruct import stub_scan as _stub_scan
 from pipeline_core.application.reconstruct.failure_analysis import FailureAnalysisStep
 from pipeline_core.application.reconstruct.failure_diagnosis import (
     classify_phase_c_test_failures as _classify_phase_c_test_failures_impl,
@@ -186,9 +190,6 @@ from pipeline_core.application.reconstruct.failure_diagnosis import (
 )
 from pipeline_core.application.reconstruct.failure_diagnosis import (
     record_tdd_regression as _record_tdd_regression_impl,
-)
-from pipeline_core.application.reconstruct.fill_merge import (
-    merge_fills_preserving_existing as _merge_fills_preserving_existing,
 )
 from pipeline_core.application.reconstruct.fill_merge import (
     merge_fn_blocks_into_disk as _merge_fn_blocks_into_disk,
@@ -212,6 +213,9 @@ from pipeline_core.application.reconstruct.retrospective import (
 )
 from pipeline_core.application.reconstruct.retrospective import (
     diagnose_phase_c as _diagnose_phase_c,
+)
+from pipeline_core.application.reconstruct.retrospective import (
+    whole_tree_retrospective as _whole_tree_retrospective_impl,
 )
 from pipeline_core.application.reconstruct.run_context import RunContext
 from pipeline_core.application.reconstruct.source_view import (
@@ -384,9 +388,6 @@ from pipeline_core.domain.refine import (
     parse_retrospective_categories as _parse_retrospective_categories,
 )
 from pipeline_core.domain.rust_fn_headers import (
-    fn_headers,
-)
-from pipeline_core.domain.rust_fn_headers import (
     is_pub_fn as _is_pub_fn,
 )
 from pipeline_core.domain.rust_fn_headers import (
@@ -403,8 +404,6 @@ from pipeline_core.domain.rust_idents import (
 from pipeline_core.domain.rust_macros import macro_definitions
 from pipeline_core.domain.rust_scan import (
     after_brace_newline,
-    contains_decl_keyword,
-    contains_word,
     count_test_attrs,
     count_word,
     find_mod_opener,
@@ -412,7 +411,6 @@ from pipeline_core.domain.rust_scan import (
     has_nonempty_test_fn,
     is_structural_brace_line,
     line_has_assertion,
-    named_fn_decl_start,
     strip_line_block_comments,
     use_imports_symbol,
 )
@@ -444,9 +442,6 @@ from pipeline_core.domain.text import (
     flags_unreachable as _flags_unreachable,
 )
 from pipeline_core.domain.text import (
-    label_value_offset as _label_value_offset,
-)
-from pipeline_core.domain.text import (
     parse_attempt_number as _parse_attempt_number,
 )
 from pipeline_core.domain.text import (
@@ -454,13 +449,7 @@ from pipeline_core.domain.text import (
     strip_trailing_file_tag,
 )
 from pipeline_core.domain.text import (
-    starts_with_label as _starts_with_label,
-)
-from pipeline_core.domain.text import (
     strip_markdown_fences as _strip_markdown_fences,
-)
-from pipeline_core.domain.text import (
-    strip_surrounding_asterisks as _strip_surrounding_asterisks,
 )
 from pipeline_core.domain.type_refs import (
     types_referenced_in_text as _types_referenced_in_text,
@@ -504,7 +493,9 @@ from pipeline_core.prompts.skeleton_index import (
 from pipeline_core.prompts.skeleton_index import (
     format_skeleton_index_for_cluster as _format_skeleton_index_for_cluster,
 )
-from pipeline_core.prompts.test_grouping import format_skeleton_for_prompt as _format_skeleton_for_prompt
+from pipeline_core.prompts.test_environment import (
+    describe_test_environment as _describe_test_environment_impl,
+)
 from pipeline_core.prompts.whole_file_fix import build_whole_file_fix_prompt
 from pipeline_core.retry import with_retry
 from pipeline_core.settings import Settings
@@ -1043,7 +1034,6 @@ TASK4_DOC_LIMIT = 200_000
 # Directory for locked module source backups (bottom-up integration).
 # Layout vocabulary now lives in pipeline_core.domain.workspace_layout.
 from pipeline_core.domain.workspace_layout import (  # noqa: E402
-    BUILD_CONFIGS_NAME,
     CHUNK_CACHE_DIR,
     COVERAGE_STRATEGY_NAME,
     FAILURE_LOG_NAME,
@@ -1746,85 +1736,6 @@ def _count_active_tests_for_cluster(
 
 
 # ---------------------------------------------------------------------------
-# Resume detection
-# ---------------------------------------------------------------------------
-
-def detect_resume_point(root: Path, project_dir: Path, manifest_path: Path,
-                        genesis_path: Path, functional_req_path: Path) -> tuple:
-    """
-    Inspect existing files to determine exactly where the previous run stopped.
-    Returns (iteration, start_task) where start_task is 1-6.
-
-    State machine:
-      The four observable signals are:
-        - max_n:            highest N in tests_output_N.txt (0 if none)
-        - has_functional:   functional_requirements.md exists
-        - has_manifest:     .generated_files.txt exists
-
-      Possible states and their meaning:
-        max_n=0, no functional, no manifest  -> clean start, TASK 1 of iter 1
-        max_n=0, functional,    no manifest  -> TASK 1 done, resume TASK 2 of iter 1
-        max_n=0, functional,    manifest     -> TASK 2 done, resume TASK 3 of iter 1
-        max_n=0, no functional, manifest     -> corrupt state, clean up, TASK 1 of iter 1
-
-        max_n>0, no functional, no manifest  -> iteration max_n complete, TASK 1 of max_n+1
-        max_n>0, functional,    no manifest  -> TASK 1 of max_n+1 done, resume TASK 2
-        max_n>0, functional,    manifest     -> TASK 2 of max_n+1 done OR crash after
-                                               TASK 3 of max_n; safest: resume TASK 3
-        max_n>0, no functional, manifest     -> TASK 5 done, TASK 6 not done; finish
-                                               cleanup then TASK 1 of max_n+1
-    """
-    existing = list(project_dir.glob("tests_output_*.txt"))
-    max_n = 0
-    if existing:
-        max_n = max(
-            (num for p in existing if (num := _tests_output_number(p.name)) is not None),
-            default=0,
-        )
-
-    has_functional = functional_req_path.exists()
-    has_manifest = manifest_path.exists()
-
-    if max_n == 0:
-        if not has_functional and not has_manifest:
-            _log("Clean start: beginning from iteration 1, TASK 1.")
-            return 1, 1
-        if has_functional and not has_manifest:
-            _log("Resume: TASK 1 completed. Resuming iteration 1 from TASK 2.")
-            return 1, 2
-        if has_functional and has_manifest:
-            _log("Resume: TASK 2 completed. Resuming iteration 1 from TASK 3.")
-            return 1, 3
-        # manifest but no functional_req: corrupt, clean up
-        _log("Unexpected state (manifest without functional_requirements.md). Cleaning up.")
-        delete_source_files(project_dir, manifest_path)
-        return 1, 1
-
-    # max_n > 0
-    next_iter = max_n + 1
-
-    if not has_functional and not has_manifest:
-        _log(f"Resume: iteration {max_n} complete. Starting iteration {next_iter} from TASK 1.")
-        return next_iter, 1
-
-    if has_functional and not has_manifest:
-        _log(f"Resume: TASK 1 of iteration {next_iter} completed. Resuming from TASK 2.")
-        return next_iter, 2
-
-    if has_functional and has_manifest:
-        # Ambiguous: could be after TASK 2 of next_iter OR after TASK 3 of max_n.
-        # Safest resolution: treat as after TASK 2 of next_iter and run TASK 3.
-        # Worst case: we re-run tests once with the same code; harmless.
-        _log(f"Resume: source files present. Resuming iteration {next_iter} from TASK 3.")
-        return next_iter, 3
-
-    # no functional_req, manifest exists: TASK 5 done, TASK 6 not done
-    _log(f"Resume: TASK 5 of iteration {max_n} done. Completing TASK 6 then starting {next_iter}.")
-    delete_source_files(project_dir, manifest_path)
-    return next_iter, 1
-
-
-# ---------------------------------------------------------------------------
 # Test file collection -- language agnostic
 # ---------------------------------------------------------------------------
 
@@ -2397,48 +2308,11 @@ def _task2_group_tests(
 # Per-fn fill rules relocated to application/reconstruct/fill_rules.py (P2);
 # aliases keep engine call sites + pins unchanged.
 from pipeline_core.application.reconstruct.fill_rules import (  # noqa: E402
-    is_unimplemented_body as _is_unimplemented_body,
+    extract_fn_blocks as _extract_fn_blocks,
 )
 from pipeline_core.application.reconstruct.fill_rules import (  # noqa: E402
     module_of as _module_of,
 )
-
-
-def _extract_fn_blocks(response: str) -> dict[str, str]:
-    """Parse `<FN sig="...">body</FN>` blocks from the LLM response.
-
-    Returns {signature → body_text}. The body is the raw content between
-    the opening `<FN ...>` and closing `</FN>` markers, trimmed of leading/
-    trailing whitespace. The signature must include everything from "fn name"
-    to the opening `{` exclusive — matching how `_merge_fills_preserving_existing`
-    keys its disk-function map.
-
-    Tolerates loosely-formatted responses (extra whitespace, mixed quoting on
-    the sig attribute).
-    """
-    # `(?s)` for DOTALL so body can span lines. Match sig attribute value
-    # in double quotes (most common) or single quotes (sometimes used).
-    pat = re.compile(
-        r'<FN\s+sig\s*=\s*(?P<q>["\'])(?P<sig>.+?)(?P=q)\s*>(?P<body>.*?)</FN>',
-        re.DOTALL,
-    )
-    out: dict[str, str] = {}
-    stubs_dropped = 0
-    for m in pat.finditer(response):
-        sig = m.group("sig").strip()
-        body = m.group("body").strip()
-        if not sig or not body:
-            continue
-        # P3.10 enforcement: drop stub bodies so they don't appear successful.
-        if _is_unimplemented_body(body) or body.strip() in ("todo!()", "todo!();"):
-            stubs_dropped += 1
-            continue
-        out[sig] = body
-    if stubs_dropped:
-        _log(f"  [phase-c] dropped {stubs_dropped} stub <FN> block(s) "
-             f"from model output (model re-emitted unimplemented!).")
-    return out
-
 
 # _merge_fn_blocks_into_disk → application/reconstruct/fill_merge.py (imported above).
 
@@ -2861,95 +2735,11 @@ def _whole_tree_retrospective(
     *,
     name: str = "fix_loop",
 ) -> str:
-    """Strategy retrospective for whole-tree fix loops. Mirrors the per-fn
-    `_phase_c_retrospective` but at the tree-wide compile-error level.
-
-    Called by `_improvement_loop` when the prior iter did not reduce the
-    error floor. Asks the model: "you tried X and the error count stayed
-    the same — what categorically different approach should the next
-    attempt take?". Returns a short guidance string the next `do_fix`
-    closure injects into its prompt.
-
-    Empty string on transient failures (LLM exception, empty response).
-    """
-    if not error_excerpt.strip():
-        return ""
-    # Compact history view — the last 3 attempts' summaries and the error
-    # signature they failed against.
-    recent = history[-3:] if history else []
-    history_block = ""
-    for h in recent:
-        summary = h.get("summary") or h.get("fix_summary") or ""
-        err = (h.get("error_sig") or "")[:600]
-        history_block += (
-            f"\nIter {h.get('iter','?')}: {summary}\n"
-            f"  metric_before={h.get('metric','?')} → "
-            f"metric_after={h.get('post_fix_metric','?')}\n"
-            f"  error_sig: {err}\n"
-        )
-    prior_retro = ""
-    for h in reversed(recent):
-        if h.get("retro"):
-            prior_retro = h["retro"]
-            break
-    prior_block = (
-        f"\nPrior retrospective said:\n{prior_retro}\n"
-        "If that guidance did not move the error floor, escalate to a\n"
-        "DIFFERENT strategy this time.\n"
-    ) if prior_retro else ""
-    prompt = (
-        f"You are diagnosing why fix-loop `{name}` has stopped reducing\n"
-        f"the rustc error count across multiple attempts.\n\n"
-        f"Recent attempts:\n{history_block}\n"
-        f"Current error excerpt:\n```\n{error_excerpt[:_FIX_ERR_CAP]}\n```\n"
-        f"{prior_block}\n"
-        "Output EXACTLY two lines:\n"
-        "  CATEGORY: <one short tag — e.g. WRONG_FILE_TARGETED, "
-        "TRAIT_HEADER_MISMATCH, UNSIZED_RETURN, DUPLICATE_IMPL, "
-        "GENUINELY_HARD>\n"
-        "  GUIDANCE: <one paragraph — what concretely different approach to "
-        "try next iter. Reference specific symbols, fns, or rustc error codes.>\n\n"
-        "GUIDANCE must be actionable, not 'try harder'. If two iters in a row\n"
-        "with non-trivial strategy changes both failed to move the floor,\n"
-        "set CATEGORY: GENUINELY_HARD."
-    )
-    try:
-        result = _ask_retrospective(prompt)
-    except Exception as e:
-        _log(f"  [retro/{name}] LLM call failed: {e}")
-        return ""
-    if not (result or "").strip():
-        _log(f"  [retro/{name}] LLM returned empty content")
-        return ""
-    # Lightweight parse: collect everything after "GUIDANCE:" up to next
-    # uppercase-tag-style label. Tolerant of decorations.
-    cat = ""
-    guidance_lines: list[str] = []
-    in_guidance = False
-    for ln in (result or "").splitlines():
-        s = ln.strip().lstrip("*-• ").strip()
-        s = _strip_surrounding_asterisks(s)
-        off = _label_value_offset(s, "category")
-        if off is not None and (parts := s[off:].split()):
-            cat = parts[0].strip().rstrip(".,;").upper()
-            in_guidance = False
-            continue
-        off = _label_value_offset(s, "guidance")
-        if off is not None and s[off:]:
-            guidance_lines = [s[off:].strip()]
-            in_guidance = True
-            continue
-        if in_guidance and s:
-            if _starts_with_label(s, ("category", "guidance", "note")):
-                in_guidance = False
-            else:
-                guidance_lines.append(s)
-    guidance = " ".join(guidance_lines).strip()
-    if not cat and not guidance:
-        guidance = (result or "").strip()[:1200]
-    if cat:
-        return f"[{cat}] {guidance}" if guidance else f"[{cat}]"
-    return guidance
+    """Thin shim binding the LLM + log + budget; impl in
+    application/reconstruct/retrospective.whole_tree_retrospective."""
+    return _whole_tree_retrospective_impl(
+        error_excerpt, history, name=name,
+        ask_retrospective=_ask_retrospective, log=_log, fix_err_cap=_FIX_ERR_CAP)
 
 
 def _write_phase_c_test_fix_log(
@@ -3890,60 +3680,6 @@ def _frontier_from_diags(
     return _attribution.frontier_from_diags(_ATTR_DEPS, diagnostics, src_dir)
 
 
-# "cannot find …" diagnostics — an undefined value/fn/type/macro referenced but
-# never defined. When several fns in one file hit these, they likely share
-# internal machinery (a constructor, a const, a helper) that no single per-fn
-# fill establishes — the vtable class (FR-040).
-_CANNOT_FIND_CODES = {"E0425", "E0433", "E0412", "E0531", "E0405", "E0422", "E0423"}
-
-
-def _coupled_cofill_groups(
-    diagnostics: list[dict], src_dir: Path,
-) -> list[dict]:
-    """#1 (FR-040): detect co-fill groups — 2+ fns in the SAME file that fail
-    with "cannot find" errors (undefined symbols). Filled per-fn they each
-    invent the shared item under inconsistent names (`ADHOC_VTABLE` vs
-    `VTABLE_ADHOC`); designed together the model can define it ONCE and
-    reference it consistently. Returns [{file, fns:[...], symbols:[...]}], one
-    per file with >= 2 such fns. Symbols are extracted from the diagnostic
-    message between backticks (no regex)."""
-    recs_by_file: dict[str, list[dict]] = {}
-    text_cache: dict[str, str] = {}
-    fn_syms: dict[str, dict[str, set]] = {}
-    for d in diagnostics or []:
-        if (d.get("code") or "") not in _CANNOT_FIND_CODES:
-            continue
-        rel = d.get("file") or ""
-        line_no = int(d.get("line") or 0)
-        msg = d.get("message") or ""
-        if not rel or line_no < 1:
-            continue
-        sym = msg.split("`")[1] if msg.count("`") >= 2 else ""
-        if rel not in recs_by_file:
-            _all = _enumerate_fns_via_extractor(src_dir) or []
-            recs_by_file[rel] = [r for r in _all if r.get("file") == rel]
-        recs = recs_by_file[rel]
-        if not recs:
-            continue
-        if rel not in text_cache:
-            try:
-                text_cache[rel] = (src_dir / rel).read_text(encoding="utf-8")
-            except Exception:
-                continue
-        rec = _line_to_fn_record(text_cache[rel], line_no, recs)
-        if rec is None:
-            continue
-        fn_syms.setdefault(rel, {}).setdefault(rec["fn_name"], set())
-        if sym:
-            fn_syms[rel][rec["fn_name"]].add(sym)
-    groups: list[dict] = []
-    for rel, fns in fn_syms.items():
-        if len(fns) >= 2:
-            syms = sorted({s for ss in fns.values() for s in ss})
-            groups.append({"file": rel, "fns": sorted(fns), "symbols": syms})
-    return groups
-
-
 def _strip_ansi(text: str) -> str:
     """Drop ANSI SGR colour escapes (cargo's rendered-ansi diagnostics)."""
     return strip_ansi(text or "")
@@ -3978,47 +3714,9 @@ def _order_frontier(
 
 
 def _scan_unimplemented_functions(src_dir: Path) -> list[tuple[str, str]]:
-    """Return [(file_rel_path, fn_name), ...] for every fn whose body is still
-    `unimplemented!()` (or an annotated stub).
-
-    Prefers the syn-based extractor binary for robustness — it catches every
-    fn rustc would consider (free fns, impl methods, trait method defaults,
-    inline-compressed declarations, cfg-attributed fns). Falls back to a
-    regex scanner when the binary isn't available.
-
-    Note: this is the LEGACY name-only return form. New code should use
-    `_scan_unimplemented_records` to also get container + signature, which
-    are needed to disambiguate same-named fns within a single file.
-    """
-    recs = _enumerate_fns_via_extractor(src_dir)
-    if recs is not None:
-        return [(r["file"], r["fn_name"]) for r in recs
-                if r.get("has_unimplemented_body")]
-    # Fallback: best-effort regex scan. Less robust but doesn't require
-    # the Rust binary; kept for the tests-fixture path and for portability.
-    out: list[tuple[str, str]] = []
-    for p in sorted(src_dir.rglob("*.rs")):
-        try:
-            text = p.read_text(encoding="utf-8")
-        except Exception:
-            continue
-        for h in fn_headers(text, line_anchored=False):
-            fn_name = h.name
-            body_start = h.brace_open + 1
-            depth = 1
-            i = body_start
-            while i < len(text) and depth > 0:
-                if text[i] == "{":
-                    depth += 1
-                elif text[i] == "}":
-                    depth -= 1
-                i += 1
-            if depth != 0:
-                continue
-            body = text[body_start:i - 1]
-            if _is_unimplemented_body(body):
-                out.append((str(p.relative_to(src_dir)), fn_name))
-    return out
+    """Composition shim → application.reconstruct.stub_scan (extractor injected)."""
+    return _stub_scan.scan_unimplemented_functions(
+        src_dir, enumerate_fns=_enumerate_fns_via_extractor)
 
 
 # ---------------------------------------------------------------------------
@@ -4032,32 +3730,7 @@ def _scan_unimplemented_functions(src_dir: Path) -> list[tuple[str, str]]:
 # `# [cfg (X)] mod foo ;`) is done via domain.cfg.cfg_inline_predicates.
 
 
-def _fn_cfg_predicates(file_text: str, fn_name: str) -> list[str]:
-    """Return all `#[cfg(...)]` predicates that gate `fn_name` in `file_text`.
-
-    FALLBACK ONLY (R7.4a): callers holding extractor records must pass the
-    record's `cfg_predicates` to `_fn_belongs_to_cluster` instead — this
-    regex's backward window (previous blank line → decl) can over-capture
-    a PRECEDING fn's cfg attrs when fns are not blank-line separated, and
-    it only ever finds the FIRST same-named fn in the file.
-
-    Walks BACKWARD from the fn's declaration line, collecting consecutive
-    `#[cfg(...)]` and `#[...]` attribute lines. Stops at the first
-    non-attribute, non-blank line. Returns just the cfg predicates
-    (the part inside `cfg(...)`).
-    """
-    m_start = named_fn_decl_start(file_text, fn_name)
-    if m_start is None:
-        return []
-    decl_offset = m_start + (1 if file_text[m_start] == "\n" else 0)
-    # Window: from the previous blank line (or start) to the fn decl.
-    # Captures both same-line and above-line cfg attributes that the
-    # skeleton extractor may emit (`# [cfg (X)] fn foo ...` or
-    # `#[cfg(X)]\nfn foo`).
-    ws = file_text.rfind("\n\n", 0, decl_offset)
-    window_start = ws + 2 if ws >= 0 else 0
-    window = file_text[window_start:decl_offset + 1]
-    return [pred.strip() for pred in _cfg.cfg_inline_predicates(window)]
+_fn_cfg_predicates = _membership.fn_cfg_predicates
 
 
 def _enumerate_mods_via_extractor(src_dir: Path) -> list[ModRecord] | None:
@@ -4080,54 +3753,13 @@ def _enumerate_consts_via_extractor(src_dir: Path) -> list[ConstRecord] | None:
 
 
 def _public_api_from_source(content: str) -> str:
-    """Render a single Rust source string's public API surface using the syn extractor —
-    no regex on Rust source (Hard Rule). The extractor is path-based, so write the string to a
-    throwaway crate tree and enumerate types / fns / consts over it.
-
-    Output mirrors the legacy regex format: `pub struct Name { f: T, ... }`, `pub enum Name
-    { A, B }`, `pub trait Name`, full pub fn signatures, and `pub const NAME: T`.
-    """
-    import tempfile as _tempfile
-    lines: list[str] = []
-    with _tempfile.TemporaryDirectory() as _d:
-        _src = Path(_d) / "src"
-        _src.mkdir()
-        (_src / "lib.rs").write_text(content, encoding="utf-8")
-        _td = Path(_d)
-        types = _enumerate_types_via_extractor(_td) or []
-        fns = _enumerate_fns_via_extractor(_td) or []        # dicts (engine contract)
-        consts = _enumerate_consts_via_extractor(_td) or []
-
-    for t in types:
-        if not t.is_pub:
-            continue
-        if t.kind == "struct":
-            if t.fields:
-                fields = ", ".join(f"{f.name}: {f.ty}" for f in t.fields)
-                lines.append(f"pub struct {t.name}{t.generics} {{ {fields} }}")
-            else:
-                lines.append(f"pub struct {t.name}{t.generics}")
-        elif t.kind == "enum":
-            if t.variants:
-                lines.append(f"pub enum {t.name}{t.generics} {{ {', '.join(t.variants)} }}")
-            else:
-                lines.append(f"pub enum {t.name}{t.generics}")
-        elif t.kind == "trait":
-            lines.append(f"pub trait {t.name}")
-
-    for f in fns:
-        if f.get("is_pub"):
-            # sig_text starts at the `fn`/`unsafe`/`async` keyword (the extractor's sig span
-            # excludes the visibility), so prepend `pub ` to match the API-listing convention.
-            sig = " ".join((f.get("sig_text") or "").split())
-            if sig:
-                lines.append(sig if sig.startswith("pub ") else f"pub {sig}")
-
-    for c in consts:
-        if c.is_pub:
-            lines.append(f"pub const {c.name}: {c.ty}")
-
-    return "\n".join(lines)
+    """Composition shim → application.reconstruct.source_view (extractors injected)."""
+    return _source_view.public_api_from_source(
+        content,
+        enumerate_types=_enumerate_types_via_extractor,
+        enumerate_fns=_enumerate_fns_via_extractor,
+        enumerate_consts=_enumerate_consts_via_extractor,
+    )
 
 
 # Cache of mod records per src_dir to avoid re-invoking the extractor for
@@ -4149,31 +3781,10 @@ def _mod_records_cached(src_dir: Path) -> "list[ModRecord] | None":
 
 
 def _file_cfg_predicate(target_src_dir: Path, file_rel: str) -> str | None:
-    """Return the cfg predicate (if any) under which `file_rel` is compiled.
-
-    AST-derived via the syn-based skeleton extractor (`--enumerate-mods`).
-    Returns None when the file is unconditionally included or when no
-    parent mod decl is found.
-
-    Falls back to the old regex-based scan when the extractor binary
-    isn't available (test-fixture environments, partial setup, etc).
-    """
-    stem = Path(file_rel).stem
-    if stem in ("lib", "main"):
-        return None
-    recs = _mod_records_cached(target_src_dir)
-    if recs is None:
-        return _file_cfg_predicate_regex_fallback(target_src_dir, file_rel)
-    file_name = Path(file_rel).name
-    for r in recs:
-        if r.name == stem or r.file == file_name:
-            preds: list[str] = list(r.cfg_predicates)
-            if not preds:
-                return None
-            if len(preds) == 1:
-                return preds[0]
-            return "all(" + ", ".join(preds) + ")"
-    return None
+    """Composition shim → application.reconstruct.cluster_membership
+    (mod-records cache injected; falls back to the structured scan)."""
+    return _membership.file_cfg_predicate(
+        target_src_dir, file_rel, mod_records=_mod_records_cached)
 
 
 def _invalidate_mod_records_cache() -> None:
@@ -4185,65 +3796,7 @@ def _invalidate_mod_records_cache() -> None:
     _CLUSTER_SPECIFIC_SYMS_CACHE.clear()  # #26 residual: same invalidation lifecycle
 
 
-def _file_cfg_predicate_regex_fallback(
-    target_src_dir: Path, file_rel: str,
-) -> str | None:
-    """Regex-based fallback for environments without the syn extractor
-    binary. Known limitation: can conflate cfg attrs from an adjacent
-    mod declaration when they share a line region. The AST path is
-    preferred whenever available.
-    """
-    stem = Path(file_rel).stem
-    if stem in ("lib", "main"):
-        return None
-    for root in ("src/lib.rs", "src/main.rs"):
-        p = target_src_dir / root
-        if not p.exists():
-            continue
-        try:
-            text = p.read_text(encoding="utf-8")
-        except Exception:
-            continue
-        mod_decl_pat = re.compile(
-            r"(?:^|\n)([^\n]*\b(?:pub(?:\([^)]*\))?\s+)?mod\s+"
-            + re.escape(stem) + r"\s*;[^\n]*)",
-            re.MULTILINE,
-        )
-        m = mod_decl_pat.search(text)
-        if not m:
-            continue
-        decl_line = m.group(1)
-        preds: list[str] = []
-        mod_idx = decl_line.find("mod ")
-        if mod_idx < 0:
-            mod_idx = len(decl_line)
-        for pred in _cfg.cfg_inline_predicates(decl_line[:mod_idx]):
-            preds.append(pred.strip())
-        decl_start = m.start() + (1 if text[m.start()] == "\n" else 0)
-        head = text[:decl_start]
-        for ln in reversed(head.splitlines()):
-            s = ln.strip()
-            if not s:
-                break
-            if s.startswith("//") or s.startswith("/*"):
-                continue
-            # Stop on any line that contains a declaration keyword — the
-            # cfg attrs on such a line belong to ITS item, not ours.
-            if contains_decl_keyword(s):
-                break
-            ln_preds = _cfg.cfg_inline_predicates(ln)
-            if ln_preds:
-                preds.extend(p.strip() for p in ln_preds)
-                continue
-            if s.startswith("#["):
-                continue
-            break
-        if not preds:
-            return None
-        if len(preds) == 1:
-            return preds[0]
-        return "all(" + ", ".join(preds) + ")"
-    return None
+_file_cfg_predicate_regex_fallback = _membership.file_cfg_predicate_regex_fallback
 
 
 def _fn_belongs_to_cluster(
@@ -4253,86 +3806,33 @@ def _fn_belongs_to_cluster(
     cluster: "BuildCluster",
     fn_cfg_predicates: "list[str] | None" = None,
 ) -> bool:
-    """True when the fn (or its enclosing file) is active in `cluster`.
-
-    Evaluates the conjunction of:
-      - The file's parent-mod cfg (if any)
-      - The fn's own cfg attrs (if any)
-    against the cluster's cfg_true / cfg_false sets.
-
-    `fn_cfg_predicates` (R7.4a): the syn extractor's cfg list for THIS fn
-    record — callers that hold extractor records pass it ([] = extractor
-    says ungated, trusted as-is). Only when None does the legacy regex
-    text-walk run (extractor-absent text-scan path); its backward window
-    can over-capture a preceding fn's cfgs, which is exactly why record
-    callers must not fall through to it.
-
-    Conservative on uncertainty: when a predicate is undecidable, defaults
-    to True (include the stub) so the per-fn fill loop sees it — better
-    to waste a call than miss a fn we should have filled.
-    """
-    cfg_true = set(cluster.cfg_true)
-    cfg_false = set(cluster.cfg_false)
-    preds: list[str] = []
-    file_pred = _file_cfg_predicate(target_src_dir, file_rel)
-    if file_pred:
-        preds.append(file_pred)
-    if fn_cfg_predicates is not None:
-        preds.extend(fn_cfg_predicates)
-    else:
-        try:
-            text = (target_src_dir / file_rel).read_text(encoding="utf-8")
-        except Exception:
-            text = ""
-        if text:
-            preds.extend(_fn_cfg_predicates(text, fn_name))
-    if not preds:
-        return True  # no cfg gating → exists in every cluster
-    for p in preds:
-        v = _eval_cfg_pred(p, cfg_true, cfg_false)
-        if v is False:
-            return False
-        # v is None (undecidable) → conservatively keep
-    return True
+    """Composition shim → application.reconstruct.cluster_membership
+    (mod-records cache injected)."""
+    return _membership.fn_belongs_to_cluster(
+        target_src_dir, file_rel, fn_name, cluster, fn_cfg_predicates,
+        mod_records=_mod_records_cached)
 
 
 def _scan_unimplemented_for_cluster(
     target_src_dir: Path,
     cluster: "BuildCluster | None",
 ) -> list[tuple[str, str]]:
-    """Cluster-aware variant of _scan_unimplemented_functions.
-
-    Returns only stubs that belong to `cluster` per static cfg evaluation.
-    When `cluster` is None (no cluster context), behaves identically to
-    the unfiltered scan — used by callers that don't yet thread cluster.
-    """
-    raw = _scan_unimplemented_functions(target_src_dir)
-    if cluster is None:
-        return raw
-    out: list[tuple[str, str]] = []
-    skipped: int = 0
-    for rel, fn in raw:
-        if _fn_belongs_to_cluster(target_src_dir, rel, fn, cluster):
-            out.append((rel, fn))
-        else:
-            skipped += 1
-    if skipped:
-        _log(f"  [phase-c/per-fn] cluster {cluster.name}: skipped "
-             f"{skipped} stub(s) not active in this cluster's cfg-set.")
-    return out
+    """Composition shim → application.reconstruct.cluster_membership."""
+    return _membership.scan_unimplemented_for_cluster(
+        target_src_dir, cluster,
+        enumerate_fns=_enumerate_fns_via_extractor,
+        mod_records=_mod_records_cached, log=_log)
 
 
-def _filter_test_exercised(stubs: list[tuple[str, str]],
-                            test_files: list[tuple[str, str]]) -> list[tuple[str, str]]:
-    """Keep only stubs whose function name appears (as a token) in any test file."""
-    if not stubs or not test_files:
-        return []
-    test_blob = "\n".join(content for _, content in test_files)
-    out: list[tuple[str, str]] = []
-    for rel, name in stubs:
-        if contains_word(test_blob, name):
-            out.append((rel, name))
-    return out
+_CLEANUP_RESIDUALS_DEPS = _cleanup_residuals.CleanupResidualsDeps(
+    scan_unimplemented=lambda tsd: _scan_unimplemented_functions(tsd),
+    load_skeleton_files=lambda tsd: _load_skeleton_files(tsd),
+    ask=lambda *a, **k: _ASK_CLIENT.ask(*a, **k),
+    task2_model=_TASK2_MODEL,
+    single_call_char_limit=SINGLE_CALL_CHAR_LIMIT,
+    file_format_instruction=FILE_FORMAT_INSTRUCTION,
+    log=_log,
+)
 
 
 def _task2_cleanup_residuals(
@@ -4342,93 +3842,10 @@ def _task2_cleanup_residuals(
     test_files: list[tuple[str, str]],
     module_name: str,
 ) -> dict:
-    """Phase D: scan for residual `unimplemented!()` and patch what tests need.
-
-    - Classifies remaining stubs as test-exercised vs not.
-    - For test-exercised stubs, issues ONE LLM call with the relevant tests + the
-      current source of each touched file + an instruction to fill those stubs.
-    - Untouched stubs are left as-is (cargo test won't trigger them).
-
-    Returns {'stubs_total': int, 'stubs_exercised': int, 'files_updated': int,
-             'stubs_remaining': int}.
-    """
-    stubs = _scan_unimplemented_functions(target_src_dir)
-    if not stubs:
-        return {"stubs_total": 0, "stubs_exercised": 0, "files_updated": 0, "stubs_remaining": 0}
-
-    exercised = _filter_test_exercised(stubs, test_files)
-    _log(f"  [phase-d] {len(stubs)} residual stub(s); {len(exercised)} reachable from tests.")
-
-    if not exercised:
-        return {"stubs_total": len(stubs), "stubs_exercised": 0,
-                "files_updated": 0, "stubs_remaining": len(stubs)}
-
-    # Group exercised stubs by file so the model sees each affected file as one unit.
-    by_file: dict[str, list[str]] = {}
-    for rel, fn in exercised:
-        by_file.setdefault(rel, []).append(fn)
-
-    # Load only the affected files (plus all of the rest for type context).
-    skeleton_block = _format_skeleton_for_prompt(_load_skeleton_files(target_src_dir))
-    targets_block = "\n".join(
-        f"  - {rel}: {', '.join(fns)}" for rel, fns in by_file.items()
-    )
-    # Surface only tests that mention any of the target functions (relevance filter).
-    relevant_tests: list[str] = []
-    for rel, content in test_files:
-        if any(contains_word(content, fn)
-               for fns in by_file.values() for fn in fns):
-            relevant_tests.append(f'<TESTFILE path="{rel}">\n{content}\n</TESTFILE>')
-    tests_block = "\n\n".join(relevant_tests)
-    _fr_cap = SINGLE_CALL_CHAR_LIMIT // 4
-    _fr_capped = smart_truncate(functional_req or "", total_limit=_fr_cap,
-                                head=_fr_cap // 3, tail=2 * _fr_cap // 3)
-
-    prompt = f"""You are cleaning up residual `unimplemented!()` bodies in a Rust crate after a
-phase of group-driven test-driven fills.
-
-Crate: `{module_name}`
-
-These specific functions are still `unimplemented!()` but the tests call them:
-{targets_block}
-
-Current source on disk:
-{skeleton_block}
-
-Tests that reference these functions:
-{tests_block}
-
-Functional requirements:
-{_fr_capped}
-
-{FILE_FORMAT_INSTRUCTION}
-
-Output the source files you modified. Fill ONLY the functions listed above.
-Do NOT modify any function whose body is NOT `unimplemented!()`.
-Do NOT modify type definitions, imports, or any other items.
-"""
-    response = _ASK_CLIENT.ask(prompt, model=_TASK2_MODEL)
-    files = extract_files(response)
-    files_updated = 0
-    for rel, model_text in files.items():
-        if ".gen_tests_" in rel:
-            continue  # never touch task0c protected test artifacts
-        disk_path = target_src_dir / rel
-        if not disk_path.exists():
-            continue
-        disk_text = disk_path.read_text(encoding="utf-8")
-        merged = _merge_fills_preserving_existing(disk_text, model_text)
-        if merged != disk_text:
-            disk_path.write_text(merged, encoding="utf-8")
-            files_updated += 1
-
-    remaining = _scan_unimplemented_functions(target_src_dir)
-    return {
-        "stubs_total": len(stubs),
-        "stubs_exercised": len(exercised),
-        "files_updated": files_updated,
-        "stubs_remaining": len(remaining),
-    }
+    """Composition shim → application.reconstruct.cleanup_residuals (Phase D)."""
+    return _cleanup_residuals.cleanup_residuals(
+        target_src_dir, project_dir, functional_req, test_files, module_name,
+        deps=_CLEANUP_RESIDUALS_DEPS)
 
 
 def _cmd_phase_c_only(project_dir: Path) -> int:
@@ -4583,36 +4000,8 @@ def _cfg_to_cluster_name(pred: str) -> str:
     return _cluster_plan.cluster_name_for_custom(pred)
 
 
-def _write_build_configs(project_dir: Path, clusters: list, predicate_lines: dict) -> None:
-    lines = [
-        f"# Build configurations — {project_dir.name}",
-        f"# {len(clusters)} cluster(s) derived from source",
-        f"# Generated: {datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S UTC')}",
-        "",
-    ]
-    for c in clusters:
-        lines.append(f"## cluster: {c.name}")
-        if c.env_extra:
-            for k, v in c.env_extra.items():
-                lines.append(f"env: {k} += {v}")
-        else:
-            lines.append("env: (none)")
-        if c.tarpaulin_exclude_files:
-            for pat in c.tarpaulin_exclude_files:
-                lines.append(f"tarpaulin_exclude: {pat}")
-        else:
-            lines.append("tarpaulin_exclude: (none — all files measured)")
-        if c.active_cfg:
-            lines.append(f"active_cfg: {', '.join(c.active_cfg)}")
-        else:
-            lines.append("active_cfg: (default build)")
-        if c.excluded_cfg:
-            lines.append(f"excluded_cfg: {', '.join(c.excluded_cfg)}")
-        gated = sum(predicate_lines.get(p, 0) for p in c.active_cfg)
-        if gated:
-            lines.append(f"gated_lines: ~{gated}")
-        lines.append("")
-    (project_dir / BUILD_CONFIGS_NAME).write_text("\n".join(lines))
+# _write_build_configs → pipeline_core.adapters.workspace_files (imported as _wsfiles).
+_write_build_configs = _wsfiles.write_build_configs
 
 
 # ---------------------------------------------------------------------------
@@ -4938,9 +4327,6 @@ from pipeline_core.domain.generation import (
 )
 from pipeline_core.domain.generation import (
     strip_gen_tests_decl_n as _domain_strip_gen_tests_decl_n,  # noqa: E402
-)
-from pipeline_core.domain.generation import (  # noqa: E402
-    tests_output_number as _tests_output_number,
 )
 
 # P6: the `_Task2Adapter` god-object is dissolved — each TASK-1/TASK-2 generator
@@ -5851,48 +5237,13 @@ _TASK4_DEPS = Task4Deps(
 
 
 def _describe_test_environment() -> str:
-    """Return a prompt-ready description of the cargo subprocess env.
-
-    The pipeline knows which env vars and cfg predicates are set for the
-    test process; the LLM doesn't. Without this signal, the LLM can propose
-    strategies that the pipeline knows can't work — for example writing tests
-    that try to enable a feature whose env var was never set in the parent
-    process. Describe the env factually; let the LLM draw its own implications.
-
-    Generic across projects: only states what IS / IS NOT set + the active
-    test runner. No project-specific reasoning is baked in.
-    """
-    env = _cargo_env()
-
-    # Variables the LLM should always see if present.
-    visible = ("RUSTFLAGS", "CARGO_TERM_COLOR", "RUSTUP_TOOLCHAIN")
-    # Variables whose ABSENCE is informative — std libs commonly gate behavior
-    # on these and cache the lookup at process start, so per-test set_var
-    # doesn't help.
-    notable = ("RUST_BACKTRACE", "RUST_LIB_BACKTRACE", "RUST_LOG")
-
-    lines = [
-        "--- Test environment (cargo subprocess under coverage instrumentation) ---",
-    ]
-    for k in visible:
-        if k in env:
-            lines.append(f"  {k} = {env[k]!r}")
-    unset = [k for k in notable if k not in env]
-    if unset:
-        lines.append(f"  NOT SET in parent process: {', '.join(unset)}")
-        lines.append(
-            "  Code paths whose execution depends on these variables (env-gated "
-            "logging, backtrace capture, etc.) are unreachable from this test run."
-        )
-
-    if _SCOPE.active is not None:
-        active = ", ".join(_SCOPE.active.active_cfg) if _SCOPE.active.active_cfg else "(none)"
-        excluded = ", ".join(_SCOPE.active.excluded_cfg) if _SCOPE.active.excluded_cfg else "(none)"
-        lines.append(f"  active cfg predicates: {active}")
-        lines.append(f"  excluded cfg predicates: {excluded}")
-
-    lines.append("  test runner: `cargo test --test-threads=1` (under cargo-llvm-cov instrumentation)")
-    return "\n".join(lines) + "\n"
+    """Thin shim binding the live cargo env + active cluster cfg; impl in
+    prompts/test_environment.describe_test_environment."""
+    active = _SCOPE.active
+    return _describe_test_environment_impl(
+        _cargo_env(),
+        active.active_cfg if active is not None else None,
+        active.excluded_cfg if active is not None else None)
 
 
 def _crate_name_from_toml(module_dir: Path, fallback: str) -> str:

@@ -11,11 +11,74 @@ domain.
 """
 from __future__ import annotations
 
+import tempfile
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
+
 from pipeline_core.application.reconstruct.fill_rules import is_unimplemented_body
 from pipeline_core.domain.doc_render import condense_doc_attrs, strip_crate_attrs
+from pipeline_core.domain.models import ConstRecord, TypeRecord
 from pipeline_core.domain.rust_fn_headers import fn_headers
 from pipeline_core.domain.rust_idents import contains_fn_decl
 from pipeline_core.domain.rust_scan import is_type_decl_line
+
+
+def public_api_from_source(
+    content: str,
+    *,
+    enumerate_types: Callable[[Path], list[TypeRecord] | None],
+    enumerate_fns: Callable[[Path], list[dict[str, Any]] | None],
+    enumerate_consts: Callable[[Path], list[ConstRecord] | None],
+) -> str:
+    """Render a single Rust source string's public API surface using the syn
+    extractor — no regex on Rust source (Hard Rule). The extractor is path-based,
+    so write the string to a throwaway crate tree and enumerate types / fns /
+    consts over it (injected callables).
+
+    Output mirrors the legacy format: `pub struct Name { f: T, ... }`, `pub enum
+    Name { A, B }`, `pub trait Name`, full pub fn signatures, `pub const NAME: T`.
+    """
+    lines: list[str] = []
+    with tempfile.TemporaryDirectory() as _d:
+        _src = Path(_d) / "src"
+        _src.mkdir()
+        (_src / "lib.rs").write_text(content, encoding="utf-8")
+        _td = Path(_d)
+        types = enumerate_types(_td) or []
+        fns = enumerate_fns(_td) or []            # dicts (engine contract)
+        consts = enumerate_consts(_td) or []
+
+    for t in types:
+        if not t.is_pub:
+            continue
+        if t.kind == "struct":
+            if t.fields:
+                fields = ", ".join(f"{f.name}: {f.ty}" for f in t.fields)
+                lines.append(f"pub struct {t.name}{t.generics} {{ {fields} }}")
+            else:
+                lines.append(f"pub struct {t.name}{t.generics}")
+        elif t.kind == "enum":
+            if t.variants:
+                lines.append(f"pub enum {t.name}{t.generics} {{ {', '.join(t.variants)} }}")
+            else:
+                lines.append(f"pub enum {t.name}{t.generics}")
+        elif t.kind == "trait":
+            lines.append(f"pub trait {t.name}")
+
+    for f in fns:
+        if f.get("is_pub"):
+            # sig_text starts at the `fn`/`unsafe`/`async` keyword (the extractor's sig span
+            # excludes the visibility), so prepend `pub ` to match the API-listing convention.
+            sig = " ".join((f.get("sig_text") or "").split())
+            if sig:
+                lines.append(sig if sig.startswith("pub ") else f"pub {sig}")
+
+    for c in consts:
+        if c.is_pub:
+            lines.append(f"pub const {c.name}: {c.ty}")
+
+    return "\n".join(lines)
 
 
 def condense_rust_to_signatures(source: str, filename: str = "code.rs") -> str:

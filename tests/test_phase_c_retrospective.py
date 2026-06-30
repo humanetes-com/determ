@@ -10,8 +10,35 @@ from __future__ import annotations
 from pipeline_core.application.reconstruct.retrospective import (
     PhaseCRetroDeps,
     diagnose_phase_c,
+    whole_tree_retrospective,
 )
 from pipeline_core.prompts.retrospective import build_phase_c_retro_prompt
+
+
+def _wtr(answer: str, *, raises: bool = False) -> str:
+    def ask(_p: str) -> str:
+        if raises:
+            raise RuntimeError("boom")
+        return answer
+    return whole_tree_retrospective(
+        "error[E0277]: bad", [{"iter": 1, "summary": "x", "error_sig": "E0277"}],
+        name="gfl", ask_retrospective=ask, log=lambda _m: None, fix_err_cap=2000)
+
+
+def test_whole_tree_retro_parses_category_and_guidance() -> None:
+    assert _wtr("CATEGORY: UNSIZED_RETURN\nGUIDANCE: return &T instead") == (
+        "[UNSIZED_RETURN] return &T instead")
+
+
+def test_whole_tree_retro_empty_excerpt_short_circuits() -> None:
+    assert whole_tree_retrospective(
+        "   ", [], name="x", ask_retrospective=lambda _p: "X",
+        log=lambda _m: None, fix_err_cap=10) == ""
+
+
+def test_whole_tree_retro_llm_error_and_empty() -> None:
+    assert _wtr("", raises=True) == ""        # exception → ""
+    assert _wtr("   ") == ""                    # empty content → ""
 
 
 def _deps(answer=None, raises=False):

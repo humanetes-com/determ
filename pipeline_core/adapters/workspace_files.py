@@ -11,12 +11,16 @@ sink at the composition root), so these functions take no logger argument.
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 
 from pipeline_core.adapters.artifacts import load_manifest
 from pipeline_core.adapters.discovery import TEST_DIR_NAMES
+from pipeline_core.domain.models import BuildCluster
 from pipeline_core.domain.rust_scan import replace_elision_placeholders
 from pipeline_core.domain.workspace_layout import (
+    BUILD_CONFIGS_NAME,
     LOCKED_MODULES_DIR,
     SOURCE_EXTENSIONS,
 )
@@ -184,3 +188,39 @@ def delete_source_files(project_dir: Path, manifest_path: Path,
                     _log(f"  Deleted ghost file (untracked by manifest): {rel}")
 
     _log(f"  Deleted {deleted} generated source file(s).")
+
+
+def write_build_configs(project_dir: Path, clusters: Sequence[BuildCluster],
+                        predicate_lines: dict[str, int]) -> None:
+    """Write the per-cluster build-config dump (env_extra / cfg / tarpaulin
+    excludes / gated-line estimate) to ``build_configs.md`` — a human-readable
+    record of the cluster plan derived from source."""
+    lines = [
+        f"# Build configurations — {project_dir.name}",
+        f"# {len(clusters)} cluster(s) derived from source",
+        f"# Generated: {datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S UTC')}",
+        "",
+    ]
+    for c in clusters:
+        lines.append(f"## cluster: {c.name}")
+        if c.env_extra:
+            for k, v in c.env_extra.items():
+                lines.append(f"env: {k} += {v}")
+        else:
+            lines.append("env: (none)")
+        if c.tarpaulin_exclude_files:
+            for pat in c.tarpaulin_exclude_files:
+                lines.append(f"tarpaulin_exclude: {pat}")
+        else:
+            lines.append("tarpaulin_exclude: (none — all files measured)")
+        if c.active_cfg:
+            lines.append(f"active_cfg: {', '.join(c.active_cfg)}")
+        else:
+            lines.append("active_cfg: (default build)")
+        if c.excluded_cfg:
+            lines.append(f"excluded_cfg: {', '.join(c.excluded_cfg)}")
+        gated = sum(predicate_lines.get(p, 0) for p in c.active_cfg)
+        if gated:
+            lines.append(f"gated_lines: ~{gated}")
+        lines.append("")
+    (project_dir / BUILD_CONFIGS_NAME).write_text("\n".join(lines))
