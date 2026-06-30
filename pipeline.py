@@ -12,7 +12,6 @@ import importlib
 import json
 import os
 import shlex
-import shutil
 import subprocess
 import sys
 import threading
@@ -60,6 +59,7 @@ from pipeline_core.adapters.augment_engine import CargoAugmentEngine, StaticRust
 from pipeline_core.adapters.augment_store import FileAugmentStore
 from pipeline_core.adapters.build_script import CargoBuildScriptReader
 from pipeline_core.adapters.cargo import CargoEnv
+from pipeline_core.adapters.cargo import run_build_check as _cargo_run_build_check
 from pipeline_core.adapters.cluster_merge import ClusterMerger
 from pipeline_core.adapters.cluster_pruning import prune_redundant_clusters as _prune_redundant_clusters
 from pipeline_core.adapters.commit_gate import CallableCommitGate
@@ -136,6 +136,9 @@ from pipeline_core.adapters.reconstruct_roles import (
 )
 from pipeline_core.adapters.run_registry import FileRunRegistry
 from pipeline_core.adapters.structure import CliStructureReader
+from pipeline_core.adapters.structure import fn_name_counts as _fn_name_counts
+from pipeline_core.adapters.structure import load_baked_clusters as _load_baked_clusters_impl
+from pipeline_core.adapters.structure import source_hash as _source_hash_impl
 from pipeline_core.adapters.task2_roles import (
     CargoBackendAdapter,
     ClustersAdapter,
@@ -235,7 +238,11 @@ from pipeline_core.application.reconstruct.test_locator import (
     find_tests_referencing_fn as _find_tests_referencing_fn,
 )
 from pipeline_core.application.strip_bake import (
+    BakeArtifactsDeps,
     StripBakeDeps,
+)
+from pipeline_core.application.strip_bake import (
+    bake_skeleton_artifacts as _bake_skeleton_artifacts_impl,
 )
 from pipeline_core.application.strip_bake import (
     strip_and_bake_module as _strip_and_bake_module,
@@ -405,19 +412,19 @@ from pipeline_core.domain.rust_fn_headers import (
 )
 from pipeline_core.domain.rust_idents import (
     camelcase_type_names,
-    crate_lint_attr_args,
     defined_type_names,
-    fn_reference_counts,
     use_path_requirement_gaps,
 )
-from pipeline_core.domain.rust_macros import macro_definitions
+from pipeline_core.domain.rust_idioms import no_std_invariant_note
+from pipeline_core.domain.rust_macros import (
+    collect_crate_macros as _collect_crate_macros_pure,
+)
 from pipeline_core.domain.rust_macros import (
     proc_macro_fallback_requirements as _proc_macro_fallback_requirements,
 )
 from pipeline_core.domain.rust_scan import (
     count_test_attrs,
     find_mod_opener,
-    has_no_std_attr,
     has_nonempty_test_fn,
     is_structural_brace_line,
     strip_line_block_comments,
@@ -1231,6 +1238,9 @@ def _start_audit_thread() -> None:
 # (for large files where whole-file rewrites truncate). See generate_fix_loop.
 
 
+from pipeline_core.domain.generation import (  # noqa: E402
+    derive_gentest_prelude as _derive_gentest_prelude_pure,
+)
 from pipeline_core.domain.generation import extract_test_mod  # noqa: E402
 from pipeline_core.domain.generation import (  # noqa: E402
     inject_gen_prelude_imports as _inject_gen_prelude_imports,
@@ -1582,27 +1592,9 @@ def clean_state(root: Path, project_dir: Path, manifest_path: Path,
 # ---------------------------------------------------------------------------
 
 def run_build_check(project_dir: Path, build_cmd: str) -> tuple[bool, str]:
-    """
-    Run the compile-only check command in project_dir.
-    Returns (success, output) where output contains stderr + stdout on failure.
-    """
-    env = _cargo_env()
-
-    try:
-        result = subprocess.run(
-            _parse_cmd(build_cmd),
-            cwd=project_dir,
-            capture_output=True,
-            text=True,
-            timeout=BUILD_TIMEOUT,
-            env=env,
-        )
-        output = (result.stdout + "\n" + result.stderr).strip()
-        return result.returncode == 0, output
-    except subprocess.TimeoutExpired:
-        return False, f"Build check timed out after {BUILD_TIMEOUT}s."
-    except FileNotFoundError as e:
-        return False, f"Build check command not found: {e}"
+    # C7: relocated to adapters.cargo.run_build_check; shim binds env + timeout.
+    return _cargo_run_build_check(project_dir, build_cmd,
+                                  cargo_env=_cargo_env, build_timeout=BUILD_TIMEOUT)
 
 
 # ---------------------------------------------------------------------------
@@ -1755,24 +1747,8 @@ _pcretry.configure(max_retries=MAX_RETRIES)
 
 def _filter_tests_for_cluster(test_files: list[tuple[str, str]],
                               cluster: "BuildCluster | None") -> list[tuple[str, str]]:
-    """File-level cluster test filter.
-
-    For each test file, evaluate any top-level `#![cfg(...)]` against the
-    cluster's cfg-set. If the predicate is decidably false, drop the file.
-    Files with no top-level cfg, or with undecidable predicates, are kept
-    (safe default — better to include than wrongly exclude).
-    """
-    if cluster is None:
-        return test_files
-    cfg_true_set = {_normalize_cfg_pred(p) for p in cluster.cfg_true}
-    cfg_false_set = {_normalize_cfg_pred(p) for p in cluster.cfg_false}
-
-    out: list[tuple[str, str]] = []
-    for rel, content in test_files:
-        if _file_top_cfg_excluded(content, cfg_true_set, cfg_false_set):
-            continue
-        out.append((rel, content))
-    return out
+    # C4: relocated to cluster_membership.filter_tests_for_cluster (pure).
+    return _membership.filter_tests_for_cluster(test_files, cluster)
 
 
 def _normalize_cfg_pred(p: str) -> str:
@@ -1842,199 +1818,18 @@ def _extract_skeleton(input_dir: Path, output_dir: Path,
 
 
 def _compute_fn_name_counts(src_dir: Path) -> dict[str, int]:
-    """Count word-boundary fn-name references across every .rs file under
-    `src_dir`. Used to build leaf-first fill ordering for Phase C.
-
-    Caller is responsible for passing a directory that contains real source
-    (typically the live project_dir/src/ BEFORE strip). Result is a dict
-    `{fn_name: ref_count}` that gets serialised to disk so Phase C never
-    needs to re-read source after strip.
-    """
-    text_parts: list[str] = []
-    if not src_dir.exists():
-        return {}
-    for p in src_dir.rglob("*.rs"):
-        try:
-            text_parts.append(p.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-    text = "\n".join(text_parts)
-    if not text:
-        return {}
-    # P7: the `fn <name>` declaration scan + per-name `\b<name>\b` reference
-    # count are now a pure identifier tokeniser (byte-equivalent), no regex.
-    return fn_reference_counts(text)
+    # C5: relocated to adapters.structure.fn_name_counts.
+    return _fn_name_counts(src_dir)
 
 
-def _bake_skeleton_artifacts(
-    project_dir: Path, module_name: str,
-) -> dict:
-    """Run BEFORE strip while the live source is still on disk.
-
-    Discovers clusters, prunes redundant ones, then for each cluster:
-      - extracts the skeleton (signatures + types + macros, bodies →
-        `unimplemented!()`) to `.skeleton/{cluster}/`
-      - computes fn-name reference counts and writes them to
-        `.skeleton/{cluster}/_leaf_order.json`
-
-    Cluster metadata is saved to `.skeleton/_clusters.json` so TASK 2 can
-    rehydrate clusters post-strip without re-scanning source.
-
-    Per Hard Rule 11: this is the ONLY place pipeline code is allowed to
-    read the original source. After strip, every downstream phase reads
-    `.skeleton/` artefacts only.
-
-    Returns {'ok': bool, 'clusters': list[str], 'reason': str}.
-    """
-    skel_root = project_dir / ".skeleton"
-    skel_root.mkdir(parents=True, exist_ok=True)
-
-    src_dir = project_dir / "src"
-    if not src_dir.exists() or not any(src_dir.rglob("*.rs")):
-        return {"ok": False, "clusters": [],
-                "reason": f"no source at {src_dir} — strip already happened?"}
-
-    # Cluster discovery on the live source (Principle 1: deterministic).
-    try:
-        clusters = task0_cfg_scan(project_dir)
-    except Exception as e:
-        return {"ok": False, "clusters": [], "reason": f"task0_cfg_scan: {e}"}
-    if not clusters:
-        clusters = [BuildCluster(
-            name="default", env_extra={}, tarpaulin_exclude_files=[],
-            excluded_cfg=[], active_cfg=[], prompt_nightly_rule="",
-            is_default=True,
-        )]
-    clusters = sorted(clusters, key=lambda c: c.name)
-    _log(f"  [bake-skeleton] discovered {len(clusters)} cluster(s): "
-         f"{', '.join(c.name for c in clusters)}")
-
-    cargo_toml = project_dir / "Cargo.toml"
-    clusters = _prune_redundant_clusters(
-        clusters, project_dir,
-        cargo_toml_path=cargo_toml if cargo_toml.exists() else None,
-    )
-    _log(f"  [bake-skeleton] processing {len(clusters)} cluster(s) after pruning: "
-         f"{', '.join(c.name for c in clusters)}")
-
-    name_counts = _compute_fn_name_counts(src_dir)
-    _log(f"  [bake-skeleton] computed reference counts for {len(name_counts)} fn name(s).")
-
-    baked: list[str] = []
-    for cluster in clusters:
-        skeleton_dir = skel_root / cluster.name
-        if skeleton_dir.exists():
-            shutil.rmtree(skeleton_dir)
-        skeleton_dir.mkdir(parents=True, exist_ok=True)
-        # Pass `src_dir` (NOT project_dir) so the extractor can never walk
-        # into prior cluster outputs under `.skeleton/`. Output mirrors
-        # under `skeleton_dir/src/`, matching the runnable-crate layout
-        # Phase A expects.
-        res = _extract_skeleton(src_dir, skeleton_dir / "src", cluster=None)
-        if not res["ok"]:
-            _log(f"  [bake-skeleton] cluster {cluster.name}: extractor FAILED: "
-                 f"{res['stderr']}")
-            return {"ok": False, "clusters": baked,
-                    "reason": f"extract {cluster.name}: {res['stderr']}"}
-        order_path = skeleton_dir / "_leaf_order.json"
-        try:
-            order_path.write_text(json.dumps(name_counts, sort_keys=True),
-                                  encoding="utf-8")
-        except Exception as e:
-            _log(f"  [bake-skeleton] cluster {cluster.name}: leaf-order write failed: {e}")
-        _log(f"  [bake-skeleton] cluster {cluster.name}: {len(res['reports'])} "
-             f"file(s) skeletonised → {skeleton_dir}")
-        baked.append(cluster.name)
-
-    # Save cluster metadata for TASK 2 to rehydrate.
-    try:
-        manifest = {
-            "module": module_name,
-            "clusters": [
-                {
-                    "name": c.name,
-                    "env_extra": dict(c.env_extra),
-                    "tarpaulin_exclude_files": list(c.tarpaulin_exclude_files),
-                    "excluded_cfg": list(c.excluded_cfg),
-                    "active_cfg": list(c.active_cfg),
-                    "prompt_nightly_rule": c.prompt_nightly_rule,
-                    "is_default": c.is_default,
-                    "cfg_true": list(getattr(c, "cfg_true", []) or []),
-                    "cfg_false": list(getattr(c, "cfg_false", []) or []),
-                    "toolchain": getattr(c, "toolchain", None),
-                    "requires_nightly": bool(getattr(c, "requires_nightly", False)),
-                }
-                for c in clusters
-            ],
-        }
-        (skel_root / "_clusters.json").write_text(
-            json.dumps(manifest, indent=2), encoding="utf-8",
-        )
-    except Exception as e:
-        _log(f"  [bake-skeleton] cluster manifest write failed: {e}")
-
-    # Capture each gen_tests sibling's ORIGIN cluster cfg from the live (pre-strip)
-    # decls. task0c stamps the generating cluster's cfg on the `mod gen_tests_N;`
-    # decl; strip then removes the decl and `saved_gen_blocks` keeps only the body,
-    # losing provenance. Without this manifest, downstream propagation re-derives
-    # the gate from the CURRENT cluster (always-active → no protection), so a
-    # nightly-only test (e.g. `request_ref`) leaks into stable/no_core → E0658.
-    # Keyed by sibling stem "{parent_stem}.gen_tests_{n}" → origin cfg ('' = default).
-    try:
-        origin: dict[str, str] = {}
-        for rs in sorted(src_dir.rglob("*.rs")):
-            if _is_gen_tests_file(rs.name):
-                continue
-            try:
-                text = rs.read_text(encoding="utf-8")
-            except OSError:
-                continue
-            for n, cfg in _gen_tests_origin_cfgs(text).items():
-                origin[f"{rs.stem}.gen_tests_{n}"] = cfg
-        (skel_root / "_gen_tests_origin.json").write_text(
-            json.dumps(origin, indent=2, sort_keys=True), encoding="utf-8",
-        )
-        if origin:
-            _log(f"  [bake-skeleton] captured origin cfg for {len(origin)} gen_tests sibling(s).")
-    except Exception as e:
-        _log(f"  [bake-skeleton] gen_tests origin manifest write failed: {e}")
-
-    return {"ok": True, "clusters": baked, "reason": ""}
+def _bake_skeleton_artifacts(project_dir: Path, module_name: str) -> dict:
+    # C5 (Hard Rule 11): relocated to strip_bake.bake_skeleton_artifacts; shim binds deps.
+    return _bake_skeleton_artifacts_impl(project_dir, module_name, _BAKE_ARTIFACTS_DEPS)
 
 
 def _load_baked_clusters(project_dir: Path) -> list["BuildCluster"]:
-    """Rehydrate clusters from `.skeleton/_clusters.json` (written by
-    `_bake_skeleton_artifacts` before strip). Returns [] if absent.
-
-    Replaces every post-strip call to `task0_cfg_scan` — those would need
-    the source tree, which is gone.
-    """
-    path = project_dir / ".skeleton" / "_clusters.json"
-    if not path.exists():
-        return []
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return []
-    out: list[BuildCluster] = []
-    for c in data.get("clusters", []):
-        bc = BuildCluster(
-            name=c.get("name", ""),
-            env_extra=dict(c.get("env_extra", {}) or {}),
-            tarpaulin_exclude_files=list(c.get("tarpaulin_exclude_files", []) or []),
-            excluded_cfg=list(c.get("excluded_cfg", []) or []),
-            active_cfg=list(c.get("active_cfg", []) or []),
-            prompt_nightly_rule=c.get("prompt_nightly_rule", "") or "",
-            is_default=bool(c.get("is_default", False)),
-        )
-        # cfg_true / cfg_false / toolchain are read-only @properties derived
-        # from active_cfg, excluded_cfg, and requires_nightly. They're written
-        # into the manifest for human readability but must not be assigned
-        # back onto the cluster.
-        if c.get("requires_nightly"):
-            bc.requires_nightly = True
-        out.append(bc)
-    return out
+    # C5: relocated to adapters.structure.load_baked_clusters.
+    return _load_baked_clusters_impl(project_dir)
 
 
 def _load_baked_leaf_order(project_dir: Path, cluster_name: str) -> dict[str, int]:
@@ -2162,15 +1957,7 @@ def _annotate_file_view(file_text: str, target_fn: str) -> str:
 
 
 def _detect_crate_no_std_invariant(src_dir: Path) -> str:
-    """Return a no_std-aware invariant string if the crate's lib.rs
-    declares `#![no_std]`. Otherwise empty.
-
-    Crate-level rather than cluster-level: anyhow is `#![no_std]` by
-    default with `extern crate std` conditionally enabled via the
-    `std` feature. Even with `std` enabled, `format!`, `vec!`, etc.
-    are NOT auto-imported in a no_std crate root — they must be
-    pulled in explicitly. The model trips over this every time.
-    """
+    # C7: pure decision in domain.rust_idioms.no_std_invariant_note; shim reads lib.rs head.
     lib_rs = src_dir / "src" / "lib.rs" if (src_dir / "src").exists() else src_dir / "lib.rs"
     if not lib_rs.exists():
         return ""
@@ -2178,45 +1965,18 @@ def _detect_crate_no_std_invariant(src_dir: Path) -> str:
         head = lib_rs.read_text(encoding="utf-8")[:4000]
     except Exception:
         return ""
-    if not has_no_std_attr(head):
-        return ""
-    return (
-        "crate is #![no_std]. `format!`, `vec!`, `print!`, `println!` "
-        "are NOT in scope by default — even when `feature = \"std\"` is "
-        "enabled. If you need to produce a String, prefer passing the "
-        "Display value directly (most APIs take `M: Display` and don't "
-        "need a String at all). Only if you genuinely need allocation, "
-        "use `alloc::format!` after `use alloc::format;` or "
-        "`crate::__private::format` if the crate provides it."
-    )
+    return no_std_invariant_note(head)
 
 
 def _collect_crate_macros(src_dir: Path, max_chars: int = max(6_000, SINGLE_CALL_CHAR_LIMIT // 25)) -> str:  # Plan 9 F1: budget-derived (was 6000)
-    """Extract `macro_rules!` blocks from every .rs file in `src_dir`.
-
-    Returned as a compact section the model can scan to understand how
-    user-facing macros invoke internal helpers (the most common reason a
-    private fn has no direct test-name match).
-    """
-    macros: list[tuple[str, str]] = []
+    # C7: macro extraction in domain.rust_macros.collect_crate_macros; shim reads the .rs files.
+    files: list[tuple[str, str]] = []
     for p in sorted(src_dir.rglob("*.rs")):
         try:
-            text = p.read_text(encoding="utf-8")
+            files.append((p.name, p.read_text(encoding="utf-8")))
         except Exception:
             continue
-        for md in macro_definitions(text):
-            if not md.balanced:  # original `if depth != 0: continue`
-                continue
-            # When `#[macro_export]` precedes the decl, include it in the block
-            # (the old regex captured it via the optional leading group).
-            block = text[md.export_start:md.body_close + 1]
-            macros.append((p.name, f"// from {p.name}\n{block}"))
-    if not macros:
-        return ""
-    joined = "\n\n".join(b for _, b in macros)
-    if len(joined) > max_chars:
-        joined = joined[:max_chars] + "\n... (macros truncated)"
-    return joined
+    return _collect_crate_macros_pure(files, max_chars)
 
 
 from pipeline_core.application.reconstruct.scheduling import (  # noqa: E402
@@ -3014,25 +2774,8 @@ def _cluster_filter_type_methods(
     records: list[TypeRecord],
     cluster: "BuildCluster | None",
 ) -> list[TypeRecord]:
-    """Drop methods whose cfg is excluded by `cluster` so TYPES_IN_SCOPE
-    advertises only what compiles here (Hard Rule 8). A method is kept unless
-    one of its cfg predicates evaluates definitively False; undecidable
-    predicates are kept (conservative — matches _fn_belongs_to_cluster).
-    Fields/variants carry no cfg today and pass through unchanged."""
-    if cluster is None:
-        return records
-    cfg_true = set(cluster.cfg_true)
-    cfg_false = set(cluster.cfg_false)
-    out: list[TypeRecord] = []
-    for r in records:
-        kept = tuple(
-            m for m in r.methods
-            if not any(_eval_cfg_pred(p, cfg_true, cfg_false) is False
-                       for p in m.cfg_predicates)
-        )
-        out.append(dataclasses.replace(r, methods=kept)
-                   if len(kept) != len(r.methods) else r)
-    return out
+    # C4: relocated to cluster_membership.cluster_filter_type_methods (pure).
+    return _membership.cluster_filter_type_methods(records, cluster)
 
 
 
@@ -3222,58 +2965,21 @@ def _collect_impl_blocks_for_cluster(
     target_src_dir: Path,
     cluster: "BuildCluster | None",
 ) -> list[ImplBlock] | None:
-    """Cluster-aware variant of `_collect_impl_blocks`. A block is included
-    iff at least one of its STUB members is active under this cluster's
-    cfg-set. Stub members not active in the cluster are dropped from
-    `stub_members` so the per-impl prompt never asks the model to fill
-    something that wouldn't compile in this cluster anyway."""
-    blocks = _collect_impl_blocks(target_src_dir)
-    if blocks is None:
-        return None
-    if cluster is None:
-        return blocks
-    out: list[ImplBlock] = []
-    for b in blocks:
-        kept_stubs = tuple(
-            m for m in b.stub_members
-            if _fn_belongs_to_cluster(
-                target_src_dir, b.file, m.fn_name, cluster,
-                fn_cfg_predicates=list(m.cfg_predicates))
-        )
-        if not kept_stubs:
-            continue
-        out.append(dataclasses.replace(b, stub_members=kept_stubs))
-    return out
+    # C4: relocated to cluster_membership; shim injects extractor + fn_belongs.
+    return _membership.collect_impl_blocks_for_cluster(
+        target_src_dir, cluster,
+        collect_impl_blocks=_collect_impl_blocks, fn_belongs=_fn_belongs_to_cluster)
 
 
 def _scan_unimplemented_records_for_cluster(
     target_src_dir: Path,
     cluster: "BuildCluster | None",
 ) -> list[dict] | None:
-    """Cluster-aware variant of _scan_unimplemented_records.
-
-    Returns records filtered to fns whose file/fn cfg evaluates true for
-    `cluster`. Returns None if the extractor binary isn't available —
-    callers should fall back to _scan_unimplemented_for_cluster (tuple form).
-    """
-    recs = _scan_unimplemented_records(target_src_dir)
-    if recs is None:
-        return None
-    if cluster is None:
-        return recs
-    out: list[dict] = []
-    skipped = 0
-    for r in recs:
-        if _fn_belongs_to_cluster(
-                target_src_dir, r["file"], r["fn_name"], cluster,
-                fn_cfg_predicates=list(r.get("cfg_predicates") or [])):
-            out.append(r)
-        else:
-            skipped += 1
-    if skipped:
-        _log(f"  [phase-c/per-fn] cluster {cluster.name}: skipped "
-             f"{skipped} stub(s) not active in this cluster's cfg-set.")
-    return out
+    # C4: relocated to cluster_membership; shim injects extractor + fn_belongs + log.
+    return _membership.scan_unimplemented_records_for_cluster(
+        target_src_dir, cluster,
+        scan_records=_scan_unimplemented_records, fn_belongs=_fn_belongs_to_cluster,
+        log=_log)
 
 
 # ---------------------------------------------------------------------------
@@ -3523,24 +3229,11 @@ _write_build_configs = _wsfiles.write_build_configs
 # ---------------------------------------------------------------------------
 
 def _source_hash(project_dir: Path) -> str:
-    """Hash of Cargo.toml + src/*.rs (gen_tests artifacts stripped) + test files.
-    Shared across all phases — if source changes, all phase hashes become stale."""
-    parts: list[str] = []
-    cargo = project_dir / "Cargo.toml"
-    if cargo.exists():
-        parts.append(cargo.read_text(errors="replace"))
-    for p in sorted((project_dir / "src").glob("*.rs")) if (project_dir / "src").exists() else []:
-        # Skip gen_tests sibling files entirely — pipeline-generated content.
-        if _is_gen_tests_sibling_name(p.name):
-            continue
-        with suppress(Exception):
-            parts.append(_strip_gen_tests_decls(p.read_text(errors="replace")))
-    for p in sorted(project_dir.rglob("*.rs")):
-        rel = str(p.relative_to(project_dir))
-        if "tests/" in rel or rel.startswith("tests"):
-            with suppress(Exception):
-                parts.append(p.read_text(errors="replace")[:500])
-    return hashlib.sha256("".join(parts).encode()).hexdigest()[:16]
+    # C5: relocated to adapters.structure.source_hash; shim injects the gen_tests helpers.
+    return _source_hash_impl(
+        project_dir,
+        is_gen_tests_sibling_name=_is_gen_tests_sibling_name,
+        strip_gen_tests_decls=_strip_gen_tests_decls)
 
 
 # Slice 9: the pipeline_state.md store moved to pipeline_core/adapters/state.py
@@ -4829,39 +4522,8 @@ def _is_gen_tests_decl_only_src(content: str) -> bool:
 
 
 def _cluster_cfg_attr(cluster) -> str:
-    """Return the cfg predicate string that gates code to this cluster.
-
-    Each active cfg `N` becomes `any(N, feature = "N")` (FR-032): a cluster may
-    be switched on by either `--cfg N` (RUSTFLAGS) or `--features N`, and this
-    gate must be true under whichever form the cluster uses. Multiple flags
-    combine via `all(...)`.
-
-    The default (stable) cluster is gated by the NEGATION of every other
-    cluster's flags: stable's gen_tests were only ever validated under the
-    default build, and ungated they compile under nightly's cfg-set, where
-    they can break that cluster's harness (observed live: nightly task0c
-    aborted at 0% on stable's siblings). No other clusters → no gate.
-    """
-    if cluster is None:
-        return ""
-    if getattr(cluster, "is_default", True):
-        other_flags: set[str] = set()
-        for c in _SCOPE.all:
-            if c is cluster or getattr(c, "is_default", True):
-                continue
-            other_flags.update(getattr(c, "active_cfg", []) or [])
-        if not other_flags:
-            return ""
-        terms = [t for f in sorted(other_flags)
-                 for t in (f, f'feature = "{f}"')]
-        return "not(any(" + ", ".join(terms) + "))"
-    flags = list(getattr(cluster, "active_cfg", []) or [])
-    if not flags:
-        return ""
-    terms = [f'any({f}, feature = "{f}")' for f in flags]
-    if len(terms) == 1:
-        return terms[0]
-    return "all(" + ", ".join(terms) + ")"
+    # C4: relocated to cluster_membership.cluster_cfg_attr; shim passes _SCOPE.all.
+    return _membership.cluster_cfg_attr(cluster, _SCOPE.all)
 
 
 _CLUSTER_SPECIFIC_SYMS_CACHE: dict[str, frozenset[str]] = {}
@@ -4901,16 +4563,12 @@ def _cluster_gate_for_sibling(cluster, source_text: str, uncov_lines,
     compile if shared ungated into that cluster's harness. So keep the gate when
     `sibling_body` references any cluster-specific symbol — only a body that is
     both line-agnostic AND symbol-agnostic is shared."""
-    base_gate = _cluster_cfg_attr(cluster)
-    if not base_gate or not getattr(cluster, "is_default", False):
-        return base_gate
+    # C4: relocated to cluster_membership.cluster_gate_for_sibling; shim binds
+    # _SCOPE.all + a LAZY cluster-specific-symbols provider (extractor + cache).
     contexts = [_cfg.CfgSet.of(cfg_true=c.cfg_true, cfg_false=c.cfg_false) for c in _SCOPE.all]
-    if _cfg.lines_are_cluster_specific(source_text, set(uncov_lines or ()), contexts):
-        return base_gate
-    if _cfg.body_uses_cluster_specific_symbol(
-            sibling_body, _cluster_specific_symbols(project_dir, contexts)):
-        return base_gate   # body touches a cluster-gated symbol → must stay gated
-    return ""   # cluster- AND symbol-agnostic → shareable across clusters
+    return _membership.cluster_gate_for_sibling(
+        cluster, source_text, uncov_lines, sibling_body, _SCOPE.all,
+        lambda: _cluster_specific_symbols(project_dir, contexts))
 
 
 
@@ -4918,30 +4576,9 @@ def _propagate_or_quarantine_sibling(
     gt: Path, origin_manifest: dict, parent_stem: str, pass_n: int,
     log_fn=None, tag: str = "",
 ) -> bool:
-    """R9.6: the origin manifest is authoritative for which gen_tests siblings are
-    legitimate. Returns True if `gt` should be propagated (it is declared in a
-    non-empty manifest, OR the manifest is empty/absent → legacy pre-bake run).
-
-    If the manifest is NON-empty and this sibling is absent from it, it was never
-    declared pre-strip — i.e. never coverage-validated by task0c. Resurrecting it
-    under a guessed cfg gate is the latent cluster-leak class (a nightly-only orphan
-    would E0658 in a stable cluster). Quarantine it to `.rs.broken` and return False.
-    """
-    key = f"{parent_stem}.gen_tests_{pass_n}"
-    if origin_manifest and key not in origin_manifest:
-        if not gt.name.endswith(".broken"):
-            broken = gt.with_name(gt.name + ".broken")
-            try:
-                gt.rename(broken)
-                if log_fn:
-                    log_fn(f"  {tag} [skeleton-C] ⚠️  orphan gen_tests sibling "
-                           f"'{gt.name}' absent from origin manifest (undeclared "
-                           f"pre-strip) — quarantined → {broken.name}, not propagated.")
-            except OSError as e:
-                if log_fn:
-                    log_fn(f"  {tag} [skeleton-C] orphan quarantine failed {gt.name}: {e}")
-        return False
-    return True
+    # C4: relocated verbatim to cluster_membership.propagate_or_quarantine_sibling.
+    return _membership.propagate_or_quarantine_sibling(
+        gt, origin_manifest, parent_stem, pass_n, log_fn, tag)
 
 
 
@@ -5023,41 +4660,12 @@ def _test_augmentor_factory() -> TestAugmentor:
 
 
 def _derive_gentest_prelude(project_dir: Path) -> tuple[str, str]:
-    """Derive gen_tests allow attributes and prelude imports from project source — no LLM.
-
-    Reads lib.rs/main.rs for crate-level #![deny/forbid] lints and #![no_std].
-    cargo test always links std even for no_std crates, so prelude always uses std:: paths.
-
-    Returns (allow_line, prelude_imports_block).
-    """
-    # Base lints to always allow — generated test code can't control these.
-    allow_lints: set[str] = {"unused", "clippy::all", "non_snake_case", "unreachable_patterns"}
-
+    # C12: pure logic in domain.generation.derive_gentest_prelude; shim reads lib/main.rs.
     lib_rs = project_dir / "src" / "lib.rs"
     if not lib_rs.exists():
         lib_rs = project_dir / "src" / "main.rs"
-
-    if lib_rs.exists():
-        text = lib_rs.read_text(encoding="utf-8")
-        # Collect all crate-level deny/forbid lints → gen_tests must allow them.
-        for args in crate_lint_attr_args(text):
-            for lint in args.split(","):
-                allow_lints.add(lint.strip())
-
-    allow_line = f"#[allow({', '.join(sorted(allow_lints))})]"
-
-    # cargo test always has std available (test harness links std) even in no_std crates.
-    # Pre-inject the most commonly missing items so the LLM doesn't need to guess imports.
-    prelude_lines = [
-        "use std::string::{String, ToString};",
-        "use std::vec::Vec;",
-        "use std::boxed::Box;",
-        "use std::format;",
-        "use std::error::Error as StdError;",
-    ]
-    prelude_block = "\n    ".join(prelude_lines)
-
-    return allow_line, prelude_block
+    text = lib_rs.read_text(encoding="utf-8") if lib_rs.exists() else ""
+    return _derive_gentest_prelude_pure(text)
 
 
 def task0c_augment_module(
@@ -5295,6 +4903,19 @@ _CLUSTER_AUGMENTOR = ClusterAugmentor(
     telemetry=_TELEMETRY, scope=_SCOPE, store=_AUGMENT_STORE,
     engine=_AUGMENT_ENGINE, gate=CallableCommitGate(_commit_and_mark),
 )
+
+# C5: the pre-strip bake (Hard Rule 11) lives in strip_bake; this binds its
+# pipeline-resident collaborators (cfg scan, cluster pruning, extractor).
+_BAKE_ARTIFACTS_DEPS = BakeArtifactsDeps(
+    log=_log,
+    cfg_scan=task0_cfg_scan,
+    prune_clusters=_prune_redundant_clusters,
+    fn_name_counts=_fn_name_counts,
+    extract_skeleton=_extract_skeleton,
+    is_gen_tests_file=_is_gen_tests_file,
+    gen_tests_origin_cfgs=_gen_tests_origin_cfgs,
+)
+
 
 # C8: the standalone --phase-*-only / --skeleton-backend handlers live in the
 # orchestrator; this binds them to the resident pipeline shims.

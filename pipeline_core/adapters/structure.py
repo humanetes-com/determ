@@ -6,12 +6,97 @@ constructs it once from the `Extractor` adapter and injects it; tests inject a f
 """
 from __future__ import annotations
 
+import hashlib
+import json
+from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from pipeline_core.domain.models import ConstRecord, DispatchFamily, ModRecord, TypeRecord
+from pipeline_core.domain.models import (
+    BuildCluster,
+    ConstRecord,
+    DispatchFamily,
+    ModRecord,
+    TypeRecord,
+)
+from pipeline_core.domain.rust_idents import fn_reference_counts
 from pipeline_core.ports import Extractor
+
+
+def fn_name_counts(src_dir: Path) -> dict[str, int]:
+    """`{fn_name: ref_count}` across every .rs under `src_dir` (word-boundary
+    reference count, regex-free). Pass a dir holding real source (the live
+    project_dir/src BEFORE strip) — the result is serialised so Phase C never
+    re-reads source after strip."""
+    if not src_dir.exists():
+        return {}
+    parts: list[str] = []
+    for p in src_dir.rglob("*.rs"):
+        try:
+            parts.append(p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+    text = "\n".join(parts)
+    return fn_reference_counts(text) if text else {}
+
+
+def source_hash(
+    project_dir: Path, *,
+    is_gen_tests_sibling_name: Callable[[str], bool],
+    strip_gen_tests_decls: Callable[[str], str],
+) -> str:
+    """16-hex hash of Cargo.toml + src/*.rs (gen_tests artifacts stripped) +
+    test-file heads. Shared across phases — if source changes, all phase hashes
+    go stale. The gen_tests helpers are injected (pipeline-resident)."""
+    parts: list[str] = []
+    cargo = project_dir / "Cargo.toml"
+    if cargo.exists():
+        parts.append(cargo.read_text(errors="replace"))
+    src = project_dir / "src"
+    for p in sorted(src.glob("*.rs")) if src.exists() else []:
+        if is_gen_tests_sibling_name(p.name):
+            continue
+        with suppress(Exception):
+            parts.append(strip_gen_tests_decls(p.read_text(errors="replace")))
+    for p in sorted(project_dir.rglob("*.rs")):
+        rel = str(p.relative_to(project_dir))
+        if "tests/" in rel or rel.startswith("tests"):
+            with suppress(Exception):
+                parts.append(p.read_text(errors="replace")[:500])
+    return hashlib.sha256("".join(parts).encode()).hexdigest()[:16]
+
+
+def load_baked_clusters(project_dir: Path) -> list[BuildCluster]:
+    """Rehydrate clusters from `.skeleton/_clusters.json` (written pre-strip by
+    the bake step). Returns [] if absent. Replaces every post-strip
+    `task0_cfg_scan` call — those need the source tree, which is gone."""
+    path = project_dir / ".skeleton" / "_clusters.json"
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    out: list[BuildCluster] = []
+    for c in data.get("clusters", []):
+        bc = BuildCluster(
+            name=c.get("name", ""),
+            env_extra=dict(c.get("env_extra", {}) or {}),
+            tarpaulin_exclude_files=list(c.get("tarpaulin_exclude_files", []) or []),
+            excluded_cfg=list(c.get("excluded_cfg", []) or []),
+            active_cfg=list(c.get("active_cfg", []) or []),
+            prompt_nightly_rule=c.get("prompt_nightly_rule", "") or "",
+            is_default=bool(c.get("is_default", False)),
+        )
+        # cfg_true / cfg_false / toolchain are read-only @properties derived from
+        # active_cfg / excluded_cfg / requires_nightly — written into the manifest
+        # for readability but must not be assigned back onto the cluster.
+        if c.get("requires_nightly"):
+            bc.requires_nightly = True
+        out.append(bc)
+    return out
 
 
 @dataclass(frozen=True, slots=True)

@@ -15,12 +15,34 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from pipeline_core.domain.rust_idents import crate_lint_attr_args
 from pipeline_core.domain.rust_scan import (
     after_brace_newline,
     find_mod_opener,
     gen_mod_body_start,
     use_imports_symbol,
 )
+
+
+def derive_gentest_prelude(lib_source: str) -> tuple[str, str]:
+    """`(allow_line, prelude_block)` for generated test modules, derived from a
+    crate's lib/main source text (pure — no I/O). Crate-level `#![deny/forbid]`
+    lints are added to a base allow-set so generated tests can't trip them; the
+    std prelude block pre-imports the items the model most often forgets (cargo
+    test always links std, even for `#![no_std]` crates)."""
+    allow_lints: set[str] = {"unused", "clippy::all", "non_snake_case", "unreachable_patterns"}
+    for args in crate_lint_attr_args(lib_source):
+        for lint in args.split(","):
+            allow_lints.add(lint.strip())
+    allow_line = f"#[allow({', '.join(sorted(allow_lints))})]"
+    prelude_block = "\n    ".join([
+        "use std::string::{String, ToString};",
+        "use std::vec::Vec;",
+        "use std::boxed::Box;",
+        "use std::format;",
+        "use std::error::Error as StdError;",
+    ])
+    return allow_line, prelude_block
 
 # Std-prelude `use` statements injected into a generated test module when the
 # block doesn't already import the symbol. (stmt, prefixes-that-satisfy, symbol).

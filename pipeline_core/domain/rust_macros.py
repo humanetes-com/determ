@@ -21,6 +21,25 @@ _MACRO_KW = "macro_rules!"
 _EXPORT_ATTR = "#[macro_export]"
 
 
+def collect_crate_macros(files: list[tuple[str, str]], max_chars: int) -> str:
+    """Compact `macro_rules!` section from `(filename, source)` pairs — each
+    balanced macro block (with a preceding `#[macro_export]` when present),
+    tagged by file, truncated to `max_chars`. Pure: caller supplies the files."""
+    blocks: list[str] = []
+    for name, text in files:
+        for md in macro_definitions(text):
+            if not md.balanced:  # original `if depth != 0: continue`
+                continue
+            block = text[md.export_start:md.body_close + 1]
+            blocks.append(f"// from {name}\n{block}")
+    if not blocks:
+        return ""
+    joined = "\n\n".join(blocks)
+    if len(joined) > max_chars:
+        joined = joined[:max_chars] + "\n... (macros truncated)"
+    return joined
+
+
 def proc_macro_fallback_requirements(
     relevant: list[tuple[str, str]], crate_name: str = "",
 ) -> str:

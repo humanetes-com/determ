@@ -13,11 +13,36 @@ from __future__ import annotations
 import os
 import shlex
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 from ..domain.cluster_scope import ClusterScope
 from ..domain.models import BuildCluster
+from ..domain.test_command import parse_cmd
+
+
+def run_build_check(
+    project_dir: Path,
+    build_cmd: str,
+    *,
+    cargo_env: Callable[[], dict[str, str]],
+    build_timeout: int,
+) -> tuple[bool, str]:
+    """Run the compile-only check command in `project_dir`. Returns (success,
+    output) with stdout+stderr; failure-safe on timeout / missing command."""
+    try:
+        result = subprocess.run(
+            parse_cmd(build_cmd),
+            cwd=project_dir, capture_output=True, text=True,
+            timeout=build_timeout, env=cargo_env(),
+        )
+        output = (result.stdout + "\n" + result.stderr).strip()
+        return result.returncode == 0, output
+    except subprocess.TimeoutExpired:
+        return False, f"Build check timed out after {build_timeout}s."
+    except FileNotFoundError as e:
+        return False, f"Build check command not found: {e}"
 
 
 def base_cargo_env() -> dict[str, str]:

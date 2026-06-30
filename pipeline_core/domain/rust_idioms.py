@@ -16,8 +16,26 @@ negated-class regexes were.
 
 from __future__ import annotations
 
+from pipeline_core.domain.rust_scan import has_no_std_attr
+
 _IDENT_START = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_")
 _ASCII_WORD = _IDENT_START | frozenset("0123456789")  # [A-Za-z0-9_]
+
+_NO_STD_INVARIANT = (
+    "crate is #![no_std]. `format!`, `vec!`, `print!`, `println!` "
+    "are NOT in scope by default — even when `feature = \"std\"` is "
+    "enabled. If you need to produce a String, prefer passing the "
+    "Display value directly (most APIs take `M: Display` and don't "
+    "need a String at all). Only if you genuinely need allocation, "
+    "use `alloc::format!` after `use alloc::format;` or "
+    "`crate::__private::format` if the crate provides it."
+)
+
+
+def no_std_invariant_note(lib_source: str) -> str:
+    """The no_std prompt invariant when `lib_source` (crate root head) declares
+    `#![no_std]`, else "" (pure — caller does the I/O)."""
+    return _NO_STD_INVARIANT if has_no_std_attr(lib_source) else ""
 
 
 def _is_word_char(c: str) -> bool:
