@@ -273,6 +273,7 @@ from pipeline_core.application.workspace_lifecycle import (
 from pipeline_core.application.workspace_lifecycle import (
     wipe_module_sources as _wl_wipe_module_sources,
 )
+from pipeline_core.composition import AugmentRoles as _AugmentRoles
 from pipeline_core.composition import CompositionConfig as _CompositionConfig
 from pipeline_core.composition import FillRoles as _FillRoles
 from pipeline_core.composition import Helpers as _Helpers
@@ -1684,8 +1685,26 @@ _FILL_ROLES = _FillRoles(
 # S23: telemetry as a standalone injected value (so module-level consumers like
 # _CLUSTER_AUGMENTOR bind it without reading _APP — clears the last _APP-to-end blocker).
 _TELEMETRY = LogTelemetry()
+# S25: TASK-0c augmentation cluster — built here (resident collaborators) and
+# injected into build_app so App.run can drive the augment loop. `augment_module`
+# is late-bound (its def is further down this module).
+_AUGMENT_STORE = FileAugmentStore()
+_AUGMENT_ENGINE = CargoAugmentEngine(
+    log=_log, cargo_env=_cargo_env, build_timeout=BUILD_TIMEOUT,
+    default_setup=Path(__file__).parent / "setup.sh",
+    collect_test_files=collect_test_files,
+    augment_module=lambda *a, **k: task0c_augment_module(*a, **k),
+)
+_CLUSTER_AUGMENTOR = ClusterAugmentor(
+    telemetry=_TELEMETRY, scope=_SCOPE, store=_AUGMENT_STORE,
+    engine=_AUGMENT_ENGINE,
+    gate=CallableCommitGate(lambda *a, **k: _commit_and_mark(*a, **k)),
+)
+_AUGMENT_ROLES = _AugmentRoles(
+    store=_AUGMENT_STORE, engine=_AUGMENT_ENGINE, augmentor=_CLUSTER_AUGMENTOR,
+)
 _APP = _build_app(ADAPTERS, SETTINGS, _RUN, _SCOPE, _PORTS, _CFG, _ROLES, _HELPERS,
-                  _STRUCTURE, _FILL_ROLES, _TELEMETRY)
+                  _STRUCTURE, _FILL_ROLES, _TELEMETRY, _AUGMENT_ROLES)
 # S3.5/6/10: these deps are consumed only inside `def` bodies (lazy), so their
 # construction migrates into build_app and they're re-exported here by name.
 _WS_DEPS = _APP.ws_deps
@@ -1693,8 +1712,6 @@ _WS_SCAN_DEPS = _APP.ws_scan_deps
 _VALIDATOR_DEPS = _APP.validator_deps
 # #23: build.rs cfg authority — prunes phantom clusters from source `#[cfg]` atoms.
 _BUILD_SCRIPT_READER = CargoBuildScriptReader()
-# P6: TASK 0c augmentation sentinels (injected into ClusterAugmentor + strip/bake).
-_AUGMENT_STORE = FileAugmentStore()
 
 
 class _LateStructure:
@@ -4665,19 +4682,8 @@ _REQUIREMENTS_PHASE = _APP.requirements_phase     # S17
 _MODULE_RECONSTRUCTOR = _APP.module_reconstructor # S20
 
 
-# P6: the `_AugmentAdapter` god-object is dissolved — each TASK 0c augmentation
-# role is now a real injected adapter (telemetry/store/engine) or the domain
-# ClusterScope; only the git-global-bound commit-and-mark stays a resident callable
-# behind a focused CommitGate.
-_AUGMENT_ENGINE = CargoAugmentEngine(
-    log=_log, cargo_env=_cargo_env, build_timeout=BUILD_TIMEOUT,
-    default_setup=Path(__file__).parent / "setup.sh",
-    collect_test_files=collect_test_files, augment_module=task0c_augment_module,
-)
-_CLUSTER_AUGMENTOR = ClusterAugmentor(
-    telemetry=_TELEMETRY, scope=_SCOPE, store=_AUGMENT_STORE,
-    engine=_AUGMENT_ENGINE, gate=CallableCommitGate(_commit_and_mark),
-)
+# S25: the TASK-0c augmentation cluster (_AUGMENT_STORE/_AUGMENT_ENGINE/
+# _CLUSTER_AUGMENTOR) is built before _APP and exposed as _APP.augment_roles.
 
 # C5: the pre-strip bake (Hard Rule 11) lives in strip_bake; this binds its
 # pipeline-resident collaborators (cfg scan, cluster pruning, extractor).

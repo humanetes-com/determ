@@ -17,6 +17,8 @@ from pathlib import Path
 
 from pipeline_core.adapters import Adapters
 from pipeline_core.adapters.artifacts import WorkspaceArtifacts, load_api_surface
+from pipeline_core.adapters.augment_engine import CargoAugmentEngine
+from pipeline_core.adapters.augment_store import FileAugmentStore
 from pipeline_core.adapters.coverage import CoverageDeps, CoverageProvider, make_coverage_provider
 from pipeline_core.adapters.failure_journal import FileFailureJournal
 from pipeline_core.adapters.fill_engine_roles import (
@@ -48,6 +50,7 @@ from pipeline_core.adapters.test_runner import CallableTestRunner
 from pipeline_core.adapters.workspace import WorkspaceDeps
 from pipeline_core.adapters.workspace_files import lock_module
 from pipeline_core.adapters.workspace_scan import WorkspaceScanDeps
+from pipeline_core.application.cluster_augment import ClusterAugmentor
 from pipeline_core.application.gen_tests_reattach import ReattachDeps
 from pipeline_core.application.orchestrator import LockDeps
 from pipeline_core.application.reconstruct.failure_analysis import FailureAnalysisStep
@@ -186,6 +189,18 @@ class FillRoles:
 
 
 @dataclass(frozen=True)
+class AugmentRoles:
+    """TASK-0c augmentation cluster (store + cargo engine + the ClusterAugmentor
+    use-case). Constructed pipeline-side (resident collaborators: `collect_test_files`,
+    `task0c_augment_module`, the git-bound commit-gate) and injected into `App` so
+    the eventual `App.run` augment loop sources them from one place (S25)."""
+
+    store: FileAugmentStore
+    engine: CargoAugmentEngine
+    augmentor: ClusterAugmentor
+
+
+@dataclass(frozen=True)
 class App:
     """The wired application: external ports + run-scoped state + boundary
     providers and use-case deps built from them. Grown one S3 slice at a time
@@ -201,6 +216,8 @@ class App:
     structure: CliStructureReader
     # Fill-engine ISP role adapters (S21) — see FillRoles.
     fill_roles: FillRoles
+    # TASK-0c augmentation cluster (S25) — see AugmentRoles.
+    augment_roles: AugmentRoles
     # Migrated use-case deps:
     genesis_audit_deps: GenesisAuditDeps       # TASK-4 genesis audit (S3 slice 1)
     discover_test_cmd_deps: DiscoverTestCommandDeps  # test-command discovery (S3 slice 2)
@@ -234,6 +251,7 @@ def build_app(
     structure: CliStructureReader,
     fill_roles: FillRoles,
     telemetry: LogTelemetry,
+    augment_roles: AugmentRoles,
 ) -> App:
     """Assemble the App from its ports + run-scoped holders + config. Pure wiring
     (no I/O) — the place a test passes fake adapters/ports to get a fake-backed App."""
@@ -311,6 +329,7 @@ def build_app(
         config=config,
         structure=structure,
         fill_roles=fill_roles,
+        augment_roles=augment_roles,
         genesis_audit_deps=GenesisAuditDeps(
             ask=ports.ask, read=read, write=write,
             model=settings.task_models.task4,
