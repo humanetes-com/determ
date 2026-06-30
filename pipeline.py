@@ -39,12 +39,11 @@ from pipeline_core.adapters import workspace as _wsmod
 from pipeline_core.adapters import workspace_files as _wsfiles
 from pipeline_core.adapters.api_surface import ApiSurfaceCapture
 from pipeline_core.adapters.artifacts import (
-    WorkspaceArtifacts,
-    load_api_surface,
-    load_manifest,
+    api_surface_path as _api_surface_path,
 )
 from pipeline_core.adapters.artifacts import (
-    api_surface_path as _api_surface_path,
+    load_api_surface,
+    load_manifest,
 )
 from pipeline_core.adapters.artifacts import (
     load_type_names as _load_type_names,
@@ -63,7 +62,6 @@ from pipeline_core.adapters.cluster_pruning import prune_redundant_clusters as _
 from pipeline_core.adapters.commit_gate import CallableCommitGate
 from pipeline_core.adapters.commit_gate import commit_and_mark as _commit_and_mark_impl
 from pipeline_core.adapters.downstream_api import scan_downstream_api
-from pipeline_core.adapters.failure_journal import FileFailureJournal
 from pipeline_core.adapters.file_constraints import FileConstraintsReader
 from pipeline_core.adapters.fill_engine_roles import (
     CargoFillAdapter,
@@ -121,12 +119,6 @@ from pipeline_core.adapters.model_notes_store import (
 from pipeline_core.adapters.mutation import MutationTester
 from pipeline_core.adapters.phase_c_log import write_phase_c_test_fix_log as _write_phase_c_test_fix_log
 from pipeline_core.adapters.progress import ChunkProgress
-from pipeline_core.adapters.ratchet import BestTreeRatchet
-from pipeline_core.adapters.reconstruct_roles import (
-    CoverageDocsAdapter,
-    DocsMetricsAdapter,
-    FlowAuditAdapter,
-)
 from pipeline_core.adapters.run_registry import FileRunRegistry
 from pipeline_core.adapters.structure import fn_name_counts as _fn_name_counts
 from pipeline_core.adapters.structure import load_baked_clusters as _load_baked_clusters_impl
@@ -145,9 +137,8 @@ from pipeline_core.adapters.task2_roles import (
     SourceScanAdapter,
     WorkspaceAdapter,
 )
-from pipeline_core.adapters.telemetry import JsonlEventEmitter, LogTelemetry
+from pipeline_core.adapters.telemetry import JsonlEventEmitter
 from pipeline_core.adapters.telemetry import emit_per_file_test_overview as _emit_per_file_test_overview
-from pipeline_core.adapters.test_runner import CallableTestRunner
 from pipeline_core.adapters.workspace_lifecycle import clean_state as _clean_state_impl
 from pipeline_core.adapters.workspace_restore import RestoreFromAugmented
 from pipeline_core.adapters.workspace_scan import (
@@ -159,9 +150,6 @@ from pipeline_core.application import test_count as _tc_app
 from pipeline_core.application.cluster_augment import (
     AugmentContext,
     ClusterAugmentor,
-)
-from pipeline_core.application.gen_tests_reattach import (
-    ReattachDeps,
 )
 from pipeline_core.application.generators.task1_synthesizer import (
     LLMTask1Synthesizer,
@@ -181,7 +169,6 @@ from pipeline_core.application.reconstruct import per_fn_retry as _per_fn_retry
 from pipeline_core.application.reconstruct import phase_c_tdd as _phase_c_tdd
 from pipeline_core.application.reconstruct import source_view as _source_view
 from pipeline_core.application.reconstruct import stub_scan as _stub_scan
-from pipeline_core.application.reconstruct.failure_analysis import FailureAnalysisStep
 from pipeline_core.application.reconstruct.failure_diagnosis import (
     classify_phase_c_test_failures as _classify_phase_c_test_failures_impl,
 )
@@ -205,9 +192,6 @@ from pipeline_core.application.reconstruct.impl_blocks import (
 from pipeline_core.application.reconstruct.macro_invariants import (
     compute_cluster_macro_invariants as _compute_cluster_macro_invariants,
 )
-from pipeline_core.application.reconstruct.module_reconstructor import ModuleReconstructor
-from pipeline_core.application.reconstruct.reconstruction_step import ReconstructionStep
-from pipeline_core.application.reconstruct.requirements_phase import RequirementsPhase
 from pipeline_core.application.reconstruct.retrospective import (
     diagnose_phase_c as _diagnose_phase_c,
 )
@@ -1554,6 +1538,11 @@ SKELETON_EXTRACTOR_BIN = Path(__file__).parent / "tools" / "skeleton_extractor" 
 # (CODE_ARCHITECTURE.md §1), so it owns construction; call sites migrate onto ADAPTERS
 # one task at a time (slice 5). Adapters wrap real primitives and never import back here.
 ADAPTERS = build_adapters(SETTINGS, extractor_bin=SKELETON_EXTRACTOR_BIN, model=MODEL)
+# Run a genesis audit every this many total module iterations (across all modules).
+GENESIS_AUDIT_INTERVAL = 5
+# After this many consecutive module iterations with no pass-count improvement,
+# escalate to whole-project context in TASK 2.
+NO_IMPROVEMENT_THRESHOLD = 3
 # Phase 3 S1: the composition factory. main() will route through this; for now it
 # owns the boundary providers (the extractor StructureReader) so subsequent stages
 # repoint call sites + tests onto `_APP.*` (see refactoring.md §Phase 3).
@@ -1576,6 +1565,10 @@ _CFG = _CompositionConfig(
     readme_cap=_README_CAP, profile_cap=_PROFILE_CAP,
     project_context_name=PROJECT_CONTEXT_NAME,
     failed_body_cap=_FAILED_BODY_CAP, fix_err_cap=_FIX_ERR_CAP,
+    coverage_strategy_name=COVERAGE_STRATEGY_NAME,
+    no_improvement_threshold=NO_IMPROVEMENT_THRESHOLD,
+    genesis_audit_interval=GENESIS_AUDIT_INTERVAL,
+    module_plateau_abort=int(os.getenv("MODULE_PLATEAU_ABORT", "10")),
 )
 # Phase 3 S3.5-10: resident pipeline helpers the migrated deps need, late-binding.
 _HELPERS = _Helpers(
@@ -1585,6 +1578,20 @@ _HELPERS = _Helpers(
     extract_and_store_rules=lambda *a, **k: _task4_extract_and_store_rules(*a, **k),
     enumerate_types=lambda *a, **k: _enumerate_types_via_extractor(*a, **k),
     enumerate_fns=lambda *a, **k: _enumerate_fns_via_extractor(*a, **k),
+    git_commit=lambda *a, **k: git_commit(*a, **k),
+    task3=lambda *a, **k: task3(*a, **k),
+    task0b_discovery=lambda *a, **k: task0b_discovery(*a, **k),
+    run_flow_audit=lambda *a, **k: _run_flow_audit(*a, **k),
+    load_model_notes=lambda *a, **k: _load_model_notes(*a, **k),
+    genesis_rules_count=lambda *a, **k: genesis_rules_count(*a, **k),
+    derive_gentest_prelude=lambda *a, **k: _derive_gentest_prelude(*a, **k),
+    is_gen_tests_file=lambda *a, **k: _is_gen_tests_file(*a, **k),
+    gen_tests_siblings=lambda *a, **k: _gen_tests_siblings(*a, **k),
+    load_gen_tests_origin=lambda *a, **k: _load_gen_tests_origin(*a, **k),
+    gen_tests_path=lambda *a, **k: _gen_tests_path(*a, **k),
+    build_gen_tests_decl=lambda *a, **k: _build_gen_tests_decl(*a, **k),
+    cluster_cfg_attr=lambda *a, **k: _cluster_cfg_attr(*a, **k),
+    has_gen_tests_decl=lambda *a, **k: _has_gen_tests_decl(*a, **k),
 )
 # Phase 3 S3.4: TASK-1→4 reconstruction role callables, late-binding (the wrapped
 # fns are defined later in this module; lambdas resolve them at call time).
@@ -1894,7 +1901,7 @@ _MODEL_NOTES_STORE = _FileModelNotesStore(
     fix_err_cap=_FIX_ERR_CAP,
 )
 
-_load_model_notes = _MODEL_NOTES_STORE.load
+_load_model_notes: Callable[..., list[str]] = _MODEL_NOTES_STORE.load
 _save_model_notes = _MODEL_NOTES_STORE.save
 
 
@@ -4137,13 +4144,6 @@ def task1_static_audit(functional_req_path: Path, test_files: list) -> list[str]
 # Genesis audit — detect and resolve contradictions in genesis.md
 # ---------------------------------------------------------------------------
 
-# Run a genesis audit every this many total module iterations (across all modules).
-GENESIS_AUDIT_INTERVAL = 5
-
-# After this many consecutive module iterations with no pass-count improvement,
-# escalate to whole-project context in TASK 2.
-NO_IMPROVEMENT_THRESHOLD = 3
-
 
 # Phase 3 S3 slice 1: genesis-audit deps now CONSTRUCTED in composition.build_app;
 # pipeline re-exports the name so call sites + tests are unchanged.
@@ -4628,13 +4628,8 @@ _TASK0C_DEPS = Task0cDeps(
 )
 
 # P5-S3: deps for the extracted gen_tests reattach block (per-block injection).
-_REATTACH_DEPS = ReattachDeps(
-    log=_log, emit=_emit, derive_gentest_prelude=_derive_gentest_prelude,
-    is_gen_tests_file=_is_gen_tests_file, gen_tests_siblings=_gen_tests_siblings,
-    load_gen_tests_origin=_load_gen_tests_origin, gen_tests_path=_gen_tests_path,
-    build_gen_tests_decl=_build_gen_tests_decl, cluster_cfg_attr=_cluster_cfg_attr,
-    has_gen_tests_decl=_has_gen_tests_decl, cargo_env=_cargo_env,
-)
+# S3.12: ReattachDeps construction migrated into build_app; re-export by name.
+_REATTACH_DEPS = _APP.reattach_deps
 
 # P6: pre-strip API-surface capture — focused adapter, composition-injected.
 _API_SURFACE = ApiSurfaceCapture(
@@ -4661,11 +4656,8 @@ _STRIP_BAKE_DEPS = StripBakeDeps(
     coverage_target=COVERAGE_AUGMENTATION_TARGET,
 )
 
-# P5-S3: deps for the lock/complete transition (dedups 3 call sites).
-_LOCK_DEPS = _orchestrator.LockDeps(
-    commit_and_mark=_commit_and_mark, set_current=_set_current,
-    lock_module=lock_module, git_commit=git_commit, log=_log, sys_exit=sys.exit,
-)
+# S3.11: LockDeps construction migrated into build_app; re-export by name.
+_LOCK_DEPS = _APP.lock_deps
 
 
 # P6: the `_ReconstructAdapter` god-object is dissolved — each reconstruction
@@ -4678,41 +4670,18 @@ _REQUIREMENTS = _APP.requirements
 _GENERATOR = _APP.generator
 _FIXER = _APP.fixer
 _ANALYST = _APP.analyst
-_COVERAGE_DOCS = CoverageDocsAdapter(
-    lambda project_dir, test_files, readme_text, project_profile, clusters: task0b_discovery(
-        project_dir / COVERAGE_STRATEGY_NAME, project_dir, test_files, readme_text,
-        project_profile, clusters=clusters, force=True),
-)
-_FLOW_AUDIT = FlowAuditAdapter(_run_flow_audit)
-_DOCS_METRICS = DocsMetricsAdapter(_load_model_notes, genesis_rules_count)
-
-# P5: reconstruction use-cases — each depends on narrow role slices.
-_FAILURE_JOURNAL = FileFailureJournal()
-_WORKSPACE_ARTIFACTS = WorkspaceArtifacts()
-_TELEMETRY = LogTelemetry()
-_TEST_RUNNER = CallableTestRunner(task3)
-_REQUIREMENTS_PHASE = RequirementsPhase(
-    requirements=_REQUIREMENTS, gate=_PHASE_GATE,
-    telemetry=_TELEMETRY, analyst=_ANALYST,
-    journal=_FAILURE_JOURNAL, artifacts=_WORKSPACE_ARTIFACTS,
-)
-_RECONSTRUCTION_STEP = ReconstructionStep(
-    generator=_GENERATOR, tests=_TEST_RUNNER, fixer=_FIXER,
-    artifacts=_WORKSPACE_ARTIFACTS, telemetry=_TELEMETRY,
-    lock_deps=_LOCK_DEPS, reattach_deps=_REATTACH_DEPS,
-    no_improvement_threshold=NO_IMPROVEMENT_THRESHOLD,
-)
-_FAILURE_ANALYSIS = FailureAnalysisStep(
-    analyst=_ANALYST, journal=_FAILURE_JOURNAL, ratchet=BestTreeRatchet(),
-    artifacts=_WORKSPACE_ARTIFACTS, coverage_docs=_COVERAGE_DOCS,
-    audit=_FLOW_AUDIT, docs=_DOCS_METRICS, telemetry=_TELEMETRY,
-    genesis_audit_interval=GENESIS_AUDIT_INTERVAL,
-)
-_MODULE_RECONSTRUCTOR = ModuleReconstructor(
-    step=_RECONSTRUCTION_STEP, analysis=_FAILURE_ANALYSIS, telemetry=_TELEMETRY,
-    # debt #18: bound the outer repair loop (> NO_IMPROVEMENT_THRESHOLD so escalation acts first).
-    plateau_abort=int(os.getenv("MODULE_PLATEAU_ABORT", "10")),
-)
+# S3.13-20: reconstruction use-case spine migrated into build_app; re-export by name.
+_COVERAGE_DOCS = _APP.coverage_docs               # S15
+_FLOW_AUDIT = _APP.flow_audit                     # S16
+_DOCS_METRICS = _APP.docs_metrics                 # S16
+_FAILURE_JOURNAL = _APP.failure_journal           # S13
+_WORKSPACE_ARTIFACTS = _APP.workspace_artifacts   # S13
+_TELEMETRY = _APP.telemetry                       # S13
+_TEST_RUNNER = _APP.test_runner                   # S14
+_REQUIREMENTS_PHASE = _APP.requirements_phase     # S17
+_RECONSTRUCTION_STEP = _APP.reconstruction_step   # S18
+_FAILURE_ANALYSIS = _APP.failure_analysis         # S19
+_MODULE_RECONSTRUCTOR = _APP.module_reconstructor # S20
 
 
 # P6: the `_AugmentAdapter` god-object is dissolved — each TASK 0c augmentation

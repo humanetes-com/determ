@@ -16,19 +16,33 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from pipeline_core.adapters import Adapters
-from pipeline_core.adapters.artifacts import load_api_surface
+from pipeline_core.adapters.artifacts import WorkspaceArtifacts, load_api_surface
 from pipeline_core.adapters.coverage import CoverageDeps
+from pipeline_core.adapters.failure_journal import FileFailureJournal
+from pipeline_core.adapters.ratchet import BestTreeRatchet
 from pipeline_core.adapters.reconstruct_roles import (
     AnalystAdapter,
+    CoverageDocsAdapter,
+    DocsMetricsAdapter,
     FixerAdapter,
+    FlowAuditAdapter,
     GeneratorAdapter,
     PhaseGateAdapter,
     RequirementsAdapter,
 )
-from pipeline_core.adapters.state import mark_phase, phase_valid
+from pipeline_core.adapters.state import mark_phase, phase_valid, set_current
 from pipeline_core.adapters.structure import CliStructureReader
+from pipeline_core.adapters.telemetry import LogTelemetry
+from pipeline_core.adapters.test_runner import CallableTestRunner
 from pipeline_core.adapters.workspace import WorkspaceDeps
+from pipeline_core.adapters.workspace_files import lock_module
 from pipeline_core.adapters.workspace_scan import WorkspaceScanDeps
+from pipeline_core.application.gen_tests_reattach import ReattachDeps
+from pipeline_core.application.orchestrator import LockDeps
+from pipeline_core.application.reconstruct.failure_analysis import FailureAnalysisStep
+from pipeline_core.application.reconstruct.module_reconstructor import ModuleReconstructor
+from pipeline_core.application.reconstruct.reconstruction_step import ReconstructionStep
+from pipeline_core.application.reconstruct.requirements_phase import RequirementsPhase
 from pipeline_core.application.reconstruct.retrospective import PhaseCRetroDeps
 from pipeline_core.application.tasks.discover_test_command import DiscoverTestCommandDeps
 from pipeline_core.application.tasks.genesis_audit import GenesisAuditDeps
@@ -78,6 +92,10 @@ class CompositionConfig:
     project_context_name: str
     failed_body_cap: int
     fix_err_cap: int
+    coverage_strategy_name: str
+    no_improvement_threshold: int
+    genesis_audit_interval: int
+    module_plateau_abort: int
 
 
 @dataclass(frozen=True)
@@ -119,6 +137,21 @@ class Helpers:
     extract_and_store_rules: Callable[..., bool]
     enumerate_types: Callable[[Path], list[TypeRecord] | None]
     enumerate_fns: Callable[[Path], list[dict[str, object]] | None]
+    # Reconstruction-cluster collaborators (S3 slices 11-20):
+    git_commit: Callable[..., bool]
+    task3: Callable[..., tuple[bool, str]]
+    task0b_discovery: Callable[..., str]
+    run_flow_audit: Callable[[str], None]
+    load_model_notes: Callable[..., list[str]]
+    genesis_rules_count: Callable[..., int]
+    derive_gentest_prelude: Callable[..., tuple[str, str]]
+    is_gen_tests_file: Callable[[str], bool]
+    gen_tests_siblings: Callable[[Path], list[tuple[int, Path]]]
+    load_gen_tests_origin: Callable[[Path], dict[str, str]]
+    gen_tests_path: Callable[[Path, int], Path]
+    build_gen_tests_decl: Callable[..., str]
+    cluster_cfg_attr: Callable[..., str]
+    has_gen_tests_decl: Callable[..., bool]
 
 
 @dataclass(frozen=True)
@@ -152,6 +185,20 @@ class App:
     task0_docs_deps: Task0DocsDeps             # TASK-0 profile/context docs (S3 slice 8)
     phase_c_retro_deps: PhaseCRetroDeps        # phase-C retrospective (S3 slice 9)
     validator_deps: Task2CheckerDeps           # TASK-2 output validators (S3 slice 10)
+    # Reconstruction use-case spine (S3 slices 11-20):
+    lock_deps: LockDeps                        # lock/complete transition (S11)
+    reattach_deps: ReattachDeps                # gen_tests reattach (S12)
+    failure_journal: FileFailureJournal        # (S13)
+    workspace_artifacts: WorkspaceArtifacts    # (S13)
+    telemetry: LogTelemetry                    # (S13)
+    test_runner: CallableTestRunner            # (S14)
+    coverage_docs: CoverageDocsAdapter         # (S15)
+    flow_audit: FlowAuditAdapter               # (S16)
+    docs_metrics: DocsMetricsAdapter           # (S16)
+    requirements_phase: RequirementsPhase      # (S17)
+    reconstruction_step: ReconstructionStep    # (S18)
+    failure_analysis: FailureAnalysisStep      # (S19)
+    module_reconstructor: ModuleReconstructor  # (S20)
 
 
 def build_app(
@@ -167,6 +214,66 @@ def build_app(
     """Assemble the App from its ports + run-scoped holders + config. Pure wiring
     (no I/O) — the place a test passes fake adapters/ports to get a fake-backed App."""
     cfg = config
+    # Role adapters + spine objects are referenced by the phase use-cases below,
+    # so build them as locals first (a field can't reference a sibling field in
+    # the same App(...) call), then thread them into the use-cases.
+    phase_gate = PhaseGateAdapter(roles.phase_valid, roles.commit_and_mark)
+    requirements = RequirementsAdapter(roles.task1, roles.validate_task1_output)
+    generator = GeneratorAdapter(
+        roles.task2_inner_loop, roles.load_original_structure,
+        roles.validate_task2_output, roles.validate_task2_api_conformance,
+    )
+    fixer = FixerAdapter(
+        roles.task2_fix_loop, roles.classify_failure, ports.log,
+        roles.insert_no_run, roles.fix_err_cap,
+    )
+    analyst = AnalystAdapter(
+        roles.task4, roles.validate_task4_output, roles.task_genesis_audit,
+    )
+    telemetry = LogTelemetry()
+    failure_journal = FileFailureJournal()
+    workspace_artifacts = WorkspaceArtifacts()
+    lock_deps = LockDeps(
+        commit_and_mark=roles.commit_and_mark, set_current=set_current,
+        lock_module=lock_module, git_commit=helpers.git_commit, log=ports.log,
+        sys_exit=sys.exit,
+    )
+    reattach_deps = ReattachDeps(
+        log=ports.log, emit=ports.emit, derive_gentest_prelude=helpers.derive_gentest_prelude,
+        is_gen_tests_file=helpers.is_gen_tests_file, gen_tests_siblings=helpers.gen_tests_siblings,
+        load_gen_tests_origin=helpers.load_gen_tests_origin, gen_tests_path=helpers.gen_tests_path,
+        build_gen_tests_decl=helpers.build_gen_tests_decl, cluster_cfg_attr=helpers.cluster_cfg_attr,
+        has_gen_tests_decl=helpers.has_gen_tests_decl, cargo_env=ports.cargo_env,
+    )
+    test_runner = CallableTestRunner(helpers.task3)
+    coverage_docs = CoverageDocsAdapter(
+        lambda project_dir, test_files, readme_text, project_profile, clusters:
+            helpers.task0b_discovery(
+                project_dir / cfg.coverage_strategy_name, project_dir, test_files,
+                readme_text, project_profile, clusters=clusters, force=True),
+    )
+    flow_audit = FlowAuditAdapter(helpers.run_flow_audit)
+    docs_metrics = DocsMetricsAdapter(helpers.load_model_notes, helpers.genesis_rules_count)
+    requirements_phase = RequirementsPhase(
+        requirements=requirements, gate=phase_gate, telemetry=telemetry,
+        analyst=analyst, journal=failure_journal, artifacts=workspace_artifacts,
+    )
+    reconstruction_step = ReconstructionStep(
+        generator=generator, tests=test_runner, fixer=fixer,
+        artifacts=workspace_artifacts, telemetry=telemetry,
+        lock_deps=lock_deps, reattach_deps=reattach_deps,
+        no_improvement_threshold=cfg.no_improvement_threshold,
+    )
+    failure_analysis = FailureAnalysisStep(
+        analyst=analyst, journal=failure_journal, ratchet=BestTreeRatchet(),
+        artifacts=workspace_artifacts, coverage_docs=coverage_docs,
+        audit=flow_audit, docs=docs_metrics, telemetry=telemetry,
+        genesis_audit_interval=cfg.genesis_audit_interval,
+    )
+    module_reconstructor = ModuleReconstructor(
+        step=reconstruction_step, analysis=failure_analysis, telemetry=telemetry,
+        plateau_abort=cfg.module_plateau_abort,
+    )
     return App(
         adapters=adapters,
         settings=settings,
@@ -192,19 +299,11 @@ def build_app(
             tarpaulin_bin=cfg.tarpaulin_bin, grcov_bin=cfg.grcov_bin,
             build_timeout=cfg.build_timeout, ignore_pragma=cfg.ignore_pragma,
         ),
-        phase_gate=PhaseGateAdapter(roles.phase_valid, roles.commit_and_mark),
-        requirements=RequirementsAdapter(roles.task1, roles.validate_task1_output),
-        generator=GeneratorAdapter(
-            roles.task2_inner_loop, roles.load_original_structure,
-            roles.validate_task2_output, roles.validate_task2_api_conformance,
-        ),
-        fixer=FixerAdapter(
-            roles.task2_fix_loop, roles.classify_failure, ports.log,
-            roles.insert_no_run, roles.fix_err_cap,
-        ),
-        analyst=AnalystAdapter(
-            roles.task4, roles.validate_task4_output, roles.task_genesis_audit,
-        ),
+        phase_gate=phase_gate,
+        requirements=requirements,
+        generator=generator,
+        fixer=fixer,
+        analyst=analyst,
         ws_deps=WorkspaceDeps(log=ports.log, emit=ports.emit),
         ws_scan_deps=WorkspaceScanDeps(
             ask=ports.ask, task0_model=settings.task_models.task0,
@@ -232,4 +331,17 @@ def build_app(
             enumerate_types=helpers.enumerate_types, enumerate_fns=helpers.enumerate_fns,
             load_api_surface=load_api_surface,
         ),
+        lock_deps=lock_deps,
+        reattach_deps=reattach_deps,
+        failure_journal=failure_journal,
+        workspace_artifacts=workspace_artifacts,
+        telemetry=telemetry,
+        test_runner=test_runner,
+        coverage_docs=coverage_docs,
+        flow_audit=flow_audit,
+        docs_metrics=docs_metrics,
+        requirements_phase=requirements_phase,
+        reconstruction_step=reconstruction_step,
+        failure_analysis=failure_analysis,
+        module_reconstructor=module_reconstructor,
     )
