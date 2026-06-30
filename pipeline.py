@@ -34,6 +34,7 @@ from pipeline_core import retry as _pcretry
 from pipeline_core.adapters import build_adapters
 from pipeline_core.adapters import coverage as _covmod
 from pipeline_core.adapters import discovery as _discovery
+from pipeline_core.adapters import log_rotation as _log_rotation
 from pipeline_core.adapters import model_catalog as _model_catalog
 from pipeline_core.adapters import state as _state_mod
 from pipeline_core.adapters import strip as _strip_mod
@@ -133,6 +134,7 @@ from pipeline_core.adapters.reconstruct_roles import (
     PhaseGateAdapter,
     RequirementsAdapter,
 )
+from pipeline_core.adapters.run_registry import FileRunRegistry
 from pipeline_core.adapters.structure import CliStructureReader
 from pipeline_core.adapters.task2_roles import (
     CargoBackendAdapter,
@@ -324,6 +326,7 @@ from pipeline_core.domain.coverage_annotation import (
 from pipeline_core.domain.coverage_annotation import (
     partition_uncovered_lines as _partition_uncovered_lines,
 )
+from pipeline_core.domain.crate_name import crate_display_name as _crate_display_name
 from pipeline_core.domain.enums import (
     Backend,
     CoverageBackend,
@@ -684,26 +687,6 @@ _LOG_MAX_BYTES    = 512 * 1024   # keep last 512 KB in pipeline_anyhow.log
 _LOG_TRIM_EVERY   = 50           # check file size every N _log() calls
 _log_trim_counter = 0
 _RUN_REGISTRY     = Path(os.getenv("PIPELINE_RUN_REGISTRY", "/tmp/determ_pipelines.json"))
-
-
-def _trim_pipeline_log() -> None:
-    """Truncate logs/pipeline_anyhow.log to _LOG_MAX_BYTES by dropping the head."""
-    try:
-        path = _PIPELINE_LOG
-        size = os.path.getsize(path)
-        if size <= _LOG_MAX_BYTES:
-            return
-        with open(path, "r+b") as fh:
-            fh.seek(-_LOG_MAX_BYTES, 2)
-            tail = fh.read()
-            nl = tail.find(b"\n")
-            if nl >= 0:
-                tail = tail[nl + 1:]
-            fh.seek(0)
-            fh.write(tail)
-            fh.truncate()
-    except Exception:
-        pass
 
 
 def _guard(location: str, msg: str) -> None:
@@ -1101,7 +1084,7 @@ def _log(msg: str):
     _log_trim_counter += 1
     if _log_trim_counter >= _LOG_TRIM_EVERY:
         _log_trim_counter = 0
-        _trim_pipeline_log()
+        _log_rotation.trim_head(_PIPELINE_LOG, _LOG_MAX_BYTES)
 
 
 def _git_file_hash(root: Path, filename: str) -> str:
@@ -1122,64 +1105,28 @@ def _resolve_stdout_path() -> str | None:
 
 
 def _register_run(project_dir: Path) -> None:
-    """Write this run's coordinates to the shared registry so monitor.py can
-    auto-discover it. Idempotent: also prunes dead pids."""
+    """Build this run's coordinate entry and hand it to the file registry so
+    monitor.py can auto-discover it. Sets the crate display name for the
+    from-scratch disclaimer."""
     global _CRATE_DISPLAY_NAME
-    _name = project_dir.name
-    for _suffix in ("-master", "-main", "-trunk"):
-        if _name.endswith(_suffix):
-            _name = _name[: -len(_suffix)]
-            break
-    _CRATE_DISPLAY_NAME = _name
-    try:
-        pid = os.getpid()
-        stdout_log = _resolve_stdout_path()
-        entry: dict = {
-            "pid": pid,
-            "project": project_dir.name,
-            "project_dir": str(project_dir),
-            "pipeline_log": _PIPELINE_LOG,
-            "run_log": (str(_log_path) if _log_path else None),
-            "stdout_log": stdout_log,
-            "stream_log": os.getenv("LLM_STREAM_LOG", os.getenv("OLLAMA_STREAM_LOG",
-                str(Path(__file__).parent / "logs" / "stream.log"))),
-            "events_log": os.getenv("PIPELINE_EVENTS_LOG",
-                str(Path(__file__).parent / "logs" / "events.jsonl")),
-            "guard_log": _GUARD_LOG,
-            "argv": sys.argv[1:],
-            "cwd": os.getcwd(),
-            "started_at": int(time.time()),
-        }
-        reg: list[dict] = []
-        if _RUN_REGISTRY.exists():
-            try:
-                reg = json.loads(_RUN_REGISTRY.read_text())
-                if not isinstance(reg, list):
-                    reg = []
-            except Exception:
-                reg = []
-        # Drop dead pids and any duplicate of our own pid.
-        reg = [r for r in reg
-               if r.get("pid") != pid and Path(f"/proc/{r.get('pid')}").exists()]
-        reg.append(entry)
-        _RUN_REGISTRY.parent.mkdir(parents=True, exist_ok=True)
-        _RUN_REGISTRY.write_text(json.dumps(reg, indent=2))
-
-        import atexit
-        def _unregister() -> None:
-            try:
-                if not _RUN_REGISTRY.exists():
-                    return
-                cur = json.loads(_RUN_REGISTRY.read_text())
-                cur = [r for r in cur if r.get("pid") != pid]
-                _RUN_REGISTRY.write_text(json.dumps(cur, indent=2))
-            except Exception:
-                pass
-        atexit.register(_unregister)
-    except Exception as e:
-        # Never let registry bookkeeping break a real run.
-        with suppress(Exception):
-            _log(f"  (registry write failed: {e})")
+    _CRATE_DISPLAY_NAME = _crate_display_name(project_dir.name)
+    entry: dict = {
+        "pid": os.getpid(),
+        "project": project_dir.name,
+        "project_dir": str(project_dir),
+        "pipeline_log": _PIPELINE_LOG,
+        "run_log": (str(_log_path) if _log_path else None),
+        "stdout_log": _resolve_stdout_path(),
+        "stream_log": os.getenv("LLM_STREAM_LOG", os.getenv("OLLAMA_STREAM_LOG",
+            str(Path(__file__).parent / "logs" / "stream.log"))),
+        "events_log": os.getenv("PIPELINE_EVENTS_LOG",
+            str(Path(__file__).parent / "logs" / "events.jsonl")),
+        "guard_log": _GUARD_LOG,
+        "argv": sys.argv[1:],
+        "cwd": os.getcwd(),
+        "started_at": int(time.time()),
+    }
+    FileRunRegistry(_RUN_REGISTRY).register(entry)
 
 
 def init_log(root: Path, nolog: bool = False, progress_mode: bool = False):
