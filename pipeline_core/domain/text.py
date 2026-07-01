@@ -9,6 +9,32 @@ each byte-equivalent to the pattern it replaced (pinned in tests/test_text_domai
 
 from __future__ import annotations
 
+import hashlib
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True, slots=True)
+class PromptDigest:
+    """Content-address of a prompt/response body: its sha256 and char count.
+    Names the ``{sha256, char_count}`` record that ``_store_prompt_content``
+    emits into event ``data`` (and the cassette layer keys on). ``as_dict`` is
+    the on-the-wire shape; an empty body digests to ``("", 0)``."""
+
+    sha256: str
+    char_count: int
+
+    @classmethod
+    def of(cls, text: str) -> PromptDigest:
+        if not text:
+            return cls(sha256="", char_count=0)
+        return cls(
+            sha256=hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest(),
+            char_count=len(text),
+        )
+
+    def as_dict(self) -> dict[str, int | str]:
+        return {"sha256": self.sha256, "char_count": self.char_count}
+
 
 def _strip_opening_fence(content: str) -> str:
     """``re.sub(r'^```[a-zA-Z0-9_-]*\\s*\\n', '', content)`` — drop a leading fence

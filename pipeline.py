@@ -433,6 +433,11 @@ from pipeline_core.domain.test_results import (
     _parse_test_counts as _parse_test_counts,  # noqa: PLC0414 (test seam re-export)
 )
 from pipeline_core.domain.text import (
+    PromptDigest,
+    smart_truncate,
+    strip_trailing_file_tag,
+)
+from pipeline_core.domain.text import (
     block_is_prose as _block_is_prose,
 )
 from pipeline_core.domain.text import (
@@ -443,10 +448,6 @@ from pipeline_core.domain.text import (
 )
 from pipeline_core.domain.text import (
     parse_attempt_number as _parse_attempt_number,
-)
-from pipeline_core.domain.text import (
-    smart_truncate,
-    strip_trailing_file_tag,
 )
 from pipeline_core.domain.text import (
     strip_markdown_fences as _strip_markdown_fences,
@@ -777,18 +778,16 @@ def init_events(product: str) -> None:
 
 
 def _store_prompt_content(text: str) -> dict[str, int | str]:
-    """Content-address a prompt/response. Returns {sha256, char_count}.
-
-    Writes to logs/prompts/{sha256}.txt if not already present. Never raises.
-    """
-    if not text:
-        return {"sha256": "", "char_count": 0}
-    h = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
-    path = _PROMPTS_DIR / f"{h}.txt"
-    if not path.exists():
-        with suppress(Exception):
-            path.write_text(text, encoding="utf-8", errors="replace")
-    return {"sha256": h, "char_count": len(text)}
+    """Content-address a prompt/response (domain PromptDigest). Returns
+    {sha256, char_count} and writes logs/prompts/{sha256}.txt if not already
+    present. Never raises."""
+    digest = PromptDigest.of(text)
+    if text:
+        path = _PROMPTS_DIR / f"{digest.sha256}.txt"
+        if not path.exists():
+            with suppress(Exception):
+                path.write_text(text, encoding="utf-8", errors="replace")
+    return digest.as_dict()
 
 
 # C-finale: the events.jsonl sink + `_phase` relocated to

@@ -2,13 +2,25 @@
 (P7 — think-block + code-fence stripping)."""
 from __future__ import annotations
 
+import hashlib
 import re
 
 from pipeline_core.domain.text import (
+    PromptDigest,
     extract_code_content,
     strip_simple_code_fence,
     strip_think_blocks,
 )
+
+
+def test_prompt_digest_matches_legacy_dict() -> None:
+    # empty → ("", 0); non-empty → sha256 + char count, as the old dict.
+    assert PromptDigest.of("").as_dict() == {"sha256": "", "char_count": 0}
+    text = "hello — prompt"
+    exp = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
+    d = PromptDigest.of(text).as_dict()
+    assert d == {"sha256": exp, "char_count": len(text)}
+    assert list(d.keys()) == ["sha256", "char_count"]  # wire-shape key order
 
 
 def _old_strip_think(text: str) -> str:
