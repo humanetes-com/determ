@@ -10,6 +10,7 @@ logs/
 tmp
 handover/
 handover.md
+*.md
 previous_handovers.md
 functional_requirements_*.md
 failure_log.md
@@ -22,8 +23,6 @@ tools/skeleton_extractor/target/
 *.md
 !README.md
 !CONTRIBUTING.md
-!CODE_ARCHITECTURE.md
-!ARCHITECTURE.md
 !docs/*.md
 
 # Coverage data (xdist workers leave .coverage.<host>.<pid>.* shards).

@@ -321,8 +321,11 @@ from pipeline_core.domain.crate_name import crate_display_name as _crate_display
 from pipeline_core.domain.enums import (
     Backend,
     CoverageBackend,
+    ModelTier,
     PhaseCDriver,
     PhaseCMode,
+    Task1Backend,
+    Task2Backend,
 )
 from pipeline_core.domain.failure_classification import (
     classify_failure as _classify_failure,
@@ -377,6 +380,7 @@ from pipeline_core.domain.models import (
     ModRecord,
     TypeRecord,
 )
+from pipeline_core.domain.prompt_budget import PromptBudgets
 from pipeline_core.domain.refine import (
     parse_retrospective_categories as _parse_retrospective_categories,
 )
@@ -524,7 +528,7 @@ def _record_tdd_regression(fr_path: Path, src_dir: Path, filled_keys: "list[tupl
     return _record_tdd_regression_impl(
         fr_path, src_dir, filled_keys, broken_tests, prev_best, now_pass,
         enumerate_fns=_enumerate_fns_via_extractor, append_note=_append_model_note,
-        body_cap=_FAILED_BODY_CAP)
+        body_cap=_BUDGETS.failed_body)
 
 
 def _implicated_fns_from_cargo_errors(cargo_output: str, target_src_dir: Path) -> list[tuple[str, str]]:
@@ -563,9 +567,9 @@ _TASK2_MODEL  = SETTINGS.task_models.task2
 _TASK4_MODEL  = SETTINGS.task_models.task4
 
 
-def _model_tier(model: str) -> str:
-    """Thin shim → pipeline_core.domain.model_caps.model_tier (returns 'mid'/'weak')."""
-    return str(_model_tier_pure(model))
+def _model_tier(model: str) -> ModelTier:
+    """Thin shim → pipeline_core.domain.model_caps.model_tier (ModelTier.MID/WEAK)."""
+    return _model_tier_pure(model)
 
 
 _TASK0C_TIER = _model_tier(_TASK0C_MODEL)
@@ -581,13 +585,13 @@ _TASK2_THINKING_DIRECTIVE = (
     "Before writing code: reason through all required public types, trait impls, "
     "module structure, and re-exports against the API surface and test assertions. "
     "Then write complete, compilable source.\n\n"
-    if _TASK2_TIER == "mid" else ""
+    if _TASK2_TIER == ModelTier.MID else ""
 )
 
 _FIX_THINKING_DIRECTIVE = (
     "Before writing fixes: trace the error to its root cause — identify the specific "
     "type mismatch, missing impl, or wrong signature — then write a targeted correction.\n\n"
-    if _TASK2_TIER == "mid" else ""
+    if _TASK2_TIER == ModelTier.MID else ""
 )
 
 # Verbosity guard (weak-tier only): appended after FILE_FORMAT_INSTRUCTION.
@@ -595,7 +599,7 @@ _FIX_THINKING_DIRECTIVE = (
 # this explicit reminder reduces that failure mode. Mid-tier models follow reliably.
 _TASK2_VERBOSITY_GUARD = (
     ""
-    if _TASK2_TIER == "mid"
+    if _TASK2_TIER == ModelTier.MID
     else "Output ONLY the FILE markers above — no prose, no markdown fences, no text outside markers.\n"
 )
 
@@ -605,7 +609,7 @@ _TASK2_VERBOSITY_GUARD = (
 _TASK1_THINKING_DIRECTIVE = (
     "Before writing requirements: for each test assertion, trace exactly what behavior "
     "it verifies — function name, arguments, return value, invariants. Miss nothing.\n\n"
-    if _TASK1_TIER == "mid" else ""
+    if _TASK1_TIER == ModelTier.MID else ""
 )
 
 # Task 0c: coverage test generation.
@@ -614,7 +618,7 @@ _TASK1_THINKING_DIRECTIVE = (
 _TASK0C_THINKING_DIRECTIVE = (
     "Before writing tests: for each uncovered function, determine which input values "
     "or states exercise each branch, and what assertion verifies the result. Then write.\n\n"
-    if _TASK0C_TIER == "mid" else ""
+    if _TASK0C_TIER == ModelTier.MID else ""
 )
 
 # Task 0c: compile / test-block fix.
@@ -622,7 +626,7 @@ _TASK0C_THINKING_DIRECTIVE = (
 _TASK0C_FIX_THINKING_DIRECTIVE = (
     "Before writing the fix: identify the exact error — wrong type, wrong path, missing "
     "impl, bad import — then write the minimal correction.\n\n"
-    if _TASK0C_TIER == "mid" else ""
+    if _TASK0C_TIER == ModelTier.MID else ""
 )
 
 # Task 4: genesis update.
@@ -631,7 +635,7 @@ _TASK0C_FIX_THINKING_DIRECTIVE = (
 # custom GENESIS_DELIM_START / GENESIS_DELIM_END markers.
 _TASK4_VERBOSITY_GUARD = (
     ""
-    if _TASK4_TIER == "mid"
+    if _TASK4_TIER == ModelTier.MID
     else "Use ONLY the delimiters shown above for output — no text outside them.\n"
 )
 
@@ -862,28 +866,10 @@ _ASK_CLIENT = AskClient(
     single_call_char_limit=SINGLE_CALL_CHAR_LIMIT,
 )
 
-# Supplementary material caps — scale with context so they don't freeze at
-# values tuned for an old (small) context window.
-_README_CAP    = max(3_000, SINGLE_CALL_CHAR_LIMIT // 20)   # ~5% of budget
-_PROFILE_CAP   = max(2_000, SINGLE_CALL_CHAR_LIMIT // 30)   # ~3% of budget
-_GENESIS_CAP   = max(3_000, SINGLE_CALL_CHAR_LIMIT // 20)   # methodology doc
-_FIX_ERR_CAP   = SETTINGS.fix_caps.fix_err_cap             # per-attempt error in fix loop
-_REPO_SPEC_CAP = max(2_500, SINGLE_CALL_CHAR_LIMIT // 10)   # REPOSITORY_SPECIFICATIONS in per-fn/per-impl prompts
-_REPO_SPEC_CAP_WIDE = max(5_000, SINGLE_CALL_CHAR_LIMIT // 5)  # …in whole-file fix prompts (bigger budget)
-_STRATEGY_CAP  = max(4_000, SINGLE_CALL_CHAR_LIMIT // 15)   # coverage strategy doc
-_SIBLING_CAP   = max(3_000, SINGLE_CALL_CHAR_LIMIT // 30)   # per-sibling condensed source
-_SRC_SNIP_CAP  = max(4_000, SINGLE_CALL_CHAR_LIMIT // 10)   # source snippet in task0c prompts
-_EXTRA_CAP     = max(3_000, SINGLE_CALL_CHAR_LIMIT // 20)   # extra context files (Cargo.toml etc.)
-_WORKING_CAP   = max(800,   SINGLE_CALL_CHAR_LIMIT // 100)  # "what worked before" hint
-
-# Per-fn / per-impl reconstruction context (Plan 9 F1/F2). Types+traits are the
-# highest-value context for body reconstruction — they drive the dominant
-# E0277/E0599/E0046/E0053 errors. Budget-derive generously; do NOT freeze at
-# 8192-era hardcoded values (3000 chars / 6 types). The char cap governs; the
-# count cap is only a runaway safety net.
-_TYPES_SECTION_CAP = max(8_000, SINGLE_CALL_CHAR_LIMIT // 3)   # type/trait defs in fill prompt
-_TYPES_COUNT_CAP   = max(40,    SINGLE_CALL_CHAR_LIMIT // 6000)  # safety net only; chars govern
-_FAILED_BODY_CAP   = max(2_000, SINGLE_CALL_CHAR_LIMIT // 12)  # prior failed body in fix prompt
+# Supplementary-material prompt caps — the per-section sizing policy is a domain
+# VO (PromptBudgets) derived from the call budget; see domain/prompt_budget.py.
+_BUDGETS = PromptBudgets.derive(SINGLE_CALL_CHAR_LIMIT)
+_FIX_ERR_CAP = SETTINGS.fix_caps.fix_err_cap  # Settings passthrough, not a budget fraction
 
 # Plan 10 U2: test-based acceptance. When on, a per-fn fill is accepted only if
 # the fn's OWN tests pass (not just compile); test failures route through the
@@ -1561,15 +1547,15 @@ _PORTS = _Ports(
     cargo_env=lambda: _cargo_env(),
 )
 _CFG = _CompositionConfig(
-    task4_verbosity_guard=_TASK4_VERBOSITY_GUARD, extra_cap=_EXTRA_CAP,
+    task4_verbosity_guard=_TASK4_VERBOSITY_GUARD, extra_cap=_BUDGETS.extra,
     tarpaulin_bin=TARPAULIN_BIN, grcov_bin=GRCOV_BIN, build_timeout=BUILD_TIMEOUT,
     ignore_pragma=COVERAGE_IGNORE_PRAGMA,
     skip_dir_names=frozenset(SKIP_DIR_NAMES),
     intermediate_char_limit=INTERMEDIATE_CHAR_LIMIT,
     single_call_char_limit=SINGLE_CALL_CHAR_LIMIT,
-    readme_cap=_README_CAP, profile_cap=_PROFILE_CAP,
+    readme_cap=_BUDGETS.readme, profile_cap=_BUDGETS.profile,
     project_context_name=PROJECT_CONTEXT_NAME,
-    failed_body_cap=_FAILED_BODY_CAP, fix_err_cap=_FIX_ERR_CAP,
+    failed_body_cap=_BUDGETS.failed_body, fix_err_cap=_FIX_ERR_CAP,
     coverage_strategy_name=COVERAGE_STRATEGY_NAME,
     no_improvement_threshold=NO_IMPROVEMENT_THRESHOLD,
     genesis_audit_interval=GENESIS_AUDIT_INTERVAL,
@@ -2003,7 +1989,7 @@ _MODEL_NOTES_STORE = _FileModelNotesStore(
     _ASK_CLIENT, _TASK2_MODEL, _log,
     max_chars=_MODEL_NOTES_MAX_CHARS,
     max_entries=_MODEL_NOTES_MAX_ENTRIES,
-    failed_body_cap=_FAILED_BODY_CAP,
+    failed_body_cap=_BUDGETS.failed_body,
     fix_err_cap=_FIX_ERR_CAP,
 )
 
@@ -2096,7 +2082,7 @@ def _repo_spec_section(
         return render_repo_spec(
             docs, file_rel=file_rel,
             identifiers=identifiers_for_target(fn_name, container, file_rel),
-            char_budget=char_budget or _REPO_SPEC_CAP,
+            char_budget=char_budget or _BUDGETS.repo_spec,
         )
     except Exception:
         return ""
@@ -2543,7 +2529,7 @@ _IMPL_FILL_DEPS = _impl_fill.ImplFillDeps(
     bound_methods_section_for=lambda *a, **k: _bound_methods_section_for(*a, **k),
     u2_test_gate=lambda *a, **k: _u2_test_gate(*a, **k),
     ask=_ASK_CLIENT.ask,
-    failed_body_cap=_FAILED_BODY_CAP,
+    failed_body_cap=_BUDGETS.failed_body,
     per_fn_fix_hard_cap=_PER_FN_FIX_HARD_CAP,
     per_impl_max_stubs=_PER_IMPL_MAX_STUBS,
     task2_model=_TASK2_MODEL,
@@ -2676,7 +2662,7 @@ _GROUP_FILL_DEPS = _group_fill.GroupFillDeps(
     merge_fn_blocks_into_disk=lambda *a, **k: _merge_fn_blocks_into_disk(*a, **k),
     scan_unimplemented_functions=lambda *a, **k: _scan_unimplemented_functions(*a, **k),
     single_call_char_limit=SINGLE_CALL_CHAR_LIMIT,
-    genesis_cap=_GENESIS_CAP,
+    genesis_cap=_BUDGETS.genesis,
     task2_model=_TASK2_MODEL,
 )
 
@@ -2729,13 +2715,13 @@ def _types_section_for_fix(
         sig_text or "", container or "", impl_where or "",
         body_text or "", error_excerpt or "",
     ])
-    recs = _types_referenced_in_text(search, type_records)[:_TYPES_COUNT_CAP]
+    recs = _types_referenced_in_text(search, type_records)[:_BUDGETS.types_count]
     full = "\n\n".join(_format_type_for_prompt(r) for r in recs)
-    if len(full) > _TYPES_SECTION_CAP:  # Plan 9 F5: surface starvation
+    if len(full) > _BUDGETS.types_section:  # Plan 9 F5: surface starvation
         _guard("phase-c/types_truncated",
                f"{(container or sig_text)[:50]}: type context {len(full):,} > "
-               f"cap {_TYPES_SECTION_CAP:,} ({len(recs)} types)")
-    return full[:_TYPES_SECTION_CAP]
+               f"cap {_BUDGETS.types_section:,} ({len(recs)} types)")
+    return full[:_BUDGETS.types_section]
 
 
 def _fn_container_index(src_dir: Path) -> dict[tuple[str, str], str]:
@@ -3287,8 +3273,8 @@ def _build_task1_config() -> "Task1Config":
         file_format_instruction=FILE_FORMAT_INSTRUCTION,
         single_call_char_limit=SINGLE_CALL_CHAR_LIMIT,
         synthesis_group_size=SYNTHESIS_GROUP_SIZE,
-        readme_cap=_README_CAP,
-        strategy_cap=_STRATEGY_CAP,
+        readme_cap=_BUDGETS.readme,
+        strategy_cap=_BUDGETS.strategy,
         chunk_cache_dir=CHUNK_CACHE_DIR,
         parallelism=_pipeline_parallelism(),
     )
@@ -3320,8 +3306,8 @@ def _new_llm_task1_synthesizer() -> LLMTask1Synthesizer:
 
 
 def _task1_synthesizer_factory() -> Task1Synthesizer:
-    backend = os.getenv("TASK1_SYNTHESIZER", "llm").lower()
-    if backend == "static":
+    backend = Task1Backend.coerce(os.getenv("TASK1_SYNTHESIZER"), Task1Backend.LLM)
+    if backend is Task1Backend.STATIC:
         return _new_static_task1_synthesizer()
     return _new_llm_task1_synthesizer()
 
@@ -3507,8 +3493,8 @@ def _build_task2_config() -> "Task2Config":
         task2_model=_TASK2_MODEL,
         thinking_directive=_TASK2_THINKING_DIRECTIVE,
         verbosity_guard=_TASK2_VERBOSITY_GUARD,
-        genesis_cap=_GENESIS_CAP,
-        strategy_cap=_STRATEGY_CAP,
+        genesis_cap=_BUDGETS.genesis,
+        strategy_cap=_BUDGETS.strategy,
         single_call_char_limit=SINGLE_CALL_CHAR_LIMIT,
         model_label=MODEL,
     )
@@ -3585,12 +3571,12 @@ def _count_rustc_error_codes(output: str) -> int:
 
 
 def _task2_generator_factory() -> Task2Generator:
-    backend = os.getenv("TASK2_GENERATOR", "filelist").lower()
-    if backend == "llm":
+    backend = Task2Backend.coerce(os.getenv("TASK2_GENERATOR"), Task2Backend.FILELIST)
+    if backend is Task2Backend.LLM:
         return _new_llm_task2_generator()
-    if backend == "static":
+    if backend is Task2Backend.STATIC:
         return _new_static_task2_generator()
-    if backend == "skeleton":
+    if backend is Task2Backend.SKELETON:
         return _new_skeleton_task2_generator()
     return _new_filelist_task2_generator()  # default: filelist
 
@@ -3704,7 +3690,7 @@ _TASK2_DEPS = Task2Deps(
     task2_model=_TASK2_MODEL,
     task2_fix_retries=TASK2_FIX_RETRIES,
     single_call_char_limit=SINGLE_CALL_CHAR_LIMIT,
-    genesis_cap=_GENESIS_CAP,
+    genesis_cap=_BUDGETS.genesis,
     cluster_check_factory=_cluster_check_factory,
 )
 
@@ -4031,7 +4017,7 @@ _TASK0B_DEPS = Task0bDeps(
     strip_gen_tests_decls=_strip_gen_tests_decls,
     condense_rust_to_signatures=_condense_rust_to_signatures,
     manifest_name=MANIFEST_NAME,
-    sibling_cap=_SIBLING_CAP,
+    sibling_cap=_BUDGETS.sibling,
     single_call_char_limit=SINGLE_CALL_CHAR_LIMIT,
     task0_model=_TASK0_MODEL,
 )
@@ -4269,7 +4255,7 @@ _TASK1_DEPS = Task1Deps(
     format_api_surface_section=_format_api_surface_section,
     file_format_instruction=FILE_FORMAT_INSTRUCTION,
     single_call_char_limit=SINGLE_CALL_CHAR_LIMIT,
-    profile_cap=_PROFILE_CAP,
+    profile_cap=_BUDGETS.profile,
     task1_model=_TASK1_MODEL,
 )
 
@@ -4356,10 +4342,10 @@ _GEN_FIX_LOOP_DEPS = _fix_loop.GenerateFixLoopDeps(
     FixPromptsAdapter=_FixPromptsAdapter,
     FixSplicerAdapter=_FixSplicerAdapter,
     FrontierBuilderAdapter=_FrontierBuilderAdapter,
-    REPO_SPEC_CAP_WIDE=_REPO_SPEC_CAP_WIDE,
-    SRC_SNIP_CAP=_SRC_SNIP_CAP,
+    REPO_SPEC_CAP_WIDE=_BUDGETS.repo_spec_wide,
+    SRC_SNIP_CAP=_BUDGETS.src_snippet,
     TASK2_VERBOSITY_GUARD=_TASK2_VERBOSITY_GUARD,
-    TYPES_SECTION_CAP=_TYPES_SECTION_CAP,
+    TYPES_SECTION_CAP=_BUDGETS.types_section,
     behavior_frontier=lambda *a, **k: _behavior_frontier(*a, **k),
     cargo_env=_cargo_env,
     categorize_compile_error=_categorize_compile_error,
@@ -4398,7 +4384,7 @@ _GEN_FIX_LOOP_DEPS = _fix_loop.GenerateFixLoopDeps(
 )
 
 _TASK0C_DEPS = Task0cDeps(
-    BUILD_TIMEOUT=BUILD_TIMEOUT, COVERAGE_TARGET=COVERAGE_AUGMENTATION_TARGET, coverage_ignore_pragma=COVERAGE_IGNORE_PRAGMA, TASK0C_PROMPT_CHAR_CAP=TASK0C_PROMPT_CHAR_CAP, FIX_ERR_CAP=_FIX_ERR_CAP, SIBLING_CAP=_SIBLING_CAP, SRC_SNIP_CAP=_SRC_SNIP_CAP, TASK0C_FIX_THINKING_DIRECTIVE=_TASK0C_FIX_THINKING_DIRECTIVE, TASK0C_MODEL=_TASK0C_MODEL, TASK0C_THINKING_DIRECTIVE=_TASK0C_THINKING_DIRECTIVE, WORKING_CAP=_WORKING_CAP, annotate_uncovered=_annotate_uncovered, block_is_prose=_block_is_prose, build_gen_tests_decl=_build_gen_tests_decl, guard=_guard, cargo_env=_cargo_env, cluster_gate_for=_cluster_gate_for_sibling, condense_rust_to_signatures=_condense_rust_to_signatures, count_test_attrs=_count_test_attrs, derive_gentest_prelude=_derive_gentest_prelude, describe_test_environment=_describe_test_environment, error_signatures_from_output=_error_signatures_from_output, extract_branch_guard=_extract_branch_guard, extract_gen_tests_body=_extract_gen_tests_body, extract_public_symbols=_extract_public_symbols, extract_uncovered_functions=_extract_uncovered_functions, filter_cfg_excluded_lines=_filter_cfg_excluded_lines, filter_cfg_incompatible_lines=_filter_cfg_incompatible_lines, flags_unreachable=_flags_unreachable, gen_tests_path=_gen_tests_path, has_nonempty_test_body=_has_nonempty_test_body, inject_allow_before_any_mod=_inject_allow_before_any_mod, inject_allow_before_gen_mod=_inject_allow_before_gen_mod, inject_gen_prelude_imports=_inject_gen_prelude_imports, is_gen_tests_file=_is_gen_tests_file, is_structural_line=_is_structural_line, load_file_constraints=_FILE_CONSTRAINTS.load, type_signals_write=type_signals_write, mark_phase=_mark_phase, match_gen_tests_sibling=_match_gen_tests_sibling, next_gen_tests_n=_next_gen_tests_n, nightly_rules_for_cluster=_nightly_rules_for_cluster, parse_attempt_number=_parse_attempt_number, parse_retrospective_categories=_parse_retrospective_categories, partition_uncovered_lines=_partition_uncovered_lines, prelude_import_names=_prelude_import_names, quick_file_coverage=_quick_file_coverage, read_all_gen_tests=_read_all_gen_tests, read_state=_read_state, revert_gen_tests_pass=_revert_gen_tests_pass, select_relevant_siblings=_select_relevant_siblings, set_current=_set_current, source_hash=_source_hash, strip_all_gen_tests_artifacts=_strip_all_gen_tests_artifacts, strip_gen_tests_decl_n=_strip_gen_tests_decl_n, strip_gen_tests_decls=_strip_gen_tests_decls, strip_trailing_file_tag=_strip_trailing_file_tag, mutation_harden_file=lambda *a, **k: _MUTATION.harden_file(*a, **k), gen_tests_siblings=_gen_tests_siblings, test_augmentor_factory=_test_augmentor_factory, ask=_ASK_CLIENT.ask, extract_files=extract_files, extract_test_mod=extract_test_mod, generate_fix_loop=generate_fix_loop, generate_in_parallel=generate_in_parallel, is_test_file=is_test_file, write=write,
+    BUILD_TIMEOUT=BUILD_TIMEOUT, COVERAGE_TARGET=COVERAGE_AUGMENTATION_TARGET, coverage_ignore_pragma=COVERAGE_IGNORE_PRAGMA, TASK0C_PROMPT_CHAR_CAP=TASK0C_PROMPT_CHAR_CAP, FIX_ERR_CAP=_FIX_ERR_CAP, SIBLING_CAP=_BUDGETS.sibling, SRC_SNIP_CAP=_BUDGETS.src_snippet, TASK0C_FIX_THINKING_DIRECTIVE=_TASK0C_FIX_THINKING_DIRECTIVE, TASK0C_MODEL=_TASK0C_MODEL, TASK0C_THINKING_DIRECTIVE=_TASK0C_THINKING_DIRECTIVE, WORKING_CAP=_BUDGETS.working, annotate_uncovered=_annotate_uncovered, block_is_prose=_block_is_prose, build_gen_tests_decl=_build_gen_tests_decl, guard=_guard, cargo_env=_cargo_env, cluster_gate_for=_cluster_gate_for_sibling, condense_rust_to_signatures=_condense_rust_to_signatures, count_test_attrs=_count_test_attrs, derive_gentest_prelude=_derive_gentest_prelude, describe_test_environment=_describe_test_environment, error_signatures_from_output=_error_signatures_from_output, extract_branch_guard=_extract_branch_guard, extract_gen_tests_body=_extract_gen_tests_body, extract_public_symbols=_extract_public_symbols, extract_uncovered_functions=_extract_uncovered_functions, filter_cfg_excluded_lines=_filter_cfg_excluded_lines, filter_cfg_incompatible_lines=_filter_cfg_incompatible_lines, flags_unreachable=_flags_unreachable, gen_tests_path=_gen_tests_path, has_nonempty_test_body=_has_nonempty_test_body, inject_allow_before_any_mod=_inject_allow_before_any_mod, inject_allow_before_gen_mod=_inject_allow_before_gen_mod, inject_gen_prelude_imports=_inject_gen_prelude_imports, is_gen_tests_file=_is_gen_tests_file, is_structural_line=_is_structural_line, load_file_constraints=_FILE_CONSTRAINTS.load, type_signals_write=type_signals_write, mark_phase=_mark_phase, match_gen_tests_sibling=_match_gen_tests_sibling, next_gen_tests_n=_next_gen_tests_n, nightly_rules_for_cluster=_nightly_rules_for_cluster, parse_attempt_number=_parse_attempt_number, parse_retrospective_categories=_parse_retrospective_categories, partition_uncovered_lines=_partition_uncovered_lines, prelude_import_names=_prelude_import_names, quick_file_coverage=_quick_file_coverage, read_all_gen_tests=_read_all_gen_tests, read_state=_read_state, revert_gen_tests_pass=_revert_gen_tests_pass, select_relevant_siblings=_select_relevant_siblings, set_current=_set_current, source_hash=_source_hash, strip_all_gen_tests_artifacts=_strip_all_gen_tests_artifacts, strip_gen_tests_decl_n=_strip_gen_tests_decl_n, strip_gen_tests_decls=_strip_gen_tests_decls, strip_trailing_file_tag=_strip_trailing_file_tag, mutation_harden_file=lambda *a, **k: _MUTATION.harden_file(*a, **k), gen_tests_siblings=_gen_tests_siblings, test_augmentor_factory=_test_augmentor_factory, ask=_ASK_CLIENT.ask, extract_files=extract_files, extract_test_mod=extract_test_mod, generate_fix_loop=generate_fix_loop, generate_in_parallel=generate_in_parallel, is_test_file=is_test_file, write=write,
     subprocess=subprocess, get_current_cluster=_SCOPE.get_active,
     coverage_provider=_coverage_provider, check_stop=_check_graceful_stop,
 )

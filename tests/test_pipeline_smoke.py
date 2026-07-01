@@ -2148,6 +2148,8 @@ def test_domain_enums_and_model_caps() -> None:
         CoverageBackend,
         FillUnit,
         ModelTier,
+        Task1Backend,
+        Task2Backend,
     )
     from pipeline_core.domain.model_caps import model_context_chars, model_tier
 
@@ -2161,6 +2163,12 @@ def test_domain_enums_and_model_caps() -> None:
     assert Backend.coerce("nonsense", Backend.OLLAMA) is Backend.OLLAMA
     assert Backend.coerce(None, Backend.VLLM) is Backend.VLLM
     assert CoverageBackend.coerce("llvm-cov", CoverageBackend.TARPAULIN) is CoverageBackend.LLVM_COV
+    # task-backend selectors: defaults on unknown/None match the factory fallbacks.
+    assert Task1Backend.coerce("static", Task1Backend.LLM) is Task1Backend.STATIC
+    assert Task1Backend.coerce(None, Task1Backend.LLM) is Task1Backend.LLM
+    assert Task1Backend.coerce("bogus", Task1Backend.LLM) is Task1Backend.LLM
+    assert Task2Backend.coerce("SKELETON", Task2Backend.FILELIST) is Task2Backend.SKELETON
+    assert Task2Backend.coerce("bogus", Task2Backend.FILELIST) is Task2Backend.FILELIST
 
     # backend → context-length env var mapping.
     assert Backend.OLLAMA.max_len_env_var == "OLLAMA_NUM_CTX"

@@ -87,3 +87,19 @@ class ModelTier(_Coercible):
 
     MID = "mid"
     WEAK = "weak"
+
+
+class Task1Backend(_Coercible):
+    """TASK 1 requirements-synthesizer selector (``TASK1_SYNTHESIZER`` env)."""
+
+    STATIC = "static"   # conservative prompt-based path
+    LLM = "llm"         # default: contract-first, more deterministic
+
+
+class Task2Backend(_Coercible):
+    """TASK 2 source-generator selector (``TASK2_GENERATOR`` env)."""
+
+    LLM = "llm"           # file-by-file experimental
+    STATIC = "static"     # one big ask per attempt
+    SKELETON = "skeleton"
+    FILELIST = "filelist"  # default
