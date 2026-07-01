@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from ..domain.coverage import CoverageMeasurement
 from ..domain.enums import CoverageBackend
 
 
@@ -66,7 +67,7 @@ def cluster_exclude_patterns(deps: CoverageDeps) -> list[str]:
     return list(cluster.tarpaulin_exclude_files)
 
 
-def run_tarpaulin(deps: CoverageDeps, project_dir: Path, module_name: str) -> tuple[float, list[dict[str, Any]], int, int]:
+def run_tarpaulin(deps: CoverageDeps, project_dir: Path, module_name: str) -> CoverageMeasurement:
     """
     Run cargo tarpaulin for one module.
     Returns (coverage_pct 0-100, files_list, covered_lines, coverable_lines).
@@ -103,9 +104,9 @@ def run_tarpaulin(deps: CoverageDeps, project_dir: Path, module_name: str) -> tu
         json_path = out_dir / "tarpaulin-report.json"
         if not json_path.exists():
             deps.log(f"  tarpaulin: no JSON report produced. stderr: {result.stderr[:300]}")
-            return 0.0, [], 0, 0
+            return CoverageMeasurement(0.0, [], 0, 0)
         data = json.loads(json_path.read_text())
-        return (
+        return CoverageMeasurement(
             data.get("coverage", 0.0),
             data.get("files", []),
             data.get("covered", 0),
@@ -113,10 +114,10 @@ def run_tarpaulin(deps: CoverageDeps, project_dir: Path, module_name: str) -> tu
         )
     except subprocess.TimeoutExpired:
         deps.log(f"  tarpaulin: timeout after {deps.build_timeout}s")
-        return 0.0, [], 0, 0
+        return CoverageMeasurement(0.0, [], 0, 0)
     except Exception as e:
         deps.log(f"  tarpaulin: error: {e}")
-        return 0.0, [], 0, 0
+        return CoverageMeasurement(0.0, [], 0, 0)
 
 
 def quick_file_coverage_grcov(deps: CoverageDeps, project_dir: Path, module_name: str, rel_path: str) -> tuple[int, int] | None:
@@ -186,7 +187,7 @@ def quick_file_coverage_grcov(deps: CoverageDeps, project_dir: Path, module_name
         return None
 
 
-def run_grcov(deps: CoverageDeps, project_dir: Path, module_name: str) -> tuple[float, list[dict[str, Any]], int, int]:
+def run_grcov(deps: CoverageDeps, project_dir: Path, module_name: str) -> CoverageMeasurement:
     """
     Run grcov (LLVM source-based coverage) for one module.
     Returns (coverage_pct 0-100, files_list compatible with tarpaulin format, covered, coverable).
@@ -227,7 +228,7 @@ def run_grcov(deps: CoverageDeps, project_dir: Path, module_name: str) -> tuple[
         )
         if result.returncode != 0 and not list(profraw_dir.glob("*.profraw")):
             deps.log(f"  grcov: cargo test failed and produced no profraw: {result.stderr[:200]}")
-            return 0.0, [], 0, 0
+            return CoverageMeasurement(0.0, [], 0, 0)
 
         # Step 2: run grcov to produce coveralls JSON.
         out_json = Path("/tmp") / f"grcov_{module_name}.json"
@@ -290,17 +291,17 @@ def run_grcov(deps: CoverageDeps, project_dir: Path, module_name: str) -> tuple[
             })
 
         pct = (total_covered / total_coverable * 100.0) if total_coverable > 0 else 0.0
-        return pct, files_data, total_covered, total_coverable
+        return CoverageMeasurement(pct, files_data, total_covered, total_coverable)
 
     except subprocess.TimeoutExpired:
         deps.log(f"  grcov: timeout after {deps.build_timeout}s")
-        return 0.0, [], 0, 0
+        return CoverageMeasurement(0.0, [], 0, 0)
     except Exception as e:
         deps.log(f"  grcov: error: {e}")
-        return 0.0, [], 0, 0
+        return CoverageMeasurement(0.0, [], 0, 0)
 
 
-def load_grcov_json(project_dir: Path, module_name: str) -> tuple[float, list[dict[str, Any]], int, int] | None:
+def load_grcov_json(project_dir: Path, module_name: str) -> CoverageMeasurement | None:
     """Parse the existing grcov JSON + filecache without re-running grcov.
 
     Returns (pct, files_data, covered, coverable) if the JSON exists, else None.
@@ -351,7 +352,7 @@ def load_grcov_json(project_dir: Path, module_name: str) -> tuple[float, list[di
         total_covered   = sum(f["covered"]   for f in files_data)
         total_coverable = sum(f["coverable"] for f in files_data)
         pct = (total_covered / total_coverable * 100.0) if total_coverable > 0 else 0.0
-        return pct, files_data, total_covered, total_coverable
+        return CoverageMeasurement(pct, files_data, total_covered, total_coverable)
     except Exception:
         return None
 
@@ -371,7 +372,7 @@ class CoverageProvider(ABC):
         self.ignore_pragma: str = deps.ignore_pragma
 
     @abstractmethod
-    def measure(self, project_dir: Path, module_name: str) -> tuple[float, list[dict[str, Any]], int, int]:
+    def measure(self, project_dir: Path, module_name: str) -> CoverageMeasurement:
         """Run instrumented tests. Returns (pct, files_data, covered, coverable)."""
 
     @abstractmethod
@@ -379,23 +380,23 @@ class CoverageProvider(ABC):
         """Quick per-file snapshot. Returns (covered, coverable) or None on failure."""
 
     @abstractmethod
-    def load_cached(self, project_dir: Path, module_name: str) -> tuple[float, list[dict[str, Any]], int, int] | None:
+    def load_cached(self, project_dir: Path, module_name: str) -> CoverageMeasurement | None:
         """Load previous measurement without re-running. Returns None if unavailable."""
 
 
 class TarpaulinProvider(CoverageProvider):
-    def measure(self, project_dir: Path, module_name: str) -> tuple[float, list[dict[str, Any]], int, int]:
+    def measure(self, project_dir: Path, module_name: str) -> CoverageMeasurement:
         return run_tarpaulin(self._deps, project_dir, module_name)
 
     def measure_file(self, project_dir: Path, module_name: str, rel_path: str) -> tuple[int, int] | None:
         return None  # tarpaulin is too slow for per-file quick checks
 
-    def load_cached(self, project_dir: Path, module_name: str) -> tuple[float, list[dict[str, Any]], int, int] | None:
+    def load_cached(self, project_dir: Path, module_name: str) -> CoverageMeasurement | None:
         return None
 
 
 class GrcovProvider(CoverageProvider):
-    def measure(self, project_dir: Path, module_name: str) -> tuple[float, list[dict[str, Any]], int, int]:
+    def measure(self, project_dir: Path, module_name: str) -> CoverageMeasurement:
         if not self._deps.grcov_bin.exists():
             self._deps.log("  [warn] COVERAGE_BACKEND=grcov but grcov not found — falling back to tarpaulin")
             return run_tarpaulin(self._deps, project_dir, module_name)
@@ -404,7 +405,7 @@ class GrcovProvider(CoverageProvider):
     def measure_file(self, project_dir: Path, module_name: str, rel_path: str) -> tuple[int, int] | None:
         return quick_file_coverage_grcov(self._deps, project_dir, module_name, rel_path)
 
-    def load_cached(self, project_dir: Path, module_name: str) -> tuple[float, list[dict[str, Any]], int, int] | None:
+    def load_cached(self, project_dir: Path, module_name: str) -> CoverageMeasurement | None:
         return load_grcov_json(project_dir, module_name)
 
 
@@ -414,7 +415,7 @@ class LlvmCovProvider(CoverageProvider):
     def _lcov_path(self, module_name: str, suffix: str = "") -> Path:
         return Path("/tmp") / f"llvmcov_{module_name}{suffix}.lcov"
 
-    def _run(self, project_dir: Path, module_name: str, suffix: str = "") -> tuple[float, list[dict[str, Any]], int, int]:
+    def _run(self, project_dir: Path, module_name: str, suffix: str = "") -> CoverageMeasurement:
         lcov_path = self._lcov_path(module_name, suffix)
         env = self._deps.cargo_env()
         # llvm-cov uses LLVM's regex (POSIX-ERE-ish): no `\d`, use `[0-9]` instead.
@@ -448,21 +449,21 @@ class LlvmCovProvider(CoverageProvider):
                 # the LAST kilobyte after pages of "Compiling …" messages).
                 _err_tail = result.stderr[-1500:] if len(result.stderr) > 1500 else result.stderr
                 self._deps.log(f"  llvm-cov: failed (exit={result.returncode}):\n{_err_tail}")
-                return 0.0, [], 0, 0
+                return CoverageMeasurement(0.0, [], 0, 0)
         except subprocess.TimeoutExpired:
             self._deps.log(f"  llvm-cov: timeout after {self._deps.build_timeout}s")
-            return 0.0, [], 0, 0
+            return CoverageMeasurement(0.0, [], 0, 0)
         except Exception as e:
             self._deps.log(f"  llvm-cov: error: {e}")
-            return 0.0, [], 0, 0
+            return CoverageMeasurement(0.0, [], 0, 0)
         return self._parse_lcov(lcov_path, project_dir)
 
-    def _parse_lcov(self, lcov_path: Path, project_dir: Path) -> tuple[float, list[dict[str, Any]], int, int]:
+    def _parse_lcov(self, lcov_path: Path, project_dir: Path) -> CoverageMeasurement:
         ignore_pragma = self._deps.ignore_pragma
         try:
             text = lcov_path.read_text(encoding="utf-8", errors="replace")
         except FileNotFoundError:
-            return 0.0, [], 0, 0
+            return CoverageMeasurement(0.0, [], 0, 0)
         files_data: list[dict[str, Any]] = []
         current_file: str | None = None
         line_hits: dict[int, int] = {}
@@ -507,9 +508,9 @@ class LlvmCovProvider(CoverageProvider):
         total_covered   = sum(f["covered"]   for f in files_data)
         total_coverable = sum(f["coverable"] for f in files_data)
         pct = (total_covered / total_coverable * 100.0) if total_coverable > 0 else 0.0
-        return pct, files_data, total_covered, total_coverable
+        return CoverageMeasurement(pct, files_data, total_covered, total_coverable)
 
-    def measure(self, project_dir: Path, module_name: str) -> tuple[float, list[dict[str, Any]], int, int]:
+    def measure(self, project_dir: Path, module_name: str) -> CoverageMeasurement:
         return self._run(project_dir, module_name)
 
     def measure_file(self, project_dir: Path, module_name: str, rel_path: str) -> tuple[int, int] | None:
@@ -520,7 +521,7 @@ class LlvmCovProvider(CoverageProvider):
                 return fd["covered"], fd["coverable"]
         return None
 
-    def load_cached(self, project_dir: Path, module_name: str) -> tuple[float, list[dict[str, Any]], int, int] | None:
+    def load_cached(self, project_dir: Path, module_name: str) -> CoverageMeasurement | None:
         lcov_path = self._lcov_path(module_name)
         if not lcov_path.exists():
             return None

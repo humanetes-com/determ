@@ -299,6 +299,7 @@ from pipeline_core.domain.cargo_toml import cargo_is_proc_macro as _domain_cargo
 from pipeline_core.domain.cargo_toml import cargo_package_name as _domain_cargo_package_name
 from pipeline_core.domain.cargo_toml import load_cargo_toml as _domain_load_cargo_toml
 from pipeline_core.domain.cluster_scope import ClusterScope
+from pipeline_core.domain.coverage import CoverageMeasurement
 from pipeline_core.domain.coverage_annotation import (
     annotate_uncovered as _annotate_uncovered,
 )
@@ -3919,7 +3920,7 @@ def _quick_file_coverage(project_dir: Path, module_name: str, rel_path: str) -> 
     return _coverage_provider.measure_file(project_dir, module_name, rel_path)
 
 
-def _measure_coverage(project_dir: Path, module_name: str) -> tuple[float, list[dict], int, int]:
+def _measure_coverage(project_dir: Path, module_name: str) -> CoverageMeasurement:
     _t0 = time.monotonic()
     pct, files_data, covered, coverable = _coverage_provider.measure(project_dir, module_name)
     _emit("coverage.measured",
@@ -3928,7 +3929,7 @@ def _measure_coverage(project_dir: Path, module_name: str) -> tuple[float, list[
           duration_ms=int((time.monotonic() - _t0) * 1000),
           data={"pct": pct, "covered": covered, "coverable": coverable,
                 "backend": COVERAGE_BACKEND, "file_count": len(files_data)})
-    return pct, files_data, covered, coverable
+    return CoverageMeasurement(pct, files_data, covered, coverable)
 
 
 # S26: _coverage_provider constructed standalone above (before _APP); also injected

@@ -79,10 +79,14 @@ def test_make_coverage_provider_selects_by_enum_identity() -> None:
 def test_parse_lcov_basic_counts_and_schema(tmp_path: Path) -> None:
     """One src file: covered = DA lines with hit>0, coverable = all DA lines; the
     tarpaulin-compatible record (abs_path/path/traces/covered/coverable) is built."""
+    from pipeline_core.domain.coverage import CoverageMeasurement
     (tmp_path / "src").mkdir()
     lcov = tmp_path / "c.lcov"
     _write_lcov(lcov, "SF:src/f.rs\nDA:1,5\nDA:2,0\nDA:3,2\nend_of_record\n")
-    pct, files, covered, coverable = _provider()._parse_lcov(lcov, tmp_path)
+    m = _provider()._parse_lcov(lcov, tmp_path)
+    assert isinstance(m, CoverageMeasurement)          # named result, still a tuple
+    assert (m.pct, m.covered, m.coverable) == (m[0], m[2], m[3])
+    pct, files, covered, coverable = m                  # positional unpack unchanged
     assert (covered, coverable) == (2, 3)
     assert pct == pytest.approx(2 / 3 * 100.0)
     assert len(files) == 1

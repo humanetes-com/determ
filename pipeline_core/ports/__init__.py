@@ -10,6 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+from ..domain.coverage import CoverageMeasurement
 from ..domain.models import (
     CfgOccurrence,
     ConstRecord,
@@ -72,15 +73,16 @@ class Cargo(Protocol):
 class Coverage(Protocol):
     """A coverage backend (tarpaulin / grcov / llvm-cov).
 
-    Matches the relocated provider seam: ``measure`` returns the tarpaulin-compatible
-    ``(pct, files_data, covered, coverable)`` tuple that downstream pragma/uncovered-line
-    passes consume; ``measure_file`` is the fast per-file snapshot; ``load_cached`` restores
-    a prior measurement without re-running.
+    Matches the relocated provider seam: ``measure`` returns a
+    :class:`~pipeline_core.domain.coverage.CoverageMeasurement`
+    ``(pct, files, covered, coverable)`` that downstream pragma/uncovered-line passes
+    consume; ``measure_file`` is the fast per-file snapshot; ``load_cached`` restores a
+    prior measurement without re-running.
     """
 
-    def measure(self, project_dir: Path, module_name: str) -> tuple[float, list[dict[str, Any]], int, int]: ...
+    def measure(self, project_dir: Path, module_name: str) -> CoverageMeasurement: ...
     def measure_file(self, project_dir: Path, module_name: str, rel_path: str) -> tuple[int, int] | None: ...
-    def load_cached(self, project_dir: Path, module_name: str) -> tuple[float, list[dict[str, Any]], int, int] | None: ...
+    def load_cached(self, project_dir: Path, module_name: str) -> CoverageMeasurement | None: ...
 
 
 @runtime_checkable
