@@ -16,7 +16,13 @@ from typing import Any
 
 from pipeline_core.application.fix_loop import FixOutcome, drive_fix_loop
 from pipeline_core.domain.llm_output import extract_fn_bodies
-from pipeline_core.domain.models import BuildCluster, DispatchFamily, Frontier, ImplBlock
+from pipeline_core.domain.models import (
+    BuildCluster,
+    DispatchFamily,
+    FnLocator,
+    Frontier,
+    ImplBlock,
+)
 from pipeline_core.domain.refine import FloorStall
 from pipeline_core.prompts.context import PerImplSections
 
@@ -82,7 +88,7 @@ def fill_impl_blocks(
     check_cmd: str,
     cluster_env: dict[str, str] | None,
     fr_path: Path | None,
-    tdd_frontier_keys: set[tuple[str, str]] | None,
+    tdd_frontier_keys: set[FnLocator] | None,
     tdd_frontier_tests: Frontier | None = None,  # Plan 10 U2
     tdd_test_cmd: str | None = None,                                       # Plan 10 U2
 ) -> dict[str, Any]:
@@ -455,7 +461,7 @@ def fill_impl_blocks(
                     _block_tests: set[str] = set()
                     for _bm in block.stub_members:
                         _block_tests |= (tdd_frontier_tests or {}).get(
-                            (block.file, _bm.fn_name), set())
+                            FnLocator(block.file, _bm.fn_name), set())
                     _u2_impl = _u2_test_gate(_block_tests, tdd_test_cmd,
                                              target_src_dir, cluster_env)
                 else:

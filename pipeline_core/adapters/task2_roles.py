@@ -22,6 +22,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from pipeline_core.domain.models import FnLocator
+
 
 # --------------------------------------------------------------------------- #
 # ports.generator.Telemetry
@@ -148,7 +150,7 @@ class CargoBackendAdapter:
     run_check_diag_fn: Callable[..., tuple[int, str, list[Any]]]
     build_test_cmd_fn: Callable[[list[str], Any], str]
     env_fn: Callable[[], dict[str, str]]
-    implicated_fns_fn: Callable[[str, Path], list[tuple[str, str]]]
+    implicated_fns_fn: Callable[[str, Path], list[FnLocator]]
     attribute_failures_fn: Callable[..., tuple[Any, str]]
     filter_test_targets_fn: Callable[[Any, Path], Any]
 
@@ -176,12 +178,12 @@ class CargoBackendAdapter:
         return self.env_fn()
 
     def implicated_fns_from_cargo_errors(self, cargo_output: str,
-                                         target_src_dir: Path) -> list[tuple[str, str]]:
+                                         target_src_dir: Path) -> list[FnLocator]:
         return self.implicated_fns_fn(cargo_output, target_src_dir)
 
     def attribute_failures(self, test_output: str, src_dir: Path,
-                           recently_filled: list[tuple[str, str]],
-                           test_reverse_map: dict[str, set[tuple[str, str]]],
+                           recently_filled: list[FnLocator],
+                           test_reverse_map: dict[str, set[FnLocator]],
                            cluster_name: str) -> tuple[Any, str]:
         fr, kind = self.attribute_failures_fn(test_output, src_dir, recently_filled,
                                               test_reverse_map, cluster_name)
@@ -198,11 +200,11 @@ class FillEngineAdapter:
     fill_groups_fn: Callable[..., dict[str, Any]]
     group_tests_fn: Callable[..., list[dict[str, Any]]]
     cleanup_residuals_fn: Callable[..., dict[str, Any]]
-    scan_unimplemented_fn: Callable[[Path], list[tuple[str, str]]]
+    scan_unimplemented_fn: Callable[[Path], list[FnLocator]]
     merge_cluster_outputs_fn: Callable[..., dict[str, Any]]
     generate_fix_loop_fn: Callable[..., tuple[bool, str]]
     reset_exhaustion_flags_fn: Callable[[Path, str], object]  # return discarded
-    build_test_reverse_map_fn: Callable[..., dict[str, set[tuple[str, str]]]]
+    build_test_reverse_map_fn: Callable[..., dict[str, set[FnLocator]]]
 
     def run_phase_c_tdd(self, **kw: Any) -> dict[str, Any]:
         return self.run_phase_c_tdd_fn(**kw)
@@ -225,7 +227,7 @@ class FillEngineAdapter:
         return self.cleanup_residuals_fn(target_src_dir, project_dir, functional_req,
                                          test_files, **kw)
 
-    def scan_unimplemented_functions(self, src_dir: Path) -> list[tuple[str, str]]:
+    def scan_unimplemented_functions(self, src_dir: Path) -> list[FnLocator]:
         return self.scan_unimplemented_fn(src_dir)
 
     def merge_cluster_outputs(self, **kw: Any) -> dict[str, Any]:
@@ -238,7 +240,7 @@ class FillEngineAdapter:
         self.reset_exhaustion_flags_fn(project_dir, reason)
 
     def build_test_reverse_map(self, test_files: list[Path],
-                               src_dir: Path) -> dict[str, set[tuple[str, str]]]:
+                               src_dir: Path) -> dict[str, set[FnLocator]]:
         return self.build_test_reverse_map_fn(test_files, src_dir)
 
 

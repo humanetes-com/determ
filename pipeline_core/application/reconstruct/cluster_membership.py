@@ -23,7 +23,7 @@ from pipeline_core.application.reconstruct.stub_scan import (
     scan_unimplemented_functions,
 )
 from pipeline_core.domain import cfg as _cfg
-from pipeline_core.domain.models import ImplBlock, ModRecord, TypeRecord
+from pipeline_core.domain.models import FnLocator, ImplBlock, ModRecord, TypeRecord
 from pipeline_core.domain.rust_scan import contains_decl_keyword, named_fn_decl_start
 from pipeline_core.domain.test_count import file_top_cfg_excluded
 
@@ -391,7 +391,7 @@ def scan_unimplemented_for_cluster(
     enumerate_fns: Callable[[Path], list[dict[str, Any]] | None],
     mod_records: Callable[[Path], list[ModRecord] | None],
     log: Callable[[str], None],
-) -> list[tuple[str, str]]:
+) -> list[FnLocator]:
     """Cluster-aware variant of `scan_unimplemented_functions`.
 
     Returns only stubs that belong to `cluster` per static cfg evaluation. When
@@ -400,12 +400,12 @@ def scan_unimplemented_for_cluster(
     raw = scan_unimplemented_functions(target_src_dir, enumerate_fns=enumerate_fns)
     if cluster is None:
         return raw
-    out: list[tuple[str, str]] = []
+    out: list[FnLocator] = []
     skipped = 0
     for rel, fn in raw:
         if fn_belongs_to_cluster(target_src_dir, rel, fn, cluster,
                                  mod_records=mod_records):
-            out.append((rel, fn))
+            out.append(FnLocator(rel, fn))
         else:
             skipped += 1
     if skipped:

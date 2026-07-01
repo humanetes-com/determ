@@ -30,7 +30,7 @@ from pipeline_core.domain.attribution import (
     FailureKind,
     line_to_fn_record,
 )
-from pipeline_core.domain.models import Diagnostic, Frontier
+from pipeline_core.domain.models import Diagnostic, FnLocator, Frontier
 from pipeline_core.domain.rust_idents import ascii_word_tokens, test_fn_names
 from pipeline_core.domain.test_results import (
     build_test_name_index,
@@ -131,7 +131,7 @@ def extract_tdd_frontier(deps: AttributionDeps,
                                       col_no=col_no)
             if rec is None:
                 continue
-            key = (rel, rec["fn_name"])
+            key = FnLocator(rel, rec["fn_name"])
             frontier.setdefault(key, set()).add(test_name)
     return frontier
 
@@ -190,7 +190,7 @@ def behavior_frontier(
                 if len(recs) > 1 and not (
                         identifiers_in(rec.get("container", "")) & idents):
                     continue
-                frontier.setdefault((rec["file"], fn_name), set()).add(tname)
+                frontier.setdefault(FnLocator(rec["file"], fn_name), set()).add(tname)
     return frontier, test_srcs
 
 def extract_tdd_compile_frontier(deps: AttributionDeps,
@@ -229,7 +229,7 @@ def extract_tdd_compile_frontier(deps: AttributionDeps,
         rec = line_to_fn_record(file_text_cache[rel], line_no, recs)
         if rec is None:
             continue
-        frontier.setdefault((rel, rec["fn_name"]), set()).add("<compile>")
+        frontier.setdefault(FnLocator(rel, rec["fn_name"]), set()).add("<compile>")
     return frontier
 
 def frontier_from_diags(deps: AttributionDeps,
@@ -265,7 +265,7 @@ def frontier_from_diags(deps: AttributionDeps,
         rec = line_to_fn_record(file_text_cache[rel], line_no, recs)
         if rec is None:
             continue
-        frontier.setdefault((rel, rec["fn_name"]), set()).add("<compile>")
+        frontier.setdefault(FnLocator(rel, rec["fn_name"]), set()).add("<compile>")
     return frontier
 
 def compile_error_frontier(
@@ -295,7 +295,7 @@ def build_test_reverse_map(
     deps: AttributionDeps,
     test_files: list[Path],
     src_dir: Path,
-) -> dict[str, set[tuple[str, str]]]:
+) -> dict[str, set[FnLocator]]:
     """Return {test_name: set[(file_rel, fn_name)]} — for each #[test] fn in
     the test files, the set of fn records in `src_dir` whose names appear
     textually in the test's body. Best-effort static analysis used as the
@@ -314,7 +314,7 @@ def build_test_reverse_map(
     # only ever attributed to a fixable production fn, never to another test
     # (the test-oracle is immutable — FR-018), so test fns are excluded as
     # candidates and instead indexed as KEYS by the inline pass below.
-    by_name: dict[str, list[tuple[str, str]]] = {}
+    by_name: dict[str, list[FnLocator]] = {}
     src_test_recs: list[dict[str, Any]] = []
     for r in fn_index:
         if is_test_fn_record(r):
@@ -323,8 +323,8 @@ def build_test_reverse_map(
         name = r.get("fn_name", "")
         f = r.get("file", "")
         if name and f:
-            by_name.setdefault(name, []).append((f, name))
-    out: dict[str, set[tuple[str, str]]] = {}
+            by_name.setdefault(name, []).append(FnLocator(f, name))
+    out: dict[str, set[FnLocator]] = {}
     for tp in test_files:
         try:
             text = tp.read_text(encoding="utf-8", errors="replace")
@@ -335,7 +335,7 @@ def build_test_reverse_map(
         # identifier appears anywhere in the test file. This is file-level
         # not fn-body-level (cheaper, captures helper fns the test calls).
         for test_name in test_fn_names(text):
-            candidates: set[tuple[str, str]] = set()
+            candidates: set[FnLocator] = set()
             for ident in ids:
                 if ident in by_name:
                     candidates.update(by_name[ident])
@@ -370,8 +370,8 @@ def attribute_failures(
     deps: AttributionDeps,
     test_output: str,
     src_dir: Path,
-    recently_filled: list[tuple[str, str]],
-    test_reverse_map: dict[str, set[tuple[str, str]]],
+    recently_filled: list[FnLocator],
+    test_reverse_map: dict[str, set[FnLocator]],
     cluster_name: str,
 ) -> tuple[Frontier, str]:
     """Robust failure-to-fn attribution chain. Returns (frontier, kind). Callers
@@ -427,7 +427,7 @@ def attribute_failures(
                 ref = info.get("fn") or ""
                 if "::" in ref:
                     fp, fn = ref.split("::", 1)
-                    key = (fp.strip(), fn.strip())
+                    key = FnLocator(fp.strip(), fn.strip())
                     if key[0] and key[1]:
                         synth.setdefault(key, set()).add(tname)
             synth = _strip(synth)

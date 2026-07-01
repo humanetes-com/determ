@@ -31,6 +31,7 @@ from pipeline_core.domain.enums import FillUnit
 from pipeline_core.domain.models import (
     BuildCluster,
     ClusterFillResult,
+    FnLocator,
     Frontier,
     Stub,
 )
@@ -90,7 +91,7 @@ class PhaseCFillEngine:
         max_passes: int = 3,
         leaf_name_counts: dict[str, int] | None = None,
         fr_path: Path | None = None,
-        tdd_frontier_keys: set[tuple[str, str]] | None = None,
+        tdd_frontier_keys: set[FnLocator] | None = None,
         skip_end_pass_test: bool = False,
         tdd_frontier_tests: Frontier | None = None,
         tdd_test_cmd: str | None = None,
@@ -190,7 +191,7 @@ class PhaseCFillEngine:
             _tuples = [r.key for r in stubs]
             _ordered_tuples = self.ws.leaf_first_fn_order(_tuples, leaf_name_counts)
             # Reorder records to match the leaf-first tuple order.
-            _seen: dict[tuple[str, str], int] = {}
+            _seen: dict[FnLocator, int] = {}
             _reordered: list[Stub] = []
             for tup in _ordered_tuples:
                 matches = [r for r in stubs if r.key == tup]
@@ -236,7 +237,7 @@ class PhaseCFillEngine:
                 "filled_count": _filled_count,
             })
             progress_this_pass = 0
-            filled_this_pass: list[tuple[str, str]] = []  # [(file_rel, fn_name)]
+            filled_this_pass: list[FnLocator] = []  # [(file_rel, fn_name)]
             pass_fail_floor = 0  # P7.6: this pass's failing-test floor
 
             # P8: priority-level batching — `stubs` is leaf-first sorted, so
@@ -267,7 +268,7 @@ class PhaseCFillEngine:
 
             def _worker(work_queue: _queue_mod.Queue[tuple[int, Stub]], *,
                         _pass_ctx: PerFnPassCtx = _pass_ctx,
-                        filled_this_pass: list[tuple[str, str]] = filled_this_pass) -> None:
+                        filled_this_pass: list[FnLocator] = filled_this_pass) -> None:
                 # B023: the per-LEVEL queue AND the per-pass ctx/list are passed
                 # explicitly — free-var reads would rely on late binding.
                 nonlocal attempts, fns_filled, progress_this_pass
@@ -292,7 +293,7 @@ class PhaseCFillEngine:
                         if res.filled:
                             fns_filled += 1
                             progress_this_pass += 1
-                            filled_this_pass.append((res.file, res.fn_name))
+                            filled_this_pass.append(FnLocator(res.file, res.fn_name))
                         if res.error:
                             errors.append(res.error)
 
@@ -367,7 +368,7 @@ class PhaseCFillEngine:
 
                         def _attempt_test_fix(test_fix_attempt: int, *,
                                               pass_n: int = pass_n,
-                                              filled_this_pass: list[tuple[str, str]] = filled_this_pass,
+                                              filled_this_pass: list[FnLocator] = filled_this_pass,
                                               test_cmd: str = test_cmd,
                                               test_fix_history: dict[tuple[str, str], list[dict[str, Any]]] = test_fix_history,
                                               _stall_seen: dict[str, int] = _stall_seen,
@@ -388,9 +389,9 @@ class PhaseCFillEngine:
                                     failed_tests=sorted(failed_tests),
                                     cluster_name=cluster_name,
                                 )
-                            fns_to_retry: list[tuple[str, str]] = []
+                            fns_to_retry: list[FnLocator] = []
                             if classification:
-                                wanted: set[tuple[str, str]] = set()
+                                wanted: set[FnLocator] = set()
                                 for _test, info in classification.items():
                                     if info["category"] not in (
                                             "BAD_FILL", "TEST_PRECONDITION_MISSING"):
@@ -398,7 +399,7 @@ class PhaseCFillEngine:
                                     ref = info["fn"]
                                     if "::" in ref:
                                         rel_f, fn = ref.split("::", 1)
-                                        wanted.add((rel_f.strip(), fn.strip()))
+                                        wanted.add(FnLocator(rel_f.strip(), fn.strip()))
                                 if filled_this_pass:
                                     in_scope = set(filled_this_pass)
                                     fns_to_retry = [p for p in wanted if p in in_scope]
@@ -414,7 +415,7 @@ class PhaseCFillEngine:
                                 # Naive fallback: token match in test output.
                                 for (rel_f, fn) in filled_this_pass:
                                     if any(fn in t for t in failed_tests) or fn in test_out:
-                                        fns_to_retry.append((rel_f, fn))
+                                        fns_to_retry.append(FnLocator(rel_f, fn))
                             if not fns_to_retry and not filled_this_pass:
                                 # Reverse-lookup fallback: for each failing test
                                 # binary, enumerate fns it exercises and feed those
@@ -433,7 +434,7 @@ class PhaseCFillEngine:
                                         file_rel=rel_path, src_dir=_src_for_macros,
                                     ):
                                         if Path(tf[0]).stem in test_fname_set:
-                                            fns_to_retry.append((rel_path, fn))
+                                            fns_to_retry.append(FnLocator(rel_path, fn))
                                             break
                                 fns_to_retry = list(dict.fromkeys(fns_to_retry))
                             if not fns_to_retry:
@@ -461,7 +462,7 @@ class PhaseCFillEngine:
                                     file_text=cur_text, file_rel=rel_f, fn_name=fn,
                                     sig_text=sig_t, body_text=cur_body,
                                     error_excerpt=error_excerpt_test,
-                                    container=_retry_containers.get((rel_f, fn), ""),
+                                    container=_retry_containers.get(FnLocator(rel_f, fn), ""),
                                     type_records=_crate_type_records,
                                     fr_path=fr_path,
                                 )

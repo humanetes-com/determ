@@ -26,6 +26,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
+from pipeline_core.domain.models import FnLocator
 from pipeline_core.ports.structure import StructureReader
 
 
@@ -180,20 +181,20 @@ class PromptContextAdapter:
 class WorkspaceModelAdapter:
     structure: StructureReader
     scan_stub_records_fn: Callable[[Path, Any], list[dict[str, Any]] | None]
-    scan_stub_tuples_fn: Callable[[Path, Any], list[tuple[str, str]]]
+    scan_stub_tuples_fn: Callable[[Path, Any], list[FnLocator]]
     collect_impl_blocks_fn: Callable[[Path], list[Any] | None]
-    fn_container_index_fn: Callable[[Path], dict[tuple[str, str], str]]
+    fn_container_index_fn: Callable[[Path], dict[FnLocator, str]]
     fn_belongs_to_cluster_fn: Callable[..., bool]
     cluster_filter_type_methods_fn: Callable[[list[Any], Any], list[Any]]
     is_gen_tests_file_fn: Callable[[str], bool]
-    leaf_first_fn_order_fn: Callable[[list[tuple[str, str]], Any], list[tuple[str, str]]]
+    leaf_first_fn_order_fn: Callable[[list[FnLocator], Any], list[FnLocator]]
 
     def scan_stub_records(self, target_src_dir: Path,
                           cluster: Any) -> list[dict[str, Any]] | None:
         return self.scan_stub_records_fn(target_src_dir, cluster)
 
     def scan_stub_tuples(self, target_src_dir: Path,
-                         cluster: Any) -> list[tuple[str, str]]:
+                         cluster: Any) -> list[FnLocator]:
         return self.scan_stub_tuples_fn(target_src_dir, cluster)
 
     def enumerate_fns(self, src_dir: Path) -> list[dict[str, Any]] | None:
@@ -205,7 +206,7 @@ class WorkspaceModelAdapter:
     def collect_impl_blocks(self, src_dir: Path) -> list[Any] | None:
         return self.collect_impl_blocks_fn(src_dir)
 
-    def fn_container_index(self, src_dir: Path) -> dict[tuple[str, str], str]:
+    def fn_container_index(self, src_dir: Path) -> dict[FnLocator, str]:
         return self.fn_container_index_fn(src_dir)
 
     def fn_belongs_to_cluster(self, target_src_dir: Path, file_rel: str,
@@ -221,9 +222,9 @@ class WorkspaceModelAdapter:
     def is_gen_tests_file(self, name: str) -> bool:
         return self.is_gen_tests_file_fn(name)
 
-    def leaf_first_fn_order(self, tuples: list[tuple[str, str]],
+    def leaf_first_fn_order(self, tuples: list[FnLocator],
                             leaf_name_counts: dict[str, int] | None
-                            ) -> list[tuple[str, str]]:
+                            ) -> list[FnLocator]:
         return self.leaf_first_fn_order_fn(tuples, leaf_name_counts)
 
 
@@ -293,7 +294,7 @@ class TestLinkerAdapter:
                                          src_dir=src_dir, container=container)
 
     def classify_failures(self, test_out: str,
-                          filled_this_pass: list[tuple[str, str]],
+                          filled_this_pass: list[FnLocator],
                           failed_tests: list[str],
                           cluster_name: str) -> dict[str, dict[str, Any]]:
         return self.classify_failures_fn(test_out, filled_this_pass, failed_tests,
@@ -301,7 +302,7 @@ class TestLinkerAdapter:
 
     def write_test_fix_log(self, *, project_dir: Path, cluster_name: str, pass_n: int,
                            fix_iter: int, test_out: str, failed_tests: list[str],
-                           fns_retried: list[tuple[str, str]], cur_fail_count: int,
+                           fns_retried: list[FnLocator], cur_fail_count: int,
                            new_fail_count: int, best_fail_count: int,
                            stall: int) -> None:
         self.write_test_fix_log_fn(

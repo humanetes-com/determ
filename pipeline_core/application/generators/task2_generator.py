@@ -36,7 +36,7 @@ from ...domain.generation import (
     topo_sort_files,
 )
 from ...domain.llm_output import extract_files
-from ...domain.models import BuildCluster
+from ...domain.models import BuildCluster, FnLocator
 from ...domain.rust_scan import item_names
 from ...domain.test_results import parse_test_counts
 from ...domain.text import (
@@ -1551,11 +1551,11 @@ class StaticSkeletonTask2Generator(Task2Generator):
             self.tel.log(f"  {tag} post-merge reverse-map build failed: {_e}")
             test_reverse_map = {}
 
-        permanently_exhausted: set[tuple[str, str]] = set()
+        permanently_exhausted: set[FnLocator] = set()
         # The merge landed every cluster's fills — D3's "other fills landed"
         # criterion holds globally, so cross-iter exhaustion gets one reset.
         self.fill.reset_exhaustion_flags(project_dir, "post-merge: merged tree is new context")
-        recently_filled: list[tuple[str, str]] = []
+        recently_filled: list[FnLocator] = []
         recently_filled_max = self.cfg.recently_filled_max
         stall = 0
         best_pass = -1
@@ -1658,7 +1658,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
                 skip_end_pass_test=True,
             )
             cur_stubs = set(self.fill.scan_unimplemented_functions(project_dir / "src"))
-            newly_filled: list[tuple[str, str]] = [
+            newly_filled: list[FnLocator] = [
                 k for k in eligible
                 if k not in cur_stubs
                 and (k[0].split("/")[-1], k[1]) not in cur_stubs

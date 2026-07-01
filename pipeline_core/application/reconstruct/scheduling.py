@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pipeline_core.domain.models import Frontier, Stub
+from pipeline_core.domain.models import FnLocator, Frontier, Stub
 
 
 def group_priority_levels(
@@ -56,9 +56,9 @@ def leaf_first_group_order(groups: list[dict[str, Any]]) -> list[dict[str, Any]]
 
 
 def leaf_first_fn_order(
-    stubs: list[tuple[str, str]],
+    stubs: list[FnLocator],
     name_counts: dict[str, int] | None,
-) -> list[tuple[str, str]]:
+) -> list[FnLocator]:
     """Sort stubs so the most-referenced fns come first (likely call-graph
     leaves — utility fns relied on by many others). Public-API entry points end
     up last, where they can see real helper bodies on disk.
@@ -67,7 +67,7 @@ def leaf_first_fn_order(
     bake step. When empty/None, falls back to deterministic order (file, fn)."""
     if not name_counts:
         return sorted(stubs)
-    scores: dict[tuple[str, str], int] = {}
+    scores: dict[FnLocator, int] = {}
     for s in stubs:
         _, fn = s
         scores[s] = name_counts.get(fn, 0) if fn else 0
@@ -78,8 +78,8 @@ def leaf_first_fn_order(
 def order_frontier(
     frontier: Frontier,
     leaf_name_counts: dict[str, int] | None,
-    panic_depths: dict[tuple[str, str], int] | None = None,
-) -> list[tuple[tuple[str, str], set[str]]]:
+    panic_depths: dict[FnLocator, int] | None = None,
+) -> list[tuple[FnLocator, set[str]]]:
     """Order frontier entries by D2's rule: shallowest panic depth first, then
     most-callers, then alphabetical (file, fn) for reproducibility.
 
@@ -91,10 +91,10 @@ def order_frontier(
     leaf_name_counts = leaf_name_counts or {}
     items = list(frontier.items())
 
-    def _key(item: tuple[tuple[str, str], set[str]]) -> tuple[int, int, int, str, str]:
+    def _key(item: tuple[FnLocator, set[str]]) -> tuple[int, int, int, str, str]:
         (file_rel, fn_name), tests = item
         return (
-            panic_depths.get((file_rel, fn_name), 0),  # shallowest first
+            panic_depths.get(FnLocator(file_rel, fn_name), 0),  # shallowest first
             -len(tests),                                # most tests first
             -leaf_name_counts.get(fn_name, 0),          # most-referenced first
             file_rel, fn_name,                          # alphabetical reproducible

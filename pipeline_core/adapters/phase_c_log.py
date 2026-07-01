@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from pipeline_core.domain.models import FnLocator
 from pipeline_core.domain.workspace_layout import PHASE_C_LOGS_DIR
 from pipeline_core.log import log
 
@@ -17,7 +18,7 @@ def write_phase_c_test_fix_log(
     fix_iter: int,
     test_out: str,
     failed_tests: list[str],
-    fns_retried: list[tuple[str, str]],
+    fns_retried: list[FnLocator],
     cur_fail_count: int,
     new_fail_count: int,
     best_fail_count: int,

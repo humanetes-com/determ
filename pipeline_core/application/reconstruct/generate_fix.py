@@ -36,7 +36,7 @@ from pipeline_core.domain.enums import FillUnit, FixStrategy
 from pipeline_core.domain.fix_plan import plan_per_fn, plan_per_impl
 from pipeline_core.domain.fix_report import FixReport
 from pipeline_core.domain.fix_session import FixSession
-from pipeline_core.domain.models import ImplBlock
+from pipeline_core.domain.models import FnLocator, ImplBlock
 from pipeline_core.ports.fix_engine import FrontierBuilder
 
 # (output, history, retro) -> FixReport — the legacy whole-file rewrite path.
@@ -67,8 +67,8 @@ class CompileFixStrategy(Protocol):
                 retro: str = ...) -> FixReport: ...
 
 
-def _container_index(recs: list[dict[str, Any]]) -> dict[tuple[str, str], str]:
-    return {(r.get("file", ""), r.get("fn_name", "")): r.get("container", "")
+def _container_index(recs: list[dict[str, Any]]) -> dict[FnLocator, str]:
+    return {FnLocator(r.get("file", ""), r.get("fn_name", "")): r.get("container", "")
             for r in recs}
 
 

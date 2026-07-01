@@ -20,7 +20,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 from pipeline_core.domain.fix_target import FnTarget, ImplTarget
-from pipeline_core.domain.models import Frontier, ImplBlock
+from pipeline_core.domain.models import FnLocator, Frontier, ImplBlock
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,7 +40,7 @@ class FixPlan:
 def plan_per_fn(
     frontier: Frontier, *,
     name_counts: Mapping[tuple[str, str], int],
-    container_index: Mapping[tuple[str, str], str],
+    container_index: Mapping[FnLocator, str],
     writable: Callable[[str], bool],
 ) -> FixPlan:
     """One :class:`FnTarget` per UNIQUE (file, fn); a name with >1 record is
@@ -61,13 +61,13 @@ def plan_per_fn(
 def plan_per_impl(
     frontier: Frontier, *,
     fn_to_block: Mapping[tuple[str, str], ImplBlock],
-    container_index: Mapping[tuple[str, str], str],
+    container_index: Mapping[FnLocator, str],
     writable: Callable[[str], bool],
 ) -> FixPlan:
     """Group every impl-member frontier fn into one :class:`ImplTarget` per
     block; the rest are free :class:`FnTarget`s."""
     impl_groups: dict[tuple[str, str], ImplTarget] = {}
-    free_keys: set[tuple[str, str]] = set()
+    free_keys: set[FnLocator] = set()
     for key in frontier:
         rel, fn = key
         if not writable(rel):
@@ -78,7 +78,7 @@ def plan_per_impl(
         else:
             impl_groups[(block.file, block.container)] = ImplTarget(
                 block.file, block.container, block)
-    free = [FnTarget(rel, fn, container_index.get((rel, fn), ""))
+    free = [FnTarget(rel, fn, container_index.get(FnLocator(rel, fn), ""))
             for (rel, fn) in sorted(free_keys)]
     return FixPlan(
         impl_groups=tuple(impl_groups[k] for k in sorted(impl_groups)),

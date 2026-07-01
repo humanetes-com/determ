@@ -18,6 +18,7 @@ from pipeline_core.application.reconstruct.fill_merge import (
     merge_fills_preserving_existing,
 )
 from pipeline_core.domain.llm_output import extract_files
+from pipeline_core.domain.models import FnLocator
 from pipeline_core.domain.rust_scan import contains_word
 from pipeline_core.prompts.cleanup_residuals import build_cleanup_residuals_prompt
 from pipeline_core.prompts.test_grouping import format_skeleton_for_prompt
@@ -25,7 +26,7 @@ from pipeline_core.prompts.test_grouping import format_skeleton_for_prompt
 
 @dataclass(frozen=True)
 class CleanupResidualsDeps:
-    scan_unimplemented: Callable[[Path], list[tuple[str, str]]]
+    scan_unimplemented: Callable[[Path], list[FnLocator]]
     load_skeleton_files: Callable[[Path], list[tuple[str, str]]]
     ask: Callable[..., str]
     task2_model: str
@@ -35,13 +36,13 @@ class CleanupResidualsDeps:
 
 
 def filter_test_exercised(
-    stubs: list[tuple[str, str]], test_files: list[tuple[str, str]],
-) -> list[tuple[str, str]]:
+    stubs: list[FnLocator], test_files: list[tuple[str, str]],
+) -> list[FnLocator]:
     """Keep only stubs whose function name appears (as a token) in any test file."""
     if not stubs or not test_files:
         return []
     test_blob = "\n".join(content for _, content in test_files)
-    return [(rel, name) for rel, name in stubs if contains_word(test_blob, name)]
+    return [FnLocator(rel, name) for rel, name in stubs if contains_word(test_blob, name)]
 
 
 def cleanup_residuals(

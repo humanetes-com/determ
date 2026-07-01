@@ -10,7 +10,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Any, NamedTuple
 
-from pipeline_core.domain.models import Frontier
+from pipeline_core.domain.models import FnLocator, Frontier
 
 
 class FailureKind(StrEnum):
@@ -65,7 +65,7 @@ def line_to_fn_record(
 
 
 def union_unattributed_stubs(
-    frontier: Frontier, remaining_stubs: list[tuple[str, str]],
+    frontier: Frontier, remaining_stubs: list[FnLocator],
 ) -> Frontier:
     """Add every remaining `unimplemented!()` stub to the frontier so a helper
     that NO failing test attributes directly (a leaf called only transitively,

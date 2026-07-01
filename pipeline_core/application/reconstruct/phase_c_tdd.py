@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from pipeline_core.domain.attribution import union_unattributed_stubs
-from pipeline_core.domain.models import BuildCluster, Frontier
+from pipeline_core.domain.models import BuildCluster, FnLocator, Frontier
 from pipeline_core.domain.refine import Attempt, LoopState
 from pipeline_core.domain.test_results import parse_failed_tests, parse_test_counts
 
@@ -97,8 +97,8 @@ def run_phase_c_tdd(
          f"max_stalls={max_stalls}, timeout={test_timeout}s, "
          f"stems={len(test_stems)}")
 
-    permanently_exhausted: set[tuple[str, str]] = set()
-    last_notes_count: dict[tuple[str, str], int] = {}
+    permanently_exhausted: set[FnLocator] = set()
+    last_notes_count: dict[FnLocator, int] = {}
     last_total_filled = 0
 
     total_filled = 0
@@ -118,14 +118,14 @@ def run_phase_c_tdd(
     stall = 0
     best_pass = -1
     best_fail = None
-    recently_filled: list[tuple[str, str]] = []
+    recently_filled: list[FnLocator] = []
     recently_filled_max = int(os.getenv("TDD_RECENTLY_FILLED_MAX", "50"))
     # Hook 3 — causal-regression tracking. `prev_failed` = the failing-test set
     # from the previous iter; `last_newly_filled` = the fns we materially
     # changed last iter. A test that flips pass→fail right after a fill is a
     # regression attributable to that fill.
     prev_failed: set[str] = set()
-    last_newly_filled: list[tuple[str, str]] = []
+    last_newly_filled: list[FnLocator] = []
     _regression_notes = os.getenv("TDD_REGRESSION_NOTES", "1") == "1"
     # Build the test reverse map once per cluster — cheap (one extractor
     # invocation, one regex scan of each test file). Used as the LAST

@@ -30,7 +30,7 @@ from pipeline_core.domain.fix_report import FixReport
 from pipeline_core.domain.fix_session import FixSession
 from pipeline_core.domain.fix_target import FixTarget, FnTarget, ImplTarget
 from pipeline_core.domain.llm_output import extract_fn_bodies
-from pipeline_core.domain.models import Frontier
+from pipeline_core.domain.models import FnLocator, Frontier
 from pipeline_core.ports.fix_engine import (
     CompileChecker,
     FixModel,
@@ -317,7 +317,7 @@ def one_shot_fill(
         errs = output[-err_cap:] if len(output) > err_cap else output
         if kind == "behavior":
             tests_block = ""
-            for tn in sorted(targets[(rel, fn)]):
+            for tn in sorted(targets[FnLocator(rel, fn)]):
                 trel, tsrc = behavior_srcs.get(tn, ("", ""))
                 if tsrc and len(tests_block) + len(tsrc) <= src_snip_cap:
                     tests_block += f"// {trel} :: {tn}\n{tsrc}\n\n"

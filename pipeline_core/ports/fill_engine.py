@@ -22,6 +22,7 @@ from typing import Any, Protocol, runtime_checkable
 from pipeline_core.domain.models import (
     BuildCluster,
     FnFixContext,
+    FnLocator,
     ImplBlock,
     TypeRecord,
 )
@@ -126,7 +127,7 @@ class WorkspaceModel(Protocol):
     ) -> list[dict[str, Any]] | None: ...
     def scan_stub_tuples(
         self, target_src_dir: Path, cluster: BuildCluster | None,
-    ) -> list[tuple[str, str]]: ...
+    ) -> list[FnLocator]: ...
     def enumerate_fns(
         self, src_dir: Path,
     ) -> list[dict[str, Any]] | None: ...
@@ -134,7 +135,7 @@ class WorkspaceModel(Protocol):
     def collect_impl_blocks(self, src_dir: Path) -> list[ImplBlock] | None: ...
     def fn_container_index(
         self, src_dir: Path,
-    ) -> dict[tuple[str, str], str]: ...
+    ) -> dict[FnLocator, str]: ...
     def fn_belongs_to_cluster(
         self, target_src_dir: Path, file_rel: str, fn_name: str,
         cluster: BuildCluster, fn_cfg_predicates: list[str] | None = ...,
@@ -144,9 +145,9 @@ class WorkspaceModel(Protocol):
     ) -> list[TypeRecord]: ...
     def is_gen_tests_file(self, name: str) -> bool: ...
     def leaf_first_fn_order(
-        self, tuples: list[tuple[str, str]],
+        self, tuples: list[FnLocator],
         leaf_name_counts: dict[str, int] | None,
-    ) -> list[tuple[str, str]]: ...
+    ) -> list[FnLocator]: ...
 
 
 @runtime_checkable
@@ -185,15 +186,15 @@ class TestLinker(Protocol):
     def find_tests_for_fn(
         self, tests_dir_files: list[Path], fn_name: str, *,
         file_rel: str = ..., src_dir: Path | None = ..., container: str = ...,
-    ) -> list[tuple[str, str]]: ...
+    ) -> list[tuple[str, str]]: ...  # (path, content) tuples — NOT FnLocator
     def classify_failures(
-        self, test_out: str, filled_this_pass: list[tuple[str, str]],
+        self, test_out: str, filled_this_pass: list[FnLocator],
         failed_tests: list[str], cluster_name: str,
     ) -> dict[str, dict[str, Any]]: ...
     def write_test_fix_log(
         self, *, project_dir: Path, cluster_name: str, pass_n: int,
         fix_iter: int, test_out: str, failed_tests: list[str],
-        fns_retried: list[tuple[str, str]], cur_fail_count: int,
+        fns_retried: list[FnLocator], cur_fail_count: int,
         new_fail_count: int, best_fail_count: int, stall: int,
     ) -> None: ...
 
@@ -218,6 +219,6 @@ class ImplFillPath(Protocol):
         tests_dir_files: list[Path], module_name: str, cluster_name: str,
         cluster: BuildCluster | None, check_cmd: str,
         cluster_env: dict[str, str], fr_path: Path | None,
-        tdd_frontier_keys: set[tuple[str, str]] | None,
+        tdd_frontier_keys: set[FnLocator] | None,
         tdd_frontier_tests: Any, tdd_test_cmd: str | None,
     ) -> dict[str, Any]: ...

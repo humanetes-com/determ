@@ -32,7 +32,7 @@ from pipeline_core.application.reconstruct.fill_rules import (
 )
 from pipeline_core.domain.cfg import filter_cfg_inactive_branches
 from pipeline_core.domain.model_notes import errorimpl_object_note, is_errorimpl_container
-from pipeline_core.domain.models import FillResult, Stub
+from pipeline_core.domain.models import FillResult, FnLocator, Stub
 from pipeline_core.domain.refine import FloorStall
 from pipeline_core.ports.fill_engine import (
     Cargo,
@@ -314,7 +314,7 @@ class FillOneFn:
             _u2_fail_sig: frozenset[str] | None = None
             if rc == 0:
                 _g = self.cargo.u2_test_gate(
-                    (ctx.tdd_frontier_tests or {}).get((rel_file, fn_name), set()),
+                    (ctx.tdd_frontier_tests or {}).get(FnLocator(rel_file, fn_name), set()),
                     ctx.tdd_test_cmd, ctx.target_src_dir, ctx.cluster_env)
                 if _g is not None:
                     _u2_fail_sig, cargo_out = _g

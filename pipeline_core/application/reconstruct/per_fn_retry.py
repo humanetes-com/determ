@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from pipeline_core.application.refine_loop import run_callback_loop
-from pipeline_core.domain.models import Frontier
+from pipeline_core.domain.models import FnLocator, Frontier
 from pipeline_core.domain.retry_outcome import (
     RetryMode,
     RetryVerdict,
@@ -38,7 +38,7 @@ class RetryContext:
     project_dir: Path
     src_root: Path
     cluster_label: str
-    containers: dict[tuple[str, str], str]
+    containers: dict[FnLocator, str]
     type_recs: list[Any]
     fr_path: Path | None
     tests_dir_files: list[Path]
@@ -72,7 +72,7 @@ class Task3Attribution:
     """Failure → (file, fn) repair-target attribution (test-failure classifier,
     test reverse-map, compile-diagnostic frontier, test-oracle filter)."""
     attribute_failures: Callable[..., tuple[Frontier, str]]
-    build_test_reverse_map: Callable[..., dict[str, set[tuple[str, str]]]]
+    build_test_reverse_map: Callable[..., dict[str, set[FnLocator]]]
     frontier_from_diags: Callable[..., Frontier]
     filter_test_targets: Callable[..., Frontier]
 
@@ -82,7 +82,7 @@ class Task3Enumerate:
     """Cluster-aware type/container enumeration for the per-fn fix prompts."""
     cluster_filter_type_methods: Callable[..., list[Any]]
     enumerate_types: Callable[..., list[Any] | None]
-    fn_container_index: Callable[..., dict[tuple[str, str], str]]
+    fn_container_index: Callable[..., dict[FnLocator, str]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -226,7 +226,7 @@ def run_task3_inline_retry(
             cluster_name=_cluster_label,
         )
         frontier = deps.attribution.filter_test_targets(frontier, project_dir)
-        refs: list[tuple[str, str]] = list(frontier.keys())
+        refs: list[FnLocator] = list(frontier.keys())
         if not refs:
             return {"abort": True, "reason": "no_actionable_refs"}
         fixed_count = apply_per_fn_fixes(refs, output, _retry_ctx, deps.retry_fix)
@@ -244,7 +244,7 @@ def run_task3_inline_retry(
             return {"abort": True, "reason": "no_compile_errors"}
         frontier = deps.attribution.filter_test_targets(
             deps.attribution.frontier_from_diags(diags, project_dir), project_dir)
-        refs: list[tuple[str, str]] = list(frontier.keys())
+        refs: list[FnLocator] = list(frontier.keys())
         if not refs:
             return {"abort": True, "reason": "unattributed_compile_errors"}
         fixed_count = apply_per_fn_fixes(refs, output, _retry_ctx, deps.retry_fix)
@@ -343,7 +343,7 @@ def fix_one_ref(
         file_text=cur_text, file_rel=rel_f, fn_name=fn,
         sig_text=sig_t, body_text=cur_body,
         error_excerpt=err_excerpt,
-        container=ctx.containers.get((_src_rel, fn), ""),
+        container=ctx.containers.get(FnLocator(_src_rel, fn), ""),
         type_records=ctx.type_recs,
         fr_path=ctx.fr_path,
     )
@@ -376,7 +376,7 @@ def fix_one_ref(
 
 
 def apply_per_fn_fixes(
-    refs: list[tuple[str, str]], output: str, ctx: RetryContext, deps: RetryDeps,
+    refs: list[FnLocator], output: str, ctx: RetryContext, deps: RetryDeps,
 ) -> int:
     """Re-ask + splice each (file, fn). B2: one fn's exception is logged and
     skipped — never aborts the pass, never masks the other fixable frontier fns.

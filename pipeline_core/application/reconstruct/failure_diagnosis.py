@@ -19,6 +19,7 @@ from typing import Any
 
 from pipeline_core.application.reconstruct.cargo_errors import strip_cargo_warnings
 from pipeline_core.domain.attribution import line_to_fn_record
+from pipeline_core.domain.models import FnLocator
 from pipeline_core.domain.rust_idents import first_fn_decl_name
 from pipeline_core.domain.test_results import (
     parse_phase_c_line,
@@ -34,7 +35,7 @@ CLASSIFIER_CATEGORIES = (
 
 def classify_phase_c_test_failures(
     test_out: str,
-    filled_this_pass: list[tuple[str, str]],
+    filled_this_pass: list[FnLocator],
     failed_tests: list[str],
     cluster_name: str,
     *,
@@ -120,7 +121,7 @@ def classify_phase_c_test_failures(
 def record_tdd_regression(
     fr_path: Path,
     src_dir: Path,
-    filled_keys: list[tuple[str, str]],
+    filled_keys: list[FnLocator],
     broken_tests: set[str],
     prev_best: int,
     now_pass: int,
@@ -175,7 +176,7 @@ def implicated_fns_from_cargo_errors(
     target_src_dir: Path,
     *,
     enumerate_fns: Callable[[Path], list[dict[str, Any]] | None],
-) -> list[tuple[str, str]]:
+) -> list[FnLocator]:
     """Parse cargo error output and return the (file_rel, fn_name) pairs the
     errors implicate.
 
@@ -187,8 +188,8 @@ def implicated_fns_from_cargo_errors(
     if not cargo_output:
         return []
     cargo_output = strip_cargo_warnings(cargo_output)
-    pairs: list[tuple[str, str]] = []
-    seen: set[tuple[str, str]] = set()
+    pairs: list[FnLocator] = []
+    seen: set[FnLocator] = set()
     # Enclosing-fn attribution via the syn extractor (byte-span lookup); the
     # backward `fn` scan is the no-binary fallback. (`-->` parse = cargo output.)
     _all_recs = enumerate_fns(target_src_dir)
@@ -235,7 +236,7 @@ def implicated_fns_from_cargo_errors(
                     break
         if not fn_name:
             continue
-        key = (rel_p, fn_name)
+        key = FnLocator(rel_p, fn_name)
         if key in seen:
             continue
         seen.add(key)

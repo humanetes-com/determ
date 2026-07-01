@@ -16,7 +16,7 @@ Pure domain: stdlib only, no I/O. Parsing happens in the adapter, which is the s
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NamedTuple
 
 from pipeline_core.domain.cfg import CfgAtom
 
@@ -26,6 +26,29 @@ def _strs(v: Any) -> tuple[str, ...]:
     if not v:
         return ()
     return tuple(str(x) for x in v)
+
+
+class FnLocator(NamedTuple):
+    """Identity of one reconstructable function: its ``file`` (repo-relative
+    ``.rs`` path) and ``fn_name``. This ``(file, fn_name)`` pair is the pipeline's
+    ubiquitous fill-unit key — the frontier key, the container-index key, the
+    attribution reverse-map value, the leaf-first ordering unit, the fix-loop
+    repair target.
+
+    A ``NamedTuple`` (deliberately, not a frozen dataclass): it stays structurally
+    a 2-tuple, so it is a *drop-in* for every existing ``set`` membership, ``dict``
+    key, positional unpack (``for file, fn in …``) and tuple-equality that already
+    treats the pair as a bare ``tuple[str, str]`` — while adding the ``.file`` /
+    ``.fn_name`` vocabulary and a named constructor. Producers may be migrated
+    one slice at a time; a not-yet-converted plain tuple still interoperates.
+
+    Caveat: it does NOT structurally differ from the unrelated ``(rel_path,
+    content)`` pair also spelled ``tuple[str, str]`` — the guard against confusing
+    the two is reader/annotation-level, not runtime. See PLAN.md PORT CAMPAIGN 3.
+    """
+
+    file: str
+    fn_name: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -279,8 +302,8 @@ class DispatchFamily:
 # sentinel "<compile>") that reach that still-broken fn at runtime/compile time. Produced
 # by the TDD driver from cargo output and consumed by the per-fn / per-impl fill planners.
 # It is a mapping keyed by identity, not a record with fields, so a type alias — not a
-# dataclass — is its correct domain form.
-Frontier = dict[tuple[str, str], set[str]]
+# dataclass — is its correct domain form. The key is a `FnLocator` (file, fn_name).
+Frontier = dict[FnLocator, set[str]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -536,9 +559,9 @@ class Stub:
         }
 
     @property
-    def key(self) -> tuple[str, str]:
+    def key(self) -> FnLocator:
         """The (file, fn_name) identity used as a frontier / ordering key."""
-        return (self.file, self.fn_name)
+        return FnLocator(self.file, self.fn_name)
 
 
 @dataclass(frozen=True, slots=True)

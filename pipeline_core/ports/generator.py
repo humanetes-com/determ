@@ -16,7 +16,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from ..domain.models import BuildCluster, Diagnostic, Frontier
+from ..domain.models import BuildCluster, Diagnostic, FnLocator, Frontier
 
 
 @runtime_checkable
@@ -109,11 +109,11 @@ class Cargo(Protocol):
     def env(self) -> dict[str, str]: ...
     def implicated_fns_from_cargo_errors(
         self, cargo_output: str, target_src_dir: Path,
-    ) -> list[tuple[str, str]]: ...
+    ) -> list[FnLocator]: ...
     def attribute_failures(
         self, test_output: str, src_dir: Path,
-        recently_filled: list[tuple[str, str]],
-        test_reverse_map: dict[str, set[tuple[str, str]]], cluster_name: str,
+        recently_filled: list[FnLocator],
+        test_reverse_map: dict[str, set[FnLocator]], cluster_name: str,
     ) -> tuple[Frontier, str]: ...
 
 
@@ -135,7 +135,7 @@ class FillEngine(Protocol):
         cluster: BuildCluster | None = ..., check_cmd: str = ...,
         cluster_env: dict[str, str] | None = ..., max_passes: int = ...,
         leaf_name_counts: dict[str, int] | None = ..., fr_path: Path | None = ...,
-        tdd_frontier_keys: set[tuple[str, str]] | None = ...,
+        tdd_frontier_keys: set[FnLocator] | None = ...,
         skip_end_pass_test: bool = ..., tdd_frontier_tests: Frontier | None = ...,
         tdd_test_cmd: str | None = ...,
     ) -> dict[str, Any]: ...
@@ -154,7 +154,7 @@ class FillEngine(Protocol):
     ) -> dict[str, Any]: ...
     def scan_unimplemented_functions(
         self, src_dir: Path,
-    ) -> list[tuple[str, str]]: ...
+    ) -> list[FnLocator]: ...
     def merge_cluster_outputs(
         self, *, project_dir: Path, cluster_specs: dict[str, BuildCluster],
         successes: list[dict[str, Any]],
@@ -167,7 +167,7 @@ class FillEngine(Protocol):
     def reset_exhaustion_flags(self, project_dir: Path, reason: str) -> None: ...
     def build_test_reverse_map(
         self, test_files: list[Path], src_dir: Path,
-    ) -> dict[str, set[tuple[str, str]]]: ...
+    ) -> dict[str, set[FnLocator]]: ...
 
 
 @runtime_checkable

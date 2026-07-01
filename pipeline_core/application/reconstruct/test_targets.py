@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from typing import Any
 
-from pipeline_core.domain.models import Frontier
+from pipeline_core.domain.models import FnLocator, Frontier
 
 
 def is_test_fn_record(rec: dict[str, Any]) -> bool:
@@ -19,9 +19,10 @@ def is_test_fn_record(rec: dict[str, Any]) -> bool:
     return "test" in (rec.get("cfg_predicates") or [])
 
 
-def test_fn_keys(recs: Iterable[dict[str, Any]]) -> set[tuple[str, str]]:
+def test_fn_keys(recs: Iterable[dict[str, Any]]) -> set[FnLocator]:
     """The `(file, fn_name)` keys of every test fn among `recs`."""
-    return {(r.get("file", ""), r.get("fn_name", "")) for r in recs if is_test_fn_record(r)}
+    return {FnLocator(r.get("file", ""), r.get("fn_name", ""))
+            for r in recs if is_test_fn_record(r)}
 
 
 def filter_test_targets(

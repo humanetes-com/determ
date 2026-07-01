@@ -376,6 +376,7 @@ from pipeline_core.domain.models import (
     ConstRecord,
     Diagnostic,
     DispatchFamily,
+    FnLocator,
     Frontier,
     ImplBlock,
     ModRecord,
@@ -521,14 +522,14 @@ _mi_mtime: float = os.path.getmtime(_mi.__file__)
 # Attribution-cluster deps-binding shims (P6): bodies live in failure_diagnosis;
 # these bind the resident module-globals at call time so the existing
 # `monkeypatch.setattr(pipeline, "_classify_phase_c_test_failures", …)` seams hold.
-def _classify_phase_c_test_failures(test_out: str, filled_this_pass: list[tuple[str, str]],
+def _classify_phase_c_test_failures(test_out: str, filled_this_pass: list[FnLocator],
                                     failed_tests: list[str], cluster_name: str) -> dict[str, dict]:
     return _classify_phase_c_test_failures_impl(
         test_out, filled_this_pass, failed_tests, cluster_name,
         ask=_ASK_CLIENT.ask, log=_log, model=_TASK0C_MODEL, err_cap=_FIX_ERR_CAP)
 
 
-def _record_tdd_regression(fr_path: Path, src_dir: Path, filled_keys: "list[tuple[str, str]]",
+def _record_tdd_regression(fr_path: Path, src_dir: Path, filled_keys: "list[FnLocator]",
                            broken_tests: "set[str]", prev_best: int, now_pass: int) -> str:
     return _record_tdd_regression_impl(
         fr_path, src_dir, filled_keys, broken_tests, prev_best, now_pass,
@@ -536,7 +537,7 @@ def _record_tdd_regression(fr_path: Path, src_dir: Path, filled_keys: "list[tupl
         body_cap=_BUDGETS.failed_body)
 
 
-def _implicated_fns_from_cargo_errors(cargo_output: str, target_src_dir: Path) -> list[tuple[str, str]]:
+def _implicated_fns_from_cargo_errors(cargo_output: str, target_src_dir: Path) -> list[FnLocator]:
     return _implicated_fns_from_cargo_errors_impl(
         cargo_output, target_src_dir, enumerate_fns=_enumerate_fns_via_extractor)
 
@@ -2266,7 +2267,7 @@ def _run_cargo(cmd: str, cwd: Path, env: dict, timeout: int = 180) -> tuple[int,
 def _build_test_reverse_map(
     test_files: list[Path],
     src_dir: Path,
-) -> dict[str, set[tuple[str, str]]]:
+) -> dict[str, set[FnLocator]]:
     """P2: delegates to _attribution.build_test_reverse_map (logic relocated)."""
     return _attribution.build_test_reverse_map(_ATTR_DEPS, test_files, src_dir)
 
@@ -2280,8 +2281,8 @@ def _filter_test_targets(frontier: Frontier, src_dir: Path) -> Frontier:
 def _attribute_failures(
     test_output: str,
     src_dir: Path,
-    recently_filled: list[tuple[str, str]],
-    test_reverse_map: dict[str, set[tuple[str, str]]],
+    recently_filled: list[FnLocator],
+    test_reverse_map: dict[str, set[FnLocator]],
     cluster_name: str,
 ) -> tuple[Frontier, str]:
     """P2: delegates to _attribution.attribute_failures (logic relocated)."""
@@ -2626,7 +2627,7 @@ def _task2_fill_fns_one_by_one(
     max_passes: int = 3,
     leaf_name_counts: dict[str, int] | None = None,
     fr_path: Path | None = None,
-    tdd_frontier_keys: "set[tuple[str, str]] | None" = None,
+    tdd_frontier_keys: "set[FnLocator] | None" = None,
     skip_end_pass_test: bool = False,
     tdd_frontier_tests: "Frontier | None" = None,
     tdd_test_cmd: str | None = None,
@@ -2727,7 +2728,7 @@ def _types_section_for_fix(
     return full[:_BUDGETS.types_section]
 
 
-def _fn_container_index(src_dir: Path) -> dict[tuple[str, str], str]:
+def _fn_container_index(src_dir: Path) -> dict[FnLocator, str]:
     """(file_rel_to_src, fn_name) → container ("impl … for …" / "trait …" / "").
 
     Slice 8a (FnContext): the syn enumerator is the one source of truth for
@@ -2735,9 +2736,9 @@ def _fn_container_index(src_dir: Path) -> dict[tuple[str, str], str]:
     self-type whose definition must be injected (the BoxedError gap). First
     record wins for duplicate names, matching the previous inline builders.
     """
-    idx: dict[tuple[str, str], str] = {}
+    idx: dict[FnLocator, str] = {}
     for rec in (_enumerate_fns_via_extractor(src_dir) or []):
-        idx.setdefault((rec.get("file", ""), rec.get("fn_name", "")),
+        idx.setdefault(FnLocator(rec.get("file", ""), rec.get("fn_name", "")),
                        rec.get("container", ""))
     return idx
 
@@ -2959,7 +2960,7 @@ from pipeline_core.application.reconstruct.scheduling import (  # noqa: E402
 )
 
 
-def _scan_unimplemented_functions(src_dir: Path) -> list[tuple[str, str]]:
+def _scan_unimplemented_functions(src_dir: Path) -> list[FnLocator]:
     """Composition shim → application.reconstruct.stub_scan (extractor injected)."""
     return _stub_scan.scan_unimplemented_functions(
         src_dir, enumerate_fns=_enumerate_fns_via_extractor)
@@ -3060,7 +3061,7 @@ def _fn_belongs_to_cluster(
 def _scan_unimplemented_for_cluster(
     target_src_dir: Path,
     cluster: "BuildCluster | None",
-) -> list[tuple[str, str]]:
+) -> list[FnLocator]:
     """Composition shim → application.reconstruct.cluster_membership."""
     return _membership.scan_unimplemented_for_cluster(
         target_src_dir, cluster,

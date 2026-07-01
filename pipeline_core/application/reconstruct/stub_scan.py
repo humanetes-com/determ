@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from pipeline_core.application.reconstruct.fill_rules import is_unimplemented_body
+from pipeline_core.domain.models import FnLocator
 from pipeline_core.domain.rust_fn_headers import fn_headers
 
 
@@ -22,7 +23,7 @@ def scan_unimplemented_functions(
     src_dir: Path,
     *,
     enumerate_fns: Callable[[Path], list[dict[str, Any]] | None],
-) -> list[tuple[str, str]]:
+) -> list[FnLocator]:
     """Return [(file_rel_path, fn_name), ...] for every fn whose body is still
     `unimplemented!()` (or an annotated stub).
 
@@ -32,9 +33,9 @@ def scan_unimplemented_functions(
     """
     recs = enumerate_fns(src_dir)
     if recs is not None:
-        return [(r["file"], r["fn_name"]) for r in recs
+        return [FnLocator(r["file"], r["fn_name"]) for r in recs
                 if r.get("has_unimplemented_body")]
-    out: list[tuple[str, str]] = []
+    out: list[FnLocator] = []
     for p in sorted(src_dir.rglob("*.rs")):
         try:
             text = p.read_text(encoding="utf-8")
@@ -55,5 +56,5 @@ def scan_unimplemented_functions(
                 continue
             body = text[body_start:i - 1]
             if is_unimplemented_body(body):
-                out.append((str(p.relative_to(src_dir)), fn_name))
+                out.append(FnLocator(str(p.relative_to(src_dir)), fn_name))
     return out
