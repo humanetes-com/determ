@@ -21,6 +21,7 @@ from typing import Any
 import pytest
 
 from pipeline_core.application.tasks.task0c import Task0cDeps, task0c_augment_module
+from pipeline_core.domain.coverage import PerFileCoverage
 
 
 class _Stop(Exception):
@@ -237,8 +238,8 @@ def test_engine_pragma_pass_writes_and_compiles(tmp_path: Path) -> None:
         is_test_file=lambda p, d: False,
         subprocess=SimpleNamespace(run=lambda *a, **k: SimpleNamespace(returncode=0)),
     )
-    files_data = [{"abs_path": str(f),
-                   "traces": [{"line": 1, "stats": {"Line": 0}}]}]
+    files_data = [PerFileCoverage.from_dict(
+        {"abs_path": str(f), "traces": [{"line": 1, "stats": {"Line": 0}}]})]
 
     _engine_pragma_pass(deps, tmp_path, "x", src_dir, files_data, "m")
 
@@ -267,8 +268,8 @@ def test_engine_pragma_pass_reverts_on_compile_fail(tmp_path: Path) -> None:
         is_test_file=lambda p, d: False,
         subprocess=SimpleNamespace(run=lambda *a, **k: SimpleNamespace(returncode=1)),
     )
-    files_data = [{"abs_path": str(f),
-                   "traces": [{"line": 1, "stats": {"Line": 0}}]}]
+    files_data = [PerFileCoverage.from_dict(
+        {"abs_path": str(f), "traces": [{"line": 1, "stats": {"Line": 0}}]})]
 
     _engine_pragma_pass(deps, tmp_path, "x", src_dir, files_data, "m")
     assert f.read_text() == original       # reverted

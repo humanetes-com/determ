@@ -1942,9 +1942,8 @@ def test_coverage_measurement() -> None:
     assert covered < coverable, "fixture has uncovered code — partial coverage expected"
     assert 10.0 < pct < 95.0, f"expected 10%-95% coverage, got {pct:.1f}%"
 
-    paths = [fd.get("abs_path") or fd.get("path") or "" for fd in files_data]
-    has_lib = any("lib.rs" in (str(p) if not isinstance(p, list) else "/".join(p))
-                  for p in paths)
+    paths = [fd.abs_path for fd in files_data]
+    has_lib = any("lib.rs" in p for p in paths)
     assert has_lib, f"lib.rs not in measured files_data: {paths}"
 
     print("  OK  coverage measurement")
@@ -1988,12 +1987,7 @@ mod gen_tests_1 {
     print(f"  ... with-sibling coverage: {pct:.1f}% ({covered}/{coverable})")
 
     # The sibling file must not appear in measured files.
-    paths = [
-        (str(fd.get("abs_path") or fd.get("path") or ""))
-        if not isinstance(fd.get("path"), list)
-        else "/".join(fd.get("path", []))
-        for fd in files_data
-    ]
+    paths = [fd.abs_path for fd in files_data]
     sibling_seen = any("gen_tests_1" in p for p in paths)
     assert not sibling_seen, (
         f"sibling file leaked into coverage measurement: {paths}"
@@ -2288,7 +2282,7 @@ def test_coverage_workspace_adapters() -> None:
         lcov.write_text("SF:src/f.rs\nDA:1,5\nDA:2,0\nDA:3,0\nend_of_record\n")
         pct, files, covd, total = prov._parse_lcov(lcov, proj)  # type: ignore[attr-defined]
         assert (covd, total) == (1, 2)  # line 2 dropped by pragma; 1 of {1,3} hit
-        assert files and files[0]["abs_path"].endswith("src/f.rs")
+        assert files and files[0].abs_path.endswith("src/f.rs")
 
         # grcov-json parse (load_grcov_json reads /tmp/grcov_<mod>.json).
         mod = f"covtest_{os.getpid()}"

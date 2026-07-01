@@ -132,11 +132,11 @@ def test_parse_lcov_basic_counts_and_schema(tmp_path: Path) -> None:
     assert pct == pytest.approx(2 / 3 * 100.0)
     assert len(files) == 1
     rec = files[0]
-    assert rec["abs_path"] == str(tmp_path / "src" / "f.rs")
-    assert rec["path"] == rec["abs_path"].split(os.sep)
-    assert rec["covered"] == 2 and rec["coverable"] == 3
+    assert rec.abs_path == str(tmp_path / "src" / "f.rs")
+    assert rec.path == rec.abs_path.split(os.sep)
+    assert rec.covered == 2 and rec.coverable == 3
     # traces sorted by line, carrying the hit count under stats.Line.
-    assert rec["traces"] == [
+    assert rec.traces == [
         {"line": 1, "stats": {"Line": 5}},
         {"line": 2, "stats": {"Line": 0}},
         {"line": 3, "stats": {"Line": 2}},
@@ -150,7 +150,7 @@ def test_parse_lcov_multiple_files_aggregate(tmp_path: Path) -> None:
                 "SF:src/a.rs\nDA:1,1\nDA:2,0\nend_of_record\n"
                 "SF:src/b.rs\nDA:1,3\nend_of_record\n")
     pct, files, covered, coverable = _provider()._parse_lcov(lcov, tmp_path)
-    assert {f["abs_path"].rsplit(os.sep, 1)[-1] for f in files} == {"a.rs", "b.rs"}
+    assert {f.abs_path.rsplit(os.sep, 1)[-1] for f in files} == {"a.rs", "b.rs"}
     assert (covered, coverable) == (2, 3)  # a: 1/2, b: 1/1
 
 
@@ -163,7 +163,7 @@ def test_parse_lcov_skips_non_src_files(tmp_path: Path) -> None:
                 "SF:tests/drop.rs\nDA:1,1\nend_of_record\n"
                 "SF:examples/also_drop.rs\nDA:1,1\nend_of_record\n")
     _pct, files, covered, coverable = _provider()._parse_lcov(lcov, tmp_path)
-    assert [f["abs_path"].rsplit(os.sep, 1)[-1] for f in files] == ["keep.rs"]
+    assert [f.abs_path.rsplit(os.sep, 1)[-1] for f in files] == ["keep.rs"]
     assert (covered, coverable) == (1, 1)
 
 
@@ -173,7 +173,7 @@ def test_parse_lcov_absolute_sf_path_inside_src(tmp_path: Path) -> None:
     lcov = tmp_path / "c.lcov"
     _write_lcov(lcov, f"SF:{abs_sf}\nDA:1,4\nDA:2,0\nend_of_record\n")
     _pct, files, covered, coverable = _provider()._parse_lcov(lcov, tmp_path)
-    assert files[0]["abs_path"] == abs_sf
+    assert files[0].abs_path == abs_sf
     assert (covered, coverable) == (1, 2)
 
 
@@ -184,7 +184,7 @@ def test_parse_lcov_duplicate_da_keeps_max_hit(tmp_path: Path) -> None:
     _write_lcov(lcov, "SF:src/f.rs\nDA:1,0\nDA:1,7\nend_of_record\n")
     _pct, files, covered, coverable = _provider()._parse_lcov(lcov, tmp_path)
     assert (covered, coverable) == (1, 1)
-    assert files[0]["traces"] == [{"line": 1, "stats": {"Line": 7}}]
+    assert files[0].traces == [{"line": 1, "stats": {"Line": 7}}]
 
 
 def test_parse_lcov_ignores_malformed_da(tmp_path: Path) -> None:
@@ -203,7 +203,7 @@ def test_parse_lcov_file_with_no_da_is_zero_coverable(tmp_path: Path) -> None:
     pct, files, covered, coverable = _provider()._parse_lcov(lcov, tmp_path)
     assert (covered, coverable) == (0, 0)
     assert pct == 0.0  # no coverable lines anywhere → 0, not a ZeroDivisionError
-    assert files[0]["coverable"] == 0
+    assert files[0].coverable == 0
 
 
 def test_parse_lcov_missing_file_returns_zeros(tmp_path: Path) -> None:
@@ -240,7 +240,8 @@ def test_measure_file_returns_matching_file_counts(tmp_path: Path, monkeypatch: 
     """measure_file runs a quick measurement then looks up rel_path by abs_path."""
     prov = _provider()
     target_abs = str(tmp_path / "src" / "f.rs")
-    canned = (50.0, [{"abs_path": target_abs, "covered": 3, "coverable": 6}], 3, 6)
+    canned = (50.0, [PerFileCoverage.from_dict(
+        {"abs_path": target_abs, "covered": 3, "coverable": 6})], 3, 6)
     monkeypatch.setattr(prov, "_run", lambda *a, **k: canned)
     assert prov.measure_file(tmp_path, "mod", "src/f.rs") == (3, 6)
     # Not in the file list → None.
