@@ -116,6 +116,12 @@ def test_run_scoped_tests_pass_fail_timeout() -> None:
     # timeout sentinel (rc=-1) → inconclusive
     assert run_scoped_tests(_const_run_cargo(-1, ""), "cargo test", Path("."), {},
                             err_cap=500) == (False, -1, "scoped test run timed out", set())
+    # result is a named TestRunOutcome (drop-in for the old tuple).
+    from pipeline_core.domain.test_results import TestRunOutcome
+    out = run_scoped_tests(_const_run_cargo(101, "test b ... FAILED"),
+                           "cargo test", Path("."), {}, err_cap=500)
+    assert isinstance(out, TestRunOutcome)
+    assert (out.passed, out.fail_count, out.failed) == (False, 1, {"b"})
     # err_cap truncates the detail tail
     _, _, d, _ = run_scoped_tests(_const_run_cargo(101, "x" * 100 + "\ntest z ... FAILED"),
                                   "cargo test", Path("."), {}, err_cap=10)

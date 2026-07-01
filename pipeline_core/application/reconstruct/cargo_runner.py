@@ -17,7 +17,7 @@ from pathlib import Path
 
 from pipeline_core.application.reconstruct.cargo_errors import diagnostics_from_json
 from pipeline_core.domain.models import Diagnostic
-from pipeline_core.domain.test_results import parse_failed_tests
+from pipeline_core.domain.test_results import TestRunOutcome, parse_failed_tests
 from pipeline_core.ports import Cargo
 
 # A "run one cargo command → (rc, combined_output)" operation. The production
@@ -60,10 +60,10 @@ def run_scoped_tests(
     *,
     timeout: int = 120,
     err_cap: int,
-) -> tuple[bool, int, str, set[str]]:
+) -> TestRunOutcome:
     """Plan 10 U1 — the reusable test-validation step (runtime analog of a
     compile check). Runs `test_cmd` via the injected `run_cargo_fn` and returns
-    (passed, fail_count, detail, failed_names).
+    a :class:`TestRunOutcome` (passed, fail_count, detail, failed_names).
 
     `passed` is True only when cargo reports rc==0 with zero failing tests.
     `detail` is the failing-test output tail (capped at `err_cap`) for the next
@@ -72,11 +72,11 @@ def run_scoped_tests(
     """
     rc, out = run_cargo_fn(test_cmd, cwd, env, timeout=timeout)
     if rc == -1:
-        return False, -1, "scoped test run timed out", set()
+        return TestRunOutcome(False, -1, "scoped test run timed out", set())
     failed = parse_failed_tests(out)
     passed = rc == 0 and len(failed) == 0
     detail = "" if passed else out[-err_cap:]
-    return passed, len(failed), detail, failed
+    return TestRunOutcome(passed, len(failed), detail, failed)
 
 
 def u2_test_gate(

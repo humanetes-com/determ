@@ -419,9 +419,7 @@ from pipeline_core.domain.test_results import (
     OUTPUT_SEPARATOR as OUTPUT_SEPARATOR,  # noqa: PLC0414 (test seam re-export)
 )
 from pipeline_core.domain.test_results import (
-    _parse_test_counts as _parse_test_counts,  # noqa: PLC0414 (test seam re-export)
-)
-from pipeline_core.domain.test_results import (
+    TestRunOutcome,
     count_passing_tests,
     extract_test_output_from_file,
     insert_no_run,
@@ -430,6 +428,9 @@ from pipeline_core.domain.test_results import (
     rustc_error_signatures,
     strip_ansi,
     validate_task3_output_strict,
+)
+from pipeline_core.domain.test_results import (
+    _parse_test_counts as _parse_test_counts,  # noqa: PLC0414 (test seam re-export)
 )
 from pipeline_core.domain.text import (
     block_is_prose as _block_is_prose,
@@ -2288,7 +2289,7 @@ def _attribute_failures(
 
 def _run_scoped_tests(
     test_cmd: str, cwd: Path, env: dict, *, timeout: int = 120,
-) -> "tuple[bool, int, str, set[str]]":
+) -> TestRunOutcome:
     # P2 slice 9: pass `_run_cargo` (the patchable seam) so the e2e/smoke
     # harness's `monkeypatch pipeline._run_cargo` still intercepts test runs.
     return _reconstruct_cargo_runner.run_scoped_tests(

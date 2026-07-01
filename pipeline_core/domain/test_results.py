@@ -14,6 +14,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import NamedTuple
 
 
 class ClusterStatus(StrEnum):
@@ -87,6 +88,19 @@ class TestOutcome:
             return {"passed": self.passed, "reason": self.reason}
         return {"passed": self.passed,
                 "pass_count": self.pass_count, "fail_count": self.fail_count}
+
+
+class TestRunOutcome(NamedTuple):
+    """Result of a scoped test run (Plan 10 U1): whether it passed, the failing
+    count, the failing-output tail for the next prompt, and the failing-test
+    names. On timeout ``fail_count`` is ``-1`` (INCONCLUSIVE — caller falls back
+    to compile-based acceptance). A ``NamedTuple`` so it stays a drop-in for the
+    ``(passed, fail_count, detail, failed)`` tuple callers already unpack."""
+
+    passed: bool
+    fail_count: int
+    detail: str
+    failed: set[str]
 
 
 # Format marker between the genesis snapshot and the real test output in
