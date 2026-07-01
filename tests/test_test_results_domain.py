@@ -5,9 +5,39 @@ from __future__ import annotations
 import re
 
 from pipeline_core.domain.test_results import (
+    TestOutcome,
     is_compiler_output_line,
     rustc_error_codes,
 )
+
+
+def test_test_outcome_event_data_byte_identical_to_legacy_dicts():
+    # Each constructor must reproduce the exact literal dict (keys + order) that
+    # _task3_legacy_single historically wrote to done["data"].
+    assert TestOutcome.timeout().as_event_data() == {
+        "passed": False, "reason": "timeout"}
+    assert TestOutcome.command_not_found().as_event_data() == {
+        "passed": False, "reason": "command_not_found"}
+    assert TestOutcome.from_counts(True, 7, 0).as_event_data() == {
+        "passed": True, "pass_count": 7, "fail_count": 0}
+    assert TestOutcome.from_counts(False, 3, 4).as_event_data() == {
+        "passed": False, "pass_count": 3, "fail_count": 4}
+    # key ORDER preserved (raw-JSON-safe): reason path omits counts, run path omits reason
+    assert list(TestOutcome.timeout().as_event_data()) == ["passed", "reason"]
+    assert list(TestOutcome.from_counts(True, 1, 2).as_event_data()) == [
+        "passed", "pass_count", "fail_count"]
+
+
+def test_test_outcome_is_frozen_value_object():
+    import dataclasses
+    o = TestOutcome.from_counts(True, 1, 0)
+    assert o == TestOutcome.from_counts(True, 1, 0)   # value equality
+    try:
+        o.passed = False  # type: ignore[misc]
+    except dataclasses.FrozenInstanceError:
+        pass
+    else:
+        raise AssertionError("TestOutcome must be frozen")
 
 
 def test_rustc_error_codes_matches_regex():

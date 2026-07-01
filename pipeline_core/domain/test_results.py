@@ -12,6 +12,7 @@ extractor. No new patterns are authored; the bodies are moved as-is.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from enum import StrEnum
 
 
@@ -43,6 +44,49 @@ def cluster_failure_is_actionable(status: str, rc: int, fail_count: int) -> bool
     if status == ClusterStatus.INCOMPLETE:
         return rc != 0
     return False
+
+
+@dataclass(frozen=True)
+class TestOutcome:
+    """The result of one test-command run — a named value object replacing the
+    ad-hoc ``done["data"] = {...}`` dicts that drifted into three inconsistent
+    shapes at the call sites. The constructor names the *intent* (timed out /
+    command missing / ran with counts); ``as_event_data`` renders the exact
+    telemetry dict each intent historically produced, so emitted events stay
+    byte-identical while the concept is now explicit and drift-proof.
+
+    ``reason`` is set only for the non-running outcomes (``"timeout"`` /
+    ``"command_not_found"``); a run that produced pass/fail counts leaves it
+    ``None``. The two are mutually exclusive by construction."""
+
+    passed: bool
+    pass_count: int = 0
+    fail_count: int = 0
+    reason: str | None = None
+
+    @classmethod
+    def timeout(cls) -> TestOutcome:
+        """Tests exceeded the timeout — no counts available."""
+        return cls(passed=False, reason="timeout")
+
+    @classmethod
+    def command_not_found(cls) -> TestOutcome:
+        """The test command's runtime was missing from PATH — no counts."""
+        return cls(passed=False, reason="command_not_found")
+
+    @classmethod
+    def from_counts(cls, passed: bool, pass_count: int, fail_count: int) -> TestOutcome:
+        """Tests ran to completion; carry the parsed pass/fail counts."""
+        return cls(passed=passed, pass_count=pass_count, fail_count=fail_count)
+
+    def as_event_data(self) -> dict[str, object]:
+        """Render the telemetry `data` payload. Reproduces the historical
+        per-intent key set (and order) exactly: a reason-bearing outcome omits
+        the counts; a completed run omits the reason."""
+        if self.reason is not None:
+            return {"passed": self.passed, "reason": self.reason}
+        return {"passed": self.passed,
+                "pass_count": self.pass_count, "fail_count": self.fail_count}
 
 
 # Format marker between the genesis snapshot and the real test output in

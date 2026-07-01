@@ -234,6 +234,12 @@ from pipeline_core.application.tasks.genesis_audit import (
 from pipeline_core.application.tasks.genesis_audit import (
     genesis_audit,
 )
+from pipeline_core.application.tasks.legacy_test_run import (
+    LegacyTestRunDeps,
+)
+from pipeline_core.application.tasks.legacy_test_run import (
+    run_legacy_single as _run_legacy_single,
+)
 from pipeline_core.application.tasks.task0_docs import (
     task0_project_context as _task0_context_impl,
 )
@@ -405,8 +411,12 @@ from pipeline_core.domain.rust_scan import (
 )
 from pipeline_core.domain.test_grouping import split_oversized_groups as _split_oversized_groups
 from pipeline_core.domain.test_results import (
-    OUTPUT_SEPARATOR,
-    _parse_test_counts,
+    OUTPUT_SEPARATOR as OUTPUT_SEPARATOR,  # noqa: PLC0414 (test seam re-export)
+)
+from pipeline_core.domain.test_results import (
+    _parse_test_counts as _parse_test_counts,  # noqa: PLC0414 (test seam re-export)
+)
+from pipeline_core.domain.test_results import (
     count_passing_tests,
     extract_test_output_from_file,
     insert_no_run,
@@ -3775,91 +3785,26 @@ def task3(project_dir, test_command, iteration, output_dir, genesis_path):
 def _task3_legacy_single(
     project_dir, test_command, iteration, output_dir, genesis_path,
 ) -> tuple[bool, str]:
-    """Pre-FR-024 single-shot path. Retained for pipelines without baked
-    clusters (non-skeleton backends, plain-cargo projects). Uses the
-    discovered `test_command` and the lenient `validate_task3_output`
-    classifier. New skeleton-backend runs never hit this path."""
-    output_file = Path(output_dir) / f"tests_output_{iteration}.txt"
-    env = _cargo_env()
-    _attempt = iteration if isinstance(iteration, int) else None
-
-    with _phase("task", task="task3", attempt=_attempt,
-                data={"command": test_command, "iteration": iteration}) as done:
-        _emit("test.start", attempt=_attempt, data={"command": test_command})
-        _t_start = time.monotonic()
-        try:
-            result = subprocess.run(
-                _parse_cmd(test_command),
-                cwd=project_dir, capture_output=True, text=True,
-                timeout=TEST_TIMEOUT, env=env,
-            )
-        except subprocess.TimeoutExpired:
-            msg = f"TIMEOUT: tests exceeded {TEST_TIMEOUT} seconds."
-            genesis = read(genesis_path)
-            write(output_file,
-                  f"=== genesis.md (iteration {iteration}) ===\n{genesis}\n{OUTPUT_SEPARATOR}\n{msg}")
-            _log(f"  {msg}")
-            _emit("test.fail",
-                  duration_ms=int((time.monotonic() - _t_start) * 1000),
-                  data={"reason": "timeout", "timeout_s": TEST_TIMEOUT})
-            done["data"] = {"passed": False, "reason": "timeout"}
-            return False, msg
-        except FileNotFoundError as e:
-            msg = (f"ERROR: test command not found: {e}\n"
-                   f"Command was: {test_command}\n"
-                   "Ensure the required runtime is installed and on PATH.")
-            genesis = read(genesis_path)
-            write(output_file,
-                  f"=== genesis.md (iteration {iteration}) ===\n{genesis}\n{OUTPUT_SEPARATOR}\n{msg}")
-            _log(f"  {msg}")
-            _emit("test.fail",
-                  duration_ms=int((time.monotonic() - _t_start) * 1000),
-                  data={"reason": "command_not_found", "error": str(e)[:200]})
-            done["data"] = {"passed": False, "reason": "command_not_found"}
-            sys.exit(1)
-
-        test_output = result.stdout
-        if result.stderr:
-            test_output += "\n--- stderr ---\n" + result.stderr
-        genesis = read(genesis_path)
-        write(output_file,
-              f"=== genesis.md (iteration {iteration}) ===\n{genesis}\n{OUTPUT_SEPARATOR}\n{test_output}")
-        passed   = result.returncode == 0
-        _pass_n, _fail_n, _ = _parse_test_counts(test_output)
-        _log(f"  Tests {'PASSED' if passed else 'FAILED'}. Output -> {output_file}")
-        _emit("test.pass" if passed else "test.fail",
-              duration_ms=int((time.monotonic() - _t_start) * 1000),
-              data={"returncode": result.returncode,
-                    "pass_count": _pass_n, "fail_count": _fail_n,
-                    "output": _store_prompt_content(test_output)})
-        if not passed:
-            retry_passed, retry_output = _task3_inline_retry(
-                project_dir=project_dir,
-                test_command=test_command,
-                iteration=iteration,
-                initial_test_output=test_output,
-            )
-            if retry_passed:
-                passed = True
-                test_output = retry_output
-                write(output_file,
-                      f"=== genesis.md (iteration {iteration}) ===\n{genesis}"
-                      f"\n{OUTPUT_SEPARATOR}\n{test_output}")
-                _pass_n, _fail_n, _ = _parse_test_counts(test_output)
-                _log(f"  Tests PASSED via inline retry. Output -> {output_file}")
-                _emit("test.pass", duration_ms=int(
-                    (time.monotonic() - _t_start) * 1000),
-                      data={"returncode": 0, "pass_count": _pass_n,
-                            "fail_count": _fail_n, "via": "task3_inline_retry",
-                            "output": _store_prompt_content(test_output)})
-            elif retry_output != test_output:
-                test_output = retry_output
-                write(output_file,
-                      f"=== genesis.md (iteration {iteration}) ===\n{genesis}"
-                      f"\n{OUTPUT_SEPARATOR}\n{test_output}")
-                _pass_n, _fail_n, _ = _parse_test_counts(test_output)
-        done["data"] = {"passed": passed, "pass_count": _pass_n, "fail_count": _fail_n}
-        return passed, test_output
+    """Composition-root shim -> legacy_test_run.run_legacy_single. Builds the
+    deps fresh per call, binding the resident telemetry / cargo / io / inline-
+    retry collaborators by name so the e2e monkeypatch seams (pipeline._emit,
+    pipeline._run_cargo via inline-retry, …) still intercept at call time. The
+    single-shot orchestration itself lives in pipeline_core."""
+    return _run_legacy_single(
+        project_dir, test_command, iteration, output_dir, genesis_path,
+        LegacyTestRunDeps(
+            phase=_phase,
+            emit=_emit,
+            log=_log,
+            cargo_env=_cargo_env,
+            parse_cmd=_parse_cmd,
+            store_prompt_content=_store_prompt_content,
+            task3_inline_retry=_task3_inline_retry,
+            read=read,
+            write=write,
+            test_timeout=TEST_TIMEOUT,
+        ),
+    )
 
 
 def task4(genesis_path, functional_req_path, test_output, iteration, output_dir,
