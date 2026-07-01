@@ -3910,7 +3910,7 @@ def _describe_test_environment() -> str:
 # S26: _COV_DEPS constructed standalone above (before _APP); also injected into build_app.
 
 
-def _run_tarpaulin(project_dir: Path, module_name: str) -> tuple[float, list[dict], int, int]:
+def _run_tarpaulin(project_dir: Path, module_name: str) -> CoverageMeasurement:
     # Thin shim until call sites migrate (slice 5).
     return _covmod.run_tarpaulin(_COV_DEPS, project_dir, module_name)
 

@@ -15,7 +15,48 @@ from pathlib import Path
 import pytest
 
 from pipeline_core.adapters import coverage as cov
+from pipeline_core.domain.coverage import CoverageMeasurement, PerFileCoverage
 from pipeline_core.domain.enums import CoverageBackend
+
+
+def test_per_file_coverage_from_dict_tolerant() -> None:
+    # full tarpaulin-shaped dict → verbatim fields.
+    d = {"abs_path": "/p/src/f.rs", "path": ["", "p", "src", "f.rs"],
+         "traces": [{"line": 1, "stats": {"Line": 3}}], "covered": 1, "coverable": 2}
+    pf = PerFileCoverage.from_dict(d)
+    assert (pf.abs_path, pf.covered, pf.coverable) == ("/p/src/f.rs", 1, 2)
+    assert pf.traces == d["traces"]
+    # abs_path absent → derived from path (matches the old consumer fallback).
+    pf2 = PerFileCoverage.from_dict({"path": ["a", "b", "c.rs"]})
+    assert pf2.abs_path == os.sep.join(["a", "b", "c.rs"])
+    # everything absent → safe zero/empty defaults, never KeyError.
+    pf3 = PerFileCoverage.from_dict({})
+    assert (pf3.abs_path, pf3.path, pf3.traces, pf3.covered, pf3.coverable) == ("", [], [], 0, 0)
+
+
+def test_load_grcov_json_parses_external_json(tmp_path: Path) -> None:
+    # Anti-corruption boundary: a synthetic grcov coveralls JSON on disk →
+    # CoverageMeasurement of PerFileCoverage (previously untested path).
+    import json as _json
+    mod = "boundarytest_xyz"
+    grcov_json = Path("/tmp") / f"grcov_{mod}.json"
+    grcov_json.write_text(_json.dumps({"source_files": [
+        {"name": "src/f.rs", "coverage": [None, 5, 0, 2]},   # 2 covered, 3 coverable
+    ]}), encoding="utf-8")
+    try:
+        m = cov.load_grcov_json(tmp_path, mod)
+    finally:
+        grcov_json.unlink(missing_ok=True)
+    assert isinstance(m, CoverageMeasurement)
+    assert (m.covered, m.coverable) == (2, 3)
+    assert len(m.files) == 1 and isinstance(m.files[0], PerFileCoverage)
+    assert m.files[0].abs_path == str(tmp_path / "src/f.rs")
+    # traces skip the None (non-coverable) line, keep hit counts.
+    assert m.files[0].traces == [
+        {"line": 2, "stats": {"Line": 5}},
+        {"line": 3, "stats": {"Line": 0}},
+        {"line": 4, "stats": {"Line": 2}},
+    ]
 
 # --------------------------------------------------------------------------- fixtures
 

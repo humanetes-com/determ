@@ -23,6 +23,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from ...domain.coverage import PerFileCoverage
 from ...domain.generation import merge_gen_tests_blocks
 from ...domain.llm_output import extract_code_blocks, strip_uncovered_markers
 from ...domain.refine import Attempt, LoopState
@@ -174,7 +175,7 @@ def _engine_pragma_pass(
     project_dir: Path,
     module_name: str,
     module_dir: Path,
-    files_data: list[dict[str, Any]],
+    files_data: list[PerFileCoverage],
     model: str,
 ) -> None:
     """
@@ -201,7 +202,7 @@ def _engine_pragma_pass(
     # Build map: abs_path → set of uncovered line numbers
     uncovered_by_file: dict[Path, set[int]] = {}
     for fdata in files_data:
-        abs_path = Path(fdata["abs_path"]) if "abs_path" in fdata else Path(os.sep.join(fdata["path"]))
+        abs_path = Path(fdata.abs_path)
         if not str(abs_path).startswith(mod_prefix):
             continue
         if is_test_file(abs_path, project_dir):
@@ -209,7 +210,7 @@ def _engine_pragma_pass(
         if abs_path.name == "build.rs":
             continue
         lines_uncov = {
-            t["line"] for t in fdata.get("traces", [])
+            t["line"] for t in fdata.traces
             if t["stats"].get("Line", 1) == 0
         }
         if lines_uncov:
@@ -1218,7 +1219,7 @@ def _run_phase_c(
     attempt: int,
     coverage: float,
     covered_lines: int,
-    files_data: list[dict[str, Any]],
+    files_data: list[PerFileCoverage],
     hist: Task0cFileHistory,
     ctx: _PhaseCCtx,
 ) -> _PhaseCOutcome:
@@ -1311,19 +1312,19 @@ def _run_phase_c(
     mod_prefix = str(module_dir) + "/"
     uncovered_by_file: dict[str, tuple[str, set[int]]] = {}
     for fdata in files_data:
-        abs_path_str = fdata["abs_path"] if "abs_path" in fdata else os.sep.join(fdata["path"])
+        abs_path_str = fdata.abs_path
         if not abs_path_str.startswith(mod_prefix):
             continue
         rel = str(Path(abs_path_str).relative_to(project_dir))
         lines_uncov = {
-            t["line"] for t in fdata.get("traces", [])
+            t["line"] for t in fdata.traces
             if t["stats"].get("Line", 1) == 0
         }
         _gated = _current_cluster.gated_files if _current_cluster and _current_cluster.gated_files else set()
         if lines_uncov and not is_test_file(Path(abs_path_str), project_dir) \
                 and Path(abs_path_str).name != "build.rs" \
                 and rel not in _gated:
-            uncovered_by_file[rel] = (fdata.get("content", ""), lines_uncov)
+            uncovered_by_file[rel] = ("", lines_uncov)  # elem [0] is unused (see [1]-only reads)
             # Baseline-floor seed: the file's covered-line count from the
             # start-of-attempt full measurement. The quick-cov accept gate
             # (below) reverts any block whose quick-cov drops at/below this,
@@ -1333,7 +1334,7 @@ def _run_phase_c(
             # gate only guards the 2nd+ block against the 1st, never the 1st
             # against baseline, letting a net-negative block lower total
             # coverage and spin the outer attempt loop.
-            file_last_qcov[rel] = fdata.get("covered", 0)
+            file_last_qcov[rel] = fdata.covered
 
     if not uncovered_by_file:
         _log(f"  [{module_name}] No uncovered lines in module source files.")
@@ -1441,9 +1442,9 @@ def _run_phase_c(
         # Only strip if at least one adjacent line IS covered (confirming the block runs).
         _file_cov_hits: dict[int, int] = {}
         for _fd in files_data:
-            _fd_abs = _fd.get("abs_path", os.sep.join(_fd.get("path", [])))
+            _fd_abs = _fd.abs_path
             if _fd_abs == str(abs_path):
-                _file_cov_hits = {t["line"]: t["stats"].get("Line", 0) for t in _fd.get("traces", [])}
+                _file_cov_hits = {t["line"]: t["stats"].get("Line", 0) for t in _fd.traces}
                 break
         _src_lines_list = existing_text.splitlines()
         _artifact_lines: set[int] = set()
@@ -2450,7 +2451,7 @@ def task0c_augment_module(
     coverage = 0.0
     covered_lines = 0
     coverable_lines = 0
-    files_data: list[dict[str, Any]] = []
+    files_data: list[PerFileCoverage] = []
     _skip_first_measure = False
     # On resume, reload coverage from the previous run's grcov JSON + filecache
     # to avoid an expensive full re-run before the first gen attempt.

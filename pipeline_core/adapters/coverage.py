@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from ..domain.coverage import CoverageMeasurement
+from ..domain.coverage import CoverageMeasurement, PerFileCoverage
 from ..domain.enums import CoverageBackend
 
 
@@ -108,7 +108,7 @@ def run_tarpaulin(deps: CoverageDeps, project_dir: Path, module_name: str) -> Co
         data = json.loads(json_path.read_text())
         return CoverageMeasurement(
             data.get("coverage", 0.0),
-            data.get("files", []),
+            [PerFileCoverage.from_dict(d) for d in data.get("files", [])],
             data.get("covered", 0),
             data.get("coverable", 0),
         )
@@ -282,13 +282,13 @@ def run_grcov(deps: CoverageDeps, project_dir: Path, module_name: str) -> Covera
                 if c is not None
             ]
             abs_path = str(project_dir / sf.get("name", ""))
-            files_data.append({
-                "path": abs_path.split(os.sep),  # tarpaulin-compat schema
-                "abs_path": abs_path,             # reliable full path for consumers
-                "traces": traces,
-                "covered": covered,
-                "coverable": coverable,
-            })
+            files_data.append(PerFileCoverage(
+                abs_path=abs_path,
+                path=abs_path.split(os.sep),  # tarpaulin-compat schema
+                traces=traces,
+                covered=covered,
+                coverable=coverable,
+            ))
 
         pct = (total_covered / total_coverable * 100.0) if total_coverable > 0 else 0.0
         return CoverageMeasurement(pct, files_data, total_covered, total_coverable)
@@ -348,9 +348,9 @@ def load_grcov_json(project_dir: Path, module_name: str) -> CoverageMeasurement 
             except Exception:
                 pass
 
-        files_data = list(file_map.values())
-        total_covered   = sum(f["covered"]   for f in files_data)
-        total_coverable = sum(f["coverable"] for f in files_data)
+        files_data = [PerFileCoverage.from_dict(v) for v in file_map.values()]
+        total_covered   = sum(f.covered   for f in files_data)
+        total_coverable = sum(f.coverable for f in files_data)
         pct = (total_covered / total_coverable * 100.0) if total_coverable > 0 else 0.0
         return CoverageMeasurement(pct, files_data, total_covered, total_coverable)
     except Exception:
@@ -464,7 +464,7 @@ class LlvmCovProvider(CoverageProvider):
             text = lcov_path.read_text(encoding="utf-8", errors="replace")
         except FileNotFoundError:
             return CoverageMeasurement(0.0, [], 0, 0)
-        files_data: list[dict[str, Any]] = []
+        files_data: list[PerFileCoverage] = []
         current_file: str | None = None
         line_hits: dict[int, int] = {}
         project_str = str(project_dir)
@@ -496,17 +496,17 @@ class LlvmCovProvider(CoverageProvider):
                     covered   = sum(1 for c in line_hits.values() if c > 0)
                     coverable = len(line_hits)
                     traces    = [{"line": ln, "stats": {"Line": ct}} for ln, ct in sorted(line_hits.items())]
-                    files_data.append({
-                        "abs_path":  abs_path,
-                        "path":      abs_path.split(os.sep),
-                        "traces":    traces,
-                        "covered":   covered,
-                        "coverable": coverable,
-                    })
+                    files_data.append(PerFileCoverage(
+                        abs_path=abs_path,
+                        path=abs_path.split(os.sep),
+                        traces=traces,
+                        covered=covered,
+                        coverable=coverable,
+                    ))
                 current_file = None
                 line_hits = {}
-        total_covered   = sum(f["covered"]   for f in files_data)
-        total_coverable = sum(f["coverable"] for f in files_data)
+        total_covered   = sum(f.covered   for f in files_data)
+        total_coverable = sum(f.coverable for f in files_data)
         pct = (total_covered / total_coverable * 100.0) if total_coverable > 0 else 0.0
         return CoverageMeasurement(pct, files_data, total_covered, total_coverable)
 
@@ -517,8 +517,8 @@ class LlvmCovProvider(CoverageProvider):
         pct, files_data, _, _ = self._run(project_dir, module_name, suffix="_quick")
         abs_target = str(project_dir / rel_path)
         for fd in files_data:
-            if fd["abs_path"] == abs_target:
-                return fd["covered"], fd["coverable"]
+            if fd.abs_path == abs_target:
+                return fd.covered, fd.coverable
         return None
 
     def load_cached(self, project_dir: Path, module_name: str) -> CoverageMeasurement | None:
