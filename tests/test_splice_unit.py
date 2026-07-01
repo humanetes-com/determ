@@ -9,7 +9,23 @@ from pathlib import Path
 from pipeline_core.application.reconstruct.splice import (
     locate_fn_by_record,
     splice_fn_body_at,
+    splice_fn_with_where,
 )
+from pipeline_core.domain.reconstruction import SpliceOutcome
+
+
+def test_splice_outcome_is_named_tuple_and_unpacks() -> None:
+    o = SpliceOutcome(True, "ok", 12)
+    ok, reason, delta = o                      # positional unpack still works
+    assert (ok, reason, delta) == (True, "ok", 12)
+    assert (o.ok, o.reason, o.delta) == (True, "ok", 12)
+    assert o == (True, "ok", 12)               # tuple-equal → drop-in
+
+
+def test_splice_fn_with_where_missing_file_returns_outcome(tmp_path: Path) -> None:
+    out = splice_fn_with_where(lambda _p: [], tmp_path / "nope.rs", "", "f", "{ 1 }")
+    assert isinstance(out, SpliceOutcome)
+    assert out == (False, "file_missing", 0)
 
 
 def _rec(**kw: object) -> dict[str, object]:

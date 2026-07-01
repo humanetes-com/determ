@@ -118,7 +118,7 @@ from pipeline_core.adapters.model_notes_store import (
 from pipeline_core.adapters.mutation import MutationTester
 from pipeline_core.adapters.phase_c_log import write_phase_c_test_fix_log as _write_phase_c_test_fix_log
 from pipeline_core.adapters.progress import ChunkProgress
-from pipeline_core.adapters.run_registry import FileRunRegistry
+from pipeline_core.adapters.run_registry import FileRunRegistry, RunRegistryEntry
 from pipeline_core.adapters.structure import CliStructureReader as _CliStructureReader
 from pipeline_core.adapters.structure import fn_name_counts as _fn_name_counts
 from pipeline_core.adapters.structure import load_baked_clusters as _load_baked_clusters_impl
@@ -381,6 +381,7 @@ from pipeline_core.domain.models import (
     TypeRecord,
 )
 from pipeline_core.domain.prompt_budget import PromptBudgets
+from pipeline_core.domain.reconstruction import SpliceOutcome
 from pipeline_core.domain.refine import (
     parse_retrospective_categories as _parse_retrospective_categories,
 )
@@ -1041,23 +1042,23 @@ def _register_run(project_dir: Path) -> None:
     from-scratch disclaimer."""
     global _CRATE_DISPLAY_NAME
     _CRATE_DISPLAY_NAME = _crate_display_name(project_dir.name)
-    entry: dict = {
-        "pid": os.getpid(),
-        "project": project_dir.name,
-        "project_dir": str(project_dir),
-        "pipeline_log": _PIPELINE_LOG,
-        "run_log": (str(_RUN.log_path) if _RUN.log_path else None),
-        "stdout_log": _resolve_stdout_path(),
-        "stream_log": os.getenv("LLM_STREAM_LOG", os.getenv("OLLAMA_STREAM_LOG",
+    entry = RunRegistryEntry(
+        pid=os.getpid(),
+        project=project_dir.name,
+        project_dir=str(project_dir),
+        pipeline_log=_PIPELINE_LOG,
+        run_log=(str(_RUN.log_path) if _RUN.log_path else None),
+        stdout_log=_resolve_stdout_path(),
+        stream_log=os.getenv("LLM_STREAM_LOG", os.getenv("OLLAMA_STREAM_LOG",
             str(Path(__file__).parent / "logs" / "stream.log"))),
-        "events_log": os.getenv("PIPELINE_EVENTS_LOG",
+        events_log=os.getenv("PIPELINE_EVENTS_LOG",
             str(Path(__file__).parent / "logs" / "events.jsonl")),
-        "guard_log": _GUARD_LOG,
-        "argv": sys.argv[1:],
-        "cwd": os.getcwd(),
-        "started_at": int(time.time()),
-    }
-    FileRunRegistry(_RUN_REGISTRY).register(entry)
+        guard_log=_GUARD_LOG,
+        argv=sys.argv[1:],
+        cwd=os.getcwd(),
+        started_at=int(time.time()),
+    )
+    FileRunRegistry(_RUN_REGISTRY).register(entry.as_dict())
 
 
 def init_log(root: Path, nolog: bool = False, progress_mode: bool = False):
@@ -1907,7 +1908,7 @@ def _splice_fn_with_where(
     body: str,
     where_clause: str | None = None,
     allow_nonstub: bool = False,
-) -> tuple[bool, str, int]:
+) -> SpliceOutcome:
     return _reconstruct_splice.splice_fn_with_where(
         _enumerate_fns_via_extractor, file_path, container, fn_name, body,
         where_clause, allow_nonstub)

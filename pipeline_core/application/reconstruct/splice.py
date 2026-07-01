@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from pipeline_core.application.reconstruct.fill_rules import is_unimplemented_body
+from pipeline_core.domain.reconstruction import SpliceOutcome
 from pipeline_core.domain.rust_fn_headers import is_pub_fn, locate_fn
 from pipeline_core.domain.rust_idents import declares_fn
 
@@ -233,20 +234,21 @@ def splice_fn_with_where(
     body: str,
     where_clause: str | None = None,
     allow_nonstub: bool = False,
-) -> tuple[bool, str, int]:
+) -> SpliceOutcome:
     """Splice ``body`` into ``fn_name`` whose containing impl matches
     ``container`` (located via the syn enumerator). When ``where_clause`` is
     given, insert it into the signature just before the body's opening brace
-    (byte space — offsets come from the enumerator). Returns
-    ``(success, reason, bytes_delta)``; ``reason`` is ``"ok"`` or a failure tag."""
+    (byte space — offsets come from the enumerator). Returns a
+    :class:`SpliceOutcome` ``(ok, reason, delta)``; ``reason`` is ``"ok"`` or a
+    failure tag."""
     if not file_path.exists():
-        return False, "file_missing", 0
+        return SpliceOutcome(False, "file_missing", 0)
     loc = locate_fn_by_record(enumerate_fns, file_path, fn_name, container, "")
     if loc is None:
         loose_container = container.split("{", 1)[0].strip()
         loc = locate_fn_by_record(enumerate_fns, file_path, fn_name, loose_container, "")
     if loc is None:
-        return False, "fn_not_found", 0
+        return SpliceOutcome(False, "fn_not_found", 0)
     sig_byte_start, body_byte_start, body_byte_end, _sig_text = loc
 
     if where_clause:
@@ -265,5 +267,5 @@ def splice_fn_with_where(
     ok, delta = splice_fn_body_at(file_path, body_byte_start, body_byte_end, body,
                                   allow_nonstub=allow_nonstub)
     if not ok:
-        return False, "splice_rejected", 0
-    return True, "ok", delta
+        return SpliceOutcome(False, "splice_rejected", 0)
+    return SpliceOutcome(True, "ok", delta)

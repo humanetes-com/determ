@@ -6,6 +6,19 @@ unit-testable in isolation and the application layer holds no loose loop locals.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import NamedTuple
+
+
+class SpliceOutcome(NamedTuple):
+    """Result of splicing a body into a function: whether it applied, a reason
+    tag (``"ok"`` or a failure like ``"fn_not_found"``/``"splice_rejected"``),
+    and the byte delta the edit introduced. A ``NamedTuple`` so it stays a
+    drop-in for the ``(ok, reason, delta)`` tuple callers already unpack while
+    the fields are now named."""
+
+    ok: bool
+    reason: str
+    delta: int
 
 # Crate-type constraint appended to the generation context for proc-macro crates
 # so the model emits a valid macro crate (entry fns over `proc_macro::TokenStream`,

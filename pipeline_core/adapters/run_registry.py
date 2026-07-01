@@ -11,10 +11,49 @@ from __future__ import annotations
 import atexit
 import json
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from pipeline_core.log import log
+
+
+@dataclass(frozen=True, slots=True)
+class RunRegistryEntry:
+    """The coordinate record one pipeline run publishes to the live-run registry
+    so ``monitor.py`` can auto-discover it. Names what used to be an ad-hoc 12-key
+    dict built inline in pipeline.py. ``as_dict`` is the on-disk JSON shape — its
+    key order matches the historical dict so the persisted registry (which the
+    monitor reads by key) stays byte-stable."""
+
+    pid: int
+    project: str
+    project_dir: str
+    pipeline_log: str
+    run_log: str | None
+    stdout_log: str | None
+    stream_log: str
+    events_log: str
+    guard_log: str
+    argv: list[str]
+    cwd: str
+    started_at: int
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "pid": self.pid,
+            "project": self.project,
+            "project_dir": self.project_dir,
+            "pipeline_log": self.pipeline_log,
+            "run_log": self.run_log,
+            "stdout_log": self.stdout_log,
+            "stream_log": self.stream_log,
+            "events_log": self.events_log,
+            "guard_log": self.guard_log,
+            "argv": self.argv,
+            "cwd": self.cwd,
+            "started_at": self.started_at,
+        }
 
 
 class FileRunRegistry:
