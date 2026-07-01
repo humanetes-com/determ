@@ -29,6 +29,18 @@ def _strs(v: Any) -> tuple[str, ...]:
 
 
 @dataclass(frozen=True, slots=True)
+class SkeletoniseResult:
+    """Outcome of one ``--skeletonise`` extractor invocation: whether it
+    succeeded, the per-file JSON reports (empty on failure), and captured stderr
+    (the failure reason when ``ok`` is False). Replaces the anonymous
+    ``{ok, reports, stderr}`` dict the ``Extractor.skeletonise`` port returned."""
+
+    ok: bool
+    reports: list[dict[str, Any]]
+    stderr: str
+
+
+@dataclass(frozen=True, slots=True)
 class FieldRecord:
     """A struct field (model.rs FieldRecord)."""
     name: str = ""

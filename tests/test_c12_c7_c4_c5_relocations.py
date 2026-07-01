@@ -17,7 +17,7 @@ from pipeline_core.application.strip_bake import (
     bake_skeleton_artifacts,
 )
 from pipeline_core.domain.generation import derive_gentest_prelude
-from pipeline_core.domain.models import BuildCluster
+from pipeline_core.domain.models import BuildCluster, SkeletoniseResult
 from pipeline_core.domain.rust_idioms import no_std_invariant_note
 from pipeline_core.domain.rust_macros import collect_crate_macros
 
@@ -123,9 +123,9 @@ def test_load_baked_clusters(tmp_path: Path) -> None:
 
 
 def _bake_deps(logs: list[str]) -> BakeArtifactsDeps:
-    def fake_extract(src: Path, out: Path, cluster: object = None) -> dict:
+    def fake_extract(src: Path, out: Path, cluster: object = None) -> SkeletoniseResult:
         Path(out).mkdir(parents=True, exist_ok=True)
-        return {"ok": True, "reports": [1], "stderr": ""}
+        return SkeletoniseResult(True, [{"f": 1}], "")
 
     return BakeArtifactsDeps(
         log=lambda m: logs.append(m),
@@ -163,7 +163,7 @@ def test_bake_skeleton_artifacts_extractor_failure(tmp_path: Path) -> None:
     bad = BakeArtifactsDeps(
         log=deps.log, cfg_scan=deps.cfg_scan, prune_clusters=deps.prune_clusters,
         fn_name_counts=deps.fn_name_counts,
-        extract_skeleton=lambda s, o, cluster=None: {"ok": False, "stderr": "boom"},
+        extract_skeleton=lambda s, o, cluster=None: SkeletoniseResult(False, [], "boom"),
         is_gen_tests_file=deps.is_gen_tests_file,
         gen_tests_origin_cfgs=deps.gen_tests_origin_cfgs)
     res = bake_skeleton_artifacts(tmp_path, "m", bad)

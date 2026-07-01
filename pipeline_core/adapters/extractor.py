@@ -23,6 +23,7 @@ from ..domain.models import (
     DispatchFamily,
     FnRecord,
     ModRecord,
+    SkeletoniseResult,
     TypeRecord,
 )
 
@@ -96,24 +97,24 @@ class CliExtractor:
         return None if rows is None else [CfgOccurrence.from_dict(r) for r in rows]
 
     # ── skeletonise : --input/--output tree, structured report dict ───────────
-    def skeletonise(self, input_dir: Path, output_dir: Path, *, cfg_true: tuple[str, ...] = (), cfg_false: tuple[str, ...] = ()) -> dict[str, Any]:
+    def skeletonise(self, input_dir: Path, output_dir: Path, *, cfg_true: tuple[str, ...] = (), cfg_false: tuple[str, ...] = ()) -> SkeletoniseResult:
         if not self._bin.exists():
-            return {"ok": False, "reports": [], "stderr": f"skeleton-extractor binary missing at {self._bin}. Run `bash setup.sh` to build it."}
+            return SkeletoniseResult(False, [], f"skeleton-extractor binary missing at {self._bin}. Run `bash setup.sh` to build it.")
         Path(output_dir).mkdir(parents=True, exist_ok=True)
         cmd = [str(self._bin), "--input", str(input_dir), "--output", str(output_dir), "--report", *_cfg_args(cfg_true, cfg_false)]
         try:
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         except subprocess.TimeoutExpired:
-            return {"ok": False, "reports": [], "stderr": "skeleton-extractor timed out (>120s)"}
+            return SkeletoniseResult(False, [], "skeleton-extractor timed out (>120s)")
         except Exception as e:
-            return {"ok": False, "reports": [], "stderr": f"skeleton-extractor invocation failed: {e}"}
+            return SkeletoniseResult(False, [], f"skeleton-extractor invocation failed: {e}")
         if r.returncode != 0:
-            return {"ok": False, "reports": [], "stderr": r.stderr.strip()}
+            return SkeletoniseResult(False, [], r.stderr.strip())
         try:
             reports = json.loads(r.stdout) if r.stdout.strip() else []
         except json.JSONDecodeError as e:
-            return {"ok": False, "reports": [], "stderr": f"could not parse JSON report: {e}"}
-        return {"ok": True, "reports": reports, "stderr": r.stderr.strip()}
+            return SkeletoniseResult(False, [], f"could not parse JSON report: {e}")
+        return SkeletoniseResult(True, reports, r.stderr.strip())
 
     # ── merge-clusters : cross-cluster AST merge, bool out ────────────────────
     def merge_clusters(self, out_path: Path, cluster_files: list[tuple[str, Path, str]]) -> bool:

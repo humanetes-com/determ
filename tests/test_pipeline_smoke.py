@@ -2235,7 +2235,7 @@ def test_adapters_satisfy_ports() -> None:
     # Missing-binary extractor degrades to None / not-ok, never raises (parity with pipeline).
     assert a.extractor.enumerate_fns(Path("/tmp")) is None
     assert a.extractor.merge_clusters(Path("/tmp/x"), []) is False
-    assert a.extractor.skeletonise(Path("/tmp"), Path("/tmp/out"))["ok"] is False
+    assert a.extractor.skeletonise(Path("/tmp"), Path("/tmp/out")).ok is False
 
     # Cargo: bogus binary → rc=-1, structured Process satisfying ProcessResult.
     p = a.cargo.run("definitely-not-cargo --version", Path("/tmp"), env={})
@@ -2325,7 +2325,12 @@ def test_slice5a_shims_delegate_to_adapters() -> None:
 
     calls: list[tuple] = []
 
-    from pipeline_core.domain.models import FnRecord, ModRecord, TypeRecord
+    from pipeline_core.domain.models import (
+        FnRecord,
+        ModRecord,
+        SkeletoniseResult,
+        TypeRecord,
+    )
 
     class _FakeExtractor:
         # slice 6: the adapter contract returns typed records, not dicts.
@@ -2334,7 +2339,7 @@ def test_slice5a_shims_delegate_to_adapters() -> None:
         def enumerate_dispatch_families(self, d, **k): calls.append(("disp", d)); return []
         def enumerate_feature_gate_cfgs(self, d, **k): calls.append(("feat", d)); return ["nightly"]
         def enumerate_mods(self, d, **k): calls.append(("mods", d)); return [ModRecord(name="m")]
-        def skeletonise(self, i, o, **k): calls.append(("skel", i, o, k)); return {"ok": True, "reports": [], "stderr": ""}
+        def skeletonise(self, i, o, **k): calls.append(("skel", i, o, k)); return SkeletoniseResult(True, [], "")
 
     class _FakeCargo:
         def __init__(self): self.last = None
@@ -2364,7 +2369,7 @@ def test_slice5a_shims_delegate_to_adapters() -> None:
         assert pipeline._feature_gate_cfgs_via_extractor(d) == ["nightly"]
         assert pipeline._enumerate_mods_via_extractor(d) == [ModRecord(name="m")]
         r = pipeline._extract_skeleton(Path("/in"), Path("/out"))
-        assert r["ok"] is True
+        assert r.ok is True
         assert {c[0] for c in calls} == {"fns", "types", "disp", "feat", "mods", "skel"}
 
         # _run_cargo: success → (rc, combined stdout+stderr-block); error rc=-1 → bare stderr.

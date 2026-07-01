@@ -379,6 +379,7 @@ from pipeline_core.domain.models import (
     Frontier,
     ImplBlock,
     ModRecord,
+    SkeletoniseResult,
     TypeRecord,
 )
 from pipeline_core.domain.prompt_budget import PromptBudgets
@@ -1785,7 +1786,7 @@ def _cluster_extractor_args(cluster: "BuildCluster | None") -> list[str]:
 
 
 def _extract_skeleton(input_dir: Path, output_dir: Path,
-                      cluster: "BuildCluster | None" = None) -> dict:
+                      cluster: "BuildCluster | None" = None) -> SkeletoniseResult:
     """Invoke the Rust skeleton extractor over a live source tree.
 
     Run only during the bake step (`_bake_skeleton_artifacts`), before

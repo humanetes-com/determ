@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from pipeline_core.domain.models import BuildCluster
+from pipeline_core.domain.models import BuildCluster, SkeletoniseResult
 
 
 @dataclass(frozen=True)
@@ -31,7 +31,7 @@ class BakeArtifactsDeps:
     cfg_scan: Callable[[Path], list[BuildCluster]]
     prune_clusters: Callable[..., list[BuildCluster]]
     fn_name_counts: Callable[[Path], dict[str, int]]
-    extract_skeleton: Callable[..., dict[str, Any]]
+    extract_skeleton: Callable[..., SkeletoniseResult]
     is_gen_tests_file: Callable[[str], bool]
     gen_tests_origin_cfgs: Callable[[str], dict[int, str]]
 
@@ -89,17 +89,17 @@ def bake_skeleton_artifacts(
         # prior cluster outputs under `.skeleton/`. Output mirrors under
         # `skeleton_dir/src/`, matching the runnable-crate layout Phase A expects.
         res = d.extract_skeleton(src_dir, skeleton_dir / "src", cluster=None)
-        if not res["ok"]:
+        if not res.ok:
             d.log(f"  [bake-skeleton] cluster {cluster.name}: extractor FAILED: "
-                  f"{res['stderr']}")
+                  f"{res.stderr}")
             return {"ok": False, "clusters": baked,
-                    "reason": f"extract {cluster.name}: {res['stderr']}"}
+                    "reason": f"extract {cluster.name}: {res.stderr}"}
         order_path = skeleton_dir / "_leaf_order.json"
         try:
             order_path.write_text(json.dumps(name_counts, sort_keys=True), encoding="utf-8")
         except Exception as e:
             d.log(f"  [bake-skeleton] cluster {cluster.name}: leaf-order write failed: {e}")
-        d.log(f"  [bake-skeleton] cluster {cluster.name}: {len(res['reports'])} "
+        d.log(f"  [bake-skeleton] cluster {cluster.name}: {len(res.reports)} "
               f"file(s) skeletonised → {skeleton_dir}")
         baked.append(cluster.name)
 

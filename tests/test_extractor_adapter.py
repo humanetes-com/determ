@@ -124,7 +124,7 @@ def test_skeletonise_ok_parses_reports(tmp_path: Path, monkeypatch: pytest.Monke
     monkeypatch.setattr(ext.subprocess, "run", fake)
     out_dir = tmp_path / "out"
     res = CliExtractor(_bin(tmp_path)).skeletonise(tmp_path, out_dir)
-    assert res == {"ok": True, "reports": [{"file": "a.rs", "fns": 3}], "stderr": "warn"}
+    assert (res.ok, res.reports, res.stderr) == (True, [{"file": "a.rs", "fns": 3}], "warn")
     assert out_dir.is_dir()  # output dir created
     # argv carries --input/--output/--report
     argv = fake.calls[0]
@@ -134,37 +134,37 @@ def test_skeletonise_ok_parses_reports(tmp_path: Path, monkeypatch: pytest.Monke
 def test_skeletonise_empty_stdout_yields_empty_reports(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(ext.subprocess, "run", _FakeRun(stdout="   "))
     res = CliExtractor(_bin(tmp_path)).skeletonise(tmp_path, tmp_path / "o")
-    assert res["ok"] is True and res["reports"] == []
+    assert res.ok is True and res.reports == []
 
 
 def test_skeletonise_missing_binary(tmp_path: Path) -> None:
     res = CliExtractor(tmp_path / "absent").skeletonise(tmp_path, tmp_path / "o")
-    assert res["ok"] is False and "binary missing" in res["stderr"]
+    assert res.ok is False and "binary missing" in res.stderr
 
 
 def test_skeletonise_nonzero_rc_reports_stderr(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(ext.subprocess, "run", _FakeRun(returncode=2, stderr="  parse failed  "))
     res = CliExtractor(_bin(tmp_path)).skeletonise(tmp_path, tmp_path / "o")
-    assert res["ok"] is False and res["stderr"] == "parse failed"
+    assert res.ok is False and res.stderr == "parse failed"
 
 
 def test_skeletonise_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import subprocess
     monkeypatch.setattr(ext.subprocess, "run", _FakeRun(raises=subprocess.TimeoutExpired("c", 120)))
     res = CliExtractor(_bin(tmp_path)).skeletonise(tmp_path, tmp_path / "o")
-    assert res["ok"] is False and "timed out" in res["stderr"]
+    assert res.ok is False and "timed out" in res.stderr
 
 
 def test_skeletonise_bad_json_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(ext.subprocess, "run", _FakeRun(stdout="{bad json"))
     res = CliExtractor(_bin(tmp_path)).skeletonise(tmp_path, tmp_path / "o")
-    assert res["ok"] is False and "could not parse JSON report" in res["stderr"]
+    assert res.ok is False and "could not parse JSON report" in res.stderr
 
 
 def test_skeletonise_generic_exception(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(ext.subprocess, "run", _FakeRun(raises=RuntimeError("nope")))
     res = CliExtractor(_bin(tmp_path)).skeletonise(tmp_path, tmp_path / "o")
-    assert res["ok"] is False and "invocation failed" in res["stderr"]
+    assert res.ok is False and "invocation failed" in res.stderr
 
 
 # --------------------------------------------------------------------------- merge_clusters
