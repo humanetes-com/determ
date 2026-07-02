@@ -110,6 +110,19 @@ class Task0cDeps:
     check_stop: Any   # graceful-stop hook for the fix loops (#14: was a fix_loop global)
 
 
+def _iter_module_rs(module_dir: Path) -> list[Path]:
+    """Real source .rs files of the module, sorted. Excludes cargo build
+    artifacts (`target/`) and per-cluster skeleton scratch (`.skeleton/`):
+    those trees hold duplicate-basename copies (e.g. macros.rs, context.rs)
+    that false-match the `src_file.name in compile_err` basename checks and
+    drag build-expanded/scratch files into the harness-fix and restore loops.
+    """
+    return [
+        p for p in sorted(module_dir.rglob("*.rs"))
+        if "target" not in p.parts and ".skeleton" not in p.parts
+    ]
+
+
 def _engine_get_history(deps: Task0cDeps, project_dir: Path, rel_path: str, max_entries: int = 5) -> str:
     """BL-002/BL-016: Return formatted prior-attempt history for rel_path, most recent first.
 
@@ -912,14 +925,14 @@ def _run_harness_preflight(
             ("gen_tests" in lib_err) or
             (src_file.name in lib_err and
              "mod gen_" in src_file.read_text(encoding="utf-8", errors="ignore"))
-            for src_file in module_dir.rglob("*.rs")
+            for src_file in _iter_module_rs(module_dir)
             if not is_test_file(src_file, project_dir)
         )
         if not _lib_err_in_gen:
             # Check whether any of the broken files are writable (i.e. we wrote them).
             # If the error is only in write-protected originals, we truly cannot fix it.
             _broken_in_err = [
-                src_file for src_file in module_dir.rglob("*.rs")
+                src_file for src_file in _iter_module_rs(module_dir)
                 if (str(src_file.relative_to(project_dir)) in lib_err
                     or src_file.name in lib_err)
                 and not is_test_file(src_file, project_dir)
@@ -965,12 +978,12 @@ def _run_harness_preflight(
 
             # Find source files mentioned in the error that belong to this module.
             broken_files = []
-            for src_file in sorted(module_dir.rglob("*.rs")):
+            for src_file in _iter_module_rs(module_dir):
                 rel = str(src_file.relative_to(project_dir))
                 if rel in compile_err or src_file.name in compile_err:
                     broken_files.append(src_file)
             if not broken_files:
-                for src_file in sorted(module_dir.rglob("*.rs")):
+                for src_file in _iter_module_rs(module_dir):
                     try:
                         if "#[cfg(test)]" in src_file.read_text(encoding="utf-8"):
                             broken_files.append(src_file)
@@ -1143,7 +1156,7 @@ corrected content here
                     _log(f"  [{module_name}] Source files damaged by LLM fix attempts — restoring from git HEAD.")
                     # Restore non-test source files from git HEAD (not test files — those we own).
                     _restore_ok = True
-                    for _sf in sorted(module_dir.rglob("*.rs")):
+                    for _sf in _iter_module_rs(module_dir):
                         if is_test_file(_sf, project_dir):
                             continue
                         _rel = str(_sf.relative_to(project_dir))
@@ -1368,17 +1381,11 @@ def _run_phase_c(
     # Include other targeted files too — they define the types the target uses.
     # Only the file being processed is excluded (its content is in the main prompt).
     sibling_files_all: list[tuple[str, str]] = []
-    _target_dir = project_dir / "target"
-    for sib_file in sorted(module_dir.rglob("*.rs")):
+    for sib_file in _iter_module_rs(module_dir):
         if is_test_file(sib_file, project_dir):
             continue
         if sib_file.name == "build.rs":
             continue  # build scripts are not library code — no useful type context
-        try:
-            if sib_file.is_relative_to(_target_dir):
-                continue  # skip build artifacts
-        except Exception:
-            pass
         try:
             sib_rel = str(sib_file.relative_to(project_dir))
             sib_text = sib_file.read_text(encoding="utf-8")
@@ -2422,7 +2429,7 @@ def task0c_augment_module(
     # keep them so accumulated coverage is never lost on re-entry.
     _precheck_ok, _ = augmentor.test_harness_compiles(project_dir, module_name)
     if not _precheck_ok:
-        for src_file in sorted(module_dir.rglob("*.rs")):
+        for src_file in _iter_module_rs(module_dir):
             if is_test_file(src_file, project_dir):
                 continue
             # Don't recurse into siblings here — they're handled via their parent.
@@ -2503,7 +2510,7 @@ def task0c_augment_module(
         # Only source files with #[cfg(test)] blocks are candidates — these hold
         # the generated tests that may have syntax errors.
         module_source_paths = [
-            f for f in sorted(module_dir.rglob("*.rs"))
+            f for f in _iter_module_rs(module_dir)
             if not is_test_file(f, project_dir)
         ]
         compile_ok, _ = generate_fix_loop(
@@ -2631,7 +2638,7 @@ def task0c_augment_module(
     try:
         _rel_files = [
             str(p.relative_to(project_dir))
-            for p in sorted(module_dir.rglob("*.rs"))
+            for p in _iter_module_rs(module_dir)
             if not _is_gen_tests_file(p.name)
             and str(p.relative_to(project_dir)) not in existing_test_files
         ]
