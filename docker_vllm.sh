@@ -14,6 +14,33 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 _env() { grep -E "^[[:space:]]*$1=" "$SCRIPT_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '[:space:]'; }
 
+# True (rc 0) when the HF hub cache holds a COMPLETE snapshot for repo id "$1":
+# a real weight file (safetensors/bin/gguf/pt) present, no broken/empty symlink
+# targets, no `*.incomplete` blobs. Echoes the reason on failure. Lets us fail
+# fast instead of waiting ~20 min or silently pulling a multi-GB download.
+_model_cached() {
+    local repo="$1"
+    local hub="${HF_HOME:-$HOME/.cache/huggingface}/hub"
+    local dir="$hub/models--${repo//\//--}"          # "Org/Name" -> "models--Org--Name"
+    [[ -d "$dir" ]] || { echo "not in cache ($dir)"; return 1; }
+    local snap=""
+    snap=$(ls -dt "$dir"/snapshots/*/ 2>/dev/null | head -1) || true
+    [[ -n "$snap" ]] || { echo "no snapshot dir"; return 1; }
+    local f have=0 broken=0
+    shopt -s nullglob
+    for f in "$snap"*.safetensors "$snap"*.bin "$snap"*.gguf "$snap"*.pt; do
+        have=1
+        [[ -s "$f" ]] || broken=1                     # -s follows symlink: false if target missing/empty
+    done
+    shopt -u nullglob
+    [[ "$have" -eq 1 ]]   || { echo "no weight files in snapshot"; return 1; }
+    [[ "$broken" -eq 0 ]] || { echo "partial download (broken/empty weight blobs)"; return 1; }
+    local inc=""
+    inc=$(ls "$dir"/blobs/*.incomplete 2>/dev/null | head -1) || true
+    [[ -z "$inc" ]] || { echo "download in progress (.incomplete blobs)"; return 1; }
+    return 0
+}
+
 VLLM_MODEL=$(_env VLLM_MODEL_NAME)
 VLLM_URL=$(_env VLLM_BASE_URL); VLLM_URL="${VLLM_URL:-http://localhost:8000/v1}"
 VLLM_PORT="${VLLM_URL##*:}"; VLLM_PORT="${VLLM_PORT%%/*}"; VLLM_PORT="${VLLM_PORT:-8000}"
@@ -23,10 +50,32 @@ HF_TOKEN=$(_env HF_TOKEN)
 CONTAINER_ID_FILE=/tmp/vllm_container.id
 
 # Parse flags: --y / -y skips the confirmation prompts below.
+# --allow-download bypasses the "model fully cached?" gate (lets vLLM fetch it).
 _YES=false
+_ALLOW_DL=false
 for _arg in "$@"; do
     [[ "$_arg" == "--y" || "$_arg" == "-y" ]] && _YES=true
+    [[ "$_arg" == "--allow-download" ]] && _ALLOW_DL=true
 done
+
+# Fail fast BEFORE touching any container: if VLLM_MODEL_NAME isn't fully in the
+# HF cache, abort with the reason + the repos that ARE cached, so the user fixes
+# .env instead of waiting 20 min or triggering a surprise download.
+if [[ -z "$VLLM_MODEL" ]]; then
+    echo "[error] VLLM_MODEL_NAME is empty in .env — nothing to load." >&2
+    exit 1
+fi
+if [[ "$_ALLOW_DL" == false ]]; then
+    if ! _reason=$(_model_cached "$VLLM_MODEL"); then
+        echo "[error] model '$VLLM_MODEL' is not fully downloaded: $_reason" >&2
+        echo "        Repos present in the HF cache:" >&2
+        ls -1d "${HF_HOME:-$HOME/.cache/huggingface}"/hub/models--* 2>/dev/null \
+            | sed 's#.*/models--##; s#--#/#; s/^/          /' >&2
+        echo "        → fix VLLM_MODEL_NAME in .env to one of those, or pass --allow-download to fetch it." >&2
+        exit 1
+    fi
+    echo "Model '$VLLM_MODEL' is fully present in the HF cache ✓"
+fi
 
 # Detect a running pipeline first — restarting vLLM mid-pipeline would
 # crash whatever LLM call is in flight. Warn (or kill with --y).

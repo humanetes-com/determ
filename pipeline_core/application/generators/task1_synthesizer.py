@@ -324,30 +324,6 @@ Output a plain structured list of the merged requirements. No filler, no code, n
         chunk_test_files_by_file = self.shaping.chunk_test_files_by_file
         format_test_files = self.shaping.format_test_files
         prompt_budget = self.shaping.prompt_budget
-        _fixed = (
-            min(len(readme_text), 2_000)
-            + min(len(project_profile), 2_000)
-            + min(len(project_context), 2_000)
-            + min(len(existing_genesis), 3_000)
-            + min(len(coverage_strategy), 4_000)
-            + 300   # type manifest header
-            + 600   # static instruction text
-        )
-        _chunk_content_budget = prompt_budget(" " * _fixed)
-        chunks = chunk_test_files_by_file(test_files, _chunk_content_budget)
-        total_chunks = len(chunks)
-        _log(f"  Extracting requirements file-by-file: {total_chunks} file(s) → one call each "
-             f"(parallelism={_PARALLELISM}).")
-        _log("  Calibration in progress, progress estimations will be available soon...")
-
-        root = genesis_path.parent
-        partials_dir = root / ".task1_partials"
-        cache_dir = root / CHUNK_CACHE_DIR
-        partials_dir.mkdir(exist_ok=True)
-        cache_dir.mkdir(exist_ok=True)
-
-        progress = ChunkProgress(total=total_chunks)
-        cache_hits = 0
         # Deterministic, syn-extracted type manifest (baked pre-strip — see
         # _capture_api_surface) — known up front, so every chunk gets the SAME
         # header instead of an LLM-output-guessed one accumulated chunk-by-chunk.
@@ -369,6 +345,33 @@ Output a plain structured list of the merged requirements. No filler, no code, n
         context_header = (f"\nProject context (behavioral summary):\n{project_context}\n"
                           ) if project_context.strip() else ""
         chunk_extra_header = profile_header + context_header + type_manifest_header
+
+        # Budget against the REAL fixed prompt (everything except tests_section),
+        # not a hand-maintained estimate: the old sum silently omitted api_surface
+        # (capped ~SINGLE_CALL//2 chars) and undercounted the static template, so
+        # chunks were sized as if the API section were empty → prompt overflowed
+        # ctx (InputTooLong, whole-run abort). Rendering the fixed prompt once with
+        # empty tests is deterministic and self-corrects when any section grows.
+        _fixed_prompt = self._chunk_prompt(
+            1, 1, readme_text, "", chunk_extra_header,
+            genesis=existing_genesis, coverage_strategy=coverage_strategy,
+            api_surface=api_surface,
+        )
+        _chunk_content_budget = prompt_budget(_fixed_prompt)
+        chunks = chunk_test_files_by_file(test_files, _chunk_content_budget)
+        total_chunks = len(chunks)
+        _log(f"  Extracting requirements file-by-file: {total_chunks} file(s) → one call each "
+             f"(parallelism={_PARALLELISM}).")
+        _log("  Calibration in progress, progress estimations will be available soon...")
+
+        root = genesis_path.parent
+        partials_dir = root / ".task1_partials"
+        cache_dir = root / CHUNK_CACHE_DIR
+        partials_dir.mkdir(exist_ok=True)
+        cache_dir.mkdir(exist_ok=True)
+
+        progress = ChunkProgress(total=total_chunks)
+        cache_hits = 0
 
         partial_requirements: list[str | None] = [None] * total_chunks
         pending: list[tuple[int, str, Path, str]] = []
