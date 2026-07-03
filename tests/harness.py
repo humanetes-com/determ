@@ -67,6 +67,12 @@ def install_scripted_model(
     monkeypatch.setattr(pipeline, "_ask_per_fn_body", script)
     if raw is not None:
         monkeypatch.setattr(pipeline, "_ask_raw", _Script(raw))
+    # Retrospective is a distinct model seam: a fix-loop that exhausts calls
+    # `_ask_retrospective` → the REAL `_ASK_CLIENT` (not `_ask_per_fn_body`/`_ask_raw`).
+    # Offline, that meant real TCP connects to an absent server — ~30s/attempt of
+    # dead time (conftest no-ops sleep, not socket connect). Stub it to "" (the same
+    # empty-retro the absent server produced, only instant) so offline tests stay offline.
+    monkeypatch.setattr(pipeline, "_ask_retrospective", lambda *a, **k: "")
     return script
 
 

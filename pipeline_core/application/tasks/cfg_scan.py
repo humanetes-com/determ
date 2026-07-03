@@ -18,6 +18,7 @@ from typing import NamedTuple
 from ...domain import cluster_plan
 from ...domain.build_script import BuildScriptCfg
 from ...domain.cargo_toml import load_cargo_toml
+from ...domain.generation import is_gen_tests_sibling_name
 from ...domain.models import BuildCluster
 from ...log import log
 from ...ports.build_script import BuildScriptReader
@@ -66,7 +67,14 @@ def scan_build_clusters(project_dir: Path, reader: ClusterFactReader,
     src_dir = project_dir / "src"
     cargo_features, default_features = _cargo_features(project_dir)
 
-    occurrences = reader.enumerate_cfgs(src_dir) or []
+    # Hard Rule 8: cluster identity is derived from REAL source directives only.
+    # `*.gen_tests_<N>.rs` siblings are LLM-authored augmented tests, not source —
+    # a stray `#[cfg(not(anyhow_no_core_error))]` in one spawned a phantom cluster
+    # whose harness never compiled (0% coverage → blind reconstruction). Drop them.
+    occurrences = [
+        occ for occ in (reader.enumerate_cfgs(src_dir) or [])
+        if not is_gen_tests_sibling_name(Path(occ.file).name)
+    ]
     mod_records = reader.enumerate_mods(src_dir) or []
     feature_gate_cfgs = set(reader.enumerate_feature_gate_cfgs(src_dir) or [])
     bs_set_default, bs_set_nightly, bs_declared = _build_script_facts(project_dir, build_script)

@@ -55,6 +55,23 @@ def test_declared_feature_below_threshold_is_noise(tmp_path: Path) -> None:
     assert _names(clusters) == ["stable"]
 
 
+def test_gen_tests_cfg_never_clusters(tmp_path: Path) -> None:
+    """A custom cfg that appears ONLY in an LLM-authored `*.gen_tests_<N>.rs`
+    sibling must NOT form a cluster (Hard Rule 8: cluster identity is static, from
+    real source only). Regression: a stray `#[cfg(not(anyhow_no_core_error))]` in an
+    augmented test spawned a phantom cluster whose harness never compiled → 0%
+    coverage → blind reconstruction. The real-source cfg beside it still clusters."""
+    (tmp_path / "src").mkdir(exist_ok=True)
+    (tmp_path / "Cargo.toml").write_text('[package]\nname="x"\nversion="0.1.0"\n')
+    (tmp_path / "src" / "lib.rs").write_text(
+        "#[cfg(real_cap)]\npub fn big() -> usize { 9 }\npub fn small() -> usize { 1 }\n")
+    (tmp_path / "src" / "wrapper.gen_tests_4.rs").write_text(
+        "#[cfg(phantom_cap)]\npub fn ghost() -> usize { 0 }\n")
+    clusters = pipeline.task0_cfg_scan(tmp_path)
+    assert "real_cap" in _names(clusters)
+    assert "phantom_cap" not in _names(clusters)
+
+
 def test_builtin_cfg_never_clusters(tmp_path: Path) -> None:
     """Platform/builtin cfgs (`unix`, `test`, `target_os`) never form a cluster
     regardless of how many lines they gate."""
