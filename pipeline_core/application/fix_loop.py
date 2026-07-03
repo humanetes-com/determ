@@ -248,6 +248,7 @@ class GenerateFixLoopDeps:
     render_impl_block: Any
     repo_spec_section: Any
     run_cargo_check_diag: Any
+    restore_frozen_signature: Any
     splice_fn_body: Any
     splice_fn_with_where: Any
     strip_ansi: Any
@@ -497,7 +498,8 @@ def generate_fix_loop(
     _fix_splicer = deps.FixSplicerAdapter(
         locate_fn_fn=deps.locate_fn, is_pub_fn_fn=deps.is_pub_fn,
         render_impl_block_fn=deps.render_impl_block,
-        splice_fn_fn=deps.splice_fn_with_where, splice_body_fn=deps.splice_fn_body)
+        splice_fn_fn=deps.splice_fn_with_where, splice_body_fn=deps.splice_fn_body,
+        restore_signature_fn=deps.restore_frozen_signature)
     _fix_prompts = deps.FixPromptsAdapter(
         repo_spec_block_fn=lambda *, file_rel="", fn_name="", container="":
             deps.tag_block("REPOSITORY_SPECIFICATIONS", deps.repo_spec_section(

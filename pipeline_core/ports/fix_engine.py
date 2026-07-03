@@ -54,6 +54,9 @@ class FixSplicer(Protocol):
         self, file_path: Path, name: str, body: str, *,
         allow_nonstub: bool = ...,
     ) -> tuple[bool, int]: ...
+    def restore_signature(
+        self, file_path: Path, name: str, skeleton_sig: str,
+    ) -> bool: ...
 
 
 @runtime_checkable

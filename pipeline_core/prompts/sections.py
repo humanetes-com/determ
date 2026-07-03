@@ -226,6 +226,47 @@ RUST_GOTCHAS: list[dict[str, Any]] = [
         ),
     },
     {
+        # The frozen-signature ratchet class (anyhow run 30425): a bound added
+        # to a trait-impl METHOD is always rejected — the trait fixes the sig.
+        "id": "trait_impl_stricter_bound",
+        "summary": "E0276 `impl has stricter requirements than trait` → NEVER add a `where` clause / bound to a trait-impl method. Keep the trait's exact signature; write a body that needs no extra bound.",
+        "triggers": {"E0276", "impl has stricter requirements than trait",
+                     "stricter requirements"},
+        "detail": (
+            "A method inside `impl Trait for Type` must keep EXACTLY the trait's\n"
+            "signature — any extra bound is rejected (E0276), even if the body\n"
+            "seems to need it.\n"
+            "  WRONG (extra bound on the method):\n"
+            "    impl<C, E> StdErr for Pair<C, E> {\n"
+            "        fn provide<'a>(&'a self, req: &mut Request<'a>)\n"
+            "        where C: 'static                      // E0276\n"
+            "        { req.provide_ref(&self.first) }\n"
+            "    }\n"
+            "  RIGHT (trait signature untouched; body uses only members that\n"
+            "  already satisfy the trait's own requirements):\n"
+            "    impl<C, E> StdErr for Pair<C, E> {\n"
+            "        fn provide<'a>(&'a self, req: &mut Request<'a>) {\n"
+            "            self.second.provide(req)   // forward; no new bound\n"
+            "        }\n"
+            "    }\n"
+            "  WRONG (method bound in a Display impl):\n"
+            "    impl<T> Display for Wrap<T> {\n"
+            "        fn fmt(&self, f: &mut Formatter) -> fmt::Result\n"
+            "        where T: Debug                        // E0276\n"
+            "        { write!(f, \"{:?}\", self.inner) }\n"
+            "    }\n"
+            "  RIGHT (use only what the impl block's existing bounds provide):\n"
+            "    impl<T> Display for Wrap<T> {\n"
+            "        fn fmt(&self, f: &mut Formatter) -> fmt::Result {\n"
+            "            write!(f, \"{}\", self.label)   // no T needed\n"
+            "        }\n"
+            "    }\n"
+            "If the body truly cannot be written without the bound, the bound\n"
+            "belongs on the IMPL BLOCK header — but that header is frozen too;\n"
+            "choose a body that works within the existing bounds."
+        ),
+    },
+    {
         "id": "unsafe_call_block",
         "summary": "Calling an unsafe fn needs `unsafe { ... }` — unless the enclosing fn is itself `unsafe fn` (then the body is already an unsafe context).",
         "triggers": {"E0133", "call to unsafe", "requires unsafe", "unsafe function or block"},

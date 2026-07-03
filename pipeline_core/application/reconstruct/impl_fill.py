@@ -24,6 +24,7 @@ from pipeline_core.domain.models import (
     ImplBlock,
 )
 from pipeline_core.domain.refine import FloorStall
+from pipeline_core.domain.rust_idents import is_trait_impl_container
 from pipeline_core.prompts.context import PerImplSections
 
 
@@ -429,9 +430,17 @@ def fill_impl_blocks(
                 # re-locate after each splice via the syn enumerator.
                 for fn_data, container in routed:
                     target_file = target_src_dir / block.file
+                    # Trait-impl members: the trait fixes the signature — a
+                    # model-proposed where-clause would splice E0276 corruption
+                    # into the frozen sig. Drop it (align to fix-loop policy).
+                    wc = fn_data["where_clause"]
+                    if wc and is_trait_impl_container(container):
+                        _log(f"  [phase-c/impl] {block_id}: dropped where-clause "
+                             f"on trait-impl member `{fn_data['fn_name']}`")
+                        wc = None
                     ok, reason, delta = _splice_fn_with_where(
                         target_file, container, fn_data["fn_name"],
-                        fn_data["body"], fn_data["where_clause"],
+                        fn_data["body"], wc,
                     )
                     if ok:
                         spliced_now += 1

@@ -8,6 +8,7 @@ from pathlib import Path
 
 from pipeline_core.application.reconstruct.splice import (
     locate_fn_by_record,
+    restore_frozen_signature,
     splice_fn_body_at,
     splice_fn_with_where,
 )
@@ -149,3 +150,59 @@ def test_splice_braced_body_succeeds() -> None:
     ok, delta = splice_fn_body_at(p, bs, be, "{ a + 1 }")
     assert ok is True and delta != 0
     assert "a + 1" in p.read_text()
+
+
+# --- restore_frozen_signature (E0276 ratchet recovery) -----------------------
+
+_CORRUPTED = """impl<C, E> StdError for ContextError<C, E> {
+    fn provide<'a>(&'a self, request: &mut Request<'a>)
+    where
+        C: 'static,
+ {
+        request.provide_ref(&self.context)
+    }
+}
+"""
+
+_FROZEN_SIG = "fn provide<'a>(&'a self, request: &mut Request<'a>)"
+
+
+def test_restore_frozen_signature_strips_spliced_where(tmp_path: Path) -> None:
+    f = tmp_path / "context.rs"
+    f.write_text(_CORRUPTED, encoding="utf-8")
+    assert restore_frozen_signature(f, "provide", _FROZEN_SIG)
+    text = f.read_text(encoding="utf-8")
+    assert "'static" not in text                      # corruption gone
+    assert _FROZEN_SIG + " {" in text                 # frozen sig restored
+    assert "request.provide_ref(&self.context)" in text   # body intact
+
+
+def test_restore_frozen_signature_noop_when_already_frozen(tmp_path: Path) -> None:
+    f = tmp_path / "ok.rs"
+    f.write_text(_FROZEN_SIG + " {\n    1\n}\n", encoding="utf-8")
+    before = f.read_text(encoding="utf-8")
+    assert not restore_frozen_signature(f, "provide", _FROZEN_SIG)
+    assert f.read_text(encoding="utf-8") == before
+
+
+def test_restore_frozen_signature_guards(tmp_path: Path) -> None:
+    f = tmp_path / "g.rs"
+    f.write_text("fn other() { 1 }\n", encoding="utf-8")
+    # sig must declare the fn being restored
+    assert not restore_frozen_signature(f, "other", "fn different()")
+    # fn absent from the file
+    assert not restore_frozen_signature(f, "missing", "fn missing()")
+    # unreadable file
+    assert not restore_frozen_signature(tmp_path / "nope.rs", "f", "fn f()")
+
+
+def test_restore_frozen_signature_preserves_indent(tmp_path: Path) -> None:
+    f = tmp_path / "i.rs"
+    f.write_text(
+        "impl Foo for Bar {\n"
+        "    fn go(&self) -> u8 where Self: Sized {\n"
+        "        7\n"
+        "    }\n"
+        "}\n", encoding="utf-8")
+    assert restore_frozen_signature(f, "go", "fn go(&self) -> u8")
+    assert "    fn go(&self) -> u8 {" in f.read_text(encoding="utf-8")

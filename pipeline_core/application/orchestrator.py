@@ -835,10 +835,15 @@ def run_pipeline(deps: RunDeps, args: argparse.Namespace, root: Path) -> None:
     ))
 
     total_iters = 0
+    # Plateaued (non-converged) modules never lock — without this exclusion the
+    # loop re-picks them forever with a fresh IterationState (plateau counter
+    # resets each re-entry → unbounded macro-loop; observed on anyhow run 30425).
+    nonconverged_modules: set[str] = set()
     while True:
-        module_name = (next_module(modules, locked_modules, module_coverage)
+        module_name = (next_module(modules, locked_modules | nonconverged_modules,
+                                   module_coverage)
                        if is_multi_module else (modules[0] if modules else None))
-        if module_name is None:
+        if module_name is None or module_name in nonconverged_modules:
             break
 
         _desc = module_descriptor(
@@ -991,13 +996,20 @@ def run_pipeline(deps: RunDeps, args: argparse.Namespace, root: Path) -> None:
             test_files=test_files, existing_test_files=existing_test_files,
             clusters=_clusters, saved_gen_blocks=saved_gen_blocks,
         )
-        total_iters, coverage_strategy = deps.module_reconstructor.run(
+        result = deps.module_reconstructor.run(
             run_ctx, total_iters=total_iters, coverage_strategy=coverage_strategy)
+        total_iters, coverage_strategy = result.total_iters, result.coverage_strategy
+        if not result.converged:
+            nonconverged_modules.add(module_name)
 
     # -----------------------------------------------------------------------
     # Final: run full test suite to validate the integrated workspace.
-    # Only reached in multi-module mode (single-module exits on pass above).
+    # Reached in multi-module mode (single-module exits on pass above) and by
+    # any run with a plateaued module — that run reports FAIL and exits 1.
     # -----------------------------------------------------------------------
+    if nonconverged_modules:
+        deps.log(f"\nNON-CONVERGED (plateau): {', '.join(sorted(nonconverged_modules))}"
+                 " — repair stopped at the plateau cap; best tree kept.")
     deps.log(f"\n{'=' * 60}")
     deps.log("FINAL: Running full test suite to validate integrated workspace")
     deps.log(f"{'=' * 60}")
@@ -1005,6 +1017,10 @@ def run_pipeline(deps: RunDeps, args: argparse.Namespace, root: Path) -> None:
     if passed:
         deps.log("\nSUCCESS: all tests passed.")
         sys.exit(0)
+    elif nonconverged_modules:
+        deps.log("\nFAIL: pipeline stopped — non-converged module(s) plateaued; "
+                 "final suite failing. Best tree kept for inspection.")
+        sys.exit(1)
     else:
         deps.log("\nWARNING: all modules locked individually but full suite failed.")
         deps.log("         Integration issues between modules may require attention.")

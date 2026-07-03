@@ -5,9 +5,9 @@ behind an injectable `RunDeps` bundle — the whole justification being that the
 top-level pipeline run is now unit-testable with fakes. This drives the
 single-module forward path: prologue (workspace/setup → cluster scan → test cmd
 → task0a/0b → dep graph → baseline coverage → cluster augment) plus one
-reconstruction loop iteration. The single-module loop has no None sentinel
-(`modules[0]` is re-selected forever); the real `ModuleReconstructor.run`
-sys.exit(0)s on a passing module, so the fake does the same to end the run.
+reconstruction loop iteration. The single-module loop re-selects `modules[0]`
+until the module passes (the real `ModuleReconstructor.run` sys.exit(0)s, so
+the fake does the same) or plateaus (converged=False → excluded → FINAL verdict).
 """
 from __future__ import annotations
 
@@ -100,6 +100,21 @@ def test_run_pipeline_single_module_happy_path(tmp_path: Path) -> None:
     deps.requirements_phase.run.assert_called_once()
     deps.module_reconstructor.run.assert_called_once()
     assert deps.run_state.git_managed is True
+
+
+def test_run_pipeline_plateau_stops_no_reentry(tmp_path: Path) -> None:
+    """A non-converged (plateaued) module must end the run — exit 1 after the
+    FINAL verdict — not be re-entered by the selection loop (the anyhow run-30425
+    unbounded macro-loop: re-entry reset IterationState and looped forever)."""
+    from pipeline_core.application.reconstruct.module_reconstructor import ModuleResult
+    deps = _run_deps(tmp_path)
+    deps.module_reconstructor.run.side_effect = None
+    deps.module_reconstructor.run.return_value = ModuleResult(3, "s", converged=False)
+    deps.task3.return_value = (False, "test result: FAILED. 51 passed; 19 failed;")
+    with pytest.raises(SystemExit) as exc:
+        orchestrator.run_pipeline(deps, _args(), tmp_path)
+    assert exc.value.code == 1
+    deps.module_reconstructor.run.assert_called_once()  # not re-entered
 
 
 def test_run_pipeline_missing_project_dir_exits(tmp_path: Path) -> None:

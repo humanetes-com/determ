@@ -1898,6 +1898,10 @@ def _replace_fn_signature(file_path: Path, fn_name: str, new_sig: str) -> bool:
     return _reconstruct_splice.replace_fn_signature(file_path, fn_name, new_sig)
 
 
+def _restore_frozen_signature(file_path: Path, fn_name: str, skeleton_sig: str) -> bool:
+    return _reconstruct_splice.restore_frozen_signature(file_path, fn_name, skeleton_sig)
+
+
 def _splice_fn_body(file_path: Path, fn_name: str, new_body: str,
                     allow_nonstub: bool = False) -> tuple[bool, int]:
     return _reconstruct_splice.splice_fn_body(
@@ -4373,6 +4377,7 @@ _GEN_FIX_LOOP_DEPS = _fix_loop.GenerateFixLoopDeps(
     parse_cmd=_parse_cmd,
     render_impl_block=_render_impl_block,
     repo_spec_section=_repo_spec_section,
+    restore_frozen_signature=_restore_frozen_signature,
     run_cargo_check_diag=lambda *a, **k: _run_cargo_check_diag(*a, **k),
     splice_fn_body=_splice_fn_body,
     splice_fn_with_where=_splice_fn_with_where,

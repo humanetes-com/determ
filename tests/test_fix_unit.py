@@ -45,6 +45,8 @@ class _Model:
 class _Splicer:
     def __init__(self) -> None:
         self.spliced: list[tuple[str, str | None]] = []
+        self.restored: list[tuple[str, str]] = []
+        self.restore_result = False
 
     def locate_fn(self, text: str, name: str):
         return (f"fn {name}()", 0, 0, len(text))
@@ -59,6 +61,10 @@ class _Splicer:
                   where_clause=None, allow_nonstub=False):
         self.spliced.append((name, where_clause))
         return True, "ok", len(body)
+
+    def restore_signature(self, file_path, name, skeleton_sig):
+        self.restored.append((name, skeleton_sig))
+        return self.restore_result
 
 
 class _Prompts:
@@ -130,3 +136,80 @@ def test_fn_unit_verify_reports_metric(tmp_path: Path) -> None:
                      FnTarget("src/lib.rs", "foo"))
     ok, rendered, metric = unit.verify()
     assert not ok and metric == 1 and "boom" in rendered
+
+
+# --- trait-impl signature protection (E0276 ratchet, plan items 2+3) --------
+
+_TRAIT_CONTAINER = "impl StdError for ContextError < C , E >"
+_WHERE_RESP = '<FN name="foo" block="impl">\nwhere C: \'static\n42\n</FN>'
+
+
+def test_fn_unit_denies_where_on_trait_impl(tmp_path: Path) -> None:
+    """history>=1 relaxes the sig rule for private fns — but NEVER for a
+    trait-impl member (the trait fixes the signature: E0276)."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src/lib.rs").write_text("fn foo() { 0 }\n")
+    splicer = _Splicer()
+    unit = FnFixUnit(_session(tmp_path),
+                     _deps(_Checker("src/lib.rs", "foo"), _Model(_WHERE_RESP), splicer),
+                     FnTarget("src/lib.rs", "foo", container=_TRAIT_CONTAINER))
+    unit.attempt("E0276 boom", history=[{"attempt": 1}])
+    assert splicer.spliced == [("foo", None)]         # where-clause dropped
+
+
+def test_fn_unit_allows_where_on_private_free_fn(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src/lib.rs").write_text("fn foo() { 0 }\n")
+    splicer = _Splicer()
+    unit = FnFixUnit(_session(tmp_path),
+                     _deps(_Checker("src/lib.rs", "foo"), _Model(_WHERE_RESP), splicer),
+                     FnTarget("src/lib.rs", "foo"))
+    unit.attempt("E0277 boom", history=[{"attempt": 1}])
+    assert splicer.spliced == [("foo", "where C: 'static")]
+
+
+def test_impl_unit_denies_where_on_trait_impl(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src/m.rs").write_text("impl X for Y { fn foo(){} }\n")
+    block = ImplBlock(file="src/m.rs", container=_TRAIT_CONTAINER,
+                      members=(FnRecord(file="src/m.rs", fn_name="foo"),))
+    splicer = _Splicer()
+    unit = ImplFixUnit(_session(tmp_path),
+                       _deps(_Checker("src/m.rs", "foo"), _Model(_WHERE_RESP), splicer),
+                       ImplTarget("src/m.rs", _TRAIT_CONTAINER, block))
+    unit.attempt("E0276 boom", history=[{"attempt": 1}])
+    assert splicer.spliced == [("foo", None)]         # where-clause dropped
+
+
+def test_fn_unit_restores_frozen_sig_from_skeleton(tmp_path: Path) -> None:
+    """A trait-impl member whose sig drifted from the baked skeleton is restored
+    BEFORE prompting — the recovery path for spliced-where corruption."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src/lib.rs").write_text("fn foo() { 0 }\n")
+    for cluster in ("stable", "nightly"):
+        d = tmp_path / ".skeleton" / cluster / "src"
+        d.mkdir(parents=True)
+        (d / "lib.rs").write_text("fn foo() { unimplemented!() }\n")
+    splicer = _Splicer()
+    splicer.restore_result = True
+    logs: list[str] = []
+    deps = FixUnitDeps(
+        checker=_Checker("src/lib.rs", "foo"), model=_Model(""), splicer=splicer,
+        prompts=_Prompts(), log=logs.append, do_retro=lambda _o, _h: "",
+        thinking_directive="T ", err_cap=2000, per_fn_max_stalls=2)
+    unit = FnFixUnit(_session(tmp_path), deps,
+                     FnTarget("src/lib.rs", "foo", container=_TRAIT_CONTAINER))
+    unit.attempt("E0276 boom", history=[])
+    assert splicer.restored == [("foo", "fn foo()")]
+    assert any("restored frozen signature src/lib.rs::foo" in m for m in logs)
+
+
+def test_fn_unit_no_restore_for_free_fn(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src/lib.rs").write_text("fn foo() { 0 }\n")
+    splicer = _Splicer()
+    unit = FnFixUnit(_session(tmp_path),
+                     _deps(_Checker("src/lib.rs", "foo"), _Model(""), splicer),
+                     FnTarget("src/lib.rs", "foo"))
+    unit.attempt("boom", history=[])
+    assert splicer.restored == []

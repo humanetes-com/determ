@@ -8,11 +8,23 @@ sequencing the two use-cases over the loop state.
 """
 from __future__ import annotations
 
+from typing import NamedTuple
+
 from pipeline_core.application.reconstruct.failure_analysis import FailureAnalysisStep
 from pipeline_core.application.reconstruct.reconstruction_step import ReconstructionStep
 from pipeline_core.application.reconstruct.run_context import RunContext
 from pipeline_core.domain.reconstruction import IterationState
 from pipeline_core.ports.reconstruct import Telemetry
+
+
+class ModuleResult(NamedTuple):
+    """Outcome of reconstructing one module. converged=False means the plateau
+    terminator fired (module is non-converged) — the caller must NOT re-enter the
+    module (re-entry resets IterationState, restarting the plateau counter and
+    looping the whole module forever)."""
+    total_iters: int
+    coverage_strategy: str
+    converged: bool
 
 
 class ModuleReconstructor:
@@ -32,13 +44,13 @@ class ModuleReconstructor:
 
     def run(
         self, ctx: RunContext, *, total_iters: int, coverage_strategy: str,
-    ) -> tuple[int, str]:
+    ) -> ModuleResult:
         """Reconstruct one module to a lock (or single-module completion → exit).
-        Returns the updated (total_iters, coverage_strategy) for the next module.
-        Returns WITHOUT a lock when the module plateaus (non-converged) — the
-        caller's FINAL test pass then reports the real (failing) status instead of
-        the loop spinning forever."""
+        Returns converged=False when the module plateaus (non-converged) — the
+        caller must exclude the module and fall to the FINAL test verdict instead
+        of re-entering it."""
         state = IterationState()
+        converged = True
         while True:
             self._tel.log(f"\n{'=' * 50}")
             self._tel.log(f"MODULE {ctx.module_name} — ITERATION {state.iteration}")
@@ -69,5 +81,6 @@ class ModuleReconstructor:
                                data={"iterations": state.iteration,
                                      "streak": state.no_improvement_streak,
                                      "best_pass": state.prev_pass_count})
+                converged = False
                 break
-        return total_iters, coverage_strategy
+        return ModuleResult(total_iters, coverage_strategy, converged)

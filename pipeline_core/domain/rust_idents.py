@@ -67,6 +67,25 @@ def is_unsafe_fn(sig: str) -> bool:
     return _kw_followed_by(sig, "unsafe", "fn")
 
 
+def is_trait_impl_container(container: str) -> bool:
+    """True iff `container` is a TRAIT impl header (``impl Trait for Type``) —
+    whose member signatures are fixed by the trait (adding a bound → E0276).
+
+    Container strings come from the syn enumerator token stream
+    (``impl StdError for ContextError < C , E >``) or a compact header
+    (``impl Display for X``). Trait impl iff some whole-word ``for`` token is
+    NOT immediately followed by a ``<`` token — an HRTB renders as
+    ``for < 'a >`` (spaced) or ``for<'a>`` (compact, no bare ``for`` token),
+    so neither form false-positives. Inherent impls (``impl Foo``), trait
+    declarations (``trait Foo``), and free fns (empty container) are False."""
+    ws = container.split()
+    if not ws or ws[0] != "impl":
+        return False
+    return any(
+        tok == "for" and (i + 1 >= len(ws) or not ws[i + 1].startswith("<"))
+        for i, tok in enumerate(ws))
+
+
 def declares_fn(sig: str, fn_name: str) -> bool:
     """True iff `sig` declares `fn <fn_name>` (``\\bfn\\s+<fn_name>\\b``)."""
     return _kw_followed_by(sig, "fn", fn_name)

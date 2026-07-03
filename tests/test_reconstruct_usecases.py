@@ -279,8 +279,9 @@ def test_analysis_no_regression_off_interval_skips_audit(tmp_path: Path) -> None
 def test_reconstructor_locks_immediately(tmp_path: Path) -> None:
     fa = FakeAdapter(task2=True, task3=(True, "9 passed"))
     coord = ModuleReconstructor(step=_step(fa), analysis=_analysis(fa), telemetry=fa)
-    total, strat = coord.run(_ctx(tmp_path), total_iters=0, coverage_strategy="s")
-    assert total == 0 and strat == "s"                # locked first iter, no analysis
+    res = coord.run(_ctx(tmp_path), total_iters=0, coverage_strategy="s")
+    assert res.total_iters == 0 and res.coverage_strategy == "s"  # locked first iter, no analysis
+    assert res.converged
     assert "task4" not in fa.calls
 
 
@@ -289,8 +290,9 @@ def test_reconstructor_iterates_then_locks(tmp_path: Path) -> None:
                      task3_seq=[(False, "test result: FAILED. 0 passed; 1 failed;"),
                                 (True, "test result: ok. 1 passed; 0 failed;")])
     coord = ModuleReconstructor(step=_step(fa), analysis=_analysis(fa), telemetry=fa)
-    total, _ = coord.run(_ctx(tmp_path), total_iters=0, coverage_strategy="s")
-    assert total == 1 and "task4" in fa.calls         # one failure → analysis → lock
+    res = coord.run(_ctx(tmp_path), total_iters=0, coverage_strategy="s")
+    assert res.total_iters == 1 and "task4" in fa.calls  # one failure → analysis → lock
+    assert res.converged
 
 
 def test_reconstructor_plateau_aborts_nonconverging(tmp_path: Path) -> None:
@@ -301,8 +303,9 @@ def test_reconstructor_plateau_aborts_nonconverging(tmp_path: Path) -> None:
                      task3=(False, "test result: FAILED. 0 passed; 1 failed;"))
     coord = ModuleReconstructor(step=_step(fa), analysis=_analysis(fa),
                                 telemetry=fa, plateau_abort=3)
-    coord.run(_ctx(tmp_path), total_iters=0, coverage_strategy="s")
+    res = coord.run(_ctx(tmp_path), total_iters=0, coverage_strategy="s")
     assert "module.nonconverged" in fa.events     # terminated, not hung
+    assert not res.converged   # caller must exclude the module, not re-enter it
     # iter 1 establishes the baseline (0→N counts as improvement); then 3
     # consecutive non-improving iters trip the cap → 4 iterations total.
     assert fa.events.count("module.iter") == 4

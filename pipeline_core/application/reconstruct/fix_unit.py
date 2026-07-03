@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Protocol
 
 from pipeline_core.application.refine_loop import run_callback_loop
@@ -31,6 +32,7 @@ from pipeline_core.domain.fix_session import FixSession
 from pipeline_core.domain.fix_target import FixTarget, FnTarget, ImplTarget
 from pipeline_core.domain.llm_output import extract_fn_bodies
 from pipeline_core.domain.models import FnLocator, Frontier
+from pipeline_core.domain.rust_idents import is_trait_impl_container
 from pipeline_core.ports.fix_engine import (
     CompileChecker,
     FixModel,
@@ -50,7 +52,8 @@ _FN_SIG_RULE_RELAX = (
     "Signature is FIXED — except, if this fn fails because a type "
     "parameter needs a tighter bound (E0277 'size cannot be known'), "
     "you MAY add it by making the FIRST body line a `where` clause "
-    "(e.g. `where T: Sized`).\n"
+    "(e.g. `where T: Sized`). NEVER on a trait-impl method — the trait "
+    "fixes the signature; an extra bound is rejected (E0276).\n"
 )
 _FN_SIG_RULE_FIXED = "Signature (do NOT change it):\n"
 _IMPL_WHERE_RULE_RELAX = (
@@ -59,7 +62,9 @@ _IMPL_WHERE_RULE_RELAX = (
     "the fn returns `T` by value but `T` is `?Sized`), you MAY add a bound "
     "by making the FIRST line of that fn's body a `where` clause:\n"
     '<FN name="read" block="impl">\nwhere T: Sized\n... body ...\n</FN>\n'
-    "Do not otherwise change any signature. Never add a bound to a `pub` fn.\n"
+    "Do not otherwise change any signature. Never add a bound to a `pub` fn, "
+    "and NEVER to a trait-impl method — the trait fixes the signature; an "
+    "extra bound is rejected (E0276).\n"
 )
 _IMPL_WHERE_RULE_FIXED = "Do NOT change any signature.\n"
 
@@ -67,6 +72,37 @@ _IMPL_WHERE_RULE_FIXED = "Do NOT change any signature.\n"
 def _retro_block(retro: str) -> str:
     return (f"\n<RETROSPECTIVE_GUIDANCE>\n{retro}\n</RETROSPECTIVE_GUIDANCE>\n"
             if retro.strip() else "")
+
+
+def _skeleton_frozen_sig(project_dir: Path, file_rel: str, fn_name: str,
+                         locate: Callable[[str, str], tuple[str, int, int, int] | None],
+                         ) -> str | None:
+    """The baked skeleton's signature for (file_rel, fn_name) — the frozen
+    authority. Cluster copies live at `.skeleton/{cluster}/{file_rel}`; the sig
+    is returned only when every cluster that has the fn agrees
+    (whitespace-collapsed), else None. Reading `.skeleton/` post-strip is Hard
+    Rule 11-compliant — it IS the baked artifact, not original source."""
+    root = project_dir / ".skeleton"
+    if not root.is_dir():
+        return None
+    first: str | None = None
+    norms: set[str] = set()
+    for cluster_dir in sorted(root.iterdir()):
+        f = cluster_dir / file_rel
+        if not cluster_dir.is_dir() or not f.is_file():
+            continue
+        try:
+            text = f.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        loc = locate(text, fn_name)
+        if loc is None:
+            continue
+        sig = loc[0]
+        norms.add(" ".join(sig.split()))
+        if first is None:
+            first = sig
+    return first if len(norms) == 1 else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +201,19 @@ class FnFixUnit(_BaseFixUnit):
         t = self.target
         assert isinstance(t, FnTarget)
         path = self.session.project_dir / t.file_rel
+        trait_impl = is_trait_impl_container(t.container or "")
+        # Frozen-signature authority (E0276 ratchet recovery): a where-clause
+        # once spliced into a trait-impl method sticks — splice_fn_with_where
+        # only inserts, and this prompt would re-freeze the corrupted sig as
+        # "verbatim, do not change". Restore the baked-skeleton sig first.
+        if trait_impl:
+            frozen = _skeleton_frozen_sig(
+                self.session.project_dir, t.file_rel, t.fn_name,
+                self.deps.splicer.locate_fn)
+            if frozen and self.deps.splicer.restore_signature(
+                    path, t.fn_name, frozen):
+                self.deps.log("  [fix loop/fn] restored frozen signature "
+                              f"{t.file_rel}::{t.fn_name}")
         file_text = path.read_text(encoding="utf-8", errors="replace")
         loc = self.deps.splicer.locate_fn(file_text, t.fn_name)
         if loc is None:
@@ -172,9 +221,10 @@ class FnFixUnit(_BaseFixUnit):
         sig_text, _ss, bs, be = loc
         cur_body = file_text[bs:be]
         # After a body-only attempt stalls, a PRIVATE fn may tighten its bounds
-        # (unsized-T: returns `T` by value but `T` is `?Sized` → `where T: Sized`).
-        allow_where = len(history) >= 1 and not self.deps.splicer.is_pub_fn(
-            file_text, t.fn_name)
+        # (unsized-T: returns `T` by value but `T` is `?Sized` → `where T: Sized`)
+        # — never a trait-impl member, whose signature the trait fixes (E0276).
+        allow_where = (len(history) >= 1 and not trait_impl
+                       and not self.deps.splicer.is_pub_fn(file_text, t.fn_name))
         sig_rule = _FN_SIG_RULE_RELAX if allow_where else _FN_SIG_RULE_FIXED
         prompt = build_fn_fix_prompt(
             thinking_directive=self.deps.thinking_directive, file_rel=t.file_rel,
@@ -255,10 +305,13 @@ class ImplFixUnit(_BaseFixUnit):
             body = fb.get("body")
             if not nm or not body:
                 continue
-            # Honour a where-clause only for PRIVATE fns (API-surface guard).
+            # Honour a where-clause only for PRIVATE fns (API-surface guard)
+            # that are not trait-impl members (trait fixes the sig — E0276).
             wc = fb.get("where_clause")
-            use_wc = wc if (allow_where and wc and not self.deps.splicer.is_pub_fn(
-                file_text, nm)) else None
+            use_wc = wc if (allow_where and wc
+                            and not is_trait_impl_container(t.container)
+                            and not self.deps.splicer.is_pub_fn(
+                                file_text, nm)) else None
             ok_s, reason, delta = self.deps.splicer.splice_fn(
                 path, t.container, nm, body,
                 where_clause=use_wc, allow_nonstub=True)

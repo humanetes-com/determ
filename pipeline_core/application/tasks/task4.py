@@ -194,8 +194,13 @@ Previous test output (for comparison):
                      "test discovery conventions.",
     }.get(failure_type, "")
 
-    if _is_build:
-        prompt = f"""You are refining a methodology for translating test suites into functional requirements.
+    failure_hint_section = (
+        f"\n⚠️  Failure sub-type: {failure_type.upper()}\n{_failure_hint}\n"
+    ) if _failure_hint else ""
+
+    def _render(out: str) -> str:
+        if _is_build:
+            return f"""You are refining a methodology for translating test suites into functional requirements.
 
 genesis.md is NOT a bug fix and NOT specific to this crate's tests: it is the project-independent,
 language-agnostic reasoning process for turning ANY test suite into requirements. You are improving
@@ -217,7 +222,7 @@ functional_requirements.md (requirements that led to broken code):
 {functional_req}
 {source_section}
 Compiler/build output (what broke):
-{truncated_output}
+{out}
 {comparison_section}{failure_log_section}
 Analyze in this order:
 1. What structural information was absent from functional_requirements.md that caused the build to fail?
@@ -237,11 +242,7 @@ Output the updated genesis.md between these exact delimiters (required — do no
 updated genesis.md content here
 {GENESIS_DELIM_END}
 """
-    else:
-        failure_hint_section = (
-            f"\n⚠️  Failure sub-type: {failure_type.upper()}\n{_failure_hint}\n"
-        ) if _failure_hint else ""
-        prompt = f"""You are refining a general methodology for translating test suites into functional requirements.
+        return f"""You are refining a general methodology for translating test suites into functional requirements.
 
 genesis.md is not a patch document — it is a project-independent, language-agnostic reasoning
 process that, when mature, should work on any test suite without needing iteration. Every update
@@ -255,7 +256,7 @@ functional_requirements.md (produced by that process):
 {functional_req}
 {source_section}
 Test output (iteration {iteration}):
-{truncated_output}
+{out}
 {comparison_section}{failure_log_section}
 Analyze in this order:
 1. Which tests failed and what do the failures reveal about what was missing or wrong in
@@ -280,6 +281,21 @@ Output the updated genesis.md between these exact delimiters (required — do no
 updated genesis.md content here
 {GENESIS_DELIM_END}
 """
+
+    # The section budgets above use additive `max(5_000, …)` floors that can sum
+    # past the model input limit (seen live: 296,417/293,376 → prompt rejected).
+    # Render the REAL prompt, then re-truncate the largest tail-weighted section
+    # (the test output) by the exact overage and re-render — the c05904e task1
+    # pattern: size against the actual fixed prompt, not an estimate.
+    prompt = _render(truncated_output)
+    _overflow = len(prompt) - deps.single_call_char_limit
+    if _overflow > 0:
+        _out_cap = max(2_000, len(truncated_output) - _overflow)
+        truncated_output = smart_truncate(test_output, total_limit=_out_cap,
+                                          head=_out_cap // 4, tail=3 * _out_cap // 4)
+        prompt = _render(truncated_output)
+        log(f"  [task4] prompt exceeded input limit by {_overflow:,} chars — "
+            f"test-output section re-truncated to {_out_cap:,}.")
 
     def attempt() -> bool:
         response = deps.ask(prompt, model=deps.task4_model)

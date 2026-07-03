@@ -186,6 +186,36 @@ def replace_fn_signature(file_path: Path, fn_name: str, new_sig: str) -> bool:
     return True
 
 
+def restore_frozen_signature(file_path: Path, fn_name: str,
+                             skeleton_sig: str) -> bool:
+    """Overwrite ``fn_name``'s CURRENT signature with the baked-skeleton one,
+    leaving the body intact. The recovery path for frozen-signature corruption:
+    a model-proposed where-clause spliced into a trait-impl method ratchets
+    (splice_fn_with_where only inserts, and fix prompts re-read the corrupted
+    sig as \"verbatim, do not change\"). The skeleton is the signature
+    authority, so unlike :func:`replace_fn_signature` this is allowed on any
+    fn — restoring the frozen sig cannot break the API surface. Returns True
+    iff applied (False also when the sig already matches)."""
+    if not declares_fn(skeleton_sig, fn_name):
+        return False
+    try:
+        text = file_path.read_text(encoding="utf-8")
+    except Exception:
+        return False
+    loc = locate_fn(text, fn_name)
+    if loc is None:
+        return False
+    cur_sig, sig_start, body_start, _body_end = loc
+    cleaned = skeleton_sig.strip().rstrip("{").rstrip()
+    if " ".join(cur_sig.split()) == " ".join(cleaned.split()):
+        return False
+    line_start = text.rfind("\n", 0, sig_start) + 1
+    indent = text[line_start:sig_start]
+    new_text = text[:line_start] + indent + cleaned + " {" + text[body_start:]
+    file_path.write_text(new_text, encoding="utf-8")
+    return True
+
+
 def splice_fn_body(file_path: Path, fn_name: str, new_body: str,
                    allow_nonstub: bool = False) -> tuple[bool, int]:
     """Replace the body of ``fn_name`` in ``file_path`` with ``new_body`` via a

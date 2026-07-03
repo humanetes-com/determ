@@ -22,6 +22,7 @@ from pipeline_core.domain.rust_idents import (
     identifier_tokens,
     impl_self_type,
     is_fn_signature_line,
+    is_trait_impl_container,
     is_unsafe_fn,
     mask_identifiers,
     mixed_case_identifiers,
@@ -274,3 +275,30 @@ def test_mask_identifiers_matches_regex():
     pat = re.compile(r"[A-Za-z_]\w*")
     for t in _TOKEN_TEXTS:
         assert mask_identifiers(t) == pat.sub("X", t), t
+
+
+_TRAIT_IMPLS = [
+    "impl StdError for ContextError < C , E >",       # syn-spaced token stream
+    "impl Display for X",                              # compact header
+    "impl < 'a > Iterator for Chain < 'a >",           # spaced generics
+    # trait impl whose WHERE clause carries a spaced HRTB — still a trait impl
+    "impl < T > Trait for X where T : for < 'a > Fn ( & 'a str )",
+]
+
+_NOT_TRAIT_IMPLS = [
+    "impl Foo",                                        # inherent impl
+    "impl < T > Wrap < T >",                           # inherent, generic
+    # inherent impl with a spaced-HRTB bound: `for` is followed by `<` → not flagged
+    "impl < T > Wrap < T > where T : for < 'a > Fn ( & 'a str )",
+    "impl Wrap where W : for<'a> Fn(&'a str)",         # compact HRTB: no bare `for`
+    "trait TraitKind",                                 # trait DECLARATION
+    "",                                                # free fn
+    "for X",                                           # not an impl header
+]
+
+
+def test_is_trait_impl_container():
+    for c in _TRAIT_IMPLS:
+        assert is_trait_impl_container(c), c
+    for c in _NOT_TRAIT_IMPLS:
+        assert not is_trait_impl_container(c), c
