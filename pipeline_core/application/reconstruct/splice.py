@@ -109,7 +109,7 @@ def locate_fn_by_record(enumerate_fns: Callable[[Path], list[dict[str, Any]] | N
 
 
 def splice_fn_body_at(file_path: Path, body_byte_start: int, body_byte_end: int,
-                        new_body: str, allow_nonstub: bool = False) -> tuple[bool, int]:
+                        new_body: str, allow_nonstub: bool = False) -> SpliceOutcome:
     """Splice `new_body` between bytes [body_byte_start, body_byte_end) in
     `file_path`. Replaces an explicit byte range — used when the caller has
     canonical offsets from the syn enumerator. By default refuses to
@@ -123,7 +123,8 @@ def splice_fn_body_at(file_path: Path, body_byte_start: int, body_byte_end: int,
     the caller MUST re-enumerate offsets before each splice, since every
     write shifts the byte ranges of later fns in the same file.
 
-    Returns (success, bytes_delta).
+    Returns a :class:`SpliceOutcome`; every refusal carries its distinct
+    :data:`SpliceReason` (debt #39).
     """
     # The offsets are BYTE offsets from the syn enumerator. They MUST be applied
     # in byte space: a `str` from read_text() is indexed by CHARACTERS, so any
@@ -133,17 +134,17 @@ def splice_fn_body_at(file_path: Path, body_byte_start: int, body_byte_end: int,
     try:
         raw = file_path.read_bytes()
     except Exception:
-        return False, 0
+        return SpliceOutcome(False, "read_failed", 0)
     if body_byte_end > len(raw) or body_byte_start > body_byte_end:
-        return False, 0
+        return SpliceOutcome(False, "bad_offsets", 0)
     cur_body = raw[body_byte_start:body_byte_end].decode("utf-8", errors="replace")
     if not allow_nonstub and not is_unimplemented_body(cur_body):
-        return False, 0
+        return SpliceOutcome(False, "target_not_stub", 0)
     nb = new_body.strip()
     if nb.startswith("{") and nb.endswith("}"):
         nb = nb[1:-1].strip()
     if not nb or is_unimplemented_body(nb):
-        return False, 0
+        return SpliceOutcome(False, "body_is_stub", 0)
     # Re-indent the body to match the fn's existing indentation. Find the
     # column of the fn declaration by walking back to the previous newline.
     line_start = raw.rfind(b"\n", 0, body_byte_start) + 1
@@ -159,7 +160,7 @@ def splice_fn_body_at(file_path: Path, body_byte_start: int, body_byte_end: int,
     ) + "\n" + base_indent
     new_raw = raw[:body_byte_start] + nb_indented.encode("utf-8") + raw[body_byte_end:]
     file_path.write_bytes(new_raw)
-    return True, len(new_raw) - len(raw)
+    return SpliceOutcome(True, "ok", len(new_raw) - len(raw))
 
 
 def replace_fn_signature(file_path: Path, fn_name: str, new_sig: str) -> bool:
@@ -217,28 +218,28 @@ def restore_frozen_signature(file_path: Path, fn_name: str,
 
 
 def splice_fn_body(file_path: Path, fn_name: str, new_body: str,
-                   allow_nonstub: bool = False) -> tuple[bool, int]:
+                   allow_nonstub: bool = False) -> SpliceOutcome:
     """Replace the body of ``fn_name`` in ``file_path`` with ``new_body`` via a
     name-match (char-space) locate. By default only splices an
     ``unimplemented!()`` stub; ``allow_nonstub=True`` re-fills a wrong body. The
-    file is re-read every call so byte offsets stay fresh. Returns
-    ``(success, bytes_delta)``."""
+    file is re-read every call so byte offsets stay fresh. Returns a
+    :class:`SpliceOutcome` with the distinct :data:`SpliceReason` (debt #39)."""
     try:
         text = file_path.read_text(encoding="utf-8")
     except Exception:
-        return False, 0
+        return SpliceOutcome(False, "read_failed", 0)
     loc = locate_fn(text, fn_name)
     if loc is None:
-        return False, 0
+        return SpliceOutcome(False, "fn_not_found", 0)
     _sig, _sig_start, body_start, body_end = loc
     cur_body = text[body_start:body_end]
     if not allow_nonstub and not is_unimplemented_body(cur_body):
-        return False, 0
+        return SpliceOutcome(False, "target_not_stub", 0)
     nb = new_body.strip()
     if nb.startswith("{") and nb.endswith("}"):
         nb = nb[1:-1].strip()
     if not nb or is_unimplemented_body(nb):
-        return False, 0
+        return SpliceOutcome(False, "body_is_stub", 0)
     line_start = text.rfind("\n", 0, _sig_start) + 1
     sig_line = text[line_start:_sig_start]
     base_indent = ""
@@ -253,7 +254,7 @@ def splice_fn_body(file_path: Path, fn_name: str, new_body: str,
     ) + "\n" + base_indent
     new_text = text[:body_start] + nb_indented + text[body_end:]
     file_path.write_text(new_text, encoding="utf-8")
-    return True, len(new_text) - len(text)
+    return SpliceOutcome(True, "ok", len(new_text) - len(text))
 
 
 def splice_fn_with_where(
@@ -269,8 +270,8 @@ def splice_fn_with_where(
     ``container`` (located via the syn enumerator). When ``where_clause`` is
     given, insert it into the signature just before the body's opening brace
     (byte space — offsets come from the enumerator). Returns a
-    :class:`SpliceOutcome` ``(ok, reason, delta)``; ``reason`` is ``"ok"`` or a
-    failure tag."""
+    :class:`SpliceOutcome` ``(ok, reason, delta)``; ``reason`` is the distinct
+    :data:`SpliceReason` cause (debt #39)."""
     if not file_path.exists():
         return SpliceOutcome(False, "file_missing", 0)
     loc = locate_fn_by_record(enumerate_fns, file_path, fn_name, container, "")
@@ -294,8 +295,5 @@ def splice_fn_with_where(
                 body_byte_end += shift
                 file_path.write_bytes(raw)
 
-    ok, delta = splice_fn_body_at(file_path, body_byte_start, body_byte_end, body,
-                                  allow_nonstub=allow_nonstub)
-    if not ok:
-        return SpliceOutcome(False, "splice_rejected", 0)
-    return SpliceOutcome(True, "ok", delta)
+    return splice_fn_body_at(file_path, body_byte_start, body_byte_end, body,
+                             allow_nonstub=allow_nonstub)

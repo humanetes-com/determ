@@ -15,7 +15,7 @@ from pipeline_core.domain import cfg as _cfg
 
 
 def _excludes(pred, cfg_true=frozenset(), cfg_false=frozenset(), defaults=frozenset()):
-    return pipeline._cfg_false_for_cargo(pred, set(cfg_true), set(cfg_false), frozenset(defaults))
+    return _cfg.CfgSet.of(set(cfg_true), set(cfg_false), frozenset(defaults)).excludes_for_cargo(pred)
 
 
 def _leaf_atoms(pred):

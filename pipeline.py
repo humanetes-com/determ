@@ -1760,19 +1760,6 @@ def _filter_tests_for_cluster(test_files: list[tuple[str, str]],
 
 
 
-def _eval_cfg_pred(pred: str, cfg_true: set[str], cfg_false: set[str]) -> "bool | None":
-    """Evaluate a cfg predicate (`not/all/any`, bare ident, `feature = "X"`).
-    Thin shim → `pipeline_core.domain.cfg.CfgSet.evaluate`."""
-    return _cfg.CfgSet.of(cfg_true, cfg_false).evaluate(pred)
-
-
-def _cfg_false_for_cargo(pred: str, cfg_true: set[str], cfg_false: set[str],
-                         default_features: "frozenset[str] | set[str]" = frozenset()) -> bool:
-    """cargo-faithful "does this cfg keep the item from compiling/running here?".
-    Thin shim → `pipeline_core.domain.cfg.CfgSet.excludes_for_cargo`."""
-    return _cfg.CfgSet.of(cfg_true, cfg_false, default_features).excludes_for_cargo(pred)
-
-
 def _cluster_extractor_args(cluster: "BuildCluster | None") -> list[str]:
     """Build `--cfg-true PRED` / `--cfg-false PRED` CLI args for the extractor
     from a BuildCluster. Returns empty list if cluster is None."""
@@ -1881,7 +1868,7 @@ from pipeline_core.application.reconstruct.fill_rules import (  # noqa: E402
 # keeps thin late-binding shims (NOT partials) so the e2e harness's
 # `_enumerate_fns_via_extractor` monkeypatch is resolved at CALL time.
 def _splice_fn_body_at(file_path: Path, body_byte_start: int, body_byte_end: int,
-                       new_body: str, allow_nonstub: bool = False) -> tuple[bool, int]:
+                       new_body: str, allow_nonstub: bool = False) -> SpliceOutcome:
     return _reconstruct_splice.splice_fn_body_at(
         file_path, body_byte_start, body_byte_end, new_body,
         allow_nonstub=allow_nonstub)
@@ -1903,7 +1890,7 @@ def _restore_frozen_signature(file_path: Path, fn_name: str, skeleton_sig: str) 
 
 
 def _splice_fn_body(file_path: Path, fn_name: str, new_body: str,
-                    allow_nonstub: bool = False) -> tuple[bool, int]:
+                    allow_nonstub: bool = False) -> SpliceOutcome:
     return _reconstruct_splice.splice_fn_body(
         file_path, fn_name, new_body, allow_nonstub=allow_nonstub)
 

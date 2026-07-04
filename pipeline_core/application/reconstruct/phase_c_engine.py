@@ -496,8 +496,8 @@ class PhaseCFillEngine:
                                 # allow_nonstub: every test-retry candidate is an
                                 # already-FILLED fn — without it the splice is
                                 # always rejected and the whole loop is a no-op.
-                                ok2, _ = self.mut.splice_fn_body(fp, fn, new_body,
-                                                                 allow_nonstub=True)
+                                ok2 = self.mut.splice_fn_body(
+                                    fp, fn, new_body, allow_nonstub=True).ok
                                 if ok2:
                                     any_progress = True
                                     self.tel.log(f"  [phase-c/per-fn] test-fix: re-spliced "

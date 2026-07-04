@@ -19,13 +19,14 @@ import shlex
 import shutil
 import time
 from abc import ABC, abstractmethod
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ...application.reconstruct.fill_merge import backfill_stub_bodies
 from ...application.reconstruct.fill_rules import is_unimplemented_body
+from ...domain.cluster_plan import fill_order
 from ...domain.generation import (
     GenerationRequest,
     SkeletonConfig,
@@ -953,7 +954,9 @@ class StaticSkeletonTask2Generator(Task2Generator):
                          f"{project_dir}/.skeleton/_clusters.json. The skeleton bake "
                          "step (pre-strip) must run before TASK 2.")
             return False
-        clusters = sorted(clusters, key=lambda c: c.name)
+        # Debt #36: default cluster first — later clusters seed shared-fn
+        # bodies from the ones earlier clusters accepted (fill ONCE, propagate).
+        clusters = fill_order(clusters)
         self.tel.log(f"  [skeleton] loaded {len(clusters)} baked cluster(s): "
                      f"{', '.join(c.name for c in clusters)}")
 
@@ -983,7 +986,8 @@ class StaticSkeletonTask2Generator(Task2Generator):
             self.tel.set_current(project_dir,
                                  f"task2a/{module} / per-cluster reconstruction (0/{len(clusters)})")
 
-            def _run_one_cluster(cluster: BuildCluster) -> dict[str, Any]:
+            def _run_one_cluster(cluster: BuildCluster,
+                                 donor_dirs: list[Path]) -> dict[str, Any]:
                 tag = f"[{cluster.name}]"
                 self.tel.log(f"\n  {tag} === cluster start ===")
                 try:
@@ -994,6 +998,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
                         all_test_pairs=all_test_pairs,
                         genesis=genesis,
                         functional_req=functional_req,
+                        donor_dirs=donor_dirs,
                     )
                 except Exception as _ce:
                     self.tel.log(f"  {tag} cluster crashed: {type(_ce).__name__}: {_ce}")
@@ -1002,28 +1007,28 @@ class StaticSkeletonTask2Generator(Task2Generator):
                     self.tel.log(f"  {tag} cluster aborted: {res.get('reason', 'unknown')}")
                 return {"cluster": cluster.name, **res}
 
-            # PIPELINE_PARALLELISM>1: clusters run concurrently — each owns
-            # isolated scratch trees (.skeleton/{c}, .skeleton-filled/{c}) with
-            # their own target/, splice locks are per tree, ask() is thread-safe,
-            # and the event log is append-only. Summaries stay index-aligned to
-            # `clusters`. 1 = historical serial behavior.
-            _t2a_par = min(self.cfg.parallelism, len(clusters))
-            if _t2a_par > 1:
-                self.tel.log(f"  [skeleton] task2a parallelism={_t2a_par} "
-                             f"({len(clusters)} cluster(s) concurrent).")
+            # Debt #36: clusters run SERIALLY in fill_order. Each cluster seeds
+            # its stubs from the bodies earlier clusters accepted, so an item
+            # shared across clusters is filled ONCE; a later cluster rewrites a
+            # seeded body only when its own compile/tests fail on it — which is
+            # exactly the "proven divergence" that justifies a cfg-split at
+            # merge. Cluster-level parallelism is intentionally gone: concurrent
+            # per-cluster fills of the same shared fns were the double-fill /
+            # cfg-chimera machine (2× LLM cost, wholesale cfg-gated forks).
+            if self.cfg.parallelism > 1 and len(clusters) > 1:
+                self.tel.log("  [skeleton] task2a runs clusters serially (debt "
+                             "#36 shared-fn seeding); PIPELINE_PARALLELISM "
+                             "applies within a cluster, not across clusters.")
+            donor_dirs: list[Path] = []
+            for _ci, cluster in enumerate(clusters):
                 self.tel.set_current(
                     project_dir,
-                    f"task2a/{module} / {len(clusters)} cluster(s) in parallel (x{_t2a_par})")
-                with ThreadPoolExecutor(
-                        max_workers=_t2a_par,
-                        thread_name_prefix=f"task2a-{module}") as _pool:
-                    cluster_summaries = list(_pool.map(_run_one_cluster, clusters))
-            else:
-                for _ci, cluster in enumerate(clusters):
-                    self.tel.set_current(
-                        project_dir,
-                        f"task2a/{module} / cluster {cluster.name} ({_ci + 1}/{len(clusters)})")
-                    cluster_summaries.append(_run_one_cluster(cluster))
+                    f"task2a/{module} / cluster {cluster.name} ({_ci + 1}/{len(clusters)})")
+                _summary = _run_one_cluster(cluster, list(donor_dirs))
+                cluster_summaries.append(_summary)
+                _fd = project_dir / ".skeleton-filled" / cluster.name
+                if _summary.get("ok") and _fd.exists():
+                    donor_dirs.append(_fd)
             self.tel.mark_phase(project_dir, f"task2a/{module}", "done",
                                 detail=f"{len(clusters)} cluster(s)")
 
@@ -1044,6 +1049,21 @@ class StaticSkeletonTask2Generator(Task2Generator):
             self.tel.set_current(
                 project_dir,
                 f"task2b/{module} / merging {len(cluster_summaries)} cluster output(s)")
+            # Debt #36: pre-merge stub backfill. A stub still left in one
+            # cluster's tree (cfg-inactive there, or its fill exhausted) adopts
+            # the body a sibling cluster accepted, so the AST merge never emits
+            # a dead `unimplemented!()` cfg-variant alongside a real body —
+            # only genuine rewrites remain divergent.
+            _ok_trees = [project_dir / ".skeleton-filled" / s["cluster"]
+                         for s in cluster_summaries if s.get("ok")]
+            _ok_trees = [d for d in _ok_trees if d.exists()]
+            _backfilled = 0
+            for _tree in _ok_trees:
+                _backfilled += self._backfill_tree(
+                    _tree, [d for d in _ok_trees if d != _tree])
+            if _backfilled:
+                self.tel.log(f"  [ownership] pre-merge backfill: {_backfilled} "
+                             "stub body(ies) adopted from sibling clusters.")
             self.tel.log(f"\n  [skeleton-merge] composing {len(cluster_summaries)} cluster output(s) "
                          f"into {project_dir}/src/")
             merge_stats = self.fill.merge_cluster_outputs(
@@ -1102,6 +1122,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
         all_test_pairs: list[tuple[str, str]],
         genesis: str,
         functional_req: str,
+        donor_dirs: list[Path] | None = None,
     ) -> dict[str, Any]:
         """Run Phase A + B + C + D for a single cluster, returning a stats dict.
 
@@ -1189,6 +1210,19 @@ class StaticSkeletonTask2Generator(Task2Generator):
             if not dst.exists():
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 dst.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+
+        # Debt #36: adopt the shared-fn bodies earlier clusters already accepted
+        # (fill ONCE, propagate). Only `unimplemented!()` stubs are replaced, so
+        # resume-time prior fills of THIS cluster are never overwritten; this
+        # cluster's phase C then only fills its cluster-specific remainder and
+        # rewrites a seeded body only when its own compile/tests reject it.
+        if donor_dirs:
+            _seeded = self._backfill_tree(filled_dir, donor_dirs)
+            if _seeded:
+                self.tel.log(f"  {tag} [ownership] seeded {_seeded} shared fn "
+                             f"body(ies) from {len(donor_dirs)} prior "
+                             "cluster(s); only unfilled stubs remain for this "
+                             "cluster's fill.")
 
         # Propagate gen_tests siblings from project_dir/src/ into filled_dir/src/.
         # task0c commits these as cluster-specific unit-test specs; the bake step
@@ -1511,6 +1545,39 @@ class StaticSkeletonTask2Generator(Task2Generator):
 
         return {"ok": True, "phase_c": c_result, "phase_d": d_result,
                 "validates": validate_ok}
+
+    def _backfill_tree(self, tree_dir: Path, donor_dirs: list[Path]) -> int:
+        """Fill remaining `unimplemented!()` stubs in `tree_dir/src` with the
+        bodies the same rel-file carries in `donor_dirs` (earlier donor wins).
+        gen_tests siblings are skipped — they are cluster-owned test specs, not
+        shared implementation. Returns the number of stub bodies adopted."""
+        src_root = tree_dir / "src"
+        if not src_root.exists():
+            return 0
+        adopted = 0
+        for dst in sorted(src_root.rglob("*.rs")):
+            if self.gentests.is_gen_tests_file(dst.name):
+                continue
+            rel = dst.relative_to(tree_dir)
+            donors: list[str] = []
+            for dd in donor_dirs:
+                dp = dd / rel
+                if dp.exists():
+                    try:
+                        donors.append(dp.read_text(encoding="utf-8"))
+                    except OSError:
+                        continue
+            if not donors:
+                continue
+            try:
+                text = dst.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            new_text, n = backfill_stub_bodies(text, donors)
+            if n:
+                dst.write_text(new_text, encoding="utf-8")
+                adopted += n
+        return adopted
 
     def _post_merge_fill_pass(
         self,

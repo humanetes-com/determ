@@ -58,11 +58,11 @@ def test_render_impl_block_full_and_fallback() -> None:
 def test_splice_fn_body_stub_only(tmp_path) -> None:
     f = tmp_path / "lib.rs"
     f.write_text(SRC)
-    ok, delta = splice_fn_body(f, "read", "a + 1")
-    assert ok and delta != 0 and "a + 1" in f.read_text()
+    ok, reason, delta = splice_fn_body(f, "read", "a + 1")
+    assert ok and reason == "ok" and delta != 0 and "a + 1" in f.read_text()
     # already filled → refused unless allow_nonstub
-    assert splice_fn_body(f, "read", "a + 2") == (False, 0)
-    assert splice_fn_body(f, "read", "a + 2", allow_nonstub=True)[0] is True
+    assert splice_fn_body(f, "read", "a + 2") == (False, "target_not_stub", 0)
+    assert splice_fn_body(f, "read", "a + 2", allow_nonstub=True).ok is True
 
 
 def test_replace_fn_signature_private_only(tmp_path) -> None:

@@ -8,8 +8,55 @@ matched by signature line. Pure text→text; fn boundaries come from the structu
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from pipeline_core.application.reconstruct.fill_rules import is_unimplemented_body
 from pipeline_core.domain.rust_fn_headers import fn_headers
+
+
+def fn_body_spans(text: str) -> list[tuple[int, int, int]]:
+    """``(header_start, body_start, body_end)`` for each fn with a balanced body.
+    ``body_start`` is the offset just after the opening ``{``; ``body_end`` is
+    the offset of the matching ``}`` (exclusive end of body). Malformed
+    (unbalanced) fns are skipped."""
+    out: list[tuple[int, int, int]] = []
+    for h in fn_headers(text, line_anchored=False):
+        body_start = h.brace_open + 1
+        depth = 1
+        i = body_start
+        while i < len(text) and depth > 0:
+            ch = text[i]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+            i += 1
+        if depth != 0:
+            continue
+        out.append((h.start, body_start, i - 1))
+    return out
+
+
+def count_stub_bodies(text: str) -> int:
+    """Number of fns in ``text`` whose body is still ``unimplemented!()``."""
+    return sum(1 for _hs, bs, be in fn_body_spans(text)
+               if is_unimplemented_body(text[bs:be]))
+
+
+def backfill_stub_bodies(target_text: str, donor_texts: Sequence[str]) -> tuple[str, int]:
+    """Cross-cluster stub backfill (debt #36): adopt filled fn bodies from
+    sibling-cluster copies of the same file into ``target_text``'s remaining
+    ``unimplemented!()`` stubs. Donors apply in order — the earliest donor with
+    a real body for a given signature wins. Only stub bodies are ever replaced
+    (:func:`merge_fills_preserving_existing` semantics), so a body this cluster
+    filled itself is never overwritten. Returns ``(new_text, stubs_filled)``."""
+    before = count_stub_bodies(target_text)
+    if before == 0:
+        return target_text, 0
+    out = target_text
+    for donor in donor_texts:
+        out = merge_fills_preserving_existing(out, donor)
+    return out, before - count_stub_bodies(out)
 
 
 def merge_fills_preserving_existing(disk_text: str, model_text: str) -> str:
@@ -36,22 +83,9 @@ def merge_fills_preserving_existing(disk_text: str, model_text: str) -> str:
         body_end is the offset of the closing `}` itself (exclusive end of body).
         """
         out: list[tuple[str, str, int, int]] = []
-        for h in fn_headers(text, line_anchored=False):
-            body_start = h.brace_open + 1  # right after the opening `{`
-            depth = 1
-            i = body_start
-            while i < len(text) and depth > 0:
-                ch = text[i]
-                if ch == "{":
-                    depth += 1
-                elif ch == "}":
-                    depth -= 1
-                i += 1
-            if depth != 0:
-                continue  # malformed; skip
-            body_end = i - 1  # position of the matching '}'
+        for hs, body_start, body_end in fn_body_spans(text):
             body = text[body_start:body_end]
-            sig_line = text[h.start:body_start].strip()
+            sig_line = text[hs:body_start].strip()
             out.append((sig_line, body, body_start, body_end))
         return out
 
@@ -98,22 +132,9 @@ def merge_fn_blocks_into_disk(disk_text: str, fn_blocks: dict[str, str]) -> str:
     if not fn_blocks:
         return disk_text
     matches: list[tuple[str, int, int]] = []  # (sig, body_start, body_end)
-    for h in fn_headers(disk_text, line_anchored=False):
-        body_start = h.brace_open + 1
-        depth = 1
-        i = body_start
-        while i < len(disk_text) and depth > 0:
-            ch = disk_text[i]
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-            i += 1
-        if depth != 0:
-            continue
-        body_end = i - 1
+    for hs, body_start, body_end in fn_body_spans(disk_text):
         # Strip the trailing '{' so the sig matches the `<FN sig="...">` key.
-        sig_line = disk_text[h.start:body_start].rstrip("{ \t\n").strip()
+        sig_line = disk_text[hs:body_start].rstrip("{ \t\n").strip()
         matches.append((sig_line, body_start, body_end))
 
     out = disk_text

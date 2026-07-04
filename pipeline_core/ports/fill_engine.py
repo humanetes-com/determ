@@ -26,6 +26,7 @@ from pipeline_core.domain.models import (
     ImplBlock,
     TypeRecord,
 )
+from pipeline_core.domain.reconstruction import SpliceOutcome
 
 
 @runtime_checkable
@@ -54,11 +55,11 @@ class Mutator(Protocol):
     def splice_fn_body_at(
         self, file_path: Path, body_byte_start: int, body_byte_end: int,
         new_body: str, allow_nonstub: bool = ...,
-    ) -> tuple[bool, int]: ...
+    ) -> SpliceOutcome: ...
     def splice_fn_body(
         self, file_path: Path, name: str, new_body: str,
         allow_nonstub: bool = ...,
-    ) -> tuple[bool, int]: ...
+    ) -> SpliceOutcome: ...
     def replace_fn_signature(
         self, file_path: Path, name: str, new_sig: str,
     ) -> bool: ...

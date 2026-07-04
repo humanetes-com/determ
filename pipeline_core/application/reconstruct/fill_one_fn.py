@@ -261,31 +261,33 @@ class FillOneFn:
                 file_path, fn_name, container, sig_text, rec.cfg_predicates)
             if _splice_loc is not None:
                 _, _bs, _be, _ = _splice_loc
-                ok, delta = self.mut.splice_fn_body_at(file_path, _bs, _be, body)
+                splice_out = self.mut.splice_fn_body_at(file_path, _bs, _be, body)
             else:
                 # Fallback: regex-based locator. Less accurate for
                 # same-name collisions but acceptable when the syn
                 # binary isn't available.
-                ok, delta = self.mut.splice_fn_body(file_path, fn_name, body)
+                splice_out = self.mut.splice_fn_body(file_path, fn_name, body)
+            ok, delta = splice_out.ok, splice_out.delta
             if not ok:
                 ctx.splice_check_lock.release()
                 _lock_released = True
-                # splice rejected — usually because another worker filled
-                # this fn between our read and our splice (race) OR
-                # because the body was no longer `unimplemented!()` for
-                # some other reason. Distinguish via a quick re-read.
+                # A `target_not_stub` refusal is usually another worker
+                # filling this fn between our read and our splice (race).
+                # Confirm via a quick re-read; every other reason is its
+                # own diagnosis (debt #39) — no guessing needed.
                 _race_detected = False
-                try:
-                    _cur_text = file_path.read_text(encoding="utf-8")
-                    _race_loc = self.mut.locate_fn_by_record(
-                        file_path, fn_name, container, sig_text, rec.cfg_predicates)
-                    if _race_loc is not None:
-                        _, _race_bs, _race_be, _ = _race_loc
-                        _race_cur_body = _cur_text[_race_bs:_race_be]
-                        if not is_unimplemented_body(_race_cur_body):
-                            _race_detected = True
-                except Exception:
-                    pass
+                if splice_out.reason == "target_not_stub":
+                    try:
+                        _cur_text = file_path.read_text(encoding="utf-8")
+                        _race_loc = self.mut.locate_fn_by_record(
+                            file_path, fn_name, container, sig_text, rec.cfg_predicates)
+                        if _race_loc is not None:
+                            _, _race_bs, _race_be, _ = _race_loc
+                            _race_cur_body = _cur_text[_race_bs:_race_be]
+                            if not is_unimplemented_body(_race_cur_body):
+                                _race_detected = True
+                    except Exception:
+                        pass
                 _ctx = f" [{container}]" if container else ""
                 if _race_detected:
                     self.tel.log(f"  [phase-c/per-fn] GUARD POSSIBLE RACE — "
@@ -293,15 +295,15 @@ class FillOneFn:
                                  "another worker; this worker's LLM output "
                                  "discarded.")
                 else:
-                    self.tel.log(f"  [phase-c/per-fn] splice rejected for "
-                                 f"{rel_file}::{fn_name}{_ctx} (body no longer "
-                                 "a stub).")
+                    self.tel.log(f"  [phase-c/per-fn] splice refused for "
+                                 f"{rel_file}::{fn_name}{_ctx}: "
+                                 f"{splice_out.reason}.")
                 self.tel.emit("phase_c.fn.fill.skip", data={
                     "cluster": ctx.cluster_name, "pass_n": ctx.pass_n,
                     "file": rel_file, "fn": fn_name,
                     "container": container,
                     "fix_attempt": fix_attempt, "body_chars": len(body),
-                    "reason": "race_lost" if _race_detected else "splice_rejected",
+                    "reason": "race_lost" if _race_detected else splice_out.reason,
                 })
                 return FixOutcome("stop")
 

@@ -6,18 +6,31 @@ unit-testable in isolation and the application layer holds no loose loop locals.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import NamedTuple
+from typing import Literal, NamedTuple
+
+# Why a body splice applied or was refused. Every refusal is a DISTINCT cause
+# (debt #39 — the old blanket "splice_rejected" hid whether the model emitted a
+# stub body vs the pipeline re-targeting an already-filled fn):
+#   file_missing    — target file does not exist
+#   read_failed     — target file unreadable
+#   fn_not_found    — locator found no matching fn record
+#   bad_offsets     — caller's byte range does not fit the file
+#   target_not_stub — current body is already filled and allow_nonstub=False
+#   body_is_stub    — the NEW body is empty or itself `unimplemented!()`
+SpliceReason = Literal[
+    "ok", "file_missing", "read_failed", "fn_not_found",
+    "bad_offsets", "target_not_stub", "body_is_stub",
+]
 
 
 class SpliceOutcome(NamedTuple):
-    """Result of splicing a body into a function: whether it applied, a reason
-    tag (``"ok"`` or a failure like ``"fn_not_found"``/``"splice_rejected"``),
-    and the byte delta the edit introduced. A ``NamedTuple`` so it stays a
-    drop-in for the ``(ok, reason, delta)`` tuple callers already unpack while
-    the fields are now named."""
+    """Result of splicing a body into a function: whether it applied, the
+    :data:`SpliceReason` cause, and the byte delta the edit introduced. A
+    ``NamedTuple`` so it stays a drop-in for the ``(ok, reason, delta)`` tuple
+    callers already unpack while the fields are now named."""
 
     ok: bool
-    reason: str
+    reason: SpliceReason
     delta: int
 
 # Crate-type constraint appended to the generation context for proc-macro crates

@@ -24,6 +24,7 @@ from pipeline_core.domain.models import (
     FnFixContext,
     Stub,
 )
+from pipeline_core.domain.reconstruction import SpliceOutcome
 
 
 class FakeFill:
@@ -45,10 +46,10 @@ class FakeFill:
     # Mutator
     def locate_fn_by_record(self, *a: Any) -> Any: return self.s.get("loc_rec")
     def locate_fn(self, *a: Any) -> Any: return self.s.get("loc", ("fn x()", 0, 5, 7))
-    def splice_fn_body_at(self, *a: Any, **k: Any) -> tuple[bool, int]:
-        return self.s.get("splice", (True, 4))
-    def splice_fn_body(self, *a: Any, **k: Any) -> tuple[bool, int]:
-        return self.s.get("splice", (True, 4))
+    def splice_fn_body_at(self, *a: Any, **k: Any) -> SpliceOutcome:
+        return self.s.get("splice", SpliceOutcome(True, "ok", 4))
+    def splice_fn_body(self, *a: Any, **k: Any) -> SpliceOutcome:
+        return self.s.get("splice", SpliceOutcome(True, "ok", 4))
     def replace_fn_signature(self, *a: Any) -> bool: return False
     def extract_signature_block(self, *a: Any) -> str | None: return None
     def lock_for(self, tree: Path) -> threading.Lock: return self.lock

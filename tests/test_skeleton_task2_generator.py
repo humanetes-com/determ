@@ -351,13 +351,64 @@ def test_cluster_exception_caught(tmp_path: Path) -> None:
     assert any("cluster crashed" in m for m in fake.logs)
 
 
-def test_parallel_two_clusters(tmp_path: Path) -> None:
+def test_clusters_run_serially_even_with_parallelism(tmp_path: Path) -> None:
+    # Debt #36: cluster-level parallelism is gone — shared-fn seeding needs the
+    # previous cluster's accepted bodies on disk before the next cluster starts.
     cs = [_cluster("default"), _cluster("nightly")]
     fake = FakeAdapter(clusters_list=cs, cluster_tests=[("tests/it.rs", "x")],
                        run_results=[(0, "ok")])
     pd = _make_project(tmp_path, cs)
     assert _run(pd, _gen(fake, _cfg(per_fn=True, tdd=True, parallelism=2))) is True
-    assert any("parallelism=2" in m for m in fake.logs)
+    assert any("runs clusters serially" in m for m in fake.logs)
+
+
+def test_second_cluster_seeds_shared_bodies_from_first(tmp_path: Path) -> None:
+    # Debt #36: the default cluster fills `foo`; the nightly cluster must start
+    # from that body (seeded into its stub) instead of re-filling it.
+    cs = [_cluster("default"), _cluster("nightly")]
+    fake = FakeAdapter(clusters_list=cs, cluster_tests=[("tests/it.rs", "x")],
+                       run_results=[(0, "ok")])
+    seen_at_fill: list[str] = []
+
+    def _fill(**kw: Any) -> dict[str, Any]:
+        lib = kw["target_src_dir"] / "src" / "lib.rs"
+        text = lib.read_text(encoding="utf-8")
+        seen_at_fill.append(text)
+        if "unimplemented!()" in text:
+            lib.write_text("fn foo() -> i32 {\n    42\n}\n", encoding="utf-8")
+        return dict(_PER_FN_RESULT)
+
+    fake.run_phase_c_tdd = _fill  # type: ignore[method-assign]
+    pd = _make_project(tmp_path, cs)
+    assert _run(pd, _gen(fake, _cfg(per_fn=True, tdd=True))) is True
+    # default saw the stub; nightly saw the ALREADY-SEEDED body.
+    assert "unimplemented!()" in seen_at_fill[0]
+    assert "42" in seen_at_fill[1] and "unimplemented!()" not in seen_at_fill[1]
+    assert any("[ownership] seeded 1 shared fn" in m for m in fake.logs)
+
+
+def test_premerge_backfill_adopts_sibling_body(tmp_path: Path) -> None:
+    # Debt #36: a stub left in one cluster's tree adopts the body a sibling
+    # cluster accepted, so the merge never emits a dead unimplemented!() variant.
+    cs = [_cluster("default"), _cluster("nightly")]
+    fake = FakeAdapter(clusters_list=cs, cluster_tests=[("tests/it.rs", "x")],
+                       run_results=[(0, "ok")])
+    calls = {"n": 0}
+
+    def _fill(**kw: Any) -> dict[str, Any]:
+        calls["n"] += 1
+        if calls["n"] == 2:  # only the SECOND cluster produces a body
+            (kw["target_src_dir"] / "src" / "lib.rs").write_text(
+                "fn foo() -> i32 {\n    7\n}\n", encoding="utf-8")
+        return dict(_PER_FN_RESULT)
+
+    fake.run_phase_c_tdd = _fill  # type: ignore[method-assign]
+    pd = _make_project(tmp_path, cs)
+    assert _run(pd, _gen(fake, _cfg(per_fn=True, tdd=True))) is True
+    assert any("pre-merge backfill: 1 stub body(ies) adopted" in m
+               for m in fake.logs)
+    default_lib = pd / ".skeleton-filled" / "default" / "src" / "lib.rs"
+    assert "unimplemented!()" not in default_lib.read_text(encoding="utf-8")
 
 
 def test_resume_skips_all_phases(tmp_path: Path) -> None:

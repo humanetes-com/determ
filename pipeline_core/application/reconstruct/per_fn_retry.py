@@ -17,6 +17,7 @@ from typing import Any
 
 from pipeline_core.application.refine_loop import run_callback_loop
 from pipeline_core.domain.models import FnLocator, Frontier
+from pipeline_core.domain.reconstruction import SpliceOutcome
 from pipeline_core.domain.retry_outcome import (
     RetryMode,
     RetryVerdict,
@@ -51,7 +52,7 @@ class RetryDeps:
     gather_fix_context: Callable[..., Any]
     build_per_fn_fix_prompt: Callable[..., str]
     ask_per_fn_body: Callable[..., tuple[str | None, str]]
-    splice_fn_body: Callable[..., tuple[bool, int]]
+    splice_fn_body: Callable[..., SpliceOutcome]
     find_tests_for_fn: Callable[..., list[Any]]
     focus_cargo_errors: Callable[[str, str], str]
     is_gen_tests_file: Callable[[str], bool]
@@ -368,10 +369,12 @@ def fix_one_ref(
     new_body, _ = deps.ask_per_fn_body(prompt, fn, [], sig_text=sig_t)
     if not new_body:
         return False
-    ok, _ = deps.splice_fn_body(fp, fn, new_body, allow_nonstub=True)
-    if ok:
+    splice_out = deps.splice_fn_body(fp, fn, new_body, allow_nonstub=True)
+    if splice_out.ok:
         deps.log(f"  [task3-retry] re-spliced {rel_f}::{fn}.")
         return True
+    deps.log(f"  [task3-retry] splice refused for {rel_f}::{fn}: "
+             f"{splice_out.reason}.")
     return False
 
 

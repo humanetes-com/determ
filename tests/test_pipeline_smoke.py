@@ -468,10 +468,11 @@ def test_filter_tests_for_cluster() -> None:
 
 def test_eval_cfg_pred() -> None:
     """Plan 4: cfg predicate evaluator handles all/any/not."""
-    import pipeline
+    from pipeline_core.domain.cfg import CfgSet
     true_set = {'feature="std"', 'nightly'}
     false_set = {'feature="alloc"'}
-    e = pipeline._eval_cfg_pred
+    def e(pred, t, f):
+        return CfgSet.of(t, f).evaluate(pred)
     assert e('feature = "std"', true_set, false_set) is True
     assert e('feature = "alloc"', true_set, false_set) is False
     assert e('nightly', true_set, false_set) is True
@@ -2030,11 +2031,12 @@ def test_splice_fn_body_allow_nonstub() -> None:
         p = Path(d) / "f.rs"
         p.write_text(src, encoding="utf-8")
         # Default: refuses to clobber a non-stub body.
-        ok, _ = pipeline._splice_fn_body(p, "as_ref", "self.right_field")
-        assert not ok, "default splice must refuse a non-stub body"
+        ok, reason, _ = pipeline._splice_fn_body(p, "as_ref", "self.right_field")
+        assert not ok and reason == "target_not_stub", \
+            "default splice must refuse a non-stub body"
         assert "wrong_field" in p.read_text(encoding="utf-8")
         # allow_nonstub: overwrites it.
-        ok, delta = pipeline._splice_fn_body(
+        ok, _reason, delta = pipeline._splice_fn_body(
             p, "as_ref", "self.right_field", allow_nonstub=True)
         assert ok, "allow_nonstub splice must succeed"
         out = p.read_text(encoding="utf-8")

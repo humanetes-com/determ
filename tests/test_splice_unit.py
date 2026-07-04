@@ -108,8 +108,8 @@ def test_locate_cfg_tier_absent_keeps_legacy_behavior() -> None:
 
 
 def test_splice_read_failure_returns_false() -> None:
-    ok, delta = splice_fn_body_at(Path("/no/such/file.rs"), 0, 1, "x")
-    assert ok is False and delta == 0
+    ok, reason, delta = splice_fn_body_at(Path("/no/such/file.rs"), 0, 1, "x")
+    assert ok is False and reason == "read_failed" and delta == 0
 
 
 def _stub_file(body: str = "    ::core::unimplemented!()\n") -> tuple[Path, int, int]:
@@ -123,32 +123,32 @@ def _stub_file(body: str = "    ::core::unimplemented!()\n") -> tuple[Path, int,
 
 def test_splice_out_of_bounds_returns_false() -> None:
     p, bs, _ = _stub_file()
-    ok, _ = splice_fn_body_at(p, bs, 10_000, "x")
-    assert ok is False
+    ok, reason, _ = splice_fn_body_at(p, bs, 10_000, "x")
+    assert ok is False and reason == "bad_offsets"
 
 
 def test_splice_refuses_nonstub_body() -> None:
     p, bs, be = _stub_file(body="    let a = 1;\n")  # real body, not a stub
-    ok, _ = splice_fn_body_at(p, bs, be, "a + 1")
-    assert ok is False
+    ok, reason, _ = splice_fn_body_at(p, bs, be, "a + 1")
+    assert ok is False and reason == "target_not_stub"
 
 
 def test_splice_strips_outer_braces_and_rejects_empty() -> None:
     p, bs, be = _stub_file()
-    ok, _ = splice_fn_body_at(p, bs, be, "{ }")  # strips to empty → reject
-    assert ok is False
+    ok, reason, _ = splice_fn_body_at(p, bs, be, "{ }")  # strips to empty → reject
+    assert ok is False and reason == "body_is_stub"
 
 
 def test_splice_rejects_new_stub_body() -> None:
     p, bs, be = _stub_file()
-    ok, _ = splice_fn_body_at(p, bs, be, "unimplemented!()")
-    assert ok is False
+    ok, reason, _ = splice_fn_body_at(p, bs, be, "unimplemented!()")
+    assert ok is False and reason == "body_is_stub"
 
 
 def test_splice_braced_body_succeeds() -> None:
     p, bs, be = _stub_file()
-    ok, delta = splice_fn_body_at(p, bs, be, "{ a + 1 }")
-    assert ok is True and delta != 0
+    ok, reason, delta = splice_fn_body_at(p, bs, be, "{ a + 1 }")
+    assert ok is True and reason == "ok" and delta != 0
     assert "a + 1" in p.read_text()
 
 

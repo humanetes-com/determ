@@ -388,10 +388,11 @@ def one_shot_fill(
         body = blk.get("body") if blk else None
         if not body:
             continue
-        ok_s, delta = splicer.splice_body(path, fn, body, allow_nonstub=True)
+        ok_s, reason_s, delta = splicer.splice_body(path, fn, body,
+                                                    allow_nonstub=True)
         if ok_s:
             changed.append(f"{rel}::{fn}")
             log(f"  [fix loop/{kind}] spliced {rel}::{fn} ({delta:+d} bytes)")
         else:
-            log(f"  [fix loop/{kind}] splice rejected {rel}::{fn}")
+            log(f"  [fix loop/{kind}] splice refused {rel}::{fn}: {reason_s}")
     return changed

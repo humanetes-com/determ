@@ -16,6 +16,7 @@ from typing import Protocol, runtime_checkable
 
 from pipeline_core.domain.compile_probe import CompileProbe
 from pipeline_core.domain.models import FnRecord, Frontier
+from pipeline_core.domain.reconstruction import SpliceOutcome
 
 
 @runtime_checkable
@@ -49,11 +50,11 @@ class FixSplicer(Protocol):
     def splice_fn(
         self, file_path: Path, container: str, name: str, body: str, *,
         where_clause: str | None = ..., allow_nonstub: bool = ...,
-    ) -> tuple[bool, str, int]: ...
+    ) -> SpliceOutcome: ...
     def splice_body(
         self, file_path: Path, name: str, body: str, *,
         allow_nonstub: bool = ...,
-    ) -> tuple[bool, int]: ...
+    ) -> SpliceOutcome: ...
     def restore_signature(
         self, file_path: Path, name: str, skeleton_sig: str,
     ) -> bool: ...

@@ -27,6 +27,7 @@ from threading import Lock
 from typing import Any
 
 from pipeline_core.domain.models import FnLocator
+from pipeline_core.domain.reconstruction import SpliceOutcome
 from pipeline_core.ports.structure import StructureReader
 
 
@@ -60,8 +61,8 @@ class EngineTelemetryAdapter:
 class MutatorAdapter:
     locate_fn_by_record_fn: Callable[..., tuple[int, int, int, str] | None]
     locate_fn_fn: Callable[[str, str], tuple[str, int, int, int] | None]
-    splice_fn_body_at_fn: Callable[..., tuple[bool, int]]
-    splice_fn_body_fn: Callable[..., tuple[bool, int]]
+    splice_fn_body_at_fn: Callable[..., SpliceOutcome]
+    splice_fn_body_fn: Callable[..., SpliceOutcome]
     replace_fn_signature_fn: Callable[[Path, str, str], bool]
     extract_signature_block_fn: Callable[[str], str | None]
     lock_for_fn: Callable[[Path], Lock]
@@ -78,12 +79,12 @@ class MutatorAdapter:
 
     def splice_fn_body_at(self, file_path: Path, body_byte_start: int,
                           body_byte_end: int, new_body: str,
-                          allow_nonstub: bool = False) -> tuple[bool, int]:
+                          allow_nonstub: bool = False) -> SpliceOutcome:
         return self.splice_fn_body_at_fn(file_path, body_byte_start, body_byte_end,
                                          new_body, allow_nonstub=allow_nonstub)
 
     def splice_fn_body(self, file_path: Path, name: str, new_body: str,
-                       allow_nonstub: bool = False) -> tuple[bool, int]:
+                       allow_nonstub: bool = False) -> SpliceOutcome:
         return self.splice_fn_body_fn(file_path, name, new_body,
                                       allow_nonstub=allow_nonstub)
 

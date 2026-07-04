@@ -287,3 +287,10 @@ def prune_redundant_clusters(
     else:
         _log.log(f"  [prune] no redundant clusters; keeping all {len(keep)}.")
     return keep
+
+
+def fill_order(clusters: Iterable[BuildCluster]) -> list[BuildCluster]:
+    """Deterministic task2a fill order (debt #36): the default cluster first —
+    it owns every cfg-agnostic item, and each later cluster seeds its stubs
+    from the bodies earlier clusters already accepted — then the rest by name."""
+    return sorted(clusters, key=lambda c: (not c.is_default, c.name))

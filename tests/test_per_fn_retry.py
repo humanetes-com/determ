@@ -19,6 +19,7 @@ from pipeline_core.application.reconstruct.per_fn_retry import (
     apply_per_fn_fixes,
     fix_one_ref,
 )
+from pipeline_core.domain.reconstruction import SpliceOutcome
 
 
 def _ctx(tmp_path: Path) -> RetryContext:
@@ -40,7 +41,7 @@ def _deps(**overrides) -> RetryDeps:
             container="", types_section="", notes_section="", bound_methods_section="")),
         "build_per_fn_fix_prompt": lambda **kw: "prompt",
         "ask_per_fn_body": lambda prompt, fn, log, **kw: (None, ""),
-        "splice_fn_body": lambda fp, fn, body, **kw: (True, 0),
+        "splice_fn_body": lambda fp, fn, body, **kw: SpliceOutcome(True, "ok", 0),
         "find_tests_for_fn": lambda tdf, fn, **kw: [],
         "focus_cargo_errors": lambda out, rel_f: "",
         "is_gen_tests_file": lambda name: name.startswith("gen_"),
@@ -85,7 +86,7 @@ def test_fix_one_ref_returns_true_on_success(tmp_path):
     d = _deps(
         locate_fn=lambda text, fn: ("fn bar()", 0, 12, 27),
         ask_per_fn_body=lambda *a, **kw: ("{ Ok(()) }", ""),
-        splice_fn_body=lambda fp, fn, body, **kw: (True, 0),
+        splice_fn_body=lambda fp, fn, body, **kw: SpliceOutcome(True, "ok", 0),
     )
     assert fix_one_ref("src.rs", "bar", "", _ctx(tmp_path), d) is True
 
@@ -137,7 +138,7 @@ def test_apply_skips_failing_fn_and_continues(tmp_path):
     d = _deps(
         locate_fn=lambda text, fn: ("fn x()", 0, 8, 22),
         ask_per_fn_body=ask,
-        splice_fn_body=lambda fp, fn, body, **kw: (True, 0),
+        splice_fn_body=lambda fp, fn, body, **kw: SpliceOutcome(True, "ok", 0),
     )
     ctx = _ctx(tmp_path)
     # boom_fn references missing file (→ False, no raise) to isolate the raise
@@ -174,7 +175,7 @@ def test_apply_returns_correct_count(tmp_path):
     d = _deps(
         locate_fn=lambda text, fn: ("fn x()", 0, 6, 20),
         ask_per_fn_body=lambda *a, **kw: ("{ () }", ""),
-        splice_fn_body=lambda fp, fn, body, **kw: (True, 0),
+        splice_fn_body=lambda fp, fn, body, **kw: SpliceOutcome(True, "ok", 0),
     )
     count = apply_per_fn_fixes(
         [("a.rs", "a"), ("b.rs", "b")], "", _ctx(tmp_path), d

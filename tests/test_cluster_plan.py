@@ -139,3 +139,17 @@ def test_bs_unmentioned_custom_cfg_stays_a_cluster() -> None:
         counts, {}, cargo_features=[], default_features=[], feature_gate_cfgs=[],
         bs_declared=frozenset({"some_other_cfg"}))
     assert [c.name for c in clusters] == ["stable", "extra_cap"]
+
+
+def test_fill_order_default_cluster_first() -> None:
+    from pipeline_core.domain.cluster_plan import fill_order
+    from pipeline_core.domain.models import BuildCluster
+
+    def _c(name: str, default: bool) -> BuildCluster:
+        return BuildCluster(name=name, env_extra={}, tarpaulin_exclude_files=[],
+                            excluded_cfg=[], active_cfg=[],
+                            prompt_nightly_rule="", is_default=default)
+
+    # "zdefault" sorts LAST by name but owns the base position (debt #36).
+    out = fill_order([_c("nightly", False), _c("zdefault", True), _c("alpha", False)])
+    assert [c.name for c in out] == ["zdefault", "alpha", "nightly"]

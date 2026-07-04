@@ -44,7 +44,7 @@ class _Splicer:
 
     def splice_body(self, file_path, name, body, *, allow_nonstub=False):
         self.body_spliced.append(name)
-        return True, len(body)
+        return True, "ok", len(body)
 
 
 class _Prompts:

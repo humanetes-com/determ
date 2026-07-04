@@ -21,6 +21,7 @@ from pathlib import Path
 
 from pipeline_core.domain.compile_probe import CompileProbe
 from pipeline_core.domain.models import Diagnostic, FnRecord, Frontier
+from pipeline_core.domain.reconstruction import SpliceOutcome
 
 
 # --------------------------------------------------------------------------- #
@@ -65,8 +66,8 @@ class FixSplicerAdapter:
     locate_fn_fn: Callable[[str, str], tuple[str, int, int, int] | None]
     is_pub_fn_fn: Callable[[str, str], bool]
     render_impl_block_fn: Callable[[str, tuple[FnRecord, ...]], str]
-    splice_fn_fn: Callable[..., tuple[bool, str, int]]
-    splice_body_fn: Callable[..., tuple[bool, int]]
+    splice_fn_fn: Callable[..., SpliceOutcome]
+    splice_body_fn: Callable[..., SpliceOutcome]
     restore_signature_fn: Callable[[Path, str, str], bool]
 
     def locate_fn(self, text: str, name: str,
@@ -81,13 +82,13 @@ class FixSplicerAdapter:
 
     def splice_fn(self, file_path: Path, container: str, name: str, body: str, *,
                   where_clause: str | None = None,
-                  allow_nonstub: bool = False) -> tuple[bool, str, int]:
+                  allow_nonstub: bool = False) -> SpliceOutcome:
         return self.splice_fn_fn(file_path, container, name, body,
                                  where_clause=where_clause,
                                  allow_nonstub=allow_nonstub)
 
     def splice_body(self, file_path: Path, name: str, body: str, *,
-                    allow_nonstub: bool = False) -> tuple[bool, int]:
+                    allow_nonstub: bool = False) -> SpliceOutcome:
         return self.splice_body_fn(file_path, name, body,
                                    allow_nonstub=allow_nonstub)
 
