@@ -478,3 +478,120 @@ def test_sibling_comment_block_spans_matches_old_regex() -> None:
     ]
     for t in cases:
         assert text.sibling_comment_block_spans(t) == old(t), repr(t)
+
+
+# --- ratchet sweep 2026-07-04: malformed-input edges previously reached only
+# --- through e2e flows (coverage floor pipeline_core.domain) --------------- #
+
+def test_extract_files_malformed_blocks_skipped() -> None:
+    assert llm_output.extract_files('<FILE path="a.rs">unterminated') == {}
+    assert llm_output.extract_files('<FILE path="">A</FILE>') == {}
+    assert llm_output.extract_files('<FILE path="a.rs" >A</FILE>') == {}
+    assert llm_output.extract_files("<FILE path=''>A</FILE>") == {}
+
+
+def test_extract_files_multiple_single_quoted() -> None:
+    out = llm_output.extract_files(
+        "<FILE path='a.rs'>fn a() {}</FILE>x<FILE path='b.rs'>fn b() {}</FILE>")
+    assert out == {"a.rs": "fn a() {}", "b.rs": "fn b() {}"}
+
+
+def test_extract_body_response_priorities() -> None:
+    assert llm_output.extract_body_response("") is None
+    assert llm_output.extract_body_response("   \n") is None
+    assert llm_output.extract_body_response("<BODY>  </BODY>") is None
+    assert llm_output.extract_body_response("<BODY>self.x()</BODY>") == "self.x()"
+    fenced = llm_output.extract_body_response("```rust\nself.y()\n```")
+    assert fenced is not None and "self.y()" in fenced
+    # Unterminated fence → fence scan misses → raw fallback.
+    raw = llm_output.extract_body_response("```rust\nself.z()")
+    assert raw == "```rust\nself.z()"
+
+
+def test_extract_fn_bodies_happy_and_where() -> None:
+    (rec,) = llm_output.extract_fn_bodies(
+        '<FN name="f" block="impl X">a()</FN>')
+    assert rec == {"fn_name": "f", "block": "impl X",
+                   "where_clause": None, "body": "a()"}
+    (w,) = llm_output.extract_fn_bodies(
+        '<FN name="g" block="impl Y">where T: Debug\nself.t()</FN>')
+    assert w["where_clause"] == "where T: Debug" and w["body"] == "self.t()"
+    # `where` followed directly by newline is NOT a clause (needs ≥1 char).
+    (e,) = llm_output.extract_fn_bodies(
+        '<FN name="h" block="impl Z">where \nself.u()</FN>')
+    assert e["where_clause"] is None and e["body"] == "where \nself.u()"
+
+
+def test_extract_fn_bodies_fence_wrapped_and_empty() -> None:
+    (rec,) = llm_output.extract_fn_bodies(
+        '<FN name="f" block="b">```rust\nself.x()\n```</FN>')
+    assert rec["body"] == "self.x()"
+    assert llm_output.extract_fn_bodies(
+        '<FN name="f" block="b">```rust\n```</FN>') == []
+
+
+def test_extract_fn_bodies_malformed_headers_skipped() -> None:
+    for bad in [
+        '<FNname="f" block="b">x</FN>',      # no whitespace after <FN
+        '<FN name="f">x</FN>',               # missing block attr
+        '<FN name="" block="b">x</FN>',      # empty attr value
+        '<FN name="f" block="b"x>y</FN>',    # junk before >
+        '<FN name="f" block="b">y</FN x',    # malformed close tag
+    ]:
+        assert llm_output.extract_fn_bodies(bad) == [], bad
+
+
+def test_insert_no_run() -> None:
+    assert test_results.insert_no_run("cargo test --lib") == "cargo test --no-run --lib"
+    assert test_results.insert_no_run("cargo +nightly build") == "cargo +nightly build"
+
+
+def test_resolve_test_file_tiers() -> None:
+    resolve = test_results._resolve_test_file
+    assert resolve([], {"src/lib.rs"}) == "src/lib.rs"
+    assert resolve([], set()) == ""
+    assert resolve(["context", "gen_tests_1"],
+                   {"src/context.gen_tests_1.rs", "src/lib.rs"}) == "src/context.gen_tests_1.rs"
+    assert resolve(["context", "gen_tests_1"],
+                   {"src/context/gen_tests_1.rs"}) == "src/context/gen_tests_1.rs"
+    assert resolve(["context", "tests"], {"src/context.rs"}) == "src/context.rs"
+    assert resolve(["nope"], {"src/lib.rs"}) == "src/lib.rs"
+
+
+def test_per_file_test_stats_attribution() -> None:
+    out = "\n".join([
+        "running 5 tests",
+        "test context::gen_tests_1::t_mod ... ok",
+        "test src/lib.rs - Error (line 5) ... ok",
+        "test named_test ... FAILED",
+        "test ambiguous ... ok",
+        "test loner ... ignored, not yet stable",
+        "test result: ok. 3 passed; 1 failed; 1 ignored",
+    ])
+    stats = test_results.per_file_test_stats(
+        out, {"src/context.gen_tests_1.rs", "src/lib.rs"},
+        {"named_test": "tests/a.rs", "ambiguous": ""},
+    )
+    assert stats["src/context.gen_tests_1.rs"]["passed"] == 1
+    assert stats["src/lib.rs"]["passed"] == 1          # doc-test
+    assert stats["tests/a.rs"]["failed"] == 1
+    assert stats["(unmapped)"]["passed"] == 1          # ambiguous index entry
+    assert stats["(unmapped)"]["ignored"] == 1         # bare name, no index
+
+
+def test_failing_test_names_dedup_order() -> None:
+    out = ("test b ... FAILED\ntest a ... ok\ntest c ... FAILED\n"
+           "test b ... FAILED\ntest result: FAILED. 1 passed; 3 failed")
+    assert test_results.failing_test_names(out) == ["b", "c"]
+
+
+def test_parse_rustc_compile_errors_edges() -> None:
+    parse = test_results.parse_rustc_compile_errors
+    ok = parse("error[E0308]: mismatched types\n  --> src/lib.rs:42:5\n")
+    assert ok == [("mismatched types", "src/lib.rs", 42)]
+    assert parse("error[E03x8]: bad code\n  --> src/lib.rs:1\n") == []
+    assert parse("error[E0308] no colon\n  --> src/lib.rs:1\n") == []
+    assert parse("error: msg but no arrow line\nnote: other\n") == []
+    assert parse("error: msg\n  --> nocolonhere\n") == []
+    assert parse("error: msg\n  --> src/lib.rs:xy\n") == []
+    assert parse("error: msg at end of output") == []

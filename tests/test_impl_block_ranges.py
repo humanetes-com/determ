@@ -172,3 +172,45 @@ def test_impl_where_clause_ignores_commented_impl_mention():
     ft = "// impl Ghost for X where SHOULD: NotMatch\nimpl Ghost for X {}"
     c = "impl Ghost for X"
     assert impl_where_clause(ft, c) == ""
+
+
+# --- ratchet sweep 2026-07-04: lexer edges previously reached only through
+# --- e2e flows (coverage floor pipeline_core.domain) ----------------------- #
+
+def test_raw_strings_and_char_literals_skipped():
+    src = (
+        'impl Foo {\n'
+        '    fn a(&self) -> &str { r#"raw } brace"# }\n'
+        '    fn b(&self) -> char { \'}\' }\n'
+        '    fn c(&self) -> char { \'\\n\' }\n'
+        '    fn d(&self) -> &str { r"plain raw }" }\n'
+        '}\n'
+        'impl Bar {}\n'
+    )
+    ranges = parse_impl_block_ranges(src)
+    assert len(ranges) == 2
+    assert _slice(src, ranges[0]).rstrip().endswith("}")
+    assert "Bar" in _slice(src, ranges[1])
+
+
+def test_bare_r_identifier_not_raw_string():
+    src = "impl Foo { fn a(&self) -> u8 { r } }\nimpl Baz {}\n"
+    assert len(parse_impl_block_ranges(src)) == 2
+
+
+def test_comments_inside_impl_header_skipped():
+    src = ("impl /* header } comment */ Foo // trailing }\n"
+           "{ fn a(&self) {} }\n")
+    (r,) = parse_impl_block_ranges(src)
+    assert "fn a" in src[r.header_start:r.body_close + 1]
+
+
+def test_impl_where_clause_lookup():
+    src = ("impl<T> Wrap<T> for Vec<T>\n"
+           "where\n    T: Clone,\n"
+           "{ fn w(&self) {} }\n")
+    # container carries the impl's own generics stripped (extractor form)
+    assert impl_where_clause(src, "impl Wrap<T> for Vec<T>") == "T: Clone"
+    assert impl_where_clause(src, "impl Missing") == ""
+    assert impl_where_clause(src, "not an impl") == ""
+    assert impl_where_clause(src, "impl") == ""

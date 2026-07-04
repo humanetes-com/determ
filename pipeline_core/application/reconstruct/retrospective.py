@@ -16,6 +16,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from ...domain.bound_mismatch import detect_frozen_bound_mismatch
 from ...domain.llm_output import parse_retrospective
 from ...domain.text import (
     label_value_offset,
@@ -80,6 +81,31 @@ def diagnose_phase_c(
             ),
             "signal": "vtable_fast_exit",
         }
+
+    # Debt #28: a frozen where-bound the compiler proves unsatisfiable cannot be
+    # fixed by ANY body — park the fn structurally instead of letting the LLM
+    # classifier oscillate TRAIT_BOUND_VIOLATION↔API_HALLUCINATION for 5-6
+    # attempts. The cause is the module defining the frozen bound's trait
+    # (alias/re-export mismatch), not this fn.
+    if fix_attempts >= 2:
+        _mm = detect_frozen_bound_mismatch(sig_text, container, _exc)
+        if _mm is not None:
+            deps.log(f"  [phase-c/retro] {fn_name}: frozen-bound mismatch — "
+                     f"`{_mm.param}: {' + '.join(_mm.frozen)}` (frozen) cannot "
+                     f"satisfy required `{_mm.required}`; parking fn (fix the "
+                     f"module defining `{_mm.frozen[0]}`, not this body).")
+            return {
+                "category": "FROZEN_BOUND_MISMATCH",
+                "guidance": (
+                    f"the compiler requires `{_mm.param}: {_mm.required}` but the "
+                    f"FROZEN signature only grants `{_mm.param}: "
+                    f"{' + '.join(_mm.frozen)}` — no body can satisfy this. The "
+                    f"mismatch is in the module that defines "
+                    f"`{_mm.frozen[0]}` (it must be, or re-export, "
+                    f"`{_mm.required}`). Do not retry this fn."
+                ),
+                "signal": "frozen_bound_mismatch",
+            }
 
     prompt = build_phase_c_retro_prompt(
         fn_name, sig_text, container, file_rel, cluster_name, last_body,

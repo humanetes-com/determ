@@ -188,7 +188,8 @@ def test_fill_one_missing_file_skips(tmp_path: Path) -> None:
 def test_fill_one_happy_path_first_attempt(tmp_path: Path) -> None:
     ws = _mk_ws(tmp_path)
     # locate_fn_by_record None → regex locator path; splice ok; cargo rc=0; u2 None.
-    fake = FakeFill(loc=("pub fn answer()", 0, 16, 35), splice=(True, 4),
+    fake = FakeFill(loc=("pub fn answer()", 0, 16, 35),
+                    splice=SpliceOutcome(True, "ok", 4),
                     run=(0, ""), u2=None, body=("42", "RESP"))
     res = _fill_one(fake).run(1, Stub(file="lib.rs", fn_name="answer"), ctx=_ctx(ws))
     assert res.filled and res.attempts == 1

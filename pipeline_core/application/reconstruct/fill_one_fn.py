@@ -560,7 +560,10 @@ class FillOneFn:
                         _improved = _cur_errs < int(_prior_best)
                     _new_count = _prior_count + 1
                     _full_exhaust = (
-                        _retro.get("category") == "GENUINELY_HARD"
+                        # FROZEN_BOUND_MISMATCH (debt #28): structurally proven
+                        # unsatisfiable — park immediately like GENUINELY_HARD.
+                        _retro.get("category") in ("GENUINELY_HARD",
+                                                   "FROZEN_BOUND_MISMATCH")
                         or (_prior_best is not None and not _improved)
                     )
                     _retros[_retro_k] = {

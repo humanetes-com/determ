@@ -165,3 +165,34 @@ def test_parse_retrospective_function_matches_old_regex():
     ]
     for line in cases:
         assert parse_retrospective_function(line) == old(line), repr(line)
+
+
+# --- ratchet sweep 2026-07-04 ---------------------------------------------- #
+
+def test_loop_state_latest_retro_fallbacks() -> None:
+    st = LoopState()
+    assert st.latest_retro() == ""
+    st.record(Attempt(metric=1.0, retro="first"))
+    st.record(Attempt(metric=2.0))
+    assert st.latest_retro() == "first"       # last attempt has none → walk back
+    st.pending_retro = "pending"
+    assert st.latest_retro() == "pending"
+
+
+def test_parse_retrospective_categories_map() -> None:
+    from pipeline_core.domain.refine import parse_retrospective_categories
+    retro = "\n".join([
+        "FUNCTION foo: (a) TESTABLE covered by t1",
+        "FUNCTION bar::baz: CFG_GATED nightly only",
+        "FUNCTION qux: (c) UNREACHABLE dead branch",
+        "FUNCTION deep: NEEDS_INTERNALS private state",
+        "FUNCTION odd: WEIRD_KEYWORD unknown",
+        "not a function line",
+        "FUNCTION",
+        "FUNCTION : missing name",
+    ])
+    cats = parse_retrospective_categories(retro)
+    assert cats["TESTABLE"] == ["foo"]
+    assert cats["CFG_GATED"] == ["bar::baz"]
+    assert cats["UNREACHABLE"] == ["qux"]
+    assert cats["NEEDS_INTERNALS"] == ["deep"]

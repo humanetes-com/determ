@@ -86,3 +86,25 @@ def test_file_level_cfg_gate_excludes_whole_file() -> None:
     assert pipeline._count_test_fns_cfg_aware(
         "#[test]\nfn a() {}\n#[test]\nfn b() {}\n", set(),
         {"extra_cap", "feature = \"extra_cap\""}) == 2
+
+
+# --- ratchet sweep 2026-07-04 ---------------------------------------------- #
+
+def test_count_test_fns_comment_lines_in_attr_block_skipped() -> None:
+    # Comment lines inside the attribute block are skipped by the backtrack,
+    # so the cfg gate above them still applies.
+    txt = ("#[cfg(extra_cap)]\n"
+           "// a comment between attrs\n"
+           "#[test]\nfn gated() {}\n")
+    assert pipeline._count_test_fns_cfg_aware(txt, set(), set()) == 0
+
+
+def test_count_test_fns_in_records_gating() -> None:
+    from pipeline_core.domain.test_count import count_test_fns_in_records
+    recs = [
+        {"is_test": True, "cfg_predicates": []},
+        {"is_test": False, "cfg_predicates": []},          # not a test
+        {"is_test": True, "cfg_predicates": ["extra_cap"]},  # custom off → dropped
+        {"is_test": True},                                  # no predicates key
+    ]
+    assert count_test_fns_in_records(recs, set(), set()) == 2

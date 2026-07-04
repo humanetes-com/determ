@@ -261,3 +261,103 @@ def test_tests_output_number_matches_regex() -> None:
                  "x_tests_output_5.txt", "tests_output_5.log", "other.txt", "tests_output_5x.txt"]:
         m = re.search(r"tests_output_(\d+)\.txt", name)
         assert tests_output_number(name) == (int(m.group(1)) if m else None), name
+
+
+# --- ratchet sweep 2026-07-04: direct tests for regions previously reached ---
+# --- only through e2e flows (coverage floor pipeline_core.domain) ---------- #
+from pipeline_core.domain.generation import (  # noqa: E402
+    _attr_path_value,
+    extract_gen_tests_body,
+    extract_test_mod,
+    gen_tests_origin_cfgs,
+    inject_gen_prelude_imports,
+    prelude_import_names,
+    strip_trailing_legacy_gen_block,
+    testfile_paths,
+)
+
+
+def test_prelude_import_names_groups_renames_dedupe() -> None:
+    block = (
+        "use std::string::{String, ToString};\n"
+        "use std::error::Error as StdError;\n"
+        "use std::vec::Vec;\n"
+        "use std::vec::Vec;\n"
+        "fn not_a_use() {}\n"
+    )
+    assert prelude_import_names(block) == "String, ToString, StdError, Vec"
+    assert prelude_import_names("") == ""
+    assert prelude_import_names("fn f() {}\n") == ""
+
+
+def test_extract_test_mod_brace_counter() -> None:
+    text = ('before\n#[cfg(test)]\n#[allow(dead_code)]\n'
+            'mod gen_tests_1 {\n    fn t() { assert!(true); }\n}\nafter\n')
+    out = extract_test_mod(text)
+    assert out.startswith("#[cfg(test)]") and out.endswith("}")
+    assert "assert!(true);" in out and "after" not in out
+
+
+def test_extract_test_mod_absent_or_malformed() -> None:
+    assert extract_test_mod("no cfg here") == ""
+    assert extract_test_mod("#[cfg(test)]\nfn loose() {}") == ""
+    assert extract_test_mod("#[cfg(test)]\nmod gen_tests_1;") == ""
+    assert extract_test_mod("#[cfg(test)]\nmod gen_tests_1 { fn t() {") == ""
+
+
+def test_extract_gen_tests_body_unbalanced_falls_through() -> None:
+    block = "mod gen_tests_1 {\n    fn t() {"
+    assert extract_gen_tests_body(block) == block.strip() + "\n"
+
+
+def test_gen_tests_origin_cfgs_scan() -> None:
+    text = (
+        '#[cfg(feature = "std")]\n#[cfg(test)]\nmod gen_tests_1;\n'
+        "#[cfg(test)]\nmod gen_tests_2;\n"
+        "#[allow(dead_code)]\n#[cfg(test)]\nmod gen_tests_3;\n"
+        "mod gen_tests_x;\n"
+        "mod gen_tests_4\n"
+    )
+    assert gen_tests_origin_cfgs(text) == {
+        1: 'feature = "std"', 2: "", 3: ""}
+
+
+def test_inject_gen_prelude_imports_mod_opener_path() -> None:
+    block = "mod gen_tests_1 {\n    #[test]\n    fn t() {}\n}\n"
+    out = inject_gen_prelude_imports(block)
+    assert out != block
+    assert out.index("use std::string::{String, ToString};") < out.index("#[test]")
+    # No gen-mod opener and no `use super::*;` → unchanged.
+    bare = "#[test]\nfn t() {}\n"
+    assert inject_gen_prelude_imports(bare) == bare
+
+
+def test_parse_gen_tests_filename_edges() -> None:
+    assert parse_gen_tests_filename("a.gen_tests_2.txt") is None
+    assert parse_gen_tests_filename(".gen_tests_1.rs") is None
+    assert parse_gen_tests_filename("a.gen_tests_x.rs") is None
+    assert parse_gen_tests_filename("a.gen_tests_3.rs.broken") == ("a", 3)
+
+
+def test_attr_path_value_quote_edges() -> None:
+    assert _attr_path_value('#[path = "x.rs"]') == "x.rs"
+    assert _attr_path_value("#[path = x]") is None
+    assert _attr_path_value('#[path = "x') is None
+
+
+def test_strip_trailing_legacy_gen_block_malformed_kept() -> None:
+    unterminated_attr = "fn f() {}\n\n#[cfg(test)]\n#[allow(x"
+    assert strip_trailing_legacy_gen_block(unterminated_attr) == unterminated_attr
+    empty_mod_name = "fn f() {}\n\n#[cfg(test)]\nmod gen_ {\n}\n"
+    assert strip_trailing_legacy_gen_block(empty_mod_name) == empty_mod_name
+
+
+def test_testfile_paths_skips_empty() -> None:
+    text = '<TESTFILE path="">\n<TESTFILE path="tests/a.rs">\n<TESTFILE path="'
+    assert testfile_paths(text) == ["tests/a.rs"]
+
+
+def test_has_gen_tests_mod_decl_mod_word_edges() -> None:
+    for src in ["module gen_tests_1;", "xx mod", "mod\tgen_tests_1  ;"]:
+        pat = re.compile(r'\bmod\s+gen_tests_1\s*;')
+        assert has_gen_tests_mod_decl(src, 1) == bool(pat.search(src)), src
