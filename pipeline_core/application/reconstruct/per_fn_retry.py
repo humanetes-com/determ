@@ -371,6 +371,7 @@ def fix_one_ref(
             macros="", invariants="", retrospective_guidance="",
             siblings="", crate_idioms="",
             bound_methods=fix_ctx.bound_methods_section,
+            blueprint=fix_ctx.blueprint_section,
         ),
         fr_path=ctx.fr_path,
     )

@@ -30,13 +30,18 @@ class PerFnSections:
     # Methods the fn's FROZEN where-bounds make callable (corrected R2/R3,
     # debt #28). "" when no generic param is bounded by an in-scope trait.
     bound_methods: str
+    # The crate blueprint slice (P3) — the model's OWN design sections
+    # relevant to this fn. "" when no blueprint exists.
+    blueprint: str = ""
 
 
 @dataclass(frozen=True, slots=True)
 class PerFnFixSections(PerFnSections):
     """Per-fn FIX prompt sections = the initial set plus the retrospective
-    guidance the fix loop accumulates on stall."""
-    retrospective_guidance: str
+    guidance the fix loop accumulates on stall. (Default "" only because the
+    base class ends in the defaulted `blueprint` field — every construction
+    site passes it explicitly.)"""
+    retrospective_guidance: str = ""
 
 
 @dataclass(frozen=True, slots=True)

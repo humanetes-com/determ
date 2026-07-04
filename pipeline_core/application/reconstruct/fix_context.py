@@ -8,10 +8,17 @@ model-notes store (I/O) and the truncation guard (telemetry).
 """
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
+from pipeline_core.domain.blueprint import (
+    Blueprint,
+    blueprint_path,
+    parse_blueprint,
+    slice_identifiers,
+)
 from pipeline_core.domain.bound_methods import (
     format_bound_methods_section,
     select_bound_provider_traits,
@@ -30,6 +37,24 @@ class FixContextAssembler:
     budgets: PromptBudgets
     filter_notes: Callable[..., str]    # model-notes store (fr I/O)
     guard: Callable[[str, str], None]   # truncation telemetry (`GUARD:` log)
+    # P3 blueprint cache: path → (mtime, parsed). Frozen dataclass, mutable
+    # CONTENTS — reparse only when the file changes.
+    _bp_cache: dict[Path, tuple[float, Blueprint]] = field(default_factory=dict)
+
+    def _blueprint_for(self, fr_path: Path | None) -> Blueprint:
+        if fr_path is None:
+            return Blueprint()
+        path = blueprint_path(fr_path)
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            return Blueprint()
+        hit = self._bp_cache.get(path)
+        if hit is not None and hit[0] == mtime:
+            return hit[1]
+        bp = parse_blueprint(path.read_text(encoding="utf-8", errors="replace"))
+        self._bp_cache[path] = (mtime, bp)
+        return bp
 
     def types_section_for_fix(
         self,
@@ -97,8 +122,16 @@ class FixContextAssembler:
                 fr_path, file_rel=file_rel, fn_name=fn_name,
                 file_text=file_text, current_error=error_excerpt,
             )
+        # P3: this fn's blueprint slice — ranked by overlap with the fn name,
+        # file stem, container tokens and signature tokens.
+        bp = self._blueprint_for(fr_path)
+        blueprint_section = "" if bp.empty else bp.slice_for(
+            slice_identifiers(fn_name, Path(file_rel).stem, container,
+                              sig_text),
+            cap=int(os.getenv("BLUEPRINT_SLICE_CAP", "2500")))
         return FnFixContext(
             container=container, impl_where=impl_where,
             types_section=types_section, notes_section=notes_section,
             bound_methods_section=bound_methods_section,
+            blueprint_section=blueprint_section,
         )

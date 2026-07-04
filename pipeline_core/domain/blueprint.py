@@ -103,6 +103,29 @@ def parse_blueprint(text: str) -> Blueprint:
     return Blueprint(tuple(sections))
 
 
+_NOISE_TOKENS = frozenset({"impl", "for", "where", "dyn", "pub", "fn",
+                           "self", "mut", "ref"})
+
+
+def slice_identifiers(*texts: str) -> frozenset[str]:
+    """Candidate identifiers for `slice_for` from arbitrary Rust-ish text
+    (container headers, signatures): maximal `[A-Za-z0-9_]+` runs, len>1,
+    keyword noise dropped."""
+    out: set[str] = set()
+    for text in texts:
+        cur: list[str] = []
+        for ch in text or "":
+            if ch.isalnum() or ch == "_":
+                cur.append(ch)
+            else:
+                if len(cur) > 1:
+                    out.add("".join(cur))
+                cur = []
+        if len(cur) > 1:
+            out.add("".join(cur))
+    return frozenset(out - _NOISE_TOKENS)
+
+
 def missing_topics(bp: Blueprint, topics: frozenset[str]) -> tuple[str, ...]:
     """Topics (file stems, family names, macro names) with NO section whose
     heading mentions them — the generation validator's gap list."""

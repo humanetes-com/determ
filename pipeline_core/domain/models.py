@@ -485,6 +485,8 @@ class FnFixContext:
     types_section: str = ""
     notes_section: str = ""
     bound_methods_section: str = ""
+    # P3: the crate blueprint slice relevant to this fn ("" without one).
+    blueprint_section: str = ""
 
 
 @dataclass(frozen=True, slots=True)

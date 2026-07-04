@@ -72,3 +72,56 @@ def test_gather_assembles_vo_and_notes_gated_on_fr_path(tmp_path: Path) -> None:
     with_fr = a.gather(**kw, fr_path=tmp_path / "fr.md")
     assert with_fr.notes_section == "NOTE"
     assert calls and calls[0]["fn_name"] == "f"
+
+
+# --- P3: blueprint slice derivation ------------------------------------------
+
+
+def test_gather_includes_blueprint_slice(tmp_path: Path) -> None:
+    fr = tmp_path / "functional_requirements_x.md"
+    fr.write_text("FR")
+    (tmp_path / "blueprint_x.md").write_text(
+        "## Overview\nplan\n## ptr\nOwn<T> wraps NonNull; boxed() allocates.\n"
+        "## error\nvtable at offset zero.\n")
+    ctx = _assembler().gather(
+        file_text="impl<T> Own<T> { fn boxed(){} }", file_rel="src/ptr.rs",
+        fn_name="boxed", sig_text="fn boxed(self) -> Box<T>",
+        body_text="", error_excerpt="", container="impl<T> Own<T>",
+        type_records=[], fr_path=fr)
+    assert "NonNull" in ctx.blueprint_section       # ptr section selected
+    assert "offset zero" not in ctx.blueprint_section
+    assert "plan" in ctx.blueprint_section          # anchor kept
+
+
+def test_gather_blueprint_cache_reparses_on_change(tmp_path: Path) -> None:
+    import os as _os
+    fr = tmp_path / "functional_requirements_x.md"
+    fr.write_text("FR")
+    bp = tmp_path / "blueprint_x.md"
+    bp.write_text("## Overview\nfirst\n")
+    a = _assembler()
+    kw: dict[str, Any] = {
+        "file_text": "", "file_rel": "src/a.rs", "fn_name": "f",
+        "sig_text": "fn f()", "body_text": "", "error_excerpt": "",
+        "container": "", "type_records": [], "fr_path": fr}
+    assert "first" in a.gather(**kw).blueprint_section
+    bp.write_text("## Overview\nsecond\n")
+    _os.utime(bp, (1e9, 1e9))                      # force distinct mtime
+    assert "second" in a.gather(**kw).blueprint_section
+
+
+def test_gather_without_blueprint_file_is_empty(tmp_path: Path) -> None:
+    fr = tmp_path / "functional_requirements_x.md"
+    fr.write_text("FR")
+    ctx = _assembler().gather(
+        file_text="", file_rel="src/a.rs", fn_name="f", sig_text="fn f()",
+        body_text="", error_excerpt="", container="", type_records=[],
+        fr_path=fr)
+    assert ctx.blueprint_section == ""
+
+
+def test_slice_identifiers_tokenises_and_drops_noise() -> None:
+    from pipeline_core.domain.blueprint import slice_identifiers
+    got = slice_identifiers("impl<T> Own<T> for Box<T>", "fn by_ref(&self)")
+    assert "Own" in got and "Box" in got and "by_ref" in got
+    assert "impl" not in got and "for" not in got and "T" not in got

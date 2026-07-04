@@ -188,7 +188,8 @@ class FillOneFn:
                         siblings=self.prompt.collect_sibling_filled_bodies(
                             cur_text, fn_name, container),
                         crate_idioms=crate_idioms_section,
-                        bound_methods=_fn_ctx.bound_methods_section),
+                        bound_methods=_fn_ctx.bound_methods_section,
+                        blueprint=_fn_ctx.blueprint_section),
                     fr_path=ctx.fr_path,
                 )
             else:
@@ -211,7 +212,8 @@ class FillOneFn:
                         siblings=self.prompt.collect_sibling_filled_bodies(
                             cur_text, fn_name, container),
                         crate_idioms=crate_idioms_section,
-                        bound_methods=_fn_ctx.bound_methods_section),
+                        bound_methods=_fn_ctx.bound_methods_section,
+                        blueprint=_fn_ctx.blueprint_section),
                     # P3.1: open the sig-change escape hatch after multiple
                     # compile failures. The model can return an additional
                     # <SIGNATURE> block; we splice it only when fn is non-pub.
