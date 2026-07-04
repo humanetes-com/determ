@@ -21,6 +21,7 @@ from pipeline_core.application.reconstruct.pull_resolver import (
     ask_with_pulls,
     workspace_file_reader,
 )
+from pipeline_core.domain.blueprint import Blueprint, blueprint_path, parse_blueprint
 from pipeline_core.domain.impl_routing import route_fn_bodies
 from pipeline_core.domain.llm_output import extract_fn_bodies
 from pipeline_core.domain.models import (
@@ -219,6 +220,18 @@ def fill_impl_blocks(
         _enumerate_types_via_extractor(target_src_dir) or [], cluster)
     macros_section = _collect_crate_macros(_src_for_macros)
 
+    # P3: the crate blueprint — the model's own design doc, sliced per block
+    # so every local fill sees the global scheme it committed to.
+    _blueprint = Blueprint()
+    if fr_path is not None:
+        _bp_path = blueprint_path(fr_path)
+        if _bp_path.exists():
+            _blueprint = parse_blueprint(
+                _bp_path.read_text(encoding="utf-8", errors="replace"))
+            if not _blueprint.empty:
+                _log(f"  [phase-c/impl] blueprint loaded: "
+                     f"{len(_blueprint.sections)} section(s).")
+
     # P2 pull protocol: the model may request ONE typed artifact instead of
     # guessing (bounded round-trips; menu appended to every fill prompt).
     # All sources are post-strip-legal: the reconstruction tree, the tests,
@@ -390,6 +403,12 @@ def fill_impl_blocks(
             if _s:
                 _sib_parts.append(_s)
         siblings_section = "\n\n".join(_sib_parts)
+        # P3: this block's blueprint slice — ranked by overlap with the
+        # stub names, the container tokens, and the file stem.
+        _blueprint_slice = "" if _blueprint.empty else _blueprint.slice_for(
+            frozenset([*stub_fn_names, *_container_names(block.container),
+                       Path(block.file).stem]),
+            cap=int(os.getenv("BLUEPRINT_SLICE_CAP", "2500")))
         prior_retro = retros_cache.get(
             _retro_key(block.file, "*impl*", block.container), {}
         ).get("guidance", "")
@@ -446,6 +465,7 @@ def fill_impl_blocks(
                     notes=notes_section, retrospective_guidance=prior_retro,
                     crate_idioms=crate_idioms_section, macros=macros_section,
                     dispatch_family=dispatch_family_section, siblings=siblings_section,
+                    blueprint=_blueprint_slice,
                     bound_methods=_bound_methods_section_for(
                         _block_where, _crate_type_records)),
                 fr_path=fr_path,

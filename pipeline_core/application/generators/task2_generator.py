@@ -935,6 +935,45 @@ class StaticSkeletonTask2Generator(Task2Generator):
     scan: SourceScan
     ws: Workspace
     cfg: SkeletonConfig
+    # P3 blueprint phase deps (BlueprintDeps, constructed by the composition
+    # root; None → blueprint generation is skipped).
+    blueprint_deps: Any = None
+
+    def _ensure_blueprint(self, project_dir: Path, module: str,
+                          default_cluster: Any, all_test_pairs: list[tuple[str, str]],
+                          functional_req: str, functional_req_path: Path) -> None:
+        """P3: the model authors its own design doc from skeleton sigs +
+        tests + FR, once per crate, before any fill. Topics = source-file
+        stems (one section each) + Overview; fills consume slices of it."""
+        from pipeline_core.application.reconstruct.source_view import (
+            condense_rust_to_signatures,
+        )
+        from pipeline_core.application.tasks.blueprint_phase import ensure_blueprint
+        from pipeline_core.domain.blueprint import blueprint_path
+        skel_dir = project_dir / ".skeleton" / default_cluster.name
+        sig_parts: list[str] = []
+        topics: list[str] = []
+        for f in sorted(skel_dir.rglob("*.rs")):
+            rel = f.relative_to(skel_dir)
+            text = f.read_text(encoding="utf-8", errors="replace")
+            sig_parts.append(f"// {rel}\n"
+                             + condense_rust_to_signatures(text, str(rel)))
+            if f.stem != "mod" and not f.stem.startswith("gen_tests"):
+                topics.append(f.stem)
+        if not sig_parts:
+            self.tel.log("  [blueprint] no baked skeleton files — skipped.")
+            return
+        cap = int(os.getenv("BLUEPRINT_INPUT_CAP", "60000"))
+        tests_block = "\n\n".join(
+            f"// {rel}\n{txt}" for rel, txt in all_test_pairs)
+        ensure_blueprint(
+            blueprint_path(functional_req_path),
+            module=module,
+            skeleton_sigs="\n\n".join(sig_parts)[:cap],
+            tests_block=tests_block[:cap],
+            functional_req=functional_req[:cap // 2],
+            topics=tuple(dict.fromkeys(topics)),
+            deps=self.blueprint_deps)
 
     def generate(self, req: GenerationRequest) -> bool:
         (project_dir, genesis_path, functional_req_path, manifest_path,
@@ -973,6 +1012,18 @@ class StaticSkeletonTask2Generator(Task2Generator):
         if not all_test_pairs:
             self.tel.log("  [skeleton] no test files; cannot proceed.")
             return False
+
+        # P3: crate blueprint — the top-down design the per-block fills
+        # consume slices of. Idempotent; never blocks the run on failure.
+        if (self.blueprint_deps is not None
+                and os.getenv("BLUEPRINT_PHASE", "1") != "0"):
+            try:
+                self._ensure_blueprint(project_dir, module, clusters[0],
+                                       all_test_pairs, functional_req,
+                                       functional_req_path)
+            except Exception as e:
+                self.tel.log(f"  [blueprint] generation failed ({e}) — "
+                             "continuing without a blueprint.")
 
         # === task2a — per-cluster Phase A→D (RESUMABLE). The per-cluster
         # .skeleton-filled/ trees persist, so once this stage is marked done it

@@ -223,6 +223,7 @@ from pipeline_core.application.strip_bake import (
     strip_and_bake_module as _strip_and_bake_module,
 )
 from pipeline_core.application.tasks import cfg_scan as _cfg_scan
+from pipeline_core.application.tasks.blueprint_phase import BlueprintDeps
 from pipeline_core.application.tasks.discover_test_command import (
     discover_test_command as _discover_test_command_impl,
 )
@@ -3382,7 +3383,13 @@ def _new_skeleton_task2_generator() -> StaticSkeletonTask2Generator:
     return StaticSkeletonTask2Generator(
         tel=_GEN_TELEMETRY, cargo=_GEN_CARGO, fill=_GEN_FILL, clusters=_GEN_CLUSTERS,
         gentests=_GEN_GENTESTS, scan=_GEN_SCAN, ws=_GEN_WORKSPACE,
-        cfg=_build_skeleton_config())
+        cfg=_build_skeleton_config(),
+        # P3 blueprint deps — ask late-bound over the module global so the
+        # scripted-model e2e seam (pipeline._ask_raw) intercepts.
+        blueprint_deps=BlueprintDeps(
+            ask=lambda *a, **k: _ask_raw(*a, **k),
+            log=lambda m: _log(m), emit=lambda *a, **k: _emit(*a, **k),
+            model=_TASK2_MODEL))
 
 
 def _crate_entry_point(cargo_toml_path: Path, module_dir_rel: str,

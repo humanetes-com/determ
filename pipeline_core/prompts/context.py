@@ -54,3 +54,6 @@ class PerImplSections:
     # Methods the impl's FROZEN where-bounds make callable (corrected R2/R3,
     # debt #28). "" when no generic param is bounded by an in-scope trait.
     bound_methods: str
+    # The crate blueprint slice (P3) — the model's OWN design sections
+    # relevant to this block. "" when no blueprint exists.
+    blueprint: str = ""

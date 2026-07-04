@@ -98,6 +98,10 @@ def build_per_impl_prompt(
     invariants_block = tag_block("CLUSTER_INVARIANTS", invariants_section)
     trait_block = tag_block("TRAIT_CONTRACT", trait_contract_for(container))
     recurring_block = tag_block("RECURRING_ERRORS", promoted_error_rules(fr_path))
+    blueprint_block = tag_block(
+        "DESIGN_BLUEPRINT", sections.blueprint,
+        prefix="YOUR crate design, written by you before filling began — every\n"
+               "body in this block must agree with it:\n")
     repo_spec_block = tag_block(
         "REPOSITORY_SPECIFICATIONS",
         repo_spec_section(fr_path, file_rel=file_rel, container=container),
@@ -147,7 +151,7 @@ Stubs to fill in this response: {stub_names}
 <RUST_GOTCHAS>
 {gotchas_summary()}
 </RUST_GOTCHAS>
-{repo_spec_block}{retro_block}{siblings_block}{trait_block}{types_block}{bound_methods_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{dispatch_family_section}{related_section}
+{repo_spec_block}{blueprint_block}{retro_block}{siblings_block}{trait_block}{types_block}{bound_methods_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{dispatch_family_section}{related_section}
 <TARGET_IMPL_BLOCK file="{file_rel}">
 ```rust
 {target_render}
