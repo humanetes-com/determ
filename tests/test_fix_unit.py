@@ -99,8 +99,9 @@ def test_fn_unit_splices_then_loop_accepts(tmp_path: Path) -> None:
     checker = _Checker("src/lib.rs", "foo", clean_after=1)
     unit = FnFixUnit(_session(tmp_path), _deps(checker, model, splicer),
                      FnTarget("src/lib.rs", "foo"))
-    changed = unit.run()
-    assert changed == ["src/lib.rs::foo"]
+    out = unit.run()
+    assert out.changed == ("src/lib.rs::foo",)
+    assert out.clean and not out.escalate
     assert splicer.spliced == [("foo", None)]
     assert "THINK " in model.prompts[0] and "<REPO/>" in model.prompts[0]
 
@@ -109,7 +110,8 @@ def test_fn_unit_missing_file_is_noop(tmp_path: Path) -> None:
     unit = FnFixUnit(_session(tmp_path),
                      _deps(_Checker("src/x.rs", "f"), _Model(""), _Splicer()),
                      FnTarget("src/x.rs", "f"))
-    assert unit.run() == []
+    out = unit.run()
+    assert out.changed == () and not out.escalate
 
 
 def test_impl_unit_splices_each_member(tmp_path: Path) -> None:
@@ -123,8 +125,8 @@ def test_impl_unit_splices_each_member(tmp_path: Path) -> None:
     checker = _Checker("src/m.rs", "a", clean_after=1)
     unit = ImplFixUnit(_session(tmp_path), _deps(checker, model, splicer),
                        ImplTarget("src/m.rs", "impl Foo", block))
-    changed = unit.run()
-    assert changed == ["src/m.rs::a", "src/m.rs::b"]
+    out = unit.run()
+    assert out.changed == ("src/m.rs::a", "src/m.rs::b")
     assert "IMPL_BLOCK_SRC" in model.prompts[0]
 
 
@@ -202,6 +204,65 @@ def test_fn_unit_restores_frozen_sig_from_skeleton(tmp_path: Path) -> None:
     unit.attempt("E0276 boom", history=[])
     assert splicer.restored == [("foo", "fn foo()")]
     assert any("restored frozen signature src/lib.rs::foo" in m for m in logs)
+
+
+class _ScriptedChecker:
+    """Probe errors follow `counts` (last value repeats); never clean while >0."""
+
+    def __init__(self, file_rel: str, fn: str, counts: list[int]) -> None:
+        self.file_rel, self.fn, self.counts = file_rel, fn, counts
+        self.calls = 0
+
+    def probe(self, cmd: str, cwd: Path, env: dict[str, str],
+              timeout: int) -> CompileProbe:
+        n = self.counts[min(self.calls, len(self.counts) - 1)]
+        self.calls += 1
+        if n == 0:
+            return CompileProbe(rc=0, rendered="ok")
+        return CompileProbe(rc=101, rendered="E0277 boom",
+                            frontier={(self.file_rel, self.fn): {"t"}},
+                            errors_by_file={self.file_rel: n})
+
+
+def test_fn_unit_identical_error_stall_escalates(tmp_path: Path) -> None:
+    """Stall budget spent with the error count never below its opening value
+    → floor_stalled, not progressed → the escalation verdict fires."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src/lib.rs").write_text("fn foo() { unimplemented!() }\n")
+    checker = _ScriptedChecker("src/lib.rs", "foo", [1])
+    unit = FnFixUnit(_session(tmp_path),
+                     _deps(checker, _Model('<FN name="foo" block="any">\n1\n</FN>'),
+                           _Splicer()),
+                     FnTarget("src/lib.rs", "foo"))
+    out = unit.run()
+    assert out.floor_stalled and not out.progressed and out.escalate
+
+
+def test_fn_unit_progressed_stall_does_not_escalate(tmp_path: Path) -> None:
+    """Errors drop 3→1 then stick: the scope IS productive — no escalation."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src/lib.rs").write_text("fn foo() { unimplemented!() }\n")
+    checker = _ScriptedChecker("src/lib.rs", "foo", [3, 1])
+    unit = FnFixUnit(_session(tmp_path),
+                     _deps(checker, _Model('<FN name="foo" block="any">\n1\n</FN>'),
+                           _Splicer()),
+                     FnTarget("src/lib.rs", "foo"))
+    out = unit.run()
+    assert out.floor_stalled and out.progressed and not out.escalate
+
+
+def test_fn_unit_abort_does_not_escalate(tmp_path: Path) -> None:
+    """fn_not_located aborts the loop — a scope escalation can't help."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src/lib.rs").write_text("fn foo() { unimplemented!() }\n")
+    splicer = _Splicer()
+    splicer.locate_fn = lambda text, name: None  # type: ignore[method-assign]
+    unit = FnFixUnit(_session(tmp_path),
+                     _deps(_ScriptedChecker("src/lib.rs", "foo", [1]),
+                           _Model(""), splicer),
+                     FnTarget("src/lib.rs", "foo"))
+    out = unit.run()
+    assert not out.floor_stalled and not out.escalate
 
 
 def test_fn_unit_no_restore_for_free_fn(tmp_path: Path) -> None:

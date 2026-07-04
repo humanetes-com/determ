@@ -27,7 +27,7 @@ from typing import Any, Protocol
 
 from pipeline_core.application.refine_loop import run_callback_loop
 from pipeline_core.domain.compile_probe import CompileProbe
-from pipeline_core.domain.fix_report import FixReport
+from pipeline_core.domain.fix_report import FixReport, UnitRunOutcome
 from pipeline_core.domain.fix_session import FixSession
 from pipeline_core.domain.fix_target import FixTarget, FnTarget, ImplTarget
 from pipeline_core.domain.llm_output import extract_fn_bodies
@@ -128,7 +128,7 @@ class FixUnit(Protocol):
     def verify(self) -> tuple[bool, str, int]: ...
     def attempt(self, output: str, history: list[dict[str, Any]], *,
                 retro: str = ...) -> FixReport: ...
-    def run(self) -> list[str]: ...
+    def run(self) -> UnitRunOutcome: ...
 
 
 class _BaseFixUnit:
@@ -168,22 +168,30 @@ class _BaseFixUnit:
     def _fixing_desc(self) -> str:  # pragma: no cover - overridden
         return self.target.label()
 
-    def run(self) -> list[str]:
-        """Drive the inner cargo-check loop; return the changed unit-ids."""
+    def run(self) -> UnitRunOutcome:
+        """Drive the inner cargo-check loop; return the changed unit-ids plus
+        the termination verdict (the escalation policy's input)."""
         path = self.session.project_dir / self.target.file_rel
         if not path.exists():
-            return []
+            return UnitRunOutcome()
         self.deps.log(
             f"  [fix loop/{self._kind}] fixing {self._fixing_desc()} "
             "(inner cargo check loop)")
-        run_callback_loop(
+        ok, _out, history = run_callback_loop(
             name=self.target.label(),
             run_check=self.verify,
             do_fix=lambda o, h, *, retro="": self.attempt(o, h, retro=retro).as_record(),
             do_retro=self.deps.do_retro,
             max_stalls=self.deps.per_fn_max_stalls,
         )
-        return list(self._changed)
+        aborted = any(bool(r.get("abort")) for r in history)
+        opening = int(history[0].get("metric", 0)) if history else 0
+        best_post = min((int(r.get("post_fix_metric", opening)) for r in history),
+                        default=opening)
+        return UnitRunOutcome(
+            changed=tuple(self._changed), clean=ok,
+            floor_stalled=not ok and not aborted,
+            progressed=bool(history) and best_post < opening)
 
 
 class FnFixUnit(_BaseFixUnit):

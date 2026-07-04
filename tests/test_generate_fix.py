@@ -13,16 +13,20 @@ from pipeline_core.application.reconstruct.generate_fix import (
     WholeFileFix,
     select_strategy,
 )
+from pipeline_core.domain.compile_probe import CompileProbe
 from pipeline_core.domain.enums import FillUnit, FixStrategy
 from pipeline_core.domain.fix_report import FixKind, FixReport
 from pipeline_core.domain.fix_session import FixSession
+from pipeline_core.domain.models import FnRecord, ImplBlock
 
 
 class _Model:
     def __init__(self, resp: str = "") -> None:
         self.resp = resp
+        self.prompts: list[str] = []
 
     def ask(self, prompt: str) -> str:
+        self.prompts.append(prompt)
         return self.resp
 
 
@@ -67,14 +71,17 @@ class _Frontiers:
     def behavior_frontier(self, output): return dict(self._b[0]), dict(self._b[1])
 
 
-def _deps(frontiers, splicer=None, model=None, whole=None) -> GenerateFixDeps:
+def _deps(frontiers, splicer=None, model=None, whole=None, checker=None,
+          enumerate_fns=None, impl_blocks=None) -> GenerateFixDeps:
     unit = FixUnitDeps(
-        checker=object(), model=model or _Model(), splicer=splicer or _Splicer(),
+        checker=checker or object(), model=model or _Model(),
+        splicer=splicer or _Splicer(),
         prompts=_Prompts(), log=lambda _m: None, do_retro=lambda _o, _h: "",
         thinking_directive="T", err_cap=500, per_fn_max_stalls=2)
     return GenerateFixDeps(
         unit=unit, frontiers=frontiers,
-        enumerate_fns=lambda: [], collect_impl_blocks=lambda: [],
+        enumerate_fns=enumerate_fns or (lambda: []),
+        collect_impl_blocks=(lambda: impl_blocks or []),
         log_overview=lambda _o, _n: None,
         whole_file_fix=whole or (lambda o, h, r: FixReport.changed(
             summary="whole", files_changed_str="x", error_preview="")),
@@ -117,3 +124,59 @@ def test_per_impl_one_shot_fills_tdd_frontier(tmp_path: Path) -> None:
     rep = PerImplFix(_session(tmp_path), d).attempt("test failed", [])
     assert splicer.body_spliced == ["foo"]
     assert rep.summary == "tdd_stub changed=1"
+
+
+# --- splice-unit escalation on identical-error stall (s117 #3) ---------------
+
+
+class _StuckChecker:
+    """Always 1 error on `file_rel` — every unit floor-stalls without progress."""
+
+    def __init__(self, file_rel: str, fn: str) -> None:
+        self.file_rel, self.fn = file_rel, fn
+
+    def probe(self, cmd, cwd, env, timeout) -> CompileProbe:
+        return CompileProbe(rc=101, rendered="E0308 stuck",
+                            frontier={(self.file_rel, self.fn): {"t"}},
+                            errors_by_file={self.file_rel: 1})
+
+
+def _foo_block() -> ImplBlock:
+    return ImplBlock(file="src/lib.rs", container="impl Foo",
+                     members=(FnRecord(file="src/lib.rs", fn_name="foo",
+                                       container="impl Foo"),))
+
+
+def test_per_fn_stall_escalates_to_impl_then_whole_file(tmp_path: Path) -> None:
+    """fn unit stalls on identical errors → retried at the enclosing impl
+    scope; the impl stalls too → ONE whole-file rewrite."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src/lib.rs").write_text("impl Foo { fn foo(){ unimplemented!() } }\n")
+    model = _Model()
+    whole_calls: list[str] = []
+    d = _deps(_Frontiers(compile_fr={("src/lib.rs", "foo"): {"t"}}),
+              model=model, checker=_StuckChecker("src/lib.rs", "foo"),
+              enumerate_fns=lambda: [{"file": "src/lib.rs", "fn_name": "foo",
+                                      "container": "impl Foo"}],
+              impl_blocks=[_foo_block()],
+              whole=lambda o, h, r: (whole_calls.append(o) or FixReport.changed(
+                  summary="w", files_changed_str="x", error_preview="")))
+    PerFnFix(_session(tmp_path), d).attempt("E0308 stuck", [])
+    assert whole_calls == ["E0308 stuck"]
+    # The impl rung actually ran: an impl prompt renders the block source.
+    assert any("BLK" in p for p in model.prompts)
+
+
+def test_per_impl_stall_escalates_to_whole_file(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src/lib.rs").write_text("impl Foo { fn foo(){ unimplemented!() } }\n")
+    whole_calls: list[str] = []
+    d = _deps(_Frontiers(compile_fr={("src/lib.rs", "foo"): {"t"}}),
+              checker=_StuckChecker("src/lib.rs", "foo"),
+              enumerate_fns=lambda: [{"file": "src/lib.rs", "fn_name": "foo",
+                                      "container": "impl Foo"}],
+              impl_blocks=[_foo_block()],
+              whole=lambda o, h, r: (whole_calls.append(o) or FixReport.changed(
+                  summary="w", files_changed_str="x", error_preview="")))
+    PerImplFix(_session(tmp_path), d).attempt("E0308 stuck", [])
+    assert whole_calls == ["E0308 stuck"]

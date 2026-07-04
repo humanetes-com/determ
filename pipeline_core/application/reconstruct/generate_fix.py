@@ -16,6 +16,12 @@ and grouping inline. This module makes the branch a TYPE:
   enums); :func:`run_generate_fix` — the thin driver over
   :func:`run_callback_loop`.
 
+Splice-unit escalation (s117 #3): a unit whose inner loop floor-stalls WITHOUT
+ever improving on its opening error count (`UnitRunOutcome.escalate`) is retried
+at the next-larger scope — fn → enclosing impl block → whole-file rewrite — so
+a defect that lives outside the unit's window (a sibling member, a type in the
+same file) stops burning the whole outer stall budget at the wrong scope.
+
 `pipeline.py` is the composition root: it binds the ports + the resident
 whole-file/overview callables and calls :func:`run_generate_fix`.
 """
@@ -36,6 +42,7 @@ from pipeline_core.domain.enums import FillUnit, FixStrategy
 from pipeline_core.domain.fix_plan import plan_per_fn, plan_per_impl
 from pipeline_core.domain.fix_report import FixReport
 from pipeline_core.domain.fix_session import FixSession
+from pipeline_core.domain.fix_target import FnTarget, ImplTarget
 from pipeline_core.domain.models import FnLocator, ImplBlock
 from pipeline_core.ports.fix_engine import FrontierBuilder
 
@@ -76,6 +83,24 @@ def _err_preview(output: str, cap: int) -> str:
     return output[-cap:] if len(output) > cap else output
 
 
+def _escalate_to_whole_file(
+    session: FixSession, deps: GenerateFixDeps, stalled_files: list[str],
+    history: list[dict[str, Any]], retro: str,
+) -> None:
+    """Last escalation rung: units in `stalled_files` spent their stall budget
+    without ever improving on their opening error count — the defect spans a
+    scope no fn/impl unit can see, so the model gets the whole file(s) once."""
+    probe = deps.unit.checker.probe(
+        session.check_only_cmd, session.project_dir,
+        dict(session.env), session.timeout)
+    if probe.rc == 0:
+        return
+    files = ", ".join(sorted(set(stalled_files)))
+    deps.unit.log("  [fix loop/escalate] identical-error stall at unit scope "
+                  f"({files}) → whole-file rewrite")
+    deps.whole_file_fix(probe.rendered, history, retro)
+
+
 class WholeFileFix:
     """Legacy strategy: the model returns each broken file in full."""
 
@@ -112,9 +137,42 @@ class PerFnFix:
                 container_index=_container_index(recs),
                 writable=self.session.is_writable)
             changed: list[str] = []
+            stalled_fns: list[FnTarget] = []
             for target in plan.free_fns:
-                changed += make_fix_unit(self.session, d.unit, target).run()
-            if plan.deferred:
+                res = make_fix_unit(self.session, d.unit, target).run()
+                changed += res.changed
+                if res.escalate:
+                    stalled_fns.append(target)
+            # Escalation rung 2: a stalled fn retries at its ENCLOSING impl
+            # scope (the model sees every sibling member — the usual home of
+            # the real defect); each block at most once per attempt.
+            stalled_files: list[str] = []
+            if stalled_fns:
+                fn_to_block = {(b.file, m.fn_name): b
+                               for b in d.collect_impl_blocks()
+                               for m in b.members}
+                seen: set[tuple[str, str]] = set()
+                for t in stalled_fns:
+                    block = fn_to_block.get((t.file_rel, t.fn_name))
+                    if block is None or not block.container:
+                        stalled_files.append(t.file_rel)
+                        continue
+                    key = (block.file, block.container)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    d.unit.log(f"  [fix loop/escalate] {t.file_rel}::{t.fn_name} "
+                               "stalled on identical errors → impl "
+                               f"{block.container[:50]}")
+                    impl_target = ImplTarget(block.file, block.container, block)
+                    ires = make_fix_unit(self.session, d.unit, impl_target).run()
+                    changed += ires.changed
+                    if ires.escalate:
+                        stalled_files.append(block.file)
+            if stalled_files:
+                _escalate_to_whole_file(self.session, d, stalled_files,
+                                        history, retro)
+            elif plan.deferred:
                 probe = d.unit.checker.probe(
                     self.session.check_only_cmd, self.session.project_dir,
                     dict(self.session.env), self.session.timeout)
@@ -194,10 +252,22 @@ class PerImplFix:
                 container_index=_container_index(d.enumerate_fns()),
                 writable=self.session.is_writable)
             changed: list[str] = []
+            stalled_files: list[str] = []
             for impl_target in plan.impl_groups:
-                changed += make_fix_unit(self.session, d.unit, impl_target).run()
+                res = make_fix_unit(self.session, d.unit, impl_target).run()
+                changed += res.changed
+                if res.escalate:
+                    stalled_files.append(impl_target.file_rel)
             for fn_target in plan.free_fns:
-                changed += make_fix_unit(self.session, d.unit, fn_target).run()
+                res = make_fix_unit(self.session, d.unit, fn_target).run()
+                changed += res.changed
+                # A free fn here has no enclosing impl by construction
+                # (plan_per_impl grouped every impl member) → file rung.
+                if res.escalate:
+                    stalled_files.append(fn_target.file_rel)
+            if stalled_files:
+                _escalate_to_whole_file(self.session, d, stalled_files,
+                                        history, retro)
             err = _err_preview(output, d.unit.err_cap)
             return FixReport.changed(
                 summary=f"per_impl changed={len(changed)}",

@@ -90,3 +90,24 @@ class FixReport:
         if self.error_sig is not None:
             rec["error_sig"] = self.error_sig
         return rec
+
+
+@dataclass(frozen=True, slots=True)
+class UnitRunOutcome:
+    """How one fix unit's inner loop ended: the spliced unit-ids plus the
+    termination verdict the escalation policy reads (fn → enclosing impl →
+    whole file). `progressed` = the file's error floor dropped below its
+    opening value at least once during the loop."""
+
+    changed: tuple[str, ...] = ()
+    clean: bool = False
+    floor_stalled: bool = False
+    progressed: bool = False
+
+    @property
+    def escalate(self) -> bool:
+        """Identical-error stall: the stall budget was spent without EVER
+        improving on the opening error count — the unit's scope is too small
+        (the real defect lives in a sibling member or elsewhere in the file),
+        so retrying at the same scope cannot converge."""
+        return self.floor_stalled and not self.progressed and not self.clean
