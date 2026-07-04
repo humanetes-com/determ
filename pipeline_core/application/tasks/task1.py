@@ -17,7 +17,9 @@ from typing import Any
 from ...domain.generation import coalesce_gen_tests_siblings
 from ...domain.llm_output import extract_files
 from ...domain.text import smart_truncate, strip_markdown_fences
+from ...io import write
 from ...log import log
+from ...prompts.genesis_seed import GENESIS_SEED
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +179,16 @@ def task1(project_dir: Path, genesis_path: Path, functional_req_path: Path,
     # are untouched; attribution still resolves them by their real paths.
     test_files = coalesce_gen_tests_siblings(test_files)
 
+    existing_genesis = deps.read(genesis_path)
+    genesis_exists = bool(existing_genesis.strip())
+    if genesis_exists:
+        log("  genesis.md exists — will use as-is; only producing functional_requirements.md.")
+    else:
+        # Seed the reconstruction methodology now (deterministic, debt #38) so
+        # every downstream prompt carries it even when TASK 4 never runs.
+        write(genesis_path, GENESIS_SEED)
+        log("  No genesis.md yet — seeded it with the reconstruction methodology.")
+
     # For proc-macro crates with no own tests, extract proc-macro interface
     # (derive macros, helper attributes) from how they're used in the test suite.
     if crate_type == "proc-macro":
@@ -184,13 +196,6 @@ def task1(project_dir: Path, genesis_path: Path, functional_req_path: Path,
                                  test_files, readme_text, project_profile, deps,
                                  crate_name=module_name, project_context=project_context,
                                  api_surface=api_surface)
-
-    existing_genesis = deps.read(genesis_path)
-    genesis_exists = bool(existing_genesis.strip())
-    if genesis_exists:
-        log("  genesis.md exists — will use as-is; only producing functional_requirements.md.")
-    else:
-        log("  No genesis.md yet — will create it alongside functional_requirements.md.")
     total_chars = sum(len(c) for _, c in test_files)
     log(f"  Total test content: {total_chars:,} chars across {len(test_files)} file(s).")
 
@@ -204,9 +209,9 @@ def task1(project_dir: Path, genesis_path: Path, functional_req_path: Path,
 
     if not ok:
         return False
-    existing_genesis = deps.read(genesis_path)
-    if existing_genesis.strip():
+    if genesis_exists:
         log("  functional_requirements.md written (genesis.md unchanged).")
     else:
-        log("  genesis.md and functional_requirements.md written.")
+        log("  functional_requirements.md written; genesis.md seeded with the "
+            "reconstruction methodology.")
     return True

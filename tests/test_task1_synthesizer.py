@@ -151,6 +151,26 @@ def test_chunk_extraction_failure_returns_false(tmp_path: Path) -> None:
     assert ok is False
 
 
+def test_chunk_input_too_long_degrades_not_aborts(tmp_path: Path) -> None:
+    # debt #32: a chunk that overflows ctx even after the controller replan is
+    # SKIPPED (missing from FR, logged) — task1 still succeeds on the rest.
+    from pipeline_core.llm import InputTooLong
+
+    def _ask(p: str) -> str:
+        if "fn one" in p:
+            raise InputTooLong(40172)
+        return _FILE_RESP
+
+    genesis, fr = _paths(tmp_path)
+    fake = FakeAdapter(ask_fn=_ask)
+    ok = _make(StaticTask1Synthesizer, fake, _cfg(single_call_char_limit=10)).synthesize(
+        tmp_path, genesis, fr,
+        test_files=[("a.rs", "fn one(){}"), ("b.rs", "fn two(){}")],
+        readme_text="r")
+    assert ok is True
+    assert "FR_BODY" in fr.read_text()
+
+
 def test_group_merge_failure_returns_false(tmp_path: Path) -> None:
     genesis, fr = _paths(tmp_path)
     fake = FakeAdapter(ask_fn=lambda p: "" if "merging a group" in p else "chunk requirement")
@@ -205,3 +225,38 @@ def test_no_file_markers_raw_fallback(tmp_path: Path) -> None:
         tmp_path, genesis, fr, test_files=[("tests/a.rs", "fn t(){}")], readme_text="r")
     assert ok is True
     assert long_text.strip() in fr.read_text()
+
+
+@pytest.mark.parametrize("cls", [StaticTask1Synthesizer, LLMTask1Synthesizer])
+def test_genesis_seeded_with_methodology_not_placeholder(
+        tmp_path: Path, cls: type[Task1Synthesizer]) -> None:
+    # debt #38: the happy path must leave a real methodology document, never
+    # the "(populated by TASK 4)" placeholder.
+    from pipeline_core.prompts.genesis_seed import GENESIS_SEED
+    genesis, fr = _paths(tmp_path)
+    fake = FakeAdapter()
+    ok = _make(cls, fake, _cfg()).synthesize(
+        tmp_path, genesis, fr,
+        test_files=[("tests/a.rs", "#[test] fn t() { add(1,2); }")],
+        readme_text="readme",
+    )
+    assert ok is True
+    text = genesis.read_text()
+    assert text == GENESIS_SEED
+    assert "populated by TASK 4" not in text
+    assert "reconstruction methodology" in text
+
+
+@pytest.mark.parametrize("cls", [StaticTask1Synthesizer, LLMTask1Synthesizer])
+def test_genesis_existing_content_never_overwritten(
+        tmp_path: Path, cls: type[Task1Synthesizer]) -> None:
+    genesis, fr = _paths(tmp_path)
+    genesis.write_text("# genesis.md\n\ncustom lesson\n")
+    fake = FakeAdapter()
+    ok = _make(cls, fake, _cfg()).synthesize(
+        tmp_path, genesis, fr,
+        test_files=[("tests/a.rs", "#[test] fn t() { add(1,2); }")],
+        readme_text="readme",
+    )
+    assert ok is True
+    assert genesis.read_text() == "# genesis.md\n\ncustom lesson\n"

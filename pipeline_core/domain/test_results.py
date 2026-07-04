@@ -437,6 +437,20 @@ def parse_rustc_compile_errors(build_output: str) -> list[tuple[str, str, int]]:
     return out
 
 
+def compile_gate_reason(cluster_name: str, cargo_output: str) -> str | None:
+    """Refined 'incomplete' reason when a nonzero-rc run reported 0 tests
+    because the lib failed to compile (debt #34): name the real gate — error
+    count + first diagnostic — instead of the opaque "some binary failed to
+    compile or crashed". Returns None when no rustc error is parseable
+    (genuine crash/timeout — keep the generic wording)."""
+    errors = parse_rustc_compile_errors(cargo_output)
+    if not errors:
+        return None
+    msg, file, line = errors[0]
+    return (f"cluster '{cluster_name}': lib failed to compile — "
+            f"{len(errors)} error(s), first: {file}:{line}: {msg}")
+
+
 def rustc_error_signatures(cargo_output: str) -> frozenset[str]:
     """Stable rustc error signatures (`error[E<code>]: <message>`, no file/line),
     regex-free (R7). Equivalent to `re.findall(r'error\\[E\\d+\\]: .+', output)`:

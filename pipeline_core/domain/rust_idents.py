@@ -693,8 +693,13 @@ def use_path_requirement_gaps(
     reqs_text: str, test_files: list[tuple[str, str]],
 ) -> tuple[int, list[str]]:
     """Static TASK-1.5 audit (pure): every `use` symbol path in the test files
-    that is absent from the requirements text. Returns (total_use_paths_found,
-    sorted_gaps). std/core/alloc/super/self/crate prefixes are never gaps."""
+    whose LEAF identifier (last `::` segment, alias-stripped) does not appear as
+    a whole word anywhere in the requirements text. Returns
+    (total_use_paths_found, sorted_gaps). std/core/alloc/super/self/crate
+    prefixes are never gaps. Requirements docs name symbols under module
+    headings (`## Module: \\`cap\\`` + bare fn names), never as full
+    `module::name` paths — so the match unit is the leaf word, with the full
+    path accepted too."""
     SKIP_PREFIXES = ('std::', 'core::', 'alloc::', 'super::', 'self::', 'crate::')
     found: set[str] = set()
     for _rel, content in test_files:
@@ -710,9 +715,19 @@ def use_path_requirement_gaps(
                         found.add(f"{prefix}::{item}")
             else:
                 found.add(raw)
+    req_words = {reqs_text[s:e] for s, e in _word_spans(reqs_text)}
+
+    def _leaf(sym: str) -> str:
+        leaf = sym.rsplit('::', 1)[-1].strip()
+        if ' as ' in leaf:  # brace-group alias: `use m::{Foo as F};`
+            leaf = leaf.split(' as ', 1)[0].strip()
+        return leaf
+
     gaps = [
         sym for sym in sorted(found)
         if not any(sym.startswith(p) for p in SKIP_PREFIXES)
+        and (leaf := _leaf(sym)) not in ('*', 'self')
+        and leaf not in req_words
         and sym not in reqs_text
     ]
     return len(found), gaps

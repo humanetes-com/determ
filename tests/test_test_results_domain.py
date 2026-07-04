@@ -123,3 +123,28 @@ def test_parse_phase_c_line_matches_regex():
         m = pat.match(ln)
         exp = (m.group("test"), m.group("cat"), m.group("fn"), m.group("reason").strip()) if m else None
         assert parse_phase_c_line(ln) == exp, ln
+
+
+from pipeline_core.domain.test_results import compile_gate_reason  # noqa: E402
+
+_E0276_OUT = """   Compiling anyhow v1.0.0
+error[E0276]: impl has stricter requirements than trait
+  --> src/context.rs:193:5
+error[E0599]: no method named `provide_ref`
+  --> src/context.rs:201:9
+error: could not compile `anyhow` (lib)
+"""
+
+
+def test_compile_gate_reason_names_the_gate():
+    # debt #34: 1-error compile gate must not read as a harness crash.
+    reason = compile_gate_reason("nightly", _E0276_OUT)
+    assert reason == ("cluster 'nightly': lib failed to compile — 2 error(s), "
+                      "first: src/context.rs:193: impl has stricter "
+                      "requirements than trait")
+
+
+def test_compile_gate_reason_none_without_diagnostics():
+    # No parseable rustc error (crash/timeout) → keep the generic wording.
+    assert compile_gate_reason("stable", "TIMEOUT: exceeded 600s") is None
+    assert compile_gate_reason("stable", "") is None

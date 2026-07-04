@@ -19,7 +19,9 @@ from typing import Any
 
 from ...domain.test_results import (
     OUTPUT_SEPARATOR,
+    ClusterStatus,
     cluster_failure_is_actionable,
+    compile_gate_reason,
     parse_test_counts,
     validate_task3_output_strict,
 )
@@ -112,6 +114,10 @@ def run_clusters_strict(project_dir: Path, clusters: list[Any],
         status, reason = validate_task3_output_strict(
             pass_n, fail_n, ign_n, expected_n, cluster.name,
         )
+        if (status == ClusterStatus.INCOMPLETE and rc != 0
+                and pass_n + fail_n + ign_n == 0):
+            # debt #34: a 1-error compile gate misread as a harness crash.
+            reason = compile_gate_reason(cluster.name, output) or reason
         log(f"  [task3/{cluster.name}] {status}: {reason} "
             f"(rc={rc}, {dt:.1f}s)")
         per_cluster_results.append({

@@ -2211,11 +2211,6 @@ def _whole_tree_retrospective(
         ask_retrospective=_ask_retrospective, log=_log, fix_err_cap=_FIX_ERR_CAP)
 
 
-# P3: classification step run before each post-stall test-fix iteration.
-# A single LLM call labels each failing test into a small fixed taxonomy so
-# the loop can target the right fn(s) instead of bluntly retrying everything
-# that was filled this pass.
-
 def _check_graceful_stop(context: str) -> None:
     """Exit cleanly when the graceful stop sentinel is set. Called from inside
     long-running loops so `bash continue.sh --graceful` is responsive."""

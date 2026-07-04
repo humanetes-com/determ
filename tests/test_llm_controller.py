@@ -234,6 +234,18 @@ def test_controller_input_too_long_retries():
     assert len(t.calls) == 2
 
 
+def test_controller_input_retry_pads_lower_bound():
+    # debt #32: the server's real_tokens is a LOWER bound ("at least N") —
+    # the replanned request must pad it (N*1.02 + 256) on top of the margin,
+    # or the retry lands ~1 token over ctx forever (anyhow 2026-07-02).
+    t = FakeTransport([InputTooLong(40172), [Delta(content="ok")]])
+    out = _controller().run(t, system=None, prompt="p", model="m", max_tokens=SENTINEL)
+    assert out == "ok"
+    retry_max = t.calls[1]["max_tokens"]
+    assert retry_max is not None
+    assert 40172 + retry_max <= 65536 - 512 - int(40172 * 0.02) - 256
+
+
 def test_controller_no_followup_when_unsupported():
     t = FakeTransport([[Delta(reasoning="r"), Delta(content="")]])
     t.supports_followup = False

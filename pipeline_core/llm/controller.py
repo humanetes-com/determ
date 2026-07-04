@@ -241,11 +241,16 @@ class LLMController:
     @staticmethod
     def _replan_with_input(spec: BudgetSpec, state: BudgetState, real_tokens: int,
                            max_tokens: int, enable_thinking: bool, prev_plan: Plan) -> Plan:
-        """Recompute the budget plan using the server's exact input-token count."""
+        """Recompute the budget plan from the server's reported input-token
+        count. The server reports "at least N" — a LOWER bound, not exact;
+        treating it as exact left the retry ~1 token over ctx on every
+        attempt (debt #32, anyhow 2026-07-02: 25365+40172 = 65537 > 65536).
+        Pad it before capping so the retry actually fits."""
         thinking_reserve = prev_plan.thinking_reserve
         content_cap = prev_plan.content_cap
+        padded_input = int(real_tokens * 1.02) + 256
         if spec.cap_by_ctx:
-            safe = max(512, spec.ctx_len - real_tokens - thinking_reserve - spec.margin)
+            safe = max(512, spec.ctx_len - padded_input - thinking_reserve - spec.margin)
             content_cap = min(content_cap, safe)
         req = (content_cap + thinking_reserve) if spec.send_max_tokens else None
         return Plan(req, real_tokens, content_cap, thinking_reserve)

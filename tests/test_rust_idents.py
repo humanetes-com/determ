@@ -26,6 +26,7 @@ from pipeline_core.domain.rust_idents import (
     is_unsafe_fn,
     mask_identifiers,
     mixed_case_identifiers,
+    use_path_requirement_gaps,
     use_symbol_paths,
 )
 
@@ -302,3 +303,52 @@ def test_is_trait_impl_container():
         assert is_trait_impl_container(c), c
     for c in _NOT_TRAIT_IMPLS:
         assert not is_trait_impl_container(c), c
+
+
+# ---------------------------------------------------------------------------
+# use_path_requirement_gaps — TASK 1.5 leaf-identifier matching (debt #37)
+# ---------------------------------------------------------------------------
+
+_FR_DOC = """# Functional Requirements: hardcrate
+
+## Module: `cap`
+- `wrapping_total(xs: &[u8]) -> u8` sums bytes with wrapping arithmetic.
+
+## Module: `counter`
+- `Counter::new(start: u32)` initializes the counter.
+
+## Root Module
+- `add(a: i32, b: i32) -> i32`
+"""
+
+
+def test_use_path_gaps_leaf_match_no_false_positives():
+    # FR names symbols under module headings, never as `module::name` paths;
+    # the leaf word must be enough (the run-421357 66/66-missing regression).
+    tests = [("t.rs", "use hardcrate::cap::wrapping_total;\n"
+                      "use hardcrate::{Counter, add};\n")]
+    found, gaps = use_path_requirement_gaps(_FR_DOC, tests)
+    assert found == 3
+    assert gaps == []
+
+
+def test_use_path_gaps_reports_genuinely_undocumented():
+    tests = [("t.rs", "use hardcrate::framing::deframe;\n")]
+    _found, gaps = use_path_requirement_gaps(_FR_DOC, tests)
+    assert gaps == ["hardcrate::framing::deframe"]
+
+
+def test_use_path_gaps_skips_std_glob_self_and_alias():
+    tests = [("t.rs", "use std::fmt::Write;\n"
+                      "use hardcrate::sprawl::*;\n"
+                      "use hardcrate::counter::{self, Counter as C};\n")]
+    _found, gaps = use_path_requirement_gaps(_FR_DOC, tests)
+    # glob + self are never gaps; alias resolves to its leaf (`Counter`).
+    assert gaps == []
+
+
+def test_use_path_gaps_full_path_in_reqs_still_accepted():
+    reqs = "The API exposes `hardcrate::framing::deframe` for decoding."
+    tests = [("t.rs", "use hardcrate::framing::deframe;\n")]
+    _found, gaps = use_path_requirement_gaps(reqs, tests)
+    assert gaps == []

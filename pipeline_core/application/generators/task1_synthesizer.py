@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, cast
+from typing import Literal
 
 from ...chunk_cache import chunk_hash as _chunk_hash
 from ...chunk_cache import load_cached_chunk as _load_cached_chunk
@@ -27,6 +27,7 @@ from ...domain.generation import Task1Config
 from ...domain.llm_output import extract_files
 from ...domain.text import smart_truncate, trim_to_line
 from ...io import read, write
+from ...llm import InputTooLong
 from ...log import log as _log
 from ...ports.synthesizer import (
     Progress,
@@ -34,6 +35,7 @@ from ...ports.synthesizer import (
     Requirements,
     Task1LLM,
 )
+from ...prompts.genesis_seed import GENESIS_SEED
 from ...retry import with_retry
 
 
@@ -131,7 +133,7 @@ class StaticTask1Synthesizer(Task1Synthesizer):
                            f"{project_context}\n") if project_context.strip() else ""
 
         if not genesis_exists and not genesis_path.exists():
-            write(genesis_path, "# genesis.md\n\n(populated by TASK 4 after first iteration)\n")
+            write(genesis_path, GENESIS_SEED)
 
         # Budget the tests_section against the actual prompt overhead. The
         # single-call path is taken when tests are expected to fit, but
@@ -404,6 +406,8 @@ Output a plain structured list of the merged requirements. No filler, no code, n
         # No cross-chunk data dependency now that the type manifest is fixed up
         # front, so these can run in parallel — same pattern as task2a cluster
         # concurrency (PIPELINE_PARALLELISM).
+        overflow_chunks: set[int] = set()
+
         def _run_chunk(item: tuple[int, str, Path, str]) -> tuple[int, str | None]:
             i, tests_section, partial_file, h = item
             prompt = self._chunk_prompt(i, total_chunks, readme_text, tests_section,
@@ -418,7 +422,18 @@ Output a plain structured list of the merged requirements. No filler, no code, n
                 return result
 
             progress.start_chunk()
-            partial = with_retry(chunk_attempt)
+            try:
+                partial = with_retry(chunk_attempt)
+            except InputTooLong as exc:
+                # debt #32: a chunk that still overflows ctx after the
+                # controller's replan degrades (skip it, keep the others) —
+                # never aborts the whole pipeline mid-run.
+                progress.finish_chunk(i)
+                overflow_chunks.add(i)
+                _log(f"  WARNING: chunk {i}/{total_chunks} exceeds the model context "
+                     f"even after replan ({exc}) — skipped; its requirements are "
+                     "missing from this iteration's FR.")
+                return i, None
             progress.finish_chunk(i)
             if partial is False:
                 _log(f"  ERROR: failed to extract requirements from chunk {i} after all retries.")
@@ -435,9 +450,10 @@ Output a plain structured list of the merged requirements. No filler, no code, n
                 for i, entry in pool.map(_run_chunk, pending):
                     partial_requirements[i - 1] = entry
 
-        if any(entry is None for entry in partial_requirements):
+        if any(entry is None and (idx + 1) not in overflow_chunks
+               for idx, entry in enumerate(partial_requirements)):
             return False
-        final_requirements: list[str] = [cast(str, e) for e in partial_requirements]
+        final_requirements: list[str] = [e for e in partial_requirements if e is not None]
 
         progress.finish()
 
@@ -489,7 +505,7 @@ Output a plain structured list of the merged requirements. No filler, no code, n
         _log("  Stage 2: final synthesis into output documents...")
 
         if not genesis_exists and not genesis_path.exists():
-            write(genesis_path, "# genesis.md\n\n(populated by TASK 4 after first iteration)\n")
+            write(genesis_path, GENESIS_SEED)
 
         synthesis_prompt = self._synthesis_prompt(
             readme_text, profile_section, existing_genesis, all_for_synthesis,

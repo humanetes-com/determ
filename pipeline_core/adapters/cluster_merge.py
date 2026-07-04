@@ -78,6 +78,14 @@ class ClusterMerger:
 
         files_written = 0
         cfg_gated_fns = 0
+        # Divergence counter matches the atoms the clusters actually gate on
+        # (never a hardcoded crate-specific list — debt #35).
+        gate_atoms: tuple[str, ...] = tuple(sorted({
+            atom
+            for c in cluster_specs.values()
+            for atom in ((getattr(c, "active_cfg", []) or [])
+                         + (getattr(c, "excluded_cfg", []) or []))
+        }))
         extractor_available = self.extractor_bin.exists()
         if not extractor_available:
             self.log("  [skeleton-merge] WARN: extractor binary missing; falling "
@@ -123,13 +131,11 @@ class ClusterMerger:
             files_written += 1
             # Approximate cfg_gated_fns from #[cfg(...)] attributes in the
             # merged output matching our cluster gates (log line only).
-            try:
-                text_out = out_path.read_text(encoding="utf-8")
-                cfg_gated_fns += count_cfg_attrs(
-                    text_out,
-                    ("error_generic_member_access", "anyhow_no_core_error"),
-                )
-            except Exception:
-                pass
+            if gate_atoms:
+                try:
+                    text_out = out_path.read_text(encoding="utf-8")
+                    cfg_gated_fns += count_cfg_attrs(text_out, gate_atoms)
+                except Exception:
+                    pass
 
         return {"files_written": files_written, "cfg_gated_fns": cfg_gated_fns}
