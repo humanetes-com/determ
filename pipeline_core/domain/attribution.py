@@ -18,6 +18,7 @@ class FailureKind(StrEnum):
 
     RUNTIME = "runtime"
     COMPILE = "compile"
+    BEHAVIOR = "behavior"
     CLASSIFIER = "classifier"
     RECENTLY_FILLED = "recently_filled"
     REVERSE_MAP = "reverse_map"

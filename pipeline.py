@@ -2270,9 +2270,12 @@ def _attribute_failures(
     recently_filled: list[FnLocator],
     test_reverse_map: dict[str, set[FnLocator]],
     cluster_name: str,
+    test_texts: "dict[str, str] | None" = None,
 ) -> tuple[Frontier, str]:
     """P2: delegates to _attribution.attribute_failures (logic relocated)."""
-    return _attribution.attribute_failures(_ATTR_DEPS, test_output, src_dir, recently_filled, test_reverse_map, cluster_name)
+    return _attribution.attribute_failures(
+        _ATTR_DEPS, test_output, src_dir, recently_filled, test_reverse_map,
+        cluster_name, test_texts=test_texts)
 
 
 def _run_scoped_tests(

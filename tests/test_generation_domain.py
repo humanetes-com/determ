@@ -273,7 +273,6 @@ from pipeline_core.domain.generation import (  # noqa: E402
     inject_gen_prelude_imports,
     prelude_import_names,
     strip_trailing_legacy_gen_block,
-    testfile_paths,
 )
 
 
@@ -352,9 +351,9 @@ def test_strip_trailing_legacy_gen_block_malformed_kept() -> None:
     assert strip_trailing_legacy_gen_block(empty_mod_name) == empty_mod_name
 
 
-def test_testfile_paths_skips_empty() -> None:
+def test_testfile_paths_unclosed_quote_stops_scan() -> None:
     text = '<TESTFILE path="">\n<TESTFILE path="tests/a.rs">\n<TESTFILE path="'
-    assert testfile_paths(text) == ["tests/a.rs"]
+    assert _testfile_paths(text) == ["tests/a.rs"]
 
 
 def test_has_gen_tests_mod_decl_mod_word_edges() -> None:

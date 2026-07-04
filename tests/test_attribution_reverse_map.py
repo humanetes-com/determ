@@ -12,6 +12,7 @@ from pipeline_core.application.reconstruct.attribution import (
     attribute_failures,
     build_test_reverse_map,
 )
+from pipeline_core.domain.models import FnLocator
 
 
 class _FakeStructure:
@@ -122,3 +123,58 @@ def test_assertion_panic_falls_through_to_reverse_map(
 
     assert ("lib.rs", "cap_limit") in frontier
     assert ("lib.rs", "extra_cap_limit") not in frontier
+
+
+# --- s117 lever: deterministic behavior attribution in the TDD chain ------- #
+
+def test_behavior_path_fires_before_classifier(tmp_path: Path) -> None:
+    """Assertion failure with a clean build and test texts available → the
+    deterministic behavior path attributes it; the LLM classifier is never
+    called (Hard Rule 9a)."""
+    from pipeline_core.domain.rust_fn_headers import locate_fn
+
+    def _classify_boom(**_k: Any) -> dict[str, dict[str, Any]]:
+        raise AssertionError("classifier must not run when behavior attributes")
+
+    recs = [
+        {"file": "src/lib.rs", "fn_name": "cap_limit", "cfg_predicates": [],
+         "container": ""},
+    ]
+    deps = AttributionDeps(
+        structure=_FakeStructure(recs),
+        classify=_classify_boom,
+        locate_fn=locate_fn,
+        run_check_diag=lambda *_a, **_k: (0, "", []),
+        derive_check_only_cmd=lambda c: c,
+        is_gen_tests_file=lambda _f: False,
+        log=lambda _m: None,
+    )
+    test_texts = {
+        "tests/cap.rs": ("#[test]\n"
+                         "fn t_cap() { assert_eq!(cap_limit(999), 255); }\n"),
+    }
+    output = ("running 1 test\ntest t_cap ... FAILED\n\nfailures:\n\n"
+              "---- t_cap stdout ----\n"
+              "assertion `left == right` failed\n")
+    frontier, kind = attribute_failures(
+        deps, output, tmp_path, recently_filled=[],
+        test_reverse_map={}, cluster_name="stable", test_texts=test_texts)
+    assert kind == "behavior"
+    key = FnLocator("src/lib.rs", "cap_limit")
+    assert key in frontier and frontier[key] == {"t_cap"}
+
+
+def test_behavior_path_skipped_without_texts(
+    tmp_path: Path, monkeypatch: Any,
+) -> None:
+    """No test_texts (fix-loop callers unchanged) → chain behaves as before:
+    falls through to the reverse map."""
+    monkeypatch.setenv("PHASE_C_TDD_USE_CLASSIFIER", "0")
+    recs = [{"file": "src/lib.rs", "fn_name": "cap_limit", "cfg_predicates": []}]
+    output = ("running 1 test\ntest t_cap ... FAILED\n\nfailures:\n")
+    frontier, kind = attribute_failures(
+        _deps(recs), output, tmp_path, recently_filled=[],
+        test_reverse_map={"t_cap": {FnLocator("src/lib.rs", "cap_limit")}},
+        cluster_name="stable")
+    assert kind == "reverse_map"
+    assert FnLocator("src/lib.rs", "cap_limit") in frontier

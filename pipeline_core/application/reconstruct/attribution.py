@@ -150,8 +150,7 @@ def behavior_frontier(
 
     Returns ({(file_rel, fn): {test names}}, {test name: (test_rel, test_src)}).
     """
-    failed = failing_test_names(test_output)
-    if not failed:
+    if not failing_test_names(test_output):
         return {}, {}
     texts: dict[str, str] = {}
     for trel in sorted(existing_test_files):
@@ -159,13 +158,26 @@ def behavior_frontier(
         if tp.exists():
             with suppress(Exception):
                 texts[trel] = tp.read_text(encoding="utf-8", errors="replace")
-    if not texts:
+    return behavior_frontier_from_texts(deps, test_output, texts, project_dir)
+
+
+def behavior_frontier_from_texts(
+    deps: AttributionDeps,
+    test_output: str, texts: dict[str, str], fns_root: Path,
+) -> tuple[Frontier, dict[str, tuple[str, str]]]:
+    """Core of :func:`behavior_frontier` over already-loaded test texts
+    ({rel_path: content}) — the phase-c TDD loop holds the cluster's test pairs
+    in memory, so it attributes without re-reading files. `fns_root` is the
+    tree whose fn records are the attribution candidates (the cluster's target
+    tree in phase-c; the project dir in the fix loop)."""
+    failed = failing_test_names(test_output)
+    if not failed or not texts:
         return {}, {}
     index = build_test_name_index(texts)
     by_name: dict[str, list[dict[str, Any]]] = {}
-    for r in deps.structure.enumerate_fns(project_dir) or []:
+    for r in deps.structure.enumerate_fns(fns_root) or []:
         f_rel = r.get("file", "")
-        if f_rel in existing_test_files or deps.is_gen_tests_file(Path(f_rel).name):
+        if f_rel in texts or deps.is_gen_tests_file(Path(f_rel).name):
             continue
         if is_test_fn_record(r):  # inline #[cfg(test)] = oracle, never a target (FR-018)
             continue
@@ -373,18 +385,22 @@ def attribute_failures(
     recently_filled: list[FnLocator],
     test_reverse_map: dict[str, set[FnLocator]],
     cluster_name: str,
+    test_texts: dict[str, str] | None = None,
 ) -> tuple[Frontier, str]:
     """Robust failure-to-fn attribution chain. Returns (frontier, kind). Callers
     pass the result through `_filter_test_targets` (FR-018) — same as the fix
     dispatchers — so a test-oracle fn is never spliced.
     Tries each path until one yields a non-empty frontier:
-    Tries each path until one yields a non-empty frontier:
       1. Runtime panics (unimplemented stubs) — `_extract_tdd_frontier`
       2. Compile errors — `_extract_tdd_compile_frontier`
-      3. LLM classifier — `_classify_phase_c_test_failures` (P4.5)
-      4. Recently-filled fallback — most recent fills are likely culprits
+      3. Behavioral attribution — `behavior_frontier_from_texts` over the
+         caller's test texts (deterministic: failing test body → identifier
+         intersection with fn records; Hard Rule 9a — runs BEFORE the LLM
+         classifier; skipped when the caller has no test texts)
+      4. LLM classifier — `_classify_phase_c_test_failures` (P4.5)
+      5. Recently-filled fallback — most recent fills are likely culprits
          for new assertion failures
-      5. Test-reverse-map fallback — every fn the failing tests could reach
+      6. Test-reverse-map fallback — every fn the failing tests could reach
 
     Empty frontier means all paths exhausted — caller should let the
     stall budget exit the loop. Kind tells the caller which path produced
@@ -411,7 +427,16 @@ def attribute_failures(
     frontier = _strip(extract_tdd_compile_frontier(deps, test_output, src_dir))
     if frontier:
         return AttributionResult(frontier, FailureKind.COMPILE)
-    # 3. LLM classifier — turn off via PHASE_C_TDD_USE_CLASSIFIER=0.
+    # 3. Deterministic behavioral attribution (assertion failures with a clean
+    # build — the s117 stable-51/72 case: no stub panic, no compile error, so
+    # the chain previously fell through to the non-deterministic classifier).
+    if test_texts:
+        frontier, _srcs = behavior_frontier_from_texts(
+            deps, test_output, test_texts, src_dir)
+        frontier = _strip(frontier)
+        if frontier:
+            return AttributionResult(frontier, FailureKind.BEHAVIOR)
+    # 4. LLM classifier — turn off via PHASE_C_TDD_USE_CLASSIFIER=0.
     if os.getenv("PHASE_C_TDD_USE_CLASSIFIER", "1") != "0":
         failing = sorted(parse_failed_tests(test_output))
         if failing:
@@ -433,7 +458,7 @@ def attribute_failures(
             synth = _strip(synth)
             if synth:
                 return AttributionResult(synth, FailureKind.CLASSIFIER)
-    # 4. Recently-filled fallback. If new assertion failures appeared
+    # 5. Recently-filled fallback. If new assertion failures appeared
     # after recent fills, the recent fills are the most likely cause.
     # Queue them in reverse-filled order (newest first).
     if recently_filled:
@@ -445,7 +470,7 @@ def attribute_failures(
             recent_synth = _strip(recent_synth)
             if recent_synth:
                 return AttributionResult(recent_synth, FailureKind.RECENTLY_FILLED)
-    # 5. Test-reverse-map. For each failing test, queue every fn it
+    # 6. Test-reverse-map. For each failing test, queue every fn it
     # could reach according to the static reverse map. Over-attribution
     # is tolerable here — per-fn splice guards reject overwriting
     # non-stub bodies, so already-correct fills aren't clobbered.

@@ -201,11 +201,13 @@ def run_phase_c_tdd(
         best_pass = int(state.best_metric)
         stall = state.stalls
 
-        # Attribute failures via the full chain (panics → compile →
-        # classifier → recently_filled → reverse_map).
+        # Attribute failures via the full chain (panics → compile → behavior →
+        # classifier → recently_filled → reverse_map). The cluster's in-memory
+        # test pairs feed the deterministic behavior path (s117 stable-51/72).
         frontier, kind = deps.attribute_failures(
             output, src_dir, recently_filled,
             test_reverse_map, cluster.name,
+            test_texts=dict(cluster_tests),
         )
         frontier = deps.filter_test_targets(frontier, src_dir)
 
