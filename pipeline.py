@@ -4145,6 +4145,8 @@ _GEN_FIX_LOOP_DEPS = _fix_loop.GenerateFixLoopDeps(
     # late-bind: the e2e harness monkeypatches pipeline._enumerate_fns_via_extractor,
     # so resolve it from the module global at call time (not frozen at construction).
     enumerate_fns_via_extractor=lambda *a, **k: _enumerate_fns_via_extractor(*a, **k),
+    enumerate_types=lambda *a, **k: _enumerate_types_via_extractor(*a, **k),
+    types_section_for_fix=lambda *a, **k: _FIX_CONTEXT.types_section_for_fix(*a, **k),
     extract_tdd_frontier=lambda *a, **k: _extract_tdd_frontier(*a, **k),
     filter_test_targets=_filter_test_targets,
     fix_diag=_fix_diag,

@@ -274,3 +274,57 @@ def test_fn_unit_no_restore_for_free_fn(tmp_path: Path) -> None:
                      FnTarget("src/lib.rs", "foo"))
     unit.attempt("boom", history=[])
     assert splicer.restored == []
+
+
+# --- P2: pull round-trip through the fix unit --------------------------------
+
+
+def test_fn_unit_pull_answered_then_body_spliced(tmp_path: Path) -> None:
+    """First reply is a REQUEST; the answered re-ask returns the body."""
+    from pipeline_core.application.reconstruct.pull_resolver import (
+        PullSources,
+        workspace_file_reader,
+    )
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src/lib.rs").write_text("fn foo() { unimplemented!() }\n")
+    class _SeqModel:
+        def __init__(self, responses: list[str]) -> None:
+            self.responses = list(responses)
+            self.prompts: list[str] = []
+
+        def ask(self, prompt: str) -> str:
+            self.prompts.append(prompt)
+            return (self.responses.pop(0) if len(self.responses) > 1
+                    else self.responses[0])
+
+    model = _SeqModel(['<REQUEST kind="type_def" arg="Buf"/>',
+                       '<FN name="foo" block="any">\n42\n</FN>'])
+    splicer = _Splicer()
+    deps = FixUnitDeps(
+        checker=_Checker("src/lib.rs", "foo", clean_after=1), model=model,
+        splicer=splicer, prompts=_Prompts(), log=lambda _m: None,
+        do_retro=lambda _o, _h: "", thinking_directive="T ", err_cap=2000,
+        per_fn_max_stalls=2,
+        pull_sources=PullSources(
+            read_file=workspace_file_reader(tmp_path),
+            find_tests=lambda n: "",
+            type_def=lambda n: f"struct {n} {{ len: usize }}",
+            full_error=lambda: ""))
+    unit = FnFixUnit(_session(tmp_path), deps, FnTarget("src/lib.rs", "foo"))
+    out = unit.run()
+    assert out.changed == ("src/lib.rs::foo",)
+    assert splicer.spliced == [("foo", None)]
+    assert len(model.prompts) == 2
+    assert "INSTEAD OF GUESSING" in model.prompts[0]       # menu present
+    assert "struct Buf { len: usize }" in model.prompts[1]  # answer delivered
+
+
+def test_fn_unit_no_pull_sources_keeps_plain_ask(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src/lib.rs").write_text("fn foo() { unimplemented!() }\n")
+    model = _Model('<FN name="foo" block="any">\n1\n</FN>')
+    unit = FnFixUnit(_session(tmp_path),
+                     _deps(_Checker("src/lib.rs", "foo"), model, _Splicer()),
+                     FnTarget("src/lib.rs", "foo"))
+    unit.attempt("boom", history=[])
+    assert "INSTEAD OF GUESSING" not in model.prompts[0]

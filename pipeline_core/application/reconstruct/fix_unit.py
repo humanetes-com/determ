@@ -20,11 +20,16 @@ ISP role ports (`ports.fix_engine`) — the unit is constructible with fakes.
 """
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol
 
+from pipeline_core.application.reconstruct.pull_resolver import (
+    PullSources,
+    ask_with_pulls,
+)
 from pipeline_core.application.refine_loop import run_callback_loop
 from pipeline_core.domain.compile_probe import CompileProbe
 from pipeline_core.domain.fix_report import FixReport, UnitRunOutcome
@@ -45,6 +50,7 @@ from pipeline_core.prompts.fix_prompts import (
     build_impl_fix_prompt,
     build_tdd_stub_fill_prompt,
 )
+from pipeline_core.prompts.pull_menu import pull_menu_section
 
 # The per-fn body-fix sig_rule (E0277 unsized-T relaxation) and the per-impl
 # where_rule, verbatim from the originals so the prompts stay byte-identical.
@@ -118,6 +124,12 @@ class FixUnitDeps:
     thinking_directive: str
     err_cap: int
     per_fn_max_stalls: int
+    # P2 pull protocol (None → plain ask, existing constructions unchanged).
+    # `full_error` on the sources is a placeholder — each attempt rebinds it
+    # to that attempt's untruncated cargo output.
+    pull_sources: PullSources | None = None
+    emit: Callable[..., None] | None = None
+    max_pulls: int = 2
 
 
 class FixUnit(Protocol):
@@ -164,6 +176,23 @@ class _BaseFixUnit:
     def _err(self, output: str) -> str:
         cap = self.deps.err_cap
         return output[-cap:] if len(output) > cap else output
+
+    def _ask(self, prompt: str, *, full_error: str) -> str:
+        """The unit's ask seam (P2): bounded pull round-trips when sources
+        are bound and CONTEXT_PULLS is on; plain model ask otherwise.
+        `full_error` is THIS attempt's untruncated check output — the
+        `full_error` pull kind serves it verbatim."""
+        d = self.deps
+        if d.pull_sources is None or os.getenv("CONTEXT_PULLS", "1") == "0":
+            return d.model.ask(prompt)
+        sources = replace(d.pull_sources, full_error=lambda: full_error)
+        return ask_with_pulls(
+            d.model.ask,
+            prompt + pull_menu_section(sources.available_kinds(), d.max_pulls),
+            sources=sources,
+            has_deliverable=lambda r: bool(extract_fn_bodies(r)),
+            log=d.log, emit=d.emit or (lambda *_a, **_k: None),
+            max_pulls=d.max_pulls)
 
     def _fixing_desc(self) -> str:  # pragma: no cover - overridden
         return self.target.label()
@@ -243,7 +272,7 @@ class FnFixUnit(_BaseFixUnit):
             retro_block=_retro_block(retro),
             gotchas_block=self.deps.prompts.gotchas_block(output),
             tests_block=self.deps.prompts.tests_block(frozenset({t.fn_name})))
-        resp = self.deps.model.ask(prompt)
+        resp = self._ask(prompt, full_error=output)
         bodies = extract_fn_bodies(resp)
         blk = next((b for b in bodies if b.get("fn_name") == t.fn_name),
                    bodies[0] if bodies else None)
@@ -306,7 +335,7 @@ class ImplFixUnit(_BaseFixUnit):
             retro_block=_retro_block(retro),
             gotchas_block=self.deps.prompts.gotchas_block(output),
             tests_block=self.deps.prompts.tests_block(t.member_names()))
-        resp = self.deps.model.ask(prompt)
+        resp = self._ask(prompt, full_error=output)
         spliced = 0
         for fb in extract_fn_bodies(resp):
             nm = fb.get("fn_name")

@@ -42,6 +42,10 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Protocol
 
+from pipeline_core.application.reconstruct.pull_resolver import (
+    PullSources,
+    workspace_file_reader,
+)
 from pipeline_core.domain.fix_report import FixReport
 from pipeline_core.domain.refine import FloorStall
 
@@ -260,6 +264,9 @@ class GenerateFixLoopDeps:
     is_compiler_output_line: Any
     run_generate_fix: Callable[..., tuple[bool, str]]
     write: Any
+    # P2 pull protocol (optional — None keeps the plain-ask behavior):
+    enumerate_types: Any = None          # src_dir -> list[TypeRecord] | None
+    types_section_for_fix: Any = None    # FixContextAssembler.types_section_for_fix
 
 
 def generate_fix_loop(
@@ -523,11 +530,28 @@ def generate_fix_loop(
         model=model, fr_path=fr_path,
         existing_test_files=frozenset(existing_test_files),
         allowed_dir_prefix=allowed_dir_prefix)
+    # P2 pull sources for the fix units — all post-strip-legal (HR 11):
+    # the reconstruction tree, the crate's tests, the enumerated type
+    # records, and (rebound per attempt) the full check output.
+    def _pull_type_def(name: str) -> str:
+        if deps.enumerate_types is None or deps.types_section_for_fix is None:
+            return ""
+        return str(deps.types_section_for_fix(
+            name, "", "", "", "", deps.enumerate_types(project_dir) or []))
+
+    _pull_sources = PullSources(
+        read_file=workspace_file_reader(project_dir),
+        find_tests=lambda name: _tests_for_names({name}),
+        type_def=_pull_type_def,
+        full_error=lambda: "",   # rebound per attempt by _BaseFixUnit._ask
+    )
     _fix_unit_deps = deps.FixUnitDeps(
         checker=_fix_checker, model=_fix_model, splicer=_fix_splicer,
         prompts=_fix_prompts, log=deps.log, do_retro=_do_retro,
         thinking_directive=deps.FIX_THINKING_DIRECTIVE, err_cap=deps.FIX_ERR_CAP,
-        per_fn_max_stalls=int(os.getenv("FIX_LOOP_PER_FN_MAX_STALLS", "2")))
+        per_fn_max_stalls=int(os.getenv("FIX_LOOP_PER_FN_MAX_STALLS", "2")),
+        pull_sources=_pull_sources, emit=deps.emit,
+        max_pulls=int(os.getenv("CONTEXT_PULLS_MAX", "2")))
 
     _gen_fix_deps = deps.GenerateFixDeps(
         unit=_fix_unit_deps,
