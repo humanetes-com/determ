@@ -93,3 +93,27 @@ def test_tdd_stub_fill_prompt_exact() -> None:
         '<FN name="foo" block="any">\n...body...\n</FN>\n'
         "Output nothing else."
     )
+
+
+def test_build_maximal_impl_prompt_carries_everything() -> None:
+    from pipeline_core.prompts.fix_prompts import build_maximal_impl_prompt
+    p = build_maximal_impl_prompt(
+        file_rel="src/ensure.rs",
+        container="impl Buf\nwhere\n    T: ?Sized,",
+        stub_names=["write_str", "as_str"],
+        file_text="struct Buf; /*whole file*/",
+        tests_block="#[test] fn t(){}",
+        errs="error[E0133]: unsafe",
+        notes="I tried X; wrong.")
+    assert "/*whole file*/" in p and "#[test] fn t(){}" in p
+    assert "error[E0133]" in p and "I tried X" in p
+    assert "write_str, as_str" in p
+    assert '<FN name="FUNCTION_NAME" block="impl Buf">' in p
+
+
+def test_build_maximal_impl_prompt_omits_empty_sections() -> None:
+    from pipeline_core.prompts.fix_prompts import build_maximal_impl_prompt
+    p = build_maximal_impl_prompt(
+        file_rel="a.rs", container="impl A", stub_names=["f"],
+        file_text="x", tests_block="", errs="e", notes=" ")
+    assert "Tests that exercise" not in p and "Notes from earlier" not in p

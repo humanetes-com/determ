@@ -204,3 +204,44 @@ def test_all_target_not_stub_refusals_count_as_complete(monkeypatch, tmp_path):
     assert res["impls_failed"] == 0 and res["impls_filled"] == 0
     assert res["attempts"] == 1
     assert (ws / "src" / "lib.rs").read_text() == IMPL_LIB_FILLED
+
+
+# --- P6: maximal last-resort attempt (budgets off) ---------------------------
+
+
+def test_maximal_last_resort_rescues_exhausted_block(monkeypatch, tmp_path):
+    """Budgeted loop dies (identical-error stop), then the ONE maximal
+    attempt — whole file + tests + full error — fills the block."""
+    ws = _setup(monkeypatch, tmp_path)
+    _install_model(monkeypatch, [RESPONSE_BOTH])
+    red = (101, "error: x", [diag("src/lib.rs", code="E0308")])
+    install_scripted_cargo(
+        monkeypatch, check_diag=[red, red, (0, "", [])])
+    res = _run(ws)
+    text = (ws / "src" / "lib.rs").read_text()
+    assert res["impls_filled"] == 1 and res["fns_filled"] == 2
+    assert res["impls_failed"] == 0
+    assert res["attempts"] == 2            # maximal is not a loop attempt
+    assert "self.tag" in text and "unimplemented!()" not in text
+
+
+def test_maximal_skipped_when_over_char_cap(monkeypatch, tmp_path):
+    ws = _setup(monkeypatch, tmp_path)
+    monkeypatch.setenv("PHASE_C_MAXIMAL_CHAR_CAP", "10")
+    _install_model(monkeypatch, [RESPONSE_BOTH])
+    install_scripted_cargo(
+        monkeypatch,
+        check_diag=(101, "error: x", [diag("src/lib.rs", code="E0308")]))
+    res = _run(ws)
+    assert res["impls_failed"] == 1
+    assert (ws / "src" / "lib.rs").read_text() == IMPL_LIB   # reverted
+
+
+def test_maximal_disabled_by_env(monkeypatch, tmp_path):
+    ws = _setup(monkeypatch, tmp_path)
+    monkeypatch.setenv("PHASE_C_MAXIMAL_LAST_RESORT", "0")
+    _install_model(monkeypatch, [RESPONSE_BOTH])
+    red = (101, "error: x", [diag("src/lib.rs", code="E0308")])
+    install_scripted_cargo(monkeypatch, check_diag=[red, red, (0, "", [])])
+    res = _run(ws)
+    assert res["impls_failed"] == 1        # green 3rd check never reached

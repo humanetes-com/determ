@@ -28,6 +28,7 @@ from pipeline_core.domain.models import (
 from pipeline_core.domain.refine import FloorStall
 from pipeline_core.domain.rust_idents import canon_container, is_trait_impl_container
 from pipeline_core.prompts.context import PerImplSections
+from pipeline_core.prompts.fix_prompts import build_maximal_impl_prompt
 
 
 @dataclass(frozen=True, slots=True)
@@ -388,9 +389,7 @@ def fill_impl_blocks(
         })
 
         def _attempt_impl_fill(fix_attempt: int) -> FixOutcome:
-            nonlocal attempts_total, fns_filled_total, impls_filled, \
-                last_error_excerpt, last_response, members_filled_this_block, \
-                block_already_complete
+            nonlocal attempts_total, last_response
             attempts_total += 1
             # Slice 8a: TYPES_IN_SCOPE re-selected each attempt from the
             # member sigs + impl header + where clause + the current error
@@ -425,6 +424,14 @@ def fill_impl_blocks(
                 _log(f"  [phase-c/impl] {block_id}: empty/no FN blocks "
                      f"(attempt {fix_attempt}).")
                 return FixOutcome("stop")
+            return _splice_and_verify(parsed, fix_attempt)
+
+        def _splice_and_verify(parsed: list[dict[str, Any]],
+                               fix_attempt: int) -> FixOutcome:
+            """Route → splice → cargo-verify one parsed reply. Shared by the
+            budgeted attempts and the P6 maximal last-resort attempt."""
+            nonlocal fns_filled_total, impls_filled, last_error_excerpt, \
+                members_filled_this_block, block_already_complete
             # Hold the global splice+cargo lock while we mutate and check.
             with _splice_check_lock:
                 # Splice each parsed body into the impl indicated by its
@@ -606,6 +613,50 @@ def fill_impl_blocks(
             on_repeated=_on_impl_repeated,
             check_stop=_check_graceful_stop,
         )
+        # P6: maximal last-resort — ONE attempt with budgets OFF before the
+        # block is declared failed: the WHOLE current file, every referencing
+        # test verbatim, and the full focused error. A defect outside the
+        # budgeted window (sibling member, type elsewhere in the file) is
+        # invisible to the normal prompt; cost is one LLM call on an
+        # already-failed block.
+        if (members_filled_this_block == 0 and not block_already_complete
+                and os.getenv("PHASE_C_MAXIMAL_LAST_RESORT", "1") != "0"):
+            _max_cap = int(os.getenv("PHASE_C_MAXIMAL_CHAR_CAP", "120000"))
+            _cur_text = file_path.read_text(encoding="utf-8", errors="replace")
+            _max_tests: list[tuple[str, str]] = []
+            for _fn in [m.fn_name for m in block.stub_members]:
+                for _pth, _txt in _find_tests_referencing_fn(
+                        tests_dir_files, _fn, max_blocks=4):
+                    if not any(p == _pth for p, _ in _max_tests):
+                        _max_tests.append((_pth, _txt))
+            _tests_text = "\n\n".join(
+                f"// {p}\n{t}" for p, t in _max_tests)
+            _max_prompt = build_maximal_impl_prompt(
+                file_rel=block.file, container=block.container,
+                stub_names=[m.fn_name for m in block.stub_members],
+                file_text=_cur_text, tests_block=_tests_text,
+                errs=last_error_excerpt, notes=notes_section)
+            if len(_max_prompt) > _max_cap:
+                _log(f"  [phase-c/impl] {block_id}: maximal last-resort "
+                     f"skipped ({len(_max_prompt)} chars > cap {_max_cap}).")
+            else:
+                _log(f"  [phase-c/impl] {block_id}: maximal last-resort "
+                     f"attempt (budgets off, {len(_max_prompt)} chars).")
+                _emit("phase_c.impl.fill.maximal", data={
+                    "cluster": cluster_name, "file": block.file,
+                    "container": block.container,
+                    "prompt_chars": len(_max_prompt)})
+                try:
+                    _max_parsed = extract_fn_bodies(
+                        ask(_max_prompt, model=_TASK2_MODEL))
+                    if _max_parsed:
+                        _splice_and_verify(_max_parsed, fix_attempt + 1)
+                    else:
+                        _log(f"  [phase-c/impl] {block_id}: maximal attempt "
+                             "returned no FN blocks.")
+                except Exception as _me:
+                    _log(f"  [phase-c/impl] {block_id}: maximal attempt "
+                         f"error: {_me}")
         if members_filled_this_block == 0 and not block_already_complete:
             impls_failed += 1
             errors.append(f"{block.file}::{block.container}: "

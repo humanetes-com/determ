@@ -88,6 +88,46 @@ signature line, no outer braces). Use the function name verbatim:
 Output nothing else."""
 
 
+def build_maximal_impl_prompt(
+    *,
+    file_rel: str,
+    container: str,
+    stub_names: list[str],
+    file_text: str,
+    tests_block: str,
+    errs: str,
+    notes: str,
+) -> str:
+    """P6 last resort — budgets OFF. After the budgeted per-impl loop
+    exhausts, the model gets ONE attempt with the WHOLE current file, every
+    referencing test verbatim, and the full focused error (a defect outside
+    the block's window is invisible to the budgeted prompt)."""
+    header = container.splitlines()[0] if container else "impl"
+    names = ", ".join(stub_names)
+    tests_part = (f"\nTests that exercise these functions (make them pass):\n"
+                  f"{tests_block}\n" if tests_block.strip() else "")
+    notes_part = (f"\nNotes from earlier attempts:\n{notes}\n"
+                  if notes.strip() else "")
+    return f"""Previous attempts to implement functions in this Rust file failed.
+You now see the ENTIRE current file. Implement the still-unimplemented
+function(s) {names} of `{header}` so the file compiles and the tests pass.
+Keep every signature EXACTLY as written; change bodies only.
+File: {file_rel}
+```rust
+{file_text}
+```
+{tests_part}Compiler errors from the last attempt:
+```
+{errs}
+```
+{notes_part}For EACH function you implement, return one block (body statements only — no
+fn signature line, no outer braces). Use the function name verbatim:
+<FN name="FUNCTION_NAME" block="{header}">
+...body...
+</FN>
+Output nothing else."""
+
+
 def build_behavior_fix_prompt(
     *,
     thinking_directive: str,
