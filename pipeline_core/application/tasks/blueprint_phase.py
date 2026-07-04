@@ -15,6 +15,7 @@ from pipeline_core.domain.blueprint import (
     missing_topics,
     parse_blueprint,
 )
+from pipeline_core.domain.rust_macros import macro_definitions
 from pipeline_core.prompts.blueprint import build_blueprint_prompt
 
 
@@ -65,6 +66,21 @@ def ensure_blueprint(
         except Exception as e:
             deps.log(f"  [blueprint] family enumeration failed ({e}) — "
                      "file topics only.")
+
+    # Every `macro_rules!` is a REQUIRED topic too — macro expansion
+    # strategies are exactly the schemes per-fn fills invent inconsistently
+    # (the `ensure!` operand-rendering gap).
+    if skeleton_dir is not None:
+        macro_topics: list[str] = []
+        for f in sorted(skeleton_dir.rglob("*.rs")):
+            try:
+                text = f.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            macro_topics += [md.name for md in macro_definitions(text)
+                             if md.name]
+        if macro_topics:
+            topics = tuple(dict.fromkeys([*topics, *macro_topics]))
 
     missing: tuple[str, ...] = ()
     bp = Blueprint()

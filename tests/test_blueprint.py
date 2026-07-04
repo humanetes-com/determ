@@ -144,3 +144,26 @@ def test_ensure_blueprint_adds_family_topics(tmp_path: Path) -> None:
         skeleton_dir=tmp_path)
     assert not missing_topics(bp, frozenset({"__dispatch_ensure"}))
     assert any("__dispatch_ensure" in m for m in logs)   # gap named on retry
+
+
+def test_ensure_blueprint_adds_macro_topics(tmp_path: Path) -> None:
+    skel = tmp_path / "skel"
+    (skel / "src").mkdir(parents=True)
+    (skel / "src/lib.rs").write_text(
+        "macro_rules! ensure { ($e:expr) => { ... }; }\nfn a() {}\n")
+    path = tmp_path / "blueprint_x.md"
+    logs: list[str] = []
+    with_macro = _DOC   # has "## ensure macro" heading → topic satisfied
+    bp = ensure_blueprint(
+        path, module="x", skeleton_sigs="", tests_block="",
+        functional_req="", topics=("error", "ptr"),
+        deps=_deps([with_macro], logs), skeleton_dir=skel)
+    assert not missing_topics(bp, frozenset({"ensure"}))
+    # a doc WITHOUT the macro section leaves the gap named
+    path2 = tmp_path / "blueprint_y.md"
+    no_macro = "## Overview\np\n## error\ns\n## ptr\nq\n"
+    ensure_blueprint(
+        path2, module="y", skeleton_sigs="", tests_block="",
+        functional_req="", topics=("error", "ptr"),
+        deps=_deps([no_macro], logs), skeleton_dir=skel)
+    assert any("ensure" in m and "missing" in m for m in logs)
