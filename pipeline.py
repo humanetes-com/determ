@@ -7,7 +7,6 @@ Usage:
 """
 
 import dataclasses
-import hashlib
 import importlib
 import json
 import os
@@ -19,6 +18,7 @@ from collections.abc import Callable
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from uuid import uuid4 as _uuid4
 
 import model_interact as _mi
@@ -118,6 +118,7 @@ from pipeline_core.adapters.model_notes_store import (
 from pipeline_core.adapters.mutation import MutationTester
 from pipeline_core.adapters.phase_c_log import write_phase_c_test_fix_log as _write_phase_c_test_fix_log
 from pipeline_core.adapters.progress import ChunkProgress
+from pipeline_core.adapters.run_banner import banner_lines as _banner_lines
 from pipeline_core.adapters.run_registry import FileRunRegistry, RunRegistryEntry
 from pipeline_core.adapters.structure import CliStructureReader as _CliStructureReader
 from pipeline_core.adapters.structure import fn_name_counts as _fn_name_counts
@@ -285,7 +286,6 @@ from pipeline_core.composition import Ports as _Ports
 from pipeline_core.composition import ReconstructRoles as _ReconstructRoles
 from pipeline_core.composition import build_app as _build_app
 from pipeline_core.domain import cfg as _cfg
-from pipeline_core.domain import model_report as _model_report
 from pipeline_core.domain import test_count as _tc
 from pipeline_core.domain.cargo_toml import cargo_default_features as _domain_cargo_default_features
 from pipeline_core.domain.cargo_toml import cargo_entry_point_paths as _domain_cargo_entry_point_paths
@@ -1058,24 +1058,10 @@ def init_log(root: Path, nolog: bool = False, progress_mode: bool = False):
     if not nolog:
         _RUN.log_path = root / LOG_NAME
     Path(_GUARD_LOG).parent.mkdir(parents=True, exist_ok=True)
-    _log(f"\n{'=' * 60}")
-    _log(f"{'=' * 60}")
-    _py_hash = hashlib.md5(Path(__file__).read_bytes()).hexdigest()[:8]
-    _git_hash = ""
-    try:
-        import subprocess as _sp
-        _git_hash = " git=" + _sp.check_output(
-            ["git", "rev-parse", "--short", "HEAD"],
-            cwd=Path(__file__).parent, stderr=_sp.DEVNULL, text=True
-        ).strip()
-    except Exception:
-        pass
     _RUN.run_started_iso = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S")
-    _log(f"  PIPELINE STARTED — {datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S')} UTC  pipeline.py={_py_hash}{_git_hash}  run_id={_RUN_ID}")
-    _log(f"  CMD: {sys.executable} {' '.join(sys.argv)}")
-    _log(f"  PIPELINE_PARALLELISM={_pipeline_parallelism()}")
-    _log(f"{'=' * 60}")
-    _log(f"{'=' * 60}")
+    for line in _banner_lines(Path(__file__), _RUN_ID, sys.argv,
+                              _pipeline_parallelism()):
+        _log(line)
     _register_run(root)
     _emit("parallelism.config", data={"parallelism": _pipeline_parallelism()})
 
@@ -2599,37 +2585,14 @@ def _build_phase_c_engine(*, structure: "_structure_port.StructureReader | None"
 
 
 def _task2_fill_fns_one_by_one(
-    project_dir: Path,
-    target_src_dir: Path,
-    tests_dir_files: list[Path],
-    module_name: str,
-    cluster_name: str,
-    cluster: "BuildCluster | None" = None,
-    check_cmd: str = "cargo check",
-    cluster_env: dict | None = None,
-    max_passes: int = 3,
-    leaf_name_counts: dict[str, int] | None = None,
-    fr_path: Path | None = None,
-    tdd_frontier_keys: "set[FnLocator] | None" = None,
-    skip_end_pass_test: bool = False,
-    tdd_frontier_tests: "Frontier | None" = None,
-    tdd_test_cmd: str | None = None,
+    *args: Any,
     structure: "_structure_port.StructureReader | None" = None,
+    **kwargs: Any,
 ) -> dict:
-    """Phase C — the per-cluster fill engine. Thin composition-root shim over
-    `application.reconstruct.phase_c_engine.PhaseCFillEngine` (P2/R3.3): for each
-    pass, scan stubs → leaf-first priority levels → worker pool (each worker
-    drives `FillOneFn`) → per-pass cargo test + test-fix loop → pass-level
-    floor-stall. `structure` is the P1 test-injection seam (fake StructureReader).
-    Returns {'fns_filled','bytes_filled','attempts','errors',
-    'remaining','impls_filled','impls_failed'}."""
-    return _build_phase_c_engine(structure=structure).run(
-        project_dir, target_src_dir, tests_dir_files, module_name, cluster_name,
-        cluster=cluster, check_cmd=check_cmd, cluster_env=cluster_env,
-        max_passes=max_passes, leaf_name_counts=leaf_name_counts, fr_path=fr_path,
-        tdd_frontier_keys=tdd_frontier_keys, skip_end_pass_test=skip_end_pass_test,
-        tdd_frontier_tests=tdd_frontier_tests, tdd_test_cmd=tdd_test_cmd,
-    )
+    """Phase C per-cluster fill engine shim → `PhaseCFillEngine.run` (the typed
+    signature + pass/worker orchestration live there); `structure` is the P1
+    test-injection seam (fake StructureReader)."""
+    return _build_phase_c_engine(structure=structure).run(*args, **kwargs)
 
 
 def _task2_fill_groups(skeleton_dir, target_src_dir, groups, project_dir, **kwargs):
@@ -3064,28 +3027,8 @@ def _commit_and_mark(
     detail: str = "",
     source_hash: "str | None" = None,
 ) -> None:
-    """Atomic transition: COMMIT the workspace, optionally TAG, THEN mark
-    the phase done in pipeline_state.md.
-
-    This ordering is the persistence fix for the original bug — the
-    legacy pattern was `do_work → _mark_phase("done") → git_commit(...)`,
-    which leaks irrecoverably when the process dies between the mark and
-    the commit: the next run sees `state=done`, skips re-running the
-    phase, and the workspace mutation is never preserved in git. Reverse
-    the order: commit first, then mark. Death between commit and mark is
-    benign — the next run re-runs the (idempotent) phase, the second
-    `git_commit` is a no-op because the tree is already clean, and the
-    `_mark_phase` finally records done.
-
-    `commit_message` is passed verbatim to `git_commit`. If the working
-    tree has no changes the commit silently no-ops (already-clean case);
-    we still proceed to tag + mark, which preserves the "resume" case
-    where a prior run already committed.
-
-    Returns nothing — failures are logged inside git_commit/git_tag.
-    """
-    # C-finale: logic relocated to adapters.commit_gate.commit_and_mark; shim
-    # binds the git/state primitives (which read the live _RUN.git_managed).
+    """Commit-then-mark shim → adapters.commit_gate.commit_and_mark (which
+    carries the ordering rationale); binds the live git/state primitives."""
     _commit_and_mark_impl(
         project_dir, phase_key, status, commit_message=commit_message, tag=tag,
         detail=detail, source_hash=source_hash,
@@ -4152,32 +4095,8 @@ def load_original_structure(project_dir: Path, module_name: str) -> list[str]:
 
 
 
-def cmd_best_models(vram_gb: float = 32.0) -> None:
-    """Print best coding models (Ollama + HuggingFace) annotated for a VRAM budget.
-
-    Composition root: live catalog reads (`adapters.model_catalog`) + pure
-    ranking/rendering (`domain.model_report`)."""
-    ollama = _model_report.annotate_installed(
-        _model_report.build_ollama_rows(vram_gb),
-        _model_catalog.ollama_installed_bases())
-    print(_model_report.format_model_table(
-        ollama, f"\u2500\u2500 Ollama  (ollama pull <name>)  |  VRAM budget: {vram_gb:.0f} GB"))
-    print("  Benchmark scores: https://livecodebench.github.io/leaderboard.html")
-
-    try:
-        import huggingface_hub  # noqa: F401  (capability probe; the read is in the adapter)
-    except ImportError:
-        print("\nERROR: huggingface_hub not installed \u2014 skipping HF section.  Run: pip install huggingface_hub")
-        print(_model_report.LEGEND)
-        return
-
-    print("\nFetching HuggingFace Hub top models \u2026")
-    hf = _model_catalog.hf_top_models(vram_gb)
-    deduped = _model_report.dedup_hf_rows(_model_report.rank_hf_rows(hf))
-    print(_model_report.format_model_table(
-        deduped[:30], f"\u2500\u2500 HuggingFace  (HF_MODEL=<id>)  |  VRAM budget: {vram_gb:.0f} GB"))
-    print("  Benchmark scores: https://huggingface.co/spaces/bigcode/bigcodebench-leaderboard")
-    print(_model_report.LEGEND)
+# --best-models-list body relocated to adapters.model_catalog.print_best_models.
+cmd_best_models = _model_catalog.print_best_models
 
 
 # P6: per-file generation constraints reader (config TOML I/O) — focused adapter,

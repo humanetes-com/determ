@@ -93,3 +93,62 @@ def test_retro_fast_path_parks_without_llm_call() -> None:
     assert out["signal"] == "frozen_bound_mismatch"
     assert "core::error::Error" in out["guidance"]
     assert calls == []  # structural — no LLM call burned
+
+
+# --- edge branches (coverage debt, s119 handover: 13 missed lines) -----------
+
+
+def test_double_colon_paths_never_split_bound_entries() -> None:
+    """`::` in paths (both scan directions) must not be taken as the bound
+    colon; `dyn ` prefixes are stripped from bound paths."""
+    got = frozen_bounds(
+        "fn f<T: std::fmt::Debug + dyn my::Trait>(t: T) -> T", "")
+    assert got == {"T": ("std::fmt::Debug", "my::Trait")}
+
+
+def test_where_entry_without_colon_is_skipped() -> None:
+    assert frozen_bounds("fn f<T>(t: T) where T", "") == {}
+
+
+def test_paren_close_inside_generics_list_walk() -> None:
+    """`(...)` nesting inside the `<...>` list (fn-pointer bound) keeps depth."""
+    got = frozen_bounds("fn f<F: Fn(u8) -> u8, T: Clone>(f: F, t: T)", "")
+    assert got == {"F": ("Fn(u8) -> u8",), "T": ("Clone",)}
+
+
+def test_associated_type_where_entry_is_skipped_not_missplit() -> None:
+    """`Self::Item: Clone` in a where clause — the `::` is walked over (not
+    taken as the bound colon) and the non-identifier param is then skipped."""
+    got = frozen_bounds("fn f<T: Iterator>(t: T) where T::Item: Clone", "")
+    assert got == {"T": ("Iterator",)}
+
+
+def test_split_first_bound_colon_degenerate_colon_runs() -> None:
+    """Path-only text (no bound colon) → None; a `:::` run (colon whose
+    previous char is a colon after the `::` skip) is also stepped over."""
+    from pipeline_core.domain.bound_mismatch import _split_first_bound_colon
+    assert _split_first_bound_colon("std::fmt::Debug") is None
+    assert _split_first_bound_colon("a:::b") is None
+
+
+def test_unclosed_generics_list_yields_nothing() -> None:
+    assert frozen_bounds("fn f<T: Clone", "") == {}
+
+
+def test_lifetime_and_const_generic_entries_are_skipped() -> None:
+    got = frozen_bounds("fn f<'a, const N: usize, T: Copy>(t: &'a T)", "")
+    assert got == {"T": ("Copy",)}
+
+
+def test_unsatisfied_lines_missing_marker_or_backtick_or_colon() -> None:
+    err = ("error[E0277]: something is not satisfied\n"                # no marker
+           "error[E0277]: the trait bound `E: core::error::Error\n"    # no close `
+           "error[E0277]: the trait bound `NoColonHere` is not satisfied\n")
+    assert unsatisfied_trait_bounds(err) == []
+
+
+def test_detect_skips_params_without_frozen_bounds() -> None:
+    """E0277 on `U` (unconstrained) with `T` frozen: not a mismatch."""
+    err = "error[E0277]: the trait bound `U: Display` is not satisfied\n"
+    assert detect_frozen_bound_mismatch(
+        "fn f<T: Clone, U>(t: T, u: U)", "", err) is None

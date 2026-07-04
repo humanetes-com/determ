@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from pipeline_core.domain import model_report as _report
 from pipeline_core.domain.model_report import (
     ModelRow,
     extract_params_b,
@@ -59,3 +60,29 @@ def hf_top_models(vram_gb: float, limit: int = 1000) -> list[ModelRow]:
             downloads=m.downloads or 0, likes=m.likes or 0,
         ))
     return rows
+
+
+def print_best_models(vram_gb: float = 32.0) -> None:
+    """Print best coding models (Ollama + HuggingFace) annotated for a VRAM
+    budget — the `--best-models-list` command (catalog reads + domain
+    ranking/rendering + stdout)."""
+    ollama = _report.annotate_installed(
+        _report.build_ollama_rows(vram_gb), ollama_installed_bases())
+    print(_report.format_model_table(
+        ollama, f"── Ollama  (ollama pull <name>)  |  VRAM budget: {vram_gb:.0f} GB"))
+    print("  Benchmark scores: https://livecodebench.github.io/leaderboard.html")
+
+    try:
+        import huggingface_hub  # noqa: F401  (capability probe; the read is below)
+    except ImportError:
+        print("\nERROR: huggingface_hub not installed — skipping HF section.  Run: pip install huggingface_hub")
+        print(_report.LEGEND)
+        return
+
+    print("\nFetching HuggingFace Hub top models …")
+    hf = hf_top_models(vram_gb)
+    deduped = _report.dedup_hf_rows(_report.rank_hf_rows(hf))
+    print(_report.format_model_table(
+        deduped[:30], f"── HuggingFace  (HF_MODEL=<id>)  |  VRAM budget: {vram_gb:.0f} GB"))
+    print("  Benchmark scores: https://huggingface.co/spaces/bigcode/bigcodebench-leaderboard")
+    print(_report.LEGEND)
