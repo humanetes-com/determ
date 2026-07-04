@@ -10,11 +10,12 @@ from __future__ import annotations
 import os
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from pipeline_core.application.fix_loop import FixOutcome, drive_fix_loop
+from pipeline_core.domain.impl_routing import route_fn_bodies
 from pipeline_core.domain.llm_output import extract_fn_bodies
 from pipeline_core.domain.models import (
     BuildCluster,
@@ -24,7 +25,7 @@ from pipeline_core.domain.models import (
     ImplBlock,
 )
 from pipeline_core.domain.refine import FloorStall
-from pipeline_core.domain.rust_idents import is_trait_impl_container
+from pipeline_core.domain.rust_idents import canon_container, is_trait_impl_container
 from pipeline_core.prompts.context import PerImplSections
 
 
@@ -260,6 +261,31 @@ def fill_impl_blocks(
             _log(f"  [phase-c/impl] {block_id}: skipped (prior retro "
                  "marked exhausted).")
             return
+        # Debt #42: `stub_members` is pass-scan-time state — earlier blocks'
+        # family/sibling routing may have already filled members of THIS block.
+        # Re-scan before spending an LLM call; a block with nothing left is
+        # COMPLETE, not failed (run 187469: `impl NotBothDebug` prompted for an
+        # already-filled `__dispatch_ensure` → target_not_stub → false failure).
+        _fresh_recs = _scan_unimplemented_records_for_cluster(target_src_dir, cluster)
+        if _fresh_recs is not None:
+            _block_canon = canon_container(block.container)
+            _still_stub = {
+                r["fn_name"] for r in _fresh_recs
+                if r.get("file") == block.file
+                and canon_container(r.get("container", "")) == _block_canon}
+            _fresh_members = tuple(m for m in block.stub_members
+                                   if m.fn_name in _still_stub)
+            if not _fresh_members:
+                _log(f"  [phase-c/impl] {block_id}: already complete — all "
+                     f"{len(block.stub_members)} stub member(s) filled by "
+                     "earlier sibling/family fills.")
+                _emit("phase_c.impl.fill.already_complete", data={
+                    "cluster": cluster_name, "file": block.file,
+                    "container": block.container,
+                    "members": len(block.stub_members)})
+                return
+            if len(_fresh_members) < len(block.stub_members):
+                block = replace(block, stub_members=_fresh_members)
         # Related blocks (same trait, different generic) for the prompt.
         all_blocks_by_id = {_impl_block_id(b.file, b.container): b for b in blocks}
         related_blocks: list[ImplBlock] = []
@@ -337,6 +363,7 @@ def fill_impl_blocks(
         last_error_excerpt = ""
         last_response = ""
         members_filled_this_block = 0
+        block_already_complete = False  # debt #42: all-target_not_stub ⇒ done
         # B3 (FR-029): baseline = the crate's error signature with THIS block's
         # stubs still unimplemented. A fill is "non-regressing" if it adds no
         # error beyond this baseline and none on the filled fns — then we keep
@@ -361,7 +388,8 @@ def fill_impl_blocks(
 
         def _attempt_impl_fill(fix_attempt: int) -> FixOutcome:
             nonlocal attempts_total, fns_filled_total, impls_filled, \
-                last_error_excerpt, last_response, members_filled_this_block
+                last_error_excerpt, last_response, members_filled_this_block, \
+                block_already_complete
             attempts_total += 1
             # Slice 8a: TYPES_IN_SCOPE re-selected each attempt from the
             # member sigs + impl header + where clause + the current error
@@ -401,30 +429,20 @@ def fill_impl_blocks(
                 # Splice each parsed body into the impl indicated by its
                 # `block` attribute. Match against TARGET container OR any
                 # related container.
-                routed: list[tuple[dict[str, Any], str]] = []  # (fn_data, container)
-                for fn_data in parsed:
-                    container = fn_data["block"]
-                    if container == block.container:
-                        routed.append((fn_data, block.container))
-                        continue
-                    matched = False
-                    for rb in related_blocks:
-                        if container == rb.container:
-                            routed.append((fn_data, rb.container))
-                            matched = True
-                            break
-                    if not matched:
-                        # Loose match: header prefix only.
-                        for cand in [block, *related_blocks]:
-                            if container.split("{", 1)[0].strip() == cand.container.split("{", 1)[0].strip():
-                                routed.append((fn_data, cand.container))
-                                matched = True
-                                break
-                    if not matched:
-                        _log(f"  [phase-c/impl] {block_id}: dropped "
-                             f"`{fn_data['fn_name']}` — block header "
-                             "does not match any TARGET or RELATED.")
+                # Debt #43: route by canonical impl-header identity (exact
+                # first) — a multi-line where-clause container must match the
+                # model's single-line `block` attribute.
+                routing = route_fn_bodies(
+                    parsed, target=block.container,
+                    related=[rb.container for rb in related_blocks])
+                routed: list[tuple[dict[str, Any], str]] = [
+                    (rb.fn_data, rb.container) for rb in routing.routed]
+                for _nm in routing.dropped:
+                    _log(f"  [phase-c/impl] {block_id}: dropped "
+                         f"`{_nm}` — block header "
+                         "does not match any TARGET or RELATED.")
                 spliced_now = 0
+                refusals: list[str] = []
                 # Apply each splice. Operating on the same file in
                 # sequence keeps byte offsets consistent because we
                 # re-locate after each splice via the syn enumerator.
@@ -445,9 +463,23 @@ def fill_impl_blocks(
                     if ok:
                         spliced_now += 1
                     else:
+                        refusals.append(reason)
                         _log(f"  [phase-c/impl] {block_id}: splice "
                              f"`{fn_data['fn_name']}` failed: {reason}")
                 if spliced_now == 0:
+                    # Debt #42: every routed body refused as target_not_stub
+                    # ⇒ the members are already filled — the block is
+                    # COMPLETE, not failed (don't burn retries or a retro).
+                    if routed and all(r == "target_not_stub" for r in refusals):
+                        block_already_complete = True
+                        _log(f"  [phase-c/impl] {block_id}: all {len(routed)} "
+                             "routed body(ies) already filled "
+                             "(target_not_stub) — block complete.")
+                        _emit("phase_c.impl.fill.already_complete", data={
+                            "cluster": cluster_name, "file": block.file,
+                            "container": block.container,
+                            "members": len(routed)})
+                        return FixOutcome("accepted")
                     _log(f"  [phase-c/impl] {block_id}: nothing spliced "
                          f"(attempt {fix_attempt}).")
                     return FixOutcome("stop")
@@ -569,7 +601,7 @@ def fill_impl_blocks(
             on_repeated=_on_impl_repeated,
             check_stop=_check_graceful_stop,
         )
-        if members_filled_this_block == 0:
+        if members_filled_this_block == 0 and not block_already_complete:
             impls_failed += 1
             errors.append(f"{block.file}::{block.container}: "
                           f"impl-fill failed after {fix_attempt} attempt(s)")

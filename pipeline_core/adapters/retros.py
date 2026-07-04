@@ -11,8 +11,15 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
+from pipeline_core.domain.rust_idents import canon_container
 from pipeline_core.domain.workspace_layout import PHASE_C_LOGS_DIR
 from pipeline_core.log import emit, log
+
+__all__ = [
+    "canon_container", "is_fn_fully_exhausted", "load_retrospectives",
+    "reset_exhaustion_flags", "retro_key", "retrospectives_path",
+    "save_retrospectives",
+]
 
 
 def retrospectives_path(project_dir: Path) -> Path:
@@ -53,31 +60,9 @@ def save_retrospectives(project_dir: Path, data: dict[str, Any]) -> None:
             json.dumps(data, indent=2), encoding="utf-8")
 
 
-def canon_container(container: str) -> str:
-    """Canonical container form for keying. The extractor's fn records and
-    the impl-block manifest render the same impl differently (token-spaced
-    `impl Context < T , E > for Result < T , E >` vs pretty-printed
-    `impl<T, E> Context<T, E> for Result<T, E>\\nwhere\\n    E: ...`), which
-    used to split one impl across two retrospective keys. Reduce both to
-    `<Trait>for<SelfTy>`: drop a leading impl-generics list, drop the
-    where-clause, drop all whitespace."""
-    s = " ".join(container.split())
-    if s.startswith("impl"):
-        s = s[4:].lstrip()
-        if s.startswith("<"):
-            depth = 0
-            for i, ch in enumerate(s):
-                if ch == "<":
-                    depth += 1
-                elif ch == ">":
-                    depth -= 1
-                    if depth == 0:
-                        s = s[i + 1:]
-                        break
-    if s.endswith(" where"):
-        s = s[: -len(" where")]
-    s = s.split(" where ")[0]
-    return "".join(s.split())
+# canon_container relocated to domain/rust_idents.py (debt #43 — the per-impl
+# body routing needs the same identity); re-exported here so the retro-key
+# call sites and the pipeline.py smoke-pin alias stay unchanged.
 
 
 def retro_key(file_rel: str, fn_name: str, container: str) -> str:

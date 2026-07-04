@@ -731,3 +731,31 @@ def use_path_requirement_gaps(
         and sym not in reqs_text
     ]
     return len(found), gaps
+
+
+def canon_container(container: str) -> str:
+    """Canonical container identity. The extractor's fn records, the impl-block
+    manifest, and model-returned ``block`` attributes render the same impl
+    differently (token-spaced ``impl Context < T , E > for Result < T , E >``
+    vs pretty-printed ``impl<T, E> Context<T, E> for Result<T, E>\\nwhere\\n
+    E: ...`` vs the model's single-line ``impl<T, E> Context<T, E> for
+    Result<T, E>``). Reduce all to ``<Trait>for<SelfTy>``: drop a leading
+    impl-generics list, drop the where-clause, drop all whitespace. Keys the
+    retrospectives store and the per-impl body routing (debt #43)."""
+    s = " ".join(container.split())
+    if s.startswith("impl"):
+        s = s[4:].lstrip()
+        if s.startswith("<"):
+            depth = 0
+            for i, ch in enumerate(s):
+                if ch == "<":
+                    depth += 1
+                elif ch == ">":
+                    depth -= 1
+                    if depth == 0:
+                        s = s[i + 1:]
+                        break
+    if s.endswith(" where"):
+        s = s[: -len(" where")]
+    s = s.split(" where ")[0]
+    return "".join(s.split())
