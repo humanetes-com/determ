@@ -8,6 +8,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from pipeline_core.domain.blueprint import (
     Blueprint,
@@ -23,6 +24,10 @@ class BlueprintDeps:
     log: Callable[[str], None]
     emit: Callable[..., None]
     model: str | None    # None → the ask client's default model
+    # Dispatch-family enumeration over the baked skeleton (syn extractor;
+    # None/failed → file-stem topics only). Families are cross-impl schemes —
+    # exactly what the blueprint must pin down (FR-027).
+    dispatch_families: Callable[..., Any] | None = None
 
 
 def ensure_blueprint(
@@ -34,6 +39,7 @@ def ensure_blueprint(
     functional_req: str,
     topics: tuple[str, ...],
     deps: BlueprintDeps,
+    skeleton_dir: Path | None = None,
     max_attempts: int = 2,
 ) -> Blueprint:
     """Return the crate blueprint, generating it if absent. Validation:
@@ -47,6 +53,18 @@ def ensure_blueprint(
             deps.log(f"  [blueprint] {path.name} exists "
                      f"({len(existing.sections)} section(s)) — keeping.")
             return existing
+
+    # Dispatch families are cross-impl schemes (FR-027): each one is a
+    # REQUIRED topic, keyed by its dispatch method name.
+    if deps.dispatch_families is not None and skeleton_dir is not None:
+        try:
+            fam_topics = [fam.method
+                          for fam in (deps.dispatch_families(skeleton_dir)
+                                      or []) if fam.method]
+            topics = tuple(dict.fromkeys([*topics, *fam_topics]))
+        except Exception as e:
+            deps.log(f"  [blueprint] family enumeration failed ({e}) — "
+                     "file topics only.")
 
     missing: tuple[str, ...] = ()
     bp = Blueprint()

@@ -973,7 +973,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
             tests_block=tests_block[:cap],
             functional_req=functional_req[:cap // 2],
             topics=tuple(dict.fromkeys(topics)),
-            deps=self.blueprint_deps)
+            deps=self.blueprint_deps, skeleton_dir=skel_dir)
 
     def generate(self, req: GenerationRequest) -> bool:
         (project_dir, genesis_path, functional_req_path, manifest_path,

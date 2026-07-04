@@ -116,3 +116,31 @@ def test_build_blueprint_prompt_lists_topics_and_gaps() -> None:
         functional_req="FR text", topics=("error", "ptr"), missing=("ptr",))
     assert "  - error" in p and "  - ptr" in p
     assert "MISSED these required" in p and "fn a();" in p and "FR text" in p
+
+
+def test_missing_family_topic_is_reasked() -> None:
+    """A dispatch-family topic (method name) missing from the headings is a
+    validation gap like any file topic."""
+    bp = parse_blueprint("## Overview\np\n## error\ns\n")
+    assert missing_topics(bp, frozenset({"error", "__dispatch_ensure"})) == (
+        "__dispatch_ensure",)
+    covered = parse_blueprint(
+        "## Overview\np\n## error\ns\n## __dispatch_ensure family\nscheme\n")
+    assert missing_topics(covered, frozenset({"__dispatch_ensure"})) == ()
+
+
+def test_ensure_blueprint_adds_family_topics(tmp_path: Path) -> None:
+    from dataclasses import replace as _replace
+    from types import SimpleNamespace
+    path = tmp_path / "blueprint_x.md"
+    logs: list[str] = []
+    full = (_DOC + "\n## __dispatch_ensure family\ntoken-muncher scheme\n")
+    deps = _replace(
+        _deps([_DOC, full], logs),
+        dispatch_families=lambda _d: [SimpleNamespace(method="__dispatch_ensure")])
+    bp = ensure_blueprint(
+        path, module="x", skeleton_sigs="", tests_block="",
+        functional_req="", topics=("error", "ptr"), deps=deps,
+        skeleton_dir=tmp_path)
+    assert not missing_topics(bp, frozenset({"__dispatch_ensure"}))
+    assert any("__dispatch_ensure" in m for m in logs)   # gap named on retry

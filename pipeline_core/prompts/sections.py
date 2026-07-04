@@ -482,6 +482,51 @@ RUST_GOTCHAS: list[dict[str, Any]] = [
             "and even then prefer `core::fmt::Write` on a buffer."
         ),
     },
+    {
+        # Starvation-miner evidence (runs 6390/187469): E0133 on
+        # MaybeUninit::assume_init inside a safe fn — the model writes the
+        # right call but forgets the unsafe block.
+        "id": "unsafe_requires_block",
+        "summary": "Calling an `unsafe fn` (e.g. `MaybeUninit::assume_init`, raw-pointer deref) needs an `unsafe { ... }` block around the CALL — even inside `unsafe fn` bodies, wrap the exact unsafe operation.",
+        "triggers": {"E0133", "requires unsafe block", "is unsafe and requires"},
+        "detail": (
+            "E0133 means an unsafe operation sits in safe code. Wrap the exact\n"
+            "call, not the whole body:\n"
+            "  WRONG:\n"
+            "    let value = self.slot.assume_init();          // E0133\n"
+            "  RIGHT:\n"
+            "    let value = unsafe { self.slot.assume_init() };\n"
+            "  WRONG:\n"
+            "    let inner = *self.ptr.as_ptr();               // E0133\n"
+            "  RIGHT:\n"
+            "    let inner = unsafe { *self.ptr.as_ptr() };\n"
+            "Keep the unsafe block MINIMAL — one operation per block, so the\n"
+            "compiler still checks everything around it."
+        ),
+    },
+    {
+        # Starvation-miner evidence (run 187469): E0433 `cannot find `format`\n
+        # in `core`` — alloc macros do not live in core.
+        "id": "no_core_format",
+        "summary": "`format!`/`vec!`/`String` are NOT in `core` — never write `core::format!`. In no_std paths pass the Display value through, or `write!` into a buffer via `core::fmt::Write`.",
+        "triggers": {"E0433", "in `core`", "could not find `format`",
+                     "cannot find macro `format`"},
+        "detail": (
+            "`core` has no allocator, so alloc macros don't resolve there:\n"
+            "  WRONG:\n"
+            "    let s = core::format!(\"{x}\");        // E0433: not in core\n"
+            "  RIGHT (no allocation — pass the Display value through):\n"
+            "    target.push_msg(x)                     // x: impl Display\n"
+            "  WRONG:\n"
+            "    let s = format!(\"{a}{b}\");            // no_std: unresolved\n"
+            "  RIGHT (build into a stack buffer):\n"
+            "    use core::fmt::Write;\n"
+            "    let mut buf = Buffer::new();\n"
+            "    write!(buf, \"{a}{b}\").ok();\n"
+            "Reach for `alloc::format!` ONLY when the crate/cluster explicitly\n"
+            "links `alloc`."
+        ),
+    },
 ]
 
 

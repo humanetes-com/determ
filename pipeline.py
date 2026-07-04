@@ -3390,7 +3390,8 @@ def _new_skeleton_task2_generator() -> StaticSkeletonTask2Generator:
         blueprint_deps=BlueprintDeps(
             ask=lambda *a, **k: _ask_raw(*a, **k),
             log=lambda m: _log(m), emit=lambda *a, **k: _emit(*a, **k),
-            model=_TASK2_MODEL))
+            model=_TASK2_MODEL,
+            dispatch_families=lambda *a, **k: _dispatch_families_via_extractor(*a, **k)))
 
 
 def _crate_entry_point(cargo_toml_path: Path, module_dir_rel: str,
