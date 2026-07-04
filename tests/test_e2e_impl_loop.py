@@ -273,3 +273,82 @@ def test_pulls_disabled_by_env(monkeypatch, tmp_path):
     install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
     res = _run(ws)
     assert res["impls_filled"] == 0 and res["impls_failed"] == 1
+
+
+# --- P5: file-first fill for multi-block files --------------------------------
+
+IMPL_LIB_TWO = """\
+pub struct Foo { tag: u32 }
+pub struct Bar { tag: u32 }
+
+impl Foo {
+    pub fn kind(&self) -> u32 {
+        unimplemented!()
+    }
+}
+impl Bar {
+    pub fn name(&self) -> u32 {
+        unimplemented!()
+    }
+}
+"""
+
+RESPONSE_TWO = (
+    '<FN name="kind" block="impl Foo">self.tag</FN>\n'
+    '<FN name="name" block="impl Bar">self.tag + 1</FN>'
+)
+
+
+def _two_blocks() -> list[ImplBlock]:
+    a = FnRecord(file="lib.rs", fn_name="kind", container="impl Foo",
+                 sig_text="fn kind (& self) -> u32", has_unimplemented_body=True)
+    b = FnRecord(file="lib.rs", fn_name="name", container="impl Bar",
+                 sig_text="fn name (& self) -> u32", has_unimplemented_body=True)
+    return [ImplBlock(file="lib.rs", container="impl Foo",
+                      members=(a,), stub_members=(a,)),
+            ImplBlock(file="lib.rs", container="impl Bar",
+                      members=(b,), stub_members=(b,))]
+
+
+def test_file_first_fills_multi_block_file_in_one_call(monkeypatch, tmp_path):
+    ws = _setup(monkeypatch, tmp_path)
+    (ws / "src" / "lib.rs").write_text(IMPL_LIB_TWO)
+    monkeypatch.setattr(pipeline, "_collect_impl_blocks_for_cluster",
+                        lambda *a, **k: _two_blocks())
+    # Fresh scan authority: after the file pass everything is filled, so the
+    # per-block loop must SKIP both blocks (no extra LLM calls counted).
+    monkeypatch.setattr(pipeline, "_scan_unimplemented_records_for_cluster",
+                        lambda *a, **k: [])
+    _install_model(monkeypatch, [RESPONSE_TWO])
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
+    res = _run(ws)
+    text = (ws / "src" / "lib.rs").read_text()
+    assert res["fns_filled"] == 2 and res["impls_failed"] == 0
+    assert res["attempts"] == 1                    # ONE file-level call
+    assert "self.tag" in text and "unimplemented!()" not in text
+
+
+def test_file_first_reverts_on_compile_failure_then_blocks_take_over(
+        monkeypatch, tmp_path):
+    ws = _setup(monkeypatch, tmp_path)
+    (ws / "src" / "lib.rs").write_text(IMPL_LIB_TWO)
+    monkeypatch.setattr(pipeline, "_collect_impl_blocks_for_cluster",
+                        lambda *a, **k: _two_blocks())
+    _install_model(monkeypatch, [RESPONSE_TWO])
+    # File pass check fails → revert; per-block passes then succeed.
+    install_scripted_cargo(
+        monkeypatch,
+        check_diag=[(101, "error: x", [diag("src/lib.rs", code="E0308")]),
+                    (0, "", [])])
+    res = _run(ws)
+    text = (ws / "src" / "lib.rs").read_text()
+    assert res["impls_filled"] == 2 and res["impls_failed"] == 0
+    assert "self.tag" in text and "unimplemented!()" not in text
+
+
+def test_file_first_skipped_for_single_block(monkeypatch, tmp_path):
+    ws = _setup(monkeypatch, tmp_path)      # default single-block fixture
+    _install_model(monkeypatch, [RESPONSE_BOTH])
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
+    res = _run(ws)
+    assert res["impls_filled"] == 1          # per-block path, as before

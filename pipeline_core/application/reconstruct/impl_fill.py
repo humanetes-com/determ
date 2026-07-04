@@ -35,7 +35,10 @@ from pipeline_core.domain.refine import FloorStall
 from pipeline_core.domain.rust_idents import canon_container, is_trait_impl_container
 from pipeline_core.domain.test_results import strip_ansi
 from pipeline_core.prompts.context import PerImplSections
-from pipeline_core.prompts.fix_prompts import build_maximal_impl_prompt
+from pipeline_core.prompts.fix_prompts import (
+    build_file_fill_prompt,
+    build_maximal_impl_prompt,
+)
 from pipeline_core.prompts.pull_menu import pull_menu_section
 
 
@@ -295,6 +298,108 @@ def fill_impl_blocks(
     retros_cache = _load_retrospectives(project_dir)
 
     _impl_full_stalls = int(os.getenv("PHASE_C_IMPL_MAX_STALLS", "3"))
+
+    def _fill_file_first(file_rel: str, fblocks: list[ImplBlock]) -> None:
+        """P5 file-first pass: ONE prompt fills every stub of a multi-block
+        file so the impls are designed together (run-187469 evidence: the
+        Own/Ref/Mut family in src/ptr.rs diverged when filled per block).
+        Strict gate — kept only on rc==0 (+U2), else reverted verbatim; the
+        per-block loop then handles the file exactly as today (the #42
+        freshness gate skips whatever this pass completed)."""
+        nonlocal fns_filled_total, attempts_total
+        file_path = target_src_dir / file_rel
+        if not file_path.exists():
+            return
+        stub_names = [m.fn_name for b in fblocks for m in b.stub_members]
+        max_stubs = int(os.getenv("PHASE_C_FILE_MAX_STUBS", "12"))
+        if not stub_names or len(stub_names) > max_stubs:
+            return
+        snapshot = file_path.read_text(encoding="utf-8", errors="replace")
+        test_blocks: list[tuple[str, str]] = []
+        for fn_name in stub_names[:6]:
+            for path_str, txt in _find_tests_referencing_fn(
+                    tests_dir_files, fn_name, max_blocks=2):
+                if not any(p == path_str for p, _ in test_blocks):
+                    test_blocks.append((path_str, txt))
+        _bp_slice = "" if _blueprint.empty else _blueprint.slice_for(
+            frozenset([*stub_names,
+                       *(t for b in fblocks
+                         for t in _container_names(b.container)),
+                       Path(file_rel).stem]),
+            cap=int(os.getenv("BLUEPRINT_SLICE_CAP", "2500")))
+        notes_section = ""
+        if fr_path is not None:
+            notes_section = _filter_model_notes_for_prompt(
+                fr_path, file_rel=file_rel, fn_name=stub_names[0],
+                file_text=snapshot, current_error="")
+        prompt = build_file_fill_prompt(
+            file_rel=file_rel, file_text=snapshot,
+            stub_map=[(b.container, [m.fn_name for m in b.stub_members])
+                      for b in fblocks],
+            tests_block="\n\n".join(f"// {p}\n{t}" for p, t in test_blocks),
+            blueprint=_bp_slice, notes=notes_section)
+        _log(f"  [phase-c/file] {file_rel}: file-first fill "
+             f"({len(fblocks)} block(s), {len(stub_names)} stub(s)).")
+        _emit("phase_c.file.fill.start", data={
+            "cluster": cluster_name, "file": file_rel,
+            "blocks": len(fblocks), "stubs": len(stub_names)})
+        attempts_total += 1
+        try:
+            parsed = extract_fn_bodies(_ask_fill(prompt))
+        except Exception as e:
+            _log(f"  [phase-c/file] {file_rel}: LLM error: {e}")
+            return
+        if not parsed:
+            _log(f"  [phase-c/file] {file_rel}: empty/no FN blocks — "
+                 "falling back to per-block fills.")
+            return
+        with _splice_check_lock:
+            containers = [b.container for b in fblocks]
+            routing = route_fn_bodies(parsed, target=containers[0],
+                                      related=containers[1:])
+            for _nm in routing.dropped:
+                _log(f"  [phase-c/file] {file_rel}: dropped `{_nm}` — "
+                     "block header does not match any impl in this file.")
+            spliced_now = 0
+            for rb in routing.routed:
+                wc = rb.fn_data["where_clause"]
+                if wc and is_trait_impl_container(rb.container):
+                    wc = None
+                ok, reason, _delta = _splice_fn_with_where(
+                    file_path, rb.container, rb.fn_data["fn_name"],
+                    rb.fn_data["body"], wc)
+                if ok:
+                    spliced_now += 1
+                else:
+                    _log(f"  [phase-c/file] {file_rel}: splice "
+                         f"`{rb.fn_data['fn_name']}` failed: {reason}")
+            if spliced_now == 0:
+                _log(f"  [phase-c/file] {file_rel}: nothing spliced — "
+                     "falling back to per-block fills.")
+                return
+            rc, cargo_out, _diags = _run_cargo_check_diag(
+                check_cmd, target_src_dir, cluster_env)
+            _u2_file = None
+            if rc == 0:
+                _file_tests: set[str] = set()
+                for b in fblocks:
+                    for m in b.stub_members:
+                        _file_tests |= (tdd_frontier_tests or {}).get(
+                            FnLocator(file_rel, m.fn_name), set())
+                _u2_file = _u2_test_gate(_file_tests, tdd_test_cmd,
+                                         target_src_dir, cluster_env)
+            if rc == 0 and _u2_file is None:
+                fns_filled_total += spliced_now
+                _log(f"  [phase-c/file] {file_rel}: FILE FILLED "
+                     f"{spliced_now} fn(s) in one pass.")
+                _emit("phase_c.file.fill.done", data={
+                    "cluster": cluster_name, "file": file_rel,
+                    "fns_filled": spliced_now})
+                return
+            file_path.write_text(snapshot, encoding="utf-8")
+            _log(f"  [phase-c/file] {file_rel}: reverted "
+                 f"({'U2 test failure' if rc == 0 else 'compile failed'}) — "
+                 "falling back to per-block fills.")
 
     def _fill_one_block(block: ImplBlock) -> None:
         """One impl block's fill: context assembly, the `_attempt_impl_fill`
@@ -772,6 +877,16 @@ def fill_impl_blocks(
             except Exception as _re:
                 _log(f"  [phase-c/impl/retro] {block_id}: {_re}")
 
+    # P5: file-first pass for multi-block files — one prompt designs the
+    # file's impls together; the per-block loop below handles the remainder
+    # (the #42 freshness gate skips blocks the file pass completed).
+    if os.getenv("PHASE_C_FILE_FIRST", "1") != "0":
+        _by_file: dict[str, list[ImplBlock]] = {}
+        for b in viable_blocks:
+            _by_file.setdefault(b.file, []).append(b)
+        for _file_rel, _fblocks in _by_file.items():
+            if len(_fblocks) >= 2:
+                _fill_file_first(_file_rel, _fblocks)
     for block in viable_blocks:
         _fill_one_block(block)
     bytes_after = sum(p.stat().st_size for p in target_src_dir.rglob("*.rs"))

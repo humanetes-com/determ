@@ -88,6 +88,48 @@ signature line, no outer braces). Use the function name verbatim:
 Output nothing else."""
 
 
+def build_file_fill_prompt(
+    *,
+    file_rel: str,
+    file_text: str,
+    stub_map: list[tuple[str, list[str]]],
+    tests_block: str,
+    blueprint: str,
+    notes: str,
+) -> str:
+    """P5 file-first fill: ALL stubs of one file in ONE prompt, so the model
+    designs the file's impls together (the coherence a fresh reply naturally
+    has) instead of inventing each block locally. `stub_map` is
+    [(container_header, [stub fn names])]."""
+    plan_lines = "\n".join(
+        f"  {header.splitlines()[0] if header else 'free fns'}: "
+        + ", ".join(names)
+        for header, names in stub_map)
+    bp_part = (f"\n<DESIGN_BLUEPRINT>\nYOUR crate design — every body must "
+               f"agree with it:\n{blueprint}\n</DESIGN_BLUEPRINT>\n"
+               if blueprint.strip() else "")
+    notes_part = (f"\n<MODEL_NOTES>\n{notes}\n</MODEL_NOTES>\n"
+                  if notes.strip() else "")
+    tests_part = (f"\nTests that exercise this file (make them pass):\n"
+                  f"{tests_block}\n" if tests_block.strip() else "")
+    return f"""Implement EVERY unimplemented function of this Rust file in one pass —
+design the impl blocks together so they stay mutually consistent. Keep every
+signature EXACTLY as written; write bodies only.
+File: {file_rel}
+Stubs to fill (by impl block):
+{plan_lines}
+```rust
+{file_text}
+```
+{bp_part}{notes_part}{tests_part}
+For EACH function, return one block (body statements only — no fn signature
+line, no outer braces). `block` must name the function's OWN impl header:
+<FN name="FUNCTION_NAME" block="IMPL_HEADER">
+...body...
+</FN>
+Output nothing else."""
+
+
 def build_maximal_impl_prompt(
     *,
     file_rel: str,
