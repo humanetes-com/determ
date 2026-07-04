@@ -245,3 +245,31 @@ def test_maximal_disabled_by_env(monkeypatch, tmp_path):
     install_scripted_cargo(monkeypatch, check_diag=[red, red, (0, "", [])])
     res = _run(ws)
     assert res["impls_failed"] == 1        # green 3rd check never reached
+
+
+# --- P2: pull protocol through the impl fill path -----------------------------
+
+
+def test_pull_request_answered_then_block_fills(monkeypatch, tmp_path):
+    """Model asks for a file first (bounded pull), gets it, then delivers the
+    bodies — block fills in one loop attempt."""
+    ws = _setup(monkeypatch, tmp_path)
+    _install_model(monkeypatch, [
+        '<REQUEST kind="file" arg="lib.rs"/>', RESPONSE_BOTH])
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
+    res = _run(ws)
+    text = (ws / "src" / "lib.rs").read_text()
+    assert res["impls_filled"] == 1 and res["fns_filled"] == 2
+    assert "self.tag" in text and "unimplemented!()" not in text
+
+
+def test_pulls_disabled_by_env(monkeypatch, tmp_path):
+    """CONTEXT_PULLS=0: a REQUEST reply is just a no-FN response — the loop
+    treats it as a failed attempt instead of answering it."""
+    ws = _setup(monkeypatch, tmp_path)
+    monkeypatch.setenv("CONTEXT_PULLS", "0")
+    monkeypatch.setenv("PHASE_C_MAXIMAL_LAST_RESORT", "0")
+    _install_model(monkeypatch, ['<REQUEST kind="file" arg="lib.rs"/>'])
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
+    res = _run(ws)
+    assert res["impls_filled"] == 0 and res["impls_failed"] == 1

@@ -16,6 +16,11 @@ from typing import Any
 
 from pipeline_core.application.fix_loop import FixOutcome, drive_fix_loop
 from pipeline_core.application.reconstruct.cargo_errors import focus_diagnostics
+from pipeline_core.application.reconstruct.pull_resolver import (
+    PullSources,
+    ask_with_pulls,
+    workspace_file_reader,
+)
 from pipeline_core.domain.impl_routing import route_fn_bodies
 from pipeline_core.domain.llm_output import extract_fn_bodies
 from pipeline_core.domain.models import (
@@ -27,8 +32,10 @@ from pipeline_core.domain.models import (
 )
 from pipeline_core.domain.refine import FloorStall
 from pipeline_core.domain.rust_idents import canon_container, is_trait_impl_container
+from pipeline_core.domain.test_results import strip_ansi
 from pipeline_core.prompts.context import PerImplSections
 from pipeline_core.prompts.fix_prompts import build_maximal_impl_prompt
+from pipeline_core.prompts.pull_menu import pull_menu_section
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,6 +218,36 @@ def fill_impl_blocks(
     _crate_type_records = _cluster_filter_type_methods(
         _enumerate_types_via_extractor(target_src_dir) or [], cluster)
     macros_section = _collect_crate_macros(_src_for_macros)
+
+    # P2 pull protocol: the model may request ONE typed artifact instead of
+    # guessing (bounded round-trips; menu appended to every fill prompt).
+    # All sources are post-strip-legal: the reconstruction tree, the tests,
+    # the enumerated type records, the last cargo output.
+    _pulls_on = os.getenv("CONTEXT_PULLS", "1") != "0"
+    _max_pulls = int(os.getenv("CONTEXT_PULLS_MAX", "2"))
+    _last_full_out: list[str] = [""]  # set by _splice_and_verify per check
+    _pull_sources = PullSources(
+        read_file=workspace_file_reader(target_src_dir),
+        find_tests=lambda name: "\n\n".join(
+            f"// {p}\n{t}" for p, t in _find_tests_referencing_fn(
+                tests_dir_files, name, max_blocks=4)),
+        type_def=lambda name: _types_section_for_fix(
+            name, "", "", "", "", _crate_type_records),
+        full_error=lambda: strip_ansi(_last_full_out[0]),
+    )
+    _pull_menu = (pull_menu_section(_pull_sources.available_kinds(), _max_pulls)
+                  if _pulls_on else "")
+
+    def _ask_fill(prompt: str) -> str:
+        """The shared ask seam: pull round-trips when enabled, plain ask
+        otherwise. Deliverable-first — FN bodies short-circuit."""
+        if not _pulls_on:
+            return str(ask(prompt, model=_TASK2_MODEL))
+        return ask_with_pulls(
+            lambda p: str(ask(p, model=_TASK2_MODEL)), prompt + _pull_menu,
+            sources=_pull_sources,
+            has_deliverable=lambda r: bool(extract_fn_bodies(r)),
+            log=_log, emit=_emit, max_pulls=_max_pulls)
 
     # Dispatch families (FR-027): autoref-specialization trait sets dispatched
     # by a macro. Their correctness is a cross-impl invariant, so when a block
@@ -414,7 +451,7 @@ def fill_impl_blocks(
                 fr_path=fr_path,
             )
             try:
-                response = ask(prompt, model=_TASK2_MODEL)
+                response = _ask_fill(prompt)
             except Exception as e:
                 _log(f"  [phase-c/impl] {block_id}: LLM error: {e}")
                 return FixOutcome("stop")
@@ -504,6 +541,7 @@ def fill_impl_blocks(
                 # not from regex over rendered text.
                 rc, cargo_out, diagnostics = _run_cargo_check_diag(
                     check_cmd, target_src_dir, cluster_env)
+                _last_full_out[0] = cargo_out  # `full_error` pull source
                 if rc == 0:
                     # Plan 10 U2 (shared gate): accept the block only if its
                     # members' own tests pass too — not just compile.
@@ -647,8 +685,7 @@ def fill_impl_blocks(
                     "container": block.container,
                     "prompt_chars": len(_max_prompt)})
                 try:
-                    _max_parsed = extract_fn_bodies(
-                        ask(_max_prompt, model=_TASK2_MODEL))
+                    _max_parsed = extract_fn_bodies(_ask_fill(_max_prompt))
                     if _max_parsed:
                         _splice_and_verify(_max_parsed, fix_attempt + 1)
                     else:
