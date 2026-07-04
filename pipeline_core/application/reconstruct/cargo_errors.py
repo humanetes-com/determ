@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 
 from pipeline_core.domain.models import Diagnostic
+from pipeline_core.domain.test_results import strip_ansi
 
 
 def is_error_header(ln: str) -> bool:
@@ -134,6 +135,43 @@ def strip_cargo_warnings(output: str) -> str:
     return "\n".join(out)
 
 
+def focus_diagnostics(diagnostics: list[Diagnostic], file_rel: str, *,
+                      max_target: int = 8, max_cross: int = 4) -> str:
+    """Diagnostics-first error focusing (P7): render rustc's OWN complete
+    blocks, capped by diagnostic COUNT — never by characters — so the model
+    always sees a diagnostic whole (an E0308 cut before its expected/found
+    lines is unactionable; starvation-miner evidence, runs 6390/187469).
+
+    Target-file diagnostics first, then cross-file ones under a separate
+    header. ANSI stripped, duplicates and `aborting due to …` summaries
+    dropped. Returns "" when nothing renders — callers fall back to the
+    text path (:func:`focus_cargo_errors`)."""
+    base = file_rel.rsplit("/", 1)[-1]
+    target: list[str] = []
+    cross: list[str] = []
+    seen: set[str] = set()
+    for d in diagnostics:
+        text = strip_ansi(d.rendered or d.message).strip()
+        if not text or "aborting due to" in text:
+            continue
+        if text in seen:
+            continue
+        seen.add(text)
+        if d.file and d.file.rsplit("/", 1)[-1] == base:
+            target.append(text)
+        else:
+            cross.append(text)
+    parts: list[str] = []
+    if target:
+        parts.append("# Errors in target file:")
+        parts.extend(target[:max_target])
+    if cross:
+        parts.append("# Errors elsewhere in the crate "
+                     "(likely downstream of the target):")
+        parts.extend(cross[:max_cross])
+    return "\n".join(parts)
+
+
 def focus_cargo_errors(output: str, file_rel: str, max_chars: int) -> str:
     """Extract a focused error excerpt from cargo output.
 
@@ -147,8 +185,13 @@ def focus_cargo_errors(output: str, file_rel: str, max_chars: int) -> str:
     consumer of error.rs). Without the cross-file slice, the model would
     not see the real symptom — only the absence of expected errors in its
     own file.
+
+    ANSI is stripped FIRST (P7): cargo's colored rendering prefixes `error[…]`
+    headers with SGR escapes, which silently defeated `is_error_header` — no
+    blocks parsed, and the model got a head-truncated raw dump (starvation
+    miner, runs 6390/187469).
     """
-    output = strip_cargo_warnings(output)
+    output = strip_cargo_warnings(strip_ansi(output))
     base = file_rel.rsplit("/", 1)[-1]
     in_blocks: list[list[str]] = []
     cross_blocks: list[list[str]] = []

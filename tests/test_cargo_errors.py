@@ -152,3 +152,55 @@ def test_error_type_signals_requires_capitalized_ident() -> None:
     assert error_type_signals("expected type foo") == []      # lowercase
     assert error_type_signals("expected type `X`") == []      # single char (<2)
     assert dict(error_type_signals("expected type `Xy`")) == {"Xy": 15}
+
+
+# --- P7: diagnostics-first focusing + ANSI-hardened text path ----------------
+
+def _diag(code: str, file: str, rendered: str):
+    from pipeline_core.domain.models import Diagnostic
+    return Diagnostic(code=code, file=file, message=rendered.splitlines()[0],
+                      rendered=rendered)
+
+
+def test_focus_diagnostics_target_first_whole_blocks() -> None:
+    from pipeline_core.application.reconstruct.cargo_errors import focus_diagnostics
+    tgt = ("error[E0308]: mismatched types\n --> src/ptr.rs:10:5\n"
+           "  expected `&str`, found `String`")
+    other = "error[E0425]: cannot find value `x`\n --> src/lib.rs:3:1"
+    out = focus_diagnostics([_diag("E0425", "src/lib.rs", other),
+                             _diag("E0308", "src/ptr.rs", tgt)], "src/ptr.rs")
+    assert out.index("E0308") < out.index("E0425")
+    assert "expected `&str`, found `String`" in out      # block kept WHOLE
+    assert out.startswith("# Errors in target file:")
+    assert "# Errors elsewhere" in out
+
+
+def test_focus_diagnostics_strips_ansi_dedups_and_skips_summaries() -> None:
+    from pipeline_core.application.reconstruct.cargo_errors import focus_diagnostics
+    colored = "\x1b[1m\x1b[91merror[E0133]\x1b[0m: unsafe call\n --> src/a.rs:1:1"
+    out = focus_diagnostics(
+        [_diag("E0133", "src/a.rs", colored),
+         _diag("E0133", "src/a.rs", colored),
+         _diag("", "", "error: aborting due to 2 previous errors")],
+        "src/a.rs")
+    assert out.count("E0133") == 1 and "\x1b" not in out
+    assert "aborting" not in out
+
+
+def test_focus_diagnostics_count_cap_and_empty() -> None:
+    from pipeline_core.application.reconstruct.cargo_errors import focus_diagnostics
+    diags = [_diag("E0308", "src/a.rs", f"error[E0308]: case {i}")
+             for i in range(12)]
+    out = focus_diagnostics(diags, "src/a.rs", max_target=3)
+    assert out.count("error[E0308]") == 3
+    assert focus_diagnostics([], "src/a.rs") == ""
+
+
+def test_focus_cargo_errors_parses_ansi_colored_headers() -> None:
+    from pipeline_core.application.reconstruct.cargo_errors import focus_cargo_errors
+    out_text = ("\x1b[1m\x1b[91merror[E0308]\x1b[0m: mismatched types\n"
+                " --> src/ptr.rs:10:5\n"
+                "  expected `&str`, found `String`\n\n")
+    got = focus_cargo_errors(out_text, "src/ptr.rs", 4000)
+    assert got.startswith("# Errors in target file:")   # block WAS parsed
+    assert "\x1b" not in got

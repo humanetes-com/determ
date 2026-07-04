@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from pipeline_core.application.fix_loop import FixOutcome, drive_fix_loop
+from pipeline_core.application.reconstruct.cargo_errors import focus_diagnostics
 from pipeline_core.domain.impl_routing import route_fn_bodies
 from pipeline_core.domain.llm_output import extract_fn_bodies
 from pipeline_core.domain.models import (
@@ -567,7 +568,11 @@ def fill_impl_blocks(
                 cur_err_sig = (_u2_impl[0] if _u2_impl is not None
                                else _cargo_err_sig_from_diagnostics(diagnostics))
                 cur_err_count = max(1, len(cur_err_sig))  # rc-honest minimum
-                last_error_excerpt = _focus_cargo_errors(cargo_out, block.file)
+                # P7: whole rustc diagnostics (count-capped) when the JSON
+                # path yielded them; the char-budgeted text focus is fallback.
+                last_error_excerpt = (
+                    focus_diagnostics(diagnostics, block.file)
+                    or _focus_cargo_errors(cargo_out, block.file))
                 _record_error_codes_seen(cargo_out)
                 # The fill regressed (a new error, or an error on the filled
                 # fns) — B3 (FR-029) already accepted non-regressing fills
