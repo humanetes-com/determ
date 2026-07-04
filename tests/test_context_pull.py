@@ -157,3 +157,77 @@ def test_ask_loop_budget_exhausts(tmp_path: Path) -> None:
 def test_ask_loop_plain_response_passes_through(tmp_path: Path) -> None:
     out, asked = _loop(["gibberish no tag"], tmp_path)
     assert out == "gibberish no tag" and len(asked) == 1
+
+
+# --- ladder integration (per_fn_ask + make_request_answerer) ------------------
+
+
+from pipeline_core.adapters.per_fn_ask import ask_per_fn_body  # noqa: E402
+from pipeline_core.application.reconstruct.pull_resolver import (  # noqa: E402
+    make_request_answerer,
+)
+
+
+class _LadderClient:
+    """Protocol-complete scripted client (matches _AskClient)."""
+
+    def __init__(self, responses: list[str]) -> None:
+        self.responses = list(responses)
+        self.calls: list[dict] = []
+
+    def ask(self, prompt: str, system: str | None = None,
+            model: str | None = None, max_tokens: int | None = None,
+            think: bool | None = None,
+            temperature: float | None = None) -> str:
+        self.calls.append({"prompt": prompt, "think": think})
+        return (self.responses.pop(0) if len(self.responses) > 1
+                else self.responses[0])
+
+
+def _answerer_for(tmp_path: Path, max_pulls: int):
+    return make_request_answerer(
+        _sources(tmp_path, type_def=lambda n: f"struct {n};"),
+        log=lambda _m: None, emit=lambda *_a, **_k: None,
+        max_pulls=max_pulls)
+
+
+def test_ladder_answers_request_on_same_rung(tmp_path: Path) -> None:
+    """A bodyless REQUEST reply re-asks the SAME rung with the answer —
+    no think=False rung burned."""
+    client = _LadderClient(
+        ['<REQUEST kind="type_def" arg="Buf"/>', "<BODY>\n42\n</BODY>"])
+    body, _ = ask_per_fn_body(
+        client, "PROMPT", "foo", [], sig_text="fn foo()", model="m",
+        answer_request=_answerer_for(tmp_path, 2))
+    assert body == "42"
+    assert len(client.calls) == 2
+    assert client.calls[1]["think"] is None            # still the DEFAULT rung
+    assert "struct Buf;" in client.calls[1]["prompt"]  # answer in the re-ask
+
+
+def test_ladder_budget_falls_through_to_next_rung(tmp_path: Path) -> None:
+    client = _LadderClient(['<REQUEST kind="type_def" arg="Buf"/>'])
+    body, _ = ask_per_fn_body(
+        client, "PROMPT", "foo", [], sig_text="fn foo()", model="m",
+        answer_request=_answerer_for(tmp_path, 1))
+    assert body is None
+    # 1 answered re-ask on rung 1, then the 3 rungs exhaust: 4 asks total.
+    assert len(client.calls) == 4
+    assert client.calls[2]["think"] is False           # ladder did move on
+
+
+def test_ladder_without_answerer_unchanged(tmp_path: Path) -> None:
+    client = _LadderClient([""])
+    body, _ = ask_per_fn_body(
+        client, "PROMPT", "foo", [], sig_text="fn foo()", model="m")
+    assert body is None and len(client.calls) == 3
+
+
+def test_ladder_never_splices_request_text_as_body(tmp_path: Path) -> None:
+    """With the budget spent, a request-only reply must NOT raw-fallback into
+    a 'body' (extract_body_response would return the tag text verbatim)."""
+    client = _LadderClient(['<REQUEST kind="type_def" arg="Buf"/>'])
+    body, _ = ask_per_fn_body(
+        client, "PROMPT", "foo", [], sig_text="fn foo()", model="m",
+        answer_request=_answerer_for(tmp_path, 0))
+    assert body is None

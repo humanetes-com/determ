@@ -95,7 +95,7 @@ class PromptContext(Protocol):
 
     def ask_per_fn_body(
         self, prompt: str, fn_name: str, attempts_log: list[str],
-        sig_text: str = ...,
+        sig_text: str = ..., answer_request: object = ...,
     ) -> tuple[str | None, str]: ...
     def gather(
         self, *, file_text: str, file_rel: str, fn_name: str, sig_text: str,

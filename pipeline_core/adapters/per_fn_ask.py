@@ -11,6 +11,7 @@ import os
 from typing import Any, Protocol
 
 from pipeline_core.application.reconstruct.fill_rules import is_unimplemented_body
+from pipeline_core.domain.context_pull import extract_context_pull
 from pipeline_core.domain.llm_output import extract_body_response
 from pipeline_core.domain.rust_idents import is_unsafe_fn
 
@@ -30,6 +31,7 @@ def ask_per_fn_body(
     sig_text: str = "",
     model: str,
     unsafe_temp: float | None = None,
+    answer_request: Any = None,
 ) -> tuple[str | None, str]:
     """3-attempt extraction ladder for a per-fn reconstruction prompt.
 
@@ -39,6 +41,12 @@ def ask_per_fn_body(
     For ``unsafe`` fns, lowers sampling temperature to ``PHASE_C_UNSAFE_TEMP``
     (env, default 0.1): rigid pointer/vtable bodies have one correct token
     sequence, not a range of creative choices.
+
+    ``answer_request`` (P2 pulls): a bodyless reply carrying a
+    ``<REQUEST .../>`` is a context request, NOT a failed extraction — the
+    answerer returns the prompt addition and the SAME rung re-asks (no
+    think=False rung burned); the answerer's budget bounds the loop, and the
+    augmented prompt persists into later rungs.
     """
     is_unsafe = bool(sig_text) and is_unsafe_fn(sig_text)
     eff_unsafe_temp = unsafe_temp if unsafe_temp is not None else float(
@@ -51,11 +59,27 @@ def ask_per_fn_body(
             kwargs["think"] = False
         if is_unsafe:
             kwargs["temperature"] = eff_unsafe_temp
-        last_response = client.ask(prompt, **kwargs)
-        body = extract_body_response(last_response)
-        if body and not is_unimplemented_body(body):
-            if label != "default":
-                attempts_log.append(f"{fn_name}: recovered via {label}")
-            return body, last_response
+        while True:
+            last_response = client.ask(prompt, **kwargs)
+            # P2: a request-only reply (no <BODY>, no fence) is a context
+            # request, never a body — extract_body_response's raw fallback
+            # would otherwise splice the tag text verbatim.
+            if (answer_request is not None
+                    and "<BODY>" not in last_response
+                    and "```" not in last_response
+                    and extract_context_pull(last_response) is not None):
+                addition = answer_request(last_response)
+                if addition is not None:
+                    attempts_log.append(f"{fn_name}: answered context request")
+                    prompt = prompt + addition
+                    continue
+                attempts_log.append(f"{fn_name}: unanswered context request")
+                break
+            body = extract_body_response(last_response)
+            if body and not is_unimplemented_body(body):
+                if label != "default":
+                    attempts_log.append(f"{fn_name}: recovered via {label}")
+                return body, last_response
+            break
         attempts_log.append(f"{fn_name}: empty/stub from {label}")
     return None, last_response

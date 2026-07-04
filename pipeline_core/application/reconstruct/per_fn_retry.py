@@ -16,6 +16,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from pipeline_core.application.reconstruct.pull_resolver import (
+    PullSources,
+    make_request_answerer,
+    workspace_file_reader,
+)
 from pipeline_core.application.refine_loop import run_callback_loop
 from pipeline_core.domain.models import FnLocator, Frontier
 from pipeline_core.domain.reconstruction import SpliceOutcome
@@ -31,7 +36,10 @@ from pipeline_core.domain.test_results import (
     parse_test_counts,
     strip_ansi,
 )
+from pipeline_core.domain.type_refs import types_referenced_in_text
 from pipeline_core.prompts.context import PerFnFixSections
+from pipeline_core.prompts.pull_menu import pull_menu_section
+from pipeline_core.prompts.sections import format_type_for_prompt
 
 
 @dataclass(frozen=True, slots=True)
@@ -375,7 +383,29 @@ def fix_one_ref(
         ),
         fr_path=ctx.fr_path,
     )
-    new_body, _ = deps.ask_per_fn_body(prompt, fn, [], sig_text=sig_t)
+    # P2 pulls: bounded typed requests through the ladder (same rung re-asks
+    # with the answered context; budget per fix attempt).
+    _menu = ""
+    _answerer = None
+    if os.getenv("CONTEXT_PULLS", "1") != "0":
+        _max_pulls = int(os.getenv("CONTEXT_PULLS_MAX", "2"))
+        _sources = PullSources(
+            read_file=workspace_file_reader(ctx.project_dir),
+            find_tests=lambda name: "\n\n".join(
+                f"// {p}\n{t}" for p, t in deps.find_tests_for_fn(
+                    ctx.tests_dir_files, name)),
+            type_def=lambda name: "\n\n".join(
+                format_type_for_prompt(r) for r in
+                types_referenced_in_text(name, ctx.type_recs)[:3]),
+            full_error=lambda: err_excerpt,
+        )
+        _menu = pull_menu_section(_sources.available_kinds(), _max_pulls)
+        # RetryDeps carries no emit port — pulls here log only.
+        _answerer = make_request_answerer(
+            _sources, log=deps.log, emit=lambda *_a, **_k: None,
+            max_pulls=_max_pulls)
+    new_body, _ = deps.ask_per_fn_body(prompt + _menu, fn, [], sig_text=sig_t,
+                                       answer_request=_answerer)
     if not new_body:
         return False
     splice_out = deps.splice_fn_body(fp, fn, new_body, allow_nonstub=True)

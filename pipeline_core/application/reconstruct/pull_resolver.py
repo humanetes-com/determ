@@ -116,6 +116,43 @@ def resolve_pull(pull: ContextPull, sources: PullSources) -> PullAnswer:
         return PullAnswer(pull, f"lookup failed: {e}", ok=False)
 
 
+def make_request_answerer(
+    sources: PullSources,
+    *,
+    log: Callable[[str], None],
+    emit: Callable[..., None],
+    max_pulls: int = 2,
+) -> Callable[[str], str | None]:
+    """A stateful answerer for ask ladders that own their retry policy (the
+    per-fn 3-rung ladder): given a raw response, returns the follow-up prompt
+    ADDITION for its request — or None when there is no well-formed request
+    or the shared budget is spent. Budget persists across the ladder's rungs."""
+    budget = PullBudget(max_pulls)
+
+    def _answer(response: str) -> str | None:
+        nonlocal budget
+        pull = extract_context_pull(response)
+        if pull is None:
+            return None
+        spent = budget.spend()
+        if spent is None:
+            log(f"  [pull] budget exhausted — ignoring {pull.tag()}")
+            return None
+        budget = spent
+        answer = resolve_pull(pull, sources)
+        log(f"  [pull] {pull.tag()} → "
+            f"{'ok' if answer.ok else 'unavailable'} "
+            f"({len(answer.payload)} chars"
+            f"{', truncated' if answer.truncated else ''})")
+        emit("pull.answer", data={
+            "kind": str(pull.kind), "arg": pull.arg, "ok": answer.ok,
+            "chars": len(answer.payload), "truncated": answer.truncated,
+            "remaining": budget.remaining})
+        return render_pull_followup(pull, answer)
+
+    return _answer
+
+
 def ask_with_pulls(
     ask: Callable[[str], str],
     prompt: str,

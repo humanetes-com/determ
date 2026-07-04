@@ -143,8 +143,11 @@ class PromptContextAdapter:
     detect_crate_no_std_invariant_fn: Callable[[Path], str]
 
     def ask_per_fn_body(self, prompt: str, fn_name: str, attempts_log: list[str],
-                        sig_text: str = "") -> tuple[str | None, str]:
-        return self.ask_per_fn_body_fn(prompt, fn_name, attempts_log, sig_text=sig_text)
+                        sig_text: str = "",
+                        answer_request: object = None) -> tuple[str | None, str]:
+        return self.ask_per_fn_body_fn(prompt, fn_name, attempts_log,
+                                       sig_text=sig_text,
+                                       answer_request=answer_request)
 
     def gather(self, *, file_text: str, file_rel: str, fn_name: str, sig_text: str,
                body_text: str, error_excerpt: str, container: str,

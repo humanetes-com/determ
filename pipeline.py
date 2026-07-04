@@ -1617,7 +1617,7 @@ _FILL_CARGO = CargoFillAdapter(
     env_fn=lambda: _cargo_env(),
 )
 _FILL_PROMPT = PromptContextAdapter(
-    ask_per_fn_body_fn=lambda prompt, fn, alog, sig_text="": _ask_per_fn_body(prompt, fn, alog, sig_text=sig_text),
+    ask_per_fn_body_fn=lambda prompt, fn, alog, sig_text="", answer_request=None: _ask_per_fn_body(prompt, fn, alog, sig_text=sig_text, answer_request=answer_request),
     gather_fn=lambda **kw: _FIX_CONTEXT.gather(**kw),
     collect_sibling_filled_bodies_fn=lambda ft, tfn, tc: _collect_sibling_filled_bodies(ft, tfn, tc),
     extract_crate_idioms_fn=lambda ib, fr, target_sig_text="", max_idioms=5: _extract_crate_idioms(ib, fr, target_sig_text=target_sig_text, max_idioms=max_idioms),
@@ -2318,11 +2318,12 @@ from pipeline_core.application.reconstruct.sibling_context import (  # noqa: E40
 
 def _ask_per_fn_body(
     prompt: str, fn_name: str, attempts_log: list[str],
-    sig_text: str = "",
+    sig_text: str = "", answer_request: "Any | None" = None,
 ) -> tuple[str | None, str]:
     return _ask_per_fn_body_impl(
         _ASK_CLIENT, prompt, fn_name, attempts_log,
         sig_text=sig_text, model=_TASK2_MODEL,
+        answer_request=answer_request,
     )
 
 

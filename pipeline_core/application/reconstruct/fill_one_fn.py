@@ -12,6 +12,7 @@ target tree (under `ctx.splice_check_lock`) and reports the outcome as a
 """
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -30,10 +31,16 @@ from pipeline_core.application.reconstruct.fill_rules import (
     make_failed_attempt_body,
     module_of,
 )
+from pipeline_core.application.reconstruct.pull_resolver import (
+    PullSources,
+    make_request_answerer,
+    workspace_file_reader,
+)
 from pipeline_core.domain.cfg import filter_cfg_inactive_branches
 from pipeline_core.domain.model_notes import errorimpl_object_note, is_errorimpl_container
 from pipeline_core.domain.models import FillResult, FnLocator, Stub
 from pipeline_core.domain.refine import FloorStall
+from pipeline_core.domain.type_refs import types_referenced_in_text
 from pipeline_core.ports.fill_engine import (
     Cargo,
     EngineTelemetry,
@@ -48,6 +55,8 @@ from pipeline_core.prompts.per_fn import (
     build_per_fn_fix_prompt,
     build_per_fn_prompt,
 )
+from pipeline_core.prompts.pull_menu import pull_menu_section
+from pipeline_core.prompts.sections import format_type_for_prompt
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,6 +155,27 @@ class FillOneFn:
         # from the last gather so the exhaustion retro can redirect to a frozen
         # bound's trait method instead of mis-routing to GENUINELY_HARD.
         retro_bound_methods = ""
+        # P2 pulls for the per-fn ladder: bounded typed requests; a bodyless
+        # reply with a <REQUEST .../> re-asks the SAME rung with the answer.
+        _pull_menu = ""
+        _answerer = None
+        if os.getenv("CONTEXT_PULLS", "1") != "0":
+            _max_pulls = int(os.getenv("CONTEXT_PULLS_MAX", "2"))
+            _pull_sources = PullSources(
+                read_file=workspace_file_reader(ctx.target_src_dir),
+                find_tests=lambda name: "\n\n".join(
+                    f"// {p}\n{t}" for p, t in self.tests.find_tests_for_fn(
+                        ctx.tests_dir_files, name)),
+                type_def=lambda name: "\n\n".join(
+                    format_type_for_prompt(r) for r in
+                    types_referenced_in_text(name, ctx.crate_type_records)[:3]),
+                full_error=lambda: error_excerpt,   # this fn's latest error
+            )
+            _pull_menu = pull_menu_section(
+                _pull_sources.available_kinds(), _max_pulls)
+            _answerer = make_request_answerer(
+                _pull_sources, log=self.tel.log, emit=self.tel.emit,
+                max_pulls=_max_pulls)
         # P2: history of (body, error_sig, outcome) for THIS fn's fix loop.
         # Surfaced to the model in subsequent fix prompts so it sees the
         # search space it has already explored.
@@ -223,7 +253,8 @@ class FillOneFn:
                 )
 
             body, last_response = self.prompt.ask_per_fn_body(
-                prompt, fn_name, attempts_log, sig_text=sig_text)
+                prompt + _pull_menu, fn_name, attempts_log,
+                sig_text=sig_text, answer_request=_answerer)
             if body is None:
                 # Model gave no usable response — stop retrying this fn.
                 self.tel.emit("phase_c.fn.fill.skip", data={
