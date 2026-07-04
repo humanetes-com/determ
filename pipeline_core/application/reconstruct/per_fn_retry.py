@@ -9,6 +9,7 @@ harness-testable without monkeypatching module globals.
 """
 from __future__ import annotations
 
+import os
 import shlex
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -106,8 +107,8 @@ def run_task3_inline_retry(
     initial_test_output: str,
     cluster: Any,
     *,
-    max_stalls: int,
-    hard_cap: int,
+    max_stalls: int | None = None,
+    hard_cap: int | None = None,
     deps: Task3RetryDeps,
 ) -> tuple[bool, str]:
     """Improvement-driven retry over a failed task3. Returns (passed, final_output).
@@ -121,6 +122,13 @@ def run_task3_inline_retry(
     scripted-model monkeypatch seams).
     """
     _ = iteration  # signature-compat; not used by the retry policy
+    # Env knobs read per call (tests set them via monkeypatch.setenv).
+    if os.getenv("TASK3_INLINE_RETRY", "1") == "0":
+        return False, initial_test_output
+    if max_stalls is None:
+        max_stalls = int(os.getenv("TASK3_INLINE_MAX_STALLS", "3"))
+    if hard_cap is None:
+        hard_cap = int(os.getenv("TASK3_INLINE_HARD_CAP", "10"))
     # R9 residual: be CLUSTER-AWARE. task3 runs each cluster with its own toolchain
     # + env_extra (RUSTFLAGS/cfg); the failing cluster is threaded in so the retry
     # reproduces THAT cluster's build under THAT env — the global cargo env would

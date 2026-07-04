@@ -457,7 +457,7 @@ from pipeline_core.prompts import shaping as _shaping
 from pipeline_core.prompts.crate_idioms import (
     extract_crate_idioms as _extract_crate_idioms,
 )
-from pipeline_core.prompts.per_fn import (
+from pipeline_core.prompts.per_fn import (  # noqa: F401  (smoke pin: test_pipeline_smoke uses pipeline._build_per_fn_fix_prompt)
     build_per_fn_fix_prompt as _build_per_fn_fix_prompt,
 )
 from pipeline_core.prompts.per_impl import (
@@ -1552,6 +1552,7 @@ _CFG = _CompositionConfig(
     no_improvement_threshold=NO_IMPROVEMENT_THRESHOLD,
     genesis_audit_interval=GENESIS_AUDIT_INTERVAL,
     module_plateau_abort=int(os.getenv("MODULE_PLATEAU_ABORT", "10")),
+    test_timeout=TEST_TIMEOUT,
 )
 # Phase 3 S3.5-10: resident pipeline helpers the migrated deps need, late-binding.
 _HELPERS = _Helpers(
@@ -1575,6 +1576,11 @@ _HELPERS = _Helpers(
     build_gen_tests_decl=lambda *a, **k: _build_gen_tests_decl(*a, **k),
     cluster_cfg_attr=lambda *a, **k: _cluster_cfg_attr(*a, **k),
     has_gen_tests_decl=lambda *a, **k: _has_gen_tests_decl(*a, **k),
+    run_cargo_check_diag=lambda *a, **k: _run_cargo_check_diag(*a, **k),
+    attribute_failures=lambda *a, **k: _attribute_failures(*a, **k),
+    frontier_from_diags=lambda *a, **k: _frontier_from_diags(*a, **k),
+    build_test_reverse_map=lambda *a, **k: _build_test_reverse_map(*a, **k),
+    filter_test_targets=lambda *a, **k: _filter_test_targets(*a, **k),
 )
 # Phase 3 S3.4: TASK-1→4 reconstruction role callables, late-binding (the wrapped
 # fns are defined later in this module; lambdas resolve them at call time).
@@ -3606,50 +3612,15 @@ def _task3_inline_retry(
     initial_test_output: str,
     cluster: "BuildCluster | None" = None,
 ) -> tuple[bool, str]:
-    """Composition-root shim -> per_fn_retry.run_task3_inline_retry (chunk H).
-    Builds the deps fresh per call, binding the resident cargo / attribution /
-    enumeration / per-fn-fix collaborators by name so the scripted-cargo /
+    """Composition-root shim -> per_fn_retry.run_task3_inline_retry (chunk H,
+    deps migrated into build_app in S27). The deps' fill-role adapters +
+    Helpers lambdas late-bind the module globals, so the scripted-cargo /
     scripted-model monkeypatch seams (test_e2e_build_fix / test_e2e_routing)
-    still intercept at call time. The orchestration itself lives in pipeline_core.
+    still intercept at call time; env knobs are read per call in pipeline_core.
     """
-    if os.getenv("TASK3_INLINE_RETRY", "1") == "0":
-        return False, initial_test_output
-    _deps = _per_fn_retry.Task3RetryDeps(
-        cargo=_per_fn_retry.Task3Cargo(
-            env=_cargo_env,
-            run=_run_cargo,
-            check_diag=_run_cargo_check_diag,
-        ),
-        attribution=_per_fn_retry.Task3Attribution(
-            attribute_failures=_attribute_failures,
-            build_test_reverse_map=_build_test_reverse_map,
-            frontier_from_diags=_frontier_from_diags,
-            filter_test_targets=_filter_test_targets,
-        ),
-        enumerator=_per_fn_retry.Task3Enumerate(
-            cluster_filter_type_methods=_cluster_filter_type_methods,
-            enumerate_types=_enumerate_types_via_extractor,
-            fn_container_index=_fn_container_index,
-        ),
-        retry_fix=_per_fn_retry.RetryDeps(
-            locate_fn=_locate_fn,
-            gather_fix_context=lambda **kw: _FIX_CONTEXT.gather(**kw),
-            build_per_fn_fix_prompt=_build_per_fn_fix_prompt,
-            ask_per_fn_body=_ask_per_fn_body,
-            splice_fn_body=_splice_fn_body,
-            find_tests_for_fn=_find_tests_for_fn,
-            focus_cargo_errors=lambda out, rel_f: _focus_cargo_errors(out, rel_f, max_chars=_FIX_ERR_CAP),
-            is_gen_tests_file=_is_gen_tests_file,
-            log=_log,
-        ),
-        log=_log,
-        test_timeout=TEST_TIMEOUT,
-    )
     return _per_fn_retry.run_task3_inline_retry(
         project_dir, test_command, iteration, initial_test_output, cluster,
-        max_stalls=int(os.getenv("TASK3_INLINE_MAX_STALLS", "3")),
-        hard_cap=int(os.getenv("TASK3_INLINE_HARD_CAP", "10")),
-        deps=_deps)
+        deps=_APP.task3_retry_deps)
 
 
 def task3(project_dir, test_command, iteration, output_dir, genesis_path):

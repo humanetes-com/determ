@@ -14,6 +14,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from pipeline_core.adapters import Adapters
 from pipeline_core.adapters.artifacts import WorkspaceArtifacts, load_api_surface
@@ -55,6 +56,13 @@ from pipeline_core.application.gen_tests_reattach import ReattachDeps
 from pipeline_core.application.orchestrator import LockDeps
 from pipeline_core.application.reconstruct.failure_analysis import FailureAnalysisStep
 from pipeline_core.application.reconstruct.module_reconstructor import ModuleReconstructor
+from pipeline_core.application.reconstruct.per_fn_retry import (
+    RetryDeps,
+    Task3Attribution,
+    Task3Cargo,
+    Task3Enumerate,
+    Task3RetryDeps,
+)
 from pipeline_core.application.reconstruct.reconstruction_step import ReconstructionStep
 from pipeline_core.application.reconstruct.requirements_phase import RequirementsPhase
 from pipeline_core.application.reconstruct.retrospective import PhaseCRetroDeps
@@ -67,6 +75,7 @@ from pipeline_core.domain.cluster_scope import ClusterScope
 from pipeline_core.domain.models import TypeRecord
 from pipeline_core.domain.run_state import RunState
 from pipeline_core.io import read, write
+from pipeline_core.prompts.per_fn import build_per_fn_fix_prompt
 from pipeline_core.settings import Settings
 
 
@@ -110,6 +119,7 @@ class CompositionConfig:
     no_improvement_threshold: int
     genesis_audit_interval: int
     module_plateau_abort: int
+    test_timeout: int
 
 
 @dataclass(frozen=True)
@@ -166,6 +176,13 @@ class Helpers:
     build_gen_tests_decl: Callable[..., str]
     cluster_cfg_attr: Callable[..., str]
     has_gen_tests_decl: Callable[..., bool]
+    # task3 inline-retry collaborators (S27) — resident shims over pipeline-side
+    # bound deps (_ATTR_DEPS, ADAPTERS.cargo); the first three are e2e seams.
+    run_cargo_check_diag: Callable[..., tuple[int, str, list[Any]]]
+    attribute_failures: Callable[..., Any]
+    frontier_from_diags: Callable[..., Any]
+    build_test_reverse_map: Callable[..., Any]
+    filter_test_targets: Callable[..., Any]
 
 
 @dataclass(frozen=True)
@@ -237,6 +254,7 @@ class App:
     telemetry: LogTelemetry                    # injected (S23)
     requirements_phase: RequirementsPhase      # (S17) — read by main()
     module_reconstructor: ModuleReconstructor  # (S20) — read by main()
+    task3_retry_deps: Task3RetryDeps           # task3 inline retry (S27)
 
 
 def build_app(
@@ -373,4 +391,40 @@ def build_app(
         telemetry=telemetry,
         requirements_phase=requirements_phase,
         module_reconstructor=module_reconstructor,
+        # S27: task3 inline-retry deps — composed from the fill-role adapters
+        # (whose lambdas late-bind the pipeline globals, so the scripted-cargo/
+        # scripted-model e2e seams intercept at call time) + the Helpers shims
+        # for the attribution/diag collaborators the fill roles don't carry.
+        task3_retry_deps=Task3RetryDeps(
+            cargo=Task3Cargo(
+                env=fill_roles.cargo.env,
+                run=fill_roles.cargo.run,
+                check_diag=helpers.run_cargo_check_diag,
+            ),
+            attribution=Task3Attribution(
+                attribute_failures=helpers.attribute_failures,
+                build_test_reverse_map=helpers.build_test_reverse_map,
+                frontier_from_diags=helpers.frontier_from_diags,
+                filter_test_targets=helpers.filter_test_targets,
+            ),
+            enumerator=Task3Enumerate(
+                cluster_filter_type_methods=fill_roles.ws.cluster_filter_type_methods,
+                enumerate_types=helpers.enumerate_types,
+                fn_container_index=fill_roles.ws.fn_container_index,
+            ),
+            retry_fix=RetryDeps(
+                locate_fn=fill_roles.mut.locate_fn,
+                gather_fix_context=fill_roles.prompt.gather,
+                build_per_fn_fix_prompt=build_per_fn_fix_prompt,
+                ask_per_fn_body=fill_roles.prompt.ask_per_fn_body,
+                splice_fn_body=fill_roles.mut.splice_fn_body,
+                find_tests_for_fn=fill_roles.tests.find_tests_for_fn,
+                focus_cargo_errors=lambda out, rel_f: fill_roles.cargo.focus_errors(
+                    out, rel_f, max_chars=cfg.fix_err_cap),
+                is_gen_tests_file=fill_roles.ws.is_gen_tests_file,
+                log=ports.log,
+            ),
+            log=ports.log,
+            test_timeout=cfg.test_timeout,
+        ),
     )

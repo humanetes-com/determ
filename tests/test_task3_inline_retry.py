@@ -62,6 +62,27 @@ def test_build_mode_no_reproducible_diags_bails(tmp_path: Path) -> None:
     assert out == initial
 
 
+def test_env_gate_disables_retry(tmp_path: Path, monkeypatch) -> None:
+    """TASK3_INLINE_RETRY=0 short-circuits before touching any collaborator
+    (the gate moved from the pipeline.py shim into the use-case, S27)."""
+    monkeypatch.setenv("TASK3_INLINE_RETRY", "0")
+    initial = _failed(1)
+    passed, out = run_task3_inline_retry(
+        tmp_path, "cargo test", 1, initial, None, deps=_deps())
+    assert passed is False and out == initial
+
+
+def test_env_default_stall_knobs(tmp_path: Path, monkeypatch) -> None:
+    """Omitted max_stalls/hard_cap read TASK3_INLINE_* per call."""
+    monkeypatch.setenv("TASK3_INLINE_MAX_STALLS", "1")
+    (tmp_path / "src").mkdir()
+    initial = "error: could not compile (no FAILED test lines)\n"
+    deps = _deps(check_diag=lambda *a, **k: (1, "", []))  # build mode, no diags
+    passed, out = run_task3_inline_retry(
+        tmp_path, "cargo test", 1, initial, None, deps=deps)
+    assert passed is False and out == initial
+
+
 def test_test_mode_passes_immediately(tmp_path: Path) -> None:
     (tmp_path / "src").mkdir()
     (tmp_path / "tests").mkdir()
