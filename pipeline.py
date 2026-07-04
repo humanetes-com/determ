@@ -287,12 +287,6 @@ from pipeline_core.composition import build_app as _build_app
 from pipeline_core.domain import cfg as _cfg
 from pipeline_core.domain import model_report as _model_report
 from pipeline_core.domain import test_count as _tc
-from pipeline_core.domain.bound_methods import (
-    format_bound_methods_section as _format_bound_methods_section,
-)
-from pipeline_core.domain.bound_methods import (
-    select_bound_provider_traits as _select_bound_provider_traits,
-)
 from pipeline_core.domain.cargo_toml import cargo_default_features as _domain_cargo_default_features
 from pipeline_core.domain.cargo_toml import cargo_entry_point_paths as _domain_cargo_entry_point_paths
 from pipeline_core.domain.cargo_toml import cargo_is_proc_macro as _domain_cargo_is_proc_macro
@@ -455,9 +449,6 @@ from pipeline_core.domain.text import (
 from pipeline_core.domain.text import (
     strip_markdown_fences as _strip_markdown_fences,
 )
-from pipeline_core.domain.type_refs import (
-    types_referenced_in_text as _types_referenced_in_text,
-)
 from pipeline_core.io import read, write
 from pipeline_core.ports import structure as _structure_port
 from pipeline_core.ports.augment import TestAugmentor
@@ -479,9 +470,6 @@ from pipeline_core.prompts.repo_spec import (
 )
 from pipeline_core.prompts.sections import (
     build_dispatch_family_section as _build_dispatch_family_section_pure,
-)
-from pipeline_core.prompts.sections import (
-    format_type_for_prompt as _format_type_for_prompt,
 )
 from pipeline_core.prompts.sections import (
     gotchas_for_error as _gotchas_for_error,
@@ -1637,7 +1625,7 @@ _FILL_CARGO = CargoFillAdapter(
 )
 _FILL_PROMPT = PromptContextAdapter(
     ask_per_fn_body_fn=lambda prompt, fn, alog, sig_text="": _ask_per_fn_body(prompt, fn, alog, sig_text=sig_text),
-    gather_fn=lambda **kw: _gather_fn_fix_context(**kw),
+    gather_fn=lambda **kw: _FIX_CONTEXT.gather(**kw),
     collect_sibling_filled_bodies_fn=lambda ft, tfn, tc: _collect_sibling_filled_bodies(ft, tfn, tc),
     extract_crate_idioms_fn=lambda ib, fr, target_sig_text="", max_idioms=5: _extract_crate_idioms(ib, fr, target_sig_text=target_sig_text, max_idioms=max_idioms),
     collect_crate_macros_fn=lambda sd: _collect_crate_macros(sd),
@@ -2499,7 +2487,7 @@ _IMPL_FILL_DEPS = _impl_fill.ImplFillDeps(
     emit=lambda *a, **k: _emit(*a, **k),
     enumerate_types_via_extractor=lambda *a, **k: _enumerate_types_via_extractor(*a, **k),
     extract_crate_idioms=lambda *a, **k: _extract_crate_idioms(*a, **k),
-    extract_impl_where_clause=lambda *a, **k: _extract_impl_where_clause(*a, **k),
+    extract_impl_where_clause=lambda *a, **k: impl_where_clause(*a, **k),
     filter_model_notes_for_prompt=lambda *a, **k: _filter_model_notes_for_prompt(*a, **k),
     find_tests_referencing_fn=lambda *a, **k: _find_tests_referencing_fn(*a, **k),
     focus_cargo_errors=lambda *a, **k: _focus_cargo_errors(*a, **k),
@@ -2518,8 +2506,8 @@ _IMPL_FILL_DEPS = _impl_fill.ImplFillDeps(
     scan_unimplemented_records_for_cluster=lambda *a, **k: _scan_unimplemented_records_for_cluster(*a, **k),
     splice_fn_with_where=lambda *a, **k: _splice_fn_with_where(*a, **k),
     splice_lock_for=lambda *a, **k: _splice_lock_for(*a, **k),
-    types_section_for_fix=lambda *a, **k: _types_section_for_fix(*a, **k),
-    bound_methods_section_for=lambda *a, **k: _bound_methods_section_for(*a, **k),
+    types_section_for_fix=lambda *a, **k: _FIX_CONTEXT.types_section_for_fix(*a, **k),
+    bound_methods_section_for=lambda *a, **k: _FIX_CONTEXT.bound_methods_section_for(*a, **k),
     u2_test_gate=lambda *a, **k: _u2_test_gate(*a, **k),
     ask=_ASK_CLIENT.ask,
     failed_body_cap=_BUDGETS.failed_body,
@@ -2530,6 +2518,7 @@ _IMPL_FILL_DEPS = _impl_fill.ImplFillDeps(
 
 
 import pipeline_core.application.reconstruct.cargo_errors as _reconstruct_cargo_errors  # noqa: E402
+import pipeline_core.application.reconstruct.fix_context as _fix_context  # noqa: E402
 import pipeline_core.application.reconstruct.splice as _reconstruct_splice  # noqa: E402
 
 # Leaf-first GROUP ordering stays aliased (used by the per-impl path); the per-fn
@@ -2568,7 +2557,6 @@ from pipeline_core.application.reconstruct.phase_c_engine import (  # noqa: E402
 from pipeline_core.application.reconstruct.scheduling import (
     group_priority_levels as _group_priority_levels,  # noqa: E402,F401
 )
-from pipeline_core.domain.models import FnFixContext as _FnFixContext  # noqa: E402
 from pipeline_core.prompts.per_fn import build_per_fn_prompt as _build_per_fn_prompt  # noqa: E402,F401
 
 # S21: the fill-engine role adapters (`_FILL_*`) + `_STRUCTURE` are built BEFORE
@@ -2691,30 +2679,6 @@ def _cluster_filter_type_methods(
 
 
 
-def _types_section_for_fix(
-    sig_text: str,
-    body_text: str,
-    error_excerpt: str,
-    container: str,
-    impl_where: str,
-    type_records: "list[TypeRecord]",
-) -> str:
-    """TYPES_IN_SCOPE for retry/fix prompts (P5.1 parity). Selects from
-    everything that can name a type at fix time — the signature, the
-    enclosing impl header (+ where clause), the CURRENT body (names the
-    types the previous attempt actually manipulated), and the error
-    text — then formats and caps like the initial-fill path."""
-    search = "\n".join([
-        sig_text or "", container or "", impl_where or "",
-        body_text or "", error_excerpt or "",
-    ])
-    recs = _types_referenced_in_text(search, type_records)[:_BUDGETS.types_count]
-    full = "\n\n".join(_format_type_for_prompt(r) for r in recs)
-    if len(full) > _BUDGETS.types_section:  # Plan 9 F5: surface starvation
-        _guard("phase-c/types_truncated",
-               f"{(container or sig_text)[:50]}: type context {len(full):,} > "
-               f"cap {_BUDGETS.types_section:,} ({len(recs)} types)")
-    return full[:_BUDGETS.types_section]
 
 
 def _fn_container_index(src_dir: Path) -> dict[FnLocator, str]:
@@ -2732,74 +2696,15 @@ def _fn_container_index(src_dir: Path) -> dict[FnLocator, str]:
     return idx
 
 
-def _bound_methods_section_for(
-    impl_where: str, type_records: "list[TypeRecord]",
-) -> str:
-    """Corrected R2/R3 (debt #28): name the methods the fn's FROZEN where-bounds
-    make callable, so the body uses a bound-provided trait method instead of a
-    mis-bound free constructor. Resolves which in-scope TRAIT records the
-    `where` clause references (structured name match, not regex), filters to
-    provider traits, and renders via the pure domain formatter. "" when none."""
-    if not impl_where.strip() or not type_records:
-        return ""
-    referenced = _types_referenced_in_text(impl_where, type_records)
-    providers = _select_bound_provider_traits(referenced)
-    return _format_bound_methods_section(impl_where, providers)
+# Per-fn fix-prompt sections — the assembler use-case (god-file shrink,
+# 2026-07-04); lambdas late-bind the notes store + guard for test seams.
+_FIX_CONTEXT: _fix_context.FixContextAssembler = _fix_context.FixContextAssembler(
+    budgets=_BUDGETS,
+    filter_notes=lambda *a, **k: _filter_model_notes_for_prompt(*a, **k),
+    guard=lambda *a: _guard(*a),
+)
 
 
-def _gather_fn_fix_context(
-    *,
-    file_text: str,
-    file_rel: str,
-    fn_name: str,
-    sig_text: str,
-    body_text: str,
-    error_excerpt: str,
-    container: str,
-    type_records: "list[TypeRecord]",
-    fr_path: "Path | None" = None,
-) -> _FnFixContext:
-    """Assemble the fix-prompt context for one fn: impl where-clause from the
-    file, TYPES_IN_SCOPE from everything that names a type at fix time, and
-    the relevance-filtered model notes (empty when `fr_path` is None).
-
-    Returns the domain `FnFixContext` directly (debt #13): this composition-root
-    helper stays in pipeline.py — it's prompts-layer + fr_path I/O — but its
-    result is the pure VO the fill use-cases consume, so the adapter no longer
-    remaps a pipeline-local twin per attempt. One place still derives every
-    injectable section, so a site can't silently omit one."""
-    impl_where = _extract_impl_where_clause(file_text, container)
-    types_section = _types_section_for_fix(
-        sig_text, body_text, error_excerpt, container, impl_where,
-        type_records)
-    bound_methods_section = _bound_methods_section_for(impl_where, type_records)
-    notes_section = ""
-    if fr_path is not None:
-        notes_section = _filter_model_notes_for_prompt(
-            fr_path, file_rel=file_rel, fn_name=fn_name,
-            file_text=file_text, current_error=error_excerpt,
-        )
-    return _FnFixContext(
-        container=container, impl_where=impl_where,
-        types_section=types_section, notes_section=notes_section,
-        bound_methods_section=bound_methods_section,
-    )
-
-
-def _extract_impl_where_clause(file_text: str, container: str) -> str:
-    """For a fn whose container is `impl ... for ...` or `impl ...`,
-    locate the impl block in `file_text` and return its `where` clause
-    (or empty string if absent / not found).
-
-    The syn extractor records the container header but drops the
-    `where` clause. Bounds like `where E: ext::StdError` are critical
-    for picking the right TYPES_IN_SCOPE entries — they tell us which
-    trait's methods are callable on the generic parameter.
-
-    Thin shim over `domain.impl_block_ranges.impl_where_clause` (P7: the
-    old regex locator was replaced by the comment/string-aware brace scanner).
-    """
-    return impl_where_clause(file_text, container)
 
 
 def _enumerate_fns_via_extractor(src_dir: Path) -> list[dict] | None:
@@ -3728,7 +3633,7 @@ def _task3_inline_retry(
         ),
         retry_fix=_per_fn_retry.RetryDeps(
             locate_fn=_locate_fn,
-            gather_fix_context=_gather_fn_fix_context,
+            gather_fix_context=lambda **kw: _FIX_CONTEXT.gather(**kw),
             build_per_fn_fix_prompt=_build_per_fn_fix_prompt,
             ask_per_fn_body=_ask_per_fn_body,
             splice_fn_body=_splice_fn_body,
