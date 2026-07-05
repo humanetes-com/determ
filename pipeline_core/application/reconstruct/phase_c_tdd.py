@@ -50,6 +50,30 @@ class PhaseCTddDeps:
     task2_fill_fns_one_by_one: Callable[..., Any]
 
 
+def _log_attribution_gap(
+    deps: PhaseCTddDeps, tag: str, iter_n: int, fail_count: int,
+    cur_failed: set[str], frontier_size: int, kind: str,
+) -> None:
+    """Diagnose a give-up iter where tests still fail but no fn was targeted.
+
+    Disambiguates the ways attribution can silently starve the loop:
+      parsed==0                → parse_failed_tests couldn't read the names (parser gap)
+      parsed>0 & candidates==0 → names parsed fine but NO attribution path
+                                 (behavioral/reverse-map) mapped them to a fn
+      parsed>0 & candidates>0  → candidates existed but all exhaustion-filtered (D3)
+    Prints the failing names so we can see which fns should have been re-filled.
+    """
+    if fail_count <= 0:
+        return
+    names = sorted(cur_failed)
+    sample = ", ".join(names[:12]) + (" …" if len(names) > 12 else "")
+    deps.log(
+        f"  {tag} [phase-c/tdd] iter {iter_n}: ATTRIBUTION GAP — "
+        f"{fail_count} test(s) fail, parsed={len(names)} name(s), "
+        f"candidates(pre-exhaust-filter)={frontier_size} (last kind={kind}). "
+        f"failing: {sample or '(none parsed)'}")
+
+
 def run_phase_c_tdd(
     deps: PhaseCTddDeps,
     *, project_dir: Path,
@@ -306,6 +330,8 @@ def run_phase_c_tdd(
                  f"({len(eligible)} fn(s) still on frontier — will be "
                  "marked exhausted). best pass="
                  f"{best_pass} fail={best_fail}.")
+            _log_attribution_gap(deps, tag, iter_n, fail_count, cur_failed,
+                                 len(frontier), kind)
             for _stuck_key in eligible:
                 permanently_exhausted.add(_stuck_key)
             deps.emit("phase_c.tdd.iter", data={
@@ -320,6 +346,8 @@ def run_phase_c_tdd(
                  f"frontier this iter but stall={stall}/{max_stalls} — "
                  f"continuing (pass={pass_count}, fail={fail_count}, "
                  f"improved={improved}).")
+            _log_attribution_gap(deps, tag, iter_n, fail_count, cur_failed,
+                                 len(frontier), kind)
             deps.emit("phase_c.tdd.iter", data={
                 "cluster": cluster.name, "iter": iter_n, "rc": rc,
                 "frontier_size": 0, "kind": "no_frontier_continue",
