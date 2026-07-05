@@ -440,6 +440,19 @@ def _phase_c_panel_rows(state: dict[str, Any]) -> list[str]:
         _bar = "█" * _filled + "░" * (_bar_w - _filled)
         rows.append(f"           progress  [{_bar}]  {_done_this_pass}/{_pt} ({int(_pct * 100)}%)")
 
+    # TDD-native frontier bar: live under the tdd driver (where the classic
+    # pass.start fields above aren't set). Denominator = this iter's frontier;
+    # numerator = per-fn + impl-block fills done/failed since the iter began.
+    _fro = state.get("tdd_frontier")
+    if _fro:
+        _fd = (state.get("iter_fills_done", 0) or 0) + (state.get("iter_fills_failed", 0) or 0)
+        _fpct = min(1.0, _fd / _fro) if _fro else 0.0
+        _fw = 28
+        _ff = int(_fw * _fpct)
+        _fbar = "█" * _ff + "░" * (_fw - _ff)
+        rows.append(f"           frontier [{_fbar}]  {_fd}/{_fro} "
+                    f"({int(_fpct * 100)}%)  iter {state.get('tdd_iter', '?')}")
+
     first = state.get("fills_first", 0)
     rec = state.get("fills_recovered", 0)
     failed = state.get("fills_failed", 0)
@@ -452,10 +465,22 @@ def _phase_c_panel_rows(state: dict[str, Any]) -> list[str]:
                 f"{dim(f'⊘ skip={skip}')}  "
                 f"{dim(f'(done={total_done})')}")
     notes = state.get("notes", 0)
-    cur_fn = state.get("current_fn")
-    cur_att = state.get("current_attempt") or 0
-    cur_str = f"{cur_fn} (attempt {cur_att})" if cur_fn else dim("idle")
-    rows.append(f"           current  {cyan(cur_str)}   notes={notes}")
+    # In-flight fills — the parallel set (up to PIPELINE_PARALLELISM at once),
+    # longest-running first (the block eating the iter). ↻ = behavioral re-fill,
+    # ⊞ = impl block, plain = per-fn; each annotated with elapsed.
+    flight = state.get("in_flight") or []
+    if flight:
+        _ifb = []
+        for u in flight[:4]:
+            _a = u.get("age_s")
+            _age = ("?" if _a is None else f"{_a}s" if _a < 60 else f"{_a // 60}m")
+            _tag = "↻" if u.get("refill") else ("⊞" if u.get("kind") == "impl" else "")
+            _lab = (u.get("label") or "?").splitlines()[0][:30]
+            _ifb.append(f"{_tag}{_lab}({_age})")
+        _more = f"  +{len(flight) - 4}" if len(flight) > 4 else ""
+        rows.append(f"           in-flight {cyan('  '.join(_ifb))}{dim(_more)}   notes={notes}")
+    else:
+        rows.append(f"           in-flight {dim('idle')}   notes={notes}")
     hot = state.get("hot_fn")
     if hot:
         rows.append(f"           hot fn   {dim(hot[0])} ({hot[1]} attempts)")

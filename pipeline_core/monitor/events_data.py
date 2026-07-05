@@ -13,7 +13,6 @@ from __future__ import annotations
 import contextlib
 import json as _json
 import os
-import re
 import subprocess
 import time
 from collections.abc import Callable
@@ -253,6 +252,17 @@ def coverage_from_events() -> str:
         return ""
 
 
+def _record_error_codes(out: dict[str, Any], d: dict[str, Any]) -> None:
+    """Tally the rustc E-codes on a fill-fail event. Prefers the structured
+    `error_codes` field (emitted by the fill engine); no regex."""
+    codes = d.get("error_codes") or []
+    if not codes:
+        return
+    out["last_error_code"] = codes[0]
+    for c in codes:
+        out["err_codes"][c] = out["err_codes"].get(c, 0) + 1
+
+
 def phase_c_state() -> dict[str, Any]:
     """Roll up Phase C per-fn events into a dashboard summary.
 
@@ -271,6 +281,14 @@ def phase_c_state() -> dict[str, Any]:
         "pass_stubs_total": 0,
         "pass_fills_done": 0,
         "pass_fills_failed": 0,
+        # Per-tdd-iter frontier progress (denominator = tdd_frontier). Reset each
+        # phase_c.tdd.iter; incremented by BOTH per-fn and impl-block fills so the
+        # bar is live under the tdd driver (where pass.start fields aren't set).
+        "iter_fills_done": 0,
+        "iter_fills_failed": 0,
+        # In-flight fills (parallel — up to PIPELINE_PARALLELISM at once): each is
+        # {label, kind: fn|impl, refill, age_s, file}. The set, not one cursor.
+        "in_flight": [],
         # Cumulative progress denominator (total fns in cluster scope).
         "total_fns_in_cluster": 0,
         # Authoritative cluster-scope filled count emitted by pass.start.
@@ -299,7 +317,8 @@ def phase_c_state() -> dict[str, Any]:
     out["active"] = True
 
     fn_attempts: dict[str, int] = {}
-    in_flight_fn: str | None = None
+    # label -> {kind, refill, start_iso, file}; parallel fills coexist here.
+    in_flight_units: dict[str, dict[str, Any]] = {}
     last_ts_iso: str | None = None
     for e in events:
         ev = e["event"]
@@ -335,37 +354,62 @@ def phase_c_state() -> dict[str, Any]:
             out["filled_count_at_pass_start"] = int(d.get("filled_count", 0))
             out["all_stubs_remaining_at_pass_start"] = int(d.get("all_stubs_remaining", 0))
         elif ev == "phase_c.fn.fill.start":
-            in_flight_fn = d.get("fn")
+            fn = d.get("fn") or "?"
+            in_flight_units[fn] = {
+                "kind": "fn", "refill": bool(d.get("refill")),
+                "start_iso": e.get("ts"), "file": d.get("file"),
+            }
             out["cluster"] = d.get("cluster") or out["cluster"]
         elif ev == "phase_c.fn.fill.done":
             fn = d.get("fn") or "?"
             attempts = d.get("fix_attempts", 1)
             out["fills_done"] += 1
             out["pass_fills_done"] = out.get("pass_fills_done", 0) + 1
+            out["iter_fills_done"] = out.get("iter_fills_done", 0) + 1
             if d.get("recovered"):
                 out["fills_recovered"] += 1
             else:
                 out["fills_first"] += 1
             fn_attempts[fn] = fn_attempts.get(fn, 0) + attempts
             out["recent_fills"].append((fn, d.get("body_chars", 0), attempts))
-            in_flight_fn = None
+            in_flight_units.pop(fn, None)
         elif ev == "phase_c.fn.fill.fail":
             fn = d.get("fn") or "?"
             attempts = d.get("fix_attempts", 0)
             out["fills_failed"] += 1
             out["pass_fills_failed"] = out.get("pass_fills_failed", 0) + 1
+            out["iter_fills_failed"] = out.get("iter_fills_failed", 0) + 1
             fn_attempts[fn] = fn_attempts.get(fn, 0) + attempts
-            in_flight_fn = None
-            # Current/last error class — extract the rustc code the model is
-            # fighting, from the failed attempt's error preview.
-            _m = re.findall(r"E\d{4}", d.get("last_error_preview") or "")
-            if _m:
-                out["last_error_code"] = _m[0]
-                for _c in _m:
-                    out["err_codes"][_c] = out["err_codes"].get(_c, 0) + 1
+            in_flight_units.pop(fn, None)
+            _record_error_codes(out, d)
         elif ev == "phase_c.fn.fill.skip":
             out["fills_skipped"] += 1
-            in_flight_fn = None
+            in_flight_units.pop(d.get("fn") or "?", None)
+        elif ev == "phase_c.impl.fill.start":
+            _lbl = d.get('container') or '?'
+            in_flight_units[_lbl] = {
+                "kind": "impl", "refill": False,
+                "start_iso": e.get("ts"), "file": d.get("file"),
+                "members": int(d.get("stub_count", 0)),
+            }
+            out["cluster"] = d.get("cluster") or out["cluster"]
+        elif ev == "phase_c.impl.fill.done":
+            _lbl = d.get('container') or '?'
+            _members = int(d.get("members_filled", 0)) or 1
+            out["fills_done"] += _members
+            out["pass_fills_done"] = out.get("pass_fills_done", 0) + _members
+            out["iter_fills_done"] = out.get("iter_fills_done", 0) + _members
+            out["fills_first"] += _members
+            out["recent_fills"].append(
+                (_lbl, 0, d.get("fix_attempts", 1)))
+            in_flight_units.pop(_lbl, None)
+        elif ev == "phase_c.impl.fill.fail":
+            _lbl = d.get('container') or '?'
+            out["fills_failed"] += 1
+            out["pass_fills_failed"] = out.get("pass_fills_failed", 0) + 1
+            out["iter_fills_failed"] = out.get("iter_fills_failed", 0) + 1
+            in_flight_units.pop(_lbl, None)
+            _record_error_codes(out, d)
         elif ev == "phase_c.note.added":
             out["notes"] += 1
         elif ev == "phase_c.pass.done":
@@ -377,6 +421,11 @@ def phase_c_state() -> dict[str, Any]:
             _tcl = d.get("cluster") or out["cluster"]
             out["cluster"] = _tcl or out["cluster"]
             out["tdd_iter"] = d.get("iter", out["tdd_iter"])
+            # Fresh iter → reset the frontier progress counters and drop any
+            # in-flight units left dangling from the prior iter's sweep.
+            out["iter_fills_done"] = 0
+            out["iter_fills_failed"] = 0
+            in_flight_units.clear()
             _pc = d.get("pass_count")
             if _pc is not None:
                 out["tdd_pass"] = _pc
@@ -397,9 +446,26 @@ def phase_c_state() -> dict[str, Any]:
                 _cs["frontier"] = d.get("frontier_size", _cs["frontier"])
                 _cs["stall"] = d.get("stall", _cs["stall"])
 
-    out["current_fn"] = in_flight_fn
-    if in_flight_fn:
-        out["current_attempt"] = fn_attempts.get(in_flight_fn, 0)
+    _now = time.time()
+    _flight: list[dict[str, Any]] = []
+    for _lbl, _u in in_flight_units.items():
+        _age = None
+        if _u.get("start_iso"):
+            try:
+                _st = datetime.fromisoformat(
+                    _u["start_iso"].replace("Z", "+00:00")).timestamp()
+                _age = int(_now - _st)
+            except Exception:
+                _age = None
+        _flight.append({"label": _lbl, "kind": _u["kind"],
+                        "refill": _u.get("refill", False),
+                        "age_s": _age, "file": _u.get("file")})
+    # Longest-running first — that's the block eating the iter.
+    _flight.sort(key=lambda x: (x["age_s"] is None, -(x["age_s"] or 0)))
+    out["in_flight"] = _flight
+    if _flight:
+        out["current_fn"] = _flight[0]["label"]
+        out["current_attempt"] = fn_attempts.get(_flight[0]["label"], 0)
     if out["recent_fills"]:
         out["recent_fills"] = out["recent_fills"][-5:]
     if fn_attempts:
