@@ -747,7 +747,14 @@ def fill_impl_blocks(
                 # interdependent web, not a failure to discard. This dissolves
                 # the convergence deadlock where every correct piece is reverted
                 # for not single-handedly making rc==0.
-                if _b3_keep:
+                # debt #46 point 4: B3 keeps ONLY while the crate is RED (rc!=0),
+                # its actual purpose — accumulating prerequisites of a web that
+                # can't yet compile. When rc==0 the crate compiles and tests CAN
+                # run, so reaching here means U2 FAILED (own tests red): keeping a
+                # green-but-behaviorally-wrong body just masks it as "filled".
+                # Fall through to revert (→ stub) so the per-fn behavioral re-fill
+                # (debt #46 point 1) retries it cleanly with the failing test.
+                if _b3_keep and rc != 0:
                     _cur_sig = _cargo_err_sig_from_diagnostics(diagnostics)
                     _new_errs = _cur_sig - _baseline_sig
                     _frontier = _frontier_from_diags(diagnostics, target_src_dir)

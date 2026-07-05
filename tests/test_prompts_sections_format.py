@@ -96,3 +96,31 @@ def test_format_impl_block_free_fns_no_container():
     out = format_impl_block_for_prompt(block)
     assert "// free fns at file level" in out
     assert "[STUB]" in out
+
+
+from pipeline_core.prompts.sections import RUST_GOTCHAS, gotchas_for_error  # noqa: E402
+
+
+def test_gotcha_e0034_ambiguous_method_fires_with_fq_examples():
+    # debt #46 point 3: E0034 → fully-qualified disambiguation, WRONG→RIGHT.
+    out = gotchas_for_error("error[E0034]: multiple applicable items in scope")
+    assert "ambiguous_method_e0034" in {g["id"] for g in RUST_GOTCHAS
+                                        if any(t in "E0034 multiple applicable items"
+                                               for t in g["triggers"])}
+    assert "TraitA::len(&value)" in out and "E0034" in out
+
+
+def test_gotcha_e0599_invented_associated_ctor_fires():
+    # debt #46 point 3: E0599 `no function or associated item` → struct literal,
+    # NOT an invented `T::new`.
+    err = ("error[E0599]: no function or associated item named `new` found for "
+           "struct `ContextError<C, E>`")
+    out = gotchas_for_error(err)
+    assert "invented_associated_ctor" in {
+        g["id"] for g in RUST_GOTCHAS if any(t in err for t in g["triggers"])}
+    assert "no `new` on the struct" in out
+
+
+def test_gotcha_ids_are_unique():
+    ids = [g["id"] for g in RUST_GOTCHAS]
+    assert len(ids) == len(set(ids))

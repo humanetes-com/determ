@@ -148,6 +148,32 @@ def test_impl_b3_keeps_nonregressing_fill(monkeypatch, tmp_path):
     assert "self.tag" in text and "unimplemented!()" not in text
 
 
+def test_impl_b3_does_not_keep_green_but_test_failing_fill(monkeypatch, tmp_path):
+    # debt #46 point 4: when the crate COMPILES (rc==0) but the block's own U2
+    # test fails, B3 must NOT keep the green-but-wrong body — it reverts to stub
+    # so the per-fn behavioral re-fill retries it. B3 keeps only while rc!=0.
+    from pipeline_core.domain.models import FnLocator
+    ws = _setup(monkeypatch, tmp_path)
+    monkeypatch.setenv("PHASE_C_KEEP_NONREGRESSING", "1")
+    _install_model(monkeypatch, [RESPONSE_BOTH])
+    # Green compile, but the scoped test run reports a failing own-test.
+    install_scripted_cargo(
+        monkeypatch,
+        check_diag=(0, "", []),
+        run=(101, "test kind_works ... FAILED\n"
+                  "test result: FAILED. 0 passed; 1 failed; 0 ignored"))
+    res = pipeline._phase_c_fill_impl_blocks(
+        project_dir=ws, target_src_dir=ws / "src", tests_dir_files=[],
+        module_name="m", cluster_name="t", cluster=None, check_cmd="cargo check",
+        cluster_env={}, fr_path=None, tdd_frontier_keys=None,
+        tdd_test_cmd="cargo test",
+        tdd_frontier_tests={FnLocator("lib.rs", "kind"): {"kind_works"},
+                            FnLocator("lib.rs", "name"): {"kind_works"}})
+    text = (ws / "src" / "lib.rs").read_text()
+    assert res["impls_filled"] == 0            # NOT kept
+    assert "unimplemented!()" in text          # reverted to stub
+
+
 # --- debt #42: stale stub_members / already-filled blocks ---------------------
 
 IMPL_LIB_FILLED = IMPL_LIB.replace("unimplemented!()", "7")

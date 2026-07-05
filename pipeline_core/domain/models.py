@@ -534,6 +534,13 @@ class Stub:
     # cfg-variant fns that share file+name+container+sig (the cap_limit pair),
     # so each variant fills into its own body instead of colliding on the first.
     cfg_predicates: tuple[str, ...] = ()
+    # debt #46: a BEHAVIORAL RE-FILL target — not an `unimplemented!()` stub but
+    # an already-filled body that COMPILES yet whose attributed test fails (the
+    # B3-kept-wrong case). The fill unit then splices with `allow_nonstub=True`
+    # and seeds the prompt with the current body + failing test (fix framing),
+    # so the TDD driver can CORRECT wrong bodies, not only fill stubs. Default
+    # False = ordinary stub fill (all scanned stubs, unchanged).
+    refill: bool = False
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> Stub:

@@ -47,8 +47,10 @@ class FakeFill:
     def locate_fn_by_record(self, *a: Any) -> Any: return self.s.get("loc_rec")
     def locate_fn(self, *a: Any) -> Any: return self.s.get("loc", ("fn x()", 0, 5, 7))
     def splice_fn_body_at(self, *a: Any, **k: Any) -> SpliceOutcome:
+        self.s["last_allow_nonstub"] = k.get("allow_nonstub", False)
         return self.s.get("splice", SpliceOutcome(True, "ok", 4))
     def splice_fn_body(self, *a: Any, **k: Any) -> SpliceOutcome:
+        self.s["last_allow_nonstub"] = k.get("allow_nonstub", False)
         return self.s.get("splice", SpliceOutcome(True, "ok", 4))
     def replace_fn_signature(self, *a: Any) -> bool: return False
     def extract_signature_block(self, *a: Any) -> str | None: return None
@@ -198,6 +200,32 @@ def test_fill_one_happy_path_first_attempt(tmp_path: Path) -> None:
     assert "phase_c.fn.fill.done" in fake.events
 
 
+def test_fill_one_stub_splices_without_allow_nonstub(tmp_path: Path) -> None:
+    # debt #46: an ordinary stub fill must NOT allow_nonstub (refuse a filled body).
+    ws = _mk_ws(tmp_path)
+    fake = FakeFill(loc_rec=("pub fn answer()", 0, 5, "pub fn answer()"),
+                    splice=SpliceOutcome(True, "ok", 4),
+                    run=(0, ""), u2=None, body=("42", "RESP"))
+    res = _fill_one(fake).run(1, Stub(file="lib.rs", fn_name="answer"), ctx=_ctx(ws))
+    assert res.filled
+    assert fake.s["last_allow_nonstub"] is False
+
+
+def test_fill_one_refill_splices_with_allow_nonstub(tmp_path: Path) -> None:
+    # debt #46 point 1: a refill target replaces an already-filled body → the
+    # splice MUST pass allow_nonstub=True (else target_not_stub refuses it).
+    ws = _mk_ws(tmp_path)
+    (ws / "src" / "lib.rs").write_text("pub fn answer() {\n 0\n}\n")
+    fake = FakeFill(loc_rec=("pub fn answer()", 0, 5, "pub fn answer()"),
+                    splice=SpliceOutcome(True, "ok", 4),
+                    run=(0, ""), u2=None, body=("42", "RESP"))
+    res = _fill_one(fake).run(
+        1, Stub(file="lib.rs", fn_name="answer", refill=True), ctx=_ctx(ws))
+    assert res.filled
+    assert fake.s["last_allow_nonstub"] is True
+    assert fake.events[0] == "phase_c.fn.fill.start"
+
+
 def test_fill_one_empty_response_stops(tmp_path: Path) -> None:
     ws = _mk_ws(tmp_path)
     fake = FakeFill(loc=("pub fn answer()", 0, 16, 35), body=(None, ""))
@@ -236,3 +264,27 @@ def test_engine_per_fn_empty_cluster(tmp_path: Path) -> None:
         skip_end_pass_test=True)
     assert out["fns_filled"] == 0 and out["remaining"] == 0
     assert "phase_c.cluster.done" in fake.events
+
+
+def test_collect_refill_targets_only_filled_frontier_fns(tmp_path: Path) -> None:
+    # debt #46 point 1: a frontier fn that is NOT a stub but has a failing test
+    # becomes a refill=True target; stubs and tests-less keys are excluded.
+    from pipeline_core.domain.models import FnLocator
+    fns = [
+        {"file": "src/a.rs", "fn_name": "wrongfn", "container": "impl A",
+         "sig_text": "fn wrongfn()"},                       # filled+failing → refill
+        {"file": "src/a.rs", "fn_name": "stubfn", "sig_text": "fn stubfn()"},
+        {"file": "src/a.rs", "fn_name": "greenfn", "sig_text": "fn greenfn()"},
+    ]
+    eng = _engine(FakeFill(fns=fns), FillUnit.FN)
+    stubs = [Stub(file="src/a.rs", fn_name="stubfn", sig_text="fn stubfn()")]
+    keys = {FnLocator("src/a.rs", "wrongfn"), FnLocator("src/a.rs", "stubfn"),
+            FnLocator("src/a.rs", "greenfn")}
+    # only wrongfn + stubfn have failing tests; stubfn is still a stub → excluded.
+    tests = {FnLocator("src/a.rs", "wrongfn"): {"t1"},
+             FnLocator("src/a.rs", "stubfn"): {"t2"}}
+    out = eng._collect_refill_targets(tmp_path, stubs, keys, tests)
+    assert [(s.fn_name, s.refill) for s in out] == [("wrongfn", True)]
+    # No frontier map (legacy fn_walk driver) → never produces refill targets.
+    assert eng._collect_refill_targets(tmp_path, stubs, None, None) == []
+    assert eng._collect_refill_targets(tmp_path, stubs, keys, None) == []

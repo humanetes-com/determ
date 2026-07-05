@@ -108,6 +108,7 @@ class FillOneFn:
         # find this specific record's current location.
         loc_at = self.mut.locate_fn_by_record(file_path, fn_name, container, sig_text,
                                                rec.cfg_predicates)
+        _cur_body = ""   # debt #46: current (wrong) body for a behavioral re-fill
         if loc_at is None:
             # Fall back to regex locator (for tests-fixture path where
             # the extractor binary isn't built).
@@ -116,7 +117,9 @@ class FillOneFn:
                 return fill_skip(rec, attempts)
             sig_text = sig_text or loc[0]
         else:
-            _, _, _, sig_text = loc_at
+            _, _cbs, _cbe, sig_text = loc_at
+            if rec.refill:
+                _cur_body = snapshot[_cbs:_cbe]
         test_blocks = self.tests.find_tests_for_fn(
             ctx.tests_dir_files, fn_name,
             file_rel=rel_file, src_dir=ctx.src_for_macros,
@@ -133,6 +136,7 @@ class FillOneFn:
             "file": rel_file, "fn": fn_name,
             "tests_attached": len(test_blocks),
             "sig_chars": len(sig_text),
+            "refill": rec.refill,   # debt #46: behavioral re-fill of a wrong body
         })
         # Monotone-ratchet baseline: cluster runtime test state BEFORE this fn is
         # filled (pass_count + failing names), so a fill whose own tests pass but
@@ -156,6 +160,16 @@ class FillOneFn:
         last_response = ""
         last_body = ""
         error_excerpt = ""
+        # debt #46: a behavioral re-fill enters the loop already "in fix mode" —
+        # seed the current wrong body + a behavioral instruction so attempt 1 is
+        # a corrective fix (build_per_fn_fix_prompt) with the failing test shown,
+        # not a naive from-scratch stub fill.
+        if rec.refill:
+            last_body = _cur_body
+            error_excerpt = (
+                "This body COMPILES but its attributed test(s) below still FAIL. "
+                "Rewrite the BEHAVIOR so those test(s) pass; keep the signature "
+                "and do not reintroduce `unimplemented!()`.")
         attempts_log: list[str] = []
         first_failed_body = ""
         first_error_excerpt = ""
@@ -214,7 +228,9 @@ class FillOneFn:
             notes_section = _fn_ctx.notes_section
             _types_section_eff = _fn_ctx.types_section
             retro_bound_methods = _fn_ctx.bound_methods_section
-            if fix_attempt == 1:
+            # debt #46: a re-fill target is corrective from attempt 1 — take the
+            # fix branch (prev_body + failing test) rather than the stub-fill one.
+            if fix_attempt == 1 and not rec.refill:
                 prompt = build_per_fn_prompt(
                     file_text=cur_text, fn_name=fn_name, sig_text=sig_text,
                     test_blocks=test_blocks, module_name=ctx.module_name,
@@ -300,14 +316,18 @@ class FillOneFn:
             _lock_released = False
             _splice_loc = self.mut.locate_fn_by_record(
                 file_path, fn_name, container, sig_text, rec.cfg_predicates)
+            # debt #46: a behavioral re-fill target replaces an already-filled
+            # (compiling-but-wrong) body → the splice must accept a non-stub.
             if _splice_loc is not None:
                 _, _bs, _be, _ = _splice_loc
-                splice_out = self.mut.splice_fn_body_at(file_path, _bs, _be, body)
+                splice_out = self.mut.splice_fn_body_at(
+                    file_path, _bs, _be, body, allow_nonstub=rec.refill)
             else:
                 # Fallback: regex-based locator. Less accurate for
                 # same-name collisions but acceptable when the syn
                 # binary isn't available.
-                splice_out = self.mut.splice_fn_body(file_path, fn_name, body)
+                splice_out = self.mut.splice_fn_body(
+                    file_path, fn_name, body, allow_nonstub=rec.refill)
             ok, delta = splice_out.ok, splice_out.delta
             if not ok:
                 ctx.splice_check_lock.release()

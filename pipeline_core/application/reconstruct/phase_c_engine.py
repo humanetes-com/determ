@@ -18,7 +18,7 @@ import queue as _queue_mod
 import threading as _threading
 import time
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -77,6 +77,34 @@ class PhaseCFillEngine:
     impl_path: ImplFillPath
     fill_one: FillOneFn
     config: EngineConfig
+
+    def _collect_refill_targets(
+        self, target_src_dir: Path, stubs: list[Stub],
+        tdd_frontier_keys: set[FnLocator] | None,
+        tdd_frontier_tests: Frontier | None,
+    ) -> list[Stub]:
+        """debt #46 — frontier fns that are already FILLED (not stubs) but have a
+        failing attributed test → behavioral re-fill targets (`refill=True`).
+        Empty unless the TDD outer loop supplied both the frontier keys and the
+        failing-test map (i.e. `driver=tdd`); the legacy `fn_walk` driver has its
+        own internal test-fix loop and passes neither."""
+        if not (tdd_frontier_keys and tdd_frontier_tests):
+            return []
+        _stub_keys = {s.key for s in stubs}
+        _refill_keys = {
+            k for k in tdd_frontier_keys
+            if k not in _stub_keys and tdd_frontier_tests.get(k)
+        }
+        if not _refill_keys:
+            return []
+        out: list[Stub] = []
+        _seen: set[FnLocator] = set()
+        for r in self.ws.enumerate_fns(target_src_dir) or []:
+            rec = Stub.from_dict(r)
+            if rec.key in _refill_keys and rec.key not in _seen:
+                out.append(replace(rec, refill=True))
+                _seen.add(rec.key)
+        return out
 
     def run(
         self,
@@ -185,7 +213,16 @@ class PhaseCFillEngine:
             # Plan 4 — restrict this pass to the TDD frontier's fns when supplied.
             if tdd_frontier_keys is not None:
                 stubs = [s for s in stubs if s.key in tdd_frontier_keys]
-            if not stubs:
+            # debt #46 — behavioral RE-FILL targets: frontier fns that are NOT
+            # stubs (already filled with a compiling-but-wrong body) yet have a
+            # failing attributed test. Under `driver=tdd` these were previously
+            # dropped (stub-only enumeration) → wrong bodies were permanent. Emit
+            # them as `refill=True` Stubs so the SAME fill unit corrects them,
+            # guarded by the regression ratchet. Only when the outer loop passes
+            # the frontier's failing-test map.
+            _refill_recs = self._collect_refill_targets(
+                target_src_dir, stubs, tdd_frontier_keys, tdd_frontier_tests)
+            if not stubs and not _refill_recs:
                 break
             # D: leaf-first order — most-referenced fns first.
             _tuples = [r.key for r in stubs]
@@ -199,7 +236,12 @@ class PhaseCFillEngine:
                 if taken < len(matches):
                     _reordered.append(matches[taken])
                     _seen[tup] = taken + 1
-            stubs = _reordered
+            # Stubs first (fill missing pieces), behavioral re-fills after (correct
+            # wrong bodies once their prerequisites exist).
+            stubs = _reordered + _refill_recs
+            if _refill_recs:
+                self.tel.log(f"  [phase-c/per-fn] {len(_refill_recs)} behavioral "
+                             "re-fill target(s) (filled bodies with failing tests).")
             # Crate idioms source: impl-block records snapshot for this pass.
             _idiom_blocks = self.ws.collect_impl_blocks(target_src_dir) or []
             # Count total fns in the cluster (regardless of body state) — the

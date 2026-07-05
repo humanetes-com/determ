@@ -527,6 +527,52 @@ RUST_GOTCHAS: list[dict[str, Any]] = [
             "links `alloc`."
         ),
     },
+    {
+        # Starvation-miner evidence (run 2941): E0034 on an ErrorImpl method —
+        # the name is provided by two in-scope traits, so the bare call is
+        # ambiguous. The fix is fully-qualified call syntax, not a rename.
+        "id": "ambiguous_method_e0034",
+        "summary": "E0034 `multiple applicable items in scope` = a method name is provided by two traits at once, so `x.method()` is ambiguous. Disambiguate with fully-qualified syntax `Trait::method(&x)` or `<T as Trait>::method(&x)`; never rename or drop the method.",
+        "triggers": {"E0034", "multiple applicable items", "candidate #"},
+        "detail": (
+            "Two traits in scope both define the method; name the one you mean —\n"
+            "do NOT invent a differently-named method to dodge it:\n"
+            "  WRONG:\n"
+            "    let n = value.len();          // E0034: TraitA::len & TraitB::len\n"
+            "  RIGHT (method-path form, trait named):\n"
+            "    let n = TraitA::len(&value);\n"
+            "  WRONG:\n"
+            "    let s = self.source();        // E0034: two `source` in scope\n"
+            "  RIGHT (qualified form when the receiver type must be pinned):\n"
+            "    let s = <Self as StdError>::source(self);\n"
+            "Pick the trait whose behavior the failing test expects; qualified\n"
+            "syntax selects exactly that one and nothing else changes."
+        ),
+    },
+    {
+        # Starvation-miner evidence (run 2941): E0599 `no function or associated
+        # item named `new` for struct ContextError` — an associated constructor
+        # the type never defines, invented because sibling fns disagree on how to
+        # build the same type. Distinct from the instance-method `no method` case.
+        "id": "invented_associated_ctor",
+        "summary": "E0599 `no function or associated item named X for T` = you called an associated fn/constructor (`T::new`, `T::with`) that T never defines. Build T with the struct/enum literal the type definition shows, and use the SAME construction every sibling fn uses; never invent `T::new`.",
+        "triggers": {"E0599", "no function or associated item", "no associated item named"},
+        "detail": (
+            "The type exists but has no such associated item — a struct literal is\n"
+            "ALWAYS available for an in-scope type, and sibling fns pin the form:\n"
+            "  WRONG:\n"
+            "    ContextValue::new(ctx, err)      // E0599: no `new` on the struct\n"
+            "  RIGHT (struct literal from the type's shown fields):\n"
+            "    ContextValue { context: ctx, error: err }\n"
+            "  WRONG:\n"
+            "    Wrapper::with(inner)             // E0599: no such associated fn\n"
+            "  RIGHT (reuse the constructor a sibling fn already uses):\n"
+            "    Wrapper::from_inner(inner)       // exists — seen in a sibling\n"
+            "If several fns build the SAME type, they MUST agree on one\n"
+            "construction form — read the sibling bodies / blueprint before\n"
+            "introducing a new constructor name that nothing defines."
+        ),
+    },
 ]
 
 
