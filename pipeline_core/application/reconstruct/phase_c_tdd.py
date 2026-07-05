@@ -15,10 +15,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from pipeline_core.application.reconstruct.tdd_ratchet import (
+    restore_src_tree,
+    snapshot_src_tree,
+)
 from pipeline_core.domain.attribution import union_unattributed_stubs
 from pipeline_core.domain.models import BuildCluster, FnLocator, Frontier
 from pipeline_core.domain.refine import Attempt, LoopState
-from pipeline_core.domain.test_results import parse_failed_tests, parse_test_counts
+from pipeline_core.domain.test_results import (
+    parse_failed_tests,
+    parse_test_counts,
+    summarize_test_binaries,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,6 +126,12 @@ def run_phase_c_tdd(
     stall = 0
     best_pass = -1
     best_fail = None
+    # Debt #45 — TDD-iter batch ratchet: snapshot the src tree at each pass_count
+    # high-water; restore it when a later iter's fills net-regress the count.
+    _batch_ratchet = os.getenv("PHASE_C_TDD_BATCH_RATCHET", "1") not in ("", "0", "false")
+    _src_root = target_src_dir / "src"
+    _bratchet_best = -1
+    _bratchet_snap: dict[str, str] | None = None
     recently_filled: list[FnLocator] = []
     recently_filled_max = int(os.getenv("TDD_RECENTLY_FILLED_MAX", "50"))
     # Hook 3 — causal-regression tracking. `prev_failed` = the failing-test set
@@ -156,6 +170,40 @@ def run_phase_c_tdd(
         dt = time.monotonic() - t0
         pass_count, fail_count, _ignored = parse_test_counts(output)
         cur_failed = parse_failed_tests(output)
+        # Debt #45 — batch ratchet. pass_count reflects the PREVIOUS iter's fills;
+        # a drop below the best we've measured means that iter net-regressed the
+        # cluster (a regression the per-fill guard couldn't catch while the crate
+        # was red mid-batch). Restore the best-known src tree and re-test, so the
+        # loop always attacks from — and can only exit at — its high-water mark.
+        if _batch_ratchet and _bratchet_snap is not None and pass_count < _bratchet_best:
+            _rev = restore_src_tree(_bratchet_snap)
+            deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: batch ratchet — "
+                     f"pass_count {pass_count}<{_bratchet_best} (last iter's fills "
+                     f"net-regressed); reverted {_rev} file(s) to best state, "
+                     "re-testing.")
+            deps.emit("phase_c.tdd.batch_revert", data={
+                "cluster": cluster.name, "iter": iter_n,
+                "pass_count": pass_count, "best_pass": _bratchet_best,
+                "files_reverted": _rev,
+            })
+            rc, output = deps.run_cargo(test_cmd, target_src_dir, cluster_env,
+                                        timeout=test_timeout)
+            pass_count, fail_count, _ignored = parse_test_counts(output)
+            cur_failed = parse_failed_tests(output)
+        # Refresh the best-known snapshot on the first iter and each strict
+        # improvement (never on a plateau — the existing best-state snapshot is
+        # equivalent and re-reading the tree would be wasted I/O).
+        if _batch_ratchet and (_bratchet_snap is None or pass_count > _bratchet_best):
+            _snap = snapshot_src_tree(_src_root)
+            if _snap is not None:
+                _bratchet_best = pass_count
+                _bratchet_snap = _snap
+        # Debt #44 — per-binary breakdown so triage can see WHICH test set
+        # changed between iters (vanished tests, not just pass→fail flips).
+        _bins = summarize_test_binaries(output)
+        if _bins:
+            deps.log(f"  {tag} [phase-c/tdd] iter {iter_n} binaries: "
+                     + ", ".join(f"{lbl} {p}/{f}" for lbl, p, f in _bins))
         if rc == 0:
             deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: all tests pass "
                  f"({pass_count} passed, {dt:.1f}s). Cluster done.")
@@ -288,6 +336,7 @@ def run_phase_c_tdd(
             "frontier_size": len(eligible), "kind": kind,
             "pass_count": pass_count, "fail_count": fail_count,
             "improved": improved, "stall": stall,
+            "binaries": [[lbl, p, f] for lbl, p, f in _bins],
         })
 
         # Drive the per-fn fill machinery with this frontier.

@@ -146,6 +146,48 @@ def parse_test_counts(test_output: str) -> tuple[int, int, int]:
 _parse_test_counts = parse_test_counts
 
 
+def _counts_on_result_line(line: str) -> tuple[int, int]:
+    """(passed, failed) parsed from ONE `test result:` line via pure string ops
+    (no regex — Hard Rule). `test result: FAILED. 6 passed; 2 failed; …`."""
+    passed = failed = 0
+    tail = line.split("test result:", 1)[1] if "test result:" in line else ""
+    tail = tail.split(".", 1)[1] if "." in tail else tail
+    for tok in tail.split(";"):
+        parts = tok.split()
+        if len(parts) >= 2 and parts[0].lstrip("-").isdigit():
+            if parts[1] == "passed":
+                passed = int(parts[0])
+            elif parts[1] == "failed":
+                failed = int(parts[0])
+    return passed, failed
+
+
+def summarize_test_binaries(test_output: str) -> list[tuple[str, int, int]]:
+    """Per-binary breakdown `(label, passed, failed)` in output order — one entry
+    per cargo test target (unit-tests, each `tests/*.rs` integration binary, and
+    Doc-tests). Lets triage see WHICH test set changed between TDD iters (debt
+    #44: a drop in the number of binaries/tests that RUN — not just pass→fail —
+    was previously invisible because only the summed pass/fail was logged).
+
+    Pure string parsing: a `Running <desc> (<path>)` / `Doc-tests <crate>` line
+    opens a binary; the next `test result:` line closes it with its counts."""
+    out: list[tuple[str, int, int]] = []
+    label = "?"
+    for raw in test_output.splitlines():
+        line = raw.strip()
+        if line.startswith("Running "):
+            # `Running unittests src/lib.rs (target/…)` → drop the (path) tail.
+            desc = line[len("Running "):].split(" (", 1)[0].strip()
+            label = desc or "?"
+        elif line.startswith("Doc-tests "):
+            label = "Doc-tests " + line[len("Doc-tests "):].strip()
+        elif line.startswith("test result:"):
+            p, f = _counts_on_result_line(line)
+            out.append((label, p, f))
+            label = "?"
+    return out
+
+
 def count_passing_tests(test_output: str) -> int:
     """
     Extract the number of passing tests from test output.

@@ -148,3 +148,41 @@ def test_compile_gate_reason_none_without_diagnostics():
     # No parseable rustc error (crash/timeout) → keep the generic wording.
     assert compile_gate_reason("stable", "TIMEOUT: exceeded 600s") is None
     assert compile_gate_reason("stable", "") is None
+
+
+from pipeline_core.domain.test_results import summarize_test_binaries  # noqa: E402
+
+_MULTI_BIN = """   Compiling anyhow
+     Running unittests src/lib.rs (target/debug/deps/anyhow-ab12)
+
+running 12 tests
+test a ... ok
+test result: ok. 12 passed; 0 failed; 1 ignored; 0 measured
+
+     Running tests/test_boxed.rs (target/debug/deps/test_boxed-cd34)
+
+running 8 tests
+test result: FAILED. 6 passed; 2 failed; 0 ignored
+
+   Doc-tests anyhow
+
+running 3 tests
+test result: ok. 3 passed; 0 failed; 0 ignored
+"""
+
+
+def test_summarize_test_binaries_per_target_breakdown():
+    # debt #44: one (label, passed, failed) per cargo test target, in order.
+    assert summarize_test_binaries(_MULTI_BIN) == [
+        ("unittests src/lib.rs", 12, 0),
+        ("tests/test_boxed.rs", 6, 2),
+        ("Doc-tests anyhow", 3, 0),
+    ]
+
+
+def test_summarize_test_binaries_empty_and_no_regex():
+    assert summarize_test_binaries("") == []
+    assert summarize_test_binaries("error[E0308]: mismatched") == []
+    # negative/odd tokens must not crash the pure-string parser
+    one = "test result: FAILED. 0 passed; 5 failed; 0 ignored"
+    assert summarize_test_binaries(one) == [("?", 0, 5)]
