@@ -28,6 +28,37 @@ def test_format_type_struct_with_fields():
     assert "fields (access with .name)" in out
 
 
+def test_construct_hint_tuple_struct_shows_positional_not_new():
+    rec = TypeRecord(kind="struct", name="ContextError", generics="<C, E>",
+                     definition="struct ContextError<C, E>(C, E)",
+                     fields=(FieldRecord(name="0", ty="C"),
+                             FieldRecord(name="1", ty="E")))
+    out = format_type_for_prompt(rec)
+    assert "construct: ContextError(<C>, <E>)" in out
+    assert "NOT ContextError::new" in out
+
+
+def test_construct_hint_named_struct_shows_literal():
+    rec = TypeRecord(kind="struct", name="Error",
+                     definition="struct Error { inner: Box<ErrorImpl> }",
+                     fields=(FieldRecord(name="inner", ty="Box<ErrorImpl>"),))
+    out = format_type_for_prompt(rec)
+    assert "construct: Error { inner: <Box<ErrorImpl>> }" in out
+    assert "NOT Error::new" in out
+
+
+def test_construct_hint_tuple_struct_without_field_records():
+    rec = TypeRecord(kind="struct", name="Wrapper",
+                     definition="struct Wrapper(Box<dyn Error>)")
+    out = format_type_for_prompt(rec)
+    assert "construct: Wrapper(<fields...>)" in out
+
+
+def test_construct_hint_absent_for_enum():
+    rec = TypeRecord(kind="enum", name="Kind", variants=("A", "B"))
+    assert "construct:" not in format_type_for_prompt(rec)
+
+
 def test_format_type_enum_truncates_variants():
     rec = TypeRecord(kind="enum", name="E",
                      variants=tuple(f"V{i}" for i in range(12)))

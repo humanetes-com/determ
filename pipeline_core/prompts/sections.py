@@ -661,6 +661,38 @@ def format_impl_block_for_prompt(
     return "\n".join(lines)
 
 
+def _construct_hint(rec: TypeRecord) -> str | None:
+    """A `construct:` line showing HOW to build `rec`, derived deterministically
+    from the frozen definition/fields (a legitimate, always-correct input).
+
+    Kills the dominant E0599 class: the model pulls a type, sees its fields, then
+    writes the universal `Type::new(...)` idiom that doesn't exist. Showing the
+    real literal (tuple `Type(a, b)` / struct `Type { f: … }`) replaces the guess.
+    Placeholders are the field TYPES so the shape is unambiguous.
+    """
+    if rec.kind != "struct":
+        return None
+    name = rec.name or "?"
+    fields = rec.fields
+    deff = rec.definition or ""
+    # Tuple struct: positional fields (numeric/empty names), or a `Name( … )`
+    # definition with no brace. Named struct: real field names / a `{ … }` def.
+    if fields and all((not f.name) or f.name.isdigit() for f in fields):
+        args = ", ".join(f"<{f.ty}>" for f in fields)
+        return (f"  construct: {name}({args})   "
+                f"// tuple struct — positional; NOT {name}::new(...)")
+    if not fields and "(" in deff and "{" not in deff:
+        return (f"  construct: {name}(<fields...>)   "
+                f"// tuple struct — positional args; NOT {name}::new(...)")
+    if fields:
+        body = ", ".join(f"{f.name}: <{f.ty}>" for f in fields)
+        return (f"  construct: {name} {{ {body} }}   "
+                f"// struct literal; NOT {name}::new(...)")
+    if "{" not in deff and "(" not in deff:
+        return f"  construct: {name}   // unit struct — no fields"
+    return None
+
+
 def format_type_for_prompt(rec: TypeRecord) -> str:
     """Render a type record as a compact Rust-like definition for prompts.
 
@@ -690,6 +722,9 @@ def format_type_for_prompt(rec: TypeRecord) -> str:
             lines.append(f"    {v}")
         if len(variants) > 8:
             lines.append(f"    ... ({len(variants) - 8} more)")
+    _ctor = _construct_hint(rec)
+    if _ctor:
+        lines.append(_ctor)
     if methods:
         # Dedup by method name (same fn can appear in multiple impl blocks);
         # keep the first sig we saw. Then render WITH SIGNATURE (P6.1).

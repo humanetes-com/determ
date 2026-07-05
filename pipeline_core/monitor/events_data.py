@@ -279,13 +279,12 @@ def phase_c_state() -> dict[str, Any]:
         "last_event_age_s": None,
         # P4: progress bar fields (per-pass progress against stubs_at_pass_start).
         "pass_stubs_total": 0,
+        # pass_fills_done/failed count each per-fn fill, each impl-block MEMBER,
+        # and each whole-file fn — so the `frontier: A/B` progress segment stays
+        # correct across all three fill paths (not just per-fn). Reset per pass
+        # (= per tdd iter, since the tdd driver emits one pass.start per iter).
         "pass_fills_done": 0,
         "pass_fills_failed": 0,
-        # Per-tdd-iter frontier progress (denominator = tdd_frontier). Reset each
-        # phase_c.tdd.iter; incremented by BOTH per-fn and impl-block fills so the
-        # bar is live under the tdd driver (where pass.start fields aren't set).
-        "iter_fills_done": 0,
-        "iter_fills_failed": 0,
         # In-flight fills (parallel — up to PIPELINE_PARALLELISM at once): each is
         # {label, kind: fn|impl, refill, age_s, file}. The set, not one cursor.
         "in_flight": [],
@@ -365,7 +364,6 @@ def phase_c_state() -> dict[str, Any]:
             attempts = d.get("fix_attempts", 1)
             out["fills_done"] += 1
             out["pass_fills_done"] = out.get("pass_fills_done", 0) + 1
-            out["iter_fills_done"] = out.get("iter_fills_done", 0) + 1
             if d.get("recovered"):
                 out["fills_recovered"] += 1
             else:
@@ -378,7 +376,6 @@ def phase_c_state() -> dict[str, Any]:
             attempts = d.get("fix_attempts", 0)
             out["fills_failed"] += 1
             out["pass_fills_failed"] = out.get("pass_fills_failed", 0) + 1
-            out["iter_fills_failed"] = out.get("iter_fills_failed", 0) + 1
             fn_attempts[fn] = fn_attempts.get(fn, 0) + attempts
             in_flight_units.pop(fn, None)
             _record_error_codes(out, d)
@@ -386,6 +383,11 @@ def phase_c_state() -> dict[str, Any]:
             out["fills_skipped"] += 1
             in_flight_units.pop(d.get("fn") or "?", None)
         elif ev == "phase_c.impl.fill.start":
+            # A file-first fill for this file that fell back to per-block fills →
+            # drop the now-superseded file unit so it isn't shown alongside its blocks.
+            for _k in [k for k, v in in_flight_units.items()
+                       if v.get("kind") == "file" and v.get("file") == d.get("file")]:
+                in_flight_units.pop(_k, None)
             _lbl = d.get('container') or '?'
             in_flight_units[_lbl] = {
                 "kind": "impl", "refill": False,
@@ -393,12 +395,25 @@ def phase_c_state() -> dict[str, Any]:
                 "members": int(d.get("stub_count", 0)),
             }
             out["cluster"] = d.get("cluster") or out["cluster"]
+        elif ev == "phase_c.file.fill.start":
+            _lbl = f"file {d.get('file') or '?'}"
+            in_flight_units[_lbl] = {
+                "kind": "file", "refill": False,
+                "start_iso": e.get("ts"), "file": d.get("file"),
+            }
+            out["cluster"] = d.get("cluster") or out["cluster"]
+        elif ev == "phase_c.file.fill.done":
+            _lbl = f"file {d.get('file') or '?'}"
+            _fns = int(d.get("fns_filled", 0)) or 1
+            out["fills_done"] += _fns
+            out["pass_fills_done"] = out.get("pass_fills_done", 0) + _fns
+            out["fills_first"] += _fns
+            in_flight_units.pop(_lbl, None)
         elif ev == "phase_c.impl.fill.done":
             _lbl = d.get('container') or '?'
             _members = int(d.get("members_filled", 0)) or 1
             out["fills_done"] += _members
             out["pass_fills_done"] = out.get("pass_fills_done", 0) + _members
-            out["iter_fills_done"] = out.get("iter_fills_done", 0) + _members
             out["fills_first"] += _members
             out["recent_fills"].append(
                 (_lbl, 0, d.get("fix_attempts", 1)))
@@ -407,7 +422,6 @@ def phase_c_state() -> dict[str, Any]:
             _lbl = d.get('container') or '?'
             out["fills_failed"] += 1
             out["pass_fills_failed"] = out.get("pass_fills_failed", 0) + 1
-            out["iter_fills_failed"] = out.get("iter_fills_failed", 0) + 1
             in_flight_units.pop(_lbl, None)
             _record_error_codes(out, d)
         elif ev == "phase_c.note.added":
@@ -421,10 +435,9 @@ def phase_c_state() -> dict[str, Any]:
             _tcl = d.get("cluster") or out["cluster"]
             out["cluster"] = _tcl or out["cluster"]
             out["tdd_iter"] = d.get("iter", out["tdd_iter"])
-            # Fresh iter → reset the frontier progress counters and drop any
-            # in-flight units left dangling from the prior iter's sweep.
-            out["iter_fills_done"] = 0
-            out["iter_fills_failed"] = 0
+            # Fresh iter → drop any in-flight units left dangling from the prior
+            # iter's sweep (pass_fills_done resets separately on the pass.start
+            # the tdd driver emits at the head of each iter).
             in_flight_units.clear()
             _pc = d.get("pass_count")
             if _pc is not None:

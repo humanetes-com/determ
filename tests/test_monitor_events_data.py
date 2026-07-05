@@ -251,14 +251,38 @@ def test_phase_c_impl_fills_and_parallel_in_flight(tmp_path, monkeypatch):
     )
     _patch(monkeypatch, ev)
     s = ed.phase_c_state()
-    # impl members count toward the frontier bar; fn.render is still in flight.
-    assert s["iter_fills_done"] == 2 and s["tdd_frontier"] == 10
+    # impl members count toward the frontier segment; fn.render is still in flight.
+    assert s["pass_fills_done"] == 2 and s["tdd_frontier"] == 10
     assert [u["label"] for u in s["in_flight"]] == ["render"]
     assert s["in_flight"][0]["kind"] == "fn" and s["in_flight"][0]["refill"] is True
     assert s["current_fn"] == "render"
 
 
-def test_phase_c_tdd_iter_resets_frontier_counters(tmp_path, monkeypatch):
+def test_phase_c_file_fill_counts_and_fallback_drops_file_unit(tmp_path, monkeypatch):
+    ev = tmp_path / "events.jsonl"
+    _write(
+        ev,
+        {"ts": "2026-06-10T00:00:00+00:00", "event": "phase_c.tdd.iter",
+         "data": {"cluster": "stable", "iter": 1, "frontier_size": 10}},
+        # A whole-file fill succeeds → 4 fns counted toward the frontier.
+        {"ts": "2026-06-10T00:00:01+00:00", "event": "phase_c.file.fill.start",
+         "data": {"cluster": "stable", "file": "src/fmt.rs", "blocks": 2, "stubs": 4}},
+        {"ts": "2026-06-10T00:00:02+00:00", "event": "phase_c.file.fill.done",
+         "data": {"file": "src/fmt.rs", "fns_filled": 4}},
+        # A second file-fill falls back to per-block → its file unit is superseded.
+        {"ts": "2026-06-10T00:00:03+00:00", "event": "phase_c.file.fill.start",
+         "data": {"cluster": "stable", "file": "src/ctx.rs", "blocks": 1, "stubs": 2}},
+        {"ts": "2026-06-10T00:00:04+00:00", "event": "phase_c.impl.fill.start",
+         "data": {"cluster": "stable", "file": "src/ctx.rs", "container": "impl Ctx",
+                  "stub_count": 2}},
+    )
+    _patch(monkeypatch, ev)
+    s = ed.phase_c_state()
+    assert s["pass_fills_done"] == 4
+    assert [(u["label"], u["kind"]) for u in s["in_flight"]] == [("impl Ctx", "impl")]
+
+
+def test_phase_c_tdd_iter_clears_stale_in_flight(tmp_path, monkeypatch):
     ev = tmp_path / "events.jsonl"
     _write(
         ev,
@@ -266,8 +290,8 @@ def test_phase_c_tdd_iter_resets_frontier_counters(tmp_path, monkeypatch):
          "data": {"cluster": "stable", "iter": 1, "frontier_size": 3}},
         {"ts": "2026-06-10T00:00:01+00:00", "event": "phase_c.fn.fill.done",
          "data": {"fn": "a", "fix_attempts": 1}},
-        # A new iter must zero the per-iter frontier counter (and drop stale
-        # in-flight), even though cumulative fills_done keeps climbing.
+        # A fill.start with no matching done, then a fresh iter must drop that
+        # dangling in-flight unit (cumulative fills_done still keeps climbing).
         {"ts": "2026-06-10T00:00:02+00:00", "event": "phase_c.fn.fill.start",
          "data": {"fn": "stale"}},
         {"ts": "2026-06-10T00:00:03+00:00", "event": "phase_c.tdd.iter",
@@ -275,7 +299,7 @@ def test_phase_c_tdd_iter_resets_frontier_counters(tmp_path, monkeypatch):
     )
     _patch(monkeypatch, ev)
     s = ed.phase_c_state()
-    assert s["iter_fills_done"] == 0 and s["tdd_frontier"] == 2
+    assert s["tdd_frontier"] == 2
     assert s["fills_done"] == 1 and s["in_flight"] == []
 
 

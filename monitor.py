@@ -405,6 +405,17 @@ def _phase_c_panel_rows(state: dict[str, Any]) -> list[str]:
     # narrows pass_stubs_total to a per-pass frontier (1-2 fns) instead of
     # the full remaining-stubs count — the math then claims ~99% with only
     # 1 frontier slot, which is what was hiding the real cluster progress.
+    # The `· frontier: A/B` segment appended below (both the primary and legacy
+    # branches) reads:
+    #   A = fills done + failed in the current fill pass
+    #       (pass_fills_done + pass_fills_failed) — counts each per-fn fill, each
+    #       impl-block MEMBER, and each whole-file fn individually.
+    #   B = the number of stubs the fill engine QUEUED for this pass
+    #       (pass_stubs_total) — that's the frontier fns PLUS their leaf-first
+    #       prerequisites and any behavioral re-fill targets, so B is usually
+    #       larger than the raw tdd frontier_size.
+    # So "frontier: 6/9" = 6 of the 9 queued stubs have been attempted this pass.
+    # Under the tdd driver pass.start fires once per iter, so A resets per iter.
     _pt = state.get("pass_stubs_total", 0) or 0
     _pd = state.get("pass_fills_done", 0) or 0
     _pf = state.get("pass_fills_failed", 0) or 0
@@ -440,19 +451,6 @@ def _phase_c_panel_rows(state: dict[str, Any]) -> list[str]:
         _bar = "█" * _filled + "░" * (_bar_w - _filled)
         rows.append(f"           progress  [{_bar}]  {_done_this_pass}/{_pt} ({int(_pct * 100)}%)")
 
-    # TDD-native frontier bar: live under the tdd driver (where the classic
-    # pass.start fields above aren't set). Denominator = this iter's frontier;
-    # numerator = per-fn + impl-block fills done/failed since the iter began.
-    _fro = state.get("tdd_frontier")
-    if _fro:
-        _fd = (state.get("iter_fills_done", 0) or 0) + (state.get("iter_fills_failed", 0) or 0)
-        _fpct = min(1.0, _fd / _fro) if _fro else 0.0
-        _fw = 28
-        _ff = int(_fw * _fpct)
-        _fbar = "█" * _ff + "░" * (_fw - _ff)
-        rows.append(f"           frontier [{_fbar}]  {_fd}/{_fro} "
-                    f"({int(_fpct * 100)}%)  iter {state.get('tdd_iter', '?')}")
-
     first = state.get("fills_first", 0)
     rec = state.get("fills_recovered", 0)
     failed = state.get("fills_failed", 0)
@@ -474,7 +472,9 @@ def _phase_c_panel_rows(state: dict[str, Any]) -> list[str]:
         for u in flight[:4]:
             _a = u.get("age_s")
             _age = ("?" if _a is None else f"{_a}s" if _a < 60 else f"{_a // 60}m")
-            _tag = "↻" if u.get("refill") else ("⊞" if u.get("kind") == "impl" else "")
+            _k = u.get("kind")
+            _tag = ("↻" if u.get("refill")
+                    else "⊞" if _k == "impl" else "▤" if _k == "file" else "")
             _lab = (u.get("label") or "?").splitlines()[0][:30]
             _ifb.append(f"{_tag}{_lab}({_age})")
         _more = f"  +{len(flight) - 4}" if len(flight) > 4 else ""
