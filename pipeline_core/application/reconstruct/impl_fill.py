@@ -85,6 +85,8 @@ class ImplFillDeps:
     types_section_for_fix: Callable[..., Any]
     bound_methods_section_for: Callable[..., Any]
     u2_test_gate: Callable[..., Any]
+    test_regression_baseline: Callable[..., Any]
+    test_regression_gate: Callable[..., Any]
     ask: Callable[..., Any]
     failed_body_cap: Any
     per_fn_fix_hard_cap: Any
@@ -165,6 +167,8 @@ def fill_impl_blocks(
     _types_section_for_fix = deps.types_section_for_fix
     _bound_methods_section_for = deps.bound_methods_section_for
     _u2_test_gate = deps.u2_test_gate
+    _test_regression_baseline = deps.test_regression_baseline
+    _test_regression_gate = deps.test_regression_gate
     ask = deps.ask
     _FAILED_BODY_CAP = deps.failed_body_cap
     _PER_FN_FIX_HARD_CAP = deps.per_fn_fix_hard_cap
@@ -353,6 +357,10 @@ def fill_impl_blocks(
             _log(f"  [phase-c/file] {file_rel}: empty/no FN blocks — "
                  "falling back to per-block fills.")
             return
+        # Pre-fill runtime test state for the monotone ratchet (None ⇒ crate
+        # not test-runnable now → gate self-disables, verbatim revert unchanged).
+        _baseline_test = _test_regression_baseline(
+            tdd_test_cmd, target_src_dir, cluster_env)
         with _splice_check_lock:
             containers = [b.container for b in fblocks]
             routing = route_fn_bodies(parsed, target=containers[0],
@@ -388,7 +396,10 @@ def fill_impl_blocks(
                             FnLocator(file_rel, m.fn_name), set())
                 _u2_file = _u2_test_gate(_file_tests, tdd_test_cmd,
                                          target_src_dir, cluster_env)
-            if rc == 0 and _u2_file is None:
+            _regr_file = (_test_regression_gate(
+                tdd_test_cmd, target_src_dir, cluster_env, _baseline_test)
+                if rc == 0 else None)
+            if rc == 0 and _u2_file is None and _regr_file is None:
                 fns_filled_total += spliced_now
                 _log(f"  [phase-c/file] {file_rel}: FILE FILLED "
                      f"{spliced_now} fn(s) in one pass.")
@@ -397,9 +408,10 @@ def fill_impl_blocks(
                     "fns_filled": spliced_now})
                 return
             file_path.write_text(snapshot, encoding="utf-8")
+            _revert_reason = ("regressed sibling test(s)" if _regr_file is not None
+                              else "U2 test failure" if rc == 0 else "compile failed")
             _log(f"  [phase-c/file] {file_rel}: reverted "
-                 f"({'U2 test failure' if rc == 0 else 'compile failed'}) — "
-                 "falling back to per-block fills.")
+                 f"({_revert_reason}) — falling back to per-block fills.")
 
     def _fill_one_block(block: ImplBlock) -> None:
         """One impl block's fill: context assembly, the `_attempt_impl_fill`
@@ -541,6 +553,16 @@ def fill_impl_blocks(
                 _brc, _bout, _bdiag = _run_cargo_check_diag(
                     check_cmd, target_src_dir, cluster_env)
             _baseline_sig = _cargo_err_sig_from_diagnostics(_bdiag)
+        # Monotone ratchet baseline: the cluster's runtime test state BEFORE
+        # this block's stubs are filled. Captured once per block at the pristine
+        # snapshot; None when the crate isn't test-runnable now (then the
+        # regression gate self-disables and any regression is deferred to the
+        # outer TDD loop). Tests failing only because THIS block is still an
+        # `unimplemented!()` stub are already in the baseline, so filling them
+        # green is never mistaken for a regression.
+        with _splice_check_lock:
+            _baseline_test = _test_regression_baseline(
+                tdd_test_cmd, target_src_dir, cluster_env)
         _t0 = time.monotonic()
         _emit("phase_c.impl.fill.start", data={
             "cluster": cluster_name,
@@ -678,6 +700,29 @@ def fill_impl_blocks(
                                              target_src_dir, cluster_env)
                 else:
                     _u2_impl = None
+                # Global monotone ratchet: a compiled fill is rejected if it
+                # reddened ANY previously-passing cluster test — even when the
+                # block's own U2 tests pass (or it would be B3-kept). This is
+                # the guard the pass-count oscillation was slipping through:
+                # both accept paths below verified compile/own-tests only. When
+                # rc==0 the crate compiles clean, so B3's compile-signature is
+                # empty and one of the two paths WILL accept — hence the check
+                # runs exactly once per green attempt (never wasted). Red
+                # attempts skip it (tests can't run; deferred to the TDD loop).
+                _regr = (_test_regression_gate(
+                    tdd_test_cmd, target_src_dir, cluster_env, _baseline_test)
+                    if rc == 0 else None)
+                if _regr is not None:
+                    _newly, _regr_detail = _regr
+                    file_path.write_text(snapshot, encoding="utf-8")
+                    _log(f"  [phase-c/impl] {block_id}: REVERTED {spliced_now} "
+                         f"fn(s) — regressed sibling test(s) "
+                         f"{sorted(_newly) or '(pass-count drop)'} "
+                         f"(attempt {fix_attempt}).")
+                    last_error_excerpt = _regr_detail
+                    _rsig = _newly if _newly else frozenset({"__pass_count_drop__"})
+                    return FixOutcome("failed", err_sig=_rsig,
+                                      err_count=max(1, len(_rsig)))
                 if rc == 0 and _u2_impl is None:
                     members_filled_this_block = spliced_now
                     fns_filled_total += spliced_now

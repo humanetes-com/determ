@@ -134,6 +134,14 @@ class FillOneFn:
             "tests_attached": len(test_blocks),
             "sig_chars": len(sig_text),
         })
+        # Monotone-ratchet baseline: cluster runtime test state BEFORE this fn is
+        # filled (pass_count + failing names), so a fill whose own tests pass but
+        # which reddens a sibling is reverted, not accepted. None ⇒ crate not
+        # test-runnable now (or guard off) → gate self-disables. Tests failing
+        # only because this fn is still an `unimplemented!()` stub are in the
+        # baseline, so turning them green is never seen as a regression.
+        _fn_baseline_test = self.cargo.test_regression_baseline(
+            ctx.tdd_test_cmd, ctx.target_src_dir, ctx.cluster_env)
 
         # Notes loaded inside the fix-loop on every iteration so that
         # (a) notes added during this fn's own fix loop become visible
@@ -367,6 +375,22 @@ class FillOneFn:
                                      "test blocked by an unfilled sibling stub — deferred "
                                      "to outer loop).")
                         _u2_fail_sig = None
+            # Global monotone ratchet: this fn compiles and its own tests pass,
+            # but reject it if it reddened any previously-passing cluster test
+            # (or dropped the pass count). Routed through the SAME failure path
+            # as a U2 test failure — revert + re-prompt with the reddened tests
+            # as the stall signature.
+            if rc == 0 and _u2_fail_sig is None:
+                _regr = self.cargo.test_regression_gate(
+                    ctx.tdd_test_cmd, ctx.target_src_dir, ctx.cluster_env,
+                    _fn_baseline_test)
+                if _regr is not None:
+                    _newly, _regr_detail = _regr
+                    _u2_fail_sig = _newly if _newly else frozenset({"__pass_count_drop__"})
+                    cargo_out = _regr_detail
+                    self.tel.log(
+                        f"  [phase-c/per-fn] {fn_name}: reverted — regressed "
+                        f"sibling test(s) {sorted(_newly) or '(pass-count drop)'}.")
             if rc == 0 and _u2_fail_sig is None:
                 ctx.splice_check_lock.release()
                 _lock_released = True

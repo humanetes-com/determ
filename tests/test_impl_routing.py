@@ -54,3 +54,31 @@ def test_canonical_related_routes_in_listed_order() -> None:
 def test_canon_container_reexport_stays() -> None:
     from pipeline_core.adapters.retros import canon_container as via_adapter
     assert via_adapter is canon_container
+
+
+def test_html_escaped_block_attr_routes(tmp_path=None) -> None:
+    """Run-346122 field bug: the model emits XML-safe attribute values
+    (`block="impl&lt;T, E&gt; Context&lt;T, E&gt; for Result&lt;T, E&gt;"`);
+    the parser must decode them so routing sees real angle brackets."""
+    from pipeline_core.domain.llm_output import extract_fn_bodies
+    resp = ('<FN name="context" '
+            'block="impl&lt;T, E&gt; Context&lt;T, E&gt; for Result&lt;T, E&gt;">\n'
+            'self.map_err(|e| e.ext_context(ctx))\n</FN>')
+    parsed = extract_fn_bodies(resp)
+    assert parsed[0]["block"] == "impl<T, E> Context<T, E> for Result<T, E>"
+    r = route_fn_bodies(
+        parsed,
+        target="impl<T, E> Context<T, E> for Result<T, E>\nwhere\n    E: StdError,",
+        related=[])
+    assert len(r.routed) == 1 and r.dropped == ()
+
+
+def test_escaped_pull_arg_decodes() -> None:
+    from pipeline_core.domain.context_pull import (
+        ContextPull,
+        PullKind,
+        extract_context_pull,
+    )
+    assert extract_context_pull(
+        '<REQUEST kind="type_def" arg="Own&lt;T&gt;"/>') == ContextPull(
+        PullKind.TYPE_DEF, "Own<T>")

@@ -170,3 +170,68 @@ def test_u2_gate_failsafe_and_inconclusive() -> None:
     assert fired == ["phase-c/u2_skip"]
     # timeout (rc=-1) → empty failed set → accept
     assert _gate(_const_run_cargo(-1, ""), {"a"}) is None
+
+
+# --- measure_test_state / test_regression_gate (monotone ratchet) ------------
+
+_RES = "test result: FAILED. {p} passed; {f} failed; 0 ignored"
+
+
+def _cargo_suite(rc: int, passed: int, failed_names: list[str]):
+    body = "".join(f"test {n} ... FAILED\n" for n in failed_names)
+    body += _RES.format(p=passed, f=len(failed_names))
+    return _const_run_cargo(rc, body)
+
+
+def test_measure_test_state_counts_and_inconclusive() -> None:
+    from pipeline_core.application.reconstruct.cargo_runner import measure_test_state
+    # green suite: rc==0, pass count parsed, no failures
+    assert measure_test_state(
+        _const_run_cargo(0, "test result: ok. 5 passed; 0 failed; 0 ignored"),
+        "cargo test", Path("."), {}) == (5, frozenset())
+    # some failures: pass count + failing names
+    assert measure_test_state(_cargo_suite(101, 3, ["b", "c"]),
+                              "cargo test", Path("."), {}) == (3, frozenset({"b", "c"}))
+    # crate did not compile (no test-result lines, rc!=0) → inconclusive None
+    assert measure_test_state(_const_run_cargo(101, "error[E0308]: mismatched"),
+                              "cargo test", Path("."), {}) is None
+    # timeout → inconclusive None
+    assert measure_test_state(_const_run_cargo(-1, ""), "cargo test", Path("."), {}) is None
+
+
+def _regr(run_cargo_fn, baseline, enabled=True):
+    from pipeline_core.application.reconstruct.cargo_runner import test_regression_gate
+    return test_regression_gate(
+        run_cargo_fn, "cargo test", Path("."), {}, baseline,
+        enabled=enabled, timeout=120, guard=lambda *_: None)
+
+
+def test_regression_gate_accepts_when_no_new_red() -> None:
+    base: tuple[int, frozenset[str]] = (5, frozenset({"b"}))  # b already failing
+    # b still failing, pass count held → NOT a regression
+    assert _regr(_cargo_suite(101, 5, ["b"]), base) is None
+    # a formerly-failing test turned green (pass up) → accept
+    assert _regr(_const_run_cargo(0, "test result: ok. 6 passed; 0 failed; 0 ignored"),
+                 base) is None
+
+
+def test_regression_gate_blocks_new_red_and_pass_drop() -> None:
+    base: tuple[int, frozenset[str]] = (5, frozenset({"b"}))
+    # a NEW test (z) went red though b is fixed → regression names z
+    res = _regr(_cargo_suite(101, 5, ["z"]), base)
+    assert res is not None
+    newly, msg = res
+    assert newly == frozenset({"z"}) and "REGRESSED" in msg
+    # no new named failure but pass count dropped (tests vanished) → regression
+    res2 = _regr(_cargo_suite(101, 3, ["b"]), base)
+    assert res2 is not None
+    newly2, msg2 = res2
+    assert newly2 == frozenset() and "pass count" in msg2
+
+
+def test_regression_gate_self_disables() -> None:
+    base: tuple[int, frozenset[str]] = (5, frozenset())
+    assert _regr(_cargo_suite(101, 5, ["z"]), base, enabled=False) is None   # off
+    assert _regr(_cargo_suite(101, 5, ["z"]), None) is None                  # no baseline
+    # post-fill suite inconclusive (crate red now) → cannot judge → accept
+    assert _regr(_const_run_cargo(101, "error: could not compile"), base) is None

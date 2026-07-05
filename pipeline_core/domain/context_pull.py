@@ -17,6 +17,7 @@ This module is pure: the VO set, the budget arithmetic, and the structured
 """
 from __future__ import annotations
 
+import html
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -72,7 +73,9 @@ def _attr(tag: str, name: str) -> str | None:
     b = tag.find('"', a + len(key))
     if b == -1:
         return None
-    return tag[a + len(key):b]
+    # Models emit XML-safe attribute values (`arg="Own&lt;T&gt;"`) — decode
+    # them like the FN-block parser does.
+    return html.unescape(tag[a + len(key):b])
 
 
 def extract_context_pull(response: str) -> ContextPull | None:

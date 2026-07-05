@@ -1615,6 +1615,8 @@ _FILL_CARGO = CargoFillAdapter(
     u2_test_gate_fn=lambda ft, tc, tsd, ce: _u2_test_gate(ft, tc, tsd, ce),
     focus_errors_fn=lambda out, fr, max_chars=None: _focus_cargo_errors(out, fr, max_chars=max_chars),
     env_fn=lambda: _cargo_env(),
+    test_regression_baseline_fn=lambda tc, cwd, env: _test_regression_baseline(tc, cwd, env),
+    test_regression_gate_fn=lambda tc, cwd, env, base: _test_regression_gate(tc, cwd, env, base),
 )
 _FILL_PROMPT = PromptContextAdapter(
     ask_per_fn_body_fn=lambda prompt, fn, alog, sig_text="", answer_request=None: _ask_per_fn_body(prompt, fn, alog, sig_text=sig_text, answer_request=answer_request),
@@ -2196,6 +2198,7 @@ def _check_graceful_stop(context: str) -> None:
 # (P2 slice 6): composes the Cargo PORT + diagnostics_from_json, per the port
 # docstring ("JSON-diagnostic checks compose on top in the application layer").
 import pipeline_core.application.reconstruct.cargo_runner as _reconstruct_cargo_runner  # noqa: E402
+import pipeline_core.application.reconstruct.regression_guard as _regression_guard  # noqa: E402
 import pipeline_core.application.reconstruct.test_targets as _reconstruct_test_targets  # noqa: E402
 from pipeline_core.application.reconstruct.cargo_errors import (  # noqa: E402
     err_sig as _cargo_err_sig,
@@ -2291,6 +2294,14 @@ def _u2_test_gate(
         _run_cargo, fn_tests, test_cmd, target_src_dir, cluster_env,
         enabled=_UNIFIED_FILL_LOOP, timeout=_U2_TEST_TIMEOUT,
         err_cap=_FIX_ERR_CAP, guard=_guard)
+
+
+def _test_regression_baseline(tc: "str|None", cwd: Path, env: "dict|None") -> "tuple[int, frozenset]|None":
+    return _regression_guard.baseline(_run_cargo, _U2_TEST_TIMEOUT, _UNIFIED_FILL_LOOP, tc, cwd, env)
+
+
+def _test_regression_gate(tc: "str|None", cwd: Path, env: "dict|None", base: "tuple|None") -> "tuple[frozenset, str]|None":
+    return _regression_guard.gate(_run_cargo, _guard, _U2_TEST_TIMEOUT, _UNIFIED_FILL_LOOP, tc, cwd, env, base)
 
 
 def _build_test_cmd(test_stems: list[str], cluster: "BuildCluster | None") -> str:
@@ -2503,6 +2514,8 @@ _IMPL_FILL_DEPS = _impl_fill.ImplFillDeps(
     types_section_for_fix=lambda *a, **k: _FIX_CONTEXT.types_section_for_fix(*a, **k),
     bound_methods_section_for=lambda *a, **k: _FIX_CONTEXT.bound_methods_section_for(*a, **k),
     u2_test_gate=lambda *a, **k: _u2_test_gate(*a, **k),
+    test_regression_baseline=lambda *a, **k: _test_regression_baseline(*a, **k),
+    test_regression_gate=lambda *a, **k: _test_regression_gate(*a, **k),
     ask=_ASK_CLIENT.ask,
     failed_body_cap=_BUDGETS.failed_body,
     per_fn_fix_hard_cap=_PER_FN_FIX_HARD_CAP,

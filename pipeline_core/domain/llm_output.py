@@ -9,6 +9,7 @@ through the :mod:`pipeline_core.log` facade; the genesis-format text helper
 
 from __future__ import annotations
 
+import html
 import re
 from typing import Any
 
@@ -398,7 +399,12 @@ def _skip_ws(text: str, pos: int) -> int:
 
 def _read_quoted_attr(text: str, pos: int, name: str) -> tuple[str, int] | None:
     """If `text[pos:]` opens with `name="<value>"` (value = `[^"]+`, i.e. ≥1
-    non-quote char), return (value, pos-after-closing-quote); else None."""
+    non-quote char), return (value, pos-after-closing-quote); else None.
+
+    The value is HTML-unescaped: models emit XML-safe attribute values for
+    generic headers (`block="impl&lt;T, E&gt; Context&lt;T, E&gt; …"`), which
+    would never match a real container (run 346122: every file-first body for
+    src/context.rs dropped on `&lt;`-escaped headers)."""
     lead = name + '="'
     if not text.startswith(lead, pos):
         return None
@@ -406,7 +412,7 @@ def _read_quoted_attr(text: str, pos: int, name: str) -> tuple[str, int] | None:
     end = text.find('"', v)
     if end in (-1, v):                       # need a closing quote AND ≥1 char
         return None
-    return text[v:end], end + 1
+    return html.unescape(text[v:end]), end + 1
 
 
 def _find_fn_close(text: str, start: int) -> tuple[int, int] | None:

@@ -108,6 +108,8 @@ class CargoFillAdapter:
     u2_test_gate_fn: Callable[..., tuple[frozenset[str], str] | None]
     focus_errors_fn: Callable[..., str]
     env_fn: Callable[[], dict[str, str]]
+    test_regression_baseline_fn: Callable[..., tuple[int, frozenset[str]] | None] | None = None
+    test_regression_gate_fn: Callable[..., tuple[frozenset[str], str] | None] | None = None
 
     def run(self, cmd: str, cwd: Path, env: dict[str, str],
             timeout: int = 180) -> tuple[int, str]:
@@ -120,6 +122,21 @@ class CargoFillAdapter:
                      target_src_dir: Path, cluster_env: dict[str, str] | None
                      ) -> tuple[frozenset[str], str] | None:
         return self.u2_test_gate_fn(fn_tests, test_cmd, target_src_dir, cluster_env)
+
+    def test_regression_baseline(self, test_cmd: str | None, cwd: Path,
+                                 env: dict[str, str] | None
+                                 ) -> tuple[int, frozenset[str]] | None:
+        if self.test_regression_baseline_fn is None:
+            return None
+        return self.test_regression_baseline_fn(test_cmd, cwd, env)
+
+    def test_regression_gate(self, test_cmd: str | None, cwd: Path,
+                             env: dict[str, str] | None,
+                             baseline: tuple[int, frozenset[str]] | None
+                             ) -> tuple[frozenset[str], str] | None:
+        if self.test_regression_gate_fn is None:
+            return None
+        return self.test_regression_gate_fn(test_cmd, cwd, env, baseline)
 
     def focus_errors(self, output: str, file_rel: str,
                      max_chars: int | None = None) -> str:
