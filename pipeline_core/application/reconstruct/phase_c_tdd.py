@@ -108,6 +108,14 @@ def run_phase_c_tdd(
     permanently_exhausted: set[FnLocator] = set()
     last_notes_count: dict[FnLocator, int] = {}
     last_total_filled = 0
+    # debt #46 residual: behavioral re-fill targets (frontier fns already filled
+    # with a compiling-but-wrong body) are not stubs, so the stub-based
+    # exhaustion path never bounds them → an unfixable wrong body would burn one
+    # LLM call every iter until the stall budget alone exits. Count per-fn re-fill
+    # attempts and mark a fn exhausted once it caps (D3 still re-admits it on new
+    # notes / cluster-wide progress — same escape hatch as stubs).
+    refill_attempts: dict[FnLocator, int] = {}
+    _refill_max = int(os.getenv("TDD_REFILL_MAX_ATTEMPTS", "2"))
 
     total_filled = 0
     total_attempts = 0
@@ -339,6 +347,10 @@ def run_phase_c_tdd(
             "binaries": [[lbl, p, f] for lbl, p, f in _bins],
         })
 
+        # Re-fill targets this iter = frontier fns already filled at iter start
+        # (not stubs) → the engine will behaviorally re-fill them (debt #46).
+        _stubs_before = set(deps.scan_unimplemented_functions(src_dir))
+        _refill_targets = frontier_keys - _stubs_before
         # Drive the per-fn fill machinery with this frontier.
         sub = deps.task2_fill_fns_one_by_one(
             project_dir=project_dir,
@@ -375,8 +387,19 @@ def run_phase_c_tdd(
             recently_filled = recently_filled[-recently_filled_max:]
         for key in frontier_keys:
             if key in cur_stubs:
+                # First-fill attempt left it a stub → exhausted (existing).
                 permanently_exhausted.add(key)
                 last_notes_count[key] = deps.count_relevant_notes(fr_path, key)
+            elif key in _refill_targets:
+                # debt #46 residual: a behavioral re-fill was attempted (fn was
+                # filled at iter start). It reappears here only while its test
+                # keeps failing → count the attempt and exhaust it at the cap so
+                # it stops re-attempting every iter. A re-fill that FIXED its test
+                # leaves the frontier next iter and never reaches the cap.
+                refill_attempts[key] = refill_attempts.get(key, 0) + 1
+                if refill_attempts[key] >= _refill_max:
+                    permanently_exhausted.add(key)
+                    last_notes_count[key] = deps.count_relevant_notes(fr_path, key)
         last_total_filled = total_filled
 
     return {
