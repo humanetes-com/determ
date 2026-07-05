@@ -121,7 +121,8 @@ def post_mortem(fail: dict[str, Any], exchanges: list[Exchange],
     return FillPostMortem(
         unit=unit, cluster=d.get("cluster", ""),
         attempts=int(d.get("fix_attempts") or 0),
-        cause=cause, evidence=evidence)
+        cause=cause, evidence=evidence,
+        error_codes=tuple(d.get("error_codes") or ()))
 
 
 def mine_run(events: Iterable[dict[str, Any]], run_id: str,
@@ -136,8 +137,15 @@ def render_report(pms: list[FillPostMortem], run_id: str) -> str:
     counts = Counter(pm.cause for pm in pms)
     for cause, n in counts.most_common():
         lines.append(f"  {cause:<16} {n}")
+    code_counts: Counter[str] = Counter()
+    for pm in pms:
+        code_counts.update(pm.error_codes)
+    if code_counts:
+        lines.append("  codes: " + ", ".join(
+            f"{c}×{n}" for c, n in code_counts.most_common()))
     lines.append("")
     for pm in sorted(pms, key=lambda p: (p.cause, p.unit)):
-        lines.append(f"  [{pm.cause}] {pm.cluster}:{pm.unit} "
+        _codes = f" {list(pm.error_codes)}" if pm.error_codes else ""
+        lines.append(f"  [{pm.cause}]{_codes} {pm.cluster}:{pm.unit} "
                      f"(attempts={pm.attempts}) — {pm.evidence[:100]}")
     return "\n".join(lines)

@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from pipeline_core.application.fix_loop import FixOutcome, drive_fix_loop
-from pipeline_core.application.reconstruct.cargo_errors import focus_diagnostics
+from pipeline_core.application.reconstruct.cargo_errors import ecodes_in_text, focus_diagnostics
 from pipeline_core.application.reconstruct.pull_resolver import (
     PullSources,
     ask_with_pulls,
@@ -805,18 +805,23 @@ def fill_impl_blocks(
 
         def _on_impl_failure(attempt_n: int, outcome: FixOutcome,
                              gauge: FloorStall) -> None:
-            _log(f"  [phase-c/impl] {block_id}: compile failed "
+            _codes = sorted(ecodes_in_text(last_error_excerpt))
+            _kind = "U2 test" if not _codes and last_error_excerpt else "compile"
+            _log(f"  [phase-c/impl] {block_id}: {_kind} failed "
                  f"(attempt {attempt_n}); errs={outcome.err_count} "
+                 f"codes={_codes or '—'} "
                  f"floor={gauge.best} stall={gauge.stalls}.")
 
         def _on_impl_stall(attempt_n: int, gauge: FloorStall) -> None:
+            _codes = sorted(ecodes_in_text(last_error_excerpt))
             _log(f"  [phase-c/impl] {block_id}: floor stalled "
                  f"at {gauge.best} for {gauge.stalls} iter(s) "
-                 "— stopping this block.")
+                 f"codes={_codes or '—'} — stopping this block.")
 
         def _on_impl_repeated(attempt_n: int, gauge: FloorStall) -> None:
+            _codes = sorted(ecodes_in_text(last_error_excerpt))
             _log(f"  [phase-c/impl] {block_id}: identical errors "
-                 f"after attempt {attempt_n} — stopping.")
+                 f"after attempt {attempt_n} codes={_codes or '—'} — stopping.")
 
         _, fix_attempt = drive_fix_loop(
             _attempt_impl_fill,
@@ -884,6 +889,7 @@ def fill_impl_blocks(
                     "members_failed": len(block.stub_members),
                     "fix_attempts": fix_attempt,
                     "last_error_preview": last_error_excerpt[:200],
+                    "error_codes": sorted(ecodes_in_text(last_error_excerpt)),
                 })
             # Per-impl retrospective — surface a strategy hint for the
             # next iter to consume. Uses the existing per-fn retro helper

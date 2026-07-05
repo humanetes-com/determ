@@ -106,6 +106,7 @@ def _stream():
         _ev("phase_c.fn.fill.fail", "10:01:00", 7, duration_ms=60_000,
             data={"file": "src/error.rs", "fn": "object_ref", "cluster": "stable",
                   "fix_attempts": 2,
+                  "error_codes": ["E0425"],
                   "last_error_preview":
                       "error[E0425]: cannot find function `ext_context` "
                       "in this scope"}),
@@ -153,6 +154,24 @@ def test_render_report_ranks_causes() -> None:
     out = render_report(pms, _RID)
     assert "symbol_absent    1" in out
     assert "stable:src/error.rs::object_ref" in out
+
+
+def test_error_codes_flow_from_event_payload() -> None:
+    pms = mine_run(_stream(), _RID, _BLOBS.get)
+    assert pms[0].error_codes == ("E0425",)
+    out = render_report(pms, _RID)
+    assert "codes: E0425×1" in out
+    assert "['E0425']" in out
+
+
+def test_error_codes_surface_even_without_correlation() -> None:
+    # No matching exchange → cause UNKNOWN, but the codes still come straight
+    # from the event payload (the whole point of threading them onto the event).
+    stream = [e for e in _stream() if e.get("tid") != 7
+              or e["event"].startswith("phase_c")]
+    pms = mine_run(stream, _RID, _BLOBS.get)
+    assert pms[0].cause is StarvationCause.UNKNOWN
+    assert pms[0].error_codes == ("E0425",)
 
 
 def test_response_unused_when_no_error_captured() -> None:

@@ -503,8 +503,11 @@ class FillOneFn:
             if not _lock_released:
                 ctx.splice_check_lock.release()
                 _lock_released = True
-            self.tel.log(f"  [phase-c/per-fn] {fn_name}: compile failed "
-                         f"(attempt {fix_attempt}); re-prompting with errors.")
+            _codes = sorted(ecodes_in_text(cargo_out))
+            _kind = "U2 test" if _u2_fail_sig is not None else "compile"
+            self.tel.log(f"  [phase-c/per-fn] {fn_name}: {_kind} failed "
+                         f"(attempt {fix_attempt}); "
+                         f"codes={_codes or '—'}; re-prompting with errors.")
             return FixOutcome("failed", err_sig=cur_err_sig,
                               err_count=cur_err_count)
 
@@ -568,6 +571,8 @@ class FillOneFn:
                 "fix_attempts": fix_attempt,
                 "last_error_chars": len(error_excerpt),
                 "last_error_preview": error_excerpt[:200],
+                "error_codes": sorted(ecodes_in_text(
+                    (error_excerpt or "") + " " + (first_error_excerpt or ""))),
             })
             # Exhausted fix-loop — extract a "what didn't work" note so the
             # model doesn't repeat the same dead-end approach on the next pass.

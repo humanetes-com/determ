@@ -43,6 +43,7 @@ class FillPostMortem:
     attempts: int
     cause: StarvationCause
     evidence: str
+    error_codes: tuple[str, ...] = ()  # rustc E-codes from the fail event payload
 
 
 def has_word(text: str, word: str) -> bool:
