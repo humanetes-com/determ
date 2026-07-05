@@ -65,6 +65,16 @@ TRAPS: dict[str, dict] = {
     "unsafe_ptr": {"level": 5, "src": "src/unsafe_ptr.rs", "test": "tests/unsafe_ptr.rs",
                    "lib": ["mod unsafe_ptr;",
                            "pub use unsafe_ptr::{copy_via_raw, ptr_distance, read_at, write_at};"]},
+    # level 6 — CO-DESIGNED PRIVATE SCHEME (the anyhow ContextError reproducer): a
+    # tuple struct (construction is `Guarded(a, t)`, not `::new` → E0599 on the naive
+    # fill) plus `seal`/`verify` that must AGREE on a private tag scheme the tests pin
+    # only RELATIONALLY (round-trip + rejection + distinctness), never absolutely. A
+    # single-fn fill is under-constrained; a seal/verify disagreement compiles clean
+    # but fails the cross round-trip → forces the TDD re-fill loop across iterations
+    # (C3/C4) and a wrong re-fill of one side reddens the round-trip the other passed
+    # (C6 ratchet). Directly mirrors the live anyhow ceiling (compile-clean-but-wrong).
+    "guarded": {"level": 6, "src": "src/guarded.rs", "test": "tests/guarded.rs",
+                "lib": ["mod guarded;", "pub use guarded::{seal, verify, Guarded};"]},
 }
 
 
