@@ -336,13 +336,21 @@ def fill_impl_blocks(
 
     _impl_full_stalls = int(os.getenv("PHASE_C_IMPL_MAX_STALLS", "3"))
 
+    _FILE_FIRST_MAX_ATTEMPTS = 2
+
     def _fill_file_first(file_rel: str, fblocks: list[ImplBlock]) -> None:
         """P5 file-first pass: ONE prompt fills every stub of a multi-block
         file so the impls are designed together (run-187469 evidence: the
         Own/Ref/Mut family in src/ptr.rs diverged when filled per block).
-        Strict gate — kept only on rc==0 (+U2), else reverted verbatim; the
-        per-block loop then handles the file exactly as today (the #42
-        freshness gate skips whatever this pass completed)."""
+        Strict gate — kept only on rc==0 (+U2), else reverted verbatim; on
+        revert the failure is fed back for up to `_FILE_FIRST_MAX_ATTEMPTS`
+        total attempts before giving up (debt #54: fragmenting a genuinely
+        co-designed impl cluster into independent per-block fills after a
+        SINGLE miss throws away the joint-design coherence file-first exists
+        for — the model, still asked to fix each block alone, keeps
+        answering with content spanning several impls, which the per-block
+        router then drops). The per-block loop handles whatever's left (the
+        #42 freshness gate skips whatever this pass completed)."""
         nonlocal fns_filled_total, attempts_total
         file_path = target_src_dir / file_rel
         if not file_path.exists():
@@ -369,82 +377,96 @@ def fill_impl_blocks(
             notes_section = _filter_model_notes_for_prompt(
                 fr_path, file_rel=file_rel, fn_name=stub_names[0],
                 file_text=snapshot, current_error="")
-        prompt = build_file_fill_prompt(
-            file_rel=file_rel, file_text=snapshot,
-            stub_map=[(b.container, [m.fn_name for m in b.stub_members])
-                      for b in fblocks],
-            tests_block="\n\n".join(f"// {p}\n{t}" for p, t in test_blocks),
-            blueprint=_bp_slice, notes=notes_section)
-        _log(f"  [phase-c/file] {file_rel}: file-first fill "
-             f"({len(fblocks)} block(s), {len(stub_names)} stub(s)).")
-        _emit("phase_c.file.fill.start", data={
-            "cluster": cluster_name, "file": file_rel,
-            "blocks": len(fblocks), "stubs": len(stub_names)})
-        attempts_total += 1
-        try:
-            parsed = extract_fn_bodies(_ask_fill(prompt))
-        except Exception as e:
-            _log(f"  [phase-c/file] {file_rel}: LLM error: {e}")
-            return
-        if not parsed:
-            _log(f"  [phase-c/file] {file_rel}: empty/no FN blocks — "
-                 "falling back to per-block fills.")
-            return
-        # Pre-fill runtime test state for the monotone ratchet (None ⇒ crate
-        # not test-runnable now → gate self-disables, verbatim revert unchanged).
-        _baseline_test = _test_regression_baseline(
-            tdd_test_cmd, target_src_dir, cluster_env)
-        with _splice_check_lock:
-            containers = [b.container for b in fblocks]
-            routing = route_fn_bodies(parsed, target=containers[0],
-                                      related=containers[1:])
-            for _nm in routing.dropped:
-                _log(f"  [phase-c/file] {file_rel}: dropped `{_nm}` — "
-                     "block header does not match any impl in this file.")
-            spliced_now = 0
-            for rb in routing.routed:
-                wc = rb.fn_data["where_clause"]
-                if wc and is_trait_impl_container(rb.container):
-                    wc = None
-                ok, reason, _delta = _splice_fn_with_where(
-                    file_path, rb.container, rb.fn_data["fn_name"],
-                    rb.fn_data["body"], wc)
-                if ok:
-                    spliced_now += 1
-                else:
-                    _log(f"  [phase-c/file] {file_rel}: splice "
-                         f"`{rb.fn_data['fn_name']}` failed: {reason}")
-            if spliced_now == 0:
-                _log(f"  [phase-c/file] {file_rel}: nothing spliced — "
+        prior_error = ""
+        for _attempt in range(1, _FILE_FIRST_MAX_ATTEMPTS + 1):
+            prompt = build_file_fill_prompt(
+                file_rel=file_rel, file_text=snapshot,
+                stub_map=[(b.container, [m.fn_name for m in b.stub_members])
+                          for b in fblocks],
+                tests_block="\n\n".join(f"// {p}\n{t}" for p, t in test_blocks),
+                blueprint=_bp_slice, notes=notes_section, prior_error=prior_error)
+            _log(f"  [phase-c/file] {file_rel}: file-first fill "
+                 f"({len(fblocks)} block(s), {len(stub_names)} stub(s), "
+                 f"attempt {_attempt}/{_FILE_FIRST_MAX_ATTEMPTS}).")
+            _emit("phase_c.file.fill.start", data={
+                "cluster": cluster_name, "file": file_rel,
+                "blocks": len(fblocks), "stubs": len(stub_names)})
+            attempts_total += 1
+            try:
+                parsed = extract_fn_bodies(_ask_fill(prompt))
+            except Exception as e:
+                _log(f"  [phase-c/file] {file_rel}: LLM error: {e}")
+                return
+            if not parsed:
+                _log(f"  [phase-c/file] {file_rel}: empty/no FN blocks — "
                      "falling back to per-block fills.")
                 return
-            rc, cargo_out, _diags = _run_cargo_check_diag(
-                check_cmd, target_src_dir, cluster_env)
-            _u2_file = None
-            if rc == 0:
-                _file_tests: set[str] = set()
-                for b in fblocks:
-                    for m in b.stub_members:
-                        _file_tests |= (tdd_frontier_tests or {}).get(
-                            FnLocator(file_rel, m.fn_name), set())
-                _u2_file = _u2_test_gate(_file_tests, tdd_test_cmd,
-                                         target_src_dir, cluster_env)
-            _regr_file = (_test_regression_gate(
-                tdd_test_cmd, target_src_dir, cluster_env, _baseline_test)
-                if rc == 0 else None)
-            if rc == 0 and _u2_file is None and _regr_file is None:
-                fns_filled_total += spliced_now
-                _log(f"  [phase-c/file] {file_rel}: FILE FILLED "
-                     f"{spliced_now} fn(s) in one pass.")
-                _emit("phase_c.file.fill.done", data={
-                    "cluster": cluster_name, "file": file_rel,
-                    "fns_filled": spliced_now})
-                return
-            file_path.write_text(snapshot, encoding="utf-8")
-            _revert_reason = ("regressed sibling test(s)" if _regr_file is not None
-                              else "U2 test failure" if rc == 0 else "compile failed")
-            _log(f"  [phase-c/file] {file_rel}: reverted "
-                 f"({_revert_reason}) — falling back to per-block fills.")
+            # Pre-fill runtime test state for the monotone ratchet (None ⇒
+            # crate not test-runnable now → gate self-disables, verbatim
+            # revert unchanged).
+            _baseline_test = _test_regression_baseline(
+                tdd_test_cmd, target_src_dir, cluster_env)
+            with _splice_check_lock:
+                containers = [b.container for b in fblocks]
+                routing = route_fn_bodies(parsed, target=containers[0],
+                                          related=containers[1:])
+                for _nm in routing.dropped:
+                    _log(f"  [phase-c/file] {file_rel}: dropped `{_nm}` — "
+                         "block header does not match any impl in this file.")
+                spliced_now = 0
+                for rb in routing.routed:
+                    wc = rb.fn_data["where_clause"]
+                    if wc and is_trait_impl_container(rb.container):
+                        wc = None
+                    ok, reason, _delta = _splice_fn_with_where(
+                        file_path, rb.container, rb.fn_data["fn_name"],
+                        rb.fn_data["body"], wc)
+                    if ok:
+                        spliced_now += 1
+                    else:
+                        _log(f"  [phase-c/file] {file_rel}: splice "
+                             f"`{rb.fn_data['fn_name']}` failed: {reason}")
+                if spliced_now == 0:
+                    _log(f"  [phase-c/file] {file_rel}: nothing spliced — "
+                         "falling back to per-block fills.")
+                    return
+                rc, cargo_out, _diags = _run_cargo_check_diag(
+                    check_cmd, target_src_dir, cluster_env)
+                _u2_file = None
+                if rc == 0:
+                    _file_tests: set[str] = set()
+                    for b in fblocks:
+                        for m in b.stub_members:
+                            _file_tests |= (tdd_frontier_tests or {}).get(
+                                FnLocator(file_rel, m.fn_name), set())
+                    _u2_file = _u2_test_gate(_file_tests, tdd_test_cmd,
+                                             target_src_dir, cluster_env)
+                _regr_file = (_test_regression_gate(
+                    tdd_test_cmd, target_src_dir, cluster_env, _baseline_test)
+                    if rc == 0 else None)
+                if rc == 0 and _u2_file is None and _regr_file is None:
+                    fns_filled_total += spliced_now
+                    _log(f"  [phase-c/file] {file_rel}: FILE FILLED "
+                         f"{spliced_now} fn(s) in one pass.")
+                    _emit("phase_c.file.fill.done", data={
+                        "cluster": cluster_name, "file": file_rel,
+                        "fns_filled": spliced_now})
+                    return
+                file_path.write_text(snapshot, encoding="utf-8")
+                if _regr_file is not None:
+                    _revert_reason = "regressed sibling test(s)"
+                    prior_error = _regr_file[1]
+                elif rc == 0:
+                    _revert_reason = "U2 test failure"
+                    prior_error = _u2_file[1] if _u2_file is not None else ""
+                else:
+                    _revert_reason = "compile failed"
+                    prior_error = _focus_cargo_errors(cargo_out, file_rel)
+                _more = _attempt < _FILE_FIRST_MAX_ATTEMPTS
+                _log(f"  [phase-c/file] {file_rel}: reverted "
+                     f"({_revert_reason}) — "
+                     + ("retrying file-first once more."
+                        if _more else "falling back to per-block fills."))
 
     def _fill_one_block(block: ImplBlock) -> None:
         """One impl block's fill: context assembly, the `_attempt_impl_fill`

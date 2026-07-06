@@ -92,11 +92,39 @@ _MISSING_IDENT_MARKERS = (
 _DIAGNOSTIC_HEADS = (
     "error", "warning", "note", "help", "test ", "thread ", "running",
     "Errors in target file", "FILE NOT FOUND", "TIMEOUT", "Compiling",
-    "Checking", "Finished", "cargo", "failures:", "$",
+    "Checking", "Finished", "cargo", "failures:", "$", "----",
 )
 _DESIGN_CONFLICT_CODES = ("E0053", "E0046", "E0407")
 _TEST_FAILURE_MARKS = ("test result: FAILED", "panicked at", "assertion",
                        "... FAILED")
+# `u2_test_gate`/`test_regression_gate` (cargo_runner.py) prepend their own
+# verdict commentary before any real cargo/libtest evidence. Left in place,
+# that commentary's first line never matches `_DIAGNOSTIC_HEADS`, so debt #55:
+# EVERY compiled-but-tests-fail / regression event was misclassified
+# ERROR_TRUNCATED regardless of whether the evidence beneath it was intact.
+# `_U2_PREAMBLE` marks where the real evidence resumes; `_GATE_ONLY_MESSAGES`
+# are gates that carry no further evidence at all (the message IS the cause).
+_U2_PREAMBLE = ("This compiled, but these tests still FAIL:",
+                "Fix the BEHAVIOR so they pass.\n")
+_GATE_ONLY_MESSAGES = (
+    "This compiled, but it REGRESSED previously-passing test(s):",
+    "This dropped the cluster pass count",
+)
+
+
+def _strip_gate_commentary(err: str) -> tuple[str, str]:
+    """Peel a `cargo_runner.py` gate's own verdict text off `err`. Returns
+    (remaining_evidence, short_circuit_evidence) — the second is non-empty
+    only when the gate carried no diagnostic beneath its commentary, in which
+    case the caller should stop classifying and return it directly."""
+    lead, marker = _U2_PREAMBLE
+    if err.startswith(lead):
+        cut = err.find(marker)
+        if cut != -1:
+            return err[cut + len(marker):], ""
+    if err.lstrip().startswith(_GATE_ONLY_MESSAGES):
+        return err, err.splitlines()[0].strip()[:120]
+    return err, ""
 
 
 def _ident_root(span: str) -> str:
@@ -124,6 +152,13 @@ def classify_starvation(
     err = strip_ansi(error_text or "")   # previews carry cargo's SGR colors
     prompt = prompt_text or ""
     response = response_text or ""
+
+    # -1) Peel off the pipeline's own gate commentary (debt #55) before any
+    # check below sees it — otherwise its first line never matches a
+    # `_DIAGNOSTIC_HEADS` token and every gate verdict is misread as truncated.
+    err, _gate_evidence = _strip_gate_commentary(err)
+    if _gate_evidence:
+        return StarvationCause.UNKNOWN, _gate_evidence
 
     # 0) No error at all: the fill died WITHOUT a compile/test verdict — the
     # model's reply was produced but never applied (splice refused, routing

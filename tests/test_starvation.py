@@ -70,6 +70,31 @@ def test_error_truncated_tail_detected() -> None:
     assert cause is StarvationCause.ERROR_TRUNCATED
 
 
+def test_u2_gate_wrapper_not_truncated_when_evidence_intact() -> None:
+    # debt #55: cargo_runner.py's u2_test_gate prepends its own verdict line
+    # before the real libtest evidence — that framing must not itself be
+    # read as a cut-off diagnostic when the body beneath it is intact.
+    prompt = _PROMPT + "test_clone\n"
+    err = ("This compiled, but these tests still FAIL: ['test_clone']\n\n"
+           "Fix the BEHAVIOR so they pass.\n"
+           "---- test_clone stdout ----\n"
+           "thread 'test_clone' panicked at src/chain.rs:35:5:\n"
+           "assertion `left == right` failed")
+    cause, _ = classify_starvation(prompt, "", err)
+    assert cause is not StarvationCause.ERROR_TRUNCATED
+
+
+def test_regression_gate_message_is_unknown_not_truncated() -> None:
+    # debt #55: the regression gate's message carries no diagnostic beneath
+    # its own commentary at all — it should short-circuit to UNKNOWN with
+    # its own line as evidence, not be misread as a cut-off excerpt.
+    err = ("This dropped the cluster pass count 40→38 (tests that used to "
+           "run/pass no longer do). Revert the change that removed them.")
+    cause, ev = classify_starvation(_PROMPT, "", err)
+    assert cause is StarvationCause.UNKNOWN
+    assert ev.startswith("This dropped the cluster pass count")
+
+
 def test_e0277_names_type_absent_from_prompt() -> None:
     err = "error[E0277]: the trait bound `Quoted: Write` is not satisfied"
     cause, ev = classify_starvation(_PROMPT, "", err)
