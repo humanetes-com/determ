@@ -19,6 +19,7 @@ from pipeline_core.application.reconstruct.cargo_errors import diagnostics_from_
 from pipeline_core.domain.models import Diagnostic
 from pipeline_core.domain.test_results import (
     TestRunOutcome,
+    failure_bodies_for,
     parse_failed_tests,
     parse_test_counts,
 )
@@ -70,22 +71,37 @@ def run_scoped_tests(
     *,
     timeout: int = 120,
     err_cap: int,
+    only: set[str] | None = None,
 ) -> TestRunOutcome:
     """Plan 10 U1 — the reusable test-validation step (runtime analog of a
     compile check). Runs `test_cmd` via the injected `run_cargo_fn` and returns
     a :class:`TestRunOutcome` (passed, fail_count, detail, failed_names).
 
     `passed` is True only when cargo reports rc==0 with zero failing tests.
-    `detail` is the failing-test output tail (capped at `err_cap`) for the next
-    prompt. On timeout the caller gets (False, -1, …, set()) and should treat it
-    as INCONCLUSIVE — fall back to compile-based acceptance rather than block.
+    `detail` is the failing test(s)' own `---- name stdout ----` body/bodies —
+    `test_cmd` runs the WHOLE cluster's tests, so a blind tail-slice of the
+    combined output frequently lands on an unrelated binary's summary banner
+    instead of the actual panic/assertion text; extracting the specific
+    section is what fixes that. `only`, when given, restricts which failing tests'
+    bodies are included (the caller's own tests, not every unrelated failure
+    in the cluster) — falls back to ALL failing tests' bodies when omitted,
+    and to the raw tail-slice only if no section body could be found at all.
+    On timeout the caller gets (False, -1, …, set()) and should treat it as
+    INCONCLUSIVE — fall back to compile-based acceptance rather than block.
     """
     rc, out = run_cargo_fn(test_cmd, cwd, env, timeout=timeout)
     if rc == -1:
         return TestRunOutcome(False, -1, "scoped test run timed out", set())
     failed = parse_failed_tests(out)
     passed = rc == 0 and len(failed) == 0
-    detail = "" if passed else out[-err_cap:]
+    if passed:
+        detail = ""
+    else:
+        wanted = (failed & only) if only is not None else failed
+        bodies = failure_bodies_for(out, wanted)
+        detail = ("\n\n".join(f"---- {name} stdout ----\n{body}"
+                               for name, body in bodies.items())[-err_cap:]
+                   if bodies else out[-err_cap:])
     return TestRunOutcome(passed, len(failed), detail, failed)
 
 
@@ -197,7 +213,7 @@ def u2_test_gate(
     try:
         _passed, _fc, detail, failed = run_scoped_tests(
             run_cargo_fn, test_cmd, target_src_dir, cluster_env or {},
-            timeout=timeout, err_cap=err_cap)
+            timeout=timeout, err_cap=err_cap, only=set(fn_tests))
     except Exception as e:  # noqa: BLE001 — fail-safe to compile-based accept
         guard("phase-c/u2_skip", f"{type(e).__name__}: {e}")
         return None

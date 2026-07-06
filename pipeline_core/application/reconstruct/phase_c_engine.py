@@ -148,6 +148,7 @@ class PhaseCFillEngine:
                 tdd_frontier_keys=tdd_frontier_keys,
                 tdd_frontier_tests=tdd_frontier_tests,   # Plan 10 U2
                 tdd_test_cmd=tdd_test_cmd,               # Plan 10 U2
+                parallelism=self.config.parallelism,     # debt #51
             )
             # If there are still stub members the per-impl path didn't cover
             # (free fns or oversized blocks), fall through to the per-fn path.

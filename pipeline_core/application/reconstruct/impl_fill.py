@@ -8,6 +8,8 @@ the existing `ports/fill_engine.py` role ports (overlaps `_PhaseCFillAdapter`).
 from __future__ import annotations
 
 import os
+import queue as _queue_mod
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -111,6 +113,7 @@ def fill_impl_blocks(
     tdd_frontier_keys: set[FnLocator] | None,
     tdd_frontier_tests: Frontier | None = None,  # Plan 10 U2
     tdd_test_cmd: str | None = None,                                       # Plan 10 U2
+    parallelism: int = 1,
 ) -> dict[str, Any]:
     """Per-impl-block Phase C fill — alternative to `_task2_fill_fns_one_by_one`.
 
@@ -129,6 +132,18 @@ def fill_impl_blocks(
     Free fns (container == "") and impl blocks with more than
     `_PER_IMPL_MAX_STUBS` stubs are left untouched — the caller's per-fn
     fallback handles them.
+
+    `parallelism > 1` dispatches independent FILES to a thread pool — blocks
+    from the same file are never run concurrently with each other, since
+    sibling impls on one type are frequently co-designed (e.g. an inherent
+    impl's `new` plus a trait impl's methods) and a concurrent sibling
+    attempt sees a mid-flux copy of the file, prompting the model to emit
+    fixes spanning multiple impls that the splice router then drops for
+    every target except its own. LLM calls for DIFFERENT files run
+    concurrently; `_splice_check_lock` (already shared with the per-fn path)
+    serializes every splice+cargo-check, and `_counters_lock` protects the
+    plain-Python aggregate counters and the
+    on-disk retrospective cache save that fall outside that lock.
     """
     # P4 rebind-prelude — collaborators localised so the 8 nested closures stay byte-identical.
     _build_dispatch_family_section = deps.build_dispatch_family_section
@@ -182,6 +197,11 @@ def fill_impl_blocks(
     target_src_dir.mkdir(parents=True, exist_ok=True)
     # This tree's splice+cargo lock (per-tree: parallel clusters don't share).
     _splice_check_lock = _splice_lock_for(target_src_dir)
+    # Guards the plain-Python aggregate counters (`attempts_total`,
+    # `impls_failed`, `errors`) and the retrospective-cache save — the parts
+    # of a block's fill that touch SHARED state but fall outside the
+    # per-attempt `_splice_check_lock` critical section.
+    _counters_lock = threading.Lock()
     bytes_before = sum(p.stat().st_size for p in target_src_dir.rglob("*.rs"))
     impls_filled = 0
     impls_failed = 0
@@ -598,7 +618,8 @@ def fill_impl_blocks(
 
         def _attempt_impl_fill(fix_attempt: int) -> FixOutcome:
             nonlocal attempts_total, last_response
-            attempts_total += 1
+            with _counters_lock:
+                attempts_total += 1
             # Slice 8a: TYPES_IN_SCOPE re-selected each attempt from the
             # member sigs + impl header + where clause + the current error
             # (Plan 9 F4: E0277/E0599/E0046/E0053 routinely name a trait
@@ -654,10 +675,20 @@ def fill_impl_blocks(
                     related=[rb.container for rb in related_blocks])
                 routed: list[tuple[dict[str, Any], str]] = [
                     (rb.fn_data, rb.container) for rb in routing.routed]
-                for _nm in routing.dropped:
-                    _log(f"  [phase-c/impl] {block_id}: dropped "
-                         f"`{_nm}` — block header "
-                         "does not match any TARGET or RELATED.")
+                if routing.dropped:
+                    # Capture the raw `block` attr + its canon key so a drop
+                    # is diagnosable from the log alone, instead of
+                    # theorizing about what the model sent.
+                    _by_name = {str(fd.get("fn_name", "")): fd for fd in parsed}
+                    target_canon = canon_container(block.container)
+                    for _nm in routing.dropped:
+                        _raw_block = str(_by_name.get(_nm, {}).get("block") or "")
+                        _log(f"  [phase-c/impl] {block_id}: dropped "
+                             f"`{_nm}` — block header "
+                             "does not match any TARGET or RELATED. "
+                             f"raw_block={_raw_block!r} "
+                             f"raw_canon={canon_container(_raw_block)!r} "
+                             f"target_canon={target_canon!r}")
                 spliced_now = 0
                 refusals: list[str] = []
                 # debt #46 point 2: refill members are already-filled (not
@@ -910,9 +941,10 @@ def fill_impl_blocks(
                     _log(f"  [phase-c/impl] {block_id}: maximal attempt "
                          f"error: {_me}")
         if members_filled_this_block == 0 and not block_already_complete:
-            impls_failed += 1
-            errors.append(f"{block.file}::{block.container}: "
-                          f"impl-fill failed after {fix_attempt} attempt(s)")
+            with _counters_lock:
+                impls_failed += 1
+                errors.append(f"{block.file}::{block.container}: "
+                              f"impl-fill failed after {fix_attempt} attempt(s)")
             _emit("phase_c.impl.fill.fail", duration_ms=int(
                 (time.monotonic() - _t0) * 1000),
                 data={
@@ -954,17 +986,24 @@ def fill_impl_blocks(
                     retro.get("category") == "GENUINELY_HARD"
                     or (prior_best is not None and not improved)
                 )
-                retros_cache[_retro_key(block.file, "*impl*", block.container)] = {
-                    "category": retro.get("category", ""),
-                    "guidance": retro.get("guidance", ""),
-                    "signal": retro.get("signal", ""),
-                    "retrospective_count": int(prior.get("retrospective_count", 0)) + 1,
-                    "error_count": cur_errs,
-                    "best_error_count": new_best,
-                    "fully_exhausted": full_exhaust,
-                    "last_error_preview": last_error_excerpt[:240],
-                }
-                _save_retrospectives(project_dir, retros_cache)
+                # The dict write + on-disk save must be atomic together —
+                # two blocks finishing concurrently each write their OWN key
+                # (safe unlocked, per-block-unique), but an unlocked
+                # save-after-write race could have one thread's
+                # `_save_retrospectives` persist a snapshot taken before the
+                # other thread's key landed, silently losing that entry.
+                with _counters_lock:
+                    retros_cache[_retro_key(block.file, "*impl*", block.container)] = {
+                        "category": retro.get("category", ""),
+                        "guidance": retro.get("guidance", ""),
+                        "signal": retro.get("signal", ""),
+                        "retrospective_count": int(prior.get("retrospective_count", 0)) + 1,
+                        "error_count": cur_errs,
+                        "best_error_count": new_best,
+                        "fully_exhausted": full_exhaust,
+                        "last_error_preview": last_error_excerpt[:240],
+                    }
+                    _save_retrospectives(project_dir, retros_cache)
             except Exception as _re:
                 _log(f"  [phase-c/impl/retro] {block_id}: {_re}")
 
@@ -978,8 +1017,50 @@ def fill_impl_blocks(
         for _file_rel, _fblocks in _by_file.items():
             if len(_fblocks) >= 2:
                 _fill_file_first(_file_rel, _fblocks)
-    for block in viable_blocks:
-        _fill_one_block(block)
+    # Independent FILES dispatch to a thread pool — the LLM call inside
+    # each block's fix loop is the slow part; `_splice_check_lock` +
+    # `_counters_lock` (above) already serialize everything that touches
+    # shared state, so concurrent files are safe the same way the per-fn
+    # engine's worker pool is (phase_c_engine.py). Blocks WITHIN a file are
+    # never split across workers — sibling impls on one type are frequently
+    # co-designed, so a worker processes its file's blocks one at a time.
+    _by_file_q: dict[str, list[ImplBlock]] = {}
+    for _b in viable_blocks:
+        _by_file_q.setdefault(_b.file, []).append(_b)
+    _file_units = list(_by_file_q.values())
+    _nw = min(max(1, parallelism), len(_file_units)) if _file_units else 0
+    if _nw > 1:
+        _log(f"  [phase-c/impl] parallelism={_nw} (LLM calls concurrent "
+             "across files, serial within a file; splice+cargo serialised per tree).")
+        _file_queue: _queue_mod.Queue[list[ImplBlock]] = _queue_mod.Queue()
+        for _fb in _file_units:
+            _file_queue.put(_fb)
+
+        def _impl_worker() -> None:
+            while True:
+                try:
+                    _fblocks = _file_queue.get_nowait()
+                except _queue_mod.Empty:
+                    return
+                for _blk in _fblocks:
+                    try:
+                        _fill_one_block(_blk)
+                    except Exception as _we:
+                        _log(f"  [phase-c/impl] worker error on "
+                             f"{_blk.file}::{_blk.container}: {_we}")
+
+        _impl_workers = [
+            threading.Thread(target=_impl_worker,
+                              name=f"impl-fill-{cluster_name}-w{i}")
+            for i in range(_nw)
+        ]
+        for _t in _impl_workers:
+            _t.start()
+        for _t in _impl_workers:
+            _t.join()
+    else:
+        for block in viable_blocks:
+            _fill_one_block(block)
     bytes_after = sum(p.stat().st_size for p in target_src_dir.rglob("*.rs"))
     remaining_records = _scan_unimplemented_records_for_cluster(target_src_dir, cluster)
     # None = extractor absent → text-scan fallback; 0 here would make the

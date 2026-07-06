@@ -438,6 +438,53 @@ def parse_failed_tests(output: str) -> set[str]:
     return failed
 
 
+def split_test_stdout_sections(output: str) -> list[tuple[str, str]]:
+    """Split cargo test output into `(test_name, body)` pairs at each
+    `---- name stdout ----` header (regex-free; same header recognition as
+    :func:`parse_failed_tests`). `body` runs until the next such header, one
+    of cargo's own trailing structural lines (the `failures:` name-list, a
+    `test result:` summary, or the next binary's `running N tests` preamble —
+    otherwise the LAST matched section absorbs every subsequent binary's
+    output when `cargo test` runs the whole suite in one invocation), or end
+    of output — stripped. Order preserved; a name repeats in the list if
+    cargo printed its stdout section more than once."""
+    sections: list[tuple[str, list[str]]] = []
+    cur_name: str | None = None
+    cur_body: list[str] = []
+    for ln in output.splitlines():
+        toks = ln.split()
+        if (ln[:4] == "----" and len(toks) >= 4
+                and toks[0] == "----" and toks[2] == "stdout" and toks[3] == "----"):
+            if cur_name is not None:
+                sections.append((cur_name, cur_body))
+            cur_name = toks[1]
+            cur_body = []
+            continue
+        if cur_name is not None:
+            stripped = ln.strip()
+            if (stripped == "failures:" or stripped.startswith("test result:")
+                    or stripped.startswith("running ")):
+                sections.append((cur_name, cur_body))
+                cur_name = None
+                cur_body = []
+                continue
+            cur_body.append(ln)
+    if cur_name is not None:
+        sections.append((cur_name, cur_body))
+    return [(name, "\n".join(body).strip()) for name, body in sections]
+
+
+def failure_bodies_for(output: str, names: set[str]) -> dict[str, str]:
+    """The stdout-section body for each of `names` present in `output` (first
+    occurrence wins). A name with no captured output (empty body) is omitted
+    — a bare header tells the caller nothing a blind tail-slice wouldn't."""
+    bodies: dict[str, str] = {}
+    for name, body in split_test_stdout_sections(output):
+        if name in names and body and name not in bodies:
+            bodies[name] = body
+    return bodies
+
+
 def parse_rustc_compile_errors(build_output: str) -> list[tuple[str, str, int]]:
     """`(message, file, line)` for each rustc `error[...]: <msg>` line immediately
     followed by a `--> <file>:<line>[:col]` location line (regex-free, R7; mirrors
