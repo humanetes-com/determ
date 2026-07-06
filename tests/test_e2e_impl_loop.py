@@ -442,10 +442,13 @@ def test_file_first_reverts_on_compile_failure_then_blocks_take_over(
     monkeypatch.setattr(pipeline, "_collect_impl_blocks_for_cluster",
                         lambda *a, **k: _two_blocks())
     _install_model(monkeypatch, [RESPONSE_TWO])
-    # File pass check fails → revert; per-block passes then succeed.
+    # Both file-first attempts fail (debt #54: file-first now retries once
+    # with feedback before giving up) → revert x2; per-block takes over and
+    # succeeds.
     install_scripted_cargo(
         monkeypatch,
         check_diag=[(101, "error: x", [diag("src/lib.rs", code="E0308")]),
+                    (101, "error: x", [diag("src/lib.rs", code="E0308")]),
                     (0, "", [])])
     res = _run(ws)
     text = (ws / "src" / "lib.rs").read_text()
