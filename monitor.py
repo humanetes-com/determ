@@ -94,7 +94,20 @@ from pipeline_core.monitor.render import (  # noqa: E402
     ansi_seq_len as _ansi_seq_len,
 )
 from pipeline_core.monitor.render import (
+    bg_white,
+    bold,
+    cyan,
+    dim,
+    green,
+    red,
+    rev,
+    yellow,
+)
+from pipeline_core.monitor.render import (
     call_start_value as _call_start_value,
+)
+from pipeline_core.monitor.render import (
+    event_format as _event_format,
 )
 from pipeline_core.monitor.render import (
     plain as _plain,
@@ -139,16 +152,6 @@ def _w():
 def _h():
     try: return os.get_terminal_size().lines
     except: return 24
-
-def bold(s):     return f"\033[1m{s}\033[0m"
-def dim(s):      return f"\033[2m{s}\033[0m"
-def underline(s):return f"\033[4m{s}\033[0m"
-def green(s):    return f"\033[32m{s}\033[0m"
-def red(s):      return f"\033[31m{s}\033[0m"
-def cyan(s):     return f"\033[36m{s}\033[0m"
-def yellow(s):   return f"\033[33m{s}\033[0m"
-def rev(s):      return f"\033[7m{s}\033[0m"   # reverse video (highlight)
-def bg_white(s): return f"\033[30;107m{s}\033[0m"  # black text on bright white background
 
 def bar(pct, width=18, label: str = ""):
     filled = round(pct / 100 * width)
@@ -1130,58 +1133,6 @@ def _log_lines(log_path, tail_bytes: int = 2 * 1024 * 1024):
             for i in range(0, len(line), w):
                 out.append(line[i:i+w])
     return out
-
-
-def _event_format(ev: dict) -> str:
-    """Render a single event-log entry as one human-readable colored line."""
-    ts = ev.get("ts", "")
-    # Time portion only: HH:MM:SS.mmm
-    if "T" in ts:
-        time_part = ts.split("T", 1)[1].split("+")[0].split(".")
-        ts_s = time_part[0] + ("." + time_part[1][:3] if len(time_part) > 1 else "")
-    else:
-        ts_s = ts[:12]
-
-    verb = ev.get("event", "")
-    if verb.endswith(".done") or verb.endswith(".pass") or verb.endswith(".success"):
-        verb_col = green
-    elif verb.endswith(".fail") or verb.endswith(".error"):
-        verb_col = red
-    elif verb.endswith(".start") or verb.endswith(".request"):
-        verb_col = yellow
-    elif verb.startswith("guard.") or verb.startswith("llm."):
-        verb_col = cyan
-    else:
-        verb_col = bold
-
-    fields = []
-    for k in ("task", "cluster", "module", "file", "attempt"):
-        v = ev.get(k)
-        if v not in (None, "", "-"):
-            fields.append(f"{k}={v}")
-    if ev.get("duration_ms") is not None:
-        fields.append(f"{ev['duration_ms']}ms")
-
-    # Short data summary: prefer a couple of high-signal fields.
-    data = ev.get("data") or {}
-    data_bits = []
-    for k in ("pct", "passed", "ok", "covered", "coverable", "pass_count", "fail_count",
-              "returncode", "reason", "model"):
-        if k in data:
-            v = data[k]
-            if isinstance(v, str) and len(v) > 30:
-                v = v[:27] + "..."
-            data_bits.append(f"{k}={v}")
-    # Compact prompt content-addressed summary when present.
-    for k in ("prompt", "response"):
-        sub = data.get(k)
-        if isinstance(sub, dict) and "char_count" in sub:
-            data_bits.append(f"{k}={sub['char_count']}c")
-
-    head = f"{dim(ts_s)} {verb_col(bold(verb)):<22}"
-    tail = "  ".join(fields)
-    extra = "  ".join(data_bits)
-    return f"{head}  {dim(tail) if tail else ''}{('  ' + dim(extra)) if extra else ''}".rstrip()
 
 
 def _event_lines(events_path: str, tail_bytes: int = 1024 * 1024) -> list[str]:

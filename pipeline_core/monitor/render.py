@@ -1,13 +1,79 @@
 """Pure ANSI / pipeline-line text helpers for the monitor TUI.
 
 These are the regex-free (R7) presentation-layer primitives the renderer reuses:
-visible-width measurement (ANSI escape stripping) and the two structured scrapes
-of pipeline-state / call-start log lines. They hold no I/O and no module state, so
-they live in :mod:`pipeline_core.monitor` beside the data readers (run_data /
-events_data) rather than in the god-file ``monitor.py``.
+visible-width measurement (ANSI escape stripping), the color-wrapping helpers,
+the two structured scrapes of pipeline-state / call-start log lines, and the
+event-log line formatter. They hold no I/O and no module state, so they live in
+:mod:`pipeline_core.monitor` beside the data readers (run_data / events_data)
+rather than in the god-file ``monitor.py``.
 """
 
 from __future__ import annotations
+
+from typing import Any
+
+
+def bold(s: str) -> str:      return f"\033[1m{s}\033[0m"
+def dim(s: str) -> str:       return f"\033[2m{s}\033[0m"
+def underline(s: str) -> str: return f"\033[4m{s}\033[0m"
+def green(s: str) -> str:     return f"\033[32m{s}\033[0m"
+def red(s: str) -> str:       return f"\033[31m{s}\033[0m"
+def cyan(s: str) -> str:      return f"\033[36m{s}\033[0m"
+def yellow(s: str) -> str:    return f"\033[33m{s}\033[0m"
+def rev(s: str) -> str:       return f"\033[7m{s}\033[0m"   # reverse video (highlight)
+def bg_white(s: str) -> str:  return f"\033[30;107m{s}\033[0m"  # black on bright white
+
+
+def event_format(ev: dict[str, Any]) -> str:
+    """Render a single event-log entry as one human-readable colored line."""
+    ts = ev.get("ts", "")
+    # Time portion only: HH:MM:SS.mmm
+    if "T" in ts:
+        time_part = ts.split("T", 1)[1].split("+")[0].split(".")
+        ts_s = time_part[0] + ("." + time_part[1][:3] if len(time_part) > 1 else "")
+    else:
+        ts_s = ts[:12]
+
+    verb = ev.get("event", "")
+    if verb.endswith(".done") or verb.endswith(".pass") or verb.endswith(".success"):
+        verb_col = green
+    elif verb.endswith(".fail") or verb.endswith(".error"):
+        verb_col = red
+    elif verb.endswith(".start") or verb.endswith(".request"):
+        verb_col = yellow
+    elif verb.startswith("guard.") or verb.startswith("llm."):
+        verb_col = cyan
+    else:
+        verb_col = bold
+
+    fields = []
+    for k in ("task", "cluster", "module", "file", "attempt"):
+        v = ev.get(k)
+        if v not in (None, "", "-"):
+            fields.append(f"{k}={v}")
+    if ev.get("duration_ms") is not None:
+        fields.append(f"{ev['duration_ms']}ms")
+
+    # Short data summary: prefer a couple of high-signal fields.
+    data = ev.get("data") or {}
+    data_bits = []
+    for k in ("pct", "passed", "ok", "covered", "coverable", "pass_count", "fail_count",
+              "returncode", "reason", "model"):
+        if k in data:
+            v = data[k]
+            if isinstance(v, str) and len(v) > 30:
+                v = v[:27] + "..."
+            data_bits.append(f"{k}={v}")
+    # Compact prompt content-addressed summary when present.
+    for k in ("prompt", "response"):
+        sub = data.get(k)
+        if isinstance(sub, dict) and "char_count" in sub:
+            data_bits.append(f"{k}={sub['char_count']}c")
+
+    head = f"{dim(ts_s)} {verb_col(bold(verb)):<22}"
+    tail = "  ".join(fields)
+    extra = "  ".join(data_bits)
+    return f"{head}  {dim(tail) if tail else ''}{('  ' + dim(extra)) if extra else ''}".rstrip()
 
 
 def ansi_seq_len(s: str, i: int) -> int:

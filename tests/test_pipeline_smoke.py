@@ -2633,18 +2633,21 @@ def test_impl_block_model() -> None:
         "members": [fmt, helper],
         "stub_members": [fmt],
         "related_containers": ["impl Debug for Error"],
+        "refill_members": [],
     }
     blk = ImplBlock.from_dict(wire)
     assert blk.file == "src/error.rs" and blk.container == "impl Display for Error"
     assert isinstance(blk.members[0], FnRecord) and blk.members[0].fn_name == "fmt"
     assert isinstance(blk.stub_members[0], FnRecord) and blk.stub_members[0].has_unimplemented_body
     assert blk.related_containers == ("impl Debug for Error",)
+    assert blk.refill_members == ()
     assert blk.id == "src/error.rs::impl Display for Error"
     assert blk.to_dict() == wire, "ImplBlock round-trip must equal the wire dict"
 
     # tolerant: empty / missing member lists → all-default block, no crash.
     blank = ImplBlock.from_dict({"file": "a.rs"})
     assert blank.members == () and blank.stub_members == () and blank.related_containers == ()
+    assert blank.refill_members == ()
     print("  OK  ImplBlock model: typed members + round-trip + id (R3.2)")
 
 
