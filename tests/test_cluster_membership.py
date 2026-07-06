@@ -3,6 +3,7 @@ from pipeline_core.application.reconstruct import cluster_membership as cm
 from pipeline_core.application.reconstruct.cleanup_residuals import (
     filter_test_exercised,
 )
+from pipeline_core.domain.models import FnLocator, FnRecord, ImplBlock
 
 
 def test_line_declares_mod_token_exact():
@@ -37,3 +38,78 @@ def test_filter_test_exercised():
     assert filter_test_exercised(stubs, tests) == [("src/a.rs", "used")]
     assert filter_test_exercised([], tests) == []
     assert filter_test_exercised(stubs, []) == []
+
+
+# --- debt #46 point 2: collect_impl_blocks_for_cluster / collect_impl_refill_targets ---
+
+def _member(name: str, is_stub: bool) -> FnRecord:
+    return FnRecord(file="lib.rs", fn_name=name, container="impl Foo",
+                    sig_text=f"fn {name}()", has_unimplemented_body=is_stub)
+
+
+def test_collect_impl_blocks_for_cluster_drops_block_with_no_active_members():
+    block = ImplBlock(file="lib.rs", container="impl Foo",
+                      members=(_member("kind", False),), stub_members=())
+    out = cm.collect_impl_blocks_for_cluster(
+        None, object(),
+        collect_impl_blocks=lambda _d: [block],
+        fn_belongs=lambda *a, **k: False)   # nothing active in this cluster
+    assert out == []
+
+
+def test_collect_impl_blocks_for_cluster_keeps_all_filled_block_with_active_member():
+    # The bug this fixes: a block with ZERO stub members (all filled, one wrong)
+    # used to be dropped outright — unreachable for behavioral re-fill targeting.
+    block = ImplBlock(file="lib.rs", container="impl Foo",
+                      members=(_member("kind", False), _member("name", False)),
+                      stub_members=())
+    out = cm.collect_impl_blocks_for_cluster(
+        None, object(),
+        collect_impl_blocks=lambda _d: [block],
+        fn_belongs=lambda _dir, _f, fn_name, _c, **_k: fn_name == "kind")
+    assert len(out) == 1
+    assert out[0].stub_members == ()          # no stub was active — narrowed to empty
+    assert out[0].members == block.members    # members untouched
+
+
+def test_collect_impl_blocks_for_cluster_narrows_stub_members_to_active_subset():
+    block = ImplBlock(file="lib.rs", container="impl Foo",
+                      members=(_member("kind", True), _member("name", True)),
+                      stub_members=(_member("kind", True), _member("name", True)))
+    out = cm.collect_impl_blocks_for_cluster(
+        None, object(),
+        collect_impl_blocks=lambda _d: [block],
+        fn_belongs=lambda _dir, _f, fn_name, _c, **_k: fn_name == "kind")
+    assert len(out) == 1
+    assert [m.fn_name for m in out[0].stub_members] == ["kind"]
+
+
+def test_collect_impl_refill_targets_stamps_nonstub_frontier_member():
+    block = ImplBlock(file="lib.rs", container="impl Foo",
+                      members=(_member("kind", False), _member("name", False)),
+                      stub_members=())
+    out = cm.collect_impl_refill_targets(
+        [block],
+        tdd_frontier_keys={FnLocator("lib.rs", "kind")},
+        tdd_frontier_tests={FnLocator("lib.rs", "kind"): {"kind_is_wrong"}})
+    assert [m.fn_name for m in out[0].refill_members] == ["kind"]
+
+
+def test_collect_impl_refill_targets_excludes_actual_stubs():
+    # A member still IN stub_members is a normal stub fill, never a refill target
+    # (even if it happens to be named in the frontier).
+    block = ImplBlock(file="lib.rs", container="impl Foo",
+                      members=(_member("kind", True),),
+                      stub_members=(_member("kind", True),))
+    out = cm.collect_impl_refill_targets(
+        [block],
+        tdd_frontier_keys={FnLocator("lib.rs", "kind")},
+        tdd_frontier_tests={FnLocator("lib.rs", "kind"): {"kind_is_wrong"}})
+    assert out[0].refill_members == ()
+
+
+def test_collect_impl_refill_targets_noop_without_frontier():
+    block = ImplBlock(file="lib.rs", container="impl Foo",
+                      members=(_member("kind", False),), stub_members=())
+    assert cm.collect_impl_refill_targets([block], None, None) == [block]
+    assert cm.collect_impl_refill_targets([block], set(), {}) == [block]

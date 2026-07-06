@@ -118,6 +118,22 @@ def test_build_blueprint_prompt_lists_topics_and_gaps() -> None:
     assert "MISSED these required" in p and "fn a();" in p and "FR text" in p
 
 
+def test_build_blueprint_prompt_defers_construction_to_deterministic_hint() -> None:
+    # Bake-time blueprint construction-consistency fix: the model-authored
+    # blueprint must NOT be asked to restate/invent construction syntax — that's
+    # already frozen and shown deterministically via a `construct:` line
+    # (`format_type_for_prompt`/`_construct_hint`, sections.py) at fill time. Two
+    # contradicting construction descriptions in one prompt is the bug; this
+    # keeps the blueprint prompt from being the second one.
+    from pipeline_core.prompts.blueprint import build_blueprint_prompt
+    p = build_blueprint_prompt(
+        module="m", skeleton_sigs="fn a();", tests_block="#[test] fn t(){}",
+        functional_req="FR text", topics=("error",))
+    assert "ALREADY FROZEN" in p
+    assert "Do NOT restate or re-describe construction" in p
+    assert "construct:" in p
+
+
 def test_missing_family_topic_is_reasked() -> None:
     """A dispatch-family topic (method name) missing from the headings is a
     validation gap like any file topic."""

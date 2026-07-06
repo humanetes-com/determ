@@ -6,7 +6,7 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from tools.hardcrate_select import TRAPS, max_level, select
+from tools.hardcrate_select import TRAPS, _as_list, max_level, select
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "hardcrate"
 
@@ -23,8 +23,10 @@ def test_level0_strips_every_trap_to_baseline(tmp_path: Path) -> None:
     assert removed == sorted(TRAPS)                       # all traps gone at level 0
     lib = (crate / "src" / "lib.rs").read_text()
     for name, t in TRAPS.items():
-        assert not (crate / t["src"]).exists(), name      # src deleted
-        assert not (crate / t["test"]).exists(), name     # test deleted
+        for rel in _as_list(t["src"]):
+            assert not (crate / rel).exists(), name       # src deleted
+        for rel in _as_list(t["test"]):
+            assert not (crate / rel).exists(), name       # test deleted
         for anchor in t["lib"]:
             assert anchor not in lib                       # lib mod/use lines removed
     # baseline survives, and the cap_limit dual-form (the extra_cap cluster toggle) stays.
@@ -37,7 +39,26 @@ def test_level_at_max_keeps_all_traps(tmp_path: Path) -> None:
     crate = _stage(tmp_path)
     assert select(crate, max_level()) == []               # nothing stripped
     for t in TRAPS.values():
-        assert (crate / t["src"]).exists() and (crate / t["test"]).exists()
+        for rel in _as_list(t["src"]):
+            assert (crate / rel).exists()
+        for rel in _as_list(t["test"]):
+            assert (crate / rel).exists()
+
+
+def test_level7_link_trap_is_multi_file(tmp_path: Path) -> None:
+    # `link` (level 7) is the first multi-src-file trap — stripping level 6 removes
+    # ONLY `link` (both halves + the shared test), keeping `guarded` (level 6) intact.
+    crate = _stage(tmp_path)
+    removed = select(crate, 6)
+    assert removed == ["link"]
+    assert not (crate / "src" / "link_a.rs").exists()
+    assert not (crate / "src" / "link_b.rs").exists()
+    assert not (crate / "tests" / "link_pair.rs").exists()
+    assert (crate / "src" / "guarded.rs").exists()
+    assert (crate / "tests" / "guarded.rs").exists()
+    lib = (crate / "src" / "lib.rs").read_text()
+    assert "mod link_a;" not in lib and "mod link_b;" not in lib
+    assert "mod guarded;" in lib
 
 
 def test_strip_removes_cfg_attr_above_anchor(tmp_path: Path) -> None:

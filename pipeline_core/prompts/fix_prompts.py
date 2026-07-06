@@ -151,9 +151,10 @@ def build_maximal_impl_prompt(
     notes_part = (f"\nNotes from earlier attempts:\n{notes}\n"
                   if notes.strip() else "")
     return f"""Previous attempts to implement functions in this Rust file failed.
-You now see the ENTIRE current file. Implement the still-unimplemented
-function(s) {names} of `{header}` so the file compiles and the tests pass.
-Keep every signature EXACTLY as written; change bodies only.
+You now see the ENTIRE current file. Implement or CORRECT the function(s)
+{names} of `{header}` so the file compiles and the tests pass — some may
+already have a body that compiles but whose test still fails; rewrite its
+behavior. Keep every signature EXACTLY as written; change bodies only.
 File: {file_rel}
 ```rust
 {file_text}

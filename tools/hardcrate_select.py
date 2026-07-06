@@ -75,6 +75,18 @@ TRAPS: dict[str, dict] = {
     # (C6 ratchet). Directly mirrors the live anyhow ceiling (compile-clean-but-wrong).
     "guarded": {"level": 6, "src": "src/guarded.rs", "test": "tests/guarded.rs",
                 "lib": ["mod guarded;", "pub use guarded::{seal, verify, Guarded};"]},
+    # level 7 — REGRESSION-CYCLE (the anyhow ceiling's remaining half): the SAME
+    # co-designed-private-scheme property as `guarded` (level 6), but the two sides
+    # (`stamp` / `unstamp`) live in SEPARATE files with independently-named private
+    # helpers (`mix_a` / `mix_b`), so a greedy PER-FILE fix loop cannot co-design them
+    # in one LLM call the way it can for `guarded`'s single file. Only the cross-file
+    # round-trip test catches a mismatch, forcing ≥2 outer TDD iterations with no
+    # single-pass fixed point — exercises the C3/C4 plateau + C6 ratchet-sanity audits
+    # end-to-end (they currently SKIP: no existing trap forces >=3 module-iterations).
+    "link": {"level": 7, "src": ["src/link_a.rs", "src/link_b.rs"],
+             "test": "tests/link_pair.rs",
+             "lib": ["mod link_a;", "mod link_b;",
+                     "pub use link_a::stamp;", "pub use link_b::unstamp;"]},
 }
 
 
@@ -100,17 +112,24 @@ def _strip_lib_anchors(lib_path: Path, anchors: list[str]) -> None:
     lib_path.write_text("\n".join(kept) + "\n", encoding="utf-8")
 
 
+def _as_list(v: str | list[str]) -> list[str]:
+    return v if isinstance(v, list) else [v]
+
+
 def select(crate_dir: str | Path, max_keep: int) -> list[str]:
     """Strip every trap whose level > `max_keep` from `crate_dir` (in place).
-    Returns the sorted names of the traps removed."""
+    Returns the sorted names of the traps removed. A trap's `src`/`test` may be
+    a single path or a list (a multi-file trap like `link`)."""
     root = Path(crate_dir)
     lib = root / "src" / "lib.rs"
     removed: list[str] = []
     for name, t in TRAPS.items():
         if t["level"] <= max_keep:
             continue
-        (root / t["src"]).unlink(missing_ok=True)
-        (root / t["test"]).unlink(missing_ok=True)
+        for rel in _as_list(t["src"]):
+            (root / rel).unlink(missing_ok=True)
+        for rel in _as_list(t["test"]):
+            (root / rel).unlink(missing_ok=True)
         if lib.exists():
             _strip_lib_anchors(lib, t["lib"])
         removed.append(name)

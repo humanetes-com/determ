@@ -34,9 +34,18 @@ Format: markdown. Start with `## Overview` (the crate's collaboration story in
 a few sentences), then ONE `## <topic>` section per topic:
 {topic_lines}
 {missing_part}
-In each section state CONCRETELY, in 3-10 lines:
-  - for a source file: what each type stores (fields you plan), how its fns
-    collaborate, which invariants hold;
+Every type's field layout (tuple vs named, field types) is ALREADY FROZEN by
+the skeleton signatures below — you are not choosing or inventing it, and at
+fill time each type's exact construction syntax is shown to you deterministically
+(a `construct: Name(<a>, <b>)` / `construct: Name {{ field: <ty> }}` line derived
+from that same frozen layout). Do NOT restate or re-describe construction
+syntax here — a free-form guess that disagrees with the frozen layout only
+contradicts the deterministic hint later. Instead, in each section state
+CONCRETELY, in 3-10 lines, what's actually underdetermined:
+  - for a source file: WHY each frozen private field exists (what invariant or
+    piece of state it encodes) and how its fns collaborate to maintain that
+    invariant — not what the field IS (already frozen) or how to construct it
+    (already deterministic);
   - for a dispatch family / macro: the exact expansion or specialization
     scheme you will implement, with a short generic example (placeholder
     names, e.g. `struct Wrapper(Inner);` — never prose like "design X well").

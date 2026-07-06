@@ -585,12 +585,21 @@ class ImplBlock:
 
     `from_dict` parses members tolerantly (FnRecord.from_dict per member), so it
     accepts the legacy block dict unchanged; `to_dict` round-trips the exact wire
-    shape the existing consumers read."""
+    shape the existing consumers read.
+
+    `refill_members` (block-level analog of `Stub.refill`): already-filled,
+    compiling members whose attributed test still fails — a co-design correction
+    target. Populated only when the caller supplies a TDD frontier + failing-test
+    map; the whole point of tracking these at BLOCK (not fn) granularity is that
+    two co-designed members needing joint correction (e.g. a shared private tag
+    scheme two fns must agree on) reach the model in the SAME LLM call, which a
+    per-fn refill can never do."""
     file: str = ""
     container: str = ""
     members: tuple[FnRecord, ...] = ()
     stub_members: tuple[FnRecord, ...] = ()
     related_containers: tuple[str, ...] = ()
+    refill_members: tuple[FnRecord, ...] = ()
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> ImplBlock:
@@ -600,6 +609,7 @@ class ImplBlock:
             members=tuple(FnRecord.from_dict(m) for m in (d.get("members") or [])),
             stub_members=tuple(FnRecord.from_dict(m) for m in (d.get("stub_members") or [])),
             related_containers=_strs(d.get("related_containers")),
+            refill_members=tuple(FnRecord.from_dict(m) for m in (d.get("refill_members") or [])),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -609,12 +619,21 @@ class ImplBlock:
             "members": [m.to_dict() for m in self.members],
             "stub_members": [m.to_dict() for m in self.stub_members],
             "related_containers": list(self.related_containers),
+            "refill_members": [m.to_dict() for m in self.refill_members],
         }
 
     @property
     def id(self) -> str:
         """Stable hashable id (file::container) — the per-block lock / frontier key."""
         return f"{self.file}::{self.container}"
+
+    @property
+    def needs_fill(self) -> bool:
+        """True if this block has ANY work left — a stub to fill or a wrong-but-
+        compiling member to correct. Named once so `_viable`-style checks don't
+        re-derive "does this block have work" from raw truthiness in multiple
+        places (one of which would otherwise miss `refill_members`)."""
+        return bool(self.stub_members or self.refill_members)
 
 
 __all__ = [

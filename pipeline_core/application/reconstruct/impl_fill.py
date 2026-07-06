@@ -16,6 +16,9 @@ from typing import Any
 
 from pipeline_core.application.fix_loop import FixOutcome, drive_fix_loop
 from pipeline_core.application.reconstruct.cargo_errors import ecodes_in_text, focus_diagnostics
+from pipeline_core.application.reconstruct.cluster_membership import (
+    collect_impl_refill_targets,
+)
 from pipeline_core.application.reconstruct.pull_resolver import (
     PullSources,
     ask_with_pulls,
@@ -194,13 +197,20 @@ def fill_impl_blocks(
             "impls_filled": 0, "impls_failed": 0,
         }
 
-    # If a TDD frontier is provided, narrow to blocks whose stub_members
-    # intersect the frontier. Otherwise process all blocks with stubs.
+    # debt #46 point 2 — stamp `refill_members` onto blocks that have an
+    # already-filled, compiling member with a failing attributed test, so the
+    # co-designed block is re-attacked WHOLE in one call instead of leaving
+    # wrong bodies to a per-fn refill that can only touch one member at a time.
+    blocks = collect_impl_refill_targets(blocks, tdd_frontier_keys, tdd_frontier_tests)
+
+    # If a TDD frontier is provided, narrow to blocks whose stub_members OR
+    # refill_members intersect the frontier. Otherwise process all blocks with
+    # stubs (refill_members is always empty without a frontier — same guard).
     if tdd_frontier_keys is not None:
         narrowed: list[ImplBlock] = []
         for b in blocks:
-            stub_keys = {(b.file, m.fn_name) for m in b.stub_members}
-            if stub_keys & tdd_frontier_keys:
+            keys = {(b.file, m.fn_name) for m in (*b.stub_members, *b.refill_members)}
+            if keys & tdd_frontier_keys:
                 narrowed.append(b)
         blocks = narrowed
 
@@ -208,14 +218,17 @@ def fill_impl_blocks(
     def _viable(b: ImplBlock) -> bool:
         if not b.container:
             return False
-        if not b.stub_members:
+        if not b.needs_fill:
             return False
-        return not len(b.stub_members) > _PER_IMPL_MAX_STUBS
+        return not len(b.stub_members) + len(b.refill_members) > _PER_IMPL_MAX_STUBS
     viable_blocks = [b for b in blocks if _viable(b)]
+    _refill_block_count = sum(1 for b in viable_blocks if b.refill_members)
     _log(f"  [phase-c/impl] cluster {cluster_name}: "
          f"{len(viable_blocks)} impl block(s) viable "
          f"({len(blocks) - len(viable_blocks)} skipped — free fns / "
-         "oversized).")
+         "oversized)."
+         + (f" {_refill_block_count} behavioral re-fill block(s) "
+            "(filled bodies with failing tests)." if _refill_block_count else ""))
 
     # Crate-level context (shared by every block we visit).
     _src_for_macros = target_src_dir / "src" if (target_src_dir / "src").exists() else target_src_dir
@@ -444,7 +457,12 @@ def fill_impl_blocks(
                 and canon_container(r.get("container", "")) == _block_canon}
             _fresh_members = tuple(m for m in block.stub_members
                                    if m.fn_name in _still_stub)
-            if not _fresh_members:
+            # refill_members carry no "still a stub" signal (they were never
+            # stubs) — the frontier+failing-test snapshot that produced them is
+            # fixed for this whole call, so they stay valid re-fill targets
+            # unchanged; the eventual cargo-check + U2 gate is what actually
+            # re-validates them, regardless of why they were targeted.
+            if not _fresh_members and not block.refill_members:
                 _log(f"  [phase-c/impl] {block_id}: already complete — all "
                      f"{len(block.stub_members)} stub member(s) filled by "
                      "earlier sibling/family fills.")
@@ -484,9 +502,14 @@ def fill_impl_blocks(
         snapshot = file_path.read_text(encoding="utf-8")
         # Per-block context.
         stub_fn_names = [m.fn_name for m in block.stub_members]
+        # debt #46 point 2: refill members need their OWN failing test(s) and
+        # blueprint/notes context surfaced too, not just the stubs'.
+        refill_fn_names = [m.fn_name for m in block.refill_members]
+        _fill_target_names = stub_fn_names + refill_fn_names
         test_blocks: list[tuple[str, str]] = []
-        # Reuse the per-fn test finder by unioning tests touching any stub.
-        for fn_name in stub_fn_names[:4]:
+        # Reuse the per-fn test finder by unioning tests touching any
+        # stub/refill target.
+        for fn_name in _fill_target_names[:4]:
             for path_str, txt in _find_tests_referencing_fn(
                     tests_dir_files, fn_name, max_blocks=2):
                 if not any(p == path_str for p, _ in test_blocks):
@@ -505,25 +528,25 @@ def fill_impl_blocks(
         # sig_text drives the relevance ranking so the model sees the
         # patterns most likely to apply to the fns it's about to write.
         _target_sig_concat = " ".join(
-            (m.sig_text) for m in block.stub_members)
+            (m.sig_text) for m in (*block.stub_members, *block.refill_members))
         crate_idioms_section = _extract_crate_idioms(
             blocks, block.file,
             target_sig_text=_target_sig_concat,
             max_idioms=5,
         )
-        # FR-024 sibling reference: union over stub member names so e.g.
+        # FR-024 sibling reference: union over stub/refill member names so e.g.
         # a stub `fmt` sees an already-filled `fmt` from another impl.
         _sib_parts: list[str] = []
-        for fn_name in stub_fn_names[:4]:
+        for fn_name in _fill_target_names[:4]:
             _s = _collect_sibling_filled_bodies(
                 snapshot, fn_name, block.container)
             if _s:
                 _sib_parts.append(_s)
         siblings_section = "\n\n".join(_sib_parts)
         # P3: this block's blueprint slice — ranked by overlap with the
-        # stub names, the container tokens, and the file stem.
+        # stub/refill names, the container tokens, and the file stem.
         _blueprint_slice = "" if _blueprint.empty else _blueprint.slice_for(
-            frozenset([*stub_fn_names, *_container_names(block.container),
+            frozenset([*_fill_target_names, *_container_names(block.container),
                        Path(block.file).stem]),
             cap=int(os.getenv("BLUEPRINT_SLICE_CAP", "2500")))
         prior_retro = retros_cache.get(
@@ -532,7 +555,8 @@ def fill_impl_blocks(
         notes_section = ""
         if fr_path is not None:
             notes_section = _filter_model_notes_for_prompt(
-                fr_path, file_rel=block.file, fn_name=stub_fn_names[0] if stub_fn_names else "",
+                fr_path, file_rel=block.file,
+                fn_name=_fill_target_names[0] if _fill_target_names else "",
                 file_text=snapshot, current_error="",
             )
         last_error_excerpt = ""
@@ -569,6 +593,7 @@ def fill_impl_blocks(
             "file": block.file,
             "container": block.container,
             "stub_count": len(block.stub_members),
+            "refill_count": len(block.refill_members),
         })
 
         def _attempt_impl_fill(fix_attempt: int) -> FixOutcome:
@@ -635,6 +660,11 @@ def fill_impl_blocks(
                          "does not match any TARGET or RELATED.")
                 spliced_now = 0
                 refusals: list[str] = []
+                # debt #46 point 2: refill members are already-filled (not
+                # `unimplemented!()`) — the splice must be told to overwrite a
+                # non-stub body for exactly these fn names, same as the per-fn
+                # refill path's `allow_nonstub=rec.refill` (fill_one_fn.py).
+                _refill_names = {m.fn_name for m in block.refill_members}
                 # Apply each splice. Operating on the same file in
                 # sequence keeps byte offsets consistent because we
                 # re-locate after each splice via the syn enumerator.
@@ -651,6 +681,7 @@ def fill_impl_blocks(
                     ok, reason, delta = _splice_fn_with_where(
                         target_file, container, fn_data["fn_name"],
                         fn_data["body"], wc,
+                        allow_nonstub=fn_data["fn_name"] in _refill_names,
                     )
                     if ok:
                         spliced_now += 1
@@ -693,7 +724,7 @@ def fill_impl_blocks(
                     # Plan 10 U2 (shared gate): accept the block only if its
                     # members' own tests pass too — not just compile.
                     _block_tests: set[str] = set()
-                    for _bm in block.stub_members:
+                    for _bm in (*block.stub_members, *block.refill_members):
                         _block_tests |= (tdd_frontier_tests or {}).get(
                             FnLocator(block.file, _bm.fn_name), set())
                     _u2_impl = _u2_test_gate(_block_tests, tdd_test_cmd,
@@ -844,7 +875,9 @@ def fill_impl_blocks(
             _max_cap = int(os.getenv("PHASE_C_MAXIMAL_CHAR_CAP", "120000"))
             _cur_text = file_path.read_text(encoding="utf-8", errors="replace")
             _max_tests: list[tuple[str, str]] = []
-            for _fn in [m.fn_name for m in block.stub_members]:
+            _max_target_names = [m.fn_name for m in
+                                  (*block.stub_members, *block.refill_members)]
+            for _fn in _max_target_names:
                 for _pth, _txt in _find_tests_referencing_fn(
                         tests_dir_files, _fn, max_blocks=4):
                     if not any(p == _pth for p, _ in _max_tests):
@@ -853,7 +886,7 @@ def fill_impl_blocks(
                 f"// {p}\n{t}" for p, t in _max_tests)
             _max_prompt = build_maximal_impl_prompt(
                 file_rel=block.file, container=block.container,
-                stub_names=[m.fn_name for m in block.stub_members],
+                stub_names=_max_target_names,
                 file_text=_cur_text, tests_block=_tests_text,
                 errs=last_error_excerpt, notes=notes_section)
             if len(_max_prompt) > _max_cap:
@@ -886,7 +919,7 @@ def fill_impl_blocks(
                     "cluster": cluster_name,
                     "file": block.file,
                     "container": block.container,
-                    "members_failed": len(block.stub_members),
+                    "members_failed": len(block.stub_members) + len(block.refill_members),
                     "fix_attempts": fix_attempt,
                     "last_error_preview": last_error_excerpt[:200],
                     "error_codes": sorted(ecodes_in_text(last_error_excerpt)),

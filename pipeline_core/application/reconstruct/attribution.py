@@ -419,23 +419,39 @@ def attribute_failures(
     def _strip(fr: Frontier) -> Frontier:
         return {k: v for k, v in fr.items() if k not in _test_keys} if _test_keys else fr
 
-    # 1. Runtime panics.
-    frontier = _strip(extract_tdd_frontier(deps, test_output, src_dir))
-    if frontier:
-        return AttributionResult(frontier, FailureKind.RUNTIME)
-    # 2. Compile errors.
-    frontier = _strip(extract_tdd_compile_frontier(deps, test_output, src_dir))
-    if frontier:
-        return AttributionResult(frontier, FailureKind.COMPILE)
-    # 3. Deterministic behavioral attribution (assertion failures with a clean
-    # build — the s117 stable-51/72 case: no stub panic, no compile error, so
-    # the chain previously fell through to the non-deterministic classifier).
+    # Paths 1-3 are DETERMINISTIC and DISJOINT by failure mode: a test that
+    # stub-panics (1), one whose harness fails to compile (2), and one that
+    # assertion-fails on a clean build (3) attribute to DIFFERENT fns. The old
+    # "return the first non-empty path" starved 2 and 3 whenever ANY stub still
+    # panicked — a handful of unfillable exhausted stubs kept path 1 non-empty
+    # every iter, so the wrong-BODY behavioral failures were never surfaced and
+    # never re-filled (the anyhow 14-ceiling). Fix: UNION the three, so stub
+    # fills AND wrong-body re-fills are dispatched together. Over-attribution is
+    # already tolerated downstream (splice guards reject non-stub overwrites;
+    # behavioral re-fill WANTS the non-stub keys). The classifier (4) and the
+    # coarse fallbacks (5,6) stay as fallbacks — only reached if 1-3 are empty.
+    contributors: list[FailureKind] = []
+
+    def _merge(dst: Frontier, add: Frontier, kind: FailureKind) -> None:
+        if add:
+            contributors.append(kind)
+            for k, v in add.items():
+                dst.setdefault(k, set()).update(v)
+
+    merged: Frontier = {}
+    _merge(merged, _strip(extract_tdd_frontier(deps, test_output, src_dir)),
+           FailureKind.RUNTIME)
+    _merge(merged, _strip(extract_tdd_compile_frontier(deps, test_output, src_dir)),
+           FailureKind.COMPILE)
     if test_texts:
-        frontier, _srcs = behavior_frontier_from_texts(
+        _bf, _srcs = behavior_frontier_from_texts(
             deps, test_output, test_texts, src_dir)
-        frontier = _strip(frontier)
-        if frontier:
-            return AttributionResult(frontier, FailureKind.BEHAVIOR)
+        _merge(merged, _strip(_bf), FailureKind.BEHAVIOR)
+    if merged:
+        # One contributor → keep its kind (preserves per-path stats); several →
+        # MERGED so the union is visible in logs/events.
+        kind = contributors[0] if len(contributors) == 1 else FailureKind.MERGED
+        return AttributionResult(merged, kind)
     # 4. LLM classifier — turn off via PHASE_C_TDD_USE_CLASSIFIER=0.
     if os.getenv("PHASE_C_TDD_USE_CLASSIFIER", "1") != "0":
         failing = sorted(parse_failed_tests(test_output))

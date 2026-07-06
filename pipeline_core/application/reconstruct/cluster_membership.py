@@ -23,7 +23,13 @@ from pipeline_core.application.reconstruct.stub_scan import (
     scan_unimplemented_functions,
 )
 from pipeline_core.domain import cfg as _cfg
-from pipeline_core.domain.models import FnLocator, ImplBlock, ModRecord, TypeRecord
+from pipeline_core.domain.models import (
+    FnLocator,
+    Frontier,
+    ImplBlock,
+    ModRecord,
+    TypeRecord,
+)
 from pipeline_core.domain.rust_scan import contains_decl_keyword, named_fn_decl_start
 from pipeline_core.domain.test_count import file_top_cfg_excluded
 
@@ -144,9 +150,14 @@ def collect_impl_blocks_for_cluster(
     collect_impl_blocks: Callable[[Path], list[ImplBlock] | None],
     fn_belongs: Callable[..., bool],
 ) -> list[ImplBlock] | None:
-    """Cluster-aware `collect_impl_blocks`: a block is kept iff ≥1 of its STUB
-    members is active in `cluster`; inactive stubs are dropped from
-    `stub_members`. None (extractor unavailable) passes through."""
+    """Cluster-aware `collect_impl_blocks`: a block is kept iff ≥1 of its
+    members (stub OR already-filled) is active in `cluster`; inactive stubs are
+    dropped from `stub_members`. A block with zero cluster-active STUBS but a
+    cluster-active already-filled member is still kept (with `stub_members`
+    narrowed to `()`) — dropping it here would make an all-filled-but-wrong
+    block unreachable for behavioral re-fill targeting downstream (debt #46
+    point 2 / `collect_impl_refill_targets`). None (extractor unavailable)
+    passes through."""
     blocks = collect_impl_blocks(target_src_dir)
     if blocks is None or cluster is None:
         return blocks
@@ -157,8 +168,41 @@ def collect_impl_blocks_for_cluster(
             if fn_belongs(target_src_dir, b.file, m.fn_name, cluster,
                           fn_cfg_predicates=list(m.cfg_predicates))
         )
-        if kept:
+        any_active = bool(kept) or any(
+            fn_belongs(target_src_dir, b.file, m.fn_name, cluster,
+                       fn_cfg_predicates=list(m.cfg_predicates))
+            for m in b.members
+        )
+        if any_active:
             out.append(dataclasses.replace(b, stub_members=kept))
+    return out
+
+
+def collect_impl_refill_targets(
+    blocks: list[ImplBlock],
+    tdd_frontier_keys: set[FnLocator] | None,
+    tdd_frontier_tests: Frontier | None,
+) -> list[ImplBlock]:
+    """debt #46 point 2 — block-level analog of
+    `PhaseCFillEngine._collect_refill_targets`: for each block, find members
+    that are already FILLED (not in `stub_members`) but have a failing
+    attributed test, and stamp them onto `refill_members` so the per-impl fill
+    path re-attacks the whole co-designed block in ONE call instead of leaving
+    wrong bodies to a per-fn refill that can only touch one member at a time.
+    Empty unless the TDD outer loop supplied both the frontier keys and the
+    failing-test map (mirrors the per-fn version's same guard)."""
+    if not (tdd_frontier_keys and tdd_frontier_tests):
+        return blocks
+    out: list[ImplBlock] = []
+    for b in blocks:
+        stub_keys = {FnLocator(b.file, m.fn_name) for m in b.stub_members}
+        refill = tuple(
+            m for m in b.members
+            if FnLocator(b.file, m.fn_name) in tdd_frontier_keys
+            and FnLocator(b.file, m.fn_name) not in stub_keys
+            and tdd_frontier_tests.get(FnLocator(b.file, m.fn_name))
+        )
+        out.append(dataclasses.replace(b, refill_members=refill) if refill else b)
     return out
 
 

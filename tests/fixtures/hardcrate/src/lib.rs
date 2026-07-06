@@ -21,6 +21,8 @@ mod sprawl;
 mod label;
 mod unsafe_ptr;
 mod guarded;
+mod link_a;
+mod link_b;
 #[cfg(any(extra_cap, feature = "extra_cap"))]
 mod cap;
 
@@ -34,6 +36,8 @@ pub use sprawl::{abs_diff, clamp_u8, classify, count_set_bits, digit_sum, is_asc
 pub use label::{Describe, Reason, Tagged};
 pub use unsafe_ptr::{copy_via_raw, ptr_distance, read_at, write_at};
 pub use guarded::{seal, verify, Guarded};
+pub use link_a::stamp;
+pub use link_b::unstamp;
 #[cfg(any(extra_cap, feature = "extra_cap"))]
 pub use cap::wrapping_total;
 

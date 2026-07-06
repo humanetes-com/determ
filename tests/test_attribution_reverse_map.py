@@ -164,6 +164,41 @@ def test_behavior_path_fires_before_classifier(tmp_path: Path) -> None:
     assert key in frontier and frontier[key] == {"t_cap"}
 
 
+def test_merges_runtime_and_behavioral_paths(
+    tmp_path: Path, monkeypatch: Any,
+) -> None:
+    """The fix: when a stub still panics (path 1) AND other tests assertion-fail
+    (path 3), the frontier must surface BOTH — not just the panicking stub. The
+    old first-non-empty chain let exhausted stub-panics starve behavioral
+    attribution forever (the anyhow 14-ceiling)."""
+    import pipeline_core.application.reconstruct.attribution as attr
+    a = FnLocator("src/a.rs", "stub_fn")
+    b = FnLocator("src/b.rs", "wrong_fn")
+    monkeypatch.setattr(attr, "extract_tdd_frontier", lambda *_a, **_k: {a: {"t_panic"}})
+    monkeypatch.setattr(attr, "extract_tdd_compile_frontier", lambda *_a, **_k: {})
+    monkeypatch.setattr(attr, "behavior_frontier_from_texts",
+                        lambda *_a, **_k: ({b: {"t_assert"}}, {}))
+    frontier, kind = attribute_failures(
+        _deps([]), "out", tmp_path, recently_filled=[], test_reverse_map={},
+        cluster_name="stable", test_texts={"tests/x.rs": "…"})
+    assert kind == "merged"
+    assert frontier[a] == {"t_panic"} and frontier[b] == {"t_assert"}
+
+
+def test_single_deterministic_path_keeps_its_kind(
+    tmp_path: Path, monkeypatch: Any,
+) -> None:
+    import pipeline_core.application.reconstruct.attribution as attr
+    a = FnLocator("src/a.rs", "stub_fn")
+    monkeypatch.setattr(attr, "extract_tdd_frontier", lambda *_a, **_k: {a: {"t"}})
+    monkeypatch.setattr(attr, "extract_tdd_compile_frontier", lambda *_a, **_k: {})
+    monkeypatch.setattr(attr, "behavior_frontier_from_texts", lambda *_a, **_k: ({}, {}))
+    frontier, kind = attribute_failures(
+        _deps([]), "out", tmp_path, recently_filled=[], test_reverse_map={},
+        cluster_name="stable", test_texts={"tests/x.rs": "…"})
+    assert kind == "runtime" and a in frontier
+
+
 def test_behavior_path_skipped_without_texts(
     tmp_path: Path, monkeypatch: Any,
 ) -> None:

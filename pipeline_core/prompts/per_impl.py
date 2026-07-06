@@ -51,7 +51,10 @@ def build_per_impl_prompt(
     file_rel = block.file
     container = block.container
     stub_members = block.stub_members
-    target_render = format_impl_block_for_prompt(block, mark_target=True)
+    refill_members = block.refill_members
+    target_render = format_impl_block_for_prompt(
+        block, mark_target=True,
+        refill_fn_names=frozenset(m.fn_name for m in refill_members))
     related_renders = []
     for rb in related_blocks:
         related_renders.append(
@@ -124,11 +127,24 @@ def build_per_impl_prompt(
                "these idioms whenever your fn's situation matches one of "
                "them. Do NOT invent a new approach when one of these "
                "patterns clearly applies.\n")
+    # debt #46 point 2: members flagged [REFILL] above compile but their
+    # attributed test still fails — usually because they disagree with a
+    # sibling stub/refill member on a shared private scheme. Rewrite them
+    # TOGETHER with the stubs so the whole block agrees.
+    refill_block = tag_block(
+        "REFILL_TARGETS",
+        ", ".join(m.fn_name for m in refill_members),
+        prefix="These members are marked [REFILL] in TARGET_IMPL_BLOCK above: "
+               "they already COMPILE but their attributed test (see Tests "
+               "below) still FAILS. Rewrite their BEHAVIOR — keep the "
+               "signature, do not just resubmit the same body. If they share "
+               "a private field/scheme with a [STUB] member, design BOTH "
+               "consistently in this same response.\n")
 
     # Output protocol example.
     output_example: list[str] = []
-    for m in stub_members[:2]:  # show up to 2 worked examples in the
-                                # output format
+    for m in (*stub_members, *refill_members)[:2]:  # show up to 2 worked
+                                # examples in the output format
         output_example.append(
             f'<FN name="{m.fn_name}" block="{container}">\n'
             "  // body (no outer braces, no signature)\n"
@@ -137,7 +153,7 @@ def build_per_impl_prompt(
     output_example_str = "\n".join(output_example) if output_example else (
         '<FN name="..." block="...">\nbody\n</FN>')
 
-    stub_names = ", ".join(m.fn_name for m in stub_members)
+    stub_names = ", ".join(m.fn_name for m in (*stub_members, *refill_members))
     return f"""Implement the marked [STUB] fns in this Rust impl block so the
 tests pass. The unit of work is the IMPL BLOCK — design every member
 together; each fn must respect the impl header's generic parameters,
@@ -151,7 +167,7 @@ Stubs to fill in this response: {stub_names}
 <RUST_GOTCHAS>
 {gotchas_summary()}
 </RUST_GOTCHAS>
-{repo_spec_block}{blueprint_block}{retro_block}{siblings_block}{trait_block}{types_block}{bound_methods_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{dispatch_family_section}{related_section}
+{repo_spec_block}{blueprint_block}{retro_block}{refill_block}{siblings_block}{trait_block}{types_block}{bound_methods_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{dispatch_family_section}{related_section}
 <TARGET_IMPL_BLOCK file="{file_rel}">
 ```rust
 {target_render}

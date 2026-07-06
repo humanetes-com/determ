@@ -22,6 +22,7 @@ class FailureKind(StrEnum):
     CLASSIFIER = "classifier"
     RECENTLY_FILLED = "recently_filled"
     REVERSE_MAP = "reverse_map"
+    MERGED = "merged"
     NO_FRONTIER = "no_frontier"
 
 

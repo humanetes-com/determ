@@ -334,7 +334,7 @@ RUST_GOTCHAS: list[dict[str, Any]] = [
         "summary": "Wrapper struct (Own<T>, Ref<T>): if wrapper.method() fails, try wrapper.field.method() or wrapper.as_ptr().method().",
         "triggers": {"E0599", "no method"},
         "detail": (
-            "Many wrapper types in anyhow (Own<T>, Ref<T>) don't auto-delegate "
+            "Many wrapper types (Own<T>, Ref<T>) don't auto-delegate "
             "methods to their inner pointer. If `wrapper.foo()` reports "
             "'no method foo', access the inner field directly: "
             "`wrapper.inner.foo()`, `wrapper.as_ptr()`, or "
@@ -619,12 +619,16 @@ def tag_block(tag: str, content: str, *, prefix: str = "", suffix: str = "") -> 
 def format_impl_block_for_prompt(
     block: ImplBlock,
     mark_target: bool = True,
+    refill_fn_names: frozenset[str] = frozenset(),
 ) -> str:
     """Render an impl block in TARGET form: the impl header followed by every
     member's signature + a one-line body status. Stub members are tagged
     [STUB] so the model knows which to fill; already-filled members carry a
     shortened body preview so the model can mirror their structural shape
-    when designing the new ones.
+    when designing the new ones. Members named in `refill_fn_names` (debt #46
+    point 2 — behavioral re-fill targets: compiling but test-failing) get the
+    FULL body (no truncation) tagged [REFILL] instead of the FILLED preview,
+    so the model can actually rewrite them, not just pattern-match them.
 
     `block` is an `ImplBlock` produced by `_collect_impl_blocks`.
     """
@@ -649,6 +653,10 @@ def format_impl_block_for_prompt(
         if is_stub:
             tag = " // [STUB] — fill in this response" if mark_target else " // [STUB]"
             lines.append(f"    {sig} {tag}")
+        elif m.fn_name in refill_fn_names:
+            body = m.body_text.strip().replace("\n", "\n    ")
+            lines.append(f"    {sig} {{ /* [REFILL] compiles but its test "
+                          f"below FAILS — rewrite the BEHAVIOR */ {body} }}")
         else:
             body = m.body_text.strip()
             preview = body

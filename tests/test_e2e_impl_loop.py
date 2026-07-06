@@ -174,6 +174,87 @@ def test_impl_b3_does_not_keep_green_but_test_failing_fill(monkeypatch, tmp_path
     assert "unimplemented!()" in text          # reverted to stub
 
 
+# --- debt #46 point 2: per-impl behavioral re-fill (block-level, no stubs left) ---
+
+IMPL_LIB_WRONG_KIND = """pub struct Foo { tag: u32 }
+
+impl Foo {
+    pub fn kind(&self) -> u32 {
+        self.tag + 999
+    }
+    pub fn name(&self) -> u32 {
+        self.tag + 1
+    }
+}
+"""
+
+RESPONSE_KIND_ONLY = '<FN name="kind" block="impl Foo">self.tag</FN>'
+
+
+def _refill_block() -> ImplBlock:
+    # NO stub_members — both members already compile. `kind`'s body is WRONG
+    # (a prior fill/refill attempt), `name`'s is correct. Mirrors the anyhow
+    # seal/verify co-design ceiling: the block has zero stubs left, yet one
+    # member's attributed test still fails.
+    members = (
+        FnRecord(file="lib.rs", fn_name="kind", container="impl Foo",
+                 sig_text="fn kind (& self) -> u32", body_text="self.tag + 999",
+                 has_unimplemented_body=False),
+        FnRecord(file="lib.rs", fn_name="name", container="impl Foo",
+                 sig_text="fn name (& self) -> u32", body_text="self.tag + 1",
+                 has_unimplemented_body=False),
+    )
+    return ImplBlock(file="lib.rs", container="impl Foo",
+                     members=members, stub_members=())
+
+
+def test_refill_only_block_reaches_llm_and_splices_with_allow_nonstub(
+        monkeypatch, tmp_path):
+    # debt #46 point 2: a block with stub_members=() would previously never be
+    # collected (collect_impl_blocks_for_cluster drops all-filled blocks) nor
+    # reach `_fill_one_block` (`_viable` required stub_members). With a TDD
+    # frontier naming `kind` as test-failing, `collect_impl_refill_targets`
+    # must stamp `refill_members=(kind,)`, `_viable` must accept it, and the
+    # splice must allow overwriting `kind`'s non-stub body.
+    from pipeline_core.domain.models import FnLocator
+    ws = _setup(monkeypatch, tmp_path)
+    (ws / "src" / "lib.rs").write_text(IMPL_LIB_WRONG_KIND)
+    monkeypatch.setattr(pipeline, "_collect_impl_blocks_for_cluster",
+                        lambda *a, **k: [_refill_block()])
+    _install_model(monkeypatch, [RESPONSE_KIND_ONLY])
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
+    res = pipeline._phase_c_fill_impl_blocks(
+        project_dir=ws, target_src_dir=ws / "src", tests_dir_files=[],
+        module_name="m", cluster_name="t", cluster=None, check_cmd="cargo check",
+        cluster_env={}, fr_path=None,
+        tdd_frontier_keys={FnLocator("lib.rs", "kind")},
+        tdd_frontier_tests={FnLocator("lib.rs", "kind"): {"kind_is_wrong"}})
+    text = (ws / "src" / "lib.rs").read_text()
+    assert res["impls_filled"] == 1 and res["fns_filled"] == 1
+    assert "self.tag + 999" not in text         # wrong `kind` body replaced
+    assert "self.tag + 1" in text               # `name` untouched (not a target)
+
+
+def test_block_with_no_refill_target_is_not_collected(monkeypatch, tmp_path):
+    # Control: same all-filled block, but the frontier doesn't name `kind` as
+    # test-failing → no refill_members → the block stays non-viable, no LLM call.
+    ws = _setup(monkeypatch, tmp_path)
+    (ws / "src" / "lib.rs").write_text(IMPL_LIB_WRONG_KIND)
+    monkeypatch.setattr(pipeline, "_collect_impl_blocks_for_cluster",
+                        lambda *a, **k: [_refill_block()])
+    def _no_call(*_a, **_k):
+        raise AssertionError("model must not be asked without a refill target")
+    monkeypatch.setattr(pipeline, "_ask_raw", _no_call)
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
+    res = pipeline._phase_c_fill_impl_blocks(
+        project_dir=ws, target_src_dir=ws / "src", tests_dir_files=[],
+        module_name="m", cluster_name="t", cluster=None, check_cmd="cargo check",
+        cluster_env={}, fr_path=None, tdd_frontier_keys=None,
+        tdd_frontier_tests=None)
+    assert res["impls_filled"] == 0 and res["impls_failed"] == 0
+    assert res["attempts"] == 0
+
+
 # --- debt #42: stale stub_members / already-filled blocks ---------------------
 
 IMPL_LIB_FILLED = IMPL_LIB.replace("unimplemented!()", "7")
