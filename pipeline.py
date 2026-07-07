@@ -287,6 +287,7 @@ from pipeline_core.composition import Ports as _Ports
 from pipeline_core.composition import ReconstructRoles as _ReconstructRoles
 from pipeline_core.composition import build_app as _build_app
 from pipeline_core.domain import cfg as _cfg
+from pipeline_core.domain import graceful_stop as _graceful_stop
 from pipeline_core.domain import test_count as _tc
 from pipeline_core.domain.cargo_toml import cargo_default_features as _domain_cargo_default_features
 from pipeline_core.domain.cargo_toml import cargo_entry_point_paths as _domain_cargo_entry_point_paths
@@ -2084,7 +2085,6 @@ def _build_dispatch_family_section(family: DispatchFamily) -> str:
         family, single_call_char_limit=SINGLE_CALL_CHAR_LIMIT)
 
 
-_GRACEFUL_SENTINEL_PATH = Path("/tmp/pipeline_graceful_stop")
 _SHUTDOWN_SENTINEL_PATH = Path("/tmp/pipeline_shutdown_on_finish")
 # P7.2: per-fn cargo-check inner loop is now governed by a failure-floor
 # stall budget against rustc error count. Hard cap was a counter — the
@@ -2182,13 +2182,11 @@ def _whole_tree_retrospective(
 
 
 def _check_graceful_stop(context: str) -> None:
-    """Exit cleanly when the graceful stop sentinel is set. Called from inside
-    long-running loops so `bash continue.sh --graceful` is responsive."""
-    if _GRACEFUL_SENTINEL_PATH.exists():
-        with suppress(OSError):
-            _GRACEFUL_SENTINEL_PATH.unlink()
-        _log(f"  [graceful] stop sentinel detected at {context} — exiting cleanly.")
-        sys.exit(0)
+    """Thin delegate to `pipeline_core.domain.graceful_stop` (moved there —
+    a worker thread's `sys.exit()` only unwinds itself, so under
+    PIPELINE_PARALLELISM>1 the stop signal must be tracked process-wide, not
+    just via the sentinel FILE; see that module's docstring)."""
+    _graceful_stop.check_graceful_stop(_log, context)
 
 
 # Cargo diagnostic parsing relocated to application/reconstruct/cargo_errors.py

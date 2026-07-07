@@ -311,11 +311,18 @@ class PhaseCFillEngine:
 
             def _worker(work_queue: _queue_mod.Queue[tuple[int, Stub]], *,
                         _pass_ctx: PerFnPassCtx = _pass_ctx,
-                        filled_this_pass: list[FnLocator] = filled_this_pass) -> None:
-                # B023: the per-LEVEL queue AND the per-pass ctx/list are passed
-                # explicitly — free-var reads would rely on late binding.
+                        filled_this_pass: list[FnLocator] = filled_this_pass,
+                        pass_n: int = pass_n) -> None:
+                # B023: the per-LEVEL queue AND the per-pass ctx/list/number are
+                # passed explicitly — free-var reads would rely on late binding.
                 nonlocal attempts, fns_filled, progress_this_pass
                 while True:
+                    # Stop pulling NEW work once another worker (or the main
+                    # thread) has seen a graceful-stop request — raises in
+                    # THIS thread immediately, same as the per-fn check inside
+                    # `fill_one.run` below; the main thread's own check (after
+                    # the join below) is what actually ends the process.
+                    self.tel.check_stop(f"per-fn pass {pass_n} worker dispatch")
                     try:
                         idx, rec = work_queue.get_nowait()
                     except _queue_mod.Empty:
@@ -356,6 +363,11 @@ class PhaseCFillEngine:
                         _t.start()
                     for _t in _workers:
                         _t.join()
+                    # Main-thread checkpoint: if a worker set the
+                    # graceful-stop event, this is the only context where
+                    # raising it actually ends the process (`sys.exit()` in
+                    # a worker thread only kills that thread).
+                    self.tel.check_stop(f"per-fn pass {pass_n} level joined")
                 else:
                     _worker(_work_queue)
 

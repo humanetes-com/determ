@@ -1060,6 +1060,12 @@ def fill_impl_blocks(
 
         def _impl_worker() -> None:
             while True:
+                # Stop pulling NEW files once another worker (or the main
+                # thread) has seen a graceful-stop request — raises in THIS
+                # thread immediately, same as the per-block check inside
+                # `_fill_one_block` below; the main thread's own check (after
+                # the join below) is what actually ends the process.
+                _check_graceful_stop("impl-fill worker dispatch")
                 try:
                     _fblocks = _file_queue.get_nowait()
                 except _queue_mod.Empty:
@@ -1080,6 +1086,10 @@ def fill_impl_blocks(
             _t.start()
         for _t in _impl_workers:
             _t.join()
+        # Main-thread checkpoint: if a worker set the graceful-stop event,
+        # this is the only context where raising it actually ends the
+        # process (`sys.exit()` in a worker thread only kills that thread).
+        _check_graceful_stop("impl-fill pool joined")
     else:
         for block in viable_blocks:
             _fill_one_block(block)
