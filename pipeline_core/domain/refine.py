@@ -136,6 +136,38 @@ class FloorStall:
         return self.stalls >= max_stalls
 
 
+@dataclass(frozen=True, slots=True)
+class RetroCandidate:
+    """One retro-round attempt's own-test/compile state — the two inputs
+    `is_retro_improvement` compares against the PRIOR attempt's state."""
+    own_tests_passing: int
+    compile_error_count: int
+
+
+def is_retro_improvement(old: RetroCandidate, new: RetroCandidate) -> bool:
+    """Whether a retro-round retry counts as forward motion, worth one more
+    round. Composes the two improvement signals the pipeline already tracks
+    SEPARATELY elsewhere (`FloorStall`'s lower-is-better error count,
+    `LoopState`'s higher-is-better metric) into the ONE comparator any
+    "should we spend another round on this?" decision can share, instead of
+    each loop inventing its own slightly different heuristic:
+
+      1. More of the fn's OWN attributed tests passing than before — the
+         primary signal, since that's the thing actually being optimised for.
+      2. If the passing-test count is UNCHANGED, a lower compile-error count
+         still counts as progress (closer to compiling, even if not yet
+         test-reachable) — this tier is what lets a still-broken attempt
+         that's nonetheless getting closer earn one more round instead of
+         being judged solely on the binary pass/fail of its own tests.
+
+    Same-or-fewer tests passing AND same-or-higher error count → not an
+    improvement; the caller should stop spending rounds on this unit.
+    """
+    if new.own_tests_passing != old.own_tests_passing:
+        return new.own_tests_passing > old.own_tests_passing
+    return new.compile_error_count < old.compile_error_count
+
+
 def parse_retrospective_function(line: str) -> tuple[str, str] | None:
     """Parse a retrospective `FUNCTION <name>: [(x) ]<KEYWORD> …` line into
     `(fn_name, keyword)` (regex-free, R7; mirrors

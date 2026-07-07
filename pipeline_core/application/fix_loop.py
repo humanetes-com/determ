@@ -34,9 +34,7 @@ from __future__ import annotations
 
 import os
 import subprocess
-import sys
 from collections.abc import Callable
-from contextlib import suppress
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -267,6 +265,7 @@ class GenerateFixLoopDeps:
     # P2 pull protocol (optional — None keeps the plain-ask behavior):
     enumerate_types: Any = None          # src_dir -> list[TypeRecord] | None
     types_section_for_fix: Any = None    # FixContextAssembler.types_section_for_fix
+    check_stop: Callable[[str], None] = _no_stop
 
 
 def generate_fix_loop(
@@ -352,13 +351,11 @@ def generate_fix_loop(
     _ = max_fix_attempts
 
     def _run_check() -> tuple[bool, str, int]:
-        # Graceful-stop check at the top of each iter.
-        _graceful_sentinel = Path("/tmp/pipeline_graceful_stop")
-        if _graceful_sentinel.exists():
-            with suppress(OSError):
-                _graceful_sentinel.unlink()
-            deps.log("  [fix loop] Graceful stop requested — exiting cleanly.")
-            sys.exit(0)
+        # Graceful-stop check at the top of each iter — routed through the
+        # shared, thread-safe check (pipeline_core.domain.graceful_stop)
+        # rather than an inline sentinel read, so every caller sees the same
+        # stop signal regardless of which thread or loop first noticed it.
+        deps.check_stop("fix loop")
         try:
             if check_fn is not None:
                 ok, output = check_fn()

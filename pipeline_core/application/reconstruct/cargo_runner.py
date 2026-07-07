@@ -17,6 +17,7 @@ from pathlib import Path
 
 from pipeline_core.application.reconstruct.cargo_errors import diagnostics_from_json
 from pipeline_core.domain.models import Diagnostic
+from pipeline_core.domain.test_command import derive_scoped_test_cmd
 from pipeline_core.domain.test_results import (
     TestRunOutcome,
     failure_bodies_for,
@@ -207,12 +208,21 @@ def u2_test_gate(
         `fail_sig` is the failing-test set (stall signature → loop terminates),
         `detail` is the assertion/panic text for the next prompt.
     Fail-safe: any error → None (fall back to compile-based acceptance).
+
+    The actual `cargo test` invocation is scoped to `fn_tests` via libtest's
+    own `-- name1 name2 ...` OR filter (empirically verified: multiple
+    trailing positional filters run the union, not an intersection) — unlike
+    `test_regression_gate`, which stays unscoped BY DESIGN (it must see the
+    WHOLE cluster to catch a fill that reddens a sibling), this gate only
+    ever inspects `fn_tests`, so there is no reason to pay for a full-suite
+    run on every single fix-loop attempt.
     """
     if not (enabled and test_cmd and fn_tests):
         return None
+    scoped_cmd = derive_scoped_test_cmd(test_cmd, fn_tests)
     try:
         _passed, _fc, detail, failed = run_scoped_tests(
-            run_cargo_fn, test_cmd, target_src_dir, cluster_env or {},
+            run_cargo_fn, scoped_cmd, target_src_dir, cluster_env or {},
             timeout=timeout, err_cap=err_cap, only=set(fn_tests))
     except Exception as e:  # noqa: BLE001 — fail-safe to compile-based accept
         guard("phase-c/u2_skip", f"{type(e).__name__}: {e}")

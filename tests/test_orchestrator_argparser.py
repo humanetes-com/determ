@@ -31,6 +31,7 @@ def _lock_deps(log: list[str]) -> tuple[LockDeps, list[str]]:
         git_commit=lambda _pd, msg: events.append(f"git_commit:{msg}") or True,
         log=lambda m: log.append(m),
         sys_exit=exit_,
+        scan_unimplemented_functions=lambda *a, **k: [],
     )
     return deps, events
 

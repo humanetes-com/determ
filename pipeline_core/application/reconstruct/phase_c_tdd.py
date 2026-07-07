@@ -44,6 +44,7 @@ class PhaseCTddDeps:
     log: Callable[[str], None]
     order_frontier: Callable[..., Any]
     record_tdd_regression: Callable[..., Any]
+    reset_exhaustion_flags: Callable[..., Any]
     run_cargo: Callable[..., Any]
     scan_unimplemented_for_cluster: Callable[..., Any]
     scan_unimplemented_functions: Callable[..., Any]
@@ -132,6 +133,13 @@ def run_phase_c_tdd(
     permanently_exhausted: set[FnLocator] = set()
     last_notes_count: dict[FnLocator, int] = {}
     last_total_filled = 0
+    # Self-contained snapshot for the exhaustion-reset gate below — deliberately
+    # NOT reusing `total_filled == last_total_filled` (that pair is compared
+    # earlier in THIS SAME iteration, before `total_filled`'s one update at the
+    # bottom of the loop, so at this call site both already reflect the END of
+    # the PREVIOUS iteration and would always compare equal; a fresh snapshot
+    # updated only when we actually reset avoids relying on that ordering).
+    _filled_at_last_reset = 0
     # debt #46 residual: behavioral re-fill targets (frontier fns already filled
     # with a compiling-but-wrong body) are not stubs, so the stub-based
     # exhaustion path never bounds them → an unfixable wrong body would burn one
@@ -195,6 +203,29 @@ def run_phase_c_tdd(
                  "have fired first.")
             break
         deps.check_graceful_stop(f"TDD iter {iter_n}")
+        # One fresh, informed retry per iteration boundary for fns/blocks
+        # marked fully_exhausted (a DIFFERENT, disk-persisted gate than this
+        # loop's own local `permanently_exhausted` — this one lives in the
+        # retrospective cache and is checked INSIDE the per-fn fill engine
+        # itself, so `permanently_exhausted`'s own re-admission logic below
+        # cannot reach it). Comment-preservation already keeps the failed
+        # attempt + cargo error visible in source
+        # (fill_one_fn.py's make_failed_attempt_body), and normal per-fn
+        # retrospective accounting already re-exhausts on no improvement —
+        # this just re-admits them so that machinery gets to run again.
+        # Gated on real progress since the LAST reset (not blind per-iter),
+        # so a crate that's genuinely plateaued doesn't keep paying for
+        # retries with no new context — same bound the debt-46 refill-cap
+        # test below this loop protects for a different exhaustion path.
+        if iter_n > 1 and total_filled > _filled_at_last_reset:
+            _cleared = deps.reset_exhaustion_flags(
+                project_dir, f"TDD iter {iter_n} boundary — {total_filled - _filled_at_last_reset} "
+                             "new fill(s) since the last check")
+            _filled_at_last_reset = total_filled
+            if _cleared:
+                deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: re-admitted "
+                         f"{_cleared} previously-exhausted fn(s)/block(s) for "
+                         "one more informed attempt.")
         deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: running cargo test...")
         t0 = time.monotonic()
         rc, output = deps.run_cargo(test_cmd, target_src_dir, cluster_env,

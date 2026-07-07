@@ -14,6 +14,7 @@ structured character scan (:func:`backtick_spans`) with byte-equivalent semantic
 from __future__ import annotations
 
 import shlex
+from collections.abc import Iterable
 
 # Known command prefixes across common project types.
 KNOWN_PREFIXES: tuple[str, ...] = (
@@ -145,6 +146,29 @@ def parse_cmd(cmd: str) -> list[str]:
         return shlex.split(cmd)
     except ValueError:
         return cmd.split()
+
+
+def derive_scoped_test_cmd(test_cmd: str, names: Iterable[str]) -> str:
+    """Scope a test command to only run the given test names, via libtest's
+    own `-- name1 name2 ...` filter args (empirically verified: multiple
+    trailing positional filters are OR'd — a test runs if its name contains
+    ANY of them — regardless of whether they're the only harness args or
+    appended after existing ones like `--test-threads=1`).
+
+    `names` empty ⇒ `test_cmd` unchanged (the unscoped caller keeps working).
+
+    Examples:
+      cargo test -p x                    + {"foo"}        → cargo test -p x -- foo
+      cargo test -p x -- --test-threads=1 + {"foo", "bar"} → cargo test -p x -- --test-threads=1 bar foo
+    """
+    names_sorted = sorted(names)
+    if not names_sorted:
+        return test_cmd
+    toks = parse_cmd(test_cmd)
+    if "--" not in toks:
+        toks.append("--")
+    toks.extend(names_sorted)
+    return shlex.join(toks)
 
 
 def derive_check_only_cmd(check_cmd: str) -> str:

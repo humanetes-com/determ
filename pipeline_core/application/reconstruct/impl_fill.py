@@ -336,21 +336,23 @@ def fill_impl_blocks(
 
     _impl_full_stalls = int(os.getenv("PHASE_C_IMPL_MAX_STALLS", "3"))
 
-    _FILE_FIRST_MAX_ATTEMPTS = 2
+    # One shot, not a retry loop: an immediate blind retry with the same
+    # limited context reproduces the same mistake (live-observed — a retried
+    # file-first attempt on anyhow's error.rs hit the identical cross-wiring
+    # drop pattern as its first try). Retry investment is spent ONCE, at the
+    # END of the TDD iteration, in the dedicated retro round — by then the
+    # rest of the crate has real, passing context this immediate retry never
+    # had. The per-block loop handles whatever's left after this one attempt
+    # (the #42 freshness gate skips whatever this pass completed).
+    _FILE_FIRST_MAX_ATTEMPTS = 1
 
     def _fill_file_first(file_rel: str, fblocks: list[ImplBlock]) -> None:
         """P5 file-first pass: ONE prompt fills every stub of a multi-block
         file so the impls are designed together (run-187469 evidence: the
         Own/Ref/Mut family in src/ptr.rs diverged when filled per block).
-        Strict gate — kept only on rc==0 (+U2), else reverted verbatim; on
-        revert the failure is fed back for up to `_FILE_FIRST_MAX_ATTEMPTS`
-        total attempts before giving up (debt #54: fragmenting a genuinely
-        co-designed impl cluster into independent per-block fills after a
-        SINGLE miss throws away the joint-design coherence file-first exists
-        for — the model, still asked to fix each block alone, keeps
-        answering with content spanning several impls, which the per-block
-        router then drops). The per-block loop handles whatever's left (the
-        #42 freshness gate skips whatever this pass completed)."""
+        Strict gate — kept only on rc==0 (+U2), else reverted verbatim and
+        handed to the per-block loop; see `_FILE_FIRST_MAX_ATTEMPTS` for why
+        this is one shot, not an immediate retry."""
         nonlocal fns_filled_total, attempts_total
         file_path = target_src_dir / file_rel
         if not file_path.exists():
@@ -408,8 +410,18 @@ def fill_impl_blocks(
                 tdd_test_cmd, target_src_dir, cluster_env)
             with _splice_check_lock:
                 containers = [b.container for b in fblocks]
+                # Route-only widening (debt #54): `fblocks` is only this
+                # file's STILL-NEEDS-FILLING blocks, but the model sees the
+                # WHOLE file text and can (correctly, for genuinely coupled
+                # types) answer an already-complete sibling too — route those
+                # bodies there instead of dropping them; the #42 freshness
+                # gate downstream makes an already-filled target a safe
+                # no-op. Kept out of `containers[0]`/target selection, which
+                # stays exactly as before.
+                _extra_containers = [b.container for b in blocks
+                                     if b.file == file_rel and b.container not in containers]
                 routing = route_fn_bodies(parsed, target=containers[0],
-                                          related=containers[1:])
+                                          related=containers[1:] + _extra_containers)
                 for _nm in routing.dropped:
                     _log(f"  [phase-c/file] {file_rel}: dropped `{_nm}` — "
                          "block header does not match any impl in this file.")
@@ -541,6 +553,26 @@ def fill_impl_blocks(
                     related_blocks.append(b2)
                     _seen.add(bid)
             dispatch_family_section = _build_dispatch_family_section(_family)
+        # Route-only widening (debt #54): bodies tagged for ANY real impl in
+        # the SAME FILE should splice there — an already-filled target is a
+        # safe no-op via the #42 freshness gate — rather than being dropped,
+        # even when that container isn't a formal trait/family match. Live
+        # evidence: `impl Error`/`impl ErrorImpl` in anyhow's error.rs are
+        # tightly coupled (one wraps the other) but share no trait, so
+        # neither `related_containers` nor the dispatch-family heuristic ever
+        # pairs them — the model still answers both together (it can see the
+        # whole file), and every such body was silently dropped. Kept
+        # SEPARATE from `related_blocks` (the curated PROMPT context) so
+        # widening the ROUTING match set doesn't bloat every per-block
+        # prompt with the rest of the file's unrelated impls.
+        _route_candidates = list(related_blocks)
+        _route_seen = {_impl_block_id(rb.file, rb.container) for rb in _route_candidates}
+        _route_seen.add(_impl_block_id(block.file, block.container))
+        for b2 in blocks:
+            _bid2 = _impl_block_id(b2.file, b2.container)
+            if b2.file == block.file and _bid2 not in _route_seen:
+                _route_candidates.append(b2)
+                _route_seen.add(_bid2)
         snapshot = file_path.read_text(encoding="utf-8")
         # Per-block context.
         stub_fn_names = [m.fn_name for m in block.stub_members]
@@ -694,7 +726,7 @@ def fill_impl_blocks(
                 # model's single-line `block` attribute.
                 routing = route_fn_bodies(
                     parsed, target=block.container,
-                    related=[rb.container for rb in related_blocks])
+                    related=[rb.container for rb in _route_candidates])
                 routed: list[tuple[dict[str, Any], str]] = [
                     (rb.fn_data, rb.container) for rb in routing.routed]
                 if routing.dropped:

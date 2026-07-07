@@ -99,9 +99,9 @@ _TEST_FAILURE_MARKS = ("test result: FAILED", "panicked at", "assertion",
                        "... FAILED")
 # `u2_test_gate`/`test_regression_gate` (cargo_runner.py) prepend their own
 # verdict commentary before any real cargo/libtest evidence. Left in place,
-# that commentary's first line never matches `_DIAGNOSTIC_HEADS`, so debt #55:
-# EVERY compiled-but-tests-fail / regression event was misclassified
-# ERROR_TRUNCATED regardless of whether the evidence beneath it was intact.
+# that commentary's first line never matches `_DIAGNOSTIC_HEADS`, so every
+# compiled-but-tests-fail / regression event was misclassified ERROR_TRUNCATED
+# regardless of whether the evidence beneath it was intact.
 # `_U2_PREAMBLE` marks where the real evidence resumes; `_GATE_ONLY_MESSAGES`
 # are gates that carry no further evidence at all (the message IS the cause).
 _U2_PREAMBLE = ("This compiled, but these tests still FAIL:",
@@ -153,9 +153,9 @@ def classify_starvation(
     prompt = prompt_text or ""
     response = response_text or ""
 
-    # -1) Peel off the pipeline's own gate commentary (debt #55) before any
-    # check below sees it — otherwise its first line never matches a
-    # `_DIAGNOSTIC_HEADS` token and every gate verdict is misread as truncated.
+    # -1) Peel off the pipeline's own gate commentary before any check below
+    # sees it — otherwise its first line never matches a `_DIAGNOSTIC_HEADS`
+    # token and every gate verdict is misread as truncated.
     err, _gate_evidence = _strip_gate_commentary(err)
     if _gate_evidence:
         return StarvationCause.UNKNOWN, _gate_evidence

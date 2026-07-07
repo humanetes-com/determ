@@ -62,7 +62,13 @@ wait "$PID" 2>/dev/null || true
 echo "======================================================================"
 if grep -q "complete — all tests pass iter" "$LOG"; then
     ITERS="$(grep -oE 'complete — all tests pass iter [0-9]+' "$LOG" | grep -oE '[0-9]+' | tail -1)"
-    echo "CONVERGED: GREEN(iter${ITERS})  log=$(basename "$LOG")"
+    if grep -q "WARNING: all tests passed, but" "$LOG"; then
+        echo "CONVERGED WITH ORPHANED STUBS: iter${ITERS} — tests pass but some fn(s)"
+        echo "  were never reachable from any built cluster (see the WARNING above)."
+        echo "  log=$(basename "$LOG")"
+    else
+        echo "CONVERGED: GREEN(iter${ITERS})  log=$(basename "$LOG")"
+    fi
 else
     echo "DID NOT CONVERGE — see $LOG"
 fi

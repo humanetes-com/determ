@@ -1569,6 +1569,7 @@ _HELPERS = _Helpers(
     frontier_from_diags=lambda *a, **k: _frontier_from_diags(*a, **k),
     build_test_reverse_map=lambda *a, **k: _build_test_reverse_map(*a, **k),
     filter_test_targets=lambda *a, **k: _filter_test_targets(*a, **k),
+    scan_unimplemented_functions=lambda *a, **k: _scan_unimplemented_functions(*a, **k),
 )
 # Phase 3 S3.4: TASK-1→4 reconstruction role callables, late-binding (the wrapped
 # fns are defined later in this module; lambdas resolve them at call time).
@@ -2429,6 +2430,7 @@ _PHASE_C_TDD_DEPS = _phase_c_tdd.PhaseCTddDeps(
     log=lambda m: _log(m),
     order_frontier=lambda *a, **k: _order_frontier(*a, **k),
     record_tdd_regression=lambda *a, **k: _record_tdd_regression(*a, **k),
+    reset_exhaustion_flags=lambda *a, **k: _reset_exhaustion_flags(*a, **k),
     run_cargo=lambda *a, **k: _run_cargo(*a, **k),
     scan_unimplemented_for_cluster=lambda *a, **k: _scan_unimplemented_for_cluster(*a, **k),
     scan_unimplemented_functions=lambda *a, **k: _scan_unimplemented_functions(*a, **k),
@@ -3773,13 +3775,10 @@ def _strip_gen_tests_decls(src_text: str) -> str:
     return _strip_all_gen_tests_decls(src_text)
 
 
-def _is_gen_tests_file(name: str) -> bool:
-    """True if `name` is a pipeline-generated `*.gen_tests_<N>.rs` sibling."""
-    return _match_gen_tests_sibling(name) is not None
-
-
-# Sibling-name parser moved to discovery (P5); shim keeps the private name.
+# Sibling-name parser + predicate live in discovery (P5); shims keep the
+# private names the call sites already use.
 _match_gen_tests_sibling = _discovery.match_gen_tests_sibling
+_is_gen_tests_file: Callable[[str], bool] = _discovery.is_gen_tests_file
 
 
 def _strip_gen_tests_decl_n(parent_text: str, pass_n: int) -> str:
@@ -4167,6 +4166,7 @@ _GEN_FIX_LOOP_DEPS = _fix_loop.GenerateFixLoopDeps(
     enumerate_fns_via_extractor=lambda *a, **k: _enumerate_fns_via_extractor(*a, **k),
     enumerate_types=lambda *a, **k: _enumerate_types_via_extractor(*a, **k),
     types_section_for_fix=lambda *a, **k: _FIX_CONTEXT.types_section_for_fix(*a, **k),
+    check_stop=lambda ctx: _check_graceful_stop(ctx),
     extract_tdd_frontier=lambda *a, **k: _extract_tdd_frontier(*a, **k),
     filter_test_targets=_filter_test_targets,
     fix_diag=_fix_diag,
@@ -4298,6 +4298,7 @@ _RUN_DEPS = _orchestrator.RunDeps(
     gen_tests_siblings=_gen_tests_siblings, is_gen_tests_file=_is_gen_tests_file,
     wl_wipe_module_sources=_wl_wipe_module_sources, write_workspace_stub=_write_workspace_stub,
     collect_examples=collect_examples, task3=task3,
+    scan_unimplemented_functions=lambda sd: _scan_unimplemented_functions(sd),
 )
 
 def main():

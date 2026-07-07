@@ -10,6 +10,7 @@ This is also the first direct test of the TDD loop (deps are all Callables).
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +48,7 @@ def _deps(fill_calls: list[frozenset[FnLocator]]) -> PhaseCTddDeps:
         log=lambda *a, **k: None,
         order_frontier=lambda eligible, counts: list(eligible.items()),
         record_tdd_regression=lambda *a, **k: "",
+        reset_exhaustion_flags=lambda *a, **k: 0,
         run_cargo=lambda *a, **k: (
             101, "test t1 ... FAILED\ntest result: FAILED. 3 passed; 1 failed"),
         scan_unimplemented_for_cluster=lambda *a, **k: [],
@@ -88,3 +90,28 @@ def test_refill_cap_env_raises_attempts(tmp_path: Path, monkeypatch) -> None:
         leaf_counts=None, fr_path=None,
         test_cmd_builder=lambda stems: "cargo test", tag="[stable]")
     assert len([c for c in fill_calls if _WRONG in c]) == 4
+
+
+def test_reset_exhaustion_fires_once_after_progress_then_stays_quiet(
+        tmp_path: Path, monkeypatch) -> None:
+    # Progress lands once (iter 1's fill), then plateaus. The reset should
+    # fire exactly once — right after that progress is observed — and never
+    # again once nothing new lands, same bound as the refill cap above but
+    # for the retrospective-cache exhaustion gate instead of the local
+    # per-fn re-fill counter.
+    call_n = [0]
+    reset_reasons: list[str] = []
+
+    def _fill(**kw: Any) -> dict[str, Any]:
+        call_n[0] += 1
+        return {"fns_filled": 1 if call_n[0] == 1 else 0, "attempts": 1,
+                "bytes_filled": 0, "errors": []}
+
+    deps = replace(
+        _deps([]),
+        task2_fill_fns_one_by_one=_fill,
+        reset_exhaustion_flags=lambda pd, reason: (
+            reset_reasons.append(reason), 1)[1],
+    )
+    _run(deps, tmp_path, monkeypatch)
+    assert len(reset_reasons) == 1, reset_reasons

@@ -8,7 +8,13 @@ loops are migrated against.
 from __future__ import annotations
 
 from pipeline_core.application.refine_loop import run_refine_loop
-from pipeline_core.domain.refine import Attempt, FloorStall, LoopState
+from pipeline_core.domain.refine import (
+    Attempt,
+    FloorStall,
+    LoopState,
+    RetroCandidate,
+    is_retro_improvement,
+)
 
 
 class _Scripted:
@@ -143,6 +149,38 @@ def test_floorstall_no_signature_never_repeated():
     g.observe(4)
     g.observe(4)
     assert g.repeated is False
+
+
+def test_retro_improvement_more_own_tests_passing():
+    old = RetroCandidate(own_tests_passing=1, compile_error_count=0)
+    new = RetroCandidate(own_tests_passing=2, compile_error_count=0)
+    assert is_retro_improvement(old, new) is True
+
+
+def test_retro_improvement_fewer_own_tests_passing_is_not_improvement():
+    old = RetroCandidate(own_tests_passing=2, compile_error_count=0)
+    new = RetroCandidate(own_tests_passing=1, compile_error_count=0)
+    assert is_retro_improvement(old, new) is False
+
+
+def test_retro_improvement_same_tests_lower_errors_still_counts():
+    old = RetroCandidate(own_tests_passing=0, compile_error_count=3)
+    new = RetroCandidate(own_tests_passing=0, compile_error_count=1)
+    assert is_retro_improvement(old, new) is True
+
+
+def test_retro_improvement_same_tests_same_errors_is_not_improvement():
+    old = RetroCandidate(own_tests_passing=0, compile_error_count=3)
+    new = RetroCandidate(own_tests_passing=0, compile_error_count=3)
+    assert is_retro_improvement(old, new) is False
+
+
+def test_retro_improvement_test_count_dominates_error_count():
+    # Fewer tests passing but ALSO fewer errors is still not an improvement —
+    # the own-test signal is primary and overrides the error-count tiebreak.
+    old = RetroCandidate(own_tests_passing=2, compile_error_count=3)
+    new = RetroCandidate(own_tests_passing=1, compile_error_count=0)
+    assert is_retro_improvement(old, new) is False
 
 
 def test_parse_retrospective_function_matches_old_regex():

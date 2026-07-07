@@ -1080,8 +1080,25 @@ class StaticSkeletonTask2Generator(Task2Generator):
                 _fd = project_dir / ".skeleton-filled" / cluster.name
                 if _summary.get("ok") and _fd.exists():
                     donor_dirs.append(_fd)
-            self.tel.mark_phase(project_dir, f"task2a/{module}", "done",
-                                detail=f"{len(clusters)} cluster(s)")
+            # Only record task2a as done when at least one cluster actually
+            # produced something. Marking it done unconditionally meant a
+            # total wipeout (every cluster aborted) still got treated as a
+            # valid checkpoint: the phase-valid check above reads it as
+            # "already done" and short-circuits to `ok=True` for every
+            # cluster without even looking at `.skeleton-filled/` — so a
+            # retry within the same run inherited and merged straight from
+            # whatever fragments survived the abort, silently losing every fn
+            # that never got written. Not marking done here means a retry
+            # re-attempts real reconstruction instead of trusting garbage.
+            if any(s.get("ok") for s in cluster_summaries):
+                self.tel.mark_phase(project_dir, f"task2a/{module}", "done",
+                                    detail=f"{len(clusters)} cluster(s)")
+            else:
+                self.tel.log(f"  [skeleton] task2a/{module}: no cluster "
+                             "succeeded — NOT marking done, so a retry "
+                             "re-attempts reconstruction from the frozen "
+                             "skeleton instead of reusing this attempt's "
+                             "empty/partial .skeleton-filled/ state.")
 
         # === task2b — cross-cluster merge into project_dir/src/ (RESUMABLE).
         # Skipped only if marked done AND the merged tree is intact: every file
@@ -1239,7 +1256,27 @@ class StaticSkeletonTask2Generator(Task2Generator):
                 timeout=180,
             )
             if not ok:
-                return {"ok": False, "reason": "skeleton_fix_loop_exhausted"}
+                # The fix loop gave up (floor-stalled) — but that verdict is
+                # about ONE hard fn, not the whole tree: `merge_cluster_outputs`
+                # only ever sees clusters marked ok, so bailing here discards
+                # every OTHER file the fix loop already got compiling clean
+                # along with the one it couldn't. Re-check compilability
+                # directly rather than trusting the fix loop's own exhausted
+                # verdict: if the tree still doesn't compile, this genuinely
+                # is a full failure (bail, unchanged from before). If it DOES
+                # compile — the exhaustion was over test/behavioral
+                # correctness on specific fn(s), not syntax — fall through to
+                # Phase C below, whose per-fn TDD floor-stall/GENUINELY_HARD
+                # machinery is exactly the right tool for "this one fn is
+                # hard," instead of discarding the whole cluster over it.
+                _rc2, _out2, _ = self.cargo.run_raw(
+                    shlex.split(check_cmd), skeleton_dir, self._cluster_env(cluster), 180)
+                if _rc2 not in (-1, 0):
+                    return {"ok": False, "reason": "skeleton_fix_loop_exhausted"}
+                self.tel.log(f"  {tag} [skeleton-A] fix-loop exhausted but the "
+                             "tree still compiles clean — salvaging: falling "
+                             "through to Phase C instead of discarding this "
+                             "cluster's other files.")
 
         # Per-cluster test scoping.
         cluster_tests = self.clusters.filter_tests_for_cluster(all_test_pairs, cluster)

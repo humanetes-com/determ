@@ -183,6 +183,7 @@ class Helpers:
     frontier_from_diags: Callable[..., Any]
     build_test_reverse_map: Callable[..., Any]
     filter_test_targets: Callable[..., Any]
+    scan_unimplemented_functions: Callable[..., Any]
 
 
 @dataclass(frozen=True)
@@ -298,6 +299,7 @@ def build_app(
         commit_and_mark=roles.commit_and_mark, set_current=set_current,
         lock_module=lock_module, git_commit=helpers.git_commit, log=ports.log,
         sys_exit=sys.exit,
+        scan_unimplemented_functions=helpers.scan_unimplemented_functions,
     )
     reattach_deps = ReattachDeps(
         log=ports.log, emit=ports.emit, derive_gentest_prelude=helpers.derive_gentest_prelude,

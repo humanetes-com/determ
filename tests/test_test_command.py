@@ -11,6 +11,7 @@ import re
 
 from pipeline_core.domain.test_command import (
     backtick_spans,
+    derive_scoped_test_cmd,
     extract_command_from_response,
     looks_like_command,
     normalize_bare_tool,
@@ -67,3 +68,22 @@ def test_normalize_bare_tool():
     assert normalize_bare_tool("  NPM ") == "npm test"
     assert normalize_bare_tool("cargo test") is None
     assert normalize_bare_tool("pytest") is None
+
+
+def test_derive_scoped_test_cmd_empty_names_unchanged():
+    assert derive_scoped_test_cmd("cargo test -p x", []) == "cargo test -p x"
+
+
+def test_derive_scoped_test_cmd_appends_filter_section():
+    assert (derive_scoped_test_cmd("cargo test -p x", {"foo"})
+            == "cargo test -p x -- foo")
+
+
+def test_derive_scoped_test_cmd_sorts_multiple_names():
+    assert (derive_scoped_test_cmd("cargo test -p x", {"zeta", "alpha"})
+            == "cargo test -p x -- alpha zeta")
+
+
+def test_derive_scoped_test_cmd_appends_after_existing_harness_args():
+    assert (derive_scoped_test_cmd("cargo test -p x -- --test-threads=1", {"foo"})
+            == "cargo test -p x -- --test-threads=1 foo")

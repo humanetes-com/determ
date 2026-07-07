@@ -407,6 +407,7 @@ class LockDeps:
     git_commit: Callable[[Path, str], bool]
     log: Callable[[str], None]
     sys_exit: Callable[[int], None]
+    scan_unimplemented_functions: Callable[..., Any]
 
 
 def lock_or_complete(
@@ -443,6 +444,22 @@ def lock_or_complete(
         locked_modules.add(module_name)
         deps.git_commit(project_dir, locked_commit_msg)
     else:
+        # Same cfg-blind stub scan as the multi-module final check in
+        # `run_pipeline` — single-module projects (the common case: anyhow,
+        # hardcrate, most real crates) complete HERE, not there, so without
+        # this the whole-tree check would never run for them.
+        orphaned_stubs = deps.scan_unimplemented_functions(project_dir)
+        if orphaned_stubs:
+            deps.log(f"\nWARNING: all tests passed, but {len(orphaned_stubs)} "
+                      "fn(s) are STILL unimplemented!() — unreachable from "
+                      "every cfg cluster that got built/tested this run:")
+            for loc in orphaned_stubs:
+                deps.log(f"    {loc.file}::{loc.fn_name}")
+            deps.log("         This is NOT a clean success — the fns above "
+                      "were never attempted.")
+            if complete_commit_msg is not None:
+                deps.git_commit(project_dir, complete_commit_msg)
+            deps.sys_exit(1)
         deps.log(success_log)
         if complete_commit_msg is not None:
             deps.git_commit(project_dir, complete_commit_msg)
@@ -536,6 +553,7 @@ class RunDeps:
     write_workspace_stub: Callable[..., Any]
     collect_examples: Callable[..., Any]
     task3: Callable[..., Any]
+    scan_unimplemented_functions: Callable[..., Any]
 
 
 def run_pipeline(deps: RunDeps, args: argparse.Namespace, root: Path) -> None:
@@ -1015,6 +1033,24 @@ def run_pipeline(deps: RunDeps, args: argparse.Namespace, root: Path) -> None:
     deps.log(f"{'=' * 60}")
     passed, _ = deps.task3(project_dir, test_command, "final", project_dir, genesis_path)
     if passed:
+        # A full-suite pass only proves the ACTIVE cfg cluster's view compiles
+        # and tests clean. Code gated behind a cfg predicate whose cluster got
+        # dropped (too few distinguishing items to justify its own pass) is
+        # invisible to every remaining cluster's build, so its stubs never
+        # surface as a compile or test failure. This scan is CFG-BLIND — it
+        # reads every .rs file's raw fn bodies, not just what the current
+        # cluster compiles — and is the only thing that can still catch them
+        # before claiming success.
+        orphaned_stubs = deps.scan_unimplemented_functions(project_dir)
+        if orphaned_stubs:
+            deps.log(f"\nWARNING: all tests passed, but {len(orphaned_stubs)} "
+                      "fn(s) are STILL unimplemented!() — unreachable from "
+                      "every cfg cluster that got built/tested this run:")
+            for loc in orphaned_stubs:
+                deps.log(f"    {loc.file}::{loc.fn_name}")
+            deps.log("         This is NOT a clean success — the fns above "
+                      "were never attempted.")
+            sys.exit(1)
         deps.log("\nSUCCESS: all tests passed.")
         sys.exit(0)
     elif nonconverged_modules:

@@ -32,6 +32,11 @@ def match_gen_tests_sibling(name: str) -> tuple[str, int] | None:
     return stem, int(n_str)
 
 
+def is_gen_tests_file(name: str) -> bool:
+    """True if `name` is a pipeline-generated `*.gen_tests_<N>.rs` sibling."""
+    return match_gen_tests_sibling(name) is not None
+
+
 def is_test_file(path: Path, project_dir: Path) -> bool:
     """Determine if a file is a test file using path and name conventions that
     apply across languages. Does not inspect file contents."""

@@ -14,7 +14,6 @@ import contextlib
 import functools
 import json
 import os
-import sys
 import time
 from collections.abc import Callable
 from contextlib import suppress
@@ -2624,13 +2623,11 @@ def task0c_augment_module(
             break
 
         # --- Graceful stop check ---
-        # If /tmp/pipeline_graceful_stop exists, finish this attempt cleanly and exit.
-        _graceful_sentinel = Path("/tmp/pipeline_graceful_stop")
-        if _graceful_sentinel.exists():
-            with contextlib.suppress(OSError):
-                _graceful_sentinel.unlink()
-            _log(f"  [{module_name}] Graceful stop requested — attempt {attempt} complete. Exiting.")
-            sys.exit(0)
+        # Routed through the shared, thread-safe check (already available as
+        # deps.check_stop) rather than an inline sentinel read, so every
+        # caller sees the same stop signal regardless of which thread or
+        # loop first noticed it.
+        deps.check_stop(f"{module_name} attempt {attempt}")
 
     # M4 (FR-039): behaviour-hardening pass — mutation-kill as the strength
     # metric on top of line coverage. Opt-in via TASK0C_MUTATION_HARDEN; a

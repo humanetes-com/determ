@@ -114,7 +114,8 @@ def _lock_deps() -> orchestrator.LockDeps:
     return orchestrator.LockDeps(
         commit_and_mark=lambda *a, **k: None, set_current=lambda *a: None,
         lock_module=lambda *a: 0, git_commit=lambda *a: True, log=lambda *a: None,
-        sys_exit=lambda c: (_ for _ in ()).throw(SystemExit(c)))
+        sys_exit=lambda c: (_ for _ in ()).throw(SystemExit(c)),
+        scan_unimplemented_functions=lambda *a, **k: [])
 
 
 def _reattach_deps() -> ReattachDeps:

@@ -442,17 +442,25 @@ def test_file_first_reverts_on_compile_failure_then_blocks_take_over(
     monkeypatch.setattr(pipeline, "_collect_impl_blocks_for_cluster",
                         lambda *a, **k: _two_blocks())
     _install_model(monkeypatch, [RESPONSE_TWO])
-    # Both file-first attempts fail (debt #54: file-first now retries once
-    # with feedback before giving up) → revert x2; per-block takes over and
-    # succeeds.
+    # File-first is one shot (an immediate retry with the same limited
+    # context just reproduces the same mistake — retry investment goes to
+    # the end-of-iteration retro round instead) → one revert; per-block
+    # takes over and succeeds.
     install_scripted_cargo(
         monkeypatch,
         check_diag=[(101, "error: x", [diag("src/lib.rs", code="E0308")]),
-                    (101, "error: x", [diag("src/lib.rs", code="E0308")]),
                     (0, "", [])])
     res = _run(ws)
     text = (ws / "src" / "lib.rs").read_text()
-    assert res["impls_filled"] == 2 and res["impls_failed"] == 0
+    # debt #54's routing widening lets a per-block turn splice a SIBLING
+    # container's body too (not just its own target) when the model answers
+    # both together, as RESPONSE_TWO always does here — Foo's turn now fills
+    # BOTH `kind` and `name` in one call, so Bar's own turn finds `name`
+    # already filled and completes via the freshness gate without a NEW
+    # fill of its own. Content correctness (both fns filled, no stubs left)
+    # is what matters — the block-attribution count is one accounting
+    # consequence of the fix, not the thing being tested here.
+    assert res["impls_filled"] == 1 and res["impls_failed"] == 0
     assert "self.tag" in text and "unimplemented!()" not in text
 
 

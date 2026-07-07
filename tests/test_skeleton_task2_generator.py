@@ -333,13 +333,36 @@ def test_leak_guard_quarantines_sibling(tmp_path: Path) -> None:
 
 def test_skeleton_fix_loop_aborts_cluster(tmp_path: Path) -> None:
     c = _cluster()
+    # Two failing raw checks: the initial cargo check, AND the post-exhaustion
+    # recheck that decides whether to salvage (tree compiles) or genuinely
+    # bail (still broken) — this fixture simulates "still broken", so the
+    # recheck must also fail for the abort path to fire.
     fake = FakeAdapter(clusters_list=[c], cluster_tests=[("tests/it.rs", "x")],
-                       raw_results=[(1, "err", "boom")], run_results=[(0, "ok")])
+                       raw_results=[(1, "err", "boom"), (1, "err", "boom")],
+                       run_results=[(0, "ok")])
     fake.generate_fix_loop = lambda **kw: (False, "")  # type: ignore[method-assign]
     pd = _make_project(tmp_path, [c])
     # cluster aborts but generate() still completes (merge of zero successes).
     assert _run(pd, _gen(fake, _cfg(per_fn=True, tdd=True))) is True
     assert any("cluster aborted" in m for m in fake.logs)
+
+
+def test_skeleton_fix_loop_exhaustion_salvaged_when_tree_still_compiles(
+        tmp_path: Path) -> None:
+    # Same exhausted fix-loop verdict as above, but this time the
+    # post-exhaustion recheck finds the tree compiles clean (the exhaustion
+    # was over one fn's test/behavioral correctness, not syntax) — the
+    # cluster must NOT abort; it falls through to Phase C instead of
+    # discarding every other file the fix loop already got right.
+    c = _cluster()
+    fake = FakeAdapter(clusters_list=[c], cluster_tests=[("tests/it.rs", "x")],
+                       raw_results=[(1, "err", "boom"), (0, "", "")],
+                       run_results=[(0, "ok")])
+    fake.generate_fix_loop = lambda **kw: (False, "")  # type: ignore[method-assign]
+    pd = _make_project(tmp_path, [c])
+    assert _run(pd, _gen(fake, _cfg(per_fn=True, tdd=True))) is True
+    assert not any("cluster aborted" in m for m in fake.logs)
+    assert any("salvaging" in m for m in fake.logs)
 
 
 def test_cluster_exception_caught(tmp_path: Path) -> None:
