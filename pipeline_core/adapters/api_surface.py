@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from pipeline_core.domain.pub_items import pub_items_from_records
+
 
 @dataclass(frozen=True, slots=True)
 class ApiSurfaceCapture:
@@ -28,6 +30,8 @@ class ApiSurfaceCapture:
     is_test_file: Callable[[Path, Path], bool]
     skip_dir_names: frozenset[str]
     log: Callable[[str], None]
+    enumerate_fns: Callable[[Path], list[dict[str, object]] | None] = lambda _: None
+    pub_items_manifest_path: Callable[[Path, str], Path] | None = None
 
     def capture(self, project_dir: Path, module_dir: Path,
                 module_name: str) -> Path | None:
@@ -88,4 +92,18 @@ class ApiSurfaceCapture:
             types_path.write_text(json.dumps(type_names, indent=2), encoding="utf-8")
             self.log(f"  Captured type manifest: {len(type_names)} type(s) → "
                      f"{types_path.relative_to(project_dir)}.")
+
+        # Structured pub-item manifest (same extraction as the type manifest
+        # above, PLUS fns) — the TASK 2 conformance check compares against
+        # THIS, not a regex over the human-readable listing above, which
+        # cannot tell a real top-level `pub` item from the same syntax
+        # inside a `///` doc-comment usage example (debt #64).
+        if self.pub_items_manifest_path is not None:
+            fn_records = self.enumerate_fns(walk_root) or []
+            pub_items = sorted(pub_items_from_records(type_records, fn_records))
+            if pub_items:
+                items_path = self.pub_items_manifest_path(project_dir, module_name)
+                items_path.write_text(json.dumps(pub_items, indent=2), encoding="utf-8")
+                self.log(f"  Captured pub-items manifest: {len(pub_items)} item(s) → "
+                         f"{items_path.relative_to(project_dir)}.")
         return out_path

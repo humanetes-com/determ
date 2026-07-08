@@ -138,14 +138,25 @@ class FillOneFn:
             "sig_chars": len(sig_text),
             "refill": rec.refill,   # debt #46: behavioral re-fill of a wrong body
         })
-        # Monotone-ratchet baseline: cluster runtime test state BEFORE this fn is
-        # filled (pass_count + failing names), so a fill whose own tests pass but
-        # which reddens a sibling is reverted, not accepted. None ⇒ crate not
-        # test-runnable now (or guard off) → gate self-disables. Tests failing
-        # only because this fn is still an `unimplemented!()` stub are in the
-        # baseline, so turning them green is never seen as a regression.
-        _fn_baseline_test = self.cargo.test_regression_baseline(
-            ctx.tdd_test_cmd, ctx.target_src_dir, ctx.cluster_env)
+        # Monotone-ratchet baseline: cluster runtime test state BEFORE this fn's
+        # OWN splice, so a fill whose own tests pass but which reddens a sibling
+        # is reverted, not accepted. Captured freshly per ATTEMPT, inside the
+        # splice lock right before this attempt's own splice (see
+        # `_attempt_fn_fill`) — NOT once here at fn-dispatch time. Under
+        # PIPELINE_PARALLELISM>1, several fns dispatch together and queue for
+        # the same shared lock; a baseline captured before that queueing goes
+        # stale by the time this fn's own turn arrives, since OTHER queued fns'
+        # accepted changes land first. A stale baseline misattributes THEIR
+        # regressions to whichever fn happens to run its own check right after
+        # — live-observed on anyhow: `test_as_ref`/`test_downcast` (real
+        # `Error::downcast`/`AsRef` tests, unrelated to `Chain`) were reported
+        # as "regressed" by logically-unrelated `chain.rs` fns (`new`,
+        # `default`, `next_back`, `len`, `size_hint`) and `error.rs::root_cause`
+        # — one real regression elsewhere, misattributed to everyone queued
+        # behind it. None ⇒ crate not test-runnable now (or guard off) → gate
+        # self-disables for that attempt. Tests failing only because this fn is
+        # still an `unimplemented!()` stub are in the baseline, so turning them
+        # green is never seen as a regression.
 
         # Notes loaded inside the fix-loop on every iteration so that
         # (a) notes added during this fn's own fix loop become visible
@@ -309,14 +320,22 @@ class FillOneFn:
             # have shifted offsets. When a fn's name is duplicated in a
             # file (Display::fmt vs Debug::fmt), we disambiguate by
             # container + sig_text in locate_fn_by_record.
-            # P4: hold splice_check_lock from splice through cargo check
-            # through the revert (if applicable). Other workers wait so
-            # we don't corrupt target/ with concurrent cargo invocations.
+            # Hold splice_check_lock from splice through cargo check through
+            # the revert (if applicable). Other workers wait so we don't
+            # corrupt target/ with concurrent cargo invocations.
             ctx.splice_check_lock.acquire()
             _lock_released = False
+            # Fresh regression baseline, captured NOW (inside the lock, right
+            # before this attempt's own splice) rather than once at fn-dispatch
+            # time — see the comment on the old dispatch-time capture this
+            # replaced, above `_attempt_fn_fill`'s definition, for why a stale
+            # baseline under parallelism misattributes other workers' queued-
+            # ahead regressions to this fn.
+            _attempt_baseline_test = self.cargo.test_regression_baseline(
+                ctx.tdd_test_cmd, ctx.target_src_dir, ctx.cluster_env)
             _splice_loc = self.mut.locate_fn_by_record(
                 file_path, fn_name, container, sig_text, rec.cfg_predicates)
-            # debt #46: a behavioral re-fill target replaces an already-filled
+            # A behavioral re-fill target replaces an already-filled
             # (compiling-but-wrong) body → the splice must accept a non-stub.
             if _splice_loc is not None:
                 _, _bs, _be, _ = _splice_loc
@@ -403,7 +422,7 @@ class FillOneFn:
             if rc == 0 and _u2_fail_sig is None:
                 _regr = self.cargo.test_regression_gate(
                     ctx.tdd_test_cmd, ctx.target_src_dir, ctx.cluster_env,
-                    _fn_baseline_test)
+                    _attempt_baseline_test)
                 if _regr is not None:
                     _newly, _regr_detail = _regr
                     _u2_fail_sig = _newly if _newly else frozenset({"__pass_count_drop__"})

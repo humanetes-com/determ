@@ -25,6 +25,15 @@ def api_surface_path(project_dir: Path, module_name: str) -> Path:
     return project_dir / ORIGINAL_STRUCTURE_DIR / f"{module_name}.api.md"
 
 
+def pub_items_manifest_path(project_dir: Path, module_name: str) -> Path:
+    """Path where the pre-strip STRUCTURED pub-item manifest is saved — the
+    same structured extraction used on the regenerated side of the TASK 2
+    conformance check (debt #64: this replaces a regex over the human-
+    readable `.api.md` listing, which cannot tell a real top-level `pub`
+    item from the same syntax inside a `///` doc-comment example)."""
+    return project_dir / ORIGINAL_STRUCTURE_DIR / f"{module_name}.pub_items.json"
+
+
 def load_manifest(manifest_path: Path) -> list[str]:
     """The generated-source manifest as a list of relative paths (blank-skipped)."""
     content = read(manifest_path)
@@ -42,6 +51,21 @@ def load_api_surface(project_dir: Path, module_name: str) -> str:
         return p.read_text(encoding="utf-8")
     except OSError:
         return ""
+
+
+def load_pub_items_manifest(
+        project_dir: Path, module_name: str) -> set[tuple[str, str]] | None:
+    """The saved pre-strip structured pub-item set, or None if absent (a
+    project baked before this manifest existed) — the caller should skip
+    the conformance check on None rather than fabricate an empty result."""
+    p = pub_items_manifest_path(project_dir, module_name)
+    if not p.exists():
+        return None
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return {(str(kind), str(name)) for kind, name in data}
+    except (OSError, ValueError, TypeError):
+        return None
 
 
 def type_manifest_path(project_dir: Path, module_name: str) -> Path:

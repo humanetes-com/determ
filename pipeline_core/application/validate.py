@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from pipeline_core.domain.models import TypeRecord
+from pipeline_core.domain.pub_items import pub_items_from_records
 from pipeline_core.domain.rust_idents import (
     _META_PHRASES,
     camelcase_type_names,
@@ -18,7 +19,6 @@ from pipeline_core.domain.rust_idents import (
     extract_identifiers,
 )
 from pipeline_core.domain.rust_scan import strip_comment_spans
-from pipeline_core.domain.workspace_layout import SKIP_DIR_NAMES
 
 # Justified: detecting model-output placeholder patterns in generated files
 # (not Rust-source structure parsing — R7.5 category).
@@ -27,21 +27,12 @@ _PLACEHOLDER_RE = re.compile(
     re.MULTILINE,
 )
 
-# Justified: parsing the api_surface *listing* artifact (a summary text, NOT
-# valid Rust source — syn cannot parse it; the generated-source side uses the
-# extractor). See R7.2 in CODE_ARCHITECTURE.md.
-_PUB_ITEM_RE = re.compile(
-    r'\bpub(?:\([^)]*\))?\s+'
-    r'(?:unsafe\s+)?(?:async\s+)?(?:const\s+)?(?:default\s+)?'
-    r'(fn|struct|enum|trait|type|mod)\s+(\w+)',
-)
-
-
 @dataclass(frozen=True)
 class Task2CheckerDeps:
     enumerate_types: Callable[[Path], list[TypeRecord] | None]
     enumerate_fns: Callable[[Path], list[dict[str, object]] | None]
-    load_api_surface: Callable[[Path, str], str]
+    load_pub_items_manifest: Callable[[Path, str], set[tuple[str, str]] | None] = (
+        lambda project_dir, module_name: None)
 
 
 def validate_task1_output(req_path: Path, test_files: list[tuple[str, str]]) -> tuple[bool, str]:
@@ -101,30 +92,16 @@ def validate_task4_output(
     return True, "ok"
 
 
-def _extract_pub_items(text: str) -> set[tuple[str, str]]:
-    """Return {(kind, name)} for every pub item in the api_surface listing artifact."""
-    return {(m.group(1), m.group(2)) for m in _PUB_ITEM_RE.finditer(text)}
-
-
 def _pub_items_from_tree(
     walk_root: Path,
     deps: Task2CheckerDeps,
 ) -> set[tuple[str, str]]:
-    """Return {(kind, name)} for pub items in a Rust source tree, via the extractor."""
-    def _excluded(rel: str) -> bool:
-        parts = set(Path(rel).parts)
-        return bool(parts & {"examples", "benches", "tests"}) or bool(parts & SKIP_DIR_NAMES)
-
-    out: set[tuple[str, str]] = set()
-    for t in deps.enumerate_types(walk_root) or []:
-        if t.is_pub and t.kind in {"struct", "enum", "trait"} and not _excluded(t.file):
-            out.add((t.kind, t.name))
-    for f in deps.enumerate_fns(walk_root) or []:
-        fn_file = str(f.get("file", ""))
-        fn_name = str(f.get("fn_name", ""))
-        if f.get("is_pub") and not _excluded(fn_file):
-            out.add(("fn", fn_name))
-    return out
+    """Return {(kind, name)} for pub items in a Rust source tree, via the
+    structured extractor (shared with the pre-strip bake side — see
+    `pub_items_from_records`'s docstring for why both sides must agree)."""
+    return pub_items_from_records(
+        deps.enumerate_types(walk_root) or [],
+        deps.enumerate_fns(walk_root) or [])
 
 
 def validate_task2_output(
@@ -197,14 +174,18 @@ def validate_task2_api_surface_conformance(
     module_dir: Path,
     deps: Task2CheckerDeps | None = None,
 ) -> tuple[bool, str]:
-    """Compare pub items in regenerated source to pre-strip api_surface. Returns (ok, report)."""
-    api_text = deps.load_api_surface(project_dir, module_name) if deps is not None else ""
-    if not api_text:
-        return True, "no api_surface captured — skipping conformance check"
-
-    api_items = _extract_pub_items(api_text)
+    """Compare pub items in regenerated source to the pre-strip structured
+    pub-items manifest. Returns (ok, report). Uses the same structured
+    extractor on both sides (see `pub_items_from_records`) — NOT a regex over
+    the human-readable api_surface listing, which cannot tell a real
+    top-level `pub` item from the same syntax inside a `///` doc-comment
+    usage example (debt #64)."""
+    api_items = (deps.load_pub_items_manifest(project_dir, module_name)
+                 if deps is not None else None)
+    if api_items is None:
+        return True, "no pub-items manifest captured — skipping conformance check"
     if not api_items:
-        return True, "api_surface contained no pub items — skipping"
+        return True, "pub-items manifest contained no items — skipping"
 
     src_root = module_dir / "src"
     walk_root = src_root if src_root.is_dir() else module_dir

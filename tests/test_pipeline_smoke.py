@@ -1276,13 +1276,13 @@ def test_api_surface_conformance() -> None:
     assert "never_called" in report
     assert "fn:" in report
 
-    # Missing api_surface → check is a no-op.
+    # Missing pub-items manifest (never baked) → check is a no-op.
     workspace2 = _setup_workspace("smoke-api-conformance-no-api")
     ok, report = pipeline.validate_task2_api_surface_conformance(
         workspace2, module_name, workspace2
     )
     assert ok
-    assert "no api_surface" in report.lower()
+    assert "no pub-items manifest" in report.lower()
 
     print("  OK  validate_task2_api_surface_conformance")
 

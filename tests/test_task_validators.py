@@ -14,11 +14,11 @@ from pipeline_core.domain.models import TypeRecord
 
 
 def _deps(types: list[TypeRecord] | None = None, fns: list[dict] | None = None,
-          api: str = "") -> Task2CheckerDeps:
+          pub_items: set[tuple[str, str]] | None = None) -> Task2CheckerDeps:
     return Task2CheckerDeps(
         enumerate_types=lambda _: types,
         enumerate_fns=lambda _: fns,
-        load_api_surface=lambda _d, _m: api,
+        load_pub_items_manifest=lambda _d, _m: pub_items,
     )
 
 
@@ -164,34 +164,53 @@ def test_task2_ok_file(tmp_path: Path) -> None:
 
 def test_api_conformance_no_api_surface(tmp_path: Path) -> None:
     ok, reason = validate_task2_api_surface_conformance(
-        tmp_path, "mymod", tmp_path, deps=_deps(api="")
+        tmp_path, "mymod", tmp_path, deps=_deps(pub_items=None)
     )
     assert ok
     assert "skipping" in reason
 
 
 def test_api_conformance_all_present(tmp_path: Path) -> None:
-    api = "pub struct Foo {}\npub fn bar() {}"
+    pub_items = {("struct", "Foo"), ("fn", "bar")}
     types = [TypeRecord(file="src/lib.rs", kind="struct", name="Foo", is_pub=True)]
     fns = [{"fn_name": "bar", "is_pub": True, "file": "src/lib.rs"}]
     src = tmp_path / "src"
     src.mkdir()
     ok, reason = validate_task2_api_surface_conformance(
-        tmp_path, "mymod", tmp_path, deps=_deps(types=types, fns=fns, api=api)
+        tmp_path, "mymod", tmp_path, deps=_deps(types=types, fns=fns, pub_items=pub_items)
     )
     assert ok
 
 
 def test_api_conformance_drift(tmp_path: Path) -> None:
-    api = "pub struct Foo {}\npub struct Bar {}"
+    pub_items = {("struct", "Foo"), ("struct", "Bar")}
     types = [TypeRecord(file="src/lib.rs", kind="struct", name="Foo", is_pub=True)]
     src = tmp_path / "src"
     src.mkdir()
     ok, reason = validate_task2_api_surface_conformance(
-        tmp_path, "mymod", tmp_path, deps=_deps(types=types, fns=[], api=api)
+        tmp_path, "mymod", tmp_path, deps=_deps(types=types, fns=[], pub_items=pub_items)
     )
     assert not ok
     assert "Bar" in reason
+
+
+def test_api_conformance_doc_comment_example_is_not_drift(tmp_path: Path) -> None:
+    # debt #64 regression: a `///` doc-comment usage example containing
+    # `pub struct ImportantThing { ... }` must NOT be treated as a real
+    # top-level item — the manifest is built from the structured extractor
+    # (which never sees doc-comment text as AST), not a text-level scan of
+    # the human-readable api_surface listing.
+    pub_items = {("struct", "Error")}
+    types = [TypeRecord(file="src/lib.rs", kind="struct", name="Error", is_pub=True)]
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "lib.rs").write_text(
+        "/// ```\n/// pub struct ImportantThing { path: PathBuf }\n/// ```\n"
+        "pub struct Error;\n")
+    ok, reason = validate_task2_api_surface_conformance(
+        tmp_path, "mymod", tmp_path, deps=_deps(types=types, fns=[], pub_items=pub_items)
+    )
+    assert ok, reason
 
 
 def test_api_conformance_no_deps_skips_check(tmp_path: Path) -> None:

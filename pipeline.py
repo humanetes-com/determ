@@ -48,6 +48,9 @@ from pipeline_core.adapters.artifacts import (
     load_type_names as _load_type_names,
 )
 from pipeline_core.adapters.artifacts import (
+    pub_items_manifest_path as _pub_items_manifest_path,
+)
+from pipeline_core.adapters.artifacts import (
     type_manifest_path as _type_manifest_path,
 )
 from pipeline_core.adapters.ask_client import AskClient
@@ -1010,11 +1013,6 @@ def _log(msg: str):
     if _log_trim_counter >= _LOG_TRIM_EVERY:
         _log_trim_counter = 0
         _log_rotation.trim_head(_PIPELINE_LOG, _LOG_MAX_BYTES)
-
-
-def _git_file_hash(root: Path, filename: str) -> str:
-    # Slice 4b: relocated to adapters.workspace; thin shim until call sites migrate.
-    return _wsmod.git_file_hash(root, filename)
 
 
 def _resolve_stdout_path() -> str | None:
@@ -4207,6 +4205,8 @@ _API_SURFACE = ApiSurfaceCapture(
     strip_gen_tests_decls=_strip_gen_tests_decls,
     enumerate_types=ADAPTERS.extractor.enumerate_types,
     is_test_file=is_test_file, skip_dir_names=frozenset(SKIP_DIR_NAMES), log=_log,
+    enumerate_fns=lambda sd: _enumerate_fns_via_extractor(sd),
+    pub_items_manifest_path=_pub_items_manifest_path,
 )
 
 # P6: --restart-from-augmented workspace restore — focused adapter, composition-injected.
@@ -4279,7 +4279,7 @@ _RUN_DEPS = _orchestrator.RunDeps(
     requirements_phase=_REQUIREMENTS_PHASE, module_reconstructor=_MODULE_RECONSTRUCTOR,
     log=_log, emit=_emit, setup_workspace=setup_workspace, is_git_repo=_is_git_repo,
     init_log=init_log, init_events=init_events, start_audit_thread=_start_audit_thread,
-    quarantine_broken_gen_tests=_quarantine_broken_gen_tests, git_file_hash=_git_file_hash,
+    quarantine_broken_gen_tests=_quarantine_broken_gen_tests, git_file_hash=_wsmod.git_file_hash,
     ensure_vllm_ready=_vllm_bootstrap.ensure_vllm_ready, git_clean_reset=git_clean_reset,
     clean_state=clean_state, state_path=_state_path,
     restart_from_augmented=restart_from_augmented, source_hash=_source_hash,

@@ -76,6 +76,41 @@ def test_reset_exhaustion_flags_keeps_lessons(tmp_path: Path) -> None:
     assert pipeline._reset_exhaustion_flags(tmp_path, "again") == 0
 
 
+def test_reset_exhaustion_flags_caps_repeat_offenders(
+        tmp_path: Path, monkeypatch) -> None:
+    # A fn that keeps re-exhausting immediately after each reset (no real
+    # improvement) must stop being re-admitted once it hits the per-fn cap —
+    # otherwise it pays a full attempt on every future boundary forever,
+    # for zero payoff each time (live-observed on anyhow: a 16-fn re-admit
+    # batch came back improved=False right after a 43-fn batch that DID
+    # pay off — the unconditional version can't tell those apart).
+    monkeypatch.setenv("RETRO_RESET_MAX_ATTEMPTS", "2")
+    key = pipeline._retro_key("src/nightly.rs", "provide", "impl Error")
+    pipeline._save_retrospectives(tmp_path, {
+        key: {"fully_exhausted": True, "category": "GENUINELY_HARD",
+              "guidance": "stuck"},
+    })
+    # Attempt 1: cleared, reset_attempts becomes 1.
+    assert pipeline._reset_exhaustion_flags(tmp_path, "boundary 1") == 1
+    retros = pipeline._load_retrospectives(tmp_path)
+    assert retros[key]["reset_attempts"] == 1
+    # Simulate the fn immediately re-exhausting with no improvement.
+    retros[key]["fully_exhausted"] = True
+    pipeline._save_retrospectives(tmp_path, retros)
+    # Attempt 2: still under the cap (1 < 2) — cleared again.
+    assert pipeline._reset_exhaustion_flags(tmp_path, "boundary 2") == 1
+    retros = pipeline._load_retrospectives(tmp_path)
+    assert retros[key]["reset_attempts"] == 2
+    retros[key]["fully_exhausted"] = True
+    pipeline._save_retrospectives(tmp_path, retros)
+    # Attempt 3: now AT the cap (2 >= 2) — refused, stays exhausted.
+    assert pipeline._reset_exhaustion_flags(tmp_path, "boundary 3") == 0
+    retros = pipeline._load_retrospectives(tmp_path)
+    assert retros[key]["fully_exhausted"] is True
+    assert pipeline._is_fn_fully_exhausted(
+        retros, "src/nightly.rs", "provide", "impl Error")
+
+
 # ── 3. default-cluster cfg gate ─────────────────────────────────────────────
 
 def _cluster(name: str, active: list, default: bool) -> BuildCluster:

@@ -7,6 +7,7 @@ learning record (`.phase_c_logs/retrospectives.json`), keyed by
 from __future__ import annotations
 
 import json
+import os
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
@@ -73,22 +74,42 @@ def retro_key(file_rel: str, fn_name: str, container: str) -> str:
 
 
 def reset_exhaustion_flags(project_dir: Path, reason: str) -> int:
-    """Clear every `fully_exhausted` flag (keep the lessons — category,
-    guidance, history all stay) at a phase boundary where the evidence
-    context changed (e.g. the merged tree landed dozens of fills). FR-024's
-    cross-iter skip was written against a narrower tree; one fresh, note-
-    informed attempt per boundary is exactly D3's re-entry rule applied
-    across phases. Returns the number of flags cleared."""
+    """Clear `fully_exhausted` flags (keep the lessons — category, guidance,
+    history all stay) at a phase boundary where the evidence context changed
+    (e.g. the merged tree landed dozens of fills). FR-024's cross-iter skip
+    was written against a narrower tree; one fresh, note-informed attempt per
+    boundary is exactly D3's re-entry rule applied across phases.
+
+    Capped PER FN via `reset_attempts` (env `RETRO_RESET_MAX_ATTEMPTS`,
+    default 2): a fn that has already been reset and immediately
+    re-exhausted (no improvement) this many times stops being re-admitted,
+    even while OTHER work in the cluster keeps progressing. Without this a
+    genuinely-stuck fn pays one full LLM-call-plus-compile-cycle tax on
+    EVERY future boundary for the rest of the run, for zero payoff each
+    time — live-observed on anyhow (iter 3 re-admitted 16 fns, net
+    `improved=False`, right after iter 2's 43-fn batch DID pay off) — the
+    unconditional version can't tell "first informed retry" from "the same
+    fn getting its Nth futile one." Returns the number of flags cleared."""
+    max_attempts = int(os.getenv("RETRO_RESET_MAX_ATTEMPTS", "2"))
     retros = load_retrospectives(project_dir)
     cleared = 0
+    capped = 0
     for rec in retros.values():
-        if isinstance(rec, dict) and rec.get("fully_exhausted"):
-            rec["fully_exhausted"] = False
-            cleared += 1
-    if cleared:
+        if not (isinstance(rec, dict) and rec.get("fully_exhausted")):
+            continue
+        attempts = int(rec.get("reset_attempts", 0))
+        if attempts >= max_attempts:
+            capped += 1
+            continue
+        rec["fully_exhausted"] = False
+        rec["reset_attempts"] = attempts + 1
+        cleared += 1
+    if cleared or capped:
         save_retrospectives(project_dir, retros)
-        log(f"  [phase-c] reset {cleared} fully_exhausted flag(s) — {reason}")
-        emit("phase_c.exhaustion.reset", data={"cleared": cleared, "reason": reason})
+        log(f"  [phase-c] reset {cleared} fully_exhausted flag(s) "
+            f"({capped} at the {max_attempts}-attempt cap, left exhausted) — {reason}")
+        emit("phase_c.exhaustion.reset",
+             data={"cleared": cleared, "capped": capped, "reason": reason})
     return cleared
 
 

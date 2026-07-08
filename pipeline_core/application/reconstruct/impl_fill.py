@@ -403,12 +403,19 @@ def fill_impl_blocks(
                 _log(f"  [phase-c/file] {file_rel}: empty/no FN blocks — "
                      "falling back to per-block fills.")
                 return
-            # Pre-fill runtime test state for the monotone ratchet (None ⇒
-            # crate not test-runnable now → gate self-disables, verbatim
-            # revert unchanged).
-            _baseline_test = _test_regression_baseline(
-                tdd_test_cmd, target_src_dir, cluster_env)
             with _splice_check_lock:
+                # Runtime test state for the monotone ratchet, captured NOW
+                # (inside the lock, right before this splice) rather than
+                # before acquiring it — under PIPELINE_PARALLELISM>1 several
+                # workers queue for this same lock, and a baseline captured
+                # before that queueing goes stale by the time this worker's
+                # turn arrives (other queued workers' accepted changes land
+                # first), misattributing THEIR regressions to whichever fn
+                # happens to check right after. None ⇒ crate not
+                # test-runnable now → gate self-disables, verbatim revert
+                # unchanged.
+                _baseline_test = _test_regression_baseline(
+                    tdd_test_cmd, target_src_dir, cluster_env)
                 containers = [b.container for b in fblocks]
                 # Route-only widening (debt #54): `fblocks` is only this
                 # file's STILL-NEEDS-FILLING blocks, but the model sees the
@@ -651,16 +658,6 @@ def fill_impl_blocks(
                 _brc, _bout, _bdiag = _run_cargo_check_diag(
                     check_cmd, target_src_dir, cluster_env)
             _baseline_sig = _cargo_err_sig_from_diagnostics(_bdiag)
-        # Monotone ratchet baseline: the cluster's runtime test state BEFORE
-        # this block's stubs are filled. Captured once per block at the pristine
-        # snapshot; None when the crate isn't test-runnable now (then the
-        # regression gate self-disables and any regression is deferred to the
-        # outer TDD loop). Tests failing only because THIS block is still an
-        # `unimplemented!()` stub are already in the baseline, so filling them
-        # green is never mistaken for a regression.
-        with _splice_check_lock:
-            _baseline_test = _test_regression_baseline(
-                tdd_test_cmd, target_src_dir, cluster_env)
         _t0 = time.monotonic()
         _emit("phase_c.impl.fill.start", data={
             "cluster": cluster_name,
@@ -718,12 +715,26 @@ def fill_impl_blocks(
                 members_filled_this_block, block_already_complete
             # Hold the global splice+cargo lock while we mutate and check.
             with _splice_check_lock:
+                # Monotone ratchet baseline: the cluster's runtime test state
+                # right NOW, before this attempt's own splice — captured
+                # inside the lock, not before it. Several blocks/fns queue
+                # for this same shared lock under PIPELINE_PARALLELISM>1; a
+                # baseline captured before that queueing goes stale by the
+                # time this attempt's own turn arrives (other queued workers'
+                # accepted changes land first), misattributing THEIR
+                # regressions to whichever attempt happens to check right
+                # after. None ⇒ crate not test-runnable now → gate
+                # self-disables for this attempt. Tests failing only because
+                # THIS block is still an `unimplemented!()` stub are already
+                # in the baseline, so filling them green is never mistaken
+                # for a regression.
+                _baseline_test = _test_regression_baseline(
+                    tdd_test_cmd, target_src_dir, cluster_env)
                 # Splice each parsed body into the impl indicated by its
                 # `block` attribute. Match against TARGET container OR any
-                # related container.
-                # Debt #43: route by canonical impl-header identity (exact
-                # first) — a multi-line where-clause container must match the
-                # model's single-line `block` attribute.
+                # related container. Route by canonical impl-header identity
+                # (exact first) — a multi-line where-clause container must
+                # match the model's single-line `block` attribute.
                 routing = route_fn_bodies(
                     parsed, target=block.container,
                     related=[rb.container for rb in _route_candidates])

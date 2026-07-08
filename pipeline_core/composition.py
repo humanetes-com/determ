@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from pipeline_core.adapters import Adapters
-from pipeline_core.adapters.artifacts import WorkspaceArtifacts, load_api_surface
+from pipeline_core.adapters.artifacts import WorkspaceArtifacts, load_pub_items_manifest
 from pipeline_core.adapters.augment_engine import CargoAugmentEngine
 from pipeline_core.adapters.augment_store import FileAugmentStore
 from pipeline_core.adapters.coverage import CoverageDeps, CoverageProvider
@@ -388,7 +388,7 @@ def build_app(
         ),
         validator_deps=Task2CheckerDeps(
             enumerate_types=helpers.enumerate_types, enumerate_fns=helpers.enumerate_fns,
-            load_api_surface=load_api_surface,
+            load_pub_items_manifest=load_pub_items_manifest,
         ),
         telemetry=telemetry,
         requirements_phase=requirements_phase,
