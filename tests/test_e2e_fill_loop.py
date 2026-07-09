@@ -211,3 +211,69 @@ def test_sig_change_hatch_applies_on_attempt_five(monkeypatch, tmp_path):
     assert res["fns_filled"] == 1
     assert res["attempts"] == 5
     assert "u64" in text and "42" in text and "unimplemented!()" not in text
+
+
+# --- Retro-informed immediate retry (the t2a per-fn loop: fix loop exhausts →
+# retrospective → re-enter the fix loop with the guidance, while the error
+# floor keeps strictly improving; park only on a no-improvement round) ---
+
+RETRO_ANSWER = "CATEGORY: WRONG_TYPE_CHOICE\nGUIDANCE: return a u32 literal"
+
+
+def test_retro_retry_recovers_after_first_fix_loop_exhausts(monkeypatch, tmp_path):
+    ws = _setup(monkeypatch, tmp_path)
+    bodies = iter(["0", "0", "42"])
+    install_scripted_model(monkeypatch,
+                           per_fn_body=lambda _fn: next(bodies, "42"))
+    # Real (non-transient) retro → round 1 establishes the improvement
+    # baseline → the fn re-enters the fix loop instead of being parked.
+    monkeypatch.setattr(pipeline, "_ask_retrospective",
+                        lambda *a, **k: RETRO_ANSWER)
+    # Round 1: same E-code twice → repeated-signature exit after 2 attempts.
+    # Round 2 (post-retro): attempt 3 compiles clean → filled.
+    install_scripted_cargo(
+        monkeypatch, check_diag=(0, "", []),
+        run=[(101, ERR.format(code="E0308", msg="mismatched types")),
+             (101, ERR.format(code="E0308", msg="mismatched types")),
+             (0, "ok")])
+    res = _run(ws)
+    text = (ws / "src" / "lib.rs").read_text()
+    assert res["fns_filled"] == 1 and res["remaining"] == 0
+    assert res["attempts"] == 3
+    assert "42" in text and "unimplemented!()" not in text
+
+
+def test_retro_retry_parks_fn_when_error_floor_stops_improving(monkeypatch, tmp_path):
+    ws = _setup(monkeypatch, tmp_path)
+    install_scripted_model(monkeypatch, per_fn_body="0")
+    monkeypatch.setattr(pipeline, "_ask_retrospective",
+                        lambda *a, **k: RETRO_ANSWER)
+    # Every attempt fails with the SAME single error → round 1 baselines the
+    # error count, round 2 shows no strict improvement → fully exhausted.
+    install_scripted_cargo(
+        monkeypatch, check_diag=(0, "", []),
+        run=(101, ERR.format(code="E0308", msg="mismatched types")))
+    res = _run(ws)
+    text = (ws / "src" / "lib.rs").read_text()
+    assert res["fns_filled"] == 0 and res["remaining"] == 1
+    assert res["attempts"] == 4          # 2 rounds × repeated-sig exit at 2
+    assert "unimplemented!()" in text    # annotated stub restored
+    from pipeline_core.adapters.retros import load_retrospectives, retro_key
+    rec = load_retrospectives(ws)[retro_key("lib.rs", "answer", "")]
+    assert rec["fully_exhausted"] is True
+    assert rec["retrospective_count"] == 2
+
+
+def test_transient_retro_does_not_trigger_immediate_retry(monkeypatch, tmp_path):
+    ws = _setup(monkeypatch, tmp_path)
+    install_scripted_model(monkeypatch, per_fn_body="0")
+    # install_scripted_model leaves _ask_retrospective returning "" →
+    # empty_response (transient): no state update, no immediate retry.
+    install_scripted_cargo(
+        monkeypatch, check_diag=(0, "", []),
+        run=(101, ERR.format(code="E0308", msg="mismatched types")))
+    res = _run(ws)
+    assert res["fns_filled"] == 0 and res["remaining"] == 1
+    assert res["attempts"] == 2          # single round, no retro retry
+    from pipeline_core.adapters.retros import load_retrospectives
+    assert load_retrospectives(ws) == {}

@@ -89,8 +89,9 @@ class FillOneFn:
                 ctx.retros_cache, rel_file, fn_name, container):
             self.tel.log(f"  [phase-c/per-fn] {idx}/{ctx.total} skipped "
                          f"{rel_file}::{fn_name} [{container}] — fully exhausted "
-                         "across iters (retrospective marked GENUINELY_HARD or "
-                         ">=2 prior retrospectives).")
+                         "across iters (retrospective marked GENUINELY_HARD/"
+                         "FROZEN_BOUND_MISMATCH, or a retro round brought no "
+                         "error-count improvement).")
             self.tel.emit("phase_c.fn.fill.skip", data={
                 "cluster": ctx.cluster_name, "pass_n": ctx.pass_n,
                 "file": rel_file, "fn": fn_name,
@@ -552,17 +553,138 @@ class FillOneFn:
             self.tel.log(f"  [phase-c/per-fn] {fn_name}: same error set after "
                          f"attempt {attempt_n} — stopping fix loop.")
 
-        success, fix_attempt = drive_fix_loop(
-            _attempt_fn_fill,
-            hard_cap=self.caps.per_fn_fix_hard_cap,
-            max_stalls=self.stall.effective_stalls(
-                self.caps.per_fn_fix_max_stalls, module_of(rel_file)),
-            stop_context=f"per-fn fix for {fn_name}",
-            on_failure=_on_fn_failure,
-            on_stall=_on_fn_stall,
-            on_repeated=_on_fn_repeated,
-            check_stop=self.tel.check_stop,
-        )
+        # === Retro-informed retry loop: a failed fix loop gets a
+        # retrospective diagnosis and, while each round STRICTLY improves
+        # this fn's best error count, re-enters the fix loop immediately
+        # with that guidance in the prompt — instead of parking the fn
+        # behind an annotated comment until a later pass happens to
+        # re-admit it. Strictly decreasing error counts terminate on their
+        # own; the round cap is a runaway backstop, not the working bound.
+        _retro_rounds_max = int(os.getenv("PER_FN_RETRO_ROUNDS_MAX", "25"))
+        _retro_round = 0
+        success = False
+        fix_attempt = 0
+        while True:
+            _retro_round += 1
+            success, fix_attempt = drive_fix_loop(
+                _attempt_fn_fill,
+                hard_cap=self.caps.per_fn_fix_hard_cap,
+                max_stalls=self.stall.effective_stalls(
+                    self.caps.per_fn_fix_max_stalls, module_of(rel_file)),
+                stop_context=f"per-fn fix for {fn_name}",
+                on_failure=_on_fn_failure,
+                on_stall=_on_fn_stall,
+                on_repeated=_on_fn_repeated,
+                check_stop=self.tel.check_stop,
+            )
+            if success:
+                break
+
+            # FR-024 retrospective: actively diagnose why the fix loop
+            # exhausted and prescribe a different strategy for the next
+            # attempt. Persisted across module iterations. Runs on EVERY
+            # failed round so the improvement gate always has a fresh
+            # measurement.
+            #
+            # Exhaustion is PROGRESS-GATED — no hard cap on the number
+            # of retros. A retro fires; if the next-best error count
+            # is strictly lower than the prior best (real improvement),
+            # the fn stays eligible AND re-enters the fix loop below.
+            # If it isn't, the fn is marked fully exhausted on the spot.
+            _retry_informed = False
+            try:
+                _retros = self.retros.load(ctx.project_dir)
+                _retro_k = self.retros.retro_key(rel_file, fn_name, container)
+                _prior = _retros.get(_retro_k, {})
+                _prior_count = int(_prior.get("retrospective_count", 0))
+                _prior_best = _prior.get("best_error_count")
+                _prior_guidance = _prior.get("guidance", "")
+                _retro = self.retros.diagnose(
+                    fn_name=fn_name, sig_text=sig_text,
+                    container=container, file_rel=rel_file,
+                    cluster_name=ctx.cluster_name,
+                    last_body=last_body or first_failed_body or "",
+                    error_excerpt=error_excerpt or first_error_excerpt or "",
+                    fix_attempts=fix_attempt,
+                    prior_retrospective=_prior_guidance,
+                    bound_methods_section=retro_bound_methods,
+                )
+                # Transient empties (llm_error / empty_response) don't
+                # update state — we never saw a real fix attempt's
+                # outcome, so they cannot count toward exhaustion (and
+                # don't justify an immediate retry either).
+                _signal = _retro.get("signal", "")
+                _transient = _signal in ("llm_error", "empty_response")
+                if not _transient:
+                    _cur_errs = len(cargo_err_sig(
+                        error_excerpt or first_error_excerpt or ""
+                    ))
+                    # First retro for this fn establishes a baseline —
+                    # no prior to compare, so we never exhaust on
+                    # round 1. Subsequent retros exhaust unless
+                    # current count is strictly lower than prior best.
+                    if _prior_best is None:
+                        _new_best = _cur_errs
+                        _improved = True
+                    else:
+                        _new_best = min(int(_prior_best), _cur_errs)
+                        _improved = _cur_errs < int(_prior_best)
+                    _new_count = _prior_count + 1
+                    _full_exhaust = (
+                        # FROZEN_BOUND_MISMATCH: structurally proven
+                        # unsatisfiable — park immediately like GENUINELY_HARD.
+                        _retro.get("category") in ("GENUINELY_HARD",
+                                                   "FROZEN_BOUND_MISMATCH")
+                        or (_prior_best is not None and not _improved)
+                    )
+                    _retros[_retro_k] = {
+                        "category": _retro.get("category", ""),
+                        "guidance": _retro.get("guidance", ""),
+                        "signal": _signal,
+                        "retrospective_count": _new_count,
+                        "error_count": _cur_errs,
+                        "best_error_count": _new_best,
+                        "fully_exhausted": _full_exhaust,
+                        "last_error_preview": (error_excerpt or "")[:240],
+                    }
+                    self.retros.save(ctx.project_dir, _retros)
+                    # Make the fresh guidance visible to this fn's OWN next
+                    # round (the fix prompt reads ctx.retros_cache) and to
+                    # every later dispatch in this pass.
+                    ctx.retros_cache[_retro_k] = _retros[_retro_k]
+                    _retry_informed = not _full_exhaust
+                    self.tel.log(f"  [phase-c/retro] {fn_name} "
+                                 f"[{_retro.get('category','?')}] "
+                                 f"signal={_signal} "
+                                 f"errs={_cur_errs} "
+                                 f"(prior_best={_prior_best}, "
+                                 f"improved={_improved}, "
+                                 f"exhausted={_full_exhaust}): "
+                                 f"{_retro.get('guidance','')[:120]}...")
+                    self.tel.emit("phase_c.retrospective", data={
+                        "cluster": ctx.cluster_name, "pass_n": ctx.pass_n,
+                        "file": rel_file, "fn": fn_name,
+                        "category": _retro.get("category", ""),
+                        "signal": _signal,
+                        "retrospective_count": _new_count,
+                        "error_count": _cur_errs,
+                        "best_error_count": _new_best,
+                        "improved": _improved,
+                        "fully_exhausted": _full_exhaust,
+                        "preview": _retro.get("guidance", "")[:200],
+                    })
+            except Exception as _re:
+                self.tel.log(f"  [phase-c/retro] failed for {fn_name}: {_re}")
+            if not (_retry_informed and _retro_round < _retro_rounds_max):
+                break
+            self.tel.log(f"  [phase-c/per-fn] {fn_name}: retro round "
+                         f"{_retro_round} kept the error floor improving — "
+                         "re-entering the fix loop with the new guidance.")
+            self.tel.emit("phase_c.fn.retro_retry", data={
+                "cluster": ctx.cluster_name, "pass_n": ctx.pass_n,
+                "file": rel_file, "fn": fn_name,
+                "retro_round": _retro_round,
+            })
 
         if not success:
             # Restore the snapshot first (clears whatever broken body the
@@ -588,6 +710,7 @@ class FillOneFn:
                 "cluster": ctx.cluster_name, "pass_n": ctx.pass_n,
                 "file": rel_file, "fn": fn_name,
                 "fix_attempts": fix_attempt,
+                "retro_rounds": _retro_round,
                 "last_error_chars": len(error_excerpt),
                 "last_error_preview": error_excerpt[:200],
                 "error_codes": sorted(ecodes_in_text(
@@ -613,93 +736,6 @@ class FillOneFn:
                         "file": rel_file, "fn": fn_name,
                         "kind": "exhausted", "preview": note[:200],
                     })
-
-            # FR-024 retrospective: actively diagnose why the fix
-            # loop exhausted and prescribe a different strategy for
-            # the next attempt. Persisted across module iterations.
-            #
-            # Exhaustion is PROGRESS-GATED — no hard cap on the number
-            # of retros. A retro fires; if the next-best error count
-            # is strictly lower than the prior best (real improvement),
-            # the fn stays eligible. If it isn't, the fn is marked
-            # fully exhausted on the spot.
-            try:
-                _retros = self.retros.load(ctx.project_dir)
-                _retro_k = self.retros.retro_key(rel_file, fn_name, container)
-                _prior = _retros.get(_retro_k, {})
-                _prior_count = int(_prior.get("retrospective_count", 0))
-                _prior_best = _prior.get("best_error_count")
-                _prior_guidance = _prior.get("guidance", "")
-                _retro = self.retros.diagnose(
-                    fn_name=fn_name, sig_text=sig_text,
-                    container=container, file_rel=rel_file,
-                    cluster_name=ctx.cluster_name,
-                    last_body=last_body or first_failed_body or "",
-                    error_excerpt=error_excerpt or first_error_excerpt or "",
-                    fix_attempts=fix_attempt,
-                    prior_retrospective=_prior_guidance,
-                    bound_methods_section=retro_bound_methods,
-                )
-                # Transient empties (llm_error / empty_response) don't
-                # update state — we never saw a real fix attempt's
-                # outcome, so they cannot count toward exhaustion.
-                _signal = _retro.get("signal", "")
-                _transient = _signal in ("llm_error", "empty_response")
-                if not _transient:
-                    _cur_errs = len(cargo_err_sig(
-                        error_excerpt or first_error_excerpt or ""
-                    ))
-                    # First retro for this fn establishes a baseline —
-                    # no prior to compare, so we never exhaust on
-                    # round 1. Subsequent retros exhaust unless
-                    # current count is strictly lower than prior best.
-                    if _prior_best is None:
-                        _new_best = _cur_errs
-                        _improved = True
-                    else:
-                        _new_best = min(int(_prior_best), _cur_errs)
-                        _improved = _cur_errs < int(_prior_best)
-                    _new_count = _prior_count + 1
-                    _full_exhaust = (
-                        # FROZEN_BOUND_MISMATCH (debt #28): structurally proven
-                        # unsatisfiable — park immediately like GENUINELY_HARD.
-                        _retro.get("category") in ("GENUINELY_HARD",
-                                                   "FROZEN_BOUND_MISMATCH")
-                        or (_prior_best is not None and not _improved)
-                    )
-                    _retros[_retro_k] = {
-                        "category": _retro.get("category", ""),
-                        "guidance": _retro.get("guidance", ""),
-                        "signal": _signal,
-                        "retrospective_count": _new_count,
-                        "error_count": _cur_errs,
-                        "best_error_count": _new_best,
-                        "fully_exhausted": _full_exhaust,
-                        "last_error_preview": (error_excerpt or "")[:240],
-                    }
-                    self.retros.save(ctx.project_dir, _retros)
-                    self.tel.log(f"  [phase-c/retro] {fn_name} "
-                                 f"[{_retro.get('category','?')}] "
-                                 f"signal={_signal} "
-                                 f"errs={_cur_errs} "
-                                 f"(prior_best={_prior_best}, "
-                                 f"improved={_improved}, "
-                                 f"exhausted={_full_exhaust}): "
-                                 f"{_retro.get('guidance','')[:120]}...")
-                    self.tel.emit("phase_c.retrospective", data={
-                        "cluster": ctx.cluster_name, "pass_n": ctx.pass_n,
-                        "file": rel_file, "fn": fn_name,
-                        "category": _retro.get("category", ""),
-                        "signal": _signal,
-                        "retrospective_count": _new_count,
-                        "error_count": _cur_errs,
-                        "best_error_count": _new_best,
-                        "improved": _improved,
-                        "fully_exhausted": _full_exhaust,
-                        "preview": _retro.get("guidance", "")[:200],
-                    })
-            except Exception as _re:
-                self.tel.log(f"  [phase-c/retro] failed for {fn_name}: {_re}")
             try:
                 ts = int(time.time())
                 fpath = ctx.failures_dir / f"{fn_name}-{ts}.txt"
@@ -717,7 +753,8 @@ class FillOneFn:
             except Exception:
                 pass
             self.tel.log(f"  [phase-c/per-fn] {idx}/{ctx.total} {rel_file}::{fn_name}: "
-                         f"reverted after {fix_attempt} attempt(s).")
+                         f"reverted after {fix_attempt} attempt(s) "
+                         f"({_retro_round} retro round(s)).")
             return FillResult(file=rel_file, fn_name=fn_name, filled=False,
                               attempts=attempts, error=exhaust_error)
 
