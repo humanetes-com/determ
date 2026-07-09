@@ -38,6 +38,7 @@ from pipeline_core.domain.models import (
 )
 from pipeline_core.domain.refine import FloorStall
 from pipeline_core.domain.rust_idents import canon_container, is_trait_impl_container
+from pipeline_core.domain.std_api_sigs import std_api_def
 from pipeline_core.domain.test_results import strip_ansi
 from pipeline_core.prompts.context import PerImplSections
 from pipeline_core.prompts.fix_prompts import (
@@ -284,8 +285,11 @@ def fill_impl_blocks(
         find_tests=lambda name: "\n\n".join(
             f"// {p}\n{t}" for p, t in _find_tests_referencing_fn(
                 tests_dir_files, name, max_blocks=4)),
-        type_def=lambda name: _types_section_for_fix(
-            name, "", "", "", "", _crate_type_records),
+        type_def=lambda name: (_types_section_for_fix(
+            name, "", "", "", "", _crate_type_records)
+            # Crate records win; well-known unstable std APIs answer as a
+            # last fallback so the pull never starves on a std type.
+            or std_api_def(name)),
         full_error=lambda: strip_ansi(_last_full_out[0]),
     )
     _pull_menu = (pull_menu_section(_pull_sources.available_kinds(), _max_pulls)

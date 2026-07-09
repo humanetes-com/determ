@@ -1029,7 +1029,22 @@ class StaticSkeletonTask2Generator(Task2Generator):
         # .skeleton-filled/ trees persist, so once this stage is marked done it
         # is skipped on resume / retry; restart_from.sh task2a re-runs it. ===
         cluster_summaries: list[dict[str, Any]] = []
+        # Honor the task2a checkpoint only when every baked cluster's filled
+        # tree is actually on disk (same artifact-intact rule task2b applies
+        # to its merge manifest below). A bare done-flag is defeated by a
+        # checkpoint written under a DIFFERENT cluster set: the skip branch
+        # then fabricates ok=True for clusters that never ran, and the merge
+        # silently drops their entire reconstruction.
+        _task2a_done = False
         if self.tel.phase_valid(project_dir, f"task2a/{module}"):
+            _missing = [c.name for c in clusters
+                        if not (project_dir / ".skeleton-filled" / c.name).exists()]
+            _task2a_done = not _missing
+            if _missing:
+                self.tel.log("  [skeleton] task2a marked done but no filled tree "
+                             f"for cluster(s): {', '.join(_missing)} — stale "
+                             "checkpoint; re-running per-cluster reconstruction.")
+        if _task2a_done:
             self.tel.log("  [skeleton] task2a (per-cluster reconstruction) already done — "
                          "skipping (fills persist in .skeleton-filled/).")
             cluster_summaries = [{"cluster": c.name, "ok": True} for c in clusters]

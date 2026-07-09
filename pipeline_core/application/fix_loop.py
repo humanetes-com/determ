@@ -46,6 +46,7 @@ from pipeline_core.application.reconstruct.pull_resolver import (
 )
 from pipeline_core.domain.fix_report import FixReport
 from pipeline_core.domain.refine import FloorStall
+from pipeline_core.domain.std_api_sigs import std_api_def
 
 
 def _no_stop(_context: str) -> None:
@@ -532,9 +533,12 @@ def generate_fix_loop(
     # records, and (rebound per attempt) the full check output.
     def _pull_type_def(name: str) -> str:
         if deps.enumerate_types is None or deps.types_section_for_fix is None:
-            return ""
+            return std_api_def(name)
         return str(deps.types_section_for_fix(
-            name, "", "", "", "", deps.enumerate_types(project_dir) or []))
+            name, "", "", "", "", deps.enumerate_types(project_dir) or [])
+            # Crate records win; well-known unstable std APIs answer as a
+            # last fallback so the pull never starves on a std type.
+            or std_api_def(name))
 
     _pull_sources = PullSources(
         read_file=workspace_file_reader(project_dir),

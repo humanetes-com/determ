@@ -31,6 +31,7 @@ from pipeline_core.domain.retry_outcome import (
     failing_test_verdict,
 )
 from pipeline_core.domain.source_snapshot import SourceSnapshot
+from pipeline_core.domain.std_api_sigs import std_api_def
 from pipeline_core.domain.test_results import (
     parse_failed_tests,
     parse_test_counts,
@@ -394,9 +395,13 @@ def fix_one_ref(
             find_tests=lambda name: "\n\n".join(
                 f"// {p}\n{t}" for p, t in deps.find_tests_for_fn(
                     ctx.tests_dir_files, name)),
-            type_def=lambda name: "\n\n".join(
+            type_def=lambda name: ("\n\n".join(
                 format_type_for_prompt(r) for r in
-                types_referenced_in_text(name, ctx.type_recs)[:3]),
+                types_referenced_in_text(name, ctx.type_recs)[:3])
+                # Crate-local records win; well-known unstable std APIs
+                # (std::error::Request et al.) answer as a last fallback so
+                # the pull never starves on a std type the manifest can't have.
+                or std_api_def(name)),
             full_error=lambda: err_excerpt,
         )
         _menu = pull_menu_section(_sources.available_kinds(), _max_pulls)

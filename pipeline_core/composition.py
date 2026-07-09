@@ -119,6 +119,7 @@ class CompositionConfig:
     no_improvement_threshold: int
     genesis_audit_interval: int
     module_plateau_abort: int
+    stall_refill_iters: int
     test_timeout: int
 
 
@@ -333,9 +334,18 @@ def build_app(
         audit=flow_audit, docs=docs_metrics, telemetry=telemetry,
         genesis_audit_interval=cfg.genesis_audit_interval,
     )
+    def _stall_refill(project_dir: Path, module: str) -> None:
+        # Same keys restart_from.sh task2a clears — the manual escape hatch,
+        # now fired automatically on a stalled repair loop.
+        for _key in (f"task2a/{module}", f"task2b/{module}", f"task2c/{module}"):
+            mark_phase(project_dir, _key, "pending",
+                       detail="auto-reset: stalled repair iterations")
+
     module_reconstructor = ModuleReconstructor(
         step=reconstruction_step, analysis=failure_analysis, telemetry=telemetry,
         plateau_abort=cfg.module_plateau_abort,
+        stall_refill_iters=cfg.stall_refill_iters,
+        stall_refill=_stall_refill,
     )
     # S26: coverage_deps + provider are injected pre-built (constructed standalone in
     # pipeline.py before _APP) so module-level consumers reach them without _APP.

@@ -1538,6 +1538,7 @@ _CFG = _CompositionConfig(
     no_improvement_threshold=NO_IMPROVEMENT_THRESHOLD,
     genesis_audit_interval=GENESIS_AUDIT_INTERVAL,
     module_plateau_abort=int(os.getenv("MODULE_PLATEAU_ABORT", "10")),
+    stall_refill_iters=int(os.getenv("TASK2A_STALL_REFILL_ITERS", "2")),
     test_timeout=TEST_TIMEOUT,
 )
 # Phase 3 S3.5-10: resident pipeline helpers the migrated deps need, late-binding.
@@ -4284,6 +4285,7 @@ _RUN_DEPS = _orchestrator.RunDeps(
     clean_state=clean_state, state_path=_state_path,
     restart_from_augmented=restart_from_augmented, source_hash=_source_hash,
     log_state_summary=_log_state_summary, read=read, task0_cfg_scan=task0_cfg_scan,
+    load_baked_clusters=_load_baked_clusters,
     mark_phase=_mark_phase, phase_valid=_phase_valid, read_state=_read_state,
     discover_test_command=discover_test_command, parse_cmd=_parse_cmd,
     collect_test_files=collect_test_files,

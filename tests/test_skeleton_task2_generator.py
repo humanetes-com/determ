@@ -443,8 +443,34 @@ def test_resume_skips_all_phases(tmp_path: Path) -> None:
     )
     pd = _make_project(tmp_path, [c])
     (pd / "src" / "lib.rs").write_text("fn foo() {}\n", encoding="utf-8")
+    # The task2a skip is honored only when every cluster's filled tree exists.
+    fd = pd / ".skeleton-filled" / c.name / "src"
+    fd.mkdir(parents=True)
+    (fd / "lib.rs").write_text("fn foo() {}\n", encoding="utf-8")
     assert _run(pd, _gen(fake, _cfg(per_fn=True, tdd=True))) is True
-    assert any("already done" in m for m in fake.logs)
+    assert any("task2a (per-cluster reconstruction) already done" in m
+               for m in fake.logs)
+
+
+def test_resume_task2a_stale_checkpoint_reruns_missing_cluster(tmp_path: Path) -> None:
+    """A task2a done-flag written under a DIFFERENT cluster set must not be
+    trusted: if a baked cluster has no .skeleton-filled tree, the skip branch
+    would fabricate ok=True for it and the merge would silently drop its
+    entire reconstruction. The checkpoint is honored only when every baked
+    cluster's filled tree is on disk."""
+    c = _cluster()
+    fake = FakeAdapter(
+        clusters_list=[c],
+        phase_valid_keys={"task2a/crate", "task2b/crate", "task2c/crate"},
+        manifest=["src/lib.rs"], run_results=[(0, "ok")],
+    )
+    pd = _make_project(tmp_path, [c])
+    (pd / "src" / "lib.rs").write_text("fn foo() {}\n", encoding="utf-8")
+    # No .skeleton-filled/<cluster> tree on disk → checkpoint is stale.
+    assert _run(pd, _gen(fake, _cfg(per_fn=True, tdd=True))) is True
+    assert any("stale checkpoint" in m for m in fake.logs)
+    assert not any("task2a (per-cluster reconstruction) already done" in m
+                   for m in fake.logs)
 
 
 def test_no_tests_for_cluster_note(tmp_path: Path) -> None:

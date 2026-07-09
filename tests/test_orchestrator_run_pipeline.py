@@ -57,6 +57,9 @@ def _run_deps(project_dir: Path) -> orchestrator.RunDeps:
         git_file_hash=MagicMock(return_value="abcd1234"),
         source_hash=MagicMock(return_value="srchash"),
         task0_cfg_scan=MagicMock(return_value=[]),
+        # No bake artifact → the live scan runs (cluster identity is frozen to
+        # the baked manifest as soon as one exists — see the frozen-path test).
+        load_baked_clusters=MagicMock(return_value=[]),
         phase_valid=MagicMock(return_value=False),
         discover_test_command=MagicMock(return_value="cargo test"),
         parse_cmd=MagicMock(return_value=["cargo", "test"]),
@@ -123,3 +126,19 @@ def test_run_pipeline_missing_project_dir_exits(tmp_path: Path) -> None:
     with pytest.raises(SystemExit) as exc:
         orchestrator.run_pipeline(deps, _args(), tmp_path)
     assert exc.value.code == 1
+
+
+def test_run_pipeline_baked_clusters_freeze_identity(tmp_path: Path) -> None:
+    """Once the bake artifact exists (post-strip), cluster identity comes from
+    it — the live cfg re-scan must NOT run. A post-strip re-scan walks the
+    reconstructed tree and mints phantom clusters (build-probe/lint cfgs)
+    whose task0c then destroys oracle gen_tests it cannot compile."""
+    baked = [SimpleNamespace(name="stable", env_extra={}),
+             SimpleNamespace(name="nightly", env_extra={"RUSTFLAGS": "x"})]
+    deps = replace(_run_deps(tmp_path),
+                   load_baked_clusters=MagicMock(return_value=baked))
+    with pytest.raises(SystemExit) as exc:
+        orchestrator.run_pipeline(deps, _args(), tmp_path)
+    assert exc.value.code == 0
+    deps.task0_cfg_scan.assert_not_called()
+    deps.scope.reset.assert_called_once_with(baked)

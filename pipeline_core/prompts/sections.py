@@ -573,6 +573,55 @@ RUST_GOTCHAS: list[dict[str, Any]] = [
             "introducing a new constructor name that nothing defines."
         ),
     },
+    {
+        # Live evidence (anyhow nightly cluster, 2026-07-09): the model wrote
+        # `feature = "error_generic_member_access"` — but compiler-capability
+        # cfgs set via RUSTFLAGS `--cfg NAME` are BARE cfg names, not cargo
+        # features; the mixup silently compiles the wrong branch out.
+        "id": "cfg_name_vs_feature",
+        "summary": "A cfg set via RUSTFLAGS `--cfg name` (e.g. error_generic_member_access, nightly probes) is a BARE cfg: `#[cfg(name)]`. `#[cfg(feature = \"name\")]` only matches cargo features declared in Cargo.toml — writing one for the other silently deactivates the code.",
+        "triggers": {"unexpected `cfg` condition", "expected values for `feature`",
+                     "unexpected_cfgs", "error_generic_member_access"},
+        "detail": (
+            "Two different namespaces — match the one the build actually sets:\n"
+            "  WRONG:\n"
+            "    #[cfg(feature = \"error_generic_member_access\")]   // not a cargo feature\n"
+            "    fn provide(...) { ... }\n"
+            "  RIGHT (bare cfg — set by RUSTFLAGS --cfg error_generic_member_access):\n"
+            "    #[cfg(error_generic_member_access)]\n"
+            "    fn provide(...) { ... }\n"
+            "  WRONG:\n"
+            "    if cfg!(nightly_probe) { ... }        // when Cargo.toml declares it as a feature\n"
+            "  RIGHT:\n"
+            "    if cfg!(feature = \"nightly_probe\") { ... }\n"
+            "Check the error's own note: `expected values for feature are: ...`\n"
+            "lists the REAL cargo features — anything not in that list is a bare cfg."
+        ),
+    },
+    {
+        # Live evidence (anyhow, recurring across runs): whole-file rewrites of
+        # error.rs kept importing `crate::backtrace::{backtrace, backtrace_if_absent}`
+        # — helpers the sibling module never defines — exploding one file's 3
+        # errors into crate-wide E0432/E0433 storms.
+        "id": "import_must_exist_in_sibling",
+        "summary": "E0432/E0433 `unresolved import crate::mod::item` = the sibling module does NOT define that item. Never import a helper you haven't seen in the pulled sibling file; either define the helper IN this file, or request the sibling and use what it actually exports.",
+        "triggers": {"E0432", "E0433", "unresolved import", "cannot find", "no `"},
+        "detail": (
+            "An import is a CLAIM about another file — verify it against the\n"
+            "sibling's real contents (pull the file), don't assume:\n"
+            "  WRONG (helper assumed, never defined anywhere):\n"
+            "    use crate::helpers::{compute, compute_if_absent};   // E0432\n"
+            "    let b = compute!();\n"
+            "  RIGHT (self-contained — define what you need where you need it):\n"
+            "    fn compute() -> Value { ... }        // local, no import\n"
+            "  WRONG (guessing a module path):\n"
+            "    use crate::util::cache::lookup;      // E0433: no `cache` in util\n"
+            "  RIGHT (use the item the pulled sibling actually exports):\n"
+            "    use crate::util::lookup;             // seen in src/util.rs\n"
+            "If the design NEEDS a shared helper that doesn't exist yet, put it\n"
+            "in the file you are editing — you cannot edit the sibling from here."
+        ),
+    },
 ]
 
 

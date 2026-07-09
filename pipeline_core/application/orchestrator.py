@@ -528,6 +528,7 @@ class RunDeps:
     log_state_summary: Callable[..., None]
     read: Callable[..., str]
     task0_cfg_scan: Callable[..., Any]
+    load_baked_clusters: Callable[..., Any]
     mark_phase: Callable[..., None]
     phase_valid: Callable[..., bool]
     read_state: Callable[..., Any]
@@ -705,7 +706,19 @@ def run_pipeline(deps: RunDeps, args: argparse.Namespace, root: Path) -> None:
 
     # Cluster scan is pure static analysis (no LLM) — run first so all downstream
     # LLM tasks (discover_test_command, task0b) have cluster context available.
-    _clusters = deps.task0_cfg_scan(project_dir)
+    # Cluster identity is FROZEN at bake time: once `.skeleton/_clusters.json`
+    # exists the original source is gone (stripped), and a live re-scan walks
+    # the RECONSTRUCTED tree instead — it minted phantom clusters from cfgs the
+    # reconstruction itself exposes (build-probe/lint cfgs), whose task0c then
+    # ran against half-broken generated code and stripped oracle gen_tests it
+    # couldn't compile. Post-bake, the baked manifest is the only truth.
+    _clusters = deps.load_baked_clusters(project_dir)
+    if _clusters:
+        deps.log(f"\n  [cfg-scan] using {len(_clusters)} baked cluster(s) from "
+                 ".skeleton/_clusters.json (post-bake: live re-scan would walk "
+                 "reconstructed code, not original source).")
+    else:
+        _clusters = deps.task0_cfg_scan(project_dir)
     deps.scope.reset(_clusters)
     deps.log(f"\nCompiler clusters identified: {len(_clusters)}")
     for _c in _clusters:

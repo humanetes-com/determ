@@ -321,3 +321,31 @@ def test_reconstructor_plateau_disabled_by_default(tmp_path: Path) -> None:
     coord = ModuleReconstructor(step=_step(fa), analysis=_analysis(fa), telemetry=fa)
     coord.run(_ctx(tmp_path), total_iters=0, coverage_strategy="s")
     assert "module.nonconverged" not in fa.events
+
+
+def test_reconstructor_stall_refill_clears_checkpoints(tmp_path: Path) -> None:
+    """A stalled repair loop must re-open the deep engine: every
+    `stall_refill_iters` non-improving iterations the injected callback fires
+    (composition clears task2a/b/c markers) so the next TASK 2 re-enters
+    per-cluster reconstruction instead of skip→shallow-fix-loop forever."""
+    fa = FakeAdapter(task2=True, fix=(False, "x"), validate_task4=(True, ""), best=None,
+                     task3=(False, "test result: FAILED. 0 passed; 1 failed;"))
+    refills: list[tuple[Path, str]] = []
+    coord = ModuleReconstructor(step=_step(fa), analysis=_analysis(fa),
+                                telemetry=fa, plateau_abort=5,
+                                stall_refill_iters=2,
+                                stall_refill=lambda pd, m: refills.append((pd, m)))
+    coord.run(_ctx(tmp_path), total_iters=0, coverage_strategy="s")
+    # Streak reaches 2 and 4 before the plateau cap (5) fires → two refills.
+    assert len(refills) == 2
+    assert all(m == _ctx(tmp_path).module_name for _, m in refills)
+    assert "module.stall_refill" in fa.events
+
+
+def test_reconstructor_stall_refill_disabled_by_default(tmp_path: Path) -> None:
+    fa = FakeAdapter(task2=True, fix=(False, "x"), validate_task4=(True, ""), best=None,
+                     task3=(False, "test result: FAILED. 0 passed; 1 failed;"))
+    coord = ModuleReconstructor(step=_step(fa), analysis=_analysis(fa),
+                                telemetry=fa, plateau_abort=3)
+    coord.run(_ctx(tmp_path), total_iters=0, coverage_strategy="s")
+    assert "module.stall_refill" not in fa.events
