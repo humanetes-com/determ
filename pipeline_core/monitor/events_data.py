@@ -273,6 +273,11 @@ def phase_c_state() -> dict[str, Any]:
         "active": False, "cluster": None, "pass_n": None, "max_passes": None,
         "fills_done": 0, "fills_first": 0, "fills_recovered": 0,
         "fills_failed": 0, "fills_skipped": 0, "stubs_remaining": 0,
+        # Fills already present in the tree when this run first touched each
+        # cluster (resumed runs keep prior fills spliced, so no fill.done
+        # events re-fire for them). Without this the fills row reads first=0
+        # after every resume even though the cluster is mostly filled.
+        "fills_carried": 0,
         "notes": 0, "current_fn": None, "current_attempt": None,
         "recent_fills": [], "hot_fn": None,
         "last_test_rc": None, "last_test_failed": None,
@@ -316,6 +321,10 @@ def phase_c_state() -> dict[str, Any]:
     out["active"] = True
 
     fn_attempts: dict[str, int] = {}
+    # Clusters whose carried-over fill count was already seeded — only the
+    # FIRST pass.start per cluster carries a filled_count that predates this
+    # run's own fills; later ones would double-count fills_first.
+    carried_seeded: set[str] = set()
     # label -> {kind, refill, start_iso, file}; parallel fills coexist here.
     in_flight_units: dict[str, dict[str, Any]] = {}
     last_ts_iso: str | None = None
@@ -352,6 +361,10 @@ def phase_c_state() -> dict[str, Any]:
             # back to the inferred math.
             out["filled_count_at_pass_start"] = int(d.get("filled_count", 0))
             out["all_stubs_remaining_at_pass_start"] = int(d.get("all_stubs_remaining", 0))
+            _pcl = d.get("cluster") or "?"
+            if _pcl not in carried_seeded:
+                carried_seeded.add(_pcl)
+                out["fills_carried"] += int(d.get("filled_count", 0))
         elif ev == "phase_c.fn.fill.start":
             fn = d.get("fn") or "?"
             in_flight_units[fn] = {

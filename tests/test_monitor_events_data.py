@@ -201,6 +201,35 @@ def test_phase_c_state_rollup(tmp_path, monkeypatch):
     assert s["hot_fn"] == ("b", 3)  # most cumulative attempts
 
 
+def test_phase_c_state_carried_fills_seeded_once_per_cluster(tmp_path, monkeypatch):
+    # Resumed run: fills spliced by prior runs emit no fill.done events, so the
+    # carried count comes from each cluster's FIRST pass.start filled_count —
+    # later pass.starts of the same cluster must not re-add (they include this
+    # run's own fills, which fills_first already counts).
+    ev = tmp_path / "events.jsonl"
+    _write(
+        ev,
+        {"ts": "2026-06-10T00:00:00+00:00", "event": "phase_c.pass.start",
+         "data": {"cluster": "stable", "pass_n": 1, "stubs": 3,
+                  "total_fns_in_cluster": 90, "filled_count": 82,
+                  "all_stubs_remaining": 8}},
+        {"ts": "2026-06-10T00:00:01+00:00", "event": "phase_c.fn.fill.done",
+         "data": {"fn": "a", "fix_attempts": 1, "body_chars": 10}},
+        {"ts": "2026-06-10T00:00:02+00:00", "event": "phase_c.pass.start",
+         "data": {"cluster": "stable", "pass_n": 2, "stubs": 2,
+                  "total_fns_in_cluster": 90, "filled_count": 83,
+                  "all_stubs_remaining": 7}},
+        {"ts": "2026-06-10T00:00:03+00:00", "event": "phase_c.pass.start",
+         "data": {"cluster": "nightly", "pass_n": 1, "stubs": 1,
+                  "total_fns_in_cluster": 10, "filled_count": 4,
+                  "all_stubs_remaining": 6}},
+    )
+    _patch(monkeypatch, ev)
+    s = ed.phase_c_state()
+    assert s["fills_carried"] == 82 + 4
+    assert s["fills_first"] == 1  # this run's own fill stays separate
+
+
 def test_phase_c_state_tdd_skip_passdone_test_clusterdone(tmp_path, monkeypatch):
     ev = tmp_path / "events.jsonl"
     _write(

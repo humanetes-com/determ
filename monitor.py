@@ -458,13 +458,19 @@ def _phase_c_panel_rows(state: dict[str, Any]) -> list[str]:
     rec = state.get("fills_recovered", 0)
     failed = state.get("fills_failed", 0)
     skip = state.get("fills_skipped", 0)
+    # Fills already in the tree when this run first touched each cluster
+    # (resumed run) — shown separately so a resume doesn't read as "first=0,
+    # no progress" when the cluster is in fact mostly filled.
+    carried = state.get("fills_carried", 0)
     total_done = first + rec
+    _carried_seg = f"{cyan(f'⧉ carried={carried}')}  " if carried else ""
     rows.append(f"           fills  "
                 f"{green(f'✓ first={first}')}  "
                 f"{yellow(f'↻ recovered={rec}')}  "
                 f"{red(f'✗ failed={failed}')}  "
                 f"{dim(f'⊘ skip={skip}')}  "
-                f"{dim(f'(done={total_done})')}")
+                f"{_carried_seg}"
+                f"{dim(f'(done={total_done + carried})')}")
     notes = state.get("notes", 0)
     # In-flight fills — the parallel set (up to PIPELINE_PARALLELISM at once),
     # longest-running first (the block eating the iter). ↻ = behavioral re-fill,
