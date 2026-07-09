@@ -12,15 +12,18 @@
 
 _SENTINEL=/tmp/pipeline_graceful_stop
 
+# shellcheck source=lib/pipeline_pids.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/pipeline_pids.sh"
+
 graceful_stop_pipeline() {
     local interactive="${1:-1}"
 
-    if ! pgrep -f "pipeline.py" > /dev/null 2>&1; then
+    if ! pipeline_running; then
         return 0
     fi
 
     local _pid
-    _pid="$(pgrep -f pipeline.py | head -1)"
+    _pid="$(pipeline_pids | head -1)"
     touch "$_SENTINEL"
     echo "Graceful stop requested (PID $_pid). Pipeline will exit at the next"
     echo "checkpoint (between fn fills, ~30-60s)."
@@ -30,7 +33,7 @@ graceful_stop_pipeline() {
         echo "  Or wait — pipeline will exit on its own."
     fi
 
-    while pgrep -f "pipeline.py" > /dev/null 2>&1; do
+    while pipeline_running; do
         if [[ "$interactive" == "1" ]] && [[ -t 0 ]]; then
             # 2-second read so we re-check the pipeline status frequently.
             local _key=""
@@ -46,7 +49,7 @@ graceful_stop_pipeline() {
                         rm -f "$_SENTINEL"
                         kill "$_pid" 2>/dev/null || true
                         sleep 2
-                        pkill -9 -f "pipeline.py" 2>/dev/null || true
+                        pkill -9 -f "$_PIPELINE_PGREP" 2>/dev/null || true
                         sleep 1
                         return 0
                         ;;

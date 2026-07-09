@@ -29,6 +29,8 @@ for _arg in "$@"; do [[ "$_arg" == "--force" ]] && _FORCE=true; done
 # Stage→phase-key mapping lives in the shared lib (also used by run_microcrate.sh).
 # shellcheck source=lib/restart_from_lib.sh
 source "$SCRIPT_DIR/lib/restart_from_lib.sh"
+# shellcheck source=lib/pipeline_pids.sh
+source "$SCRIPT_DIR/lib/pipeline_pids.sh"
 if ! _KEYS_STR=$(restart_from_keys "$STAGE"); then
     echo "usage: restart_from.sh <stage> [--force]"
     echo "  stage ∈ task1 | task2 | task2a | task2b | task2c | task3 | task4"
@@ -40,12 +42,11 @@ read -ra _KEYS <<< "$_KEYS_STR"
 echo "[restart-from] stage=$STAGE → clearing phase entries: ${_KEYS[*]}"
 
 # 1. Stop any running pipeline.
-if pgrep -f "pipeline.py" > /dev/null 2>&1; then
-    _pids="$(pgrep -f pipeline.py | tr '\n' ' ')"
+if pipeline_running; then
+    _pids="$(pipeline_pids | tr '\n' ' ')"
     if [[ "$_FORCE" == true ]]; then
         echo "[restart-from] force-killing pipeline (PID $_pids)"
-        kill $(pgrep -f "pipeline.py") 2>/dev/null || true; sleep 2
-        pkill -9 -f "pipeline.py" 2>/dev/null || true; sleep 1
+        kill_pipeline
     else
         echo "[restart-from] graceful-stopping pipeline (PID $_pids)"
         # shellcheck source=lib/graceful_stop.sh

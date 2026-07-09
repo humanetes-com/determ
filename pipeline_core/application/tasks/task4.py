@@ -20,7 +20,7 @@ from ...domain.llm_output import (
     GENESIS_DELIM_START,
     _extract_genesis,
 )
-from ...domain.test_results import count_passing_tests, extract_test_output_from_file
+from ...domain.test_results import extract_test_output_from_file, parse_test_counts
 from ...domain.text import smart_truncate
 from ...log import emit, log
 from ...retry import with_retry
@@ -93,7 +93,13 @@ def task4(genesis_path: Path, functional_req_path: Path, test_output: str,
 
     # Regression / comparison section.
     # Prefer caller-supplied prev data (per-module mode); fall back to file lookup (legacy mode).
-    current_pass = count_passing_tests(test_output)
+    # Aggregate across EVERY `test result:` line — the same metric TASK 3's
+    # verdict uses. A first-match scan here once returned one binary's count
+    # (the lib's 113 unit tests) instead of the 70/226 aggregate, inflating
+    # the ratchet's best beyond anything the real metric could reach — so no
+    # snapshot was ever saved again and every iteration "restored" a stale,
+    # non-compiling tree forever.
+    current_pass = parse_test_counts(test_output)[0]
     comparison_section = ""
 
     _prev_output = prev_test_output
@@ -103,7 +109,7 @@ def task4(genesis_path: Path, functional_req_path: Path, test_output: str,
         prev_content = deps.read(prev_file)
         if prev_content:
             _prev_output = extract_test_output_from_file(prev_content)
-            _prev_pass = count_passing_tests(_prev_output)
+            _prev_pass = parse_test_counts(_prev_output)[0]
 
     if _prev_output:
         _t4_used = len(genesis) + len(functional_req) + len(truncated_output)

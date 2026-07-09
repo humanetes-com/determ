@@ -4131,6 +4131,7 @@ _FILE_CONSTRAINTS = FileConstraintsReader(
 
 # S28: deps for the relocated fix-loop body (fix_loop.generate_fix_loop).
 _GEN_FIX_LOOP_DEPS = _fix_loop.GenerateFixLoopDeps(
+    set_current=_set_current,
     BUILD_TIMEOUT=BUILD_TIMEOUT,
     FILE_FORMAT_INSTRUCTION=FILE_FORMAT_INSTRUCTION,
     FixSession=FixSession,

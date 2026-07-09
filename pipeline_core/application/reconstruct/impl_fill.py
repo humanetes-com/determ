@@ -954,81 +954,82 @@ def fill_impl_blocks(
             _log(f"  [phase-c/impl] {block_id}: identical errors "
                  f"after attempt {attempt_n} codes={_codes or '—'} — stopping.")
 
-        _, fix_attempt = drive_fix_loop(
-            _attempt_impl_fill,
-            hard_cap=_PER_FN_FIX_HARD_CAP,
-            max_stalls=block_max_stalls,
-            stop_context=f"per-impl fix for {block_id}",
-            on_failure=_on_impl_failure,
-            on_stall=_on_impl_stall,
-            on_repeated=_on_impl_repeated,
-            check_stop=_check_graceful_stop,
-        )
-        # P6: maximal last-resort — ONE attempt with budgets OFF before the
-        # block is declared failed: the WHOLE current file, every referencing
-        # test verbatim, and the full focused error. A defect outside the
-        # budgeted window (sibling member, type elsewhere in the file) is
-        # invisible to the normal prompt; cost is one LLM call on an
-        # already-failed block.
-        if (members_filled_this_block == 0 and not block_already_complete
-                and os.getenv("PHASE_C_MAXIMAL_LAST_RESORT", "1") != "0"):
-            _max_cap = int(os.getenv("PHASE_C_MAXIMAL_CHAR_CAP", "120000"))
-            _cur_text = file_path.read_text(encoding="utf-8", errors="replace")
-            _max_tests: list[tuple[str, str]] = []
-            _max_target_names = [m.fn_name for m in
-                                  (*block.stub_members, *block.refill_members)]
-            for _fn in _max_target_names:
-                for _pth, _txt in _find_tests_referencing_fn(
-                        tests_dir_files, _fn, max_blocks=4):
-                    if not any(p == _pth for p, _ in _max_tests):
-                        _max_tests.append((_pth, _txt))
-            _tests_text = "\n\n".join(
-                f"// {p}\n{t}" for p, t in _max_tests)
-            _max_prompt = build_maximal_impl_prompt(
-                file_rel=block.file, container=block.container,
-                stub_names=_max_target_names,
-                file_text=_cur_text, tests_block=_tests_text,
-                errs=last_error_excerpt, notes=notes_section)
-            if len(_max_prompt) > _max_cap:
-                _log(f"  [phase-c/impl] {block_id}: maximal last-resort "
-                     f"skipped ({len(_max_prompt)} chars > cap {_max_cap}).")
-            else:
-                _log(f"  [phase-c/impl] {block_id}: maximal last-resort "
-                     f"attempt (budgets off, {len(_max_prompt)} chars).")
-                _emit("phase_c.impl.fill.maximal", data={
-                    "cluster": cluster_name, "file": block.file,
-                    "container": block.container,
-                    "prompt_chars": len(_max_prompt)})
-                try:
-                    _max_parsed = extract_fn_bodies(_ask_fill(_max_prompt))
-                    if _max_parsed:
-                        _splice_and_verify(_max_parsed, fix_attempt + 1)
-                    else:
+        # Retro-informed retry loop (parity with the per-fn path): a failed
+        # fix loop gets a retrospective and, while each round STRICTLY
+        # improves the block's best error count, re-enters the fix loop with
+        # that guidance in the prompt — instead of parking the block until a
+        # later iteration. Strictly decreasing error counts terminate on
+        # their own; the round cap is a runaway backstop.
+        _retro_rounds_max = int(os.getenv("PER_FN_RETRO_ROUNDS_MAX", "25"))
+        _retro_round = 0
+        fix_attempt = 0
+        while True:
+            _retro_round += 1
+            _, fix_attempt = drive_fix_loop(
+                _attempt_impl_fill,
+                hard_cap=_PER_FN_FIX_HARD_CAP,
+                max_stalls=block_max_stalls,
+                stop_context=f"per-impl fix for {block_id}",
+                on_failure=_on_impl_failure,
+                on_stall=_on_impl_stall,
+                on_repeated=_on_impl_repeated,
+                check_stop=_check_graceful_stop,
+            )
+            if members_filled_this_block > 0 or block_already_complete:
+                break
+            # P6: maximal last-resort — ONE attempt with budgets OFF (round 1
+            # only; later rounds change guidance, not budgets): the WHOLE
+            # current file, every referencing test verbatim, and the full
+            # focused error. A defect outside the budgeted window (sibling
+            # member, type elsewhere in the file) is invisible to the normal
+            # prompt; cost is one LLM call on an already-failed block.
+            if (_retro_round == 1
+                    and os.getenv("PHASE_C_MAXIMAL_LAST_RESORT", "1") != "0"):
+                _max_cap = int(os.getenv("PHASE_C_MAXIMAL_CHAR_CAP", "120000"))
+                _cur_text = file_path.read_text(encoding="utf-8", errors="replace")
+                _max_tests: list[tuple[str, str]] = []
+                _max_target_names = [m.fn_name for m in
+                                      (*block.stub_members, *block.refill_members)]
+                for _fn in _max_target_names:
+                    for _pth, _txt in _find_tests_referencing_fn(
+                            tests_dir_files, _fn, max_blocks=4):
+                        if not any(p == _pth for p, _ in _max_tests):
+                            _max_tests.append((_pth, _txt))
+                _tests_text = "\n\n".join(
+                    f"// {p}\n{t}" for p, t in _max_tests)
+                _max_prompt = build_maximal_impl_prompt(
+                    file_rel=block.file, container=block.container,
+                    stub_names=_max_target_names,
+                    file_text=_cur_text, tests_block=_tests_text,
+                    errs=last_error_excerpt, notes=notes_section)
+                if len(_max_prompt) > _max_cap:
+                    _log(f"  [phase-c/impl] {block_id}: maximal last-resort "
+                         f"skipped ({len(_max_prompt)} chars > cap {_max_cap}).")
+                else:
+                    _log(f"  [phase-c/impl] {block_id}: maximal last-resort "
+                         f"attempt (budgets off, {len(_max_prompt)} chars).")
+                    _emit("phase_c.impl.fill.maximal", data={
+                        "cluster": cluster_name, "file": block.file,
+                        "container": block.container,
+                        "prompt_chars": len(_max_prompt)})
+                    try:
+                        _max_parsed = extract_fn_bodies(_ask_fill(_max_prompt))
+                        if _max_parsed:
+                            _splice_and_verify(_max_parsed, fix_attempt + 1)
+                        else:
+                            _log(f"  [phase-c/impl] {block_id}: maximal attempt "
+                                 "returned no FN blocks.")
+                    except Exception as _me:
                         _log(f"  [phase-c/impl] {block_id}: maximal attempt "
-                             "returned no FN blocks.")
-                except Exception as _me:
-                    _log(f"  [phase-c/impl] {block_id}: maximal attempt "
-                         f"error: {_me}")
-        if members_filled_this_block == 0 and not block_already_complete:
-            with _counters_lock:
-                impls_failed += 1
-                errors.append(f"{block.file}::{block.container}: "
-                              f"impl-fill failed after {fix_attempt} attempt(s)")
-            _emit("phase_c.impl.fill.fail", duration_ms=int(
-                (time.monotonic() - _t0) * 1000),
-                data={
-                    "cluster": cluster_name,
-                    "file": block.file,
-                    "container": block.container,
-                    "members_failed": len(block.stub_members) + len(block.refill_members),
-                    "fix_attempts": fix_attempt,
-                    "last_error_preview": last_error_excerpt[:200],
-                    "error_codes": sorted(ecodes_in_text(last_error_excerpt)),
-                })
-            # Per-impl retrospective — surface a strategy hint for the
-            # next iter to consume. Uses the existing per-fn retro helper
-            # with the impl id as the fn key so the on-disk store layout
-            # stays uniform.
+                             f"error: {_me}")
+                if members_filled_this_block > 0 or block_already_complete:
+                    break
+            # Per-impl retrospective — runs on EVERY failed round so the
+            # improvement gate below always has a fresh measurement. Uses the
+            # existing per-fn retro helper with the impl id as the fn key so
+            # the on-disk store layout stays uniform. Transient LLM failures
+            # (llm_error/empty_response) update no state and never retry.
+            _retry_informed = False
             try:
                 cur_errs = len(_cargo_err_sig(last_error_excerpt))
                 prior = retros_cache.get(
@@ -1052,9 +1053,13 @@ def fill_impl_blocks(
                     new_best = min(int(prior_best), cur_errs)
                     improved = cur_errs < int(prior_best)
                 full_exhaust = (
-                    retro.get("category") == "GENUINELY_HARD"
+                    retro.get("category") in ("GENUINELY_HARD",
+                                              "FROZEN_BOUND_MISMATCH")
                     or (prior_best is not None and not improved)
                 )
+                _signal = retro.get("signal", "")
+                if _signal in ("llm_error", "empty_response"):
+                    raise RuntimeError(f"transient retro signal: {_signal}")
                 # The dict write + on-disk save must be atomic together —
                 # two blocks finishing concurrently each write their OWN key
                 # (safe unlocked, per-block-unique), but an unlocked
@@ -1065,7 +1070,7 @@ def fill_impl_blocks(
                     retros_cache[_retro_key(block.file, "*impl*", block.container)] = {
                         "category": retro.get("category", ""),
                         "guidance": retro.get("guidance", ""),
-                        "signal": retro.get("signal", ""),
+                        "signal": _signal,
                         "retrospective_count": int(prior.get("retrospective_count", 0)) + 1,
                         "error_count": cur_errs,
                         "best_error_count": new_best,
@@ -1073,8 +1078,41 @@ def fill_impl_blocks(
                         "last_error_preview": last_error_excerpt[:240],
                     }
                     _save_retrospectives(project_dir, retros_cache)
+                _retry_informed = not full_exhaust
             except Exception as _re:
                 _log(f"  [phase-c/impl/retro] {block_id}: {_re}")
+            if not (_retry_informed and _retro_round < _retro_rounds_max):
+                break
+            # Fresh guidance for the next round's prompt (the closure reads
+            # this enclosing binding).
+            prior_retro = retros_cache.get(
+                _retro_key(block.file, "*impl*", block.container), {}
+            ).get("guidance", "")
+            _log(f"  [phase-c/impl] {block_id}: retro round {_retro_round} "
+                 "kept the error floor improving — re-entering the fix loop "
+                 "with the new guidance.")
+            _emit("phase_c.impl.retro_retry", data={
+                "cluster": cluster_name, "file": block.file,
+                "container": block.container, "retro_round": _retro_round,
+            })
+
+        if members_filled_this_block == 0 and not block_already_complete:
+            with _counters_lock:
+                impls_failed += 1
+                errors.append(f"{block.file}::{block.container}: "
+                              f"impl-fill failed after {fix_attempt} attempt(s)")
+            _emit("phase_c.impl.fill.fail", duration_ms=int(
+                (time.monotonic() - _t0) * 1000),
+                data={
+                    "cluster": cluster_name,
+                    "file": block.file,
+                    "container": block.container,
+                    "members_failed": len(block.stub_members) + len(block.refill_members),
+                    "fix_attempts": fix_attempt,
+                    "retro_rounds": _retro_round,
+                    "last_error_preview": last_error_excerpt[:200],
+                    "error_codes": sorted(ecodes_in_text(last_error_excerpt)),
+                })
 
     # P5: file-first pass for multi-block files — one prompt designs the
     # file's impls together; the per-block loop below handles the remainder

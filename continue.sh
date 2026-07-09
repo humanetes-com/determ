@@ -33,6 +33,8 @@ LLM_STREAM_LOG="$LOG_DIR/stream.log"
 # ---------------------------------------------------------------------------
 # shellcheck source=lib/graceful_stop.sh
 source "$SCRIPT_DIR/lib/graceful_stop.sh"
+# shellcheck source=lib/pipeline_pids.sh
+source "$SCRIPT_DIR/lib/pipeline_pids.sh"
 
 _YES=false
 _FORCE=false
@@ -51,14 +53,11 @@ done
 # pipeline. The user must opt in via --y (graceful stop) or --force
 # (SIGTERM then SIGKILL). This prevents the surprise where a quick
 # `continue.sh` to restart with new flags silently kills an in-flight run.
-if pgrep -f "pipeline.py" > /dev/null 2>&1; then
-    _running_pids="$(pgrep -f pipeline.py | tr '\n' ' ')"
+if pipeline_running; then
+    _running_pids="$(pipeline_pids | tr '\n' ' ')"
     if [[ "$_FORCE" == true ]]; then
         echo "Pipeline running (PID $_running_pids) — force-killing."
-        kill $(pgrep -f "pipeline.py") 2>/dev/null || true
-        sleep 2
-        pkill -9 -f "pipeline.py" 2>/dev/null || true
-        sleep 1
+        kill_pipeline
     elif [[ "$_YES" == true ]]; then
         echo "Pipeline running (PID $_running_pids) — graceful stop."
         graceful_stop_pipeline 0
@@ -206,8 +205,8 @@ _PIPELINE_ARGS="--project anyhow --audit"
 
 # Final guard against a duplicate slipping in despite the flock (e.g. if
 # someone bypassed the lock or pgrep was momentarily wrong above).
-if pgrep -f "pipeline.py" > /dev/null 2>&1; then
-    echo "Pipeline already running (PID $(pgrep -f pipeline.py | head -1)). Not launching another."
+if pipeline_running; then
+    echo "Pipeline already running (PID $(pipeline_pids | head -1)). Not launching another."
     exit 0
 fi
 nohup .venv/bin/python pipeline.py $_PIPELINE_ARGS >> "$LOG_DIR/pipeline_anyhow.log" 2>&1 200<&- &

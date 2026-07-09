@@ -1045,6 +1045,8 @@ class StaticSkeletonTask2Generator(Task2Generator):
                              f"for cluster(s): {', '.join(_missing)} — stale "
                              "checkpoint; re-running per-cluster reconstruction.")
         if _task2a_done:
+            self.tel.set_current(project_dir,
+                                 f"task2a/{module} / skipped (checkpoint valid)")
             self.tel.log("  [skeleton] task2a (per-cluster reconstruction) already done — "
                          "skipping (fills persist in .skeleton-filled/).")
             cluster_summaries = [{"cluster": c.name, "ok": True} for c in clusters]
@@ -1127,6 +1129,8 @@ class StaticSkeletonTask2Generator(Task2Generator):
             _merged_tree_intact = bool(_mf) and all(
                 (project_dir / rel).exists() for rel in _mf)
         if _merged_tree_intact:
+            self.tel.set_current(project_dir,
+                                 f"task2b/{module} / skipped (merged tree intact)")
             self.tel.log("  [skeleton-merge] task2b (merge) already done — skipping.")
         else:
             self.tel.set_current(
@@ -1175,6 +1179,8 @@ class StaticSkeletonTask2Generator(Task2Generator):
         # acceptance does most of its work. restart_from.sh task2c re-runs ONLY
         # this stage (per-cluster + merge skipped if their markers stand). ===
         if self.tel.phase_valid(project_dir, f"task2c/{module}"):
+            self.tel.set_current(project_dir,
+                                 f"task2c/{module} / skipped (checkpoint valid)")
             self.tel.log("  task2c (merged-tree fill) already done — skipping.")
         else:
             self.tel.set_current(project_dir, f"task2c/{module} / merged-tree fill")

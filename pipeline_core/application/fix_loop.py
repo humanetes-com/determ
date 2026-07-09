@@ -266,6 +266,9 @@ class GenerateFixLoopDeps:
     # P2 pull protocol (optional — None keeps the plain-ask behavior):
     enumerate_types: Any = None          # src_dir -> list[TypeRecord] | None
     types_section_for_fix: Any = None    # FixContextAssembler.types_section_for_fix
+    # Optional live-status writer (project_dir, label) — keeps the monitor's
+    # 'current:' line truthful during the loop's long-running iterations.
+    set_current: Any = None
     check_stop: Callable[[str], None] = _no_stop
 
 
@@ -564,8 +567,15 @@ def generate_fix_loop(
         behavior_max_fns=int(os.getenv("FIX_BEHAVIOR_MAX_FNS", "8")),
         src_snip_cap=deps.SRC_SNIP_CAP)
 
+    _set_cur = deps.set_current
+    _on_iter = None
+    if _set_cur is not None:
+        def _on_iter(ev: dict[str, Any]) -> None:
+            _set_cur(project_dir,
+                     f"task2-4/fix-loop iter {ev['iter']} — "
+                     f"{ev['metric_new']} err(s), best {ev['metric_best']}")
     return deps.run_generate_fix(
         session=_fix_session, deps=_gen_fix_deps,
         strategy=deps.settings_now().fix_loop_strategy, unit=deps.settings_now().fix_loop_unit,
         run_check=_run_check, do_retro=_do_retro,
-        max_stalls=_fl_max_stalls, log=deps.log)
+        max_stalls=_fl_max_stalls, log=deps.log, on_iter=_on_iter)

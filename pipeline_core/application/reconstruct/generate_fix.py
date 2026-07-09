@@ -295,6 +295,7 @@ def run_generate_fix(
     run_check: Callable[[], tuple[bool, str, int]],
     do_retro: Callable[[str, list[dict[str, Any]]], str],
     max_stalls: int, log: Callable[[str], None],
+    on_iter: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[bool, str]:
     """Drive the chosen strategy via the shared callback loop until the check
     passes, the strategy aborts, or the floor-stall budget is spent."""
@@ -306,5 +307,6 @@ def run_generate_fix(
         do_fix=lambda o, h, *, retro="": chosen.attempt(o, h, retro=retro).as_record(),
         do_retro=do_retro,
         max_stalls=max_stalls,
+        on_iter=on_iter,
     )
     return ok, last_output

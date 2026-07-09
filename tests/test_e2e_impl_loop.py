@@ -108,7 +108,9 @@ def test_impl_floor_stall_reverts_block(monkeypatch, tmp_path):
     res = _run(ws)
     text = (ws / "src" / "lib.rs").read_text()
     assert res["impls_filled"] == 0 and res["impls_failed"] == 1
-    assert res["attempts"] == 4
+    # Round 1: floor stall exhausts at 4. Retro round 1 baselines -> one
+    # informed retry; round 2 repeats E0999 twice -> repeated exit at 2.
+    assert res["attempts"] == 6
     assert text == IMPL_LIB              # reverted to pristine stubs
     # Extractor seam returns None → remaining must come from the text-scan
     # fallback (was 0, silently skipping the caller's per-fn cleanup pass).
@@ -116,6 +118,9 @@ def test_impl_floor_stall_reverts_block(monkeypatch, tmp_path):
 
 
 def test_impl_repeated_error_signature_stops_after_two(monkeypatch, tmp_path):
+    # Retro-retry parity with the per-fn path: the repeated-signature exit
+    # still fires at 2 attempts per round; retro round 1 baselines the error
+    # count (always eligible), round 2 shows no strict improvement -> parked.
     ws = _setup(monkeypatch, tmp_path)
     _install_model(monkeypatch, [RESPONSE_BOTH])
     install_scripted_cargo(
@@ -123,7 +128,7 @@ def test_impl_repeated_error_signature_stops_after_two(monkeypatch, tmp_path):
         check_diag=(101, "error: x", [diag("src/lib.rs", code="E0308")]))
     res = _run(ws)
     assert res["impls_filled"] == 0 and res["impls_failed"] == 1
-    assert res["attempts"] == 2
+    assert res["attempts"] == 4          # 2 rounds x repeated-sig exit at 2
     assert (ws / "src" / "lib.rs").read_text() == IMPL_LIB
 
 
@@ -347,11 +352,27 @@ def test_maximal_skipped_when_over_char_cap(monkeypatch, tmp_path):
 def test_maximal_disabled_by_env(monkeypatch, tmp_path):
     ws = _setup(monkeypatch, tmp_path)
     monkeypatch.setenv("PHASE_C_MAXIMAL_LAST_RESORT", "0")
+    # Cap retro rounds to 1 so no informed retry fires either — this test
+    # pins ONLY that the maximal-last-resort path is env-disabled.
+    monkeypatch.setenv("PER_FN_RETRO_ROUNDS_MAX", "1")
     _install_model(monkeypatch, [RESPONSE_BOTH])
     red = (101, "error: x", [diag("src/lib.rs", code="E0308")])
     install_scripted_cargo(monkeypatch, check_diag=[red, red, (0, "", [])])
     res = _run(ws)
     assert res["impls_failed"] == 1        # green 3rd check never reached
+
+
+def test_impl_retro_retry_recovers_on_second_round(monkeypatch, tmp_path):
+    # The value pin: round 1 exhausts (repeated sig), the retro's guidance
+    # feeds an immediate second round whose fill compiles clean -> filled.
+    ws = _setup(monkeypatch, tmp_path)
+    monkeypatch.setenv("PHASE_C_MAXIMAL_LAST_RESORT", "0")
+    _install_model(monkeypatch, [RESPONSE_BOTH, RESPONSE_BOTH, RESPONSE_BOTH])
+    red = (101, "error: x", [diag("src/lib.rs", code="E0308")])
+    install_scripted_cargo(monkeypatch, check_diag=[red, red, (0, "", [])])
+    res = _run(ws)
+    assert res["impls_filled"] == 1 and res["impls_failed"] == 0
+    assert res["attempts"] == 3            # 2 failed + 1 green post-retro
 
 
 # --- P2: pull protocol through the impl fill path -----------------------------
