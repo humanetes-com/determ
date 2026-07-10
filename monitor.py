@@ -90,7 +90,7 @@ EVENTS_LOG   = os.getenv("PIPELINE_EVENTS_LOG", _pick_log(
 # (Tests point the readers via pipeline_core.monitor.events_data.configure / globals.)
 from pipeline_core.monitor import events_data as _ed  # noqa: E402
 from pipeline_core.monitor import run_data as _rd  # noqa: E402
-from pipeline_core.monitor.legend import legend_lines as _legend_lines  # noqa: E402
+from pipeline_core.monitor.legend import legend_window as _legend_window  # noqa: E402
 from pipeline_core.monitor.render import (  # noqa: E402
     ansi_seq_len as _ansi_seq_len,
 )
@@ -1297,11 +1297,8 @@ def _render_all():
 
     elif _view == "legend":
         inner = max(1, h - gpu_h - 2 - BOTTOM_LINES)
-        rows = _legend_lines(_w() - 4)
-        off = min(_scroll["legend"], max(0, len(rows) - inner))
-        top = max(0, len(rows) - inner - off)
         for row in box_lines("Legend — what each phase performs",
-                             rows[top:top + inner]):
+                             _legend_window(_w() - 4, inner, _scroll["legend"])):
             _ln(row)
         while len(_buf) < h - BOTTOM_LINES:
             _ln()

@@ -78,6 +78,9 @@ from pipeline_core.adapters.fill_engine_roles import (
     WorkspaceModelAdapter,
 )
 from pipeline_core.adapters.gen_tests_storage import (
+    derive_gentest_prelude as _derive_gentest_prelude,
+)
+from pipeline_core.adapters.gen_tests_storage import (
     gen_tests_path as _gen_tests_path,
 )
 from pipeline_core.adapters.gen_tests_storage import (
@@ -377,9 +380,6 @@ from pipeline_core.domain.rust_fn_headers import (  # noqa: F401  (smoke pin: te
 from pipeline_core.domain.rust_fn_headers import (
     locate_fn as _locate_fn,
 )
-from pipeline_core.domain.test_command import (  # noqa: F401  (smoke pin: test_derive_check_only_cmd)
-    derive_check_only_cmd as _derive_check_only_cmd,
-)
 from pipeline_core.domain.rust_idents import (
     camelcase_type_names,
     defined_type_names,
@@ -398,6 +398,9 @@ from pipeline_core.domain.rust_scan import (
 )
 from pipeline_core.domain.rust_scan import (
     rust_delimiters_balanced as _rust_delimiters_balanced,
+)
+from pipeline_core.domain.test_command import (  # noqa: F401  (smoke pin: test_derive_check_only_cmd)
+    derive_check_only_cmd as _derive_check_only_cmd,
 )
 from pipeline_core.domain.test_grouping import split_oversized_groups as _split_oversized_groups
 from pipeline_core.domain.test_results import (
@@ -1093,9 +1096,6 @@ def _start_audit_thread() -> None:
 
 from pipeline_core.domain.generation import (  # noqa: E402
     Task1Request as _Task1Request,
-)
-from pipeline_core.domain.generation import (  # noqa: E402
-    derive_gentest_prelude as _derive_gentest_prelude_pure,
 )
 from pipeline_core.domain.generation import extract_test_mod  # noqa: E402
 from pipeline_core.domain.generation import (  # noqa: E402
@@ -3727,10 +3727,6 @@ def _inject_allow_before_mod(block: str, allow_line: str, *, gen_only: bool) -> 
 
 
 
-def _is_structural_line(text: str) -> bool:
-    """True for structural-only Rust lines (`}`, `} else {`, etc.) that LLVM miscounts.
-    (Regex in pipeline.)"""
-    return is_structural_brace_line(text)
 
 
 # slice 5b: deps for the extracted TASK 0b discovery (defined after its parsers).
@@ -3885,16 +3881,6 @@ def _select_relevant_siblings(
 
 
 
-def _extract_public_symbols(content: str) -> str:
-    """Extract public API from source with full signatures and field types.
-
-    Returns a structured listing that lets the model construct types correctly
-    without guessing field names, enum variants, or function parameter types.
-
-    Parsing goes through the syn extractor — NOT regex (Hard Rule: no regex on Rust
-    source). See `_public_api_from_source`.
-    """
-    return _public_api_from_source(content)
 
 
 # TestAugmentor (ABC) → ports/augment.py; StaticRustTestAugmentor →
@@ -3912,13 +3898,8 @@ def _test_augmentor_factory() -> TestAugmentor:
     return _new_static_rust_augmentor()
 
 
-def _derive_gentest_prelude(project_dir: Path) -> tuple[str, str]:
-    # C12: pure logic in domain.generation.derive_gentest_prelude; shim reads lib/main.rs.
-    lib_rs = project_dir / "src" / "lib.rs"
-    if not lib_rs.exists():
-        lib_rs = project_dir / "src" / "main.rs"
-    text = lib_rs.read_text(encoding="utf-8") if lib_rs.exists() else ""
-    return _derive_gentest_prelude_pure(text)
+# _derive_gentest_prelude → adapters/gen_tests_storage.derive_gentest_prelude (S33);
+# alias lives at the import (line ~100s) so every reference sees it defined.
 
 
 def task0c_augment_module(
@@ -4003,7 +3984,7 @@ _FILE_CONSTRAINTS = FileConstraintsReader(
 
 
 _TASK0C_DEPS = Task0cDeps(
-    BUILD_TIMEOUT=BUILD_TIMEOUT, COVERAGE_TARGET=COVERAGE_AUGMENTATION_TARGET, coverage_ignore_pragma=COVERAGE_IGNORE_PRAGMA, TASK0C_PROMPT_CHAR_CAP=TASK0C_PROMPT_CHAR_CAP, FIX_ERR_CAP=_FIX_ERR_CAP, SIBLING_CAP=_BUDGETS.sibling, SRC_SNIP_CAP=_BUDGETS.src_snippet, TASK0C_FIX_THINKING_DIRECTIVE=_TASK0C_FIX_THINKING_DIRECTIVE, TASK0C_MODEL=_TASK0C_MODEL, TASK0C_THINKING_DIRECTIVE=_TASK0C_THINKING_DIRECTIVE, WORKING_CAP=_BUDGETS.working, annotate_uncovered=_annotate_uncovered, block_is_prose=_block_is_prose, build_gen_tests_decl=_build_gen_tests_decl, guard=_guard, cargo_env=_cargo_env, cluster_gate_for=_cluster_gate_for_sibling, condense_rust_to_signatures=_condense_rust_to_signatures, count_test_attrs=count_test_attrs, derive_gentest_prelude=_derive_gentest_prelude, describe_test_environment=_describe_test_environment, error_signatures_from_output=rustc_error_signatures, extract_branch_guard=_extract_branch_guard, extract_gen_tests_body=_extract_gen_tests_body, extract_public_symbols=_extract_public_symbols, extract_uncovered_functions=_extract_uncovered_functions, filter_cfg_excluded_lines=_filter_cfg_excluded_lines, filter_cfg_incompatible_lines=_filter_cfg_incompatible_lines, flags_unreachable=_flags_unreachable, gen_tests_path=_gen_tests_path, has_nonempty_test_body=has_nonempty_test_fn, inject_allow_before_any_mod=functools.partial(_inject_allow_before_mod, gen_only=False), inject_allow_before_gen_mod=functools.partial(_inject_allow_before_mod, gen_only=True), inject_gen_prelude_imports=_inject_gen_prelude_imports, is_gen_tests_file=_is_gen_tests_file, is_structural_line=_is_structural_line, load_file_constraints=_FILE_CONSTRAINTS.load, type_signals_write=type_signals_write, mark_phase=_mark_phase, match_gen_tests_sibling=_match_gen_tests_sibling, next_gen_tests_n=_next_gen_tests_n, nightly_rules_for_cluster=_nightly_rules_for_cluster, parse_attempt_number=_parse_attempt_number, parse_retrospective_categories=_parse_retrospective_categories, partition_uncovered_lines=_partition_uncovered_lines, prelude_import_names=_prelude_import_names, quick_file_coverage=_coverage_provider.measure_file, read_all_gen_tests=_read_all_gen_tests, read_state=_read_state, revert_gen_tests_pass=_revert_gen_tests_pass, select_relevant_siblings=_select_relevant_siblings, set_current=_set_current, source_hash=_source_hash, strip_all_gen_tests_artifacts=_strip_all_gen_tests_artifacts, strip_gen_tests_decl_n=_strip_gen_tests_decl_n, strip_gen_tests_decls=_strip_gen_tests_decls, strip_trailing_file_tag=strip_trailing_file_tag, mutation_harden_file=lambda *a, **k: _MUTATION.harden_file(*a, **k), gen_tests_siblings=_gen_tests_siblings, test_augmentor_factory=_test_augmentor_factory, ask=_ASK_CLIENT.ask, extract_files=extract_files, extract_test_mod=extract_test_mod, generate_fix_loop=generate_fix_loop, generate_in_parallel=generate_in_parallel, is_test_file=is_test_file, write=write,
+    BUILD_TIMEOUT=BUILD_TIMEOUT, COVERAGE_TARGET=COVERAGE_AUGMENTATION_TARGET, coverage_ignore_pragma=COVERAGE_IGNORE_PRAGMA, TASK0C_PROMPT_CHAR_CAP=TASK0C_PROMPT_CHAR_CAP, FIX_ERR_CAP=_FIX_ERR_CAP, SIBLING_CAP=_BUDGETS.sibling, SRC_SNIP_CAP=_BUDGETS.src_snippet, TASK0C_FIX_THINKING_DIRECTIVE=_TASK0C_FIX_THINKING_DIRECTIVE, TASK0C_MODEL=_TASK0C_MODEL, TASK0C_THINKING_DIRECTIVE=_TASK0C_THINKING_DIRECTIVE, WORKING_CAP=_BUDGETS.working, annotate_uncovered=_annotate_uncovered, block_is_prose=_block_is_prose, build_gen_tests_decl=_build_gen_tests_decl, guard=_guard, cargo_env=_cargo_env, cluster_gate_for=_cluster_gate_for_sibling, condense_rust_to_signatures=_condense_rust_to_signatures, count_test_attrs=count_test_attrs, derive_gentest_prelude=_derive_gentest_prelude, describe_test_environment=_describe_test_environment, error_signatures_from_output=rustc_error_signatures, extract_branch_guard=_extract_branch_guard, extract_gen_tests_body=_extract_gen_tests_body, extract_public_symbols=_public_api_from_source, extract_uncovered_functions=_extract_uncovered_functions, filter_cfg_excluded_lines=_filter_cfg_excluded_lines, filter_cfg_incompatible_lines=_filter_cfg_incompatible_lines, flags_unreachable=_flags_unreachable, gen_tests_path=_gen_tests_path, has_nonempty_test_body=has_nonempty_test_fn, inject_allow_before_any_mod=functools.partial(_inject_allow_before_mod, gen_only=False), inject_allow_before_gen_mod=functools.partial(_inject_allow_before_mod, gen_only=True), inject_gen_prelude_imports=_inject_gen_prelude_imports, is_gen_tests_file=_is_gen_tests_file, is_structural_line=is_structural_brace_line, load_file_constraints=_FILE_CONSTRAINTS.load, type_signals_write=type_signals_write, mark_phase=_mark_phase, match_gen_tests_sibling=_match_gen_tests_sibling, next_gen_tests_n=_next_gen_tests_n, nightly_rules_for_cluster=_nightly_rules_for_cluster, parse_attempt_number=_parse_attempt_number, parse_retrospective_categories=_parse_retrospective_categories, partition_uncovered_lines=_partition_uncovered_lines, prelude_import_names=_prelude_import_names, quick_file_coverage=_coverage_provider.measure_file, read_all_gen_tests=_read_all_gen_tests, read_state=_read_state, revert_gen_tests_pass=_revert_gen_tests_pass, select_relevant_siblings=_select_relevant_siblings, set_current=_set_current, source_hash=_source_hash, strip_all_gen_tests_artifacts=_strip_all_gen_tests_artifacts, strip_gen_tests_decl_n=_strip_gen_tests_decl_n, strip_gen_tests_decls=_strip_gen_tests_decls, strip_trailing_file_tag=strip_trailing_file_tag, mutation_harden_file=lambda *a, **k: _MUTATION.harden_file(*a, **k), gen_tests_siblings=_gen_tests_siblings, test_augmentor_factory=_test_augmentor_factory, ask=_ASK_CLIENT.ask, extract_files=extract_files, extract_test_mod=extract_test_mod, generate_fix_loop=generate_fix_loop, generate_in_parallel=generate_in_parallel, is_test_file=is_test_file, write=write,
     subprocess=subprocess, get_current_cluster=_SCOPE.get_active,
     coverage_provider=_coverage_provider, check_stop=_check_graceful_stop,
 )
@@ -4040,8 +4021,6 @@ _STRIP_BAKE_DEPS = StripBakeDeps(
 # _FLOW_AUDIT/_DOCS_METRICS/_FAILURE_JOURNAL/_WORKSPACE_ARTIFACTS/_TEST_RUNNER) are
 # consumed only INSIDE build_app now → their pipeline re-exports were dead and deleted.
 # main() reads only these two:
-_REQUIREMENTS_PHASE = _APP.requirements_phase     # S17
-_MODULE_RECONSTRUCTOR = _APP.module_reconstructor # S20
 
 
 # S25: the TASK-0c augmentation cluster (_AUGMENT_STORE/_AUGMENT_ENGINE/
@@ -4086,7 +4065,7 @@ _RUN_DEPS = _orchestrator.RunDeps(
     run_state=_RUN, scope=_SCOPE, augment_store=_AUGMENT_STORE,
     cluster_augmentor=_CLUSTER_AUGMENTOR, strip_bake_deps=_STRIP_BAKE_DEPS,
     ws_scan_deps=_APP.ws_scan_deps, phase_subcommand_deps=_PHASE_SUBCOMMAND_DEPS,
-    requirements_phase=_REQUIREMENTS_PHASE, module_reconstructor=_MODULE_RECONSTRUCTOR,
+    requirements_phase=_APP.requirements_phase, module_reconstructor=_APP.module_reconstructor,
     log=_log, emit=_emit, setup_workspace=setup_workspace, is_git_repo=_wsmod.is_git_repo,
     init_log=init_log, init_events=init_events, start_audit_thread=_start_audit_thread,
     quarantine_broken_gen_tests=_quarantine_broken_gen_tests, git_file_hash=_wsmod.git_file_hash,

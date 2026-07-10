@@ -22,3 +22,11 @@ def test_lines_fit_width_and_wrap_with_aligned_continuations():
     # every phase appears exactly once as a line prefix
     firsts = [ln for ln in lines if not ln.startswith(" ")]
     assert len(firsts) == len(PHASES)
+
+
+def test_legend_window_scrolls_from_bottom():
+    from pipeline_core.monitor.legend import legend_lines, legend_window
+    rows = legend_lines(60)
+    assert legend_window(60, 5, 0) == rows[-5:]          # bottom
+    assert legend_window(60, 5, 3) == rows[-8:-3]        # scrolled up 3
+    assert legend_window(60, len(rows) + 10, 0) == rows  # viewport bigger than content

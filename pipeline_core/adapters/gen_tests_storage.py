@@ -19,6 +19,9 @@ from pipeline_core.domain.generation import (
     strip_all_gen_tests_decls,
     strip_gen_tests_decl,
 )
+from pipeline_core.domain.generation import (
+    derive_gentest_prelude as _derive_gentest_prelude_pure,
+)
 from pipeline_core.domain.rust_scan import rust_delimiters_balanced
 
 
@@ -181,3 +184,14 @@ def strip_all_gen_tests_artifacts(src_file: Path) -> int:
         if cleaned != original:
             src_file.write_text(cleaned, encoding="utf-8")
     return count
+
+
+def derive_gentest_prelude(project_dir: Path) -> tuple[str, str]:
+    """Derive the gen_tests allow-line + prelude from the crate root file
+    (lib.rs, falling back to main.rs). Pure derivation lives in
+    domain.generation.derive_gentest_prelude; this adapter owns the read."""
+    lib_rs = project_dir / "src" / "lib.rs"
+    if not lib_rs.exists():
+        lib_rs = project_dir / "src" / "main.rs"
+    text = lib_rs.read_text(encoding="utf-8") if lib_rs.exists() else ""
+    return _derive_gentest_prelude_pure(text)

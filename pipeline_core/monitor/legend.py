@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import textwrap
 
-__all__ = ["PHASES", "legend_lines"]
+__all__ = ["PHASES", "legend_lines", "legend_window"]
 
 # (tag as it appears in the log, what the phase performs)
 PHASES: list[tuple[str, str]] = [
@@ -44,3 +44,12 @@ def legend_lines(width: int) -> list[str]:
         out.append(f"{tag.ljust(tag_w)}{wrapped[0]}")
         out.extend(" " * tag_w + cont for cont in wrapped[1:])
     return out
+
+
+def legend_window(width: int, inner: int, scroll_from_bottom: int) -> list[str]:
+    """The visible slice of the legend for a viewport of `inner` rows,
+    scrolled `scroll_from_bottom` rows up from the end (0 = bottom)."""
+    rows = legend_lines(width)
+    off = min(scroll_from_bottom, max(0, len(rows) - inner))
+    top = max(0, len(rows) - inner - off)
+    return rows[top:top + inner]

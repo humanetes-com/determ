@@ -1416,7 +1416,7 @@ def test_cargo_toml_parsed_with_tomllib() -> None:
 
 @needs_extractor
 def test_extract_public_symbols_via_syn() -> None:
-    """_extract_public_symbols parses Rust source via the syn extractor (no regex on source).
+    """_public_api_from_source parses Rust source via the syn extractor (no regex on source).
     Confirm it surfaces pub structs (with fields), enums (with variants), traits, fn sigs, and
     consts — and excludes private items."""
     import pipeline
@@ -1430,7 +1430,7 @@ def test_extract_public_symbols_via_syn() -> None:
         "struct Hidden { x: u8 }\n"          # private — must NOT appear
         "const SECRET: u8 = 1;\n"
     )
-    out = pipeline._extract_public_symbols(src)
+    out = pipeline._public_api_from_source(src)
     assert "pub struct Error" in out and "inner" in out and "code" in out
     assert "pub enum Kind" in out and "A" in out
     assert "pub trait Show" in out
