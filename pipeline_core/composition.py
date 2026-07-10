@@ -40,6 +40,7 @@ from pipeline_core.adapters.fill_engine_roles import (
     TestLinkerAdapter,
     WorkspaceModelAdapter,
 )
+from pipeline_core.adapters.pipeline_db import compile_patterns_write as _db_compile_patterns_write
 from pipeline_core.adapters.ratchet import BestTreeRatchet
 from pipeline_core.adapters.reconstruct_roles import (
     AnalystAdapter,
@@ -71,10 +72,18 @@ from pipeline_core.adapters.workspace import WorkspaceDeps
 from pipeline_core.adapters.workspace_files import lock_module
 from pipeline_core.adapters.workspace_scan import WorkspaceScanDeps
 from pipeline_core.application.cluster_augment import ClusterAugmentor
+from pipeline_core.application.fix_loop import GenerateFixLoopDeps
 from pipeline_core.application.gen_tests_reattach import ReattachDeps
 from pipeline_core.application.orchestrator import LockDeps
+from pipeline_core.application.reconstruct.attribution import AttributionDeps
+from pipeline_core.application.reconstruct.cargo_errors import (
+    categorize_compile_error as _categorize_compile_error,
+)
 from pipeline_core.application.reconstruct.cargo_runner import PortBoundCargoRunner
 from pipeline_core.application.reconstruct.failure_analysis import FailureAnalysisStep
+from pipeline_core.application.reconstruct.generate_fix import (
+    run_generate_fix as _run_generate_fix,
+)
 from pipeline_core.application.reconstruct.group_fill import GroupFillDeps
 from pipeline_core.application.reconstruct.impl_fill import ImplFillDeps
 from pipeline_core.application.reconstruct.module_reconstructor import ModuleReconstructor
@@ -89,6 +98,9 @@ from pipeline_core.application.reconstruct.phase_c_tdd import PhaseCTddDeps
 from pipeline_core.application.reconstruct.reconstruction_step import ReconstructionStep
 from pipeline_core.application.reconstruct.requirements_phase import RequirementsPhase
 from pipeline_core.application.reconstruct.retrospective import PhaseCRetroDeps
+from pipeline_core.application.reconstruct.splice import (
+    restore_frozen_signature as _splice_restore_frozen_sig,
+)
 from pipeline_core.application.tasks.discover_test_command import DiscoverTestCommandDeps
 from pipeline_core.application.tasks.genesis_audit import GenesisAuditDeps
 from pipeline_core.application.tasks.task0_docs import Task0DocsDeps
@@ -97,17 +109,30 @@ from pipeline_core.application.tasks.task4 import Task4Deps
 from pipeline_core.application.validate import Task2CheckerDeps
 from pipeline_core.domain.cluster_scope import ClusterScope
 from pipeline_core.domain.impl_routing import impl_block_id as _impl_block_id
+from pipeline_core.domain.llm_output import extract_files as _extract_files
 from pipeline_core.domain.models import TypeRecord
 from pipeline_core.domain.prompt_budget import PromptBudgets
 from pipeline_core.domain.run_state import RunState
+from pipeline_core.domain.rust_fn_headers import is_pub_fn as _domain_is_pub_fn
+from pipeline_core.domain.rust_fn_headers import locate_fn as _domain_locate_fn
 from pipeline_core.domain.rust_macros import (
     proc_macro_fallback_requirements as _pm_fallback_reqs,
 )
+from pipeline_core.domain.test_command import (
+    derive_check_only_cmd as _domain_derive_check_only_cmd,
+)
+from pipeline_core.domain.test_results import (
+    is_compiler_output_line as _is_compiler_output_line,
+)
+from pipeline_core.domain.test_results import strip_ansi as _strip_ansi
 from pipeline_core.io import read, write
 from pipeline_core.io import read as _io_read
+from pipeline_core.io import write as _io_write
 from pipeline_core.ports.cargo_runner import CargoRunner as CargoRunnerPort
 from pipeline_core.ports.structure import StructureReader
 from pipeline_core.prompts.per_fn import build_per_fn_fix_prompt
+from pipeline_core.prompts.sections import tag_block as _tag_block
+from pipeline_core.prompts.whole_file_fix import build_whole_file_fix_prompt as _build_wff
 from pipeline_core.settings import Settings
 
 
@@ -211,6 +236,27 @@ class Helpers:
     # provides these App-reading closures itself):
     scan_stub_records_via_app: Callable[..., Any]
     collect_impl_blocks_via_app: Callable[..., Any]
+    # Fix-loop collaborators (P3-S3 step 31, GenerateFixLoopDeps construction):
+    set_current: Callable[..., Any]
+    emit_per_file_test_overview: Callable[..., Any]
+    fix_diag: Any
+    gotchas_for_error: Callable[..., Any]
+    gotchas_summary: Callable[..., Any]
+    render_impl_block: Callable[..., Any]
+    whole_tree_retrospective: Callable[..., Any]
+    repo_spec_section: Callable[..., Any]
+    splice_fn_body: Callable[..., Any]
+    collect_impl_blocks: Callable[..., Any]
+    behavior_frontier: Callable[..., Any]
+    compile_error_frontier: Callable[..., Any]
+    extract_tdd_frontier: Callable[..., Any]
+    settings_now: Callable[..., Any]
+    source_extensions: Any
+    fix_thinking_directive: str
+    task2_verbosity_guard: str
+    # Attribution collaborators (P3-S3, AttributionDeps construction):
+    classify_phase_c_test_failures: Callable[..., Any]
+    structure_via_app: Any  # StructureReader reading the LIVE pipeline._APP.structure
     # Task-1 collaborators (P3-S3, Task1Deps construction):
     write_fr_preserving_notes: Callable[..., Any]
     task1_synthesizer_factory: Callable[..., Any]
@@ -340,6 +386,10 @@ class App:
     impl_fill_deps: ImplFillDeps
     # Task-1 deps (P3-S3).
     task1_deps: Task1Deps
+    # Attribution deps (P3-S3).
+    attribution_deps: AttributionDeps
+    # Fix-loop deps (P3-S3 step 31).
+    gen_fix_loop_deps: GenerateFixLoopDeps
 
     # Guarded LLM ask client (P3-S3 bridge): constructed by the composition
     # root (its ask_raw/hot-reload lambdas close over pipeline residents) and
@@ -573,6 +623,68 @@ def build_app(
             per_fn_fix_hard_cap=settings.fix_caps.per_fn_fix_hard_cap,
             per_impl_max_stubs=helpers.per_impl_max_stubs,
             task2_model=settings.task_models.task2,
+        ),
+        gen_fix_loop_deps=GenerateFixLoopDeps(
+            set_current=helpers.set_current,
+            BUILD_TIMEOUT=cfg.build_timeout,
+            FILE_FORMAT_INSTRUCTION=helpers.file_format_instruction,
+            MODEL=settings.model,
+            settings_now=helpers.settings_now,
+            SINGLE_CALL_CHAR_LIMIT=cfg.single_call_char_limit,
+            SOURCE_EXTENSIONS=helpers.source_extensions,
+            ASK_CLIENT=ask_client,
+            FIX_ERR_CAP=cfg.fix_err_cap,
+            FIX_THINKING_DIRECTIVE=helpers.fix_thinking_directive,
+            REPO_SPEC_CAP_WIDE=PromptBudgets.derive(cfg.single_call_char_limit).repo_spec_wide,
+            SRC_SNIP_CAP=PromptBudgets.derive(cfg.single_call_char_limit).src_snippet,
+            TASK2_VERBOSITY_GUARD=helpers.task2_verbosity_guard,
+            TYPES_SECTION_CAP=PromptBudgets.derive(cfg.single_call_char_limit).types_section,
+            behavior_frontier=helpers.behavior_frontier,
+            cargo_env=ports.cargo_env,
+            categorize_compile_error=_categorize_compile_error,
+            collect_impl_blocks=helpers.collect_impl_blocks,
+            compile_error_frontier=helpers.compile_error_frontier,
+            derive_check_only_cmd=_domain_derive_check_only_cmd,
+            emit=ports.emit,
+            emit_per_file_test_overview=helpers.emit_per_file_test_overview,
+            enumerate_fns_via_extractor=helpers.enumerate_fns,
+            enumerate_types=helpers.enumerate_types,
+            types_section_for_fix=helpers.types_section_for_fix,
+            check_stop=helpers.check_graceful_stop,
+            extract_tdd_frontier=helpers.extract_tdd_frontier,
+            filter_test_targets=helpers.filter_test_targets,
+            fix_diag=helpers.fix_diag,
+            frontier_from_diags=helpers.frontier_from_diags,
+            gotchas_for_error=helpers.gotchas_for_error,
+            gotchas_summary=helpers.gotchas_summary,
+            is_pub_fn=_domain_is_pub_fn,
+            locate_fn=_domain_locate_fn,
+            log=ports.log,
+            parse_cmd=helpers.parse_cmd,
+            render_impl_block=helpers.render_impl_block,
+            repo_spec_section=helpers.repo_spec_section,
+            restore_frozen_signature=_splice_restore_frozen_sig,
+            run_cargo_check_diag=helpers.run_cargo_check_diag,
+            splice_fn_body=helpers.splice_fn_body,
+            splice_fn_with_where=helpers.splice_fn_with_where,
+            strip_ansi=_strip_ansi,
+            tag_block=_tag_block,
+            whole_tree_retrospective=helpers.whole_tree_retrospective,
+            build_whole_file_fix_prompt=_build_wff,
+            compile_patterns_write=_db_compile_patterns_write,
+            extract_files=_extract_files,
+            is_compiler_output_line=_is_compiler_output_line,
+            run_generate_fix=_run_generate_fix,
+            write=_io_write,
+        ),
+        attribution_deps=AttributionDeps(
+            structure=helpers.structure_via_app,
+            classify=helpers.classify_phase_c_test_failures,
+            locate_fn=_domain_locate_fn,
+            run_check_diag=helpers.run_cargo_check_diag,
+            derive_check_only_cmd=_domain_derive_check_only_cmd,
+            is_gen_tests_file=helpers.is_gen_tests_file,
+            log=ports.log,
         ),
         task1_deps=Task1Deps(
             load_api_surface=_load_api_surface,

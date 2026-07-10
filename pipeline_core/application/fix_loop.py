@@ -40,11 +40,19 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Protocol
 
+from pipeline_core.application.reconstruct.fix_roles import (
+    FixCheckerAdapter,
+    FixModelAdapter,
+    FixPromptsAdapter,
+    FixSplicerAdapter,
+    FrontierBuilderAdapter,
+)
 from pipeline_core.application.reconstruct.pull_resolver import (
     PullSources,
     workspace_file_reader,
 )
 from pipeline_core.domain.fix_report import FixReport
+from pipeline_core.domain.fix_session import FixSession
 from pipeline_core.domain.refine import FloorStall
 from pipeline_core.domain.std_api_sigs import std_api_def
 
@@ -210,9 +218,6 @@ class GenerateFixLoopDeps:
     natives + constants; the loop body lives here, injected for testability."""
     BUILD_TIMEOUT: Any
     FILE_FORMAT_INSTRUCTION: Any
-    FixSession: Any
-    FixUnitDeps: Any
-    GenerateFixDeps: Any
     MODEL: Any
     settings_now: Callable[..., Any]   # getter — tests monkeypatch pipeline.SETTINGS
     SINGLE_CALL_CHAR_LIMIT: Any
@@ -220,11 +225,6 @@ class GenerateFixLoopDeps:
     ASK_CLIENT: Any
     FIX_ERR_CAP: Any
     FIX_THINKING_DIRECTIVE: Any
-    FixCheckerAdapter: Any
-    FixModelAdapter: Any
-    FixPromptsAdapter: Any
-    FixSplicerAdapter: Any
-    FrontierBuilderAdapter: Any
     REPO_SPEC_CAP_WIDE: Any
     SRC_SNIP_CAP: Any
     TASK2_VERBOSITY_GUARD: Any
@@ -497,18 +497,18 @@ def generate_fix_loop(
     # generate_fix}. pipeline.py is the composition root — it wires the resident
     # check/model/splice/prompt/frontier helpers in via late-binding lambdas
     # (preserves the _run_cargo/_splice_fn_body/ask monkeypatch seams).
-    _fix_checker = deps.FixCheckerAdapter(
+    _fix_checker = FixCheckerAdapter(
         run_cargo_check_diag=lambda c, cwd, e, t: deps.run_cargo_check_diag(c, cwd, e, t),
         strip_ansi=deps.strip_ansi,
         frontier_from_diags=lambda diags: deps.frontier_from_diags(diags, project_dir))
-    _fix_model = deps.FixModelAdapter(
+    _fix_model = FixModelAdapter(
         ask_fn=lambda prompt: deps.ASK_CLIENT.ask(prompt, model=model))
-    _fix_splicer = deps.FixSplicerAdapter(
+    _fix_splicer = FixSplicerAdapter(
         locate_fn_fn=deps.locate_fn, is_pub_fn_fn=deps.is_pub_fn,
         render_impl_block_fn=deps.render_impl_block,
         splice_fn_fn=deps.splice_fn_with_where, splice_body_fn=deps.splice_fn_body,
         restore_signature_fn=deps.restore_frozen_signature)
-    _fix_prompts = deps.FixPromptsAdapter(
+    _fix_prompts = FixPromptsAdapter(
         repo_spec_block_fn=lambda *, file_rel="", fn_name="", container="":
             deps.tag_block("REPOSITORY_SPECIFICATIONS", deps.repo_spec_section(
                 fr_path, file_rel=file_rel, fn_name=fn_name, container=container)),
@@ -517,7 +517,7 @@ def generate_fix_loop(
     def _behavior_frontier_filtered(output: str) -> tuple[Any, Any]:
         fr, srcs = deps.behavior_frontier(output, project_dir, existing_test_files)
         return deps.filter_test_targets(fr, project_dir), srcs
-    _frontiers = deps.FrontierBuilderAdapter(
+    _frontiers = FrontierBuilderAdapter(
         compile_frontier_fn=lambda output: deps.filter_test_targets(
             deps.compile_error_frontier(output, project_dir, check_cmd, env, timeout),
             project_dir),
@@ -525,7 +525,7 @@ def generate_fix_loop(
             deps.extract_tdd_frontier(output, project_dir), project_dir),
         behavior_frontier_fn=_behavior_frontier_filtered)
 
-    _fix_session = deps.FixSession.for_check_cmd(
+    _fix_session = FixSession.for_check_cmd(
         project_dir=project_dir, check_cmd=check_cmd,
         derive_check_only=deps.derive_check_only_cmd, env=env, timeout=timeout,
         model=model, fr_path=fr_path,
@@ -549,7 +549,9 @@ def generate_fix_loop(
         type_def=_pull_type_def,
         full_error=lambda: "",   # rebound per attempt by _BaseFixUnit._ask
     )
-    _fix_unit_deps = deps.FixUnitDeps(
+    from pipeline_core.application.reconstruct.fix_unit import FixUnitDeps
+    from pipeline_core.application.reconstruct.generate_fix import GenerateFixDeps
+    _fix_unit_deps = FixUnitDeps(
         checker=_fix_checker, model=_fix_model, splicer=_fix_splicer,
         prompts=_fix_prompts, log=deps.log, do_retro=_do_retro,
         thinking_directive=deps.FIX_THINKING_DIRECTIVE, err_cap=deps.FIX_ERR_CAP,
@@ -557,7 +559,7 @@ def generate_fix_loop(
         pull_sources=_pull_sources, emit=deps.emit,
         max_pulls=int(os.getenv("CONTEXT_PULLS_MAX", "2")))
 
-    _gen_fix_deps = deps.GenerateFixDeps(
+    _gen_fix_deps = GenerateFixDeps(
         unit=_fix_unit_deps,
         frontiers=_frontiers,
         enumerate_fns=lambda: deps.enumerate_fns_via_extractor(project_dir) or [],

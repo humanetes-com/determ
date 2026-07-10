@@ -77,21 +77,6 @@ from pipeline_core.adapters.fill_engine_roles import (
     TestLinkerAdapter,
     WorkspaceModelAdapter,
 )
-from pipeline_core.adapters.fix_loop_roles import (
-    FixCheckerAdapter as _FixCheckerAdapter,
-)
-from pipeline_core.adapters.fix_loop_roles import (
-    FixModelAdapter as _FixModelAdapter,
-)
-from pipeline_core.adapters.fix_loop_roles import (
-    FixPromptsAdapter as _FixPromptsAdapter,
-)
-from pipeline_core.adapters.fix_loop_roles import (
-    FixSplicerAdapter as _FixSplicerAdapter,
-)
-from pipeline_core.adapters.fix_loop_roles import (
-    FrontierBuilderAdapter as _FrontierBuilderAdapter,
-)
 from pipeline_core.adapters.gen_tests_storage import (
     gen_tests_path as _gen_tests_path,
 )
@@ -185,11 +170,6 @@ from pipeline_core.application.reconstruct.failure_diagnosis import (
 )
 from pipeline_core.application.reconstruct.fill_merge import (
     merge_fn_blocks_into_disk as _merge_fn_blocks_into_disk,
-)
-from pipeline_core.application.reconstruct.fix_unit import FixUnitDeps
-from pipeline_core.application.reconstruct.generate_fix import (
-    GenerateFixDeps,
-    run_generate_fix,
 )
 from pipeline_core.application.reconstruct.impl_blocks import (
     collect_impl_blocks as _collect_impl_blocks_impl,
@@ -331,7 +311,6 @@ from pipeline_core.domain.enums import (
 from pipeline_core.domain.failure_classification import (
     classify_failure as _classify_failure,
 )
-from pipeline_core.domain.fix_session import FixSession
 from pipeline_core.domain.impl_block_ranges import (
     impl_where_clause,
 )
@@ -373,7 +352,6 @@ from pipeline_core.domain.model_notes import (
 )
 from pipeline_core.domain.models import (
     BuildCluster,
-    ConstRecord,
     Diagnostic,
     DispatchFamily,
     FnLocator,
@@ -393,11 +371,14 @@ from pipeline_core.domain.refine import (
 )
 from pipeline_core.domain.run_state import RunPlan as _RunPlan
 from pipeline_core.domain.run_state import RunState
-from pipeline_core.domain.rust_fn_headers import (
+from pipeline_core.domain.rust_fn_headers import (  # noqa: F401  (smoke pin: test_sig_tighten_guard_and_where_parse)
     is_pub_fn as _is_pub_fn,
 )
 from pipeline_core.domain.rust_fn_headers import (
     locate_fn as _locate_fn,
+)
+from pipeline_core.domain.test_command import (  # noqa: F401  (smoke pin: test_derive_check_only_cmd)
+    derive_check_only_cmd as _derive_check_only_cmd,
 )
 from pipeline_core.domain.rust_idents import (
     camelcase_type_names,
@@ -427,7 +408,6 @@ from pipeline_core.domain.test_results import (
     count_passing_tests,
     extract_test_output_from_file,
     insert_no_run,
-    is_compiler_output_line,
     rustc_error_codes,
     rustc_error_signatures,
     strip_ansi,
@@ -499,7 +479,6 @@ from pipeline_core.prompts.skeleton_index import (
 from pipeline_core.prompts.test_environment import (
     describe_test_environment as _describe_test_environment_impl,
 )
-from pipeline_core.prompts.whole_file_fix import build_whole_file_fix_prompt
 from pipeline_core.retry import with_retry
 from pipeline_core.settings import Settings
 
@@ -527,17 +506,8 @@ def _classify_phase_c_test_failures(test_out: str, filled_this_pass: list[FnLoca
         ask=_ASK_CLIENT.ask, log=_log, model=_TASK0C_MODEL, err_cap=_FIX_ERR_CAP)
 
 
-def _record_tdd_regression(fr_path: Path, src_dir: Path, filled_keys: "list[FnLocator]",
-                           broken_tests: "set[str]", prev_best: int, now_pass: int) -> str:
-    return _record_tdd_regression_impl(
-        fr_path, src_dir, filled_keys, broken_tests, prev_best, now_pass,
-        enumerate_fns=_enumerate_fns_via_extractor, append_note=_append_model_note,
-        body_cap=_BUDGETS.failed_body)
 
 
-def _implicated_fns_from_cargo_errors(cargo_output: str, target_src_dir: Path) -> list[FnLocator]:
-    return _implicated_fns_from_cargo_errors_impl(
-        cargo_output, target_src_dir, enumerate_fns=_enumerate_fns_via_extractor)
 
 
 def _hot_reload_mi() -> None:
@@ -810,9 +780,6 @@ def _phase(*a, **k):
 _CRATE_DISPLAY_NAME = ""
 
 
-def _from_scratch_disclaimer() -> str:
-    """Anti-leakage note, bound to the live crate name (prompts/disclaimer.py)."""
-    return _prompts_disclaimer(_CRATE_DISPLAY_NAME)
 
 
 # Public `ask` shim removed (G/P6). Entry point is _ASK_CLIENT.ask(...);
@@ -853,7 +820,8 @@ _ASK_CLIENT = AskClient(
     emit=lambda *a, **k: _emit(*a, **k),
     guard=_guard,
     store_prompt_content=lambda s: _store_prompt_content(s),
-    caller_site=_pclog.caller_site, disclaimer=_from_scratch_disclaimer,
+    caller_site=_pclog.caller_site,
+    disclaimer=lambda: _prompts_disclaimer(_CRATE_DISPLAY_NAME),
     model_name=MODEL, context_chars=MODEL_CONTEXT_CHARS,
     single_call_char_limit=SINGLE_CALL_CHAR_LIMIT,
 )
@@ -1189,18 +1157,11 @@ def _parse_cmd(cmd: str) -> list[str]:
 # Per-project SQLite knowledge store relocated to adapters/pipeline_db.py.
 from pipeline_core.adapters.pipeline_db import (  # noqa: E402
     compile_patterns_read,
-    compile_patterns_write,
     genesis_rules_count,
     genesis_rules_read,
     genesis_rules_write,
     type_signals_read,
     type_signals_write,
-)
-from pipeline_core.application.reconstruct.cargo_errors import (  # noqa: E402
-    categorize_compile_error as _categorize_compile_error,
-)
-from pipeline_core.domain.test_command import (  # noqa: E402
-    derive_check_only_cmd as _derive_check_only_cmd,
 )
 
 # ---------------------------------------------------------------------------
@@ -1225,7 +1186,7 @@ def scan_workspace_structure(project_dir: Path) -> str:
     Produce a markdown workspace map for TASK 2.
     Implementation is selected by WORKSPACE_SCANNER in .env (default: llm).
     """
-    return _workspace_scanner_factory(_WS_SCAN_DEPS).scan(project_dir)
+    return _workspace_scanner_factory(_APP.ws_scan_deps).scan(project_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -1283,13 +1244,13 @@ from pipeline_core.application.validate import (  # noqa: E402
 def validate_task2_output(
     project_dir: Path, expected_paths: list[str], req_path: Path | None = None,
 ) -> tuple[bool, str]:
-    return _validate_task2_output_impl(project_dir, expected_paths, req_path, _VALIDATOR_DEPS)
+    return _validate_task2_output_impl(project_dir, expected_paths, req_path, _APP.validator_deps)
 
 
 def validate_task2_api_surface_conformance(
     project_dir: Path, module_name: str, module_dir: Path,
 ) -> tuple[bool, str]:
-    return _validate_task2_api_impl(project_dir, module_name, module_dir, _VALIDATOR_DEPS)
+    return _validate_task2_api_impl(project_dir, module_name, module_dir, _APP.validator_deps)
 
 
 def _test_count_deps() -> "_tc_app.TestCountDeps":
@@ -1443,8 +1404,6 @@ _cargo_env = CargoEnv(_SCOPE)
 # Git workspace helpers
 # ---------------------------------------------------------------------------
 
-def _is_git_repo(path: Path) -> bool:
-    return _wsmod.is_git_repo(path)
 
 
 # Slice 4b: git workspace I/O relocated to pipeline_core.adapters.workspace. These are
@@ -1456,21 +1415,21 @@ def _is_git_repo(path: Path) -> bool:
 
 
 def git_commit(project_dir: Path, message: str) -> bool:
-    return _wsmod.git_commit(_WS_DEPS, project_dir, message, managed=_RUN.git_managed)
+    return _wsmod.git_commit(_APP.ws_deps, project_dir, message, managed=_RUN.git_managed)
 
 
 def git_tag(project_dir: Path, tag: str) -> None:
-    _wsmod.git_tag(_WS_DEPS, project_dir, tag, managed=_RUN.git_managed)
+    _wsmod.git_tag(_APP.ws_deps, project_dir, tag, managed=_RUN.git_managed)
 
 
 def git_clean_reset(project_dir: Path) -> None:
-    _wsmod.git_clean_reset(_WS_DEPS, project_dir)
+    _wsmod.git_clean_reset(_APP.ws_deps, project_dir)
 
 
 def setup_workspace(repo: str, workspace_dir: Path, force_fresh: bool = False) -> Path:
     """Composition-root shim → adapters.workspace.setup_workspace (clone/copy a
     repo into tmp/ and check out the pipeline branch). I/O lives in the adapter."""
-    return _wsmod.setup_workspace(_WS_DEPS, repo, workspace_dir, force_fresh)
+    return _wsmod.setup_workspace(_APP.ws_deps, repo, workspace_dir, force_fresh)
 
 
 def _nightly_rules_for_cluster() -> str:
@@ -1545,6 +1504,17 @@ _CFG = _CompositionConfig(
 # the only block likely to exceed this in practice.
 _PER_IMPL_MAX_STUBS = int(os.getenv("PHASE_C_IMPL_MAX_STUBS", "12"))
 
+class _LateStructure:
+    """P2 backward-compat: late-binds `_enumerate_fns_via_extractor` so existing tests
+    that monkeypatch that pipeline shim are still honoured by the attribution use-case.
+    New tests inject a real `StructureReader` fake via `AttributionDeps.structure`."""
+
+    def enumerate_fns(self, src_dir: Path) -> "list[dict] | None":
+        return _enumerate_fns_via_extractor(src_dir)
+
+
+_set_current: "Callable[..., None]" = _state_mod.set_current
+
 _HELPERS = _Helpers(
     parse_cmd=lambda *a, **k: _parse_cmd(*a, **k),
     prompt_budget=lambda *a, **k: prompt_budget(*a, **k),
@@ -1561,11 +1531,31 @@ _HELPERS = _Helpers(
     scan_stub_records_via_app=lambda *a, **k: _APP.scan_stub_records_for_cluster(*a, **k),
     collect_impl_blocks_via_app=lambda *a, **k: _APP.collect_impl_blocks_for_cluster(*a, **k),
     write_fr_preserving_notes=lambda *a, **k: _write_fr_preserving_notes(*a, **k),
+    classify_phase_c_test_failures=lambda *a, **k: _classify_phase_c_test_failures(*a, **k),
+    set_current=lambda *a, **k: _set_current(*a, **k),
+    emit_per_file_test_overview=lambda *a, **k: _emit_per_file_test_overview(*a, **k),
+    fix_diag=_fix_diag,  # the fix_diagnostics module (imported at top)
+    gotchas_for_error=lambda *a, **k: _gotchas_for_error(*a, **k),
+    gotchas_summary=lambda *a, **k: _gotchas_summary(*a, **k),
+    render_impl_block=lambda *a, **k: _render_impl_block(*a, **k),
+    whole_tree_retrospective=lambda *a, **k: _whole_tree_retrospective(*a, **k),
+    repo_spec_section=lambda *a, **k: _repo_spec_section(*a, **k),
+    splice_fn_body=lambda *a, **k: _splice_fn_body(*a, **k),
+    collect_impl_blocks=lambda *a, **k: _collect_impl_blocks(*a, **k),
+    behavior_frontier=lambda *a, **k: _behavior_frontier(*a, **k),
+    compile_error_frontier=lambda *a, **k: _compile_error_frontier(*a, **k),
+    extract_tdd_frontier=lambda *a, **k: _extract_tdd_frontier(*a, **k),
+    settings_now=lambda: SETTINGS,
+    source_extensions=SOURCE_EXTENSIONS,
+    fix_thinking_directive=_FIX_THINKING_DIRECTIVE,
+    task2_verbosity_guard=_TASK2_VERBOSITY_GUARD,
+    structure_via_app=_LateStructure(),
     task1_synthesizer_factory=lambda *a, **k: _task1_synthesizer_factory(*a, **k),
     filter_proc_macro_test_files=lambda *a, **k: _filter_proc_macro_test_files(*a, **k),
     format_api_surface_section=lambda *a, **k: _format_api_surface_section(*a, **k),
     file_format_instruction=FILE_FORMAT_INSTRUCTION,
-    build_dispatch_family_section=lambda *a, **k: _build_dispatch_family_section(*a, **k),
+    build_dispatch_family_section=lambda *a, **k: _build_dispatch_family_section_pure(
+        *a, **k, single_call_char_limit=SINGLE_CALL_CHAR_LIMIT),
     build_per_impl_prompt=lambda *a, **k: _build_per_impl_prompt(*a, **k),
     cargo_err_sig=lambda *a, **k: _cargo_err_sig(*a, **k),
     cargo_err_sig_from_diagnostics=lambda *a, **k: _cargo_err_sig_from_diagnostics(*a, **k),
@@ -1595,7 +1585,9 @@ _HELPERS = _Helpers(
     count_relevant_notes=lambda *a, **k: _count_relevant_notes(*a, **k),
     effective_stalls=lambda *a, **k: _effective_stalls(*a, **k),
     order_frontier=lambda *a, **k: _order_frontier(*a, **k),
-    record_tdd_regression=lambda *a, **k: _record_tdd_regression(*a, **k),
+    record_tdd_regression=lambda *a, **k: _record_tdd_regression_impl(
+        *a, **k, enumerate_fns=_enumerate_fns_via_extractor,
+        append_note=_append_model_note, body_cap=_BUDGETS.failed_body),
     reset_exhaustion_flags=lambda *a, **k: _reset_exhaustion_flags(*a, **k),
     run_cargo=lambda *a, **k: _run_cargo(*a, **k),
     scan_unimplemented_for_cluster=lambda *a, **k: _scan_unimplemented_for_cluster(*a, **k),
@@ -1755,34 +1747,18 @@ _APP: _App = _build_app(ADAPTERS, SETTINGS, _RUN, _SCOPE, _PORTS, _CFG, _ROLES, 
                   events_log=lambda: _EVENTS_LOG, run_context=_RUN_CONTEXT)
 # S3.5/6/10: these deps are consumed only inside `def` bodies (lazy), so their
 # construction migrates into build_app and they're re-exported here by name.
-_WS_DEPS = _APP.ws_deps
-_WS_SCAN_DEPS = _APP.ws_scan_deps
-_VALIDATOR_DEPS = _APP.validator_deps
+_VALIDATOR_DEPS = _APP.validator_deps  # smoke pin: test_pipeline_smoke uses pipeline._VALIDATOR_DEPS
 # #23: build.rs cfg authority — prunes phantom clusters from source `#[cfg]` atoms.
 _BUILD_SCRIPT_READER = CargoBuildScriptReader()
 
 
-class _LateStructure:
-    """P2 backward-compat: late-binds `_enumerate_fns_via_extractor` so existing tests
-    that monkeypatch that pipeline shim are still honoured by the attribution use-case.
-    New tests inject a real `StructureReader` fake via `AttributionDeps.structure`."""
-
-    def enumerate_fns(self, src_dir: Path) -> "list[dict] | None":
-        return _enumerate_fns_via_extractor(src_dir)
+# _LateStructure hoisted above _HELPERS (step 22).
 
 
 # P2: composition root for the attribution use-case. Collaborators are late-bound
 # (lambdas resolve the module globals at call time) so every existing monkeypatch
 # seam keeps working; the AttributionDeps record is the clean DI rail a fake can fill.
-_ATTR_DEPS = _attribution.AttributionDeps(
-    structure=_LateStructure(),
-    classify=lambda *a, **k: _classify_phase_c_test_failures(*a, **k),
-    locate_fn=lambda *a, **k: _locate_fn(*a, **k),
-    run_check_diag=lambda *a, **k: _run_cargo_check_diag(*a, **k),
-    derive_check_only_cmd=lambda c: _derive_check_only_cmd(c),
-    is_gen_tests_file=lambda n: _is_gen_tests_file(n),
-    log=lambda m: _log(m),
-)
+# P3-S3 (step 22): AttributionDeps constructed in build_app (App.attribution_deps).
 # The application-layer composition context. main()'s task dispatch migrates onto it
 # slice by slice (5b); for now it bundles the resolved settings + adapters.
 # Wire the cross-cutting infra seams to the pipeline's concrete sinks/config (slice 5b).
@@ -1925,8 +1901,6 @@ def _replace_fn_signature(file_path: Path, fn_name: str, new_sig: str) -> bool:
     return _reconstruct_splice.replace_fn_signature(file_path, fn_name, new_sig)
 
 
-def _restore_frozen_signature(file_path: Path, fn_name: str, skeleton_sig: str) -> bool:
-    return _reconstruct_splice.restore_frozen_signature(file_path, fn_name, skeleton_sig)
 
 
 def _splice_fn_body(file_path: Path, fn_name: str, new_body: str,
@@ -2135,10 +2109,6 @@ _prompts_runtime.bind(_prompts_runtime.PromptRuntimeDeps(
 ))
 
 
-def _build_dispatch_family_section(family: DispatchFamily) -> str:
-    """Shim: render via pipeline_core.prompts with the Settings-derived cap."""
-    return _build_dispatch_family_section_pure(
-        family, single_call_char_limit=SINGLE_CALL_CHAR_LIMIT)
 
 
 _SHUTDOWN_SENTINEL_PATH = Path("/tmp/pipeline_shutdown_on_finish")
@@ -2291,7 +2261,7 @@ def _build_test_reverse_map(
     src_dir: Path,
 ) -> dict[str, set[FnLocator]]:
     """P2: delegates to _attribution.build_test_reverse_map (logic relocated)."""
-    return _attribution.build_test_reverse_map(_ATTR_DEPS, test_files, src_dir)
+    return _attribution.build_test_reverse_map(_APP.attribution_deps, test_files, src_dir)
 
 
 def _filter_test_targets(frontier: Frontier, src_dir: Path) -> Frontier:
@@ -2310,7 +2280,7 @@ def _attribute_failures(
 ) -> tuple[Frontier, str]:
     """P2: delegates to _attribution.attribute_failures (logic relocated)."""
     return _attribution.attribute_failures(
-        _ATTR_DEPS, test_output, src_dir, recently_filled, test_reverse_map,
+        _APP.attribution_deps, test_output, src_dir, recently_filled, test_reverse_map,
         cluster_name, test_texts=test_texts)
 
 
@@ -2436,14 +2406,13 @@ def _phase_c_retrospective(
     """
     return _diagnose_phase_c(
         fn_name, sig_text, container, file_rel, cluster_name, last_body,
-        error_excerpt, fix_attempts, _PHASE_C_RETRO_DEPS,
+        error_excerpt, fix_attempts, _APP.phase_c_retro_deps,
         prior_retrospective=prior_retrospective, sibling_bodies=sibling_bodies,
         bound_methods_section=bound_methods_section,
     )
 
 
 # S3.9: PhaseCRetroDeps construction migrated into build_app; re-export by name.
-_PHASE_C_RETRO_DEPS = _APP.phase_c_retro_deps
 
 
 def _count_relevant_notes(fr_path: Path | None,
@@ -2772,14 +2741,14 @@ def _extract_tdd_frontier(
     test_output: str, src_dir: Path,
 ) -> Frontier:
     """P2: delegates to _attribution.extract_tdd_frontier (logic relocated)."""
-    return _attribution.extract_tdd_frontier(_ATTR_DEPS, test_output, src_dir)
+    return _attribution.extract_tdd_frontier(_APP.attribution_deps, test_output, src_dir)
 
 
 def _behavior_frontier(
     test_output: str, project_dir: Path, existing_test_files: set,
 ) -> "tuple[Frontier, dict[str, tuple[str, str]]]":
     """P2: delegates to _attribution.behavior_frontier (logic relocated)."""
-    return _attribution.behavior_frontier(_ATTR_DEPS, test_output, project_dir, existing_test_files)
+    return _attribution.behavior_frontier(_APP.attribution_deps, test_output, project_dir, existing_test_files)
 
 
 
@@ -2789,14 +2758,14 @@ def _compile_error_frontier(
     env: dict, timeout: int,
 ) -> Frontier:
     """P2: delegates to _attribution.compile_error_frontier (logic relocated)."""
-    return _attribution.compile_error_frontier(_ATTR_DEPS, output, project_dir, check_cmd, env, timeout)
+    return _attribution.compile_error_frontier(_APP.attribution_deps, output, project_dir, check_cmd, env, timeout)
 
 
 def _frontier_from_diags(
     diagnostics: list[Diagnostic], src_dir: Path,
 ) -> Frontier:
     """P2: delegates to _attribution.frontier_from_diags (logic relocated)."""
-    return _attribution.frontier_from_diags(_ATTR_DEPS, diagnostics, src_dir)
+    return _attribution.frontier_from_diags(_APP.attribution_deps, diagnostics, src_dir)
 
 
 def _strip_ansi(text: str) -> str:
@@ -2840,11 +2809,6 @@ def _enumerate_mods_via_extractor(src_dir: Path) -> list[ModRecord] | None:
     return _APP.structure.enumerate_mods(src_dir)  # P3-S2: via App port
 
 
-def _enumerate_consts_via_extractor(src_dir: Path) -> list[ConstRecord] | None:
-    """Invoke the syn-based extractor's --enumerate-consts subcommand: pub/private
-    `const` and `static` items (name, type, is_pub). Replaces regex scans of source
-    for `pub const`/`pub static` (Hard Rule: no regex on Rust source — use syn)."""
-    return _APP.structure.enumerate_consts(src_dir)  # P3-S2: via App port
 
 
 def _public_api_from_source(content: str) -> str:
@@ -2853,7 +2817,7 @@ def _public_api_from_source(content: str) -> str:
         content,
         enumerate_types=_enumerate_types_via_extractor,
         enumerate_fns=_enumerate_fns_via_extractor,
-        enumerate_consts=_enumerate_consts_via_extractor,
+        enumerate_consts=lambda sd: _APP.structure.enumerate_consts(sd),
     )
 
 
@@ -2997,7 +2961,6 @@ _state_path = _state_mod.state_path
 _read_state = _state_mod.read_state
 _write_state = _state_mod.write_state
 _mark_phase = _state_mod.mark_phase
-_set_current = _state_mod.set_current
 _phase_valid: Callable[[Path, str], bool] = _state_mod.phase_valid
 _log_state_summary = _state_mod.log_state_summary
 
@@ -3247,14 +3210,15 @@ _GEN_DOCS = ContextDocsAdapter(
     genesis_rules_read_fn=lambda pd, module_scope="*": genesis_rules_read(pd, module_scope=module_scope),
     extract_test_assertions_fn=lambda tf, mdr="": _extract_test_assertions(tf, mdr),
     format_api_surface_section_fn=lambda api: _format_api_surface_section(api),
-    split_api_surface_by_file_fn=lambda api: _split_api_surface_by_file(api),
+    split_api_surface_by_file_fn=lambda api: _domain_split_api_surface_by_file(api),
 )
 _GEN_CARGO = CargoBackendAdapter(
     run_fn=lambda cmd, cwd, env, timeout=180: _run_cargo(cmd, cwd, env, timeout),
     run_check_diag_fn=lambda cmd, cwd, env, timeout=180: _run_cargo_check_diag(cmd, cwd, env, timeout),
     build_test_cmd_fn=lambda stems, cluster: _build_test_cmd(stems, cluster),
     env_fn=lambda: _cargo_env(),
-    implicated_fns_fn=lambda out, tsd: _implicated_fns_from_cargo_errors(out, tsd),
+    implicated_fns_fn=lambda out, tsd: _implicated_fns_from_cargo_errors_impl(
+        out, tsd, enumerate_fns=_enumerate_fns_via_extractor),
     attribute_failures_fn=lambda to, sd, rf, trm, cn: _attribute_failures(to, sd, rf, trm, cn),
     filter_test_targets_fn=lambda fr, sd: _filter_test_targets(fr, sd),
 )
@@ -3384,23 +3348,12 @@ def _crate_entry_point(cargo_toml_path: Path, module_dir_rel: str,
     return next((c for c in candidates if c in file_path_set), None)
 
 
-def _split_api_surface_by_file(api_surface: str) -> list[tuple[str, str]]:
-    """Parse monolithic API surface doc into (path, full_section_text) pairs.
-    Regex-free domain scan (R8.5)."""
-    return _domain_split_api_surface_by_file(api_surface)
 
 
 
 
-def _is_proc_macro_crate(cargo_toml_text: str) -> bool:
-    """True if Cargo.toml declares `proc-macro = true`. (Regex kept in pipeline — Option 1.)"""
-    return _cargo_is_proc_macro(cargo_toml_text)
 
 
-def _count_rustc_error_codes(output: str) -> int:
-    """Count distinct rustc error codes (E0001 etc.) in build output.
-    (Tool-output regex kept in pipeline — Option 1.)"""
-    return len(set(rustc_error_codes(output or "", "E")))
 
 
 def _task2_generator_factory() -> Task2Generator:
@@ -3467,7 +3420,7 @@ def generate_fix_loop(
 ) -> tuple[bool, str]:
     """S28: body relocated to fix_loop.generate_fix_loop; this shim binds deps."""
     return _fix_loop.generate_fix_loop(
-        _GEN_FIX_LOOP_DEPS, project_dir, check_cmd, source_paths, existing_test_files,
+        _APP.gen_fix_loop_deps, project_dir, check_cmd, source_paths, existing_test_files,
         extra_context=extra_context, model=model, max_fix_attempts=max_fix_attempts,
         timeout=timeout, allowed_dir_prefix=allowed_dir_prefix, functional_req=functional_req,
         fr_path=fr_path, check_fn=check_fn)
@@ -3514,8 +3467,8 @@ _TASK2_DEPS = Task2Deps(
     read=read,
     generate_fix_loop=generate_fix_loop,
     store_prompt_content=_store_prompt_content,
-    is_proc_macro_crate=_is_proc_macro_crate,
-    count_error_codes=_count_rustc_error_codes,
+    is_proc_macro_crate=_cargo_is_proc_macro,
+    count_error_codes=lambda output: len(set(rustc_error_codes(output or "", "E"))),
     build_check_retries=BUILD_CHECK_RETRIES,
     build_max_stalls=int(os.getenv("TASK2_BUILD_MAX_STALLS", "2")),
     build_timeout=BUILD_TIMEOUT,
@@ -3598,7 +3551,7 @@ def task4(genesis_path, functional_req_path, test_output, iteration, output_dir,
     _emit("task.start", task="task4")  # debt#7: structured stage event
     # slice 5b: extracted to pipeline_core.application.tasks.task4; thin shim binding deps.
     return _task4_impl(
-        genesis_path, functional_req_path, test_output, iteration, output_dir, _TASK4_DEPS,
+        genesis_path, functional_req_path, test_output, iteration, output_dir, _APP.task4_deps,
         failure_type=failure_type, failure_log=failure_log,
         prev_pass_count=prev_pass_count, prev_test_output=prev_test_output,
         source_context=source_context, api_surface=api_surface,
@@ -3650,11 +3603,11 @@ def task1_static_audit(functional_req_path: Path, test_files: list) -> list[str]
 
 # Phase 3 S3 slice 1: genesis-audit deps now CONSTRUCTED in composition.build_app;
 # pipeline re-exports the name so call sites + tests are unchanged.
-_GENESIS_AUDIT_DEPS = _APP.genesis_audit_deps
+_GENESIS_AUDIT_DEPS = _APP.genesis_audit_deps  # smoke pin
 
 
 def task_genesis_audit(genesis_path: Path) -> bool:
-    return genesis_audit(genesis_path, _GENESIS_AUDIT_DEPS)
+    return genesis_audit(genesis_path, _APP.genesis_audit_deps)
 
 
 # ---------------------------------------------------------------------------
@@ -3684,7 +3637,6 @@ _TASK3_DEPS = Task3Deps(
     test_timeout=TEST_TIMEOUT,
 )
 # S3.7: Task4Deps construction migrated into build_app; re-export by name.
-_TASK4_DEPS = _APP.task4_deps
 
 
 def _describe_test_environment() -> str:
@@ -3706,14 +3658,8 @@ def _describe_test_environment() -> str:
 # S26: _COV_DEPS constructed standalone above (before _APP); also injected into build_app.
 
 
-def _run_tarpaulin(project_dir: Path, module_name: str) -> CoverageMeasurement:
-    # Thin shim until call sites migrate (slice 5).
-    return _covmod.run_tarpaulin(_COV_DEPS, project_dir, module_name)
 
 
-def _quick_file_coverage(project_dir: Path, module_name: str, rel_path: str) -> tuple[int, int] | None:
-    """Per-file coverage snapshot. Delegates to the active CoverageProvider."""
-    return _coverage_provider.measure_file(project_dir, module_name, rel_path)
 
 
 def _measure_coverage(project_dir: Path, module_name: str) -> CoverageMeasurement:
@@ -3750,9 +3696,6 @@ def _strip_gen_tests_decl_n(parent_text: str, pass_n: int) -> str:
     return _domain_strip_gen_tests_decl_n(parent_text, pass_n)
 
 
-def _error_signatures_from_output(cargo_output: str) -> frozenset:
-    """Stable rustc error signatures (R7: test_results.rustc_error_signatures)."""
-    return rustc_error_signatures(cargo_output)
 
 
 # Prelude imports injected into generated test modules when absent. Each row is
@@ -3770,29 +3713,16 @@ def _inject_allow_before_mod(block: str, allow_line: str, *, gen_only: bool) -> 
     return block[:opener[0]] + f"{allow_line}\n" + block[opener[0]:]
 
 
-def _inject_allow_before_gen_mod(block: str, allow_line: str) -> str:
-    return _inject_allow_before_mod(block, allow_line, gen_only=True)
-
-
-def _inject_allow_before_any_mod(block: str, allow_line: str) -> str:
-    return _inject_allow_before_mod(block, allow_line, gen_only=False)
 
 
 
 
-def _count_test_attrs(block: str) -> int:
-    """Count `#[test]` attrs (R7: domain.rust_scan.count_test_attrs)."""
-    return count_test_attrs(block)
 
 
-def _strip_trailing_file_tag(text: str) -> str:
-    """Strip a trailing `</FILE>` tag (R7: domain.text.strip_trailing_file_tag)."""
-    return strip_trailing_file_tag(text)
 
 
-def _has_nonempty_test_body(block: str) -> bool:
-    """True if the block has at least one `#[test]` fn with a non-trivial body."""
-    return has_nonempty_test_fn(block)
+
+
 
 
 
@@ -4069,72 +3999,11 @@ _FILE_CONSTRAINTS = FileConstraintsReader(
 # getter (mutable global); coverage provider as a value.
 
 # S28: deps for the relocated fix-loop body (fix_loop.generate_fix_loop).
-_GEN_FIX_LOOP_DEPS = _fix_loop.GenerateFixLoopDeps(
-    set_current=_set_current,
-    BUILD_TIMEOUT=BUILD_TIMEOUT,
-    FILE_FORMAT_INSTRUCTION=FILE_FORMAT_INSTRUCTION,
-    FixSession=FixSession,
-    FixUnitDeps=FixUnitDeps,
-    GenerateFixDeps=GenerateFixDeps,
-    MODEL=MODEL,
-    settings_now=lambda: SETTINGS,
-    SINGLE_CALL_CHAR_LIMIT=SINGLE_CALL_CHAR_LIMIT,
-    SOURCE_EXTENSIONS=SOURCE_EXTENSIONS,
-    ASK_CLIENT=_ASK_CLIENT,
-    FIX_ERR_CAP=_FIX_ERR_CAP,
-    FIX_THINKING_DIRECTIVE=_FIX_THINKING_DIRECTIVE,
-    FixCheckerAdapter=_FixCheckerAdapter,
-    FixModelAdapter=_FixModelAdapter,
-    FixPromptsAdapter=_FixPromptsAdapter,
-    FixSplicerAdapter=_FixSplicerAdapter,
-    FrontierBuilderAdapter=_FrontierBuilderAdapter,
-    REPO_SPEC_CAP_WIDE=_BUDGETS.repo_spec_wide,
-    SRC_SNIP_CAP=_BUDGETS.src_snippet,
-    TASK2_VERBOSITY_GUARD=_TASK2_VERBOSITY_GUARD,
-    TYPES_SECTION_CAP=_BUDGETS.types_section,
-    behavior_frontier=lambda *a, **k: _behavior_frontier(*a, **k),
-    cargo_env=_cargo_env,
-    categorize_compile_error=_categorize_compile_error,
-    collect_impl_blocks=lambda *a, **k: _collect_impl_blocks(*a, **k),
-    compile_error_frontier=lambda *a, **k: _compile_error_frontier(*a, **k),
-    derive_check_only_cmd=_derive_check_only_cmd,
-    emit=lambda *a, **k: _emit(*a, **k),
-    emit_per_file_test_overview=_emit_per_file_test_overview,
-    # late-bind: the e2e harness monkeypatches pipeline._enumerate_fns_via_extractor,
-    # so resolve it from the module global at call time (not frozen at construction).
-    enumerate_fns_via_extractor=lambda *a, **k: _enumerate_fns_via_extractor(*a, **k),
-    enumerate_types=lambda *a, **k: _enumerate_types_via_extractor(*a, **k),
-    types_section_for_fix=lambda *a, **k: _FIX_CONTEXT.types_section_for_fix(*a, **k),
-    check_stop=lambda ctx: _check_graceful_stop(ctx),
-    extract_tdd_frontier=lambda *a, **k: _extract_tdd_frontier(*a, **k),
-    filter_test_targets=_filter_test_targets,
-    fix_diag=_fix_diag,
-    frontier_from_diags=lambda *a, **k: _frontier_from_diags(*a, **k),
-    gotchas_for_error=_gotchas_for_error,
-    gotchas_summary=_gotchas_summary,
-    is_pub_fn=_is_pub_fn,
-    locate_fn=_locate_fn,
-    log=_log,
-    parse_cmd=_parse_cmd,
-    render_impl_block=_render_impl_block,
-    repo_spec_section=_repo_spec_section,
-    restore_frozen_signature=_restore_frozen_signature,
-    run_cargo_check_diag=lambda *a, **k: _run_cargo_check_diag(*a, **k),
-    splice_fn_body=_splice_fn_body,
-    splice_fn_with_where=_splice_fn_with_where,
-    strip_ansi=_strip_ansi,
-    tag_block=_tag_block,
-    whole_tree_retrospective=_whole_tree_retrospective,
-    build_whole_file_fix_prompt=build_whole_file_fix_prompt,
-    compile_patterns_write=compile_patterns_write,
-    extract_files=extract_files,
-    is_compiler_output_line=is_compiler_output_line,
-    run_generate_fix=run_generate_fix,
-    write=write,
-)
+# P3-S3 (step 31): GenerateFixLoopDeps constructed in build_app (App.gen_fix_loop_deps).
+
 
 _TASK0C_DEPS = Task0cDeps(
-    BUILD_TIMEOUT=BUILD_TIMEOUT, COVERAGE_TARGET=COVERAGE_AUGMENTATION_TARGET, coverage_ignore_pragma=COVERAGE_IGNORE_PRAGMA, TASK0C_PROMPT_CHAR_CAP=TASK0C_PROMPT_CHAR_CAP, FIX_ERR_CAP=_FIX_ERR_CAP, SIBLING_CAP=_BUDGETS.sibling, SRC_SNIP_CAP=_BUDGETS.src_snippet, TASK0C_FIX_THINKING_DIRECTIVE=_TASK0C_FIX_THINKING_DIRECTIVE, TASK0C_MODEL=_TASK0C_MODEL, TASK0C_THINKING_DIRECTIVE=_TASK0C_THINKING_DIRECTIVE, WORKING_CAP=_BUDGETS.working, annotate_uncovered=_annotate_uncovered, block_is_prose=_block_is_prose, build_gen_tests_decl=_build_gen_tests_decl, guard=_guard, cargo_env=_cargo_env, cluster_gate_for=_cluster_gate_for_sibling, condense_rust_to_signatures=_condense_rust_to_signatures, count_test_attrs=_count_test_attrs, derive_gentest_prelude=_derive_gentest_prelude, describe_test_environment=_describe_test_environment, error_signatures_from_output=_error_signatures_from_output, extract_branch_guard=_extract_branch_guard, extract_gen_tests_body=_extract_gen_tests_body, extract_public_symbols=_extract_public_symbols, extract_uncovered_functions=_extract_uncovered_functions, filter_cfg_excluded_lines=_filter_cfg_excluded_lines, filter_cfg_incompatible_lines=_filter_cfg_incompatible_lines, flags_unreachable=_flags_unreachable, gen_tests_path=_gen_tests_path, has_nonempty_test_body=_has_nonempty_test_body, inject_allow_before_any_mod=_inject_allow_before_any_mod, inject_allow_before_gen_mod=_inject_allow_before_gen_mod, inject_gen_prelude_imports=_inject_gen_prelude_imports, is_gen_tests_file=_is_gen_tests_file, is_structural_line=_is_structural_line, load_file_constraints=_FILE_CONSTRAINTS.load, type_signals_write=type_signals_write, mark_phase=_mark_phase, match_gen_tests_sibling=_match_gen_tests_sibling, next_gen_tests_n=_next_gen_tests_n, nightly_rules_for_cluster=_nightly_rules_for_cluster, parse_attempt_number=_parse_attempt_number, parse_retrospective_categories=_parse_retrospective_categories, partition_uncovered_lines=_partition_uncovered_lines, prelude_import_names=_prelude_import_names, quick_file_coverage=_quick_file_coverage, read_all_gen_tests=_read_all_gen_tests, read_state=_read_state, revert_gen_tests_pass=_revert_gen_tests_pass, select_relevant_siblings=_select_relevant_siblings, set_current=_set_current, source_hash=_source_hash, strip_all_gen_tests_artifacts=_strip_all_gen_tests_artifacts, strip_gen_tests_decl_n=_strip_gen_tests_decl_n, strip_gen_tests_decls=_strip_gen_tests_decls, strip_trailing_file_tag=_strip_trailing_file_tag, mutation_harden_file=lambda *a, **k: _MUTATION.harden_file(*a, **k), gen_tests_siblings=_gen_tests_siblings, test_augmentor_factory=_test_augmentor_factory, ask=_ASK_CLIENT.ask, extract_files=extract_files, extract_test_mod=extract_test_mod, generate_fix_loop=generate_fix_loop, generate_in_parallel=generate_in_parallel, is_test_file=is_test_file, write=write,
+    BUILD_TIMEOUT=BUILD_TIMEOUT, COVERAGE_TARGET=COVERAGE_AUGMENTATION_TARGET, coverage_ignore_pragma=COVERAGE_IGNORE_PRAGMA, TASK0C_PROMPT_CHAR_CAP=TASK0C_PROMPT_CHAR_CAP, FIX_ERR_CAP=_FIX_ERR_CAP, SIBLING_CAP=_BUDGETS.sibling, SRC_SNIP_CAP=_BUDGETS.src_snippet, TASK0C_FIX_THINKING_DIRECTIVE=_TASK0C_FIX_THINKING_DIRECTIVE, TASK0C_MODEL=_TASK0C_MODEL, TASK0C_THINKING_DIRECTIVE=_TASK0C_THINKING_DIRECTIVE, WORKING_CAP=_BUDGETS.working, annotate_uncovered=_annotate_uncovered, block_is_prose=_block_is_prose, build_gen_tests_decl=_build_gen_tests_decl, guard=_guard, cargo_env=_cargo_env, cluster_gate_for=_cluster_gate_for_sibling, condense_rust_to_signatures=_condense_rust_to_signatures, count_test_attrs=count_test_attrs, derive_gentest_prelude=_derive_gentest_prelude, describe_test_environment=_describe_test_environment, error_signatures_from_output=rustc_error_signatures, extract_branch_guard=_extract_branch_guard, extract_gen_tests_body=_extract_gen_tests_body, extract_public_symbols=_extract_public_symbols, extract_uncovered_functions=_extract_uncovered_functions, filter_cfg_excluded_lines=_filter_cfg_excluded_lines, filter_cfg_incompatible_lines=_filter_cfg_incompatible_lines, flags_unreachable=_flags_unreachable, gen_tests_path=_gen_tests_path, has_nonempty_test_body=has_nonempty_test_fn, inject_allow_before_any_mod=functools.partial(_inject_allow_before_mod, gen_only=False), inject_allow_before_gen_mod=functools.partial(_inject_allow_before_mod, gen_only=True), inject_gen_prelude_imports=_inject_gen_prelude_imports, is_gen_tests_file=_is_gen_tests_file, is_structural_line=_is_structural_line, load_file_constraints=_FILE_CONSTRAINTS.load, type_signals_write=type_signals_write, mark_phase=_mark_phase, match_gen_tests_sibling=_match_gen_tests_sibling, next_gen_tests_n=_next_gen_tests_n, nightly_rules_for_cluster=_nightly_rules_for_cluster, parse_attempt_number=_parse_attempt_number, parse_retrospective_categories=_parse_retrospective_categories, partition_uncovered_lines=_partition_uncovered_lines, prelude_import_names=_prelude_import_names, quick_file_coverage=_coverage_provider.measure_file, read_all_gen_tests=_read_all_gen_tests, read_state=_read_state, revert_gen_tests_pass=_revert_gen_tests_pass, select_relevant_siblings=_select_relevant_siblings, set_current=_set_current, source_hash=_source_hash, strip_all_gen_tests_artifacts=_strip_all_gen_tests_artifacts, strip_gen_tests_decl_n=_strip_gen_tests_decl_n, strip_gen_tests_decls=_strip_gen_tests_decls, strip_trailing_file_tag=strip_trailing_file_tag, mutation_harden_file=lambda *a, **k: _MUTATION.harden_file(*a, **k), gen_tests_siblings=_gen_tests_siblings, test_augmentor_factory=_test_augmentor_factory, ask=_ASK_CLIENT.ask, extract_files=extract_files, extract_test_mod=extract_test_mod, generate_fix_loop=generate_fix_loop, generate_in_parallel=generate_in_parallel, is_test_file=is_test_file, write=write,
     subprocess=subprocess, get_current_cluster=_SCOPE.get_active,
     coverage_provider=_coverage_provider, check_stop=_check_graceful_stop,
 )
@@ -4216,9 +4085,9 @@ _RUN_DEPS = _orchestrator.RunDeps(
     SETTINGS=SETTINGS,
     run_state=_RUN, scope=_SCOPE, augment_store=_AUGMENT_STORE,
     cluster_augmentor=_CLUSTER_AUGMENTOR, strip_bake_deps=_STRIP_BAKE_DEPS,
-    ws_scan_deps=_WS_SCAN_DEPS, phase_subcommand_deps=_PHASE_SUBCOMMAND_DEPS,
+    ws_scan_deps=_APP.ws_scan_deps, phase_subcommand_deps=_PHASE_SUBCOMMAND_DEPS,
     requirements_phase=_REQUIREMENTS_PHASE, module_reconstructor=_MODULE_RECONSTRUCTOR,
-    log=_log, emit=_emit, setup_workspace=setup_workspace, is_git_repo=_is_git_repo,
+    log=_log, emit=_emit, setup_workspace=setup_workspace, is_git_repo=_wsmod.is_git_repo,
     init_log=init_log, init_events=init_events, start_audit_thread=_start_audit_thread,
     quarantine_broken_gen_tests=_quarantine_broken_gen_tests, git_file_hash=_wsmod.git_file_hash,
     ensure_vllm_ready=_vllm_bootstrap.ensure_vllm_ready, git_clean_reset=git_clean_reset,
@@ -4233,7 +4102,7 @@ _RUN_DEPS = _orchestrator.RunDeps(
     task0_project_profile=task0_project_profile, task0_project_context=task0_project_context,
     task0b_discovery=task0b_discovery, commit_and_mark=_commit_and_mark,
     dependency_graph_factory=_dependency_graph_factory, load_locked_modules=load_locked_modules,
-    run_tarpaulin=_run_tarpaulin, strip_and_bake_module=_strip_and_bake_module,
+    run_tarpaulin=functools.partial(_covmod.run_tarpaulin, _COV_DEPS), strip_and_bake_module=_strip_and_bake_module,
     task1_static_audit=task1_static_audit, scan_workspace_structure=scan_workspace_structure,
     infer_build_check_command=_infer_build_check_command,
     wl_save_gen_tests_siblings=_wl_save_gen_tests_siblings,
