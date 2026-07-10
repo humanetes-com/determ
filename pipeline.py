@@ -142,7 +142,7 @@ from pipeline_core.adapters.task2_roles import (
     SourceScanAdapter,
     WorkspaceAdapter,
 )
-from pipeline_core.adapters.telemetry import JsonlEventEmitter, LogTelemetry
+from pipeline_core.adapters.telemetry import LogTelemetry
 from pipeline_core.adapters.telemetry import emit_per_file_test_overview as _emit_per_file_test_overview
 from pipeline_core.adapters.workspace_lifecycle import clean_state as _clean_state_impl
 from pipeline_core.adapters.workspace_restore import RestoreFromAugmented
@@ -798,14 +798,16 @@ def _store_prompt_content(text: str) -> dict[str, int | str]:
 # C-finale: the events.jsonl sink + `_phase` relocated to
 # adapters.telemetry.JsonlEventEmitter; the emitter holds a live ref to
 # `_RUN_CONTEXT` (mutated by init_events). Shims keep every call site stable.
-_EVENT_EMITTER = JsonlEventEmitter(lambda: _EVENTS_LOG, _RUN_CONTEXT)
+# P3-S2/S3: the emitter is built in build_app (App.emitter) from these two
+# late-bound residents; the shims below stay as the (test-patched) seam names.
 
 
 def _emit(event: str, **fields) -> None:
-    _EVENT_EMITTER.emit(event, **fields)
+    _APP.emitter.emit(event, **fields)
 
 
-_phase = _EVENT_EMITTER.phase
+def _phase(*a, **k):
+    return _APP.emitter.phase(*a, **k)
 
 
 # Set once per run by _register_run; used to build the from-scratch disclaimer.
@@ -1547,6 +1549,23 @@ _HELPERS = _Helpers(
     prompt_budget=lambda *a, **k: prompt_budget(*a, **k),
     ask_retrospective=lambda *a, **k: _ask_retrospective(*a, **k),
     ask_per_fn_body=lambda *a, **k: _ask_per_fn_body(*a, **k),
+    extract_fn_blocks=lambda *a, **k: _extract_fn_blocks(*a, **k),
+    format_skeleton_index_for_cluster=lambda *a, **k: _format_skeleton_index_for_cluster(*a, **k),
+    leaf_first_group_order=lambda *a, **k: _leaf_first_group_order(*a, **k),
+    load_skeleton_files=lambda *a, **k: _load_skeleton_files(*a, **k),
+    merge_fn_blocks_into_disk=lambda *a, **k: _merge_fn_blocks_into_disk(*a, **k),
+    check_graceful_stop=lambda *a, **k: _check_graceful_stop(*a, **k),
+    scan_stub_records_for_cluster=lambda *a, **k: _scan_unimplemented_records_for_cluster(*a, **k),
+    collect_impl_blocks_for_cluster=lambda *a, **k: _collect_impl_blocks_for_cluster(*a, **k),
+    converge_in_cluster=lambda *a, **k: _converge_in_cluster(*a, **k),
+    count_relevant_notes=lambda *a, **k: _count_relevant_notes(*a, **k),
+    effective_stalls=lambda *a, **k: _effective_stalls(*a, **k),
+    order_frontier=lambda *a, **k: _order_frontier(*a, **k),
+    record_tdd_regression=lambda *a, **k: _record_tdd_regression(*a, **k),
+    reset_exhaustion_flags=lambda *a, **k: _reset_exhaustion_flags(*a, **k),
+    run_cargo=lambda *a, **k: _run_cargo(*a, **k),
+    scan_unimplemented_for_cluster=lambda *a, **k: _scan_unimplemented_for_cluster(*a, **k),
+    task2_fill_fns_one_by_one=lambda *a, **k: _task2_fill_fns_one_by_one(*a, **k),
     extract_and_store_rules=lambda *a, **k: _task4_extract_and_store_rules(*a, **k),
     enumerate_types=lambda *a, **k: _enumerate_types_via_extractor(*a, **k),
     enumerate_fns=lambda *a, **k: _enumerate_fns_via_extractor(*a, **k),
@@ -1631,7 +1650,7 @@ _FILL_PROMPT = PromptContextAdapter(
 )
 _FILL_WS = WorkspaceModelAdapter(
     structure=_STRUCTURE,
-    scan_stub_records_fn=lambda tsd, cluster: _scan_unimplemented_records_for_cluster(tsd, cluster),
+    scan_stub_records_fn=lambda tsd, cluster: _APP.scan_stub_records_for_cluster(tsd, cluster),
     scan_stub_tuples_fn=lambda tsd, cluster: _scan_unimplemented_for_cluster(tsd, cluster),
     collect_impl_blocks_fn=lambda sd: _collect_impl_blocks(sd),
     fn_container_index_fn=lambda sd: _fn_container_index(sd),
@@ -1697,7 +1716,9 @@ _coverage_provider: _covmod.CoverageProvider = _covmod.make_coverage_provider(
     COVERAGE_BACKEND, _COV_DEPS)
 _APP: _App = _build_app(ADAPTERS, SETTINGS, _RUN, _SCOPE, _PORTS, _CFG, _ROLES, _HELPERS,
                   _STRUCTURE, _FILL_ROLES, _TELEMETRY, _AUGMENT_ROLES,
-                  _COV_DEPS, _coverage_provider)
+                  _COV_DEPS, _coverage_provider,
+                  ask_client=_ASK_CLIENT,
+                  events_log=lambda: _EVENTS_LOG, run_context=_RUN_CONTEXT)
 # S3.5/6/10: these deps are consumed only inside `def` bodies (lazy), so their
 # construction migrates into build_app and they're re-exported here by name.
 _WS_DEPS = _APP.ws_deps
@@ -2411,28 +2432,11 @@ def _count_relevant_notes(fr_path: Path | None,
     return section.count("\n- ") if section else 0
 
 
-_PHASE_C_TDD_DEPS = _phase_c_tdd.PhaseCTddDeps(
-    attribute_failures=lambda *a, **k: _attribute_failures(*a, **k),
-    build_test_reverse_map=lambda *a, **k: _build_test_reverse_map(*a, **k),
-    filter_test_targets=lambda *a, **k: _filter_test_targets(*a, **k),
-    check_graceful_stop=lambda *a, **k: _check_graceful_stop(*a, **k),
-    converge_in_cluster=lambda *a, **k: _converge_in_cluster(*a, **k),
-    count_relevant_notes=lambda *a, **k: _count_relevant_notes(*a, **k),
-    effective_stalls=lambda *a, **k: _effective_stalls(*a, **k),
-    emit=lambda *a, **k: _emit(*a, **k),
-    log=lambda m: _log(m),
-    order_frontier=lambda *a, **k: _order_frontier(*a, **k),
-    record_tdd_regression=lambda *a, **k: _record_tdd_regression(*a, **k),
-    reset_exhaustion_flags=lambda *a, **k: _reset_exhaustion_flags(*a, **k),
-    run_cargo=lambda *a, **k: _run_cargo(*a, **k),
-    scan_unimplemented_for_cluster=lambda *a, **k: _scan_unimplemented_for_cluster(*a, **k),
-    scan_unimplemented_functions=lambda *a, **k: _scan_unimplemented_functions(*a, **k),
-    task2_fill_fns_one_by_one=lambda *a, **k: _task2_fill_fns_one_by_one(*a, **k),
-)
+# P3-S3: PhaseCTddDeps constructed in build_app (App.phase_c_tdd_deps).
 # Typed boundary (plan #77 T1): partial binds only the deps — the fully typed
 # keyword signature lives on the engine fn itself, no **kwargs hop to hide it.
 _run_phase_c_tdd: "Callable[..., ClusterFillResult]" = functools.partial(
-    _phase_c_tdd.run_phase_c_tdd, _PHASE_C_TDD_DEPS)
+    _phase_c_tdd.run_phase_c_tdd, _APP.phase_c_tdd_deps)
 
 
 # Soft cap on stub members per impl block. Larger blocks fall back to the
@@ -2475,7 +2479,7 @@ _IMPL_FILL_DEPS = _impl_fill.ImplFillDeps(
     check_graceful_stop=lambda *a, **k: _check_graceful_stop(*a, **k),
     cluster_filter_type_methods=lambda *a, **k: _cluster_filter_type_methods(*a, **k),
     collect_crate_macros=lambda *a, **k: _collect_crate_macros(*a, **k),
-    collect_impl_blocks_for_cluster=lambda *a, **k: _collect_impl_blocks_for_cluster(*a, **k),
+    collect_impl_blocks_for_cluster=lambda *a, **k: _APP.collect_impl_blocks_for_cluster(*a, **k),
     collect_sibling_filled_bodies=lambda *a, **k: _collect_sibling_filled_bodies(*a, **k),
     compute_cluster_macro_invariants=lambda *a, **k: _compute_cluster_macro_invariants(*a, **k),
     detect_crate_no_std_invariant=lambda *a, **k: _detect_crate_no_std_invariant(*a, **k),
@@ -2500,7 +2504,7 @@ _IMPL_FILL_DEPS = _impl_fill.ImplFillDeps(
     run_cargo_check_diag=lambda *a, **k: _run_cargo_check_diag(*a, **k),
     save_retrospectives=lambda *a, **k: _save_retrospectives(*a, **k),
     scan_unimplemented_for_cluster=lambda *a, **k: _scan_unimplemented_for_cluster(*a, **k),
-    scan_unimplemented_records_for_cluster=lambda *a, **k: _scan_unimplemented_records_for_cluster(*a, **k),
+    scan_unimplemented_records_for_cluster=lambda *a, **k: _APP.scan_stub_records_for_cluster(*a, **k),
     splice_fn_with_where=lambda *a, **k: _splice_fn_with_where(*a, **k),
     splice_lock_for=lambda *a, **k: _splice_lock_for(*a, **k),
     types_section_for_fix=lambda *a, **k: _FIX_CONTEXT.types_section_for_fix(*a, **k),
@@ -2611,23 +2615,11 @@ def _task2_fill_fns_one_by_one(
 def _task2_fill_groups(skeleton_dir, target_src_dir, groups, project_dir, **kwargs):
     """P4: delegates to application.reconstruct.group_fill (logic relocated)."""
     return _group_fill.task2_fill_groups(
-        _GROUP_FILL_DEPS, skeleton_dir=skeleton_dir, target_src_dir=target_src_dir,
+        _APP.group_fill_deps, skeleton_dir=skeleton_dir, target_src_dir=target_src_dir,
         groups=groups, project_dir=project_dir, **kwargs)
 
 
-_GROUP_FILL_DEPS = _group_fill.GroupFillDeps(
-    log=lambda m: _log(m),
-    ask=_ASK_CLIENT.ask,
-    extract_fn_blocks=lambda *a, **k: _extract_fn_blocks(*a, **k),
-    format_skeleton_index_for_cluster=lambda *a, **k: _format_skeleton_index_for_cluster(*a, **k),
-    leaf_first_group_order=lambda *a, **k: _leaf_first_group_order(*a, **k),
-    load_skeleton_files=lambda *a, **k: _load_skeleton_files(*a, **k),
-    merge_fn_blocks_into_disk=lambda *a, **k: _merge_fn_blocks_into_disk(*a, **k),
-    scan_unimplemented_functions=lambda *a, **k: _scan_unimplemented_functions(*a, **k),
-    single_call_char_limit=SINGLE_CALL_CHAR_LIMIT,
-    genesis_cap=_BUDGETS.genesis,
-    task2_model=_TASK2_MODEL,
-)
+# P3-S3: GroupFillDeps constructed in build_app (App.group_fill_deps).
 
 
 

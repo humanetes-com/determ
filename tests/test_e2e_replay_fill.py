@@ -17,7 +17,7 @@ import pipeline
 from pipeline_core.domain.enums import FillUnit
 from tests.cargo_cache import CargoCache
 from tests.cassette import _sha, install_cassette
-from tests.harness import install_fake_extractor
+from tests.harness import install_cargo_runner, install_cluster_scan, install_fake_extractor
 
 STUB = "pub fn answer() -> u32 {\n    unimplemented!()\n}\n"
 OK_RUN = (0, "test result: ok. 1 passed; 0 failed")
@@ -34,7 +34,7 @@ def _force_fn_unit(monkeypatch) -> None:
     # setup to test_e2e_fill_loop, so this exercises the same real engine path.
     monkeypatch.setattr(pipeline, "SETTINGS",
                         dataclasses.replace(pipeline.SETTINGS, phase_c_fill_unit=FillUnit.FN))
-    monkeypatch.setattr(pipeline, "_scan_unimplemented_records_for_cluster", lambda *a, **k: None)
+    install_cluster_scan(monkeypatch, stub_records=lambda *a, **k: None)
     install_fake_extractor(monkeypatch, fns=None, types=[])
 
 
@@ -57,8 +57,8 @@ def test_replay_reproduces_real_fill_engine(tmp_path, monkeypatch) -> None:
 
     monkeypatch.setattr(pipeline, "_ask_raw", rec_ask)
     rec = CargoCache(record=True)
-    monkeypatch.setattr(pipeline, "_run_cargo", rec.wrap(lambda *a, **k: OK_RUN))
-    monkeypatch.setattr(pipeline, "_run_cargo_check_diag", rec.wrap_check(lambda *a, **k: (0, "", [])))
+    install_cargo_runner(monkeypatch, run=rec.wrap(lambda *a, **k: OK_RUN),
+                         check_diag=rec.wrap_check(lambda *a, **k: (0, "", [])))
 
     res1 = _run(_ws(tmp_path / "rec"))
     fill1 = (tmp_path / "rec" / "src" / "lib.rs").read_text()
@@ -73,8 +73,8 @@ def test_replay_reproduces_real_fill_engine(tmp_path, monkeypatch) -> None:
     def boom(*a, **k):
         raise AssertionError("real cargo ran during replay")
 
-    monkeypatch.setattr(pipeline, "_run_cargo", rep.wrap(boom))
-    monkeypatch.setattr(pipeline, "_run_cargo_check_diag", rep.wrap_check(boom))
+    install_cargo_runner(monkeypatch, run=rep.wrap(boom),
+                         check_diag=rep.wrap_check(boom))
 
     res2 = _run(_ws(tmp_path / "rep"))
     fill2 = (tmp_path / "rep" / "src" / "lib.rs").read_text()
@@ -94,8 +94,8 @@ def test_prompt_change_is_a_precise_cassette_miss(tmp_path, monkeypatch) -> None
         return asks[_sha(prompt)]
 
     monkeypatch.setattr(pipeline, "_ask_raw", rec_ask)
-    monkeypatch.setattr(pipeline, "_run_cargo", lambda *a, **k: OK_RUN)
-    monkeypatch.setattr(pipeline, "_run_cargo_check_diag", lambda *a, **k: (0, "", []))
+    install_cargo_runner(monkeypatch, run=lambda *a, **k: OK_RUN,
+                         check_diag=lambda *a, **k: (0, "", []))
     _run(_ws(tmp_path / "rec"))                              # record the `answer` prompt
 
     # Replay against a CHANGED stub: a different fn → a different per-fn prompt → its

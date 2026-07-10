@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pipeline
 from pipeline_core.domain.models import FnRecord, ImplBlock
-from tests.harness import diag, install_fake_extractor, install_scripted_cargo
+from tests.harness import diag, install_cluster_scan, install_fake_extractor, install_scripted_cargo
 
 IMPL_LIB = """pub struct Foo { tag: u32 }
 
@@ -51,10 +51,8 @@ def _setup(monkeypatch, tmp_path: Path) -> Path:
     # B3 is env-driven and .env sets it ON for live runs — pin it OFF here so
     # the revert-path tests are environment-independent; the B3 test pins it ON.
     monkeypatch.setenv("PHASE_C_KEEP_NONREGRESSING", "0")
-    monkeypatch.setattr(pipeline, "_collect_impl_blocks_for_cluster",
-                        lambda *a, **k: [_block()])
-    monkeypatch.setattr(pipeline, "_scan_unimplemented_records_for_cluster",
-                        lambda *a, **k: None)
+    install_cluster_scan(monkeypatch, impl_blocks=lambda *a, **k: [_block()])
+    install_cluster_scan(monkeypatch, stub_records=lambda *a, **k: None)
     # fns passes through to the REAL reader (these tests exercise the syn
     # extractor's record-based splice); only types/dispatch are stubbed.
     install_fake_extractor(
@@ -225,8 +223,7 @@ def test_refill_only_block_reaches_llm_and_splices_with_allow_nonstub(
     from pipeline_core.domain.models import FnLocator
     ws = _setup(monkeypatch, tmp_path)
     (ws / "src" / "lib.rs").write_text(IMPL_LIB_WRONG_KIND)
-    monkeypatch.setattr(pipeline, "_collect_impl_blocks_for_cluster",
-                        lambda *a, **k: [_refill_block()])
+    install_cluster_scan(monkeypatch, impl_blocks=lambda *a, **k: [_refill_block()])
     _install_model(monkeypatch, [RESPONSE_KIND_ONLY])
     install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
     res = pipeline._phase_c_fill_impl_blocks(
@@ -246,8 +243,7 @@ def test_block_with_no_refill_target_is_not_collected(monkeypatch, tmp_path):
     # test-failing → no refill_members → the block stays non-viable, no LLM call.
     ws = _setup(monkeypatch, tmp_path)
     (ws / "src" / "lib.rs").write_text(IMPL_LIB_WRONG_KIND)
-    monkeypatch.setattr(pipeline, "_collect_impl_blocks_for_cluster",
-                        lambda *a, **k: [_refill_block()])
+    install_cluster_scan(monkeypatch, impl_blocks=lambda *a, **k: [_refill_block()])
     def _no_call(*_a, **_k):
         raise AssertionError("model must not be asked without a refill target")
     monkeypatch.setattr(pipeline, "_ask_raw", _no_call)
@@ -272,8 +268,7 @@ def test_already_complete_block_skips_llm_call(monkeypatch, tmp_path):
     ws = _setup(monkeypatch, tmp_path)
     (ws / "src" / "lib.rs").write_text(IMPL_LIB_FILLED)
     # Fresh scan authority: no stubs anywhere (empty list ≠ None).
-    monkeypatch.setattr(pipeline, "_scan_unimplemented_records_for_cluster",
-                        lambda *a, **k: [])
+    install_cluster_scan(monkeypatch, stub_records=lambda *a, **k: [])
     def _no_call(*_a, **_k):
         raise AssertionError("model must not be asked for a complete block")
     monkeypatch.setattr(pipeline, "_ask_raw", _no_call)
@@ -442,12 +437,10 @@ def _two_blocks() -> list[ImplBlock]:
 def test_file_first_fills_multi_block_file_in_one_call(monkeypatch, tmp_path):
     ws = _setup(monkeypatch, tmp_path)
     (ws / "src" / "lib.rs").write_text(IMPL_LIB_TWO)
-    monkeypatch.setattr(pipeline, "_collect_impl_blocks_for_cluster",
-                        lambda *a, **k: _two_blocks())
+    install_cluster_scan(monkeypatch, impl_blocks=lambda *a, **k: _two_blocks())
     # Fresh scan authority: after the file pass everything is filled, so the
     # per-block loop must SKIP both blocks (no extra LLM calls counted).
-    monkeypatch.setattr(pipeline, "_scan_unimplemented_records_for_cluster",
-                        lambda *a, **k: [])
+    install_cluster_scan(monkeypatch, stub_records=lambda *a, **k: [])
     _install_model(monkeypatch, [RESPONSE_TWO])
     install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
     res = _run(ws)
@@ -461,8 +454,7 @@ def test_file_first_reverts_on_compile_failure_then_blocks_take_over(
         monkeypatch, tmp_path):
     ws = _setup(monkeypatch, tmp_path)
     (ws / "src" / "lib.rs").write_text(IMPL_LIB_TWO)
-    monkeypatch.setattr(pipeline, "_collect_impl_blocks_for_cluster",
-                        lambda *a, **k: _two_blocks())
+    install_cluster_scan(monkeypatch, impl_blocks=lambda *a, **k: _two_blocks())
     _install_model(monkeypatch, [RESPONSE_TWO])
     # File-first is one shot (an immediate retry with the same limited
     # context just reproduces the same mistake — retry investment goes to

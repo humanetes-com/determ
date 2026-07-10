@@ -18,6 +18,7 @@ from typing import Any
 
 from pipeline_core.adapters import Adapters
 from pipeline_core.adapters.artifacts import WorkspaceArtifacts, load_pub_items_manifest
+from pipeline_core.adapters.ask_client import AskClient
 from pipeline_core.adapters.augment_engine import CargoAugmentEngine
 from pipeline_core.adapters.augment_store import FileAugmentStore
 from pipeline_core.adapters.coverage import CoverageDeps, CoverageProvider
@@ -46,7 +47,7 @@ from pipeline_core.adapters.reconstruct_roles import (
 )
 from pipeline_core.adapters.state import mark_phase, phase_valid, set_current
 from pipeline_core.adapters.structure import CliStructureReader  # noqa: F401 (re-export for composition callers)
-from pipeline_core.adapters.telemetry import LogTelemetry
+from pipeline_core.adapters.telemetry import JsonlEventEmitter, LogTelemetry
 from pipeline_core.adapters.test_runner import CallableTestRunner
 from pipeline_core.adapters.workspace import WorkspaceDeps
 from pipeline_core.adapters.workspace_files import lock_module
@@ -56,6 +57,7 @@ from pipeline_core.application.gen_tests_reattach import ReattachDeps
 from pipeline_core.application.orchestrator import LockDeps
 from pipeline_core.application.reconstruct.cargo_runner import PortBoundCargoRunner
 from pipeline_core.application.reconstruct.failure_analysis import FailureAnalysisStep
+from pipeline_core.application.reconstruct.group_fill import GroupFillDeps
 from pipeline_core.application.reconstruct.module_reconstructor import ModuleReconstructor
 from pipeline_core.application.reconstruct.per_fn_retry import (
     RetryDeps,
@@ -64,6 +66,7 @@ from pipeline_core.application.reconstruct.per_fn_retry import (
     Task3Enumerate,
     Task3RetryDeps,
 )
+from pipeline_core.application.reconstruct.phase_c_tdd import PhaseCTddDeps
 from pipeline_core.application.reconstruct.reconstruction_step import ReconstructionStep
 from pipeline_core.application.reconstruct.requirements_phase import RequirementsPhase
 from pipeline_core.application.reconstruct.retrospective import PhaseCRetroDeps
@@ -74,6 +77,7 @@ from pipeline_core.application.tasks.task4 import Task4Deps
 from pipeline_core.application.validate import Task2CheckerDeps
 from pipeline_core.domain.cluster_scope import ClusterScope
 from pipeline_core.domain.models import TypeRecord
+from pipeline_core.domain.prompt_budget import PromptBudgets
 from pipeline_core.domain.run_state import RunState
 from pipeline_core.io import read, write
 from pipeline_core.ports.cargo_runner import CargoRunner as CargoRunnerPort
@@ -165,6 +169,27 @@ class Helpers:
     # The per-fn conversation protocol (prompt → body/pull-request) — the
     # PromptContext role's model seam, routed through App (P3-S2 llm boundary).
     ask_per_fn_body: Callable[..., tuple[str | None, str]]
+    # Group-fill leaf collaborators (P3-S3, GroupFillDeps construction):
+    extract_fn_blocks: Callable[..., Any]
+    format_skeleton_index_for_cluster: Callable[..., Any]
+    leaf_first_group_order: Callable[..., Any]
+    load_skeleton_files: Callable[..., Any]
+    merge_fn_blocks_into_disk: Callable[..., Any]
+    # Phase-C TDD driver collaborators (P3-S3, PhaseCTddDeps construction;
+    # attribute_failures/build_test_reverse_map/filter_test_targets pre-exist
+    # below in the S27 group):
+    check_graceful_stop: Callable[..., Any]
+    scan_stub_records_for_cluster: Callable[..., Any]
+    collect_impl_blocks_for_cluster: Callable[..., Any]
+    converge_in_cluster: Callable[..., Any]
+    count_relevant_notes: Callable[..., Any]
+    effective_stalls: Callable[..., Any]
+    order_frontier: Callable[..., Any]
+    record_tdd_regression: Callable[..., Any]
+    reset_exhaustion_flags: Callable[..., Any]
+    run_cargo: Callable[..., Any]
+    scan_unimplemented_for_cluster: Callable[..., Any]
+    task2_fill_fns_one_by_one: Callable[..., Any]
     extract_and_store_rules: Callable[..., bool]
     enumerate_types: Callable[[Path], list[TypeRecord] | None]
     enumerate_fns: Callable[[Path], list[dict[str, object]] | None]
@@ -237,6 +262,28 @@ class App:
     scope: ClusterScope
     ports: Ports
     config: CompositionConfig
+    # Cluster-scoped structure queries (P3-S3): the WorkspaceModel role's
+    # derived scans — stub records / impl blocks filtered to a cluster's
+    # cfg-set. Explicit App seams so tests script them at the boundary
+    # instead of monkeypatching pipeline module fns.
+    scan_stub_records_for_cluster: Callable[..., Any]
+    collect_impl_blocks_for_cluster: Callable[..., Any]
+
+    # Group-fill deps (P3-S3): constructed here from helpers + ask_client.
+    group_fill_deps: GroupFillDeps
+    # Phase-C TDD driver deps (P3-S3).
+    phase_c_tdd_deps: PhaseCTddDeps
+
+    # Guarded LLM ask client (P3-S3 bridge): constructed by the composition
+    # root (its ask_raw/hot-reload lambdas close over pipeline residents) and
+    # HELD here so use-case deps bind `app.ask_client.ask` and tests swap it.
+    ask_client: AskClient
+
+    # Telemetry boundary (P3-S2/S3): the structured-event sink, constructed
+    # HERE from the late-bound events-log path + live run-context dict the
+    # composition root owns. `pipeline._emit`/`_phase` delegate to it.
+    emitter: JsonlEventEmitter
+
     # LLM per-fn boundary (P3-S2): the engines' PromptContext role resolves its
     # model seam here at call time — swap via dataclasses.replace to script it.
     ask_per_fn_body: Callable[..., tuple[str | None, str]]
@@ -290,6 +337,10 @@ def build_app(
     augment_roles: AugmentRoles,
     coverage_deps: CoverageDeps,
     coverage_provider: CoverageProvider,
+    *,
+    ask_client: AskClient,
+    events_log: Callable[[], str] = lambda: "logs/events.jsonl",
+    run_context: dict[str, str] | None = None,
 ) -> App:
     """Assemble the App from its ports + run-scoped holders + config. Pure wiring
     (no I/O) — the place a test passes fake adapters/ports to get a fake-backed App."""
@@ -374,6 +425,41 @@ def build_app(
         config=config,
         structure=structure,
         cargo_runner=PortBoundCargoRunner(adapters.cargo),
+        ask_client=ask_client,
+        scan_stub_records_for_cluster=helpers.scan_stub_records_for_cluster,
+        collect_impl_blocks_for_cluster=helpers.collect_impl_blocks_for_cluster,
+        group_fill_deps=GroupFillDeps(
+            log=ports.log,
+            ask=ask_client.ask,
+            extract_fn_blocks=helpers.extract_fn_blocks,
+            format_skeleton_index_for_cluster=helpers.format_skeleton_index_for_cluster,
+            leaf_first_group_order=helpers.leaf_first_group_order,
+            load_skeleton_files=helpers.load_skeleton_files,
+            merge_fn_blocks_into_disk=helpers.merge_fn_blocks_into_disk,
+            scan_unimplemented_functions=helpers.scan_unimplemented_functions,
+            single_call_char_limit=cfg.single_call_char_limit,
+            genesis_cap=PromptBudgets.derive(cfg.single_call_char_limit).genesis,
+            task2_model=settings.task_models.task2,
+        ),
+        phase_c_tdd_deps=PhaseCTddDeps(
+            attribute_failures=helpers.attribute_failures,
+            build_test_reverse_map=helpers.build_test_reverse_map,
+            filter_test_targets=helpers.filter_test_targets,
+            check_graceful_stop=helpers.check_graceful_stop,
+            converge_in_cluster=helpers.converge_in_cluster,
+            count_relevant_notes=helpers.count_relevant_notes,
+            effective_stalls=helpers.effective_stalls,
+            emit=ports.emit,
+            log=ports.log,
+            order_frontier=helpers.order_frontier,
+            record_tdd_regression=helpers.record_tdd_regression,
+            reset_exhaustion_flags=helpers.reset_exhaustion_flags,
+            run_cargo=helpers.run_cargo,
+            scan_unimplemented_for_cluster=helpers.scan_unimplemented_for_cluster,
+            scan_unimplemented_functions=helpers.scan_unimplemented_functions,
+            task2_fill_fns_one_by_one=helpers.task2_fill_fns_one_by_one,
+        ),
+        emitter=JsonlEventEmitter(events_log, run_context if run_context is not None else {}),
         ask_per_fn_body=helpers.ask_per_fn_body,
         fill_roles=fill_roles,
         augment_roles=augment_roles,

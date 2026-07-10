@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pipeline
 from pipeline_core.domain.enums import FillUnit
-from tests.harness import install_fake_extractor
+from tests.harness import install_cargo_runner, install_cluster_scan, install_fake_extractor
 
 _STUB_SRC = "pub fn add(a: i32, b: i32) -> i32 { unimplemented!() }\n"
 
@@ -30,8 +30,7 @@ def _setup(monkeypatch, tmp_path: Path) -> tuple[Path, Path]:
     monkeypatch.setattr(
         pipeline, "SETTINGS",
         dataclasses.replace(pipeline.SETTINGS, phase_c_fill_unit=FillUnit.FN))
-    monkeypatch.setattr(pipeline, "_scan_unimplemented_records_for_cluster",
-                        lambda *a, **k: None)
+    install_cluster_scan(monkeypatch, stub_records=lambda *a, **k: None)
     install_fake_extractor(monkeypatch, fns=None, types=[])
     return ws, lib
 
@@ -69,9 +68,7 @@ def test_wrong_compiling_fill_rejected_by_u2_gate(monkeypatch, tmp_path):
     monkeypatch.setattr(pipeline, "_ask_per_fn_body",
                         lambda *_a, **_k: (next(bodies, "a + b"), None))
 
-    # compile check (_run_cargo_check_diag): always clean.
-    monkeypatch.setattr(pipeline, "_run_cargo_check_diag",
-                        lambda *_a, **_k: (0, "", []))
+
 
     # _run_cargo: distinguishes compile run ("cargo check") from U2 test run
     # ("cargo test") by inspecting the command string AND the file content.
@@ -84,7 +81,9 @@ def test_wrong_compiling_fill_rejected_by_u2_gate(monkeypatch, tmp_path):
             )
         return (0, "")  # compile check passes
 
-    monkeypatch.setattr(pipeline, "_run_cargo", _cargo_run)
+    # compile check always clean; run distinguishes check vs U2 test (above).
+    install_cargo_runner(monkeypatch, run=_cargo_run,
+                         check_diag=lambda *_a, **_k: (0, "", []))
 
     # _UNIFIED_FILL_LOOP is NOT patched here — we rely on the default (enabled).
 

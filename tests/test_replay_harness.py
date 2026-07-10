@@ -75,7 +75,7 @@ def test_install_replay_patches_both_seams(tmp_path, monkeypatch) -> None:
     # Model seam: recorded prompt → canned response (no LLM).
     assert pipeline._ask_raw("PROMPT_A") == "RESP_A"
     # Cargo seam: known tree+cmd served from the memo (no cargo binary).
-    assert pipeline._run_cargo("cargo test", crate) == (0, "ok\n")
+    assert pipeline._run_cargo("cargo test", crate, {}) == (0, "ok\n")
     assert replay.cargo.hits == 1
     assert not misses
 
@@ -106,7 +106,7 @@ def test_replay_cargo_miss_raises_in_replay_mode(tmp_path, monkeypatch) -> None:
     (crate / "src" / "lib.rs").write_text("pub fn g() {}\n", encoding="utf-8")
     # A tree with no recorded verdict is a hard miss in replay mode (never a stale hit).
     try:
-        pipeline._run_cargo("cargo test", crate)
+        pipeline._run_cargo("cargo test", crate, {})
         raise AssertionError("expected cargo cache miss")
     except KeyError:
         pass

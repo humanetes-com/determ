@@ -99,11 +99,22 @@ class CargoCache:
 
 
 def install_cargo_cache(monkeypatch, cache: CargoCache) -> CargoCache:
-    """Patch BOTH cargo seams (`_run_cargo`, `_run_cargo_check_diag`) through `cache`
-    (wrapping the live runners), so a full reconstruction replays offline."""
-    monkeypatch.setattr(pipeline, "_run_cargo", cache.wrap(pipeline._run_cargo))
-    monkeypatch.setattr(pipeline, "_run_cargo_check_diag",
-                        cache.wrap_check(pipeline._run_cargo_check_diag))
+    """Route BOTH cargo operations through `cache` (wrapping the live runner)
+    at the App port (P3-S2), so a full reconstruction replays offline."""
+    import dataclasses as _dc
+    real = pipeline._APP.cargo_runner
+    run_memo = cache.wrap(real.run)
+    check_memo = cache.wrap_check(real.check_diag)
+
+    class _CachedRunner:
+        def run(self, cmd, cwd, env, timeout=180):
+            return run_memo(cmd, cwd, env, timeout)
+
+        def check_diag(self, cmd, cwd, env, timeout=180):
+            return check_memo(cmd, cwd, env, timeout)
+
+    monkeypatch.setattr(pipeline, "_APP",
+                        _dc.replace(pipeline._APP, cargo_runner=_CachedRunner()))
     return cache
 
 

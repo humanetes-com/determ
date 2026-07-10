@@ -60,3 +60,18 @@ def _isolate_graceful_stop(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     graceful_stop.reset_for_tests()
     yield
     graceful_stop.reset_for_tests()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_observability_sinks(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """Tests must not write to the PRODUCTION observability sinks
+    (logs/pipeline_guards.log, logs/prompts/, logs/events.jsonl): synthetic
+    600K-char guard-test prompts landed in the real guards log and prompt
+    store, and were then mis-read as live-run evidence during monitoring
+    (same ambient-state family as the graceful-stop sentinel incident).
+    Redirect the module-level paths to pytest's per-test tmp_path; the real
+    pipeline process is unaffected (it re-reads its own module state)."""
+    import pipeline
+    monkeypatch.setattr(pipeline, "_GUARD_LOG", str(tmp_path / "guards.log"))
+    monkeypatch.setattr(pipeline, "_PROMPTS_DIR", tmp_path / "prompts")
+    monkeypatch.setattr(pipeline, "_EVENTS_LOG", str(tmp_path / "events.jsonl"))

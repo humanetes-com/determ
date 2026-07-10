@@ -32,6 +32,9 @@ def diag(file: str, line: int = 1, code: str = "E0277",
                       rendered=f"error[{code}]: {message}\n --> {file}:{line}")
 
 
+_UNSET = object()
+
+
 class _Script:
     """A scripted value source: constant | list (left-pop, last repeats) | callable."""
 
@@ -178,3 +181,40 @@ def install_fake_extractor(monkeypatch, *, fns: Any = None, types: Any = None,
     monkeypatch.setattr(pipeline, "_APP",
                         _dc.replace(pipeline._APP, structure=reader))
     return reader
+
+
+def install_cargo_runner(monkeypatch, run: Callable[..., Any],
+                         check_diag: Callable[..., Any]) -> None:
+    """Swap the App's cargo runner for arbitrary callables (P3-S2/S5): the
+    port-boundary form of `setattr(pipeline, "_run_cargo…")`. `run` gets the
+    (cmd, cwd, env, timeout) call and returns (rc, text); `check_diag`
+    returns (rc, rendered, [Diagnostic])."""
+    import dataclasses as _dc
+
+    class _Runner:
+        def run(self, cmd, cwd, env, timeout=180):  # noqa: ANN001, ANN201
+            return run(cmd, cwd, env, timeout)
+
+        def check_diag(self, cmd, cwd, env, timeout=180):  # noqa: ANN001, ANN201
+            return check_diag(cmd, cwd, env, timeout)
+
+    monkeypatch.setattr(pipeline, "_APP",
+                        _dc.replace(pipeline._APP, cargo_runner=_Runner()))
+
+
+def install_cluster_scan(monkeypatch, *, stub_records: Any = _UNSET,
+                         impl_blocks: Any = _UNSET) -> None:
+    """Script the App's cluster-scoped structure queries (P3-S3): stub-record
+    scan and impl-block collection. Value-or-callable semantics like the other
+    seams; omit a kwarg to keep the production behavior."""
+    import dataclasses as _dc
+    fields: dict[str, Any] = {}
+    if stub_records is not _UNSET:
+        s = _Script(stub_records) if callable(stub_records) else None
+        fields["scan_stub_records_for_cluster"] = (
+            (lambda *a, **k: s(*a, **k)) if s else (lambda *a, **k: stub_records))
+    if impl_blocks is not _UNSET:
+        s2 = _Script(impl_blocks) if callable(impl_blocks) else None
+        fields["collect_impl_blocks_for_cluster"] = (
+            (lambda *a, **k: s2(*a, **k)) if s2 else (lambda *a, **k: impl_blocks))
+    monkeypatch.setattr(pipeline, "_APP", _dc.replace(pipeline._APP, **fields))
