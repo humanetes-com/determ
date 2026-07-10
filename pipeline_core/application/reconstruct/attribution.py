@@ -504,3 +504,99 @@ def attribute_failures(
             if reverse_synth:
                 return AttributionResult(reverse_synth, FailureKind.REVERSE_MAP)
     return AttributionResult({}, FailureKind.NO_FRONTIER)
+
+
+# --- Futility escalation (debt #82, 2026-07-10) ------------------------------
+# When every fn attributed to a failing test has been rewritten to the same
+# dead end, the defect usually sits in the CONSTRUCTION path of the type those
+# fns read (observed live: test_len blamed on Chain::len/size_hint — accessors
+# that merely COUNT a source chain that context()/source() built wrongly).
+# Escalate the frontier to the producers of the exercised types.
+
+def container_type_name(container: str) -> str:
+    """The Self type name of an impl container: `impl Debug for Quoted<C>` →
+    `Quoted`; `impl<'a> Chain<'a>` → `Chain`; free fns ("") → ""."""
+    text = container.strip()
+    if not text.startswith("impl"):
+        return ""
+    rest = text[4:].lstrip()
+    if rest.startswith("<"):
+        depth = 0
+        for i, ch in enumerate(rest):
+            if ch == "<":
+                depth += 1
+            elif ch == ">":
+                depth -= 1
+                if depth == 0:
+                    rest = rest[i + 1:].lstrip()
+                    break
+    marker = rest.find(" for ")
+    if marker != -1:
+        rest = rest[marker + 5:].lstrip()
+    name = ""
+    for ch in rest:
+        if ch.isalnum() or ch == "_":
+            name += ch
+        else:
+            break
+    return name
+
+
+def producers_for_types(
+    fn_records: list[dict[str, Any]],
+    type_names: set[str],
+    *,
+    exclude: set[FnLocator] | None = None,
+) -> list[FnLocator]:
+    """Fns that PRODUCE one of `type_names`: return it, or construct it in the
+    body (`Type {`, `Type::`). Token containment scan — no regex on source."""
+    exclude = exclude or set()
+    out: list[FnLocator] = []
+    seen: set[FnLocator] = set()
+    for r in fn_records:
+        key = FnLocator(r.get("file", ""), r.get("fn_name", ""))
+        if key in exclude or key in seen or not key[0] or not key[1]:
+            continue
+        sig = r.get("sig_text", "") or ""
+        body = r.get("body_text", "") or ""
+        ret = sig.split("->", 1)[1] if "->" in sig else ""
+        for tn in type_names:
+            if not tn:
+                continue
+            if tn in ret or f"{tn} {{" in body or f"{tn}::" in body:
+                out.append(key)
+                seen.add(key)
+                break
+    return out
+
+
+def escalate_frontier_to_producers(
+    deps: AttributionDeps,
+    src_dir: Path,
+    test_name: str,
+    futile_units: set[FnLocator],
+) -> Frontier:
+    """Frontier additions for `test_name`: producers of the types whose
+    accessors proved futile. Containers come from the fn records (the
+    frontier key is a bare (file, fn_name) pair). Fail-safe: empty on any
+    missing input."""
+    try:
+        recs = deps.structure.enumerate_fns(src_dir) or []
+    except Exception:
+        recs = []
+    containers = {(r.get("file", ""), r.get("fn_name", "")): r.get("container", "")
+                  for r in recs}
+    type_names = {container_type_name(containers.get((k[0], k[1]), ""))
+                  for k in futile_units}
+    type_names.discard("")
+    if not type_names:
+        return {}
+    producers = producers_for_types(recs, type_names, exclude=futile_units)
+    if not producers:
+        return {}
+    deps.log(f"  [attribution/escalate] {test_name}: accessors of "
+             f"{sorted(type_names)} are futile — escalating to "
+             f"{len(producers)} producer fn(s): "
+             f"{', '.join(f'{f}::{fn}' for f, fn in producers[:5])}"
+             + ("..." if len(producers) > 5 else ""))
+    return {key: {test_name} for key in producers}

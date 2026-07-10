@@ -90,6 +90,7 @@ EVENTS_LOG   = os.getenv("PIPELINE_EVENTS_LOG", _pick_log(
 # (Tests point the readers via pipeline_core.monitor.events_data.configure / globals.)
 from pipeline_core.monitor import events_data as _ed  # noqa: E402
 from pipeline_core.monitor import run_data as _rd  # noqa: E402
+from pipeline_core.monitor.health_view import health_lines as _health_lines  # noqa: E402
 from pipeline_core.monitor.legend import legend_window as _legend_window  # noqa: E402
 from pipeline_core.monitor.render import (  # noqa: E402
     ansi_seq_len as _ansi_seq_len,
@@ -1005,8 +1006,8 @@ def _detach(cmd):
         stderr=subprocess.DEVNULL,
         start_new_session=True,   # setsid() — detach from controlling terminal
     )
-_view        = "monitor"      # "monitor" | "pipeline" | "stream" | "events" | "legend"
-_scroll      = {"pipeline": 0, "stream": 0, "events": 0, "legend": 0}   # lines scrolled up from bottom (0=bottom)
+_view        = "monitor"      # monitor|pipeline|stream|events|legend|health
+_scroll      = {"pipeline": 0, "stream": 0, "events": 0, "legend": 0, "health": 0}   # lines scrolled up from bottom (0=bottom)
 _confirm          = None   # pending confirmation: "continue" | "wipe" | "stop" | "poweroff" | None
 _graceful_pending = os.path.exists("/tmp/pipeline_graceful_stop")  # survives monitor restart
 
@@ -1086,6 +1087,7 @@ def _bottom_bar():
     s_col = red if running else dim
     parts += [
         rev(bold("[l]egend")) if _view == "legend" else dim("[l]egend"),
+        rev(bold("[h]ealth")) if _view == "health" else dim("[h]ealth"),
         green("[c]ontinue"),
         cyan("[g]raceful"),
         yellow("[w]ipe"),
@@ -1295,10 +1297,16 @@ def _render_all():
         _event_box(EVENTS_LOG, "events", "Events (logs/events.jsonl)", inner,
                    header=(pipeline_rows[:1] if pipeline_rows else ()))
 
-    elif _view == "legend":
+    elif _view in ("health", "legend"):
         inner = max(1, h - gpu_h - 2 - BOTTOM_LINES)
-        for row in box_lines("Legend — what each phase performs",
-                             _legend_window(_w() - 4, inner, _scroll["legend"])):
+        if _view == "health":
+            title, rows = ("Run health (60s cache) — tools/run_health.py",
+                           _health_lines(PIPELINE_LOG,
+                                         SCRIPT_DIR + "/tmp/anyhow")[:inner])
+        else:
+            title, rows = ("Legend — what each phase performs",
+                           _legend_window(_w() - 4, inner, _scroll["legend"]))
+        for row in box_lines(title, rows):
             _ln(row)
         while len(_buf) < h - BOTTOM_LINES:
             _ln()
@@ -1444,6 +1452,8 @@ def _run_action(key):
             _action_msg = red("⏻ power off machine when the run finishes — confirm? [y/n]")
     elif key == "l":
         _view = "monitor" if _view == "legend" else "legend"
+    elif key == "h":
+        _view = "monitor" if _view == "health" else "health"
     elif key in ("1", "2", "3", "4"):
         _view = {"1": "monitor", "2": "pipeline", "3": "stream", "4": "events"}[key]
     elif key == "UP"   and _view in _scroll: _scroll[_view] += SCROLL_STEP

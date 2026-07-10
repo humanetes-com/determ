@@ -150,7 +150,9 @@ class FileModelNotesStore:
         max_chars: int | None = None,
     ) -> str:
         """Relevance-ranked ``<MODEL_NOTES>`` block for the current (file, fn)."""
-        notes = self.load(fr_path)
+        notes = [n for n in self.load(fr_path)
+                 if not mn.is_bogus_regression_note(n)
+                 and not mn.is_stale_regression_note(n, file_text)]
         err_codes = ecodes_in_text(current_error) if current_error else set()
         return mn.rank_notes(
             notes,

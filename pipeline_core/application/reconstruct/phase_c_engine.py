@@ -256,7 +256,21 @@ class PhaseCFillEngine:
                 _total_fns_in_cluster = len(_all_recs)
             except Exception:
                 _total_fns_in_cluster = len(stubs)  # fallback
-            _filled_count = max(0, _total_fns_in_cluster - _all_stubs_count)
+            # Cluster-honest denominator: cfg-gated stubs can NEVER fill in
+            # this cluster — a total that includes them freezes below 100% by
+            # design and reads as a stall (operator confusion, 2026-07-10).
+            try:
+                _stubs_any_cluster = self.ws.scan_stub_records(target_src_dir, None)
+                _stubs_all_count = (len(_stubs_any_cluster)
+                                    if _stubs_any_cluster is not None
+                                    else _all_stubs_count)
+            except Exception:
+                _stubs_all_count = _all_stubs_count
+            _gated = max(0, _stubs_all_count - _all_stubs_count)
+            _filled_count = max(0, _total_fns_in_cluster - _stubs_all_count)
+            _fillable_total = _filled_count + _all_stubs_count
+            _gated_suffix = (f", {_gated} cfg-gated to other clusters"
+                             if _gated else "")
             _frontier_suffix = (
                 f", {len(stubs)} in frontier this pass"
                 if tdd_frontier_keys is not None and len(stubs) != _all_stubs_count
@@ -265,8 +279,8 @@ class PhaseCFillEngine:
             self.tel.log(f"  [phase-c/per-fn] pass {pass_n}/{max_passes}: "
                          f"{_all_stubs_count} stub(s) remaining in cluster "
                          f"'{cluster_name}' "
-                         f"({_filled_count}/{_total_fns_in_cluster} already filled"
-                         f"{_frontier_suffix}).")
+                         f"({_filled_count}/{_fillable_total} fillable filled"
+                         f"{_gated_suffix}{_frontier_suffix}).")
             _pass_t0 = time.monotonic()
             self.tel.emit("phase_c.pass.start", data={
                 "pass_n": pass_n, "cluster": cluster_name, "stubs": len(stubs),

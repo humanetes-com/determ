@@ -382,3 +382,60 @@ def build_promoted_rules(
         return ""
     return ("These errors keep recurring in this run; address them proactively:\n"
             + "\n".join(promoted))
+
+
+def is_bogus_regression_note(note: str) -> bool:
+    """A `[regression]` note whose recorded aggregate did NOT drop is provably
+    invalid feedback: "pass count dropped 22\u219222" (no change) or
+    "dropped 15\u219216" (an INCREASE) came from the shotgun-blame era —
+    every fn filled in a pass was blamed for any test flip regardless of the
+    aggregate direction. Injecting them steers the model AWAY from correct
+    bodies (observed live: textbook `source`/`root_cause` bodies marked
+    WRONG). Readers drop them; the writer no longer produces them."""
+    if not note.lstrip().startswith("[regression]"):
+        return False
+    marker = "count dropped "
+    i = note.find(marker)
+    if i == -1:
+        return False
+    rest = note[i + len(marker):]
+    arrow = rest.find("\u2192")
+    if arrow == -1:
+        return False
+    prev_s = rest[:arrow].strip()
+    after = rest[arrow + 1:]
+    now_digits = ""
+    for ch in after:
+        if ch.isdigit():
+            now_digits += ch
+        else:
+            break
+    if not (prev_s.isdigit() and now_digits):
+        return False
+    return int(now_digits) >= int(prev_s)
+
+
+def is_stale_regression_note(note: str, file_text: str) -> bool:
+    """A `[regression]` note whose recorded body is no longer the file's
+    current body describes a SUPERSEDED attempt — its causal claim ("this
+    body broke those tests") cannot bind the model's next attempt. Retire it
+    from prompts (the note stays on disk). `file_text` empty → keep (no
+    evidence either way)."""
+    if not file_text or not note.lstrip().startswith("[regression]"):
+        return False
+    body = ""
+    for marker in ("Body applied:", "WRONG (this body broke those tests):"):
+        i = note.find(marker)
+        if i != -1:
+            body = note[i + len(marker):]
+            break
+    if not body:
+        return False
+    for ln in body.splitlines():
+        probe = ln.strip()
+        if len(probe) >= 12:
+            # first substantial body line; ignore the trailing instruction line
+            if probe.startswith("Re-implement"):
+                return False
+            return probe[:60] not in file_text
+    return False

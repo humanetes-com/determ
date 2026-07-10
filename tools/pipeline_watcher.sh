@@ -91,6 +91,11 @@ while true; do
     echo "$CUR_PASS $STALE_COUNT $LATEST_STALL" > "$TREND_STATE"
 
     echo "[$(date -u +%H:%M:%SZ)] proc=${ALIVE} (pid $PID) new_log_lines=${NEWLINES} latest=${LATEST_PASS_LINE:-none} ${LATEST_STALL:-}"
+    # Deep-analysis detectors (poisoned notes, attribution futility, zero-payoff
+    # burn, frozen counters, repeated heals, stall decision distance) — the
+    # coded version of the manual investigation that found the 2026-07-10
+    # plateau causes. Never fails the watch; findings become event lines.
+    "$(dirname "$0")/../.venv/bin/python" "$(dirname "$0")/run_health.py" --brief 2>/dev/null || true
     if [ ${#ALERTS[@]} -gt 0 ]; then
         echo "  ALERT:"
         printf '  - %s\n' "${ALERTS[@]}"

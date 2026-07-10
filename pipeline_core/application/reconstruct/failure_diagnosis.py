@@ -151,7 +151,18 @@ def record_tdd_regression(
         nm = r.get("fn_name", "")
         if nm and nm not in by_name:
             by_name[nm] = r
+    # Causality guard: a note that blames a body is only trustworthy when the
+    # AGGREGATE actually dropped. Flips with an equal/rising aggregate mean
+    # the batch traded tests — blaming every filled fn poisons the notes
+    # channel (observed live: correct `source`/`root_cause` bodies marked
+    # WRONG by "dropped 22→22" notes; the model then avoided them).
+    if int(now_pass) >= int(prev_best):
+        return ""
     broken = ", ".join(sorted(broken_tests)[:6])
+    batch_caveat = ("" if len(filled_keys) == 1 else
+                    f" ({len(filled_keys)} bodies were filled this pass — the"
+                    " culprit is ONE of them, treat this as a suspect, not a"
+                    " verdict)")
     for key in filled_keys:
         fn = key[1] if isinstance(key, tuple) and len(key) > 1 else str(key)
         rec = by_name.get(fn)
@@ -160,11 +171,11 @@ def record_tdd_regression(
         file_rel = rec.get("file", "")
         body = (rec.get("body_text", "") or "").strip()
         note = (
-            f"[regression] In {Path(file_rel).name or '?'}, the body just written for "
-            f"`{fn}` made previously-passing test(s) FAIL: {broken} (cluster pass "
-            f"count dropped {int(prev_best)}→{int(now_pass)}). WRONG (this body "
-            f"broke those tests):\n{body[:body_cap]}\nRe-implement `{fn}` so "
-            f"{broken} keep passing; do not repeat that approach."
+            f"[regression] In {Path(file_rel).name or '?'}, after `{fn}` was "
+            f"written, previously-passing test(s) FAILED: {broken} (cluster "
+            f"pass count dropped {int(prev_best)}→{int(now_pass)})"
+            f"{batch_caveat}. Body applied:\n{body[:body_cap]}\n"
+            f"Re-implement `{fn}` so {broken} keep passing."
         )
         with suppress(Exception):
             append_note(fr_path, note)

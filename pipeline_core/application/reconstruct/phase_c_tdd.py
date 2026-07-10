@@ -54,6 +54,9 @@ class PhaseCTddDeps:
     scan_unimplemented_for_cluster: Callable[..., Any]
     scan_unimplemented_functions: Callable[..., Any]
     task2_fill_fns_one_by_one: Callable[..., ClusterFillResult]
+    # Futility escalation (debt #82): (src_dir, test, futile_units,
+    # futile_containers) -> Frontier additions. None disables escalation.
+    escalate_to_producers: Callable[..., Frontier] | None = None
 
 
 def _log_attribution_gap(
@@ -135,6 +138,11 @@ def run_phase_c_tdd(
          f"stems={len(test_stems)}")
 
     permanently_exhausted: set[FnLocator] = set()
+    # Futility escalation state (debt #82): per failing test, the frontier
+    # unit-set of the previous iteration; a test whose set is UNCHANGED while
+    # it kept failing has exhausted its attributed fns — escalate once.
+    prev_test_units: dict[str, frozenset[FnLocator]] = {}
+    escalated_tests: set[str] = set()
     last_notes_count: dict[FnLocator, int] = {}
     last_total_filled = 0
     # Self-contained snapshot for the exhaustion-reset gate below — deliberately
@@ -325,6 +333,32 @@ def run_phase_c_tdd(
             test_texts=dict(cluster_tests),
         )
         frontier = deps.filter_test_targets(frontier, src_dir)
+
+        # Futility escalation (debt #82): a failing test whose attributed
+        # unit-set is identical to last iteration's has been fully served by
+        # rewrites that changed nothing — its accessors are the wrong target.
+        # Escalate ONCE per test to the producers of the exercised types.
+        if deps.escalate_to_producers is not None:
+            units_by_test: dict[str, set[FnLocator]] = {}
+            for key, tests in frontier.items():
+                for tname in tests:
+                    units_by_test.setdefault(tname, set()).add(key)
+            for tname, units in units_by_test.items():
+                prev = prev_test_units.get(tname)
+                if (tname not in escalated_tests and prev is not None
+                        and prev == frozenset(units)):
+                    extra = deps.escalate_to_producers(
+                        src_dir, tname, set(units))
+                    if extra:
+                        escalated_tests.add(tname)
+                        for k, ts in extra.items():
+                            frontier.setdefault(k, set()).update(ts)
+                        deps.emit("phase_c.attribution.escalated", data={
+                            "test": tname,
+                            "futile_units": sorted(str(u) for u in units),
+                            "added": sorted(str(k) for k in extra),
+                        })
+                prev_test_units[tname] = frozenset(units)
 
         # Union remaining cluster-active stubs into the frontier so a helper
         # that no failing test attributes directly (called only transitively)

@@ -116,7 +116,10 @@ from pipeline_core.application.orchestrator import LockDeps
 from pipeline_core.application.orchestrator import (
     PhaseSubcommandDeps as _PhaseSubcommandDeps,
 )
-from pipeline_core.application.reconstruct.attribution import AttributionDeps
+from pipeline_core.application.reconstruct.attribution import (
+    AttributionDeps,
+    escalate_frontier_to_producers,
+)
 from pipeline_core.application.reconstruct.cargo_errors import (
     categorize_compile_error as _categorize_compile_error,
 )
@@ -668,6 +671,18 @@ def build_app(
     )
     # S26: coverage_deps + provider are injected pre-built (constructed standalone in
     # pipeline.py before _APP) so module-level consumers reach them without _APP.
+    # Attribution deps built as a local first — the TDD driver's futility
+    # escalation (debt #82) closes over it.
+    _attr_deps = AttributionDeps(
+        structure=helpers.structure_via_app,
+        classify=helpers.classify_phase_c_test_failures,
+        locate_fn=_domain_locate_fn,
+        run_check_diag=helpers.run_cargo_check_diag,
+        derive_check_only_cmd=_domain_derive_check_only_cmd,
+        is_gen_tests_file=helpers.is_gen_tests_file,
+        log=ports.log,
+    )
+
     return App(
         adapters=adapters,
         settings=settings,
@@ -710,6 +725,8 @@ def build_app(
             scan_unimplemented_for_cluster=helpers.scan_unimplemented_for_cluster,
             scan_unimplemented_functions=helpers.scan_unimplemented_functions,
             task2_fill_fns_one_by_one=helpers.task2_fill_fns_one_by_one,
+            escalate_to_producers=functools.partial(
+                escalate_frontier_to_producers, _attr_deps),
         ),
         impl_fill_deps=ImplFillDeps(
             build_dispatch_family_section=helpers.build_dispatch_family_section,
@@ -897,15 +914,7 @@ def build_app(
             run_generate_fix=_run_generate_fix,
             write=_io_write,
         ),
-        attribution_deps=AttributionDeps(
-            structure=helpers.structure_via_app,
-            classify=helpers.classify_phase_c_test_failures,
-            locate_fn=_domain_locate_fn,
-            run_check_diag=helpers.run_cargo_check_diag,
-            derive_check_only_cmd=_domain_derive_check_only_cmd,
-            is_gen_tests_file=helpers.is_gen_tests_file,
-            log=ports.log,
-        ),
+        attribution_deps=_attr_deps,
         task1_deps=Task1Deps(
             load_api_surface=_load_api_surface,
             load_type_names=_load_type_names,
