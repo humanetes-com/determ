@@ -41,12 +41,12 @@ from pipeline_core.adapters.api_surface import ApiSurfaceCapture
 from pipeline_core.adapters.artifacts import (
     api_surface_path as _api_surface_path,
 )
-from pipeline_core.adapters.artifacts import (
+from pipeline_core.adapters.artifacts import (  # noqa: F401  (smoke pin: test_api_surface_capture uses pipeline.load_api_surface)
     load_api_surface,
     load_manifest,
 )
 from pipeline_core.adapters.artifacts import (
-    load_type_names as _load_type_names,
+    load_original_structure as _artifacts_load_original_structure,
 )
 from pipeline_core.adapters.artifacts import (
     pub_items_manifest_path as _pub_items_manifest_path,
@@ -260,7 +260,6 @@ from pipeline_core.application.tasks.task0b_discovery import (
 )
 from pipeline_core.application.tasks.task0c import Task0cDeps
 from pipeline_core.application.tasks.task0c import task0c_augment_module as _task0c_impl
-from pipeline_core.application.tasks.task1 import Task1Deps
 from pipeline_core.application.tasks.task1 import task1 as _task1_impl
 from pipeline_core.application.tasks.task2 import (
     Task2Deps,
@@ -408,9 +407,6 @@ from pipeline_core.domain.rust_idents import (
 from pipeline_core.domain.rust_idioms import no_std_invariant_note
 from pipeline_core.domain.rust_macros import (
     collect_crate_macros as _collect_crate_macros_pure,
-)
-from pipeline_core.domain.rust_macros import (
-    proc_macro_fallback_requirements as _proc_macro_fallback_requirements,
 )
 from pipeline_core.domain.rust_scan import (
     count_test_attrs,
@@ -1544,6 +1540,11 @@ _CFG = _CompositionConfig(
     test_timeout=TEST_TIMEOUT,
 )
 # Phase 3 S3.5-10: resident pipeline helpers the migrated deps need, late-binding.
+# Soft cap on stub members per impl block. Larger blocks fall back to the
+# per-fn path so the output budget always fits. Anyhow's `impl Error` is
+# the only block likely to exceed this in practice.
+_PER_IMPL_MAX_STUBS = int(os.getenv("PHASE_C_IMPL_MAX_STUBS", "12"))
+
 _HELPERS = _Helpers(
     parse_cmd=lambda *a, **k: _parse_cmd(*a, **k),
     prompt_budget=lambda *a, **k: prompt_budget(*a, **k),
@@ -1557,6 +1558,39 @@ _HELPERS = _Helpers(
     check_graceful_stop=lambda *a, **k: _check_graceful_stop(*a, **k),
     scan_stub_records_for_cluster=lambda *a, **k: _scan_unimplemented_records_for_cluster(*a, **k),
     collect_impl_blocks_for_cluster=lambda *a, **k: _collect_impl_blocks_for_cluster(*a, **k),
+    scan_stub_records_via_app=lambda *a, **k: _APP.scan_stub_records_for_cluster(*a, **k),
+    collect_impl_blocks_via_app=lambda *a, **k: _APP.collect_impl_blocks_for_cluster(*a, **k),
+    write_fr_preserving_notes=lambda *a, **k: _write_fr_preserving_notes(*a, **k),
+    task1_synthesizer_factory=lambda *a, **k: _task1_synthesizer_factory(*a, **k),
+    filter_proc_macro_test_files=lambda *a, **k: _filter_proc_macro_test_files(*a, **k),
+    format_api_surface_section=lambda *a, **k: _format_api_surface_section(*a, **k),
+    file_format_instruction=FILE_FORMAT_INSTRUCTION,
+    build_dispatch_family_section=lambda *a, **k: _build_dispatch_family_section(*a, **k),
+    build_per_impl_prompt=lambda *a, **k: _build_per_impl_prompt(*a, **k),
+    cargo_err_sig=lambda *a, **k: _cargo_err_sig(*a, **k),
+    cargo_err_sig_from_diagnostics=lambda *a, **k: _cargo_err_sig_from_diagnostics(*a, **k),
+    cluster_filter_type_methods=lambda *a, **k: _cluster_filter_type_methods(*a, **k),
+    collect_crate_macros=lambda *a, **k: _collect_crate_macros(*a, **k),
+    collect_sibling_filled_bodies=lambda *a, **k: _collect_sibling_filled_bodies(*a, **k),
+    compute_cluster_macro_invariants=lambda *a, **k: _compute_cluster_macro_invariants(*a, **k),
+    detect_crate_no_std_invariant=lambda *a, **k: _detect_crate_no_std_invariant(*a, **k),
+    dispatch_families=lambda *a, **k: _dispatch_families_via_extractor(*a, **k),
+    extract_crate_idioms=lambda *a, **k: _extract_crate_idioms(*a, **k),
+    extract_impl_where_clause=lambda *a, **k: impl_where_clause(*a, **k),
+    filter_model_notes_for_prompt=lambda *a, **k: _filter_model_notes_for_prompt(*a, **k),
+    find_tests_referencing_fn=lambda *a, **k: _find_tests_referencing_fn(*a, **k),
+    focus_cargo_errors=lambda *a, **k: _focus_cargo_errors(*a, **k),
+    module_of=lambda *a, **k: _module_of(*a, **k),
+    phase_c_retrospective=lambda *a, **k: _phase_c_retrospective(*a, **k),
+    record_error_codes_seen=lambda *a, **k: _record_error_codes_seen(*a, **k),
+    splice_fn_with_where=lambda *a, **k: _splice_fn_with_where(*a, **k),
+    splice_lock_for=lambda *a, **k: _splice_lock_for(*a, **k),
+    types_section_for_fix=lambda *a, **k: _FIX_CONTEXT.types_section_for_fix(*a, **k),
+    bound_methods_section_for=lambda *a, **k: _FIX_CONTEXT.bound_methods_section_for(*a, **k),
+    u2_test_gate=lambda *a, **k: _u2_test_gate(*a, **k),
+    test_regression_baseline=lambda *a, **k: _test_regression_baseline(*a, **k),
+    test_regression_gate=lambda *a, **k: _test_regression_gate(*a, **k),
+    per_impl_max_stubs=_PER_IMPL_MAX_STUBS,
     converge_in_cluster=lambda *a, **k: _converge_in_cluster(*a, **k),
     count_relevant_notes=lambda *a, **k: _count_relevant_notes(*a, **k),
     effective_stalls=lambda *a, **k: _effective_stalls(*a, **k),
@@ -2439,10 +2473,7 @@ _run_phase_c_tdd: "Callable[..., ClusterFillResult]" = functools.partial(
     _phase_c_tdd.run_phase_c_tdd, _APP.phase_c_tdd_deps)
 
 
-# Soft cap on stub members per impl block. Larger blocks fall back to the
-# per-fn path so the output budget always fits. Anyhow's `impl Error` is
-# the only block likely to exceed this in practice.
-_PER_IMPL_MAX_STUBS = int(os.getenv("PHASE_C_IMPL_MAX_STUBS", "12"))
+# _PER_IMPL_MAX_STUBS moved above _HELPERS (P3-S3 value dependency).
 
 # Per-source-tree splice+cargo locks. Originally one global lock (hoisted
 # from `_task2_fill_fns_one_by_one` because the per-impl path also needs to
@@ -2470,57 +2501,10 @@ def _splice_lock_for(tree: Path) -> "_threading_mod.Lock":
 # can drive it too; these aliases keep every call site + test pin unchanged.
 
 
-_IMPL_FILL_DEPS = _impl_fill.ImplFillDeps(
-    build_dispatch_family_section=lambda *a, **k: _build_dispatch_family_section(*a, **k),
-    build_per_impl_prompt=lambda *a, **k: _build_per_impl_prompt(*a, **k),
-    cargo_env=lambda *a, **k: _cargo_env(*a, **k),
-    cargo_err_sig=lambda *a, **k: _cargo_err_sig(*a, **k),
-    cargo_err_sig_from_diagnostics=lambda *a, **k: _cargo_err_sig_from_diagnostics(*a, **k),
-    check_graceful_stop=lambda *a, **k: _check_graceful_stop(*a, **k),
-    cluster_filter_type_methods=lambda *a, **k: _cluster_filter_type_methods(*a, **k),
-    collect_crate_macros=lambda *a, **k: _collect_crate_macros(*a, **k),
-    collect_impl_blocks_for_cluster=lambda *a, **k: _APP.collect_impl_blocks_for_cluster(*a, **k),
-    collect_sibling_filled_bodies=lambda *a, **k: _collect_sibling_filled_bodies(*a, **k),
-    compute_cluster_macro_invariants=lambda *a, **k: _compute_cluster_macro_invariants(*a, **k),
-    detect_crate_no_std_invariant=lambda *a, **k: _detect_crate_no_std_invariant(*a, **k),
-    dispatch_families_via_extractor=lambda *a, **k: _dispatch_families_via_extractor(*a, **k),
-    effective_stalls=lambda *a, **k: _effective_stalls(*a, **k),
-    emit=lambda *a, **k: _emit(*a, **k),
-    enumerate_types_via_extractor=lambda *a, **k: _enumerate_types_via_extractor(*a, **k),
-    extract_crate_idioms=lambda *a, **k: _extract_crate_idioms(*a, **k),
-    extract_impl_where_clause=lambda *a, **k: impl_where_clause(*a, **k),
-    filter_model_notes_for_prompt=lambda *a, **k: _filter_model_notes_for_prompt(*a, **k),
-    find_tests_referencing_fn=lambda *a, **k: _find_tests_referencing_fn(*a, **k),
-    focus_cargo_errors=lambda *a, **k: _focus_cargo_errors(*a, **k),
-    frontier_from_diags=lambda *a, **k: _frontier_from_diags(*a, **k),
-    impl_block_id=lambda *a, **k: _impl_block_id(*a, **k),
-    is_fn_fully_exhausted=lambda *a, **k: _is_fn_fully_exhausted(*a, **k),
-    load_retrospectives=lambda *a, **k: _load_retrospectives(*a, **k),
-    log=lambda *a, **k: _log(*a, **k),
-    module_of=lambda *a, **k: _module_of(*a, **k),
-    phase_c_retrospective=lambda *a, **k: _phase_c_retrospective(*a, **k),
-    record_error_codes_seen=lambda *a, **k: _record_error_codes_seen(*a, **k),
-    retro_key=lambda *a, **k: _retro_key(*a, **k),
-    run_cargo_check_diag=lambda *a, **k: _run_cargo_check_diag(*a, **k),
-    save_retrospectives=lambda *a, **k: _save_retrospectives(*a, **k),
-    scan_unimplemented_for_cluster=lambda *a, **k: _scan_unimplemented_for_cluster(*a, **k),
-    scan_unimplemented_records_for_cluster=lambda *a, **k: _APP.scan_stub_records_for_cluster(*a, **k),
-    splice_fn_with_where=lambda *a, **k: _splice_fn_with_where(*a, **k),
-    splice_lock_for=lambda *a, **k: _splice_lock_for(*a, **k),
-    types_section_for_fix=lambda *a, **k: _FIX_CONTEXT.types_section_for_fix(*a, **k),
-    bound_methods_section_for=lambda *a, **k: _FIX_CONTEXT.bound_methods_section_for(*a, **k),
-    u2_test_gate=lambda *a, **k: _u2_test_gate(*a, **k),
-    test_regression_baseline=lambda *a, **k: _test_regression_baseline(*a, **k),
-    test_regression_gate=lambda *a, **k: _test_regression_gate(*a, **k),
-    ask=_ASK_CLIENT.ask,
-    failed_body_cap=_BUDGETS.failed_body,
-    per_fn_fix_hard_cap=_PER_FN_FIX_HARD_CAP,
-    per_impl_max_stubs=_PER_IMPL_MAX_STUBS,
-    task2_model=_TASK2_MODEL,
-)
+# P3-S3: ImplFillDeps constructed in build_app (App.impl_fill_deps).
 # Typed boundary (plan #77 T1): see _run_phase_c_tdd above.
 _phase_c_fill_impl_blocks: "Callable[..., ClusterFillResult]" = functools.partial(
-    _impl_fill.fill_impl_blocks, _IMPL_FILL_DEPS)
+    _impl_fill.fill_impl_blocks, _APP.impl_fill_deps)
 
 
 import pipeline_core.application.reconstruct.cargo_errors as _reconstruct_cargo_errors  # noqa: E402
@@ -2747,10 +2731,7 @@ def _collect_impl_blocks(src_dir: Path) -> list[ImplBlock] | None:
     return _collect_impl_blocks_impl(src_dir, enumerate_fns=_enumerate_fns_via_extractor)
 
 
-def _impl_block_id(file_rel: str, container: str) -> str:
-    """Stable hashable id for an impl block (used as a dict key in the
-    Phase C frontier mapping and as a per-block lock key)."""
-    return f"{file_rel}::{container}"
+# _impl_block_id → domain.impl_routing.impl_block_id (P3-S5).
 def _collect_impl_blocks_for_cluster(
     target_src_dir: Path,
     cluster: "BuildCluster | None",
@@ -3170,7 +3151,7 @@ def _task1_synthesizer_factory() -> Task1Synthesizer:
 def task1(req: "_Task1Request") -> bool:
     _emit("task.start", task="task1")  # debt#7: structured stage event (monitor reads these)
     # slice 5b: extracted to application.tasks.task1; thin shim binding deps.
-    return _task1_impl(req, _TASK1_DEPS)
+    return _task1_impl(req, _APP.task1_deps)
 
 
 # ---------------------------------------------------------------------------
@@ -4057,37 +4038,11 @@ ORIGINAL_STRUCTURE_DIR = _strip_mod.ORIGINAL_STRUCTURE_DIR
 
 
 # slice 5b: deps for the extracted TASK 1 (defined after load_api_surface, its latest dep).
-_TASK1_DEPS = Task1Deps(
-    load_api_surface=load_api_surface,
-    load_type_names=_load_type_names,
-    read=read,
-    ask=_ASK_CLIENT.ask,
-    write_fr_preserving_notes=_write_fr_preserving_notes,
-    synthesizer_factory=_task1_synthesizer_factory,
-    filter_proc_macro_test_files=_filter_proc_macro_test_files,
-    proc_macro_fallback_requirements=_proc_macro_fallback_requirements,
-    format_api_surface_section=_format_api_surface_section,
-    file_format_instruction=FILE_FORMAT_INSTRUCTION,
-    single_call_char_limit=SINGLE_CALL_CHAR_LIMIT,
-    profile_cap=_BUDGETS.profile,
-    task1_model=_TASK1_MODEL,
-)
+# P3-S3: Task1Deps constructed in build_app (App.task1_deps).
 
 
-def load_original_structure(project_dir: Path, module_name: str) -> list[str]:
-    """Load the saved pre-strip file list for a module. Returns [] if not found.
-
-    Matches by .txt filename stem (exact), not by content prefix. The stem-based match
-    is unambiguous: 'argh' never collides with 'argh_shared', regardless of iteration order.
-    """
-    out_dir = project_dir / ORIGINAL_STRUCTURE_DIR
-    target = module_name.replace("-", "_")
-    for candidate in out_dir.glob("*.txt"):
-        stem = candidate.stem.replace("-", "_")
-        if stem == target:
-            content = candidate.read_text()
-            return [ln.strip() for ln in content.splitlines() if ln.strip()]
-    return []
+# Relocated to adapters/artifacts.py (P3-S5); alias keeps call sites + fakes stable.
+load_original_structure: "Callable[[Path, str], list[str]]" = _artifacts_load_original_structure
 
 
 

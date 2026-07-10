@@ -18,6 +18,12 @@ from typing import Any
 
 from pipeline_core.adapters import Adapters
 from pipeline_core.adapters.artifacts import WorkspaceArtifacts, load_pub_items_manifest
+from pipeline_core.adapters.artifacts import (
+    load_api_surface as _load_api_surface,
+)
+from pipeline_core.adapters.artifacts import (
+    load_type_names as _load_type_names,
+)
 from pipeline_core.adapters.ask_client import AskClient
 from pipeline_core.adapters.augment_engine import CargoAugmentEngine
 from pipeline_core.adapters.augment_store import FileAugmentStore
@@ -45,6 +51,18 @@ from pipeline_core.adapters.reconstruct_roles import (
     PhaseGateAdapter,
     RequirementsAdapter,
 )
+from pipeline_core.adapters.retros import (
+    is_fn_fully_exhausted as _retros_is_exhausted,
+)
+from pipeline_core.adapters.retros import (
+    load_retrospectives as _retros_load,
+)
+from pipeline_core.adapters.retros import (
+    retro_key as _retros_key,
+)
+from pipeline_core.adapters.retros import (
+    save_retrospectives as _retros_save,
+)
 from pipeline_core.adapters.state import mark_phase, phase_valid, set_current
 from pipeline_core.adapters.structure import CliStructureReader  # noqa: F401 (re-export for composition callers)
 from pipeline_core.adapters.telemetry import JsonlEventEmitter, LogTelemetry
@@ -58,6 +76,7 @@ from pipeline_core.application.orchestrator import LockDeps
 from pipeline_core.application.reconstruct.cargo_runner import PortBoundCargoRunner
 from pipeline_core.application.reconstruct.failure_analysis import FailureAnalysisStep
 from pipeline_core.application.reconstruct.group_fill import GroupFillDeps
+from pipeline_core.application.reconstruct.impl_fill import ImplFillDeps
 from pipeline_core.application.reconstruct.module_reconstructor import ModuleReconstructor
 from pipeline_core.application.reconstruct.per_fn_retry import (
     RetryDeps,
@@ -73,13 +92,19 @@ from pipeline_core.application.reconstruct.retrospective import PhaseCRetroDeps
 from pipeline_core.application.tasks.discover_test_command import DiscoverTestCommandDeps
 from pipeline_core.application.tasks.genesis_audit import GenesisAuditDeps
 from pipeline_core.application.tasks.task0_docs import Task0DocsDeps
+from pipeline_core.application.tasks.task1 import Task1Deps
 from pipeline_core.application.tasks.task4 import Task4Deps
 from pipeline_core.application.validate import Task2CheckerDeps
 from pipeline_core.domain.cluster_scope import ClusterScope
+from pipeline_core.domain.impl_routing import impl_block_id as _impl_block_id
 from pipeline_core.domain.models import TypeRecord
 from pipeline_core.domain.prompt_budget import PromptBudgets
 from pipeline_core.domain.run_state import RunState
+from pipeline_core.domain.rust_macros import (
+    proc_macro_fallback_requirements as _pm_fallback_reqs,
+)
 from pipeline_core.io import read, write
+from pipeline_core.io import read as _io_read
 from pipeline_core.ports.cargo_runner import CargoRunner as CargoRunnerPort
 from pipeline_core.ports.structure import StructureReader
 from pipeline_core.prompts.per_fn import build_per_fn_fix_prompt
@@ -181,6 +206,44 @@ class Helpers:
     check_graceful_stop: Callable[..., Any]
     scan_stub_records_for_cluster: Callable[..., Any]
     collect_impl_blocks_for_cluster: Callable[..., Any]
+    # Same seams read through the LIVE pipeline._APP (swap-aware: tests
+    # replace _APP; composition must not import pipeline, so the module
+    # provides these App-reading closures itself):
+    scan_stub_records_via_app: Callable[..., Any]
+    collect_impl_blocks_via_app: Callable[..., Any]
+    # Task-1 collaborators (P3-S3, Task1Deps construction):
+    write_fr_preserving_notes: Callable[..., Any]
+    task1_synthesizer_factory: Callable[..., Any]
+    filter_proc_macro_test_files: Callable[..., Any]
+    format_api_surface_section: Callable[..., Any]
+    file_format_instruction: str
+    # Impl-fill collaborators (P3-S3, ImplFillDeps construction):
+    build_dispatch_family_section: Callable[..., Any]
+    build_per_impl_prompt: Callable[..., Any]
+    cargo_err_sig: Callable[..., Any]
+    cargo_err_sig_from_diagnostics: Callable[..., Any]
+    cluster_filter_type_methods: Callable[..., Any]
+    collect_crate_macros: Callable[..., Any]
+    collect_sibling_filled_bodies: Callable[..., Any]
+    compute_cluster_macro_invariants: Callable[..., Any]
+    detect_crate_no_std_invariant: Callable[..., Any]
+    dispatch_families: Callable[..., Any]
+    extract_crate_idioms: Callable[..., Any]
+    extract_impl_where_clause: Callable[..., Any]
+    filter_model_notes_for_prompt: Callable[..., Any]
+    find_tests_referencing_fn: Callable[..., Any]
+    focus_cargo_errors: Callable[..., Any]
+    module_of: Callable[..., Any]
+    phase_c_retrospective: Callable[..., Any]
+    record_error_codes_seen: Callable[..., Any]
+    splice_fn_with_where: Callable[..., Any]
+    splice_lock_for: Callable[..., Any]
+    types_section_for_fix: Callable[..., Any]
+    bound_methods_section_for: Callable[..., Any]
+    u2_test_gate: Callable[..., Any]
+    test_regression_baseline: Callable[..., Any]
+    test_regression_gate: Callable[..., Any]
+    per_impl_max_stubs: int
     converge_in_cluster: Callable[..., Any]
     count_relevant_notes: Callable[..., Any]
     effective_stalls: Callable[..., Any]
@@ -273,6 +336,10 @@ class App:
     group_fill_deps: GroupFillDeps
     # Phase-C TDD driver deps (P3-S3).
     phase_c_tdd_deps: PhaseCTddDeps
+    # Impl-fill deps (P3-S3).
+    impl_fill_deps: ImplFillDeps
+    # Task-1 deps (P3-S3).
+    task1_deps: Task1Deps
 
     # Guarded LLM ask client (P3-S3 bridge): constructed by the composition
     # root (its ask_raw/hot-reload lambdas close over pipeline residents) and
@@ -458,6 +525,69 @@ def build_app(
             scan_unimplemented_for_cluster=helpers.scan_unimplemented_for_cluster,
             scan_unimplemented_functions=helpers.scan_unimplemented_functions,
             task2_fill_fns_one_by_one=helpers.task2_fill_fns_one_by_one,
+        ),
+        impl_fill_deps=ImplFillDeps(
+            build_dispatch_family_section=helpers.build_dispatch_family_section,
+            build_per_impl_prompt=helpers.build_per_impl_prompt,
+            cargo_env=ports.cargo_env,
+            cargo_err_sig=helpers.cargo_err_sig,
+            cargo_err_sig_from_diagnostics=helpers.cargo_err_sig_from_diagnostics,
+            check_graceful_stop=helpers.check_graceful_stop,
+            cluster_filter_type_methods=helpers.cluster_filter_type_methods,
+            collect_crate_macros=helpers.collect_crate_macros,
+            collect_impl_blocks_for_cluster=helpers.collect_impl_blocks_via_app,
+            collect_sibling_filled_bodies=helpers.collect_sibling_filled_bodies,
+            compute_cluster_macro_invariants=helpers.compute_cluster_macro_invariants,
+            detect_crate_no_std_invariant=helpers.detect_crate_no_std_invariant,
+            dispatch_families_via_extractor=helpers.dispatch_families,
+            effective_stalls=helpers.effective_stalls,
+            emit=ports.emit,
+            enumerate_types_via_extractor=helpers.enumerate_types,
+            extract_crate_idioms=helpers.extract_crate_idioms,
+            extract_impl_where_clause=helpers.extract_impl_where_clause,
+            filter_model_notes_for_prompt=helpers.filter_model_notes_for_prompt,
+            find_tests_referencing_fn=helpers.find_tests_referencing_fn,
+            focus_cargo_errors=helpers.focus_cargo_errors,
+            frontier_from_diags=helpers.frontier_from_diags,
+            impl_block_id=_impl_block_id,
+            is_fn_fully_exhausted=_retros_is_exhausted,
+            load_retrospectives=_retros_load,
+            log=ports.log,
+            module_of=helpers.module_of,
+            phase_c_retrospective=helpers.phase_c_retrospective,
+            record_error_codes_seen=helpers.record_error_codes_seen,
+            retro_key=_retros_key,
+            run_cargo_check_diag=helpers.run_cargo_check_diag,
+            save_retrospectives=_retros_save,
+            scan_unimplemented_for_cluster=helpers.scan_unimplemented_for_cluster,
+            scan_unimplemented_records_for_cluster=helpers.scan_stub_records_via_app,
+            splice_fn_with_where=helpers.splice_fn_with_where,
+            splice_lock_for=helpers.splice_lock_for,
+            types_section_for_fix=helpers.types_section_for_fix,
+            bound_methods_section_for=helpers.bound_methods_section_for,
+            u2_test_gate=helpers.u2_test_gate,
+            test_regression_baseline=helpers.test_regression_baseline,
+            test_regression_gate=helpers.test_regression_gate,
+            ask=ask_client.ask,
+            failed_body_cap=cfg.failed_body_cap,
+            per_fn_fix_hard_cap=settings.fix_caps.per_fn_fix_hard_cap,
+            per_impl_max_stubs=helpers.per_impl_max_stubs,
+            task2_model=settings.task_models.task2,
+        ),
+        task1_deps=Task1Deps(
+            load_api_surface=_load_api_surface,
+            load_type_names=_load_type_names,
+            read=_io_read,
+            ask=ask_client.ask,
+            write_fr_preserving_notes=helpers.write_fr_preserving_notes,
+            synthesizer_factory=helpers.task1_synthesizer_factory,
+            filter_proc_macro_test_files=helpers.filter_proc_macro_test_files,
+            proc_macro_fallback_requirements=_pm_fallback_reqs,
+            format_api_surface_section=helpers.format_api_surface_section,
+            file_format_instruction=helpers.file_format_instruction,
+            single_call_char_limit=cfg.single_call_char_limit,
+            profile_cap=cfg.profile_cap,
+            task1_model=settings.task_models.task1,
         ),
         emitter=JsonlEventEmitter(events_log, run_context if run_context is not None else {}),
         ask_per_fn_body=helpers.ask_per_fn_body,

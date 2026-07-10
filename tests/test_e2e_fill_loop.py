@@ -186,7 +186,9 @@ def test_sig_change_hatch_applies_on_attempt_five(monkeypatch, tmp_path):
         asks["n"] += 1
         return ("42", raw_with_sig) if asks["n"] >= 5 else ("0", "<BODY>0</BODY>")
 
-    monkeypatch.setattr(pipeline, "_ask_per_fn_body", fake_ask)
+    import dataclasses as _dc
+    monkeypatch.setattr(pipeline, "_APP",
+                        _dc.replace(pipeline._APP, ask_per_fn_body=fake_ask))
     # Attempts 1-4: strictly DECREASING distinct-E-code counts (improving
     # floor → no stall, different sigs → no repeated-exit). Attempt 5: ok.
     fails = iter([

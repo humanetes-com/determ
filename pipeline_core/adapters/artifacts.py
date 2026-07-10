@@ -157,3 +157,19 @@ class WorkspaceArtifacts:
             if sp.exists():
                 out += f'\n<FILE path="{rel}">\n{sp.read_text(encoding="utf-8")}\n</FILE>\n'
         return out
+
+
+def load_original_structure(project_dir: Path, module_name: str) -> list[str]:
+    """Load the saved pre-strip file list for a module. Returns [] if not found.
+
+    Matches by .txt filename stem (exact), not by content prefix. The stem-based
+    match is unambiguous: 'argh' never collides with 'argh_shared', regardless of
+    iteration order."""
+    out_dir = project_dir / ORIGINAL_STRUCTURE_DIR
+    target = module_name.replace("-", "_")
+    for candidate in out_dir.glob("*.txt"):
+        stem = candidate.stem.replace("-", "_")
+        if stem == target:
+            content = candidate.read_text()
+            return [ln.strip() for ln in content.splitlines() if ln.strip()]
+    return []

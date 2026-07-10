@@ -65,8 +65,10 @@ def test_wrong_compiling_fill_rejected_by_u2_gate(monkeypatch, tmp_path):
 
     # Model: first attempt wrong, second correct.
     bodies = iter(["a - b", "a + b"])
-    monkeypatch.setattr(pipeline, "_ask_per_fn_body",
-                        lambda *_a, **_k: (next(bodies, "a + b"), None))
+    import dataclasses as _dc
+    monkeypatch.setattr(pipeline, "_APP", _dc.replace(
+        pipeline._APP,
+        ask_per_fn_body=lambda *_a, **_k: (next(bodies, "a + b"), None)))
 
 
 

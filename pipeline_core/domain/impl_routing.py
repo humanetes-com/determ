@@ -70,3 +70,9 @@ def route_fn_bodies(
             continue
         dropped.append(str(fn_data.get("fn_name", "")))
     return BodyRouting(routed=tuple(routed), dropped=tuple(dropped))
+
+
+def impl_block_id(file_rel: str, container: str) -> str:
+    """Stable hashable id for an impl block (frontier-mapping dict key and
+    per-block lock key)."""
+    return f"{file_rel}::{container}"
