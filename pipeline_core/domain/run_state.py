@@ -23,3 +23,38 @@ class RunState:
     nolog: bool = False
     progress_mode: bool = False
     run_started_iso: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class RunPlan:
+    """The parsed CLI contract (plan #77 T1, parse-don't-validate): argparse's
+    Namespace is read EXACTLY ONCE — in :meth:`from_args` — and everything
+    downstream consumes this frozen, typed VO. Field set = the flags the run
+    loop actually consumes (display-only flags like --best-models-list stay
+    in `main`)."""
+
+    project: str = "agave"
+    repo: str | None = None
+    clean: bool = False
+    progress: bool = False
+    nolog: bool = False
+    augment_tests: bool = False
+    from_spec: bool = False
+    restart_from_augmented: bool = False
+    audit: bool = False
+    phase_a_only: bool = False
+    phase_b_only: bool = False
+    phase_c_only: bool = False
+    phase_d_only: bool = False
+    skeleton_backend: bool = False
+
+    @classmethod
+    def from_args(cls, args: object) -> RunPlan:
+        """Build from an argparse Namespace (or any attribute bag — tests pass
+        SimpleNamespace). Missing attributes take the field default, so a
+        partial namespace never crashes the boundary."""
+        from dataclasses import fields
+        return cls(**{
+            f.name: getattr(args, f.name)
+            for f in fields(cls) if hasattr(args, f.name)
+        })

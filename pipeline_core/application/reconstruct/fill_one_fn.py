@@ -620,6 +620,16 @@ class FillOneFn:
                 # don't justify an immediate retry either).
                 _signal = _retro.get("signal", "")
                 _transient = _signal in ("llm_error", "empty_response")
+                # Every error is in ANOTHER file: the crate is broken
+                # elsewhere and this fn is probably fine. Its error count
+                # reflects the blocker, not this body — folding it into
+                # best_error_count would exhaust an innocent fn the moment
+                # the blocker persists across two rounds (observed: a
+                # corrupted error.rs permanently parked unrelated fns in
+                # backtrace.rs and nightly.rs). Record the diagnosis but
+                # never exhaust, never move the baseline, and don't retry
+                # now (no body change can fix a downstream break).
+                _downstream = _signal == "downstream_only"
                 if not _transient:
                     _cur_errs = len(cargo_err_sig(
                         error_excerpt or first_error_excerpt or ""
@@ -628,20 +638,29 @@ class FillOneFn:
                     # no prior to compare, so we never exhaust on
                     # round 1. Subsequent retros exhaust unless
                     # current count is strictly lower than prior best.
-                    if _prior_best is None:
+                    if _downstream:
+                        _new_best = _prior_best
+                        _improved = False
+                        _full_exhaust = False
+                    elif _prior_best is None:
                         _new_best = _cur_errs
                         _improved = True
+                        _full_exhaust = (
+                            _retro.get("category") in ("GENUINELY_HARD",
+                                                       "FROZEN_BOUND_MISMATCH")
+                        )
                     else:
                         _new_best = min(int(_prior_best), _cur_errs)
                         _improved = _cur_errs < int(_prior_best)
+                        _full_exhaust = (
+                            # FROZEN_BOUND_MISMATCH: structurally proven
+                            # unsatisfiable — park immediately like
+                            # GENUINELY_HARD.
+                            _retro.get("category") in ("GENUINELY_HARD",
+                                                       "FROZEN_BOUND_MISMATCH")
+                            or not _improved
+                        )
                     _new_count = _prior_count + 1
-                    _full_exhaust = (
-                        # FROZEN_BOUND_MISMATCH: structurally proven
-                        # unsatisfiable — park immediately like GENUINELY_HARD.
-                        _retro.get("category") in ("GENUINELY_HARD",
-                                                   "FROZEN_BOUND_MISMATCH")
-                        or (_prior_best is not None and not _improved)
-                    )
                     _retros[_retro_k] = {
                         "category": _retro.get("category", ""),
                         "guidance": _retro.get("guidance", ""),
@@ -657,7 +676,7 @@ class FillOneFn:
                     # round (the fix prompt reads ctx.retros_cache) and to
                     # every later dispatch in this pass.
                     ctx.retros_cache[_retro_k] = _retros[_retro_k]
-                    _retry_informed = not _full_exhaust
+                    _retry_informed = not _full_exhaust and not _downstream
                     self.tel.log(f"  [phase-c/retro] {fn_name} "
                                  f"[{_retro.get('category','?')}] "
                                  f"signal={_signal} "

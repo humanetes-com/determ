@@ -64,7 +64,7 @@ def test_fill_first_try_success(monkeypatch, tmp_path):
     install_scripted_cargo(monkeypatch, check_diag=(0, "", []), run=(0, "ok"))
     res = _run(ws)
     text = (ws / "src" / "lib.rs").read_text()
-    assert res["fns_filled"] == 1 and res["remaining"] == 0
+    assert res.fns_filled == 1 and res.remaining == 0
     assert "42" in text and "unimplemented!()" not in text
 
 
@@ -79,8 +79,8 @@ def test_fix_loop_recovers_on_second_attempt(monkeypatch, tmp_path):
              (0, "ok")])
     res = _run(ws)
     text = (ws / "src" / "lib.rs").read_text()
-    assert res["fns_filled"] == 1
-    assert res["attempts"] == 2          # one failure, one recovery
+    assert res.fns_filled == 1
+    assert res.attempts == 2          # one failure, one recovery
     assert "42" in text and "unimplemented!()" not in text
 
 
@@ -93,8 +93,8 @@ def test_repeated_error_signature_stops_after_two_attempts(monkeypatch, tmp_path
         run=(101, ERR.format(code="E0308", msg="mismatched types")))
     res = _run(ws)
     text = (ws / "src" / "lib.rs").read_text()
-    assert res["fns_filled"] == 0 and res["remaining"] == 1
-    assert res["attempts"] == 2
+    assert res.fns_filled == 0 and res.remaining == 1
+    assert res.attempts == 2
     assert "unimplemented!()" in text    # annotated stub restored
 
 
@@ -109,8 +109,8 @@ def test_floor_stall_exhaustion_restores_annotated_stub(monkeypatch, tmp_path):
         run=lambda: (101, ERR.format(code=next(codes, "E0999"), msg="x")))
     res = _run(ws)
     text = (ws / "src" / "lib.rs").read_text()
-    assert res["fns_filled"] == 0 and res["remaining"] == 1
-    assert res["attempts"] == 4          # observe(improved) + 3 stalls
+    assert res.fns_filled == 0 and res.remaining == 1
+    assert res.attempts == 4          # observe(improved) + 3 stalls
     assert "unimplemented!()" in text
 
 
@@ -138,8 +138,8 @@ def test_u2_assertion_failure_routes_to_fix_loop(monkeypatch, tmp_path):
         skip_end_pass_test=True,
         tdd_frontier_tests={("lib.rs", "answer"): {"t_answer"}},
         tdd_test_cmd="cargo test")
-    assert res["fns_filled"] == 1
-    assert res["attempts"] == 2
+    assert res.fns_filled == 1
+    assert res.attempts == 2
     assert "42" in (ws / "src" / "lib.rs").read_text()
 
 
@@ -160,8 +160,8 @@ def test_u2_codependent_stub_panic_keeps_body(monkeypatch, tmp_path):
         skip_end_pass_test=True,
         tdd_frontier_tests={("lib.rs", "answer"): {"t_answer"}},
         tdd_test_cmd="cargo test")
-    assert res["fns_filled"] == 1
-    assert res["attempts"] == 1
+    assert res.fns_filled == 1
+    assert res.attempts == 1
     assert "42" in (ws / "src" / "lib.rs").read_text()
 
 
@@ -208,8 +208,8 @@ def test_sig_change_hatch_applies_on_attempt_five(monkeypatch, tmp_path):
                            run=lambda: next(fails, (0, "ok")))
     res = _run(ws)
     text = (ws / "src" / "lib.rs").read_text()
-    assert res["fns_filled"] == 1
-    assert res["attempts"] == 5
+    assert res.fns_filled == 1
+    assert res.attempts == 5
     assert "u64" in text and "42" in text and "unimplemented!()" not in text
 
 
@@ -238,8 +238,8 @@ def test_retro_retry_recovers_after_first_fix_loop_exhausts(monkeypatch, tmp_pat
              (0, "ok")])
     res = _run(ws)
     text = (ws / "src" / "lib.rs").read_text()
-    assert res["fns_filled"] == 1 and res["remaining"] == 0
-    assert res["attempts"] == 3
+    assert res.fns_filled == 1 and res.remaining == 0
+    assert res.attempts == 3
     assert "42" in text and "unimplemented!()" not in text
 
 
@@ -255,8 +255,8 @@ def test_retro_retry_parks_fn_when_error_floor_stops_improving(monkeypatch, tmp_
         run=(101, ERR.format(code="E0308", msg="mismatched types")))
     res = _run(ws)
     text = (ws / "src" / "lib.rs").read_text()
-    assert res["fns_filled"] == 0 and res["remaining"] == 1
-    assert res["attempts"] == 4          # 2 rounds × repeated-sig exit at 2
+    assert res.fns_filled == 0 and res.remaining == 1
+    assert res.attempts == 4          # 2 rounds × repeated-sig exit at 2
     assert "unimplemented!()" in text    # annotated stub restored
     from pipeline_core.adapters.retros import load_retrospectives, retro_key
     rec = load_retrospectives(ws)[retro_key("lib.rs", "answer", "")]
@@ -273,7 +273,7 @@ def test_transient_retro_does_not_trigger_immediate_retry(monkeypatch, tmp_path)
         monkeypatch, check_diag=(0, "", []),
         run=(101, ERR.format(code="E0308", msg="mismatched types")))
     res = _run(ws)
-    assert res["fns_filled"] == 0 and res["remaining"] == 1
-    assert res["attempts"] == 2          # single round, no retro retry
+    assert res.fns_filled == 0 and res.remaining == 1
+    assert res.attempts == 2          # single round, no retro retry
     from pipeline_core.adapters.retros import load_retrospectives
     assert load_retrospectives(ws) == {}

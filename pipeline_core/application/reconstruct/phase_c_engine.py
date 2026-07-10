@@ -123,12 +123,8 @@ class PhaseCFillEngine:
         skip_end_pass_test: bool = False,
         tdd_frontier_tests: Frontier | None = None,
         tdd_test_cmd: str | None = None,
-    ) -> dict[str, Any]:
-        """Phase C — Flavour B with full validation loops.
-
-        Returns {'fns_filled', 'bytes_filled', 'attempts', 'errors', 'remaining',
-        'impls_filled', 'impls_failed'}.
-        """
+    ) -> ClusterFillResult:
+        """Phase C — Flavour B with full validation loops."""
         if cluster_env is None:
             cluster_env = self.cargo.env()
         # P5 — per-impl-block path. New default unit of work: fill all stubs of
@@ -152,12 +148,12 @@ class PhaseCFillEngine:
             )
             # If there are still stub members the per-impl path didn't cover
             # (free fns or oversized blocks), fall through to the per-fn path.
-            if _impl_stats["remaining"] == 0:
+            if _impl_stats.remaining == 0:
                 return _impl_stats
             _carryover = {
-                "impls_filled": _impl_stats.get("impls_filled", 0),
-                "impls_failed": _impl_stats.get("impls_failed", 0),
-                "fns_filled_via_impl": _impl_stats.get("fns_filled", 0),
+                "impls_filled": _impl_stats.impls_filled,
+                "impls_failed": _impl_stats.impls_failed,
+                "fns_filled_via_impl": _impl_stats.fns_filled,
             }
         else:
             _carryover = {}
@@ -687,4 +683,4 @@ class PhaseCFillEngine:
             remaining=remaining,
             impls_filled=_carryover.get("impls_filled", 0),
             impls_failed=_carryover.get("impls_failed", 0),
-        ).to_dict()
+        )

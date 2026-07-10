@@ -244,16 +244,26 @@ def build_per_fn_fix_prompt(
     if attempt_history:
         _PRIOR_MAX_ITEMS = 3
         _PRIOR_BODY_CAP = 320
-        _PRIOR_ERR_CAP = 180
+        _PRIOR_ERR_CAP = 700
         recent = attempt_history[-_PRIOR_MAX_ITEMS:]
         rendered: list[str] = []
         for h in recent:
             body_excerpt = (h.get("body") or "").strip()
             if len(body_excerpt) > _PRIOR_BODY_CAP:
                 body_excerpt = body_excerpt[:_PRIOR_BODY_CAP] + "..."
+            # Cap at a LINE boundary: a rustc diagnostic sliced mid-line
+            # ("- th...") is unactionable — the model needs the span arrows
+            # and expected/found lines whole (same rule as focus_diagnostics).
             err_excerpt = (h.get("error_sig") or "").strip()
             if len(err_excerpt) > _PRIOR_ERR_CAP:
-                err_excerpt = err_excerpt[:_PRIOR_ERR_CAP] + "..."
+                _kept: list[str] = []
+                _used = 0
+                for _ln in err_excerpt.splitlines():
+                    if _used + len(_ln) + 1 > _PRIOR_ERR_CAP and _kept:
+                        break
+                    _kept.append(_ln)
+                    _used += len(_ln) + 1
+                err_excerpt = "\n".join(_kept) + "\n..."
             outcome = h.get("outcome", "fail")
             attempt_n = h.get("attempt", "?")
             rendered.append(

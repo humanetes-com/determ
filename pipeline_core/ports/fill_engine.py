@@ -21,6 +21,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from pipeline_core.domain.models import (
     BuildCluster,
+    ClusterFillResult,
     FnFixContext,
     FnLocator,
     ImplBlock,
@@ -230,4 +231,4 @@ class ImplFillPath(Protocol):
         tdd_frontier_keys: set[FnLocator] | None,
         tdd_frontier_tests: Any, tdd_test_cmd: str | None,
         parallelism: int = 1,
-    ) -> dict[str, Any]: ...
+    ) -> ClusterFillResult: ...

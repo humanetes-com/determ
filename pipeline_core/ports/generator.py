@@ -16,7 +16,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from ..domain.models import BuildCluster, Diagnostic, FnLocator, Frontier
+from ..domain.models import (
+    BuildCluster,
+    ClusterFillResult,
+    Diagnostic,
+    FnLocator,
+    Frontier,
+)
 
 
 @runtime_checkable
@@ -128,7 +134,7 @@ class FillEngine(Protocol):
         module: str, cluster: BuildCluster, check_cmd: str,
         cluster_env: dict[str, str], leaf_counts: dict[str, int] | None,
         fr_path: Path | None, test_cmd_builder: Any, tag: str,
-    ) -> dict[str, Any]: ...
+    ) -> ClusterFillResult: ...
     def fill_fns_one_by_one(
         self, *, project_dir: Path, target_src_dir: Path,
         tests_dir_files: list[Path], module_name: str, cluster_name: str,
@@ -138,7 +144,7 @@ class FillEngine(Protocol):
         tdd_frontier_keys: set[FnLocator] | None = ...,
         skip_end_pass_test: bool = ..., tdd_frontier_tests: Frontier | None = ...,
         tdd_test_cmd: str | None = ...,
-    ) -> dict[str, Any]: ...
+    ) -> ClusterFillResult: ...
     def fill_groups(
         self, skeleton_dir: Path, target_src_dir: Path, groups: list[dict[str, Any]],
         project_dir: Path, *, cluster_name: str, module_name: str,
@@ -208,7 +214,4 @@ class GenTests(Protocol):
 class SourceScan(Protocol):
     """Pure structural source scanners (`pipeline.py`-resident syn-backed)."""
 
-    def locate_fn(
-        self, file_text: str, fn_name: str,
-    ) -> tuple[str, int, int, int] | None: ...
     def rust_delimiters_balanced(self, text: str) -> bool: ...

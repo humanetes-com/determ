@@ -10,6 +10,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+from pipeline_core.domain.generation import Task1Request
+
 
 @runtime_checkable
 class Telemetry(Protocol):
@@ -36,12 +38,7 @@ class PhaseGate(Protocol):
 class RequirementsService(Protocol):
     """TASK 1: synthesise functional_requirements + anti-corruption validation."""
 
-    def task1(
-        self, project_dir: Path, genesis_path: Path, functional_req_path: Path,
-        test_files: Any, readme_text: str, *, project_profile: str = ...,
-        crate_type: str = ..., module_name: str = ..., project_context: str = ...,
-        coverage_strategy: str = ...,
-    ) -> bool: ...
+    def task1(self, req: Task1Request) -> bool: ...
     def validate_task1_output(
         self, req_path: Path, test_files: Any,
     ) -> tuple[bool, str]: ...

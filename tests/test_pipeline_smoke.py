@@ -2454,6 +2454,7 @@ def test_slice5b_task1() -> None:
     from types import SimpleNamespace
 
     from pipeline_core.application.tasks.task1 import Task1Deps, task1
+    from pipeline_core.domain.generation import Task1Request
 
     calls: dict = {}
 
@@ -2473,13 +2474,13 @@ def test_slice5b_task1() -> None:
 
     tf = [("tests/a.rs", "#[derive(Foo)] struct S;")]
     # standard path → synthesizer.synthesize drives it
-    assert task1(Path("."), Path("g"), Path("r"), tf, "readme", mk(True)) is True
+    assert task1(Task1Request(Path("."), Path("g"), Path("r"), tf, "readme"), mk(True)) is True
     assert calls.get("synth") is True
     # proc-macro path → writes FR from a <FILE> response
     calls.clear()
-    r = task1(Path("."), Path("g"), Path("r"), tf, "readme",
-              mk(ask_resp='<FILE path="functional_requirements.md">PM REQS</FILE>'),
-              crate_type="proc-macro", module_name="mycrate")
+    r = task1(Task1Request(Path("."), Path("g"), Path("r"), tf, "readme",
+                           crate_type="proc-macro", module_name="mycrate"),
+              mk(ask_resp='<FILE path="functional_requirements.md">PM REQS</FILE>'))
     assert r is True and calls["fr"] == "PM REQS"
     print("  OK  task1 (dispatcher + proc-macro) extracted (slice 5b)")
 

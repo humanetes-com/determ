@@ -37,7 +37,8 @@ from ...domain.generation import (
     topo_sort_files,
 )
 from ...domain.llm_output import extract_files
-from ...domain.models import BuildCluster, FnLocator
+from ...domain.models import BuildCluster, ClusterFillResult, FnLocator
+from ...domain.rust_fn_headers import locate_all_fns
 from ...domain.rust_scan import item_names
 from ...domain.test_results import parse_test_counts
 from ...domain.text import (
@@ -1333,6 +1334,32 @@ class StaticSkeletonTask2Generator(Task2Generator):
                              "cluster(s); only unfilled stubs remain for this "
                              "cluster's fill.")
 
+        # Pre-pass heal: donor seeding and resume both admit bodies that were
+        # never compile-gated against THIS tree (an exhausted fix loop leaves
+        # its last broken body in the donor). One broken body fails every
+        # unit of the coming pass as `downstream_only` — an entire pass of
+        # LLM calls burned before end-of-pass validate reverts the blocker
+        # (live case: a donor `context` body poisoned error.rs's 35-fn
+        # refill). Check + revert the implicated fns NOW, before filling.
+        _rc0, _o0, _e0 = self.cargo.run_raw(
+            shlex.split(check_cmd), filled_dir, self._cluster_env(cluster), 180)
+        if _rc0 not in (-1, 0):
+            _pre_out = (_o0 or "") + "\n" + (_e0 or "")
+            _pre_impl = self.cargo.implicated_fns_from_cargo_errors(
+                _pre_out, filled_dir)
+            if _pre_impl:
+                self.tel.log(f"  {tag} [pre-pass-heal] seeded/resumed tree does "
+                             "not compile; implicated: "
+                             f"{', '.join(f'{f}::{fn}' for f, fn in _pre_impl[:6])}")
+                _healed = self._revert_implicated(tag, _pre_impl, filled_dir,
+                                                  skeleton_dir)
+                self.tel.log(f"  {tag} [pre-pass-heal] reverted {_healed} fn(s) "
+                             "to stubs before the fill pass.")
+                self.tel.emit("phase_c.cluster.prepass_heal", data={
+                    "cluster": cluster.name, "reverted": _healed,
+                    "implicated": [{"file": f, "fn": fn} for f, fn in _pre_impl],
+                })
+
         # Propagate gen_tests siblings from project_dir/src/ into filled_dir/src/.
         # task0c commits these as cluster-specific unit-test specs; the bake step
         # emits only the structural skeleton. Without this propagation Phase C
@@ -1395,7 +1422,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
                 self.tel.log(f"  {tag} [skeleton-C] propagated {_gt_propagated} "
                              f"gen_tests decl(s) into filled tree.")
 
-        c_result: dict[str, Any]
+        c_result: ClusterFillResult | dict[str, Any]
         if per_fn_mode:
             self.tel.log(f"  {tag} [skeleton-C] per-fn mode (Flavour B): scanning stubs...")
             # Make filled_dir a runnable crate root so cargo check/test work:
@@ -1500,11 +1527,11 @@ class StaticSkeletonTask2Generator(Task2Generator):
                     leaf_name_counts=_leaf_counts,
                     fr_path=_fr_for_notes,
                 )
-            self.tel.log(f"  {tag} [skeleton-C] {c_result['fns_filled']} fn(s) filled, "
-                         f"{c_result['bytes_filled']:,} bytes net, "
-                         f"{c_result['attempts']} LLM call(s), "
-                         f"{c_result['remaining']} stub(s) remaining, "
-                         f"{len(c_result['errors'])} error(s).")
+            self.tel.log(f"  {tag} [skeleton-C] {c_result.fns_filled} fn(s) filled, "
+                         f"{c_result.bytes_filled:,} bytes net, "
+                         f"{c_result.attempts} LLM call(s), "
+                         f"{c_result.remaining} stub(s) remaining, "
+                         f"{len(c_result.errors)} error(s).")
         else:
             # Phase B — grouping (cached per cluster).
             groups_path = skeleton_dir / "groups.json"
@@ -1595,37 +1622,12 @@ class StaticSkeletonTask2Generator(Task2Generator):
             self.tel.log(f"  {tag} [skeleton-validate] implicated fns: "
                          f"{', '.join(f'{f}::{fn}' for f, fn in implicated[:6])}"
                          + ("..." if len(implicated) > 6 else ""))
-            # Revert each implicated fn to unimplemented!() so the per-fn loop
-            # picks them up again as stubs.
-            reverted = 0
-            for rel_f, fn in implicated:
-                fp = filled_dir / rel_f
-                try:
-                    text = fp.read_text(encoding="utf-8")
-                except Exception:
-                    continue
-                loc = self.scan.locate_fn(text, fn)
-                if loc is None:
-                    continue
-                _sig, _ss, body_start, body_end = loc
-                cur_body = text[body_start:body_end]
-                if is_unimplemented_body(cur_body):
-                    continue  # already a stub — nothing to revert
-                # Re-indent unimplemented!() like a normal body.
-                line_start = text.rfind("\n", 0, _ss) + 1
-                indent = ""
-                for ch in text[line_start:_ss]:
-                    if ch in (" ", "\t"):
-                        indent += ch
-                    else:
-                        break
-                inner = indent + "    "
-                new_body = "\n" + inner + "unimplemented!()\n" + indent
-                fp.write_text(
-                    text[:body_start] + new_body + text[body_end:],
-                    encoding="utf-8",
-                )
-                reverted += 1
+            reverted = self._revert_implicated(tag, implicated, filled_dir,
+                                               skeleton_dir)
+            if reverted == 0:
+                self.tel.log(f"  {tag} [skeleton-validate] nothing "
+                             "revertible and no skeleton copy — giving up.")
+                break
             self.tel.log(f"  {tag} [skeleton-validate] reverted {reverted} fn(s) "
                          f"to stubs; re-entering per-fn fill loop.")
             self.tel.emit("phase_c.cluster.validate_retry", data={
@@ -1654,6 +1656,60 @@ class StaticSkeletonTask2Generator(Task2Generator):
 
         return {"ok": True, "phase_c": c_result, "phase_d": d_result,
                 "validates": validate_ok}
+
+    def _revert_implicated(self, tag: str, implicated: list[FnLocator],
+                           filled_dir: Path, skeleton_dir: Path) -> int:
+        """Revert every implicated fn to `unimplemented!()` so the per-fn loop
+        refills it. EVERY same-name occurrence is reverted (fmt lives in each
+        Debug/Display impl; the error output gives a bare name, so any of them
+        may be the culprit — a stub is always safe, a kept-broken body never
+        is). Occurrences are rewritten last-to-first so earlier offsets stay
+        valid. When nothing is revertible at fn granularity (corruption
+        OUTSIDE any locatable fn body — e.g. a past splice broke out of a
+        doc-comment, leaving stray tokens between items), restore each
+        implicated FILE wholesale from the baked skeleton: good fills in that
+        file are lost, but the tree parses again and the per-fn loop refills
+        them; a permanently broken file blocks the ENTIRE cluster forever.
+        Returns the number of fns/files reverted (0 = nothing left to try)."""
+        reverted = 0
+        for rel_f, fn in implicated:
+            fp = filled_dir / rel_f
+            try:
+                text = fp.read_text(encoding="utf-8")
+            except Exception:
+                continue
+            locs = locate_all_fns(text, fn)
+            changed = False
+            for _sig, _ss, body_start, body_end in reversed(locs):
+                cur_body = text[body_start:body_end]
+                if is_unimplemented_body(cur_body):
+                    continue  # already a stub — nothing to revert
+                # Re-indent unimplemented!() like a normal body.
+                line_start = text.rfind("\n", 0, _ss) + 1
+                indent = ""
+                for ch in text[line_start:_ss]:
+                    if ch in (" ", "\t"):
+                        indent += ch
+                    else:
+                        break
+                inner = indent + "    "
+                new_body = "\n" + inner + "unimplemented!()\n" + indent
+                text = text[:body_start] + new_body + text[body_end:]
+                changed = True
+                reverted += 1
+            if changed:
+                fp.write_text(text, encoding="utf-8")
+        if reverted == 0:
+            for rel_f in {rf for rf, _ in implicated}:
+                skel_src = skeleton_dir / rel_f
+                if not skel_src.exists():
+                    continue
+                shutil.copy(skel_src, filled_dir / rel_f)
+                reverted += 1
+                self.tel.log(f"  {tag} [heal] {rel_f}: no fn was revertible — "
+                             "restored whole file from skeleton (stubs will "
+                             "be refilled).")
+        return reverted
 
     def _backfill_tree(self, tree_dir: Path, donor_dirs: list[Path]) -> int:
         """Fill remaining `unimplemented!()` stubs in `tree_dir/src` with the
@@ -1847,8 +1903,8 @@ class StaticSkeletonTask2Generator(Task2Generator):
                 if key in cur_stubs or (key[0].split("/")[-1], key[1]) in cur_stubs:
                     permanently_exhausted.add(key)
             self.tel.log(f"  {tag} post-merge iter {iter_n}: "
-                         f"{sub.get('fns_filled', 0)} fn(s) filled, "
-                         f"{sub.get('attempts', 0)} attempt(s).")
+                         f"{sub.fns_filled} fn(s) filled, "
+                         f"{sub.attempts} attempt(s).")
         self.tel.log(f"  {tag} post-merge hard cap {hard_cap} reached (safety net).")
 
     @staticmethod

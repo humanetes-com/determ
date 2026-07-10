@@ -112,8 +112,8 @@ class FakeFill:
     def converge_in_cluster(self, cluster: Any) -> str | None: return None
 
     # ImplFillPath
-    def fill_impl_blocks(self, **k: Any) -> dict[str, Any]:
-        return self.s.get("impl_stats", {"remaining": 0})
+    def fill_impl_blocks(self, **k: Any) -> ClusterFillResult:
+        return self.s.get("impl_stats", ClusterFillResult())
 
 
 _CAPS = FillCaps(per_fn_fix_hard_cap=8, per_fn_fix_max_stalls=2, fix_err_cap=2000)
@@ -145,15 +145,6 @@ def _fill_one(fake: FakeFill) -> FillOneFn:
 
 
 # ---- domain value objects ----
-
-def test_cluster_fill_result_to_dict_keys() -> None:
-    d = ClusterFillResult(fns_filled=2, bytes_filled=10, attempts=3,
-                          errors=("e",), remaining=1, impls_filled=4,
-                          impls_failed=5).to_dict()
-    assert d == {"fns_filled": 2, "bytes_filled": 10, "attempts": 3,
-                 "errors": ["e"], "remaining": 1, "impls_filled": 4,
-                 "impls_failed": 5}
-
 
 def test_fn_fix_context_defaults() -> None:
     c = FnFixContext()
@@ -248,7 +239,8 @@ def _engine(fake: FakeFill, fill_unit: FillUnit) -> PhaseCFillEngine:
 
 def test_engine_impl_path_early_return(tmp_path: Path) -> None:
     ws = _mk_ws(tmp_path)
-    stats = {"remaining": 0, "fns_filled": 3, "impls_filled": 1, "impls_failed": 0}
+    stats = ClusterFillResult(remaining=0, fns_filled=3, impls_filled=1,
+                              impls_failed=0)
     fake = FakeFill(impl_stats=stats)
     out = _engine(fake, FillUnit.IMPL).run(
         ws, ws / "src", [], "m", "t", cluster=None, cluster_env={})
@@ -262,7 +254,7 @@ def test_engine_per_fn_empty_cluster(tmp_path: Path) -> None:
     out = _engine(fake, FillUnit.FN).run(
         ws, ws / "src", [], "m", "t", cluster=None, cluster_env={},
         skip_end_pass_test=True)
-    assert out["fns_filled"] == 0 and out["remaining"] == 0
+    assert out.fns_filled == 0 and out.remaining == 0
     assert "phase_c.cluster.done" in fake.events
 
 

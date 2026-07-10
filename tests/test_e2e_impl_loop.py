@@ -90,9 +90,9 @@ def test_impl_block_filled_in_one_call(monkeypatch, tmp_path):
     install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
     res = _run(ws)
     text = (ws / "src" / "lib.rs").read_text()
-    assert res["impls_filled"] == 1 and res["fns_filled"] == 2
+    assert res.impls_filled == 1 and res.fns_filled == 2
     assert "self.tag" in text and "unimplemented!()" not in text
-    assert res["remaining"] == 0
+    assert res.remaining == 0
 
 
 def test_impl_floor_stall_reverts_block(monkeypatch, tmp_path):
@@ -107,14 +107,14 @@ def test_impl_floor_stall_reverts_block(monkeypatch, tmp_path):
                             [diag("src/lib.rs", code=next(codes, "E0999"))]))
     res = _run(ws)
     text = (ws / "src" / "lib.rs").read_text()
-    assert res["impls_filled"] == 0 and res["impls_failed"] == 1
+    assert res.impls_filled == 0 and res.impls_failed == 1
     # Round 1: floor stall exhausts at 4. Retro round 1 baselines -> one
     # informed retry; round 2 repeats E0999 twice -> repeated exit at 2.
-    assert res["attempts"] == 6
+    assert res.attempts == 6
     assert text == IMPL_LIB              # reverted to pristine stubs
     # Extractor seam returns None → remaining must come from the text-scan
     # fallback (was 0, silently skipping the caller's per-fn cleanup pass).
-    assert res["remaining"] == 2
+    assert res.remaining == 2
 
 
 def test_impl_repeated_error_signature_stops_after_two(monkeypatch, tmp_path):
@@ -127,8 +127,8 @@ def test_impl_repeated_error_signature_stops_after_two(monkeypatch, tmp_path):
         monkeypatch,
         check_diag=(101, "error: x", [diag("src/lib.rs", code="E0308")]))
     res = _run(ws)
-    assert res["impls_filled"] == 0 and res["impls_failed"] == 1
-    assert res["attempts"] == 4          # 2 rounds x repeated-sig exit at 2
+    assert res.impls_filled == 0 and res.impls_failed == 1
+    assert res.attempts == 4          # 2 rounds x repeated-sig exit at 2
     assert (ws / "src" / "lib.rs").read_text() == IMPL_LIB
 
 
@@ -149,7 +149,7 @@ def test_impl_b3_keeps_nonregressing_fill(monkeypatch, tmp_path):
     )
     res = _run(ws)
     text = (ws / "src" / "lib.rs").read_text()
-    assert res["impls_filled"] == 1 and res["fns_filled"] == 2
+    assert res.impls_filled == 1 and res.fns_filled == 2
     assert "self.tag" in text and "unimplemented!()" not in text
 
 
@@ -175,7 +175,7 @@ def test_impl_b3_does_not_keep_green_but_test_failing_fill(monkeypatch, tmp_path
         tdd_frontier_tests={FnLocator("lib.rs", "kind"): {"kind_works"},
                             FnLocator("lib.rs", "name"): {"kind_works"}})
     text = (ws / "src" / "lib.rs").read_text()
-    assert res["impls_filled"] == 0            # NOT kept
+    assert res.impls_filled == 0            # NOT kept
     assert "unimplemented!()" in text          # reverted to stub
 
 
@@ -235,7 +235,7 @@ def test_refill_only_block_reaches_llm_and_splices_with_allow_nonstub(
         tdd_frontier_keys={FnLocator("lib.rs", "kind")},
         tdd_frontier_tests={FnLocator("lib.rs", "kind"): {"kind_is_wrong"}})
     text = (ws / "src" / "lib.rs").read_text()
-    assert res["impls_filled"] == 1 and res["fns_filled"] == 1
+    assert res.impls_filled == 1 and res.fns_filled == 1
     assert "self.tag + 999" not in text         # wrong `kind` body replaced
     assert "self.tag + 1" in text               # `name` untouched (not a target)
 
@@ -256,8 +256,8 @@ def test_block_with_no_refill_target_is_not_collected(monkeypatch, tmp_path):
         module_name="m", cluster_name="t", cluster=None, check_cmd="cargo check",
         cluster_env={}, fr_path=None, tdd_frontier_keys=None,
         tdd_frontier_tests=None)
-    assert res["impls_filled"] == 0 and res["impls_failed"] == 0
-    assert res["attempts"] == 0
+    assert res.impls_filled == 0 and res.impls_failed == 0
+    assert res.attempts == 0
 
 
 # --- debt #42: stale stub_members / already-filled blocks ---------------------
@@ -277,8 +277,8 @@ def test_already_complete_block_skips_llm_call(monkeypatch, tmp_path):
         raise AssertionError("model must not be asked for a complete block")
     monkeypatch.setattr(pipeline, "_ask_raw", _no_call)
     res = _run(ws)
-    assert res["impls_failed"] == 0 and res["impls_filled"] == 0
-    assert res["attempts"] == 0
+    assert res.impls_failed == 0 and res.impls_filled == 0
+    assert res.attempts == 0
 
 
 def test_partial_staleness_refills_only_remaining_stub(monkeypatch, tmp_path):
@@ -298,8 +298,8 @@ def test_partial_staleness_refills_only_remaining_stub(monkeypatch, tmp_path):
     install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
     res = _run(ws)
     text = (ws / "src" / "lib.rs").read_text()
-    assert res["impls_filled"] == 1 and res["impls_failed"] == 0
-    assert res["fns_filled"] == 1
+    assert res.impls_filled == 1 and res.impls_failed == 0
+    assert res.fns_filled == 1
     assert "self.tag + 1" in text          # `name` filled from the reply
     assert "9" in text                     # earlier `kind` fill untouched
 
@@ -313,8 +313,8 @@ def test_all_target_not_stub_refusals_count_as_complete(monkeypatch, tmp_path):
     _install_model(monkeypatch, [RESPONSE_BOTH])
     install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
     res = _run(ws)
-    assert res["impls_failed"] == 0 and res["impls_filled"] == 0
-    assert res["attempts"] == 1
+    assert res.impls_failed == 0 and res.impls_filled == 0
+    assert res.attempts == 1
     assert (ws / "src" / "lib.rs").read_text() == IMPL_LIB_FILLED
 
 
@@ -331,9 +331,9 @@ def test_maximal_last_resort_rescues_exhausted_block(monkeypatch, tmp_path):
         monkeypatch, check_diag=[red, red, (0, "", [])])
     res = _run(ws)
     text = (ws / "src" / "lib.rs").read_text()
-    assert res["impls_filled"] == 1 and res["fns_filled"] == 2
-    assert res["impls_failed"] == 0
-    assert res["attempts"] == 2            # maximal is not a loop attempt
+    assert res.impls_filled == 1 and res.fns_filled == 2
+    assert res.impls_failed == 0
+    assert res.attempts == 2            # maximal is not a loop attempt
     assert "self.tag" in text and "unimplemented!()" not in text
 
 
@@ -345,7 +345,7 @@ def test_maximal_skipped_when_over_char_cap(monkeypatch, tmp_path):
         monkeypatch,
         check_diag=(101, "error: x", [diag("src/lib.rs", code="E0308")]))
     res = _run(ws)
-    assert res["impls_failed"] == 1
+    assert res.impls_failed == 1
     assert (ws / "src" / "lib.rs").read_text() == IMPL_LIB   # reverted
 
 
@@ -359,7 +359,7 @@ def test_maximal_disabled_by_env(monkeypatch, tmp_path):
     red = (101, "error: x", [diag("src/lib.rs", code="E0308")])
     install_scripted_cargo(monkeypatch, check_diag=[red, red, (0, "", [])])
     res = _run(ws)
-    assert res["impls_failed"] == 1        # green 3rd check never reached
+    assert res.impls_failed == 1        # green 3rd check never reached
 
 
 def test_impl_retro_retry_recovers_on_second_round(monkeypatch, tmp_path):
@@ -371,8 +371,8 @@ def test_impl_retro_retry_recovers_on_second_round(monkeypatch, tmp_path):
     red = (101, "error: x", [diag("src/lib.rs", code="E0308")])
     install_scripted_cargo(monkeypatch, check_diag=[red, red, (0, "", [])])
     res = _run(ws)
-    assert res["impls_filled"] == 1 and res["impls_failed"] == 0
-    assert res["attempts"] == 3            # 2 failed + 1 green post-retro
+    assert res.impls_filled == 1 and res.impls_failed == 0
+    assert res.attempts == 3            # 2 failed + 1 green post-retro
 
 
 # --- P2: pull protocol through the impl fill path -----------------------------
@@ -387,7 +387,7 @@ def test_pull_request_answered_then_block_fills(monkeypatch, tmp_path):
     install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
     res = _run(ws)
     text = (ws / "src" / "lib.rs").read_text()
-    assert res["impls_filled"] == 1 and res["fns_filled"] == 2
+    assert res.impls_filled == 1 and res.fns_filled == 2
     assert "self.tag" in text and "unimplemented!()" not in text
 
 
@@ -400,7 +400,7 @@ def test_pulls_disabled_by_env(monkeypatch, tmp_path):
     _install_model(monkeypatch, ['<REQUEST kind="file" arg="lib.rs"/>'])
     install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
     res = _run(ws)
-    assert res["impls_filled"] == 0 and res["impls_failed"] == 1
+    assert res.impls_filled == 0 and res.impls_failed == 1
 
 
 # --- P5: file-first fill for multi-block files --------------------------------
@@ -451,8 +451,8 @@ def test_file_first_fills_multi_block_file_in_one_call(monkeypatch, tmp_path):
     install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
     res = _run(ws)
     text = (ws / "src" / "lib.rs").read_text()
-    assert res["fns_filled"] == 2 and res["impls_failed"] == 0
-    assert res["attempts"] == 1                    # ONE file-level call
+    assert res.fns_filled == 2 and res.impls_failed == 0
+    assert res.attempts == 1                    # ONE file-level call
     assert "self.tag" in text and "unimplemented!()" not in text
 
 
@@ -481,7 +481,7 @@ def test_file_first_reverts_on_compile_failure_then_blocks_take_over(
     # fill of its own. Content correctness (both fns filled, no stubs left)
     # is what matters — the block-attribution count is one accounting
     # consequence of the fix, not the thing being tested here.
-    assert res["impls_filled"] == 1 and res["impls_failed"] == 0
+    assert res.impls_filled == 1 and res.impls_failed == 0
     assert "self.tag" in text and "unimplemented!()" not in text
 
 
@@ -490,4 +490,4 @@ def test_file_first_skipped_for_single_block(monkeypatch, tmp_path):
     _install_model(monkeypatch, [RESPONSE_BOTH])
     install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
     res = _run(ws)
-    assert res["impls_filled"] == 1          # per-block path, as before
+    assert res.impls_filled == 1          # per-block path, as before

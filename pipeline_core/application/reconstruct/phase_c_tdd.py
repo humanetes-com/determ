@@ -20,7 +20,12 @@ from pipeline_core.application.reconstruct.tdd_ratchet import (
     snapshot_src_tree,
 )
 from pipeline_core.domain.attribution import union_unattributed_stubs
-from pipeline_core.domain.models import BuildCluster, FnLocator, Frontier
+from pipeline_core.domain.models import (
+    BuildCluster,
+    ClusterFillResult,
+    FnLocator,
+    Frontier,
+)
 from pipeline_core.domain.refine import Attempt, LoopState
 from pipeline_core.domain.test_results import (
     parse_failed_tests,
@@ -48,7 +53,7 @@ class PhaseCTddDeps:
     run_cargo: Callable[..., Any]
     scan_unimplemented_for_cluster: Callable[..., Any]
     scan_unimplemented_functions: Callable[..., Any]
-    task2_fill_fns_one_by_one: Callable[..., Any]
+    task2_fill_fns_one_by_one: Callable[..., ClusterFillResult]
 
 
 def _log_attribution_gap(
@@ -89,7 +94,7 @@ def run_phase_c_tdd(
     fr_path: Path | None,
     test_cmd_builder: Callable[..., str],
     tag: str,
-) -> dict[str, Any]:
+) -> ClusterFillResult:
     """Plan 4 — TDD-scoped Phase C driver.
 
     Outer loop: cargo test → frontier → fill frontier → repeat.
@@ -115,10 +120,9 @@ def run_phase_c_tdd(
     })
     if not test_stems:
         deps.log(f"  {tag} [phase-c/tdd] no test stems in cluster; skipping TDD.")
-        return {"fns_filled": 0, "bytes_filled": 0, "attempts": 0,
-                "remaining": len(deps.scan_unimplemented_for_cluster(
-                    target_src_dir, cluster)),
-                "errors": []}
+        return ClusterFillResult(
+            remaining=len(deps.scan_unimplemented_for_cluster(
+                target_src_dir, cluster)))
     test_cmd = test_cmd_builder(test_stems)
     test_timeout = int(os.getenv("PHASE_C_TEST_TIMEOUT", "120"))
     # max_iters is legacy — only the 10k backstop in the loop body honors it.
@@ -428,10 +432,10 @@ def run_phase_c_tdd(
             tdd_test_cmd=test_cmd,         # Plan 10 U2: scoped cluster test cmd
             skip_end_pass_test=True,
         )
-        total_filled += sub.get("fns_filled", 0)
-        total_attempts += sub.get("attempts", 0)
-        total_bytes += sub.get("bytes_filled", 0)
-        errors.extend(sub.get("errors", []))
+        total_filled += sub.fns_filled
+        total_attempts += sub.attempts
+        total_bytes += sub.bytes_filled
+        errors.extend(sub.errors)
 
         # Update recently_filled ring buffer with this iter's actual fills.
         # We don't have the exact list from the sub-result, so use the
@@ -461,11 +465,11 @@ def run_phase_c_tdd(
                     last_notes_count[key] = deps.count_relevant_notes(fr_path, key)
         last_total_filled = total_filled
 
-    return {
-        "fns_filled": total_filled,
-        "bytes_filled": total_bytes,
-        "attempts": total_attempts,
-        "remaining": len(deps.scan_unimplemented_for_cluster(
+    return ClusterFillResult(
+        fns_filled=total_filled,
+        bytes_filled=total_bytes,
+        attempts=total_attempts,
+        remaining=len(deps.scan_unimplemented_for_cluster(
             target_src_dir, cluster)),
-        "errors": errors,
-    }
+        errors=tuple(errors),
+    )

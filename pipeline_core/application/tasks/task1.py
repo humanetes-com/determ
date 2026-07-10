@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ...domain.generation import coalesce_gen_tests_siblings
+from ...domain.generation import Task1Request, coalesce_gen_tests_siblings
 from ...domain.llm_output import extract_files
 from ...domain.text import smart_truncate, strip_markdown_fences
 from ...io import write
@@ -156,11 +156,17 @@ that is NOT a proc-macro derive or attribute provided by this crate.
     return True
 
 
-def task1(project_dir: Path, genesis_path: Path, functional_req_path: Path,
-          test_files: Any, readme_text: str,
-          deps: Task1Deps,
-          project_profile: str = "", crate_type: str = "", module_name: str = "",
-          project_context: str = "", coverage_strategy: str = "") -> bool:
+def task1(req: Task1Request, deps: Task1Deps) -> bool:
+    project_dir = req.project_dir
+    genesis_path = req.genesis_path
+    functional_req_path = req.functional_req_path
+    test_files = req.test_files
+    readme_text = req.readme_text
+    project_profile = req.project_profile
+    crate_type = req.crate_type
+    module_name = req.module_name
+    project_context = req.project_context
+    coverage_strategy = req.coverage_strategy
     log("\nTASK 1: Analyzing tests + README, building functional_requirements.md")
 
     # Pre-strip API surface snapshot (signatures + type defs of the original

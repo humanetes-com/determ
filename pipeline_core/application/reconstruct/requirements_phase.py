@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from pipeline_core.domain.generation import Task1Request
 from pipeline_core.ports.reconstruct import (
     Analyst,
     Artifacts,
@@ -63,12 +64,14 @@ class RequirementsPhase:
                 if attempt > 0:
                     self._tel.log(f"\nTASK 1: retry {attempt}/{T1_MAX_RETRIES} for '{module_name}'.")
                     module_req_path.unlink(missing_ok=True)
-                if not self._req.task1(
-                    project_dir, genesis_path, module_req_path, t1_input, readme_text,
+                if not self._req.task1(Task1Request(
+                    project_dir=project_dir, genesis_path=genesis_path,
+                    functional_req_path=module_req_path, test_files=t1_input,
+                    readme_text=readme_text,
                     project_profile=project_profile, crate_type=crate_type,
                     module_name=module_name, project_context=project_context,
                     coverage_strategy=coverage_strategy,
-                ):
+                )):
                     self._tel.log(f"  TASK 1 failed for '{module_name}' — skipping module.")
                     self._tel.emit("task.done", task="task1", module=module_name,
                                    duration_ms=int((time.monotonic() - t0) * 1000),

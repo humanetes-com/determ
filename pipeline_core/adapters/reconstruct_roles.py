@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from pipeline_core.domain.generation import Task1Request
+
 
 @dataclass(frozen=True, slots=True)
 class PhaseGateAdapter:
@@ -35,17 +37,11 @@ class PhaseGateAdapter:
 
 @dataclass(frozen=True, slots=True)
 class RequirementsAdapter:
-    task1_fn: Callable[..., bool]
+    task1_fn: Callable[[Task1Request], bool]
     validate_fn: Callable[[Path, Any], tuple[bool, str]]
 
-    def task1(self, project_dir: Path, genesis_path: Path, functional_req_path: Path,
-              test_files: Any, readme_text: str, *, project_profile: str = "",
-              crate_type: str = "", module_name: str = "", project_context: str = "",
-              coverage_strategy: str = "") -> bool:
-        return self.task1_fn(
-            project_dir, genesis_path, functional_req_path, test_files, readme_text,
-            project_profile=project_profile, crate_type=crate_type, module_name=module_name,
-            project_context=project_context, coverage_strategy=coverage_strategy)
+    def task1(self, req: Task1Request) -> bool:
+        return self.task1_fn(req)
 
     def validate_task1_output(self, req_path: Path, test_files: Any) -> tuple[bool, str]:
         return self.validate_fn(req_path, test_files)

@@ -90,6 +90,7 @@ EVENTS_LOG   = os.getenv("PIPELINE_EVENTS_LOG", _pick_log(
 # (Tests point the readers via pipeline_core.monitor.events_data.configure / globals.)
 from pipeline_core.monitor import events_data as _ed  # noqa: E402
 from pipeline_core.monitor import run_data as _rd  # noqa: E402
+from pipeline_core.monitor.legend import legend_lines as _legend_lines  # noqa: E402
 from pipeline_core.monitor.render import (  # noqa: E402
     ansi_seq_len as _ansi_seq_len,
 )
@@ -1004,8 +1005,8 @@ def _detach(cmd):
         stderr=subprocess.DEVNULL,
         start_new_session=True,   # setsid() — detach from controlling terminal
     )
-_view        = "monitor"      # "monitor" | "pipeline" | "stream" | "events"
-_scroll      = {"pipeline": 0, "stream": 0, "events": 0}   # lines scrolled up from bottom (0=bottom)
+_view        = "monitor"      # "monitor" | "pipeline" | "stream" | "events" | "legend"
+_scroll      = {"pipeline": 0, "stream": 0, "events": 0, "legend": 0}   # lines scrolled up from bottom (0=bottom)
 _confirm          = None   # pending confirmation: "continue" | "wipe" | "stop" | "poweroff" | None
 _graceful_pending = os.path.exists("/tmp/pipeline_graceful_stop")  # survives monitor restart
 
@@ -1084,6 +1085,7 @@ def _bottom_bar():
         parts.append(rev(bold(tag)) if vid == _view else dim(tag))
     s_col = red if running else dim
     parts += [
+        rev(bold("[l]egend")) if _view == "legend" else dim("[l]egend"),
         green("[c]ontinue"),
         cyan("[g]raceful"),
         yellow("[w]ipe"),
@@ -1293,6 +1295,17 @@ def _render_all():
         _event_box(EVENTS_LOG, "events", "Events (logs/events.jsonl)", inner,
                    header=(pipeline_rows[:1] if pipeline_rows else ()))
 
+    elif _view == "legend":
+        inner = max(1, h - gpu_h - 2 - BOTTOM_LINES)
+        rows = _legend_lines(_w() - 4)
+        off = min(_scroll["legend"], max(0, len(rows) - inner))
+        top = max(0, len(rows) - inner - off)
+        for row in box_lines("Legend — what each phase performs",
+                             rows[top:top + inner]):
+            _ln(row)
+        while len(_buf) < h - BOTTOM_LINES:
+            _ln()
+
     for row in _bottom_bar():
         _ln(row)
 
@@ -1432,6 +1445,8 @@ def _run_action(key):
         else:
             _confirm    = "poweroff"
             _action_msg = red("⏻ power off machine when the run finishes — confirm? [y/n]")
+    elif key == "l":
+        _view = "monitor" if _view == "legend" else "legend"
     elif key in ("1", "2", "3", "4"):
         _view = {"1": "monitor", "2": "pipeline", "3": "stream", "4": "events"}[key]
     elif key == "UP"   and _view in _scroll: _scroll[_view] += SCROLL_STEP
@@ -1448,6 +1463,8 @@ def available_lines():
     elif _view == "stream" or _view == "events":
         p_h = len(pipeline_status()) + 2
         return max(1, h - gpu_h - p_h - 2 - BOTTOM_LINES)
+    elif _view == "legend":
+        return max(1, h - gpu_h - 2 - BOTTOM_LINES)
     return 1
 
 # ── Main loop ─────────────────────────────────────────────────────────────────

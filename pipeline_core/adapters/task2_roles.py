@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from pipeline_core.domain.models import FnLocator
+from pipeline_core.domain.models import ClusterFillResult, FnLocator
 
 
 # --------------------------------------------------------------------------- #
@@ -195,8 +195,8 @@ class CargoBackendAdapter:
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True, slots=True)
 class FillEngineAdapter:
-    run_phase_c_tdd_fn: Callable[..., dict[str, Any]]
-    fill_fns_one_by_one_fn: Callable[..., dict[str, Any]]
+    run_phase_c_tdd_fn: Callable[..., ClusterFillResult]
+    fill_fns_one_by_one_fn: Callable[..., ClusterFillResult]
     fill_groups_fn: Callable[..., dict[str, Any]]
     group_tests_fn: Callable[..., list[dict[str, Any]]]
     cleanup_residuals_fn: Callable[..., dict[str, Any]]
@@ -206,10 +206,10 @@ class FillEngineAdapter:
     reset_exhaustion_flags_fn: Callable[[Path, str], object]  # return discarded
     build_test_reverse_map_fn: Callable[..., dict[str, set[FnLocator]]]
 
-    def run_phase_c_tdd(self, **kw: Any) -> dict[str, Any]:
+    def run_phase_c_tdd(self, **kw: Any) -> ClusterFillResult:
         return self.run_phase_c_tdd_fn(**kw)
 
-    def fill_fns_one_by_one(self, **kw: Any) -> dict[str, Any]:
+    def fill_fns_one_by_one(self, **kw: Any) -> ClusterFillResult:
         return self.fill_fns_one_by_one_fn(**kw)
 
     def fill_groups(self, skeleton_dir: Path, target_src_dir: Path,
@@ -313,12 +313,7 @@ class GenTestsAdapter:
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True, slots=True)
 class SourceScanAdapter:
-    locate_fn_fn: Callable[[str, str], tuple[str, int, int, int] | None]
     rust_delimiters_balanced_fn: Callable[[str], bool]
-
-    def locate_fn(self, file_text: str,
-                  fn_name: str) -> tuple[str, int, int, int] | None:
-        return self.locate_fn_fn(file_text, fn_name)
 
     def rust_delimiters_balanced(self, text: str) -> bool:
         return self.rust_delimiters_balanced_fn(text)

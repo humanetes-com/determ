@@ -146,6 +146,24 @@ class GenerationRequest:
     prev_source_context: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class Task1Request:
+    """One TASK-1 synthesis request (plan #77 T1) — the inputs the
+    requirements synthesiser consumes, replacing a 10-positional signature.
+    `test_files` is the module's (rel_path, content) test spec; the strings
+    are optional prompt context, empty when not applicable."""
+    project_dir: Path
+    genesis_path: Path
+    functional_req_path: Path
+    test_files: Any  # list[tuple[str, str]] — caller's collection, passed through
+    readme_text: str
+    project_profile: str = ""
+    crate_type: str = ""
+    module_name: str = ""
+    project_context: str = ""
+    coverage_strategy: str = ""
+
+
 def strip_test_prefix(stem: str) -> str:
     """Drop a leading `test_`/`tests_`/`it_` prefix from a test file stem
     (regex-free, R7). Equivalent to `re.sub(r'^(test_|tests_|it_)', '', stem)` —

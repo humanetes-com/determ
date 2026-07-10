@@ -78,7 +78,7 @@ def test_retry_fixes_failing_test(monkeypatch, tmp_path):
     res = _run(ws)
     text = (ws / "src" / "lib.rs").read_text()
     assert "42" in text and "41" not in text      # re-splice kept
-    assert res["attempts"] == 2                   # fill + one retry
+    assert res.attempts == 2                   # fill + one retry
     assert cargo["run"].calls == 4
 
 
@@ -99,7 +99,7 @@ def test_retry_stall_exits_after_three_nonimproving_iters(monkeypatch, tmp_path)
     res = _run(ws)
     text = (ws / "src" / "lib.rs").read_text()
     assert "b3" in text                           # last attempt kept
-    assert res["attempts"] == 4                   # fill + 3 retries
+    assert res.attempts == 4                   # fill + 3 retries
     assert cargo["run"].calls == 8                # 1 fill + 1 pass-test + 3×(check+test)
 
 
@@ -117,7 +117,7 @@ def test_retry_broken_check_stops_and_keeps_splice(monkeypatch, tmp_path):
     res = _run(ws)
     text = (ws / "src" / "lib.rs").read_text()
     assert "broken_body" in text
-    assert res["attempts"] == 2
+    assert res.attempts == 2
     assert cargo["run"].calls == 3                # no cargo test after broken check
 
 
@@ -134,5 +134,5 @@ def test_retry_no_resplice_stops_immediately(monkeypatch, tmp_path):
     res = _run(ws)
     text = (ws / "src" / "lib.rs").read_text()
     assert "41" in text
-    assert res["attempts"] == 2                   # fill + the no-body retry ask
+    assert res.attempts == 2                   # fill + the no-body retry ask
     assert cargo["run"].calls == 2

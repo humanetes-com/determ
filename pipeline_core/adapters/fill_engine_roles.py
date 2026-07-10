@@ -26,7 +26,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
-from pipeline_core.domain.models import FnLocator
+from pipeline_core.domain.models import ClusterFillResult, FnLocator
 from pipeline_core.domain.reconstruction import SpliceOutcome
 from pipeline_core.ports.structure import StructureReader
 
@@ -354,7 +354,7 @@ class StallPolicyAdapter:
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True, slots=True)
 class ImplFillPathAdapter:
-    fill_impl_blocks_fn: Callable[..., dict[str, Any]]
+    fill_impl_blocks_fn: Callable[..., ClusterFillResult]
 
-    def fill_impl_blocks(self, **kw: Any) -> dict[str, Any]:
+    def fill_impl_blocks(self, **kw: Any) -> ClusterFillResult:
         return self.fill_impl_blocks_fn(**kw)

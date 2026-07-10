@@ -491,9 +491,9 @@ class FnFixContext:
 
 @dataclass(frozen=True, slots=True)
 class ClusterFillResult:
-    """Outcome of one cluster's phase-C fill (P2 de-monolith of
-    `_task2_fill_fns_one_by_one`). `to_dict` round-trips the exact key set the
-    legacy function returned, so every call site reads it unchanged."""
+    """Outcome of one cluster's phase-C fill — the typed result every fill
+    engine (per-fn, per-impl, TDD driver) returns end-to-end (plan #77 T1;
+    the legacy dict bridge is gone)."""
     fns_filled: int = 0
     bytes_filled: int = 0
     attempts: int = 0
@@ -501,17 +501,6 @@ class ClusterFillResult:
     remaining: int = 0
     impls_filled: int = 0
     impls_failed: int = 0
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "fns_filled": self.fns_filled,
-            "bytes_filled": self.bytes_filled,
-            "attempts": self.attempts,
-            "errors": list(self.errors),
-            "remaining": self.remaining,
-            "impls_filled": self.impls_filled,
-            "impls_failed": self.impls_failed,
-        }
 
 
 @dataclass(frozen=True, slots=True)

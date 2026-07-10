@@ -12,6 +12,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
+from pipeline_core.domain.identity import RetroKey
 from pipeline_core.domain.rust_idents import canon_container
 from pipeline_core.domain.workspace_layout import PHASE_C_LOGS_DIR
 from pipeline_core.log import emit, log
@@ -66,11 +67,12 @@ def save_retrospectives(project_dir: Path, data: dict[str, Any]) -> None:
 # call sites and the pipeline.py smoke-pin alias stay unchanged.
 
 
-def retro_key(file_rel: str, fn_name: str, container: str) -> str:
-    """Stable key for the retrospective dict. Container is included so
-    overloaded `fn new` impls (Adhoc/Trait/Boxed) track independently;
-    it is canonicalised so different renderings of one impl share a key."""
-    return f"{file_rel}::{fn_name}::{canon_container(container)}"
+def retro_key(file_rel: str, fn_name: str, container: str) -> RetroKey:
+    """Stable key for the retrospective dict — the ONE mint point of
+    :class:`RetroKey`. Container is included so overloaded `fn new` impls
+    (Adhoc/Trait/Boxed) track independently; it is canonicalised so different
+    renderings of one impl share a key."""
+    return RetroKey(f"{file_rel}::{fn_name}::{canon_container(container)}")
 
 
 def reset_exhaustion_flags(project_dir: Path, reason: str) -> int:
@@ -127,5 +129,12 @@ def is_fn_fully_exhausted(
     key = retro_key(file_rel, fn_name, container)
     rec = retros.get(key)
     if not rec:
+        return False
+    # A downstream_only record means every error was in ANOTHER file — the
+    # fn itself is probably fine and was parked for a break it didn't cause.
+    # Ignore the flag (records written before the writer stopped exhausting
+    # on downstream_only stay on disk; reinterpreting heals them without a
+    # state migration).
+    if rec.get("signal") == "downstream_only":
         return False
     return bool(rec.get("fully_exhausted"))

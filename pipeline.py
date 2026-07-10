@@ -7,6 +7,7 @@ Usage:
 """
 
 import dataclasses
+import functools
 import importlib
 import json
 import os
@@ -382,11 +383,15 @@ from pipeline_core.domain.models import (
     SkeletoniseResult,
     TypeRecord,
 )
+from pipeline_core.domain.models import (
+    ClusterFillResult as ClusterFillResult,  # noqa: PLC0414 (typed fill-result boundary)
+)
 from pipeline_core.domain.prompt_budget import PromptBudgets
 from pipeline_core.domain.reconstruction import SpliceOutcome
 from pipeline_core.domain.refine import (
     parse_retrospective_categories as _parse_retrospective_categories,
 )
+from pipeline_core.domain.run_state import RunPlan as _RunPlan
 from pipeline_core.domain.run_state import RunState
 from pipeline_core.domain.rust_fn_headers import (
     is_pub_fn as _is_pub_fn,
@@ -461,6 +466,9 @@ from pipeline_core.prompts import runtime as _prompts_runtime
 from pipeline_core.prompts import shaping as _shaping
 from pipeline_core.prompts.crate_idioms import (
     extract_crate_idioms as _extract_crate_idioms,
+)
+from pipeline_core.prompts.disclaimer import (
+    from_scratch_disclaimer as _prompts_disclaimer,
 )
 from pipeline_core.prompts.per_fn import (  # noqa: F401  (smoke pin: test_pipeline_smoke uses pipeline._build_per_fn_fix_prompt)
     build_per_fn_fix_prompt as _build_per_fn_fix_prompt,
@@ -804,20 +812,8 @@ _CRATE_DISPLAY_NAME = ""
 
 
 def _from_scratch_disclaimer() -> str:
-    """Anti-leakage system note: our impl is independent of any public crate of the same name.
-
-    Local models often 'know' a popular crate (anyhow, serde, …) and silently reconstruct
-    its real internals from memory. That defeats tests-only reconstruction. Stated on every
-    call so any code-viewing step is reminded the bytes it sees are ours, not upstream's.
-    """
-    name = _CRATE_DISPLAY_NAME or "this crate"
-    return (
-        f"This project reuses the name `{name}`, but the implementation has been written "
-        f"entirely from scratch and is COMPLETELY DIFFERENT from any public library known as "
-        f"`{name}`. Do NOT assume types, signatures, internal structure, or behavior from the "
-        f"upstream `{name}`. Reason ONLY from the code, signatures, and tests shown to you; "
-        f"the structure of names and modules may differ from what you remember."
-    )
+    """Anti-leakage note, bound to the live crate name (prompts/disclaimer.py)."""
+    return _prompts_disclaimer(_CRATE_DISPLAY_NAME)
 
 
 # Public `ask` shim removed (G/P6). Entry point is _ASK_CLIENT.ask(...);
@@ -1128,6 +1124,9 @@ def _start_audit_thread() -> None:
 # (for large files where whole-file rewrites truncate). See generate_fix_loop.
 
 
+from pipeline_core.domain.generation import (  # noqa: E402
+    Task1Request as _Task1Request,
+)
 from pipeline_core.domain.generation import (  # noqa: E402
     derive_gentest_prelude as _derive_gentest_prelude_pure,
 )
@@ -2412,11 +2411,6 @@ def _count_relevant_notes(fr_path: Path | None,
     return section.count("\n- ") if section else 0
 
 
-def _run_phase_c_tdd(**kwargs):
-    """P4: delegates to application.reconstruct.phase_c_tdd (logic relocated)."""
-    return _phase_c_tdd.run_phase_c_tdd(_PHASE_C_TDD_DEPS, **kwargs)
-
-
 _PHASE_C_TDD_DEPS = _phase_c_tdd.PhaseCTddDeps(
     attribute_failures=lambda *a, **k: _attribute_failures(*a, **k),
     build_test_reverse_map=lambda *a, **k: _build_test_reverse_map(*a, **k),
@@ -2435,6 +2429,10 @@ _PHASE_C_TDD_DEPS = _phase_c_tdd.PhaseCTddDeps(
     scan_unimplemented_functions=lambda *a, **k: _scan_unimplemented_functions(*a, **k),
     task2_fill_fns_one_by_one=lambda *a, **k: _task2_fill_fns_one_by_one(*a, **k),
 )
+# Typed boundary (plan #77 T1): partial binds only the deps — the fully typed
+# keyword signature lives on the engine fn itself, no **kwargs hop to hide it.
+_run_phase_c_tdd: "Callable[..., ClusterFillResult]" = functools.partial(
+    _phase_c_tdd.run_phase_c_tdd, _PHASE_C_TDD_DEPS)
 
 
 # Soft cap on stub members per impl block. Larger blocks fall back to the
@@ -2466,11 +2464,6 @@ def _splice_lock_for(tree: Path) -> "_threading_mod.Lock":
 
 # THE fix-loop driver — relocated to the application layer (P1) so task0c
 # can drive it too; these aliases keep every call site + test pin unchanged.
-
-
-def _phase_c_fill_impl_blocks(**kwargs):
-    """P4: delegates to application.reconstruct.impl_fill (logic relocated)."""
-    return _impl_fill.fill_impl_blocks(_IMPL_FILL_DEPS, **kwargs)
 
 
 _IMPL_FILL_DEPS = _impl_fill.ImplFillDeps(
@@ -2521,6 +2514,9 @@ _IMPL_FILL_DEPS = _impl_fill.ImplFillDeps(
     per_impl_max_stubs=_PER_IMPL_MAX_STUBS,
     task2_model=_TASK2_MODEL,
 )
+# Typed boundary (plan #77 T1): see _run_phase_c_tdd above.
+_phase_c_fill_impl_blocks: "Callable[..., ClusterFillResult]" = functools.partial(
+    _impl_fill.fill_impl_blocks, _IMPL_FILL_DEPS)
 
 
 import pipeline_core.application.reconstruct.cargo_errors as _reconstruct_cargo_errors  # noqa: E402
@@ -2602,7 +2598,7 @@ def _task2_fill_fns_one_by_one(
     *args: Any,
     structure: "_structure_port.StructureReader | None" = None,
     **kwargs: Any,
-) -> dict:
+) -> "ClusterFillResult":
     """Phase C per-cluster fill engine shim → `PhaseCFillEngine.run` (the typed
     signature + pass/worker orchestration live there); `structure` is the P1
     test-injection seam (fake StructureReader)."""
@@ -3176,16 +3172,10 @@ def _task1_synthesizer_factory() -> Task1Synthesizer:
 # slice 5b: _task1_proc_macro moved to application.tasks.task1.
 
 
-def task1(project_dir, genesis_path, functional_req_path, test_files, readme_text,
-          project_profile: str = "", crate_type: str = "", module_name: str = "",
-          project_context: str = "", coverage_strategy: str = ""):
+def task1(req: "_Task1Request") -> bool:
     _emit("task.start", task="task1")  # debt#7: structured stage event (monitor reads these)
     # slice 5b: extracted to application.tasks.task1; thin shim binding deps.
-    return _task1_impl(
-        project_dir, genesis_path, functional_req_path, test_files, readme_text, _TASK1_DEPS,
-        project_profile=project_profile, crate_type=crate_type, module_name=module_name,
-        project_context=project_context, coverage_strategy=coverage_strategy,
-    )
+    return _task1_impl(req, _TASK1_DEPS)
 
 
 # ---------------------------------------------------------------------------
@@ -3330,7 +3320,6 @@ _GEN_GENTESTS = GenTestsAdapter(
     is_gen_tests_file_fn=lambda name: _is_gen_tests_file(name),
 )
 _GEN_SCAN = SourceScanAdapter(
-    locate_fn_fn=lambda txt, fn: _locate_fn(txt, fn),
     rust_delimiters_balanced_fn=lambda txt: _rust_delimiters_balanced(txt),
 )
 _GEN_SHAPING = PromptShapingAdapter(
@@ -4313,7 +4302,9 @@ def main():
         sys.exit(0)
 
     root = Path(__file__).parent
-    _orchestrator.run_pipeline(_RUN_DEPS, args, root)
+    # Parse-don't-validate (#77 T1): the Namespace is read once, here.
+    plan = _RunPlan.from_args(args)
+    _orchestrator.run_pipeline(_RUN_DEPS, plan, root)
 
 
 def _shutdown_on_finish_enabled() -> bool:

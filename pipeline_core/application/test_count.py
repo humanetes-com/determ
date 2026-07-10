@@ -147,6 +147,7 @@ def count_active_tests_for_cluster(
 
     cs = CfgSet.of(cfg_true, cfg_false)
     # 2. gen_tests siblings — gated by their parent #[path] decl (R7: decl scan).
+    declared_sibs: set[str] = set()
     for parent in src_dir.glob("*.rs"):
         if deps.is_gen_tests_file(parent.name):
             continue
@@ -162,6 +163,7 @@ def count_active_tests_for_cluster(
         for decl in gen_tests_decl_blocks(ptext):
             gate = decl.gate.strip()
             sib_name = decl.sibling_name or ""
+            declared_sibs.add(sib_name)   # declared — even if gated out below
             if gate and cs.evaluate(gate) is False:
                 continue
             sib = src_dir / sib_name
@@ -172,6 +174,30 @@ def count_active_tests_for_cluster(
             except Exception:
                 continue
             total += _count_file(sib.relative_to(project_dir).as_posix(), stext)
+
+    # 2b. UNDECLARED siblings on disk still count toward expected. A sibling
+    # whose parent lost its `mod gen_tests_N;` decl is a HIDDEN test file —
+    # its tests silently stop compiling. Counting it keeps the strict verdict
+    # 'incomplete' instead of letting the expected count shrink in the same
+    # stroke that hid the tests (never undercount the oracle). Siblings
+    # DECLARED somewhere are exempt — a cluster-gated decl (evaluated False
+    # above) is deliberate exclusion, not hiding.
+    for sib in src_dir.glob("*.rs"):
+        if not deps.is_gen_tests_file(sib.name) or sib.name in declared_sibs:
+            continue
+        parent_stem = sib.name.split(".gen_tests_", 1)[0]
+        parent = src_dir / f"{parent_stem}.rs"
+        # Parent cfg'd out of this cluster → the sibling could never compile
+        # here even when declared; a MISSING parent stays counted (that is a
+        # corruption to surface, not a reason to shrink the count).
+        if parent.exists() and not file_active_for_cluster(
+                src_dir, parent, cfg_true, cfg_false, deps, 0, default_features):
+            continue
+        try:
+            stext = sib.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        total += _count_file(sib.relative_to(project_dir).as_posix(), stext)
 
     # 3. src/**/*.rs (excluding gen_tests siblings) — inline test mods.
     for srf in src_dir.rglob("*.rs"):

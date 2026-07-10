@@ -19,7 +19,7 @@ from pipeline_core.application.generators.task2_generator import (
     StaticSkeletonTask2Generator,
 )
 from pipeline_core.domain.generation import GenerationRequest, SkeletonConfig
-from pipeline_core.domain.models import BuildCluster
+from pipeline_core.domain.models import BuildCluster, ClusterFillResult
 
 
 @dataclass
@@ -37,8 +37,7 @@ def _cluster(name: str = "default", *, requires_nightly: bool = False) -> BuildC
     )
 
 
-_PER_FN_RESULT = {"fns_filled": 1, "bytes_filled": 10, "attempts": 1,
-                  "remaining": 0, "errors": []}
+_PER_FN_RESULT = ClusterFillResult(fns_filled=1, bytes_filled=10, attempts=1)
 _GROUP_RESULT = {"groups_processed": 1, "bytes_filled": 10, "errors": []}
 _D_RESULT = {"stubs_total": 0, "stubs_exercised": 0, "files_updated": 0,
              "stubs_remaining": 0}
@@ -128,11 +127,11 @@ class FakeAdapter:
         return self.attribute_seq.pop(0) if self.attribute_seq else ({}, "none")
 
     # --- FillEngine ---
-    def run_phase_c_tdd(self, **kw: Any) -> dict[str, Any]:
-        return dict(_PER_FN_RESULT)
+    def run_phase_c_tdd(self, **kw: Any) -> ClusterFillResult:
+        return _PER_FN_RESULT
 
-    def fill_fns_one_by_one(self, **kw: Any) -> dict[str, Any]:
-        return dict(_PER_FN_RESULT)
+    def fill_fns_one_by_one(self, **kw: Any) -> ClusterFillResult:
+        return _PER_FN_RESULT
 
     def fill_groups(self, *a: Any, **kw: Any) -> dict[str, Any]:
         return dict(_GROUP_RESULT)
@@ -202,12 +201,6 @@ class FakeAdapter:
         return ".gen_tests_" in name
 
     # --- SourceScan ---
-    def locate_fn(self, file_text: str, fn_name: str) -> tuple[str, int, int, int] | None:
-        idx = file_text.find("{")
-        if idx < 0:
-            return None
-        return (f"fn {fn_name}()", 0, idx + 1, len(file_text) - 1)
-
     def rust_delimiters_balanced(self, text: str) -> bool:
         return self.balanced
 
@@ -393,13 +386,13 @@ def test_second_cluster_seeds_shared_bodies_from_first(tmp_path: Path) -> None:
                        run_results=[(0, "ok")])
     seen_at_fill: list[str] = []
 
-    def _fill(**kw: Any) -> dict[str, Any]:
+    def _fill(**kw: Any) -> ClusterFillResult:
         lib = kw["target_src_dir"] / "src" / "lib.rs"
         text = lib.read_text(encoding="utf-8")
         seen_at_fill.append(text)
         if "unimplemented!()" in text:
             lib.write_text("fn foo() -> i32 {\n    42\n}\n", encoding="utf-8")
-        return dict(_PER_FN_RESULT)
+        return _PER_FN_RESULT
 
     fake.run_phase_c_tdd = _fill  # type: ignore[method-assign]
     pd = _make_project(tmp_path, cs)
@@ -418,12 +411,12 @@ def test_premerge_backfill_adopts_sibling_body(tmp_path: Path) -> None:
                        run_results=[(0, "ok")])
     calls = {"n": 0}
 
-    def _fill(**kw: Any) -> dict[str, Any]:
+    def _fill(**kw: Any) -> ClusterFillResult:
         calls["n"] += 1
         if calls["n"] == 2:  # only the SECOND cluster produces a body
             (kw["target_src_dir"] / "src" / "lib.rs").write_text(
                 "fn foo() -> i32 {\n    7\n}\n", encoding="utf-8")
-        return dict(_PER_FN_RESULT)
+        return _PER_FN_RESULT
 
     fake.run_phase_c_tdd = _fill  # type: ignore[method-assign]
     pd = _make_project(tmp_path, cs)
@@ -527,6 +520,86 @@ def test_post_merge_fill_then_stall_exit(tmp_path: Path) -> None:
     pd = _make_project(tmp_path, [c])
     _post(fake, pd, _cfg(per_fn=True, tdd=True))
     assert fake.events.count("post_merge.fill.iter") >= 1
+
+
+def test_validate_reverts_every_same_name_fn(tmp_path: Path) -> None:
+    """`fmt` lives in several impls; the bare-name implication must revert
+    every occurrence, not just the first."""
+    c = _cluster()
+    fake = FakeAdapter(
+        clusters_list=[c], cluster_tests=[("tests/it.rs", "x")],
+        raw_results=[(0, "", ""), (1, "err", "boom"), (0, "", "")],
+        implicated=[("src/lib.rs", "fmt")],
+        run_results=[(0, "ok")],
+    )
+    pd = _make_project(tmp_path, [c], with_gen_tests=True)
+    two_fmts = (
+        "impl Debug for E {\n"
+        "    fn fmt(&self, f: &mut F) -> R { broken_a() }\n"
+        "}\n"
+        "impl Display for E {\n"
+        "    fn fmt(&self, f: &mut F) -> R { broken_b() }\n"
+        "}\n"
+    )
+    filled = pd / ".skeleton-filled" / c.name / "src"
+    filled.mkdir(parents=True)
+    (filled / "lib.rs").write_text(two_fmts, encoding="utf-8")
+    assert _run(pd, _gen(fake, _cfg(per_fn=True, tdd=False))) is True
+    text = (filled / "lib.rs").read_text(encoding="utf-8")
+    assert "broken_a" not in text and "broken_b" not in text
+    assert text.count("unimplemented!()") == 2
+    assert any("reverted 2 fn(s)" in m for m in fake.logs)
+
+
+def test_validate_restores_file_from_skeleton_when_nothing_revertible(
+        tmp_path: Path) -> None:
+    """Corruption outside any locatable fn body (e.g. a splice that broke out
+    of a doc-comment) leaves zero revertible fns — the implicated file must be
+    restored wholesale from the skeleton instead of looping identically."""
+    c = _cluster()
+    fake = FakeAdapter(
+        clusters_list=[c], cluster_tests=[("tests/it.rs", "x")],
+        raw_results=[(0, "", ""), (1, "err", "boom"), (0, "", "")],
+        implicated=[("src/lib.rs", "fmt")],  # not locatable in the corrupt file
+        run_results=[(0, "ok")],
+    )
+    pd = _make_project(tmp_path, [c], with_gen_tests=True)
+    filled = pd / ".skeleton-filled" / c.name / "src"
+    filled.mkdir(parents=True)
+    (filled / "lib.rs").write_text("/// # fn fmt(&self) {\nstray tokens }\n",
+                                   encoding="utf-8")
+    assert _run(pd, _gen(fake, _cfg(per_fn=True, tdd=False))) is True
+    text = (filled / "lib.rs").read_text(encoding="utf-8")
+    skel = (pd / ".skeleton" / c.name / "src" / "lib.rs").read_text(
+        encoding="utf-8")
+    # Corruption gone, skeleton content back (later steps may append
+    # gen_tests decls, so containment — not byte equality).
+    assert "stray tokens" not in text and skel.strip() in text
+    assert any("restored whole file from skeleton" in m for m in fake.logs)
+
+
+def test_prepass_heal_reverts_poisoned_seeded_body(tmp_path: Path) -> None:
+    """A broken body admitted without a compile gate (donor seeding / resume)
+    must be reverted BEFORE the fill pass — not after a full pass of
+    downstream_only failures burns LLM calls."""
+    c = _cluster()
+    fake = FakeAdapter(
+        clusters_list=[c], cluster_tests=[("tests/it.rs", "x")],
+        # phase-A ok; PRE-PASS check fails (poisoned seed); validate ok.
+        raw_results=[(0, "", ""), (1, "err", "boom"), (0, "", "")],
+        implicated=[("src/lib.rs", "foo")],
+        run_results=[(0, "ok")],
+    )
+    pd = _make_project(tmp_path, [c], with_gen_tests=True)
+    filled = pd / ".skeleton-filled" / c.name / "src"
+    filled.mkdir(parents=True)
+    (filled / "lib.rs").write_text(
+        "fn foo() -> i32 { broken_donor_body() }\n", encoding="utf-8")
+    assert _run(pd, _gen(fake, _cfg(per_fn=True, tdd=False))) is True
+    text = (filled / "lib.rs").read_text(encoding="utf-8")
+    assert "broken_donor_body" not in text and "unimplemented!()" in text
+    assert any("[pre-pass-heal]" in m for m in fake.logs)
+    assert "phase_c.cluster.prepass_heal" in fake.events
 
 
 if __name__ == "__main__":  # pragma: no cover

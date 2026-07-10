@@ -40,6 +40,7 @@ _YES=false
 _FORCE=false
 _WIPE=false
 _KEEP_AUGMENTED=false
+_NO_TAIL=false
 for _arg in "$@"; do
     [[ "$_arg" == "--y" ]]              && _YES=true
     [[ "$_arg" == "--force" ]]          && _FORCE=true
@@ -47,6 +48,7 @@ for _arg in "$@"; do
     [[ "$_arg" == "--graceful" ]]       && true
     [[ "$_arg" == "--wipe" ]]           && _WIPE=true && _YES=true
     [[ "$_arg" == "--keep-augmented" ]] && _KEEP_AUGMENTED=true
+    [[ "$_arg" == "--no-tail" ]]        && _NO_TAIL=true
 done
 
 # Policy: an unflagged `continue.sh` invocation NEVER kills a running
@@ -228,5 +230,12 @@ fi
 # advisory flock indefinitely).
 flock -u 200
 exec 200<&-
+
+# --no-tail: exit right after launch, for programmatic callers (autopilot).
+# Wrapping the tailing default in `timeout N` is NOT a safe substitute:
+# coreutils timeout signals the whole process GROUP, and nohup only shields
+# SIGHUP — the just-launched pipeline gets SIGTERMed ~N seconds in
+# (observed: run 12643 died silently 60s after launch).
+[[ "$_NO_TAIL" == true ]] && exit 0
 
 tail -f "$LOG_DIR/pipeline_anyhow.log"

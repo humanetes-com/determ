@@ -108,3 +108,43 @@ def test_count_test_fns_in_records_gating() -> None:
         {"is_test": True},                                  # no predicates key
     ]
     assert count_test_fns_in_records(recs, set(), set()) == 2
+
+
+def test_undeclared_gen_tests_sibling_still_counts(tmp_path) -> None:
+    """A sibling whose parent lost its `mod gen_tests_N;` decl is a HIDDEN
+    test file — it must still raise the expected count (never let the count
+    shrink in the same stroke that hid the tests). A sibling declared behind
+    a cluster gate that evaluates False is deliberate exclusion, not hiding."""
+    from pipeline_core.application.test_count import (
+        TestCountDeps,
+        count_active_tests_for_cluster,
+    )
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (tmp_path / "Cargo.toml").write_text("[package]\nname='c'\n")
+    body = "#[cfg(test)]\nmod gen_tests {\n    #[test]\n    fn t() {}\n}\n"
+    # Parent declares sibling 1; sibling 2 exists but is UNDECLARED (hidden);
+    # sibling 3 is declared behind a False gate (deliberately excluded).
+    (src / "lib.rs").write_text(
+        '#[cfg(test)]\n#[path = "lib.gen_tests_1.rs"]\nmod gen_tests_1;\n'
+        '#[cfg(nightly_only)]\n#[path = "lib.gen_tests_3.rs"]\nmod gen_tests_3;\n'
+    )
+    (src / "lib.gen_tests_1.rs").write_text(body)
+    (src / "lib.gen_tests_2.rs").write_text(body)
+    (src / "lib.gen_tests_3.rs").write_text(body)
+
+    deps = TestCountDeps(
+        enumerate_fns=lambda p: None,
+        mod_records=lambda p: None,
+        file_cfg_predicate=lambda d, n: None,
+        is_gen_tests_file=lambda n: ".gen_tests_" in n,
+    )
+
+    class _Cluster:
+        cfg_true: list[str] = []
+        cfg_false = ["nightly_only"]
+
+    total = count_active_tests_for_cluster(tmp_path, _Cluster(), deps)
+    # declared(1) + hidden-undeclared(1); the False-gated sibling 3 excluded.
+    assert total == 2

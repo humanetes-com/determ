@@ -16,8 +16,10 @@ exposes `start` (= the old ``m.start(1)`` / ``m.start()``), the fn/macro `name`,
 ``m.end()``). The caller does its own brace-depth body scan from `body_start`, exactly
 as before.
 
-Pure: stdlib only, no I/O, no regex. Naive of string/char literals — byte-for-byte
-what the negated-class regexes (``[^{]``) did; the first textual ``{`` ends the header.
+Pure: stdlib only, no I/O, no regex. Comment/string-aware via `code_mask`: a
+``fn fmt`` sitting inside a ``///`` doc-comment usage example or a string
+literal is TEXT, never a header — splicing a body into one corrupts the file
+(observed crate-wide `unexpected closing delimiter` from a doc-comment splice).
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import NamedTuple
 
+from .rust_lex import code_mask
 from .rust_scan import starts_with_pub
 
 _IDENT_CHARS = frozenset(
@@ -140,12 +143,17 @@ def _scan(
 ) -> list[HeaderMatch]:
     out: list[HeaderMatch] = []
     n = len(text)
+    mask = code_mask(text)
     i = 0
     while i < n:
         # Perf gate: a match can only begin at the first char of its leading keyword
         # (`pub`/`async`/`unsafe`/`const`/`fn`, or `pub`/`macro_rules`). Skipping other
         # positions is exact — `clause` would return None there anyway.
         if text[i] not in lead_chars:
+            i += 1
+            continue
+        # Never match inside a comment or string/char literal.
+        if mask[i]:
             i += 1
             continue
         # (?<![A-Za-z_0-9]) lookbehind for the non-line-anchored variant.
@@ -157,6 +165,12 @@ def _scan(
             i += 1
             continue
         name, brace = m
+        if mask[brace]:
+            # The first textual `{` after the header sits in a comment/string
+            # — refusing the match is safe; accepting it would splice into
+            # non-code.
+            i += 1
+            continue
         if line_anchored:
             # (?:^|\n)[ \t]*: the clause must be the first non-blank content of its
             # line; group 1 starts at the preceding `\n` (or at string start).
@@ -199,6 +213,18 @@ def locate_fn(file_text: str, fn_name: str) -> tuple[str, int, int, int] | None:
     whose name matches ``fn_name``. ``body_start`` is just after the opening
     ``{``; ``body_end`` is the position of the matching ``}`` (exclusive end of
     body). ``None`` if not found or braces are malformed."""
+    all_locs = locate_all_fns(file_text, fn_name)
+    return all_locs[0] if all_locs else None
+
+
+def locate_all_fns(file_text: str, fn_name: str) -> list[tuple[str, int, int, int]]:
+    """Every ``(sig_text, sig_start, body_start, body_end)`` whose name matches
+    ``fn_name``, in source order. Same-name fns are the norm in Rust (`fmt` in
+    each Debug/Display impl) — callers that revert or inspect "the" fn by bare
+    name must handle every occurrence, not just the first. Brace counting
+    skips comment/string content so a ``}`` in a string never ends a body."""
+    mask = code_mask(file_text)
+    out: list[tuple[str, int, int, int]] = []
     for h in fn_headers(file_text, line_anchored=False):
         if h.name != fn_name:
             continue
@@ -207,18 +233,19 @@ def locate_fn(file_text: str, fn_name: str) -> tuple[str, int, int, int] | None:
         depth = 1
         i = body_start
         while i < len(file_text) and depth > 0:
-            ch = file_text[i]
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
+            if not mask[i]:
+                ch = file_text[i]
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
             i += 1
         if depth != 0:
-            return None
+            continue
         body_end = i - 1
         sig_text = file_text[sig_start:body_start].rstrip("{ \t\n").strip()
-        return sig_text, sig_start, body_start, body_end
-    return None
+        out.append((sig_text, sig_start, body_start, body_end))
+    return out
 
 
 def is_pub_fn(file_text: str, fn_name: str) -> bool:

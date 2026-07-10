@@ -31,6 +31,7 @@ from pipeline_core.domain.impl_routing import route_fn_bodies
 from pipeline_core.domain.llm_output import extract_fn_bodies
 from pipeline_core.domain.models import (
     BuildCluster,
+    ClusterFillResult,
     DispatchFamily,
     FnLocator,
     Frontier,
@@ -115,7 +116,7 @@ def fill_impl_blocks(
     tdd_frontier_tests: Frontier | None = None,  # Plan 10 U2
     tdd_test_cmd: str | None = None,                                       # Plan 10 U2
     parallelism: int = 1,
-) -> dict[str, Any]:
+) -> ClusterFillResult:
     """Per-impl-block Phase C fill — alternative to `_task2_fill_fns_one_by_one`.
 
     Collects impl blocks active in this cluster, optionally narrows to
@@ -212,11 +213,7 @@ def fill_impl_blocks(
 
     blocks = _collect_impl_blocks_for_cluster(target_src_dir, cluster) or []
     if not blocks:
-        return {
-            "fns_filled": 0, "bytes_filled": 0, "attempts": 0,
-            "errors": [], "remaining": 0,
-            "impls_filled": 0, "impls_failed": 0,
-        }
+        return ClusterFillResult()
 
     # debt #46 point 2 — stamp `refill_members` onto blocks that have an
     # already-filled, compiling member with a failing attributed test, so the
@@ -1046,20 +1043,31 @@ def fill_impl_blocks(
                     fix_attempts=fix_attempt,
                     prior_retrospective=prior.get("guidance", ""),
                 )
-                if prior_best is None:
-                    new_best = cur_errs
-                    improved = True
-                else:
-                    new_best = min(int(prior_best), cur_errs)
-                    improved = cur_errs < int(prior_best)
-                full_exhaust = (
-                    retro.get("category") in ("GENUINELY_HARD",
-                                              "FROZEN_BOUND_MISMATCH")
-                    or (prior_best is not None and not improved)
-                )
                 _signal = retro.get("signal", "")
                 if _signal in ("llm_error", "empty_response"):
                     raise RuntimeError(f"transient retro signal: {_signal}")
+                # Errors all in OTHER files → the block is blocked by a break
+                # elsewhere; its error count reflects the blocker, not these
+                # bodies. Record the diagnosis but never exhaust, never move
+                # the baseline, and don't retry now (mirrors the per-fn rule).
+                _downstream = _signal == "downstream_only"
+                if _downstream:
+                    new_best = prior_best
+                    improved = False
+                    full_exhaust = False
+                elif prior_best is None:
+                    new_best = cur_errs
+                    improved = True
+                    full_exhaust = retro.get("category") in (
+                        "GENUINELY_HARD", "FROZEN_BOUND_MISMATCH")
+                else:
+                    new_best = min(int(prior_best), cur_errs)
+                    improved = cur_errs < int(prior_best)
+                    full_exhaust = (
+                        retro.get("category") in ("GENUINELY_HARD",
+                                                  "FROZEN_BOUND_MISMATCH")
+                        or not improved
+                    )
                 # The dict write + on-disk save must be atomic together —
                 # two blocks finishing concurrently each write their OWN key
                 # (safe unlocked, per-block-unique), but an unlocked
@@ -1078,7 +1086,7 @@ def fill_impl_blocks(
                         "last_error_preview": last_error_excerpt[:240],
                     }
                     _save_retrospectives(project_dir, retros_cache)
-                _retry_informed = not full_exhaust
+                _retry_informed = not full_exhaust and not _downstream
             except Exception as _re:
                 _log(f"  [phase-c/impl/retro] {block_id}: {_re}")
             if not (_retry_informed and _retro_round < _retro_rounds_max):
@@ -1184,12 +1192,12 @@ def fill_impl_blocks(
     # caller skip the per-fn cleanup pass entirely.
     remaining_n = (len(remaining_records) if remaining_records is not None
                    else len(_scan_unimplemented_for_cluster(target_src_dir, cluster)))
-    return {
-        "fns_filled": fns_filled_total,
-        "bytes_filled": max(0, bytes_after - bytes_before),
-        "attempts": attempts_total,
-        "errors": errors,
-        "remaining": remaining_n,
-        "impls_filled": impls_filled,
-        "impls_failed": impls_failed,
-    }
+    return ClusterFillResult(
+        fns_filled=fns_filled_total,
+        bytes_filled=max(0, bytes_after - bytes_before),
+        attempts=attempts_total,
+        errors=tuple(errors),
+        remaining=remaining_n,
+        impls_filled=impls_filled,
+        impls_failed=impls_failed,
+    )

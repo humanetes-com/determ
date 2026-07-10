@@ -21,6 +21,7 @@ from pipeline_core.application.cluster_augment import AugmentContext
 from pipeline_core.application.reconstruct.run_context import RunContext
 from pipeline_core.domain.enums import Backend
 from pipeline_core.domain.generation import GenerationRequest
+from pipeline_core.domain.run_state import RunPlan
 
 # The --phase-*-only / --skeleton-backend standalone subcommands, in dispatch
 # order. Each maps an `args` flag attribute to a handler keyed by the same name.
@@ -117,7 +118,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def run_phase_subcommand(
-    args: argparse.Namespace,
+    plan: RunPlan,
     project_dir: Path,
     handlers: Mapping[str, Callable[[Path], int]],
 ) -> int | None:
@@ -129,7 +130,7 @@ def run_phase_subcommand(
     the work stays in the injected handlers.
     """
     for flag in _PHASE_SUBCOMMAND_FLAGS:
-        if getattr(args, flag):
+        if getattr(plan, flag):
             return handlers[flag](project_dir)
     return None
 
@@ -557,21 +558,21 @@ class RunDeps:
     scan_unimplemented_functions: Callable[..., Any]
 
 
-def run_pipeline(deps: RunDeps, args: argparse.Namespace, root: Path) -> None:
+def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
     """The deterministic per-module reconstruction run, extracted verbatim from
     pipeline.py:main (S27). `main` now only parses args, resolves `root`, builds
     `RunDeps`, and calls here."""
     workspace_dir = root / deps.WORKSPACE_DIR
 
-    if args.repo:
+    if plan.repo:
         # Full git-managed workspace: clone/copy into tmp/, checkout pipeline branch.
-        project_dir = deps.setup_workspace(args.repo, workspace_dir,
-                                           force_fresh=args.clean)
+        project_dir = deps.setup_workspace(plan.repo, workspace_dir,
+                                           force_fresh=plan.clean)
         deps.run_state.git_managed = True
     else:
         # --project: check tmp/ first, then root (backward compat).
-        candidate = workspace_dir / args.project
-        project_dir = candidate if candidate.exists() else root / args.project
+        candidate = workspace_dir / plan.project
+        project_dir = candidate if candidate.exists() else root / plan.project
         deps.run_state.git_managed = deps.is_git_repo(project_dir)
 
     genesis_path = project_dir / "genesis.md"
@@ -582,11 +583,11 @@ def run_pipeline(deps: RunDeps, args: argparse.Namespace, root: Path) -> None:
         print(f"ERROR: project directory '{project_dir}' not found.")
         sys.exit(1)
 
-    deps.init_log(root, nolog=args.nolog, progress_mode=args.progress)
+    deps.init_log(root, nolog=plan.nolog, progress_mode=plan.progress)
     deps.init_events(product=project_dir.name)
 
     # --audit: periodic + iteration-boundary flow self-audit (read-only).
-    deps.run_state.audit_enabled = bool(args.audit)
+    deps.run_state.audit_enabled = bool(plan.audit)
     deps.run_state.audit_project_dir = project_dir
     if deps.run_state.audit_enabled:
         deps.start_audit_thread()
@@ -603,7 +604,7 @@ def run_pipeline(deps: RunDeps, args: argparse.Namespace, root: Path) -> None:
     except Exception as _e:
         deps.log(f"  [gen_tests] startup quarantine scan failed: {_e}")
 
-    _sub_rc = run_phase_subcommand(args, project_dir, {
+    _sub_rc = run_phase_subcommand(plan, project_dir, {
         "phase_a_only": lambda pd: run_phase_a(deps.phase_subcommand_deps, pd),
         "phase_b_only": lambda pd: run_phase_b(deps.phase_subcommand_deps, pd),
         "phase_c_only": lambda pd: run_phase_c(deps.phase_subcommand_deps, pd),
@@ -616,7 +617,7 @@ def run_pipeline(deps: RunDeps, args: argparse.Namespace, root: Path) -> None:
     # Forward (spec-driven) mode: skip reconstruction-phase tasks. The user
     # provides functional_requirements.md (+ optional API surface) and tests;
     # the pipeline goes straight to TASK 2 → TASK 3 → TASK 4.
-    _from_spec = args.from_spec
+    _from_spec = plan.from_spec
     if _from_spec:
         _fr_root = project_dir / "functional_requirements.md"
         if not _fr_root.exists():
@@ -627,8 +628,8 @@ def run_pipeline(deps: RunDeps, args: argparse.Namespace, root: Path) -> None:
 
     deps.emit("pipeline.start", data={
         "project_dir": str(project_dir),
-        "clean": args.clean,
-        "augment_tests": args.augment_tests,
+        "clean": plan.clean,
+        "augment_tests": plan.augment_tests,
         "from_spec": _from_spec,
         "model": deps.MODEL,
         "backend": deps.SETTINGS.backend,
@@ -639,21 +640,21 @@ def run_pipeline(deps: RunDeps, args: argparse.Namespace, root: Path) -> None:
     _ph = deps.git_file_hash(root, "pipeline.py")
     _mh = deps.git_file_hash(root, "monitor.py")
     _params = []
-    if args.repo:
-        _params.append(f"--repo {args.repo}")
-    if args.project and not args.repo:
-        _params.append(f"--project {args.project}")
-    if args.clean:
+    if plan.repo:
+        _params.append(f"--repo {plan.repo}")
+    if plan.project and not plan.repo:
+        _params.append(f"--project {plan.project}")
+    if plan.clean:
         _params.append("--clean")
-    if args.augment_tests:
+    if plan.augment_tests:
         _params.append("--augment-tests")
-    if args.progress:
+    if plan.progress:
         _params.append("--progress")
-    if args.nolog:
+    if plan.nolog:
         _params.append("--nolog")
-    if args.from_spec:
+    if plan.from_spec:
         _params.append("--from-spec")
-    if args.restart_from_augmented:
+    if plan.restart_from_augmented:
         _params.append("--restart-from-augmented")
     deps.log(f"  pipeline.py [{_ph}]  monitor.py [{_mh}]  params: {' '.join(_params) or '(none)'}")
 
@@ -674,18 +675,18 @@ def run_pipeline(deps: RunDeps, args: argparse.Namespace, root: Path) -> None:
     if _backend is Backend.VLLM:
         deps.ensure_vllm_ready(root, deps.log)
 
-    if args.clean and args.restart_from_augmented:
+    if plan.clean and plan.restart_from_augmented:
         deps.log("\n-- ERROR: --clean and --restart-from-augmented are mutually exclusive --")
         sys.exit(2)
 
-    if args.clean:
+    if plan.clean:
         deps.log("\n-- --clean requested: wiping all generated state --")
         if deps.run_state.git_managed:
             deps.git_clean_reset(project_dir)
         deps.clean_state(root, project_dir, manifest_path, genesis_path, functional_req_path)
         deps.state_path(project_dir).unlink(missing_ok=True)
 
-    if args.restart_from_augmented:
+    if plan.restart_from_augmented:
         deps.log("\n-- --restart-from-augmented: restoring workspace to task0c augmented state --")
         try:
             deps.restart_from_augmented(root, project_dir)

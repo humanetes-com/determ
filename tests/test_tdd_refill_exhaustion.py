@@ -18,7 +18,7 @@ from pipeline_core.application.reconstruct.phase_c_tdd import (
     PhaseCTddDeps,
     run_phase_c_tdd,
 )
-from pipeline_core.domain.models import BuildCluster, FnLocator
+from pipeline_core.domain.models import BuildCluster, ClusterFillResult, FnLocator
 
 _WRONG = FnLocator("src/a.rs", "wrongfn")
 
@@ -30,9 +30,9 @@ def _cluster() -> BuildCluster:
 
 
 def _deps(fill_calls: list[frozenset[FnLocator]]) -> PhaseCTddDeps:
-    def _fill(**kw: Any) -> dict[str, Any]:
+    def _fill(**kw: Any) -> ClusterFillResult:
         fill_calls.append(frozenset(kw.get("tdd_frontier_keys") or ()))
-        return {"fns_filled": 0, "attempts": 1, "bytes_filled": 0, "errors": []}
+        return ClusterFillResult(attempts=1)
 
     # Constant failing test → pass_count never improves after iter 1 → the loop
     # stalls out; `wrongfn` is attributed every iter and is never a stub.
@@ -102,10 +102,9 @@ def test_reset_exhaustion_fires_once_after_progress_then_stays_quiet(
     call_n = [0]
     reset_reasons: list[str] = []
 
-    def _fill(**kw: Any) -> dict[str, Any]:
+    def _fill(**kw: Any) -> ClusterFillResult:
         call_n[0] += 1
-        return {"fns_filled": 1 if call_n[0] == 1 else 0, "attempts": 1,
-                "bytes_filled": 0, "errors": []}
+        return ClusterFillResult(fns_filled=1 if call_n[0] == 1 else 0, attempts=1)
 
     deps = replace(
         _deps([]),
