@@ -283,6 +283,7 @@ from pipeline_core.application.workspace_lifecycle import (
 from pipeline_core.application.workspace_lifecycle import (
     wipe_module_sources as _wl_wipe_module_sources,
 )
+from pipeline_core.composition import App as _App
 from pipeline_core.composition import AugmentRoles as _AugmentRoles
 from pipeline_core.composition import CompositionConfig as _CompositionConfig
 from pipeline_core.composition import FillRoles as _FillRoles
@@ -1545,6 +1546,7 @@ _HELPERS = _Helpers(
     parse_cmd=lambda *a, **k: _parse_cmd(*a, **k),
     prompt_budget=lambda *a, **k: prompt_budget(*a, **k),
     ask_retrospective=lambda *a, **k: _ask_retrospective(*a, **k),
+    ask_per_fn_body=lambda *a, **k: _ask_per_fn_body(*a, **k),
     extract_and_store_rules=lambda *a, **k: _task4_extract_and_store_rules(*a, **k),
     enumerate_types=lambda *a, **k: _enumerate_types_via_extractor(*a, **k),
     enumerate_fns=lambda *a, **k: _enumerate_fns_via_extractor(*a, **k),
@@ -1619,7 +1621,7 @@ _FILL_CARGO = CargoFillAdapter(
     test_regression_gate_fn=lambda tc, cwd, env, base: _test_regression_gate(tc, cwd, env, base),
 )
 _FILL_PROMPT = PromptContextAdapter(
-    ask_per_fn_body_fn=lambda prompt, fn, alog, sig_text="", answer_request=None: _ask_per_fn_body(prompt, fn, alog, sig_text=sig_text, answer_request=answer_request),
+    ask_per_fn_body_fn=lambda prompt, fn, alog, sig_text="", answer_request=None: _APP.ask_per_fn_body(prompt, fn, alog, sig_text=sig_text, answer_request=answer_request),
     gather_fn=lambda **kw: _FIX_CONTEXT.gather(**kw),
     collect_sibling_filled_bodies_fn=lambda ft, tfn, tc: _collect_sibling_filled_bodies(ft, tfn, tc),
     extract_crate_idioms_fn=lambda ib, fr, target_sig_text="", max_idioms=5: _extract_crate_idioms(ib, fr, target_sig_text=target_sig_text, max_idioms=max_idioms),
@@ -1693,7 +1695,7 @@ _COV_DEPS = _covmod.CoverageDeps(
 )
 _coverage_provider: _covmod.CoverageProvider = _covmod.make_coverage_provider(
     COVERAGE_BACKEND, _COV_DEPS)
-_APP = _build_app(ADAPTERS, SETTINGS, _RUN, _SCOPE, _PORTS, _CFG, _ROLES, _HELPERS,
+_APP: _App = _build_app(ADAPTERS, SETTINGS, _RUN, _SCOPE, _PORTS, _CFG, _ROLES, _HELPERS,
                   _STRUCTURE, _FILL_ROLES, _TELEMETRY, _AUGMENT_ROLES,
                   _COV_DEPS, _coverage_provider)
 # S3.5/6/10: these deps are consumed only inside `def` bodies (lazy), so their

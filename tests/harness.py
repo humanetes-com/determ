@@ -64,7 +64,12 @@ def install_scripted_model(
         return body_src(fn), None
 
     script = _Script(_fake_per_fn)
-    monkeypatch.setattr(pipeline, "_ask_per_fn_body", script)
+    # Port-boundary injection (P3-S2): swap the App's per-fn model seam.
+    # `_ask_raw` stays a module seam — it is the TRANSPORT under the real
+    # AskClient (tests scripting raw exercise the guard logic on purpose).
+    import dataclasses as _dc
+    monkeypatch.setattr(pipeline, "_APP",
+                        _dc.replace(pipeline._APP, ask_per_fn_body=script))
     if raw is not None:
         monkeypatch.setattr(pipeline, "_ask_raw", _Script(raw))
     # Retrospective is a distinct model seam: a fix-loop that exhausts calls

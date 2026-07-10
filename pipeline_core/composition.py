@@ -162,6 +162,9 @@ class Helpers:
     parse_cmd: Callable[[str], list[str]]
     prompt_budget: Callable[..., int]
     ask_retrospective: Callable[..., str]
+    # The per-fn conversation protocol (prompt → body/pull-request) — the
+    # PromptContext role's model seam, routed through App (P3-S2 llm boundary).
+    ask_per_fn_body: Callable[..., tuple[str | None, str]]
     extract_and_store_rules: Callable[..., bool]
     enumerate_types: Callable[[Path], list[TypeRecord] | None]
     enumerate_fns: Callable[[Path], list[dict[str, object]] | None]
@@ -234,6 +237,10 @@ class App:
     scope: ClusterScope
     ports: Ports
     config: CompositionConfig
+    # LLM per-fn boundary (P3-S2): the engines' PromptContext role resolves its
+    # model seam here at call time — swap via dataclasses.replace to script it.
+    ask_per_fn_body: Callable[..., tuple[str | None, str]]
+
     # Cargo boundary (P3-S2): the application-facing runner over `adapters.cargo`
     # — the semantic (rc, text) / (rc, text, diags) level engines and scripted
     # tests work at. Swap via dataclasses.replace to script it.
@@ -367,6 +374,7 @@ def build_app(
         config=config,
         structure=structure,
         cargo_runner=PortBoundCargoRunner(adapters.cargo),
+        ask_per_fn_body=helpers.ask_per_fn_body,
         fill_roles=fill_roles,
         augment_roles=augment_roles,
         genesis_audit_deps=GenesisAuditDeps(
