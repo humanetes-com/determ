@@ -103,3 +103,12 @@ class Task2Backend(_Coercible):
     STATIC = "static"     # one big ask per attempt
     SKELETON = "skeleton"
     FILELIST = "filelist"  # default
+
+
+class ProcessFailure(_Coercible):
+    """Why a subprocess produced NO normal exit code (the rc=-1 sentinel made
+    explicit — plan #77/#79). TIMEOUT is retryable/slow; BINARY_MISSING is a
+    broken environment no retry can fix."""
+
+    TIMEOUT = "timeout"
+    BINARY_MISSING = "binary_missing"

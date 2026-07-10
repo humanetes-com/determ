@@ -60,7 +60,8 @@ def run_cargo(
     otherwise the stdout+stderr-block combined layout (legacy parity)."""
     p = cargo.run(cmd, cwd, env=env, timeout=timeout)
     if p.returncode == -1:
-        return -1, p.stderr
+        # Keep the pre-kill partial stdout (names the hung test — debt #80).
+        return -1, (p.stdout + "\n" if p.stdout else "") + p.stderr
     return p.returncode, _combined(p.stdout, p.stderr)
 
 

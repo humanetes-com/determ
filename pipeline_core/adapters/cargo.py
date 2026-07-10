@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..domain.cluster_scope import ClusterScope
+from ..domain.enums import ProcessFailure
 from ..domain.models import BuildCluster
 from ..domain.test_command import parse_cmd
 
@@ -39,8 +40,10 @@ def run_build_check(
         )
         output = (result.stdout + "\n" + result.stderr).strip()
         return result.returncode == 0, output
-    except subprocess.TimeoutExpired:
-        return False, f"Build check timed out after {build_timeout}s."
+    except subprocess.TimeoutExpired as e:
+        partial = (_partial_text(e.stdout) + "\n" + _partial_text(e.stderr)).strip()
+        return False, (partial + "\n" if partial else "") + (
+            f"Build check timed out after {build_timeout}s.")
     except FileNotFoundError as e:
         return False, f"Build check command not found: {e}"
 
@@ -97,6 +100,21 @@ class Process:
     returncode: int
     stdout: str
     stderr: str
+    # rc=-1 made explicit (debt #79): which failure CLASS produced no exit
+    # code. None for any normally-exited process (including rc!=0 failures).
+    failure: ProcessFailure | None = None
+
+
+
+
+def _partial_text(captured: object) -> str:
+    """TimeoutExpired.stdout/.stderr may be bytes (pre-kill partial capture)
+    or None regardless of text=True — normalise to str."""
+    if captured is None:
+        return ""
+    if isinstance(captured, bytes):
+        return captured.decode("utf-8", errors="replace")
+    return str(captured)
 
 
 class CargoCli:
@@ -109,7 +127,13 @@ class CargoCli:
                 timeout=timeout, env=env,
             )
             return Process(r.returncode, r.stdout or "", r.stderr or "")
-        except subprocess.TimeoutExpired:
-            return Process(-1, "", f"TIMEOUT after {timeout}s")
+        except subprocess.TimeoutExpired as e:
+            # Keep the partial output: for a HUNG test it names which test was
+            # running when the clock ran out — the one fact the fix loop and
+            # the operator need. Discarding it is a feedback-fidelity loss.
+            return Process(-1, _partial_text(e.stdout),
+                           _partial_text(e.stderr) + f"\nTIMEOUT after {timeout}s",
+                           failure=ProcessFailure.TIMEOUT)
         except FileNotFoundError as e:
-            return Process(-1, "", f"FILE NOT FOUND: {e}")
+            return Process(-1, "", f"FILE NOT FOUND: {e}",
+                           failure=ProcessFailure.BINARY_MISSING)

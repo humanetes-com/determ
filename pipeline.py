@@ -2212,7 +2212,7 @@ def _run_cargo_check_diag(
     timeout: int = 180,
 ) -> "tuple[int, str, list[Diagnostic]]":
     return _reconstruct_cargo_runner.run_check_diag(
-        ADAPTERS.cargo, cmd, cwd, env, timeout)
+        _APP.adapters.cargo, cmd, cwd, env, timeout)  # P3-S2: via App port
 
 
 def _focus_cargo_errors(output: str, file_rel: str,
@@ -2224,7 +2224,7 @@ def _focus_cargo_errors(output: str, file_rel: str,
 def _run_cargo(cmd: str, cwd: Path, env: dict, timeout: int = 180) -> tuple[int, str]:
     # Port-composed runner (P2 slice 8): see application/reconstruct/cargo_runner.run_cargo.
     return _reconstruct_cargo_runner.run_cargo(
-        ADAPTERS.cargo, cmd, cwd, env, timeout)
+        _APP.adapters.cargo, cmd, cwd, env, timeout)  # P3-S2: via App port
 
 
 # FR-024: every cargo test invocation must be wrapped in an improvement-driven

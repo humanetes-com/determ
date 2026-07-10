@@ -160,8 +160,14 @@ class CargoBackendAdapter:
             r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
                                timeout=timeout, env=env)
             return r.returncode, r.stdout or "", r.stderr or ""
-        except subprocess.TimeoutExpired:
-            return -1, "", ""  # -1 = timeout sentinel (matches _run_cargo)
+        except subprocess.TimeoutExpired as e:
+            # -1 = timeout sentinel (matches _run_cargo). Keep the partial
+            # output — it names the hung test / the last compiling unit.
+            def _s(c: object) -> str:
+                if c is None:
+                    return ""
+                return c.decode("utf-8", errors="replace") if isinstance(c, bytes) else str(c)
+            return -1, _s(e.stdout), _s(e.stderr) + f"\nTIMEOUT after {timeout}s"
 
     def run(self, cmd: str, cwd: Path, env: dict[str, str],
             timeout: int = 180) -> tuple[int, str]:

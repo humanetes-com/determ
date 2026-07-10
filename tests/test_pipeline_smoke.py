@@ -2363,7 +2363,8 @@ def test_slice5a_shims_delegate_to_adapters() -> None:
     # tests.harness.install_fake_extractor. feature-gate-cfgs + skeletonise +
     # cargo still go straight to ADAPTERS.
     pipeline._APP = _dc.replace(
-        pipeline._APP, structure=CliStructureReader(pipeline.ADAPTERS.extractor))
+        pipeline._APP, adapters=pipeline.ADAPTERS,
+        structure=CliStructureReader(pipeline.ADAPTERS.extractor))
     try:
         d = Path("/tmp/x")
         # fns wrapper re-serialises typed records to wire dicts for the fill engine.
