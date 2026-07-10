@@ -94,10 +94,21 @@ def install_scripted_cargo(
         "check_diag": _Script(check_diag),
         "run": _Script(run),
     }
-    monkeypatch.setattr(pipeline, "_run_cargo_check_diag",
-                        lambda *a, **k: scripts["check_diag"]())
-    monkeypatch.setattr(pipeline, "_run_cargo",
-                        lambda *a, **k: scripts["run"]())
+
+    class _ScriptedCargoRunner:
+        """ports.cargo_runner.CargoRunner over the scripts — injected on _APP
+        (port boundary, P3-S2) instead of patching the module fns."""
+
+        def run(self, cmd, cwd, env, timeout=180):  # noqa: ANN001, ANN201
+            return scripts["run"]()
+
+        def check_diag(self, cmd, cwd, env, timeout=180):  # noqa: ANN001, ANN201
+            return scripts["check_diag"]()
+
+    import dataclasses as _dc
+    monkeypatch.setattr(pipeline, "_APP",
+                        _dc.replace(pipeline._APP,
+                                    cargo_runner=_ScriptedCargoRunner()))
     if frontier is not None:
         fscript = _Script(frontier)
         scripts["frontier"] = fscript

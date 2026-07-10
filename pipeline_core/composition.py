@@ -54,6 +54,7 @@ from pipeline_core.adapters.workspace_scan import WorkspaceScanDeps
 from pipeline_core.application.cluster_augment import ClusterAugmentor
 from pipeline_core.application.gen_tests_reattach import ReattachDeps
 from pipeline_core.application.orchestrator import LockDeps
+from pipeline_core.application.reconstruct.cargo_runner import PortBoundCargoRunner
 from pipeline_core.application.reconstruct.failure_analysis import FailureAnalysisStep
 from pipeline_core.application.reconstruct.module_reconstructor import ModuleReconstructor
 from pipeline_core.application.reconstruct.per_fn_retry import (
@@ -75,6 +76,7 @@ from pipeline_core.domain.cluster_scope import ClusterScope
 from pipeline_core.domain.models import TypeRecord
 from pipeline_core.domain.run_state import RunState
 from pipeline_core.io import read, write
+from pipeline_core.ports.cargo_runner import CargoRunner as CargoRunnerPort
 from pipeline_core.ports.structure import StructureReader
 from pipeline_core.prompts.per_fn import build_per_fn_fix_prompt
 from pipeline_core.settings import Settings
@@ -232,6 +234,11 @@ class App:
     scope: ClusterScope
     ports: Ports
     config: CompositionConfig
+    # Cargo boundary (P3-S2): the application-facing runner over `adapters.cargo`
+    # — the semantic (rc, text) / (rc, text, diags) level engines and scripted
+    # tests work at. Swap via dataclasses.replace to script it.
+    cargo_runner: CargoRunnerPort
+
     # Syn-extractor boundary: the structured-source reader over `adapters.extractor`.
     # Typed at the PORT so tests swap in a fake via dataclasses.replace (P3-S2).
     structure: StructureReader
@@ -359,6 +366,7 @@ def build_app(
         ports=ports,
         config=config,
         structure=structure,
+        cargo_runner=PortBoundCargoRunner(adapters.cargo),
         fill_roles=fill_roles,
         augment_roles=augment_roles,
         genesis_audit_deps=GenesisAuditDeps(

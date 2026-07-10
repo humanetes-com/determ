@@ -2362,9 +2362,13 @@ def test_slice5a_shims_delegate_to_adapters() -> None:
     # structure provider (port boundary) — swap it wholesale, as tests do via
     # tests.harness.install_fake_extractor. feature-gate-cfgs + skeletonise +
     # cargo still go straight to ADAPTERS.
+    from pipeline_core.application.reconstruct.cargo_runner import (
+        PortBoundCargoRunner,
+    )
     pipeline._APP = _dc.replace(
         pipeline._APP, adapters=pipeline.ADAPTERS,
-        structure=CliStructureReader(pipeline.ADAPTERS.extractor))
+        structure=CliStructureReader(pipeline.ADAPTERS.extractor),
+        cargo_runner=PortBoundCargoRunner(pipeline.ADAPTERS.cargo))
     try:
         d = Path("/tmp/x")
         # fns wrapper re-serialises typed records to wire dicts for the fill engine.

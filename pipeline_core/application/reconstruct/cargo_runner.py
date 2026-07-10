@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import shlex
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from pipeline_core.application.reconstruct.cargo_errors import diagnostics_from_json
@@ -275,3 +276,19 @@ def run_check_diag(
         if d.rendered:
             rendered_parts.append(d.rendered)
     return proc.returncode, "\n".join(rendered_parts), diagnostics
+
+
+@dataclass(frozen=True, slots=True)
+class PortBoundCargoRunner:
+    """Production `ports.cargo_runner.CargoRunner`: the module's composition
+    fns bound to one raw `Cargo` port. Built once in `build_app`."""
+
+    cargo: Cargo
+
+    def run(self, cmd: str, cwd: Path, env: dict[str, str],
+            timeout: int = 180) -> tuple[int, str]:
+        return run_cargo(self.cargo, cmd, cwd, env, timeout)
+
+    def check_diag(self, cmd: str, cwd: Path, env: dict[str, str],
+                   timeout: int = 180) -> tuple[int, str, list[Diagnostic]]:
+        return run_check_diag(self.cargo, cmd, cwd, env, timeout)
