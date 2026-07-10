@@ -294,3 +294,22 @@ def fill_order(clusters: Iterable[BuildCluster]) -> list[BuildCluster]:
     it owns every cfg-agnostic item, and each later cluster seeds its stubs
     from the bodies earlier clusters already accepted — then the rest by name."""
     return sorted(clusters, key=lambda c: (not c.is_default, c.name))
+
+
+def nightly_rules_for(cluster: object | None) -> str:
+    """The nightly boundary rules to inject into generation prompts for the
+    ACTIVE cluster: a non-default cluster carries its own prompt override; the
+    default cluster derives a do-not-test rule from its excluded cfg set; no
+    active cluster (or no exclusions) → no rules."""
+    if cluster is None:
+        return ""
+    if not getattr(cluster, "is_default", True):
+        return str(getattr(cluster, "prompt_nightly_rule", ""))
+    excluded = getattr(cluster, "excluded_cfg", None) or []
+    if not excluded:
+        return ""
+    predicates = ", ".join(f"`{p}`" for p in sorted(excluded))
+    return (
+        f"- Do NOT write tests for code gated behind these excluded cfg predicates: {predicates}.\n"
+        f"  Skip any source lines inside their `#[cfg(...)]` blocks — they are untestable on this toolchain."
+    )

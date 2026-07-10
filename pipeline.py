@@ -90,19 +90,7 @@ from pipeline_core.adapters.gen_tests_storage import (
     load_gen_tests_origin as _load_gen_tests_origin,
 )
 from pipeline_core.adapters.gen_tests_storage import (
-    next_gen_tests_n as _next_gen_tests_n,
-)
-from pipeline_core.adapters.gen_tests_storage import (
     quarantine_broken_gen_tests as _quarantine_broken_gen_tests,
-)
-from pipeline_core.adapters.gen_tests_storage import (
-    read_all_gen_tests as _read_all_gen_tests,
-)
-from pipeline_core.adapters.gen_tests_storage import (
-    revert_gen_tests_pass as _revert_gen_tests_pass,
-)
-from pipeline_core.adapters.gen_tests_storage import (
-    strip_all_gen_tests_artifacts as _strip_all_gen_tests_artifacts,
 )
 from pipeline_core.adapters.model_notes_store import (
     FileModelNotesStore as _FileModelNotesStore,
@@ -241,7 +229,6 @@ from pipeline_core.application.tasks.task0b_discovery import (
 from pipeline_core.application.tasks.task0b_discovery import (
     task0b_discovery as _task0b_impl,
 )
-from pipeline_core.application.tasks.task0c import Task0cDeps
 from pipeline_core.application.tasks.task0c import task0c_augment_module as _task0c_impl
 from pipeline_core.application.tasks.task1 import task1 as _task1_impl
 from pipeline_core.application.tasks.task2 import (
@@ -283,24 +270,6 @@ from pipeline_core.domain.cargo_toml import cargo_package_name as _domain_cargo_
 from pipeline_core.domain.cargo_toml import load_cargo_toml as _domain_load_cargo_toml
 from pipeline_core.domain.cluster_scope import ClusterScope
 from pipeline_core.domain.coverage import CoverageMeasurement
-from pipeline_core.domain.coverage_annotation import (
-    annotate_uncovered as _annotate_uncovered,
-)
-from pipeline_core.domain.coverage_annotation import (
-    extract_branch_guard as _extract_branch_guard,
-)
-from pipeline_core.domain.coverage_annotation import (
-    extract_uncovered_functions as _extract_uncovered_functions,
-)
-from pipeline_core.domain.coverage_annotation import (
-    filter_cfg_excluded_lines as _filter_cfg_excluded_lines,
-)
-from pipeline_core.domain.coverage_annotation import (
-    filter_cfg_incompatible_lines as _filter_cfg_incompatible_lines,
-)
-from pipeline_core.domain.coverage_annotation import (
-    partition_uncovered_lines as _partition_uncovered_lines,
-)
 from pipeline_core.domain.crate_name import crate_display_name as _crate_display_name
 from pipeline_core.domain.enums import (
     Backend,
@@ -324,7 +293,6 @@ from pipeline_core.domain.llm_output import (
     GENESIS_DELIM_END,
     GENESIS_DELIM_START,
     _extract_genesis,
-    extract_files,
 )
 from pipeline_core.domain.llm_output import (
     _find_fn_blocks as _find_fn_blocks,  # R8.5 parsers — re-export for call sites/tests
@@ -369,9 +337,6 @@ from pipeline_core.domain.models import (
 )
 from pipeline_core.domain.prompt_budget import PromptBudgets
 from pipeline_core.domain.reconstruction import SpliceOutcome
-from pipeline_core.domain.refine import (
-    parse_retrospective_categories as _parse_retrospective_categories,
-)
 from pipeline_core.domain.run_state import RunPlan as _RunPlan
 from pipeline_core.domain.run_state import RunState
 from pipeline_core.domain.rust_fn_headers import (  # noqa: F401  (smoke pin: test_sig_tighten_guard_and_where_parse)
@@ -381,8 +346,6 @@ from pipeline_core.domain.rust_fn_headers import (
     locate_fn as _locate_fn,
 )
 from pipeline_core.domain.rust_idents import (
-    camelcase_type_names,
-    defined_type_names,
     use_path_requirement_gaps,
 )
 from pipeline_core.domain.rust_idioms import no_std_invariant_note
@@ -390,14 +353,10 @@ from pipeline_core.domain.rust_macros import (
     collect_crate_macros as _collect_crate_macros_pure,
 )
 from pipeline_core.domain.rust_scan import (
-    count_test_attrs,
-    find_mod_opener,
-    has_nonempty_test_fn,
-    is_structural_brace_line,
-    strip_line_block_comments,
+    rust_delimiters_balanced as _rust_delimiters_balanced,
 )
 from pipeline_core.domain.rust_scan import (
-    rust_delimiters_balanced as _rust_delimiters_balanced,
+    strip_line_block_comments,
 )
 from pipeline_core.domain.test_command import (  # noqa: F401  (smoke pin: test_derive_check_only_cmd)
     derive_check_only_cmd as _derive_check_only_cmd,
@@ -412,7 +371,6 @@ from pipeline_core.domain.test_results import (
     extract_test_output_from_file,
     insert_no_run,
     rustc_error_codes,
-    rustc_error_signatures,
     strip_ansi,
     validate_task3_output_strict,
 )
@@ -422,19 +380,9 @@ from pipeline_core.domain.test_results import (
 from pipeline_core.domain.text import (
     PromptDigest,
     smart_truncate,
-    strip_trailing_file_tag,
-)
-from pipeline_core.domain.text import (
-    block_is_prose as _block_is_prose,
 )
 from pipeline_core.domain.text import (
     extract_code_content as extract_code_content,  # noqa: PLC0414 (test seam re-export)
-)
-from pipeline_core.domain.text import (
-    flags_unreachable as _flags_unreachable,
-)
-from pipeline_core.domain.text import (
-    parse_attempt_number as _parse_attempt_number,
 )
 from pipeline_core.domain.text import (
     strip_markdown_fences as _strip_markdown_fences,
@@ -1097,10 +1045,6 @@ def _start_audit_thread() -> None:
 from pipeline_core.domain.generation import (  # noqa: E402
     Task1Request as _Task1Request,
 )
-from pipeline_core.domain.generation import extract_test_mod  # noqa: E402
-from pipeline_core.domain.generation import (  # noqa: E402
-    inject_gen_prelude_imports as _inject_gen_prelude_imports,
-)
 
 
 def generate_in_parallel(
@@ -1161,7 +1105,6 @@ from pipeline_core.adapters.pipeline_db import (  # noqa: E402
     genesis_rules_read,
     genesis_rules_write,
     type_signals_read,
-    type_signals_write,
 )
 
 # ---------------------------------------------------------------------------
@@ -1432,21 +1375,6 @@ def setup_workspace(repo: str, workspace_dir: Path, force_fresh: bool = False) -
     return _wsmod.setup_workspace(_APP.ws_deps, repo, workspace_dir, force_fresh)
 
 
-def _nightly_rules_for_cluster() -> str:
-    """Return the nightly boundary rules to inject into generation prompts.
-    Non-default cluster: cluster-specific override from prompt_nightly_rule.
-    Default/stable cluster: derived from the cluster's excluded_cfg list.
-    Returns empty string if no exclusions apply.
-    """
-    if _SCOPE.active and not _SCOPE.active.is_default:
-        return _SCOPE.active.prompt_nightly_rule
-    if _SCOPE.active and _SCOPE.active.excluded_cfg:
-        predicates = ", ".join(f"`{p}`" for p in sorted(_SCOPE.active.excluded_cfg))
-        return (
-            f"- Do NOT write tests for code gated behind these excluded cfg predicates: {predicates}.\n"
-            f"  Skip any source lines inside their `#[cfg(...)]` blocks — they are untestable on this toolchain."
-        )
-    return ""
 
 
 # _estimate_cluster_ceiling + _cluster_pre_check relocated to
@@ -1513,6 +1441,15 @@ class _LateStructure:
         return _enumerate_fns_via_extractor(src_dir)
 
 
+_MUTATION = MutationTester(
+    cargo_env=_cargo_env, ask=_ASK_CLIENT.ask, log=_log,
+    task0c_model=_TASK0C_MODEL, single_call_char_limit=SINGLE_CALL_CHAR_LIMIT,
+)
+_FILE_CONSTRAINTS = FileConstraintsReader(
+    configs_dir=Path(__file__).parent / "project_configs",
+    is_nightly=lambda: _SCOPE.active is not None and not _SCOPE.active.is_default,
+    log=_log,
+)
 _set_current: "Callable[..., None]" = _state_mod.set_current
 
 _HELPERS = _Helpers(
@@ -1533,6 +1470,19 @@ _HELPERS = _Helpers(
     write_fr_preserving_notes=lambda *a, **k: _write_fr_preserving_notes(*a, **k),
     classify_phase_c_test_failures=lambda *a, **k: _classify_phase_c_test_failures(*a, **k),
     set_current=lambda *a, **k: _set_current(*a, **k),
+    cluster_gate_for=lambda *a, **k: _cluster_gate_for_sibling(*a, **k),
+    describe_test_environment=lambda *a, **k: _describe_test_environment(*a, **k),
+    public_api_from_source=lambda *a, **k: _public_api_from_source(*a, **k),
+    source_hash=lambda *a, **k: _source_hash(*a, **k),
+    test_augmentor_factory=lambda *a, **k: _test_augmentor_factory(*a, **k),
+    generate_fix_loop=lambda *a, **k: generate_fix_loop(*a, **k),
+    generate_in_parallel=lambda *a, **k: generate_in_parallel(*a, **k),
+    load_file_constraints=lambda *a, **k: _FILE_CONSTRAINTS.load(*a, **k),
+    mutation_harden_file=lambda *a, **k: _MUTATION.harden_file(*a, **k),
+    coverage_target=COVERAGE_AUGMENTATION_TARGET,
+    task0c_prompt_char_cap=TASK0C_PROMPT_CHAR_CAP,
+    task0c_fix_thinking_directive=_TASK0C_FIX_THINKING_DIRECTIVE,
+    task0c_thinking_directive=_TASK0C_THINKING_DIRECTIVE,
     emit_per_file_test_overview=lambda *a, **k: _emit_per_file_test_overview(*a, **k),
     fix_diag=_fix_diag,  # the fix_diagnostics module (imported at top)
     gotchas_for_error=lambda *a, **k: _gotchas_for_error(*a, **k),
@@ -2951,7 +2901,7 @@ def _source_hash(project_dir: Path) -> str:
     return _source_hash_impl(
         project_dir,
         is_gen_tests_sibling_name=_is_gen_tests_sibling_name,
-        strip_gen_tests_decls=_strip_gen_tests_decls)
+        strip_gen_tests_decls=_strip_all_gen_tests_decls)
 
 
 # Slice 9: the pipeline_state.md store moved to pipeline_core/adapters/state.py
@@ -3159,9 +3109,6 @@ from pipeline_core.domain.generation import (  # noqa: E402
     build_gen_tests_decl as _build_gen_tests_decl,
 )
 from pipeline_core.domain.generation import (  # noqa: E402
-    extract_gen_tests_body as _extract_gen_tests_body,
-)
-from pipeline_core.domain.generation import (  # noqa: E402
     gen_tests_origin_cfgs as _gen_tests_origin_cfgs,
 )
 from pipeline_core.domain.generation import (
@@ -3169,9 +3116,6 @@ from pipeline_core.domain.generation import (
 )
 from pipeline_core.domain.generation import (
     is_gen_tests_sibling_name as _is_gen_tests_sibling_name,
-)
-from pipeline_core.domain.generation import (
-    prelude_import_names as _prelude_import_names,  # noqa: E402
 )
 from pipeline_core.domain.generation import (
     strip_all_gen_tests_decls as _strip_all_gen_tests_decls,  # noqa: E402
@@ -3227,10 +3171,8 @@ _CLUSTER_MERGER = ClusterMerger(extractor_bin=_SKELETON_EXTRACTOR_BIN, log=_log)
 
 # P6: mutation-testing behaviour hardening — focused adapter, composition-injected
 # (ask late-bound so a test monkeypatching pipeline.ask still intercepts).
-_MUTATION = MutationTester(
-    cargo_env=_cargo_env, ask=_ASK_CLIENT.ask, log=_log,
-    task0c_model=_TASK0C_MODEL, single_call_char_limit=SINGLE_CALL_CHAR_LIMIT,
-)
+# _MUTATION constructed above _HELPERS (S43 definition-order).
+
 
 _GEN_FILL = FillEngineAdapter(
     run_phase_c_tdd_fn=lambda **kw: _run_phase_c_tdd(**kw),
@@ -3253,7 +3195,7 @@ _GEN_CLUSTERS = ClustersAdapter(
 _GEN_GENTESTS = GenTestsAdapter(
     build_decl_fn=lambda name, n, allow, cluster_cfg_attr="": _build_gen_tests_decl(name, n, allow, cluster_cfg_attr=cluster_cfg_attr),
     has_decl_fn=lambda txt, pn: _has_gen_tests_decl(txt, pn),
-    strip_decl_n_fn=lambda txt, pn: _strip_gen_tests_decl_n(txt, pn),
+    strip_decl_n_fn=lambda txt, pn: _domain_strip_gen_tests_decl_n(txt, pn),
     derive_prelude_fn=lambda pd: _derive_gentest_prelude(pd),
     load_origin_fn=lambda pd: _load_gen_tests_origin(pd),
     propagate_fn=lambda gt, om, ps, pn, tag="": _propagate_or_quarantine_sibling(gt, om, ps, pn, _log, tag),
@@ -3680,9 +3622,6 @@ def _measure_coverage(project_dir: Path, module_name: str) -> CoverageMeasuremen
 
 
 
-def _strip_gen_tests_decls(src_text: str) -> str:
-    """Remove all gen_tests path-mod decls (R7: generation.strip_all_gen_tests_decls)."""
-    return _strip_all_gen_tests_decls(src_text)
 
 
 # Sibling-name parser + predicate live in discovery (P5); shims keep the
@@ -3691,9 +3630,6 @@ _match_gen_tests_sibling = _discovery.match_gen_tests_sibling
 _is_gen_tests_file: Callable[[str], bool] = _discovery.is_gen_tests_file
 
 
-def _strip_gen_tests_decl_n(parent_text: str, pass_n: int) -> str:
-    """Remove the gen_tests_<N> decl for one pass (R7: generation.strip_gen_tests_decl_n)."""
-    return _domain_strip_gen_tests_decl_n(parent_text, pass_n)
 
 
 
@@ -3703,14 +3639,7 @@ def _strip_gen_tests_decl_n(parent_text: str, pass_n: int) -> str:
 # `use <prefix>…<symbol>…` statement exists (R7: rust_scan.use_imports_symbol).
 
 
-def _inject_allow_before_mod(block: str, allow_line: str, *, gen_only: bool) -> str:
-    """Insert `allow_line` before the first `[gen_]mod` opener (R7: find_mod_opener)."""
-    if allow_line in block:
-        return block
-    opener = find_mod_opener(block, gen_only=gen_only)
-    if opener is None:
-        return block
-    return block[:opener[0]] + f"{allow_line}\n" + block[opener[0]:]
+# _inject_allow_before_mod → domain/coverage_annotation.inject_allow_before_mod (S42).
 
 
 
@@ -3735,7 +3664,7 @@ _TASK0B_DEPS = Task0bDeps(
     write=write,
     is_test_file=is_test_file,
     is_gen_tests_file=_is_gen_tests_file,
-    strip_gen_tests_decls=_strip_gen_tests_decls,
+    strip_gen_tests_decls=_strip_all_gen_tests_decls,
     condense_rust_to_signatures=_condense_rust_to_signatures,
     manifest_name=MANIFEST_NAME,
     sibling_cap=_BUDGETS.sibling,
@@ -3765,7 +3694,7 @@ def _is_gen_tests_decl_only_src(content: str) -> bool:
     """
     if not content.strip():
         return True
-    no_decls = _strip_gen_tests_decls(content)
+    no_decls = _strip_all_gen_tests_decls(content)
     # Strip line and block comments before checking for remaining code.
     return strip_line_block_comments(no_decls).strip() == ""
 
@@ -3836,46 +3765,7 @@ def _propagate_or_quarantine_sibling(
 
 
 
-def _select_relevant_siblings(
-    target_rel: str,
-    target_source: str,
-    all_siblings: list[tuple[str, str]],
-    project_dir: Path,
-) -> list[tuple[str, str]]:
-    """
-    Python type-name overlap ranking — replaces the BL-014 LLM planner call.
-
-    Algorithm:
-    1. Extract CamelCase identifiers used in the target file (types, structs, etc.)
-    2. For each sibling, count how many of those identifiers are *defined* there
-       (defined = appears after struct/enum/trait/type/impl keyword)
-    3. Return all siblings sorted by overlap count descending — the budget system
-       decides how many to include.
-
-    Zero LLM calls, deterministic, and empirically better for type-heavy files
-    (e.g. error.rs uses Own/Mut/Ref → correctly ranks ptr.rs first).
-    """
-    if not all_siblings:
-        return []
-
-    # P7: CamelCase type-name + `kw Name` definition scans → pure tokeniser
-    # (byte-equivalent), no regex on source.
-    used_types: set[str] = camelcase_type_names(target_source)
-
-    def _overlap(content: str) -> int:
-        return len(used_types & defined_type_names(content))
-
-    scored = sorted(
-        ((srel, sc, _overlap(sc)) for srel, sc in all_siblings),
-        key=lambda x: x[2],
-        reverse=True,
-    )
-
-    top = [(srel, score) for srel, _sc, score in scored if score > 0][:4]
-    _log(f"  [task0c planner] {target_rel}: ranked {len(all_siblings)} siblings by type overlap"
-         f" (top: {top if top else 'none matched'})")
-    _emit("task0c.planner", file=target_rel)  # debt#7: monitor file-progress source
-    return [(srel, sc) for srel, sc, _score in scored]
+# _select_relevant_siblings → application/tasks/task0c.select_relevant_siblings (S38).
 
 
 
@@ -3913,7 +3803,7 @@ def task0c_augment_module(
 ) -> tuple[float, int, bool, str]:
     # slice 5b: extracted to application.tasks.task0c; thin shim binding deps.
     return _task0c_impl(
-        project_dir, module_name, module_dir, _TASK0C_DEPS,
+        project_dir, module_name, module_dir, _APP.task0c_deps,
         crate_type=crate_type, existing_test_files=existing_test_files,
         project_context=project_context, coverage_strategy=coverage_strategy,
     )
@@ -3969,11 +3859,8 @@ cmd_best_models = _model_catalog.print_best_models
 
 # P6: per-file generation constraints reader (config TOML I/O) — focused adapter,
 # composition-injected with the configs dir + the active-cluster predicate + log.
-_FILE_CONSTRAINTS = FileConstraintsReader(
-    configs_dir=Path(__file__).parent / "project_configs",
-    is_nightly=lambda: _SCOPE.active is not None and not _SCOPE.active.is_default,
-    log=_log,
-)
+# _FILE_CONSTRAINTS constructed above _HELPERS (S43 definition-order).
+
 
 # slice 5b: deps for the extracted TASK 0c engine (defined before main(), after every
 # collaborator). subprocess/git injected as the module; _current_cluster via a call-time
@@ -3983,17 +3870,14 @@ _FILE_CONSTRAINTS = FileConstraintsReader(
 # P3-S3 (step 31): GenerateFixLoopDeps constructed in build_app (App.gen_fix_loop_deps).
 
 
-_TASK0C_DEPS = Task0cDeps(
-    BUILD_TIMEOUT=BUILD_TIMEOUT, COVERAGE_TARGET=COVERAGE_AUGMENTATION_TARGET, coverage_ignore_pragma=COVERAGE_IGNORE_PRAGMA, TASK0C_PROMPT_CHAR_CAP=TASK0C_PROMPT_CHAR_CAP, FIX_ERR_CAP=_FIX_ERR_CAP, SIBLING_CAP=_BUDGETS.sibling, SRC_SNIP_CAP=_BUDGETS.src_snippet, TASK0C_FIX_THINKING_DIRECTIVE=_TASK0C_FIX_THINKING_DIRECTIVE, TASK0C_MODEL=_TASK0C_MODEL, TASK0C_THINKING_DIRECTIVE=_TASK0C_THINKING_DIRECTIVE, WORKING_CAP=_BUDGETS.working, annotate_uncovered=_annotate_uncovered, block_is_prose=_block_is_prose, build_gen_tests_decl=_build_gen_tests_decl, guard=_guard, cargo_env=_cargo_env, cluster_gate_for=_cluster_gate_for_sibling, condense_rust_to_signatures=_condense_rust_to_signatures, count_test_attrs=count_test_attrs, derive_gentest_prelude=_derive_gentest_prelude, describe_test_environment=_describe_test_environment, error_signatures_from_output=rustc_error_signatures, extract_branch_guard=_extract_branch_guard, extract_gen_tests_body=_extract_gen_tests_body, extract_public_symbols=_public_api_from_source, extract_uncovered_functions=_extract_uncovered_functions, filter_cfg_excluded_lines=_filter_cfg_excluded_lines, filter_cfg_incompatible_lines=_filter_cfg_incompatible_lines, flags_unreachable=_flags_unreachable, gen_tests_path=_gen_tests_path, has_nonempty_test_body=has_nonempty_test_fn, inject_allow_before_any_mod=functools.partial(_inject_allow_before_mod, gen_only=False), inject_allow_before_gen_mod=functools.partial(_inject_allow_before_mod, gen_only=True), inject_gen_prelude_imports=_inject_gen_prelude_imports, is_gen_tests_file=_is_gen_tests_file, is_structural_line=is_structural_brace_line, load_file_constraints=_FILE_CONSTRAINTS.load, type_signals_write=type_signals_write, mark_phase=_mark_phase, match_gen_tests_sibling=_match_gen_tests_sibling, next_gen_tests_n=_next_gen_tests_n, nightly_rules_for_cluster=_nightly_rules_for_cluster, parse_attempt_number=_parse_attempt_number, parse_retrospective_categories=_parse_retrospective_categories, partition_uncovered_lines=_partition_uncovered_lines, prelude_import_names=_prelude_import_names, quick_file_coverage=_coverage_provider.measure_file, read_all_gen_tests=_read_all_gen_tests, read_state=_read_state, revert_gen_tests_pass=_revert_gen_tests_pass, select_relevant_siblings=_select_relevant_siblings, set_current=_set_current, source_hash=_source_hash, strip_all_gen_tests_artifacts=_strip_all_gen_tests_artifacts, strip_gen_tests_decl_n=_strip_gen_tests_decl_n, strip_gen_tests_decls=_strip_gen_tests_decls, strip_trailing_file_tag=strip_trailing_file_tag, mutation_harden_file=lambda *a, **k: _MUTATION.harden_file(*a, **k), gen_tests_siblings=_gen_tests_siblings, test_augmentor_factory=_test_augmentor_factory, ask=_ASK_CLIENT.ask, extract_files=extract_files, extract_test_mod=extract_test_mod, generate_fix_loop=generate_fix_loop, generate_in_parallel=generate_in_parallel, is_test_file=is_test_file, write=write,
-    subprocess=subprocess, get_current_cluster=_SCOPE.get_active,
-    coverage_provider=_coverage_provider, check_stop=_check_graceful_stop,
-)
+# P3-S3 (step 42): Task0cDeps constructed in build_app (App.task0c_deps).
+
 
 # P6: pre-strip API-surface capture — focused adapter, composition-injected.
 _API_SURFACE = ApiSurfaceCapture(
     api_surface_path=_api_surface_path, type_manifest_path=_type_manifest_path,
     condense_to_signatures=_condense_rust_to_signatures,
-    strip_gen_tests_decls=_strip_gen_tests_decls,
+    strip_gen_tests_decls=_strip_all_gen_tests_decls,
     enumerate_types=ADAPTERS.extractor.enumerate_types,
     is_test_file=is_test_file, skip_dir_names=frozenset(SKIP_DIR_NAMES), log=_log,
     enumerate_fns=lambda sd: _enumerate_fns_via_extractor(sd),

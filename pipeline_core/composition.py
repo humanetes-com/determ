@@ -10,6 +10,8 @@ state + the boundary providers derived from them. Later stages move the
 `_X_DEPS` use-case wiring and the `main` run-loop here (see refactoring.md §Phase 3)."""
 from __future__ import annotations
 
+import functools
+import subprocess as _subprocess_mod
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -28,6 +30,15 @@ from pipeline_core.adapters.ask_client import AskClient
 from pipeline_core.adapters.augment_engine import CargoAugmentEngine
 from pipeline_core.adapters.augment_store import FileAugmentStore
 from pipeline_core.adapters.coverage import CoverageDeps, CoverageProvider
+from pipeline_core.adapters.discovery import (
+    is_gen_tests_file as _disc_is_gen_tests_file,
+)
+from pipeline_core.adapters.discovery import (
+    is_test_file as _disc_is_test_file,
+)
+from pipeline_core.adapters.discovery import (
+    match_gen_tests_sibling as _disc_match_gen_tests_sibling,
+)
 from pipeline_core.adapters.failure_journal import FileFailureJournal
 from pipeline_core.adapters.fill_engine_roles import (
     CargoFillAdapter,
@@ -40,7 +51,29 @@ from pipeline_core.adapters.fill_engine_roles import (
     TestLinkerAdapter,
     WorkspaceModelAdapter,
 )
+from pipeline_core.adapters.gen_tests_storage import (
+    derive_gentest_prelude as _gts_derive_gentest_prelude,
+)
+from pipeline_core.adapters.gen_tests_storage import (
+    gen_tests_path as _gts_gen_tests_path,
+)
+from pipeline_core.adapters.gen_tests_storage import (
+    gen_tests_siblings as _gts_gen_tests_siblings,
+)
+from pipeline_core.adapters.gen_tests_storage import (
+    next_gen_tests_n as _gts_next_gen_tests_n,
+)
+from pipeline_core.adapters.gen_tests_storage import (
+    read_all_gen_tests as _gts_read_all_gen_tests,
+)
+from pipeline_core.adapters.gen_tests_storage import (
+    revert_gen_tests_pass as _gts_revert_gen_tests_pass,
+)
+from pipeline_core.adapters.gen_tests_storage import (
+    strip_all_gen_tests_artifacts as _gts_strip_all_artifacts,
+)
 from pipeline_core.adapters.pipeline_db import compile_patterns_write as _db_compile_patterns_write
+from pipeline_core.adapters.pipeline_db import type_signals_write as _db_type_signals_write
 from pipeline_core.adapters.ratchet import BestTreeRatchet
 from pipeline_core.adapters.reconstruct_roles import (
     AnalystAdapter,
@@ -65,6 +98,8 @@ from pipeline_core.adapters.retros import (
     save_retrospectives as _retros_save,
 )
 from pipeline_core.adapters.state import mark_phase, phase_valid, set_current
+from pipeline_core.adapters.state import mark_phase as _state_mark_phase
+from pipeline_core.adapters.state import read_state as _state_read_state
 from pipeline_core.adapters.structure import CliStructureReader  # noqa: F401 (re-export for composition callers)
 from pipeline_core.adapters.telemetry import JsonlEventEmitter, LogTelemetry
 from pipeline_core.adapters.test_runner import CallableTestRunner
@@ -98,25 +133,85 @@ from pipeline_core.application.reconstruct.phase_c_tdd import PhaseCTddDeps
 from pipeline_core.application.reconstruct.reconstruction_step import ReconstructionStep
 from pipeline_core.application.reconstruct.requirements_phase import RequirementsPhase
 from pipeline_core.application.reconstruct.retrospective import PhaseCRetroDeps
+from pipeline_core.application.reconstruct.source_view import (
+    condense_rust_to_signatures as _condense_rust_to_signatures,
+)
 from pipeline_core.application.reconstruct.splice import (
     restore_frozen_signature as _splice_restore_frozen_sig,
 )
 from pipeline_core.application.tasks.discover_test_command import DiscoverTestCommandDeps
 from pipeline_core.application.tasks.genesis_audit import GenesisAuditDeps
 from pipeline_core.application.tasks.task0_docs import Task0DocsDeps
+from pipeline_core.application.tasks.task0c import Task0cDeps
+from pipeline_core.application.tasks.task0c import (
+    select_relevant_siblings as _t0c_select_relevant_siblings,
+)
 from pipeline_core.application.tasks.task1 import Task1Deps
 from pipeline_core.application.tasks.task4 import Task4Deps
 from pipeline_core.application.validate import Task2CheckerDeps
+from pipeline_core.domain.cluster_plan import nightly_rules_for
 from pipeline_core.domain.cluster_scope import ClusterScope
+from pipeline_core.domain.coverage_annotation import (
+    annotate_uncovered as _cov_annotate_uncovered,
+)
+from pipeline_core.domain.coverage_annotation import (
+    extract_branch_guard as _cov_extract_branch_guard,
+)
+from pipeline_core.domain.coverage_annotation import (
+    extract_uncovered_functions as _cov_extract_uncovered_functions,
+)
+from pipeline_core.domain.coverage_annotation import (
+    filter_cfg_excluded_lines as _cov_filter_cfg_excluded_lines,
+)
+from pipeline_core.domain.coverage_annotation import (
+    filter_cfg_incompatible_lines as _cov_filter_cfg_incompat,
+)
+from pipeline_core.domain.coverage_annotation import (
+    inject_allow_before_mod as _cov_inject_allow_before_mod,
+)
+from pipeline_core.domain.coverage_annotation import (
+    partition_uncovered_lines as _cov_partition_uncovered_lines,
+)
+from pipeline_core.domain.generation import (
+    build_gen_tests_decl as _gen_build_gen_tests_decl,
+)
+from pipeline_core.domain.generation import (
+    extract_gen_tests_body as _gen_extract_gen_tests_body,
+)
+from pipeline_core.domain.generation import (
+    extract_test_mod as _gen_extract_test_mod,
+)
+from pipeline_core.domain.generation import (
+    inject_gen_prelude_imports as _gen_inject_gen_prelude_imports,
+)
+from pipeline_core.domain.generation import (
+    prelude_import_names as _gen_prelude_import_names,
+)
+from pipeline_core.domain.generation import (
+    strip_all_gen_tests_decls as _gen_strip_all_decls,
+)
+from pipeline_core.domain.generation import (
+    strip_gen_tests_decl_n as _gen_strip_decl_n,
+)
 from pipeline_core.domain.impl_routing import impl_block_id as _impl_block_id
 from pipeline_core.domain.llm_output import extract_files as _extract_files
 from pipeline_core.domain.models import TypeRecord
 from pipeline_core.domain.prompt_budget import PromptBudgets
+from pipeline_core.domain.refine import (
+    parse_retrospective_categories as _parse_retro_categories,
+)
 from pipeline_core.domain.run_state import RunState
 from pipeline_core.domain.rust_fn_headers import is_pub_fn as _domain_is_pub_fn
 from pipeline_core.domain.rust_fn_headers import locate_fn as _domain_locate_fn
 from pipeline_core.domain.rust_macros import (
     proc_macro_fallback_requirements as _pm_fallback_reqs,
+)
+from pipeline_core.domain.rust_scan import count_test_attrs as _scan_count_test_attrs
+from pipeline_core.domain.rust_scan import (
+    has_nonempty_test_fn as _scan_has_nonempty_test_fn,
+)
+from pipeline_core.domain.rust_scan import (
+    is_structural_brace_line as _scan_is_structural_brace_line,
 )
 from pipeline_core.domain.test_command import (
     derive_check_only_cmd as _domain_derive_check_only_cmd,
@@ -124,7 +219,16 @@ from pipeline_core.domain.test_command import (
 from pipeline_core.domain.test_results import (
     is_compiler_output_line as _is_compiler_output_line,
 )
+from pipeline_core.domain.test_results import (
+    rustc_error_signatures as _rustc_error_signatures,
+)
 from pipeline_core.domain.test_results import strip_ansi as _strip_ansi
+from pipeline_core.domain.text import block_is_prose as _text_block_is_prose
+from pipeline_core.domain.text import flags_unreachable as _text_flags_unreachable
+from pipeline_core.domain.text import parse_attempt_number as _text_parse_attempt_number
+from pipeline_core.domain.text import (
+    strip_trailing_file_tag as _text_strip_trailing_file_tag,
+)
 from pipeline_core.io import read, write
 from pipeline_core.io import read as _io_read
 from pipeline_core.io import write as _io_write
@@ -236,6 +340,20 @@ class Helpers:
     # provides these App-reading closures itself):
     scan_stub_records_via_app: Callable[..., Any]
     collect_impl_blocks_via_app: Callable[..., Any]
+    # Task-0c collaborators (P3-S3 step 42, Task0cDeps construction):
+    cluster_gate_for: Callable[..., Any]
+    describe_test_environment: Callable[..., Any]
+    public_api_from_source: Callable[..., Any]
+    source_hash: Callable[..., Any]
+    test_augmentor_factory: Callable[..., Any]
+    generate_fix_loop: Callable[..., Any]
+    generate_in_parallel: Callable[..., Any]
+    load_file_constraints: Callable[..., Any]
+    mutation_harden_file: Callable[..., Any]
+    coverage_target: float
+    task0c_prompt_char_cap: int
+    task0c_fix_thinking_directive: str
+    task0c_thinking_directive: str
     # Fix-loop collaborators (P3-S3 step 31, GenerateFixLoopDeps construction):
     set_current: Callable[..., Any]
     emit_per_file_test_overview: Callable[..., Any]
@@ -390,6 +508,8 @@ class App:
     attribution_deps: AttributionDeps
     # Fix-loop deps (P3-S3 step 31).
     gen_fix_loop_deps: GenerateFixLoopDeps
+    # Task-0c deps (P3-S3 step 42).
+    task0c_deps: Task0cDeps
 
     # Guarded LLM ask client (P3-S3 bridge): constructed by the composition
     # root (its ask_raw/hot-reload lambdas close over pipeline residents) and
@@ -623,6 +743,81 @@ def build_app(
             per_fn_fix_hard_cap=settings.fix_caps.per_fn_fix_hard_cap,
             per_impl_max_stubs=helpers.per_impl_max_stubs,
             task2_model=settings.task_models.task2,
+        ),
+        task0c_deps=Task0cDeps(
+            BUILD_TIMEOUT=cfg.build_timeout,
+            COVERAGE_TARGET=helpers.coverage_target,
+            coverage_ignore_pragma=cfg.ignore_pragma,
+            TASK0C_PROMPT_CHAR_CAP=helpers.task0c_prompt_char_cap,
+            FIX_ERR_CAP=cfg.fix_err_cap,
+            SIBLING_CAP=PromptBudgets.derive(cfg.single_call_char_limit).sibling,
+            SRC_SNIP_CAP=PromptBudgets.derive(cfg.single_call_char_limit).src_snippet,
+            TASK0C_FIX_THINKING_DIRECTIVE=helpers.task0c_fix_thinking_directive,
+            TASK0C_MODEL=settings.task_models.task0c,
+            TASK0C_THINKING_DIRECTIVE=helpers.task0c_thinking_directive,
+            WORKING_CAP=PromptBudgets.derive(cfg.single_call_char_limit).working,
+            annotate_uncovered=_cov_annotate_uncovered,
+            block_is_prose=_text_block_is_prose,
+            build_gen_tests_decl=_gen_build_gen_tests_decl,
+            guard=ports.guard,
+            cargo_env=ports.cargo_env,
+            cluster_gate_for=helpers.cluster_gate_for,
+            condense_rust_to_signatures=_condense_rust_to_signatures,
+            count_test_attrs=_scan_count_test_attrs,
+            derive_gentest_prelude=_gts_derive_gentest_prelude,
+            describe_test_environment=helpers.describe_test_environment,
+            error_signatures_from_output=_rustc_error_signatures,
+            extract_branch_guard=_cov_extract_branch_guard,
+            extract_gen_tests_body=_gen_extract_gen_tests_body,
+            extract_public_symbols=helpers.public_api_from_source,
+            extract_uncovered_functions=_cov_extract_uncovered_functions,
+            filter_cfg_excluded_lines=_cov_filter_cfg_excluded_lines,
+            filter_cfg_incompatible_lines=_cov_filter_cfg_incompat,
+            flags_unreachable=_text_flags_unreachable,
+            gen_tests_path=_gts_gen_tests_path,
+            has_nonempty_test_body=_scan_has_nonempty_test_fn,
+            inject_allow_before_any_mod=functools.partial(
+                _cov_inject_allow_before_mod, gen_only=False),
+            inject_allow_before_gen_mod=functools.partial(
+                _cov_inject_allow_before_mod, gen_only=True),
+            inject_gen_prelude_imports=_gen_inject_gen_prelude_imports,
+            is_gen_tests_file=_disc_is_gen_tests_file,
+            is_structural_line=_scan_is_structural_brace_line,
+            load_file_constraints=helpers.load_file_constraints,
+            type_signals_write=_db_type_signals_write,
+            mark_phase=_state_mark_phase,
+            match_gen_tests_sibling=_disc_match_gen_tests_sibling,
+            next_gen_tests_n=_gts_next_gen_tests_n,
+            nightly_rules_for_cluster=lambda: nightly_rules_for(scope.active),
+            parse_attempt_number=_text_parse_attempt_number,
+            parse_retrospective_categories=_parse_retro_categories,
+            partition_uncovered_lines=_cov_partition_uncovered_lines,
+            prelude_import_names=_gen_prelude_import_names,
+            quick_file_coverage=coverage_provider.measure_file,
+            read_all_gen_tests=_gts_read_all_gen_tests,
+            read_state=_state_read_state,
+            revert_gen_tests_pass=_gts_revert_gen_tests_pass,
+            select_relevant_siblings=_t0c_select_relevant_siblings,
+            set_current=helpers.set_current,
+            source_hash=helpers.source_hash,
+            strip_all_gen_tests_artifacts=_gts_strip_all_artifacts,
+            strip_gen_tests_decl_n=_gen_strip_decl_n,
+            strip_gen_tests_decls=_gen_strip_all_decls,
+            strip_trailing_file_tag=_text_strip_trailing_file_tag,
+            mutation_harden_file=helpers.mutation_harden_file,
+            gen_tests_siblings=_gts_gen_tests_siblings,
+            test_augmentor_factory=helpers.test_augmentor_factory,
+            ask=ask_client.ask,
+            extract_files=_extract_files,
+            extract_test_mod=_gen_extract_test_mod,
+            generate_fix_loop=helpers.generate_fix_loop,
+            generate_in_parallel=helpers.generate_in_parallel,
+            is_test_file=_disc_is_test_file,
+            write=_io_write,
+            subprocess=_subprocess_mod,
+            get_current_cluster=scope.get_active,
+            coverage_provider=coverage_provider,
+            check_stop=helpers.check_graceful_stop,
         ),
         gen_fix_loop_deps=GenerateFixLoopDeps(
             set_current=helpers.set_current,

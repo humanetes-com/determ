@@ -26,6 +26,7 @@ from ...domain.coverage import PerFileCoverage
 from ...domain.generation import merge_gen_tests_blocks
 from ...domain.llm_output import extract_code_blocks, strip_uncovered_markers
 from ...domain.refine import Attempt, LoopState
+from ...domain.rust_idents import camelcase_type_names, defined_type_names
 from ...domain.text import strip_think_blocks
 from ...log import emit, log
 from ..fix_loop import FixOutcome, drive_fix_loop
@@ -2647,3 +2648,45 @@ def task0c_augment_module(
 
     _log(f"  [{module_name}/{_cluster_label}] Finished augmentation: {coverage:.1f}% coverage after {attempt} attempt(s).")
     return coverage, covered_lines, _at_ceiling, ""
+
+
+def select_relevant_siblings(
+    target_rel: str,
+    target_source: str,
+    all_siblings: list[tuple[str, str]],
+    project_dir: Path,
+) -> list[tuple[str, str]]:
+    """
+    Python type-name overlap ranking — replaces the BL-014 LLM planner call.
+
+    Algorithm:
+    1. Extract CamelCase identifiers used in the target file (types, structs, etc.)
+    2. For each sibling, count how many of those identifiers are *defined* there
+       (defined = appears after struct/enum/trait/type/impl keyword)
+    3. Return all siblings sorted by overlap count descending — the budget system
+       decides how many to include.
+
+    Zero LLM calls, deterministic, and empirically better for type-heavy files
+    (e.g. error.rs uses Own/Mut/Ref → correctly ranks ptr.rs first).
+    """
+    if not all_siblings:
+        return []
+
+    # P7: CamelCase type-name + `kw Name` definition scans → pure tokeniser
+    # (byte-equivalent), no regex on source.
+    used_types: set[str] = camelcase_type_names(target_source)
+
+    def _overlap(content: str) -> int:
+        return len(used_types & defined_type_names(content))
+
+    scored = sorted(
+        ((srel, sc, _overlap(sc)) for srel, sc in all_siblings),
+        key=lambda x: x[2],
+        reverse=True,
+    )
+
+    top = [(srel, score) for srel, _sc, score in scored if score > 0][:4]
+    log(f"  [task0c planner] {target_rel}: ranked {len(all_siblings)} siblings by type overlap"
+         f" (top: {top if top else 'none matched'})")
+    emit("task0c.planner", file=target_rel)  # debt#7: monitor file-progress source
+    return [(srel, sc) for srel, sc, _score in scored]

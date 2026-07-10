@@ -22,6 +22,11 @@ from pathlib import Path
 
 import pytest
 
+from pipeline_core.adapters import gen_tests_storage as _gts
+from pipeline_core.domain import coverage_annotation as _cov_ann
+from pipeline_core.domain import generation as _gen_dom
+from pipeline_core.domain import llm_output as _llm_out
+
 REPO = Path(__file__).resolve().parent.parent
 FIXTURE = REPO / "fixtures" / "tiny"
 
@@ -148,7 +153,7 @@ def test_gen_tests_helpers() -> None:
     pristine = src.read_text()
 
     assert _gen_tests_count(src) == 0, "expected zero siblings initially"
-    assert pipeline._next_gen_tests_n(src) == 1, "next-n should be 1 when empty"
+    assert _gts.next_gen_tests_n(src) == 1, "next-n should be 1 when empty"
 
     block_1 = """#[cfg(test)]
 #[allow(unused)]
@@ -158,7 +163,7 @@ mod gen_tests_1 {
     fn t() { assert_eq!(add(1, 1), 2); }
 }"""
     _write_gen_tests_pass(src, pristine, block_1, "#[allow(clippy::all)]", 1)
-    sibling_1 = pipeline._gen_tests_path(src, 1)
+    sibling_1 = _gts.gen_tests_path(src, 1)
     assert sibling_1.exists(), f"expected sibling {sibling_1}"
     assert sibling_1.name == "lib.gen_tests_1.rs"
     body = sibling_1.read_text()
@@ -172,21 +177,21 @@ mod gen_tests_1 {
     assert '#[path = "lib.gen_tests_1.rs"]' in src_text
     assert "#[allow(clippy::all)]" in src_text
     assert _gen_tests_count(src) == 1
-    assert pipeline._next_gen_tests_n(src) == 2
+    assert _gts.next_gen_tests_n(src) == 2
 
     # Read-all re-wraps for LLM context.
-    all_text = pipeline._read_all_gen_tests(src)
+    all_text = _gts.read_all_gen_tests(src)
     assert all_text.startswith("#[cfg(test)]\nmod gen_tests_1 {")
 
     # Add a second pass.
     block_2 = "mod gen_tests_2 {\n    use super::*;\n    #[test] fn u() {}\n}"
     _write_gen_tests_pass(src, src.read_text(), block_2, "#[allow(clippy::all)]", 2)
     assert _gen_tests_count(src) == 2
-    assert pipeline._next_gen_tests_n(src) == 3
+    assert _gts.next_gen_tests_n(src) == 3
 
     # Strip decls from the source text (helper used in many places).
     src_text = src.read_text()
-    stripped = pipeline._strip_gen_tests_decls(src_text)
+    stripped = pipeline._strip_all_gen_tests_decls(src_text)
     assert "mod gen_tests_1" not in stripped
     assert "mod gen_tests_2" not in stripped
     assert "pub fn add" in stripped, "original source content must remain"
@@ -195,13 +200,13 @@ mod gen_tests_1 {
     src_before_pass_2 = stripped + "\n" + pipeline._build_gen_tests_decl(
         "lib.gen_tests_1.rs", 1, "#[allow(clippy::all)]"
     )
-    sibling_2 = pipeline._gen_tests_path(src, 2)
-    pipeline._revert_gen_tests_pass(src, src_before_pass_2, sibling_2)
+    sibling_2 = _gts.gen_tests_path(src, 2)
+    _gts.revert_gen_tests_pass(src, src_before_pass_2, sibling_2)
     assert not sibling_2.exists()
     assert _gen_tests_count(src) == 1
 
     # Strip everything.
-    n = pipeline._strip_all_gen_tests_artifacts(src)
+    n = _gts.strip_all_gen_tests_artifacts(src)
     assert n == 1
     assert _gen_tests_count(src) == 0
     final = src.read_text()
@@ -621,7 +626,6 @@ def test_generate_in_parallel() -> None:
 def test_partition_uncovered_lines() -> None:
     """Plan 8: uncovered lines partition into <=N buckets, keeping each
     function's lines together and balancing across buckets."""
-    import pipeline
     src = (
         "pub fn a() -> i32 {\n"      # line 1
         "    1\n"                      # 2
@@ -634,18 +638,18 @@ def test_partition_uncovered_lines() -> None:
         "}\n"                          # 9
     )
     uncov = {2, 5, 8}
-    buckets = pipeline._partition_uncovered_lines(src, uncov, 3)
+    buckets = _cov_ann.partition_uncovered_lines(src, uncov, 3)
     assert len(buckets) == 3, buckets
     # every uncovered line lands in exactly one bucket; buckets are disjoint.
     union = set().union(*buckets)
     assert union == uncov, (buckets, union)
     assert sum(len(b) for b in buckets) == len(uncov), buckets
     # fewer functions than groups → never more buckets than functions.
-    two = pipeline._partition_uncovered_lines(src, {2, 5}, 4)
+    two = _cov_ann.partition_uncovered_lines(src, {2, 5}, 4)
     assert len(two) == 2, two
     # n_groups==1 or empty are trivial.
-    assert pipeline._partition_uncovered_lines(src, uncov, 1) == [uncov]
-    assert pipeline._partition_uncovered_lines(src, set(), 3) == []
+    assert _cov_ann.partition_uncovered_lines(src, uncov, 1) == [uncov]
+    assert _cov_ann.partition_uncovered_lines(src, set(), 3) == []
     print("  OK  _partition_uncovered_lines (Plan 8 split-and-merge)")
 
 
@@ -1891,7 +1895,6 @@ def test_context_guard_middle_trim() -> None:
 
 
 def test_extract_gen_tests_body() -> None:
-    import pipeline
 
     block_with_attrs = """#[cfg(test)]
 #[allow(unused)]
@@ -1903,7 +1906,7 @@ mod gen_tests_5 {
         assert!(true);
     }
 }"""
-    body = pipeline._extract_gen_tests_body(block_with_attrs)
+    body = _gen_dom.extract_gen_tests_body(block_with_attrs)
     assert body.startswith("use super::*;"), f"body starts wrong: {body[:80]!r}"
     assert "#[test]" in body
     assert "mod gen_tests" not in body
@@ -1913,7 +1916,7 @@ mod gen_tests_5 {
 
     # Bare functions (no mod wrapper): returned as-is.
     bare = "#[test]\nfn x() { assert!(true); }"
-    body = pipeline._extract_gen_tests_body(bare)
+    body = _gen_dom.extract_gen_tests_body(bare)
     assert "#[test]" in body and "fn x()" in body
 
     print("  OK  _extract_gen_tests_body")
@@ -2496,7 +2499,7 @@ def test_slice5b_task1() -> None:
 def test_slice5b_task0c() -> None:
     """Slice 5b: extracted task0c engine — verbatim body behind a rebind-prelude. Exercise the
     early-skip path (augmentor not applicable) with all-stub deps; confirm pipeline builds the
-    real _TASK0C_DEPS (which validates all injected names resolve)."""
+    real App.task0c_deps (which validates all injected names resolve)."""
     from pathlib import Path
     from types import SimpleNamespace
 
@@ -2510,7 +2513,7 @@ def test_slice5b_task0c() -> None:
     assert task0c_augment_module(Path("."), "m", Path("."), deps, crate_type="proc-macro") == (100.0, 0, False, "")
 
     import pipeline
-    assert isinstance(pipeline._TASK0C_DEPS, Task0cDeps)
+    assert isinstance(pipeline._APP.task0c_deps, Task0cDeps)
     print("  OK  task0c engine extracted behind orchestrator (slice 5b)")
 
 
@@ -2826,7 +2829,7 @@ def test_slice5b_genesis_audit_task() -> None:
     assert pcretry.with_retry(_always_false, retries=2) is False and _n[0] == 2
     # 5b foundation: <FILE>/genesis extraction relocated to domain.llm_output; re-exported.
     from pipeline_core.domain import llm_output as lo
-    assert pipeline.extract_files is lo.extract_files
+    assert _llm_out.extract_files is lo.extract_files
     assert pipeline._extract_genesis is lo._extract_genesis
     assert pipeline.GENESIS_DELIM_START == lo.GENESIS_DELIM_START == "===GENESIS_START==="
     assert lo.extract_files('<FILE path="a.rs">fn x(){}</FILE>') == {"a.rs": "fn x(){}"}
@@ -2953,7 +2956,6 @@ def test_revert_gen_tests_pass_reconciles_all_siblings() -> None:
     import tempfile
     from pathlib import Path
 
-    import pipeline
 
     with tempfile.TemporaryDirectory() as td:
         src_dir = Path(td)
@@ -2968,7 +2970,7 @@ def test_revert_gen_tests_pass_reconciles_all_siblings() -> None:
         sib2.write_text("fn t2() {}\n")
 
         # Revert naming only sib1 — sib2's decl is also dropped by the snapshot.
-        pipeline._revert_gen_tests_pass(parent, snapshot, sib1)
+        _gts.revert_gen_tests_pass(parent, snapshot, sib1)
 
         assert parent.read_text() == snapshot
         assert not sib1.exists()

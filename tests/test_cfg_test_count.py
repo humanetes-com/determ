@@ -148,3 +148,17 @@ def test_undeclared_gen_tests_sibling_still_counts(tmp_path) -> None:
     total = count_active_tests_for_cluster(tmp_path, _Cluster(), deps)
     # declared(1) + hidden-undeclared(1); the False-gated sibling 3 excluded.
     assert total == 2
+
+
+def test_nightly_rules_for_cluster_shapes() -> None:
+    from types import SimpleNamespace
+
+    from pipeline_core.domain.cluster_plan import nightly_rules_for
+
+    assert nightly_rules_for(None) == ""
+    nd = SimpleNamespace(is_default=False, prompt_nightly_rule="RULE", excluded_cfg=["x"])
+    assert nightly_rules_for(nd) == "RULE"
+    default_excl = SimpleNamespace(is_default=True, excluded_cfg=["egma", "abc"])
+    out = nightly_rules_for(default_excl)
+    assert "`abc`, `egma`" in out and "Do NOT write tests" in out
+    assert nightly_rules_for(SimpleNamespace(is_default=True, excluded_cfg=[])) == ""

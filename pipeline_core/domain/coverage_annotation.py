@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from pipeline_core.domain import cfg as _cfg
 from pipeline_core.domain.rust_idents import is_fn_signature_line
-from pipeline_core.domain.rust_scan import branch_guard_label, is_rust_item_boundary_line
+from pipeline_core.domain.rust_scan import branch_guard_label, find_mod_opener, is_rust_item_boundary_line
 
 
 def extract_branch_guard(lines: list[str], line_no: int) -> str | None:
@@ -178,3 +178,13 @@ def filter_cfg_excluded_lines(
         return set()
     ctx = _cfg.CfgSet.of(cfg_false=[t for p in excluded_cfgs for t in (p, f'feature = "{p}"')])
     return ctx.excluded_uncovered_lines(source_text, uncov_lines)
+
+
+def inject_allow_before_mod(block: str, allow_line: str, *, gen_only: bool) -> str:
+    """Insert `allow_line` before the first `[gen_]mod` opener (find_mod_opener)."""
+    if allow_line in block:
+        return block
+    opener = find_mod_opener(block, gen_only=gen_only)
+    if opener is None:
+        return block
+    return block[:opener[0]] + f"{allow_line}\n" + block[opener[0]:]
