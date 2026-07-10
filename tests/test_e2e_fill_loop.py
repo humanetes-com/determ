@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pipeline
 from pipeline_core.domain.enums import FillUnit
-from tests.harness import install_scripted_cargo, install_scripted_model
+from tests.harness import install_fake_extractor, install_scripted_cargo, install_scripted_model
 
 STUB_LIB = """pub fn answer() -> u32 {
     unimplemented!()
@@ -35,10 +35,7 @@ def _setup(monkeypatch, tmp_path: Path) -> Path:
     # Extractor-absent fallbacks: name-only stub scan, no type/fn records.
     monkeypatch.setattr(pipeline, "_scan_unimplemented_records_for_cluster",
                         lambda *a, **k: None)
-    monkeypatch.setattr(pipeline, "_enumerate_types_via_extractor",
-                        lambda *a, **k: [])
-    monkeypatch.setattr(pipeline, "_enumerate_fns_via_extractor",
-                        lambda *a, **k: None)
+    install_fake_extractor(monkeypatch, fns=None, types=[])
     return ws
 
 
@@ -181,10 +178,7 @@ def test_sig_change_hatch_applies_on_attempt_five(monkeypatch, tmp_path):
                                             phase_c_fill_unit=FillUnit.FN))
     monkeypatch.setattr(pipeline, "_scan_unimplemented_records_for_cluster",
                         lambda *a, **k: None)
-    monkeypatch.setattr(pipeline, "_enumerate_types_via_extractor",
-                        lambda *a, **k: [])
-    monkeypatch.setattr(pipeline, "_enumerate_fns_via_extractor",
-                        lambda *a, **k: None)
+    install_fake_extractor(monkeypatch, fns=None, types=[])
 
     raw_with_sig = ("<SIGNATURE>fn answer() -> u64</SIGNATURE>\n"
                     "<BODY>42</BODY>")

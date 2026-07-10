@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pipeline
 from pipeline_core.domain.models import FnRecord, ImplBlock
-from tests.harness import diag, install_scripted_cargo
+from tests.harness import diag, install_fake_extractor, install_scripted_cargo
 
 IMPL_LIB = """pub struct Foo { tag: u32 }
 
@@ -55,10 +55,11 @@ def _setup(monkeypatch, tmp_path: Path) -> Path:
                         lambda *a, **k: [_block()])
     monkeypatch.setattr(pipeline, "_scan_unimplemented_records_for_cluster",
                         lambda *a, **k: None)
-    monkeypatch.setattr(pipeline, "_enumerate_types_via_extractor",
-                        lambda *a, **k: [])
-    monkeypatch.setattr(pipeline, "_dispatch_families_via_extractor",
-                        lambda *a, **k: [])
+    # fns passes through to the REAL reader (these tests exercise the syn
+    # extractor's record-based splice); only types/dispatch are stubbed.
+    install_fake_extractor(
+        monkeypatch, fns=lambda sd: pipeline._STRUCTURE.enumerate_fns(sd),
+        types=[], dispatch_families=[])
     return ws
 
 

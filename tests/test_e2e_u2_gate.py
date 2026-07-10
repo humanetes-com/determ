@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pipeline
 from pipeline_core.domain.enums import FillUnit
+from tests.harness import install_fake_extractor
 
 _STUB_SRC = "pub fn add(a: i32, b: i32) -> i32 { unimplemented!() }\n"
 
@@ -31,10 +32,7 @@ def _setup(monkeypatch, tmp_path: Path) -> tuple[Path, Path]:
         dataclasses.replace(pipeline.SETTINGS, phase_c_fill_unit=FillUnit.FN))
     monkeypatch.setattr(pipeline, "_scan_unimplemented_records_for_cluster",
                         lambda *a, **k: None)
-    monkeypatch.setattr(pipeline, "_enumerate_types_via_extractor",
-                        lambda *a, **k: [])
-    monkeypatch.setattr(pipeline, "_enumerate_fns_via_extractor",
-                        lambda *a, **k: None)
+    install_fake_extractor(monkeypatch, fns=None, types=[])
     return ws, lib
 
 

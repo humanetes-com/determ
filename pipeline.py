@@ -2573,7 +2573,10 @@ def _build_phase_c_engine(*, structure: "_structure_port.StructureReader | None"
     (tests) are honoured at call time. `structure` lets a test inject a fake
     StructureReader (P1 constructor-DI seam) instead of monkeypatching the
     enumerate globals — it is swapped into the WorkspaceModel adapter only."""
-    ws = _FILL_WS if structure is None else dataclasses.replace(_FILL_WS, structure=structure)
+    # P3-S2: default to the App's structure provider at CALL time, so a
+    # test-injected _APP (build_app/replace with a fake reader) intercepts.
+    ws = dataclasses.replace(
+        _FILL_WS, structure=structure if structure is not None else _APP.structure)
     caps = FillCaps(
         per_fn_fix_hard_cap=_PER_FN_FIX_HARD_CAP,
         per_fn_fix_max_stalls=_PER_FN_FIX_MAX_STALLS,
@@ -2645,7 +2648,7 @@ def _enumerate_types_via_extractor(src_dir: Path) -> list[TypeRecord] | None:
     Each record has: file, kind, name, generics, definition, fields[],
     variants[], methods[], is_pub.
     """
-    return _STRUCTURE.enumerate_types(src_dir)  # slice 5a: via Extractor adapter
+    return _APP.structure.enumerate_types(src_dir)  # P3-S2: via App port
 
 
 def _cluster_filter_type_methods(
@@ -2689,7 +2692,7 @@ _FIX_CONTEXT: _fix_context.FixContextAssembler = _fix_context.FixContextAssemble
 def _enumerate_fns_via_extractor(src_dir: Path) -> list[dict] | None:
     """Fn wire-dicts for the not-yet-decomposed engine call sites (P2–P4 will route
     them through the injected `StructureReader`). Logic + dict shape: CliStructureReader."""
-    return _STRUCTURE.enumerate_fns(src_dir)
+    return _APP.structure.enumerate_fns(src_dir)  # P3-S2: via App port
 
 
 def _dispatch_families_via_extractor(src_dir: Path) -> list[DispatchFamily] | None:
@@ -2703,7 +2706,7 @@ def _dispatch_families_via_extractor(src_dir: Path) -> list[DispatchFamily] | No
     Dispatch correctness is a cross-impl invariant (FR-027), so the whole
     family is co-designed in one prompt context.
     """
-    return _STRUCTURE.enumerate_dispatch_families(src_dir)  # slice 5a: via adapter
+    return _APP.structure.enumerate_dispatch_families(src_dir)  # P3-S2: via App port
 
 
 def _feature_gate_cfgs_via_extractor(src_dir: Path) -> list[str] | None:
@@ -2861,14 +2864,14 @@ def _enumerate_mods_via_extractor(src_dir: Path) -> list[ModRecord] | None:
     Rust correctly and never conflates an adjacent mod's cfg with the
     target mod's cfg.
     """
-    return _STRUCTURE.enumerate_mods(src_dir)  # slice 5a: via Extractor adapter
+    return _APP.structure.enumerate_mods(src_dir)  # P3-S2: via App port
 
 
 def _enumerate_consts_via_extractor(src_dir: Path) -> list[ConstRecord] | None:
     """Invoke the syn-based extractor's --enumerate-consts subcommand: pub/private
     `const` and `static` items (name, type, is_pub). Replaces regex scans of source
     for `pub const`/`pub static` (Hard Rule: no regex on Rust source — use syn)."""
-    return _STRUCTURE.enumerate_consts(src_dir)
+    return _APP.structure.enumerate_consts(src_dir)  # P3-S2: via App port
 
 
 def _public_api_from_source(content: str) -> str:

@@ -2351,16 +2351,19 @@ def test_slice5a_shims_delegate_to_adapters() -> None:
                 return Process(-1, "", "TIMEOUT after 5s")
             return Process(0, "out", "err")
 
+    import dataclasses as _dc
+
     from pipeline_core.adapters.structure import CliStructureReader
 
     orig = pipeline.ADAPTERS
-    orig_struct = pipeline._STRUCTURE
+    orig_app = pipeline._APP
     pipeline.ADAPTERS = types.SimpleNamespace(extractor=_FakeExtractor(), cargo=_FakeCargo())  # type: ignore[assignment]
-    # P1: the fns/types/mods/dispatch shims now delegate through the injected
-    # StructureReader (which wraps ADAPTERS.extractor), not ADAPTERS directly —
-    # re-point it at the fake extractor. feature-gate-cfgs + skeletonise + cargo
-    # still go straight to ADAPTERS.
-    pipeline._STRUCTURE = CliStructureReader(pipeline.ADAPTERS.extractor)
+    # P3-S2: the fns/types/mods/dispatch shims delegate through the App's
+    # structure provider (port boundary) — swap it wholesale, as tests do via
+    # tests.harness.install_fake_extractor. feature-gate-cfgs + skeletonise +
+    # cargo still go straight to ADAPTERS.
+    pipeline._APP = _dc.replace(
+        pipeline._APP, structure=CliStructureReader(pipeline.ADAPTERS.extractor))
     try:
         d = Path("/tmp/x")
         # fns wrapper re-serialises typed records to wire dicts for the fill engine.
@@ -2381,7 +2384,7 @@ def test_slice5a_shims_delegate_to_adapters() -> None:
         assert rc == -1 and out == "TIMEOUT after 5s"  # no stderr-block prefix on error
     finally:
         pipeline.ADAPTERS = orig
-        pipeline._STRUCTURE = orig_struct
+        pipeline._APP = orig_app
     print("  OK  pipeline extractor + cargo shims delegate to ADAPTERS (slice 5a)")
 
 

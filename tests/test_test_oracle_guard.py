@@ -10,6 +10,7 @@ import pytest
 
 import pipeline
 from pipeline_core.application.reconstruct.test_targets import is_test_fn_record
+from tests.harness import install_fake_extractor
 
 
 def _recs() -> list[dict]:
@@ -30,7 +31,7 @@ def test_is_test_fn_record() -> None:
 
 def test_filter_test_targets_drops_test_keys(monkeypatch: pytest.MonkeyPatch) -> None:
     from pathlib import Path
-    monkeypatch.setattr(pipeline, "_enumerate_fns_via_extractor", lambda _p: _recs())
+    install_fake_extractor(monkeypatch, fns=lambda _p: _recs())
     frontier = {
         ("src/lib.rs", "cap_limit"): {"default_cap_limit"},       # production → kept
         ("src/lib.rs", "extra_cap_limit"): {"extra_cap_limit"},   # test oracle → dropped
@@ -42,8 +43,8 @@ def test_filter_test_targets_drops_test_keys(monkeypatch: pytest.MonkeyPatch) ->
 
 def test_filter_test_targets_noop_without_tests(monkeypatch: pytest.MonkeyPatch) -> None:
     from pathlib import Path
-    monkeypatch.setattr(pipeline, "_enumerate_fns_via_extractor",
-                        lambda _p: [{"file": "src/lib.rs", "fn_name": "f", "cfg_predicates": []}])
+    install_fake_extractor(
+        monkeypatch, fns=[{"file": "src/lib.rs", "fn_name": "f", "cfg_predicates": []}])
     frontier = {("src/lib.rs", "f"): {"t"}}
     assert pipeline._filter_test_targets(frontier, Path("/proj")) == frontier
     assert pipeline._filter_test_targets({}, Path("/proj")) == {}

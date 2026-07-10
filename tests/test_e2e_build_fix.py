@@ -19,8 +19,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import pipeline
-from tests.harness import (
+from tests.harness import (  # noqa: I001
     diag,
+    install_fake_extractor,
     install_scripted_attribution,
     install_scripted_cargo,
     install_scripted_model,
@@ -55,7 +56,9 @@ def _setup(monkeypatch, tmp_path: Path) -> Path:
     (ws / "src" / "lib.rs").write_text(STUB_LIB)
     (ws / "tests").mkdir()
     # Keep the per-fn fix context off the extractor binary (absent in CI py).
-    monkeypatch.setattr(pipeline, "_enumerate_types_via_extractor", lambda *a, **k: [])
+    install_fake_extractor(
+        monkeypatch, fns=lambda sd: pipeline._STRUCTURE.enumerate_fns(sd),
+        types=[])
     monkeypatch.setattr(pipeline, "_fn_container_index", lambda *a, **k: {})
     return ws
 

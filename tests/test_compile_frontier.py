@@ -7,7 +7,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pipeline
-from tests.harness import diag, install_scripted_cargo
+from tests.harness import diag, install_fake_extractor, install_scripted_cargo
 
 LIB = "pub fn alpha() -> u32 {\n    unimplemented!()\n}\n"
 
@@ -18,8 +18,7 @@ def _setup(monkeypatch, tmp_path: Path) -> Path:
     (ws / "src" / "lib.rs").write_text(LIB)
     recs = [{"file": "src/lib.rs", "fn_name": "alpha",
              "sig_byte_start": 0, "body_byte_end": len(LIB)}]
-    monkeypatch.setattr(pipeline, "_enumerate_fns_via_extractor",
-                        lambda *a, **k: recs)
+    install_fake_extractor(monkeypatch, fns=lambda *a, **k: recs)
     return ws
 
 

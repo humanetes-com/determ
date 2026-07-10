@@ -25,6 +25,7 @@ from pipeline_core.domain.test_results import (  # noqa: E402
     failing_test_names,
     identifiers_in,
 )
+from tests.harness import install_fake_extractor  # noqa: E402
 
 # ── 1. retro-key canonicalisation ───────────────────────────────────────────
 
@@ -184,7 +185,7 @@ def test_behavior_frontier_attributes_failing_test_to_fn(tmp_path: Path, monkeyp
         "pub fn sub(a: u32, b: u32) -> u32 { 0 }\n", encoding="utf-8")
     (ws / "tests" / "test_math.rs").write_text(
         "#[test]\nfn test_add() { assert_eq!(add(1, 2), 3); }\n", encoding="utf-8")
-    monkeypatch.setattr(pipeline, "_enumerate_fns_via_extractor", lambda *a, **k: [
+    install_fake_extractor(monkeypatch, fns=[
         {"file": "src/lib.rs", "fn_name": "add", "container": ""},
         {"file": "src/lib.rs", "fn_name": "sub", "container": ""},
     ])
@@ -203,7 +204,7 @@ def test_behavior_frontier_disambiguates_by_container(tmp_path: Path, monkeypatc
     (ws / "tests" / "t.rs").write_text(
         "#[test]\nfn test_new() { let e = Error::new(1); assert!(new(e)); }\n",
         encoding="utf-8")
-    monkeypatch.setattr(pipeline, "_enumerate_fns_via_extractor", lambda *a, **k: [
+    install_fake_extractor(monkeypatch, fns=[
         {"file": "src/error.rs", "fn_name": "new", "container": "impl Error"},
         {"file": "src/other.rs", "fn_name": "new", "container": "impl Widget"},
     ])

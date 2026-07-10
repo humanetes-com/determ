@@ -45,7 +45,7 @@ from pipeline_core.adapters.reconstruct_roles import (
     RequirementsAdapter,
 )
 from pipeline_core.adapters.state import mark_phase, phase_valid, set_current
-from pipeline_core.adapters.structure import CliStructureReader
+from pipeline_core.adapters.structure import CliStructureReader  # noqa: F401 (re-export for composition callers)
 from pipeline_core.adapters.telemetry import LogTelemetry
 from pipeline_core.adapters.test_runner import CallableTestRunner
 from pipeline_core.adapters.workspace import WorkspaceDeps
@@ -75,6 +75,7 @@ from pipeline_core.domain.cluster_scope import ClusterScope
 from pipeline_core.domain.models import TypeRecord
 from pipeline_core.domain.run_state import RunState
 from pipeline_core.io import read, write
+from pipeline_core.ports.structure import StructureReader
 from pipeline_core.prompts.per_fn import build_per_fn_fix_prompt
 from pipeline_core.settings import Settings
 
@@ -232,7 +233,8 @@ class App:
     ports: Ports
     config: CompositionConfig
     # Syn-extractor boundary: the structured-source reader over `adapters.extractor`.
-    structure: CliStructureReader
+    # Typed at the PORT so tests swap in a fake via dataclasses.replace (P3-S2).
+    structure: StructureReader
     # Fill-engine ISP role adapters (S21) — see FillRoles.
     fill_roles: FillRoles
     # TASK-0c augmentation cluster (S25) — see AugmentRoles.
@@ -268,7 +270,7 @@ def build_app(
     config: CompositionConfig,
     roles: ReconstructRoles,
     helpers: Helpers,
-    structure: CliStructureReader,
+    structure: StructureReader,
     fill_roles: FillRoles,
     telemetry: LogTelemetry,
     augment_roles: AugmentRoles,
