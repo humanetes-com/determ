@@ -26,6 +26,7 @@ from pipeline_core.adapters import gen_tests_storage as _gts
 from pipeline_core.domain import coverage_annotation as _cov_ann
 from pipeline_core.domain import generation as _gen_dom
 from pipeline_core.domain import llm_output as _llm_out
+from pipeline_core.domain import text as _text_dom
 
 REPO = Path(__file__).resolve().parent.parent
 FIXTURE = REPO / "fixtures" / "tiny"
@@ -2809,7 +2810,7 @@ def test_slice5b_genesis_audit_task() -> None:
     assert pipeline.extract_code_content is txt.extract_code_content
     # trim_to_line: no longer used in pipeline.py (moved to group_fill in P4) → not re-exported;
     # it lives in domain.text and call sites import it there directly.
-    assert pipeline.smart_truncate is txt.smart_truncate
+    assert _text_dom.smart_truncate is txt.smart_truncate
     assert txt.strip_markdown_fences("```rust\nlet x = 1;\n```") == "let x = 1;"
     assert txt.smart_truncate("abcdef", total_limit=4, head=2, tail=2).startswith("ab")
     assert txt.trim_to_line("a\nbb\nccc", 4) == "a" + "\n// ... (truncated)"

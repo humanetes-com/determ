@@ -868,3 +868,27 @@ def build_dispatch_family_section(
         "The dispatching macro (the behaviour these must satisfy):\n```rust\n"
         f"{macro_text}\n```\n</DISPATCH_FAMILY>\n"
     )
+
+
+from pipeline_core.domain.text import smart_truncate
+
+
+def format_api_surface_section(api_surface: str, *, cap: int) -> str:
+    """Wrap the captured API surface into a labelled prompt section, head+tail
+    truncated to `cap`. Returns '' if api_surface is empty."""
+    if not api_surface or not api_surface.strip():
+        return ""
+    text = smart_truncate(
+        api_surface,
+        total_limit=cap,
+        head=2 * cap // 3,
+        tail=cap // 3,
+    )
+    return (
+        "\n--- Public API surface (ground truth — pre-strip skeleton) ---\n"
+        "Use these signatures and type definitions exactly. Do not invent items not\n"
+        "listed here, do not change signatures, and do not contradict the shapes shown\n"
+        "below. The behavioral semantics (what each function returns, invariants)\n"
+        "are still derived from the tests; this skeleton only defines the SHAPE.\n"
+        f"{text}\n"
+    )

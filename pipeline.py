@@ -98,6 +98,10 @@ from pipeline_core.adapters.model_notes_store import (
 from pipeline_core.adapters.mutation import MutationTester
 from pipeline_core.adapters.phase_c_log import write_phase_c_test_fix_log as _write_phase_c_test_fix_log
 from pipeline_core.adapters.progress import ChunkProgress
+from pipeline_core.adapters.repo_spec_docs import FR_PREFIX as _REPO_SPEC_FR_PREFIX
+from pipeline_core.adapters.repo_spec_docs import (
+    load_repo_spec_docs as _adapters_load_repo_spec_docs,
+)
 from pipeline_core.adapters.run_banner import banner_lines as _banner_lines
 from pipeline_core.adapters.run_registry import FileRunRegistry, RunRegistryEntry
 from pipeline_core.adapters.structure import CliStructureReader as _CliStructureReader
@@ -231,6 +235,9 @@ from pipeline_core.application.tasks.task0b_discovery import (
 )
 from pipeline_core.application.tasks.task0c import task0c_augment_module as _task0c_impl
 from pipeline_core.application.tasks.task1 import task1 as _task1_impl
+from pipeline_core.application.tasks.task1 import (
+    task1_static_audit as _t1_static_audit,
+)
 from pipeline_core.application.tasks.task2 import (
     Task2Deps,
 )
@@ -318,9 +325,6 @@ from pipeline_core.domain.model_caps import (
 from pipeline_core.domain.model_notes import (
     preserve_model_notes as _preserve_model_notes,
 )
-from pipeline_core.domain.model_notes import (
-    strip_model_notes_section as _strip_model_notes_section,
-)
 from pipeline_core.domain.models import (
     BuildCluster,
     Diagnostic,
@@ -344,9 +348,6 @@ from pipeline_core.domain.rust_fn_headers import (  # noqa: F401  (smoke pin: te
 )
 from pipeline_core.domain.rust_fn_headers import (
     locate_fn as _locate_fn,
-)
-from pipeline_core.domain.rust_idents import (
-    use_path_requirement_gaps,
 )
 from pipeline_core.domain.rust_idioms import no_std_invariant_note
 from pipeline_core.domain.rust_macros import (
@@ -379,7 +380,6 @@ from pipeline_core.domain.test_results import (
 )
 from pipeline_core.domain.text import (
     PromptDigest,
-    smart_truncate,
 )
 from pipeline_core.domain.text import (
     extract_code_content as extract_code_content,  # noqa: PLC0414 (test seam re-export)
@@ -405,12 +405,14 @@ from pipeline_core.prompts.per_impl import (
     build_per_impl_prompt as _build_per_impl_prompt,
 )
 from pipeline_core.prompts.repo_spec import (
-    RepoSpecDocs,
     identifiers_for_target,
     render_repo_spec,
 )
 from pipeline_core.prompts.sections import (
     build_dispatch_family_section as _build_dispatch_family_section_pure,
+)
+from pipeline_core.prompts.sections import (
+    format_api_surface_section as _fmt_api_surface,
 )
 from pipeline_core.prompts.sections import (
     gotchas_for_error as _gotchas_for_error,
@@ -864,6 +866,7 @@ from pipeline_core.domain.workspace_layout import (  # noqa: E402
     CHUNK_CACHE_DIR,
     COVERAGE_STRATEGY_NAME,
     FAILURE_LOG_NAME,
+    MANIFEST_NAME,
     PROJECT_CONTEXT_NAME,
     PROJECT_PROFILE_NAME,
     SOURCE_EXTENSIONS,
@@ -891,7 +894,6 @@ COVERAGE_IGNORE_PRAGMA = (
 # Separator written into tests_output_N.txt between genesis snapshot and output.
 
 # Manifest tracking which source files the model generated.
-MANIFEST_NAME = ".generated_files.txt"
 
 # Persistent log file written alongside the script.
 LOG_NAME = "run.log"
@@ -1471,6 +1473,11 @@ _HELPERS = _Helpers(
     classify_phase_c_test_failures=lambda *a, **k: _classify_phase_c_test_failures(*a, **k),
     set_current=lambda *a, **k: _set_current(*a, **k),
     cluster_gate_for=lambda *a, **k: _cluster_gate_for_sibling(*a, **k),
+    bake_skeleton_artifacts=lambda *a, **k: _bake_skeleton_artifacts(*a, **k),
+    task2_group_tests=lambda *a, **k: _task2_group_tests(*a, **k),
+    task2_fill_groups=lambda *a, **k: _task2_fill_groups(*a, **k),
+    task2_cleanup_residuals=lambda *a, **k: _task2_cleanup_residuals(*a, **k),
+    new_skeleton_generator=lambda *a, **k: _new_skeleton_task2_generator(*a, **k),
     describe_test_environment=lambda *a, **k: _describe_test_environment(*a, **k),
     public_api_from_source=lambda *a, **k: _public_api_from_source(*a, **k),
     source_hash=lambda *a, **k: _source_hash(*a, **k),
@@ -1994,33 +2001,11 @@ def _promoted_error_rules(fr_path: "Path | None" = None) -> str:
 # — injected into EVERY code-producing prompt from t2 onward via the prompts
 # runtime facade. Loaded here (I/O + mtime cache), rendered by the pure
 # pipeline_core.prompts.repo_spec selector.
-_REPO_SPEC_CACHE: dict[str, tuple[tuple, RepoSpecDocs]] = {}
-_FR_PREFIX = "functional_requirements_"
+_FR_PREFIX = _REPO_SPEC_FR_PREFIX
 
 
-def _load_repo_spec_docs(project_dir: Path, module_name: str) -> RepoSpecDocs:
-    genesis_p = project_dir / "genesis.md"
-    fr_p = project_dir / f"{_FR_PREFIX}{module_name}.md"
-    api_p = _api_surface_path(project_dir, module_name)
-    mtimes = tuple(p.stat().st_mtime if p.exists() else 0.0
-                   for p in (genesis_p, fr_p, api_p))
-    key = str(project_dir / module_name)
-    cached = _REPO_SPEC_CACHE.get(key)
-    if cached and cached[0] == mtimes:
-        return cached[1]
-    def _read(p: Path) -> str:
-        try:
-            return p.read_text(encoding="utf-8") if p.exists() else ""
-        except OSError:
-            return ""
-    docs = RepoSpecDocs(
-        genesis_rules=genesis_rules_read(project_dir, module_scope=module_name or "*"),
-        genesis=_read(genesis_p),
-        functional_req=_strip_model_notes_section(_read(fr_p)),
-        api_surface=_read(api_p),
-    )
-    _REPO_SPEC_CACHE[key] = (mtimes, docs)
-    return docs
+# _load_repo_spec_docs → adapters/repo_spec_docs.load_repo_spec_docs (S51).
+_load_repo_spec_docs = _adapters_load_repo_spec_docs
 
 
 def _repo_spec_section(
@@ -2985,24 +2970,8 @@ _API_SURFACE_CAP = max(8_000, SINGLE_CALL_CHAR_LIMIT // 2)
 
 
 def _format_api_surface_section(api_surface: str) -> str:
-    """Wrap the captured API surface into a labelled prompt section, head+tail
-    truncated to _API_SURFACE_CAP. Returns '' if api_surface is empty."""
-    if not api_surface or not api_surface.strip():
-        return ""
-    text = smart_truncate(
-        api_surface,
-        total_limit=_API_SURFACE_CAP,
-        head=2 * _API_SURFACE_CAP // 3,
-        tail=_API_SURFACE_CAP // 3,
-    )
-    return (
-        "\n--- Public API surface (ground truth — pre-strip skeleton) ---\n"
-        "Use these signatures and type definitions exactly. Do not invent items not\n"
-        "listed here, do not change signatures, and do not contradict the shapes shown\n"
-        "below. The behavioral semantics (what each function returns, invariants)\n"
-        "are still derived from the tests; this skeleton only defines the SHAPE.\n"
-        f"{text}\n"
-    )
+    """Binder: prompts.sections.format_api_surface_section with the budgeted cap."""
+    return _fmt_api_surface(api_surface, cap=_API_SURFACE_CAP)
 
 
 # --- TASK 1 synthesizer engine relocated to application/generators (P4). The
@@ -3512,30 +3481,8 @@ def _task4_extract_and_store_rules(project_dir: Path, genesis_text: str,
 # TASK 1.5 — Static use-statement audit (no LLM)
 # ---------------------------------------------------------------------------
 
-def task1_static_audit(functional_req_path: Path, test_files: list) -> list[str]:
-    """
-    Parse every test file for `use` statements and check that each imported
-    symbol path appears in functional_requirements.md.
-
-    Returns a (possibly empty) list of symbol paths that are absent from the
-    requirements. Callers should log a warning and optionally re-run TASK 1
-    on the missing symbols.
-
-    No LLM call — structured `use`-path scan. Runs in milliseconds.
-    """
-    reqs = read(functional_req_path)
-    if not reqs.strip():
-        return []
-
-    found_count, gaps = use_path_requirement_gaps(reqs, test_files)
-
-    _log(f"\nTASK 1.5: {found_count} use-paths in tests, {len(gaps)} missing from requirements.")
-    if gaps:
-        for g in gaps[:10]:
-            _log(f"  missing: {g}")
-        if len(gaps) > 10:
-            _log(f"  ... and {len(gaps) - 10} more")
-    return gaps
+# task1_static_audit → application/tasks/task1.py (S49); alias for RunDeps + tests.
+task1_static_audit = _t1_static_audit
 
 
 # ---------------------------------------------------------------------------
@@ -3925,16 +3872,7 @@ _BAKE_ARTIFACTS_DEPS = BakeArtifactsDeps(
 
 # C8: the standalone --phase-*-only / --skeleton-backend handlers live in the
 # orchestrator; this binds them to the resident pipeline shims.
-_PHASE_SUBCOMMAND_DEPS = _orchestrator.PhaseSubcommandDeps(
-    log=_log,
-    bake_skeleton_artifacts=_bake_skeleton_artifacts,
-    collect_test_files=collect_protected_test_files,
-    group_tests=_task2_group_tests,
-    fill_groups=_task2_fill_groups,
-    cleanup_residuals=_task2_cleanup_residuals,
-    new_skeleton_generator=_new_skeleton_task2_generator,
-    manifest_name=MANIFEST_NAME,
-)
+# P3-S3 (step 47): PhaseSubcommandDeps constructed in build_app.
 
 
 _RUN_DEPS = _orchestrator.RunDeps(
@@ -3948,7 +3886,7 @@ _RUN_DEPS = _orchestrator.RunDeps(
     SETTINGS=SETTINGS,
     run_state=_RUN, scope=_SCOPE, augment_store=_AUGMENT_STORE,
     cluster_augmentor=_CLUSTER_AUGMENTOR, strip_bake_deps=_STRIP_BAKE_DEPS,
-    ws_scan_deps=_APP.ws_scan_deps, phase_subcommand_deps=_PHASE_SUBCOMMAND_DEPS,
+    ws_scan_deps=_APP.ws_scan_deps, phase_subcommand_deps=_APP.phase_subcommand_deps,
     requirements_phase=_APP.requirements_phase, module_reconstructor=_APP.module_reconstructor,
     log=_log, emit=_emit, setup_workspace=setup_workspace, is_git_repo=_wsmod.is_git_repo,
     init_log=init_log, init_events=init_events, start_audit_thread=_start_audit_thread,

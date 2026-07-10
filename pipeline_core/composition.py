@@ -31,6 +31,9 @@ from pipeline_core.adapters.augment_engine import CargoAugmentEngine
 from pipeline_core.adapters.augment_store import FileAugmentStore
 from pipeline_core.adapters.coverage import CoverageDeps, CoverageProvider
 from pipeline_core.adapters.discovery import (
+    collect_protected_test_files as _collect_protected_test_files,
+)
+from pipeline_core.adapters.discovery import (
     is_gen_tests_file as _disc_is_gen_tests_file,
 )
 from pipeline_core.adapters.discovery import (
@@ -110,6 +113,9 @@ from pipeline_core.application.cluster_augment import ClusterAugmentor
 from pipeline_core.application.fix_loop import GenerateFixLoopDeps
 from pipeline_core.application.gen_tests_reattach import ReattachDeps
 from pipeline_core.application.orchestrator import LockDeps
+from pipeline_core.application.orchestrator import (
+    PhaseSubcommandDeps as _PhaseSubcommandDeps,
+)
 from pipeline_core.application.reconstruct.attribution import AttributionDeps
 from pipeline_core.application.reconstruct.cargo_errors import (
     categorize_compile_error as _categorize_compile_error,
@@ -229,6 +235,7 @@ from pipeline_core.domain.text import parse_attempt_number as _text_parse_attemp
 from pipeline_core.domain.text import (
     strip_trailing_file_tag as _text_strip_trailing_file_tag,
 )
+from pipeline_core.domain.workspace_layout import MANIFEST_NAME as _MANIFEST_NAME
 from pipeline_core.io import read, write
 from pipeline_core.io import read as _io_read
 from pipeline_core.io import write as _io_write
@@ -340,6 +347,12 @@ class Helpers:
     # provides these App-reading closures itself):
     scan_stub_records_via_app: Callable[..., Any]
     collect_impl_blocks_via_app: Callable[..., Any]
+    # Phase-subcommand collaborators (P3-S3 step 47):
+    bake_skeleton_artifacts: Callable[..., Any]
+    task2_group_tests: Callable[..., Any]
+    task2_fill_groups: Callable[..., Any]
+    task2_cleanup_residuals: Callable[..., Any]
+    new_skeleton_generator: Callable[..., Any]
     # Task-0c collaborators (P3-S3 step 42, Task0cDeps construction):
     cluster_gate_for: Callable[..., Any]
     describe_test_environment: Callable[..., Any]
@@ -510,6 +523,8 @@ class App:
     gen_fix_loop_deps: GenerateFixLoopDeps
     # Task-0c deps (P3-S3 step 42).
     task0c_deps: Task0cDeps
+    # Phase-subcommand deps (P3-S3 step 47).
+    phase_subcommand_deps: Any
 
     # Guarded LLM ask client (P3-S3 bridge): constructed by the composition
     # root (its ask_raw/hot-reload lambdas close over pipeline residents) and
@@ -743,6 +758,16 @@ def build_app(
             per_fn_fix_hard_cap=settings.fix_caps.per_fn_fix_hard_cap,
             per_impl_max_stubs=helpers.per_impl_max_stubs,
             task2_model=settings.task_models.task2,
+        ),
+        phase_subcommand_deps=_PhaseSubcommandDeps(
+            log=ports.log,
+            bake_skeleton_artifacts=helpers.bake_skeleton_artifacts,
+            collect_test_files=_collect_protected_test_files,
+            group_tests=helpers.task2_group_tests,
+            fill_groups=helpers.task2_fill_groups,
+            cleanup_residuals=helpers.task2_cleanup_residuals,
+            new_skeleton_generator=helpers.new_skeleton_generator,
+            manifest_name=_MANIFEST_NAME,
         ),
         task0c_deps=Task0cDeps(
             BUILD_TIMEOUT=cfg.build_timeout,

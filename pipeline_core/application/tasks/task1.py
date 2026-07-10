@@ -16,7 +16,9 @@ from typing import Any
 
 from ...domain.generation import Task1Request, coalesce_gen_tests_siblings
 from ...domain.llm_output import extract_files
+from ...domain.rust_idents import use_path_requirement_gaps
 from ...domain.text import smart_truncate, strip_markdown_fences
+from ...io import read as _io_read
 from ...io import write
 from ...log import log
 from ...prompts.genesis_seed import GENESIS_SEED
@@ -221,3 +223,24 @@ def task1(req: Task1Request, deps: Task1Deps) -> bool:
         log("  functional_requirements.md written; genesis.md seeded with the "
             "reconstruction methodology.")
     return True
+
+
+def task1_static_audit(functional_req_path: Path, test_files: list[Any]) -> list[str]:
+    """Parse every test file for `use` statements and check that each imported
+    symbol path appears in functional_requirements.md. Returns the symbol
+    paths absent from the requirements (callers log a warning and optionally
+    re-run TASK 1 on the missing symbols). No LLM call — structured
+    `use`-path scan, runs in milliseconds."""
+    reqs = _io_read(functional_req_path)
+    if not reqs.strip():
+        return []
+
+    found_count, gaps = use_path_requirement_gaps(reqs, test_files)
+
+    log(f"\nTASK 1.5: {found_count} use-paths in tests, {len(gaps)} missing from requirements.")
+    if gaps:
+        for g in gaps[:10]:
+            log(f"  missing: {g}")
+        if len(gaps) > 10:
+            log(f"  ... and {len(gaps) - 10} more")
+    return gaps

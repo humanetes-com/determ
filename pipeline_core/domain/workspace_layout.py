@@ -103,3 +103,6 @@ def drop_iteration_phases(phases: dict[str, object]) -> dict[str, object]:
         k: v for k, v in phases.items()
         if not k.startswith(ITERATION_PHASE_PREFIXES)
     }
+
+# Legacy whole-workspace manifest of generated files.
+MANIFEST_NAME = ".generated_files.txt"
