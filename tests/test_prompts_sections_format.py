@@ -152,6 +152,17 @@ def test_gotcha_e0599_invented_associated_ctor_fires():
     assert "no `new` on the struct" in out
 
 
+def test_gotcha_invented_field_frozen_layout_fires():
+    # F9: E0609 `no field` → use the frozen layout in TYPES_IN_SCOPE, never
+    # invent `.inner`/`.0`. Two WRONG→RIGHT pairs, generic names (FR-036).
+    err = "error[E0609]: no field `inner` on type `Wrap`"
+    out = gotchas_for_error(err)
+    assert "invented_field_frozen_layout" in {
+        g["id"] for g in RUST_GOTCHAS if any(t in err for t in g["triggers"])}
+    assert "WRONG" in out and "RIGHT" in out
+    assert out.count("WRONG") >= 2   # ≥2 few-shot pairs
+
+
 def test_gotcha_ids_are_unique():
     ids = [g["id"] for g in RUST_GOTCHAS]
     assert len(ids) == len(set(ids))

@@ -20,6 +20,8 @@ from pipeline_core.application.reconstruct.tdd_ratchet import (
     snapshot_src_tree,
 )
 from pipeline_core.domain.attribution import union_unattributed_stubs
+from pipeline_core.domain.dispatch import defer_blocked_consumers
+from pipeline_core.domain.measurement import Measurement, tree_content_sha
 from pipeline_core.domain.models import (
     BuildCluster,
     ClusterFillResult,
@@ -27,6 +29,7 @@ from pipeline_core.domain.models import (
     Frontier,
 )
 from pipeline_core.domain.refine import Attempt, LoopState
+from pipeline_core.domain.test_report import parse_test_output
 from pipeline_core.domain.test_results import (
     parse_failed_tests,
     parse_test_counts,
@@ -57,6 +60,10 @@ class PhaseCTddDeps:
     # Futility escalation (debt #82): (src_dir, test, futile_units,
     # futile_containers) -> Frontier additions. None disables escalation.
     escalate_to_producers: Callable[..., Frontier] | None = None
+    # Persist a new pass high-water fill tree to heal's restore tiers:
+    # (project_dir, cluster_name, filled_dir, pass_count, iteration) -> None.
+    # None disables checkpointing (heal then has only excision + skeleton).
+    checkpoint_fill_tree: Callable[..., None] | None = None
 
 
 def _log_attribution_gap(
@@ -184,6 +191,12 @@ def run_phase_c_tdd(
     _src_root = target_src_dir / "src"
     _bratchet_best = -1
     _bratchet_snap: dict[str, str] | None = None
+    # Persist each new pass high-water to heal's durable restore tiers
+    # (best-tree snapshot + workspace-git commit). Tracked independently of
+    # the in-memory batch ratchet above so the tiers stay populated even when
+    # PHASE_C_TDD_BATCH_RATCHET is off — without this, a parse-corruption heal
+    # falls straight through to the skeleton nuke (loses every fill in the file).
+    _checkpoint_best = -1
     recently_filled: list[FnLocator] = []
     recently_filled_max = int(os.getenv("TDD_RECENTLY_FILLED_MAX", "50"))
     # Hook 3 — causal-regression tracking. `prev_failed` = the failing-test set
@@ -273,6 +286,27 @@ def run_phase_c_tdd(
             if _snap is not None:
                 _bratchet_best = pass_count
                 _bratchet_snap = _snap
+        # Durable checkpoint of the new-best fill tree so a later heal restores
+        # THIS good state (best-tree copy / git ancestor) instead of nuking the
+        # file to the baked skeleton. Independent of _batch_ratchet.
+        if deps.checkpoint_fill_tree is not None and pass_count > _checkpoint_best:
+            deps.checkpoint_fill_tree(
+                project_dir, cluster.name, target_src_dir, pass_count, iter_n)
+            _checkpoint_best = pass_count
+        # F6 — measurement provenance: stamp every iter event with the tree it
+        # measured (content hash), the oracle size (denominator), and the actual
+        # test names, so cross-run pass-count claims are verifiable and oracle
+        # drift is detectable.
+        _measure = Measurement(
+            cluster=cluster.name, iteration=iter_n,
+            tree_sha=tree_content_sha(_src_root),
+            oracle_size=pass_count + fail_count,
+            pass_count=pass_count, fail_count=fail_count,
+            passed=parse_test_output(output).passed,
+            failed=frozenset(cur_failed))
+        _prov = {"tree_sha": _measure.tree_sha, "oracle_size": _measure.oracle_size,
+                 "passed": sorted(_measure.passed)[:200],
+                 "failed": sorted(_measure.failed)[:200]}
         # Debt #44 — per-binary breakdown so triage can see WHICH test set
         # changed between iters (vanished tests, not just pass→fail flips).
         _bins = summarize_test_binaries(output)
@@ -283,6 +317,7 @@ def run_phase_c_tdd(
             deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: all tests pass "
                  f"({pass_count} passed, {dt:.1f}s). Cluster done.")
             deps.emit("phase_c.tdd.iter", data={
+                **_prov,
                 "cluster": cluster.name, "iter": iter_n, "rc": 0,
                 "frontier_size": 0, "kind": "pass",
                 "pass_count": pass_count, "fail_count": fail_count,
@@ -292,6 +327,7 @@ def run_phase_c_tdd(
             deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: cargo test TIMED OUT "
                  f"({test_timeout}s). Stopping.")
             deps.emit("phase_c.tdd.iter", data={
+                **_prov,
                 "cluster": cluster.name, "iter": iter_n, "rc": -1,
                 "frontier_size": 0, "kind": "timeout",
                 "pass_count": pass_count, "fail_count": fail_count,
@@ -384,6 +420,24 @@ def run_phase_c_tdd(
                 permanently_exhausted.discard(key)
             eligible[key] = tests
 
+        # F4 core-first dispatch: a unit whose every failing test panics inside
+        # a DIFFERENT still-stubbed producer can't be helped by filling it —
+        # defer it (NOT exhaust) so the producer gets the LLM budget first. This
+        # is stateless: recomputed each iter from the current stub set, so a
+        # deferred consumer is re-admitted the moment its producer fills.
+        _stub_keys = frozenset(
+            deps.scan_unimplemented_for_cluster(target_src_dir, cluster))
+        eligible, _deferred = defer_blocked_consumers(eligible, _stub_keys)
+        if _deferred:
+            deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: deferred "
+                     f"{len(_deferred)} consumer(s) blocked by still-stubbed "
+                     "producer(s) (re-admitted when the producer fills).")
+            deps.emit("phase_c.dispatch.deferred", data={
+                "cluster": cluster.name, "iter": iter_n,
+                "deferred": {f"{f}::{fn}": sorted(f"{bf}::{bfn}"
+                                                  for bf, bfn in blk)
+                             for (f, fn), blk in _deferred.items()}})
+
         # Exit condition: stall budget exhausted on the cluster-level
         # pass_count floor. Fires regardless of whether `eligible` is
         # empty — pass_count is the only metric that captures real-world
@@ -404,6 +458,7 @@ def run_phase_c_tdd(
             for _stuck_key in eligible:
                 permanently_exhausted.add(_stuck_key)
             deps.emit("phase_c.tdd.iter", data={
+                **_prov,
                 "cluster": cluster.name, "iter": iter_n, "rc": rc,
                 "frontier_size": len(eligible), "kind": "stall_exit",
                 "pass_count": pass_count, "fail_count": fail_count,
@@ -418,6 +473,7 @@ def run_phase_c_tdd(
             _log_attribution_gap(deps, tag, iter_n, fail_count, cur_failed,
                                  len(frontier), kind)
             deps.emit("phase_c.tdd.iter", data={
+                **_prov,
                 "cluster": cluster.name, "iter": iter_n, "rc": rc,
                 "frontier_size": 0, "kind": "no_frontier_continue",
                 "pass_count": pass_count, "fail_count": fail_count,
@@ -433,10 +489,12 @@ def run_phase_c_tdd(
         frontier_keys = {key for key, _ in ordered}
         deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: cargo test rc={rc} "
              f"({dt:.1f}s); pass={pass_count} fail={fail_count} "
+             f"oracle={_measure.oracle_size} "
              f"(improved={improved}, stall={stall}/{max_stalls}); "
              f"frontier={len(eligible)} fn(s) ({kind}), "
              f"{skipped_perm} skipped as exhausted.")
         deps.emit("phase_c.tdd.iter", data={
+                **_prov,
             "cluster": cluster.name, "iter": iter_n, "rc": rc,
             "frontier_size": len(eligible), "kind": kind,
             "pass_count": pass_count, "fail_count": fail_count,

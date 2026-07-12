@@ -267,6 +267,30 @@ RUST_GOTCHAS: list[dict[str, Any]] = [
         ),
     },
     {
+        # The frozen-layout class (miner design_conflict rows): the model
+        # invents a field on a private struct/enum whose EXACT layout is shown
+        # in TYPES_IN_SCOPE. Those are the impls the whole crate waits on.
+        "id": "invented_field_frozen_layout",
+        "summary": "`no field X on type Y` / `struct Y has no field named X` → the type's layout is FROZEN and shown in TYPES_IN_SCOPE. Use ONLY the field names listed there; never invent `.inner`/`.0`/`.value`.",
+        "triggers": {"E0609", "E0560", "no field", "has no field named",
+                     "does not have a field"},
+        "detail": (
+            "The struct/enum layout is frozen — every field name + type is listed\n"
+            "in TYPES_IN_SCOPE. Access ONLY those; do not guess a conventional name.\n"
+            "  WRONG (invents `.inner` on a type whose real field is `object_`):\n"
+            "    fn message(&self) -> &str { &self.inner.msg }   // E0609 no field `inner`\n"
+            "  RIGHT (use the field the frozen def lists):\n"
+            "    // TYPES_IN_SCOPE showed:  struct Wrap { object_: Box<str> }\n"
+            "    fn message(&self) -> &str { &self.object_ }\n"
+            "  WRONG (assumes a tuple `.0` on a NAMED-field struct):\n"
+            "    fn first(&self) -> &T { &self.0 }               // E0609 no field `0`\n"
+            "  RIGHT (named access — the def had `struct Pair<T> { head: T, .. }`):\n"
+            "    fn first(&self) -> &T { &self.head }\n"
+            "If a value you need isn't a field, derive it from the fields that ARE\n"
+            "listed — never add a field, and never rename one."
+        ),
+    },
+    {
         "id": "unsafe_call_block",
         "summary": "Calling an unsafe fn needs `unsafe { ... }` — unless the enclosing fn is itself `unsafe fn` (then the body is already an unsafe context).",
         "triggers": {"E0133", "call to unsafe", "requires unsafe", "unsafe function or block"},

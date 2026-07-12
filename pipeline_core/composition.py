@@ -106,7 +106,7 @@ from pipeline_core.adapters.state import read_state as _state_read_state
 from pipeline_core.adapters.structure import CliStructureReader  # noqa: F401 (re-export for composition callers)
 from pipeline_core.adapters.telemetry import JsonlEventEmitter, LogTelemetry
 from pipeline_core.adapters.test_runner import CallableTestRunner
-from pipeline_core.adapters.workspace import WorkspaceDeps
+from pipeline_core.adapters.workspace import WorkspaceDeps, git_commit_paths
 from pipeline_core.adapters.workspace_files import lock_module
 from pipeline_core.adapters.workspace_scan import WorkspaceScanDeps
 from pipeline_core.application.cluster_augment import ClusterAugmentor
@@ -158,6 +158,7 @@ from pipeline_core.application.tasks.task0c import (
 from pipeline_core.application.tasks.task1 import Task1Deps
 from pipeline_core.application.tasks.task4 import Task4Deps
 from pipeline_core.application.validate import Task2CheckerDeps
+from pipeline_core.application.workspace_lifecycle import save_cluster_best_tree
 from pipeline_core.domain.cluster_plan import nightly_rules_for
 from pipeline_core.domain.cluster_scope import ClusterScope
 from pipeline_core.domain.coverage_annotation import (
@@ -683,6 +684,30 @@ def build_app(
         log=ports.log,
     )
 
+    def _checkpoint_fill_tree(
+        project_dir: Path, cluster: str, filled_dir: Path,
+        pass_count: int, iteration: int,
+    ) -> None:
+        """Persist a new pass high-water fill tree to heal's durable restore
+        tiers so a later parse-corruption heal restores this good state
+        (best-tree copy → git ancestor) instead of nuking the file to the
+        baked skeleton."""
+        try:
+            n = save_cluster_best_tree(
+                project_dir, cluster, filled_dir, pass_count, iteration)
+        except Exception as e:  # snapshot must never break the fill loop
+            ports.log(f"  [ratchet] cluster best-tree snapshot failed: {e}")
+            n = 0
+        committed = git_commit_paths(
+            WorkspaceDeps(log=ports.log, emit=ports.emit), project_dir,
+            [f".skeleton-filled/{cluster}"],
+            f"pipeline: task2a checkpoint — {cluster}:{pass_count} passing "
+            f"(iter {iteration})",
+            managed=run_state.git_managed)
+        ports.emit("phase_c.checkpoint", data={
+            "cluster": cluster, "pass_count": pass_count,
+            "best_tree_files": n, "git_committed": committed})
+
     return App(
         adapters=adapters,
         settings=settings,
@@ -727,6 +752,7 @@ def build_app(
             task2_fill_fns_one_by_one=helpers.task2_fill_fns_one_by_one,
             escalate_to_producers=functools.partial(
                 escalate_frontier_to_producers, _attr_deps),
+            checkpoint_fill_tree=_checkpoint_fill_tree,
         ),
         impl_fill_deps=ImplFillDeps(
             build_dispatch_family_section=helpers.build_dispatch_family_section,

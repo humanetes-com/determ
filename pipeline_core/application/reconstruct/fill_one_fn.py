@@ -26,7 +26,6 @@ from pipeline_core.application.reconstruct.cargo_errors import (
 )
 from pipeline_core.application.reconstruct.context import PerFnPassCtx, fill_skip
 from pipeline_core.application.reconstruct.fill_rules import (
-    failure_hit_unfilled_stub,
     is_unimplemented_body,
     make_failed_attempt_body,
     module_of,
@@ -41,6 +40,7 @@ from pipeline_core.domain.model_notes import errorimpl_object_note, is_errorimpl
 from pipeline_core.domain.models import FillResult, FnLocator, Stub
 from pipeline_core.domain.refine import FloorStall
 from pipeline_core.domain.std_api_sigs import std_api_def
+from pipeline_core.domain.test_report import U2Decision
 from pipeline_core.domain.type_refs import types_referenced_in_text
 from pipeline_core.ports.fill_engine import (
     Cargo,
@@ -401,25 +401,28 @@ class FillOneFn:
             # (failing-test set as the stall signature).
             _u2_fail_sig: frozenset[str] | None = None
             if rc == 0:
-                _g = self.cargo.u2_test_gate(
-                    (ctx.tdd_frontier_tests or {}).get(FnLocator(rel_file, fn_name), set()),
+                _key = FnLocator(rel_file, fn_name)
+                _v = self.cargo.u2_test_gate(
+                    (ctx.tdd_frontier_tests or {}).get(_key, set()),
+                    frozenset({_key}),
                     ctx.tdd_test_cmd, ctx.target_src_dir, ctx.cluster_env)
-                if _g is not None:
-                    _u2_fail_sig, cargo_out = _g
-                    # #3 co-dependency: this fn COMPILES but an attributed test
-                    # still fails BECAUSE a sibling it also calls is an unfilled
-                    # stub (panic "not implemented") — not this fn's fault. Keep
-                    # the compiling body and defer to the outer TDD loop (which
-                    # re-runs once the whole pass fills); reverting to a stub
-                    # would be strictly worse. An assertion mismatch is real →
-                    # fall through to the normal fix path.
-                    if _u2_fail_sig and failure_hit_unfilled_stub(cargo_out):
-                        _ctx2 = f" [{container}]" if container else ""
-                        self.tel.log(f"  [phase-c/per-fn] {idx}/{ctx.total} kept "
-                                     f"{rel_file}::{fn_name}{_ctx2} (compiles; attributed "
-                                     "test blocked by an unfilled sibling stub — deferred "
-                                     "to outer loop).")
-                        _u2_fail_sig = None
+                if _v.decision is U2Decision.REJECT:
+                    # A real self-failure (assertion/behavior). Route through the
+                    # normal fix path: revert + re-prompt with the failing tests
+                    # as the stall signature.
+                    _u2_fail_sig, cargo_out = _v.self_failures, _v.detail
+                elif _v.decision is U2Decision.ACCEPT_EXTERNAL_ONLY:
+                    # Compiles, but every attributed failure panics inside a
+                    # DIFFERENT still-stubbed fn — not this fn's fault. Keep the
+                    # compiling body and defer to the outer TDD loop (re-runs
+                    # once the blocking producers fill). Reverting would be
+                    # strictly worse.
+                    _ctx2 = f" [{container}]" if container else ""
+                    self.tel.log(f"  [phase-c/per-fn] {idx}/{ctx.total} kept "
+                                 f"{rel_file}::{fn_name}{_ctx2} (compiles; "
+                                 f"{len(_v.external)} attributed test(s) blocked "
+                                 "by still-stubbed sibling(s) — deferred to outer "
+                                 "loop).")
             # Global monotone ratchet: this fn compiles and its own tests pass,
             # but reject it if it reddened any previously-passing cluster test
             # (or dropped the pass count). Routed through the SAME failure path

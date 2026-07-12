@@ -122,11 +122,13 @@ def test_u2_assertion_failure_routes_to_fix_loop(monkeypatch, tmp_path):
     install_scripted_model(monkeypatch,
                            per_fn_body=lambda _fn: next(bodies, "42"))
     install_scripted_cargo(monkeypatch, check_diag=(0, "", []), run=(0, "ok"))
-    gates = iter([(frozenset({"t_answer"}),
-                   "test t_answer FAILED: assertion `left == right` failed"),
-                  None])
+    from pipeline_core.domain.test_report import U2Verdict
+    gates = iter([U2Verdict.reject(
+        frozenset({"t_answer"}),
+        "test t_answer FAILED: assertion `left == right` failed"),
+        U2Verdict.accept()])
     monkeypatch.setattr(pipeline, "_u2_test_gate",
-                        lambda *a, **k: next(gates, None))
+                        lambda *a, **k: next(gates, U2Verdict.accept()))
     res = pipeline._task2_fill_fns_one_by_one(
         project_dir=ws, target_src_dir=ws / "src", tests_dir_files=[],
         module_name="m", cluster_name="t", cluster=None,
@@ -141,14 +143,23 @@ def test_u2_assertion_failure_routes_to_fix_loop(monkeypatch, tmp_path):
 
 def test_u2_codependent_stub_panic_keeps_body(monkeypatch, tmp_path):
     # Compiles, attributed test fails with a "not implemented" panic — a
-    # SIBLING stub's fault (#3 co-dependency) → keep the body, no fix loop.
+    # SIBLING stub's fault (#3 co-dependency). The gate returns
+    # ACCEPT_EXTERNAL_ONLY → keep the body, no fix loop.
     ws = _setup(monkeypatch, tmp_path)
     install_scripted_model(monkeypatch, per_fn_body="42")
     install_scripted_cargo(monkeypatch, check_diag=(0, "", []), run=(0, "ok"))
+    from pipeline_core.domain.models import FnLocator
+    from pipeline_core.domain.test_report import (
+        FailureKind,
+        TestFailure,
+        U2Verdict,
+    )
+    _ext = ((TestFailure("t_answer", FailureKind.STUB_PANIC,
+                         "src/other.rs", 1, 1, "not implemented"),
+             FnLocator("src/other.rs", "sibling")),)
     monkeypatch.setattr(
         pipeline, "_u2_test_gate",
-        lambda *a, **k: (frozenset({"t_answer"}),
-                         "thread 't_answer' panicked at 'not implemented'"))
+        lambda *a, **k: U2Verdict.accept_external_only(_ext))
     res = pipeline._task2_fill_fns_one_by_one(
         project_dir=ws, target_src_dir=ws / "src", tests_dir_files=[],
         module_name="m", cluster_name="t", cluster=None,

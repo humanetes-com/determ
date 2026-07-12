@@ -18,3 +18,10 @@ ClusterName = NewType("ClusterName", str)
 ModuleName = NewType("ModuleName", str)
 RunId = NewType("RunId", str)
 RetroKey = NewType("RetroKey", str)
+
+# A whitespace/where-clause-STABLE impl-block identity (F5). Minted ONCE by
+# `impl_routing.impl_block_id` from the canonical container, so a block stored
+# under one rendering (`impl<E> From<E> for Error`) and looked up under another
+# (with a newline where-clause) resolve to the SAME key — the routing-table miss
+# that silently dropped a whole impl's model reply (`response_unused`).
+ContainerId = NewType("ContainerId", str)

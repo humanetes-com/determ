@@ -19,6 +19,10 @@ from pathlib import Path
 from typing import Any
 
 from pipeline_core.application.reconstruct.fill_rules import is_unimplemented_body
+from pipeline_core.application.reconstruct.splice_txn import (
+    ParseValidator,
+    parse_guarded_write,
+)
 from pipeline_core.domain.reconstruction import SpliceOutcome
 from pipeline_core.domain.rust_fn_headers import is_pub_fn, locate_fn
 from pipeline_core.domain.rust_idents import declares_fn
@@ -109,7 +113,8 @@ def locate_fn_by_record(enumerate_fns: Callable[[Path], list[dict[str, Any]] | N
 
 
 def splice_fn_body_at(file_path: Path, body_byte_start: int, body_byte_end: int,
-                        new_body: str, allow_nonstub: bool = False) -> SpliceOutcome:
+                        new_body: str, allow_nonstub: bool = False,
+                        validate_parse: ParseValidator | None = None) -> SpliceOutcome:
     """Splice `new_body` between bytes [body_byte_start, body_byte_end) in
     `file_path`. Replaces an explicit byte range — used when the caller has
     canonical offsets from the syn enumerator. By default refuses to
@@ -159,7 +164,8 @@ def splice_fn_body_at(file_path: Path, body_byte_start: int, body_byte_end: int,
         (inner_indent + ln) if ln.strip() else "" for ln in nb.splitlines()
     ) + "\n" + base_indent
     new_raw = raw[:body_byte_start] + nb_indented.encode("utf-8") + raw[body_byte_end:]
-    file_path.write_bytes(new_raw)
+    if not parse_guarded_write(file_path, new_raw, raw, validate_parse):
+        return SpliceOutcome(False, "parse_broken", 0)
     return SpliceOutcome(True, "ok", len(new_raw) - len(raw))
 
 
@@ -218,7 +224,8 @@ def restore_frozen_signature(file_path: Path, fn_name: str,
 
 
 def splice_fn_body(file_path: Path, fn_name: str, new_body: str,
-                   allow_nonstub: bool = False) -> SpliceOutcome:
+                   allow_nonstub: bool = False,
+                   validate_parse: ParseValidator | None = None) -> SpliceOutcome:
     """Replace the body of ``fn_name`` in ``file_path`` with ``new_body`` via a
     name-match (char-space) locate. By default only splices an
     ``unimplemented!()`` stub; ``allow_nonstub=True`` re-fills a wrong body. The
@@ -253,7 +260,9 @@ def splice_fn_body(file_path: Path, fn_name: str, new_body: str,
         (inner_indent + ln) if ln.strip() else "" for ln in nb.splitlines()
     ) + "\n" + base_indent
     new_text = text[:body_start] + nb_indented + text[body_end:]
-    file_path.write_text(new_text, encoding="utf-8")
+    if not parse_guarded_write(file_path, new_text.encode("utf-8"),
+                               text.encode("utf-8"), validate_parse):
+        return SpliceOutcome(False, "parse_broken", 0)
     return SpliceOutcome(True, "ok", len(new_text) - len(text))
 
 
@@ -265,13 +274,16 @@ def splice_fn_with_where(
     body: str,
     where_clause: str | None = None,
     allow_nonstub: bool = False,
+    validate_parse: ParseValidator | None = None,
 ) -> SpliceOutcome:
     """Splice ``body`` into ``fn_name`` whose containing impl matches
     ``container`` (located via the syn enumerator). When ``where_clause`` is
     given, insert it into the signature just before the body's opening brace
     (byte space — offsets come from the enumerator). Returns a
     :class:`SpliceOutcome` ``(ok, reason, delta)``; ``reason`` is the distinct
-    :data:`SpliceReason` cause (debt #39)."""
+    :data:`SpliceReason` cause (debt #39). The where-clause insert + body splice
+    are ONE transaction: a non-ok outcome restores the original bytes so a
+    where-clause is never left dangling on an unspliced stub."""
     if not file_path.exists():
         return SpliceOutcome(False, "file_missing", 0)
     loc = locate_fn_by_record(enumerate_fns, file_path, fn_name, container, "")
@@ -282,6 +294,7 @@ def splice_fn_with_where(
         return SpliceOutcome(False, "fn_not_found", 0)
     sig_byte_start, body_byte_start, body_byte_end, _sig_text = loc
 
+    pre_image: bytes | None = None
     if where_clause:
         raw = file_path.read_bytes()
         brace_pos = raw.rfind(b"{", sig_byte_start, body_byte_start + 1)
@@ -289,11 +302,16 @@ def splice_fn_with_where(
             sig_slice = raw[sig_byte_start:brace_pos].decode("utf-8", errors="replace")
             if "where" not in sig_slice:
                 insert = f"\n    {where_clause}\n".encode()
-                raw = raw[:brace_pos] + insert + raw[brace_pos:]
+                new_raw = raw[:brace_pos] + insert + raw[brace_pos:]
                 shift = len(insert)
                 body_byte_start += shift
                 body_byte_end += shift
-                file_path.write_bytes(raw)
+                pre_image = raw
+                file_path.write_bytes(new_raw)
 
-    return splice_fn_body_at(file_path, body_byte_start, body_byte_end, body,
-                             allow_nonstub=allow_nonstub)
+    out = splice_fn_body_at(file_path, body_byte_start, body_byte_end, body,
+                            allow_nonstub=allow_nonstub,
+                            validate_parse=validate_parse)
+    if not out.ok and pre_image is not None:
+        file_path.write_bytes(pre_image)   # undo the dangling where-clause insert
+    return out

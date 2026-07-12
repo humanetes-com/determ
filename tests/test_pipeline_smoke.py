@@ -107,18 +107,19 @@ def test_run_scoped_tests_shim_routes_through_run_cargo(monkeypatch, tmp_path) -
 def test_u2_test_gate_shim_routes_and_blocks(monkeypatch, tmp_path) -> None:
     """Slice-11 seam: the _u2_test_gate shim composes via pipeline._run_cargo + _guard."""
     import pipeline
+    from pipeline_core.domain.test_report import U2Decision
 
     fake = _fake_run_cargo(101, "test b ... FAILED\nassertion failed")
     monkeypatch.setattr(pipeline, "_run_cargo", fake)
     monkeypatch.setattr(pipeline, "_UNIFIED_FILL_LOOP", True)
-    res = pipeline._u2_test_gate({"b"}, "cargo test", tmp_path, {})
-    assert res is not None
-    sig, msg = res
-    assert sig == frozenset({"b"}) and "still FAIL" in msg
+    v = pipeline._u2_test_gate({"b"}, frozenset(), "cargo test", tmp_path, {})
+    assert v.decision is U2Decision.REJECT
+    assert v.self_failures == frozenset({"b"}) and "still FAIL" in v.detail
     assert fake.calls  # routed through the patchable seam
     # gate disabled → accept regardless
     monkeypatch.setattr(pipeline, "_UNIFIED_FILL_LOOP", False)
-    assert pipeline._u2_test_gate({"b"}, "cargo test", tmp_path, {}) is None
+    assert pipeline._u2_test_gate(
+        {"b"}, frozenset(), "cargo test", tmp_path, {}).decision is U2Decision.ACCEPT
 
 
 def test_extract_self_note_shim(monkeypatch) -> None:

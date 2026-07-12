@@ -17,9 +17,12 @@ from typing import Literal, NamedTuple
 #   bad_offsets     — caller's byte range does not fit the file
 #   target_not_stub — current body is already filled and allow_nonstub=False
 #   body_is_stub    — the NEW body is empty or itself `unimplemented!()`
+#   parse_broken    — the write would leave the file unparseable (syn reject);
+#                     bytes restored to the pre-image, so the tree never persists
+#                     an unparseable state (the error.rs doc-comment corruption class)
 SpliceReason = Literal[
     "ok", "file_missing", "read_failed", "fn_not_found",
-    "bad_offsets", "target_not_stub", "body_is_stub",
+    "bad_offsets", "target_not_stub", "body_is_stub", "parse_broken",
 ]
 
 

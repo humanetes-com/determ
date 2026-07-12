@@ -28,6 +28,7 @@ from pipeline_core.domain.models import (
     TypeRecord,
 )
 from pipeline_core.domain.reconstruction import SpliceOutcome
+from pipeline_core.domain.test_report import U2Verdict
 
 
 @runtime_checkable
@@ -80,9 +81,10 @@ class Cargo(Protocol):
         self, test_stems: list[str], cluster: BuildCluster | None,
     ) -> str: ...
     def u2_test_gate(
-        self, fn_tests: set[str], test_cmd: str | None,
+        self, fn_tests: set[str], unit_fns: frozenset[FnLocator],
+        test_cmd: str | None,
         target_src_dir: Path, cluster_env: dict[str, str] | None,
-    ) -> tuple[frozenset[str], str] | None: ...
+    ) -> U2Verdict: ...
     def test_regression_baseline(
         self, test_cmd: str | None, cwd: Path, env: dict[str, str] | None,
     ) -> tuple[int, frozenset[str]] | None: ...

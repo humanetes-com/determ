@@ -171,6 +171,38 @@ def save_best_tree(
     return saved
 
 
+def save_cluster_best_tree(
+    project_dir: Path, cluster: str, filled_dir: Path, pass_count: int,
+    iteration: int = 0,
+) -> int:
+    """Snapshot a cluster's fill tree (``.skeleton-filled/<cluster>/``) into
+    ``.best_tree/<cluster>/`` so heal's BEST_TREE_COPY tier has a parseable
+    good-fill copy of each file to restore from. Layout mirrors what
+    ``heal``'s ``best_tree_bytes(rel)`` reads: ``.best_tree/<cluster>/<rel>``
+    with ``rel`` relative to ``filled_dir`` (e.g. ``src/error.rs``).
+
+    Cluster-scoped: replaces only this cluster's subtree, never other
+    clusters' snapshots. Returns files saved."""
+    import json
+    import shutil
+    dst_root = project_dir / BEST_TREE_DIR / cluster
+    if dst_root.exists():
+        shutil.rmtree(dst_root)
+    saved = 0
+    for src in sorted(Path(filled_dir).rglob("*.rs")):
+        if not src.is_file():
+            continue
+        dst = dst_root / src.relative_to(filled_dir)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+        saved += 1
+    if saved:
+        (dst_root / _BEST_META).write_text(
+            json.dumps({"pass_count": pass_count, "iteration": iteration}),
+            encoding="utf-8")
+    return saved
+
+
 def restore_best_tree(project_dir: Path) -> list[str]:
     """Copy the snapshotted best tree back over the working tree. Returns the
     restored relative paths ([] if no snapshot)."""

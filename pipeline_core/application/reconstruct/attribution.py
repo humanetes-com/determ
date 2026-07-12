@@ -7,14 +7,12 @@ verbatim relocation of pipeline.py's `_attribute_failures` family; the compositi
 binds the concrete collaborators. The `#[test]`-oracle filter (FR-018) is applied by the
 callers (same as before), via `reconstruct.test_targets.filter_test_targets`.
 
-cfg/test-output regexes here parse CARGO OUTPUT and TEST files (not the crate's Rust
-source through the no-regex rule), so they are legitimate (R7); migrating the test-file
-scan to syn is P7.
+Cargo-output parsing goes through the structured `domain.test_report` parser
+(no regex); the remaining identifier scans use `domain.rust_idents`.
 """
 from __future__ import annotations
 
 import os
-import re
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
@@ -32,6 +30,8 @@ from pipeline_core.domain.attribution import (
 )
 from pipeline_core.domain.models import Diagnostic, FnLocator, Frontier
 from pipeline_core.domain.rust_idents import ascii_word_tokens, test_fn_names
+from pipeline_core.domain.test_report import FailureKind as TestFailureKind
+from pipeline_core.domain.test_report import parse_test_output
 from pipeline_core.domain.test_results import (
     build_test_name_index,
     failing_test_names,
@@ -54,10 +54,46 @@ class AttributionDeps:
     log: Callable[[str], None]
 
 
-_PANIC_HEADER_RE = re.compile(
-    r"thread '([^']+)'(?:\s+\(\d+\))?\s+panicked at ([^:]+):(\d+)(?::(\d+))?:\s*\n([^\n]*)"
-)
-_TEST_STDOUT_HEADER_RE = re.compile(r"^----\s+(\S+)\s+stdout\s+----\s*$", re.MULTILINE)
+def make_fn_locator(
+    structure: Any, src_dir: Path,
+) -> Callable[[str, int], FnLocator | None]:
+    """Build a ``(panic_file, panic_line) -> FnLocator | None`` resolver over
+    `src_dir`'s fn records, caching enumeration + file text. `panic_file` is a
+    path as libtest prints it (crate-root-relative, e.g. ``src/error.rs``, or
+    absolute); it is normalised to `src_dir`-relative exactly as
+    :func:`extract_tdd_frontier` does. Used by the U2 blame partition (F3) and
+    any consumer that maps a panic span back to the fn it fired in."""
+    recs_by_file: dict[str, list[dict[str, Any]]] = {}
+    text_by_file: dict[str, str] = {}
+    all_recs: list[dict[str, Any]] | None = None
+
+    def locate(panic_file: str, panic_line: int) -> FnLocator | None:
+        nonlocal all_recs
+        p_abs = Path(panic_file)
+        if not p_abs.is_absolute():
+            p_abs = (src_dir / panic_file).resolve()
+        try:
+            rel = str(p_abs.relative_to(src_dir.resolve()))
+        except ValueError:
+            return None
+        if rel not in recs_by_file:
+            if all_recs is None:
+                all_recs = structure.enumerate_fns(src_dir) or []
+            recs_by_file[rel] = [r for r in all_recs if r.get("file") == rel]
+        recs = recs_by_file[rel]
+        if not recs:
+            return None
+        if rel not in text_by_file:
+            try:
+                text_by_file[rel] = p_abs.read_text(encoding="utf-8")
+            except Exception:
+                return None
+        rec = line_to_fn_record(text_by_file[rel], panic_line, recs)
+        if rec is None:
+            return None
+        return FnLocator(rel, rec["fn_name"])
+
+    return locate
 
 
 def extract_tdd_frontier(deps: AttributionDeps,
@@ -65,74 +101,28 @@ def extract_tdd_frontier(deps: AttributionDeps,
 ) -> Frontier:
     """Parse cargo test output → frontier dict.
 
-    Keys are (file_rel, fn_name), values are sets of test names that
-    panicked inside that fn. Only `not yet implemented` panics are
-    included by default — they map cleanly to a still-unfilled fn.
-    Assertion-failure attribution is handled in a separate pass (see
-    `_extract_tdd_assertion_frontier`).
+    Keys are (file_rel, fn_name), values are the test names that panicked in a
+    still-unfilled `unimplemented!()`/`todo!()` stub inside that fn. Built on
+    the shared structured parser (`parse_test_output`): only STUB_PANIC
+    failures are included — they map cleanly to a still-unfilled fn.
+    Assertion-failure attribution is a separate pass (`behavior_frontier`).
 
-    Returns {} when no panics could be parsed (e.g. cargo build failed
-    before any test ran).
+    Returns {} when no stub panics resolve (build failed before any test ran,
+    or every failure is an assertion).
     """
     frontier: Frontier = {}
     if not test_output:
         return frontier
-    # Per-file fn records cache.
-    fn_records_by_file: dict[str, list[dict[str, Any]]] = {}
-    file_text_cache: dict[str, str] = {}
-    # Split output into per-test stdout sections. Each section holds the
-    # panic header for that test's failures.
-    sections = _TEST_STDOUT_HEADER_RE.split(test_output)
-    # _TEST_STDOUT_HEADER_RE.split returns [pre, test1, body1, test2, body2, ...].
-    if len(sections) < 3:
-        # No per-test sections — try parsing the whole output as a single
-        # block (some cargo versions don't emit `---- N stdout ----` headers
-        # for single-test runs).
-        sections = ["", "unknown_test", test_output]
-    for i in range(1, len(sections) - 1, 2):
-        test_name = sections[i].strip()
-        body = sections[i + 1]
-        for m in _PANIC_HEADER_RE.finditer(body):
-            _thread, file_path, line_str, col_str, _panic_msg = m.group(
-                1, 2, 3, 4, 5)
-            # Accept every panic whose path resolves to a fn in src/. The
-            # skeleton extractor replaced every fn body with
-            # `unimplemented!()`, so any panic inside src/ IS from a stub.
-            # Test-file panics (tests/foo.rs:N) get rejected later by the
-            # fn-lookup, since we only enumerate src/ fns.
-            try:
-                line_no = int(line_str)
-            except ValueError:
-                continue
-            # Resolve file_path relative to src_dir.
-            p_abs = Path(file_path)
-            if not p_abs.is_absolute():
-                p_abs = (src_dir / file_path).resolve()
-            try:
-                rel = str(p_abs.relative_to(src_dir.resolve()))
-            except ValueError:
-                # File outside src_dir — skip (likely a panic from std).
-                continue
-            # Look up fn at this line.
-            if rel not in fn_records_by_file:
-                _all_recs = deps.structure.enumerate_fns(src_dir) or []
-                fn_records_by_file[rel] = [r for r in _all_recs
-                                            if r.get("file") == rel]
-            recs = fn_records_by_file[rel]
-            if not recs:
-                continue
-            if rel not in file_text_cache:
-                try:
-                    file_text_cache[rel] = p_abs.read_text(encoding="utf-8")
-                except Exception:
-                    continue
-            col_no = int(col_str) if col_str else None
-            rec = line_to_fn_record(file_text_cache[rel], line_no, recs,
-                                      col_no=col_no)
-            if rec is None:
-                continue
-            key = FnLocator(rel, rec["fn_name"])
-            frontier.setdefault(key, set()).add(test_name)
+    locate = make_fn_locator(deps.structure, src_dir)
+    for f in parse_test_output(test_output).failures:
+        if f.kind is not TestFailureKind.STUB_PANIC:
+            continue
+        if not (f.panic_file and f.panic_line is not None):
+            continue
+        key = locate(f.panic_file, f.panic_line)
+        if key is None:
+            continue
+        frontier.setdefault(key, set()).add(f.test_name)
     return frontier
 
 def behavior_frontier(

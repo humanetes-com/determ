@@ -116,6 +116,22 @@ class CliExtractor:
             return SkeletoniseResult(False, [], f"could not parse JSON report: {e}")
         return SkeletoniseResult(True, reports, r.stderr.strip())
 
+    # ── parse-check : syn-parse a single FILE, bool out ───────────────────────
+    def parse_check(self, file_path: Path) -> bool:
+        """True iff the syn extractor parses `file_path` as valid Rust. The
+        transactional splice gate's signal (F1). Fail-OPEN: the gate must reject
+        ONLY on a POSITIVE syn parse failure (rc != 0). A missing binary or
+        subprocess error is inconclusive → return True (don't block all fills;
+        F2 heal + F7 alarm are the downstream net for anything that slips)."""
+        if not self._bin.exists():
+            return True
+        cmd = [str(self._bin), "--parse-check", "--input", str(file_path)]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        except Exception:
+            return True
+        return r.returncode == 0
+
     # ── merge-clusters : cross-cluster AST merge, bool out ────────────────────
     def merge_clusters(self, out_path: Path, cluster_files: list[tuple[str, Path, str]]) -> bool:
         if not self._bin.exists():

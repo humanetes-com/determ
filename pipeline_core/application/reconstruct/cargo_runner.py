@@ -15,10 +15,20 @@ import shlex
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
+from pipeline_core.application.reconstruct.attribution import make_fn_locator
 from pipeline_core.application.reconstruct.cargo_errors import diagnostics_from_json
-from pipeline_core.domain.models import Diagnostic
+from pipeline_core.domain.models import Diagnostic, FnLocator
 from pipeline_core.domain.test_command import derive_scoped_test_cmd
+from pipeline_core.domain.test_report import (
+    BlameVerdict,
+    FailureExcerpt,
+    TestRunReport,
+    U2Verdict,
+    parse_test_output,
+    partition_blame,
+)
 from pipeline_core.domain.test_results import (
     TestRunOutcome,
     failure_bodies_for,
@@ -188,53 +198,88 @@ def test_regression_gate(
     return frozenset(newly_red), detail
 
 
+def _render_u2_reject(blame: BlameVerdict, err_cap: int) -> str:
+    """Prompt feedback for a REJECT: the unit's OWN failing tests + their
+    bodies (via the shared :class:`FailureExcerpt` rule — names never truncated,
+    bodies capped at line boundaries), plus a single summary line for any tests
+    blocked by another unit's stub (so the model never chases a failure that
+    isn't its fault)."""
+    excerpt = FailureExcerpt(
+        names=tuple(sorted(f.test_name for f in blame.self_failures)),
+        bodies=tuple((f.test_name, f.body) for f in blame.self_failures))
+    out = excerpt.render(err_cap)
+    if blame.external:
+        blocking = sorted({f"{loc.file}::{loc.fn_name}"
+                           for _f, loc in blame.external})
+        out += (f"\n\n(Ignore: {len(blame.external)} other failing "
+                f"test(s) are blocked by still-stubbed fn(s) {blocking} "
+                "— not this unit.)")
+    return out
+
+
 def u2_test_gate(
     run_cargo_fn: RunCargo,
     fn_tests: set[str],
+    unit_fns: frozenset[FnLocator],
     test_cmd: str | None,
     target_src_dir: Path,
     cluster_env: dict[str, str] | None,
     *,
+    structure: Any,
     enabled: bool,
     timeout: int,
     err_cap: int,
     guard: Callable[[str, str], None],
-) -> tuple[frozenset[str], str] | None:
-    """Plan 10 — the SINGLE reusable test-acceptance gate, called by every fill
-    loop (per-fn, per-impl, post-merge) at the point a unit compiles.
+) -> U2Verdict:
+    """Plan 10 / F3 — the SINGLE reusable test-acceptance gate, called by every
+    fill loop (per-fn, per-impl, post-merge) at the point a unit compiles.
 
-    Runs the unit's own tests (`fn_tests`) via `run_scoped_tests` and decides:
-      - None  → ACCEPT (tests pass, gate off, no tests, or inconclusive run —
-        never block on uncertainty).
-      - (fail_sig, detail) → DO NOT ACCEPT: compiled but its own tests fail.
-        `fail_sig` is the failing-test set (stall signature → loop terminates),
-        `detail` is the assertion/panic text for the next prompt.
-    Fail-safe: any error → None (fall back to compile-based acceptance).
+    Runs the unit's own tests (`fn_tests`), parses the structured report, and
+    PARTITIONS the failures: a test that panics inside a DIFFERENT unit's
+    still-`unimplemented!()` stub is not this unit's fault. Returns a typed
+    :class:`U2Verdict`:
+      - ACCEPT               → tests pass / gate off / no tests / inconclusive.
+      - ACCEPT_EXTERNAL_ONLY → compiled; every failing test is blocked by
+        another unit's stub. Caller KEEPS the fill, writes no retro, does not
+        exhaust, does not immediate-retry (the outer TDD loop re-runs once the
+        blocking producers fill).
+      - REJECT               → ≥1 real self failure. `self_failures` is the
+        stall signature; `detail` feeds the next prompt (external failures
+        summarized, never chased).
+    Fail-safe: any error / timeout → ACCEPT (compile-based acceptance).
 
-    The actual `cargo test` invocation is scoped to `fn_tests` via libtest's
-    own `-- name1 name2 ...` OR filter (empirically verified: multiple
-    trailing positional filters run the union, not an intersection) — unlike
-    `test_regression_gate`, which stays unscoped BY DESIGN (it must see the
-    WHOLE cluster to catch a fill that reddens a sibling), this gate only
-    ever inspects `fn_tests`, so there is no reason to pay for a full-suite
-    run on every single fix-loop attempt.
+    `unit_fns` is what this unit owns (per-fn: that one fn; per-impl: the
+    block's stub members; file-first: the file's fns) — the partition subtracts
+    only stub-panics that resolve OUTSIDE it.
+
+    The `cargo test` invocation is scoped to `fn_tests` via libtest's own
+    `-- name1 name2 ...` OR filter — unlike `test_regression_gate`, which stays
+    unscoped BY DESIGN.
     """
     if not (enabled and test_cmd and fn_tests):
-        return None
+        return U2Verdict.accept()
     scoped_cmd = derive_scoped_test_cmd(test_cmd, fn_tests)
     try:
-        _passed, _fc, detail, failed = run_scoped_tests(
-            run_cargo_fn, scoped_cmd, target_src_dir, cluster_env or {},
-            timeout=timeout, err_cap=err_cap, only=set(fn_tests))
+        rc, out = run_cargo_fn(scoped_cmd, target_src_dir, cluster_env or {},
+                               timeout=timeout)
     except Exception as e:  # noqa: BLE001 — fail-safe to compile-based accept
         guard("phase-c/u2_skip", f"{type(e).__name__}: {e}")
-        return None
-    still = set(fn_tests) & failed
-    if not still:
-        return None
-    msg = (f"This compiled, but these tests still FAIL: {sorted(still)}\n\n"
-           "Fix the BEHAVIOR so they pass.\n" + detail)
-    return frozenset(still), msg
+        return U2Verdict.accept()
+    if rc == -1:
+        return U2Verdict.accept()  # timeout → INCONCLUSIVE, never block
+    report = parse_test_output(out)
+    scoped = TestRunReport(
+        report.passed,
+        tuple(f for f in report.failures if f.test_name in fn_tests))
+    if not scoped.failures:
+        return U2Verdict.accept()
+    locate = make_fn_locator(structure, target_src_dir)
+    blame = partition_blame(scoped, frozenset(unit_fns), locate)
+    if not blame.self_failures:
+        return U2Verdict.accept_external_only(blame.external)
+    detail = _render_u2_reject(blame, err_cap)
+    return U2Verdict.reject(
+        frozenset(f.test_name for f in blame.self_failures), detail)
 
 
 def run_check_diag(

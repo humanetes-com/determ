@@ -28,6 +28,7 @@ from typing import Any
 
 from pipeline_core.domain.models import ClusterFillResult, FnLocator
 from pipeline_core.domain.reconstruction import SpliceOutcome
+from pipeline_core.domain.test_report import U2Verdict
 from pipeline_core.ports.structure import StructureReader
 
 
@@ -105,7 +106,7 @@ class MutatorAdapter:
 class CargoFillAdapter:
     run_fn: Callable[..., tuple[int, str]]
     build_test_cmd_fn: Callable[[list[str], Any], str]
-    u2_test_gate_fn: Callable[..., tuple[frozenset[str], str] | None]
+    u2_test_gate_fn: Callable[..., U2Verdict]
     focus_errors_fn: Callable[..., str]
     env_fn: Callable[[], dict[str, str]]
     test_regression_baseline_fn: Callable[..., tuple[int, frozenset[str]] | None] | None = None
@@ -118,10 +119,12 @@ class CargoFillAdapter:
     def build_test_cmd(self, test_stems: list[str], cluster: Any) -> str:
         return self.build_test_cmd_fn(test_stems, cluster)
 
-    def u2_test_gate(self, fn_tests: set[str], test_cmd: str | None,
+    def u2_test_gate(self, fn_tests: set[str], unit_fns: frozenset[FnLocator],
+                     test_cmd: str | None,
                      target_src_dir: Path, cluster_env: dict[str, str] | None
-                     ) -> tuple[frozenset[str], str] | None:
-        return self.u2_test_gate_fn(fn_tests, test_cmd, target_src_dir, cluster_env)
+                     ) -> U2Verdict:
+        return self.u2_test_gate_fn(fn_tests, unit_fns, test_cmd,
+                                    target_src_dir, cluster_env)
 
     def test_regression_baseline(self, test_cmd: str | None, cwd: Path,
                                  env: dict[str, str] | None

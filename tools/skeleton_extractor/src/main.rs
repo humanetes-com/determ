@@ -55,6 +55,11 @@ struct Cli {
     #[arg(long = "enumerate-cfgs")]
     enumerate_cfgs: bool,
 
+    /// Parse-check a single Rust FILE (`--input <file>`): exit 0 if syn parses
+    /// it, non-zero otherwise. The transactional splice gate's signal.
+    #[arg(long = "parse-check")]
+    parse_check: bool,
+
     /// Merge per-cluster trees into one cfg-gated source file.
     #[arg(long)]
     merge_clusters: bool,
@@ -109,6 +114,13 @@ fn main() -> Result<()> {
         }
         std::fs::write(&out_path, merged)
             .with_context(|| format!("write merged file {}", out_path.display()))?;
+        return Ok(());
+    }
+
+    if cli.parse_check {
+        // `--input` is a single FILE here, not a tree.
+        let input = cli.input.context("--input is required")?;
+        skeleton_extractor::parse_check(&input)?;
         return Ok(());
     }
 

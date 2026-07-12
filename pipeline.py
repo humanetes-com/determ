@@ -363,6 +363,7 @@ from pipeline_core.domain.test_command import (  # noqa: F401  (smoke pin: test_
     derive_check_only_cmd as _derive_check_only_cmd,
 )
 from pipeline_core.domain.test_grouping import split_oversized_groups as _split_oversized_groups
+from pipeline_core.domain.test_report import U2Verdict
 from pipeline_core.domain.test_results import (
     OUTPUT_SEPARATOR as OUTPUT_SEPARATOR,  # noqa: PLC0414 (test seam re-export)
 )
@@ -1616,7 +1617,7 @@ _FILL_MUT = MutatorAdapter(
 _FILL_CARGO = CargoFillAdapter(
     run_fn=lambda cmd, cwd, env, timeout=180: _run_cargo(cmd, cwd, env, timeout),
     build_test_cmd_fn=lambda stems, cluster: _build_test_cmd(stems, cluster),
-    u2_test_gate_fn=lambda ft, tc, tsd, ce: _u2_test_gate(ft, tc, tsd, ce),
+    u2_test_gate_fn=lambda ft, uf, tc, tsd, ce: _u2_test_gate(ft, uf, tc, tsd, ce),
     focus_errors_fn=lambda out, fr, max_chars=None: _focus_cargo_errors(out, fr, max_chars=max_chars),
     env_fn=lambda: _cargo_env(),
     test_regression_baseline_fn=lambda tc, cwd, env: _test_regression_baseline(tc, cwd, env),
@@ -1840,11 +1841,18 @@ from pipeline_core.application.reconstruct.fill_rules import (  # noqa: E402
 # file-MUTATING splices live in application/reconstruct/splice.py; pipeline.py
 # keeps thin late-binding shims (NOT partials) so the e2e harness's
 # `_enumerate_fns_via_extractor` monkeypatch is resolved at CALL time.
+def _parse_ok(path: Path) -> bool:
+    """F1 splice-gate validator: resolve `_APP.structure` at call time so a
+    test's fake reader wins, and only gate fill-tree files (the reconstruction
+    trees) — never the frozen oracle/tests."""
+    return _APP.structure.parse_ok(path)
+
+
 def _splice_fn_body_at(file_path: Path, body_byte_start: int, body_byte_end: int,
                        new_body: str, allow_nonstub: bool = False) -> SpliceOutcome:
     return _reconstruct_splice.splice_fn_body_at(
         file_path, body_byte_start, body_byte_end, new_body,
-        allow_nonstub=allow_nonstub)
+        allow_nonstub=allow_nonstub, validate_parse=_parse_ok)
 
 
 def _locate_fn_by_record(file_path: Path, name: str, container: str, sig_text: str,
@@ -1863,7 +1871,8 @@ def _replace_fn_signature(file_path: Path, fn_name: str, new_sig: str) -> bool:
 def _splice_fn_body(file_path: Path, fn_name: str, new_body: str,
                     allow_nonstub: bool = False) -> SpliceOutcome:
     return _reconstruct_splice.splice_fn_body(
-        file_path, fn_name, new_body, allow_nonstub=allow_nonstub)
+        file_path, fn_name, new_body, allow_nonstub=allow_nonstub,
+        validate_parse=_parse_ok)
 
 
 def _splice_fn_with_where(
@@ -1876,7 +1885,7 @@ def _splice_fn_with_where(
 ) -> SpliceOutcome:
     return _reconstruct_splice.splice_fn_with_where(
         _enumerate_fns_via_extractor, file_path, container, fn_name, body,
-        where_clause, allow_nonstub)
+        where_clause, allow_nonstub, validate_parse=_parse_ok)
 
 
 
@@ -2229,26 +2238,20 @@ def _run_scoped_tests(
 
 
 def _u2_test_gate(
-    fn_tests: "set[str]", test_cmd: "str | None",
-    target_src_dir: Path, cluster_env: "dict | None",
-) -> "tuple[frozenset, str] | None":
-    """Plan 10 — the SINGLE reusable test-acceptance gate, called by every fill
-    loop (per-fn, per-impl, post-merge) at the point a unit compiles.
+    fn_tests: "set[str]", unit_fns: "frozenset[FnLocator]",
+    test_cmd: "str | None", target_src_dir: Path, cluster_env: "dict | None",
+) -> "U2Verdict":
+    """F3 — the SINGLE reusable test-acceptance gate. Returns a typed
+    :class:`U2Verdict` (ACCEPT / ACCEPT_EXTERNAL_ONLY / REJECT): stub-panics
+    that fire in a fn OUTSIDE `unit_fns` are subtracted so an innocent unit is
+    never charged for another unit's still-`unimplemented!()` stub.
 
-    Given the test names the unit must make pass (`fn_tests`), run them via the
-    shared `_run_scoped_tests` and decide:
-      - return None  → ACCEPT (tests pass, or U2 off, or no tests, or the test
-        run was inconclusive — never block on uncertainty).
-      - return (fail_sig, detail) → DO NOT ACCEPT: the unit compiled but its own
-        tests still fail. `fail_sig` is the failing-test set (use as the stall
-        signature so the fix loop terminates), `detail` is the assertion / panic
-        text to feed back into the next prompt.
-    Fail-safe: any error → None (fall back to compile-based acceptance).
+    Shim injects the patchable `_run_cargo` seam + `_guard`, the config, and the
+    live `_APP.structure` (resolved at call time so a test's fake reader wins).
     """
-    # P2 slice 11: gate logic crossed to cargo_runner; shim injects the patchable
-    # `_run_cargo` seam + `_guard` and the config (resolved at call time).
     return _reconstruct_cargo_runner.u2_test_gate(
-        _run_cargo, fn_tests, test_cmd, target_src_dir, cluster_env,
+        _run_cargo, fn_tests, unit_fns, test_cmd, target_src_dir, cluster_env,
+        structure=_APP.structure,
         enabled=_UNIFIED_FILL_LOOP, timeout=_U2_TEST_TIMEOUT,
         err_cap=_FIX_ERR_CAP, guard=_guard)
 
@@ -3237,6 +3240,7 @@ def _new_skeleton_task2_generator() -> StaticSkeletonTask2Generator:
         tel=_GEN_TELEMETRY, cargo=_GEN_CARGO, fill=_GEN_FILL, clusters=_GEN_CLUSTERS,
         gentests=_GEN_GENTESTS, scan=_GEN_SCAN, ws=_GEN_WORKSPACE,
         cfg=_build_skeleton_config(),
+        structure=_STRUCTURE,
         # P3 blueprint deps — ask late-bound over the module global so the
         # scripted-model e2e seam (pipeline._ask_raw) intercepts.
         blueprint_deps=BlueprintDeps(

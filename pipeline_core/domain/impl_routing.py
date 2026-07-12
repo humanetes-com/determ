@@ -19,6 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from pipeline_core.domain.identity import ContainerId
 from pipeline_core.domain.rust_idents import canon_container
 
 
@@ -72,7 +73,12 @@ def route_fn_bodies(
     return BodyRouting(routed=tuple(routed), dropped=tuple(dropped))
 
 
-def impl_block_id(file_rel: str, container: str) -> str:
-    """Stable hashable id for an impl block (frontier-mapping dict key and
-    per-block lock key)."""
-    return f"{file_rel}::{container}"
+def impl_block_id(file_rel: str, container: str) -> ContainerId:
+    """Stable hashable id for an impl block (routing-table key, frontier-mapping
+    key, per-block lock key). The container is reduced to its CANONICAL identity
+    (`canon_container`) so the SAME impl rendered two ways — a block's own
+    verbatim container vs a `related_containers` entry carrying a newline
+    where-clause — produces the SAME id. Keying on the raw string let a related
+    block miss the routing table, dropping its whole model reply (F5,
+    `response_unused` on `impl<E> From<E> for Error`)."""
+    return ContainerId(f"{file_rel}::{canon_container(container)}")

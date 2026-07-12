@@ -26,6 +26,7 @@ from typing import Any
 
 from ...application.reconstruct.fill_merge import backfill_stub_bodies
 from ...application.reconstruct.fill_rules import is_unimplemented_body
+from ...application.reconstruct.heal import HealDeps, heal_file
 from ...domain.cluster_plan import fill_order
 from ...domain.generation import (
     GenerationRequest,
@@ -36,6 +37,7 @@ from ...domain.generation import (
     testfile_paths,
     topo_sort_files,
 )
+from ...domain.heal import RestorePoint
 from ...domain.llm_output import extract_files
 from ...domain.models import BuildCluster, ClusterFillResult, FnLocator
 from ...domain.rust_fn_headers import locate_all_fns
@@ -939,6 +941,9 @@ class StaticSkeletonTask2Generator(Task2Generator):
     # P3 blueprint phase deps (BlueprintDeps, constructed by the composition
     # root; None → blueprint generation is skipped).
     blueprint_deps: Any = None
+    # F2 heal: the syn StructureReader (parse-check gate for the heal hierarchy).
+    # None → heal falls back to whole-file skeleton restore (legacy behaviour).
+    structure: Any = None
 
     def _ensure_blueprint(self, project_dir: Path, module: str,
                           default_cluster: Any, all_test_pairs: list[tuple[str, str]],
@@ -1352,7 +1357,8 @@ class StaticSkeletonTask2Generator(Task2Generator):
                              "not compile; implicated: "
                              f"{', '.join(f'{f}::{fn}' for f, fn in _pre_impl[:6])}")
                 _healed = self._revert_implicated(tag, _pre_impl, filled_dir,
-                                                  skeleton_dir)
+                                                  skeleton_dir, project_dir,
+                                                  cluster.name)
                 self.tel.log(f"  {tag} [pre-pass-heal] reverted {_healed} fn(s) "
                              "to stubs before the fill pass.")
                 self.tel.emit("phase_c.cluster.prepass_heal", data={
@@ -1623,7 +1629,8 @@ class StaticSkeletonTask2Generator(Task2Generator):
                          f"{', '.join(f'{f}::{fn}' for f, fn in implicated[:6])}"
                          + ("..." if len(implicated) > 6 else ""))
             reverted = self._revert_implicated(tag, implicated, filled_dir,
-                                               skeleton_dir)
+                                               skeleton_dir, project_dir,
+                                               cluster.name)
             if reverted == 0:
                 self.tel.log(f"  {tag} [skeleton-validate] nothing "
                              "revertible and no skeleton copy — giving up.")
@@ -1654,11 +1661,79 @@ class StaticSkeletonTask2Generator(Task2Generator):
                 fr_path=_fr_for_notes,
             )
 
+        # F7: the tree still does not compile/parse after every heal attempt.
+        # Emit a LOUD halt so the run never silently marches on mis-exhausting
+        # fns from a broken state (the ~30h corruption freeze had no alarm).
+        if not validate_ok:
+            from pipeline_core.domain.tree_health import classify_tree_health
+            _, _, _diags = self.cargo.run_check_diag(
+                check_cmd, filled_dir, self._cluster_env(cluster), 180)
+            _health = classify_tree_health(1, _diags, 0, 0)
+            self.tel.emit("phase_c.cluster.halted", data={
+                "cluster": cluster.name, "health": _health.name,
+                "first_errors": _vr_out.splitlines()[:5]})
+            self.tel.log(f"  {tag} [skeleton-validate] cluster HALTED "
+                         f"({_health.name}) — tree unrecoverable; NOT marking "
+                         "fns exhausted from this state.")
+
         return {"ok": True, "phase_c": c_result, "phase_d": d_result,
                 "validates": validate_ok}
 
+    def _git_ancestor_blobs(self, repo: Path, repo_rel: str) -> list[bytes]:
+        """Committed versions of `repo_rel` in the workspace git repo, newest
+        first — the fill tree is checkpoint-committed, so a parseable ancestor
+        is exactly what would have saved the pre-corruption 22-fill state."""
+        import subprocess
+        try:
+            r = subprocess.run(
+                ["git", "-C", str(repo), "log", "--format=%H", "--", repo_rel],
+                capture_output=True, text=True, timeout=30)
+            if r.returncode != 0:
+                return []
+            blobs: list[bytes] = []
+            for sha in r.stdout.split():
+                b = subprocess.run(
+                    ["git", "-C", str(repo), "show", f"{sha}:{repo_rel}"],
+                    capture_output=True, timeout=30)
+                if b.returncode == 0 and b.stdout:
+                    blobs.append(b.stdout)
+            return blobs
+        except Exception:
+            return []
+
+    def _heal_deps(self, project_dir: Path, filled_dir: Path,
+                   skeleton_dir: Path, cluster_name: str) -> HealDeps | None:
+        """Build the F2 heal collaborators, or None when no parse gate is wired
+        (→ caller keeps the legacy whole-file skeleton restore)."""
+        if self.structure is None:
+            return None
+
+        def _skeleton_bytes(rel: str) -> bytes | None:
+            sp = skeleton_dir / rel
+            return sp.read_bytes() if sp.exists() else None
+
+        def _best_tree_bytes(rel: str) -> bytes | None:
+            bp = project_dir / ".best_tree" / cluster_name / rel
+            return bp.read_bytes() if bp.exists() else None
+
+        def _git_blobs(rel: str) -> list[bytes]:
+            try:
+                repo_rel = str((filled_dir / rel).relative_to(project_dir))
+            except ValueError:
+                return []
+            return self._git_ancestor_blobs(project_dir, repo_rel)
+
+        return HealDeps(
+            parse_ok=self.structure.parse_ok,
+            best_tree_bytes=_best_tree_bytes,
+            git_ancestor_blobs=_git_blobs,
+            skeleton_bytes=_skeleton_bytes,
+            log=self.tel.log, emit=self.tel.emit)
+
     def _revert_implicated(self, tag: str, implicated: list[FnLocator],
-                           filled_dir: Path, skeleton_dir: Path) -> int:
+                           filled_dir: Path, skeleton_dir: Path,
+                           project_dir: Path | None = None,
+                           cluster_name: str = "") -> int:
         """Revert every implicated fn to `unimplemented!()` so the per-fn loop
         refills it. EVERY same-name occurrence is reverted (fmt lives in each
         Debug/Display impl; the error output gives a bare name, so any of them
@@ -1700,7 +1775,20 @@ class StaticSkeletonTask2Generator(Task2Generator):
             if changed:
                 fp.write_text(text, encoding="utf-8")
         if reverted == 0:
+            # No fn was revertible at fn granularity — corruption sits OUTSIDE
+            # any locatable fn body (the doc-comment intrusion class). Run the
+            # heal hierarchy: surgical excision → best-tree → git-ancestor →
+            # skeleton (loud loss), least-destructive first. The old code jumped
+            # straight to a whole-file skeleton copy, discarding every fill.
+            heal_deps = self._heal_deps(project_dir, filled_dir, skeleton_dir,
+                                        cluster_name) if project_dir else None
             for rel_f in {rf for rf, _ in implicated}:
+                if heal_deps is not None:
+                    out = heal_file(filled_dir, rel_f, cluster_name, heal_deps)
+                    if out.point is not RestorePoint.NONE:
+                        reverted += 1
+                    continue
+                # Legacy fallback when no parse gate is wired.
                 skel_src = skeleton_dir / rel_f
                 if not skel_src.exists():
                     continue

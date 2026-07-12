@@ -91,6 +91,38 @@ def git_commit(deps: WorkspaceDeps, project_dir: Path, message: str, *, managed:
         return False
 
 
+def git_commit_paths(
+    deps: WorkspaceDeps, project_dir: Path, rel_paths: list[str], message: str,
+    *, managed: bool,
+) -> bool:
+    """Stage ONLY ``rel_paths`` and commit. Focused alternative to
+    ``git_commit``'s ``git add -A`` — checkpoints the fill tree without
+    sweeping in build artifacts (``.skeleton/**/target``, absent at the earlier
+    whole-tree checkpoints but present once phase-c has built). Returns True if
+    a commit was made."""
+    if not managed:
+        return False
+    try:
+        subprocess.run(["git", "add", "--", *rel_paths], cwd=project_dir,
+                       check=True, capture_output=True)
+        staged = subprocess.run(
+            ["git", "diff", "--cached", "--quiet", "--", *rel_paths],
+            cwd=project_dir, capture_output=True)
+        if staged.returncode == 0:
+            return False  # nothing staged under these paths
+        subprocess.run(
+            ["git", "commit", "-m", message, "--no-gpg-sign"],
+            cwd=project_dir, check=True, capture_output=True,
+        )
+        deps.log(f"  [git] committed: {message}")
+        deps.emit("git.commit", data={"message": message})
+        return True
+    except Exception as e:
+        deps.log(f"  [git] fill-tree commit failed: {e}")
+        deps.emit("git.error", data={"message": message, "error": str(e)[:300]})
+        return False
+
+
 def git_tag(deps: WorkspaceDeps, project_dir: Path, tag: str, *, managed: bool) -> None:
     """Create or update a lightweight tag at HEAD."""
     if not managed:

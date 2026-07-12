@@ -13,6 +13,7 @@ from pipeline_core.application.reconstruct.cargo_runner import (
     run_scoped_tests,
     u2_test_gate,
 )
+from pipeline_core.domain.test_report import U2Decision
 
 
 @dataclass
@@ -128,48 +129,89 @@ def test_run_scoped_tests_pass_fail_timeout() -> None:
     assert len(d) == 10
 
 
-def _gate(run_cargo_fn, fn_tests, test_cmd="cargo test", enabled=True, guard=None):
+class _FakeStructure:
+    def __init__(self, recs=None):
+        self._recs = recs or []
+
+    def enumerate_fns(self, src_dir):
+        return self._recs
+
+
+def _gate(run_cargo_fn, fn_tests, unit_fns=frozenset(), test_cmd="cargo test",
+          enabled=True, guard=None, structure=None, src_dir=Path(".")):
     return u2_test_gate(
-        run_cargo_fn, fn_tests, test_cmd, Path("."), {},
+        run_cargo_fn, fn_tests, unit_fns, test_cmd, src_dir, {},
+        structure=structure or _FakeStructure(),
         enabled=enabled, timeout=120, err_cap=500,
         guard=guard or (lambda *_: None))
 
 
+# assertion failure with a proper stdout section (stays self → REJECT)
+_ASSERT_OUT = (
+    "test a ... ok\ntest b ... FAILED\n\n"
+    "---- b stdout ----\n"
+    "thread 'b' panicked at src/lib.rs:1:1:\nassertion failed: boom\n")
+
+
 def test_u2_gate_accepts_when_disabled_or_no_tests() -> None:
     boom = _const_run_cargo(101, "test a ... FAILED")
-    assert _gate(boom, {"a"}, enabled=False) is None      # gate off
-    assert _gate(boom, set()) is None                     # no fn_tests
-    assert _gate(boom, {"a"}, test_cmd=None) is None       # no cmd
+    assert _gate(boom, {"a"}, enabled=False).decision is U2Decision.ACCEPT
+    assert _gate(boom, set()).decision is U2Decision.ACCEPT
+    assert _gate(boom, {"a"}, test_cmd=None).decision is U2Decision.ACCEPT
 
 
 def test_u2_gate_accepts_when_tests_pass() -> None:
-    assert _gate(_const_run_cargo(0, "test a ... ok"), {"a"}) is None
+    v = _gate(_const_run_cargo(0, "test a ... ok"), {"a"})
+    assert v.decision is U2Decision.ACCEPT
+
+
+def test_u2_gate_inconclusive_on_timeout() -> None:
+    v = _gate(_const_run_cargo(-1, ""), {"a"})
+    assert v.decision is U2Decision.ACCEPT
 
 
 def test_u2_gate_blocks_on_own_failing_test() -> None:
-    out = "test a ... ok\ntest b ... FAILED\nassert failed"
-    res = _gate(_const_run_cargo(101, out), {"a", "b"})
-    assert res is not None
-    sig, msg = res
-    assert sig == frozenset({"b"}) and "still FAIL" in msg and msg.endswith("assert failed")
+    v = _gate(_const_run_cargo(101, _ASSERT_OUT), {"a", "b"})
+    assert v.decision is U2Decision.REJECT
+    assert v.self_failures == frozenset({"b"})
+    assert "still FAIL" in v.detail and "assertion failed: boom" in v.detail
 
 
 def test_u2_gate_ignores_unrelated_failures() -> None:
-    # a failing test NOT in fn_tests must not block this unit
-    assert _gate(_const_run_cargo(101, "test other ... FAILED"), {"a"}) is None
+    # a failing test NOT in fn_tests must not block this unit (scoped out)
+    v = _gate(_const_run_cargo(101, "test other ... FAILED"), {"a"})
+    assert v.decision is U2Decision.ACCEPT
+
+
+def test_u2_gate_external_stub_panic_accepts(tmp_path) -> None:
+    # the unit's test compiles but panics in ANOTHER file's still-stubbed fn →
+    # ACCEPT_EXTERNAL_ONLY (keep the fill), NOT a rejection.
+    (tmp_path / "src").mkdir()
+    err = tmp_path / "src" / "error.rs"
+    err.write_text("fn context() {\n    unimplemented!()\n}\n", encoding="utf-8")
+    recs = [{"file": "src/error.rs", "fn_name": "context",
+             "sig_byte_start": 0, "body_byte_end": len(err.read_text())}]
+    out = ("test a ... FAILED\n\n---- a stdout ----\n"
+           "thread 'a' panicked at src/error.rs:2:5:\nnot yet implemented\n")
+    v = _gate(_const_run_cargo(101, out), {"a"},
+              unit_fns=frozenset({("src/lib.rs", "mine")}),
+              structure=_FakeStructure(recs), src_dir=tmp_path)
+    assert v.decision is U2Decision.ACCEPT_EXTERNAL_ONLY
+    assert ("src/error.rs", "context") in v.blocking_fns
 
 
 def test_u2_gate_failsafe_and_inconclusive() -> None:
-    # run_cargo raises → guard fires, accept (None)
+    # run_cargo raises → guard fires, ACCEPT (fail-safe)
     fired = []
 
     def _raise(*_a, **_k):
         raise RuntimeError("cargo blew up")
 
-    assert _gate(_raise, {"a"}, guard=lambda loc, m: fired.append(loc)) is None
+    assert _gate(_raise, {"a"},
+                 guard=lambda loc, m: fired.append(loc)).decision is U2Decision.ACCEPT
     assert fired == ["phase-c/u2_skip"]
-    # timeout (rc=-1) → empty failed set → accept
-    assert _gate(_const_run_cargo(-1, ""), {"a"}) is None
+    # timeout (rc=-1) → INCONCLUSIVE → ACCEPT
+    assert _gate(_const_run_cargo(-1, ""), {"a"}).decision is U2Decision.ACCEPT
 
 
 # --- measure_test_state / test_regression_gate (monotone ratchet) ------------

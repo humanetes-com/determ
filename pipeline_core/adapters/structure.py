@@ -126,3 +126,8 @@ class CliStructureReader:
 
     def enumerate_dispatch_families(self, src_dir: Path) -> list[DispatchFamily] | None:
         return self.extractor.enumerate_dispatch_families(src_dir)
+
+    def parse_ok(self, path: Path) -> bool:
+        """Syn parse-check one file via the extractor (`--parse-check`). The F1
+        splice gate's validator — fail-open (see Extractor.parse_check)."""
+        return self.extractor.parse_check(path)

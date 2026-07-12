@@ -40,6 +40,7 @@ from pipeline_core.domain.models import (
 from pipeline_core.domain.refine import FloorStall
 from pipeline_core.domain.rust_idents import canon_container, is_trait_impl_container
 from pipeline_core.domain.std_api_sigs import std_api_def
+from pipeline_core.domain.test_report import U2Decision, U2TestGate, U2Verdict
 from pipeline_core.domain.test_results import strip_ansi
 from pipeline_core.prompts.context import PerImplSections
 from pipeline_core.prompts.fix_prompts import (
@@ -91,7 +92,7 @@ class ImplFillDeps:
     splice_lock_for: Callable[..., Any]
     types_section_for_fix: Callable[..., Any]
     bound_methods_section_for: Callable[..., Any]
-    u2_test_gate: Callable[..., Any]
+    u2_test_gate: U2TestGate
     test_regression_baseline: Callable[..., Any]
     test_regression_gate: Callable[..., Any]
     ask: Callable[..., Any]
@@ -452,19 +453,25 @@ def fill_impl_blocks(
                     return
                 rc, cargo_out, _diags = _run_cargo_check_diag(
                     check_cmd, target_src_dir, cluster_env)
-                _u2_file = None
+                _u2_file: U2Verdict | None = None
                 if rc == 0:
+                    _unit_fns = frozenset(
+                        FnLocator(file_rel, m.fn_name)
+                        for b in fblocks for m in b.stub_members)
                     _file_tests: set[str] = set()
-                    for b in fblocks:
-                        for m in b.stub_members:
-                            _file_tests |= (tdd_frontier_tests or {}).get(
-                                FnLocator(file_rel, m.fn_name), set())
-                    _u2_file = _u2_test_gate(_file_tests, tdd_test_cmd,
+                    for _key in _unit_fns:
+                        _file_tests |= (tdd_frontier_tests or {}).get(_key, set())
+                    _u2_file = _u2_test_gate(_file_tests, _unit_fns, tdd_test_cmd,
                                              target_src_dir, cluster_env)
+                # ACCEPT_EXTERNAL_ONLY (all failures blocked by another file's
+                # stub) is NOT a revert — keep the fill and defer to the outer
+                # loop. Only a real self-failure (REJECT) reverts.
+                _u2_reject = (_u2_file is not None
+                              and _u2_file.decision is U2Decision.REJECT)
                 _regr_file = (_test_regression_gate(
                     tdd_test_cmd, target_src_dir, cluster_env, _baseline_test)
                     if rc == 0 else None)
-                if rc == 0 and _u2_file is None and _regr_file is None:
+                if rc == 0 and not _u2_reject and _regr_file is None:
                     fns_filled_total += spliced_now
                     _log(f"  [phase-c/file] {file_rel}: FILE FILLED "
                          f"{spliced_now} fn(s) in one pass.")
@@ -478,7 +485,7 @@ def fill_impl_blocks(
                     prior_error = _regr_file[1]
                 elif rc == 0:
                     _revert_reason = "U2 test failure"
-                    prior_error = _u2_file[1] if _u2_file is not None else ""
+                    prior_error = _u2_file.detail if _u2_file is not None else ""
                 else:
                     _revert_reason = "compile failed"
                     prior_error = _focus_cargo_errors(cargo_out, file_rel)
@@ -817,17 +824,26 @@ def fill_impl_blocks(
                 rc, cargo_out, diagnostics = _run_cargo_check_diag(
                     check_cmd, target_src_dir, cluster_env)
                 _last_full_out[0] = cargo_out  # `full_error` pull source
+                _u2_impl: U2Verdict | None = None
                 if rc == 0:
                     # Plan 10 U2 (shared gate): accept the block only if its
                     # members' own tests pass too — not just compile.
+                    _block_fns = frozenset(
+                        FnLocator(block.file, _bm.fn_name)
+                        for _bm in (*block.stub_members, *block.refill_members))
                     _block_tests: set[str] = set()
-                    for _bm in (*block.stub_members, *block.refill_members):
-                        _block_tests |= (tdd_frontier_tests or {}).get(
-                            FnLocator(block.file, _bm.fn_name), set())
-                    _u2_impl = _u2_test_gate(_block_tests, tdd_test_cmd,
-                                             target_src_dir, cluster_env)
-                else:
-                    _u2_impl = None
+                    for _key in _block_fns:
+                        _block_tests |= (tdd_frontier_tests or {}).get(_key, set())
+                    _u2_impl = _u2_test_gate(_block_tests, _block_fns,
+                                             tdd_test_cmd, target_src_dir,
+                                             cluster_env)
+                # Only a REAL self-failure reverts. ACCEPT_EXTERNAL_ONLY (every
+                # failing test blocked by another unit's stub) keeps the fill.
+                _u2_impl_reject = (_u2_impl is not None
+                                   and _u2_impl.decision is U2Decision.REJECT)
+                _u2_external_only = (
+                    _u2_impl is not None
+                    and _u2_impl.decision is U2Decision.ACCEPT_EXTERNAL_ONLY)
                 # Global monotone ratchet: a compiled fill is rejected if it
                 # reddened ANY previously-passing cluster test — even when the
                 # block's own U2 tests pass (or it would be B3-kept). This is
@@ -851,7 +867,13 @@ def fill_impl_blocks(
                     _rsig = _newly if _newly else frozenset({"__pass_count_drop__"})
                     return FixOutcome("failed", err_sig=_rsig,
                                       err_count=max(1, len(_rsig)))
-                if rc == 0 and _u2_impl is None:
+                if rc == 0 and not _u2_impl_reject:
+                    if _u2_external_only and _u2_impl is not None:
+                        _emit("phase_c.u2.external_only", data={
+                            "cluster": cluster_name, "file": block.file,
+                            "container": block.container,
+                            "blocking_fns": sorted(
+                                f"{f}::{fn}" for f, fn in _u2_impl.blocking_fns)})
                     members_filled_this_block = spliced_now
                     fns_filled_total += spliced_now
                     impls_filled += 1
@@ -909,13 +931,14 @@ def fill_impl_blocks(
                                 "crate_errs_remaining": len(_cur_sig),
                             })
                         return FixOutcome("accepted")
-                if _u2_impl is not None:
-                    cargo_out = _u2_impl[1]   # route test-failure detail as the error
-                # Compile failed (or U2 test failure). Structured diagnostics
+                if _u2_impl_reject and _u2_impl is not None:
+                    cargo_out = _u2_impl.detail   # route test-failure detail as the error
+                # Compile failed (or U2 self-test failure). Structured diagnostics
                 # give the error signature; a U2 test failure uses the
                 # failing-test set (test output has no rustc E-codes).
                 # rc != 0 establishes a minimum count of 1.
-                cur_err_sig = (_u2_impl[0] if _u2_impl is not None
+                cur_err_sig = (_u2_impl.self_failures
+                               if _u2_impl_reject and _u2_impl is not None
                                else _cargo_err_sig_from_diagnostics(diagnostics))
                 cur_err_count = max(1, len(cur_err_sig))  # rc-honest minimum
                 # P7: whole rustc diagnostics (count-capped) when the JSON

@@ -5,8 +5,21 @@ match the model's single-line ``block`` attribute instead of dropping every
 returned body."""
 from __future__ import annotations
 
-from pipeline_core.domain.impl_routing import route_fn_bodies
+from pipeline_core.domain.impl_routing import impl_block_id, route_fn_bodies
 from pipeline_core.domain.rust_idents import canon_container
+
+
+def test_impl_block_id_stable_across_renderings() -> None:
+    # F5: the same impl rendered with vs without a newline where-clause must
+    # produce the SAME id, or a related-block routing-table lookup misses and
+    # the whole reply is dropped (response_unused on impl<E> From<E> for Error).
+    verbatim = "impl<E> From<E> for Error\nwhere\n    E: StdError,"
+    single = "impl<E> From<E> for Error"
+    assert impl_block_id("src/error.rs", verbatim) == impl_block_id(
+        "src/error.rs", single)
+    # a genuinely different impl still gets a different id.
+    assert impl_block_id("src/error.rs", "impl Display for Error") != impl_block_id(
+        "src/error.rs", single)
 
 _OWN_TARGET = "impl<T> Own<T>\nwhere\n    T: ?Sized,"
 

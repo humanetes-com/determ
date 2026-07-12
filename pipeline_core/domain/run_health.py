@@ -33,6 +33,9 @@ class HealthKind(StrEnum):
     STALL_BUDGET = "stall_budget"                # decision distance to stall-out
     REPEATED_HEAL = "repeated_heal"              # pre-pass heal firing on the same file again
     SYSTEMIC_SIGNATURE = "systemic_signature"    # same failure shape across unrelated files
+    FROZEN_ZERO_TREE = "frozen_zero_tree"        # pass=0 fail=0 for N iters — tree likely broken
+    HEAL_SKELETON_LOSS = "heal_skeleton_loss"    # whole-file skeleton restore discarded fills
+    ORACLE_DRIFT = "oracle_drift"                # denominator changed mid-run — counts not comparable
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +54,7 @@ class IterReading:
     fail_count: int
     stall: int
     stall_max: int
+    oracle: int | None = None   # F6: the denominator (tests reporting a verdict)
 
 
 def _int_after(text: str, marker: str) -> int | None:
@@ -80,7 +84,8 @@ def parse_iter_readings(lines: list[str]) -> list[IterReading]:
         m = _int_after(ln[i:], "/") if i != -1 else None
         if None in (it, p, f, s, m):
             continue
-        out.append(IterReading(it, p, f, s, m))  # type: ignore[arg-type]
+        oracle = _int_after(ln, "oracle=")   # F6 — may be absent on older lines
+        out.append(IterReading(it, p, f, s, m, oracle))  # type: ignore[arg-type]
     return out
 
 
@@ -198,5 +203,54 @@ def analyze(
                 "something re-poisons the tree between passes — find the "
                 "writer, do not let the heal loop mask it",
             ))
+
+    # -- 7. frozen-zero tree (F7): pass=0 fail=0 for ≥3 trailing iters -------
+    # No test ever reports a verdict → the crate is not compiling/parsing, but
+    # the loop marches on marking fns exhausted from a broken state (the ~30h
+    # error.rs corruption freeze had zero alarm). A pass=0 fail=0 STREAK is the
+    # tree-broken signature (a legitimately hard cluster still reports fails).
+    if readings:
+        zero_streak = 0
+        for r in reversed(readings):
+            if r.pass_count == 0 and r.fail_count == 0:
+                zero_streak += 1
+            else:
+                break
+        if zero_streak >= 3:
+            findings.append(HealthFinding(
+                HealthKind.FROZEN_ZERO_TREE, "alert", "tdd driver",
+                f"pass=0 fail=0 for {zero_streak} consecutive iter(s) — no test "
+                "reported a verdict",
+                "the tree likely does not parse/compile and the heal is NOT "
+                "firing; every unit is being mis-exhausted from a broken state "
+                "— inspect the cluster tree, do not trust exhaustion",
+            ))
+
+    # -- 7b. oracle (denominator) drift (F6) --------------------------------
+    # The test corpus grew 61→68 between runs unflagged, making pass counts
+    # incomparable. A within-run change in the number of tests reporting a
+    # verdict is the same class of hazard (a test target started/stopped
+    # compiling) — surface it so pass= is never compared across a drift.
+    oracles = [r.oracle for r in readings if r.oracle is not None and r.oracle > 0]
+    if len(set(oracles)) > 1:
+        findings.append(HealthFinding(
+            HealthKind.ORACLE_DRIFT, "warn", "tdd driver",
+            f"oracle size varied {min(oracles)}→{max(oracles)} within the run",
+            "the denominator moved — pass counts across these iters are NOT "
+            "comparable; a test target's compilation likely flipped",
+        ))
+
+    # -- 8. skeleton-fallback fill loss (F7 pairs with F2) ------------------
+    for ln in segment_lines:
+        if "restored whole file from skeleton" not in ln:
+            continue
+        lost = _int_after(ln, "(")   # "(N fill(s) lost" — 0 when absent
+        findings.append(HealthFinding(
+            HealthKind.HEAL_SKELETON_LOSS, "warn",
+            _unit_of(ln, "restored") or "heal",
+            f"whole-file skeleton restore discarded ~{lost or 0} fill(s)",
+            "a writer left the file unparseable past surgical/best-tree/git "
+            "recovery — find the writer bypassing the F1 splice gate",
+        ))
 
     return findings
