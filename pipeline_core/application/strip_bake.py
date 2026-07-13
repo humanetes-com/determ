@@ -20,7 +20,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from pipeline_core.application.extract_behaviours import harvest_behaviour_suite
+from pipeline_core.domain.behaviour import BehaviourSuite
 from pipeline_core.domain.models import BuildCluster, SkeletoniseResult
+from pipeline_core.domain.workspace_layout import SKIP_DIR_NAMES
 
 
 @dataclass(frozen=True)
@@ -34,6 +37,24 @@ class BakeArtifactsDeps:
     extract_skeleton: Callable[..., SkeletoniseResult]
     is_gen_tests_file: Callable[[str], bool]
     gen_tests_origin_cfgs: Callable[[str], dict[int, str]]
+    # F10: persist a harvested behaviour suite (adapter, injected — keeps this
+    # application module off the adapters layer). Returns the written path.
+    save_behaviour_suite: Callable[[Path, BehaviourSuite], Path]
+
+
+def _behaviour_sources(src_dir: Path) -> list[tuple[str, str]]:
+    """(`rel_path`, `text`) for each crate source file whose doc-comments may
+    carry behaviours — skipping build/aux dirs. Read once, pre-strip."""
+    out: list[tuple[str, str]] = []
+    for rs in sorted(src_dir.rglob("*.rs")):
+        if any(part in SKIP_DIR_NAMES for part in rs.parts):
+            continue
+        try:
+            out.append((str(rs.relative_to(src_dir)),
+                        rs.read_text(encoding="utf-8")))
+        except OSError:
+            continue
+    return out
 
 
 def bake_skeleton_artifacts(
@@ -101,6 +122,21 @@ def bake_skeleton_artifacts(
             d.log(f"  [bake-skeleton] cluster {cluster.name}: leaf-order write failed: {e}")
         d.log(f"  [bake-skeleton] cluster {cluster.name}: {len(res.reports)} "
               f"file(s) skeletonised → {skeleton_dir}")
+        # F10 t0d: harvest this cfg-cluster's behaviour oracle from live source
+        # (pre-strip, Hard Rule 11 — behaviours are OBSERVABLE outcomes, the same
+        # legality class as a test assertion, never bodies). Additive: a harvest
+        # failure never blocks the strip.
+        try:
+            sources = _behaviour_sources(src_dir)
+            suite = harvest_behaviour_suite(sources, cfg_cluster=cluster.name)
+            if suite.specs:
+                d.save_behaviour_suite(project_dir, suite)
+                d.log(f"  [bake-skeleton] cluster {cluster.name}: harvested "
+                      f"{len(suite.specs)} behaviour(s) → "
+                      f".skeleton/_behaviours_{cluster.name}.json")
+        except Exception as e:
+            d.log(f"  [bake-skeleton] cluster {cluster.name}: behaviour harvest "
+                  f"failed (non-fatal): {e}")
         baked.append(cluster.name)
 
     try:

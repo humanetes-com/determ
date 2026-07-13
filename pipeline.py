@@ -57,6 +57,7 @@ from pipeline_core.adapters.artifacts import (
 from pipeline_core.adapters.ask_client import AskClient
 from pipeline_core.adapters.augment_engine import CargoAugmentEngine, StaticRustTestAugmentor
 from pipeline_core.adapters.augment_store import FileAugmentStore
+from pipeline_core.adapters.behaviour_store import save_behaviour_suite
 from pipeline_core.adapters.build_script import CargoBuildScriptReader
 from pipeline_core.adapters.cargo import CargoEnv
 from pipeline_core.adapters.cargo import run_build_check as _cargo_run_build_check
@@ -3871,6 +3872,7 @@ _BAKE_ARTIFACTS_DEPS = BakeArtifactsDeps(
     extract_skeleton=_extract_skeleton,
     is_gen_tests_file=_is_gen_tests_file,
     gen_tests_origin_cfgs=_gen_tests_origin_cfgs,
+    save_behaviour_suite=save_behaviour_suite,
 )
 
 

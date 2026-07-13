@@ -33,6 +33,7 @@ def test_single_line_attr_matches_multiline_where_target() -> None:
                         target=_OWN_TARGET, related=[])
     assert [rb.container for rb in r.routed] == [_OWN_TARGET]
     assert r.dropped == ()
+    assert r.dropped_names == ()
 
 
 def test_token_spaced_rendering_matches_pretty_printed() -> None:
@@ -54,7 +55,23 @@ def test_unmatched_block_attr_is_dropped_by_name() -> None:
         [_fn("ok", _OWN_TARGET), _fn("stray", "impl Unrelated for Thing")],
         target=_OWN_TARGET, related=[])
     assert [rb.fn_data["fn_name"] for rb in r.routed] == ["ok"]
-    assert r.dropped == ("stray",)
+    assert r.dropped_names == ("stray",)
+    assert r.dropped[0].block_attr == "impl Unrelated for Thing"
+
+
+def test_dropped_body_carries_the_rejected_block_not_a_name_collision() -> None:
+    # I1: two bodies with the SAME fn name in different impls, only one matching
+    # the target. The dropped VO must carry the OTHER's real block header — a
+    # {fn_name: fn_data} re-lookup would collapse them and mis-report the drop.
+    target = "impl Bool for &bool"
+    other = "impl Bool for bool"
+    r = route_fn_bodies(
+        [_fn("not", target), _fn("not", other)],
+        target=target, related=[])
+    assert [rb.container for rb in r.routed] == [target]
+    assert r.dropped_names == ("not",)
+    assert r.dropped[0].block_attr == other
+    assert r.dropped[0].attr_canon == canon_container(other)
 
 
 def test_canonical_related_routes_in_listed_order() -> None:
@@ -83,7 +100,7 @@ def test_html_escaped_block_attr_routes(tmp_path=None) -> None:
         parsed,
         target="impl<T, E> Context<T, E> for Result<T, E>\nwhere\n    E: StdError,",
         related=[])
-    assert len(r.routed) == 1 and r.dropped == ()
+    assert len(r.routed) == 1 and r.dropped_names == ()
 
 
 def test_escaped_pull_arg_decodes() -> None:

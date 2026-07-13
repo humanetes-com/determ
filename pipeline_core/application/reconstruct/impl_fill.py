@@ -431,9 +431,10 @@ def fill_impl_blocks(
                                      if b.file == file_rel and b.container not in containers]
                 routing = route_fn_bodies(parsed, target=containers[0],
                                           related=containers[1:] + _extra_containers)
-                for _nm in routing.dropped:
-                    _log(f"  [phase-c/file] {file_rel}: dropped `{_nm}` — "
-                         "block header does not match any impl in this file.")
+                for _db in routing.dropped:
+                    _log(f"  [phase-c/file] {file_rel}: dropped `{_db.fn_name}` — "
+                         f"block header does not match any impl in this file. "
+                         f"raw_block={_db.block_attr!r} raw_canon={_db.attr_canon!r}")
                 spliced_now = 0
                 for rb in routing.routed:
                     wc = rb.fn_data["where_clause"]
@@ -749,18 +750,16 @@ def fill_impl_blocks(
                 routed: list[tuple[dict[str, Any], str]] = [
                     (rb.fn_data, rb.container) for rb in routing.routed]
                 if routing.dropped:
-                    # Capture the raw `block` attr + its canon key so a drop
-                    # is diagnosable from the log alone, instead of
-                    # theorizing about what the model sent.
-                    _by_name = {str(fd.get("fn_name", "")): fd for fd in parsed}
+                    # The dropped VO carries the ACTUAL rejected block header —
+                    # a name re-lookup would collapse two same-named bodies in
+                    # different impls and print the wrong one.
                     target_canon = canon_container(block.container)
-                    for _nm in routing.dropped:
-                        _raw_block = str(_by_name.get(_nm, {}).get("block") or "")
+                    for _db in routing.dropped:
                         _log(f"  [phase-c/impl] {block_id}: dropped "
-                             f"`{_nm}` — block header "
+                             f"`{_db.fn_name}` — block header "
                              "does not match any TARGET or RELATED. "
-                             f"raw_block={_raw_block!r} "
-                             f"raw_canon={canon_container(_raw_block)!r} "
+                             f"raw_block={_db.block_attr!r} "
+                             f"raw_canon={_db.attr_canon!r} "
                              f"target_canon={target_canon!r}")
                 spliced_now = 0
                 refusals: list[str] = []

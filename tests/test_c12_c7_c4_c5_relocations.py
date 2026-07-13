@@ -137,6 +137,7 @@ def _bake_deps(logs: list[str]) -> BakeArtifactsDeps:
         extract_skeleton=fake_extract,
         is_gen_tests_file=lambda n: False,
         gen_tests_origin_cfgs=lambda t: {},
+        save_behaviour_suite=lambda pd, suite: pd / "_b.json",
     )
 
 
@@ -165,6 +166,7 @@ def test_bake_skeleton_artifacts_extractor_failure(tmp_path: Path) -> None:
         fn_name_counts=deps.fn_name_counts,
         extract_skeleton=lambda s, o, cluster=None: SkeletoniseResult(False, [], "boom"),
         is_gen_tests_file=deps.is_gen_tests_file,
-        gen_tests_origin_cfgs=deps.gen_tests_origin_cfgs)
+        gen_tests_origin_cfgs=deps.gen_tests_origin_cfgs,
+        save_behaviour_suite=deps.save_behaviour_suite)
     res = bake_skeleton_artifacts(tmp_path, "m", bad)
     assert res["ok"] is False and "boom" in res["reason"]

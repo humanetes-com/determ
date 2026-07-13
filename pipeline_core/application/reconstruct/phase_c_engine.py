@@ -193,6 +193,11 @@ class PhaseCFillEngine:
         _pass_max_stalls = self.config.pass_max_stalls
         _pass_gauge = FloorStall()  # slice 8a
         _pass_last_fail_count = 0
+        # Cumulative body-fills landed in this cluster across all passes — the
+        # real-time progress signal emitted as `phase_c.fill.progress`. pass=
+        # is only re-measured per multi-hour sweep, so this lets monitoring
+        # distinguish a frozen tree from mid-sweep splicing.
+        _fills_landed_total = 0
 
         for pass_n in range(1, max_passes + 1):
             self.tel.check_stop(f"per-fn pass {pass_n}")
@@ -326,6 +331,7 @@ class PhaseCFillEngine:
                 # B023: the per-LEVEL queue AND the per-pass ctx/list/number are
                 # passed explicitly — free-var reads would rely on late binding.
                 nonlocal attempts, fns_filled, progress_this_pass
+                nonlocal _fills_landed_total
                 while True:
                     # Stop pulling NEW work once another worker (or the main
                     # thread) has seen a graceful-stop request — raises in
@@ -353,6 +359,12 @@ class PhaseCFillEngine:
                         if res.filled:
                             fns_filled += 1
                             progress_this_pass += 1
+                            _fills_landed_total += 1
+                            self.tel.emit("phase_c.fill.progress", data={
+                                "cluster": cluster_name, "pass_n": pass_n,
+                                "fills_landed": _fills_landed_total,
+                                "file": res.file, "fn": res.fn_name,
+                            })
                             filled_this_pass.append(FnLocator(res.file, res.fn_name))
                         if res.error:
                             errors.append(res.error)

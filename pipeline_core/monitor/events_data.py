@@ -307,6 +307,9 @@ def phase_c_state() -> dict[str, Any]:
         # Per-cluster overview ("where are we") + current error class.
         "clusters_seen": [], "clusters_done": [], "last_error_code": None,
         "err_codes": {},
+        # Cumulative body-fills landed (phase_c.fill.progress) — mid-sweep
+        # progress independent of the per-sweep pass reading.
+        "fills_landed": 0,
     }
     events = read_recent_events(
         lambda n: n.startswith("phase_c.") or n == "cluster.done")
@@ -424,6 +427,11 @@ def phase_c_state() -> dict[str, Any]:
             out["pass_fills_failed"] = out.get("pass_fills_failed", 0) + 1
             in_flight_units.pop(_lbl, None)
             _record_error_codes(out, d)
+        elif ev == "phase_c.fill.progress":
+            # Cumulative fills-landed for the cluster — the mid-sweep progress
+            # signal (pass= only re-measures per multi-hour sweep). Last value
+            # wins; monotonic within a cluster.
+            out["fills_landed"] = d.get("fills_landed", out.get("fills_landed", 0))
         elif ev == "phase_c.note.added":
             out["notes"] += 1
         elif ev == "phase_c.pass.done":

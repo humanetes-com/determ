@@ -89,6 +89,23 @@ def parse_iter_readings(lines: list[str]) -> list[IterReading]:
     return out
 
 
+def count_fills_landed(lines: list[str]) -> int:
+    """Successful body-fills that LANDED in the segment (per-fn `filled`,
+    per-impl `FILLED`/`KEPT`). This is the real-time progress signal: pass= is
+    only re-measured once per multi-hour TDD sweep, so a segment can splice N
+    correct bodies while the pass reading stays frozen. Counting landed fills
+    lets zero_payoff_burn tell a genuinely frozen tree from mid-sweep progress
+    instead of crying wolf on every fill batch that hasn't reached the next
+    sweep boundary yet."""
+    n = 0
+    for ln in lines:
+        per_fn = "[phase-c/per-fn]" in ln and " filled " in ln
+        per_impl = "[phase-c/impl]" in ln and ("FILLED " in ln or "KEPT " in ln)
+        if per_fn or per_impl:
+            n += 1
+    return n
+
+
 def _unit_of(ln: str, tag: str) -> str:
     """The unit id between a `] ` prefix and the `: <tag>` suffix."""
     end = ln.find(f": {tag}")
@@ -145,11 +162,16 @@ def analyze(
     maximal = sum(1 for ln in segment_lines if "maximal last-resort" in ln)
     if readings and attempts >= burn_min_attempts:
         delta = readings[-1].pass_count - readings[0].pass_count
-        if delta <= 0:
+        landed = count_fills_landed(segment_lines)
+        # Only cry wolf when the tree is genuinely frozen. A stale per-sweep
+        # pass delta ≤ 0 while bodies are still landing = mid-sweep, not a
+        # burning loop — pass= just hasn't been re-measured since the last
+        # sweep boundary. Suppress on landed fills to avoid alarm fatigue.
+        if delta <= 0 and landed == 0:
             findings.append(HealthFinding(
                 HealthKind.ZERO_PAYOFF_BURN, "warn", "fill/re-fill loop",
                 f"{attempts} failed attempt(s) incl. {maximal} maximal, "
-                f"pass delta {delta:+d} across the segment",
+                f"pass delta {delta:+d} across the segment, no fills landed",
                 "the loop is buying nothing — check MODEL_NOTES quality and "
                 "attribution before letting it continue",
             ))

@@ -32,12 +32,32 @@ class RoutedBody:
 
 
 @dataclass(frozen=True, slots=True)
+class DroppedBody:
+    """One returned FN body whose ``block`` attribute matched no container.
+
+    Carries the ACTUAL rejected block header (``block_attr``) and its canonical
+    form so the drop diagnostic reports the real reason. Re-looking the name up
+    in a ``{fn_name: fn_data}`` dict lied whenever the model returned two bodies
+    for the same fn name in different impls: the dict collapsed them and the log
+    printed whichever body won the collision, not the one that was dropped."""
+
+    fn_name: str
+    block_attr: str
+    attr_canon: str
+
+
+@dataclass(frozen=True, slots=True)
 class BodyRouting:
     """The routing decision for one model reply: spliceable bodies in reply
-    order, plus the fn names whose ``block`` attribute matched no container."""
+    order, plus the bodies whose ``block`` attribute matched no container."""
 
     routed: tuple[RoutedBody, ...] = ()
-    dropped: tuple[str, ...] = ()
+    dropped: tuple[DroppedBody, ...] = ()
+
+    @property
+    def dropped_names(self) -> tuple[str, ...]:
+        """Fn names of the dropped bodies (order-preserving)."""
+        return tuple(d.fn_name for d in self.dropped)
 
 
 def route_fn_bodies(
@@ -49,7 +69,7 @@ def route_fn_bodies(
     (listed order), canonical match on TARGET, canonical on RELATED (listed
     order). A body matching nothing is dropped by name."""
     routed: list[RoutedBody] = []
-    dropped: list[str] = []
+    dropped: list[DroppedBody] = []
     target_canon = canon_container(target)
     related_canon = [(c, canon_container(c)) for c in related]
     for fn_data in parsed:
@@ -69,7 +89,11 @@ def route_fn_bodies(
         if canonical is not None:
             routed.append(RoutedBody(fn_data, canonical))
             continue
-        dropped.append(str(fn_data.get("fn_name", "")))
+        dropped.append(DroppedBody(
+            fn_name=str(fn_data.get("fn_name", "")),
+            block_attr=block_attr,
+            attr_canon=attr_canon,
+        ))
     return BodyRouting(routed=tuple(routed), dropped=tuple(dropped))
 
 

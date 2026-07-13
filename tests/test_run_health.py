@@ -42,6 +42,20 @@ def test_zero_payoff_burn():
     assert HealthKind.ZERO_PAYOFF_BURN in _kinds(f)
 
 
+def test_zero_payoff_burn_suppressed_when_fills_landed_mid_sweep():
+    # I3: pass= is only re-measured per multi-hour sweep, so a flat delta with
+    # bodies still landing is mid-sweep progress, not a burning loop. Landed
+    # fills must silence the alarm to avoid false-alarm fatigue.
+    from pipeline_core.domain.run_health import count_fills_landed
+    filled = ["  [phase-c/per-fn] 3/68 filled src/error.rs::root_cause (+40 bytes, body=40)",
+              "  [phase-c/impl] impl Display for Error: FILLED 2 fn(s) (attempt 1)."]
+    assert count_fills_landed(filled) == 2
+    lines = ([ITER] + ["  [phase-c/impl] u: U2 test failed (attempt 1)"] * 45
+             + filled + [ITER])
+    f = analyze(lines, [])
+    assert HealthKind.ZERO_PAYOFF_BURN not in _kinds(f)
+
+
 def test_attribution_futility_names_units():
     lines = [
         "  [phase-c/impl] src/chain.rs::impl ExactSizeIterator for Chain<'_>: identical errors after attempt 2 codes=— — stopping.",
