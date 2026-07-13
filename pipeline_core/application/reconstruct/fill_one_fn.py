@@ -35,6 +35,7 @@ from pipeline_core.application.reconstruct.pull_resolver import (
     make_request_answerer,
     workspace_file_reader,
 )
+from pipeline_core.domain.behaviour_select import select_usage_examples
 from pipeline_core.domain.cfg import filter_cfg_inactive_branches
 from pipeline_core.domain.model_notes import errorimpl_object_note, is_errorimpl_container
 from pipeline_core.domain.models import FillResult, FnLocator, Stub
@@ -260,7 +261,10 @@ class FillOneFn:
                             cur_text, fn_name, container),
                         crate_idioms=crate_idioms_section,
                         bound_methods=_fn_ctx.bound_methods_section,
-                        blueprint=_fn_ctx.blueprint_section),
+                        blueprint=_fn_ctx.blueprint_section,
+                        usage_examples=select_usage_examples(
+                            ctx.behaviour_specs, fn_name=fn_name,
+                            container=container, char_budget=1200)),
                     fr_path=ctx.fr_path,
                 )
             else:

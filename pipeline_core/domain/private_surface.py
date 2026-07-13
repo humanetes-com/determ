@@ -20,7 +20,8 @@ Pure domain: consumes already-enumerated TypeRecord/FnRecord, no IO, no regex
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from enum import Enum, auto
 
 from pipeline_core.domain.models import FnRecord, TypeRecord
@@ -61,11 +62,26 @@ class PrivateSurface:
     """The replaceable private layout for ONE cfg-cluster, plus the public item
     names that stay frozen (t1.5 must keep them existing + satisfying their
     pins). ``components`` partitions the replaceable items into connected
-    reference-graph components — the t1.5 authoring unit."""
+    reference-graph components — the t1.5 authoring unit.
+
+    ``public_referenced`` = the private type names a FROZEN-PUBLIC type's
+    definition points at (e.g. ``pub struct Error { inner: Own<ErrorImpl> }`` →
+    ``Own``). These are the layout-sensitive private types: getting their size
+    wrong changes a PUBLIC type's size. The t1.5 missing-pin gate (M13) refuses
+    to author a component containing one of these UNLESS the layout pins that
+    constrain it were actually harvested — otherwise it authors a wrong-sized
+    public type that compiles yet fails the repr tests a whole sweep later."""
 
     cfg_cluster: str
     replaceable: tuple[PrivateSurfaceItem, ...]
     frozen_public: frozenset[str]
+    public_referenced: frozenset[str] = frozenset()
+    # Per PUBLIC type name, the private type names ITS OWN definition names
+    # directly (not merged across all public types) — the precise seed set a
+    # STATIC_ASSERTION pinning that one public type's layout must propagate
+    # to. `public_referenced` above is the union of these, used only for the
+    # coarse "is this component sensitive at all" gate.
+    public_direct_refs: Mapping[str, frozenset[str]] = field(default_factory=dict)
 
     @property
     def is_empty(self) -> bool:
@@ -75,10 +91,46 @@ class PrivateSurface:
     def components(self) -> tuple[tuple[PrivateSurfaceItem, ...], ...]:
         return connected_components(self.replaceable)
 
+    def component_is_layout_sensitive(
+        self, component: tuple[PrivateSurfaceItem, ...],
+    ) -> bool:
+        """True iff any item in `component` is reachable from a public type's
+        layout (directly named by a public def, or transitively via the private
+        reference graph). Such a component MUST reach t1.5 with layout pins."""
+        reachable = _reachable_from(self.public_referenced, self.replaceable)
+        return any(it.name in reachable for it in component)
+
+    def reachable_from_public(self, public_name: str) -> frozenset[str]:
+        """Private type names reachable from ONE public type's OWN direct
+        references — e.g. a ``size_of::<Error>()`` pin never names ``Error``'s
+        private fields, so a component matched only by this closure (not by
+        its own item names) is still the exact scope that pin constrains."""
+        seeds = self.public_direct_refs.get(public_name, frozenset())
+        return _reachable_from(seeds, self.replaceable)
+
 
 def _references(definition: str, private_names: frozenset[str]) -> frozenset[str]:
     """Which private type names this definition points at (graph edges)."""
     return frozenset(camelcase_type_names(definition) & private_names)
+
+
+def _reachable_from(
+    seeds: frozenset[str], items: tuple[PrivateSurfaceItem, ...],
+) -> frozenset[str]:
+    """The closure of `seeds` under each item's private references — every
+    private type a public layout depends on, directly or transitively."""
+    by_name = {it.name: it for it in items}
+    seen: set[str] = set()
+    stack = [s for s in seeds if s in by_name]
+    while stack:
+        n = stack.pop()
+        if n in seen:
+            continue
+        seen.add(n)
+        it = by_name.get(n)
+        if it is not None:
+            stack.extend(r for r in it.references if r not in seen)
+    return frozenset(seen)
 
 
 def classify_private_surface(
@@ -86,24 +138,41 @@ def classify_private_surface(
     fn_records: list[FnRecord],
     *,
     cfg_cluster: str = "default",
+    reachable_files: frozenset[str] | None = None,
 ) -> PrivateSurface:
     """Partition enumerated items into frozen-public vs private-replaceable.
 
     Replaceable = every non-``pub`` struct/enum/type-alias/trait, PLUS every
     non-``pub`` free/helper fn whose signature references one of those private
     types (the layout helpers, e.g. anyhow's ``unsafe fn vtable(NonNull<
-    ErrorImpl>)``). Public items stay frozen — they are the API contract."""
+    ErrorImpl>)``). Public items stay frozen — they are the API contract.
+
+    A type only counts as truly public (frozen) when its OWN visibility is
+    exactly ``pub`` (``is_exactly_pub`` — a `pub(crate)` item is NOT part of
+    the crate's external contract, however `is_pub` folds it) AND its file is
+    externally reachable (``reachable_files``, when supplied — a `pub` item
+    sealed behind a private `mod` is equally unreachable). Omitting
+    `reachable_files` skips that second check (module-tree data unavailable)."""
     frozen_public: set[str] = set()
+    public_types: list[TypeRecord] = []
     private_types: list[TypeRecord] = []
     for t in type_records:
         if not t.name or t.kind not in _TYPE_KINDS:
             continue
-        if t.is_pub:
+        truly_public = (
+            t.is_pub and t.is_exactly_pub
+            and (reachable_files is None or t.file in reachable_files))
+        if truly_public:
             frozen_public.add(t.name)
+            public_types.append(t)
         else:
             private_types.append(t)
 
     private_names = frozenset(t.name for t in private_types)
+    public_direct_refs = {
+        t.name: _references(t.definition, private_names) for t in public_types}
+    public_referenced = frozenset(
+        name for refs in public_direct_refs.values() for name in refs)
     items: list[PrivateSurfaceItem] = []
     for t in private_types:
         items.append(PrivateSurfaceItem(
@@ -125,6 +194,8 @@ def classify_private_surface(
         cfg_cluster=cfg_cluster,
         replaceable=tuple(items),
         frozen_public=frozenset(frozen_public),
+        public_referenced=public_referenced,
+        public_direct_refs=public_direct_refs,
     )
 
 

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.cfg import CfgSet
 from pipeline_core.domain.models import FillResult, Frontier, ImplBlock, Stub
 
@@ -40,6 +41,9 @@ class PerFnPassCtx:
     total: int
     # E/R3: cluster cfg context for inactive-branch filtering at prompt-render time.
     cluster_cfg_set: CfgSet | None
+    # F10 Use-B (M5): behaviours harvested for this cluster, for the few-shot
+    # USAGE_EXAMPLES channel. Empty when no suite was baked (additive).
+    behaviour_specs: tuple[BehaviourSpec, ...] = ()
 
 
 def fill_skip(rec: Stub, attempts: int) -> FillResult:

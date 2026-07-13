@@ -59,6 +59,14 @@ def build_per_fn_prompt(
                          "invoked indirectly via a macro; consult MACROS below)")
     annotated = annotate_file_view(file_text, fn_name)
     notes_block = tag_block("MODEL_NOTES", notes_section)
+    # F10 Use-B (M5): concrete RIGHT usage examples harvested from the real
+    # lib's doc-tests/examples — teaches the API SHAPE by example. After notes,
+    # before the file context (same slot the archetype prescribes).
+    usage_block = tag_block(
+        "USAGE_EXAMPLES", sections.usage_examples,
+        prefix="Real, working uses of this crate's public API (harvested from "
+               "the library's own tests/examples). Match how the API is called "
+               "here:\n```rust\n", suffix="\n```")
     macros_block = tag_block("MACROS", macros_section)
     # P5.1: type definitions for types the fn touches. The model often
     # confuses Own/Ref/ErrorImpl fields with methods (writes self.ptr.as_ref
@@ -116,7 +124,7 @@ Crate: {module_name} | Cluster: {cluster_name} | File: {file_rel} | Fn: {fn_name
 <RUST_GOTCHAS>
 {gotchas_summary()}
 </RUST_GOTCHAS>
-{repo_spec_block}{blueprint_block}{siblings_block}{trait_block}{types_block}{bound_methods_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}
+{repo_spec_block}{blueprint_block}{siblings_block}{trait_block}{types_block}{bound_methods_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{usage_block}
 FILE — stubs are annotated. SKELETON STUB = will be filled later (rely on
 the signature). TARGET = implement now.
 
@@ -193,6 +201,11 @@ def build_per_fn_fix_prompt(
         tests_section = "(no tests directly reference this fn — see MACROS)"
     annotated = annotate_file_view(file_text, fn_name)
     notes_block = tag_block("MODEL_NOTES", notes_section)
+    usage_block = tag_block(
+        "USAGE_EXAMPLES", sections.usage_examples,
+        prefix="Real, working uses of this crate's public API (harvested from "
+               "the library's own tests/examples). Match how the API is called "
+               "here:\n```rust\n", suffix="\n```")
     macros_block = tag_block("MACROS", macros_section)
     # P3.2: full detail block for gotchas matching the current error.
     gotchas_block = tag_block("RUST_GOTCHAS_DETAIL", gotchas_for_error(error_excerpt))
@@ -289,7 +302,7 @@ Crate: {module_name} | Cluster: {cluster_name} | File: {file_rel} | Fn: {fn_name
 <RUST_GOTCHAS>
 {gotchas_summary()}
 </RUST_GOTCHAS>
-{repo_spec_block}{blueprint_block}{retro_block}{siblings_block}{gotchas_block}{trait_block}{types_block}{bound_methods_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{prior_block}
+{repo_spec_block}{blueprint_block}{retro_block}{siblings_block}{gotchas_block}{trait_block}{types_block}{bound_methods_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{usage_block}{prior_block}
 FILE (previous attempt reverted; stubs annotated):
 <FILE path="{file_rel}">
 {annotated}

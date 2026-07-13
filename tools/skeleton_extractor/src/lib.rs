@@ -49,6 +49,17 @@ mod tests {
     }
 
     #[test]
+    fn is_exactly_pub_excludes_restricted_visibility() {
+        let src = "pub struct Fully; pub(crate) struct CrateOnly; struct Private;";
+        let ast: syn::File = parse_file(src).unwrap();
+        let mut out = std::collections::BTreeMap::new();
+        collect_types_and_methods(&ast.items, "lib.rs", &mut out);
+        assert!(out["Fully"].is_pub && out["Fully"].is_exactly_pub);
+        assert!(out["CrateOnly"].is_pub && !out["CrateOnly"].is_exactly_pub);
+        assert!(!out["Private"].is_pub && !out["Private"].is_exactly_pub);
+    }
+
+    #[test]
     fn stubs_free_function() {
         let out = skeletonise_str("pub fn answer() -> u32 { 42 }");
         assert!(out.contains("unimplemented"));
@@ -471,5 +482,26 @@ mod tests {
                 .iter()
                 .all(|r| !r.relative_path.contains(".gen_tests_"))
         );
+    }
+
+    #[test]
+    fn mod_record_captures_own_visibility() {
+        use std::fs;
+        let tmp = std::env::temp_dir().join("skel_extractor_mod_vis_test");
+        if tmp.exists() {
+            fs::remove_dir_all(&tmp).unwrap();
+        }
+        fs::create_dir_all(&tmp).unwrap();
+        fs::write(
+            tmp.join("lib.rs"),
+            "pub mod pub_mod; pub(crate) mod crate_mod; mod private_mod;",
+        )
+        .unwrap();
+        let recs = enumerate_mods_in_file(&tmp.join("lib.rs"), &tmp).unwrap();
+        let by_name: std::collections::BTreeMap<_, _> =
+            recs.iter().map(|m| (m.name.as_str(), m.vis.as_str())).collect();
+        assert_eq!(by_name["pub_mod"], "public");
+        assert_eq!(by_name["crate_mod"], "restricted");
+        assert_eq!(by_name["private_mod"], "private");
     }
 }

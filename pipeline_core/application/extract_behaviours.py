@@ -16,21 +16,32 @@ from pipeline_core.domain.doctest import (
     harvest_doctest_behaviours,
     harvest_static_assertions,
 )
+from pipeline_core.domain.layout_pins import harvest_layout_pin_behaviours
 
 
 def harvest_behaviour_suite(
-    sources: Iterable[tuple[str, str]], *, cfg_cluster: str = "default",
+    sources: Iterable[tuple[str, str]],
+    *,
+    cfg_cluster: str = "default",
+    test_sources: Iterable[tuple[str, str]] = (),
 ) -> BehaviourSuite:
-    """Assemble one cfg-cluster's :class:`BehaviourSuite` from ``(rel_path,
-    source_text)`` pairs. Harvests runnable doc-test assertion-behaviours plus
-    layout-pinning STATIC_ASSERTION behaviours (F11's selector). Deterministic:
-    specs sorted by id, deduped by id."""
+    """Assemble one cfg-cluster's :class:`BehaviourSuite`.
+
+    ``sources`` = crate ``src/*.rs`` ``(rel, text)`` pairs → doc-test
+    assertion-behaviours + doc-test STATIC_ASSERTION pins. ``test_sources`` =
+    integration/unit ``tests/*.rs`` pairs → the layout pins (`size_of`, NPO,
+    autotraits) that live in test bodies, not doc-fences (M12 — the source M2's
+    selector reads from). Deterministic: specs sorted + deduped by id."""
     by_id: dict[str, BehaviourSpec] = {}
     for rel, text in sources:
         for spec in harvest_doctest_behaviours(
                 text, source_file=rel, cfg_cluster=cfg_cluster):
             by_id.setdefault(spec.behaviour_id, spec)
         for spec in harvest_static_assertions(
+                text, source_file=rel, cfg_cluster=cfg_cluster):
+            by_id.setdefault(spec.behaviour_id, spec)
+    for rel, text in test_sources:
+        for spec in harvest_layout_pin_behaviours(
                 text, source_file=rel, cfg_cluster=cfg_cluster):
             by_id.setdefault(spec.behaviour_id, spec)
     specs = tuple(by_id[k] for k in sorted(by_id))

@@ -41,6 +41,13 @@ pub struct TypeRecord {
     pub variants: Vec<String>,      // enum variants (name and parenthesised shape)
     pub methods: Vec<MethodRecord>, // names of methods declared on this type
     pub is_pub: bool,
+    // Strictly `syn::Visibility::Public` — false for `pub(crate)`/`pub(super)`/
+    // `pub(in path)`, which `is_pub` (deliberately) folds into `true` for other
+    // callers that just need "any pub keyword, for cross-module skeletonising
+    // purposes". A type's TRUE external-API membership requires this to be
+    // true (Rust visibility can never be widened past the defining crate by a
+    // restricted `pub(...)`, whatever `is_pub` says).
+    pub is_exactly_pub: bool,
 }
 
 #[derive(serde::Serialize, Debug, Clone)]
@@ -73,6 +80,12 @@ pub struct ModRecord {
     pub file: String,
     pub cfg_predicates: Vec<String>,
     pub declared_in: String,
+    // The `mod` declaration's OWN visibility: "public" (`pub mod`), "restricted"
+    // (`pub(crate) mod` / `pub(super) mod` / `pub(in path) mod`), or "private"
+    // (bare `mod`, the default). A non-"public" mod wall makes every item
+    // behind it externally unreachable, however those items are themselves
+    // marked — see `module_reachability.py` on the Python side.
+    pub vis: String,
 }
 
 /// One leaf of a `#[cfg(...)]` condition: a bare ident (`value: None`, e.g.

@@ -22,7 +22,18 @@ from typing import Any
 
 from pipeline_core.application.extract_behaviours import harvest_behaviour_suite
 from pipeline_core.domain.behaviour import BehaviourSuite
-from pipeline_core.domain.models import BuildCluster, SkeletoniseResult
+from pipeline_core.domain.models import (
+    BuildCluster,
+    FnRecord,
+    ModRecord,
+    SkeletoniseResult,
+    TypeRecord,
+)
+from pipeline_core.domain.module_reachability import externally_reachable_files
+from pipeline_core.domain.private_surface import (
+    PrivateSurface,
+    classify_private_surface,
+)
 from pipeline_core.domain.workspace_layout import SKIP_DIR_NAMES
 
 
@@ -40,6 +51,14 @@ class BakeArtifactsDeps:
     # F10: persist a harvested behaviour suite (adapter, injected — keeps this
     # application module off the adapters layer). Returns the written path.
     save_behaviour_suite: Callable[[Path, BehaviourSuite], Path]
+    # F11 M1: enumerate the skeleton's types/fns (injected extractor) + persist
+    # the public-frozen vs private-replaceable marks the t1.5 phase consumes.
+    enumerate_types: Callable[[Path], list[TypeRecord] | None]
+    enumerate_fns: Callable[[Path], list[FnRecord] | None]
+    save_private_surface: Callable[[Path, PrivateSurface], Path]
+    # module-reachability fix: which mods gate which files, so a `pub` item
+    # behind a private `mod` wall is classified replaceable, not frozen.
+    enumerate_mods: Callable[[Path], list[ModRecord] | None]
 
 
 def _behaviour_sources(src_dir: Path) -> list[tuple[str, str]]:
@@ -51,6 +70,28 @@ def _behaviour_sources(src_dir: Path) -> list[tuple[str, str]]:
             continue
         try:
             out.append((str(rs.relative_to(src_dir)),
+                        rs.read_text(encoding="utf-8")))
+        except OSError:
+            continue
+    return out
+
+
+def _test_layout_sources(project_dir: Path) -> list[tuple[str, str]]:
+    """(`rel_path`, `text`) for each integration test file under ``tests/``.
+
+    The layout pins F11's t1.5 must satisfy (`size_of`, NPO, autotraits) live in
+    these test BODIES, not in doc-fences (M12). Read once, pre-strip — a
+    `size_of` assertion is an observable fact, the same legality class as any
+    harvested test assertion (Hard Rule 11 safe)."""
+    tests_dir = project_dir / "tests"
+    out: list[tuple[str, str]] = []
+    if not tests_dir.is_dir():
+        return out
+    for rs in sorted(tests_dir.rglob("*.rs")):
+        if any(part in SKIP_DIR_NAMES for part in rs.parts):
+            continue
+        try:
+            out.append((str(rs.relative_to(project_dir)),
                         rs.read_text(encoding="utf-8")))
         except OSError:
             continue
@@ -122,13 +163,37 @@ def bake_skeleton_artifacts(
             d.log(f"  [bake-skeleton] cluster {cluster.name}: leaf-order write failed: {e}")
         d.log(f"  [bake-skeleton] cluster {cluster.name}: {len(res.reports)} "
               f"file(s) skeletonised → {skeleton_dir}")
+        # F11 M1: classify the skeleton's private layout (public-frozen vs
+        # private-replaceable) so the t1.5 phase knows what it may re-author.
+        # Visibility is an observable structural fact (Hard Rule 11 safe).
+        # Additive: a classification failure never blocks the strip.
+        try:
+            _skel_src = skeleton_dir / "src"
+            types = d.enumerate_types(_skel_src) or []
+            fns = d.enumerate_fns(_skel_src) or []
+            mods = d.enumerate_mods(_skel_src) or []
+            reachable = externally_reachable_files(
+                list(mods), frozenset(t.file for t in types))
+            surface = classify_private_surface(
+                list(types), list(fns), cfg_cluster=cluster.name,
+                reachable_files=reachable)
+            d.save_private_surface(project_dir, surface)
+            d.log(f"  [bake-skeleton] cluster {cluster.name}: private surface — "
+                  f"{len(surface.replaceable)} replaceable item(s) in "
+                  f"{len(surface.components)} component(s), "
+                  f"{len(surface.frozen_public)} frozen-public.")
+        except Exception as e:
+            d.log(f"  [bake-skeleton] cluster {cluster.name}: private-surface "
+                  f"classification failed (non-fatal): {e}")
         # F10 t0d: harvest this cfg-cluster's behaviour oracle from live source
         # (pre-strip, Hard Rule 11 — behaviours are OBSERVABLE outcomes, the same
         # legality class as a test assertion, never bodies). Additive: a harvest
         # failure never blocks the strip.
         try:
             sources = _behaviour_sources(src_dir)
-            suite = harvest_behaviour_suite(sources, cfg_cluster=cluster.name)
+            test_sources = _test_layout_sources(project_dir)
+            suite = harvest_behaviour_suite(
+                sources, cfg_cluster=cluster.name, test_sources=test_sources)
             if suite.specs:
                 d.save_behaviour_suite(project_dir, suite)
                 d.log(f"  [bake-skeleton] cluster {cluster.name}: harvested "
@@ -204,6 +269,11 @@ class StripBakeDeps:
     set_current: Callable[[Path, str], None]
     tarpaulin_bin: Path
     coverage_target: float
+    # F11 t1.5 (M2): re-author each cluster's private layout over the baked
+    # skeleton, BEFORE the augmentation commit so the rewrite is captured. A
+    # no-op binding disables the phase; any failure inside it degrades to the
+    # frozen skeleton (the run proceeds exactly as before F11).
+    run_layout_phase: Callable[[Path, str], None] = lambda _p, _m: None
 
 
 def strip_and_bake_module(
@@ -261,6 +331,13 @@ def strip_and_bake_module(
             f"{_bake_res.get('reason', 'unknown')}")
     d.log(f"  Baked skeleton for {len(_bake_res['clusters'])} cluster(s): "
           f"{', '.join(_bake_res['clusters'])}")
+    # F11 t1.5: author the private layout over the baked skeleton BEFORE the
+    # augmentation commit below (so the rewrite is committed with the skeleton).
+    # Degrade-safe: a failure here leaves the frozen skeleton untouched.
+    try:
+        d.run_layout_phase(project_dir, module_name)
+    except Exception as e:
+        d.log(f"  [t1.5] layout-authoring phase failed (non-fatal): {e}")
     # The bake's outputs (.skeleton/) are tracked in git. When
     # resuming from a task0c-augmented-{module} tag, the
     # rebake produces byte-identical files → nothing to

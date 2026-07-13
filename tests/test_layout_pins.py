@@ -1,10 +1,12 @@
 """Pins for the layout-pinning classifier (shared F10/F11 primitive)."""
 from __future__ import annotations
 
-from pipeline_core.domain.behaviour import StaticAssertKind
+from pipeline_core.domain.behaviour import OutcomeKind, StaticAssertKind
 from pipeline_core.domain.layout_pins import (
     classify_layout_assertions,
+    harvest_layout_pin_behaviours,
     is_layout_pinning,
+    pinned_type_names,
 )
 
 
@@ -49,3 +51,37 @@ def test_dedup_repeated_assertions():
     src = ("assert_eq!(size_of::<Error>(), 8);\n"
            "assert_eq!(size_of::<Error>(), 8);")
     assert len(classify_layout_assertions(src)) == 1
+
+
+# --- M12: harvest layout pins from a whole test file --------------------------
+
+_REPR_TEST = """
+#[test]
+fn test_error_size() {
+    assert_eq!(size_of::<Error>(), size_of::<usize>());
+    assert_eq!(size_of::<Result<(), Error>>(), size_of::<Option<Error>>());
+}
+"""
+
+
+def test_harvest_layout_pins_from_test_file():
+    specs = harvest_layout_pin_behaviours(
+        _REPR_TEST, source_file="tests/repr.rs", cfg_cluster="stable")
+    assert specs, "repr test must yield layout-pin behaviours"
+    for s in specs:
+        assert s.then is not None
+        assert s.then.kind is OutcomeKind.STATIC_ASSERTION
+        assert s.cfg_cluster == "stable"
+        assert s.source_ref == "tests/repr.rs"
+
+
+def test_harvest_layout_pins_none_for_plain_test():
+    assert harvest_layout_pin_behaviours(
+        "#[test]\nfn t() { assert_eq!(1 + 1, 2); }",
+        source_file="tests/math.rs") == []
+
+
+def test_pinned_type_names_extracts_the_pinned_type():
+    specs = tuple(harvest_layout_pin_behaviours(
+        _REPR_TEST, source_file="tests/repr.rs"))
+    assert "Error" in pinned_type_names(specs)

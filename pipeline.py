@@ -57,7 +57,7 @@ from pipeline_core.adapters.artifacts import (
 from pipeline_core.adapters.ask_client import AskClient
 from pipeline_core.adapters.augment_engine import CargoAugmentEngine, StaticRustTestAugmentor
 from pipeline_core.adapters.augment_store import FileAugmentStore
-from pipeline_core.adapters.behaviour_store import save_behaviour_suite
+from pipeline_core.adapters.behaviour_store import load_behaviour_suite, save_behaviour_suite
 from pipeline_core.adapters.build_script import CargoBuildScriptReader
 from pipeline_core.adapters.cargo import CargoEnv
 from pipeline_core.adapters.cargo import run_build_check as _cargo_run_build_check
@@ -98,6 +98,7 @@ from pipeline_core.adapters.model_notes_store import (
 )
 from pipeline_core.adapters.mutation import MutationTester
 from pipeline_core.adapters.phase_c_log import write_phase_c_test_fix_log as _write_phase_c_test_fix_log
+from pipeline_core.adapters.private_surface_store import save_private_surface
 from pipeline_core.adapters.progress import ChunkProgress
 from pipeline_core.adapters.repo_spec_docs import FR_PREFIX as _REPO_SPEC_FR_PREFIX
 from pipeline_core.adapters.repo_spec_docs import (
@@ -268,6 +269,7 @@ from pipeline_core.composition import Helpers as _Helpers
 from pipeline_core.composition import Ports as _Ports
 from pipeline_core.composition import ReconstructRoles as _ReconstructRoles
 from pipeline_core.composition import build_app as _build_app
+from pipeline_core.composition_layout import build_layout_phase_runner
 from pipeline_core.domain import cfg as _cfg
 from pipeline_core.domain import graceful_stop as _graceful_stop
 from pipeline_core.domain import test_count as _tc
@@ -331,6 +333,7 @@ from pipeline_core.domain.models import (
     Diagnostic,
     DispatchFamily,
     FnLocator,
+    FnRecord,
     Frontier,
     ImplBlock,
     ModRecord,
@@ -2490,7 +2493,8 @@ def _build_phase_c_engine(*, structure: "_structure_port.StructureReader | None"
     )
     return PhaseCFillEngine(tel=_FILL_TEL, mut=_FILL_MUT, cargo=_FILL_CARGO, prompt=_FILL_PROMPT,
                             ws=ws, retros=_FILL_RETROS, tests=_FILL_TESTS, stall=_FILL_STALL,
-                            impl_path=_FILL_IMPL, fill_one=fill_one, config=cfg)
+                            impl_path=_FILL_IMPL, fill_one=fill_one, config=cfg,
+                            behaviour_loader=lambda pd, c: load_behaviour_suite(pd, c).specs)
 
 
 def _task2_fill_fns_one_by_one(
@@ -3841,6 +3845,15 @@ _RESTORE_FROM_AUGMENTED = RestoreFromAugmented(
     read_state=_read_state, write_state=_write_state, log=_log,
 )
 
+# F11 t1.5 (M2): runner assembled in composition_layout; gated by ENABLE_LAYOUT_AUTHORING.
+_run_layout_phase = build_layout_phase_runner(
+    enabled=os.getenv("ENABLE_LAYOUT_AUTHORING", "0") == "1",
+    ask=_ASK_CLIENT.ask, task2_model=_TASK2_MODEL,
+    load_baked_clusters=_load_baked_clusters,
+    fn_name_counts=_fn_name_counts, log=_log,
+)
+
+
 # P5-S3: deps for the extracted strip/bake/commit pre-step (per-block injection).
 _STRIP_BAKE_DEPS = StripBakeDeps(
     log=_log, phase_valid=_phase_valid, module_augmented_path=_AUGMENT_STORE.module_path,
@@ -3850,6 +3863,7 @@ _STRIP_BAKE_DEPS = StripBakeDeps(
     strip_module_source=strip_module_source, commit_and_mark=_commit_and_mark,
     set_current=_set_current, tarpaulin_bin=TARPAULIN_BIN,
     coverage_target=COVERAGE_AUGMENTATION_TARGET,
+    run_layout_phase=_run_layout_phase,
 )
 
 # S24: the role adapters (_PHASE_GATE/…/_ANALYST) + spine use-cases
@@ -3873,6 +3887,11 @@ _BAKE_ARTIFACTS_DEPS = BakeArtifactsDeps(
     is_gen_tests_file=_is_gen_tests_file,
     gen_tests_origin_cfgs=_gen_tests_origin_cfgs,
     save_behaviour_suite=save_behaviour_suite,
+    enumerate_types=_enumerate_types_via_extractor,
+    enumerate_fns=lambda sd: [FnRecord.from_dict(d)  # typed view for F11 M1 classifier
+                              for d in (_enumerate_fns_via_extractor(sd) or [])],
+    enumerate_mods=_enumerate_mods_via_extractor,
+    save_private_surface=save_private_surface,
 )
 
 

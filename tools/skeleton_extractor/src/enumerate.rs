@@ -271,6 +271,7 @@ pub(crate) fn collect_types_and_methods(
                     s.vis,
                     syn::Visibility::Public(_) | syn::Visibility::Restricted(_)
                 );
+                let is_exactly_pub = matches!(s.vis, syn::Visibility::Public(_));
                 let definition = quote::quote!(#s).to_string();
                 // Update the entry: an earlier impl block may have created a
                 // placeholder with empty fields. We always overwrite the
@@ -285,6 +286,7 @@ pub(crate) fn collect_types_and_methods(
                     variants: Vec::new(),
                     methods: Vec::new(),
                     is_pub: false,
+                    is_exactly_pub: false,
                 });
                 entry.kind = "struct".to_string();
                 entry.file = file_rel.to_string();
@@ -292,6 +294,7 @@ pub(crate) fn collect_types_and_methods(
                 entry.definition = definition;
                 entry.fields = fields;
                 entry.is_pub = is_pub;
+                entry.is_exactly_pub = is_exactly_pub;
             }
             Item::Enum(e) => {
                 let name = e.ident.to_string();
@@ -304,6 +307,7 @@ pub(crate) fn collect_types_and_methods(
                     e.vis,
                     syn::Visibility::Public(_) | syn::Visibility::Restricted(_)
                 );
+                let is_exactly_pub = matches!(e.vis, syn::Visibility::Public(_));
                 let definition = quote::quote!(#e).to_string();
                 out_types.entry(name.clone()).or_insert(TypeRecord {
                     file: file_rel.to_string(),
@@ -315,6 +319,7 @@ pub(crate) fn collect_types_and_methods(
                     variants,
                     methods: Vec::new(),
                     is_pub,
+                    is_exactly_pub,
                 });
             }
             Item::Type(t) => {
@@ -324,6 +329,7 @@ pub(crate) fn collect_types_and_methods(
                     t.vis,
                     syn::Visibility::Public(_) | syn::Visibility::Restricted(_)
                 );
+                let is_exactly_pub = matches!(t.vis, syn::Visibility::Public(_));
                 let definition = quote::quote!(#t).to_string();
                 out_types.entry(name.clone()).or_insert(TypeRecord {
                     file: file_rel.to_string(),
@@ -335,6 +341,7 @@ pub(crate) fn collect_types_and_methods(
                     variants: Vec::new(),
                     methods: Vec::new(),
                     is_pub,
+                    is_exactly_pub,
                 });
             }
             Item::Trait(tr) => {
@@ -344,6 +351,7 @@ pub(crate) fn collect_types_and_methods(
                     tr.vis,
                     syn::Visibility::Public(_) | syn::Visibility::Restricted(_)
                 );
+                let is_exactly_pub = matches!(tr.vis, syn::Visibility::Public(_));
                 let definition = quote::quote!(#tr).to_string();
                 let mut methods = Vec::new();
                 let tr_cfgs = extract_cfg_predicates(&tr.attrs);
@@ -369,6 +377,7 @@ pub(crate) fn collect_types_and_methods(
                     variants: Vec::new(),
                     methods,
                     is_pub,
+                    is_exactly_pub,
                 });
             }
             Item::Impl(ii) => {
@@ -390,6 +399,7 @@ pub(crate) fn collect_types_and_methods(
                     variants: Vec::new(),
                     methods: Vec::new(),
                     is_pub: false,
+                    is_exactly_pub: false,
                 });
                 let impl_cfgs = extract_cfg_predicates(&ii.attrs);
                 for impl_item in &ii.items {
@@ -540,11 +550,17 @@ pub fn enumerate_mods_in_file(path: &Path, root: &Path) -> Result<Vec<ModRecord>
             let name = m.ident.to_string();
             let file = extract_path_attr(&m.attrs).unwrap_or_else(|| format!("{name}.rs"));
             let cfg_predicates = extract_cfg_predicates(&m.attrs);
+            let vis = match m.vis {
+                syn::Visibility::Public(_) => "public",
+                syn::Visibility::Restricted(_) => "restricted",
+                syn::Visibility::Inherited => "private",
+            };
             out.push(ModRecord {
                 name,
                 file,
                 cfg_predicates,
                 declared_in: declared_in.clone(),
+                vis: vis.to_string(),
             });
         }
     }

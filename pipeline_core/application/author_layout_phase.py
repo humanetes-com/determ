@@ -1,0 +1,202 @@
+"""Layout-authoring PHASE (F11 t1.5) — the composition step that runs
+:func:`author_layout` for every cfg-cluster between bake and strip, then
+recomputes the leaf-first order over the rewritten scaffold.
+
+Placement (plan_2 M2): bake writes the frozen skeleton + private-surface marks +
+behaviour suite; THIS phase lets the model re-author each cluster's private
+layout so the reconstruction is not forced to reproduce the original's unsafe
+internals; THEN the leaf-first order + fn-ref-counts are recomputed over the
+rewritten scaffold (the model may have renamed/replaced private helper sigs, so
+counts keyed to the frozen names would be stale). Strip runs after.
+
+Fully DI + degrade-safe: an empty surface, an unavailable model, or a compile
+adapter that always says "no" all reduce to a no-op — the run proceeds on the
+frozen skeleton exactly as before F11.
+"""
+from __future__ import annotations
+
+import json
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from pipeline_core.application.author_layout import (
+    AuthorLayoutDeps,
+    AuthorLayoutResult,
+    author_layout,
+)
+from pipeline_core.domain.behaviour import (
+    BehaviourSpec,
+    BehaviourSuite,
+    OutcomeKind,
+)
+from pipeline_core.domain.private_surface import PrivateSurface, PrivateSurfaceItem
+from pipeline_core.domain.rust_idents import camelcase_type_names
+
+
+def _spec_pins_types(spec: BehaviourSpec) -> frozenset[str]:
+    """The type names one STATIC_ASSERTION spec pins (empty for non-static)."""
+    if spec.then is None or spec.then.kind is not OutcomeKind.STATIC_ASSERTION:
+        return frozenset()
+    return frozenset(camelcase_type_names(spec.then.static_expr))
+
+
+def make_pin_selector(
+    suite: BehaviourSuite, surface: PrivateSurface,
+) -> Callable[[tuple[PrivateSurfaceItem, ...]], list[BehaviourSpec]]:
+    """A per-component pin selector: the STATIC_ASSERTION specs in `suite` whose
+    pinned type names intersect the component's item names. This is what feeds
+    the t1.5 prompt AND drives the M13 gate (empty selection on a layout-
+    sensitive component = harvest gap).
+
+    A pin often names only the PUBLIC type (``size_of::<Error>()``), never the
+    private types behind it — so a direct name match alone misses every such
+    pin. When a spec pins a FROZEN-PUBLIC name, it also applies to whichever
+    component is reachable from THAT public type's own direct references
+    (``surface.reachable_from_public``), not the whole crate's merged
+    layout-sensitive set — so a pin on one public type never leaks onto an
+    unrelated public type's private component."""
+    static_specs = [(s, _spec_pins_types(s)) for s in suite.specs
+                    if s.then is not None
+                    and s.then.kind is OutcomeKind.STATIC_ASSERTION]
+
+    def select(comp: tuple[PrivateSurfaceItem, ...]) -> list[BehaviourSpec]:
+        names = {i.name for i in comp}
+        out = []
+        for s, pinned in static_specs:
+            if pinned & names:
+                out.append(s)
+                continue
+            for pub_name in pinned & surface.frozen_public:
+                if names & surface.reachable_from_public(pub_name):
+                    out.append(s)
+                    break
+        return out
+
+    return select
+
+
+@dataclass(frozen=True)
+class LayoutPhaseDeps:
+    """Collaborators for the t1.5 phase. All injected — the composition root
+    binds them to the resident model transport, skeleton IO, and cargo check."""
+    log: Callable[[str], None]
+    load_surface: Callable[[Path, str], PrivateSurface]
+    load_suite: Callable[[Path, str], BehaviourSuite]
+    public_surface_text: Callable[[Path, str], str]
+    symbol_inventory_text: Callable[[Path, str], str]
+    author_deps_for: Callable[[Path, str], AuthorLayoutDeps]
+    recompute_leaf_order: Callable[[Path, str], None]
+
+
+def run_layout_phase(
+    project_dir: Path, module_name: str, cluster_names: list[str],
+    deps: LayoutPhaseDeps,
+) -> dict[str, AuthorLayoutResult]:
+    """Author the private layout for every cfg-cluster. Returns per-cluster
+    results (empty dict when nothing was authorable). Never raises on a single
+    cluster's failure — the frozen skeleton is always a valid fallback."""
+    results: dict[str, AuthorLayoutResult] = {}
+    for cluster in cluster_names:
+        try:
+            surface = deps.load_surface(project_dir, cluster)
+        except Exception as e:
+            deps.log(f"  [t1.5] {cluster}: could not load private surface ({e}) — skipping.")
+            continue
+        if surface.is_empty:
+            deps.log(f"  [t1.5] {cluster}: no private-replaceable layout — frozen skeleton kept.")
+            continue
+        suite = deps.load_suite(project_dir, cluster)
+        select_pins = make_pin_selector(suite, surface)
+        res = author_layout(
+            surface,
+            module_name=module_name,
+            public_surface=deps.public_surface_text(project_dir, cluster),
+            select_pins=select_pins,
+            symbol_inventory=deps.symbol_inventory_text(project_dir, cluster),
+            deps=deps.author_deps_for(project_dir, cluster),
+        )
+        results[cluster] = res
+        authored = sum(1 for c in res.components if c.authored)
+        deps.log(
+            f"  [t1.5] {cluster}: authored {authored}/{len(res.components)} "
+            f"component(s); {len(res.gated)} gated (harvest gap); "
+            f"{len(res.components) - authored - len(res.gated)} left frozen.")
+        # The model may have renamed private helpers → recompute leaf-first
+        # order + fn-ref-counts over the REWRITTEN scaffold (plan_2 M2).
+        if authored:
+            try:
+                deps.recompute_leaf_order(project_dir, cluster)
+            except Exception as e:
+                deps.log(f"  [t1.5] {cluster}: leaf-order recompute failed (non-fatal): {e}")
+    return results
+
+
+def make_layout_phase_runner(
+    *,
+    enabled: bool,
+    load_baked_clusters: Callable[[Path], list[Any]],
+    load_surface: Callable[[Path, str], PrivateSurface],
+    load_suite: Callable[[Path, str], BehaviourSuite],
+    api_surface_path: Callable[[Path, str], Path],
+    run_model: Callable[[str], str],
+    compile_ok: Callable[[Path, str, Mapping[str, str]], bool],
+    skeleton_src_dir_for: Callable[[Path, str], Path],
+    fn_name_counts: Callable[[Path], dict[str, int]],
+    log: Callable[[str], None],
+) -> Callable[[Path, str], None]:
+    """Assemble the t1.5 phase runner from resident ports (composition helper —
+    keeps pipeline.py thin per the shrink goal). Returns a no-op when disabled or
+    when no clusters were baked. All IO/model/cargo access is injected."""
+
+    def _runner(project_dir: Path, module_name: str) -> None:
+        if not enabled:
+            return
+        clusters = load_baked_clusters(project_dir) or []
+        if not clusters:
+            return
+        env_by_cluster = {c.name: dict(c.env_extra) for c in clusters}
+
+        def _public_surface_text(pd: Path, cluster: str) -> str:
+            try:
+                p = api_surface_path(pd, module_name)
+                return p.read_text(encoding="utf-8") if p.exists() else ""
+            except Exception:
+                return ""
+
+        def _author_deps_for(pd: Path, cluster: str) -> AuthorLayoutDeps:
+            src = skeleton_src_dir_for(pd, cluster)
+
+            def _read(rel: str) -> str | None:
+                try:
+                    return (src / rel).read_text(encoding="utf-8")
+                except OSError:
+                    return None
+
+            def _write(rel: str, txt: str) -> None:
+                fp = src / rel
+                fp.parent.mkdir(parents=True, exist_ok=True)
+                fp.write_text(txt, encoding="utf-8")
+
+            return AuthorLayoutDeps(
+                run_model=run_model, read_skeleton=_read, write_skeleton=_write,
+                compile_ok=lambda: compile_ok(
+                    pd, cluster, env_by_cluster.get(cluster, {})),
+                log=log)
+
+        def _recompute_leaf_order(pd: Path, cluster: str) -> None:
+            src = skeleton_src_dir_for(pd, cluster)
+            (src.parent / "_leaf_order.json").write_text(
+                json.dumps(fn_name_counts(src), sort_keys=True), encoding="utf-8")
+
+        deps = LayoutPhaseDeps(
+            log=log, load_surface=load_surface, load_suite=load_suite,
+            public_surface_text=_public_surface_text,
+            symbol_inventory_text=lambda pd, c: "",
+            author_deps_for=_author_deps_for,
+            recompute_leaf_order=_recompute_leaf_order)
+        run_layout_phase(project_dir, module_name,
+                         [c.name for c in clusters], deps)
+
+    return _runner

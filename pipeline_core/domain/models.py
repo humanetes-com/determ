@@ -109,6 +109,12 @@ class TypeRecord:
     variants: tuple[str, ...] = ()
     methods: tuple[MethodRecord, ...] = ()
     is_pub: bool = False
+    # Strictly `Visibility::Public` — false for `pub(crate)`/`pub(super)`/
+    # `pub(in path)`, which `is_pub` folds into True (deliberate, for
+    # cross-module skeletonising callers). Defaults to True so existing
+    # fixtures/tests that only set `is_pub` keep their prior meaning; the
+    # extractor always emits both fields explicitly.
+    is_exactly_pub: bool = True
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> TypeRecord:
@@ -122,6 +128,7 @@ class TypeRecord:
             variants=_strs(d.get("variants")),
             methods=tuple(MethodRecord.from_dict(m) for m in (d.get("methods") or [])),
             is_pub=bool(d.get("is_pub", False)),
+            is_exactly_pub=bool(d.get("is_exactly_pub", True)),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -135,6 +142,7 @@ class TypeRecord:
             "variants": list(self.variants),
             "methods": [m.to_dict() for m in self.methods],
             "is_pub": self.is_pub,
+            "is_exactly_pub": self.is_exactly_pub,
         }
 
 
@@ -195,6 +203,11 @@ class ModRecord:
     file: str = ""
     cfg_predicates: tuple[str, ...] = ()
     declared_in: str = ""
+    # The `mod` declaration's OWN visibility: "public" | "restricted" | "private".
+    # A non-"public" mod wall makes everything behind it externally
+    # unreachable regardless of the nested items' own visibility — see
+    # domain/module_reachability.py.
+    vis: str = "private"
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> ModRecord:
@@ -203,12 +216,14 @@ class ModRecord:
             file=d.get("file", ""),
             cfg_predicates=_strs(d.get("cfg_predicates")),
             declared_in=d.get("declared_in", ""),
+            vis=d.get("vis", "private"),
         )
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
             "file": self.file,
+            "vis": self.vis,
             "cfg_predicates": list(self.cfg_predicates),
             "declared_in": self.declared_in,
         }

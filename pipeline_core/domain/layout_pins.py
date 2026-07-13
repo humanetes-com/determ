@@ -12,7 +12,14 @@ adapter reads the file, this classifies the text.
 """
 from __future__ import annotations
 
-from pipeline_core.domain.behaviour import ObservableOutcome, StaticAssertKind
+from pipeline_core.domain.behaviour import (
+    BehaviourProvenance,
+    BehaviourSpec,
+    BehaviourSubKind,
+    FenceDirective,
+    ObservableOutcome,
+    StaticAssertKind,
+)
 from pipeline_core.domain.rust_scan import contains_word, count_word
 
 # The autotrait markers a layout-pinning test uses to freeze Send/Sync/Unpin/…
@@ -66,3 +73,40 @@ def is_layout_pinning(test_src: str) -> bool:
     layout-pinning-test selector. Such tests MUST be fed to the t1.5 authoring
     prompt so the model's private layout satisfies them by construction."""
     return bool(classify_layout_assertions(test_src))
+
+
+def harvest_layout_pin_behaviours(
+    test_src: str, *, source_file: str, cfg_cluster: str = "default",
+) -> list[BehaviourSpec]:
+    """STATIC_ASSERTION behaviours from a whole integration/unit test FILE.
+
+    The layout pins F11's t1.5 must satisfy (``size_of::<Error>()==usize``, NPO,
+    ``Send+Sync+Unpin``) live in ``tests/*.rs`` function bodies, NOT in doc-test
+    fences — so the doc-test harvester never sees them. This lifts them straight
+    from the test source (the whole file is the ``test_src``), the same legality
+    class as any harvested assertion (an observable layout fact, never a body).
+    ``exercises`` is left empty; the caller fills it from a type-name scan."""
+    out: list[BehaviourSpec] = []
+    for i, outcome in enumerate(classify_layout_assertions(test_src)):
+        out.append(BehaviourSpec(
+            behaviour_id=f"static::{source_file}::{i}",
+            given="", when=outcome.static_expr, then=outcome,
+            provenance=BehaviourProvenance.HARVESTED,
+            subkind=BehaviourSubKind.OUTCOME, fence=FenceDirective.RUN,
+            cfg_cluster=cfg_cluster, source_ref=source_file))
+    return out
+
+
+def pinned_type_names(specs: tuple[BehaviourSpec, ...]) -> frozenset[str]:
+    """The type names any STATIC_ASSERTION in `specs` pins (CamelCase idents in
+    the asserted expression). A private type whose name is in here but which
+    reaches t1.5 with NO pin fed to the prompt is a HARVEST GAP, not a free
+    layout — the caller (M13 gate) refuses to author it blind."""
+    from pipeline_core.domain.behaviour import OutcomeKind
+    from pipeline_core.domain.rust_idents import camelcase_type_names
+
+    names: set[str] = set()
+    for s in specs:
+        if s.then is not None and s.then.kind is OutcomeKind.STATIC_ASSERTION:
+            names |= camelcase_type_names(s.then.static_expr)
+    return frozenset(names)

@@ -77,8 +77,11 @@ def test_filter_tests_for_cluster_none_passthrough() -> None:
 def test_cluster_gate_lazy_symbols_not_called_for_nondefault() -> None:
     nightly = _C(name="nightly", active_cfg=("egma",))
     called: list[int] = []
-    cm.cluster_gate_for_sibling(nightly, "src", [], "", [nightly],
-                                lambda: called.append(1) or frozenset())
+    def _record_call() -> frozenset[str]:
+        called.append(1)
+        return frozenset()
+
+    cm.cluster_gate_for_sibling(nightly, "src", [], "", [nightly], _record_call)
     assert not called  # non-default cluster → returns base gate before symbol branch
 
 
@@ -138,6 +141,10 @@ def _bake_deps(logs: list[str]) -> BakeArtifactsDeps:
         is_gen_tests_file=lambda n: False,
         gen_tests_origin_cfgs=lambda t: {},
         save_behaviour_suite=lambda pd, suite: pd / "_b.json",
+        enumerate_types=lambda sd: [],
+        enumerate_fns=lambda sd: [],
+        enumerate_mods=lambda sd: [],
+        save_private_surface=lambda pd, surface: pd / "_ps.json",
     )
 
 
@@ -167,6 +174,10 @@ def test_bake_skeleton_artifacts_extractor_failure(tmp_path: Path) -> None:
         extract_skeleton=lambda s, o, cluster=None: SkeletoniseResult(False, [], "boom"),
         is_gen_tests_file=deps.is_gen_tests_file,
         gen_tests_origin_cfgs=deps.gen_tests_origin_cfgs,
-        save_behaviour_suite=deps.save_behaviour_suite)
+        save_behaviour_suite=deps.save_behaviour_suite,
+        enumerate_types=deps.enumerate_types,
+        enumerate_fns=deps.enumerate_fns,
+        enumerate_mods=deps.enumerate_mods,
+        save_private_surface=deps.save_private_surface)
     res = bake_skeleton_artifacts(tmp_path, "m", bad)
     assert res["ok"] is False and "boom" in res["reason"]

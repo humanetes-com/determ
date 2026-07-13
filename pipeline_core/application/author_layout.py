@@ -42,6 +42,7 @@ class ComponentResult:
     item_names: tuple[str, ...]
     authored: bool
     reason: str = ""
+    gated: bool = False   # M13: skipped-on-purpose (harvest gap), not a failure
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +53,10 @@ class AuthorLayoutResult:
     @property
     def all_authored(self) -> bool:
         return all(c.authored for c in self.components)
+
+    @property
+    def gated(self) -> tuple[ComponentResult, ...]:
+        return tuple(c for c in self.components if c.gated)
 
 
 def _splice_component(
@@ -84,20 +89,33 @@ def author_layout(
     *,
     module_name: str,
     public_surface: str,
-    layout_pins: list[BehaviourSpec],
+    select_pins: Callable[[tuple[PrivateSurfaceItem, ...]], list[BehaviourSpec]],
     symbol_inventory: str,
     deps: AuthorLayoutDeps,
 ) -> AuthorLayoutResult:
     """Author every connected component of `surface`. Each component is
     committed to the skeleton only after the rewritten scaffold compiles; a
-    failed component is rolled back to its frozen state."""
+    failed component is rolled back to its frozen state.
+
+    M13 gate: a component that is LAYOUT-SENSITIVE (its private types feed a
+    public type's size/niche) but reaches here with NO layout pins is a harvest
+    gap, not a free layout — authoring it blind produces a wrong-sized public
+    type that compiles yet fails the repr tests a whole sweep later. Such a
+    component is left FROZEN (gated), loud in the log, never authored blind."""
     results: list[ComponentResult] = []
     for comp in surface.components:
         names = tuple(i.name for i in comp)
+        pins = select_pins(comp)
+        if not pins and surface.component_is_layout_sensitive(comp):
+            reason = ("layout-sensitive (feeds a public type's size) but NO "
+                      "layout pins harvested — refusing to author blind")
+            deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: GATED — {reason}")
+            results.append(ComponentResult(names, False, reason, gated=True))
+            continue
         prompt = build_layout_authoring_prompt(
             module_name=module_name, cfg_cluster=surface.cfg_cluster,
             items=comp, public_surface=public_surface,
-            layout_pins=layout_pins, symbol_inventory=symbol_inventory)
+            layout_pins=pins, symbol_inventory=symbol_inventory)
         committed = False
         reason = "no attempt"
         # snapshot the pristine skeleton files this component touches, so a

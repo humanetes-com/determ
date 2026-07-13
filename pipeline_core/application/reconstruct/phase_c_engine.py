@@ -18,6 +18,7 @@ import queue as _queue_mod
 import threading as _threading
 import time
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,7 @@ from pipeline_core.application.fix_loop import FixOutcome, drive_fix_loop
 from pipeline_core.application.reconstruct.context import PerFnPassCtx
 from pipeline_core.application.reconstruct.fill_one_fn import FillOneFn
 from pipeline_core.application.reconstruct.scheduling import group_priority_levels
+from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.cfg import CfgSet
 from pipeline_core.domain.enums import FillUnit
 from pipeline_core.domain.models import (
@@ -77,6 +79,11 @@ class PhaseCFillEngine:
     impl_path: ImplFillPath
     fill_one: FillOneFn
     config: EngineConfig
+    # F10 Use-B (M5): load the cluster's harvested behaviours for the few-shot
+    # USAGE_EXAMPLES channel. Injected in composition (bound to the behaviour
+    # store); default returns none so the engine stays additive without it.
+    behaviour_loader: Callable[[Path, str], tuple[BehaviourSpec, ...]] = (
+        lambda _project_dir, _cluster: ())
 
     def _collect_refill_targets(
         self, target_src_dir: Path, stubs: list[Stub],
@@ -322,6 +329,7 @@ class PhaseCFillEngine:
                     CfgSet.of(cluster.cfg_true, cluster.cfg_false)
                     if cluster is not None else None
                 ),
+                behaviour_specs=self.behaviour_loader(project_dir, cluster_name),
             )
 
             def _worker(work_queue: _queue_mod.Queue[tuple[int, Stub]], *,
