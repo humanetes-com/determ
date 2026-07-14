@@ -181,8 +181,11 @@ def classify_private_surface(
             references=_references(t.definition, private_names),
         ))
     # Private helper fns that touch the private layout become authorable sigs.
+    # Only truly-EXTERNAL fns are excluded: `is_pub` alone folds `pub(crate)`
+    # in, which would wrongly freeze a `pub(crate)` layout helper instead of
+    # offering it for authoring.
     for f in fn_records:
-        if f.is_pub or not f.fn_name:
+        if (f.is_pub and f.is_exactly_pub) or not f.fn_name:
             continue
         refs = _references(f.sig_text, private_names)
         if refs:

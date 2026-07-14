@@ -68,3 +68,25 @@ def test_capture_skips_manifest_when_path_fn_not_provided(tmp_path: Path) -> Non
     cap = _capture(tmp_path, with_manifest_path=False)
     cap.capture(tmp_path, module_dir, "mymod")
     assert not (tmp_path / "mymod.pub_items.json").exists()
+
+
+def test_pub_items_missing_exactly_pub_key_degrades_to_is_pub() -> None:
+    # `is_exactly_pub` is absent from records baked by a pre-field artifact or
+    # a stale extractor binary. Absent must mean "pre-field behaviour" on BOTH
+    # record and dict shapes: a private item stays private (is_pub is the
+    # backstop — gating on the default-True field alone would promote it), and
+    # a pub item stays pub (missing dict key must not silently drop it).
+    from pipeline_core.domain.pub_items import pub_items_from_records
+    types = [
+        TypeRecord(file="src/lib.rs", kind="struct", name="Hidden", is_pub=False),
+        TypeRecord(file="src/lib.rs", kind="struct", name="Shown", is_pub=True),
+    ]
+    fns = [
+        {"file": "src/lib.rs", "fn_name": "legacy_pub", "is_pub": True},
+        {"file": "src/lib.rs", "fn_name": "legacy_priv", "is_pub": False},
+    ]
+    items = pub_items_from_records(types, fns)
+    assert ("struct", "Hidden") not in items
+    assert ("struct", "Shown") in items
+    assert ("fn", "legacy_pub") in items
+    assert ("fn", "legacy_priv") not in items

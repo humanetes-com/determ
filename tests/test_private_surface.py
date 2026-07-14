@@ -151,3 +151,27 @@ def test_public_direct_refs_do_not_merge_across_unrelated_public_types():
     s = classify_private_surface(types, [])
     assert s.reachable_from_public("Error") == {"Own", "ErrorImpl"}
     assert s.reachable_from_public("Other") == {"OtherImpl"}
+
+
+def test_pub_crate_helper_fn_referencing_layout_is_replaceable():
+    # `pub(crate) fn helper` (is_pub folds it to True, is_exactly_pub False)
+    # is NOT external API — it must be offered for authoring, not excluded as
+    # if it were a frozen public fn.
+    types = _anyhow_surface()
+    fns = [FnRecord(
+        file="src/error.rs", fn_name="vtable",
+        sig_text="unsafe fn vtable(p: NonNull<ErrorImpl>) -> &'static ErrorVTable",
+        is_pub=True, is_exactly_pub=False)]
+    s = classify_private_surface(types, fns)
+    fn_items = [i.name for i in s.replaceable if i.kind is SurfaceItemKind.FN_SIG]
+    assert fn_items == ["vtable"]
+
+
+def test_truly_pub_fn_is_not_offered_for_authoring():
+    types = _anyhow_surface()
+    fns = [FnRecord(
+        file="src/error.rs", fn_name="vtable",
+        sig_text="pub unsafe fn vtable(p: NonNull<ErrorImpl>) -> &'static ErrorVTable",
+        is_pub=True, is_exactly_pub=True)]
+    s = classify_private_surface(types, fns)
+    assert not [i for i in s.replaceable if i.kind is SurfaceItemKind.FN_SIG]

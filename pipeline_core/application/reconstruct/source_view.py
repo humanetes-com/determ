@@ -55,7 +55,10 @@ def public_api_from_source(
         consts = enumerate_consts(_td) or []
 
     for t in types:
-        if not t.is_exactly_pub:
+        # Conjunction, not is_exactly_pub alone: the field defaults True when
+        # absent (pre-field artifact / stale extractor), and alone that would
+        # render fully-PRIVATE types as `pub` — is_pub can only narrow.
+        if not (t.is_pub and t.is_exactly_pub):
             continue
         if t.kind == "struct":
             if t.fields:
@@ -72,7 +75,9 @@ def public_api_from_source(
             lines.append(f"pub trait {t.name}")
 
     for f in fns:
-        if f.get("is_exactly_pub"):
+        # Missing key defaults True (matches the record classes' from_dict) so
+        # a stale artifact degrades to pre-field behaviour, never to "no fns".
+        if f.get("is_pub") and f.get("is_exactly_pub", True):
             # sig_text starts at the `fn`/`unsafe`/`async` keyword (the extractor's sig span
             # excludes the visibility), so prepend `pub ` to match the API-listing convention.
             sig = " ".join((f.get("sig_text") or "").split())

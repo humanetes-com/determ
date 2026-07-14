@@ -384,6 +384,7 @@ class Helpers:
     repo_spec_section: Callable[..., Any]
     splice_fn_body: Callable[..., Any]
     collect_impl_blocks: Callable[..., Any]
+    fn_container_index: Callable[..., Any]
     behavior_frontier: Callable[..., Any]
     compile_error_frontier: Callable[..., Any]
     extract_tdd_frontier: Callable[..., Any]
@@ -545,6 +546,14 @@ class App:
     # LLM per-fn boundary (P3-S2): the engines' PromptContext role resolves its
     # model seam here at call time — swap via dataclasses.replace to script it.
     ask_per_fn_body: Callable[..., tuple[str | None, str]]
+    # Frontier/impl-scan seams (S60): previously duplicated as separate lambdas
+    # in both `_HELPERS` and the `FillRoles` adapters (`WorkspaceModelAdapter`/
+    # `CargoFillAdapter`) — now the ONE seam both sides read, swap via
+    # dataclasses.replace like the other boundary fields on this class.
+    collect_impl_blocks: Callable[..., Any]
+    compile_error_frontier: Callable[..., Any]
+    fn_container_index: Callable[..., Any]
+    u2_test_gate: Callable[..., Any]
 
     # Cargo boundary (P3-S2): the application-facing runner over `adapters.cargo`
     # — the semantic (rc, text) / (rc, text, diags) level engines and scripted
@@ -961,6 +970,10 @@ def build_app(
         ),
         emitter=JsonlEventEmitter(events_log, run_context if run_context is not None else {}),
         ask_per_fn_body=helpers.ask_per_fn_body,
+        collect_impl_blocks=helpers.collect_impl_blocks,
+        compile_error_frontier=helpers.compile_error_frontier,
+        fn_container_index=helpers.fn_container_index,
+        u2_test_gate=helpers.u2_test_gate,
         fill_roles=fill_roles,
         augment_roles=augment_roles,
         genesis_audit_deps=GenesisAuditDeps(

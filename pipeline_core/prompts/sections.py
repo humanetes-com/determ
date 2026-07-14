@@ -860,7 +860,10 @@ def format_type_for_prompt(rec: TypeRecord) -> str:
                 # 120 chars of the sig (covers virtually all real fn sigs).
                 if len(sig) > 120:
                     sig = sig[:117] + "..."
-                sigs.append((mn, sig.strip(), bool(m.is_exactly_pub)))
+                # Conjunction: is_exactly_pub defaults True when absent (pre-
+                # field artifact / stale extractor) — alone it would render a
+                # PRIVATE method as `pub`; is_pub can only narrow.
+                sigs.append((mn, sig.strip(), bool(m.is_pub and m.is_exactly_pub)))
         if sigs:
             lines.append("  methods (sig shown; call with .name(args)):")
             # Cap to top 10 methods to keep prompts compact for types with
