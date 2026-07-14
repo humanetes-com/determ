@@ -38,6 +38,11 @@ def public_api_from_source(
 
     Output mirrors the legacy format: `pub struct Name { f: T, ... }`, `pub enum
     Name { A, B }`, `pub trait Name`, full pub fn signatures, `pub const NAME: T`.
+
+    Gated on `is_exactly_pub` (strictly `pub`), not `is_pub` (which folds
+    `pub(crate)`/`pub(super)` in) — this renders the literal text "pub ...", so
+    a `pub(crate)` item would otherwise show up as a factually wrong claim
+    about the crate's real external API.
     """
     lines: list[str] = []
     with tempfile.TemporaryDirectory() as _d:
@@ -50,7 +55,7 @@ def public_api_from_source(
         consts = enumerate_consts(_td) or []
 
     for t in types:
-        if not t.is_pub:
+        if not t.is_exactly_pub:
             continue
         if t.kind == "struct":
             if t.fields:
@@ -67,7 +72,7 @@ def public_api_from_source(
             lines.append(f"pub trait {t.name}")
 
     for f in fns:
-        if f.get("is_pub"):
+        if f.get("is_exactly_pub"):
             # sig_text starts at the `fn`/`unsafe`/`async` keyword (the extractor's sig span
             # excludes the visibility), so prepend `pub ` to match the API-listing convention.
             sig = " ".join((f.get("sig_text") or "").split())

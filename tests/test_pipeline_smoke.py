@@ -2529,8 +2529,8 @@ def test_slice6_models() -> None:
     fn_wire = {
         "file": "src/error.rs", "fn_name": "backtrace", "sig_text": "pub fn backtrace(&self) -> &Backtrace",
         "body_text": "unimplemented!()", "sig_byte_start": 10, "body_byte_start": 50, "body_byte_end": 70,
-        "cfg_predicates": ["feature = \"std\""], "is_pub": True, "container": "impl Error",
-        "has_unimplemented_body": True, "is_test": False,
+        "cfg_predicates": ["feature = \"std\""], "is_pub": True, "is_exactly_pub": True,
+        "container": "impl Error", "has_unimplemented_body": True, "is_test": False,
     }
     fr = FnRecord.from_dict(fn_wire)
     assert fr.fn_name == "backtrace" and fr.container == "impl Error" and fr.has_unimplemented_body
@@ -2546,6 +2546,7 @@ def test_slice6_models() -> None:
         "file": "src/lib.rs", "kind": "struct", "name": "Error", "generics": "", "definition": "struct Error",
         "fields": [{"name": "inner", "ty": "Own<ErrorImpl>", "is_pub": False}],
         "variants": [], "methods": [{"name": "new", "sig": "fn new() -> Self", "is_pub": True,
+                                     "is_exactly_pub": True,
                                      "cfg_predicates": ["feature = \"std\""]}], "is_pub": True,
         "is_exactly_pub": True,
     }

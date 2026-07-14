@@ -32,8 +32,8 @@ def _capture(tmp_path: Path, *, with_manifest_path: bool = True) -> ApiSurfaceCa
             TypeRecord(file="src/lib.rs", kind="struct", name="Error", is_pub=True),
         ],
         enumerate_fns=lambda walk_root: [
-            {"file": "src/lib.rs", "fn_name": "new", "is_pub": True},
-            {"file": "src/lib.rs", "fn_name": "_private", "is_pub": False},
+            {"file": "src/lib.rs", "fn_name": "new", "is_pub": True, "is_exactly_pub": True},
+            {"file": "src/lib.rs", "fn_name": "_private", "is_pub": False, "is_exactly_pub": False},
         ],
         is_test_file=lambda p, root: False,
         skip_dir_names=frozenset(),

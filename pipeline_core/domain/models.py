@@ -84,16 +84,21 @@ class MethodRecord:
     name: str = ""
     sig: str = ""
     is_pub: bool = False
+    # Strictly `Visibility::Public` — see TypeRecord.is_exactly_pub for why
+    # this is a separate field, not a redefinition of `is_pub`.
+    is_exactly_pub: bool = True
     cfg_predicates: tuple[str, ...] = ()
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> MethodRecord:
         return cls(name=d.get("name", ""), sig=d.get("sig", ""),
                    is_pub=bool(d.get("is_pub", False)),
+                   is_exactly_pub=bool(d.get("is_exactly_pub", True)),
                    cfg_predicates=_strs(d.get("cfg_predicates")))
 
     def to_dict(self) -> dict[str, Any]:
         return {"name": self.name, "sig": self.sig, "is_pub": self.is_pub,
+                "is_exactly_pub": self.is_exactly_pub,
                 "cfg_predicates": list(self.cfg_predicates)}
 
 
@@ -158,6 +163,11 @@ class FnRecord:
     body_byte_end: int = 0      # byte offset of the closing `}` (exclusive)
     cfg_predicates: tuple[str, ...] = ()
     is_pub: bool = False
+    # Strictly `Visibility::Public` — see TypeRecord.is_exactly_pub for why
+    # this is a separate field, not a redefinition of `is_pub`. Defaults to
+    # True (matches TypeRecord's default) so existing fixtures/tests that
+    # only set `is_pub` keep their prior meaning.
+    is_exactly_pub: bool = True
     container: str = ""         # "" free fn | "impl X for Y" | "trait T"
     has_unimplemented_body: bool = False
     is_test: bool = False       # carries a test attr (#[test]/#[tokio::test]/#[rstest]/…)
@@ -174,6 +184,7 @@ class FnRecord:
             body_byte_end=int(d.get("body_byte_end", 0)),
             cfg_predicates=_strs(d.get("cfg_predicates")),
             is_pub=bool(d.get("is_pub", False)),
+            is_exactly_pub=bool(d.get("is_exactly_pub", True)),
             container=d.get("container", ""),
             has_unimplemented_body=bool(d.get("has_unimplemented_body", False)),
             is_test=bool(d.get("is_test", False)),
@@ -190,6 +201,7 @@ class FnRecord:
             "body_byte_end": self.body_byte_end,
             "cfg_predicates": list(self.cfg_predicates),
             "is_pub": self.is_pub,
+            "is_exactly_pub": self.is_exactly_pub,
             "container": self.container,
             "has_unimplemented_body": self.has_unimplemented_body,
             "is_test": self.is_test,

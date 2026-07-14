@@ -83,7 +83,7 @@ def test_format_type_methods_dedup_truncate_and_overflow():
 
 def test_format_type_method_without_sig():
     rec = TypeRecord(kind="struct", name="S",
-                     methods=(MethodRecord(name="go", sig=""),))
+                     methods=(MethodRecord(name="go", sig="", is_exactly_pub=False),))
     out = format_type_for_prompt(rec)
     assert "fn go(...)  // sig unknown" in out
 
@@ -91,6 +91,19 @@ def test_format_type_method_without_sig():
 def test_format_type_empty_record():
     out = format_type_for_prompt(TypeRecord())
     assert out == "? ?"  # kind/name default to "?"
+
+
+def test_format_type_pub_crate_method_not_rendered_as_pub():
+    # debt #85: `pub(crate) fn helper(...)` is NOT part of the crate's
+    # external API — rendering it as "pub fn ..." is a factually wrong claim
+    # the model would act on. is_pub folds pub(crate) in; is_exactly_pub must
+    # be what gates the literal "pub " text.
+    rec = TypeRecord(kind="struct", name="S", methods=(
+        MethodRecord(name="helper", sig="fn helper(&self)",
+                     is_pub=True, is_exactly_pub=False),))
+    out = format_type_for_prompt(rec)
+    assert "fn helper(&self)" in out
+    assert "pub fn helper" not in out
 
 
 def _fn(name, body="", stub=False):
@@ -166,3 +179,19 @@ def test_gotcha_invented_field_frozen_layout_fires():
 def test_gotcha_ids_are_unique():
     ids = [g["id"] for g in RUST_GOTCHAS]
     assert len(ids) == len(set(ids))
+
+
+def test_gotcha_e0424_self_confusion_fires():
+    # M10 (plan_2): confirmed via starvation_miner on run 495747 — a trait
+    # method's `self` receiver bled into a companion free fn with a
+    # differently-named parameter, firing E0424 12+ times identically.
+    err = ("error[E0424]: expected value, found module `self`\n"
+           "   --> src/lib.rs:670:11\n"
+           "    |\n"
+           "669 |     pub fn not(cond: impl Bool) -> bool {\n"
+           "    |            --- this function can't have a `self` parameter")
+    out = gotchas_for_error(err)
+    assert "self_is_not_a_free_fn_parameter" in {
+        g["id"] for g in RUST_GOTCHAS if any(t in err for t in g["triggers"])}
+    assert "WRONG" in out and "RIGHT" in out
+    assert out.count("WRONG") >= 2

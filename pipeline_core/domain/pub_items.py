@@ -31,14 +31,18 @@ def pub_items_from_records(
 ) -> set[tuple[str, str]]:
     """{(kind, name)} for every pub struct/enum/trait/fn, excluding
     examples/benches/tests/skip-dirs. `fn_records` entries are the extractor's
-    dict shape: `{"file": str, "fn_name": str, "is_pub": bool, ...}`."""
+    dict shape: `{"file": str, "fn_name": str, "is_exactly_pub": bool, ...}`.
+
+    Uses `is_exactly_pub` (strictly `pub`), NOT `is_pub` (which folds
+    `pub(crate)`/`pub(super)` in) — this is the crate's EXTERNAL API surface;
+    a `pub(crate)` item is never part of it, however `is_pub` reads."""
     out: set[tuple[str, str]] = set()
     for t in type_records:
-        if t.is_pub and t.kind in {"struct", "enum", "trait"} and not _excluded(t.file):
+        if t.is_exactly_pub and t.kind in {"struct", "enum", "trait"} and not _excluded(t.file):
             out.add((t.kind, t.name))
     for f in fn_records:
         fn_file = str(f.get("file", ""))
         fn_name = str(f.get("fn_name", ""))
-        if f.get("is_pub") and not _excluded(fn_file):
+        if f.get("is_exactly_pub") and not _excluded(fn_file):
             out.add(("fn", fn_name))
     return out

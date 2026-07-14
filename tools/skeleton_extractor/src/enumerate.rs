@@ -34,6 +34,7 @@ impl<'a> FnEnumerator<'a> {
         fn_name: &str,
         attrs: &[syn::Attribute],
         is_pub: bool,
+        is_exactly_pub: bool,
         sig: &syn::Signature,
         block: &syn::Block,
     ) {
@@ -83,6 +84,7 @@ impl<'a> FnEnumerator<'a> {
             body_byte_end,
             cfg_predicates: cfgs,
             is_pub,
+            is_exactly_pub,
             container,
             has_unimplemented_body: body_looks_unimplemented(&body_text),
             is_test,
@@ -105,6 +107,7 @@ impl<'a> FnEnumerator<'a> {
                             item_fn.vis,
                             syn::Visibility::Public(_) | syn::Visibility::Restricted(_)
                         ),
+                        matches!(item_fn.vis, syn::Visibility::Public(_)),
                         &item_fn.sig,
                         &item_fn.block,
                     );
@@ -125,6 +128,7 @@ impl<'a> FnEnumerator<'a> {
                                     item_fn.vis,
                                     syn::Visibility::Public(_) | syn::Visibility::Restricted(_)
                                 ),
+                                matches!(item_fn.vis, syn::Visibility::Public(_)),
                                 &item_fn.sig,
                                 &item_fn.block,
                             );
@@ -149,6 +153,7 @@ impl<'a> FnEnumerator<'a> {
                             self.record_from_fn(
                                 &item_fn.sig.ident.to_string(),
                                 &item_fn.attrs,
+                                false,
                                 false,
                                 &item_fn.sig,
                                 block,
@@ -363,6 +368,7 @@ pub(crate) fn collect_types_and_methods(
                             name: itf.sig.ident.to_string(),
                             sig: render_type(&itf.sig).trim().to_string(),
                             is_pub: false,
+                            is_exactly_pub: false,
                             cfg_predicates: cfgs,
                         });
                     }
@@ -413,6 +419,7 @@ pub(crate) fn collect_types_and_methods(
                                 item_fn.vis,
                                 syn::Visibility::Public(_) | syn::Visibility::Restricted(_)
                             ),
+                            is_exactly_pub: matches!(item_fn.vis, syn::Visibility::Public(_)),
                             cfg_predicates: cfgs,
                         });
                     }

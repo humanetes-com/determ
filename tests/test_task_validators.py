@@ -173,7 +173,7 @@ def test_api_conformance_no_api_surface(tmp_path: Path) -> None:
 def test_api_conformance_all_present(tmp_path: Path) -> None:
     pub_items = {("struct", "Foo"), ("fn", "bar")}
     types = [TypeRecord(file="src/lib.rs", kind="struct", name="Foo", is_pub=True)]
-    fns = [{"fn_name": "bar", "is_pub": True, "file": "src/lib.rs"}]
+    fns = [{"fn_name": "bar", "is_pub": True, "is_exactly_pub": True, "file": "src/lib.rs"}]
     src = tmp_path / "src"
     src.mkdir()
     ok, reason = validate_task2_api_surface_conformance(

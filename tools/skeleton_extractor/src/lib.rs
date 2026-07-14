@@ -60,6 +60,41 @@ mod tests {
     }
 
     #[test]
+    fn fn_record_is_exactly_pub_excludes_restricted_visibility() {
+        use std::fs;
+        let tmp = std::env::temp_dir().join("skel_extractor_fn_pub_test");
+        if tmp.exists() {
+            fs::remove_dir_all(&tmp).unwrap();
+        }
+        fs::create_dir_all(&tmp).unwrap();
+        fs::write(
+            tmp.join("lib.rs"),
+            "pub fn fully() {} pub(crate) fn crate_only() {} fn private() {}",
+        )
+        .unwrap();
+        let recs = enumerate_fns_in_file(&tmp.join("lib.rs"), &tmp).unwrap();
+        let by_name: std::collections::BTreeMap<_, _> =
+            recs.iter().map(|r| (r.fn_name.as_str(), r)).collect();
+        assert!(by_name["fully"].is_pub && by_name["fully"].is_exactly_pub);
+        assert!(by_name["crate_only"].is_pub && !by_name["crate_only"].is_exactly_pub);
+        assert!(!by_name["private"].is_pub && !by_name["private"].is_exactly_pub);
+    }
+
+    #[test]
+    fn method_record_is_exactly_pub_excludes_restricted_visibility() {
+        let src = "struct S; impl S { pub fn fully(&self) {} pub(crate) fn crate_only(&self) {} fn private(&self) {} }";
+        let ast: syn::File = parse_file(src).unwrap();
+        let mut out = std::collections::BTreeMap::new();
+        collect_types_and_methods(&ast.items, "lib.rs", &mut out);
+        let methods = &out["S"].methods;
+        let by_name: std::collections::BTreeMap<_, _> =
+            methods.iter().map(|m| (m.name.as_str(), m)).collect();
+        assert!(by_name["fully"].is_pub && by_name["fully"].is_exactly_pub);
+        assert!(by_name["crate_only"].is_pub && !by_name["crate_only"].is_exactly_pub);
+        assert!(!by_name["private"].is_pub && !by_name["private"].is_exactly_pub);
+    }
+
+    #[test]
     fn stubs_free_function() {
         let out = skeletonise_str("pub fn answer() -> u32 { 42 }");
         assert!(out.contains("unimplemented"));

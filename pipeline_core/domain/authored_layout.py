@@ -10,7 +10,9 @@ leaves an ``unimplemented!()`` reference dangling and the scaffold won't
 compile).
 
 Tolerant, regex-free tag scanning (Hard Rule) mirroring the ``<FN>`` protocol
-parser; attribute values are HTML-unescaped (models emit XML-safe generics).
+parser; attribute values AND the item body are HTML-unescaped (some chat
+templates round-trip generics like ``Own<T>`` through an XML/HTML-safe layer,
+emitting ``Own&lt;T&gt;`` — left as-is, that text would splice as non-Rust).
 """
 from __future__ import annotations
 
@@ -92,7 +94,7 @@ def parse_authored_layout(reply: str) -> AuthoredLayout:
         close = reply.find(_CLOSE, gt + 1)
         if close == -1:
             break
-        definition = reply[gt + 1:close].strip()
+        definition = html.unescape(reply[gt + 1:close].strip())
         if name.strip() and definition:
             items.append(AuthoredItem(name.strip(), kind.strip(), definition))
         i = close + len(_CLOSE)

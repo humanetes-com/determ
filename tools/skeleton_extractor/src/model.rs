@@ -25,6 +25,9 @@ pub struct FnRecord {
     pub body_byte_end: usize,   // byte offset of the closing `}` (exclusive end of body)
     pub cfg_predicates: Vec<String>, // accumulated cfg predicates gating this fn
     pub is_pub: bool,           // any pub visibility (incl pub(crate), pub(super))
+    // Strictly `Visibility::Public` — see TypeRecord::is_exactly_pub for why
+    // this is a SEPARATE field from `is_pub` rather than a redefinition.
+    pub is_exactly_pub: bool,
     pub container: String, // "" for free fn, "impl X for Y" for inherent/trait impl, "trait T" for trait method
     pub has_unimplemented_body: bool, // body is a single `unimplemented!()` or annotated stub
     pub is_test: bool, // fn carries a test attribute (#[test], #[tokio::test], #[rstest], …)
@@ -62,6 +65,9 @@ pub struct MethodRecord {
     pub name: String,
     pub sig: String, // sig text up to but excluding `{`
     pub is_pub: bool,
+    // Strictly `Visibility::Public` — see TypeRecord::is_exactly_pub for why
+    // this is a separate field, not a redefinition of `is_pub`.
+    pub is_exactly_pub: bool,
     // Effective cfg predicates: the enclosing impl/trait block's cfgs unioned
     // with the method's own. Lets the pipeline drop methods that don't compile
     // in a given cluster's cfg-set (cluster-aware TYPES_IN_SCOPE).

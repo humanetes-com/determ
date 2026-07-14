@@ -623,6 +623,46 @@ RUST_GOTCHAS: list[dict[str, Any]] = [
         ),
     },
     {
+        # Live evidence (anyhow "stable" cluster, run 495747): a trait method
+        # `fn not(self) -> bool` and a SEPARATE free dispatcher fn
+        # `pub fn not(cond: impl Bool) -> bool` share a name; every fill for
+        # the trait impls also failed a stub in the free fn, whose body used
+        # `self` even though its OWN parameter is `cond` — E0424 "expected
+        # value, found module `self`" fired 12+ times identically across the
+        # run (starvation_miner cause=unknown, error_codes=['E0424']).
+        "id": "self_is_not_a_free_fn_parameter",
+        "summary": "E0424 `expected value, found module self` = you wrote `self` inside a fn that has NO `self` parameter (a free fn or a fn with a differently-named parameter). Use THAT fn's own parameter name — `self` only exists inside a method whose signature actually declares it.",
+        "triggers": {"E0424", "expected value, found module", "can't have a `self`", "this function can't have"},
+        "detail": (
+            "`self` is only a bound name inside a method whose OWN signature\n"
+            "declares it (`fn f(self)`/`fn f(&self)`/`fn f(&mut self)`). A FREE\n"
+            "function — even one that calls a method also named `f` — has its own\n"
+            "parameter name; writing `self` there resolves to the CURRENT MODULE\n"
+            "path instead (E0424), not the parameter.\n"
+            "  WRONG (dispatcher's own parameter is `value`, not `self`):\n"
+            "    trait Marker { fn flag(self) -> bool; }\n"
+            "    pub fn flag(value: impl Marker) -> bool {\n"
+            "        self.flag()                    // E0424 — no `self` here\n"
+            "    }\n"
+            "  RIGHT (use the fn's own parameter):\n"
+            "    pub fn flag(value: impl Marker) -> bool {\n"
+            "        value.flag()\n"
+            "    }\n"
+            "  WRONG (same mixup with a differently-shaped helper):\n"
+            "    pub fn describe(item: impl Show) -> String {\n"
+            "        format!(\"{}\", self)            // E0424 — parameter is `item`\n"
+            "    }\n"
+            "  RIGHT:\n"
+            "    pub fn describe(item: impl Show) -> String {\n"
+            "        format!(\"{}\", item)\n"
+            "    }\n"
+            "Before writing `self` in ANY fn body, check that fn's OWN signature\n"
+            "for a `self`/`&self`/`&mut self` parameter — if it isn't there\n"
+            "(free fn, or a parameter under a different name), use that\n"
+            "parameter's actual name instead."
+        ),
+    },
+    {
         # Live evidence (anyhow, recurring across runs): whole-file rewrites of
         # error.rs kept importing `crate::backtrace::{backtrace, backtrace_if_absent}`
         # — helpers the sibling module never defines — exploding one file's 3
@@ -810,7 +850,7 @@ def format_type_for_prompt(rec: TypeRecord) -> str:
         # Dedup by method name (same fn can appear in multiple impl blocks);
         # keep the first sig we saw. Then render WITH SIGNATURE (P6.1).
         seen: set[str] = set()
-        sigs: list[tuple[str, str, bool]] = []  # (name, sig, is_pub)
+        sigs: list[tuple[str, str, bool]] = []  # (name, sig, is_exactly_pub)
         for m in methods:
             mn = m.name
             if mn and mn not in seen:
@@ -820,12 +860,14 @@ def format_type_for_prompt(rec: TypeRecord) -> str:
                 # 120 chars of the sig (covers virtually all real fn sigs).
                 if len(sig) > 120:
                     sig = sig[:117] + "..."
-                sigs.append((mn, sig.strip(), bool(m.is_pub)))
+                sigs.append((mn, sig.strip(), bool(m.is_exactly_pub)))
         if sigs:
             lines.append("  methods (sig shown; call with .name(args)):")
             # Cap to top 10 methods to keep prompts compact for types with
             # many. The first 10 are typically the most-used.
             for mn, sig, is_pub in sigs[:10]:
+                # `pub ` is literal rendered text, so it must reflect TRUE
+                # external visibility (is_exactly_pub), not `pub(crate)`.
                 vis = "pub " if is_pub else ""
                 if sig:
                     lines.append(f"    {vis}{sig}")
