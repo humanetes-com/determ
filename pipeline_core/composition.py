@@ -344,6 +344,8 @@ class Helpers:
     # attribute_failures/build_test_reverse_map/filter_test_targets pre-exist
     # below in the S27 group):
     check_graceful_stop: Callable[..., Any]
+    # F11 M3: the stall-exit layout re-trigger action.
+    retrigger_layout: Callable[..., Any]
     scan_stub_records_for_cluster: Callable[..., Any]
     collect_impl_blocks_for_cluster: Callable[..., Any]
     # Same seams read through the LIVE pipeline._APP (swap-aware: tests
@@ -753,6 +755,7 @@ def build_app(
             escalate_to_producers=functools.partial(
                 escalate_frontier_to_producers, _attr_deps),
             checkpoint_fill_tree=_checkpoint_fill_tree,
+            retrigger_layout=helpers.retrigger_layout,
         ),
         impl_fill_deps=ImplFillDeps(
             build_dispatch_family_section=helpers.build_dispatch_family_section,

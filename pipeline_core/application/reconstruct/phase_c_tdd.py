@@ -64,6 +64,10 @@ class PhaseCTddDeps:
     # (project_dir, cluster_name, filled_dir, pass_count, iteration) -> None.
     # None disables checkpointing (heal then has only excision + skeleton).
     checkpoint_fill_tree: Callable[..., None] | None = None
+    # F11 M3: (project_dir, module, cluster_name, target_src_dir, error_text)
+    # -> RetriggerResult, tried once at the stall-exit before giving up on the
+    # cluster. None disables it — the exit behaves exactly as before F11 M3.
+    retrigger_layout: Callable[..., Any] | None = None
 
 
 def _log_attribution_gap(
@@ -448,6 +452,29 @@ def run_phase_c_tdd(
         # indefinitely. The frontier is now a hint about WHERE to look,
         # not a license to keep iterating.
         if stall >= max_stalls:
+            # F11 M3: before giving up, check whether the plateau is a private
+            # LAYOUT problem (t1.5 left a component frozen on the original
+            # scaffold, and this cluster's fills are fighting it) rather than
+            # N independently-hard fns. A successful re-author + surgical
+            # revert resets the stall counter and lets the loop continue
+            # against a layout the model can actually work with; a capped or
+            # failed attempt falls through to the unchanged exit below.
+            if deps.retrigger_layout is not None:
+                _retrig = deps.retrigger_layout(
+                    project_dir, module, cluster.name, target_src_dir, output)
+                if _retrig.fired and _retrig.succeeded:
+                    deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: layout "
+                         f"retrigger fired (cause={_retrig.cause}) — reverted "
+                         f"{_retrig.reverted_count} fn(s) to re-fill under the "
+                         "new layout; resetting stall budget.")
+                    deps.emit("phase_c.layout_retrigger.fired", data={
+                        "cluster": cluster.name, "iter": iter_n,
+                        "cause": _retrig.cause,
+                        "reverted_count": _retrig.reverted_count,
+                    })
+                    state.stalls = 0
+                    stall = 0
+                    continue
             deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: pass_count plateau "
                  f"{stall} iter(s) at best={best_pass}; stopping "
                  f"({len(eligible)} fn(s) still on frontier — will be "

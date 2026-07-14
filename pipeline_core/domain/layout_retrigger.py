@@ -19,12 +19,18 @@ from __future__ import annotations
 
 from enum import Enum, auto
 
+from pipeline_core.domain.models import FnLocator, FnRecord
 from pipeline_core.domain.rust_scan import contains_word
 from pipeline_core.domain.starvation import StarvationCause
 
 # Diagnostics that, when concentrated on the authored private types, mean the
-# LAYOUT (not the body) is the wall — a type/trait/field mismatch on those types.
-_LAYOUT_ATTRIBUTABLE_CODES = ("E0308", "E0599", "E0609", "E0277")
+# LAYOUT (not the body) is the wall — a type/trait/field mismatch on those
+# types. E0308/E0599/E0609/E0277 are cause B's body-vs-layout mismatches;
+# E0053/E0046/E0407 are cause A's frozen-shape rejections — both classes only
+# count as layout evidence when they ALSO name one of this cluster's private
+# types (see `classify_layout_retrigger`).
+_LAYOUT_ATTRIBUTABLE_CODES = (
+    "E0308", "E0599", "E0609", "E0277", "E0053", "E0046", "E0407")
 
 
 class LayoutRetriggerCause(Enum):
@@ -54,15 +60,42 @@ def classify_layout_retrigger(
 ) -> LayoutRetriggerCause:
     """Decide whether the cluster's layout should be re-authored.
 
-    A DESIGN_CONFLICT starvation always re-triggers (cause A). Otherwise, if the
-    cluster's fills exhausted AND the residual errors are layout-attributable on
-    the authored private types, re-trigger for cause B. Else NONE."""
+    BOTH causes require `_errors_hit_private_types` — independent textual
+    evidence that one of THIS cluster's authored/frozen private types is
+    actually implicated, not just an ordinary retriable body bug. This is
+    deliberately NOT "any DESIGN_CONFLICT retriggers": `starvation.py`'s
+    classifier returns DESIGN_CONFLICT for an E0609 "no field X on Y" line
+    whenever Y's name merely APPEARS in the prompt (a proxy for "not a lookup
+    gap"), regardless of whether X genuinely doesn't exist ANYWHERE — that
+    proxy is silent on receiver-type mixups (a body method treating `self` as
+    the wrong sibling type), which are fixable by an ordinary retry, not a
+    layout problem. Retriggering a whole-cluster private-layout re-author is
+    expensive and disruptive (§ `retrigger_layout.py`); requiring the private
+    type's own name in the error text is the same fingerprint LAYOUT_EXHAUSTION
+    already uses, now applied uniformly so a plain mislabeled bug can't fire it."""
+    if not _errors_hit_private_types(error_text, private_type_names):
+        return LayoutRetriggerCause.NONE
     if starvation_cause is StarvationCause.DESIGN_CONFLICT:
         return LayoutRetriggerCause.DESIGN_CONFLICT
-    if fills_exhausted and _errors_hit_private_types(error_text, private_type_names):
+    if fills_exhausted:
         return LayoutRetriggerCause.LAYOUT_EXHAUSTION
     return LayoutRetriggerCause.NONE
 
 
 def should_retrigger(cause: LayoutRetriggerCause) -> bool:
     return cause is not LayoutRetriggerCause.NONE
+
+
+def find_fns_referencing(
+    fn_records: list[FnRecord], names: frozenset[str],
+) -> list[FnLocator]:
+    """Every already-filled fn whose signature OR body names one of `names` —
+    the surgical revert scope after a component is re-authored: ONLY fns that
+    actually touch the retriggered types get reverted to stubs, everything
+    else in the cluster keeps its existing fill untouched."""
+    out: list[FnLocator] = []
+    for f in fn_records:
+        haystack = f.sig_text + " " + f.body_text
+        if any(contains_word(haystack, n) for n in names):
+            out.append(FnLocator(f.file, f.fn_name))
+    return out

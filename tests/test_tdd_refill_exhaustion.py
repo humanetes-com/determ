@@ -18,6 +18,7 @@ from pipeline_core.application.reconstruct.phase_c_tdd import (
     PhaseCTddDeps,
     run_phase_c_tdd,
 )
+from pipeline_core.application.retrigger_layout import RetriggerResult
 from pipeline_core.domain.models import BuildCluster, ClusterFillResult, FnLocator
 
 _WRONG = FnLocator("src/a.rs", "wrongfn")
@@ -57,7 +58,7 @@ def _deps(fill_calls: list[frozenset[FnLocator]]) -> PhaseCTddDeps:
     )
 
 
-def _run(deps: PhaseCTddDeps, tmp_path: Path, monkeypatch) -> dict[str, Any]:
+def _run(deps: PhaseCTddDeps, tmp_path: Path, monkeypatch) -> ClusterFillResult:
     monkeypatch.setenv("PHASE_C_TDD_BATCH_RATCHET", "0")   # isolate the residual
     monkeypatch.setenv("TDD_MAX_STALLS", "3")
     monkeypatch.setenv("TDD_REFILL_MAX_ATTEMPTS", "2")
@@ -106,11 +107,69 @@ def test_reset_exhaustion_fires_once_after_progress_then_stays_quiet(
         call_n[0] += 1
         return ClusterFillResult(fns_filled=1 if call_n[0] == 1 else 0, attempts=1)
 
+    def _reset_exhaustion_flags(pd, reason):
+        reset_reasons.append(reason)
+        return 1
+
     deps = replace(
         _deps([]),
         task2_fill_fns_one_by_one=_fill,
-        reset_exhaustion_flags=lambda pd, reason: (
-            reset_reasons.append(reason), 1)[1],
+        reset_exhaustion_flags=_reset_exhaustion_flags,
     )
     _run(deps, tmp_path, monkeypatch)
     assert len(reset_reasons) == 1, reset_reasons
+
+
+def test_layout_retrigger_resets_stall_and_continues_the_loop(
+        tmp_path: Path, monkeypatch) -> None:
+    # F11 M3: on the FIRST stall-exit, a successful retrigger must reset the
+    # stall budget and let the loop keep going (proven by MORE cargo runs
+    # than a bare TDD_MAX_STALLS=3 would allow) instead of marking fns
+    # exhausted and breaking. On the SECOND stall-exit (simulating a spent
+    # cap), it reports not-fired and the loop exits exactly as before F11 M3.
+    cargo_calls = [0]
+    retrig_calls: list[tuple] = []
+    events: list[tuple[str, dict]] = []
+
+    def _run_cargo(*a, **k):
+        cargo_calls[0] += 1
+        return (101, "test t1 ... FAILED\ntest result: FAILED. 3 passed; 1 failed")
+
+    def _retrigger(project_dir, module, cluster_name, target_src_dir, error_text):
+        retrig_calls.append((cluster_name, error_text))
+        if len(retrig_calls) == 1:
+            return RetriggerResult(fired=True, succeeded=True, reverted_count=2,
+                                   cause="LAYOUT_EXHAUSTION")
+        return RetriggerResult(fired=False, reason="cap reached")
+
+    deps = replace(
+        _deps([]),
+        run_cargo=_run_cargo,
+        retrigger_layout=_retrigger,
+        emit=lambda name, data=None: events.append((name, data or {})),
+    )
+    _run(deps, tmp_path, monkeypatch)
+    # 1st stall-exit retriggers (continues); 2nd stall-exit (cap spent) does
+    # not — strictly more cargo runs than the bare no-retrigger baseline
+    # below (4), proving the loop kept going past what would have exited it.
+    assert cargo_calls[0] > 4
+    assert len(retrig_calls) == 2
+    fired_events = [d for n, d in events if n == "phase_c.layout_retrigger.fired"]
+    assert len(fired_events) == 1
+    assert fired_events[0]["reverted_count"] == 2
+
+
+def test_omitting_retrigger_layout_preserves_prior_stall_exit_behaviour(
+        tmp_path: Path, monkeypatch) -> None:
+    # retrigger_layout defaults to None — the exit must behave EXACTLY as
+    # before F11 M3 (regression guard on the shared stall-exit hook).
+    cargo_calls = [0]
+
+    def _run_cargo(*a, **k):
+        cargo_calls[0] += 1
+        return (101, "test t1 ... FAILED\ntest result: FAILED. 3 passed; 1 failed")
+
+    deps = replace(_deps([]), run_cargo=_run_cargo)
+    assert deps.retrigger_layout is None
+    _run(deps, tmp_path, monkeypatch)
+    assert cargo_calls[0] == 4  # exits at the bare TDD_MAX_STALLS, no retrigger

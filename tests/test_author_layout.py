@@ -3,7 +3,10 @@ from __future__ import annotations
 
 from pipeline_core.application.author_layout import (
     AuthorLayoutDeps,
+    ComponentResult,
+    LayoutOutcome,
     author_layout,
+    component_outcome,
 )
 from pipeline_core.domain.behaviour import (
     BehaviourSpec,
@@ -109,3 +112,18 @@ def test_m13_gate_refuses_layout_sensitive_component_without_pins():
     assert d.files["src/error.rs"] == "struct ErrorImpl { vtable: u8 }\n"  # untouched
     assert d.prompts == []  # never even prompted the model
     assert any("GATED" in m for m in d.logs)
+
+
+def test_component_outcome_authored():
+    c = ComponentResult(item_names=("Foo",), authored=True)
+    assert component_outcome(c) is LayoutOutcome.AUTHORED
+
+
+def test_component_outcome_gated_takes_priority_over_authored_flag():
+    c = ComponentResult(item_names=("Foo",), authored=False, gated=True)
+    assert component_outcome(c) is LayoutOutcome.GATED
+
+
+def test_component_outcome_frozen_when_neither_authored_nor_gated():
+    c = ComponentResult(item_names=("Foo",), authored=False, reason="did not compile")
+    assert component_outcome(c) is LayoutOutcome.FROZEN

@@ -88,6 +88,11 @@ class LayoutPhaseDeps:
     symbol_inventory_text: Callable[[Path, str], str]
     author_deps_for: Callable[[Path, str], AuthorLayoutDeps]
     recompute_leaf_order: Callable[[Path, str], None]
+    # F11 M3 precondition: persist which component ended up authored/gated/
+    # frozen, so a later re-trigger can find "still on the original scaffold"
+    # without re-deriving reachability. Optional — an omitted store is a no-op
+    # (additive; the phase runs exactly as before F11 M3 existed).
+    save_layout_outcomes: Callable[[Path, AuthorLayoutResult], Path] | None = None
 
 
 def run_layout_phase(
@@ -118,6 +123,11 @@ def run_layout_phase(
             deps=deps.author_deps_for(project_dir, cluster),
         )
         results[cluster] = res
+        if deps.save_layout_outcomes is not None:
+            try:
+                deps.save_layout_outcomes(project_dir, res)
+            except Exception as e:
+                deps.log(f"  [t1.5] {cluster}: layout-outcomes persist failed (non-fatal): {e}")
         authored = sum(1 for c in res.components if c.authored)
         deps.log(
             f"  [t1.5] {cluster}: authored {authored}/{len(res.components)} "
@@ -145,6 +155,7 @@ def make_layout_phase_runner(
     skeleton_src_dir_for: Callable[[Path, str], Path],
     fn_name_counts: Callable[[Path], dict[str, int]],
     log: Callable[[str], None],
+    save_layout_outcomes: Callable[[Path, AuthorLayoutResult], Path] | None = None,
 ) -> Callable[[Path, str], None]:
     """Assemble the t1.5 phase runner from resident ports (composition helper —
     keeps pipeline.py thin per the shrink goal). Returns a no-op when disabled or
@@ -195,7 +206,8 @@ def make_layout_phase_runner(
             public_surface_text=_public_surface_text,
             symbol_inventory_text=lambda pd, c: "",
             author_deps_for=_author_deps_for,
-            recompute_leaf_order=_recompute_leaf_order)
+            recompute_leaf_order=_recompute_leaf_order,
+            save_layout_outcomes=save_layout_outcomes)
         run_layout_phase(project_dir, module_name,
                          [c.name for c in clusters], deps)
 

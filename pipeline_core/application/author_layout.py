@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from enum import Enum, auto
 
 from pipeline_core.domain.authored_layout import (
     AuthoredLayout,
@@ -43,6 +44,25 @@ class ComponentResult:
     authored: bool
     reason: str = ""
     gated: bool = False   # M13: skipped-on-purpose (harvest gap), not a failure
+
+
+class LayoutOutcome(Enum):
+    """What became of ONE connected component after a t1.5 pass — the shape
+    the F11 M3 re-trigger mechanism needs to find "which private types are
+    still on the ORIGINAL frozen scaffold" (FROZEN = every retry attempt
+    failed to compile; the model never got a layout it could work with)."""
+
+    AUTHORED = auto()   # a model-authored replacement compiles and was spliced
+    GATED = auto()      # M13 refused to author blind (harvest gap) — left frozen on purpose
+    FROZEN = auto()     # every authoring attempt failed to compile — reverted to the original
+
+
+def component_outcome(c: ComponentResult) -> LayoutOutcome:
+    if c.gated:
+        return LayoutOutcome.GATED
+    if c.authored:
+        return LayoutOutcome.AUTHORED
+    return LayoutOutcome.FROZEN
 
 
 @dataclass(frozen=True, slots=True)
