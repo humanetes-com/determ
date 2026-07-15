@@ -34,6 +34,11 @@ PID_EXTRACTION=$!
 "$SCRIPT_DIR/.venv/bin/python" tools/loc_ratchet.py \
     > "$GATE_TMP/loc.out" 2>&1 &
 PID_LOC=$!
+# The extractor's own unit tests ran in NO gate before — a rendering regression
+# there (e.g. definitions the t1.5 splice can never locate) only surfaced live.
+(cd "$SCRIPT_DIR/tools/skeleton_extractor" && cargo test --quiet) \
+    > "$GATE_TMP/cargo.out" 2>&1 &
+PID_CARGO=$!
 
 FAILED=0
 gate() {  # gate <name> <pid> <outfile>
@@ -53,6 +58,7 @@ gate "ruff" "$PID_RUFF" "$GATE_TMP/ruff.out"
 gate "layer contract (adapters > application > ports > domain)" "$PID_LAYERS" "$GATE_TMP/layers.out"
 gate "extraction invariants" "$PID_EXTRACTION" "$GATE_TMP/extraction.out"
 gate "LOC ratchet (god-files only shrink)" "$PID_LOC" "$GATE_TMP/loc.out"
+gate "skeleton-extractor cargo test" "$PID_CARGO" "$GATE_TMP/cargo.out"
 [ "$FAILED" -eq 0 ] || exit 1
 
 echo ""

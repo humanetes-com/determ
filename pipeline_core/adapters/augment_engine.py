@@ -15,7 +15,7 @@ import shlex
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from ..domain.cfg import CfgSet
 from ..domain.models import BuildCluster
@@ -62,6 +62,17 @@ class StaticRustTestAugmentor(TestAugmentor):
         return "proc-macro" not in crate_type.lower()
 
 
+class AugmentModuleFn(Protocol):
+    """Exact call shape ``augment_module`` is invoked with. A plain
+    ``Callable[..., ...]`` erases the parameter list, letting an arity
+    mismatch in the composition-root binding pass mypy and crash live."""
+
+    def __call__(self, project_dir: Path, module_name: str, module_dir: Path,
+                 crate_type: str, /, *, existing_test_files: set[str],
+                 project_context: str,
+                 coverage_strategy: str) -> tuple[float, int, bool, str]: ...
+
+
 class CargoAugmentEngine:
     def __init__(
         self, *,
@@ -70,7 +81,7 @@ class CargoAugmentEngine:
         build_timeout: int,
         default_setup: Path,
         collect_test_files: Callable[[Path], list[tuple[str, str]]],
-        augment_module: Callable[..., tuple[float, int, bool, str]],
+        augment_module: AugmentModuleFn,
     ) -> None:
         self._log = log
         self._cargo_env = cargo_env

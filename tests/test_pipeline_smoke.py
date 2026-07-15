@@ -2498,6 +2498,23 @@ def test_slice5b_task0c() -> None:
     print("  OK  task0c engine extracted behind orchestrator (slice 5b)")
 
 
+def test_augment_engine_callback_accepts_engine_call_shape() -> None:
+    """AugmentEngine.augment_module forwards crate_type POSITIONALLY (4th arg) to the
+    injected callback; a 3-positional composition lambda crashes t0c live with
+    'takes 3 positional arguments but 4 were given'. Bind the exact call shape."""
+    import inspect
+    from pathlib import Path
+
+    import pipeline
+
+    cb = pipeline._APP.augment_roles.engine._augment_module
+    inspect.signature(cb).bind(
+        Path("."), "m", Path("."), "bin",
+        existing_test_files=set(), project_context="", coverage_strategy="",
+    )
+    print("  OK  augment-engine callback matches the engine call shape")
+
+
 def test_slice6_models() -> None:
     """Slice 6: domain dataclasses for the Rust↔Python extractor seam. Verify tolerant
     from_dict (missing keys default, nested records parse, extra keys ignored) and that

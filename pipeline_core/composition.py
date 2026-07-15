@@ -50,6 +50,7 @@ from pipeline_core.adapters.artifacts import (
 )
 from pipeline_core.adapters.ask_client import AskClient
 from pipeline_core.adapters.augment_engine import (
+    AugmentModuleFn,
     CargoAugmentEngine,
     StaticRustTestAugmentor,
 )
@@ -746,7 +747,7 @@ class Helpers:
     enumerate_mods: Callable[..., Any]
     find_tests_referencing_fn: Callable[..., Any]
     git_tag: Callable[..., Any]
-    task0c_augment_module: Callable[..., Any]
+    task0c_augment_module: AugmentModuleFn
     module_of: Callable[..., Any]
     types_section_for_fix: Callable[..., Any]
     bound_methods_section_for: Callable[..., Any]

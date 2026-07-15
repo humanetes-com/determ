@@ -49,6 +49,35 @@ mod tests {
     }
 
     #[test]
+    fn type_definition_locatable_in_skeleton_rendering() {
+        // The t1.5 layout splice locates a frozen definition inside a skeleton
+        // file (prettyplease output) by whitespace-tolerant text match. A
+        // token-stream rendering turns `/// doc` into `# [doc = "..."]`, which
+        // never matches — every doc-commented private type froze silently.
+        let src = "/// A doc'd counter.\n\
+                   #[derive(Debug, Default)]\n\
+                   pub struct Counter { value: u32 }\n\
+                   mod inner {\n\
+                       /// Inner doc'd enum.\n\
+                       pub enum Reason { A, B }\n\
+                   }";
+        let ast: syn::File = parse_file(src).unwrap();
+        let rendered = prettyplease::unparse(&ast); // what skeletonise writes
+        let mut out = std::collections::BTreeMap::new();
+        collect_types_and_methods(&ast.items, "lib.rs", &mut out);
+        let strip = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+        for name in ["Counter", "Reason"] {
+            let def = &out[name].definition;
+            assert!(def.contains("///"), "{name}: doc comment lost:\n{def}");
+            assert!(!def.contains("doc ="), "{name}: token-soup doc attr:\n{def}");
+            assert!(
+                strip(&rendered).contains(&strip(def)),
+                "{name}: definition not locatable in skeleton rendering:\n{def}\n---\n{rendered}"
+            );
+        }
+    }
+
+    #[test]
     fn is_exactly_pub_excludes_restricted_visibility() {
         let src = "pub struct Fully; pub(crate) struct CrateOnly; struct Private;";
         let ast: syn::File = parse_file(src).unwrap();

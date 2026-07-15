@@ -1124,7 +1124,7 @@ _HELPERS = _Helpers(
     collect_test_files=lambda *a, **k: collect_test_files(*a, **k),
     enumerate_mods=lambda sd: _APP.structure.enumerate_mods(sd),
     git_tag=lambda *a, **k: git_tag(*a, **k),
-    task0c_augment_module=lambda pd, mn, md, **k: _task0c_impl(pd, mn, md, _APP.task0c_deps, **k),
+    task0c_augment_module=lambda pd, mn, md, crate_type="", **k: _task0c_impl(pd, mn, md, _APP.task0c_deps, crate_type, **k),
     scan_stub_records_via_app=lambda *a, **k: _APP.scan_stub_records_for_cluster(*a, **k),
     collect_impl_blocks_via_app=lambda *a, **k: _APP.collect_impl_blocks_for_cluster(*a, **k),
     classify_phase_c_test_failures=lambda *a, **k: _classify_phase_c_test_failures(*a, **k),

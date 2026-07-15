@@ -239,6 +239,21 @@ pub(crate) fn render_type<T: quote::ToTokens>(t: &T) -> String {
     quote::quote!(#t).to_string()
 }
 
+/// Render a whole item exactly as the skeleton emitter prints it.
+/// The private-surface splice locates a frozen definition inside a skeleton
+/// file (itself `prettyplease::unparse` output) by whitespace-tolerant text
+/// match; a `quote!` token-stream rendering turns `/// doc` into
+/// `# [doc = "..."]`, which can never match the printed file, so every
+/// doc-commented type silently failed to locate. Same printer ⇒ same tokens.
+pub(crate) fn render_item_definition(item: &Item) -> String {
+    let file = syn::File {
+        shebang: None,
+        attrs: Vec::new(),
+        items: vec![item.clone()],
+    };
+    prettyplease::unparse(&file).trim().to_string()
+}
+
 pub(crate) fn collect_types_and_methods(
     items: &[Item],
     file_rel: &str,
@@ -277,7 +292,7 @@ pub(crate) fn collect_types_and_methods(
                     syn::Visibility::Public(_) | syn::Visibility::Restricted(_)
                 );
                 let is_exactly_pub = matches!(s.vis, syn::Visibility::Public(_));
-                let definition = quote::quote!(#s).to_string();
+                let definition = render_item_definition(item);
                 // Update the entry: an earlier impl block may have created a
                 // placeholder with empty fields. We always overwrite the
                 // struct-level fields (definition, generics, kind, fields).
@@ -313,7 +328,7 @@ pub(crate) fn collect_types_and_methods(
                     syn::Visibility::Public(_) | syn::Visibility::Restricted(_)
                 );
                 let is_exactly_pub = matches!(e.vis, syn::Visibility::Public(_));
-                let definition = quote::quote!(#e).to_string();
+                let definition = render_item_definition(item);
                 out_types.entry(name.clone()).or_insert(TypeRecord {
                     file: file_rel.to_string(),
                     kind: "enum".to_string(),
@@ -335,7 +350,7 @@ pub(crate) fn collect_types_and_methods(
                     syn::Visibility::Public(_) | syn::Visibility::Restricted(_)
                 );
                 let is_exactly_pub = matches!(t.vis, syn::Visibility::Public(_));
-                let definition = quote::quote!(#t).to_string();
+                let definition = render_item_definition(item);
                 out_types.entry(name.clone()).or_insert(TypeRecord {
                     file: file_rel.to_string(),
                     kind: "type".to_string(),
@@ -357,7 +372,7 @@ pub(crate) fn collect_types_and_methods(
                     syn::Visibility::Public(_) | syn::Visibility::Restricted(_)
                 );
                 let is_exactly_pub = matches!(tr.vis, syn::Visibility::Public(_));
-                let definition = quote::quote!(#tr).to_string();
+                let definition = render_item_definition(item);
                 let mut methods = Vec::new();
                 let tr_cfgs = extract_cfg_predicates(&tr.attrs);
                 for ti in &tr.items {
