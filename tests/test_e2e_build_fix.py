@@ -21,6 +21,7 @@ from pathlib import Path
 import pipeline
 from tests.harness import (  # noqa: I001
     diag,
+    install_app_seams,
     install_fake_extractor,
     install_scripted_attribution,
     install_scripted_cargo,
@@ -59,7 +60,7 @@ def _setup(monkeypatch, tmp_path: Path) -> Path:
     install_fake_extractor(
         monkeypatch, fns=lambda sd: pipeline._STRUCTURE.enumerate_fns(sd),
         types=[])
-    monkeypatch.setattr(pipeline, "_fn_container_index", lambda *a, **k: {})
+    install_app_seams(monkeypatch, fn_container_index=lambda *a, **k: {})
     return ws
 
 

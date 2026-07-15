@@ -36,7 +36,7 @@ def test_filter_test_targets_drops_test_keys(monkeypatch: pytest.MonkeyPatch) ->
         ("src/lib.rs", "cap_limit"): {"default_cap_limit"},       # production → kept
         ("src/lib.rs", "extra_cap_limit"): {"extra_cap_limit"},   # test oracle → dropped
     }
-    out = pipeline._filter_test_targets(frontier, Path("/proj"))
+    out = pipeline._APP.phase_c_tdd_deps.filter_test_targets(frontier, Path("/proj"))
     assert ("src/lib.rs", "cap_limit") in out
     assert ("src/lib.rs", "extra_cap_limit") not in out
 
@@ -46,5 +46,5 @@ def test_filter_test_targets_noop_without_tests(monkeypatch: pytest.MonkeyPatch)
     install_fake_extractor(
         monkeypatch, fns=[{"file": "src/lib.rs", "fn_name": "f", "cfg_predicates": []}])
     frontier = {("src/lib.rs", "f"): {"t"}}
-    assert pipeline._filter_test_targets(frontier, Path("/proj")) == frontier
-    assert pipeline._filter_test_targets({}, Path("/proj")) == {}
+    assert pipeline._APP.phase_c_tdd_deps.filter_test_targets(frontier, Path("/proj")) == frontier
+    assert pipeline._APP.phase_c_tdd_deps.filter_test_targets({}, Path("/proj")) == {}

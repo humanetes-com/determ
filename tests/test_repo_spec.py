@@ -115,6 +115,6 @@ def test_builders_carry_repository_specifications(tmp_path: Path) -> None:
     # Facade restore safety: bind is idempotent with pipeline's provider.
     runtime.bind(runtime.PromptRuntimeDeps(
         annotate_file_view=pipeline._annotate_file_view,
-        promoted_error_rules=pipeline._promoted_error_rules,
+        promoted_error_rules=pipeline._MODEL_NOTES_STORE.promoted_error_rules,
         repo_spec_section=pipeline._repo_spec_section,
     ))

@@ -60,6 +60,8 @@ class TestOutcome:
     ``"command_not_found"``); a run that produced pass/fail counts leaves it
     ``None``. The two are mutually exclusive by construction."""
 
+    __test__ = False  # domain VO, not a pytest class (silences collection warning)
+
     passed: bool
     pass_count: int = 0
     fail_count: int = 0

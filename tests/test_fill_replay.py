@@ -29,7 +29,7 @@ CANNED_TWO_MEMBERS = (
 
 
 def _splice(p: Path, rec: dict) -> bool:
-    ok, _reason, _delta = pipeline._splice_fn_with_where(
+    ok, _reason, _delta = pipeline._APP.impl_fill_deps.splice_fn_with_where(
         p, rec["block"], rec["fn_name"], rec["body"], rec["where_clause"]
     )
     return ok

@@ -10,8 +10,8 @@ as cargo does (OFF) while leaving builtin/target cfgs undecidable (never
 over-excludes — FR-018)."""
 from __future__ import annotations
 
-import pipeline
 from pipeline_core.domain import cfg as _cfg
+from pipeline_core.domain.test_count import count_test_fns_cfg_aware
 
 
 def _excludes(pred, cfg_true=frozenset(), cfg_false=frozenset(), defaults=frozenset()):
@@ -61,9 +61,9 @@ def test_count_test_fns_excludes_custom_gated_only() -> None:
         "#[cfg(not(extra_cap))]\n#[test]\nfn default_only() {}\n"  # runs in default → kept
         "#[cfg(unix)]\n#[test]\nfn on_unix() {}\n"          # builtin → kept
     )
-    assert pipeline._count_test_fns_cfg_aware(txt, set(), set()) == 3
+    assert count_test_fns_cfg_aware(txt, set(), set()) == 3
     # when extra_cap IS the active cluster, the gated test counts and not() drops.
-    assert pipeline._count_test_fns_cfg_aware(
+    assert count_test_fns_cfg_aware(
         txt, {"extra_cap"}, {"feature=\"extra_cap\""}) == 3
 
 
@@ -77,13 +77,13 @@ def test_file_level_cfg_gate_excludes_whole_file() -> None:
         "#[test]\nfn a() {}\n#[test]\nfn b() {}\n"
     )
     # stable cluster: extra_cap + feature both false → whole file excluded → 0.
-    assert pipeline._count_test_fns_cfg_aware(
+    assert count_test_fns_cfg_aware(
         txt, set(), {"extra_cap", "feature = \"extra_cap\""}) == 0
     # extra_cap cluster: predicate true → both tests counted.
-    assert pipeline._count_test_fns_cfg_aware(
+    assert count_test_fns_cfg_aware(
         txt, {"extra_cap", "feature = \"extra_cap\""}, set()) == 2
     # no top-level gate → unaffected (both counted).
-    assert pipeline._count_test_fns_cfg_aware(
+    assert count_test_fns_cfg_aware(
         "#[test]\nfn a() {}\n#[test]\nfn b() {}\n", set(),
         {"extra_cap", "feature = \"extra_cap\""}) == 2
 
@@ -96,7 +96,7 @@ def test_count_test_fns_comment_lines_in_attr_block_skipped() -> None:
     txt = ("#[cfg(extra_cap)]\n"
            "// a comment between attrs\n"
            "#[test]\nfn gated() {}\n")
-    assert pipeline._count_test_fns_cfg_aware(txt, set(), set()) == 0
+    assert count_test_fns_cfg_aware(txt, set(), set()) == 0
 
 
 def test_count_test_fns_in_records_gating() -> None:
@@ -107,7 +107,7 @@ def test_count_test_fns_in_records_gating() -> None:
         {"is_test": True, "cfg_predicates": ["extra_cap"]},  # custom off → dropped
         {"is_test": True},                                  # no predicates key
     ]
-    assert count_test_fns_in_records(recs, set(), set()) == 2
+    assert count_test_fns_in_records(recs, set(), set()) == 2  # type: ignore[arg-type]
 
 
 def test_undeclared_gen_tests_sibling_still_counts(tmp_path) -> None:

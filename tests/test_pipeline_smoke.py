@@ -23,10 +23,21 @@ from pathlib import Path
 import pytest
 
 from pipeline_core.adapters import gen_tests_storage as _gts
+from pipeline_core.application.reconstruct import (
+    cluster_membership as _membership,
+)
+from pipeline_core.application.validate import (
+    validate_task2_api_surface_conformance as _validate_task2_api,
+)
 from pipeline_core.domain import coverage_annotation as _cov_ann
 from pipeline_core.domain import generation as _gen_dom
 from pipeline_core.domain import llm_output as _llm_out
 from pipeline_core.domain import text as _text_dom
+from pipeline_core.domain.generation import (
+    has_gen_tests_mod_decl,
+    is_gen_tests_decl_only_src,
+)
+from pipeline_core.prompts.sections import format_api_surface_section
 
 REPO = Path(__file__).resolve().parent.parent
 FIXTURE = REPO / "fixtures" / "tiny"
@@ -93,17 +104,6 @@ def _fake_run_cargo(rc: int, out: str):
     return _fn
 
 
-def test_run_scoped_tests_shim_routes_through_run_cargo(monkeypatch, tmp_path) -> None:
-    """Slice-9 seam: the _run_scoped_tests shim MUST go through pipeline._run_cargo
-    (the monkeypatchable attr), not ADAPTERS.cargo."""
-    import pipeline
-
-    fake = _fake_run_cargo(0, "test a ... ok\ntest b ... ok")
-    monkeypatch.setattr(pipeline, "_run_cargo", fake)
-    assert pipeline._run_scoped_tests("cargo test", tmp_path, {}) == (True, 0, "", set())
-    assert fake.calls == ["cargo test"]  # routed through the seam
-
-
 def test_u2_test_gate_shim_routes_and_blocks(monkeypatch, tmp_path) -> None:
     """Slice-11 seam: the _u2_test_gate shim composes via pipeline._run_cargo + _guard."""
     import pipeline
@@ -128,12 +128,12 @@ def test_extract_self_note_shim(monkeypatch) -> None:
 
     note = "this is a sufficiently long self-correction note about lifetimes"
     monkeypatch.setattr(pipeline, "_ask_raw", lambda *a, **k: note)
-    assert pipeline._extract_self_note("failbody", "err excerpt", "fixbody") == note
+    assert pipeline._MODEL_NOTES_STORE.extract_self_note("failbody", "err excerpt", "fixbody") == note
     # model declines → None
     monkeypatch.setattr(pipeline, "_ask_raw", lambda *a, **k: "NONE")
-    assert pipeline._extract_self_note("failbody", "err excerpt", "fixbody") is None
+    assert pipeline._MODEL_NOTES_STORE.extract_self_note("failbody", "err excerpt", "fixbody") is None
     # empty inputs short-circuit before any ask
-    assert pipeline._extract_self_note("", "err", "fix") is None
+    assert pipeline._MODEL_NOTES_STORE.extract_self_note("", "err", "fix") is None
 
 
 def test_gen_tests_helpers() -> None:
@@ -193,7 +193,7 @@ mod gen_tests_1 {
 
     # Strip decls from the source text (helper used in many places).
     src_text = src.read_text()
-    stripped = pipeline._strip_all_gen_tests_decls(src_text)
+    stripped = _gen_dom.strip_all_gen_tests_decls(src_text)
     assert "mod gen_tests_1" not in stripped
     assert "mod gen_tests_2" not in stripped
     assert "pub fn add" in stripped, "original source content must remain"
@@ -236,7 +236,8 @@ def test_gen_tests_origin_cfgs() -> None:
         + pipeline._build_gen_tests_decl("error.gen_tests_7.rs", 7, "#[allow(clippy::all)]",
                                          cluster_cfg_attr=nightly_cfg)
     )
-    origins = pipeline._gen_tests_origin_cfgs(src)
+    from pipeline_core.domain.generation import gen_tests_origin_cfgs
+    origins = gen_tests_origin_cfgs(src)
     assert origins[1] == "", "stable-origin (no extra cfg) must map to ''"
     assert origins[7] == nightly_cfg, "nightly-origin must recover the error_generic_member_access gate"
 
@@ -431,7 +432,8 @@ def test_prune_redundant_clusters() -> None:
                                   active_cfg=["rare_cfg"], prompt_nightly_rule="",
                                   is_default=False),
         ]
-        kept = pipeline._prune_redundant_clusters(clusters, Path(td), cargo_toml_path=cargo,
+        from pipeline_core.adapters.cluster_pruning import prune_redundant_clusters
+        kept = prune_redundant_clusters(clusters, Path(td), cargo_toml_path=cargo,
                                                    min_gated_items=5)
         kept_names = {c.name for c in kept}
         # stable (baseline) → kept
@@ -463,7 +465,8 @@ def test_filter_tests_for_cluster() -> None:
         ("tests/no_std.rs", '#![cfg(not(feature = "std"))]\n\nfn t4() {}'),
         ("tests/unknown.rs", "#![cfg(some_random)]\n\nfn t5() {}"),
     ]
-    filtered = pipeline._filter_tests_for_cluster(tests, cluster_stable)
+    from pipeline_core.application.reconstruct import cluster_membership as _cm
+    filtered = _cm.filter_tests_for_cluster(tests, cluster_stable)
     rels = {r for r, _ in filtered}
     assert "tests/always.rs" in rels
     assert "tests/needs_nightly.rs" not in rels  # nightly is false in stable
@@ -565,27 +568,23 @@ def test_cluster_gate_predicate_is_satisfiable() -> None:
 def test_run_scoped_tests() -> None:
     """Plan 10 U1: reusable scoped-test check classifies pass/fail/timeout and
     returns failure detail for prompt feedback."""
-    import pipeline
-    _orig = pipeline._run_cargo
-    try:
-        _P = __import__("pathlib").Path(".")
-        # all pass → (True, 0, "", set())
-        pipeline._run_cargo = lambda *a, **k: (0, "test result: ok. 5 passed; 0 failed")
-        ok, n, detail, failed = pipeline._run_scoped_tests("cargo test", _P, {})
-        assert ok and n == 0 and detail == "" and failed == set(), (ok, n, detail, failed)
+    from pipeline_core.application.reconstruct.cargo_runner import run_scoped_tests
+    _P = __import__("pathlib").Path(".")
+    # all pass → (True, 0, "", set())
+    run = lambda *a, **k: (0, "test result: ok. 5 passed; 0 failed")  # noqa: E731
+    ok, n, detail, failed = run_scoped_tests(run, "cargo test", _P, {}, err_cap=1200)
+    assert ok and n == 0 and detail == "" and failed == set(), (ok, n, detail, failed)
 
-        # failures → (False, count>0, detail tail, failed names set)
-        out = "test foo::bar ... FAILED\ntest result: FAILED. 4 passed; 1 failed\nassertion `left == right` failed"
-        pipeline._run_cargo = lambda *a, **k: (101, out)
-        ok, n, detail, failed = pipeline._run_scoped_tests("cargo test", _P, {})
-        assert (not ok) and n == 1 and "assertion" in detail and "foo::bar" in failed, (ok, n, detail, failed)
+    # failures → (False, count>0, detail tail, failed names set)
+    out = "test foo::bar ... FAILED\ntest result: FAILED. 4 passed; 1 failed\nassertion `left == right` failed"
+    run = lambda *a, **k: (101, out)  # noqa: E731
+    ok, n, detail, failed = run_scoped_tests(run, "cargo test", _P, {}, err_cap=1200)
+    assert (not ok) and n == 1 and "assertion" in detail and "foo::bar" in failed, (ok, n, detail, failed)
 
-        # timeout → inconclusive (False, -1, ..., set())
-        pipeline._run_cargo = lambda *a, **k: (-1, "")
-        ok, n, detail, failed = pipeline._run_scoped_tests("cargo test", _P, {})
-        assert (not ok) and n == -1 and failed == set(), (ok, n, detail, failed)
-    finally:
-        pipeline._run_cargo = _orig
+    # timeout → inconclusive (False, -1, ..., set())
+    run = lambda *a, **k: (-1, "")  # noqa: E731
+    ok, n, detail, failed = run_scoped_tests(run, "cargo test", _P, {}, err_cap=1200)
+    assert (not ok) and n == -1 and failed == set(), (ok, n, detail, failed)
     print("  OK  _run_scoped_tests (Plan 10 U1)")
 
 
@@ -682,7 +681,6 @@ def test_collect_sibling_filled_bodies() -> None:
 def test_count_test_fns_cfg_aware() -> None:
     """FR-024: cfg-aware test counter must skip #[test] fns gated by a
     #[cfg(...)] whose predicate is in the cluster's cfg_false set."""
-    import pipeline
     text = (
         "#[test]\nfn t_always() {}\n"
         "\n"
@@ -698,7 +696,7 @@ def test_count_test_fns_cfg_aware() -> None:
     # → excluded (the 2026-06-16 hardcrate over-count fix; was wrongly "kept" via
     # undecidable). t_always counted; t_std_or_default kept (`not(anyhow_no_core_error)`
     # is true — that custom cfg is off by default). → 2.
-    n_stable = pipeline._count_test_fns_cfg_aware(
+    n_stable = __import__('pipeline_core.domain.test_count',fromlist=['x']).count_test_fns_cfg_aware(
         text,
         cfg_true=set(),
         cfg_false={"error_generic_member_access", "anyhow_no_core_error"},
@@ -706,7 +704,7 @@ def test_count_test_fns_cfg_aware() -> None:
     assert n_stable == 2, f"stable count expected 2, got {n_stable}"
     # Nightly: error_generic_member_access ∈ cfg_true → t_nightly_only kept;
     # t_unknown still excluded (custom flag, off). → 3.
-    n_nightly = pipeline._count_test_fns_cfg_aware(
+    n_nightly = __import__('pipeline_core.domain.test_count',fromlist=['x']).count_test_fns_cfg_aware(
         text,
         cfg_true={"error_generic_member_access"},
         cfg_false=set(),
@@ -789,7 +787,7 @@ def test_build_test_reverse_map() -> None:
             "#[test]\nfn t_two() { assert_eq!(beta(), 2); }\n"
         )
         test_files = list(tests_dir.rglob("*.rs"))
-        rev = pipeline._build_test_reverse_map(test_files, src)
+        rev = pipeline._APP.phase_c_tdd_deps.build_test_reverse_map(test_files, src)
         # Both test fns should map to alpha and beta (gamma not referenced
         # by name in the test file, but it's in src — coarse reverse map
         # is file-level, so it may or may not appear; either way both
@@ -1047,26 +1045,6 @@ def test_file_cfg_predicate_adjacent_mod_decls() -> None:
     print("  OK  _file_cfg_predicate adjacent mod decls (AST + fallback)")
 
 
-def test_cluster_extractor_args() -> None:
-    """Plan 4: cluster → CLI args translation."""
-    import pipeline
-
-    cluster = pipeline.BuildCluster(
-        name="stable", env_extra={}, tarpaulin_exclude_files=[],
-        excluded_cfg=["nightly"],
-        active_cfg=['feature = "std"'],
-        prompt_nightly_rule="",
-    )
-    args = pipeline._cluster_extractor_args(cluster)
-    assert "--cfg-true" in args
-    assert 'feature = "std"' in args
-    assert "--cfg-false" in args
-    assert "nightly" in args
-    # None → empty.
-    assert pipeline._cluster_extractor_args(None) == []
-    print("  OK  _cluster_extractor_args")
-
-
 def test_buildcluster_features_toolchain() -> None:
     """Plan 4: BuildCluster derives features and toolchain from cfg lists."""
     import pipeline
@@ -1257,8 +1235,8 @@ def test_api_surface_conformance() -> None:
     pipeline._API_SURFACE.capture(workspace, workspace, module_name)
 
     # All pub items present → ok.
-    ok, report = pipeline.validate_task2_api_surface_conformance(
-        workspace, module_name, workspace
+    ok, report = _validate_task2_api(
+        workspace, module_name, workspace, pipeline._APP.validator_deps
     )
     assert ok, f"unmodified fixture should conform: {report}"
     assert "ok" in report.lower()
@@ -1275,8 +1253,8 @@ def test_api_surface_conformance() -> None:
     assert text_mutated != text, "test setup: expected to remove never_called"
     src.write_text(text_mutated)
 
-    ok, report = pipeline.validate_task2_api_surface_conformance(
-        workspace, module_name, workspace
+    ok, report = _validate_task2_api(
+        workspace, module_name, workspace, pipeline._APP.validator_deps
     )
     assert not ok, "expected drift report after removing pub fn"
     assert "never_called" in report
@@ -1284,8 +1262,8 @@ def test_api_surface_conformance() -> None:
 
     # Missing pub-items manifest (never baked) → check is a no-op.
     workspace2 = _setup_workspace("smoke-api-conformance-no-api")
-    ok, report = pipeline.validate_task2_api_surface_conformance(
-        workspace2, module_name, workspace2
+    ok, report = _validate_task2_api(
+        workspace2, module_name, workspace2, pipeline._APP.validator_deps
     )
     assert ok
     assert "no pub-items manifest" in report.lower()
@@ -1296,9 +1274,10 @@ def test_api_surface_conformance() -> None:
 def test_examples_collector() -> None:
     """collect_examples picks up examples/*.rs files for TASK 1 usage signal."""
     import pipeline
+    from pipeline_core.adapters.discovery import collect_examples
 
     workspace = _setup_workspace("smoke-examples")
-    examples = pipeline.collect_examples(workspace)
+    examples = collect_examples(workspace)
     rels = [rel for rel, _ in examples]
     assert any("examples/usage.rs" in r for r in rels), \
         f"expected examples/usage.rs in collected examples, got: {rels}"
@@ -1320,7 +1299,6 @@ def test_decl_only_src_noise_filter() -> None:
     """Stripped src files containing only gen_tests decls should be skipped by
     TASK 1's input collector. Regression for the post-strip noise issue where
     src/lib.rs would survive strip as a 4-line decl stub and confuse TASK 1."""
-    import pipeline
 
     decl_only = (
         '// auto-generated stub after strip\n'
@@ -1334,14 +1312,14 @@ def test_decl_only_src_noise_filter() -> None:
         '#[path = "lib.gen_tests_2.rs"]\n'
         'mod gen_tests_2;\n'
     )
-    assert pipeline._is_gen_tests_decl_only_src(decl_only) is True
+    assert is_gen_tests_decl_only_src(decl_only) is True
 
     decl_only_no_comments = (
         '#[cfg(test)]\n'
         '#[path = "lib.gen_tests_1.rs"]\n'
         'mod gen_tests_1;\n'
     )
-    assert pipeline._is_gen_tests_decl_only_src(decl_only_no_comments) is True
+    assert is_gen_tests_decl_only_src(decl_only_no_comments) is True
 
     # A real source file with actual code is NOT decl-only.
     has_code = (
@@ -1349,7 +1327,7 @@ def test_decl_only_src_noise_filter() -> None:
         '#[cfg(test)]\n'
         'mod inline_tests { #[test] fn t() {} }\n'
     )
-    assert pipeline._is_gen_tests_decl_only_src(has_code) is False
+    assert is_gen_tests_decl_only_src(has_code) is False
 
     # A stripped file with one inline test mod (not a path-mod decl) is NOT decl-only.
     has_inline_tests = (
@@ -1358,11 +1336,11 @@ def test_decl_only_src_noise_filter() -> None:
         '    #[test] fn t() {}\n'
         '}\n'
     )
-    assert pipeline._is_gen_tests_decl_only_src(has_inline_tests) is False
+    assert is_gen_tests_decl_only_src(has_inline_tests) is False
 
     # Empty / whitespace counts as decl-only (no semantic content).
-    assert pipeline._is_gen_tests_decl_only_src("") is True
-    assert pipeline._is_gen_tests_decl_only_src("\n\n  \n") is True
+    assert is_gen_tests_decl_only_src("") is True
+    assert is_gen_tests_decl_only_src("\n\n  \n") is True
 
     print("  OK  _is_gen_tests_decl_only_src")
 
@@ -1371,7 +1349,6 @@ def test_has_gen_tests_decl() -> None:
     """The guard used by task2 reattach: detects whether src contains
     `mod gen_tests_<n>;`. Regression coverage for the orphan-siblings bug
     where the previous guard checked only sibling-file existence."""
-    import pipeline
 
     src = (
         'pub fn add(a: i32, b: i32) -> i32 { a + b }\n'
@@ -1383,11 +1360,11 @@ def test_has_gen_tests_decl() -> None:
         '#[path = "lib.gen_tests_3.rs"]\n'
         'mod gen_tests_3;\n'
     )
-    assert pipeline._has_gen_tests_decl(src, 1) is True
-    assert pipeline._has_gen_tests_decl(src, 3) is True
-    assert pipeline._has_gen_tests_decl(src, 2) is False, "missing decl must report False"
-    assert pipeline._has_gen_tests_decl("", 1) is False
-    assert pipeline._has_gen_tests_decl("// no decls here\n", 1) is False
+    assert has_gen_tests_mod_decl(src, 1) is True
+    assert has_gen_tests_mod_decl(src, 3) is True
+    assert has_gen_tests_mod_decl(src, 2) is False, "missing decl must report False"
+    assert has_gen_tests_mod_decl("", 1) is False
+    assert has_gen_tests_mod_decl("// no decls here\n", 1) is False
 
     print("  OK  _has_gen_tests_decl")
 
@@ -1436,7 +1413,7 @@ def test_extract_public_symbols_via_syn() -> None:
         "struct Hidden { x: u8 }\n"          # private — must NOT appear
         "const SECRET: u8 = 1;\n"
     )
-    out = pipeline._public_api_from_source(src)
+    out = pipeline._APP.task0c_deps.extract_public_symbols(src)
     assert "pub struct Error" in out and "inner" in out and "code" in out
     assert "pub enum Kind" in out and "A" in out
     assert "pub trait Show" in out
@@ -1499,11 +1476,11 @@ def test_api_surface_capture() -> None:
     assert loaded == text
 
     # _format_api_surface_section wraps it with the prompt header and truncates.
-    section = pipeline._format_api_surface_section(loaded)
+    section = format_api_surface_section(loaded, cap=8_000)
     assert "Public API surface" in section
     assert "ground truth" in section.lower()
     # Empty input → empty section (no prompt noise).
-    assert pipeline._format_api_surface_section("") == ""
+    assert format_api_surface_section("", cap=8_000) == ""
 
     print("  OK  api_surface capture + load + format")
 
@@ -1778,11 +1755,12 @@ def test_genesis_rules_count() -> None:
 
     with tempfile.TemporaryDirectory() as td:
         pd = Path(td)
+        from pipeline_core.adapters.pipeline_db import genesis_rules_write
         assert pipeline.genesis_rules_count(pd, "error") == 0
         for i in range(25):
-            pipeline.genesis_rules_write(pd, "error", "build", f"rule {i}")
-        pipeline.genesis_rules_write(pd, "*", "build", "global rule")
-        pipeline.genesis_rules_write(pd, "other", "build", "other-scope rule")
+            genesis_rules_write(pd, "error", "build", f"rule {i}")
+        genesis_rules_write(pd, "*", "build", "global rule")
+        genesis_rules_write(pd, "other", "build", "other-scope rule")
         # error scope sees its 25 + the global '*' rule, not the other module's.
         assert pipeline.genesis_rules_count(pd, "error") == 26
         assert pipeline.genesis_rules_count(pd, "*") == 1  # '*' scope alone
@@ -2036,12 +2014,12 @@ def test_splice_fn_body_allow_nonstub() -> None:
         p = Path(d) / "f.rs"
         p.write_text(src, encoding="utf-8")
         # Default: refuses to clobber a non-stub body.
-        ok, reason, _ = pipeline._splice_fn_body(p, "as_ref", "self.right_field")
+        ok, reason, _ = pipeline._APP.fill_roles.mut.splice_fn_body(p, "as_ref", "self.right_field")
         assert not ok and reason == "target_not_stub", \
             "default splice must refuse a non-stub body"
         assert "wrong_field" in p.read_text(encoding="utf-8")
         # allow_nonstub: overwrites it.
-        ok, _reason, delta = pipeline._splice_fn_body(
+        ok, _reason, delta = pipeline._APP.fill_roles.mut.splice_fn_body(
             p, "as_ref", "self.right_field", allow_nonstub=True)
         assert ok, "allow_nonstub splice must succeed"
         out = p.read_text(encoding="utf-8")
@@ -2093,7 +2071,8 @@ def test_strip_ansi_and_diag_frontier() -> None:
     from pipeline_core.domain.test_results import parse_rustc_compile_errors
     ansi = ("\x1b[0m\x1b[1m\x1b[38;5;9merror[E0201]\x1b[0m\x1b[1m: dup\x1b[0m\n"
             "  \x1b[38;5;12m-->\x1b[0m src/error.rs:1634:5")
-    plain = pipeline._strip_ansi(ansi)
+    from pipeline_core.domain.test_results import strip_ansi as _strip_ansi
+    plain = _strip_ansi(ansi)
     assert "\x1b[" not in plain and "error[E0201]" in plain, plain
     # The text-fallback parser (parse_rustc_compile_errors, migrated from the old
     # `_COMPILE_ERROR_RE` per R7) needs the `error` keyword at line start, so it
@@ -2104,11 +2083,11 @@ def test_strip_ansi_and_diag_frontier() -> None:
     assert parse_rustc_compile_errors(plain)
     # Structured-diag frontier never touches rendered text; empty/garbage in →
     # empty out (no crash), and it ignores ANSI entirely.
-    assert pipeline._frontier_from_diags([], pipeline.Path(".")) == {}
+    assert pipeline._APP.frontier_from_diags([], pipeline.Path(".")) == {}
     # slice 6: diagnostics are typed Diagnostic records now (empty file → skipped → {}).
-    assert pipeline._frontier_from_diags(
+    assert pipeline._APP.frontier_from_diags(
         [pipeline.Diagnostic(file="", line=0)], pipeline.Path(".")) == {}
-    print("  OK  _strip_ansi + _frontier_from_diags (ANSI-immune inner check)")
+    print("  OK  _strip_ansi + frontier_from_diags (ANSI-immune inner check)")
 
 
 def test_sig_tighten_guard_and_where_parse() -> None:
@@ -2379,11 +2358,11 @@ def test_slice5a_shims_delegate_to_adapters() -> None:
         # fns wrapper re-serialises typed records to wire dicts for the fill engine.
         assert pipeline._enumerate_fns_via_extractor(d) == [FnRecord(fn_name="x").to_dict()]
         # types/mods/dispatch wrappers pass the typed records straight through.
-        assert pipeline._enumerate_types_via_extractor(d) == [TypeRecord(name="T")]
-        assert pipeline._dispatch_families_via_extractor(d) == []
-        assert pipeline._feature_gate_cfgs_via_extractor(d) == ["nightly"]
-        assert pipeline._enumerate_mods_via_extractor(d) == [ModRecord(name="m")]
-        r = pipeline._extract_skeleton(Path("/in"), Path("/out"))
+        assert pipeline._APP.structure.enumerate_types(d) == [TypeRecord(name="T")]
+        assert pipeline._APP.structure.enumerate_dispatch_families(d) == []
+        assert pipeline.ADAPTERS.extractor.enumerate_feature_gate_cfgs(d) == ["nightly"]
+        assert pipeline._APP.structure.enumerate_mods(d) == [ModRecord(name="m")]
+        r = pipeline._APP.bake_artifacts_deps.extract_skeleton(Path("/in"), Path("/out"))
         assert r.ok is True
         assert {c[0] for c in calls} == {"fns", "types", "disp", "feat", "mods", "skel"}
 
@@ -3000,11 +2979,11 @@ def test_cluster_filter_type_methods_drops_cfg_dead_methods():
         name="anyhow_no_core_error", env_extra={}, tarpaulin_exclude_files=[],
         excluded_cfg=["std"], active_cfg=["anyhow_no_core_error"],
         prompt_nightly_rule="")
-    [out] = pipeline._cluster_filter_type_methods([err], cluster)
+    [out] = _membership.cluster_filter_type_methods([err], cluster)
     kept = {m.name for m in out.methods}
     assert kept == {"construct_from_display", "provide"}, kept
     # None cluster → unchanged identity.
-    assert pipeline._cluster_filter_type_methods([err], None) == [err]
+    assert _membership.cluster_filter_type_methods([err], None) == [err]
 
 
 # ─── Driver ─────────────────────────────────────────────────────────────────

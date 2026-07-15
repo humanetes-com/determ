@@ -244,3 +244,19 @@ def task1_static_audit(functional_req_path: Path, test_files: list[Any]) -> list
         if len(gaps) > 10:
             log(f"  ... and {len(gaps) - 10} more")
     return gaps
+
+
+def filter_proc_macro_test_files(
+    test_files: list[tuple[str, str]], crate_name: str = "",
+) -> list[tuple[str, str]]:
+    """Keep test files that use #[derive(...)] or the crate's own #[crate_name(...)]
+    attribute. Falls back to all files if none match (literal substring scan)."""
+    needles = ["#[derive("]
+    if crate_name:
+        needles.append(f"#[{crate_name.replace('-', '_')}(")
+    relevant = [
+        (rel, content) for rel, content in test_files
+        if any(nd in content for nd in needles)
+    ]
+    return relevant or test_files
+

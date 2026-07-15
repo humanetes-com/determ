@@ -173,3 +173,28 @@ def load_original_structure(project_dir: Path, module_name: str) -> list[str]:
             content = candidate.read_text()
             return [ln.strip() for ln in content.splitlines() if ln.strip()]
     return []
+
+
+def load_skeleton_files(skeleton_dir: Path) -> list[tuple[str, str]]:
+    """Return [(relative_path, content), ...] for every .rs file under skeleton_dir."""
+    out: list[tuple[str, str]] = []
+    for p in sorted(skeleton_dir.rglob("*.rs")):
+        try:
+            out.append((str(p.relative_to(skeleton_dir)), p.read_text(encoding="utf-8")))
+        except Exception:
+            continue
+    return out
+
+
+def load_baked_leaf_order(project_dir: Path, cluster_name: str) -> dict[str, int]:
+    """Load the `{fn_name: ref_count}` map saved during the bake step.
+    Returns {} if absent — caller falls back to alphabetical order."""
+    path = project_dir / ".skeleton" / cluster_name / "_leaf_order.json"
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return {str(k): int(v) for k, v in data.items() if isinstance(v, (int, float))}
+

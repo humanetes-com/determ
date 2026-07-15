@@ -18,7 +18,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pipeline
-from tests.harness import diag, install_scripted_cargo
+from tests.harness import diag, install_app_seams, install_scripted_cargo
 
 # ── fixture source ──────────────────────────────────────────────────────────
 _STUB_SRC = "pub fn foo() -> u32 { unimplemented!() }\n"
@@ -75,17 +75,14 @@ def test_stub_panic_routes_to_per_fn_not_whole_file(monkeypatch, tmp_path):
         ],
     )
 
-    # _compile_error_frontier: always empty (test output has no rustc errors).
-    monkeypatch.setattr(pipeline, "_compile_error_frontier", lambda *a, **k: {})
-
-    # _extract_tdd_frontier: returns foo as a stub (the new routing hook).
-    monkeypatch.setattr(
-        pipeline, "_extract_tdd_frontier",
-        lambda *a, **k: {("src/lib.rs", "foo"): {"test_foo"}},
+    # App seams (S61): compile frontier empty (no rustc errors); TDD frontier
+    # returns foo as a stub (the routing hook); no impl blocks (foo is free).
+    install_app_seams(
+        monkeypatch,
+        compile_error_frontier=lambda *a, **k: {},
+        extract_tdd_frontier=lambda *a, **k: {("src/lib.rs", "foo"): {"test_foo"}},
+        collect_impl_blocks=lambda *a, **k: [],
     )
-
-    # impl-block collector: no impl blocks (foo is a free function).
-    monkeypatch.setattr(pipeline, "_collect_impl_blocks", lambda *a, **k: [])
 
     # Model: return the <FN> form — consumed by per-fn, ignored by whole-file.
     monkeypatch.setattr(pipeline, "_ask_raw", lambda *a, **k: _PER_FN_RESPONSE)

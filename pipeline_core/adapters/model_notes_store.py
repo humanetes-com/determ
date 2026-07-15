@@ -213,3 +213,15 @@ class FileModelNotesStore:
                 self._log(f"  [model-notes] extraction failed (think=False): {e}")
                 return None
         return parse_self_note(resp)
+
+
+def write_fr_preserving_notes(path: Path | str, new_content: str) -> None:
+    """Write FR content, preserving an existing `## Model Notes` section.
+    Use at every TASK 1 write site so regenerating FR never wipes the
+    model's accumulated self-corrections."""
+    p = Path(path)
+    old = p.read_text(encoding="utf-8") if p.exists() else None
+    merged = mn.preserve_model_notes(old, new_content)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(merged, encoding="utf-8")
+

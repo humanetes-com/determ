@@ -13,7 +13,13 @@ from pathlib import Path
 
 import pipeline
 from pipeline_core.domain.models import FnRecord, ImplBlock
-from tests.harness import diag, install_cluster_scan, install_fake_extractor, install_scripted_cargo
+from tests.harness import (
+    diag,
+    install_app_seams,
+    install_cluster_scan,
+    install_fake_extractor,
+    install_scripted_cargo,
+)
 
 IMPL_LIB = """pub struct Foo { tag: u32 }
 
@@ -67,7 +73,7 @@ def _install_model(monkeypatch, responses):
                         lambda *a, **k: seq.pop(0) if len(seq) > 1 else seq[0])
 
 
-def _run(ws: Path) -> dict:
+def _run(ws: Path) -> pipeline.ClusterFillResult:
     # target_src_dir is the dir block["file"] is relative to (lib.rs → src/).
     return pipeline._phase_c_fill_impl_blocks(  # type: ignore[no-any-return]
         project_dir=ws,
@@ -286,10 +292,10 @@ def test_partial_staleness_refills_only_remaining_stub(monkeypatch, tmp_path):
         "pub fn kind(&self) -> u32 {\n        unimplemented!()\n    }",
         "pub fn kind(&self) -> u32 {\n        9\n    }")
     (ws / "src" / "lib.rs").write_text(half)
-    monkeypatch.setattr(
-        pipeline, "_scan_unimplemented_records_for_cluster",
-        lambda *a, **k: [{"file": "lib.rs", "fn_name": "name",
-                          "container": "impl Foo"}])
+    install_app_seams(
+        monkeypatch,
+        scan_stub_records_for_cluster=lambda *a, **k: [
+            {"file": "lib.rs", "fn_name": "name", "container": "impl Foo"}])
     _install_model(monkeypatch, [RESPONSE_BOTH])
     install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
     res = _run(ws)

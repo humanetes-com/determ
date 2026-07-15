@@ -9,6 +9,7 @@ cannot parse. File changed ⇒ per-fn path taken.
 from __future__ import annotations
 
 import pipeline
+from tests.harness import install_app_seams
 
 _WRONG_SRC = "pub fn add(a: u32, b: u32) -> u32 { 0 }\n"
 _PER_FN_RESPONSE = '<FN name="add" block="any">\na + b\n</FN>\n'
@@ -21,17 +22,17 @@ def test_behavior_failure_routes_to_per_fn_not_whole_file(monkeypatch, tmp_path)
     lib.write_text(_WRONG_SRC, encoding="utf-8")
 
     # No compile errors, no unimplemented stubs — only a behavioral failure.
-    monkeypatch.setattr(pipeline, "_compile_error_frontier", lambda *a, **k: {})
-    monkeypatch.setattr(pipeline, "_extract_tdd_frontier", lambda *a, **k: {})
-    monkeypatch.setattr(
-        pipeline, "_behavior_frontier",
-        lambda *a, **k: (
+    install_app_seams(
+        monkeypatch,
+        compile_error_frontier=lambda *a, **k: {},
+        extract_tdd_frontier=lambda *a, **k: {},
+        behavior_frontier=lambda *a, **k: (
             {("src/lib.rs", "add"): {"test_add"}},
             {"test_add": ("tests/t.rs",
                           "fn test_add() { assert_eq!(add(1, 2), 3); }")},
         ),
+        collect_impl_blocks=lambda *a, **k: [],
     )
-    monkeypatch.setattr(pipeline, "_collect_impl_blocks", lambda *a, **k: [])
     monkeypatch.setattr(pipeline, "_ask_raw", lambda *a, **k: _PER_FN_RESPONSE)
 
     pipeline.generate_fix_loop(

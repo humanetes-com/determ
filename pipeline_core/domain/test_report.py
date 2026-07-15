@@ -55,6 +55,8 @@ class TestRunReport:
     """The parsed result of one `cargo test` run: which tests passed, and the
     structured failures. `passed`/`failures` are disjoint by test name."""
 
+    __test__ = False  # domain VO, not a pytest class (silences collection warning)
+
     passed: frozenset[str]
     failures: tuple[TestFailure, ...]
 

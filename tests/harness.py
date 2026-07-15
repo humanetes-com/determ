@@ -9,7 +9,7 @@ QUALITY.
 Seams (the single injection points, verified session 58):
   pipeline._ask_per_fn_body / _ask_raw         ← scripted model
   pipeline._run_cargo / _run_cargo_check_diag  ← scripted cargo
-  pipeline._frontier_from_diags                ← scripted attribution (skips the
+  _APP.frontier_from_diags (install_app_seams) ← scripted attribution (skips the
                                                  extractor binary, absent in CI py)
 
 A "scripted" seam is either a constant, a list (popped left, last value repeats
@@ -94,7 +94,7 @@ def install_scripted_cargo(
 
     check_diag : (rc, rendered, [Diagnostic]) — what `_run_cargo_check_diag` returns.
     run        : (rc, text)                   — what `_run_cargo` returns.
-    frontier   : Frontier (dict) for `_frontier_from_diags` — bypasses the extractor.
+    frontier   : Frontier (dict) for the App's `frontier_from_diags` seam — bypasses the extractor.
 
     Each is a constant / list / callable (see `_Script`).
     """
@@ -120,17 +120,28 @@ def install_scripted_cargo(
     if frontier is not None:
         fscript = _Script(frontier)
         scripts["frontier"] = fscript
-        monkeypatch.setattr(pipeline, "_frontier_from_diags",
-                            lambda *a, **k: fscript())
+        install_app_seams(monkeypatch, frontier_from_diags=lambda *a, **k: fscript())
     return scripts
 
 
+def install_app_seams(monkeypatch, **seams: Any) -> None:
+    """Swap named App seam fields (S61: attribute_failures, behavior_frontier,
+    collect_impl_blocks, compile_error_frontier, extract_tdd_frontier,
+    fn_container_index, frontier_from_diags, u2_test_gate, ...) for scripted
+    callables — the port-boundary form of the old `setattr(pipeline, "_x")`
+    module-fn patches. Every consumer resolves through the live `pipeline._APP`
+    (build_app's `app_ref`), so one swap covers all call sites."""
+    import dataclasses as _dc
+    monkeypatch.setattr(pipeline, "_APP", _dc.replace(pipeline._APP, **seams))
+
+
 def install_scripted_attribution(monkeypatch, frontier: Any, kind: str = "scripted") -> _Script:
-    """Patch `_attribute_failures` (TEST-mode fix path) → (frontier, kind), bypassing
-    the test-reverse-map + extractor. `frontier` is constant / list / callable."""
+    """Swap the App's `attribute_failures` seam (TEST-mode fix path) →
+    (frontier, kind), bypassing the test-reverse-map + extractor. `frontier`
+    is constant / list / callable."""
     fscript = _Script(frontier)
-    monkeypatch.setattr(pipeline, "_attribute_failures",
-                        lambda *a, **k: (fscript(), kind))
+    install_app_seams(monkeypatch,
+                      attribute_failures=lambda *a, **k: (fscript(), kind))
     return fscript
 
 

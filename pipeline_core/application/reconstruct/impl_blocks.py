@@ -17,10 +17,26 @@ from pathlib import Path
 from typing import Any
 
 from ...domain.impl_block_ranges import ImplRange, parse_impl_block_ranges
-from ...domain.models import FnRecord, ImplBlock
+from ...domain.models import FnLocator, FnRecord, ImplBlock
 from ...prompts.sections import extract_trait_from_container
 
 EnumerateFns = Callable[[Path], "list[dict[str, Any]] | None"]
+
+
+def fn_container_index(
+    src_dir: Path, *, enumerate_fns: EnumerateFns,
+) -> dict[FnLocator, str]:
+    """(file_rel_to_src, fn_name) → container ("impl … for …" / "trait …" / "").
+
+    The syn enumerator is the one source of truth for which impl owns a fn —
+    every retry site needs this to resolve the self-type whose definition must
+    be injected. First record wins for duplicate names, matching the previous
+    inline builders."""
+    idx: dict[FnLocator, str] = {}
+    for rec in (enumerate_fns(src_dir) or []):
+        idx.setdefault(FnLocator(rec.get("file", ""), rec.get("fn_name", "")),
+                       rec.get("container", ""))
+    return idx
 
 
 def collect_impl_blocks(src_dir: Path, *, enumerate_fns: EnumerateFns) -> list[ImplBlock] | None:

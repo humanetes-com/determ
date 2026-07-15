@@ -30,7 +30,7 @@ def test_structured_diags_win_over_text(monkeypatch, tmp_path):
         monkeypatch,
         check_diag=(101, "error: x",
                     [diag("src/lib.rs", line=2, code="E0308")]))
-    fr = pipeline._compile_error_frontier(
+    fr = pipeline._APP.compile_error_frontier(
         "\x1b[31merror\x1b[0m: nope", ws, "cargo test", {}, 5)
     assert fr == {("src/lib.rs", "alpha"): {"<compile>"}}
 
@@ -41,7 +41,7 @@ def test_rc_zero_means_no_compile_frontier(monkeypatch, tmp_path):
     ws = _setup(monkeypatch, tmp_path)
     install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
     out = "error[E0308]: stale line\n --> src/lib.rs:2\n"
-    assert pipeline._compile_error_frontier(out, ws, "cargo test", {}, 5) == {}
+    assert pipeline._APP.compile_error_frontier(out, ws, "cargo test", {}, 5) == {}
 
 
 def test_no_diags_falls_back_to_text_parse(monkeypatch, tmp_path):
@@ -50,5 +50,5 @@ def test_no_diags_falls_back_to_text_parse(monkeypatch, tmp_path):
     ws = _setup(monkeypatch, tmp_path)
     install_scripted_cargo(monkeypatch, check_diag=(101, "error: x", []))
     out = "error[E0308]: mismatched types\n  --> src/lib.rs:2:5\n"
-    fr = pipeline._compile_error_frontier(out, ws, "cargo test", {}, 5)
+    fr = pipeline._APP.compile_error_frontier(out, ws, "cargo test", {}, 5)
     assert fr == {("src/lib.rs", "alpha"): {"<compile>"}}

@@ -106,3 +106,6 @@ def drop_iteration_phases(phases: dict[str, object]) -> dict[str, object]:
 
 # Legacy whole-workspace manifest of generated files.
 MANIFEST_NAME = ".generated_files.txt"
+
+# Workspace directory for cloned/copied project repos (relative to pipeline root).
+WORKSPACE_DIR = "tmp"

@@ -40,7 +40,7 @@ def test_splice_fn_body_at_is_byte_correct() -> None:
     with tempfile.TemporaryDirectory() as td:
         p = Path(td) / "lib.rs"
         p.write_bytes(raw)
-        ok, _reason, _delta = pipeline._splice_fn_body_at(p, bs, be, "a + 1")
+        ok, _reason, _delta = pipeline._APP.fill_roles.mut.splice_fn_body_at(p, bs, be, "a + 1")
         out = p.read_text(encoding="utf-8")
 
     assert ok is True
@@ -65,10 +65,12 @@ def test_splice_fn_body_at_offsets_match_real_extractor() -> None:
         src = Path(td) / "src"
         src.mkdir()
         (src / "lib.rs").write_bytes(_SRC.encode("utf-8"))
-        loc = pipeline._locate_fn_by_record(src / "lib.rs", "f", "", "pub fn f() -> i32")
+        loc = pipeline._APP.fill_roles.mut.locate_fn_by_record(
+            src / "lib.rs", "f", "", "pub fn f() -> i32")
         assert loc is not None
         _, bs, be, _ = loc
-        ok, _reason, _ = pipeline._splice_fn_body_at(src / "lib.rs", bs, be, "a + 1")
+        ok, _reason, _ = pipeline._APP.fill_roles.mut.splice_fn_body_at(
+            src / "lib.rs", bs, be, "a + 1")
         out = (src / "lib.rs").read_text(encoding="utf-8")
         shutil.rmtree(src, ignore_errors=True)
     assert ok is True

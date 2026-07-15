@@ -20,6 +20,15 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 import pipeline  # noqa: E402
+from pipeline_core.adapters.retros import (  # noqa: E402
+    is_fn_fully_exhausted,
+    load_retrospectives,
+    retro_key,
+    save_retrospectives,
+)
+from pipeline_core.application.reconstruct.cluster_membership import (  # noqa: E402
+    cluster_cfg_attr,
+)
 from pipeline_core.domain.models import BuildCluster  # noqa: E402
 from pipeline_core.domain.test_results import (  # noqa: E402
     failing_test_names,
@@ -35,8 +44,8 @@ _TOKENED = "impl Context < T , E > for Result < T , E >"
 
 def test_canon_container_unifies_renderings() -> None:
     assert pipeline._canon_container(_PRETTY) == pipeline._canon_container(_TOKENED)
-    assert pipeline._retro_key("src/context.rs", "context", _PRETTY) == \
-        pipeline._retro_key("src/context.rs", "context", _TOKENED)
+    assert retro_key("src/context.rs", "context", _PRETTY) == \
+        retro_key("src/context.rs", "context", _TOKENED)
     # Distinct impls stay distinct; sentinel and empty unchanged.
     assert pipeline._canon_container("impl Bool for &bool") != \
         pipeline._canon_container(_TOKENED)
@@ -51,28 +60,28 @@ def test_load_retrospectives_rekeys_old_records(tmp_path: Path) -> None:
         f"src/context.rs::context::{_PRETTY}": {"fully_exhausted": True, "guidance": "g1"},
         f"src/context.rs::context::{_TOKENED}": {"fully_exhausted": False, "guidance": "g2"},
     }), encoding="utf-8")
-    retros = pipeline._load_retrospectives(tmp_path)
+    retros = load_retrospectives(tmp_path)
     # Both old spellings collapse onto the canonical key.
     assert len(retros) == 1
-    key = pipeline._retro_key("src/context.rs", "context", _TOKENED)
+    key = retro_key("src/context.rs", "context", _TOKENED)
     assert key in retros
 
 
 # ── 2. exhaustion reset ─────────────────────────────────────────────────────
 
 def test_reset_exhaustion_flags_keeps_lessons(tmp_path: Path) -> None:
-    key = pipeline._retro_key("src/error.rs", "new", "impl Error")
-    pipeline._save_retrospectives(tmp_path, {
+    key = retro_key("src/error.rs", "new", "impl Error")
+    save_retrospectives(tmp_path, {
         key: {"fully_exhausted": True, "category": "GENUINELY_HARD",
               "guidance": "try a vtable"},
     })
     cleared = pipeline._reset_exhaustion_flags(tmp_path, "test boundary")
     assert cleared == 1
-    retros = pipeline._load_retrospectives(tmp_path)
+    retros = load_retrospectives(tmp_path)
     rec = retros[key]
     assert rec["fully_exhausted"] is False
     assert rec["guidance"] == "try a vtable"          # lesson survives
-    assert not pipeline._is_fn_fully_exhausted(retros, "src/error.rs", "new", "impl Error")
+    assert not is_fn_fully_exhausted(retros, "src/error.rs", "new", "impl Error")
     # Idempotent: nothing left to clear.
     assert pipeline._reset_exhaustion_flags(tmp_path, "again") == 0
 
@@ -86,29 +95,29 @@ def test_reset_exhaustion_flags_caps_repeat_offenders(
     # batch came back improved=False right after a 43-fn batch that DID
     # pay off — the unconditional version can't tell those apart).
     monkeypatch.setenv("RETRO_RESET_MAX_ATTEMPTS", "2")
-    key = pipeline._retro_key("src/nightly.rs", "provide", "impl Error")
-    pipeline._save_retrospectives(tmp_path, {
+    key = retro_key("src/nightly.rs", "provide", "impl Error")
+    save_retrospectives(tmp_path, {
         key: {"fully_exhausted": True, "category": "GENUINELY_HARD",
               "guidance": "stuck"},
     })
     # Attempt 1: cleared, reset_attempts becomes 1.
     assert pipeline._reset_exhaustion_flags(tmp_path, "boundary 1") == 1
-    retros = pipeline._load_retrospectives(tmp_path)
+    retros = load_retrospectives(tmp_path)
     assert retros[key]["reset_attempts"] == 1
     # Simulate the fn immediately re-exhausting with no improvement.
     retros[key]["fully_exhausted"] = True
-    pipeline._save_retrospectives(tmp_path, retros)
+    save_retrospectives(tmp_path, retros)
     # Attempt 2: still under the cap (1 < 2) — cleared again.
     assert pipeline._reset_exhaustion_flags(tmp_path, "boundary 2") == 1
-    retros = pipeline._load_retrospectives(tmp_path)
+    retros = load_retrospectives(tmp_path)
     assert retros[key]["reset_attempts"] == 2
     retros[key]["fully_exhausted"] = True
-    pipeline._save_retrospectives(tmp_path, retros)
+    save_retrospectives(tmp_path, retros)
     # Attempt 3: now AT the cap (2 >= 2) — refused, stays exhausted.
     assert pipeline._reset_exhaustion_flags(tmp_path, "boundary 3") == 0
-    retros = pipeline._load_retrospectives(tmp_path)
+    retros = load_retrospectives(tmp_path)
     assert retros[key]["fully_exhausted"] is True
-    assert pipeline._is_fn_fully_exhausted(
+    assert is_fn_fully_exhausted(
         retros, "src/nightly.rs", "provide", "impl Error")
 
 
@@ -126,17 +135,17 @@ def test_default_cluster_gen_tests_gated_against_other_clusters(monkeypatch) -> 
     no_core = _cluster("anyhow_no_core_error", ["anyhow_no_core_error"], False)
     monkeypatch.setattr(pipeline._SCOPE, "all", [stable, nightly, no_core])
 
-    gate = pipeline._cluster_cfg_attr(stable)
+    gate = cluster_cfg_attr(stable, pipeline._SCOPE.all)
     assert gate.startswith("not(any(")
     assert "error_generic_member_access" in gate
     assert 'feature = "anyhow_no_core_error"' in gate
     # Non-default clusters keep their positive gate.
-    assert pipeline._cluster_cfg_attr(nightly) == \
+    assert cluster_cfg_attr(nightly, pipeline._SCOPE.all) == \
         'any(error_generic_member_access, feature = "error_generic_member_access")'
     # Single-cluster project: default stays ungated.
     monkeypatch.setattr(pipeline._SCOPE, "all", [stable])
-    assert pipeline._cluster_cfg_attr(stable) == ""
-    assert pipeline._cluster_cfg_attr(None) == ""
+    assert cluster_cfg_attr(stable, pipeline._SCOPE.all) == ""
+    assert cluster_cfg_attr(None, pipeline._SCOPE.all) == ""
 
 
 # ── 4. sibling name parsing (regex-free) ────────────────────────────────────
@@ -189,7 +198,7 @@ def test_behavior_frontier_attributes_failing_test_to_fn(tmp_path: Path, monkeyp
         {"file": "src/lib.rs", "fn_name": "add", "container": ""},
         {"file": "src/lib.rs", "fn_name": "sub", "container": ""},
     ])
-    frontier, test_srcs = pipeline._behavior_frontier(
+    frontier, test_srcs = pipeline._APP.behavior_frontier(
         _CARGO_OUT, ws, {"tests/test_math.rs"})
     assert frontier == {("src/lib.rs", "add"): {"test_add"}}
     trel, tsrc = test_srcs["test_add"]
@@ -209,7 +218,7 @@ def test_behavior_frontier_disambiguates_by_container(tmp_path: Path, monkeypatc
         {"file": "src/other.rs", "fn_name": "new", "container": "impl Widget"},
     ])
     out = "test test_new ... FAILED\n"
-    frontier, _ = pipeline._behavior_frontier(out, ws, {"tests/t.rs"})
+    frontier, _ = pipeline._APP.behavior_frontier(out, ws, {"tests/t.rs"})
     # Ambiguous fn name: only the container mentioned in the test is kept.
     assert ("src/error.rs", "new") in frontier
     assert ("src/other.rs", "new") not in frontier

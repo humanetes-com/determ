@@ -547,7 +547,7 @@ class RunDeps:
     strip_and_bake_module: Callable[..., None]
     task1_static_audit: Callable[..., Any]
     scan_workspace_structure: Callable[..., Any]
-    infer_build_check_command: Callable[..., str]
+    infer_build_check_command: Callable[..., str | None]
     wl_save_gen_tests_siblings: Callable[..., Any]
     gen_tests_siblings: Callable[..., Any]
     is_gen_tests_file: Callable[..., bool]

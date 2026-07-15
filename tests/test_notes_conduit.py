@@ -46,7 +46,7 @@ def test_notes_filter_tier_ordering(tmp_path) -> None:
     ecode = "[E0277] T may be unsized; add where T: Sized or return &T instead"
     fr = _write_fr(tmp_path, [generic, ecode, fmt_note])
 
-    out = pipeline._filter_model_notes_for_prompt(
+    out = pipeline._MODEL_NOTES_STORE.filter_for_prompt(
         fr, "src/error.rs", "fmt",
         file_text="struct Wrapper { }",
         current_error="error[E0277]: the trait bound `T: Sized` is not satisfied",
@@ -62,7 +62,7 @@ def test_notes_filter_symbol_match_outranks_generic(tmp_path) -> None:
     generic = "generic recency only note about delegation and ownership"
     sym_note = "the MyWidget value must be cloned before the closure captures it"
     fr = _write_fr(tmp_path, [generic, sym_note])
-    out = pipeline._filter_model_notes_for_prompt(
+    out = pipeline._MODEL_NOTES_STORE.filter_for_prompt(
         fr, "src/core.rs", "render",
         file_text="pub struct MyWidget { }\npub fn helper() {}",
     )
@@ -78,7 +78,7 @@ def test_notes_filter_fn_specific_selection_and_drop(tmp_path) -> None:
     fr = _write_fr(tmp_path, [alpha_note, beta_note])
 
     first_for = lambda fn: [  # noqa: E731
-        ln[2:] for ln in pipeline._filter_model_notes_for_prompt(fr, "src/widget.rs", fn).splitlines()
+        ln[2:] for ln in pipeline._MODEL_NOTES_STORE.filter_for_prompt(fr, "src/widget.rs", fn).splitlines()
     ][0]
     assert first_for("alpha") == alpha_note  # selected for alpha
     assert first_for("beta") == beta_note    # alpha-note dropped to generic → beta-note wins
@@ -88,7 +88,7 @@ def test_notes_filter_caps_at_bullet_boundary(tmp_path) -> None:
     """Under bloat the block is capped at max_chars and never emits a partial bullet."""
     notes = [f"note {i} about lifetimes generics sized bounds padding padding" for i in range(50)]
     fr = _write_fr(tmp_path, notes)
-    out = pipeline._filter_model_notes_for_prompt(fr, "a.rs", "f", max_chars=200)
+    out = pipeline._MODEL_NOTES_STORE.filter_for_prompt(fr, "a.rs", "f", max_chars=200)
     assert 0 < len(out) <= 200
     assert all(ln.startswith("- ") for ln in out.splitlines()), "no truncated partial bullet"
 
@@ -96,15 +96,15 @@ def test_notes_filter_caps_at_bullet_boundary(tmp_path) -> None:
 def test_notes_filter_empty_when_no_section(tmp_path) -> None:
     fr = tmp_path / "functional_requirements_x.md"
     fr.write_text("# FR\nno notes section here.\n")
-    assert pipeline._filter_model_notes_for_prompt(fr, "a.rs", "f") == ""
+    assert pipeline._MODEL_NOTES_STORE.filter_for_prompt(fr, "a.rs", "f") == ""
 
 
 def test_promotion_threshold(tmp_path) -> None:
     """A code recurs < 3× → not promoted; at 3× → promoted with its canonical hint."""
     with _error_counts({"E0277": 2}):
-        assert pipeline._promoted_error_rules() == "", "below threshold → nothing promoted"
+        assert pipeline._MODEL_NOTES_STORE.promoted_error_rules() == "", "below threshold → nothing promoted"
     with _error_counts({"E0277": 3}):
-        out = pipeline._promoted_error_rules()
+        out = pipeline._MODEL_NOTES_STORE.promoted_error_rules()
         assert "E0277" in out and "seen 3" in out
         assert "trait bound" in out, "canonical E0277 hint must be surfaced"
 
@@ -114,8 +114,8 @@ def test_promotion_surfaces_past_note(tmp_path) -> None:
     (the rule the model wrote for itself last time the code fired)."""
     fr = _write_fr(tmp_path, ["[E0277] build via construct_from_display, do not call new"])
     with _error_counts({"E0277": 3}):
-        out = pipeline._promoted_error_rules(fr)
+        out = pipeline._MODEL_NOTES_STORE.promoted_error_rules(fr)
         assert "past note: build via construct_from_display" in out
     # below threshold → the code isn't promoted, so no past note either.
     with _error_counts({"E0277": 2}):
-        assert pipeline._promoted_error_rules(fr) == ""
+        assert pipeline._MODEL_NOTES_STORE.promoted_error_rules(fr) == ""

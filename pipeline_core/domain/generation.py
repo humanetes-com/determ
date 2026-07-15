@@ -20,6 +20,7 @@ from pipeline_core.domain.rust_scan import (
     after_brace_newline,
     find_mod_opener,
     gen_mod_body_start,
+    strip_line_block_comments,
     use_imports_symbol,
 )
 
@@ -463,6 +464,22 @@ def strip_gen_tests_decl_n(parent_text: str, pass_n: int) -> str:
 def strip_all_gen_tests_decls(text: str) -> str:
     """Remove every gen_tests path-mod decl block (path is a `*.gen_tests_<N>.rs`)."""
     return _strip_decls(text, keep=lambda d: not _is_gen_tests_sibling(d.sibling_name))
+
+
+def is_gen_tests_decl_only_src(content: str) -> bool:
+    """True if content consists only of gen_tests path-mod decls + whitespace + comments.
+
+    After strip, a source file like src/lib.rs is reduced to its `#[cfg(test)]
+    #[path = "..."] mod gen_tests_N;` declarations -- the rest is removed by
+    extract_rust_tests. Those declaration-only files leak into TASK 1's input
+    because they contain `#[cfg(test)]`, but they carry no test semantics
+    (the actual tests live in the sibling files referenced by the decls).
+    """
+    if not content.strip():
+        return True
+    no_decls = strip_all_gen_tests_decls(content)
+    # Strip line and block comments before checking for remaining code.
+    return strip_line_block_comments(no_decls).strip() == ""
 
 
 def strip_trailing_legacy_gen_block(text: str) -> str:

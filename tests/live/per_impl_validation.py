@@ -47,7 +47,7 @@ def find_block(blocks, file_rel, fn_name):
                 return b
     return None
 
-blocks = P._collect_impl_blocks(src)
+blocks = P._APP.collect_impl_blocks(src)
 print(f"Total impl blocks: {len(blocks)}")
 
 # Need to also re-mark stub_members because the on-disk file may have

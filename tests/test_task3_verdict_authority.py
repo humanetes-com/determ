@@ -204,6 +204,24 @@ def _write_workspace(ws: Path) -> None:
     )
 
 
+def _count_active(project_dir: Path, cluster: BuildCluster) -> int:
+    """The FR-024 count over the live wiring (S73: composition-built, no
+    pipeline delegate) — same collaborators build_app binds."""
+    import pipeline
+    from pipeline_core.adapters.discovery import is_gen_tests_file
+    from pipeline_core.application.test_count import (
+        TestCountDeps,
+        count_active_tests_for_cluster,
+    )
+    sc = pipeline._APP.structure_cache
+    return count_active_tests_for_cluster(project_dir, cluster, TestCountDeps(
+        enumerate_fns=pipeline._APP.structure.enumerate_fns,
+        mod_records=sc.mod_records,
+        file_cfg_predicate=sc.file_cfg_predicate,
+        is_gen_tests_file=is_gen_tests_file,
+    ))
+
+
 def _cluster(name: str, active: list[str], excluded: list[str]) -> BuildCluster:
     return BuildCluster(name=name, env_extra={}, tarpaulin_exclude_files=[],
                         excluded_cfg=excluded, active_cfg=active,
@@ -215,17 +233,15 @@ def test_expected_count_excludes_cfg_gated_module_files(tmp_path: Path) -> None:
     compile — their tests must not inflate the expected count. Counting them
     makes the stable cluster permanently 'incomplete' (the 12-vs-10 in both
     microcrate runs)."""
-    import pipeline
     _write_workspace(tmp_path)
     stable = _cluster("stable", active=[], excluded=["extra_cap"])
     # lib 1 + counter 1 + tests/it.rs 1 — cap.rs (2) and deep.rs (1) are
     # unreachable under stable.
-    assert pipeline._count_active_tests_for_cluster(tmp_path, stable) == 3
+    assert _count_active(tmp_path, stable) == 3
 
 
 def test_expected_count_includes_active_cfg_modules(tmp_path: Path) -> None:
-    import pipeline
     _write_workspace(tmp_path)
     extra = _cluster("extra_cap", active=["extra_cap"], excluded=[])
     # lib 1 + counter 1 + cap 2 + deep 1 + tests/it.rs 1.
-    assert pipeline._count_active_tests_for_cluster(tmp_path, extra) == 6
+    assert _count_active(tmp_path, extra) == 6

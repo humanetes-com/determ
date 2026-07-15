@@ -22,7 +22,36 @@ from pipeline_core.domain.models import (
     TypeRecord,
 )
 from pipeline_core.domain.rust_idents import fn_reference_counts
+from pipeline_core.domain.rust_idioms import no_std_invariant_note
+from pipeline_core.domain.rust_macros import (
+    collect_crate_macros as _collect_crate_macros_pure,
+)
 from pipeline_core.ports import Extractor
+
+
+def collect_crate_macros(src_dir: Path, max_chars: int) -> str:
+    """Read the crate's .rs files and render its macro_rules! section (pure
+    extraction in domain.rust_macros.collect_crate_macros; this shim does the I/O)."""
+    files: list[tuple[str, str]] = []
+    for p in sorted(src_dir.rglob("*.rs")):
+        try:
+            files.append((p.name, p.read_text(encoding="utf-8")))
+        except Exception:
+            continue
+    return _collect_crate_macros_pure(files, max_chars)
+
+
+def detect_crate_no_std_invariant(src_dir: Path) -> str:
+    """Read the crate root's head and return the no_std invariant note (pure
+    decision in domain.rust_idioms.no_std_invariant_note; this shim does the I/O)."""
+    lib_rs = src_dir / "src" / "lib.rs" if (src_dir / "src").exists() else src_dir / "lib.rs"
+    if not lib_rs.exists():
+        return ""
+    try:
+        head = lib_rs.read_text(encoding="utf-8")[:4000]
+    except Exception:
+        return ""
+    return no_std_invariant_note(head)
 
 
 def fn_name_counts(src_dir: Path) -> dict[str, int]:
@@ -131,3 +160,19 @@ class CliStructureReader:
         """Syn parse-check one file via the extractor (`--parse-check`). The F1
         splice gate's validator — fail-open (see Extractor.parse_check)."""
         return self.extractor.parse_check(path)
+
+
+def crate_entry_point(cargo_toml_path: Path, module_dir_rel: str,
+                      file_path_set: set[str]) -> str | None:
+    """Return the crate entry point path (relative to project root) from Cargo.toml."""
+    from pipeline_core.domain.cargo_toml import cargo_entry_point_paths
+
+    candidates = []
+    if cargo_toml_path.exists():
+        text = cargo_toml_path.read_text(encoding="utf-8")
+        for rel in cargo_entry_point_paths(text):
+            candidates.append(str(Path(module_dir_rel) / rel) if module_dir_rel else rel)
+    for default in ("src/lib.rs", "src/main.rs"):
+        candidates.append(str(Path(module_dir_rel) / default) if module_dir_rel else default)
+    return next((c for c in candidates if c in file_path_set), None)
+

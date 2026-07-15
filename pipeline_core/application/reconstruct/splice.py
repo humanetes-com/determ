@@ -14,6 +14,7 @@ CALL time.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,19 @@ from pipeline_core.application.reconstruct.splice_txn import (
 from pipeline_core.domain.reconstruction import SpliceOutcome
 from pipeline_core.domain.rust_fn_headers import is_pub_fn, locate_fn
 from pipeline_core.domain.rust_idents import declares_fn
+
+# Process-global path-keyed splice+cargo locks. One lock per resolved source
+# tree — regression-gate baselines are captured fresh INSIDE this lock, so it
+# must be a genuine per-tree singleton across every engine in the process.
+_splice_locks: dict[str, threading.Lock] = {}
+_splice_locks_guard = threading.Lock()
+
+
+def splice_lock_for(tree: Path) -> threading.Lock:
+    """The splice+cargo lock owned by `tree` (one per resolved source tree)."""
+    key = str(Path(tree).resolve())
+    with _splice_locks_guard:
+        return _splice_locks.setdefault(key, threading.Lock())
 
 
 def _norm_cfg_set(preds: Any) -> frozenset[str]:
