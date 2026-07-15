@@ -80,7 +80,7 @@ def test_phase_c_engine_uses_constructor_injected_structure() -> None:
 def test_default_workspace_adapter_holds_the_real_reader() -> None:
     """Composition root wires the real CliStructureReader by default."""
     import pipeline
-    assert isinstance(pipeline._FILL_WS.structure, CliStructureReader)
+    assert isinstance(pipeline._APP.fill_roles.ws.structure, CliStructureReader)
     assert isinstance(pipeline._STRUCTURE, CliStructureReader)
     # The default engine's WorkspaceModel adapter carries the real reader too.
     assert isinstance(pipeline._build_phase_c_engine().ws.structure, CliStructureReader)

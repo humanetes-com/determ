@@ -50,7 +50,6 @@ from pipeline_core.adapters.artifacts import (
 )
 from pipeline_core.adapters.ask_client import AskClient
 from pipeline_core.adapters.augment_engine import (
-    AugmentModuleFn,
     CargoAugmentEngine,
     StaticRustTestAugmentor,
 )
@@ -80,6 +79,9 @@ from pipeline_core.adapters.discovery import (
     collect_protected_test_files as _collect_protected_test_files,
 )
 from pipeline_core.adapters.discovery import (
+    collect_test_files as _disc_collect_test_files,
+)
+from pipeline_core.adapters.discovery import (
     is_gen_tests_file as _disc_is_gen_tests_file,
 )
 from pipeline_core.adapters.discovery import (
@@ -90,6 +92,7 @@ from pipeline_core.adapters.discovery import (
 )
 from pipeline_core.adapters.downstream_api import scan_downstream_api as _scan_downstream_api
 from pipeline_core.adapters.failure_journal import FileFailureJournal
+from pipeline_core.adapters.file_constraints import FileConstraintsReader
 from pipeline_core.adapters.fill_engine_roles import (
     CargoFillAdapter,
     EngineTelemetryAdapter,
@@ -172,6 +175,9 @@ from pipeline_core.adapters.retros import (
     load_retrospectives as _retros_load,
 )
 from pipeline_core.adapters.retros import (
+    reset_exhaustion_flags as _reset_exhaustion_flags,
+)
+from pipeline_core.adapters.retros import (
     retro_key as _retros_key,
 )
 from pipeline_core.adapters.retros import (
@@ -219,6 +225,9 @@ from pipeline_core.adapters.task2_roles import (
     WorkspaceAdapter,
 )
 from pipeline_core.adapters.telemetry import JsonlEventEmitter, LogTelemetry
+from pipeline_core.adapters.telemetry import (
+    emit_per_file_test_overview as _emit_per_file_test_overview,
+)
 from pipeline_core.adapters.test_runner import CallableTestRunner
 from pipeline_core.adapters.vllm_bootstrap import (
     ensure_vllm_ready as _ensure_vllm_ready,
@@ -281,12 +290,18 @@ from pipeline_core.application.orchestrator import LockDeps, RunDeps
 from pipeline_core.application.orchestrator import (
     PhaseSubcommandDeps as _PhaseSubcommandDeps,
 )
+from pipeline_core.application.parallel import (
+    generate_in_parallel as _gen_in_parallel_impl,
+)
 from pipeline_core.application.reconstruct import attribution as _attribution
 from pipeline_core.application.reconstruct import (
     cleanup_residuals as _cleanup_residuals,
 )
 from pipeline_core.application.reconstruct import (
     cluster_membership as _membership,
+)
+from pipeline_core.application.reconstruct import (
+    leaf_first_group_order as _leaf_first_group_order,
 )
 from pipeline_core.application.reconstruct import source_view as _source_view
 from pipeline_core.application.reconstruct import splice as _splice_mod
@@ -300,12 +315,36 @@ from pipeline_core.application.reconstruct.cargo_errors import (
     categorize_compile_error as _categorize_compile_error,
 )
 from pipeline_core.application.reconstruct.cargo_errors import (
+    err_sig as _cargo_err_sig,
+)
+from pipeline_core.application.reconstruct.cargo_errors import (
+    err_sig_from_diagnostics as _cargo_err_sig_from_diagnostics,
+)
+from pipeline_core.application.reconstruct.cargo_errors import (
     focus_cargo_errors as _focus_cargo_errors_impl,
 )
 from pipeline_core.application.reconstruct.cargo_runner import PortBoundCargoRunner
+from pipeline_core.application.reconstruct.cargo_runner import (
+    u2_test_gate as _cargo_runner_u2_gate,
+)
 from pipeline_core.application.reconstruct.failure_analysis import FailureAnalysisStep
 from pipeline_core.application.reconstruct.failure_diagnosis import (
+    classify_phase_c_test_failures as _classify_failures_impl,
+)
+from pipeline_core.application.reconstruct.failure_diagnosis import (
     implicated_fns_from_cargo_errors as _implicated_fns_impl,
+)
+from pipeline_core.application.reconstruct.failure_diagnosis import (
+    record_tdd_regression as _record_tdd_impl,
+)
+from pipeline_core.application.reconstruct.fill_merge import (
+    merge_fn_blocks_into_disk as _merge_fn_blocks_into_disk,
+)
+from pipeline_core.application.reconstruct.fill_rules import (
+    extract_fn_blocks as _extract_fn_blocks,
+)
+from pipeline_core.application.reconstruct.fill_rules import (
+    module_of as _module_of,
 )
 from pipeline_core.application.reconstruct.fix_context import FixContextAssembler
 from pipeline_core.application.reconstruct.generate_fix import (
@@ -324,6 +363,9 @@ from pipeline_core.application.reconstruct.impl_blocks import (
 from pipeline_core.application.reconstruct.impl_fill import ImplFillDeps
 from pipeline_core.application.reconstruct.impl_fill import (
     fill_impl_blocks as _fill_impl_blocks,
+)
+from pipeline_core.application.reconstruct.macro_invariants import (
+    compute_cluster_macro_invariants as _compute_cluster_macro_invariants,
 )
 from pipeline_core.application.reconstruct.module_reconstructor import ModuleReconstructor
 from pipeline_core.application.reconstruct.per_fn_retry import (
@@ -351,6 +393,12 @@ from pipeline_core.application.reconstruct.retrospective import (
 from pipeline_core.application.reconstruct.scheduling import (
     leaf_first_fn_order as _leaf_first_fn_order,
 )
+from pipeline_core.application.reconstruct.scheduling import (
+    order_frontier as _order_frontier,
+)
+from pipeline_core.application.reconstruct.sibling_context import (
+    collect_sibling_filled_bodies as _collect_sibling_filled_bodies,
+)
 from pipeline_core.application.reconstruct.source_view import (
     condense_rust_to_signatures as _condense_rust_to_signatures,
 )
@@ -366,9 +414,15 @@ from pipeline_core.application.reconstruct.test_grouping import (
 from pipeline_core.application.reconstruct.test_locator import (
     find_tests_for_fn as _find_tests_for_fn,
 )
+from pipeline_core.application.reconstruct.test_locator import (
+    find_tests_referencing_fn as _find_tests_referencing_fn,
+)
 from pipeline_core.application.strip_bake import (
     BakeArtifactsDeps,
     StripBakeDeps,
+)
+from pipeline_core.application.strip_bake import (
+    bake_skeleton_artifacts as _bake_artifacts_impl,
 )
 from pipeline_core.application.strip_bake import (
     strip_and_bake_module as _strip_and_bake_module,
@@ -403,6 +457,9 @@ from pipeline_core.application.tasks.task0b_discovery import (
 from pipeline_core.application.tasks.task0c import Task0cDeps
 from pipeline_core.application.tasks.task0c import (
     select_relevant_siblings as _t0c_select_relevant_siblings,
+)
+from pipeline_core.application.tasks.task0c import (
+    task0c_augment_module as _task0c_augment_impl,
 )
 from pipeline_core.application.tasks.task1 import Task1Deps
 from pipeline_core.application.tasks.task1 import (
@@ -515,6 +572,9 @@ from pipeline_core.domain.generation import (
     inject_gen_prelude_imports as _gen_inject_gen_prelude_imports,
 )
 from pipeline_core.domain.generation import (
+    is_gen_tests_decl_only_src as _gen_is_decl_only_src,
+)
+from pipeline_core.domain.generation import (
     is_gen_tests_sibling_name as _is_gen_tests_sibling_name,
 )
 from pipeline_core.domain.generation import (
@@ -532,6 +592,12 @@ from pipeline_core.domain.generation import (
 from pipeline_core.domain.generation import (
     strip_gen_tests_decl_n as _strip_gen_tests_decl_n,
 )
+from pipeline_core.domain.impl_block_ranges import (
+    impl_where_clause as _impl_where_clause,
+)
+from pipeline_core.domain.impl_block_ranges import (
+    render_impl_block as _render_impl_block,
+)
 from pipeline_core.domain.impl_routing import impl_block_id as _impl_block_id
 from pipeline_core.domain.llm_output import extract_files as _extract_files
 from pipeline_core.domain.llm_output import (
@@ -540,7 +606,7 @@ from pipeline_core.domain.llm_output import (
 from pipeline_core.domain.llm_output import (
     split_api_surface_by_file as _split_api_surface_by_file,
 )
-from pipeline_core.domain.models import FnRecord, TypeRecord
+from pipeline_core.domain.models import FnRecord
 from pipeline_core.domain.prompt_budget import PromptBudgets
 from pipeline_core.domain.refine import (
     parse_retrospective_categories as _parse_retro_categories,
@@ -603,11 +669,30 @@ from pipeline_core.io import write as _io_write
 from pipeline_core.ports.cargo_runner import CargoRunner as CargoRunnerPort
 from pipeline_core.ports.structure import StructureReader
 from pipeline_core.prompts import shaping as _shaping
+from pipeline_core.prompts.crate_idioms import (
+    extract_crate_idioms as _extract_crate_idioms,
+)
+from pipeline_core.prompts.output_format import FILE_FORMAT_INSTRUCTION
 from pipeline_core.prompts.per_fn import build_per_fn_fix_prompt
+from pipeline_core.prompts.per_impl import (
+    build_per_impl_prompt as _build_per_impl_prompt,
+)
+from pipeline_core.prompts.sections import (
+    build_dispatch_family_section as _build_dispatch_family_impl,
+)
 from pipeline_core.prompts.sections import (
     format_api_surface_section as _fmt_api_surface_impl,
 )
+from pipeline_core.prompts.sections import (
+    gotchas_for_error as _gotchas_for_error,
+)
+from pipeline_core.prompts.sections import (
+    gotchas_summary as _gotchas_summary,
+)
 from pipeline_core.prompts.sections import tag_block as _tag_block
+from pipeline_core.prompts.skeleton_index import (
+    format_skeleton_index_for_cluster as _format_skeleton_index_for_cluster,
+)
 from pipeline_core.prompts.whole_file_fix import build_whole_file_fix_prompt as _build_wff
 from pipeline_core.settings import Settings
 
@@ -687,84 +772,44 @@ class Helpers:
     # PromptContext role's model seam, routed through App (P3-S2 llm boundary).
     ask_per_fn_body: Callable[..., tuple[str | None, str]]
     # Group-fill leaf collaborators (P3-S3, GroupFillDeps construction):
-    extract_fn_blocks: Callable[..., Any]
-    format_skeleton_index_for_cluster: Callable[..., Any]
-    leaf_first_group_order: Callable[..., Any]
-    merge_fn_blocks_into_disk: Callable[..., Any]
     # Phase-C TDD driver collaborators (P3-S3, PhaseCTddDeps construction;
     # attribute_failures/build_test_reverse_map/filter_test_targets pre-exist
     # below in the S27 group):
     # Same seams read through the LIVE pipeline._APP (swap-aware: tests
     # replace _APP; composition must not import pipeline, so the module
     # provides these App-reading closures itself):
-    scan_stub_records_via_app: Callable[..., Any]
-    collect_impl_blocks_via_app: Callable[..., Any]
     # Phase-subcommand collaborators (P3-S3 step 47):
-    bake_skeleton_artifacts: Callable[..., Any]
     # Task-0c collaborators (P3-S3 step 42, Task0cDeps construction):
     cluster_gate_for: Callable[..., Any]
     describe_test_environment: Callable[..., Any]
-    generate_in_parallel: Callable[..., Any]
-    load_file_constraints: Callable[..., Any]
     coverage_target: float
     task0c_prompt_char_cap: int
     task0c_fix_thinking_directive: str
     task0c_thinking_directive: str
     # Fix-loop collaborators (P3-S3 step 31, GenerateFixLoopDeps construction):
-    set_current: Callable[..., Any]
-    emit_per_file_test_overview: Callable[..., Any]
     fix_diag: Any
-    gotchas_for_error: Callable[..., Any]
-    gotchas_summary: Callable[..., Any]
-    render_impl_block: Callable[..., Any]
     settings_now: Callable[..., Any]
     store_prompt_content: Callable[..., Any]
     ask_raw: Callable[..., Any]
     pipeline_parallelism: Callable[[], int]
-    propagate_or_quarantine_sibling: Callable[..., Any]
     task3_legacy_single: Callable[..., Any]
     task3_inline_retry: Callable[..., Any]
     source_extensions: Any
     fix_thinking_directive: str
     task2_verbosity_guard: str
     # Attribution collaborators (P3-S3, AttributionDeps construction):
-    classify_phase_c_test_failures: Callable[..., Any]
     structure_via_app: Any  # StructureReader reading the LIVE pipeline._APP.structure
     # Task-1 collaborators (P3-S3, Task1Deps construction):
-    file_format_instruction: str
     # Impl-fill collaborators (P3-S3, ImplFillDeps construction):
-    build_dispatch_family_section: Callable[..., Any]
-    build_per_impl_prompt: Callable[..., Any]
-    cargo_err_sig: Callable[..., Any]
-    cargo_err_sig_from_diagnostics: Callable[..., Any]
-    collect_sibling_filled_bodies: Callable[..., Any]
-    compute_cluster_macro_invariants: Callable[..., Any]
-    dispatch_families: Callable[..., Any]
-    extract_crate_idioms: Callable[..., Any]
-    extract_impl_where_clause: Callable[..., Any]
-    collect_test_files: Callable[..., Any]
-    enumerate_mods: Callable[..., Any]
-    find_tests_referencing_fn: Callable[..., Any]
-    task0c_augment_module: AugmentModuleFn
-    module_of: Callable[..., Any]
-    types_section_for_fix: Callable[..., Any]
-    bound_methods_section_for: Callable[..., Any]
-    u2_test_gate: Callable[..., Any]
     test_regression_baseline: Callable[..., Any]
     test_regression_gate: Callable[..., Any]
     per_impl_max_stubs: int
     converge_in_cluster: Callable[..., Any]
     count_relevant_notes: Callable[..., Any]
     effective_stalls: Callable[..., Any]
-    order_frontier: Callable[..., Any]
-    record_tdd_regression: Callable[..., Any]
-    reset_exhaustion_flags: Callable[..., Any]
     run_cargo: Callable[..., Any]
     task2_fill_fns_one_by_one: Callable[..., Any]
-    enumerate_types: Callable[[Path], list[TypeRecord] | None]
-    enumerate_fns: Callable[[Path], list[dict[str, object]] | None]
     # Reconstruction-cluster collaborators (S3 slices 11-20):
-    task3: Callable[..., tuple[bool, str]]
     run_flow_audit: Callable[[str], None]
     load_model_notes: Callable[..., list[str]]
     genesis_rules_count: Callable[..., int]
@@ -874,6 +919,7 @@ class App:
     # so a test's replace on the live App is seen at call time.
     attribute_failures: Callable[..., Any]
     behavior_frontier: Callable[..., Any]
+    classify_phase_c_test_failures: Callable[..., Any]
     collect_impl_blocks: Callable[..., Any]
     compile_error_frontier: Callable[..., Any]
     extract_tdd_frontier: Callable[..., Any]
@@ -981,6 +1027,59 @@ def build_app(
             return getattr(app_ref(), name)(*a, **k)
         return _call
 
+    # S85: former Helpers pass-throughs over the live App — resolved via
+    # _live() so a test's dataclasses.replace on pipeline._APP wins.
+    def enumerate_fns(sd: Path) -> Any:
+        return _live().structure.enumerate_fns(sd)
+
+    def enumerate_types(sd: Path) -> Any:
+        return _live().structure.enumerate_types(sd)
+
+    def enumerate_mods(sd: Path) -> Any:
+        return _live().structure.enumerate_mods(sd)
+
+    def enumerate_dispatch_families(sd: Path) -> Any:
+        return _live().structure.enumerate_dispatch_families(sd)
+
+    def scan_stub_records_via_app(*a: Any, **k: Any) -> Any:
+        return _live().scan_stub_records_for_cluster(*a, **k)
+
+    def collect_impl_blocks_via_app(*a: Any, **k: Any) -> Any:
+        return _live().collect_impl_blocks_for_cluster(*a, **k)
+
+    def bound_methods_section_for(*a: Any, **k: Any) -> Any:
+        return _live().fix_context.bound_methods_section_for(*a, **k)
+
+    def types_section_for_fix(*a: Any, **k: Any) -> Any:
+        return _live().fix_context.types_section_for_fix(*a, **k)
+
+    def task3_via_app(*a: Any, **k: Any) -> Any:
+        return _live().task3(*a, **k)
+
+    def task0c_augment_module(pd: Path, mn: str, md: Path, crate_type: str = "",
+                              **k: Any) -> Any:
+        return _task0c_augment_impl(pd, mn, md, _live().task0c_deps, crate_type, **k)
+
+    def bake_skeleton_artifacts(pd: Path, mn: str) -> Any:
+        return _bake_artifacts_impl(pd, mn, _live().bake_artifacts_deps)
+
+    generate_in_parallel = functools.partial(
+        _gen_in_parallel_impl, ask=ask_client.ask, guard=ports.guard)
+    build_dispatch_family_section = functools.partial(
+        _build_dispatch_family_impl, single_call_char_limit=cfg.single_call_char_limit)
+
+    def record_tdd_regression(*a: Any, **k: Any) -> Any:
+        return _record_tdd_impl(
+            *a, **k, enumerate_fns=enumerate_fns,
+            append_note=model_notes_store.append,
+            body_cap=PromptBudgets.derive(cfg.single_call_char_limit).failed_body)
+
+    file_constraints = FileConstraintsReader(
+        configs_dir=Path(__file__).resolve().parent.parent / "project_configs",
+        is_nightly=lambda: scope.active is not None and not scope.active.is_default,
+        log=ports.log,
+    )
+
     def _via_deps_impl_fill() -> ImplFillDeps:
         if app_ref is None:
             raise RuntimeError("impl_fill deps resolved without app_ref")
@@ -1005,18 +1104,18 @@ def build_app(
     splice_fn_body = functools.partial(
         _splice_mod.splice_fn_body, validate_parse=_validate_parse)
     locate_fn_by_record = functools.partial(
-        _splice_mod.locate_fn_by_record, helpers.enumerate_fns)
+        _splice_mod.locate_fn_by_record, enumerate_fns)
 
     def splice_fn_with_where(
         file_path: Path, container: str, fn_name: str, body: str,
         where_clause: str | None = None, allow_nonstub: bool = False,
     ) -> Any:
         return _splice_mod.splice_fn_with_where(
-            helpers.enumerate_fns, file_path, container, fn_name, body,
+            enumerate_fns, file_path, container, fn_name, body,
             where_clause, allow_nonstub, validate_parse=_validate_parse)
 
     scan_unimplemented_functions = functools.partial(
-        _stub_scan.scan_unimplemented_functions, enumerate_fns=helpers.enumerate_fns)
+        _stub_scan.scan_unimplemented_functions, enumerate_fns=enumerate_fns)
     source_hash = functools.partial(
         _structure_source_hash,
         is_gen_tests_sibling_name=_is_gen_tests_sibling_name,
@@ -1028,7 +1127,7 @@ def build_app(
         sc = app_ref().structure_cache if app_ref is not None else structure_cache
         return _tc_app.count_active_tests_for_cluster(
             project_dir, cluster, _tc_app.TestCountDeps(
-                enumerate_fns=helpers.enumerate_fns,
+                enumerate_fns=enumerate_fns,
                 mod_records=sc.mod_records,
                 file_cfg_predicate=sc.file_cfg_predicate,
                 is_gen_tests_file=_disc_is_gen_tests_file,
@@ -1045,7 +1144,7 @@ def build_app(
     def filter_test_targets(frontier: Any, src_dir: Path) -> Any:
         """Drop frontier keys that resolve to a #[cfg(test)]/#[test] fn (FR-018)."""
         return _test_targets_mod.filter_test_targets(
-            frontier, helpers.enumerate_fns(src_dir) or [], log=ports.log)
+            frontier, enumerate_fns(src_dir) or [], log=ports.log)
 
     def extract_skeleton(input_dir: Path, output_dir: Path,
                          cluster: Any = None) -> Any:
@@ -1060,8 +1159,8 @@ def build_app(
     def public_api_from_source(content: str) -> str:
         return _source_view.public_api_from_source(
             content,
-            enumerate_types=helpers.enumerate_types,
-            enumerate_fns=helpers.enumerate_fns,
+            enumerate_types=enumerate_types,
+            enumerate_fns=enumerate_fns,
             enumerate_consts=lambda sd: (
                 app_ref().structure if app_ref is not None else structure
             ).enumerate_consts(sd),
@@ -1102,6 +1201,22 @@ def build_app(
     def git_tag(project_dir: Path, tag: str) -> None:
         _ws_git_tag(_live().ws_deps, project_dir, tag,
                     managed=run_state.git_managed)
+
+    collect_test_files = functools.partial(
+        _disc_collect_test_files, is_gen_tests_decl_only=_gen_is_decl_only_src)
+
+    def u2_test_gate(fn_tests: set[str], unit_fns: Any, test_cmd: str | None,
+                     target_src_dir: Path, cluster_env: dict[str, str] | None) -> Any:
+        """F3 test-acceptance gate. run_cargo late-binds the pipeline seam via
+        helpers; enabled/timeout re-read settings_now() so a patched SETTINGS
+        wins; structure resolves through the LIVE app (fake readers win)."""
+        caps = helpers.settings_now().fix_caps
+        return _cargo_runner_u2_gate(
+            helpers.run_cargo, fn_tests, unit_fns, test_cmd, target_src_dir,
+            cluster_env, structure=_live().structure,
+            enabled=caps.unified_fill_loop, timeout=caps.u2_test_timeout,
+            err_cap=cfg.fix_err_cap, guard=ports.guard)
+
 
     def commit_and_mark(
         project_dir: Path, phase_key: str, status: str, *,
@@ -1171,7 +1286,7 @@ def build_app(
         ask=ask_client.ask,
         task2_model=settings.task_models.task2,
         single_call_char_limit=cfg.single_call_char_limit,
-        file_format_instruction=helpers.file_format_instruction,
+        file_format_instruction=FILE_FORMAT_INSTRUCTION,
         log=ports.log,
     )
     # S69: former pipeline delegate shims, bound direct (their bodies never
@@ -1241,7 +1356,7 @@ def build_app(
         enumerate_types=adapters.extractor.enumerate_types,
         is_test_file=_disc_is_test_file, skip_dir_names=cfg.skip_dir_names,
         log=ports.log,
-        enumerate_fns=helpers.enumerate_fns,
+        enumerate_fns=enumerate_fns,
         pub_items_manifest_path=_pub_items_manifest_path,
     )
     restore_from_augmented = RestoreFromAugmented(
@@ -1253,8 +1368,8 @@ def build_app(
     # through helpers (late-bind → live _APP.structure, so fake extractors win);
     # impl-block collection through the swap-aware App seam.
     structure_cache = StructureCache(
-        enumerate_fns=helpers.enumerate_fns,
-        enumerate_mods=helpers.enumerate_mods,
+        enumerate_fns=enumerate_fns,
+        enumerate_mods=enumerate_mods,
         collect_impl_blocks=_via("collect_impl_blocks"),
         log=ports.log,
     )
@@ -1264,8 +1379,8 @@ def build_app(
     augment_engine = CargoAugmentEngine(
         log=ports.log, cargo_env=ports.cargo_env, build_timeout=cfg.build_timeout,
         default_setup=cfg.setup_script,
-        collect_test_files=helpers.collect_test_files,
-        augment_module=helpers.task0c_augment_module,
+        collect_test_files=collect_test_files,
+        augment_module=task0c_augment_module,
     )
     augment_roles = AugmentRoles(
         store=augment_store, engine=augment_engine,
@@ -1277,7 +1392,7 @@ def build_app(
     )
 
     def _typed_fn_records(sd: Path) -> list[FnRecord]:
-        return [FnRecord.from_dict(d) for d in (helpers.enumerate_fns(sd) or [])]
+        return [FnRecord.from_dict(d) for d in (enumerate_fns(sd) or [])]
 
     # F11 t1.5 (M2) + M3 (S66): layout phase runner + stall-exit re-trigger.
     run_layout_phase = build_layout_phase_runner(
@@ -1298,11 +1413,11 @@ def build_app(
         log=ports.log, phase_valid=phase_valid,
         module_augmented_path=augment_roles.store.module_path,
         capture_api_surface=api_surface.capture,
-        bake_skeleton_artifacts=helpers.bake_skeleton_artifacts,
+        bake_skeleton_artifacts=bake_skeleton_artifacts,
         git_commit=git_commit, git_tag=git_tag,
         strip_module_source=_strip_module_source,
         commit_and_mark=commit_and_mark,
-        set_current=helpers.set_current, tarpaulin_bin=cfg.tarpaulin_bin,
+        set_current=set_current, tarpaulin_bin=cfg.tarpaulin_bin,
         coverage_target=helpers.coverage_target,
         run_layout_phase=run_layout_phase,
     )
@@ -1315,9 +1430,9 @@ def build_app(
         is_gen_tests_file=helpers.is_gen_tests_file,
         gen_tests_origin_cfgs=_gen_tests_origin_cfgs,
         save_behaviour_suite=save_behaviour_suite,
-        enumerate_types=helpers.enumerate_types,
+        enumerate_types=enumerate_types,
         enumerate_fns=_typed_fn_records,
-        enumerate_mods=helpers.enumerate_mods,
+        enumerate_mods=enumerate_mods,
         save_private_surface=save_private_surface,
     )
 
@@ -1365,10 +1480,10 @@ def build_app(
         prompt=PromptContextAdapter(
             ask_per_fn_body_fn=_via("ask_per_fn_body"),
             gather_fn=fix_context.gather,
-            collect_sibling_filled_bodies_fn=helpers.collect_sibling_filled_bodies,
-            extract_crate_idioms_fn=helpers.extract_crate_idioms,
+            collect_sibling_filled_bodies_fn=_collect_sibling_filled_bodies,
+            extract_crate_idioms_fn=_extract_crate_idioms,
             collect_crate_macros_fn=collect_crate_macros,
-            compute_cluster_macro_invariants_fn=helpers.compute_cluster_macro_invariants,
+            compute_cluster_macro_invariants_fn=_compute_cluster_macro_invariants,
             detect_crate_no_std_invariant_fn=_detect_crate_no_std_invariant,
         ),
         ws=WorkspaceModelAdapter(
@@ -1394,7 +1509,7 @@ def build_app(
         ),
         tests=TestLinkerAdapter(
             find_tests_for_fn_fn=_find_tests_for_fn,
-            classify_failures_fn=helpers.classify_phase_c_test_failures,
+            classify_failures_fn=_via("classify_phase_c_test_failures"),
             write_test_fix_log_fn=_write_phase_c_test_fix_log,
         ),
         stall=StallPolicyAdapter(
@@ -1439,7 +1554,7 @@ def build_app(
         passed, test_output = _task3_impl(
             project_dir, test_command, iteration, output_dir, genesis_path, _task3_deps)
         ports.emit("task.done", task="task3", data={"passed": bool(passed)})
-        helpers.emit_per_file_test_overview(
+        _emit_per_file_test_overview(
             Path(project_dir), _extract_test_output_from_file(test_output),
             context=f"task3 iter {iteration}")
         return passed, test_output
@@ -1450,7 +1565,7 @@ def build_app(
         log_fn=ports.log,
         emit_fn=ports.emit,
         check_stop_fn=check_graceful_stop,
-        set_current_fn=helpers.set_current,
+        set_current_fn=set_current,
         mark_phase_fn=lambda pd, key, status, detail="": _state_mark_phase(pd, key, status, detail=detail),
         phase_valid_fn=phase_valid,
     )
@@ -1478,7 +1593,7 @@ def build_app(
         build_test_cmd_fn=_build_test_cmd,
         env_fn=ports.cargo_env,
         implicated_fns_fn=lambda out, tsd: _implicated_fns_impl(
-            out, tsd, enumerate_fns=helpers.enumerate_fns),
+            out, tsd, enumerate_fns=enumerate_fns),
         attribute_failures_fn=lambda to, sd, rf, trm, cn: _via("attribute_failures")(to, sd, rf, trm, cn),
         filter_test_targets_fn=filter_test_targets,
     )
@@ -1492,7 +1607,7 @@ def build_app(
         scan_unimplemented_fn=scan_unimplemented_functions,
         merge_cluster_outputs_fn=lambda **kw: cluster_merger.merge_cluster_outputs(**kw),
         generate_fix_loop_fn=generate_fix_loop,
-        reset_exhaustion_flags_fn=helpers.reset_exhaustion_flags,
+        reset_exhaustion_flags_fn=_reset_exhaustion_flags,
         build_test_reverse_map_fn=build_test_reverse_map,
     )
     gen_clusters = ClustersAdapter(
@@ -1507,7 +1622,7 @@ def build_app(
         strip_decl_n_fn=_strip_gen_tests_decl_n,
         derive_prelude_fn=helpers.derive_gentest_prelude,
         load_origin_fn=helpers.load_gen_tests_origin,
-        propagate_fn=lambda gt, om, ps, pn, tag="": helpers.propagate_or_quarantine_sibling(
+        propagate_fn=lambda gt, om, ps, pn, tag="": _membership.propagate_or_quarantine_sibling(
             gt, om, ps, pn, ports.log, tag),
         is_gen_tests_file_fn=helpers.is_gen_tests_file,
     )
@@ -1531,7 +1646,7 @@ def build_app(
             model=settings.model,
             task1_model=settings.task_models.task1,
             thinking_directive=cfg.task1_thinking_directive,
-            file_format_instruction=helpers.file_format_instruction,
+            file_format_instruction=FILE_FORMAT_INSTRUCTION,
             single_call_char_limit=cfg.single_call_char_limit,
             synthesis_group_size=cfg.synthesis_group_size,
             readme_cap=cfg.readme_cap,
@@ -1548,7 +1663,7 @@ def build_app(
 
     def _build_task2_config() -> Task2Config:
         return Task2Config(
-            file_format_instruction=helpers.file_format_instruction,
+            file_format_instruction=FILE_FORMAT_INSTRUCTION,
             task2_model=settings.task_models.task2,
             thinking_directive=cfg.task2_thinking_directive,
             verbosity_guard=helpers.task2_verbosity_guard,
@@ -1583,7 +1698,7 @@ def build_app(
                 ask=lambda *a, **k: helpers.ask_raw(*a, **k),
                 log=ports.log, emit=ports.emit,
                 model=settings.task_models.task2,
-                dispatch_families=lambda *a, **k: helpers.dispatch_families(*a, **k)))
+                dispatch_families=lambda *a, **k: enumerate_dispatch_families(*a, **k)))
 
     def _task2_generator_factory() -> Task2Generator:
         backend = Task2Backend.coerce(_os.getenv("TASK2_GENERATOR"), Task2Backend.FILELIST)
@@ -1673,7 +1788,7 @@ def build_app(
         build_gen_tests_decl=helpers.build_gen_tests_decl, cluster_cfg_attr=cluster_cfg_attr,
         has_gen_tests_decl=_has_gen_tests_mod_decl, cargo_env=ports.cargo_env,
     )
-    test_runner = CallableTestRunner(helpers.task3)
+    test_runner = CallableTestRunner(task3_via_app)
     coverage_docs = CoverageDocsAdapter(
         lambda project_dir, test_files, readme_text, project_profile, clusters:
             _via("task0b_discovery")(
@@ -1715,7 +1830,7 @@ def build_app(
     # escalation (debt #82) closes over it.
     _attr_deps = AttributionDeps(
         structure=helpers.structure_via_app,
-        classify=helpers.classify_phase_c_test_failures,
+        classify=_via("classify_phase_c_test_failures"),
         locate_fn=_domain_locate_fn,
         run_check_diag=helpers.run_cargo_check_diag,
         derive_check_only_cmd=_domain_derive_check_only_cmd,
@@ -1772,7 +1887,7 @@ def build_app(
     )
     phase_subcommand_deps = _PhaseSubcommandDeps(
         log=ports.log,
-        bake_skeleton_artifacts=helpers.bake_skeleton_artifacts,
+        bake_skeleton_artifacts=bake_skeleton_artifacts,
         collect_test_files=_collect_protected_test_files,
         group_tests=task2_group_tests,
         fill_groups=task2_fill_groups,
@@ -1836,7 +1951,7 @@ def build_app(
         discover_test_command=lambda readme_text, project_dir=None: (
             _discover_test_command_impl(readme_text, project_dir, discover_test_cmd_deps)),
         parse_cmd=_parse_cmd,
-        collect_test_files=helpers.collect_test_files,
+        collect_test_files=collect_test_files,
         collect_protected_test_files=_collect_protected_test_files,
         task0_project_profile=lambda path, test_files, readme: (
             _task0_profile_impl(path, test_files, readme, task0_docs_deps)),
@@ -1877,11 +1992,11 @@ def build_app(
         group_fill_deps=GroupFillDeps(
             log=ports.log,
             ask=ask_client.ask,
-            extract_fn_blocks=helpers.extract_fn_blocks,
-            format_skeleton_index_for_cluster=helpers.format_skeleton_index_for_cluster,
-            leaf_first_group_order=helpers.leaf_first_group_order,
+            extract_fn_blocks=_extract_fn_blocks,
+            format_skeleton_index_for_cluster=_format_skeleton_index_for_cluster,
+            leaf_first_group_order=_leaf_first_group_order,
             load_skeleton_files=_load_skeleton_files,
-            merge_fn_blocks_into_disk=helpers.merge_fn_blocks_into_disk,
+            merge_fn_blocks_into_disk=_merge_fn_blocks_into_disk,
             scan_unimplemented_functions=scan_unimplemented_functions,
             single_call_char_limit=cfg.single_call_char_limit,
             genesis_cap=PromptBudgets.derive(cfg.single_call_char_limit).genesis,
@@ -1897,9 +2012,9 @@ def build_app(
             effective_stalls=helpers.effective_stalls,
             emit=ports.emit,
             log=ports.log,
-            order_frontier=helpers.order_frontier,
-            record_tdd_regression=helpers.record_tdd_regression,
-            reset_exhaustion_flags=helpers.reset_exhaustion_flags,
+            order_frontier=_order_frontier,
+            record_tdd_regression=record_tdd_regression,
+            reset_exhaustion_flags=_reset_exhaustion_flags,
             run_cargo=helpers.run_cargo,
             scan_unimplemented_for_cluster=structure_cache.scan_unimplemented_for_cluster,
             scan_unimplemented_functions=scan_unimplemented_functions,
@@ -1910,44 +2025,44 @@ def build_app(
             retrigger_layout=retrigger_layout,
         ),
         impl_fill_deps=ImplFillDeps(
-            build_dispatch_family_section=helpers.build_dispatch_family_section,
-            build_per_impl_prompt=helpers.build_per_impl_prompt,
+            build_dispatch_family_section=build_dispatch_family_section,
+            build_per_impl_prompt=_build_per_impl_prompt,
             cargo_env=ports.cargo_env,
-            cargo_err_sig=helpers.cargo_err_sig,
-            cargo_err_sig_from_diagnostics=helpers.cargo_err_sig_from_diagnostics,
+            cargo_err_sig=_cargo_err_sig,
+            cargo_err_sig_from_diagnostics=_cargo_err_sig_from_diagnostics,
             check_graceful_stop=check_graceful_stop,
             cluster_filter_type_methods=_membership.cluster_filter_type_methods,
             collect_crate_macros=collect_crate_macros,
-            collect_impl_blocks_for_cluster=helpers.collect_impl_blocks_via_app,
-            collect_sibling_filled_bodies=helpers.collect_sibling_filled_bodies,
-            compute_cluster_macro_invariants=helpers.compute_cluster_macro_invariants,
+            collect_impl_blocks_for_cluster=collect_impl_blocks_via_app,
+            collect_sibling_filled_bodies=_collect_sibling_filled_bodies,
+            compute_cluster_macro_invariants=_compute_cluster_macro_invariants,
             detect_crate_no_std_invariant=_detect_crate_no_std_invariant,
-            dispatch_families_via_extractor=helpers.dispatch_families,
+            dispatch_families_via_extractor=enumerate_dispatch_families,
             effective_stalls=helpers.effective_stalls,
             emit=ports.emit,
-            enumerate_types_via_extractor=helpers.enumerate_types,
-            extract_crate_idioms=helpers.extract_crate_idioms,
-            extract_impl_where_clause=helpers.extract_impl_where_clause,
+            enumerate_types_via_extractor=enumerate_types,
+            extract_crate_idioms=_extract_crate_idioms,
+            extract_impl_where_clause=_impl_where_clause,
             filter_model_notes_for_prompt=model_notes_store.filter_for_prompt,
-            find_tests_referencing_fn=helpers.find_tests_referencing_fn,
+            find_tests_referencing_fn=_find_tests_referencing_fn,
             focus_cargo_errors=focus_cargo_errors,
             frontier_from_diags=_via("frontier_from_diags"),
             impl_block_id=_impl_block_id,
             is_fn_fully_exhausted=_retros_is_exhausted,
             load_retrospectives=_retros_load,
             log=ports.log,
-            module_of=helpers.module_of,
+            module_of=_module_of,
             phase_c_retrospective=_via("phase_c_retrospective"),
             record_error_codes_seen=model_notes_store.record_error_codes_seen,
             retro_key=_retros_key,
             run_cargo_check_diag=helpers.run_cargo_check_diag,
             save_retrospectives=_retros_save,
             scan_unimplemented_for_cluster=structure_cache.scan_unimplemented_for_cluster,
-            scan_unimplemented_records_for_cluster=helpers.scan_stub_records_via_app,
+            scan_unimplemented_records_for_cluster=scan_stub_records_via_app,
             splice_fn_with_where=splice_fn_with_where,
             splice_lock_for=_splice_mod.splice_lock_for,
-            types_section_for_fix=helpers.types_section_for_fix,
-            bound_methods_section_for=helpers.bound_methods_section_for,
+            types_section_for_fix=types_section_for_fix,
+            bound_methods_section_for=bound_methods_section_for,
             u2_test_gate=_via("u2_test_gate"),
             test_regression_baseline=helpers.test_regression_baseline,
             test_regression_gate=helpers.test_regression_gate,
@@ -1997,7 +2112,7 @@ def build_app(
             inject_gen_prelude_imports=_gen_inject_gen_prelude_imports,
             is_gen_tests_file=_disc_is_gen_tests_file,
             is_structural_line=_scan_is_structural_brace_line,
-            load_file_constraints=helpers.load_file_constraints,
+            load_file_constraints=file_constraints.load,
             type_signals_write=_db_type_signals_write,
             mark_phase=_state_mark_phase,
             match_gen_tests_sibling=_disc_match_gen_tests_sibling,
@@ -2012,7 +2127,7 @@ def build_app(
             read_state=_state_read_state,
             revert_gen_tests_pass=_gts_revert_gen_tests_pass,
             select_relevant_siblings=_t0c_select_relevant_siblings,
-            set_current=helpers.set_current,
+            set_current=set_current,
             source_hash=source_hash,
             strip_all_gen_tests_artifacts=_gts_strip_all_artifacts,
             strip_gen_tests_decl_n=_gen_strip_decl_n,
@@ -2025,7 +2140,7 @@ def build_app(
             extract_files=_extract_files,
             extract_test_mod=_gen_extract_test_mod,
             generate_fix_loop=generate_fix_loop,
-            generate_in_parallel=helpers.generate_in_parallel,
+            generate_in_parallel=generate_in_parallel,
             is_test_file=_disc_is_test_file,
             write=_io_write,
             subprocess=_subprocess_mod,
@@ -2034,9 +2149,9 @@ def build_app(
             check_stop=check_graceful_stop,
         ),
         gen_fix_loop_deps=GenerateFixLoopDeps(
-            set_current=helpers.set_current,
+            set_current=set_current,
             BUILD_TIMEOUT=cfg.build_timeout,
-            FILE_FORMAT_INSTRUCTION=helpers.file_format_instruction,
+            FILE_FORMAT_INSTRUCTION=FILE_FORMAT_INSTRUCTION,
             MODEL=settings.model,
             settings_now=helpers.settings_now,
             SINGLE_CALL_CHAR_LIMIT=cfg.single_call_char_limit,
@@ -2055,22 +2170,22 @@ def build_app(
             compile_error_frontier=_via("compile_error_frontier"),
             derive_check_only_cmd=_domain_derive_check_only_cmd,
             emit=ports.emit,
-            emit_per_file_test_overview=helpers.emit_per_file_test_overview,
-            enumerate_fns_via_extractor=helpers.enumerate_fns,
-            enumerate_types=helpers.enumerate_types,
-            types_section_for_fix=helpers.types_section_for_fix,
+            emit_per_file_test_overview=_emit_per_file_test_overview,
+            enumerate_fns_via_extractor=enumerate_fns,
+            enumerate_types=enumerate_types,
+            types_section_for_fix=types_section_for_fix,
             check_stop=check_graceful_stop,
             extract_tdd_frontier=_via("extract_tdd_frontier"),
             filter_test_targets=filter_test_targets,
             fix_diag=helpers.fix_diag,
             frontier_from_diags=_via("frontier_from_diags"),
-            gotchas_for_error=helpers.gotchas_for_error,
-            gotchas_summary=helpers.gotchas_summary,
+            gotchas_for_error=_gotchas_for_error,
+            gotchas_summary=_gotchas_summary,
             is_pub_fn=_domain_is_pub_fn,
             locate_fn=_domain_locate_fn,
             log=ports.log,
             parse_cmd=_parse_cmd,
-            render_impl_block=helpers.render_impl_block,
+            render_impl_block=_render_impl_block,
             repo_spec_section=repo_spec_section,
             restore_frozen_signature=_splice_restore_frozen_sig,
             run_cargo_check_diag=helpers.run_cargo_check_diag,
@@ -2097,7 +2212,7 @@ def build_app(
             filter_proc_macro_test_files=_filter_proc_macro_test_files,
             proc_macro_fallback_requirements=_pm_fallback_reqs,
             format_api_surface_section=format_api_surface_section,
-            file_format_instruction=helpers.file_format_instruction,
+            file_format_instruction=FILE_FORMAT_INSTRUCTION,
             single_call_char_limit=cfg.single_call_char_limit,
             profile_cap=cfg.profile_cap,
             task1_model=settings.task_models.task1,
@@ -2106,20 +2221,20 @@ def build_app(
         ask_per_fn_body=helpers.ask_per_fn_body,
         # S61: seam fields bound DIRECT to the pipeline_core impls (consumers
         # go through _via(...) so a test's replace on the live App wins).
-        # u2_test_gate stays helpers-bound: its impl closes over the resident
-        # `_run_cargo`/`_UNIFIED_FILL_LOOP` module seams raw-scripting tests
-        # still patch.
         attribute_failures=functools.partial(_attribution.attribute_failures, _attr_deps),
         behavior_frontier=functools.partial(_attribution.behavior_frontier, _attr_deps),
+        classify_phase_c_test_failures=functools.partial(
+            _classify_failures_impl, ask=ask_client.ask, log=ports.log,
+            model=settings.task_models.task0c, err_cap=cfg.fix_err_cap),
         collect_impl_blocks=functools.partial(
-            _collect_impl_blocks_impl, enumerate_fns=helpers.enumerate_fns),
+            _collect_impl_blocks_impl, enumerate_fns=enumerate_fns),
         compile_error_frontier=functools.partial(
             _attribution.compile_error_frontier, _attr_deps),
         extract_tdd_frontier=functools.partial(_attribution.extract_tdd_frontier, _attr_deps),
         fn_container_index=functools.partial(
-            _fn_container_index_impl, enumerate_fns=helpers.enumerate_fns),
+            _fn_container_index_impl, enumerate_fns=enumerate_fns),
         frontier_from_diags=functools.partial(_attribution.frontier_from_diags, _attr_deps),
-        u2_test_gate=helpers.u2_test_gate,
+        u2_test_gate=u2_test_gate,
         fill_roles=fill_roles,
         model_notes_store=model_notes_store,
         cleanup_residuals_deps=cleanup_residuals_deps,
@@ -2154,7 +2269,7 @@ def build_app(
         task0b_discovery=functools.partial(_task0b_impl, deps=_task0b_deps),
         task3=_task3,
         validator_deps=Task2CheckerDeps(
-            enumerate_types=helpers.enumerate_types, enumerate_fns=helpers.enumerate_fns,
+            enumerate_types=enumerate_types, enumerate_fns=enumerate_fns,
             load_pub_items_manifest=load_pub_items_manifest,
         ),
         telemetry=telemetry,
@@ -2178,7 +2293,7 @@ def build_app(
             ),
             enumerator=Task3Enumerate(
                 cluster_filter_type_methods=fill_roles.ws.cluster_filter_type_methods,
-                enumerate_types=helpers.enumerate_types,
+                enumerate_types=enumerate_types,
                 fn_container_index=fill_roles.ws.fn_container_index,
             ),
             retry_fix=RetryDeps(

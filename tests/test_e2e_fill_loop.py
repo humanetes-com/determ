@@ -13,7 +13,13 @@ from pathlib import Path
 
 import pipeline
 from pipeline_core.domain.enums import FillUnit
-from tests.harness import install_cluster_scan, install_fake_extractor, install_scripted_cargo, install_scripted_model
+from tests.harness import (
+    install_app_seams,
+    install_cluster_scan,
+    install_fake_extractor,
+    install_scripted_cargo,
+    install_scripted_model,
+)
 
 STUB_LIB = """pub fn answer() -> u32 {
     unimplemented!()
@@ -127,8 +133,8 @@ def test_u2_assertion_failure_routes_to_fix_loop(monkeypatch, tmp_path):
         frozenset({"t_answer"}),
         "test t_answer FAILED: assertion `left == right` failed"),
         U2Verdict.accept()])
-    monkeypatch.setattr(pipeline, "_u2_test_gate",
-                        lambda *a, **k: next(gates, U2Verdict.accept()))
+    install_app_seams(monkeypatch,
+                      u2_test_gate=lambda *a, **k: next(gates, U2Verdict.accept()))
     res = pipeline._task2_fill_fns_one_by_one(
         project_dir=ws, target_src_dir=ws / "src", tests_dir_files=[],
         module_name="m", cluster_name="t", cluster=None,
@@ -157,9 +163,9 @@ def test_u2_codependent_stub_panic_keeps_body(monkeypatch, tmp_path):
     _ext = ((TestFailure("t_answer", FailureKind.STUB_PANIC,
                          "src/other.rs", 1, 1, "not implemented"),
              FnLocator("src/other.rs", "sibling")),)
-    monkeypatch.setattr(
-        pipeline, "_u2_test_gate",
-        lambda *a, **k: U2Verdict.accept_external_only(_ext))
+    install_app_seams(
+        monkeypatch,
+        u2_test_gate=lambda *a, **k: U2Verdict.accept_external_only(_ext))
     res = pipeline._task2_fill_fns_one_by_one(
         project_dir=ws, target_src_dir=ws / "src", tests_dir_files=[],
         module_name="m", cluster_name="t", cluster=None,

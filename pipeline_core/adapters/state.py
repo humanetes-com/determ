@@ -6,6 +6,11 @@ verbatim from pipeline.py; the only change is the line parser, rewritten
 regex-free (project rule) with semantics identical to the old
 ``\\[([^\\]]+)\\]\\s+(\\S+)\\s+hash=(\\S+)\\s*(.*)`` match.
 
+File format (one phase per line):
+  [phase_key]  status  hash=<16-char>  detail text
+status: done | in_progress | pending; hash: 16-char SHA-256 prefix of the
+phase's source inputs, or "-".
+
 Self-contained (stdlib + the log facade): no deps record needed.
 """
 

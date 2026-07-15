@@ -22,10 +22,15 @@ from ..log import emit, log
 
 class JsonlEventEmitter:
     """The structured-event sink: append one JSON record per event to
-    ``events.jsonl``. Relocated from pipeline.py's `_emit`/`_phase`. Holds a live
-    reference to the run-context dict (product / pipeline_sha / run_id), which the
-    composition root mutates via `init_events`. Never raises — observability must
-    not crash the pipeline."""
+    ``events.jsonl`` — one JSON object per line; cheap to write, crash-safe,
+    tail-friendly, SQLite-ingestable. Fixed fields: ts (ISO 8601 UTC, ms),
+    product, pipeline_sha, event (dot.notation verb, e.g. "llm.request");
+    optional: task, cluster, module, file, attempt, duration_ms, data.
+    Prompts/responses are content-addressed to logs/prompts/{sha256}.txt so
+    events stay small (~90% of context repeats across calls → strong dedup).
+    Holds a live reference to the run-context dict (product / pipeline_sha /
+    run_id), which the composition root mutates via `init_events`. Never
+    raises — observability must not crash the pipeline."""
 
     def __init__(
         self, events_log: Callable[[], str], run_context: dict[str, str],

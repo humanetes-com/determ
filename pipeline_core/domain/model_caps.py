@@ -2,6 +2,11 @@
 
 No env reads, no I/O — callers resolve env/config and pass values in. This keeps the
 budget logic unit-testable and the domain layer pure.
+
+Context-budget derivation: (num_ctx_tokens - prompt_overhead) * chars_per_token,
+with prompt_overhead ≈ 6k tokens (instructions + system prompt + response buffer)
+and chars_per_token ≈ 4 (conservative; typical Rust/English source is 3.5-4.5).
+Reference: OLLAMA_NUM_CTX=32768 → ~104k chars; the 8192-token fallback → ~26k.
 """
 
 from __future__ import annotations

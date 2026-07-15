@@ -105,20 +105,28 @@ def _fake_run_cargo(rc: int, out: str):
 
 
 def test_u2_test_gate_shim_routes_and_blocks(monkeypatch, tmp_path) -> None:
-    """Slice-11 seam: the _u2_test_gate shim composes via pipeline._run_cargo + _guard."""
+    """App.u2_test_gate composes via the late-bound pipeline._run_cargo seam;
+    the enabled flag re-reads settings_now(), so a patched SETTINGS toggles it."""
+    import dataclasses
+
     import pipeline
     from pipeline_core.domain.test_report import U2Decision
 
+    def _with_gate(on: bool):
+        return dataclasses.replace(
+            pipeline.SETTINGS, fix_caps=dataclasses.replace(
+                pipeline.SETTINGS.fix_caps, unified_fill_loop=on))
+
     fake = _fake_run_cargo(101, "test b ... FAILED\nassertion failed")
     monkeypatch.setattr(pipeline, "_run_cargo", fake)
-    monkeypatch.setattr(pipeline, "_UNIFIED_FILL_LOOP", True)
-    v = pipeline._u2_test_gate({"b"}, frozenset(), "cargo test", tmp_path, {})
+    monkeypatch.setattr(pipeline, "SETTINGS", _with_gate(True))
+    v = pipeline._APP.u2_test_gate({"b"}, frozenset(), "cargo test", tmp_path, {})
     assert v.decision is U2Decision.REJECT
     assert v.self_failures == frozenset({"b"}) and "still FAIL" in v.detail
     assert fake.calls  # routed through the patchable seam
     # gate disabled → accept regardless
-    monkeypatch.setattr(pipeline, "_UNIFIED_FILL_LOOP", False)
-    assert pipeline._u2_test_gate(
+    monkeypatch.setattr(pipeline, "SETTINGS", _with_gate(False))
+    assert pipeline._APP.u2_test_gate(
         {"b"}, frozenset(), "cargo test", tmp_path, {}).decision is U2Decision.ACCEPT
 
 
@@ -1017,14 +1025,14 @@ def test_file_cfg_predicate_adjacent_mod_decls() -> None:
 
         # AST path (requires the extractor binary). Skip if not built.
         if pipeline._SKELETON_EXTRACTOR_BIN.exists():
-            pipeline._invalidate_mod_records_cache()
-            assert pipeline._file_cfg_predicate(root, "src/nightly.rs") == \
+            pipeline._APP.structure_cache.invalidate()
+            assert pipeline._APP.structure_cache.file_cfg_predicate(root, "src/nightly.rs") == \
                 "gated_feature", "AST path: nightly should be gated"
-            assert pipeline._file_cfg_predicate(root, "src/ptr.rs") is None, \
+            assert pipeline._APP.structure_cache.file_cfg_predicate(root, "src/ptr.rs") is None, \
                 "AST path: ptr must NOT inherit neighbour's cfg"
-            assert pipeline._file_cfg_predicate(root, "src/wrapper.rs") is None, \
+            assert pipeline._APP.structure_cache.file_cfg_predicate(root, "src/wrapper.rs") is None, \
                 "AST path: wrapper must NOT inherit any cfg"
-            pipeline._invalidate_mod_records_cache()
+            pipeline._APP.structure_cache.invalidate()
 
         # Regex fallback path: force it by pointing _SKELETON_EXTRACTOR_BIN
         # at a non-existent file. The fallback must also resist conflation
@@ -1032,16 +1040,16 @@ def test_file_cfg_predicate_adjacent_mod_decls() -> None:
         orig = pipeline._SKELETON_EXTRACTOR_BIN
         try:
             pipeline._SKELETON_EXTRACTOR_BIN = Path("/nonexistent/extractor")
-            pipeline._invalidate_mod_records_cache()
-            assert pipeline._file_cfg_predicate(root, "src/nightly.rs") == \
+            pipeline._APP.structure_cache.invalidate()
+            assert pipeline._APP.structure_cache.file_cfg_predicate(root, "src/nightly.rs") == \
                 "gated_feature", "fallback: nightly should be gated"
-            assert pipeline._file_cfg_predicate(root, "src/ptr.rs") is None, \
+            assert pipeline._APP.structure_cache.file_cfg_predicate(root, "src/ptr.rs") is None, \
                 "fallback: ptr must NOT inherit neighbour's cfg"
-            assert pipeline._file_cfg_predicate(root, "src/wrapper.rs") is None, \
+            assert pipeline._APP.structure_cache.file_cfg_predicate(root, "src/wrapper.rs") is None, \
                 "fallback: wrapper must NOT inherit any cfg"
         finally:
             pipeline._SKELETON_EXTRACTOR_BIN = orig
-            pipeline._invalidate_mod_records_cache()
+            pipeline._APP.structure_cache.invalidate()
     print("  OK  _file_cfg_predicate adjacent mod decls (AST + fallback)")
 
 
@@ -1288,7 +1296,7 @@ def test_examples_collector() -> None:
     assert "add(" in content
 
     # collect_test_files does NOT pick up examples (they aren't tests).
-    test_files = pipeline.collect_test_files(workspace)
+    test_files = pipeline._APP.run_deps.collect_test_files(workspace)
     assert not any("examples/" in rel for rel, _ in test_files), \
         "examples/ files must NOT appear in collect_test_files output"
 
@@ -1387,9 +1395,13 @@ def test_cargo_toml_parsed_with_tomllib() -> None:
         'serde = { version = "1", features = ["derive"] }\n'
         '# proc-macro = true   ← a commented decoy the regex would have matched\n'
     )
-    assert pipeline._cargo_package_name(toml) == "my-crate"
+    from pipeline_core.domain.cargo_toml import (
+        cargo_default_features,
+        cargo_package_name,
+    )
+    assert cargo_package_name(toml) == "my-crate"
     assert pipeline._cargo_is_proc_macro(toml) is True
-    assert set(pipeline._cargo_default_features(toml)) == {"std", "backtrace"}
+    assert set(cargo_default_features(toml)) == {"std", "backtrace"}
     # A crate WITHOUT [lib] proc-macro: the commented decoy must not register.
     not_pm = '[package]\nname = "x"\n# proc-macro = true\n[dependencies]\n'
     assert pipeline._cargo_is_proc_macro(not_pm) is False
@@ -1442,7 +1454,7 @@ def test_pub_items_from_tree_via_syn() -> None:
         tests = Path(d) / "tests"
         tests.mkdir()
         (tests / "it.rs").write_text("pub fn should_not_appear() {}", encoding="utf-8")
-        items = _pub_items_from_tree(Path(d), pipeline._VALIDATOR_DEPS)
+        items = _pub_items_from_tree(Path(d), pipeline._APP.validator_deps)
     assert ("struct", "A") in items and ("enum", "E") in items and ("trait", "T") in items
     assert ("fn", "f") in items and ("fn", "g") in items
     assert not any(n == "Priv" for _, n in items)                 # private excluded by syn
@@ -1550,8 +1562,10 @@ def test_module_augment_state() -> None:
 
 
 def test_model_context_chars() -> None:
-    """_model_context_chars returns sensible values for different env configs."""
+    """Settings.from_env resolves the env→context-chars chain (the pipeline
+    global MODEL_CONTEXT_CHARS is this value snapshotted at import)."""
     import pipeline
+    from pipeline_core.settings import Settings
 
     orig_env = {k: os.environ.get(k) for k in ("BACKEND", "OLLAMA_NUM_CTX", "VLLM_MAX_MODEL_LEN", "MODEL")}
 
@@ -1561,8 +1575,7 @@ def test_model_context_chars() -> None:
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
-        result = pipeline._model_context_chars()
-        return result
+        return Settings.from_env(model=pipeline.MODEL).model_context_chars
 
     try:
         # Ollama with explicit context window.
@@ -1802,37 +1815,36 @@ def test_monitor_docs_richness_row() -> None:
 def test_shutdown_on_finish_toggle() -> None:
     """Power-off-on-finish: the monitor-written sentinel ("1"/"0") overrides
     .env SHUTDOWN_ON_FINISH; no sentinel falls back to the env default;
-    pipeline._shutdown_on_finish_enabled and monitor._shutdown_armed agree."""
+    adapters.power.shutdown_on_finish_enabled and monitor._shutdown_armed agree."""
     import tempfile
 
     import monitor
-    import pipeline
+    from pipeline_core.adapters.power import shutdown_on_finish_enabled
 
     with tempfile.TemporaryDirectory() as td:
         sentinel = os.path.join(td, "shutdown_sentinel")
-        old_path, old_mon = pipeline._SHUTDOWN_SENTINEL_PATH, monitor._SHUTDOWN_SENTINEL
+        spath = Path(sentinel)
+        old_mon = monitor._SHUTDOWN_SENTINEL
         old_script_dir = monitor.SCRIPT_DIR
         old_env = os.environ.get("SHUTDOWN_ON_FINISH")
-        pipeline._SHUTDOWN_SENTINEL_PATH = Path(sentinel)
         monitor._SHUTDOWN_SENTINEL = sentinel
         monitor.SCRIPT_DIR = td  # no .env here → monitor falls back to False
         try:
             os.environ["SHUTDOWN_ON_FINISH"] = "1"
-            assert pipeline._shutdown_on_finish_enabled()      # env default applies
+            assert shutdown_on_finish_enabled(spath)           # env default applies
             monitor._set_shutdown_armed(False)                 # monitor disable wins
-            assert not pipeline._shutdown_on_finish_enabled()
+            assert not shutdown_on_finish_enabled(spath)
             assert not monitor._shutdown_armed()
             monitor._set_shutdown_armed(True)                  # monitor re-arm wins
-            assert pipeline._shutdown_on_finish_enabled()
+            assert shutdown_on_finish_enabled(spath)
             assert monitor._shutdown_armed()
             os.unlink(sentinel)
             os.environ["SHUTDOWN_ON_FINISH"] = "0"
-            assert not pipeline._shutdown_on_finish_enabled()  # back to env default
+            assert not shutdown_on_finish_enabled(spath)       # back to env default
             with open(os.path.join(td, ".env"), "w") as fh:    # monitor's .env fallback
                 fh.write("OTHER=x\nSHUTDOWN_ON_FINISH=1\n")
             assert monitor._shutdown_armed()
         finally:
-            pipeline._SHUTDOWN_SENTINEL_PATH = old_path
             monitor._SHUTDOWN_SENTINEL = old_mon
             monitor.SCRIPT_DIR = old_script_dir
             if old_env is None:
@@ -2179,7 +2191,6 @@ def test_domain_enums_and_model_caps() -> None:
     from pipeline_core.domain.model_caps import safe_input_char_limit
     s = pipeline.SETTINGS
     assert s.single_call_char_limit == pipeline.SINGLE_CALL_CHAR_LIMIT
-    assert s.safe_input_char_limit == pipeline._SAFE_INPUT_CHAR_LIMIT
     assert s.safe_input_char_limit_task0c == pipeline._SAFE_INPUT_CHAR_LIMIT_TASK0C
     assert s.single_call_char_limit == min(s.safe_input_char_limit, s.model_context_chars * 3 // 4)
     assert s.intermediate_char_limit == s.model_context_chars // 2
@@ -2192,7 +2203,7 @@ def test_domain_enums_and_model_caps() -> None:
     from pipeline_core.settings import TaskModels
     tm = s.task_models
     assert isinstance(tm, TaskModels)
-    assert tm.task0 == pipeline._TASK0_MODEL and tm.task4 == pipeline._TASK4_MODEL
+    assert tm.task4 == pipeline._TASK4_MODEL
     assert tm.task0c == pipeline._TASK0C_MODEL and tm.task2 == pipeline._TASK2_MODEL
     # default fallback: a task with no env override resolves to the global model.
     import os as _os
@@ -2356,7 +2367,7 @@ def test_slice5a_shims_delegate_to_adapters() -> None:
     try:
         d = Path("/tmp/x")
         # fns wrapper re-serialises typed records to wire dicts for the fill engine.
-        assert pipeline._enumerate_fns_via_extractor(d) == [FnRecord(fn_name="x").to_dict()]
+        assert pipeline._APP.structure.enumerate_fns(d) == [FnRecord(fn_name="x").to_dict()]
         # types/mods/dispatch wrappers pass the typed records straight through.
         assert pipeline._APP.structure.enumerate_types(d) == [TypeRecord(name="T")]
         assert pipeline._APP.structure.enumerate_dispatch_families(d) == []
@@ -2791,7 +2802,7 @@ def test_slice5b_genesis_audit_task() -> None:
     assert written["c"] == "fixed-genesis-body"
 
     import pipeline
-    assert isinstance(pipeline._GENESIS_AUDIT_DEPS, GenesisAuditDeps)
+    assert isinstance(pipeline._APP.genesis_audit_deps, GenesisAuditDeps)
 
     # 5b foundation: test-result helpers relocated to domain; pipeline re-exports the
     # SAME objects (single source of truth) so call sites + tasks share one definition.
@@ -2919,7 +2930,9 @@ def test_propagate_or_quarantine_orphan_sibling() -> None:
     import tempfile
     from pathlib import Path
 
-    import pipeline
+    from pipeline_core.application.reconstruct.cluster_membership import (
+        propagate_or_quarantine_sibling as _propagate_or_quarantine_sibling,
+    )
 
     with tempfile.TemporaryDirectory() as td:
         src = Path(td)
@@ -2930,20 +2943,20 @@ def test_propagate_or_quarantine_orphan_sibling() -> None:
         manifest = {"error.gen_tests_1": "", "context.gen_tests_2": ""}
 
         # Orphan (gen_tests_5 not in manifest) → quarantined, returns False.
-        assert pipeline._propagate_or_quarantine_sibling(
+        assert _propagate_or_quarantine_sibling(
             orphan, manifest, "error", 5, log_fn=None, tag="t") is False
         assert not orphan.exists()
         assert (src / "error.gen_tests_5.rs.broken").exists()
 
         # Declared sibling → propagate, returns True, untouched.
-        assert pipeline._propagate_or_quarantine_sibling(
+        assert _propagate_or_quarantine_sibling(
             declared, manifest, "error", 1, log_fn=None, tag="t") is True
         assert declared.exists()
 
         # Empty manifest (pre-bake/legacy) → always propagate, no quarantine.
         legacy = src / "lib.gen_tests_9.rs"
         legacy.write_text("fn t() {}\n")
-        assert pipeline._propagate_or_quarantine_sibling(
+        assert _propagate_or_quarantine_sibling(
             legacy, {}, "lib", 9, log_fn=None, tag="t") is True
         assert legacy.exists()
         print("  OK  _propagate_or_quarantine_sibling quarantines orphans (R9.6)")
@@ -3033,9 +3046,9 @@ def test_tag_block_shapes():
 def test_per_impl_prompt_macros_and_siblings_sections():
     # Per-impl/per-fn prompt parity: MACROS + SIBLING_REFERENCE render when
     # provided and vanish when empty (the per-impl builder lacked both).
-    import pipeline as p
     from pipeline_core.domain.models import FnRecord, ImplBlock
     from pipeline_core.prompts.context import PerImplSections
+    from pipeline_core.prompts.per_impl import build_per_impl_prompt
     members = (FnRecord(file="lib.rs", fn_name="kind", container="impl Foo",
                         sig_text="fn kind (& self) -> u32", has_unimplemented_body=True),)
     block = ImplBlock(file="lib.rs", container="impl Foo",
@@ -3050,12 +3063,12 @@ def test_per_impl_prompt_macros_and_siblings_sections():
         base.update(over)
         return PerImplSections(**base)
 
-    full = p._build_per_impl_prompt(
+    full = build_per_impl_prompt(
         sections=_impl_sections(macros="macro_rules! mk { () => {} }",
                                 siblings="fn kind(&self) -> u32 { 7 }"), **kw)  # type: ignore[arg-type]
     assert "<MACROS>" in full and "macro_rules! mk" in full
     assert "<SIBLING_REFERENCE>" in full and "{ 7 }" in full
-    bare = p._build_per_impl_prompt(sections=_impl_sections(), **kw)  # type: ignore[arg-type]
+    bare = build_per_impl_prompt(sections=_impl_sections(), **kw)  # type: ignore[arg-type]
     assert "<MACROS>" not in bare and "<SIBLING_REFERENCE>" not in bare
 
 
@@ -3078,7 +3091,7 @@ def test_fn_belongs_to_cluster_record_cfg_path(tmp_path):
         'pub fn gated() {}\n'
         'pub fn open_fn() {}\n'
     )
-    b = pipeline._fn_belongs_to_cluster
+    b = pipeline._APP.structure_cache.fn_belongs_to_cluster
     # Record path: extractor says open_fn is ungated → in every cluster.
     assert b(src, "lib.rs", "open_fn", cluster, fn_cfg_predicates=[]) is True
     # Record path: gated() carries the std cfg → excluded from no_std.

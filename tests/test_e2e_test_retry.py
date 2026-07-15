@@ -16,7 +16,13 @@ from pathlib import Path
 
 import pipeline
 from pipeline_core.domain.enums import FillUnit
-from tests.harness import install_cluster_scan, install_fake_extractor, install_scripted_cargo, install_scripted_model
+from tests.harness import (
+    install_app_seams,
+    install_cluster_scan,
+    install_fake_extractor,
+    install_scripted_cargo,
+    install_scripted_model,
+)
 
 STUB_LIB = """pub fn answer() -> u32 {
     unimplemented!()
@@ -39,10 +45,10 @@ def _setup(monkeypatch, tmp_path: Path) -> Path:
         dataclasses.replace(pipeline.SETTINGS, phase_c_fill_unit=FillUnit.FN))
     install_cluster_scan(monkeypatch, stub_records=lambda *a, **k: None)
     install_fake_extractor(monkeypatch, fns=None, types=[])
-    # The classifier is an LLM call — patch it out; candidates then come from
-    # the naive token match ("answer" ⊂ "t_answer").
-    monkeypatch.setattr(pipeline, "_classify_phase_c_test_failures",
-                        lambda *a, **k: {})
+    # The classifier is an LLM call — patch it out via the App seam; candidates
+    # then come from the naive token match ("answer" ⊂ "t_answer").
+    install_app_seams(monkeypatch,
+                      classify_phase_c_test_failures=lambda *a, **k: {})
     return ws
 
 
