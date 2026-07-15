@@ -32,7 +32,6 @@ from pipeline_core.adapters import log_rotation as _log_rotation
 from pipeline_core.adapters import model_catalog as _model_catalog
 from pipeline_core.adapters import state as _state_mod
 from pipeline_core.adapters import strip as _strip_mod
-from pipeline_core.adapters import workspace as _wsmod
 from pipeline_core.adapters import workspace_files as _wsfiles
 from pipeline_core.adapters.artifacts import (  # noqa: F401  (smoke pin: test_api_surface_capture uses pipeline.load_api_surface)
     load_api_surface,
@@ -69,7 +68,6 @@ from pipeline_core.adapters.run_registry import FileRunRegistry, RunRegistryEntr
 from pipeline_core.adapters.structure import CliStructureReader as _CliStructureReader
 from pipeline_core.adapters.telemetry import LogTelemetry
 from pipeline_core.adapters.telemetry import emit_per_file_test_overview as _emit_per_file_test_overview
-from pipeline_core.application import fix_loop as _fix_loop
 from pipeline_core.application import orchestrator as _orchestrator
 from pipeline_core.application.parallel import (
     generate_in_parallel as _generate_in_parallel,
@@ -576,12 +574,6 @@ _UNIFIED_FILL_LOOP = SETTINGS.fix_caps.unified_fill_loop
 _U2_TEST_TIMEOUT   = SETTINGS.fix_caps.u2_test_timeout
 
 
-def prompt_budget(*fixed_parts: str) -> int:
-    """Chars remaining for dynamic content (binds the configured char limit to the
-    relocated `prompts.shaping.prompt_budget`)."""
-    return _shaping.prompt_budget(SINGLE_CALL_CHAR_LIMIT, *fixed_parts)
-
-
 # task0c output is a small test block (~500-2000 chars), so reserve only 2000 chars
 # for the response — use almost the full context window for source+siblings+tests.
 # Do NOT use SINGLE_CALL_CHAR_LIMIT here (that reserves 25% for large outputs like
@@ -1015,13 +1007,7 @@ _cargo_env = CargoEnv(_SCOPE)
 # S3.5: WorkspaceDeps construction migrated into build_app; re-exported above as _APP.ws_deps.
 
 
-def git_commit(project_dir: Path, message: str) -> bool:
-    return _wsmod.git_commit(_APP.ws_deps, project_dir, message, managed=_RUN.git_managed)
-
-
-def git_tag(project_dir: Path, tag: str) -> None:
-    _wsmod.git_tag(_APP.ws_deps, project_dir, tag, managed=_RUN.git_managed)
-
+# S80: git_commit/git_tag construct in build_app (live ws_deps + run_state.git_managed).
 
 # git_clean_reset / setup_workspace → adapters.workspace, bound in build_app
 # (App.run_deps, S72).
@@ -1114,7 +1100,6 @@ _FILE_CONSTRAINTS = FileConstraintsReader(
 _set_current: "Callable[..., None]" = _state_mod.set_current
 
 _HELPERS = _Helpers(
-    prompt_budget=lambda *a, **k: prompt_budget(*a, **k),
     ask_retrospective=lambda *a, **k: _ask_retrospective(*a, **k),
     ask_per_fn_body=lambda *a, **k: _ask_per_fn_body(*a, **k),
     extract_fn_blocks=lambda *a, **k: _extract_fn_blocks(*a, **k),
@@ -1123,7 +1108,6 @@ _HELPERS = _Helpers(
     merge_fn_blocks_into_disk=lambda *a, **k: _merge_fn_blocks_into_disk(*a, **k),
     collect_test_files=lambda *a, **k: collect_test_files(*a, **k),
     enumerate_mods=lambda sd: _APP.structure.enumerate_mods(sd),
-    git_tag=lambda *a, **k: git_tag(*a, **k),
     task0c_augment_module=lambda pd, mn, md, crate_type="", **k: _task0c_impl(pd, mn, md, _APP.task0c_deps, crate_type, **k),
     scan_stub_records_via_app=lambda *a, **k: _APP.scan_stub_records_for_cluster(*a, **k),
     collect_impl_blocks_via_app=lambda *a, **k: _APP.collect_impl_blocks_for_cluster(*a, **k),
@@ -1132,7 +1116,6 @@ _HELPERS = _Helpers(
     cluster_gate_for=lambda *a, **k: _cluster_gate_for_sibling(*a, **k),
     bake_skeleton_artifacts=lambda *a, **k: _bake_skeleton_artifacts(*a, **k),
     describe_test_environment=lambda *a, **k: _describe_test_environment(*a, **k),
-    generate_fix_loop=lambda *a, **k: generate_fix_loop(*a, **k),
     generate_in_parallel=lambda *a, **k: generate_in_parallel(*a, **k),
     load_file_constraints=lambda *a, **k: _FILE_CONSTRAINTS.load(*a, **k),
     coverage_target=COVERAGE_AUGMENTATION_TARGET,
@@ -1187,7 +1170,6 @@ _HELPERS = _Helpers(
     task2_fill_fns_one_by_one=lambda *a, **k: _task2_fill_fns_one_by_one(*a, **k),
     enumerate_types=lambda sd: _APP.structure.enumerate_types(sd),
     enumerate_fns=lambda *a, **k: _enumerate_fns_via_extractor(*a, **k),
-    git_commit=lambda *a, **k: git_commit(*a, **k),
     task3=lambda *a, **k: _APP.task3(*a, **k),
     run_flow_audit=lambda *a, **k: _run_flow_audit(*a, **k),
     load_model_notes=lambda *a, **k: _load_model_notes(*a, **k),
@@ -1912,26 +1894,9 @@ from pipeline_core.domain.generation import (
 # _format_whole_project_context → pipeline_core.adapters.artifacts.WorkspaceArtifacts.
 
 
-def generate_fix_loop(
-    project_dir: Path,
-    check_cmd: str,
-    source_paths: list[Path],
-    existing_test_files: set,
-    extra_context: str = "",
-    model: str = MODEL,
-    max_fix_attempts: int = 2,
-    timeout: int = BUILD_TIMEOUT,
-    allowed_dir_prefix: str = "",
-    functional_req: str = "",
-    fr_path: "Path | None" = None,
-    check_fn: "Callable[[], tuple[bool, str]] | None" = None,
-) -> tuple[bool, str]:
-    """S28: body relocated to fix_loop.generate_fix_loop; this shim binds deps."""
-    return _fix_loop.generate_fix_loop(
-        _APP.gen_fix_loop_deps, project_dir, check_cmd, source_paths, existing_test_files,
-        extra_context=extra_context, model=model, max_fix_attempts=max_fix_attempts,
-        timeout=timeout, allowed_dir_prefix=allowed_dir_prefix, functional_req=functional_req,
-        fr_path=fr_path, check_fn=check_fn)
+# S79: generate_fix_loop constructs in build_app (app_ref-live deps); pin kept
+# for the e2e routing/stub/fix-gate tests.
+generate_fix_loop: "Callable[..., tuple[bool, str]]" = _APP.task0c_deps.generate_fix_loop
 
 
 # slice 5b: deps for the extracted TASK 2 (defined after generate_fix_loop, its latest dep).

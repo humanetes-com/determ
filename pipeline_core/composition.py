@@ -260,6 +260,7 @@ from pipeline_core.adapters.workspace_scan import (
     _dependency_graph_factory,
     _workspace_scanner_factory,
 )
+from pipeline_core.application import fix_loop as _fix_loop_mod
 from pipeline_core.application import test_count as _tc_app
 from pipeline_core.application.cluster_augment import ClusterAugmentor
 from pipeline_core.application.fix_loop import GenerateFixLoopDeps
@@ -681,7 +682,6 @@ class Helpers:
     globals → preserve the test seam and let build_app wire them before they're
     defined. Dissolve a field once its helper relocates into pipeline_core."""
 
-    prompt_budget: Callable[..., int]
     ask_retrospective: Callable[..., str]
     # The per-fn conversation protocol (prompt → body/pull-request) — the
     # PromptContext role's model seam, routed through App (P3-S2 llm boundary).
@@ -704,7 +704,6 @@ class Helpers:
     # Task-0c collaborators (P3-S3 step 42, Task0cDeps construction):
     cluster_gate_for: Callable[..., Any]
     describe_test_environment: Callable[..., Any]
-    generate_fix_loop: Callable[..., Any]
     generate_in_parallel: Callable[..., Any]
     load_file_constraints: Callable[..., Any]
     coverage_target: float
@@ -746,7 +745,6 @@ class Helpers:
     collect_test_files: Callable[..., Any]
     enumerate_mods: Callable[..., Any]
     find_tests_referencing_fn: Callable[..., Any]
-    git_tag: Callable[..., Any]
     task0c_augment_module: AugmentModuleFn
     module_of: Callable[..., Any]
     types_section_for_fix: Callable[..., Any]
@@ -766,7 +764,6 @@ class Helpers:
     enumerate_types: Callable[[Path], list[TypeRecord] | None]
     enumerate_fns: Callable[[Path], list[dict[str, object]] | None]
     # Reconstruction-cluster collaborators (S3 slices 11-20):
-    git_commit: Callable[..., bool]
     task3: Callable[..., tuple[bool, str]]
     run_flow_audit: Callable[[str], None]
     load_model_notes: Callable[..., list[str]]
@@ -1087,6 +1084,25 @@ def build_app(
             raise RuntimeError("reconstruction role resolved without app_ref")
         return app_ref()
 
+    def generate_fix_loop(
+        project_dir: Path, check_cmd: str, source_paths: list[Path],
+        existing_test_files: set[str], **kw: Any,
+    ) -> tuple[bool, str]:
+        """Shared iterative fix loop; resolves gen_fix_loop_deps through the
+        LIVE app so seams swapped after build still intercept. model/timeout
+        default inside the impl to deps.MODEL/deps.BUILD_TIMEOUT."""
+        return _fix_loop_mod.generate_fix_loop(
+            _live().gen_fix_loop_deps, project_dir, check_cmd, source_paths,
+            existing_test_files, **kw)
+
+    def git_commit(project_dir: Path, message: str) -> bool:
+        return _ws_git_commit(_live().ws_deps, project_dir, message,
+                              managed=run_state.git_managed)
+
+    def git_tag(project_dir: Path, tag: str) -> None:
+        _ws_git_tag(_live().ws_deps, project_dir, tag,
+                    managed=run_state.git_managed)
+
     def commit_and_mark(
         project_dir: Path, phase_key: str, status: str, *,
         commit_message: str, tag: str | None = None, detail: str = "",
@@ -1274,7 +1290,7 @@ def build_app(
         ask=ask_client.ask, task2_model=settings.task_models.task2,
         load_baked_clusters=_load_baked_clusters,
         enumerate_fns=_typed_fn_records,
-        git_commit=helpers.git_commit, log=ports.log,
+        git_commit=git_commit, log=ports.log,
         max_attempts=cfg.layout_retrigger_max_attempts,
     )
     # P5-S3/S66: strip/bake/commit pre-step deps + the pre-strip bake (Hard Rule 11).
@@ -1283,7 +1299,7 @@ def build_app(
         module_augmented_path=augment_roles.store.module_path,
         capture_api_surface=api_surface.capture,
         bake_skeleton_artifacts=helpers.bake_skeleton_artifacts,
-        git_commit=helpers.git_commit, git_tag=helpers.git_tag,
+        git_commit=git_commit, git_tag=git_tag,
         strip_module_source=_strip_module_source,
         commit_and_mark=commit_and_mark,
         set_current=helpers.set_current, tarpaulin_bin=cfg.tarpaulin_bin,
@@ -1475,7 +1491,7 @@ def build_app(
         cleanup_residuals_fn=task2_cleanup_residuals,
         scan_unimplemented_fn=scan_unimplemented_functions,
         merge_cluster_outputs_fn=lambda **kw: cluster_merger.merge_cluster_outputs(**kw),
-        generate_fix_loop_fn=lambda **kw: helpers.generate_fix_loop(**kw),
+        generate_fix_loop_fn=generate_fix_loop,
         reset_exhaustion_flags_fn=helpers.reset_exhaustion_flags,
         build_test_reverse_map_fn=build_test_reverse_map,
     )
@@ -1496,8 +1512,9 @@ def build_app(
         is_gen_tests_file_fn=helpers.is_gen_tests_file,
     )
     gen_scan = SourceScanAdapter(rust_delimiters_balanced_fn=_rust_delimiters_balanced)
+    prompt_budget = functools.partial(_shaping.prompt_budget, cfg.single_call_char_limit)
     gen_shaping = PromptShapingAdapter(
-        prompt_budget_fn=lambda *parts: helpers.prompt_budget(*parts),
+        prompt_budget_fn=prompt_budget,
         format_test_files_fn=_shaping.format_test_files,
         chunk_test_files_by_file_fn=_shaping.chunk_test_files_by_file,
         format_api_surface_section_fn=format_api_surface_section,
@@ -1585,7 +1602,7 @@ def build_app(
         generator_factory=_task2_generator_factory,
         load_manifest=_load_manifest,
         read=read,
-        generate_fix_loop=helpers.generate_fix_loop,
+        generate_fix_loop=generate_fix_loop,
         store_prompt_content=helpers.store_prompt_content,
         is_proc_macro_crate=_cargo_is_proc_macro,
         count_error_codes=lambda output: len(set(_rustc_error_codes(output or "", "E"))),
@@ -1645,7 +1662,7 @@ def build_app(
     workspace_artifacts = WorkspaceArtifacts()
     lock_deps = LockDeps(
         commit_and_mark=commit_and_mark, set_current=set_current,
-        lock_module=lock_module, git_commit=helpers.git_commit, log=ports.log,
+        lock_module=lock_module, git_commit=git_commit, log=ports.log,
         sys_exit=sys.exit,
         scan_unimplemented_functions=scan_unimplemented_functions,
     )
@@ -1749,7 +1766,7 @@ def build_app(
     )
     task0_docs_deps = Task0DocsDeps(
         phase_valid=phase_valid, mark_phase=mark_phase, ask=ports.ask, write=write,
-        prompt_budget=helpers.prompt_budget, task0_model=settings.task_models.task0,
+        prompt_budget=prompt_budget, task0_model=settings.task_models.task0,
         model=settings.model, readme_cap=cfg.readme_cap, profile_cap=cfg.profile_cap,
         project_context_name=cfg.project_context_name,
     )
@@ -2007,7 +2024,7 @@ def build_app(
             ask=ask_client.ask,
             extract_files=_extract_files,
             extract_test_mod=_gen_extract_test_mod,
-            generate_fix_loop=helpers.generate_fix_loop,
+            generate_fix_loop=generate_fix_loop,
             generate_in_parallel=helpers.generate_in_parallel,
             is_test_file=_disc_is_test_file,
             write=_io_write,
