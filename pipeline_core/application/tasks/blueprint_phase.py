@@ -27,7 +27,7 @@ class BlueprintDeps:
     model: str | None    # None → the ask client's default model
     # Dispatch-family enumeration over the baked skeleton (syn extractor;
     # None/failed → file-stem topics only). Families are cross-impl schemes —
-    # exactly what the blueprint must pin down (FR-027).
+    # exactly what the blueprint must pin down.
     dispatch_families: Callable[..., Any] | None = None
 
 
@@ -55,7 +55,7 @@ def ensure_blueprint(
                      f"({len(existing.sections)} section(s)) — keeping.")
             return existing
 
-    # Dispatch families are cross-impl schemes (FR-027): each one is a
+    # Dispatch families are cross-impl schemes: each one is a
     # REQUIRED topic, keyed by its dispatch method name.
     if deps.dispatch_families is not None and skeleton_dir is not None:
         try:

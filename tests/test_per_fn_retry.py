@@ -91,7 +91,7 @@ def test_fix_one_ref_returns_true_on_success(tmp_path):
     assert fix_one_ref("src.rs", "bar", "", _ctx(tmp_path), d) is True
 
 
-# ── B2 contract: model/transport errors must RAISE out of fix_one_ref ─────────
+# ── contract: model/transport errors must RAISE out of fix_one_ref ─────────
 
 def test_fix_one_ref_raises_on_model_error(tmp_path):
     (tmp_path / "src.rs").write_text("fn bar() { unimplemented!() }")
@@ -122,7 +122,7 @@ def test_fix_one_ref_raises_on_splice_error(tmp_path):
         fix_one_ref("src.rs", "bar", "", _ctx(tmp_path), d)
 
 
-# ── apply_per_fn_fixes B2 isolation ───────────────────────────────────────────
+# ── apply_per_fn_fixes isolation ───────────────────────────────────────────
 
 def test_apply_skips_failing_fn_and_continues(tmp_path):
     """fn#1 raises → logged and skipped; fn#2 succeeds → count=1."""

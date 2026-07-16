@@ -84,7 +84,7 @@ class ApiSurfaceCapture:
                  f"{out_path.relative_to(project_dir)} ({out_path.stat().st_size:,} chars).")
 
         # Deterministic type-name manifest (syn-extracted, same walk_root) so TASK 1
-        # knows "what types exist" up front instead of guessing it (debt #22).
+        # knows "what types exist" up front instead of guessing it.
         type_records = self.enumerate_types(walk_root) or []
         type_names = sorted({t.name for t in type_records if t.name})
         if type_names:
@@ -97,7 +97,7 @@ class ApiSurfaceCapture:
         # above, PLUS fns) — the TASK 2 conformance check compares against
         # THIS, not a regex over the human-readable listing above, which
         # cannot tell a real top-level `pub` item from the same syntax
-        # inside a `///` doc-comment usage example (debt #64).
+        # inside a `///` doc-comment usage example.
         if self.pub_items_manifest_path is not None:
             fn_records = self.enumerate_fns(walk_root) or []
             pub_items = sorted(pub_items_from_records(type_records, fn_records))

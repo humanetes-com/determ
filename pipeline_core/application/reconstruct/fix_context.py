@@ -37,7 +37,7 @@ class FixContextAssembler:
     budgets: PromptBudgets
     filter_notes: Callable[..., str]    # model-notes store (fr I/O)
     guard: Callable[[str, str], None]   # truncation telemetry (`GUARD:` log)
-    # P3 blueprint cache: path → (mtime, parsed). Frozen dataclass, mutable
+    # Blueprint cache: path → (mtime, parsed). Frozen dataclass, mutable
     # CONTENTS — reparse only when the file changes.
     _bp_cache: dict[Path, tuple[float, Blueprint]] = field(default_factory=dict)
 
@@ -122,7 +122,7 @@ class FixContextAssembler:
                 fr_path, file_rel=file_rel, fn_name=fn_name,
                 file_text=file_text, current_error=error_excerpt,
             )
-        # P3: this fn's blueprint slice — ranked by overlap with the fn name,
+        # This fn's blueprint slice — ranked by overlap with the fn name,
         # file stem, container tokens and signature tokens.
         bp = self._blueprint_for(fr_path)
         blueprint_section = "" if bp.empty else bp.slice_for(

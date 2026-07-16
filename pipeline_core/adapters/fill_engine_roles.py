@@ -199,7 +199,7 @@ class PromptContextAdapter:
 
 
 # --------------------------------------------------------------------------- #
-# ports.fill_engine.WorkspaceModel  (carries the P1 StructureReader DI seam)
+# ports.fill_engine.WorkspaceModel  (carries the StructureReader DI seam)
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True, slots=True)
 class WorkspaceModelAdapter:

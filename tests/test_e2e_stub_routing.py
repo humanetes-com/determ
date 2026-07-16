@@ -75,7 +75,7 @@ def test_stub_panic_routes_to_per_fn_not_whole_file(monkeypatch, tmp_path):
         ],
     )
 
-    # App seams (S61): compile frontier empty (no rustc errors); TDD frontier
+    # App seams: compile frontier empty (no rustc errors); TDD frontier
     # returns foo as a stub (the routing hook); no impl blocks (foo is free).
     install_app_seams(
         monkeypatch,

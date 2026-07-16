@@ -16,12 +16,12 @@ from typing import Any
 from .. import log as _log
 from .text import extract_code_content
 
-# R8.5: the `<FILE path="…">…</FILE>` model-protocol parser is a tolerant,
+# The `<FILE path="…">…</FILE>` model-protocol parser is a tolerant,
 # regex-free state machine (`_find_file_blocks` / `_bad_file_marker` below).
 # Fenced ```lang … ``` code blocks (fallback when no <FILE> tag) and the prompt-only
 # `// !! UNCOVERED` markers models sometimes copy back into their output. Both are
 # model-output protocol parsing (fenced-block / comment-marker class, distinct
-# from the `<FILE>`/`<FN>` block protocol migrated under R8.5), kept here so the
+# from the `<FILE>`/`<FN>` block protocol), kept here so the
 # application layer (task0c) stays regex-free.
 _CODE_BLOCK_PATTERN = re.compile(r'```[a-zA-Z0-9_-]*\n(.*?)```', re.DOTALL)
 _UNCOVERED_MARKER_PATTERN = re.compile(r'\s*//\s*!!\s*UNCOVERED[^\n]*')
@@ -383,7 +383,7 @@ def _extract_genesis(text: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# R8.5: <FN name="X" block="Y">body</FN> model-protocol parsers — tolerant,
+# <FN name="X" block="Y">body</FN> model-protocol parsers — tolerant,
 # regex-free state machines (NOT model-JSON; local models adhere poorly to it).
 # Same model-output concern as the <FILE> block parser above.
 # ---------------------------------------------------------------------------

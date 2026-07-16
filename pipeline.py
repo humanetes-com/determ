@@ -107,13 +107,13 @@ from pipeline_core.domain.llm_output import (
     _extract_genesis,
 )
 from pipeline_core.domain.llm_output import (
-    _find_fn_blocks as _find_fn_blocks,  # R8.5 parsers — re-export for call sites/tests
+    _find_fn_blocks as _find_fn_blocks,  # parsers — re-export for call sites/tests
 )
 from pipeline_core.domain.llm_output import (
     _split_leading_where as _split_leading_where,
 )
 from pipeline_core.domain.llm_output import (
-    extract_fn_bodies as extract_fn_bodies,  # R8.5 parser — re-export for call sites/tests
+    extract_fn_bodies as extract_fn_bodies,  # parser — re-export for call sites/tests
 )
 from pipeline_core.domain.model_caps import (
     model_tier as _model_tier,
@@ -357,7 +357,7 @@ _EVENTS_LOG  = os.getenv("PIPELINE_EVENTS_LOG",
 _PROMPTS_DIR = Path(os.getenv("PIPELINE_PROMPTS_DIR",
                               str(Path(__file__).parent / "logs" / "prompts")))
 _RUN_CONTEXT: dict[str, str] = {"product": "unknown", "pipeline_sha": "unknown"}
-# Per-process run identity (debt #21b): tags every event so the C10 audit can
+# Per-process run identity: tags every event so the audit can
 # scope a run by IDENTITY, not just a `ts >=` window — a concurrent xdist worker
 # (distinct pid) writing to the SHARED events.jsonl no longer pollutes the
 # window. pid+uuid: pid distinguishes concurrent processes, uuid guards pid reuse
@@ -398,7 +398,7 @@ def _store_prompt_content(text: str) -> dict[str, int | str]:
 # C-finale: the events.jsonl sink + `_phase` relocated to
 # adapters.telemetry.JsonlEventEmitter; the emitter holds a live ref to
 # `_RUN_CONTEXT` (mutated by init_events). Shims keep every call site stable.
-# P3-S2/S3: the emitter is built in build_app (App.emitter) from these two
+# The emitter is built in build_app (App.emitter) from these two
 # late-bound residents; the shims below stay as the (test-patched) seam names.
 
 
@@ -414,7 +414,7 @@ def _phase(*a, **k):
 _CRATE_DISPLAY_NAME = ""
 
 
-# Public `ask` shim removed (G/P6). Entry point is _ASK_CLIENT.ask(...);
+# Public `ask` shim removed. Entry point is _ASK_CLIENT.ask(...);
 # tests that intercept LLM calls patch pipeline._ask_raw (lower, stable seam).
 
 
@@ -443,7 +443,7 @@ _CRATE_DISPLAY_NAME = ""
 _SAFE_INPUT_CHAR_LIMIT_TASK0C = SETTINGS.safe_input_char_limit_task0c
 SINGLE_CALL_CHAR_LIMIT        = SETTINGS.single_call_char_limit
 
-# P6: guarded LLM ask client — focused adapter, composition-injected. `ask_raw`
+# Guarded LLM ask client — focused adapter, composition-injected. `ask_raw`
 # is late-bound because `_hot_reload_mi` rebinds the module global on disk change.
 _ASK_CLIENT = AskClient(
     ask_raw=lambda *a, **k: _ask_raw(*a, **k),
@@ -480,7 +480,7 @@ _U2_TEST_TIMEOUT   = SETTINGS.fix_caps.u2_test_timeout
 # Use the full safe input limit rather than the 75%-budget SINGLE_CALL_CHAR_LIMIT.
 TASK0C_PROMPT_CHAR_CAP = _SAFE_INPUT_CHAR_LIMIT_TASK0C
 
-# Per-file limit before semantic splitting (FR-001) now derives in build_app
+# Per-file limit before semantic splitting now derives in build_app
 # (App.run_deps.FILE_CHAR_LIMIT, from settings).
 
 
@@ -553,7 +553,7 @@ LOG_NAME = "run.log"
 
 # Per-file attempt log for TASK 0c: JSONL, one entry per generation attempt (BL-002).
 
-# Test/example file discovery moved to pipeline_core.adapters.discovery (P5).
+# Test/example file discovery moved to pipeline_core.adapters.discovery.
 # Re-exported here so existing references keep working through the shim.
 SKIP_DIR_NAMES = _discovery.SKIP_DIR_NAMES
 
@@ -674,7 +674,7 @@ def _start_audit_thread() -> None:
 # (for large files where whole-file rewrites truncate). See generate_fix_loop.
 
 
-# C11/S77: application.parallel.generate_in_parallel with ask + guard bound.
+# application.parallel.generate_in_parallel with ask + guard bound.
 
 
 
@@ -696,8 +696,8 @@ from pipeline_core.adapters.pipeline_db import (  # noqa: E402
 _load_cargo_toml = _domain_load_cargo_toml
 _cargo_is_proc_macro = _domain_cargo_is_proc_macro
 
-# Workspace/dependency scanners live in adapters/workspace_scan.py (P4);
-# bound in build_app (App.run_deps.scan_workspace_structure, S72).
+# Workspace/dependency scanners live in adapters/workspace_scan.py;
+# bound in build_app (App.run_deps.scan_workspace_structure).
 
 
 # append_failure_log / load_failure_log → pipeline_core.adapters.failure_journal
@@ -705,7 +705,7 @@ _cargo_is_proc_macro = _domain_cargo_is_proc_macro
 
 
 # ---------------------------------------------------------------------------
-# Step output validators (anti-corruption layer) — relocated to pipeline_core (H/P6)
+# Step output validators (anti-corruption layer) — relocated to pipeline_core
 # ---------------------------------------------------------------------------
 # validate_task1_output + validate_task4_output → pipeline_core.application.validate
 # validate_task2_output + validate_task2_api_surface_conformance: thin wrappers below
@@ -714,7 +714,7 @@ from pipeline_core.application.validate import (  # noqa: E402, F401  (smoke pin
     validate_task4_output,
 )
 
-# Discovery moved to pipeline_core.adapters.discovery (P5). Shims preserve the
+# Discovery moved to pipeline_core.adapters.discovery. Shims preserve the
 # module-level names existing call sites and configure() wiring reference.
 is_test_file = _discovery.is_test_file
 
@@ -727,7 +727,7 @@ chunk_test_files_by_file = _shaping.chunk_test_files_by_file
 
 
 # discover_test_command → application.tasks.discover_test_command, bound in
-# build_app (App.run_deps, S72).
+# build_app (App.run_deps).
 
 
 # Source-file lifecycle (write/delete/lock + manifest/locked ledgers) →
@@ -759,13 +759,13 @@ _cargo_env = CargoEnv(_SCOPE)
 # S3.5: WorkspaceDeps construction migrated into build_app; re-exported above as _APP.ws_deps.
 
 
-# S80: git_commit/git_tag construct in build_app (live ws_deps + run_state.git_managed).
+# git_commit/git_tag construct in build_app (live ws_deps + run_state.git_managed).
 
 # git_clean_reset / setup_workspace → adapters.workspace, bound in build_app
-# (App.run_deps, S72).
+# (App.run_deps).
 
 # _estimate_cluster_ceiling + _cluster_pre_check relocated to
-# pipeline_core.adapters.augment_engine.CargoAugmentEngine (P6).
+# pipeline_core.adapters.augment_engine.CargoAugmentEngine.
 
 
 # ---------------------------------------------------------------------------
@@ -898,10 +898,10 @@ _HELPERS = _Helpers(
 )
 # Phase 3 S3.4: TASK-1→4 reconstruction role callables, late-binding (the wrapped
 # fns are defined later in this module; lambdas resolve them at call time).
-# S76: the reconstruction roles construct in build_app (ReconstructRoles dissolved).
-# P1: the real StructureReader — injected into the fill engine (no monkeypatch seam).
+# The reconstruction roles construct in build_app (ReconstructRoles dissolved).
+# The real StructureReader — injected into the fill engine (no monkeypatch seam).
 _STRUCTURE = _CliStructureReader(ADAPTERS.extractor)
-# S23: telemetry as a standalone injected value (so module-level consumers like
+# Telemetry as a standalone injected value (so module-level consumers like
 # _CLUSTER_AUGMENTOR bind it without reading _APP — clears the last _APP-to-end blocker).
 _TELEMETRY = LogTelemetry()
 _APP: _App = _build_app(ADAPTERS, SETTINGS, _RUN, _SCOPE, _PORTS, _CFG, _HELPERS,
@@ -911,7 +911,7 @@ _APP: _App = _build_app(ADAPTERS, SETTINGS, _RUN, _SCOPE, _PORTS, _CFG, _HELPERS
                   app_ref=lambda: _APP)
 # S3.5/6/10: these deps are consumed only inside `def` bodies (lazy), so their
 # construction migrates into build_app and they're re-exported here by name.
-# S65: coverage deps + backend-selected provider construct in build_app.
+# Coverage deps + backend-selected provider construct in build_app.
 _coverage_provider: _covmod.CoverageProvider = _APP.coverage_provider
 # #23: build.rs cfg authority — prunes phantom clusters from source `#[cfg]` atoms.
 
@@ -919,10 +919,10 @@ _coverage_provider: _covmod.CoverageProvider = _APP.coverage_provider
 # _LateStructure hoisted above _HELPERS (step 22).
 
 
-# P2: composition root for the attribution use-case. Collaborators are late-bound
+# Composition root for the attribution use-case. Collaborators are late-bound
 # (lambdas resolve the module globals at call time) so every existing monkeypatch
 # seam keeps working; the AttributionDeps record is the clean DI rail a fake can fill.
-# P3-S3 (step 22): AttributionDeps constructed in build_app (App.attribution_deps).
+# AttributionDeps constructed in build_app (App.attribution_deps).
 # The application-layer composition context. main()'s task dispatch migrates onto it
 # slice by slice (5b); for now it bundles the resolved settings + adapters.
 # Wire the cross-cutting infra seams to the pipeline's concrete sinks/config (slice 5b).
@@ -930,7 +930,7 @@ _pclog.set_sinks(_log, _emit)
 _pcretry.configure(max_retries=MAX_RETRIES)
 
 
-# Per-fn fill rules relocated to application/reconstruct/fill_rules.py (P2);
+# Per-fn fill rules relocated to application/reconstruct/fill_rules.py;
 # aliases keep engine call sites + pins unchanged.
 from pipeline_core.application.reconstruct.fill_rules import (  # noqa: E402
     extract_fn_blocks as _extract_fn_blocks,  # noqa: F401  (test pin: pipeline._extract_fn_blocks)
@@ -964,7 +964,7 @@ _DOC_KEEP_FULL_LIMIT = SINGLE_CALL_CHAR_LIMIT // 6
 
 # Section parse/render (_preserve_model_notes, strip, dedup/rank/promote rules) →
 # pipeline_core.domain.model_notes (regex-free). I/O + run-state → the store
-# (adapters/model_notes_store.py), constructed in build_app (S64); pipeline.py
+# (adapters/model_notes_store.py), constructed in build_app; pipeline.py
 # keeps thin name-preserving wrappers so dep-injection sites + test seams are stable.
 _MODEL_NOTES_STORE: "_FileModelNotesStore" = _APP.model_notes_store
 
@@ -976,7 +976,7 @@ from pipeline_core.adapters.repo_spec_docs import (  # noqa: E402
     make_repo_spec_section as _make_repo_spec_section,
 )
 
-# Slice 8/S75: the prompt builders live in pipeline_core/prompts/ (pure
+# The prompt builders live in pipeline_core/prompts/ (pure
 # text→text); their impure providers now come from pipeline_core homes
 # (budget-bound partials + the notes store) and are wired into the prompts
 # runtime facade once at import time. The module aliases double as test pins.
@@ -990,7 +990,7 @@ _prompts_runtime.bind(_prompts_runtime.PromptRuntimeDeps(
 ))
 
 
-# P7.2: per-fn cargo-check inner loop is now governed by a failure-floor
+# Per-fn cargo-check inner loop is now governed by a failure-floor
 # stall budget against rustc error count. Hard cap was a counter — the
 # user's "no hard limits" principle replaced that with floor-stall as the
 # sole non-success exit. The 10k backstop is now a runaway safety net only;
@@ -999,7 +999,7 @@ _prompts_runtime.bind(_prompts_runtime.PromptRuntimeDeps(
 # operators who want to clamp behaviour explicitly.
 _PER_FN_FIX_HARD_CAP = SETTINGS.fix_caps.per_fn_fix_hard_cap
 _PER_FN_FIX_MAX_STALLS = SETTINGS.fix_caps.per_fn_fix_max_stalls
-# P1: per-pass test-fix loop now governed by a failure-floor stall budget,
+# Per-pass test-fix loop now governed by a failure-floor stall budget,
 # not a flat count. Iterate as long as the minimum failure count keeps
 # decreasing. Break when N consecutive iterations make no new minimum, or
 # when the absolute hard cap fires (runaway safety). `PHASE_C_FIX_CAP_PER_PASS`
@@ -1042,12 +1042,12 @@ def _converge_in_cluster(cluster: "BuildCluster | None") -> str | None:
 
 
 # _improvement_loop (the callback->RefineStrategy adapter) was relocated to
-# pipeline_core.application.refine_loop.run_callback_loop (P3.3) and is
+# pipeline_core.application.refine_loop.run_callback_loop and is
 # imported above as _improvement_loop. The 4 in-file callers (generate_fix_loop
-# closures, _task3_inline_retry) move onto it directly in P3.4/P3.5.
+# closures, _task3_inline_retry) move onto it directly.
 
 
-# Retro/diagnosis calls MUST run with think=True (FR-028). The served
+# Retro/diagnosis calls MUST run with think=True. The served
 # Qwen3.6 model (vLLM + --reasoning-parser qwen3) returns EMPTY content under
 # think=False — its hybrid-thinking path never populates `content`. Fill calls
 # already use think=True and work. think=True was once dropped pipeline-wide for
@@ -1073,7 +1073,7 @@ def _ask_retrospective(prompt: str, model: str | None = None) -> str:
 
 
 # Cargo diagnostic parsing relocated to application/reconstruct/cargo_errors.py
-# (P2 slice 5, regex-free): the rendered-text error-signature fallback is now
+# (regex-free): the rendered-text error-signature fallback is now
 # the structured `err_sig_from_text` scan (R7 standing rule).
 import pipeline_core.application.reconstruct.regression_guard as _regression_guard  # noqa: E402
 
@@ -1084,15 +1084,15 @@ def _run_cargo_check_diag(
     env: dict,
     timeout: int = 180,
 ) -> "tuple[int, str, list[Diagnostic]]":
-    return _APP.cargo_runner.check_diag(cmd, cwd, env, timeout)  # P3-S2: App port
+    return _APP.cargo_runner.check_diag(cmd, cwd, env, timeout)  # App port
 
 
 def _run_cargo(cmd: str, cwd: Path, env: dict, timeout: int = 180) -> tuple[int, str]:
-    # Port-composed runner (P2 slice 8): see application/reconstruct/cargo_runner.run_cargo.
-    return _APP.cargo_runner.run(cmd, cwd, env, timeout)  # P3-S2: App port
+    # Port-composed runner: see application/reconstruct/cargo_runner.run_cargo.
+    return _APP.cargo_runner.run(cmd, cwd, env, timeout)  # App port
 
 
-# FR-024: every cargo test invocation must be wrapped in an improvement-driven
+# Every cargo test invocation must be wrapped in an improvement-driven
 # loop. These helpers provide the metric (pass/fail counts), the attribution
 # fallbacks (recently-filled queue, test-reverse map), and the stall budget.
 

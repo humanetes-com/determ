@@ -100,7 +100,7 @@ def task2_inner_loop(project_dir: Path, genesis_path: Path, functional_req_path:
     emit("task.start", task="task2", module=current_module,
          data={"max_attempts": deps.build_check_retries,
                "has_build_check": bool(build_check_cmd)})
-    # P7.5: floor-stall against rustc error count across regen attempts.
+    # Floor-stall against rustc error count across regen attempts.
     _t2_max_stalls = deps.build_max_stalls
     _t2_best_count: int | None = None
     _t2_stall = 0
@@ -182,7 +182,7 @@ def task2_inner_loop(project_dir: Path, genesis_path: Path, functional_req_path:
         log(f"  Build still failing after fix attempts (inner loop attempt {attempt_num}).")
         emit("compile.fail", module=current_module, attempt=attempt_num,
              data={"output": deps.store_prompt_content(build_output or "")})
-        # P7.5: floor-stall against error count across regens.
+        # Floor-stall against error count across regens.
         _t2_count = deps.count_error_codes(build_output or "")
         if _t2_best_count is None or _t2_count < _t2_best_count:
             _t2_best_count = _t2_count

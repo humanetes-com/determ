@@ -74,7 +74,7 @@ def test_gather_assembles_vo_and_notes_gated_on_fr_path(tmp_path: Path) -> None:
     assert calls and calls[0]["fn_name"] == "f"
 
 
-# --- P3: blueprint slice derivation ------------------------------------------
+# --- blueprint slice derivation ------------------------------------------
 
 
 def test_gather_includes_blueprint_slice(tmp_path: Path) -> None:

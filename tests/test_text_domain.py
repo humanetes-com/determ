@@ -75,7 +75,7 @@ def test_strip_simple_code_fence_matches_regex():
         assert strip_simple_code_fence(t) == _old_simple_fence(t), t
 
 
-# --- P7: more regex-free text helpers (strip_markdown_fences, blank-line/asterisk) ---
+# --- more regex-free text helpers (strip_markdown_fences, blank-line/asterisk) ---
 
 from pipeline_core.domain.text import (  # noqa: E402
     collapse_blank_lines,
@@ -113,7 +113,7 @@ def test_strip_surrounding_asterisks_matches_regex():
         assert strip_surrounding_asterisks(s) == re.sub(r'^\*+\s*|\s*\*+$', '', s), s
 
 
-# --- P7: model-output text predicates (moved from pipeline.py) ---
+# --- model-output text predicates (moved from pipeline.py) ---
 
 from pipeline_core.domain.text import (  # noqa: E402
     block_is_prose,
@@ -144,7 +144,7 @@ def test_parse_attempt_number_matches_regex():
         assert parse_attempt_number(d) == (int(m.group(1)) if m else None), d
 
 
-# --- P7: llm_output tagged-block + fence extractors ---
+# --- llm_output tagged-block + fence extractors ---
 
 from pipeline_core.domain.llm_output import (  # noqa: E402
     extract_response_code_fence,
@@ -178,7 +178,7 @@ def test_extract_response_code_fence_matches_regex():
         assert extract_response_code_fence(t) == _old_fence(t), t
 
 
-# --- P7: label-line parsing (retrospective category/guidance) ---
+# --- label-line parsing (retrospective category/guidance) ---
 
 from pipeline_core.domain.text import label_value_offset, starts_with_label  # noqa: E402
 

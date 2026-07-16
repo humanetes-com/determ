@@ -84,7 +84,7 @@ def find_tests_for_fn(
     # Build candidate set with scores.
     scored: dict[Path, tuple[int, int]] = {}  # path → (tier, hits) — lower tier = better
 
-    # P5.4 Tier 0: when fn_name is generic (very common: new, fmt, source,
+    # Tier 0: when fn_name is generic (very common: new, fmt, source,
     # clone, drop, default), filter by the container's TYPE NAME so we don't
     # match every test that mentions e.g. "new". Falls back to the regular
     # name-based search if the container doesn't yield a clear type name.

@@ -1,10 +1,10 @@
-"""Failure→fn attribution use-case (P2) — Clean Architecture.
+"""Failure→fn attribution use-case — Clean Architecture.
 
 Folds the runtime-panic / compile-error / classifier / recently-filled / reverse-map
 attribution paths into one application context over an injected `AttributionDeps`
 (StructureReader + cargo-check + LLM classifier + source locator). Behaviour is the
 verbatim relocation of pipeline.py's `_attribute_failures` family; the composition root
-binds the concrete collaborators. The `#[test]`-oracle filter (FR-018) is applied by the
+binds the concrete collaborators. The `#[test]`-oracle filter is applied by the
 callers (same as before), via `reconstruct.test_targets.filter_test_targets`.
 
 Cargo-output parsing goes through the structured `domain.test_report` parser
@@ -47,7 +47,7 @@ class AttributionDeps:
 
     structure: Any                       # ports.structure.StructureReader (enumerate_fns)
     classify: Callable[..., dict[str, dict[str, Any]]]   # LLM per-test classifier
-    locate_fn: Callable[..., Any]              # regex source locator (R7.6, stays in pipeline.py)
+    locate_fn: Callable[..., Any]              # regex source locator (stays in pipeline.py)
     run_check_diag: Callable[..., Any]         # cargo check → (rc, rendered, [Diagnostic])
     derive_check_only_cmd: Callable[[str], str]
     is_gen_tests_file: Callable[[str], bool]
@@ -169,7 +169,7 @@ def behavior_frontier_from_texts(
         f_rel = r.get("file", "")
         if f_rel in texts or deps.is_gen_tests_file(Path(f_rel).name):
             continue
-        if is_test_fn_record(r):  # inline #[cfg(test)] = oracle, never a target (FR-018)
+        if is_test_fn_record(r):  # inline #[cfg(test)] = oracle, never a target
             continue
         by_name.setdefault(r.get("fn_name", ""), []).append(r)
     frontier: Frontier = {}

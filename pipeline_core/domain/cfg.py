@@ -1,4 +1,4 @@
-"""Cfg predicate domain — a typed, algebraic model of `#[cfg(...)]` (CODE_ARCHITECTURE.md §4 P5).
+"""Cfg predicate domain — a typed, algebraic model of `#[cfg(...)]`.
 
 This replaces the string-slicing cfg helpers that used to live in ``pipeline.py``
 (``_eval_cfg_pred``, ``_cfg_leaf_atoms``, ``_cfg_false_for_cargo``,
@@ -29,8 +29,8 @@ from pipeline_core.domain.rust_scan import contains_word
 
 # Built-in cfg identifiers cargo evaluates from the build TARGET (not from a
 # `--cfg`/feature flag). Undecidable to a cluster's cfg sets, but cargo MAY set
-# them, so cargo-faithful exclusion must never force them off (never over-exclude,
-# FR-018). Everything else that is a bare ident is a custom `--cfg NAME`, default OFF.
+# them, so cargo-faithful exclusion must never force them off (never over-exclude).
+# Everything else that is a bare ident is a custom `--cfg NAME`, default OFF.
 BUILTIN_CFG_IDENTS: frozenset[str] = frozenset({
     "unix", "windows", "test", "debug_assertions", "doc", "doctest", "miri",
     "proc_macro", "overflow_checks",
@@ -275,7 +275,7 @@ def body_uses_cluster_specific_symbol(
 _OPS = {"not": Not, "all": All, "any": Any}
 
 
-# --- `#[cfg(...)]` ATTRIBUTE EXTRACTION from rendered source text (P7) ---
+# --- `#[cfg(...)]` ATTRIBUTE EXTRACTION from rendered source text ---
 # Structured replacements for the source regexes that pulled predicate strings out
 # of cfg attributes before handing them to `CfgSet.evaluate`. Each is byte-equivalent
 # to the exact regex it replaced (fuzz-verified). Naive of string literals, as the

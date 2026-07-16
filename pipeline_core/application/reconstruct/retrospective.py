@@ -60,7 +60,7 @@ def diagnose_phase_c(
 ) -> dict[str, str]:
     if not last_body and not error_excerpt:
         return {"category": "", "guidance": "", "signal": "no_data"}
-    # FR-037: if EVERY error is downstream (other files, none in the target),
+    # If EVERY error is downstream (other files, none in the target),
     # this fn is probably fine and the crate is broken elsewhere. A target retro
     # here misattributes the cause and writes a WRONG anti-hallucination note —
     # skip it; let the blocking fn's own loop fix it.
@@ -113,7 +113,7 @@ def diagnose_phase_c(
         failed_body_cap=deps.failed_body_cap, fix_err_cap=deps.fix_err_cap,
         bound_methods_section=bound_methods_section,
     )
-    # FR-028: retro runs think=True with a bounded output budget (think=False
+    # Retro runs think=True with a bounded output budget (think=False
     # returns empty content on the vLLM reasoning-parser endpoint). One retry on
     # empty is handled inside the injected ask_retrospective.
     try:

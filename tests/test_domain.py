@@ -70,11 +70,11 @@ def test_extract_files_strips_inner_fence_and_rejects_prose() -> None:
 def test_normalize_file_markers() -> None:
     assert llm_output._normalize_file_markers('### <FILE path="x">c</FILE>') == '<FILE path="x">c</FILE>'
     assert llm_output._normalize_file_markers('### FILE path="x">c</FILE>') == '<FILE path="x">c</FILE>'
-    # R8.5: single→double quote is now the regex-free _rewrite_sq_file_blocks pass.
+    # single→double quote is now the regex-free _rewrite_sq_file_blocks pass.
     assert llm_output._normalize_file_markers("<FILE path='x'>c</FILE>") == '<FILE path="x">c</FILE>'
 
 
-# --------------------------------------------------------- R8.5 <FILE>/<FN> parsers
+# --------------------------------------------------------- <FILE>/<FN> parsers
 
 
 _OLD_FILE_RE = re.compile(r'<FILE path="([^"]+)">(.*?)</FILE>', re.DOTALL)

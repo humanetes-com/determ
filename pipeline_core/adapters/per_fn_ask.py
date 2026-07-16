@@ -61,7 +61,7 @@ def ask_per_fn_body(
             kwargs["temperature"] = eff_unsafe_temp
         while True:
             last_response = client.ask(prompt, **kwargs)
-            # P2: a request-only reply (no <BODY>, no fence) is a context
+            # A request-only reply (no <BODY>, no fence) is a context
             # request, never a body — extract_body_response's raw fallback
             # would otherwise splice the tag text verbatim.
             if (answer_request is not None

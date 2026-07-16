@@ -39,7 +39,7 @@ class ModuleReconstructor:
         self._step = step
         self._analysis = analysis
         self._tel = telemetry
-        # Outer-loop fixed-point terminator (debt #16 follow-up): stop after this
+        # Outer-loop fixed-point terminator: stop after this
         # many consecutive non-improving iterations. The loop previously only exited
         # on a lock, so a module the model can't converge looped unbounded (the
         # hardcrate `cap_limit` hang). 0 = disabled. Must exceed the whole-project

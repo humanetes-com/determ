@@ -63,7 +63,7 @@ def group_tests(
             response, test_paths, sym_set
         )
         if validated is not None:
-            # P3.6: post-process to enforce max group size = 3.
+            # Post-process to enforce max group size = 3.
             validated = split_oversized_groups(validated, max_size=3)
             log(f"  [phase-b] LLM produced {len(validated)} group(s) (post-split).")
             out_path.write_text(json.dumps(validated, indent=2), encoding="utf-8")
@@ -83,7 +83,7 @@ def group_tests(
                     "test_files": sorted(recoverable_missing),
                     "target_symbols": [],
                 })
-                # Apply P3.6 split even on the auto-recovered path so big
+                # Apply the same split even on the auto-recovered path so big
                 # groups still get chunked.
                 partial = split_oversized_groups(partial, max_size=3)
                 log(f"  [phase-b] auto-recovered {len(recoverable_missing)} "

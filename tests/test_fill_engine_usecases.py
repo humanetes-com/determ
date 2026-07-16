@@ -154,7 +154,7 @@ def test_fn_fix_context_defaults() -> None:
 
 
 def test_stub_carries_cfg_predicates_for_variant_splice() -> None:
-    # debt #17 residual: the Stub must thread the fn's cfg chain so the splice's
+    # the Stub must thread the fn's cfg chain so the splice's
     # locate_fn_by_record cfg tier can pick the right one of two cfg-variant fns
     # sharing file+name+container+sig (the cap_limit pair).
     s = Stub.from_dict({"file": "lib.rs", "fn_name": "cap_limit",
@@ -194,7 +194,7 @@ def test_fill_one_happy_path_first_attempt(tmp_path: Path) -> None:
 
 
 def test_fill_one_stub_splices_without_allow_nonstub(tmp_path: Path) -> None:
-    # debt #46: an ordinary stub fill must NOT allow_nonstub (refuse a filled body).
+    # an ordinary stub fill must NOT allow_nonstub (refuse a filled body).
     ws = _mk_ws(tmp_path)
     fake = FakeFill(loc_rec=("pub fn answer()", 0, 5, "pub fn answer()"),
                     splice=SpliceOutcome(True, "ok", 4),
@@ -205,7 +205,7 @@ def test_fill_one_stub_splices_without_allow_nonstub(tmp_path: Path) -> None:
 
 
 def test_fill_one_refill_splices_with_allow_nonstub(tmp_path: Path) -> None:
-    # debt #46 point 1: a refill target replaces an already-filled body → the
+    # a refill target replaces an already-filled body → the
     # splice MUST pass allow_nonstub=True (else target_not_stub refuses it).
     ws = _mk_ws(tmp_path)
     (ws / "src" / "lib.rs").write_text("pub fn answer() {\n 0\n}\n")
@@ -261,7 +261,7 @@ def test_engine_per_fn_empty_cluster(tmp_path: Path) -> None:
 
 
 def test_collect_refill_targets_only_filled_frontier_fns(tmp_path: Path) -> None:
-    # debt #46 point 1: a frontier fn that is NOT a stub but has a failing test
+    # a frontier fn that is NOT a stub but has a failing test
     # becomes a refill=True target; stubs and tests-less keys are excluded.
     from pipeline_core.domain.models import FnLocator
     fns = [

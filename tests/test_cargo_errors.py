@@ -154,7 +154,7 @@ def test_error_type_signals_requires_capitalized_ident() -> None:
     assert dict(error_type_signals("expected type `Xy`")) == {"Xy": 15}
 
 
-# --- P7: diagnostics-first focusing + ANSI-hardened text path ----------------
+# --- diagnostics-first focusing + ANSI-hardened text path ----------------
 
 def _diag(code: str, file: str, rendered: str):
     from pipeline_core.domain.models import Diagnostic

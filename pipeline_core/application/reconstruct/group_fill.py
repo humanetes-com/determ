@@ -59,7 +59,7 @@ def task2_fill_groups(
 
     Returns {'groups_processed': int, 'bytes_filled': int, 'errors': list}.
     """
-    # P4 rebind-prelude (task0c pattern): collaborators localised from deps so the
+    # Rebind-prelude (task0c pattern): collaborators localised from deps so the
     # nested closures capture them unchanged — body relocated byte-for-byte.
     _log = deps.log
     ask = deps.ask
@@ -86,11 +86,11 @@ def task2_fill_groups(
     errors: list[str] = []
     skipped_already_filled = 0
 
-    # P3.5: cache the smallest successful fills from earlier groups so we can
+    # Cache the smallest successful fills from earlier groups so we can
     # offer them as few-shot examples on retry.
     successful_examples: list[tuple[str, str]] = []  # [(sig, body), ...]
 
-    # P3.7: stash directory for failure triples (prompt, response, outcome).
+    # Stash directory for failure triples (prompt, response, outcome).
     failures_dir = project_dir / ".skeleton" / "_failures"
     failures_dir.mkdir(parents=True, exist_ok=True)
 
@@ -139,7 +139,7 @@ def task2_fill_groups(
         _log(f"  [phase-c] group {g_idx}/{len(ordered)}: {gname} "
              f"({len(gtests)} test file(s))")
 
-        # P3.4: skip the group entirely if its target_symbols all already
+        # Skip the group entirely if its target_symbols all already
         # have bodies. Saves an LLM round-trip and prevents the model from
         # being asked to "fill" things that are already done.
         remaining = _stub_count_for_group(g)
@@ -159,7 +159,7 @@ def task2_fill_groups(
             _log(f"  [phase-c] group {gname}: no readable tests; skipping.")
             continue
 
-        # P3.3 + Plan 4: signature-only skeleton index, additionally
+        # Signature-only skeleton index, additionally
         # cfg-filtered for the active cluster so the model sees only
         # items active in this cluster (reduces cognitive load).
         cur_files = _load_skeleton_files(target_src_dir)
@@ -172,7 +172,7 @@ def task2_fill_groups(
         _fr_capped = smart_truncate(functional_req or "", total_limit=_fr_cap,
                                     head=_fr_cap // 3, tail=2 * _fr_cap // 3)
 
-        # P3.5: few-shot examples included from attempt 2 onward.
+        # Few-shot examples included from attempt 2 onward.
         # B023: per-group loop vars bound at def time.
         def _build_prompt(include_examples: bool, *, gname: str = gname, g: Any = g,
                           skeleton_index: str = skeleton_index, _fr_capped: str = _fr_capped,
@@ -256,7 +256,7 @@ that satisfy the tests above.
         if not fn_blocks:
             _log(f"  [phase-c] group {gname}: all attempts failed.")
             errors.append(f"{gname}: empty/unparseable response")
-            # P3.7: persist the failure for inspection / future training corpus.
+            # Persist the failure for inspection / future training corpus.
             try:
                 ts = int(time.time())
                 fpath = failures_dir / f"{gname}-{ts}.txt"
@@ -282,7 +282,7 @@ that satisfy the tests above.
                 src_path.write_text(merged, encoding="utf-8")
                 _log(f"  [phase-c] group {gname}: updated {rel_str} "
                      f"({len(disk_text)} → {len(merged)} bytes)")
-                # P3.5: cache small successful fills as future few-shot examples.
+                # Cache small successful fills as future few-shot examples.
                 for sig, body in fn_blocks.items():
                     if len(body) < 800 and len(successful_examples) < 20:
                         successful_examples.append((sig, body))

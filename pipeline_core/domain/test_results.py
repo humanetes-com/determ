@@ -141,7 +141,7 @@ def parse_test_counts(test_output: str) -> tuple[int, int, int]:
     return (passed, failed, ignored)
 
 
-# R6.5: this is a module-public parser (sibling to count_passing_tests /
+# This is a module-public parser (sibling to count_passing_tests /
 # validate_task3_output_strict) — the public name is the canonical one; the old
 # `_`-prefixed name is kept as a back-compat alias for the pipeline.py test seam
 # (test_pipeline_smoke asserts `pipeline._parse_test_counts is tr._parse_test_counts`).

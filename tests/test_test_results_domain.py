@@ -137,7 +137,7 @@ error: could not compile `anyhow` (lib)
 
 
 def test_compile_gate_reason_names_the_gate():
-    # debt #34: 1-error compile gate must not read as a harness crash.
+    # a 1-error compile gate must not read as a harness crash.
     reason = compile_gate_reason("nightly", _E0276_OUT)
     assert reason == ("cluster 'nightly': lib failed to compile — 2 error(s), "
                       "first: src/context.rs:193: impl has stricter "
@@ -172,7 +172,7 @@ test result: ok. 3 passed; 0 failed; 0 ignored
 
 
 def test_summarize_test_binaries_per_target_breakdown():
-    # debt #44: one (label, passed, failed) per cargo test target, in order.
+    # one (label, passed, failed) per cargo test target, in order.
     assert summarize_test_binaries(_MULTI_BIN) == [
         ("unittests src/lib.rs", 12, 0),
         ("tests/test_boxed.rs", 6, 2),

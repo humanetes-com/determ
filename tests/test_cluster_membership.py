@@ -40,7 +40,7 @@ def test_filter_test_exercised():
     assert filter_test_exercised(stubs, []) == []
 
 
-# --- debt #46 point 2: collect_impl_blocks_for_cluster / collect_impl_refill_targets ---
+# --- collect_impl_blocks_for_cluster / collect_impl_refill_targets ---
 
 def _member(name: str, is_stub: bool) -> FnRecord:
     return FnRecord(file="lib.rs", fn_name=name, container="impl Foo",

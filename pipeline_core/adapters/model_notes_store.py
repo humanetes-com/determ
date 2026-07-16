@@ -90,7 +90,7 @@ class FileModelNotesStore:
         self._excerpt_max_per_code = excerpt_max_per_code
         self._excerpt_max_chars = excerpt_max_chars
         self._hash_cache: dict[Path, set[str]] = {}
-        # Run-scoped recurring-error accumulators (P5.5 / P6.3).
+        # Run-scoped recurring-error accumulators.
         self.error_code_counts: Counter[str] = Counter()
         self.error_code_excerpts: dict[str, list[str]] = {}
 

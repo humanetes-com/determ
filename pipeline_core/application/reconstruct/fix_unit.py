@@ -124,7 +124,7 @@ class FixUnitDeps:
     thinking_directive: str
     err_cap: int
     per_fn_max_stalls: int
-    # P2 pull protocol (None → plain ask, existing constructions unchanged).
+    # Pull protocol (None → plain ask, existing constructions unchanged).
     # `full_error` on the sources is a placeholder — each attempt rebinds it
     # to that attempt's untruncated cargo output.
     pull_sources: PullSources | None = None

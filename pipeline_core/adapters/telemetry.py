@@ -48,9 +48,9 @@ class JsonlEventEmitter:
                 "pipeline_sha": self._ctx.get("pipeline_sha", "unknown"),
                 "run_id": self._ctx.get("run_id", ""),
                 "event": event,
-                # Emitting thread — per-thread stream logs key on this name (C10 audit).
+                # Emitting thread — per-thread stream logs key on this name.
                 "thread": threading.current_thread().name,
-                # OS thread id — distinguishes a real name-collision from reentrancy (debt #6).
+                # OS thread id — distinguishes a real name-collision from reentrancy.
                 "tid": threading.get_ident(),
             }
             for k, v in fields.items():

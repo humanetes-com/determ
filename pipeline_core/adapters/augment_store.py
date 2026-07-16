@@ -39,7 +39,7 @@ class FileAugmentStore:
                                module_name: str, cov: float) -> None:
         p = self.cluster_path(project_dir, cluster_name, module_name)
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(f"{cov:.1f}\n")   # R8.4: bare numeric (no '%' text round-trip)
+        p.write_text(f"{cov:.1f}\n")   # bare numeric (no '%' text round-trip)
 
     def cluster_augmented_value(self, project_dir: Path, cluster_name: str,
                                 module_name: str) -> float:
@@ -51,7 +51,7 @@ class FileAugmentStore:
     def mark_module_augmented(self, project_dir: Path, module_name: str, cov: float) -> None:
         p = self.module_path(project_dir, module_name)
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(f"{cov:.1f}\n")   # R8.4: bare numeric (no '%' text round-trip)
+        p.write_text(f"{cov:.1f}\n")   # bare numeric (no '%' text round-trip)
 
     def module_augmented_value(self, project_dir: Path, module_name: str) -> float:
         return _read_cov(self.module_path(project_dir, module_name))

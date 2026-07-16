@@ -14,7 +14,7 @@ def test_cluster_sentinel_roundtrip(tmp_path: Path) -> None:
     s.mark_cluster_augmented(tmp_path, "stable", "anyhow", 98.5)
     assert s.is_cluster_augmented(tmp_path, "stable", "anyhow") is True
     assert s.cluster_augmented_value(tmp_path, "stable", "anyhow") == 98.5
-    # R8.4: bare numeric, one decimal, no '%'.
+    # bare numeric, one decimal, no '%'.
     assert (tmp_path / CLUSTER_AUGMENTED_DIR / "stable__anyhow").read_text() == "98.5\n"
 
 

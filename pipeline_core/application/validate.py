@@ -21,7 +21,7 @@ from pipeline_core.domain.rust_idents import (
 from pipeline_core.domain.rust_scan import strip_comment_spans
 
 # Justified: detecting model-output placeholder patterns in generated files
-# (not Rust-source structure parsing — R7.5 category).
+# (not Rust-source structure parsing).
 _PLACEHOLDER_RE = re.compile(
     r'unimplemented!\s*\(\)|todo!\s*\(\)|#\s*TODO|#\s*FIXME|pass\s*$|raise\s+NotImplementedError',
     re.MULTILINE,

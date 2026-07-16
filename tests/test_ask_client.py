@@ -93,7 +93,7 @@ def test_network_error_exhausts_to_terminal_error(monkeypatch):
     assert _names(events) == ["llm.request", "llm.error"]
 
 
-# --- B1: temperature threads through to the transport (CODE_ARCHITECTURE §7.0a) ---
+# --- temperature threads through to the transport ---
 
 def test_temperature_forwarded_to_transport_when_set():
     seen = {}
@@ -107,7 +107,7 @@ def test_temperature_forwarded_to_transport_when_set():
 
 def test_temperature_absent_when_none_keeps_request_byte_identical():
     # When temperature is None the key must NOT be sent, so an unsafe-fn-free
-    # request is byte-identical to the pre-B1 behaviour (no cassette MISS).
+    # request is byte-identical to the previous behaviour (no cassette MISS).
     seen = {}
     def raw(prompt, system=None, **k):
         seen.update(k)

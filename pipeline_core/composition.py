@@ -769,24 +769,24 @@ class Helpers:
 
     ask_retrospective: Callable[..., str]
     # The per-fn conversation protocol (prompt → body/pull-request) — the
-    # PromptContext role's model seam, routed through App (P3-S2 llm boundary).
+    # PromptContext role's model seam, routed through App (llm boundary).
     ask_per_fn_body: Callable[..., tuple[str | None, str]]
-    # Group-fill leaf collaborators (P3-S3, GroupFillDeps construction):
-    # Phase-C TDD driver collaborators (P3-S3, PhaseCTddDeps construction;
+    # Group-fill leaf collaborators (GroupFillDeps construction):
+    # Phase-C TDD driver collaborators (PhaseCTddDeps construction;
     # attribute_failures/build_test_reverse_map/filter_test_targets pre-exist
-    # below in the S27 group):
+    # below in the group):
     # Same seams read through the LIVE pipeline._APP (swap-aware: tests
     # replace _APP; composition must not import pipeline, so the module
     # provides these App-reading closures itself):
-    # Phase-subcommand collaborators (P3-S3 step 47):
-    # Task-0c collaborators (P3-S3 step 42, Task0cDeps construction):
+    # Phase-subcommand collaborators:
+    # Task-0c collaborators (Task0cDeps construction):
     cluster_gate_for: Callable[..., Any]
     describe_test_environment: Callable[..., Any]
     coverage_target: float
     task0c_prompt_char_cap: int
     task0c_fix_thinking_directive: str
     task0c_thinking_directive: str
-    # Fix-loop collaborators (P3-S3 step 31, GenerateFixLoopDeps construction):
+    # Fix-loop collaborators (GenerateFixLoopDeps construction):
     fix_diag: Any
     settings_now: Callable[..., Any]
     store_prompt_content: Callable[..., Any]
@@ -797,10 +797,10 @@ class Helpers:
     source_extensions: Any
     fix_thinking_directive: str
     task2_verbosity_guard: str
-    # Attribution collaborators (P3-S3, AttributionDeps construction):
+    # Attribution collaborators (AttributionDeps construction):
     structure_via_app: Any  # StructureReader reading the LIVE pipeline._APP.structure
-    # Task-1 collaborators (P3-S3, Task1Deps construction):
-    # Impl-fill collaborators (P3-S3, ImplFillDeps construction):
+    # Task-1 collaborators (Task1Deps construction):
+    # Impl-fill collaborators (ImplFillDeps construction):
     test_regression_baseline: Callable[..., Any]
     test_regression_gate: Callable[..., Any]
     per_impl_max_stubs: int
@@ -819,10 +819,10 @@ class Helpers:
     load_gen_tests_origin: Callable[[Path], dict[str, str]]
     gen_tests_path: Callable[[Path, int], Path]
     build_gen_tests_decl: Callable[..., str]
-    # task3 inline-retry collaborators (S27) — resident shims over pipeline-side
+    # task3 inline-retry collaborators — resident shims over pipeline-side
     # bound deps (_ATTR_DEPS, ADAPTERS.cargo); run_cargo_check_diag is an e2e seam.
     run_cargo_check_diag: Callable[..., tuple[int, str, list[Any]]]
-    # Run-loop residents (S72, RunDeps construction): logging/telemetry init +
+    # Run-loop residents (RunDeps construction): logging/telemetry init +
     # the flow-audit thread — they mutate pipeline-side run globals (_RUN,
     # _RUN_CONTEXT), so they stay resident and late-bind here.
     init_log: Callable[..., None]
@@ -874,44 +874,44 @@ class App:
     scope: ClusterScope
     ports: Ports
     config: CompositionConfig
-    # Cluster-scoped structure queries (P3-S3): the WorkspaceModel role's
+    # Cluster-scoped structure queries: the WorkspaceModel role's
     # derived scans — stub records / impl blocks filtered to a cluster's
     # cfg-set. Explicit App seams so tests script them at the boundary
     # instead of monkeypatching pipeline module fns.
     scan_stub_records_for_cluster: Callable[..., Any]
     collect_impl_blocks_for_cluster: Callable[..., Any]
 
-    # Group-fill deps (P3-S3): constructed here from helpers + ask_client.
+    # Group-fill deps: constructed here from helpers + ask_client.
     group_fill_deps: GroupFillDeps
-    # Phase-C TDD driver deps (P3-S3).
+    # Phase-C TDD driver deps.
     phase_c_tdd_deps: PhaseCTddDeps
-    # Impl-fill deps (P3-S3).
+    # Impl-fill deps.
     impl_fill_deps: ImplFillDeps
-    # Task-1 deps (P3-S3).
+    # Task-1 deps.
     task1_deps: Task1Deps
-    # Attribution deps (P3-S3).
+    # Attribution deps.
     attribution_deps: AttributionDeps
-    # Fix-loop deps (P3-S3 step 31).
+    # Fix-loop deps.
     gen_fix_loop_deps: GenerateFixLoopDeps
-    # Task-0c deps (P3-S3 step 42).
+    # Task-0c deps.
     task0c_deps: Task0cDeps
-    # Phase-subcommand deps (P3-S3 step 47).
+    # Phase-subcommand deps.
     phase_subcommand_deps: Any
 
-    # Guarded LLM ask client (P3-S3 bridge): constructed by the composition
+    # Guarded LLM ask client (bridge): constructed by the composition
     # root (its ask_raw/hot-reload lambdas close over pipeline residents) and
     # HELD here so use-case deps bind `app.ask_client.ask` and tests swap it.
     ask_client: AskClient
 
-    # Telemetry boundary (P3-S2/S3): the structured-event sink, constructed
+    # Telemetry boundary: the structured-event sink, constructed
     # HERE from the late-bound events-log path + live run-context dict the
     # composition root owns. `pipeline._emit`/`_phase` delegate to it.
     emitter: JsonlEventEmitter
 
-    # LLM per-fn boundary (P3-S2): the engines' PromptContext role resolves its
+    # LLM per-fn boundary: the engines' PromptContext role resolves its
     # model seam here at call time — swap via dataclasses.replace to script it.
     ask_per_fn_body: Callable[..., tuple[str | None, str]]
-    # Frontier/attribution/impl-scan seams (S60/S61): the ONE seam every
+    # Frontier/attribution/impl-scan seams: the ONE seam every
     # consumer reads — bound DIRECT to the pipeline_core impls in build_app
     # (attribution fns over attribution_deps; impl-scan over the enumerate
     # seam); swap via dataclasses.replace like the other boundary fields.
@@ -926,43 +926,43 @@ class App:
     fn_container_index: Callable[..., Any]
     frontier_from_diags: Callable[..., Any]
     u2_test_gate: Callable[..., Any]
-    # Per-fn exhaustion diagnosis (S62): the retrospective model call, bound
+    # Per-fn exhaustion diagnosis: the retrospective model call, bound
     # over the same PhaseCRetroDeps held at App.phase_c_retro_deps.
     phase_c_retrospective: Callable[..., Any]
-    # TASK-0b discovery use-case (S63): deps constructed here, bound direct.
+    # TASK-0b discovery use-case: deps constructed here, bound direct.
     task0b_discovery: Callable[..., str]
-    # TASK-3 verification driver (S63): wraps the relocated task3 with the
+    # TASK-3 verification driver: wraps the relocated task3 with the
     # task.start/task.done events + per-file overview the old shim emitted.
     task3: Callable[..., tuple[Any, str]]
 
-    # Cargo boundary (P3-S2): the application-facing runner over `adapters.cargo`
+    # Cargo boundary: the application-facing runner over `adapters.cargo`
     # — the semantic (rc, text) / (rc, text, diags) level engines and scripted
     # tests work at. Swap via dataclasses.replace to script it.
     cargo_runner: CargoRunnerPort
 
     # Syn-extractor boundary: the structured-source reader over `adapters.extractor`.
-    # Typed at the PORT so tests swap in a fake via dataclasses.replace (P3-S2).
+    # Typed at the PORT so tests swap in a fake via dataclasses.replace.
     structure: StructureReader
-    # Fill-engine ISP role adapters (S21) — see FillRoles.
+    # Fill-engine ISP role adapters — see FillRoles.
     fill_roles: FillRoles
-    # Model self-correction notes store (S64): I/O + run-state engine behind the
+    # Model self-correction notes store: I/O + run-state engine behind the
     # notes prompt sections; test seam pipeline._MODEL_NOTES_STORE re-exports it.
     model_notes_store: FileModelNotesStore
-    # TASK-2 residual-cleanup deps (S65).
+    # TASK-2 residual-cleanup deps.
     cleanup_residuals_deps: _cleanup_residuals.CleanupResidualsDeps
-    # Pre-strip API-surface capture (S65); test seam pipeline._API_SURFACE.
+    # Pre-strip API-surface capture; test seam pipeline._API_SURFACE.
     api_surface: ApiSurfaceCapture
-    # --restart-from-augmented workspace restore (S65).
+    # --restart-from-augmented workspace restore.
     restore_from_augmented: RestoreFromAugmented
-    # Strip/bake pre-step deps + pre-strip bake deps (S66, Hard Rule 11).
+    # Strip/bake pre-step deps + pre-strip bake deps.
     strip_bake_deps: StripBakeDeps
-    # Per-run structure caches + cluster-membership queries (S71); owns the
+    # Per-run structure caches + cluster-membership queries; owns the
     # mod-records invalidation hook (call after strip/task1-reset/task2-regen).
     structure_cache: StructureCache
     bake_artifacts_deps: BakeArtifactsDeps
-    # Per-fn fix-prompt section assembler (S64).
+    # Per-fn fix-prompt section assembler.
     fix_context: FixContextAssembler
-    # TASK-0c augmentation cluster (S25) — see AugmentRoles.
+    # TASK-0c augmentation cluster — see AugmentRoles.
     augment_roles: AugmentRoles
     # Migrated use-case deps:
     genesis_audit_deps: GenesisAuditDeps       # TASK-4 genesis audit (S3 slice 1)
@@ -979,12 +979,12 @@ class App:
     # Reconstruction use-case spine (S3 slices 11-20). NB: the role adapters +
     # lock/reattach/journal/artifacts/test_runner/coverage_docs/flow_audit/
     # docs_metrics/reconstruction_step/failure_analysis are consumed only as
-    # build_app locals (to assemble the phase use-cases) → not exposed on App (S24).
-    telemetry: LogTelemetry                    # injected (S23)
-    requirements_phase: RequirementsPhase      # (S17) — read by main()
-    module_reconstructor: ModuleReconstructor  # (S20) — read by main()
-    task3_retry_deps: Task3RetryDeps           # task3 inline retry (S27)
-    # Top-level run-loop deps (S72) — read by pipeline main() → run_pipeline.
+    # build_app locals (to assemble the phase use-cases) → not exposed on App.
+    telemetry: LogTelemetry                    # injected
+    requirements_phase: RequirementsPhase      # read by main()
+    module_reconstructor: ModuleReconstructor  # read by main()
+    task3_retry_deps: Task3RetryDeps           # task3 inline retry
+    # Top-level run-loop deps — read by pipeline main() → run_pipeline.
     run_deps: RunDeps
 
 
@@ -1027,7 +1027,7 @@ def build_app(
             return getattr(app_ref(), name)(*a, **k)
         return _call
 
-    # S85: former Helpers pass-throughs over the live App — resolved via
+    # Former Helpers pass-throughs over the live App — resolved via
     # _live() so a test's dataclasses.replace on pipeline._APP wins.
     def enumerate_fns(sd: Path) -> Any:
         return _live().structure.enumerate_fns(sd)
@@ -1090,7 +1090,7 @@ def build_app(
             raise RuntimeError("group_fill deps resolved without app_ref")
         return app_ref().group_fill_deps
 
-    # S73: former pipeline delegate defs, bound direct. The splice gate + the
+    # Former pipeline delegate defs, bound direct. The splice gate + the
     # cluster caches resolve through the LIVE App when app_ref is provided (a
     # test's dataclasses.replace on the held App wins), else the injected values.
     def _validate_parse(path: Path) -> bool:
@@ -1133,7 +1133,7 @@ def build_app(
                 is_gen_tests_file=_disc_is_gen_tests_file,
             ))
 
-    # S74: more former pipeline delegate defs, bound direct.
+    # More former pipeline delegate defs, bound direct.
     def cluster_cfg_attr(cluster: Any) -> str:
         return _membership.cluster_cfg_attr(cluster, scope.all)
 
@@ -1142,7 +1142,7 @@ def build_app(
         return _attribution.build_test_reverse_map(deps_a, test_files, src_dir)
 
     def filter_test_targets(frontier: Any, src_dir: Path) -> Any:
-        """Drop frontier keys that resolve to a #[cfg(test)]/#[test] fn (FR-018)."""
+        """Drop frontier keys that resolve to a #[cfg(test)]/#[test] fn."""
         return _test_targets_mod.filter_test_targets(
             frontier, enumerate_fns(src_dir) or [], log=ports.log)
 
@@ -1175,7 +1175,7 @@ def build_app(
         PromptBudgets.derive(cfg.single_call_char_limit).repo_spec)
     _build_script_reader = CargoBuildScriptReader()
 
-    # S76: the TASK-1→4 reconstruction roles, built here (ReconstructRoles
+    # The TASK-1→4 reconstruction roles, built here (ReconstructRoles
     # dissolved). Task/validator deps resolve through the LIVE App at call
     # time — same swap semantics the old pipeline shims had via `_APP`.
     def _live() -> App:
@@ -1267,7 +1267,7 @@ def build_app(
         _wsf_write_build_configs(project_dir, scan.clusters, scan.predicate_counts)
         return scan.clusters
 
-    # S65: coverage + mutation constructed here (S26 injected them pre-built).
+    # Coverage + mutation constructed here (injected them pre-built).
     coverage_deps = CoverageDeps(
         log=ports.log, cargo_env=ports.cargo_env, cluster=scope.get_active,
         tarpaulin_bin=cfg.tarpaulin_bin, grcov_bin=cfg.grcov_bin,

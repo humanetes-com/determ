@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Literal, NamedTuple
 
 # Why a body splice applied or was refused. Every refusal is a DISTINCT cause
-# (debt #39 — the old blanket "splice_rejected" hid whether the model emitted a
+# (the old blanket "splice_rejected" hid whether the model emitted a
 # stub body vs the pipeline re-targeting an already-filled fn):
 #   file_missing    — target file does not exist
 #   read_failed     — target file unreadable

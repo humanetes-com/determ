@@ -18,7 +18,7 @@ FAILED_ATTEMPT_SENTINEL = "// SKELETON_STUB_FAILED_ATTEMPT"
 # `(?s)` DOTALL so a body can span lines. The sig attribute value is in double
 # quotes (most common) or single quotes (sometimes used). This parses MODEL
 # OUTPUT (the `<FN sig="…">…</FN>` fill protocol), not Rust source — the no-regex
-# hard rule is scoped to source parsing (R7.3).
+# hard rule is scoped to source parsing.
 _FN_BLOCK_PATTERN = re.compile(
     r'<FN\s+sig\s*=\s*(?P<q>["\'])(?P<sig>.+?)(?P=q)\s*>(?P<body>.*?)</FN>',
     re.DOTALL,
@@ -62,7 +62,7 @@ def extract_fn_blocks(response: str) -> dict[str, str]:
         body = m.group("body").strip()
         if not sig or not body:
             continue
-        # P3.10 enforcement: drop stub bodies so they don't appear successful.
+        # Drop stub bodies so they don't appear successful.
         if is_unimplemented_body(body) or body.strip() in ("todo!()", "todo!();"):
             stubs_dropped += 1
             continue

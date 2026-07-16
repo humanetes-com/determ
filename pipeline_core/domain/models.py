@@ -512,7 +512,7 @@ class FnFixContext:
     types_section: str = ""
     notes_section: str = ""
     bound_methods_section: str = ""
-    # P3: the crate blueprint slice relevant to this fn ("" without one).
+    # The crate blueprint slice relevant to this fn ("" without one).
     blueprint_section: str = ""
 
 
@@ -545,12 +545,12 @@ class Stub:
     fn_name: str = ""
     container: str = ""
     sig_text: str = ""
-    # debt #17 residual: the fn's accumulated `#[cfg(...)]` chain — lets the
+    # The fn's accumulated `#[cfg(...)]` chain — lets the
     # splice's `locate_fn_by_record` cfg tier pick the RIGHT one of two
     # cfg-variant fns that share file+name+container+sig (the cap_limit pair),
     # so each variant fills into its own body instead of colliding on the first.
     cfg_predicates: tuple[str, ...] = ()
-    # debt #46: a BEHAVIORAL RE-FILL target — not an `unimplemented!()` stub but
+    # A BEHAVIORAL RE-FILL target — not an `unimplemented!()` stub but
     # an already-filled body that COMPILES yet whose attributed test fails (the
     # B3-kept-wrong case). The fill unit then splices with `allow_nonstub=True`
     # and seeds the prompt with the current body + failing test (fix framing),

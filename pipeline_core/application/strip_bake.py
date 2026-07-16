@@ -165,7 +165,7 @@ def bake_skeleton_artifacts(
               f"file(s) skeletonised → {skeleton_dir}")
         # F11 M1: classify the skeleton's private layout (public-frozen vs
         # private-replaceable) so the t1.5 phase knows what it may re-author.
-        # Visibility is an observable structural fact (Hard Rule 11 safe).
+        # Visibility is an observable structural fact, safe to use post-strip.
         # Additive: a classification failure never blocks the strip.
         try:
             _skel_src = skeleton_dir / "src"
@@ -186,7 +186,7 @@ def bake_skeleton_artifacts(
             d.log(f"  [bake-skeleton] cluster {cluster.name}: private-surface "
                   f"classification failed (non-fatal): {e}")
         # F10 t0d: harvest this cfg-cluster's behaviour oracle from live source
-        # (pre-strip, Hard Rule 11 — behaviours are OBSERVABLE outcomes, the same
+        # (pre-strip — behaviours are OBSERVABLE outcomes, the same
         # legality class as a test assertion, never bodies). Additive: a harvest
         # failure never blocks the strip.
         try:
@@ -306,7 +306,7 @@ def strip_and_bake_module(
     if crate_type != "proc-macro" and d.tarpaulin_bin.exists():
         _sentinel_path = d.module_augmented_path(project_dir, module_name)
         try:
-            _strip_cov = float(_sentinel_path.read_text().strip())  # R8.4: numeric sentinel
+            _strip_cov = float(_sentinel_path.read_text().strip())  # numeric sentinel
         except (ValueError, OSError):
             _strip_cov = 0.0
         if _strip_cov < d.coverage_target:
@@ -318,7 +318,7 @@ def strip_and_bake_module(
     # TASK 1. The .original_structure/ dir survives strip (lives at the
     # project root, not under src/), so TASK 1 can read it post-strip.
     d.capture_api_surface(project_dir, module_dir, module_name)
-    # Hard Rule 11: bake the skeleton + leaf-first ordering +
+    # Bake the skeleton + leaf-first ordering +
     # cluster manifest from live source BEFORE strip. After
     # strip these artefacts are the only source-derived inputs
     # any downstream phase is allowed to read.

@@ -159,7 +159,7 @@ def test_rust_delimiters_balanced():
     assert rust_delimiters_balanced("fn f() {") is False               # unclosed brace
 
 
-# --- P7: source-LINE classification + scan_downstream_api source scans ---
+# --- source-LINE classification + scan_downstream_api source scans ---
 
 
 def _old_boundary(s: str) -> bool:
@@ -256,7 +256,7 @@ def test_rust_code_fences_matches_regex():
         assert rust_code_fences(t) == [m.group(1) for m in pat.finditer(t)], t
 
 
-# --- P7: more source line/token classifiers ---
+# --- more source line/token classifiers ---
 
 from pipeline_core.domain.rust_scan import (  # noqa: E402
     contains_decl_keyword,
@@ -307,7 +307,7 @@ def test_has_no_std_attr_matches_regex():
         assert has_no_std_attr(s) == bool(pat.search(s)), s
 
 
-# --- P7: whole-word presence / count / macro-call helpers ---
+# --- whole-word presence / count / macro-call helpers ---
 
 from pipeline_core.domain.rust_scan import (  # noqa: E402
     contains_word,
@@ -345,7 +345,7 @@ def test_count_macro_calls_matches_regex():
             assert count_macro_calls(t, w) == len(re.findall(r"\b" + re.escape(w) + r"\s*!", t)), (t, w)
 
 
-# --- P7: Rust comment stripping ---
+# --- Rust comment stripping ---
 
 from pipeline_core.domain.rust_scan import (  # noqa: E402
     strip_comment_spans,
@@ -372,7 +372,7 @@ def test_strip_line_block_comments_matches_regex():
         assert strip_line_block_comments(t) == expected, t
 
 
-# --- P7: attribute-opener scan ---
+# --- attribute-opener scan ---
 
 from pipeline_core.domain.rust_scan import attr_opener_end  # noqa: E402
 
@@ -387,7 +387,7 @@ def test_attr_opener_end_matches_regex():
             assert attr_opener_end(t, i) == expected, (t, i)
 
 
-# --- P7: test-attribute line detection ---
+# --- test-attribute line detection ---
 
 from pipeline_core.domain.rust_scan import is_attr_line, is_test_attr_line  # noqa: E402
 

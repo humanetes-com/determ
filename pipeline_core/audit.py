@@ -98,7 +98,7 @@ def load_run(events_path: Path, prompts_dir: Path | None,
         log_lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
     if not since and log_lines:
         since = parse_run_start(log_lines)
-    # debt #21b: when the run's log carries a run_id, scope events by IDENTITY.
+    # When the run's log carries a run_id, scope events by IDENTITY.
     # An event that carries a DIFFERENT run_id is another process (a concurrent
     # xdist worker on the shared events.jsonl) and is dropped regardless of ts;
     # an event with NO run_id (older format) falls back to the ts window.

@@ -84,7 +84,7 @@ def test_each_trap_carries_its_distinguishing_case() -> None:
     assert 'encode_id(42), "002a"' in integ                   # pinned only here
 
     # dual-form cap_limit is what makes extra_cap a detected 2nd cluster (fix for
-    # the single-cluster miscalibration that surfaced debt #15).
+    # the single-cluster miscalibration).
     lib_src = src("src/lib.rs")
     assert "#[cfg(not(any(extra_cap" in lib_src and "fn cap_limit()" in lib_src
 

@@ -115,7 +115,7 @@ def test_multiple_impls_and_comment_with_impl_word():
     assert heads == ["impl A ", "impl B "]
 
 
-# --- impl_where_clause (P7: regex locator → structural; byte-equal to the old
+# --- impl_where_clause (regex locator → structural; byte-equal to the old
 #     regex on normal input, improving on nested generics + comment mentions) ---
 def _orig_where(file_text: str, container: str) -> str:
     """The regex implementation impl_where_clause replaced — the oracle."""

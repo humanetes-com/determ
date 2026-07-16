@@ -63,7 +63,7 @@ def test_inline_cfg_test_maps_to_production_fn(tmp_path: Path) -> None:
     rmap = build_test_reverse_map(_deps(recs), [], src)
 
     assert ("lib.rs", "cap_limit") in rmap["extra_cap_limit"]
-    # The test fn is never a candidate (immutable oracle, FR-018).
+    # The test fn is never a candidate (immutable oracle).
     assert ("lib.rs", "extra_cap_limit") not in rmap["extra_cap_limit"]
 
 

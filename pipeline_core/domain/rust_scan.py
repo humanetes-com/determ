@@ -367,7 +367,7 @@ def rust_delimiters_balanced(text: str) -> bool:
     return not stack and not in_str and not in_chr and not in_blk_cmt
 
 
-# --- P7: source-LINE classification (replaces _extract_branch_guard / ---
+# --- source-LINE classification (replaces _extract_branch_guard / ---
 # --- _is_structural_line / _has_nonempty_test_body source-regex scans) ---
 
 _GUARD_ITEM_KEYWORDS = ("impl", "struct", "enum", "trait")
@@ -489,7 +489,7 @@ def has_nonempty_test_fn(block: str) -> bool:
     return False
 
 
-# --- P7: scan_downstream_api source scans (use-paths + ```rust fences) ---
+# --- scan_downstream_api source scans (use-paths + ```rust fences) ---
 
 def module_use_imports(
     text: str, module: str,
@@ -575,7 +575,7 @@ def rust_code_fences(text: str) -> list[str]:
     return out
 
 
-# --- P7: more source line/token classifiers ---
+# --- more source line/token classifiers ---
 
 _TYPE_DECL_LINE_KEYWORDS = ("struct", "enum", "trait", "impl", "type", "macro_rules")
 _DECL_KEYWORDS = frozenset({
@@ -668,7 +668,7 @@ def has_no_std_attr(text: str) -> bool:
     return False
 
 
-# --- P7: Rust comment stripping (two distinct algorithms — byte-equivalent) ---
+# --- Rust comment stripping (two distinct algorithms — byte-equivalent) ---
 
 def strip_comment_spans(text: str) -> str:
     """Remove ``//`` line comments, ``/* */`` block comments AND ``#`` line comments
@@ -740,7 +740,7 @@ def strip_line_block_comments(text: str) -> str:
     return _strip_block_comments(_strip_line_comments(text))
 
 
-# --- P7: Rust attribute-opener scan (replaces _ATTR_OPENER_RE) ---
+# --- Rust attribute-opener scan (replaces _ATTR_OPENER_RE) ---
 
 def attr_opener_end(text: str, i: int) -> tuple[bool, int] | None:
     """Match an attribute opener ``#\\s*(!?)\\s*\\[`` anchored at `i` — byte-equivalent
@@ -764,7 +764,7 @@ def attr_opener_end(text: str, i: int) -> tuple[bool, int] | None:
     return None
 
 
-# --- P7: test-attribute line detection (replaces _count_test_fns_cfg_aware regexes) ---
+# --- test-attribute line detection (replaces _count_test_fns_cfg_aware regexes) ---
 
 _TEST_ATTR_TOKENS = (
     "test", "tokio::test", "async_std::test", "serial_test::serial",

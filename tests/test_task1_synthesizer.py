@@ -1,10 +1,10 @@
-"""Fake-adapter tests for the TASK-1 synthesizer engine (debt #14 — ports migration).
+"""Fake-adapter tests for the TASK-1 synthesizer engine (ports migration).
 
 Drive StaticTask1Synthesizer / LLMTask1Synthesizer over a fake satisfying the 5
 `ports.synthesizer` roles + a `Task1Config` VO — no pipeline import, no LLM, no
 cargo. Covers the single-call path, the chunked+hierarchical path, the multi-group
 Stage-1 merge, the cache-hit / partial-file reuse skips, and the failure/raw-fallback
-branches (the configure()-seam suite this replaces). Every `# debt #14` per-method
+branches (the configure()-seam suite this replaces). Every per-method
 local-binding preamble is exercised end-to-end (a missed binding = NameError here)."""
 from __future__ import annotations
 
@@ -152,7 +152,7 @@ def test_chunk_extraction_failure_returns_false(tmp_path: Path) -> None:
 
 
 def test_chunk_input_too_long_degrades_not_aborts(tmp_path: Path) -> None:
-    # debt #32: a chunk that overflows ctx even after the controller replan is
+    # a chunk that overflows ctx even after the controller replan is
     # SKIPPED (missing from FR, logged) — task1 still succeeds on the rest.
     from pipeline_core.llm import InputTooLong
 
@@ -230,7 +230,7 @@ def test_no_file_markers_raw_fallback(tmp_path: Path) -> None:
 @pytest.mark.parametrize("cls", [StaticTask1Synthesizer, LLMTask1Synthesizer])
 def test_genesis_seeded_with_methodology_not_placeholder(
         tmp_path: Path, cls: type[Task1Synthesizer]) -> None:
-    # debt #38: the happy path must leave a real methodology document, never
+    # the happy path must leave a real methodology document, never
     # the "(populated by TASK 4)" placeholder.
     from pipeline_core.prompts.genesis_seed import GENESIS_SEED
     genesis, fr = _paths(tmp_path)

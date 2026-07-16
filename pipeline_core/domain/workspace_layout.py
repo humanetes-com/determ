@@ -12,7 +12,7 @@ from __future__ import annotations
 LOCKED_MODULES_DIR = ".locked_modules"
 
 # TASK 0c augmentation sentinels: one file per (cluster, module) and one per
-# module, each holding the bare numeric coverage reached (R8.4 — no '%' text).
+# module, each holding the bare numeric coverage reached (no '%' text).
 CLUSTER_AUGMENTED_DIR = ".cluster_augmented"
 MODULE_AUGMENTED_DIR = ".module_augmented"
 
@@ -91,7 +91,7 @@ SKIP_DIR_NAMES: frozenset[str] = frozenset({
     ".best_tree",                      # best-tree ratchet snapshot
     ".original_structure",             # pre-strip API snapshot
     ".chunk_cache", ".task1_partials", # task1 caches
-    ".phase_c_logs",                   # Phase C test-fix iteration archives (P4)
+    ".phase_c_logs",                   # Phase C test-fix iteration archives
 })
 
 

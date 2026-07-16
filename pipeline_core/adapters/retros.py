@@ -62,7 +62,7 @@ def save_retrospectives(project_dir: Path, data: dict[str, Any]) -> None:
             json.dumps(data, indent=2), encoding="utf-8")
 
 
-# canon_container relocated to domain/rust_idents.py (debt #43 — the per-impl
+# canon_container relocated to domain/rust_idents.py (the per-impl
 # body routing needs the same identity); re-exported here so the retro-key
 # call sites and the pipeline.py smoke-pin alias stay unchanged.
 

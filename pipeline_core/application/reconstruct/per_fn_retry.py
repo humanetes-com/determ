@@ -159,7 +159,7 @@ def run_task3_inline_retry(
             e.update(cluster.env_extra)
         return e
 
-    # R9.1: two modes. TEST mode (some test FAILED) attributes via the test
+    # Two modes. TEST mode (some test FAILED) attributes via the test
     # reverse-map/classifier. BUILD mode (zero FAILED lines because the tree did
     # not COMPILE) attributes via structured cargo diagnostics and fixes the fns
     # the compile errors point at — TASK 4 (a test-failure analyzer) cannot, since
@@ -187,10 +187,10 @@ def run_task3_inline_retry(
     src_root = project_dir / "src"
     snapshot = SourceSnapshot.capture(src_root)
 
-    # P5.1 parity: fix prompts here previously carried no TYPES_IN_SCOPE and
+    # Fix prompts here previously carried no TYPES_IN_SCOPE and
     # no container — the model had to guess struct fields. Enumerate from the
     # current (reconstructed) src; cluster-filter so only methods that compile
-    # under THIS cluster are advertised (Hard Rule 8).
+    # under THIS cluster are advertised.
     _retry_type_recs = deps.enumerator.cluster_filter_type_methods(
         deps.enumerator.enumerate_types(src_root) or [], cluster)
     _retry_containers = deps.enumerator.fn_container_index(src_root)
@@ -224,7 +224,7 @@ def run_task3_inline_retry(
         return rc == 0, strip_ansi(rendered), len(diags)
 
     def _do_fix_test(output: str, history: list[dict[str, Any]]) -> dict[str, Any]:
-        # FR-024: full attribution chain. The classifier is one step in a
+        # Full attribution chain. The classifier is one step in a
         # longer chain — when it returns no actionable refs, fall back to
         # the test-reverse-map. Previously this gave up at classifier
         # exhaustion; now it has more candidates to try.
@@ -307,7 +307,7 @@ def run_task3_inline_retry(
     if passed:
         deps.log(f"  [task3-retry] tests now PASS after {len(history)} iter(s).")
         return True, last_out
-    # Decide whether to keep partial progress or revert. R9.2: a non-compiling tree
+    # Decide whether to keep partial progress or revert. A non-compiling tree
     # emits NO `FAILED` lines, so `len(final_failed)` reads as 0 ("near success") even
     # when a re-splice broke the build. Compile/ran-state is the real signal — if the
     # tree ran tests before the retry but no longer does, the retry made it STRICTLY
@@ -384,7 +384,7 @@ def fix_one_ref(
         ),
         fr_path=ctx.fr_path,
     )
-    # P2 pulls: bounded typed requests through the ladder (same rung re-asks
+    # Context pulls: bounded typed requests through the ladder (same rung re-asks
     # with the answered context; budget per fix attempt).
     _menu = ""
     _answerer = None

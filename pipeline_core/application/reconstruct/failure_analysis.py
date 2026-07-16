@@ -125,7 +125,7 @@ class FailureAnalysisStep:
                       f"{it + 1} (no wipe — docs updated, fix loop continues).")
         self._audit.run(f"iter {it}")
 
-        # R13.3: per-iteration doc-richness vs convergence → trendable across runs.
+        # Per-iteration doc-richness vs convergence → trendable across runs.
         self._tel.emit("docs.richness", module=ctx.module_name, iteration=it, data={
             "fr_chars": ctx.module_req_path.stat().st_size if ctx.module_req_path.exists() else 0,
             "notes": len(self._docs.model_notes(ctx.module_req_path)),

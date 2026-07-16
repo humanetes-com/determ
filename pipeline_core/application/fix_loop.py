@@ -263,7 +263,7 @@ class GenerateFixLoopDeps:
     is_compiler_output_line: Any
     run_generate_fix: Callable[..., tuple[bool, str]]
     write: Any
-    # P2 pull protocol (optional — None keeps the plain-ask behavior):
+    # Pull protocol (optional — None keeps the plain-ask behavior):
     enumerate_types: Any = None          # src_dir -> list[TypeRecord] | None
     types_section_for_fix: Any = None    # FixContextAssembler.types_section_for_fix
     # Optional live-status writer (project_dir, label) — keeps the monitor's
@@ -531,7 +531,7 @@ def generate_fix_loop(
         model=model, fr_path=fr_path,
         existing_test_files=frozenset(existing_test_files),
         allowed_dir_prefix=allowed_dir_prefix)
-    # P2 pull sources for the fix units — all post-strip-legal (HR 11):
+    # Pull sources for the fix units — all post-strip-legal:
     # the reconstruction tree, the crate's tests, the enumerated type
     # records, and (rebound per attempt) the full check output.
     def _pull_type_def(name: str) -> str:

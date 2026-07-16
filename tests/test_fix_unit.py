@@ -276,7 +276,7 @@ def test_fn_unit_no_restore_for_free_fn(tmp_path: Path) -> None:
     assert splicer.restored == []
 
 
-# --- P2: pull round-trip through the fix unit --------------------------------
+# --- pull round-trip through the fix unit --------------------------------
 
 
 def test_fn_unit_pull_answered_then_body_spliced(tmp_path: Path) -> None:

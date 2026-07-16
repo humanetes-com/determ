@@ -145,7 +145,7 @@ def strip_model_notes_section(fr_text: str) -> str:
 # ---------------------------------------------------------------------------
 
 # Curated Rust load-bearing keywords that, co-mentioned in two notes, almost
-# certainly mean the notes are about the same confusion (semantic dedup, P3.3).
+# certainly mean the notes are about the same confusion (semantic dedup).
 NOTE_SIGNATURE_KEYWORDS = frozenset({
     "typeid", "'static", "static", "&dyn", "dyn", "box", "nonnull",
     "ptr", "as_ptr", "as_ref", "from_raw", "deref",

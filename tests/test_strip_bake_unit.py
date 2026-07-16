@@ -80,7 +80,7 @@ def test_low_coverage_warns_then_proceeds(
     # tarpaulin "exists" + sentinel below target → low-coverage WARNING branch.
     tarp = tmp_path / "tarpaulin"
     tarp.write_text("", encoding="utf-8")
-    (tmp_path / ".aug_m").write_text("50.0", encoding="utf-8")  # R8.4: bare-float sentinel (no %)
+    (tmp_path / ".aug_m").write_text("50.0", encoding="utf-8")  # bare-float sentinel (no %)
     deps = StripBakeDeps(**{**deps.__dict__, "tarpaulin_bin": tarp,
                             "log": lambda m: logs.append(m)})
     strip_and_bake_module(tmp_path, "m", tmp_path / "m", crate_type="lib",

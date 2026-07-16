@@ -109,7 +109,7 @@ def test_run_start_parsing_scopes_events(tmp_path: Path) -> None:
 
 
 def test_run_id_scopes_events_by_identity(tmp_path: Path) -> None:
-    # debt #21b: a concurrent process (distinct run_id) writing to the SHARED
+    # a concurrent process (distinct run_id) writing to the SHARED
     # events.jsonl inside this run's ts window must be dropped by IDENTITY.
     log = "  PIPELINE STARTED — 2026-06-11 06:09:25 UTC  pipeline.py=cccc git=dddd  run_id=999-abc\n"
     assert flow_audit.parse_run_id(log.splitlines()) == "999-abc"

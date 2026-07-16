@@ -100,7 +100,7 @@ class Process:
     returncode: int
     stdout: str
     stderr: str
-    # rc=-1 made explicit (debt #79): which failure CLASS produced no exit
+    # rc=-1 made explicit: which failure CLASS produced no exit
     # code. None for any normally-exited process (including rc!=0 failures).
     failure: ProcessFailure | None = None
 

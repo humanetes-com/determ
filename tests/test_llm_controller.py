@@ -235,7 +235,7 @@ def test_controller_input_too_long_retries():
 
 
 def test_controller_input_retry_pads_lower_bound():
-    # debt #32: the server's real_tokens is a LOWER bound ("at least N") —
+    # the server's real_tokens is a LOWER bound ("at least N") —
     # the replanned request must pad it (N*1.02 + 256) on top of the margin,
     # or the retry lands ~1 token over ctx forever (anyhow 2026-07-02).
     t = FakeTransport([InputTooLong(40172), [Delta(content="ok")]])

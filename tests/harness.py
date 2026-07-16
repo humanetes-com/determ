@@ -67,7 +67,7 @@ def install_scripted_model(
         return body_src(fn), None
 
     script = _Script(_fake_per_fn)
-    # Port-boundary injection (P3-S2): swap the App's per-fn model seam.
+    # Port-boundary injection: swap the App's per-fn model seam.
     # `_ask_raw` stays a module seam — it is the TRANSPORT under the real
     # AskClient (tests scripting raw exercise the guard logic on purpose).
     import dataclasses as _dc

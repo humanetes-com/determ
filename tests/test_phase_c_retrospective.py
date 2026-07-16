@@ -90,7 +90,7 @@ def _retro_prompt(bound_methods_section: str = "") -> str:
 
 
 def test_prompt_forbids_signature_edits_body_only():
-    # R1 (debt #28): the retro must constrain guidance to BODY-ONLY edits so it
+    # the retro must constrain guidance to BODY-ONLY edits so it
     # never proposes a frozen-signature/bound/where change → no re-submit thrash.
     p = _retro_prompt()
     assert "ONLY change the function BODY" in p

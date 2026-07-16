@@ -68,7 +68,7 @@ def _lib(ws: Path) -> str:
     return (ws / "src" / "lib.rs").read_text()
 
 
-# ── R9.1 — BUILD mode ────────────────────────────────────────────────────────
+# ── BUILD mode ────────────────────────────────────────────────────────
 
 def test_build_mode_no_reproducible_diags_bails(monkeypatch, tmp_path):
     """0 FAILED tests AND the compile is clean under this env ⇒ nothing to act
@@ -122,7 +122,7 @@ def test_build_mode_progress_keeps_and_reruns_task3(monkeypatch, tmp_path):
     assert MARKER in _lib(ws)                # progress kept
 
 
-# ── R9.2 — TEST mode keep/revert ─────────────────────────────────────────────
+# ── TEST mode keep/revert ─────────────────────────────────────────────
 
 def test_test_mode_raised_failures_reverts(monkeypatch, tmp_path):
     """Retry raises the failing-test count above the initial floor ⇒ revert."""

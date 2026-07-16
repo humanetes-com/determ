@@ -150,6 +150,6 @@ def test_fill_order_default_cluster_first() -> None:
                             excluded_cfg=[], active_cfg=[],
                             prompt_nightly_rule="", is_default=default)
 
-    # "zdefault" sorts LAST by name but owns the base position (debt #36).
+    # "zdefault" sorts LAST by name but owns the base position.
     out = fill_order([_c("nightly", False), _c("zdefault", True), _c("alpha", False)])
     assert [c.name for c in out] == ["zdefault", "alpha", "nightly"]

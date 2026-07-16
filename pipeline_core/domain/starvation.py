@@ -169,7 +169,7 @@ def classify_starvation(
                     "no error captured — reply produced but nothing spliced")
         return StarvationCause.UNKNOWN, "no error and no response captured"
 
-    # 1) Frozen-bound mismatch (debt #28): the impl header freezes a param to
+    # 1) Frozen-bound mismatch: the impl header freezes a param to
     # one trait while the compiler demands another — no body can fix it.
     if container:
         fbm = detect_frozen_bound_mismatch("", container, err)
@@ -190,7 +190,7 @@ def classify_starvation(
             return StarvationCause.DESIGN_CONFLICT, line.strip()
         # 2b) E0609 `no field` — the model guessed a PRIVATE field name. If the
         # owning type's definition never reached the prompt that is starvation;
-        # if it did, the model contradicted the frozen layout (P4 evidence).
+        # if it did, the model contradicted the frozen layout.
         if "no field" in line and "`" in line:
             spans = _backticked(line)
             if len(spans) >= 2:

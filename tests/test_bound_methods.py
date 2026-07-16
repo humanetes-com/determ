@@ -34,7 +34,7 @@ def test_format_lists_methods_under_prefer_directive():
     assert "ext_context" in sec
     assert "StdError" in sec
     assert "where E: ext::StdError + Send" in sec
-    # The prefer-over-constructor directive, with GENERIC placeholders (FR-036).
+    # The prefer-over-constructor directive, with GENERIC placeholders.
     assert "PREFER" in sec
     assert "WRONG:" in sec and "RIGHT:" in sec
     # No crate source names baked into the directive examples.

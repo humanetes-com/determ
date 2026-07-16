@@ -1,4 +1,4 @@
-"""Test-oracle immutability for the fill/fix frontier (debt #17b, FR-018).
+"""Test-oracle immutability for the fill/fix frontier.
 
 A reconstruction target is a broken PRODUCTION fn. A `#[cfg(test)]`/`#[test]` fn is
 the oracle — splicing its body rewrites the spec (the hardcrate `extra_cap_limit`

@@ -60,7 +60,7 @@ def reattach_gen_tests(
     # was a no-op once strip started preserving sibling files,
     # leaving them orphaned by the regenerated source.
     _reattached: list[tuple[Path, Path, int]] = []
-    # FR-038: source gen_tests PER-CLUSTER so a test's content and
+    # Source gen_tests PER-CLUSTER so a test's content and
     # its cfg gate never separate. A gen_test generated under one
     # cluster (e.g. nightly's `request_ref`) must be gated to THAT
     # cluster and excluded from others. Emit ONE ungated sibling only
