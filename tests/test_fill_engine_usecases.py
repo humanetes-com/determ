@@ -52,6 +52,9 @@ class FakeFill:
     def splice_fn_body(self, *a: Any, **k: Any) -> SpliceOutcome:
         self.s["last_allow_nonstub"] = k.get("allow_nonstub", False)
         return self.s.get("splice", SpliceOutcome(True, "ok", 4))
+    def splice_body_scoped(self, *a: Any, **k: Any) -> SpliceOutcome:
+        self.s["last_allow_nonstub"] = k.get("allow_nonstub", False)
+        return self.s.get("splice", SpliceOutcome(True, "ok", 4))
     def replace_fn_signature(self, *a: Any) -> bool: return False
     def extract_signature_block(self, *a: Any) -> str | None: return None
     def lock_for(self, tree: Path) -> threading.Lock: return self.lock

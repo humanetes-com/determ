@@ -90,17 +90,14 @@ EVENTS_LOG   = os.getenv("PIPELINE_EVENTS_LOG", _pick_log(
 # (Tests point the readers via pipeline_core.monitor.events_data.configure / globals.)
 from pipeline_core.monitor import events_data as _ed  # noqa: E402
 from pipeline_core.monitor import run_data as _rd  # noqa: E402
-from pipeline_core.monitor.health_view import health_lines as _health_lines  # noqa: E402
 from pipeline_core.monitor.field_glossary import (  # noqa: E402
     field_glossary_window as _field_glossary_window,
 )
 from pipeline_core.monitor.field_glossary import (
     hint_lines as _hint_lines,
 )
+from pipeline_core.monitor.health_view import health_lines as _health_lines  # noqa: E402
 from pipeline_core.monitor.legend import legend_window as _legend_window  # noqa: E402
-from pipeline_core.monitor.vllm_status import (  # noqa: E402
-    vllm_status_rows as _vllm_status,
-)
 from pipeline_core.monitor.render import (  # noqa: E402
     ansi_seq_len as _ansi_seq_len,
 )
@@ -125,6 +122,9 @@ from pipeline_core.monitor.render import (
 )
 from pipeline_core.monitor.render import (
     state_done_key as _state_done_key,
+)
+from pipeline_core.monitor.vllm_status import (  # noqa: E402
+    vllm_status_rows as _vllm_status,
 )
 
 _ed.configure(events_log=EVENTS_LOG)
