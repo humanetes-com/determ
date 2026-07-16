@@ -89,6 +89,28 @@ class MutatorAdapter:
         return self.splice_fn_body_fn(file_path, name, new_body,
                                       allow_nonstub=allow_nonstub)
 
+    def splice_body_scoped(self, file_path: Path, name: str, container: str,
+                           sig_text: str, new_body: str,
+                           cfg_predicates: tuple[str, ...] | None = None,
+                           allow_nonstub: bool = False) -> SpliceOutcome:
+        """Container-scoped body splice — the collision-safe entry point.
+
+        When ``container`` is known, locate the fn by (name, container, sig,
+        cfg) via the syn record and splice at its exact byte offsets, so a
+        same-named fn in a different impl is never touched. Only when no
+        container is available does it fall back to the bare-name splice, which
+        itself refuses (``ambiguous_name``) if the name is not unique. Either
+        way a body meant for one impl can never land in another."""
+        if container:
+            loc = self.locate_fn_by_record(file_path, name, container, sig_text,
+                                           cfg_predicates)
+            if loc is not None:
+                _sig_start, body_start, body_end, _sig = loc
+                return self.splice_fn_body_at(file_path, body_start, body_end,
+                                              new_body, allow_nonstub=allow_nonstub)
+        return self.splice_fn_body(file_path, name, new_body,
+                                   allow_nonstub=allow_nonstub)
+
     def replace_fn_signature(self, file_path: Path, name: str, new_sig: str) -> bool:
         return self.replace_fn_signature_fn(file_path, name, new_sig)
 

@@ -91,7 +91,16 @@ EVENTS_LOG   = os.getenv("PIPELINE_EVENTS_LOG", _pick_log(
 from pipeline_core.monitor import events_data as _ed  # noqa: E402
 from pipeline_core.monitor import run_data as _rd  # noqa: E402
 from pipeline_core.monitor.health_view import health_lines as _health_lines  # noqa: E402
+from pipeline_core.monitor.field_glossary import (  # noqa: E402
+    field_glossary_window as _field_glossary_window,
+)
+from pipeline_core.monitor.field_glossary import (
+    hint_lines as _hint_lines,
+)
 from pipeline_core.monitor.legend import legend_window as _legend_window  # noqa: E402
+from pipeline_core.monitor.vllm_status import (  # noqa: E402
+    vllm_status_rows as _vllm_status,
+)
 from pipeline_core.monitor.render import (  # noqa: E402
     ansi_seq_len as _ansi_seq_len,
 )
@@ -589,7 +598,7 @@ def pipeline_status():
     rows = []
 
     # vLLM backend status (loading indicator / docker logs when not ready)
-    rows.extend(_vllm_status())
+    rows.extend(_vllm_status(_w() - 4))
 
     # Full pipeline phase sequence (t0a … t4) with the current stage highlighted.
     rows.extend(_phase_bar())
@@ -849,78 +858,6 @@ def pipeline_status():
 _prev_len        = 0
 _THINK_CAP_CHARS = 40_000
 
-_vllm_cache: tuple[float, list[str]] = (0.0, [])
-
-def _vllm_status() -> list[str]:
-    """Return status rows for the vLLM backend; empty if backend != vllm.
-
-    Cached: health check runs at most once per 3 s; docker log fetch at most once per 8 s.
-    Never blocks the render loop for more than ~0.3 s.
-    """
-    global _vllm_cache
-    if _read_backend() != "vllm":
-        return []
-    import socket
-    import urllib.request
-    now = time.time()
-    cache_age = now - _vllm_cache[0]
-
-    # Fast TCP pre-check — fails instantly if nothing listens on :8000.
-    def _tcp_open() -> bool:
-        try:
-            s = socket.create_connection(("127.0.0.1", 8000), timeout=0.3)
-            s.close()
-            return True
-        except OSError:
-            return False
-
-    # Return cached result if fresh enough (3 s when healthy, 3 s when loading).
-    if cache_age < 3.0:
-        return _vllm_cache[1]
-
-    healthy = False
-    if _tcp_open():
-        try:
-            urllib.request.urlopen("http://localhost:8000/health", timeout=0.5)
-            healthy = True
-        except Exception:
-            pass
-
-    if healthy:
-        result = [green("vLLM  ✓  healthy")]
-        _vllm_cache = (now, result)
-        return result
-
-    rows: list[str] = [yellow("vLLM  ◑  loading (not yet ready)")]
-
-    # Only re-fetch docker logs every 8 s (they're slow).
-    if cache_age >= 8.0 or not _vllm_cache[1]:
-        try:
-            cid = ""
-            cid_file = "/tmp/vllm_container.id"
-            if os.path.exists(cid_file):
-                with open(cid_file) as _f:
-                    cid = _f.read().strip()
-            if not cid:
-                cid = subprocess.check_output(
-                    ["docker", "ps", "--filter", "ancestor=vllm/vllm-openai:latest",
-                     "--format", "{{.ID}}", "--latest"],
-                    stderr=subprocess.DEVNULL, timeout=2, text=True
-                ).strip()
-            if cid:
-                logs = subprocess.check_output(
-                    ["docker", "logs", "--tail", "6", cid],
-                    stderr=subprocess.STDOUT, timeout=2, text=True
-                ).splitlines()
-                w = _w() - 4
-                for line in logs:
-                    rows.append(dim((line[:w-1] + "…") if len(line) > w else line))
-        except Exception:
-            pass
-
-    _vllm_cache = (now, rows)
-    return rows
-
 def _fmt_eta(secs):
     if secs < 60:   return f"{int(secs)}s"
     if secs < 3600: return f"{int(secs/60)}m{int(secs%60):02d}s"
@@ -1006,8 +943,9 @@ def _detach(cmd):
         stderr=subprocess.DEVNULL,
         start_new_session=True,   # setsid() — detach from controlling terminal
     )
-_view        = "monitor"      # monitor|pipeline|stream|events|legend|health
-_scroll      = {"pipeline": 0, "stream": 0, "events": 0, "legend": 0, "health": 0}   # lines scrolled up from bottom (0=bottom)
+_view        = "monitor"      # monitor|pipeline|stream|events|legend|health|fields
+_scroll      = {"pipeline": 0, "stream": 0, "events": 0, "legend": 0, "health": 0, "fields": 0}   # lines scrolled up from bottom (0=bottom)
+_show_hints  = True           # inline field-hint strip under the monitor view (toggle: [t])
 _confirm          = None   # pending confirmation: "continue" | "wipe" | "stop" | "poweroff" | None
 _graceful_pending = os.path.exists("/tmp/pipeline_graceful_stop")  # survives monitor restart
 
@@ -1088,6 +1026,8 @@ def _bottom_bar():
     parts += [
         rev(bold("[l]egend")) if _view == "legend" else dim("[l]egend"),
         rev(bold("[h]ealth")) if _view == "health" else dim("[h]ealth"),
+        rev(bold("[f]ields")) if _view == "fields" else dim("[f]ields"),
+        cyan("[t]ips on") if _show_hints else dim("[t]ips off"),
         green("[c]ontinue"),
         cyan("[g]raceful"),
         yellow("[w]ipe"),
@@ -1270,6 +1210,12 @@ def _render_all():
             _ln(row)
         for row in box_lines("Generation", gen_rows):
             _ln(row)
+        if _show_hints:
+            _plain_text = "\n".join(_plain(r) for r in pipeline_rows + gen_rows)
+            _hints = _hint_lines(_plain_text, _w() - 4)
+            if _hints:
+                for row in box_lines("field hints — [t] hide, [f] full glossary", [dim(hh) for hh in _hints]):
+                    _ln(row)
         while len(_buf) < h - BOTTOM_LINES:
             _ln()
 
@@ -1297,12 +1243,15 @@ def _render_all():
         _event_box(EVENTS_LOG, "events", "Events (logs/events.jsonl)", inner,
                    header=(pipeline_rows[:1] if pipeline_rows else ()))
 
-    elif _view in ("health", "legend"):
+    elif _view in ("health", "legend", "fields"):
         inner = max(1, h - gpu_h - 2 - BOTTOM_LINES)
         if _view == "health":
             title, rows = ("Run health (60s cache) — tools/run_health.py",
                            _health_lines(PIPELINE_LOG,
                                          SCRIPT_DIR + "/tmp/anyhow")[:inner])
+        elif _view == "fields":
+            title, rows = ("Field glossary — what each stat/label on screen means",
+                            _field_glossary_window(_w() - 4, inner, _scroll["fields"]))
         else:
             title, rows = ("Legend — what each phase performs",
                            _legend_window(_w() - 4, inner, _scroll["legend"]))
@@ -1342,7 +1291,7 @@ def _augmentation_tag() -> str | None:
 
 
 def _run_action(key):
-    global _action_msg, _view, _confirm, _graceful_pending
+    global _action_msg, _view, _confirm, _graceful_pending, _show_hints
     if _confirm == "wipe":
         if key == "y":
             _confirm = None
@@ -1454,6 +1403,10 @@ def _run_action(key):
         _view = "monitor" if _view == "legend" else "legend"
     elif key == "h":
         _view = "monitor" if _view == "health" else "health"
+    elif key == "f":
+        _view = "monitor" if _view == "fields" else "fields"
+    elif key == "t":
+        _show_hints = not _show_hints
     elif key in ("1", "2", "3", "4"):
         _view = {"1": "monitor", "2": "pipeline", "3": "stream", "4": "events"}[key]
     elif key == "UP"   and _view in _scroll: _scroll[_view] += SCROLL_STEP
@@ -1470,7 +1423,7 @@ def available_lines():
     elif _view == "stream" or _view == "events":
         p_h = len(pipeline_status()) + 2
         return max(1, h - gpu_h - p_h - 2 - BOTTOM_LINES)
-    elif _view == "legend":
+    elif _view in ("legend", "fields"):
         return max(1, h - gpu_h - 2 - BOTTOM_LINES)
     return 1
 

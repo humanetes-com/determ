@@ -536,18 +536,35 @@ class PhaseCFillEngine:
                                     cur_text = fp.read_text(encoding="utf-8")
                                 except Exception:
                                     continue
-                                sloc = self.mut.locate_fn(cur_text, fn)
-                                if sloc is None:
-                                    continue
-                                sig_t = sloc[0]
-                                cur_body = cur_text[sloc[2]:sloc[3]]
+                                # Container-scoped read: `fn` may be one of
+                                # several same-named methods in this file (`from`
+                                # across the From impls, `not` across the Bool
+                                # impls). A bare-name locate returns the FIRST,
+                                # so the prompt would show — and the splice below
+                                # would target — the wrong definition. Resolve by
+                                # (name, container) via the syn record.
+                                container_for_fn = _retry_containers.get(
+                                    FnLocator(rel_f, fn), "")
+                                rec_loc = None
+                                if container_for_fn:
+                                    rec_loc = self.mut.locate_fn_by_record(
+                                        fp, fn, container_for_fn, "")
+                                if rec_loc is not None:
+                                    _rss, _rbs, _rbe, sig_t = rec_loc
+                                    cur_body = cur_text[_rbs:_rbe]
+                                else:
+                                    sloc = self.mut.locate_fn(cur_text, fn)
+                                    if sloc is None:
+                                        continue
+                                    sig_t = sloc[0]
+                                    cur_body = cur_text[sloc[2]:sloc[3]]
                                 error_excerpt_test = self.cargo.focus_errors(
                                     test_out, rel_f, max_chars=self.config.fix_err_cap)
                                 _ctx = self.prompt.gather(
                                     file_text=cur_text, file_rel=rel_f, fn_name=fn,
                                     sig_text=sig_t, body_text=cur_body,
                                     error_excerpt=error_excerpt_test,
-                                    container=_retry_containers.get(FnLocator(rel_f, fn), ""),
+                                    container=container_for_fn,
                                     type_records=_crate_type_records,
                                     fr_path=fr_path,
                                 )
@@ -581,8 +598,11 @@ class PhaseCFillEngine:
                                 # allow_nonstub: every test-retry candidate is an
                                 # already-FILLED fn — without it the splice is
                                 # always rejected and the whole loop is a no-op.
-                                ok2 = self.mut.splice_fn_body(
-                                    fp, fn, new_body, allow_nonstub=True).ok
+                                # Container-scoped so a same-named sibling in
+                                # another impl is never overwritten.
+                                ok2 = self.mut.splice_body_scoped(
+                                    fp, fn, container_for_fn, sig_t, new_body,
+                                    allow_nonstub=True).ok
                                 if ok2:
                                     any_progress = True
                                     self.tel.log(f"  [phase-c/per-fn] test-fix: re-spliced "

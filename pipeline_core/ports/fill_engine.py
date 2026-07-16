@@ -62,6 +62,11 @@ class Mutator(Protocol):
         self, file_path: Path, name: str, new_body: str,
         allow_nonstub: bool = ...,
     ) -> SpliceOutcome: ...
+    def splice_body_scoped(
+        self, file_path: Path, name: str, container: str, sig_text: str,
+        new_body: str, cfg_predicates: tuple[str, ...] | None = ...,
+        allow_nonstub: bool = ...,
+    ) -> SpliceOutcome: ...
     def replace_fn_signature(
         self, file_path: Path, name: str, new_sig: str,
     ) -> bool: ...

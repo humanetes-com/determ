@@ -20,9 +20,18 @@ from typing import Literal, NamedTuple
 #   parse_broken    — the write would leave the file unparseable (syn reject);
 #                     bytes restored to the pre-image, so the tree never persists
 #                     an unparseable state (the error.rs doc-comment corruption class)
+#   ambiguous_name  — a bare-name splice was asked to target a fn whose name is
+#                     NOT unique in the file (e.g. `from` across the six
+#                     `From<…> for …` impls, `fn not` across the `Bool` impls,
+#                     `fmt` across Debug/Display). A name-only locate would pick
+#                     the FIRST definition and splice a body meant for one impl
+#                     into another → E0308/E0424 corruption. The caller must
+#                     re-route through the container-aware locator; refusing is
+#                     the only safe outcome without a container.
 SpliceReason = Literal[
     "ok", "file_missing", "read_failed", "fn_not_found",
     "bad_offsets", "target_not_stub", "body_is_stub", "parse_broken",
+    "ambiguous_name",
 ]
 
 

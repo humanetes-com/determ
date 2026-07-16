@@ -25,8 +25,8 @@ from pipeline_core.application.reconstruct.splice_txn import (
     parse_guarded_write,
 )
 from pipeline_core.domain.reconstruction import SpliceOutcome
-from pipeline_core.domain.rust_fn_headers import is_pub_fn, locate_fn
-from pipeline_core.domain.rust_idents import declares_fn
+from pipeline_core.domain.rust_fn_headers import is_pub_fn, locate_all_fns
+from pipeline_core.domain.rust_idents import canon_container, declares_fn
 
 # Process-global path-keyed splice+cargo locks. One lock per resolved source
 # tree — regression-gate baselines are captured fresh INSIDE this lock, so it
@@ -95,7 +95,17 @@ def locate_fn_by_record(enumerate_fns: Callable[[Path], list[dict[str, Any]] | N
     if not cands:
         return None
     if container:
-        narrowed = [r for r in cands if r.get("container") == container]
+        # Canonical-identity match, NOT exact-string. The syn extractor renders
+        # type syntax with its own spacing (`impl Bool for & bool`, `impl
+        # Context < T , E > for ...`) which need not match a caller's compact
+        # string. An exact compare silently fails to narrow and the ambiguity
+        # fallback then picks the FIRST same-name stub — landing a body in the
+        # wrong impl (the `not`/`from`/`fmt` collision). `canon_container`
+        # (`<Trait>for<SelfTy>`, whitespace/impl-generics/where-clause dropped)
+        # is the same identity the per-impl router and retro store key on.
+        want_c = canon_container(container)
+        narrowed = [r for r in cands
+                    if canon_container(str(r.get("container", ""))) == want_c]
         if narrowed:
             cands = narrowed
     if sig_text:
@@ -196,10 +206,13 @@ def replace_fn_signature(file_path: Path, fn_name: str, new_sig: str) -> bool:
         return False
     if not declares_fn(new_sig, fn_name):
         return False
-    loc = locate_fn(text, fn_name)
-    if loc is None:
+    locs = locate_all_fns(text, fn_name)
+    if len(locs) != 1:
+        # 0 → absent; >1 → same-name collision this bare-name path cannot
+        # safely disambiguate. Rewriting the first def's signature would
+        # corrupt an unrelated same-named fn — refuse.
         return False
-    _old_sig, sig_start, body_start, _body_end = loc
+    _old_sig, sig_start, body_start, _body_end = locs[0]
     line_start = text.rfind("\n", 0, sig_start) + 1
     cleaned = new_sig.strip().rstrip("{").rstrip()
     new_text = text[:line_start] + cleaned + " {" + text[body_start:]
@@ -223,10 +236,14 @@ def restore_frozen_signature(file_path: Path, fn_name: str,
         text = file_path.read_text(encoding="utf-8")
     except Exception:
         return False
-    loc = locate_fn(text, fn_name)
-    if loc is None:
+    locs = locate_all_fns(text, fn_name)
+    if len(locs) != 1:
+        # 0 → absent; >1 → the frozen sig belongs to ONE of several same-named
+        # fns and a bare-name locate cannot tell which. Restoring the first's
+        # signature could overwrite an unrelated same-named fn — refuse. The
+        # container-aware caller path handles collision-heavy files.
         return False
-    cur_sig, sig_start, body_start, _body_end = loc
+    cur_sig, sig_start, body_start, _body_end = locs[0]
     cleaned = skeleton_sig.strip().rstrip("{").rstrip()
     if " ".join(cur_sig.split()) == " ".join(cleaned.split()):
         return False
@@ -249,9 +266,17 @@ def splice_fn_body(file_path: Path, fn_name: str, new_body: str,
         text = file_path.read_text(encoding="utf-8")
     except Exception:
         return SpliceOutcome(False, "read_failed", 0)
-    loc = locate_fn(text, fn_name)
-    if loc is None:
+    all_locs = locate_all_fns(text, fn_name)
+    if not all_locs:
         return SpliceOutcome(False, "fn_not_found", 0)
+    if len(all_locs) > 1:
+        # The name is not unique in this file. A bare-name splice cannot know
+        # which definition the caller means, and picking the first would land
+        # a body meant for one impl into another (the `from`/`not`/`fmt`
+        # collision class). Refuse — the caller must supply a container and
+        # re-route through the syn-record locator.
+        return SpliceOutcome(False, "ambiguous_name", 0)
+    loc = all_locs[0]
     _sig, _sig_start, body_start, body_end = loc
     cur_body = text[body_start:body_end]
     if not allow_nonstub and not is_unimplemented_body(cur_body):

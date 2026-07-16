@@ -62,6 +62,18 @@ def test_locate_container_narrows() -> None:
     assert out is not None and out[0] == 2
 
 
+def test_locate_container_canonical_match_ignores_syn_spacing() -> None:
+    """The syn extractor renders `& bool` (spaced) while a caller holds the
+    compact `&bool`. Container narrowing is canonical-identity, not exact
+    string — otherwise the ambiguity fallback would pick the FIRST same-name
+    stub and splice a body into the wrong impl (the plateau's `not`/`from`
+    collision)."""
+    recs = [_rec(container="impl Bool for bool", sig_byte_start=1),
+            _rec(container="impl Bool for & bool", sig_byte_start=2)]
+    out = _loc(recs, container="impl Bool for &bool")
+    assert out is not None and out[0] == 2
+
+
 def test_locate_exact_sig_wins() -> None:
     recs = [_rec(sig_text="fn f() -> i32", sig_byte_start=1),
             _rec(sig_text="fn f()", sig_byte_start=2)]

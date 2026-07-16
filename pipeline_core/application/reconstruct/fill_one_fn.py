@@ -732,7 +732,11 @@ class FillOneFn:
                     error_excerpt=error_excerpt or first_error_excerpt or "",
                     fix_attempts=fix_attempt,
                 )
-                self.mut.splice_fn_body(file_path, fn_name, annotated_body)
+                # Container-scoped: annotate THIS fn's body, never a same-named
+                # sibling in another impl (the `from`/`fmt`/`not` collision).
+                self.mut.splice_body_scoped(
+                    file_path, fn_name, container, sig_text, annotated_body,
+                    cfg_predicates=rec.cfg_predicates)
             exhaust_error = (f"{rel_file}::{fn_name}: fix loop exhausted "
                              f"after {fix_attempt} attempt(s)")
             self.tel.emit("phase_c.fn.fill.fail", duration_ms=int(
