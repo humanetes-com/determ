@@ -484,6 +484,61 @@ def test_file_first_reverts_on_compile_failure_then_blocks_take_over(
     assert "self.tag" in text and "unimplemented!()" not in text
 
 
+IMPL_LIB_FREE = """\
+pub fn not(cond: bool) -> bool {
+    unimplemented!()
+}
+
+pub struct Foo { tag: u32 }
+pub struct Bar { tag: u32 }
+
+impl Foo {
+    pub fn kind(&self) -> u32 {
+        unimplemented!()
+    }
+}
+impl Bar {
+    pub fn name(&self) -> u32 {
+        unimplemented!()
+    }
+}
+"""
+
+# Order matters: the impl-addressed `not` body comes FIRST — without the
+# impl-header guard it would win the free stub (name-only reroute) and the
+# correct free body would then be refused as not-a-stub.
+RESPONSE_FREE = (
+    '<FN name="not" block="impl Baz">!self.tag</FN>\n'
+    '<FN name="kind" block="impl Foo">self.tag</FN>\n'
+    '<FN name="name" block="impl Bar">self.tag + 1</FN>\n'
+    '<FN name="not" block="pub fn not(cond: bool) -> bool">!cond</FN>'
+)
+
+
+def test_file_first_routes_free_fn_but_never_an_impl_addressed_body(
+        monkeypatch, tmp_path):
+    """File-first must land a file's FREE fns atomically with its impls: a
+    dropped body whose block attr echoes the free fn's signature is routed to
+    the module-level stub; a dropped body addressed to an IMPL header (`impl
+    Baz`) must NEVER land there — splicing `!self` into the self-less free
+    `fn not(cond)` is the same-name corruption container scoping prevents."""
+    ws = _setup(monkeypatch, tmp_path)
+    (ws / "src" / "lib.rs").write_text(IMPL_LIB_FREE)
+    install_cluster_scan(monkeypatch, impl_blocks=lambda *a, **k: _two_blocks())
+    install_cluster_scan(monkeypatch, stub_records=lambda *a, **k: [
+        {"file": "lib.rs", "fn_name": "not", "container": "",
+         "sig_text": "pub fn not(cond: bool) -> bool",
+         "has_unimplemented_body": True}])
+    _install_model(monkeypatch, [RESPONSE_FREE])
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
+    _run(ws)
+    text = (ws / "src" / "lib.rs").read_text()
+    free_body = text.split("pub struct Foo", 1)[0]
+    assert "!cond" in free_body           # the free-fn body landed in the free fn
+    assert "!self.tag" not in text        # the impl-addressed body landed nowhere
+    assert "self.tag\n" in text and "self.tag + 1" in text
+
+
 def test_file_first_skipped_for_single_block(monkeypatch, tmp_path):
     ws = _setup(monkeypatch, tmp_path)      # default single-block fixture
     _install_model(monkeypatch, [RESPONSE_BOTH])

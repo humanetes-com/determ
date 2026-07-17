@@ -17,9 +17,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from pipeline_core.application.reconstruct.attribution import make_fn_locator
+from pipeline_core.application.reconstruct.attribution import make_fn_site_locator
 from pipeline_core.application.reconstruct.cargo_errors import diagnostics_from_json
-from pipeline_core.domain.models import Diagnostic, FnLocator
+from pipeline_core.domain.models import Diagnostic, FnSite
 from pipeline_core.domain.test_command import derive_scoped_test_cmd
 from pipeline_core.domain.test_report import (
     BlameVerdict,
@@ -220,7 +220,7 @@ def _render_u2_reject(blame: BlameVerdict, err_cap: int) -> str:
 def u2_test_gate(
     run_cargo_fn: RunCargo,
     fn_tests: set[str],
-    unit_fns: frozenset[FnLocator],
+    unit_sites: frozenset[FnSite],
     test_cmd: str | None,
     target_src_dir: Path,
     cluster_env: dict[str, str] | None,
@@ -248,9 +248,11 @@ def u2_test_gate(
         summarized, never chased).
     Fail-safe: any error / timeout → ACCEPT (compile-based acceptance).
 
-    `unit_fns` is what this unit owns (per-fn: that one fn; per-impl: the
-    block's stub members; file-first: the file's fns) — the partition subtracts
-    only stub-panics that resolve OUTSIDE it.
+    `unit_sites` is what this unit owns as container-qualified :class:`FnSite`
+    identities (per-fn: that one fn; per-impl: the block's stub members;
+    file-first: the file's fns) — the partition subtracts only stub-panics that
+    resolve OUTSIDE it, matched on (file, name, canonical container) so a
+    same-named sibling's stub is never counted as this unit's own failure.
 
     The `cargo test` invocation is scoped to `fn_tests` via libtest's own
     `-- name1 name2 ...` OR filter — unlike `test_regression_gate`, which stays
@@ -273,8 +275,8 @@ def u2_test_gate(
         tuple(f for f in report.failures if f.test_name in fn_tests))
     if not scoped.failures:
         return U2Verdict.accept()
-    locate = make_fn_locator(structure, target_src_dir)
-    blame = partition_blame(scoped, frozenset(unit_fns), locate)
+    locate = make_fn_site_locator(structure, target_src_dir)
+    blame = partition_blame(scoped, frozenset(unit_sites), locate)
     if not blame.self_failures:
         return U2Verdict.accept_external_only(blame.external)
     detail = _render_u2_reject(blame, err_cap)

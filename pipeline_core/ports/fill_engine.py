@@ -24,6 +24,7 @@ from pipeline_core.domain.models import (
     ClusterFillResult,
     FnFixContext,
     FnLocator,
+    FnSite,
     ImplBlock,
     TypeRecord,
 )
@@ -86,7 +87,7 @@ class Cargo(Protocol):
         self, test_stems: list[str], cluster: BuildCluster | None,
     ) -> str: ...
     def u2_test_gate(
-        self, fn_tests: set[str], unit_fns: frozenset[FnLocator],
+        self, fn_tests: set[str], unit_sites: frozenset[FnSite],
         test_cmd: str | None,
         target_src_dir: Path, cluster_env: dict[str, str] | None,
     ) -> U2Verdict: ...

@@ -26,7 +26,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
-from pipeline_core.domain.models import ClusterFillResult, FnLocator
+from pipeline_core.domain.models import ClusterFillResult, FnLocator, FnSite
 from pipeline_core.domain.reconstruction import SpliceOutcome
 from pipeline_core.domain.test_report import U2Verdict
 from pipeline_core.ports.structure import StructureReader
@@ -141,11 +141,11 @@ class CargoFillAdapter:
     def build_test_cmd(self, test_stems: list[str], cluster: Any) -> str:
         return self.build_test_cmd_fn(test_stems, cluster)
 
-    def u2_test_gate(self, fn_tests: set[str], unit_fns: frozenset[FnLocator],
+    def u2_test_gate(self, fn_tests: set[str], unit_sites: frozenset[FnSite],
                      test_cmd: str | None,
                      target_src_dir: Path, cluster_env: dict[str, str] | None
                      ) -> U2Verdict:
-        return self.u2_test_gate_fn(fn_tests, unit_fns, test_cmd,
+        return self.u2_test_gate_fn(fn_tests, unit_sites, test_cmd,
                                     target_src_dir, cluster_env)
 
     def test_regression_baseline(self, test_cmd: str | None, cwd: Path,

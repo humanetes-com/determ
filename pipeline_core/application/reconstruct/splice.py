@@ -314,21 +314,26 @@ def splice_fn_with_where(
     where_clause: str | None = None,
     allow_nonstub: bool = False,
     validate_parse: ParseValidator | None = None,
+    sig_text: str = "",
 ) -> SpliceOutcome:
     """Splice ``body`` into ``fn_name`` whose containing impl matches
-    ``container`` (located via the syn enumerator). When ``where_clause`` is
-    given, insert it into the signature just before the body's opening brace
-    (byte space — offsets come from the enumerator). Returns a
-    :class:`SpliceOutcome` ``(ok, reason, delta)``; ``reason`` is the distinct
-    :data:`SpliceReason` cause (debt #39). The where-clause insert + body splice
+    ``container`` (located via the syn enumerator). ``sig_text`` is an OPTIONAL
+    extra disambiguator: a FREE function has no impl container (the extractor
+    renders it ``""``), so container narrowing can't pick it out from same-named
+    impl-method siblings (`fn not(cond)` vs the two `Bool::not`); its verbatim
+    signature can. Pass the stub record's ``sig_text`` to target a free fn.
+    When ``where_clause`` is given, insert it into the signature just before the
+    body's opening brace (byte space — offsets come from the enumerator).
+    Returns a :class:`SpliceOutcome` ``(ok, reason, delta)``; ``reason`` is the
+    distinct :data:`SpliceReason` cause. The where-clause insert + body splice
     are ONE transaction: a non-ok outcome restores the original bytes so a
     where-clause is never left dangling on an unspliced stub."""
     if not file_path.exists():
         return SpliceOutcome(False, "file_missing", 0)
-    loc = locate_fn_by_record(enumerate_fns, file_path, fn_name, container, "")
+    loc = locate_fn_by_record(enumerate_fns, file_path, fn_name, container, sig_text)
     if loc is None:
         loose_container = container.split("{", 1)[0].strip()
-        loc = locate_fn_by_record(enumerate_fns, file_path, fn_name, loose_container, "")
+        loc = locate_fn_by_record(enumerate_fns, file_path, fn_name, loose_container, sig_text)
     if loc is None:
         return SpliceOutcome(False, "fn_not_found", 0)
     sig_byte_start, body_byte_start, body_byte_end, _sig_text = loc

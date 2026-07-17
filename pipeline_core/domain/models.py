@@ -51,6 +51,27 @@ class FnLocator(NamedTuple):
     fn_name: str
 
 
+class FnSite(NamedTuple):
+    """Container-qualified identity of a reconstructable function: ``(file,
+    fn_name, container)``. Where :class:`FnLocator` keys the file-and-name plane
+    (frontier, dispatch, leaf-ordering — one fn per name in the common case),
+    ``FnSite`` disambiguates the SAME name across impls in one file: the free
+    ``fn not(cond)`` (``container=""``) vs the ``Bool`` trait method ``fn not``
+    (``container="impl Bool for &bool"``); the six ``fn from`` across the
+    ``From<…>`` impls; the eight ``fn fmt`` across Debug/Display.
+
+    Used by the U2 blame partition: a test that panics in a still-stubbed fn is
+    only the unit's OWN failure when the panic site's ``(file, fn_name,
+    container)`` matches the unit — a name-only match wrongly charges a unit for
+    a same-named SIBLING's stub. Container equality must be taken canonically
+    (``canon_container``) because the extractor and the impl-manifest render the
+    same header with different spacing (``impl Bool for & bool`` vs ``&bool``)."""
+
+    file: str
+    fn_name: str
+    container: str
+
+
 @dataclass(frozen=True, slots=True)
 class SkeletoniseResult:
     """Outcome of one ``--skeletonise`` extractor invocation: whether it

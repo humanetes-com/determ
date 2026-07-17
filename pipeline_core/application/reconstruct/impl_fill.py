@@ -34,6 +34,7 @@ from pipeline_core.domain.models import (
     ClusterFillResult,
     DispatchFamily,
     FnLocator,
+    FnSite,
     Frontier,
     ImplBlock,
 )
@@ -448,6 +449,51 @@ def fill_impl_blocks(
                     else:
                         _log(f"  [phase-c/file] {file_rel}: splice "
                              f"`{rb.fn_data['fn_name']}` failed: {reason}")
+                # File-first is the ATOMIC co-dependent fill: it must land a
+                # file's FREE functions together with its impls, else a
+                # producer/consumer cycle (the free `not(cond)` that the `Bool`
+                # impls' tests call) can never validate — each half reverts
+                # while the other is a stub. `route_fn_bodies` only matches impl
+                # containers, so free-fn bodies land in `routing.dropped`. Route
+                # each dropped body whose name matches a still-stubbed FREE fn
+                # in THIS file, disambiguating by the stub's verbatim signature
+                # (a free fn has no impl container to narrow on).
+                _free_stubs = {
+                    r["fn_name"]: r
+                    for r in (_scan_unimplemented_records_for_cluster(
+                        target_src_dir, cluster) or [])
+                    if (r.get("file", "") == file_rel
+                        or r.get("file", "").endswith("/" + Path(file_rel).name))
+                    and not str(r.get("container", "")).strip().startswith("impl")
+                }
+                if _free_stubs and routing.dropped:
+                    _dropped_keys = {(_db.fn_name, _db.block_attr)
+                                     for _db in routing.dropped}
+                    for _p in parsed:
+                        if (_p["fn_name"], _p["block"]) not in _dropped_keys:
+                            continue
+                        # A dropped body ADDRESSED TO AN IMPL header was aimed
+                        # at an impl method, never the free fn — landing it in
+                        # the free stub by shared name is the same-name
+                        # corruption container scoping exists to prevent
+                        # (WRONG: `!self` from `impl Bool for bool` spliced
+                        # into the self-less free `fn not(cond)` → E0424).
+                        if _p["block"].lstrip().startswith("impl"):
+                            continue
+                        _rec = _free_stubs.get(_p["fn_name"])
+                        if _rec is None:
+                            continue
+                        _ok, _reason, _d = _splice_fn_with_where(
+                            file_path, str(_rec.get("container", "")),
+                            _p["fn_name"], _p["body"], _p["where_clause"],
+                            sig_text=str(_rec.get("sig_text", "")))
+                        if _ok:
+                            spliced_now += 1
+                            _log(f"  [phase-c/file] {file_rel}: routed free fn "
+                                 f"`{_p['fn_name']}` to its module-level stub.")
+                        else:
+                            _log(f"  [phase-c/file] {file_rel}: free-fn splice "
+                                 f"`{_p['fn_name']}` failed: {_reason}")
                 if spliced_now == 0:
                     _log(f"  [phase-c/file] {file_rel}: nothing spliced — "
                          "falling back to per-block fills.")
@@ -462,7 +508,12 @@ def fill_impl_blocks(
                     _file_tests: set[str] = set()
                     for _key in _unit_fns:
                         _file_tests |= (tdd_frontier_tests or {}).get(_key, set())
-                    _u2_file = _u2_test_gate(_file_tests, _unit_fns, tdd_test_cmd,
+                    # Container-qualified sites so a panic in a same-named
+                    # sibling (another impl's fn) is not charged to this file.
+                    _unit_sites = frozenset(
+                        FnSite(file_rel, m.fn_name, b.container)
+                        for b in fblocks for m in b.stub_members)
+                    _u2_file = _u2_test_gate(_file_tests, _unit_sites, tdd_test_cmd,
                                              target_src_dir, cluster_env)
                 # ACCEPT_EXTERNAL_ONLY (all failures blocked by another file's
                 # stub) is NOT a revert — keep the fill and defer to the outer
@@ -833,7 +884,15 @@ def fill_impl_blocks(
                     _block_tests: set[str] = set()
                     for _key in _block_fns:
                         _block_tests |= (tdd_frontier_tests or {}).get(_key, set())
-                    _u2_impl = _u2_test_gate(_block_tests, _block_fns,
+                    # Container-qualified sites: this block's members share
+                    # block.container, so a same-named method in ANOTHER impl
+                    # (e.g. a different `From` variant's `from`, the free `not`
+                    # vs this Bool impl's `not`) whose stub the test panics in
+                    # is correctly external, not this block's own failure.
+                    _block_sites = frozenset(
+                        FnSite(block.file, _bm.fn_name, block.container)
+                        for _bm in (*block.stub_members, *block.refill_members))
+                    _u2_impl = _u2_test_gate(_block_tests, _block_sites,
                                              tdd_test_cmd, target_src_dir,
                                              cluster_env)
                 # Only a REAL self-failure reverts. ACCEPT_EXTERNAL_ONLY (every
@@ -872,7 +931,7 @@ def fill_impl_blocks(
                             "cluster": cluster_name, "file": block.file,
                             "container": block.container,
                             "blocking_fns": sorted(
-                                f"{f}::{fn}" for f, fn in _u2_impl.blocking_fns)})
+                                f"{s.file}::{s.fn_name}" for s in _u2_impl.blocking_fns)})
                     members_filled_this_block = spliced_now
                     fns_filled_total += spliced_now
                     impls_filled += 1

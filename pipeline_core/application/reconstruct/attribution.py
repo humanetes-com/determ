@@ -28,7 +28,7 @@ from pipeline_core.domain.attribution import (
     FailureKind,
     line_to_fn_record,
 )
-from pipeline_core.domain.models import Diagnostic, FnLocator, Frontier
+from pipeline_core.domain.models import Diagnostic, FnLocator, FnSite, Frontier
 from pipeline_core.domain.rust_idents import ascii_word_tokens, test_fn_names
 from pipeline_core.domain.test_report import FailureKind as TestFailureKind
 from pipeline_core.domain.test_report import parse_test_output
@@ -54,20 +54,20 @@ class AttributionDeps:
     log: Callable[[str], None]
 
 
-def make_fn_locator(
+def _make_record_locator(
     structure: Any, src_dir: Path,
-) -> Callable[[str, int], FnLocator | None]:
-    """Build a ``(panic_file, panic_line) -> FnLocator | None`` resolver over
-    `src_dir`'s fn records, caching enumeration + file text. `panic_file` is a
-    path as libtest prints it (crate-root-relative, e.g. ``src/error.rs``, or
-    absolute); it is normalised to `src_dir`-relative exactly as
-    :func:`extract_tdd_frontier` does. Used by the U2 blame partition (F3) and
-    any consumer that maps a panic span back to the fn it fired in."""
+) -> Callable[[str, int], tuple[str, dict[str, Any]] | None]:
+    """Shared core: build a ``(panic_file, panic_line) -> (rel, fn_record) |
+    None`` resolver over `src_dir`'s fn records, caching enumeration + file
+    text. `panic_file` is a path as libtest prints it (crate-root-relative,
+    e.g. ``src/error.rs``, or absolute); it is normalised to `src_dir`-relative
+    exactly as :func:`extract_tdd_frontier` does. The two public locators below
+    project the resolved record onto their own identity type."""
     recs_by_file: dict[str, list[dict[str, Any]]] = {}
     text_by_file: dict[str, str] = {}
     all_recs: list[dict[str, Any]] | None = None
 
-    def locate(panic_file: str, panic_line: int) -> FnLocator | None:
+    def locate(panic_file: str, panic_line: int) -> tuple[str, dict[str, Any]] | None:
         nonlocal all_recs
         p_abs = Path(panic_file)
         if not p_abs.is_absolute():
@@ -91,7 +91,40 @@ def make_fn_locator(
         rec = line_to_fn_record(text_by_file[rel], panic_line, recs)
         if rec is None:
             return None
-        return FnLocator(rel, rec["fn_name"])
+        return (rel, rec)
+
+    return locate
+
+
+def make_fn_locator(
+    structure: Any, src_dir: Path,
+) -> Callable[[str, int], FnLocator | None]:
+    """``(panic_file, panic_line) -> FnLocator | None`` — resolve a panic span to
+    the (file, fn_name) it fired in. Frontier/dispatch key; drops container."""
+    core = _make_record_locator(structure, src_dir)
+
+    def locate(panic_file: str, panic_line: int) -> FnLocator | None:
+        hit = core(panic_file, panic_line)
+        return None if hit is None else FnLocator(hit[0], hit[1]["fn_name"])
+
+    return locate
+
+
+def make_fn_site_locator(
+    structure: Any, src_dir: Path,
+) -> Callable[[str, int], FnSite | None]:
+    """``(panic_file, panic_line) -> FnSite | None`` — resolve a panic span to a
+    CONTAINER-qualified identity. Used by the U2 blame partition so a panic in a
+    same-named sibling (free `fn not` vs a `Bool` impl's `fn not`) is told apart
+    from the unit's own fn."""
+    core = _make_record_locator(structure, src_dir)
+
+    def locate(panic_file: str, panic_line: int) -> FnSite | None:
+        hit = core(panic_file, panic_line)
+        if hit is None:
+            return None
+        rel, rec = hit
+        return FnSite(rel, rec["fn_name"], rec.get("container", "") or "")
 
     return locate
 

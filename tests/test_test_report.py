@@ -1,7 +1,7 @@
 """F3 pins — structured test-run report + blame partition (pure domain)."""
 from __future__ import annotations
 
-from pipeline_core.domain.models import FnLocator
+from pipeline_core.domain.models import FnSite
 from pipeline_core.domain.test_report import (
     BlameVerdict,
     FailureExcerpt,
@@ -121,38 +121,61 @@ def test_parse_empty() -> None:
 
 # --- blame partition -------------------------------------------------------- #
 
-def _locate(table: dict[tuple[str, int], FnLocator]):
+def _locate(table: dict[tuple[str, int], FnSite]):
     return lambda f, ln: table.get((f, ln))
 
 
 def test_partition_external_only() -> None:
     # the only failure is a stub-panic in a fn NOT owned by this unit.
     r = parse_test_output(NIGHTLY_OLD)
-    unit = frozenset({FnLocator("src/lib.rs", "mine")})
-    loc = _locate({("src/error.rs", 5): FnLocator("src/error.rs", "context")})
+    unit = frozenset({FnSite("src/lib.rs", "mine", "")})
+    loc = _locate({("src/error.rs", 5): FnSite("src/error.rs", "context", "impl Error")})
     v = partition_blame(r, unit, loc)
     assert v.self_failures == ()
-    assert v.blocking_fns == frozenset({FnLocator("src/error.rs", "context")})
+    assert v.blocking_fns == frozenset({FnSite("src/error.rs", "context", "impl Error")})
 
 
 def test_partition_mixed_keeps_only_self() -> None:
     r = parse_test_output(STABLE_MULTI)
     # this unit OWNS chain.rs::eq (the assertion), NOT error.rs (the stub).
-    unit = frozenset({FnLocator("src/chain.rs", "eq")})
+    unit = frozenset({FnSite("src/chain.rs", "eq", "impl PartialEq for Chain")})
     loc = _locate({
-        ("src/error.rs", 42): FnLocator("src/error.rs", "context"),
-        ("src/chain.rs", 8): FnLocator("src/chain.rs", "eq"),
+        ("src/error.rs", 42): FnSite("src/error.rs", "context", "impl Error"),
+        ("src/chain.rs", 8): FnSite("src/chain.rs", "eq", "impl PartialEq for Chain"),
     })
     v = partition_blame(r, unit, loc)
     assert [f.test_name for f in v.self_failures] == ["tests::test_assert"]
-    assert v.blocking_fns == frozenset({FnLocator("src/error.rs", "context")})
+    assert v.blocking_fns == frozenset({FnSite("src/error.rs", "context", "impl Error")})
 
 
 def test_partition_stub_in_own_unit_stays_self() -> None:
     # a stub-panic that resolves to the unit's OWN fn is not external.
     r = parse_test_output(NIGHTLY_OLD)
-    own = FnLocator("src/error.rs", "context")
+    own = FnSite("src/error.rs", "context", "impl Error")
     v = partition_blame(r, frozenset({own}), _locate({("src/error.rs", 5): own}))
+    assert len(v.self_failures) == 1 and v.external == ()
+
+
+def test_partition_same_name_sibling_is_external() -> None:
+    # THE collision the U2 gate mis-classified: the unit is a `Bool` impl's
+    # `not`; the panic is in the FREE `not(cond)` stub — same file, same name,
+    # DIFFERENT container. A name-only key would call this the unit's own
+    # failure (→ wrongly REJECT); the container disambiguates it as external.
+    r = parse_test_output(NIGHTLY_OLD)
+    unit = frozenset({FnSite("src/error.rs", "context", "impl Bool for &bool")})
+    # panic resolves to the free fn (container "") of the SAME name+file.
+    free = FnSite("src/error.rs", "context", "")
+    v = partition_blame(r, unit, _locate({("src/error.rs", 5): free}))
+    assert v.self_failures == () and v.blocking_fns == frozenset({free})
+
+
+def test_partition_container_match_is_canonical() -> None:
+    # The extractor spaces `& bool`; the unit was built with the compact form.
+    # Canonical container equality must still recognise the unit's OWN fn.
+    r = parse_test_output(NIGHTLY_OLD)
+    unit = frozenset({FnSite("src/error.rs", "context", "impl Bool for &bool")})
+    same = FnSite("src/error.rs", "context", "impl Bool for & bool")  # syn spacing
+    v = partition_blame(r, unit, _locate({("src/error.rs", 5): same}))
     assert len(v.self_failures) == 1 and v.external == ()
 
 
@@ -168,10 +191,10 @@ def test_partition_unresolvable_stays_self() -> None:
 def test_u2verdict_factories() -> None:
     assert U2Verdict.accept().decision is U2Decision.ACCEPT
     ext = ((parse_test_output(NIGHTLY_OLD).failures[0],
-            FnLocator("src/error.rs", "context")),)
+            FnSite("src/error.rs", "context", "impl Error")),)
     ev = U2Verdict.accept_external_only(ext)
     assert ev.decision is U2Decision.ACCEPT_EXTERNAL_ONLY
-    assert ev.blocking_fns == frozenset({FnLocator("src/error.rs", "context")})
+    assert ev.blocking_fns == frozenset({FnSite("src/error.rs", "context", "impl Error")})
     rv = U2Verdict.reject(frozenset({"t"}), "detail")
     assert rv.decision is U2Decision.REJECT and rv.self_failures == frozenset({"t"})
 

@@ -21,7 +21,8 @@ from enum import Enum, auto
 from pathlib import Path
 from typing import Protocol
 
-from pipeline_core.domain.models import FnLocator
+from pipeline_core.domain.models import FnSite
+from pipeline_core.domain.rust_idents import canon_container
 from pipeline_core.domain.test_results import (
     parse_failed_tests,
     split_test_stdout_sections,
@@ -178,30 +179,43 @@ class BlameVerdict:
     each paired with the fn locator they resolved to (the blocking producer)."""
 
     self_failures: tuple[TestFailure, ...] = ()
-    external: tuple[tuple[TestFailure, FnLocator], ...] = ()
+    external: tuple[tuple[TestFailure, FnSite], ...] = ()
 
     @property
-    def blocking_fns(self) -> frozenset[FnLocator]:
+    def blocking_fns(self) -> frozenset[FnSite]:
         return frozenset(loc for _f, loc in self.external)
+
+
+def _site_key(s: FnSite) -> tuple[str, str, str]:
+    """Collision-safe identity: file, name, and CANONICAL container. Canonical
+    because the extractor renders a header's spacing (`impl Bool for & bool`)
+    differently from the impl-manifest a unit was built from (`&bool`); an
+    exact-string container compare would miss the match and misclassify a unit's
+    OWN failure as external."""
+    return (s.file, s.fn_name, canon_container(s.container))
 
 
 def partition_blame(
     report: TestRunReport,
-    unit_fns: frozenset[FnLocator],
-    locate: Callable[[str, int], FnLocator | None],
+    unit_sites: frozenset[FnSite],
+    locate: Callable[[str, int], FnSite | None],
 ) -> BlameVerdict:
     """Split `report.failures` into self vs external. A failure is EXTERNAL iff
     it is a STUB_PANIC whose panic location resolves (via `locate`) to a fn NOT
-    in `unit_fns`. ASSERTION/OTHER failures always stay self — an assertion can
-    be another unit's wrong body, but that is behavioral attribution, out of
-    scope here (do not over-subtract)."""
+    in `unit_sites` — matched on (file, name, CANONICAL container), so a panic
+    in a same-named SIBLING (the free `fn not(cond)` vs a `Bool` impl's `fn
+    not`; one `From` impl's `fn from` vs another) is correctly external, not
+    charged to this unit. ASSERTION/OTHER failures always stay self — an
+    assertion can be another unit's wrong body, but that is behavioral
+    attribution, out of scope here (do not over-subtract)."""
+    own = {_site_key(s) for s in unit_sites}
     self_f: list[TestFailure] = []
-    external: list[tuple[TestFailure, FnLocator]] = []
+    external: list[tuple[TestFailure, FnSite]] = []
     for f in report.failures:
         if (f.kind is FailureKind.STUB_PANIC
                 and f.panic_file and f.panic_line is not None):
             loc = locate(f.panic_file, f.panic_line)
-            if loc is not None and loc not in unit_fns:
+            if loc is not None and _site_key(loc) not in own:
                 external.append((f, loc))
                 continue
         self_f.append(f)
@@ -223,7 +237,7 @@ class U2Verdict:
 
     decision: U2Decision
     self_failures: frozenset[str] = frozenset()
-    external: tuple[tuple[TestFailure, FnLocator], ...] = ()
+    external: tuple[tuple[TestFailure, FnSite], ...] = ()
     detail: str = ""
 
     @classmethod
@@ -232,7 +246,7 @@ class U2Verdict:
 
     @classmethod
     def accept_external_only(
-        cls, external: tuple[tuple[TestFailure, FnLocator], ...],
+        cls, external: tuple[tuple[TestFailure, FnSite], ...],
     ) -> U2Verdict:
         return cls(U2Decision.ACCEPT_EXTERNAL_ONLY, external=external)
 
@@ -241,7 +255,7 @@ class U2Verdict:
         return cls(U2Decision.REJECT, self_failures=self_failures, detail=detail)
 
     @property
-    def blocking_fns(self) -> frozenset[FnLocator]:
+    def blocking_fns(self) -> frozenset[FnSite]:
         return frozenset(loc for _f, loc in self.external)
 
 
@@ -276,10 +290,12 @@ class FailureExcerpt:
 class U2TestGate(Protocol):
     """The composition-bound U2 acceptance gate a fill loop calls once its unit
     compiles: run the unit's own tests, partition blame, return a typed verdict.
-    `unit_fns` is what the unit owns (used to subtract external stub-panics)."""
+    `unit_sites` is what the unit owns as container-qualified :class:`FnSite`
+    identities — used to subtract same-file/same-name SIBLING stub-panics that a
+    name-only key would wrongly charge to this unit."""
 
     def __call__(
-        self, fn_tests: set[str], unit_fns: frozenset[FnLocator],
+        self, fn_tests: set[str], unit_sites: frozenset[FnSite],
         test_cmd: str | None, target_src_dir: Path,
         cluster_env: dict[str, str] | None,
     ) -> U2Verdict: ...

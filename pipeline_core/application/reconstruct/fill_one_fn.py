@@ -38,7 +38,7 @@ from pipeline_core.application.reconstruct.pull_resolver import (
 from pipeline_core.domain.behaviour_select import select_usage_examples
 from pipeline_core.domain.cfg import filter_cfg_inactive_branches
 from pipeline_core.domain.model_notes import errorimpl_object_note, is_errorimpl_container
-from pipeline_core.domain.models import FillResult, FnLocator, Stub
+from pipeline_core.domain.models import FillResult, FnLocator, FnSite, Stub
 from pipeline_core.domain.refine import FloorStall
 from pipeline_core.domain.std_api_sigs import std_api_def
 from pipeline_core.domain.test_report import U2Decision
@@ -406,9 +406,12 @@ class FillOneFn:
             _u2_fail_sig: frozenset[str] | None = None
             if rc == 0:
                 _key = FnLocator(rel_file, fn_name)
+                # Container-qualified own-site: a test panicking in a same-named
+                # sibling (e.g. this fn is a `Bool` impl's `not`, the panic is in
+                # the free `not(cond)` stub) is external, not this fn's failure.
                 _v = self.cargo.u2_test_gate(
                     (ctx.tdd_frontier_tests or {}).get(_key, set()),
-                    frozenset({_key}),
+                    frozenset({FnSite(rel_file, fn_name, container)}),
                     ctx.tdd_test_cmd, ctx.target_src_dir, ctx.cluster_env)
                 if _v.decision is U2Decision.REJECT:
                     # A real self-failure (assertion/behavior). Route through the

@@ -1109,10 +1109,12 @@ def build_app(
     def splice_fn_with_where(
         file_path: Path, container: str, fn_name: str, body: str,
         where_clause: str | None = None, allow_nonstub: bool = False,
+        sig_text: str = "",
     ) -> Any:
         return _splice_mod.splice_fn_with_where(
             enumerate_fns, file_path, container, fn_name, body,
-            where_clause, allow_nonstub, validate_parse=_validate_parse)
+            where_clause, allow_nonstub, validate_parse=_validate_parse,
+            sig_text=sig_text)
 
     scan_unimplemented_functions = functools.partial(
         _stub_scan.scan_unimplemented_functions, enumerate_fns=enumerate_fns)

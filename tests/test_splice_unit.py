@@ -62,6 +62,25 @@ def test_locate_container_narrows() -> None:
     assert out is not None and out[0] == 2
 
 
+def test_locate_free_fn_by_sig_when_container_empty() -> None:
+    """A FREE function has no impl container (extractor renders it ``""``), so
+    container narrowing can't pick it out from same-named impl-method siblings
+    (the free `fn not(cond)` vs the two `Bool::not`). Its verbatim signature
+    disambiguates — this is what lets file-first land a free-fn producer atomically
+    with the impls that call it."""
+    recs = [
+        _rec(fn_name="not", container="",
+             sig_text="pub fn not(cond: impl Bool) -> bool", sig_byte_start=1),
+        _rec(fn_name="not", container="impl Bool for bool",
+             sig_text="fn not(self) -> bool", sig_byte_start=2),
+        _rec(fn_name="not", container="impl Bool for &bool",
+             sig_text="fn not(self) -> bool", sig_byte_start=3),
+    ]
+    out = locate_fn_by_record(lambda _p: recs, Path("/x/src/lib.rs"), "not",
+                              "", "pub fn not(cond: impl Bool) -> bool")
+    assert out is not None and out[0] == 1  # the free fn, located by signature
+
+
 def test_locate_container_canonical_match_ignores_syn_spacing() -> None:
     """The syn extractor renders `& bool` (spaced) while a caller holds the
     compact `&bool`. Container narrowing is canonical-identity, not exact

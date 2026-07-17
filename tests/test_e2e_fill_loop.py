@@ -154,7 +154,7 @@ def test_u2_codependent_stub_panic_keeps_body(monkeypatch, tmp_path):
     ws = _setup(monkeypatch, tmp_path)
     install_scripted_model(monkeypatch, per_fn_body="42")
     install_scripted_cargo(monkeypatch, check_diag=(0, "", []), run=(0, "ok"))
-    from pipeline_core.domain.models import FnLocator
+    from pipeline_core.domain.models import FnSite
     from pipeline_core.domain.test_report import (
         FailureKind,
         TestFailure,
@@ -162,7 +162,7 @@ def test_u2_codependent_stub_panic_keeps_body(monkeypatch, tmp_path):
     )
     _ext = ((TestFailure("t_answer", FailureKind.STUB_PANIC,
                          "src/other.rs", 1, 1, "not implemented"),
-             FnLocator("src/other.rs", "sibling")),)
+             FnSite("src/other.rs", "sibling", "")),)
     install_app_seams(
         monkeypatch,
         u2_test_gate=lambda *a, **k: U2Verdict.accept_external_only(_ext))

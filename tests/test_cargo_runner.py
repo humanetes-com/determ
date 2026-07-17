@@ -13,6 +13,7 @@ from pipeline_core.application.reconstruct.cargo_runner import (
     run_scoped_tests,
     u2_test_gate,
 )
+from pipeline_core.domain.models import FnSite
 from pipeline_core.domain.test_report import U2Decision
 
 
@@ -189,15 +190,15 @@ def test_u2_gate_external_stub_panic_accepts(tmp_path) -> None:
     (tmp_path / "src").mkdir()
     err = tmp_path / "src" / "error.rs"
     err.write_text("fn context() {\n    unimplemented!()\n}\n", encoding="utf-8")
-    recs = [{"file": "src/error.rs", "fn_name": "context",
+    recs = [{"file": "src/error.rs", "fn_name": "context", "container": "impl Error",
              "sig_byte_start": 0, "body_byte_end": len(err.read_text())}]
     out = ("test a ... FAILED\n\n---- a stdout ----\n"
            "thread 'a' panicked at src/error.rs:2:5:\nnot yet implemented\n")
     v = _gate(_const_run_cargo(101, out), {"a"},
-              unit_fns=frozenset({("src/lib.rs", "mine")}),
+              unit_fns=frozenset({FnSite("src/lib.rs", "mine", "")}),
               structure=_FakeStructure(recs), src_dir=tmp_path)
     assert v.decision is U2Decision.ACCEPT_EXTERNAL_ONLY
-    assert ("src/error.rs", "context") in v.blocking_fns
+    assert FnSite("src/error.rs", "context", "impl Error") in v.blocking_fns
 
 
 def test_u2_gate_failsafe_and_inconclusive() -> None:
