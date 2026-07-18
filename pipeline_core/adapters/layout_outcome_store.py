@@ -1,11 +1,14 @@
 """Layout-outcome storage — persist WHICH connected component t1.5 authored,
-gated, or left frozen (F11 M3's precondition).
+gated, or left frozen (F11 M3's precondition), and — for authored components —
+the per-uid locate-keys a later re-author needs to find the authored items in
+the LIVE skeleton (the baked frozen definitions no longer exist there once a
+splice landed, so locating by them fails every attempt).
 
-Written once per t1.5 pass (`application/author_layout_phase.py::run_layout_phase`),
-read later by the F11 M3 re-trigger mechanism (`application/retrigger_layout.py`) to
-find "which private types are still on the ORIGINAL frozen scaffold" without
-re-deriving reachability from scratch mid-run. One file per cfg-cluster mirrors
-the skeleton's per-cluster layout, matching `private_surface_store.py`'s convention.
+Written once per t1.5 pass (`application/author_layout_phase.py::run_layout_phase`)
+and upserted per component by the F11 M3 re-trigger
+(`application/retrigger_layout.py`) when it re-authors one. One file per
+cfg-cluster mirrors the skeleton's per-cluster layout, matching
+`private_surface_store.py`'s convention.
 """
 from __future__ import annotations
 
@@ -14,6 +17,8 @@ from pathlib import Path
 
 from pipeline_core.application.author_layout import (
     AuthorLayoutResult,
+    ComponentResult,
+    LayoutComponentRecord,
     LayoutOutcome,
     component_outcome,
 )
@@ -25,36 +30,74 @@ def _outcomes_path(project_dir: Path, cfg_cluster: str) -> Path:
     return Path(project_dir) / _SKELETON_DIR / f"_layout_outcomes_{cfg_cluster}.json"
 
 
+def _row(names: tuple[str, ...] | frozenset[str], outcome: LayoutOutcome,
+         defs: tuple[tuple[str, str], ...]) -> dict[str, object]:
+    return {
+        "item_names": sorted(names),
+        "outcome": outcome.name,
+        "defs": dict(defs),
+    }
+
+
 def save_layout_outcomes(project_dir: Path, result: AuthorLayoutResult) -> Path:
     """Write `result`'s per-component outcomes to
     ``.skeleton/_layout_outcomes_<cluster>.json``."""
     p = _outcomes_path(project_dir, result.cfg_cluster)
     p.parent.mkdir(parents=True, exist_ok=True)
     payload = [
-        {
-            "item_names": sorted(c.item_names),
-            "outcome": component_outcome(c).name,
-        }
+        _row(c.item_names, component_outcome(c), c.authored_defs)
         for c in result.components
     ]
     p.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     return p
 
 
-def load_layout_outcomes(
-    project_dir: Path, cfg_cluster: str,
-) -> list[tuple[frozenset[str], LayoutOutcome]]:
-    """Read a cluster's baked per-component outcomes. Missing/corrupt → empty
-    list (the F11 M3 caller is additive — its absence must never break a run;
-    it simply finds nothing to retrigger)."""
+def update_layout_outcome(
+    project_dir: Path, cfg_cluster: str, component: ComponentResult,
+) -> Path | None:
+    """Upsert ONE component's row (matched by its item-name set) after a
+    re-author changed its outcome — without this, a successfully re-authored
+    component stays FROZEN in the store forever, so a later trigger re-fires
+    on it and every splice attempt fails to locate the (long-gone) frozen
+    defs. Missing/corrupt store → None (additive mechanism, never breaks)."""
     p = _outcomes_path(project_dir, cfg_cluster)
     try:
         rows = json.loads(p.read_text(encoding="utf-8"))
-        out: list[tuple[frozenset[str], LayoutOutcome]] = []
+    except (OSError, json.JSONDecodeError):
+        return None
+    key = sorted(component.item_names)
+    new_row = _row(component.item_names, component_outcome(component),
+                   component.authored_defs)
+    replaced = False
+    for i, row in enumerate(rows):
+        if sorted(row.get("item_names") or []) == key:
+            rows[i] = new_row
+            replaced = True
+            break
+    if not replaced:
+        rows.append(new_row)
+    p.write_text(json.dumps(rows, indent=2, sort_keys=True), encoding="utf-8")
+    return p
+
+
+def load_layout_records(
+    project_dir: Path, cfg_cluster: str,
+) -> list[LayoutComponentRecord]:
+    """Read a cluster's per-component outcome records. Missing/corrupt → empty
+    list (the F11 M3 caller is additive — its absence must never break a run;
+    it simply finds nothing to retrigger). Rows written before locate-keys
+    existed load with empty ``defs`` — an AUTHORED row without defs is simply
+    not re-authorable and gets skipped loudly by the consumer."""
+    p = _outcomes_path(project_dir, cfg_cluster)
+    try:
+        rows = json.loads(p.read_text(encoding="utf-8"))
+        out: list[LayoutComponentRecord] = []
         for row in rows:
             names = frozenset(str(x) for x in (row.get("item_names") or []))
             outcome = LayoutOutcome[str(row.get("outcome", "FROZEN"))]
-            out.append((names, outcome))
+            defs = tuple(sorted(
+                (str(k), str(v)) for k, v in (row.get("defs") or {}).items()))
+            out.append(LayoutComponentRecord(names, outcome, defs))
         return out
     except (OSError, json.JSONDecodeError, KeyError, ValueError):
         return []

@@ -76,6 +76,24 @@ def classify_crash_retrigger(
     return LayoutRetriggerCause.NONE
 
 
+def crash_evidence_confounded(
+    fn_records: list[FnRecord], component_names: frozenset[str],
+) -> bool:
+    """Cause C cannot tell 'the authored scheme crashes' from 'the component's
+    own still-stubbed fns crash' — a stub panic inside drop/vtable code aborts
+    the test binary exactly like a bad pointer scheme (observed live: a fresh
+    restart after a successful re-author left 102 reverted stubs, the sweep
+    shrank, and the retrigger burned its last attempt re-authoring a layout
+    whose bodies were never tried). While half or more of the component's own
+    fns are still stubs the vanish evidence is confounded: fills must run
+    first."""
+    members = [r for r in fn_records if r.fn_name in component_names]
+    if not members:
+        return False
+    stubbed = sum(1 for r in members if r.has_unimplemented_body)
+    return stubbed * 2 >= len(members)
+
+
 def _errors_hit_private_types(
     error_text: str, private_type_names: frozenset[str],
 ) -> bool:

@@ -2,7 +2,8 @@
 cluster's per-fn fix loop is stalled by a private layout it can't work with.
 
 `domain/layout_retrigger.py` decides WHETHER to retrigger; this module does
-it: narrow the cluster's private surface down to ONE frozen component, ask the
+it: narrow the cluster's private surface down to ONE component (frozen OR
+previously authored), ask the
 model for a fresh layout attempt (independent LLM sample — a real chance at a
 structurally different, simpler design, since the model is free to invent its
 own scheme per the reconstruction-target rule), and on success surgically
@@ -11,28 +12,32 @@ per-fn loop re-fills them under the new layout. Everything else in the
 cluster — fills unrelated to this component — is left untouched.
 
 Capped per (cluster, component) via a disk-persisted attempt counter (mirrors
-the debt-#63 `RETRO_RESET_MAX_ATTEMPTS` shape) so a component that can't be
+the `RETRO_RESET_MAX_ATTEMPTS` shape) so a component that can't be
 re-authored within the cap degrades to today's behaviour: exhausted, left
 frozen, the TDD driver's existing stall-exit stands.
 """
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from pipeline_core.application.author_layout import (
     AuthorLayoutDeps,
+    ComponentResult,
+    LayoutComponentRecord,
     LayoutOutcome,
     author_layout,
 )
 from pipeline_core.application.author_layout_phase import make_pin_selector
+from pipeline_core.domain.authored_layout import component_uids
 from pipeline_core.domain.behaviour import BehaviourSuite
 from pipeline_core.domain.layout_retrigger import (
     CrashEvidence,
     LayoutRetriggerCause,
     classify_crash_retrigger,
     classify_layout_retrigger,
+    crash_evidence_confounded,
     find_fns_referencing,
     should_retrigger,
 )
@@ -57,7 +62,11 @@ class RetriggerResult:
 class RetriggerLayoutDeps:
     log: Callable[[str], None]
     load_surface: Callable[[Path, str], PrivateSurface]
-    load_layout_outcomes: Callable[[Path, str], list[tuple[frozenset[str], LayoutOutcome]]]
+    load_layout_records: Callable[[Path, str], list[LayoutComponentRecord]]
+    # Upsert one component's outcome row after a re-author — a success MUST
+    # flip FROZEN→AUTHORED (and store fresh locate-keys) or the next trigger
+    # re-fires on a component whose frozen defs no longer exist in the tree.
+    update_layout_outcome: Callable[[Path, str, ComponentResult], object]
     load_suite: Callable[[Path, str], BehaviourSuite]
     public_surface_text: Callable[[Path, str], str]
     symbol_inventory_text: Callable[[Path, str], str]
@@ -78,13 +87,40 @@ def _component_key(names: frozenset[str]) -> str:
     return "|".join(sorted(names))
 
 
+def _with_stored_defs(
+    narrowed: PrivateSurface, defs: dict[str, str],
+) -> PrivateSurface | None:
+    """Swap each narrowed item's BAKED frozen definition for the stored
+    locate-key of the def now living in the skeleton (an AUTHORED component's
+    frozen defs are long gone — splicing against them fails every attempt).
+    None when any item lacks a stored key: authoring would burn an attempt on
+    a guaranteed locate failure. Keys are looked up by the same deterministic
+    per-component uids the original splice used."""
+    key_by_item: dict[int, str] = {}
+    for comp in narrowed.components:
+        for uid, it in zip(component_uids(comp), comp, strict=True):
+            key = defs.get(uid)
+            if key is None:
+                return None
+            key_by_item[id(it)] = key
+    return PrivateSurface(
+        cfg_cluster=narrowed.cfg_cluster,
+        replaceable=tuple(
+            replace(i, definition=key_by_item[id(i)])
+            if id(i) in key_by_item else i
+            for i in narrowed.replaceable),
+        frozen_public=narrowed.frozen_public,
+        public_referenced=narrowed.public_referenced,
+        public_direct_refs=narrowed.public_direct_refs)
+
+
 def retrigger_layout(
     project_dir: Path, module_name: str, cfg_cluster: str,
     filled_src_dir: Path, error_text: str,
     deps: RetriggerLayoutDeps,
     crash_evidence: CrashEvidence | None = None,
 ) -> RetriggerResult:
-    """Try to re-author whichever FROZEN component's errors are implicated.
+    """Try to re-author whichever non-gated component's evidence is implicated.
     Returns fired=False when no frozen component matches (the caller's
     existing stall-exit behaviour should proceed unchanged).
 
@@ -92,21 +128,38 @@ def retrigger_layout(
     private types (causes A/B, `classify_layout_retrigger`), or — when
     `crash_evidence` is given — runtime-crash implication (cause C,
     `classify_crash_retrigger`: a vanished test's reverse-map target is or
-    references a component member; no error text exists in that class)."""
-    outcomes = deps.load_layout_outcomes(project_dir, cfg_cluster)
-    frozen = [names for names, outcome in outcomes if outcome is LayoutOutcome.FROZEN]
-    if not frozen:
-        return RetriggerResult(fired=False, reason="no frozen component recorded")
+    references a component member; no error text exists in that class).
+
+    Both FROZEN and AUTHORED components are eligible: an authored layout can
+    compile yet still be the wall (cause B's body-vs-layout exhaustion, cause
+    C's runtime crash). An AUTHORED component's baked frozen defs left the
+    tree when its splice landed, so its re-author locates the LIVE items via
+    the store's per-uid locate-keys; a row without them (pre-locate-key
+    store) is skipped loudly instead of burning an attempt on a guaranteed
+    locate failure. GATED stays excluded — authoring blind is still refused."""
+    records = deps.load_layout_records(project_dir, cfg_cluster)
+    candidates = [r for r in records if r.outcome is not LayoutOutcome.GATED]
+    if not candidates:
+        return RetriggerResult(fired=False, reason="no re-authorable component recorded")
 
     attempts = deps.load_attempts(project_dir, cfg_cluster)
     starv_cause, _evidence = classify_starvation("", "", error_text)
     _live_records: list[FnRecord] | None = None
 
-    for names in frozen:
+    for rec in candidates:
+        names = rec.names
         if crash_evidence is not None:
             if _live_records is None:
                 _live_records = deps.enumerate_fns(filled_src_dir) or []
             cause = classify_crash_retrigger(crash_evidence, _live_records, names)
+            if (should_retrigger(cause)
+                    and crash_evidence_confounded(_live_records, names)):
+                deps.log(
+                    f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: "
+                    "crash evidence confounded — most of the component's own "
+                    "fns are still stubs (stub panics abort binaries too); "
+                    "letting fills run before spending an attempt.")
+                continue
         else:
             cause = classify_layout_retrigger(
                 starvation_cause=starv_cause, fills_exhausted=True,
@@ -120,13 +173,6 @@ def retrigger_layout(
                      f"({deps.max_attempts}) reached — not retriggering again.")
             continue
 
-        attempts[key] = attempts.get(key, 0) + 1
-        deps.save_attempts(project_dir, cfg_cluster, attempts)
-        deps.git_commit(
-            project_dir,
-            f"pre-layout-retrigger checkpoint — {cfg_cluster}/{sorted(names)} "
-            f"attempt {attempts[key]}")
-
         surface = deps.load_surface(project_dir, cfg_cluster)
         narrowed = PrivateSurface(
             cfg_cluster=cfg_cluster,
@@ -134,6 +180,23 @@ def retrigger_layout(
             frozen_public=surface.frozen_public,
             public_referenced=surface.public_referenced,
             public_direct_refs=surface.public_direct_refs)
+        if rec.outcome is LayoutOutcome.AUTHORED:
+            with_defs = _with_stored_defs(narrowed, dict(rec.defs))
+            if with_defs is None:
+                deps.log(
+                    f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: "
+                    "AUTHORED component has no stored locate-keys for its "
+                    "live defs — cannot re-author safely; skipping.")
+                continue
+            narrowed = with_defs
+
+        attempts[key] = attempts.get(key, 0) + 1
+        deps.save_attempts(project_dir, cfg_cluster, attempts)
+        deps.git_commit(
+            project_dir,
+            f"pre-layout-retrigger checkpoint — {cfg_cluster}/{sorted(names)} "
+            f"attempt {attempts[key]}")
+
         suite = deps.load_suite(project_dir, cfg_cluster)
         select_pins = make_pin_selector(suite, surface)  # full surface: correct reachability
         res = author_layout(
@@ -152,6 +215,11 @@ def retrigger_layout(
             return RetriggerResult(fired=True, succeeded=False, cause=cause.name,
                                    reason="re-authoring failed again")
 
+        merged_defs = tuple(d for c in res.components for d in c.authored_defs)
+        deps.update_layout_outcome(
+            project_dir, cfg_cluster,
+            ComponentResult(tuple(sorted(names)), authored=True,
+                            authored_defs=merged_defs))
         fn_records = deps.enumerate_fns(filled_src_dir) or []
         referencing = find_fns_referencing(fn_records, names)
         reverted = deps.revert_fns(referencing, filled_src_dir)
@@ -161,4 +229,4 @@ def retrigger_layout(
         return RetriggerResult(fired=True, succeeded=True, reverted_count=reverted,
                                cause=cause.name)
 
-    return RetriggerResult(fired=False, reason="no frozen component's errors matched")
+    return RetriggerResult(fired=False, reason="no re-authorable component's evidence matched")

@@ -16,10 +16,11 @@ from pipeline_core.adapters.artifacts import api_surface_path
 from pipeline_core.adapters.behaviour_store import load_behaviour_suite
 from pipeline_core.adapters.fn_revert import revert_fns_to_stub
 from pipeline_core.adapters.layout_outcome_store import (
-    load_layout_outcomes,
+    load_layout_records,
     load_retrigger_attempts,
     save_layout_outcomes,
     save_retrigger_attempts,
+    update_layout_outcome,
 )
 from pipeline_core.adapters.private_surface_store import load_private_surface
 from pipeline_core.adapters.skeleton_compile import (
@@ -111,7 +112,8 @@ def build_retrigger_layout(
 
         deps = RetriggerLayoutDeps(
             log=log, load_surface=load_private_surface,
-            load_layout_outcomes=load_layout_outcomes,
+            load_layout_records=load_layout_records,
+            update_layout_outcome=update_layout_outcome,
             load_suite=load_behaviour_suite,
             public_surface_text=_public_surface_text,
             symbol_inventory_text=lambda pd, c: "",

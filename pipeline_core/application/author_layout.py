@@ -19,6 +19,7 @@ from enum import Enum, auto
 
 from pipeline_core.domain.authored_layout import (
     AuthoredItem,
+    authored_locate_keys,
     component_uids,
     parse_authored_layout,
 )
@@ -57,6 +58,10 @@ class ComponentResult:
     authored: bool
     reason: str = ""
     gated: bool = False   # M13: skipped-on-purpose (harvest gap), not a failure
+    # (uid, locate-key) per item when authored: the text a future re-author
+    # matches against the LIVE skeleton (the baked frozen defs no longer exist
+    # there once a splice landed — locating by them fails every attempt).
+    authored_defs: tuple[tuple[str, str], ...] = ()
 
 
 class LayoutOutcome(Enum):
@@ -76,6 +81,18 @@ def component_outcome(c: ComponentResult) -> LayoutOutcome:
     if c.authored:
         return LayoutOutcome.AUTHORED
     return LayoutOutcome.FROZEN
+
+
+@dataclass(frozen=True, slots=True)
+class LayoutComponentRecord:
+    """One persisted per-component layout row. `defs` carries the (uid,
+    locate-key) pairs of an AUTHORED component — the text that finds each
+    authored item in the LIVE skeleton, which a re-author must use instead of
+    the baked frozen definitions (those left the tree when the splice landed)."""
+
+    names: frozenset[str]
+    outcome: LayoutOutcome
+    defs: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +182,7 @@ def author_layout(
                 item_uids=chunk_uids) + hint
         committed = False
         reason = "no attempt"
+        committed_defs: tuple[tuple[str, str], ...] = ()
         # snapshot the pristine skeleton files this component touches, so a
         # failed candidate is reverted exactly (no cross-attempt bleed).
         touched = {i.file for i in comp}
@@ -189,6 +207,7 @@ def author_layout(
             if compiled:
                 committed = True
                 reason = ""
+                committed_defs = authored_locate_keys(comp, authored)
                 deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: authored "
                          f"layout compiles (attempt {attempt}).")
                 break
@@ -199,7 +218,8 @@ def author_layout(
                     deps.write_skeleton(rel, orig)
             deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: authored "
                      f"scaffold did not compile (attempt {attempt}) — reverted.")
-        results.append(ComponentResult(names, committed, reason))
+        results.append(ComponentResult(names, committed, reason,
+                                       authored_defs=committed_defs))
     return AuthorLayoutResult(surface.cfg_cluster, tuple(results))
 
 

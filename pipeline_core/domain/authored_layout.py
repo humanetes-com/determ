@@ -19,7 +19,11 @@ from __future__ import annotations
 import html
 from dataclasses import dataclass
 
-from pipeline_core.domain.private_surface import PrivateSurfaceItem
+from pipeline_core.domain.private_surface import (
+    PrivateSurfaceItem,
+    SurfaceItemKind,
+)
+from pipeline_core.domain.rust_fn_headers import locate_all_fns
 
 _OPEN = "<LAYOUT_ITEM"
 _CLOSE = "</LAYOUT_ITEM>"
@@ -108,8 +112,9 @@ def component_uids(items: tuple[PrivateSurfaceItem, ...]) -> tuple[str, ...]:
     one authored block would then cover — and get spliced into — every
     same-named slot. Duplicated names get a deterministic ordinal suffix
     (`as_ref.1`, `as_ref.2`); unique names stay bare. Recomputable identically
-    at prompt-build, coverage and splice time from the same component tuple —
-    never persisted."""
+    at prompt-build, coverage and splice time from the same component tuple;
+    the layout-outcome store keys authored locate-keys by these uids, relying
+    on exactly that determinism."""
     total: dict[str, int] = {}
     for it in items:
         total[it.name] = total.get(it.name, 0) + 1
@@ -122,6 +127,32 @@ def component_uids(items: tuple[PrivateSurfaceItem, ...]) -> tuple[str, ...]:
             seen[it.name] = seen.get(it.name, 0) + 1
             uids.append(f"{it.name}.{seen[it.name]}")
     return tuple(uids)
+
+
+def authored_locate_keys(
+    items: tuple[PrivateSurfaceItem, ...],
+    authored: dict[str, AuthoredItem],
+) -> tuple[tuple[str, str], ...]:
+    """(uid, locate-key) per component item after a successful splice: the text
+    a FUTURE re-author can whitespace-tolerantly match against the LIVE
+    skeleton to find this authored item again. Type/trait definitions are
+    stable verbatim (fills never rewrite them), so the whole authored def is
+    the key. A fn item's BODY gets rewritten by every later fill, so its key
+    is the authored item's header (signature incl. qualifiers) — that survives
+    any body fill; if the header can't be parsed the whole def is kept and a
+    future locate simply fails loudly (batch reject), never splices wrong."""
+    keys: list[tuple[str, str]] = []
+    for uid, it in zip(component_uids(items), items, strict=True):
+        block = authored.get(uid)
+        if block is None:
+            continue
+        key = block.definition
+        if it.kind is SurfaceItemKind.FN_SIG:
+            locs = locate_all_fns(block.definition, it.name)
+            if locs:
+                key = locs[0][0]
+        keys.append((uid, key))
+    return tuple(keys)
 
 
 def layout_coverage(

@@ -121,3 +121,23 @@ def test_crash_retrigger_fires_on_member_or_referencing_suspect():
     assert classify_crash_retrigger(
         CrashEvidence(frozenset(), frozenset()), records, comp,
     ) is LayoutRetriggerCause.NONE
+
+
+def test_crash_evidence_confounded_thresholds():
+    from pipeline_core.domain.layout_retrigger import crash_evidence_confounded
+    from pipeline_core.domain.models import FnRecord
+
+    def _fn(name, stub):
+        return FnRecord(file="src/error.rs", fn_name=name,
+                        sig_text=f"fn {name}()", body_text="x",
+                        has_unimplemented_body=stub)
+
+    names = frozenset({"ErrorImpl", "a", "b"})
+    # half or more stubbed → confounded
+    assert crash_evidence_confounded([_fn("a", True), _fn("b", False)], names)
+    # minority stubbed → real evidence
+    assert not crash_evidence_confounded(
+        [_fn("a", True), _fn("b", False), _fn("c", False)],
+        frozenset({"a", "b", "c"}))
+    # component with no fn members (types only) → never confounded
+    assert not crash_evidence_confounded([_fn("x", True)], frozenset({"T"}))

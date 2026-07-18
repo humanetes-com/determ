@@ -1,4 +1,4 @@
-"""TDD-iter batch ratchet (debt #45).
+"""TDD-iter batch ratchet.
 
 The per-fill regression guard (`regression_guard.py`) reverts any single fill
 that reddens a passing test — but only when the crate is TEST-RUNNABLE at accept
@@ -13,6 +13,23 @@ exits at — its high-water mark, killing the 11↔14 oscillation ceiling.
 from __future__ import annotations
 
 from pathlib import Path
+
+
+def ratchet_breach(
+    pass_count: int, missing_count: int, best_pass: int, snap_missing: int,
+) -> str:
+    """Which ratchet signal (if any) says the tree net-regressed vs the
+    best-known snapshot: '' = no breach, else a printable description of the
+    breached condition. A crash-killed test binary drops a NONDETERMINISTIC
+    subset of its tests from the output (observed live: 22 vs 23 vanished on
+    back-to-back sweeps of an unchanged tree), so a single reading of either
+    signal is noisy while any binary crashes — the caller must confirm a
+    breach on a fresh sweep before acting on it destructively."""
+    if pass_count < best_pass:
+        return f"pass_count {pass_count}<{best_pass}"
+    if missing_count > snap_missing:
+        return f"oracle missing {missing_count}>{snap_missing}"
+    return ""
 
 
 def snapshot_src_tree(src_root: Path) -> dict[str, str] | None:

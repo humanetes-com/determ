@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from pipeline_core.application.reconstruct.tdd_ratchet import (
+    ratchet_breach,
     restore_src_tree,
     snapshot_src_tree,
 )
@@ -59,7 +60,7 @@ class PhaseCTddDeps:
     scan_unimplemented_for_cluster: Callable[..., Any]
     scan_unimplemented_functions: Callable[..., Any]
     task2_fill_fns_one_by_one: Callable[..., ClusterFillResult]
-    # Futility escalation (debt #82): (src_dir, test, futile_units,
+    # Futility escalation: (src_dir, test, futile_units,
     # futile_containers) -> Frontier additions. None disables escalation.
     escalate_to_producers: Callable[..., Frontier] | None = None
     # Persist a new pass high-water fill tree to heal's restore tiers:
@@ -155,7 +156,7 @@ def run_phase_c_tdd(
          f"stems={len(test_stems)}")
 
     permanently_exhausted: set[FnLocator] = set()
-    # Futility escalation state (debt #82): per failing test, the frontier
+    # Futility escalation state: per failing test, the frontier
     # unit-set of the previous iteration; a test whose set is UNCHANGED while
     # it kept failing has exhausted its attributed fns — escalate once.
     prev_test_units: dict[str, frozenset[FnLocator]] = {}
@@ -169,7 +170,7 @@ def run_phase_c_tdd(
     # the PREVIOUS iteration and would always compare equal; a fresh snapshot
     # updated only when we actually reset avoids relying on that ordering).
     _filled_at_last_reset = 0
-    # debt #46 residual: behavioral re-fill targets (frontier fns already filled
+    # behavioral re-fill targets (frontier fns already filled
     # with a compiling-but-wrong body) are not stubs, so the stub-based
     # exhaustion path never bounds them → an unfixable wrong body would burn one
     # LLM call every iter until the stall budget alone exits. Count per-fn re-fill
@@ -195,7 +196,7 @@ def run_phase_c_tdd(
     stall = 0
     best_pass = -1
     best_fail = None
-    # Debt #45 — TDD-iter batch ratchet: snapshot the src tree at each pass_count
+    # TDD-iter batch ratchet: snapshot the src tree at each pass_count
     # high-water; restore it when a later iter's fills net-regress the count.
     _batch_ratchet = os.getenv("PHASE_C_TDD_BATCH_RATCHET", "1") not in ("", "0", "false")
     _src_root = target_src_dir / "src"
@@ -317,7 +318,7 @@ def run_phase_c_tdd(
         cur_failed = parse_failed_tests(output)
         fail_count, cur_failed, _oracle = _reconcile(
             rc, output, pass_count, fail_count, cur_failed)
-        # Debt #45 — batch ratchet. pass_count reflects the PREVIOUS iter's fills;
+        # Batch ratchet. pass_count reflects the PREVIOUS iter's fills;
         # a drop below the best we've measured means that iter net-regressed the
         # cluster (a regression the per-fill guard couldn't catch while the crate
         # was red mid-batch). Restore the best-known src tree and re-test, so the
@@ -325,25 +326,43 @@ def run_phase_c_tdd(
         # An oracle shrink beyond the snapshot's own (tests that executed at the
         # snapshot no longer report) is the same net regression, even when the
         # pass count held — the lost binary may have been mostly failing.
-        if _batch_ratchet and _bratchet_snap is not None and (
-                pass_count < _bratchet_best
-                or _oracle.missing_count > _bratchet_missing):
-            _rev = restore_src_tree(_bratchet_snap)
-            deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: batch ratchet — "
-                     f"pass_count {pass_count}<{_bratchet_best} (last iter's fills "
-                     f"net-regressed); reverted {_rev} file(s) to best state, "
-                     "re-testing.")
-            deps.emit("phase_c.tdd.batch_revert", data={
-                "cluster": cluster.name, "iter": iter_n,
-                "pass_count": pass_count, "best_pass": _bratchet_best,
-                "files_reverted": _rev,
-            })
+        _breach = ratchet_breach(pass_count, _oracle.missing_count,
+                                 _bratchet_best, _bratchet_missing)
+        if _batch_ratchet and _bratchet_snap is not None and _breach:
+            # A crashing binary drops a nondeterministic subset of tests, so a
+            # single breached reading can be pure noise; re-sweep the UNCHANGED
+            # tree and only a reproduced breach earns the destructive revert
+            # (a spurious one would wipe sibling-blocked fills every iter and
+            # lock the plateau).
             rc, output = deps.run_cargo(test_cmd, target_src_dir, cluster_env,
                                         timeout=test_timeout)
             pass_count, fail_count, _ignored = parse_test_counts(output)
             cur_failed = parse_failed_tests(output)
             fail_count, cur_failed, _oracle = _reconcile(
                 rc, output, pass_count, fail_count, cur_failed)
+            _confirm = ratchet_breach(pass_count, _oracle.missing_count,
+                                      _bratchet_best, _bratchet_missing)
+            if not _confirm:
+                deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: batch ratchet — "
+                         f"breach ({_breach}) NOT reproduced on re-sweep; "
+                         "keeping the tree (crash-noise reading).")
+            else:
+                _rev = restore_src_tree(_bratchet_snap)
+                deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: batch ratchet — "
+                         f"{_confirm} (last iter's fills net-regressed, "
+                         f"confirmed on re-sweep); reverted {_rev} file(s) to "
+                         "best state, re-testing.")
+                deps.emit("phase_c.tdd.batch_revert", data={
+                    "cluster": cluster.name, "iter": iter_n,
+                    "pass_count": pass_count, "best_pass": _bratchet_best,
+                    "breach": _confirm, "files_reverted": _rev,
+                })
+                rc, output = deps.run_cargo(test_cmd, target_src_dir, cluster_env,
+                                            timeout=test_timeout)
+                pass_count, fail_count, _ignored = parse_test_counts(output)
+                cur_failed = parse_failed_tests(output)
+                fail_count, cur_failed, _oracle = _reconcile(
+                    rc, output, pass_count, fail_count, cur_failed)
         # Refresh the best-known snapshot on the first iter and each strict
         # improvement (never on a plateau — the existing best-state snapshot is
         # equivalent and re-reading the tree would be wasted I/O). Never
@@ -383,7 +402,7 @@ def run_phase_c_tdd(
         _prov = {"tree_sha": _measure.tree_sha, "oracle_size": _measure.oracle_size,
                  "passed": sorted(_measure.passed)[:200],
                  "failed": sorted(_measure.failed)[:200]}
-        # Debt #44 — per-binary breakdown so triage can see WHICH test set
+        # Per-binary breakdown so triage can see WHICH test set
         # changed between iters (vanished tests, not just pass→fail flips).
         _bins = summarize_test_binaries(output)
         if _bins:
@@ -454,7 +473,7 @@ def run_phase_c_tdd(
         )
         frontier = deps.filter_test_targets(frontier, src_dir)
 
-        # Futility escalation (debt #82): a failing test whose attributed
+        # Futility escalation: a failing test whose attributed
         # unit-set is identical to last iteration's has been fully served by
         # rewrites that changed nothing — its accessors are the wrong target.
         # Escalate ONCE per test to the producers of the exercised types.
@@ -680,7 +699,7 @@ def run_phase_c_tdd(
         })
 
         # Re-fill targets this iter = frontier fns already filled at iter start
-        # (not stubs) → the engine will behaviorally re-fill them (debt #46).
+        # (not stubs) → the engine will behaviorally re-fill them.
         _stubs_before = set(deps.scan_unimplemented_functions(src_dir))
         _refill_targets = frontier_keys - _stubs_before
         # Drive the per-fn fill machinery with this frontier.
@@ -723,7 +742,7 @@ def run_phase_c_tdd(
                 permanently_exhausted.add(key)
                 last_notes_count[key] = deps.count_relevant_notes(fr_path, key)
             elif key in _refill_targets:
-                # debt #46 residual: a behavioral re-fill was attempted (fn was
+                # residual: a behavioral re-fill was attempted (fn was
                 # filled at iter start). It reappears here only while its test
                 # keeps failing → count the attempt and exhaust it at the cap so
                 # it stops re-attempting every iter. A re-fill that FIXED its test
