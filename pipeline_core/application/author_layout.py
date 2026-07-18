@@ -24,8 +24,15 @@ from pipeline_core.domain.authored_layout import (
 )
 from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.layout_chunking import plan_author_chunks
-from pipeline_core.domain.private_surface import PrivateSurface, PrivateSurfaceItem
-from pipeline_core.domain.scaffold_rewrite import replace_definitions
+from pipeline_core.domain.private_surface import (
+    PrivateSurface,
+    PrivateSurfaceItem,
+    SurfaceItemKind,
+)
+from pipeline_core.domain.scaffold_rewrite import (
+    DefReplacement,
+    replace_surface_definitions,
+)
 from pipeline_core.prompts.layout_authoring import build_layout_authoring_prompt
 
 
@@ -95,18 +102,23 @@ def _splice_component(
     same-named items land in their OWN slots; any unlocatable frozen def
     rejects the splice — a dangling frozen def next to an authored one would
     not compile."""
-    per_file: dict[str, list[tuple[str, str]]] = {}
+    per_file: dict[str, list[DefReplacement]] = {}
     for uid, it in zip(component_uids(items), items, strict=True):
         block = authored.get(uid)
         if block is None:
             return {}, False
-        per_file.setdefault(it.file, []).append((it.definition, block.definition))
+        # Fn definitions are enumerated as bare signatures (no vis/`unsafe`
+        # prefix, no stub body) — name the fn so the splice swaps the whole
+        # item instead of nesting the new def inside the old one.
+        fn_name = it.name if it.kind is SurfaceItemKind.FN_SIG else ""
+        per_file.setdefault(it.file, []).append(
+            DefReplacement(it.definition, block.definition, fn_name))
     edited: dict[str, str] = {}
     for rel, pairs in per_file.items():
         current = deps.read_skeleton(rel)
         if current is None:
             return edited, False
-        res = replace_definitions(current, pairs)
+        res = replace_surface_definitions(current, pairs)
         if not res.replaced:
             return edited, False
         edited[rel] = res.text

@@ -14,11 +14,28 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from pipeline_core.domain.rust_fn_headers import locate_all_fns
+
 
 @dataclass(frozen=True, slots=True)
 class RewriteResult:
     text: str
     replaced: bool
+
+
+@dataclass(frozen=True, slots=True)
+class DefReplacement:
+    """One frozen-definition swap. `old` is the enumerated definition text used
+    to LOCATE the target (whitespace-tolerant). For fn items the enumerated
+    text is the bare signature — no visibility/`unsafe` prefix and no stub
+    body — so replacing just the matched span leaves `pub(crate) pub(crate)
+    fn …` and an orphaned `{ … }` behind. A non-empty `fn_name` therefore
+    expands the matched signature to the ENTIRE enclosing fn item (qualifiers
+    through closing brace) before splicing `new` over it."""
+
+    old: str
+    new: str
+    fn_name: str = ""
 
 
 def _nonspace_index(text: str) -> tuple[str, list[int]]:
@@ -74,6 +91,14 @@ def replace_definition(
 def replace_definitions(
     text: str, replacements: list[tuple[str, str]],
 ) -> RewriteResult:
+    """Text-match-only batch replace (see `replace_surface_definitions`)."""
+    return replace_surface_definitions(
+        text, [DefReplacement(o, n) for o, n in replacements])
+
+
+def replace_surface_definitions(
+    text: str, replacements: list[DefReplacement],
+) -> RewriteResult:
     """Replace several frozen definitions in one file atomically. Occurrences
     are assigned in list order: when two items share an IDENTICAL frozen
     definition (e.g. the same private trait method on two impls), the first
@@ -81,17 +106,41 @@ def replace_definitions(
     text a previous replacement just spliced in (sequential single replaces
     re-match inside the fresh splice and nest garbage). Spans are located on
     the pristine text and applied bottom-up; any miss rejects the whole batch
-    (``replaced=False``, text unchanged)."""
+    (``replaced=False``, text unchanged).
+
+    A replacement carrying `fn_name` swaps the WHOLE enclosing fn item: the
+    signature match must fall inside the header of a brace-counted fn of that
+    name (comment/string occurrences of the signature text fail this test and
+    are skipped), and the splice span becomes qualifiers-through-closing-brace.
+    Same-name fns NOT targeted by any pair (a frozen `pub fn` twin) are left
+    untouched because their header never contains the enumerated signature."""
+    fn_locs: dict[str, list[tuple[str, int, int, int]]] = {}
+    used_fn_spans: set[tuple[int, int]] = set()
     cursor_by_def: dict[str, int] = {}
     spans: list[tuple[int, int, str]] = []
-    for old_def, new_def in replacements:
-        span = find_definition_span(
-            text, old_def, start_at=cursor_by_def.get(old_def, 0))
-        if span is None:
-            return RewriteResult(text, False)
-        start, end = span
-        cursor_by_def[old_def] = end
-        spans.append((start, end, new_def))
+    for rep in replacements:
+        pos = cursor_by_def.get(rep.old, 0)
+        while True:
+            span = find_definition_span(text, rep.old, start_at=pos)
+            if span is None:
+                return RewriteResult(text, False)
+            start, end = span
+            if not rep.fn_name:
+                cursor_by_def[rep.old] = end
+                spans.append((start, end, rep.new))
+                break
+            if rep.fn_name not in fn_locs:
+                fn_locs[rep.fn_name] = locate_all_fns(text, rep.fn_name)
+            enclosing = next(
+                ((s, be + 1) for _, s, bs, be in fn_locs[rep.fn_name]
+                 if s <= start and end < bs and (s, be + 1) not in used_fn_spans),
+                None)
+            if enclosing is not None:
+                used_fn_spans.add(enclosing)
+                cursor_by_def[rep.old] = end
+                spans.append((*enclosing, rep.new))
+                break
+            pos = start + 1  # sig text hit outside any fn header — keep looking
     ordered = sorted(spans, reverse=True)
     for (start, _, _), (_, prev_end, _) in zip(ordered, ordered[1:], strict=False):
         if start < prev_end:  # overlapping targets — ambiguous, refuse

@@ -109,6 +109,20 @@ def test_capped_retry_single_compile_fail_stays_quiet():
     assert f == []
 
 
+_T15_SCAFFOLD = ("  [t1.5] stable/('ErrorVTable', 'as_ref'): "
+                 "authored scaffold did not compile (attempt {}) — reverted.")
+
+
+def test_capped_retry_repeated_scaffold_compile_fail_alerts():
+    # The 2079391 burn: three t1.5 attempts, each "authored scaffold did not
+    # compile — reverted", zero alert because only the retrigger wording
+    # ("still did not compile") was counted.
+    lines = [_T15_SCAFFOLD.format(i) for i in (1, 2, 3)]
+    f = [x for x in analyze(lines, [])
+         if x.kind == HealthKind.CAPPED_RETRY_FUTILITY]
+    assert f and "3 re-author attempt(s) failed" in f[0].evidence
+
+
 def test_capped_retry_success_suppresses():
     f = [x for x in analyze([_RT_FAIL, _RT_FAIL, _RT_OK], [])
          if x.kind == HealthKind.CAPPED_RETRY_FUTILITY]

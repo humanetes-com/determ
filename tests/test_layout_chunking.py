@@ -154,9 +154,11 @@ def _items_and_file():
              _fn("get", "src/x.rs", "fn get(&self) -> u8", {"Inner"}),
              _fn("put", "src/x.rs", "fn put(&self) -> u8", {"Holder"}),
              _fn("erase", "src/x.rs", "fn erase(&self) -> u8", {"Holder"}))
+    # fn items render as bodied stubs in the skeleton (never bare decls)
     file_text = ("struct Inner { v: u8 }\nstruct Holder { v: u8 }\n"
-                 "fn get(&self) -> u8;\nfn put(&self) -> u8;\n"
-                 "fn erase(&self) -> u8;\n")
+                 "fn get(&self) -> u8 { unimplemented!() }\n"
+                 "fn put(&self) -> u8 { unimplemented!() }\n"
+                 "fn erase(&self) -> u8 { unimplemented!() }\n")
     return items, {"src/x.rs": file_text}
 
 
@@ -223,7 +225,8 @@ def test_chunk_exhausted_coverage_fails_component_without_writes():
 def test_duplicate_sigs_route_to_distinct_slots_via_uids():
     items = (_fn("as_ref", "src/e.rs", "fn as_ref(&self) -> &A"),
              _fn("as_ref", "src/e.rs", "fn as_ref(&self) -> &B"))
-    files = {"src/e.rs": "fn as_ref(&self) -> &A;\nfn as_ref(&self) -> &B;\n"}
+    files = {"src/e.rs": ("fn as_ref(&self) -> &A { unimplemented!() }\n"
+                          "fn as_ref(&self) -> &B { unimplemented!() }\n")}
     d = _ChunkDeps(files)
 
     def per_uid(prompt):
@@ -249,7 +252,8 @@ def test_duplicate_sigs_route_to_distinct_slots_via_uids():
 def test_prompt_lists_uids_with_current_sig():
     items = (_fn("as_ref", "src/e.rs", "fn as_ref(&self) -> &A"),
              _fn("as_ref", "src/e.rs", "fn as_ref(&self) -> &B"))
-    files = {"src/e.rs": "fn as_ref(&self) -> &A;\nfn as_ref(&self) -> &B;\n"}
+    files = {"src/e.rs": ("fn as_ref(&self) -> &A { unimplemented!() }\n"
+                          "fn as_ref(&self) -> &B { unimplemented!() }\n")}
     d = _ChunkDeps(files)
     author_layout(_surface_from(items), module_name="m",
                   public_surface="pub struct P;",

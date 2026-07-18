@@ -300,6 +300,7 @@ def analyze(
             if "re-authored successfully" in what or "authored layout compiles" in what:
                 succeeded.add(subj.strip())
             elif ("still did not compile" in what
+                  or "did not compile" in what
                   or any(r in what for r in _STRUCTURAL)):
                 fail_reasons.setdefault(subj.strip(), []).append(what.strip())
     for subj, reasons in fail_reasons.items():
