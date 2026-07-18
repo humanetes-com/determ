@@ -180,6 +180,57 @@ def test_summarize_test_binaries_per_target_breakdown():
     ]
 
 
+_SPLIT_STREAM = """\
+running 12 tests
+test a ... ok
+test result: ok. 12 passed; 0 failed; 1 ignored; 0 measured
+
+running 8 tests
+test result: FAILED. 6 passed; 2 failed; 0 ignored
+
+--- stderr ---
+   Compiling anyhow
+     Running unittests src/lib.rs (target/debug/deps/anyhow-ab12)
+     Running tests/test_boxed.rs (target/debug/deps/test_boxed-cd34)
+"""
+
+
+def test_summarize_test_binaries_split_stream_layout_keeps_labels():
+    # Captured cargo output puts the stderr `Running` lines AFTER every
+    # stdout section — labels must still bind by section index, not `?`.
+    assert summarize_test_binaries(_SPLIT_STREAM) == [
+        ("unittests src/lib.rs", 12, 0),
+        ("tests/test_boxed.rs", 6, 2),
+    ]
+
+
+_CRASHED_SECTION = """\
+running 12 tests
+test a ... ok
+test result: ok. 12 passed; 0 failed; 0 ignored
+
+running 8 tests
+test b ... ok
+
+running 3 tests
+test result: ok. 3 passed; 0 failed; 0 ignored
+
+--- stderr ---
+     Running unittests src/lib.rs (target/x)
+     Running tests/test_boxed.rs (target/y)
+   Doc-tests anyhow
+"""
+
+
+def test_summarize_test_binaries_crashed_section_consumes_its_label():
+    # The middle binary crashed (no `test result:` line) — it must still
+    # consume its label so the next section doesn't get misattributed.
+    assert summarize_test_binaries(_CRASHED_SECTION) == [
+        ("unittests src/lib.rs", 12, 0),
+        ("Doc-tests anyhow", 3, 0),
+    ]
+
+
 def test_summarize_test_binaries_empty_and_no_regex():
     assert summarize_test_binaries("") == []
     assert summarize_test_binaries("error[E0308]: mismatched") == []

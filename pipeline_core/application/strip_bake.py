@@ -274,6 +274,10 @@ class StripBakeDeps:
     # no-op binding disables the phase; any failure inside it degrades to the
     # frozen skeleton (the run proceeds exactly as before F11).
     run_layout_phase: Callable[[Path, str], None] = lambda _p, _m: None
+    # Strip rewrites mod declarations (drops `#[cfg(test)] mod`) under the
+    # same src path earlier phases already queried — cached mod records
+    # would misclassify cluster membership afterwards.
+    invalidate_structure: Callable[[], None] = lambda: None
 
 
 def strip_and_bake_module(
@@ -357,6 +361,7 @@ def strip_and_bake_module(
         d.log("  [augmentation] tree already clean — augmented state preserved from prior run.")
     d.git_tag(project_dir, f"task0c-augmented-{module_name}")
     d.strip_module_source(project_dir, module_dir)
+    d.invalidate_structure()
     # ATOMIC: commit the stripped tree FIRST, then mark state
     # done. Reverse of the legacy order — protects against
     # the lost-commit bug where a process dying between mark

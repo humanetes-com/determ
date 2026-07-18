@@ -37,6 +37,7 @@ def _deps(calls: list[str], *, phase_valid: bool = False, bake_ok: bool = True) 
         set_current=rec("set_current"),
         tarpaulin_bin=Path("/nonexistent/tarpaulin"),
         coverage_target=98.0,
+        invalidate_structure=rec("invalidate_structure"),
     )
 
 
@@ -63,9 +64,10 @@ def test_happy_path_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
     calls: list[str] = []
     strip_and_bake_module(tmp_path, "m", tmp_path / "m", crate_type="lib",
                           from_spec=False, src_hash="abc", deps=_deps(calls))
-    # Hard-Rule-11 ordering: capture → bake → commit → tag → strip → commit_and_mark.
+    # Hard-Rule-11 ordering: capture → bake → commit → tag → strip →
+    # cache invalidation (strip rewrote mod decls) → commit_and_mark.
     assert calls == ["capture", "bake", "git_commit", "git_tag", "strip",
-                     "commit_and_mark", "set_current"]
+                     "invalidate_structure", "commit_and_mark", "set_current"]
 
 
 def test_low_coverage_warns_then_proceeds(

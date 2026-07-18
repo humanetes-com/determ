@@ -106,6 +106,15 @@ class ImplFillDeps:
     task2_model: Any
 
 
+def _norm_src_rel(rel: str) -> str:
+    """Normalized workspace-relative path: posix separators, no leading
+    `src/`. Extractor records and block records disagree on the prefix; full
+    normalized equality is the only safe comparison (a basename fallback can
+    collide two same-named files in different directories)."""
+    p = Path(rel).as_posix().lstrip("/")
+    return p[4:] if p.startswith("src/") else p
+
+
 def fill_impl_blocks(
     deps: ImplFillDeps,
     project_dir: Path,
@@ -461,14 +470,23 @@ def fill_impl_blocks(
                 # each dropped body whose name matches a still-stubbed FREE fn
                 # in THIS file, disambiguating by the stub's verbatim signature
                 # (a free fn has no impl container to narrow on).
-                _free_stubs = {
-                    r["fn_name"]: r
-                    for r in (_scan_unimplemented_records_for_cluster(
-                        target_src_dir, cluster) or [])
-                    if (r.get("file", "") == file_rel
-                        or r.get("file", "").endswith("/" + Path(file_rel).name))
-                    and not str(r.get("container", "")).strip().startswith("impl")
-                }
+                _free_stubs: dict[str, list[dict[str, Any]]] = {}
+                for r in (_scan_unimplemented_records_for_cluster(
+                        target_src_dir, cluster) or []):
+                    # Full normalized rel-path equality only — a basename
+                    # fallback can hit a same-named file in another directory
+                    # (two `mod.rs`). Extractor paths may carry a `src/`
+                    # prefix the block records lack; strip it on both sides.
+                    if _norm_src_rel(r.get("file", "")) != _norm_src_rel(file_rel):
+                        continue
+                    # Only module-level stubs may receive a rerouted body:
+                    # free fns ("" or `mod …`) and trait default methods
+                    # (`trait …`). Impl methods are container-scoped by the
+                    # main routing and must never be reachable by bare name.
+                    _cont = str(r.get("container", "")).strip()
+                    if _cont and not _cont.startswith(("mod ", "trait ")):
+                        continue
+                    _free_stubs.setdefault(r["fn_name"], []).append(r)
                 if _free_stubs and routing.dropped:
                     _dropped_keys = {(_db.fn_name, _db.block_attr)
                                      for _db in routing.dropped}
@@ -483,9 +501,24 @@ def fill_impl_blocks(
                         # into the self-less free `fn not(cond)` → E0424).
                         if _p["block"].lstrip().startswith("impl"):
                             continue
-                        _rec = _free_stubs.get(_p["fn_name"])
-                        if _rec is None:
+                        _cands = _free_stubs.get(_p["fn_name"], [])
+                        if len(_cands) > 1:
+                            # Same fn name stubbed in several mods of this
+                            # file: bind only on an exact container match from
+                            # the body's own block attr; guessing splices into
+                            # the wrong mod's stub.
+                            _blk = _p["block"].strip()
+                            _cands = [c for c in _cands
+                                      if str(c.get("container", "")).strip()
+                                      in (_blk, f"mod {_blk}", f"trait {_blk}")]
+                        if len(_cands) != 1:
+                            if _p["fn_name"] in _free_stubs:
+                                _log(f"  [phase-c/file] {file_rel}: free-fn "
+                                     f"reroute of `{_p['fn_name']}` refused — "
+                                     f"{len(_cands) or 'no unambiguous'} "
+                                     "matching module-level stub(s).")
                             continue
+                        _rec = _cands[0]
                         _ok, _reason, _d = _splice_fn_with_where(
                             file_path, str(_rec.get("container", "")),
                             _p["fn_name"], _p["body"], _p["where_clause"],

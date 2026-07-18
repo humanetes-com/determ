@@ -201,6 +201,19 @@ def test_u2_gate_external_stub_panic_accepts(tmp_path) -> None:
     assert FnSite("src/error.rs", "context", "impl Error") in v.blocking_fns
 
 
+def test_u2_gate_surfaces_missing_verdicts_on_crashed_scoped_binary() -> None:
+    # rc!=0 with the unit's own test absent from the output = the scoped
+    # binary crashed/failed to compile. Verdict stays fail-safe ACCEPT (the
+    # regression gate owns executed-count drops) but the deficit must reach
+    # the guard channel, never pass silently.
+    fired = []
+    v = _gate(_const_run_cargo(101, "error: process didn't exit successfully"),
+              {"a", "b"}, guard=lambda loc, m: fired.append((loc, m)))
+    assert v.decision is U2Decision.ACCEPT
+    assert fired and fired[0][0] == "phase-c/u2_missing_verdict"
+    assert "'a'" in fired[0][1] and "'b'" in fired[0][1]
+
+
 def test_u2_gate_failsafe_and_inconclusive() -> None:
     # run_cargo raises → guard fires, ACCEPT (fail-safe)
     fired = []

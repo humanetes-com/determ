@@ -211,3 +211,50 @@ def test_active_test_inventory_names_and_stem_scope(tmp_path) -> None:
         tmp_path, _Cluster(), deps)
     assert full_n == 4 and full_names == frozenset(
         {"t_a1", "t_a2", "t_b", "t_lib"})
+
+
+def test_active_test_inventory_subdir_module_counts_into_root_binary(
+        tmp_path) -> None:
+    # tests/common/mod.rs has no binary of its own — its #[test] fns compile
+    # INTO tests/a.rs (which declares `mod common;`). The stem-scoped
+    # inventory must count them; a subdir NOT included by any selected root
+    # binary stays out.
+    from pipeline_core.application.test_count import (
+        TestCountDeps,
+        active_test_inventory_for_cluster,
+    )
+    (tmp_path / "tests" / "common").mkdir(parents=True)
+    (tmp_path / "tests" / "orphan").mkdir()
+    (tmp_path / "tests" / "a.rs").write_text(
+        "mod common;\n#[test]\nfn t_a() {}\n", encoding="utf-8")
+    (tmp_path / "tests" / "common" / "mod.rs").write_text(
+        "#[test]\nfn t_common() {}\n", encoding="utf-8")
+    (tmp_path / "tests" / "orphan" / "mod.rs").write_text(
+        "#[test]\nfn t_orphan() {}\n", encoding="utf-8")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "lib.rs").write_text("", encoding="utf-8")
+
+    def _recs(p):
+        return [
+            {"file": "tests/a.rs", "fn_name": "t_a", "is_test": True,
+             "cfg_predicates": []},
+            {"file": "tests/common/mod.rs", "fn_name": "t_common",
+             "is_test": True, "cfg_predicates": []},
+            {"file": "tests/orphan/mod.rs", "fn_name": "t_orphan",
+             "is_test": True, "cfg_predicates": []},
+        ]
+
+    deps = TestCountDeps(
+        enumerate_fns=_recs,
+        mod_records=lambda p: None,
+        file_cfg_predicate=lambda d, n: None,
+        is_gen_tests_file=lambda n: ".gen_tests_" in n,
+    )
+
+    class _Cluster:
+        cfg_true: list[str] = []
+        cfg_false: list[str] = []
+
+    n, names = active_test_inventory_for_cluster(
+        tmp_path, _Cluster(), deps, tests_dir_stems=frozenset({"a"}))
+    assert n == 2 and names == frozenset({"t_a", "t_common"})

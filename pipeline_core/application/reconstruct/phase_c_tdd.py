@@ -244,6 +244,10 @@ def run_phase_c_tdd(
     _vanish_streak = 0
     _crash_retrigger_after = int(
         os.getenv("PHASE_C_CRASH_RETRIGGER_AFTER", "2"))
+    # One-iter cooldown after a retrigger attempt: the next sweep's shrink is
+    # expected (reverted stubs crash until re-filled) and must not confirm-now
+    # a fresh attempt before a single fill pass has run.
+    _retrig_cooldown = False
 
     def _reconcile(rc_: int, output_: str, pass_n: int, fail_n: int,
                    failed_: set[str]) -> tuple[int, set[str], SweepOracle]:
@@ -532,8 +536,15 @@ def run_phase_c_tdd(
             # on tests that cannot report verdicts); an immediate re-sweep
             # (<1s) answers the same transient-vs-real question now — a crash
             # that reproduces back-to-back is deterministic, so the streak is
-            # treated as complete this iter.
+            # treated as complete this iter. EXCEPT right after a successful
+            # re-author: its surgical revert leaves the component's fns as
+            # stubs, and a stub panic inside drop/vtable code aborts the test
+            # binary — the very next sweep shrinks REGARDLESS of the new
+            # layout's quality. Firing then burns the capped attempt budget
+            # with zero re-fill evidence (observed live: attempts 1 and 2 in
+            # back-to-back iters). The fills of THIS iter must run first.
             if (_vanish_streak < _crash_retrigger_after
+                    and not _retrig_cooldown
                     and deps.retrigger_layout is not None):
                 _rc2, _out2 = deps.run_cargo(
                     test_cmd, target_src_dir, cluster_env, timeout=test_timeout)
@@ -549,6 +560,7 @@ def run_phase_c_tdd(
                     _vanish_streak = _crash_retrigger_after
         else:
             _vanish_streak = 0
+        _retrig_cooldown = False   # one iter of fills has now had its chance
         if (_vanish_streak >= _crash_retrigger_after
                 and deps.retrigger_layout is not None):
             _vanish_streak = 0   # re-arm only after another full streak
@@ -564,6 +576,8 @@ def run_phase_c_tdd(
                     vanished=frozenset(_oracle.vanished),
                     suspect_fns=frozenset(_suspects),
                     consecutive_sweeps=_crash_retrigger_after))
+            if _retrig_c.fired:
+                _retrig_cooldown = True
             if _retrig_c.fired and _retrig_c.succeeded:
                 deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: CRASH layout "
                          f"retrigger fired (cause={_retrig_c.cause}) — reverted "

@@ -16,6 +16,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from pipeline_core.application.reconstruct.import_repair import (
+    repair_missing_imports,
+)
 from pipeline_core.application.reconstruct.pull_resolver import (
     PullSources,
     make_request_answerer,
@@ -260,6 +263,20 @@ def run_task3_inline_retry(
             compile_cmd, project_dir, _env(), timeout=deps.test_timeout)
         if not diags:
             return {"abort": True, "reason": "no_compile_errors"}
+        # Deterministic import repair first: a rustc single-candidate
+        # "consider importing" suggestion needs no LLM attempt — the fill
+        # paths already do this, and an E0425-class failure reaching task3
+        # burned model calls here before.
+        for _rel in sorted({f.file for d in diags for f in d.import_fixes}):
+            _rep = repair_missing_imports(
+                lambda cmd, cwd, env: deps.cargo.check_diag(
+                    cmd, cwd, env, timeout=deps.test_timeout),
+                compile_cmd, project_dir, _env(), _rel, diags,
+                deps.log, "[task3-retry]")
+            if _rep is not None:
+                _, _, diags = _rep
+                if not diags:
+                    return {"summary": "auto_import_repair", "abort": False}
         frontier = deps.attribution.filter_test_targets(
             deps.attribution.frontier_from_diags(diags, project_dir), project_dir)
         refs: list[FnLocator] = list(frontier.keys())

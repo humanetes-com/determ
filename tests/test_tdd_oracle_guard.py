@@ -171,6 +171,39 @@ def test_reproducible_first_sweep_shrink_fires_retrigger_immediately(
     assert len(cargo_runs) >= 2
 
 
+def test_retrigger_cooldown_skips_confirm_now_for_one_fill_pass(
+        tmp_path: Path, monkeypatch) -> None:
+    # After a retrigger attempt the component's fns are reverted to stubs, so
+    # the NEXT sweep shrinks regardless of the new layout — confirm-now must
+    # not burn the capped attempt budget in back-to-back iters (observed
+    # live: attempts 1+2 fired at iters 1+2 with zero fills between). Fired
+    # events must never land on consecutive iters.
+    from pipeline_core.application.retrigger_layout import RetriggerResult
+    monkeypatch.setenv("PHASE_C_CRASH_RETRIGGER_AFTER", "2")
+    out = ("test t1 ... FAILED\n"
+           "test result: FAILED. 0 passed; 1 failed; 0 ignored")
+    calls: list[int] = []
+
+    def _retrig(pd, mod, cl, sd, output, crash_evidence=None):
+        calls.append(1)
+        fired = len(calls) <= 2
+        return RetriggerResult(fired=fired, succeeded=fired,
+                               reverted_count=1, cause="RUNTIME_CRASH")
+
+    events: list[tuple[str, dict]] = []
+    _run_driver(monkeypatch, tmp_path,
+                run_cargo=lambda *a, **k: (101, out),
+                inventory=lambda pd, cl, stems: (2, frozenset({"t1", "t2"})),
+                attribution_kwargs=[], checkpoints=[], events=events,
+                retrigger=_retrig,
+                reverse_map={"t2": {("src/error.rs", "downcast_ref")}})
+    fired_iters = [d["iter"] for ev, d in events
+                   if ev == "phase_c.layout_retrigger.fired"]
+    assert len(fired_iters) == 2
+    assert fired_iters[1] - fired_iters[0] >= 2, \
+        f"attempts fired on consecutive iters: {fired_iters}"
+
+
 def test_transient_shrink_confirm_sweep_intact_does_not_fire(
         tmp_path: Path, monkeypatch) -> None:
     # First sweep shrinks, but the instant re-sweep reports every expected

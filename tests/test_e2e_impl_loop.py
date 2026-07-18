@@ -539,6 +539,88 @@ def test_file_first_routes_free_fn_but_never_an_impl_addressed_body(
     assert "self.tag\n" in text and "self.tag + 1" in text
 
 
+IMPL_LIB_TWO_MODS = """\
+pub mod a {
+    pub fn helper() -> u32 {
+        unimplemented!()
+    }
+}
+pub mod b {
+    pub fn helper() -> u32 {
+        unimplemented!()
+    }
+}
+
+pub struct Foo { tag: u32 }
+pub struct Bar { tag: u32 }
+
+impl Foo {
+    pub fn kind(&self) -> u32 {
+        unimplemented!()
+    }
+}
+impl Bar {
+    pub fn name(&self) -> u32 {
+        unimplemented!()
+    }
+}
+"""
+
+RESPONSE_TWO_MODS = (
+    '<FN name="kind" block="impl Foo">self.tag</FN>\n'
+    '<FN name="name" block="impl Bar">self.tag + 1</FN>\n'
+    '<FN name="helper" block="mod b">42</FN>'
+)
+
+
+def _two_mod_stub_records(*a, **k):
+    return [
+        {"file": "lib.rs", "fn_name": "helper", "container": "mod a",
+         "sig_text": "pub fn helper() -> u32",
+         "has_unimplemented_body": True},
+        {"file": "lib.rs", "fn_name": "helper", "container": "mod b",
+         "sig_text": "pub fn helper() -> u32",
+         "has_unimplemented_body": True},
+    ]
+
+
+def test_free_fn_reroute_same_name_in_two_mods_binds_by_container(
+        monkeypatch, tmp_path):
+    """Two same-named FREE fns stubbed in different mods of one file must not
+    collapse to one record (last-wins routed a body into the wrong mod): the
+    body's own block attr picks its mod, the other stub stays untouched."""
+    ws = _setup(monkeypatch, tmp_path)
+    (ws / "src" / "lib.rs").write_text(IMPL_LIB_TWO_MODS)
+    install_cluster_scan(monkeypatch, impl_blocks=lambda *a, **k: _two_blocks())
+    install_cluster_scan(monkeypatch, stub_records=_two_mod_stub_records)
+    _install_model(monkeypatch, [RESPONSE_TWO_MODS])
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
+    _run(ws)
+    text = (ws / "src" / "lib.rs").read_text()
+    mod_a = text.split("pub mod b", 1)[0]
+    mod_b = text.split("pub mod b", 1)[1].split("pub struct Foo", 1)[0]
+    assert "unimplemented!()" in mod_a    # mod a's stub untouched
+    assert "42" in mod_b                  # the body landed in mod b only
+
+
+def test_free_fn_reroute_ambiguous_two_mods_refuses(
+        monkeypatch, tmp_path):
+    """A dropped body whose block attr names NO mod cannot pick between two
+    same-named mod stubs — the reroute must refuse, never guess."""
+    ws = _setup(monkeypatch, tmp_path)
+    (ws / "src" / "lib.rs").write_text(IMPL_LIB_TWO_MODS)
+    install_cluster_scan(monkeypatch, impl_blocks=lambda *a, **k: _two_blocks())
+    install_cluster_scan(monkeypatch, stub_records=_two_mod_stub_records)
+    _install_model(monkeypatch, [
+        '<FN name="kind" block="impl Foo">self.tag</FN>\n'
+        '<FN name="name" block="impl Bar">self.tag + 1</FN>\n'
+        '<FN name="helper" block="pub fn helper() -> u32">42</FN>'])
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
+    _run(ws)
+    text = (ws / "src" / "lib.rs").read_text()
+    assert text.count("unimplemented!()") == 2   # both mod stubs untouched
+
+
 def test_file_first_skipped_for_single_block(monkeypatch, tmp_path):
     ws = _setup(monkeypatch, tmp_path)      # default single-block fixture
     _install_model(monkeypatch, [RESPONSE_BOTH])

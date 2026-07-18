@@ -1438,6 +1438,7 @@ def build_app(
         set_current=set_current, tarpaulin_bin=cfg.tarpaulin_bin,
         coverage_target=helpers.coverage_target,
         run_layout_phase=run_layout_phase,
+        invalidate_structure=structure_cache.invalidate,
     )
     bake_artifacts_deps = BakeArtifactsDeps(
         log=ports.log,

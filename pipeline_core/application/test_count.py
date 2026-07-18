@@ -22,6 +22,7 @@ from typing import Any
 from pipeline_core.domain.cargo_toml import cargo_default_features
 from pipeline_core.domain.cfg import CfgSet
 from pipeline_core.domain.generation import gen_tests_decl_blocks
+from pipeline_core.domain.rust_scan import mod_decls
 from pipeline_core.domain.test_count import (
     count_test_fns_cfg_aware,
     count_test_fns_in_records,
@@ -167,9 +168,29 @@ def active_test_inventory_for_cluster(
     # 1. tests/**/*.rs — cfg-filtered per-test.
     tests_dir = project_dir / "tests"
     if tests_dir.is_dir():
+        # A subdirectory module (tests/common/mod.rs) has no binary of its
+        # own — it compiles INTO every root-level binary that declares its
+        # top directory (`mod common;`). With a stem filter active, such
+        # files count iff a SELECTED root binary includes them; skipping
+        # them wholesale undercounted their #[test] fns (missed vanishes).
+        included_dirs: set[str] = set()
+        if tests_dir_stems is not None:
+            for root_f in tests_dir.glob("*.rs"):
+                if root_f.stem not in tests_dir_stems:
+                    continue
+                try:
+                    rtext = root_f.read_text(encoding="utf-8", errors="replace")
+                except Exception:
+                    continue
+                included_dirs.update(mod_decls(rtext))
         for tp in tests_dir.rglob("*.rs"):
-            if tests_dir_stems is not None and tp.stem not in tests_dir_stems:
-                continue
+            rel_parts = tp.relative_to(tests_dir).parts
+            if tests_dir_stems is not None:
+                in_root = len(rel_parts) == 1
+                if in_root and tp.stem not in tests_dir_stems:
+                    continue
+                if not in_root and rel_parts[0] not in included_dirs:
+                    continue
             try:
                 text = tp.read_text(encoding="utf-8", errors="replace")
             except Exception:

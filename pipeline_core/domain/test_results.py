@@ -171,22 +171,33 @@ def summarize_test_binaries(test_output: str) -> list[tuple[str, int, int]]:
     #44: a drop in the number of binaries/tests that RUN — not just pass→fail —
     was previously invisible because only the summed pass/fail was logged).
 
-    Pure string parsing: a `Running <desc> (<path>)` / `Doc-tests <crate>` line
-    opens a binary; the next `test result:` line closes it with its counts."""
-    out: list[tuple[str, int, int]] = []
-    label = "?"
+    Pure string parsing, resilient to the combined stdout+stderr layout: the
+    `Running <desc> (<path>)` / `Doc-tests <crate>` labels are STDERR lines,
+    so in captured output they may all sit AFTER every stdout `test result:`
+    line (which made every label render `?` in live logs). Cargo executes
+    targets sequentially, so the i-th label names the i-th stdout section
+    opened by a libtest `running N tests` header; sections are paired with
+    labels by index. A section with no `test result:` line (its binary
+    crashed mid-run) still consumes its label."""
+    labels: list[str] = []
     for raw in test_output.splitlines():
         line = raw.strip()
         if line.startswith("Running "):
             # `Running unittests src/lib.rs (target/…)` → drop the (path) tail.
             desc = line[len("Running "):].split(" (", 1)[0].strip()
-            label = desc or "?"
+            labels.append(desc or "?")
         elif line.startswith("Doc-tests "):
-            label = "Doc-tests " + line[len("Doc-tests "):].strip()
+            labels.append("Doc-tests " + line[len("Doc-tests "):].strip())
+    out: list[tuple[str, int, int]] = []
+    section = -1
+    for raw in test_output.splitlines():
+        line = raw.strip()
+        if line.startswith("running ") and line.endswith(("tests", "test")):
+            section += 1
         elif line.startswith("test result:"):
             p, f = _counts_on_result_line(line)
+            label = labels[section] if 0 <= section < len(labels) else "?"
             out.append((label, p, f))
-            label = "?"
     return out
 
 

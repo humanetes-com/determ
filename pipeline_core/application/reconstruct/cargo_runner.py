@@ -285,6 +285,18 @@ def u2_test_gate(
     scoped = TestRunReport(
         report.passed,
         tuple(f for f in report.failures if f.test_name in fn_tests))
+    # Expected-vs-reported for OUR OWN tests: a crashed/uncompilable scoped
+    # binary takes its tests away without a FAILED line, so rc!=0 with no
+    # parsed failures used to read as "no failures" here. The verdict stays
+    # fail-safe ACCEPT (the whole-cluster regression gate owns executed-count
+    # drops, with a baseline this gate lacks) — but the deficit is surfaced,
+    # never silently invisible.
+    _reported = report.passed | {f.test_name for f in report.failures}
+    _missing = fn_tests - _reported
+    if rc != 0 and _missing:
+        guard("phase-c/u2_missing_verdict",
+              f"{sorted(_missing)} reported no verdict in the scoped run "
+              "(binary crashed or failed to compile)")
     if not scoped.failures:
         return U2Verdict.accept()
     locate = make_fn_site_locator(structure, target_src_dir)
