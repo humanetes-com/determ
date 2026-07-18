@@ -137,6 +137,73 @@ def test_intact_oracle_keeps_legacy_done_path(
                if ev == "phase_c.tdd.iter")
 
 
+def test_reproducible_first_sweep_shrink_fires_retrigger_immediately(
+        tmp_path: Path, monkeypatch) -> None:
+    # First shrunk sweep + the shrink reproducing on the instant re-sweep =
+    # deterministic crash: the retrigger fires at iter 1 instead of burning a
+    # full fill pass waiting for a second sweep.
+    from pipeline_core.application.retrigger_layout import RetriggerResult
+    monkeypatch.setenv("PHASE_C_CRASH_RETRIGGER_AFTER", "2")
+    out = ("test t1 ... FAILED\n"
+           "test result: FAILED. 0 passed; 1 failed; 0 ignored")
+    cargo_runs: list[int] = []
+    calls: list[dict[str, Any]] = []
+
+    def _cargo(*a: Any, **k: Any):
+        cargo_runs.append(1)
+        return 101, out
+
+    def _retrig(pd, mod, cl, sd, output, crash_evidence=None):
+        calls.append({"evidence": crash_evidence})
+        fired = len(calls) == 1
+        return RetriggerResult(fired=fired, succeeded=fired,
+                               reverted_count=1, cause="RUNTIME_CRASH")
+
+    events: list[tuple[str, dict]] = []
+    _run_driver(monkeypatch, tmp_path,
+                run_cargo=_cargo,
+                inventory=lambda pd, cl, stems: (2, frozenset({"t1", "t2"})),
+                attribution_kwargs=[], checkpoints=[], events=events,
+                retrigger=_retrig,
+                reverse_map={"t2": {("src/error.rs", "downcast_ref")}})
+    assert calls, "retrigger never fired on a reproducible first-sweep shrink"
+    # sweep + confirmation re-sweep happened before the first retrigger call
+    assert len(cargo_runs) >= 2
+
+
+def test_transient_shrink_confirm_sweep_intact_does_not_fire(
+        tmp_path: Path, monkeypatch) -> None:
+    # First sweep shrinks, but the instant re-sweep reports every expected
+    # test — transient, no retrigger this iter.
+    monkeypatch.setenv("PHASE_C_CRASH_RETRIGGER_AFTER", "2")
+    shrunk = ("test t1 ... FAILED\n"
+              "test result: FAILED. 0 passed; 1 failed; 0 ignored")
+    intact = ("test t1 ... FAILED\ntest t2 ... ok\n"
+              "test result: FAILED. 1 passed; 1 failed; 0 ignored")
+    outs = [shrunk, intact]
+    calls: list[dict[str, Any]] = []
+
+    def _cargo(*a: Any, **k: Any):
+        return 101, outs.pop(0) if outs else intact
+
+    def _retrig(pd, mod, cl, sd, output, crash_evidence=None):
+        calls.append({"evidence": crash_evidence})
+        from pipeline_core.application.retrigger_layout import RetriggerResult
+        return RetriggerResult(fired=False)
+
+    events: list[tuple[str, dict]] = []
+    _run_driver(monkeypatch, tmp_path,
+                run_cargo=_cargo,
+                inventory=lambda pd, cl, stems: (2, frozenset({"t1", "t2"})),
+                attribution_kwargs=[], checkpoints=[], events=events,
+                retrigger=_retrig,
+                reverse_map={"t2": {("src/error.rs", "downcast_ref")}})
+    # The stall-exit path may still consult the retrigger via the error-text
+    # channel; what must NOT happen is a crash-evidence (cause C) call.
+    assert all(c["evidence"] is None for c in calls), \
+        "crash retrigger fired on a transient one-sweep shrink"
+
+
 def test_persistent_vanish_fires_crash_retrigger_with_suspects(
         tmp_path: Path, monkeypatch) -> None:
     # Two consecutive short-oracle sweeps → the driver calls the layout

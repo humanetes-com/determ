@@ -526,6 +526,27 @@ def run_phase_c_tdd(
         # burning the stall budget on it.
         if _oracle.missing_count > 0:
             _vanish_streak += 1
+            # A shrunk oracle with a clean compile is either the frozen-scheme
+            # crash class or a transient. Waiting for the streak proves
+            # persistence at the cost of a full fill pass (hours of GPU spent
+            # on tests that cannot report verdicts); an immediate re-sweep
+            # (<1s) answers the same transient-vs-real question now — a crash
+            # that reproduces back-to-back is deterministic, so the streak is
+            # treated as complete this iter.
+            if (_vanish_streak < _crash_retrigger_after
+                    and deps.retrigger_layout is not None):
+                _rc2, _out2 = deps.run_cargo(
+                    test_cmd, target_src_dir, cluster_env, timeout=test_timeout)
+                _p2, _f2, _ig2 = parse_test_counts(_out2)
+                _, _, _oracle2 = _reconcile(
+                    _rc2, _out2, _p2, _f2, parse_failed_tests(_out2))
+                if _oracle2.missing_count > 0:
+                    deps.log(
+                        f"  {tag} [phase-c/tdd] iter {iter_n}: oracle shrink "
+                        "reproduced on immediate re-sweep — crash is "
+                        "deterministic, retriggering now instead of waiting "
+                        "out the sweep streak.")
+                    _vanish_streak = _crash_retrigger_after
         else:
             _vanish_streak = 0
         if (_vanish_streak >= _crash_retrigger_after
