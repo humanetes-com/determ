@@ -32,21 +32,29 @@ def _nonspace_index(text: str) -> tuple[str, list[int]]:
     return "".join(chars), idx
 
 
-def find_definition_span(text: str, definition: str) -> tuple[int, int] | None:
+def find_definition_span(
+    text: str, definition: str, *, start_at: int = 0,
+) -> tuple[int, int] | None:
     """The [start, end) span in `text` matching `definition` ignoring whitespace
     runs, or None. Matches on the non-space projection so a struct enumerated as
     ``struct Own<T> { ptr: NonNull<T> }`` still locates its skeleton rendering
-    across differing indentation/newlines."""
+    across differing indentation/newlines. `start_at` restricts the search to
+    spans beginning at or after that original-text offset (occurrence stepping
+    for duplicate definitions)."""
     hay, idx = _nonspace_index(text)
     needle, _ = _nonspace_index(definition)
     if not needle:
         return None
-    pos = hay.find(needle)
-    if pos == -1:
-        return None
-    start = idx[pos]
-    end = idx[pos + len(needle) - 1] + 1
-    return start, end
+    pos = 0
+    while True:
+        pos = hay.find(needle, pos)
+        if pos == -1:
+            return None
+        start = idx[pos]
+        if start >= start_at:
+            end = idx[pos + len(needle) - 1] + 1
+            return start, end
+        pos += 1
 
 
 def replace_definition(
@@ -61,3 +69,33 @@ def replace_definition(
         return RewriteResult(text, False)
     start, end = span
     return RewriteResult(text[:start] + new_definition + text[end:], True)
+
+
+def replace_definitions(
+    text: str, replacements: list[tuple[str, str]],
+) -> RewriteResult:
+    """Replace several frozen definitions in one file atomically. Occurrences
+    are assigned in list order: when two items share an IDENTICAL frozen
+    definition (e.g. the same private trait method on two impls), the first
+    pair binds the first occurrence, the second pair the next one — never the
+    text a previous replacement just spliced in (sequential single replaces
+    re-match inside the fresh splice and nest garbage). Spans are located on
+    the pristine text and applied bottom-up; any miss rejects the whole batch
+    (``replaced=False``, text unchanged)."""
+    cursor_by_def: dict[str, int] = {}
+    spans: list[tuple[int, int, str]] = []
+    for old_def, new_def in replacements:
+        span = find_definition_span(
+            text, old_def, start_at=cursor_by_def.get(old_def, 0))
+        if span is None:
+            return RewriteResult(text, False)
+        start, end = span
+        cursor_by_def[old_def] = end
+        spans.append((start, end, new_def))
+    ordered = sorted(spans, reverse=True)
+    for (start, _, _), (_, prev_end, _) in zip(ordered, ordered[1:], strict=False):
+        if start < prev_end:  # overlapping targets — ambiguous, refuse
+            return RewriteResult(text, False)
+    for start, end, new_def in ordered:
+        text = text[:start] + new_def + text[end:]
+    return RewriteResult(text, True)

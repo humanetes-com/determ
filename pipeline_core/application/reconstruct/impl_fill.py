@@ -21,6 +21,9 @@ from pipeline_core.application.reconstruct.cargo_errors import ecodes_in_text, f
 from pipeline_core.application.reconstruct.cluster_membership import (
     collect_impl_refill_targets,
 )
+from pipeline_core.application.reconstruct.import_repair import (
+    repair_missing_imports,
+)
 from pipeline_core.application.reconstruct.pull_resolver import (
     PullSources,
     ask_with_pulls,
@@ -500,6 +503,13 @@ def fill_impl_blocks(
                     return
                 rc, cargo_out, _diags = _run_cargo_check_diag(
                     check_cmd, target_src_dir, cluster_env)
+                if rc != 0:
+                    _rep = repair_missing_imports(
+                        _run_cargo_check_diag, check_cmd, target_src_dir,
+                        cluster_env or {}, file_rel, _diags, _log,
+                        "[phase-c/file]")
+                    if _rep is not None:
+                        rc, cargo_out, _diags = _rep
                 _u2_file: U2Verdict | None = None
                 if rc == 0:
                     _unit_fns = frozenset(
@@ -873,6 +883,16 @@ def fill_impl_blocks(
                 # not from regex over rendered text.
                 rc, cargo_out, diagnostics = _run_cargo_check_diag(
                     check_cmd, target_src_dir, cluster_env)
+                if rc != 0:
+                    # Deterministic repair: a body cannot add `use` items, so
+                    # apply rustc's own single-candidate import suggestions to
+                    # the block's file and re-check before charging the model.
+                    _rep = repair_missing_imports(
+                        _run_cargo_check_diag, check_cmd, target_src_dir,
+                        cluster_env or {}, block.file, diagnostics, _log,
+                        "[phase-c/impl]")
+                    if _rep is not None:
+                        rc, cargo_out, diagnostics = _rep
                 _last_full_out[0] = cargo_out  # `full_error` pull source
                 _u2_impl: U2Verdict | None = None
                 if rc == 0:

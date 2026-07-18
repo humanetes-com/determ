@@ -1,0 +1,65 @@
+"""Sweep-level test-oracle reconciliation — pure domain.
+
+A cargo test sweep only reports tests whose binary built AND ran to the
+summary line; a binary that fails to compile or crashes (segfault, abort)
+takes its whole test set out of the output silently. Comparing pass/fail
+counts across sweeps with a shrinking denominator understates failures and
+can manufacture a fraudulent "all tests pass" (FR-018/FR-022) — the same
+fraud class FR-024 guards at TASK 3, applied here to every TDD iteration.
+
+`reconcile_sweep` folds the statically-expected oracle (cfg-aware test-fn
+inventory) into one sweep's observed results: expected tests that reported no
+verdict are VANISHED and must be accounted as failing; a reported total below
+the expected count is a DEFICIT that blocks "cluster done".
+
+Names compare on their last `::` segment: cargo may print `module::test_x`
+while the static inventory carries the bare fn name.
+"""
+from __future__ import annotations
+
+from collections.abc import Iterable
+from dataclasses import dataclass
+
+
+def bare_test_name(name: str) -> str:
+    return name.rsplit("::", 1)[-1]
+
+
+@dataclass(frozen=True, slots=True)
+class SweepOracle:
+    """One sweep's oracle verdict. `vanished` holds expected test names (bare
+    form) that reported no verdict; `deficit` is how many expected tests are
+    missing from the reported total (covers tests the static NAME inventory
+    could not enumerate). `intact` gates ratchet snapshots / "cluster done"."""
+    vanished: frozenset[str]
+    deficit: int
+
+    @property
+    def intact(self) -> bool:
+        return not self.vanished and self.deficit <= 0
+
+    @property
+    def missing_count(self) -> int:
+        """How many expected tests reported no verdict. `vanished` and
+        `deficit` overlap (a vanished name IS part of the count deficit), so
+        the honest fail-count adjustment is the max, never the sum."""
+        return max(len(self.vanished), self.deficit)
+
+
+def reconcile_sweep(
+    expected_count: int,
+    expected_names: frozenset[str],
+    passed: Iterable[str],
+    failed: Iterable[str],
+    ignored_count: int = 0,
+) -> SweepOracle:
+    observed = {bare_test_name(n) for n in passed}
+    observed |= {bare_test_name(n) for n in failed}
+    vanished = frozenset(
+        n for n in (bare_test_name(e) for e in expected_names)
+        if n not in observed)
+    reported = len(observed) + ignored_count
+    return SweepOracle(
+        vanished=vanished,
+        deficit=max(0, expected_count - reported),
+    )

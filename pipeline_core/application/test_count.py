@@ -26,6 +26,7 @@ from pipeline_core.domain.test_count import (
     count_test_fns_cfg_aware,
     count_test_fns_in_records,
     file_top_cfg_excluded,
+    test_fn_names_in_records,
 )
 
 
@@ -87,6 +88,27 @@ def count_active_tests_for_cluster(
     """FR-024 strict-verdict helper — see module docstring. Counts three
     sources (tests/, gen_tests siblings, src/), all cfg-filtered against the
     cluster's (cfg_true, cfg_false) sets. Returns the cfg-aware total."""
+    return active_test_inventory_for_cluster(project_dir, cluster, deps)[0]
+
+
+def active_test_inventory_for_cluster(
+    project_dir: Path,
+    cluster: Any,
+    deps: TestCountDeps,
+    *,
+    tests_dir_stems: frozenset[str] | None = None,
+) -> tuple[int, frozenset[str]]:
+    """(expected_count, expected_names) over the same walk as
+    `count_active_tests_for_cluster`. Names come from the typed-record path
+    only — a file counted via the line-walker fallback contributes to the
+    count but not the names, so the name set may be a SUBSET of the count
+    (safe: reconciliation treats missing names as a count deficit, never
+    invents vanished tests).
+
+    `tests_dir_stems`: when given, the inventory covers ONLY `tests/` files
+    with those stems — the denominator of a `cargo test --test stem…` sweep
+    (which runs no src-side or gen_tests tests). None keeps the full FR-024
+    walk (tests/ + gen_tests siblings + src/)."""
     if cluster is None:
         cfg_true: set[str] = set()
         cfg_false: set[str] = set()
@@ -120,30 +142,46 @@ def count_active_tests_for_cluster(
         for r in fn_recs:
             by_file.setdefault(r.get("file", ""), []).append(r)
 
-    def _count_file(rel: str, text: str) -> int:
+    def _count_file(rel: str, text: str) -> tuple[int, frozenset[str]]:
         # File-level inner `#![cfg(P)]` gates the whole compilation unit and is
         # not carried on fn records — apply it here (both paths agree below).
         if file_top_cfg_excluded(text, cfg_true, cfg_false):
-            return 0
+            return 0, frozenset()
         if by_file is not None and rel in by_file:
-            return count_test_fns_in_records(
-                by_file[rel], cfg_true, cfg_false, default_features)
-        return count_test_fns_cfg_aware(text, cfg_true, cfg_false, default_features)
+            return (count_test_fns_in_records(
+                        by_file[rel], cfg_true, cfg_false, default_features),
+                    test_fn_names_in_records(
+                        by_file[rel], cfg_true, cfg_false, default_features))
+        return (count_test_fns_cfg_aware(
+                    text, cfg_true, cfg_false, default_features),
+                frozenset())
 
     total = 0
+    names: set[str] = set()
+
+    def _add(rel: str, text: str) -> None:
+        nonlocal total
+        n, nm = _count_file(rel, text)
+        total += n
+        names.update(nm)
     # 1. tests/**/*.rs — cfg-filtered per-test.
     tests_dir = project_dir / "tests"
     if tests_dir.is_dir():
         for tp in tests_dir.rglob("*.rs"):
+            if tests_dir_stems is not None and tp.stem not in tests_dir_stems:
+                continue
             try:
                 text = tp.read_text(encoding="utf-8", errors="replace")
             except Exception:
                 continue
-            total += _count_file(tp.relative_to(project_dir).as_posix(), text)
+            _add(tp.relative_to(project_dir).as_posix(), text)
+
+    if tests_dir_stems is not None:
+        return total, frozenset(names)
 
     src_dir = project_dir / "src"
     if not src_dir.is_dir():
-        return total
+        return total, frozenset(names)
 
     cs = CfgSet.of(cfg_true, cfg_false)
     # 2. gen_tests siblings — gated by their parent #[path] decl (R7: decl scan).
@@ -173,7 +211,7 @@ def count_active_tests_for_cluster(
                 stext = sib.read_text(encoding="utf-8", errors="replace")
             except Exception:
                 continue
-            total += _count_file(sib.relative_to(project_dir).as_posix(), stext)
+            _add(sib.relative_to(project_dir).as_posix(), stext)
 
     # 2b. UNDECLARED siblings on disk still count toward expected. A sibling
     # whose parent lost its `mod gen_tests_N;` decl is a HIDDEN test file —
@@ -197,7 +235,7 @@ def count_active_tests_for_cluster(
             stext = sib.read_text(encoding="utf-8", errors="replace")
         except Exception:
             continue
-        total += _count_file(sib.relative_to(project_dir).as_posix(), stext)
+        _add(sib.relative_to(project_dir).as_posix(), stext)
 
     # 3. src/**/*.rs (excluding gen_tests siblings) — inline test mods.
     for srf in src_dir.rglob("*.rs"):
@@ -210,5 +248,5 @@ def count_active_tests_for_cluster(
             stext = srf.read_text(encoding="utf-8", errors="replace")
         except Exception:
             continue
-        total += _count_file(srf.relative_to(project_dir).as_posix(), stext)
-    return total
+        _add(srf.relative_to(project_dir).as_posix(), stext)
+    return total, frozenset(names)

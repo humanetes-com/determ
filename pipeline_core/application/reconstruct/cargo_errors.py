@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 
+from pipeline_core.domain.import_repair import import_fixes_from_message
 from pipeline_core.domain.models import Diagnostic
 from pipeline_core.domain.test_results import strip_ansi
 
@@ -295,6 +296,7 @@ def diagnostics_from_json(output: str) -> list[Diagnostic] | None:
             line=int(primary.get("line_start") or 0) if isinstance(primary, dict) else 0,
             message=msg.get("message") or "",
             rendered=msg.get("rendered") or "",
+            import_fixes=import_fixes_from_message(msg),
         ))
     return out if json_seen else None
 

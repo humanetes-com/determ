@@ -30,6 +30,9 @@ from pipeline_core.application.reconstruct.fill_rules import (
     make_failed_attempt_body,
     module_of,
 )
+from pipeline_core.application.reconstruct.import_repair import (
+    repair_missing_imports,
+)
 from pipeline_core.application.reconstruct.pull_resolver import (
     PullSources,
     make_request_answerer,
@@ -399,6 +402,20 @@ class FillOneFn:
 
             rc, cargo_out = self.cargo.run(
                 ctx.check_cmd, ctx.target_src_dir, ctx.cluster_env)
+            if rc != 0:
+                # Deterministic repair: a body cannot add `use` items, so apply
+                # rustc's own single-candidate import suggestions to this fn's
+                # file and re-check before charging the model an attempt. The
+                # structured diagnostics are fetched only on failure — the
+                # plain `run` above stays the compile gate.
+                _, _, _diags = self.cargo.check_diag(
+                    ctx.check_cmd, ctx.target_src_dir, ctx.cluster_env)
+                _rep = repair_missing_imports(
+                    self.cargo.check_diag, ctx.check_cmd, ctx.target_src_dir,
+                    ctx.cluster_env or {}, rel_file, _diags, self.tel.log,
+                    "[phase-c/per-fn]")
+                if _rep is not None:
+                    rc, cargo_out, _diags = _rep
             # Plan 10 U2: compile is only a pre-gate — accept the fn only if
             # its OWN tests pass. The SHARED u2_test_gate decides; on a test
             # failure it routes through the same fix loop as a compile error

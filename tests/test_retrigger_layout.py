@@ -79,7 +79,8 @@ class _Fakes:
                 run_model=run_model,
                 read_skeleton=lambda rel: files.get(rel),
                 write_skeleton=lambda rel, txt: files.__setitem__(rel, txt),
-                compile_ok=lambda: self.compiles,
+                compile_check=lambda: (self.compiles, "" if self.compiles
+                                       else "error[E0308]: mismatched types"),
                 log=self.logs.append, max_attempts=1)
 
         def revert_fns(fns, src_dir):
@@ -148,3 +149,34 @@ def test_reauthor_failure_is_fired_but_not_succeeded():
     res = retrigger_layout(Path("/x"), "anyhow", "stable", Path("/x/src"), _ERR, f.deps())
     assert res.fired and not res.succeeded
     assert f.reverted_calls == []  # never reached the revert step
+
+
+def test_crash_evidence_fires_without_compile_text_and_adds_guidance():
+    from pipeline_core.domain.layout_retrigger import CrashEvidence
+    f = _Fakes()
+    # Output has NO layout-attributable compile error — only crash evidence
+    # (a vanished test whose reverse-map target references ErrorImpl).
+    ev = CrashEvidence(
+        vanished=frozenset({"test_boxed_str"}),
+        suspect_fns=frozenset({FnLocator("src/error.rs", "fmt")}))
+    res = retrigger_layout(Path("/x"), "anyhow", "stable", Path("/x/src"),
+                           "test result: FAILED. 14 passed; 55 failed",
+                           f.deps(), crash_evidence=ev)
+    assert res.fired and res.succeeded and res.cause == "RUNTIME_CRASH"
+    assert any("RUNTIME-CRASH GUIDANCE" in p for p in f.prompts)
+    # Cap still applies to the crash channel.
+    f2 = _Fakes(attempts={"ErrorImpl": 2})
+    res2 = retrigger_layout(Path("/x"), "anyhow", "stable", Path("/x/src"),
+                            "", f2.deps(), crash_evidence=ev)
+    assert not res2.fired
+
+
+def test_crash_evidence_unrelated_suspects_do_not_fire():
+    from pipeline_core.domain.layout_retrigger import CrashEvidence
+    f = _Fakes()
+    ev = CrashEvidence(vanished=frozenset({"test_x"}),
+                       suspect_fns=frozenset({FnLocator("src/chain.rs", "next")}))
+    res = retrigger_layout(Path("/x"), "anyhow", "stable", Path("/x/src"),
+                           "", f.deps(), crash_evidence=ev)
+    assert not res.fired
+    assert not f.committed

@@ -123,7 +123,8 @@ class _Recorder:
             run_model=run_model,
             read_skeleton=lambda rel: self.files.get(rel),
             write_skeleton=lambda rel, txt: self.files.__setitem__(rel, txt),
-            compile_ok=lambda: self.compiles,
+            compile_check=lambda: (self.compiles, "" if self.compiles
+                                   else "error[E0308]: mismatched types"),
             log=self.logs.append, max_attempts=1)
 
     def deps(self):

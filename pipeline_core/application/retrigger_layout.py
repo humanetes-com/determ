@@ -29,6 +29,9 @@ from pipeline_core.application.author_layout import (
 from pipeline_core.application.author_layout_phase import make_pin_selector
 from pipeline_core.domain.behaviour import BehaviourSuite
 from pipeline_core.domain.layout_retrigger import (
+    CrashEvidence,
+    LayoutRetriggerCause,
+    classify_crash_retrigger,
     classify_layout_retrigger,
     find_fns_referencing,
     should_retrigger,
@@ -36,6 +39,7 @@ from pipeline_core.domain.layout_retrigger import (
 from pipeline_core.domain.models import FnLocator, FnRecord
 from pipeline_core.domain.private_surface import PrivateSurface
 from pipeline_core.domain.starvation import classify_starvation
+from pipeline_core.prompts.layout_authoring import CRASH_GUIDANCE
 
 DEFAULT_MAX_ATTEMPTS = 2
 
@@ -78,10 +82,17 @@ def retrigger_layout(
     project_dir: Path, module_name: str, cfg_cluster: str,
     filled_src_dir: Path, error_text: str,
     deps: RetriggerLayoutDeps,
+    crash_evidence: CrashEvidence | None = None,
 ) -> RetriggerResult:
     """Try to re-author whichever FROZEN component's errors are implicated.
     Returns fired=False when no frozen component matches (the caller's
-    existing stall-exit behaviour should proceed unchanged)."""
+    existing stall-exit behaviour should proceed unchanged).
+
+    Two evidence channels select a component: compile-error text naming its
+    private types (causes A/B, `classify_layout_retrigger`), or — when
+    `crash_evidence` is given — runtime-crash implication (cause C,
+    `classify_crash_retrigger`: a vanished test's reverse-map target is or
+    references a component member; no error text exists in that class)."""
     outcomes = deps.load_layout_outcomes(project_dir, cfg_cluster)
     frozen = [names for names, outcome in outcomes if outcome is LayoutOutcome.FROZEN]
     if not frozen:
@@ -89,11 +100,17 @@ def retrigger_layout(
 
     attempts = deps.load_attempts(project_dir, cfg_cluster)
     starv_cause, _evidence = classify_starvation("", "", error_text)
+    _live_records: list[FnRecord] | None = None
 
     for names in frozen:
-        cause = classify_layout_retrigger(
-            starvation_cause=starv_cause, fills_exhausted=True,
-            error_text=error_text, private_type_names=names)
+        if crash_evidence is not None:
+            if _live_records is None:
+                _live_records = deps.enumerate_fns(filled_src_dir) or []
+            cause = classify_crash_retrigger(crash_evidence, _live_records, names)
+        else:
+            cause = classify_layout_retrigger(
+                starvation_cause=starv_cause, fills_exhausted=True,
+                error_text=error_text, private_type_names=names)
         if not should_retrigger(cause):
             continue
 
@@ -124,7 +141,10 @@ def retrigger_layout(
             public_surface=deps.public_surface_text(project_dir, cfg_cluster),
             select_pins=select_pins,
             symbol_inventory=deps.symbol_inventory_text(project_dir, cfg_cluster),
-            deps=deps.author_deps_for(project_dir, cfg_cluster))
+            deps=deps.author_deps_for(project_dir, cfg_cluster),
+            extra_guidance=(CRASH_GUIDANCE
+                            if cause is LayoutRetriggerCause.RUNTIME_CRASH
+                            else ""))
 
         if not res.all_authored:
             deps.log(f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: re-author "

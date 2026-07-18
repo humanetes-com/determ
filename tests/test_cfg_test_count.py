@@ -162,3 +162,52 @@ def test_nightly_rules_for_cluster_shapes() -> None:
     out = nightly_rules_for(default_excl)
     assert "`abc`, `egma`" in out and "Do NOT write tests" in out
     assert nightly_rules_for(SimpleNamespace(is_default=True, excluded_cfg=[])) == ""
+
+
+def test_active_test_inventory_names_and_stem_scope(tmp_path) -> None:
+    # Two tests/ binaries + a src-side inline test. The stem-scoped inventory
+    # (a `cargo test --test a` sweep's denominator) must cover ONLY tests/a.rs;
+    # the full walk counts everything. Names come from the record path.
+    from pipeline_core.application.test_count import (
+        TestCountDeps,
+        active_test_inventory_for_cluster,
+    )
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "a.rs").write_text(
+        "#[test]\nfn t_a1() {}\n#[test]\nfn t_a2() {}\n", encoding="utf-8")
+    (tmp_path / "tests" / "b.rs").write_text(
+        "#[test]\nfn t_b() {}\n", encoding="utf-8")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "lib.rs").write_text(
+        "#[test]\nfn t_lib() {}\n", encoding="utf-8")
+
+    def _recs(p):
+        return [
+            {"file": "tests/a.rs", "fn_name": "t_a1", "is_test": True,
+             "cfg_predicates": []},
+            {"file": "tests/a.rs", "fn_name": "t_a2", "is_test": True,
+             "cfg_predicates": []},
+            {"file": "tests/b.rs", "fn_name": "t_b", "is_test": True,
+             "cfg_predicates": []},
+            {"file": "src/lib.rs", "fn_name": "t_lib", "is_test": True,
+             "cfg_predicates": []},
+        ]
+
+    deps = TestCountDeps(
+        enumerate_fns=_recs,
+        mod_records=lambda p: None,
+        file_cfg_predicate=lambda d, n: None,
+        is_gen_tests_file=lambda n: ".gen_tests_" in n,
+    )
+
+    class _Cluster:
+        cfg_true: list[str] = []
+        cfg_false: list[str] = []
+
+    n, names = active_test_inventory_for_cluster(
+        tmp_path, _Cluster(), deps, tests_dir_stems=frozenset({"a"}))
+    assert n == 2 and names == frozenset({"t_a1", "t_a2"})
+    full_n, full_names = active_test_inventory_for_cluster(
+        tmp_path, _Cluster(), deps)
+    assert full_n == 4 and full_names == frozenset(
+        {"t_a1", "t_a2", "t_b", "t_lib"})

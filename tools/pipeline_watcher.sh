@@ -41,6 +41,13 @@ if [ -n "$EXTRA" ]; then
     PATTERN="$BUILTIN|$EXTRA"
 fi
 
+# Baseline on arm: without this, a fresh STATE file makes the first tick treat
+# the ENTIRE log as new lines, flagging matches from PREVIOUS runs' segments as
+# if they happened in this one (twice misread as live retrigger failures).
+if [ ! -f "$STATE" ]; then
+    wc -l < "$LOG" > "$STATE"
+fi
+
 while true; do
     sleep "$INTERVAL"
     PREV=$(cat "$STATE" 2>/dev/null || echo 0)

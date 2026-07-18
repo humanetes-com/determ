@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import Any, NamedTuple
 
 from pipeline_core.domain.cfg import CfgAtom
+from pipeline_core.domain.import_repair import ImportFix
 
 
 def _strs(v: Any) -> tuple[str, ...]:
@@ -364,6 +365,10 @@ class Diagnostic:
     line: int = 0            # primary span start line; 0 if none
     message: str = ""
     rendered: str = ""       # rustc's own rendered text (may carry ANSI)
+    # Unambiguous "consider importing ..." suggestions rustc attached to this
+    # error — applied mechanically by the import-repair step (a body-only
+    # splice cannot add `use` items, so the compiler supplies them).
+    import_fixes: tuple[ImportFix, ...] = ()
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> Diagnostic:
@@ -373,16 +378,24 @@ class Diagnostic:
             line=int(d.get("line", 0)),
             message=d.get("message", ""),
             rendered=d.get("rendered", ""),
+            import_fixes=tuple(
+                ImportFix(**f) for f in d.get("import_fixes", ())),
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             "code": self.code,
             "file": self.file,
             "line": self.line,
             "message": self.message,
             "rendered": self.rendered,
         }
+        if self.import_fixes:  # wire-compat: absent key ⇔ no fixes
+            d["import_fixes"] = [
+                {"file": f.file, "byte_start": f.byte_start,
+                 "byte_end": f.byte_end, "replacement": f.replacement}
+                for f in self.import_fixes]
+        return d
 
 
 @dataclass

@@ -151,7 +151,7 @@ def make_layout_phase_runner(
     load_suite: Callable[[Path, str], BehaviourSuite],
     api_surface_path: Callable[[Path, str], Path],
     run_model: Callable[[str], str],
-    compile_ok: Callable[[Path, str, Mapping[str, str]], bool],
+    compile_check: Callable[[Path, str, Mapping[str, str]], tuple[bool, str]],
     skeleton_src_dir_for: Callable[[Path, str], Path],
     fn_name_counts: Callable[[Path], dict[str, int]],
     log: Callable[[str], None],
@@ -192,7 +192,7 @@ def make_layout_phase_runner(
 
             return AuthorLayoutDeps(
                 run_model=run_model, read_skeleton=_read, write_skeleton=_write,
-                compile_ok=lambda: compile_ok(
+                compile_check=lambda: compile_check(
                     pd, cluster, env_by_cluster.get(cluster, {})),
                 log=log)
 

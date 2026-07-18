@@ -265,11 +265,13 @@ def test_regression_gate_blocks_new_red_and_pass_drop() -> None:
     assert res is not None
     newly, msg = res
     assert newly == frozenset({"z"}) and "REGRESSED" in msg
-    # no new named failure but pass count dropped (tests vanished) → regression
+    # no new named failure but pass count dropped (tests vanished) → regression;
+    # with the failed set unchanged this IS an executed-count drop, so the
+    # detail now names the crashed/non-compiling-binary mechanism.
     res2 = _regr(_cargo_suite(101, 3, ["b"]), base)
     assert res2 is not None
     newly2, msg2 = res2
-    assert newly2 == frozenset() and "pass count" in msg2
+    assert newly2 == frozenset() and "EXECUTE" in msg2
 
 
 def test_regression_gate_self_disables() -> None:
@@ -278,3 +280,19 @@ def test_regression_gate_self_disables() -> None:
     assert _regr(_cargo_suite(101, 5, ["z"]), None) is None                  # no baseline
     # post-fill suite inconclusive (crate red now) → cannot judge → accept
     assert _regr(_const_run_cargo(101, "error: could not compile"), base) is None
+
+
+def test_regression_gate_blocks_executed_count_drop() -> None:
+    # A fill that crashes a test BINARY removes its tests from the output:
+    # the pass count can HOLD (the lost binary was mostly failing) and no new
+    # name goes red — but fewer tests execute than at baseline. That is a
+    # regression (the anyhow oracle-shrink 68→50 that kept a segfaulting body).
+    base: tuple[int, frozenset[str]] = (5, frozenset({"b", "c", "d"}))  # 8 ran
+    res = _regr(_cargo_suite(101, 5, ["b"]), base)  # only 6 ran, pass held
+    assert res is not None
+    newly, msg = res
+    assert newly == frozenset()
+    assert "EXECUTE" in msg
+    # Equal executed totals with pass held stays accepted (no false positive
+    # when a failing test merely flips to passing).
+    assert _regr(_cargo_suite(101, 6, ["b", "c"]), base) is None

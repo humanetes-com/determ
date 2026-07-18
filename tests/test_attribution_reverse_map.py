@@ -213,3 +213,38 @@ def test_behavior_path_skipped_without_texts(
         cluster_name="stable")
     assert kind == "reverse_map"
     assert FnLocator("src/lib.rs", "cap_limit") in frontier
+
+
+def test_vanished_tests_merge_into_nonempty_frontier(
+    tmp_path: Path, monkeypatch: Any,
+) -> None:
+    """A vanished test (its binary segfaulted → NO line in the output) must
+    reach the frontier via the reverse map even when other tests' stub panics
+    keep paths 1-3 non-empty — otherwise the crashing filled body is never
+    re-dispatched (the anyhow vtable-segfault plateau: fallbacks only ran on
+    an empty merged frontier)."""
+    monkeypatch.setenv("PHASE_C_TDD_USE_CLASSIFIER", "0")
+    src = tmp_path / "src"
+    src.mkdir()
+    body = "pub fn stub_fn() { unimplemented!() }\npub fn crashy() {}\n"
+    (src / "lib.rs").write_text(body, encoding="utf-8")
+    recs = [
+        {"file": "lib.rs", "fn_name": "stub_fn", "cfg_predicates": [],
+         "sig_byte_start": 0, "body_byte_end": body.index("\n") + 1},
+        {"file": "lib.rs", "fn_name": "crashy", "cfg_predicates": []},
+    ]
+    # Path 1 evidence: a stub panic from a DIFFERENT, still-reporting test.
+    output = (
+        "running 1 test\n"
+        "test test_stub ... FAILED\n\n"
+        "---- test_stub stdout ----\n"
+        "thread 'test_stub' panicked at src/lib.rs:1:20:\n"
+        "not implemented\n"
+    )
+    reverse_map = {"test_vanished": {("lib.rs", "crashy")}}
+    frontier, kind = attribute_failures(
+        _deps(recs), output, src, recently_filled=[],
+        test_reverse_map=reverse_map, cluster_name="stable",
+        extra_failed=frozenset({"test_vanished"}))
+    assert ("lib.rs", "crashy") in frontier
+    assert frontier[("lib.rs", "crashy")] == {"test_vanished"}

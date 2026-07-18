@@ -17,6 +17,7 @@ Typed, not string-matched: the trigger reason is an enum a caller acts on.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import Enum, auto
 
 from pipeline_core.domain.models import FnLocator, FnRecord
@@ -37,6 +38,42 @@ class LayoutRetriggerCause(Enum):
     NONE = auto()
     DESIGN_CONFLICT = auto()     # cause A — authored shape rejected by the compiler
     LAYOUT_EXHAUSTION = auto()   # cause B — compiles, but no body passes under it
+    RUNTIME_CRASH = auto()       # cause C — compiles, but bodies filled under the
+    #                              layout crash whole test binaries (their tests
+    #                              VANISH from the sweep output with no compile
+    #                              error at all — the unsafe-scheme fingerprint)
+
+
+@dataclass(frozen=True, slots=True)
+class CrashEvidence:
+    """Cause C's typed payload from the TDD driver: which expected tests
+    reported no verdict (their binary crashed), which fns those tests
+    statically reach (reverse-map targets), and for how many consecutive
+    sweeps the shrink persisted."""
+    vanished: frozenset[str]
+    suspect_fns: frozenset[FnLocator]
+    consecutive_sweeps: int = 0
+
+
+def classify_crash_retrigger(
+    evidence: CrashEvidence,
+    fn_records: list[FnRecord],
+    component_names: frozenset[str],
+) -> LayoutRetriggerCause:
+    """Cause C decision for ONE frozen component. RUNTIME_CRASH iff a suspect
+    fn (a reverse-map target of a vanished test) either IS a component member
+    by name or its filled signature/body references a component type/fn name —
+    the crash implicates THIS component's scheme, not an unrelated body. No
+    compile-error text is required: the defining feature of the crash class is
+    a clean compile."""
+    if not evidence.vanished or not evidence.suspect_fns:
+        return LayoutRetriggerCause.NONE
+    if any(fn.fn_name in component_names for fn in evidence.suspect_fns):
+        return LayoutRetriggerCause.RUNTIME_CRASH
+    referencing = set(find_fns_referencing(fn_records, component_names))
+    if referencing & set(evidence.suspect_fns):
+        return LayoutRetriggerCause.RUNTIME_CRASH
+    return LayoutRetriggerCause.NONE
 
 
 def _errors_hit_private_types(

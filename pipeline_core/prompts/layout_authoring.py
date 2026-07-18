@@ -12,6 +12,7 @@ Pure text→text; no IO.
 """
 from __future__ import annotations
 
+from pipeline_core.domain.authored_layout import component_uids
 from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.private_surface import PrivateSurfaceItem
 
@@ -20,6 +21,14 @@ _PROTOCOL = (
     '<LAYOUT_ITEM name="ItemName" kind="struct|enum|type|trait|fn">\n'
     "<the full Rust definition — for a struct/enum include all fields/variants;\n"
     " for a fn emit only the signature followed by `{ unimplemented!() }`>\n"
+    "</LAYOUT_ITEM>\n"
+    "\n"
+    "The name attribute must copy the listed id EXACTLY — including any `.N`\n"
+    "suffix that distinguishes same-named items on different impls. The Rust\n"
+    "code inside the block always uses the plain name.\n"
+    'WRONG (suffix dropped — cannot tell the two apart): <LAYOUT_ITEM name="as_ref" kind="fn">\n'
+    'RIGHT: <LAYOUT_ITEM name="as_ref.2" kind="fn">\n'
+    "fn as_ref(&self) -> &(dyn std::error::Error + 'static) { unimplemented!() }\n"
     "</LAYOUT_ITEM>\n"
 )
 
@@ -49,9 +58,40 @@ def _fmt_pins(pins: list[BehaviourSpec]) -> str:
     return "\n".join(lines)
 
 
-def _fmt_items(items: tuple[PrivateSurfaceItem, ...]) -> str:
-    return "\n".join(
-        f"- {it.name} ({it.kind.name.lower()}) in {it.file}" for it in items)
+def _fmt_items(
+    items: tuple[PrivateSurfaceItem, ...], uids: tuple[str, ...],
+) -> str:
+    """One listing line per item, keyed by protocol uid. The frozen first line
+    of the current definition is shown so the model can tell same-named items
+    apart (two `as_ref` on different impls differ only by signature)."""
+    lines = []
+    for uid, it in zip(uids, items, strict=True):
+        head = it.definition.strip().splitlines()[0] if it.definition.strip() else ""
+        lines.append(f"- {uid} ({it.kind.name.lower()}) in {it.file} — currently: {head}")
+    return "\n".join(lines)
+
+
+# Cause-C (runtime crash) authoring guidance: the frozen scheme compiles but
+# segfaults through raw fn pointers — steer the redesign toward compiler-checked
+# safety, in generic placeholder terms only (never a real library's internals).
+CRASH_GUIDANCE = """=== RUNTIME-CRASH GUIDANCE ===
+The previous design for these items compiled cleanly but CRASHED at runtime
+(segfault through a function pointer). Prefer a scheme the compiler can check
+end-to-end. Concrete pattern to avoid vs prefer (placeholder names):
+
+WRONG (compiles, crashes — hand-rolled fn-pointer table + raw casts):
+struct VTable { drop_fn: unsafe fn(*mut ()), view_fn: unsafe fn(*const ()) -> *const () }
+struct Holder { ptr: *mut (), vtable: &'static VTable }
+// every call site casts through *mut () — one inconsistent assumption segfaults
+
+RIGHT (all safe code, still one machine word for the public wrapper):
+struct Inner { source: Box<dyn std::error::Error + Send + Sync + 'static>, notes: Vec<String> }
+struct Holder { inner: Box<Inner> }
+// the OUTER Box keeps Holder pointer-sized even though Inner holds a wide dyn Box
+// downcasting is built in: holder.inner.source.downcast_ref::<T>()
+
+You must still author EVERY listed item by name; an item your design makes
+unnecessary may become a minimal safe stub that nothing calls."""
 
 
 def build_layout_authoring_prompt(
@@ -62,10 +102,19 @@ def build_layout_authoring_prompt(
     public_surface: str,
     layout_pins: list[BehaviourSpec],
     symbol_inventory: str,
+    extra_guidance: str = "",
+    authored_scheme: str = "",
+    item_uids: tuple[str, ...] | None = None,
 ) -> str:
     """Assemble the t1.5 prompt for one connected component of the private
-    surface. `items` are the replaceable items the model must author."""
-    return "\n".join([
+    surface (or ONE CHUNK of a large component — `items` is then the chunk and
+    `item_uids` carries the COMPONENT-scoped protocol uids, which a chunk
+    cannot recompute from its own subset). `extra_guidance` (e.g.
+    CRASH_GUIDANCE) is appended before the rules. `authored_scheme` carries
+    the definitions already authored by earlier chunks of the same pass —
+    fixed context the new items must fit."""
+    uids = item_uids if item_uids is not None else component_uids(items)
+    return "\n".join([s for s in [
         f"You are designing the PRIVATE layout of the `{module_name}` crate "
         f"(cfg cluster: {cfg_cluster}).",
         "",
@@ -83,10 +132,16 @@ def build_layout_authoring_prompt(
         "=== IN-SCOPE SYMBOL INVENTORY ===",
         symbol_inventory.strip() or "(std/core only)",
         "",
+        ("=== ALREADY AUTHORED THIS PASS (fixed — design consistently with "
+         "these; do NOT re-emit them) ===") if authored_scheme.strip() else None,
+        authored_scheme.strip() or None,
+        "" if authored_scheme.strip() else None,
         "=== ITEMS TO AUTHOR ===",
-        _fmt_items(items),
+        _fmt_items(items, uids),
         "",
+        extra_guidance or None,
+        "" if extra_guidance else None,
         _RULES,
         "",
         _PROTOCOL,
-    ])
+    ] if s is not None])

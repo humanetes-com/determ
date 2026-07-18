@@ -23,7 +23,7 @@ from pipeline_core.adapters.layout_outcome_store import (
 )
 from pipeline_core.adapters.private_surface_store import load_private_surface
 from pipeline_core.adapters.skeleton_compile import (
-    compile_skeleton_ok,
+    compile_skeleton_check,
     skeleton_src_dir_for,
 )
 from pipeline_core.application.author_layout import AuthorLayoutDeps
@@ -52,7 +52,8 @@ def build_layout_phase_runner(
         load_suite=load_behaviour_suite,
         api_surface_path=api_surface_path,
         run_model=lambda prompt: ask(prompt, model=task2_model),
-        compile_ok=lambda pd, c, env: compile_skeleton_ok(pd, c, env_extra=env),
+        compile_check=lambda pd, c, env: compile_skeleton_check(
+            pd, c, env_extra=env),
         skeleton_src_dir_for=skeleton_src_dir_for,
         fn_name_counts=fn_name_counts,
         log=log,
@@ -75,7 +76,8 @@ def build_retrigger_layout(
     invoked again mid-run for one component instead of the whole surface)."""
 
     def _run(project_dir: Path, module_name: str, cfg_cluster: str,
-              target_src_dir: Path, error_text: str) -> RetriggerResult:
+              target_src_dir: Path, error_text: str,
+              crash_evidence: Any = None) -> RetriggerResult:
         clusters = load_baked_clusters(project_dir) or []
         env_by_cluster = {c.name: dict(c.env_extra) for c in clusters}
 
@@ -103,7 +105,7 @@ def build_retrigger_layout(
             return AuthorLayoutDeps(
                 run_model=lambda prompt: ask(prompt, model=task2_model),
                 read_skeleton=_read, write_skeleton=_write,
-                compile_ok=lambda: compile_skeleton_ok(
+                compile_check=lambda: compile_skeleton_check(
                     pd, cluster, env_extra=env_by_cluster.get(cluster, {})),
                 log=log)
 
@@ -122,6 +124,7 @@ def build_retrigger_layout(
             max_attempts=max_attempts,
         )
         return retrigger_layout(
-            project_dir, module_name, cfg_cluster, target_src_dir, error_text, deps)
+            project_dir, module_name, cfg_cluster, target_src_dir, error_text,
+            deps, crash_evidence=crash_evidence)
 
     return _run

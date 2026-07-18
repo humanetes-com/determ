@@ -36,6 +36,7 @@ class HealthKind(StrEnum):
     FROZEN_ZERO_TREE = "frozen_zero_tree"        # pass=0 fail=0 for N iters — tree likely broken
     HEAL_SKELETON_LOSS = "heal_skeleton_loss"    # whole-file skeleton restore discarded fills
     ORACLE_DRIFT = "oracle_drift"                # denominator changed mid-run — counts not comparable
+    CAPPED_RETRY_FUTILITY = "capped_retry_futility"  # budgeted mechanism failing in an attempt-invariant way
 
 
 @dataclass(frozen=True, slots=True)
@@ -274,5 +275,54 @@ def analyze(
             "a writer left the file unparseable past surgical/best-tree/git "
             "recovery — find the writer bypassing the F1 splice gate",
         ))
+
+    # -- 9. capped-retry futility (session-241 plateau class) ---------------
+    # A budgeted mechanism (layout re-trigger, t1.5 authoring) burning its cap
+    # on a failure MODE retries cannot change. The overnight pass=14 burn: the
+    # crash-retrigger failed attempt 1 with "missing authored items" (a
+    # protocol/coverage defect — attempt-invariant) and the operator waited
+    # out the remaining budget. Structural reasons alert on FIRST occurrence;
+    # repeated compile-fails of the same component alert too (same design
+    # re-rejected); a later success line for that component suppresses.
+    _STRUCTURAL = ("missing authored items",
+                   "could not locate a frozen definition")
+    fail_reasons: dict[str, list[str]] = {}
+    succeeded: set[str] = set()
+    for ln in segment_lines:
+        for tag in ("[layout-retrigger] ", "[t1.5] "):
+            i = ln.find(tag)
+            if i == -1:
+                continue
+            rest = ln[i + len(tag):]
+            subj, sep, what = rest.partition(":")
+            if not sep:
+                continue
+            if "re-authored successfully" in what or "authored layout compiles" in what:
+                succeeded.add(subj.strip())
+            elif ("still did not compile" in what
+                  or any(r in what for r in _STRUCTURAL)):
+                fail_reasons.setdefault(subj.strip(), []).append(what.strip())
+    for subj, reasons in fail_reasons.items():
+        if subj in succeeded:
+            continue
+        structural = [r for r in reasons
+                      if any(s in r for s in _STRUCTURAL)]
+        if structural:
+            findings.append(HealthFinding(
+                HealthKind.CAPPED_RETRY_FUTILITY, "alert", subj,
+                f"attempt-invariant failure: {structural[0][:120]}",
+                "retries CANNOT fix a coverage/protocol defect — stop the "
+                "pipeline and fix the mechanism now; do not wait out the "
+                "remaining attempt budget",
+            ))
+        elif len(reasons) >= 2:
+            findings.append(HealthFinding(
+                HealthKind.CAPPED_RETRY_FUTILITY, "alert", subj,
+                f"{len(reasons)} re-author attempt(s) failed with no success "
+                "line in this segment",
+                "the same design keeps getting rejected — read the actual "
+                "authoring prompt/reply and the compile errors before the "
+                "cap exhausts silently",
+            ))
 
     return findings

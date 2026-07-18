@@ -53,11 +53,30 @@ def compile_skeleton_ok(
 ) -> bool:
     """True iff the per-cluster skeleton crate passes ``cargo check`` (lib only).
     Everything that is not a clean rc==0 → False (see module docstring)."""
+    ok, _ = compile_skeleton_check(
+        project_dir, cfg_cluster, env_extra=env_extra, timeout=timeout)
+    return ok
+
+
+_ERROR_EXCERPT_CHARS = 5000
+
+
+def compile_skeleton_check(
+    project_dir: Path,
+    cfg_cluster: str,
+    *,
+    env_extra: Mapping[str, str] | None = None,
+    timeout: int = 240,
+) -> tuple[bool, str]:
+    """``compile_skeleton_ok`` plus a bounded compiler-error excerpt, so a
+    failed layout-authoring attempt can feed the model WHAT failed instead of
+    a bare "did not compile" (feedback fidelity). rustc puts the primary
+    diagnostics first — keep the head."""
     skel_dir = skeleton_dir_for(project_dir, cfg_cluster)
     if not (skel_dir / "src").is_dir():
-        return False
+        return False, "skeleton src/ missing"
     if not _ensure_crate_manifest(project_dir, skel_dir):
-        return False
+        return False, "crate manifest missing"
     env = dict(os.environ)
     if env_extra:
         env.update({str(k): str(v) for k, v in env_extra.items()})
@@ -66,6 +85,8 @@ def compile_skeleton_ok(
             ["cargo", "check", "--lib", "--quiet"],
             cwd=skel_dir, env=env, capture_output=True, text=True, timeout=timeout,
         )
-        return proc.returncode == 0
-    except (OSError, subprocess.SubprocessError):
-        return False
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"cargo check did not run: {exc}"
+    if proc.returncode == 0:
+        return True, ""
+    return False, (proc.stderr or "")[:_ERROR_EXCERPT_CHARS]

@@ -101,12 +101,37 @@ def parse_authored_layout(reply: str) -> AuthoredLayout:
     return AuthoredLayout(items=tuple(items))
 
 
+def component_uids(items: tuple[PrivateSurfaceItem, ...]) -> tuple[str, ...]:
+    """Protocol identity for each item of one component, in component order.
+    A bare name is ambiguous when several items share it (the same trait
+    method on different impls, e.g. two `as_ref` with DIFFERENT signatures):
+    one authored block would then cover — and get spliced into — every
+    same-named slot. Duplicated names get a deterministic ordinal suffix
+    (`as_ref.1`, `as_ref.2`); unique names stay bare. Recomputable identically
+    at prompt-build, coverage and splice time from the same component tuple —
+    never persisted."""
+    total: dict[str, int] = {}
+    for it in items:
+        total[it.name] = total.get(it.name, 0) + 1
+    seen: dict[str, int] = {}
+    uids: list[str] = []
+    for it in items:
+        if total[it.name] == 1:
+            uids.append(it.name)
+        else:
+            seen[it.name] = seen.get(it.name, 0) + 1
+            uids.append(f"{it.name}.{seen[it.name]}")
+    return tuple(uids)
+
+
 def layout_coverage(
     required: tuple[PrivateSurfaceItem, ...], layout: AuthoredLayout,
 ) -> tuple[frozenset[str], frozenset[str]]:
-    """(missing, extra): required item names the layout did NOT author, and
-    authored names not in the required set. A non-empty ``missing`` means the
-    authored scaffold is incomplete and must be re-requested — never spliced."""
-    req = frozenset(i.name for i in required)
+    """(missing, extra): required item uids the layout did NOT author, and
+    authored names not in the required uid set. A non-empty ``missing`` means
+    the authored scaffold is incomplete and must be re-requested — never
+    spliced. Duplicate-named items are covered per-uid: an authored `as_ref`
+    block does NOT cover `as_ref.1` and `as_ref.2`."""
+    req = frozenset(component_uids(required))
     got = layout.names
     return req - got, got - req

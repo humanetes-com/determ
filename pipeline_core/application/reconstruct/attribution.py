@@ -409,6 +409,7 @@ def attribute_failures(
     test_reverse_map: dict[str, set[FnLocator]],
     cluster_name: str,
     test_texts: dict[str, str] | None = None,
+    extra_failed: frozenset[str] = frozenset(),
 ) -> tuple[Frontier, str]:
     """Robust failure-to-fn attribution chain. Returns (frontier, kind). Callers
     pass the result through `_filter_test_targets` (FR-018) — same as the fix
@@ -470,6 +471,21 @@ def attribute_failures(
         _bf, _srcs = behavior_frontier_from_texts(
             deps, test_output, test_texts, src_dir)
         _merge(merged, _strip(_bf), FailureKind.BEHAVIOR)
+    # Vanished tests (`extra_failed` — expected but absent from the output:
+    # their binary segfaulted or stopped compiling) leave NO panic line, no
+    # compile error, no behavioral evidence, so paths 1-3 can never see them
+    # — and when those paths are non-empty the fallbacks below never run.
+    # Route them through the static reverse map HERE, unioned like 1-3, or a
+    # crashing filled body is never re-dispatched while ordinary stub panics
+    # keep the merged frontier non-empty.
+    if extra_failed and test_reverse_map:
+        vanished_fr: Frontier = {}
+        for tname in sorted(extra_failed):
+            bare = tname.split("::")[-1]
+            cands = test_reverse_map.get(bare) or test_reverse_map.get(tname) or set()
+            for key in cands:
+                vanished_fr.setdefault(key, set()).add(tname)
+        _merge(merged, _strip(vanished_fr), FailureKind.REVERSE_MAP)
     if merged:
         # One contributor → keep its kind (preserves per-path stats); several →
         # MERGED so the union is visible in logs/events.
@@ -477,7 +493,7 @@ def attribute_failures(
         return AttributionResult(merged, kind)
     # 4. LLM classifier — turn off via PHASE_C_TDD_USE_CLASSIFIER=0.
     if os.getenv("PHASE_C_TDD_USE_CLASSIFIER", "1") != "0":
-        failing = sorted(parse_failed_tests(test_output))
+        failing = sorted(parse_failed_tests(test_output) | extra_failed)
         if failing:
             classification = deps.classify(
                 test_out=test_output, filled_this_pass=[],
@@ -501,7 +517,7 @@ def attribute_failures(
     # after recent fills, the recent fills are the most likely cause.
     # Queue them in reverse-filled order (newest first).
     if recently_filled:
-        failing = sorted(parse_failed_tests(test_output))
+        failing = sorted(parse_failed_tests(test_output) | extra_failed)
         if failing:
             recent_synth: Frontier = {}
             for key in reversed(recently_filled):
@@ -514,7 +530,7 @@ def attribute_failures(
     # is tolerable here — per-fn splice guards reject overwriting
     # non-stub bodies, so already-correct fills aren't clobbered.
     if test_reverse_map:
-        failing = sorted(parse_failed_tests(test_output))
+        failing = sorted(parse_failed_tests(test_output) | extra_failed)
         if failing:
             reverse_synth: Frontier = {}
             for tname in failing:

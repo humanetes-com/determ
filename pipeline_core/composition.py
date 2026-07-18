@@ -1135,6 +1135,22 @@ def build_app(
                 is_gen_tests_file=_disc_is_gen_tests_file,
             ))
 
+    def active_test_inventory_for_cluster(
+            project_dir: Path, cluster: Any,
+            tests_dir_stems: frozenset[str] | None = None,
+    ) -> tuple[int, frozenset[str]]:
+        """Sweep-level FR-024: (expected_count, expected_names) — same walk
+        and deps as `count_active_tests_for_cluster`, scopable to the
+        `--test stem…` binaries a TDD sweep actually runs."""
+        sc = app_ref().structure_cache if app_ref is not None else structure_cache
+        return _tc_app.active_test_inventory_for_cluster(
+            project_dir, cluster, _tc_app.TestCountDeps(
+                enumerate_fns=enumerate_fns,
+                mod_records=sc.mod_records,
+                file_cfg_predicate=sc.file_cfg_predicate,
+                is_gen_tests_file=_disc_is_gen_tests_file,
+            ), tests_dir_stems=tests_dir_stems)
+
     # More former pipeline delegate defs, bound direct.
     def cluster_cfg_attr(cluster: Any) -> str:
         return _membership.cluster_cfg_attr(cluster, scope.all)
@@ -1478,6 +1494,7 @@ def build_app(
             env_fn=ports.cargo_env,
             test_regression_baseline_fn=helpers.test_regression_baseline,
             test_regression_gate_fn=helpers.test_regression_gate,
+            check_diag_fn=helpers.run_cargo_check_diag,
         ),
         prompt=PromptContextAdapter(
             ask_per_fn_body_fn=_via("ask_per_fn_body"),
@@ -2025,6 +2042,7 @@ def build_app(
                 escalate_frontier_to_producers, _attr_deps),
             checkpoint_fill_tree=_checkpoint_fill_tree,
             retrigger_layout=retrigger_layout,
+            active_test_inventory=active_test_inventory_for_cluster,
         ),
         impl_fill_deps=ImplFillDeps(
             build_dispatch_family_section=build_dispatch_family_section,

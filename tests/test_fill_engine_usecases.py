@@ -65,6 +65,9 @@ class FakeFill:
         if seq:
             return seq.pop(0)
         return self.s.get("run", (0, ""))
+    def check_diag(self, *a: Any, **k: Any) -> tuple[int, str, list[Any]]:
+        rc, out = self.run(*a, **k)
+        return rc, out, []
     def build_test_cmd(self, *a: Any) -> str: return "cargo test"
     def u2_test_gate(self, *a: Any) -> Any:
         from pipeline_core.domain.test_report import U2Verdict

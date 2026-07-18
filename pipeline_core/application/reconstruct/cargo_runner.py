@@ -184,13 +184,25 @@ def test_regression_gate(
         return None  # crate not compiling now ⇒ can't judge; defer to TDD loop
     cur_pass, cur_failed = after
     newly_red = cur_failed - base_failed
-    if not newly_red and cur_pass >= base_pass:
+    # Executed-count drop: a fill that makes a test BINARY crash or stop
+    # compiling removes its tests from the output entirely — no newly-red
+    # names, and the pass count can hold if the lost binary was mostly
+    # failing. Fewer tests executing than at baseline is a regression even
+    # when both name/pass checks look clean (the anyhow oracle-shrink 68→50).
+    base_total = base_pass + len(base_failed)
+    cur_total = cur_pass + len(cur_failed)
+    if not newly_red and cur_pass >= base_pass and cur_total >= base_total:
         return None
     if newly_red:
         detail = ("This compiled, but it REGRESSED previously-passing test(s): "
                   f"{sorted(newly_red)} (cluster pass count {base_pass}→"
                   f"{cur_pass}).\nKeep those tests passing while fixing the "
                   "target — do not change shared behavior they rely on.")
+    elif cur_total < base_total:
+        detail = (f"This dropped the number of tests that EXECUTE "
+                  f"{base_total}→{cur_total} (a test binary crashed — e.g. "
+                  "segfault from bad unsafe code — or no longer compiles). "
+                  "Write a body that lets every test binary build and run.")
     else:
         detail = (f"This dropped the cluster pass count {base_pass}→"
                   f"{cur_pass} (tests that used to run/pass no longer do). "

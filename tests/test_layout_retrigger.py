@@ -90,3 +90,34 @@ def test_find_fns_referencing_empty_when_no_match():
     records = [FnRecord(file="src/chain.rs", fn_name="next",
                         sig_text="fn next(&mut self) -> Option<u8>", body_text="None")]
     assert find_fns_referencing(records, frozenset({"ErrorImpl"})) == []
+
+
+def test_crash_retrigger_fires_on_member_or_referencing_suspect():
+    from pipeline_core.domain.layout_retrigger import (
+        CrashEvidence,
+        classify_crash_retrigger,
+    )
+    records = [
+        FnRecord(file="src/error.rs", fn_name="downcast_ref",
+                 sig_text="fn downcast_ref<T>(&self) -> Option<&T>",
+                 body_text="unsafe { (vtable(self.inner.ptr).object_downcast)(x) }"),
+        FnRecord(file="src/chain.rs", fn_name="next",
+                 sig_text="fn next(&mut self) -> Option<u8>", body_text="None"),
+    ]
+    comp = frozenset({"ErrorVTable", "object_downcast", "vtable"})
+    # Suspect fn is a component MEMBER by name → fires.
+    ev = CrashEvidence(vanished=frozenset({"test_boxed_str"}),
+                       suspect_fns=frozenset({FnLocator("src/error.rs", "object_downcast")}))
+    assert classify_crash_retrigger(ev, records, comp) is LayoutRetriggerCause.RUNTIME_CRASH
+    # Suspect fn merely REFERENCES a component name in its body → fires.
+    ev2 = CrashEvidence(vanished=frozenset({"test_boxed_str"}),
+                        suspect_fns=frozenset({FnLocator("src/error.rs", "downcast_ref")}))
+    assert classify_crash_retrigger(ev2, records, comp) is LayoutRetriggerCause.RUNTIME_CRASH
+    # Suspect unrelated to the component → no fire.
+    ev3 = CrashEvidence(vanished=frozenset({"test_iter"}),
+                        suspect_fns=frozenset({FnLocator("src/chain.rs", "next")}))
+    assert classify_crash_retrigger(ev3, records, comp) is LayoutRetriggerCause.NONE
+    # No vanished tests / no suspects → never fires.
+    assert classify_crash_retrigger(
+        CrashEvidence(frozenset(), frozenset()), records, comp,
+    ) is LayoutRetriggerCause.NONE

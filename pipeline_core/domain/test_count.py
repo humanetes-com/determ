@@ -101,3 +101,27 @@ def count_test_fns_in_records(
             continue
         count += 1
     return count
+
+
+def test_fn_names_in_records(
+    records: list[dict[str, Any]],
+    cfg_true: set[str],
+    cfg_false: set[str],
+    default_features: frozenset[str] | set[str] = frozenset(),
+) -> frozenset[str]:
+    """The NAMES of the test fns `count_test_fns_in_records` counts — same
+    cfg filter, same records. Feeds the sweep-oracle reconciliation (which
+    expected test never reported a verdict), where the count alone can only
+    say HOW MANY are missing."""
+    cs = CfgSet.of(cfg_true, cfg_false, default_features)
+    out: set[str] = set()
+    for r in records:
+        if not r.get("is_test"):
+            continue
+        gates = r.get("cfg_predicates") or []
+        if any(cs.excludes_for_cargo(g) for g in gates):
+            continue
+        name = str(r.get("fn_name") or r.get("name") or "")
+        if name:
+            out.add(name)
+    return frozenset(out)

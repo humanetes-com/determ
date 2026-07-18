@@ -57,7 +57,8 @@ class _Deps:
             run_model=run_model,
             read_skeleton=lambda rel: self.files.get(rel),
             write_skeleton=lambda rel, txt: self.files.__setitem__(rel, txt),
-            compile_ok=lambda: self.compile_results.pop(0),
+            compile_check=lambda: (self.compile_results.pop(0),
+                                   "error[E0308]: mismatched types"),
             log=self.logs.append, max_attempts=3)
 
 
@@ -99,6 +100,8 @@ def test_second_attempt_recovers_after_compile_fail():
                         select_pins=_has_pins, symbol_inventory="", deps=d.deps())
     assert res.all_authored
     assert len(d.prompts) == 2  # retried once
+    # the retry prompt carries the compiler diagnostics, not a bare "failed"
+    assert "error[E0308]" in d.prompts[1]
 
 
 def test_m13_gate_refuses_layout_sensitive_component_without_pins():

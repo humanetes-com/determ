@@ -21,6 +21,7 @@ from pipeline_core.application.reconstruct.tdd_ratchet import (
 )
 from pipeline_core.domain.attribution import union_unattributed_stubs
 from pipeline_core.domain.dispatch import defer_blocked_consumers
+from pipeline_core.domain.layout_retrigger import CrashEvidence
 from pipeline_core.domain.measurement import Measurement, tree_content_sha
 from pipeline_core.domain.models import (
     BuildCluster,
@@ -28,6 +29,7 @@ from pipeline_core.domain.models import (
     FnLocator,
     Frontier,
 )
+from pipeline_core.domain.oracle_ledger import SweepOracle, reconcile_sweep
 from pipeline_core.domain.refine import Attempt, LoopState
 from pipeline_core.domain.test_report import parse_test_output
 from pipeline_core.domain.test_results import (
@@ -68,6 +70,10 @@ class PhaseCTddDeps:
     # -> RetriggerResult, tried once at the stall-exit before giving up on the
     # cluster. None disables it — the exit behaves exactly as before F11 M3.
     retrigger_layout: Callable[..., Any] | None = None
+    # FR-024 at the sweep level: (project_dir, cluster) -> (expected_count,
+    # expected_names) — the cfg-aware static test inventory. None disables
+    # oracle reconciliation — sweeps then trust whatever cargo reported.
+    active_test_inventory: Callable[..., tuple[int, frozenset[str]]] | None = None
 
 
 def _log_attribution_gap(
@@ -219,6 +225,49 @@ def run_phase_c_tdd(
         deps.log(f"  {tag} [phase-c/tdd] reverse-map build failed: {_e}")
         test_reverse_map = {}
 
+    # FR-024 at the sweep level: the statically-expected oracle for this
+    # cluster. Vanished tests (expected, but no verdict in the output — their
+    # binary crashed or stopped compiling) are counted as FAILING, so the
+    # loop can neither call a shrunken suite "done" nor snapshot/checkpoint a
+    # tree that silently lost part of its oracle.
+    # Scoped to the very stems this loop's `cargo test --test stem…` runs —
+    # the sweep's denominator, not the whole-crate FR-024 walk (which also
+    # counts src-side/gen_tests tests this command never executes).
+    _expected_count, _expected_names = (
+        deps.active_test_inventory(project_dir, cluster, frozenset(test_stems))
+        if deps.active_test_inventory is not None else (0, frozenset()))
+    _bratchet_missing = 0   # oracle missing_count at the ratchet snapshot
+    _ckpt_min_missing: int | None = None  # best (lowest) missing seen
+    # Cause-C (runtime crash) retrigger: consecutive sweeps whose oracle was
+    # short; at the threshold the frozen component the crashes implicate gets
+    # re-authored (see the trigger block below the stall accounting).
+    _vanish_streak = 0
+    _crash_retrigger_after = int(
+        os.getenv("PHASE_C_CRASH_RETRIGGER_AFTER", "2"))
+
+    def _reconcile(rc_: int, output_: str, pass_n: int, fail_n: int,
+                   failed_: set[str]) -> tuple[int, set[str], SweepOracle]:
+        if rc_ == -1 or deps.active_test_inventory is None:
+            return fail_n, failed_, SweepOracle(frozenset(), 0)
+        _ig = parse_test_counts(output_)[2]
+        oracle = reconcile_sweep(
+            _expected_count, _expected_names,
+            parse_test_output(output_).passed, failed_, _ig)
+        if not oracle.intact:
+            deps.log(
+                f"  {tag} [phase-c/tdd] iter {iter_n}: ORACLE SHRUNK — "
+                f"{oracle.missing_count} expected test(s) reported no verdict "
+                f"(binary crashed or failed to compile); counting them as "
+                f"failing. Vanished: {sorted(oracle.vanished)[:20]}")
+            deps.emit("phase_c.tdd.oracle_vanished", data={
+                "cluster": cluster.name, "iter": iter_n,
+                "expected": _expected_count,
+                "missing": oracle.missing_count,
+                "vanished": sorted(oracle.vanished)[:200]})
+            fail_n += oracle.missing_count
+            failed_ = set(failed_) | set(oracle.vanished)
+        return fail_n, failed_, oracle
+
     iter_n = 0
     # Hard cap removed — the sole non-success terminator is `stall >=
     # max_stalls` on the pass_count floor. The 10k backstop here mirrors
@@ -262,12 +311,19 @@ def run_phase_c_tdd(
         dt = time.monotonic() - t0
         pass_count, fail_count, _ignored = parse_test_counts(output)
         cur_failed = parse_failed_tests(output)
+        fail_count, cur_failed, _oracle = _reconcile(
+            rc, output, pass_count, fail_count, cur_failed)
         # Debt #45 — batch ratchet. pass_count reflects the PREVIOUS iter's fills;
         # a drop below the best we've measured means that iter net-regressed the
         # cluster (a regression the per-fill guard couldn't catch while the crate
         # was red mid-batch). Restore the best-known src tree and re-test, so the
         # loop always attacks from — and can only exit at — its high-water mark.
-        if _batch_ratchet and _bratchet_snap is not None and pass_count < _bratchet_best:
+        # An oracle shrink beyond the snapshot's own (tests that executed at the
+        # snapshot no longer report) is the same net regression, even when the
+        # pass count held — the lost binary may have been mostly failing.
+        if _batch_ratchet and _bratchet_snap is not None and (
+                pass_count < _bratchet_best
+                or _oracle.missing_count > _bratchet_missing):
             _rev = restore_src_tree(_bratchet_snap)
             deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: batch ratchet — "
                      f"pass_count {pass_count}<{_bratchet_best} (last iter's fills "
@@ -282,21 +338,33 @@ def run_phase_c_tdd(
                                         timeout=test_timeout)
             pass_count, fail_count, _ignored = parse_test_counts(output)
             cur_failed = parse_failed_tests(output)
+            fail_count, cur_failed, _oracle = _reconcile(
+                rc, output, pass_count, fail_count, cur_failed)
         # Refresh the best-known snapshot on the first iter and each strict
         # improvement (never on a plateau — the existing best-state snapshot is
-        # equivalent and re-reading the tree would be wasted I/O).
-        if _batch_ratchet and (_bratchet_snap is None or pass_count > _bratchet_best):
+        # equivalent and re-reading the tree would be wasted I/O). Never
+        # snapshot a tree whose oracle shrank below the best seen — restoring
+        # it later would restore the shrink.
+        _min_missing = (_oracle.missing_count if _ckpt_min_missing is None
+                        else min(_ckpt_min_missing, _oracle.missing_count))
+        if _batch_ratchet and (_bratchet_snap is None or pass_count > _bratchet_best) \
+                and _oracle.missing_count <= _min_missing:
             _snap = snapshot_src_tree(_src_root)
             if _snap is not None:
                 _bratchet_best = pass_count
                 _bratchet_snap = _snap
+                _bratchet_missing = _oracle.missing_count
         # Durable checkpoint of the new-best fill tree so a later heal restores
         # THIS good state (best-tree copy / git ancestor) instead of nuking the
-        # file to the baked skeleton. Independent of _batch_ratchet.
-        if deps.checkpoint_fill_tree is not None and pass_count > _checkpoint_best:
+        # file to the baked skeleton. Independent of _batch_ratchet. Never
+        # persisted while the oracle is short: a higher pass count over a
+        # shrunken suite must not overwrite a full-oracle best tree.
+        if deps.checkpoint_fill_tree is not None and pass_count > _checkpoint_best \
+                and _oracle.missing_count == 0:
             deps.checkpoint_fill_tree(
                 project_dir, cluster.name, target_src_dir, pass_count, iter_n)
             _checkpoint_best = pass_count
+        _ckpt_min_missing = _min_missing
         # F6 — measurement provenance: stamp every iter event with the tree it
         # measured (content hash), the oracle size (denominator), and the actual
         # test names, so cross-run pass-count claims are verifiable and oracle
@@ -317,7 +385,14 @@ def run_phase_c_tdd(
         if _bins:
             deps.log(f"  {tag} [phase-c/tdd] iter {iter_n} binaries: "
                      + ", ".join(f"{lbl} {p}/{f}" for lbl, p, f in _bins))
-        if rc == 0:
+        if rc == 0 and not _oracle.intact:
+            # cargo says green but part of the expected oracle never reported —
+            # a shrunken suite must not close the cluster (FR-024). Fall
+            # through to the failing path with the vanished tests as failures.
+            deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: rc==0 but the "
+                     f"oracle is short {_oracle.missing_count} test(s) — NOT "
+                     "declaring the cluster done.")
+        if rc == 0 and _oracle.intact:
             deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: all tests pass "
                  f"({pass_count} passed, {dt:.1f}s). Cluster done.")
             deps.emit("phase_c.tdd.iter", data={
@@ -371,6 +446,7 @@ def run_phase_c_tdd(
             output, src_dir, recently_filled,
             test_reverse_map, cluster.name,
             test_texts=dict(cluster_tests),
+            extra_failed=frozenset(_oracle.vanished),
         )
         frontier = deps.filter_test_targets(frontier, src_dir)
 
@@ -441,6 +517,45 @@ def run_phase_c_tdd(
                 "deferred": {f"{f}::{fn}": sorted(f"{bf}::{bfn}"
                                                   for bf, bfn in blk)
                              for (f, fn), blk in _deferred.items()}})
+
+        # Cause-C layout retrigger (proactive, not stall-gated): expected
+        # tests VANISHING sweep after sweep with a clean compile is the
+        # fingerprint of a frozen unsafe scheme whose filled bodies crash the
+        # test binaries — per-fn re-fills can't converge on a shared pointer
+        # scheme, so re-author the implicated frozen component instead of
+        # burning the stall budget on it.
+        if _oracle.missing_count > 0:
+            _vanish_streak += 1
+        else:
+            _vanish_streak = 0
+        if (_vanish_streak >= _crash_retrigger_after
+                and deps.retrigger_layout is not None):
+            _vanish_streak = 0   # re-arm only after another full streak
+            _suspects: set[FnLocator] = set()
+            for _vt in _oracle.vanished:
+                _bare = _vt.split("::")[-1]
+                for _k in (test_reverse_map.get(_bare)
+                           or test_reverse_map.get(_vt) or set()):
+                    _suspects.add(FnLocator(*_k))
+            _retrig_c = deps.retrigger_layout(
+                project_dir, module, cluster.name, target_src_dir, output,
+                crash_evidence=CrashEvidence(
+                    vanished=frozenset(_oracle.vanished),
+                    suspect_fns=frozenset(_suspects),
+                    consecutive_sweeps=_crash_retrigger_after))
+            if _retrig_c.fired and _retrig_c.succeeded:
+                deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: CRASH layout "
+                         f"retrigger fired (cause={_retrig_c.cause}) — reverted "
+                         f"{_retrig_c.reverted_count} fn(s) to re-fill under "
+                         "the new layout; resetting stall budget.")
+                deps.emit("phase_c.layout_retrigger.fired", data={
+                    "cluster": cluster.name, "iter": iter_n,
+                    "cause": _retrig_c.cause,
+                    "reverted_count": _retrig_c.reverted_count,
+                })
+                state.stalls = 0
+                stall = 0
+                continue
 
         # Exit condition: stall budget exhausted on the cluster-level
         # pass_count floor. Fires regardless of whether `eligible` is

@@ -18,13 +18,14 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 
 from pipeline_core.domain.authored_layout import (
-    AuthoredLayout,
-    layout_coverage,
+    AuthoredItem,
+    component_uids,
     parse_authored_layout,
 )
 from pipeline_core.domain.behaviour import BehaviourSpec
+from pipeline_core.domain.layout_chunking import plan_author_chunks
 from pipeline_core.domain.private_surface import PrivateSurface, PrivateSurfaceItem
-from pipeline_core.domain.scaffold_rewrite import replace_definition
+from pipeline_core.domain.scaffold_rewrite import replace_definitions
 from pipeline_core.prompts.layout_authoring import build_layout_authoring_prompt
 
 
@@ -33,9 +34,14 @@ class AuthorLayoutDeps:
     run_model: Callable[[str], str]                 # prompt → reply
     read_skeleton: Callable[[str], str | None]      # rel path → text (None if absent)
     write_skeleton: Callable[[str, str], None]      # rel path, text
-    compile_ok: Callable[[], bool]                  # scaffold compiles with stubs?
+    compile_check: Callable[[], tuple[bool, str]]   # (compiles?, error excerpt)
     log: Callable[[str], None]
     max_attempts: int = 3
+    # M6 chunking: components above `single_shot_max` items are authored in
+    # chunks (types first, then fns) instead of demanding one 40-block reply.
+    single_shot_max: int = 14
+    fns_per_chunk: int = 10
+    chunk_coverage_retries: int = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,27 +86,30 @@ class AuthorLayoutResult:
 
 
 def _splice_component(
-    items: tuple[PrivateSurfaceItem, ...], layout: AuthoredLayout,
+    items: tuple[PrivateSurfaceItem, ...], authored: dict[str, AuthoredItem],
     deps: AuthorLayoutDeps,
 ) -> tuple[dict[str, str], bool]:
-    """Apply the authored layout to the skeleton files in memory. Returns
-    (edited files by rel path, all_replaced). Every item must be located in its
-    home file (whitespace-tolerant) or the splice is rejected — a dangling
-    frozen def next to an authored one would not compile."""
+    """Apply the authored layout (keyed by protocol uid) to the skeleton files
+    in memory. Returns (edited files by rel path, all_replaced). Replacements
+    are batched per file and occurrence-ordered (`replace_definitions`) so
+    same-named items land in their OWN slots; any unlocatable frozen def
+    rejects the splice — a dangling frozen def next to an authored one would
+    not compile."""
+    per_file: dict[str, list[tuple[str, str]]] = {}
+    for uid, it in zip(component_uids(items), items, strict=True):
+        block = authored.get(uid)
+        if block is None:
+            return {}, False
+        per_file.setdefault(it.file, []).append((it.definition, block.definition))
     edited: dict[str, str] = {}
-    for it in items:
-        authored = layout.item(it.name)
-        if authored is None:
-            return edited, False
-        current = edited.get(it.file)
+    for rel, pairs in per_file.items():
+        current = deps.read_skeleton(rel)
         if current is None:
-            current = deps.read_skeleton(it.file)
-            if current is None:
-                return edited, False
-        res = replace_definition(current, it.definition, authored.definition)
+            return edited, False
+        res = replace_definitions(current, pairs)
         if not res.replaced:
             return edited, False
-        edited[it.file] = res.text
+        edited[rel] = res.text
     return edited, True
 
 
@@ -112,6 +121,7 @@ def author_layout(
     select_pins: Callable[[tuple[PrivateSurfaceItem, ...]], list[BehaviourSpec]],
     symbol_inventory: str,
     deps: AuthorLayoutDeps,
+    extra_guidance: str = "",
 ) -> AuthorLayoutResult:
     """Author every connected component of `surface`. Each component is
     committed to the skeleton only after the rewritten scaffold compiles; a
@@ -132,10 +142,15 @@ def author_layout(
             deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: GATED — {reason}")
             results.append(ComponentResult(names, False, reason, gated=True))
             continue
-        prompt = build_layout_authoring_prompt(
-            module_name=module_name, cfg_cluster=surface.cfg_cluster,
-            items=comp, public_surface=public_surface,
-            layout_pins=pins, symbol_inventory=symbol_inventory)
+        def _prompt(chunk_items: tuple[PrivateSurfaceItem, ...],
+                    chunk_uids: tuple[str, ...], scheme: str, hint: str,
+                    *, _pins: list[BehaviourSpec] = pins) -> str:
+            return build_layout_authoring_prompt(
+                module_name=module_name, cfg_cluster=surface.cfg_cluster,
+                items=chunk_items, public_surface=public_surface,
+                layout_pins=_pins, symbol_inventory=symbol_inventory,
+                extra_guidance=extra_guidance, authored_scheme=scheme,
+                item_uids=chunk_uids) + hint
         committed = False
         reason = "no attempt"
         # snapshot the pristine skeleton files this component touches, so a
@@ -143,16 +158,14 @@ def author_layout(
         touched = {i.file for i in comp}
         pristine = {f: deps.read_skeleton(f) for f in touched}
         for attempt in range(1, deps.max_attempts + 1):
-            reply = deps.run_model(prompt if attempt == 1
-                                   else prompt + _retry_hint(reason))
-            layout = parse_authored_layout(reply)
-            missing, _ = layout_coverage(comp, layout)
-            if missing:
-                reason = f"missing authored items: {', '.join(sorted(missing))}"
+            hint = _retry_hint(reason) if attempt > 1 else ""
+            authored, reason = _author_component(
+                comp, surface.cfg_cluster, _prompt, hint, deps)
+            if authored is None:
                 deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: {reason} "
                          f"(attempt {attempt})")
                 continue
-            edited, ok = _splice_component(comp, layout, deps)
+            edited, ok = _splice_component(comp, authored, deps)
             if not ok:
                 reason = "could not locate a frozen definition to replace"
                 deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: {reason} "
@@ -160,20 +173,67 @@ def author_layout(
                 continue
             for rel, txt in edited.items():
                 deps.write_skeleton(rel, txt)
-            if deps.compile_ok():
+            compiled, errors = deps.compile_check()
+            if compiled:
                 committed = True
                 reason = ""
                 deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: authored "
                          f"layout compiles (attempt {attempt}).")
                 break
-            reason = "authored scaffold did not compile"
+            reason = ("authored scaffold did not compile:\n"
+                      + errors if errors else "authored scaffold did not compile")
             for rel, orig in pristine.items():
                 if orig is not None:
                     deps.write_skeleton(rel, orig)
-            deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: {reason} "
-                     f"(attempt {attempt}) — reverted.")
+            deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: authored "
+                     f"scaffold did not compile (attempt {attempt}) — reverted.")
         results.append(ComponentResult(names, committed, reason))
     return AuthorLayoutResult(surface.cfg_cluster, tuple(results))
+
+
+def _author_component(
+    comp: tuple[PrivateSurfaceItem, ...],
+    cfg_cluster: str,
+    make_prompt: Callable[
+        [tuple[PrivateSurfaceItem, ...], tuple[str, ...], str, str], str],
+    attempt_hint: str,
+    deps: AuthorLayoutDeps,
+) -> tuple[dict[str, AuthoredItem] | None, str]:
+    """One full authoring pass over the component's chunk plan. Returns
+    (authored blocks by component-scoped uid, "") or (None, reason). Each
+    chunk sees the definitions earlier chunks authored (the scheme) and gets
+    `chunk_coverage_retries` extra tries when it omits items — a missing item
+    re-requests ONE chunk, not the whole component."""
+    uids = component_uids(comp)
+    chunks = plan_author_chunks(
+        comp, single_shot_max=deps.single_shot_max,
+        fns_per_chunk=deps.fns_per_chunk)
+    authored: dict[str, AuthoredItem] = {}
+    scheme_parts: list[str] = []
+    for chunk in chunks:
+        chunk_items = tuple(comp[i] for i in chunk)
+        chunk_uids = tuple(uids[i] for i in chunk)
+        want = frozenset(chunk_uids)
+        missing = want
+        hint = attempt_hint
+        for _ in range(1 + deps.chunk_coverage_retries):
+            reply = deps.run_model(
+                make_prompt(chunk_items, chunk_uids, "\n\n".join(scheme_parts),
+                            hint))
+            layout = parse_authored_layout(reply)
+            for item in layout.items:
+                if item.name in want:
+                    authored[item.name] = item
+            missing = frozenset(u for u in want if u not in authored)
+            if not missing:
+                break
+            hint = _retry_hint(
+                f"missing authored items: {', '.join(sorted(missing))}")
+        if missing:
+            return None, f"missing authored items: {', '.join(sorted(missing))}"
+        scheme_parts.extend(
+            authored[u].definition for u in chunk_uids)
+    return authored, ""
 
 
 def _retry_hint(reason: str) -> str:

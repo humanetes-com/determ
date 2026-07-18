@@ -80,3 +80,36 @@ def test_frozen_counter_info():
 
 def test_healthy_segment_is_quiet():
     assert analyze(["  [phase-c/per-fn] 1/5 filled src/lib.rs::f (+10 bytes)"], []) == []
+
+
+_RT_FAIL = ("  [layout-retrigger] stable/['ErrorVTable', 'as_ref']: "
+            "re-author attempt 1 still did not compile.")
+_RT_OK = ("  [layout-retrigger] stable/['ErrorVTable', 'as_ref']: "
+          "re-authored successfully (cause=RUNTIME_CRASH)")
+_T15_MISSING = ("  [t1.5] stable/('ErrorVTable', 'as_ref'): "
+                "missing authored items: as_ref (attempt 2)")
+
+
+def test_capped_retry_structural_reason_alerts_on_first_occurrence():
+    f = [x for x in analyze([_T15_MISSING], [])
+         if x.kind == HealthKind.CAPPED_RETRY_FUTILITY]
+    assert f and f[0].severity == "alert"
+    assert "missing authored items" in f[0].evidence
+
+
+def test_capped_retry_repeated_compile_fail_alerts():
+    f = [x for x in analyze([_RT_FAIL, _RT_FAIL], [])
+         if x.kind == HealthKind.CAPPED_RETRY_FUTILITY]
+    assert f and "2 re-author attempt(s) failed" in f[0].evidence
+
+
+def test_capped_retry_single_compile_fail_stays_quiet():
+    f = [x for x in analyze([_RT_FAIL], [])
+         if x.kind == HealthKind.CAPPED_RETRY_FUTILITY]
+    assert f == []
+
+
+def test_capped_retry_success_suppresses():
+    f = [x for x in analyze([_RT_FAIL, _RT_FAIL, _RT_OK], [])
+         if x.kind == HealthKind.CAPPED_RETRY_FUTILITY]
+    assert f == []

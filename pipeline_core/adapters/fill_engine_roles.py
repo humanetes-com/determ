@@ -133,10 +133,19 @@ class CargoFillAdapter:
     env_fn: Callable[[], dict[str, str]]
     test_regression_baseline_fn: Callable[..., tuple[int, frozenset[str]] | None] | None = None
     test_regression_gate_fn: Callable[..., tuple[frozenset[str], str] | None] | None = None
+    check_diag_fn: Callable[..., tuple[int, str, list[Any]]] | None = None
 
     def run(self, cmd: str, cwd: Path, env: dict[str, str],
             timeout: int = 180) -> tuple[int, str]:
         return self.run_fn(cmd, cwd, env, timeout)
+
+    def check_diag(self, cmd: str, cwd: Path, env: dict[str, str],
+                   timeout: int = 180) -> tuple[int, str, list[Any]]:
+        if self.check_diag_fn is None:
+            # Diagnostics-less fallback (harnesses that bind only run_fn).
+            rc, out = self.run_fn(cmd, cwd, env, timeout)
+            return rc, out, []
+        return self.check_diag_fn(cmd, cwd, env, timeout)
 
     def build_test_cmd(self, test_stems: list[str], cluster: Any) -> str:
         return self.build_test_cmd_fn(test_stems, cluster)
