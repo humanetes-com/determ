@@ -59,13 +59,86 @@ def classify_layout_assertions(test_src: str) -> tuple[ObservableOutcome, ...]:
     for macro in _AUTOTRAIT_MACROS:
         for ln in _nonempty_lines_with(test_src, macro):
             _add(StaticAssertKind.AUTOTRAITS, ln)
-    if contains_word(test_src, "where") or contains_word(test_src, "fn"):
-        for ln in test_src.splitlines():
-            s = ln.strip()
-            if any(contains_word(s, b) for b in _AUTOTRAIT_BOUNDS) and (
-                    contains_word(s, "where") or ":" in s) and "size_of" not in s:
-                _add(StaticAssertKind.AUTOTRAITS, s)
+    for ln in test_src.splitlines():
+        if is_autotrait_assertion(ln):
+            _add(StaticAssertKind.AUTOTRAITS, ln.strip())
     return tuple(out)
+
+
+def is_autotrait_assertion(line: str) -> bool:
+    """True iff `line` ASSERTS an autotrait bound, rather than merely mentioning
+    one.
+
+    The pinning idiom is a generic helper the test instantiates —
+    ``fn assert<T: Send + Sync>() {}`` or ``fn _a() where Error: Send`` — so the
+    line must be a `fn` declaration carrying the bound. Accepting any line with
+    an autotrait word and a colon swept up ordinary code: a type annotation
+    (``let e: Box<dyn StdError + Send + Sync> = x.into();``), a parameter list
+    (``fn from_boxed(e: Box<dyn StdError + Send>) -> Self``) and a turbofish
+    (``.downcast_ref::<Box<dyn StdError + Send>>()``) all matched, and every one
+    of them then reached the t1.5 authoring prompt as a layout constraint the
+    model was told to satisfy."""
+    s = line.strip()
+    if "size_of" in s or not contains_word(s, "fn"):
+        return False
+    if not any(contains_word(s, b) for b in _AUTOTRAIT_BOUNDS):
+        return False
+    if contains_word(s, "where"):
+        return True
+    return autotrait_bound_list(s) is not None
+
+
+def autotrait_bound_list(line: str) -> str | None:
+    """The bounds of a single-parameter generic helper — ``fn assert<E: Unpin +
+    Send>() {}`` → ``Unpin + Send``; None when the line has no such parameter.
+
+    Structural (bracket-depth) scan, never a text match: the bound list may
+    itself contain generics (``T: AsRef<[u8]> + Send``) and the parameter list
+    may sit anywhere on the line."""
+    at = line.find("<")
+    if at < 0:
+        return None
+    end = _balanced_angle(line, at)
+    if end < 0:
+        return None
+    params = _split_top_level_commas(line[at + 1:end - 1])
+    if len(params) != 1 or ":" not in params[0]:
+        return None
+    return params[0].split(":", 1)[1].strip() or None
+
+
+def _balanced_angle(text: str, start: int) -> int:
+    """Index just past the ``<``…``>`` group at `start`, or -1 if unbalanced."""
+    if start >= len(text) or text[start] != "<":
+        return -1
+    depth = 0
+    for i in range(start, len(text)):
+        if text[i] == "<":
+            depth += 1
+        elif text[i] == ">":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return -1
+
+
+def _split_top_level_commas(text: str) -> list[str]:
+    """Split on commas at bracket depth 0 (``T: AsRef<[u8], u8>`` is ONE param)."""
+    out: list[str] = []
+    depth = 0
+    cur: list[str] = []
+    for c in text:
+        if c in "(<[":
+            depth += 1
+        elif c in ")>]":
+            depth -= 1
+        if c == "," and depth == 0:
+            out.append("".join(cur))
+            cur = []
+            continue
+        cur.append(c)
+    out.append("".join(cur))
+    return [s.strip() for s in out]
 
 
 def is_layout_pinning(test_src: str) -> bool:

@@ -155,6 +155,9 @@ def make_layout_phase_runner(
     skeleton_src_dir_for: Callable[[Path, str], Path],
     fn_name_counts: Callable[[Path], dict[str, int]],
     log: Callable[[str], None],
+    # Installs/removes the layout-pin probe in the skeleton crate root so the
+    # compile gate decides the pins. Absent ⇒ pins stay advisory (prior gate).
+    write_pin_probe: Callable[[Path, str, str | None], None] | None = None,
     save_layout_outcomes: Callable[[Path, AuthorLayoutResult], Path] | None = None,
 ) -> Callable[[Path, str], None]:
     """Assemble the t1.5 phase runner from resident ports (composition helper —
@@ -194,7 +197,10 @@ def make_layout_phase_runner(
                 run_model=run_model, read_skeleton=_read, write_skeleton=_write,
                 compile_check=lambda: compile_check(
                     pd, cluster, env_by_cluster.get(cluster, {})),
-                log=log)
+                log=log,
+                write_pin_probe=(
+                    None if write_pin_probe is None
+                    else (lambda src: write_pin_probe(pd, cluster, src))))
 
         def _recompute_leaf_order(pd: Path, cluster: str) -> None:
             src = skeleton_src_dir_for(pd, cluster)

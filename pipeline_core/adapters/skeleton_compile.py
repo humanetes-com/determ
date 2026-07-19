@@ -60,6 +60,48 @@ def compile_skeleton_ok(
 
 _ERROR_EXCERPT_CHARS = 5000
 
+_PROBE_BEGIN = "// __LAYOUT_PIN_PROBE_BEGIN__"
+_PROBE_END = "// __LAYOUT_PIN_PROBE_END__"
+
+
+def _strip_probe(text: str) -> str:
+    """`text` with any previously installed probe region removed. Marker-
+    delimited rather than length-based so an interrupted run cannot leave a
+    half-probe behind that the next install would nest inside itself."""
+    begin = text.find(_PROBE_BEGIN)
+    if begin < 0:
+        return text
+    end = text.find(_PROBE_END, begin)
+    if end < 0:
+        return text[:begin].rstrip() + "\n"
+    return (text[:begin].rstrip() + "\n" + text[end + len(_PROBE_END):].lstrip("\n"))
+
+
+def write_pin_probe(
+    project_dir: Path, cfg_cluster: str, source: str | None,
+) -> None:
+    """Install (`source`) or remove (`None`) the layout-pin probe in the
+    skeleton's crate root, so ``cargo check --lib`` decides the pins.
+
+    The probe rides in ``lib.rs`` because it must be part of the LIB target —
+    the pins are compile-time facts about crate-root types, and the gate never
+    builds test targets. Install is strip-then-append, so it is idempotent and
+    always removable regardless of what the authoring splice did to the file in
+    between."""
+    root = skeleton_src_dir_for(project_dir, cfg_cluster) / "lib.rs"
+    try:
+        current = root.read_text(encoding="utf-8")
+    except OSError:
+        return
+    base = _strip_probe(current)
+    new = base if source is None else (
+        f"{base.rstrip()}\n\n{_PROBE_BEGIN}\n{source.rstrip()}\n{_PROBE_END}\n")
+    if new != current:
+        try:
+            root.write_text(new, encoding="utf-8")
+        except OSError:
+            return
+
 
 def compile_skeleton_check(
     project_dir: Path,

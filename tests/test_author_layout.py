@@ -1,6 +1,8 @@
 """Pins for the F11 layout-authoring use-case (t1.5 orchestration)."""
 from __future__ import annotations
 
+import dataclasses
+
 from pipeline_core.application.author_layout import (
     AuthorLayoutDeps,
     ComponentResult,
@@ -130,3 +132,54 @@ def test_component_outcome_gated_takes_priority_over_authored_flag():
 def test_component_outcome_frozen_when_neither_authored_nor_gated():
     c = ComponentResult(item_names=("Foo",), authored=False, reason="did not compile")
     assert component_outcome(c) is LayoutOutcome.FROZEN
+
+
+class _ProbeDeps(_Deps):
+    """`_Deps` plus the pin-probe port, recording install/remove order."""
+
+    def __init__(self, reply, compile_results):
+        super().__init__(reply, compile_results)
+        self.probe_writes: list[str | None] = []
+
+    def deps(self):
+        base = super().deps()
+        return dataclasses.replace(
+            base, write_pin_probe=self.probe_writes.append)
+
+
+def test_pin_probe_is_calibrated_on_the_frozen_scaffold_first():
+    # First compile_check is the CALIBRATION (probe vs the pristine layout);
+    # only then is a candidate authored and gated.
+    d = _ProbeDeps(_GOOD, [True, True])
+    res = author_layout(_surface(), module_name="anyhow", public_surface="",
+                        select_pins=_has_pins, symbol_inventory="", deps=d.deps())
+    assert res.all_authored
+    # install → remove (calibration), install → remove (the gated attempt)
+    assert [w is not None for w in d.probe_writes] == [True, False, True, False]
+    assert any("layout pin(s) verified" in m for m in d.logs)
+
+
+def test_probe_that_fails_on_the_frozen_scaffold_disables_pin_gating():
+    # The frozen layout is the crate's own, so every harvested pin holds there.
+    # A probe that fails calibration is wrong ABOUT ITSELF — it must never be
+    # allowed to reject an authored layout (that would freeze good components).
+    d = _ProbeDeps(_GOOD, [False, True])
+    res = author_layout(_surface(), module_name="anyhow", public_surface="",
+                        select_pins=_has_pins, symbol_inventory="", deps=d.deps())
+    assert res.all_authored, "calibration failure must not fail the component"
+    assert any("probe is wrong" in m for m in d.logs)
+    # Calibration installed the probe once; after it failed, NO further install
+    # happens — the attempt runs ungated. Removal stays unconditional so a stale
+    # probe from an interrupted run cannot survive into a gated compile.
+    assert d.probe_writes.count(str(d.probe_writes[0])) <= 1
+    assert sum(w is not None for w in d.probe_writes) == 1
+    assert d.probe_writes[-1] is None
+
+
+def test_probe_is_removed_even_when_the_authored_layout_fails_to_compile():
+    # A probe left behind would poison every later compile in the run.
+    d = _ProbeDeps(_GOOD, [True, False, False, False])
+    res = author_layout(_surface(), module_name="anyhow", public_surface="",
+                        select_pins=_has_pins, symbol_inventory="", deps=d.deps())
+    assert not res.all_authored
+    assert d.probe_writes[-1] is None

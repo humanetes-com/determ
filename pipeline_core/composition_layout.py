@@ -26,6 +26,7 @@ from pipeline_core.adapters.private_surface_store import load_private_surface
 from pipeline_core.adapters.skeleton_compile import (
     compile_skeleton_check,
     skeleton_src_dir_for,
+    write_pin_probe,
 )
 from pipeline_core.application.author_layout import AuthorLayoutDeps
 from pipeline_core.application.author_layout_phase import make_layout_phase_runner
@@ -59,6 +60,7 @@ def build_layout_phase_runner(
         fn_name_counts=fn_name_counts,
         log=log,
         save_layout_outcomes=save_layout_outcomes,
+        write_pin_probe=write_pin_probe,
     )
 
 
@@ -109,7 +111,8 @@ def build_retrigger_layout(
                 read_skeleton=_read, write_skeleton=_write,
                 compile_check=lambda: compile_skeleton_check(
                     pd, cluster, env_extra=env_by_cluster.get(cluster, {})),
-                log=log)
+                log=log,
+                write_pin_probe=lambda src: write_pin_probe(pd, cluster, src))
 
         deps = RetriggerLayoutDeps(
             log=log, load_surface=load_private_surface,

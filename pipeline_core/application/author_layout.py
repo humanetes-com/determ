@@ -25,6 +25,7 @@ from pipeline_core.domain.authored_layout import (
 )
 from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.layout_chunking import plan_author_chunks
+from pipeline_core.domain.layout_probe import LayoutProbe, build_layout_probe
 from pipeline_core.domain.private_surface import (
     PrivateSurface,
     PrivateSurfaceItem,
@@ -44,6 +45,9 @@ class AuthorLayoutDeps:
     write_skeleton: Callable[[str, str], None]      # rel path, text
     compile_check: Callable[[], tuple[bool, str]]   # (compiles?, error excerpt)
     log: Callable[[str], None]
+    # Layout-pin gate: install probe source into the skeleton (None removes it).
+    # Absent ⇒ pins stay advisory, exactly as before the gate existed.
+    write_pin_probe: Callable[[str | None], None] | None = None
     max_attempts: int = 3
     # M6 chunking: components above `single_shot_max` items are authored in
     # chunks (types first, then fns) instead of demanding one 40-block reply.
@@ -196,6 +200,7 @@ def author_layout(
         # failed candidate is reverted exactly (no cross-attempt bleed).
         touched = {i.file for i in comp}
         pristine = {f: deps.read_skeleton(f) for f in touched}
+        probe = _calibrated_pin_probe(surface, comp, pins, deps)
         for attempt in range(1, deps.max_attempts + 1):
             hint = _retry_hint(reason) if attempt > 1 else ""
             authored, reason = _author_component(
@@ -212,13 +217,23 @@ def author_layout(
                 continue
             for rel, txt in edited.items():
                 deps.write_skeleton(rel, txt)
+            # The pin probe rides along with THIS compile: a layout that no
+            # longer satisfies `size_of::<Error>() == size_of::<usize>()` must
+            # be rejected here, not discovered a whole sweep later as repr
+            # failures blamed on individual fn bodies.
+            if probe.checks_anything and deps.write_pin_probe is not None:
+                deps.write_pin_probe(probe.source)
             compiled, errors = deps.compile_check()
+            if deps.write_pin_probe is not None:
+                deps.write_pin_probe(None)
             if compiled:
                 committed = True
                 reason = ""
                 committed_defs = authored_locate_keys(comp, authored)
+                pin_note = (f" [{len(probe.gated)} layout pin(s) verified]"
+                            if probe.checks_anything else "")
                 deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: authored "
-                         f"layout compiles (attempt {attempt}).")
+                         f"layout compiles (attempt {attempt}).{pin_note}")
                 break
             reason = ("authored scaffold did not compile:\n"
                       + errors if errors else "authored scaffold did not compile")
@@ -226,10 +241,54 @@ def author_layout(
                 if orig is not None:
                     deps.write_skeleton(rel, orig)
             deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: authored "
-                     f"scaffold did not compile (attempt {attempt}) — reverted.")
+                     f"scaffold did not compile (attempt {attempt}) — reverted"
+                     + (" (layout pins were gated this attempt)"
+                        if probe.checks_anything else "") + ".")
         results.append(ComponentResult(names, committed, reason,
                                        authored_defs=committed_defs))
     return AuthorLayoutResult(surface.cfg_cluster, tuple(results))
+
+
+def _calibrated_pin_probe(
+    surface: PrivateSurface,
+    comp: tuple[PrivateSurfaceItem, ...],
+    pins: list[BehaviourSpec],
+    deps: AuthorLayoutDeps,
+) -> LayoutProbe:
+    """The component's layout pins rendered as a compile-time probe, PROVEN to
+    hold on the pristine (frozen) skeleton before it is allowed to reject
+    anything.
+
+    The frozen layout is the crate's own, so every harvested pin holds there by
+    construction. A probe that fails this calibration is therefore wrong ABOUT
+    ITSELF — an expression we rendered badly, a type not in scope at crate root
+    — never a real violation. Rejecting authored layouts on such a probe would
+    freeze components that were fine, so a failed calibration disables pin
+    gating loudly and the gate degrades to exactly its pre-probe behaviour.
+    """
+    if deps.write_pin_probe is None or not pins:
+        return LayoutProbe()
+    pinned_types = tuple(sorted(
+        name for name in surface.public_direct_refs
+        if surface.reachable_from_public(name) & {i.name for i in comp}))
+    probe = build_layout_probe(pins, pinned_types=pinned_types)
+    names = tuple(i.name for i in comp)
+    if probe.skipped:
+        deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: "
+                 f"{len(probe.skipped)} layout pin(s) NOT compile-gated "
+                 f"(could not be rendered): {list(probe.skipped)}")
+    if not probe.checks_anything:
+        return LayoutProbe(skipped=probe.skipped)
+    deps.write_pin_probe(probe.source)
+    holds, errors = deps.compile_check()
+    deps.write_pin_probe(None)
+    if not holds:
+        deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: layout-pin probe "
+                 "does not hold on the FROZEN scaffold — the probe is wrong, "
+                 "not the layout; pin gating disabled for this component. "
+                 f"{errors.strip()[:300]}")
+        return LayoutProbe(skipped=probe.gated + probe.skipped)
+    return probe
 
 
 def _author_component(

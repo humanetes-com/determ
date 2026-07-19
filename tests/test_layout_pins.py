@@ -85,3 +85,36 @@ def test_pinned_type_names_extracts_the_pinned_type():
     specs = tuple(harvest_layout_pin_behaviours(
         _REPR_TEST, source_file="tests/repr.rs"))
     assert "Error" in pinned_type_names(specs)
+
+
+def test_ordinary_code_mentioning_an_autotrait_is_not_a_pin() -> None:
+    # Live defect: any line with Send/Sync/Unpin AND a colon was harvested as a
+    # layout pin, so eight ordinary lines from anyhow's tests reached the t1.5
+    # authoring prompt as constraints the model was told its layout must satisfy.
+    for code in (
+        "let boxed_error: Box<dyn StdError + Send + Sync + 'static> = e.into();",
+        "fn from_boxed(e: Box<dyn StdError + Send + Sync + 'static>) -> Self {",
+        "let error = Box::<dyn StdError + Send + Sync>::from(\"oh no!\");",
+        "    .downcast_ref::<Box<dyn StdError + Send + Sync>>()",
+        "let r: &(dyn StdError + Send + Sync) = error.as_ref();",
+    ):
+        assert classify_layout_assertions(code) == (), code
+
+
+def test_generic_helper_and_where_clause_forms_are_still_pins() -> None:
+    for pin in (
+        "fn assert_send<T: Send>() {}",
+        "fn assert<E: Unpin + Send + Sync + 'static>() {}",
+        "fn _assert() where Error: Send + Sync {}",
+    ):
+        got = classify_layout_assertions(pin)
+        assert len(got) == 1 and got[0].static_kind is StaticAssertKind.AUTOTRAITS, pin
+
+
+def test_autotrait_bound_list_survives_nested_generics() -> None:
+    from pipeline_core.domain.layout_pins import autotrait_bound_list
+    assert autotrait_bound_list("fn a<T: AsRef<[u8]> + Send>() {}") == (
+        "AsRef<[u8]> + Send")
+    # two bounded params are ambiguous (which one is the pin?) — not a pin
+    assert autotrait_bound_list("fn a<A: Send, B: Sync>() {}") is None
+    assert autotrait_bound_list("fn a() {}") is None
