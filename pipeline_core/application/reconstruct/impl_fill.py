@@ -352,15 +352,21 @@ def fill_impl_blocks(
 
     _impl_full_stalls = int(os.getenv("PHASE_C_IMPL_MAX_STALLS", "3"))
 
-    # One shot, not a retry loop: an immediate blind retry with the same
-    # limited context reproduces the same mistake (live-observed — a retried
-    # file-first attempt on anyhow's error.rs hit the identical cross-wiring
-    # drop pattern as its first try). Retry investment is spent ONCE, at the
-    # END of the TDD iteration, in the dedicated retro round — by then the
-    # rest of the crate has real, passing context this immediate retry never
-    # had. The per-block loop handles whatever's left after this one attempt
-    # (the #42 freshness gate skips whatever this pass completed).
-    _FILE_FIRST_MAX_ATTEMPTS = 1
+    # Retries here are FEEDBACK-CARRYING, not blind: every revert path below
+    # sets `prior_error` (focused cargo diagnostics, the U2 self-failure
+    # detail, or the regressed sibling test) and the next attempt's prompt
+    # renders it. A BLIND immediate retry is the thing that fails — live-
+    # observed, a re-ask with identical context reproduced the same
+    # cross-wiring drop pattern — so this budget is only worth spending
+    # because attempt N+1 sees what attempt N broke. It matters most for the
+    # jointly-coupled files this route exists for: a whole-file scheme (a
+    # vtable built by one fn and dispatched through by its siblings) cannot
+    # be repaired one fn at a time, so if the joint attempt dies on a compile
+    # error the per-block fallback cannot recover it either. Whatever is still
+    # stubbed after this budget falls through to the per-block loop (the
+    # freshness gate skips names this pass already completed) and to the retro
+    # round at the end of the TDD iteration.
+    _FILE_FIRST_MAX_ATTEMPTS = int(os.getenv("PHASE_C_FILE_MAX_ATTEMPTS", "3"))
 
     def _fill_file_first(file_rel: str, fblocks: list[ImplBlock]) -> None:
         """P5 file-first pass: ONE prompt fills every stub of a multi-block

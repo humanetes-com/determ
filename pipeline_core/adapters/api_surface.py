@@ -17,7 +17,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from pipeline_core.domain.models import FnRecord
 from pipeline_core.domain.pub_items import pub_items_from_records
+from pipeline_core.domain.rust_elide import elide_fn_bodies
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +55,22 @@ class ApiSurfaceCapture:
         # part of the public API — they are consumers of it.
         src_root = module_dir / "src"
         walk_root = src_root if src_root.is_dir() else module_dir
+
+        # Body elision runs off the extractor's byte spans, not a text scan: a
+        # scanner only recognises a body whose `{` shares the declaration's
+        # line, so every `where`-clause / multi-line-generic fn leaked its body
+        # verbatim into an artefact that TASK 1 reads AFTER strip. Records are
+        # keyed by the extractor's own relative path.
+        # Keyed by RESOLVED path, not by the extractor's relative string: the
+        # two only agree if this walk and the extractor's input root happen to
+        # render paths identically, and a silent key miss would degrade back to
+        # leaking bodies with no signal.
+        _fn_dicts = self.enumerate_fns(walk_root) or []
+        _fn_records = [FnRecord.from_dict(d) for d in _fn_dicts]
+        by_file: dict[Path, list[FnRecord]] = {}
+        for _r in _fn_records:
+            if _r.file:
+                by_file.setdefault((walk_root / _r.file).resolve(), []).append(_r)
         for src_file in sorted(walk_root.rglob("*.rs")):
             rel = src_file.relative_to(project_dir)
             if any(part in self.skip_dir_names for part in rel.parts):
@@ -66,6 +84,13 @@ class ApiSurfaceCapture:
                 text = src_file.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
+            # Elide FIRST: the spans index the file exactly as the extractor
+            # read it, so any rewrite must be applied to the result. The text
+            # condenser still runs afterwards for type-level shaping, but it is
+            # no longer what keeps bodies out.
+            _recs = by_file.get(src_file.resolve(), [])
+            if _recs:
+                text = elide_fn_bodies(text, _recs)
             # Drop any gen_tests declarations the pipeline added.
             text = self.strip_gen_tests_decls(text)
             condensed = self.condense_to_signatures(text, filename=src_file.name).rstrip()
@@ -99,8 +124,8 @@ class ApiSurfaceCapture:
         # cannot tell a real top-level `pub` item from the same syntax
         # inside a `///` doc-comment usage example.
         if self.pub_items_manifest_path is not None:
-            fn_records = self.enumerate_fns(walk_root) or []
-            pub_items = sorted(pub_items_from_records(type_records, fn_records))
+            # Same walk_root, same extraction the elision pass already did.
+            pub_items = sorted(pub_items_from_records(type_records, _fn_dicts))
             if pub_items:
                 items_path = self.pub_items_manifest_path(project_dir, module_name)
                 items_path.write_text(json.dumps(pub_items, indent=2), encoding="utf-8")

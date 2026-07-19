@@ -462,10 +462,10 @@ def test_file_first_reverts_on_compile_failure_then_blocks_take_over(
     (ws / "src" / "lib.rs").write_text(IMPL_LIB_TWO)
     install_cluster_scan(monkeypatch, impl_blocks=lambda *a, **k: _two_blocks())
     _install_model(monkeypatch, [RESPONSE_TWO])
-    # File-first is one shot (an immediate retry with the same limited
-    # context just reproduces the same mistake — retry investment goes to
-    # the end-of-iteration retro round instead) → one revert; per-block
-    # takes over and succeeds.
+    # Budget pinned to 1 so this test keeps exercising the FALLBACK contract
+    # (file-first gives up → per-block takes over). The retry path itself is
+    # pinned separately below.
+    monkeypatch.setenv("PHASE_C_FILE_MAX_ATTEMPTS", "1")
     install_scripted_cargo(
         monkeypatch,
         check_diag=[(101, "error: x", [diag("src/lib.rs", code="E0308")]),
@@ -482,6 +482,62 @@ def test_file_first_reverts_on_compile_failure_then_blocks_take_over(
     # consequence of the fix, not the thing being tested here.
     assert res.impls_filled == 1 and res.impls_failed == 0
     assert "self.tag" in text and "unimplemented!()" not in text
+
+
+def test_file_first_retries_with_the_compiler_errors_from_the_failed_attempt(
+        monkeypatch, tmp_path):
+    """A jointly-coupled file cannot be repaired one fn at a time, so when the
+    whole-file attempt dies on a compile error the per-block fallback cannot
+    recover it either — the retry has to happen HERE. It is only worth
+    spending because it is feedback-carrying: attempt 2's prompt must render
+    the diagnostics attempt 1 produced, otherwise it is a blind re-ask that
+    reproduces the same mistake."""
+    ws = _setup(monkeypatch, tmp_path)
+    (ws / "src" / "lib.rs").write_text(IMPL_LIB_TWO)
+    install_cluster_scan(monkeypatch, impl_blocks=lambda *a, **k: _two_blocks())
+    install_cluster_scan(monkeypatch, stub_records=lambda *a, **k: [])
+    prompts: list[str] = []
+
+    def _capture(prompt, *a, **k):
+        prompts.append(prompt)
+        return RESPONSE_TWO
+
+    monkeypatch.setattr(pipeline, "_ask_raw", _capture)
+    monkeypatch.setenv("PHASE_C_FILE_MAX_ATTEMPTS", "3")
+    install_scripted_cargo(
+        monkeypatch,
+        check_diag=[(101, "error[E0432]: unresolved import `crate::Nope`",
+                     [diag("src/lib.rs", code="E0432")]),
+                    (0, "", [])])
+    res = _run(ws)
+    text = (ws / "src" / "lib.rs").read_text()
+    assert len(prompts) == 2, "compile failure must be retried file-first"
+    assert "E0432" in prompts[1], "retry prompt must carry attempt 1's errors"
+    assert "E0432" not in prompts[0]
+    assert res.fns_filled == 2 and "unimplemented!()" not in text
+
+
+def test_file_first_attempt_budget_is_bounded(monkeypatch, tmp_path):
+    """The budget must terminate: a file that never compiles stops at the cap
+    and hands over, rather than looping on the model until the sweep dies."""
+    ws = _setup(monkeypatch, tmp_path)
+    (ws / "src" / "lib.rs").write_text(IMPL_LIB_TWO)
+    install_cluster_scan(monkeypatch, impl_blocks=lambda *a, **k: _two_blocks())
+    calls: list[str] = []
+
+    def _capture(prompt, *a, **k):
+        calls.append(prompt)
+        return RESPONSE_TWO
+
+    monkeypatch.setattr(pipeline, "_ask_raw", _capture)
+    monkeypatch.setenv("PHASE_C_FILE_MAX_ATTEMPTS", "2")
+    install_scripted_cargo(
+        monkeypatch, check_diag=(101, "error: nope", [diag("src/lib.rs")]))
+    _run(ws)
+    # 2 file-first attempts, then the per-block fallback — never an unbounded
+    # loop. The exact fallback count is not the contract; the cap is.
+    assert len(calls) >= 2
+    assert (ws / "src" / "lib.rs").read_text().count("unimplemented!()") == 2
 
 
 IMPL_LIB_FREE = """\

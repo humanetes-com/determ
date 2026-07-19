@@ -894,6 +894,12 @@ class BinaryResult:
     fail_count: int = 0
     dangling: str | None = None
     exe_path: str | None = None
+    # Names libtest reported as `ignored` (cfg-gated off for THIS cluster, e.g.
+    # `ignored, requires nightly`). Kept, not dropped: an ignored test reports
+    # no pass/fail verdict, so an oracle that only knows passed∪failed counts
+    # it as VANISHED and charges it as a failure — fabricating a crash signal
+    # for a test that was never meant to run here.
+    ignored: frozenset[str] = frozenset()
 
     @property
     def executed(self) -> int:
@@ -957,7 +963,11 @@ def _verdict_of_test_line(line: str) -> tuple[str, str] | None:
         name, _, tail = line[len("test "):].rpartition(" ... ")
         if not name:
             return None
-        head = tail.split()[0] if tail.split() else ""
+        # libtest may qualify a verdict with a reason — `ignored, requires
+        # nightly`. The token carries the comma, so an unstripped compare
+        # fails the verdict table and the line falls through to "no verdict",
+        # marking a cfg-gated test as the in-flight one that crashed.
+        head = tail.split()[0].rstrip(",") if tail.split() else ""
         verdict = head if head in _LIBTEST_VERDICTS else ""
         return (name.strip(), verdict)
     if line.endswith(" ..."):
@@ -987,12 +997,13 @@ def parse_binary_results(test_output: str) -> tuple[BinaryResult, ...]:
             labels.append(("Doc-tests " + line[len("Doc-tests "):].strip(), None))
 
     class _Section:
-        __slots__ = ("passed", "failed", "completed", "dangling",
+        __slots__ = ("passed", "failed", "ignored", "completed", "dangling",
                      "pass_count", "fail_count")
 
         def __init__(self) -> None:
             self.passed: set[str] = set()
             self.failed: set[str] = set()
+            self.ignored: set[str] = set()
             self.completed = False
             self.dangling: str | None = None
             self.pass_count = 0
@@ -1032,6 +1043,10 @@ def parse_binary_results(test_output: str) -> tuple[BinaryResult, ...]:
             current.failed.add(name)
             if current.dangling == name:
                 current.dangling = None
+        elif verdict == "ignored":
+            current.ignored.add(name)
+            if current.dangling == name:
+                current.dangling = None
         elif verdict == "":
             # `test NAME ...` printed, no libtest verdict followed: in-flight
             # when the process died (the crash output itself may occupy the
@@ -1054,6 +1069,7 @@ def parse_binary_results(test_output: str) -> tuple[BinaryResult, ...]:
             fail_count=sec.fail_count,
             dangling=None if sec.completed else sec.dangling,
             exe_path=exe,
+            ignored=frozenset(sec.ignored),
         ))
     return tuple(out)
 

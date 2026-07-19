@@ -27,6 +27,25 @@ test delta ...
 """
 
 
+_IGNORED_BINARY = """\
+    Running tests/test_backtrace.rs (target/debug/deps/test_backtrace-be1)
+running 1 test
+test test_backtrace ... ignored, requires nightly
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out
+"""
+
+
+def test_parse_binary_results_captures_ignored_names() -> None:
+    """`ignored` is a real libtest verdict, not a missing one. Dropping the
+    name leaves the oracle unable to tell a cfg-gated test from a test whose
+    binary crashed, so the ignored test gets charged as a failure."""
+    (b,) = parse_binary_results(_IGNORED_BINARY)
+    assert b.completed and b.ignored == frozenset({"test_backtrace"})
+    assert b.passed == frozenset() and b.failed == frozenset()
+    # An ignored test is NOT in-flight: it must never look like a crash site.
+    assert b.dangling is None
+
+
 def test_parse_binary_results_sections_and_crash() -> None:
     a, b = parse_binary_results(_TWO_BINARIES)
     assert a.label == "tests/test_a.rs" and a.completed

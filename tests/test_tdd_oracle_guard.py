@@ -36,6 +36,42 @@ def test_reconcile_sweep_vanished_deficit_and_normalization() -> None:
     assert ig.deficit == 0
 
 
+def test_cluster_ignored_test_is_not_vanished() -> None:
+    """A test cfg-gated off for THIS cluster (`ignored, requires nightly`)
+    reports no pass/fail verdict — without its NAME it is indistinguishable
+    from a crash-vanished test and gets charged as a failure, fabricating a
+    deterministic-crash signal for a test that was never meant to run here."""
+    o = reconcile_sweep(
+        3, frozenset({"test_a", "test_backtrace", "ui"}),
+        passed=["test_a"], failed=[], ignored_count=2,
+        ignored_names=frozenset({"test_backtrace", "ui"}), executed_count=1)
+    assert o.vanished == frozenset()
+    assert o.deficit == 0
+    assert o.intact, "cluster-ignored tests must not shrink the oracle"
+    # Without the names it is the old behaviour: two phantom failures.
+    blind = reconcile_sweep(
+        3, frozenset({"test_a", "test_backtrace", "ui"}),
+        passed=["test_a"], failed=[], ignored_count=2, executed_count=1)
+    assert blind.vanished == frozenset({"test_backtrace", "ui"})
+
+
+def test_duplicate_bare_names_across_binaries_both_count() -> None:
+    """`observed` is a SET of BARE names, so two binaries each defining
+    `test_drop` collapse to one entry. Measuring that deduped size against an
+    un-deduped expected_count silently inflates the deficit once per duplicate
+    — the trailer-authoritative executed total must win."""
+    expected = frozenset({"a::test_drop", "b::test_drop", "c::test_other"})
+    o = reconcile_sweep(3, expected,
+                        passed=["a::test_drop", "b::test_drop"],
+                        failed=["c::test_other"], executed_count=3)
+    assert o.deficit == 0 and o.intact
+    # The deduped fallback is exactly the bug being pinned against.
+    deduped = reconcile_sweep(3, expected,
+                              passed=["a::test_drop", "b::test_drop"],
+                              failed=["c::test_other"])
+    assert deduped.deficit == 1
+
+
 def _cluster() -> BuildCluster:
     return BuildCluster(
         name="stable", env_extra={}, tarpaulin_exclude_files=[],

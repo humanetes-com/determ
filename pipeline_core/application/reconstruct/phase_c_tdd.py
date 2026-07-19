@@ -37,6 +37,7 @@ from pipeline_core.domain.refine import Attempt, LoopState
 from pipeline_core.domain.test_command import ensure_serial_harness
 from pipeline_core.domain.test_report import parse_test_output
 from pipeline_core.domain.test_results import (
+    parse_binary_results,
     parse_failed_tests,
     parse_test_counts,
     summarize_test_binaries,
@@ -280,9 +281,17 @@ def run_phase_c_tdd(
         if rc_ == -1 or deps.active_test_inventory is None:
             return fail_n, failed_, SweepOracle(frozenset(), 0)
         _ig = parse_test_counts(output_)[2]
+        # Per-binary reading supplies what the flat name sets cannot: the
+        # NAMES of cluster-ignored tests (so they are not mistaken for
+        # crash-vanished) and the trailer-authoritative executed total (so
+        # tests sharing a bare name across binaries are not deduped out of
+        # the denominator).
+        _bins = parse_binary_results(output_)
         oracle = reconcile_sweep(
             _expected_count, _expected_names,
-            parse_test_output(output_).passed, failed_, _ig)
+            parse_test_output(output_).passed, failed_, _ig,
+            ignored_names=frozenset(n for b in _bins for n in b.ignored),
+            executed_count=sum(b.executed for b in _bins))
         if not oracle.intact:
             deps.log(
                 f"  {tag} [phase-c/tdd] iter {iter_n}: ORACLE SHRUNK — "

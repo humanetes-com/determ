@@ -52,13 +52,36 @@ def reconcile_sweep(
     passed: Iterable[str],
     failed: Iterable[str],
     ignored_count: int = 0,
+    *,
+    ignored_names: Iterable[str] = (),
+    executed_count: int | None = None,
 ) -> SweepOracle:
+    """Fold one sweep's observations into the expected oracle.
+
+    `ignored_names` are tests libtest reported as `ignored` — cfg-gated off for
+    THIS cluster (`ignored, requires nightly`). They report no pass/fail
+    verdict, so without them a cluster-ignored test looks identical to a test
+    whose binary crashed: it gets counted as vanished and charged as a failure,
+    which manufactures a deterministic-crash signal out of a test that was
+    never meant to run here (Hard Rule 8 — an ignored test belongs to the
+    cluster whose cfg enables it).
+
+    `executed_count` is the AUTHORITATIVE reported total, summed from the
+    libtest `test result:` trailers. It must be preferred over `len(observed)`:
+    `observed` is a SET of BARE names, so two binaries that each define a test
+    with the same name collapse to one entry and every duplicate silently
+    inflates the deficit by one. Comparing a deduped set size against an
+    un-deduped `expected_count` is a category error; the fallback only stands
+    in when trailer counts are unavailable.
+    """
     observed = {bare_test_name(n) for n in passed}
     observed |= {bare_test_name(n) for n in failed}
+    skip = {bare_test_name(n) for n in ignored_names}
     vanished = frozenset(
         n for n in (bare_test_name(e) for e in expected_names)
-        if n not in observed)
-    reported = len(observed) + ignored_count
+        if n not in observed and n not in skip)
+    executed = executed_count if executed_count is not None else len(observed)
+    reported = executed + ignored_count
     return SweepOracle(
         vanished=vanished,
         deficit=max(0, expected_count - reported),

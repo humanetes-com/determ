@@ -112,6 +112,7 @@ def condense_rust_to_signatures(source: str, filename: str = "code.rs") -> str:
     # Fallback: brace-counting line scanner.
     lines = source.splitlines(keepends=True)
     result_lines: list[str] = []
+    pending_sig: list[str] = []
     depth = 0
     skip_until_depth: int | None = None
 
@@ -123,20 +124,54 @@ def condense_rust_to_signatures(source: str, filename: str = "code.rs") -> str:
             continue
 
         stripped = line.strip()
+        net = line.count('{') - line.count('}')
+
+        # A multi-line signature is open: its continuation lines are ordinary
+        # text (`error: E,`, `) -> Self`, `where`), so they must be ACCUMULATED,
+        # not tested for fn-ness. It terminates at the body's `{` or, for a
+        # bodyless trait/extern declaration, at `;`.
+        if pending_sig:
+            if '{' in line and net > 0:
+                first = pending_sig[0]
+                indent = first[:len(first) - len(first.lstrip())]
+                head = line[:line.rindex('{')].rstrip()
+                result_lines.extend(pending_sig)
+                if head:
+                    result_lines.append(head + '\n')
+                result_lines.append(indent + '{ /* ... */ }\n')
+                pending_sig = []
+                skip_until_depth = depth
+                depth += net
+                continue
+            pending_sig.append(line)
+            depth += net
+            if stripped.endswith(';'):
+                result_lines.extend(pending_sig)
+                pending_sig = []
+            continue
+
         is_fn = contains_fn_decl(stripped) and not stripped.startswith('//')
         is_type_kw = is_type_decl_line(line)
-
-        net = line.count('{') - line.count('}')
 
         if is_fn and not is_type_kw and '{' in line and net > 0:
             last_brace = line.rindex('{')
             result_lines.append(line[:last_brace].rstrip() + ' { /* ... */ }\n')
             skip_until_depth = depth
             depth += net
+        elif (is_fn and not is_type_kw and '{' not in line
+                and not stripped.endswith(';')):
+            # The body's `{` lands on a later line, after a multi-line parameter
+            # list, a long generic list, or a `where` clause. Without this arm
+            # the declaration was emitted verbatim and the WHOLE BODY followed
+            # it — and since only long/complex fns are written this way, the
+            # leak selected precisely the hardest fns in the crate.
+            pending_sig.append(line)
+            depth += net
         else:
             depth += net
             result_lines.append(line)
 
+    result_lines.extend(pending_sig)   # unterminated tail: never silently drop
     return ''.join(result_lines)
 
 
