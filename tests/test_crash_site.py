@@ -77,7 +77,7 @@ def test_parse_asan_report_splits_access_and_origin() -> None:
     assert parsed is not None
     kind, access, origin = parsed
     assert kind == "AddressSanitizer: stack-use-after-return"
-    assert access[0]["func"].endswith("::deref") and access[0]["line"] == 560
+    assert str(access[0]["func"]).endswith("::deref") and access[0]["line"] == 560
     assert origin and "construct_from_std" in str(origin[0]["func"])
     assert parse_asan_report("all tests passed") is None
 
@@ -98,3 +98,22 @@ def test_asan_to_site_end_to_end() -> None:
                             access, origin_raw_frames=origin)
     assert site.blamed_locator == FnLocator("src/error.rs", "construct_from_std")
     assert [f.fn_name for f in site.frames] == ["deref"]
+
+
+def test_file_fill_prompt_carries_crash_evidence() -> None:
+    # The whole-file prompt renders a crashing body as part of the file and
+    # asks for mutually consistent siblings — without the evidence the model
+    # reads the unsound scheme as the house idiom and copies it.
+    from pipeline_core.prompts.fix_prompts import build_file_fill_prompt
+
+    kw = {"file_rel": "src/error.rs", "file_text": "fn a() {}",
+          "stub_map": [("impl Error", ["construct_from_adhoc"])],
+          "tests_block": "", "blueprint": "", "notes": ""}
+    without = build_file_fill_prompt(**kw)
+    assert "CRASH_EVIDENCE" not in without
+
+    with_ev = build_file_fill_prompt(
+        **kw, crash_evidence="stack-use-after-return in construct_from_std")
+    assert "<CRASH_EVIDENCE>" in with_ev
+    assert "construct_from_std" in with_ev
+    assert "do NOT copy that pattern" in with_ev

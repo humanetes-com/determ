@@ -22,6 +22,7 @@ from pipeline_core.application.reconstruct.tdd_ratchet import (
     snapshot_src_tree,
 )
 from pipeline_core.domain.attribution import union_unattributed_stubs
+from pipeline_core.domain.crash_site import crash_evidence_by_locator
 from pipeline_core.domain.dispatch import defer_blocked_consumers
 from pipeline_core.domain.layout_retrigger import CrashEvidence
 from pipeline_core.domain.measurement import Measurement, tree_content_sha
@@ -33,7 +34,6 @@ from pipeline_core.domain.models import (
 )
 from pipeline_core.domain.oracle_ledger import SweepOracle, reconcile_sweep
 from pipeline_core.domain.refine import Attempt, LoopState
-from pipeline_core.domain.crash_site import crash_evidence_by_locator
 from pipeline_core.domain.test_command import ensure_serial_harness
 from pipeline_core.domain.test_report import parse_test_output
 from pipeline_core.domain.test_results import (

@@ -398,6 +398,11 @@ def fill_impl_blocks(
             notes_section = _filter_model_notes_for_prompt(
                 fr_path, file_rel=file_rel, fn_name=stub_names[0],
                 file_text=snapshot, current_error="")
+        # Any localized crash inside THIS file applies: the prompt renders the
+        # whole file, so a crashing body is visible as an idiom to imitate.
+        _file_crash = "\n\n".join(dict.fromkeys(
+            txt for loc, txt in (crash_evidence or {}).items()
+            if loc.file == file_rel))
         prior_error = ""
         for _attempt in range(1, _FILE_FIRST_MAX_ATTEMPTS + 1):
             prompt = build_file_fill_prompt(
@@ -405,7 +410,8 @@ def fill_impl_blocks(
                 stub_map=[(b.container, [m.fn_name for m in b.stub_members])
                           for b in fblocks],
                 tests_block="\n\n".join(f"// {p}\n{t}" for p, t in test_blocks),
-                blueprint=_bp_slice, notes=notes_section, prior_error=prior_error)
+                blueprint=_bp_slice, notes=notes_section, prior_error=prior_error,
+                crash_evidence=_file_crash)
             _log(f"  [phase-c/file] {file_rel}: file-first fill "
                  f"({len(fblocks)} block(s), {len(stub_names)} stub(s), "
                  f"attempt {_attempt}/{_FILE_FIRST_MAX_ATTEMPTS}).")

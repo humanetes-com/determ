@@ -106,8 +106,15 @@ def _strip_generics(symbol: str) -> str:
 def bare_fn_name(symbol: str) -> str:
     """Bare fn identifier from a demangled symbol:
     `anyhow::error::ErrorImpl<()>::error` → `error`;
-    `anyhow::error::{impl#6}::drop` → `drop`."""
-    return _strip_generics(symbol).rsplit("::", 1)[-1].strip()
+    `anyhow::error::{impl#6}::drop` → `drop`;
+    `<Error>::construct_from_std::<E>` → `construct_from_std`.
+
+    The last form is why segments are scanned from the right instead of a
+    single rsplit: a turbofish tail strips to an EMPTY trailing segment, and
+    an empty fn_name silently produces a locator that matches no fn — the
+    crash-blamed frame would drop out of the frontier entirely."""
+    parts = [p for p in _strip_generics(symbol).split("::") if p.strip()]
+    return parts[-1].strip() if parts else ""
 
 
 def _crate_frames(
@@ -119,10 +126,8 @@ def _crate_frames(
     for rec in raw_frames:
         file_ = str(rec.get("file") or "")
         func = str(rec.get("func") or "")
-        try:
-            line = int(rec.get("line") or 0)
-        except (TypeError, ValueError):
-            line = 0
+        raw_line = rec.get("line")
+        line = raw_line if isinstance(raw_line, int) else 0
         if not file_.startswith(crate_file_prefix) or not func:
             continue
         frames.append(CrashFrame(

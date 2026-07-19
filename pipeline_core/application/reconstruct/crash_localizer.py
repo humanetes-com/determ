@@ -43,6 +43,47 @@ class CrashLocalizerDeps:
     log: Callable[[str], None]
 
 
+# Signals that mean "memory was used after it stopped being valid". For this
+# class the faulting frame is routinely INNOCENT — it merely reads a pointer
+# some other fn fabricated — so a backtrace alone points at the wrong fn to
+# fix (live: a dangling stack vtable made `Drop::drop` fault while the defect
+# sat in the constructor that built the vtable on its stack frame). Only a
+# detector that reports where the memory ORIGINATED can name the culprit.
+_MEMORY_FAULT_SIGNALS = ("SIGSEGV", "SIGBUS", "SIGILL", "SIGABRT")
+
+
+def _is_memory_fault(signal: str) -> bool:
+    up = signal.upper()
+    return any(s in up for s in _MEMORY_FAULT_SIGNALS)
+
+
+def _asan_site(
+    deps: CrashLocalizerDeps,
+    test_cmd: str,
+    workspace_root: Path,
+    env: dict[str, str],
+) -> CrashSite | None:
+    """Run the sanitized sweep and build the ORIGIN-bearing site, or None."""
+    if deps.asan_sweep is None:
+        return None
+    asan = deps.asan_sweep(test_cmd, workspace_root, env)
+    if asan is None:
+        return None
+    _rc, out = asan
+    rep = parse_asan_report(out)
+    if rep is None:
+        return None
+    kind, access, origin = rep
+    access = relativize_frame_files(access, str(workspace_root))
+    origin = relativize_frame_files(origin, str(workspace_root))
+    # binary label + in-flight test from the ASAN run's own cargo output.
+    a_crashed = [b for b in parse_binary_results(out) if not b.completed]
+    label = a_crashed[0].label if a_crashed else "?"
+    test = a_crashed[0].dangling if a_crashed else None
+    site = site_from_frames(label, test, kind, access, origin_raw_frames=origin)
+    return site if site.all_frames else None
+
+
 def localize_crashes(
     deps: CrashLocalizerDeps,
     sweep_output: str,
@@ -53,14 +94,23 @@ def localize_crashes(
     max_binaries: int = 3,
 ) -> tuple[CrashSite, ...]:
     """Localize every crashed binary visible in ``sweep_output`` (capped).
+
+    gdb runs first because it is cheap and confirms WHICH binary/test dies,
+    but its backtrace names only the faulting frame. For a memory fault that
+    frame is usually not the fn to fix, so the sanitized sweep runs too and
+    its ORIGIN-bearing site supersedes gdb's for that binary. gdb's result is
+    kept when the sanitizer produces nothing (no nightly, sanitizer
+    unsupported, crash not reproducible under instrumentation).
+
     Returns () when nothing crashed or nothing could be localized — callers
     must treat an empty result on a shrunken oracle as "unlocalized", never
     as health."""
     crashed = [b for b in parse_binary_results(sweep_output) if not b.completed]
     if not crashed:
         return ()
+    considered = crashed[:max_binaries]
     sites: list[CrashSite] = []
-    for b in crashed[:max_binaries]:
+    for b in considered:
         if not b.exe_path:
             continue
         exe = Path(b.exe_path)
@@ -73,27 +123,40 @@ def localize_crashes(
         site = site_from_frames(b.label, b.dangling, signal, frames)
         if site.frames:
             sites.append(site)
-    if sites or deps.asan_sweep is None:
+    if deps.asan_sweep is None:
         return tuple(sites)
-    # gdb saw no native fault — the crash is layout-dependent. ASAN is the
-    # deterministic detector; halt_on_error yields the FIRST error's site,
-    # later sweeps localize the next one once this is fixed.
-    deps.log("  [phase-c/crash-localizer] native re-run showed no fault "
-             "(layout-dependent crash) — running ASAN sweep.")
-    asan = deps.asan_sweep(test_cmd, workspace_root, env)
+    # Escalate to the sanitizer whenever origin evidence is missing and could
+    # change the blame: a crashed binary gdb could not reproduce (precisely
+    # the layout-dependent memory bugs), or a memory-fault backtrace whose
+    # innermost frame may be an innocent reader.
+    unreproduced = len(sites) < len(considered)
+    needs_origin = unreproduced or any(
+        _is_memory_fault(s.signal) and not s.origin_frames for s in sites)
+    if not needs_origin:
+        return tuple(sites)
+    deps.log("  [phase-c/crash-localizer] "
+             + ("native re-run showed no fault (layout-dependent crash)"
+                if unreproduced else
+                "backtrace names only the faulting frame")
+             + " — running ASAN sweep for the memory's origin.")
+    asan = _asan_site(deps, test_cmd, workspace_root, env)
     if asan is None:
-        return ()
-    _rc, out = asan
-    rep = parse_asan_report(out)
-    if rep is None:
-        return ()
-    kind, access, origin = rep
-    access = relativize_frame_files(access, str(workspace_root))
-    origin = relativize_frame_files(origin, str(workspace_root))
-    # binary label + in-flight test from the ASAN run's own cargo output.
-    a_crashed = [b for b in parse_binary_results(out) if not b.completed]
-    label = a_crashed[0].label if a_crashed else "?"
-    test = a_crashed[0].dangling if a_crashed else None
-    site = site_from_frames(label, test, kind, access,
-                            origin_raw_frames=origin)
-    return (site,) if site.all_frames else ()
+        return tuple(sites)
+    # Once ONE origin is known, the other memory-fault backtraces of the same
+    # round are almost certainly downstream readers of that same corruption
+    # (one dangling pointer kills every binary that dereferences it). Blaming
+    # their faulting frames would hand the model correct fns to "fix" — the
+    # misattribution this localizer exists to end. Keep only origin-bearing
+    # blame plus crashes of a different class; the sanitizer halts on the
+    # first error, so the next sweep localizes the next origin once this one
+    # is fixed.
+    kept = [s for s in sites
+            if s.binary_label != asan.binary_label
+            and not (_is_memory_fault(s.signal) and not s.origin_frames)]
+    dropped = len(sites) - len(kept) - sum(
+        1 for s in sites if s.binary_label == asan.binary_label)
+    if dropped > 0:
+        deps.log(f"  [phase-c/crash-localizer] {dropped} further memory-fault "
+                 "backtrace(s) not blamed — same corruption read downstream; "
+                 f"blame stays on {asan.blamed_locator}.")
+    return (asan, *kept)

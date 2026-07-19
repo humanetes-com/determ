@@ -48,6 +48,7 @@ from pipeline_core.adapters.artifacts import (
 from pipeline_core.adapters.artifacts import (
     type_manifest_path as _type_manifest_path,
 )
+from pipeline_core.adapters.asan_sweep import run_asan_sweep as _asan_run_sweep
 from pipeline_core.adapters.ask_client import AskClient
 from pipeline_core.adapters.augment_engine import (
     CargoAugmentEngine,
@@ -91,11 +92,7 @@ from pipeline_core.adapters.discovery import (
     match_gen_tests_sibling as _disc_match_gen_tests_sibling,
 )
 from pipeline_core.adapters.downstream_api import scan_downstream_api as _scan_downstream_api
-from pipeline_core.adapters.asan_sweep import run_asan_sweep as _asan_run_sweep
 from pipeline_core.adapters.failure_journal import FileFailureJournal
-from pipeline_core.adapters.gdb_backtrace import (
-    localize_crashed_binary as _gdb_localize_crashed_binary,
-)
 from pipeline_core.adapters.file_constraints import FileConstraintsReader
 from pipeline_core.adapters.fill_engine_roles import (
     CargoFillAdapter,
@@ -107,6 +104,9 @@ from pipeline_core.adapters.fill_engine_roles import (
     StallPolicyAdapter,
     TestLinkerAdapter,
     WorkspaceModelAdapter,
+)
+from pipeline_core.adapters.gdb_backtrace import (
+    localize_crashed_binary as _gdb_localize_crashed_binary,
 )
 from pipeline_core.adapters.gen_tests_storage import (
     derive_gentest_prelude as _gts_derive_gentest_prelude,
@@ -139,10 +139,6 @@ from pipeline_core.adapters.model_notes_store import (
     write_fr_preserving_notes as _write_fr_preserving_notes,
 )
 from pipeline_core.adapters.mutation import MutationTester
-from pipeline_core.application.reconstruct.crash_localizer import (
-    CrashLocalizerDeps,
-    localize_crashes as _app_localize_crashes,
-)
 from pipeline_core.adapters.phase_c_log import (
     write_phase_c_test_fix_log as _write_phase_c_test_fix_log,
 )
@@ -184,6 +180,8 @@ from pipeline_core.adapters.retros import (
 )
 from pipeline_core.adapters.retros import (
     migrate_confounded_retros as _migrate_confounded_retros,
+)
+from pipeline_core.adapters.retros import (
     reset_exhaustion_flags as _reset_exhaustion_flags,
 )
 from pipeline_core.adapters.retros import (
@@ -335,6 +333,12 @@ from pipeline_core.application.reconstruct.cargo_errors import (
 from pipeline_core.application.reconstruct.cargo_runner import PortBoundCargoRunner
 from pipeline_core.application.reconstruct.cargo_runner import (
     u2_test_gate as _cargo_runner_u2_gate,
+)
+from pipeline_core.application.reconstruct.crash_localizer import (
+    CrashLocalizerDeps,
+)
+from pipeline_core.application.reconstruct.crash_localizer import (
+    localize_crashes as _app_localize_crashes,
 )
 from pipeline_core.application.reconstruct.failure_analysis import FailureAnalysisStep
 from pipeline_core.application.reconstruct.failure_diagnosis import (
@@ -2013,7 +2017,8 @@ def build_app(
         log=ports.log)
 
     def _localize_crashes(sweep_output: str, test_cmd: str,
-                          workspace_root: Path, env: dict[str, str]) -> tuple:
+                          workspace_root: Path,
+                          env: dict[str, str]) -> tuple[Any, ...]:
         return _app_localize_crashes(
             _crash_localizer_deps, sweep_output, test_cmd, workspace_root, env)
 

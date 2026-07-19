@@ -97,6 +97,7 @@ def build_file_fill_prompt(
     blueprint: str,
     notes: str,
     prior_error: str = "",
+    crash_evidence: str = "",
 ) -> str:
     """P5 file-first fill: ALL stubs of one file in ONE prompt, so the model
     designs the file's impls together (the coherence a fresh reply naturally
@@ -120,6 +121,13 @@ def build_file_fill_prompt(
     error_part = (f"\nYour last attempt at this file failed:\n{prior_error}\n"
                   "Fix the WHOLE file again, keeping every impl mutually "
                   "consistent.\n" if prior_error.strip() else "")
+    crash_part = (f"\n<CRASH_EVIDENCE>\nA test binary CRASHED at runtime inside "
+                  f"this file:\n{crash_evidence}\nAn already-written body in the "
+                  "file above uses a scheme that is UNSOUND — do NOT copy that "
+                  "pattern into the bodies you write, and if a stub you are "
+                  "filling participates in the same scheme, implement it the "
+                  "sound way.\n</CRASH_EVIDENCE>\n"
+                  if crash_evidence.strip() else "")
     return f"""Implement EVERY unimplemented function of this Rust file in one pass —
 design the impl blocks together so they stay mutually consistent. Keep every
 signature EXACTLY as written; write bodies only.
@@ -129,7 +137,7 @@ Stubs to fill (by impl block):
 ```rust
 {file_text}
 ```
-{bp_part}{notes_part}{tests_part}{error_part}
+{crash_part}{bp_part}{notes_part}{tests_part}{error_part}
 For EACH function, return one block (body statements only — no fn signature
 line, no outer braces). `block` must name the function's OWN impl header:
 <FN name="FUNCTION_NAME" block="IMPL_HEADER">

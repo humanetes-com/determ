@@ -127,3 +127,38 @@ def test_capped_retry_success_suppresses():
     f = [x for x in analyze([_RT_FAIL, _RT_FAIL, _RT_OK], [])
          if x.kind == HealthKind.CAPPED_RETRY_FUTILITY]
     assert f == []
+
+
+_SHRUNK = ("  [stable] [phase-c/tdd] iter 1: ORACLE SHRUNK — 21 expected "
+           "test(s) reported no verdict (binary crashed or failed to compile)")
+_BLAMED = ("  [stable] [phase-c/crash] tests/test_source.rs::test_io_source "
+           "SIGSEGV — blamed FnLocator(file='src/error.rs', "
+           "fn_name='construct_from_std')")
+
+
+def test_crash_unlocalized_alerts_when_vanish_has_no_blame_line():
+    # Vanished tests with no faulting stack = back to blind vanish accounting,
+    # the exact state that produced the pass=14 plateau.
+    f = [x for x in analyze([_SHRUNK], []) if x.kind == HealthKind.CRASH_UNLOCALIZED]
+    assert len(f) == 1 and f[0].severity == "alert"
+    assert "localizer never logged" in f[0].evidence
+
+
+def test_crash_unlocalized_reports_explicit_no_localize_lines():
+    lines = [_SHRUNK, "  [stable] [phase-c/crash] 21 test(s) vanished but no "
+                      "crash could be localized (no native fault under gdb, "
+                      "no ASAN report)."]
+    (f,) = [x for x in analyze(lines, []) if x.kind == HealthKind.CRASH_UNLOCALIZED]
+    assert "1 explicit no-localize line(s)" in f.evidence
+
+
+def test_crash_unlocalized_suppressed_once_a_site_is_blamed():
+    # The localizer works; a per-sweep reproduction gap is not a defect.
+    lines = [_SHRUNK, _BLAMED, _SHRUNK]
+    assert not [x for x in analyze(lines, [])
+                if x.kind == HealthKind.CRASH_UNLOCALIZED]
+
+
+def test_crash_unlocalized_silent_without_vanish():
+    assert not [x for x in analyze([ITER], [])
+                if x.kind == HealthKind.CRASH_UNLOCALIZED]

@@ -241,7 +241,7 @@ def _cargo_suite(rc: int, passed: int, failed_names: list[str]):
 
 def _reading(passed: int, failed_names: list[str]):
     """Baseline TestStateReading with one completed implicit binary."""
-    from pipeline_core.domain.test_results import parse_binary_results, TestStateReading
+    from pipeline_core.domain.test_results import TestStateReading, parse_binary_results
     body = "".join(f"test {n} ... FAILED\n" for n in failed_names)
     body += _RES.format(p=passed, f=len(failed_names))
     return TestStateReading(parse_binary_results(body))
@@ -324,7 +324,7 @@ def test_regression_gate_binary_scoped_crash_exclusion() -> None:
     # exonerate a fill. Baseline: binary A complete (2 pass), binary B
     # crashed mid-run. After: A unchanged, B's flicker shows a FAILED name
     # that never reported at baseline → must NOT be newly-red, gate accepts.
-    from pipeline_core.domain.test_results import parse_binary_results, TestStateReading
+    from pipeline_core.domain.test_results import TestStateReading, parse_binary_results
     base_out = (
         "    Running tests/a.rs (t/a-1)\n"
         "running 2 tests\ntest x ... ok\ntest y ... ok\n"
@@ -352,7 +352,7 @@ def test_regression_gate_flags_newly_crashed_binary() -> None:
     # A binary COMPLETE at baseline that crashes after the fill is a real,
     # attributable regression — detail names the binary and the historical
     # prefix stays absent (new crash message class).
-    from pipeline_core.domain.test_results import parse_binary_results, TestStateReading
+    from pipeline_core.domain.test_results import TestStateReading, parse_binary_results
     base_out = (
         "    Running tests/a.rs (t/a-1)\n"
         "running 2 tests\ntest x ... ok\ntest y ... ok\n"

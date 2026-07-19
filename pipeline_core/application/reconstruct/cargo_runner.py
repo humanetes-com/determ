@@ -36,7 +36,6 @@ from pipeline_core.domain.test_results import (
     failure_bodies_for,
     parse_binary_results,
     parse_failed_tests,
-    parse_test_counts,
     render_regression_detail,
 )
 from pipeline_core.ports import Cargo

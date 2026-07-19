@@ -27,9 +27,9 @@ from threading import Lock
 from typing import Any
 
 from pipeline_core.domain.models import ClusterFillResult, FnLocator, FnSite
-from pipeline_core.domain.test_results import TestStateReading
 from pipeline_core.domain.reconstruction import SpliceOutcome
 from pipeline_core.domain.test_report import U2Verdict
+from pipeline_core.domain.test_results import TestStateReading
 from pipeline_core.ports.structure import StructureReader
 
 
@@ -132,7 +132,7 @@ class CargoFillAdapter:
     u2_test_gate_fn: Callable[..., U2Verdict]
     focus_errors_fn: Callable[..., str]
     env_fn: Callable[[], dict[str, str]]
-    test_regression_baseline_fn: Callable[..., 'TestStateReading | None'] | None = None
+    test_regression_baseline_fn: Callable[..., TestStateReading | None] | None = None
     test_regression_gate_fn: Callable[..., tuple[frozenset[str], str] | None] | None = None
     check_diag_fn: Callable[..., tuple[int, str, list[Any]]] | None = None
 

@@ -906,6 +906,8 @@ class TestStateReading:
     ``(pass_count, failed_names)`` tuple as the regression-gate currency so
     the gate can scope its comparison to completed binaries."""
 
+    __test__ = False  # domain VO, not a pytest class (silences collection warning)
+
     binaries: tuple[BinaryResult, ...]
 
     @property
@@ -935,19 +937,28 @@ class TestStateReading:
         return {b.label: b for b in self.binaries}
 
 
+# Verdict tokens libtest itself prints. Anything ELSE sitting where a verdict
+# belongs is not a verdict: libtest writes `test NAME ... ` WITHOUT a newline
+# and only then the outcome, so when the process dies mid-test whatever is
+# written next (an ASAN report, a signal message) lands on that same line.
+# Treating an unknown token as "no verdict" is what lets the localizer name
+# the in-flight test from a real crash capture.
+_LIBTEST_VERDICTS = ("ok", "FAILED", "ignored", "bench")
+
+
 def _verdict_of_test_line(line: str) -> tuple[str, str] | None:
-    """``test NAME ... ok|FAILED|ignored`` → (name, verdict); a verdict-less
-    ``test NAME ...`` prefix (the in-flight test when a binary dies — libtest
-    prints the prefix before running the test) → (name, ""). None otherwise.
-    Pure string ops. Handles doc-test names containing spaces by splitting on
-    the LAST ``" ... "`` separator."""
+    """``test NAME ... ok|FAILED|ignored|bench`` → (name, verdict); a line
+    whose verdict slot is empty or holds foreign text (the in-flight test when
+    a binary dies) → (name, ""). None otherwise. Pure string ops. Handles
+    doc-test names containing spaces by splitting on the LAST ``" ... "``."""
     if not line.startswith("test "):
         return None
     if " ... " in line:
         name, _, tail = line[len("test "):].rpartition(" ... ")
         if not name:
             return None
-        verdict = tail.split()[0] if tail.split() else ""
+        head = tail.split()[0] if tail.split() else ""
+        verdict = head if head in _LIBTEST_VERDICTS else ""
         return (name.strip(), verdict)
     if line.endswith(" ..."):
         name = line[len("test "):-len(" ...")].strip()
@@ -1022,8 +1033,9 @@ def parse_binary_results(test_output: str) -> tuple[BinaryResult, ...]:
             if current.dangling == name:
                 current.dangling = None
         elif verdict == "":
-            # `test NAME ...` printed, verdict never followed: in-flight when
-            # the process died. A later verdict line for the same name
+            # `test NAME ...` printed, no libtest verdict followed: in-flight
+            # when the process died (the crash output itself may occupy the
+            # rest of the line). A later verdict line for the same name
             # (parallel-harness interleaving) clears it above.
             current.dangling = name
 

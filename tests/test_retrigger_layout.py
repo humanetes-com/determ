@@ -299,3 +299,29 @@ def test_crash_evidence_unrelated_suspects_do_not_fire():
                            "", f.deps(), crash_evidence=ev)
     assert not res.fired
     assert not f.committed
+
+
+def test_mechanical_splice_failure_refunds_the_attempt():
+    # The cap bounds MODEL attempts. When authoring dies in the splice/locate
+    # infrastructure the model's output was never evaluated against the tree,
+    # so the attempt bought no evidence — a mechanical bug must not be able to
+    # exhaust the budget (a live cap was spent entirely on a since-fixed
+    # "could not locate a frozen definition" failure).
+    f = _Fakes(skeleton_def="fn totally_different() {}")  # frozen def absent
+    res = retrigger_layout(Path("/x"), "anyhow", "stable", Path("/x/src"), _ERR,
+                           f.deps())
+    assert res.fired and not res.succeeded
+    assert f.saved_attempts == {"ErrorImpl": 0}   # 1 spent, then refunded
+    assert any("attempt refunded" in m for m in f.logs)
+    assert "mechanical" in (res.reason or "")
+
+
+def test_model_rejection_still_consumes_the_attempt():
+    # The complement: the model DID author something and it failed to compile.
+    # That is real evidence — the attempt must stay spent.
+    f = _Fakes(compiles=False)
+    res = retrigger_layout(Path("/x"), "anyhow", "stable", Path("/x/src"), _ERR,
+                           f.deps())
+    assert res.fired and not res.succeeded
+    assert f.saved_attempts == {"ErrorImpl": 1}
+    assert not any("refunded" in m for m in f.logs)
