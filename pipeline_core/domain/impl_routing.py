@@ -16,10 +16,13 @@ without the model, cargo, or the tree.
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import Any
 
 from pipeline_core.domain.identity import ContainerId
+from pipeline_core.domain.models import ImplBlock
 from pipeline_core.domain.rust_idents import canon_container
 
 
@@ -106,3 +109,36 @@ def impl_block_id(file_rel: str, container: str) -> ContainerId:
     block miss the routing table, dropping its whole model reply (F5,
     `response_unused` on `impl<E> From<E> for Error`)."""
     return ContainerId(f"{file_rel}::{canon_container(container)}")
+
+
+def norm_src_rel(rel: str) -> str:
+    """Normalized workspace-relative source path: posix separators, no leading
+    `src/`. Extractor records and block records disagree on that prefix, so full
+    normalized equality is the only safe comparison — a basename fallback would
+    collide two same-named files in different directories (`a/mod.rs` vs
+    `b/mod.rs`)."""
+    p = PurePosixPath(rel.replace("\\", "/")).as_posix().lstrip("/")
+    return p[4:] if p.startswith("src/") else p
+
+
+def refill_authorized_names(
+    blocks: Sequence[ImplBlock], file_rel: str,
+) -> frozenset[str]:
+    """Fn names in `file_rel` whose ALREADY-FILLED body a splice may overwrite.
+
+    Authorization spans the whole FILE, never a single block, because both fill
+    routes route bodies file-wide: the file-first route shows the model the
+    entire file, and the per-block route widens to `related`/sibling containers.
+    A body correctly routed to a sibling container is still refused
+    `target_not_stub` if authorization is read off the block being filled — so
+    the model's answer for a refill target owned by a DIFFERENT block in the
+    same file is discarded, which is exactly the co-designed multi-fn
+    correction the refill path exists to make (a vtable built by one fn and
+    dispatched through by its siblings cannot be repaired one fn at a time).
+    """
+    want = norm_src_rel(file_rel)
+    return frozenset(
+        m.fn_name
+        for b in blocks if norm_src_rel(b.file) == want
+        for m in b.refill_members
+    )

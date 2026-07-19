@@ -30,7 +30,13 @@ from pipeline_core.application.reconstruct.pull_resolver import (
     workspace_file_reader,
 )
 from pipeline_core.domain.blueprint import Blueprint, blueprint_path, parse_blueprint
-from pipeline_core.domain.impl_routing import route_fn_bodies
+from pipeline_core.domain.impl_routing import (
+    norm_src_rel as _norm_src_rel,
+)
+from pipeline_core.domain.impl_routing import (
+    refill_authorized_names,
+    route_fn_bodies,
+)
 from pipeline_core.domain.llm_output import extract_fn_bodies
 from pipeline_core.domain.models import (
     BuildCluster,
@@ -107,15 +113,6 @@ class ImplFillDeps:
     # Mechanical note validation: (fr_path, error_text) -> retired count.
     # None disables (tests / minimal wiring).
     retire_contradicted_notes: Callable[..., Any] | None = None
-
-
-def _norm_src_rel(rel: str) -> str:
-    """Normalized workspace-relative path: posix separators, no leading
-    `src/`. Extractor records and block records disagree on the prefix; full
-    normalized equality is the only safe comparison (a basename fallback can
-    collide two same-named files in different directories)."""
-    p = Path(rel).as_posix().lstrip("/")
-    return p[4:] if p.startswith("src/") else p
 
 
 def fill_impl_blocks(
@@ -459,13 +456,20 @@ def fill_impl_blocks(
                          f"block header does not match any impl in this file. "
                          f"raw_block={_db.block_attr!r} raw_canon={_db.attr_canon!r}")
                 spliced_now = 0
+                # Refill targets are already-filled-but-WRONG bodies; the splice
+                # must be told to overwrite a non-stub for exactly those names,
+                # or the model's correction is refused `target_not_stub` and
+                # silently dropped. Authorization spans the whole file because
+                # this route routes bodies file-wide.
+                _refill_names = refill_authorized_names(blocks, file_rel)
                 for rb in routing.routed:
                     wc = rb.fn_data["where_clause"]
                     if wc and is_trait_impl_container(rb.container):
                         wc = None
                     ok, reason, _delta = _splice_fn_with_where(
                         file_path, rb.container, rb.fn_data["fn_name"],
-                        rb.fn_data["body"], wc)
+                        rb.fn_data["body"], wc,
+                        allow_nonstub=rb.fn_data["fn_name"] in _refill_names)
                     if ok:
                         spliced_now += 1
                     else:
@@ -881,11 +885,14 @@ def fill_impl_blocks(
                              f"target_canon={target_canon!r}")
                 spliced_now = 0
                 refusals: list[str] = []
-                # debt #46 point 2: refill members are already-filled (not
-                # `unimplemented!()`) — the splice must be told to overwrite a
-                # non-stub body for exactly these fn names, same as the per-fn
-                # refill path's `allow_nonstub=rec.refill` (fill_one_fn.py).
-                _refill_names = {m.fn_name for m in block.refill_members}
+                # Refill members are already-filled (not `unimplemented!()`) —
+                # the splice must be told to overwrite a non-stub body for
+                # exactly these fn names, same as the per-fn refill path's
+                # `allow_nonstub=rec.refill` (fill_one_fn.py). Scoped to the
+                # FILE, not `block`: routing widens to related/sibling
+                # containers, so a body landing on a refill target owned by
+                # another block in this file must still be authorized.
+                _refill_names = refill_authorized_names(blocks, block.file)
                 # Apply each splice. Operating on the same file in
                 # sequence keeps byte offsets consistent because we
                 # re-locate after each splice via the syn enumerator.

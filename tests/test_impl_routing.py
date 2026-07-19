@@ -5,7 +5,13 @@ match the model's single-line ``block`` attribute instead of dropping every
 returned body."""
 from __future__ import annotations
 
-from pipeline_core.domain.impl_routing import impl_block_id, route_fn_bodies
+from pipeline_core.domain.impl_routing import (
+    impl_block_id,
+    norm_src_rel,
+    refill_authorized_names,
+    route_fn_bodies,
+)
+from pipeline_core.domain.models import FnRecord, ImplBlock
 from pipeline_core.domain.rust_idents import canon_container
 
 
@@ -112,3 +118,40 @@ def test_escaped_pull_arg_decodes() -> None:
     assert extract_context_pull(
         '<REQUEST kind="type_def" arg="Own&lt;T&gt;"/>') == ContextPull(
         PullKind.TYPE_DEF, "Own<T>")
+
+
+def _block(file: str, container: str, refill: tuple[str, ...] = ()) -> ImplBlock:
+    return ImplBlock(
+        file=file, container=container,
+        members=tuple(FnRecord(fn_name=n) for n in refill),
+        refill_members=tuple(FnRecord(fn_name=n) for n in refill))
+
+
+def test_refill_authorization_spans_the_file_not_one_block() -> None:
+    # Live loss (run 601947): the crash-blamed `construct_from_std` is a refill
+    # member of `impl Error`, but the model answered it while filling
+    # `impl Display for Error`. Authorization read off the block being filled
+    # refused the splice as `target_not_stub` and dropped the correction.
+    blocks = [
+        _block("src/error.rs", "impl Error", refill=("construct_from_std",)),
+        _block("src/error.rs", "impl Display for Error"),
+        _block("src/ptr.rs", "impl<T> Own<T>", refill=("boxed",)),
+    ]
+    names = refill_authorized_names(blocks, "src/error.rs")
+    assert names == frozenset({"construct_from_std"})
+    # a refill target in ANOTHER file stays unauthorized here.
+    assert refill_authorized_names(blocks, "src/ptr.rs") == frozenset({"boxed"})
+    # no refill members anywhere in the file ⇒ nothing may overwrite a non-stub.
+    assert refill_authorized_names(
+        [_block("src/fmt.rs", "impl Debug for Error")], "src/fmt.rs") == frozenset()
+
+
+def test_refill_authorization_matches_across_src_prefix_forms() -> None:
+    # Block records and extractor records disagree on the `src/` prefix; an
+    # exact-string compare would silently authorize nothing.
+    blocks = [_block("error.rs", "impl Error", refill=("construct_from_std",))]
+    assert refill_authorized_names(blocks, "src/error.rs") == frozenset(
+        {"construct_from_std"})
+    assert norm_src_rel("src/error.rs") == norm_src_rel("error.rs") == "error.rs"
+    # a same-named file in another directory must NOT collide.
+    assert norm_src_rel("src/a/mod.rs") != norm_src_rel("src/b/mod.rs")
