@@ -64,7 +64,19 @@ def test_ratchet_breach_conditions() -> None:
     assert ratchet_breach(14, 22, 14, 22) == ""
     assert ratchet_breach(15, 20, 14, 22) == ""          # improvement, no breach
     assert "pass_count 13<14" in ratchet_breach(13, 22, 14, 22)
-    assert "oracle missing 23>22" in ratchet_breach(14, 23, 14, 22)
+    # Crash-free snapshot: any vanish is a real regression.
+    assert "oracle missing 1>0" in ratchet_breach(14, 1, 14, 0)
+    # Confounded snapshot (missing>0): counts are non-comparable noise — a
+    # higher reading (even the observed-live 22→23) must NOT breach.
+    assert ratchet_breach(14, 23, 14, 22) == ""
+    assert ratchet_breach(14, 40, 14, 21) == ""
+
+
+def test_snapshot_allowed_regimes() -> None:
+    from pipeline_core.application.reconstruct.tdd_ratchet import snapshot_allowed
+    assert snapshot_allowed(0, 0)          # crash-free tree, always ok
+    assert snapshot_allowed(23, 21)        # both confounded: noise can't veto
+    assert not snapshot_allowed(2, 0)      # would trade crash-free for crashy
 
 
 def _driver_deps(run_cargo, inventory, events):

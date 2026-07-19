@@ -21,15 +21,34 @@ def ratchet_breach(
     """Which ratchet signal (if any) says the tree net-regressed vs the
     best-known snapshot: '' = no breach, else a printable description of the
     breached condition. A crash-killed test binary drops a NONDETERMINISTIC
-    subset of its tests from the output (observed live: 22 vs 23 vanished on
-    back-to-back sweeps of an unchanged tree), so a single reading of either
-    signal is noisy while any binary crashes — the caller must confirm a
-    breach on a fresh sweep before acting on it destructively."""
+    subset of its tests from the output (observed live: 21..24 vanished across
+    sweeps of an unchanged tree), so while any binary crashes, missing_count is
+    a draw from an unknown distribution — comparing two such draws is invalid
+    no matter how often it is re-read (a min-of-history baseline makes every
+    later reading look like a shrink). The oracle condition therefore only
+    fires against an EXACT baseline (snap_missing == 0, crash-free snapshot):
+    any vanish from zero is a binary newly crashing/not compiling, which is
+    reproducible in occurrence even when its count is not. While confounded,
+    pass_count is the sole guard (vanished tests are already counted as
+    failing, so the frontier keeps targeting them). Either signal can still be
+    perturbed by crash timing — the caller must confirm a breach on a fresh
+    sweep before acting on it destructively."""
     if pass_count < best_pass:
         return f"pass_count {pass_count}<{best_pass}"
-    if missing_count > snap_missing:
-        return f"oracle missing {missing_count}>{snap_missing}"
+    if snap_missing == 0 and missing_count > 0:
+        return f"oracle missing {missing_count}>0 (was crash-free)"
     return ""
+
+
+def snapshot_allowed(missing_count: int, min_missing: int) -> bool:
+    """May the current tree become the ratchet/best snapshot, oracle-wise?
+    Blocks only the one comparison that is exact: a crash-free tree has been
+    seen (min_missing == 0) and the current reading is confounded — restoring
+    such a snapshot later would restore the crash. When every reading so far
+    is confounded (min_missing > 0), counts are non-comparable noise and must
+    not veto snapshotting a pass-improving tree (a stale snapshot means later
+    pass-breach reverts wipe the improvements that beat it)."""
+    return min_missing > 0 or missing_count == 0
 
 
 def snapshot_src_tree(src_root: Path) -> dict[str, str] | None:

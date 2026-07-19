@@ -21,6 +21,11 @@ from pipeline_core.domain.rust_fn_headers import locate_all_fns
 class RewriteResult:
     text: str
     replaced: bool
+    # On a batch reject: index into the replacement list of the pair whose
+    # `old` could not be located (None for the overlapping-spans reject and
+    # for successes). Lets the caller name WHICH definition failed instead of
+    # collapsing every cause into one opaque failure.
+    miss_index: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,12 +123,12 @@ def replace_surface_definitions(
     used_fn_spans: set[tuple[int, int]] = set()
     cursor_by_def: dict[str, int] = {}
     spans: list[tuple[int, int, str]] = []
-    for rep in replacements:
+    for rep_i, rep in enumerate(replacements):
         pos = cursor_by_def.get(rep.old, 0)
         while True:
             span = find_definition_span(text, rep.old, start_at=pos)
             if span is None:
-                return RewriteResult(text, False)
+                return RewriteResult(text, False, miss_index=rep_i)
             start, end = span
             if not rep.fn_name:
                 cursor_by_def[rep.old] = end

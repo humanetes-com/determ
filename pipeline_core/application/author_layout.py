@@ -112,34 +112,43 @@ class AuthorLayoutResult:
 def _splice_component(
     items: tuple[PrivateSurfaceItem, ...], authored: dict[str, AuthoredItem],
     deps: AuthorLayoutDeps,
-) -> tuple[dict[str, str], bool]:
+) -> tuple[dict[str, str], str]:
     """Apply the authored layout (keyed by protocol uid) to the skeleton files
-    in memory. Returns (edited files by rel path, all_replaced). Replacements
-    are batched per file and occurrence-ordered (`replace_definitions`) so
-    same-named items land in their OWN slots; any unlocatable frozen def
-    rejects the splice — a dangling frozen def next to an authored one would
-    not compile."""
+    in memory. Returns (edited files by rel path, failure reason — "" on
+    success). Replacements are batched per file and occurrence-ordered
+    (`replace_definitions`) so same-named items land in their OWN slots; any
+    unlocatable frozen def rejects the splice — a dangling frozen def next to
+    an authored one would not compile. The reason NAMES the failing uid/file:
+    a missing block, an unreadable file and a locate miss are three different
+    bugs and collapsing them into one message hides which one is happening."""
     per_file: dict[str, list[DefReplacement]] = {}
+    per_file_uids: dict[str, list[str]] = {}
     for uid, it in zip(component_uids(items), items, strict=True):
         block = authored.get(uid)
         if block is None:
-            return {}, False
+            return {}, f"authored blocks missing uid {uid}"
         # Fn definitions are enumerated as bare signatures (no vis/`unsafe`
         # prefix, no stub body) — name the fn so the splice swaps the whole
         # item instead of nesting the new def inside the old one.
         fn_name = it.name if it.kind is SurfaceItemKind.FN_SIG else ""
         per_file.setdefault(it.file, []).append(
             DefReplacement(it.definition, block.definition, fn_name))
+        per_file_uids.setdefault(it.file, []).append(uid)
     edited: dict[str, str] = {}
     for rel, pairs in per_file.items():
         current = deps.read_skeleton(rel)
         if current is None:
-            return edited, False
+            return edited, f"skeleton file unreadable: {rel}"
         res = replace_surface_definitions(current, pairs)
         if not res.replaced:
-            return edited, False
+            if res.miss_index is not None:
+                return edited, ("could not locate a frozen definition to "
+                                f"replace: {per_file_uids[rel][res.miss_index]}"
+                                f" in {rel}")
+            return edited, ("could not locate a frozen definition to replace:"
+                            f" overlapping/ambiguous target spans in {rel}")
         edited[rel] = res.text
-    return edited, True
+    return edited, ""
 
 
 def author_layout(
@@ -195,9 +204,9 @@ def author_layout(
                 deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: {reason} "
                          f"(attempt {attempt})")
                 continue
-            edited, ok = _splice_component(comp, authored, deps)
-            if not ok:
-                reason = "could not locate a frozen definition to replace"
+            edited, splice_err = _splice_component(comp, authored, deps)
+            if splice_err:
+                reason = splice_err
                 deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: {reason} "
                          f"(attempt {attempt})")
                 continue

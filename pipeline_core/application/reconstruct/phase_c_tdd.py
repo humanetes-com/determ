@@ -18,6 +18,7 @@ from typing import Any
 from pipeline_core.application.reconstruct.tdd_ratchet import (
     ratchet_breach,
     restore_src_tree,
+    snapshot_allowed,
     snapshot_src_tree,
 )
 from pipeline_core.domain.attribution import union_unattributed_stubs
@@ -365,13 +366,13 @@ def run_phase_c_tdd(
                     rc, output, pass_count, fail_count, cur_failed)
         # Refresh the best-known snapshot on the first iter and each strict
         # improvement (never on a plateau — the existing best-state snapshot is
-        # equivalent and re-reading the tree would be wasted I/O). Never
-        # snapshot a tree whose oracle shrank below the best seen — restoring
-        # it later would restore the shrink.
+        # equivalent and re-reading the tree would be wasted I/O). Oracle veto
+        # is regime-scoped (see snapshot_allowed): only a crash-free-vs-crashy
+        # comparison is exact; two confounded readings are non-comparable.
         _min_missing = (_oracle.missing_count if _ckpt_min_missing is None
                         else min(_ckpt_min_missing, _oracle.missing_count))
         if _batch_ratchet and (_bratchet_snap is None or pass_count > _bratchet_best) \
-                and _oracle.missing_count <= _min_missing:
+                and snapshot_allowed(_oracle.missing_count, _min_missing):
             _snap = snapshot_src_tree(_src_root)
             if _snap is not None:
                 _bratchet_best = pass_count

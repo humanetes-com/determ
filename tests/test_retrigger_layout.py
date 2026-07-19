@@ -73,6 +73,10 @@ class _Fakes:
             [LayoutComponentRecord(frozenset({"ErrorImpl"}), LayoutOutcome.FROZEN)]
             if frozen else [])
         self.files = {"src/error.rs": skeleton_def + "\n"}
+        # Backfill sources (parsed records over the scaffold): None = the
+        # extractor is unavailable, so keyless AUTHORED rows must skip.
+        self.skeleton_fns: list[FnRecord] | None = None
+        self.skeleton_types: list[TypeRecord] | None = None
         self.committed: list[str] = []
         self.reverted_calls: list[list[FnLocator]] = []
         self.outcome_updates: list[ComponentResult] = []
@@ -113,6 +117,8 @@ class _Fakes:
             load_surface=lambda pd, c: _surface(),
             load_layout_records=lambda pd, c: self._records,
             update_layout_outcome=update_outcome,
+            enumerate_skeleton_fns=lambda pd, c: self.skeleton_fns,
+            enumerate_skeleton_types=lambda pd, c: self.skeleton_types,
             load_suite=lambda pd, c: _suite_with_pin(),
             public_surface_text=lambda pd, c: "pub struct Error;",
             symbol_inventory_text=lambda pd, c: "Box",
@@ -181,6 +187,28 @@ def test_authored_component_without_stored_keys_is_skipped_loudly():
     assert not f.committed          # no attempt burned
     assert f.saved_attempts is None
     assert any("no stored locate-keys" in ln for ln in f.logs)
+
+
+def test_keyless_authored_row_backfills_from_scaffold_records():
+    # Store row predates locate-keys, but the AST extractor can read the
+    # authored def back from the scaffold: keys are derived, PERSISTED, and
+    # the re-author proceeds against the live def.
+    authored_def = "struct ErrorImpl { inner: Box<dyn StdError> }"
+    new_reply = ('<LAYOUT_ITEM name="ErrorImpl" kind="struct">'
+                 'struct ErrorImpl { msg: String }</LAYOUT_ITEM>')
+    f = _Fakes(reply=new_reply, skeleton_def=authored_def)
+    f._records = [LayoutComponentRecord(
+        frozenset({"ErrorImpl"}), LayoutOutcome.AUTHORED)]
+    f.skeleton_fns = []
+    f.skeleton_types = [TypeRecord(
+        file="src/error.rs", kind="struct", name="ErrorImpl", is_pub=False,
+        definition=authored_def)]
+    res = retrigger_layout(Path("/x"), "anyhow", "stable", Path("/x/src"), _ERR, f.deps())
+    assert res.fired and res.succeeded
+    assert "struct ErrorImpl { msg: String }" in f.files["src/error.rs"]
+    # first update = the backfilled keys, second = the re-author's fresh keys
+    assert dict(f.outcome_updates[0].authored_defs)["ErrorImpl"] == authored_def
+    assert any("backfilled" in ln for ln in f.logs)
 
 
 def test_gated_component_is_never_reauthored():

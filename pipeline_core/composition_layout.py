@@ -68,6 +68,7 @@ def build_retrigger_layout(
     task2_model: str,
     load_baked_clusters: Callable[[Path], list[Any]],
     enumerate_fns: Callable[[Path], list[Any] | None],
+    enumerate_types: Callable[[Path], list[Any] | None],
     git_commit: Callable[[Path, str], bool],
     log: Callable[[str], None],
     max_attempts: int,
@@ -114,6 +115,10 @@ def build_retrigger_layout(
             log=log, load_surface=load_private_surface,
             load_layout_records=load_layout_records,
             update_layout_outcome=update_layout_outcome,
+            enumerate_skeleton_fns=lambda pd, c: enumerate_fns(
+                skeleton_src_dir_for(pd, c)),
+            enumerate_skeleton_types=lambda pd, c: enumerate_types(
+                skeleton_src_dir_for(pd, c)),
             load_suite=load_behaviour_suite,
             public_surface_text=_public_surface_text,
             symbol_inventory_text=lambda pd, c: "",

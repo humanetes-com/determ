@@ -1423,6 +1423,7 @@ def build_app(
         ask=ask_client.ask, task2_model=settings.task_models.task2,
         load_baked_clusters=_load_baked_clusters,
         enumerate_fns=_typed_fn_records,
+        enumerate_types=enumerate_types,
         git_commit=git_commit, log=ports.log,
         max_attempts=cfg.layout_retrigger_max_attempts,
     )

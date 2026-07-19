@@ -61,3 +61,52 @@ def test_full_coverage_is_empty():
     )
     missing, extra = layout_coverage(required, parse_authored_layout(_REPLY))
     assert missing == frozenset() and extra == frozenset()
+
+
+def test_derive_locate_keys_from_scaffold_records():
+    from pipeline_core.domain.authored_layout import derive_locate_keys
+    from pipeline_core.domain.models import FnRecord, TypeRecord
+    items = (
+        PrivateSurfaceItem(kind=SurfaceItemKind.STRUCT, name="Own",
+                           file="src/ptr.rs", definition="stale-baked-def"),
+        # two same-named fns in one file — must bind by source order
+        PrivateSurfaceItem(kind=SurfaceItemKind.FN_SIG, name="as_ref",
+                           file="src/ptr.rs", definition="stale-sig-a"),
+        PrivateSurfaceItem(kind=SurfaceItemKind.FN_SIG, name="as_ref",
+                           file="src/ptr.rs", definition="stale-sig-b"),
+    )
+    fns = [
+        FnRecord(file="src/ptr.rs", fn_name="as_ref",
+                 sig_text="fn as_ref(&self) -> Ref<T>", body_text=""),
+        FnRecord(file="src/ptr.rs", fn_name="as_ref",
+                 sig_text="fn as_ref(&self) -> &T", body_text=""),
+        FnRecord(file="src/other.rs", fn_name="as_ref",
+                 sig_text="fn as_ref(&self) -> u8", body_text=""),
+    ]
+    types = [TypeRecord(file="src/ptr.rs", kind="struct", name="Own",
+                        is_pub=False, definition="struct Own<T> { ptr: *mut T }")]
+    keys = derive_locate_keys(items, fns, types)
+    assert keys is not None
+    got = dict(keys)
+    assert got["Own"] == "struct Own<T> { ptr: *mut T }"
+    assert got["as_ref.1"] == "fn as_ref(&self) -> Ref<T>"
+    assert got["as_ref.2"] == "fn as_ref(&self) -> &T"
+
+
+def test_derive_locate_keys_none_on_any_miss():
+    from pipeline_core.domain.authored_layout import derive_locate_keys
+    from pipeline_core.domain.models import TypeRecord
+    items = (
+        PrivateSurfaceItem(kind=SurfaceItemKind.STRUCT, name="Own",
+                           file="src/ptr.rs", definition="d"),
+        PrivateSurfaceItem(kind=SurfaceItemKind.FN_SIG, name="erase",
+                           file="src/ptr.rs", definition="s"),
+    )
+    types = [TypeRecord(file="src/ptr.rs", kind="struct", name="Own",
+                        is_pub=False, definition="struct Own;")]
+    # fn record absent → whole derivation refuses (no partial guessing)
+    assert derive_locate_keys(items, [], types) is None
+    # kind mismatch (trait vs struct) refuses too
+    items2 = (PrivateSurfaceItem(kind=SurfaceItemKind.TRAIT, name="Own",
+                                 file="src/ptr.rs", definition="d"),)
+    assert derive_locate_keys(items2, [], types) is None

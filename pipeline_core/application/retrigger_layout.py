@@ -30,7 +30,10 @@ from pipeline_core.application.author_layout import (
     author_layout,
 )
 from pipeline_core.application.author_layout_phase import make_pin_selector
-from pipeline_core.domain.authored_layout import component_uids
+from pipeline_core.domain.authored_layout import (
+    component_uids,
+    derive_locate_keys,
+)
 from pipeline_core.domain.behaviour import BehaviourSuite
 from pipeline_core.domain.layout_retrigger import (
     CrashEvidence,
@@ -41,7 +44,7 @@ from pipeline_core.domain.layout_retrigger import (
     find_fns_referencing,
     should_retrigger,
 )
-from pipeline_core.domain.models import FnLocator, FnRecord
+from pipeline_core.domain.models import FnLocator, FnRecord, TypeRecord
 from pipeline_core.domain.private_surface import PrivateSurface
 from pipeline_core.domain.starvation import classify_starvation
 from pipeline_core.prompts.layout_authoring import CRASH_GUIDANCE
@@ -67,6 +70,11 @@ class RetriggerLayoutDeps:
     # flip FROZEN→AUTHORED (and store fresh locate-keys) or the next trigger
     # re-fires on a component whose frozen defs no longer exist in the tree.
     update_layout_outcome: Callable[[Path, str, ComponentResult], object]
+    # Parsed records over the CLUSTER'S SKELETON scaffold (the tree the
+    # splice edits) — the backfill source for AUTHORED rows persisted before
+    # locate-keys existed.
+    enumerate_skeleton_fns: Callable[[Path, str], list[FnRecord] | None]
+    enumerate_skeleton_types: Callable[[Path, str], list[TypeRecord] | None]
     load_suite: Callable[[Path, str], BehaviourSuite]
     public_surface_text: Callable[[Path, str], str]
     symbol_inventory_text: Callable[[Path, str], str]
@@ -112,6 +120,34 @@ def _with_stored_defs(
         frozen_public=narrowed.frozen_public,
         public_referenced=narrowed.public_referenced,
         public_direct_refs=narrowed.public_direct_refs)
+
+
+def _backfill_stored_defs(
+    project_dir: Path, cfg_cluster: str, names: frozenset[str],
+    narrowed: PrivateSurface, deps: RetriggerLayoutDeps,
+) -> PrivateSurface | None:
+    """Derive an AUTHORED component's missing locate-keys from the scaffold
+    itself (AST-extracted, verbatim) and persist them, migrating a store row
+    written before locate-keys existed. None when derivation is incomplete —
+    the caller skips instead of burning an attempt on a locate failure."""
+    fn_records = deps.enumerate_skeleton_fns(project_dir, cfg_cluster)
+    type_records = deps.enumerate_skeleton_types(project_dir, cfg_cluster)
+    if fn_records is None or type_records is None:
+        return None
+    all_keys: list[tuple[str, str]] = []
+    for comp in narrowed.components:
+        keys = derive_locate_keys(comp, fn_records, type_records)
+        if keys is None:
+            return None
+        all_keys.extend(keys)
+    deps.update_layout_outcome(
+        project_dir, cfg_cluster,
+        ComponentResult(tuple(sorted(names)), authored=True,
+                        authored_defs=tuple(all_keys)))
+    deps.log(f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: backfilled "
+             f"{len(all_keys)} locate-key(s) from the scaffold (store row "
+             "predates locate-keys).")
+    return _with_stored_defs(narrowed, dict(all_keys))
 
 
 def retrigger_layout(
@@ -183,10 +219,14 @@ def retrigger_layout(
         if rec.outcome is LayoutOutcome.AUTHORED:
             with_defs = _with_stored_defs(narrowed, dict(rec.defs))
             if with_defs is None:
+                with_defs = _backfill_stored_defs(
+                    project_dir, cfg_cluster, names, narrowed, deps)
+            if with_defs is None:
                 deps.log(
                     f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: "
-                    "AUTHORED component has no stored locate-keys for its "
-                    "live defs — cannot re-author safely; skipping.")
+                    "AUTHORED component has no stored locate-keys and they "
+                    "could not be derived from the scaffold — cannot "
+                    "re-author safely; skipping.")
                 continue
             narrowed = with_defs
 

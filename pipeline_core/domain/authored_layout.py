@@ -19,6 +19,7 @@ from __future__ import annotations
 import html
 from dataclasses import dataclass
 
+from pipeline_core.domain.models import FnRecord, TypeRecord
 from pipeline_core.domain.private_surface import (
     PrivateSurfaceItem,
     SurfaceItemKind,
@@ -152,6 +153,50 @@ def authored_locate_keys(
             if locs:
                 key = locs[0][0]
         keys.append((uid, key))
+    return tuple(keys)
+
+
+_EXTRACTOR_KIND = {
+    SurfaceItemKind.STRUCT: "struct",
+    SurfaceItemKind.ENUM: "enum",
+    SurfaceItemKind.TYPE_ALIAS: "type",
+    SurfaceItemKind.TRAIT: "trait",
+}
+
+
+def derive_locate_keys(
+    items: tuple[PrivateSurfaceItem, ...],
+    fn_records: list[FnRecord],
+    type_records: list[TypeRecord],
+) -> tuple[tuple[str, str], ...] | None:
+    """Reconstruct (uid, locate-key) pairs for a component from the CURRENT
+    scaffold's parsed records — the backfill for AUTHORED store rows persisted
+    before locate-keys existed (their authored text was never saved, but it
+    lives in the scaffold and the AST extractor reads it back verbatim). Fn
+    keys = the parsed signature; type keys = the parsed definition — the same
+    text classes the original bake enumerated, so the splice's whitespace-
+    tolerant matcher locates them identically. Same-named fns in one file
+    bind by source order, matching the splice's occurrence ordering. None
+    when any item has no matching record: the caller must skip, never guess."""
+    keys: list[tuple[str, str]] = []
+    fn_taken: dict[tuple[str, str], int] = {}
+    for uid, it in zip(component_uids(items), items, strict=True):
+        if it.kind is SurfaceItemKind.FN_SIG:
+            matches = [r for r in fn_records
+                       if r.file == it.file and r.fn_name == it.name]
+            k = fn_taken.get((it.file, it.name), 0)
+            fn_taken[(it.file, it.name)] = k + 1
+            if k >= len(matches) or not matches[k].sig_text:
+                return None
+            keys.append((uid, matches[k].sig_text))
+        else:
+            kind = _EXTRACTOR_KIND[it.kind]
+            rec = next((r for r in type_records
+                        if r.file == it.file and r.name == it.name
+                        and r.kind == kind), None)
+            if rec is None or not rec.definition:
+                return None
+            keys.append((uid, rec.definition))
     return tuple(keys)
 
 
