@@ -90,11 +90,16 @@ class PhaseCFillEngine:
         tdd_frontier_keys: set[FnLocator] | None,
         tdd_frontier_tests: Frontier | None,
     ) -> list[Stub]:
-        """debt #46 — frontier fns that are already FILLED (not stubs) but have a
-        failing attributed test → behavioral re-fill targets (`refill=True`).
+        """Frontier fns that are already FILLED (not stubs) but have a failing
+        attributed test → behavioral re-fill targets (`refill=True`).
         Empty unless the TDD outer loop supplied both the frontier keys and the
         failing-test map (i.e. `driver=tdd`); the legacy `fn_walk` driver has its
-        own internal test-fix loop and passes neither."""
+        own internal test-fix loop and passes neither.
+
+        A frontier key that is neither a stub nor an enumerated fn resolves to
+        nothing and would drop out here without a trace — the failure mode that
+        let a crash-blamed fn sit unfixed for entire runs while its blame line
+        was printed every sweep. Such keys are reported, never swallowed."""
         if not (tdd_frontier_keys and tdd_frontier_tests):
             return []
         _stub_keys = {s.key for s in stubs}
@@ -104,13 +109,22 @@ class PhaseCFillEngine:
         }
         if not _refill_keys:
             return []
+        _records = [Stub.from_dict(r)
+                    for r in self.ws.enumerate_fns(target_src_dir) or []]
         out: list[Stub] = []
         _seen: set[FnLocator] = set()
-        for r in self.ws.enumerate_fns(target_src_dir) or []:
-            rec = Stub.from_dict(r)
+        for rec in _records:
             if rec.key in _refill_keys and rec.key not in _seen:
                 out.append(replace(rec, refill=True))
                 _seen.add(rec.key)
+        _dangling = sorted(
+            f"{k.file}::{k.fn_name}" for k in _refill_keys - _seen)
+        if _dangling:
+            self.tel.log(
+                f"  [phase-c/per-fn] {len(_dangling)} frontier key(s) match no "
+                f"enumerated fn — NOT re-filled: {_dangling[:8]}")
+            self.tel.emit("phase_c.refill.dangling_keys",
+                          data={"keys": _dangling[:50]})
         return out
 
     def run(

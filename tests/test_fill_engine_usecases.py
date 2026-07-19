@@ -288,3 +288,21 @@ def test_collect_refill_targets_only_filled_frontier_fns(tmp_path: Path) -> None
     # No frontier map (legacy fn_walk driver) → never produces refill targets.
     assert eng._collect_refill_targets(tmp_path, stubs, None, None) == []
     assert eng._collect_refill_targets(tmp_path, stubs, keys, None) == []
+
+
+def test_refill_target_key_matching_no_fn_is_reported(tmp_path: Path) -> None:
+    """A frontier key that resolves to no enumerated fn must be announced. It
+    used to vanish here, which is how a crash-blamed fn stayed unfilled for whole
+    runs: the blame was printed every sweep and then dropped without a trace."""
+    from pipeline_core.domain.models import FnLocator
+    fake = FakeFill(fns=[{"file": "src/a.rs", "fn_name": "realfn",
+                          "container": "impl A", "sig_text": "fn realfn()"}])
+    eng = _engine(fake, FillUnit.FN)
+    keys = {FnLocator("src/a.rs", "realfn"), FnLocator("nowhere.rs", "ghostfn")}
+    tests = {FnLocator("src/a.rs", "realfn"): {"t1"},
+             FnLocator("nowhere.rs", "ghostfn"): {"t2"}}
+    out = eng._collect_refill_targets(tmp_path, [], keys, tests)
+    assert [s.fn_name for s in out] == ["realfn"]
+    assert "phase_c.refill.dangling_keys" in fake.events
+    assert any("nowhere.rs::ghostfn" in m and "match no enumerated fn" in m
+               for m in fake.logs)
