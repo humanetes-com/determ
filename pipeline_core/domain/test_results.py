@@ -853,3 +853,299 @@ def parse_error_code_note(line: str) -> tuple[str, str] | None:
     codes = line[1:e]
     rest = line[e + 1:]  # \s*(.+)$ matches iff rest non-empty; .+ reclaims leading ws
     return (codes, rest.strip()) if rest else None
+
+
+# ---------------------------------------------------------------------------
+# Per-binary test readings (crash-regime scoping for the per-fill gate)
+# ---------------------------------------------------------------------------
+# A cluster test run is N independent binaries. When one crashes mid-run
+# (SIGSEGV/abort) its tests silently vanish from the output, and WHICH of them
+# printed a verdict first varies run-to-run — so whole-run pass counts and
+# failed-name sets become draws from a distribution, not measurements. Any
+# before/after comparison must therefore be scoped to binaries that COMPLETED
+# (printed their `test result:` trailer) in BOTH readings; a crashed binary
+# testifies for nobody. The one exact cross-regime fact: a binary that was
+# complete at baseline and crashed after a single change was crashed BY that
+# change.
+
+
+@dataclass(frozen=True)
+class BinaryResult:
+    """One test target's section of a cargo test run.
+
+    ``completed`` is True iff the section printed its `test result:` trailer —
+    a section that opened (`running N tests`) but never closed means the
+    process died mid-run. ``dangling`` is the test that had printed its
+    `test NAME ... ` prefix but no verdict when the process died (under
+    `--test-threads=1` this is precisely the crashing test). ``exe_path`` is
+    the executable from the `Running <desc> (<path>)` stderr line, kept so a
+    crash localizer can re-run the exact binary.
+
+    ``pass_count``/``fail_count`` come from the trailer (authoritative even
+    when per-test lines are absent, e.g. `-q` runs); the name SETS drive
+    newly-red attribution only. For a crashed section they fall back to the
+    verdicts observed before death."""
+
+    label: str
+    completed: bool
+    passed: frozenset[str]
+    failed: frozenset[str]
+    pass_count: int = 0
+    fail_count: int = 0
+    dangling: str | None = None
+    exe_path: str | None = None
+
+    @property
+    def executed(self) -> int:
+        return self.pass_count + self.fail_count
+
+
+@dataclass(frozen=True)
+class TestStateReading:
+    """A full cluster test-run reading, per binary. Replaces the bare
+    ``(pass_count, failed_names)`` tuple as the regression-gate currency so
+    the gate can scope its comparison to completed binaries."""
+
+    binaries: tuple[BinaryResult, ...]
+
+    @property
+    def pass_count(self) -> int:
+        return sum(b.pass_count for b in self.binaries)
+
+    @property
+    def fail_count(self) -> int:
+        return sum(b.fail_count for b in self.binaries)
+
+    @property
+    def failed_names(self) -> frozenset[str]:
+        out: set[str] = set()
+        for b in self.binaries:
+            out |= b.failed
+        return frozenset(out)
+
+    @property
+    def executed(self) -> int:
+        return sum(b.executed for b in self.binaries)
+
+    @property
+    def crashed(self) -> tuple[BinaryResult, ...]:
+        return tuple(b for b in self.binaries if not b.completed)
+
+    def by_label(self) -> dict[str, BinaryResult]:
+        return {b.label: b for b in self.binaries}
+
+
+def _verdict_of_test_line(line: str) -> tuple[str, str] | None:
+    """``test NAME ... ok|FAILED|ignored`` → (name, verdict); a verdict-less
+    ``test NAME ...`` prefix (the in-flight test when a binary dies — libtest
+    prints the prefix before running the test) → (name, ""). None otherwise.
+    Pure string ops. Handles doc-test names containing spaces by splitting on
+    the LAST ``" ... "`` separator."""
+    if not line.startswith("test "):
+        return None
+    if " ... " in line:
+        name, _, tail = line[len("test "):].rpartition(" ... ")
+        if not name:
+            return None
+        verdict = tail.split()[0] if tail.split() else ""
+        return (name.strip(), verdict)
+    if line.endswith(" ..."):
+        name = line[len("test "):-len(" ...")].strip()
+        return (name, "") if name else None
+    return None
+
+
+def parse_binary_results(test_output: str) -> tuple[BinaryResult, ...]:
+    """Split a combined cargo-test stdout+stderr capture into per-binary
+    :class:`BinaryResult`s. Labels come from the stderr ``Running <desc>
+    (<path>)`` / ``Doc-tests <crate>`` lines; sections open on the stdout
+    ``running N tests`` header and close on their ``test result:`` trailer.
+    Cargo executes targets sequentially, so the i-th label names the i-th
+    section even when stderr and stdout ordering interleaves (same pairing
+    rule as :func:`summarize_test_binaries`). A section with no trailer is a
+    crashed binary: ``completed=False`` and any dangling ``test NAME ... ``
+    prefix line (verdict never printed) names the in-flight test."""
+    labels: list[tuple[str, str | None]] = []
+    for raw in test_output.splitlines():
+        line = raw.strip()
+        if line.startswith("Running "):
+            desc, sep, tail = line[len("Running "):].partition(" (")
+            exe = tail[:-1].strip() if sep and tail.endswith(")") else None
+            labels.append((desc.strip() or "?", exe))
+        elif line.startswith("Doc-tests "):
+            labels.append(("Doc-tests " + line[len("Doc-tests "):].strip(), None))
+
+    class _Section:
+        __slots__ = ("passed", "failed", "completed", "dangling",
+                     "pass_count", "fail_count")
+
+        def __init__(self) -> None:
+            self.passed: set[str] = set()
+            self.failed: set[str] = set()
+            self.completed = False
+            self.dangling: str | None = None
+            self.pass_count = 0
+            self.fail_count = 0
+
+    sections: list[_Section] = []
+    current: _Section | None = None
+    for raw in test_output.splitlines():
+        line = raw.strip()
+        if line.startswith("running ") and line.endswith(("tests", "test")):
+            current = _Section()
+            sections.append(current)
+            continue
+        if current is None or current.completed:
+            # Tolerate headerless captures (truncated logs, minimal
+            # fixtures): a verdict/trailer line with no open section opens
+            # an implicit one instead of being dropped.
+            if (line.startswith("test result:")
+                    or _verdict_of_test_line(line) is not None):
+                current = _Section()
+                sections.append(current)
+            else:
+                continue
+        if line.startswith("test result:"):
+            current.completed = True
+            current.pass_count, current.fail_count = _counts_on_result_line(line)
+            continue
+        parsed = _verdict_of_test_line(line)
+        if parsed is None:
+            continue
+        name, verdict = parsed
+        if verdict == "ok":
+            current.passed.add(name)
+            if current.dangling == name:
+                current.dangling = None
+        elif verdict == "FAILED":
+            current.failed.add(name)
+            if current.dangling == name:
+                current.dangling = None
+        elif verdict == "":
+            # `test NAME ...` printed, verdict never followed: in-flight when
+            # the process died. A later verdict line for the same name
+            # (parallel-harness interleaving) clears it above.
+            current.dangling = name
+
+    out: list[BinaryResult] = []
+    for i, sec in enumerate(sections):
+        label, exe = labels[i] if i < len(labels) else ("?", None)
+        if not sec.completed:
+            # crashed section: only the observed verdicts exist
+            sec.pass_count, sec.fail_count = len(sec.passed), len(sec.failed)
+        out.append(BinaryResult(
+            label=label,
+            completed=sec.completed,
+            passed=frozenset(sec.passed),
+            failed=frozenset(sec.failed),
+            pass_count=sec.pass_count,
+            fail_count=sec.fail_count,
+            dangling=None if sec.completed else sec.dangling,
+            exe_path=exe,
+        ))
+    return tuple(out)
+
+
+@dataclass(frozen=True)
+class RegressionComparison:
+    """Outcome of a binary-scoped baseline-vs-after comparison.
+
+    ``measured`` — labels complete in BOTH readings (the only verdicts that
+    count). ``newly_crashed`` — complete at baseline, crashed after: a real
+    regression attributable to the change under test. ``excluded_crashed`` —
+    crashed in both readings: pre-existing, excluded, never blamed."""
+
+    newly_red: frozenset[str]
+    newly_crashed: tuple[str, ...]
+    excluded_crashed: tuple[str, ...]
+    not_run: tuple[str, ...]
+    measured: tuple[str, ...]
+    base_pass: int
+    cur_pass: int
+    base_executed: int
+    cur_executed: int
+
+    @property
+    def regressed(self) -> bool:
+        return bool(self.newly_red or self.newly_crashed
+                    or self.cur_pass < self.base_pass
+                    or self.cur_executed < self.base_executed)
+
+
+def compare_readings(base: TestStateReading,
+                     cur: TestStateReading) -> RegressionComparison:
+    """Binary-scoped regression comparison. Only binaries complete in BOTH
+    readings contribute verdicts/counts; a binary that crashed at baseline is
+    excluded no matter what it printed after (its readings are noise); a
+    binary that was complete at baseline and crashed after IS a regression."""
+    base_by, cur_by = base.by_label(), cur.by_label()
+    measured: list[str] = []
+    newly_crashed: list[str] = []
+    excluded: list[str] = []
+    not_run: list[str] = []
+    newly_red: set[str] = set()
+    base_pass = cur_pass = base_exec = cur_exec = 0
+    for label, b in base_by.items():
+        c = cur_by.get(label)
+        if not b.completed:
+            excluded.append(label)
+            continue
+        if c is None:
+            # Absent section: the binary never STARTED in the after-reading
+            # (cargo fail-fast stopped before it, or the run was cut short).
+            # Inconclusive — exclude; only a section that opened and died is
+            # attributable as a crash.
+            not_run.append(label)
+            continue
+        if not c.completed:
+            newly_crashed.append(label)
+            continue
+        measured.append(label)
+        newly_red |= (c.failed - b.failed)
+        base_pass += b.pass_count
+        cur_pass += c.pass_count
+        base_exec += b.executed
+        cur_exec += c.executed
+    return RegressionComparison(
+        newly_red=frozenset(newly_red),
+        newly_crashed=tuple(sorted(newly_crashed)),
+        excluded_crashed=tuple(sorted(excluded)),
+        not_run=tuple(sorted(not_run)),
+        measured=tuple(sorted(measured)),
+        base_pass=base_pass, cur_pass=cur_pass,
+        base_executed=base_exec, cur_executed=cur_exec)
+
+
+def render_regression_detail(cmp: RegressionComparison) -> str:
+    """Prompt-ready explanation of a regression verdict. The opening sentence
+    keeps the exact historical prefixes (the starvation classifier keys on
+    them); the scope sentences state WHAT was measured and what was excluded
+    as pre-existing, so the model is never blamed for a crash it didn't
+    cause."""
+    if cmp.newly_crashed:
+        head = (f"This made test binar{'ies' if len(cmp.newly_crashed) > 1 else 'y'} "
+                f"{list(cmp.newly_crashed)} CRASH before reporting results "
+                "(e.g. segfault from bad unsafe code) — they completed fine "
+                "before this change. Write a body that lets every test binary "
+                "build and run to completion.")
+    elif cmp.newly_red:
+        head = ("This compiled, but it REGRESSED previously-passing test(s): "
+                f"{sorted(cmp.newly_red)} (cluster pass count {cmp.base_pass}→"
+                f"{cmp.cur_pass}).\nKeep those tests passing while fixing the "
+                "target — do not change shared behavior they rely on.")
+    elif cmp.cur_executed < cmp.base_executed:
+        head = (f"This dropped the number of tests that EXECUTE "
+                f"{cmp.base_executed}→{cmp.cur_executed} within the completed "
+                "test binaries. Write a body that lets every test build and "
+                "run.")
+    else:
+        head = (f"This dropped the cluster pass count {cmp.base_pass}→"
+                f"{cmp.cur_pass} (tests that used to run/pass no longer do). "
+                "Revert the change that removed them.")
+    if cmp.excluded_crashed:
+        head += ("\n(Note: test binar"
+                 f"{'ies' if len(cmp.excluded_crashed) > 1 else 'y'} "
+                 f"{list(cmp.excluded_crashed)} crashed BEFORE this change "
+                 "too — pre-existing, excluded from this verdict, and NOT "
+                 "your fault. Do not contort this fn to fix them.)")
+    return head

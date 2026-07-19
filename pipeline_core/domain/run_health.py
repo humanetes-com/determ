@@ -37,6 +37,7 @@ class HealthKind(StrEnum):
     HEAL_SKELETON_LOSS = "heal_skeleton_loss"    # whole-file skeleton restore discarded fills
     ORACLE_DRIFT = "oracle_drift"                # denominator changed mid-run — counts not comparable
     CAPPED_RETRY_FUTILITY = "capped_retry_futility"  # budgeted mechanism failing in an attempt-invariant way
+    CRASH_UNLOCALIZED = "crash_unlocalized"      # tests vanished but no crash site was produced
 
 
 @dataclass(frozen=True, slots=True)
@@ -261,6 +262,30 @@ def analyze(
             f"oracle size varied {min(oracles)}→{max(oracles)} within the run",
             "the denominator moved — pass counts across these iters are NOT "
             "comparable; a test target's compilation likely flipped",
+        ))
+
+    # -- 7c. unlocalized crashes -------------------------------------------
+    # A shrunken oracle names WHICH tests vanished; the crash localizer names
+    # WHERE. Sweeps with vanish but NO `[phase-c/crash]` blame line mean the
+    # localizer is broken/disabled (gdb missing, ASAN build failing) — the
+    # run is back to blind vanish accounting, the state that produced the
+    # pass=14 plateau. One localized site in the segment suppresses (the
+    # localizer works; per-sweep gaps are then reproduction flakiness).
+    shrunk = sum(1 for ln in segment_lines if "ORACLE SHRUNK" in ln)
+    blamed = sum(1 for ln in segment_lines
+                 if "[phase-c/crash]" in ln and "blamed" in ln)
+    no_localize = sum(1 for ln in segment_lines
+                      if "no crash could be localized" in ln)
+    if shrunk and not blamed:
+        findings.append(HealthFinding(
+            HealthKind.CRASH_UNLOCALIZED, "alert", "crash localizer",
+            f"{shrunk} ORACLE SHRUNK sweep(s), 0 localized crash site(s)"
+            + (f" ({no_localize} explicit no-localize line(s))"
+               if no_localize else " (localizer never logged at all)"),
+            "vanished tests with no faulting stack = the localizer is not "
+            "running or cannot reproduce — check gdb availability, the ASAN "
+            "nightly build, and the [phase-c/crash] wiring before trusting "
+            "any revert/exhaustion verdicts",
         ))
 
     # -- 8. skeleton-fallback fill loss (F7 pairs with F2) ------------------

@@ -239,15 +239,26 @@ def _cargo_suite(rc: int, passed: int, failed_names: list[str]):
     return _const_run_cargo(rc, body)
 
 
+def _reading(passed: int, failed_names: list[str]):
+    """Baseline TestStateReading with one completed implicit binary."""
+    from pipeline_core.domain.test_results import parse_binary_results, TestStateReading
+    body = "".join(f"test {n} ... FAILED\n" for n in failed_names)
+    body += _RES.format(p=passed, f=len(failed_names))
+    return TestStateReading(parse_binary_results(body))
+
+
 def test_measure_test_state_counts_and_inconclusive() -> None:
     from pipeline_core.application.reconstruct.cargo_runner import measure_test_state
     # green suite: rc==0, pass count parsed, no failures
-    assert measure_test_state(
+    r = measure_test_state(
         _const_run_cargo(0, "test result: ok. 5 passed; 0 failed; 0 ignored"),
-        "cargo test", Path("."), {}) == (5, frozenset())
+        "cargo test", Path("."), {})
+    assert r is not None and (r.pass_count, r.failed_names) == (5, frozenset())
     # some failures: pass count + failing names
-    assert measure_test_state(_cargo_suite(101, 3, ["b", "c"]),
-                              "cargo test", Path("."), {}) == (3, frozenset({"b", "c"}))
+    r2 = measure_test_state(_cargo_suite(101, 3, ["b", "c"]),
+                            "cargo test", Path("."), {})
+    assert r2 is not None
+    assert (r2.pass_count, r2.failed_names) == (3, frozenset({"b", "c"}))
     # crate did not compile (no test-result lines, rc!=0) → inconclusive None
     assert measure_test_state(_const_run_cargo(101, "error[E0308]: mismatched"),
                               "cargo test", Path("."), {}) is None
@@ -263,7 +274,7 @@ def _regr(run_cargo_fn, baseline, enabled=True):
 
 
 def test_regression_gate_accepts_when_no_new_red() -> None:
-    base: tuple[int, frozenset[str]] = (5, frozenset({"b"}))  # b already failing
+    base = _reading(5, ["b"])  # b already failing
     # b still failing, pass count held → NOT a regression
     assert _regr(_cargo_suite(101, 5, ["b"]), base) is None
     # a formerly-failing test turned green (pass up) → accept
@@ -272,15 +283,13 @@ def test_regression_gate_accepts_when_no_new_red() -> None:
 
 
 def test_regression_gate_blocks_new_red_and_pass_drop() -> None:
-    base: tuple[int, frozenset[str]] = (5, frozenset({"b"}))
+    base = _reading(5, ["b"])
     # a NEW test (z) went red though b is fixed → regression names z
     res = _regr(_cargo_suite(101, 5, ["z"]), base)
     assert res is not None
     newly, msg = res
     assert newly == frozenset({"z"}) and "REGRESSED" in msg
-    # no new named failure but pass count dropped (tests vanished) → regression;
-    # with the failed set unchanged this IS an executed-count drop, so the
-    # detail now names the crashed/non-compiling-binary mechanism.
+    # no new named failure but pass count dropped within the completed binary
     res2 = _regr(_cargo_suite(101, 3, ["b"]), base)
     assert res2 is not None
     newly2, msg2 = res2
@@ -288,7 +297,7 @@ def test_regression_gate_blocks_new_red_and_pass_drop() -> None:
 
 
 def test_regression_gate_self_disables() -> None:
-    base: tuple[int, frozenset[str]] = (5, frozenset())
+    base = _reading(5, [])
     assert _regr(_cargo_suite(101, 5, ["z"]), base, enabled=False) is None   # off
     assert _regr(_cargo_suite(101, 5, ["z"]), None) is None                  # no baseline
     # post-fill suite inconclusive (crate red now) → cannot judge → accept
@@ -296,11 +305,9 @@ def test_regression_gate_self_disables() -> None:
 
 
 def test_regression_gate_blocks_executed_count_drop() -> None:
-    # A fill that crashes a test BINARY removes its tests from the output:
-    # the pass count can HOLD (the lost binary was mostly failing) and no new
-    # name goes red — but fewer tests execute than at baseline. That is a
-    # regression (the anyhow oracle-shrink 68→50 that kept a segfaulting body).
-    base: tuple[int, frozenset[str]] = (5, frozenset({"b", "c", "d"}))  # 8 ran
+    # A fill that shrinks a COMPLETED binary's executed count is a regression
+    # even when the pass count holds and no new name goes red.
+    base = _reading(5, ["b", "c", "d"])  # 8 ran
     res = _regr(_cargo_suite(101, 5, ["b"]), base)  # only 6 ran, pass held
     assert res is not None
     newly, msg = res
@@ -309,3 +316,53 @@ def test_regression_gate_blocks_executed_count_drop() -> None:
     # Equal executed totals with pass held stays accepted (no false positive
     # when a failing test merely flips to passing).
     assert _regr(_cargo_suite(101, 6, ["b", "c"]), base) is None
+
+
+def test_regression_gate_binary_scoped_crash_exclusion() -> None:
+    # THE plateau class: a binary already CRASHED at baseline emits a
+    # nondeterministic verdict subset — its tests may neither convict nor
+    # exonerate a fill. Baseline: binary A complete (2 pass), binary B
+    # crashed mid-run. After: A unchanged, B's flicker shows a FAILED name
+    # that never reported at baseline → must NOT be newly-red, gate accepts.
+    from pipeline_core.domain.test_results import parse_binary_results, TestStateReading
+    base_out = (
+        "    Running tests/a.rs (t/a-1)\n"
+        "running 2 tests\ntest x ... ok\ntest y ... ok\n"
+        "test result: ok. 2 passed; 0 failed; 0 ignored\n"
+        "    Running tests/b.rs (t/b-2)\n"
+        "running 3 tests\ntest p ... ok\ntest q ...\n")
+    cur_out = (
+        "    Running tests/a.rs (t/a-1)\n"
+        "running 2 tests\ntest x ... ok\ntest y ... ok\n"
+        "test result: ok. 2 passed; 0 failed; 0 ignored\n"
+        "    Running tests/b.rs (t/b-2)\n"
+        "running 3 tests\ntest q ... FAILED\ntest r ...\n")
+    base = TestStateReading(parse_binary_results(base_out))
+    fired: list[tuple[str, str]] = []
+    from pipeline_core.application.reconstruct.cargo_runner import test_regression_gate
+    res = test_regression_gate(
+        _const_run_cargo(101, cur_out), "cargo test", Path("."), {}, base,
+        enabled=True, timeout=120, guard=lambda loc, m: fired.append((loc, m)))
+    assert res is None  # crashed-at-baseline binary excluded entirely
+    assert fired and fired[0][0] == "phase-c/u2_missing_verdict"
+    assert "tests/b.rs" in fired[0][1]
+
+
+def test_regression_gate_flags_newly_crashed_binary() -> None:
+    # A binary COMPLETE at baseline that crashes after the fill is a real,
+    # attributable regression — detail names the binary and the historical
+    # prefix stays absent (new crash message class).
+    from pipeline_core.domain.test_results import parse_binary_results, TestStateReading
+    base_out = (
+        "    Running tests/a.rs (t/a-1)\n"
+        "running 2 tests\ntest x ... ok\ntest y ... ok\n"
+        "test result: ok. 2 passed; 0 failed; 0 ignored\n")
+    cur_out = (
+        "    Running tests/a.rs (t/a-1)\n"
+        "running 2 tests\ntest x ... ok\ntest y ...\n")
+    base = TestStateReading(parse_binary_results(base_out))
+    res = _regr(_const_run_cargo(101, cur_out), base)
+    assert res is not None
+    newly, msg = res
+    assert newly == frozenset()
+    assert "CRASH" in msg and "tests/a.rs" in msg

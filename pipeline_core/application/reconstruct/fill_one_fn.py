@@ -90,7 +90,11 @@ class FillOneFn:
         container = rec.container
         sig_text = rec.sig_text
         attempts = 0   # LLM attempts this fn consumed — returned in FillResult
-        if self.retros.is_fn_fully_exhausted(
+        # A crash-implicated fn is never exhaustion-skipped: the localized
+        # faulting stack is evidence no prior attempt ever saw.
+        _crash_evidence = (ctx.crash_evidence or {}).get(
+            FnLocator(rel_file, fn_name), "")
+        if not _crash_evidence and self.retros.is_fn_fully_exhausted(
                 ctx.retros_cache, rel_file, fn_name, container):
             self.tel.log(f"  [phase-c/per-fn] {idx}/{ctx.total} skipped "
                          f"{rel_file}::{fn_name} [{container}] — fully exhausted "
@@ -265,6 +269,7 @@ class FillOneFn:
                         crate_idioms=crate_idioms_section,
                         bound_methods=_fn_ctx.bound_methods_section,
                         blueprint=_fn_ctx.blueprint_section,
+                        crash_evidence=_crash_evidence,
                         usage_examples=select_usage_examples(
                             ctx.behaviour_specs, fn_name=fn_name,
                             container=container, char_budget=1200)),
@@ -291,7 +296,8 @@ class FillOneFn:
                             cur_text, fn_name, container),
                         crate_idioms=crate_idioms_section,
                         bound_methods=_fn_ctx.bound_methods_section,
-                        blueprint=_fn_ctx.blueprint_section),
+                        blueprint=_fn_ctx.blueprint_section,
+                        crash_evidence=_crash_evidence),
                     # P3.1: open the sig-change escape hatch after multiple
                     # compile failures. The model can return an additional
                     # <SIGNATURE> block; we splice it only when fn is non-pub.

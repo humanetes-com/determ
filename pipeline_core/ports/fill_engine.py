@@ -30,6 +30,7 @@ from pipeline_core.domain.models import (
 )
 from pipeline_core.domain.reconstruction import SpliceOutcome
 from pipeline_core.domain.test_report import U2Verdict
+from pipeline_core.domain.test_results import TestStateReading
 
 
 @runtime_checkable
@@ -95,10 +96,10 @@ class Cargo(Protocol):
     ) -> U2Verdict: ...
     def test_regression_baseline(
         self, test_cmd: str | None, cwd: Path, env: dict[str, str] | None,
-    ) -> tuple[int, frozenset[str]] | None: ...
+    ) -> TestStateReading | None: ...
     def test_regression_gate(
         self, test_cmd: str | None, cwd: Path, env: dict[str, str] | None,
-        baseline: tuple[int, frozenset[str]] | None,
+        baseline: TestStateReading | None,
     ) -> tuple[frozenset[str], str] | None: ...
     def focus_errors(self, output: str, file_rel: str,
                      max_chars: int | None = ...) -> str: ...

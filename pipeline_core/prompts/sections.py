@@ -183,6 +183,43 @@ def trait_contract_for(container: str) -> str:
 # gotcha's trigger keyword/code, via gotchas_for_error).
 RUST_GOTCHAS: list[dict[str, Any]] = [
     {
+        # The dangling-'static class: silencing the borrow checker with a
+        # raw-pointer cast turns a lifetime ERROR into a runtime SIGSEGV that
+        # takes the whole test binary down (observed live: a fn-pointer table
+        # built on the stack, addr_of!-cast to &'static, stored in a heap
+        # object — every later dispatch jumped through dead stack memory).
+        "id": "stack_to_static_cast",
+        "summary": "NEVER cast a stack local's address to `&'static` (`&*(addr_of!(local) as *const T)` / transmute). It compiles, then SEGFAULTS at runtime when the frame dies. Use static promotion `&T { ... }` (const-eligible fields) or `Box::leak`.",
+        "triggers": {"E0515", "E0716", "cannot return reference",
+                     "temporary value dropped while borrowed",
+                     "does not live long enough", "SIGSEGV",
+                     "stack-use-after-return"},
+        "detail": (
+            "A `&'static T` must point at memory that NEVER dies. Fabricating\n"
+            "one from a stack local silences the borrow checker but leaves a\n"
+            "dangling pointer — every later read/dispatch through it is UB\n"
+            "(silent SIGSEGV, whole test binary dies, its tests vanish).\n"
+            "  WRONG (stack local + cast — compiles, segfaults later):\n"
+            "    let table = FnTable { call: handler::<T>, drop: dropper::<T> };\n"
+            "    let r: &'static FnTable = unsafe { &*(ptr::addr_of!(table) as *const FnTable) };\n"
+            "    Holder::store(r)   // r dangles as soon as this fn returns\n"
+            "  RIGHT (static promotion — `&EXPR` where every field is a\n"
+            "  const-eligible value like a fn path; rvalue is promoted to 'static):\n"
+            "    let r: &'static FnTable = &FnTable { call: handler::<T>, drop: dropper::<T> };\n"
+            "    Holder::store(r)\n"
+            "  (Promotion needs const-eligible fields: name a generic fn\n"
+            "  `dropper::<T>` instead of a closure `|x| ...` — closures block it.)\n"
+            "  WRONG (returning 'static view of a local buffer):\n"
+            "    let s = String::from(name);\n"
+            "    let out: &'static str = unsafe { mem::transmute(s.as_str()) };  // dangles\n"
+            "  RIGHT (leak an owned allocation when the value is runtime-built):\n"
+            "    let out: &'static str = String::from(name).leak();\n"
+            "The compile error the cast silences (E0716/E0515 'temporary value\n"
+            "dropped', 'does not live long enough') is the CORRECT diagnosis —\n"
+            "fix the lifetime, never cast it away."
+        ),
+    },
+    {
         # FR-040: the vtable / shared-machinery class. You fill fn BODIES only —
         # you cannot introduce a new top-level item — so a referenced-but-
         # undefined module-level symbol can never resolve. Build it inline.

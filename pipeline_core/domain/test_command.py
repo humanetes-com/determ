@@ -193,3 +193,24 @@ def derive_check_only_cmd(check_cmd: str) -> str:
         out_toks.append(t)
     s = " ".join(out_toks).strip()
     return s if "check" in s.split() else "cargo check"
+
+
+def ensure_serial_harness(test_cmd: str) -> str:
+    """Force single-threaded libtest execution (`--test-threads=1` after the
+    harness `--`, added if absent). Serial execution makes a crashing binary's
+    output DETERMINISTIC: the same tests print verdicts before the crash every
+    run, so vanished-test sets stop flickering and before/after comparisons of
+    sweep readings become meaningful. No-op when the flag is already present.
+
+    Examples:
+      cargo test -p x                     → cargo test -p x -- --test-threads=1
+      cargo test -p x -- foo              → cargo test -p x -- foo --test-threads=1
+      cargo test -- --test-threads=1      → (unchanged)
+    """
+    toks = parse_cmd(test_cmd)
+    if any(t == "--test-threads=1" or t.startswith("--test-threads=") for t in toks):
+        return test_cmd
+    if "--" not in toks:
+        toks.append("--")
+    toks.append("--test-threads=1")
+    return shlex.join(toks)

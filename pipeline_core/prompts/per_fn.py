@@ -59,6 +59,11 @@ def build_per_fn_prompt(
                          "invoked indirectly via a macro; consult MACROS below)")
     annotated = annotate_file_view(file_text, fn_name)
     notes_block = tag_block("MODEL_NOTES", notes_section)
+    crash_block = tag_block(
+        "CRASH_EVIDENCE", sections.crash_evidence,
+        prefix="A test binary CRASHED and this fn is on the faulting or "
+               "origin stack. This is runtime evidence from the actual "
+               "crash, stronger than any failing-test guess:\n")
     # F10 Use-B (M5): concrete RIGHT usage examples harvested from the real
     # lib's doc-tests/examples — teaches the API SHAPE by example. After notes,
     # before the file context (same slot the archetype prescribes).
@@ -124,7 +129,7 @@ Crate: {module_name} | Cluster: {cluster_name} | File: {file_rel} | Fn: {fn_name
 <RUST_GOTCHAS>
 {gotchas_summary()}
 </RUST_GOTCHAS>
-{repo_spec_block}{blueprint_block}{siblings_block}{trait_block}{types_block}{bound_methods_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{usage_block}
+{crash_block}{repo_spec_block}{blueprint_block}{siblings_block}{trait_block}{types_block}{bound_methods_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{usage_block}
 FILE — stubs are annotated. SKELETON STUB = will be filled later (rely on
 the signature). TARGET = implement now.
 
@@ -201,6 +206,11 @@ def build_per_fn_fix_prompt(
         tests_section = "(no tests directly reference this fn — see MACROS)"
     annotated = annotate_file_view(file_text, fn_name)
     notes_block = tag_block("MODEL_NOTES", notes_section)
+    crash_block = tag_block(
+        "CRASH_EVIDENCE", sections.crash_evidence,
+        prefix="A test binary CRASHED and this fn is on the faulting or "
+               "origin stack. This is runtime evidence from the actual "
+               "crash, stronger than any failing-test guess:\n")
     usage_block = tag_block(
         "USAGE_EXAMPLES", sections.usage_examples,
         prefix="Real, working uses of this crate's public API (harvested from "
@@ -302,7 +312,7 @@ Crate: {module_name} | Cluster: {cluster_name} | File: {file_rel} | Fn: {fn_name
 <RUST_GOTCHAS>
 {gotchas_summary()}
 </RUST_GOTCHAS>
-{repo_spec_block}{blueprint_block}{retro_block}{siblings_block}{gotchas_block}{trait_block}{types_block}{bound_methods_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{usage_block}{prior_block}
+{crash_block}{repo_spec_block}{blueprint_block}{retro_block}{siblings_block}{gotchas_block}{trait_block}{types_block}{bound_methods_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{usage_block}{prior_block}
 FILE (previous attempt reverted; stubs annotated):
 <FILE path="{file_rel}">
 {annotated}

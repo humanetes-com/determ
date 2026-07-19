@@ -164,6 +164,22 @@ class FileModelNotesStore:
             max_chars=self._max_chars if max_chars is None else max_chars,
         )
 
+    def retire_contradicted(self, fr_path: Path, error_text: str) -> int:
+        """Drop notes whose advice the compiler just disproved (E0599/E0425
+        naming a recommended symbol as nonexistent). Mechanical validation by
+        the model's own compile feedback; returns notes removed."""
+        notes = self.load(fr_path)
+        bad = set(mn.contradicted_notes(notes, error_text))
+        if not bad:
+            return 0
+        kept = [n for n in notes if n not in bad]
+        self.save(fr_path, kept)
+        self._hash_cache.pop(fr_path, None)
+        for n in sorted(bad):
+            self._log(f"  [notes] retired compiler-contradicted note: "
+                      f"{n[:100]}…")
+        return len(bad)
+
     # -- recurring-error promotion ----------------------------------------
     def record_error_codes_seen(self, output: str) -> None:
         """Tally each unique E0xxx code in ``output`` and keep a capped excerpt

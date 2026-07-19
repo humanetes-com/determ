@@ -115,6 +115,11 @@ def build_per_impl_prompt(
         "RETROSPECTIVE_GUIDANCE", retrospective_guidance,
         prefix="The previous attempt at this impl block did not reduce the "
                "error count. Apply this strategy differently this time:\n")
+    crash_block = tag_block(
+        "CRASH_EVIDENCE", sections.crash_evidence,
+        prefix="A test binary CRASHED and fns of this block are on the "
+               "faulting or origin stack. This is runtime evidence from the "
+               "actual crash, stronger than any failing-test guess:\n")
     # Crate idioms — patterns extracted from already-filled fns in THIS
     # file. Surfaces e.g. anyhow's `Self::construct_from_*(arg, None)`
     # constructor family, its `ContextError { context, error }` wrapper,
@@ -167,7 +172,7 @@ Stubs to fill in this response: {stub_names}
 <RUST_GOTCHAS>
 {gotchas_summary()}
 </RUST_GOTCHAS>
-{repo_spec_block}{blueprint_block}{retro_block}{refill_block}{siblings_block}{trait_block}{types_block}{bound_methods_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{dispatch_family_section}{related_section}
+{crash_block}{repo_spec_block}{blueprint_block}{retro_block}{refill_block}{siblings_block}{trait_block}{types_block}{bound_methods_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{dispatch_family_section}{related_section}
 <TARGET_IMPL_BLOCK file="{file_rel}">
 ```rust
 {target_render}

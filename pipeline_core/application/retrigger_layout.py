@@ -250,6 +250,28 @@ def retrigger_layout(
                             else ""))
 
         if not res.all_authored:
+            # The cap bounds MODEL attempts. A failure whose reason is splice/
+            # locate infrastructure (the model's output was never evaluated
+            # against the tree) bought no evidence — refund the attempt so a
+            # mechanical bug can never exhaust the budget (observed: the mega
+            # component's cap spent on "could not locate a frozen definition"
+            # before locate-keys were persisted).
+            _mech_markers = ("could not locate a frozen definition",
+                             "skeleton file unreadable",
+                             "authored blocks missing uid")
+            _reasons = [c.reason for c in res.components if not c.authored]
+            if _reasons and all(any(m in r for m in _mech_markers)
+                                for r in _reasons):
+                attempts[key] = max(0, attempts[key] - 1)
+                deps.save_attempts(project_dir, cfg_cluster, attempts)
+                deps.log(f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: "
+                         "re-author died in splice/locate infrastructure — "
+                         "attempt refunded (mechanical failure, no model "
+                         "evidence).")
+                return RetriggerResult(fired=True, succeeded=False,
+                                       cause=cause.name,
+                                       reason="mechanical splice failure "
+                                              "(attempt refunded)")
             deps.log(f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: re-author "
                      f"attempt {attempts[key]} still did not compile.")
             return RetriggerResult(fired=True, succeeded=False, cause=cause.name,

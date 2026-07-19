@@ -44,6 +44,11 @@ class PerFnPassCtx:
     # F10 Use-B (M5): behaviours harvested for this cluster, for the few-shot
     # USAGE_EXAMPLES channel. Empty when no suite was baked (additive).
     behaviour_specs: tuple[BehaviourSpec, ...] = ()
+    # Localized crash evidence keyed by (file, fn_name): rendered faulting/
+    # origin stacks for fns implicated in a binary crash. Drives a
+    # CRASH_EVIDENCE prompt section and overrides the fully-exhausted skip
+    # (a localized crash is evidence prior attempts never saw).
+    crash_evidence: dict[Any, str] | None = None
 
 
 def fill_skip(rec: Stub, attempts: int) -> FillResult:

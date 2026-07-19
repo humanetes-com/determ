@@ -67,9 +67,12 @@ echo "========================================"
 echo ""
 echo "-- System packages --"
 NEEDED_PKGS=()
-for pkg in curl build-essential python3 python3-venv python3-pip; do
+# gdb: the phase-c crash localizer's native fast path (backtraces of crashed
+# test binaries). The ASAN fallback needs only the nightly toolchain below.
+for pkg in curl build-essential python3 python3-venv python3-pip gdb; do
     dpkg -s "$pkg" &>/dev/null || NEEDED_PKGS+=("$pkg")
 done
+command -v gdb >/dev/null || echo "[warn] gdb not on PATH — crash localizer will rely on the ASAN fallback only (non-apt system: install gdb via your package manager)"
 if [[ ${#NEEDED_PKGS[@]} -gt 0 ]]; then
     info "Installing: ${NEEDED_PKGS[*]}"
     if sudo -n true 2>/dev/null; then

@@ -2,7 +2,7 @@
 pipeline.py god-file). Two config-taking functions the fill loops consume via
 thin pipeline.py shims:
 
-  - baseline(...) → pre-fill (pass_count, failing-names) or None
+  - baseline(...) → pre-fill per-binary TestStateReading or None
   - gate(...)     → None (accept) | (newly_red, detail) (revert)
 
 Both self-disable (return None) when the guard env `PHASE_C_TEST_REGRESSION_GUARD`
@@ -16,6 +16,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from pipeline_core.application.reconstruct import cargo_runner
+from pipeline_core.domain.test_results import TestStateReading
 
 RunCargo = Callable[..., "tuple[int, str]"]
 
@@ -31,7 +32,7 @@ def baseline(
     test_cmd: str | None,
     cwd: Path,
     env: dict[str, str] | None,
-) -> tuple[int, frozenset[str]] | None:
+) -> TestStateReading | None:
     if not (test_cmd and unified_on and _guard_on()):
         return None
     return cargo_runner.measure_test_state(
@@ -46,7 +47,7 @@ def gate(
     test_cmd: str | None,
     cwd: Path,
     env: dict[str, str] | None,
-    base: tuple[int, frozenset[str]] | None,
+    base: TestStateReading | None,
 ) -> tuple[frozenset[str], str] | None:
     return cargo_runner.test_regression_gate(
         run_cargo, test_cmd, cwd, env, base,

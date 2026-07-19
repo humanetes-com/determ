@@ -33,6 +33,8 @@ from pipeline_core.domain.models import (
 )
 from pipeline_core.domain.oracle_ledger import SweepOracle, reconcile_sweep
 from pipeline_core.domain.refine import Attempt, LoopState
+from pipeline_core.domain.crash_site import crash_evidence_by_locator
+from pipeline_core.domain.test_command import ensure_serial_harness
 from pipeline_core.domain.test_report import parse_test_output
 from pipeline_core.domain.test_results import (
     parse_failed_tests,
@@ -76,6 +78,14 @@ class PhaseCTddDeps:
     # expected_names) — the cfg-aware static test inventory. None disables
     # oracle reconciliation — sweeps then trust whatever cargo reported.
     active_test_inventory: Callable[..., tuple[int, frozenset[str]]] | None = None
+    # Crash localizer: (sweep_output, test_cmd, workspace_root, env) ->
+    # tuple[CrashSite, ...] — gdb fast path + ASAN fallback. None disables
+    # localization (no CRASH_EVIDENCE prompts, no crash-first frontier).
+    localize_crashes: Callable[..., tuple[Any, ...]] | None = None
+    # One-time retro evidence migration: (project_dir) -> (cleared, retired).
+    # Clears exhaustion verdicts + retires guidance recorded under the old
+    # crash-confounded whole-run gate. None disables.
+    migrate_retro_evidence: Callable[..., tuple[int, int]] | None = None
 
 
 def _log_attribution_gap(
@@ -145,7 +155,13 @@ def run_phase_c_tdd(
         return ClusterFillResult(
             remaining=len(deps.scan_unimplemented_for_cluster(
                 target_src_dir, cluster)))
-    test_cmd = test_cmd_builder(test_stems)
+    # Serial harness: with parallel test threads a crashing binary kills a
+    # RANDOM subset of its tests' verdicts each run (whichever threads printed
+    # first), making sweep readings and gate baselines non-comparable draws.
+    # `--test-threads=1` pins the crash point, so vanished-test sets are
+    # deterministic. Flows into every downstream consumer (sweeps, regression
+    # gate, scoped u2 runs) via tdd_test_cmd.
+    test_cmd = ensure_serial_harness(test_cmd_builder(test_stems))
     test_timeout = int(os.getenv("PHASE_C_TEST_TIMEOUT", "120"))
     # max_iters is legacy — only the 10k backstop in the loop body honors it.
     # The real terminator is floor-stall on pass_count (max_stalls below).
@@ -155,6 +171,14 @@ def run_phase_c_tdd(
     deps.log(f"  {tag} [phase-c/tdd] driver=tdd, "
          f"max_stalls={max_stalls}, timeout={test_timeout}s, "
          f"stems={len(test_stems)}")
+
+    if deps.migrate_retro_evidence is not None:
+        _mig_cleared, _mig_retired = deps.migrate_retro_evidence(project_dir)
+        if _mig_cleared or _mig_retired:
+            deps.log(f"  {tag} [phase-c/tdd] retro evidence migration: "
+                     f"cleared {_mig_cleared} exhaustion record(s), retired "
+                     f"{_mig_retired} guidance text(s) written under the "
+                     "pre-binary-scoped gate (confounded verdicts).")
 
     permanently_exhausted: set[FnLocator] = set()
     # Futility escalation state: per failing test, the frontier
@@ -474,6 +498,35 @@ def run_phase_c_tdd(
         )
         frontier = deps.filter_test_targets(frontier, src_dir)
 
+        # Crash localization: the vanished-test oracle names WHICH tests died;
+        # the localizer names WHERE (gdb fast path, ASAN fallback with origin
+        # frames). Blamed fns enter the frontier directly — stack evidence
+        # outranks reverse-map attribution — their fill prompts receive the
+        # rendered CRASH_EVIDENCE, and crash evidence voids prior exhaustion
+        # verdicts (a localized crash is new information the earlier attempts
+        # never saw).
+        crash_texts: dict[FnLocator, str] = {}
+        if _oracle.missing_count > 0 and deps.localize_crashes is not None:
+            _sites = deps.localize_crashes(
+                output, test_cmd, target_src_dir, cluster_env)
+            crash_texts = crash_evidence_by_locator(tuple(_sites))
+            for _site in _sites:
+                deps.log(f"  {tag} [phase-c/crash] {_site.binary_label}"
+                         f"::{_site.test_name or '?'} {_site.signal} — "
+                         f"blamed {_site.blamed_locator}")
+                deps.emit("phase_c.crash.localized", data={
+                    "cluster": cluster.name, "iter": iter_n,
+                    "binary": _site.binary_label, "signal": _site.signal,
+                    "test": _site.test_name,
+                    "frames": [[f.file_rel, f.line, f.fn_name]
+                               for f in _site.all_frames]})
+            if not _sites:
+                deps.log(f"  {tag} [phase-c/crash] {_oracle.missing_count} "
+                         "test(s) vanished but no crash could be localized "
+                         "(no native fault under gdb, no ASAN report).")
+            for _loc in crash_texts:
+                frontier.setdefault(_loc, set()).update(_oracle.vanished)
+
         # Futility escalation: a failing test whose attributed
         # unit-set is identical to last iteration's has been fully served by
         # rewrites that changed nothing — its accessors are the wrong target.
@@ -512,6 +565,9 @@ def run_phase_c_tdd(
         # D3 — re-entry filter for fns that already exhausted the per-fn
         # fix loop in a prior iter (avoid burning compute on the same fn
         # with no new context).
+        # Crash evidence voids exhaustion: the prior attempts never saw a
+        # localized faulting stack, so "nothing left to try" no longer holds.
+        permanently_exhausted -= set(crash_texts)
         eligible: Frontier = {}
         skipped_perm: int = 0
         for key, tests in frontier.items():
@@ -720,6 +776,7 @@ def run_phase_c_tdd(
             tdd_frontier_tests=eligible,   # Plan 10 U2: {key: {tests}} to validate
             tdd_test_cmd=test_cmd,         # Plan 10 U2: scoped cluster test cmd
             skip_end_pass_test=True,
+            crash_evidence=crash_texts or None,
         )
         total_filled += sub.fns_filled
         total_attempts += sub.attempts

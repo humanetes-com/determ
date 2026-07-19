@@ -19,8 +19,8 @@ from pipeline_core.log import emit, log
 
 __all__ = [
     "canon_container", "is_fn_fully_exhausted", "load_retrospectives",
-    "reset_exhaustion_flags", "retro_key", "retrospectives_path",
-    "save_retrospectives",
+    "migrate_confounded_retros", "reset_exhaustion_flags", "retro_key",
+    "retrospectives_path", "save_retrospectives",
 ]
 
 
@@ -138,3 +138,57 @@ def is_fn_fully_exhausted(
     if rec.get("signal") == "downstream_only":
         return False
     return bool(rec.get("fully_exhausted"))
+
+
+# Gate-verdict sentence openers (regression gate feedback, cargo_runner) — a
+# retro whose ONLY failure evidence starts with one of these and carries zero
+# compile errors was concluded from runtime test-count comparisons. Records
+# written before the gate became binary-scoped drew those comparisons over
+# crash-flickering binaries: the "evidence" was noise and the guidance
+# confabulated around it.
+_GATE_VERDICT_PREFIXES = (
+    "This compiled, but it REGRESSED",
+    "This dropped the number of tests that EXECUTE",
+    "This dropped the cluster pass count",
+    "This made test binar",
+)
+
+_CONFOUND_MIGRATION = "binary_scoped_gate_2026_07"
+
+
+def migrate_confounded_retros(project_dir: Path) -> tuple[int, int]:
+    """One-time evidence-hygiene migration, armed when the regression gate
+    became binary-scoped: every existing `fully_exhausted` flag (and its
+    reset-attempt budget) was computed under the old whole-run gate whose
+    verdicts were crash-confounded — clear them all for one fresh attempt
+    under trustworthy verdicts. Guidance is RETIRED (dropped) only for
+    records whose last failure evidence was purely a gate verdict with no
+    compile error: those lessons explained noise. Compile-error-derived
+    guidance stays. Returns (flags_cleared, guidance_retired)."""
+    retros = load_retrospectives(project_dir)
+    done = retros.get("__migrations__")
+    if isinstance(done, list) and _CONFOUND_MIGRATION in done:
+        return (0, 0)
+    cleared = retired = 0
+    for key, rec in retros.items():
+        if key == "__migrations__" or not isinstance(rec, dict):
+            continue
+        if rec.get("fully_exhausted") or rec.get("reset_attempts"):
+            rec["fully_exhausted"] = False
+            rec["reset_attempts"] = 0
+            cleared += 1
+        preview = str(rec.get("last_error_preview") or "")
+        if (rec.get("guidance")
+                and int(rec.get("error_count") or 0) == 0
+                and preview.startswith(_GATE_VERDICT_PREFIXES)):
+            rec["guidance"] = ""
+            rec["retired_reason"] = "confounded gate verdict (pre-binary-scoping)"
+            retired += 1
+    migrations = retros.setdefault("__migrations__", [])
+    if isinstance(migrations, list):
+        migrations.append(_CONFOUND_MIGRATION)
+    save_retrospectives(project_dir, retros)
+    emit("phase_c.retros.migrated", data={
+        "migration": _CONFOUND_MIGRATION,
+        "flags_cleared": cleared, "guidance_retired": retired})
+    return (cleared, retired)

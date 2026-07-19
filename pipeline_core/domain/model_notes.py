@@ -439,3 +439,48 @@ def is_stale_regression_note(note: str, file_text: str) -> bool:
                 return False
             return probe[:60] not in file_text
     return False
+
+
+def rejected_symbols_in_errors(error_text: str) -> frozenset[str]:
+    """Symbols the compiler REJECTED as nonexistent, from E0599/E0425/E0433
+    diagnostics: the backtick-quoted name after ``named``/``find``. These are
+    ground truth that the symbol is not available — any note recommending it
+    is teaching a compile error."""
+    out: set[str] = set()
+    for raw in error_text.splitlines():
+        line = raw.strip()
+        if "error[E0599]" in line or "error[E0425]" in line or "error[E0433]" in line:
+            for marker in (" named `", " find value `", " find function `",
+                           " find type `", " find `"):
+                if marker in line:
+                    sym = line.split(marker, 1)[1].split("`", 1)[0]
+                    if len(sym) >= 4:  # short names (new/get) false-hit notes
+                        out.add(sym)
+                    break
+    return frozenset(out)
+
+
+def contradicted_notes(notes: list[str], error_text: str) -> list[str]:
+    """Notes whose advice recommends a symbol the compiler just rejected as
+    nonexistent — the model's own compile feedback disproves them (e.g. a
+    note prescribing ``MaybeUninit::uninit_array()`` after E0599 reported
+    that fn doesn't exist). Retiring them is mechanical validation by
+    compiler evidence, not human curation."""
+    rejected = rejected_symbols_in_errors(error_text)
+    if not rejected:
+        return []
+    out: list[str] = []
+    for note in notes:
+        low = note.lower()
+        # Only notes that RECOMMEND the symbol ("use X", "not Y" where X is
+        # the rejected one) — a note that already warns AGAINST it is fine.
+        for sym in rejected:
+            s = sym.lower()
+            if s in low and (f"use {s}" in low or f"use `{s}" in low
+                             or f"always use {s}" in low or f"{s}()" in low
+                             or f"{s}(),' " in low or f"::{s}()" in low):
+                if f"not {s}" in low and f"use {s}" not in low:
+                    continue  # warns against it — keep
+                out.append(note)
+                break
+    return out

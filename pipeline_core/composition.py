@@ -91,7 +91,11 @@ from pipeline_core.adapters.discovery import (
     match_gen_tests_sibling as _disc_match_gen_tests_sibling,
 )
 from pipeline_core.adapters.downstream_api import scan_downstream_api as _scan_downstream_api
+from pipeline_core.adapters.asan_sweep import run_asan_sweep as _asan_run_sweep
 from pipeline_core.adapters.failure_journal import FileFailureJournal
+from pipeline_core.adapters.gdb_backtrace import (
+    localize_crashed_binary as _gdb_localize_crashed_binary,
+)
 from pipeline_core.adapters.file_constraints import FileConstraintsReader
 from pipeline_core.adapters.fill_engine_roles import (
     CargoFillAdapter,
@@ -135,6 +139,10 @@ from pipeline_core.adapters.model_notes_store import (
     write_fr_preserving_notes as _write_fr_preserving_notes,
 )
 from pipeline_core.adapters.mutation import MutationTester
+from pipeline_core.application.reconstruct.crash_localizer import (
+    CrashLocalizerDeps,
+    localize_crashes as _app_localize_crashes,
+)
 from pipeline_core.adapters.phase_c_log import (
     write_phase_c_test_fix_log as _write_phase_c_test_fix_log,
 )
@@ -175,6 +183,7 @@ from pipeline_core.adapters.retros import (
     load_retrospectives as _retros_load,
 )
 from pipeline_core.adapters.retros import (
+    migrate_confounded_retros as _migrate_confounded_retros,
     reset_exhaustion_flags as _reset_exhaustion_flags,
 )
 from pipeline_core.adapters.retros import (
@@ -1998,6 +2007,16 @@ def build_app(
         scan_unimplemented_functions=scan_unimplemented_functions,
     )
 
+    _crash_localizer_deps = CrashLocalizerDeps(
+        gdb_localize=_gdb_localize_crashed_binary,
+        asan_sweep=_asan_run_sweep,
+        log=ports.log)
+
+    def _localize_crashes(sweep_output: str, test_cmd: str,
+                          workspace_root: Path, env: dict[str, str]) -> tuple:
+        return _app_localize_crashes(
+            _crash_localizer_deps, sweep_output, test_cmd, workspace_root, env)
+
     return App(
         adapters=adapters,
         settings=settings,
@@ -2045,6 +2064,8 @@ def build_app(
             checkpoint_fill_tree=_checkpoint_fill_tree,
             retrigger_layout=retrigger_layout,
             active_test_inventory=active_test_inventory_for_cluster,
+            localize_crashes=_localize_crashes,
+            migrate_retro_evidence=_migrate_confounded_retros,
         ),
         impl_fill_deps=ImplFillDeps(
             build_dispatch_family_section=build_dispatch_family_section,
@@ -2066,6 +2087,7 @@ def build_app(
             extract_crate_idioms=_extract_crate_idioms,
             extract_impl_where_clause=_impl_where_clause,
             filter_model_notes_for_prompt=model_notes_store.filter_for_prompt,
+            retire_contradicted_notes=model_notes_store.retire_contradicted,
             find_tests_referencing_fn=_find_tests_referencing_fn,
             focus_cargo_errors=focus_cargo_errors,
             frontier_from_diags=_via("frontier_from_diags"),

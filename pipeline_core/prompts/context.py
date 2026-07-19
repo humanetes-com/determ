@@ -36,6 +36,9 @@ class PerFnSections:
     # Harvested behaviours that demonstrate this fn's public usage (F10 Use-B /
     # M5) — concrete RIGHT examples. "" when none matched / no suite baked.
     usage_examples: str = ""
+    # Localized crash backtrace implicating this fn (faulting + origin
+    # frames). "" when no binary crash points here.
+    crash_evidence: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,3 +68,6 @@ class PerImplSections:
     # The crate blueprint slice (P3) — the model's OWN design sections
     # relevant to this block. "" when no blueprint exists.
     blueprint: str = ""
+    # Localized crash backtrace implicating this block's fns (faulting +
+    # origin frames). "" when no binary crash points here.
+    crash_evidence: str = ""

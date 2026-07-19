@@ -104,6 +104,9 @@ class ImplFillDeps:
     per_fn_fix_hard_cap: Any
     per_impl_max_stubs: Any
     task2_model: Any
+    # Mechanical note validation: (fr_path, error_text) -> retired count.
+    # None disables (tests / minimal wiring).
+    retire_contradicted_notes: Callable[..., Any] | None = None
 
 
 def _norm_src_rel(rel: str) -> str:
@@ -130,6 +133,7 @@ def fill_impl_blocks(
     tdd_frontier_tests: Frontier | None = None,  # Plan 10 U2
     tdd_test_cmd: str | None = None,                                       # Plan 10 U2
     parallelism: int = 1,
+    crash_evidence: dict[FnLocator, str] | None = None,
 ) -> ClusterFillResult:
     """Per-impl-block Phase C fill — alternative to `_task2_fill_fns_one_by_one`.
 
@@ -601,9 +605,22 @@ def fill_impl_blocks(
         file_path = target_src_dir / block.file
         if not file_path.exists():
             return
+        # Crash evidence keyed to this block's members (faulting/origin
+        # stacks from a localized binary crash) — rendered into the prompt
+        # and an override for the exhaustion skip: a localized crash is
+        # evidence no prior attempt ever saw.
+        _crash_txts = tuple(dict.fromkeys(
+            txt for loc, txt in (crash_evidence or {}).items()
+            if loc.file == block.file
+            and loc.fn_name in {m.fn_name for m in block.stub_members}
+            | {m.fn_name for m in block.refill_members}))
+        _block_crash_evidence = "\n\n".join(_crash_txts)
         # Honor cross-iter exhaustion — if a prior retrospective marked
-        # this block GENUINELY_HARD it's skipped.
-        if _is_fn_fully_exhausted(retros_cache, block.file, "*impl*", block.container):
+        # this block GENUINELY_HARD it's skipped. A crash-implicated block is
+        # NEVER skipped: the crash frames are new information.
+        if (_is_fn_fully_exhausted(retros_cache, block.file, "*impl*",
+                                   block.container)
+                and not _block_crash_evidence):
             _log(f"  [phase-c/impl] {block_id}: skipped (prior retro "
                  "marked exhausted).")
             return
@@ -793,6 +810,7 @@ def fill_impl_blocks(
                     crate_idioms=crate_idioms_section, macros=macros_section,
                     dispatch_family=dispatch_family_section, siblings=siblings_section,
                     blueprint=_blueprint_slice,
+                    crash_evidence=_block_crash_evidence,
                     bound_methods=_bound_methods_section_for(
                         _block_where, _crate_type_records)),
                 fr_path=fr_path,
@@ -1058,6 +1076,8 @@ def fill_impl_blocks(
                     focus_diagnostics(diagnostics, block.file)
                     or _focus_cargo_errors(cargo_out, block.file))
                 _record_error_codes_seen(cargo_out)
+                if deps.retire_contradicted_notes is not None and fr_path:
+                    deps.retire_contradicted_notes(fr_path, cargo_out)
                 # The fill regressed (a new error, or an error on the filled
                 # fns) — B3 (FR-029) already accepted non-regressing fills
                 # above. Revert; the driver decides whether to retry.

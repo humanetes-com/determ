@@ -109,6 +109,8 @@ _U2_PREAMBLE = ("This compiled, but these tests still FAIL:",
 _GATE_ONLY_MESSAGES = (
     "This compiled, but it REGRESSED previously-passing test(s):",
     "This dropped the cluster pass count",
+    "This dropped the number of tests that EXECUTE",
+    "This made test binar",
 )
 
 
