@@ -88,6 +88,41 @@ def test_canonical_related_routes_in_listed_order() -> None:
     assert [rb.container for rb in r.routed] == [rel[0]]
 
 
+def test_lifetime_rendering_does_not_lose_a_body() -> None:
+    # Live loss (run 1170946): the file declares
+    # `impl Write for Quoted<&mut fmt::Formatter<'_>>`; the model answered with
+    # `Formatter<'_'>` — `'_` reads as an unterminated quote, so it closed it.
+    # One `write_str` body dropped as "does not match any impl in this file".
+    declared = "impl Write for Quoted<&mut fmt::Formatter<'_>>"
+    assert canon_container("impl Write for Quoted<&mut fmt::Formatter<'_'>>") \
+        == canon_container(declared)
+    # A named lifetime is the same container as an elided one.
+    assert canon_container("impl<'a> Write for Quoted<&'a mut Formatter<'a>>") \
+        == canon_container("impl Write for Quoted<&mut Formatter<'_>>")
+    # `Box<dyn Trait>` defaults to `+ 'static`, so both spellings are one type.
+    assert canon_container(
+        "impl From<Error> for Box<dyn StdError + Send + Sync + 'static>") \
+        == canon_container("impl From<Error> for Box<dyn StdError + Send + Sync>")
+
+
+def test_distinct_containers_still_differ_after_lifetime_elision() -> None:
+    # Elision must not collapse containers that differ in anything but a
+    # lifetime — otherwise a body routes into the wrong sibling impl.
+    assert canon_container("impl Foo for Bar<'a>") != canon_container(
+        "impl Foo for Baz<'a>")
+    assert canon_container("impl From<Error> for Box<dyn StdError>") != \
+        canon_container("impl From<Error> for Box<dyn StdError + Send>")
+    # The real shape elision runs closest to: three sibling impls in one file
+    # that differ ONLY in their auto-trait bounds, each carrying `+ 'static`.
+    # Collapsing any pair would route a `from` body into the wrong sibling.
+    siblings = [
+        "impl From<Error> for Box<dyn StdError + Send + Sync + 'static>",
+        "impl From<Error> for Box<dyn StdError + Send + 'static>",
+        "impl From<Error> for Box<dyn StdError + 'static>",
+    ]
+    assert len({canon_container(h) for h in siblings}) == 3
+
+
 def test_canon_container_reexport_stays() -> None:
     from pipeline_core.adapters.retros import canon_container as via_adapter
     assert via_adapter is canon_container

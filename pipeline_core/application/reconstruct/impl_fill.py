@@ -614,9 +614,16 @@ def fill_impl_blocks(
                         rc, cargo_out, _diags = _rep
                 _u2_file: U2Verdict | None = None
                 if rc == 0:
+                    # Stubs AND re-fills. A behavioral re-fill block has no stub
+                    # left, so keying this gate on stubs alone hands an all-refill
+                    # file an EMPTY test set — and an empty set is an
+                    # unconditional ACCEPT, meaning the failing tests the re-fill
+                    # exists to fix are never run and the bodies are kept on
+                    # compile alone.
                     _unit_fns = frozenset(
                         FnLocator(file_rel, m.fn_name)
-                        for b in fblocks for m in b.stub_members)
+                        for b in fblocks
+                        for m in (*b.stub_members, *b.refill_members))
                     _file_tests: set[str] = set()
                     for _key in _unit_fns:
                         _file_tests |= (tdd_frontier_tests or {}).get(_key, set())
@@ -624,7 +631,8 @@ def fill_impl_blocks(
                     # sibling (another impl's fn) is not charged to this file.
                     _unit_sites = frozenset(
                         FnSite(file_rel, m.fn_name, b.container)
-                        for b in fblocks for m in b.stub_members)
+                        for b in fblocks
+                        for m in (*b.stub_members, *b.refill_members))
                     _u2_file = _u2_test_gate(_file_tests, _unit_sites, tdd_test_cmd,
                                              target_src_dir, cluster_env)
                 # ACCEPT_EXTERNAL_ONLY (all failures blocked by another file's

@@ -704,6 +704,78 @@ def test_file_first_work_bound_counts_refills_and_says_so_when_it_skips(
     assert "PHASE_C_FILE_MAX_FNS=1" in out
 
 
+IMPL_LIB_TWO_WRONG = """\
+pub struct Foo { tag: u32 }
+pub struct Bar { tag: u32 }
+
+impl Foo {
+    pub fn kind(&self) -> u32 {
+        self.tag + 999
+    }
+}
+impl Bar {
+    pub fn name(&self) -> u32 {
+        self.tag + 777
+    }
+}
+"""
+
+
+def _two_refill_blocks() -> list[ImplBlock]:
+    # Two blocks, ZERO stubs — both bodies compile but are behaviorally wrong.
+    a = FnRecord(file="lib.rs", fn_name="kind", container="impl Foo",
+                 sig_text="fn kind (& self) -> u32", body_text="self.tag + 999",
+                 has_unimplemented_body=False)
+    b = FnRecord(file="lib.rs", fn_name="name", container="impl Bar",
+                 sig_text="fn name (& self) -> u32", body_text="self.tag + 777",
+                 has_unimplemented_body=False)
+    return [ImplBlock(file="lib.rs", container="impl Foo",
+                      members=(a,), stub_members=()),
+            ImplBlock(file="lib.rs", container="impl Bar",
+                      members=(b,), stub_members=())]
+
+
+def test_file_first_u2_gate_runs_the_refill_members_tests(monkeypatch, tmp_path,
+                                                          capsys):
+    # Live regression (run 1170946): the file route built its U2 test set from
+    # `stub_members` alone. A behavioral re-fill has no stub left, so an
+    # all-refill file produced an EMPTY test set — and an empty set is an
+    # unconditional ACCEPT in `u2_test_gate`. The route then reported
+    # "FILE FILLED" for bodies whose failing tests were never run (34 fns across
+    # 5 files in one pass, with the cluster pass-count flat at 14).
+    from pipeline_core.domain.models import FnLocator
+    ws = _setup(monkeypatch, tmp_path)
+    (ws / "src" / "lib.rs").write_text(IMPL_LIB_TWO_WRONG)
+    install_cluster_scan(monkeypatch,
+                         impl_blocks=lambda *a, **k: _two_refill_blocks())
+    install_cluster_scan(monkeypatch, stub_records=lambda *a, **k: [])
+    _install_model(monkeypatch, [RESPONSE_TWO])
+    # Compiles clean; the scoped test run still reports the re-fill's own test
+    # failing — so the replacement bodies are no better than what they replaced.
+    install_scripted_cargo(
+        monkeypatch,
+        check_diag=(0, "", []),
+        run=(101, "test kind_is_wrong ... FAILED\n"
+                  "test result: FAILED. 0 passed; 1 failed; 0 ignored"))
+    res = pipeline._phase_c_fill_impl_blocks(
+        project_dir=ws, target_src_dir=ws / "src", tests_dir_files=[],
+        module_name="m", cluster_name="t", cluster=None, check_cmd="cargo check",
+        cluster_env={}, fr_path=None, tdd_test_cmd="cargo test",
+        tdd_frontier_keys={FnLocator("lib.rs", "kind"),
+                           FnLocator("lib.rs", "name")},
+        tdd_frontier_tests={FnLocator("lib.rs", "kind"): {"kind_is_wrong"},
+                            FnLocator("lib.rs", "name"): {"name_is_wrong"}})
+    out = capsys.readouterr().out
+    assert "file-first fill (2 block(s), 0 stub(s), 2 re-fill(s)" in out
+    # The defect boundary: with an empty test set the gate was an unconditional
+    # ACCEPT and this file reported FILE FILLED. It must now reach the gate,
+    # fail it, and hand the file to the per-block loop (whose own gate already
+    # counted refills — that fallback is not what this pins).
+    assert "[phase-c/file] lib.rs: FILE FILLED" not in out
+    assert "[phase-c/file] lib.rs: reverted (U2 test failure)" in out
+    del res
+
+
 def test_file_first_default_bound_admits_a_stub_plus_refill_workload(
         monkeypatch, tmp_path):
     # The default must still admit the shape that motivated counting refills:

@@ -755,6 +755,45 @@ def canon_fn_name(name: str) -> str:
     return tail
 
 
+def _strip_lifetimes(s: str) -> str:
+    """Drop every lifetime token. Runs on the STILL-SPACED header: whitespace is
+    the token boundary that ends a lifetime name, so stripping after a
+    whitespace join would read ``&'a mut T`` as ``&'amut T`` and eat ``amut``.
+
+    Two impls in one crate whose headers differ ONLY in lifetime names would be
+    overlapping impls — coherence rejects that — so a lifetime carries no
+    routing identity and eliding it cannot conflate two real containers. What it
+    DOES recover is the model's rendering of one: ``Formatter<'_'>`` (a lifetime
+    closed like a char literal, an easy slip since ``'_`` reads as an
+    unterminated quote) and ``Foo<'a>`` vs ``Foo<'_>`` both reduce to the header
+    the file declares instead of being dropped as an unknown block. A trailing
+    ``'`` is consumed with the token precisely so the mangled form lands on the
+    same string as the well-formed one."""
+    out: list[str] = []
+    i = 0
+    while i < len(s):
+        if s[i] != "'":
+            out.append(s[i])
+            i += 1
+            continue
+        i += 1
+        while i < len(s) and (s[i].isalnum() or s[i] == "_"):
+            i += 1
+        if i < len(s) and s[i] == "'":
+            i += 1
+    return "".join(out)
+
+
+def _drop_orphan_plus(s: str) -> str:
+    """Clean up the ``+`` left behind by an elided trait-object bound, so
+    ``Box<dyn E+Send+'static>`` and ``Box<dyn E+Send>`` agree — as they do in
+    the type system, where the bound is the default. Whitespace-free input."""
+    while "++" in s:
+        s = s.replace("++", "+")
+    s = s.replace("+>", ">")
+    return s[:-1] if s.endswith("+") else s
+
+
 def canon_container(container: str) -> str:
     """Canonical container identity. The extractor's fn records, the impl-block
     manifest, and model-returned ``block`` attributes render the same impl
@@ -762,8 +801,8 @@ def canon_container(container: str) -> str:
     vs pretty-printed ``impl<T, E> Context<T, E> for Result<T, E>\\nwhere\\n
     E: ...`` vs the model's single-line ``impl<T, E> Context<T, E> for
     Result<T, E>``). Reduce all to ``<Trait>for<SelfTy>``: drop a leading
-    impl-generics list, drop the where-clause, drop all whitespace. Keys the
-    retrospectives store and the per-impl body routing (debt #43)."""
+    impl-generics list, drop the where-clause, drop all whitespace, elide
+    lifetimes. Keys the retrospectives store and the per-impl body routing."""
     s = " ".join(container.split())
     if s.startswith("impl"):
         s = s[4:].lstrip()
@@ -780,4 +819,4 @@ def canon_container(container: str) -> str:
     if s.endswith(" where"):
         s = s[: -len(" where")]
     s = s.split(" where ")[0]
-    return "".join(s.split())
+    return _drop_orphan_plus("".join(_strip_lifetimes(s).split()))
