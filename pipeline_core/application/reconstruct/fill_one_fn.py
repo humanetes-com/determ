@@ -475,7 +475,7 @@ class FillOneFn:
                 _ctx = f" [{container}]" if container else ""
                 self.tel.log(f"  [phase-c/per-fn] {idx}/{ctx.total} filled "
                              f"{rel_file}::{fn_name}{_ctx} "
-                             f"(+{delta} bytes, body={len(body)}"
+                             f"({delta:+d} bytes, body={len(body)}"
                              + (f", fix-attempts={fix_attempt}" if fix_attempt > 1 else "")
                              + ")")
                 self.tel.emit("phase_c.fn.fill.done", duration_ms=int(

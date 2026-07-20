@@ -14,6 +14,7 @@ import re
 from typing import Any
 
 from .. import log as _log
+from .rust_idents import canon_fn_name
 from .text import extract_code_content
 
 # The `<FILE path="…">…</FILE>` model-protocol parser is a tolerant,
@@ -492,7 +493,9 @@ def extract_fn_bodies(text: str) -> list[dict[str, Any]]:
         {"fn_name": str, "block": str, "where_clause": str | None,
          "body": str}
     The order in the response is preserved. Bodies are stripped of
-    surrounding fences if present.
+    surrounding fences if present. ``fn_name`` is reduced to its bare
+    identifier (:func:`canon_fn_name`) so a path-qualified answer still
+    resolves at splice time instead of being lost as `fn_not_found`.
     """
     out: list[dict[str, Any]] = []
     for fn_name, block_header, body in _find_fn_blocks(text or ""):
@@ -510,7 +513,7 @@ def extract_fn_bodies(text: str) -> list[dict[str, Any]]:
         # Detect an optional leading `where ...` clause used to tighten bounds.
         where_clause, body_stripped = _split_leading_where(body_stripped)
         out.append({
-            "fn_name": fn_name.strip(),
+            "fn_name": canon_fn_name(fn_name),
             "block": block_header.strip(),
             "where_clause": where_clause,
             "body": body_stripped,

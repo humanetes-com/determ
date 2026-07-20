@@ -522,6 +522,22 @@ def test_extract_fn_bodies_happy_and_where() -> None:
     assert e["where_clause"] is None and e["body"] == "where \nself.u()"
 
 
+def test_extract_fn_bodies_reduces_a_path_qualified_name() -> None:
+    # Live loss (run 990528): the file-fill plan listed stubs as
+    # `<impl header>: fn, fn` and the model mirrored that shape into the name
+    # attribute. 37 bodies routed to the right block, then failed to splice as
+    # `fn_not_found` looking up a fn literally called "Error: root_cause".
+    for name in ('Error: root_cause', 'Error::root_cause',
+                 'impl ErrorImpl: root_cause', '<Error as Trait>::root_cause'):
+        (rec,) = llm_output.extract_fn_bodies(
+            f'<FN name="{name}" block="impl Error">self.x()</FN>')
+        assert rec["fn_name"] == "root_cause", name
+    # the container stays in `block`, untouched.
+    (rec,) = llm_output.extract_fn_bodies(
+        '<FN name="Error: msg" block="impl Error">self.m()</FN>')
+    assert rec["block"] == "impl Error"
+
+
 def test_extract_fn_bodies_fence_wrapped_and_empty() -> None:
     (rec,) = llm_output.extract_fn_bodies(
         '<FN name="f" block="b">```rust\nself.x()\n```</FN>')

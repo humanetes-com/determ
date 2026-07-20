@@ -104,10 +104,13 @@ def test_file_fill_prompt_carries_crash_evidence() -> None:
     # The whole-file prompt renders a crashing body as part of the file and
     # asks for mutually consistent siblings — without the evidence the model
     # reads the unsound scheme as the house idiom and copies it.
-    from pipeline_core.prompts.fix_prompts import build_file_fill_prompt
+    from pipeline_core.prompts.fix_prompts import (
+        BlockFillPlan,
+        build_file_fill_prompt,
+    )
 
     kw = {"file_rel": "src/error.rs", "file_text": "fn a() {}",
-          "stub_map": [("impl Error", ["construct_from_adhoc"])],
+          "fill_plan": [BlockFillPlan("impl Error", ("construct_from_adhoc",))],
           "tests_block": "", "blueprint": "", "notes": ""}
     without = build_file_fill_prompt(**kw)
     assert "CRASH_EVIDENCE" not in without

@@ -8,7 +8,9 @@ strings are the originals' rendered form.
 from __future__ import annotations
 
 from pipeline_core.prompts.fix_prompts import (
+    BlockFillPlan,
     build_behavior_fix_prompt,
+    build_file_fill_prompt,
     build_fn_fix_prompt,
     build_impl_fix_prompt,
     build_tdd_stub_fill_prompt,
@@ -117,3 +119,42 @@ def test_build_maximal_impl_prompt_omits_empty_sections() -> None:
         file_rel="a.rs", container="impl A", stub_names=["f"],
         file_text="x", tests_block="", errs="e", notes=" ")
     assert "Tests that exercise" not in p and "Notes from earlier" not in p
+
+
+def _file_fill(plan: list[BlockFillPlan]) -> str:
+    return build_file_fill_prompt(
+        file_rel="src/error.rs", file_text="fn a() {}", fill_plan=plan,
+        tests_block="", blueprint="", notes="")
+
+
+def test_file_fill_plan_names_the_refill_members() -> None:
+    # Live loss (run 990528): the plan rendered `stub_members` only, so a block
+    # in the fill set purely to CORRECT a wrong-but-compiling body arrived as a
+    # bare header with no fn names — 5 of 6 plan lines were empty.
+    out = _file_fill([BlockFillPlan("impl ErrorImpl", (), ("provide",))])
+    assert "in `impl ErrorImpl` -> rewrite" in out
+    assert "provide" in out
+    # a block needing both gets both instructions, and they stay distinguished.
+    both = _file_fill([BlockFillPlan("impl Error", ("msg",), ("chain",))])
+    line = next(ln for ln in both.splitlines() if ln.startswith("  in `impl Error`"))
+    assert line.index("write: msg") < line.index("rewrite")
+    assert "chain" in line.split("rewrite")[1]
+
+
+def test_file_fill_plan_never_renders_a_header_with_no_functions() -> None:
+    # The prompt asks for work per block; a line naming a block but no fn is an
+    # instruction to fill nothing, and the model answers for whatever it likes.
+    for plan in ([BlockFillPlan("impl Error", ("msg",))],
+                 [BlockFillPlan("impl Error", (), ("chain",))],
+                 [BlockFillPlan("", ("free_one",))]):
+        for line in _file_fill(plan).splitlines():
+            if line.startswith("  in `") or line.startswith("  free fns"):
+                assert line.rstrip().endswith(("msg", "chain", "free_one")), line
+
+
+def test_file_fill_plan_line_avoids_the_name_colon_shape() -> None:
+    # `<header>: fn` invited name="Error: root_cause", which splices nowhere.
+    out = _file_fill([BlockFillPlan("impl Error", ("root_cause",))])
+    assert "impl Error: root_cause" not in out
+    assert "in `impl Error` -> write: root_cause" in out
+    assert 'RIGHT: <FN name="root_cause" block="impl Error">' in out

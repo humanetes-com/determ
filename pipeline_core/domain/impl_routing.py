@@ -121,6 +121,27 @@ def norm_src_rel(rel: str) -> str:
     return p[4:] if p.startswith("src/") else p
 
 
+def containers_in_file(
+    blocks: Sequence[ImplBlock], file_rel: str,
+) -> tuple[str, ...]:
+    """Every distinct impl container declared in `file_rel`, in block order.
+
+    The file-first route shows the model the WHOLE file, so it can answer for
+    an impl that needs no filling — a sibling it (correctly) re-designed along
+    with its target. Routing has to recognise those headers or the body is
+    dropped as "matches no impl in this file" while the impl is sitting right
+    there in the text. Callers must therefore pass the FULL block list, not a
+    frontier-narrowed one: narrowing keeps only what still needs filling, which
+    is exactly the set that already routes.
+    """
+    want = norm_src_rel(file_rel)
+    seen: dict[str, None] = {}
+    for b in blocks:
+        if b.container and norm_src_rel(b.file) == want:
+            seen.setdefault(b.container, None)
+    return tuple(seen)
+
+
 def refill_authorized_names(
     blocks: Sequence[ImplBlock], file_rel: str,
 ) -> frozenset[str]:

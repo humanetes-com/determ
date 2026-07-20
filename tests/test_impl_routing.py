@@ -6,6 +6,7 @@ returned body."""
 from __future__ import annotations
 
 from pipeline_core.domain.impl_routing import (
+    containers_in_file,
     impl_block_id,
     norm_src_rel,
     refill_authorized_names,
@@ -155,3 +156,50 @@ def test_refill_authorization_matches_across_src_prefix_forms() -> None:
     assert norm_src_rel("src/error.rs") == norm_src_rel("error.rs") == "error.rs"
     # a same-named file in another directory must NOT collide.
     assert norm_src_rel("src/a/mod.rs") != norm_src_rel("src/b/mod.rs")
+
+
+def test_containers_in_file_sees_impls_that_need_no_filling() -> None:
+    # Live loss (run 990528): `impl Deref for Error` et al. are present in
+    # src/error.rs but carry no stub, so they are absent from the fill set. The
+    # file-first prompt renders the whole file, the model answered for them, and
+    # routing dropped every body as "matches no impl in this file".
+    fill_set = [_block("src/error.rs", "impl Error", refill=("root_cause",))]
+    whole_file = [
+        *fill_set,
+        _block("src/error.rs", "impl Deref for Error"),
+        _block("src/error.rs", "impl<E> ErrorImpl<E>"),
+        _block("src/ptr.rs", "impl<T> Own<T>"),
+    ]
+    assert containers_in_file(fill_set, "src/error.rs") == ("impl Error",)
+    assert containers_in_file(whole_file, "src/error.rs") == (
+        "impl Error", "impl Deref for Error", "impl<E> ErrorImpl<E>")
+    # the widening only ever routes; it must not reach another file.
+    assert containers_in_file(whole_file, "src/ptr.rs") == ("impl<T> Own<T>",)
+
+
+def test_containers_in_file_normalizes_the_src_prefix_and_dedupes() -> None:
+    blocks = [
+        _block("error.rs", "impl Error"),
+        _block("src/error.rs", "impl Error"),
+        _block("error.rs", ""),
+    ]
+    # same impl reached under both prefix forms collapses to one entry, and a
+    # free-fn block (empty container) is not a routable header.
+    assert containers_in_file(blocks, "src/error.rs") == ("impl Error",)
+
+
+def test_widened_containers_route_a_body_for_an_unfilled_sibling() -> None:
+    # End-to-end of the two halves: the widened vocabulary is what makes an
+    # already-complete sibling's body routable instead of dropped.
+    whole_file = [
+        _block("src/error.rs", "impl Error", refill=("root_cause",)),
+        _block("src/error.rs", "impl Deref for Error"),
+    ]
+    containers = ["impl Error"]
+    extra = [c for c in containers_in_file(whole_file, "src/error.rs")
+             if c not in containers]
+    r = route_fn_bodies(
+        [{"fn_name": "deref", "block": "impl Deref for Error", "body": "self.inner"}],
+        target=containers[0], related=containers[1:] + extra)
+    assert r.dropped == ()
+    assert r.routed[0].container == "impl Deref for Error"

@@ -79,3 +79,20 @@ def test_item_listing_disambiguates_by_the_public_type_it_anchors_to():
         item_anchors={"Inner.1": "Alpha", "Inner.2": "Beta"})
     assert "- Inner.1 (struct) in src/a.rs — reached from the public `Alpha`" in p
     assert "- Inner.2 (struct) in src/b.rs — reached from the public `Beta`" in p
+
+
+def test_protocol_forbids_wrapping_a_fn_in_an_impl_header():
+    """A kind="fn" block splices in place INSIDE its existing impl, so a reply
+    wrapping the fn in `impl Foo { … }` produces a nested impl — rustc's
+    `implementation is not supported in `trait`s or `impl`s`. That error burned
+    all 3 attempts on anyhow's 34-item component on nightly (and 2 of 3 on
+    stable), so the protocol must show the mistake, not just describe the rule.
+    """
+    p = _prompt()
+    assert "implementation is not supported in" in p
+    assert "impl Inner { fn drop_inner(&mut self) { unimplemented!() } }" in p
+    # ...and both diverse WRONG cases carry their RIGHT counterpart.
+    assert "fn drop_inner(&mut self) { unimplemented!() }" in p
+    assert "unsafe fn width(p: NonNull<Cell>) -> usize { unimplemented!() }" in p
+    # Types are NOT bare — the carve-out must survive.
+    assert 'kind="struct"' in p

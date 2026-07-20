@@ -683,3 +683,39 @@ def test_file_first_skipped_for_single_block(monkeypatch, tmp_path):
     install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
     res = _run(ws)
     assert res.impls_filled == 1          # per-block path, as before
+
+
+def test_file_first_work_bound_counts_refills_and_says_so_when_it_skips(
+        monkeypatch, tmp_path, capsys):
+    # Live regression (run 1154362): the bound started counting re-fills but
+    # kept its stubs-era value, so a file needing 8 stubs + 6 rewrites dropped
+    # out of the joint-design route — and the old `return` was silent, which
+    # in the log is indistinguishable from a file with no work at all.
+    ws = _setup(monkeypatch, tmp_path)
+    (ws / "src" / "lib.rs").write_text(IMPL_LIB_TWO)
+    install_cluster_scan(monkeypatch, impl_blocks=lambda *a, **k: _two_blocks())
+    install_cluster_scan(monkeypatch, stub_records=lambda *a, **k: [])
+    _install_model(monkeypatch, [RESPONSE_TWO])
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
+    monkeypatch.setenv("PHASE_C_FILE_MAX_FNS", "1")     # 2 fns > bound
+    _run(ws)
+    out = capsys.readouterr().out
+    assert "skipped — 2 fn(s)" in out
+    assert "PHASE_C_FILE_MAX_FNS=1" in out
+
+
+def test_file_first_default_bound_admits_a_stub_plus_refill_workload(
+        monkeypatch, tmp_path):
+    # The default must still admit the shape that motivated counting refills:
+    # a file with stubs AND rewrites. Pinning the default keeps a future
+    # tightening from silently disabling the route again.
+    ws = _setup(monkeypatch, tmp_path)
+    (ws / "src" / "lib.rs").write_text(IMPL_LIB_TWO)
+    install_cluster_scan(monkeypatch, impl_blocks=lambda *a, **k: _two_blocks())
+    install_cluster_scan(monkeypatch, stub_records=lambda *a, **k: [])
+    _install_model(monkeypatch, [RESPONSE_TWO])
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
+    monkeypatch.delenv("PHASE_C_FILE_MAX_FNS", raising=False)
+    monkeypatch.delenv("PHASE_C_FILE_MAX_STUBS", raising=False)
+    res = _run(ws)
+    assert res.attempts == 1 and res.fns_filled == 2    # route ran

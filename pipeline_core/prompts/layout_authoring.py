@@ -32,6 +32,25 @@ _PROTOCOL = (
     'RIGHT: <LAYOUT_ITEM name="as_ref.2" kind="fn">\n'
     "fn as_ref(&self) -> &(dyn std::error::Error + 'static) { unimplemented!() }\n"
     "</LAYOUT_ITEM>\n"
+    "\n"
+    "A `kind=\"fn\"` block is spliced IN PLACE, inside the `impl`/`trait` the fn\n"
+    "already lives in. So emit the BARE fn item — never wrap it in an `impl` or\n"
+    "`trait` header, or the result nests one impl inside another and rustc\n"
+    "rejects it with `implementation is not supported in `trait`s or `impl`s`.\n"
+    'WRONG: <LAYOUT_ITEM name="drop_inner" kind="fn">\n'
+    "impl Inner { fn drop_inner(&mut self) { unimplemented!() } }\n"
+    "</LAYOUT_ITEM>\n"
+    'RIGHT: <LAYOUT_ITEM name="drop_inner" kind="fn">\n'
+    "fn drop_inner(&mut self) { unimplemented!() }\n"
+    "</LAYOUT_ITEM>\n"
+    'WRONG: <LAYOUT_ITEM name="width" kind="fn">\n'
+    "impl Layout for Grid { unsafe fn width(p: NonNull<Cell>) -> usize { unimplemented!() } }\n"
+    "</LAYOUT_ITEM>\n"
+    'RIGHT: <LAYOUT_ITEM name="width" kind="fn">\n'
+    "unsafe fn width(p: NonNull<Cell>) -> usize { unimplemented!() }\n"
+    "</LAYOUT_ITEM>\n"
+    "(A `kind=\"struct\"|\"enum\"|\"trait\"` block IS the whole item — those DO\n"
+    " carry their own `struct`/`trait` header. Only `kind=\"fn\"` is bare.)\n"
 )
 
 _RULES = (

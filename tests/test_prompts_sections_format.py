@@ -146,7 +146,7 @@ from pipeline_core.prompts.sections import RUST_GOTCHAS, gotchas_for_error  # no
 
 
 def test_gotcha_e0034_ambiguous_method_fires_with_fq_examples():
-    # debt #46 point 3: E0034 → fully-qualified disambiguation, WRONG→RIGHT.
+    # E0034 → fully-qualified disambiguation, shown as WRONG→RIGHT.
     out = gotchas_for_error("error[E0034]: multiple applicable items in scope")
     assert "ambiguous_method_e0034" in {g["id"] for g in RUST_GOTCHAS
                                         if any(t in "E0034 multiple applicable items"
@@ -155,8 +155,8 @@ def test_gotcha_e0034_ambiguous_method_fires_with_fq_examples():
 
 
 def test_gotcha_e0599_invented_associated_ctor_fires():
-    # debt #46 point 3: E0599 `no function or associated item` → struct literal,
-    # NOT an invented `T::new`.
+    # E0599 `no function or associated item` → struct literal, NOT an
+    # invented `T::new`.
     err = ("error[E0599]: no function or associated item named `new` found for "
            "struct `ContextError<C, E>`")
     out = gotchas_for_error(err)
@@ -165,9 +165,27 @@ def test_gotcha_e0599_invented_associated_ctor_fires():
     assert "no `new` on the struct" in out
 
 
+def test_gotcha_field_through_type_path_fires():
+    # E0599 whose named item IS a declared field → instance access, not a
+    # struct literal and not a trait impl. Distinct remedy from
+    # invented_associated_ctor, which fires on the same wording.
+    err = ("error[E0599]: no function or associated item named `bytes` found "
+           "for struct `Buf` in the current scope\n"
+           "   = note: the following trait defines an item `bytes`, perhaps "
+           "you need to implement it:\n"
+           "           candidate #1: `std::io::Read`")
+    out = gotchas_for_error(err)
+    assert "field_through_type_path" in {
+        g["id"] for g in RUST_GOTCHAS if any(t in err for t in g["triggers"])}
+    assert "`T::field` never" in out
+    assert out.count("WRONG") >= 2   # ≥2 few-shot pairs
+    # the trait-note trap must be named explicitly — it is the misleading part
+    assert "coincidence" in out
+
+
 def test_gotcha_invented_field_frozen_layout_fires():
-    # F9: E0609 `no field` → use the frozen layout in TYPES_IN_SCOPE, never
-    # invent `.inner`/`.0`. Two WRONG→RIGHT pairs, generic names (FR-036).
+    # E0609 `no field` → use the frozen layout in TYPES_IN_SCOPE, never
+    # invent `.inner`/`.0`. Two WRONG→RIGHT pairs, generic placeholder names.
     err = "error[E0609]: no field `inner` on type `Wrap`"
     out = gotchas_for_error(err)
     assert "invented_field_frozen_layout" in {

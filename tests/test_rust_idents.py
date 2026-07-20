@@ -11,6 +11,7 @@ import re
 from pipeline_core.domain.rust_idents import (
     attr_call_args,
     camelcase_type_names,
+    canon_fn_name,
     contains_fn_decl,
     crate_lint_attr_args,
     declares_fn,
@@ -352,3 +353,24 @@ def test_use_path_gaps_full_path_in_reqs_still_accepted():
     tests = [("t.rs", "use hardcrate::framing::deframe;\n")]
     _found, gaps = use_path_requirement_gaps(reqs, tests)
     assert gaps == []
+
+
+def test_canon_fn_name_strips_a_path_qualification():
+    # A Rust ident cannot contain `:`, so a colon means the model answered with
+    # a qualified name — the fn identity is the last segment.
+    assert canon_fn_name("Error: root_cause") == "root_cause"
+    assert canon_fn_name("Error::root_cause") == "root_cause"
+    assert canon_fn_name("impl ErrorImpl: provide") == "provide"
+    assert canon_fn_name("<Error as StdError>::source") == "source"
+    assert canon_fn_name("  Error :: msg  ") == "msg"
+
+
+def test_canon_fn_name_leaves_a_plain_name_and_an_unparsed_shape_alone():
+    assert canon_fn_name("root_cause") == "root_cause"
+    assert canon_fn_name("  from  ") == "from"
+    assert canon_fn_name("_private") == "_private"
+    # nothing identifier-shaped after the colon ⇒ return the input untouched
+    # rather than inventing a name that would splice into the wrong place.
+    assert canon_fn_name("Error: ") == "Error:"
+    assert canon_fn_name("Error: 9lives") == "Error: 9lives"
+    assert canon_fn_name("Error: root_cause()") == "Error: root_cause()"

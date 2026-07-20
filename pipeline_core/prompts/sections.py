@@ -635,6 +635,44 @@ RUST_GOTCHAS: list[dict[str, Any]] = [
         ),
     },
     {
+        # Live evidence (anyhow stable, phase-c): the model wrote
+        # `Buf::bytes.len()` for a field it had itself declared moments earlier.
+        # Identical E0599 wording to an invented associated fn, but the item
+        # EXISTS — it is merely per-instance, so the struct-literal remedy above
+        # does not apply. The compiler's own note ("perhaps you need to implement
+        # it: candidate #1: std::io::Read") points at a trait impl, which is the
+        # wrong repair and drags std into a no_std crate.
+        "id": "field_through_type_path",
+        "summary": (
+            "E0599 naming an item that IS a declared field = you reached a field "
+            "through the TYPE path (`T::field`). Fields live on a value: use "
+            "`self.field` / `value.field`. Ignore the compiler's \"perhaps you "
+            "need to implement it: candidate #1: <trait>\" note — implementing a "
+            "trait to reach your own field is always the wrong repair."
+        ),
+        "triggers": {"E0599", "no function or associated item",
+                     "no associated item named",
+                     "perhaps you need to implement it",
+                     "items from traits can only be used if"},
+        "detail": (
+            "Check the type definition FIRST: if the name is listed as a field,\n"
+            "the item exists and only the PATH is wrong — `T::field` never\n"
+            "resolves, for any T.\n"
+            "  WRONG:\n"
+            "    if Wrapper::payload.len() > 0 { … }   // E0599 on a real field\n"
+            "  RIGHT (a field is reached through a value, never the type):\n"
+            "    if self.payload.len() > 0 { … }\n"
+            "  WRONG (wanted the array's capacity, no instance in scope):\n"
+            "    let cap = Holder::slots.len();        // E0599 on a real field\n"
+            "  RIGHT (take the capacity from the declared type, not the field):\n"
+            "    const CAP: usize = 32;                // from `slots: [T; 32]`\n"
+            "    let cap = CAP;\n"
+            "A trait that happens to define the same NAME is a coincidence, not\n"
+            "the fix: implementing it changes the type's observable behaviour and\n"
+            "can pull in `std` items a no_std crate must not reference."
+        ),
+    },
+    {
         # Live evidence (anyhow nightly cluster, 2026-07-09): the model wrote
         # `feature = "error_generic_member_access"` — but compiler-capability
         # cfgs set via RUSTFLAGS `--cfg NAME` are BARE cfg names, not cargo

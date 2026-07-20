@@ -733,6 +733,28 @@ def use_path_requirement_gaps(
     return len(found), gaps
 
 
+def canon_fn_name(name: str) -> str:
+    """The bare fn identifier from a model-returned ``name`` attribute.
+
+    A Rust identifier can never contain ``:``, so a colon means the name
+    arrived PATH-QUALIFIED (``Error: root_cause``, ``Error::root_cause``,
+    ``impl ErrorImpl: provide``) and the fn identity is the last segment. That
+    is not an ambiguous answer — the container travels separately in the
+    ``block`` attribute — so looking the qualified string up as a fn name and
+    dropping the body on `fn_not_found` discards work the model got right.
+    Returns the input unchanged when the tail is not an identifier, so a shape
+    this rule does not understand is never made worse."""
+    s = name.strip()
+    if ":" not in s:
+        return s
+    tail = s.rsplit(":", 1)[1].strip()
+    if not tail or not _is_ascii_ident_start(tail[0]):
+        return s
+    if not all(c.isalnum() or c == "_" for c in tail):
+        return s
+    return tail
+
+
 def canon_container(container: str) -> str:
     """Canonical container identity. The extractor's fn records, the impl-block
     manifest, and model-returned ``block`` attributes render the same impl

@@ -31,11 +31,12 @@ from pipeline_core.application.reconstruct.pull_resolver import (
 )
 from pipeline_core.domain.blueprint import Blueprint, blueprint_path, parse_blueprint
 from pipeline_core.domain.impl_routing import (
-    norm_src_rel as _norm_src_rel,
-)
-from pipeline_core.domain.impl_routing import (
+    containers_in_file,
     refill_authorized_names,
     route_fn_bodies,
+)
+from pipeline_core.domain.impl_routing import (
+    norm_src_rel as _norm_src_rel,
 )
 from pipeline_core.domain.llm_output import extract_fn_bodies
 from pipeline_core.domain.models import (
@@ -54,6 +55,7 @@ from pipeline_core.domain.test_report import U2Decision, U2TestGate, U2Verdict
 from pipeline_core.domain.test_results import strip_ansi
 from pipeline_core.prompts.context import PerImplSections
 from pipeline_core.prompts.fix_prompts import (
+    BlockFillPlan,
     build_file_fill_prompt,
     build_maximal_impl_prompt,
 )
@@ -236,6 +238,11 @@ def fill_impl_blocks(
     # wrong bodies to a per-fn refill that can only touch one member at a time.
     blocks = collect_impl_refill_targets(blocks, tdd_frontier_keys, tdd_frontier_tests)
 
+    # Every impl in the cluster, kept whole. Narrowing below answers "what do we
+    # fill?"; routing a file-wide model reply asks the different question "what
+    # impls EXIST in this file?", and must not be answered with the fill set.
+    all_blocks = blocks
+
     # If a TDD frontier is provided, narrow to blocks whose stub_members OR
     # refill_members intersect the frontier. Otherwise process all blocks with
     # stubs (refill_members is always empty without a frontier — same guard).
@@ -380,18 +387,39 @@ def fill_impl_blocks(
         if not file_path.exists():
             return
         stub_names = [m.fn_name for b in fblocks for m in b.stub_members]
-        max_stubs = int(os.getenv("PHASE_C_FILE_MAX_STUBS", "12"))
-        if not stub_names or len(stub_names) > max_stubs:
+        refill_names = [m.fn_name for b in fblocks for m in b.refill_members]
+        # Everything this file needs from the model. A behavioral re-fill block
+        # has no stub left, so gating (and test/blueprint selection) on stubs
+        # alone skipped the file-first route for exactly the case it exists
+        # for: members that only a JOINT rewrite can correct.
+        wanted = [*stub_names, *refill_names]
+        # Bounds how many fns one prompt asks for, so it counts re-fills too —
+        # they are bodies the model must write. The old bound counted stubs
+        # only, so its value assumed re-fills were free; a file needing 8 stubs
+        # + 6 re-writes now exceeds a stubs-era 12 and would skip the route
+        # entirely. `_MAX_FNS` is the honest name; the stubs-era env var is
+        # still honoured so an existing .env keeps working.
+        max_fns = int(os.getenv("PHASE_C_FILE_MAX_FNS")
+                      or os.getenv("PHASE_C_FILE_MAX_STUBS") or "20")
+        if not wanted:
+            return
+        if len(wanted) > max_fns:
+            # Never a silent return: a file dropping out of the joint-design
+            # route looks identical in the log to a file that has no work.
+            _log(f"  [phase-c/file] {file_rel}: skipped — {len(wanted)} fn(s) "
+                 f"({len(stub_names)} stub, {len(refill_names)} re-fill) "
+                 f"exceeds PHASE_C_FILE_MAX_FNS={max_fns}; per-block fills "
+                 "will handle it.")
             return
         snapshot = file_path.read_text(encoding="utf-8", errors="replace")
         test_blocks: list[tuple[str, str]] = []
-        for fn_name in stub_names[:6]:
+        for fn_name in wanted[:6]:
             for path_str, txt in _find_tests_referencing_fn(
                     tests_dir_files, fn_name, max_blocks=2):
                 if not any(p == path_str for p, _ in test_blocks):
                     test_blocks.append((path_str, txt))
         _bp_slice = "" if _blueprint.empty else _blueprint.slice_for(
-            frozenset([*stub_names,
+            frozenset([*wanted,
                        *(t for b in fblocks
                          for t in _container_names(b.container)),
                        Path(file_rel).stem]),
@@ -399,7 +427,7 @@ def fill_impl_blocks(
         notes_section = ""
         if fr_path is not None:
             notes_section = _filter_model_notes_for_prompt(
-                fr_path, file_rel=file_rel, fn_name=stub_names[0],
+                fr_path, file_rel=file_rel, fn_name=wanted[0],
                 file_text=snapshot, current_error="")
         # Any localized crash inside THIS file applies: the prompt renders the
         # whole file, so a crashing body is visible as an idiom to imitate.
@@ -410,17 +438,22 @@ def fill_impl_blocks(
         for _attempt in range(1, _FILE_FIRST_MAX_ATTEMPTS + 1):
             prompt = build_file_fill_prompt(
                 file_rel=file_rel, file_text=snapshot,
-                stub_map=[(b.container, [m.fn_name for m in b.stub_members])
-                          for b in fblocks],
+                fill_plan=[BlockFillPlan(
+                    b.container,
+                    tuple(m.fn_name for m in b.stub_members),
+                    tuple(m.fn_name for m in b.refill_members))
+                    for b in fblocks],
                 tests_block="\n\n".join(f"// {p}\n{t}" for p, t in test_blocks),
                 blueprint=_bp_slice, notes=notes_section, prior_error=prior_error,
                 crash_evidence=_file_crash)
             _log(f"  [phase-c/file] {file_rel}: file-first fill "
                  f"({len(fblocks)} block(s), {len(stub_names)} stub(s), "
+                 f"{len(refill_names)} re-fill(s), "
                  f"attempt {_attempt}/{_FILE_FIRST_MAX_ATTEMPTS}).")
             _emit("phase_c.file.fill.start", data={
                 "cluster": cluster_name, "file": file_rel,
-                "blocks": len(fblocks), "stubs": len(stub_names)})
+                "blocks": len(fblocks), "stubs": len(stub_names),
+                "refills": len(refill_names)})
             attempts_total += 1
             try:
                 parsed = extract_fn_bodies(_ask_fill(prompt))
@@ -445,16 +478,17 @@ def fill_impl_blocks(
                 _baseline_test = _test_regression_baseline(
                     tdd_test_cmd, target_src_dir, cluster_env)
                 containers = [b.container for b in fblocks]
-                # Route-only widening (debt #54): `fblocks` is only this
-                # file's STILL-NEEDS-FILLING blocks, but the model sees the
-                # WHOLE file text and can (correctly, for genuinely coupled
-                # types) answer an already-complete sibling too — route those
-                # bodies there instead of dropping them; the #42 freshness
-                # gate downstream makes an already-filled target a safe
-                # no-op. Kept out of `containers[0]`/target selection, which
-                # stays exactly as before.
-                _extra_containers = [b.container for b in blocks
-                                     if b.file == file_rel and b.container not in containers]
+                # Route-only widening: `fblocks` is only this file's
+                # STILL-NEEDS-FILLING blocks, but the model sees the WHOLE file
+                # text and can (correctly, for genuinely coupled types) answer
+                # an already-complete sibling too — route those bodies there
+                # instead of dropping them; the freshness gate downstream makes
+                # an already-filled target a safe no-op. Reads the FULL block
+                # list: the fill set cannot widen routing beyond itself. Kept
+                # out of `containers[0]`/target selection, which stays exactly
+                # as before.
+                _extra_containers = [c for c in containers_in_file(all_blocks, file_rel)
+                                     if c not in containers]
                 routing = route_fn_bodies(parsed, target=containers[0],
                                           related=containers[1:] + _extra_containers)
                 for _db in routing.dropped:
@@ -462,25 +496,40 @@ def fill_impl_blocks(
                          f"block header does not match any impl in this file. "
                          f"raw_block={_db.block_attr!r} raw_canon={_db.attr_canon!r}")
                 spliced_now = 0
+                _landed: list[tuple[str, str]] = []
                 # Refill targets are already-filled-but-WRONG bodies; the splice
                 # must be told to overwrite a non-stub for exactly those names,
                 # or the model's correction is refused `target_not_stub` and
                 # silently dropped. Authorization spans the whole file because
                 # this route routes bodies file-wide.
-                _refill_names = refill_authorized_names(blocks, file_rel)
+                _refill_names = refill_authorized_names(all_blocks, file_rel)
                 for rb in routing.routed:
                     wc = rb.fn_data["where_clause"]
                     if wc and is_trait_impl_container(rb.container):
                         wc = None
+                    _fn = rb.fn_data["fn_name"]
                     ok, reason, _delta = _splice_fn_with_where(
-                        file_path, rb.container, rb.fn_data["fn_name"],
+                        file_path, rb.container, _fn,
                         rb.fn_data["body"], wc,
-                        allow_nonstub=rb.fn_data["fn_name"] in _refill_names)
+                        allow_nonstub=_fn in _refill_names)
                     if ok:
                         spliced_now += 1
+                        _landed.append((_fn, rb.container))
                     else:
+                        # `target_not_stub` is unfalsifiable from the log alone —
+                        # the body is reverted before anyone reads it. Name the
+                        # container it routed to and whether an EARLIER body in
+                        # this same reply already filled the fn, which is the
+                        # difference between a duplicate answer and a stale
+                        # stub record.
+                        _dup = [c for n, c in _landed if n == _fn]
                         _log(f"  [phase-c/file] {file_rel}: splice "
-                             f"`{rb.fn_data['fn_name']}` failed: {reason}")
+                             f"`{_fn}` failed: {reason} "
+                             f"[routed to `{rb.container}`, "
+                             + (f"already filled earlier in this reply via "
+                                f"`{_dup[0]}`" if _dup else
+                                f"overwrite {'allowed' if _fn in _refill_names else 'not authorized'}")
+                             + "]")
                 # File-first is the ATOMIC co-dependent fill: it must land a
                 # file's FREE functions together with its impls, else a
                 # producer/consumer cycle (the free `not(cond)` that the `Bool`
