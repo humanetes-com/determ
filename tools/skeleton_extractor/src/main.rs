@@ -43,6 +43,10 @@ struct Cli {
     #[arg(long)]
     enumerate_consts: bool,
 
+    /// Emit JSON array of UseRecord (top-level `use` bindings) to stdout.
+    #[arg(long)]
+    enumerate_uses: bool,
+
     /// Emit JSON array of DispatchFamily to stdout.
     #[arg(long = "enumerate-dispatch-families")]
     enumerate_dispatch: bool,
@@ -148,6 +152,11 @@ fn main() -> Result<()> {
     }
     if cli.enumerate_consts {
         let records = skeleton_extractor::enumerate_consts_in_tree(&input)?;
+        println!("{}", serde_json::to_string(&records)?);
+        return Ok(());
+    }
+    if cli.enumerate_uses {
+        let records = skeleton_extractor::enumerate_uses_in_tree(&input)?;
         println!("{}", serde_json::to_string(&records)?);
         return Ok(());
     }

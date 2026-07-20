@@ -1051,6 +1051,9 @@ def build_app(
     def enumerate_mods(sd: Path) -> Any:
         return _live().structure.enumerate_mods(sd)
 
+    def enumerate_uses(sd: Path) -> Any:
+        return _live().structure.enumerate_uses(sd)
+
     def enumerate_dispatch_families(sd: Path) -> Any:
         return _live().structure.enumerate_dispatch_families(sd)
 
@@ -1466,6 +1469,7 @@ def build_app(
         enumerate_types=enumerate_types,
         enumerate_fns=_typed_fn_records,
         enumerate_mods=enumerate_mods,
+        enumerate_uses=enumerate_uses,
         save_private_surface=save_private_surface,
     )
 

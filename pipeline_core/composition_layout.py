@@ -54,8 +54,8 @@ def build_layout_phase_runner(
         load_suite=load_behaviour_suite,
         api_surface_path=api_surface_path,
         run_model=lambda prompt: ask(prompt, model=task2_model),
-        compile_check=lambda pd, c, env: compile_skeleton_check(
-            pd, c, env_extra=env),
+        compile_check=lambda pd, c, cl: compile_skeleton_check(
+            pd, c, cluster=cl),
         skeleton_src_dir_for=skeleton_src_dir_for,
         fn_name_counts=fn_name_counts,
         log=log,
@@ -83,7 +83,7 @@ def build_retrigger_layout(
               target_src_dir: Path, error_text: str,
               crash_evidence: Any = None) -> RetriggerResult:
         clusters = load_baked_clusters(project_dir) or []
-        env_by_cluster = {c.name: dict(c.env_extra) for c in clusters}
+        cluster_by_name = {c.name: c for c in clusters}
 
         def _public_surface_text(pd: Path, cluster: str) -> str:
             try:
@@ -110,7 +110,7 @@ def build_retrigger_layout(
                 run_model=lambda prompt: ask(prompt, model=task2_model),
                 read_skeleton=_read, write_skeleton=_write,
                 compile_check=lambda: compile_skeleton_check(
-                    pd, cluster, env_extra=env_by_cluster.get(cluster, {})),
+                    pd, cluster, cluster=cluster_by_name.get(cluster)),
                 log=log,
                 write_pin_probe=lambda src: write_pin_probe(pd, cluster, src))
 

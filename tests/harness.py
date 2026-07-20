@@ -154,10 +154,12 @@ class FakeStructureReader:
     monkeypatching `pipeline._enumerate_*_via_extractor` module fns."""
 
     def __init__(self, *, fns: Any = None, types: Any = None, mods: Any = None,
-                 consts: Any = None, dispatch_families: Any = None) -> None:
+                 consts: Any = None, dispatch_families: Any = None,
+                 uses: Any = None) -> None:
         self._fns = _Script(fns) if callable(fns) else fns
         self._types = _Script(types) if callable(types) else types
         self._mods = mods
+        self._uses = uses
         self._consts = consts
         self._families = dispatch_families
 
@@ -170,6 +172,9 @@ class FakeStructureReader:
 
     def enumerate_mods(self, src_dir):  # noqa: ANN001, ANN201
         return self._mods
+
+    def enumerate_uses(self, src_dir):  # noqa: ANN001, ANN201
+        return self._uses
 
     def enumerate_consts(self, src_dir):  # noqa: ANN001, ANN201
         return self._consts
@@ -186,7 +191,8 @@ class FakeStructureReader:
 
 def install_fake_extractor(monkeypatch, *, fns: Any = None, types: Any = None,
                            mods: Any = None, consts: Any = None,
-                           dispatch_families: Any = None) -> FakeStructureReader:
+                           dispatch_families: Any = None,
+                           uses: Any = None) -> FakeStructureReader:
     """Swap the App's syn-extractor structure provider for a scripted fake —
     the port-boundary injection (`build_app`-style) replacing per-shim
     monkeypatches of `pipeline._enumerate_fns_via_extractor` et al. All shims
@@ -194,7 +200,7 @@ def install_fake_extractor(monkeypatch, *, fns: Any = None, types: Any = None,
     time, so one swap covers every read."""
     import dataclasses as _dc
     reader = FakeStructureReader(fns=fns, types=types, mods=mods, consts=consts,
-                                 dispatch_families=dispatch_families)
+                                 dispatch_families=dispatch_families, uses=uses)
     monkeypatch.setattr(pipeline, "_APP",
                         _dc.replace(pipeline._APP, structure=reader))
     return reader

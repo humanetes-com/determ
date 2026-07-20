@@ -28,12 +28,14 @@ from pipeline_core.domain.models import (
     ModRecord,
     SkeletoniseResult,
     TypeRecord,
+    UseRecord,
 )
 from pipeline_core.domain.module_reachability import externally_reachable_files
 from pipeline_core.domain.private_surface import (
     PrivateSurface,
     classify_private_surface,
 )
+from pipeline_core.domain.rust_name_scope import ModuleScopes
 from pipeline_core.domain.workspace_layout import SKIP_DIR_NAMES
 
 
@@ -59,6 +61,9 @@ class BakeArtifactsDeps:
     # module-reachability fix: which mods gate which files, so a `pub` item
     # behind a private `mod` wall is classified replaceable, not frozen.
     enumerate_mods: Callable[[Path], list[ModRecord] | None]
+    # `use` bindings per file, so a private name is only a reference edge where
+    # the ident actually denotes it (see domain/rust_name_scope).
+    enumerate_uses: Callable[[Path], list[UseRecord] | None]
 
 
 def _behaviour_sources(src_dir: Path) -> list[tuple[str, str]]:
@@ -174,14 +179,28 @@ def bake_skeleton_artifacts(
             mods = d.enumerate_mods(_skel_src) or []
             reachable = externally_reachable_files(
                 list(mods), frozenset(t.file for t in types))
+            # `None` = the extractor could not report `use` bindings at all (a
+            # stale binary). That is NOT the same as a crate with no imports:
+            # resolving names against an empty binding set would silently drop
+            # every cross-file edge, so fall back to bare-name matching and say
+            # so, rather than shipping a fragmented component partition.
+            uses = d.enumerate_uses(_skel_src)
+            if uses is None:
+                d.log(f"  [bake-skeleton] cluster {cluster.name}: no `use` "
+                      "bindings available — private-surface names resolved "
+                      "crate-globally (run `bash setup.sh` to rebuild the "
+                      "extractor).")
+            scopes = (None if uses is None
+                      else ModuleScopes.from_records(list(mods), list(uses)))
             surface = classify_private_surface(
                 list(types), list(fns), cfg_cluster=cluster.name,
-                reachable_files=reachable)
+                reachable_files=reachable, scopes=scopes)
             d.save_private_surface(project_dir, surface)
             d.log(f"  [bake-skeleton] cluster {cluster.name}: private surface — "
                   f"{len(surface.replaceable)} replaceable item(s) in "
                   f"{len(surface.components)} component(s), "
-                  f"{len(surface.frozen_public)} frozen-public.")
+                  f"{len(surface.frozen_public)} frozen-public, "
+                  f"largest component {max((len(c) for c in surface.components), default=0)}.")
         except Exception as e:
             d.log(f"  [bake-skeleton] cluster {cluster.name}: private-surface "
                   f"classification failed (non-fatal): {e}")

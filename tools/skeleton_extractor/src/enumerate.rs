@@ -696,6 +696,100 @@ pub fn enumerate_consts_in_tree(input_dir: &Path) -> Result<Vec<ConstRecord>> {
     Ok(out)
 }
 
+/// Flatten one `use` tree into the (alias, full path) pairs it binds.
+fn collect_use_tree(
+    tree: &syn::UseTree,
+    prefix: &mut Vec<String>,
+    file: &str,
+    out: &mut Vec<UseRecord>,
+) {
+    match tree {
+        syn::UseTree::Path(p) => {
+            prefix.push(p.ident.to_string());
+            collect_use_tree(&p.tree, prefix, file, out);
+            prefix.pop();
+        }
+        syn::UseTree::Name(n) => {
+            let mut path = prefix.clone();
+            path.push(n.ident.to_string());
+            out.push(UseRecord {
+                file: file.to_string(),
+                alias: n.ident.to_string(),
+                path,
+                is_glob: false,
+            });
+        }
+        syn::UseTree::Rename(r) => {
+            let mut path = prefix.clone();
+            path.push(r.ident.to_string());
+            out.push(UseRecord {
+                file: file.to_string(),
+                alias: r.rename.to_string(),
+                path,
+                is_glob: false,
+            });
+        }
+        syn::UseTree::Glob(_) => out.push(UseRecord {
+            file: file.to_string(),
+            alias: "*".to_string(),
+            path: prefix.clone(),
+            is_glob: true,
+        }),
+        syn::UseTree::Group(g) => {
+            for item in &g.items {
+                collect_use_tree(item, prefix, file, out);
+            }
+        }
+    }
+}
+
+pub fn enumerate_uses_in_file(path: &Path, root: &Path) -> Result<Vec<UseRecord>> {
+    let source = std::fs::read_to_string(path).map_err(|e| ExtractError::read(path, e))?;
+    let ast: syn::File = parse_file(&source).map_err(|e| ExtractError::parse(path, e))?;
+    let rel = path
+        .strip_prefix(root)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| path.to_string_lossy().to_string());
+    let mut out = Vec::new();
+    // Top-level only — see UseRecord: a nested `use` binds names in the inline
+    // module's scope, not the file's.
+    for item in &ast.items {
+        if let Item::Use(u) = item {
+            let mut prefix = Vec::new();
+            collect_use_tree(&u.tree, &mut prefix, &rel, &mut out);
+        }
+    }
+    Ok(out)
+}
+
+pub fn enumerate_uses_in_tree(input_dir: &Path) -> Result<Vec<UseRecord>> {
+    let mut out = Vec::new();
+    for entry in walkdir::WalkDir::new(input_dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let p = entry.path();
+        if !p.is_file() {
+            continue;
+        }
+        if p.extension().and_then(|s| s.to_str()) != Some("rs") {
+            continue;
+        }
+        let rel = p.strip_prefix(input_dir).unwrap_or(p);
+        if rel.components().any(|c| {
+            let s = c.as_os_str().to_string_lossy();
+            s.starts_with('.') || s == "target"
+        }) {
+            continue;
+        }
+        match enumerate_uses_in_file(p, input_dir) {
+            Ok(mut recs) => out.append(&mut recs),
+            Err(_e) => continue,
+        }
+    }
+    Ok(out)
+}
+
 // ---------------------------------------------------------------------------
 // Cfg occurrences — P5: replaces the Python regex scan of `#[cfg(...)]` /
 // `#[cfg_attr(...)]` predicates in `task0_cfg_scan`. A `syn::visit::Visit` walk

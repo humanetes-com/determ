@@ -1,12 +1,18 @@
 """Pins for F11 private-surface classification (freeze-scope boundary)."""
 from __future__ import annotations
 
-from pipeline_core.domain.models import FnRecord, TypeRecord
+from pipeline_core.domain.models import (
+    FnRecord,
+    ModRecord,
+    TypeRecord,
+    UseRecord,
+)
 from pipeline_core.domain.private_surface import (
     SurfaceItemKind,
     classify_private_surface,
     connected_components,
 )
+from pipeline_core.domain.rust_name_scope import ModuleScopes
 
 
 def _ty(name, kind, is_pub, defn, file="src/error.rs"):
@@ -175,3 +181,87 @@ def test_truly_pub_fn_is_not_offered_for_authoring():
         is_pub=True, is_exactly_pub=True)]
     s = classify_private_surface(types, fns)
     assert not [i for i in s.replaceable if i.kind is SurfaceItemKind.FN_SIG]
+
+
+def test_scoped_names_do_not_weld_a_rebound_identifier():
+    # The real anyhow collision: the crate root does `use std::error::Error as
+    # StdError` while an inline `mod ext` in context.rs declares a private
+    # trait of the same name. Matched bare, every `dyn StdError` signature in
+    # the crate became an edge to that private trait — welding trait impls on
+    # PUBLIC types into the private-layout component and offering them for
+    # re-authoring.
+    types = [
+        _ty("Error", "struct", True, "pub struct Error { inner: Own<ErrorImpl> }", "lib.rs"),
+        _ty("StdError", "trait", False, "pub trait StdError { }", "context.rs"),
+        _ty("Own", "struct", False, "struct Own<T> { ptr: NonNull<T> }", "ptr.rs"),
+        _ty("ErrorImpl", "struct", False, "struct ErrorImpl { o: () }", "error.rs"),
+    ]
+    fns = [FnRecord(file="error.rs", fn_name="source",
+                    sig_text="fn source(&self) -> Option<&(dyn StdError + 'static)>",
+                    is_pub=False, is_exactly_pub=False)]
+    mods = [ModRecord(name=n, file=f, declared_in="lib.rs", vis="private")
+            for n, f in (("context", "context.rs"), ("ptr", "ptr.rs"),
+                         ("error", "error.rs"))]
+    uses = [UseRecord(file="lib.rs", alias="StdError",
+                      path=("std", "error", "Error")),
+            UseRecord(file="error.rs", alias="StdError", path=("crate", "StdError")),
+            UseRecord(file="error.rs", alias="Own", path=("crate", "ptr", "Own")),
+            UseRecord(file="lib.rs", alias="Own", path=("crate", "ptr", "Own")),
+            UseRecord(file="lib.rs", alias="ErrorImpl",
+                      path=("crate", "error", "ErrorImpl"))]
+    scopes = ModuleScopes.from_records(mods, uses)
+
+    bare = classify_private_surface(types, fns)
+    assert "source" in {i.name for i in bare.replaceable}
+    assert frozenset({"StdError", "source"}) in {
+        frozenset(i.name for i in c) for c in bare.components}
+
+    scoped = classify_private_surface(types, fns, scopes=scopes)
+    assert "source" not in {i.name for i in scoped.replaceable}
+    assert {frozenset(i.name for i in c) for c in scoped.components} == {
+        frozenset({"StdError"}), frozenset({"Own", "ErrorImpl"})}
+
+
+def test_frozen_item_couples_the_private_types_it_names_together():
+    # `impl<T> Own<T> { pub fn by_mut(&mut self) -> Mut<T> }` stays frozen, so
+    # re-authoring `Own` without `Mut` breaks it — neither type's own
+    # definition names the other, yet they must be authored as one component.
+    types = [
+        _ty("Own", "struct", False, "struct Own<T> { ptr: NonNull<T> }", "ptr.rs"),
+        _ty("Mut", "struct", False, "struct Mut<T> { ptr: NonNull<T> }", "ptr.rs"),
+    ]
+    fns = [FnRecord(file="ptr.rs", fn_name="by_mut", container="impl Own < T >",
+                    sig_text="fn by_mut(&mut self) -> Mut<T>", is_pub=True)]
+    s = classify_private_surface(types, fns)
+    assert s.coupled == (frozenset({"Mut", "Own"}),)
+    assert len(s.components) == 1
+
+
+def test_trait_default_method_is_not_a_separate_target():
+    """anyhow's kind.rs: `trait AdhocKind { fn anyhow_kind(&self) -> Adhoc {…} }`.
+    The trait's definition text CONTAINS the method, so listing the method too
+    gives the splice two nested spans — refused as ambiguous, freezing the whole
+    9-item component on every attempt, on both clusters."""
+    types = [TypeRecord(file="kind.rs", kind="trait", name="AdhocKind", is_pub=False,
+                        definition=("pub trait AdhocKind: Sized {\n"
+                                    "    fn anyhow_kind(&self) -> Adhoc {}\n}")),
+             TypeRecord(file="kind.rs", kind="struct", name="Adhoc", is_pub=False,
+                        definition="pub struct Adhoc;")]
+    fns = [FnRecord(file="kind.rs", fn_name="anyhow_kind", is_pub=False,
+                    is_exactly_pub=False, container="trait AdhocKind",
+                    sig_text="fn anyhow_kind(&self) -> Adhoc")]
+    s = classify_private_surface(types, fns, cfg_cluster="stable")
+    assert "anyhow_kind" not in {i.name for i in s.replaceable}
+    assert {"AdhocKind", "Adhoc"} == {i.name for i in s.replaceable}
+
+
+def test_inherent_impl_method_stays_authorable():
+    """`impl Adhoc { fn new(..) }` lives OUTSIDE `pub struct Adhoc;` — no span
+    nesting, so it must remain its own target."""
+    types = [TypeRecord(file="kind.rs", kind="struct", name="Adhoc", is_pub=False,
+                        definition="pub struct Adhoc;")]
+    fns = [FnRecord(file="kind.rs", fn_name="new", is_pub=False,
+                    is_exactly_pub=False, container="impl Adhoc",
+                    sig_text="fn new(self) -> Adhoc")]
+    s = classify_private_surface(types, fns, cfg_cluster="stable")
+    assert "new" in {i.name for i in s.replaceable}

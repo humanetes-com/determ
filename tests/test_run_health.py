@@ -129,8 +129,15 @@ def test_capped_retry_success_suppresses():
     assert f == []
 
 
-_SHRUNK = ("  [stable] [phase-c/tdd] iter 1: ORACLE SHRUNK — 21 expected "
-           "test(s) reported no verdict (binary crashed or failed to compile)")
+_SHRUNK = ("  [stable] [phase-c/tdd] iter 1: ORACLE SHRUNK — counting 21 as "
+           "failing. 21 named test(s) reported no verdict (binary crashed or "
+           "failed to compile): ['test_a']")
+# Every expected NAME reported; the total is merely short → an inventory gap,
+# not a crash. The localizer is never invoked, so its silence is correct.
+_SHRUNK_UNNAMED = (
+    "  [stable] [phase-c/tdd] iter 1: ORACLE SHRUNK — counting 1 as failing. "
+    "1 unnamed test(s) short of the expected total — every expected NAME "
+    "reported, so the static inventory under-enumerated (not a crash)")
 _BLAMED = ("  [stable] [phase-c/crash] tests/test_source.rs::test_io_source "
            "SIGSEGV — blamed FnLocator(file='src/error.rs', "
            "fn_name='construct_from_std')")
@@ -162,3 +169,11 @@ def test_crash_unlocalized_suppressed_once_a_site_is_blamed():
 def test_crash_unlocalized_silent_without_vanish():
     assert not [x for x in analyze([ITER], [])
                 if x.kind == HealthKind.CRASH_UNLOCALIZED]
+
+
+def test_unnamed_shortfall_does_not_report_a_broken_localizer():
+    """A count-only shrink has no crash to localize; flagging it sends the
+    operator after gdb/ASAN wiring that is working fine."""
+    f = [x for x in analyze([_SHRUNK_UNNAMED], [])
+         if x.kind == HealthKind.CRASH_UNLOCALIZED]
+    assert f == []

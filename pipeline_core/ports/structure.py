@@ -11,7 +11,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Protocol
 
-from pipeline_core.domain.models import ConstRecord, DispatchFamily, ModRecord, TypeRecord
+from pipeline_core.domain.models import (
+    ConstRecord,
+    DispatchFamily,
+    ModRecord,
+    TypeRecord,
+    UseRecord,
+)
 
 
 class StructureReader(Protocol):
@@ -23,6 +29,7 @@ class StructureReader(Protocol):
 
     def enumerate_types(self, src_dir: Path) -> list[TypeRecord] | None: ...
     def enumerate_mods(self, src_dir: Path) -> list[ModRecord] | None: ...
+    def enumerate_uses(self, src_dir: Path) -> list[UseRecord] | None: ...
     def enumerate_consts(self, src_dir: Path) -> list[ConstRecord] | None: ...
     def enumerate_dispatch_families(self, src_dir: Path) -> list[DispatchFamily] | None: ...
 

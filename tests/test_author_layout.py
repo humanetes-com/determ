@@ -183,3 +183,14 @@ def test_probe_is_removed_even_when_the_authored_layout_fails_to_compile():
                         select_pins=_has_pins, symbol_inventory="", deps=d.deps())
     assert not res.all_authored
     assert d.probe_writes[-1] is None
+
+
+def test_failed_compile_log_names_the_diagnostic():
+    """A bare "did not compile" makes one broken gate (e.g. E0554: the cluster's
+    toolchain never reached cargo) read as N independently-hard components."""
+    d = _Deps(_GOOD, [False, False, False])
+    author_layout(_surface(), module_name="anyhow", public_surface="pub struct Error;",
+                  select_pins=_has_pins, symbol_inventory="Box", deps=d.deps())
+    failed = [ln for ln in d.logs if "did not compile" in ln]
+    assert failed
+    assert all("error[E0308]: mismatched types" in ln for ln in failed)

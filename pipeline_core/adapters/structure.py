@@ -20,6 +20,7 @@ from pipeline_core.domain.models import (
     DispatchFamily,
     ModRecord,
     TypeRecord,
+    UseRecord,
 )
 from pipeline_core.domain.rust_idents import fn_reference_counts
 from pipeline_core.domain.rust_idioms import no_std_invariant_note
@@ -149,6 +150,9 @@ class CliStructureReader:
 
     def enumerate_mods(self, src_dir: Path) -> list[ModRecord] | None:
         return self.extractor.enumerate_mods(src_dir)
+
+    def enumerate_uses(self, src_dir: Path) -> list[UseRecord] | None:
+        return self.extractor.enumerate_uses(src_dir)
 
     def enumerate_consts(self, src_dir: Path) -> list[ConstRecord] | None:
         return self.extractor.enumerate_consts(src_dir)

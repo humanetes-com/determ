@@ -24,6 +24,7 @@ from pipeline_core.domain.authored_layout import (
     parse_authored_layout,
 )
 from pipeline_core.domain.behaviour import BehaviourSpec
+from pipeline_core.domain.failure_classification import first_diagnostic
 from pipeline_core.domain.layout_chunking import plan_author_chunks
 from pipeline_core.domain.layout_probe import LayoutProbe, build_layout_probe
 from pipeline_core.domain.private_surface import (
@@ -184,15 +185,17 @@ def author_layout(
             deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: GATED — {reason}")
             results.append(ComponentResult(names, False, reason, gated=True))
             continue
+        anchors = _public_anchors(surface, comp)
         def _prompt(chunk_items: tuple[PrivateSurfaceItem, ...],
                     chunk_uids: tuple[str, ...], scheme: str, hint: str,
-                    *, _pins: list[BehaviourSpec] = pins) -> str:
+                    *, _pins: list[BehaviourSpec] = pins,
+                    _anchors: dict[str, str] = anchors) -> str:
             return build_layout_authoring_prompt(
                 module_name=module_name, cfg_cluster=surface.cfg_cluster,
                 items=chunk_items, public_surface=public_surface,
                 layout_pins=_pins, symbol_inventory=symbol_inventory,
                 extra_guidance=extra_guidance, authored_scheme=scheme,
-                item_uids=chunk_uids) + hint
+                item_uids=chunk_uids, item_anchors=_anchors) + hint
         committed = False
         reason = "no attempt"
         committed_defs: tuple[tuple[str, str], ...] = ()
@@ -240,13 +243,39 @@ def author_layout(
             for rel, orig in pristine.items():
                 if orig is not None:
                     deps.write_skeleton(rel, orig)
+            # Name the first diagnostic: an environmental failure that no
+            # authored layout can fix (E0554 = nightly `#![feature]` built on
+            # stable) is otherwise indistinguishable in the log from a model
+            # that wrote bad code, and reads as N hard components instead of
+            # one broken gate.
+            diag = first_diagnostic(errors)
             deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: authored "
                      f"scaffold did not compile (attempt {attempt}) — reverted"
                      + (" (layout pins were gated this attempt)"
-                        if probe.checks_anything else "") + ".")
+                        if probe.checks_anything else "")
+                     + (f": {diag}" if diag else "."))
         results.append(ComponentResult(names, committed, reason,
                                        authored_defs=committed_defs))
     return AuthorLayoutResult(surface.cfg_cluster, tuple(results))
+
+
+def _public_anchors(
+    surface: PrivateSurface, comp: tuple[PrivateSurfaceItem, ...],
+) -> dict[str, str]:
+    """uid → the frozen PUBLIC type whose layout reaches that item, for the
+    items the prompt lists. This is the ONLY disambiguation the item listing
+    carries now that the frozen definition is withheld, and it leaks nothing:
+    the public type's own definition is already in the prompt's frozen-surface
+    section. A name reachable from several public types gets the first by sort
+    order — a stable label, not a claim of exclusivity."""
+    reach = {name: surface.reachable_from_public(name)
+             for name in sorted(surface.public_direct_refs)}
+    out: dict[str, str] = {}
+    for uid, it in zip(component_uids(comp), comp, strict=True):
+        anchor = next((p for p, names in reach.items() if it.name in names), "")
+        if anchor:
+            out[uid] = anchor
+    return out
 
 
 def _calibrated_pin_probe(

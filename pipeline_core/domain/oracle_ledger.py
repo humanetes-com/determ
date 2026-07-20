@@ -45,6 +45,20 @@ class SweepOracle:
         the honest fail-count adjustment is the max, never the sum."""
         return max(len(self.vanished), self.deficit)
 
+    @property
+    def unnamed_shortfall(self) -> int:
+        """Missing tests that no expected NAME accounts for.
+
+        A shrink has two causes with two different remedies, and only one of
+        them is a crash. Named `vanished` tests were enumerated and then
+        reported nothing → their binary died, so a stack is worth hunting. An
+        unnamed shortfall means every expected name DID report and the total is
+        still short → the static inventory under-enumerated, and no debugger
+        will ever find a fault for it. Folding both into one count sends the
+        crash localizer (gdb + an ASAN rebuild) after a fault that cannot
+        exist, every iteration, and logs it as tests vanishing when none did."""
+        return max(0, self.deficit - len(self.vanished))
+
 
 def reconcile_sweep(
     expected_count: int,

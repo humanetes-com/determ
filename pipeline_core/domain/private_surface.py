@@ -26,6 +26,7 @@ from enum import Enum, auto
 
 from pipeline_core.domain.models import FnRecord, TypeRecord
 from pipeline_core.domain.rust_idents import camelcase_type_names
+from pipeline_core.domain.rust_name_scope import ModuleScopes, NameResolver
 
 
 class SurfaceItemKind(Enum):
@@ -76,6 +77,12 @@ class PrivateSurface:
     replaceable: tuple[PrivateSurfaceItem, ...]
     frozen_public: frozenset[str]
     public_referenced: frozenset[str] = frozenset()
+    # Private names that a FROZEN item names together — e.g. an untouched
+    # `impl<T> Own<T> { pub fn by_mut(&mut self) -> Mut<T> }` couples `Own` and
+    # `Mut` even though neither type's own definition names the other.
+    # Re-authoring one without the other breaks that frozen item, so these are
+    # component edges exactly like a reference edge.
+    coupled: tuple[frozenset[str], ...] = ()
     # Per PUBLIC type name, the private type names ITS OWN definition names
     # directly (not merged across all public types) — the precise seed set a
     # STATIC_ASSERTION pinning that one public type's layout must propagate
@@ -89,7 +96,7 @@ class PrivateSurface:
 
     @property
     def components(self) -> tuple[tuple[PrivateSurfaceItem, ...], ...]:
-        return connected_components(self.replaceable)
+        return connected_components(self.replaceable, self.coupled)
 
     def component_is_layout_sensitive(
         self, component: tuple[PrivateSurfaceItem, ...],
@@ -109,9 +116,14 @@ class PrivateSurface:
         return _reachable_from(seeds, self.replaceable)
 
 
-def _references(definition: str, private_names: frozenset[str]) -> frozenset[str]:
-    """Which private type names this definition points at (graph edges)."""
-    return frozenset(camelcase_type_names(definition) & private_names)
+def _references(
+    definition: str, file: str, resolver: NameResolver,
+) -> frozenset[str]:
+    """Which private type names this definition points at (graph edges), with
+    each bare ident resolved in ITS OWN file's scope — an ident that a `use`
+    binds to another crate's item is not an edge however closely it spells a
+    private name (`dyn StdError` under `use std::error::Error as StdError`)."""
+    return resolver.resolve(file, camelcase_type_names(definition))
 
 
 def _reachable_from(
@@ -139,6 +151,7 @@ def classify_private_surface(
     *,
     cfg_cluster: str = "default",
     reachable_files: frozenset[str] | None = None,
+    scopes: ModuleScopes | None = None,
 ) -> PrivateSurface:
     """Partition enumerated items into frozen-public vs private-replaceable.
 
@@ -152,7 +165,12 @@ def classify_private_surface(
     the crate's external contract, however `is_pub` folds it) AND its file is
     externally reachable (``reachable_files``, when supplied — a `pub` item
     sealed behind a private `mod` is equally unreachable). Omitting
-    `reachable_files` skips that second check (module-tree data unavailable)."""
+    `reachable_files` skips that second check (module-tree data unavailable).
+
+    `scopes` carries the crate's module tree + `use` bindings so a reference is
+    an edge only where the ident actually denotes that private item. Omitting
+    it resolves names crate-globally by bare identifier, which welds every item
+    mentioning a name the crate re-binds elsewhere (see rust_name_scope)."""
     frozen_public: set[str] = set()
     public_types: list[TypeRecord] = []
     private_types: list[TypeRecord] = []
@@ -168,9 +186,10 @@ def classify_private_surface(
         else:
             private_types.append(t)
 
-    private_names = frozenset(t.name for t in private_types)
+    scope = scopes or ModuleScopes()
+    resolver = scope.resolver((t.name, t.file) for t in private_types)
     public_direct_refs = {
-        t.name: _references(t.definition, private_names) for t in public_types}
+        t.name: _references(t.definition, t.file, resolver) for t in public_types}
     public_referenced = frozenset(
         name for refs in public_direct_refs.values() for name in refs)
     items: list[PrivateSurfaceItem] = []
@@ -178,46 +197,91 @@ def classify_private_surface(
         items.append(PrivateSurfaceItem(
             kind=_TYPE_KINDS[t.kind], name=t.name, file=t.file,
             definition=t.definition,
-            references=_references(t.definition, private_names),
+            references=_references(t.definition, t.file, resolver),
         ))
     # Private helper fns that touch the private layout become authorable sigs.
     # Only truly-EXTERNAL fns are excluded: `is_pub` alone folds `pub(crate)`
     # in, which would wrongly freeze a `pub(crate)` layout helper instead of
     # offering it for authoring.
+    # A trait's `definition` is the WHOLE `trait T { … }` text, method bodies
+    # included, so a default method inside a replaceable trait is already being
+    # authored as part of its trait. Listing it again as its own item makes two
+    # targets whose splice spans NEST, which `replace_surface_definitions`
+    # rightly refuses as ambiguous — freezing the entire component. (Impl
+    # blocks are NOT containers in this sense: `impl Adhoc { … }` lives outside
+    # `pub struct Adhoc;`, so those methods stay independently authorable.)
+    trait_owned = {
+        f"trait {t.name}" for t in private_types if _TYPE_KINDS[t.kind] is
+        SurfaceItemKind.TRAIT}
     for f in fn_records:
         if (f.is_pub and f.is_exactly_pub) or not f.fn_name:
             continue
-        refs = _references(f.sig_text, private_names)
+        if f.container in trait_owned:
+            continue
+        refs = _references(f.sig_text, f.file, resolver)
         if refs:
             items.append(PrivateSurfaceItem(
                 kind=SurfaceItemKind.FN_SIG, name=f.fn_name, file=f.file,
                 definition=f.sig_text, references=refs,
             ))
+    replaceable_names = frozenset(i.name for i in items)
     return PrivateSurface(
         cfg_cluster=cfg_cluster,
         replaceable=tuple(items),
         frozen_public=frozenset(frozen_public),
         public_referenced=public_referenced,
         public_direct_refs=public_direct_refs,
+        coupled=_coupling_groups(
+            type_records, fn_records, replaceable_names, resolver),
     )
+
+
+def _coupling_groups(
+    type_records: list[TypeRecord],
+    fn_records: list[FnRecord],
+    replaceable: frozenset[str],
+    resolver: NameResolver,
+) -> tuple[frozenset[str], ...]:
+    """Replaceable names that some item holds together in one text. A fn is read
+    with its CONTAINER (`impl Own<T>`) because that is where the coupling lives:
+    `fn by_mut(&mut self) -> Mut<T>` names only `Mut`, yet re-authoring `Own`
+    alone breaks it. Frozen and replaceable items alike contribute — the frozen
+    ones are the load-bearing case, since nothing else can adapt them."""
+    groups: set[frozenset[str]] = set()
+    texts: list[tuple[str, str]] = [(t.definition, t.file) for t in type_records]
+    texts += [(f"{f.container} {f.sig_text}", f.file) for f in fn_records]
+    for text, file in texts:
+        named = resolver.resolve(file, camelcase_type_names(text)) & replaceable
+        if len(named) > 1:
+            groups.add(named)
+    return tuple(sorted(groups, key=lambda g: sorted(g)))
 
 
 def connected_components(
     items: tuple[PrivateSurfaceItem, ...],
+    coupled: tuple[frozenset[str], ...] = (),
 ) -> tuple[tuple[PrivateSurfaceItem, ...], ...]:
     """Group items into connected components of the type-reference graph.
 
     Edges: an item references another private type by name (directed), plus all
-    items sharing a name (a fn sig helper attaches to the type it names). We use
-    the UNDIRECTED closure — any partition finer than the connected component
-    would let two mutually-referencing private types be authored inconsistently
-    (the exact divergence F11 exists to prevent). Deterministic order:
-    components sorted by their first item's (file, name)."""
+    items sharing a name (a fn sig helper attaches to the type it names), plus
+    each `coupled` group (private names a FROZEN item holds together — see
+    PrivateSurface.coupled). We use the UNDIRECTED closure — any partition finer
+    than the connected component would let two mutually-referencing private
+    types be authored inconsistently (the exact divergence F11 exists to
+    prevent). Deterministic order: components sorted by first item's (file,
+    name)."""
     by_name: dict[str, list[int]] = {}
     for i, it in enumerate(items):
         by_name.setdefault(it.name, []).append(i)
 
     adj: dict[int, set[int]] = {i: set() for i in range(len(items))}
+    for group in coupled:
+        idxs = [i for n in group for i in by_name.get(n, ())]
+        for i in idxs:
+            for j in idxs:
+                if i != j:
+                    adj[i].add(j)
     for i, it in enumerate(items):
         for ref in it.references:
             for j in by_name.get(ref, ()):

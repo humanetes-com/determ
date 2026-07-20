@@ -293,11 +293,21 @@ def run_phase_c_tdd(
             ignored_names=frozenset(n for b in _bins for n in b.ignored),
             executed_count=sum(b.executed for b in _bins))
         if not oracle.intact:
+            _why = []
+            if oracle.vanished:
+                _why.append(
+                    f"{len(oracle.vanished)} named test(s) reported no verdict "
+                    f"(binary crashed or failed to compile): "
+                    f"{sorted(oracle.vanished)[:20]}")
+            if oracle.unnamed_shortfall:
+                _why.append(
+                    f"{oracle.unnamed_shortfall} unnamed test(s) short of the "
+                    f"expected total — every expected NAME reported, so the "
+                    f"static inventory under-enumerated (not a crash)")
             deps.log(
                 f"  {tag} [phase-c/tdd] iter {iter_n}: ORACLE SHRUNK — "
-                f"{oracle.missing_count} expected test(s) reported no verdict "
-                f"(binary crashed or failed to compile); counting them as "
-                f"failing. Vanished: {sorted(oracle.vanished)[:20]}")
+                f"counting {oracle.missing_count} as failing. "
+                + "; ".join(_why))
             deps.emit("phase_c.tdd.oracle_vanished", data={
                 "cluster": cluster.name, "iter": iter_n,
                 "expected": _expected_count,
@@ -515,7 +525,10 @@ def run_phase_c_tdd(
         # verdicts (a localized crash is new information the earlier attempts
         # never saw).
         crash_texts: dict[FnLocator, str] = {}
-        if _oracle.missing_count > 0 and deps.localize_crashes is not None:
+        # Gated on NAMED vanished tests, never the bare missing count: an
+        # unnamed shortfall is an inventory gap, and sending gdb + an ASAN
+        # rebuild after it burns a sweep to conclude "no native fault".
+        if _oracle.vanished and deps.localize_crashes is not None:
             _sites = deps.localize_crashes(
                 output, test_cmd, target_src_dir, cluster_env)
             crash_texts = crash_evidence_by_locator(tuple(_sites))
@@ -530,7 +543,7 @@ def run_phase_c_tdd(
                     "frames": [[f.file_rel, f.line, f.fn_name]
                                for f in _site.all_frames]})
             if not _sites:
-                deps.log(f"  {tag} [phase-c/crash] {_oracle.missing_count} "
+                deps.log(f"  {tag} [phase-c/crash] {len(_oracle.vanished)} "
                          "test(s) vanished but no crash could be localized "
                          "(no native fault under gdb, no ASAN report).")
             for _loc in crash_texts:

@@ -271,7 +271,12 @@ def analyze(
     # run is back to blind vanish accounting, the state that produced the
     # pass=14 plateau. One localized site in the segment suppresses (the
     # localizer works; per-sweep gaps are then reproduction flakiness).
-    shrunk = sum(1 for ln in segment_lines if "ORACLE SHRUNK" in ln)
+    # Only a shrink that NAMES vanished tests implies a crash to localize. A
+    # shrink that is purely an unnamed shortfall is a test-inventory gap; the
+    # localizer is right not to blame anything, and counting it here reports a
+    # broken localizer that is in fact working correctly.
+    shrunk = sum(1 for ln in segment_lines
+                 if "ORACLE SHRUNK" in ln and "named test(s) reported" in ln)
     blamed = sum(1 for ln in segment_lines
                  if "[phase-c/crash]" in ln and "blamed" in ln)
     no_localize = sum(1 for ln in segment_lines

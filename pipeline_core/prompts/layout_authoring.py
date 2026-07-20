@@ -12,6 +12,8 @@ Pure text→text; no IO.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from pipeline_core.domain.authored_layout import component_uids
 from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.private_surface import PrivateSurfaceItem
@@ -60,14 +62,23 @@ def _fmt_pins(pins: list[BehaviourSpec]) -> str:
 
 def _fmt_items(
     items: tuple[PrivateSurfaceItem, ...], uids: tuple[str, ...],
+    anchors: Mapping[str, str] | None = None,
 ) -> str:
-    """One listing line per item, keyed by protocol uid. The frozen first line
-    of the current definition is shown so the model can tell same-named items
-    apart (two `as_ref` on different impls differ only by signature)."""
+    """One listing line per item, keyed by protocol uid.
+
+    The item's CURRENT definition is deliberately absent. Showing it — even
+    just its first line — hands over the design the model is being asked to
+    invent (`ErrorImpl — currently: #[repr(C)]`, `vtable — currently: fn
+    vtable(p: NonNull<ErrorImpl>) -> &'static ErrorVTable` is an architecture,
+    not a disambiguator), and the reply comes back shaped like it. Same-named
+    items are told apart by the uid's ordinal suffix plus the file and the
+    public type the item is reachable from — facts already visible in the
+    frozen public surface above."""
     lines = []
     for uid, it in zip(uids, items, strict=True):
-        head = it.definition.strip().splitlines()[0] if it.definition.strip() else ""
-        lines.append(f"- {uid} ({it.kind.name.lower()}) in {it.file} — currently: {head}")
+        anchor = (anchors or {}).get(uid, "")
+        via = f" — reached from the public `{anchor}`" if anchor else ""
+        lines.append(f"- {uid} ({it.kind.name.lower()}) in {it.file}{via}")
     return "\n".join(lines)
 
 
@@ -105,6 +116,7 @@ def build_layout_authoring_prompt(
     extra_guidance: str = "",
     authored_scheme: str = "",
     item_uids: tuple[str, ...] | None = None,
+    item_anchors: Mapping[str, str] | None = None,
 ) -> str:
     """Assemble the t1.5 prompt for one connected component of the private
     surface (or ONE CHUNK of a large component — `items` is then the chunk and
@@ -112,7 +124,9 @@ def build_layout_authoring_prompt(
     cannot recompute from its own subset). `extra_guidance` (e.g.
     CRASH_GUIDANCE) is appended before the rules. `authored_scheme` carries
     the definitions already authored by earlier chunks of the same pass —
-    fixed context the new items must fit."""
+    fixed context the new items must fit. `item_anchors` maps a uid to the
+    frozen PUBLIC type that reaches it, the only disambiguation the listing
+    offers (never the item's current definition — see `_fmt_items`)."""
     uids = item_uids if item_uids is not None else component_uids(items)
     return "\n".join([s for s in [
         f"You are designing the PRIVATE layout of the `{module_name}` crate "
@@ -137,7 +151,7 @@ def build_layout_authoring_prompt(
         authored_scheme.strip() or None,
         "" if authored_scheme.strip() else None,
         "=== ITEMS TO AUTHOR ===",
-        _fmt_items(items, uids),
+        _fmt_items(items, uids, item_anchors),
         "",
         extra_guidance or None,
         "" if extra_guidance else None,

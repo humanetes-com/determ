@@ -5,6 +5,7 @@ from __future__ import annotations
 from pipeline_core.domain.failure_classification import (
     FailureCategory,
     classify_failure,
+    first_diagnostic,
 )
 
 
@@ -35,3 +36,20 @@ def test_is_a_str_for_back_compat() -> None:
     # StrEnum: equality with the legacy string values still holds.
     assert classify_failure("error[E0308]") == "build"
     assert FailureCategory.NO_TESTS == "no_tests"
+
+
+def test_first_diagnostic_names_the_error() -> None:
+    out = ("   Compiling x v0.1.0\n"
+           "warning: unused import\n"
+           "error[E0554]: `#![feature]` may not be used on the stable release channel\n"
+           "  --> src/lib.rs:210:42\n"
+           "error: aborting due to 1 previous error\n")
+    # The FIRST diagnostic, not the last — rustc puts the primary cause first,
+    # and "aborting due to" names no cause at all.
+    assert first_diagnostic(out) == (
+        "error[E0554]: `#![feature]` may not be used on the stable release channel")
+
+
+def test_first_diagnostic_empty_when_no_diagnostic() -> None:
+    assert first_diagnostic("") == ""
+    assert first_diagnostic("   Compiling x\nwarning: unused\n") == ""

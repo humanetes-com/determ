@@ -25,6 +25,7 @@ from ..domain.models import (
     ModRecord,
     SkeletoniseResult,
     TypeRecord,
+    UseRecord,
 )
 
 
@@ -83,6 +84,10 @@ class CliExtractor:
     def enumerate_feature_gate_cfgs(self, src_dir: Path, *, cfg_true: tuple[str, ...] = (), cfg_false: tuple[str, ...] = ()) -> list[str] | None:
         rows = self._enumerate("--enumerate-feature-gate-cfgs", src_dir, cfg_true, cfg_false)
         return None if rows is None else [str(x) for x in rows]
+
+    def enumerate_uses(self, src_dir: Path, *, cfg_true: tuple[str, ...] = (), cfg_false: tuple[str, ...] = ()) -> list[UseRecord] | None:
+        rows = self._enumerate("--enumerate-uses", src_dir, cfg_true, cfg_false)
+        return None if rows is None else [UseRecord.from_dict(r) for r in rows]
 
     def enumerate_mods(self, src_dir: Path, *, cfg_true: tuple[str, ...] = (), cfg_false: tuple[str, ...] = ()) -> list[ModRecord] | None:
         rows = self._enumerate("--enumerate-mods", src_dir, cfg_true, cfg_false)

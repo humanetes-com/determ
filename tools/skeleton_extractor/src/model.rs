@@ -94,6 +94,29 @@ pub struct ModRecord {
     pub vis: String,
 }
 
+/// One name a file's TOP-LEVEL `use` declarations bind into that file's scope.
+///
+/// Needed because a bare type identifier does NOT identify a crate item on its
+/// own: `use std::error::Error as StdError;` makes `StdError` mean std's trait
+/// in every file that imports it, even when the crate ALSO declares a private
+/// `StdError` of its own in some inline module. Resolving references by bare
+/// name alone welds unrelated items together; these records let the Python side
+/// resolve a name to the module path it actually denotes.
+///
+/// Only top-level `use`s are emitted: a `use` nested inside an inline `mod`
+/// binds names in THAT module's scope, which the file-granular records here
+/// cannot represent — emitting it would over-bind the enclosing file.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct UseRecord {
+    pub file: String,
+    /// Ident bound in the file's scope; `"*"` for a glob import.
+    pub alias: String,
+    /// Path segments as written, terminal included (`crate`/`self`/`super`
+    /// prefixes preserved). For a glob this is the globbed module's path.
+    pub path: Vec<String>,
+    pub is_glob: bool,
+}
+
 /// One leaf of a `#[cfg(...)]` condition: a bare ident (`value: None`, e.g.
 /// `nightly`) or a `key = "value"` (`feature = "std"` → key `feature`, value
 /// `"std"` with quotes, spaces stripped). The Python side counts these to derive

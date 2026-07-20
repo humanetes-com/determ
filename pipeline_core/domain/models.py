@@ -264,6 +264,38 @@ class ModRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class UseRecord:
+    """One name a file's TOP-LEVEL `use` declarations bind (model.rs UseRecord).
+
+    A bare type identifier does not identify a crate item on its own: with
+    `use std::error::Error as StdError;` the ident `StdError` denotes std's
+    trait even in a crate that also declares a private `StdError` of its own.
+    These records are what `domain.rust_name_scope` resolves names against."""
+
+    file: str = ""
+    alias: str = ""             # ident bound in the file's scope; "*" for a glob
+    path: tuple[str, ...] = ()  # segments as written, terminal included
+    is_glob: bool = False
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> UseRecord:
+        return cls(
+            file=d.get("file", ""),
+            alias=d.get("alias", ""),
+            path=_strs(d.get("path")),
+            is_glob=bool(d.get("is_glob", False)),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "file": self.file,
+            "alias": self.alias,
+            "path": list(self.path),
+            "is_glob": self.is_glob,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class CfgOccurrence:
     """One `#[cfg(...)]` / `#[cfg_attr(COND, ...)]` occurrence and the leaf atoms
     of its condition (model.rs CfgOccurrence). Emitted by `--enumerate-cfgs`;

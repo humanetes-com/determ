@@ -16,7 +16,7 @@ frozen skeleton exactly as before F11.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -151,7 +151,9 @@ def make_layout_phase_runner(
     load_suite: Callable[[Path, str], BehaviourSuite],
     api_surface_path: Callable[[Path, str], Path],
     run_model: Callable[[str], str],
-    compile_check: Callable[[Path, str, Mapping[str, str]], tuple[bool, str]],
+    # (project_dir, cluster name, the baked cluster itself). The cluster object
+    # travels whole: its toolchain is not expressible as an env mapping.
+    compile_check: Callable[[Path, str, Any], tuple[bool, str]],
     skeleton_src_dir_for: Callable[[Path, str], Path],
     fn_name_counts: Callable[[Path], dict[str, int]],
     log: Callable[[str], None],
@@ -170,7 +172,7 @@ def make_layout_phase_runner(
         clusters = load_baked_clusters(project_dir) or []
         if not clusters:
             return
-        env_by_cluster = {c.name: dict(c.env_extra) for c in clusters}
+        cluster_by_name = {c.name: c for c in clusters}
 
         def _public_surface_text(pd: Path, cluster: str) -> str:
             try:
@@ -196,7 +198,7 @@ def make_layout_phase_runner(
             return AuthorLayoutDeps(
                 run_model=run_model, read_skeleton=_read, write_skeleton=_write,
                 compile_check=lambda: compile_check(
-                    pd, cluster, env_by_cluster.get(cluster, {})),
+                    pd, cluster, cluster_by_name.get(cluster)),
                 log=log,
                 write_pin_probe=(
                     None if write_pin_probe is None

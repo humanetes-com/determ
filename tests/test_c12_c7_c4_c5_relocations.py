@@ -144,6 +144,7 @@ def _bake_deps(logs: list[str]) -> BakeArtifactsDeps:
         enumerate_types=lambda sd: [],
         enumerate_fns=lambda sd: [],
         enumerate_mods=lambda sd: [],
+        enumerate_uses=lambda sd: [],
         save_private_surface=lambda pd, surface: pd / "_ps.json",
     )
 
@@ -178,6 +179,7 @@ def test_bake_skeleton_artifacts_extractor_failure(tmp_path: Path) -> None:
         enumerate_types=deps.enumerate_types,
         enumerate_fns=deps.enumerate_fns,
         enumerate_mods=deps.enumerate_mods,
+        enumerate_uses=deps.enumerate_uses,
         save_private_surface=deps.save_private_surface)
     res = bake_skeleton_artifacts(tmp_path, "m", bad)
     assert res["ok"] is False and "boom" in res["reason"]

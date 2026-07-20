@@ -59,6 +59,7 @@ def save_private_surface(project_dir: Path, surface: PrivateSurface) -> Path:
         "public_direct_refs": {
             name: sorted(refs)
             for name, refs in surface.public_direct_refs.items()},
+        "coupled": [sorted(g) for g in surface.coupled],
     }
     p.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     return p
@@ -80,6 +81,9 @@ def load_private_surface(project_dir: Path, cfg_cluster: str) -> PrivateSurface:
             public_direct_refs={
                 str(name): frozenset(str(x) for x in (refs or []))
                 for name, refs in (d.get("public_direct_refs") or {}).items()},
+            coupled=tuple(
+                frozenset(str(x) for x in (g or []))
+                for g in (d.get("coupled") or [])),
         )
     except (OSError, json.JSONDecodeError, KeyError, ValueError):
         return PrivateSurface(cfg_cluster=cfg_cluster, replaceable=(),

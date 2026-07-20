@@ -81,7 +81,7 @@ def _cluster() -> BuildCluster:
 def _run_driver(monkeypatch, tmp_path: Path, *, run_cargo, inventory,
                 attribution_kwargs: list[dict[str, Any]],
                 checkpoints: list[int], events: list[tuple[str, dict]],
-                retrigger=None, reverse_map=None,
+                retrigger=None, reverse_map=None, localize=None,
                 ) -> ClusterFillResult:
     monkeypatch.setenv("PHASE_C_TDD_BATCH_RATCHET", "0")
     monkeypatch.setenv("TDD_MAX_STALLS", "2")
@@ -110,6 +110,7 @@ def _run_driver(monkeypatch, tmp_path: Path, *, run_cargo, inventory,
         checkpoint_fill_tree=lambda pd, cl, d, p, i: checkpoints.append(p),
         active_test_inventory=inventory,
         retrigger_layout=retrigger,
+        localize_crashes=localize,
     )
     return run_phase_c_tdd(
         deps, project_dir=tmp_path, target_src_dir=tmp_path, tests_dir_files=[],
@@ -305,3 +306,56 @@ def test_persistent_vanish_fires_crash_retrigger_with_suspects(
     assert ("src/error.rs", "downcast_ref") in ev.suspect_fns
     assert any(ev_name == "phase_c.layout_retrigger.fired"
                for ev_name, _ in events)
+
+
+def test_unnamed_shortfall_separates_inventory_gap_from_crash() -> None:
+    """Every expected NAME reported, yet the trailer total is short by one:
+    nothing crashed, the inventory just could not enumerate that test. Keeping
+    the two apart is what stops the crash localizer (gdb + an ASAN rebuild)
+    being sent after a fault that cannot exist."""
+    o = reconcile_sweep(3, frozenset({"a", "b"}),
+                        passed=["a"], failed=["b"], executed_count=2)
+    assert o.vanished == frozenset()
+    assert o.deficit == 1
+    assert o.unnamed_shortfall == 1
+    assert o.missing_count == 1          # still charged as failing — no fraud
+    assert not o.intact
+
+
+def test_named_vanish_is_not_double_counted_as_unnamed() -> None:
+    o = reconcile_sweep(3, frozenset({"a", "b", "c"}),
+                        passed=["a"], failed=[], executed_count=1)
+    assert o.vanished == frozenset({"b", "c"})
+    assert o.unnamed_shortfall == 0      # the deficit IS the two vanished names
+    assert o.missing_count == 2
+
+
+def test_unnamed_shortfall_does_not_invoke_the_crash_localizer(
+        tmp_path: Path, monkeypatch) -> None:
+    """3 expected, 3 named tests all report, trailer says 2 → a count-only
+    shortfall. gdb + an ASAN rebuild cannot find a fault that never happened,
+    so the localizer must not be paid for every sweep to say so."""
+    out = ("test t1 ... ok\ntest t2 ... ok\ntest t3 ... FAILED\n"
+           "test result: FAILED. 2 passed; 1 failed; 0 ignored")
+    calls: list[Any] = []
+    _run_driver(monkeypatch, tmp_path,
+                run_cargo=lambda *a, **k: (101, out),
+                inventory=lambda pd, cl, stems: (
+                    4, frozenset({"t1", "t2", "t3"})),
+                attribution_kwargs=[], checkpoints=[], events=[],
+                localize=lambda *a, **k: calls.append(a) or ())
+    assert calls == []
+
+
+def test_named_vanish_still_invokes_the_crash_localizer(
+        tmp_path: Path, monkeypatch) -> None:
+    out = ("test t1 ... ok\ntest t2 ... ok\n"
+           "test result: FAILED. 2 passed; 0 failed; 0 ignored")
+    calls: list[Any] = []
+    _run_driver(monkeypatch, tmp_path,
+                run_cargo=lambda *a, **k: (101, out),
+                inventory=lambda pd, cl, stems: (
+                    3, frozenset({"t1", "t2", "t3"})),
+                attribution_kwargs=[], checkpoints=[], events=[],
+                localize=lambda *a, **k: calls.append(a) or ())
+    assert calls, "a named vanished test is exactly what the localizer is for"

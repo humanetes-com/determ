@@ -11,11 +11,12 @@ positive would splice a broken scaffold into t2a — so we never guess ``True``.
 """
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
-from collections.abc import Mapping
 from pathlib import Path
+
+from pipeline_core.adapters.cargo import apply_cluster_env, base_cargo_env
+from pipeline_core.domain.models import BuildCluster
 
 _SKELETON_DIR = ".skeleton"
 
@@ -42,20 +43,6 @@ def _ensure_crate_manifest(project_dir: Path, skel_dir: Path) -> bool:
         return True
     except OSError:
         return False
-
-
-def compile_skeleton_ok(
-    project_dir: Path,
-    cfg_cluster: str,
-    *,
-    env_extra: Mapping[str, str] | None = None,
-    timeout: int = 240,
-) -> bool:
-    """True iff the per-cluster skeleton crate passes ``cargo check`` (lib only).
-    Everything that is not a clean rc==0 → False (see module docstring)."""
-    ok, _ = compile_skeleton_check(
-        project_dir, cfg_cluster, env_extra=env_extra, timeout=timeout)
-    return ok
 
 
 _ERROR_EXCERPT_CHARS = 5000
@@ -107,21 +94,35 @@ def compile_skeleton_check(
     project_dir: Path,
     cfg_cluster: str,
     *,
-    env_extra: Mapping[str, str] | None = None,
+    cluster: BuildCluster | None,
     timeout: int = 240,
 ) -> tuple[bool, str]:
-    """``compile_skeleton_ok`` plus a bounded compiler-error excerpt, so a
-    failed layout-authoring attempt can feed the model WHAT failed instead of
-    a bare "did not compile" (feedback fidelity). rustc puts the primary
-    diagnostics first — keep the head."""
+    """Does the per-cluster skeleton crate pass ``cargo check`` (lib only)? Plus
+    a bounded compiler-error excerpt, so a failed layout-authoring attempt can
+    feed the model WHAT failed instead of a bare "did not compile" (feedback
+    fidelity). rustc puts the primary diagnostics first — keep the head.
+
+    Takes the whole :class:`BuildCluster`, never a loose env mapping: a dict of
+    env vars cannot express "this cluster needs the nightly toolchain", so a
+    mapping-shaped parameter silently drops it. Compiling anyhow's nightly
+    cluster with its ``RUSTFLAGS=--cfg error_generic_member_access`` but the
+    default toolchain switches the nightly-only blocks ON and then builds them
+    on stable — E0554 at the crate root, every component, every attempt,
+    whatever the model wrote. ``apply_cluster_env`` is the one place that knows
+    both halves; going through it keeps this gate compiling under the same
+    conditions as the real build."""
     skel_dir = skeleton_dir_for(project_dir, cfg_cluster)
     if not (skel_dir / "src").is_dir():
         return False, "skeleton src/ missing"
     if not _ensure_crate_manifest(project_dir, skel_dir):
         return False, "crate manifest missing"
-    env = dict(os.environ)
-    if env_extra:
-        env.update({str(k): str(v) for k, v in env_extra.items()})
+    if cluster is None:
+        # Conservative + loud: guessing a toolchain here is what this signature
+        # exists to prevent, and False merely leaves the component frozen.
+        return False, (f"no baked cluster {cfg_cluster!r} — cannot determine the "
+                       "toolchain/cfg the layout gate must compile under")
+    env = base_cargo_env()
+    apply_cluster_env(env, cluster)
     try:
         proc = subprocess.run(
             ["cargo", "check", "--lib", "--quiet"],

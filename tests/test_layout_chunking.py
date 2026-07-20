@@ -249,7 +249,7 @@ def test_duplicate_sigs_route_to_distinct_slots_via_uids():
     assert "imp_a" in lines[0] and "imp_b" in lines[1]
 
 
-def test_prompt_lists_uids_with_current_sig():
+def test_prompt_lists_uids_without_the_frozen_sig():
     items = (_fn("as_ref", "src/e.rs", "fn as_ref(&self) -> &A"),
              _fn("as_ref", "src/e.rs", "fn as_ref(&self) -> &B"))
     files = {"src/e.rs": ("fn as_ref(&self) -> &A { unimplemented!() }\n"
@@ -260,5 +260,8 @@ def test_prompt_lists_uids_with_current_sig():
                   select_pins=lambda c: [], symbol_inventory="",
                   deps=d.deps())
     p = d.prompts[0]
-    assert "- as_ref.1 (fn_sig) in src/e.rs — currently: fn as_ref(&self) -> &A" in p
-    assert "- as_ref.2 (fn_sig) in src/e.rs — currently: fn as_ref(&self) -> &B" in p
+    # the ordinal uid tells the two apart; their frozen signatures are NOT
+    # shown — that head line was handing the model the design to invent.
+    assert "- as_ref.1 (fn_sig) in src/e.rs" in p
+    assert "- as_ref.2 (fn_sig) in src/e.rs" in p
+    assert "currently:" not in p and "-> &A" not in p

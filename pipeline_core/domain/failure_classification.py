@@ -33,6 +33,22 @@ class FailureCategory(StrEnum):
     TEST = "test"            # catch-all for other test failures
 
 
+def first_diagnostic(text: str) -> str:
+    """The first compiler diagnostic line in ``text``, for log lines that must
+    say WHY a compile failed without dumping the whole excerpt.
+
+    A bare "did not compile" log is unactionable: a gate that fails every
+    attempt for one environmental reason (e.g. E0554 — `#![feature]` on the
+    stable channel, which no authored layout can fix) reads identically to a
+    model that simply wrote bad code. Returns "" when nothing looks like a
+    diagnostic."""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("error"):
+            return stripped
+    return ""
+
+
 def classify_failure(test_output: str) -> FailureCategory:
     """Classify runner output into a :class:`FailureCategory`."""
     out = test_output.lower()
