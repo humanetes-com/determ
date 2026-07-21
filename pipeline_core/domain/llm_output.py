@@ -191,17 +191,31 @@ def extract_response_code_fence(text: str) -> str | None:
     return None
 
 
-def extract_body_response(response: str) -> str | None:
+def extract_body_response(response: str, fn_name: str | None = None) -> str | None:
     """Pull a Rust function body out of an LLM response.
 
-    Priority: <BODY>…</BODY> tag → ```rust``` fence → raw response (last resort).
-    Returns None on empty/blank.
+    Priority: <BODY>…</BODY> tag → <FN name=…> block → ```rust``` fence → raw
+    response (last resort). Returns None on empty/blank.
+
+    The `<FN>` rung exists because several per-fn prompts specify that format,
+    and a model given one fn will often answer with its siblings too. Without
+    it the raw fallback returns the WHOLE reply — literal `<FN …>` tags and all
+    — as "the body", which splices unparseable text and loses a correct answer.
+    A reply that uses `<FN>` never reaches the raw fallback: when the wanted
+    name is absent and several blocks are offered, None (ask again) beats
+    splicing a sibling's body into this fn.
     """
     if not response or not response.strip():
         return None
     inner = extract_tagged_block(response, "BODY")
     if inner is not None:
         return inner.strip() or None
+    blocks = extract_fn_bodies(response)
+    if blocks:
+        named = [b for b in blocks
+                 if fn_name and b["fn_name"] == canon_fn_name(fn_name)]
+        chosen = named[0] if named else (blocks[0] if len(blocks) == 1 else None)
+        return (chosen["body"].strip() or None) if chosen else None
     fenced = extract_response_code_fence(response)
     if fenced:
         return fenced

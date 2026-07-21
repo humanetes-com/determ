@@ -611,3 +611,44 @@ def test_parse_rustc_compile_errors_edges() -> None:
     assert parse("error: msg\n  --> nocolonhere\n") == []
     assert parse("error: msg\n  --> src/lib.rs:xy\n") == []
     assert parse("error: msg at end of output") == []
+
+
+def test_extract_body_response_reads_fn_blocks() -> None:
+    # The per-fn prompts specify <FN>, and a model given one fn often answers
+    # with its siblings too. Without this rung the raw fallback returned the
+    # whole reply — tags included — as "the body" and the splice lost it.
+    from pipeline_core.domain import llm_output as lo
+
+    reply = (
+        '<FN name="construct_from_display" block="impl Error">\n'
+        "    let a = 1;\n"
+        "</FN>\n"
+        '<FN name="construct_from_boxed" block="impl Error">\n'
+        "    let b = 2;\n"
+        "</FN>\n"
+    )
+    assert lo.extract_body_response(reply, "construct_from_display") == "let a = 1;"
+    assert lo.extract_body_response(reply, "construct_from_boxed") == "let b = 2;"
+    # No <FN ...> tag text ever survives into a body.
+    for name in ("construct_from_display", "construct_from_boxed"):
+        assert "<FN" not in (lo.extract_body_response(reply, name) or "")
+
+
+def test_extract_body_response_refuses_to_guess_between_fn_blocks() -> None:
+    from pipeline_core.domain import llm_output as lo
+
+    reply = ('<FN name="a" block="impl X">1</FN>\n'
+             '<FN name="b" block="impl X">2</FN>\n')
+    # Wanted name absent + several offered → ask again, never splice a
+    # sibling's body into this fn.
+    assert lo.extract_body_response(reply, "c") is None
+    assert lo.extract_body_response(reply) is None
+    # A single unnamed-match block is unambiguous, so it is used.
+    assert lo.extract_body_response('<FN name="a" block="impl X">1</FN>') == "1"
+
+
+def test_extract_body_response_body_tag_still_wins() -> None:
+    from pipeline_core.domain import llm_output as lo
+
+    reply = '<BODY>self.x()</BODY>\n<FN name="a" block="impl X">other</FN>'
+    assert lo.extract_body_response(reply, "a") == "self.x()"

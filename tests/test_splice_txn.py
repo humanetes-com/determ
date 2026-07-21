@@ -209,3 +209,44 @@ def test_replace_fn_signature_recovers_an_escaped_signature(tmp_path) -> None:
     assert replace_fn_signature(f, "a", "fn a(x: &amp;str) -> usize",
                                 validate_parse=_validate) is True
     assert "fn a(x: &str) -> usize" in f.read_text(encoding="utf-8")
+
+
+def test_revert_writes_a_stub_back_but_a_fill_still_cannot(tmp_path) -> None:
+    # Undoing a fill legitimately restores `unimplemented!()`; the stub refusal
+    # exists to stop the MODEL answering with one, not the pipeline reverting.
+    f = tmp_path / "m.rs"
+    f.write_text("fn a() {\n    let x = 1;\n}\n", encoding="utf-8")
+    assert splice_fn_body(f, "a", "unimplemented!()", allow_nonstub=True,
+                          validate_parse=_ACCEPT).reason == "body_is_stub"
+    out = splice_fn_body(f, "a", "unimplemented!()", allow_nonstub=True,
+                         allow_stub_body=True, validate_parse=_ACCEPT)
+    assert out.ok is True
+    assert "unimplemented!()" in f.read_text(encoding="utf-8")
+
+
+def test_revert_body_scoped_touches_only_its_own_fn(tmp_path) -> None:
+    # The regression this exists for: a losing unit used to restore a WHOLE-FILE
+    # snapshot taken before it queued for the splice lock, erasing sibling fills
+    # that landed meanwhile and had already been reported as filled.
+    from pipeline_core.adapters.fill_engine_roles import MutatorAdapter
+
+    f = tmp_path / "m.rs"
+    f.write_text("fn a() {\n    unimplemented!()\n}\n"
+                 "fn b() {\n    unimplemented!()\n}\n", encoding="utf-8")
+    mut = MutatorAdapter(
+        locate_fn_by_record_fn=lambda *a, **k: None,   # extractor-absent path
+        locate_fn_fn=lambda *a: None,
+        splice_fn_body_at_fn=splice_fn_body_at,
+        splice_fn_body_fn=splice_fn_body,
+        replace_fn_signature_fn=lambda *a, **k: False,
+        extract_signature_block_fn=lambda _r: None,
+        lock_for_fn=lambda _t: __import__("threading").Lock(),
+    )
+    # a sibling fills while our unit is working
+    assert splice_fn_body(f, "b", "let sibling = 1;", validate_parse=_ACCEPT).ok
+    # our unit loses and reverts its own fn
+    assert mut.revert_body_scoped(f, "a", "", "", "unimplemented!()").ok
+
+    text = f.read_text(encoding="utf-8")
+    assert "let sibling = 1;" in text     # sibling's work survives
+    assert text.count("unimplemented!()") == 1   # only `a` is back to a stub

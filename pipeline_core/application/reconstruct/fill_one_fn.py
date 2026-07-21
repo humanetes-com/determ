@@ -130,6 +130,20 @@ class FillOneFn:
             _, _cbs, _cbe, sig_text = loc_at
             if rec.refill:
                 _cur_body = snapshot[_cbs:_cbe]
+        # `snapshot` is the WHOLE FILE as it stood before this unit queued for
+        # the splice lock. Under parallelism several units in the same file
+        # snapshot the same starting state, so by the time a losing unit
+        # reverts, its image predates every sibling fill that landed meanwhile
+        # — writing it back erases fns already reported as filled (observed:
+        # three `filled` constructors back to `unimplemented!()`). Revert only
+        # THIS fn, at offsets resolved against the file as it stands now.
+        _own_pre_image = _cur_body or "unimplemented!()"
+
+        def _revert_own_body() -> None:
+            self.mut.revert_body_scoped(
+                file_path, fn_name, container, sig_text, _own_pre_image,
+                cfg_predicates=rec.cfg_predicates)
+
         test_blocks = self.tests.find_tests_for_fn(
             ctx.tests_dir_files, fn_name,
             file_rel=rel_file, src_dir=ctx.src_for_macros,
@@ -561,7 +575,7 @@ class FillOneFn:
             # block below restores + annotates anyway, so the end state
             # on a stall/repeated exit is identical to the old in-loop
             # ordering.)
-            file_path.write_text(snapshot, encoding="utf-8")
+            _revert_own_body()
             if not _lock_released:
                 ctx.splice_check_lock.release()
                 _lock_released = True
@@ -756,7 +770,7 @@ class FillOneFn:
             # implemented, giving richer context. Lock the file-write
             # phase against concurrent workers.
             with ctx.splice_check_lock:
-                file_path.write_text(snapshot, encoding="utf-8")
+                _revert_own_body()
                 annotated_body = make_failed_attempt_body(
                     attempted_body=last_body or first_failed_body or "",
                     error_excerpt=error_excerpt or first_error_excerpt or "",

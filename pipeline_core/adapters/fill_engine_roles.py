@@ -81,14 +81,45 @@ class MutatorAdapter:
 
     def splice_fn_body_at(self, file_path: Path, body_byte_start: int,
                           body_byte_end: int, new_body: str,
-                          allow_nonstub: bool = False) -> SpliceOutcome:
+                          allow_nonstub: bool = False,
+                          allow_stub_body: bool = False) -> SpliceOutcome:
         return self.splice_fn_body_at_fn(file_path, body_byte_start, body_byte_end,
-                                         new_body, allow_nonstub=allow_nonstub)
+                                         new_body, allow_nonstub=allow_nonstub,
+                                         allow_stub_body=allow_stub_body)
+
+    def revert_body_scoped(self, file_path: Path, name: str, container: str,
+                           sig_text: str, pre_image: str,
+                           cfg_predicates: tuple[str, ...] | None = None,
+                           ) -> SpliceOutcome:
+        """Undo THIS fn's own edit by writing `pre_image` back at offsets
+        re-resolved against the file as it stands now.
+
+        Never restore a whole-file snapshot to revert one fn: under
+        parallelism the snapshot is older than the sibling fills that landed
+        in the same file meanwhile, so writing it back erases work that has
+        already been reported as filled. Reverting is a per-fn operation and
+        `pre_image` may legally be a stub."""
+        if container:
+            loc = self.locate_fn_by_record(file_path, name, container, sig_text,
+                                           cfg_predicates)
+            if loc is not None:
+                _sig_start, body_start, body_end, _sig = loc
+                return self.splice_fn_body_at(
+                    file_path, body_start, body_end, pre_image,
+                    allow_nonstub=True, allow_stub_body=True)
+        # Same record-locator-then-bare-name ladder as splice_body_scoped: the
+        # extractor binary is absent on the fixture path, and a revert that
+        # silently does nothing leaves the failed body in place, so the next
+        # attempt's splice is refused `target_not_stub`.
+        return self.splice_fn_body(file_path, name, pre_image,
+                                   allow_nonstub=True, allow_stub_body=True)
 
     def splice_fn_body(self, file_path: Path, name: str, new_body: str,
-                       allow_nonstub: bool = False) -> SpliceOutcome:
+                       allow_nonstub: bool = False,
+                       allow_stub_body: bool = False) -> SpliceOutcome:
         return self.splice_fn_body_fn(file_path, name, new_body,
-                                      allow_nonstub=allow_nonstub)
+                                      allow_nonstub=allow_nonstub,
+                                      allow_stub_body=allow_stub_body)
 
     def splice_body_scoped(self, file_path: Path, name: str, container: str,
                            sig_text: str, new_body: str,

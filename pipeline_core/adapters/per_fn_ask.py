@@ -61,11 +61,12 @@ def ask_per_fn_body(
             kwargs["temperature"] = eff_unsafe_temp
         while True:
             last_response = client.ask(prompt, **kwargs)
-            # A request-only reply (no <BODY>, no fence) is a context
+            # A request-only reply (no <BODY>, no <FN>, no fence) is a context
             # request, never a body — extract_body_response's raw fallback
             # would otherwise splice the tag text verbatim.
             if (answer_request is not None
                     and "<BODY>" not in last_response
+                    and "<FN " not in last_response
                     and "```" not in last_response
                     and extract_context_pull(last_response) is not None):
                 addition = answer_request(last_response)
@@ -75,7 +76,7 @@ def ask_per_fn_body(
                     continue
                 attempts_log.append(f"{fn_name}: unanswered context request")
                 break
-            body = extract_body_response(last_response)
+            body = extract_body_response(last_response, fn_name)
             if body and not is_unimplemented_body(body):
                 if label != "default":
                     attempts_log.append(f"{fn_name}: recovered via {label}")

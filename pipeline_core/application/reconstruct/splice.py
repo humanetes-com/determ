@@ -162,6 +162,7 @@ def locate_fn_by_record(enumerate_fns: Callable[[Path], list[dict[str, Any]] | N
 
 def splice_fn_body_at(file_path: Path, body_byte_start: int, body_byte_end: int,
                         new_body: str, allow_nonstub: bool = False,
+                        allow_stub_body: bool = False,
                         validate_parse: ParseValidator | None = None) -> SpliceOutcome:
     """Splice `new_body` between bytes [body_byte_start, body_byte_end) in
     `file_path`. Replaces an explicit byte range — used when the caller has
@@ -196,7 +197,10 @@ def splice_fn_body_at(file_path: Path, body_byte_start: int, body_byte_end: int,
     nb = new_body.strip()
     if nb.startswith("{") and nb.endswith("}"):
         nb = nb[1:-1].strip()
-    if not nb or is_unimplemented_body(nb):
+    # The stub refusal exists to stop the MODEL answering `unimplemented!()`.
+    # A REVERT writes the pipeline's own pre-image back and may legitimately
+    # be a stub — that is what undoing a fill means.
+    if not nb or (not allow_stub_body and is_unimplemented_body(nb)):
         return SpliceOutcome(False, "body_is_stub", 0)
     # Re-indent the body to match the fn's existing indentation. Find the
     # column of the fn declaration by walking back to the previous newline.
@@ -298,7 +302,7 @@ def restore_frozen_signature(file_path: Path, fn_name: str,
 
 
 def splice_fn_body(file_path: Path, fn_name: str, new_body: str,
-                   allow_nonstub: bool = False,
+                   allow_nonstub: bool = False, allow_stub_body: bool = False,
                    validate_parse: ParseValidator | None = None) -> SpliceOutcome:
     """Replace the body of ``fn_name`` in ``file_path`` with ``new_body`` via a
     name-match (char-space) locate. By default only splices an
@@ -327,7 +331,7 @@ def splice_fn_body(file_path: Path, fn_name: str, new_body: str,
     nb = new_body.strip()
     if nb.startswith("{") and nb.endswith("}"):
         nb = nb[1:-1].strip()
-    if not nb or is_unimplemented_body(nb):
+    if not nb or (not allow_stub_body and is_unimplemented_body(nb)):
         return SpliceOutcome(False, "body_is_stub", 0)
     line_start = text.rfind("\n", 0, _sig_start) + 1
     sig_line = text[line_start:_sig_start]

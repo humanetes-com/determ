@@ -58,11 +58,15 @@ class Mutator(Protocol):
     ) -> tuple[str, int, int, int] | None: ...
     def splice_fn_body_at(
         self, file_path: Path, body_byte_start: int, body_byte_end: int,
-        new_body: str, allow_nonstub: bool = ...,
+        new_body: str, allow_nonstub: bool = ..., allow_stub_body: bool = ...,
+    ) -> SpliceOutcome: ...
+    def revert_body_scoped(
+        self, file_path: Path, name: str, container: str, sig_text: str,
+        pre_image: str, cfg_predicates: tuple[str, ...] | None = ...,
     ) -> SpliceOutcome: ...
     def splice_fn_body(
         self, file_path: Path, name: str, new_body: str,
-        allow_nonstub: bool = ...,
+        allow_nonstub: bool = ..., allow_stub_body: bool = ...,
     ) -> SpliceOutcome: ...
     def splice_body_scoped(
         self, file_path: Path, name: str, container: str, sig_text: str,
