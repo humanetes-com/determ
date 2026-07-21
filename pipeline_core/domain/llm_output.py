@@ -416,6 +416,63 @@ def _read_quoted_attr(text: str, pos: int, name: str) -> tuple[str, int] | None:
     return html.unescape(text[v:end]), end + 1
 
 
+_XML_ENTITIES = {"amp": "&", "lt": "<", "gt": ">", "quot": '"', "apos": "'"}
+
+
+def xml_unescape_strict(text: str) -> str:
+    """Resolve XML entity references, STRICTLY: only the five predefined names
+    and numeric refs, and only when terminated by `;`.
+
+    `html.unescape` must NOT be used on code. HTML5 accepts a named reference
+    without its semicolon, so it rewrites the ordinary Rust `&ampersand` to
+    `&ersand` and `&gtr_bound` to `>r_bound` — silently mangling any identifier
+    whose name starts with an entity name. Attribute values can afford that
+    leniency; a function body cannot.
+    """
+    if "&" not in text:
+        return text
+    out: list[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch != "&":
+            out.append(ch)
+            i += 1
+            continue
+        end = text.find(";", i + 1, i + 12)
+        ref = text[i + 1:end] if end != -1 else ""
+        if ref in _XML_ENTITIES:
+            out.append(_XML_ENTITIES[ref])
+            i = end + 1
+        elif ref.startswith("#") and ref[1:].isdigit():
+            out.append(chr(int(ref[1:])))
+            i = end + 1
+        elif ref[:2].lower() == "#x" and ref[2:] and all(
+                c in "0123456789abcdefABCDEF" for c in ref[2:]):
+            out.append(chr(int(ref[2:], 16)))
+            i = end + 1
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
+def xml_unescaped_variant(body: str) -> str | None:
+    """The XML-unescaped reading of a model-emitted body, or None when it is
+    identical to the input.
+
+    A model that renders `block="impl&lt;E&gt; …"` in an attribute renders
+    `match &amp;mut self.state` in the body of the same reply — the escaping is
+    a property of the reply, not of the field. The body is CODE, so this
+    variant is only ever a *candidate*: the caller keeps the verbatim body when
+    it parses and falls back to this reading only when it does not, which is
+    what stops a legitimate `"&amp;"` inside a string literal from being
+    rewritten to `"&"`.
+    """
+    variant = xml_unescape_strict(body)
+    return variant if variant != body else None
+
+
 def _find_fn_close(text: str, start: int) -> tuple[int, int] | None:
     """Nearest `</FN\\s*>` at/after `start`. Returns (close_start, pos_after_`>`)."""
     j = start

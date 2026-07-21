@@ -16,6 +16,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+# The file/impl view handed to the model can itself contain HTML-escaped Rust —
+# rustdoc comments legitimately write `Vec&lt;T&gt;` inside a `<code>` tag — and
+# a model that has just read that mirrors the rendering into its own answer.
+# `&amp;mut self.x` is not Rust: the body used to be spliced verbatim, rejected
+# by the parser, and lost. Say it once, here, where the block format is defined.
+FN_LITERAL_RULE = """Write RAW Rust inside the block and in `block=`. Never
+XML-escape it, even where the code you were shown does:
+WRONG: <FN name="get" block="impl&lt;T&gt; Holder&lt;T&gt;">
+RIGHT: <FN name="get" block="impl<T> Holder<T>">
+WRONG: match &amp;mut self.slot { Some(v) =&gt; v, None =&gt; return None }
+RIGHT: match &mut self.slot { Some(v) => v, None => return None }"""
+
 
 def build_fn_fix_prompt(
     *,
@@ -174,6 +186,7 @@ WRONG: <FN name="Error: root_cause" block="impl Error">
 WRONG: <FN name="ErrorImpl::provide" block="impl ErrorImpl">
 RIGHT: <FN name="root_cause" block="impl Error">
 RIGHT: <FN name="provide" block="impl ErrorImpl">
+{FN_LITERAL_RULE}
 <FN name="FUNCTION_NAME" block="IMPL_HEADER">
 ...body...
 </FN>

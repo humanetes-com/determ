@@ -515,6 +515,10 @@ def fill_impl_blocks(
                     if ok:
                         spliced_now += 1
                         _landed.append((_fn, rb.container))
+                        if reason == "ok_xml_unescaped":
+                            _log(f"  [phase-c/file] {file_rel}: `{_fn}` landed "
+                                 "only after resolving XML entities in the body "
+                                 "— the reply used the escaped rendering.")
                     else:
                         # `target_not_stub` is unfalsifiable from the log alone —
                         # the body is reverted before anyone reads it. Name the
@@ -976,6 +980,11 @@ def fill_impl_blocks(
                     )
                     if ok:
                         spliced_now += 1
+                        if reason == "ok_xml_unescaped":
+                            _log(f"  [phase-c/impl] {block_id}: "
+                                 f"`{fn_data['fn_name']}` landed only after "
+                                 "resolving XML entities in the body — the "
+                                 "reply used the escaped rendering.")
                     else:
                         refusals.append(reason)
                         _log(f"  [phase-c/impl] {block_id}: splice "

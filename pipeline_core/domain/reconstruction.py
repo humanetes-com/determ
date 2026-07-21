@@ -28,8 +28,13 @@ from typing import Literal, NamedTuple
 #                     into another → E0308/E0424 corruption. The caller must
 #                     re-route through the container-aware locator; refusing is
 #                     the only safe outcome without a container.
+#   ok_xml_unescaped — committed, but only after resolving XML entities the
+#                     model emitted in the body (`match &amp;mut self.state`).
+#                     A distinct reason because the verbatim body was NOT valid
+#                     Rust: it says the reply used the escaped rendering, which
+#                     is a protocol signal worth seeing, not a plain success
 SpliceReason = Literal[
-    "ok", "file_missing", "read_failed", "fn_not_found",
+    "ok", "ok_xml_unescaped", "file_missing", "read_failed", "fn_not_found",
     "bad_offsets", "target_not_stub", "body_is_stub", "parse_broken",
     "ambiguous_name",
 ]

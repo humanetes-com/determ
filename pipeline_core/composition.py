@@ -1119,6 +1119,8 @@ def build_app(
         _splice_mod.splice_fn_body_at, validate_parse=_validate_parse)
     splice_fn_body = functools.partial(
         _splice_mod.splice_fn_body, validate_parse=_validate_parse)
+    replace_fn_signature = functools.partial(
+        _splice_replace_fn_signature, validate_parse=_validate_parse)
     locate_fn_by_record = functools.partial(
         _splice_mod.locate_fn_by_record, enumerate_fns)
 
@@ -1501,7 +1503,7 @@ def build_app(
             locate_fn_fn=_domain_locate_fn,
             splice_fn_body_at_fn=splice_fn_body_at,
             splice_fn_body_fn=splice_fn_body,
-            replace_fn_signature_fn=_splice_replace_fn_signature,
+            replace_fn_signature_fn=replace_fn_signature,
             extract_signature_block_fn=_extract_signature_block,
             lock_for_fn=_splice_mod.splice_lock_for,
         ),

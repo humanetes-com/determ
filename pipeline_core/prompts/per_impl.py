@@ -10,6 +10,7 @@ from pathlib import Path
 
 from pipeline_core.domain.models import ImplBlock
 from pipeline_core.prompts.context import PerImplSections
+from pipeline_core.prompts.fix_prompts import FN_LITERAL_RULE
 from pipeline_core.prompts.runtime import promoted_error_rules, repo_spec_section
 from pipeline_core.prompts.sections import (
     format_impl_block_for_prompt,
@@ -155,8 +156,9 @@ def build_per_impl_prompt(
             "  // body (no outer braces, no signature)\n"
             "</FN>"
         )
-    output_example_str = "\n".join(output_example) if output_example else (
-        '<FN name="..." block="...">\nbody\n</FN>')
+    output_example_str = (("\n".join(output_example) if output_example else
+                           '<FN name="..." block="...">\nbody\n</FN>')
+                          + "\n" + FN_LITERAL_RULE)
 
     stub_names = ", ".join(m.fn_name for m in (*stub_members, *refill_members))
     return f"""Implement the marked [STUB] fns in this Rust impl block so the

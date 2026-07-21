@@ -24,9 +24,33 @@ from pipeline_core.application.reconstruct.splice_txn import (
     ParseValidator,
     parse_guarded_write,
 )
-from pipeline_core.domain.reconstruction import SpliceOutcome
+from pipeline_core.domain.llm_output import xml_unescaped_variant
+from pipeline_core.domain.reconstruction import SpliceOutcome, SpliceReason
 from pipeline_core.domain.rust_fn_headers import is_pub_fn, locate_all_fns
 from pipeline_core.domain.rust_idents import canon_container, declares_fn
+
+
+def _commit_with_xml_fallback(
+    commit: Callable[[str, SpliceReason], SpliceOutcome], body: str,
+) -> SpliceOutcome:
+    """Commit `body`, retrying once with XML entities resolved if the verbatim
+    write leaves the file unparseable.
+
+    A model that emits XML-safe attribute values emits them in the body of the
+    same reply, and `match &amp;mut self.state` is not Rust — syn rejects the
+    file and a CORRECT body is reverted and lost. The retry is gated on the
+    parse failure rather than applied up front so that a body legitimately
+    containing `"&amp;"` (a string literal in HTML-handling code) is kept
+    verbatim: it parses, so the fallback never runs.
+    """
+    out = commit(body, "ok")
+    if out.ok or out.reason != "parse_broken":
+        return out
+    variant = xml_unescaped_variant(body)
+    if variant is None:
+        return out
+    retry = commit(variant, "ok_xml_unescaped")
+    return retry if retry.ok else out
 
 # Process-global path-keyed splice+cargo locks. One lock per resolved source
 # tree — regression-gate baselines are captured fresh INSIDE this lock, so it
@@ -184,20 +208,34 @@ def splice_fn_body_at(file_path: Path, body_byte_start: int, body_byte_end: int,
         else:
             break
     inner_indent = base_indent + "    "
-    nb_indented = "\n" + "\n".join(
-        (inner_indent + ln) if ln.strip() else "" for ln in nb.splitlines()
-    ) + "\n" + base_indent
-    new_raw = raw[:body_byte_start] + nb_indented.encode("utf-8") + raw[body_byte_end:]
-    if not parse_guarded_write(file_path, new_raw, raw, validate_parse):
-        return SpliceOutcome(False, "parse_broken", 0)
-    return SpliceOutcome(True, "ok", len(new_raw) - len(raw))
+
+    def _commit(candidate: str, reason: SpliceReason) -> SpliceOutcome:
+        indented = "\n" + "\n".join(
+            (inner_indent + ln) if ln.strip() else ""
+            for ln in candidate.splitlines()
+        ) + "\n" + base_indent
+        new_raw = (raw[:body_byte_start] + indented.encode("utf-8")
+                   + raw[body_byte_end:])
+        if not parse_guarded_write(file_path, new_raw, raw, validate_parse):
+            return SpliceOutcome(False, "parse_broken", 0)
+        return SpliceOutcome(True, reason, len(new_raw) - len(raw))
+
+    return _commit_with_xml_fallback(_commit, nb)
 
 
-def replace_fn_signature(file_path: Path, fn_name: str, new_sig: str) -> bool:
+def replace_fn_signature(file_path: Path, fn_name: str, new_sig: str,
+                         validate_parse: ParseValidator | None = None) -> bool:
     """P3.1: replace the verbatim signature line(s) of ``fn_name`` with
     ``new_sig``, leaving the body intact. Only for PRIVATE fns (changing a
     ``pub`` sig would break the test surface) and only when ``new_sig`` still
-    declares ``fn_name`` (the model can't rename). Returns True iff applied."""
+    declares ``fn_name`` (the model can't rename). Returns True iff applied.
+
+    `new_sig` is MODEL text and the write is parse-gated like a body splice:
+    `declares_fn` confirms it declares the right fn but accepts an XML-escaped
+    rendering (`fn f(x: &amp;str)` reads as a declaration of `f`), which would
+    otherwise be written verbatim, leave the file unparseable, and — unlike
+    every other model write here — persist, because a signature edit has no
+    body offsets to roll back to."""
     try:
         text = file_path.read_text(encoding="utf-8")
     except Exception:
@@ -214,10 +252,15 @@ def replace_fn_signature(file_path: Path, fn_name: str, new_sig: str) -> bool:
         return False
     _old_sig, sig_start, body_start, _body_end = locs[0]
     line_start = text.rfind("\n", 0, sig_start) + 1
-    cleaned = new_sig.strip().rstrip("{").rstrip()
-    new_text = text[:line_start] + cleaned + " {" + text[body_start:]
-    file_path.write_text(new_text, encoding="utf-8")
-    return True
+    def _commit(candidate: str, _reason: SpliceReason) -> SpliceOutcome:
+        cleaned = candidate.strip().rstrip("{").rstrip()
+        new_text = text[:line_start] + cleaned + " {" + text[body_start:]
+        if not parse_guarded_write(file_path, new_text.encode("utf-8"),
+                                   text.encode("utf-8"), validate_parse):
+            return SpliceOutcome(False, "parse_broken", 0)
+        return SpliceOutcome(True, "ok", len(new_text) - len(text))
+
+    return _commit_with_xml_fallback(_commit, new_sig).ok
 
 
 def restore_frozen_signature(file_path: Path, fn_name: str,
@@ -295,14 +338,19 @@ def splice_fn_body(file_path: Path, fn_name: str, new_body: str,
         else:
             break
     inner_indent = base_indent + "    "
-    nb_indented = "\n" + "\n".join(
-        (inner_indent + ln) if ln.strip() else "" for ln in nb.splitlines()
-    ) + "\n" + base_indent
-    new_text = text[:body_start] + nb_indented + text[body_end:]
-    if not parse_guarded_write(file_path, new_text.encode("utf-8"),
-                               text.encode("utf-8"), validate_parse):
-        return SpliceOutcome(False, "parse_broken", 0)
-    return SpliceOutcome(True, "ok", len(new_text) - len(text))
+
+    def _commit(candidate: str, reason: SpliceReason) -> SpliceOutcome:
+        indented = "\n" + "\n".join(
+            (inner_indent + ln) if ln.strip() else ""
+            for ln in candidate.splitlines()
+        ) + "\n" + base_indent
+        new_text = text[:body_start] + indented + text[body_end:]
+        if not parse_guarded_write(file_path, new_text.encode("utf-8"),
+                                   text.encode("utf-8"), validate_parse):
+            return SpliceOutcome(False, "parse_broken", 0)
+        return SpliceOutcome(True, reason, len(new_text) - len(text))
+
+    return _commit_with_xml_fallback(_commit, nb)
 
 
 def splice_fn_with_where(

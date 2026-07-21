@@ -6,10 +6,15 @@ from pathlib import Path
 import pytest
 
 from pipeline_core.application.reconstruct.splice import (
+    replace_fn_signature,
     splice_fn_body,
     splice_fn_body_at,
 )
 from pipeline_core.application.reconstruct.splice_txn import parse_guarded_write
+from pipeline_core.domain.llm_output import (
+    xml_unescape_strict,
+    xml_unescaped_variant,
+)
 
 _REJECT = lambda _p: False   # noqa: E731 — "syn says broken"
 _ACCEPT = lambda _p: True    # noqa: E731
@@ -102,3 +107,105 @@ def test_real_parse_check_catches_broken_splice(tmp_path) -> None:
     out = splice_fn_body(f, "a", "let x = ; x", validate_parse=reader.parse_ok)
     assert out.reason == "parse_broken"
     assert f.read_text(encoding="utf-8") == original
+
+
+# --- XML-entity bodies: the reply escapes the body, not just the attributes ---
+
+
+def test_xml_unescape_strict_resolves_the_five_named_entities() -> None:
+    assert xml_unescape_strict("match &amp;mut self.state") == "match &mut self.state"
+    assert xml_unescape_strict("Vec&lt;T&gt;") == "Vec<T>"
+    assert xml_unescape_strict("&quot;x&quot; &apos;y&apos;") == '"x" \'y\''
+    assert xml_unescape_strict("&#38;&#x3C;") == "&<"
+
+
+def test_xml_unescape_strict_leaves_bare_idents_alone() -> None:
+    # The reason html.unescape is banned here: HTML5 resolves a named
+    # reference WITHOUT its semicolon, so these ordinary Rust borrows would
+    # come back as `&ersand` / `>r_bound` / `<_cmp`.
+    for src in ("&ampersand", "&gtr_bound", "&lt_cmp", "&quotient", "&aposition"):
+        assert xml_unescape_strict(src) == src
+    assert xml_unescape_strict("let r = &amp;") == "let r = &"   # terminated → real
+
+
+def test_xml_unescaped_variant_is_none_when_nothing_changes() -> None:
+    assert xml_unescaped_variant("match &mut self.state") is None
+    assert xml_unescaped_variant("&amp;x") == "&x"
+
+
+def test_splice_falls_back_to_unescaped_body_only_after_parse_failure(tmp_path) -> None:
+    seen: list[str] = []
+
+    def _validate(p: Path) -> bool:
+        text = p.read_text(encoding="utf-8")
+        seen.append(text)
+        return "&amp;" not in text          # stands in for syn rejecting it
+
+    f = tmp_path / "m.rs"
+    f.write_text("fn a() {\n    unimplemented!()\n}\n", encoding="utf-8")
+    out = splice_fn_body(f, "a", "foo(&amp;self.x)", validate_parse=_validate)
+    assert out.ok is True and out.reason == "ok_xml_unescaped"
+    assert "foo(&self.x)" in f.read_text(encoding="utf-8")
+    # verbatim was tried FIRST — the fallback is gated on the parse failure
+    assert "&amp;" in seen[0]
+
+
+def test_splice_keeps_a_body_that_parses_verbatim(tmp_path) -> None:
+    # A legitimate `&amp;` inside a string literal parses, so the entity
+    # reading must never be substituted for it.
+    f = tmp_path / "m.rs"
+    f.write_text("fn a() {\n    unimplemented!()\n}\n", encoding="utf-8")
+    body = 'let s = "Tom &amp; Jerry"; println!("{}", s)'
+    out = splice_fn_body(f, "a", body, validate_parse=_ACCEPT)
+    assert out.ok is True and out.reason == "ok"
+    assert "&amp;" in f.read_text(encoding="utf-8")
+
+
+def test_splice_reports_parse_broken_when_neither_reading_parses(tmp_path) -> None:
+    f = tmp_path / "m.rs"
+    f.write_text("fn a() {\n    unimplemented!()\n}\n", encoding="utf-8")
+    original = f.read_text(encoding="utf-8")
+    out = splice_fn_body(f, "a", "let x = &amp;;", validate_parse=_REJECT)
+    assert out.ok is False and out.reason == "parse_broken"
+    assert f.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.skipif(not _BIN.exists(), reason="extractor binary not built")
+def test_real_parser_recovers_the_escaped_body_that_was_being_lost(tmp_path) -> None:
+    from pipeline_core.adapters.extractor import CliExtractor
+    from pipeline_core.adapters.structure import CliStructureReader
+
+    reader = CliStructureReader(CliExtractor(_BIN))
+    f = tmp_path / "m.rs"
+    f.write_text("fn a(s: &str) -> usize {\n    unimplemented!()\n}\n",
+                 encoding="utf-8")
+    # Verbatim, this is the body chain.rs/error.rs lost all run: not Rust.
+    out = splice_fn_body(f, "a", "core::mem::size_of_val(&amp;s)",
+                         validate_parse=reader.parse_ok)
+    assert out.ok is True and out.reason == "ok_xml_unescaped"
+    assert reader.parse_ok(f) is True
+
+
+def test_replace_fn_signature_is_parse_gated(tmp_path) -> None:
+    # A signature edit has no body offsets to fall back to, so an unguarded
+    # write of a bad sig would PERSIST an unparseable file.
+    f = tmp_path / "m.rs"
+    original = "fn a(x: u32) -> u32 {\n    x\n}\n"
+    f.write_text(original, encoding="utf-8")
+    assert replace_fn_signature(f, "a", "fn a(x: u64) -> u64",
+                                validate_parse=_REJECT) is False
+    assert f.read_text(encoding="utf-8") == original
+
+
+def test_replace_fn_signature_recovers_an_escaped_signature(tmp_path) -> None:
+    f = tmp_path / "m.rs"
+    f.write_text("fn a(x: u32) -> u32 {\n    x\n}\n", encoding="utf-8")
+
+    def _validate(p: Path) -> bool:
+        return "&amp;" not in p.read_text(encoding="utf-8")
+
+    # `declares_fn` accepts this as a declaration of `a` — the parse gate is
+    # what stops the escaped rendering from being written verbatim.
+    assert replace_fn_signature(f, "a", "fn a(x: &amp;str) -> usize",
+                                validate_parse=_validate) is True
+    assert "fn a(x: &str) -> usize" in f.read_text(encoding="utf-8")

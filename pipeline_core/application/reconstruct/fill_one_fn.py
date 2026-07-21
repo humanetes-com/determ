@@ -367,6 +367,10 @@ class FillOneFn:
                 splice_out = self.mut.splice_fn_body(
                     file_path, fn_name, body, allow_nonstub=rec.refill)
             ok, delta = splice_out.ok, splice_out.delta
+            if ok and splice_out.reason == "ok_xml_unescaped":
+                self.tel.log(f"  [phase-c/per-fn] {fn_name}: landed only after "
+                             "resolving XML entities in the body — the reply "
+                             "used the escaped rendering.")
             if not ok:
                 ctx.splice_check_lock.release()
                 _lock_released = True
