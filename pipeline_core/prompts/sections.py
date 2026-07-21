@@ -183,6 +183,37 @@ def trait_contract_for(container: str) -> str:
 # gotcha's trigger keyword/code, via gotchas_for_error).
 RUST_GOTCHAS: list[dict[str, Any]] = [
     {
+        # Observed live: four attempts burned re-guessing a call whose type
+        # parameter appears only behind an associated-type projection, with
+        # the model annotating the let-binding each time (which cannot help).
+        "id": "assoc_type_needs_turbofish",
+        "summary": "A type parameter that appears ONLY behind an associated type in the return (`-> W<M::Out>`) can never be inferred — turbofish the CALL (`x.conv::<Concrete>()`). Annotating the let-binding does NOT work.",
+        "triggers": {"E0282", "E0283", "E0284", "type annotations needed",
+                     "cannot infer type of the type parameter",
+                     "type must be known at this point"},
+        "detail": (
+            "Inference solves the return type FORWARD from the parameter, not\n"
+            "backward: `M::Out` is a projection, so knowing the result is\n"
+            "`W<Foo>` does not tell the compiler that `M` is `Bar` — many `M`\n"
+            "could project to the same `Out`. The parameter must be named at\n"
+            "the call site.\n"
+            "  WRONG (annotate the binding — still E0284, the projection is\n"
+            "  not invertible):\n"
+            "    trait Marker { type Out; }\n"
+            "    impl W<T> { fn conv<M: Marker>(self) -> W<M::Out> { ... } }\n"
+            "    let out: W<Foo> = value.conv();      // cannot infer `M`\n"
+            "  RIGHT (name the parameter on the call):\n"
+            "    let out = value.conv::<Bar>();       // `M = Bar`, Out follows\n"
+            "  WRONG (free fn whose parameter is used only in the return):\n"
+            "    fn build<F: Factory>() -> F::Product { ... }\n"
+            "    let p: Widget = build();             // cannot infer `F`\n"
+            "  RIGHT:\n"
+            "    let p = build::<WidgetFactory>();\n"
+            "  Rule of thumb: if the parameter is absent from the ARGUMENT\n"
+            "  types, only a turbofish can supply it."
+        ),
+    },
+    {
         # The dangling-'static class: silencing the borrow checker with a
         # raw-pointer cast turns a lifetime ERROR into a runtime SIGSEGV that
         # takes the whole test binary down (observed live: a fn-pointer table

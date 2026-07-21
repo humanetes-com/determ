@@ -201,3 +201,75 @@ def test_u2verdict_factories() -> None:
 
 def test_blameverdict_default_empty() -> None:
     assert BlameVerdict().self_failures == () and BlameVerdict().external == ()
+
+
+# --- evidence-free failures never convict ----------------------------------- #
+
+# A libtest run whose process aborted mid-suite: two tests printed their FAILED
+# line before the abort, and the summary that would have carried their
+# `---- name stdout ----` sections never ran. A third test in another binary
+# completed normally and DID print its stub-panic section.
+ABORTED_RUN = """\
+running 4 tests
+test test_altdebug ... FAILED
+test test_altdisplay ... FAILED
+
+running 2 tests
+test test_iter ... FAILED
+
+failures:
+
+---- test_iter stdout ----
+thread 'test_iter' panicked at src/error.rs:5:9:
+not implemented
+
+failures:
+    test_iter
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored
+"""
+
+
+def test_failure_without_captured_output_is_no_verdict() -> None:
+    r = parse_test_output(ABORTED_RUN)
+    assert {f.test_name for f in r.failures} == {
+        "test_altdebug", "test_altdisplay", "test_iter"}
+    unit = frozenset({FnSite("src/lib.rs", "mine", "")})
+    loc = _locate({("src/error.rs", 5): FnSite("src/error.rs", "ctx", "impl Error")})
+    v = partition_blame(r, unit, loc)
+    # the two body-less failures neither convict nor exonerate
+    assert {f.test_name for f in v.no_verdict} == {"test_altdebug", "test_altdisplay"}
+    assert v.self_failures == ()
+    assert v.blocking_fns == frozenset({FnSite("src/error.rs", "ctx", "impl Error")})
+
+
+def test_no_verdict_failure_is_not_charged_even_without_externals() -> None:
+    # every failure is evidence-free → nothing to reject on at all.
+    r = parse_test_output("running 2 tests\ntest test_a ... FAILED\n"
+                          "test test_b ... FAILED\n")
+    v = partition_blame(r, frozenset(), _locate({}))
+    assert v.self_failures == () and v.external == ()
+    assert {f.test_name for f in v.no_verdict} == {"test_a", "test_b"}
+
+
+def test_render_u2_reject_flags_unjudged_tests() -> None:
+    from pipeline_core.application.reconstruct.cargo_runner import _render_u2_reject
+    r = parse_test_output(ABORTED_RUN)
+    unit = frozenset({FnSite("src/error.rs", "ctx", "impl Error")})
+    v = partition_blame(r, unit, _locate(
+        {("src/error.rs", 5): FnSite("src/error.rs", "ctx", "impl Error")}))
+    assert len(v.self_failures) == 1        # test_iter resolves INTO the unit
+    out = _render_u2_reject(v, err_cap=4000)
+    assert "not implemented" in out         # the one real body is shown
+    assert "test process aborted" in out    # the unjudged pair is disclosed
+    assert "test_altdebug" not in out.split("Fix the BEHAVIOR")[0]
+
+
+def test_u2verdict_carries_no_verdict_names() -> None:
+    assert U2Verdict.accept_external_only((), frozenset({"t"})).no_verdict == frozenset({"t"})
+    assert U2Verdict.reject(frozenset({"a"}), "d", frozenset({"t"})).no_verdict == frozenset({"t"})
+    assert U2Verdict.accept().no_verdict == frozenset()
+
+
+def test_blameverdict_no_verdict_defaults_empty() -> None:
+    assert BlameVerdict().no_verdict == ()

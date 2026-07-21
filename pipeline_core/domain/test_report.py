@@ -155,8 +155,11 @@ def parse_test_output(text: str) -> TestRunReport:
         bodies.setdefault(name, body)   # first section wins
     # Some cargo versions emit no `---- name stdout ----` header for a
     # single-test run — the panic sits in the bare output. Fall back to the
-    # whole text as the body so the panic still resolves (attribution.py:87).
-    no_sections = not bodies
+    # whole text as the body so the panic still resolves. Gated on the text
+    # actually holding a panic: an aborted process also prints no sections,
+    # and handing back its bare `test NAME ... FAILED` lines as a "body" would
+    # dress a verdict-less crash up as diagnosed evidence.
+    no_sections = not bodies and "panicked at " in text
     failures: list[TestFailure] = []
     seen: set[str] = set()
     for name in sorted(parse_failed_tests(text)):
@@ -176,10 +179,13 @@ def parse_test_output(text: str) -> TestRunReport:
 class BlameVerdict:
     """Partition of a unit's failing tests. `self_failures` count against the
     unit; `external` are stub-panics that fired in a DIFFERENT unit's stub —
-    each paired with the fn locator they resolved to (the blocking producer)."""
+    each paired with the fn locator they resolved to (the blocking producer);
+    `no_verdict` are failures libtest named but never printed output for, which
+    can neither convict nor exonerate (see :func:`partition_blame`)."""
 
     self_failures: tuple[TestFailure, ...] = ()
     external: tuple[tuple[TestFailure, FnSite], ...] = ()
+    no_verdict: tuple[TestFailure, ...] = ()
 
     @property
     def blocking_fns(self) -> frozenset[FnSite]:
@@ -207,11 +213,26 @@ def partition_blame(
     not`; one `From` impl's `fn from` vs another) is correctly external, not
     charged to this unit. ASSERTION/OTHER failures always stay self — an
     assertion can be another unit's wrong body, but that is behavioral
-    attribution, out of scope here (do not over-subtract)."""
+    attribution, out of scope here (do not over-subtract).
+
+    A failure with an EMPTY body is NO_VERDICT, never self. libtest always
+    prints a `---- name stdout ----` section for a test that fails normally, so
+    a bare `test NAME ... FAILED` with nothing captured means the process died
+    before the summary (a panic while unwinding out of a stubbed `Drop` aborts,
+    taking every section with it). Which tests printed before the abort varies
+    run to run, so such a failure carries no information about the unit under
+    test: charging it convicts the unit of a crash somewhere else, with no
+    diagnostic to act on. Same rule the regression gate applies to already-
+    crashed binaries — evidence-free means it can neither convict nor
+    exonerate."""
     own = {_site_key(s) for s in unit_sites}
     self_f: list[TestFailure] = []
     external: list[tuple[TestFailure, FnSite]] = []
+    no_verdict: list[TestFailure] = []
     for f in report.failures:
+        if not f.body:
+            no_verdict.append(f)
+            continue
         if (f.kind is FailureKind.STUB_PANIC
                 and f.panic_file and f.panic_line is not None):
             loc = locate(f.panic_file, f.panic_line)
@@ -219,7 +240,7 @@ def partition_blame(
                 external.append((f, loc))
                 continue
         self_f.append(f)
-    return BlameVerdict(tuple(self_f), tuple(external))
+    return BlameVerdict(tuple(self_f), tuple(external), tuple(no_verdict))
 
 
 class U2Decision(Enum):
@@ -233,12 +254,15 @@ class U2Verdict:
     """Typed U2 acceptance decision (replaces the ``tuple[frozenset, str] |
     None`` protocol). ACCEPT/ACCEPT_EXTERNAL_ONLY keep the compiling fill and
     write no retro; REJECT reverts with `detail` as the next-prompt feedback
-    and `self_failures` as the stall signature."""
+    and `self_failures` as the stall signature. `no_verdict` names failures
+    that were excluded from blame for want of any captured output — carried so
+    a caller renders WHY it accepted instead of logging "0 attributed"."""
 
     decision: U2Decision
     self_failures: frozenset[str] = frozenset()
     external: tuple[tuple[TestFailure, FnSite], ...] = ()
     detail: str = ""
+    no_verdict: frozenset[str] = frozenset()
 
     @classmethod
     def accept(cls) -> U2Verdict:
@@ -247,12 +271,16 @@ class U2Verdict:
     @classmethod
     def accept_external_only(
         cls, external: tuple[tuple[TestFailure, FnSite], ...],
+        no_verdict: frozenset[str] = frozenset(),
     ) -> U2Verdict:
-        return cls(U2Decision.ACCEPT_EXTERNAL_ONLY, external=external)
+        return cls(U2Decision.ACCEPT_EXTERNAL_ONLY, external=external,
+                   no_verdict=no_verdict)
 
     @classmethod
-    def reject(cls, self_failures: frozenset[str], detail: str) -> U2Verdict:
-        return cls(U2Decision.REJECT, self_failures=self_failures, detail=detail)
+    def reject(cls, self_failures: frozenset[str], detail: str,
+               no_verdict: frozenset[str] = frozenset()) -> U2Verdict:
+        return cls(U2Decision.REJECT, self_failures=self_failures,
+                   detail=detail, no_verdict=no_verdict)
 
     @property
     def blocking_fns(self) -> frozenset[FnSite]:

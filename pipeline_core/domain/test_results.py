@@ -1099,6 +1099,39 @@ class RegressionComparison:
                     or self.cur_pass < self.base_pass
                     or self.cur_executed < self.base_executed)
 
+    @property
+    def summary(self) -> str:
+        """One-line log label naming WHICH regression fired. Callers used to
+        print '(pass-count drop)' whenever `newly_red` was empty, which
+        mislabels a binary that crashed — the two are different failures with
+        different fixes, and the log is where that distinction is read."""
+        if self.newly_crashed:
+            plural = "ies" if len(self.newly_crashed) > 1 else "y"
+            return f"binar{plural} crashed: {list(self.newly_crashed)}"
+        if self.newly_red:
+            return f"newly red: {sorted(self.newly_red)}"
+        if self.cur_pass < self.base_pass:
+            return f"pass count {self.base_pass}→{self.cur_pass}"
+        if self.cur_executed < self.base_executed:
+            return f"executed count {self.base_executed}→{self.cur_executed}"
+        return ""
+
+    @property
+    def signature(self) -> frozenset[str]:
+        """Stall-signature key. Distinct regression CLASSES must not collapse
+        onto one marker: two consecutive attempts, one crashing a binary and
+        one dropping the pass count, are different failures and must not read
+        as a repeat."""
+        if self.newly_red:
+            return self.newly_red
+        if self.newly_crashed:
+            return frozenset(f"__binary_crash__:{b}" for b in self.newly_crashed)
+        if self.cur_pass < self.base_pass:
+            return frozenset({"__pass_count_drop__"})
+        if self.cur_executed < self.base_executed:
+            return frozenset({"__executed_count_drop__"})
+        return frozenset()
+
 
 def compare_readings(base: TestStateReading,
                      cur: TestStateReading) -> RegressionComparison:

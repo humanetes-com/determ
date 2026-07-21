@@ -170,8 +170,17 @@ def test_impl_b3_does_not_keep_green_but_test_failing_fill(monkeypatch, tmp_path
     install_scripted_cargo(
         monkeypatch,
         check_diag=(0, "", []),
+        # A real assertion failure, with the stdout section libtest always
+        # prints for one — a bare FAILED line with no captured output means an
+        # aborted process, which carries no verdict and must not convict.
         run=(101, "test kind_works ... FAILED\n"
-                  "test result: FAILED. 0 passed; 1 failed; 0 ignored"))
+                  "\nfailures:\n\n"
+                  "---- kind_works stdout ----\n"
+                  "thread 'kind_works' panicked at tests/t.rs:3:5:\n"
+                  "assertion `left == right` failed\n"
+                  "  left: 1\n right: 2\n"
+                  "\nfailures:\n    kind_works\n"
+                  "\ntest result: FAILED. 0 passed; 1 failed; 0 ignored"))
     res = pipeline._phase_c_fill_impl_blocks(
         project_dir=ws, target_src_dir=ws / "src", tests_dir_files=[],
         module_name="m", cluster_name="t", cluster=None, check_cmd="cargo check",
@@ -756,7 +765,12 @@ def test_file_first_u2_gate_runs_the_refill_members_tests(monkeypatch, tmp_path,
         monkeypatch,
         check_diag=(0, "", []),
         run=(101, "test kind_is_wrong ... FAILED\n"
-                  "test result: FAILED. 0 passed; 1 failed; 0 ignored"))
+                  "\nfailures:\n\n"
+                  "---- kind_is_wrong stdout ----\n"
+                  "thread 'kind_is_wrong' panicked at tests/t.rs:3:5:\n"
+                  "assertion `left == right` failed\n"
+                  "\nfailures:\n    kind_is_wrong\n"
+                  "\ntest result: FAILED. 0 passed; 1 failed; 0 ignored"))
     res = pipeline._phase_c_fill_impl_blocks(
         project_dir=ws, target_src_dir=ws / "src", tests_dir_files=[],
         module_name="m", cluster_name="t", cluster=None, check_cmd="cargo check",

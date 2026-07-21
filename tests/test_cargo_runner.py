@@ -287,13 +287,16 @@ def test_regression_gate_blocks_new_red_and_pass_drop() -> None:
     # a NEW test (z) went red though b is fixed → regression names z
     res = _regr(_cargo_suite(101, 5, ["z"]), base)
     assert res is not None
-    newly, msg = res
+    cmp, msg = res
+    newly = cmp.newly_red
     assert newly == frozenset({"z"}) and "REGRESSED" in msg
     # no new named failure but pass count dropped within the completed binary
     res2 = _regr(_cargo_suite(101, 3, ["b"]), base)
     assert res2 is not None
-    newly2, msg2 = res2
-    assert newly2 == frozenset() and "EXECUTE" in msg2
+    cmp2, msg2 = res2
+    assert cmp2.newly_red == frozenset() and "EXECUTE" in msg2
+    # count-drop and crash are distinct classes: distinct stall signatures
+    assert cmp2.signature == frozenset({"__pass_count_drop__"})
 
 
 def test_regression_gate_self_disables() -> None:
@@ -310,7 +313,8 @@ def test_regression_gate_blocks_executed_count_drop() -> None:
     base = _reading(5, ["b", "c", "d"])  # 8 ran
     res = _regr(_cargo_suite(101, 5, ["b"]), base)  # only 6 ran, pass held
     assert res is not None
-    newly, msg = res
+    cmp, msg = res
+    newly = cmp.newly_red
     assert newly == frozenset()
     assert "EXECUTE" in msg
     # Equal executed totals with pass held stays accepted (no false positive
@@ -363,6 +367,10 @@ def test_regression_gate_flags_newly_crashed_binary() -> None:
     base = TestStateReading(parse_binary_results(base_out))
     res = _regr(_const_run_cargo(101, cur_out), base)
     assert res is not None
-    newly, msg = res
-    assert newly == frozenset()
+    cmp, msg = res
+    assert cmp.newly_red == frozenset()
+    assert cmp.newly_crashed == ("tests/a.rs",)
+    # the log summary must name the CRASH, not fall back to "pass-count drop"
+    assert cmp.summary == "binary crashed: ['tests/a.rs']"
+    assert cmp.signature == frozenset({"__binary_crash__:tests/a.rs"})
     assert "CRASH" in msg and "tests/a.rs" in msg

@@ -117,7 +117,10 @@ def test_u2_test_gate_shim_routes_and_blocks(monkeypatch, tmp_path) -> None:
             pipeline.SETTINGS, fix_caps=dataclasses.replace(
                 pipeline.SETTINGS.fix_caps, unified_fill_loop=on))
 
-    fake = _fake_run_cargo(101, "test b ... FAILED\nassertion failed")
+    fake = _fake_run_cargo(101, "test b ... FAILED\n\nfailures:\n\n"
+                                "---- b stdout ----\n"
+                                "thread 'b' panicked at tests/t.rs:1:1:\n"
+                                "assertion failed\n")
     monkeypatch.setattr(pipeline, "_run_cargo", fake)
     monkeypatch.setattr(pipeline, "SETTINGS", _with_gate(True))
     v = pipeline._APP.u2_test_gate({"b"}, frozenset(), "cargo test", tmp_path, {})

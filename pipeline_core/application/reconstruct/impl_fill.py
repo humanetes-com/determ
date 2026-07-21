@@ -657,7 +657,7 @@ def fill_impl_blocks(
                     return
                 file_path.write_text(snapshot, encoding="utf-8")
                 if _regr_file is not None:
-                    _revert_reason = "regressed sibling test(s)"
+                    _revert_reason = f"regressed sibling test(s): {_regr_file[0].summary}"
                     prior_error = _regr_file[1]
                 elif rc == 0:
                     _revert_reason = "U2 test failure"
@@ -1071,14 +1071,13 @@ def fill_impl_blocks(
                     tdd_test_cmd, target_src_dir, cluster_env, _baseline_test)
                     if rc == 0 else None)
                 if _regr is not None:
-                    _newly, _regr_detail = _regr
+                    _cmp, _regr_detail = _regr
                     file_path.write_text(snapshot, encoding="utf-8")
                     _log(f"  [phase-c/impl] {block_id}: REVERTED {spliced_now} "
-                         f"fn(s) — regressed sibling test(s) "
-                         f"{sorted(_newly) or '(pass-count drop)'} "
-                         f"(attempt {fix_attempt}).")
+                         f"fn(s) — regressed sibling test(s): "
+                         f"{_cmp.summary} (attempt {fix_attempt}).")
                     last_error_excerpt = _regr_detail
-                    _rsig = _newly if _newly else frozenset({"__pass_count_drop__"})
+                    _rsig = _cmp.signature
                     return FixOutcome("failed", err_sig=_rsig,
                                       err_count=max(1, len(_rsig)))
                 if rc == 0 and not _u2_impl_reject:
@@ -1087,7 +1086,8 @@ def fill_impl_blocks(
                             "cluster": cluster_name, "file": block.file,
                             "container": block.container,
                             "blocking_fns": sorted(
-                                f"{s.file}::{s.fn_name}" for s in _u2_impl.blocking_fns)})
+                                f"{s.file}::{s.fn_name}" for s in _u2_impl.blocking_fns),
+                            "unjudged": sorted(_u2_impl.no_verdict)})
                     members_filled_this_block = spliced_now
                     fns_filled_total += spliced_now
                     impls_filled += 1

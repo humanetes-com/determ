@@ -30,6 +30,7 @@ from pipeline_core.domain.test_report import (
     partition_blame,
 )
 from pipeline_core.domain.test_results import (
+    RegressionComparison,
     TestRunOutcome,
     TestStateReading,
     compare_readings,
@@ -159,7 +160,7 @@ def test_regression_gate(
     enabled: bool,
     timeout: int,
     guard: Callable[[str, str], None],
-) -> tuple[frozenset[str], str] | None:
+) -> tuple[RegressionComparison, str] | None:
     """Global non-regression gate (the monotone ratchet). A fill is a REGRESSION
     if it turns a previously-passing test red, crashes a previously-completing
     test binary, or drops the passing/executed counts — all judged ONLY over
@@ -174,9 +175,11 @@ def test_regression_gate(
       - None → ACCEPT (gate off, no test_cmd, no valid baseline, the post-fill
         suite was inconclusive, or nothing regressed within the measured
         scope — never block on uncertainty, mirroring `u2_test_gate`).
-      - (newly_red, detail) → REVERT: `newly_red` is the set of previously-green
-        tests this fill broke (empty when the regression is a crash or a
-        count drop); `detail` is the prompt-ready explanation, which names the
+      - (comparison, detail) → REVERT: the typed
+        :class:`RegressionComparison` (which regression fired, over which
+        measured scope — callers read `.summary` to log it and `.signature` to
+        key the stall on it, rather than inferring a cause from an empty
+        `newly_red`); `detail` is the prompt-ready explanation, which names the
         measured scope and lists pre-existing crashed binaries as excluded.
     """
     if not (enabled and test_cmd and baseline is not None):
@@ -196,7 +199,7 @@ def test_regression_gate(
               "baseline — their tests are excluded from the regression verdict")
     if not cmp.regressed:
         return None
-    return cmp.newly_red, render_regression_detail(cmp)
+    return cmp, render_regression_detail(cmp)
 
 
 def _render_u2_reject(blame: BlameVerdict, err_cap: int) -> str:
@@ -215,6 +218,9 @@ def _render_u2_reject(blame: BlameVerdict, err_cap: int) -> str:
         out += (f"\n\n(Ignore: {len(blame.external)} other failing "
                 f"test(s) are blocked by still-stubbed fn(s) {blocking} "
                 "— not this unit.)")
+    if blame.no_verdict:
+        out += (f"\n\n(Ignore: {len(blame.no_verdict)} other test(s) produced "
+                "no output because their test process aborted — not judged.)")
     return out
 
 
@@ -240,10 +246,12 @@ def u2_test_gate(
     still-`unimplemented!()` stub is not this unit's fault. Returns a typed
     :class:`U2Verdict`:
       - ACCEPT               → tests pass / gate off / no tests / inconclusive.
-      - ACCEPT_EXTERNAL_ONLY → compiled; every failing test is blocked by
-        another unit's stub. Caller KEEPS the fill, writes no retro, does not
-        exhaust, does not immediate-retry (the outer TDD loop re-runs once the
-        blocking producers fill).
+      - ACCEPT_EXTERNAL_ONLY → compiled; no failing test convicts this unit —
+        each is either blocked by another unit's stub or carries no verdict at
+        all (named FAILED with no captured output, i.e. the test process
+        aborted). Caller KEEPS the fill, writes no retro, does not exhaust,
+        does not immediate-retry (the outer TDD loop re-runs once the blocking
+        producers fill).
       - REJECT               → ≥1 real self failure. `self_failures` is the
         stall signature; `detail` feeds the next prompt (external failures
         summarized, never chased).
@@ -290,11 +298,19 @@ def u2_test_gate(
         return U2Verdict.accept()
     locate = make_fn_site_locator(structure, target_src_dir)
     blame = partition_blame(scoped, frozenset(unit_sites), locate)
+    unjudged = frozenset(f.test_name for f in blame.no_verdict)
+    if unjudged:
+        guard("phase-c/u2_no_verdict",
+              f"{sorted(unjudged)} were named FAILED but printed no output "
+              "(process aborted) — not charged to this unit")
     if not blame.self_failures:
-        return U2Verdict.accept_external_only(blame.external)
+        # Includes the all-inconclusive case: nothing convicts, so the
+        # compiling fill stands rather than burning attempts on a verdict the
+        # unit cannot influence.
+        return U2Verdict.accept_external_only(blame.external, unjudged)
     detail = _render_u2_reject(blame, err_cap)
     return U2Verdict.reject(
-        frozenset(f.test_name for f in blame.self_failures), detail)
+        frozenset(f.test_name for f in blame.self_failures), detail, unjudged)
 
 
 def run_check_diag(

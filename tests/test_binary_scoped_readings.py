@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from pipeline_core.domain.test_command import ensure_serial_harness
 from pipeline_core.domain.test_results import (
+    RegressionComparison,
     TestStateReading,
     compare_readings,
     parse_binary_results,
@@ -194,3 +195,51 @@ def test_ensure_serial_harness() -> None:
     assert ensure_serial_harness(already) == already
     explicit = "cargo test -- --test-threads=4"
     assert ensure_serial_harness(explicit) == explicit
+
+
+# --- a regression verdict names its own class ------------------------------- #
+
+def _cmp(**kw) -> RegressionComparison:
+    base = {
+        "newly_red": frozenset(), "newly_crashed": (), "excluded_crashed": (),
+        "not_run": (), "measured": ("tests/a.rs",), "base_pass": 5,
+        "cur_pass": 5, "base_executed": 5, "cur_executed": 5,
+    }
+    return RegressionComparison(**{**base, **kw})
+
+
+def test_summary_and_signature_name_the_regression_class() -> None:
+    # Each class gets its OWN label and its OWN stall key — collapsing them
+    # onto "(pass-count drop)" mislabels a crash and makes two different
+    # failures read as one repeated one.
+    crash1 = _cmp(newly_crashed=("tests/a.rs",))
+    assert crash1.summary == "binary crashed: ['tests/a.rs']"
+    assert crash1.signature == frozenset({"__binary_crash__:tests/a.rs"})
+
+    crash2 = _cmp(newly_crashed=("tests/a.rs", "tests/b.rs"))
+    assert crash2.summary == "binaries crashed: ['tests/a.rs', 'tests/b.rs']"
+    assert crash2.signature == frozenset(
+        {"__binary_crash__:tests/a.rs", "__binary_crash__:tests/b.rs"})
+
+    red = _cmp(newly_red=frozenset({"t_b", "t_a"}))
+    assert red.summary == "newly red: ['t_a', 't_b']"
+    assert red.signature == frozenset({"t_a", "t_b"})
+
+    dropped = _cmp(cur_pass=3)
+    assert dropped.summary == "pass count 5→3"
+    assert dropped.signature == frozenset({"__pass_count_drop__"})
+
+    fewer = _cmp(cur_executed=4)
+    assert fewer.summary == "executed count 5→4"
+    assert fewer.signature == frozenset({"__executed_count_drop__"})
+
+    clean = _cmp()
+    assert not clean.regressed and clean.summary == "" and clean.signature == frozenset()
+
+
+def test_crash_outranks_a_count_drop_in_the_label() -> None:
+    # A crashed binary takes its passes with it, so both signals fire at once;
+    # the crash is the actionable one and must win the label.
+    both = _cmp(newly_crashed=("tests/a.rs",), cur_pass=0, cur_executed=0)
+    assert both.summary.startswith("binary crashed")
+    assert both.signature == frozenset({"__binary_crash__:tests/a.rs"})

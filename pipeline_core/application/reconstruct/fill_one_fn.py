@@ -466,11 +466,16 @@ class FillOneFn:
                     # once the blocking producers fill). Reverting would be
                     # strictly worse.
                     _ctx2 = f" [{container}]" if container else ""
+                    _why = []
+                    if _v.external:
+                        _why.append(f"{len(_v.external)} attributed test(s) "
+                                    "blocked by still-stubbed sibling(s)")
+                    if _v.no_verdict:
+                        _why.append(f"{len(_v.no_verdict)} unjudged (aborted "
+                                    "test process)")
                     self.tel.log(f"  [phase-c/per-fn] {idx}/{ctx.total} kept "
                                  f"{rel_file}::{fn_name}{_ctx2} (compiles; "
-                                 f"{len(_v.external)} attributed test(s) blocked "
-                                 "by still-stubbed sibling(s) — deferred to outer "
-                                 "loop).")
+                                 f"{'; '.join(_why)} — deferred to outer loop).")
             # Global monotone ratchet: this fn compiles and its own tests pass,
             # but reject it if it reddened any previously-passing cluster test
             # (or dropped the pass count). Routed through the SAME failure path
@@ -481,12 +486,12 @@ class FillOneFn:
                     ctx.tdd_test_cmd, ctx.target_src_dir, ctx.cluster_env,
                     _attempt_baseline_test)
                 if _regr is not None:
-                    _newly, _regr_detail = _regr
-                    _u2_fail_sig = _newly if _newly else frozenset({"__pass_count_drop__"})
+                    _cmp, _regr_detail = _regr
+                    _u2_fail_sig = _cmp.signature
                     cargo_out = _regr_detail
                     self.tel.log(
-                        f"  [phase-c/per-fn] {fn_name}: reverted — regressed "
-                        f"sibling test(s) {sorted(_newly) or '(pass-count drop)'}.")
+                        f"  [phase-c/per-fn] {fn_name}: reverted — "
+                        f"regressed sibling test(s): {_cmp.summary}.")
             if rc == 0 and _u2_fail_sig is None:
                 ctx.splice_check_lock.release()
                 _lock_released = True
