@@ -312,6 +312,16 @@ def run_phase_c_tdd(
                 "cluster": cluster.name, "iter": iter_n,
                 "expected": _expected_count,
                 "missing": oracle.missing_count,
+                # `vanished: []` with a non-zero `missing` is ambiguous on its
+                # own — a reader cannot tell a crash that ate unnamed tests
+                # from a static inventory that over-counted. The two have
+                # different remedies (hunt a stack vs. fix enumeration), so
+                # the cause is carried, never left to be inferred.
+                "unnamed_shortfall": oracle.unnamed_shortfall,
+                "cause": "+".join(
+                    (["crash"] if oracle.vanished else [])
+                    + (["inventory_overcount"] if oracle.unnamed_shortfall
+                       else [])),
                 "vanished": sorted(oracle.vanished)[:200]})
             fail_n += oracle.missing_count
             failed_ = set(failed_) | set(oracle.vanished)

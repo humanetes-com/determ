@@ -137,9 +137,29 @@ def test_vanished_tests_fail_the_sweep_and_reach_attribution(
                          for k in attrs)
     vanish_evs = [d for ev, d in events if ev == "phase_c.tdd.oracle_vanished"]
     assert vanish_evs and vanish_evs[0]["vanished"] == ["t4"]
+    assert vanish_evs[0]["cause"] == "crash"
+    assert vanish_evs[0]["unnamed_shortfall"] == 0
     # The iter measurement's failed set carries the vanished test too.
     iters = [d for ev, d in events if ev == "phase_c.tdd.iter"]
     assert iters and "t4" in iters[0]["failed"]
+
+
+def test_unnamed_shortfall_names_its_own_cause_in_the_event(
+        tmp_path: Path, monkeypatch) -> None:
+    # Every expected NAME reports, yet the total is one short: the static
+    # inventory over-counted. No test vanished, so `vanished` is empty — and
+    # the event must say so rather than leave a reader to infer a crash.
+    out = ("test t1 ... ok\ntest t2 ... FAILED\n"
+           "test result: FAILED. 1 passed; 1 failed; 0 ignored")
+    events: list[tuple[str, dict]] = []
+    _run_driver(monkeypatch, tmp_path,
+                run_cargo=lambda *a, **k: (101, out),
+                inventory=lambda pd, cl, stems: (3, frozenset({"t1", "t2"})),
+                attribution_kwargs=[], checkpoints=[], events=events)
+    evs = [d for ev, d in events if ev == "phase_c.tdd.oracle_vanished"]
+    assert evs and evs[0]["vanished"] == []
+    assert evs[0]["unnamed_shortfall"] == 1
+    assert evs[0]["cause"] == "inventory_overcount"
 
 
 def test_rc0_with_short_oracle_never_closes_cluster(
