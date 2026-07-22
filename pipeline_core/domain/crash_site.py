@@ -13,6 +13,7 @@ test list.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
 from pipeline_core.domain.models import FnLocator
@@ -245,3 +246,39 @@ def relativize_frame_files(
             rec = {**rec, "file": f[len(root):]}
         out.append(rec)
     return out
+
+
+def vanish_is_stub_confounded(
+    vanished: Iterable[str],
+    test_reverse_map: Mapping[str, set[FnLocator]],
+    current_stubs: Iterable[FnLocator],
+) -> bool:
+    """True when a vanished-test sweep is explained by remaining stubs, so
+    native crash localization would only burn a rebuild to find nothing.
+
+    An `unimplemented!()` panic reached inside drop/vtable/constructor code
+    aborts the whole test binary exactly like a bad-pointer scheme — every
+    later test in that binary reports no verdict and "vanishes". But a clean
+    Rust panic-abort raises no hardware fault for gdb to catch and produces no
+    ASAN report, so the localizer can only conclude "no native fault" after
+    paying for the gdb attach + an ASAN-instrumented rebuild. While the fns the
+    vanished tests statically reach are still ≥half stubs, the vanish evidence
+    is confounded (which stub aborts is indistinguishable from a filled-body
+    crash) and localization must wait for fills — the same ≥half rule and
+    reasoning as ``layout_retrigger.crash_evidence_confounded``, applied at
+    localizer scope instead of per frozen component.
+
+    Matches suspects to stubs by full ``FnLocator`` (both come from the one
+    extractor over the same src tree): a stale path would only shrink the
+    stub overlap and fall back to localizing — never suppress a real crash.
+    """
+    suspects: set[FnLocator] = set()
+    for vt in vanished:
+        bare = vt.split("::")[-1]
+        suspects |= (test_reverse_map.get(bare)
+                     or test_reverse_map.get(vt) or set())
+    if not suspects:
+        return False
+    stub_set = set(current_stubs)
+    stubbed = sum(1 for s in suspects if s in stub_set)
+    return stubbed * 2 >= len(suspects)

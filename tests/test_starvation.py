@@ -36,6 +36,26 @@ def test_type_def_absent_for_unresolved_type() -> None:
     assert cause is StarvationCause.TYPE_DEF_ABSENT and ev == "BoxedError"
 
 
+def test_e0560_owner_named_first_does_not_swap_field_and_type() -> None:
+    # E0560 names the STRUCT first ("struct `X` has no field named `Y`"), the
+    # reverse of E0609. ErrorImpl is shown in the prompt, so inventing
+    # `backtrace` on it is a design conflict — and the evidence must read
+    # `backtrace` on `ErrorImpl`, not the swapped form.
+    err = "error[E0560]: struct `ErrorImpl<E>` has no field named `backtrace`"
+    cause, ev = classify_starvation(_PROMPT, "self.backtrace", err)
+    assert cause is StarvationCause.DESIGN_CONFLICT
+    assert ev == "invented field `backtrace` on `ErrorImpl`"
+
+
+def test_e0609_field_named_first_still_reads_field_then_owner() -> None:
+    # E0609 keeps field-first order; the E0560 fix must not regress it. Both
+    # codes now normalise to the same correct (field, owner) evidence.
+    err = "error[E0609]: no field `backtrace` on type `ErrorImpl<E>`"
+    cause, ev = classify_starvation(_PROMPT, "self.backtrace", err)
+    assert cause is StarvationCause.DESIGN_CONFLICT
+    assert ev == "invented field `backtrace` on `ErrorImpl`"
+
+
 def test_symbol_present_in_prompt_is_not_starvation() -> None:
     err = "error[E0425]: cannot find function `vtable` in this scope"
     cause, _ = classify_starvation(_PROMPT, "vtable()", err)

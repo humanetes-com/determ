@@ -932,6 +932,29 @@ class TestStateReading:
         return frozenset(out)
 
     @property
+    def passed_names(self) -> frozenset[str]:
+        """Names observed passing in COMPLETED binaries only. A crashed
+        binary's partial `ok` verdicts are a nondeterministic prefix (which
+        tests print before the signal varies run-to-run), so they can neither
+        exonerate nor convict — a test only counts as "was passing" when its
+        binary finished."""
+        out: set[str] = set()
+        for b in self.binaries:
+            if b.completed:
+                out |= b.passed
+        return frozenset(out)
+
+    @property
+    def ignored_names(self) -> frozenset[str]:
+        """Names libtest reported `ignored` (cfg-gated off for this cluster).
+        Callers subtract these from any "not passing ⇒ failing" reading — an
+        ignored test is neither."""
+        out: set[str] = set()
+        for b in self.binaries:
+            out |= b.ignored
+        return frozenset(out)
+
+    @property
     def executed(self) -> int:
         return sum(b.executed for b in self.binaries)
 
@@ -1079,9 +1102,15 @@ class RegressionComparison:
     """Outcome of a binary-scoped baseline-vs-after comparison.
 
     ``measured`` — labels complete in BOTH readings (the only verdicts that
-    count). ``newly_crashed`` — complete at baseline, crashed after: a real
-    regression attributable to the change under test. ``excluded_crashed`` —
-    crashed in both readings: pre-existing, excluded, never blamed."""
+    count). ``newly_crashed`` — complete at baseline WITH at least one passing
+    test, crashed after: a real regression (something that worked was lost).
+    ``crashed_all_red`` — complete at baseline with ZERO passing tests,
+    crashed after: NOT a regression — every test in it was already failing,
+    only the failure MODE moved (caught panic → process abort; typical when a
+    newly-filled constructor lets tests reach a still-stubbed Drop). Judging
+    these as regressions convicted every partial fill of a coupled family for
+    sibling stubs it cannot control. ``excluded_crashed`` — crashed in both
+    readings: pre-existing, excluded, never blamed."""
 
     newly_red: frozenset[str]
     newly_crashed: tuple[str, ...]
@@ -1092,6 +1121,7 @@ class RegressionComparison:
     cur_pass: int
     base_executed: int
     cur_executed: int
+    crashed_all_red: tuple[str, ...] = ()
 
     @property
     def regressed(self) -> bool:
@@ -1138,10 +1168,14 @@ def compare_readings(base: TestStateReading,
     """Binary-scoped regression comparison. Only binaries complete in BOTH
     readings contribute verdicts/counts; a binary that crashed at baseline is
     excluded no matter what it printed after (its readings are noise); a
-    binary that was complete at baseline and crashed after IS a regression."""
+    binary that was complete at baseline and crashed after is a regression
+    IFF anything passed in it at baseline — an all-red binary that starts
+    crashing lost nothing that worked (only the failure mode moved, panic →
+    abort), so it is reported separately and never convicts."""
     base_by, cur_by = base.by_label(), cur.by_label()
     measured: list[str] = []
     newly_crashed: list[str] = []
+    crashed_all_red: list[str] = []
     excluded: list[str] = []
     not_run: list[str] = []
     newly_red: set[str] = set()
@@ -1159,7 +1193,10 @@ def compare_readings(base: TestStateReading,
             not_run.append(label)
             continue
         if not c.completed:
-            newly_crashed.append(label)
+            if b.pass_count == 0:
+                crashed_all_red.append(label)
+            else:
+                newly_crashed.append(label)
             continue
         measured.append(label)
         newly_red |= (c.failed - b.failed)
@@ -1174,7 +1211,8 @@ def compare_readings(base: TestStateReading,
         not_run=tuple(sorted(not_run)),
         measured=tuple(sorted(measured)),
         base_pass=base_pass, cur_pass=cur_pass,
-        base_executed=base_exec, cur_executed=cur_exec)
+        base_executed=base_exec, cur_executed=cur_exec,
+        crashed_all_red=tuple(sorted(crashed_all_red)))
 
 
 def render_regression_detail(cmp: RegressionComparison) -> str:
@@ -1209,4 +1247,12 @@ def render_regression_detail(cmp: RegressionComparison) -> str:
                  f"{list(cmp.excluded_crashed)} crashed BEFORE this change "
                  "too — pre-existing, excluded from this verdict, and NOT "
                  "your fault. Do not contort this fn to fix them.)")
+    if cmp.crashed_all_red:
+        head += ("\n(Note: test binar"
+                 f"{'ies' if len(cmp.crashed_all_red) > 1 else 'y'} "
+                 f"{list(cmp.crashed_all_red)} now abort, but every test in "
+                 "them was ALREADY failing — not counted as regression. The "
+                 "abort usually means a still-stubbed sibling (often Drop "
+                 "machinery) is now reachable; those bodies are separate "
+                 "work, not a fault of this change.)")
     return head

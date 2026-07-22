@@ -90,6 +90,7 @@ class FileModelNotesStore:
         self._excerpt_max_per_code = excerpt_max_per_code
         self._excerpt_max_chars = excerpt_max_chars
         self._hash_cache: dict[Path, set[str]] = {}
+        self._layout_retired_logged: set[str] = set()
         # Run-scoped recurring-error accumulators.
         self.error_code_counts: Counter[str] = Counter()
         self.error_code_excerpts: dict[str, list[str]] = {}
@@ -153,6 +154,16 @@ class FileModelNotesStore:
         notes = [n for n in self.load(fr_path)
                  if not mn.is_bogus_regression_note(n)
                  and not mn.is_stale_regression_note(n, file_text)]
+        contradicted = mn.layout_contradicted_notes(notes, file_text)
+        if contradicted:
+            dropped = set(contradicted)
+            notes = [n for n in notes if n not in dropped]
+            for note in contradicted:
+                h = mn.note_hash(note)
+                if h not in self._layout_retired_logged:
+                    self._layout_retired_logged.add(h)
+                    self._log("  [notes] layout-contradicted note kept out of "
+                              f"prompt (field not in current layout): {note[:100]}…")
         err_codes = ecodes_in_text(current_error) if current_error else set()
         return mn.rank_notes(
             notes,

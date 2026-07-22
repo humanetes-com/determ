@@ -91,31 +91,203 @@ def preserve_model_notes(old_fr_text: str | None, new_fr_text: str) -> str:
     return new_body.rstrip() + "\n\n" + notes_section
 
 
-# Pre-canned notes injected deterministically (not LLM-extracted) when a
-# specific structural pattern is detected. Each is a single bullet string
-# containing ≥2 WRONG→RIGHT pairs for few-shot variety (CLAUDE.md rule).
-
-_ERRORIMPL_OBJECT_NOTE = (
-    "ErrorImpl<E> stores the wrapped error in field `_object: E`, not `error` or "
-    "`inner`. "
-    "WRONG: `self.error.source()` (no field `error` → E0609) / "
-    "RIGHT: `self._object.source()`. "
-    "WRONG: `self.inner.source()` (no field `inner` → E0609) / "
-    "RIGHT: `self._object.source()`."
-)
+# Layout-contradicted notes — reader-side retirement. A private layout is
+# re-authorable per cluster and per bake, so a persisted field fact can
+# silently invert between the moment a note is written and the moment it is
+# injected. The current file text is the single source of truth for field
+# names; notes are checked against it at prompt-build time. (Notes must never
+# hardcode a specific crate's private field names in pipeline source either —
+# a canned note did exactly that and kept teaching the model a field the
+# re-authored layout no longer had.)
 
 
-def is_errorimpl_container(container: str) -> bool:
-    """True when the impl container involves ErrorImpl — signals that the
-    `_object` field canned note should be appended on first compile failure."""
-    return "ErrorImpl" in container
+def _ident_at(text: str, i: int) -> str:
+    """The identifier starting at ``i`` (empty when none starts there)."""
+    n = len(text)
+    j = i
+    if j < n and (text[j].isalpha() or text[j] == "_"):
+        j += 1
+        while j < n and (text[j].isalnum() or text[j] == "_"):
+            j += 1
+    return text[i:j]
 
 
-def errorimpl_object_note() -> str:
-    """Pre-canned WRONG→RIGHT note for ErrorImpl's `_object` field naming.
-    Appended on the first compile failure of any ErrorImpl fn so that
-    subsequent attempts see the note in MODEL_NOTES."""
-    return _ERRORIMPL_OBJECT_NOTE
+def struct_fields(file_text: str, type_name: str) -> frozenset[str] | None:
+    """Named fields of ``struct type_name`` as declared in ``file_text``, or
+    ``None`` when no braced struct of that exact name is declared there
+    (absent, tuple/unit struct) — ``None`` means "no evidence", callers keep
+    notes in doubt.
+
+    Char scan, comment/string aware: a field name is the identifier ending at
+    a ``:`` at brace depth 1 (``::`` path separators excluded; attribute args
+    and generic bounds carry their colons inside ``[]``/``<>`` nesting or as
+    ``=`` bindings, so they cannot false-hit at depth 1)."""
+    idx = 0
+    while True:
+        idx = file_text.find(f"struct {type_name}", idx)
+        if idx == -1:
+            return None
+        end = idx + len(f"struct {type_name}")
+        nxt = file_text[end:end + 1]
+        if not nxt or not (nxt.isalnum() or nxt == "_"):
+            break  # exact name, not a prefix of a longer identifier
+        idx = end
+    n = len(file_text)
+    i = end
+    angle = 0
+    while i < n:
+        ch = file_text[i]
+        if ch == "<":
+            angle += 1
+        elif ch == ">":
+            angle = max(0, angle - 1)
+        elif angle == 0:
+            if ch == "{":
+                break
+            if ch in ";(":
+                return None  # unit or tuple struct: no named fields
+        i += 1
+    if i >= n:
+        return None
+    depth = 1
+    i += 1
+    fields: set[str] = set()
+    while i < n and depth > 0:
+        two = file_text[i:i + 2]
+        if two == "//":
+            j = file_text.find("\n", i)
+            i = n if j == -1 else j + 1
+            continue
+        if two == "/*":
+            j = file_text.find("*/", i + 2)
+            i = n if j == -1 else j + 2
+            continue
+        ch = file_text[i]
+        if ch == '"':
+            i += 1
+            while i < n and file_text[i] != '"':
+                i += 2 if file_text[i] == "\\" else 1
+            i += 1
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        elif (ch == ":" and depth == 1
+              and file_text[i + 1:i + 2] != ":"
+              and file_text[i - 1:i] != ":"):
+            j = i - 1
+            while j >= 0 and file_text[j] in " \t":
+                j -= 1
+            k = j
+            while k >= 0 and (file_text[k].isalnum() or file_text[k] == "_"):
+                k -= 1
+            name = file_text[k + 1:j + 1]
+            if name and not name[0].isdigit():
+                fields.add(name)
+        i += 1
+    return frozenset(fields)
+
+
+def _field_claims(note: str, struct_names: set[str]) -> frozenset[str]:
+    """Field names the note claims to exist, from three concrete shapes:
+    ``self.name`` access (method calls ``self.name()`` excluded),
+    ``field `name``` / ```name` field`` prose, and ``TypeName { name, … }``
+    struct literals for the given struct names."""
+    claims: set[str] = set()
+    start = 0
+    while True:
+        i = note.find("self.", start)
+        if i == -1:
+            break
+        name = _ident_at(note, i + 5)
+        if name and note[i + 5 + len(name):i + 6 + len(name)] != "(":
+            claims.add(name)
+        start = i + 5
+    start = 0
+    while True:
+        i = note.find("field `", start)
+        if i == -1:
+            break
+        name = _ident_at(note, i + len("field `"))
+        if name:
+            claims.add(name)
+        start = i + 1
+    start = 0
+    while True:
+        i = note.find("`", start)
+        if i == -1:
+            break
+        name = _ident_at(note, i + 1)
+        j = i + 1 + len(name)
+        if name and note[j:j + 1] == "`" and note[j + 1:].lstrip().startswith("field"):
+            claims.add(name)
+        start = i + 1
+    for s in struct_names:
+        start = 0
+        while True:
+            i = note.find(s, start)
+            if i == -1:
+                break
+            start = i + len(s)
+            j = start
+            if note[j:j + 1] == "<":
+                depth = 0
+                while j < len(note):
+                    if note[j] == "<":
+                        depth += 1
+                    elif note[j] == ">":
+                        depth -= 1
+                        if depth == 0:
+                            j += 1
+                            break
+                    j += 1
+            while j < len(note) and note[j] == " ":
+                j += 1
+            if note[j:j + 1] != "{":
+                continue
+            j += 1
+            for frag in note[j:note.find("}", j) if note.find("}", j) != -1
+                             else len(note)].split(","):
+                name = _ident_at(frag.strip(), 0)
+                if name:
+                    claims.add(name)
+    return frozenset(claims)
+
+
+def layout_contradicted_notes(notes: list[str], file_text: str) -> list[str]:
+    """Notes claiming a field that exists on none of the structs the note
+    names, judged against the structs actually declared in ``file_text`` (the
+    current spliced layout for the file being filled).
+
+    Observed live: a note teaching ``self._object`` against a re-authored
+    layout whose field was ``error: E`` steered every attempt into E0609 on
+    the exact file that held the pass plateau; the same note was TRUE for the
+    sibling cluster's frozen layout — correctness is per (cluster, bake), so
+    it must be judged against the file text of the attempt being prompted.
+    Bias to retire: claims inside WRONG-example fragments count too — losing
+    a true-but-redundant warning is cheap (the struct definition is already
+    visible in the prompt), keeping a false recommendation poisons every
+    subsequent attempt."""
+    if not notes or not file_text:
+        return []
+    out: list[str] = []
+    cache: dict[str, frozenset[str] | None] = {}
+    for note in notes:
+        named: dict[str, frozenset[str]] = {}
+        for tok in camelcase_type_tokens(note):
+            bare = tok.split("<", 1)[0]
+            if bare not in cache:
+                cache[bare] = struct_fields(file_text, bare)
+            f = cache[bare]
+            if f is not None:
+                named[bare] = f
+        if not named:
+            continue
+        known: frozenset[str] = frozenset().union(*named.values())
+        if any(c not in known for c in _field_claims(note, set(named))):
+            out.append(note)
+    return out
 
 
 def render_with_notes(fr_text: str, notes: list[str]) -> str:

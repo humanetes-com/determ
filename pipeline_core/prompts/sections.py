@@ -792,6 +792,59 @@ RUST_GOTCHAS: list[dict[str, Any]] = [
             "in the file you are editing — you cannot edit the sibling from here."
         ),
     },
+    {
+        # Observed live (anyhow nightly, impl ErrorImpl): the model wrote
+        # `fn provide<'a>(this: Ref<'a, Self>, ...) { ... Self::error(this) }`
+        # as a NESTED fn inside another method's body — every `Self` there is
+        # E0401, because a nested item opens a fresh generic scope that cannot
+        # see the enclosing impl's `Self`/type params. Burned attempts re-emitting
+        # the same nested shape.
+        "id": "self_from_outer_item_nested_fn",
+        "summary": "E0401 `can't use Self from outer item` = you declared a `fn` INSIDE another fn's body and referenced `Self` (or `Self::assoc`, or an outer generic like `E`) in it. A nested `fn` opens a fresh scope and cannot see the enclosing impl's `Self`. Either make it a SIBLING associated fn of the impl (where `Self` is in scope), or name the concrete type.",
+        "triggers": {"E0401", "can't use `Self` from outer item",
+                     "use of `Self` from outer item", "from outer item",
+                     "can't use generic parameters from outer item"},
+        "detail": (
+            "A nested `fn` is a fresh item with its OWN (empty) generic scope —\n"
+            "it does not inherit `Self` or the type params of the impl/fn around\n"
+            "it. Referencing them there is E0401. Two fixes:\n"
+            "  WRONG (nested fn names `Self` as a type — E0401):\n"
+            "    impl Node {\n"
+            "        fn walk(&self) {\n"
+            "            fn visit(n: &Self) { /* ... */ }   // E0401\n"
+            "            visit(self);\n"
+            "        }\n"
+            "    }\n"
+            "  RIGHT (name the concrete type — `Self` is `Node` here):\n"
+            "    impl Node {\n"
+            "        fn walk(&self) {\n"
+            "            fn visit(n: &Node) { /* ... */ }\n"
+            "            visit(self);\n"
+            "        }\n"
+            "    }\n"
+            "  WRONG (nested fn calls `Self::assoc` and uses outer generic `E` —\n"
+            "  E0401 on every `Self`):\n"
+            "    impl Table<E> {\n"
+            "        fn get(this: Ref<Self>) {\n"
+            "            fn helper(this: Ref<Self>) -> &E {   // E0401 x2\n"
+            "                unsafe { Self::field(this) }     // E0401\n"
+            "            }\n"
+            "            let _ = helper(this);\n"
+            "        }\n"
+            "    }\n"
+            "  RIGHT (hoist it to a SIBLING associated fn — inside the impl\n"
+            "  block `Self` and `E` are both in scope):\n"
+            "    impl Table<E> {\n"
+            "        fn get(this: Ref<Self>) { let _ = Self::helper(this); }\n"
+            "        fn helper(this: Ref<Self>) -> &E {\n"
+            "            unsafe { Self::field(this) }\n"
+            "        }\n"
+            "    }\n"
+            "Rule: if a body needs `Self`, `Self::x`, or an outer type param, it\n"
+            "must be an associated fn/method of the impl — never a `fn` declared\n"
+            "inside another fn's body."
+        ),
+    },
 ]
 
 

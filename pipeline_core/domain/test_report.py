@@ -263,6 +263,10 @@ class U2Verdict:
     external: tuple[tuple[TestFailure, FnSite], ...] = ()
     detail: str = ""
     no_verdict: frozenset[str] = frozenset()
+    # Attributed tests observed PASSING in the same scoped run — the positive
+    # evidence comparative banking requires (a test absent from the output is
+    # never "resolved", it is unmeasured).
+    self_passed: frozenset[str] = frozenset()
 
     @classmethod
     def accept(cls) -> U2Verdict:
@@ -278,13 +282,74 @@ class U2Verdict:
 
     @classmethod
     def reject(cls, self_failures: frozenset[str], detail: str,
-               no_verdict: frozenset[str] = frozenset()) -> U2Verdict:
+               no_verdict: frozenset[str] = frozenset(),
+               self_passed: frozenset[str] = frozenset()) -> U2Verdict:
         return cls(U2Decision.REJECT, self_failures=self_failures,
-                   detail=detail, no_verdict=no_verdict)
+                   detail=detail, no_verdict=no_verdict,
+                   self_passed=self_passed)
 
     @property
     def blocking_fns(self) -> frozenset[FnSite]:
         return frozenset(loc for _f, loc in self.external)
+
+
+@dataclass(frozen=True)
+class JointImprovement:
+    """Comparative banking assessment for JOINT fill routes only (file-first,
+    impl-block). Per-fn acceptance stays absolute — a single fn that reddens
+    its own test is simply wrong — but where one prompt rewrites a coupled
+    family, the only REACHABLE step may be FEWER self-failures, and an
+    absolute gate discards exactly the improvements the iter-level ratchet
+    exists to bank. Vanished/aborted tests count by PRIOR state: a test that
+    was failing and now aborts is still failing, not newly broken; a
+    previously-passing test lost to an abort is caught by the global
+    regression gate, which still runs unchanged.
+
+    ``baseline_failing`` — the unit's attributed tests not observed passing
+    (and not cfg-ignored) at the fresh in-lock baseline. ``resolved`` — the
+    subset observed PASSING in the fill's own scoped run: banking demands
+    POSITIVE evidence (a test absent from both readings is unmeasured, not
+    fixed — counting absence as progress fabricated improvement). ``new_failures``
+    — self-failures outside the baseline-failing set. Banks iff something
+    resolved AND nothing new broke."""
+
+    baseline_failing: frozenset[str]
+    resolved: frozenset[str]
+    new_failures: frozenset[str]
+
+    @property
+    def unresolved(self) -> frozenset[str]:
+        return self.baseline_failing - self.resolved
+
+    @property
+    def banks(self) -> bool:
+        return bool(self.resolved) and not self.new_failures
+
+    @property
+    def summary(self) -> str:
+        shown = ", ".join(sorted(self.resolved)[:5]) + (
+            "…" if len(self.resolved) > 5 else "")
+        return (f"self-failures {len(self.baseline_failing)}→"
+                f"{len(self.unresolved)} (resolved: {shown})")
+
+
+def assess_joint_improvement(
+    attributed: frozenset[str],
+    baseline_passed: frozenset[str],
+    baseline_ignored: frozenset[str],
+    verdict: U2Verdict,
+) -> JointImprovement:
+    """Build the :class:`JointImprovement` for a joint fill judged REJECT by
+    the absolute U2 gate. ``attributed − passed − ignored`` (rather than the
+    baseline's failed names) is the honest "was failing" set: a test whose
+    baseline binary crashed printed no verdict at all, yet it was certainly
+    not passing. Resolution comes only from ``verdict.self_passed`` — the
+    same scoped run that produced the failures."""
+    baseline_failing = attributed - baseline_passed - baseline_ignored
+    return JointImprovement(
+        baseline_failing=frozenset(baseline_failing),
+        resolved=frozenset(verdict.self_passed & baseline_failing),
+        new_failures=frozenset(verdict.self_failures - baseline_failing))
 
 
 def cap_at_line_boundary(text: str, cap: int) -> str:

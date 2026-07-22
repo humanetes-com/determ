@@ -40,7 +40,6 @@ from pipeline_core.application.reconstruct.pull_resolver import (
 )
 from pipeline_core.domain.behaviour_select import select_usage_examples
 from pipeline_core.domain.cfg import filter_cfg_inactive_branches
-from pipeline_core.domain.model_notes import errorimpl_object_note, is_errorimpl_container
 from pipeline_core.domain.models import FillResult, FnLocator, FnSite, Stub
 from pipeline_core.domain.refine import FloorStall
 from pipeline_core.domain.std_api_sigs import std_api_def
@@ -538,16 +537,6 @@ class FillOneFn:
             if fix_attempt == 1:
                 first_failed_body = body
                 first_error_excerpt = self.cargo.focus_errors(cargo_out, rel_file)
-                # D/R2: eagerly append the canned _object field note for any
-                # ErrorImpl fn — available to attempt 2+ via the notes_section
-                # gather (loaded fresh every iteration).
-                if ctx.fr_path is not None and is_errorimpl_container(container):
-                    _obj_note = errorimpl_object_note()
-                    if self.retros.append_note(ctx.fr_path, _obj_note,
-                                               error_codes=["E0609"]):
-                        self.tel.log(
-                            f"  [model-notes] +1 note (ErrorImpl/_object): "
-                            f"{_obj_note[:80]}...")
 
             # P5.5: track error codes seen so we can promote recurring
             # ones to every subsequent prompt.

@@ -22,7 +22,10 @@ from pipeline_core.application.reconstruct.tdd_ratchet import (
     snapshot_src_tree,
 )
 from pipeline_core.domain.attribution import union_unattributed_stubs
-from pipeline_core.domain.crash_site import crash_evidence_by_locator
+from pipeline_core.domain.crash_site import (
+    crash_evidence_by_locator,
+    vanish_is_stub_confounded,
+)
 from pipeline_core.domain.dispatch import defer_blocked_consumers
 from pipeline_core.domain.layout_retrigger import CrashEvidence
 from pipeline_core.domain.measurement import Measurement, tree_content_sha
@@ -539,25 +542,38 @@ def run_phase_c_tdd(
         # unnamed shortfall is an inventory gap, and sending gdb + an ASAN
         # rebuild after it burns a sweep to conclude "no native fault".
         if _oracle.vanished and deps.localize_crashes is not None:
-            _sites = deps.localize_crashes(
-                output, test_cmd, target_src_dir, cluster_env)
-            crash_texts = crash_evidence_by_locator(tuple(_sites))
-            for _site in _sites:
-                deps.log(f"  {tag} [phase-c/crash] {_site.binary_label}"
-                         f"::{_site.test_name or '?'} {_site.signal} — "
-                         f"blamed {_site.blamed_locator}")
-                deps.emit("phase_c.crash.localized", data={
-                    "cluster": cluster.name, "iter": iter_n,
-                    "binary": _site.binary_label, "signal": _site.signal,
-                    "test": _site.test_name,
-                    "frames": [[f.file_rel, f.line, f.fn_name]
-                               for f in _site.all_frames]})
-            if not _sites:
+            # A second gate on the SAME expensive path: while the fns the
+            # vanished tests reach are still >=half stubs, a stub panic (not a
+            # native fault) is the likely cause — gdb + an ASAN rebuild would
+            # only conclude "no fault". Defer until fills land; the frontier
+            # already carries the vanished tests via extra_failed above.
+            if vanish_is_stub_confounded(
+                    _oracle.vanished, test_reverse_map,
+                    deps.scan_unimplemented_functions(src_dir)):
                 deps.log(f"  {tag} [phase-c/crash] {len(_oracle.vanished)} "
-                         "test(s) vanished but no crash could be localized "
-                         "(no native fault under gdb, no ASAN report).")
-            for _loc in crash_texts:
-                frontier.setdefault(_loc, set()).update(_oracle.vanished)
+                         "test(s) vanished — deferring localization (>=half "
+                         "the fns they reach are still stubs; stub panics "
+                         "abort binaries too), fills run first.")
+            else:
+                _sites = deps.localize_crashes(
+                    output, test_cmd, target_src_dir, cluster_env)
+                crash_texts = crash_evidence_by_locator(tuple(_sites))
+                for _site in _sites:
+                    deps.log(f"  {tag} [phase-c/crash] {_site.binary_label}"
+                             f"::{_site.test_name or '?'} {_site.signal} — "
+                             f"blamed {_site.blamed_locator}")
+                    deps.emit("phase_c.crash.localized", data={
+                        "cluster": cluster.name, "iter": iter_n,
+                        "binary": _site.binary_label, "signal": _site.signal,
+                        "test": _site.test_name,
+                        "frames": [[f.file_rel, f.line, f.fn_name]
+                                   for f in _site.all_frames]})
+                if not _sites:
+                    deps.log(f"  {tag} [phase-c/crash] {len(_oracle.vanished)} "
+                             "test(s) vanished but no crash could be localized "
+                             "(no native fault under gdb, no ASAN report).")
+                for _loc in crash_texts:
+                    frontier.setdefault(_loc, set()).update(_oracle.vanished)
 
         # Futility escalation: a failing test whose attributed
         # unit-set is identical to last iteration's has been fully served by

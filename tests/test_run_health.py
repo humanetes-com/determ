@@ -141,6 +141,9 @@ _SHRUNK_UNNAMED = (
 _BLAMED = ("  [stable] [phase-c/crash] tests/test_source.rs::test_io_source "
            "SIGSEGV — blamed FnLocator(file='src/error.rs', "
            "fn_name='construct_from_std')")
+_DEFERRED = ("  [nightly] [phase-c/crash] 66 test(s) vanished — deferring "
+             "localization (>=half the fns they reach are still stubs; stub "
+             "panics abort binaries too), fills run first.")
 
 
 def test_crash_unlocalized_alerts_when_vanish_has_no_blame_line():
@@ -177,3 +180,22 @@ def test_unnamed_shortfall_does_not_report_a_broken_localizer():
     f = [x for x in analyze([_SHRUNK_UNNAMED], [])
          if x.kind == HealthKind.CRASH_UNLOCALIZED]
     assert f == []
+
+
+def test_crash_unlocalized_suppressed_when_shrink_was_deferred_as_stub_confounded():
+    """Early fill: the vanished tests reach >=half still-stubbed fns, so the
+    localizer was deliberately deferred. A stub panic raises no native fault —
+    deferral is correct handling, not a broken localizer, and must stay quiet."""
+    f = [x for x in analyze([_SHRUNK, _DEFERRED], [])
+         if x.kind == HealthKind.CRASH_UNLOCALIZED]
+    assert f == []
+
+
+def test_crash_unlocalized_still_fires_on_real_no_localize_despite_a_deferral():
+    """A deferral elsewhere must NOT mask a shrink where the localizer actually
+    RAN and found nothing (no native fault) — that is still a real concern."""
+    no_loc = ("  [stable] [phase-c/crash] 21 test(s) vanished but no crash "
+              "could be localized (no native fault under gdb, no ASAN report).")
+    (f,) = [x for x in analyze([_SHRUNK, _DEFERRED, _SHRUNK, no_loc], [])
+            if x.kind == HealthKind.CRASH_UNLOCALIZED]
+    assert "deferred as stub-confounded" in f.evidence

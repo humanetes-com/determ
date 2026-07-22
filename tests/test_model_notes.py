@@ -6,12 +6,12 @@ from pipeline_core.domain.model_notes import (
     MODEL_NOTES_HEADER as H,
 )
 from pipeline_core.domain.model_notes import (
-    errorimpl_object_note,
-    is_errorimpl_container,
+    layout_contradicted_notes,
     parse_note_bullets,
     preserve_model_notes,
     render_with_notes,
     slice_model_notes,
+    struct_fields,
 )
 
 
@@ -59,38 +59,112 @@ def test_render_round_trips() -> None:
     assert parse_note_bullets(notes) == ["x", "y"]
 
 
-# D/R2 — ErrorImpl _object field note tests
-def test_errorimpl_container_detection_positive() -> None:
-    assert is_errorimpl_container("impl<E> StdError for ErrorImpl<E>")
-    assert is_errorimpl_container("impl ErrorImpl")
-    assert is_errorimpl_container("impl<E> ErrorImpl<E>")
+# --- layout-contradicted note retirement (reader-side) -----------------------
+# A field fact persisted in a note can invert across a re-bake or differ per
+# cluster; the file text of the attempt being prompted is the only truth.
+
+AUTHORED_LAYOUT = """
+pub(crate) struct ErrorImpl<E = ()> {
+    pub(crate) vtable: &'static ErrorVTable,
+    pub(crate) error: E,
+}
+// vtable of erased fns
+struct ErrorVTable {
+    object_drop: unsafe fn(Own<ErrorImpl>),
+    object_ref: unsafe fn(Ref<ErrorImpl>) -> Ref<dyn StdError + Send + Sync>,
+}
+"""
+
+FROZEN_LAYOUT = """
+#[repr(C)]
+pub(crate) struct ErrorImpl<E = ()> {
+    vtable: &'static ErrorVTable,
+    backtrace: Option<Backtrace>,
+    _object: E,
+}
+"""
+
+# The exact note observed poisoning live fills: written when `_object` was the
+# field, injected after a re-bake renamed it to `error`.
+POISON_NOTE = (
+    "[E0609] ErrorImpl<E> stores the wrapped error in field `_object: E`, not "
+    "`error` or `inner`. WRONG: `self.error.source()` (no field `error` → "
+    "E0609) / RIGHT: `self._object.source()`. WRONG: `self.inner.source()` "
+    "(no field `inner` → E0609) / RIGHT: `self._object.source()`."
+)
 
 
-def test_errorimpl_container_detection_negative() -> None:
-    assert not is_errorimpl_container("impl Error for MyError")
-    assert not is_errorimpl_container("impl<E> Display for Wrapper<E>")
-    assert not is_errorimpl_container("")
+def test_struct_fields_reads_named_fields() -> None:
+    assert struct_fields(AUTHORED_LAYOUT, "ErrorImpl") == {"vtable", "error"}
+    assert struct_fields(AUTHORED_LAYOUT, "ErrorVTable") == {
+        "object_drop", "object_ref"}
+    assert struct_fields(FROZEN_LAYOUT, "ErrorImpl") == {
+        "vtable", "backtrace", "_object"}
 
 
-def test_errorimpl_note_has_two_or_more_wrong_right_pairs() -> None:
-    note = errorimpl_object_note()
-    assert note.count("WRONG:") >= 2
-    assert note.count("RIGHT:") >= 2
+def test_struct_fields_no_evidence_cases() -> None:
+    assert struct_fields(AUTHORED_LAYOUT, "Missing") is None
+    assert struct_fields("struct Own<T: ?Sized>(NonNull<T>);", "Own") is None
+    assert struct_fields("struct Marker;", "Marker") is None
+    # exact-name only: `Error` must not match `ErrorImpl`
+    assert struct_fields(AUTHORED_LAYOUT, "Error") is None
 
 
-def test_errorimpl_note_names_object_field() -> None:
-    note = errorimpl_object_note()
-    assert "_object" in note
+def test_struct_fields_skips_comments_and_attrs() -> None:
+    text = """
+struct S {
+    // not_a_field: u8,
+    /* also_not: u8, */
+    #[cfg(feature = "std")]
+    real: u8,
+}
+"""
+    assert struct_fields(text, "S") == {"real"}
 
 
-def test_errorimpl_note_round_trips_through_render() -> None:
-    note = errorimpl_object_note()
-    out = render_with_notes("# FR\n\nbody\n", [note])
-    _, notes_section = slice_model_notes(out)
-    bullets = parse_note_bullets(notes_section)
-    assert len(bullets) == 1
-    assert "_object" in bullets[0]
-    assert bullets[0].count("WRONG:") >= 2
+def test_poison_note_retired_when_field_renamed() -> None:
+    # Written against the frozen `_object` layout, judged against the
+    # re-authored `error` layout → its recommendation no longer exists.
+    assert layout_contradicted_notes([POISON_NOTE], AUTHORED_LAYOUT) == [POISON_NOTE]
+
+
+def test_poison_note_also_retired_on_frozen_layout_by_wrong_examples() -> None:
+    # Bias to retire: its WRONG examples claim `error`/`inner`, absent from the
+    # frozen layout too. The struct def in the prompt already carries the fact.
+    assert layout_contradicted_notes([POISON_NOTE], FROZEN_LAYOUT) == [POISON_NOTE]
+
+
+def test_note_consistent_with_current_layout_is_kept() -> None:
+    good = ("ErrorImpl stores the payload in field `error`. "
+            "RIGHT: `self.error.source()`.")
+    assert layout_contradicted_notes([good], AUTHORED_LAYOUT) == []
+
+
+def test_struct_literal_claim_checked_against_fields() -> None:
+    lit = "initialize every field: `ErrorImpl { vtable, error, backtrace }`"
+    assert layout_contradicted_notes([lit], AUTHORED_LAYOUT) == [lit]
+    ok = "initialize every field: `ErrorImpl { vtable, error }`"
+    assert layout_contradicted_notes([ok], AUTHORED_LAYOUT) == []
+
+
+def test_notes_without_in_file_structs_are_kept() -> None:
+    # `self.items` is a claim, but the note names no struct declared in this
+    # file — no evidence to judge it against, so it is kept.
+    general = ("[E0382] I tried accessing a collection after moving it; "
+               "use `self.items` after cloning, not after the move.")
+    assert layout_contradicted_notes([general], AUTHORED_LAYOUT) == []
+    boxnote = "use `Box::leak` for 'static, not a stack borrow"
+    assert layout_contradicted_notes([boxnote], AUTHORED_LAYOUT) == []
+
+
+def test_method_calls_are_not_field_claims() -> None:
+    note = "ErrorImpl: call `self.compute()` before reading `self.vtable`."
+    assert layout_contradicted_notes([note], AUTHORED_LAYOUT) == []
+
+
+def test_empty_inputs_keep_everything() -> None:
+    assert layout_contradicted_notes([], AUTHORED_LAYOUT) == []
+    assert layout_contradicted_notes([POISON_NOTE], "") == []
 
 
 # --- relocated note relevance / dedup / promotion rules (model-notes cluster) ---

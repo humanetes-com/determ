@@ -197,6 +197,11 @@ def test_regression_gate(
         guard("phase-c/u2_missing_verdict",
               f"binaries {list(cmp.excluded_crashed)} were already crashed at "
               "baseline — their tests are excluded from the regression verdict")
+    if cmp.crashed_all_red:
+        guard("phase-c/crash_all_red",
+              f"binaries {list(cmp.crashed_all_red)} crashed after the fill "
+              "but were all-red at baseline — nothing that worked was lost; "
+              "not charged as regression (failure mode moved, panic → abort)")
     if not cmp.regressed:
         return None
     return cmp, render_regression_detail(cmp)
@@ -310,7 +315,8 @@ def u2_test_gate(
         return U2Verdict.accept_external_only(blame.external, unjudged)
     detail = _render_u2_reject(blame, err_cap)
     return U2Verdict.reject(
-        frozenset(f.test_name for f in blame.self_failures), detail, unjudged)
+        frozenset(f.test_name for f in blame.self_failures), detail, unjudged,
+        self_passed=frozenset(report.passed & fn_tests))
 
 
 def run_check_diag(

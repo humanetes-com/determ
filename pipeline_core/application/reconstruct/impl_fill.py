@@ -30,6 +30,7 @@ from pipeline_core.application.reconstruct.pull_resolver import (
     workspace_file_reader,
 )
 from pipeline_core.domain.blueprint import Blueprint, blueprint_path, parse_blueprint
+from pipeline_core.domain.fill_groups import BlockGroupInput, coupled_fill_groups
 from pipeline_core.domain.impl_routing import (
     containers_in_file,
     refill_authorized_names,
@@ -51,7 +52,13 @@ from pipeline_core.domain.models import (
 from pipeline_core.domain.refine import FloorStall
 from pipeline_core.domain.rust_idents import canon_container, is_trait_impl_container
 from pipeline_core.domain.std_api_sigs import std_api_def
-from pipeline_core.domain.test_report import U2Decision, U2TestGate, U2Verdict
+from pipeline_core.domain.test_report import (
+    JointImprovement,
+    U2Decision,
+    U2TestGate,
+    U2Verdict,
+    assess_joint_improvement,
+)
 from pipeline_core.domain.test_results import strip_ansi
 from pipeline_core.prompts.context import PerImplSections
 from pipeline_core.prompts.fix_prompts import (
@@ -379,37 +386,74 @@ def fill_impl_blocks(
         """P5 file-first pass: ONE prompt fills every stub of a multi-block
         file so the impls are designed together (run-187469 evidence: the
         Own/Ref/Mut family in src/ptr.rs diverged when filled per block).
-        Strict gate — kept only on rc==0 (+U2), else reverted verbatim and
-        handed to the per-block loop; see `_FILE_FIRST_MAX_ATTEMPTS` for why
-        this is one shot, not an immediate retry."""
-        nonlocal fns_filled_total, attempts_total
+        Strict gate — kept only on rc==0 (+U2 with comparative banking), else
+        reverted verbatim and handed to the per-block loop.
+
+        A file too big for one prompt is no longer skipped wholesale — that
+        fragmented the coupled vtable family back to per-fn fills exactly when
+        it was most-stubbed. It is partitioned into TEST-WELDED block groups
+        (blocks whose attributed frontier tests overlap must be designed
+        together), each within the prompt bound, each filled jointly."""
         file_path = target_src_dir / file_rel
         if not file_path.exists():
             return
-        stub_names = [m.fn_name for b in fblocks for m in b.stub_members]
-        refill_names = [m.fn_name for b in fblocks for m in b.refill_members]
-        # Everything this file needs from the model. A behavioral re-fill block
-        # has no stub left, so gating (and test/blueprint selection) on stubs
-        # alone skipped the file-first route for exactly the case it exists
-        # for: members that only a JOINT rewrite can correct.
-        wanted = [*stub_names, *refill_names]
-        # Bounds how many fns one prompt asks for, so it counts re-fills too —
-        # they are bodies the model must write. The old bound counted stubs
-        # only, so its value assumed re-fills were free; a file needing 8 stubs
-        # + 6 re-writes now exceeds a stubs-era 12 and would skip the route
-        # entirely. `_MAX_FNS` is the honest name; the stubs-era env var is
-        # still honoured so an existing .env keeps working.
+        wanted_all = [m.fn_name for b in fblocks
+                      for m in (*b.stub_members, *b.refill_members)]
+        if not wanted_all:
+            return
+        # Bounds how many fns one prompt asks for; counts re-fills too — they
+        # are bodies the model must write. The stubs-era env var is still
+        # honoured so an existing .env keeps working.
         max_fns = int(os.getenv("PHASE_C_FILE_MAX_FNS")
                       or os.getenv("PHASE_C_FILE_MAX_STUBS") or "20")
-        if not wanted:
+        if len(wanted_all) <= max_fns:
+            _fill_block_group(file_rel, fblocks, file_rel)
             return
-        if len(wanted) > max_fns:
-            # Never a silent return: a file dropping out of the joint-design
-            # route looks identical in the log to a file that has no work.
-            _log(f"  [phase-c/file] {file_rel}: skipped — {len(wanted)} fn(s) "
-                 f"({len(stub_names)} stub, {len(refill_names)} re-fill) "
-                 f"exceeds PHASE_C_FILE_MAX_FNS={max_fns}; per-block fills "
-                 "will handle it.")
+        _binputs = [BlockGroupInput(
+            idx=_i,
+            fn_count=len(b.stub_members) + len(b.refill_members),
+            tests=frozenset(
+                t for m in (*b.stub_members, *b.refill_members)
+                for t in (tdd_frontier_tests or {}).get(
+                    FnLocator(file_rel, m.fn_name), set())))
+            for _i, b in enumerate(fblocks)]
+        _packed = coupled_fill_groups(_binputs, max_fns)
+        # Only multi-block groups run here: a lone uncoupled block is exactly
+        # the per-block route's unit, and running it in both routes doubles
+        # its attempts. A single block larger than the bound keeps the old
+        # skip semantics.
+        _joint = [g for g in _packed
+                  if len(g) >= 2
+                  and sum(_binputs[i].fn_count for i in g) <= max_fns]
+        _solo = len(_packed) - len(_joint)
+        if not _joint:
+            _log(f"  [phase-c/file] {file_rel}: skipped — {len(wanted_all)} "
+                 f"fn(s) exceeds PHASE_C_FILE_MAX_FNS={max_fns} and no "
+                 "test-welded multi-block group fits the bound; per-block "
+                 "fills will handle it.")
+            return
+        _sizes = ", ".join(
+            str(sum(_binputs[i].fn_count for i in g)) for g in _joint)
+        _log(f"  [phase-c/file] {file_rel}: {len(wanted_all)} fn(s) exceeds "
+             f"PHASE_C_FILE_MAX_FNS={max_fns} — split into {len(_joint)} "
+             f"test-welded group(s) of {_sizes} fn(s) "
+             f"(+{_solo} uncoupled block(s) → per-block loop).")
+        for _gi, _g in enumerate(_joint, 1):
+            _fill_block_group(file_rel, [fblocks[i] for i in _g],
+                              f"{file_rel}[group {_gi}/{len(_joint)}]")
+
+    def _fill_block_group(file_rel: str, fblocks: list[ImplBlock],
+                          glabel: str) -> None:
+        """One joint fill cycle over ``fblocks`` — the whole file, or one
+        test-welded group of its blocks: prompt → splice → compile → U2 over
+        the group's attributed tests (with comparative banking of strict
+        self-failure improvement) → global regression gate."""
+        nonlocal fns_filled_total, attempts_total
+        file_path = target_src_dir / file_rel
+        stub_names = [m.fn_name for b in fblocks for m in b.stub_members]
+        refill_names = [m.fn_name for b in fblocks for m in b.refill_members]
+        wanted = [*stub_names, *refill_names]
+        if not wanted:
             return
         snapshot = file_path.read_text(encoding="utf-8", errors="replace")
         test_blocks: list[tuple[str, str]] = []
@@ -446,12 +490,12 @@ def fill_impl_blocks(
                 tests_block="\n\n".join(f"// {p}\n{t}" for p, t in test_blocks),
                 blueprint=_bp_slice, notes=notes_section, prior_error=prior_error,
                 crash_evidence=_file_crash)
-            _log(f"  [phase-c/file] {file_rel}: file-first fill "
+            _log(f"  [phase-c/file] {glabel}: file-first fill "
                  f"({len(fblocks)} block(s), {len(stub_names)} stub(s), "
                  f"{len(refill_names)} re-fill(s), "
                  f"attempt {_attempt}/{_FILE_FIRST_MAX_ATTEMPTS}).")
             _emit("phase_c.file.fill.start", data={
-                "cluster": cluster_name, "file": file_rel,
+                "cluster": cluster_name, "file": file_rel, "group": glabel,
                 "blocks": len(fblocks), "stubs": len(stub_names),
                 "refills": len(refill_names)})
             attempts_total += 1
@@ -604,7 +648,7 @@ def fill_impl_blocks(
                             _log(f"  [phase-c/file] {file_rel}: free-fn splice "
                                  f"`{_p['fn_name']}` failed: {_reason}")
                 if spliced_now == 0:
-                    _log(f"  [phase-c/file] {file_rel}: nothing spliced — "
+                    _log(f"  [phase-c/file] {glabel}: nothing spliced — "
                          "falling back to per-block fills.")
                     return
                 rc, cargo_out, _diags = _run_cargo_check_diag(
@@ -641,32 +685,45 @@ def fill_impl_blocks(
                                              target_src_dir, cluster_env)
                 # ACCEPT_EXTERNAL_ONLY (all failures blocked by another file's
                 # stub) is NOT a revert — keep the fill and defer to the outer
-                # loop. Only a real self-failure (REJECT) reverts.
+                # loop. A REJECT may still BANK: a joint rewrite that strictly
+                # shrinks the group's own failing set is progress only this
+                # route can make, and demanding perfection here discarded it.
                 _u2_reject = (_u2_file is not None
                               and _u2_file.decision is U2Decision.REJECT)
+                _bank: JointImprovement | None = None
+                if _u2_reject and _u2_file is not None and _baseline_test is not None:
+                    _jb = assess_joint_improvement(
+                        frozenset(_file_tests),
+                        _baseline_test.passed_names,
+                        _baseline_test.ignored_names,
+                        _u2_file)
+                    _bank = _jb if _jb.banks else None
                 _regr_file = (_test_regression_gate(
                     tdd_test_cmd, target_src_dir, cluster_env, _baseline_test)
                     if rc == 0 else None)
-                if rc == 0 and not _u2_reject and _regr_file is None:
+                if rc == 0 and (not _u2_reject or _bank is not None) and _regr_file is None:
                     fns_filled_total += spliced_now
-                    _log(f"  [phase-c/file] {file_rel}: FILE FILLED "
-                         f"{spliced_now} fn(s) in one pass.")
+                    _log(f"  [phase-c/file] {glabel}: FILE FILLED "
+                         f"{spliced_now} fn(s) in one pass"
+                         + (f" — banked improvement: {_bank.summary}."
+                            if _bank is not None else "."))
                     _emit("phase_c.file.fill.done", data={
                         "cluster": cluster_name, "file": file_rel,
-                        "fns_filled": spliced_now})
+                        "group": glabel, "fns_filled": spliced_now,
+                        "banked": _bank is not None})
                     return
                 file_path.write_text(snapshot, encoding="utf-8")
                 if _regr_file is not None:
                     _revert_reason = f"regressed sibling test(s): {_regr_file[0].summary}"
                     prior_error = _regr_file[1]
                 elif rc == 0:
-                    _revert_reason = "U2 test failure"
+                    _revert_reason = "U2 test failure (no strict improvement)"
                     prior_error = _u2_file.detail if _u2_file is not None else ""
                 else:
                     _revert_reason = "compile failed"
                     prior_error = _focus_cargo_errors(cargo_out, file_rel)
                 _more = _attempt < _FILE_FIRST_MAX_ATTEMPTS
-                _log(f"  [phase-c/file] {file_rel}: reverted "
+                _log(f"  [phase-c/file] {glabel}: reverted "
                      f"({_revert_reason}) — "
                      + ("retrying file-first once more."
                         if _more else "falling back to per-block fills."))
@@ -1058,6 +1115,19 @@ def fill_impl_blocks(
                 _u2_external_only = (
                     _u2_impl is not None
                     and _u2_impl.decision is U2Decision.ACCEPT_EXTERNAL_ONLY)
+                # Comparative banking (joint route): a whole-block rewrite that
+                # strictly shrinks its own failing set is kept, not reverted —
+                # vanished tests judged by prior state, previously-passing
+                # losses still revert via the regression gate below.
+                _bank_impl: JointImprovement | None = None
+                if (_u2_impl_reject and _u2_impl is not None
+                        and _baseline_test is not None):
+                    _jb = assess_joint_improvement(
+                        frozenset(_block_tests),
+                        _baseline_test.passed_names,
+                        _baseline_test.ignored_names,
+                        _u2_impl)
+                    _bank_impl = _jb if _jb.banks else None
                 # Global monotone ratchet: a compiled fill is rejected if it
                 # reddened ANY previously-passing cluster test — even when the
                 # block's own U2 tests pass (or it would be B3-kept). This is
@@ -1080,7 +1150,7 @@ def fill_impl_blocks(
                     _rsig = _cmp.signature
                     return FixOutcome("failed", err_sig=_rsig,
                                       err_count=max(1, len(_rsig)))
-                if rc == 0 and not _u2_impl_reject:
+                if rc == 0 and (not _u2_impl_reject or _bank_impl is not None):
                     if _u2_external_only and _u2_impl is not None:
                         _emit("phase_c.u2.external_only", data={
                             "cluster": cluster_name, "file": block.file,
@@ -1093,7 +1163,9 @@ def fill_impl_blocks(
                     impls_filled += 1
                     _log(f"  [phase-c/impl] {block_id}: "
                          f"FILLED {spliced_now} fn(s) "
-                         f"(attempt {fix_attempt}).")
+                         f"(attempt {fix_attempt})"
+                         + (f" — banked improvement: {_bank_impl.summary}."
+                            if _bank_impl is not None else "."))
                     _emit("phase_c.impl.fill.done", duration_ms=int(
                         (time.monotonic() - _t0) * 1000),
                         data={

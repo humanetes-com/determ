@@ -786,7 +786,11 @@ def test_file_first_u2_gate_runs_the_refill_members_tests(monkeypatch, tmp_path,
     # fail it, and hand the file to the per-block loop (whose own gate already
     # counted refills — that fallback is not what this pins).
     assert "[phase-c/file] lib.rs: FILE FILLED" not in out
-    assert "[phase-c/file] lib.rs: reverted (U2 test failure)" in out
+    # The comparative verdict must not bank here either: `name_is_wrong` is
+    # absent from the scoped output (unmeasured), and absence is not positive
+    # pass evidence — so the reject stands, with the comparative reason named.
+    assert ("[phase-c/file] lib.rs: reverted "
+            "(U2 test failure (no strict improvement))") in out
     del res
 
 

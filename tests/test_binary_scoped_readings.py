@@ -243,3 +243,83 @@ def test_crash_outranks_a_count_drop_in_the_label() -> None:
     both = _cmp(newly_crashed=("tests/a.rs",), cur_pass=0, cur_executed=0)
     assert both.summary.startswith("binary crashed")
     assert both.signature == frozenset({"__binary_crash__:tests/a.rs"})
+
+
+def test_compare_all_red_binary_crash_is_not_a_regression() -> None:
+    # Baseline completed with ZERO passes (every test already failing);
+    # after the fill it aborts (e.g. a filled constructor lets tests reach a
+    # still-stubbed Drop). Nothing that worked was lost — reported in
+    # crashed_all_red, never a conviction.
+    base = """\
+    Running tests/a.rs (t/a-1)
+running 2 tests
+test x ... FAILED
+test y ... FAILED
+test result: FAILED. 0 passed; 2 failed; 0 ignored
+"""
+    cur = """\
+    Running tests/a.rs (t/a-1)
+running 2 tests
+test x ...
+"""
+    cmp = compare_readings(_reading(base), _reading(cur))
+    assert cmp.crashed_all_red == ("tests/a.rs",)
+    assert cmp.newly_crashed == ()
+    assert not cmp.regressed
+
+
+def test_compare_mixed_crash_convicts_only_binaries_with_baseline_passes() -> None:
+    base = """\
+    Running tests/a.rs (t/a-1)
+running 2 tests
+test p ... ok
+test q ... FAILED
+test result: FAILED. 1 passed; 1 failed; 0 ignored
+    Running tests/b.rs (t/b-2)
+running 1 test
+test r ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored
+"""
+    cur = """\
+    Running tests/a.rs (t/a-1)
+running 2 tests
+test p ...
+    Running tests/b.rs (t/b-2)
+running 1 test
+test r ...
+"""
+    cmp = compare_readings(_reading(base), _reading(cur))
+    assert cmp.newly_crashed == ("tests/a.rs",)   # held a baseline pass
+    assert cmp.crashed_all_red == ("tests/b.rs",)  # was all-red
+    assert cmp.regressed
+    msg = render_regression_detail(cmp)
+    assert "tests/b.rs" in msg and "ALREADY failing" in msg
+
+
+def test_reading_passed_names_completed_binaries_only() -> None:
+    text = """\
+    Running tests/a.rs (t/a-1)
+running 2 tests
+test p ... ok
+test q ... FAILED
+test result: FAILED. 1 passed; 1 failed; 0 ignored
+    Running tests/b.rs (t/b-2)
+running 2 tests
+test r ... ok
+test s ...
+"""
+    r = _reading(text)
+    # b crashed: its partial `ok` for r is a nondeterministic prefix, not a
+    # "was passing" fact.
+    assert r.passed_names == frozenset({"p"})
+
+
+def test_reading_ignored_names_collected() -> None:
+    text = """\
+    Running tests/a.rs (t/a-1)
+running 2 tests
+test n ... ignored, requires nightly
+test p ... ok
+test result: ok. 1 passed; 0 failed; 1 ignored
+"""
+    assert _reading(text).ignored_names == frozenset({"n"})

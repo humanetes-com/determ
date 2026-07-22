@@ -273,3 +273,100 @@ def test_u2verdict_carries_no_verdict_names() -> None:
 
 def test_blameverdict_no_verdict_defaults_empty() -> None:
     assert BlameVerdict().no_verdict == ()
+
+
+# --- comparative banking for joint routes (JointImprovement) -----------------
+from pipeline_core.domain.test_report import (  # noqa: E402
+    assess_joint_improvement,
+)
+
+
+def _reject(self_failures: set[str],
+            no_verdict: frozenset[str] = frozenset(),
+            self_passed: frozenset[str] = frozenset()) -> U2Verdict:
+    return U2Verdict.reject(frozenset(self_failures), "detail",
+                            no_verdict=no_verdict, self_passed=self_passed)
+
+
+def test_joint_banks_on_positive_pass_evidence() -> None:
+    ji = assess_joint_improvement(
+        attributed=frozenset({"a", "b", "c"}),
+        baseline_passed=frozenset(),
+        baseline_ignored=frozenset(),
+        verdict=_reject({"a"}, self_passed=frozenset({"b", "c"})))
+    assert ji.baseline_failing == {"a", "b", "c"}
+    assert ji.resolved == {"b", "c"}
+    assert ji.banks
+    assert "3→1" in ji.summary
+
+
+def test_joint_absence_is_not_resolution() -> None:
+    # `b` appears in NEITHER reading (stale attribution, cfg drift, crashed
+    # scoped binary): unmeasured, never "fixed" — no bank without positive
+    # pass evidence.
+    ji = assess_joint_improvement(
+        attributed=frozenset({"a", "b"}),
+        baseline_passed=frozenset(),
+        baseline_ignored=frozenset(),
+        verdict=_reject({"a"}))
+    assert ji.resolved == frozenset()
+    assert not ji.banks
+
+
+def test_joint_no_bank_when_nothing_resolved() -> None:
+    ji = assess_joint_improvement(
+        attributed=frozenset({"a", "b"}),
+        baseline_passed=frozenset(),
+        baseline_ignored=frozenset(),
+        verdict=_reject({"a", "b"}))
+    assert not ji.banks
+
+
+def test_joint_no_bank_on_new_self_failure() -> None:
+    # `c` was passing at baseline and fails now: improvement elsewhere cannot
+    # buy a regression (the global gate reverts it anyway).
+    ji = assess_joint_improvement(
+        attributed=frozenset({"a", "b", "c"}),
+        baseline_passed=frozenset({"c"}),
+        baseline_ignored=frozenset(),
+        verdict=_reject({"c"}, self_passed=frozenset({"a", "b"})))
+    assert ji.new_failures == {"c"}
+    assert not ji.banks
+
+
+def test_joint_aborted_previously_failing_is_not_resolved() -> None:
+    # `b` printed no verdict (aborted) and was failing before — unmeasured,
+    # not progress; `a` passing is what banks.
+    ji = assess_joint_improvement(
+        attributed=frozenset({"a", "b", "c"}),
+        baseline_passed=frozenset(),
+        baseline_ignored=frozenset(),
+        verdict=_reject({"c"}, no_verdict=frozenset({"b"}),
+                        self_passed=frozenset({"a"})))
+    assert ji.resolved == {"a"}
+    assert ji.unresolved == {"b", "c"}
+    assert ji.banks
+
+
+def test_joint_baseline_vanished_counts_as_failing_and_can_resolve() -> None:
+    # An attributed test absent from baseline passes (its binary crashed at
+    # baseline) was certainly not passing; observing it pass now banks.
+    ji = assess_joint_improvement(
+        attributed=frozenset({"vanished", "red"}),
+        baseline_passed=frozenset(),
+        baseline_ignored=frozenset(),
+        verdict=_reject({"red"}, self_passed=frozenset({"vanished"})))
+    assert ji.baseline_failing == {"vanished", "red"}
+    assert ji.resolved == {"vanished"}
+    assert ji.banks
+
+
+def test_joint_ignored_tests_never_pad_the_baseline() -> None:
+    # A cfg-ignored test must not sit in baseline_failing looking resolvable.
+    ji = assess_joint_improvement(
+        attributed=frozenset({"a", "ign"}),
+        baseline_passed=frozenset(),
+        baseline_ignored=frozenset({"ign"}),
+        verdict=_reject({"a"}))
+    assert ji.baseline_failing == {"a"}
+    assert not ji.banks

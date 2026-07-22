@@ -9,6 +9,7 @@ from pipeline_core.domain.crash_site import (
     parse_asan_report,
     relativize_frame_files,
     site_from_frames,
+    vanish_is_stub_confounded,
 )
 from pipeline_core.domain.models import FnLocator
 
@@ -120,3 +121,22 @@ def test_file_fill_prompt_carries_crash_evidence() -> None:
     assert "<CRASH_EVIDENCE>" in with_ev
     assert "construct_from_std" in with_ev
     assert "do NOT copy that pattern" in with_ev
+
+
+def test_vanish_is_stub_confounded() -> None:
+    provide = FnLocator("src/error.rs", "provide")
+    obj_bt = FnLocator("src/error.rs", "object_backtrace")
+    display = FnLocator("src/error.rs", "display")   # filled
+    fmt = FnLocator("src/error.rs", "fmt")           # filled
+    rmap = {"test_provide": {provide, obj_bt, display, fmt}}
+    # 2 of the 4 reached fns are still stubs -> >=half -> confounded.
+    assert vanish_is_stub_confounded(
+        {"test_provide"}, rmap, [provide, obj_bt]) is True
+    # only 1 of 4 still stubbed -> a filled-body crash is plausible, localize.
+    assert vanish_is_stub_confounded({"test_provide"}, rmap, [provide]) is False
+    # module-qualified vanished name resolves via its bare tail.
+    assert vanish_is_stub_confounded(
+        {"error::test_provide"}, rmap, [provide, obj_bt]) is True
+    # no reverse-map entry -> no suspects -> never suppress (localizer runs).
+    assert vanish_is_stub_confounded(
+        {"test_unknown"}, rmap, [provide, obj_bt]) is False

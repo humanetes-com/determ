@@ -213,3 +213,23 @@ def test_gotcha_e0424_self_confusion_fires():
         g["id"] for g in RUST_GOTCHAS if any(t in err for t in g["triggers"])}
     assert "WRONG" in out and "RIGHT" in out
     assert out.count("WRONG") >= 2
+
+
+def test_gotcha_e0401_self_from_outer_item_fires():
+    # Live (anyhow nightly, impl ErrorImpl, run 2749): the model wrote a NESTED
+    # `fn provide` that used `Self` in its signature and `Self::error` in its
+    # body — E0401 recurred identically across attempts until the fill
+    # exhausted, and the nested-fn/Self class had no gotcha of its own.
+    err = ("error[E0401]: can't use `Self` from outer item\n"
+           "   --> src/error.rs:755:35\n"
+           "    |\n"
+           "755 | fn provide<'a>(this: Ref<'a, Self>, request: &mut Request<'a>) {\n"
+           "    |    -------                   ^^^^ use of `Self` from outer item\n"
+           "    |    `Self` used in this inner function")
+    out = gotchas_for_error(err)
+    assert "self_from_outer_item_nested_fn" in {
+        g["id"] for g in RUST_GOTCHAS if any(t in err for t in g["triggers"])}
+    assert "WRONG" in out and "RIGHT" in out
+    assert out.count("WRONG") >= 2
+    # Names both fixes: concrete type AND hoisting to a sibling associated fn.
+    assert "associated fn" in out

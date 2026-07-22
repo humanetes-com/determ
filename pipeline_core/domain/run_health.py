@@ -281,12 +281,23 @@ def analyze(
                  if "[phase-c/crash]" in ln and "blamed" in ln)
     no_localize = sum(1 for ln in segment_lines
                       if "no crash could be localized" in ln)
-    if shrunk and not blamed:
+    # A shrink whose localization was deliberately DEFERRED (the vanished tests
+    # reach >=half still-stubbed fns, so a stub panic — with no native fault —
+    # is the likely cause) is correct handling, not a broken localizer. Fire
+    # only on an UNEXPLAINED shrink: the localizer RAN and found nothing
+    # (no_localize) or never logged at all — never when the segment's shrinks
+    # were all deferred as stub-confounded. (Existence, not exact counts: the
+    # ORACLE SHRUNK line double-logs on the deterministic re-sweep.)
+    deferred = any("[phase-c/crash]" in ln and "deferring localization" in ln
+                   for ln in segment_lines)
+    unexplained = no_localize > 0 or (shrunk > 0 and not deferred)
+    if shrunk and not blamed and unexplained:
         findings.append(HealthFinding(
             HealthKind.CRASH_UNLOCALIZED, "alert", "crash localizer",
             f"{shrunk} ORACLE SHRUNK sweep(s), 0 localized crash site(s)"
             + (f" ({no_localize} explicit no-localize line(s))"
-               if no_localize else " (localizer never logged at all)"),
+               if no_localize else " (localizer never logged at all)")
+            + ("; some deferred as stub-confounded" if deferred else ""),
             "vanished tests with no faulting stack = the localizer is not "
             "running or cannot reproduce — check gdb availability, the ASAN "
             "nightly build, and the [phase-c/crash] wiring before trusting "

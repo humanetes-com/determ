@@ -196,7 +196,16 @@ def classify_starvation(
         if "no field" in line and "`" in line:
             spans = _backticked(line)
             if len(spans) >= 2:
-                field, owner = spans[0], _ident_root(spans[1])
+                # E0560 "struct `Owner` has no field named `Field`" names the
+                # owner FIRST; E0609 "no field `Field` on type `Owner`" names
+                # the field first. Same defect (an invented field), opposite
+                # backtick order — reading [field, owner] for both swaps them
+                # on E0560, mislabelling the evidence and running the
+                # prompt-presence check on the field name instead of the type.
+                if "has no field named" in line:
+                    owner, field = _ident_root(spans[0]), spans[1]
+                else:
+                    field, owner = spans[0], _ident_root(spans[1])
                 if owner and not has_word(prompt, owner):
                     return StarvationCause.TYPE_DEF_ABSENT, owner
                 if owner:
