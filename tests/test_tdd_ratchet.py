@@ -126,7 +126,7 @@ def _run_tdd(monkeypatch, tmp_path: Path, outputs, events) -> None:
         return 101, out
 
     run_phase_c_tdd(
-        _driver_deps(_cargo, lambda pd, cl, stems: (2, frozenset({"t1", "t2"})),
+        _driver_deps(_cargo, lambda pd, cl, stems, lib=False: (2, frozenset({"t1", "t2"})),
                      events),
         project_dir=tmp_path, target_src_dir=tmp_path, tests_dir_files=[],
         cluster_tests=[("tests/t.rs", "fn t1() {}")], module="m",
@@ -134,7 +134,7 @@ def _run_tdd(monkeypatch, tmp_path: Path, outputs, events) -> None:
             name="stable", env_extra={}, tarpaulin_exclude_files=[],
             excluded_cfg=[], active_cfg=[], prompt_nightly_rule=""),
         check_cmd="cargo check", cluster_env={}, leaf_counts=None, fr_path=None,
-        test_cmd_builder=lambda stems: "cargo test", tag="[stable]")
+        test_cmd_builder=lambda stems, include_lib=False: "cargo test", tag="[stable]")
 
 
 _INTACT = ("test t1 ... ok\ntest t2 ... FAILED\n"

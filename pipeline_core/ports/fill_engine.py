@@ -92,6 +92,7 @@ class Cargo(Protocol):
                    timeout: int = ...) -> tuple[int, str, list[Any]]: ...
     def build_test_cmd(
         self, test_stems: list[str], cluster: BuildCluster | None,
+        *, include_lib: bool = ...,
     ) -> str: ...
     def u2_test_gate(
         self, fn_tests: set[str], unit_sites: frozenset[FnSite],

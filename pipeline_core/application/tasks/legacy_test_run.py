@@ -17,6 +17,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -28,13 +29,13 @@ from ...domain.test_results import OUTPUT_SEPARATOR, TestOutcome, parse_test_cou
 class LegacyTestRunDeps:
     """Pipeline-coupled collaborators the legacy single-shot runner needs."""
 
-    phase: Callable[..., Any]                    # _phase context-manager factory
+    phase: Callable[..., AbstractContextManager[dict[str, Any]]]  # _phase factory
     emit: Callable[..., None]                    # _emit
     log: Callable[[str], None]                   # _log
     cargo_env: Callable[[], dict[str, str]]      # _cargo_env
     parse_cmd: Callable[[str], list[str]]        # _parse_cmd
     store_prompt_content: Callable[[str], Any]   # _store_prompt_content
-    task3_inline_retry: Callable[..., Any]       # _task3_inline_retry
+    task3_inline_retry: Callable[..., tuple[bool, str]]  # _task3_inline_retry
     read: Callable[[Any], str]
     write: Callable[[Any, str], None]
     test_timeout: int

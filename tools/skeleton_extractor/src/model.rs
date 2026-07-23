@@ -29,6 +29,13 @@ pub struct FnRecord {
     // this is a SEPARATE field from `is_pub` rather than a redefinition.
     pub is_exactly_pub: bool,
     pub container: String, // "" for free fn, "impl X for Y" for inherent/trait impl, "trait T" for trait method
+    // `::`-joined inline-module path within the file ("" at file scope). Rust
+    // forbids two items of one name in one module, so (file, mod_path, fn_name)
+    // identifies at most ONE compiled fn — the key that lets a test inventory
+    // collapse mutually-exclusive source variants gated by an attribute macro
+    // (`#[rustversion::nightly]` / `#[rustversion::not(nightly)]`), which no
+    // `#[cfg]` evaluation can decide.
+    pub mod_path: String,
     pub has_unimplemented_body: bool, // body is a single `unimplemented!()` or annotated stub
     pub is_test: bool, // fn carries a test attribute (#[test], #[tokio::test], #[rstest], …)
 }

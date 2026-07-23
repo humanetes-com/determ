@@ -32,6 +32,7 @@ from pipeline_core.application.reconstruct.pull_resolver import (
 )
 from pipeline_core.domain.blueprint import Blueprint, blueprint_path, parse_blueprint
 from pipeline_core.domain.fill_groups import BlockGroupInput, coupled_fill_groups
+from pipeline_core.domain.identity import ContainerId, RetroKey
 from pipeline_core.domain.impl_routing import (
     containers_in_file,
     refill_authorized_names,
@@ -52,7 +53,9 @@ from pipeline_core.domain.models import (
     FnSite,
     Frontier,
     ImplBlock,
+    TypeRecord,
 )
+from pipeline_core.domain.reconstruction import SpliceOutcome
 from pipeline_core.domain.refine import FloorStall
 from pipeline_core.domain.retro_gate import (
     RetroGateTally,
@@ -71,7 +74,11 @@ from pipeline_core.domain.test_report import (
     U2Verdict,
     assess_joint_improvement,
 )
-from pipeline_core.domain.test_results import strip_ansi
+from pipeline_core.domain.test_results import (
+    RegressionComparison,
+    TestStateReading,
+    strip_ansi,
+)
 from pipeline_core.prompts.context import PerImplSections
 from pipeline_core.prompts.fix_prompts import (
     BlockFillPlan,
@@ -85,55 +92,55 @@ from pipeline_core.prompts.pull_menu import pull_menu_section
 class ImplFillDeps:
     """Collaborators for the per-impl fill engine, injected by the composition root."""
 
-    build_dispatch_family_section: Callable[..., Any]
-    build_per_impl_prompt: Callable[..., Any]
-    cargo_env: Callable[..., Any]
-    cargo_err_sig: Callable[..., Any]
-    cargo_err_sig_from_diagnostics: Callable[..., Any]
-    check_graceful_stop: Callable[..., Any]
-    cluster_filter_type_methods: Callable[..., Any]
-    collect_crate_macros: Callable[..., Any]
-    collect_impl_blocks_for_cluster: Callable[..., Any]
-    collect_sibling_filled_bodies: Callable[..., Any]
-    compute_cluster_macro_invariants: Callable[..., Any]
-    detect_crate_no_std_invariant: Callable[..., Any]
-    dispatch_families_via_extractor: Callable[..., Any]
-    effective_stalls: Callable[..., Any]
-    emit: Callable[..., Any]
-    enumerate_types_via_extractor: Callable[..., Any]
-    extract_crate_idioms: Callable[..., Any]
-    extract_impl_where_clause: Callable[..., Any]
-    filter_model_notes_for_prompt: Callable[..., Any]
-    find_tests_referencing_fn: Callable[..., Any]
-    focus_cargo_errors: Callable[..., Any]
-    frontier_from_diags: Callable[..., Any]
-    impl_block_id: Callable[..., Any]
-    is_fn_fully_exhausted: Callable[..., Any]
-    load_retrospectives: Callable[..., Any]
-    log: Callable[..., Any]
-    module_of: Callable[..., Any]
-    phase_c_retrospective: Callable[..., Any]
-    record_error_codes_seen: Callable[..., Any]
-    retro_key: Callable[..., Any]
-    run_cargo_check_diag: Callable[..., Any]
-    save_retrospectives: Callable[..., Any]
-    scan_unimplemented_for_cluster: Callable[..., Any]
-    scan_unimplemented_records_for_cluster: Callable[..., Any]
-    splice_fn_with_where: Callable[..., Any]
-    splice_lock_for: Callable[..., Any]
-    types_section_for_fix: Callable[..., Any]
-    bound_methods_section_for: Callable[..., Any]
+    build_dispatch_family_section: Callable[..., str]
+    build_per_impl_prompt: Callable[..., str]
+    cargo_env: Callable[..., dict[str, str]]
+    cargo_err_sig: Callable[..., frozenset[str]]
+    cargo_err_sig_from_diagnostics: Callable[..., frozenset[str]]
+    check_graceful_stop: Callable[[str], None]
+    cluster_filter_type_methods: Callable[..., list[TypeRecord]]
+    collect_crate_macros: Callable[..., str]
+    collect_impl_blocks_for_cluster: Callable[..., list[ImplBlock] | None]
+    collect_sibling_filled_bodies: Callable[..., str]
+    compute_cluster_macro_invariants: Callable[..., str]
+    detect_crate_no_std_invariant: Callable[..., str]
+    dispatch_families_via_extractor: Callable[..., list[DispatchFamily] | None]
+    effective_stalls: Callable[..., int]
+    emit: Callable[..., None]
+    enumerate_types_via_extractor: Callable[..., list[TypeRecord] | None]
+    extract_crate_idioms: Callable[..., str]
+    extract_impl_where_clause: Callable[..., str]
+    filter_model_notes_for_prompt: Callable[..., str]
+    find_tests_referencing_fn: Callable[..., list[tuple[str, str]]]
+    focus_cargo_errors: Callable[..., str]
+    frontier_from_diags: Callable[..., Frontier]
+    impl_block_id: Callable[..., ContainerId]
+    is_fn_fully_exhausted: Callable[..., bool]
+    load_retrospectives: Callable[..., dict[str, Any]]
+    log: Callable[[str], None]
+    module_of: Callable[..., str]
+    phase_c_retrospective: Callable[..., dict[str, str]]
+    record_error_codes_seen: Callable[..., None]
+    retro_key: Callable[..., RetroKey]
+    run_cargo_check_diag: Callable[..., tuple[int, str, list[Any]]]
+    save_retrospectives: Callable[..., None]
+    scan_unimplemented_for_cluster: Callable[..., list[FnLocator]]
+    scan_unimplemented_records_for_cluster: Callable[..., list[dict[str, Any]] | None]
+    splice_fn_with_where: Callable[..., SpliceOutcome]
+    splice_lock_for: Callable[..., threading.Lock]
+    types_section_for_fix: Callable[..., str]
+    bound_methods_section_for: Callable[..., str]
     u2_test_gate: U2TestGate
-    test_regression_baseline: Callable[..., Any]
-    test_regression_gate: Callable[..., Any]
-    ask: Callable[..., Any]
+    test_regression_baseline: Callable[..., TestStateReading | None]
+    test_regression_gate: Callable[..., tuple[RegressionComparison, str] | None]
+    ask: Callable[..., str]
     failed_body_cap: Any
     per_fn_fix_hard_cap: Any
     per_impl_max_stubs: Any
     task2_model: Any
     # Mechanical note validation: (fr_path, error_text) -> retired count.
     # None disables (tests / minimal wiring).
-    retire_contradicted_notes: Callable[..., Any] | None = None
+    retire_contradicted_notes: Callable[..., int] | None = None
 
 
 def fill_impl_blocks(

@@ -38,7 +38,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    from pipeline_core.settings import Settings
 
 from pipeline_core.application.reconstruct.fix_roles import (
     FixCheckerAdapter,
@@ -219,7 +222,7 @@ class GenerateFixLoopDeps:
     BUILD_TIMEOUT: Any
     FILE_FORMAT_INSTRUCTION: Any
     MODEL: Any
-    settings_now: Callable[..., Any]   # getter — tests monkeypatch pipeline.SETTINGS
+    settings_now: Callable[..., Settings]   # getter — tests monkeypatch pipeline.SETTINGS
     SINGLE_CALL_CHAR_LIMIT: Any
     SOURCE_EXTENSIONS: Any
     ASK_CLIENT: Any

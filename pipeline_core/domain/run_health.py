@@ -36,6 +36,7 @@ class HealthKind(StrEnum):
     FROZEN_ZERO_TREE = "frozen_zero_tree"        # pass=0 fail=0 for N iters — tree likely broken
     HEAL_SKELETON_LOSS = "heal_skeleton_loss"    # whole-file skeleton restore discarded fills
     ORACLE_DRIFT = "oracle_drift"                # denominator changed mid-run — counts not comparable
+    INVENTORY_OVERCOUNT = "inventory_overcount"  # static oracle permanently too big — cluster can never complete
     CAPPED_RETRY_FUTILITY = "capped_retry_futility"  # budgeted mechanism failing in an attempt-invariant way
     CRASH_UNLOCALIZED = "crash_unlocalized"      # tests vanished but no crash site was produced
 
@@ -307,6 +308,38 @@ def analyze(
             "running or cannot reproduce — check gdb availability, the ASAN "
             "nightly build, and the [phase-c/crash] wiring before trusting "
             "any revert/exhaustion verdicts",
+        ))
+
+    # -- 7d. static inventory over-count -----------------------------------
+    # An ORACLE SHRUNK whose shortfall is UNNAMED (every expected test reported;
+    # the total is still short) is not a crash — the static test inventory
+    # counted a "test" that never becomes a runnable verdict, so the expected
+    # denominator is bigger than the suite can ever report. Distinct from
+    # ORACLE_DRIFT (a denominator that MOVED): this one is constant and does not
+    # heal, so `SweepOracle.intact` can never hold and the cluster can never be
+    # declared done even at 100% real pass — every sweep charges a phantom
+    # failing test. Live class: two `#[rustversion::nightly]`/`not(nightly)`
+    # variants of one test fn, counted twice though only one ever compiles.
+    # Recurrence across >=2 iters proves it is structural, not a one-off race.
+    _oc: set[int] = set()
+    for ln in segment_lines:
+        if "ORACLE SHRUNK" in ln and "unnamed test(s) short" in ln:
+            it = _int_after(ln, "iter ")
+            if it is not None:
+                _oc.add(it)
+    overcount_iters = sorted(_oc)
+    if overcount_iters:
+        findings.append(HealthFinding(
+            HealthKind.INVENTORY_OVERCOUNT,
+            "alert" if len(overcount_iters) >= 2 else "warn",
+            "tdd driver",
+            f"unnamed oracle shortfall on iter(s) "
+            f"{','.join(str(i) for i in overcount_iters[:8])} — every expected "
+            "test reported, the expected total is still higher",
+            "the STATIC inventory over-counts (a test that never compiles to a "
+            "verdict, e.g. two attribute-macro-gated variants of one fn counted "
+            "twice) — fix count_test_fns_in_records / the extractor; the cluster "
+            "can never reach 'done' while the denominator is inflated",
         ))
 
     # -- 8. skeleton-fallback fill loss (F7 pairs with F2) ------------------

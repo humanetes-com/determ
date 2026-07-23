@@ -14,7 +14,10 @@ import shlex
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from pipeline_core.domain.models import FnFixContext
 
 from pipeline_core.application.reconstruct.import_repair import (
     repair_missing_imports,
@@ -62,7 +65,7 @@ class RetryContext:
 class RetryDeps:
     """Collaborators injected by the composition root (pipeline.py)."""
     locate_fn: Callable[[str, str], tuple[Any, ...] | None]
-    gather_fix_context: Callable[..., Any]
+    gather_fix_context: Callable[..., FnFixContext]
     build_per_fn_fix_prompt: Callable[..., str]
     ask_per_fn_body: Callable[..., tuple[str | None, str]]
     splice_fn_body: Callable[..., SpliceOutcome]

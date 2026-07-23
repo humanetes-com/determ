@@ -8,13 +8,13 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from pipeline_core.domain.blueprint import (
     Blueprint,
     missing_topics,
     parse_blueprint,
 )
+from pipeline_core.domain.models import DispatchFamily
 from pipeline_core.domain.rust_macros import macro_definitions
 from pipeline_core.prompts.blueprint import build_blueprint_prompt
 
@@ -28,7 +28,7 @@ class BlueprintDeps:
     # Dispatch-family enumeration over the baked skeleton (syn extractor;
     # None/failed → file-stem topics only). Families are cross-impl schemes —
     # exactly what the blueprint must pin down.
-    dispatch_families: Callable[..., Any] | None = None
+    dispatch_families: Callable[..., list[DispatchFamily] | None] | None = None
 
 
 def ensure_blueprint(

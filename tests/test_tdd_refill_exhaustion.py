@@ -67,7 +67,7 @@ def _run(deps: PhaseCTddDeps, tmp_path: Path, monkeypatch) -> ClusterFillResult:
         cluster_tests=[("tests/t.rs", "fn t1() {}")], module="m",
         cluster=_cluster(), check_cmd="cargo check", cluster_env={},
         leaf_counts=None, fr_path=None,
-        test_cmd_builder=lambda stems: "cargo test", tag="[stable]")
+        test_cmd_builder=lambda stems, include_lib=False: "cargo test", tag="[stable]")
 
 
 def test_refill_target_exhausts_after_cap(tmp_path: Path, monkeypatch) -> None:
@@ -89,7 +89,7 @@ def test_refill_cap_env_raises_attempts(tmp_path: Path, monkeypatch) -> None:
         tests_dir_files=[], cluster_tests=[("tests/t.rs", "fn t1() {}")],
         module="m", cluster=_cluster(), check_cmd="cargo check", cluster_env={},
         leaf_counts=None, fr_path=None,
-        test_cmd_builder=lambda stems: "cargo test", tag="[stable]")
+        test_cmd_builder=lambda stems, include_lib=False: "cargo test", tag="[stable]")
     assert len([c for c in fill_calls if _WRONG in c]) == 4
 
 

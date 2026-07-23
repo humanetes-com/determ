@@ -117,7 +117,8 @@ def _run_driver(monkeypatch, tmp_path: Path, *, run_cargo, inventory,
         cluster_tests=[("tests/t.rs", "fn t1() {}")], module="m",
         cluster=_cluster(), check_cmd="cargo check", cluster_env={},
         leaf_counts=None, fr_path=None,
-        test_cmd_builder=lambda stems: "cargo test", tag="[stable]")
+        test_cmd_builder=lambda stems, include_lib=False: "cargo test",
+        tag="[stable]")
 
 
 def test_vanished_tests_fail_the_sweep_and_reach_attribution(
@@ -130,7 +131,7 @@ def test_vanished_tests_fail_the_sweep_and_reach_attribution(
     events: list[tuple[str, dict]] = []
     _run_driver(monkeypatch, tmp_path,
                 run_cargo=lambda *a, **k: (101, out),
-                inventory=lambda pd, cl, stems: (
+                inventory=lambda pd, cl, stems, lib=False: (
                     4, frozenset({"t1", "t2", "t3", "t4"})),
                 attribution_kwargs=attrs, checkpoints=ckpts, events=events)
     assert attrs and all(k.get("extra_failed") == frozenset({"t4"})
@@ -154,7 +155,7 @@ def test_unnamed_shortfall_names_its_own_cause_in_the_event(
     events: list[tuple[str, dict]] = []
     _run_driver(monkeypatch, tmp_path,
                 run_cargo=lambda *a, **k: (101, out),
-                inventory=lambda pd, cl, stems: (3, frozenset({"t1", "t2"})),
+                inventory=lambda pd, cl, stems, lib=False: (3, frozenset({"t1", "t2"})),
                 attribution_kwargs=[], checkpoints=[], events=events)
     evs = [d for ev, d in events if ev == "phase_c.tdd.oracle_vanished"]
     assert evs and evs[0]["vanished"] == []
@@ -172,7 +173,7 @@ def test_rc0_with_short_oracle_never_closes_cluster(
     events: list[tuple[str, dict]] = []
     _run_driver(monkeypatch, tmp_path,
                 run_cargo=lambda *a, **k: (0, out),
-                inventory=lambda pd, cl, stems: (
+                inventory=lambda pd, cl, stems, lib=False: (
                     3, frozenset({"t1", "t2", "t3"})),
                 attribution_kwargs=attrs, checkpoints=ckpts, events=events)
     assert not any(d.get("kind") == "pass" for ev, d in events
@@ -188,7 +189,7 @@ def test_intact_oracle_keeps_legacy_done_path(
     events: list[tuple[str, dict]] = []
     _run_driver(monkeypatch, tmp_path,
                 run_cargo=lambda *a, **k: (0, out),
-                inventory=lambda pd, cl, stems: (2, frozenset({"t1", "t2"})),
+                inventory=lambda pd, cl, stems, lib=False: (2, frozenset({"t1", "t2"})),
                 attribution_kwargs=[], checkpoints=[], events=events)
     assert any(d.get("kind") == "pass" for ev, d in events
                if ev == "phase_c.tdd.iter")
@@ -219,13 +220,50 @@ def test_reproducible_first_sweep_shrink_fires_retrigger_immediately(
     events: list[tuple[str, dict]] = []
     _run_driver(monkeypatch, tmp_path,
                 run_cargo=_cargo,
-                inventory=lambda pd, cl, stems: (2, frozenset({"t1", "t2"})),
+                inventory=lambda pd, cl, stems, lib=False: (2, frozenset({"t1", "t2"})),
                 attribution_kwargs=[], checkpoints=[], events=events,
                 retrigger=_retrig,
                 reverse_map={"t2": {("src/error.rs", "downcast_ref")}})
     assert calls, "retrigger never fired on a reproducible first-sweep shrink"
     # sweep + confirmation re-sweep happened before the first retrigger call
     assert len(cargo_runs) >= 2
+
+
+def test_unnamed_shortfall_never_fires_the_crash_retrigger(
+        tmp_path: Path, monkeypatch) -> None:
+    """A count-only shortfall names no test, so it is not crash evidence: the
+    CrashEvidence would carry an empty vanished/suspect set and the re-author
+    would aim at nothing. It is also CONSTANT (a static over-count does not
+    heal), so gating on the raw missing count made EVERY iteration pay an extra
+    confirmation sweep and declare a deterministic crash forever."""
+    from pipeline_core.application.retrigger_layout import RetriggerResult
+    monkeypatch.setenv("PHASE_C_CRASH_RETRIGGER_AFTER", "2")
+    # Both expected NAMES report; the expected COUNT is one higher.
+    out = ("test t1 ... ok\ntest t2 ... FAILED\n"
+           "test result: FAILED. 1 passed; 1 failed; 0 ignored")
+    cargo_runs: list[int] = []
+    calls: list[Any] = []
+
+    def _cargo(*a: Any, **k: Any):
+        cargo_runs.append(1)
+        return 101, out
+
+    def _retrig(pd, mod, cl, sd, output, crash_evidence=None):
+        calls.append(crash_evidence)
+        return RetriggerResult(fired=False, succeeded=False,
+                               reverted_count=0, cause="")
+
+    events: list[tuple[str, dict]] = []
+    _run_driver(monkeypatch, tmp_path,
+                run_cargo=_cargo,
+                inventory=lambda pd, cl, stems, lib=False: (3, frozenset({"t1", "t2"})),
+                attribution_kwargs=[], checkpoints=[], events=events,
+                retrigger=_retrig)
+    assert not any(c is not None for c in calls), (
+        "crash retrigger was handed evidence built from an unnamed shortfall")
+    # One sweep per iter — no confirmation re-sweep was provoked.
+    assert len(cargo_runs) == len(
+        [1 for ev, _ in events if ev == "phase_c.tdd.iter"])
 
 
 def test_retrigger_cooldown_skips_confirm_now_for_one_fill_pass(
@@ -250,7 +288,7 @@ def test_retrigger_cooldown_skips_confirm_now_for_one_fill_pass(
     events: list[tuple[str, dict]] = []
     _run_driver(monkeypatch, tmp_path,
                 run_cargo=lambda *a, **k: (101, out),
-                inventory=lambda pd, cl, stems: (2, frozenset({"t1", "t2"})),
+                inventory=lambda pd, cl, stems, lib=False: (2, frozenset({"t1", "t2"})),
                 attribution_kwargs=[], checkpoints=[], events=events,
                 retrigger=_retrig,
                 reverse_map={"t2": {("src/error.rs", "downcast_ref")}})
@@ -284,7 +322,7 @@ def test_transient_shrink_confirm_sweep_intact_does_not_fire(
     events: list[tuple[str, dict]] = []
     _run_driver(monkeypatch, tmp_path,
                 run_cargo=_cargo,
-                inventory=lambda pd, cl, stems: (2, frozenset({"t1", "t2"})),
+                inventory=lambda pd, cl, stems, lib=False: (2, frozenset({"t1", "t2"})),
                 attribution_kwargs=[], checkpoints=[], events=events,
                 retrigger=_retrig,
                 reverse_map={"t2": {("src/error.rs", "downcast_ref")}})
@@ -316,7 +354,7 @@ def test_persistent_vanish_fires_crash_retrigger_with_suspects(
     events: list[tuple[str, dict]] = []
     _run_driver(monkeypatch, tmp_path,
                 run_cargo=lambda *a, **k: (101, out),
-                inventory=lambda pd, cl, stems: (2, frozenset({"t1", "t2"})),
+                inventory=lambda pd, cl, stems, lib=False: (2, frozenset({"t1", "t2"})),
                 attribution_kwargs=[], checkpoints=[], events=events,
                 retrigger=_retrig,
                 reverse_map={"t2": {("src/error.rs", "downcast_ref")}})
@@ -360,7 +398,7 @@ def test_unnamed_shortfall_does_not_invoke_the_crash_localizer(
     calls: list[Any] = []
     _run_driver(monkeypatch, tmp_path,
                 run_cargo=lambda *a, **k: (101, out),
-                inventory=lambda pd, cl, stems: (
+                inventory=lambda pd, cl, stems, lib=False: (
                     4, frozenset({"t1", "t2", "t3"})),
                 attribution_kwargs=[], checkpoints=[], events=[],
                 localize=lambda *a, **k: calls.append(a) or ())
@@ -374,7 +412,7 @@ def test_named_vanish_still_invokes_the_crash_localizer(
     calls: list[Any] = []
     _run_driver(monkeypatch, tmp_path,
                 run_cargo=lambda *a, **k: (101, out),
-                inventory=lambda pd, cl, stems: (
+                inventory=lambda pd, cl, stems, lib=False: (
                     3, frozenset({"t1", "t2", "t3"})),
                 attribution_kwargs=[], checkpoints=[], events=[],
                 localize=lambda *a, **k: calls.append(a) or ())

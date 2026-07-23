@@ -1516,7 +1516,8 @@ class StaticSkeletonTask2Generator(Task2Generator):
                     cluster_env=self._cluster_env(cluster),
                     leaf_counts=_leaf_counts,
                     fr_path=_fr_for_notes,
-                    test_cmd_builder=lambda stems: self.cargo.build_test_cmd(stems, cluster),
+                    test_cmd_builder=lambda stems, include_lib=False: (
+                        self.cargo.build_test_cmd(stems, cluster, include_lib=include_lib)),
                     tag=tag,
                 )
             else:

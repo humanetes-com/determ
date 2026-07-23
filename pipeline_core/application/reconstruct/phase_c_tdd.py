@@ -13,7 +13,10 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from pipeline_core.application.retrigger_layout import RetriggerResult
 
 from pipeline_core.application.reconstruct.tdd_ratchet import (
     ratchet_breach,
@@ -51,21 +54,21 @@ from pipeline_core.domain.test_results import (
 class PhaseCTddDeps:
     """Collaborators the TDD fill driver needs, injected by the composition root."""
 
-    attribute_failures: Callable[..., Any]
-    build_test_reverse_map: Callable[..., Any]
-    filter_test_targets: Callable[..., Any]
-    check_graceful_stop: Callable[..., Any]
-    converge_in_cluster: Callable[..., Any]
-    count_relevant_notes: Callable[..., Any]
-    effective_stalls: Callable[..., Any]
-    emit: Callable[..., Any]
+    attribute_failures: Callable[..., tuple[Frontier, str]]
+    build_test_reverse_map: Callable[..., dict[str, set[FnLocator]]]
+    filter_test_targets: Callable[..., Frontier]
+    check_graceful_stop: Callable[[str], None]
+    converge_in_cluster: Callable[..., str | None]
+    count_relevant_notes: Callable[..., int]
+    effective_stalls: Callable[..., int]
+    emit: Callable[..., None]
     log: Callable[[str], None]
-    order_frontier: Callable[..., Any]
-    record_tdd_regression: Callable[..., Any]
-    reset_exhaustion_flags: Callable[..., Any]
-    run_cargo: Callable[..., Any]
-    scan_unimplemented_for_cluster: Callable[..., Any]
-    scan_unimplemented_functions: Callable[..., Any]
+    order_frontier: Callable[..., list[tuple[FnLocator, set[str]]]]
+    record_tdd_regression: Callable[..., str]
+    reset_exhaustion_flags: Callable[..., int]
+    run_cargo: Callable[..., tuple[int, str]]
+    scan_unimplemented_for_cluster: Callable[..., list[FnLocator]]
+    scan_unimplemented_functions: Callable[..., list[FnLocator]]
     task2_fill_fns_one_by_one: Callable[..., ClusterFillResult]
     # Futility escalation: (src_dir, test, futile_units,
     # futile_containers) -> Frontier additions. None disables escalation.
@@ -77,7 +80,7 @@ class PhaseCTddDeps:
     # F11 M3: (project_dir, module, cluster_name, target_src_dir, error_text)
     # -> RetriggerResult, tried once at the stall-exit before giving up on the
     # cluster. None disables it — the exit behaves exactly as before F11 M3.
-    retrigger_layout: Callable[..., Any] | None = None
+    retrigger_layout: Callable[..., RetriggerResult] | None = None
     # FR-024 at the sweep level: (project_dir, cluster) -> (expected_count,
     # expected_names) — the cfg-aware static test inventory. None disables
     # oracle reconciliation — sweeps then trust whatever cargo reported.
@@ -132,7 +135,7 @@ def run_phase_c_tdd(
     cluster_env: dict[str, str],
     leaf_counts: dict[str, int] | None,
     fr_path: Path | None,
-    test_cmd_builder: Callable[..., str],
+    test_cmd_builder: Callable[..., str],  # (stems, *, include_lib=False) -> cmd
     tag: str,
 ) -> ClusterFillResult:
     """Plan 4 — TDD-scoped Phase C driver.
@@ -163,13 +166,21 @@ def run_phase_c_tdd(
         return ClusterFillResult(
             remaining=len(deps.scan_unimplemented_for_cluster(
                 target_src_dir, cluster)))
+    # --lib sweep: also run the crate unit-test binary (src-side `#[cfg(test)]`
+    # + the gen_tests siblings the reconstruction preserves as its oracle).
+    # Without it phase-c steers against only the tests/ binaries — a subset of
+    # the real oracle — and gen_tests failures surface only at task3. When on,
+    # the sweep's expected denominator must include the lib sources too, or the
+    # lib tests report as an unnamed over-count (see the inventory call below).
+    _sweep_lib = os.getenv("PHASE_C_SWEEP_LIB", "1") not in ("", "0", "false")
     # Serial harness: with parallel test threads a crashing binary kills a
     # RANDOM subset of its tests' verdicts each run (whichever threads printed
     # first), making sweep readings and gate baselines non-comparable draws.
     # `--test-threads=1` pins the crash point, so vanished-test sets are
     # deterministic. Flows into every downstream consumer (sweeps, regression
     # gate, scoped u2 runs) via tdd_test_cmd.
-    test_cmd = ensure_serial_harness(test_cmd_builder(test_stems))
+    test_cmd = ensure_serial_harness(
+        test_cmd_builder(test_stems, include_lib=_sweep_lib))
     test_timeout = int(os.getenv("PHASE_C_TEST_TIMEOUT", "120"))
     # max_iters is legacy — only the 10k backstop in the loop body honors it.
     # The real terminator is floor-stall on pass_count (max_stalls below).
@@ -277,7 +288,8 @@ def run_phase_c_tdd(
     # the sweep's denominator, not the whole-crate FR-024 walk (which also
     # counts src-side/gen_tests tests this command never executes).
     _expected_count, _expected_names = (
-        deps.active_test_inventory(project_dir, cluster, frozenset(test_stems))
+        deps.active_test_inventory(
+            project_dir, cluster, frozenset(test_stems), _sweep_lib)
         if deps.active_test_inventory is not None else (0, frozenset()))
     _bratchet_missing = 0   # oracle missing_count at the ratchet snapshot
     _ckpt_min_missing: int | None = None  # best (lowest) missing seen
@@ -325,7 +337,8 @@ def run_phase_c_tdd(
                 _why.append(
                     f"{oracle.unnamed_shortfall} unnamed test(s) short of the "
                     f"expected total — every expected NAME reported, so the "
-                    f"static inventory under-enumerated (not a crash)")
+                    f"static inventory OVER-COUNTED the oracle (not a crash: "
+                    f"no test is missing, the denominator is too big)")
             deps.log(
                 f"  {tag} [phase-c/tdd] iter {iter_n}: ORACLE SHRUNK — "
                 f"counting {oracle.missing_count} as failing. "
@@ -676,8 +689,15 @@ def run_phase_c_tdd(
         # no binaries, so its vanished names are not crash evidence — counting
         # it would re-author a frozen component off a transient compile error.
         # Such a sweep neither advances nor resets the streak.
+        # Keyed on VANISHED NAMES, never on the raw missing count. A count-only
+        # shortfall (every expected name reported, the total is still short) is
+        # a static-inventory surplus, not a crash — it names no test, so the
+        # CrashEvidence below would carry an empty vanished/suspect set and the
+        # re-author would be aimed at nothing. Worse, such a shortfall is
+        # CONSTANT: gating on it made every single iteration pay an extra full
+        # sweep and declare "crash is deterministic" forever.
         _sweep_compile_broke = "could not compile" in (output or "")
-        if _oracle.missing_count > 0 and not _sweep_compile_broke:
+        if _oracle.vanished and not _sweep_compile_broke:
             _vanish_streak += 1
             # A shrunk oracle with a clean compile is either the frozen-scheme
             # crash class or a transient. Waiting for the streak proves
@@ -700,7 +720,7 @@ def run_phase_c_tdd(
                 _p2, _f2, _ig2 = parse_test_counts(_out2)
                 _, _, _oracle2 = _reconcile(
                     _rc2, _out2, _p2, _f2, parse_failed_tests(_out2))
-                if (_oracle2.missing_count > 0
+                if (_oracle2.vanished
                         and "could not compile" not in (_out2 or "")):
                     deps.log(
                         f"  {tag} [phase-c/tdd] iter {iter_n}: oracle shrink "
@@ -708,9 +728,10 @@ def run_phase_c_tdd(
                         "deterministic, retriggering now instead of waiting "
                         "out the sweep streak.")
                     _vanish_streak = _crash_retrigger_after
-        elif _oracle.missing_count == 0:
-            # A compile-broken shrink is neutral; only a clean full sweep
-            # proves the crash class absent and may reset the streak.
+        elif not _oracle.vanished:
+            # A compile-broken shrink is neutral; only a sweep in which every
+            # expected name reported proves the crash class absent and may
+            # reset the streak.
             _vanish_streak = 0
         _retrig_cooldown = False   # one iter of fills has now had its chance
         if (_vanish_streak >= _crash_retrigger_after

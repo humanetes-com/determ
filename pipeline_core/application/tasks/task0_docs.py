@@ -25,7 +25,7 @@ class Task0DocsDeps:
     """Collaborators the task0 doc tasks need, injected by the composition root."""
 
     phase_valid: Callable[[Path, str], bool]
-    mark_phase: Callable[..., Any]
+    mark_phase: Callable[..., None]
     ask: Callable[..., str]
     write: Callable[[Any, str], None]
     prompt_budget: Callable[..., int]

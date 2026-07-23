@@ -19,8 +19,10 @@ from typing import Any, Protocol
 
 from pipeline_core.application.cluster_augment import AugmentContext
 from pipeline_core.application.reconstruct.run_context import RunContext
+from pipeline_core.domain.coverage import CoverageMeasurement
 from pipeline_core.domain.enums import Backend
 from pipeline_core.domain.generation import GenerationRequest
+from pipeline_core.domain.models import BuildCluster, FnLocator
 from pipeline_core.domain.run_state import RunPlan
 
 # The --phase-*-only / --skeleton-backend standalone subcommands, in dispatch
@@ -295,7 +297,10 @@ class DepGraphView(Protocol):
     def crate_dir(self, module_name: str) -> Path: ...
     def crate_type(self, module_name: str) -> str: ...
     def workspace_deps(self, module_name: str) -> set[str]: ...
+    def topological_order(self) -> list[str]: ...
     def module_test_command(self, test_command: str, module_name: str) -> str: ...
+    def module_build_check_command(
+        self, build_cmd: str | None, module_name: str) -> str | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -408,7 +413,7 @@ class LockDeps:
     git_commit: Callable[[Path, str], bool]
     log: Callable[[str], None]
     sys_exit: Callable[[int], None]
-    scan_unimplemented_functions: Callable[..., Any]
+    scan_unimplemented_functions: Callable[..., list[FnLocator]]
 
 
 def lock_or_complete(
@@ -518,7 +523,7 @@ class RunDeps:
     init_log: Callable[..., None]
     init_events: Callable[..., None]
     start_audit_thread: Callable[..., None]
-    quarantine_broken_gen_tests: Callable[..., Any]
+    quarantine_broken_gen_tests: Callable[..., int]
     git_file_hash: Callable[..., str]
     ensure_vllm_ready: Callable[..., None]
     git_clean_reset: Callable[..., None]
@@ -528,34 +533,34 @@ class RunDeps:
     source_hash: Callable[..., str]
     log_state_summary: Callable[..., None]
     read: Callable[..., str]
-    task0_cfg_scan: Callable[..., Any]
-    load_baked_clusters: Callable[..., Any]
+    task0_cfg_scan: Callable[..., list[BuildCluster]]
+    load_baked_clusters: Callable[..., list[BuildCluster]]
     mark_phase: Callable[..., None]
     phase_valid: Callable[..., bool]
-    read_state: Callable[..., Any]
+    read_state: Callable[..., dict[str, Any]]
     discover_test_command: Callable[..., str]
     parse_cmd: Callable[..., list[str]]
-    collect_test_files: Callable[..., Any]
-    collect_protected_test_files: Callable[..., Any]
+    collect_test_files: Callable[..., list[tuple[str, str]]]
+    collect_protected_test_files: Callable[..., set[str]]
     task0_project_profile: Callable[..., str]
     task0_project_context: Callable[..., str]
     task0b_discovery: Callable[..., str]
     commit_and_mark: Callable[..., None]
-    dependency_graph_factory: Callable[..., Any]
-    load_locked_modules: Callable[..., Any]
-    run_tarpaulin: Callable[..., Any]
+    dependency_graph_factory: Callable[..., DepGraphView]
+    load_locked_modules: Callable[..., set[str]]
+    run_tarpaulin: Callable[..., CoverageMeasurement]
     strip_and_bake_module: Callable[..., None]
-    task1_static_audit: Callable[..., Any]
-    scan_workspace_structure: Callable[..., Any]
+    task1_static_audit: Callable[..., list[str]]
+    scan_workspace_structure: Callable[..., str]
     infer_build_check_command: Callable[..., str | None]
-    wl_save_gen_tests_siblings: Callable[..., Any]
-    gen_tests_siblings: Callable[..., Any]
+    wl_save_gen_tests_siblings: Callable[..., dict[str, list[tuple[int, str]]]]
+    gen_tests_siblings: Callable[..., list[tuple[int, Path]]]
     is_gen_tests_file: Callable[..., bool]
-    wl_wipe_module_sources: Callable[..., Any]
-    write_workspace_stub: Callable[..., Any]
-    collect_examples: Callable[..., Any]
-    task3: Callable[..., Any]
-    scan_unimplemented_functions: Callable[..., Any]
+    wl_wipe_module_sources: Callable[..., list[str]]
+    write_workspace_stub: Callable[..., Path]
+    collect_examples: Callable[..., list[tuple[str, str]]]
+    task3: Callable[..., tuple[bool, str]]
+    scan_unimplemented_functions: Callable[..., list[FnLocator]]
 
 
 def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:

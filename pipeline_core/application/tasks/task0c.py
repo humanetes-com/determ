@@ -2251,7 +2251,7 @@ def _diagnose_and_fix_regression(
     cargo_env: Callable[[], dict[str, str]],
     subprocess: Any,
     build_timeout: int,
-    generate_fix_loop: Callable[..., Any],
+    generate_fix_loop: Callable[..., tuple[bool, str]],
     model: str,
     log: Callable[[str], None],
 ) -> None:

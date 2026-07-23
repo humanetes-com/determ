@@ -110,6 +110,35 @@ def test_count_test_fns_in_records_gating() -> None:
     assert count_test_fns_in_records(recs, set(), set()) == 2  # type: ignore[arg-type]
 
 
+def test_macro_gated_test_variants_count_once() -> None:
+    """Two `fn test_backtrace()` in one file, one per arm of an ATTRIBUTE MACRO
+    (`#[rustversion::not(nightly)]` / `#[rustversion::nightly]`), carry no cfg
+    predicate at all — nothing to evaluate. Rust forbids two items of one name
+    in one module, so exactly one ever compiles: counting both inflated the
+    expected oracle permanently, charging a phantom failure every sweep."""
+    from pipeline_core.domain.test_count import count_test_fns_in_records
+    recs = [
+        {"is_test": True, "fn_name": "test_backtrace", "mod_path": "",
+         "cfg_predicates": []},
+        {"is_test": True, "fn_name": "test_backtrace", "mod_path": "",
+         "cfg_predicates": []},
+    ]
+    assert count_test_fns_in_records(recs, set(), set()) == 1  # type: ignore[arg-type]
+
+
+def test_same_name_in_distinct_modules_counts_twice() -> None:
+    """Same bare name, different module — both compile and both run, so the
+    collapse above must be keyed on the module path, never on the name alone."""
+    from pipeline_core.domain.test_count import count_test_fns_in_records
+    recs = [
+        {"is_test": True, "fn_name": "x", "mod_path": "a::inner",
+         "cfg_predicates": []},
+        {"is_test": True, "fn_name": "x", "mod_path": "b", "cfg_predicates": []},
+        {"is_test": True, "fn_name": "x", "mod_path": "", "cfg_predicates": []},
+    ]
+    assert count_test_fns_in_records(recs, set(), set()) == 3  # type: ignore[arg-type]
+
+
 def test_undeclared_gen_tests_sibling_still_counts(tmp_path) -> None:
     """A sibling whose parent lost its `mod gen_tests_N;` decl is a HIDDEN
     test file — it must still raise the expected count (never let the count
@@ -211,6 +240,12 @@ def test_active_test_inventory_names_and_stem_scope(tmp_path) -> None:
         tmp_path, _Cluster(), deps)
     assert full_n == 4 and full_names == frozenset(
         {"t_a1", "t_a2", "t_b", "t_lib"})
+    # `--lib` sweep denominator: the named tests/ stem PLUS the lib sources
+    # (src-side t_lib), but NOT the un-named tests/b.rs binary.
+    lib_n, lib_names = active_test_inventory_for_cluster(
+        tmp_path, _Cluster(), deps, tests_dir_stems=frozenset({"a"}),
+        include_lib_sources=True)
+    assert lib_n == 3 and lib_names == frozenset({"t_a1", "t_a2", "t_lib"})
 
 
 def test_active_test_inventory_subdir_module_counts_into_root_binary(

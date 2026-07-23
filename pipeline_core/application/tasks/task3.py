@@ -13,6 +13,7 @@ import shlex
 import subprocess
 import time
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -32,14 +33,14 @@ from ...log import emit, log
 class Task3Deps:
     """Pipeline-coupled collaborators TASK 3 needs, injected by the composition root."""
 
-    phase: Callable[..., Any]                       # _phase context-manager factory
+    phase: Callable[..., AbstractContextManager[dict[str, Any]]]  # _phase factory
     load_baked_clusters: Callable[[Path], list[Any]]  # _load_baked_clusters
-    task3_legacy_single: Callable[..., Any]         # _task3_legacy_single fallback
+    task3_legacy_single: Callable[..., tuple[bool, str]]  # _task3_legacy_single fallback
     cargo_env: Callable[[], dict[str, str]]         # _cargo_env
     parse_cmd: Callable[[str], list[str]]           # _parse_cmd
     count_active_tests_for_cluster: Callable[[Path, Any], int]
     store_prompt_content: Callable[[str], Any]      # _store_prompt_content
-    task3_inline_retry: Callable[..., Any]          # _task3_inline_retry
+    task3_inline_retry: Callable[..., tuple[bool, str]]  # _task3_inline_retry
     read: Callable[[Any], str]
     write: Callable[[Any, str], None]
     test_timeout: int

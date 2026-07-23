@@ -628,42 +628,10 @@ def init_log(root: Path, nolog: bool = False, progress_mode: bool = False):
     _emit("parallelism.config", data={"parallelism": _pipeline_parallelism()})
 
 
-# --- flow self-audit (--audit) ----------------------------------------------
-# Runs pipeline_core.audit (the tools/flow_audit.py core) over THIS run's own
-# records at iteration boundaries + on a timer; verdicts go to the log and a
-# flow_audit.report event the monitor renders. Read-only and fail-safe — it
-# observes the run, never steers it.
-def _run_flow_audit(context: str) -> None:
-    if not _RUN.audit_enabled:
-        return
-    try:
-        from pipeline_core.audit import FAIL, audit
-        verdicts = audit(Path(_EVENTS_LOG), _PROMPTS_DIR, _RUN.log_path,
-                         _RUN.audit_project_dir, _RUN.run_started_iso,
-                         int(os.getenv("AUDIT_PLATEAU_N", "3")))
-        _log(f"  [audit] flow invariants ({context}):")
-        for v in verdicts:
-            _log(f"    {v.check.ljust(22)} {v.status:4s} {v.evidence}")
-        _emit("flow_audit.report", data={
-            "context": context,
-            "failed": sum(1 for v in verdicts if v.status == FAIL),
-            "verdicts": [{"check": v.check, "status": v.status,
-                          "evidence": v.evidence} for v in verdicts],
-        })
-    except Exception as exc:
-        _log(f"  [audit] skipped: {exc}")
-
-
-def _start_audit_thread() -> None:
-    import threading as _t
-    interval = int(os.getenv("AUDIT_INTERVAL_SEC", "900"))
-
-    def _loop() -> None:
-        while True:
-            time.sleep(interval)
-            _run_flow_audit(f"periodic/{interval}s")
-
-    _t.Thread(target=_loop, name="flow-audit", daemon=True).start()
+# flow self-audit (--audit): the audit thread + on-demand report moved to
+# pipeline_core.adapters.flow_audit.FlowAuditor (Plan #77 S4), constructed in
+# build_app from the shared RunState + events-log/prompts-dir. Read-only and
+# fail-safe — it observes the run, never steers it.
 
 
 # SEARCH/REPLACE patch protocol REMOVED. The model could not reliably
@@ -882,7 +850,6 @@ _HELPERS = _Helpers(
     effective_stalls=lambda *a, **k: _effective_stalls(*a, **k),
     run_cargo=lambda *a, **k: _run_cargo(*a, **k),
     task2_fill_fns_one_by_one=lambda *a, **k: _task2_fill_fns_one_by_one(*a, **k),
-    run_flow_audit=lambda *a, **k: _run_flow_audit(*a, **k),
     load_model_notes=lambda *a, **k: _load_model_notes(*a, **k),
     genesis_rules_count=lambda *a, **k: genesis_rules_count(*a, **k),
     derive_gentest_prelude=lambda *a, **k: _derive_gentest_prelude(*a, **k),
@@ -894,7 +861,6 @@ _HELPERS = _Helpers(
     run_cargo_check_diag=lambda *a, **k: _run_cargo_check_diag(*a, **k),
     init_log=lambda *a, **k: init_log(*a, **k),
     init_events=lambda *a, **k: init_events(*a, **k),
-    start_audit_thread=lambda: _start_audit_thread(),
 )
 # Phase 3 S3.4: TASK-1→4 reconstruction role callables, late-binding (the wrapped
 # fns are defined later in this module; lambdas resolve them at call time).
@@ -907,7 +873,8 @@ _TELEMETRY = LogTelemetry()
 _APP: _App = _build_app(ADAPTERS, SETTINGS, _RUN, _SCOPE, _PORTS, _CFG, _HELPERS,
                   _STRUCTURE, _TELEMETRY,
                   ask_client=_ASK_CLIENT,
-                  events_log=lambda: _EVENTS_LOG, run_context=_RUN_CONTEXT,
+                  events_log=lambda: _EVENTS_LOG, prompts_dir=_PROMPTS_DIR,
+                  run_context=_RUN_CONTEXT,
                   app_ref=lambda: _APP)
 # S3.5/6/10: these deps are consumed only inside `def` bodies (lazy), so their
 # construction migrates into build_app and they're re-exported here by name.

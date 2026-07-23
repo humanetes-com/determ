@@ -86,6 +86,12 @@ impl<'a> FnEnumerator<'a> {
             is_pub,
             is_exactly_pub,
             container,
+            mod_path: self
+                .container_stack
+                .iter()
+                .filter_map(|c| c.strip_prefix("mod "))
+                .collect::<Vec<_>>()
+                .join("::"),
             has_unimplemented_body: body_looks_unimplemented(&body_text),
             is_test,
         });

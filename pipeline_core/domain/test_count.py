@@ -90,17 +90,35 @@ def count_test_fns_in_records(
     `cfg_predicates` (mod/impl/trait + the fn's own attrs), so this is more
     cargo-faithful than the line-walking marker scan. File-level inner
     `#![cfg(...)]` is NOT on fn records — the caller applies
-    `file_top_cfg_excluded` separately."""
+    `file_top_cfg_excluded` separately.
+
+    Counts DISTINCT `(mod_path, fn_name)` pairs, not records. Rust forbids two
+    items of one name in one module, so several surviving records for one pair
+    are mutually-exclusive source variants of a single compiled test — the shape
+    an attribute macro produces (`#[rustversion::not(nightly)] fn t()` beside
+    `#[rustversion::nightly] fn t()`), where the gate is opaque to any cfg
+    evaluation. Counting both inflated the expected oracle by one FOREVER: the
+    surplus never reports a verdict, so every sweep charged a phantom failure,
+    `SweepOracle.intact` could never hold, and a cluster at 100% real pass could
+    never be declared done."""
     cs = CfgSet.of(cfg_true, cfg_false, default_features)
-    count = 0
+    seen: set[tuple[str, str]] = set()
+    unnamed = 0
     for r in records:
         if not r.get("is_test"):
             continue
         gates = r.get("cfg_predicates") or []
         if any(cs.excludes_for_cargo(g) for g in gates):
             continue
-        count += 1
-    return count
+        name = str(r.get("fn_name", ""))
+        if not name:
+            # Unidentifiable record: it cannot be PROVEN a duplicate, and
+            # collapsing it would undercount — the one direction that
+            # manufactures a fraudulent pass (FR-018/FR-022).
+            unnamed += 1
+            continue
+        seen.add((str(r.get("mod_path", "")), name))
+    return len(seen) + unnamed
 
 
 def test_fn_names_in_records(

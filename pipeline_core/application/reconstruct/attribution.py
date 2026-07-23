@@ -47,8 +47,8 @@ class AttributionDeps:
 
     structure: Any                       # ports.structure.StructureReader (enumerate_fns)
     classify: Callable[..., dict[str, dict[str, Any]]]   # LLM per-test classifier
-    locate_fn: Callable[..., Any]              # regex source locator (stays in pipeline.py)
-    run_check_diag: Callable[..., Any]         # cargo check → (rc, rendered, [Diagnostic])
+    locate_fn: Callable[..., tuple[str, int, int, int] | None]  # source locator
+    run_check_diag: Callable[..., tuple[int, str, list[Diagnostic]]]  # cargo check
     derive_check_only_cmd: Callable[[str], str]
     is_gen_tests_file: Callable[[str], bool]
     log: Callable[[str], None]

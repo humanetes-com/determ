@@ -212,3 +212,32 @@ def test_crash_unlocalized_ignores_compile_fail_shrinks():
     f = [x for x in analyze([_SHRUNK_COMPILE], [])
          if x.kind == HealthKind.CRASH_UNLOCALIZED]
     assert f == []
+
+
+_SHRUNK_UNNAMED_2 = (
+    "  [stable] [phase-c/tdd] iter 2: ORACLE SHRUNK — counting 1 as failing. "
+    "1 unnamed test(s) short of the expected total — every expected NAME "
+    "reported, so the static inventory under-enumerated (not a crash)")
+
+
+def test_inventory_overcount_alerts_when_shortfall_persists():
+    """An unnamed shortfall recurring across iters = the static denominator is
+    permanently too big; the cluster can never be declared done. This is the
+    class the crash-localizer detector deliberately ignores, so it needs its
+    own alert — and a persistent one is structural, not a race."""
+    (f,) = [x for x in analyze([_SHRUNK_UNNAMED, _SHRUNK_UNNAMED_2], [])
+            if x.kind == HealthKind.INVENTORY_OVERCOUNT]
+    assert f.severity == "alert"
+    assert "1,2" in f.evidence and "over-count" in f.action
+
+
+def test_inventory_overcount_warns_on_a_single_iter():
+    (f,) = [x for x in analyze([_SHRUNK_UNNAMED], [])
+            if x.kind == HealthKind.INVENTORY_OVERCOUNT]
+    assert f.severity == "warn"
+
+
+def test_inventory_overcount_silent_on_named_vanish():
+    # A crash (named vanish) is the OTHER detector's job, never this one.
+    assert not [x for x in analyze([_SHRUNK], [])
+                if x.kind == HealthKind.INVENTORY_OVERCOUNT]

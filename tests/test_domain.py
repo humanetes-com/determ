@@ -183,6 +183,23 @@ def test_parse_test_counts_sums_across_binaries() -> None:
     out = "test result: ok. 5 passed; 1 failed; 2 ignored\ntest result: ok. 3 passed; 0 failed"
     assert test_results._parse_test_counts(out) == (8, 1, 2)
     assert test_results._parse_test_counts("") == (0, 0, 0)
+    # Real libtest trailers carry tallies after `ignored`, and a filtered run
+    # reorders none of them — reading the labels present (not a fixed sequence)
+    # keeps the ignored count, which the oracle adds to the reported total.
+    full = ("test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; "
+            "0 filtered out; finished in 0.00s\n"
+            "test result: FAILED. 12 passed; 56 failed; 1 ignored; 0 measured; "
+            "0 filtered out; finished in 0.11s")
+    assert test_results._parse_test_counts(full) == (12, 56, 2)
+
+
+def test_build_test_cmd_include_lib_adds_the_lib_binary() -> None:
+    from pipeline_core.domain.test_cmd import build_test_cmd
+    assert build_test_cmd(["a", "b"], None) == (
+        "cargo test --no-fail-fast --test a --test b")
+    # --lib sits before the --test flags so the unit-test binary runs too.
+    assert build_test_cmd(["a"], None, include_lib=True) == (
+        "cargo test --no-fail-fast --lib --test a")
 
 
 def test_validate_task3_strict_pass_fail_incomplete() -> None:

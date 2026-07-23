@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from pipeline_core.domain.models import BuildCluster
+from pipeline_core.domain.models import BuildCluster, FnLocator
 from pipeline_core.domain.rust_idents import fn_names_with_body
 from pipeline_core.domain.text import smart_truncate, trim_to_line
 
@@ -25,12 +25,12 @@ class GroupFillDeps:
 
     log: Callable[[str], None]
     ask: Callable[..., str]
-    extract_fn_blocks: Callable[..., Any]
-    format_skeleton_index_for_cluster: Callable[..., Any]
-    leaf_first_group_order: Callable[..., Any]
-    load_skeleton_files: Callable[..., Any]
-    merge_fn_blocks_into_disk: Callable[..., Any]
-    scan_unimplemented_functions: Callable[..., Any]
+    extract_fn_blocks: Callable[..., dict[str, str]]
+    format_skeleton_index_for_cluster: Callable[..., str]
+    leaf_first_group_order: Callable[..., list[dict[str, Any]]]
+    load_skeleton_files: Callable[..., list[tuple[str, str]]]
+    merge_fn_blocks_into_disk: Callable[..., str]
+    scan_unimplemented_functions: Callable[..., list[FnLocator]]
     single_call_char_limit: int
     genesis_cap: int
     task2_model: str | None

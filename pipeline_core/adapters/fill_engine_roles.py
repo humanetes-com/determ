@@ -26,7 +26,12 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
-from pipeline_core.domain.models import ClusterFillResult, FnLocator, FnSite
+from pipeline_core.domain.models import (
+    ClusterFillResult,
+    FnFixContext,
+    FnLocator,
+    FnSite,
+)
 from pipeline_core.domain.reconstruction import SpliceOutcome
 from pipeline_core.domain.test_report import U2Verdict
 from pipeline_core.domain.test_results import RegressionComparison, TestStateReading
@@ -173,7 +178,7 @@ class MutatorAdapter:
 @dataclass(frozen=True, slots=True)
 class CargoFillAdapter:
     run_fn: Callable[..., tuple[int, str]]
-    build_test_cmd_fn: Callable[[list[str], Any], str]
+    build_test_cmd_fn: Callable[..., str]
     u2_test_gate_fn: Callable[..., U2Verdict]
     focus_errors_fn: Callable[..., str]
     env_fn: Callable[[], dict[str, str]]
@@ -193,8 +198,9 @@ class CargoFillAdapter:
             return rc, out, []
         return self.check_diag_fn(cmd, cwd, env, timeout)
 
-    def build_test_cmd(self, test_stems: list[str], cluster: Any) -> str:
-        return self.build_test_cmd_fn(test_stems, cluster)
+    def build_test_cmd(self, test_stems: list[str], cluster: Any,
+                        *, include_lib: bool = False) -> str:
+        return self.build_test_cmd_fn(test_stems, cluster, include_lib=include_lib)
 
     def u2_test_gate(self, fn_tests: set[str], unit_sites: frozenset[FnSite],
                      test_cmd: str | None,
@@ -232,7 +238,7 @@ class CargoFillAdapter:
 @dataclass(frozen=True, slots=True)
 class PromptContextAdapter:
     ask_per_fn_body_fn: Callable[..., tuple[str | None, str]]
-    gather_fn: Callable[..., Any]
+    gather_fn: Callable[..., FnFixContext]
     collect_sibling_filled_bodies_fn: Callable[[str, str, str], str]
     extract_crate_idioms_fn: Callable[..., str]
     collect_crate_macros_fn: Callable[[Path], str]
@@ -248,7 +254,7 @@ class PromptContextAdapter:
 
     def gather(self, *, file_text: str, file_rel: str, fn_name: str, sig_text: str,
                body_text: str, error_excerpt: str, container: str,
-               type_records: list[Any], fr_path: Path | None = None) -> Any:
+               type_records: list[Any], fr_path: Path | None = None) -> FnFixContext:
         return self.gather_fn(
             file_text=file_text, file_rel=file_rel, fn_name=fn_name,
             sig_text=sig_text, body_text=body_text, error_excerpt=error_excerpt,

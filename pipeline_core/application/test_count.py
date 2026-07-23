@@ -98,6 +98,7 @@ def active_test_inventory_for_cluster(
     deps: TestCountDeps,
     *,
     tests_dir_stems: frozenset[str] | None = None,
+    include_lib_sources: bool = False,
 ) -> tuple[int, frozenset[str]]:
     """(expected_count, expected_names) over the same walk as
     `count_active_tests_for_cluster`. Names come from the typed-record path
@@ -106,10 +107,17 @@ def active_test_inventory_for_cluster(
     (safe: reconciliation treats missing names as a count deficit, never
     invents vanished tests).
 
-    `tests_dir_stems`: when given, the inventory covers ONLY `tests/` files
-    with those stems — the denominator of a `cargo test --test stem…` sweep
-    (which runs no src-side or gen_tests tests). None keeps the full FR-024
-    walk (tests/ + gen_tests siblings + src/)."""
+    `tests_dir_stems`: when given, the `tests/` walk covers ONLY files with
+    those stems — the integration binaries a `cargo test --test stem…` sweep
+    names. None keeps the full FR-024 `tests/` walk.
+
+    `include_lib_sources`: also count the crate unit-test binary (gen_tests
+    siblings + src-side `#[cfg(test)]`) — the denominator of a sweep that adds
+    `--lib`. It composes with `tests_dir_stems`: a `--lib` sweep names its
+    `tests/` stems AND runs the lib binary, so its oracle is the stem-scoped
+    `tests/` walk PLUS the lib sources. (With `tests_dir_stems=None` the lib
+    sources are already included — the full FR-024 walk — so the flag only
+    matters when `tests/` is stem-scoped.)"""
     if cluster is None:
         cfg_true: set[str] = set()
         cfg_false: set[str] = set()
@@ -197,7 +205,7 @@ def active_test_inventory_for_cluster(
                 continue
             _add(tp.relative_to(project_dir).as_posix(), text)
 
-    if tests_dir_stems is not None:
+    if tests_dir_stems is not None and not include_lib_sources:
         return total, frozenset(names)
 
     src_dir = project_dir / "src"

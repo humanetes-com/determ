@@ -127,17 +127,13 @@ def parse_test_counts(test_output: str) -> tuple[int, int, int]:
     if not test_output:
         return (0, 0, 0)
     # Per-binary line: `test result: ok. 5 passed; 0 failed; 1 ignored; ...`
-    for m in re.finditer(
-        r"test result:\s*\w+\.\s*(\d+)\s+passed;\s*(\d+)\s+failed"
-        r"(?:;\s*(\d+)\s+ignored)?",
-        test_output,
-    ):
-        try:
-            passed += int(m.group(1))
-            failed += int(m.group(2))
-            ignored += int(m.group(3) or "0")
-        except ValueError:
+    for line in test_output.splitlines():
+        if "test result:" not in line:
             continue
+        t = _tallies_on_result_line(line)
+        passed += t.get("passed", 0)
+        failed += t.get("failed", 0)
+        ignored += t.get("ignored", 0)
     return (passed, failed, ignored)
 
 
@@ -148,20 +144,26 @@ def parse_test_counts(test_output: str) -> tuple[int, int, int]:
 _parse_test_counts = parse_test_counts
 
 
-def _counts_on_result_line(line: str) -> tuple[int, int]:
-    """(passed, failed) parsed from ONE `test result:` line via pure string ops
-    (no regex — Hard Rule). `test result: FAILED. 6 passed; 2 failed; …`."""
-    passed = failed = 0
+def _tallies_on_result_line(line: str) -> dict[str, int]:
+    """Every `<N> <label>` tally on ONE `test result:` line, via pure string ops
+    (no regex — Hard Rule). `test result: FAILED. 6 passed; 2 failed; 1 ignored;
+    0 measured; 0 filtered out` → {passed: 6, failed: 2, ignored: 1, ...}.
+    Reading the labels present, rather than matching a fixed sequence, means a
+    trailer that omits or reorders a tally still yields the ones it does carry."""
+    out: dict[str, int] = {}
     tail = line.split("test result:", 1)[1] if "test result:" in line else ""
     tail = tail.split(".", 1)[1] if "." in tail else tail
     for tok in tail.split(";"):
         parts = tok.split()
         if len(parts) >= 2 and parts[0].lstrip("-").isdigit():
-            if parts[1] == "passed":
-                passed = int(parts[0])
-            elif parts[1] == "failed":
-                failed = int(parts[0])
-    return passed, failed
+            out[parts[1]] = int(parts[0])
+    return out
+
+
+def _counts_on_result_line(line: str) -> tuple[int, int]:
+    """(passed, failed) parsed from ONE `test result:` line."""
+    t = _tallies_on_result_line(line)
+    return t.get("passed", 0), t.get("failed", 0)
 
 
 def summarize_test_binaries(test_output: str) -> list[tuple[str, int, int]]:

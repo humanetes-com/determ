@@ -78,7 +78,7 @@ class LlmAskAdapter:
 @dataclass(frozen=True, slots=True)
 class WorkspaceAdapter:
     read_fn: Callable[[Path], str]
-    write_source_files_fn: Callable[..., Any]
+    write_source_files_fn: Callable[..., int]
     load_manifest_fn: Callable[[Path], list[str]]
     save_manifest_fn: Callable[[Path, list[str]], None]
     load_original_structure_fn: Callable[[Path, str], Any]
@@ -148,7 +148,7 @@ class ContextDocsAdapter:
 class CargoBackendAdapter:
     run_fn: Callable[..., tuple[int, str]]
     run_check_diag_fn: Callable[..., tuple[int, str, list[Any]]]
-    build_test_cmd_fn: Callable[[list[str], Any], str]
+    build_test_cmd_fn: Callable[..., str]
     env_fn: Callable[[], dict[str, str]]
     implicated_fns_fn: Callable[[str, Path], list[FnLocator]]
     attribute_failures_fn: Callable[..., tuple[Any, str]]
@@ -177,8 +177,9 @@ class CargoBackendAdapter:
                        timeout: int = 180) -> tuple[int, str, list[Any]]:
         return self.run_check_diag_fn(cmd, cwd, env, timeout)
 
-    def build_test_cmd(self, test_stems: list[str], cluster: Any) -> str:
-        return self.build_test_cmd_fn(test_stems, cluster)
+    def build_test_cmd(self, test_stems: list[str], cluster: Any,
+                        *, include_lib: bool = False) -> str:
+        return self.build_test_cmd_fn(test_stems, cluster, include_lib=include_lib)
 
     def env(self) -> dict[str, str]:
         return self.env_fn()

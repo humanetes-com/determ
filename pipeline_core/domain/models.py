@@ -191,6 +191,11 @@ class FnRecord:
     # only set `is_pub` keep their prior meaning.
     is_exactly_pub: bool = True
     container: str = ""         # "" free fn | "impl X for Y" | "trait T"
+    # `::`-joined inline-module path within the file ("" at file scope). Rust
+    # forbids two items of one name in one module, so (file, mod_path, fn_name)
+    # names at most one COMPILED fn even when the source declares several
+    # variants gated by an attribute macro no cfg evaluation can decide.
+    mod_path: str = ""
     has_unimplemented_body: bool = False
     is_test: bool = False       # carries a test attr (#[test]/#[tokio::test]/#[rstest]/…)
 
@@ -208,6 +213,7 @@ class FnRecord:
             is_pub=bool(d.get("is_pub", False)),
             is_exactly_pub=bool(d.get("is_exactly_pub", True)),
             container=d.get("container", ""),
+            mod_path=d.get("mod_path", ""),
             has_unimplemented_body=bool(d.get("has_unimplemented_body", False)),
             is_test=bool(d.get("is_test", False)),
         )
@@ -225,6 +231,7 @@ class FnRecord:
             "is_pub": self.is_pub,
             "is_exactly_pub": self.is_exactly_pub,
             "container": self.container,
+            "mod_path": self.mod_path,
             "has_unimplemented_body": self.has_unimplemented_body,
             "is_test": self.is_test,
         }

@@ -105,6 +105,7 @@ from pipeline_core.adapters.fill_engine_roles import (
     TestLinkerAdapter,
     WorkspaceModelAdapter,
 )
+from pipeline_core.adapters.flow_audit import FlowAuditor
 from pipeline_core.adapters.gdb_backtrace import (
     localize_crashed_binary as _gdb_localize_crashed_binary,
 )
@@ -826,7 +827,6 @@ class Helpers:
     run_cargo: Callable[..., Any]
     task2_fill_fns_one_by_one: Callable[..., Any]
     # Reconstruction-cluster collaborators (S3 slices 11-20):
-    run_flow_audit: Callable[[str], None]
     load_model_notes: Callable[..., list[str]]
     genesis_rules_count: Callable[..., int]
     derive_gentest_prelude: Callable[..., tuple[str, str]]
@@ -838,12 +838,12 @@ class Helpers:
     # task3 inline-retry collaborators — resident shims over pipeline-side
     # bound deps (_ATTR_DEPS, ADAPTERS.cargo); run_cargo_check_diag is an e2e seam.
     run_cargo_check_diag: Callable[..., tuple[int, str, list[Any]]]
-    # Run-loop residents (RunDeps construction): logging/telemetry init +
-    # the flow-audit thread — they mutate pipeline-side run globals (_RUN,
-    # _RUN_CONTEXT), so they stay resident and late-bind here.
+    # Run-loop residents (RunDeps construction): logging/telemetry init — they
+    # mutate pipeline-side run globals (_RUN, _RUN_CONTEXT), so they stay
+    # resident and late-bind here. (The flow-audit thread moved to
+    # adapters.flow_audit.FlowAuditor, constructed in build_app.)
     init_log: Callable[..., None]
     init_events: Callable[..., None]
-    start_audit_thread: Callable[[], None]
 
 
 @dataclass(frozen=True)
@@ -1017,6 +1017,7 @@ def build_app(
     *,
     ask_client: AskClient,
     events_log: Callable[[], str] = lambda: "logs/events.jsonl",
+    prompts_dir: Path = Path("logs/prompts"),
     run_context: dict[str, str] | None = None,
     app_ref: Callable[[], App] | None = None,
 ) -> App:
@@ -1159,10 +1160,12 @@ def build_app(
     def active_test_inventory_for_cluster(
             project_dir: Path, cluster: Any,
             tests_dir_stems: frozenset[str] | None = None,
+            include_lib_sources: bool = False,
     ) -> tuple[int, frozenset[str]]:
         """Sweep-level FR-024: (expected_count, expected_names) — same walk
         and deps as `count_active_tests_for_cluster`, scopable to the
-        `--test stem…` binaries a TDD sweep actually runs."""
+        `--test stem…` binaries a TDD sweep runs; `include_lib_sources` adds
+        the gen_tests + src-side unit tests a `--lib` sweep also runs."""
         sc = app_ref().structure_cache if app_ref is not None else structure_cache
         return _tc_app.active_test_inventory_for_cluster(
             project_dir, cluster, _tc_app.TestCountDeps(
@@ -1170,7 +1173,8 @@ def build_app(
                 mod_records=sc.mod_records,
                 file_cfg_predicate=sc.file_cfg_predicate,
                 is_gen_tests_file=_disc_is_gen_tests_file,
-            ), tests_dir_stems=tests_dir_stems)
+            ), tests_dir_stems=tests_dir_stems,
+            include_lib_sources=include_lib_sources)
 
     # More former pipeline delegate defs, bound direct.
     def cluster_cfg_attr(cluster: Any) -> str:
@@ -1838,7 +1842,12 @@ def build_app(
                 project_dir / cfg.coverage_strategy_name, project_dir, test_files,
                 readme_text, project_profile, clusters=clusters, force=True),
     )
-    flow_audit = FlowAuditAdapter(helpers.run_flow_audit)
+    auditor = FlowAuditor(
+        run_state=run_state, events_log=events_log, prompts_dir=prompts_dir,
+        log=ports.log, emit=ports.emit,
+        plateau_n=int(_os.getenv("AUDIT_PLATEAU_N", "3")),
+        interval_sec=int(_os.getenv("AUDIT_INTERVAL_SEC", "900")))
+    flow_audit = FlowAuditAdapter(auditor.report)
     docs_metrics = DocsMetricsAdapter(helpers.load_model_notes, helpers.genesis_rules_count)
     requirements_phase = RequirementsPhase(
         requirements=requirements, gate=phase_gate, telemetry=telemetry,
@@ -1974,7 +1983,7 @@ def build_app(
         is_git_repo=_ws_is_git_repo,
         init_log=helpers.init_log,
         init_events=helpers.init_events,
-        start_audit_thread=helpers.start_audit_thread,
+        start_audit_thread=auditor.start_thread,
         quarantine_broken_gen_tests=_gts_quarantine_broken_gen_tests,
         git_file_hash=_ws_git_file_hash,
         ensure_vllm_ready=_ensure_vllm_ready,

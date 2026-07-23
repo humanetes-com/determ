@@ -53,10 +53,11 @@ class SweepOracle:
         them is a crash. Named `vanished` tests were enumerated and then
         reported nothing → their binary died, so a stack is worth hunting. An
         unnamed shortfall means every expected name DID report and the total is
-        still short → the static inventory under-enumerated, and no debugger
-        will ever find a fault for it. Folding both into one count sends the
-        crash localizer (gdb + an ASAN rebuild) after a fault that cannot
-        exist, every iteration, and logs it as tests vanishing when none did."""
+        still short → the static inventory OVER-COUNTED (its denominator holds
+        items that never became runnable tests), and no debugger will ever find
+        a fault for it. Folding both into one count sends the crash localizer
+        (gdb + an ASAN rebuild) after a fault that cannot exist, every
+        iteration, and logs it as tests vanishing when none did."""
         return max(0, self.deficit - len(self.vanished))
 
 

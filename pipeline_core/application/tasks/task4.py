@@ -33,7 +33,7 @@ class Task4Deps:
     ask: Callable[..., str]
     read: Callable[[Any], str]
     write: Callable[[Any, str], None]
-    extract_and_store_rules: Callable[..., Any]   # _task4_extract_and_store_rules
+    extract_and_store_rules: Callable[..., None]   # _task4_extract_and_store_rules
     model: str                                    # global MODEL (for the warning message)
     task4_model: str                              # _TASK4_MODEL
     verbosity_guard: str                          # _TASK4_VERBOSITY_GUARD

@@ -110,7 +110,8 @@ class FakeAdapter:
         return (0, "", list(self.diags))
 
     def build_test_cmd(self, test_stems: list[str],
-                       cluster: BuildCluster | None) -> str:
+                       cluster: BuildCluster | None,
+                       *, include_lib: bool = False) -> str:
         return "cargo test"
 
     def env(self) -> dict[str, str]:
