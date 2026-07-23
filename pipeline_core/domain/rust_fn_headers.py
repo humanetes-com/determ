@@ -248,6 +248,41 @@ def locate_all_fns(file_text: str, fn_name: str) -> list[tuple[str, int, int, in
     return out
 
 
+def unwrap_own_fn_definition(body_text: str, fn_name: str) -> str | None:
+    """Inner body of ``body_text`` when the WHOLE text is one fn definition
+    declaring ``fn_name``; ``None`` for anything else.
+
+    A model reply sometimes wraps the requested body in the full definition
+    (``fn target(...) -> T { <real body> }``). Spliced verbatim, that nests a
+    second ``fn target`` inside the stub's braces — legal syntax, so the parse
+    guard passes, but the outer fn now ends in an item, has no tail expression,
+    and returns ``()``: a guaranteed E0308. Worse, the duplicate header makes
+    every later bare-name operation on that fn refuse ``ambiguous_name``, so
+    the broken body cannot even be reverted and poisons every sibling compile.
+
+    Strict on purpose: the definition must span the entire text (only
+    whitespace, ``//`` comments, or ``#[...]`` attribute lines before the
+    header; only whitespace after the closing brace) and declare exactly
+    ``fn_name``. A real body that merely STARTS with a nested helper keeps
+    its trailing expression and is returned untouched (None)."""
+    text = body_text.strip()
+    locs = locate_all_fns(text, fn_name)
+    if not locs:
+        return None
+    _sig, sig_start, body_start, body_end = locs[0]
+    for line in text[:sig_start].splitlines():
+        s = line.strip()
+        if s and not (s.startswith("//") or s.startswith("#[")):
+            return None
+    if text[body_end + 1:].strip():
+        return None
+    inner = text[body_start:body_end].strip("\n")
+    lines = inner.splitlines()
+    indents = [len(ln) - len(ln.lstrip()) for ln in lines if ln.strip()]
+    cut = min(indents) if indents else 0
+    return "\n".join(ln[cut:] if ln.strip() else "" for ln in lines).strip()
+
+
 def is_pub_fn(file_text: str, fn_name: str) -> bool:
     """True if the fn declaration includes ``pub`` (any visibility variant)."""
     loc = locate_fn(file_text, fn_name)

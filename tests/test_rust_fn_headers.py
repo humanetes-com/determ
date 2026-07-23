@@ -62,3 +62,47 @@ def test_fn_headers_lookbehind_matches_regex():
         new = [(h.start, h.name, h.brace_open + 1)
                for h in fn_headers(t, line_anchored=False)]
         assert new == old, t
+
+# --------------------------------------------------------------------------- #
+# unwrap_own_fn_definition — a model reply that wraps the requested body in the
+# target's full `fn` definition must be reduced to the inner body, or the
+# splice nests a duplicate header: the outer fn then returns `()` (E0308) and
+# the duplicate name makes the bare-name revert refuse `ambiguous_name`, so
+# the broken body cannot even be undone (observed live: ensure.rs::render).
+# --------------------------------------------------------------------------- #
+from pipeline_core.domain.rust_fn_headers import unwrap_own_fn_definition
+
+
+def test_unwrap_full_definition_returns_inner_body():
+    body = ("fn render(msg: &'static str, lhs: &dyn Debug) -> Error {\n"
+            "    let mut buf = Buf::new();\n"
+            "    Error::msg(msg)\n"
+            "}")
+    assert unwrap_own_fn_definition(body, "render") == (
+        "let mut buf = Buf::new();\nError::msg(msg)")
+
+
+def test_unwrap_accepts_leading_attrs_comments_and_modifiers():
+    body = ("// helper\n#[inline]\n"
+            "pub(crate) unsafe fn object_drop<E>(e: Own<ErrorImpl>) {\n"
+            "    drop(e)\n"
+            "}")
+    assert unwrap_own_fn_definition(body, "object_drop") == "drop(e)"
+
+
+def test_unwrap_refuses_different_name_or_extra_content():
+    # A body legitimately STARTING with a nested helper keeps its tail
+    # expression — never unwrapped.
+    nested = "fn helper() -> u8 { 1 }\nhelper() as usize"
+    assert unwrap_own_fn_definition(nested, "len") is None
+    # Trailing code after the definition = not a pure wrapper.
+    trailing = "fn len(&self) -> usize { 1 }\nlet x = 2;"
+    assert unwrap_own_fn_definition(trailing, "len") is None
+    # Preceding real code = not a pure wrapper.
+    leading = "let x = 1;\nfn len(&self) -> usize { x }"
+    assert unwrap_own_fn_definition(leading, "len") is None
+
+
+def test_unwrap_ignores_plain_and_truncated_bodies():
+    assert unwrap_own_fn_definition("self.0.len()", "len") is None
+    assert unwrap_own_fn_definition("fn len(&self) -> usize {", "len") is None

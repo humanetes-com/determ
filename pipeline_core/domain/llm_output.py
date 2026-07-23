@@ -14,6 +14,7 @@ import re
 from typing import Any
 
 from .. import log as _log
+from .rust_fn_headers import unwrap_own_fn_definition
 from .rust_idents import canon_fn_name
 from .text import extract_code_content
 
@@ -581,6 +582,14 @@ def extract_fn_bodies(text: str) -> list[dict[str, Any]]:
             body_stripped = "\n".join(lines).strip()
         if not body_stripped:
             continue
+        # A reply that wraps the body in the target's full `fn` definition
+        # would splice as a NESTED fn: the outer fn then has no tail
+        # expression (guaranteed E0308) and the duplicate header breaks every
+        # later bare-name revert (`ambiguous_name`). Unwrap to the inner body.
+        _bare = canon_fn_name(fn_name)
+        unwrapped = unwrap_own_fn_definition(body_stripped, _bare)
+        if unwrapped:
+            body_stripped = unwrapped
         # Detect an optional leading `where ...` clause used to tighten bounds.
         where_clause, body_stripped = _split_leading_where(body_stripped)
         out.append({

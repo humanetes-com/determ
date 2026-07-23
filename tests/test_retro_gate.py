@@ -58,8 +58,21 @@ def test_tally_counts_and_renders() -> None:
                     RetroGateVerdict.NO_GUIDANCE):
         assert tally.record(verdict) is verdict
     assert (tally.honoured, tally.retired, tally.unanchored) == (1, 2, 1)
-    assert tally.total == 4  # NO_GUIDANCE is not sieve traffic
-    assert tally.render() == "retro-gate: honoured=1 retired=2 unanchored=1"
+    assert tally.judged == 4  # guidance existed and was sieved
+    assert tally.total == 5   # every unit that reached the gate
+    assert tally.render() == (
+        "retro-gate: honoured=1 retired=2 unanchored=1 no_guidance=1")
+
+
+def test_tally_line_fires_on_an_empty_retro_store() -> None:
+    """A --clean run has no stored guidance: the batch must still render, or
+    'nothing to judge' looks exactly like 'the gate never ran'."""
+    tally = RetroGateTally()
+    for _ in range(3):
+        tally.record(RetroGateVerdict.NO_GUIDANCE)
+    assert tally.judged == 0
+    assert tally.total == 3
+    assert tally.render().endswith("no_guidance=3")
 
 
 def test_fingerprint_tracks_layout_not_bodies() -> None:

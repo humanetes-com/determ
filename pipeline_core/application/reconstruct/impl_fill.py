@@ -721,6 +721,23 @@ def fill_impl_blocks(
                          f"{spliced_now} fn(s) in one pass"
                          + (f" — banked improvement: {_bank.summary}."
                             if _bank is not None else "."))
+                    # Trust-but-verify: a splice can report ok while the fn
+                    # stays a stub on disk (observed: "FILE FILLED 5" with one
+                    # fn still `unimplemented!()`). A silent loss here reads
+                    # as "filled" forever — re-scan and name the leftovers.
+                    _left = sorted({
+                        str(r.get("fn_name", "")) for r in
+                        (_scan_unimplemented_records_for_cluster(
+                            target_src_dir, cluster) or [])
+                        if _norm_src_rel(r.get("file", ""))
+                        == _norm_src_rel(file_rel)
+                        and str(r.get("fn_name", "")) in set(stub_names)})
+                    if _left:
+                        _log(f"  [phase-c/file] {glabel}: POST-FILL MISMATCH "
+                             f"— still stubbed after accept: {_left}.")
+                        _emit("phase_c.file.fill.mismatch", data={
+                            "cluster": cluster_name, "file": file_rel,
+                            "group": glabel, "still_stubbed": _left})
                     _emit("phase_c.file.fill.done", data={
                         "cluster": cluster_name, "file": file_rel,
                         "group": glabel, "fns_filled": spliced_now,

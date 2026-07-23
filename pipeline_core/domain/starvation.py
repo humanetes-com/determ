@@ -29,6 +29,7 @@ class StarvationCause(StrEnum):
     TYPE_DEF_ABSENT = "type_def_absent"    # needed type's definition never in prompt
     TEST_ABSENT = "test_absent"            # test failed but its source not shown
     ERROR_TRUNCATED = "error_truncated"    # error excerpt is a mid-diagnostic tail
+    FOREIGN_ERROR = "foreign_error"        # every error is another unit's; own code fine
     DESIGN_CONFLICT = "design_conflict"    # signature/scheme disagreement (E0053/E0046/E0407)
     RESPONSE_UNUSED = "response_unused"    # model answered but nothing was spliced
     UNKNOWN = "unknown"
@@ -170,6 +171,20 @@ def classify_starvation(
             return (StarvationCause.RESPONSE_UNUSED,
                     "no error captured — reply produced but nothing spliced")
         return StarvationCause.UNKNOWN, "no error and no response captured"
+
+    # 0b) Every error is DOWNSTREAM of the target (the focused-excerpt builder
+    # found none in the target file): the unit's own code compiled; it burned
+    # its attempts on a sibling's breakage. Not starvation and not the model's
+    # fault — the actionable defect is whatever broke (and failed to revert)
+    # the OTHER unit. Classified early: no ident/type check below can be about
+    # THIS unit when the excerpt says the errors are elsewhere.
+    if ("Errors elsewhere in the crate" in err
+            and "Errors in target file" not in err):
+        _for_line = next(
+            (ln.strip() for ln in err.splitlines()
+             if ln.strip().startswith("-->")), "")
+        return (StarvationCause.FOREIGN_ERROR,
+                _for_line or "all errors downstream of the target")
 
     # 1) Frozen-bound mismatch: the impl header freezes a param to
     # one trait while the compiler demands another — no body can fix it.

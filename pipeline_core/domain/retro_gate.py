@@ -37,7 +37,11 @@ GATE_VERSION = "comparative_2026_07"
 # Bumped whenever the set of fill ROUTES changes: a unit convicted when its
 # file was skipped whole (over the per-file fn cap) never met the route that
 # now partitions the file into test-welded groups.
-ROUTE_VERSION = "test_welded_groups_2026_07"
+# `leakproof_revert`: before this, a refused per-fn revert silently left the
+# failed body in the tree — sibling units then exhausted against a foreign
+# compile error and were convicted on evidence that was never about them.
+# Convictions earned under that engine are not a fair sample of any unit.
+ROUTE_VERSION = "leakproof_revert_2026_07"
 
 
 class RetroGateVerdict(Enum):
@@ -86,6 +90,10 @@ class RetroGateTally:
     honoured: int = 0
     retired: int = 0
     unanchored: int = 0
+    # Counted too, so an empty retro store (fresh --clean run) renders as
+    # "no_guidance=N" rather than as no line at all — otherwise "the sieve had
+    # nothing to judge" is indistinguishable from "the gate never ran".
+    no_guidance: int = 0
     # Fill batches dispatch units to a thread pool; `+=` on an attribute is not
     # atomic, so the counters take the same treatment as every other shared
     # aggregate in the engines.
@@ -101,15 +109,22 @@ class RetroGateTally:
                 self.retired += 1
             elif verdict is RetroGateVerdict.UNANCHORED:
                 self.unanchored += 1
+            elif verdict is RetroGateVerdict.NO_GUIDANCE:
+                self.no_guidance += 1
         return verdict
 
     @property
-    def total(self) -> int:
+    def judged(self) -> int:
+        """Verdicts where guidance actually existed and was sieved."""
         return self.honoured + self.retired + self.unanchored
+
+    @property
+    def total(self) -> int:
+        return self.judged + self.no_guidance
 
     def render(self) -> str:
         return (f"retro-gate: honoured={self.honoured} retired={self.retired} "
-                f"unanchored={self.unanchored}")
+                f"unanchored={self.unanchored} no_guidance={self.no_guidance}")
 
 
 def layout_fingerprint(file_text: str) -> str:

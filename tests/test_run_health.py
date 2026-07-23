@@ -199,3 +199,16 @@ def test_crash_unlocalized_still_fires_on_real_no_localize_despite_a_deferral():
     (f,) = [x for x in analyze([_SHRUNK, _DEFERRED, _SHRUNK, no_loc], [])
             if x.kind == HealthKind.CRASH_UNLOCALIZED]
     assert "deferred as stub-confounded" in f.evidence
+
+
+_SHRUNK_COMPILE = (
+    "  [stable] [phase-c/tdd] iter 2: ORACLE SHRUNK — counting 71 as failing. "
+    "66 named test(s) reported no verdict (cluster compile failed — no test "
+    "binaries ran): ['test_a']")
+
+
+def test_crash_unlocalized_ignores_compile_fail_shrinks():
+    # No binaries ran, so nothing crashed: a silent localizer is correct.
+    f = [x for x in analyze([_SHRUNK_COMPILE], [])
+         if x.kind == HealthKind.CRASH_UNLOCALIZED]
+    assert f == []

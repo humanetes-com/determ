@@ -258,3 +258,22 @@ def test_e0609_field_on_unknown_type_is_type_def_absent() -> None:
     err = "error[E0609]: no field `buf` on type `Indented<'_, T>`"
     cause, ev = classify_starvation(_PROMPT, "", err)
     assert cause is StarvationCause.TYPE_DEF_ABSENT and ev == "Indented"
+
+def test_foreign_error_when_every_error_is_downstream() -> None:
+    # A sibling's leftover broken body fails the whole-crate compile; THIS
+    # unit's excerpt then opens with the elsewhere header and no target-file
+    # section. That is not starvation and not this unit's defect — the old
+    # ERROR_TRUNCATED label sent the investigation to the excerpt builder.
+    err = ("# Errors elsewhere in the crate (likely downstream of the target):\n"
+           "error[E0308]: mismatched types\n"
+           "  --> src/ensure.rs:73:67\n")
+    cause, ev = classify_starvation(_PROMPT, "self.count()", err)
+    assert cause is StarvationCause.FOREIGN_ERROR
+    assert "src/ensure.rs:73" in ev
+    # With a target-file section present the errors ARE (also) ours — the
+    # foreign shortcut must not swallow that case.
+    both = ("# Errors in target file:\nerror[E0308]: mismatched types\n"
+            "# Errors elsewhere in the crate (likely downstream of the target):\n"
+            "error[E0308]: mismatched types\n")
+    cause2, _ = classify_starvation(_PROMPT, "self.count()", both)
+    assert cause2 is not StarvationCause.FOREIGN_ERROR

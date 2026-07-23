@@ -298,7 +298,8 @@ def u2_test_gate(
     if rc != 0 and _missing:
         guard("phase-c/u2_missing_verdict",
               f"{sorted(_missing)} reported no verdict in the scoped run "
-              "(binary crashed or failed to compile)")
+              + ("(compile failed — no test binaries ran)"
+                 if "could not compile" in (out or "") else "(binary crashed)"))
     if not scoped.failures:
         return U2Verdict.accept()
     locate = make_fn_site_locator(structure, target_src_dir)

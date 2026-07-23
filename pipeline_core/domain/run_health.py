@@ -275,8 +275,13 @@ def analyze(
     # shrink that is purely an unnamed shortfall is a test-inventory gap; the
     # localizer is right not to blame anything, and counting it here reports a
     # broken localizer that is in fact working correctly.
+    # "compile failed — no test binaries ran" shrinks are excluded: nothing
+    # crashed, so a silent localizer is correct there, not broken. (The legacy
+    # ambiguous rendering "crashed or failed to compile" predates the split
+    # and still counts — it may hide a real crash.)
     shrunk = sum(1 for ln in segment_lines
-                 if "ORACLE SHRUNK" in ln and "named test(s) reported" in ln)
+                 if "ORACLE SHRUNK" in ln and "named test(s) reported" in ln
+                 and "compile failed — no test binaries ran" not in ln)
     blamed = sum(1 for ln in segment_lines
                  if "[phase-c/crash]" in ln and "blamed" in ln)
     no_localize = sum(1 for ln in segment_lines

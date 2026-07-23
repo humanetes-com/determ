@@ -98,15 +98,25 @@ class MutatorAdapter:
         parallelism the snapshot is older than the sibling fills that landed
         in the same file meanwhile, so writing it back erases work that has
         already been reported as filled. Reverting is a per-fn operation and
-        `pre_image` may legally be a stub."""
-        if container:
-            loc = self.locate_fn_by_record(file_path, name, container, sig_text,
-                                           cfg_predicates)
-            if loc is not None:
-                _sig_start, body_start, body_end, _sig = loc
-                return self.splice_fn_body_at(
-                    file_path, body_start, body_end, pre_image,
-                    allow_nonstub=True, allow_stub_body=True)
+        `pre_image` may legally be a stub.
+
+        The record locator runs FIRST even for a FREE fn (empty container):
+        it indexes only top-level/impl fns, so a failed splice that nested a
+        duplicate same-name definition inside the body still resolves to the
+        one outer fn — exactly the state where the bare-name fallback refuses
+        `ambiguous_name` and a broken body would otherwise stay in the tree,
+        failing every sibling's compile until something else overwrites it.
+        Gated on having a disambiguator (container or sig): with neither, the
+        record locator guesses among same-name candidates instead of refusing,
+        and a revert must never guess."""
+        loc = (self.locate_fn_by_record(file_path, name, container, sig_text,
+                                        cfg_predicates)
+               if (container or sig_text) else None)
+        if loc is not None:
+            _sig_start, body_start, body_end, _sig = loc
+            return self.splice_fn_body_at(
+                file_path, body_start, body_end, pre_image,
+                allow_nonstub=True, allow_stub_body=True)
         # Same record-locator-then-bare-name ladder as splice_body_scoped: the
         # extractor binary is absent on the fixture path, and a revert that
         # silently does nothing leaves the failed body in place, so the next
@@ -132,8 +142,12 @@ class MutatorAdapter:
         same-named fn in a different impl is never touched. Only when no
         container is available does it fall back to the bare-name splice, which
         itself refuses (``ambiguous_name``) if the name is not unique. Either
-        way a body meant for one impl can never land in another."""
-        if container:
+        way a body meant for one impl can never land in another. A FREE fn
+        (empty container) with a known signature also routes through the
+        record locator — the bare-name path refuses `ambiguous_name` when a
+        broken prior splice left a nested same-name definition, and the
+        annotate-stub write must still land on the outer fn then."""
+        if container or sig_text:
             loc = self.locate_fn_by_record(file_path, name, container, sig_text,
                                            cfg_predicates)
             if loc is not None:

@@ -42,6 +42,7 @@ from pipeline_core.domain.behaviour_select import select_usage_examples
 from pipeline_core.domain.cfg import filter_cfg_inactive_branches
 from pipeline_core.domain.model_notes import layout_safe_guidance
 from pipeline_core.domain.models import FillResult, FnLocator, FnSite, Stub
+from pipeline_core.domain.reconstruction import SpliceOutcome
 from pipeline_core.domain.refine import FloorStall
 from pipeline_core.domain.retro_gate import (
     RetroGateVerdict,
@@ -175,10 +176,24 @@ class FillOneFn:
         # THIS fn, at offsets resolved against the file as it stands now.
         _own_pre_image = _cur_body or "unimplemented!()"
 
-        def _revert_own_body() -> None:
-            self.mut.revert_body_scoped(
+        def _revert_own_body() -> bool:
+            # A revert that silently no-ops leaves the failed body in the
+            # tree: every sibling's compile then fails on THIS fn's error,
+            # the next attempt's splice refuses `target_not_stub`, and the
+            # race guard misreads that as another worker's fill. Surface
+            # the failure loudly — never assume a revert landed.
+            out = self.mut.revert_body_scoped(
                 file_path, fn_name, container, sig_text, _own_pre_image,
                 cfg_predicates=rec.cfg_predicates)
+            if not out.ok:
+                self.tel.log(f"  [phase-c/per-fn] REVERT FAILED for "
+                             f"{rel_file}::{fn_name}: {out.reason} — broken "
+                             "body left in tree; siblings will see its errors.")
+                self.tel.emit("phase_c.fn.revert.fail", data={
+                    "cluster": ctx.cluster_name, "pass_n": ctx.pass_n,
+                    "file": rel_file, "fn": fn_name, "reason": out.reason,
+                })
+            return out.ok
 
         test_blocks = self.tests.find_tests_for_fn(
             ctx.tests_dir_files, fn_name,
@@ -407,20 +422,63 @@ class FillOneFn:
             # ahead regressions to this fn.
             _attempt_baseline_test = self.cargo.test_regression_baseline(
                 ctx.tdd_test_cmd, ctx.target_src_dir, ctx.cluster_env)
-            _splice_loc = self.mut.locate_fn_by_record(
-                file_path, fn_name, container, sig_text, rec.cfg_predicates)
-            # A behavioral re-fill target replaces an already-filled
-            # (compiling-but-wrong) body → the splice must accept a non-stub.
-            if _splice_loc is not None:
-                _, _bs, _be, _ = _splice_loc
-                splice_out = self.mut.splice_fn_body_at(
-                    file_path, _bs, _be, body, allow_nonstub=rec.refill)
-            else:
-                # Fallback: regex-based locator. Less accurate for
+            def _locate_and_splice() -> SpliceOutcome:
+                _loc = self.mut.locate_fn_by_record(
+                    file_path, fn_name, container, sig_text, rec.cfg_predicates)
+                # A behavioral re-fill target replaces an already-filled
+                # (compiling-but-wrong) body → the splice must accept a non-stub.
+                if _loc is not None:
+                    _, _lbs, _lbe, _ = _loc
+                    return self.mut.splice_fn_body_at(
+                        file_path, _lbs, _lbe, body, allow_nonstub=rec.refill)
+                # Fallback: bare-name locator. Less accurate for
                 # same-name collisions but acceptable when the syn
                 # binary isn't available.
-                splice_out = self.mut.splice_fn_body(
+                return self.mut.splice_fn_body(
                     file_path, fn_name, body, allow_nonstub=rec.refill)
+
+            splice_out = _locate_and_splice()
+            # Diagnose a `target_not_stub` WHILE STILL HOLDING the lock: the
+            # non-stub body is either another worker's fill (genuine race) or
+            # THIS fn's own earlier failed attempt that a refused revert left
+            # behind. The two need opposite handling — a race discards our
+            # output, a revert-leak must be repaired and the splice retried,
+            # or the broken body keeps failing every sibling's compile.
+            _race_detected = False
+            if not splice_out.ok and splice_out.reason == "target_not_stub":
+                try:
+                    _cur_text = file_path.read_text(encoding="utf-8")
+                    _race_loc = self.mut.locate_fn_by_record(
+                        file_path, fn_name, container, sig_text, rec.cfg_predicates)
+                    if _race_loc is not None:
+                        _, _race_bs, _race_be, _ = _race_loc
+                        _race_cur_body = _cur_text[_race_bs:_race_be]
+                        if not is_unimplemented_body(_race_cur_body):
+                            def _norm(s: str) -> str:
+                                return " ".join(s.split())
+                            _own = {_norm(h.get("body", ""))
+                                    for h in per_fn_history if h.get("body")}
+                            if _norm(_race_cur_body) in _own:
+                                self.tel.log(
+                                    f"  [phase-c/per-fn] REVERT LEAK — "
+                                    f"{rel_file}::{fn_name}: own failed body "
+                                    "found in tree; restoring pre-image and "
+                                    "retrying the splice.")
+                                self.tel.emit("phase_c.fn.revert.leak", data={
+                                    "cluster": ctx.cluster_name,
+                                    "pass_n": ctx.pass_n,
+                                    "file": rel_file, "fn": fn_name,
+                                })
+                                _rest = self.mut.splice_fn_body_at(
+                                    file_path, _race_bs, _race_be,
+                                    _own_pre_image, allow_nonstub=True,
+                                    allow_stub_body=True)
+                                if _rest.ok:
+                                    splice_out = _locate_and_splice()
+                            else:
+                                _race_detected = True
+                except Exception:
+                    pass
             ok, delta = splice_out.ok, splice_out.delta
             if ok and splice_out.reason == "ok_xml_unescaped":
                 self.tel.log(f"  [phase-c/per-fn] {fn_name}: landed only after "
@@ -429,23 +487,6 @@ class FillOneFn:
             if not ok:
                 ctx.splice_check_lock.release()
                 _lock_released = True
-                # A `target_not_stub` refusal is usually another worker
-                # filling this fn between our read and our splice (race).
-                # Confirm via a quick re-read; every other reason is its
-                # own diagnosis (debt #39) — no guessing needed.
-                _race_detected = False
-                if splice_out.reason == "target_not_stub":
-                    try:
-                        _cur_text = file_path.read_text(encoding="utf-8")
-                        _race_loc = self.mut.locate_fn_by_record(
-                            file_path, fn_name, container, sig_text, rec.cfg_predicates)
-                        if _race_loc is not None:
-                            _, _race_bs, _race_be, _ = _race_loc
-                            _race_cur_body = _cur_text[_race_bs:_race_be]
-                            if not is_unimplemented_body(_race_cur_body):
-                                _race_detected = True
-                    except Exception:
-                        pass
                 _ctx = f" [{container}]" if container else ""
                 if _race_detected:
                     self.tel.log(f"  [phase-c/per-fn] GUARD POSSIBLE RACE — "
@@ -821,9 +862,13 @@ class FillOneFn:
                 )
                 # Container-scoped: annotate THIS fn's body, never a same-named
                 # sibling in another impl (the `from`/`fmt`/`not` collision).
-                self.mut.splice_body_scoped(
+                _ann = self.mut.splice_body_scoped(
                     file_path, fn_name, container, sig_text, annotated_body,
                     cfg_predicates=rec.cfg_predicates)
+                if not _ann.ok:
+                    self.tel.log(f"  [phase-c/per-fn] ANNOTATE FAILED for "
+                                 f"{rel_file}::{fn_name}: {_ann.reason} — "
+                                 "exhausted fn not re-stubbed.")
             exhaust_error = (f"{rel_file}::{fn_name}: fix loop exhausted "
                              f"after {fix_attempt} attempt(s)")
             self.tel.emit("phase_c.fn.fill.fail", duration_ms=int(

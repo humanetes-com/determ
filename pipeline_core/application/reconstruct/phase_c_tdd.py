@@ -309,12 +309,18 @@ def run_phase_c_tdd(
             ignored_names=frozenset(n for b in _bins for n in b.ignored),
             executed_count=sum(b.executed for b in _bins))
         if not oracle.intact:
+            # A cluster that failed to COMPILE ran no binaries at all — the
+            # vanished names say nothing about crashes then, and downstream
+            # consumers (crash localizer expectation, layout-retrigger streak)
+            # must not read them as crash evidence.
+            _compile_broke = "could not compile" in (output_ or "")
             _why = []
             if oracle.vanished:
                 _why.append(
                     f"{len(oracle.vanished)} named test(s) reported no verdict "
-                    f"(binary crashed or failed to compile): "
-                    f"{sorted(oracle.vanished)[:20]}")
+                    + ("(cluster compile failed — no test binaries ran): "
+                       if _compile_broke else "(binary crashed): ")
+                    + f"{sorted(oracle.vanished)[:20]}")
             if oracle.unnamed_shortfall:
                 _why.append(
                     f"{oracle.unnamed_shortfall} unnamed test(s) short of the "
@@ -335,7 +341,8 @@ def run_phase_c_tdd(
                 # the cause is carried, never left to be inferred.
                 "unnamed_shortfall": oracle.unnamed_shortfall,
                 "cause": "+".join(
-                    (["crash"] if oracle.vanished else [])
+                    ((["compile_fail"] if _compile_broke else ["crash"])
+                     if oracle.vanished else [])
                     + (["inventory_overcount"] if oracle.unnamed_shortfall
                        else [])),
                 "vanished": sorted(oracle.vanished)[:200]})
@@ -665,7 +672,12 @@ def run_phase_c_tdd(
         # test binaries — per-fn re-fills can't converge on a shared pointer
         # scheme, so re-author the implicated frozen component instead of
         # burning the stall budget on it.
-        if _oracle.missing_count > 0:
+        # "With a clean compile" is load-bearing: a compile-broken sweep ran
+        # no binaries, so its vanished names are not crash evidence — counting
+        # it would re-author a frozen component off a transient compile error.
+        # Such a sweep neither advances nor resets the streak.
+        _sweep_compile_broke = "could not compile" in (output or "")
+        if _oracle.missing_count > 0 and not _sweep_compile_broke:
             _vanish_streak += 1
             # A shrunk oracle with a clean compile is either the frozen-scheme
             # crash class or a transient. Waiting for the streak proves
@@ -688,14 +700,17 @@ def run_phase_c_tdd(
                 _p2, _f2, _ig2 = parse_test_counts(_out2)
                 _, _, _oracle2 = _reconcile(
                     _rc2, _out2, _p2, _f2, parse_failed_tests(_out2))
-                if _oracle2.missing_count > 0:
+                if (_oracle2.missing_count > 0
+                        and "could not compile" not in (_out2 or "")):
                     deps.log(
                         f"  {tag} [phase-c/tdd] iter {iter_n}: oracle shrink "
                         "reproduced on immediate re-sweep — crash is "
                         "deterministic, retriggering now instead of waiting "
                         "out the sweep streak.")
                     _vanish_streak = _crash_retrigger_after
-        else:
+        elif _oracle.missing_count == 0:
+            # A compile-broken shrink is neutral; only a clean full sweep
+            # proves the crash class absent and may reset the streak.
             _vanish_streak = 0
         _retrig_cooldown = False   # one iter of fills has now had its chance
         if (_vanish_streak >= _crash_retrigger_after

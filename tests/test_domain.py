@@ -652,3 +652,20 @@ def test_extract_body_response_body_tag_still_wins() -> None:
 
     reply = '<BODY>self.x()</BODY>\n<FN name="a" block="impl X">other</FN>'
     assert lo.extract_body_response(reply, "a") == "self.x()"
+
+def test_extract_fn_bodies_unwraps_full_definition_wrapper() -> None:
+    # A reply wrapping the body in the target's own full definition would
+    # splice as a NESTED `fn`: the outer fn loses its tail expression
+    # (guaranteed E0308) and the duplicate header breaks the bare-name
+    # revert with `ambiguous_name` (observed live: ensure.rs::render).
+    (rec,) = llm_output.extract_fn_bodies(
+        '<FN name="render" block="free">'
+        "fn render(msg: &'static str) -> Error {\n"
+        "    Error::msg(msg)\n"
+        "}</FN>")
+    assert rec["body"] == "Error::msg(msg)"
+    # A different-named nested helper with trailing code is a REAL body.
+    (keep,) = llm_output.extract_fn_bodies(
+        '<FN name="len" block="impl X">'
+        "fn helper() -> usize { 1 }\nhelper()</FN>")
+    assert keep["body"] == "fn helper() -> usize { 1 }\nhelper()"
