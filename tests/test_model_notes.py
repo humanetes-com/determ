@@ -6,7 +6,9 @@ from pipeline_core.domain.model_notes import (
     MODEL_NOTES_HEADER as H,
 )
 from pipeline_core.domain.model_notes import (
+    guidance_contradicts_layout,
     layout_contradicted_notes,
+    layout_safe_guidance,
     parse_note_bullets,
     preserve_model_notes,
     render_with_notes,
@@ -104,10 +106,41 @@ def test_struct_fields_reads_named_fields() -> None:
 
 def test_struct_fields_no_evidence_cases() -> None:
     assert struct_fields(AUTHORED_LAYOUT, "Missing") is None
-    assert struct_fields("struct Own<T: ?Sized>(NonNull<T>);", "Own") is None
     assert struct_fields("struct Marker;", "Marker") is None
     # exact-name only: `Error` must not match `ErrorImpl`
     assert struct_fields(AUTHORED_LAYOUT, "Error") is None
+
+
+def test_struct_fields_reads_tuple_positions() -> None:
+    # A tuple struct HAS fields, they are numbered — `self.0` is valid against
+    # it, a named claim is not; both are unjudgeable if this returns None.
+    assert struct_fields("struct Own<T: ?Sized>(NonNull<T>);", "Own") == {"0"}
+    assert struct_fields("pub struct Pair(u8, Vec<(u8, u8)>);", "Pair") == {"0", "1"}
+    assert struct_fields("struct Trailing(A, B,);", "Trailing") == {"0", "1"}
+    assert struct_fields("struct Empty();", "Empty") == frozenset()
+    # a top-level comma inside generics / a `->` in a fn-ptr type is not a
+    # field separator
+    assert struct_fields("struct One(Vec<A, B>);", "One") == {"0"}
+    assert struct_fields(
+        "struct Fp(unsafe fn(Own<E>) -> Ref<E>, u8);", "Fp") == {"0", "1"}
+    # a field whose type STARTS with a bracket is still a field
+    assert struct_fields("struct Arr([u8; 4], u8);", "Arr") == {"0", "1"}
+    assert struct_fields("struct Tup((u8, u8), bool);", "Tup") == {"0", "1"}
+
+
+def test_tuple_index_claims_judged_against_named_layout() -> None:
+    # The live guidance that convicted two impl blocks: `self.0` against a
+    # struct with NAMED fields is a layout lie, invisible to an ident-only sieve.
+    g = ("Replace the non-existent field `_object` with `self.0`, as the "
+         "generic `E` is stored in the first anonymous tuple field. Use the "
+         "exact body `Debug::fmt(&self.0, formatter)`.")
+    anchor = frozenset({"ErrorImpl"})  # the impl this guidance was earned on
+    assert layout_contradicted_notes([g], AUTHORED_LAYOUT, anchor_types=anchor) == [g]
+    # …and the same claim is CORRECT where the layout really is a tuple struct
+    # (the store is shared across clusters, so both must be judged per file).
+    g2 = "On `ErrorImpl`, use the exact body `Debug::fmt(&self.0, formatter)`."
+    assert layout_contradicted_notes([g2], AUTHORED_LAYOUT) == [g2]
+    assert layout_contradicted_notes([g2], "pub(crate) struct ErrorImpl<E>(E);") == []
 
 
 def test_struct_fields_skips_comments_and_attrs() -> None:
@@ -155,6 +188,32 @@ def test_notes_without_in_file_structs_are_kept() -> None:
     assert layout_contradicted_notes([general], AUTHORED_LAYOUT) == []
     boxnote = "use `Box::leak` for 'static, not a stack borrow"
     assert layout_contradicted_notes([boxnote], AUTHORED_LAYOUT) == []
+
+
+def test_anchor_type_judges_prose_that_names_no_struct() -> None:
+    # Live guidance that stayed injected (and kept a block convicted) because
+    # it names no struct declared in the file: without an anchor there is
+    # nothing to judge `self._object` against.
+    g = ("The function `crate::nightly::provide` does not exist in scope; "
+         "change the body to `self._object.provide(request)`, which is "
+         "guaranteed to compile under the frozen `E: StdError` bound.")
+    assert layout_contradicted_notes([g], AUTHORED_LAYOUT) == []
+    assert layout_contradicted_notes(
+        [g], AUTHORED_LAYOUT, anchor_types=frozenset({"ErrorImpl"})) == [g]
+    # …and the anchor does not manufacture a contradiction where the field
+    # really exists (same string, the cluster whose layout kept `_object`).
+    assert layout_contradicted_notes(
+        [g], FROZEN_LAYOUT, anchor_types=frozenset({"ErrorImpl"})) == []
+
+
+def test_anchor_is_a_fallback_not_an_override() -> None:
+    # Prose that DOES name a declared struct is judged against that struct;
+    # the anchor never widens the vocabulary (accepted bias: guidance about
+    # its own type while naming a sibling is retired — a wrong retirement
+    # costs attempts, a wrong retention cost a plateau).
+    g = "ErrorImpl is the erased payload; call `self.object_drop` on it."
+    assert layout_contradicted_notes(
+        [g], AUTHORED_LAYOUT, anchor_types=frozenset({"ErrorVTable"})) == [g]
 
 
 def test_method_calls_are_not_field_claims() -> None:
@@ -415,3 +474,82 @@ def test_build_promoted_rules_skips_untagged_stored_note() -> None:
     out = build_promoted_rules(Counter({"E0277": 3}), {},
                                ["a plain untagged note with no code prefix"])
     assert "E0277" in out and "past note" not in out
+
+
+# ---- retrospective guidance judged against the current layout ----
+# Same judgement as the notes channel, applied to the retrospective store:
+# retros are keyed by (file, fn, container) with NO cluster, so one guidance
+# string is served to clusters whose private layouts differ.
+
+# The exact guidance observed live, convicting `impl ErrorImpl` as exhausted.
+POISON_GUIDANCE = (
+    "Eliminate all references to the hallucinated ErrorVTable fields "
+    "(`object_backtrace`, `object_ref`) and non-existent methods (`erase`, "
+    "`error` field). Instead, directly access the wrapped error via the "
+    "`_object` field using `(*this.as_ptr())._object`."
+)
+
+
+def test_guidance_naming_absent_field_is_contradicted() -> None:
+    assert guidance_contradicts_layout(POISON_GUIDANCE, AUTHORED_LAYOUT)
+    assert layout_safe_guidance(POISON_GUIDANCE, AUTHORED_LAYOUT) == ""
+
+
+def test_guidance_struct_literal_with_absent_field_is_contradicted() -> None:
+    # the shape that produced E0560 live: a literal listing a field the
+    # current layout does not have.
+    g = "Build it complete: `ErrorImpl { vtable, error, backtrace }`."
+    assert guidance_contradicts_layout(g, AUTHORED_LAYOUT)
+    assert layout_safe_guidance(g, AUTHORED_LAYOUT) == ""
+
+
+def test_guidance_consistent_with_layout_survives() -> None:
+    g = "Read the wrapped error from the `error` field of ErrorImpl."
+    assert not guidance_contradicts_layout(g, AUTHORED_LAYOUT)
+    assert layout_safe_guidance(g, AUTHORED_LAYOUT) == g
+
+
+def test_same_guidance_is_correct_against_the_other_cluster_layout() -> None:
+    # `_object` IS declared on the frozen layout — the judgement is per
+    # (cluster, bake), which is why the shared store cannot be pruned on disk.
+    g = "Access the wrapped error via the `_object` field of ErrorImpl."
+    assert guidance_contradicts_layout(g, AUTHORED_LAYOUT)
+    assert not guidance_contradicts_layout(g, FROZEN_LAYOUT)
+
+
+def test_guidance_about_types_absent_from_file_survives() -> None:
+    # judged only against structs the file actually declares — guidance about
+    # a type defined elsewhere is unknown, not contradicted.
+    g = "The `inner` field of Other holds the pointer."
+    assert not guidance_contradicts_layout(g, AUTHORED_LAYOUT)
+
+
+def test_empty_guidance_or_file_text_is_never_contradicted() -> None:
+    assert not guidance_contradicts_layout("", AUTHORED_LAYOUT)
+    assert not guidance_contradicts_layout(POISON_GUIDANCE, "")
+    assert layout_safe_guidance("", AUTHORED_LAYOUT) == ""
+    assert layout_safe_guidance(POISON_GUIDANCE, "") == POISON_GUIDANCE
+
+
+def test_struct_fields_anchor_skips_commented_declaration() -> None:
+    # An annotated-stub comment quotes a failed attempt verbatim, plain
+    # `struct NAME { … }` included — the anchor must be the CODE declaration,
+    # not the phantom one in the comment.
+    text = (
+        "// struct ErrorImpl { _object: E }\n"
+        "pub struct ErrorImpl { error: E, vtable: V }\n"
+    )
+    assert struct_fields(text, "ErrorImpl") == frozenset({"error", "vtable"})
+    # Comment-only declaration = no evidence, not a phantom layout.
+    assert struct_fields("// struct Ghost { a: u8 }\n", "Ghost") is None
+
+
+def test_struct_fields_anchor_needs_word_boundary() -> None:
+    assert struct_fields(
+        "mystruct Foo {}\nstruct Foo { a: u8 }", "Foo") == frozenset({"a"})
+
+
+def test_tuple_positions_ignore_comment_content() -> None:
+    # A `,` inside a comment is not a field separator.
+    assert struct_fields(
+        "struct P(A /* , */ , B);", "P") == frozenset({"0", "1"})

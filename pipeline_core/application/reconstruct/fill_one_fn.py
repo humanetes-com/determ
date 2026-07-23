@@ -40,8 +40,16 @@ from pipeline_core.application.reconstruct.pull_resolver import (
 )
 from pipeline_core.domain.behaviour_select import select_usage_examples
 from pipeline_core.domain.cfg import filter_cfg_inactive_branches
+from pipeline_core.domain.model_notes import layout_safe_guidance
 from pipeline_core.domain.models import FillResult, FnLocator, FnSite, Stub
 from pipeline_core.domain.refine import FloorStall
+from pipeline_core.domain.retro_gate import (
+    RetroGateVerdict,
+    RetroProvenance,
+    anchor_types_for_container,
+    conviction_is_current,
+    judge_guidance,
+)
 from pipeline_core.domain.std_api_sigs import std_api_def
 from pipeline_core.domain.test_report import U2Decision
 from pipeline_core.domain.type_refs import types_referenced_in_text
@@ -93,8 +101,42 @@ class FillOneFn:
         # faulting stack is evidence no prior attempt ever saw.
         _crash_evidence = (ctx.crash_evidence or {}).get(
             FnLocator(rel_file, fn_name), "")
-        if not _crash_evidence and self.retros.is_fn_fully_exhausted(
-                ctx.retros_cache, rel_file, fn_name, container):
+        file_path = ctx.target_src_dir / rel_file
+        try:
+            snapshot = file_path.read_text(encoding="utf-8")
+        except Exception:
+            return fill_skip(rec, attempts)
+        # A conviction reached while the prompt taught a field the current
+        # layout does not have is not evidence the fn is hard — the attempts
+        # it counted were never fair samples. Don't honour the flag while its
+        # own guidance contradicts the layout being compiled. The impl's self
+        # type anchors claims the prose leaves unattached ("change the body to
+        # `self._object.provide(..)`" names no struct at all).
+        _anchor_types = anchor_types_for_container(container)
+        _retro_rec = (ctx.retros_cache.get(
+            self.retros.retro_key(rel_file, fn_name, container), {}) or {})
+        _poisoned_retro = ctx.retro_gate.record(judge_guidance(
+            _retro_rec.get("guidance", ""), snapshot,
+            anchor_types=_anchor_types)) is RetroGateVerdict.RETIRED
+        if _poisoned_retro:
+            self.tel.log(f"  [phase-c/per-fn] {rel_file}::{fn_name} "
+                         f"[{container}]: retro guidance contradicts the "
+                         "current layout — guidance withheld, exhaustion not "
+                         "honoured (layout-contradicted).")
+        # …and a conviction earned in ANOTHER context (other cluster's layout,
+        # the absolute acceptance gate, the pre-group route set) is proof of
+        # nothing here, whatever its guidance says.
+        _provenance = RetroProvenance.current(ctx.cluster_name, snapshot)
+        _stale_conviction = (bool(_retro_rec.get("fully_exhausted"))
+                             and not conviction_is_current(_retro_rec, _provenance))
+        if _stale_conviction:
+            self.tel.log(f"  [phase-c/per-fn] {rel_file}::{fn_name} "
+                         f"[{container}]: exhaustion verdict was earned in a "
+                         "different context — not honoured "
+                         "(retro-stale-provenance).")
+        if (not _crash_evidence and not _poisoned_retro and not _stale_conviction
+                and self.retros.is_fn_fully_exhausted(
+                    ctx.retros_cache, rel_file, fn_name, container)):
             self.tel.log(f"  [phase-c/per-fn] {idx}/{ctx.total} skipped "
                          f"{rel_file}::{fn_name} [{container}] — fully exhausted "
                          "across iters (retrospective marked GENUINELY_HARD/"
@@ -107,11 +149,6 @@ class FillOneFn:
             })
             return fill_skip(rec, attempts)
         self.tel.check_stop(f"per-fn pass {ctx.pass_n} fn {fn_name}")
-        file_path = ctx.target_src_dir / rel_file
-        try:
-            snapshot = file_path.read_text(encoding="utf-8")
-        except Exception:
-            return fill_skip(rec, attempts)
         # Resolve current offsets — file may have been modified by prior
         # fills in this pass, shifting byte positions. Re-enumerate to
         # find this specific record's current location.
@@ -299,10 +336,15 @@ class FillOneFn:
                         container=container, types=_types_section_eff,
                         invariants=ctx.invariants_section,
                         # FR-024: prior retrospective guidance — start from "what to
-                        # try instead" rather than naive retry-with-errors.
-                        retrospective_guidance=(ctx.retros_cache.get(
-                            self.retros.retro_key(rel_file, fn_name, container),
-                            {}).get("guidance", "")),
+                        # try instead" rather than naive retry-with-errors. Judged
+                        # against THIS attempt's file text: the store is shared by
+                        # clusters with different private layouts, so guidance that
+                        # names a field this layout lacks is withheld, not shown.
+                        retrospective_guidance=layout_safe_guidance(
+                            (ctx.retros_cache.get(
+                                self.retros.retro_key(rel_file, fn_name, container),
+                                {}) or {}).get("guidance", ""), cur_text,
+                            anchor_types=_anchor_types),
                         # FR-024 fix 3: hoist already-filled sibling fn impls (same
                         # name, different container) — best target-body source.
                         siblings=self.prompt.collect_sibling_filled_bodies(
@@ -648,7 +690,11 @@ class FillOneFn:
                 _prior = _retros.get(_retro_k, {})
                 _prior_count = int(_prior.get("retrospective_count", 0))
                 _prior_best = _prior.get("best_error_count")
-                _prior_guidance = _prior.get("guidance", "")
+                # The diagnosis is asked to build ON the prior lesson — a lesson
+                # this layout disproves would just be restated in the new one.
+                _prior_guidance = layout_safe_guidance(
+                    _prior.get("guidance", ""), snapshot,
+                    anchor_types=_anchor_types)
                 _retro = self.retros.diagnose(
                     fn_name=fn_name, sig_text=sig_text,
                     container=container, file_rel=rel_file,
@@ -706,7 +752,10 @@ class FillOneFn:
                             or not _improved
                         )
                     _new_count = _prior_count + 1
-                    _retros[_retro_k] = {
+                    # Stamped with the context it was earned in: the next
+                    # reader honours the verdict only where that context still
+                    # holds (same cluster, layout, gate and route set).
+                    _retros[_retro_k] = _provenance.stamp({
                         "category": _retro.get("category", ""),
                         "guidance": _retro.get("guidance", ""),
                         "signal": _signal,
@@ -715,7 +764,7 @@ class FillOneFn:
                         "best_error_count": _new_best,
                         "fully_exhausted": _full_exhaust,
                         "last_error_preview": (error_excerpt or "")[:240],
-                    }
+                    })
                     self.retros.save(ctx.project_dir, _retros)
                     # Make the fresh guidance visible to this fn's OWN next
                     # round (the fix prompt reads ctx.retros_cache) and to

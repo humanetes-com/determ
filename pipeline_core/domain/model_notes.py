@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import hashlib
 from collections import Counter
+from enum import Enum
 from pathlib import Path
 
+from .rust_lex import code_mask
 from .rust_scan import item_names
 from .test_results import (
     camelcase_type_tokens,
@@ -112,25 +114,76 @@ def _ident_at(text: str, i: int) -> str:
     return text[i:j]
 
 
+def _tuple_positions(file_text: str, i: int) -> frozenset[str]:
+    """Positional field names of the tuple struct whose ``(`` starts at ``i``:
+    ``struct X(A, B);`` → ``{"0", "1"}``. A tuple struct HAS fields, they are
+    just numbered — so ``self.0`` is a valid claim against it and ``self.name``
+    is not, which is exactly the discrimination the sieve needs."""
+    n = len(file_text)
+    depth = angle = fields = 0
+    filled = False
+    while i < n:
+        two = file_text[i:i + 2]
+        if two == "//":
+            j = file_text.find("\n", i)
+            i = n if j == -1 else j + 1
+            continue
+        if two == "/*":
+            j = file_text.find("*/", i + 2)
+            i = n if j == -1 else j + 2
+            continue
+        ch = file_text[i]
+        if ch in "([":
+            # a bracket inside the outer parens is field CONTENT too — an
+            # array/tuple-typed field like `([u8; 4], …)` must count
+            filled = filled or depth > 0
+            depth += 1
+        elif ch in ")]":
+            depth -= 1
+            if depth == 0:
+                break
+        elif ch == "<":
+            angle += 1
+        elif ch == ">" and angle and file_text[i - 1] != "-":  # not `->`
+            angle -= 1
+        elif ch == "," and depth == 1 and angle == 0:
+            fields += filled
+            filled = False
+        elif depth == 1 and not ch.isspace():
+            filled = True
+        i += 1
+    return frozenset(str(k) for k in range(fields + filled))
+
+
 def struct_fields(file_text: str, type_name: str) -> frozenset[str] | None:
-    """Named fields of ``struct type_name`` as declared in ``file_text``, or
-    ``None`` when no braced struct of that exact name is declared there
-    (absent, tuple/unit struct) — ``None`` means "no evidence", callers keep
+    """Field names of ``struct type_name`` as declared in ``file_text`` — named
+    fields for a braced struct, positional (``"0"``, ``"1"``, …) for a tuple
+    struct — or ``None`` when no struct of that exact name is declared there
+    (absent, or a unit struct): ``None`` means "no evidence", callers keep
     notes in doubt.
 
-    Char scan, comment/string aware: a field name is the identifier ending at
-    a ``:`` at brace depth 1 (``::`` path separators excluded; attribute args
-    and generic bounds carry their colons inside ``[]``/``<>`` nesting or as
-    ``=`` bindings, so they cannot false-hit at depth 1)."""
+    Char scan, comment/string aware — including the ``struct NAME`` anchor
+    itself: an annotated-stub comment quoting a failed attempt (or a doc
+    example) can contain a plain ``struct NAME { … }`` declaration, and
+    anchoring there would read a phantom layout. A field name is the
+    identifier ending at a ``:`` at brace depth 1 (``::`` path separators
+    excluded; attribute args and generic bounds carry their colons inside
+    ``[]``/``<>`` nesting or as ``=`` bindings, so they cannot false-hit at
+    depth 1)."""
+    mask = code_mask(file_text)
+    needle = f"struct {type_name}"
     idx = 0
     while True:
-        idx = file_text.find(f"struct {type_name}", idx)
+        idx = file_text.find(needle, idx)
         if idx == -1:
             return None
-        end = idx + len(f"struct {type_name}")
+        end = idx + len(needle)
+        prv = file_text[idx - 1:idx]
         nxt = file_text[end:end + 1]
-        if not nxt or not (nxt.isalnum() or nxt == "_"):
-            break  # exact name, not a prefix of a longer identifier
+        if (not mask[idx]
+                and (not prv or not (prv.isalnum() or prv == "_"))
+                and (not nxt or not (nxt.isalnum() or nxt == "_"))):
+            break  # code position, exact name, not part of a longer identifier
         idx = end
     n = len(file_text)
     i = end
@@ -144,8 +197,10 @@ def struct_fields(file_text: str, type_name: str) -> frozenset[str] | None:
         elif angle == 0:
             if ch == "{":
                 break
-            if ch in ";(":
-                return None  # unit or tuple struct: no named fields
+            if ch == "(":
+                return _tuple_positions(file_text, i)
+            if ch == ";":
+                return None  # unit struct: no fields to judge a claim against
         i += 1
     if i >= n:
         return None
@@ -189,18 +244,31 @@ def struct_fields(file_text: str, type_name: str) -> frozenset[str] | None:
     return frozenset(fields)
 
 
+def _digits_at(text: str, i: int) -> str:
+    """The digit run starting at ``i`` (empty when none) — a tuple-field index."""
+    j = i
+    while j < len(text) and text[j].isdigit():
+        j += 1
+    return text[i:j]
+
+
 def _field_claims(note: str, struct_names: set[str]) -> frozenset[str]:
     """Field names the note claims to exist, from three concrete shapes:
-    ``self.name`` access (method calls ``self.name()`` excluded),
+    ``self.name`` / ``self.0`` access (method calls ``self.name()`` excluded),
     ``field `name``` / ```name` field`` prose, and ``TypeName { name, … }``
-    struct literals for the given struct names."""
+    struct literals for the given struct names.
+
+    Tuple indices count as claims because they are how a note recommends a
+    tuple layout: guidance reading "replace `_object` with `self.0`" against a
+    struct with NAMED fields is a field-name lie the same way ``self._object``
+    is against a struct without it."""
     claims: set[str] = set()
     start = 0
     while True:
         i = note.find("self.", start)
         if i == -1:
             break
-        name = _ident_at(note, i + 5)
+        name = _ident_at(note, i + 5) or _digits_at(note, i + 5)
         if name and note[i + 5 + len(name):i + 6 + len(name)] != "(":
             claims.add(name)
         start = i + 5
@@ -255,10 +323,63 @@ def _field_claims(note: str, struct_names: set[str]) -> frozenset[str]:
     return frozenset(claims)
 
 
-def layout_contradicted_notes(notes: list[str], file_text: str) -> list[str]:
+class LayoutJudgement(Enum):
+    """Outcome of checking one piece of persisted model-facing text against the
+    layout of the file being compiled. ``UNANCHORED`` is not "fine" — it is
+    "unjudgeable": nothing in the text ties it to a struct declared here."""
+    UNANCHORED = "unanchored"
+    CONSISTENT = "consistent"
+    CONTRADICTED = "contradicted"
+
+
+def judge_note_against_layout(
+    note: str, file_text: str, *,
+    anchor_types: frozenset[str] = frozenset(),
+    cache: dict[str, frozenset[str] | None] | None = None,
+) -> LayoutJudgement:
+    """Judge one note/guidance string against the structs declared in
+    ``file_text``.
+
+    Anchoring: the structs the prose NAMES decide the field vocabulary. When it
+    names none that this file declares, ``anchor_types`` (the self type of the
+    impl the text was earned on) supplies it instead — without that fallback,
+    text like "change the body to ``self._object.provide(request)``" carries a
+    field claim no sieve can place, and stays injected forever."""
+    if not note or not file_text:
+        return LayoutJudgement.UNANCHORED
+    cache = {} if cache is None else cache
+
+    def fields_of(name: str) -> frozenset[str] | None:
+        if name not in cache:
+            cache[name] = struct_fields(file_text, name)
+        return cache[name]
+
+    named: dict[str, frozenset[str]] = {}
+    for tok in camelcase_type_tokens(note):
+        f = fields_of(tok.split("<", 1)[0])
+        if f is not None:
+            named[tok.split("<", 1)[0]] = f
+    if not named:
+        for anchor in anchor_types:
+            f = fields_of(anchor)
+            if f is not None:
+                named[anchor] = f
+    if not named:
+        return LayoutJudgement.UNANCHORED
+    known: frozenset[str] = frozenset().union(*named.values())
+    if any(c not in known for c in _field_claims(note, set(named))):
+        return LayoutJudgement.CONTRADICTED
+    return LayoutJudgement.CONSISTENT
+
+
+def layout_contradicted_notes(
+    notes: list[str], file_text: str, *,
+    anchor_types: frozenset[str] = frozenset(),
+) -> list[str]:
     """Notes claiming a field that exists on none of the structs the note
-    names, judged against the structs actually declared in ``file_text`` (the
-    current spliced layout for the file being filled).
+    names (or, failing that, on none of ``anchor_types``), judged against the
+    structs actually declared in ``file_text`` (the current spliced layout for
+    the file being filled).
 
     Observed live: a note teaching ``self._object`` against a re-authored
     layout whose field was ``error: E`` steered every attempt into E0609 on
@@ -268,26 +389,44 @@ def layout_contradicted_notes(notes: list[str], file_text: str) -> list[str]:
     Bias to retire: claims inside WRONG-example fragments count too — losing
     a true-but-redundant warning is cheap (the struct definition is already
     visible in the prompt), keeping a false recommendation poisons every
-    subsequent attempt."""
+    subsequent attempt. Same bias accepted for the anchor fallback: guidance
+    that names a sibling struct while claiming a field of its OWN type is
+    retired (its claim is judged against the named struct), because a wrong
+    retirement costs a few attempts and a wrong retention cost a plateau."""
     if not notes or not file_text:
         return []
-    out: list[str] = []
     cache: dict[str, frozenset[str] | None] = {}
-    for note in notes:
-        named: dict[str, frozenset[str]] = {}
-        for tok in camelcase_type_tokens(note):
-            bare = tok.split("<", 1)[0]
-            if bare not in cache:
-                cache[bare] = struct_fields(file_text, bare)
-            f = cache[bare]
-            if f is not None:
-                named[bare] = f
-        if not named:
-            continue
-        known: frozenset[str] = frozenset().union(*named.values())
-        if any(c not in known for c in _field_claims(note, set(named))):
-            out.append(note)
-    return out
+    return [n for n in notes
+            if judge_note_against_layout(n, file_text, anchor_types=anchor_types,
+                                         cache=cache)
+            is LayoutJudgement.CONTRADICTED]
+
+
+def guidance_contradicts_layout(
+    guidance: str, file_text: str, *,
+    anchor_types: frozenset[str] = frozenset(),
+) -> bool:
+    """True when a stored retrospective's guidance claims a field that exists
+    on none of the structs it names, judged against ``file_text``.
+
+    Retrospectives are keyed by (file, fn, container) with NO cluster, so one
+    store serves clusters whose private layouts differ; a guidance string that
+    is correct against one cluster's layout is a field-name lie against the
+    other's, and it is injected verbatim into every fix prompt. Judging it
+    against the text of the file actually being compiled makes it correct per
+    (cluster, bake) by construction, without mutating the shared store."""
+    return judge_note_against_layout(
+        guidance, file_text, anchor_types=anchor_types,
+    ) is LayoutJudgement.CONTRADICTED
+
+
+def layout_safe_guidance(
+    guidance: str, file_text: str, *,
+    anchor_types: frozenset[str] = frozenset(),
+) -> str:
+    """``guidance`` unless it contradicts the current layout, else ``""``."""
+    return "" if guidance_contradicts_layout(
+        guidance, file_text, anchor_types=anchor_types) else guidance
 
 
 def render_with_notes(fr_text: str, notes: list[str]) -> str:

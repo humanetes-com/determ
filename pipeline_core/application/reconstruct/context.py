@@ -4,13 +4,14 @@
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.cfg import CfgSet
 from pipeline_core.domain.models import FillResult, Frontier, ImplBlock, Stub
+from pipeline_core.domain.retro_gate import RetroGateTally
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +50,11 @@ class PerFnPassCtx:
     # CRASH_EVIDENCE prompt section and overrides the fully-exhausted skip
     # (a localized crash is evidence prior attempts never saw).
     crash_evidence: dict[Any, str] | None = None
+    # Sieve counters for this pass (shared, mutated by the workers): how many
+    # stored guidance strings were honoured / retired / unjudgeable. Logged
+    # once per pass so "retires everything" and "retires nothing" are
+    # distinguishable — both look like silence in per-unit lines alone.
+    retro_gate: RetroGateTally = field(default_factory=RetroGateTally)
 
 
 def fill_skip(rec: Stub, attempts: int) -> FillResult:

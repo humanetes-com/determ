@@ -17,6 +17,7 @@ from pipeline_core.domain.rust_scan import (
     mod_decls,
     module_use_imports,
     rust_code_fences,
+    struct_names,
 )
 
 _OLD_SYMBOL_RE = re.compile(r'\b(?:fn|struct|enum|trait|type|const)\s+([A-Za-z_]\w*)')
@@ -460,3 +461,29 @@ def test_named_fn_decl_start_matches_regex():
                              r"(?:unsafe\s+)?(?:const\s+)?fn\s+" + re.escape(nm) + r"\b", re.M)
             m = pat.search(t)
             assert named_fn_decl_start(t, nm) == (m.start() if m else None), (t, nm)
+
+
+def test_struct_names_skip_comments_strings_and_fn_bodies():
+    text = (
+        "// struct Fake { a: u8 }\n"
+        "/// struct DocFake;\n"
+        'const S: &str = "struct InString";\n'
+        "struct Real { x: u8 }\n"
+        "fn f() { struct Local; let _ = S; }\n"
+        "struct AfterFn;\n"
+    )
+    assert struct_names(text) == ["Real", "AfterFn"]
+
+
+def test_struct_names_fn_pointer_field_does_not_swallow_siblings():
+    assert struct_names(
+        "struct A { f: fn(u32) }\nstruct B { x: u8 }\n") == ["A", "B"]
+
+
+def test_struct_names_bodyless_trait_fn_and_impl_methods():
+    text = (
+        "trait T { fn g(&self); }\n"
+        "impl X { fn a(&self) { let y = 1; } fn b(&self) {} }\n"
+        "struct C;\n"
+    )
+    assert struct_names(text) == ["C"]

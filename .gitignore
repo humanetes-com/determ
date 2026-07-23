@@ -11,6 +11,7 @@ tmp
 handover/
 handover.md
 *.md
+CLAUDE.md~
 previous_handovers.md
 functional_requirements_*.md
 failure_log.md

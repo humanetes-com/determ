@@ -19,7 +19,8 @@ from pipeline_core.log import emit, log
 
 __all__ = [
     "canon_container", "is_fn_fully_exhausted", "load_retrospectives",
-    "migrate_confounded_retros", "reset_exhaustion_flags", "retro_key",
+    "migrate_absolute_gate_retros", "migrate_confounded_retros",
+    "reset_exhaustion_flags", "retro_key",
     "retrospectives_path", "save_retrospectives",
 ]
 
@@ -192,3 +193,46 @@ def migrate_confounded_retros(project_dir: Path) -> tuple[int, int]:
         "migration": _CONFOUND_MIGRATION,
         "flags_cleared": cleared, "guidance_retired": retired})
     return (cleared, retired)
+
+
+_GATE_MIGRATION = "comparative_gate_2026_07"
+
+
+def migrate_absolute_gate_retros(project_dir: Path) -> tuple[int, int]:
+    """One-time migration, armed when fill acceptance stopped being ABSOLUTE.
+
+    Every `fully_exhausted` flag on disk was earned under the old rules: a
+    joint fill was reverted unless it made a unit PERFECT (a strict improvement
+    was thrown away), files over the per-file fn cap were skipped whole instead
+    of being partitioned into groups, and the prompts that produced those
+    attempts still carried layout-contradicted notes and guidance. A verdict of
+    "this unit is hard" drawn from those attempts counts no fair sample of the
+    current engine, so it convicts nothing — clear the flags and the
+    reset budgets and let each unit earn a verdict again.
+
+    Guidance is KEPT: whether a lesson still applies is judged per attempt
+    against the layout being compiled (domain/retro_gate), not by wiping the
+    shared store — the same string is true for the other cluster's layout.
+    Returns (flags_cleared, budgets_cleared)."""
+    retros = load_retrospectives(project_dir)
+    done = retros.get("__migrations__")
+    if isinstance(done, list) and _GATE_MIGRATION in done:
+        return (0, 0)
+    cleared = budgets = 0
+    for key, rec in retros.items():
+        if key == "__migrations__" or not isinstance(rec, dict):
+            continue
+        if rec.get("fully_exhausted"):
+            rec["fully_exhausted"] = False
+            cleared += 1
+        if rec.get("reset_attempts"):
+            rec["reset_attempts"] = 0
+            budgets += 1
+    migrations = retros.setdefault("__migrations__", [])
+    if isinstance(migrations, list):
+        migrations.append(_GATE_MIGRATION)
+    save_retrospectives(project_dir, retros)
+    emit("phase_c.retros.migrated", data={
+        "migration": _GATE_MIGRATION,
+        "flags_cleared": cleared, "budgets_cleared": budgets})
+    return (cleared, budgets)

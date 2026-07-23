@@ -13,6 +13,8 @@ from __future__ import annotations
 import string
 from collections.abc import Sequence
 
+from .rust_lex import code_mask
+
 _ITEM_KEYWORDS = frozenset({"fn", "struct", "enum", "trait", "type", "const"})
 _IDENT_START = frozenset(string.ascii_letters + "_")
 _IDENT_CHARS = _IDENT_START | frozenset(string.digits)
@@ -230,6 +232,83 @@ def item_names(text: str) -> list[str]:
             if name:
                 names.append(name)
     return names
+
+
+def struct_names(text: str) -> list[str]:
+    """Names declared by ``struct NAME`` items, in declaration order.
+
+    Comment/string aware (``code_mask``) and fn-body blind: the layout
+    fingerprint is taken over this set and must survive body splices — a
+    ``struct`` in a doc example, in an annotated-stub comment (failed
+    attempts are preserved as comments, cargo error text included), or a
+    fn-local helper would otherwise change the fingerprint every time a
+    sibling body lands, silently voiding the file's convictions."""
+    mask = code_mask(text)
+    names: list[str] = []
+    n = len(text)
+    i = 0
+    while i < n:
+        if mask[i] or text[i] not in _IDENT_START:
+            i += 1
+            continue
+        j = i
+        while j < n and not mask[j] and text[j] in _IDENT_CHARS:
+            j += 1
+        word = text[i:j]
+        if word == "struct":
+            k = j
+            while k < n and (mask[k] or text[k].isspace()):
+                k += 1
+            s = k
+            while k < n and not mask[k] and text[k] in _IDENT_CHARS:
+                k += 1
+            if k > s and text[s] in _IDENT_START:
+                names.append(text[s:k])
+            i = k
+        elif word == "fn":
+            i = _skip_fn_item(text, mask, j)
+        else:
+            i = j
+    return names
+
+
+def _skip_fn_item(text: str, mask: Sequence[bool], i: int) -> int:
+    """Index just past the fn whose ``fn`` keyword ends at ``i``: past its
+    body's matching ``}``, or past the ``;`` of a bodyless declaration
+    (trait method, extern). A ``}`` at bracket depth 0 before either means
+    this ``fn`` was a fn-POINTER type inside some braced item
+    (``f: fn(u32)``) — stop there without consuming, so items after the
+    enclosing brace stay visible to the caller's scan."""
+    n = len(text)
+    group = 0
+    while i < n:
+        if mask[i]:
+            i += 1
+            continue
+        ch = text[i]
+        if ch in "([":
+            group += 1
+        elif ch in ")]":
+            group -= 1
+        elif group <= 0:
+            if ch == ";":
+                return i + 1
+            if ch == "}":
+                return i
+            if ch == "{":
+                depth = 0
+                while i < n:
+                    if not mask[i]:
+                        if text[i] == "{":
+                            depth += 1
+                        elif text[i] == "}":
+                            depth -= 1
+                            if depth == 0:
+                                return i + 1
+                    i += 1
+                return n
+        i += 1
+    return n
 
 
 def mod_decls(text: str) -> list[str]:

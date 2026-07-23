@@ -25,6 +25,7 @@ from pipeline_core.domain.models import (
     Stub,
 )
 from pipeline_core.domain.reconstruction import SpliceOutcome
+from pipeline_core.domain.retro_gate import RetroProvenance
 
 
 class FakeFill:
@@ -182,6 +183,92 @@ def test_fill_one_fully_exhausted_skips(tmp_path: Path) -> None:
     res = _fill_one(fake).run(1, Stub(file="lib.rs", fn_name="answer"), ctx=_ctx(ws))
     assert not res.filled and res.attempts == 0
     assert "phase_c.fn.fill.skip" in fake.events
+
+
+def test_fill_one_exhaustion_not_honoured_when_guidance_contradicts_layout(
+        tmp_path: Path) -> None:
+    # A conviction reached while the prompt taught a field the current layout
+    # does not have counted no fair attempt: the stored guidance says `_object`
+    # but the file declares `error`, so the skip must not fire. (Live: one
+    # retro store serves two clusters whose private layouts differ; the shared
+    # guidance held every unit of the plateau file permanently skipped.)
+    ws = _mk_ws(tmp_path)
+    (ws / "src" / "lib.rs").write_text(
+        "struct ErrorImpl { vtable: u8, error: u8 }\n"
+        "pub fn answer() {\n unimplemented!()\n}\n")
+    fake = FakeFill(exhausted=True)
+    ctx = _ctx(ws)
+    ctx.retros_cache["k"] = {
+        "fully_exhausted": True,
+        "guidance": "Access the wrapped error via the `_object` field of "
+                    "ErrorImpl, never `error`.",
+    }
+    res = _fill_one(fake).run(1, Stub(file="lib.rs", fn_name="answer"), ctx=ctx)
+    assert "phase_c.fn.fill.skip" not in fake.events
+    assert any("layout-contradicted" in m for m in fake.logs)
+    assert res is not None
+
+
+def test_fill_one_exhaustion_honoured_when_guidance_matches_layout(
+        tmp_path: Path) -> None:
+    # The override is narrow: guidance consistent with the declared fields is
+    # a genuine conviction and still skips.
+    ws = _mk_ws(tmp_path)
+    (ws / "src" / "lib.rs").write_text(
+        "struct ErrorImpl { vtable: u8, error: u8 }\n"
+        "pub fn answer() {\n unimplemented!()\n}\n")
+    fake = FakeFill(exhausted=True)
+    ctx = _ctx(ws)
+    ctx.retros_cache["k"] = RetroProvenance.current(
+        "t", (ws / "src" / "lib.rs").read_text()).stamp({
+            "fully_exhausted": True,
+            "guidance": "Read the wrapped error from the `error` field of "
+                        "ErrorImpl.",
+        })
+    res = _fill_one(fake).run(1, Stub(file="lib.rs", fn_name="answer"), ctx=ctx)
+    assert not res.filled and res.attempts == 0
+    assert "phase_c.fn.fill.skip" in fake.events
+
+
+def test_fill_one_exhaustion_not_honoured_when_earned_elsewhere(
+        tmp_path: Path) -> None:
+    # Same layout-consistent guidance, but the verdict was earned on the OTHER
+    # cluster — whose private layout this file does not share. A conviction is
+    # proof of hardness only for the context that produced it; unstamped and
+    # foreign-stamped records convict nothing.
+    ws = _mk_ws(tmp_path)
+    (ws / "src" / "lib.rs").write_text(
+        "struct ErrorImpl { vtable: u8, error: u8 }\n"
+        "pub fn answer() {\n unimplemented!()\n}\n")
+    fake = FakeFill(exhausted=True)
+    ctx = _ctx(ws)
+    ctx.retros_cache["k"] = RetroProvenance.current(
+        "other-cluster", (ws / "src" / "lib.rs").read_text()).stamp({
+            "fully_exhausted": True,
+            "guidance": "Read the wrapped error from the `error` field of "
+                        "ErrorImpl.",
+        })
+    _fill_one(fake).run(1, Stub(file="lib.rs", fn_name="answer"), ctx=ctx)
+    assert "phase_c.fn.fill.skip" not in fake.events
+    assert any("retro-stale-provenance" in m for m in fake.logs)
+
+
+def test_fill_one_tallies_sieve_verdicts_for_the_pass(tmp_path: Path) -> None:
+    # One line per batch beats one line per unit: without the denominator,
+    # "the sieve retires everything" and "it retires nothing" both read as
+    # silence in the log.
+    ws = _mk_ws(tmp_path)
+    (ws / "src" / "lib.rs").write_text(
+        "struct ErrorImpl { vtable: u8, error: u8 }\n"
+        "pub fn answer() {\n unimplemented!()\n}\n")
+    ctx = _ctx(ws)
+    ctx.retros_cache["k"] = {
+        "guidance": "Access the wrapped error via the `_object` field of "
+                    "ErrorImpl."}
+    _fill_one(FakeFill(exhausted=True)).run(
+        1, Stub(file="lib.rs", fn_name="answer"), ctx=ctx)
+    assert (ctx.retro_gate.retired, ctx.retro_gate.honoured) == (1, 0)
+    assert "retired=1" in ctx.retro_gate.render()
 
 
 def test_fill_one_missing_file_skips(tmp_path: Path) -> None:

@@ -12,6 +12,7 @@ import queue as _queue_mod
 import threading
 import time
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,9 @@ from pipeline_core.domain.impl_routing import (
     norm_src_rel as _norm_src_rel,
 )
 from pipeline_core.domain.llm_output import extract_fn_bodies
+from pipeline_core.domain.model_notes import (
+    layout_safe_guidance as _layout_safe_guidance,
+)
 from pipeline_core.domain.models import (
     BuildCluster,
     ClusterFillResult,
@@ -50,6 +54,14 @@ from pipeline_core.domain.models import (
     ImplBlock,
 )
 from pipeline_core.domain.refine import FloorStall
+from pipeline_core.domain.retro_gate import (
+    RetroGateTally,
+    RetroGateVerdict,
+    RetroProvenance,
+    anchor_types_for_container,
+    conviction_is_current,
+    judge_guidance,
+)
 from pipeline_core.domain.rust_idents import canon_container, is_trait_impl_container
 from pipeline_core.domain.std_api_sigs import std_api_def
 from pipeline_core.domain.test_report import (
@@ -214,6 +226,8 @@ def fill_impl_blocks(
     _test_regression_baseline = deps.test_regression_baseline
     _test_regression_gate = deps.test_regression_gate
     ask = deps.ask
+    # Sieve counters for this whole impl-fill batch (workers share it).
+    _retro_gate = RetroGateTally()
     _FAILED_BODY_CAP = deps.failed_body_cap
     _PER_FN_FIX_HARD_CAP = deps.per_fn_fix_hard_cap
     _PER_IMPL_MAX_STUBS = deps.per_impl_max_stubs
@@ -751,10 +765,38 @@ def fill_impl_blocks(
         _block_crash_evidence = "\n\n".join(_crash_txts)
         # Honor cross-iter exhaustion — if a prior retrospective marked
         # this block GENUINELY_HARD it's skipped. A crash-implicated block is
-        # NEVER skipped: the crash frames are new information.
+        # NEVER skipped: the crash frames are new information. Nor is a block
+        # whose own guidance contradicts the current layout: those attempts
+        # were spent chasing a field this layout does not have, so the
+        # conviction counted no fair sample.
+        _cur_text = ""
+        with suppress(Exception):
+            _cur_text = file_path.read_text(encoding="utf-8")
+        _block_anchors = anchor_types_for_container(block.container)
+        _retro_rec = retros_cache.get(
+            _retro_key(block.file, "*impl*", block.container), {}) or {}
+        _poisoned_retro = _retro_gate.record(judge_guidance(
+            _retro_rec.get("guidance", ""), _cur_text,
+            anchor_types=_block_anchors)) is RetroGateVerdict.RETIRED
+        if _poisoned_retro:
+            _log(f"  [phase-c/impl] {block_id}: retro guidance contradicts the "
+                 "current layout — guidance withheld, exhaustion not honoured "
+                 "(layout-contradicted).")
+        # A verdict earned in another context (other cluster's layout, the
+        # absolute acceptance gate, the pre-group route set) sampled a
+        # different problem — it cannot convict this block.
+        _stale_conviction = (
+            bool(_retro_rec.get("fully_exhausted"))
+            and not conviction_is_current(
+                _retro_rec, RetroProvenance.current(cluster_name, _cur_text)))
+        if _stale_conviction:
+            _log(f"  [phase-c/impl] {block_id}: exhaustion verdict was earned "
+                 "in a different context — not honoured "
+                 "(retro-stale-provenance).")
         if (_is_fn_fully_exhausted(retros_cache, block.file, "*impl*",
                                    block.container)
-                and not _block_crash_evidence):
+                and not _block_crash_evidence and not _poisoned_retro
+                and not _stale_conviction):
             _log(f"  [phase-c/impl] {block_id}: skipped (prior retro "
                  "marked exhausted).")
             return
@@ -884,9 +926,14 @@ def fill_impl_blocks(
             frozenset([*_fill_target_names, *_container_names(block.container),
                        Path(block.file).stem]),
             cap=int(os.getenv("BLUEPRINT_SLICE_CAP", "2500")))
-        prior_retro = retros_cache.get(
+        # Judged against THIS block's file text — the retro store is shared by
+        # clusters with different private layouts, so guidance naming a field
+        # this layout lacks is withheld rather than shown (it would steer every
+        # attempt into the same E0609/E0560 on the field that does not exist).
+        prior_retro = _layout_safe_guidance(retros_cache.get(
             _retro_key(block.file, "*impl*", block.container), {}
-        ).get("guidance", "")
+        ).get("guidance", ""), snapshot,
+            anchor_types=anchor_types_for_container(block.container))
         notes_section = ""
         if fr_path is not None:
             notes_section = _filter_model_notes_for_prompt(
@@ -1352,7 +1399,9 @@ def fill_impl_blocks(
                     last_body=last_response[:_FAILED_BODY_CAP],
                     error_excerpt=last_error_excerpt,
                     fix_attempts=fix_attempt,
-                    prior_retrospective=prior.get("guidance", ""),
+                    prior_retrospective=_layout_safe_guidance(
+                        prior.get("guidance", ""), snapshot,
+                        anchor_types=anchor_types_for_container(block.container)),
                 )
                 _signal = retro.get("signal", "")
                 if _signal in ("llm_error", "empty_response"):
@@ -1385,8 +1434,13 @@ def fill_impl_blocks(
                 # save-after-write race could have one thread's
                 # `_save_retrospectives` persist a snapshot taken before the
                 # other thread's key landed, silently losing that entry.
+                # Stamped with the context it was earned in: a later reader
+                # honours the verdict only where that context still holds.
+                _prov = RetroProvenance.current(cluster_name, snapshot)
                 with _counters_lock:
-                    retros_cache[_retro_key(block.file, "*impl*", block.container)] = {
+                    retros_cache[
+                        _retro_key(block.file, "*impl*", block.container)
+                    ] = _prov.stamp({
                         "category": retro.get("category", ""),
                         "guidance": retro.get("guidance", ""),
                         "signal": _signal,
@@ -1395,7 +1449,7 @@ def fill_impl_blocks(
                         "best_error_count": new_best,
                         "fully_exhausted": full_exhaust,
                         "last_error_preview": last_error_excerpt[:240],
-                    }
+                    })
                     _save_retrospectives(project_dir, retros_cache)
                 _retry_informed = not full_exhaust and not _downstream
             except Exception as _re:
@@ -1404,9 +1458,10 @@ def fill_impl_blocks(
                 break
             # Fresh guidance for the next round's prompt (the closure reads
             # this enclosing binding).
-            prior_retro = retros_cache.get(
+            prior_retro = _layout_safe_guidance(retros_cache.get(
                 _retro_key(block.file, "*impl*", block.container), {}
-            ).get("guidance", "")
+            ).get("guidance", ""), snapshot,
+                anchor_types=anchor_types_for_container(block.container))
             _log(f"  [phase-c/impl] {block_id}: retro round {_retro_round} "
                  "kept the error floor improving — re-entering the fix loop "
                  "with the new guidance.")
@@ -1497,6 +1552,8 @@ def fill_impl_blocks(
     else:
         for block in viable_blocks:
             _fill_one_block(block)
+    if _retro_gate.total:
+        _log(f"  [phase-c/impl] cluster {cluster_name}: {_retro_gate.render()}")
     bytes_after = sum(p.stat().st_size for p in target_src_dir.rglob("*.rs"))
     remaining_records = _scan_unimplemented_records_for_cluster(target_src_dir, cluster)
     # None = extractor absent → text-scan fallback; 0 here would make the

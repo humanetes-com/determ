@@ -418,6 +418,10 @@ class PhaseCFillEngine:
                 else:
                     _worker(_work_queue)
 
+            if _pass_ctx.retro_gate.total:
+                self.tel.log(f"  [phase-c/per-fn] pass {pass_n}: "
+                             f"{_pass_ctx.retro_gate.render()}")
+
             # === Per-pass cargo test ===
             # Always run at end of every pass, even when filled_this_pass is empty.
             # Plan 4 — TDD driver runs the cluster test in its OUTER loop; skip when asked.

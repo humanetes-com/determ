@@ -14,6 +14,7 @@ from pathlib import Path
 
 from pipeline_core.adapters.retros import (
     load_retrospectives,
+    migrate_absolute_gate_retros,
     migrate_confounded_retros,
     retro_key,
     retrospectives_path,
@@ -91,6 +92,59 @@ def test_migration_marker_survives_reload(tmp_path: Path) -> None:
 
 def test_migration_on_empty_store_is_noop(tmp_path: Path) -> None:
     assert migrate_confounded_retros(tmp_path) == (0, 0)
+
+
+def test_gate_migration_voids_verdicts_earned_under_the_absolute_gate(
+        tmp_path: Path) -> None:
+    # Every flag on disk was earned when a joint fill had to be PERFECT to be
+    # kept and an over-cap file was skipped whole — no fair sample of the
+    # current engine, so no conviction. Guidance survives: whether a lesson
+    # still applies is judged per attempt against the layout, not by wiping
+    # the store (the same string is true for the other cluster's layout).
+    _store(tmp_path, {
+        _FROM_KEY: {"guidance": "Use array repetition, not uninit_array().",
+                    "fully_exhausted": True, "reset_attempts": 2},
+        _BUF_KEY: {"guidance": "keep me", "fully_exhausted": False},
+    })
+    assert migrate_absolute_gate_retros(tmp_path) == (1, 1)
+    after = load_retrospectives(tmp_path)
+    assert after[_FROM_KEY]["fully_exhausted"] is False
+    assert after[_FROM_KEY]["reset_attempts"] == 0
+    assert "uninit_array" in after[_FROM_KEY]["guidance"]
+    assert after[_BUF_KEY]["guidance"] == "keep me"
+
+
+def test_gate_migration_is_one_shot_and_tagged(tmp_path: Path) -> None:
+    _store(tmp_path, {_FROM_KEY: {"fully_exhausted": True}})
+    assert migrate_absolute_gate_retros(tmp_path) == (1, 0)
+    raw = json.loads(retrospectives_path(tmp_path).read_text(encoding="utf-8"))
+    assert "comparative_gate_2026_07" in raw["__migrations__"]
+    # a verdict re-earned under the CURRENT gate is trustworthy — never recleared
+    recs = load_retrospectives(tmp_path)
+    recs[_FROM_KEY]["fully_exhausted"] = True
+    save_retrospectives(tmp_path, recs)
+    assert migrate_absolute_gate_retros(tmp_path) == (0, 0)
+    assert load_retrospectives(tmp_path)[_FROM_KEY]["fully_exhausted"] is True
+
+
+def test_gate_migration_coexists_with_the_confounded_migration(
+        tmp_path: Path) -> None:
+    # Independent tags: running one must not mark the other as done.
+    _store(tmp_path, {_FROM_KEY: {"fully_exhausted": True, "error_count": 1,
+                                  "guidance": "g",
+                                  "last_error_preview": _COMPILE_PREVIEW}})
+    migrate_confounded_retros(tmp_path)
+    recs = load_retrospectives(tmp_path)
+    recs[_FROM_KEY]["fully_exhausted"] = True
+    save_retrospectives(tmp_path, recs)
+    assert migrate_absolute_gate_retros(tmp_path) == (1, 0)
+    raw = json.loads(retrospectives_path(tmp_path).read_text(encoding="utf-8"))
+    assert set(raw["__migrations__"]) == {
+        "binary_scoped_gate_2026_07", "comparative_gate_2026_07"}
+
+
+def test_gate_migration_on_empty_store_is_noop(tmp_path: Path) -> None:
+    assert migrate_absolute_gate_retros(tmp_path) == (0, 0)
 
 
 def test_rejected_symbols_from_compiler_diagnostics() -> None:

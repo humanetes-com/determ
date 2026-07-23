@@ -195,46 +195,112 @@ def _skip_balanced_angles(text: str, i: int) -> int | None:
 
 
 def impl_self_type(container: str) -> str | None:
-    """Self/target type name of an impl signature: the type after `for` in
-    `impl Trait for X<…>`, else the head type in `impl X<…>` (inherent). Returns the
-    bare type identifier (generics stripped) or None.
+    """Self/target type name of an impl, generics stripped, or ``None``.
 
-    Replaces ``\\bfor\\s+([A-Za-z_]\\w*)`` + ``\\bimpl\\s+(?:<[^>]*>\\s+)?([A-Za-z_]\\w*)``
-    (for-branch first, impl-branch fallback). Byte-equal to the old regexes wherever
-    they matched; additionally a structural fix — BALANCED own-generics so
-    `impl<T: Tr<X>> Foo` resolves to `Foo` (old single-`>` `<[^>]*>` returned ""), and
-    a space-less `impl<T> Foo` resolves (old required `impl\\s+`)."""
-    spans = _word_spans(container)
-    n = len(container)
-    # for-branch: first `for <ident>` (whitespace-gap, ASCII-led name).
-    for idx in range(len(spans) - 1):
-        s, e = spans[idx]
-        if container[s:e] != "for":
-            continue
-        ns, ne = spans[idx + 1]
-        gap = container[e:ns]
-        if gap and gap.isspace() and _is_ascii_ident_start(container[ns]):
-            return container[ns:ne]
-    # impl-branch: `impl [<generics>] <ident>`.
-    for s, e in spans:
-        if container[s:e] != "impl":
-            continue
-        p = e
-        while p < n and container[p].isspace():
-            p += 1
-        if p < n and container[p] == "<":
-            np = _skip_balanced_angles(container, p)
-            if np is None:
-                continue
-            p = np
-            while p < n and container[p].isspace():
-                p += 1
-        if p < n and _is_ascii_ident_start(container[p]):
-            q = p + 1
-            while q < n and (container[q].isalnum() or container[q] == "_"):
-                q += 1
-            return container[p:q]
-    return None
+    Accepts BOTH renderings the pipeline carries: the raw signature
+    (``impl Trait for X<…>``, ``impl X<…>`` inherent) and the canonical
+    whitespace-free key form produced by :func:`canon_container`
+    (``TraitforX<…>``, ``DebugforErrorImpl<E>``) — the retrospectives store keys
+    on the latter, where ``for`` has no surrounding whitespace to split on.
+    Raw text still has the ``for`` KEYWORD's word boundaries, so it is split
+    exactly there (:func:`_raw_for_tail`). The canon form erased them, and a
+    bare substring scan mis-cuts inside idents that merely contain ``for``
+    (``Platform`` → ``m``): a canon ``for`` at angle depth 0 counts as the
+    separator only when what follows can BEGIN a self type — ``&``/``*``/
+    ``(``/``[``, an upper- or underscore-led ident, a primitive (``u8``,
+    ``str`` …) or a glued ``dyn``/``mut`` head (``fordynAny``) — never the
+    lowercase tail of the word it sits in (``Plat·for·m``). The LAST such
+    ``for`` wins: a trait name ending in ``…for`` glues a false candidate to
+    the left of the real separator, never to its right."""
+    words = container.split()
+    if len(words) > 1:
+        tail = _raw_for_tail(words)
+        if tail is not None:
+            joined = "".join(_strip_lifetimes(tail).split())
+            return _leading_type_ident(_drop_orphan_plus(joined)) or None
+    s = canon_container(container)
+    depth = 0
+    cut = -1
+    for i, ch in enumerate(s):
+        if ch == "<":
+            depth += 1
+        elif ch == ">":
+            depth = max(0, depth - 1)
+        elif (depth == 0 and s.startswith("for", i)
+              and _self_type_head(s[i + 3:])):
+            cut = i + 3
+    if cut != -1:
+        s = s[cut:]
+    return _leading_type_ident(s) or None
+
+
+def _raw_for_tail(words: list[str]) -> str | None:
+    """Tokens after the ``for`` keyword of a whitespace-rendered impl header,
+    ``None`` when it has none (inherent impl). Word-exact — an ident that
+    merely CONTAINS ``for`` (``Platform``) and a glued HRTB binder
+    (``for<'a>``) are not the keyword — and angle-depth aware, so a
+    token-spaced binder (``for < 'a >``) inside bounds cannot split; the scan
+    stops at a depth-0 ``where``, past which only bounds live."""
+    depth = 0
+    cut: int | None = None
+    stop = len(words)
+    for k, w in enumerate(words):
+        if depth == 0:
+            if w == "where":
+                stop = k
+                break
+            if w == "for" and k + 1 < len(words):
+                cut = k + 1
+        for i, ch in enumerate(w):
+            if ch == "<":
+                depth += 1
+            elif ch == ">" and depth and (i == 0 or w[i - 1] != "-"):
+                depth -= 1
+    return " ".join(words[cut:stop]) if cut is not None else None
+
+
+_PRIMITIVE_TYPES = frozenset({
+    "bool", "char", "str",
+    "u8", "u16", "u32", "u64", "u128", "usize",
+    "i8", "i16", "i32", "i64", "i128", "isize", "f32", "f64",
+})
+
+
+def _self_type_head(rest: str) -> bool:
+    """Whether ``rest`` (canon text after a candidate ``for``) can begin a
+    self type. The letters continuing a camelCase word never can: they are
+    lowercase and name no primitive (``Plat·for·m`` leaves ``m``)."""
+    if not rest:
+        return False
+    if rest[0] in "&*([":
+        return True
+    j = 0
+    while j < len(rest) and (rest[j].isalnum() or rest[j] == "_"):
+        j += 1
+    head = rest[:j]
+    if not head or head[0].isdigit():
+        return False
+    return (head[0].isupper() or head[0] == "_"
+            or head in _PRIMITIVE_TYPES
+            or (head[:3] in ("dyn", "mut") and head[3:4].isupper()))
+
+
+def _leading_type_ident(s: str) -> str:
+    """Leading identifier of a type rendering (``Vec<T>`` -> ``Vec``, ``&Error``
+    -> ``Error``); canon gluing is undone for ``dyn``/``mut`` heads
+    (``&mutW`` -> ``W``, ``dynAny`` -> ``Any``). Empty when the head is not an
+    identifier."""
+    i = 0
+    while i < len(s) and s[i] in "&*(":
+        i += 1
+    for kw in ("dyn", "mut"):
+        if s.startswith(kw, i) and s[i + 3:i + 4].isupper():
+            i += 3
+    j = i
+    while j < len(s) and (s[j].isalnum() or s[j] == "_"):
+        j += 1
+    name = s[i:j]
+    return name if name and not name[0].isdigit() else ""
 
 
 _CRATE_LINT_KEYWORDS = ("deny", "forbid")

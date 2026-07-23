@@ -179,6 +179,9 @@ from pipeline_core.adapters.retros import (
     load_retrospectives as _retros_load,
 )
 from pipeline_core.adapters.retros import (
+    migrate_absolute_gate_retros as _migrate_absolute_gate_retros,
+)
+from pipeline_core.adapters.retros import (
     migrate_confounded_retros as _migrate_confounded_retros,
 )
 from pipeline_core.adapters.retros import (
@@ -2077,6 +2080,7 @@ def build_app(
             active_test_inventory=active_test_inventory_for_cluster,
             localize_crashes=_localize_crashes,
             migrate_retro_evidence=_migrate_confounded_retros,
+            migrate_retro_gate=_migrate_absolute_gate_retros,
         ),
         impl_fill_deps=ImplFillDeps(
             build_dispatch_family_section=build_dispatch_family_section,

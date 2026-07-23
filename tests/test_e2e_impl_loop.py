@@ -9,10 +9,12 @@ gauge are the REAL engine on a real temp workspace.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pipeline
 from pipeline_core.domain.models import FnRecord, ImplBlock
+from pipeline_core.domain.retro_gate import RetroProvenance
 from tests.harness import (
     diag,
     install_app_seams,
@@ -809,3 +811,91 @@ def test_file_first_default_bound_admits_a_stub_plus_refill_workload(
     monkeypatch.delenv("PHASE_C_FILE_MAX_STUBS", raising=False)
     res = _run(ws)
     assert res.attempts == 1 and res.fns_filled == 2    # route ran
+
+
+# --- exhaustion vs. layout-contradicted guidance -----------------------------
+# The retro store is keyed (file, fn, container) with NO cluster, so one
+# guidance string serves layouts that differ. A block convicted while its own
+# guidance named a field the current layout lacks was never fairly attempted.
+
+def _write_retro(ws: Path, guidance: str, *, cluster: str = "t") -> None:
+    d = ws / ".phase_c_logs"
+    d.mkdir(parents=True, exist_ok=True)
+    # Stamped as if earned here and now: an unstamped verdict is honoured
+    # nowhere (it names no context), which would mask what these pin.
+    rec = RetroProvenance.current(
+        cluster, (ws / "src" / "lib.rs").read_text(encoding="utf-8")).stamp({
+            "category": "API_HALLUCINATION", "guidance": guidance,
+            "fully_exhausted": True, "best_error_count": 3,
+        })
+    (d / "retrospectives.json").write_text(
+        json.dumps({"lib.rs::*impl*::Foo": rec}), encoding="utf-8")
+
+
+def test_impl_exhausted_block_retried_when_guidance_contradicts_layout(
+        monkeypatch, tmp_path):
+    ws = _setup(monkeypatch, tmp_path)
+    _write_retro(ws, "Read the payload from the `_object` field of Foo, "
+                     "never `tag`.")
+    _install_model(monkeypatch, [RESPONSE_BOTH])
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
+    res = _run(ws)
+    assert res.impls_filled == 1 and res.fns_filled == 2
+    assert "unimplemented!()" not in (ws / "src" / "lib.rs").read_text()
+
+
+def test_impl_exhausted_block_still_skipped_when_guidance_matches_layout(
+        monkeypatch, tmp_path):
+    ws = _setup(monkeypatch, tmp_path)
+    _write_retro(ws, "Read the payload from the `tag` field of Foo.")
+    _install_model(monkeypatch, [RESPONSE_BOTH])
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
+    res = _run(ws)
+    assert res.impls_filled == 0 and res.fns_filled == 0
+    assert "unimplemented!()" in (ws / "src" / "lib.rs").read_text()
+
+
+def test_impl_exhausted_block_retried_when_verdict_earned_in_another_cluster(
+        monkeypatch, tmp_path):
+    # Layout-consistent guidance, so the sieve keeps it — but the verdict was
+    # earned on the other cluster, whose private layout this file does not
+    # share. A conviction is evidence only for the context that produced it.
+    ws = _setup(monkeypatch, tmp_path)
+    _write_retro(ws, "Read the payload from the `tag` field of Foo.",
+                 cluster="other")
+    _install_model(monkeypatch, [RESPONSE_BOTH])
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
+    res = _run(ws)
+    assert res.impls_filled == 1 and res.fns_filled == 2
+
+
+def test_impl_exhausted_block_retried_when_layout_moved_under_the_verdict(
+        monkeypatch, tmp_path):
+    # Same cluster, but the private layout was re-authored since the verdict:
+    # the attempts it counted were compiled against a different struct.
+    ws = _setup(monkeypatch, tmp_path)
+    _write_retro(ws, "Read the payload from the `tag` field of Foo.")
+    store = ws / ".phase_c_logs" / "retrospectives.json"
+    recs = json.loads(store.read_text(encoding="utf-8"))
+    recs["lib.rs::*impl*::Foo"]["layout_fp"] = "deadbeef"
+    store.write_text(json.dumps(recs), encoding="utf-8")
+    _install_model(monkeypatch, [RESPONSE_BOTH])
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
+    res = _run(ws)
+    assert res.impls_filled == 1 and res.fns_filled == 2
+
+
+def test_impl_poisoned_guidance_is_withheld_from_the_prompt(
+        monkeypatch, tmp_path):
+    # Retrying is not enough — the same lie must not be re-injected.
+    ws = _setup(monkeypatch, tmp_path)
+    _write_retro(ws, "Read the payload from the `_object` field of Foo.")
+    seen: list[str] = []
+
+    def _capture(*a, **k):
+        seen.append(a[0] if a else k.get("prompt", ""))
+        return RESPONSE_BOTH
+    monkeypatch.setattr(pipeline, "_ask_raw", _capture)
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
+    _run(ws)
+    assert seen and not any("_object" in p for p in seen)

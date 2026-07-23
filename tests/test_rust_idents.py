@@ -374,3 +374,35 @@ def test_canon_fn_name_leaves_a_plain_name_and_an_unparsed_shape_alone():
     assert canon_fn_name("Error: ") == "Error:"
     assert canon_fn_name("Error: 9lives") == "Error: 9lives"
     assert canon_fn_name("Error: root_cause()") == "Error: root_cause()"
+
+
+def test_impl_self_type_embedded_for_is_not_the_keyword():
+    # `for` as a SUBSTRING of an ident (Plat·for·m) must not cut — raw,
+    # inherent, and canon store-key renderings alike.
+    assert impl_self_type("impl Platform") == "Platform"
+    assert impl_self_type("Platform<T>") == "Platform"
+    assert impl_self_type("impl Iterator for PlatformIter") == "PlatformIter"
+    assert impl_self_type("IteratorforPlatformIter") == "PlatformIter"
+    assert impl_self_type("TransformforError") == "Error"
+    # A trait name ending in `…for` glues a false candidate LEFT of the real
+    # separator; the last valid `for` wins.
+    assert impl_self_type("BufforforX") == "X"
+
+
+def test_impl_self_type_canon_type_heads():
+    # Self types a canon `for` may legitimately precede: primitives,
+    # references, glued `dyn`/`mut` heads.
+    assert impl_self_type("Displayforu8") == "u8"
+    assert impl_self_type("impl Display for u8") == "u8"
+    assert impl_self_type("Dereffor&Error") == "Error"
+    assert impl_self_type("StdErrorfordynAny") == "Any"
+    assert impl_self_type("impl StdError for dyn Any") == "Any"
+    assert impl_self_type("impl Write for &mut W") == "W"
+
+
+def test_impl_self_type_token_spaced_and_where():
+    # Extractor token-spaced rendering and where-clause HRTBs.
+    assert impl_self_type(
+        "impl Context < T , E > for Result < T , E >") == "Result"
+    assert impl_self_type(
+        "impl<T> Trait for Foo<T> where T: for<'a> Fn(&'a str)") == "Foo"

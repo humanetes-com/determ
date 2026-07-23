@@ -90,6 +90,10 @@ class PhaseCTddDeps:
     # Clears exhaustion verdicts + retires guidance recorded under the old
     # crash-confounded whole-run gate. None disables.
     migrate_retro_evidence: Callable[..., tuple[int, int]] | None = None
+    # One-time retro gate migration: (project_dir) -> (flags, budgets) cleared.
+    # Voids convictions earned under the pre-comparative acceptance gate and
+    # the pre-group route set. None disables.
+    migrate_retro_gate: Callable[..., tuple[int, int]] | None = None
 
 
 def _log_attribution_gap(
@@ -183,6 +187,15 @@ def run_phase_c_tdd(
                      f"cleared {_mig_cleared} exhaustion record(s), retired "
                      f"{_mig_retired} guidance text(s) written under the "
                      "pre-binary-scoped gate (confounded verdicts).")
+
+    if deps.migrate_retro_gate is not None:
+        _gate_cleared, _gate_budgets = deps.migrate_retro_gate(project_dir)
+        if _gate_cleared or _gate_budgets:
+            deps.log(f"  {tag} [phase-c/tdd] retro gate migration: cleared "
+                     f"{_gate_cleared} exhaustion verdict(s) and "
+                     f"{_gate_budgets} reset budget(s) earned under the "
+                     "pre-comparative acceptance gate (a strict improvement "
+                     "was reverted then) — one fresh verdict each.")
 
     permanently_exhausted: set[FnLocator] = set()
     # Futility escalation state: per failing test, the frontier
