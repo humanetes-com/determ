@@ -19,7 +19,7 @@ from typing import Any
 
 from pipeline_core.application.reconstruct.cargo_errors import strip_cargo_warnings
 from pipeline_core.domain.attribution import line_to_fn_record
-from pipeline_core.domain.models import FnLocator
+from pipeline_core.domain.models import Diagnostic, FnLocator
 from pipeline_core.domain.rust_idents import first_fn_decl_name
 from pipeline_core.domain.test_results import (
     parse_phase_c_line,
@@ -199,16 +199,54 @@ def implicated_fns_from_cargo_errors(
     if not cargo_output:
         return []
     cargo_output = strip_cargo_warnings(cargo_output)
+    return _locations_to_implicated_fns(
+        rustc_diagnostic_locations(cargo_output), target_src_dir,
+        enumerate_fns=enumerate_fns)
+
+
+def implicated_fns_from_diagnostics(
+    diagnostics: list[Diagnostic],
+    target_src_dir: Path,
+    *,
+    enumerate_fns: Callable[[Path], list[dict[str, Any]] | None],
+) -> list[FnLocator]:
+    """Structured-diagnostics twin of :func:`implicated_fns_from_cargo_errors`.
+
+    Attributes each error to a fn from its primary span AND every
+    macro-invocation call-site (`Diagnostic.macro_call_sites`). The text form
+    sees only the primary `-->` span, so an error that surfaces inside a macro
+    body (primary span = the macro definition, which encloses no fn) is
+    attributed to NOTHING and its invoking fn never gets reverted — the exact
+    gap that let a seeded, layout-incompatible body survive the pre-fill heal
+    and keep a whole cluster red. Feeding the expansion call-sites in reaches
+    the fn that actually wrote the bad macro call."""
+    locations: list[tuple[str, int]] = []
+    for d in diagnostics or []:
+        if d.file and d.line:
+            locations.append((d.file, d.line))
+        locations.extend(d.macro_call_sites)
+    return _locations_to_implicated_fns(
+        locations, target_src_dir, enumerate_fns=enumerate_fns)
+
+
+def _locations_to_implicated_fns(
+    locations: list[tuple[str, int]],
+    target_src_dir: Path,
+    *,
+    enumerate_fns: Callable[[Path], list[dict[str, Any]] | None],
+) -> list[FnLocator]:
+    """Map cargo diagnostic `(file, line)` locations to the (file_rel, fn_name)
+    pairs whose bodies enclose them. Dedup by (file, fn), order-preserving."""
     pairs: list[FnLocator] = []
     seen: set[FnLocator] = set()
     # Enclosing-fn attribution via the syn extractor (byte-span lookup); the
-    # backward `fn` scan is the no-binary fallback. (`-->` parse = cargo output.)
+    # backward `fn` scan is the no-binary fallback.
     _all_recs = enumerate_fns(target_src_dir)
     _recs_by_file: dict[str, list[dict[str, Any]]] = {}
     if _all_recs is not None:
         for _r in _all_recs:
             _recs_by_file.setdefault(_r.get("file", ""), []).append(_r)
-    for file_str, line_no in rustc_diagnostic_locations(cargo_output):
+    for file_str, line_no in locations:
         # Normalise to rel path under target_src_dir.
         try:
             abs_p = (target_src_dir / file_str).resolve()

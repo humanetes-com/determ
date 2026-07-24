@@ -117,6 +117,9 @@ class Cargo(Protocol):
     def implicated_fns_from_cargo_errors(
         self, cargo_output: str, target_src_dir: Path,
     ) -> list[FnLocator]: ...
+    def implicated_fns_from_diagnostics(
+        self, diagnostics: list[Diagnostic], target_src_dir: Path,
+    ) -> list[FnLocator]: ...
     def attribute_failures(
         self, test_output: str, src_dir: Path,
         recently_filled: list[FnLocator],

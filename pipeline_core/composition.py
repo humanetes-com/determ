@@ -352,6 +352,9 @@ from pipeline_core.application.reconstruct.failure_diagnosis import (
     implicated_fns_from_cargo_errors as _implicated_fns_impl,
 )
 from pipeline_core.application.reconstruct.failure_diagnosis import (
+    implicated_fns_from_diagnostics as _implicated_fns_from_diags_impl,
+)
+from pipeline_core.application.reconstruct.failure_diagnosis import (
     record_tdd_regression as _record_tdd_impl,
 )
 from pipeline_core.application.reconstruct.fill_merge import (
@@ -1641,6 +1644,8 @@ def build_app(
         env_fn=ports.cargo_env,
         implicated_fns_fn=lambda out, tsd: _implicated_fns_impl(
             out, tsd, enumerate_fns=enumerate_fns),
+        implicated_fns_from_diags_fn=lambda diags, tsd: _implicated_fns_from_diags_impl(
+            diags, tsd, enumerate_fns=enumerate_fns),
         attribute_failures_fn=lambda to, sd, rf, trm, cn: _via("attribute_failures")(to, sd, rf, trm, cn),
         filter_test_targets_fn=filter_test_targets,
     )

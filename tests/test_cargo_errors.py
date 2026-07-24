@@ -16,6 +16,7 @@ from pipeline_core.application.reconstruct.cargo_errors import (
     focus_cargo_errors,
     has_rs_line_loc,
     is_error_header,
+    macro_call_sites_from_spans,
     strip_cargo_warnings,
 )
 from pipeline_core.domain.models import Diagnostic
@@ -73,6 +74,44 @@ def test_diagnostics_and_err_sig_from_diagnostics() -> None:
     assert err_sig_from_diagnostics([Diagnostic(code="", file="", line=0,
                                                 message="linker failed", rendered="")]) \
         == frozenset({"linker failed"})
+
+
+def test_macro_call_sites_from_expansion_chain() -> None:
+    # An error inside a macro: primary span at the macro body, the invocation
+    # site carried under `expansion.span`. Nested expansions walk outward.
+    spans = [{
+        "is_primary": True, "file_name": "src/mac.rs", "line_start": 21,
+        "expansion": {"span": {
+            "file_name": "src/caller.rs", "line_start": 34,
+            "expansion": {"span": {
+                "file_name": "src/outer.rs", "line_start": 7}}}},
+    }]
+    assert macro_call_sites_from_spans(spans) == (
+        ("src/caller.rs", 34), ("src/outer.rs", 7))
+    # A plain span (no expansion) contributes nothing.
+    assert macro_call_sites_from_spans(
+        [{"is_primary": True, "file_name": "src/a.rs", "line_start": 3}]) == ()
+
+
+def test_diagnostics_from_json_carries_macro_call_sites() -> None:
+    j = (
+        '{"reason":"compiler-message","message":{"level":"error",'
+        '"code":{"code":"E0605"},"message":"non-primitive cast","spans":'
+        '[{"is_primary":true,"file_name":"src/backtrace.rs","line_start":21,'
+        '"expansion":{"span":{"file_name":"src/error.rs","line_start":34}}}],'
+        '"rendered":"R"}}\n'
+    )
+    diags = diagnostics_from_json(j)
+    assert diags is not None and len(diags) == 1
+    d = diags[0]
+    # Primary span stays the macro body; the invocation site rides alongside.
+    assert (d.file, d.line) == ("src/backtrace.rs", 21)
+    assert d.macro_call_sites == (("src/error.rs", 34),)
+    # Wire round-trip preserves it (and stays absent when empty).
+    assert Diagnostic.from_dict(d.to_dict()).macro_call_sites == (("src/error.rs", 34),)
+    plain = Diagnostic(code="E0308", file="a.rs", line=1, message="m")
+    assert "macro_call_sites" not in plain.to_dict()
+    assert Diagnostic.from_dict(plain.to_dict()).macro_call_sites == ()
 
 
 def test_is_error_header_matches_old_regex() -> None:

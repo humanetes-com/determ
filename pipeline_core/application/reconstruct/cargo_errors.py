@@ -8,6 +8,7 @@ these helpers shape arbitrary captured TEXT where they don't).
 from __future__ import annotations
 
 import json
+from typing import Any
 
 from pipeline_core.domain.import_repair import import_fixes_from_message
 from pipeline_core.domain.models import Diagnostic
@@ -297,8 +298,40 @@ def diagnostics_from_json(output: str) -> list[Diagnostic] | None:
             message=msg.get("message") or "",
             rendered=msg.get("rendered") or "",
             import_fixes=import_fixes_from_message(msg),
+            macro_call_sites=macro_call_sites_from_spans(spans),
         ))
     return out if json_seen else None
+
+
+def macro_call_sites_from_spans(
+    spans: list[dict[str, Any]],
+) -> tuple[tuple[str, int], ...]:
+    """Every macro-invocation call-site named by the diagnostic's spans.
+
+    An error inside a macro renders with its primary span at the macro's own
+    body; rustc records the INVOCATION site under `span.expansion.span`, one
+    level per nested expansion. Walk each span's expansion chain and collect
+    those call-site `(file, line)` pairs — the fn that wrote the macro call, not
+    the macro definition. Deduped, order-preserving. Empty for a plain error."""
+    out: list[tuple[str, int]] = []
+    seen: set[tuple[str, int]] = set()
+    for span in spans:
+        node = span
+        while isinstance(node, dict):
+            exp = node.get("expansion")
+            if not isinstance(exp, dict):
+                break
+            call = exp.get("span")
+            if not isinstance(call, dict):
+                break
+            f = call.get("file_name") or ""
+            ln = int(call.get("line_start") or 0)
+            key = (f, ln)
+            if f and ln and key not in seen:
+                seen.add(key)
+                out.append(key)
+            node = call
+    return tuple(out)
 
 
 def err_sig_from_diagnostics(diagnostics: list[Diagnostic]) -> frozenset[str]:

@@ -1346,12 +1346,20 @@ class StaticSkeletonTask2Generator(Task2Generator):
         # LLM calls burned before end-of-pass validate reverts the blocker
         # (live case: a donor `context` body poisoned error.rs's 35-fn
         # refill). Check + revert the implicated fns NOW, before filling.
-        _rc0, _o0, _e0 = self.cargo.run_raw(
-            shlex.split(check_cmd), filled_dir, self._cluster_env(cluster), 180)
+        _rc0, _rendered0, _diags0 = self.cargo.run_check_diag(
+            check_cmd, filled_dir, self._cluster_env(cluster), 180)
         if _rc0 not in (-1, 0):
-            _pre_out = (_o0 or "") + "\n" + (_e0 or "")
-            _pre_impl = self.cargo.implicated_fns_from_cargo_errors(
-                _pre_out, filled_dir)
+            # Structured diagnostics carry the macro-expansion call-site chain,
+            # so a body that only errors INSIDE a macro (primary span = the
+            # macro definition, enclosing no fn) is still attributed to the fn
+            # that invoked it. Fall back to the rendered-text implicator only
+            # when no structured diagnostics came back (cargo/JSON unavailable).
+            if _diags0:
+                _pre_impl = self.cargo.implicated_fns_from_diagnostics(
+                    _diags0, filled_dir)
+            else:
+                _pre_impl = self.cargo.implicated_fns_from_cargo_errors(
+                    _rendered0 or "", filled_dir)
             if _pre_impl:
                 self.tel.log(f"  {tag} [pre-pass-heal] seeded/resumed tree does "
                              "not compile; implicated: "

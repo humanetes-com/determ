@@ -408,6 +408,12 @@ class Diagnostic:
     # error — applied mechanically by the import-repair step (a body-only
     # splice cannot add `use` items, so the compiler supplies them).
     import_fixes: tuple[ImportFix, ...] = ()
+    # When the error surfaces INSIDE a macro expansion, the primary span points
+    # at the macro DEFINITION (`backtrace_if_absent!`'s body), never at the fn
+    # that invoked it. rustc's `expansion.span` chain names each invocation
+    # call-site — the real culprit a fn-granular revert must reach. Empty for a
+    # non-macro error. Each entry is (file_rel, line) of one call-site.
+    macro_call_sites: tuple[tuple[str, int], ...] = ()
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> Diagnostic:
@@ -419,6 +425,8 @@ class Diagnostic:
             rendered=d.get("rendered", ""),
             import_fixes=tuple(
                 ImportFix(**f) for f in d.get("import_fixes", ())),
+            macro_call_sites=tuple(
+                (str(f), int(ln)) for f, ln in d.get("macro_call_sites", ())),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -434,6 +442,8 @@ class Diagnostic:
                 {"file": f.file, "byte_start": f.byte_start,
                  "byte_end": f.byte_end, "replacement": f.replacement}
                 for f in self.import_fixes]
+        if self.macro_call_sites:  # wire-compat: absent key ⇔ no expansion
+            d["macro_call_sites"] = [[f, ln] for f, ln in self.macro_call_sites]
         return d
 
 
