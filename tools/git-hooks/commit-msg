@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+#
+# commit-msg hook — strip Claude/Anthropic authorship attribution.
+#
+# Legal requirement: commits in this repository must never attribute authorship
+# to Claude. This removes the "Co-Authored-By: Claude ..." trailer, any
+# "Co-authored-by" line naming Claude/Anthropic, the "Generated with Claude
+# Code" line, and any line carrying the Anthropic noreply address. Human
+# co-authors and every other line are preserved untouched.
+#
+# Enforced by git itself on EVERY commit (Claude's own commits and the
+# operator_run.sh fallback commit alike), so the guarantee does not depend on
+# the model obeying an instruction. Installed into .git/hooks/commit-msg by
+# operator_run.sh; also safe to run/install by hand.
+set -euo pipefail
+
+msg_file="$1"
+tmp="$(mktemp)"
+
+# Fixed-string, case-insensitive match (grep -iF) — no regex, so nothing in a
+# real message is matched by accident. -v keeps the lines that do NOT match.
+# `|| true`: grep exits 1 when it selects nothing (e.g. the degenerate case of
+# every line stripped), which must not abort the commit under `set -e`.
+grep -ivF \
+  -e 'co-authored-by: claude' \
+  -e 'co-authored-by: anthropic' \
+  -e 'noreply@anthropic.com' \
+  -e 'generated with claude code' \
+  -e '🤖 generated with' \
+  -- "$msg_file" > "$tmp" || true
+
+mv -- "$tmp" "$msg_file"
