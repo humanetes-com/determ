@@ -58,6 +58,7 @@ class PhaseCTddDeps:
     build_test_reverse_map: Callable[..., dict[str, set[FnLocator]]]
     filter_test_targets: Callable[..., Frontier]
     check_graceful_stop: Callable[[str], None]
+    check_auto_operator: Callable[[int, str], None]
     converge_in_cluster: Callable[..., str | None]
     count_relevant_notes: Callable[..., int]
     effective_stalls: Callable[..., int]
@@ -376,6 +377,7 @@ def run_phase_c_tdd(
                  "have fired first.")
             break
         deps.check_graceful_stop(f"TDD iter {iter_n}")
+        deps.check_auto_operator(stall, f"TDD iter {iter_n}")
         # One fresh, informed retry per iteration boundary for fns/blocks
         # marked fully_exhausted (a DIFFERENT, disk-persisted gate than this
         # loop's own local `permanently_exhausted` — this one lives in the

@@ -55,6 +55,12 @@ from pipeline_core.adapters.augment_engine import (
     StaticRustTestAugmentor,
 )
 from pipeline_core.adapters.augment_store import FileAugmentStore
+from pipeline_core.adapters.auto_operator import (
+    check_auto_operator as _auto_op_check,
+)
+from pipeline_core.adapters.auto_operator import (
+    seed_auto_operator_default as _auto_op_seed_default,
+)
 from pipeline_core.adapters.behaviour_store import save_behaviour_suite
 from pipeline_core.adapters.build_script import CargoBuildScriptReader
 from pipeline_core.adapters.cluster_merge import ClusterMerger
@@ -1338,6 +1344,7 @@ def build_app(
     # S69: former pipeline delegate shims, bound direct (their bodies never
     # touched a patched module seam — the log/emit/deps they need are ports/locals).
     check_graceful_stop = functools.partial(_graceful_stop.check_graceful_stop, ports.log)
+    check_auto_operator = functools.partial(_auto_op_check, ports.log)
 
     def focus_cargo_errors(output: str, file_rel: str, max_chars: int | None = None) -> str:
         return _focus_cargo_errors_impl(
@@ -1990,6 +1997,7 @@ def build_app(
         init_events=helpers.init_events,
         start_audit_thread=auditor.start_thread,
         quarantine_broken_gen_tests=_gts_quarantine_broken_gen_tests,
+        seed_auto_operator_default=_auto_op_seed_default,
         git_file_hash=_ws_git_file_hash,
         ensure_vllm_ready=_ensure_vllm_ready,
         git_clean_reset=functools.partial(_ws_git_clean_reset, ws_deps),
@@ -2075,6 +2083,7 @@ def build_app(
             build_test_reverse_map=build_test_reverse_map,
             filter_test_targets=filter_test_targets,
             check_graceful_stop=check_graceful_stop,
+            check_auto_operator=check_auto_operator,
             converge_in_cluster=helpers.converge_in_cluster,
             count_relevant_notes=helpers.count_relevant_notes,
             effective_stalls=helpers.effective_stalls,

@@ -95,6 +95,7 @@ def _run_driver(monkeypatch, tmp_path: Path, *, run_cargo, inventory,
         build_test_reverse_map=lambda *a, **k: dict(reverse_map or {}),
         filter_test_targets=lambda frontier, src: frontier,
         check_graceful_stop=lambda *a, **k: None,
+        check_auto_operator=lambda *a, **k: None,
         converge_in_cluster=lambda *a, **k: None,
         count_relevant_notes=lambda *a, **k: 0,
         effective_stalls=lambda budget, module: budget,
@@ -396,12 +397,17 @@ def test_unnamed_shortfall_does_not_invoke_the_crash_localizer(
     out = ("test t1 ... ok\ntest t2 ... ok\ntest t3 ... FAILED\n"
            "test result: FAILED. 2 passed; 1 failed; 0 ignored")
     calls: list[Any] = []
+
+    def localize(*a: Any, **k: Any) -> tuple[Any, ...]:
+        calls.append(a)
+        return ()
+
     _run_driver(monkeypatch, tmp_path,
                 run_cargo=lambda *a, **k: (101, out),
                 inventory=lambda pd, cl, stems, lib=False: (
                     4, frozenset({"t1", "t2", "t3"})),
                 attribution_kwargs=[], checkpoints=[], events=[],
-                localize=lambda *a, **k: calls.append(a) or ())
+                localize=localize)
     assert calls == []
 
 
@@ -410,10 +416,15 @@ def test_named_vanish_still_invokes_the_crash_localizer(
     out = ("test t1 ... ok\ntest t2 ... ok\n"
            "test result: FAILED. 2 passed; 0 failed; 0 ignored")
     calls: list[Any] = []
+
+    def localize(*a: Any, **k: Any) -> tuple[Any, ...]:
+        calls.append(a)
+        return ()
+
     _run_driver(monkeypatch, tmp_path,
                 run_cargo=lambda *a, **k: (101, out),
                 inventory=lambda pd, cl, stems, lib=False: (
                     3, frozenset({"t1", "t2", "t3"})),
                 attribution_kwargs=[], checkpoints=[], events=[],
-                localize=lambda *a, **k: calls.append(a) or ())
+                localize=localize)
     assert calls, "a named vanished test is exactly what the localizer is for"

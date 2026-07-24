@@ -23,6 +23,16 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO"
 
+# Single pass at a time, machine-wide. A pass kills and restarts the pipeline;
+# the restarted process has no memory of the pass that spawned it, so without a
+# lock that outlives both it would launch a second one that edits and commits
+# the same working tree concurrently. Held for the whole run via fd 9.
+exec 9>/tmp/pipeline_operator_pass.lock
+flock -n 9 || {
+  echo "operator_run: another pass already holds the lock — exiting." >&2
+  exit 0
+}
+
 command -v claude >/dev/null 2>&1 || {
   echo "operator_run: 'claude' CLI not found on PATH" >&2
   exit 127

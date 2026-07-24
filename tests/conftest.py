@@ -12,6 +12,7 @@ removing the wall-clock cost. `--timeout` in check.sh is the backstop.
 from __future__ import annotations
 
 import time
+from collections.abc import Generator
 
 import pytest
 
@@ -30,7 +31,7 @@ def _no_backoff_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _isolate_graceful_stop(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+def _isolate_graceful_stop(monkeypatch: pytest.MonkeyPatch, tmp_path) -> Generator[None, None, None]:
     """Tests that exercise the real, composition-wired fix loop (e2e tests
     calling `pipeline._phase_c_fill_impl_blocks`/etc directly, not a mocked
     deps object) go through the ACTUAL `check_graceful_stop`, which by
@@ -60,6 +61,38 @@ def _isolate_graceful_stop(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     graceful_stop.reset_for_tests()
     yield
     graceful_stop.reset_for_tests()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_auto_operator(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """Auto-operator's sentinel is the same ambient-`/tmp`-state hazard as the
+    graceful-stop sentinel above (a live pipeline's real /tmp/pipeline_automode
+    could be present while check.sh runs) — but the stakes here are higher: a
+    fired episode spawns a REAL, billed, unattended `claude -p` operator pass
+    via operator_run.sh. Redirect every /tmp path it touches to per-test tmp
+    ones, force the `.env` AUTO_DEFAULT fallback off (`.env` sets it to 1 for
+    real runs), reset the fire/re-arm state machine, and stub the launch itself
+    so no test can ever spawn the real subprocess even if a future test
+    mistakenly drives stall past the trigger with the mode enabled. Redirection
+    only works because the module reads these as globals at call time: as
+    default ARGUMENT values they would bind at def time and monkeypatching the
+    module attribute would silently be a no-op."""
+    import pipeline_core.adapters.auto_operator as _auto_operator
+    from pipeline_core.domain.auto_operator import AutoOperator
+
+    def _forbid_real_launch() -> None:
+        raise AssertionError(
+            "test attempted to launch the real operator_run.sh subprocess")
+
+    for _attr, _name in (("SENTINEL_PATH", "automode-sentinel"),
+                         ("PASS_LOCK_PATH", "operator-pass.lock"),
+                         ("LAST_FIRE_PATH", "operator-last-fire")):
+        monkeypatch.setattr(_auto_operator, _attr,
+                            tmp_path / f"{_name}-unused-by-real-pipeline")
+    monkeypatch.setenv("AUTO_DEFAULT", "0")
+    monkeypatch.setattr(
+        _auto_operator, "_OP", AutoOperator(trigger=_auto_operator._OP.trigger))
+    monkeypatch.setattr(_auto_operator, "_launch_operator_pass", _forbid_real_launch)
 
 
 @pytest.fixture(autouse=True)

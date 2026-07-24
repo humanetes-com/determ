@@ -15,9 +15,6 @@ from typing import Any
 _LOG_DIR     = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 _RUN_REGISTRY = os.getenv("PIPELINE_RUN_REGISTRY", "/tmp/determ_pipelines.json")
 REFRESH      = 2
-# [a] auto-operator: stall count that fires a full operator_run.sh pass. Read
-# from the process env (monitor does not load .env); export to override.
-AUTO_STALL_TRIGGER = int(os.getenv("MONITOR_AUTO_STALL_TRIGGER", "1"))
 
 
 def _discover_running_runs() -> list[dict]:
@@ -91,10 +88,6 @@ EVENTS_LOG   = os.getenv("PIPELINE_EVENTS_LOG", _pick_log(
 # P6 data-vs-render split: the events.jsonl readers live in the data module; this
 # file keeps the renderer + live loop. `_`-aliases preserve the in-file call sites.
 # (Tests point the readers via pipeline_core.monitor.events_data.configure / globals.)
-from pipeline_core.domain.auto_operator import (  # noqa: E402
-    AutoOperator,
-    active_stall,
-)
 from pipeline_core.monitor import events_data as _ed  # noqa: E402
 from pipeline_core.monitor import run_data as _rd  # noqa: E402
 from pipeline_core.monitor.field_glossary import (  # noqa: E402
@@ -942,9 +935,8 @@ SCRIPT_DIR   = os.path.dirname(os.path.abspath(__file__))
 _action_msg  = ""
 
 def _detach(cmd):
-    """Launch cmd detached — no stdin/stdout, new session. Returns the Popen so
-    pollers (the auto-operator) can watch it; fire-and-forget callers ignore it."""
-    return subprocess.Popen(
+    """Launch cmd fully detached from the terminal — no stdin/stdout, new session."""
+    subprocess.Popen(
         cmd,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
@@ -954,9 +946,26 @@ def _detach(cmd):
 _view        = "monitor"      # monitor|pipeline|stream|events|legend|health|fields
 _scroll      = {"pipeline": 0, "stream": 0, "events": 0, "legend": 0, "health": 0, "fields": 0}   # lines scrolled up from bottom (0=bottom)
 _show_hints  = True           # inline field-hint strip under the monitor view (toggle: [t])
-_auto = AutoOperator(trigger=AUTO_STALL_TRIGGER)   # [a] stall-triggered operator pass
 _confirm          = None   # pending confirmation: "continue" | "wipe" | "stop" | "poweroff" | None
 _graceful_pending = os.path.exists("/tmp/pipeline_graceful_stop")  # survives monitor restart
+
+# Auto-operator toggle: sentinel presence enables stall-triggered operator_run.sh
+# passes, mirroring the graceful-stop sentinel's touch/remove convention above.
+# The watch-and-fire logic runs inside the PIPELINE process itself (phase_c_tdd's
+# TDD loop, via pipeline_core.adapters.auto_operator) so it stays live whether or
+# not the monitor is attached; a fresh pipeline start seeds this file from `.env`
+# AUTO_DEFAULT. The monitor is just the remote toggle switch + status display.
+_AUTO_SENTINEL = "/tmp/pipeline_automode"
+
+def _auto_armed() -> bool:
+    return os.path.exists(_AUTO_SENTINEL)
+
+def _set_auto_armed(on: bool) -> None:
+    if on:
+        open(_AUTO_SENTINEL, "w").close()
+    else:
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(_AUTO_SENTINEL)
 
 # Power-off-on-finish toggle: sentinel ("1"/"0") overrides .env SHUTDOWN_ON_FINISH,
 # mirroring pipeline._shutdown_on_finish_enabled. Monitor reads it every frame.
@@ -1042,7 +1051,7 @@ def _bottom_bar():
         yellow("[w]ipe"),
         s_col("[s]top"),
         red("[p]⏻armed") if _shutdown_armed() else dim("[p]oweroff"),
-        {"green": green, "cyan": cyan, "dim": dim}[_auto.label()[0]](_auto.label()[1]),
+        cyan("[a]uto ON") if _auto_armed() else dim("[a]uto"),
         dim("[↑↓/PgUp/PgDn]"),
         dim("[q]uit"),
     ]
@@ -1418,7 +1427,9 @@ def _run_action(key):
     elif key == "t":
         _show_hints = not _show_hints
     elif key == "a":
-        _auto.toggle()   # bottom-bar [a]uto segment reflects the new state
+        _set_auto_armed(not _auto_armed())
+        _action_msg = (green("[a]uto mode ON — pipeline will fire operator_run.sh on stall")
+                      if _auto_armed() else dim("[a]uto mode off"))
     elif key in ("1", "2", "3", "4"):
         _view = {"1": "monitor", "2": "pipeline", "3": "stream", "4": "events"}[key]
     elif key == "UP"   and _view in _scroll: _scroll[_view] += SCROLL_STEP
@@ -1439,16 +1450,6 @@ def available_lines():
         return max(1, h - gpu_h - 2 - BOTTOM_LINES)
     return 1
 
-def _auto_tick():
-    """One [a] auto-operator frame: read stall, let the state machine decide."""
-    try:
-        _stall = active_stall(_phase_c_state())
-    except Exception:
-        _stall = 0
-    _auto.tick(_stall, lambda: _detach(
-        ["bash", os.path.join(SCRIPT_DIR, "operator_run.sh")]))
-
-
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
 def main():
@@ -1468,7 +1469,6 @@ def main():
                 _demo_idx = (_demo_idx + 1) % len(_DEMO_VIEWS)
                 _view = _DEMO_VIEWS[_demo_idx]
                 _demo_next = time.monotonic() + DEMO_INTERVAL
-            _auto_tick()   # [a] auto-operator: fire operator_run.sh on a stall plateau
             try:
                 _render_all()
                 _flush_frame()

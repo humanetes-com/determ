@@ -524,6 +524,7 @@ class RunDeps:
     init_events: Callable[..., None]
     start_audit_thread: Callable[..., None]
     quarantine_broken_gen_tests: Callable[..., int]
+    seed_auto_operator_default: Callable[[], None]
     git_file_hash: Callable[..., str]
     ensure_vllm_ready: Callable[..., None]
     git_clean_reset: Callable[..., None]
@@ -590,6 +591,10 @@ def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
 
     deps.init_log(root, nolog=plan.nolog, progress_mode=plan.progress)
     deps.init_events(product=project_dir.name)
+
+    # AUTO_DEFAULT=1 arms the auto-operator sentinel so stall-triggered
+    # operator passes start live without the monitor's [a] toggle.
+    deps.seed_auto_operator_default()
 
     # --audit: periodic + iteration-boundary flow self-audit (read-only).
     deps.run_state.audit_enabled = bool(plan.audit)
