@@ -6,11 +6,12 @@ rely on a later regex over the human-readable listing text.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 
 from pipeline_core.adapters.api_surface import ApiSurfaceCapture
-from pipeline_core.domain.models import TypeRecord
+from pipeline_core.domain.models import FieldRecord, TypeRecord
 
 
 def _capture(tmp_path: Path, *, with_manifest_path: bool = True) -> ApiSurfaceCapture:
@@ -90,3 +91,44 @@ def test_pub_items_missing_exactly_pub_key_degrades_to_is_pub() -> None:
     assert ("struct", "Shown") in items
     assert ("fn", "legacy_pub") in items
     assert ("fn", "legacy_priv") not in items
+
+
+def _capture_with_fields(tmp_path: Path, *, author_private_fields: bool) -> ApiSurfaceCapture:
+    cap = _capture(tmp_path)
+    return dataclasses.replace(
+        cap,
+        enumerate_types=lambda walk_root: [
+            TypeRecord(file="src/lib.rs", kind="struct", name="Error", is_pub=True,
+                       is_exactly_pub=True,
+                       definition="pub struct Error { inner: Own<ErrorImpl> }",
+                       fields=(FieldRecord(name="inner", ty="Own<ErrorImpl>"),)),
+        ],
+        author_private_fields=author_private_fields)
+
+
+def _module_with_wrapper(tmp_path: Path) -> Path:
+    module_dir = tmp_path / "wrap"
+    src = module_dir / "src"
+    src.mkdir(parents=True)
+    (src / "lib.rs").write_text(
+        "pub struct Error { inner: Own<ErrorImpl> }\npub fn new() {}\n")
+    return module_dir
+
+
+def test_api_surface_elides_model_authored_private_fields(tmp_path: Path) -> None:
+    """The artefact is read long after strip. If it still carries the original's
+    private fields, every downstream prompt hands the model back the layout the
+    authoring stage exists to replace."""
+    module_dir = _module_with_wrapper(tmp_path)
+    _capture_with_fields(tmp_path, author_private_fields=True).capture(
+        tmp_path, module_dir, "wrap")
+    text = (tmp_path / "wrap.api.md").read_text()
+    assert "pub struct Error {" in text          # head kept — it IS the contract
+    assert "Own<ErrorImpl>" not in text          # field choice withheld
+
+
+def test_api_surface_keeps_fields_when_they_stay_frozen(tmp_path: Path) -> None:
+    module_dir = _module_with_wrapper(tmp_path)
+    _capture_with_fields(tmp_path, author_private_fields=False).capture(
+        tmp_path, module_dir, "wrap")
+    assert "Own<ErrorImpl>" in (tmp_path / "wrap.api.md").read_text()

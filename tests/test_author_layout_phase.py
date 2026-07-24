@@ -1,6 +1,7 @@
 """Pins for the t1.5 layout-authoring PHASE (F11 M2 orchestration)."""
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 from pipeline_core.application.author_layout import AuthorLayoutDeps
@@ -172,3 +173,21 @@ def test_phase_noop_on_empty_surface():
     out = run_layout_phase(Path("/x"), "anyhow", ["stable"], deps)
     assert out == {}
     assert r.prompts == []
+
+
+def test_phase_warns_when_the_baked_freeze_scope_differs_from_the_run():
+    """The scope is baked into the surface AND into the elided API artefact, on
+    live source that is gone by t1.5 — so a config change can only be applied by
+    re-baking, and must be said out loud rather than half-applied."""
+    r = _Recorder(_suite_with_pin(), _GOOD, True)
+    deps = dataclasses.replace(r.deps(), author_private_fields=True)
+    run_layout_phase(Path("/x"), "anyhow", ["stable"], deps)
+    warning = next(m for m in r.logs if "WARNING" in m)
+    assert "author_private_fields=False" in warning
+    assert "restart.sh --y" in warning
+
+
+def test_phase_silent_when_the_scope_matches():
+    r = _Recorder(_suite_with_pin(), _GOOD, True)
+    run_layout_phase(Path("/x"), "anyhow", ["stable"], r.deps())
+    assert not [m for m in r.logs if "WARNING" in m]

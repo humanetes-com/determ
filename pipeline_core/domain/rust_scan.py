@@ -234,17 +234,16 @@ def item_names(text: str) -> list[str]:
     return names
 
 
-def struct_names(text: str) -> list[str]:
-    """Names declared by ``struct NAME`` items, in declaration order.
+def struct_declarations(text: str) -> list[tuple[str, int]]:
+    """(name, index of its ``struct`` keyword) per ``struct NAME`` item, in
+    declaration order.
 
-    Comment/string aware (``code_mask``) and fn-body blind: the layout
-    fingerprint is taken over this set and must survive body splices — a
-    ``struct`` in a doc example, in an annotated-stub comment (failed
-    attempts are preserved as comments, cargo error text included), or a
-    fn-local helper would otherwise change the fingerprint every time a
-    sibling body lands, silently voiding the file's convictions."""
+    Comment/string aware (``code_mask``) and fn-body blind: a ``struct`` in a
+    doc example, in an annotated-stub comment (failed attempts are preserved as
+    comments, cargo error text included), or a fn-local helper is not a
+    declaration of the file's layout."""
     mask = code_mask(text)
-    names: list[str] = []
+    found: list[tuple[str, int]] = []
     n = len(text)
     i = 0
     while i < n:
@@ -263,13 +262,21 @@ def struct_names(text: str) -> list[str]:
             while k < n and not mask[k] and text[k] in _IDENT_CHARS:
                 k += 1
             if k > s and text[s] in _IDENT_START:
-                names.append(text[s:k])
+                found.append((text[s:k], i))
             i = k
         elif word == "fn":
             i = _skip_fn_item(text, mask, j)
         else:
             i = j
-    return names
+    return found
+
+
+def struct_names(text: str) -> list[str]:
+    """Names declared by ``struct NAME`` items, in declaration order.
+
+    The layout fingerprint is taken over this set and must survive body
+    splices, hence the comment/fn-body blindness of `struct_declarations`."""
+    return [name for name, _ in struct_declarations(text)]
 
 
 def _skip_fn_item(text: str, mask: Sequence[bool], i: int) -> int:

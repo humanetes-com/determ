@@ -15,6 +15,8 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from pipeline_core.domain.models import FnRecord
+from pipeline_core.domain.rust_scan import struct_declarations
+from pipeline_core.domain.type_header import field_block_span
 
 BODY_PLACEHOLDER = " /* ... */ "
 
@@ -59,3 +61,41 @@ def elide_fn_bodies(
             continue          # stale span vs the text handed in — skip, never truncate
         data = data[:start] + ph + data[end:]
     return data.decode("utf-8", errors="replace")
+
+
+FIELDS_PLACEHOLDER = " /* private fields */ "
+
+
+def elide_private_struct_fields(
+    source: str,
+    names: Iterable[str],
+    placeholder: str = FIELDS_PLACEHOLDER,
+) -> str:
+    """`source` with the field block of every named struct emptied.
+
+    A public struct's private fields are NOT API — nothing outside the crate can
+    name them. When the model is the one designing those fields, the pre-strip
+    API artefact must not carry the original's choice, or every downstream
+    prompt hands back the very layout the authoring stage exists to replace
+    (the artefact is read long after strip, when nothing else can correct it).
+
+    Only the listed names are touched, and only their field block: the head
+    (`pub struct Foo<T: Clone>`) stays verbatim because it IS the contract.
+    Tuple structs keep their parens (`struct Foo(/* … */);` is a legal
+    zero-field tuple struct), so the result still parses.
+    """
+    wanted = frozenset(names)
+    if not wanted:
+        return source
+    out = source
+    # Right-to-left: an earlier declaration's indices stay valid after a later
+    # one is rewritten.
+    for name, start in reversed(struct_declarations(out)):
+        if name not in wanted:
+            continue
+        span = field_block_span(out[start:])
+        if span is None:                    # unit struct — nothing to elide
+            continue
+        open_idx, close_idx = start + span[0], start + span[1]
+        out = out[:open_idx + 1] + placeholder + out[close_idx:]
+    return out

@@ -215,7 +215,8 @@ def retrigger_layout(
             replaceable=tuple(i for i in surface.replaceable if i.name in names),
             frozen_public=surface.frozen_public,
             public_referenced=surface.public_referenced,
-            public_direct_refs=surface.public_direct_refs)
+            public_direct_refs=surface.public_direct_refs,
+            author_private_fields=surface.author_private_fields)
         if rec.outcome is LayoutOutcome.AUTHORED:
             with_defs = _with_stored_defs(narrowed, dict(rec.defs))
             if with_defs is None:

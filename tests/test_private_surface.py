@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pipeline_core.domain.models import (
+    FieldRecord,
     FnRecord,
     ModRecord,
     TypeRecord,
@@ -265,3 +266,63 @@ def test_inherent_impl_method_stays_authorable():
                     sig_text="fn new(self) -> Adhoc")]
     s = classify_private_surface(types, fns, cfg_cluster="stable")
     assert "new" in {i.name for i in s.replaceable}
+
+
+# --- freeze scope: private FIELDS of public structs -------------------------
+
+def _pub_wrapper():
+    """anyhow's real shape: the public wrapper's ONE private field is what pins
+    the whole erasure scheme, even though every type it names is replaceable."""
+    return TypeRecord(
+        file="src/lib.rs", kind="struct", name="Error", is_pub=True,
+        definition="pub struct Error { inner: Own<ErrorImpl> }",
+        fields=(FieldRecord(name="inner", ty="Own<ErrorImpl>", is_pub=False),))
+
+
+def test_public_struct_fields_frozen_by_default():
+    types = [_pub_wrapper()] + _anyhow_surface()[1:]
+    s = classify_private_surface(types, [])
+    assert "Error" not in {i.name for i in s.replaceable}
+    assert s.author_private_fields is False
+
+
+def test_public_struct_fields_authorable_when_enabled():
+    types = [_pub_wrapper()] + _anyhow_surface()[1:]
+    s = classify_private_surface(types, [], author_private_fields=True)
+    item = next(i for i in s.replaceable if i.name == "Error")
+    assert item.kind is SurfaceItemKind.PUB_FIELDS
+    assert s.author_private_fields is True
+    # still frozen-PUBLIC: only the fields opened up, the name/API did not.
+    assert "Error" in s.frozen_public
+    # and it lands in ONE component with the private types it points at, so
+    # the wrapper and its internals are designed as a single scheme.
+    comp = next(c for c in s.components if any(i.name == "Error" for i in c))
+    assert {i.name for i in comp} == {"Error", "Own", "ErrorImpl", "ErrorVTable"}
+
+
+def test_public_struct_with_any_pub_field_stays_frozen():
+    mixed = TypeRecord(
+        file="src/lib.rs", kind="struct", name="Span", is_pub=True,
+        definition="pub struct Span { pub start: usize, end: usize }",
+        fields=(FieldRecord(name="start", ty="usize", is_pub=True),
+                FieldRecord(name="end", ty="usize", is_pub=False)))
+    s = classify_private_surface([mixed], [], author_private_fields=True)
+    assert not s.replaceable
+
+
+def test_public_enum_variants_are_never_authorable():
+    en = TypeRecord(file="src/lib.rs", kind="enum", name="Mode", is_pub=True,
+                    definition="pub enum Mode { A, B }", variants=("A", "B"))
+    s = classify_private_surface([en], [], author_private_fields=True)
+    assert not s.replaceable
+
+
+def test_pub_fields_component_is_layout_sensitive_without_reachability():
+    """A public struct's own layout IS the thing repr pins constrain, so its
+    component must never be authored blind even when nothing references it."""
+    lone = TypeRecord(
+        file="src/lib.rs", kind="struct", name="Handle", is_pub=True,
+        definition="pub struct Handle { n: usize }",
+        fields=(FieldRecord(name="n", ty="usize", is_pub=False),))
+    s = classify_private_surface([lone], [], author_private_fields=True)
+    assert s.component_is_layout_sensitive(s.components[0])

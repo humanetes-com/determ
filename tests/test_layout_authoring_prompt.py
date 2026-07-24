@@ -96,3 +96,30 @@ def test_protocol_forbids_wrapping_a_fn_in_an_impl_header():
     assert "unsafe fn width(p: NonNull<Cell>) -> usize { unimplemented!() }" in p
     # Types are NOT bare — the carve-out must survive.
     assert 'kind="struct"' in p
+
+
+def _pub_fields_prompt():
+    items = (
+        PrivateSurfaceItem(SurfaceItemKind.PUB_FIELDS, "Error", "src/lib.rs",
+                           "pub struct Error { inner: Own<ErrorImpl> }"),
+        PrivateSurfaceItem(SurfaceItemKind.STRUCT, "ErrorImpl", "src/error.rs",
+                           "struct ErrorImpl { .. }"),
+    )
+    return build_layout_authoring_prompt(
+        module_name="anyhow", cfg_cluster="stable", items=items,
+        public_surface="pub struct Error { /* private fields */ }",
+        layout_pins=[], symbol_inventory="Box")
+
+
+def test_pub_fields_item_states_its_contract_and_leaks_no_layout():
+    p = _pub_fields_prompt()
+    assert "Error (struct) in src/lib.rs — PUBLIC type" in p
+    assert "design ONLY its fields" in p
+    # the rule block with its WRONG→RIGHT examples rides along...
+    assert "pub struct Handle<T: ?Sized> { inner: Box<T> }" in p
+    # ...and the item's own current field is still nowhere in the prompt.
+    assert "Own<ErrorImpl>" not in p
+
+
+def test_pub_fields_rule_absent_when_no_such_item_is_listed():
+    assert "PUBLIC STRUCTS ON THE LIST" not in _prompt()

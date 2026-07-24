@@ -45,6 +45,7 @@ def build_layout_phase_runner(
     load_baked_clusters: Callable[[Path], list[Any]],
     fn_name_counts: Callable[[Path], dict[str, int]],
     log: Callable[[str], None],
+    author_private_fields: bool = False,
 ) -> Callable[[Path, str], None]:
     """The t1.5 phase runner, bound to the resident adapters."""
     return make_layout_phase_runner(
@@ -61,6 +62,7 @@ def build_layout_phase_runner(
         log=log,
         save_layout_outcomes=save_layout_outcomes,
         write_pin_probe=write_pin_probe,
+        author_private_fields=author_private_fields,
     )
 
 

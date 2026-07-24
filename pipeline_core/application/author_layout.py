@@ -36,6 +36,12 @@ from pipeline_core.domain.scaffold_rewrite import (
     DefReplacement,
     replace_surface_definitions,
 )
+from pipeline_core.domain.type_header import (
+    TypeHeader,
+    declares_pub_field,
+    headers_match,
+    parse_type_header,
+)
 from pipeline_core.prompts.layout_authoring import build_layout_authoring_prompt
 
 
@@ -132,6 +138,10 @@ def _splice_component(
         block = authored.get(uid)
         if block is None:
             return {}, f"authored blocks missing uid {uid}"
+        if it.kind is SurfaceItemKind.PUB_FIELDS:
+            contract_err = _public_contract_broken(uid, it, block)
+            if contract_err:
+                return {}, contract_err
         # Fn definitions are enumerated as bare signatures (no vis/`unsafe`
         # prefix, no stub body) — name the fn so the splice swaps the whole
         # item instead of nesting the new def inside the old one.
@@ -154,6 +164,33 @@ def _splice_component(
                             f" overlapping/ambiguous target spans in {rel}")
         edited[rel] = res.text
     return edited, ""
+
+
+def _public_contract_broken(
+    uid: str, item: PrivateSurfaceItem, block: AuthoredItem,
+) -> str:
+    """Non-empty reason iff an authored PUB_FIELDS block does more than design
+    fields. The compile gate cannot catch either violation: a renamed generic
+    or a dropped bound compiles inside the crate and breaks every downstream
+    user, and a field turned `pub` compiles while silently WIDENING the API the
+    reconstruction is contracted to keep. Rejecting here feeds the reason back
+    as a retry hint, so the model gets to correct it."""
+    frozen = parse_type_header(item.definition)
+    got = parse_type_header(block.definition)
+    if not headers_match(frozen, got):
+        return (f"authored {uid} changed the frozen public declaration: "
+                f"expected `{_head_text(frozen)}`, got `{_head_text(got)}` — "
+                "author ONLY the fields, keep the head verbatim")
+    if declares_pub_field(block.definition):
+        return (f"authored {uid} marks a field `pub`, widening the public API "
+                "— every field of this struct must stay private")
+    return ""
+
+
+def _head_text(h: TypeHeader | None) -> str:
+    if h is None:
+        return "(unparseable)"
+    return " ".join(p for p in (h.vis, h.kind, h.name + h.generics) if p)
 
 
 def author_layout(

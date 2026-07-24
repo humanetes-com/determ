@@ -16,7 +16,7 @@ from pipeline_core.domain.behaviour import (
     ObservableOutcome,
     StaticAssertKind,
 )
-from pipeline_core.domain.models import TypeRecord
+from pipeline_core.domain.models import FieldRecord, TypeRecord
 from pipeline_core.domain.private_surface import classify_private_surface
 
 
@@ -194,3 +194,59 @@ def test_failed_compile_log_names_the_diagnostic():
     failed = [ln for ln in d.logs if "did not compile" in ln]
     assert failed
     assert all("error[E0308]: mismatched types" in ln for ln in failed)
+
+
+# --- PUB_FIELDS: fields are authorable, the declaration head is not ---------
+
+def _pub_fields_surface():
+    types = [
+        TypeRecord(file="src/lib.rs", kind="struct", name="Error", is_pub=True,
+                   definition="pub struct Error<T: ?Sized> { inner: Box<ErrorImpl<T>> }",
+                   fields=(FieldRecord(name="inner", ty="Box<ErrorImpl<T>>", is_pub=False),)),
+    ]
+    return classify_private_surface(types, [], cfg_cluster="stable",
+                                    author_private_fields=True)
+
+
+class _PubDeps(_Deps):
+    def __init__(self, reply, compile_results):
+        super().__init__(reply, compile_results)
+        self.files = {
+            "src/lib.rs": "pub struct Error<T: ?Sized> { inner: Box<ErrorImpl<T>> }\n"}
+
+
+def _author_pub(reply, compile_results=(True,)):
+    d = _PubDeps(reply, compile_results)
+    res = author_layout(_pub_fields_surface(), module_name="anyhow",
+                        public_surface="pub struct Error<T: ?Sized>;",
+                        select_pins=_has_pins, symbol_inventory="Box", deps=d.deps())
+    return res, d
+
+
+def test_authored_fields_are_spliced_into_the_public_struct():
+    res, d = _author_pub(
+        '<LAYOUT_ITEM name="Error" kind="struct">'
+        'pub struct Error<T: ?Sized> { boxed: Box<dyn StdError>, note: String }'
+        '</LAYOUT_ITEM>')
+    assert res.all_authored
+    assert "boxed: Box<dyn StdError>" in d.files["src/lib.rs"]
+
+
+def test_changed_declaration_head_is_rejected_not_spliced():
+    # bound dropped: compiles inside the crate, breaks the public contract.
+    res, d = _author_pub(
+        '<LAYOUT_ITEM name="Error" kind="struct">'
+        'pub struct Error<T> { boxed: Box<dyn StdError> }</LAYOUT_ITEM>',
+        compile_results=(True, True, True))
+    assert not res.all_authored
+    assert "changed the frozen public declaration" in res.components[0].reason
+    assert d.files["src/lib.rs"].startswith("pub struct Error<T: ?Sized>")
+
+
+def test_field_made_public_is_rejected():
+    res, _ = _author_pub(
+        '<LAYOUT_ITEM name="Error" kind="struct">'
+        'pub struct Error<T: ?Sized> { pub boxed: Box<dyn StdError> }</LAYOUT_ITEM>',
+        compile_results=(True, True, True))
+    assert not res.all_authored
+    assert "widening the public API" in res.components[0].reason

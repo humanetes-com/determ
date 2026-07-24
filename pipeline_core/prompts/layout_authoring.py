@@ -16,7 +16,7 @@ from collections.abc import Mapping
 
 from pipeline_core.domain.authored_layout import component_uids
 from pipeline_core.domain.behaviour import BehaviourSpec
-from pipeline_core.domain.private_surface import PrivateSurfaceItem
+from pipeline_core.domain.private_surface import PrivateSurfaceItem, SurfaceItemKind
 
 _PROTOCOL = (
     "Reply with ONE block per private item you are authoring, and NOTHING else:\n"
@@ -60,12 +60,42 @@ _RULES = (
     "  original library's internals. A simple safe layout is preferred over an\n"
     "  unsafe one whenever it satisfies the pins (e.g. a boxed trait object\n"
     "  instead of a hand-rolled vtable).\n"
-    "- The PUBLIC items below are frozen: keep their names/signatures; you only\n"
-    "  design the PRIVATE types their fields point at.\n"
+    "- The PUBLIC items below are frozen: keep their names/signatures. You\n"
+    "  design the PRIVATE types their fields point at — plus, for any public\n"
+    "  struct explicitly listed under ITEMS TO AUTHOR, its private fields.\n"
     "- Every LAYOUT-PINNING TEST must pass under your layout (size/align/\n"
     "  autotraits/niche). Design to satisfy them by construction.\n"
     "- Use ONLY the symbols in the IN-SCOPE INVENTORY plus std/core.\n"
     "- Give every private fn body `{ unimplemented!() }` — bodies are filled later.\n"
+)
+
+
+# Only emitted when the chunk actually contains a PUB_FIELDS item — a rule
+# about items that are not on the list reads as a contradiction of the one
+# above it ("the PUBLIC items are frozen").
+_PUB_FIELDS_RULE = (
+    "PUBLIC STRUCTS ON THE LIST (kind `struct`, marked PUBLIC type):\n"
+    "Their DECLARATION HEAD is frozen API — visibility, name, generics and\n"
+    "bounds must come back character-for-character. Their FIELDS are yours to\n"
+    "design, and every field must stay private (no `pub`).\n"
+    "Frozen head: `pub struct Handle<T: ?Sized>`\n"
+    'WRONG (bound dropped — different public type): <LAYOUT_ITEM name="Handle" kind="struct">\n'
+    "pub struct Handle<T> { inner: Box<T> }\n"
+    "</LAYOUT_ITEM>\n"
+    'WRONG (field exposed — widens the API): <LAYOUT_ITEM name="Handle" kind="struct">\n'
+    "pub struct Handle<T: ?Sized> { pub inner: Box<T> }\n"
+    "</LAYOUT_ITEM>\n"
+    'RIGHT: <LAYOUT_ITEM name="Handle" kind="struct">\n'
+    "pub struct Handle<T: ?Sized> { inner: Box<T> }\n"
+    "</LAYOUT_ITEM>\n"
+    "\n"
+    "Frozen head: `pub struct Cursor<'a>`\n"
+    'WRONG (renamed lifetime — different public type): <LAYOUT_ITEM name="Cursor" kind="struct">\n'
+    "pub struct Cursor<'s> { at: usize, src: &'s [u8] }\n"
+    "</LAYOUT_ITEM>\n"
+    'RIGHT: <LAYOUT_ITEM name="Cursor" kind="struct">\n'
+    "pub struct Cursor<'a> { at: usize, src: &'a [u8] }\n"
+    "</LAYOUT_ITEM>\n"
 )
 
 
@@ -95,6 +125,16 @@ def _fmt_items(
     frozen public surface above."""
     lines = []
     for uid, it in zip(uids, items, strict=True):
+        if it.kind is SurfaceItemKind.PUB_FIELDS:
+            # The protocol kind stays `struct` — what differs is the CONTRACT,
+            # so the line states it where the model reads the item, not only in
+            # the rules block far above.
+            lines.append(
+                f"- {uid} (struct) in {it.file} — PUBLIC type: re-emit its "
+                "declaration head EXACTLY as shown in the frozen public "
+                "surface (same visibility, name, generics and bounds) and "
+                "design ONLY its fields; every field must stay private")
+            continue
         anchor = (anchors or {}).get(uid, "")
         via = f" — reached from the public `{anchor}`" if anchor else ""
         lines.append(f"- {uid} ({it.kind.name.lower()}) in {it.file}{via}")
@@ -175,6 +215,8 @@ def build_layout_authoring_prompt(
         extra_guidance or None,
         "" if extra_guidance else None,
         _RULES,
+        (_PUB_FIELDS_RULE
+         if any(i.kind is SurfaceItemKind.PUB_FIELDS for i in items) else None),
         "",
         _PROTOCOL,
     ] if s is not None])

@@ -1,6 +1,9 @@
 """Pins for the private-surface marks store (F11 M1 baked artifact)."""
 from __future__ import annotations
 
+import dataclasses
+import json
+
 from pipeline_core.adapters.private_surface_store import (
     load_private_surface,
     save_private_surface,
@@ -57,3 +60,18 @@ def test_per_cluster_isolation(tmp_path):
         cfg_cluster="nightly", replaceable=(), frozen_public=frozenset()))
     assert not load_private_surface(tmp_path, "stable").is_empty
     assert load_private_surface(tmp_path, "nightly").is_empty
+
+
+def test_freeze_scope_stamp_round_trips(tmp_path):
+    s = dataclasses.replace(_surface(), author_private_fields=True)
+    save_private_surface(tmp_path, s)
+    assert load_private_surface(tmp_path, "stable").author_private_fields is True
+
+
+def test_surface_baked_before_the_stamp_existed_reads_as_frozen(tmp_path):
+    save_private_surface(tmp_path, _surface())
+    p = tmp_path / ".skeleton" / "_private_surface_stable.json"
+    d = json.loads(p.read_text())
+    del d["author_private_fields"]
+    p.write_text(json.dumps(d))
+    assert load_private_surface(tmp_path, "stable").author_private_fields is False

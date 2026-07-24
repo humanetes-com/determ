@@ -93,6 +93,11 @@ class LayoutPhaseDeps:
     # without re-deriving reachability. Optional — an omitted store is a no-op
     # (additive; the phase runs exactly as before F11 M3 existed).
     save_layout_outcomes: Callable[[Path, AuthorLayoutResult], Path] | None = None
+    # The freeze scope CONFIGURED for this run, compared against the one the
+    # surface was BAKED under. They can only differ across a config change, and
+    # only a re-bake can close the gap: the replaceable set and the elided API
+    # artefact are both frozen at bake time, on live source that is gone by now.
+    author_private_fields: bool = False
 
 
 def run_layout_phase(
@@ -109,6 +114,14 @@ def run_layout_phase(
         except Exception as e:
             deps.log(f"  [t1.5] {cluster}: could not load private surface ({e}) — skipping.")
             continue
+        if surface.author_private_fields != deps.author_private_fields:
+            deps.log(
+                f"  [t1.5] {cluster}: WARNING — this workspace was baked with "
+                f"author_private_fields={surface.author_private_fields}, the "
+                f"run is configured for {deps.author_private_fields}. The "
+                "baked surface wins (the setting also elided the pre-strip API "
+                "artefact, which cannot be re-derived post-strip). Re-bake "
+                "with `bash restart.sh --y` to apply the new scope.")
         if surface.is_empty:
             deps.log(f"  [t1.5] {cluster}: no private-replaceable layout — frozen skeleton kept.")
             continue
@@ -161,6 +174,7 @@ def make_layout_phase_runner(
     # compile gate decides the pins. Absent ⇒ pins stay advisory (prior gate).
     write_pin_probe: Callable[[Path, str, str | None], None] | None = None,
     save_layout_outcomes: Callable[[Path, AuthorLayoutResult], Path] | None = None,
+    author_private_fields: bool = False,
 ) -> Callable[[Path, str], None]:
     """Assemble the t1.5 phase runner from resident ports (composition helper —
     keeps pipeline.py thin per the shrink goal). Returns a no-op when disabled or
@@ -215,7 +229,8 @@ def make_layout_phase_runner(
             symbol_inventory_text=lambda pd, c: "",
             author_deps_for=_author_deps_for,
             recompute_leaf_order=_recompute_leaf_order,
-            save_layout_outcomes=save_layout_outcomes)
+            save_layout_outcomes=save_layout_outcomes,
+            author_private_fields=author_private_fields)
         run_layout_phase(project_dir, module_name,
                          [c.name for c in clusters], deps)
 

@@ -795,6 +795,7 @@ _CFG = _CompositionConfig(
     skeleton_extractor_bin=_SKELETON_EXTRACTOR_BIN,
     layout_authoring_enabled=os.getenv("ENABLE_LAYOUT_AUTHORING", "0") == "1",
     layout_retrigger_max_attempts=int(os.getenv("LAYOUT_RETRIGGER_MAX_ATTEMPTS", "2")),
+    layout_author_private_fields=os.getenv("LAYOUT_AUTHOR_PRIVATE_FIELDS", "1") == "1",
     setup_script=Path(__file__).parent / "setup.sh",
 )
 # Phase 3 S3.5-10: resident pipeline helpers the migrated deps need, late-binding.

@@ -782,6 +782,10 @@ class CompositionConfig:
     # at the composition root (parse-don't-validate).
     layout_authoring_enabled: bool
     layout_retrigger_max_attempts: int
+    # Freeze scope: may t1.5 design the PRIVATE FIELDS of public structs? Baked
+    # into the workspace's private-surface artefact + the elided API surface, so
+    # a change only takes effect on a re-baked run.
+    layout_author_private_fields: bool
     # Repo-root setup.sh — the augment engine's default toolchain bootstrap.
     setup_script: Path
 
@@ -1411,6 +1415,7 @@ def build_app(
         log=ports.log,
         enumerate_fns=enumerate_fns,
         pub_items_manifest_path=_pub_items_manifest_path,
+        author_private_fields=cfg.layout_author_private_fields,
     )
     restore_from_augmented = RestoreFromAugmented(
         read_state=_state_read_state, write_state=_state_write_state, log=ports.log,
@@ -1453,6 +1458,7 @@ def build_app(
         ask=ask_client.ask, task2_model=settings.task_models.task2,
         load_baked_clusters=_load_baked_clusters,
         fn_name_counts=_fn_name_counts, log=ports.log,
+        author_private_fields=cfg.layout_author_private_fields,
     )
     retrigger_layout = build_retrigger_layout(
         ask=ask_client.ask, task2_model=settings.task_models.task2,
@@ -1490,6 +1496,7 @@ def build_app(
         enumerate_mods=enumerate_mods,
         enumerate_uses=enumerate_uses,
         save_private_surface=save_private_surface,
+        author_private_fields=cfg.layout_author_private_fields,
     )
 
     model_notes_store = FileModelNotesStore(

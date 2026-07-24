@@ -18,8 +18,9 @@ from pathlib import Path
 from typing import Any
 
 from pipeline_core.domain.models import FnRecord
+from pipeline_core.domain.private_surface import pub_fields_authorable
 from pipeline_core.domain.pub_items import pub_items_from_records
-from pipeline_core.domain.rust_elide import elide_fn_bodies
+from pipeline_core.domain.rust_elide import elide_fn_bodies, elide_private_struct_fields
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +35,10 @@ class ApiSurfaceCapture:
     log: Callable[[str], None]
     enumerate_fns: Callable[[Path], list[dict[str, object]] | None] = lambda _: None
     pub_items_manifest_path: Callable[[Path, str], Path] | None = None
+    # Freeze-scope switch, same value the bake classifies under: when the model
+    # designs public structs' private fields, this artefact must not carry the
+    # original's — it is read long after strip, when nothing can correct it.
+    author_private_fields: bool = False
 
     def capture(self, project_dir: Path, module_dir: Path,
                 module_name: str) -> Path | None:
@@ -67,6 +72,14 @@ class ApiSurfaceCapture:
         # leaking bodies with no signal.
         _fn_dicts = self.enumerate_fns(walk_root) or []
         _fn_records = [FnRecord.from_dict(d) for d in _fn_dicts]
+        # Enumerated once, up front: the same records drive the type manifest
+        # below AND (when field authoring is on) the names whose field blocks
+        # this artefact must not disclose.
+        type_records = self.enumerate_types(walk_root) or []
+        _elide_fields = frozenset(
+            t.name for t in type_records
+            if self.author_private_fields and pub_fields_authorable(t)
+            and t.is_pub and t.is_exactly_pub)
         by_file: dict[Path, list[FnRecord]] = {}
         for _r in _fn_records:
             if _r.file:
@@ -93,6 +106,8 @@ class ApiSurfaceCapture:
                 text = elide_fn_bodies(text, _recs)
             # Drop any gen_tests declarations the pipeline added.
             text = self.strip_gen_tests_decls(text)
+            # Text-positional, so it runs AFTER the span-based body elision.
+            text = elide_private_struct_fields(text, _elide_fields)
             condensed = self.condense_to_signatures(text, filename=src_file.name).rstrip()
             if not condensed:
                 continue
@@ -105,12 +120,15 @@ class ApiSurfaceCapture:
         if file_count == 0:
             return None
         out_path.write_text("\n".join(parts), encoding="utf-8")
+        if _elide_fields:
+            self.log(f"  API surface: private fields elided for "
+                     f"{len(_elide_fields)} public struct(s) (model-authored): "
+                     f"{', '.join(sorted(_elide_fields))}.")
         self.log(f"  Captured API surface: {file_count} file(s) → "
                  f"{out_path.relative_to(project_dir)} ({out_path.stat().st_size:,} chars).")
 
         # Deterministic type-name manifest (syn-extracted, same walk_root) so TASK 1
         # knows "what types exist" up front instead of guessing it.
-        type_records = self.enumerate_types(walk_root) or []
         type_names = sorted({t.name for t in type_records if t.name})
         if type_names:
             types_path = self.type_manifest_path(project_dir, module_name)

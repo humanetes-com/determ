@@ -33,6 +33,7 @@ from pipeline_core.domain.models import (
 from pipeline_core.domain.module_reachability import externally_reachable_files
 from pipeline_core.domain.private_surface import (
     PrivateSurface,
+    SurfaceItemKind,
     classify_private_surface,
 )
 from pipeline_core.domain.rust_name_scope import ModuleScopes
@@ -64,6 +65,11 @@ class BakeArtifactsDeps:
     # `use` bindings per file, so a private name is only a reference edge where
     # the ident actually denotes it (see domain/rust_name_scope).
     enumerate_uses: Callable[[Path], list[UseRecord] | None]
+    # Freeze-scope switch: may the model design the PRIVATE FIELDS of public
+    # structs? Baked into the artefact (see PrivateSurface.author_private_fields)
+    # because the API-surface capture is elided to match — the two are one
+    # decision, taken once per workspace.
+    author_private_fields: bool = False
 
 
 def _behaviour_sources(src_dir: Path) -> list[tuple[str, str]]:
@@ -194,8 +200,15 @@ def bake_skeleton_artifacts(
                       else ModuleScopes.from_records(list(mods), list(uses)))
             surface = classify_private_surface(
                 list(types), list(fns), cfg_cluster=cluster.name,
-                reachable_files=reachable, scopes=scopes)
+                reachable_files=reachable, scopes=scopes,
+                author_private_fields=d.author_private_fields)
             d.save_private_surface(project_dir, surface)
+            _pub_fields = [i.name for i in surface.replaceable
+                           if i.kind is SurfaceItemKind.PUB_FIELDS]
+            if _pub_fields:
+                d.log(f"  [bake-skeleton] cluster {cluster.name}: public struct(s) "
+                      f"whose private fields are model-authored: "
+                      f"{', '.join(sorted(_pub_fields))}")
             d.log(f"  [bake-skeleton] cluster {cluster.name}: private surface — "
                   f"{len(surface.replaceable)} replaceable item(s) in "
                   f"{len(surface.components)} component(s), "

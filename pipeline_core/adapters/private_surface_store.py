@@ -60,6 +60,7 @@ def save_private_surface(project_dir: Path, surface: PrivateSurface) -> Path:
             name: sorted(refs)
             for name, refs in surface.public_direct_refs.items()},
         "coupled": [sorted(g) for g in surface.coupled],
+        "author_private_fields": surface.author_private_fields,
     }
     p.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     return p
@@ -84,6 +85,9 @@ def load_private_surface(project_dir: Path, cfg_cluster: str) -> PrivateSurface:
             coupled=tuple(
                 frozenset(str(x) for x in (g or []))
                 for g in (d.get("coupled") or [])),
+            # Absent key ⇔ False: a surface baked before field authoring
+            # existed was, by definition, baked with it off.
+            author_private_fields=bool(d.get("author_private_fields", False)),
         )
     except (OSError, json.JSONDecodeError, KeyError, ValueError):
         return PrivateSurface(cfg_cluster=cfg_cluster, replaceable=(),

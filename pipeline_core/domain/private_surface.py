@@ -35,6 +35,10 @@ class SurfaceItemKind(Enum):
     TYPE_ALIAS = auto()
     TRAIT = auto()
     FN_SIG = auto()   # a private helper fn whose signature touches the layout
+    # A PUBLIC struct whose fields are all private: the head is frozen API,
+    # the fields are not (nothing outside the crate can name them). Only the
+    # field block is authorable — see domain/type_header.
+    PUB_FIELDS = auto()
 
 
 _TYPE_KINDS = {
@@ -89,6 +93,12 @@ class PrivateSurface:
     # to. `public_referenced` above is the union of these, used only for the
     # coarse "is this component sensitive at all" gate.
     public_direct_refs: Mapping[str, frozenset[str]] = field(default_factory=dict)
+    # Which freeze-scope this classification was baked under (stamp, not a
+    # switch): with it on, a public struct's private FIELDS are authorable and
+    # the pre-strip API artefact was captured with those fields elided. Reading
+    # a surface baked under the other setting is a workspace-level mismatch
+    # nothing downstream can repair — only a re-bake can.
+    author_private_fields: bool = False
 
     @property
     def is_empty(self) -> bool:
@@ -103,7 +113,12 @@ class PrivateSurface:
     ) -> bool:
         """True iff any item in `component` is reachable from a public type's
         layout (directly named by a public def, or transitively via the private
-        reference graph). Such a component MUST reach t1.5 with layout pins."""
+        reference graph). Such a component MUST reach t1.5 with layout pins.
+
+        A PUB_FIELDS item IS a public type's layout, so it makes its component
+        sensitive by definition — it need not be reachable from anything."""
+        if any(it.kind is SurfaceItemKind.PUB_FIELDS for it in component):
+            return True
         reachable = _reachable_from(self.public_referenced, self.replaceable)
         return any(it.name in reachable for it in component)
 
@@ -152,6 +167,7 @@ def classify_private_surface(
     cfg_cluster: str = "default",
     reachable_files: frozenset[str] | None = None,
     scopes: ModuleScopes | None = None,
+    author_private_fields: bool = False,
 ) -> PrivateSurface:
     """Partition enumerated items into frozen-public vs private-replaceable.
 
@@ -170,7 +186,15 @@ def classify_private_surface(
     `scopes` carries the crate's module tree + `use` bindings so a reference is
     an edge only where the ident actually denotes that private item. Omitting
     it resolves names crate-globally by bare identifier, which welds every item
-    mentioning a name the crate re-binds elsewhere (see rust_name_scope)."""
+    mentioning a name the crate re-binds elsewhere (see rust_name_scope).
+
+    `author_private_fields` widens the boundary by one class: a PUBLIC struct
+    whose fields are ALL private becomes replaceable as a PUB_FIELDS item — its
+    head stays frozen, its fields are the model's to design. Without it the
+    crate's public wrappers keep pointing at whatever private types the original
+    chose (`pub struct Error { inner: Own<ErrorImpl> }` pins the whole erasure
+    scheme even when every type it names is nominally re-authorable), so the
+    "model owns the private layout" promise stops one field short."""
     frozen_public: set[str] = set()
     public_types: list[TypeRecord] = []
     private_types: list[TypeRecord] = []
@@ -193,6 +217,15 @@ def classify_private_surface(
     public_referenced = frozenset(
         name for refs in public_direct_refs.values() for name in refs)
     items: list[PrivateSurfaceItem] = []
+    if author_private_fields:
+        for t in public_types:
+            if not pub_fields_authorable(t):
+                continue
+            items.append(PrivateSurfaceItem(
+                kind=SurfaceItemKind.PUB_FIELDS, name=t.name, file=t.file,
+                definition=t.definition,
+                references=public_direct_refs.get(t.name, frozenset()),
+            ))
     for t in private_types:
         items.append(PrivateSurfaceItem(
             kind=_TYPE_KINDS[t.kind], name=t.name, file=t.file,
@@ -233,7 +266,19 @@ def classify_private_surface(
         public_direct_refs=public_direct_refs,
         coupled=_coupling_groups(
             type_records, fn_records, replaceable_names, resolver),
+        author_private_fields=author_private_fields,
     )
+
+
+def pub_fields_authorable(t: TypeRecord) -> bool:
+    """True iff this public type's fields are the model's to design.
+
+    Structs only, and only when EVERY field is private. An enum's variants are
+    public API (callers construct and match them) and a mixed struct's `pub`
+    fields are too — freezing those whole is the honest boundary, since a
+    per-field freeze would hand the model half a declaration to author."""
+    return (t.kind == "struct" and bool(t.fields)
+            and not any(f.is_pub for f in t.fields))
 
 
 def _coupling_groups(

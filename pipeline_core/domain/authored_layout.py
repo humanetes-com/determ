@@ -161,6 +161,7 @@ _EXTRACTOR_KIND = {
     SurfaceItemKind.ENUM: "enum",
     SurfaceItemKind.TYPE_ALIAS: "type",
     SurfaceItemKind.TRAIT: "trait",
+    SurfaceItemKind.PUB_FIELDS: "struct",
 }
 
 
