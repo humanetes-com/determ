@@ -54,6 +54,9 @@ class FakeAdapter:
     diags: list[_Diag] = field(default_factory=list)
     implicated: list[tuple[str, str]] = field(default_factory=list)
     raw_results: list[tuple[int, str, str]] = field(default_factory=list)
+    # run_check_diag results, popped FIFO. Empty → falls back to the `diags`
+    # field with rc=0 (a clean check), preserving pre-structured-heal tests.
+    diag_results: list[tuple[int, str, list[_Diag]]] = field(default_factory=list)
     run_results: list[tuple[int, str]] = field(default_factory=list)
     attribute_seq: list[tuple[dict[Any, Any], str]] = field(default_factory=list)
     phase_valid_keys: set[str] = field(default_factory=set)
@@ -107,6 +110,8 @@ class FakeAdapter:
 
     def run_check_diag(self, cmd: str, cwd: Path, env: dict[str, str],
                        timeout: int = 180) -> tuple[int, str, list[_Diag]]:
+        if self.diag_results:
+            return self.diag_results.pop(0)
         return (0, "", list(self.diags))
 
     def build_test_cmd(self, test_stems: list[str],
@@ -119,6 +124,10 @@ class FakeAdapter:
 
     def implicated_fns_from_cargo_errors(
             self, cargo_output: str, target_src_dir: Path) -> list[tuple[str, str]]:
+        return list(self.implicated)
+
+    def implicated_fns_from_diagnostics(
+            self, diagnostics: list[_Diag], target_src_dir: Path) -> list[tuple[str, str]]:
         return list(self.implicated)
 
     def attribute_failures(self, test_output: str, src_dir: Path,
@@ -586,8 +595,12 @@ def test_prepass_heal_reverts_poisoned_seeded_body(tmp_path: Path) -> None:
     c = _cluster()
     fake = FakeAdapter(
         clusters_list=[c], cluster_tests=[("tests/it.rs", "x")],
-        # phase-A ok; PRE-PASS check fails (poisoned seed); validate ok.
-        raw_results=[(0, "", ""), (1, "err", "boom"), (0, "", "")],
+        # phase-A ok; validate ok (run_raw). The PRE-PASS check now runs through
+        # run_check_diag, so its failure — with a structured diagnostic — is
+        # supplied via diag_results, and the fn is attributed by the diagnostics
+        # implicator (not the rendered-text one).
+        raw_results=[(0, "", ""), (0, "", "")],
+        diag_results=[(1, "err", [_Diag("src/lib.rs", "E0605", "boom")])],
         implicated=[("src/lib.rs", "foo")],
         run_results=[(0, "ok")],
     )
