@@ -250,3 +250,52 @@ def test_field_made_public_is_rejected():
         compile_results=(True, True, True))
     assert not res.all_authored
     assert "widening the public API" in res.components[0].reason
+
+
+# ---- cross-cluster adoption: one crate, ONE definition per private type ----
+
+def test_registry_hit_adopts_without_calling_the_model():
+    # A later cfg-cluster must reuse the definition an earlier one fixed: it is
+    # seeded with that cluster's filled bodies, which read those exact fields.
+    from pipeline_core.domain.authored_layout import AuthoredItem
+    fixed = AuthoredItem("ErrorImpl", "struct",
+                         "struct ErrorImpl { inner: Box<dyn StdError> }")
+    d = _Deps("<LAYOUT_ITEM name=\"ErrorImpl\" kind=\"struct\">"
+              "struct ErrorImpl { totally_different: u8 }</LAYOUT_ITEM>", [True])
+    res = author_layout(_surface(), module_name="anyhow", public_surface="",
+                        select_pins=_has_pins, symbol_inventory="", deps=d.deps(),
+                        registry={"ErrorImpl": fixed})
+    assert res.all_authored
+    assert d.prompts == []                                  # no model call at all
+    assert "inner: Box<dyn StdError>" in d.files["src/error.rs"]
+    assert res.components[0].adopted
+    assert res.components[0].authored_items == (("ErrorImpl", fixed),)
+
+
+def test_adopted_layout_that_does_not_compile_falls_back_to_authoring():
+    # The compile gate rules on an adopted layout exactly as on a fresh one;
+    # divergence is the DEGRADED path, and it must be logged as such.
+    from pipeline_core.domain.authored_layout import AuthoredItem
+    fixed = AuthoredItem("ErrorImpl", "struct", "struct ErrorImpl { nope: Missing }")
+    d = _Deps(_GOOD, [False, True])   # adoption fails, then the model's reply compiles
+    res = author_layout(_surface(), module_name="anyhow", public_surface="",
+                        select_pins=_has_pins, symbol_inventory="", deps=d.deps(),
+                        registry={"ErrorImpl": fixed})
+    assert res.all_authored
+    assert not res.components[0].adopted
+    assert len(d.prompts) == 1
+    assert any("DIVERGE" in m for m in d.logs)
+    assert "Box<dyn StdError>" in d.files["src/error.rs"]
+
+
+def test_partial_registry_coverage_puts_fixed_defs_in_the_prompt_verbatim():
+    # Component not fully covered → the model EXTENDS the fixed definitions and
+    # must see their exact text, rather than redesigning them.
+    from pipeline_core.domain.authored_layout import AuthoredItem
+    fixed = AuthoredItem("Other", "struct", "struct Other { tag: u32 }")
+    d = _Deps(_GOOD, [True])
+    author_layout(_surface(), module_name="anyhow", public_surface="",
+                  select_pins=_has_pins, symbol_inventory="", deps=d.deps(),
+                  registry={"Other": fixed})
+    assert d.prompts                       # the model WAS asked
+    assert "struct Other { tag: u32 }" not in d.prompts[0]   # not this component's uid

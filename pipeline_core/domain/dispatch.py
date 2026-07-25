@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from enum import Enum, auto
 
-from pipeline_core.domain.models import FnLocator, Frontier
+from pipeline_core.domain.models import FnLocator, Frontier, ImplBlock
 
 
 class DispatchClass(Enum):
@@ -49,3 +49,35 @@ def defer_blocked_consumers(
         else:
             active[key] = tests
     return active, deferred
+
+
+def impl_route_covers(block: ImplBlock, *, max_stubs: int) -> bool:
+    """True when the per-impl fill route will attempt `block` at all.
+
+    A free-fn container (`""`) and a block whose unit size exceeds the per-impl
+    cap are both delegated to the per-fn route; a block with no work is skipped.
+    Stated once so the impl route's viability filter and the engine's route
+    SEQUENCING check cannot drift — if they drift, a stub the impl route
+    silently drops still reads as "covered" to the sequencer and is never
+    filled."""
+    return bool(block.container) and block.needs_fill and (
+        len(block.stub_members) + len(block.refill_members) <= max_stubs)
+
+
+def stubs_deferred_by_impl_route(
+    blocks: list[ImplBlock], *, max_stubs: int,
+) -> frozenset[FnLocator]:
+    """Stubs that no impl-route unit will attempt — free fns and members of
+    oversized blocks.
+
+    These must be filled BEFORE any impl-route behavioural re-fill, not after
+    it. An `unimplemented!()` reached from a drop glue / vtable slot panics and
+    ABORTS the whole test binary, so every re-fill measured against that binary
+    is judged "crashed the siblings" and reverted however good the body was —
+    the re-fill work is unwinnable until the stub is gone. Running the impl
+    route first therefore spends the LLM budget on guaranteed reverts and
+    schedules the one fill that would unblock them last."""
+    return frozenset(
+        FnLocator(b.file, m.fn_name)
+        for b in blocks if not impl_route_covers(b, max_stubs=max_stubs)
+        for m in b.stub_members)

@@ -26,6 +26,7 @@ from pipeline_core.application.author_layout import (
     AuthorLayoutResult,
     author_layout,
 )
+from pipeline_core.domain.authored_layout import AuthoredItem
 from pipeline_core.domain.behaviour import (
     BehaviourSpec,
     BehaviourSuite,
@@ -93,6 +94,13 @@ class LayoutPhaseDeps:
     # without re-deriving reachability. Optional — an omitted store is a no-op
     # (additive; the phase runs exactly as before F11 M3 existed).
     save_layout_outcomes: Callable[[Path, AuthorLayoutResult], Path] | None = None
+    # Crate-wide layout registry (uid → the crate's ONE definition of that
+    # private item). Read once at phase start so a re-run adopts what a previous
+    # pass fixed, persisted after each cluster so the mid-run re-trigger writes
+    # into the same store. Optional — omitted, adoption still works WITHIN this
+    # phase via the in-memory registry, it just does not outlive the process.
+    load_registry: Callable[[Path], dict[str, AuthoredItem]] | None = None
+    save_registry: Callable[[Path, dict[str, AuthoredItem]], Path] | None = None
     # The freeze scope CONFIGURED for this run, compared against the one the
     # surface was BAKED under. They can only differ across a config change, and
     # only a re-bake can close the gap: the replaceable set and the elided API
@@ -108,6 +116,13 @@ def run_layout_phase(
     results (empty dict when nothing was authorable). Never raises on a single
     cluster's failure — the frozen skeleton is always a valid fallback."""
     results: dict[str, AuthorLayoutResult] = {}
+    # Crate-wide layout registry, uid → the definition the FIRST cluster that
+    # reached this item committed. A crate has one definition per private type,
+    # so later clusters adopt it instead of inventing a second, incompatible
+    # one — otherwise the bodies seeded into them from an earlier cluster read
+    # fields that no longer exist and the cluster never compiles.
+    registry: dict[str, AuthoredItem] = (
+        deps.load_registry(project_dir) if deps.load_registry else {})
     for cluster in cluster_names:
         try:
             surface = deps.load_surface(project_dir, cluster)
@@ -134,17 +149,29 @@ def run_layout_phase(
             select_pins=select_pins,
             symbol_inventory=deps.symbol_inventory_text(project_dir, cluster),
             deps=deps.author_deps_for(project_dir, cluster),
+            registry=registry,
         )
         results[cluster] = res
+        for comp_res in res.components:
+            for uid, item in comp_res.authored_items:
+                registry.setdefault(uid, item)   # first cluster to reach it wins
+        if deps.save_registry is not None:
+            try:
+                deps.save_registry(project_dir, registry)
+            except Exception as e:
+                deps.log(f"  [t1.5] {cluster}: layout-registry persist failed "
+                         f"(non-fatal, adoption stays in-memory): {e}")
         if deps.save_layout_outcomes is not None:
             try:
                 deps.save_layout_outcomes(project_dir, res)
             except Exception as e:
                 deps.log(f"  [t1.5] {cluster}: layout-outcomes persist failed (non-fatal): {e}")
         authored = sum(1 for c in res.components if c.authored)
+        adopted = sum(1 for c in res.components if c.adopted)
         deps.log(
             f"  [t1.5] {cluster}: authored {authored}/{len(res.components)} "
-            f"component(s); {len(res.gated)} gated (harvest gap); "
+            f"component(s) ({adopted} adopted from an earlier cluster); "
+            f"{len(res.gated)} gated (harvest gap); "
             f"{len(res.components) - authored - len(res.gated)} left frozen.")
         # The model may have renamed private helpers → recompute leaf-first
         # order + fn-ref-counts over the REWRITTEN scaffold (plan_2 M2).
@@ -174,6 +201,9 @@ def make_layout_phase_runner(
     # compile gate decides the pins. Absent ⇒ pins stay advisory (prior gate).
     write_pin_probe: Callable[[Path, str, str | None], None] | None = None,
     save_layout_outcomes: Callable[[Path, AuthorLayoutResult], Path] | None = None,
+    # Crate-wide layout registry — see LayoutPhaseDeps.
+    load_registry: Callable[[Path], dict[str, AuthoredItem]] | None = None,
+    save_registry: Callable[[Path, dict[str, AuthoredItem]], Path] | None = None,
     author_private_fields: bool = False,
 ) -> Callable[[Path, str], None]:
     """Assemble the t1.5 phase runner from resident ports (composition helper —
@@ -230,6 +260,7 @@ def make_layout_phase_runner(
             author_deps_for=_author_deps_for,
             recompute_leaf_order=_recompute_leaf_order,
             save_layout_outcomes=save_layout_outcomes,
+            load_registry=load_registry, save_registry=save_registry,
             author_private_fields=author_private_fields)
         run_layout_phase(project_dir, module_name,
                          [c.name for c in clusters], deps)

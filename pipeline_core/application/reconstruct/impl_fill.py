@@ -31,6 +31,7 @@ from pipeline_core.application.reconstruct.pull_resolver import (
     workspace_file_reader,
 )
 from pipeline_core.domain.blueprint import Blueprint, blueprint_path, parse_blueprint
+from pipeline_core.domain.dispatch import impl_route_covers
 from pipeline_core.domain.fill_groups import BlockGroupInput, coupled_fill_groups
 from pipeline_core.domain.identity import ContainerId, RetroKey
 from pipeline_core.domain.impl_routing import (
@@ -283,13 +284,8 @@ def fill_impl_blocks(
         blocks = narrowed
 
     # Drop empty / free-fn / oversized blocks (handled by per-fn fallback).
-    def _viable(b: ImplBlock) -> bool:
-        if not b.container:
-            return False
-        if not b.needs_fill:
-            return False
-        return not len(b.stub_members) + len(b.refill_members) > _PER_IMPL_MAX_STUBS
-    viable_blocks = [b for b in blocks if _viable(b)]
+    viable_blocks = [b for b in blocks
+                     if impl_route_covers(b, max_stubs=_PER_IMPL_MAX_STUBS)]
     _refill_block_count = sum(1 for b in viable_blocks if b.refill_members)
     _log(f"  [phase-c/impl] cluster {cluster_name}: "
          f"{len(viable_blocks)} impl block(s) viable "

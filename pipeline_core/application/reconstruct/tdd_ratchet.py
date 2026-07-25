@@ -51,6 +51,28 @@ def snapshot_allowed(missing_count: int, min_missing: int) -> bool:
     return min_missing > 0 or missing_count == 0
 
 
+def snapshot_due(
+    pass_count: int, best_pass: int, tree_sha: str, snap_sha: str | None,
+) -> bool:
+    """Should the current tree replace the best-known snapshot?
+
+    Yes when there is no snapshot yet, when the count strictly improved, AND
+    — crucially — when the count merely HELD but the tree moved. The ratchet's
+    mandate is to undo NET REGRESSIONS; an iter that lands work at an equal
+    pass count regressed nothing, so that work is the new baseline. Keeping the
+    older snapshot instead makes a later breach revert destroy it.
+
+    The case that made this non-optional: filling a stub (`unimplemented!()` →
+    a compiling body) removes a guaranteed panic but often moves no test, so it
+    reads as a plateau. Against a pre-fill snapshot the next breach re-stubs the
+    file, the stub re-enters the frontier, and the loop re-fills the same fn
+    every iter forever at zero payoff. An UNCHANGED tree still never re-snapshots
+    (same sha) — that was the only case the old strict `>` got right.
+    """
+    return snap_sha is None or pass_count > best_pass or (
+        pass_count == best_pass and tree_sha != snap_sha)
+
+
 def snapshot_src_tree(src_root: Path) -> dict[str, str] | None:
     """Every `.rs` under `src_root` → {abs-path: text}. None when `src_root` is
     absent (ratchet self-disables for that workspace). Scoped to `src/` on

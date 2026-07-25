@@ -22,6 +22,7 @@ from pipeline_core.application.reconstruct.tdd_ratchet import (
     ratchet_breach,
     restore_src_tree,
     snapshot_allowed,
+    snapshot_due,
     snapshot_src_tree,
 )
 from pipeline_core.domain.attribution import union_unattributed_stubs
@@ -256,12 +257,14 @@ def run_phase_c_tdd(
     _src_root = target_src_dir / "src"
     _bratchet_best = -1
     _bratchet_snap: dict[str, str] | None = None
+    _bratchet_sha: str | None = None   # tree the snapshot was taken from
     # Persist each new pass high-water to heal's durable restore tiers
     # (best-tree snapshot + workspace-git commit). Tracked independently of
     # the in-memory batch ratchet above so the tiers stay populated even when
     # PHASE_C_TDD_BATCH_RATCHET is off — without this, a parse-corruption heal
     # falls straight through to the skeleton nuke (loses every fill in the file).
     _checkpoint_best = -1
+    _checkpoint_sha: str | None = None
     recently_filled: list[FnLocator] = []
     recently_filled_max = int(os.getenv("TDD_RECENTLY_FILLED_MAX", "50"))
     # Hook 3 — causal-regression tracking. `prev_failed` = the failing-test set
@@ -462,23 +465,28 @@ def run_phase_c_tdd(
         # comparison is exact; two confounded readings are non-comparable.
         _min_missing = (_oracle.missing_count if _ckpt_min_missing is None
                         else min(_ckpt_min_missing, _oracle.missing_count))
-        if _batch_ratchet and (_bratchet_snap is None or pass_count > _bratchet_best) \
+        _tree_sha = tree_content_sha(_src_root)
+        if _batch_ratchet \
+                and snapshot_due(pass_count, _bratchet_best, _tree_sha, _bratchet_sha) \
                 and snapshot_allowed(_oracle.missing_count, _min_missing):
             _snap = snapshot_src_tree(_src_root)
             if _snap is not None:
                 _bratchet_best = pass_count
                 _bratchet_snap = _snap
+                _bratchet_sha = _tree_sha
                 _bratchet_missing = _oracle.missing_count
         # Durable checkpoint of the new-best fill tree so a later heal restores
         # THIS good state (best-tree copy / git ancestor) instead of nuking the
         # file to the baked skeleton. Independent of _batch_ratchet. Never
         # persisted while the oracle is short: a higher pass count over a
         # shrunken suite must not overwrite a full-oracle best tree.
-        if deps.checkpoint_fill_tree is not None and pass_count > _checkpoint_best \
+        if deps.checkpoint_fill_tree is not None \
+                and snapshot_due(pass_count, _checkpoint_best, _tree_sha, _checkpoint_sha) \
                 and _oracle.missing_count == 0:
             deps.checkpoint_fill_tree(
                 project_dir, cluster.name, target_src_dir, pass_count, iter_n)
             _checkpoint_best = pass_count
+            _checkpoint_sha = _tree_sha
         _ckpt_min_missing = _min_missing
         # F6 — measurement provenance: stamp every iter event with the tree it
         # measured (content hash), the oracle size (denominator), and the actual
@@ -486,7 +494,7 @@ def run_phase_c_tdd(
         # drift is detectable.
         _measure = Measurement(
             cluster=cluster.name, iteration=iter_n,
-            tree_sha=tree_content_sha(_src_root),
+            tree_sha=_tree_sha,
             oracle_size=pass_count + fail_count,
             pass_count=pass_count, fail_count=fail_count,
             passed=parse_test_output(output).passed,

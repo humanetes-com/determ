@@ -12,6 +12,7 @@ from typing import Any
 from pipeline_core.application.reconstruct.tdd_ratchet import (
     ratchet_breach,
     restore_src_tree,
+    snapshot_due,
     snapshot_src_tree,
 )
 
@@ -77,6 +78,16 @@ def test_snapshot_allowed_regimes() -> None:
     assert snapshot_allowed(0, 0)          # crash-free tree, always ok
     assert snapshot_allowed(23, 21)        # both confounded: noise can't veto
     assert not snapshot_allowed(2, 0)      # would trade crash-free for crashy
+
+
+def test_snapshot_due_takes_equal_score_work() -> None:
+    assert snapshot_due(0, -1, "sha0", None)        # no snapshot yet
+    assert snapshot_due(5, 3, "shaA", "shaB")       # strict improvement
+    # The bug this exists for: a stub fill holds the score but changes the tree.
+    # Staying on the old snapshot would let a later breach revert re-stub it.
+    assert snapshot_due(5, 5, "shaNEW", "shaOLD")
+    assert not snapshot_due(5, 5, "shaSAME", "shaSAME")  # nothing moved
+    assert not snapshot_due(4, 5, "shaNEW", "shaOLD")    # a regression is not a baseline
 
 
 def _driver_deps(run_cargo, inventory, events):
@@ -165,3 +176,20 @@ def test_reproduced_breach_reverts_to_snapshot(tmp_path: Path, monkeypatch) -> N
     assert (tmp_path / "src" / "a.rs").read_text(encoding="utf-8") == "orig"
     reverts = [d for ev, d in events if ev == "phase_c.tdd.batch_revert"]
     assert reverts and "oracle missing" in reverts[0]["breach"]
+
+
+_ZERO = ("test t1 ... FAILED\ntest t2 ... FAILED\n"
+         "test result: FAILED. 0 passed; 2 failed; 0 ignored")
+
+
+def test_equal_score_fill_survives_a_later_revert(tmp_path: Path, monkeypatch) -> None:
+    # Iter 2's fill holds the pass count (the fingerprint of a stub fill: the
+    # panic is gone, no test moved yet) so it must become the new best state.
+    # Iter 3 then net-regresses; restoring must land on the FILLED tree, never
+    # re-stub it — otherwise the next iter re-fills the same fn, forever.
+    events: list[tuple[str, dict]] = []
+    _run_tdd(monkeypatch, tmp_path,
+             [(_INTACT, False), (_INTACT, True), (_ZERO, False)], events)
+    assert (tmp_path / "src" / "a.rs").read_text(encoding="utf-8") == "FILLED"
+    reverts = [d for ev, d in events if ev == "phase_c.tdd.batch_revert"]
+    assert reverts and "pass_count 0<1" in reverts[0]["breach"]

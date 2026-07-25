@@ -1555,6 +1555,7 @@ def build_app(
             scan_stub_records_fn=_via("scan_stub_records_for_cluster"),
             scan_stub_tuples_fn=structure_cache.scan_unimplemented_for_cluster,
             collect_impl_blocks_fn=_via("collect_impl_blocks"),
+            collect_impl_blocks_for_cluster_fn=_via("collect_impl_blocks_for_cluster"),
             fn_container_index_fn=_via("fn_container_index"),
             fn_belongs_to_cluster_fn=structure_cache.fn_belongs_to_cluster,
             cluster_filter_type_methods_fn=_membership.cluster_filter_type_methods,

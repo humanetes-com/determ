@@ -22,6 +22,11 @@ from pipeline_core.adapters.layout_outcome_store import (
     save_retrigger_attempts,
     update_layout_outcome,
 )
+from pipeline_core.adapters.layout_registry_store import (
+    load_registry,
+    save_registry,
+    upsert_registry,
+)
 from pipeline_core.adapters.private_surface_store import load_private_surface
 from pipeline_core.adapters.skeleton_compile import (
     compile_skeleton_check,
@@ -61,6 +66,7 @@ def build_layout_phase_runner(
         fn_name_counts=fn_name_counts,
         log=log,
         save_layout_outcomes=save_layout_outcomes,
+        load_registry=load_registry, save_registry=save_registry,
         write_pin_probe=write_pin_probe,
         author_private_fields=author_private_fields,
     )
@@ -120,6 +126,7 @@ def build_retrigger_layout(
             log=log, load_surface=load_private_surface,
             load_layout_records=load_layout_records,
             update_layout_outcome=update_layout_outcome,
+            upsert_layout_registry=upsert_registry,
             enumerate_skeleton_fns=lambda pd, c: enumerate_fns(
                 skeleton_src_dir_for(pd, c)),
             enumerate_skeleton_types=lambda pd, c: enumerate_types(

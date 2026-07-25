@@ -24,11 +24,15 @@ from pathlib import Path
 from typing import Any
 
 from pipeline_core.application.fix_loop import FixOutcome, drive_fix_loop
+from pipeline_core.application.reconstruct.cluster_membership import (
+    collect_impl_refill_targets,
+)
 from pipeline_core.application.reconstruct.context import PerFnPassCtx
 from pipeline_core.application.reconstruct.fill_one_fn import FillOneFn
 from pipeline_core.application.reconstruct.scheduling import group_priority_levels
 from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.cfg import CfgSet
+from pipeline_core.domain.dispatch import stubs_deferred_by_impl_route
 from pipeline_core.domain.enums import FillUnit
 from pipeline_core.domain.models import (
     BuildCluster,
@@ -63,6 +67,9 @@ class EngineConfig:
     per_pass_test_fix_max_stalls: int
     pass_max_stalls: int
     fix_err_cap: int
+    # Impl-route unit cap; the engine needs it to know which frontier stubs
+    # that route will never attempt (see `stubs_deferred_by_impl_route`).
+    per_impl_max_stubs: int = 12
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,8 +158,41 @@ class PhaseCFillEngine:
             cluster_env = self.cargo.env()
         # P5 — per-impl-block path. New default unit of work: fill all stubs of
         # one impl block in one LLM call. The per-impl path delegates free fns and
-        # oversized blocks back to the per-fn path below.
-        if self.config.fill_unit is FillUnit.IMPL:
+        # oversized blocks back to the per-fn path below — but only AFTER it has
+        # run, which is the wrong order when one of those stubs is what blocks it:
+        #
+        # Stubs before re-fills, ACROSS routes. A stub the impl route never
+        # attempts (free fn / oversized block) that panics from drop glue or a
+        # vtable slot aborts the test binary, so every impl-route re-fill judged
+        # against that binary is reverted as a sibling crash no matter how good
+        # the body is. Give those stubs this call to themselves; the TDD driver
+        # re-enters next iter with them filled and the impl route resumes. Only
+        # under the TDD driver — the fn_walk driver gets one call and must not
+        # have it narrowed.
+        _impl_deferred_stubs: frozenset[FnLocator] = frozenset()
+        if self.config.fill_unit is FillUnit.IMPL and tdd_frontier_keys is not None:
+            # Refill members stamped first: the impl route's unit-size cap
+            # counts stubs + refills, so a block only looks coverable here if it
+            # is still coverable once this iter's re-fill targets are on it.
+            _blocks_now = collect_impl_refill_targets(
+                self.ws.collect_impl_blocks_for_cluster(target_src_dir, cluster) or [],
+                tdd_frontier_keys, tdd_frontier_tests)
+            _impl_deferred_stubs = stubs_deferred_by_impl_route(
+                _blocks_now, max_stubs=self.config.per_impl_max_stubs,
+            ) & tdd_frontier_keys
+        if _impl_deferred_stubs:
+            self.tel.log(
+                f"  [phase-c/impl] cluster {cluster_name}: deferring the impl "
+                f"route this iter — {len(_impl_deferred_stubs)} frontier stub(s) "
+                "it never attempts (free fn / oversized block) must fill first, "
+                "or every re-fill is reverted as a sibling crash: "
+                + ", ".join(sorted(f"{f}::{fn}" for f, fn in _impl_deferred_stubs)))
+            self.tel.emit("phase_c.dispatch.impl_route_deferred", data={
+                "cluster": cluster_name,
+                "stubs": sorted(f"{f}::{fn}" for f, fn in _impl_deferred_stubs)})
+            tdd_frontier_keys = set(_impl_deferred_stubs)
+            _carryover: dict[str, Any] = {}
+        elif self.config.fill_unit is FillUnit.IMPL:
             _impl_stats = self.impl_path.fill_impl_blocks(
                 project_dir=project_dir,
                 target_src_dir=target_src_dir,

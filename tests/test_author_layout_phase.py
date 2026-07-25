@@ -191,3 +191,47 @@ def test_phase_silent_when_the_scope_matches():
     r = _Recorder(_suite_with_pin(), _GOOD, True)
     run_layout_phase(Path("/x"), "anyhow", ["stable"], r.deps())
     assert not [m for m in r.logs if "WARNING" in m]
+
+
+def test_registry_carries_one_layout_across_clusters(tmp_path):
+    """The SECOND cluster must adopt the first's definitions, not author its
+    own — a crate has one definition per private type, and the second cluster
+    is seeded with the first's filled bodies."""
+    from pipeline_core.application.author_layout_phase import (
+        LayoutPhaseDeps,
+        run_layout_phase,
+    )
+    from pipeline_core.domain.authored_layout import AuthoredItem
+
+    prompts: list[str] = []
+    saved: dict[str, dict[str, AuthoredItem]] = {}
+    files = {"stable": {"src/error.rs": "struct ErrorImpl { vtable: u8 }\n"},
+             "nightly": {"src/error.rs": "struct ErrorImpl { vtable: u8 }\n"}}
+    reply = ('<LAYOUT_ITEM name="ErrorImpl" kind="struct">'
+             'struct ErrorImpl { inner: Box<dyn StdError> }</LAYOUT_ITEM>')
+
+    def _author_deps_for(_pd, cluster):
+        def run_model(p):
+            prompts.append(p)
+            return reply
+        return AuthorLayoutDeps(
+            run_model=run_model,
+            read_skeleton=lambda rel: files[cluster].get(rel),
+            write_skeleton=lambda rel, txt: files[cluster].__setitem__(rel, txt),
+            compile_check=lambda: (True, ""), log=lambda _m: None)
+
+    deps = LayoutPhaseDeps(
+        log=lambda _m: None,
+        load_surface=lambda _pd, c: dataclasses.replace(_surface(), cfg_cluster=c),
+        load_suite=lambda _pd, _c: _suite_with_pin(),
+        public_surface_text=lambda _pd, _c: "",
+        symbol_inventory_text=lambda _pd, _c: "",
+        author_deps_for=_author_deps_for,
+        recompute_leaf_order=lambda _pd, _c: None,
+        save_registry=lambda pd, reg: saved.setdefault("reg", dict(reg)) and pd)
+    res = run_layout_phase(tmp_path, "anyhow", ["stable", "nightly"], deps)
+
+    assert len(prompts) == 1                       # nightly never called the model
+    assert res["nightly"].components[0].adopted
+    assert files["nightly"]["src/error.rs"] == files["stable"]["src/error.rs"]
+    assert saved["reg"]["ErrorImpl"].definition.startswith("struct ErrorImpl {")

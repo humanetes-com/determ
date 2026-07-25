@@ -31,6 +31,7 @@ from pipeline_core.application.author_layout import (
 )
 from pipeline_core.application.author_layout_phase import make_pin_selector
 from pipeline_core.domain.authored_layout import (
+    AuthoredItem,
     component_uids,
     derive_locate_keys,
 )
@@ -89,6 +90,13 @@ class RetriggerLayoutDeps:
     load_attempts: Callable[[Path, str], dict[str, int]]
     save_attempts: Callable[[Path, str, dict[str, int]], Path]
     max_attempts: int = DEFAULT_MAX_ATTEMPTS
+    # Crate-wide layout registry upsert. A re-author is a deliberate redesign of
+    # THIS CRATE's layout, so the new definitions must become the ones later
+    # cfg-clusters adopt — otherwise a cluster authored after the re-trigger
+    # adopts the superseded layout and its seeded bodies do not compile.
+    # Optional: omitted ⇒ the registry keeps the pre-trigger definitions.
+    upsert_layout_registry: Callable[
+        [Path, tuple[tuple[str, AuthoredItem], ...]], object] | None = None
 
 
 def _component_key(names: frozenset[str]) -> str:
@@ -279,6 +287,10 @@ def retrigger_layout(
                                    reason="re-authoring failed again")
 
         merged_defs = tuple(d for c in res.components for d in c.authored_defs)
+        if deps.upsert_layout_registry is not None:
+            deps.upsert_layout_registry(
+                project_dir,
+                tuple(i for c in res.components for i in c.authored_items))
         deps.update_layout_outcome(
             project_dir, cfg_cluster,
             ComponentResult(tuple(sorted(names)), authored=True,

@@ -82,3 +82,29 @@ def test_update_flips_frozen_to_authored_with_defs(tmp_path):
 def test_update_on_missing_store_is_a_noop(tmp_path):
     assert update_layout_outcome(tmp_path, "stable", ComponentResult(
         item_names=("Own",), authored=True)) is None
+
+
+# ---- crate-wide layout registry ----
+
+def test_registry_round_trips_and_upsert_overwrites(tmp_path):
+    from pipeline_core.adapters.layout_registry_store import (
+        load_registry,
+        save_registry,
+        upsert_registry,
+    )
+    from pipeline_core.domain.authored_layout import AuthoredItem
+
+    assert load_registry(tmp_path) == {}          # absent file reads as empty
+    save_registry(tmp_path, {"Ref": AuthoredItem("Ref", "struct", "struct Ref { p: u8 }")})
+    assert load_registry(tmp_path)["Ref"].definition == "struct Ref { p: u8 }"
+    # a re-author supersedes the previous definition for that uid
+    upsert_registry(tmp_path, (("Ref", AuthoredItem("Ref", "struct", "struct Ref { q: u16 }")),))
+    assert load_registry(tmp_path)["Ref"].definition == "struct Ref { q: u16 }"
+
+
+def test_registry_ignores_a_corrupt_file(tmp_path):
+    from pipeline_core.adapters.layout_registry_store import load_registry, registry_path
+    p = registry_path(tmp_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("{not json", encoding="utf-8")
+    assert load_registry(tmp_path) == {}    # adoption degrades, never crashes t1.5

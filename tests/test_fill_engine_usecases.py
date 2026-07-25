@@ -98,6 +98,8 @@ class FakeFill:
     def enumerate_fns(self, *a: Any) -> Any: return self.s.get("fns", [])
     def enumerate_types(self, *a: Any) -> Any: return []
     def collect_impl_blocks(self, *a: Any) -> Any: return []
+    def collect_impl_blocks_for_cluster(self, *a: Any) -> Any:
+        return self.s.get("cluster_blocks", [])
     def fn_container_index(self, *a: Any) -> dict[tuple[str, str], str]: return {}
     def fn_belongs_to_cluster(self, *a: Any, **k: Any) -> bool: return True
     def cluster_filter_type_methods(self, records: Any, cluster: Any) -> Any: return []
@@ -396,3 +398,42 @@ def test_refill_target_key_matching_no_fn_is_reported(tmp_path: Path) -> None:
     assert "phase_c.refill.dangling_keys" in fake.events
     assert any("nowhere.rs::ghostfn" in m and "match no enumerated fn" in m
                for m in fake.logs)
+
+
+def test_engine_defers_impl_route_for_a_free_fn_stub(tmp_path: Path) -> None:
+    """A frontier stub the impl route never attempts (free fn) must be filled
+    BEFORE any impl-route re-fill: its panic aborts the test binary, so every
+    re-fill judged against that binary is reverted as a sibling crash."""
+    from pipeline_core.domain.models import FnLocator, FnRecord, ImplBlock
+    ws = _mk_ws(tmp_path)
+    free = FnRecord(file="src/e.rs", fn_name="drop_rest")
+    blocks = [ImplBlock(file="src/e.rs", container="", members=(free,),
+                        stub_members=(free,))]
+    key = FnLocator("src/e.rs", "drop_rest")
+    other = FnLocator("src/e.rs", "wrongfn")
+    fake = FakeFill(cluster_blocks=blocks, stub_records=[], stub_tuples=[],
+                    impl_stats=ClusterFillResult(remaining=0, fns_filled=99))
+    out = _engine(fake, FillUnit.IMPL).run(
+        ws, ws / "src", [], "m", "t", cluster=None, cluster_env={},
+        tdd_frontier_keys={key, other},
+        tdd_frontier_tests={other: {"t1"}},
+        skip_end_pass_test=True)
+    # The impl path's scripted result must NOT be what came back.
+    assert out.fns_filled != 99
+    assert "phase_c.dispatch.impl_route_deferred" in fake.events
+
+
+def test_engine_runs_impl_route_when_every_stub_is_covered(tmp_path: Path) -> None:
+    from pipeline_core.domain.models import FnLocator, FnRecord, ImplBlock
+    ws = _mk_ws(tmp_path)
+    m = FnRecord(file="src/e.rs", fn_name="inner")
+    blocks = [ImplBlock(file="src/e.rs", container="impl E", members=(m,),
+                        stub_members=(m,))]
+    stats = ClusterFillResult(remaining=0, fns_filled=3)
+    fake = FakeFill(cluster_blocks=blocks, impl_stats=stats)
+    out = _engine(fake, FillUnit.IMPL).run(
+        ws, ws / "src", [], "m", "t", cluster=None, cluster_env={},
+        tdd_frontier_keys={FnLocator("src/e.rs", "inner")},
+        tdd_frontier_tests={}, skip_end_pass_test=True)
+    assert out is stats
+    assert "phase_c.dispatch.impl_route_deferred" not in fake.events

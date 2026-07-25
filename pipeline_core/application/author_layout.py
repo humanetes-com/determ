@@ -13,15 +13,17 @@ pure orchestration over domain VOs.
 """
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum, auto
 
 from pipeline_core.domain.authored_layout import (
     AuthoredItem,
+    adopt_component,
     authored_locate_keys,
     component_uids,
     parse_authored_layout,
+    shared_definitions_text,
 )
 from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.failure_classification import first_diagnostic
@@ -73,6 +75,12 @@ class ComponentResult:
     # matches against the LIVE skeleton (the baked frozen defs no longer exist
     # there once a splice landed — locating by them fails every attempt).
     authored_defs: tuple[tuple[str, str], ...] = ()
+    # (uid, definition) per committed item — self-describing pairs so a LATER
+    # cfg-cluster can adopt this exact layout instead of inventing a second,
+    # incompatible one for the same private types (see `adopt_component`).
+    # Empty unless committed.
+    authored_items: tuple[tuple[str, AuthoredItem], ...] = ()
+    adopted: bool = False   # committed from the crate-wide registry, no model call
 
 
 class LayoutOutcome(Enum):
@@ -202,6 +210,7 @@ def author_layout(
     symbol_inventory: str,
     deps: AuthorLayoutDeps,
     extra_guidance: str = "",
+    registry: Mapping[str, AuthoredItem] | None = None,
 ) -> AuthorLayoutResult:
     """Author every connected component of `surface`. Each component is
     committed to the skeleton only after the rewritten scaffold compiles; a
@@ -223,24 +232,61 @@ def author_layout(
             results.append(ComponentResult(names, False, reason, gated=True))
             continue
         anchors = _public_anchors(surface, comp)
-        def _prompt(chunk_items: tuple[PrivateSurfaceItem, ...],
-                    chunk_uids: tuple[str, ...], scheme: str, hint: str,
-                    *, _pins: list[BehaviourSpec] = pins,
-                    _anchors: dict[str, str] = anchors) -> str:
-            return build_layout_authoring_prompt(
-                module_name=module_name, cfg_cluster=surface.cfg_cluster,
-                items=chunk_items, public_surface=public_surface,
-                layout_pins=_pins, symbol_inventory=symbol_inventory,
-                extra_guidance=extra_guidance, authored_scheme=scheme,
-                item_uids=chunk_uids, item_anchors=_anchors) + hint
-        committed = False
-        reason = "no attempt"
-        committed_defs: tuple[tuple[str, str], ...] = ()
+        uids = component_uids(comp)
         # snapshot the pristine skeleton files this component touches, so a
         # failed candidate is reverted exactly (no cross-attempt bleed).
         touched = {i.file for i in comp}
         pristine = {f: deps.read_skeleton(f) for f in touched}
         probe = _calibrated_pin_probe(surface, comp, pins, deps)
+
+        # ADOPTION BEFORE AUTHORING. A private type authored by an earlier
+        # cfg-cluster is already this crate's definition of that type, and this
+        # cluster is seeded with the earlier cluster's filled bodies. Authoring
+        # a second layout renames the very fields those bodies read, and the
+        # whole cluster stops compiling (`no field lifetime on Ref`). The same
+        # compile+pin gate decides it, so an adopted layout is never trusted
+        # blind — it just costs no model call.
+        adopted = adopt_component(uids, registry or {})
+        if adopted is not None:
+            ok, why, _ = _try_commit(comp, adopted, deps, probe, pristine)
+            if ok:
+                deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: adopted the "
+                         "layout already fixed by an earlier cluster "
+                         "(no model call).")
+                results.append(ComponentResult(
+                    names, True, "",
+                    authored_defs=authored_locate_keys(comp, adopted),
+                    authored_items=tuple((u, adopted[u]) for u in uids),
+                    adopted=True))
+                continue
+            deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: the crate's "
+                     f"existing layout does not hold here ({first_diagnostic(why) or why}) "
+                     "— re-authoring; this cluster's layout will DIVERGE and "
+                     "cross-cluster body seeding into it will not compile.")
+        # Partly covered: the model must EXTEND the fixed definitions (adding
+        # what this cluster's cfg needs), never redesign them — so it gets their
+        # exact current text and an instruction to reproduce it verbatim.
+        fixed = [registry[u] for u in uids if registry and u in registry]
+        shared = ("\n\nThese definitions are ALREADY FIXED for this crate by "
+                  "another cfg-cluster. Reproduce each one EXACTLY as given and "
+                  "design only the remaining items around them:\n"
+                  + shared_definitions_text(fixed)) if fixed and adopted is None else ""
+
+        def _prompt(chunk_items: tuple[PrivateSurfaceItem, ...],
+                    chunk_uids: tuple[str, ...], scheme: str, hint: str,
+                    *, _pins: list[BehaviourSpec] = pins,
+                    _anchors: dict[str, str] = anchors,
+                    _shared: str = shared) -> str:
+            return build_layout_authoring_prompt(
+                module_name=module_name, cfg_cluster=surface.cfg_cluster,
+                items=chunk_items, public_surface=public_surface,
+                layout_pins=_pins, symbol_inventory=symbol_inventory,
+                extra_guidance=extra_guidance + _shared, authored_scheme=scheme,
+                item_uids=chunk_uids, item_anchors=_anchors) + hint
+        committed = False
+        reason = "no attempt"
+        committed_defs: tuple[tuple[str, str], ...] = ()
+        committed_items: tuple[tuple[str, AuthoredItem], ...] = ()
         for attempt in range(1, deps.max_attempts + 1):
             hint = _retry_hint(reason) if attempt > 1 else ""
             authored, reason = _author_component(
@@ -249,37 +295,21 @@ def author_layout(
                 deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: {reason} "
                          f"(attempt {attempt})")
                 continue
-            edited, splice_err = _splice_component(comp, authored, deps)
-            if splice_err:
-                reason = splice_err
-                deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: {reason} "
-                         f"(attempt {attempt})")
-                continue
-            for rel, txt in edited.items():
-                deps.write_skeleton(rel, txt)
-            # The pin probe rides along with THIS compile: a layout that no
-            # longer satisfies `size_of::<Error>() == size_of::<usize>()` must
-            # be rejected here, not discovered a whole sweep later as repr
-            # failures blamed on individual fn bodies.
-            if probe.checks_anything and deps.write_pin_probe is not None:
-                deps.write_pin_probe(probe.source)
-            compiled, errors = deps.compile_check()
-            if deps.write_pin_probe is not None:
-                deps.write_pin_probe(None)
-            if compiled:
+            ok, reason, errors = _try_commit(comp, authored, deps, probe, pristine)
+            if ok:
                 committed = True
-                reason = ""
                 committed_defs = authored_locate_keys(comp, authored)
+                committed_items = tuple((u, authored[u]) for u in uids
+                                       if u in authored)
                 pin_note = (f" [{len(probe.gated)} layout pin(s) verified]"
                             if probe.checks_anything else "")
                 deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: authored "
                          f"layout compiles (attempt {attempt}).{pin_note}")
                 break
-            reason = ("authored scaffold did not compile:\n"
-                      + errors if errors else "authored scaffold did not compile")
-            for rel, orig in pristine.items():
-                if orig is not None:
-                    deps.write_skeleton(rel, orig)
+            if not errors:   # splice/coverage rejection, nothing was written
+                deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: {reason} "
+                         f"(attempt {attempt})")
+                continue
             # Name the first diagnostic: an environmental failure that no
             # authored layout can fix (E0554 = nightly `#![feature]` built on
             # stable) is otherwise indistinguishable in the log from a model
@@ -291,9 +321,50 @@ def author_layout(
                      + (" (layout pins were gated this attempt)"
                         if probe.checks_anything else "")
                      + (f": {diag}" if diag else "."))
-        results.append(ComponentResult(names, committed, reason,
-                                       authored_defs=committed_defs))
+        results.append(ComponentResult(
+            names, committed, reason, authored_defs=committed_defs,
+            authored_items=committed_items))
     return AuthorLayoutResult(surface.cfg_cluster, tuple(results))
+
+
+def _try_commit(
+    items: tuple[PrivateSurfaceItem, ...], authored: dict[str, AuthoredItem],
+    deps: AuthorLayoutDeps, probe: LayoutProbe, pristine: dict[str, str | None],
+) -> tuple[bool, str, str]:
+    """Splice one candidate layout into the skeleton and KEEP it only if the
+    rewritten scaffold still compiles with the component's layout pins probed.
+    Any failure rolls the touched files back to `pristine`.
+
+    Returns (committed, reason, compiler_errors). `compiler_errors` is empty for
+    a splice/coverage rejection — the caller needs the two apart, since nothing
+    was written in that case and there is no diagnostic to name.
+
+    One helper for BOTH candidate sources (the model's reply and a layout
+    adopted from an earlier cfg-cluster): a second copy of the accept/rollback
+    sequence is how one path ends up skipping the pin probe or leaking a failed
+    candidate into the tree.
+    """
+    edited, splice_err = _splice_component(items, authored, deps)
+    if splice_err:
+        return False, splice_err, ""
+    for rel, txt in edited.items():
+        deps.write_skeleton(rel, txt)
+    # The pin probe rides along with THIS compile: a layout that no longer
+    # satisfies `size_of::<Error>() == size_of::<usize>()` must be rejected
+    # here, not discovered a whole sweep later as repr failures blamed on
+    # individual fn bodies.
+    if probe.checks_anything and deps.write_pin_probe is not None:
+        deps.write_pin_probe(probe.source)
+    compiled, errors = deps.compile_check()
+    if deps.write_pin_probe is not None:
+        deps.write_pin_probe(None)
+    if compiled:
+        return True, "", ""
+    for rel, orig in pristine.items():
+        if orig is not None:
+            deps.write_skeleton(rel, orig)
+    return False, ("authored scaffold did not compile:\n" + errors
+                   if errors else "authored scaffold did not compile"), errors
 
 
 def _public_anchors(

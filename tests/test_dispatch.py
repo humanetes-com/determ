@@ -37,3 +37,43 @@ def test_readmitted_when_producer_no_longer_stub() -> None:
 
 def test_dispatch_class_values() -> None:
     assert DispatchClass.ACTIVE is not DispatchClass.DEFERRED
+
+
+# ---- impl-route coverage: which stubs that route will never attempt ----
+
+from pipeline_core.domain.dispatch import (  # noqa: E402
+    impl_route_covers,
+    stubs_deferred_by_impl_route,
+)
+from pipeline_core.domain.models import FnRecord, ImplBlock  # noqa: E402
+
+
+def _blk(container: str, stubs: tuple[str, ...] = (),
+         refills: tuple[str, ...] = ()) -> ImplBlock:
+    mk = tuple(FnRecord(file="src/e.rs", fn_name=n) for n in stubs)
+    rf = tuple(FnRecord(file="src/e.rs", fn_name=n) for n in refills)
+    return ImplBlock(file="src/e.rs", container=container,
+                     members=mk + rf, stub_members=mk, refill_members=rf)
+
+
+def test_impl_route_skips_free_fns_and_oversized_blocks() -> None:
+    assert impl_route_covers(_blk("impl E", ("a",)), max_stubs=2)
+    assert not impl_route_covers(_blk("", ("free",)), max_stubs=2)      # free fn
+    assert not impl_route_covers(_blk("impl E"), max_stubs=2)           # no work
+    # cap counts stubs + refills together, not stubs alone
+    assert not impl_route_covers(_blk("impl E", ("a", "b"), ("c",)), max_stubs=2)
+
+
+def test_deferred_stubs_are_exactly_the_uncovered_ones() -> None:
+    blocks = [_blk("impl E", ("covered",)),
+              _blk("", ("free1", "free2")),
+              _blk("impl Big", ("x", "y", "z"))]
+    got = stubs_deferred_by_impl_route(blocks, max_stubs=2)
+    assert got == frozenset({FnLocator("src/e.rs", "free1"),
+                             FnLocator("src/e.rs", "free2"),
+                             FnLocator("src/e.rs", "x"),
+                             FnLocator("src/e.rs", "y"),
+                             FnLocator("src/e.rs", "z")})
+    # a refill member of an uncovered block is NOT a stub → never deferred here
+    assert stubs_deferred_by_impl_route(
+        [_blk("", (), ("refill_only",))], max_stubs=2) == frozenset()

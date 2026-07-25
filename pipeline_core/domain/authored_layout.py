@@ -17,6 +17,7 @@ emitting ``Own&lt;T&gt;`` — left as-is, that text would splice as non-Rust).
 from __future__ import annotations
 
 import html
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from pipeline_core.domain.models import FnRecord, TypeRecord
@@ -212,3 +213,32 @@ def layout_coverage(
     req = frozenset(component_uids(required))
     got = layout.names
     return req - got, got - req
+
+
+def adopt_component(
+    uids: tuple[str, ...], registry: Mapping[str, AuthoredItem],
+) -> dict[str, AuthoredItem] | None:
+    """The already-fixed definitions for EVERY uid of one component, or None
+    when the registry does not cover all of them.
+
+    A crate compiles as ONE source tree: each private struct/fn has exactly one
+    definition, whatever cfg-cluster reached it first. When a later cluster is
+    seeded with an earlier cluster's filled bodies, those bodies name the
+    earlier cluster's INVENTED field names — re-authoring the same type
+    independently makes every seeded body reference a field that no longer
+    exists (`no field lifetime on Ref`, `no field object_boxed on ErrorVTable`)
+    and the whole cluster stops compiling. Adoption is therefore the default and
+    re-authoring the fallback, never the other way round."""
+    picked = {uid: registry[uid] for uid in uids if uid in registry}
+    return picked if len(picked) == len(uids) and uids else None
+
+
+def shared_definitions_text(items: Sequence[AuthoredItem]) -> str:
+    """The already-fixed definitions rendered for a prompt, verbatim.
+
+    Used when a component is only PARTLY covered by the registry: the model
+    must extend the crate's existing layout (adding what this cluster's cfg
+    needs) instead of redesigning it, so it needs the exact current text of the
+    definitions it may not change."""
+    return "\n\n".join(f"// {i.kind} {i.name} — already fixed crate-wide, "
+                       f"reproduce VERBATIM\n{i.definition}" for i in items)

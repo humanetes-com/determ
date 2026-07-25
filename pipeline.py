@@ -1205,6 +1205,7 @@ def _build_phase_c_engine(*, structure: "_structure_port.StructureReader | None"
         per_pass_test_fix_max_stalls=_PER_PASS_TEST_FIX_MAX_STALLS,
         pass_max_stalls=int(os.getenv("PHASE_C_PASS_MAX_STALLS", "2")),
         fix_err_cap=_FIX_ERR_CAP,
+        per_impl_max_stubs=_PER_IMPL_MAX_STUBS,
     )
     return PhaseCFillEngine(tel=roles.tel, mut=roles.mut, cargo=roles.cargo, prompt=roles.prompt,
                             ws=ws, retros=roles.retros, tests=roles.tests, stall=roles.stall,

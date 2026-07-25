@@ -290,6 +290,7 @@ class WorkspaceModelAdapter:
     scan_stub_records_fn: Callable[[Path, Any], list[dict[str, Any]] | None]
     scan_stub_tuples_fn: Callable[[Path, Any], list[FnLocator]]
     collect_impl_blocks_fn: Callable[[Path], list[Any] | None]
+    collect_impl_blocks_for_cluster_fn: Callable[..., list[Any] | None]
     fn_container_index_fn: Callable[[Path], dict[FnLocator, str]]
     fn_belongs_to_cluster_fn: Callable[..., bool]
     cluster_filter_type_methods_fn: Callable[[list[Any], Any], list[Any]]
@@ -312,6 +313,10 @@ class WorkspaceModelAdapter:
 
     def collect_impl_blocks(self, src_dir: Path) -> list[Any] | None:
         return self.collect_impl_blocks_fn(src_dir)
+
+    def collect_impl_blocks_for_cluster(self, target_src_dir: Path,
+                                        cluster: Any) -> list[Any] | None:
+        return self.collect_impl_blocks_for_cluster_fn(target_src_dir, cluster)
 
     def fn_container_index(self, src_dir: Path) -> dict[FnLocator, str]:
         return self.fn_container_index_fn(src_dir)
