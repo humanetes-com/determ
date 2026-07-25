@@ -28,6 +28,13 @@ from typing import Literal, NamedTuple
 #                     into another → E0308/E0424 corruption. The caller must
 #                     re-route through the container-aware locator; refusing is
 #                     the only safe outcome without a container.
+#   sig_not_bare    — a signature-only splice got a candidate carrying a body
+#                     (any `{`); writing it in front of the body already there
+#                     would define the fn twice
+#   item_set_changed — the write moved the file's top-level item list, so the
+#                     body escaped its own braces and declared items at file
+#                     scope (E0255 against the real definition, poisoning every
+#                     later fill in that file)
 #   ok_xml_unescaped — committed, but only after resolving XML entities the
 #                     model emitted in the body (`match &amp;mut self.state`).
 #                     A distinct reason because the verbatim body was NOT valid
@@ -36,7 +43,7 @@ from typing import Literal, NamedTuple
 SpliceReason = Literal[
     "ok", "ok_xml_unescaped", "file_missing", "read_failed", "fn_not_found",
     "bad_offsets", "target_not_stub", "body_is_stub", "parse_broken",
-    "ambiguous_name",
+    "ambiguous_name", "sig_not_bare", "item_set_changed",
 ]
 
 

@@ -9,6 +9,7 @@ import re
 from pipeline_core.domain.rust_scan import (
     branch_guard_label,
     count_cfg_attrs,
+    has_code_brace,
     has_nonempty_test_fn,
     is_rust_item_boundary_line,
     is_structural_brace_line,
@@ -17,7 +18,9 @@ from pipeline_core.domain.rust_scan import (
     mod_decls,
     module_use_imports,
     rust_code_fences,
+    strip_outer_attributes,
     struct_names,
+    top_level_item_names,
 )
 
 _OLD_SYMBOL_RE = re.compile(r'\b(?:fn|struct|enum|trait|type|const)\s+([A-Za-z_]\w*)')
@@ -487,3 +490,52 @@ def test_struct_names_bodyless_trait_fn_and_impl_methods():
         "struct C;\n"
     )
     assert struct_names(text) == ["C"]
+
+
+def test_strip_outer_attributes_removes_attrs_docs_and_comments():
+    text = (
+        '/// doc line\n'
+        '// plain comment\n'
+        '#[cfg(feature = "std")]\n'
+        '  #[cold]\n'
+        'pub fn f<T: Clone>(x: T) -> T {'
+    )
+    assert strip_outer_attributes(text) == "pub fn f<T: Clone>(x: T) -> T {"
+
+
+def test_strip_outer_attributes_masks_brackets_inside_literals():
+    text = '#[doc = "a ] b"]\n#[derive(Debug)]\nstruct S;'
+    assert strip_outer_attributes(text) == "struct S;"
+
+
+def test_strip_outer_attributes_leaves_a_bare_signature_and_unterminated_attr():
+    assert strip_outer_attributes("fn g() -> u8") == "fn g() -> u8"
+    unterminated = '#[cfg(feature = "std"\nfn g() -> u8'
+    assert strip_outer_attributes(unterminated) == unterminated
+
+
+def test_has_code_brace_ignores_strings_comments_and_generics():
+    assert has_code_brace("fn f<T: Clone>(x: T) -> T") is False
+    assert has_code_brace('fn f(s: &str) // { not code') is False
+    assert has_code_brace('const S: &str = "{";') is False
+    assert has_code_brace("fn f() where F: Fn() -> ()") is False
+    assert has_code_brace("fn f() -> u8 { 1 }") is True
+
+
+def test_top_level_item_names_is_depth_and_comment_aware():
+    text = (
+        "pub fn get() -> i32 { fn nested() -> i32 { 1 } nested() }\n"
+        "impl Foo { fn method(&self) {} }\n"
+        "// fn commented() {}\n"
+        'const S: &str = "fn in_string()";\n'
+        "struct Real;\n"
+    )
+    # `method` is inside the impl block (depth 1) — not a top-level item.
+    assert top_level_item_names(text) == ["fn get", "const S", "struct Real"]
+
+
+def test_top_level_item_names_detects_a_body_escaping_its_braces():
+    before = "fn read() -> i32 { unimplemented!() }\n"
+    after = "fn read() -> i32 { 1 }\nfn read() -> i32 { 2 }\n"
+    assert top_level_item_names(before) == ["fn read"]
+    assert top_level_item_names(after) == ["fn read", "fn read"]

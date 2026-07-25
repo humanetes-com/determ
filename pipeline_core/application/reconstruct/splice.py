@@ -28,6 +28,11 @@ from pipeline_core.domain.llm_output import xml_unescaped_variant
 from pipeline_core.domain.reconstruction import SpliceOutcome, SpliceReason
 from pipeline_core.domain.rust_fn_headers import is_pub_fn, locate_all_fns
 from pipeline_core.domain.rust_idents import canon_container, declares_fn
+from pipeline_core.domain.rust_scan import (
+    has_code_brace,
+    strip_outer_attributes,
+    top_level_item_names,
+)
 
 
 def _commit_with_xml_fallback(
@@ -212,6 +217,7 @@ def splice_fn_body_at(file_path: Path, body_byte_start: int, body_byte_end: int,
         else:
             break
     inner_indent = base_indent + "    "
+    items_before = top_level_item_names(raw.decode("utf-8", errors="replace"))
 
     def _commit(candidate: str, reason: SpliceReason) -> SpliceOutcome:
         indented = "\n" + "\n".join(
@@ -220,6 +226,13 @@ def splice_fn_body_at(file_path: Path, body_byte_start: int, body_byte_end: int,
         ) + "\n" + base_indent
         new_raw = (raw[:body_byte_start] + indented.encode("utf-8")
                    + raw[body_byte_end:])
+        # A body write lives strictly between one fn's braces. If the file's
+        # top-level items moved, the candidate closed the fn early and declared
+        # its own — it parses, then collides with the real definition (E0255)
+        # and poisons every sibling fill in the file until someone reverts it.
+        if top_level_item_names(
+                new_raw.decode("utf-8", errors="replace")) != items_before:
+            return SpliceOutcome(False, "item_set_changed", 0)
         if not parse_guarded_write(file_path, new_raw, raw, validate_parse):
             return SpliceOutcome(False, "parse_broken", 0)
         return SpliceOutcome(True, reason, len(new_raw) - len(raw))
@@ -239,14 +252,27 @@ def replace_fn_signature(file_path: Path, fn_name: str, new_sig: str,
     rendering (`fn f(x: &amp;str)` reads as a declaration of `f`), which would
     otherwise be written verbatim, leave the file unparseable, and — unlike
     every other model write here — persist, because a signature edit has no
-    body offsets to roll back to."""
+    body offsets to roll back to.
+
+    The write starts at the signature LINE, so the attribute block above it
+    survives: a candidate that re-emits those attributes is reduced to its bare
+    signature first, and one that carries a body (any `{`) is refused outright
+    rather than written in front of the body already there. The signature's
+    original indentation is preserved."""
     try:
         text = file_path.read_text(encoding="utf-8")
     except Exception:
         return False
     if is_pub_fn(text, fn_name):
         return False
-    if not declares_fn(new_sig, fn_name):
+    # The attributes above the fn (`#[cfg]`, `#[cold]`, `#[must_use]`) stay in
+    # the file and are not the model's to restate; keeping its copy would leave
+    # BOTH. A `{` means the candidate carries a body — splicing that in front of
+    # the existing one duplicates the item (E0255 on the second definition).
+    sig_only = strip_outer_attributes(new_sig)
+    if not declares_fn(sig_only, fn_name):
+        return False
+    if has_code_brace(sig_only.strip().rstrip("{").rstrip()):
         return False
     locs = locate_all_fns(text, fn_name)
     if len(locs) != 1:
@@ -256,9 +282,12 @@ def replace_fn_signature(file_path: Path, fn_name: str, new_sig: str,
         return False
     _old_sig, sig_start, body_start, _body_end = locs[0]
     line_start = text.rfind("\n", 0, sig_start) + 1
+    indent = text[line_start:sig_start]
     def _commit(candidate: str, _reason: SpliceReason) -> SpliceOutcome:
-        cleaned = candidate.strip().rstrip("{").rstrip()
-        new_text = text[:line_start] + cleaned + " {" + text[body_start:]
+        cleaned = strip_outer_attributes(candidate).strip().rstrip("{").rstrip()
+        if not cleaned or has_code_brace(cleaned):
+            return SpliceOutcome(False, "sig_not_bare", 0)
+        new_text = text[:line_start] + indent + cleaned + " {" + text[body_start:]
         if not parse_guarded_write(file_path, new_text.encode("utf-8"),
                                    text.encode("utf-8"), validate_parse):
             return SpliceOutcome(False, "parse_broken", 0)
@@ -342,6 +371,7 @@ def splice_fn_body(file_path: Path, fn_name: str, new_body: str,
         else:
             break
     inner_indent = base_indent + "    "
+    items_before = top_level_item_names(text)
 
     def _commit(candidate: str, reason: SpliceReason) -> SpliceOutcome:
         indented = "\n" + "\n".join(
@@ -349,6 +379,11 @@ def splice_fn_body(file_path: Path, fn_name: str, new_body: str,
             for ln in candidate.splitlines()
         ) + "\n" + base_indent
         new_text = text[:body_start] + indented + text[body_end:]
+        # Same invariant as the byte-offset splice: a body write lives strictly
+        # between one fn's braces, so a changed top-level item list means the
+        # candidate closed the fn early and declared items at file scope.
+        if top_level_item_names(new_text) != items_before:
+            return SpliceOutcome(False, "item_set_changed", 0)
         if not parse_guarded_write(file_path, new_text.encode("utf-8"),
                                    text.encode("utf-8"), validate_parse):
             return SpliceOutcome(False, "parse_broken", 0)

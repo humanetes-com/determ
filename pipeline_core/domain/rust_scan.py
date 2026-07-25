@@ -850,6 +850,124 @@ def attr_opener_end(text: str, i: int) -> tuple[bool, int] | None:
     return None
 
 
+_TOP_LEVEL_ITEM_KEYWORDS = frozenset({
+    "fn", "struct", "enum", "trait", "type", "const", "static", "mod", "union",
+})
+
+
+def top_level_item_names(text: str) -> list[str]:
+    """``"<keyword> <name>"`` per item declared at brace depth 0, in order.
+
+    The fingerprint a body splice must not change. A body write lands strictly
+    inside one fn's braces, so it can only alter this list by UNBALANCING them
+    and escaping to file scope — which is how a returned body such as
+    ``unimplemented!() }\\npub fn Ok<T>(t: T) -> Result<T> { Ok(t)`` parses
+    cleanly yet defines a second top-level `Ok` (E0255 on the whole crate).
+    Nested helper fns stay invisible here: they sit at depth ≥ 1, so a body
+    that legitimately declares one still fingerprints identically.
+
+    Comment/string aware (`code_mask`), so a `{` in a doc example or in an
+    annotated failed attempt does not shift the depth."""
+    mask = code_mask(text)
+    n = len(text)
+    i = 0
+    depth = 0
+    out: list[str] = []
+    while i < n:
+        if mask[i]:
+            i += 1
+            continue
+        ch = text[i]
+        if ch == "{":
+            depth += 1
+            i += 1
+            continue
+        if ch == "}":
+            depth -= 1
+            i += 1
+            continue
+        if ch not in _IDENT_START:
+            i += 1
+            continue
+        j = i
+        while j < n and not mask[j] and text[j] in _IDENT_CHARS:
+            j += 1
+        word = text[i:j]
+        if depth == 0 and word in _TOP_LEVEL_ITEM_KEYWORDS:
+            k = j
+            while k < n and (mask[k] or text[k].isspace()):
+                k += 1
+            s = k
+            while k < n and not mask[k] and text[k] in _IDENT_CHARS:
+                k += 1
+            if k > s and text[s] in _IDENT_START:
+                out.append(f"{word} {text[s:k]}")
+            j = k
+        i = j
+    return out
+
+
+def strip_outer_attributes(text: str) -> str:
+    """`text` from its first real token onward — leading outer attributes, doc
+    comments and comments removed.
+
+    A model-proposed signature usually re-emits the item's attributes. Those
+    attributes already sit in the file and are not the model's to restate: a
+    signature-only splice that starts at the `fn`/`pub` line leaves the
+    originals in place, so writing them again DUPLICATES them — and a duplicated
+    `#[cfg(...)]` silently changes which cluster the fn compiles in.
+
+        WRONG — model sig written verbatim     RIGHT — attributes consumed
+        #[cfg(feature = "std")]                #[cfg(feature = "std")]
+        #[cold]                                #[cold]
+        #[cfg(feature = "std")]                pub fn f<T: Clone>(x: T) -> T {
+        #[cold]
+        pub fn f<T: Clone>(x: T) -> T {
+
+        WRONG                                  RIGHT
+        /// doc line                           pub fn g(x: u8) -> u8 {
+        #[inline]
+        #[inline]
+        pub fn g(x: u8) -> u8 {
+
+    Bracket matching is mask-aware, so a `]` inside an attribute's string
+    literal (`#[doc = "a ] b"]`) does not close it. An unterminated attribute
+    leaves the text untouched from that point (conservative: never truncate)."""
+    mask = code_mask(text)
+    n = len(text)
+    i = 0
+    while i < n:
+        if text[i].isspace() or mask[i]:
+            i += 1
+            continue
+        opened = attr_opener_end(text, i)
+        if opened is None:
+            break
+        _bang, j = opened
+        depth = 1
+        while j < n and depth:
+            if not mask[j]:
+                if text[j] == "[":
+                    depth += 1
+                elif text[j] == "]":
+                    depth -= 1
+            j += 1
+        if depth:
+            break
+        i = j
+    return text[i:]
+
+
+def has_code_brace(text: str) -> bool:
+    """True iff `text` contains a `{` outside strings/comments — the test for
+    "this is a bare signature, not a whole item (or several)". A signature has
+    no braces of its own: generics use `<>`, a where-clause's `Fn() -> ()` has
+    none. A `{` therefore means the candidate carries a BODY, and splicing it
+    where only a signature is expected duplicates the item that follows."""
+    mask = code_mask(text)
+    return any(ch == "{" and not mask[k] for k, ch in enumerate(text))
+
+
 # --- test-attribute line detection (replaces _count_test_fns_cfg_aware regexes) ---
 
 _TEST_ATTR_TOKENS = (
