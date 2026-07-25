@@ -128,4 +128,4 @@ def check_auto_operator(log: Callable[[str], None], stall: int, context: str, *,
         if _OP.tick(enabled, stall, _launch_operator_pass):
             _record_fire()
             log(f"  [auto-operator] stall={stall}>={_OP.trigger} at {context} — "
-                "launching one operator_run.sh pass (see logs/operator_run_*.log)")
+                "launching one operator_run.sh pass (see logs/auto/operator_run.log)")

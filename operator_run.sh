@@ -15,6 +15,8 @@
 # Env:
 #   OPERATOR_MODEL     model alias (default: opus)
 #   OPERATOR_MAX_USD   API spend cap for the pass in dollars (default: 10)
+#   OPERATOR_COMMIT_MSG_MAX_USD  spend cap for the fallback-commit message
+#                      draft call in dollars (default: 1)
 #   OPERATOR_PERMS     permission flag (default: --dangerously-skip-permissions;
 #                      set to "--permission-mode bypassPermissions" to prefer
 #                      the softer mode)
@@ -65,9 +67,14 @@ EOF
 #      without interactive approval (this repo is trusted; runs as a normal user).
 #    --settings '{"includeCoAuthoredBy": false}': disable Claude's own commit
 #      attribution as a first line of defence (the hook is the guarantee).
-mkdir -p logs
-LOG="logs/operator_run_$(date -u +%Y%m%d-%H%M%S).log"
+mkdir -p logs/auto
+LOG="logs/auto/operator_run.log"
+PASS_START="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "operator_run: starting pass -> $LOG"
+
+{
+  echo "===== operator_run pass — $PASS_START ====="
+} >> "$LOG"
 
 if ! claude -p "load handover and start operator mode" \
       --model "${OPERATOR_MODEL:-opus}" \
@@ -75,16 +82,43 @@ if ! claude -p "load handover and start operator mode" \
       --settings '{"includeCoAuthoredBy": false}' \
       --append-system-prompt "$APPEND_SP" \
       --max-budget-usd "${OPERATOR_MAX_USD:-10}" \
-      --output-format text 2>&1 | tee "$LOG"; then
+      --output-format text 2>&1 | tee -a "$LOG"; then
   echo "operator_run: WARNING — claude exited non-zero; committing whatever changed." >&2
 fi
 
+echo "===== operator_run pass end — $(date -u +%Y-%m-%dT%H:%M:%SZ) =====" >> "$LOG"
+
 # 4. Safety net: guarantee a commit even if the pass did not make one. The
-#    commit-msg hook still strips any attribution from this message too.
+#    message must read exactly like a message a developer wrote by hand: no
+#    "operator pass" / "fallback" / "automated" wording, no timestamp, no
+#    mention of Claude or of how the message was produced — git already
+#    records the real commit time in its own metadata. A bash string built
+#    from filenames cannot describe WHAT changed, so a model call (same
+#    OPERATOR_MODEL as the pass itself) reads the actual staged diff and
+#    drafts the message; the commit-msg hook still strips any attribution
+#    line as a deterministic backstop either way.
 if [ -n "$(git status --porcelain)" ]; then
   echo "operator_run: uncommitted changes remain — committing as a fallback."
   git add -A
-  git commit -m "operator pass — $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  CHANGED_FILES="$(git diff --cached --name-only)"
+  FIRST_FILES="$(printf '%s\n' "$CHANGED_FILES" | head -3 | paste -sd, -)"
+
+  COMMIT_MSG="$(claude -p "$(cat <<EOF
+Write a git commit message for the staged diff below. Output ONLY the raw
+message text (short subject line, blank line, then a body of 1-3 sentences
+if useful) — no markdown code fences, no preamble, no mention of automation,
+tooling, dates, or authorship. Describe only what the diff changes.
+
+$(git diff --cached | head -c 20000)
+EOF
+)" --model "${OPERATOR_MODEL:-opus}" --max-budget-usd "${OPERATOR_COMMIT_MSG_MAX_USD:-1}" \
+      --output-format text 2>/dev/null | sed -e '/^```/d' -e '/./,$!d')" || true
+
+  if [ -z "$COMMIT_MSG" ]; then
+    COMMIT_MSG="update $FIRST_FILES"
+  fi
+
+  git commit -m "$COMMIT_MSG"
 else
   echo "operator_run: working tree clean (pass committed its own changes)."
 fi
