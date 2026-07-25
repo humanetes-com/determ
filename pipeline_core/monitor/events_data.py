@@ -300,6 +300,13 @@ def phase_c_state() -> dict[str, Any]:
         # converging" signal: passing/failing tests over iterations.
         "tdd_iter": 0, "tdd_pass": None, "tdd_fail": None, "tdd_frontier": None,
         "tdd_stall": None, "tdd_kind": None, "tdd_pass_hist": [],
+        "tdd_max_stalls": None,
+        # Which outer loop is driving this run. Under "tdd" the per-fn engine is
+        # an inner detail invoked with max_passes=1 — and it short-circuits
+        # without a pass.start whenever the frontier is all behavioural re-fills
+        # (zero stubs), so pass_n/max_passes stay None for the whole run. The
+        # live counter to render then is the tdd iter, never "?/?".
+        "driver": None,
         # Per-cluster TDD trajectory so each cluster's pass floor is shown on its
         # own row — a fresh cluster starting lower never reads as a regression of
         # the previous one (the per-cluster loops reset their floor by design).
@@ -336,6 +343,8 @@ def phase_c_state() -> dict[str, Any]:
                 out["clusters_done"].append(_dc)
             continue
         if ev == "phase_c.pass.start":
+            # The tdd driver also drives the per-fn engine, so it wins the label.
+            out["driver"] = out["driver"] or "per-fn"
             out["cluster"] = d.get("cluster") or out["cluster"]
             out["pass_n"] = d.get("pass_n") or out["pass_n"]
             out["max_passes"] = d.get("max_passes") or out["max_passes"]
@@ -440,6 +449,8 @@ def phase_c_state() -> dict[str, Any]:
             out["last_test_rc"] = d.get("rc")
             out["last_test_failed"] = len(d.get("failed_tests") or [])
         elif ev == "phase_c.tdd.iter":
+            out["driver"] = "tdd"
+            out["tdd_max_stalls"] = d.get("max_stalls", out["tdd_max_stalls"])
             _tcl = d.get("cluster") or out["cluster"]
             out["cluster"] = _tcl or out["cluster"]
             out["tdd_iter"] = d.get("iter", out["tdd_iter"])

@@ -150,8 +150,8 @@ class CargoBackendAdapter:
     run_check_diag_fn: Callable[..., tuple[int, str, list[Any]]]
     build_test_cmd_fn: Callable[..., str]
     env_fn: Callable[[], dict[str, str]]
-    implicated_fns_fn: Callable[[str, Path], list[FnLocator]]
-    implicated_fns_from_diags_fn: Callable[[list[Any], Path], list[FnLocator]]
+    implicated_fns_from_check_fn: Callable[
+        [list[Any], str, Path], list[FnLocator]]
     attribute_failures_fn: Callable[..., tuple[Any, str]]
     filter_test_targets_fn: Callable[[Any, Path], Any]
 
@@ -185,13 +185,11 @@ class CargoBackendAdapter:
     def env(self) -> dict[str, str]:
         return self.env_fn()
 
-    def implicated_fns_from_cargo_errors(self, cargo_output: str,
-                                         target_src_dir: Path) -> list[FnLocator]:
-        return self.implicated_fns_fn(cargo_output, target_src_dir)
-
-    def implicated_fns_from_diagnostics(self, diagnostics: list[Any],
-                                        target_src_dir: Path) -> list[FnLocator]:
-        return self.implicated_fns_from_diags_fn(diagnostics, target_src_dir)
+    def implicated_fns_from_check(self, diagnostics: list[Any],
+                                  rendered_output: str,
+                                  target_src_dir: Path) -> list[FnLocator]:
+        return self.implicated_fns_from_check_fn(
+            diagnostics, rendered_output, target_src_dir)
 
     def attribute_failures(self, test_output: str, src_dir: Path,
                            recently_filled: list[FnLocator],

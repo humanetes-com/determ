@@ -114,11 +114,9 @@ class Cargo(Protocol):
         *, include_lib: bool = ...,
     ) -> str: ...
     def env(self) -> dict[str, str]: ...
-    def implicated_fns_from_cargo_errors(
-        self, cargo_output: str, target_src_dir: Path,
-    ) -> list[FnLocator]: ...
-    def implicated_fns_from_diagnostics(
-        self, diagnostics: list[Diagnostic], target_src_dir: Path,
+    def implicated_fns_from_check(
+        self, diagnostics: list[Diagnostic], rendered_output: str,
+        target_src_dir: Path,
     ) -> list[FnLocator]: ...
     def attribute_failures(
         self, test_output: str, src_dir: Path,

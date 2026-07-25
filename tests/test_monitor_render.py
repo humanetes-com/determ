@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 
 import monitor as m
+from pipeline_core.monitor import render as _render
 
 
 def test_plain_strips_ansi_like_old_regex() -> None:
@@ -36,3 +37,19 @@ def test_call_start_value_matches_old_regex() -> None:
     for c in ["[CALL_START: 12.34]", "x [CALL_START: 5] y", "[CALL_START: ]",
               "[CALL_START: 1.2.3]", "no marker", "[CALL_START: abc]", "[CALL_START: 9"]:
         assert m._call_start_value(c) == old(c), repr(c)
+
+
+def test_driver_counter_prefers_the_live_outer_loop() -> None:
+    """`pass=?/?` was rendered for hours on healthy tdd runs: the per-fn engine
+    emits no pass.start once the frontier is all re-fills. The tdd iter wins."""
+    tdd = {"driver": "tdd", "tdd_iter": 4, "tdd_stall": 2, "tdd_max_stalls": 3,
+           "pass_n": None, "max_passes": None}
+    assert _render.driver_counter(tdd) == "iter=4  stall=2/3"
+    # Budget omitted until an iter event carries it (older runs) — never "?/?".
+    assert _render.driver_counter({**tdd, "tdd_max_stalls": None}) == "iter=4"
+    # An unreported iter shows "?" — a fabricated "iter=1" would be the same
+    # class of lie as the "?/?" this replaced.
+    assert _render.driver_counter({"driver": "tdd", "tdd_iter": 0}) == "iter=?"
+    per_fn = {"driver": "per-fn", "pass_n": 2, "max_passes": 3}
+    assert _render.driver_counter(per_fn) == "pass=2/3"
+    assert _render.driver_counter({}) == "pass=?/?"

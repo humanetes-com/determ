@@ -115,6 +115,9 @@ from pipeline_core.monitor.render import (
     call_start_value as _call_start_value,
 )
 from pipeline_core.monitor.render import (
+    driver_counter as _driver_counter,
+)
+from pipeline_core.monitor.render import (
     event_format as _event_format,
 )
 from pipeline_core.monitor.render import (
@@ -345,12 +348,11 @@ def _phase_c_panel_rows(state: dict[str, Any]) -> list[str]:
         return []
     rows: list[str] = []
     cluster = state.get("cluster") or "?"
-    pass_n = state.get("pass_n") or "?"
-    maxp = state.get("max_passes") or "?"
     age = state.get("last_event_age_s")
     age_s = (f"{age}s" if age is not None and age < 60
              else f"{age // 60}m" if age is not None else "?")
-    rows.append(f"  reconstruct  cluster={cluster}  pass={pass_n}/{maxp}  last={age_s}")
+    rows.append(f"  reconstruct  cluster={cluster}  {_driver_counter(state)}  "
+                f"last={age_s}")
 
     # Per-cluster overview — where we are across all clusters. Prefer the
     # authoritative baked order/total from the log; fall back to events-seen.

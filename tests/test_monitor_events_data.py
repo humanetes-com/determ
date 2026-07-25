@@ -350,3 +350,34 @@ def test_configure_sets_path(tmp_path, monkeypatch):
     target = str(tmp_path / "x.jsonl")
     ed.configure(events_log=target)
     assert target == ed.EVENTS_LOG
+
+
+def test_phase_c_state_driver_tdd_without_any_pass_start(tmp_path, monkeypatch):
+    """The frontier holding only behavioural re-fills (zero stubs) short-circuits
+    the per-fn engine before `phase_c.pass.start` — the run is healthy but has no
+    pass counter at all. The tdd iter must still identify the live loop."""
+    ev = tmp_path / "events.jsonl"
+    _write(
+        ev,
+        {"ts": "2026-06-10T00:00:00+00:00", "event": "phase_c.tdd.iter",
+         "data": {"cluster": "stable", "iter": 4, "pass_count": 93,
+                  "fail_count": 18, "stall": 2, "max_stalls": 3}},
+        {"ts": "2026-06-10T00:00:01+00:00", "event": "phase_c.file.fill.start",
+         "data": {"cluster": "stable", "file": "src/error.rs", "blocks": 7}},
+    )
+    _patch(monkeypatch, ev)
+    s = ed.phase_c_state()
+    assert s["driver"] == "tdd" and s["tdd_max_stalls"] == 3
+    assert s["pass_n"] is None and s["tdd_iter"] == 4
+
+
+def test_phase_c_state_driver_per_fn_when_no_tdd_iter(tmp_path, monkeypatch):
+    ev = tmp_path / "events.jsonl"
+    _write(
+        ev,
+        {"ts": "2026-06-10T00:00:00+00:00", "event": "phase_c.pass.start",
+         "data": {"cluster": "stable", "pass_n": 2, "max_passes": 3, "stubs": 5}},
+    )
+    _patch(monkeypatch, ev)
+    s = ed.phase_c_state()
+    assert s["driver"] == "per-fn" and s["pass_n"] == 2

@@ -1349,17 +1349,8 @@ class StaticSkeletonTask2Generator(Task2Generator):
         _rc0, _rendered0, _diags0 = self.cargo.run_check_diag(
             check_cmd, filled_dir, self._cluster_env(cluster), 180)
         if _rc0 not in (-1, 0):
-            # Structured diagnostics carry the macro-expansion call-site chain,
-            # so a body that only errors INSIDE a macro (primary span = the
-            # macro definition, enclosing no fn) is still attributed to the fn
-            # that invoked it. Fall back to the rendered-text implicator only
-            # when no structured diagnostics came back (cargo/JSON unavailable).
-            if _diags0:
-                _pre_impl = self.cargo.implicated_fns_from_diagnostics(
-                    _diags0, filled_dir)
-            else:
-                _pre_impl = self.cargo.implicated_fns_from_cargo_errors(
-                    _rendered0 or "", filled_dir)
+            _pre_impl = self.cargo.implicated_fns_from_check(
+                _diags0, _rendered0 or "", filled_dir)
             if _pre_impl:
                 self.tel.log(f"  {tag} [pre-pass-heal] seeded/resumed tree does "
                              "not compile; implicated: "
@@ -1609,13 +1600,12 @@ class StaticSkeletonTask2Generator(Task2Generator):
             self.tel.check_stop(f"skeleton-validate iter {v_iter}")
             self.tel.log(f"  {tag} [skeleton-validate] cargo check on filled output "
                          f"(iter {v_iter}/{max_validate_iters})...")
-            rc, _vo, _ve = self.cargo.run_raw(
-                shlex.split(check_cmd), filled_dir, self._cluster_env(cluster), 180)
+            rc, _vr_out, _vdiags = self.cargo.run_check_diag(
+                check_cmd, filled_dir, self._cluster_env(cluster), 180)
             if rc == -1:
                 self.tel.log(f"  {tag} [skeleton-validate] cargo check timed out.")
                 validate_ok = False
                 break
-            _vr_out = (_vo or "") + "\n" + (_ve or "")
             validate_ok = (rc == 0)
 
             if validate_ok:
@@ -1629,7 +1619,8 @@ class StaticSkeletonTask2Generator(Task2Generator):
                          f"(rc={rc}). First errors:")
             for line in _vr_out.splitlines()[:10]:
                 self.tel.log(f"    {line}")
-            implicated = self.cargo.implicated_fns_from_cargo_errors(_vr_out, filled_dir)
+            implicated = self.cargo.implicated_fns_from_check(
+                _vdiags, _vr_out, filled_dir)
             if not implicated:
                 self.tel.log(f"  {tag} [skeleton-validate] no implicated fns parsed "
                              f"— cannot retry, giving up.")
@@ -1674,15 +1665,26 @@ class StaticSkeletonTask2Generator(Task2Generator):
         # Emit a LOUD halt so the run never silently marches on mis-exhausting
         # fns from a broken state (the ~30h corruption freeze had no alarm).
         if not validate_ok:
-            from pipeline_core.domain.tree_health import classify_tree_health
-            _, _, _diags = self.cargo.run_check_diag(
+            from pipeline_core.domain.tree_health import (
+                TreeHealth,
+                classify_tree_health,
+            )
+            # The verdict comes from THIS check's own rc and text: the loop's
+            # last check predates its revert+refill, and the loop also exits on
+            # a budget/attribution break with a tree the reverts already healed.
+            # Hardcoding a failing rc reported "unrecoverable" for a tree that
+            # compiles clean, and the stale excerpt named errors nobody could
+            # still reproduce.
+            _hrc, _htxt, _hdiags = self.cargo.run_check_diag(
                 check_cmd, filled_dir, self._cluster_env(cluster), 180)
-            _health = classify_tree_health(1, _diags, 0, 0)
+            _health = classify_tree_health(_hrc, _hdiags, 0, 0)
+            _detail = ("validate budget exhausted, but the tree compiles"
+                       if _health is TreeHealth.OK else "tree unrecoverable")
             self.tel.emit("phase_c.cluster.halted", data={
                 "cluster": cluster.name, "health": _health.name,
-                "first_errors": _vr_out.splitlines()[:5]})
+                "first_errors": (_htxt or "").splitlines()[:5]})
             self.tel.log(f"  {tag} [skeleton-validate] cluster HALTED "
-                         f"({_health.name}) — tree unrecoverable; NOT marking "
+                         f"({_health.name}) — {_detail}; NOT marking "
                          "fns exhausted from this state.")
 
         return {"ok": True, "phase_c": c_result, "phase_d": d_result,

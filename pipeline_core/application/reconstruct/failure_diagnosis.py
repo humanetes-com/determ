@@ -229,6 +229,30 @@ def implicated_fns_from_diagnostics(
         locations, target_src_dir, enumerate_fns=enumerate_fns)
 
 
+def implicated_fns_from_check(
+    diagnostics: list[Diagnostic],
+    rendered_output: str,
+    target_src_dir: Path,
+    *,
+    enumerate_fns: Callable[[Path], list[dict[str, Any]] | None],
+) -> list[FnLocator]:
+    """Who a failed cargo check implicates — the one attribution policy every
+    revert gate uses.
+
+    Structured diagnostics win because they carry the macro-expansion call-site
+    chain: an error whose primary span sits in a macro DEFINITION encloses no
+    fn, so the text scan attributes it to NOTHING and the gate reads "no
+    implicated fns" — a green light for a body that keeps the cluster red. The
+    rendered-text scan is the fallback for output carrying no JSON messages at
+    all (cargo-level failures, older captures). Stated here once so a second
+    gate cannot be wired to the weaker half."""
+    if diagnostics:
+        return implicated_fns_from_diagnostics(
+            diagnostics, target_src_dir, enumerate_fns=enumerate_fns)
+    return implicated_fns_from_cargo_errors(
+        rendered_output, target_src_dir, enumerate_fns=enumerate_fns)
+
+
 def _locations_to_implicated_fns(
     locations: list[tuple[str, int]],
     target_src_dir: Path,

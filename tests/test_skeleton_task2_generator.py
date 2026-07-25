@@ -53,6 +53,9 @@ class FakeAdapter:
     leaf_order: dict[str, int] = field(default_factory=dict)
     diags: list[_Diag] = field(default_factory=list)
     implicated: list[tuple[str, str]] = field(default_factory=list)
+    # (diagnostics, rendered) each revert gate passed to the attribution policy
+    # — a gate handing over [] is one that fell back to the macro-blind scan.
+    implicated_calls: list[tuple[list[_Diag], str]] = field(default_factory=list)
     raw_results: list[tuple[int, str, str]] = field(default_factory=list)
     # run_check_diag results, popped FIFO. Empty → falls back to the `diags`
     # field with rc=0 (a clean check), preserving pre-structured-heal tests.
@@ -67,6 +70,9 @@ class FakeAdapter:
     raise_in_filter: bool = False
     logs: list[str] = field(default_factory=list)
     events: list[str] = field(default_factory=list)
+    # (event, data) — an event's PAYLOAD is the alarm an operator reads; a name
+    # alone cannot catch a verdict field that reports the wrong tree state.
+    event_data: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
 
     # --- Telemetry ---
     def log(self, msg: str) -> None:
@@ -75,6 +81,7 @@ class FakeAdapter:
     def emit(self, event: str, *, duration_ms: int | None = None,
              data: dict[str, Any] | None = None) -> None:
         self.events.append(event)
+        self.event_data.append((event, dict(data or {})))
 
     def check_stop(self, context: str) -> None:
         pass
@@ -122,12 +129,10 @@ class FakeAdapter:
     def env(self) -> dict[str, str]:
         return {}
 
-    def implicated_fns_from_cargo_errors(
-            self, cargo_output: str, target_src_dir: Path) -> list[tuple[str, str]]:
-        return list(self.implicated)
-
-    def implicated_fns_from_diagnostics(
-            self, diagnostics: list[_Diag], target_src_dir: Path) -> list[tuple[str, str]]:
+    def implicated_fns_from_check(
+            self, diagnostics: list[_Diag], rendered_output: str,
+            target_src_dir: Path) -> list[tuple[str, str]]:
+        self.implicated_calls.append((list(diagnostics), rendered_output))
         return list(self.implicated)
 
     def attribute_failures(self, test_output: str, src_dir: Path,
@@ -298,7 +303,12 @@ def test_happy_per_fn_fn_walk_with_validate_revert(tmp_path: Path) -> None:
     # Phase-A check ok; validate iter1 fails (triggers revert), iter2 ok.
     fake = FakeAdapter(
         clusters_list=[c], cluster_tests=[("tests/it.rs", "x")],
-        raw_results=[(0, "", ""), (1, "err", "boom"), (0, "", "")],
+        raw_results=[(0, "", ""), (0, "", "")],
+        # run_check_diag queue: pre-pass heal, gen_tests leak guard, then
+        # validate iter1 FAILS with a structured diagnostic; iter2 falls through
+        # to the fake's clean rc=0 default.
+        diag_results=[(0, "", []), (0, "", []),
+                      (1, "err", [_Diag("src/lib.rs", "E0599", "boom")])],
         implicated=[("src/lib.rs", "foo")],
         leaf_order={"foo": 1}, run_results=[(0, "ok")],
     )
@@ -538,7 +548,12 @@ def test_validate_reverts_every_same_name_fn(tmp_path: Path) -> None:
     c = _cluster()
     fake = FakeAdapter(
         clusters_list=[c], cluster_tests=[("tests/it.rs", "x")],
-        raw_results=[(0, "", ""), (1, "err", "boom"), (0, "", "")],
+        raw_results=[(0, "", ""), (0, "", "")],
+        # run_check_diag queue: pre-pass heal, gen_tests leak guard, then
+        # validate iter1 FAILS with a structured diagnostic; iter2 falls through
+        # to the fake's clean rc=0 default.
+        diag_results=[(0, "", []), (0, "", []),
+                      (1, "err", [_Diag("src/lib.rs", "E0599", "boom")])],
         implicated=[("src/lib.rs", "fmt")],
         run_results=[(0, "ok")],
     )
@@ -569,7 +584,12 @@ def test_validate_restores_file_from_skeleton_when_nothing_revertible(
     c = _cluster()
     fake = FakeAdapter(
         clusters_list=[c], cluster_tests=[("tests/it.rs", "x")],
-        raw_results=[(0, "", ""), (1, "err", "boom"), (0, "", "")],
+        raw_results=[(0, "", ""), (0, "", "")],
+        # run_check_diag queue: pre-pass heal, gen_tests leak guard, then
+        # validate iter1 FAILS with a structured diagnostic; iter2 falls through
+        # to the fake's clean rc=0 default.
+        diag_results=[(0, "", []), (0, "", []),
+                      (1, "err", [_Diag("src/lib.rs", "E0599", "boom")])],
         implicated=[("src/lib.rs", "fmt")],  # not locatable in the corrupt file
         run_results=[(0, "ok")],
     )
@@ -614,6 +634,62 @@ def test_prepass_heal_reverts_poisoned_seeded_body(tmp_path: Path) -> None:
     assert "broken_donor_body" not in text and "unimplemented!()" in text
     assert any("[pre-pass-heal]" in m for m in fake.logs)
     assert "phase_c.cluster.prepass_heal" in fake.events
+
+
+def test_validate_gate_attributes_from_structured_diagnostics(
+        tmp_path: Path) -> None:
+    """skeleton-validate must hand the STRUCTURED diagnostics to the attribution
+    policy. Handing over only rendered text loses the macro-expansion call-site
+    chain, so an error hidden inside a macro implicates nobody and this gate —
+    whose no-attribution branch gives up outright — strands the cluster red."""
+    c = _cluster()
+    boom = _Diag("src/lib.rs", "E0605", "non-primitive cast")
+    fake = FakeAdapter(
+        clusters_list=[c], cluster_tests=[("tests/it.rs", "x")],
+        raw_results=[(0, "", ""), (0, "", "")],
+        diag_results=[(0, "", []), (0, "", []), (1, "err", [boom])],
+        implicated=[("src/lib.rs", "foo")],
+        leaf_order={"foo": 1}, run_results=[(0, "ok")],
+    )
+    pd = _make_project(tmp_path, [c], with_gen_tests=True)
+    assert _run(pd, _gen(fake, _cfg(per_fn=True, tdd=False))) is True
+    # The failing check's diagnostics reached the policy — not an empty list.
+    assert any(diags == [boom] for diags, _ in fake.implicated_calls), \
+        fake.implicated_calls
+    assert any("reverted" in m for m in fake.logs)
+
+
+def test_halt_verdict_comes_from_a_fresh_check_not_the_stale_loop_text(
+        tmp_path: Path) -> None:
+    """The halt alarm must describe the tree AS IT IS when it fires. The loop's
+    last check predates its own revert+refill, so a tree the reverts healed back
+    to compiling was still announced as unrecoverable — with an error excerpt
+    nobody could reproduce."""
+    c = _cluster()
+    boom = _Diag("src/lib.rs", "E0599", "boom")
+    fake = FakeAdapter(
+        clusters_list=[c], cluster_tests=[("tests/it.rs", "x")],
+        raw_results=[(0, "", ""), (0, "", "")],
+        # pre-pass heal, gen_tests leak guard, validate iter1 + iter2 both FAIL,
+        # then the halt-path re-check finds the reverted tree compiling clean.
+        diag_results=[(0, "", []), (0, "", []),
+                      (1, "stale err", [boom]), (1, "stale err", [boom]),
+                      (0, "", [])],
+        implicated=[("src/lib.rs", "foo")],
+        leaf_order={"foo": 1}, run_results=[(0, "ok")],
+    )
+    pd = _make_project(tmp_path, [c], with_gen_tests=True)
+    filled = pd / ".skeleton-filled" / c.name / "src"
+    filled.mkdir(parents=True)
+    (filled / "lib.rs").write_text("fn foo() -> i32 { broken() }\n",
+                                   encoding="utf-8")
+    assert _run(pd, _gen(fake, _cfg(per_fn=True, tdd=False))) is True
+    halted = [d for ev, d in fake.event_data if ev == "phase_c.cluster.halted"]
+    assert len(halted) == 1, fake.events
+    assert halted[0]["health"] == "OK"
+    assert halted[0]["first_errors"] == []
+    assert any("HALTED (OK) — validate budget exhausted, but the tree compiles"
+               in m for m in fake.logs), fake.logs
 
 
 if __name__ == "__main__":  # pragma: no cover

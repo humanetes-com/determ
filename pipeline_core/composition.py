@@ -355,10 +355,7 @@ from pipeline_core.application.reconstruct.failure_diagnosis import (
     classify_phase_c_test_failures as _classify_failures_impl,
 )
 from pipeline_core.application.reconstruct.failure_diagnosis import (
-    implicated_fns_from_cargo_errors as _implicated_fns_impl,
-)
-from pipeline_core.application.reconstruct.failure_diagnosis import (
-    implicated_fns_from_diagnostics as _implicated_fns_from_diags_impl,
+    implicated_fns_from_check as _implicated_fns_from_check_impl,
 )
 from pipeline_core.application.reconstruct.failure_diagnosis import (
     record_tdd_regression as _record_tdd_impl,
@@ -1657,10 +1654,9 @@ def build_app(
         run_check_diag_fn=lambda cmd, cwd, env, timeout=180: helpers.run_cargo_check_diag(cmd, cwd, env, timeout),
         build_test_cmd_fn=_build_test_cmd,
         env_fn=ports.cargo_env,
-        implicated_fns_fn=lambda out, tsd: _implicated_fns_impl(
-            out, tsd, enumerate_fns=enumerate_fns),
-        implicated_fns_from_diags_fn=lambda diags, tsd: _implicated_fns_from_diags_impl(
-            diags, tsd, enumerate_fns=enumerate_fns),
+        implicated_fns_from_check_fn=lambda diags, out, tsd: (
+            _implicated_fns_from_check_impl(
+                diags, out, tsd, enumerate_fns=enumerate_fns)),
         attribute_failures_fn=lambda to, sd, rf, trm, cn: _via("attribute_failures")(to, sd, rf, trm, cn),
         filter_test_targets_fn=filter_test_targets,
     )

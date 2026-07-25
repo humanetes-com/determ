@@ -21,7 +21,7 @@ FIELDS: list[tuple[str, str]] = [
     ("attempt", "Level-1 loop: retry attempt count within the current cluster (bar = attempt/max_attempt)."),
     ("file", "Level-2 loop: file being processed this attempt (bar = files done this pass/total)."),
     ("retry", "Level-3 loop: inner per-file retry count — row only appears while a retry is in flight."),
-    ("reconstruct", "Phase C (task2a) header: active cluster, TDD pass number/max, seconds since the last phase_c event."),
+    ("reconstruct", "Phase C (task2a) header: active cluster, the LIVE outer loop's own counter (iter=N under the TDD driver, pass=n/N under the per-fn driver), seconds since the last phase_c event."),
     ("clusters", "Per-cluster status marks across the whole crate: ✓ done  ▶ active  · not started yet."),
     ("tdd", "Per-cluster TDD trajectory: pass=/fail= test counts, ↑/↓ change vs previous iteration, iter=iteration count, stall=iterations with no forward progress, trailing arrow chain = pass-count history."),
     ("stall=", "Consecutive TDD iterations with no improvement in this cluster's passing-test count — a rising stall is the stuck-loop signal."),

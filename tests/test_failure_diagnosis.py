@@ -8,6 +8,7 @@ from pathlib import Path
 from pipeline_core.application.reconstruct.failure_diagnosis import (
     classify_phase_c_test_failures,
     implicated_fns_from_cargo_errors,
+    implicated_fns_from_check,
     implicated_fns_from_diagnostics,
     record_tdd_regression,
 )
@@ -124,3 +125,37 @@ def test_implicated_fns_from_diagnostics_unions_primary_and_macro(tmp_path: Path
     assert implicated_fns_from_diagnostics(
         diags, tmp_path, enumerate_fns=lambda d: recs) == [
             ("a.rs", "direct"), ("caller.rs", "build")]
+
+
+def test_implicated_fns_from_check_prefers_structured_over_rendered(
+        tmp_path: Path) -> None:
+    """Every revert gate shares one policy: structured diagnostics when cargo
+    gave any, the rendered scan only when it gave none. The gate that skipped
+    the structured half read "no implicated fns" on a macro-hidden error and
+    gave up with the cluster red."""
+    (tmp_path / "caller.rs").write_text(
+        "fn build() {\n    wrap!(v);\n}\n", encoding="utf-8")
+    (tmp_path / "plain.rs").write_text(
+        "fn other() {\n    bad();\n}\n", encoding="utf-8")
+    recs = [
+        {"fn_name": "build", "file": "caller.rs",
+         "sig_byte_start": 0, "body_byte_end": 26},
+        {"fn_name": "other", "file": "plain.rs",
+         "sig_byte_start": 0, "body_byte_end": 25},
+    ]
+    diag = Diagnostic(code="E0605", file="mac.rs", line=9, message="cast",
+                      macro_call_sites=(("caller.rs", 2),))
+    rendered = "error[E0308]: mismatch\n  --> plain.rs:2:5\n"
+
+    # Diagnostics present → the rendered text is NOT consulted, so the macro
+    # call-site wins and plain.rs::other is not dragged in.
+    assert implicated_fns_from_check(
+        [diag], rendered, tmp_path, enumerate_fns=lambda d: recs) == [
+            ("caller.rs", "build")]
+    # No diagnostics (cargo-level failure, no JSON) → the text scan is the
+    # fallback, not silence.
+    assert implicated_fns_from_check(
+        [], rendered, tmp_path, enumerate_fns=lambda d: recs) == [
+            ("plain.rs", "other")]
+    assert implicated_fns_from_check(
+        [], "", tmp_path, enumerate_fns=lambda d: recs) == []

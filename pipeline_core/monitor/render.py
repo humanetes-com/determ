@@ -147,3 +147,25 @@ def call_start_value(content: str) -> str | None:
             return content[j:k]
         start = i + 1
     return None
+
+
+def driver_counter(state: dict[str, Any]) -> str:
+    """The live outer loop's own counter.
+
+    Under the TDD driver the per-fn engine runs with max_passes=1 and emits no
+    pass.start at all once the frontier holds only behavioural re-fills, so
+    `pass=n/N` renders as `?/?` for hours on a perfectly healthy run. The tdd
+    iteration (+ its stall budget) is the counter that actually advances there.
+    """
+    if state.get("driver") == "tdd":
+        stall = state.get("tdd_stall")
+        maxs = state.get("tdd_max_stalls")
+        budget = (f"  stall={stall}/{maxs}"
+                  if stall is not None and maxs is not None else "")
+        # Never substitute a plausible number for a missing one — inventing
+        # "iter=1" is the same defect as the "?/?" this replaced: a counter
+        # asserting a value the events never reported.
+        return f"iter={state.get('tdd_iter') or '?'}{budget}"
+    pass_n = state.get("pass_n") or "?"
+    maxp = state.get("max_passes") or "?"
+    return f"pass={pass_n}/{maxp}"

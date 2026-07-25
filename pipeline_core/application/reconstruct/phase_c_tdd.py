@@ -501,7 +501,10 @@ def run_phase_c_tdd(
             failed=frozenset(cur_failed))
         _prov = {"tree_sha": _measure.tree_sha, "oracle_size": _measure.oracle_size,
                  "passed": sorted(_measure.passed)[:200],
-                 "failed": sorted(_measure.failed)[:200]}
+                 "failed": sorted(_measure.failed)[:200],
+                 # The outer-loop budget travels with every iter event so a
+                 # dashboard can render stall x/N without hardcoding the cap.
+                 "max_stalls": max_stalls}
         # Per-binary breakdown so triage can see WHICH test set
         # changed between iters (vanished tests, not just pass→fail flips).
         _bins = summarize_test_binaries(output)
