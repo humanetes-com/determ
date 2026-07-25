@@ -42,6 +42,67 @@ class Measurement:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class PassDelta:
+    """Whether two measurements' pass counts may be compared at all, and why."""
+
+    comparable: bool
+    verdict: str
+
+
+def compare_measurements(prev: Measurement, cur: Measurement,
+                         name_cap: int = 200) -> PassDelta:
+    """Rule on a `prev.pass_count → cur.pass_count` claim.
+
+    Stamping provenance is only half the control: a pass count rising while the
+    DENOMINATOR moves is a measurement artefact, and reading it as progress is
+    the failure this answers (14/oracle=69 → 35/oracle=111 on a tree whose
+    content hash never changed — 21 of the 21 newly-passing names were tests
+    that did not exist in the earlier suite).
+
+    A delta is comparable only when both readings scored the SAME set of test
+    names. `to_event` caps each name list at `name_cap`, so a reading that hit
+    the cap degrades to the size check rather than pretending membership is
+    known. Set size below `oracle_size` is NOT truncation — one test name runs in
+    several binaries and counts once per verdict.
+    """
+    prev_names, cur_names = prev.passed | prev.failed, cur.passed | cur.failed
+    truncated = any(len(names) >= name_cap for names in
+                    (prev.passed, prev.failed, cur.passed, cur.failed))
+    delta = cur.pass_count - prev.pass_count
+    same_tree = prev.tree_sha == cur.tree_sha
+
+    if truncated:
+        if prev.oracle_size != cur.oracle_size:
+            return PassDelta(False, (
+                f"oracle size {prev.oracle_size}→{cur.oracle_size} and test names "
+                f"are truncated — pass {prev.pass_count}→{cur.pass_count} is not "
+                f"comparable"))
+        return PassDelta(True, (
+            f"oracle size held at {cur.oracle_size} (names truncated, membership "
+            f"unverified) — pass delta {delta:+d}"))
+
+    added, removed = cur_names - prev_names, prev_names - cur_names
+    if added or removed:
+        tree_note = (f"the fill tree never changed (sha {cur.tree_sha}), so the "
+                     f"whole delta is measurement" if same_tree else
+                     "the tree also changed, so progress cannot be separated "
+                     "from the suite change")
+        return PassDelta(False, (
+            f"oracle membership moved (+{len(added)}/-{len(removed)} tests, size "
+            f"{prev.oracle_size}→{cur.oracle_size}): pass {prev.pass_count}→"
+            f"{cur.pass_count} is NOT comparable — {tree_note}"))
+
+    if same_tree and delta != 0:
+        return PassDelta(False, (
+            f"same tree (sha {cur.tree_sha}) and same {cur.oracle_size}-test oracle "
+            f"but pass moved {delta:+d} — the suite is flaky, not progressing"))
+
+    return PassDelta(True, (
+        f"same {cur.oracle_size}-test oracle, tree {prev.tree_sha}→{cur.tree_sha}: "
+        f"pass delta {delta:+d} is real"))
+
+
 def tree_content_sha(src_root: Path) -> str:
     """16-hex content hash over every `*.rs` under `src_root`, path-sorted so it
     is deterministic and identifies the exact tree a measurement ran on. Empty /

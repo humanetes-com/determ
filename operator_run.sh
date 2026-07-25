@@ -2,8 +2,8 @@
 #
 # operator_run.sh — one unattended operator-mode pass, then commit.
 #
-# Loads Claude Code non-interactively with the message "load handover and start
-# operator mode", lets it run a single operator iteration (analyse the handover,
+# Loads Claude Code non-interactively with the message "load the handover then
+# start operator mode", lets it run a single operator iteration (analyse the handover,
 # apply fixes via stop-fix-validate, start the pipeline if that makes sense),
 # and commits the result.
 #
@@ -48,7 +48,7 @@ install -m 0755 "$REPO/tools/git-hooks/commit-msg" "$REPO/.git/hooks/commit-msg"
 APPEND_SP="$(cat <<'EOF'
 AUTOMATION CONTEXT — overrides the project's "do not commit / ask before
 committing" rule for THIS non-interactive run only:
-- Perform EXACTLY ONE full operator-mode iteration (load handover -> deep
+- Perform EXACTLY ONE full operator-mode iteration (load the handover -> deep
   analysis -> fixes via stop-fix-validate -> save handover), then STOP. Do not
   begin a second iteration and do not start a background watcher.
 - If the pipeline is not running and resuming is the right call, start it before
@@ -67,26 +67,47 @@ EOF
 #      without interactive approval (this repo is trusted; runs as a normal user).
 #    --settings '{"includeCoAuthoredBy": false}': disable Claude's own commit
 #      attribution as a first line of defence (the hook is the guarantee).
+#    --session-id: fixes the transcript filename up front so the exact model id
+#      (the alias below resolves to one) can be read back for the report header.
 mkdir -p logs/auto
 LOG="logs/auto/operator_run.log"
+PART="logs/auto/operator_run.part"     # live, tailable; survives a hard kill
+MODEL_REQ="${OPERATOR_MODEL:-opus}"
+SESSION_ID="$(python3 -c 'import uuid;print(uuid.uuid4())')"
 PASS_START="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-echo "operator_run: starting pass -> $LOG"
+echo "operator_run: starting pass -> $LOG (live: tail -f $PART)"
 
-{
-  echo "===== operator_run pass — $PASS_START ====="
-} >> "$LOG"
-
-if ! claude -p "load handover and start operator mode" \
-      --model "${OPERATOR_MODEL:-opus}" \
+: > "$PART"
+if ! claude -p "load the handover then start operator mode" \
+      --model "$MODEL_REQ" \
+      --session-id "$SESSION_ID" \
       ${OPERATOR_PERMS:---dangerously-skip-permissions} \
       --settings '{"includeCoAuthoredBy": false}' \
       --append-system-prompt "$APPEND_SP" \
       --max-budget-usd "${OPERATOR_MAX_USD:-10}" \
-      --output-format text 2>&1 | tee -a "$LOG"; then
+      --output-format text 2>&1 | tee "$PART"; then
   echo "operator_run: WARNING — claude exited non-zero; committing whatever changed." >&2
 fi
 
-echo "===== operator_run pass end — $(date -u +%Y-%m-%dT%H:%M:%SZ) =====" >> "$LOG"
+# Header is written AFTER the pass, ahead of the body, because the exact model id
+# only exists once the session transcript does — the report must name the model
+# that wrote it, not the alias that was asked for.
+MODEL_USED="$(.venv/bin/python tools/session_model.py "$SESSION_ID" 2>/dev/null || true)"
+if [ -n "$MODEL_USED" ]; then
+  MODEL_LINE="model: $MODEL_USED (requested: $MODEL_REQ)"
+else
+  MODEL_LINE="model: $MODEL_REQ (requested alias; exact id unresolved)"
+fi
+{
+  echo "===== operator_run pass — $PASS_START ====="
+  echo "date:  $PASS_START"
+  echo "$MODEL_LINE"
+  echo "session: $SESSION_ID"
+  echo
+  cat "$PART"
+  echo "===== operator_run pass end — $(date -u +%Y-%m-%dT%H:%M:%SZ) ====="
+} >> "$LOG"
+rm -f "$PART"
 
 # 4. Safety net: guarantee a commit even if the pass did not make one. The
 #    message must read exactly like a message a developer wrote by hand: no

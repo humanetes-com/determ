@@ -17,6 +17,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from pass_delta import load_measurements, report  # noqa: E402
+
 from pipeline_core.domain import model_notes as _mn  # noqa: E402
 from pipeline_core.domain.run_health import analyze, parse_iter_readings  # noqa: E402
 
@@ -39,6 +41,7 @@ def main() -> int:
     ap.add_argument("--project", default="tmp/anyhow")
     ap.add_argument("--brief", action="store_true",
                     help="findings only (for the watcher's event stream)")
+    ap.add_argument("--events", default="logs/events.jsonl")
     args = ap.parse_args()
 
     seg = segment_lines(Path(args.log))
@@ -56,6 +59,12 @@ def main() -> int:
     if not args.brief:
         print(f"run-health — segment lines={len(seg)} notes={len(notes)} "
               f"iter readings={len(readings)}")
+    # Cross-RUN pass-count comparability: `analyze` only ever sees one segment,
+    # so a denominator that moved across a restart cannot be caught there — and
+    # an incomparable delta read as progress is how a plateau gets declared over.
+    product = Path(args.project).name.split("-")[0]
+    for line in report(load_measurements(Path(args.events), product, None), 3):
+        print(f"PASS-DELTA {line}")
     if not findings:
         print("HEALTH: no findings")
         return 0
