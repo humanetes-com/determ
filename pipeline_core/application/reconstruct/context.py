@@ -8,9 +8,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.cfg import CfgSet
-from pipeline_core.domain.models import FillResult, Frontier, ImplBlock, Stub
+from pipeline_core.domain.models import FillResult, ImplBlock, Stub
 from pipeline_core.domain.retro_gate import RetroGateTally
 
 
@@ -33,7 +34,7 @@ class PerFnPassCtx:
     crate_type_records: list[Any]
     src_for_macros: Path
     failures_dir: Path
-    tdd_frontier_tests: Frontier | None
+    tdd_frontier_tests: FailureFrontier | None
     tdd_test_cmd: str | None
     splice_check_lock: threading.Lock
     retros_cache: dict[str, Any]

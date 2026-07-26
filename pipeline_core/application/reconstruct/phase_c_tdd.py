@@ -25,7 +25,11 @@ from pipeline_core.application.reconstruct.tdd_ratchet import (
     snapshot_due,
     snapshot_src_tree,
 )
-from pipeline_core.domain.attribution import union_unattributed_stubs
+from pipeline_core.domain.attribution import (
+    AttributionResult,
+    FailureFrontier,
+    union_unattributed_stubs,
+)
 from pipeline_core.domain.crash_site import (
     crash_evidence_by_locator,
     vanish_is_stub_confounded,
@@ -55,7 +59,7 @@ from pipeline_core.domain.test_results import (
 class PhaseCTddDeps:
     """Collaborators the TDD fill driver needs, injected by the composition root."""
 
-    attribute_failures: Callable[..., tuple[Frontier, str]]
+    attribute_failures: Callable[..., AttributionResult]
     build_test_reverse_map: Callable[..., dict[str, set[FnLocator]]]
     filter_test_targets: Callable[..., Frontier]
     check_graceful_stop: Callable[[str], None]
@@ -568,13 +572,21 @@ def run_phase_c_tdd(
         # Attribute failures via the full chain (panics → compile → behavior →
         # classifier → recently_filled → reverse_map). The cluster's in-memory
         # test pairs feed the deterministic behavior path (s117 stable-51/72).
-        frontier, kind = deps.attribute_failures(
+        _attr = deps.attribute_failures(
             output, src_dir, recently_filled,
             test_reverse_map, cluster.name,
             test_texts=dict(cluster_tests),
             extra_failed=frozenset(_oracle.vanished),
         )
+        frontier, kind = _attr.frontier, _attr.kind
         frontier = deps.filter_test_targets(frontier, src_dir)
+        # Only the direct-evidence subset may revert a fill. Everything added
+        # to `frontier` BELOW this line (crash-localized blame, futility
+        # escalation, unattributed stubs) widens the work list without
+        # convicting anyone: those units get attempted and are judged on
+        # compiling + not regressing the suite, never on a failing test they
+        # have no observed link to.
+        convicting = deps.filter_test_targets(_attr.convicting, src_dir)
 
         # Crash localization: the vanished-test oracle names WHICH tests died;
         # the localizer names WHERE (gdb fast path, ASAN fallback with origin
@@ -655,6 +667,14 @@ def run_phase_c_tdd(
         # callers; the D3 filter + permanently_exhausted still bound re-entry.
         frontier = union_unattributed_stubs(
             frontier, deps.scan_unimplemented_for_cluster(target_src_dir, cluster))
+
+        # No frontier key may be a `#[test]` fn — the tests ARE the oracle, and a
+        # fill dispatched at one rewrites the thing it is being judged by. The
+        # attribution chain filters its own paths, but crash blame and futility
+        # escalation ADD keys afterwards from raw fn records (escalation matched
+        # `Error::` inside gen_tests bodies and proposed those tests as
+        # "producers"), so the filter is re-applied over everything that landed.
+        frontier = deps.filter_test_targets(frontier, src_dir)
 
         # D3 — re-entry filter for fns that already exhausted the per-fn
         # fix loop in a prior iter (avoid burning compute on the same fn
@@ -883,7 +903,7 @@ def run_phase_c_tdd(
             leaf_name_counts=leaf_counts,
             fr_path=fr_path,
             tdd_frontier_keys=frontier_keys,
-            tdd_frontier_tests=eligible,   # Plan 10 U2: {key: {tests}} to validate
+            tdd_frontier_tests=FailureFrontier.build(eligible, convicting),
             tdd_test_cmd=test_cmd,         # Plan 10 U2: scoped cluster test cmd
             skip_end_pass_test=True,
             crash_evidence=crash_texts or None,

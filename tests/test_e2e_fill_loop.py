@@ -12,6 +12,7 @@ import dataclasses
 from pathlib import Path
 
 import pipeline
+from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.enums import FillUnit
 from tests.harness import (
     install_app_seams,
@@ -140,7 +141,7 @@ def test_u2_assertion_failure_routes_to_fix_loop(monkeypatch, tmp_path):
         module_name="m", cluster_name="t", cluster=None,
         check_cmd="cargo check", cluster_env={}, max_passes=1, fr_path=None,
         skip_end_pass_test=True,
-        tdd_frontier_tests={("lib.rs", "answer"): {"t_answer"}},
+        tdd_frontier_tests=FailureFrontier.of_direct({("lib.rs", "answer"): {"t_answer"}}),
         tdd_test_cmd="cargo test")
     assert res.fns_filled == 1
     assert res.attempts == 2
@@ -171,7 +172,7 @@ def test_u2_codependent_stub_panic_keeps_body(monkeypatch, tmp_path):
         module_name="m", cluster_name="t", cluster=None,
         check_cmd="cargo check", cluster_env={}, max_passes=1, fr_path=None,
         skip_end_pass_test=True,
-        tdd_frontier_tests={("lib.rs", "answer"): {"t_answer"}},
+        tdd_frontier_tests=FailureFrontier.of_direct({("lib.rs", "answer"): {"t_answer"}}),
         tdd_test_cmd="cargo test")
     assert res.fns_filled == 1
     assert res.attempts == 1

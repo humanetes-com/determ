@@ -73,3 +73,32 @@ def test_escalation_failsafe_on_missing_records():
     object.__setattr__(deps, "structure", _Broken())
     assert escalate_frontier_to_producers(
         deps, Path("src"), "t", {("f", "g")}) == {}
+
+
+def test_calling_an_associated_item_is_not_producing() -> None:
+    """`Chain::new(...)` in a body makes the caller a CONSUMER of Chain. Counting
+    it as a producer escalated a futile test to a third of the crate — and, since
+    escalation additions bypassed the oracle filter, to `#[test]` fns whose
+    bodies merely construct the type on the way to asserting something."""
+    recs = [
+        {"file": "src/user.rs", "fn_name": "consume", "container": "",
+         "sig_text": "fn consume(c: &Chain) -> usize",
+         "body_text": "let c = Chain::new(x); c.len()"},
+        {"file": "src/t.gen_tests_1.rs", "fn_name": "test_chain_len",
+         "container": "", "sig_text": "fn test_chain_len()",
+         "body_text": "assert_eq!(Chain::new(x).len(), 1);"},
+    ]
+    assert producers_for_types(recs, {"Chain"}) == []
+
+
+def test_self_returning_constructor_of_its_own_type_produces() -> None:
+    """`impl Own<T> { fn new(p) -> Self { … } }` hands back an `Own` even though
+    neither the return type nor the body spells the name."""
+    recs = [
+        {"file": "src/ptr.rs", "fn_name": "new", "container": "impl<T> Own<T>",
+         "sig_text": "pub fn new(p: Box<T>) -> Self", "body_text": "unsafe { … }"},
+        {"file": "src/other.rs", "fn_name": "new", "container": "impl<T> Ref<T>",
+         "sig_text": "pub fn new(p: *const T) -> Self", "body_text": "…"},
+    ]
+    got = producers_for_types(recs, {"Own"})
+    assert got == [("src/ptr.rs", "new")]

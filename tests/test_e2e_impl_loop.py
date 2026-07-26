@@ -13,6 +13,7 @@ import json
 from pathlib import Path
 
 import pipeline
+from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.models import FnRecord, ImplBlock
 from pipeline_core.domain.retro_gate import RetroProvenance
 from tests.harness import (
@@ -188,8 +189,8 @@ def test_impl_b3_does_not_keep_green_but_test_failing_fill(monkeypatch, tmp_path
         module_name="m", cluster_name="t", cluster=None, check_cmd="cargo check",
         cluster_env={}, fr_path=None, tdd_frontier_keys=None,
         tdd_test_cmd="cargo test",
-        tdd_frontier_tests={FnLocator("lib.rs", "kind"): {"kind_works"},
-                            FnLocator("lib.rs", "name"): {"kind_works"}})
+        tdd_frontier_tests=FailureFrontier.of_direct({FnLocator("lib.rs", "kind"): {"kind_works"},
+                            FnLocator("lib.rs", "name"): {"kind_works"}}))
     text = (ws / "src" / "lib.rs").read_text()
     assert res.impls_filled == 0            # NOT kept
     assert "unimplemented!()" in text          # reverted to stub
@@ -248,7 +249,7 @@ def test_refill_only_block_reaches_llm_and_splices_with_allow_nonstub(
         module_name="m", cluster_name="t", cluster=None, check_cmd="cargo check",
         cluster_env={}, fr_path=None,
         tdd_frontier_keys={FnLocator("lib.rs", "kind")},
-        tdd_frontier_tests={FnLocator("lib.rs", "kind"): {"kind_is_wrong"}})
+        tdd_frontier_tests=FailureFrontier.of_direct({FnLocator("lib.rs", "kind"): {"kind_is_wrong"}}))
     text = (ws / "src" / "lib.rs").read_text()
     assert res.impls_filled == 1 and res.fns_filled == 1
     assert "self.tag + 999" not in text         # wrong `kind` body replaced
@@ -779,8 +780,8 @@ def test_file_first_u2_gate_runs_the_refill_members_tests(monkeypatch, tmp_path,
         cluster_env={}, fr_path=None, tdd_test_cmd="cargo test",
         tdd_frontier_keys={FnLocator("lib.rs", "kind"),
                            FnLocator("lib.rs", "name")},
-        tdd_frontier_tests={FnLocator("lib.rs", "kind"): {"kind_is_wrong"},
-                            FnLocator("lib.rs", "name"): {"name_is_wrong"}})
+        tdd_frontier_tests=FailureFrontier.of_direct({FnLocator("lib.rs", "kind"): {"kind_is_wrong"},
+                            FnLocator("lib.rs", "name"): {"name_is_wrong"}}))
     out = capsys.readouterr().out
     assert "file-first fill (2 block(s), 0 stub(s), 2 re-fill(s)" in out
     # The defect boundary: with an empty test set the gate was an unconditional

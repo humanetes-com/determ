@@ -28,6 +28,7 @@ from pipeline_core.application.reconstruct.pull_resolver import (
     workspace_file_reader,
 )
 from pipeline_core.application.refine_loop import run_callback_loop
+from pipeline_core.domain.attribution import AttributionResult
 from pipeline_core.domain.models import FnLocator, Frontier
 from pipeline_core.domain.reconstruction import SpliceOutcome
 from pipeline_core.domain.retry_outcome import (
@@ -88,7 +89,7 @@ class Task3Cargo:
 class Task3Attribution:
     """Failure → (file, fn) repair-target attribution (test-failure classifier,
     test reverse-map, compile-diagnostic frontier, test-oracle filter)."""
-    attribute_failures: Callable[..., tuple[Frontier, str]]
+    attribute_failures: Callable[..., AttributionResult]
     build_test_reverse_map: Callable[..., dict[str, set[FnLocator]]]
     frontier_from_diags: Callable[..., Frontier]
     filter_test_targets: Callable[..., Frontier]
@@ -243,13 +244,13 @@ def run_task3_inline_retry(
                 tests_dir_files, project_dir)
         except Exception:
             test_reverse_map = {}
-        frontier, _kind = deps.attribution.attribute_failures(
-            output, project_dir,
-            recently_filled=[],  # task3 has no per-cluster fill history
-            test_reverse_map=test_reverse_map,
-            cluster_name=_cluster_label,
-        )
-        frontier = deps.attribution.filter_test_targets(frontier, project_dir)
+        frontier = deps.attribution.filter_test_targets(
+            deps.attribution.attribute_failures(
+                output, project_dir,
+                recently_filled=[],  # task3 has no per-cluster fill history
+                test_reverse_map=test_reverse_map,
+                cluster_name=_cluster_label,
+            ).frontier, project_dir)
         refs: list[FnLocator] = list(frontier.keys())
         if not refs:
             return {"abort": True, "reason": "no_actionable_refs"}

@@ -30,6 +30,7 @@ from pipeline_core.application.reconstruct.pull_resolver import (
     ask_with_pulls,
     workspace_file_reader,
 )
+from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.blueprint import Blueprint, blueprint_path, parse_blueprint
 from pipeline_core.domain.dispatch import impl_route_covers
 from pipeline_core.domain.fill_groups import BlockGroupInput, coupled_fill_groups
@@ -156,7 +157,7 @@ def fill_impl_blocks(
     cluster_env: dict[str, str] | None,
     fr_path: Path | None,
     tdd_frontier_keys: set[FnLocator] | None,
-    tdd_frontier_tests: Frontier | None = None,  # Plan 10 U2
+    tdd_frontier_tests: FailureFrontier | None = None,  # Plan 10 U2
     tdd_test_cmd: str | None = None,                                       # Plan 10 U2
     parallelism: int = 1,
     crash_evidence: dict[FnLocator, str] | None = None,
@@ -242,6 +243,9 @@ def fill_impl_blocks(
     _TASK2_MODEL = deps.task2_model
     if cluster_env is None:
         cluster_env = _cargo_env()
+    # Absent frontier (fn_walk driver) = nothing dispatched by test, nothing
+    # convicted by test; the compile gate and the regression ratchet still run.
+    _frontier_tests = tdd_frontier_tests or FailureFrontier.of_dispatch({})
     target_src_dir.mkdir(parents=True, exist_ok=True)
     # This tree's splice+cargo lock (per-tree: parallel clusters don't share).
     _splice_check_lock = _splice_lock_for(target_src_dir)
@@ -426,13 +430,17 @@ def fill_impl_blocks(
         if len(wanted_all) <= max_fns:
             _fill_block_group(file_rel, fblocks, file_rel)
             return
+        # Welding is keyed on CONVICTING tests: the coupling claim is "one
+        # validation run judges both blocks", which only a test that can
+        # actually reject them supports. An inferred attribution welds
+        # unrelated blocks into one oversized joint prompt.
         _binputs = [BlockGroupInput(
             idx=_i,
             fn_count=len(b.stub_members) + len(b.refill_members),
             tests=frozenset(
                 t for m in (*b.stub_members, *b.refill_members)
-                for t in (tdd_frontier_tests or {}).get(
-                    FnLocator(file_rel, m.fn_name), set())))
+                for t in (_frontier_tests.convicting_for(
+                    FnLocator(file_rel, m.fn_name)))))
             for _i, b in enumerate(fblocks)]
         _packed = coupled_fill_groups(_binputs, max_fns)
         # Only multi-block groups run here: a lone uncoupled block is exactly
@@ -689,9 +697,12 @@ def fill_impl_blocks(
                         FnLocator(file_rel, m.fn_name)
                         for b in fblocks
                         for m in (*b.stub_members, *b.refill_members))
+                    # Conviction-scoped, NOT the dispatch set: a test with no
+                    # observed link to this file can never be fixed here, so
+                    # letting it reject would revert every attempt forever.
                     _file_tests: set[str] = set()
                     for _key in _unit_fns:
-                        _file_tests |= (tdd_frontier_tests or {}).get(_key, set())
+                        _file_tests |= _frontier_tests.convicting_for(_key)
                     # Container-qualified sites so a panic in a same-named
                     # sibling (another impl's fn) is not charged to this file.
                     _unit_sites = frozenset(
@@ -1161,9 +1172,11 @@ def fill_impl_blocks(
                     _block_fns = frozenset(
                         FnLocator(block.file, _bm.fn_name)
                         for _bm in (*block.stub_members, *block.refill_members))
+                    # Conviction-scoped (see the file-first gate above): only
+                    # tests with direct evidence at a member may revert the block.
                     _block_tests: set[str] = set()
                     for _key in _block_fns:
-                        _block_tests |= (tdd_frontier_tests or {}).get(_key, set())
+                        _block_tests |= _frontier_tests.convicting_for(_key)
                     # Container-qualified sites: this block's members share
                     # block.container, so a same-named method in ANOTHER impl
                     # (e.g. a different `From` variant's `from`, the free `not`

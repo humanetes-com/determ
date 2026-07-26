@@ -241,3 +241,39 @@ def test_inventory_overcount_silent_on_named_vanish():
     # A crash (named vanish) is the OTHER detector's job, never this one.
     assert not [x for x in analyze([_SHRUNK], [])
                 if x.kind == HealthKind.INVENTORY_OVERCOUNT]
+
+
+def _u2(unit: str, errs: int) -> str:
+    return (f"  [phase-c/impl] {unit}: U2 test failed (attempt 1); "
+            f"errs={errs} codes=— floor={errs} stall=0.")
+
+
+def test_shared_failure_set_across_unrelated_files_alerts():
+    """The anyhow plateau's fingerprint: units in 5 unrelated files all rejected
+    with the identical errs count — one escalated test set unioned onto every
+    producer, so each was convicted for failures it does not own."""
+    lines = [_u2("src/context.rs::StdErrorforError", 8),
+             _u2("src/error.rs::ErrorImpl<E>", 8),
+             _u2("src/kind.rs::Adhoc", 8),
+             _u2("src/lib.rs::traitStdError", 8),
+             _u2("src/ensure.rs::NotBothDebugfor&(A,B)", 8)]
+    f = [x for x in analyze(lines, []) if x.kind == HealthKind.SYSTEMIC_SIGNATURE]
+    assert len(f) == 1 and f[0].severity == "alert"
+    assert "5 file(s)" in f[0].evidence
+
+
+def test_same_errs_count_within_one_file_is_not_systemic():
+    """Members of one impl family sharing a failing set is ordinary coupling."""
+    lines = [_u2("src/error.rs::A", 3), _u2("src/error.rs::B", 3),
+             _u2("src/error.rs::C", 3), _u2("src/error.rs::D", 3)]
+    assert not [x for x in analyze(lines, [])
+                if x.kind == HealthKind.SYSTEMIC_SIGNATURE]
+
+
+def test_single_failing_test_each_is_not_systemic():
+    """errs=1 everywhere is the normal shape of per-fn behavioural work, not a
+    shared oracle — it must not drown the real signal."""
+    lines = [_u2("src/a.rs::x", 1), _u2("src/b.rs::y", 1),
+             _u2("src/c.rs::z", 1), _u2("src/d.rs::w", 1)]
+    assert not [x for x in analyze(lines, [])
+                if x.kind == HealthKind.SYSTEMIC_SIGNATURE]

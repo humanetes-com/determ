@@ -16,6 +16,7 @@ from pipeline_core.application.reconstruct.phase_c_tdd import (
     PhaseCTddDeps,
     run_phase_c_tdd,
 )
+from pipeline_core.domain.attribution import AttributionResult, FailureKind
 from pipeline_core.domain.models import BuildCluster, ClusterFillResult
 from pipeline_core.domain.oracle_ledger import reconcile_sweep
 
@@ -88,7 +89,7 @@ def _run_driver(monkeypatch, tmp_path: Path, *, run_cargo, inventory,
 
     def _attr(*a: Any, **k: Any):
         attribution_kwargs.append(k)
-        return {}, "no_frontier"
+        return AttributionResult({}, FailureKind.NO_FRONTIER, {})
 
     deps = PhaseCTddDeps(
         attribute_failures=_attr,

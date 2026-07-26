@@ -23,9 +23,9 @@ from pipeline_core.application.reconstruct.stub_scan import (
     scan_unimplemented_functions,
 )
 from pipeline_core.domain import cfg as _cfg
+from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.models import (
     FnLocator,
-    Frontier,
     ImplBlock,
     ModRecord,
     TypeRecord,
@@ -181,7 +181,7 @@ def collect_impl_blocks_for_cluster(
 def collect_impl_refill_targets(
     blocks: list[ImplBlock],
     tdd_frontier_keys: set[FnLocator] | None,
-    tdd_frontier_tests: Frontier | None,
+    tdd_frontier_tests: FailureFrontier | None,
 ) -> list[ImplBlock]:
     """debt #46 point 2 — block-level analog of
     `PhaseCFillEngine._collect_refill_targets`: for each block, find members
@@ -200,7 +200,7 @@ def collect_impl_refill_targets(
             m for m in b.members
             if FnLocator(b.file, m.fn_name) in tdd_frontier_keys
             and FnLocator(b.file, m.fn_name) not in stub_keys
-            and tdd_frontier_tests.get(FnLocator(b.file, m.fn_name))
+            and tdd_frontier_tests.tests_for(FnLocator(b.file, m.fn_name))
         )
         out.append(dataclasses.replace(b, refill_members=refill) if refill else b)
     return out

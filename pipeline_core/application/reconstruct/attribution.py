@@ -410,10 +410,13 @@ def attribute_failures(
     cluster_name: str,
     test_texts: dict[str, str] | None = None,
     extra_failed: frozenset[str] = frozenset(),
-) -> tuple[Frontier, str]:
-    """Robust failure-to-fn attribution chain. Returns (frontier, kind). Callers
-    pass the result through `_filter_test_targets` (FR-018) — same as the fix
-    dispatchers — so a test-oracle fn is never spliced.
+) -> AttributionResult:
+    """Robust failure-to-fn attribution chain. Returns
+    (frontier, kind, convicting): the dispatch map, the path that produced it,
+    and the direct-evidence subset that may revert a unit (paths 1-3 only —
+    see `FailureKind.convicts`). Callers pass the result through
+    `_filter_test_targets` (FR-018) — same as the fix dispatchers — so a
+    test-oracle fn is never spliced.
     Tries each path until one yields a non-empty frontier:
       1. Runtime panics (unimplemented stubs) — `_extract_tdd_frontier`
       2. Compile errors — `_extract_tdd_compile_frontier`
@@ -451,26 +454,32 @@ def attribute_failures(
     # every iter, so the wrong-BODY behavioral failures were never surfaced and
     # never re-filled (the anyhow 14-ceiling). Fix: UNION the three, so stub
     # fills AND wrong-body re-fills are dispatched together. Over-attribution is
-    # already tolerated downstream (splice guards reject non-stub overwrites;
-    # behavioral re-fill WANTS the non-stub keys). The classifier (4) and the
-    # coarse fallbacks (5,6) stay as fallbacks — only reached if 1-3 are empty.
+    # tolerated for DISPATCH (splice guards reject non-stub overwrites;
+    # behavioral re-fill WANTS the non-stub keys) — never for acceptance, which
+    # is why paths 1-3 also build `convicting` and 4-6 do not. The classifier
+    # (4) and the coarse fallbacks (5,6) stay fallbacks — reached only if 1-3
+    # are empty.
     contributors: list[FailureKind] = []
 
-    def _merge(dst: Frontier, add: Frontier, kind: FailureKind) -> None:
+    merged: Frontier = {}
+    convicting: Frontier = {}
+
+    def _merge(add: Frontier, kind: FailureKind) -> None:
         if add:
             contributors.append(kind)
             for k, v in add.items():
-                dst.setdefault(k, set()).update(v)
+                merged.setdefault(k, set()).update(v)
+                if kind.convicts:
+                    convicting.setdefault(k, set()).update(v)
 
-    merged: Frontier = {}
-    _merge(merged, _strip(extract_tdd_frontier(deps, test_output, src_dir)),
+    _merge(_strip(extract_tdd_frontier(deps, test_output, src_dir)),
            FailureKind.RUNTIME)
-    _merge(merged, _strip(extract_tdd_compile_frontier(deps, test_output, src_dir)),
+    _merge(_strip(extract_tdd_compile_frontier(deps, test_output, src_dir)),
            FailureKind.COMPILE)
     if test_texts:
         _bf, _srcs = behavior_frontier_from_texts(
             deps, test_output, test_texts, src_dir)
-        _merge(merged, _strip(_bf), FailureKind.BEHAVIOR)
+        _merge(_strip(_bf), FailureKind.BEHAVIOR)
     # Vanished tests (`extra_failed` — expected but absent from the output:
     # their binary segfaulted or stopped compiling) leave NO panic line, no
     # compile error, no behavioral evidence, so paths 1-3 can never see them
@@ -485,12 +494,12 @@ def attribute_failures(
             cands = test_reverse_map.get(bare) or test_reverse_map.get(tname) or set()
             for key in cands:
                 vanished_fr.setdefault(key, set()).add(tname)
-        _merge(merged, _strip(vanished_fr), FailureKind.REVERSE_MAP)
+        _merge(_strip(vanished_fr), FailureKind.REVERSE_MAP)
     if merged:
         # One contributor → keep its kind (preserves per-path stats); several →
         # MERGED so the union is visible in logs/events.
         kind = contributors[0] if len(contributors) == 1 else FailureKind.MERGED
-        return AttributionResult(merged, kind)
+        return AttributionResult(merged, kind, convicting)
     # 4. LLM classifier — turn off via PHASE_C_TDD_USE_CLASSIFIER=0.
     if os.getenv("PHASE_C_TDD_USE_CLASSIFIER", "1") != "0":
         failing = sorted(parse_failed_tests(test_output) | extra_failed)
@@ -512,7 +521,7 @@ def attribute_failures(
                         synth.setdefault(key, set()).add(tname)
             synth = _strip(synth)
             if synth:
-                return AttributionResult(synth, FailureKind.CLASSIFIER)
+                return AttributionResult(synth, FailureKind.CLASSIFIER, {})
     # 5. Recently-filled fallback. If new assertion failures appeared
     # after recent fills, the recent fills are the most likely cause.
     # Queue them in reverse-filled order (newest first).
@@ -524,7 +533,8 @@ def attribute_failures(
                 recent_synth.setdefault(key, set()).update(failing)
             recent_synth = _strip(recent_synth)
             if recent_synth:
-                return AttributionResult(recent_synth, FailureKind.RECENTLY_FILLED)
+                return AttributionResult(
+                    recent_synth, FailureKind.RECENTLY_FILLED, {})
     # 6. Test-reverse-map. For each failing test, queue every fn it
     # could reach according to the static reverse map. Over-attribution
     # is tolerable here — per-fn splice guards reject overwriting
@@ -541,8 +551,9 @@ def attribute_failures(
                     reverse_synth.setdefault(key, set()).add(tname)
             reverse_synth = _strip(reverse_synth)
             if reverse_synth:
-                return AttributionResult(reverse_synth, FailureKind.REVERSE_MAP)
-    return AttributionResult({}, FailureKind.NO_FRONTIER)
+                return AttributionResult(
+                    reverse_synth, FailureKind.REVERSE_MAP, {})
+    return AttributionResult({}, FailureKind.NO_FRONTIER, {})
 
 
 # --- Futility escalation (debt #82, 2026-07-10) ------------------------------
@@ -587,8 +598,15 @@ def producers_for_types(
     *,
     exclude: set[FnLocator] | None = None,
 ) -> list[FnLocator]:
-    """Fns that PRODUCE one of `type_names`: return it, or construct it in the
-    body (`Type {`, `Type::`). Token containment scan — no regex on source."""
+    """Fns that PRODUCE one of `type_names`: hand the value back (`-> Type`, or
+    `-> Self` from that type's own impl) or build it literally (`Type { … }`).
+    Token containment scan — no regex on source.
+
+    Calling an associated item (`Type::foo()` in a body) is deliberately NOT a
+    producer: that is how CONSUMERS use a type, and matching it turned an
+    escalation meant to name a handful of constructors into a third of the
+    crate — including the `#[test]` fns that call `Error::msg` on the way to
+    asserting something."""
     exclude = exclude or set()
     out: list[FnLocator] = []
     seen: set[FnLocator] = set()
@@ -599,10 +617,12 @@ def producers_for_types(
         sig = r.get("sig_text", "") or ""
         body = r.get("body_text", "") or ""
         ret = sig.split("->", 1)[1] if "->" in sig else ""
+        own_type = container_type_name(r.get("container", "") or "")
         for tn in type_names:
             if not tn:
                 continue
-            if tn in ret or f"{tn} {{" in body or f"{tn}::" in body:
+            returns_self = "Self" in ret and own_type == tn
+            if tn in ret or returns_self or f"{tn} {{" in body:
                 out.append(key)
                 seen.add(key)
                 break

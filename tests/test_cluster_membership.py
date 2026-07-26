@@ -3,6 +3,7 @@ from pipeline_core.application.reconstruct import cluster_membership as cm
 from pipeline_core.application.reconstruct.cleanup_residuals import (
     filter_test_exercised,
 )
+from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.models import FnLocator, FnRecord, ImplBlock
 
 
@@ -91,7 +92,7 @@ def test_collect_impl_refill_targets_stamps_nonstub_frontier_member():
     out = cm.collect_impl_refill_targets(
         [block],
         tdd_frontier_keys={FnLocator("lib.rs", "kind")},
-        tdd_frontier_tests={FnLocator("lib.rs", "kind"): {"kind_is_wrong"}})
+        tdd_frontier_tests=FailureFrontier.of_direct({FnLocator("lib.rs", "kind"): {"kind_is_wrong"}}))
     assert [m.fn_name for m in out[0].refill_members] == ["kind"]
 
 
@@ -104,7 +105,7 @@ def test_collect_impl_refill_targets_excludes_actual_stubs():
     out = cm.collect_impl_refill_targets(
         [block],
         tdd_frontier_keys={FnLocator("lib.rs", "kind")},
-        tdd_frontier_tests={FnLocator("lib.rs", "kind"): {"kind_is_wrong"}})
+        tdd_frontier_tests=FailureFrontier.of_direct({FnLocator("lib.rs", "kind"): {"kind_is_wrong"}}))
     assert out[0].refill_members == ()
 
 

@@ -179,6 +179,35 @@ def analyze(
                 "attribution before letting it continue",
             ))
 
+    # -- 3b. shared failure set across unrelated files ----------------------
+    # A unit's U2 rejection names ITS OWN failing tests, so the SIZE of that
+    # set is a property of the unit. When units in several unrelated files all
+    # report the same size, they are being judged against one shared set — the
+    # frontier is convicting them for failures they do not own, and no attempt
+    # count can escape that. (Observed: `errs=8` on context.rs, error.rs,
+    # kind.rs, lib.rs and ensure.rs at once — the 8 tests futility escalation
+    # had unioned onto every producer in the crate.)
+    by_errs: dict[int, set[str]] = {}
+    for ln in segment_lines:
+        if "U2 test failed" not in ln:
+            continue
+        n = _int_after(ln, "errs=")
+        unit = _unit_of(ln, "U2 test failed")
+        if n is None or n < 2 or not unit:
+            continue
+        by_errs.setdefault(n, set()).add(unit)
+    for n, units in sorted(by_errs.items()):
+        files = {u.split("::", 1)[0] for u in units}
+        if len(files) >= 3 and len(units) >= 4:
+            findings.append(HealthFinding(
+                HealthKind.SYSTEMIC_SIGNATURE, "alert", "U2 acceptance oracle",
+                f"{len(units)} unit(s) across {len(files)} file(s) all rejected "
+                f"with errs={n}: {', '.join(sorted(units)[:4])}",
+                "unrelated units cannot own the same failing set — inspect what "
+                "the frontier attributes to them (starvation_miner names the "
+                "tests); a shared set means conviction, not evidence",
+            ))
+
     # -- 4. attribution futility -------------------------------------------
     stops: dict[str, int] = {}
     for ln in segment_lines:

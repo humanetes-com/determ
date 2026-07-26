@@ -18,6 +18,7 @@ import pytest
 from pipeline_core.application.generators.task2_generator import (
     StaticSkeletonTask2Generator,
 )
+from pipeline_core.domain.attribution import AttributionResult, FailureKind
 from pipeline_core.domain.generation import GenerationRequest, SkeletonConfig
 from pipeline_core.domain.models import BuildCluster, ClusterFillResult
 
@@ -61,7 +62,8 @@ class FakeAdapter:
     # field with rc=0 (a clean check), preserving pre-structured-heal tests.
     diag_results: list[tuple[int, str, list[_Diag]]] = field(default_factory=list)
     run_results: list[tuple[int, str]] = field(default_factory=list)
-    attribute_seq: list[tuple[dict[Any, Any], str]] = field(default_factory=list)
+    attribute_seq: list[tuple[dict[Any, Any], FailureKind]] = field(
+        default_factory=list)
     phase_valid_keys: set[str] = field(default_factory=set)
     manifest: list[str] = field(default_factory=list)
     propagate: bool = True
@@ -138,8 +140,10 @@ class FakeAdapter:
     def attribute_failures(self, test_output: str, src_dir: Path,
                            recently_filled: list[tuple[str, str]],
                            test_reverse_map: dict[str, set[tuple[str, str]]],
-                           cluster_name: str) -> tuple[dict[Any, Any], str]:
-        return self.attribute_seq.pop(0) if self.attribute_seq else ({}, "none")
+                           cluster_name: str) -> AttributionResult:
+        fr, kind = (self.attribute_seq.pop(0) if self.attribute_seq
+                    else ({}, FailureKind.NO_FRONTIER))
+        return AttributionResult(fr, FailureKind(kind), dict(fr))
 
     # --- FillEngine ---
     def run_phase_c_tdd(self, **kw: Any) -> ClusterFillResult:
@@ -533,9 +537,9 @@ def test_post_merge_fill_then_stall_exit(tmp_path: Path) -> None:
         clusters_list=[c],
         # iter1 fails+fills, iter2 no-improve, iter3 no-improve → stall_exit
         run_results=[(1, "fail"), (1, "fail"), (1, "fail")],
-        attribute_seq=[(dict(frontier), "panic"),
-                       (dict(frontier), "panic"),
-                       (dict(frontier), "panic")],
+        attribute_seq=[(dict(frontier), FailureKind.RUNTIME),
+                       (dict(frontier), FailureKind.RUNTIME),
+                       (dict(frontier), FailureKind.RUNTIME)],
     )
     pd = _make_project(tmp_path, [c])
     _post(fake, pd, _cfg(per_fn=True, tdd=True))

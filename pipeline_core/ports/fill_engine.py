@@ -19,6 +19,7 @@ import threading
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.models import (
     BuildCluster,
     ClusterFillResult,
@@ -248,7 +249,7 @@ class ImplFillPath(Protocol):
         cluster: BuildCluster | None, check_cmd: str,
         cluster_env: dict[str, str], fr_path: Path | None,
         tdd_frontier_keys: set[FnLocator] | None,
-        tdd_frontier_tests: Any, tdd_test_cmd: str | None,
+        tdd_frontier_tests: FailureFrontier | None, tdd_test_cmd: str | None,
         parallelism: int = 1,
         crash_evidence: dict[FnLocator, str] | None = None,
     ) -> ClusterFillResult: ...

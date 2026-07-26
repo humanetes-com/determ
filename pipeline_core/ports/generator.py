@@ -16,12 +16,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+from ..domain.attribution import AttributionResult, FailureFrontier
 from ..domain.models import (
     BuildCluster,
     ClusterFillResult,
     Diagnostic,
     FnLocator,
-    Frontier,
 )
 
 
@@ -122,7 +122,7 @@ class Cargo(Protocol):
         self, test_output: str, src_dir: Path,
         recently_filled: list[FnLocator],
         test_reverse_map: dict[str, set[FnLocator]], cluster_name: str,
-    ) -> tuple[Frontier, str]: ...
+    ) -> AttributionResult: ...
 
 
 @runtime_checkable
@@ -144,7 +144,8 @@ class FillEngine(Protocol):
         cluster_env: dict[str, str] | None = ..., max_passes: int = ...,
         leaf_name_counts: dict[str, int] | None = ..., fr_path: Path | None = ...,
         tdd_frontier_keys: set[FnLocator] | None = ...,
-        skip_end_pass_test: bool = ..., tdd_frontier_tests: Frontier | None = ...,
+        skip_end_pass_test: bool = ...,
+        tdd_frontier_tests: FailureFrontier | None = ...,
         tdd_test_cmd: str | None = ...,
     ) -> ClusterFillResult: ...
     def fill_groups(

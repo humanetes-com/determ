@@ -27,6 +27,7 @@ from typing import Any
 from ...application.reconstruct.fill_merge import backfill_stub_bodies
 from ...application.reconstruct.fill_rules import is_unimplemented_body
 from ...application.reconstruct.heal import HealDeps, heal_file
+from ...domain.attribution import FailureFrontier
 from ...domain.cluster_plan import fill_order
 from ...domain.generation import (
     GenerationRequest,
@@ -1926,9 +1927,10 @@ class StaticSkeletonTask2Generator(Task2Generator):
             else:
                 stall += 1
 
-            frontier, kind = self.cargo.attribute_failures(
+            _attr = self.cargo.attribute_failures(
                 output, project_dir, recently_filled, test_reverse_map, "merged",
             )
+            frontier, kind = _attr.frontier, _attr.kind
             eligible = {k: v for k, v in frontier.items()
                         if k not in permanently_exhausted}
             # Stall on pass_count is the sole real terminator. A non-empty
@@ -1984,7 +1986,8 @@ class StaticSkeletonTask2Generator(Task2Generator):
                 leaf_name_counts=leaf_counts,
                 fr_path=fr_path,
                 tdd_frontier_keys=set(eligible.keys()),
-                tdd_frontier_tests=eligible,   # Plan 10 U2
+                tdd_frontier_tests=FailureFrontier.build(
+                    eligible, _attr.convicting),
                 tdd_test_cmd=test_cmd,         # Plan 10 U2
                 skip_end_pass_test=True,
             )

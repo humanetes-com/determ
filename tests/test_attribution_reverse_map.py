@@ -117,9 +117,10 @@ def test_assertion_panic_falls_through_to_reverse_map(
     )
     reverse_map = {"extra_cap_limit": {("lib.rs", "cap_limit")}}
 
-    frontier, _kind = attribute_failures(
+    _res = attribute_failures(
         _deps(recs), output, src, recently_filled=[],
         test_reverse_map=reverse_map, cluster_name="stable")
+    frontier = _res.frontier
 
     assert ("lib.rs", "cap_limit") in frontier
     assert ("lib.rs", "extra_cap_limit") not in frontier
@@ -156,9 +157,10 @@ def test_behavior_path_fires_before_classifier(tmp_path: Path) -> None:
     output = ("running 1 test\ntest t_cap ... FAILED\n\nfailures:\n\n"
               "---- t_cap stdout ----\n"
               "assertion `left == right` failed\n")
-    frontier, kind = attribute_failures(
+    _res = attribute_failures(
         deps, output, tmp_path, recently_filled=[],
         test_reverse_map={}, cluster_name="stable", test_texts=test_texts)
+    frontier, kind = _res.frontier, _res.kind
     assert kind == "behavior"
     key = FnLocator("src/lib.rs", "cap_limit")
     assert key in frontier and frontier[key] == {"t_cap"}
@@ -178,9 +180,10 @@ def test_merges_runtime_and_behavioral_paths(
     monkeypatch.setattr(attr, "extract_tdd_compile_frontier", lambda *_a, **_k: {})
     monkeypatch.setattr(attr, "behavior_frontier_from_texts",
                         lambda *_a, **_k: ({b: {"t_assert"}}, {}))
-    frontier, kind = attribute_failures(
+    _res = attribute_failures(
         _deps([]), "out", tmp_path, recently_filled=[], test_reverse_map={},
         cluster_name="stable", test_texts={"tests/x.rs": "…"})
+    frontier, kind = _res.frontier, _res.kind
     assert kind == "merged"
     assert frontier[a] == {"t_panic"} and frontier[b] == {"t_assert"}
 
@@ -193,9 +196,10 @@ def test_single_deterministic_path_keeps_its_kind(
     monkeypatch.setattr(attr, "extract_tdd_frontier", lambda *_a, **_k: {a: {"t"}})
     monkeypatch.setattr(attr, "extract_tdd_compile_frontier", lambda *_a, **_k: {})
     monkeypatch.setattr(attr, "behavior_frontier_from_texts", lambda *_a, **_k: ({}, {}))
-    frontier, kind = attribute_failures(
+    _res = attribute_failures(
         _deps([]), "out", tmp_path, recently_filled=[], test_reverse_map={},
         cluster_name="stable", test_texts={"tests/x.rs": "…"})
+    frontier, kind = _res.frontier, _res.kind
     assert kind == "runtime" and a in frontier
 
 
@@ -207,10 +211,11 @@ def test_behavior_path_skipped_without_texts(
     monkeypatch.setenv("PHASE_C_TDD_USE_CLASSIFIER", "0")
     recs = [{"file": "src/lib.rs", "fn_name": "cap_limit", "cfg_predicates": []}]
     output = ("running 1 test\ntest t_cap ... FAILED\n\nfailures:\n")
-    frontier, kind = attribute_failures(
+    _res = attribute_failures(
         _deps(recs), output, tmp_path, recently_filled=[],
         test_reverse_map={"t_cap": {FnLocator("src/lib.rs", "cap_limit")}},
         cluster_name="stable")
+    frontier, kind = _res.frontier, _res.kind
     assert kind == "reverse_map"
     assert FnLocator("src/lib.rs", "cap_limit") in frontier
 
@@ -242,9 +247,72 @@ def test_vanished_tests_merge_into_nonempty_frontier(
         "not implemented\n"
     )
     reverse_map = {"test_vanished": {("lib.rs", "crashy")}}
-    frontier, kind = attribute_failures(
+    _res = attribute_failures(
         _deps(recs), output, src, recently_filled=[],
         test_reverse_map=reverse_map, cluster_name="stable",
         extra_failed=frozenset({"test_vanished"}))
+    frontier = _res.frontier
     assert ("lib.rs", "crashy") in frontier
     assert frontier[("lib.rs", "crashy")] == {"test_vanished"}
+
+
+# --- conviction scope: only direct evidence may revert a fill --------------- #
+
+def test_reverse_map_vanished_dispatches_without_convicting(
+    tmp_path: Path,
+) -> None:
+    """A vanished test routed through the static reverse map says "this fn could
+    reach it", never "this fn broke it". It must dispatch the fn and stay OUT of
+    the conviction set, or a compiling fill is reverted for a test it has no
+    observed link to — on every attempt, forever."""
+    src = tmp_path / "src"
+    src.mkdir()
+    body = "pub fn stub_fn() { unimplemented!() }\npub fn crashy() {}\n"
+    (src / "lib.rs").write_text(body, encoding="utf-8")
+    recs = [
+        {"file": "lib.rs", "fn_name": "stub_fn", "cfg_predicates": [],
+         "sig_byte_start": 0, "body_byte_end": body.index("\n") + 1},
+        {"file": "lib.rs", "fn_name": "crashy", "cfg_predicates": []},
+    ]
+    output = (
+        "running 1 test\n"
+        "test test_stub ... FAILED\n\n"
+        "---- test_stub stdout ----\n"
+        "thread 'test_stub' panicked at lib.rs:1:20:\n"
+        "not implemented\n"
+    )
+    _res = attribute_failures(
+        _deps(recs), output, src, recently_filled=[],
+        test_reverse_map={"test_vanished": {("lib.rs", "crashy")}},
+        cluster_name="stable", extra_failed=frozenset({"test_vanished"}))
+    # Dispatch sees both; conviction sees only the located stub panic.
+    assert ("lib.rs", "crashy") in _res.frontier
+    assert ("lib.rs", "crashy") not in _res.convicting
+    assert _res.convicting[("lib.rs", "stub_fn")] == {"test_stub"}
+
+
+def test_classifier_fallback_convicts_nobody(
+    tmp_path: Path, monkeypatch: Any,
+) -> None:
+    """The LLM classifier's opinion dispatches but never convicts — a
+    non-deterministic guess must not be able to revert a compiling body."""
+    import pipeline_core.application.reconstruct.attribution as attr
+    monkeypatch.setattr(attr, "extract_tdd_frontier", lambda *_a, **_k: {})
+    monkeypatch.setattr(attr, "extract_tdd_compile_frontier", lambda *_a, **_k: {})
+    monkeypatch.setattr(attr, "parse_failed_tests", lambda _o: {"t_x"})
+    deps = AttributionDeps(
+        structure=_FakeStructure([]),
+        classify=lambda **_k: {
+            "t_x": {"category": "BAD_FILL", "fn": "src/a.rs::wrong_fn"}},
+        locate_fn=lambda *_a, **_k: None,
+        run_check_diag=lambda *_a, **_k: (0, "", []),
+        derive_check_only_cmd=lambda c: c,
+        is_gen_tests_file=lambda _f: False,
+        log=lambda _m: None,
+    )
+    _res = attribute_failures(
+        deps, "out", tmp_path, recently_filled=[], test_reverse_map={},
+        cluster_name="stable")
+    assert _res.kind == "classifier"
+    assert _res.frontier[FnLocator("src/a.rs", "wrong_fn")] == {"t_x"}
+    assert _res.convicting == {}

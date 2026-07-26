@@ -533,7 +533,8 @@ class FillOneFn:
                 # sibling (e.g. this fn is a `Bool` impl's `not`, the panic is in
                 # the free `not(cond)` stub) is external, not this fn's failure.
                 _v = self.cargo.u2_test_gate(
-                    (ctx.tdd_frontier_tests or {}).get(_key, set()),
+                    (ctx.tdd_frontier_tests.convicting_for(_key)
+                     if ctx.tdd_frontier_tests is not None else set()),
                     frozenset({FnSite(rel_file, fn_name, container)}),
                     ctx.tdd_test_cmd, ctx.target_src_dir, ctx.cluster_env)
                 if _v.decision is U2Decision.REJECT:

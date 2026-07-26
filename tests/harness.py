@@ -22,6 +22,7 @@ from collections.abc import Callable
 from typing import Any
 
 import pipeline
+from pipeline_core.domain.attribution import AttributionResult, FailureKind
 from pipeline_core.domain.models import Diagnostic
 
 
@@ -140,8 +141,15 @@ def install_scripted_attribution(monkeypatch, frontier: Any, kind: str = "script
     (frontier, kind), bypassing the test-reverse-map + extractor. `frontier`
     is constant / list / callable."""
     fscript = _Script(frontier)
-    install_app_seams(monkeypatch,
-                      attribute_failures=lambda *a, **k: (fscript(), kind))
+
+    def _attr(*_a: Any, **_k: Any) -> AttributionResult:
+        # Scripted frontier = direct evidence: these fakes drive routes that
+        # expect the attributed test to be able to reject the fill.
+        fr = fscript()
+        return AttributionResult(fr, FailureKind(kind) if kind in tuple(FailureKind)
+                                 else FailureKind.BEHAVIOR, dict(fr))
+
+    install_app_seams(monkeypatch, attribute_failures=_attr)
     return fscript
 
 

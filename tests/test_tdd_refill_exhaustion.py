@@ -19,6 +19,7 @@ from pipeline_core.application.reconstruct.phase_c_tdd import (
     run_phase_c_tdd,
 )
 from pipeline_core.application.retrigger_layout import RetriggerResult
+from pipeline_core.domain.attribution import AttributionResult, FailureKind
 from pipeline_core.domain.models import BuildCluster, ClusterFillResult, FnLocator
 
 _WRONG = FnLocator("src/a.rs", "wrongfn")
@@ -38,7 +39,8 @@ def _deps(fill_calls: list[frozenset[FnLocator]]) -> PhaseCTddDeps:
     # Constant failing test → pass_count never improves after iter 1 → the loop
     # stalls out; `wrongfn` is attributed every iter and is never a stub.
     return PhaseCTddDeps(
-        attribute_failures=lambda *a, **k: ({_WRONG: {"t1"}}, "runtime"),
+        attribute_failures=lambda *a, **k: AttributionResult(
+            {_WRONG: {"t1"}}, FailureKind.RUNTIME, {_WRONG: {"t1"}}),
         build_test_reverse_map=lambda *a, **k: {},
         filter_test_targets=lambda frontier, src: frontier,
         check_graceful_stop=lambda *a, **k: None,

@@ -18,6 +18,7 @@ from pipeline_core.application.reconstruct.phase_c_engine import (
     EngineConfig,
     PhaseCFillEngine,
 )
+from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.enums import FillUnit
 from pipeline_core.domain.models import (
     ClusterFillResult,
@@ -373,8 +374,8 @@ def test_collect_refill_targets_only_filled_frontier_fns(tmp_path: Path) -> None
     keys = {FnLocator("src/a.rs", "wrongfn"), FnLocator("src/a.rs", "stubfn"),
             FnLocator("src/a.rs", "greenfn")}
     # only wrongfn + stubfn have failing tests; stubfn is still a stub → excluded.
-    tests = {FnLocator("src/a.rs", "wrongfn"): {"t1"},
-             FnLocator("src/a.rs", "stubfn"): {"t2"}}
+    tests = FailureFrontier.of_direct({FnLocator("src/a.rs", "wrongfn"): {"t1"},
+                                       FnLocator("src/a.rs", "stubfn"): {"t2"}})
     out = eng._collect_refill_targets(tmp_path, stubs, keys, tests)
     assert [(s.fn_name, s.refill) for s in out] == [("wrongfn", True)]
     # No frontier map (legacy fn_walk driver) → never produces refill targets.
@@ -391,8 +392,8 @@ def test_refill_target_key_matching_no_fn_is_reported(tmp_path: Path) -> None:
                           "container": "impl A", "sig_text": "fn realfn()"}])
     eng = _engine(fake, FillUnit.FN)
     keys = {FnLocator("src/a.rs", "realfn"), FnLocator("nowhere.rs", "ghostfn")}
-    tests = {FnLocator("src/a.rs", "realfn"): {"t1"},
-             FnLocator("nowhere.rs", "ghostfn"): {"t2"}}
+    tests = FailureFrontier.of_direct({FnLocator("src/a.rs", "realfn"): {"t1"},
+                                       FnLocator("nowhere.rs", "ghostfn"): {"t2"}})
     out = eng._collect_refill_targets(tmp_path, [], keys, tests)
     assert [s.fn_name for s in out] == ["realfn"]
     assert "phase_c.refill.dangling_keys" in fake.events
@@ -416,7 +417,7 @@ def test_engine_defers_impl_route_for_a_free_fn_stub(tmp_path: Path) -> None:
     out = _engine(fake, FillUnit.IMPL).run(
         ws, ws / "src", [], "m", "t", cluster=None, cluster_env={},
         tdd_frontier_keys={key, other},
-        tdd_frontier_tests={other: {"t1"}},
+        tdd_frontier_tests=FailureFrontier.of_direct({other: {"t1"}}),
         skip_end_pass_test=True)
     # The impl path's scripted result must NOT be what came back.
     assert out.fns_filled != 99
@@ -434,6 +435,6 @@ def test_engine_runs_impl_route_when_every_stub_is_covered(tmp_path: Path) -> No
     out = _engine(fake, FillUnit.IMPL).run(
         ws, ws / "src", [], "m", "t", cluster=None, cluster_env={},
         tdd_frontier_keys={FnLocator("src/e.rs", "inner")},
-        tdd_frontier_tests={}, skip_end_pass_test=True)
+        tdd_frontier_tests=FailureFrontier.of_direct({}), skip_end_pass_test=True)
     assert out is stats
     assert "phase_c.dispatch.impl_route_deferred" not in fake.events

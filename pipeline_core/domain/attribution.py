@@ -1,12 +1,13 @@
 """Domain types + pure helper for failure→fn attribution (P2).
 
 `FailureKind` is a StrEnum (its members ARE their wire strings, so existing callers that
-treat the kind as a plain string keep working). `AttributionResult` is a NamedTuple so it
-still unpacks as `frontier, kind = …` at every call site. `line_to_fn_record` is the pure
-(text, line) → fn-record mapping, moved out of pipeline.py.
+treat the kind as a plain string keep working) and it also answers whether the path it
+names may CONVICT a unit. `line_to_fn_record` is the pure (text, line) → fn-record
+mapping, moved out of pipeline.py.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, NamedTuple
 
@@ -25,13 +26,86 @@ class FailureKind(StrEnum):
     MERGED = "merged"
     NO_FRONTIER = "no_frontier"
 
+    @property
+    def convicts(self) -> bool:
+        """True when this path OBSERVED the failure AT the unit — a panic
+        located in its body, a compile error on its lines, or the failing
+        test's own body naming it. Those are the only links strong enough to
+        REVERT a fill. Every other path answers "who might be responsible"
+        (a reachability guess, a classifier's opinion, "it was filled
+        recently", the producers a futile test escalates to); widening work
+        on such a guess costs compute, but judging on it makes acceptance
+        unreachable by construction — the unit is asked to fix a test it
+        cannot influence, so no attempt count ever helps."""
+        return self in _CONVICTING_KINDS
+
+
+_CONVICTING_KINDS = frozenset({
+    FailureKind.RUNTIME, FailureKind.COMPILE, FailureKind.BEHAVIOR})
+
+
+@dataclass(frozen=True, slots=True)
+class FailureFrontier:
+    """The iteration's work list, carrying BOTH of its projections so the two
+    readings can never drift apart.
+
+    `dispatch` — which unit to attempt and which failing tests motivate it.
+    Over-inclusion here is cheap and often deliberate (unattributed stubs,
+    producer escalation): the worst case is an attempt that changes nothing.
+
+    `convicting` — the tests allowed to REVERT that unit when it compiles but
+    they still fail. Over-inclusion here is fatal, not merely wasteful: a unit
+    convicted by a test it cannot influence is reverted on every attempt, in
+    every iteration, forever.
+
+    Built once via `build`, which enforces `convicting[k] ⊆ dispatch[k]` and
+    drops keys absent from dispatch — the invariant lives here, not in each
+    fill route."""
+
+    dispatch: Frontier
+    convicting: Frontier
+
+    @classmethod
+    def build(cls, dispatch: Frontier, convicting: Frontier) -> FailureFrontier:
+        narrowed = {
+            key: (convicting.get(key, set()) & tests)
+            for key, tests in dispatch.items()
+            if convicting.get(key)
+        }
+        return cls(dict(dispatch), {k: v for k, v in narrowed.items() if v})
+
+    @classmethod
+    def of_direct(cls, attributed: Frontier) -> FailureFrontier:
+        """A frontier whose every attribution rests on direct evidence — the
+        two projections coincide."""
+        return cls(dict(attributed), {k: set(v) for k, v in attributed.items() if v})
+
+    @classmethod
+    def of_dispatch(cls, dispatch: Frontier) -> FailureFrontier:
+        """A frontier whose attributions carry no direct evidence — every unit
+        is attempted, none can be reverted for a still-failing test. The
+        compile gate and the global non-regression ratchet still apply."""
+        return cls(dict(dispatch), {})
+
+    def tests_for(self, key: FnLocator) -> set[str]:
+        return self.dispatch.get(key, set())
+
+    def convicting_for(self, key: FnLocator) -> set[str]:
+        return self.convicting.get(key, set())
+
+    def __bool__(self) -> bool:
+        return bool(self.dispatch)
+
 
 class AttributionResult(NamedTuple):
-    """(frontier, kind). Unpacks as a 2-tuple — backward compatible with the
-    `frontier, kind = _attribute_failures(...)` call sites."""
+    """`frontier` is the DISPATCH map (every path's attributions unioned);
+    `convicting` is the direct-evidence subset of it (see
+    `FailureKind.convicts`). Both are returned together so a caller cannot
+    reach for one and silently get the other."""
 
     frontier: Frontier
     kind: FailureKind
+    convicting: Frontier
 
 
 def line_to_fn_record(

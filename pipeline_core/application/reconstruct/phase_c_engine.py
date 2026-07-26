@@ -30,6 +30,7 @@ from pipeline_core.application.reconstruct.cluster_membership import (
 from pipeline_core.application.reconstruct.context import PerFnPassCtx
 from pipeline_core.application.reconstruct.fill_one_fn import FillOneFn
 from pipeline_core.application.reconstruct.scheduling import group_priority_levels
+from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.cfg import CfgSet
 from pipeline_core.domain.dispatch import stubs_deferred_by_impl_route
@@ -38,7 +39,6 @@ from pipeline_core.domain.models import (
     BuildCluster,
     ClusterFillResult,
     FnLocator,
-    Frontier,
     Stub,
 )
 from pipeline_core.domain.refine import FloorStall
@@ -95,7 +95,7 @@ class PhaseCFillEngine:
     def _collect_refill_targets(
         self, target_src_dir: Path, stubs: list[Stub],
         tdd_frontier_keys: set[FnLocator] | None,
-        tdd_frontier_tests: Frontier | None,
+        tdd_frontier_tests: FailureFrontier | None,
     ) -> list[Stub]:
         """Frontier fns that are already FILLED (not stubs) but have a failing
         attributed test → behavioral re-fill targets (`refill=True`).
@@ -112,7 +112,7 @@ class PhaseCFillEngine:
         _stub_keys = {s.key for s in stubs}
         _refill_keys = {
             k for k in tdd_frontier_keys
-            if k not in _stub_keys and tdd_frontier_tests.get(k)
+            if k not in _stub_keys and tdd_frontier_tests.tests_for(k)
         }
         if not _refill_keys:
             return []
@@ -149,7 +149,7 @@ class PhaseCFillEngine:
         fr_path: Path | None = None,
         tdd_frontier_keys: set[FnLocator] | None = None,
         skip_end_pass_test: bool = False,
-        tdd_frontier_tests: Frontier | None = None,
+        tdd_frontier_tests: FailureFrontier | None = None,
         tdd_test_cmd: str | None = None,
         crash_evidence: dict[FnLocator, str] | None = None,
     ) -> ClusterFillResult:

@@ -15,6 +15,7 @@ from pipeline_core.application.reconstruct.tdd_ratchet import (
     snapshot_due,
     snapshot_src_tree,
 )
+from pipeline_core.domain.attribution import AttributionResult, FailureKind
 
 
 def _mk_src(tmp_path: Path) -> Path:
@@ -94,7 +95,8 @@ def _driver_deps(run_cargo, inventory, events):
     from pipeline_core.application.reconstruct.phase_c_tdd import PhaseCTddDeps
     from pipeline_core.domain.models import ClusterFillResult
     return PhaseCTddDeps(
-        attribute_failures=lambda *a, **k: ({}, "no_frontier"),
+        attribute_failures=lambda *a, **k: AttributionResult(
+            {}, FailureKind.NO_FRONTIER, {}),
         build_test_reverse_map=lambda *a, **k: {},
         filter_test_targets=lambda frontier, src: frontier,
         check_graceful_stop=lambda *a, **k: None,
