@@ -11,10 +11,13 @@ from pipeline_core.application import strip_bake
 from pipeline_core.application.strip_bake import StripBakeDeps, strip_and_bake_module
 
 
-def _deps(calls: list[str], *, phase_valid: bool = False, bake_ok: bool = True) -> StripBakeDeps:
+def _deps(calls: list[str], *, phase_valid: bool = False, bake_ok: bool = True,
+          args: dict[str, tuple[object, ...]] | None = None) -> StripBakeDeps:
     def rec(name: str):
         def f(*_a: object, **_k: object):
             calls.append(name)
+            if args is not None:
+                args[name] = _a
             if name == "git_commit":
                 return True
             if name == "bake":
@@ -38,6 +41,7 @@ def _deps(calls: list[str], *, phase_valid: bool = False, bake_ok: bool = True) 
         tarpaulin_bin=Path("/nonexistent/tarpaulin"),
         coverage_target=98.0,
         invalidate_structure=rec("invalidate_structure"),
+        preserve_inline_tests=rec("preserve_inline_tests"),
     )
 
 
@@ -62,12 +66,21 @@ def test_happy_path_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
         strip_bake.subprocess, "run",
         lambda *a, **k: subprocess.CompletedProcess(a[0], 0, " M x.rs\n", ""))
     calls: list[str] = []
+    args: dict[str, tuple[object, ...]] = {}
     strip_and_bake_module(tmp_path, "m", tmp_path / "m", crate_type="lib",
-                          from_spec=False, src_hash="abc", deps=_deps(calls))
-    # Hard-Rule-11 ordering: capture → bake → commit → tag → strip →
-    # cache invalidation (strip rewrote mod decls) → commit_and_mark.
-    assert calls == ["capture", "bake", "git_commit", "git_tag", "strip",
-                     "invalidate_structure", "commit_and_mark", "set_current"]
+                          from_spec=False, src_hash="abc",
+                          deps=_deps(calls, args=args))
+    # The module's crate root, not the project root: in a workspace they differ
+    # and only the module dir holds the src/ whose tests must be relocated.
+    assert args["preserve_inline_tests"] == (tmp_path / "m",)
+    # Hard-Rule-11 ordering: relocate inline tests → capture → bake → commit →
+    # tag → strip → cache invalidation (strip rewrote mod decls) →
+    # commit_and_mark. Preservation leads: both the API snapshot and the
+    # skeleton must be derived from the file WITHOUT its tests, or the skeleton
+    # ships a test body inside the fill routes' writable surface.
+    assert calls == ["preserve_inline_tests", "capture", "bake", "git_commit",
+                     "git_tag", "strip", "invalidate_structure",
+                     "commit_and_mark", "set_current"]
 
 
 def test_low_coverage_warns_then_proceeds(
@@ -88,7 +101,7 @@ def test_low_coverage_warns_then_proceeds(
     strip_and_bake_module(tmp_path, "m", tmp_path / "m", crate_type="lib",
                           from_spec=False, src_hash="abc", deps=deps)
     assert any("coverage is 50.0%" in m for m in logs)
-    assert calls[:2] == ["capture", "bake"]  # proceeded past the warning
+    assert calls[:3] == ["preserve_inline_tests", "capture", "bake"]  # proceeded past the warning
 
 
 def test_bake_failure_aborts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

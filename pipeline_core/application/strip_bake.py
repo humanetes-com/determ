@@ -22,6 +22,7 @@ from typing import Any
 
 from pipeline_core.application.extract_behaviours import harvest_behaviour_suite
 from pipeline_core.domain.behaviour import BehaviourSuite
+from pipeline_core.domain.inline_tests import find_inline_test_mods
 from pipeline_core.domain.models import (
     BuildCluster,
     FnRecord,
@@ -84,6 +85,18 @@ def _behaviour_sources(src_dir: Path) -> list[tuple[str, str]]:
                         rs.read_text(encoding="utf-8")))
         except OSError:
             continue
+    return out
+
+
+def _inline_test_mods_left(skel_src: Path) -> list[str]:
+    """`file::mod` for every inline test module still present in the skeleton."""
+    out: list[str] = []
+    for rs in sorted(skel_src.rglob("*.rs")):
+        try:
+            text = rs.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        out.extend(f"{rs.name}::{b.name}" for b in find_inline_test_mods(text))
     return out
 
 
@@ -174,6 +187,17 @@ def bake_skeleton_artifacts(
             d.log(f"  [bake-skeleton] cluster {cluster.name}: leaf-order write failed: {e}")
         d.log(f"  [bake-skeleton] cluster {cluster.name}: {len(res.reports)} "
               f"file(s) skeletonised → {skeleton_dir}")
+        _stranded = _inline_test_mods_left(skeleton_dir / "src")
+        if _stranded:
+            # The skeletoniser keeps `#[cfg(test)] mod` deliberately (dropping
+            # it would lose the oracle), so anything still inline here escaped
+            # the preservation step — and will be handed to the fill routes as
+            # writable text. Name it: a silently-inline test reads later as a
+            # passing test that asserts nothing.
+            d.log(f"  [bake-skeleton] cluster {cluster.name}: WARNING — "
+                  f"{len(_stranded)} inline test mod(s) survived into the "
+                  f"skeleton: {', '.join(_stranded)}. They remain writable by "
+                  "the fill routes.")
         # F11 M1: classify the skeleton's private layout (public-frozen vs
         # private-replaceable) so the t1.5 phase knows what it may re-author.
         # Visibility is an observable structural fact, safe to use post-strip.
@@ -310,6 +334,16 @@ class StripBakeDeps:
     # same src path earlier phases already queried — cached mod records
     # would misclassify cluster membership afterwards.
     invalidate_structure: Callable[[], None] = lambda: None
+    # Tests written INLINE in a module file sit in the same text the fill routes
+    # show the model and splice back; relocate them into gen_tests siblings
+    # before ANY artefact is derived from source, so no later phase can offer a
+    # test body as writable surface. Takes the MODULE's crate root (the dir
+    # holding this module's src/ — the member dir in a workspace, not the
+    # workspace root, or the step scans a src/ that does not exist and silently
+    # relocates nothing). A no-op disables it.
+    # The result is the caller's own report (counts + refusals, already logged);
+    # this step only needs the relocation to have happened.
+    preserve_inline_tests: Callable[[Path], object] = lambda _p: None
 
 
 def strip_and_bake_module(
@@ -350,6 +384,11 @@ def strip_and_bake_module(
                 f"\n  WARNING at strip: '{module_name}' coverage is {_strip_cov:.1f}% "
                 f"— stripping anyway. Reconstruction may be incomplete."
             )
+    # Move any inline `#[cfg(test)] mod` into a gen_tests sibling FIRST, so the
+    # API snapshot and the skeleton below are both derived from the canonical
+    # shape (production code only) rather than from a file that still carries
+    # its own oracle.
+    d.preserve_inline_tests(module_dir)
     # Capture API surface BEFORE strip — structural ground truth for
     # TASK 1. The .original_structure/ dir survives strip (lives at the
     # project root, not under src/), so TASK 1 can read it post-strip.

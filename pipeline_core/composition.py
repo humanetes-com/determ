@@ -310,6 +310,10 @@ from pipeline_core.application.orchestrator import (
 from pipeline_core.application.parallel import (
     generate_in_parallel as _gen_in_parallel_impl,
 )
+from pipeline_core.application.preserve_inline_tests import (
+    PreserveInlineTestsDeps,
+    preserve_inline_tests,
+)
 from pipeline_core.application.reconstruct import attribution as _attribution
 from pipeline_core.application.reconstruct import (
     cleanup_residuals as _cleanup_residuals,
@@ -1467,6 +1471,14 @@ def build_app(
         git_commit=git_commit, log=ports.log,
         max_attempts=cfg.layout_retrigger_max_attempts,
     )
+    _preserve_inline_tests_deps = PreserveInlineTestsDeps(
+        log=ports.log, emit=ports.emit,
+        next_gen_tests_n=_gts_next_gen_tests_n,
+        gen_tests_path=helpers.gen_tests_path,
+        build_gen_tests_decl=helpers.build_gen_tests_decl,
+        derive_gentest_prelude=helpers.derive_gentest_prelude,
+        is_gen_tests_file=helpers.is_gen_tests_file,
+    )
     # P5-S3/S66: strip/bake/commit pre-step deps + the pre-strip bake (Hard Rule 11).
     strip_bake_deps = StripBakeDeps(
         log=ports.log, phase_valid=phase_valid,
@@ -1480,6 +1492,8 @@ def build_app(
         coverage_target=helpers.coverage_target,
         run_layout_phase=run_layout_phase,
         invalidate_structure=structure_cache.invalidate,
+        preserve_inline_tests=lambda p: preserve_inline_tests(
+            p / "src", p, _preserve_inline_tests_deps),
     )
     bake_artifacts_deps = BakeArtifactsDeps(
         log=ports.log,

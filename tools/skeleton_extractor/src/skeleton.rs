@@ -312,9 +312,12 @@ impl VisitMut for SkeletonVisitor {
         node.attrs.insert(0, allow_attr);
 
         // KEEP `#[cfg(test)] mod ...` — the original inline tests ARE the oracle
-        // (FR-018: strip removes implementation AND keeps tests). visit_item_mod_mut
+        // (strip removes implementation AND keeps tests). visit_item_mod_mut
         // guards each test mod from being recursed-into (so its test bodies are
-        // never stubbed) and from being dropped.
+        // never stubbed) and from being dropped. The pipeline normally relocates
+        // inline tests into a `gen_tests_N` sibling BEFORE this runs, so a test
+        // mod reaching here is the fallback path, not the expected one — keeping
+        // it loses nothing, whereas dropping it would shrink the oracle.
         visit_mut::visit_file_mut(self, node);
     }
 
