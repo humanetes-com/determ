@@ -204,6 +204,79 @@ def count_test_attrs(block: str) -> int:
     return count
 
 
+def count_attrs(block: str, name: str) -> int:
+    """Number of `#[<name>]` / `#[<name> = …]` / `#[<name>(…)]` attributes, incl.
+    path-qualified heads (`#[foo::<name>]`) — regex-free companion to
+    :func:`count_test_attrs` for an arbitrary attribute."""
+    count = 0
+    i = 0
+    while (k := block.find("#[", i)) >= 0:
+        i = k + 2
+        j = k + 2
+        while True:                       # consume zero or more `<ident>::` segments
+            seg = j
+            while j < len(block) and block[j] in _IDENT_CHARS:
+                j += 1
+            if j > seg and block[j:j + 2] == "::":
+                j += 2
+                continue
+            j = seg
+            break
+        if block[j:j + len(name)] == name:
+            t = j + len(name)
+            while t < len(block) and block[t] in " \t":
+                t += 1
+            if t < len(block) and block[t] in "]=(":
+                count += 1
+    return count
+
+
+def _fn_name_on_line(line: str) -> str:
+    """The name in a `fn <name>(` declaration on `line`, else ""."""
+    k = 0
+    while (k := line.find("fn", k)) >= 0:
+        boundary = k == 0 or line[k - 1] not in _IDENT_CHARS
+        j = k + 2
+        if boundary and j < len(line) and line[j].isspace():
+            while j < len(line) and line[j].isspace():
+                j += 1
+            s = j
+            while j < len(line) and line[j] in _IDENT_CHARS:
+                j += 1
+            if j > s:
+                return line[s:j]
+        k += 2
+    return ""
+
+
+def attributed_test_fn_names(text: str) -> list[str]:
+    """Names of every `#[test]`-family attributed fn, in source order.
+
+    Tolerates attribute lines between the attribute and the declaration
+    (`#[test]` / `#[should_panic]` / `fn x()`), which the next-line match in
+    `rust_idents.test_fn_names` (pinned byte-equivalent to its old regex) drops
+    — a dropped name is a test that no caller can hold accountable."""
+    out: list[str] = []
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        if not is_test_attr_line(lines[i]):
+            i += 1
+            continue
+        j = i + 1
+        while j < len(lines):
+            nxt = lines[j].strip()
+            if not nxt or nxt.startswith(("//", "#")):
+                j += 1
+                continue
+            name = _fn_name_on_line(lines[j])
+            if name:
+                out.append(name)
+            break
+        i = j + 1
+    return out
+
+
 def _leading_ident(token: str) -> str:
     """The leading Rust identifier of ``token`` (``foo(`` → ``foo``, ``Bar<T>`` → ``Bar``)."""
     out: list[str] = []

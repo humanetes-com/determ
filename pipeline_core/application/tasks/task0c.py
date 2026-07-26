@@ -25,6 +25,7 @@ from typing import Any
 from ...domain.coverage import PerFileCoverage
 from ...domain.generation import merge_gen_tests_blocks
 from ...domain.llm_output import extract_code_blocks, strip_uncovered_markers
+from ...domain.oracle_admission import BlockAdmission, judge_block, weakening_reason
 from ...domain.refine import Attempt, LoopState
 from ...domain.rust_idents import camelcase_type_names, defined_type_names
 from ...domain.text import strip_think_blocks
@@ -539,6 +540,75 @@ def _engine_targeted_pragma(
     return True
 
 
+_COMPILE_FIX_HEAD = """The Rust test block you generated for `{rel_path}` does not compile.
+    {directive}Fix ONLY the test block so it compiles. Return the corrected <FILE path="gen_tests_block"> block.
+    {history}
+    Compile error (read carefully — this is the ONLY thing to fix):
+    {err}
+"""
+
+_RUNTIME_FIX_HEAD = """The Rust test block you generated for `{rel_path}` COMPILES, but some of its own
+    tests FAIL when run against the implementation in that file. That implementation is the
+    specification here: your EXPECTATION is wrong, the code is not. Correct the assertions to
+    match what the code actually produces, then return the corrected <FILE path="gen_tests_block"> block.
+    {directive}{history}
+    Failing tests — actual panic output, read the `left`/`right` values:
+    {err}
+
+    WRONG — guessing an expectation, then asserting it:
+        assert_eq!(render(&v), "value: 3");   // panics: left: `"3"`, right: `"value: 3"`
+    RIGHT — assert what the code produced:
+        assert_eq!(render(&v), "3");
+
+    WRONG — asserting a wrapper adds a prefix it never adds:
+        assert_eq!(Wrapper::new(inner).to_string(), "wrapped: boom");   // panics: left: `"boom"`
+    RIGHT — assert the observed forwarding:
+        assert_eq!(Wrapper::new(inner).to_string(), "boom");
+
+    WRONG — silencing the failure instead of fixing it:
+        #[ignore]                     // also: #[should_panic], or gutting the body to assert!(true)
+        fn test_render() {{ /* … */ }}
+    RIGHT — keep the same call, narrow the claim to what the output supports:
+        assert!(render(&v).contains('3'));
+
+    Rules: keep the same calls into the code under test; never add `#[ignore]` or `#[should_panic]`
+    to turn a red test green; a test you cannot make honestly true may be dropped entirely, but
+    never kept as a tautology.
+"""
+
+
+def _engine_runtime_gate(
+    *,
+    project_dir: Path,
+    module_name: str,
+    pass_n: int,
+    block: str,
+    subprocess: Any,
+    cargo_env: Callable[[], dict[str, str]],
+    timeout: int,
+) -> BlockAdmission:
+    """Run ONLY this block's own tests against the implementation they specify.
+
+    Augmentation authors tests while that implementation is still on disk, so a
+    block's expectations are checkable the moment it is written. Without this a
+    compiling block whose assertion is simply wrong enters the reconstruction
+    oracle as an entry no fill can ever satisfy, and the fns it covers are
+    re-attempted for the life of the project.
+
+    The run is filtered to the block's `gen_tests_<n>::` path segment, which is
+    what lets a missing verdict be read as "this block crashed the binary"
+    rather than as someone else's failure.
+    """
+    run = subprocess.run(
+        ["cargo", "test", "-p", module_name, "--",
+         "--test-threads=1", f"gen_tests_{pass_n}::"],
+        cwd=project_dir, capture_output=True, text=True,
+        timeout=timeout, env=cargo_env(),
+    )
+    return judge_block(block, (run.stdout or "") + (run.stderr or ""),
+                       run_ok=run.returncode == 0)
+
+
 def _engine_mutation_pass(
     deps: Task0cDeps,
     project_dir: Path,
@@ -606,7 +676,7 @@ def _engine_log_attempt(
         "attempt": attempt_n,
         "block_preview": block_preview,
         "compile_error": compile_error,  # BL-016: no cap — full error stored
-        "outcome": outcome,  # "success", "compile_error", "no_block", "reverted"
+        "outcome": outcome,  # "success", "compile_error", "test_failure", "no_block", "reverted"
         "ts": datetime.now(UTC).isoformat(),
     }
     try:
@@ -1246,6 +1316,7 @@ def _run_phase_c(
     BUILD_TIMEOUT = deps.BUILD_TIMEOUT
     _COVERAGE_TARGET = deps.COVERAGE_TARGET
     TASK0C_PROMPT_CHAR_CAP = deps.TASK0C_PROMPT_CHAR_CAP
+    _FIX_ERR_CAP = deps.FIX_ERR_CAP
     _SIBLING_CAP = deps.SIBLING_CAP
     _SRC_SNIP_CAP = deps.SRC_SNIP_CAP
     _TASK0C_FIX_THINKING_DIRECTIVE = deps.TASK0C_FIX_THINKING_DIRECTIVE
@@ -1754,29 +1825,32 @@ project-specific import paths, type construction patterns, and hard constraints.
             # The old hand-rolled loop terminated only on identical error
             # signatures — floor-stall + the backstop now also bound the
             # "signatures keep changing but never resolve" case.
-            _fc: dict[str, Any] = {"compile_err": "", "sigs": frozenset(), "reverted": False}
+            # `err_text` carries whichever gate rejected the block last — compile
+            # diagnostics or its own tests' panic output; `runtime` says which.
+            _fc: dict[str, Any] = {"err_text": "", "sigs": frozenset(),
+                                   "reverted": False, "runtime": False}
 
             def _attempt_block_fix(_fix_n: int) -> FixOutcome:
                 nonlocal block, _pass_had_work
-                compile_err = _fc["compile_err"]
+                _err_text = _fc["err_text"]
+                _runtime = bool(_fc["runtime"])
                 if _fix_n > 1:
-                    _log(f"  [{module_name}] Compile error in {rel_path} "
-                         f"(fix attempt {_fix_n - 1}) — sending to LLM.")
-                    _emit("task0c.compile_error", file=rel_path)  # debt#7
+                    _log(f"  [{module_name}] {'Failing own test(s)' if _runtime else 'Compile error'}"
+                         f" in {rel_path} (fix attempt {_fix_n - 1}) — sending to LLM.")
+                    _emit("task0c.gen_tests_unsatisfiable" if _runtime else "task0c.compile_error",
+                          file=rel_path)
                     _fix_history = _get_task0c_history(project_dir, rel_path)
                     _fix_history_section = (f"\n{_fix_history}\n") if _fix_history.strip() else ""
-                    _compile_err_capped = compile_err[-3_000:] if len(compile_err) > 3_000 else compile_err
-                    _fix_extra = len(_compile_err_capped) + len(block) + len(_fix_history_section) + 4000
+                    _err_capped = _err_text[-3_000:] if len(_err_text) > 3_000 else _err_text
+                    _fix_extra = len(_err_capped) + len(block) + len(_fix_history_section) + 4000
                     _fix_core = secs['cargo'] + secs['full_source'] + secs['fn_bodies'] + secs['symbols']
                     _fix_optional = secs['integ_tests'] + secs['siblings']
                     _FIX_CHAR_LIMIT = TASK0C_PROMPT_CHAR_CAP
                     _fix_ctx = _fix_core + (_fix_optional if len(_fix_core) + len(_fix_optional) + _fix_extra < _FIX_CHAR_LIMIT else "")
-                    fix_prompt = f"""The Rust test block you generated for `{rel_path}` does not compile.
-    {_TASK0C_FIX_THINKING_DIRECTIVE}Fix ONLY the test block so it compiles. Return the corrected <FILE path="gen_tests_block"> block.
-    {_fix_history_section}
-    Compile error (read carefully — this is the ONLY thing to fix):
-    {_compile_err_capped}
-
+                    _fix_head = (_RUNTIME_FIX_HEAD if _runtime else _COMPILE_FIX_HEAD).format(
+                        rel_path=rel_path, directive=_TASK0C_FIX_THINKING_DIRECTIVE,
+                        history=_fix_history_section, err=_err_capped)
+                    fix_prompt = f"""{_fix_head}
     Current test block (fix this):
     {block}
 
@@ -1801,8 +1875,16 @@ project-specific import paths, type construction patterns, and hard constraints.
                     fix_response = ask(fix_prompt, model=_TASK0C_MODEL, think=None)
                     fixed = extract_test_mod(fix_response)
                     if fixed:
+                        _pre_fix = block
                         block = _strip_trailing_file_tag(fixed)
                         block = _inject_allow_before_gen_mod(block, _allow_line)
+                        _weak = weakening_reason(_pre_fix, block)
+                        if _weak:
+                            _log(f"  [{module_name}] fix would silence rather than correct "
+                                 f"({_weak}) — reverting {rel_path}.")
+                            _revert_gen_tests_pass(abs_path, base_text, _sib)
+                            _fc["reverted"] = True
+                            return FixOutcome("stop")
                     else:
                         _log(f"  [{module_name}] LLM returned no fix — reverting {rel_path}.")
                         _revert_gen_tests_pass(abs_path, base_text, _sib)
@@ -1816,6 +1898,28 @@ project-specific import paths, type construction patterns, and hard constraints.
                     timeout=BUILD_TIMEOUT, env=_cargo_env(),
                 )
                 if check.returncode == 0:
+                    # Compiling is not evidence that an expectation is true: run the
+                    # block's own tests against the implementation they specify, or a
+                    # wrong assertion becomes an oracle entry no fill can ever satisfy.
+                    _adm = _engine_runtime_gate(
+                        project_dir=project_dir, module_name=module_name, pass_n=pass_n,
+                        block=block, subprocess=subprocess, cargo_env=_cargo_env,
+                        timeout=BUILD_TIMEOUT)
+                    if not _adm.admitted:
+                        _adm_detail = _adm.detail(_FIX_ERR_CAP)
+                        _log(f"  [{module_name}] gen_tests_{pass_n} in {rel_path} compiles but "
+                             f"{len(_adm.failed_names)} of its own test(s) fail on the code they "
+                             f"specify — the expectation is wrong, not the code: "
+                             f"{', '.join(sorted(_adm.failed_names))}")
+                        _emit("task0c.gen_tests_unsatisfiable", file=rel_path,
+                              data={"pass_n": pass_n, "tests": sorted(_adm.failed_names)})
+                        _log_task0c_attempt(project_dir, rel_path, attempt + _fix_n - 1,
+                                            block, _adm_detail, "test_failure")
+                        _fc["err_text"] = _adm_detail
+                        _fc["runtime"] = True
+                        _fc["sigs"] = _adm.failed_names
+                        return FixOutcome("failed", err_sig=_adm.failed_names,
+                                          err_count=max(1, len(_adm.failed_names)))
                     _log_task0c_attempt(project_dir, rel_path, attempt + _fix_n - 1, block, "", "success")
                     _log(f"  [{module_name}] Appended gen_tests_{pass_n} to {rel_path} "
                          f"({len(uncov_lines)} uncovered lines targeted)")
@@ -1835,7 +1939,8 @@ project-specific import paths, type construction patterns, and hard constraints.
                     _log(f"  [{module_name}] {len(resolved)} error(s) resolved in {rel_path}, "
                          f"{len(cur_sigs)} remaining — continuing.")
                 _log_task0c_attempt(project_dir, rel_path, attempt + _fix_n - 1, block, compile_err, "compile_error")
-                _fc["compile_err"] = compile_err
+                _fc["err_text"] = compile_err
+                _fc["runtime"] = False
                 _fc["sigs"] = cur_sigs
                 return FixOutcome("failed", err_sig=cur_sigs,
                                   err_count=max(1, len(cur_sigs)))

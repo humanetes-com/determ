@@ -14,9 +14,15 @@
 # Usage:  ./operator_run.sh
 # Env:
 #   OPERATOR_MODEL     model alias (default: opus)
-#   OPERATOR_MAX_USD   API spend cap for the pass in dollars (default: 10)
-#   OPERATOR_COMMIT_MSG_MAX_USD  spend cap for the fallback-commit message
-#                      draft call in dollars (default: 1)
+#   OPERATOR_EFFORT    reasoning effort for the pass (default: max) — matches an
+#                      interactive operator session, where the deep-analysis
+#                      work this pass does is what the setting buys
+#
+# No spend ceiling is set. `--max-budget-usd` caps a figure the CLI DERIVES from
+# token counts at list API rates; with no ANTHROPIC_API_KEY in the environment
+# these runs authenticate against the subscription, so that figure is never
+# money — it can only cut a pass off mid-work. The pass is bounded by the flock,
+# the cooldown, and the one-iteration instruction below instead.
 #   OPERATOR_PERMS     permission flag (default: --dangerously-skip-permissions;
 #                      set to "--permission-mode bypassPermissions" to prefer
 #                      the softer mode)
@@ -80,11 +86,11 @@ echo "operator_run: starting pass -> $LOG (live: tail -f $PART)"
 : > "$PART"
 if ! claude -p "load the handover then start operator mode" \
       --model "$MODEL_REQ" \
+      --effort "${OPERATOR_EFFORT:-max}" \
       --session-id "$SESSION_ID" \
       ${OPERATOR_PERMS:---dangerously-skip-permissions} \
       --settings '{"includeCoAuthoredBy": false}' \
       --append-system-prompt "$APPEND_SP" \
-      --max-budget-usd "${OPERATOR_MAX_USD:-10}" \
       --output-format text 2>&1 | tee "$PART"; then
   echo "operator_run: WARNING — claude exited non-zero; committing whatever changed." >&2
 fi
@@ -132,7 +138,7 @@ tooling, dates, or authorship. Describe only what the diff changes.
 
 $(git diff --cached | head -c 20000)
 EOF
-)" --model "${OPERATOR_MODEL:-opus}" --max-budget-usd "${OPERATOR_COMMIT_MSG_MAX_USD:-1}" \
+)" --model "${OPERATOR_MODEL:-opus}" \
       --output-format text 2>/dev/null | sed -e '/^```/d' -e '/./,$!d')" || true
 
   if [ -z "$COMMIT_MSG" ]; then
