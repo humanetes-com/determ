@@ -44,9 +44,6 @@ from pipeline_core.domain.impl_routing import (
     norm_src_rel as _norm_src_rel,
 )
 from pipeline_core.domain.llm_output import extract_fn_bodies
-from pipeline_core.domain.model_notes import (
-    layout_safe_guidance as _layout_safe_guidance,
-)
 from pipeline_core.domain.models import (
     BuildCluster,
     ClusterFillResult,
@@ -60,12 +57,16 @@ from pipeline_core.domain.models import (
 from pipeline_core.domain.reconstruction import SpliceOutcome
 from pipeline_core.domain.refine import FloorStall
 from pipeline_core.domain.retro_gate import (
+    ConvictionEvidence,
+    ConvictionStanding,
     RetroGateTally,
     RetroGateVerdict,
     RetroProvenance,
+    admissible_guidance,
     anchor_types_for_container,
-    conviction_is_current,
+    conviction_standing,
     judge_guidance,
+    stamp_conviction,
 )
 from pipeline_core.domain.rust_idents import canon_container, is_trait_impl_container
 from pipeline_core.domain.std_api_sigs import std_api_def
@@ -246,6 +247,17 @@ def fill_impl_blocks(
     # Absent frontier (fn_walk driver) = nothing dispatched by test, nothing
     # convicted by test; the compile gate and the regression ratchet still run.
     _frontier_tests = tdd_frontier_tests or FailureFrontier.of_dispatch({})
+
+    def _convicting_for_block(b: ImplBlock) -> frozenset[str]:
+        """Tests with DIRECT evidence at one of this block's members — the only
+        ones that may revert it, and the only ones an exhaustion verdict about
+        it may rest on. One definition for both, or the acceptance gate and the
+        skip gate drift apart on what this block answers for."""
+        out: set[str] = set()
+        for _m in (*b.stub_members, *b.refill_members):
+            out |= _frontier_tests.convicting_for(FnLocator(b.file, _m.fn_name))
+        return frozenset(out)
+
     target_src_dir.mkdir(parents=True, exist_ok=True)
     # This tree's splice+cargo lock (per-tree: parallel clusters don't share).
     _splice_check_lock = _splice_lock_for(target_src_dir)
@@ -815,15 +827,17 @@ def fill_impl_blocks(
                  "(layout-contradicted).")
         # A verdict earned in another context (other cluster's layout, the
         # absolute acceptance gate, the pre-group route set) sampled a
-        # different problem — it cannot convict this block.
-        _stale_conviction = (
-            bool(_retro_rec.get("fully_exhausted"))
-            and not conviction_is_current(
-                _retro_rec, RetroProvenance.current(cluster_name, _cur_text)))
+        # different problem — it cannot convict this block. Neither can one
+        # drawn from tests that no longer convict these members.
+        _block_evidence = ConvictionEvidence(_convicting_for_block(block))
+        _standing = conviction_standing(
+            _retro_rec, RetroProvenance.current(cluster_name, _cur_text),
+            _block_evidence)
+        _stale_conviction = (bool(_retro_rec.get("fully_exhausted"))
+                             and _standing is not ConvictionStanding.CURRENT)
         if _stale_conviction:
             _log(f"  [phase-c/impl] {block_id}: exhaustion verdict was earned "
-                 "in a different context — not honoured "
-                 "(retro-stale-provenance).")
+                 f"in a different context — not honoured ({_standing.value}).")
         if (_is_fn_fully_exhausted(retros_cache, block.file, "*impl*",
                                    block.container)
                 and not _block_crash_evidence and not _poisoned_retro
@@ -961,9 +975,9 @@ def fill_impl_blocks(
         # clusters with different private layouts, so guidance naming a field
         # this layout lacks is withheld rather than shown (it would steer every
         # attempt into the same E0609/E0560 on the field that does not exist).
-        prior_retro = _layout_safe_guidance(retros_cache.get(
-            _retro_key(block.file, "*impl*", block.container), {}
-        ).get("guidance", ""), snapshot,
+        prior_retro = admissible_guidance(
+            retros_cache.get(_retro_key(block.file, "*impl*", block.container), {}),
+            snapshot, evidence=_block_evidence,
             anchor_types=anchor_types_for_container(block.container))
         notes_section = ""
         if fr_path is not None:
@@ -1169,14 +1183,9 @@ def fill_impl_blocks(
                 if rc == 0:
                     # Plan 10 U2 (shared gate): accept the block only if its
                     # members' own tests pass too — not just compile.
-                    _block_fns = frozenset(
-                        FnLocator(block.file, _bm.fn_name)
-                        for _bm in (*block.stub_members, *block.refill_members))
                     # Conviction-scoped (see the file-first gate above): only
                     # tests with direct evidence at a member may revert the block.
-                    _block_tests: set[str] = set()
-                    for _key in _block_fns:
-                        _block_tests |= _frontier_tests.convicting_for(_key)
+                    _block_tests = set(_block_evidence.tests)
                     # Container-qualified sites: this block's members share
                     # block.container, so a same-named method in ANOTHER impl
                     # (e.g. a different `From` variant's `from`, the free `not`
@@ -1432,8 +1441,8 @@ def fill_impl_blocks(
                     last_body=last_response[:_FAILED_BODY_CAP],
                     error_excerpt=last_error_excerpt,
                     fix_attempts=fix_attempt,
-                    prior_retrospective=_layout_safe_guidance(
-                        prior.get("guidance", ""), snapshot,
+                    prior_retrospective=admissible_guidance(
+                        prior, snapshot, evidence=_block_evidence,
                         anchor_types=anchor_types_for_container(block.container)),
                 )
                 _signal = retro.get("signal", "")
@@ -1467,13 +1476,14 @@ def fill_impl_blocks(
                 # save-after-write race could have one thread's
                 # `_save_retrospectives` persist a snapshot taken before the
                 # other thread's key landed, silently losing that entry.
-                # Stamped with the context it was earned in: a later reader
-                # honours the verdict only where that context still holds.
+                # Stamped with the context it was earned in AND the convicting
+                # tests it was drawn from: a later reader honours the verdict
+                # only where both still hold.
                 _prov = RetroProvenance.current(cluster_name, snapshot)
                 with _counters_lock:
                     retros_cache[
                         _retro_key(block.file, "*impl*", block.container)
-                    ] = _prov.stamp({
+                    ] = stamp_conviction({
                         "category": retro.get("category", ""),
                         "guidance": retro.get("guidance", ""),
                         "signal": _signal,
@@ -1482,7 +1492,7 @@ def fill_impl_blocks(
                         "best_error_count": new_best,
                         "fully_exhausted": full_exhaust,
                         "last_error_preview": last_error_excerpt[:240],
-                    })
+                    }, _prov, _block_evidence)
                     _save_retrospectives(project_dir, retros_cache)
                 _retry_informed = not full_exhaust and not _downstream
             except Exception as _re:
@@ -1491,9 +1501,9 @@ def fill_impl_blocks(
                 break
             # Fresh guidance for the next round's prompt (the closure reads
             # this enclosing binding).
-            prior_retro = _layout_safe_guidance(retros_cache.get(
-                _retro_key(block.file, "*impl*", block.container), {}
-            ).get("guidance", ""), snapshot,
+            prior_retro = admissible_guidance(
+                retros_cache.get(_retro_key(block.file, "*impl*", block.container), {}),
+                snapshot, evidence=_block_evidence,
                 anchor_types=anchor_types_for_container(block.container))
             _log(f"  [phase-c/impl] {block_id}: retro round {_retro_round} "
                  "kept the error floor improving — re-entering the fix loop "

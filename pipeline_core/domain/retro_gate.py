@@ -25,7 +25,12 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-from .model_notes import LayoutJudgement, judge_note_against_layout, struct_fields
+from .model_notes import (
+    LayoutJudgement,
+    judge_note_against_layout,
+    layout_safe_guidance,
+    struct_fields,
+)
 from .rust_idents import impl_self_type
 from .rust_scan import struct_names
 
@@ -179,13 +184,99 @@ class RetroProvenance:
             ("gate_ver", self.gate_ver), ("route_ver", self.route_ver)))
 
 
-def conviction_is_current(
-    record: Mapping[str, Any] | None, provenance: RetroProvenance,
-) -> bool:
+@dataclass(frozen=True, slots=True)
+class ConvictionEvidence:
+    """The CONVICTING tests an exhaustion verdict was drawn from.
+
+    Stamped on write next to the provenance, re-checked on read. A conviction
+    asserts "every attempt left these tests red"; the moment a test is no longer
+    one this unit answers for — attribution narrowed to direct evidence, the test
+    left the oracle — the verdict rests on a failure that was never the unit's,
+    so it may not skip an attempt. Context alone cannot catch this: the cluster,
+    layout, gate and route set can all be unchanged while the blame map moves.
+
+    A verdict drawn from compile errors alone names no tests, so an empty set is
+    supported by every later set and such convictions stand undisturbed."""
+
+    tests: frozenset[str]
+
+    def stamp(self, record: dict[str, Any]) -> dict[str, Any]:
+        """Record the evidence on a record about to be persisted (in place)."""
+        record["convicted_by"] = sorted(self.tests)
+        return record
+
+    def still_supports(self, record: Mapping[str, Any] | None) -> bool:
+        """True iff every test the verdict was drawn from may still convict."""
+        if not record:
+            return False
+        stored = record.get("convicted_by")
+        if not isinstance(stored, list):
+            # No evidence stamp: earned under an unknown blame map, which is not
+            # the same as "the current one" — the same rule as a missing
+            # provenance stamp, and it retires the pre-stamp records by itself.
+            return False
+        return frozenset(str(t) for t in stored) <= self.tests
+
+
+class ConvictionStanding(Enum):
+    """Why a stored ``fully_exhausted`` verdict does or does not apply here."""
+    CURRENT = "current"
+    STALE_CONTEXT = "stale_context"     # cluster / layout / gate / routes moved
+    STALE_EVIDENCE = "stale_evidence"   # the tests it was drawn from moved
+
+
+def conviction_standing(
+    record: Mapping[str, Any] | None,
+    provenance: RetroProvenance,
+    evidence: ConvictionEvidence,
+) -> ConvictionStanding:
     """Whether ``record``'s ``fully_exhausted`` verdict may be honoured here.
 
     A conviction is proof of hardness only for the (cluster, layout, gate,
-    routes) it was earned under. Cross-cluster reuse in particular convicted
-    one cluster's unit on the other cluster's private layout — the duplicate
-    attempts this costs are cheap next to a permanently skipped unit."""
-    return provenance.matches(record)
+    routes) it was earned under AND only for the failures it was drawn from.
+    Cross-cluster reuse in particular convicted one cluster's unit on the other
+    cluster's private layout — the duplicate attempts a wrong release costs are
+    cheap next to a permanently skipped unit."""
+    if not provenance.matches(record):
+        return ConvictionStanding.STALE_CONTEXT
+    if not evidence.still_supports(record):
+        return ConvictionStanding.STALE_EVIDENCE
+    return ConvictionStanding.CURRENT
+
+
+def admissible_guidance(
+    record: Mapping[str, Any] | None, file_text: str, *,
+    evidence: ConvictionEvidence,
+    anchor_types: frozenset[str] = frozenset(),
+) -> str:
+    """The stored lesson a prompt may carry, or ``""``.
+
+    Two independent ways a stored lesson goes bad, judged in ONE place so the
+    injection sites cannot drift apart on the rule:
+
+    - it contradicts the layout being compiled — it names a field this struct
+      does not have, and steers every attempt into the same E0609/E0560;
+    - it was drawn from failures this unit no longer answers for. A record
+      carrying compile errors learned from the COMPILER, which no change to the
+      blame map can invalidate; one that COMPILED and still failed learned from
+      test outcomes alone, so a narrowed frontier voids the lesson exactly as it
+      voids the verdict. Re-admitting a unit while still handing it the lesson a
+      foreign red test taught just spends the fresh attempts on the same wrong
+      target."""
+    rec = record or {}
+    guidance = str(rec.get("guidance") or "")
+    if not guidance:
+        return ""
+    if int(rec.get("error_count") or 0) == 0 and not evidence.still_supports(rec):
+        return ""
+    return layout_safe_guidance(guidance, file_text, anchor_types=anchor_types)
+
+
+def stamp_conviction(
+    record: dict[str, Any],
+    provenance: RetroProvenance,
+    evidence: ConvictionEvidence,
+) -> dict[str, Any]:
+    """Both halves a later reader needs: the CONTEXT the verdict was earned in
+    (equality-checked) and the EVIDENCE it rests on (subset-checked)."""
+    return evidence.stamp(provenance.stamp(record))

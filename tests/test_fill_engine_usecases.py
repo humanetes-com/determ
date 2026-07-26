@@ -26,7 +26,11 @@ from pipeline_core.domain.models import (
     Stub,
 )
 from pipeline_core.domain.reconstruction import SpliceOutcome
-from pipeline_core.domain.retro_gate import RetroProvenance
+from pipeline_core.domain.retro_gate import (
+    ConvictionEvidence,
+    RetroProvenance,
+    stamp_conviction,
+)
 
 
 class FakeFill:
@@ -222,12 +226,12 @@ def test_fill_one_exhaustion_honoured_when_guidance_matches_layout(
         "pub fn answer() {\n unimplemented!()\n}\n")
     fake = FakeFill(exhausted=True)
     ctx = _ctx(ws)
-    ctx.retros_cache["k"] = RetroProvenance.current(
-        "t", (ws / "src" / "lib.rs").read_text()).stamp({
-            "fully_exhausted": True,
-            "guidance": "Read the wrapped error from the `error` field of "
-                        "ErrorImpl.",
-        })
+    ctx.retros_cache["k"] = stamp_conviction(
+        {"fully_exhausted": True,
+         "guidance": "Read the wrapped error from the `error` field of "
+                     "ErrorImpl."},
+        RetroProvenance.current("t", (ws / "src" / "lib.rs").read_text()),
+        ConvictionEvidence(frozenset()))
     res = _fill_one(fake).run(1, Stub(file="lib.rs", fn_name="answer"), ctx=ctx)
     assert not res.filled and res.attempts == 0
     assert "phase_c.fn.fill.skip" in fake.events
@@ -245,15 +249,38 @@ def test_fill_one_exhaustion_not_honoured_when_earned_elsewhere(
         "pub fn answer() {\n unimplemented!()\n}\n")
     fake = FakeFill(exhausted=True)
     ctx = _ctx(ws)
-    ctx.retros_cache["k"] = RetroProvenance.current(
-        "other-cluster", (ws / "src" / "lib.rs").read_text()).stamp({
-            "fully_exhausted": True,
-            "guidance": "Read the wrapped error from the `error` field of "
-                        "ErrorImpl.",
-        })
+    ctx.retros_cache["k"] = stamp_conviction(
+        {"fully_exhausted": True,
+         "guidance": "Read the wrapped error from the `error` field of "
+                     "ErrorImpl."},
+        RetroProvenance.current(
+            "other-cluster", (ws / "src" / "lib.rs").read_text()),
+        ConvictionEvidence(frozenset()))
     _fill_one(fake).run(1, Stub(file="lib.rs", fn_name="answer"), ctx=ctx)
     assert "phase_c.fn.fill.skip" not in fake.events
-    assert any("retro-stale-provenance" in m for m in fake.logs)
+    assert any("stale_context" in m for m in fake.logs)
+
+
+def test_fill_one_exhaustion_not_honoured_when_its_tests_no_longer_convict(
+        tmp_path: Path) -> None:
+    # The plateau: a fn convicted while the frontier blamed it for a test with
+    # no evidence at it. Once attribution narrows, that verdict rests on a
+    # failure the fn never answered for — honour it and the fn is skipped
+    # before a single attempt, every run, forever.
+    from dataclasses import replace
+
+    from pipeline_core.domain.models import FnLocator
+    ws = _mk_ws(tmp_path)
+    fake = FakeFill(exhausted=True)
+    ctx = replace(_ctx(ws), tdd_frontier_tests=FailureFrontier.of_direct(
+        {FnLocator("lib.rs", "answer"): {"test_mine"}}))
+    ctx.retros_cache["k"] = stamp_conviction(
+        {"fully_exhausted": True, "guidance": ""},
+        RetroProvenance.current("t", (ws / "src" / "lib.rs").read_text()),
+        ConvictionEvidence(frozenset({"test_mine", "test_someone_elses"})))
+    _fill_one(fake).run(1, Stub(file="lib.rs", fn_name="answer"), ctx=ctx)
+    assert "phase_c.fn.fill.skip" not in fake.events
+    assert any("stale_evidence" in m for m in fake.logs)
 
 
 def test_fill_one_tallies_sieve_verdicts_for_the_pass(tmp_path: Path) -> None:

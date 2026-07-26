@@ -40,16 +40,19 @@ from pipeline_core.application.reconstruct.pull_resolver import (
 )
 from pipeline_core.domain.behaviour_select import select_usage_examples
 from pipeline_core.domain.cfg import filter_cfg_inactive_branches
-from pipeline_core.domain.model_notes import layout_safe_guidance
 from pipeline_core.domain.models import FillResult, FnLocator, FnSite, Stub
 from pipeline_core.domain.reconstruction import SpliceOutcome
 from pipeline_core.domain.refine import FloorStall
 from pipeline_core.domain.retro_gate import (
+    ConvictionEvidence,
+    ConvictionStanding,
     RetroGateVerdict,
     RetroProvenance,
+    admissible_guidance,
     anchor_types_for_container,
-    conviction_is_current,
+    conviction_standing,
     judge_guidance,
+    stamp_conviction,
 )
 from pipeline_core.domain.std_api_sigs import std_api_def
 from pipeline_core.domain.test_report import U2Decision
@@ -125,16 +128,21 @@ class FillOneFn:
                          "current layout — guidance withheld, exhaustion not "
                          "honoured (layout-contradicted).")
         # …and a conviction earned in ANOTHER context (other cluster's layout,
-        # the absolute acceptance gate, the pre-group route set) is proof of
-        # nothing here, whatever its guidance says.
+        # the absolute acceptance gate, the pre-group route set), or drawn from
+        # tests that no longer convict this fn, is proof of nothing here —
+        # whatever its guidance says.
         _provenance = RetroProvenance.current(ctx.cluster_name, snapshot)
+        _evidence = ConvictionEvidence(
+            frozenset(ctx.tdd_frontier_tests.convicting_for(
+                FnLocator(rel_file, fn_name)))
+            if ctx.tdd_frontier_tests is not None else frozenset())
+        _standing = conviction_standing(_retro_rec, _provenance, _evidence)
         _stale_conviction = (bool(_retro_rec.get("fully_exhausted"))
-                             and not conviction_is_current(_retro_rec, _provenance))
+                             and _standing is not ConvictionStanding.CURRENT)
         if _stale_conviction:
             self.tel.log(f"  [phase-c/per-fn] {rel_file}::{fn_name} "
                          f"[{container}]: exhaustion verdict was earned in a "
-                         "different context — not honoured "
-                         "(retro-stale-provenance).")
+                         f"different context — not honoured ({_standing.value}).")
         if (not _crash_evidence and not _poisoned_retro and not _stale_conviction
                 and self.retros.is_fn_fully_exhausted(
                     ctx.retros_cache, rel_file, fn_name, container)):
@@ -355,10 +363,10 @@ class FillOneFn:
                         # against THIS attempt's file text: the store is shared by
                         # clusters with different private layouts, so guidance that
                         # names a field this layout lacks is withheld, not shown.
-                        retrospective_guidance=layout_safe_guidance(
-                            (ctx.retros_cache.get(
+                        retrospective_guidance=admissible_guidance(
+                            ctx.retros_cache.get(
                                 self.retros.retro_key(rel_file, fn_name, container),
-                                {}) or {}).get("guidance", ""), cur_text,
+                                {}), cur_text, evidence=_evidence,
                             anchor_types=_anchor_types),
                         # FR-024 fix 3: hoist already-filled sibling fn impls (same
                         # name, different container) — best target-body source.
@@ -528,13 +536,13 @@ class FillOneFn:
             # (failing-test set as the stall signature).
             _u2_fail_sig: frozenset[str] | None = None
             if rc == 0:
-                _key = FnLocator(rel_file, fn_name)
                 # Container-qualified own-site: a test panicking in a same-named
                 # sibling (e.g. this fn is a `Bool` impl's `not`, the panic is in
                 # the free `not(cond)` stub) is external, not this fn's failure.
+                # Same set the skip gate judged the stored conviction against —
+                # one definition of what this fn answers for.
                 _v = self.cargo.u2_test_gate(
-                    (ctx.tdd_frontier_tests.convicting_for(_key)
-                     if ctx.tdd_frontier_tests is not None else set()),
+                    set(_evidence.tests),
                     frozenset({FnSite(rel_file, fn_name, container)}),
                     ctx.tdd_test_cmd, ctx.target_src_dir, ctx.cluster_env)
                 if _v.decision is U2Decision.REJECT:
@@ -734,8 +742,8 @@ class FillOneFn:
                 _prior_best = _prior.get("best_error_count")
                 # The diagnosis is asked to build ON the prior lesson — a lesson
                 # this layout disproves would just be restated in the new one.
-                _prior_guidance = layout_safe_guidance(
-                    _prior.get("guidance", ""), snapshot,
+                _prior_guidance = admissible_guidance(
+                    _prior, snapshot, evidence=_evidence,
                     anchor_types=_anchor_types)
                 _retro = self.retros.diagnose(
                     fn_name=fn_name, sig_text=sig_text,
@@ -794,10 +802,11 @@ class FillOneFn:
                             or not _improved
                         )
                     _new_count = _prior_count + 1
-                    # Stamped with the context it was earned in: the next
-                    # reader honours the verdict only where that context still
-                    # holds (same cluster, layout, gate and route set).
-                    _retros[_retro_k] = _provenance.stamp({
+                    # Stamped with the context it was earned in (same cluster,
+                    # layout, gate and route set) AND the convicting tests it
+                    # was drawn from: the next reader honours the verdict only
+                    # where both still hold.
+                    _retros[_retro_k] = stamp_conviction({
                         "category": _retro.get("category", ""),
                         "guidance": _retro.get("guidance", ""),
                         "signal": _signal,
@@ -806,7 +815,7 @@ class FillOneFn:
                         "best_error_count": _new_best,
                         "fully_exhausted": _full_exhaust,
                         "last_error_preview": (error_excerpt or "")[:240],
-                    })
+                    }, _provenance, _evidence)
                     self.retros.save(ctx.project_dir, _retros)
                     # Make the fresh guidance visible to this fn's OWN next
                     # round (the fix prompt reads ctx.retros_cache) and to

@@ -6,14 +6,20 @@ from __future__ import annotations
 from pipeline_core.domain.retro_gate import (
     GATE_VERSION,
     ROUTE_VERSION,
+    ConvictionEvidence,
+    ConvictionStanding,
     RetroGateTally,
     RetroGateVerdict,
     RetroProvenance,
+    admissible_guidance,
     anchor_types_for_container,
-    conviction_is_current,
+    conviction_standing,
     judge_guidance,
     layout_fingerprint,
+    stamp_conviction,
 )
+
+NO_TESTS = ConvictionEvidence(frozenset())
 
 LAYOUT = """
 pub(crate) struct ErrorImpl<E = ()> {
@@ -83,33 +89,115 @@ def test_fingerprint_tracks_layout_not_bodies() -> None:
     assert layout_fingerprint("") == ""
 
 
+def _standing(record: object, prov: RetroProvenance,
+              ev: ConvictionEvidence = NO_TESTS) -> ConvictionStanding:
+    return conviction_standing(record, prov, ev)  # type: ignore[arg-type]
+
+
 def test_conviction_honoured_only_in_the_context_it_was_earned() -> None:
     prov = RetroProvenance.current("stable", LAYOUT)
-    record = prov.stamp({"fully_exhausted": True})
+    record = stamp_conviction({"fully_exhausted": True}, prov, NO_TESTS)
     assert record["cluster"] == "stable"
     assert record["gate_ver"] == GATE_VERSION
     assert record["route_ver"] == ROUTE_VERSION
-    assert conviction_is_current(record, prov)
+    assert _standing(record, prov) is ConvictionStanding.CURRENT
     # other cluster, re-authored layout, changed gate semantics, changed routes
-    assert not conviction_is_current(
-        record, RetroProvenance.current("nightly", LAYOUT))
-    assert not conviction_is_current(
-        record, RetroProvenance.current("stable", LAYOUT.replace("error: E",
-                                                                 "_object: E")))
-    assert not conviction_is_current(
-        record, RetroProvenance("stable", prov.layout_fp, gate_ver="next"))
-    assert not conviction_is_current(
-        record, RetroProvenance("stable", prov.layout_fp, route_ver="next"))
+    for other in (RetroProvenance.current("nightly", LAYOUT),
+                  RetroProvenance.current(
+                      "stable", LAYOUT.replace("error: E", "_object: E")),
+                  RetroProvenance("stable", prov.layout_fp, gate_ver="next"),
+                  RetroProvenance("stable", prov.layout_fp, route_ver="next")):
+        assert _standing(record, other) is ConvictionStanding.STALE_CONTEXT
+
+
+def test_conviction_dies_when_the_tests_it_rests_on_stop_convicting() -> None:
+    # The plateau this closes: a block was convicted while the frontier blamed
+    # every unit for every failing test. Once attribution narrows to direct
+    # evidence, that verdict rests on a failure the unit never answered for —
+    # honouring it skips the unit before a single attempt, forever.
+    prov = RetroProvenance.current("stable", LAYOUT)
+    earned = ConvictionEvidence(frozenset({"test_own", "test_foreign"}))
+    record = stamp_conviction({"fully_exhausted": True}, prov, earned)
+    assert record["convicted_by"] == ["test_foreign", "test_own"]
+    assert _standing(record, prov, earned) is ConvictionStanding.CURRENT
+    narrowed = ConvictionEvidence(frozenset({"test_own"}))
+    assert _standing(record, prov, narrowed) is ConvictionStanding.STALE_EVIDENCE
+    # A WIDER frontier still supports it — every test it was drawn from may
+    # still convict, so the sample it took is unchanged.
+    wider = ConvictionEvidence(frozenset({"test_own", "test_foreign", "test_new"}))
+    assert _standing(record, prov, wider) is ConvictionStanding.CURRENT
+
+
+def test_compile_only_conviction_is_never_invalidated_by_the_frontier() -> None:
+    # Exhausting on compile errors names no tests; nothing about the blame map
+    # can make that verdict unfair, so it must survive every frontier change.
+    prov = RetroProvenance.current("stable", LAYOUT)
+    record = stamp_conviction({"fully_exhausted": True}, prov, NO_TESTS)
+    assert record["convicted_by"] == []
+    assert _standing(record, prov,
+                     ConvictionEvidence(frozenset({"test_x"}))) is (
+        ConvictionStanding.CURRENT)
 
 
 def test_legacy_records_convict_nothing() -> None:
     # No stamp = earned in an UNKNOWN context, which is not evidence about this
     # one. Anything else silently re-imports a pre-migration verdict.
     prov = RetroProvenance.current("stable", LAYOUT)
-    assert not conviction_is_current({"fully_exhausted": True}, prov)
-    assert not conviction_is_current(None, prov)
-    assert not conviction_is_current(
-        {"fully_exhausted": True, "cluster": "stable"}, prov)
+    assert _standing({"fully_exhausted": True}, prov) is (
+        ConvictionStanding.STALE_CONTEXT)
+    assert _standing(None, prov) is ConvictionStanding.STALE_CONTEXT
+    assert _standing({"fully_exhausted": True, "cluster": "stable"}, prov) is (
+        ConvictionStanding.STALE_CONTEXT)
+
+
+def test_context_stamped_but_evidence_missing_is_stale_evidence() -> None:
+    # The live store's shape before this field existed: full provenance, no
+    # `convicted_by`. Unknown blame map ⇒ it convicts nothing, same rule as a
+    # missing provenance stamp — this is what retires them without a migration.
+    prov = RetroProvenance.current("stable", LAYOUT)
+    record = prov.stamp({"fully_exhausted": True})
+    assert "convicted_by" not in record
+    assert _standing(record, prov) is ConvictionStanding.STALE_EVIDENCE
+
+
+def test_guidance_drawn_from_a_foreign_red_test_is_withheld() -> None:
+    # Re-admitting a unit while still handing it the lesson a foreign red test
+    # taught spends the fresh attempts on the same wrong target — the failure
+    # mode a blind exhaustion reset already demonstrated.
+    behavioural = {
+        "guidance": "Make Display prepend the source chain so the output reads "
+                    "\"other error: boxed_err\".",
+        "error_count": 0,
+        "convicted_by": ["test_from_boxed_basic"],
+    }
+    mine = ConvictionEvidence(frozenset({"test_from_boxed_basic"}))
+    assert admissible_guidance(behavioural, LAYOUT, evidence=mine)
+    theirs = ConvictionEvidence(frozenset({"test_display_plain"}))
+    assert admissible_guidance(behavioural, LAYOUT, evidence=theirs) == ""
+
+
+def test_compiler_taught_guidance_outlives_any_frontier_change() -> None:
+    # A lesson drawn from a compile error came from the compiler, not from a
+    # test — no change to the blame map can make it wrong, so narrowing the
+    # frontier must not cost it (that would throw away the store's real value).
+    compiled = {"guidance": "`Self` may not be nested inside a generic arg here.",
+                "error_count": 4, "convicted_by": ["test_whatever"]}
+    assert admissible_guidance(
+        compiled, LAYOUT, evidence=ConvictionEvidence(frozenset()))
+    # …but a layout-contradicted lesson is still withheld, on either path.
+    lying = {"guidance": "Read the payload from the `_object` field of ErrorImpl.",
+             "error_count": 4, "convicted_by": []}
+    assert admissible_guidance(
+        lying, LAYOUT, evidence=ConvictionEvidence(frozenset()),
+        anchor_types=frozenset({"ErrorImpl"})) == ""
+
+
+def test_legacy_behavioural_guidance_is_withheld_until_re_earned() -> None:
+    # No `convicted_by` + compiled clean = a lesson from an unknown blame map.
+    legacy = {"guidance": "Make the output read \"other error: x\".",
+              "error_count": 0}
+    assert admissible_guidance(
+        legacy, LAYOUT, evidence=ConvictionEvidence(frozenset({"t"}))) == ""
 
 
 def test_fingerprint_survives_comment_and_fn_local_churn() -> None:

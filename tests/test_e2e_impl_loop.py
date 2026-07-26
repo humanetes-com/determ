@@ -15,7 +15,11 @@ from pathlib import Path
 import pipeline
 from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.models import FnRecord, ImplBlock
-from pipeline_core.domain.retro_gate import RetroProvenance
+from pipeline_core.domain.retro_gate import (
+    ConvictionEvidence,
+    RetroProvenance,
+    stamp_conviction,
+)
 from tests.harness import (
     diag,
     install_app_seams,
@@ -822,13 +826,15 @@ def test_file_first_default_bound_admits_a_stub_plus_refill_workload(
 def _write_retro(ws: Path, guidance: str, *, cluster: str = "t") -> None:
     d = ws / ".phase_c_logs"
     d.mkdir(parents=True, exist_ok=True)
-    # Stamped as if earned here and now: an unstamped verdict is honoured
-    # nowhere (it names no context), which would mask what these pin.
-    rec = RetroProvenance.current(
-        cluster, (ws / "src" / "lib.rs").read_text(encoding="utf-8")).stamp({
-            "category": "API_HALLUCINATION", "guidance": guidance,
-            "fully_exhausted": True, "best_error_count": 3,
-        })
+    # Stamped as if earned here and now, on compile errors (no convicting
+    # tests): an unstamped verdict is honoured nowhere (it names neither a
+    # context nor its evidence), which would mask what these pin.
+    rec = stamp_conviction(
+        {"category": "API_HALLUCINATION", "guidance": guidance,
+         "fully_exhausted": True, "best_error_count": 3},
+        RetroProvenance.current(
+            cluster, (ws / "src" / "lib.rs").read_text(encoding="utf-8")),
+        ConvictionEvidence(frozenset()))
     (d / "retrospectives.json").write_text(
         json.dumps({"lib.rs::*impl*::Foo": rec}), encoding="utf-8")
 
