@@ -981,6 +981,51 @@ def top_level_item_names(text: str) -> list[str]:
     return out
 
 
+def redeclared_inner_body(body: str, fn_name: str) -> str | None:
+    """The nested fn's own body when `body` is nothing but a re-declaration of
+    `fn_name` itself; `None` for every other shape.
+
+    Detection and REPAIR are the same question asked twice, so they are one
+    function: the returned text is the work the model actually wrote, which a
+    caller splices back in place of the wrapper instead of reverting the fn to
+    a stub and throwing that work away. Dedented to column 0 — the caller owns
+    re-indentation. An empty string means the shape matched but the nested fn
+    was itself empty: nothing to recover.
+
+    See :func:`body_is_only_redeclaration` for why the shape is illegal.
+    """
+    if not fn_name or not body.strip():
+        return None
+    head = strip_outer_attributes(body)
+    mask = code_mask(head)
+    open_at = next((i for i, c in enumerate(head) if c == "{" and not mask[i]), -1)
+    if open_at < 0 or not declares_fn(head[:open_at], fn_name):
+        return None
+    depth = 0
+    for i in range(open_at, len(head)):
+        if mask[i]:
+            continue
+        if head[i] == "{":
+            depth += 1
+        elif head[i] == "}":
+            depth -= 1
+            if depth == 0:
+                tail = head[i + 1:]
+                tmask = code_mask(tail)
+                if any(c.strip() for j, c in enumerate(tail) if not tmask[j]):
+                    return None
+                return _dedent_block(head[open_at + 1:i])
+    return None
+
+
+def _dedent_block(text: str) -> str:
+    """`text` shifted left by its smallest non-blank indent, blank lines emptied."""
+    lines = text.strip("\n").splitlines()
+    indents = [len(ln) - len(ln.lstrip()) for ln in lines if ln.strip()]
+    cut = min(indents) if indents else 0
+    return "\n".join(ln[cut:] if ln.strip() else "" for ln in lines).strip()
+
+
 def body_is_only_redeclaration(body: str, fn_name: str) -> bool:
     """True when `body` is nothing but a re-declaration of `fn_name` itself.
 
@@ -1004,26 +1049,7 @@ def body_is_only_redeclaration(body: str, fn_name: str) -> bool:
     nested helper AND runs code (recursive-helper style) is legal Rust that
     works, so it is left alone.
     """
-    if not fn_name or not body.strip():
-        return False
-    head = strip_outer_attributes(body)
-    mask = code_mask(head)
-    open_at = next((i for i, c in enumerate(head) if c == "{" and not mask[i]), -1)
-    if open_at < 0 or not declares_fn(head[:open_at], fn_name):
-        return False
-    depth = 0
-    for i in range(open_at, len(head)):
-        if mask[i]:
-            continue
-        if head[i] == "{":
-            depth += 1
-        elif head[i] == "}":
-            depth -= 1
-            if depth == 0:
-                tail = head[i + 1:]
-                tmask = code_mask(tail)
-                return not any(c.strip() for j, c in enumerate(tail) if not tmask[j])
-    return False
+    return redeclared_inner_body(body, fn_name) is not None
 
 
 def strip_outer_attributes(text: str) -> str:

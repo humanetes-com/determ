@@ -27,6 +27,7 @@ from typing import Any
 from ...application.reconstruct.fill_merge import backfill_stub_bodies
 from ...application.reconstruct.fill_rules import is_unimplemented_body
 from ...application.reconstruct.heal import HealDeps, heal_file
+from ...application.reconstruct.hollow_repair import repair_hollow_bodies
 from ...domain.attribution import FailureFrontier
 from ...domain.cluster_plan import fill_order
 from ...domain.generation import (
@@ -1360,6 +1361,27 @@ class StaticSkeletonTask2Generator(Task2Generator):
         # (observed: lib.rs healed, error.rs still broken, the cluster read
         # 0 passing for the whole run). Repeat until the tree compiles or a round
         # stops making progress.
+        # Structural repair FIRST. A body that is only a re-declaration of its
+        # own fn compiles and holds no `unimplemented!()`, so no compile
+        # diagnostic and no stub scan can point at it — but the surplus brace
+        # such a reply carries is a parse error the heal loop WOULD see, and it
+        # would answer by reverting the fn to a stub, throwing away a body that
+        # only needed un-nesting. Un-nest before anything gets a chance to
+        # revert, and the hollow-but-compiling ones (a `#[test]` among them,
+        # which no fill loop may ever touch) get repaired at all.
+        _parse_ok = self.structure.parse_ok if self.structure is not None else None
+        for _rep in repair_hollow_bodies(filled_dir / "src", _parse_ok):
+            self.tel.log(f"  {tag} [hollow-repair] {_rep.file}::{_rep.fn_name}: "
+                         "un-nested self-redeclaring body"
+                         + (" + dropped surplus `}`" if _rep.dropped_stray_brace
+                            else "")
+                         + (" (TEST — was passing without asserting)"
+                            if _rep.is_test else ""))
+            self.tel.emit("phase_c.cluster.hollow_repair", data={
+                "cluster": cluster.name, "file": _rep.file, "fn": _rep.fn_name,
+                "is_test": _rep.is_test,
+                "dropped_stray_brace": _rep.dropped_stray_brace,
+            })
         _round = 0
         _clean = False
         _prev_sig = ""

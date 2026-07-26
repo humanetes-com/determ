@@ -87,10 +87,16 @@ class MutatorAdapter:
     def splice_fn_body_at(self, file_path: Path, body_byte_start: int,
                           body_byte_end: int, new_body: str,
                           allow_nonstub: bool = False,
-                          allow_stub_body: bool = False) -> SpliceOutcome:
+                          allow_stub_body: bool = False,
+                          fn_name: str = "") -> SpliceOutcome:
+        # `fn_name` is what lets the splice recognise a reply that restated the
+        # WHOLE item instead of just the body. Omitting it on a MODEL write
+        # silently disables that check: the wrapper is spliced verbatim, the
+        # outer body ends up empty, and the fn reads as filled forever.
         return self.splice_fn_body_at_fn(file_path, body_byte_start, body_byte_end,
                                          new_body, allow_nonstub=allow_nonstub,
-                                         allow_stub_body=allow_stub_body)
+                                         allow_stub_body=allow_stub_body,
+                                         fn_name=fn_name)
 
     def revert_body_scoped(self, file_path: Path, name: str, container: str,
                            sig_text: str, pre_image: str,
@@ -158,7 +164,8 @@ class MutatorAdapter:
             if loc is not None:
                 _sig_start, body_start, body_end, _sig = loc
                 return self.splice_fn_body_at(file_path, body_start, body_end,
-                                              new_body, allow_nonstub=allow_nonstub)
+                                              new_body, allow_nonstub=allow_nonstub,
+                                              fn_name=name)
         return self.splice_fn_body(file_path, name, new_body,
                                    allow_nonstub=allow_nonstub)
 

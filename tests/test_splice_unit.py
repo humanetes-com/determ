@@ -249,12 +249,35 @@ where
 }"""
 
 
-def test_splice_at_refuses_a_body_that_only_redeclares_the_fn() -> None:
+def test_splice_at_unwraps_a_body_that_only_redeclares_the_fn() -> None:
+    # Restating the whole item is a PROTOCOL mistake — the code inside is the
+    # answer. Refusing it would burn the attempt and leave the fn a stub; the
+    # wrapper is peeled and the real work lands.
     p, bs, be = _stub_file()
     ok, reason, _ = splice_fn_body_at(p, bs, be, _WHOLE_ITEM,
                                       fn_name="context_drop_rest")
+    assert ok is True and reason == "ok"
+    text = p.read_text()
+    assert "unimplemented" not in text
+    assert "ptr::write(e.ptr.as_ptr(), target);" in text
+    assert "fn context_drop_rest" not in text        # no nested item survives
+
+
+def test_splice_at_refuses_a_wrapper_with_nothing_inside() -> None:
+    # The shape matched but there is no work to recover — landing it would
+    # write an empty body that reads as FILLED forever.
+    p, bs, be = _stub_file()
+    ok, reason, _ = splice_fn_body_at(p, bs, be, "fn f() {}", fn_name="f")
     assert ok is False and reason == "body_redeclares_fn"
     assert "unimplemented" in p.read_text()          # stub untouched
+
+
+def test_splice_at_refuses_a_wrapper_whose_body_is_a_stub() -> None:
+    # Unwrapping must not smuggle `unimplemented!()` past the stub refusal.
+    p, bs, be = _stub_file()
+    ok, reason, _ = splice_fn_body_at(p, bs, be, "fn f() {\n    unimplemented!()\n}",
+                                      fn_name="f")
+    assert ok is False and reason == "body_is_stub"
 
 
 def test_splice_at_still_accepts_a_differently_named_nested_helper() -> None:
@@ -264,12 +287,13 @@ def test_splice_at_still_accepts_a_differently_named_nested_helper() -> None:
     assert ok is True and reason == "ok"
 
 
-def test_splice_fn_body_refuses_the_same_shape(tmp_path: Path) -> None:
+def test_splice_fn_body_unwraps_the_same_shape(tmp_path: Path) -> None:
     from pipeline_core.application.reconstruct.splice import splice_fn_body
     f = tmp_path / "e.rs"
     f.write_text("fn context_drop_rest() {\n    unimplemented!()\n}\n", encoding="utf-8")
     ok, reason, _ = splice_fn_body(f, "context_drop_rest", _WHOLE_ITEM)
-    assert ok is False and reason == "body_redeclares_fn"
+    assert ok is True and reason == "ok"
+    assert "ptr::write(e.ptr.as_ptr(), target);" in f.read_text()
 
 
 def test_restore_frozen_signature_never_duplicates_attributes(tmp_path: Path) -> None:

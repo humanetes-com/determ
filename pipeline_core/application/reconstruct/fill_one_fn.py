@@ -438,7 +438,8 @@ class FillOneFn:
                 if _loc is not None:
                     _, _lbs, _lbe, _ = _loc
                     return self.mut.splice_fn_body_at(
-                        file_path, _lbs, _lbe, body, allow_nonstub=rec.refill)
+                        file_path, _lbs, _lbe, body, allow_nonstub=rec.refill,
+                        fn_name=fn_name)
                 # Fallback: bare-name locator. Less accurate for
                 # same-name collisions but acceptable when the syn
                 # binary isn't available.

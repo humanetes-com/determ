@@ -735,6 +735,33 @@ def test_prepass_heal_loops_until_the_tree_parses(tmp_path: Path) -> None:
     assert not any("STILL BROKEN" in m for m in fake.logs)
 
 
+def test_hollow_bodies_are_un_nested_before_any_heal_can_revert_them(
+        tmp_path: Path) -> None:
+    """A body that only re-declares its own fn compiles and holds no
+    `unimplemented!()`, so nothing downstream can see it — but the surplus brace
+    such a reply carries IS a parse error the heal loop reacts to by reverting
+    the fn to a stub, discarding a body that only needed un-nesting."""
+    c = _cluster()
+    fake = FakeAdapter(
+        clusters_list=[c], cluster_tests=[("tests/it.rs", "x")],
+        raw_results=[(0, "", ""), (0, "", "")],
+        diag_results=[(0, "", [])],
+        run_results=[(0, "ok")],
+    )
+    pd = _make_project(tmp_path, [c], with_gen_tests=True)
+    filled = pd / ".skeleton-filled" / c.name / "src"
+    filled.mkdir(parents=True)
+    (filled / "lib.rs").write_text(
+        "fn foo() -> i32 {\n    fn foo() -> i32 {\n        41 + 1\n    }\n}\n",
+        encoding="utf-8")
+    assert _run(pd, _gen(fake, _cfg(per_fn=True, tdd=False))) is True
+    text = (filled / "lib.rs").read_text(encoding="utf-8")
+    assert text.count("fn foo") == 1 and "41 + 1" in text
+    assert "unimplemented!()" not in text          # repaired, not reverted
+    assert any("[hollow-repair] lib.rs::foo" in m for m in fake.logs), fake.logs
+    assert "phase_c.cluster.hollow_repair" in fake.events
+
+
 def test_prepass_heal_stops_when_a_round_changes_nothing(tmp_path: Path) -> None:
     """Same culprit after a heal ⇒ no restore point left. Loop, don't spin."""
     c = _cluster()

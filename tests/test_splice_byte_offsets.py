@@ -52,6 +52,26 @@ def test_splice_fn_body_at_is_byte_correct() -> None:
     assert "counter — see notes" in out
 
 
+def test_offset_splice_carries_the_fn_name_through_the_role() -> None:
+    """The offset splice's whole-item guard is keyed on `fn_name`. The role and
+    the port both dropped the parameter, so on the per-fn/re-fill route — the
+    one that writes most MODEL bodies — the guard was silently a no-op: a reply
+    that restated the whole item was spliced verbatim and the fn read as filled
+    forever. Threading the name is what makes the guard reachable at all."""
+    raw = _SRC.encode("utf-8")
+    bs, be = _byte_body_span(raw, b"fn f")
+    whole_item = "pub fn f() -> i32 {\n    a + 1\n}"
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "lib.rs"
+        p.write_bytes(raw)
+        ok, reason, _ = pipeline._APP.fill_roles.mut.splice_fn_body_at(
+            p, bs, be, whole_item, fn_name="f")
+        out = p.read_text(encoding="utf-8")
+    assert ok is True and reason == "ok"
+    assert out.count("pub fn") == 2        # the wrapper did NOT become a 3rd item
+    assert "a + 1" in out
+
+
 def test_splice_fn_body_at_offsets_match_real_extractor() -> None:
     """End-to-end with the syn enumerator (skips without the binary): the offsets
     it emits, fed to the splicer, produce a clean fill — not the off-by-bytes corruption."""

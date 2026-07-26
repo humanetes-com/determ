@@ -543,6 +543,7 @@ def test_top_level_item_names_detects_a_body_escaping_its_braces():
 
 from pipeline_core.domain.rust_scan import (  # noqa: E402
     body_is_only_redeclaration,
+    redeclared_inner_body,
 )
 
 
@@ -578,3 +579,21 @@ def test_body_is_only_redeclaration_is_comment_and_string_aware():
     # Code after the nested item's real close is real work.
     body2 = 'fn render() -> String {\n    String::from("}")\n}\nrender()'
     assert body_is_only_redeclaration(body2, "render") is False
+
+
+def test_redeclared_inner_body_returns_the_work_the_model_wrote():
+    # The wrapper is the mistake, not the contents — recovering the inner body
+    # is what turns the refusal into a landed fill instead of a lost attempt.
+    body = 'fn get(&self) -> i32 {\n        let x = 1;\n        x + 1\n}'
+    assert redeclared_inner_body(body, "get") == "let x = 1;\nx + 1"
+    # Detection and repair are the same question: True <=> not None.
+    assert body_is_only_redeclaration(body, "get") is True
+
+
+def test_redeclared_inner_body_distinguishes_no_match_from_nothing_to_recover():
+    # An ordinary body has no wrapper at all.
+    assert redeclared_inner_body("self.inner.fmt(f)", "fmt") is None
+    # The shape matched but the nested fn is empty: still illegal (the outer fn
+    # does nothing), yet there is no work to splice back.
+    assert redeclared_inner_body("fn noop() {}", "noop") == ""
+    assert body_is_only_redeclaration("fn noop() {}", "noop") is True

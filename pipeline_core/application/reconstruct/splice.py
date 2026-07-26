@@ -29,11 +29,31 @@ from pipeline_core.domain.reconstruction import SpliceOutcome, SpliceReason
 from pipeline_core.domain.rust_fn_headers import is_pub_fn, locate_all_fns
 from pipeline_core.domain.rust_idents import canon_container, declares_fn
 from pipeline_core.domain.rust_scan import (
-    body_is_only_redeclaration,
     has_code_brace,
+    redeclared_inner_body,
     strip_outer_attributes,
     top_level_item_names,
 )
+
+# A wrapper can survive one unwrap (the model restated the item twice). Bounded
+# so a pathological reply cannot spin here.
+_MAX_UNWRAP_ROUNDS = 3
+
+
+def _unwrap_redeclaration(body: str, fn_name: str) -> str | None:
+    """`body` with any self-redeclaring wrapper(s) peeled off, or `None` when
+    what is left is nothing worth splicing.
+
+    A reply that restates the WHOLE item instead of just the body is a protocol
+    mistake, not a content mistake — the code inside is the answer. Peeling the
+    wrapper turns a refused attempt into a landed fill; refusing it outright
+    would burn the attempt and leave the fn a stub."""
+    for _ in range(_MAX_UNWRAP_ROUNDS):
+        inner = redeclared_inner_body(body, fn_name)
+        if inner is None:
+            return body
+        body = inner
+    return None if redeclared_inner_body(body, fn_name) is not None else body
 
 
 def _commit_with_xml_fallback(
@@ -209,8 +229,12 @@ def splice_fn_body_at(file_path: Path, body_byte_start: int, body_byte_end: int,
     # be a stub — that is what undoing a fill means.
     if not nb or (not allow_stub_body and is_unimplemented_body(nb)):
         return SpliceOutcome(False, "body_is_stub", 0)
-    if body_is_only_redeclaration(nb, fn_name):
+    _unwrapped = _unwrap_redeclaration(nb, fn_name)
+    if _unwrapped is None or not _unwrapped.strip():
         return SpliceOutcome(False, "body_redeclares_fn", 0)
+    nb = _unwrapped
+    if not allow_stub_body and is_unimplemented_body(nb):
+        return SpliceOutcome(False, "body_is_stub", 0)
     # Re-indent the body to match the fn's existing indentation. Find the
     # column of the fn declaration by walking back to the previous newline.
     line_start = raw.rfind(b"\n", 0, body_byte_start) + 1
@@ -381,8 +405,12 @@ def splice_fn_body(file_path: Path, fn_name: str, new_body: str,
         nb = nb[1:-1].strip()
     if not nb or (not allow_stub_body and is_unimplemented_body(nb)):
         return SpliceOutcome(False, "body_is_stub", 0)
-    if body_is_only_redeclaration(nb, fn_name):
+    _unwrapped = _unwrap_redeclaration(nb, fn_name)
+    if _unwrapped is None or not _unwrapped.strip():
         return SpliceOutcome(False, "body_redeclares_fn", 0)
+    nb = _unwrapped
+    if not allow_stub_body and is_unimplemented_body(nb):
+        return SpliceOutcome(False, "body_is_stub", 0)
     line_start = text.rfind("\n", 0, _sig_start) + 1
     sig_line = text[line_start:_sig_start]
     base_indent = ""

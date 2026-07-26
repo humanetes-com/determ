@@ -60,6 +60,7 @@ class Mutator(Protocol):
     def splice_fn_body_at(
         self, file_path: Path, body_byte_start: int, body_byte_end: int,
         new_body: str, allow_nonstub: bool = ..., allow_stub_body: bool = ...,
+        fn_name: str = ...,
     ) -> SpliceOutcome: ...
     def revert_body_scoped(
         self, file_path: Path, name: str, container: str, sig_text: str,
