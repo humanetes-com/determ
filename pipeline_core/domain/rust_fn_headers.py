@@ -84,9 +84,48 @@ def _ident_end(text: str, q: int) -> int:
     return e
 
 
-def _match_fn_clause(text: str, c: int) -> tuple[str, int] | None:
-    """Match ``(pub…)?(async )?(unsafe )?(const )?fn NAME[^{]*{`` at `c`; return
-    ``(name, brace_open)`` or None."""
+def _body_brace(text: str, mask: list[bool], e: int) -> int | None:
+    """Index of the ``{`` opening the body of the fn whose name ends at `e`, or
+    None when the declaration is BODYLESS.
+
+    A trait method declaration (``fn not(self) -> bool;``) and an ``extern``
+    block entry have no body. Taking the next textual ``{`` instead adopts the
+    FOLLOWING item's brace, so the "body" swallows whole items:
+
+        WRONG  trait Bool { fn not(self) -> bool; }
+               impl Bool for bool { fn not(self) -> bool { !self } }
+               -> the declaration's "body" spans `} impl Bool for bool {`,
+                  and reverting `not` splices `unimplemented!()` over the
+                  trait's closing brace and the impl header -> the file no
+                  longer parses and the whole crate stops compiling.
+        RIGHT  the declaration has no body and is not a locatable fn at all.
+
+    A ``;`` at bracket depth 0 terminates the item; one inside ``[u8; 4]`` or a
+    comment does not, so depth is tracked and masked spans are skipped."""
+    n = len(text)
+    depth = 0
+    i = e
+    while i < n:
+        if mask[i]:
+            i += 1
+            continue
+        ch = text[i]
+        if ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth -= 1
+        elif depth == 0:
+            if ch == "{":
+                return i
+            if ch == ";":
+                return None
+        i += 1
+    return None
+
+
+def _match_fn_clause(text: str, c: int, mask: list[bool]) -> tuple[str, int] | None:
+    """Match ``(pub…)?(async )?(unsafe )?(const )?fn NAME[^{;]*{`` at `c`; return
+    ``(name, brace_open)`` or None (None also for a bodyless declaration)."""
     n = len(text)
     p = _opt_pub(text, c)
     p = _opt_kw_ws(text, p, "async")
@@ -102,13 +141,13 @@ def _match_fn_clause(text: str, c: int) -> tuple[str, int] | None:
     e = _ident_end(text, q)
     if e == q:  # name [A-Za-z_]\w* required
         return None
-    brace = text.find("{", e)  # [^{]*\{
-    if brace == -1:
+    brace = _body_brace(text, mask, e)
+    if brace is None:
         return None
     return text[q:e], brace
 
 
-def _match_macro_clause(text: str, c: int) -> tuple[str, int] | None:
+def _match_macro_clause(text: str, c: int, mask: list[bool]) -> tuple[str, int] | None:
     """Match ``(pub…)?macro_rules!\\s+NAME\\s*{`` at `c`; return
     ``(name, brace_open)`` or None."""
     n = len(text)
@@ -136,7 +175,7 @@ def _match_macro_clause(text: str, c: int) -> tuple[str, int] | None:
 
 def _scan(
     text: str,
-    clause: Callable[[str, int], tuple[str, int] | None],
+    clause: Callable[[str, int, list[bool]], tuple[str, int] | None],
     lead_chars: frozenset[str],
     *,
     line_anchored: bool,
@@ -160,7 +199,7 @@ def _scan(
         if not line_anchored and i > 0 and text[i - 1] in _IDENT_CHARS:
             i += 1
             continue
-        m = clause(text, i)
+        m = clause(text, i, mask)
         if m is None:
             i += 1
             continue

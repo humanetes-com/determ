@@ -8,7 +8,11 @@ from __future__ import annotations
 
 import re
 
-from pipeline_core.domain.rust_fn_headers import fn_headers, macro_headers
+from pipeline_core.domain.rust_fn_headers import (
+    fn_headers,
+    locate_all_fns,
+    macro_headers,
+)
 
 _FN_L = re.compile(
     r'((?:^|\n)[ \t]*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?'
@@ -38,6 +42,80 @@ _CASES = [
     "structfn glued() {}",                # `structfn` not a fn
     "",
 ]
+
+
+# A BODYLESS declaration is where the code deliberately DIVERGES from the old
+# `[^{]*\{` regexes above: they scan past the `;` and adopt the next item's
+# brace, so the declaration's "body" swallows whole items. `_CASES` contains no
+# such input, which is why the equivalence pins still hold — do not "restore"
+# equivalence by removing the terminator check.
+_TRAIT_DECL = (
+    "mod not {\n"
+    "    pub trait Bool {\n"
+    "        fn not(self) -> bool;\n"
+    "    }\n"
+    "    impl Bool for bool {\n"
+    "        #[inline]\n"
+    "        fn not(self) -> bool {\n"
+    "            !self\n"
+    "        }\n"
+    "    }\n"
+    "    impl Bool for &bool {\n"
+    "        fn not(self) -> bool {\n"
+    "            !*self\n"
+    "        }\n"
+    "    }\n"
+    "}\n"
+)
+
+
+def test_bodyless_trait_decl_is_not_a_locatable_fn():
+    # Only the two impls define `not`; the trait declaration has no body. The
+    # old scan returned a third span whose "signature" ran `fn not(self) ->
+    # bool; } impl Bool for bool` — reverting it spliced over the trait's
+    # closing brace and the impl header, leaving the file unparseable.
+    locs = locate_all_fns(_TRAIT_DECL, "not")
+    assert len(locs) == 2
+    for sig, _ss, body_start, body_end in locs:
+        assert sig == "fn not(self) -> bool"
+        assert "impl" not in _TRAIT_DECL[body_start:body_end]
+    assert _TRAIT_DECL[locs[0][2]:locs[0][3]].strip() == "!self"
+    assert _TRAIT_DECL[locs[1][2]:locs[1][3]].strip() == "!*self"
+
+
+def test_reverting_a_bodyless_decl_name_keeps_braces_balanced():
+    # What `_revert_implicated` does, on the shape that broke the crate.
+    text = _TRAIT_DECL
+    for _sig, _ss, body_start, body_end in reversed(
+            locate_all_fns(text, "not")):
+        text = text[:body_start] + "\nunimplemented!()\n" + text[body_end:]
+    assert text.count("{") == text.count("}")
+    assert "impl Bool for bool {" in text
+    assert "impl Bool for &bool {" in text
+    assert text.count("unimplemented!()") == 2
+
+
+def test_terminator_scan_ignores_semicolons_that_do_not_end_the_item():
+    # `;` inside a bracketed type, a comment, or a string is not an item
+    # terminator — these all have real bodies and must still be located.
+    cases = [
+        "fn f(x: [u8; 4]) -> bool {\n    true\n}",
+        "fn f(x: u8) -> bool { // note; here\n    true\n}",
+        'fn f(x: u8) -> bool {\n    let s = "a;b"; true\n}',
+        "fn f<T>(x: T) -> bool\nwhere\n    T: Copy,\n{\n    true\n}",
+    ]
+    for src in cases:
+        assert len(locate_all_fns(src, "f")) == 1, src
+
+
+def test_bodyless_declarations_are_dropped_everywhere():
+    for src in [
+        "extern \"C\" {\n    fn abort();\n}\nfn abort() {\n    loop {}\n}",
+        "trait T {\n    fn f<A>(a: A) -> bool\n    where\n        A: Copy;\n}\n"
+        "fn f() {\n    ()\n}",
+    ]:
+        names = [h.name for h in fn_headers(src, line_anchored=False)]
+        assert names.count("abort") + names.count("f") == 1, src
 
 
 def test_fn_headers_line_anchored_matches_regex():

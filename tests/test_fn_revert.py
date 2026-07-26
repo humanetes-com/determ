@@ -37,6 +37,34 @@ def test_every_same_name_occurrence_reverted(tmp_path):
     assert out.count("unimplemented!()") == 2
 
 
+def test_trait_declaration_of_same_name_is_not_reverted(tmp_path):
+    # `fn not(self) -> bool;` declares, it does not define. Treating it as a
+    # locatable fn made the revert splice over the trait's closing brace and
+    # the following impl header, so the file stopped parsing and the whole
+    # cluster lost its build.
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "lib.rs").write_text(
+        "pub trait Bool {\n"
+        "    fn not(self) -> bool;\n"
+        "}\n"
+        "impl Bool for bool {\n"
+        "    #[inline]\n"
+        "    fn not(self) -> bool {\n"
+        "        !self\n"
+        "    }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    n = revert_fns_to_stub([FnLocator("lib.rs", "not")], tmp_path / "src")
+    assert n == 1
+    out = (src / "lib.rs").read_text(encoding="utf-8")
+    assert out.count("{") == out.count("}")
+    assert "fn not(self) -> bool;" in out
+    assert "impl Bool for bool {" in out
+    assert out.count("unimplemented!()") == 1
+
+
 def test_already_stub_not_counted(tmp_path):
     src = tmp_path / "src"
     src.mkdir()

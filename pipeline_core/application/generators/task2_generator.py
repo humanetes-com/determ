@@ -1352,18 +1352,40 @@ class StaticSkeletonTask2Generator(Task2Generator):
         if _rc0 not in (-1, 0):
             _pre_impl = self.cargo.implicated_fns_from_check(
                 _diags0, _rendered0 or "", filled_dir)
-            if _pre_impl:
+            _first = next((d.message for d in _diags0 if d.message), "")
+            # A syntax error (unbalanced braces left by an earlier splice) carries
+            # NO fn attribution — rustc names only the file. Passing that file with
+            # an empty fn name locates nothing at fn granularity, so the revert
+            # escalates it to the heal hierarchy instead of silently doing nothing
+            # and letting the cluster spend its whole pass on a tree that cannot
+            # build a single test binary.
+            _targets = _pre_impl or [FnLocator(d.file, "") for d in _diags0 if d.file]
+            if _targets:
                 self.tel.log(f"  {tag} [pre-pass-heal] seeded/resumed tree does "
                              "not compile; implicated: "
-                             f"{', '.join(f'{f}::{fn}' for f, fn in _pre_impl[:6])}")
-                _healed = self._revert_implicated(tag, _pre_impl, filled_dir,
+                             + (", ".join(f"{f}::{fn}" for f, fn in _pre_impl[:6])
+                                if _pre_impl
+                                else f"no fn — file-level: {_first[:120]}"))
+                _healed = self._revert_implicated(tag, _targets, filled_dir,
                                                   skeleton_dir, project_dir,
                                                   cluster.name)
-                self.tel.log(f"  {tag} [pre-pass-heal] reverted {_healed} fn(s) "
-                             "to stubs before the fill pass.")
+                self.tel.log(f"  {tag} [pre-pass-heal] reverted {_healed} "
+                             "fn(s)/file(s) before the fill pass.")
                 self.tel.emit("phase_c.cluster.prepass_heal", data={
                     "cluster": cluster.name, "reverted": _healed,
-                    "implicated": [{"file": f, "fn": fn} for f, fn in _pre_impl],
+                    "implicated": [{"file": f, "fn": fn} for f, fn in _targets],
+                })
+            # Verify the repair. A heal that did not restore the build leaves
+            # every later signal meaningless — 0 passing with no localizable
+            # culprit — and the run burns a full pass before anyone notices.
+            _rc1, _, _diags1 = self.cargo.run_check_diag(
+                check_cmd, filled_dir, self._cluster_env(cluster), 180)
+            if _rc1 not in (-1, 0):
+                _still = next((d.message for d in _diags1 if d.message), _first)
+                self.tel.log(f"  {tag} [pre-pass-heal] STILL BROKEN after heal — "
+                             f"cluster cannot compile: {_still[:160]}")
+                self.tel.emit("phase_c.cluster.prepass_heal_failed", data={
+                    "cluster": cluster.name, "error": _still[:400],
                 })
 
         # Propagate gen_tests siblings from project_dir/src/ into filled_dir/src/.
@@ -1759,14 +1781,17 @@ class StaticSkeletonTask2Generator(Task2Generator):
         them; a permanently broken file blocks the ENTIRE cluster forever.
         Returns the number of fns/files reverted (0 = nothing left to try)."""
         reverted = 0
+        unparseable: set[str] = set()
+        heal_deps = self._heal_deps(project_dir, filled_dir, skeleton_dir,
+                                    cluster_name) if project_dir else None
         for rel_f, fn in implicated:
             fp = filled_dir / rel_f
             try:
-                text = fp.read_text(encoding="utf-8")
+                text = orig = fp.read_text(encoding="utf-8")
             except Exception:
                 continue
             locs = locate_all_fns(text, fn)
-            changed = False
+            here = 0
             for _sig, _ss, body_start, body_end in reversed(locs):
                 cur_body = text[body_start:body_end]
                 if is_unimplemented_body(cur_body):
@@ -1782,18 +1807,37 @@ class StaticSkeletonTask2Generator(Task2Generator):
                 inner = indent + "    "
                 new_body = "\n" + inner + "unimplemented!()\n" + indent
                 text = text[:body_start] + new_body + text[body_end:]
-                changed = True
+                here += 1
+            if not here:
+                continue
+            fp.write_text(text, encoding="utf-8")
+            # A revert that leaves the file unparseable is worse than the broken
+            # body it replaced: it kills the whole cluster's compile, so every
+            # unit of the coming pass fails for a reason none of them caused and
+            # the run reads 0 passing with no localizable culprit. Roll the file
+            # back and hand it to the heal hierarchy instead.
+            if heal_deps is not None and not heal_deps.parse_ok(fp):
+                fp.write_text(orig, encoding="utf-8")
+                unparseable.add(rel_f)
+                self.tel.log(f"  {tag} [revert] {rel_f}: reverting '{fn}' left the "
+                             "file unparseable — rolled back, escalating to heal.")
+                self.tel.emit("phase_c.revert.unparseable",
+                              data={"file": rel_f, "fn": fn,
+                                    "cluster": cluster_name})
+                continue
+            reverted += here
+        for rel_f in sorted(unparseable):
+            if heal_deps is None:
+                continue
+            out = heal_file(filled_dir, rel_f, cluster_name, heal_deps)
+            if out.point is not RestorePoint.NONE:
                 reverted += 1
-            if changed:
-                fp.write_text(text, encoding="utf-8")
         if reverted == 0:
             # No fn was revertible at fn granularity — corruption sits OUTSIDE
             # any locatable fn body (the doc-comment intrusion class). Run the
             # heal hierarchy: surgical excision → best-tree → git-ancestor →
             # skeleton (loud loss), least-destructive first. The old code jumped
             # straight to a whole-file skeleton copy, discarding every fill.
-            heal_deps = self._heal_deps(project_dir, filled_dir, skeleton_dir,
-                                        cluster_name) if project_dir else None
             for rel_f in {rf for rf, _ in implicated}:
                 if heal_deps is not None:
                     out = heal_file(filled_dir, rel_f, cluster_name, heal_deps)
