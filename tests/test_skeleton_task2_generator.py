@@ -698,3 +698,61 @@ def test_halt_verdict_comes_from_a_fresh_check_not_the_stale_loop_text(
 
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-v"])
+
+
+def test_prepass_heal_loops_until_the_tree_parses(tmp_path: Path) -> None:
+    """A syntax error ABORTS the parse, so rustc names ONE unparseable file per
+    invocation. With two corrupted files a single heal round repairs one and
+    hands the fill pass a tree that still cannot build a single test binary —
+    the whole cluster then reads 0 passing for the rest of the run."""
+    c = _cluster()
+    fake = FakeAdapter(
+        clusters_list=[c], cluster_tests=[("tests/it.rs", "x")],
+        raw_results=[(0, "", ""), (0, "", "")],
+        # Round 1 blames lib.rs; only once that parses does error.rs surface.
+        diag_results=[
+            (1, "err", [_Diag("src/lib.rs", "", "unexpected closing delimiter")]),
+            (1, "err", [_Diag("src/error.rs", "", "unexpected closing delimiter")]),
+            (0, "", []),
+        ],
+        implicated=[],          # a syntax error carries NO fn attribution
+        run_results=[(0, "ok")],
+    )
+    pd = _make_project(tmp_path, [c], with_gen_tests=True)
+    sk = pd / ".skeleton" / c.name / "src"
+    (sk / "error.rs").write_text("fn bar() -> i32 {\n    unimplemented!()\n}\n",
+                                 encoding="utf-8")
+    filled = pd / ".skeleton-filled" / c.name / "src"
+    filled.mkdir(parents=True)
+    for name in ("lib.rs", "error.rs"):
+        (filled / name).write_text("fn x() { 1 }\n}\n", encoding="utf-8")
+    assert _run(pd, _gen(fake, _cfg(per_fn=True, tdd=False))) is True
+    rounds = [m for m in fake.logs if "[pre-pass-heal] round" in m
+              and "does not compile" in m]
+    assert len(rounds) == 2, rounds
+    assert "src/lib.rs" in rounds[0] and "src/error.rs" in rounds[1]
+    assert any("tree compiles again after 2 round(s)" in m for m in fake.logs)
+    assert not any("STILL BROKEN" in m for m in fake.logs)
+
+
+def test_prepass_heal_stops_when_a_round_changes_nothing(tmp_path: Path) -> None:
+    """Same culprit after a heal ⇒ no restore point left. Loop, don't spin."""
+    c = _cluster()
+    same = [_Diag("src/lib.rs", "", "unexpected closing delimiter")]
+    fake = FakeAdapter(
+        clusters_list=[c], cluster_tests=[("tests/it.rs", "x")],
+        raw_results=[(0, "", ""), (0, "", "")],
+        diag_results=[(1, "err", same), (1, "err", same), (1, "err", same)],
+        implicated=[],
+        run_results=[(0, "ok")],
+    )
+    pd = _make_project(tmp_path, [c], with_gen_tests=True)
+    filled = pd / ".skeleton-filled" / c.name / "src"
+    filled.mkdir(parents=True)
+    (filled / "lib.rs").write_text("fn x() { 1 }\n}\n", encoding="utf-8")
+    assert _run(pd, _gen(fake, _cfg(per_fn=True, tdd=False))) is True
+    rounds = [m for m in fake.logs if "[pre-pass-heal] round" in m
+              and "does not compile" in m]
+    assert len(rounds) == 1, rounds
+    assert any("STILL BROKEN after 1 round(s)" in m for m in fake.logs)
+    assert "phase_c.cluster.prepass_heal_failed" in fake.events

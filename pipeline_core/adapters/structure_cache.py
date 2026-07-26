@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from pipeline_core.application.reconstruct import cluster_membership as _membership
+from pipeline_core.application.reconstruct.fill_rules import is_unimplemented_body
 from pipeline_core.domain.cfg import cluster_specific_symbol_names
 from pipeline_core.domain.models import FnLocator, ImplBlock, ModRecord
 
@@ -78,7 +79,13 @@ class StructureCache:
         recs = self._enumerate_fns(src_dir)
         if recs is None:
             return None
-        return [r for r in recs if r.get("has_unimplemented_body")]
+        # Same widening as the name-only scan: the extractor's flag only sees a
+        # literal stub, so a body that merely re-declares its own fn (empty
+        # outer fn, no `unimplemented!()`) would read as filled forever.
+        return [r for r in recs
+                if r.get("has_unimplemented_body")
+                or is_unimplemented_body(str(r.get("body_text", "")),
+                                         str(r.get("fn_name", "")))]
 
     def file_cfg_predicate(self, target_src_dir: Path, file_rel: str) -> str | None:
         return _membership.file_cfg_predicate(

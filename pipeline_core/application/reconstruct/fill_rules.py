@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 
 from ... import log
+from ...domain.rust_scan import body_is_only_redeclaration
 
 FAILED_ATTEMPT_SENTINEL = "// SKELETON_STUB_FAILED_ATTEMPT"
 
@@ -25,8 +26,8 @@ _FN_BLOCK_PATTERN = re.compile(
 )
 
 
-def is_unimplemented_body(body_text: str) -> bool:
-    """True if a function body looks like our `unimplemented!()` stub.
+def is_unimplemented_body(body_text: str, fn_name: str = "") -> bool:
+    """True if a function body is not an implementation.
 
     Recognises three forms:
       1. Plain stub: contains `unimplemented!`/`todo!` and body < 60 chars.
@@ -35,9 +36,19 @@ def is_unimplemented_body(body_text: str) -> bool:
       2. Annotated stub: contains the SKELETON_STUB_FAILED_ATTEMPT sentinel
          (used by the fix-loop exhaustion path to preserve the failed attempt
          and cargo error as comments while keeping the fn callable)
+      3. Self-redeclaration (needs `fn_name`): the body is nothing but a
+         nested copy of the fn itself — what a model returns when it answers
+         with the WHOLE item instead of a body. The outer fn is then EMPTY and
+         silently returns `()`, but it no longer contains `unimplemented!()`,
+         so without this arm it reads as FILLED to every scan and is never
+         re-attempted. That is the same "not implemented" state as (1), and
+         both the write gate and the stub scan must agree on it — one
+         definition, read from both sides.
     """
     stripped = body_text.strip().strip("{").strip("}").strip()
     if FAILED_ATTEMPT_SENTINEL in stripped:
+        return True
+    if fn_name and body_is_only_redeclaration(body_text, fn_name):
         return True
     return (("unimplemented" in stripped or "todo!" in stripped)
             and len(stripped) < 60)

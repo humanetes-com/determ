@@ -13,6 +13,7 @@ from __future__ import annotations
 import string
 from collections.abc import Sequence
 
+from .rust_idents import declares_fn
 from .rust_lex import code_mask
 
 _ITEM_KEYWORDS = frozenset({"fn", "struct", "enum", "trait", "type", "const"})
@@ -978,6 +979,51 @@ def top_level_item_names(text: str) -> list[str]:
             j = k
         i = j
     return out
+
+
+def body_is_only_redeclaration(body: str, fn_name: str) -> bool:
+    """True when `body` is nothing but a re-declaration of `fn_name` itself.
+
+    The fingerprint of a model that answered with the WHOLE item when it was
+    asked for a body. Splicing `fn f(..) { work() }` between the braces of the
+    existing `fn f` yields::
+
+        fn f(..) {          // the real fn — body is now EMPTY
+            fn f(..) {      // a nested item; never called
+                work()
+            }
+        }
+
+    That parses, and the file's top-level item list is unchanged because a
+    nested item sits at depth >= 1 — so neither the parse gate nor the
+    item-set gate rejects it. The outer fn silently returns `()` instead of
+    doing the work, while the fn reads as FILLED to every later stub scan: an
+    unimplemented fn that no longer looks unimplemented.
+
+    Only the do-nothing shape is refused. A body that declares a same-named
+    nested helper AND runs code (recursive-helper style) is legal Rust that
+    works, so it is left alone.
+    """
+    if not fn_name or not body.strip():
+        return False
+    head = strip_outer_attributes(body)
+    mask = code_mask(head)
+    open_at = next((i for i, c in enumerate(head) if c == "{" and not mask[i]), -1)
+    if open_at < 0 or not declares_fn(head[:open_at], fn_name):
+        return False
+    depth = 0
+    for i in range(open_at, len(head)):
+        if mask[i]:
+            continue
+        if head[i] == "{":
+            depth += 1
+        elif head[i] == "}":
+            depth -= 1
+            if depth == 0:
+                tail = head[i + 1:]
+                tmask = code_mask(tail)
+                return not any(c.strip() for j, c in enumerate(tail) if not tmask[j])
+    return False
 
 
 def strip_outer_attributes(text: str) -> str:

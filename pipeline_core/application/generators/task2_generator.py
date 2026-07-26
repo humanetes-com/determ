@@ -63,6 +63,12 @@ from ...ports.generator import (
 )
 from ...retry import with_retry
 
+# Bound on the pre-fill heal loop. One round repairs the one file rustc could
+# name before its parse aborted, so N corrupted files need N rounds; the loop
+# also exits as soon as a round leaves the culprit unchanged. The cap only stops
+# a pathological restore-point cycle from spinning before the fill pass.
+_PREPASS_HEAL_MAX_ROUNDS = 8
+
 # Prompt fragment for proc-macro crates (syn 2.0, default features) — pure text,
 # rendered into the StaticTask2Generator prompt when the workspace is a
 # proc-macro target. Kept as a module constant (data, not logic).
@@ -1347,12 +1353,26 @@ class StaticSkeletonTask2Generator(Task2Generator):
         # LLM calls burned before end-of-pass validate reverts the blocker
         # (live case: a donor `context` body poisoned error.rs's 35-fn
         # refill). Check + revert the implicated fns NOW, before filling.
-        _rc0, _rendered0, _diags0 = self.cargo.run_check_diag(
-            check_cmd, filled_dir, self._cluster_env(cluster), 180)
-        if _rc0 not in (-1, 0):
+        # A syntax error ABORTS the parse, so rustc names exactly ONE unparseable
+        # file per invocation — every other corrupted file stays invisible until
+        # that one is repaired. A single heal round therefore fixes one file and
+        # still hands the fill pass a tree that cannot build a single test binary
+        # (observed: lib.rs healed, error.rs still broken, the cluster read
+        # 0 passing for the whole run). Repeat until the tree compiles or a round
+        # stops making progress.
+        _round = 0
+        _clean = False
+        _prev_sig = ""
+        _last_msg = ""
+        while _round < _PREPASS_HEAL_MAX_ROUNDS:
+            _rc0, _rendered0, _diags0 = self.cargo.run_check_diag(
+                check_cmd, filled_dir, self._cluster_env(cluster), 180)
+            if _rc0 in (-1, 0):
+                _clean = True
+                break
             _pre_impl = self.cargo.implicated_fns_from_check(
                 _diags0, _rendered0 or "", filled_dir)
-            _first = next((d.message for d in _diags0 if d.message), "")
+            _last_msg = next((d.message for d in _diags0 if d.message), "")
             # A syntax error (unbalanced braces left by an earlier splice) carries
             # NO fn attribution — rustc names only the file. Passing that file with
             # an empty fn name locates nothing at fn granularity, so the revert
@@ -1360,33 +1380,45 @@ class StaticSkeletonTask2Generator(Task2Generator):
             # and letting the cluster spend its whole pass on a tree that cannot
             # build a single test binary.
             _targets = _pre_impl or [FnLocator(d.file, "") for d in _diags0 if d.file]
-            if _targets:
-                self.tel.log(f"  {tag} [pre-pass-heal] seeded/resumed tree does "
-                             "not compile; implicated: "
-                             + (", ".join(f"{f}::{fn}" for f, fn in _pre_impl[:6])
-                                if _pre_impl
-                                else f"no fn — file-level: {_first[:120]}"))
-                _healed = self._revert_implicated(tag, _targets, filled_dir,
-                                                  skeleton_dir, project_dir,
-                                                  cluster.name)
-                self.tel.log(f"  {tag} [pre-pass-heal] reverted {_healed} "
-                             "fn(s)/file(s) before the fill pass.")
-                self.tel.emit("phase_c.cluster.prepass_heal", data={
-                    "cluster": cluster.name, "reverted": _healed,
-                    "implicated": [{"file": f, "fn": fn} for f, fn in _targets],
-                })
-            # Verify the repair. A heal that did not restore the build leaves
-            # every later signal meaningless — 0 passing with no localizable
-            # culprit — and the run burns a full pass before anyone notices.
-            _rc1, _, _diags1 = self.cargo.run_check_diag(
-                check_cmd, filled_dir, self._cluster_env(cluster), 180)
-            if _rc1 not in (-1, 0):
-                _still = next((d.message for d in _diags1 if d.message), _first)
-                self.tel.log(f"  {tag} [pre-pass-heal] STILL BROKEN after heal — "
-                             f"cluster cannot compile: {_still[:160]}")
-                self.tel.emit("phase_c.cluster.prepass_heal_failed", data={
-                    "cluster": cluster.name, "error": _still[:400],
-                })
+            # An unchanged culprit means the heal hierarchy has no restore point
+            # left for it; another round would just repeat the failed repair.
+            _sig = repr(sorted({(f, fn) for f, fn in _targets})) + _last_msg[:200]
+            if not _targets or _sig == _prev_sig:
+                break
+            _prev_sig = _sig
+            _round += 1
+            self.tel.log(f"  {tag} [pre-pass-heal] round {_round}: seeded/resumed "
+                         "tree does not compile; implicated: "
+                         + (", ".join(f"{f}::{fn}" for f, fn in _pre_impl[:6])
+                            if _pre_impl
+                            # A syntax error names no fn, so the FILE is the
+                            # only handle on it — printing just the message
+                            # leaves the culprit unidentifiable in the log.
+                            else "no fn — file-level: "
+                                 + ", ".join(dict.fromkeys(f for f, _ in _targets))
+                                 + f": {_last_msg[:120]}"))
+            _healed = self._revert_implicated(tag, _targets, filled_dir,
+                                              skeleton_dir, project_dir,
+                                              cluster.name)
+            self.tel.log(f"  {tag} [pre-pass-heal] round {_round}: reverted "
+                         f"{_healed} fn(s)/file(s).")
+            self.tel.emit("phase_c.cluster.prepass_heal", data={
+                "cluster": cluster.name, "round": _round, "reverted": _healed,
+                "implicated": [{"file": f, "fn": fn} for f, fn in _targets],
+            })
+        # Verify the repair. A heal that did not restore the build leaves every
+        # later signal meaningless — 0 passing with no localizable culprit — and
+        # the run burns a full pass before anyone notices.
+        if _round and not _clean:
+            self.tel.log(f"  {tag} [pre-pass-heal] STILL BROKEN after {_round} "
+                         f"round(s) — cluster cannot compile: {_last_msg[:160]}")
+            self.tel.emit("phase_c.cluster.prepass_heal_failed", data={
+                "cluster": cluster.name, "rounds": _round,
+                "error": _last_msg[:400],
+            })
+        elif _round:
+            self.tel.log(f"  {tag} [pre-pass-heal] tree compiles again after "
+                         f"{_round} round(s).")
 
         # Propagate gen_tests siblings from project_dir/src/ into filled_dir/src/.
         # task0c commits these as cluster-specific unit-test specs; the bake step

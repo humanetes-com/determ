@@ -43,7 +43,7 @@ from typing import Literal, NamedTuple
 SpliceReason = Literal[
     "ok", "ok_xml_unescaped", "file_missing", "read_failed", "fn_not_found",
     "bad_offsets", "target_not_stub", "body_is_stub", "parse_broken",
-    "ambiguous_name", "sig_not_bare", "item_set_changed",
+    "ambiguous_name", "sig_not_bare", "item_set_changed", "body_redeclares_fn",
 ]
 
 

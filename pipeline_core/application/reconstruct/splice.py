@@ -29,6 +29,7 @@ from pipeline_core.domain.reconstruction import SpliceOutcome, SpliceReason
 from pipeline_core.domain.rust_fn_headers import is_pub_fn, locate_all_fns
 from pipeline_core.domain.rust_idents import canon_container, declares_fn
 from pipeline_core.domain.rust_scan import (
+    body_is_only_redeclaration,
     has_code_brace,
     strip_outer_attributes,
     top_level_item_names,
@@ -168,7 +169,8 @@ def locate_fn_by_record(enumerate_fns: Callable[[Path], list[dict[str, Any]] | N
 def splice_fn_body_at(file_path: Path, body_byte_start: int, body_byte_end: int,
                         new_body: str, allow_nonstub: bool = False,
                         allow_stub_body: bool = False,
-                        validate_parse: ParseValidator | None = None) -> SpliceOutcome:
+                        validate_parse: ParseValidator | None = None,
+                        fn_name: str = "") -> SpliceOutcome:
     """Splice `new_body` between bytes [body_byte_start, body_byte_end) in
     `file_path`. Replaces an explicit byte range — used when the caller has
     canonical offsets from the syn enumerator. By default refuses to
@@ -207,6 +209,8 @@ def splice_fn_body_at(file_path: Path, body_byte_start: int, body_byte_end: int,
     # be a stub — that is what undoing a fill means.
     if not nb or (not allow_stub_body and is_unimplemented_body(nb)):
         return SpliceOutcome(False, "body_is_stub", 0)
+    if body_is_only_redeclaration(nb, fn_name):
+        return SpliceOutcome(False, "body_redeclares_fn", 0)
     # Re-indent the body to match the fn's existing indentation. Find the
     # column of the fn declaration by walking back to the previous newline.
     line_start = raw.rfind(b"\n", 0, body_byte_start) + 1
@@ -297,7 +301,8 @@ def replace_fn_signature(file_path: Path, fn_name: str, new_sig: str,
 
 
 def restore_frozen_signature(file_path: Path, fn_name: str,
-                             skeleton_sig: str) -> bool:
+                             skeleton_sig: str,
+                             validate_parse: ParseValidator | None = None) -> bool:
     """Overwrite ``fn_name``'s CURRENT signature with the baked-skeleton one,
     leaving the body intact. The recovery path for frozen-signature corruption:
     a model-proposed where-clause spliced into a trait-impl method ratchets
@@ -305,8 +310,22 @@ def restore_frozen_signature(file_path: Path, fn_name: str,
     sig as \"verbatim, do not change\"). The skeleton is the signature
     authority, so unlike :func:`replace_fn_signature` this is allowed on any
     fn — restoring the frozen sig cannot break the API surface. Returns True
-    iff applied (False also when the sig already matches)."""
+    iff applied (False also when the sig already matches).
+
+    The write starts at the signature LINE, so the attribute block above it
+    survives: a skeleton sig that re-emits those attributes is reduced to its
+    bare signature first, or the file ends up with BOTH — and a duplicated
+    `#[cfg(...)]` silently changes which cluster the fn compiles in. A sig
+    carrying a body (any `{`) is refused rather than written in front of the
+    body already there. Like every other write here the result is parse-gated:
+    this one has no body offsets to roll back to, so an unparseable result
+    would PERSIST and kill the whole cluster's compile."""
     if not declares_fn(skeleton_sig, fn_name):
+        return False
+    sig_only = strip_outer_attributes(skeleton_sig)
+    if not declares_fn(sig_only, fn_name):
+        return False
+    if has_code_brace(sig_only.strip().rstrip("{").rstrip()):
         return False
     try:
         text = file_path.read_text(encoding="utf-8")
@@ -320,14 +339,14 @@ def restore_frozen_signature(file_path: Path, fn_name: str,
         # container-aware caller path handles collision-heavy files.
         return False
     cur_sig, sig_start, body_start, _body_end = locs[0]
-    cleaned = skeleton_sig.strip().rstrip("{").rstrip()
+    cleaned = sig_only.strip().rstrip("{").rstrip()
     if " ".join(cur_sig.split()) == " ".join(cleaned.split()):
         return False
     line_start = text.rfind("\n", 0, sig_start) + 1
     indent = text[line_start:sig_start]
     new_text = text[:line_start] + indent + cleaned + " {" + text[body_start:]
-    file_path.write_text(new_text, encoding="utf-8")
-    return True
+    return parse_guarded_write(file_path, new_text.encode("utf-8"),
+                               text.encode("utf-8"), validate_parse)
 
 
 def splice_fn_body(file_path: Path, fn_name: str, new_body: str,
@@ -362,6 +381,8 @@ def splice_fn_body(file_path: Path, fn_name: str, new_body: str,
         nb = nb[1:-1].strip()
     if not nb or (not allow_stub_body and is_unimplemented_body(nb)):
         return SpliceOutcome(False, "body_is_stub", 0)
+    if body_is_only_redeclaration(nb, fn_name):
+        return SpliceOutcome(False, "body_redeclares_fn", 0)
     line_start = text.rfind("\n", 0, _sig_start) + 1
     sig_line = text[line_start:_sig_start]
     base_indent = ""
@@ -442,7 +463,7 @@ def splice_fn_with_where(
 
     out = splice_fn_body_at(file_path, body_byte_start, body_byte_end, body,
                             allow_nonstub=allow_nonstub,
-                            validate_parse=validate_parse)
+                            validate_parse=validate_parse, fn_name=fn_name)
     if not out.ok and pre_image is not None:
         file_path.write_bytes(pre_image)   # undo the dangling where-clause insert
     return out

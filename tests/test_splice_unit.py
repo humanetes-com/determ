@@ -237,3 +237,68 @@ def test_restore_frozen_signature_preserves_indent(tmp_path: Path) -> None:
         "}\n", encoding="utf-8")
     assert restore_frozen_signature(f, "go", "fn go(&self) -> u8")
     assert "    fn go(&self) -> u8 {" in f.read_text(encoding="utf-8")
+
+
+# --- the whole-item answer: a fill that parses but implements nothing --------
+
+_WHOLE_ITEM = """unsafe fn context_drop_rest<C, E>(e: Own<ErrorImpl>, target: TypeId)
+where
+    C: 'static,
+{
+    ptr::write(e.ptr.as_ptr(), target);
+}"""
+
+
+def test_splice_at_refuses_a_body_that_only_redeclares_the_fn() -> None:
+    p, bs, be = _stub_file()
+    ok, reason, _ = splice_fn_body_at(p, bs, be, _WHOLE_ITEM,
+                                      fn_name="context_drop_rest")
+    assert ok is False and reason == "body_redeclares_fn"
+    assert "unimplemented" in p.read_text()          # stub untouched
+
+
+def test_splice_at_still_accepts_a_differently_named_nested_helper() -> None:
+    p, bs, be = _stub_file()
+    ok, reason, _ = splice_fn_body_at(p, bs, be, "fn helper() -> i32 { 1 }\nhelper()",
+                                      fn_name="f")
+    assert ok is True and reason == "ok"
+
+
+def test_splice_fn_body_refuses_the_same_shape(tmp_path: Path) -> None:
+    from pipeline_core.application.reconstruct.splice import splice_fn_body
+    f = tmp_path / "e.rs"
+    f.write_text("fn context_drop_rest() {\n    unimplemented!()\n}\n", encoding="utf-8")
+    ok, reason, _ = splice_fn_body(f, "context_drop_rest", _WHOLE_ITEM)
+    assert ok is False and reason == "body_redeclares_fn"
+
+
+def test_restore_frozen_signature_never_duplicates_attributes(tmp_path: Path) -> None:
+    # A skeleton sig that carries the item's attributes must not write them
+    # again: the originals stay in the file, and a doubled `#[cfg(...)]`
+    # silently changes which cluster the fn compiles in.
+    f = tmp_path / "a.rs"
+    f.write_text('#[cfg(feature = "std")]\n'
+                 "fn provide(&self) -> i32\nwhere\n    C: 'static,\n{\n    1\n}\n",
+                 encoding="utf-8")
+    sig = '#[cfg(feature = "std")]\nfn provide(&self) -> i32'
+    assert restore_frozen_signature(f, "provide", sig)
+    assert f.read_text(encoding="utf-8").count('#[cfg(feature = "std")]') == 1
+
+
+def test_restore_frozen_signature_refuses_a_sig_carrying_a_body(tmp_path: Path) -> None:
+    f = tmp_path / "b.rs"
+    before = "fn provide(&self) -> i32 {\n    1\n}\n"
+    f.write_text(before, encoding="utf-8")
+    assert not restore_frozen_signature(f, "provide", "fn provide(&self) -> i32 { 9 }")
+    assert f.read_text(encoding="utf-8") == before
+
+
+def test_restore_frozen_signature_rolls_back_an_unparseable_result(tmp_path: Path) -> None:
+    # No body offsets exist to undo this write, so an unparseable result would
+    # PERSIST and kill the whole cluster's compile. It must be parse-gated.
+    f = tmp_path / "c.rs"
+    before = "fn provide(&self) -> i32 {\n    1\n}\n"
+    f.write_text(before, encoding="utf-8")
+    assert not restore_frozen_signature(f, "provide", "fn provide(&self) -> Vec<i32",
+                                        validate_parse=lambda _p: False)
+    assert f.read_text(encoding="utf-8") == before

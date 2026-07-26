@@ -1135,6 +1135,8 @@ def build_app(
         _splice_mod.splice_fn_body, validate_parse=_validate_parse)
     replace_fn_signature = functools.partial(
         _splice_replace_fn_signature, validate_parse=_validate_parse)
+    restore_frozen_signature = functools.partial(
+        _splice_restore_frozen_sig, validate_parse=_validate_parse)
     locate_fn_by_record = functools.partial(
         _splice_mod.locate_fn_by_record, enumerate_fns)
 
@@ -2273,7 +2275,7 @@ def build_app(
             parse_cmd=_parse_cmd,
             render_impl_block=_render_impl_block,
             repo_spec_section=repo_spec_section,
-            restore_frozen_signature=_splice_restore_frozen_sig,
+            restore_frozen_signature=restore_frozen_signature,
             run_cargo_check_diag=helpers.run_cargo_check_diag,
             splice_fn_body=splice_fn_body,
             splice_fn_with_where=splice_fn_with_where,

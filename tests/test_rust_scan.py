@@ -539,3 +539,42 @@ def test_top_level_item_names_detects_a_body_escaping_its_braces():
     after = "fn read() -> i32 { 1 }\nfn read() -> i32 { 2 }\n"
     assert top_level_item_names(before) == ["fn read"]
     assert top_level_item_names(after) == ["fn read", "fn read"]
+
+
+from pipeline_core.domain.rust_scan import (  # noqa: E402
+    body_is_only_redeclaration,
+)
+
+
+def test_body_is_only_redeclaration_catches_the_whole_item_answer():
+    # The model answered with the whole fn when asked for a body; splicing it
+    # between the real fn's braces parses and keeps the top-level item list
+    # identical, so only this predicate rejects it.
+    body = "unsafe fn drop_rest<C, E>(e: Own<Err>, t: TypeId)\nwhere\n    C: 'static,\n{\n    ptr::write(p, v);\n}"
+    assert body_is_only_redeclaration(body, "drop_rest") is True
+    assert top_level_item_names("fn drop_rest() {" + body + "}") == ["fn drop_rest"]
+
+
+def test_body_is_only_redeclaration_ignores_attributes_and_trailing_comments():
+    body = '#[inline]\n#[cfg(feature = "std")]\nfn get(&self) -> i32 {\n    1\n}\n// done\n'
+    assert body_is_only_redeclaration(body, "get") is True
+
+
+def test_body_is_only_redeclaration_allows_real_work():
+    # A same-named nested helper that is actually CALLED is legal and works.
+    assert body_is_only_redeclaration("fn go() -> i32 { 1 }\ngo()", "go") is False
+    # A differently-named nested helper is the ordinary case.
+    assert body_is_only_redeclaration("fn helper() -> i32 { 1 }", "go") is False
+    # An ordinary body never matches.
+    assert body_is_only_redeclaration("self.inner.fmt(f)", "fmt") is False
+    assert body_is_only_redeclaration("", "fmt") is False
+    assert body_is_only_redeclaration("fn fmt() {}", "") is False
+
+
+def test_body_is_only_redeclaration_is_comment_and_string_aware():
+    # A `}` inside a string must not be read as closing the nested item.
+    body = 'fn render() -> String {\n    String::from("}")\n}'
+    assert body_is_only_redeclaration(body, "render") is True
+    # Code after the nested item's real close is real work.
+    body2 = 'fn render() -> String {\n    String::from("}")\n}\nrender()'
+    assert body_is_only_redeclaration(body2, "render") is False

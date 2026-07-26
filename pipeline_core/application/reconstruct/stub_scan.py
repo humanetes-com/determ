@@ -33,8 +33,15 @@ def scan_unimplemented_functions(
     """
     recs = enumerate_fns(src_dir)
     if recs is not None:
+        # `has_unimplemented_body` is the extractor's syntactic test and only
+        # sees a literal stub. A body that is nothing but a nested copy of its
+        # own fn contains no `unimplemented!()`, so the extractor calls it
+        # filled while the fn does nothing at all — re-check it here so an
+        # already-corrupted tree is re-attempted instead of staying invisible.
         return [FnLocator(r["file"], r["fn_name"]) for r in recs
-                if r.get("has_unimplemented_body")]
+                if r.get("has_unimplemented_body")
+                or is_unimplemented_body(str(r.get("body_text", "")),
+                                         str(r.get("fn_name", "")))]
     out: list[FnLocator] = []
     for p in sorted(src_dir.rglob("*.rs")):
         try:
