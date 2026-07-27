@@ -12,20 +12,24 @@
 # enforced by git on every commit, so the guarantee does not rely on the model.
 #
 # Usage:  ./operator_run.sh
-# Env:
+#
+# Settings resolve shell-env first, then `.env`, then the default below
+# (tools/env_value.sh). `.env` is the durable home — an auto-fired pass inherits
+# the pipeline's environment, but a hand-run one does not, and only reading the
+# file makes both behave the same:
 #   OPERATOR_MODEL     model alias (default: opus)
 #   OPERATOR_EFFORT    reasoning effort for the pass (default: max) — matches an
 #                      interactive operator session, where the deep-analysis
 #                      work this pass does is what the setting buys
+#   OPERATOR_PERMS     permission flag (default: --dangerously-skip-permissions;
+#                      set to "--permission-mode bypassPermissions" to prefer
+#                      the softer mode)
 #
 # No spend ceiling is set. `--max-budget-usd` caps a figure the CLI DERIVES from
 # token counts at list API rates; with no ANTHROPIC_API_KEY in the environment
 # these runs authenticate against the subscription, so that figure is never
 # money — it can only cut a pass off mid-work. The pass is bounded by the flock,
 # the cooldown, and the one-iteration instruction below instead.
-#   OPERATOR_PERMS     permission flag (default: --dangerously-skip-permissions;
-#                      set to "--permission-mode bypassPermissions" to prefer
-#                      the softer mode)
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -78,15 +82,17 @@ EOF
 mkdir -p logs/auto
 LOG="logs/auto/operator_run.log"
 PART="logs/auto/operator_run.part"     # live, tailable; survives a hard kill
-MODEL_REQ="${OPERATOR_MODEL:-opus}"
+MODEL_REQ="$(bash "$REPO/tools/env_value.sh" OPERATOR_MODEL opus)"
+EFFORT_REQ="$(bash "$REPO/tools/env_value.sh" OPERATOR_EFFORT max)"
 SESSION_ID="$(python3 -c 'import uuid;print(uuid.uuid4())')"
 PASS_START="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-echo "operator_run: starting pass -> $LOG (live: tail -f $PART)"
+echo "operator_run: starting pass -> $LOG (model=$MODEL_REQ effort=$EFFORT_REQ)"
+echo "operator_run: live log -> tail -f $PART"
 
 : > "$PART"
 if ! claude -p "load the handover then start operator mode" \
       --model "$MODEL_REQ" \
-      --effort "${OPERATOR_EFFORT:-max}" \
+      --effort "$EFFORT_REQ" \
       --session-id "$SESSION_ID" \
       ${OPERATOR_PERMS:---dangerously-skip-permissions} \
       --settings '{"includeCoAuthoredBy": false}' \
@@ -108,6 +114,9 @@ fi
   echo "===== operator_run pass — $PASS_START ====="
   echo "date:  $PASS_START"
   echo "$MODEL_LINE"
+  # Effort shaped the depth of everything below it, so a reader comparing two
+  # passes needs it alongside the model — the same reason the model is named.
+  echo "effort: $EFFORT_REQ"
   echo "session: $SESSION_ID"
   echo
   cat "$PART"
@@ -138,7 +147,7 @@ tooling, dates, or authorship. Describe only what the diff changes.
 
 $(git diff --cached | head -c 20000)
 EOF
-)" --model "${OPERATOR_MODEL:-opus}" \
+)" --model "$MODEL_REQ" \
       --output-format text 2>/dev/null | sed -e '/^```/d' -e '/./,$!d')" || true
 
   if [ -z "$COMMIT_MSG" ]; then

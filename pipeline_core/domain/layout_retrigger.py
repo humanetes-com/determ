@@ -22,6 +22,7 @@ Typed, not string-matched: the trigger reason is an enum a caller acts on.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum, auto
 
@@ -37,6 +38,35 @@ from pipeline_core.domain.starvation import StarvationCause
 # types (see `classify_layout_retrigger`).
 _LAYOUT_ATTRIBUTABLE_CODES = (
     "E0308", "E0599", "E0609", "E0277", "E0053", "E0046", "E0407")
+
+
+MECHANICAL_KEY_PREFIX = "mech:"
+DEFAULT_MAX_MECHANICAL = 2
+
+
+def mechanical_key(component_key: str) -> str:
+    """Attempts-store key counting a component's CONSECUTIVE mechanical
+    failures — the ones that refund the model attempt. Prefixed, so it shares
+    the attempts file without colliding with a component key (Rust idents
+    joined by `|` can never start with `mech:`)."""
+    return f"{MECHANICAL_KEY_PREFIX}{component_key}"
+
+
+def mechanical_budget_spent(
+    attempts: Mapping[str, int], component_key: str,
+    cap: int = DEFAULT_MAX_MECHANICAL,
+) -> bool:
+    """Whether this component has already failed mechanically `cap` times in a
+    row without the model being at fault.
+
+    A mechanical failure (splice/locate miss, a propagation that could not
+    reach the live tree) REFUNDS the attempt, so a pipeline bug can never
+    exhaust the budget meant for the model. The consequence is that the very
+    same failure re-fires on the next sweep, and every re-fire spends a full
+    layout-authoring model call on a bug no model output can change. This
+    bounds the refund: unbounded retries of an attempt-invariant failure is the
+    burn the refund was supposed to prevent, aimed at a different budget."""
+    return attempts.get(mechanical_key(component_key), 0) >= cap
 
 
 class LayoutRetriggerCause(Enum):

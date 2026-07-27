@@ -66,8 +66,16 @@ def plan_layout_reconciliation(
                 if it.kind is SurfaceItemKind.FN_SIG:
                     continue          # bodies are the fill loop's, not ours
                 authored = authored_by_uid.get(uid)
+                if not authored:
+                    continue
                 text = read_live(it.file)
-                if not authored or text is None:
+                if text is None:
+                    # Never silent: an unreadable path is indistinguishable
+                    # from a healthy tree in the plan (both produce no work),
+                    # and a path resolved against the wrong base reads as
+                    # "nothing to reinstall" on every item forever.
+                    notes.append(f"{it.file}: {it.name} — live file could not "
+                                 "be read; nothing reinstalled")
                     continue
                 if find_definition_span(text, authored) is not None:
                     continue          # already installed

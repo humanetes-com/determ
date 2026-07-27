@@ -145,7 +145,6 @@ def build_retrigger_layout(
             symbol_inventory_text=lambda pd, c: "",
             author_deps_for=_author_deps_for,
             enumerate_fns=enumerate_fns,
-            enumerate_types=enumerate_types,
             read_tree_file=lambda sd, rel: _read_tree_file(sd, rel),
             revert_fns=revert_fns_to_stub,
             apply_layout_to_tree=apply_layout_to_tree,

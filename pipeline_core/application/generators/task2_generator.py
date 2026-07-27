@@ -987,11 +987,15 @@ class StaticSkeletonTask2Generator(Task2Generator):
         except Exception as e:                      # never block the fill loop
             self.tel.log(f"  {tag} [layout-sync] skipped: {e}")
             return
+        # Notes first, and unconditionally: they carry the anomalies (an item
+        # that could not be located, a file that could not be read), and those
+        # are exactly the cases that produce an EMPTY plan — logging them only
+        # alongside work done hides every one of them.
+        for n in notes:
+            self.tel.log(f"  {tag} [layout-sync] {n}")
         if not plan:
             return
         written, err = apply_to_tree(plan, src)
-        for n in notes:
-            self.tel.log(f"  {tag} [layout-sync] {n}")
         self.tel.log(
             f"  {tag} [layout-sync] reinstalled "
             f"{sum(len(v) for v in plan.values())} authored definition(s) into "

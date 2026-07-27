@@ -39,6 +39,7 @@ from pipeline_core.domain.authored_layout import (
 )
 from pipeline_core.domain.behaviour import BehaviourSuite
 from pipeline_core.domain.layout_retrigger import (
+    DEFAULT_MAX_MECHANICAL,
     CompileEvidence,
     CrashEvidence,
     LayoutRetriggerCause,
@@ -47,6 +48,8 @@ from pipeline_core.domain.layout_retrigger import (
     classify_layout_retrigger,
     crash_evidence_confounded,
     find_fns_referencing,
+    mechanical_budget_spent,
+    mechanical_key,
     should_retrigger,
 )
 from pipeline_core.domain.models import FnLocator, FnRecord, TypeRecord
@@ -88,11 +91,13 @@ class RetriggerLayoutDeps:
     public_surface_text: Callable[[Path, str], str]
     symbol_inventory_text: Callable[[Path, str], str]
     author_deps_for: Callable[[Path, str], AuthorLayoutDeps]
-    # Enumerate fns/types over the LIVE (already-filled) tree — used to find
-    # which fns reference a just-reauthored component's types, and to derive
-    # that tree's own locate keys for the propagation splice.
+    # Enumerate fns over the LIVE (already-filled) tree, rooted at the dir
+    # passed in — used to find which fns reference a just-reauthored
+    # component's types (crate root, matching the reverts), and to derive that
+    # tree's own fn locate keys for the propagation splice (src dir, matching
+    # the private surface's paths). Record `file`s are relative to that dir, so
+    # the two callers must not share one enumeration.
     enumerate_fns: Callable[[Path], list[FnRecord] | None]
-    enumerate_types: Callable[[Path], list[TypeRecord] | None]
     # Read one file of the live tree (src dir, rel path) — the propagation
     # splice slices type declarations from the source rather than trusting an
     # extractor's re-rendered text.
@@ -183,10 +188,18 @@ def _backfill_stored_defs(
 
 def _live_tree_plan(
     narrowed: PrivateSurface, results: tuple[ComponentResult, ...],
-    filled_src_dir: Path, deps: RetriggerLayoutDeps,
+    live_src_dir: Path, deps: RetriggerLayoutDeps,
 ) -> tuple[dict[str, list[DefReplacement]], str]:
     """`(per-file replacements, reason)` that rewrites the LIVE tree's current
     definitions into the just-authored ones.
+
+    `live_src_dir` is the crate's `src/`, NOT the crate root: an extractor
+    record's `file` is relative to the directory that was enumerated, and the
+    private surface was enumerated from the skeleton's `src/` (`error.rs`),
+    while everything else in this module — the cargo commands, the referencing-fn
+    enumeration, the reverts — is keyed to the crate root (`src/error.rs`).
+    Resolving a surface path against the crate root finds nothing at all, and
+    finds it silently: every item reads as "not in the live tree".
 
     The locate keys come from the LIVE TREE itself, not from the skeleton
     splice's: the skeleton is edited first and separately, so reusing its keys
@@ -196,7 +209,7 @@ def _live_tree_plan(
     file (an extractor renders them back re-wrapped, with trailing commas the
     source never had); only fn keys, which are verbatim signatures, come from
     parsed records."""
-    live_fns = deps.enumerate_fns(filled_src_dir)
+    live_fns = deps.enumerate_fns(live_src_dir)
     if live_fns is None:
         return {}, "live tree could not be parsed (extractor unavailable)"
     keys: list[tuple[str, str]] = []
@@ -208,7 +221,7 @@ def _live_tree_plan(
                     return {}, f"fn {it.name} is not in the live tree"
                 keys.append((uid, fn_keys[0][1]))
                 continue
-            text = deps.read_tree_file(filled_src_dir, it.file)
+            text = deps.read_tree_file(live_src_dir, it.file)
             live_key = None if text is None else live_definition(text, it)
             if live_key is None:
                 return {}, f"{it.name} could not be located in {it.file}"
@@ -217,7 +230,14 @@ def _live_tree_plan(
     if live_surface is None:
         return {}, "live-tree locate keys are incomplete"
     plan: dict[str, list[DefReplacement]] = {}
-    for comp, cres in zip(live_surface.components, results, strict=False):
+    if len(live_surface.components) != len(results):
+        # Never zip past a mismatch: the splice is all-or-nothing precisely
+        # because a tree holding some new definitions and some old ones
+        # compiles as neither layout, and a truncated pairing builds exactly
+        # that plan while reporting success.
+        return {}, (f"{len(live_surface.components)} live component(s) but "
+                    f"{len(results)} authored result(s)")
+    for comp, cres in zip(live_surface.components, results, strict=True):
         per_file, _uids, err = definition_replacements(
             comp, dict(cres.authored_items))
         if err:
@@ -229,7 +249,7 @@ def _live_tree_plan(
 
 def retrigger_layout(
     project_dir: Path, module_name: str, cfg_cluster: str,
-    filled_src_dir: Path, error_text: str,
+    filled_crate_dir: Path, error_text: str,
     deps: RetriggerLayoutDeps,
     crash_evidence: CrashEvidence | None = None,
     compile_evidence: CompileEvidence | None = None,
@@ -271,7 +291,7 @@ def retrigger_layout(
             cause = classify_compile_retrigger(compile_evidence, names)
         elif crash_evidence is not None:
             if _live_records is None:
-                _live_records = deps.enumerate_fns(filled_src_dir) or []
+                _live_records = deps.enumerate_fns(filled_crate_dir) or []
             cause = classify_crash_retrigger(crash_evidence, _live_records, names)
             if (should_retrigger(cause)
                     and crash_evidence_confounded(_live_records, names)):
@@ -292,6 +312,13 @@ def retrigger_layout(
         if attempts.get(key, 0) >= deps.max_attempts:
             deps.log(f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: cap "
                      f"({deps.max_attempts}) reached — not retriggering again.")
+            continue
+        if mechanical_budget_spent(attempts, key):
+            deps.log(f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: "
+                     f"{DEFAULT_MAX_MECHANICAL} consecutive mechanical failure(s) "
+                     "already refunded here — the model attempt is not what is "
+                     "failing, so another authoring call would burn on the same "
+                     "bug; not retriggering until it is fixed.")
             continue
 
         surface = deps.load_surface(project_dir, cfg_cluster)
@@ -349,6 +376,8 @@ def retrigger_layout(
             if _reasons and all(any(m in r for m in _mech_markers)
                                 for r in _reasons):
                 attempts[key] = max(0, attempts[key] - 1)
+                attempts[mechanical_key(key)] = (
+                    attempts.get(mechanical_key(key), 0) + 1)
                 deps.save_attempts(project_dir, cfg_cluster, attempts)
                 deps.log(f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: "
                          "re-author died in splice/locate infrastructure — "
@@ -369,20 +398,39 @@ def retrigger_layout(
         # until one of them is edited alone, and that is exactly the state this
         # step exists to repair. Done before the revert so the re-fills below
         # see the new shape.
+        # ONE derivation of the src base, shared by the plan and the splice that
+        # applies it: a private-surface item's `file` is relative to the src dir
+        # it was enumerated from, while `filled_crate_dir` is the crate root that
+        # cargo runs in. Deriving it twice is how the two drift apart.
+        live_src_dir = filled_crate_dir / "src"
         plan, plan_err = _live_tree_plan(
-            narrowed, res.components, filled_src_dir, deps)
+            narrowed, res.components, live_src_dir, deps)
         written, apply_err = (
             (0, plan_err) if plan_err
-            else deps.apply_layout_to_tree(plan, filled_src_dir))
+            else deps.apply_layout_to_tree(plan, live_src_dir))
+        merged_defs = tuple(d for c in res.components for d in c.authored_defs)
         if apply_err:
             # The model DID produce a layout that compiles; only the propagation
             # failed. That is mechanical, so the attempt is refunded on the same
             # rule as a splice/locate miss — a pipeline bug must never be able to
-            # exhaust the budget. The skeleton keeps the new definitions and the
-            # store is left on the OLD keys, so the next attempt re-derives them
-            # from the scaffold rather than matching text that no longer exists.
+            # exhaust the budget. The refund is counted, though: an identical
+            # mechanical failure re-fires on the very next sweep, and each
+            # re-fire spends another authoring call on a bug the model cannot
+            # affect.
             attempts[key] = max(0, attempts[key] - 1)
+            attempts[mechanical_key(key)] = (
+                attempts.get(mechanical_key(key), 0) + 1)
             deps.save_attempts(project_dir, cfg_cluster, attempts)
+            # The SKELETON now holds the authored definitions, so the store must
+            # record them: it is what the seed-time layout reconciliation
+            # reinstalls from (repairing this exact failure with no model call),
+            # and what the next attempt locates by. Left on the old keys, both
+            # fall back to re-deriving from an extractor rendering that is not
+            # the bytes on disk.
+            deps.update_layout_outcome(
+                project_dir, cfg_cluster,
+                ComponentResult(tuple(sorted(names)), authored=True,
+                                authored_defs=merged_defs))
             deps.log(f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: the "
                      "re-authored layout compiled in the skeleton but could NOT "
                      f"be applied to the live tree ({apply_err}) — the build "
@@ -391,7 +439,8 @@ def retrigger_layout(
             return RetriggerResult(fired=True, succeeded=False, cause=cause.name,
                                    reason=f"live-tree splice failed: {apply_err}")
 
-        merged_defs = tuple(d for c in res.components for d in c.authored_defs)
+        attempts.pop(mechanical_key(key), None)   # consecutive-failure counter
+        deps.save_attempts(project_dir, cfg_cluster, attempts)
         if deps.upsert_layout_registry is not None:
             deps.upsert_layout_registry(
                 project_dir,
@@ -400,9 +449,9 @@ def retrigger_layout(
             project_dir, cfg_cluster,
             ComponentResult(tuple(sorted(names)), authored=True,
                             authored_defs=merged_defs))
-        fn_records = deps.enumerate_fns(filled_src_dir) or []
+        fn_records = deps.enumerate_fns(filled_crate_dir) or []
         referencing = find_fns_referencing(fn_records, names)
-        reverted = deps.revert_fns(referencing, filled_src_dir)
+        reverted = deps.revert_fns(referencing, filled_crate_dir)
         deps.log(f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: re-authored "
                  f"successfully (attempt {attempts[key]}, cause={cause.name}); "
                  f"applied to {written} live file(s); "

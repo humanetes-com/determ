@@ -1059,12 +1059,29 @@ def locate_top_level_item(
 def _item_end(text: str, mask: Sequence[bool], after_name: int) -> int | None:
     """End offset of an item whose name ends at `after_name`: past the `;` of a
     bodyless declaration, or past the `}` closing its braced body. Whichever
-    delimiter comes first decides, so `struct Foo(u8);` and `type A = B;` end at
-    their semicolon and never swallow the next item."""
+    delimiter comes first at TOP level decides, so `struct Foo(u8);` and
+    `type A = B;` end at their semicolon and never swallow the next item.
+
+    `(`/`[` nesting is tracked because both delimiters occur INSIDE a
+    declaration's own header: the `;` of an array length (`struct Buf([u8; 16]);`,
+    `type Repr = [u8; 4];`) would otherwise end the item mid-type, and splicing a
+    replacement over that span leaves ` 16]);` behind as unparseable text."""
     n = len(text)
     i = after_name
+    nest = 0
     while i < n:
         if mask[i]:
+            i += 1
+            continue
+        if text[i] in "([":
+            nest += 1
+            i += 1
+            continue
+        if text[i] in ")]":
+            nest -= 1
+            i += 1
+            continue
+        if nest != 0:
             i += 1
             continue
         if text[i] == ";":

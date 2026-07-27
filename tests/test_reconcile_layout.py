@@ -114,6 +114,16 @@ pub struct After;
 """
 
 
+def test_unreadable_live_file_is_reported_not_skipped_silently():
+    # An empty plan means "healthy tree" AND "read nothing at all" — the second
+    # is how a base-dir mistake hides: every item resolves to a missing path and
+    # the sync reports a clean no-op forever.
+    plan, notes = plan_layout_reconciliation(
+        _surface(), [_record(error_def=_NEW)], lambda rel: None)
+    assert plan == {}
+    assert any("could not be read" in n for n in notes)
+
+
 def test_locator_takes_visibility_and_attributes_with_the_item():
     # Stopping at the keyword would splice `pub(crate) pub(crate) struct` and
     # leave the old `#[repr(C)]` above the new one.
@@ -146,6 +156,23 @@ def test_locator_stops_at_a_semicolon_declaration():
     tuple_text = "struct Wrap(u8);\nstruct Other {}\n"
     sp2 = locate_top_level_item(tuple_text, "struct", "Wrap")
     assert tuple_text[sp2[0]:sp2[1]] == "struct Wrap(u8);"
+
+
+def test_locator_does_not_end_an_item_on_an_array_length_semicolon():
+    # `[u8; 16]` puts a `;` inside the declaration's own header. Ending there
+    # cuts the span mid-type, and splicing a replacement over it leaves
+    # ` 16]);` behind — a file that no longer parses, written into the tree
+    # cargo builds.
+    from pipeline_core.domain.rust_scan import locate_top_level_item
+    text = "struct Buf([u8; 16]);\npub struct Next { a: u8 }\n"
+    span = locate_top_level_item(text, "struct", "Buf")
+    assert text[span[0]:span[1]] == "struct Buf([u8; 16]);"
+    alias = "type Repr = [u8; 4];\nstruct After;\n"
+    sp2 = locate_top_level_item(alias, "type", "Repr")
+    assert alias[sp2[0]:sp2[1]] == "type Repr = [u8; 4];"
+    braced = "struct Owned { buf: [u8; 8] }\nstruct After;\n"
+    sp3 = locate_top_level_item(braced, "struct", "Owned")
+    assert braced[sp3[0]:sp3[1]] == "struct Owned { buf: [u8; 8] }"
 
 
 def test_locator_ignores_nested_and_commented_occurrences():
