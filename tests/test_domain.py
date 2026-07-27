@@ -420,8 +420,24 @@ def test_parse_rustc_compile_errors_matches_old_regex() -> None:
         "error[E0599]: m\n --> lib.rs:1:1\nerror[E0277]: x\n --> lib.rs:2\n",
         "error[E0277]: no arrow\nblah", "error[Eabc]: bad\n --> a:1", "no errors",
     ]
+    # The parser now returns a typed record; the regex-equivalence this pins is
+    # about WHICH diagnostics are located, so compare the fields the regex had.
     for c in cases:
-        assert test_results.parse_rustc_compile_errors(c) == old(c), c
+        got = [(d.message, d.file, d.line)
+               for d in test_results.parse_rustc_compile_errors(c)]
+        assert got == old(c), c
+
+
+def test_parse_rustc_compile_errors_keeps_the_error_code() -> None:
+    # The code is the class of the failure — dropping it made the compile digest
+    # unusable as layout evidence (the retrigger classifier looks for E-codes).
+    parse = test_results.parse_rustc_compile_errors
+    coded = parse("error[E0277]: not Send\n  --> tests/t.rs:5:5\n")
+    assert [(d.code, d.message) for d in coded] == [("E0277", "not Send")]
+    assert coded[0].rendered() == "tests/t.rs:5: error[E0277]: not Send"
+    uncoded = parse("error: mismatched types\n  --> src/b.rs:3\n")
+    assert uncoded[0].code == ""
+    assert uncoded[0].rendered() == "src/b.rs:3: error: mismatched types"
 
 
 def test_strip_trailing_file_tag_matches_old_regex() -> None:
@@ -621,7 +637,8 @@ def test_failing_test_names_dedup_order() -> None:
 def test_parse_rustc_compile_errors_edges() -> None:
     parse = test_results.parse_rustc_compile_errors
     ok = parse("error[E0308]: mismatched types\n  --> src/lib.rs:42:5\n")
-    assert ok == [("mismatched types", "src/lib.rs", 42)]
+    assert [(d.code, d.message, d.file, d.line) for d in ok] == [
+        ("E0308", "mismatched types", "src/lib.rs", 42)]
     assert parse("error[E03x8]: bad code\n  --> src/lib.rs:1\n") == []
     assert parse("error[E0308] no colon\n  --> src/lib.rs:1\n") == []
     assert parse("error: msg but no arrow line\nnote: other\n") == []
@@ -696,7 +713,8 @@ def test_compile_error_digest_dedups_per_binary_repeats() -> None:
     total, rendered = test_results.compile_error_digest(same * 5)
     assert total == 1
     assert rendered == [
-        "src/error.rs:12: `NonNull<ErrorImpl>` cannot be sent between threads"]
+        "src/error.rs:12: error[E0277]: `NonNull<ErrorImpl>` cannot be sent "
+        "between threads"]
 
 
 def test_compile_error_digest_keeps_first_seen_order_and_caps() -> None:
@@ -704,7 +722,8 @@ def test_compile_error_digest_keeps_first_seen_order_and_caps() -> None:
         f"error[E0277]: msg{i}\n --> src/f{i}.rs:{i}:1\n" for i in range(1, 6))
     total, rendered = test_results.compile_error_digest(out, limit=2)
     assert total == 5                       # count is of DISTINCT errors, not of shown ones
-    assert rendered == ["src/f1.rs:1: msg1", "src/f2.rs:2: msg2"]
+    assert rendered == ["src/f1.rs:1: error[E0277]: msg1",
+                        "src/f2.rs:2: error[E0277]: msg2"]
 
 
 def test_compile_error_digest_empty_when_no_location() -> None:

@@ -30,15 +30,19 @@ from pipeline_core.application.author_layout import (
     author_layout,
 )
 from pipeline_core.application.author_layout_phase import make_pin_selector
+from pipeline_core.application.reconcile_layout import live_definition
 from pipeline_core.domain.authored_layout import (
     AuthoredItem,
     component_uids,
+    definition_replacements,
     derive_locate_keys,
 )
 from pipeline_core.domain.behaviour import BehaviourSuite
 from pipeline_core.domain.layout_retrigger import (
+    CompileEvidence,
     CrashEvidence,
     LayoutRetriggerCause,
+    classify_compile_retrigger,
     classify_crash_retrigger,
     classify_layout_retrigger,
     crash_evidence_confounded,
@@ -46,7 +50,11 @@ from pipeline_core.domain.layout_retrigger import (
     should_retrigger,
 )
 from pipeline_core.domain.models import FnLocator, FnRecord, TypeRecord
-from pipeline_core.domain.private_surface import PrivateSurface
+from pipeline_core.domain.private_surface import (
+    PrivateSurface,
+    SurfaceItemKind,
+)
+from pipeline_core.domain.scaffold_rewrite import DefReplacement
 from pipeline_core.domain.starvation import classify_starvation
 from pipeline_core.prompts.layout_authoring import CRASH_GUIDANCE
 
@@ -80,12 +88,27 @@ class RetriggerLayoutDeps:
     public_surface_text: Callable[[Path, str], str]
     symbol_inventory_text: Callable[[Path, str], str]
     author_deps_for: Callable[[Path, str], AuthorLayoutDeps]
-    # Enumerate fns over the LIVE (already-filled) tree — used to find which
-    # fns reference a just-reauthored component's types.
+    # Enumerate fns/types over the LIVE (already-filled) tree — used to find
+    # which fns reference a just-reauthored component's types, and to derive
+    # that tree's own locate keys for the propagation splice.
     enumerate_fns: Callable[[Path], list[FnRecord] | None]
+    enumerate_types: Callable[[Path], list[TypeRecord] | None]
+    # Read one file of the live tree (src dir, rel path) — the propagation
+    # splice slices type declarations from the source rather than trusting an
+    # extractor's re-rendered text.
+    read_tree_file: Callable[[Path, str], str | None]
     # Revert each located fn's body to `unimplemented!()` in the live tree;
     # returns how many were actually changed (already-stub fns don't count).
     revert_fns: Callable[[list[FnLocator], Path], int]
+    # Apply the re-authored definitions to the LIVE tree, returning
+    # (files_written, reason). NOT optional: `author_layout` splices into the
+    # SKELETON, but the tree cargo compiles is seeded from it once and owned
+    # thereafter, so a type definition changed only in the skeleton never
+    # reaches the build. Without this the whole re-author is invisible — the
+    # referencing fns below get reverted and re-fill against the very layout
+    # the re-author replaced.
+    apply_layout_to_tree: Callable[
+        [dict[str, list[DefReplacement]], Path], tuple[int, str]]
     git_commit: Callable[[Path, str], bool]
     load_attempts: Callable[[Path, str], dict[str, int]]
     save_attempts: Callable[[Path, str, dict[str, int]], Path]
@@ -158,21 +181,73 @@ def _backfill_stored_defs(
     return _with_stored_defs(narrowed, dict(all_keys))
 
 
+def _live_tree_plan(
+    narrowed: PrivateSurface, results: tuple[ComponentResult, ...],
+    filled_src_dir: Path, deps: RetriggerLayoutDeps,
+) -> tuple[dict[str, list[DefReplacement]], str]:
+    """`(per-file replacements, reason)` that rewrites the LIVE tree's current
+    definitions into the just-authored ones.
+
+    The locate keys come from the LIVE TREE itself, not from the skeleton
+    splice's: the skeleton is edited first and separately, so reusing its keys
+    would silently assume the two trees still agree — the assumption that breaks
+    the moment a propagation fails once. Deriving per tree makes the step
+    idempotent and self-healing instead. Type declarations are SLICED from the
+    file (an extractor renders them back re-wrapped, with trailing commas the
+    source never had); only fn keys, which are verbatim signatures, come from
+    parsed records."""
+    live_fns = deps.enumerate_fns(filled_src_dir)
+    if live_fns is None:
+        return {}, "live tree could not be parsed (extractor unavailable)"
+    keys: list[tuple[str, str]] = []
+    for comp in narrowed.components:
+        for uid, it in zip(component_uids(comp), comp, strict=True):
+            if it.kind is SurfaceItemKind.FN_SIG:
+                fn_keys = derive_locate_keys((it,), live_fns, [])
+                if fn_keys is None:
+                    return {}, f"fn {it.name} is not in the live tree"
+                keys.append((uid, fn_keys[0][1]))
+                continue
+            text = deps.read_tree_file(filled_src_dir, it.file)
+            live_key = None if text is None else live_definition(text, it)
+            if live_key is None:
+                return {}, f"{it.name} could not be located in {it.file}"
+            keys.append((uid, live_key))
+    live_surface = _with_stored_defs(narrowed, dict(keys))
+    if live_surface is None:
+        return {}, "live-tree locate keys are incomplete"
+    plan: dict[str, list[DefReplacement]] = {}
+    for comp, cres in zip(live_surface.components, results, strict=False):
+        per_file, _uids, err = definition_replacements(
+            comp, dict(cres.authored_items))
+        if err:
+            return {}, err
+        for rel, reps in per_file.items():
+            plan.setdefault(rel, []).extend(reps)
+    return plan, ""
+
+
 def retrigger_layout(
     project_dir: Path, module_name: str, cfg_cluster: str,
     filled_src_dir: Path, error_text: str,
     deps: RetriggerLayoutDeps,
     crash_evidence: CrashEvidence | None = None,
+    compile_evidence: CompileEvidence | None = None,
 ) -> RetriggerResult:
     """Try to re-author whichever non-gated component's evidence is implicated.
     Returns fired=False when no frozen component matches (the caller's
     existing stall-exit behaviour should proceed unchanged).
 
-    Two evidence channels select a component: compile-error text naming its
-    private types (causes A/B, `classify_layout_retrigger`), or — when
-    `crash_evidence` is given — runtime-crash implication (cause C,
+    Three evidence channels select a component: compile-error text from a fill
+    attempt naming its private types (causes A/B, `classify_layout_retrigger`);
+    `crash_evidence`, runtime-crash implication (cause C,
     `classify_crash_retrigger`: a vanished test's reverse-map target is or
-    references a component member; no error text exists in that class).
+    references a component member; no error text exists in that class); or
+    `compile_evidence`, a cluster-wide build failure whose rustc digest names
+    the component's private types while the lib itself compiled (cause A,
+    `classify_compile_retrigger` — no fill attempt and no test run exists to
+    classify, and the confounding a stub could introduce cannot apply: an
+    `unimplemented!()` body type-checks, so no stub can break a build).
 
     Both FROZEN and AUTHORED components are eligible: an authored layout can
     compile yet still be the wall (cause B's body-vs-layout exhaustion, cause
@@ -192,7 +267,9 @@ def retrigger_layout(
 
     for rec in candidates:
         names = rec.names
-        if crash_evidence is not None:
+        if compile_evidence is not None:
+            cause = classify_compile_retrigger(compile_evidence, names)
+        elif crash_evidence is not None:
             if _live_records is None:
                 _live_records = deps.enumerate_fns(filled_src_dir) or []
             cause = classify_crash_retrigger(crash_evidence, _live_records, names)
@@ -286,6 +363,34 @@ def retrigger_layout(
             return RetriggerResult(fired=True, succeeded=False, cause=cause.name,
                                    reason="re-authoring failed again")
 
+        # Land the new definitions in the tree that is actually built. Its keys
+        # are derived from the LIVE TREE's own parsed records, never reused from
+        # the skeleton splice: the two trees hold the same definitions only
+        # until one of them is edited alone, and that is exactly the state this
+        # step exists to repair. Done before the revert so the re-fills below
+        # see the new shape.
+        plan, plan_err = _live_tree_plan(
+            narrowed, res.components, filled_src_dir, deps)
+        written, apply_err = (
+            (0, plan_err) if plan_err
+            else deps.apply_layout_to_tree(plan, filled_src_dir))
+        if apply_err:
+            # The model DID produce a layout that compiles; only the propagation
+            # failed. That is mechanical, so the attempt is refunded on the same
+            # rule as a splice/locate miss — a pipeline bug must never be able to
+            # exhaust the budget. The skeleton keeps the new definitions and the
+            # store is left on the OLD keys, so the next attempt re-derives them
+            # from the scaffold rather than matching text that no longer exists.
+            attempts[key] = max(0, attempts[key] - 1)
+            deps.save_attempts(project_dir, cfg_cluster, attempts)
+            deps.log(f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: the "
+                     "re-authored layout compiled in the skeleton but could NOT "
+                     f"be applied to the live tree ({apply_err}) — the build "
+                     "still sees the old layout; not reverting any fn, attempt "
+                     "refunded (mechanical failure, no model evidence).")
+            return RetriggerResult(fired=True, succeeded=False, cause=cause.name,
+                                   reason=f"live-tree splice failed: {apply_err}")
+
         merged_defs = tuple(d for c in res.components for d in c.authored_defs)
         if deps.upsert_layout_registry is not None:
             deps.upsert_layout_registry(
@@ -300,6 +405,7 @@ def retrigger_layout(
         reverted = deps.revert_fns(referencing, filled_src_dir)
         deps.log(f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: re-authored "
                  f"successfully (attempt {attempts[key]}, cause={cause.name}); "
+                 f"applied to {written} live file(s); "
                  f"reverted {reverted} referencing fn(s) to re-fill.")
         return RetriggerResult(fired=True, succeeded=True, reverted_count=reverted,
                                cause=cause.name)

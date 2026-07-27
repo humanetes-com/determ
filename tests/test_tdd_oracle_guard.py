@@ -429,3 +429,60 @@ def test_named_vanish_still_invokes_the_crash_localizer(
                 attribution_kwargs=[], checkpoints=[], events=[],
                 localize=localize)
     assert calls, "a named vanished test is exactly what the localizer is for"
+
+
+_BUILD_BROKE = (
+    "error[E0277]: `NonNull<ErrorImpl>` cannot be sent between threads safely\n"
+    "   --> tests/test_autotrait.rs:5:5\n"
+    'error: could not compile `anyhow` (test "test_autotrait") due to 1 error\n')
+
+
+def test_unbuildable_cluster_fires_the_layout_retrigger_on_the_first_sweep(
+        tmp_path: Path, monkeypatch) -> None:
+    # A tree whose test binaries do not compile reports no verdict for ANY test,
+    # so every further fill iteration is spent on a tree that cannot score. The
+    # retrigger must act at iter 1 rather than wait out the stall budget.
+    from pipeline_core.application.retrigger_layout import RetriggerResult
+    calls: list[dict[str, Any]] = []
+
+    def _retrig(pd, mod, cl, sd, output, crash_evidence=None,
+                compile_evidence=None):
+        calls.append({"compile": compile_evidence, "crash": crash_evidence})
+        fired = len(calls) == 1
+        return RetriggerResult(fired=fired, succeeded=fired, reverted_count=3,
+                               cause="DESIGN_CONFLICT")
+
+    events: list[tuple[str, dict]] = []
+    _run_driver(monkeypatch, tmp_path,
+                run_cargo=lambda *a, **k: (101, _BUILD_BROKE),
+                inventory=lambda pd, cl, stems, lib=False: (1, frozenset({"t1"})),
+                attribution_kwargs=[], checkpoints=[], events=events,
+                retrigger=_retrig)
+    assert calls, "no retrigger on a cluster whose test binaries do not build"
+    ev = calls[0]["compile"]
+    assert ev is not None and calls[0]["crash"] is None
+    assert ev.lib_clean and ev.consecutive_sweeps == 1
+    assert "E0277" in ev.digest and "ErrorImpl" in ev.digest
+    fired = [d for name, d in events if name == "phase_c.layout_retrigger.fired"]
+    assert fired and fired[0]["cause"] == "DESIGN_CONFLICT"
+
+
+def test_broken_lib_never_fires_the_layout_retrigger(
+        tmp_path: Path, monkeypatch) -> None:
+    # The lib failing to compile means a filled BODY is a live explanation, so
+    # re-authoring the layout would revert a whole component off one bad fill.
+    from pipeline_core.application.retrigger_layout import RetriggerResult
+    calls: list[dict[str, Any]] = []
+
+    def _retrig(pd, mod, cl, sd, output, crash_evidence=None,
+                compile_evidence=None):
+        calls.append({"compile": compile_evidence})
+        return RetriggerResult(fired=False)
+
+    lib_broke = _BUILD_BROKE + "error: could not compile `anyhow` (lib) due to 1\n"
+    _run_driver(monkeypatch, tmp_path,
+                run_cargo=lambda *a, **k: (101, lib_broke),
+                inventory=lambda pd, cl, stems, lib=False: (1, frozenset({"t1"})),
+                attribution_kwargs=[], checkpoints=[], events=[],
+                retrigger=_retrig)
+    assert not any(c["compile"] is not None for c in calls)

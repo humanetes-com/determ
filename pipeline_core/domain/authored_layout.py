@@ -26,6 +26,7 @@ from pipeline_core.domain.private_surface import (
     SurfaceItemKind,
 )
 from pipeline_core.domain.rust_fn_headers import locate_all_fns
+from pipeline_core.domain.scaffold_rewrite import DefReplacement
 
 _OPEN = "<LAYOUT_ITEM"
 _CLOSE = "</LAYOUT_ITEM>"
@@ -129,6 +130,35 @@ def component_uids(items: tuple[PrivateSurfaceItem, ...]) -> tuple[str, ...]:
             seen[it.name] = seen.get(it.name, 0) + 1
             uids.append(f"{it.name}.{seen[it.name]}")
     return tuple(uids)
+
+
+def definition_replacements(
+    items: tuple[PrivateSurfaceItem, ...],
+    authored: Mapping[str, AuthoredItem],
+) -> tuple[dict[str, list[DefReplacement]], dict[str, list[str]], str]:
+    """Per-file `(locate-key → authored text)` replacement plan for ONE
+    component, plus the parallel uid lists (so a locate miss can name the uid
+    that missed) and a non-empty reason when an item has no authored block.
+
+    Shared by every tree the layout must land in. A re-author that reaches only
+    one of them is silent drift, not a re-author: the skeleton is what a later
+    cluster seeds from, the filled tree is what cargo actually compiles, and a
+    type definition present in one and absent from the other builds a crate
+    nobody authored."""
+    per_file: dict[str, list[DefReplacement]] = {}
+    per_file_uids: dict[str, list[str]] = {}
+    for uid, it in zip(component_uids(items), items, strict=True):
+        block = authored.get(uid)
+        if block is None:
+            return {}, {}, f"authored blocks missing uid {uid}"
+        # Fn definitions are enumerated as bare signatures (no vis/`unsafe`
+        # prefix, no stub body) — name the fn so the splice swaps the whole
+        # item instead of nesting the new def inside the old one.
+        fn_name = it.name if it.kind is SurfaceItemKind.FN_SIG else ""
+        per_file.setdefault(it.file, []).append(
+            DefReplacement(it.definition, block.definition, fn_name))
+        per_file_uids.setdefault(it.file, []).append(uid)
+    return per_file, per_file_uids, ""
 
 
 def authored_locate_keys(

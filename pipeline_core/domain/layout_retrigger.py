@@ -1,12 +1,17 @@
 """When to re-run t1.5 layout authoring for a cluster (F11 M3) — pure domain.
 
-The frozen skeleton's layout gets ONE authoring pass at bake time (M2). Two
+The frozen skeleton's layout gets ONE authoring pass at bake time (M2). Several
 distinct signals say that pass produced a layout the reconstruction cannot live
-with, and BOTH must re-trigger a whole-cluster re-author (coarse but correct —
-the same recovery a compile-broken skeleton gets):
+with, and EACH must re-trigger a whole-cluster re-author (coarse but correct):
 
   A. DESIGN_CONFLICT — the compiler rejects the authored shape itself
      (E0053/E0046/E0407-class): the layout contradicts what a body must be.
+     Reached from a fill attempt's errors, or — `classify_compile_retrigger` —
+     from a cluster-wide BUILD failure in which the lib compiled and only the
+     test binaries did not. That second route is the only one that acts while
+     the tree cannot produce a single test verdict, so it fires on the first
+     such sweep rather than waiting out a stall budget that measures fills
+     nothing can run.
   B. LAYOUT_EXHAUSTION — the layout COMPILES, but the cluster's fills exhaust
      with failures concentrated on private-type usage (E0308/E0599/E0609 naming
      the authored private types): no body can satisfy the tests UNDER this
@@ -53,6 +58,41 @@ class CrashEvidence:
     vanished: frozenset[str]
     suspect_fns: frozenset[FnLocator]
     consecutive_sweeps: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class CompileEvidence:
+    """Cause A's typed payload from the TDD driver: the cluster's test build
+    failed outright, so no fill attempt exists to classify and no test ran to
+    crash. `digest` is the deduped rustc diagnostic text; `lib_clean` records
+    that the LIBRARY itself compiled; `consecutive_sweeps` is how many sweeps in
+    a row have failed to build."""
+    digest: str
+    lib_clean: bool
+    consecutive_sweeps: int = 0
+
+
+def classify_compile_retrigger(
+    evidence: CompileEvidence,
+    component_names: frozenset[str],
+) -> LayoutRetriggerCause:
+    """Cause A decision for ONE component, from a cluster-wide BUILD failure.
+
+    `lib_clean` is the load-bearing gate, not a heuristic: a fn body lives inside
+    the lib, so a build where the lib succeeded and only the test binaries failed
+    cannot be explained by any body a fill wrote — what the binaries link against
+    is the frozen/authored shape, which is exactly what a re-author replaces.
+    Without that gate a single bad fill that broke the lib would trigger a
+    whole-component re-author and mass revert.
+
+    A build failure is the strongest form of cause A: not one fill's opinion but
+    the whole cluster failing to compile, and every sweep spent under it is
+    wasted outright — no test can report a verdict. So it needs no streak."""
+    if not evidence.lib_clean or not evidence.digest.strip():
+        return LayoutRetriggerCause.NONE
+    if not _errors_hit_private_types(evidence.digest, component_names):
+        return LayoutRetriggerCause.NONE
+    return LayoutRetriggerCause.DESIGN_CONFLICT
 
 
 def classify_crash_retrigger(

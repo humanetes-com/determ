@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ...application.reconcile_layout import plan_layout_reconciliation
 from ...application.reconstruct.fill_merge import backfill_stub_bodies
 from ...application.reconstruct.fill_rules import is_unimplemented_body
 from ...application.reconstruct.heal import HealDeps, heal_file
@@ -41,7 +42,11 @@ from ...domain.generation import (
 )
 from ...domain.heal import RestorePoint
 from ...domain.llm_output import extract_files
-from ...domain.models import BuildCluster, ClusterFillResult, FnLocator
+from ...domain.models import (
+    BuildCluster,
+    ClusterFillResult,
+    FnLocator,
+)
 from ...domain.rust_fn_headers import locate_all_fns
 from ...domain.rust_scan import item_names
 from ...domain.test_results import parse_test_counts
@@ -118,6 +123,13 @@ PROC_MACRO_NOTE = (
     "  - If a submodule file `foo.rs` is generated, declare it in lib.rs as `mod foo;` (no braces).\n"
     "  - Every `mod foo;` declaration needs a corresponding foo.rs file.\n"
 )
+
+
+def _read_text(p: Path) -> str | None:
+    try:
+        return p.read_text(encoding="utf-8")
+    except OSError:
+        return None
 
 
 class Task2Generator(ABC):
@@ -952,6 +964,39 @@ class StaticSkeletonTask2Generator(Task2Generator):
     # F2 heal: the syn StructureReader (parse-check gate for the heal hierarchy).
     # None → heal falls back to whole-file skeleton restore (legacy behaviour).
     structure: Any = None
+    # Layout propagation: (load_private_surface, load_layout_records,
+    # apply_layout_to_tree). The filled tree is seeded from the skeleton once
+    # and owned thereafter, so a layout re-authored mid-run reaches the skeleton
+    # only — these let the seed step reinstall it. None → skipped.
+    layout_sync: Any = None
+
+    def _sync_layout_into_tree(self, tag: str, project_dir: Path, cluster: Any,
+                               filled_dir: Path) -> None:
+        """Reinstall every AUTHORED layout definition the live tree is missing.
+        Silent no-op on a healthy tree (nothing is superseded), so this reads a
+        handful of files per cluster start and never rewrites a filled body."""
+        if self.layout_sync is None:
+            return
+        load_surface, load_records, apply_to_tree = self.layout_sync
+        src = filled_dir / "src"
+        try:
+            plan, notes = plan_layout_reconciliation(
+                load_surface(project_dir, cluster.name),
+                load_records(project_dir, cluster.name),
+                lambda rel: _read_text(src / rel))
+        except Exception as e:                      # never block the fill loop
+            self.tel.log(f"  {tag} [layout-sync] skipped: {e}")
+            return
+        if not plan:
+            return
+        written, err = apply_to_tree(plan, src)
+        for n in notes:
+            self.tel.log(f"  {tag} [layout-sync] {n}")
+        self.tel.log(
+            f"  {tag} [layout-sync] reinstalled "
+            f"{sum(len(v) for v in plan.values())} authored definition(s) into "
+            f"{written} live file(s)" + (f"; ERROR: {err}" if err else "")
+            + " — the tree was building a layout the store had superseded.")
 
     def _ensure_blueprint(self, project_dir: Path, module: str,
                           default_cluster: Any, all_test_pairs: list[tuple[str, str]],
@@ -1333,6 +1378,13 @@ class StaticSkeletonTask2Generator(Task2Generator):
             if not dst.exists():
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 dst.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+
+        # The seed above copies only files that do not exist yet, which is right
+        # for BODIES (the fill loop owns them) and wrong for the private LAYOUT:
+        # a mid-run re-author edits the skeleton, so its new type/impl blocks
+        # would never reach the tree cargo builds. Reinstall them here, where
+        # the seed invariant is established.
+        self._sync_layout_into_tree(tag, project_dir, cluster, filled_dir)
 
         # Debt #36: adopt the shared-fn bodies earlier clusters already accepted
         # (fill ONCE, propagate). Only `unimplemented!()` stubs are replaced, so

@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 from pipeline_core.domain.layout_retrigger import (
+    CompileEvidence,
     LayoutRetriggerCause,
+    classify_compile_retrigger,
     classify_layout_retrigger,
     find_fns_referencing,
     should_retrigger,
@@ -141,3 +143,51 @@ def test_crash_evidence_confounded_thresholds():
         frozenset({"a", "b", "c"}))
     # component with no fn members (types only) → never confounded
     assert not crash_evidence_confounded([_fn("x", True)], frozenset({"T"}))
+
+
+# --- cause A from a cluster-wide build failure --------------------------------
+_DIGEST = ("tests/test_autotrait.rs:5: error[E0277]: "
+           "`NonNull<anyhow::error::ErrorImpl>` cannot be sent between "
+           "threads safely")
+
+
+def test_compile_evidence_retriggers_when_digest_names_a_private_type():
+    c = classify_compile_retrigger(
+        CompileEvidence(digest=_DIGEST, lib_clean=True, consecutive_sweeps=1),
+        _PRIV)
+    assert c is LayoutRetriggerCause.DESIGN_CONFLICT
+    assert should_retrigger(c)
+
+
+def test_compile_evidence_needs_no_streak():
+    # A tree that cannot build reports no verdict for any test, so a second
+    # broken sweep buys no information the first did not already give.
+    c = classify_compile_retrigger(
+        CompileEvidence(digest=_DIGEST, lib_clean=True, consecutive_sweeps=0),
+        _PRIV)
+    assert c is LayoutRetriggerCause.DESIGN_CONFLICT
+
+
+def test_compile_evidence_with_broken_lib_never_retriggers():
+    # The lib failing means a filled BODY is a live explanation; re-authoring
+    # the layout would revert the whole component off one bad fill.
+    c = classify_compile_retrigger(
+        CompileEvidence(digest=_DIGEST, lib_clean=False), _PRIV)
+    assert c is LayoutRetriggerCause.NONE
+    assert not should_retrigger(c)
+
+
+def test_compile_evidence_not_naming_a_private_type_does_not_retrigger():
+    unrelated = ("tests/t.rs:1: error[E0425]: cannot find function `helper` "
+                 "in this scope")
+    c = classify_compile_retrigger(
+        CompileEvidence(digest=unrelated, lib_clean=True), _PRIV)
+    assert c is LayoutRetriggerCause.NONE
+
+
+def test_compile_evidence_with_empty_digest_does_not_retrigger():
+    # A link error or ICE parses to no diagnostic; acting then would aim the
+    # re-author at nothing.
+    c = classify_compile_retrigger(
+        CompileEvidence(digest="   ", lib_clean=True), _PRIV)
+    assert c is LayoutRetriggerCause.NONE

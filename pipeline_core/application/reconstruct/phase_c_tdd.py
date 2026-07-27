@@ -35,7 +35,7 @@ from pipeline_core.domain.crash_site import (
     vanish_is_stub_confounded,
 )
 from pipeline_core.domain.dispatch import defer_blocked_consumers
-from pipeline_core.domain.layout_retrigger import CrashEvidence
+from pipeline_core.domain.layout_retrigger import CompileEvidence, CrashEvidence
 from pipeline_core.domain.measurement import Measurement, tree_content_sha
 from pipeline_core.domain.models import (
     BuildCluster,
@@ -49,6 +49,7 @@ from pipeline_core.domain.test_command import ensure_serial_harness
 from pipeline_core.domain.test_report import parse_test_output
 from pipeline_core.domain.test_results import (
     compile_error_digest,
+    lib_compile_clean,
     parse_binary_results,
     parse_failed_tests,
     parse_test_counts,
@@ -312,6 +313,10 @@ def run_phase_c_tdd(
     # expected (reverted stubs crash until re-filled) and must not confirm-now
     # a fresh attempt before a single fill pass has run.
     _retrig_cooldown = False
+    # Cause-A (build failure) retrigger: consecutive sweeps in which the test
+    # binaries did not compile. Carried as evidence, never as a threshold — a
+    # tree that cannot build produces no verdict at all, so waiting is pure loss.
+    _compile_broke_streak = 0
 
     def _reconcile(rc_: int, output_: str, pass_n: int, fail_n: int,
                    failed_: set[str]) -> tuple[int, set[str], SweepOracle]:
@@ -750,6 +755,54 @@ def run_phase_c_tdd(
         # CONSTANT: gating on it made every single iteration pay an extra full
         # sweep and declare "crash is deterministic" forever.
         _sweep_compile_broke = "could not compile" in (output or "")
+        # Cause-A layout retrigger, fired on the FIRST broken sweep. A cluster
+        # whose test binaries do not build reports no verdict for any test, so
+        # every further iteration of fills is spent on a tree that cannot score
+        # — the stall budget measures fills nothing can run. `lib_compile_clean`
+        # is what makes acting this early safe rather than trigger-happy: bodies
+        # live inside the lib, so a build where the lib succeeded and only the
+        # binaries failed cannot be any fill's fault, and the frozen/authored
+        # shape they link against is the only remaining explanation.
+        _compile_broke_streak = _compile_broke_streak + 1 if _sweep_compile_broke else 0
+        if (_sweep_compile_broke
+                and deps.retrigger_layout is not None
+                and lib_compile_clean(output or "")):
+            _err_n, _err_lines = compile_error_digest(output or "")
+            _retrig_k = deps.retrigger_layout(
+                project_dir, module, cluster.name, target_src_dir, output,
+                compile_evidence=CompileEvidence(
+                    digest="\n".join(_err_lines),
+                    lib_clean=True,
+                    consecutive_sweeps=_compile_broke_streak))
+            if _retrig_k.fired and _retrig_k.succeeded:
+                deps.log(
+                    f"  {tag} [phase-c/tdd] iter {iter_n}: BUILD layout "
+                    f"retrigger fired (cause={_retrig_k.cause}) — test binaries "
+                    f"had not compiled for {_compile_broke_streak} sweep(s) "
+                    f"while the lib did ({_err_n} distinct rustc error(s)); "
+                    f"reverted {_retrig_k.reverted_count} fn(s) to re-fill "
+                    "under the new layout; resetting stall budget.")
+                deps.emit("phase_c.layout_retrigger.fired", data={
+                    "cluster": cluster.name, "iter": iter_n,
+                    "cause": _retrig_k.cause,
+                    "reverted_count": _retrig_k.reverted_count,
+                    "compile_errors": _err_n,
+                    "consecutive_broken_sweeps": _compile_broke_streak,
+                })
+                _compile_broke_streak = 0
+                state.stalls = 0
+                stall = 0
+                continue
+            if not _retrig_k.fired:
+                # Nothing acts on this cluster: no component's private types
+                # appear in the diagnostics. Say so once per broken sweep —
+                # silence here is what made a 2h burn look like a plateau.
+                deps.log(
+                    f"  {tag} [phase-c/tdd] iter {iter_n}: test binaries do not "
+                    f"compile (lib does) and no layout component matched the "
+                    f"diagnostics ({_retrig_k.reason}) — no repair route; "
+                    f"{_err_n} distinct rustc error(s): "
+                    + (" | ".join(_err_lines) or "(no parseable location)"))
         if _oracle.vanished and not _sweep_compile_broke:
             _vanish_streak += 1
             # A shrunk oracle with a clean compile is either the frozen-scheme

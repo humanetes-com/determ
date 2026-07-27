@@ -140,8 +140,8 @@ def test_compile_gate_reason_names_the_gate():
     # a 1-error compile gate must not read as a harness crash.
     reason = compile_gate_reason("nightly", _E0276_OUT)
     assert reason == ("cluster 'nightly': lib failed to compile — 2 error(s), "
-                      "first: src/context.rs:193: impl has stricter "
-                      "requirements than trait")
+                      "first: src/context.rs:193: error[E0276]: impl has "
+                      "stricter requirements than trait")
 
 
 def test_compile_gate_reason_none_without_diagnostics():
@@ -237,3 +237,52 @@ def test_summarize_test_binaries_empty_and_no_regex():
     # negative/odd tokens must not crash the pure-string parser
     one = "test result: FAILED. 0 passed; 5 failed; 0 ignored"
     assert summarize_test_binaries(one) == [("?", 0, 5)]
+
+
+# --- cargo target attribution on a failed build -------------------------------
+_BUILD_FAIL = """\
+error[E0277]: `NonNull<anyhow::error::ErrorImpl>` cannot be sent between threads safely
+   --> tests/test_autotrait.rs:5:5
+error: could not compile `anyhow` (test "test_autotrait") due to 2 previous errors
+error: could not compile `anyhow` (test "test_repr") due to 1 previous error
+"""
+
+
+def test_compile_failed_targets_dedups_and_keeps_order():
+    from pipeline_core.domain.test_results import compile_failed_targets
+    assert compile_failed_targets(_BUILD_FAIL) == (
+        'test "test_autotrait"', 'test "test_repr"')
+    # same target twice collapses; order is first-seen
+    twice = _BUILD_FAIL + '\nerror: could not compile `anyhow` (test "test_autotrait") due to 1\n'
+    assert compile_failed_targets(twice) == (
+        'test "test_autotrait"', 'test "test_repr"')
+
+
+def test_compile_failed_targets_reads_through_ansi_colour():
+    from pipeline_core.domain.test_results import compile_failed_targets
+    coloured = '\x1b[1m\x1b[31merror\x1b[0m: could not compile `anyhow` (lib) due to 3\n'
+    assert compile_failed_targets(coloured) == ("lib",)
+
+
+def test_lib_compile_clean_separates_shape_failures_from_body_failures():
+    from pipeline_core.domain.test_results import lib_compile_clean
+    # Only integration binaries failed → the lib built → no body can be at fault.
+    assert lib_compile_clean(_BUILD_FAIL)
+    # The lib itself failed → a filled body is a live explanation.
+    assert not lib_compile_clean(
+        'error: could not compile `anyhow` (lib) due to 3 previous errors\n')
+    # `lib test` is the lib compiled with cfg(test) — still the lib.
+    assert not lib_compile_clean(
+        'error: could not compile `anyhow` (lib test) due to 1 previous error\n')
+    # A build where the lib ALSO failed is not clean even if binaries failed too.
+    assert not lib_compile_clean(
+        _BUILD_FAIL + 'error: could not compile `anyhow` (lib) due to 1\n')
+
+
+def test_lib_compile_clean_is_false_without_evidence():
+    from pipeline_core.domain.test_results import lib_compile_clean
+    # Absence of a parseable target is UNKNOWN, never "the lib is fine" — a
+    # caller gated on this must not act on a link error or an ICE.
+    assert not lib_compile_clean("")
+    assert not lib_compile_clean("error: linking with `cc` failed: exit status: 1")
+    assert not lib_compile_clean("test result: FAILED. 3 passed; 2 failed")

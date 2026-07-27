@@ -139,6 +139,8 @@ from pipeline_core.adapters.gen_tests_storage import (
 from pipeline_core.adapters.gen_tests_storage import (
     strip_all_gen_tests_artifacts as _gts_strip_all_artifacts,
 )
+from pipeline_core.adapters.layout_outcome_store import load_layout_records
+from pipeline_core.adapters.layout_tree_splice import apply_layout_to_tree
 from pipeline_core.adapters.model_notes_store import (
     FileModelNotesStore,
 )
@@ -163,7 +165,7 @@ from pipeline_core.adapters.pipeline_db import (
     type_signals_read as _type_signals_read,
 )
 from pipeline_core.adapters.pipeline_db import type_signals_write as _db_type_signals_write
-from pipeline_core.adapters.private_surface_store import save_private_surface
+from pipeline_core.adapters.private_surface_store import load_private_surface, save_private_surface
 from pipeline_core.adapters.progress import ChunkProgress
 from pipeline_core.adapters.ratchet import BestTreeRatchet
 from pipeline_core.adapters.reconstruct_roles import (
@@ -1773,6 +1775,8 @@ def build_app(
             gentests=gen_gentests, scan=gen_scan, ws=gen_workspace,
             cfg=_build_skeleton_config(),
             structure=structure,
+            layout_sync=(load_private_surface, load_layout_records,
+                         apply_layout_to_tree),
             blueprint_deps=BlueprintDeps(
                 ask=lambda *a, **k: helpers.ask_raw(*a, **k),
                 log=ports.log, emit=ports.emit,

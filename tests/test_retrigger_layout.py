@@ -20,6 +20,7 @@ from pipeline_core.domain.behaviour import (
     ObservableOutcome,
     StaticAssertKind,
 )
+from pipeline_core.domain.layout_retrigger import CompileEvidence
 from pipeline_core.domain.models import FnLocator, FnRecord, TypeRecord
 from pipeline_core.domain.private_surface import classify_private_surface
 
@@ -79,6 +80,16 @@ class _Fakes:
         self.skeleton_types: list[TypeRecord] | None = None
         self.committed: list[str] = []
         self.reverted_calls: list[list[FnLocator]] = []
+        self.tree_plans: list[dict] = []
+        # Parsed records over the LIVE tree: the propagation splice derives its
+        # locate keys from these, never from the skeleton's.
+        # Live-tree file text: type declarations are SLICED from here, never
+        # taken from an extractor record (syn re-renders them).
+        self.live_files: dict[str, str] = {"src/error.rs": _FROZEN_DEF + "\n"}
+        self.live_types: list[TypeRecord] | None = [
+            TypeRecord(file="src/error.rs", kind="struct", name="ErrorImpl",
+                       is_pub=False, definition=_FROZEN_DEF)]
+        self.tree_apply_error = ""
         self.outcome_updates: list[ComponentResult] = []
         self.logs: list[str] = []
         self.prompts: list[str] = []
@@ -99,6 +110,12 @@ class _Fakes:
         def revert_fns(fns, src_dir):
             self.reverted_calls.append(fns)
             return len(fns)
+
+        def apply_to_tree(plan, src_dir):
+            self.tree_plans.append(plan)
+            if self.tree_apply_error:
+                return 0, self.tree_apply_error
+            return len(plan), ""
 
         def save_attempts(pd, c, a):
             self.saved_attempts = dict(a)
@@ -124,7 +141,10 @@ class _Fakes:
             symbol_inventory_text=lambda pd, c: "Box",
             author_deps_for=author_deps_for,
             enumerate_fns=lambda sd: self.fn_records,
+            enumerate_types=lambda sd: self.live_types,
+            read_tree_file=lambda sd, rel: self.live_files.get(rel),
             revert_fns=revert_fns,
+            apply_layout_to_tree=apply_to_tree,
             git_commit=git_commit,
             load_attempts=lambda pd, c: self.attempts,
             save_attempts=save_attempts,
@@ -325,3 +345,103 @@ def test_model_rejection_still_consumes_the_attempt():
     assert res.fired and not res.succeeded
     assert f.saved_attempts == {"ErrorImpl": 1}
     assert not any("refunded" in m for m in f.logs)
+
+
+def test_compile_evidence_fires_without_any_fill_attempt():
+    f = _Fakes()
+    # No fill attempt and no crash: the cluster's test binaries did not build.
+    ev = CompileEvidence(
+        digest="tests/test_autotrait.rs:5: error[E0277]: `NonNull<ErrorImpl>` "
+               "cannot be sent between threads safely",
+        lib_clean=True, consecutive_sweeps=1)
+    res = retrigger_layout(Path("/x"), "anyhow", "stable", Path("/x/src"), "",
+                           f.deps(), compile_evidence=ev)
+    assert res.fired and res.succeeded and res.cause == "DESIGN_CONFLICT"
+
+
+def test_compile_evidence_with_broken_lib_does_not_fire():
+    f = _Fakes()
+    ev = CompileEvidence(
+        digest="src/error.rs:5: error[E0277]: `ErrorImpl` cannot be sent",
+        lib_clean=False, consecutive_sweeps=3)
+    res = retrigger_layout(Path("/x"), "anyhow", "stable", Path("/x/src"), "",
+                           f.deps(), compile_evidence=ev)
+    assert not res.fired
+    assert not f.committed          # no attempt burned
+
+
+def test_compile_evidence_takes_precedence_over_stale_error_text():
+    # The channel is chosen by the evidence passed, not by whatever text the
+    # caller happened to have: a build failure is classified as DESIGN_CONFLICT
+    # even when the fill-attempt text would have said LAYOUT_EXHAUSTION.
+    f = _Fakes()
+    ev = CompileEvidence(
+        digest="t.rs:1: error[E0277]: ErrorImpl is not Send", lib_clean=True)
+    res = retrigger_layout(Path("/x"), "anyhow", "stable", Path("/x/src"), _ERR,
+                           f.deps(), compile_evidence=ev)
+    assert res.cause == "DESIGN_CONFLICT"
+
+
+def test_compile_evidence_respects_the_attempt_cap():
+    f = _Fakes(attempts={"ErrorImpl": 2})
+    ev = CompileEvidence(
+        digest="t.rs:1: error[E0277]: ErrorImpl is not Send", lib_clean=True)
+    res = retrigger_layout(Path("/x"), "anyhow", "stable", Path("/x/src"), "",
+                           f.deps(), compile_evidence=ev)
+    assert not res.fired
+
+
+def test_reauthor_lands_in_the_live_tree_before_reverting():
+    # `author_layout` splices the SKELETON; the tree cargo builds is seeded from
+    # it once and owned thereafter. A re-author that reaches only the skeleton is
+    # invisible to every later compile — the reverted fns re-fill against the old
+    # layout — so the live splice must happen, and must precede the revert.
+    f = _Fakes()
+    res = retrigger_layout(Path("/x"), "anyhow", "stable", Path("/x/src"), _ERR,
+                           f.deps())
+    assert res.fired and res.succeeded
+    assert f.tree_plans, "the re-authored layout never reached the live tree"
+    plan = f.tree_plans[0]
+    assert "src/error.rs" in plan
+    rep = plan["src/error.rs"][0]
+    assert rep.old == _FROZEN_DEF            # locates the definition on disk now
+    assert rep.new and rep.new != rep.old    # replaced by the authored text
+    assert f.reverted_calls, "revert must still run after the live splice"
+
+
+def test_live_tree_splice_failure_fails_the_retrigger_and_reverts_nothing():
+    # Skeleton-only success is the drift this guards: reverting fns then would
+    # re-fill them against a layout the build never saw.
+    f = _Fakes()
+    f.tree_apply_error = "could not locate a definition in src/error.rs"
+    res = retrigger_layout(Path("/x"), "anyhow", "stable", Path("/x/src"), _ERR,
+                           f.deps())
+    assert res.fired and not res.succeeded
+    assert "live-tree splice failed" in res.reason
+    assert f.reverted_calls == []
+    assert any("could NOT be applied to the live tree" in ln for ln in f.logs)
+
+
+def test_live_tree_keys_come_from_the_live_tree_not_the_skeleton():
+    # The two trees agree only until one is edited alone — which is exactly the
+    # state a failed propagation leaves behind. Deriving the keys per tree is
+    # what lets the next attempt repair it instead of missing forever.
+    f = _Fakes()
+    drifted = "struct ErrorImpl { vtable: u8, extra: u16 }"
+    f.live_files = {"src/error.rs": drifted + "\n"}
+    res = retrigger_layout(Path("/x"), "anyhow", "stable", Path("/x/src"), _ERR,
+                           f.deps())
+    assert res.fired and res.succeeded
+    assert f.tree_plans[0]["src/error.rs"][0].old == drifted
+
+
+def test_unparseable_live_tree_refunds_the_attempt():
+    # A propagation failure is mechanical — the model's layout compiled. A
+    # pipeline-side bug must never be able to exhaust the capped budget.
+    f = _Fakes()
+    f.live_files = {}
+    res = retrigger_layout(Path("/x"), "anyhow", "stable", Path("/x/src"), _ERR,
+                           f.deps())
+    assert res.fired and not res.succeeded
+    assert f.saved_attempts == {"ErrorImpl": 0}
+    assert any("attempt refunded" in ln for ln in f.logs)

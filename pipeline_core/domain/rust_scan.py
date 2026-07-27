@@ -996,6 +996,152 @@ def top_level_item_names(text: str) -> list[str]:
     return out
 
 
+def locate_top_level_item(
+    text: str, keyword: str, name: str,
+) -> tuple[int, int] | None:
+    """`[start, end)` of the depth-0 ``<keyword> <name>`` item, INCLUDING the
+    outer attributes attached to it, or None.
+
+    Exists because an AST extractor's rendered `definition` is NOT the bytes on
+    disk: syn/prettyplease re-wraps long declarations and adds trailing commas
+    inside wrapped argument lists, so matching that text against the file — even
+    whitespace-tolerantly — misses every item wide enough to wrap. Anything that
+    needs to REPLACE a declaration must locate it structurally and slice the
+    file itself.
+
+    Attributes are part of the span on purpose: splicing a replacement that
+    carries its own ``#[repr(C)]`` in below a surviving one leaves the item with
+    two, and a duplicated ``#[cfg]`` silently changes which cluster it compiles
+    in. Comment/string aware, so a brace inside a doc example cannot shift the
+    depth."""
+    mask = code_mask(text)
+    n = len(text)
+    i = 0
+    depth = 0
+    while i < n:
+        if mask[i]:
+            i += 1
+            continue
+        ch = text[i]
+        if ch == "{":
+            depth += 1
+            i += 1
+            continue
+        if ch == "}":
+            depth -= 1
+            i += 1
+            continue
+        if ch not in _IDENT_START:
+            i += 1
+            continue
+        j = i
+        while j < n and not mask[j] and text[j] in _IDENT_CHARS:
+            j += 1
+        if depth != 0 or text[i:j] != keyword:
+            i = j
+            continue
+        k = j
+        while k < n and (mask[k] or text[k].isspace()):
+            k += 1
+        s = k
+        while k < n and not mask[k] and text[k] in _IDENT_CHARS:
+            k += 1
+        if text[s:k] != name:
+            i = k or j
+            continue
+        end = _item_end(text, mask, k)
+        if end is None:
+            return None
+        return _item_start(text, mask, i), end
+    return None
+
+
+def _item_end(text: str, mask: Sequence[bool], after_name: int) -> int | None:
+    """End offset of an item whose name ends at `after_name`: past the `;` of a
+    bodyless declaration, or past the `}` closing its braced body. Whichever
+    delimiter comes first decides, so `struct Foo(u8);` and `type A = B;` end at
+    their semicolon and never swallow the next item."""
+    n = len(text)
+    i = after_name
+    while i < n:
+        if mask[i]:
+            i += 1
+            continue
+        if text[i] == ";":
+            return i + 1
+        if text[i] == "{":
+            depth = 0
+            while i < n:
+                if not mask[i]:
+                    if text[i] == "{":
+                        depth += 1
+                    elif text[i] == "}":
+                        depth -= 1
+                        if depth == 0:
+                            return i + 1
+                i += 1
+            return None
+        i += 1
+    return None
+
+
+_ITEM_QUALIFIERS = frozenset({"pub", "unsafe", "auto", "default"})
+
+
+def _item_start(text: str, mask: Sequence[bool], kw_start: int) -> int:
+    """`kw_start` moved back over everything that declares the SAME item: its
+    visibility (`pub`, `pub(crate)`, `pub(in path)`), other leading qualifiers,
+    and its outer attributes.
+
+    Stopping at the keyword would splice a replacement that carries its own
+    `pub(crate)` in below the surviving one — `pub(crate) pub(crate) struct` —
+    and would leave a duplicate `#[repr]`/`#[cfg]` above it."""
+    p = kw_start
+    while True:
+        q = p - 1
+        while q >= 0 and (mask[q] or text[q].isspace()):
+            q -= 1
+        if q < 0:
+            return p
+        if text[q] == "]":                       # #[attr]
+            r = _open_delim(text, mask, q, "]", "[")
+            if r <= 0 or text[r - 1] != "#":
+                return p
+            p = r - 1
+            continue
+        if text[q] == ")":                       # pub(crate) / pub(in path)
+            r = _open_delim(text, mask, q, ")", "(")
+            if r < 0:
+                return p
+            q = r - 1
+            while q >= 0 and (mask[q] or text[q].isspace()):
+                q -= 1
+        s = q + 1                                # a bare qualifier keyword
+        while q >= 0 and not mask[q] and text[q] in _IDENT_CHARS:
+            q -= 1
+        if q + 1 >= s or text[q + 1:s] not in _ITEM_QUALIFIERS:
+            return p
+        p = q + 1
+
+
+def _open_delim(
+    text: str, mask: Sequence[bool], close_at: int, close: str, open_: str,
+) -> int:
+    """Index of the delimiter opening the pair that closes at `close_at`, or -1."""
+    depth = 0
+    i = close_at
+    while i >= 0:
+        if not mask[i]:
+            if text[i] == close:
+                depth += 1
+            elif text[i] == open_:
+                depth -= 1
+                if depth == 0:
+                    return i
+        i -= 1
+    return -1
+
+
 def redeclared_inner_body(body: str, fn_name: str) -> str | None:
     """The nested fn's own body when `body` is nothing but a re-declaration of
     `fn_name` itself; `None` for every other shape.

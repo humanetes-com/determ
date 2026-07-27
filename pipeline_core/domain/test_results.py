@@ -500,25 +500,43 @@ def failure_bodies_for(output: str, names: set[str]) -> dict[str, str]:
     return bodies
 
 
-def parse_rustc_compile_errors(build_output: str) -> list[tuple[str, str, int]]:
-    """`(message, file, line)` for each rustc `error[...]: <msg>` line immediately
+@dataclass(frozen=True, slots=True)
+class RustcDiagnostic:
+    """One located rustc error. `code` is the bare `E<digits>` (empty for an
+    uncoded `error:`) — kept as its own field because every consumer that has to
+    decide what CLASS of failure this is reads the code, and rendering it away
+    into the message made the digest unusable as evidence."""
+    code: str
+    message: str
+    file: str
+    line: int
+
+    def rendered(self) -> str:
+        head = f"error[{self.code}]: " if self.code else "error: "
+        return f"{self.file}:{self.line}: {head}{self.message}"
+
+
+def parse_rustc_compile_errors(build_output: str) -> list[RustcDiagnostic]:
+    """One `RustcDiagnostic` for each rustc `error[...]: <msg>` line immediately
     followed by a `--> <file>:<line>[:col]` location line (regex-free, R7; mirrors
     `^error(?:\\[E\\d+\\])?:\\s+([^\\n]+)\\n\\s*-->\\s*([^:]+):(\\d+)(?::\\d+)?`,
     MULTILINE). The `error` keyword must start the line — same ANSI sensitivity as
     the old regex; the structured cargo-JSON frontier is the primary path and this
     is only the text fallback."""
-    out: list[tuple[str, str, int]] = []
+    out: list[RustcDiagnostic] = []
     lines = build_output.split("\n")
     for i, line in enumerate(lines):
         if not line.startswith("error"):
             continue
         rest = line[len("error"):]
+        code = ""
         if rest.startswith("[E"):                 # optional [E<digits>]
             j = 2
             while j < len(rest) and rest[j].isdigit():
                 j += 1
             if j == 2 or j >= len(rest) or rest[j] != "]":
                 continue
+            code = rest[1:j]
             rest = rest[j + 1:]
         if not rest.startswith(":") or len(rest) < 2 or not rest[1].isspace():
             continue                               # `:` then `\s+`
@@ -537,7 +555,8 @@ def parse_rustc_compile_errors(build_output: str) -> list[tuple[str, str, int]]:
             digits += 1
         if digits == 0:                            # `(\d+)`
             continue
-        out.append((msg, loc[:colon], int(loc[colon + 1:colon + 1 + digits])))
+        out.append(RustcDiagnostic(
+            code, msg, loc[:colon], int(loc[colon + 1:colon + 1 + digits])))
     return out
 
 
@@ -550,9 +569,8 @@ def compile_gate_reason(cluster_name: str, cargo_output: str) -> str | None:
     errors = parse_rustc_compile_errors(cargo_output)
     if not errors:
         return None
-    msg, file, line = errors[0]
     return (f"cluster '{cluster_name}': lib failed to compile — "
-            f"{len(errors)} error(s), first: {file}:{line}: {msg}")
+            f"{len(errors)} error(s), first: {errors[0].rendered()}")
 
 
 def compile_error_digest(
@@ -567,20 +585,65 @@ def compile_error_digest(
     keep first-seen order: what a reader needs is the distinct set of things
     actually wrong, not its multiplicity across binaries.
 
-    Rendered as `file:line: message`. Empty list when nothing parses (a link
-    error or an ICE prints no `-->` location) — callers must keep their generic
+    Rendered as `file:line: error[CODE]: message` — the code is carried, not
+    dropped: it is what tells a reader (and the layout-retrigger classifier)
+    which CLASS of failure this is. Empty list when nothing parses (a link error
+    or an ICE prints no `-->` location) — callers must keep their generic
     wording rather than claim zero errors.
     """
-    seen: set[tuple[str, str, int]] = set()
+    seen: set[RustcDiagnostic] = set()
     rendered: list[str] = []
-    for msg, file, line in parse_rustc_compile_errors(cargo_output):
-        key = (msg, file, line)
-        if key in seen:
+    for diag in parse_rustc_compile_errors(cargo_output):
+        if diag in seen:
             continue
-        seen.add(key)
+        seen.add(diag)
         if len(rendered) < limit:
-            rendered.append(f"{file}:{line}: {msg}")
+            rendered.append(diag.rendered())
     return len(seen), rendered
+
+
+def compile_failed_targets(cargo_output: str) -> tuple[str, ...]:
+    """Cargo target descriptors from every `could not compile \\`crate\\` (<target>)`
+    line, first-seen order, deduped — e.g. `("lib", 'test "test_autotrait"')`.
+
+    Cargo names the failing TARGET on each compile failure, and that name is the
+    only evidence separating "a body inside the lib is wrong" from "the lib built
+    and what links against it did not". Empty when no such line parses (link
+    error, ICE, unreadable output): callers must read empty as UNKNOWN, never as
+    "nothing failed"."""
+    marker = "could not compile "
+    out: list[str] = []
+    for line in strip_ansi(cargo_output).split("\n"):
+        stripped = line.lstrip()
+        if not stripped.startswith("error"):
+            continue
+        k = stripped.find(marker)
+        if k < 0:
+            continue
+        open_p = stripped.find("(", k)
+        close_p = stripped.find(")", open_p) if open_p >= 0 else -1
+        if open_p < 0 or close_p < 0:
+            continue
+        target = stripped[open_p + 1:close_p].strip()
+        if target and target not in out:
+            out.append(target)
+    return tuple(out)
+
+
+def lib_compile_clean(cargo_output: str) -> bool:
+    """True iff the build failed and NO failing target is the library itself.
+
+    The discriminator between a wrong BODY and a wrong SHAPE: fn bodies live
+    inside the lib, so once the lib compiles, nothing a fill wrote can explain a
+    test binary that did not build. What remains is the API surface those
+    binaries link against — auto-traits, trait bounds, signatures.
+
+    Conservative by construction: no parseable failing target returns False, so
+    a caller gated on this never acts on absence of evidence."""
+    targets = compile_failed_targets(cargo_output)
+    if not targets:
+        return False
+    return not any(t.split()[0] == "lib" for t in targets if t.split())
 
 
 def rustc_error_signatures(cargo_output: str) -> frozenset[str]:

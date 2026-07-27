@@ -241,7 +241,8 @@ def extract_tdd_compile_frontier(deps: AttributionDeps,
         return frontier
     fn_records_by_file: dict[str, list[dict[str, Any]]] = {}
     file_text_cache: dict[str, str] = {}
-    for _msg, file_path, line_no in parse_rustc_compile_errors(build_output):
+    for _diag in parse_rustc_compile_errors(build_output):
+        file_path, line_no = _diag.file, _diag.line
         p_abs = Path(file_path)
         if not p_abs.is_absolute():
             p_abs = (src_dir / file_path).resolve()

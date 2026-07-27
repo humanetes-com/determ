@@ -27,6 +27,7 @@ from pipeline_core.adapters.layout_registry_store import (
     save_registry,
     upsert_registry,
 )
+from pipeline_core.adapters.layout_tree_splice import apply_layout_to_tree
 from pipeline_core.adapters.private_surface_store import load_private_surface
 from pipeline_core.adapters.skeleton_compile import (
     compile_skeleton_check,
@@ -72,6 +73,13 @@ def build_layout_phase_runner(
     )
 
 
+def _read_tree_file(src_dir: Path, rel: str) -> str | None:
+    try:
+        return (Path(src_dir) / rel).read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
 def build_retrigger_layout(
     *,
     ask: Callable[..., str],
@@ -89,7 +97,8 @@ def build_retrigger_layout(
 
     def _run(project_dir: Path, module_name: str, cfg_cluster: str,
               target_src_dir: Path, error_text: str,
-              crash_evidence: Any = None) -> RetriggerResult:
+              crash_evidence: Any = None,
+              compile_evidence: Any = None) -> RetriggerResult:
         clusters = load_baked_clusters(project_dir) or []
         cluster_by_name = {c.name: c for c in clusters}
 
@@ -136,7 +145,10 @@ def build_retrigger_layout(
             symbol_inventory_text=lambda pd, c: "",
             author_deps_for=_author_deps_for,
             enumerate_fns=enumerate_fns,
+            enumerate_types=enumerate_types,
+            read_tree_file=lambda sd, rel: _read_tree_file(sd, rel),
             revert_fns=revert_fns_to_stub,
+            apply_layout_to_tree=apply_layout_to_tree,
             git_commit=git_commit,
             load_attempts=load_retrigger_attempts,
             save_attempts=save_retrigger_attempts,
@@ -144,6 +156,7 @@ def build_retrigger_layout(
         )
         return retrigger_layout(
             project_dir, module_name, cfg_cluster, target_src_dir, error_text,
-            deps, crash_evidence=crash_evidence)
+            deps, crash_evidence=crash_evidence,
+            compile_evidence=compile_evidence)
 
     return _run

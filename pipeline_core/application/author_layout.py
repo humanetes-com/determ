@@ -22,6 +22,7 @@ from pipeline_core.domain.authored_layout import (
     adopt_component,
     authored_locate_keys,
     component_uids,
+    definition_replacements,
     parse_authored_layout,
     shared_definitions_text,
 )
@@ -35,7 +36,6 @@ from pipeline_core.domain.private_surface import (
     SurfaceItemKind,
 )
 from pipeline_core.domain.scaffold_rewrite import (
-    DefReplacement,
     replace_surface_definitions,
 )
 from pipeline_core.domain.type_header import (
@@ -140,23 +140,18 @@ def _splice_component(
     an authored one would not compile. The reason NAMES the failing uid/file:
     a missing block, an unreadable file and a locate miss are three different
     bugs and collapsing them into one message hides which one is happening."""
-    per_file: dict[str, list[DefReplacement]] = {}
-    per_file_uids: dict[str, list[str]] = {}
     for uid, it in zip(component_uids(items), items, strict=True):
+        if it.kind is not SurfaceItemKind.PUB_FIELDS:
+            continue
         block = authored.get(uid)
         if block is None:
             return {}, f"authored blocks missing uid {uid}"
-        if it.kind is SurfaceItemKind.PUB_FIELDS:
-            contract_err = _public_contract_broken(uid, it, block)
-            if contract_err:
-                return {}, contract_err
-        # Fn definitions are enumerated as bare signatures (no vis/`unsafe`
-        # prefix, no stub body) — name the fn so the splice swaps the whole
-        # item instead of nesting the new def inside the old one.
-        fn_name = it.name if it.kind is SurfaceItemKind.FN_SIG else ""
-        per_file.setdefault(it.file, []).append(
-            DefReplacement(it.definition, block.definition, fn_name))
-        per_file_uids.setdefault(it.file, []).append(uid)
+        contract_err = _public_contract_broken(uid, it, block)
+        if contract_err:
+            return {}, contract_err
+    per_file, per_file_uids, plan_err = definition_replacements(items, authored)
+    if plan_err:
+        return {}, plan_err
     edited: dict[str, str] = {}
     for rel, pairs in per_file.items():
         current = deps.read_skeleton(rel)
