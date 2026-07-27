@@ -102,6 +102,69 @@ def test_fn_replacement_ignores_signature_text_in_comment():
                         "fn erase(&self) -> u8 { 0 }\n")
 
 
+def test_fn_replacement_consumes_the_old_outer_attributes():
+    # Observed live on `ErrorImpl::backtrace`: the span started at `pub(crate)`,
+    # so the skeleton's `#[cfg]` survived above a replacement carrying its own.
+    # The two predicates AND together and a copy accumulates per re-splice.
+    skeleton = ("impl ErrorImpl {\n"
+                "    #[cfg(feature = \"std\")]\n"
+                "    #[cold]\n"
+                "    pub(crate) unsafe fn backtrace(this: Ref<Self>) -> &Backtrace "
+                "{ unimplemented!() }\n"
+                "}\n")
+    res = replace_surface_definitions(skeleton, [DefReplacement(
+        "pub(crate) unsafe fn backtrace(this: Ref<Self>) -> &Backtrace",
+        "#[cfg(feature = \"std\")]\n"
+        "pub(crate) unsafe fn backtrace(this: Ref<Self>) -> &Backtrace "
+        "{ &this.deref().backtrace }",
+        fn_name="backtrace")])
+    assert res.replaced
+    assert res.text.count("#[cfg(feature = \"std\")]") == 1
+    assert "#[cold]" not in res.text          # dropped by the new item, not kept
+    assert "unimplemented" not in res.text
+
+
+def test_fn_replacement_is_idempotent_across_repeated_splices():
+    # Each retrigger attempt re-splices the same item; attribute copies must not
+    # accumulate, or the item drifts further from the authored layout per attempt.
+    skeleton = ("#[cfg(any(feature = \"std\", not(anyhow_no_core_error)))]\n"
+                "pub(crate) unsafe fn error_mut(this: Mut<Self>) -> &mut dyn E "
+                "{ unimplemented!() }\n")
+    new = ("#[cfg(any(feature = \"std\", not(anyhow_no_core_error)))]\n"
+           "pub(crate) unsafe fn error_mut(this: Mut<Self>) -> &mut dyn E "
+           "{ &mut *this }\n")
+    text = skeleton
+    for _ in range(3):
+        res = replace_surface_definitions(text, [DefReplacement(
+            "pub(crate) unsafe fn error_mut(this: Mut<Self>) -> &mut dyn E",
+            new.rstrip("\n"), fn_name="error_mut")])
+        assert res.replaced
+        text = res.text
+    assert text.count("#[cfg(any(feature = \"std\", not(anyhow_no_core_error)))]") == 1
+
+
+def test_fn_replacement_attribute_span_leaves_the_public_twin_intact():
+    # The attribute walk must not run past the target into the PRECEDING item's
+    # body: an over-long span would swallow the frozen public API above it.
+    skeleton = ("impl Error {\n"
+                "    #[cfg(feature = \"std\")]\n"
+                "    pub fn backtrace(&self) -> &Backtrace { real() }\n"
+                "}\n"
+                "impl ErrorImpl {\n"
+                "    #[cfg(feature = \"std\")]\n"
+                "    pub(crate) unsafe fn backtrace(this: Ref<Self>) -> &Backtrace "
+                "{ unimplemented!() }\n"
+                "}\n")
+    res = replace_surface_definitions(skeleton, [DefReplacement(
+        "pub(crate) unsafe fn backtrace(this: Ref<Self>) -> &Backtrace",
+        "pub(crate) unsafe fn backtrace(this: Ref<Self>) -> &Backtrace { x() }",
+        fn_name="backtrace")])
+    assert res.replaced
+    assert "pub fn backtrace(&self) -> &Backtrace { real() }" in res.text
+    assert res.text.count("#[cfg(feature = \"std\")]") == 1  # public twin's kept
+    assert "unimplemented" not in res.text
+
+
 def test_fn_replacement_without_enclosing_fn_rejects_batch():
     # A trait-decl signature with no body has no fn item to expand into.
     skeleton = "trait T { fn source(&self) -> Opt; }\n"

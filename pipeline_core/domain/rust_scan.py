@@ -1052,7 +1052,7 @@ def locate_top_level_item(
         end = _item_end(text, mask, k)
         if end is None:
             return None
-        return _item_start(text, mask, i), end
+        return item_start(text, mask, i), end
     return None
 
 
@@ -1105,14 +1105,18 @@ def _item_end(text: str, mask: Sequence[bool], after_name: int) -> int | None:
 _ITEM_QUALIFIERS = frozenset({"pub", "unsafe", "auto", "default"})
 
 
-def _item_start(text: str, mask: Sequence[bool], kw_start: int) -> int:
+def item_start(text: str, mask: Sequence[bool], kw_start: int) -> int:
     """`kw_start` moved back over everything that declares the SAME item: its
     visibility (`pub`, `pub(crate)`, `pub(in path)`), other leading qualifiers,
     and its outer attributes.
 
     Stopping at the keyword would splice a replacement that carries its own
     `pub(crate)` in below the surviving one — `pub(crate) pub(crate) struct` —
-    and would leave a duplicate `#[repr]`/`#[cfg]` above it."""
+    and would leave a duplicate `#[repr]`/`#[cfg]` above it. Duplicated `#[cfg]`
+    is the damaging case: the surviving predicate ANDs with the replacement's,
+    so an item re-authored to widen or drop a gate stays gated by the old one
+    and the tree is neither the old layout nor the new. Copies also accumulate,
+    one per re-splice."""
     p = kw_start
     while True:
         q = p - 1

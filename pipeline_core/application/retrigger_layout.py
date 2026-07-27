@@ -458,13 +458,22 @@ def retrigger_layout(
             project_dir, cfg_cluster,
             ComponentResult(tuple(sorted(names)), authored=True,
                             authored_defs=merged_defs))
-        fn_records = deps.enumerate_fns(filled_crate_dir) or []
-        referencing = find_fns_referencing(fn_records, names)
+        # `reverted` alone cannot be read: revert_fns skips fns already stubbed,
+        # so 0 means "scope empty", "scope all stubs" or "nothing enumerated"
+        # — three different states, one of which is a silent failure. Report the
+        # enumeration and the scope beside it so a zero is attributable.
+        fn_records = deps.enumerate_fns(filled_crate_dir)
+        referencing = find_fns_referencing(fn_records or [], names)
         reverted = deps.revert_fns(referencing, filled_crate_dir)
+        scope = ("live tree could not be parsed (extractor unavailable) — "
+                 "revert scope is empty for that reason, not because no fn "
+                 "references the component" if fn_records is None else
+                 f"{len(referencing)} of {len(fn_records)} enumerated fn(s) "
+                 f"reference it, {reverted} had a body to revert")
         deps.log(f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: re-authored "
                  f"successfully (attempt {attempts[key]}, cause={cause.name}); "
                  f"applied to {written} live file(s); "
-                 f"reverted {reverted} referencing fn(s) to re-fill.")
+                 f"reverted {reverted} referencing fn(s) to re-fill — {scope}.")
         return RetriggerResult(fired=True, succeeded=True, reverted_count=reverted,
                                cause=cause.name)
 

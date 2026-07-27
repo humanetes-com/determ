@@ -15,6 +15,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from pipeline_core.domain.rust_fn_headers import locate_all_fns
+from pipeline_core.domain.rust_lex import code_mask
+from pipeline_core.domain.rust_scan import item_start
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,8 +37,12 @@ class DefReplacement:
     text is the bare signature — no visibility/`unsafe` prefix and no stub
     body — so replacing just the matched span leaves `pub(crate) pub(crate)
     fn …` and an orphaned `{ … }` behind. A non-empty `fn_name` therefore
-    expands the matched signature to the ENTIRE enclosing fn item (qualifiers
-    through closing brace) before splicing `new` over it."""
+    expands the matched signature to the ENTIRE enclosing fn item — outer
+    attributes and qualifiers through closing brace — before splicing `new`
+    over it. `new` is a whole item carrying its own `#[cfg]`/`#[cold]`, so a
+    span that started at the qualifiers would leave the old attributes stacked
+    above it: the two `#[cfg]`s AND together and one more copy accumulates per
+    re-splice."""
 
     old: str
     new: str
@@ -116,9 +122,11 @@ def replace_surface_definitions(
     A replacement carrying `fn_name` swaps the WHOLE enclosing fn item: the
     signature match must fall inside the header of a brace-counted fn of that
     name (comment/string occurrences of the signature text fail this test and
-    are skipped), and the splice span becomes qualifiers-through-closing-brace.
+    are skipped), and the splice span becomes outer-attributes-through-closing-
+    brace — the item as Rust defines it, since `new` brings its own attributes.
     Same-name fns NOT targeted by any pair (a frozen `pub fn` twin) are left
     untouched because their header never contains the enumerated signature."""
+    mask = code_mask(text)
     fn_locs: dict[str, list[tuple[str, int, int, int]]] = {}
     used_fn_spans: set[tuple[int, int]] = set()
     cursor_by_def: dict[str, int] = {}
@@ -137,8 +145,10 @@ def replace_surface_definitions(
             if rep.fn_name not in fn_locs:
                 fn_locs[rep.fn_name] = locate_all_fns(text, rep.fn_name)
             enclosing = next(
-                ((s, be + 1) for _, s, bs, be in fn_locs[rep.fn_name]
-                 if s <= start and end < bs and (s, be + 1) not in used_fn_spans),
+                ((item_start(text, mask, s), be + 1)
+                 for _, s, bs, be in fn_locs[rep.fn_name]
+                 if s <= start and end < bs
+                 and (item_start(text, mask, s), be + 1) not in used_fn_spans),
                 None)
             if enclosing is not None:
                 used_fn_spans.add(enclosing)
