@@ -36,6 +36,7 @@ from pipeline_core.domain.authored_layout import (
     component_uids,
     definition_replacements,
     derive_locate_keys,
+    unlocatable_private_fns,
 )
 from pipeline_core.domain.behaviour import BehaviourSuite
 from pipeline_core.domain.layout_retrigger import (
@@ -214,12 +215,20 @@ def _live_tree_plan(
         return {}, "live tree could not be parsed (extractor unavailable)"
     keys: list[tuple[str, str]] = []
     for comp in narrowed.components:
+        # Derived for the WHOLE component in one call, then consumed in order:
+        # the occurrence stepping that keeps two same-named private fns off one
+        # span lives inside derive_locate_keys and resets per call, so a
+        # per-item call silently binds both to the first match.
+        fn_items = tuple(i for i in comp if i.kind is SurfaceItemKind.FN_SIG)
+        fn_keys = derive_locate_keys(fn_items, live_fns, []) if fn_items else ()
+        if fn_keys is None:
+            missing = unlocatable_private_fns(fn_items, live_fns)
+            return {}, (f"fn {', '.join(missing) or '?'} is not in the live "
+                        "tree as a private item")
+        pending = list(fn_keys)
         for uid, it in zip(component_uids(comp), comp, strict=True):
             if it.kind is SurfaceItemKind.FN_SIG:
-                fn_keys = derive_locate_keys((it,), live_fns, [])
-                if fn_keys is None:
-                    return {}, f"fn {it.name} is not in the live tree"
-                keys.append((uid, fn_keys[0][1]))
+                keys.append((uid, pending.pop(0)[1]))
                 continue
             text = deps.read_tree_file(live_src_dir, it.file)
             live_key = None if text is None else live_definition(text, it)

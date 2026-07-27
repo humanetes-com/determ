@@ -483,6 +483,27 @@ def test_propagation_resolves_surface_paths_against_the_crate_src_dir():
     assert list(f.tree_plans[0]) == ["error.rs"]   # src-relative, not "src/…"
 
 
+def test_revert_scope_leaves_the_oracle_alone():
+    # The suite that has to judge the re-author names the retriggered types more
+    # than any production fn does. Reverting those fns stubs the oracle out, and
+    # the re-fill that follows is handed a test body to author.
+    f = _Fakes(fn_records=[
+        FnRecord(file="error.rs", fn_name="fmt",
+                 sig_text="fn fmt(&self, f: &mut Formatter) -> fmt::Result",
+                 body_text="let x: &ErrorImpl = self.inner.get();"),
+        FnRecord(file="error.gen_tests_1.rs", fn_name="test_repr", is_test=True,
+                 sig_text="fn test_repr()",
+                 body_text="assert_eq!(size_of::<ErrorImpl>(), 8);"),
+        FnRecord(file="error.gen_tests_1.rs", fn_name="fmt",
+                 sig_text="fn fmt(&self, f: &mut Formatter) -> fmt::Result",
+                 body_text="ErrorImpl::describe(f)"),
+    ])
+    res = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, _ERR, f.deps())
+    assert res.fired and res.succeeded
+    assert f.reverted_calls == [[FnLocator("src/error.rs", "fmt")]]
+    assert res.reverted_count == 1
+
+
 def test_live_splice_failure_still_records_the_authored_skeleton():
     # The skeleton now holds the new definitions whether or not they reached
     # the live tree. Leaving the store on the old keys strands the two apart

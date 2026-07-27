@@ -76,11 +76,11 @@ def test_derive_locate_keys_from_scaffold_records():
                            file="src/ptr.rs", definition="stale-sig-b"),
     )
     fns = [
-        FnRecord(file="src/ptr.rs", fn_name="as_ref",
+        FnRecord(file="src/ptr.rs", fn_name="as_ref", is_exactly_pub=False,
                  sig_text="fn as_ref(&self) -> Ref<T>", body_text=""),
-        FnRecord(file="src/ptr.rs", fn_name="as_ref",
+        FnRecord(file="src/ptr.rs", fn_name="as_ref", is_exactly_pub=False,
                  sig_text="fn as_ref(&self) -> &T", body_text=""),
-        FnRecord(file="src/other.rs", fn_name="as_ref",
+        FnRecord(file="src/other.rs", fn_name="as_ref", is_exactly_pub=False,
                  sig_text="fn as_ref(&self) -> u8", body_text=""),
     ]
     types = [TypeRecord(file="src/ptr.rs", kind="struct", name="Own",
@@ -91,6 +91,33 @@ def test_derive_locate_keys_from_scaffold_records():
     assert got["Own"] == "struct Own<T> { ptr: *mut T }"
     assert got["as_ref.1"] == "fn as_ref(&self) -> Ref<T>"
     assert got["as_ref.2"] == "fn as_ref(&self) -> &T"
+
+
+def test_derive_locate_keys_never_binds_a_frozen_public_twin():
+    """A private item whose name is also a PUBLIC method's in the same file must
+    bind the private record, whatever the source order — binding the public one
+    makes the caller splice the layout over the frozen API and delete it."""
+    from pipeline_core.domain.authored_layout import (
+        derive_locate_keys,
+        unlocatable_private_fns,
+    )
+    from pipeline_core.domain.models import FnRecord
+    items = (PrivateSurfaceItem(kind=SurfaceItemKind.FN_SIG, name="backtrace",
+                                file="error.rs", definition="stale"),)
+    public_first = [
+        FnRecord(file="error.rs", fn_name="backtrace", is_exactly_pub=True,
+                 container="impl Error",
+                 sig_text="fn backtrace(&self) -> &Backtrace"),
+        FnRecord(file="error.rs", fn_name="backtrace", is_exactly_pub=False,
+                 container="impl ErrorImpl",
+                 sig_text="fn backtrace(this: Ref<Self>) -> &Backtrace"),
+    ]
+    keys = derive_locate_keys(items, public_first, [])
+    assert keys is not None
+    assert dict(keys)["backtrace"] == "fn backtrace(this: Ref<Self>) -> &Backtrace"
+    # only a public record present → refuse rather than overwrite the API
+    assert derive_locate_keys(items, public_first[:1], []) is None
+    assert unlocatable_private_fns(items, public_first[:1]) == ("backtrace",)
 
 
 def test_derive_locate_keys_none_on_any_miss():

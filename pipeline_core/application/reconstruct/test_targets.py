@@ -10,13 +10,17 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from typing import Any
 
-from pipeline_core.domain.models import FnLocator, Frontier
+from pipeline_core.domain.models import FnLocator, FnRecord, Frontier
+from pipeline_core.domain.oracle_immutability import is_oracle_fn
 
 
 def is_test_fn_record(rec: dict[str, Any]) -> bool:
-    """True when an extractor fn record is a test — it carries a `test` cfg from an
-    enclosing `#[cfg(test)]` mod (or `#[test]`/`#[cfg(test)]` directly)."""
-    return "test" in (rec.get("cfg_predicates") or [])
+    """True when an extractor fn record is oracle content. Delegates to the one
+    domain predicate so this dict-shaped seam and the typed revert scope cannot
+    drift: a `test` cfg alone misses every fn in a `gen_tests` sibling (they
+    carry the cfg on the parent's `mod` decl, not on themselves), which is where
+    the relocated oracle actually lives."""
+    return is_oracle_fn(FnRecord.from_dict(rec))
 
 
 def test_fn_keys(recs: Iterable[dict[str, Any]]) -> set[FnLocator]:

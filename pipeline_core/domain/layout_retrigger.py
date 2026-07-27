@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 
 from pipeline_core.domain.models import FnLocator, FnRecord
+from pipeline_core.domain.oracle_immutability import production_fns
 from pipeline_core.domain.rust_scan import contains_word
 from pipeline_core.domain.starvation import StarvationCause
 
@@ -217,9 +218,14 @@ def find_fns_referencing(
     """Every already-filled fn whose signature OR body names one of `names` —
     the surgical revert scope after a component is re-authored: ONLY fns that
     actually touch the retriggered types get reverted to stubs, everything
-    else in the cluster keeps its existing fill untouched."""
+    else in the cluster keeps its existing fill untouched.
+
+    Oracle fns are excluded before the name test, not after: a test body names
+    the very types a re-author replaces (`Error`, `chain`, `backtrace`), so an
+    unfiltered scope reverts the suite that is supposed to judge the re-author
+    — observed live, 37 reverts that stubbed out whole `gen_tests` files."""
     out: list[FnLocator] = []
-    for f in fn_records:
+    for f in production_fns(fn_records):
         haystack = f.sig_text + " " + f.body_text
         if any(contains_word(haystack, n) for n in names):
             out.append(FnLocator(f.file, f.fn_name))

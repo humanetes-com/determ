@@ -88,6 +88,31 @@ def test_find_fns_referencing_matches_sig_and_body():
     assert got == [FnLocator("src/error.rs", "fmt")]
 
 
+def test_find_fns_referencing_never_reverts_the_oracle():
+    """A test body names the very types a re-author replaces. Reverting one
+    stubs the suite that judges the re-author, so the oracle is excluded before
+    the name test — including the un-attributed fixture items sharing its file,
+    and whatever the (empty) cfg_predicates of a relocated sibling say."""
+    records = [
+        FnRecord(file="src/error.rs", fn_name="fmt",
+                 sig_text="fn fmt(&self, f: &mut Formatter) -> fmt::Result",
+                 body_text="let e: &ErrorImpl<()> = self.inner.by_ref();"),
+        FnRecord(file="src/error.gen_tests_4.rs", fn_name="test_realloc",
+                 is_test=True, sig_text="fn test_realloc()",
+                 body_text="let e = ErrorImpl::new();"),
+        # fixture impl inside the same sibling: no #[test], no cfg, still oracle
+        FnRecord(file="src/error.gen_tests_4.rs", fn_name="fmt",
+                 sig_text="fn fmt(&self, f: &mut Formatter) -> fmt::Result",
+                 body_text="ErrorImpl::describe(f)"),
+        # inline test that never reached a sibling — the cfg still disqualifies
+        FnRecord(file="src/ptr.rs", fn_name="test_inline",
+                 cfg_predicates=("test",), sig_text="fn test_inline()",
+                 body_text="ErrorImpl::probe()"),
+    ]
+    assert find_fns_referencing(records, frozenset({"ErrorImpl"})) == [
+        FnLocator("src/error.rs", "fmt")]
+
+
 def test_find_fns_referencing_empty_when_no_match():
     records = [FnRecord(file="src/chain.rs", fn_name="next",
                         sig_text="fn next(&mut self) -> Option<u8>", body_text="None")]

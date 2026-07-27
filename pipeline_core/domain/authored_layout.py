@@ -196,6 +196,43 @@ _EXTRACTOR_KIND = {
 }
 
 
+def private_fn_matches(
+    fn_records: list[FnRecord], item: PrivateSurfaceItem,
+) -> list[FnRecord]:
+    """The live records a PRIVATE surface fn may bind to: same file and name, and
+    not a strictly-`pub` item. Visibility is the discriminator because a private
+    surface item carries no container, and a public twin of the same name in the
+    same file is routine:
+
+        impl Error     { pub fn backtrace(&self) -> &Backtrace { ... } }        // frozen API
+        impl ErrorImpl { pub(crate) unsafe fn backtrace(this: Ref<Self>) ... }  // the layout item
+
+    Binding on (file, name) alone takes the FIRST — the public one — and the
+    caller then splices the authored private definition over the frozen public
+    method, deleting it from the crate. `Error::chain`/`Error::backtrace` were
+    lost exactly this way, leaving `Error is not an iterator` on every sweep."""
+    return [r for r in fn_records
+            if r.file == item.file and r.fn_name == item.name
+            and not r.is_exactly_pub]
+
+
+def unlocatable_private_fns(
+    items: tuple[PrivateSurfaceItem, ...], fn_records: list[FnRecord],
+) -> tuple[str, ...]:
+    """Names of the FN_SIG `items` with fewer private records than occurrences
+    needed — why `derive_locate_keys` returned None, for the caller's log."""
+    need: dict[tuple[str, str], int] = {}
+    out: list[str] = []
+    for it in items:
+        if it.kind is not SurfaceItemKind.FN_SIG:
+            continue
+        k = (it.file, it.name)
+        need[k] = need.get(k, 0) + 1
+        if need[k] > len(private_fn_matches(fn_records, it)):
+            out.append(it.name)
+    return tuple(out)
+
+
 def derive_locate_keys(
     items: tuple[PrivateSurfaceItem, ...],
     fn_records: list[FnRecord],
@@ -207,15 +244,18 @@ def derive_locate_keys(
     lives in the scaffold and the AST extractor reads it back verbatim). Fn
     keys = the parsed signature; type keys = the parsed definition — the same
     text classes the original bake enumerated, so the splice's whitespace-
-    tolerant matcher locates them identically. Same-named fns in one file
-    bind by source order, matching the splice's occurrence ordering. None
-    when any item has no matching record: the caller must skip, never guess."""
+    tolerant matcher locates them identically. Same-named PRIVATE fns in one
+    file bind by source order, matching the splice's occurrence ordering. None
+    when any item has no matching record: the caller must skip, never guess.
+
+    Pass the whole component in ONE call: the occurrence stepping below is what
+    keeps two same-named private items off the same span, and it resets on
+    every call."""
     keys: list[tuple[str, str]] = []
     fn_taken: dict[tuple[str, str], int] = {}
     for uid, it in zip(component_uids(items), items, strict=True):
         if it.kind is SurfaceItemKind.FN_SIG:
-            matches = [r for r in fn_records
-                       if r.file == it.file and r.fn_name == it.name]
+            matches = private_fn_matches(fn_records, it)
             k = fn_taken.get((it.file, it.name), 0)
             fn_taken[(it.file, it.name)] = k + 1
             if k >= len(matches) or not matches[k].sig_text:
