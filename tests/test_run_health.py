@@ -3,6 +3,7 @@ Each detector encodes an issue class found once by manual deep analysis and
 now detected automatically (user directive 2026-07-10)."""
 from __future__ import annotations
 
+from pipeline_core.domain.cluster_membership_report import ClusterMembershipReport
 from pipeline_core.domain.run_health import (
     HealthKind,
     analyze,
@@ -71,11 +72,46 @@ def test_repeated_heal_alerts():
     assert f and f[0].severity == "alert"
 
 
+def _skip_line(n_skipped: int, total: int) -> str:
+    return ClusterMembershipReport(
+        "stable", total,
+        tuple(f"src/nightly.rs::f{i}" for i in range(n_skipped))).log_line()
+
+
 def test_frozen_counter_info():
-    lines = ["  [phase-c/per-fn] cluster stable: skipped 6 stub(s) not active in this cluster's cfg-set.",
+    lines = [_skip_line(6, 30), "  [phase-c/impl] u: U2 test failed (attempt 1)"]
+    f = [x for x in analyze(lines, []) if x.kind == HealthKind.FROZEN_COUNTER]
+    assert f
+    # the denominator and the identities must reach the operator: "6 gated"
+    # alone reads the same whether 24 stubs are active or none are.
+    assert "6 of 30" in f[0].evidence and "24 active" in f[0].evidence
+    assert "src/nightly.rs::f0" in f[0].evidence
+
+
+def test_membership_filter_emptied_alerts():
+    """The 9.5h bug: the cfg filter dropped every stub on disk and the counter
+    still read as a healthy 'behavioral re-fill' phase."""
+    lines = [_skip_line(28, 28), "  [phase-c/impl] u: U2 test failed (attempt 1)"]
+    f = [x for x in analyze(lines, [])
+         if x.kind == HealthKind.MEMBERSHIP_FILTER_EMPTIED]
+    assert f and f[0].severity == "alert"
+    assert "0 of 28" in f[0].evidence
+    # and it must not simultaneously be labelled a healthy re-fill phase
+    assert HealthKind.FROZEN_COUNTER not in _kinds(analyze(lines, []))
+
+
+def test_partial_skip_is_not_an_emptied_filter():
+    assert HealthKind.MEMBERSHIP_FILTER_EMPTIED not in _kinds(
+        analyze([_skip_line(6, 30), "  [phase-c/impl] u: U2 test failed (a 1)"], []))
+
+
+def test_legacy_bare_count_line_yields_no_reading():
+    """A denominator-less line cannot say whether the filter is correct, so it
+    must produce no finding rather than a guessed one."""
+    lines = ["  [phase-c/per-fn] cluster stable: skipped 6 stub(s) not active "
+             "in this cluster's cfg-set.",
              "  [phase-c/impl] u: U2 test failed (attempt 1)"]
-    f = analyze(lines, [])
-    assert HealthKind.FROZEN_COUNTER in _kinds(f)
+    assert HealthKind.FROZEN_COUNTER not in _kinds(analyze(lines, []))
 
 
 def test_healthy_segment_is_quiet():

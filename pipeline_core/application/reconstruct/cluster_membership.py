@@ -15,22 +15,28 @@ gating cfg attrs through `domain.cfg.cfg_inline_predicates`.
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
 from pipeline_core.application.reconstruct.stub_scan import (
-    scan_unimplemented_functions,
+    scan_unimplemented_with_cfg,
 )
 from pipeline_core.domain import cfg as _cfg
 from pipeline_core.domain.attribution import FailureFrontier
+from pipeline_core.domain.cluster_membership_report import ClusterMembershipReport
 from pipeline_core.domain.models import (
     FnLocator,
     ImplBlock,
     ModRecord,
     TypeRecord,
 )
-from pipeline_core.domain.rust_scan import contains_decl_keyword, named_fn_decl_start
+from pipeline_core.domain.rust_lex import code_mask
+from pipeline_core.domain.rust_scan import (
+    contains_decl_keyword,
+    item_start,
+    named_fn_decl_start,
+)
 from pipeline_core.domain.test_count import file_top_cfg_excluded
 
 
@@ -219,16 +225,16 @@ def scan_unimplemented_records_for_cluster(
     if recs is None or cluster is None:
         return recs
     out: list[dict[str, Any]] = []
-    skipped = 0
+    skipped: list[str] = []
     for r in recs:
         if fn_belongs(target_src_dir, r["file"], r["fn_name"], cluster,
                       fn_cfg_predicates=list(r.get("cfg_predicates") or [])):
             out.append(r)
         else:
-            skipped += 1
+            skipped.append(f"{r['file']}::{r['fn_name']}")
     if skipped:
-        log(f"  [phase-c/per-fn] cluster {cluster.name}: skipped "
-            f"{skipped} stub(s) not active in this cluster's cfg-set.")
+        log(ClusterMembershipReport(
+            cluster.name, len(recs), tuple(skipped)).log_line())
     return out
 
 
@@ -371,19 +377,23 @@ def file_cfg_predicate(
 def fn_cfg_predicates(file_text: str, fn_name: str) -> list[str]:
     """Return all `#[cfg(...)]` predicates that gate `fn_name` in `file_text`.
 
-    FALLBACK ONLY (R7.4a): callers holding extractor records must pass the
-    record's `cfg_predicates` to `fn_belongs_to_cluster` instead — this
-    text-walk's backward window can over-capture a PRECEDING fn's cfg attrs
-    when fns are not blank-line separated, and it only ever finds the FIRST
-    same-named fn in the file.
+    FALLBACK ONLY: callers holding extractor records must pass the record's
+    `cfg_predicates` to `fn_belongs_to_cluster` instead — this walk only ever
+    finds the FIRST same-named fn in the file.
+
+    The window is the fn's own item span (`item_start` walks back over exactly
+    its attributes and qualifiers), NOT back to the nearest blank line. A blank
+    line does not delimit an item: `unsafe fn object_drop<E>(..) { .. }` written
+    directly under a cfg-gated struct field would inherit that field's `#[cfg]`,
+    be judged inactive in the cluster, and never be filled — while rustc
+    compiles it unconditionally.
     """
     m_start = named_fn_decl_start(file_text, fn_name)
     if m_start is None:
         return []
     decl_offset = m_start + (1 if file_text[m_start] == "\n" else 0)
-    ws = file_text.rfind("\n\n", 0, decl_offset)
-    window_start = ws + 2 if ws >= 0 else 0
-    window = file_text[window_start:decl_offset + 1]
+    mask = code_mask(file_text)
+    window = file_text[item_start(file_text, mask, decl_offset):decl_offset + 1]
     return [pred.strip() for pred in _cfg.cfg_inline_predicates(window)]
 
 
@@ -392,7 +402,7 @@ def fn_belongs_to_cluster(
     file_rel: str,
     fn_name: str,
     cluster: Any,
-    fn_cfg_preds: list[str] | None = None,
+    fn_cfg_preds: Sequence[str] | None = None,
     *,
     mod_records: Callable[[Path], list[ModRecord] | None],
 ) -> bool:
@@ -441,18 +451,22 @@ def scan_unimplemented_for_cluster(
     Returns only stubs that belong to `cluster` per static cfg evaluation. When
     `cluster` is None, behaves identically to the unfiltered scan.
     """
-    raw = scan_unimplemented_functions(target_src_dir, enumerate_fns=enumerate_fns)
+    raw = scan_unimplemented_with_cfg(target_src_dir, enumerate_fns=enumerate_fns)
     if cluster is None:
-        return raw
+        return [loc for loc, _ in raw]
     out: list[FnLocator] = []
-    skipped = 0
-    for rel, fn in raw:
-        if fn_belongs_to_cluster(target_src_dir, rel, fn, cluster,
+    skipped: list[str] = []
+    for (rel, fn), fn_cfg in raw:
+        # `fn_cfg` is the extractor's per-fn attribute list; passing it keeps
+        # `fn_belongs_to_cluster` off the text-walk fallback, which attributes a
+        # neighbouring item's `#[cfg]` to this fn and silently drops a fn that
+        # is in fact ungated.
+        if fn_belongs_to_cluster(target_src_dir, rel, fn, cluster, fn_cfg,
                                  mod_records=mod_records):
             out.append(FnLocator(rel, fn))
         else:
-            skipped += 1
+            skipped.append(f"{rel}::{fn}")
     if skipped:
-        log(f"  [phase-c/per-fn] cluster {cluster.name}: skipped "
-            f"{skipped} stub(s) not active in this cluster's cfg-set.")
+        log(ClusterMembershipReport(
+            cluster.name, len(raw), tuple(skipped)).log_line())
     return out

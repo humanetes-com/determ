@@ -14,6 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
+from pipeline_core.domain.cluster_membership_report import ClusterMembershipReport
 from pipeline_core.domain.model_notes import is_bogus_regression_note
 
 __all__ = [
@@ -40,6 +41,7 @@ class HealthKind(StrEnum):
     CAPPED_RETRY_FUTILITY = "capped_retry_futility"  # budgeted mechanism failing in an attempt-invariant way
     CRASH_UNLOCALIZED = "crash_unlocalized"      # tests vanished but no crash site was produced
     CLUSTER_COMPILE_BROKEN = "cluster_compile_broken"  # test binaries never built — no fill route can fix it
+    MEMBERSHIP_FILTER_EMPTIED = "membership_filter_emptied"  # cfg filter dropped 100% of the stubs on disk
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +74,13 @@ def _int_after(text: str, marker: str) -> int | None:
         else:
             break
     return int(digits) if digits else None
+
+
+def _names(items: tuple[str, ...], cap: int = 6) -> str:
+    """Render identities, not just a count — a bare number cannot distinguish a
+    correct filter from a broken one. Capped so one finding stays one line."""
+    head = ", ".join(items[:cap])
+    return head if len(items) <= cap else f"{head}, +{len(items) - cap} more"
 
 
 def parse_iter_readings(lines: list[str]) -> list[IterReading]:
@@ -229,17 +238,36 @@ def analyze(
         ))
 
     # -- 5. frozen stub counter / phase -------------------------------------
-    cfg_skipped = None
+    membership = None
     for ln in reversed(segment_lines):
-        if "stub(s) not active in this cluster's cfg-set" in ln:
-            cfg_skipped = _int_after(ln, "skipped ")
+        membership = ClusterMembershipReport.parse(ln)
+        if membership is not None:
             break
+    # A filter that drops its whole input is a contradiction, not a phase: the
+    # stubs on disk and the cluster come from the same bake, so "nothing here
+    # belongs to this cluster" means the filter is wrong, not the tree. Ranked
+    # above the frozen counter because the counter reads healthy while it holds.
+    if membership is not None and membership.emptied:
+        findings.append(HealthFinding(
+            HealthKind.MEMBERSHIP_FILTER_EMPTIED, "alert", "cluster cfg filter",
+            f"cluster {membership.cluster_name}: 0 of {membership.total} stub(s) "
+            f"survived the cfg-set — dropped: {_names(membership.skipped)}",
+            "no fill route can receive work; every 'behavioral re-fill' reading "
+            "below this is about an empty frontier. Compare the filter's verdict "
+            "to the extractor's own per-fn cfg list (tools/probe_stub_frontier.py) "
+            "before interpreting any trend number",
+        ))
     behavioral = sum(1 for ln in segment_lines if "U2 test failed" in ln)
-    if cfg_skipped and behavioral:
+    # Suppressed while the filter is emptied: "the counter is at its ceiling,
+    # judge progress by pass=" is the wrong advice when the frontier is empty
+    # for a bug — it is the exact reading that made 9.5h look like a phase.
+    if (membership is not None and membership.skipped and behavioral
+            and not membership.emptied):
         findings.append(HealthFinding(
             HealthKind.FROZEN_COUNTER, "info", "stub-fill counter",
-            f"{cfg_skipped} remaining stub(s) are cfg-gated to other clusters; "
-            "run is in behavioral re-fill",
+            f"{len(membership.skipped)} of {membership.total} stub(s) are "
+            f"cfg-gated to other clusters ({membership.kept} active); run is in "
+            f"behavioral re-fill. Gated: {_names(membership.skipped)}",
             "the N/121-style progress counter is at its ceiling for this "
             "cluster and will NOT move — judge progress by pass=, not fills",
         ))

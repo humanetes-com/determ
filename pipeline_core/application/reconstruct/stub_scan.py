@@ -19,6 +19,39 @@ from pipeline_core.domain.models import FnLocator
 from pipeline_core.domain.rust_fn_headers import fn_headers
 
 
+def scan_unimplemented_with_cfg(
+    src_dir: Path,
+    *,
+    enumerate_fns: Callable[[Path], list[dict[str, Any]] | None],
+) -> list[tuple[FnLocator, tuple[str, ...] | None]]:
+    """Same stubs as :func:`scan_unimplemented_functions`, each paired with the
+    cfg predicates the AST extractor attributes to THAT fn.
+
+    ``None`` means "no authoritative list" (extractor unavailable) and is the
+    only case where a caller may fall back to reading predicates out of the
+    surrounding source text. An empty tuple means the extractor positively
+    determined the fn is ungated — very different from ``None``, and the
+    distinction is why this returns an optional rather than ``()`` for both.
+
+    Exists because reconstructing a fn's cfg gates from source text cannot be
+    done reliably: attributes are not delimited from the preceding item by
+    anything a text walk can see, so a fn sitting directly below a cfg-gated
+    struct field or sibling inherits that gate and is then judged inactive in
+    the cluster and never filled. The extractor already knows the true owner of
+    every attribute; this keeps that knowledge instead of re-deriving it.
+    """
+    recs = enumerate_fns(src_dir)
+    if recs is None:
+        return [(loc, None) for loc in
+                scan_unimplemented_functions(src_dir, enumerate_fns=lambda _d: None)]
+    return [(FnLocator(r["file"], r["fn_name"]),
+             tuple(str(c) for c in (r.get("cfg_predicates") or ())))
+            for r in recs
+            if r.get("has_unimplemented_body")
+            or is_unimplemented_body(str(r.get("body_text", "")),
+                                     str(r.get("fn_name", "")))]
+
+
 def scan_unimplemented_functions(
     src_dir: Path,
     *,

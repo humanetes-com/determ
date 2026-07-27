@@ -28,6 +28,7 @@ from pipeline_core.application.reconstruct import impl_blocks as _blocks  # noqa
 from pipeline_core.application.reconstruct.stub_scan import (  # noqa: E402
     scan_unimplemented_functions,
 )
+from pipeline_core.domain import cfg as _cfg  # noqa: E402
 
 
 class _Cluster:
@@ -80,12 +81,27 @@ def main() -> int:
 
     raw = scan_unimplemented_functions(src, enumerate_fns=enumerate_fns)
     print(f"tree={src}  cluster={cluster.name}  scan_stubs={len(raw)}")
+    print(f"cfg_true={cluster.cfg_true}  cfg_false={cluster.cfg_false}")
+    cfg_set = _cfg.CfgSet.of(set(cluster.cfg_true), set(cluster.cfg_false))
     kept = 0
     for loc in raw:
         ok = _m.fn_belongs_to_cluster(src, loc.file, loc.fn_name, cluster,
                                       mod_records=enumerate_mods)
         kept += ok
-        print(f"  {'KEEP' if ok else 'SKIP'}  {loc.file}::{loc.fn_name}")
+        # Re-derive the predicates the verdict came from: a bare KEEP/SKIP
+        # cannot distinguish "the fn's own cfg excluded it" from "the backward
+        # text-walk captured a PRECEDING item's cfg", which is the failure this
+        # probe exists to catch.
+        file_pred = _m.file_cfg_predicate(src, loc.file, mod_records=enumerate_mods)
+        try:
+            text = (src / loc.file).read_text(encoding="utf-8")
+        except OSError:
+            text = ""
+        fn_preds = _m.fn_cfg_predicates(text, loc.fn_name) if text else []
+        why = [(p, cfg_set.evaluate(p))
+               for p in ([file_pred] if file_pred else []) + fn_preds]
+        detail = "  ".join(f"{p!r}->{v}" for p, v in why) or "(ungated)"
+        print(f"  {'KEEP' if ok else 'SKIP'}  {loc.file}::{loc.fn_name}  {detail}")
     print(f"cluster-active stubs = {kept}")
     return 0
 

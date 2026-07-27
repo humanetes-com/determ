@@ -10,6 +10,7 @@ from typing import Any
 
 from pipeline_core.application.reconstruct.stub_scan import (
     scan_unimplemented_functions,
+    scan_unimplemented_with_cfg,
 )
 
 
@@ -42,3 +43,24 @@ def test_scan_keeps_a_same_named_nested_helper_that_does_work() -> None:
     ]
     out = scan_unimplemented_functions(Path("/x"), enumerate_fns=lambda _p: recs)
     assert out == []
+
+
+def test_scan_with_cfg_distinguishes_ungated_from_unknown() -> None:
+    recs: list[dict[str, Any]] = [
+        {"file": "src/error.rs", "fn_name": "object_drop",
+         "has_unimplemented_body": True, "cfg_predicates": []},
+        {"file": "src/error.rs", "fn_name": "provide",
+         "has_unimplemented_body": True,
+         "cfg_predicates": ["error_generic_member_access"]},
+    ]
+    out = scan_unimplemented_with_cfg(Path("/x"), enumerate_fns=lambda _p: recs)
+    assert out == [(("src/error.rs", "object_drop"), ()),
+                   (("src/error.rs", "provide"), ("error_generic_member_access",))]
+
+
+def test_scan_with_cfg_reports_none_when_the_extractor_is_unavailable(tmp_path) -> None:
+    """`None` (no authoritative list) must stay distinguishable from `()`
+    (positively ungated) — only the former licenses a text-walk fallback."""
+    (tmp_path / "lib.rs").write_text("fn stub() { unimplemented!() }\n", encoding="utf-8")
+    out = scan_unimplemented_with_cfg(tmp_path, enumerate_fns=lambda _p: None)
+    assert out == [(("lib.rs", "stub"), None)]

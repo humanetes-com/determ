@@ -3102,10 +3102,11 @@ def test_fn_belongs_to_cluster_record_cfg_path(tmp_path):
     # Record path: gated() carries the std cfg → excluded from no_std.
     assert b(src, "lib.rs", "gated", cluster,
              fn_cfg_predicates=['feature = "std"']) is False
-    # Legacy fallback (no record data): the window over-captures gated()'s
-    # cfg for open_fn → wrongly excluded. Documents the bug the record
-    # path fixes; if the fallback regex is ever fixed, update this line.
-    assert b(src, "lib.rs", "open_fn", cluster) is False
+    # Fallback (no record data) now agrees with the record path: the window is
+    # open_fn's own item, so gated()'s cfg — one line above, no blank line
+    # between them — is no longer attributed to it.
+    assert b(src, "lib.rs", "open_fn", cluster) is True
+    assert b(src, "lib.rs", "gated", cluster) is False
 
 
 def test_per_fn_prompts_carry_crate_idioms():

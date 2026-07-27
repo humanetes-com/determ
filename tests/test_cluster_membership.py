@@ -1,9 +1,12 @@
 """Cluster-membership use-cases — fake-injected collaborators, no monkeypatch."""
+from pathlib import Path
+
 from pipeline_core.application.reconstruct import cluster_membership as cm
 from pipeline_core.application.reconstruct.cleanup_residuals import (
     filter_test_exercised,
 )
 from pipeline_core.domain.attribution import FailureFrontier
+from pipeline_core.domain.cluster_membership_report import ClusterMembershipReport
 from pipeline_core.domain.models import FnLocator, FnRecord, ImplBlock
 
 
@@ -114,3 +117,92 @@ def test_collect_impl_refill_targets_noop_without_frontier():
                       members=(_member("kind", False),), stub_members=())
     assert cm.collect_impl_refill_targets([block], None, None) == [block]
     assert cm.collect_impl_refill_targets([block], set(), {}) == [block]
+
+
+class _Cluster:
+    name = "stable"
+    cfg_true: list[str] = []
+    cfg_false = ["error_generic_member_access"]
+
+
+_VTABLE_NEIGHBOUR = (
+    "pub(crate) struct ErrorVTable {\n"
+    "    object_drop_rest: unsafe fn(Own<ErrorImpl>, TypeId),\n"
+    '    #[cfg(error_generic_member_access)]\n'
+    "    object_backtrace: unsafe fn(Ref<ErrorImpl>) -> Option<&Backtrace>,\n"
+    "}\n"
+    "unsafe fn object_drop<E>(e: Own<ErrorImpl>) { unimplemented!() }\n"
+)
+
+
+def test_fn_cfg_predicates_stops_at_the_item_not_the_blank_line():
+    # `object_drop` is ungated; the only `#[cfg]` above it belongs to the
+    # struct field of the item before it, and no blank line separates them.
+    assert cm.fn_cfg_predicates(_VTABLE_NEIGHBOUR, "object_drop") == []
+    # the genuinely-gated neighbour still reports its own gate
+    gated = "#[cfg(error_generic_member_access)]\nfn provide() { unimplemented!() }\n"
+    assert cm.fn_cfg_predicates(gated, "provide") == ["error_generic_member_access"]
+
+
+def test_ungated_fn_under_a_gated_neighbour_stays_in_the_cluster(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "error.rs").write_text(_VTABLE_NEIGHBOUR, encoding="utf-8")
+    (src / "lib.rs").write_text("mod error;\n", encoding="utf-8")
+    assert cm.fn_belongs_to_cluster(src, "error.rs", "object_drop", _Cluster(),
+                                    mod_records=lambda _d: [])
+
+
+def test_scan_for_cluster_prefers_the_extractors_per_fn_cfg_over_the_text_walk(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "error.rs").write_text(_VTABLE_NEIGHBOUR, encoding="utf-8")
+    logged: list[str] = []
+    out = cm.scan_unimplemented_for_cluster(
+        src, _Cluster(),
+        # extractor says ungated; a text walk over this file must not override it
+        enumerate_fns=lambda _d: [{"file": "error.rs", "fn_name": "object_drop",
+                                   "has_unimplemented_body": True,
+                                   "cfg_predicates": []}],
+        mod_records=lambda _d: [],
+        log=logged.append)
+    assert out == [FnLocator("error.rs", "object_drop")]
+    assert not logged
+
+
+def test_scan_for_cluster_names_the_skipped_stubs(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "error.rs").write_text("fn provide() { unimplemented!() }\n", encoding="utf-8")
+    logged: list[str] = []
+    out = cm.scan_unimplemented_for_cluster(
+        src, _Cluster(),
+        enumerate_fns=lambda _d: [{"file": "error.rs", "fn_name": "provide",
+                                   "has_unimplemented_body": True,
+                                   "cfg_predicates": ["error_generic_member_access"]}],
+        mod_records=lambda _d: [],
+        log=logged.append)
+    assert out == []
+    # the denominator and the identity must both be readable without a probe
+    assert "1 of 1 stub(s)" in logged[0]
+    assert "error.rs::provide" in logged[0]
+
+
+def test_record_route_reports_the_same_denominator_and_names_as_the_tuple_route():
+    """The record form is the route the impl fill actually consumes, and it
+    emitted a bare count long after its sibling was corrected — a skip line that
+    cannot be told apart from a filter that dropped everything."""
+    recs = [{"file": "src/error.rs", "fn_name": "provide", "cfg_predicates":
+             ["error_generic_member_access"]},
+            {"file": "src/error.rs", "fn_name": "object_drop", "cfg_predicates": []}]
+    logged: list[str] = []
+    out = cm.scan_unimplemented_records_for_cluster(
+        Path("/x"), _Cluster(),
+        scan_records=lambda _d: recs,
+        fn_belongs=lambda _d, _f, fn, _c, fn_cfg_predicates: not fn_cfg_predicates,
+        log=logged.append)
+    assert [r["fn_name"] for r in out] == ["object_drop"]
+    report = ClusterMembershipReport.parse(logged[0])
+    assert report is not None
+    assert report.total == 2 and report.kept == 1
+    assert report.skipped == ("src/error.rs::provide",)
