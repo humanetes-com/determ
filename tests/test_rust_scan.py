@@ -597,3 +597,56 @@ def test_redeclared_inner_body_distinguishes_no_match_from_nothing_to_recover():
     # does nothing), yet there is no work to splice back.
     assert redeclared_inner_body("fn noop() {}", "noop") == ""
     assert body_is_only_redeclaration("fn noop() {}", "noop") is True
+
+
+from pipeline_core.domain.rust_scan import (  # noqa: E402
+    rust_delimiters_balanced,
+)
+
+
+# --- rust_delimiters_balanced ----------------------------------------------
+# The gate that rejects corrupted LLM output before a gen_tests sibling is
+# committed. Untested until now: every false NEGATIVE lets a broken sibling
+# reach the crate (the whole module then fails to parse), and every false
+# POSITIVE silently discards a good test block.
+def test_balanced_accepts_well_formed_and_empty() -> None:
+    assert rust_delimiters_balanced("")
+    assert rust_delimiters_balanced("fn a() { let v = [1, 2]; }")
+
+
+def test_balanced_rejects_the_common_corruptions() -> None:
+    assert not rust_delimiters_balanced("fn a() { let v = [1, 2]; ")
+    assert not rust_delimiters_balanced("fn a() { })")   # extra closer
+    assert not rust_delimiters_balanced("fn a(] {}")     # crossed pair
+
+
+def test_balanced_ignores_delimiters_inside_string_literals() -> None:
+    assert rust_delimiters_balanced('let s = "unclosed { [ (";')
+    assert rust_delimiters_balanced(r'let s = "esc \" still in { str";')
+
+
+def test_balanced_ignores_delimiters_inside_char_literals() -> None:
+    assert rust_delimiters_balanced("let c = '{';")
+    assert rust_delimiters_balanced(r"let c = '\'';")
+
+
+def test_balanced_ignores_delimiters_inside_comments() -> None:
+    assert rust_delimiters_balanced("fn a() {} // trailing ) } ]")
+    assert rust_delimiters_balanced("/* { [ ( */ fn a() {}")
+    # Rust block comments nest — an inner /* must not end the outer one early.
+    assert rust_delimiters_balanced("/* outer /* inner { */ still */ fn a() {}")
+
+
+def test_balanced_counts_code_after_a_comment_closes() -> None:
+    assert not rust_delimiters_balanced("// note\nfn a() {")
+
+
+def test_balanced_treats_lifetimes_as_carrying_no_delimiter() -> None:
+    """A lifetime is not a char literal: `'a` must not open a literal that
+    swallows the rest of the file (which would report every later brace lost)."""
+    assert rust_delimiters_balanced("fn a<'a>(x: &'a str) -> &'a str { x }")
+    assert not rust_delimiters_balanced("fn a<'a>(x: &'a str) -> &'a str {")
+
+
+def test_balanced_handles_a_quote_char_literal() -> None:
+    assert rust_delimiters_balanced(r"""let q = '"'; let b = '{'; fn a() {}""")

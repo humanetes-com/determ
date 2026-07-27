@@ -177,23 +177,6 @@ def is_fn_signature_line(line: str) -> bool:
     return line.startswith("fn", i) and i + 2 < n and line[i + 2].isspace()
 
 
-def _skip_balanced_angles(text: str, i: int) -> int | None:
-    """`text[i]` is ``<``; return the index just past the matching ``>`` (nesting
-    honoured), or None if the angles never balance."""
-    depth = 0
-    n = len(text)
-    while i < n:
-        c = text[i]
-        if c == "<":
-            depth += 1
-        elif c == ">":
-            depth -= 1
-            if depth == 0:
-                return i + 1
-        i += 1
-    return None
-
-
 def impl_self_type(container: str) -> str | None:
     """Self/target type name of an impl, generics stripped, or ``None``.
 

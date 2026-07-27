@@ -123,3 +123,23 @@ def test_pub_fields_item_states_its_contract_and_leaks_no_layout():
 
 def test_pub_fields_rule_absent_when_no_such_item_is_listed():
     assert "PUBLIC STRUCTS ON THE LIST" not in _prompt()
+
+
+def test_prompt_states_the_autotrait_obligation():
+    """A private field type silently strips Send/Sync from the PUBLIC type that
+    holds it; the break then surfaces as a test-binary compile error far from
+    the layout that caused it, so the obligation must be stated where the
+    layout is chosen."""
+    p = _prompt()
+    assert "AUTO-TRAITS ARE PART OF THE FROZEN PUBLIC API" in p
+    assert "cannot be sent between threads safely" in p
+    # Concrete WRONG->RIGHT, not abstract advice: both escape hatches shown.
+    assert "unsafe impl Send for Handle {}" in p
+    assert "pub struct Handle { inner: Box<Repr> }" in p
+
+
+def test_autotrait_rule_uses_placeholder_names_only():
+    """Guidance must never leak crate-specific naming into the model's prompt."""
+    from pipeline_core.prompts.layout_authoring import _AUTOTRAIT_RULE
+    for leaked in ("anyhow", "ErrorImpl", "Own<"):
+        assert leaked not in _AUTOTRAIT_RULE

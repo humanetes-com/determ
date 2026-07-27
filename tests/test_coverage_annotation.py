@@ -182,3 +182,40 @@ def test_filter_cfg_excluded_lines_excluded_feature() -> None:
 def test_filter_cfg_excluded_lines_empty_excluded() -> None:
     result = filter_cfg_excluded_lines(_CFG_SOURCE, {5}, excluded_cfgs=[])
     assert result == set()
+
+
+# --- inject_allow_before_mod ----------------------------------------------
+from pipeline_core.domain.coverage_annotation import (  # noqa: E402
+    inject_allow_before_mod,
+)
+
+
+def test_inject_allow_lands_above_the_mod_opener() -> None:
+    block = "#[cfg(test)]\nmod gen_tests_1 {\n    fn a() {}\n}\n"
+    out = inject_allow_before_mod(block, "#[allow(unused)]", gen_only=True)
+    assert out.index("#[allow(unused)]") < out.index("mod gen_tests_1")
+
+
+def test_inject_allow_is_idempotent() -> None:
+    """Re-running the pass must not stack duplicate attributes on the mod."""
+    block = "mod gen_tests_1 {\n}\n"
+    once = inject_allow_before_mod(block, "#[allow(unused)]", gen_only=True)
+    assert inject_allow_before_mod(once, "#[allow(unused)]", gen_only=True) == once
+
+
+def test_inject_allow_leaves_block_untouched_when_no_opener() -> None:
+    block = "fn not_a_mod() {}\n"
+    assert inject_allow_before_mod(block, "#[allow(unused)]", gen_only=True) == block
+
+
+def test_partition_uncovered_returns_single_unit_unsplit() -> None:
+    """One function body cannot be split across groups — the caller expects the
+    whole set back, not an empty partition."""
+    src = "fn a() {\n    let x = 1;\n    let y = 2;\n}\n"
+    assert partition_uncovered_lines(src, {2, 3}, 3) == [{2, 3}]
+
+
+def test_extract_uncovered_functions_falls_back_with_nothing_uncovered() -> None:
+    src = "fn a() {\n    let x = 1;\n}\n"
+    assert (extract_uncovered_functions(src, set())
+            == focused_annotation(src, set()))

@@ -39,6 +39,7 @@ class HealthKind(StrEnum):
     INVENTORY_OVERCOUNT = "inventory_overcount"  # static oracle permanently too big — cluster can never complete
     CAPPED_RETRY_FUTILITY = "capped_retry_futility"  # budgeted mechanism failing in an attempt-invariant way
     CRASH_UNLOCALIZED = "crash_unlocalized"      # tests vanished but no crash site was produced
+    CLUSTER_COMPILE_BROKEN = "cluster_compile_broken"  # test binaries never built — no fill route can fix it
 
 
 @dataclass(frozen=True, slots=True)
@@ -337,6 +338,39 @@ def analyze(
             "running or cannot reproduce — check gdb availability, the ASAN "
             "nightly build, and the [phase-c/crash] wiring before trusting "
             "any revert/exhaustion verdicts",
+        ))
+
+    # -- 7c-bis. cluster build broken --------------------------------------
+    # A sweep whose test binaries never COMPILED is categorically different
+    # from a failing one: no fill route can repair it. The per-fn route
+    # compiles the lib plus its own unit and passes, so it keeps filling
+    # bodies at full GPU cost while every test binary stays unbuildable; the
+    # crash retrigger deliberately treats such a sweep as neutral (its
+    # vanished names are not crash evidence), so it neither advances nor
+    # resets. Net effect with no detector: the run reads as an ordinary
+    # plateau — flat pass, rising stall — and burns until the stall budget
+    # runs out. Recurrence across >=2 iters separates a real structural break
+    # from one transient mid-batch red tree.
+    _cb: set[int] = set()
+    for ln in segment_lines:
+        if "ORACLE SHRUNK" in ln and "compile failed — no test binaries ran" in ln:
+            it = _int_after(ln, "iter ")
+            if it is not None:
+                _cb.add(it)
+    if len(_cb) >= 2:
+        _digest = next(
+            (ln.split("distinct rustc error(s): ", 1)[1].strip()
+             for ln in reversed(segment_lines)
+             if "distinct rustc error(s): " in ln), "")
+        findings.append(HealthFinding(
+            HealthKind.CLUSTER_COMPILE_BROKEN, "alert", "tdd driver",
+            f"cluster test binaries failed to compile on iter(s) "
+            f"{','.join(str(i) for i in sorted(_cb))}"
+            + (f" — {_digest}" if _digest else ""),
+            "no fill route can fix a build that never links: read the rustc "
+            "digest on the ORACLE SHRUNK line, decide whether the frozen "
+            "scaffold or a spliced body is at fault, and stop the run rather "
+            "than paying for fills whose tests can never report",
         ))
 
     # -- 7d. static inventory over-count -----------------------------------

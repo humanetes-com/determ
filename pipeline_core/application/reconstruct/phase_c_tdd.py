@@ -48,6 +48,7 @@ from pipeline_core.domain.refine import Attempt, LoopState
 from pipeline_core.domain.test_command import ensure_serial_harness
 from pipeline_core.domain.test_report import parse_test_output
 from pipeline_core.domain.test_results import (
+    compile_error_digest,
     parse_binary_results,
     parse_failed_tests,
     parse_test_counts,
@@ -334,13 +335,27 @@ def run_phase_c_tdd(
             # consumers (crash localizer expectation, layout-retrigger streak)
             # must not read them as crash evidence.
             _compile_broke = "could not compile" in (output_ or "")
+            _err_total, _err_digest = (
+                compile_error_digest(output_ or "") if _compile_broke else (0, []))
             _why = []
             if oracle.vanished:
-                _why.append(
-                    f"{len(oracle.vanished)} named test(s) reported no verdict "
-                    + ("(cluster compile failed — no test binaries ran): "
-                       if _compile_broke else "(binary crashed): ")
-                    + f"{sorted(oracle.vanished)[:20]}")
+                # On a compile break every expected name vanishes for ONE
+                # reason, so listing the names says nothing and the rustc
+                # diagnostics say everything — print those instead. Dumping 100
+                # test names while discarding the errors made a 2h burn on a
+                # crate whose test binaries could not build read exactly like a
+                # hard fill problem.
+                if _compile_broke:
+                    _why.append(
+                        f"{len(oracle.vanished)} named test(s) reported no "
+                        "verdict (cluster compile failed — no test binaries "
+                        f"ran); {_err_total} distinct rustc error(s)"
+                        + (": " + " | ".join(_err_digest) if _err_digest
+                           else " — none carried a parseable location"))
+                else:
+                    _why.append(
+                        f"{len(oracle.vanished)} named test(s) reported no "
+                        f"verdict (binary crashed): {sorted(oracle.vanished)[:20]}")
             if oracle.unnamed_shortfall:
                 _why.append(
                     f"{oracle.unnamed_shortfall} unnamed test(s) short of the "
@@ -361,6 +376,11 @@ def run_phase_c_tdd(
                 # different remedies (hunt a stack vs. fix enumeration), so
                 # the cause is carried, never left to be inferred.
                 "unnamed_shortfall": oracle.unnamed_shortfall,
+                # Diagnostics travel WITH the event: a compile-broken sweep is
+                # only actionable if the reader can see what failed to build
+                # without re-running cargo by hand against the right tree.
+                "compile_errors": _err_total,
+                "compile_digest": _err_digest,
                 "cause": "+".join(
                     ((["compile_fail"] if _compile_broke else ["crash"])
                      if oracle.vanished else [])

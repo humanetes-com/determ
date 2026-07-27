@@ -686,3 +686,30 @@ def test_extract_fn_bodies_unwraps_full_definition_wrapper() -> None:
         '<FN name="len" block="impl X">'
         "fn helper() -> usize { 1 }\nhelper()</FN>")
     assert keep["body"] == "fn helper() -> usize { 1 }\nhelper()"
+
+
+def test_compile_error_digest_dedups_per_binary_repeats() -> None:
+    """A cluster-wide break prints the SAME lib error under every test binary;
+    the digest must report the distinct set, not the multiplicity."""
+    same = ("error[E0277]: `NonNull<ErrorImpl>` cannot be sent between threads\n"
+            " --> src/error.rs:12:9\n")
+    total, rendered = test_results.compile_error_digest(same * 5)
+    assert total == 1
+    assert rendered == [
+        "src/error.rs:12: `NonNull<ErrorImpl>` cannot be sent between threads"]
+
+
+def test_compile_error_digest_keeps_first_seen_order_and_caps() -> None:
+    out = "".join(
+        f"error[E0277]: msg{i}\n --> src/f{i}.rs:{i}:1\n" for i in range(1, 6))
+    total, rendered = test_results.compile_error_digest(out, limit=2)
+    assert total == 5                       # count is of DISTINCT errors, not of shown ones
+    assert rendered == ["src/f1.rs:1: msg1", "src/f2.rs:2: msg2"]
+
+
+def test_compile_error_digest_empty_when_no_location() -> None:
+    """A link error / ICE prints no `-->`; callers must not read (0, []) as
+    'the build was fine' — they keep their generic wording."""
+    assert test_results.compile_error_digest(
+        "error: linking with `cc` failed\nerror: could not compile `anyhow`\n"
+    ) == (0, [])

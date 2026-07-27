@@ -130,3 +130,51 @@ def test_brace_in_a_doc_example_does_not_shift_depth() -> None:
             "pub fn f() {}\n#[cfg(test)]\nmod tests { #[test] fn a() {} }\n")
     (block,) = find_inline_test_mods(text)
     assert block.relocatable
+
+
+# --- visibility prefixes ---------------------------------------------------
+# The span must swallow the item's visibility keyword. Leaving `pub` or
+# `pub(crate)` stranded in front of the removed `mod` produces `pub #[cfg(test)]
+# #[path…] mod tests;` — the attribute lands between the visibility and the
+# item, which does not parse.
+def test_pub_test_mod_span_includes_the_visibility() -> None:
+    src = "#[cfg(test)]\npub mod tests {\n    fn a() {}\n}\n"
+    (block,) = find_inline_test_mods(src)
+    assert block.relocatable
+    assert src[block.start:block.end].startswith("#[cfg(test)]")
+    assert "pub mod tests" in src[block.start:block.end]
+    assert splice_out_inline_test_mod(src, block, "REPLACED").strip() == "REPLACED"
+
+
+def test_pub_crate_test_mod_span_includes_the_restricted_visibility() -> None:
+    src = "#[cfg(test)]\npub(crate) mod tests {\n    fn a() {}\n}\n"
+    (block,) = find_inline_test_mods(src)
+    assert "pub(crate) mod tests" in src[block.start:block.end]
+    assert splice_out_inline_test_mod(src, block, "X").strip() == "X"
+
+
+def test_pub_in_path_test_mod_span_includes_the_whole_restriction() -> None:
+    src = "#[cfg(test)]\npub(in crate::a) mod tests {\n    fn a() {}\n}\n"
+    (block,) = find_inline_test_mods(src)
+    assert "pub(in crate::a) mod tests" in src[block.start:block.end]
+
+
+def test_inner_attribute_stops_the_attribute_walk_back() -> None:
+    """`#![…]` is the FILE's attribute, not the mod's — the span must not
+    swallow it, or relocating the tests would move a crate-level attribute."""
+    src = ("#![allow(dead_code)]\n"
+           "#[cfg(test)]\nmod tests {\n    fn a() {}\n}\n")
+    (block,) = find_inline_test_mods(src)
+    assert src[block.start:].startswith("#[cfg(test)]")
+    assert "#![allow(dead_code)]" not in src[block.start:block.end]
+
+
+def test_unbalanced_braces_locate_nothing() -> None:
+    """A file that does not parse must yield no block rather than a span that
+    runs to EOF and deletes the rest of the file on splice."""
+    assert find_inline_test_mods("#[cfg(test)]\nmod tests {\n  fn a() {}\n") == ()
+
+
+def test_bare_test_mod_without_any_cfg_is_not_relocated() -> None:
+    # No cfg gate at all: not a conditionally-compiled test mod.
+    assert find_inline_test_mods("mod tests {\n    fn a() {}\n}\n") == ()

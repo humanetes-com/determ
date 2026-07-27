@@ -70,6 +70,37 @@ _RULES = (
 )
 
 
+# A public type's auto-traits are part of its API even though nothing in the
+# frozen surface spells them out: `Send`/`Sync` are inferred from the FIELDS,
+# so a private layout choice silently removes them and the break surfaces only
+# when a test binary fails to compile — far from the layout that caused it.
+# Concrete examples, not "keep autotraits in mind": the model acts on examples.
+_AUTOTRAIT_RULE = (
+    "AUTO-TRAITS ARE PART OF THE FROZEN PUBLIC API:\n"
+    "`Send`/`Sync` are auto-derived from a struct's FIELDS. A private field\n"
+    "type that is not `Send`/`Sync` silently takes those traits away from the\n"
+    "PUBLIC type that holds it — the compiler accepts your layout and the\n"
+    "failure appears later as an unrelated-looking test-binary error\n"
+    "(`... cannot be sent between threads safely`). If a public type is used\n"
+    "across threads anywhere in the tests, your layout must keep it\n"
+    "`Send`/`Sync` — either pick a field type that already carries them, or\n"
+    "add the `unsafe impl` yourself.\n"
+    "WRONG (raw pointer field — `Handle` is no longer Send/Sync):\n"
+    "pub struct Handle { inner: core::ptr::NonNull<Repr> }\n"
+    "RIGHT (wrapper carries the guarantee explicitly):\n"
+    "pub struct Handle { inner: core::ptr::NonNull<Repr> }\n"
+    "unsafe impl Send for Handle {}\n"
+    "unsafe impl Sync for Handle {}\n"
+    "RIGHT (a field type that is already Send + Sync):\n"
+    "pub struct Handle { inner: Box<Repr> }\n"
+    "\n"
+    "WRONG (`Rc`/`Cell` are never Sync — `Registry` loses Sync):\n"
+    "pub struct Registry { slots: alloc::rc::Rc<core::cell::RefCell<Slots>> }\n"
+    "RIGHT:\n"
+    "pub struct Registry { slots: alloc::sync::Arc<std::sync::Mutex<Slots>> }\n"
+)
+
+
 # Only emitted when the chunk actually contains a PUB_FIELDS item — a rule
 # about items that are not on the list reads as a contradiction of the one
 # above it ("the PUBLIC items are frozen").
@@ -215,6 +246,7 @@ def build_layout_authoring_prompt(
         extra_guidance or None,
         "" if extra_guidance else None,
         _RULES,
+        _AUTOTRAIT_RULE,
         (_PUB_FIELDS_RULE
          if any(i.kind is SurfaceItemKind.PUB_FIELDS for i in items) else None),
         "",

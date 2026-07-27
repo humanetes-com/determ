@@ -555,6 +555,34 @@ def compile_gate_reason(cluster_name: str, cargo_output: str) -> str | None:
             f"{len(errors)} error(s), first: {file}:{line}: {msg}")
 
 
+def compile_error_digest(
+    cargo_output: str, *, limit: int = 6,
+) -> tuple[int, list[str]]:
+    """`(distinct_error_count, first <=limit rendered diagnostics)` for a build
+    that failed to compile.
+
+    A cluster-wide compile break emits the SAME diagnostic once per test binary
+    (one `anyhow` lib error reappears under test_fmt, test_repr, test_macros, …),
+    so the raw list is mostly duplicates. Dedup on `(message, file, line)` and
+    keep first-seen order: what a reader needs is the distinct set of things
+    actually wrong, not its multiplicity across binaries.
+
+    Rendered as `file:line: message`. Empty list when nothing parses (a link
+    error or an ICE prints no `-->` location) — callers must keep their generic
+    wording rather than claim zero errors.
+    """
+    seen: set[tuple[str, str, int]] = set()
+    rendered: list[str] = []
+    for msg, file, line in parse_rustc_compile_errors(cargo_output):
+        key = (msg, file, line)
+        if key in seen:
+            continue
+        seen.add(key)
+        if len(rendered) < limit:
+            rendered.append(f"{file}:{line}: {msg}")
+    return len(seen), rendered
+
+
 def rustc_error_signatures(cargo_output: str) -> frozenset[str]:
     """Stable rustc error signatures (`error[E<code>]: <message>`, no file/line),
     regex-free (R7). Equivalent to `re.findall(r'error\\[E\\d+\\]: .+', output)`:

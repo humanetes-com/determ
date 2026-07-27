@@ -516,7 +516,22 @@ def rust_delimiters_balanced(text: str) -> bool:
             in_blk_cmt = 1
             i += 2
             continue
-        # char vs lifetime — treat both as opaque; good enough for balance.
+        # `'` is either a char literal or a lifetime. Skipping both left the
+        # in_chr branch dead and counted the brace in `let c = '{';` as a real
+        # opener, so a test using a brace/paren char literal was rejected as
+        # corrupt output. Disambiguate by lookahead: a char literal closes on
+        # `'` right after one char or one escape; anything else is a lifetime
+        # (`'a`), which carries no delimiter and is skipped.
+        if c == "'":
+            if nxt == "\\":
+                in_chr = True
+                i += 1
+                continue
+            if i + 2 < n and text[i + 2] == "'":
+                i += 3          # `'x'` consumed whole
+                continue
+            i += 1              # lifetime
+            continue
         if c in "([{":
             stack.append(c)
         elif c in ")]}":

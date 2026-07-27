@@ -277,3 +277,45 @@ def test_single_failing_test_each_is_not_systemic():
              _u2("src/c.rs::z", 1), _u2("src/d.rs::w", 1)]
     assert not [x for x in analyze(lines, [])
                 if x.kind == HealthKind.SYSTEMIC_SIGNATURE]
+
+
+# --- cluster build broken -------------------------------------------------
+def _shrunk_compile(iter_n: int, digest: str = "") -> str:
+    """An ORACLE SHRUNK line as the TDD driver renders a compile-broken sweep:
+    the vanished NAMES are replaced by the rustc digest, since every expected
+    test vanished for the one build failure."""
+    return (f"  [stable] [phase-c/tdd] iter {iter_n}: ORACLE SHRUNK — counting "
+            "115 as failing. 100 named test(s) reported no verdict (cluster "
+            "compile failed — no test binaries ran); 2 distinct rustc error(s)"
+            + (f": {digest}" if digest else
+               " — none carried a parseable location"))
+
+
+def test_cluster_compile_broken_alerts_on_recurrence():
+    d = "src/error.rs:12: `NonNull<ErrorImpl>` cannot be sent between threads safely"
+    (f,) = [x for x in analyze([_shrunk_compile(1, d), _shrunk_compile(2, d)], [])
+            if x.kind == HealthKind.CLUSTER_COMPILE_BROKEN]
+    assert f.severity == "alert"
+    assert "iter(s) 1,2" in f.evidence
+    # The digest must reach the operator: it is the whole point of the detector.
+    assert "cannot be sent between threads safely" in f.evidence
+
+
+def test_cluster_compile_broken_quiet_on_single_transient():
+    # One red tree mid-batch is normal; only recurrence proves it structural.
+    assert not [x for x in analyze([_shrunk_compile(3)], [])
+                if x.kind == HealthKind.CLUSTER_COMPILE_BROKEN]
+
+
+def test_cluster_compile_broken_survives_unparseable_digest():
+    # A link error / ICE carries no `-->` location — still an alert, no digest.
+    (f,) = [x for x in analyze([_shrunk_compile(1), _shrunk_compile(2)], [])
+            if x.kind == HealthKind.CLUSTER_COMPILE_BROKEN]
+    assert "iter(s) 1,2" in f.evidence
+
+
+def test_compile_broken_is_not_reported_as_a_crash():
+    # Same lines must not also fire the crash detector: nothing ran, so a
+    # silent localizer is correct behaviour, not a broken one.
+    assert not [x for x in analyze([_shrunk_compile(1), _shrunk_compile(2)], [])
+                if x.kind == HealthKind.CRASH_UNLOCALIZED]

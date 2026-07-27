@@ -184,3 +184,33 @@ def test_unwrap_refuses_different_name_or_extra_content():
 def test_unwrap_ignores_plain_and_truncated_bodies():
     assert unwrap_own_fn_definition("self.0.len()", "len") is None
     assert unwrap_own_fn_definition("fn len(&self) -> usize {", "len") is None
+
+
+from pipeline_core.domain.rust_fn_headers import (  # noqa: E402
+    fn_headers as _fn_headers,
+)
+from pipeline_core.domain.rust_fn_headers import (
+    locate_fn as _locate_fn,
+)
+
+
+def test_body_brace_skips_comments_between_header_and_body() -> None:
+    """The body opener is the first CODE `{`. A comment or string sitting
+    between the signature and the body must not be scanned as source, or the
+    located span starts inside non-code and the splice corrupts the file."""
+    src = 'fn a() /* the { here is not the body */ {\n    let s = "{";\n}\n'
+    found = _locate_fn(src, "a")
+    assert found is not None
+    _, _, start, end = found
+    body = src[start:end]
+    assert 'let s = "{"' in body                 # the real body was located
+    assert "not the body" not in body            # not the comment's brace
+
+
+def test_line_anchored_scan_ignores_a_fn_that_is_not_first_on_its_line() -> None:
+    """`line_anchored` means the clause must open its own line; a `fn` appearing
+    mid-line (inside an expression or a doc sentence) is not a definition."""
+    src = "let x = 1; fn shadowed() {}\nfn real() {}\n"
+    anchored = [h.name for h in _fn_headers(src, line_anchored=True)]
+    assert anchored == ["real"]
+    assert "shadowed" in [h.name for h in _fn_headers(src, line_anchored=False)]
