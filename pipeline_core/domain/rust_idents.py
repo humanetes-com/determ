@@ -843,16 +843,103 @@ def _drop_orphan_plus(s: str) -> str:
     return s[:-1] if s.endswith("+") else s
 
 
+def _unescape_layout(s: str) -> str:
+    """Turn LITERAL ``\\n``/``\\r``/``\\t`` two-char escapes into real whitespace.
+
+    A model that renders a multi-line impl header inside a single-line attribute
+    writes the line breaks as backslash-n rather than as newlines. Nothing
+    downstream treats that as space, so the where-clause split (which needs a
+    real ``" where "``) never fires and the clause stays in the key: ``impl<T>
+    Write for Indented<'_, T>\\nwhere\\n    T: Write,`` canonicalised to
+    ``WriteforIndented<,T>\\nwhere\\nT:Write,`` and matched no container, so a
+    correct body was dropped. A backslash cannot appear in a well-formed impl
+    header, so rewriting these is unambiguous."""
+    out: list[str] = []
+    i = 0
+    while i < len(s):
+        if s[i] == "\\" and i + 1 < len(s) and s[i + 1] in "nrt":
+            out.append(" ")
+            i += 2
+            continue
+        out.append(s[i])
+        i += 1
+    return "".join(out)
+
+
+def _strip_outer_attrs(s: str) -> str:
+    """Drop leading outer attributes and comments from an impl header.
+
+    The model is shown the file text, where the impl's ``#[cfg(...)]`` sits on
+    the line directly above ``impl``, so it routinely echoes the attribute as
+    part of the block header. The extractor's container strings carry no
+    attribute, so the two render the same block differently and every body
+    routed to it was dropped (anyhow: ``Debug``/``Display``/``StdError for
+    BoxedError``, 3 correct bodies discarded in one run).
+
+    Dropping the attribute cannot conflate two real containers HERE: two impls
+    differing only by ``cfg`` are alternative spellings of one block, and a
+    cluster activates exactly one cfg-set, so only one is ever live at a time.
+    Bracket depth is tracked through string literals so ``#[doc = "]"]`` does
+    not end the attribute early; Rust block comments nest, so those are counted
+    too."""
+    i = 0
+    n = len(s)
+    while i < n:
+        while i < n and s[i].isspace():
+            i += 1
+        if i >= n:
+            break
+        if s.startswith("#[", i) or s.startswith("#![", i):
+            j = s.index("[", i) + 1
+            depth = 1
+            while j < n and depth:
+                ch = s[j]
+                if ch == '"':
+                    j += 1
+                    while j < n and s[j] != '"':
+                        j += 2 if s[j] == "\\" else 1
+                elif ch == "[":
+                    depth += 1
+                elif ch == "]":
+                    depth -= 1
+                j += 1
+            i = j
+            continue
+        if s.startswith("//", i):
+            nl = s.find("\n", i)
+            i = n if nl < 0 else nl + 1
+            continue
+        if s.startswith("/*", i):
+            j = i + 2
+            depth = 1
+            while j < n and depth:
+                if s.startswith("/*", j):
+                    depth += 1
+                    j += 2
+                    continue
+                if s.startswith("*/", j):
+                    depth -= 1
+                    j += 2
+                    continue
+                j += 1
+            i = j
+            continue
+        break
+    return s[i:]
+
+
 def canon_container(container: str) -> str:
     """Canonical container identity. The extractor's fn records, the impl-block
     manifest, and model-returned ``block`` attributes render the same impl
     differently (token-spaced ``impl Context < T , E > for Result < T , E >``
     vs pretty-printed ``impl<T, E> Context<T, E> for Result<T, E>\\nwhere\\n
     E: ...`` vs the model's single-line ``impl<T, E> Context<T, E> for
-    Result<T, E>``). Reduce all to ``<Trait>for<SelfTy>``: drop a leading
-    impl-generics list, drop the where-clause, drop all whitespace, elide
-    lifetimes. Keys the retrospectives store and the per-impl body routing."""
-    s = " ".join(container.split())
+    Result<T, E>``). Reduce all to ``<Trait>for<SelfTy>``: normalise literal
+    ``\\n`` escapes to real whitespace, drop leading outer attributes/comments,
+    drop a leading impl-generics list, drop the where-clause, drop all
+    whitespace, elide lifetimes. Keys the retrospectives store and the per-impl
+    body routing."""
+    s = " ".join(_strip_outer_attrs(_unescape_layout(container)).split())
     if s.startswith("impl"):
         s = s[4:].lstrip()
         if s.startswith("<"):

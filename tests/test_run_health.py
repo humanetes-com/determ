@@ -355,3 +355,26 @@ def test_compile_broken_is_not_reported_as_a_crash():
     # silent localizer is correct behaviour, not a broken one.
     assert not [x for x in analyze([_shrunk_compile(1), _shrunk_compile(2)], [])
                 if x.kind == HealthKind.CRASH_UNLOCALIZED]
+
+
+def test_routing_drop_fires_and_names_the_rejected_headers() -> None:
+    # A dropped body is a paid-for LLM answer thrown away; it is invisible in
+    # pass/fail because the fn simply stays stubbed.
+    lines = [
+        "  [phase-c/file] src/wrapper.rs: dropped `fmt` — block header does not "
+        "match any impl in this file. raw_block='#[cfg(x)]\\nimpl Debug for "
+        "BoxedError' raw_canon='#[cfg(x)]implDebugforBoxedError'",
+        "  [phase-c/file] src/wrapper.rs: dropped `source` — block header does not "
+        "match any impl in this file. raw_block='#[cfg(x)]\\nimpl StdError for "
+        "BoxedError' raw_canon='#[cfg(x)]implStdErrorforBoxedError'",
+    ]
+    f = [x for x in analyze(lines, []) if x.kind is HealthKind.ROUTING_DROP]
+    assert len(f) == 1
+    assert f[0].severity == "alert"
+    assert "2 returned body(ies)" in f[0].evidence
+    assert "Debug for BoxedError" in f[0].evidence
+
+
+def test_routing_drop_silent_when_nothing_was_dropped() -> None:
+    lines = ["  [phase-c/file] src/wrapper.rs: FILE FILLED 4 fn(s) in one pass."]
+    assert not [x for x in analyze(lines, []) if x.kind is HealthKind.ROUTING_DROP]

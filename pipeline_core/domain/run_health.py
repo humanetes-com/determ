@@ -42,6 +42,7 @@ class HealthKind(StrEnum):
     CRASH_UNLOCALIZED = "crash_unlocalized"      # tests vanished but no crash site was produced
     CLUSTER_COMPILE_BROKEN = "cluster_compile_broken"  # test binaries never built — no fill route can fix it
     MEMBERSHIP_FILTER_EMPTIED = "membership_filter_emptied"  # cfg filter dropped 100% of the stubs on disk
+    ROUTING_DROP = "routing_drop"                # model answered; the body matched no container and was discarded
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,6 +271,28 @@ def analyze(
             f"behavioral re-fill. Gated: {_names(membership.skipped)}",
             "the N/121-style progress counter is at its ceiling for this "
             "cluster and will NOT move — judge progress by pass=, not fills",
+        ))
+
+    # -- 5b. bodies the model returned and routing threw away ----------------
+    # Pure pipeline loss: the LLM call was paid for and answered, then the body
+    # matched no container and was discarded. Invisible in pass/fail — the fn
+    # just stays stubbed and reads as "hard". Names the rejected headers so the
+    # canonicaliser can be compared against the container it should have hit.
+    drops: dict[str, int] = {}
+    for ln in segment_lines:
+        if "does not match any impl in this file" not in ln:
+            continue
+        head = ln.split("raw_block=", 1)[1].split(" raw_canon=", 1)[0].strip() \
+            if "raw_block=" in ln else ln.strip()
+        drops[head] = drops.get(head, 0) + 1
+    if drops:
+        findings.append(HealthFinding(
+            HealthKind.ROUTING_DROP, "alert", "impl body routing",
+            f"{sum(drops.values())} returned body(ies) discarded across "
+            f"{len(drops)} header(s): {_names(tuple(drops))}",
+            "the model answered and the pipeline dropped it — never read this as "
+            "a model failure. Compare canon_container() of the rejected header "
+            "against the containers of that file before touching any prompt",
         ))
 
     # -- 6. repeated pre-pass heal ------------------------------------------

@@ -238,3 +238,54 @@ def test_widened_containers_route_a_body_for_an_unfilled_sibling() -> None:
         target=containers[0], related=containers[1:] + extra)
     assert r.dropped == ()
     assert r.routed[0].container == "impl Deref for Error"
+
+
+_BOXED_CFG = '#[cfg(any(feature = "std", not(anyhow_no_core_error)))]'
+
+
+def test_attribute_prefixed_block_header_routes_to_the_bare_container() -> None:
+    # The model is shown the file text, where the impl's cfg attribute sits on
+    # the line above `impl`, so it echoes the attribute as part of the header.
+    # The extractor's containers carry no attribute; before the strip, all three
+    # of these bodies were dropped and the LLM call wasted.
+    containers = ["impl Debug for BoxedError", "impl Display for BoxedError",
+                  "impl StdError for BoxedError"]
+    parsed = [
+        {"fn_name": "fmt", "block": f"{_BOXED_CFG}\nimpl Debug for BoxedError",
+         "body": "..."},
+        {"fn_name": "fmt", "block": f"{_BOXED_CFG}\nimpl Display for BoxedError",
+         "body": "..."},
+        {"fn_name": "source", "block": f"{_BOXED_CFG}\nimpl StdError for BoxedError",
+         "body": "..."},
+    ]
+    r = route_fn_bodies(parsed, target=containers[0], related=containers[1:])
+    assert r.dropped == ()
+    assert [b.container for b in r.routed] == containers
+
+
+def test_literal_backslash_n_where_clause_is_not_dropped() -> None:
+    # The model rendered the line breaks as two-character `\n` escapes inside a
+    # single-line attribute. Nothing downstream read those as whitespace, so the
+    # where-clause split never fired and the clause stayed in the key.
+    escaped = r"impl<T> Write for Indented<'_, T>\nwhere\n    T: Write,"
+    r = route_fn_bodies(
+        [{"fn_name": "write_str", "block": escaped, "body": "..."}],
+        target="impl Write for Indented < '_ , T >", related=[])
+    assert r.dropped == ()
+    assert r.routed[0].container == "impl Write for Indented < '_ , T >"
+
+
+def test_attribute_strip_survives_brackets_in_strings_and_nested_comments() -> None:
+    # A `]` inside an attribute string must not end the attribute early, and
+    # Rust block comments nest.
+    assert canon_container('#[doc = "]"]\nimpl Foo for Bar') == "FooforBar"
+    assert canon_container("/* a /* b */ c */ impl Foo for Bar") == "FooforBar"
+    assert canon_container("/// docs\nimpl Foo for Bar") == "FooforBar"
+    assert canon_container("#[a]\n#[b]\nimpl Foo for Bar") == "FooforBar"
+
+
+def test_plain_headers_are_unchanged_by_the_strip() -> None:
+    # Regression guard: the normalisation must not perturb headers that never
+    # carried an attribute.
+    assert (canon_container("impl<T, E> Context<T, E> for Result<T, E>\nwhere\n    E: X,")
+            == canon_container("impl Context < T , E > for Result < T , E >"))
