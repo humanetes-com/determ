@@ -215,6 +215,25 @@ def test_gotcha_e0424_self_confusion_fires():
     assert out.count("WRONG") >= 2
 
 
+def test_gotcha_std_type_without_default_fires():
+    # Live (anyhow stable, src/error.rs::construct): three retro rounds spent
+    # cycling Backtrace::default() → disabled() → capture() → force_capture()
+    # on this exact bound. The class is "this std type has no Default at all",
+    # so no other Default-shaped call helps — the gotcha must say so.
+    err = ("error[E0277]: the trait bound `Backtrace: Default` is not satisfied\n"
+           "   --> src/error.rs:296:44\n"
+           "    |\n"
+           "296 |         let backtrace = backtrace.unwrap_or_default();\n"
+           "    |                                   ^^^^^^^^^^^^^^^^^^")
+    out = gotchas_for_error(err)
+    assert "std_type_without_default" in {
+        g["id"] for g in RUST_GOTCHAS if any(t in err for t in g["triggers"])}
+    assert "WRONG" in out and "RIGHT" in out
+    assert out.count("WRONG") >= 2
+    # Names real stable constructors, not another Default-shaped guess.
+    assert "Backtrace::capture()" in out and "Instant::now()" in out
+
+
 def test_gotcha_e0401_self_from_outer_item_fires():
     # Live (anyhow nightly, impl ErrorImpl, run 2749): the model wrote a NESTED
     # `fn provide` that used `Self` in its signature and `Self::error` in its

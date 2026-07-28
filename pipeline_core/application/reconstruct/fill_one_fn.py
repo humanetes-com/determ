@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import os
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from pipeline_core.application.fix_loop import FixOutcome, drive_fix_loop
@@ -43,6 +45,7 @@ from pipeline_core.domain.cfg import filter_cfg_inactive_branches
 from pipeline_core.domain.models import FillResult, FnLocator, FnSite, Stub
 from pipeline_core.domain.reconstruction import SpliceOutcome
 from pipeline_core.domain.refine import (
+    CompilingSalvage,
     FixProgress,
     FloorStall,
     best_progress_fields,
@@ -99,6 +102,56 @@ class FillOneFn:
     tests: TestLinker
     stall: StallPolicy
     caps: FillCaps
+
+    def _salvage_compiling_body(
+        self, ctx: PerFnPassCtx, salvage: CompilingSalvage, file_path: Path,
+        rel_file: str, fn_name: str, container: str, sig_text: str, rec: Stub,
+        revert: Callable[[], bool],
+    ) -> bool:
+        """Restore the fix loop's best COMPILING body instead of leaving the
+        stub. Call with the stub already reverted in, holding the splice lock.
+
+        The stub panics, which aborts the test binary and un-judges every
+        sibling test in it, so a compiling body is what the outer TDD loop wants
+        to iterate on even when this fn's own tests still fail. Kept only if it
+        still compiles here AND reddens nothing that is green with the stub —
+        the baseline is captured now, against the stub, because that is the
+        state the keep is being compared against."""
+        best = salvage.best
+        if best is None:
+            return False
+        _base = self.cargo.test_regression_baseline(
+            ctx.tdd_test_cmd, ctx.target_src_dir, ctx.cluster_env)
+        _sp = self.mut.splice_body_scoped(
+            file_path, fn_name, container, sig_text, best.body,
+            cfg_predicates=rec.cfg_predicates, allow_nonstub=True)
+        if not _sp.ok:
+            self.tel.log(f"  [phase-c/per-fn] salvage splice refused for "
+                         f"{rel_file}::{fn_name}: {_sp.reason} — stub kept.")
+            return False
+        _rc, _ = self.cargo.run(ctx.check_cmd, ctx.target_src_dir, ctx.cluster_env)
+        _regr = (self.cargo.test_regression_gate(
+            ctx.tdd_test_cmd, ctx.target_src_dir, ctx.cluster_env, _base)
+            if _rc == 0 else None)
+        if _rc != 0 or _regr is not None:
+            _why = ("no longer compiles here" if _regr is None
+                    else f"would regress {_regr[0].summary}")
+            self.tel.log(f"  [phase-c/per-fn] {rel_file}::{fn_name}: best "
+                         f"compiling attempt NOT salvaged ({_why}) — "
+                         "reverting to stub.")
+            revert()
+            return False
+        _ctx = f" [{container}]" if container else ""
+        self.tel.log(f"  [phase-c/per-fn] {rel_file}::{fn_name}{_ctx}: fix loop "
+                     f"exhausted — KEEPING best compiling body ({best.metric}); "
+                     "a stub would abort the test binary and un-judge its "
+                     "siblings. Deferred to the outer loop.")
+        self.tel.emit("phase_c.fn.fill.salvaged", data={
+            "cluster": ctx.cluster_name, "pass_n": ctx.pass_n,
+            "file": rel_file, "fn": fn_name, "container": container,
+            "failing_tests": best.metric.failing_tests,
+        })
+        return True
 
     def run(self, idx: int, rec: Stub, *, ctx: PerFnPassCtx) -> FillResult:
         rel_file = rec.file
@@ -265,6 +318,11 @@ class FillOneFn:
         # attempt as 0 errors — and 0 can never beat a prior 0, which parked
         # fns the moment they stopped failing to compile.
         last_metric: FixProgress | None = None
+        # Best COMPILING attempt seen across the loop. `unimplemented!()` is not
+        # a neutral fallback — it panics and aborts the whole test binary, so
+        # reverting a compiling body to it un-judges every sibling test in that
+        # binary. On exhaustion we restore this instead (regression-gated).
+        salvage = CompilingSalvage()
         # debt #46: a behavioral re-fill enters the loop already "in fix mode" —
         # seed the current wrong body + a behavioral instruction so attempt 1 is
         # a corrective fix (build_per_fn_fix_prompt) with the failing test shown,
@@ -675,6 +733,7 @@ class FillOneFn:
             })
             last_body = body
             last_metric = cur_metric
+            salvage.offer(body, cur_metric)
             error_excerpt = self.cargo.focus_errors(cargo_out, rel_file)
             # Revert to snapshot before returning; the model will see
             # the file as unimplemented again but with last_body + errors
@@ -891,20 +950,29 @@ class FillOneFn:
             # phase against concurrent workers.
             with ctx.splice_check_lock:
                 _revert_own_body()
-                annotated_body = make_failed_attempt_body(
-                    attempted_body=last_body or first_failed_body or "",
-                    error_excerpt=error_excerpt or first_error_excerpt or "",
-                    fix_attempts=fix_attempt,
-                )
-                # Container-scoped: annotate THIS fn's body, never a same-named
-                # sibling in another impl (the `from`/`fmt`/`not` collision).
-                _ann = self.mut.splice_body_scoped(
-                    file_path, fn_name, container, sig_text, annotated_body,
-                    cfg_predicates=rec.cfg_predicates)
-                if not _ann.ok:
-                    self.tel.log(f"  [phase-c/per-fn] ANNOTATE FAILED for "
-                                 f"{rel_file}::{fn_name}: {_ann.reason} — "
-                                 "exhausted fn not re-stubbed.")
+                _salvaged = self._salvage_compiling_body(
+                    ctx, salvage, file_path, rel_file, fn_name, container,
+                    sig_text, rec, _revert_own_body)
+                if not _salvaged:
+                    annotated_body = make_failed_attempt_body(
+                        attempted_body=last_body or first_failed_body or "",
+                        error_excerpt=error_excerpt or first_error_excerpt or "",
+                        fix_attempts=fix_attempt,
+                    )
+                    # Container-scoped: annotate THIS fn's body, never a
+                    # same-named sibling in another impl (the `from`/`fmt`/`not`
+                    # collision). The annotated body deliberately ENDS in
+                    # `unimplemented!()` so the crate still compiles and the stub
+                    # scan re-finds it — hence allow_stub_body, without which the
+                    # write is refused `body_is_stub` every single time and the
+                    # failure history never reaches the next pass.
+                    _ann = self.mut.splice_body_scoped(
+                        file_path, fn_name, container, sig_text, annotated_body,
+                        cfg_predicates=rec.cfg_predicates, allow_stub_body=True)
+                    if not _ann.ok:
+                        self.tel.log(f"  [phase-c/per-fn] ANNOTATE FAILED for "
+                                     f"{rel_file}::{fn_name}: {_ann.reason} — "
+                                     "exhausted fn not re-stubbed.")
             exhaust_error = (f"{rel_file}::{fn_name}: fix loop exhausted "
                              f"after {fix_attempt} attempt(s)")
             self.tel.emit("phase_c.fn.fill.fail", duration_ms=int(

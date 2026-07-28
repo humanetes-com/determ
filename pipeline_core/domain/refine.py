@@ -63,6 +63,50 @@ class FixProgress:
         return f"compiles, {self.failing_tests} failing test(s)"
 
 
+@dataclass(frozen=True, slots=True)
+class SalvagedFill:
+    """The best COMPILING body a fix loop produced, and the metric it scored."""
+
+    body: str
+    metric: FixProgress
+
+
+class CompilingSalvage:
+    """Remembers the best compiling attempt of a fix loop so exhaustion can
+    restore it instead of writing the `unimplemented!()` stub back.
+
+    A stub is NOT a neutral zero. It panics at runtime, which aborts the whole
+    test binary, so every sibling test in that binary reports no verdict at all:
+
+        WRONG:  fn compiles, 2 of its own tests red  → exhausted → stub
+                → binary aborts → 68 tests unjudged, score frozen
+        RIGHT:  fn compiles, 2 of its own tests red  → exhausted → body kept
+                → 2 tests red, the other 66 get judged
+
+    A body that compiles is therefore never worse than the stub on this fn's own
+    tests (the stub cannot pass them either) and strictly better on its
+    siblings' — provided it reddens nothing that was green, which the caller
+    still verifies with the regression gate before keeping it.
+    """
+
+    __slots__ = ("_best",)
+
+    def __init__(self) -> None:
+        self._best: SalvagedFill | None = None
+
+    def offer(self, body: str, metric: FixProgress) -> None:
+        """Record an attempt. Red attempts and empty bodies are ignored — only a
+        body that COMPILED is a candidate to keep over the stub."""
+        if not body.strip() or not metric.compiles:
+            return
+        if self._best is None or metric < self._best.metric:
+            self._best = SalvagedFill(body, metric)
+
+    @property
+    def best(self) -> SalvagedFill | None:
+        return self._best
+
+
 BEST_COMPILE_KEY = "best_compile_errors"
 BEST_TESTS_KEY = "best_failing_tests"
 

@@ -845,6 +845,44 @@ RUST_GOTCHAS: list[dict[str, Any]] = [
             "inside another fn's body."
         ),
     },
+    {
+        # Live evidence (anyhow stable, phase-c): three retro rounds burned
+        # cycling `Backtrace::default()` → `disabled()` → `capture()` →
+        # `force_capture()` on `the trait bound `Backtrace: Default` is not
+        # satisfied`. `Default` is not universal — many std types deliberately
+        # omit it because "empty" has no meaning for them, and `#[derive(Default)]`
+        # on a struct holding one fails for the same reason.
+        "id": "std_type_without_default",
+        "summary": "E0277 `the trait bound `T: Default` is not satisfied` on a STD type = that type has no `Default` impl; `T::default()`, `unwrap_or_default()` and `#[derive(Default)]` on a struct containing it are all unavailable. Call the type's own named constructor instead.",
+        "triggers": {"E0277", "Default` is not satisfied",
+                     "the trait `Default` is not implemented",
+                     "doesn't implement `Default`",
+                     "cannot find function `default`"},
+        "detail": (
+            "Reach for the type's OWN constructor, not a `Default` that does not\n"
+            "exist. Guessing the next Default-shaped call (`default()` →\n"
+            "`new()` → `unwrap_or_default()`) never converges — read the\n"
+            "constructors the type actually exposes and pick the one whose\n"
+            "meaning you want.\n"
+            "  WRONG (`std::backtrace::Backtrace` has no `Default`):\n"
+            "    let bt = Backtrace::default();\n"
+            "    let bt = maybe_bt.unwrap_or_default();\n"
+            "  RIGHT (named constructors — pick by MEANING):\n"
+            "    let bt = Backtrace::capture();        // capture if enabled\n"
+            "    let bt = Backtrace::force_capture();  // always capture\n"
+            "    let bt = maybe_bt.unwrap_or_else(Backtrace::disabled);\n"
+            "  WRONG (`std::time::Instant` has no `Default` either):\n"
+            "    #[derive(Default)]\n"
+            "    struct Timer { start: Instant }       // E0277 on the derive\n"
+            "  RIGHT (write the impl and name the constructor):\n"
+            "    impl Default for Timer {\n"
+            "        fn default() -> Self { Timer { start: Instant::now() } }\n"
+            "    }\n"
+            "Rule: `Default` means 'a meaningful empty value exists'. When the\n"
+            "compiler says a std type lacks it, that is a design fact about the\n"
+            "type — no other `Default`-shaped call will work either."
+        ),
+    },
 ]
 
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 from pipeline_core.application.refine_loop import run_refine_loop
 from pipeline_core.domain.refine import (
     Attempt,
+    CompilingSalvage,
     FixProgress,
     FloorStall,
     LoopState,
@@ -264,6 +265,37 @@ def test_floorstall_resets_on_the_tier_crossing() -> None:
     assert g.stalls == 2
     assert g.observe(FixProgress(0, 12)) is True   # compiled → improved
     assert g.stalls == 0 and g.best == FixProgress(0, 12)
+
+
+# --- CompilingSalvage — what an exhausted fix loop leaves in the tree ---
+
+def test_salvage_ignores_attempts_that_never_compiled() -> None:
+    s = CompilingSalvage()
+    s.offer("broken", FixProgress(3, 0))
+    s.offer("also broken", FixProgress(1, 0))
+    assert s.best is None
+
+
+def test_salvage_keeps_the_fewest_failing_tests_not_the_last_attempt() -> None:
+    s = CompilingSalvage()
+    s.offer("two red", FixProgress(0, 2))
+    s.offer("nine red", FixProgress(0, 9))
+    assert s.best is not None
+    assert s.best.body == "two red"
+    assert s.best.metric == FixProgress(0, 2)
+
+
+def test_salvage_prefers_a_compiling_body_over_any_red_one() -> None:
+    s = CompilingSalvage()
+    s.offer("one rustc error", FixProgress(1, 0))
+    s.offer("compiles, 12 red", FixProgress(0, 12))
+    assert s.best is not None and s.best.body == "compiles, 12 red"
+
+
+def test_salvage_ignores_empty_bodies() -> None:
+    s = CompilingSalvage()
+    s.offer("   \n", FixProgress(0, 1))
+    assert s.best is None
 
 
 def test_floorstall_rejects_mixed_metric_units() -> None:

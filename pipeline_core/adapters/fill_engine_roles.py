@@ -145,7 +145,8 @@ class MutatorAdapter:
     def splice_body_scoped(self, file_path: Path, name: str, container: str,
                            sig_text: str, new_body: str,
                            cfg_predicates: tuple[str, ...] | None = None,
-                           allow_nonstub: bool = False) -> SpliceOutcome:
+                           allow_nonstub: bool = False,
+                           allow_stub_body: bool = False) -> SpliceOutcome:
         """Container-scoped body splice — the collision-safe entry point.
 
         When ``container`` is known, locate the fn by (name, container, sig,
@@ -165,9 +166,11 @@ class MutatorAdapter:
                 _sig_start, body_start, body_end, _sig = loc
                 return self.splice_fn_body_at(file_path, body_start, body_end,
                                               new_body, allow_nonstub=allow_nonstub,
+                                              allow_stub_body=allow_stub_body,
                                               fn_name=name)
         return self.splice_fn_body(file_path, name, new_body,
-                                   allow_nonstub=allow_nonstub)
+                                   allow_nonstub=allow_nonstub,
+                                   allow_stub_body=allow_stub_body)
 
     def replace_fn_signature(self, file_path: Path, name: str, new_sig: str) -> bool:
         return self.replace_fn_signature_fn(file_path, name, new_sig)

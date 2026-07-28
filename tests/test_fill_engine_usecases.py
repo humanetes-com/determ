@@ -26,11 +26,13 @@ from pipeline_core.domain.models import (
     Stub,
 )
 from pipeline_core.domain.reconstruction import SpliceOutcome
+from pipeline_core.domain.refine import CompilingSalvage, FixProgress
 from pipeline_core.domain.retro_gate import (
     ConvictionEvidence,
     RetroProvenance,
     stamp_conviction,
 )
+from pipeline_core.domain.test_results import RegressionComparison
 
 
 class FakeFill:
@@ -180,6 +182,72 @@ def test_stub_carries_cfg_predicates_for_variant_splice() -> None:
     assert s.to_dict()["cfg_predicates"] == ["extra_cap"]
     # Tolerant of a missing key (hand-built / AST-less fallback) → empty tuple.
     assert Stub.from_dict({"file": "lib.rs", "fn_name": "x"}).cfg_predicates == ()
+
+
+# ---- exhaustion salvage: a compiling body beats the stub ----
+
+def _salvage_call(fake: FakeFill, ws: Path, salvage: CompilingSalvage,
+                  reverts: list[int]) -> bool:
+    return _fill_one(fake)._salvage_compiling_body(
+        _ctx(ws), salvage, ws / "src" / "lib.rs", "lib.rs", "answer", "", "",
+        Stub(file="lib.rs", fn_name="answer"),
+        lambda: (reverts.append(1), True)[1])
+
+
+def _regressed() -> tuple[RegressionComparison, str]:
+    return (RegressionComparison(
+        newly_red=frozenset({"test_x"}), newly_crashed=(), excluded_crashed=(),
+        not_run=(), measured=("test_x",), base_pass=1, cur_pass=0,
+        base_executed=1, cur_executed=1), "detail")
+
+
+def test_exhaustion_keeps_the_best_compiling_body_over_the_stub(
+        tmp_path: Path) -> None:
+    # The stub is not a neutral fallback — it panics, aborting the test binary
+    # and un-judging every sibling test in it. A body that compiles and reddens
+    # nothing is therefore the better end state even though its own tests fail.
+    ws = _mk_ws(tmp_path)
+    fake = FakeFill(run=(0, ""), regr=None)
+    salvage = CompilingSalvage()
+    salvage.offer("Ok(())", FixProgress(0, 2))
+    reverts: list[int] = []
+    assert _salvage_call(fake, ws, salvage, reverts) is True
+    assert reverts == []
+    assert any("KEEPING best compiling body" in m for m in fake.logs)
+    assert "phase_c.fn.fill.salvaged" in fake.events
+
+
+def test_exhaustion_reverts_to_the_stub_when_the_salvage_regresses(
+        tmp_path: Path) -> None:
+    ws = _mk_ws(tmp_path)
+    fake = FakeFill(run=(0, ""), regr=_regressed())
+    salvage = CompilingSalvage()
+    salvage.offer("Ok(())", FixProgress(0, 2))
+    reverts: list[int] = []
+    assert _salvage_call(fake, ws, salvage, reverts) is False
+    assert reverts == [1]
+    assert "phase_c.fn.fill.salvaged" not in fake.events
+
+
+def test_exhaustion_reverts_when_the_salvage_no_longer_compiles(
+        tmp_path: Path) -> None:
+    # The tree moved while this fn queued; the banked body may not build here.
+    ws = _mk_ws(tmp_path)
+    fake = FakeFill(run=(101, "error[E0308]"), regr=None)
+    salvage = CompilingSalvage()
+    salvage.offer("Ok(())", FixProgress(0, 2))
+    reverts: list[int] = []
+    assert _salvage_call(fake, ws, salvage, reverts) is False
+    assert reverts == [1]
+
+
+def test_exhaustion_with_no_compiling_attempt_costs_no_cargo_run(
+        tmp_path: Path) -> None:
+    ws = _mk_ws(tmp_path)
+    fake = FakeFill(run_seq=[])
+    reverts: list[int] = []
+    assert _salvage_call(fake, ws, CompilingSalvage(), reverts) is False
+    assert reverts == [] and fake.logs == []
 
 
 # ---- FillOneFn branches ----

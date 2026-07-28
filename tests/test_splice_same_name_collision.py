@@ -19,6 +19,9 @@ import tempfile
 from pathlib import Path
 
 import pipeline
+from pipeline_core.application.reconstruct.fill_rules import (
+    make_failed_attempt_body,
+)
 from pipeline_core.application.reconstruct.splice import (
     replace_fn_signature,
     restore_frozen_signature,
@@ -125,6 +128,23 @@ def test_scoped_splice_ampbool_variant_independent() -> None:
     # Both impls filled distinctly; only the free fn remains a stub.
     assert "!self" in text and "!*self" in text
     assert text.count("unimplemented!()") == 1
+
+
+def test_scoped_splice_writes_the_annotated_stub_when_allowed() -> None:
+    # The fix-loop exhaustion path re-stubs a fn with the failed attempt kept as
+    # comments; that body ENDS in `unimplemented!()` on purpose, so the scoped
+    # splice must forward `allow_stub_body`. Without the forward it is refused
+    # `body_is_stub` every time and the failure history never reaches the next
+    # pass — the annotate was dead in production while its own unit test passed.
+    f = _write(NOT_FIXTURE)
+    annotated = make_failed_attempt_body("let x = self;", "error[E0424]", 3)
+    refused = pipeline._APP.fill_roles.mut.splice_body_scoped(
+        f, "not", "impl Bool for bool", "", annotated)
+    assert refused == (False, "body_is_stub", 0)
+    out = pipeline._APP.fill_roles.mut.splice_body_scoped(
+        f, "not", "impl Bool for bool", "", annotated, allow_stub_body=True)
+    assert out.ok, out.reason
+    assert "let x = self;" in f.read_text(encoding="utf-8")
 
 
 def test_scoped_splice_falls_back_to_refusal_without_container() -> None:

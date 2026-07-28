@@ -56,6 +56,7 @@ from pipeline_core.domain.models import (
 )
 from pipeline_core.domain.reconstruction import SpliceOutcome
 from pipeline_core.domain.refine import (
+    CompilingSalvage,
     FixProgress,
     FloorStall,
     best_progress_fields,
@@ -997,6 +998,11 @@ def fill_impl_blocks(
         # test output carries no rustc E-codes — and 0 never beats a prior 0,
         # so a block was parked the round after it started compiling.
         last_metric: FixProgress | None = None
+        # Best COMPILING file image this block produced. `unimplemented!()` is
+        # not a neutral fallback — it panics and aborts the test binary, so
+        # every sibling test in it goes unjudged. On exhaustion we restore this
+        # rather than leaving the stubs.
+        salvage = CompilingSalvage()
         last_response = ""
         members_filled_this_block = 0
         block_already_complete = False  # debt #42: all-target_not_stub ⇒ done
@@ -1347,6 +1353,14 @@ def fill_impl_blocks(
                 # The fill regressed (a new error, or an error on the filled
                 # fns) — B3 (FR-029) already accepted non-regressing fills
                 # above. Revert; the driver decides whether to retry.
+                # A compiling attempt is banked first: the regression gate above
+                # already cleared this file image against the pre-splice
+                # baseline, so it is a strictly better end state than the stubs
+                # if the loop later exhausts (see `_salvage` restore below).
+                if cur_metric.compiles:
+                    salvage.offer(
+                        file_path.read_text(encoding="utf-8", errors="replace"),
+                        cur_metric)
                 file_path.write_text(snapshot, encoding="utf-8")
                 return FixOutcome("failed", err_sig=cur_err_sig,
                                    metric=cur_metric)
@@ -1538,6 +1552,37 @@ def fill_impl_blocks(
             })
 
         if members_filled_this_block == 0 and not block_already_complete:
+            _salvaged = salvage.best
+            if _salvaged is not None:
+                with _splice_check_lock:
+                    _sv_base = _test_regression_baseline(
+                        tdd_test_cmd, target_src_dir, cluster_env)
+                    _stubbed = file_path.read_text(encoding="utf-8",
+                                                   errors="replace")
+                    file_path.write_text(_salvaged.body, encoding="utf-8")
+                    _sv_rc, _, _ = _run_cargo_check_diag(
+                        check_cmd, target_src_dir, cluster_env)
+                    _sv_regr = (_test_regression_gate(
+                        tdd_test_cmd, target_src_dir, cluster_env, _sv_base)
+                        if _sv_rc == 0 else None)
+                    if _sv_rc != 0 or _sv_regr is not None:
+                        file_path.write_text(_stubbed, encoding="utf-8")
+                        _log(f"  [phase-c/impl] {block_id}: best compiling "
+                             "attempt NOT salvaged ("
+                             + ("no longer compiles here" if _sv_regr is None
+                                else f"would regress {_sv_regr[0].summary}")
+                             + ") — stubs kept.")
+                    else:
+                        _log(f"  [phase-c/impl] {block_id}: fix loop exhausted "
+                             f"— KEEPING best compiling image "
+                             f"({_salvaged.metric}); stubs would abort the test "
+                             "binary and un-judge their siblings. Deferred to "
+                             "the outer loop.")
+                        _emit("phase_c.impl.fill.salvaged", data={
+                            "cluster": cluster_name, "file": block.file,
+                            "container": block.container,
+                            "failing_tests": _salvaged.metric.failing_tests,
+                        })
             with _counters_lock:
                 impls_failed += 1
                 errors.append(f"{block.file}::{block.container}: "
