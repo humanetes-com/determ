@@ -192,6 +192,23 @@ class BlameVerdict:
         return frozenset(loc for _f, loc in self.external)
 
 
+def self_aborted_tests(missing: frozenset[str],
+                       judged_at_baseline: frozenset[str]) -> frozenset[str]:
+    """The unit's OWN tests whose verdict this body destroyed: judged in a
+    completed binary at baseline, no verdict at all now.
+
+    :func:`partition_blame` files an output-less failure as NO_VERDICT because,
+    read in isolation, silence can neither convict nor exonerate. Held against
+    a baseline the same silence inverts into the strongest signal there is: the
+    binary ran these tests to a verdict before the splice and died before
+    reaching them after it, so the body under test aborted the process. Nothing
+    else the unit can be scored on outranks that — an abort takes every later
+    test in the binary down with it, so a gate that stays silent here reverts
+    on two unrelated assertions while the body it is scoring quietly removes
+    dozens of verdicts from the run."""
+    return frozenset(missing & judged_at_baseline)
+
+
 def _site_key(s: FnSite) -> tuple[str, str, str]:
     """Collision-safe identity: file, name, and CANONICAL container. Canonical
     because the extractor renders a header's spacing (`impl Bool for & bool`)

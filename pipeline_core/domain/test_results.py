@@ -1038,6 +1038,21 @@ class TestStateReading:
         return frozenset(out)
 
     @property
+    def judged_names(self) -> frozenset[str]:
+        """Names that RECEIVED a verdict in a COMPLETED binary — passed or
+        failed. This is the comparison base for "the change under test
+        destroyed a verdict": a test judged here and unjudged in a later
+        reading lost its verdict to whatever changed in between. Partial
+        verdicts from a crashed binary are excluded for the same reason
+        `passed_names` excludes them — which tests print before the signal
+        varies run to run."""
+        out: set[str] = set()
+        for b in self.binaries:
+            if b.completed:
+                out |= b.passed | b.failed
+        return frozenset(out)
+
+    @property
     def ignored_names(self) -> frozenset[str]:
         """Names libtest reported `ignored` (cfg-gated off for this cluster).
         Callers subtract these from any "not passing ⇒ failing" reading — an

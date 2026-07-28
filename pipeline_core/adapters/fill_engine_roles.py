@@ -214,10 +214,12 @@ class CargoFillAdapter:
 
     def u2_test_gate(self, fn_tests: set[str], unit_sites: frozenset[FnSite],
                      test_cmd: str | None,
-                     target_src_dir: Path, cluster_env: dict[str, str] | None
+                     target_src_dir: Path, cluster_env: dict[str, str] | None,
+                     baseline: TestStateReading | None = None
                      ) -> U2Verdict:
         return self.u2_test_gate_fn(fn_tests, unit_sites, test_cmd,
-                                    target_src_dir, cluster_env)
+                                    target_src_dir, cluster_env,
+                                    baseline=baseline)
 
     def test_regression_baseline(self, test_cmd: str | None, cwd: Path,
                                  env: dict[str, str] | None

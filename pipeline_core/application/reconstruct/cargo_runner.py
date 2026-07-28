@@ -28,6 +28,7 @@ from pipeline_core.domain.test_report import (
     U2Verdict,
     parse_test_output,
     partition_blame,
+    self_aborted_tests,
 )
 from pipeline_core.domain.test_results import (
     RegressionComparison,
@@ -207,6 +208,39 @@ def test_regression_gate(
     return cmp, render_regression_detail(cmp)
 
 
+def _render_u2_abort(aborted: frozenset[str], scoped: TestRunReport,
+                     err_cap: int) -> str:
+    """Prompt feedback for a body that ABORTED the test process.
+
+    Stated as the primary finding, not a footnote: these tests are not failing
+    assertions to be argued with, they produced no output because the process
+    died. The named tests come first and uncapped — which test was in flight is
+    the one locator the model has — and any assertion that did print follows,
+    explicitly demoted so the model does not spend the attempt on it."""
+    names = ", ".join(sorted(aborted))
+    out = (
+        "Your body ABORTED the test process. These test(s) produced a verdict "
+        "BEFORE your change and produced no output at all after it:\n"
+        f"{names}\n\n"
+        "This is not an assertion failure — the process died, so every later "
+        "test in the same binary was never run. A normal `panic!` does not do "
+        "this: libtest catches it and prints a failure. Aborting means either "
+        "undefined behaviour (an unsafe block reading/writing memory that does "
+        "not hold what it claims), or a panic raised while another panic was "
+        "already unwinding.\n\n"
+        "Re-derive the body from the types. Do not re-send the previous body "
+        "with a different helper call — the fault is what the body does to "
+        "memory, not which API it names."
+    )
+    if scoped.failures:
+        excerpt = FailureExcerpt(
+            names=tuple(sorted(f.test_name for f in scoped.failures)),
+            bodies=tuple((f.test_name, f.body) for f in scoped.failures))
+        out += ("\n\n(Secondary — only after the abort is gone: these also "
+                "failed.)\n" + excerpt.render(err_cap // 2))
+    return out
+
+
 def _render_u2_reject(blame: BlameVerdict, err_cap: int) -> str:
     """Prompt feedback for a REJECT: the unit's OWN failing tests + their
     bodies (via the shared :class:`FailureExcerpt` rule — names never truncated,
@@ -242,6 +276,7 @@ def u2_test_gate(
     timeout: int,
     err_cap: int,
     guard: Callable[[str, str], None],
+    baseline: TestStateReading | None = None,
 ) -> U2Verdict:
     """Plan 10 / F3 — the SINGLE reusable test-acceptance gate, called by every
     fill loop (per-fn, per-impl, post-merge) at the point a unit compiles.
@@ -261,6 +296,12 @@ def u2_test_gate(
         stall signature; `detail` feeds the next prompt (external failures
         summarized, never chased).
     Fail-safe: any error / timeout → ACCEPT (compile-based acceptance).
+
+    `baseline` is the reading taken against the PRE-SPLICE tree (the same one
+    the regression gate uses). Without it the gate cannot tell a test that
+    never had a verdict from one whose verdict this body destroyed, so an
+    aborting body reads as "no failures" and is accepted — see
+    :func:`self_aborted_tests`.
 
     `unit_sites` is what this unit owns as container-qualified :class:`FnSite`
     identities (per-fn: that one fn; per-impl: the block's stub members;
@@ -295,11 +336,28 @@ def u2_test_gate(
     # never silently invisible.
     _reported = report.passed | {f.test_name for f in report.failures}
     _missing = fn_tests - _reported
+    _compile_failed = "could not compile" in (out or "")
     if rc != 0 and _missing:
         guard("phase-c/u2_missing_verdict",
               f"{sorted(_missing)} reported no verdict in the scoped run "
               + ("(compile failed — no test binaries ran)"
-                 if "could not compile" in (out or "") else "(binary crashed)"))
+                 if _compile_failed else "(binary crashed)"))
+    # A verdict this body DESTROYED outranks every other signal: the binary
+    # judged these tests before the splice and died before reaching them
+    # after it. Charged before the `not scoped.failures` early-accept below,
+    # because the worst case prints nothing at all — a body that aborts the
+    # process instantly leaves an empty failure list, which that early return
+    # reads as "no failures" and ACCEPTS.
+    # rc == 0 means the binary ran to completion, so a name absent from the
+    # output was never executed (libtest's OR filter did not match it), not
+    # killed mid-run — charging that would convict a body of a filter miss.
+    _aborted = (self_aborted_tests(frozenset(_missing), baseline.judged_names)
+                if baseline is not None and rc != 0 and not _compile_failed
+                else frozenset())
+    if _aborted:
+        return U2Verdict.reject(
+            frozenset(_aborted) | {f.test_name for f in scoped.failures},
+            _render_u2_abort(_aborted, scoped, err_cap))
     if not scoped.failures:
         return U2Verdict.accept()
     locate = make_fn_site_locator(structure, target_src_dir)

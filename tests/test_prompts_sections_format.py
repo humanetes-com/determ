@@ -252,3 +252,19 @@ def test_gotcha_e0401_self_from_outer_item_fires():
     assert out.count("WRONG") >= 2
     # Names both fixes: concrete type AND hoisting to a sibling associated fn.
     assert "associated fn" in out
+
+def test_gotcha_test_process_aborted_fires_on_the_u2_abort_feedback():
+    # Live (anyhow stable, src/error.rs::construct): candidate bodies aborted
+    # the test binaries, the abort never reached the prompt, and the retro
+    # answered a segfault with "use Backtrace::force_capture()". The gotcha
+    # fires on the U2 abort text itself — an aborting body compiles, so there
+    # is no error code to key on.
+    err = ("Your body ABORTED the test process. These test(s) produced a "
+           "verdict BEFORE your change and produced no output at all after "
+           "it:\ntest_downcast, test_iter\n")
+    out = gotchas_for_error(err)
+    assert "test_process_aborted" in {
+        g["id"] for g in RUST_GOTCHAS if any(t in err for t in g["triggers"])}
+    assert out.count("WRONG") >= 2 and "RIGHT" in out
+    # Names the two real causes, not an API substitution.
+    assert "unwinding" in out and "forget" in out

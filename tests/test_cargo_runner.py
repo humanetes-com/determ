@@ -139,12 +139,25 @@ class _FakeStructure:
 
 
 def _gate(run_cargo_fn, fn_tests, unit_fns=frozenset(), test_cmd="cargo test",
-          enabled=True, guard=None, structure=None, src_dir=Path(".")):
+          enabled=True, guard=None, structure=None, src_dir=Path("."),
+          baseline=None):
     return u2_test_gate(
         run_cargo_fn, fn_tests, unit_fns, test_cmd, src_dir, {},
         structure=structure or _FakeStructure(),
         enabled=enabled, timeout=120, err_cap=500,
-        guard=guard or (lambda *_: None))
+        guard=guard or (lambda *_: None), baseline=baseline)
+
+
+def _judged(names, *, completed=True):
+    """Baseline reading in which every `names` entry got a real verdict."""
+    from pipeline_core.domain.test_results import (
+        TestStateReading,
+        parse_binary_results,
+    )
+    body = "".join(f"test {n} ... ok\n" for n in names)
+    if completed:
+        body += f"test result: ok. {len(names)} passed; 0 failed; 0 ignored"
+    return TestStateReading(parse_binary_results(body))
 
 
 # assertion failure with a proper stdout section (stays self → REJECT)
@@ -212,6 +225,57 @@ def test_u2_gate_surfaces_missing_verdicts_on_crashed_scoped_binary() -> None:
     assert v.decision is U2Decision.ACCEPT
     assert fired and fired[0][0] == "phase-c/u2_missing_verdict"
     assert "'a'" in fired[0][1] and "'b'" in fired[0][1]
+
+
+def test_u2_gate_charges_verdicts_the_body_destroyed() -> None:
+    # The worst case prints NOTHING: a body that aborts instantly leaves an
+    # empty failure list, which the "no failures" early return reads as
+    # success. Held against a baseline that judged these tests, the silence
+    # is the verdict — REJECT, and say so in the words the model reads.
+    v = _gate(_const_run_cargo(101, "error: process didn't exit successfully"),
+              {"a", "b"}, baseline=_judged(["a", "b"]))
+    assert v.decision is U2Decision.REJECT
+    assert v.self_failures == frozenset({"a", "b"})
+    assert "ABORTED the test process" in v.detail
+    assert "a" in v.detail and "b" in v.detail
+
+
+def test_u2_gate_abort_outranks_leftover_assertions() -> None:
+    # An assertion that still printed is real but secondary: chasing it while
+    # the process aborts spends the attempt on the wrong defect.
+    out = ("test b ... FAILED\n\n---- b stdout ----\n"
+           "thread 'b' panicked at src/lib.rs:1:1:\nassertion failed: boom\n")
+    v = _gate(_const_run_cargo(101, out), {"a", "b", "c"},
+              baseline=_judged(["a", "b", "c"]))
+    assert v.decision is U2Decision.REJECT
+    assert v.self_failures == frozenset({"a", "b", "c"})
+    assert v.detail.index("ABORTED") < v.detail.index("Secondary")
+    assert "assertion failed: boom" in v.detail
+
+
+def test_u2_gate_does_not_charge_a_verdict_the_baseline_never_had() -> None:
+    # A baseline whose binary crashed judged nothing, so a test missing now
+    # was never observed to have a verdict — no evidence, no charge. Same
+    # rule `passed_names` applies to a crashed binary's partial output.
+    v = _gate(_const_run_cargo(101, "error: process didn't exit successfully"),
+              {"a", "b"}, baseline=_judged(["a", "b"], completed=False))
+    assert v.decision is U2Decision.ACCEPT
+
+
+def test_u2_gate_compile_failure_is_not_an_abort() -> None:
+    # No binary ran, so no verdict was destroyed — this is the compile path,
+    # which the fix loop already feeds real diagnostics.
+    v = _gate(_const_run_cargo(101, "error: could not compile `crate`"),
+              {"a", "b"}, baseline=_judged(["a", "b"]))
+    assert v.decision is U2Decision.ACCEPT
+
+
+def test_u2_gate_without_baseline_keeps_failsafe_accept() -> None:
+    # Callers that pass no baseline cannot distinguish a destroyed verdict
+    # from one that never existed; behaviour must stay as it was.
+    v = _gate(_const_run_cargo(101, "error: process didn't exit successfully"),
+              {"a", "b"})
+    assert v.decision is U2Decision.ACCEPT
 
 
 def test_u2_gate_failsafe_and_inconclusive() -> None:
@@ -374,3 +438,11 @@ def test_regression_gate_flags_newly_crashed_binary() -> None:
     assert cmp.summary == "binary crashed: ['tests/a.rs']"
     assert cmp.signature == frozenset({"__binary_crash__:tests/a.rs"})
     assert "CRASH" in msg and "tests/a.rs" in msg
+
+
+def test_u2_gate_rc_zero_missing_test_is_a_filter_miss_not_an_abort() -> None:
+    # The binary completed (rc == 0). A name absent from its output was never
+    # selected by libtest's filter — no verdict was destroyed.
+    v = _gate(_const_run_cargo(0, "test a ... ok\ntest result: ok. 1 passed"),
+              {"a", "b"}, baseline=_judged(["a", "b"]))
+    assert v.decision is U2Decision.ACCEPT

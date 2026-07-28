@@ -614,7 +614,8 @@ class FillOneFn:
                 _v = self.cargo.u2_test_gate(
                     set(_evidence.tests),
                     frozenset({FnSite(rel_file, fn_name, container)}),
-                    ctx.tdd_test_cmd, ctx.target_src_dir, ctx.cluster_env)
+                    ctx.tdd_test_cmd, ctx.target_src_dir, ctx.cluster_env,
+                    _attempt_baseline_test)
                 if _v.decision is U2Decision.REJECT:
                     # A real self-failure (assertion/behavior). Route through the
                     # normal fix path: revert + re-prompt with the failing tests
@@ -695,10 +696,25 @@ class FillOneFn:
                         })
                 return FixOutcome("accepted")
 
+            def _excerpt(max_chars: int | None = None) -> str:
+                # `focus_errors` parses cargo output into `error[E…]` blocks
+                # keyed on their `-->` location. A U2 detail is not cargo
+                # output — it is a rendered explanation (failing test names,
+                # test bodies, the abort notice), so nothing parses as a block
+                # and it falls through to the head-truncating `output[:cap]`
+                # branch, silently cutting whatever the render appended last.
+                # Pass it through intact instead of filtering it for
+                # diagnostics it was never going to contain.
+                if _u2_fail_sig is not None:
+                    cap = max_chars or self.caps.fix_err_cap
+                    return cargo_out[:cap]
+                return self.cargo.focus_errors(cargo_out, rel_file,
+                                               max_chars=max_chars)
+
             # Capture first-failure context for note extraction later.
             if fix_attempt == 1:
                 first_failed_body = body
-                first_error_excerpt = self.cargo.focus_errors(cargo_out, rel_file)
+                first_error_excerpt = _excerpt()
 
             # P5.5: track error codes seen so we can promote recurring
             # ones to every subsequent prompt.
@@ -720,8 +736,7 @@ class FillOneFn:
             # P2: record this failed attempt for the prior-attempts block.
             # We store the focused excerpt (already tier-sliced) so the
             # next prompt sees what really failed without re-paying budget.
-            _focused = self.cargo.focus_errors(
-                cargo_out, rel_file, max_chars=self.caps.fix_err_cap)
+            _focused = _excerpt(self.caps.fix_err_cap)
             per_fn_history.append({
                 "attempt": fix_attempt,
                 "body": body,
@@ -734,7 +749,7 @@ class FillOneFn:
             last_body = body
             last_metric = cur_metric
             salvage.offer(body, cur_metric)
-            error_excerpt = self.cargo.focus_errors(cargo_out, rel_file)
+            error_excerpt = _excerpt()
             # Revert to snapshot before returning; the model will see
             # the file as unimplemented again but with last_body + errors
             # in the prompt. (Reverting unconditionally — the exhaustion

@@ -323,3 +323,21 @@ test p ... ok
 test result: ok. 1 passed; 0 failed; 1 ignored
 """
     assert _reading(text).ignored_names == frozenset({"n"})
+
+def test_reading_judged_names_completed_binaries_only() -> None:
+    # The comparison base for "this body destroyed a verdict": both outcomes
+    # count (a test that failed before and is unjudged now also lost its
+    # verdict), but a crashed binary's partial output is not a verdict.
+    text = """\
+    Running tests/a.rs (t/a-1)
+running 2 tests
+test p ... ok
+test q ... FAILED
+test result: FAILED. 1 passed; 1 failed; 0 ignored
+    Running tests/b.rs (t/b-2)
+running 2 tests
+test r ... ok
+test s ...
+"""
+    r = _reading(text)
+    assert r.judged_names == frozenset({"p", "q"})

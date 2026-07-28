@@ -1267,7 +1267,8 @@ def build_app(
         _disc_collect_test_files, is_gen_tests_decl_only=_gen_is_decl_only_src)
 
     def u2_test_gate(fn_tests: set[str], unit_fns: Any, test_cmd: str | None,
-                     target_src_dir: Path, cluster_env: dict[str, str] | None) -> Any:
+                     target_src_dir: Path, cluster_env: dict[str, str] | None,
+                     baseline: Any = None) -> Any:
         """F3 test-acceptance gate. run_cargo late-binds the pipeline seam via
         helpers; enabled/timeout re-read settings_now() so a patched SETTINGS
         wins; structure resolves through the LIVE app (fake readers win)."""
@@ -1276,7 +1277,7 @@ def build_app(
             helpers.run_cargo, fn_tests, unit_fns, test_cmd, target_src_dir,
             cluster_env, structure=_live().structure,
             enabled=caps.unified_fill_loop, timeout=caps.u2_test_timeout,
-            err_cap=cfg.fix_err_cap, guard=ports.guard)
+            err_cap=cfg.fix_err_cap, guard=ports.guard, baseline=baseline)
 
 
     def commit_and_mark(

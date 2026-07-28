@@ -883,6 +883,42 @@ RUST_GOTCHAS: list[dict[str, Any]] = [
             "type — no other `Default`-shaped call will work either."
         ),
     },
+    {
+        # Fires on the U2 abort feedback, not on a compiler code: an aborting
+        # body compiles cleanly. The failure mode is invisible in the usual
+        # channel (no `error[E…]`, no assertion, no panic message), so without
+        # this the model reads only the leftover assertions and keeps swapping
+        # API calls while the real fault — what the body does to memory — goes
+        # unaddressed.
+        "id": "test_process_aborted",
+        "summary": "A test process that ABORTS (tests produce no output at all, not a failure message) is undefined behaviour or a panic during unwinding — never a wrong API choice. Re-derive the body from the types; do not resend it with a different helper call.",
+        "triggers": {"ABORTED the test process",
+                     "produced no output at all",
+                     "the process died"},
+        "detail": (
+            "An abort is not a failed assertion. libtest CATCHES a normal\n"
+            "`panic!` and prints `---- name stdout ----` with the message; if\n"
+            "there is no output at all, the process died outside that path and\n"
+            "took every later test in the binary with it. Two causes, both in\n"
+            "what the body does to memory:\n"
+            "  WRONG (transmuting a pointer to a type the allocation never held —\n"
+            "         reads garbage as a vtable/length, aborts or segfaults):\n"
+            "    let obj: &dyn Trait = unsafe { &*(ptr as *const T as *const U) };\n"
+            "  RIGHT (recover the SAME type that was stored, then coerce):\n"
+            "    let obj: &T = unsafe { &*(ptr as *const T) };\n"
+            "    let obj: &dyn Trait = obj;\n"
+            "  WRONG (taking ownership out of a borrow, then dropping it twice —\n"
+            "         the second drop aborts while the first is still unwinding):\n"
+            "    let owned = unsafe { core::ptr::read(slot) };\n"
+            "    drop(owned);                 // `slot` is still live and will drop\n"
+            "  RIGHT (either forget the original or never own it twice):\n"
+            "    let owned = unsafe { core::ptr::read(slot) };\n"
+            "    core::mem::forget(original);  // exactly one owner drops\n"
+            "Rule: when the process aborts, the previous body's SHAPE is wrong,\n"
+            "not its API. Re-derive from the declared types — which pointer holds\n"
+            "what, and who owns each value — instead of substituting another call."
+        ),
+    },
 ]
 
 

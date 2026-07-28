@@ -100,6 +100,7 @@ class Cargo(Protocol):
         self, fn_tests: set[str], unit_sites: frozenset[FnSite],
         test_cmd: str | None,
         target_src_dir: Path, cluster_env: dict[str, str] | None,
+        baseline: TestStateReading | None = ...,
     ) -> U2Verdict: ...
     def test_regression_baseline(
         self, test_cmd: str | None, cwd: Path, env: dict[str, str] | None,

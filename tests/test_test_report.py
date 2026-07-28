@@ -12,6 +12,7 @@ from pipeline_core.domain.test_report import (
     cap_at_line_boundary,
     parse_test_output,
     partition_blame,
+    self_aborted_tests,
 )
 
 # --- F8 excerpt discipline -------------------------------------------------- #
@@ -370,3 +371,20 @@ def test_joint_ignored_tests_never_pad_the_baseline() -> None:
         verdict=_reject({"a"}))
     assert ji.baseline_failing == {"a"}
     assert not ji.banks
+
+
+# --- verdicts a body destroyed ---------------------------------------------- #
+
+def test_self_abort_is_the_intersection_of_missing_and_judged() -> None:
+    # Silence read in isolation is evidence-free (partition_blame files it as
+    # no_verdict); held against a baseline that judged the test, the same
+    # silence means the body under test killed the process before it ran.
+    assert self_aborted_tests(
+        frozenset({"a", "b", "never_ran"}),
+        frozenset({"a", "b", "unrelated"})) == frozenset({"a", "b"})
+
+
+def test_self_abort_ignores_tests_the_baseline_never_judged() -> None:
+    # No prior verdict ⇒ nothing was destroyed ⇒ nothing to charge.
+    assert self_aborted_tests(frozenset({"a"}), frozenset()) == frozenset()
+    assert self_aborted_tests(frozenset(), frozenset({"a"})) == frozenset()
