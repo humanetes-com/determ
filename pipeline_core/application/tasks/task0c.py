@@ -26,7 +26,7 @@ from ...domain.coverage import PerFileCoverage
 from ...domain.generation import merge_gen_tests_blocks
 from ...domain.llm_output import extract_code_blocks, strip_uncovered_markers
 from ...domain.oracle_admission import BlockAdmission, judge_block, weakening_reason
-from ...domain.refine import Attempt, LoopState
+from ...domain.refine import Attempt, FixProgress, LoopState
 from ...domain.rust_idents import camelcase_type_names, defined_type_names
 from ...domain.text import strip_think_blocks
 from ...log import emit, log
@@ -1132,7 +1132,7 @@ corrected content here
             prev_signatures = new_signatures
             compile_err = out
             return FixOutcome("failed", err_sig=new_signatures,
-                              err_count=max(1, len(new_signatures)))
+                              metric=FixProgress(max(1, len(new_signatures)), 0))
 
         _harness_fixed, _hf_attempts = drive_fix_loop(
             _attempt_harness_fix,
@@ -1918,8 +1918,11 @@ project-specific import paths, type construction patterns, and hard constraints.
                         _fc["err_text"] = _adm_detail
                         _fc["runtime"] = True
                         _fc["sigs"] = _adm.failed_names
+                        # The harness compiled and RAN — a runtime test failure is a
+                        # test-tier metric, never comparable to a compile-error
+                        # count on the same gauge.
                         return FixOutcome("failed", err_sig=_adm.failed_names,
-                                          err_count=max(1, len(_adm.failed_names)))
+                                          metric=FixProgress(0, max(1, len(_adm.failed_names))))
                     _log_task0c_attempt(project_dir, rel_path, attempt + _fix_n - 1, block, "", "success")
                     _log(f"  [{module_name}] Appended gen_tests_{pass_n} to {rel_path} "
                          f"({len(uncov_lines)} uncovered lines targeted)")
@@ -1943,7 +1946,7 @@ project-specific import paths, type construction patterns, and hard constraints.
                 _fc["runtime"] = False
                 _fc["sigs"] = cur_sigs
                 return FixOutcome("failed", err_sig=cur_sigs,
-                                  err_count=max(1, len(cur_sigs)))
+                                  metric=FixProgress(max(1, len(cur_sigs)), 0))
 
             _committed, _ = drive_fix_loop(
                 _attempt_block_fix,

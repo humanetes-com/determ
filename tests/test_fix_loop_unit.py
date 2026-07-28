@@ -5,6 +5,7 @@ initial_floor seeding, the callbacks, and the check_stop hook. The driver is pur
 from __future__ import annotations
 
 from pipeline_core.application.fix_loop import FixOutcome, drive_fix_loop
+from pipeline_core.domain.refine import FixProgress
 
 
 def _runner(outcomes: list[FixOutcome]):
@@ -30,9 +31,10 @@ def test_stop_is_immediate_dead_end() -> None:
 
 
 def test_hard_cap_when_improving_never_stalls() -> None:
-    # Strictly decreasing err_count → floor improves every attempt → no stall;
+    # Strictly decreasing metric → floor improves every attempt → no stall;
     # distinct signatures → repeated never fires → runs to the cap.
-    outs = [FixOutcome("failed", err_sig=frozenset({str(c)}), err_count=c)
+    outs = [FixOutcome("failed", err_sig=frozenset({str(c)}),
+                       metric=FixProgress(c, 0))
             for c in (5, 4, 3)]
     one, seen = _runner(outs)
     assert drive_fix_loop(one, hard_cap=3, max_stalls=9, stop_context="x") == (False, 3)
@@ -40,8 +42,8 @@ def test_hard_cap_when_improving_never_stalls() -> None:
 
 
 def test_floor_stall_exit_and_callbacks() -> None:
-    # Flat err_count (no improvement), no signature → stall counter climbs.
-    outs = [FixOutcome("failed", err_count=5) for _ in range(5)]
+    # Flat metric (no improvement), no signature → stall counter climbs.
+    outs = [FixOutcome("failed", metric=FixProgress(5, 0)) for _ in range(5)]
     one, _ = _runner(outs)
     failures: list[int] = []
     stalls: list[int] = []
@@ -57,8 +59,8 @@ def test_floor_stall_exit_and_callbacks() -> None:
 def test_repeated_signature_exit() -> None:
     # Improving count (no stall) but identical non-None signatures two in a row.
     sig = frozenset({"src/a.rs:E0277"})
-    outs = [FixOutcome("failed", err_sig=sig, err_count=5),
-            FixOutcome("failed", err_sig=sig, err_count=4)]
+    outs = [FixOutcome("failed", err_sig=sig, metric=FixProgress(5, 0)),
+            FixOutcome("failed", err_sig=sig, metric=FixProgress(4, 0))]
     one, _ = _runner(outs)
     repeated: list[int] = []
     res = drive_fix_loop(one, hard_cap=9, max_stalls=9, stop_context="x",
@@ -68,9 +70,9 @@ def test_repeated_signature_exit() -> None:
 
 def test_initial_floor_seeds_stall() -> None:
     # Seeded floor=3; a first failure that fails to beat 3 counts as a stall.
-    one, _ = _runner([FixOutcome("failed", err_count=3)])
+    one, _ = _runner([FixOutcome("failed", metric=FixProgress(3, 0))])
     res = drive_fix_loop(one, hard_cap=5, max_stalls=1, stop_context="x",
-                         initial_floor=3)
+                         initial_floor=FixProgress(3, 0))
     assert res == (False, 1)
 
 
@@ -81,3 +83,38 @@ def test_check_stop_hook_invoked() -> None:
     drive_fix_loop(one, hard_cap=2, max_stalls=2, stop_context="ctxlabel",
                    check_stop=contexts.append)
     assert contexts == ["ctxlabel attempt 1"]
+
+
+def test_first_compiling_attempt_beats_every_red_attempt() -> None:
+    """The regression that stalled `error.rs::construct` out at attempt 4: three
+    red attempts at 2 rustc errors, then one that COMPILES with 12 failing
+    tests. Scored on one count, 12 > 2 read as a stall and the loop stopped on
+    the first attempt that ever built. The compile tier must dominate."""
+    outs = [FixOutcome("failed", err_sig=frozenset({f"E{n}"}),
+                       metric=FixProgress(2, 0)) for n in (277, 605, 308)]
+    outs.append(FixOutcome("failed", err_sig=frozenset({f"t{i}" for i in range(12)}),
+                           metric=FixProgress(0, 12)))
+    outs += [FixOutcome("failed", err_sig=frozenset({"t0"}),
+                        metric=FixProgress(0, 1)),
+             FixOutcome("accepted")]
+    one, seen = _runner(outs)
+    # max_stalls=3: attempts 2,3 stall on the flat compile floor; attempt 4
+    # must RESET the stall counter, letting 5 and 6 run.
+    res = drive_fix_loop(one, hard_cap=9, max_stalls=3, stop_context="x")
+    assert res == (True, 6)
+    assert seen == [1, 2, 3, 4, 5, 6]
+
+
+def test_more_failing_tests_still_beats_not_compiling() -> None:
+    one, _ = _runner([FixOutcome("failed", metric=FixProgress(1, 0)),
+                      FixOutcome("failed", metric=FixProgress(0, 99)),
+                      FixOutcome("accepted")])
+    assert drive_fix_loop(one, hard_cap=9, max_stalls=1, stop_context="x") == (True, 3)
+
+
+def test_test_tier_alone_still_stalls() -> None:
+    # Guard against over-correction: once compiling, a flat failing-test count
+    # must still stall out — the tier split must not make the loop unbounded.
+    outs = [FixOutcome("failed", metric=FixProgress(0, 4)) for _ in range(5)]
+    one, _ = _runner(outs)
+    assert drive_fix_loop(one, hard_cap=5, max_stalls=2, stop_context="x") == (False, 3)

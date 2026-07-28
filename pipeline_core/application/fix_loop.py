@@ -56,7 +56,7 @@ from pipeline_core.application.reconstruct.pull_resolver import (
 )
 from pipeline_core.domain.fix_report import FixReport
 from pipeline_core.domain.fix_session import FixSession
-from pipeline_core.domain.refine import FloorStall
+from pipeline_core.domain.refine import FixProgress, FloorStall
 from pipeline_core.domain.std_api_sigs import std_api_def
 
 
@@ -155,7 +155,7 @@ class FixOutcome:
           "stop"     — protocol dead-end (empty response, splice rejected,
                        race lost, LLM error): retrying cannot help;
           "failed"   — compile/test failure: the driver's gauge decides
-                       whether to retry (err_sig/err_count feed FloorStall).
+                       whether to retry (err_sig/metric feed FloorStall).
     """
     kind: str
     # None = "this unit has no error signature" → the driver's repeated-
@@ -164,7 +164,9 @@ class FixOutcome:
     # empty sigs (rc!=0, zero parsed diagnostics) trigger the repeated exit,
     # as the hand-rolled per-fn/per-impl loops always did.
     err_sig: frozenset[str] | None = None
-    err_count: int = 0
+    # Two-tier metric, never a bare count: an attempt that starts compiling has
+    # improved even when it leaves more red TESTS than it had rustc ERRORS.
+    metric: FixProgress = FixProgress(0, 0)
 
 
 def drive_fix_loop(
@@ -176,7 +178,7 @@ def drive_fix_loop(
     on_failure: Callable[[int, FixOutcome, FloorStall], None] | None = None,
     on_stall: Callable[[int, FloorStall], None] | None = None,
     on_repeated: Callable[[int, FloorStall], None] | None = None,
-    initial_floor: int | None = None,
+    initial_floor: FixProgress | None = None,
     check_stop: Callable[[str], None] = _no_stop,
 ) -> tuple[bool, int]:
     """Outcome-view facade over :func:`run_fix_loop`. Run `one_attempt` until
@@ -198,7 +200,7 @@ def drive_fix_loop(
             return StepStatus.ACCEPTED
         if outcome.kind == "stop":
             return StepStatus.DEAD_END
-        gauge.observe(outcome.err_count, signature=outcome.err_sig)
+        gauge.observe(outcome.metric, signature=outcome.err_sig)
         if on_failure is not None:
             on_failure(n, outcome, gauge)
         return StepStatus.CONTINUE

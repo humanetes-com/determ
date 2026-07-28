@@ -10,6 +10,7 @@ from __future__ import annotations
 from pipeline_core.application.refine_loop import run_refine_loop
 from pipeline_core.domain.refine import (
     Attempt,
+    FixProgress,
     FloorStall,
     LoopState,
     RetroCandidate,
@@ -234,3 +235,42 @@ def test_parse_retrospective_categories_map() -> None:
     assert cats["CFG_GATED"] == ["bar::baz"]
     assert cats["UNREACHABLE"] == ["qux"]
     assert cats["NEEDS_INTERNALS"] == ["deep"]
+
+
+# --- FixProgress — the two-tier fix-loop metric ---
+
+def test_fixprogress_compile_tier_dominates_test_tier() -> None:
+    # Compiling with many red tests beats not compiling with few errors.
+    assert FixProgress(0, 99) < FixProgress(1, 0)
+    assert FixProgress(0, 12) < FixProgress(2, 0)
+
+
+def test_fixprogress_test_count_breaks_ties_within_a_tier() -> None:
+    assert FixProgress(0, 3) < FixProgress(0, 4)
+    assert FixProgress(2, 0) < FixProgress(3, 0)
+    assert not FixProgress(0, 4) < FixProgress(0, 4)
+
+
+def test_fixprogress_renders_the_tier_it_is_in() -> None:
+    assert str(FixProgress(2, 0)) == "2 compile err(s)"
+    assert str(FixProgress(0, 12)) == "compiles, 12 failing test(s)"
+    assert FixProgress(0, 12).compiles and not FixProgress(1, 0).compiles
+
+
+def test_floorstall_resets_on_the_tier_crossing() -> None:
+    g = FloorStall()
+    for _ in range(3):
+        g.observe(FixProgress(2, 0))
+    assert g.stalls == 2
+    assert g.observe(FixProgress(0, 12)) is True   # compiled → improved
+    assert g.stalls == 0 and g.best == FixProgress(0, 12)
+
+
+def test_floorstall_rejects_mixed_metric_units() -> None:
+    # A gauge fed a raw count on one attempt and a FixProgress on the next
+    # measures nothing; the comparison must blow up loudly, not silently rank.
+    import pytest
+    g = FloorStall()
+    g.observe(FixProgress(2, 0))
+    with pytest.raises(TypeError):
+        g.observe(3)

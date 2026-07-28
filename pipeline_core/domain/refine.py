@@ -14,7 +14,74 @@ Pure domain: stdlib only, no I/O. The strategy (which actually calls the model /
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import Any, Protocol
+
+
+class Comparable(Protocol):
+    """Anything a floor gauge can order (a plain count, a :class:`FixProgress`).
+    Deliberately NOT a union of the two: mixing units in one gauge is the bug
+    this module exists to prevent, and `int < FixProgress` raising TypeError is
+    the loud failure that catches it."""
+
+    def __lt__(self, other: Any, /) -> bool: ...
+
+
+@dataclass(frozen=True, order=True, slots=True)
+class FixProgress:
+    """Lower-is-better fix-loop metric that keeps the COMPILE tier and the TEST
+    tier SEPARATE, ordered lexicographically: fewer compile errors always wins,
+    and only at an equal compile-error count does the failing-test count decide.
+
+    A fix attempt improves along two axes that share no unit. Collapsing them
+    into one integer inverts the ordering at the exact moment an attempt breaks
+    through:
+
+        WRONG:  attempt 3 → 2 rustc errors        → metric 2
+                attempt 4 → compiles, 12 tests red → metric 12  (reads WORSE →
+                stall → loop stops on the first attempt that ever compiled)
+
+        RIGHT:  attempt 3 → FixProgress(2, 0)
+                attempt 4 → FixProgress(0, 12)     → strictly better (0 < 2)
+
+    `compile_errors` carries the rc-honest minimum convention of its callers: a
+    non-zero rc with no parseable diagnostic is still at least one error, never
+    zero, so a red attempt can never tie a green one.
+    """
+
+    compile_errors: int
+    failing_tests: int = 0
+
+    @property
+    def compiles(self) -> bool:
+        return self.compile_errors == 0
+
+    def __str__(self) -> str:
+        if self.compile_errors:
+            return f"{self.compile_errors} compile err(s)"
+        return f"compiles, {self.failing_tests} failing test(s)"
+
+
+BEST_COMPILE_KEY = "best_compile_errors"
+BEST_TESTS_KEY = "best_failing_tests"
+
+
+def best_progress_of(record: Mapping[str, Any]) -> FixProgress | None:
+    """The floor a retrospective record has already reached, or None when it has
+    none yet — including records written before the metric carried tiers. None
+    means "treat this round as the baseline", the lenient direction: a fn is
+    never parked on a floor that was never measured in comparable units."""
+    lo, hi = record.get(BEST_COMPILE_KEY), record.get(BEST_TESTS_KEY)
+    if lo is None or hi is None:
+        return None
+    return FixProgress(int(lo), int(hi))
+
+
+def best_progress_fields(best: FixProgress) -> dict[str, int]:
+    """The persisted form of a floor — both tiers, never one collapsed count."""
+    return {BEST_COMPILE_KEY: best.compile_errors,
+            BEST_TESTS_KEY: best.failing_tests}
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,8 +162,11 @@ class LoopState:
 
 @dataclass
 class FloorStall:
-    """Floor-stall gauge for lower-is-better counts (rustc error count, remaining
-    stubs + last-pass failures). One `observe(count, signature=...)` per iteration:
+    """Floor-stall gauge for lower-is-better metrics (a :class:`FixProgress`, a
+    remaining-stub count, a last-pass failure count). Every observation on ONE
+    gauge must be the same metric type — a gauge fed rustc error counts on some
+    attempts and failing-test counts on others measures nothing.
+    One `observe(count, signature=...)` per iteration:
     a strict decrease of the floor resets the stall counter, anything else
     increments it. `signature` is an equality-comparable snapshot of the errors
     (e.g. a frozenset of "file:code" strings); `repeated` is True when two
@@ -109,13 +179,13 @@ class FloorStall:
     `run_refine_loop`; FloorStall is the minimal gauge for inner loops that
     keep their own history/prompt machinery.
     """
-    best: int | None = None
+    best: Comparable | None = None
     stalls: int = 0
     observations: int = 0
     repeated: bool = False
     _prev_sig: object = None
 
-    def observe(self, count: int, signature: object = None) -> bool:
+    def observe(self, count: Comparable, signature: object = None) -> bool:
         """Record one iteration's count; returns True when the floor improved."""
         self.observations += 1
         improved = self.best is None or count < self.best

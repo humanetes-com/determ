@@ -41,7 +41,7 @@ from pipeline_core.domain.models import (
     FnLocator,
     Stub,
 )
-from pipeline_core.domain.refine import FloorStall
+from pipeline_core.domain.refine import FixProgress, FloorStall
 from pipeline_core.domain.test_results import parse_failed_tests
 from pipeline_core.ports.fill_engine import (
     Cargo,
@@ -56,6 +56,14 @@ from pipeline_core.ports.fill_engine import (
 )
 from pipeline_core.prompts.context import PerFnFixSections
 from pipeline_core.prompts.per_fn import build_per_fn_fix_prompt
+
+
+def _best_fails(gauge: FloorStall) -> int:
+    """The test-fix gauge's floor as a plain count, for telemetry/status that
+    needs a number. This gauge only ever sees compiled attempts, so the floor
+    is always a test-tier `FixProgress`; None means "no observation yet"."""
+    best = gauge.best
+    return best.failing_tests if isinstance(best, FixProgress) else 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -710,7 +718,7 @@ class PhaseCFillEngine:
                             )
                             _iter_ctx["cur"] = cur_fail_count
                             _iter_ctx["fns"] = list(fns_to_retry)
-                            return FixOutcome("failed", err_count=new_fail_count)
+                            return FixOutcome("failed", metric=FixProgress(0, new_fail_count))
 
                         def _on_test_fix_failure(attempt_n: int, outcome: FixOutcome,
                                                  gauge: FloorStall, *,
@@ -721,18 +729,18 @@ class PhaseCFillEngine:
                                 "cluster": cluster_name, "pass_n": pass_n,
                                 "iter": attempt_n,
                                 "prev_fail_count": _iter_ctx["cur"],
-                                "new_fail_count": outcome.err_count,
-                                "delta": outcome.err_count - _iter_ctx["cur"],
-                                "best": gauge.best,
+                                "new_fail_count": outcome.metric.failing_tests,
+                                "delta": outcome.metric.failing_tests - _iter_ctx["cur"],
+                                "best": _best_fails(gauge),
                                 "improved": gauge.stalls == 0,
                                 "stalled": gauge.stalls,
                                 "fns_retried": [f"{r}::{f}" for r, f in _iter_ctx["fns"]],
                             })
                             self.tel.log(f"  [phase-c/per-fn] pass {pass_n} test-fix iter "
                                          f"{attempt_n}: "
-                                         f"{_iter_ctx['cur']}→{outcome.err_count} failures "
+                                         f"{_iter_ctx['cur']}→{outcome.metric.failing_tests} failures "
                                          f"(floor={gauge.best}, stall={gauge.stalls}).")
-                            _stall_seen["best"] = gauge.best or 0
+                            _stall_seen["best"] = _best_fails(gauge)
                             _stall_seen["stalls"] = gauge.stalls
 
                         def _on_test_fix_stall(attempt_n: int, gauge: FloorStall, *,
@@ -750,7 +758,7 @@ class PhaseCFillEngine:
                             stop_context="test fix",
                             on_failure=_on_test_fix_failure,
                             on_stall=_on_test_fix_stall,
-                            initial_floor=_entry_fail_count,
+                            initial_floor=FixProgress(0, _entry_fail_count),
                             check_stop=self.tel.check_stop,
                         )
                         # P7.6 floor for the pass-level gauge.

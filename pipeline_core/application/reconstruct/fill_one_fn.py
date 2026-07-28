@@ -42,7 +42,12 @@ from pipeline_core.domain.behaviour_select import select_usage_examples
 from pipeline_core.domain.cfg import filter_cfg_inactive_branches
 from pipeline_core.domain.models import FillResult, FnLocator, FnSite, Stub
 from pipeline_core.domain.reconstruction import SpliceOutcome
-from pipeline_core.domain.refine import FloorStall
+from pipeline_core.domain.refine import (
+    FixProgress,
+    FloorStall,
+    best_progress_fields,
+    best_progress_of,
+)
 from pipeline_core.domain.retro_gate import (
     ConvictionEvidence,
     ConvictionStanding,
@@ -254,6 +259,12 @@ class FillOneFn:
         last_response = ""
         last_body = ""
         error_excerpt = ""
+        # The last failed attempt's REAL two-tier metric. Kept, not
+        # re-derived from the error excerpt: a test-failure excerpt carries no
+        # rustc E-codes, so re-parsing it scores every compiled-but-red
+        # attempt as 0 errors — and 0 can never beat a prior 0, which parked
+        # fns the moment they stopped failing to compile.
+        last_metric: FixProgress | None = None
         # debt #46: a behavioral re-fill enters the loop already "in fix mode" —
         # seed the current wrong body + a behavioral instruction so attempt 1 is
         # a corrective fix (build_per_fn_fix_prompt) with the failing test shown,
@@ -304,7 +315,7 @@ class FillOneFn:
         def _attempt_fn_fill(fix_attempt: int) -> FixOutcome:
             nonlocal attempts, sig_text, last_response, \
                 last_body, error_excerpt, first_failed_body, \
-                first_error_excerpt, retro_bound_methods
+                first_error_excerpt, retro_bound_methods, last_metric
             attempts += 1
             cur_text = file_path.read_text(encoding="utf-8")
             # E/R3: strip inactive #[cfg] branches so the model sees only the
@@ -640,6 +651,14 @@ class FillOneFn:
             # empty and never stall).
             cur_err_sig = (_u2_fail_sig if _u2_fail_sig is not None
                            else cargo_err_sig(cargo_out))
+            # An attempt that reached the test gate COMPILED — its compile tier
+            # is 0, so it strictly beats every red attempt no matter how many
+            # tests are still failing. Scoring both on one count made the first
+            # compiling attempt look like a regression and stalled the loop out.
+            _compiled = _u2_fail_sig is not None
+            cur_metric = FixProgress(
+                compile_errors=0 if _compiled else max(1, len(cur_err_sig)),
+                failing_tests=len(cur_err_sig) if _compiled else 0)
             # P2: record this failed attempt for the prior-attempts block.
             # We store the focused excerpt (already tier-sliced) so the
             # next prompt sees what really failed without re-paying budget.
@@ -649,12 +668,13 @@ class FillOneFn:
                 "attempt": fix_attempt,
                 "body": body,
                 "error_sig": _focused,
-                "outcome": "compile_fail",
+                # A compiling body whose tests failed is NOT a compile failure;
+                # labelling it one tells the next prompt (PRIOR_ATTEMPTS) to
+                # re-fight an error the attempt had already solved.
+                "outcome": "test_fail" if _compiled else "compile_fail",
             })
-            # P7.2: floor-stall metric — rustc error count (the driver's
-            # FloorStall observes it and owns the stall/repeated exits).
-            cur_err_count = len(cur_err_sig)
             last_body = body
+            last_metric = cur_metric
             error_excerpt = self.cargo.focus_errors(cargo_out, rel_file)
             # Revert to snapshot before returning; the model will see
             # the file as unimplemented again but with last_body + errors
@@ -672,7 +692,7 @@ class FillOneFn:
                          f"(attempt {fix_attempt}); "
                          f"codes={_codes or '—'}; re-prompting with errors.")
             return FixOutcome("failed", err_sig=cur_err_sig,
-                              err_count=cur_err_count)
+                              metric=cur_metric)
 
         def _on_fn_failure(attempt_n: int, outcome: FixOutcome,
                            gauge: FloorStall) -> None:
@@ -681,15 +701,16 @@ class FillOneFn:
                 "cluster": ctx.cluster_name, "pass_n": ctx.pass_n,
                 "file": rel_file, "fn": fn_name,
                 "iter": attempt_n,
-                "metric_new": outcome.err_count,
-                "metric_best": gauge.best,
+                "metric_new": outcome.metric.compile_errors,
+                "metric_new_failing_tests": outcome.metric.failing_tests,
+                "metric_best": str(gauge.best),
                 "improved": gauge.stalls == 0,
                 "stalled": gauge.stalls,
             })
 
         def _on_fn_stall(attempt_n: int, gauge: FloorStall) -> None:
             self.tel.log(f"  [phase-c/per-fn] {fn_name}: floor stalled at "
-                         f"{gauge.best} errors for {gauge.stalls} iter(s) — "
+                         f"{gauge.best} for {gauge.stalls} iter(s) — "
                          f"stopping fix loop (attempt {attempt_n}).")
 
         def _on_fn_repeated(attempt_n: int, gauge: FloorStall) -> None:
@@ -740,7 +761,7 @@ class FillOneFn:
                 _retro_k = self.retros.retro_key(rel_file, fn_name, container)
                 _prior = _retros.get(_retro_k, {})
                 _prior_count = int(_prior.get("retrospective_count", 0))
-                _prior_best = _prior.get("best_error_count")
+                _prior_best = best_progress_of(_prior)
                 # The diagnosis is asked to build ON the prior lesson — a lesson
                 # this layout disproves would just be restated in the new one.
                 _prior_guidance = admissible_guidance(
@@ -773,9 +794,10 @@ class FillOneFn:
                 # now (no body change can fix a downstream break).
                 _downstream = _signal == "downstream_only"
                 if not _transient:
-                    _cur_errs = len(cargo_err_sig(
-                        error_excerpt or first_error_excerpt or ""
-                    ))
+                    # The attempt's own metric, not a re-parse of its text.
+                    _cur_progress = last_metric or FixProgress(
+                        len(cargo_err_sig(
+                            error_excerpt or first_error_excerpt or "")), 0)
                     # First retro for this fn establishes a baseline —
                     # no prior to compare, so we never exhaust on
                     # round 1. Subsequent retros exhaust unless
@@ -785,15 +807,15 @@ class FillOneFn:
                         _improved = False
                         _full_exhaust = False
                     elif _prior_best is None:
-                        _new_best = _cur_errs
+                        _new_best = _cur_progress
                         _improved = True
                         _full_exhaust = (
                             _retro.get("category") in ("GENUINELY_HARD",
                                                        "FROZEN_BOUND_MISMATCH")
                         )
                     else:
-                        _new_best = min(int(_prior_best), _cur_errs)
-                        _improved = _cur_errs < int(_prior_best)
+                        _new_best = min(_prior_best, _cur_progress)
+                        _improved = _cur_progress < _prior_best
                         _full_exhaust = (
                             # FROZEN_BOUND_MISMATCH: structurally proven
                             # unsatisfiable — park immediately like
@@ -812,8 +834,10 @@ class FillOneFn:
                         "guidance": _retro.get("guidance", ""),
                         "signal": _signal,
                         "retrospective_count": _new_count,
-                        "error_count": _cur_errs,
-                        "best_error_count": _new_best,
+                        "error_count": _cur_progress.compile_errors,
+                        "failing_test_count": _cur_progress.failing_tests,
+                        **(best_progress_fields(_new_best)
+                           if _new_best is not None else {}),
                         "fully_exhausted": _full_exhaust,
                         "last_error_preview": (error_excerpt or "")[:240],
                     }, _provenance, _evidence)
@@ -826,7 +850,7 @@ class FillOneFn:
                     self.tel.log(f"  [phase-c/retro] {fn_name} "
                                  f"[{_retro.get('category','?')}] "
                                  f"signal={_signal} "
-                                 f"errs={_cur_errs} "
+                                 f"errs={_cur_progress} "
                                  f"(prior_best={_prior_best}, "
                                  f"improved={_improved}, "
                                  f"exhausted={_full_exhaust}): "
@@ -837,8 +861,9 @@ class FillOneFn:
                         "category": _retro.get("category", ""),
                         "signal": _signal,
                         "retrospective_count": _new_count,
-                        "error_count": _cur_errs,
-                        "best_error_count": _new_best,
+                        "error_count": _cur_progress.compile_errors,
+                        "failing_test_count": _cur_progress.failing_tests,
+                        "best_error_count": str(_new_best),
                         "improved": _improved,
                         "fully_exhausted": _full_exhaust,
                         "preview": _retro.get("guidance", "")[:200],

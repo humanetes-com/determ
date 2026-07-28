@@ -55,7 +55,12 @@ from pipeline_core.domain.models import (
     TypeRecord,
 )
 from pipeline_core.domain.reconstruction import SpliceOutcome
-from pipeline_core.domain.refine import FloorStall
+from pipeline_core.domain.refine import (
+    FixProgress,
+    FloorStall,
+    best_progress_fields,
+    best_progress_of,
+)
 from pipeline_core.domain.retro_gate import (
     ConvictionEvidence,
     ConvictionStanding,
@@ -987,6 +992,11 @@ def fill_impl_blocks(
                 file_text=snapshot, current_error="",
             )
         last_error_excerpt = ""
+        # The last failed attempt's REAL two-tier metric. Re-deriving it from
+        # `last_error_excerpt` scores a compiled-but-red block as 0 errors —
+        # test output carries no rustc E-codes — and 0 never beats a prior 0,
+        # so a block was parked the round after it started compiling.
+        last_metric: FixProgress | None = None
         last_response = ""
         members_filled_this_block = 0
         block_already_complete = False  # debt #42: all-target_not_stub ⇒ done
@@ -1059,7 +1069,7 @@ def fill_impl_blocks(
             """Route → splice → cargo-verify one parsed reply. Shared by the
             budgeted attempts and the P6 maximal last-resort attempt."""
             nonlocal fns_filled_total, impls_filled, last_error_excerpt, \
-                members_filled_this_block, block_already_complete
+                members_filled_this_block, block_already_complete, last_metric
             # Hold the global splice+cargo lock while we mutate and check.
             with _splice_check_lock:
                 # Monotone ratchet baseline: the cluster's runtime test state
@@ -1237,8 +1247,12 @@ def fill_impl_blocks(
                          f"{_cmp.summary} (attempt {fix_attempt}).")
                     last_error_excerpt = _regr_detail
                     _rsig = _cmp.signature
+                    last_metric = FixProgress(0, max(1, len(_rsig)))
+                    # rc==0 got us here, so the block COMPILES — its regression
+                    # is a test-tier loss, never a compile-tier one.
                     return FixOutcome("failed", err_sig=_rsig,
-                                      err_count=max(1, len(_rsig)))
+                                      metric=FixProgress(
+                                          0, max(1, len(_rsig))))
                 if rc == 0 and (not _u2_impl_reject or _bank_impl is not None):
                     if _u2_external_only and _u2_impl is not None:
                         _emit("phase_c.u2.external_only", data={
@@ -1315,7 +1329,13 @@ def fill_impl_blocks(
                 cur_err_sig = (_u2_impl.self_failures
                                if _u2_impl_reject and _u2_impl is not None
                                else _cargo_err_sig_from_diagnostics(diagnostics))
-                cur_err_count = max(1, len(cur_err_sig))  # rc-honest minimum
+                # Two tiers, never one count: a U2 self-failure means the block
+                # COMPILED, so its compile tier is 0 and it strictly beats every
+                # red attempt regardless of how many tests are still failing.
+                cur_metric = (
+                    FixProgress(0, max(1, len(cur_err_sig))) if _u2_impl_reject
+                    else FixProgress(max(1, len(cur_err_sig)), 0))
+                last_metric = cur_metric
                 # P7: whole rustc diagnostics (count-capped) when the JSON
                 # path yielded them; the char-budgeted text focus is fallback.
                 last_error_excerpt = (
@@ -1329,14 +1349,14 @@ def fill_impl_blocks(
                 # above. Revert; the driver decides whether to retry.
                 file_path.write_text(snapshot, encoding="utf-8")
                 return FixOutcome("failed", err_sig=cur_err_sig,
-                                   err_count=cur_err_count)
+                                   metric=cur_metric)
 
         def _on_impl_failure(attempt_n: int, outcome: FixOutcome,
                              gauge: FloorStall) -> None:
             _codes = sorted(ecodes_in_text(last_error_excerpt))
             _kind = "U2 test" if not _codes and last_error_excerpt else "compile"
             _log(f"  [phase-c/impl] {block_id}: {_kind} failed "
-                 f"(attempt {attempt_n}); errs={outcome.err_count} "
+                 f"(attempt {attempt_n}); errs={outcome.metric} "
                  f"codes={_codes or '—'} "
                  f"floor={gauge.best} stall={gauge.stalls}.")
 
@@ -1428,10 +1448,12 @@ def fill_impl_blocks(
             # (llm_error/empty_response) update no state and never retry.
             _retry_informed = False
             try:
-                cur_errs = len(_cargo_err_sig(last_error_excerpt))
+                # The attempt's own metric, not a re-parse of its text.
+                cur_progress = last_metric or FixProgress(
+                    len(_cargo_err_sig(last_error_excerpt)), 0)
                 prior = retros_cache.get(
                     _retro_key(block.file, "*impl*", block.container), {})
-                prior_best = prior.get("best_error_count")
+                prior_best = best_progress_of(prior)
                 retro = _phase_c_retrospective(
                     fn_name="*impl*",
                     sig_text=block.container,
@@ -1458,13 +1480,13 @@ def fill_impl_blocks(
                     improved = False
                     full_exhaust = False
                 elif prior_best is None:
-                    new_best = cur_errs
+                    new_best = cur_progress
                     improved = True
                     full_exhaust = retro.get("category") in (
                         "GENUINELY_HARD", "FROZEN_BOUND_MISMATCH")
                 else:
-                    new_best = min(int(prior_best), cur_errs)
-                    improved = cur_errs < int(prior_best)
+                    new_best = min(prior_best, cur_progress)
+                    improved = cur_progress < prior_best
                     full_exhaust = (
                         retro.get("category") in ("GENUINELY_HARD",
                                                   "FROZEN_BOUND_MISMATCH")
@@ -1488,8 +1510,10 @@ def fill_impl_blocks(
                         "guidance": retro.get("guidance", ""),
                         "signal": _signal,
                         "retrospective_count": int(prior.get("retrospective_count", 0)) + 1,
-                        "error_count": cur_errs,
-                        "best_error_count": new_best,
+                        "error_count": cur_progress.compile_errors,
+                        "failing_test_count": cur_progress.failing_tests,
+                        **(best_progress_fields(new_best)
+                           if new_best is not None else {}),
                         "fully_exhausted": full_exhaust,
                         "last_error_preview": last_error_excerpt[:240],
                     }, _prov, _block_evidence)
