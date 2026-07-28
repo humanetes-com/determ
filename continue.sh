@@ -38,7 +38,6 @@ source "$SCRIPT_DIR/lib/pipeline_pids.sh"
 
 _YES=false
 _FORCE=false
-_WIPE=false
 _KEEP_AUGMENTED=false
 _NO_TAIL=false
 for _arg in "$@"; do
@@ -46,7 +45,16 @@ for _arg in "$@"; do
     [[ "$_arg" == "--force" ]]          && _FORCE=true
     # --graceful kept for back-compat; now the default (no-op).
     [[ "$_arg" == "--graceful" ]]       && true
-    [[ "$_arg" == "--wipe" ]]           && _WIPE=true && _YES=true
+    # --wipe is GONE (see the note above the launch block): it truncated the
+    # run log and re-cloned the workspace, destroying the only two records of
+    # what earlier runs achieved. Refuse loudly rather than silently resuming.
+    [[ "$_arg" == "--wipe" ]] && {
+        echo "continue.sh: --wipe has been removed — it discarded the run log" >&2
+        echo "  and the reconstruction, which are the evidence a plateau is" >&2
+        echo "  diagnosed from. To rebuild from upstream deliberately, invoke" >&2
+        echo "  pipeline.py with --repo <URL> --clean yourself." >&2
+        exit 2
+    }
     [[ "$_arg" == "--keep-augmented" ]] && _KEEP_AUGMENTED=true
     [[ "$_arg" == "--no-tail" ]]        && _NO_TAIL=true
 done
@@ -184,25 +192,21 @@ if [[ "$BACKEND" == "vllm" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Wipe: fresh log only. Workspace cleanup is owned by the pipeline.
-#
-# --wipe launches with `--repo <URL> --clean`, and pipeline.py's --clean path
-# does the complete reset itself: for a URL repo it rmtree's + re-clones from
-# upstream HEAD (setup_workspace, ~line 4212); then git_clean_reset (~line
-# 21703) runs `git reset --hard` + `git clean -fd` + checkout default branch,
-# wiping every gen_* block and working edit. A script-side cargo-clean/strip
-# would only duplicate that — and the old hardcoded tmp/anyhow-master path was
-# stale (workspace is tmp/<repo-name>, e.g. tmp/anyhow), so it never ran.
-# ---------------------------------------------------------------------------
-if [[ "$_WIPE" == true ]]; then
-    > "$LOG_DIR/pipeline_anyhow.log"
-fi
-
-# ---------------------------------------------------------------------------
 # Start the pipeline
+#
+# The run log is APPEND-ONLY here, and pipeline.py rolls it to
+# pipeline_anyhow.log.1/.2/... rather than dropping its head — comparing a run
+# against the runs before it is how a multi-run plateau becomes visible at all,
+# and that comparison is impossible once the earlier segments are gone.
+#
+# There is deliberately no wipe path. `--wipe` used to truncate this log AND
+# launch `--repo <URL> --clean`, whose reset (setup_workspace re-clone, then
+# git_clean_reset's `git reset --hard` + `git clean -fd`) deletes every gen_*
+# block and recreates the pipeline branch — i.e. it threw away both the record
+# and the reconstruction in one flag. Rebuilding from upstream is a deliberate
+# act; invoke pipeline.py with those arguments directly when you mean it.
 # ---------------------------------------------------------------------------
 _PIPELINE_ARGS="--project anyhow --audit"
-[[ "$_WIPE" == true ]]           && _PIPELINE_ARGS="--repo https://github.com/dtolnay/anyhow --clean --audit"
 [[ "$_KEEP_AUGMENTED" == true ]] && _PIPELINE_ARGS="--project anyhow --restart-from-augmented --audit"
 
 # Final guard against a duplicate slipping in despite the flock (e.g. if

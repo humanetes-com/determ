@@ -56,7 +56,20 @@ fi
 
 > "$LLM_DEBUG_LOG"
 > "$LLM_STREAM_LOG"
-> "$LOG_DIR/pipeline_anyhow.log"
+# The run log is ARCHIVED, never truncated, even on a from-scratch restart: this
+# script wipes the reconstruction, so its log is the only surviving record of
+# what the previous attempt reached. Same numbering pipeline.py's rotation uses
+# (.1 newest), so a reader walks one sequence across both.
+if [ -s "$LOG_DIR/pipeline_anyhow.log" ]; then
+    _n=1
+    while [ -e "$LOG_DIR/pipeline_anyhow.log.$_n" ]; do _n=$((_n + 1)); done
+    while [ "$_n" -gt 1 ]; do
+        mv "$LOG_DIR/pipeline_anyhow.log.$((_n - 1))" "$LOG_DIR/pipeline_anyhow.log.$_n"
+        _n=$((_n - 1))
+    done
+    mv "$LOG_DIR/pipeline_anyhow.log" "$LOG_DIR/pipeline_anyhow.log.1"
+fi
+: > "$LOG_DIR/pipeline_anyhow.log"
 
 # Workspace cleanup is owned by the pipeline. This script always launches with
 # `--repo <repo> --clean`; pipeline.py's --clean path resets the workspace fully
@@ -96,7 +109,12 @@ fi
 
 cd "$SCRIPT_DIR"
 echo "Starting pipeline with repo: $_REPO"
-nohup .venv/bin/python pipeline.py --repo "$_REPO" --clean --audit > "$LOG_DIR/pipeline_anyhow.log" 2>&1 &
+# `>>`, not `>`: pipeline.py bounds this log by truncating it IN PLACE (it
+# cannot make the shell reopen a renamed file). A non-append descriptor keeps
+# its offset across that truncation and pads the file with NUL bytes up to the
+# old size; O_APPEND recomputes the offset to EOF on every write. The file was
+# archived and recreated empty just above, so `>>` starts from zero regardless.
+nohup .venv/bin/python pipeline.py --repo "$_REPO" --clean --audit >> "$LOG_DIR/pipeline_anyhow.log" 2>&1 &
 echo "Pipeline started (PID $!) — backend: $BACKEND"
 echo "Pipeline log : tail -f $LOG_DIR/pipeline_anyhow.log"
 echo "Server log   : tail -f $LOG_DIR/server.log"

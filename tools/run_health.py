@@ -17,10 +17,16 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from log_files import read_all  # noqa: E402
 from pass_delta import load_measurements, report  # noqa: E402
+from run_trend import workspace_created  # noqa: E402
 
 from pipeline_core.domain import model_notes as _mn  # noqa: E402
 from pipeline_core.domain.run_health import analyze, parse_iter_readings  # noqa: E402
+from pipeline_core.domain.run_history import (  # noqa: E402
+    analyze_history,
+    parse_run_summaries,
+)
 
 
 def segment_lines(log: Path) -> list[str]:
@@ -53,12 +59,21 @@ def main() -> int:
         except Exception:
             pass
 
-    findings = analyze(seg, notes)
+    # Cross-RUN findings run FIRST and are merged into the same list: every
+    # detector in `analyze` is scoped to one segment, so a plateau spanning
+    # several runs is unaskable there — which is how five consecutive runs each
+    # read as healthy while the score had not moved in 46 hours. This is the
+    # one step every operator pass already performs, so the cross-run question
+    # gets asked whether or not anyone thinks to ask it.
+    history = parse_run_summaries(read_all(Path(args.log)))
+    findings = analyze_history(
+        history, workspace_created=workspace_created(Path(args.project)),
+    ) + analyze(seg, notes)
     readings = parse_iter_readings(seg)
 
     if not args.brief:
         print(f"run-health — segment lines={len(seg)} notes={len(notes)} "
-              f"iter readings={len(readings)}")
+              f"iter readings={len(readings)} runs in history={len(history)}")
     # Cross-RUN pass-count comparability: `analyze` only ever sees one segment,
     # so a denominator that moved across a restart cannot be caught there — and
     # an incomparable delta read as progress is how a plateau gets declared over.

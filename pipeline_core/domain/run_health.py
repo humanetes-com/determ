@@ -43,6 +43,8 @@ class HealthKind(StrEnum):
     CLUSTER_COMPILE_BROKEN = "cluster_compile_broken"  # test binaries never built — no fill route can fix it
     MEMBERSHIP_FILTER_EMPTIED = "membership_filter_emptied"  # cfg filter dropped 100% of the stubs on disk
     ROUTING_DROP = "routing_drop"                # model answered; the body matched no container and was discarded
+    PLATEAU_ACROSS_RUNS = "plateau_across_runs"  # same score in N consecutive RUNS — invisible inside any one of them
+    WORKSPACE_RESET = "workspace_reset"          # reconstruction was wiped; scores before it describe a tree that no longer exists
 
 
 @dataclass(frozen=True, slots=True)

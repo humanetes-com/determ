@@ -301,7 +301,7 @@ MODEL_CONTEXT_CHARS = SETTINGS.model_context_chars
 
 _GUARD_LOG        = os.getenv("PIPELINE_GUARD_LOG",   str(Path(__file__).parent / "logs" / "pipeline_guards.log"))
 _PIPELINE_LOG     = os.getenv("PIPELINE_LOG",         str(Path(__file__).parent / "logs" / "pipeline_anyhow.log"))
-_LOG_MAX_BYTES    = 512 * 1024   # keep last 512 KB in pipeline_anyhow.log
+_LOG_MAX_BYTES    = 512 * 1024   # roll pipeline_anyhow.log at 512 KB (.1, .2, … keep the rest)
 _LOG_TRIM_EVERY   = 50           # check file size every N _log() calls
 _log_trim_counter = 0
 _RUN_REGISTRY     = Path(os.getenv("PIPELINE_RUN_REGISTRY", "/tmp/determ_pipelines.json"))
@@ -574,7 +574,7 @@ def _log(msg: str):
     _log_trim_counter += 1
     if _log_trim_counter >= _LOG_TRIM_EVERY:
         _log_trim_counter = 0
-        _log_rotation.trim_head(_PIPELINE_LOG, _LOG_MAX_BYTES)
+        _log_rotation.rotate(_PIPELINE_LOG, _LOG_MAX_BYTES)
 
 
 def _resolve_stdout_path() -> str | None:
