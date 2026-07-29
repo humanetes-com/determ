@@ -2,7 +2,7 @@
 
 Relocated verbatim from pipeline.py (slice 5b foundation). These are pure functions over
 cargo/pytest *output text* and pass/fail counts — no I/O, no pipeline deps — so tasks
-(task3/task4 and the FR-024 loops) import them instead of carrying them in a deps record.
+(task3/task4 and the loops) import them instead of carrying them in a deps record.
 
 Note: the regex here parses tool *output* (cargo/nextest/pytest), for which there is no
 structured parser to use — distinct from source parsing, which goes through the syn
@@ -18,7 +18,7 @@ from typing import NamedTuple
 
 
 class ClusterStatus(StrEnum):
-    """The strict per-cluster TASK 3 verdict (FR-024). A `StrEnum` so existing
+    """The strict per-cluster TASK 3 verdict. A `StrEnum` so existing
     ``status == "pass"`` comparisons keep working while the vocabulary is now
     explicit and exhaustive."""
 
@@ -117,7 +117,7 @@ def parse_test_counts(test_output: str) -> tuple[int, int, int]:
     across every `test result:` line. Returns (0, 0, 0) when not
     parseable.
 
-    Used by FR-024 improvement-driven loops (the metric for "is the
+    Used by improvement-driven loops (the metric for "is the
     pipeline making progress on tests?") and by older single-shot
     callers that just need passed+failed (ignored is appended and the
     older callers unpack only the first two — Python tolerates this
@@ -227,7 +227,7 @@ def validate_task3_output_strict(
     pass_count: int, fail_count: int, ignored_count: int,
     expected_count: int, cluster_name: str,
 ) -> tuple[str, str]:
-    """FR-024 strict acceptance for TASK 3 per cluster. Returns (status, reason)
+    """strict acceptance for TASK 3 per cluster. Returns (status, reason)
     where status is 'pass' | 'fail' | 'incomplete'.
 
     Pass criteria (ALL must hold):
@@ -562,7 +562,7 @@ def parse_rustc_compile_errors(build_output: str) -> list[RustcDiagnostic]:
 
 def compile_gate_reason(cluster_name: str, cargo_output: str) -> str | None:
     """Refined 'incomplete' reason when a nonzero-rc run reported 0 tests
-    because the lib failed to compile (debt #34): name the real gate — error
+    because the lib failed to compile: name the real gate — error
     count + first diagnostic — instead of the opaque "some binary failed to
     compile or crashed". Returns None when no rustc error is parseable
     (genuine crash/timeout — keep the generic wording)."""
@@ -1218,7 +1218,10 @@ class RegressionComparison:
     newly-filled constructor lets tests reach a still-stubbed Drop). Judging
     these as regressions convicted every partial fill of a coupled family for
     sibling stubs it cannot control. ``excluded_crashed`` — crashed in both
-    readings: pre-existing, excluded, never blamed."""
+    readings: pre-existing, excluded, never blamed. ``crash_lost_pass`` — how
+    many tests those ``newly_crashed`` binaries were passing at baseline, i.e.
+    what the crash actually COST, so the verdict can weigh it against what the
+    fill bought elsewhere instead of vetoing on the crash alone."""
 
     newly_red: frozenset[str]
     newly_crashed: tuple[str, ...]
@@ -1230,12 +1233,31 @@ class RegressionComparison:
     base_executed: int
     cur_executed: int
     crashed_all_red: tuple[str, ...] = ()
+    crash_lost_pass: int = 0
+
+    @property
+    def net_pass_delta(self) -> int:
+        """Tests gained minus tests lost, across the WHOLE measured suite —
+        crashed-after binaries counted as losing everything they passed."""
+        return (self.cur_pass - self.base_pass) - self.crash_lost_pass
 
     @property
     def regressed(self) -> bool:
-        return bool(self.newly_red or self.newly_crashed
-                    or self.cur_pass < self.base_pass
-                    or self.cur_executed < self.base_executed)
+        """A fill is a regression iff it does not pay for what it costs.
+
+        The objective is the oracle pass count, so a change that raises it is
+        an improvement even when some individual test moved red or a binary
+        started aborting — refusing a +40/-1 fill is not conservatism, it
+        loses the run. Below a strict net gain the old absolute rule stands:
+        no test may be lost for nothing. Vanished tests inside a binary that
+        still completed are never traded away at any price — that is oracle
+        corruption, not a behavioural cost."""
+        if self.cur_executed < self.base_executed:
+            return True
+        if self.net_pass_delta > 0:
+            return False
+        return bool(self.net_pass_delta < 0
+                    or self.newly_red or self.newly_crashed)
 
     @property
     def summary(self) -> str:
@@ -1245,7 +1267,8 @@ class RegressionComparison:
         different fixes, and the log is where that distinction is read."""
         if self.newly_crashed:
             plural = "ies" if len(self.newly_crashed) > 1 else "y"
-            return f"binar{plural} crashed: {list(self.newly_crashed)}"
+            return (f"binar{plural} crashed: {list(self.newly_crashed)} "
+                    f"(net {self.net_pass_delta:+d} test(s))")
         if self.newly_red:
             return f"newly red: {sorted(self.newly_red)}"
         if self.cur_pass < self.base_pass:
@@ -1276,10 +1299,11 @@ def compare_readings(base: TestStateReading,
     """Binary-scoped regression comparison. Only binaries complete in BOTH
     readings contribute verdicts/counts; a binary that crashed at baseline is
     excluded no matter what it printed after (its readings are noise); a
-    binary that was complete at baseline and crashed after is a regression
-    IFF anything passed in it at baseline — an all-red binary that starts
-    crashing lost nothing that worked (only the failure mode moved, panic →
-    abort), so it is reported separately and never convicts."""
+    binary that was complete at baseline and crashed after COSTS whatever it
+    was passing — an all-red binary that starts crashing lost nothing that
+    worked (only the failure mode moved, panic → abort), so it is reported
+    separately and costs zero. Whether a cost convicts is
+    :attr:`RegressionComparison.regressed`'s call, not this function's."""
     base_by, cur_by = base.by_label(), cur.by_label()
     measured: list[str] = []
     newly_crashed: list[str] = []
@@ -1287,7 +1311,7 @@ def compare_readings(base: TestStateReading,
     excluded: list[str] = []
     not_run: list[str] = []
     newly_red: set[str] = set()
-    base_pass = cur_pass = base_exec = cur_exec = 0
+    base_pass = cur_pass = base_exec = cur_exec = crash_lost = 0
     for label, b in base_by.items():
         c = cur_by.get(label)
         if not b.completed:
@@ -1305,6 +1329,7 @@ def compare_readings(base: TestStateReading,
                 crashed_all_red.append(label)
             else:
                 newly_crashed.append(label)
+                crash_lost += b.pass_count
             continue
         measured.append(label)
         newly_red |= (c.failed - b.failed)
@@ -1320,7 +1345,8 @@ def compare_readings(base: TestStateReading,
         measured=tuple(sorted(measured)),
         base_pass=base_pass, cur_pass=cur_pass,
         base_executed=base_exec, cur_executed=cur_exec,
-        crashed_all_red=tuple(sorted(crashed_all_red)))
+        crashed_all_red=tuple(sorted(crashed_all_red)),
+        crash_lost_pass=crash_lost)
 
 
 def render_regression_detail(cmp: RegressionComparison) -> str:
@@ -1333,8 +1359,9 @@ def render_regression_detail(cmp: RegressionComparison) -> str:
         head = (f"This made test binar{'ies' if len(cmp.newly_crashed) > 1 else 'y'} "
                 f"{list(cmp.newly_crashed)} CRASH before reporting results "
                 "(e.g. segfault from bad unsafe code) — they completed fine "
-                "before this change. Write a body that lets every test binary "
-                "build and run to completion.")
+                f"before this change, where they passed {cmp.crash_lost_pass} "
+                "test(s). Write a body that lets every test binary build and "
+                "run to completion.")
     elif cmp.newly_red:
         head = ("This compiled, but it REGRESSED previously-passing test(s): "
                 f"{sorted(cmp.newly_red)} (cluster pass count {cmp.base_pass}→"

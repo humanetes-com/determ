@@ -435,7 +435,7 @@ def test_regression_gate_flags_newly_crashed_binary() -> None:
     assert cmp.newly_red == frozenset()
     assert cmp.newly_crashed == ("tests/a.rs",)
     # the log summary must name the CRASH, not fall back to "pass-count drop"
-    assert cmp.summary == "binary crashed: ['tests/a.rs']"
+    assert cmp.summary == "binary crashed: ['tests/a.rs'] (net -2 test(s))"
     assert cmp.signature == frozenset({"__binary_crash__:tests/a.rs"})
     assert "CRASH" in msg and "tests/a.rs" in msg
 

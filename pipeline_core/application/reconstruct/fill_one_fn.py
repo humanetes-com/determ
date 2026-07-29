@@ -114,9 +114,9 @@ class FillOneFn:
         The stub panics, which aborts the test binary and un-judges every
         sibling test in it, so a compiling body is what the outer TDD loop wants
         to iterate on even when this fn's own tests still fail. Kept only if it
-        still compiles here AND reddens nothing that is green with the stub —
-        the baseline is captured now, against the stub, because that is the
-        state the keep is being compared against."""
+        still compiles here AND is not a net loss against the stub — the
+        baseline is captured now, against the stub, because that is the state
+        the keep is being compared against."""
         best = salvage.best
         if best is None:
             return False
@@ -221,7 +221,7 @@ class FillOneFn:
         # find this specific record's current location.
         loc_at = self.mut.locate_fn_by_record(file_path, fn_name, container, sig_text,
                                                rec.cfg_predicates)
-        _cur_body = ""   # debt #46: current (wrong) body for a behavioral re-fill
+        _cur_body = ""   # current (wrong) body, for a behavioural re-fill
         if loc_at is None:
             # Fall back to regex locator (for tests-fixture path where
             # the extractor binary isn't built).
@@ -230,9 +230,11 @@ class FillOneFn:
                 return fill_skip(rec, attempts)
             sig_text = sig_text or loc[0]
         else:
-            _, _cbs, _cbe, sig_text = loc_at
+            sig_text = loc_at.sig_text
             if rec.refill:
-                _cur_body = snapshot[_cbs:_cbe]
+                # From the locator's own read, never sliced out of `snapshot`:
+                # that image predates this unit queueing for the splice lock.
+                _cur_body = loc_at.body_text
         # `snapshot` is the WHOLE FILE as it stood before this unit queued for
         # the splice lock. Under parallelism several units in the same file
         # snapshot the same starting state, so by the time a losing unit
@@ -277,7 +279,7 @@ class FillOneFn:
             "file": rel_file, "fn": fn_name,
             "tests_attached": len(test_blocks),
             "sig_chars": len(sig_text),
-            "refill": rec.refill,   # debt #46: behavioral re-fill of a wrong body
+            "refill": rec.refill,   # behavioral re-fill of a wrong body
         })
         # Monotone-ratchet baseline: cluster runtime test state BEFORE this fn's
         # OWN splice, so a fill whose own tests pass but which reddens a sibling
@@ -323,7 +325,7 @@ class FillOneFn:
         # reverting a compiling body to it un-judges every sibling test in that
         # binary. On exhaustion we restore this instead (regression-gated).
         salvage = CompilingSalvage()
-        # debt #46: a behavioral re-fill enters the loop already "in fix mode" —
+        # a behavioral re-fill enters the loop already "in fix mode" —
         # seed the current wrong body + a behavioral instruction so attempt 1 is
         # a corrective fix (build_per_fn_fix_prompt) with the failing test shown,
         # not a naive from-scratch stub fill.
@@ -336,7 +338,7 @@ class FillOneFn:
         attempts_log: list[str] = []
         first_failed_body = ""
         first_error_excerpt = ""
-        # Corrected R2/R3 (debt #28): carry the bound-provided method inventory
+        # Corrected R2/R3: carry the bound-provided method inventory
         # from the last gather so the exhaustion retro can redirect to a frozen
         # bound's trait method instead of mis-routing to GENUINELY_HARD.
         retro_bound_methods = ""
@@ -395,7 +397,7 @@ class FillOneFn:
             notes_section = _fn_ctx.notes_section
             _types_section_eff = _fn_ctx.types_section
             retro_bound_methods = _fn_ctx.bound_methods_section
-            # debt #46: a re-fill target is corrective from attempt 1 — take the
+            # a re-fill target is corrective from attempt 1 — take the
             # fix branch (prev_body + failing test) rather than the stub-fill one.
             if fix_attempt == 1 and not rec.refill:
                 prompt = build_per_fn_prompt(
@@ -427,7 +429,7 @@ class FillOneFn:
                         macros=ctx.macros_section, notes=notes_section,
                         container=container, types=_types_section_eff,
                         invariants=ctx.invariants_section,
-                        # FR-024: prior retrospective guidance — start from "what to
+                        # prior retrospective guidance — start from "what to
                         # try instead" rather than naive retry-with-errors. Judged
                         # against THIS attempt's file text: the store is shared by
                         # clusters with different private layouts, so guidance that
@@ -437,7 +439,7 @@ class FillOneFn:
                                 self.retros.retro_key(rel_file, fn_name, container),
                                 {}), cur_text, evidence=_evidence,
                             anchor_types=_anchor_types),
-                        # FR-024 fix 3: hoist already-filled sibling fn impls (same
+                        # hoist already-filled sibling fn impls (same
                         # name, different container) — best target-body source.
                         siblings=self.prompt.collect_sibling_filled_bodies(
                             cur_text, fn_name, container),
@@ -505,10 +507,9 @@ class FillOneFn:
                 # A behavioral re-fill target replaces an already-filled
                 # (compiling-but-wrong) body → the splice must accept a non-stub.
                 if _loc is not None:
-                    _, _lbs, _lbe, _ = _loc
                     return self.mut.splice_fn_body_at(
-                        file_path, _lbs, _lbe, body, allow_nonstub=rec.refill,
-                        fn_name=fn_name)
+                        file_path, _loc.body_byte_start, _loc.body_byte_end,
+                        body, allow_nonstub=rec.refill, fn_name=fn_name)
                 # Fallback: bare-name locator. Less accurate for
                 # same-name collisions but acceptable when the syn
                 # binary isn't available.
@@ -525,12 +526,10 @@ class FillOneFn:
             _race_detected = False
             if not splice_out.ok and splice_out.reason == "target_not_stub":
                 try:
-                    _cur_text = file_path.read_text(encoding="utf-8")
                     _race_loc = self.mut.locate_fn_by_record(
                         file_path, fn_name, container, sig_text, rec.cfg_predicates)
                     if _race_loc is not None:
-                        _, _race_bs, _race_be, _ = _race_loc
-                        _race_cur_body = _cur_text[_race_bs:_race_be]
+                        _race_cur_body = _race_loc.body_text
                         if not is_unimplemented_body(_race_cur_body):
                             def _norm(s: str) -> str:
                                 return " ".join(s.split())
@@ -548,7 +547,8 @@ class FillOneFn:
                                     "file": rel_file, "fn": fn_name,
                                 })
                                 _rest = self.mut.splice_fn_body_at(
-                                    file_path, _race_bs, _race_be,
+                                    file_path, _race_loc.body_byte_start,
+                                    _race_loc.body_byte_end,
                                     _own_pre_image, allow_nonstub=True,
                                     allow_stub_body=True)
                                 if _rest.ok:
@@ -818,7 +818,7 @@ class FillOneFn:
             if success:
                 break
 
-            # FR-024 retrospective: actively diagnose why the fix loop
+            # retrospective: actively diagnose why the fix loop
             # exhausted and prescribe a different strategy for the next
             # attempt. Persisted across module iterations. Runs on EVERY
             # failed round so the improvement gate always has a fresh

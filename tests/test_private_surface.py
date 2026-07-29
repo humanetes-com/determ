@@ -326,3 +326,59 @@ def test_pub_fields_component_is_layout_sensitive_without_reachability():
         fields=(FieldRecord(name="n", ty="usize", is_pub=False),))
     s = classify_private_surface([lone], [], author_private_fields=True)
     assert s.component_is_layout_sensitive(s.components[0])
+
+
+def test_a_fn_gated_to_another_cluster_is_not_this_cluster_authorable() -> None:
+    """`pub(crate) fn provide` is `#[cfg]`-dead under `stable`, so no stable
+    compile can judge an authored replacement for it — and the one that landed
+    carried a different impl's receiver plus a doubled `#[cfg]`, invisible to
+    every stable run since. An item this cluster does not compile is not this
+    cluster's to re-author."""
+    from pipeline_core.domain.cfg import CfgSet
+
+    priv = TypeRecord(file="src/error.rs", kind="struct", name="ErrorImpl",
+                      definition="struct ErrorImpl { vtable: u8 }",
+                      is_pub=False, is_exactly_pub=False)
+    gated = FnRecord(file="src/error.rs", fn_name="provide",
+                     sig_text="pub(crate) fn provide(&self) -> ErrorImpl",
+                     cfg_predicates=("nightly",),
+                     is_pub=True, is_exactly_pub=False)
+    ungated = FnRecord(file="src/error.rs", fn_name="vtable",
+                       sig_text="fn vtable(&self) -> ErrorImpl",
+                       is_pub=False, is_exactly_pub=False)
+    stable = CfgSet.of(set(), {"nightly"})
+    names = {i.name for i in classify_private_surface(
+        [priv], [gated, ungated], cfg_set=stable).replaceable}
+    assert "vtable" in names and "provide" not in names
+    # Under the cluster that DOES compile it, it stays authorable.
+    night = CfgSet.of({"nightly"}, set())
+    assert "provide" in {i.name for i in classify_private_surface(
+        [priv], [gated, ungated], cfg_set=night).replaceable}
+
+
+def test_an_undecidable_cfg_keeps_the_item_authorable() -> None:
+    # Same conservative direction as the fill routes: only a definite False
+    # excludes. Guessing "exclude" would silently freeze a layout the model
+    # was meant to own, with no log line anywhere.
+    from pipeline_core.domain.cfg import CfgSet
+
+    priv = TypeRecord(file="src/e.rs", kind="struct", name="Own",
+                      definition="struct Own { p: u8 }",
+                      is_pub=False, is_exactly_pub=False)
+    fn = FnRecord(file="src/e.rs", fn_name="mk", sig_text="fn mk() -> Own",
+                  cfg_predicates=("some_unknown_flag",),
+                  is_pub=False, is_exactly_pub=False)
+    surf = classify_private_surface([priv], [fn],
+                                    cfg_set=CfgSet.of(set(), set()))
+    assert "mk" in {i.name for i in surf.replaceable}
+
+
+def test_no_cfg_set_leaves_the_classification_untouched() -> None:
+    priv = TypeRecord(file="src/e.rs", kind="struct", name="Own",
+                      definition="struct Own { p: u8 }",
+                      is_pub=False, is_exactly_pub=False)
+    fn = FnRecord(file="src/e.rs", fn_name="mk", sig_text="fn mk() -> Own",
+                  cfg_predicates=("nightly",),
+                  is_pub=False, is_exactly_pub=False)
+    assert "mk" in {i.name for i in
+                    classify_private_surface([priv], [fn]).replaceable}

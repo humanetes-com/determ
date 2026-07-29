@@ -326,3 +326,22 @@ def test_restore_frozen_signature_rolls_back_an_unparseable_result(tmp_path: Pat
     assert not restore_frozen_signature(f, "provide", "fn provide(&self) -> Vec<i32",
                                         validate_parse=lambda _p: False)
     assert f.read_text(encoding="utf-8") == before
+
+
+def test_location_carries_the_body_from_its_own_enumeration() -> None:
+    """The body must travel WITH the offsets. Three call sites had each written
+    `earlier_snapshot[body_byte_start:body_byte_end]`, which mixes byte offsets
+    into character indexing AND reads a pre-lock image — yielding a fragment
+    that spans the end of one body and the start of the next signature, which
+    was then written back as the fn's original body."""
+    loc = _loc([_rec(body_text="self.0 + 1")])
+    assert loc is not None
+    assert loc.body_text == "self.0 + 1"        # type: ignore[union-attr]
+    assert loc.sig_text == "fn f()"             # type: ignore[union-attr]
+
+
+def test_location_body_defaults_empty_when_the_record_omits_it() -> None:
+    # Fixture/fake enumerators predate the field; an absent body must read as
+    # "unknown" (callers fall back to the stub pre-image), never as a crash.
+    loc = _loc([_rec()])
+    assert loc is not None and loc.body_text == ""   # type: ignore[union-attr]

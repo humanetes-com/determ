@@ -30,9 +30,11 @@ class SweepOracle:
     """One sweep's oracle verdict. `vanished` holds expected test names (bare
     form) that reported no verdict; `deficit` is how many expected tests are
     missing from the reported total (covers tests the static NAME inventory
-    could not enumerate). `intact` gates ratchet snapshots / "cluster done"."""
+    could not enumerate); `crashed` counts binaries that opened a section and
+    never printed a trailer. `intact` gates "cluster done"."""
     vanished: frozenset[str]
     deficit: int
+    crashed: int = 0
 
     @property
     def intact(self) -> bool:
@@ -47,17 +49,30 @@ class SweepOracle:
 
     @property
     def unnamed_shortfall(self) -> int:
-        """Missing tests that no expected NAME accounts for.
+        """Missing tests that no expected NAME accounts for AND no crash explains.
 
         A shrink has two causes with two different remedies, and only one of
         them is a crash. Named `vanished` tests were enumerated and then
         reported nothing → their binary died, so a stack is worth hunting. An
-        unnamed shortfall means every expected name DID report and the total is
-        still short → the static inventory OVER-COUNTED (its denominator holds
-        items that never became runnable tests), and no debugger will ever find
-        a fault for it. Folding both into one count sends the crash localizer
-        (gdb + an ASAN rebuild) after a fault that cannot exist, every
-        iteration, and logs it as tests vanishing when none did."""
+        unnamed shortfall means the static inventory OVER-COUNTED (its
+        denominator holds items that never became runnable tests), and no
+        debugger will ever find a fault for it. Folding both into one count
+        sends the crash localizer (gdb + an ASAN rebuild) after a fault that
+        cannot exist, every iteration, and logs it as tests vanishing when none
+        did.
+
+        "Every expected NAME reported" does NOT establish the over-count,
+        because `vanished` is computed over a set of BARE names: a test in the
+        crashed binary whose bare name also exists in a surviving binary is
+        still observed, so it never counts as vanished while its execution is
+        gone from the total. Live case — `tests/test_downcast.rs` (7 tests)
+        aborted; 5 of its names (`test_drop`, `test_downcast_ref`, …) are also
+        defined in other binaries, so the sweep read 2 vanished + 4 "unnamed"
+        and reported a permanent inventory over-count for a plain crash. While
+        any binary died, the deficit is crash casualties; the over-count
+        reading is only admissible once every binary completed."""
+        if self.crashed:
+            return 0
         return max(0, self.deficit - len(self.vanished))
 
 
@@ -70,6 +85,7 @@ def reconcile_sweep(
     *,
     ignored_names: Iterable[str] = (),
     executed_count: int | None = None,
+    crashed_binaries: int = 0,
 ) -> SweepOracle:
     """Fold one sweep's observations into the expected oracle.
 
@@ -100,4 +116,5 @@ def reconcile_sweep(
     return SweepOracle(
         vanished=vanished,
         deficit=max(0, expected_count - reported),
+        crashed=crashed_binaries,
     )

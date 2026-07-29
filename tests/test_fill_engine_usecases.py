@@ -25,7 +25,7 @@ from pipeline_core.domain.models import (
     FnFixContext,
     Stub,
 )
-from pipeline_core.domain.reconstruction import SpliceOutcome
+from pipeline_core.domain.reconstruction import FnLocation, SpliceOutcome
 from pipeline_core.domain.refine import CompilingSalvage, FixProgress
 from pipeline_core.domain.retro_gate import (
     ConvictionEvidence,
@@ -390,7 +390,7 @@ def test_fill_one_happy_path_first_attempt(tmp_path: Path) -> None:
 def test_fill_one_stub_splices_without_allow_nonstub(tmp_path: Path) -> None:
     # an ordinary stub fill must NOT allow_nonstub (refuse a filled body).
     ws = _mk_ws(tmp_path)
-    fake = FakeFill(loc_rec=("pub fn answer()", 0, 5, "pub fn answer()"),
+    fake = FakeFill(loc_rec=FnLocation(0, 0, 5, "pub fn answer()", "unimplemented!()"),
                     splice=SpliceOutcome(True, "ok", 4),
                     run=(0, ""), u2=None, body=("42", "RESP"))
     res = _fill_one(fake).run(1, Stub(file="lib.rs", fn_name="answer"), ctx=_ctx(ws))
@@ -403,7 +403,7 @@ def test_fill_one_refill_splices_with_allow_nonstub(tmp_path: Path) -> None:
     # splice MUST pass allow_nonstub=True (else target_not_stub refuses it).
     ws = _mk_ws(tmp_path)
     (ws / "src" / "lib.rs").write_text("pub fn answer() {\n 0\n}\n")
-    fake = FakeFill(loc_rec=("pub fn answer()", 0, 5, "pub fn answer()"),
+    fake = FakeFill(loc_rec=FnLocation(0, 0, 5, "pub fn answer()", "unimplemented!()"),
                     splice=SpliceOutcome(True, "ok", 4),
                     run=(0, ""), u2=None, body=("42", "RESP"))
     res = _fill_one(fake).run(

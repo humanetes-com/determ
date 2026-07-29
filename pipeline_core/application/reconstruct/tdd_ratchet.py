@@ -16,39 +16,44 @@ from pathlib import Path
 
 
 def ratchet_breach(
-    pass_count: int, missing_count: int, best_pass: int, snap_missing: int,
+    pass_count: int,
+    best_pass: int,
+    passing_now: frozenset[str],
+    passing_at_snapshot: frozenset[str],
 ) -> str:
     """Which ratchet signal (if any) says the tree net-regressed vs the
-    best-known snapshot: '' = no breach, else a printable description of the
-    breached condition. A crash-killed test binary drops a NONDETERMINISTIC
-    subset of its tests from the output (observed live: 21..24 vanished across
-    sweeps of an unchanged tree), so while any binary crashes, missing_count is
-    a draw from an unknown distribution — comparing two such draws is invalid
-    no matter how often it is re-read (a min-of-history baseline makes every
-    later reading look like a shrink). The oracle condition therefore only
-    fires against an EXACT baseline (snap_missing == 0, crash-free snapshot):
-    any vanish from zero is a binary newly crashing/not compiling, which is
-    reproducible in occurrence even when its count is not. While confounded,
-    pass_count is the sole guard (vanished tests are already counted as
-    failing, so the frontier keeps targeting them). Either signal can still be
-    perturbed by crash timing — the caller must confirm a breach on a fresh
-    sweep before acting on it destructively."""
+    best-known snapshot: '' = no breach, else a printable description.
+
+    Scored on the quantity the run actually optimises — the pass COUNT. A
+    crashed test binary needs no rule of its own: its tests stop being counted
+    as passing, so the crash costs exactly what that binary was passing and
+    `pass_count` already carries the whole cost. A binary that was passing
+    NOTHING can therefore start aborting without convicting the fill that
+    exposed it, which matters because that is the state a mid-reconstruction
+    tree lives in — every remaining stub still panics, and filling the funnel
+    a whole family needs is precisely what makes its siblings' panics
+    reachable. An "any binary newly crashed ⇒ revert" rule instead gets
+    STRICTER as the tree improves (the crashed binary acquires its first green
+    test) and ratchets the run shut at the exact moment it starts working.
+
+    The one thing a count alone misses is a LATERAL swap: some tests go green
+    while as many green ones die, so the count holds over a tree that really
+    did churn. Comparing the passing NAME SETS catches that, and only a STRICT
+    gain forgives a loss — otherwise the loop thrashes forever at a constant
+    score. Names come from COMPLETED binaries only, so a crashed binary's
+    nondeterministic partial output (observed live: 21..24 tests varying
+    across sweeps of an unchanged tree) can manufacture neither signal.
+
+    Either signal can still be perturbed by crash timing — the caller must
+    confirm a breach on a fresh sweep before acting on it destructively."""
     if pass_count < best_pass:
         return f"pass_count {pass_count}<{best_pass}"
-    if snap_missing == 0 and missing_count > 0:
-        return f"oracle missing {missing_count}>0 (was crash-free)"
+    lost = passing_at_snapshot - passing_now
+    if pass_count == best_pass and lost:
+        return (f"lateral swap at pass_count {pass_count} — {len(lost)} "
+                f"test(s) green at the snapshot no longer pass: "
+                f"{sorted(lost)[:10]}")
     return ""
-
-
-def snapshot_allowed(missing_count: int, min_missing: int) -> bool:
-    """May the current tree become the ratchet/best snapshot, oracle-wise?
-    Blocks only the one comparison that is exact: a crash-free tree has been
-    seen (min_missing == 0) and the current reading is confounded — restoring
-    such a snapshot later would restore the crash. When every reading so far
-    is confounded (min_missing > 0), counts are non-comparable noise and must
-    not veto snapshotting a pass-improving tree (a stale snapshot means later
-    pass-breach reverts wipe the improvements that beat it)."""
-    return min_missing > 0 or missing_count == 0
 
 
 def snapshot_due(

@@ -1,7 +1,8 @@
 """Strip-and-bake the module before reconstruction (P5-S3).
 
 Extracted verbatim from `main()`'s reconstruction loop. Before TASK 1, each
-module's implementation source is removed, but first (Hard Rule 11) every
+module's implementation source is removed, but first — the original bodies are
+readable exactly once, here — every
 source-derived artefact a later phase may read is baked from live source:
 API surface snapshot + skeleton + leaf-first ordering + cluster manifest. The
 ordering is the persistence-safe one — commit the augmented tree + tag, THEN
@@ -22,6 +23,7 @@ from typing import Any
 
 from pipeline_core.application.extract_behaviours import harvest_behaviour_suite
 from pipeline_core.domain.behaviour import BehaviourSuite
+from pipeline_core.domain.cfg import CfgSet
 from pipeline_core.domain.inline_tests import find_inline_test_mods
 from pipeline_core.domain.models import (
     BuildCluster,
@@ -43,7 +45,8 @@ from pipeline_core.domain.workspace_layout import SKIP_DIR_NAMES
 
 @dataclass(frozen=True)
 class BakeArtifactsDeps:
-    """Collaborators for the pre-strip bake (Hard Rule 11). All but BuildCluster
+    """Collaborators for the pre-strip bake, the one place original source is read.
+    All but BuildCluster
     are pipeline-resident (cfg scan, cluster pruning, extractor) and injected."""
     log: Callable[[str], None]
     cfg_scan: Callable[[Path], list[BuildCluster]]
@@ -106,7 +109,7 @@ def _test_layout_sources(project_dir: Path) -> list[tuple[str, str]]:
     The layout pins F11's t1.5 must satisfy (`size_of`, NPO, autotraits) live in
     these test BODIES, not in doc-fences (M12). Read once, pre-strip — a
     `size_of` assertion is an observable fact, the same legality class as any
-    harvested test assertion (Hard Rule 11 safe)."""
+    harvested test assertion, so reading it pre-strip is legitimate."""
     tests_dir = project_dir / "tests"
     out: list[tuple[str, str]] = []
     if not tests_dir.is_dir():
@@ -125,8 +128,8 @@ def _test_layout_sources(project_dir: Path) -> list[tuple[str, str]]:
 def bake_skeleton_artifacts(
     project_dir: Path, module_name: str, deps: BakeArtifactsDeps,
 ) -> dict[str, Any]:
-    """Run BEFORE strip while live source is on disk (Hard Rule 11 — the ONLY
-    place pipeline code reads original source). Discovers + prunes clusters,
+    """Run BEFORE strip while live source is on disk — the ONLY place pipeline
+    code may read the original bodies. Discovers + prunes clusters,
     then per cluster extracts the skeleton (bodies → `unimplemented!()`) to
     `.skeleton/{cluster}/` and writes leaf-first ref counts; saves the cluster
     manifest + gen_tests origin-cfg manifest for post-strip rehydration.
@@ -224,6 +227,7 @@ def bake_skeleton_artifacts(
                       else ModuleScopes.from_records(list(mods), list(uses)))
             surface = classify_private_surface(
                 list(types), list(fns), cfg_cluster=cluster.name,
+                cfg_set=CfgSet.of(set(cluster.cfg_true), set(cluster.cfg_false)),
                 reachable_files=reachable, scopes=scopes,
                 author_private_fields=d.author_private_fields)
             d.save_private_surface(project_dir, surface)

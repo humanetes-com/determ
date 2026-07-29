@@ -13,7 +13,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 if TYPE_CHECKING:
     from pipeline_core.application.retrigger_layout import RetriggerResult
@@ -21,7 +21,6 @@ if TYPE_CHECKING:
 from pipeline_core.application.reconstruct.tdd_ratchet import (
     ratchet_breach,
     restore_src_tree,
-    snapshot_allowed,
     snapshot_due,
     snapshot_src_tree,
 )
@@ -48,6 +47,7 @@ from pipeline_core.domain.refine import Attempt, LoopState
 from pipeline_core.domain.test_command import ensure_serial_harness
 from pipeline_core.domain.test_report import parse_test_output
 from pipeline_core.domain.test_results import (
+    TestStateReading,
     compile_error_digest,
     lib_compile_clean,
     parse_binary_results,
@@ -105,6 +105,17 @@ class PhaseCTddDeps:
     # Voids convictions earned under the pre-comparative acceptance gate and
     # the pre-group route set. None disables.
     migrate_retro_gate: Callable[..., tuple[int, int]] | None = None
+
+
+class SweepReading(NamedTuple):
+    """One reconciled cargo-test sweep. Carried as a value object rather than a
+    bare tuple because `passing` and `failed` are both name sets over the same
+    sweep: positional unpacking of two same-typed neighbours is how a caller
+    silently compares the wrong one."""
+    fail_count: int
+    failed: set[str]
+    oracle: SweepOracle
+    passing: frozenset[str]
 
 
 def _log_attribution_gap(
@@ -264,6 +275,10 @@ def run_phase_c_tdd(
     _bratchet_best = -1
     _bratchet_snap: dict[str, str] | None = None
     _bratchet_sha: str | None = None   # tree the snapshot was taken from
+    # Tests passing in COMPLETED binaries at the snapshot. The ratchet scores a
+    # candidate tree against these, so a crash costs exactly the passes it
+    # took and nothing more.
+    _bratchet_passing: frozenset[str] = frozenset()
     # Persist each new pass high-water to heal's durable restore tiers
     # (best-tree snapshot + workspace-git commit). Tracked independently of
     # the in-memory batch ratchet above so the tiers stay populated even when
@@ -301,8 +316,6 @@ def run_phase_c_tdd(
         deps.active_test_inventory(
             project_dir, cluster, frozenset(test_stems), _sweep_lib)
         if deps.active_test_inventory is not None else (0, frozenset()))
-    _bratchet_missing = 0   # oracle missing_count at the ratchet snapshot
-    _ckpt_min_missing: int | None = None  # best (lowest) missing seen
     # Cause-C (runtime crash) retrigger: consecutive sweeps whose oracle was
     # short; at the threshold the frozen component the crashes implicate gets
     # re-authored (see the trigger block below the stall accounting).
@@ -319,21 +332,25 @@ def run_phase_c_tdd(
     _compile_broke_streak = 0
 
     def _reconcile(rc_: int, output_: str, pass_n: int, fail_n: int,
-                   failed_: set[str]) -> tuple[int, set[str], SweepOracle]:
+                   failed_: set[str]) -> SweepReading:
+        _bins = parse_binary_results(output_)
+        _passing = TestStateReading(_bins).passed_names
         if rc_ == -1 or deps.active_test_inventory is None:
-            return fail_n, failed_, SweepOracle(frozenset(), 0)
+            return SweepReading(fail_n, failed_, SweepOracle(frozenset(), 0),
+                                _passing)
         _ig = parse_test_counts(output_)[2]
         # Per-binary reading supplies what the flat name sets cannot: the
         # NAMES of cluster-ignored tests (so they are not mistaken for
-        # crash-vanished) and the trailer-authoritative executed total (so
-        # tests sharing a bare name across binaries are not deduped out of
-        # the denominator).
-        _bins = parse_binary_results(output_)
+        # crash-vanished), the trailer-authoritative executed total (so tests
+        # sharing a bare name across binaries are not deduped out of the
+        # denominator), and how many binaries died — which is what separates a
+        # crash from a static inventory that over-counts.
         oracle = reconcile_sweep(
             _expected_count, _expected_names,
             parse_test_output(output_).passed, failed_, _ig,
             ignored_names=frozenset(n for b in _bins for n in b.ignored),
-            executed_count=sum(b.executed for b in _bins))
+            executed_count=sum(b.executed for b in _bins),
+            crashed_binaries=sum(1 for b in _bins if not b.completed))
         if not oracle.intact:
             # A cluster that failed to COMPILE ran no binaries at all — the
             # vanished names say nothing about crashes then, and downstream
@@ -358,9 +375,25 @@ def run_phase_c_tdd(
                         + (": " + " | ".join(_err_digest) if _err_digest
                            else " — none carried a parseable location"))
                 else:
+                    # The unnamed remainder belongs to the same crash: a dead
+                    # binary's test whose bare name is also defined in a live
+                    # binary still shows up as observed, so it is missing from
+                    # the total without ever being named. Attributing it to the
+                    # inventory would send the next reader after an enumeration
+                    # bug that does not exist.
+                    _dead = oracle.deficit - len(oracle.vanished)
                     _why.append(
                         f"{len(oracle.vanished)} named test(s) reported no "
-                        f"verdict (binary crashed): {sorted(oracle.vanished)[:20]}")
+                        f"verdict (binary crashed): {sorted(oracle.vanished)[:20]}"
+                        + (f"; {_dead} further execution(s) lost to the same "
+                           f"{oracle.crashed} crashed binary/binaries, their "
+                           "bare names also defined in a surviving binary"
+                           if _dead > 0 else ""))
+            elif oracle.crashed:
+                _why.append(
+                    f"{oracle.deficit} execution(s) short with no expected NAME "
+                    f"unreported — {oracle.crashed} binary/binaries crashed and "
+                    "every bare name they own is also defined elsewhere")
             if oracle.unnamed_shortfall:
                 _why.append(
                     f"{oracle.unnamed_shortfall} unnamed test(s) short of the "
@@ -386,15 +419,16 @@ def run_phase_c_tdd(
                 # without re-running cargo by hand against the right tree.
                 "compile_errors": _err_total,
                 "compile_digest": _err_digest,
+                "crashed_binaries": oracle.crashed,
                 "cause": "+".join(
                     ((["compile_fail"] if _compile_broke else ["crash"])
-                     if oracle.vanished else [])
+                     if (oracle.vanished or oracle.crashed) else [])
                     + (["inventory_overcount"] if oracle.unnamed_shortfall
                        else [])),
                 "vanished": sorted(oracle.vanished)[:200]})
             fail_n += oracle.missing_count
             failed_ = set(failed_) | set(oracle.vanished)
-        return fail_n, failed_, oracle
+        return SweepReading(fail_n, failed_, oracle, _passing)
 
     iter_n = 0
     # Hard cap removed — the sole non-success terminator is `stall >=
@@ -440,18 +474,20 @@ def run_phase_c_tdd(
         dt = time.monotonic() - t0
         pass_count, fail_count, _ignored = parse_test_counts(output)
         cur_failed = parse_failed_tests(output)
-        fail_count, cur_failed, _oracle = _reconcile(
-            rc, output, pass_count, fail_count, cur_failed)
+        _sweep = _reconcile(rc, output, pass_count, fail_count, cur_failed)
+        fail_count, cur_failed, _oracle = (
+            _sweep.fail_count, _sweep.failed, _sweep.oracle)
         # Batch ratchet. pass_count reflects the PREVIOUS iter's fills;
         # a drop below the best we've measured means that iter net-regressed the
         # cluster (a regression the per-fill guard couldn't catch while the crate
         # was red mid-batch). Restore the best-known src tree and re-test, so the
         # loop always attacks from — and can only exit at — its high-water mark.
-        # An oracle shrink beyond the snapshot's own (tests that executed at the
-        # snapshot no longer report) is the same net regression, even when the
-        # pass count held — the lost binary may have been mostly failing.
-        _breach = ratchet_breach(pass_count, _oracle.missing_count,
-                                 _bratchet_best, _bratchet_missing)
+        # Scored on the pass count and the passing NAMES, never on "did a binary
+        # start crashing": a binary that was passing nothing costs nothing when
+        # it aborts, and convicting on the crash alone makes the gate strictest
+        # exactly when the tree is at its best.
+        _breach = ratchet_breach(pass_count, _bratchet_best,
+                                 _sweep.passing, _bratchet_passing)
         if _batch_ratchet and _bratchet_snap is not None and _breach:
             # A crashing binary drops a nondeterministic subset of tests, so a
             # single breached reading can be pure noise; re-sweep the UNCHANGED
@@ -462,10 +498,11 @@ def run_phase_c_tdd(
                                         timeout=test_timeout)
             pass_count, fail_count, _ignored = parse_test_counts(output)
             cur_failed = parse_failed_tests(output)
-            fail_count, cur_failed, _oracle = _reconcile(
-                rc, output, pass_count, fail_count, cur_failed)
-            _confirm = ratchet_breach(pass_count, _oracle.missing_count,
-                                      _bratchet_best, _bratchet_missing)
+            _sweep = _reconcile(rc, output, pass_count, fail_count, cur_failed)
+            fail_count, cur_failed, _oracle = (
+                _sweep.fail_count, _sweep.failed, _sweep.oracle)
+            _confirm = ratchet_breach(pass_count, _bratchet_best,
+                                      _sweep.passing, _bratchet_passing)
             if not _confirm:
                 deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: batch ratchet — "
                          f"breach ({_breach}) NOT reproduced on re-sweep; "
@@ -485,25 +522,27 @@ def run_phase_c_tdd(
                                             timeout=test_timeout)
                 pass_count, fail_count, _ignored = parse_test_counts(output)
                 cur_failed = parse_failed_tests(output)
-                fail_count, cur_failed, _oracle = _reconcile(
-                    rc, output, pass_count, fail_count, cur_failed)
+                _sweep = _reconcile(rc, output, pass_count, fail_count, cur_failed)
+                fail_count, cur_failed, _oracle = (
+                    _sweep.fail_count, _sweep.failed, _sweep.oracle)
         # Refresh the best-known snapshot on the first iter and each strict
         # improvement (never on a plateau — the existing best-state snapshot is
-        # equivalent and re-reading the tree would be wasted I/O). Oracle veto
-        # is regime-scoped (see snapshot_allowed): only a crash-free-vs-crashy
-        # comparison is exact; two confounded readings are non-comparable.
-        _min_missing = (_oracle.missing_count if _ckpt_min_missing is None
-                        else min(_ckpt_min_missing, _oracle.missing_count))
+        # equivalent and re-reading the tree would be wasted I/O). No oracle
+        # veto here: control only reaches this point when the tree did NOT
+        # breach, i.e. it is not a net loss against the current best, and a
+        # tree carrying a costless crash is a legitimate baseline. Vetoing it
+        # instead leaves the baseline pinned to the pre-fill tree, so the next
+        # real breach reverts the good fill too and the loop re-fills it
+        # forever at zero payoff.
         _tree_sha = tree_content_sha(_src_root)
         if _batch_ratchet \
-                and snapshot_due(pass_count, _bratchet_best, _tree_sha, _bratchet_sha) \
-                and snapshot_allowed(_oracle.missing_count, _min_missing):
+                and snapshot_due(pass_count, _bratchet_best, _tree_sha, _bratchet_sha):
             _snap = snapshot_src_tree(_src_root)
             if _snap is not None:
                 _bratchet_best = pass_count
                 _bratchet_snap = _snap
                 _bratchet_sha = _tree_sha
-                _bratchet_missing = _oracle.missing_count
+                _bratchet_passing = _sweep.passing
         # Durable checkpoint of the new-best fill tree so a later heal restores
         # THIS good state (best-tree copy / git ancestor) instead of nuking the
         # file to the baked skeleton. Independent of _batch_ratchet. Never
@@ -516,7 +555,6 @@ def run_phase_c_tdd(
                 project_dir, cluster.name, target_src_dir, pass_count, iter_n)
             _checkpoint_best = pass_count
             _checkpoint_sha = _tree_sha
-        _ckpt_min_missing = _min_missing
         # F6 — measurement provenance: stamp every iter event with the tree it
         # measured (content hash), the oracle size (denominator), and the actual
         # test names, so cross-run pass-count claims are verifiable and oracle
@@ -824,8 +862,8 @@ def run_phase_c_tdd(
                 _rc2, _out2 = deps.run_cargo(
                     test_cmd, target_src_dir, cluster_env, timeout=test_timeout)
                 _p2, _f2, _ig2 = parse_test_counts(_out2)
-                _, _, _oracle2 = _reconcile(
-                    _rc2, _out2, _p2, _f2, parse_failed_tests(_out2))
+                _oracle2 = _reconcile(
+                    _rc2, _out2, _p2, _f2, parse_failed_tests(_out2)).oracle
                 if (_oracle2.vanished
                         and "could not compile" not in (_out2 or "")):
                     deps.log(

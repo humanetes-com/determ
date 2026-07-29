@@ -382,6 +382,27 @@ def test_unnamed_shortfall_separates_inventory_gap_from_crash() -> None:
     assert not o.intact
 
 
+def test_crashed_binary_owns_the_shortfall_its_dup_names_hide() -> None:
+    """The live misdiagnosis: `tests/test_downcast.rs` (7 tests) aborted, but 5
+    of its bare names are also defined in surviving binaries, so they stayed in
+    the observed set and only 2 read as vanished. The remaining 4 lost
+    executions were reported as a permanent static-inventory over-count — the
+    log literally said "not a crash" about a crash, the crash localizer was
+    skipped, and run_health raised a phantom inventory_overcount every sweep.
+    While a binary died, the deficit belongs to that crash."""
+    o = reconcile_sweep(6, frozenset({"uniq", "dup"}),
+                        passed=["dup"], failed=[], executed_count=1,
+                        crashed_binaries=1)
+    assert o.vanished == frozenset({"uniq"})   # `dup` still observed elsewhere
+    assert o.deficit == 5
+    assert o.unnamed_shortfall == 0            # attributed to the crash
+    assert o.missing_count == 5                # still charged as failing
+    # Same numbers with every binary intact ARE an inventory over-count.
+    clean = reconcile_sweep(6, frozenset({"uniq", "dup"}),
+                            passed=["dup"], failed=[], executed_count=1)
+    assert clean.unnamed_shortfall == 4
+
+
 def test_named_vanish_is_not_double_counted_as_unnamed() -> None:
     o = reconcile_sweep(3, frozenset({"a", "b", "c"}),
                         passed=["a"], failed=[], executed_count=1)

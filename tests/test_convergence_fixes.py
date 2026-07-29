@@ -53,6 +53,20 @@ def test_canon_container_unifies_renderings() -> None:
     assert pipeline._canon_container("") == ""
 
 
+def test_canon_container_is_total_over_lifetime_elision() -> None:
+    """`Chain<'_>` elides to an EMPTY generic list, and the model's quoted
+    `block` attribute sometimes arrives cut at the lifetime. All three shapes
+    name one impl, so all three must canonicalise alike — the one-character
+    gap between `DefaultforChain<>` and `DefaultforChain<` dropped a correct,
+    name-unique `default` body and escalated the unit to a budget-off retry."""
+    full = pipeline._canon_container("impl Default for Chain<'_>")
+    assert full == "DefaultforChain"
+    assert pipeline._canon_container("impl Default for Chain<'_") == full
+    assert pipeline._canon_container("impl Default for Chain") == full
+    # A non-empty generic list is still identity-bearing and must NOT collapse.
+    assert pipeline._canon_container("impl Default for Chain<T>") != full
+
+
 def test_load_retrospectives_rekeys_old_records(tmp_path: Path) -> None:
     d = tmp_path / ".phase_c_logs"
     d.mkdir()

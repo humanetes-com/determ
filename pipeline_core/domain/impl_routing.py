@@ -1,4 +1,4 @@
-"""Which impl block does a model-returned FN body belong to? (debt #43)
+"""Which impl block does a model-returned FN body belong to?
 
 The per-impl fill prompt shows a TARGET block plus RELATED blocks (same trait /
 dispatch family); the model tags each returned body with a ``block`` attribute.
@@ -25,6 +25,7 @@ from pipeline_core.domain.identity import ContainerId
 from pipeline_core.domain.models import ImplBlock
 from pipeline_core.domain.rust_idents import (
     canon_container,
+    impl_head_name,
     impl_trait_name,
     trait_def_name,
 )
@@ -119,8 +120,11 @@ def route_fn_bodies(
     Tiers per body (first hit wins): exact match on TARGET, exact on RELATED
     (listed order), canonical match on TARGET, canonical on RELATED (listed
     order), then the trait-default tier — a body tagged `impl <Trait> for <Ty>`
-    that matched no container routes to the declaration of `<Trait>` when that
-    trait declares the member. Last because an explicit override always wins
+    or the abbreviated `impl <Trait>` that matched no container routes to the
+    declaration of `<Trait>` when that trait declares the member — the
+    membership requirement is what makes the abbreviated form safe, since in
+    Rust it otherwise reads as an inherent impl on a TYPE of that name. Last
+    because an explicit override always wins
     over the default it would replace. A body matching nothing is dropped."""
     routed: list[RoutedBody] = []
     dropped: list[DroppedBody] = []
@@ -144,7 +148,7 @@ def route_fn_bodies(
             routed.append(RoutedBody(fn_data, canonical))
             continue
         fn_name = str(fn_data.get("fn_name", ""))
-        trait = impl_trait_name(block_attr)
+        trait = impl_trait_name(block_attr) or impl_head_name(block_attr)
         host = next((h for h in trait_defaults
                      if h.trait_name == trait and fn_name in h.member_names),
                     None) if trait else None

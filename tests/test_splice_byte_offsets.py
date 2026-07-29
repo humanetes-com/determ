@@ -88,7 +88,7 @@ def test_splice_fn_body_at_offsets_match_real_extractor() -> None:
         loc = pipeline._APP.fill_roles.mut.locate_fn_by_record(
             src / "lib.rs", "f", "", "pub fn f() -> i32")
         assert loc is not None
-        _, bs, be, _ = loc
+        bs, be = loc.body_byte_start, loc.body_byte_end
         ok, _reason, _ = pipeline._APP.fill_roles.mut.splice_fn_body_at(
             src / "lib.rs", bs, be, "a + 1")
         out = (src / "lib.rs").read_text(encoding="utf-8")

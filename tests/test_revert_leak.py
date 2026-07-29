@@ -16,6 +16,7 @@ from pipeline_core.application.reconstruct.splice import (
     splice_fn_body,
     splice_fn_body_at,
 )
+from pipeline_core.domain.reconstruction import FnLocation
 from pipeline_core.domain.rust_fn_headers import locate_all_fns
 
 _NESTED = (
@@ -38,7 +39,8 @@ def _mutator(tmp: Path) -> MutatorAdapter:
         if not locs:
             return None
         _sig, sig_start, body_start, body_end = locs[0]
-        return (sig_start, body_start, body_end, _sig)
+        return FnLocation(sig_start, body_start, body_end, _sig,
+                          text[body_start:body_end])
 
     return MutatorAdapter(
         locate_fn_by_record_fn=_locate_by_record,

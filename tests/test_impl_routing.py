@@ -340,6 +340,34 @@ def test_body_tagged_with_empty_override_routes_to_its_trait_default() -> None:
     assert all(rb.via_trait_default for rb in r.routed)
 
 
+def test_abbreviated_impl_tag_routes_to_the_trait_default() -> None:
+    """The three headers the live run actually dropped: the model abbreviates
+    `impl<T> AdhocKind for &T` down to the trait name alone, so the tag carries
+    no `for` and `impl_trait_name` reads it as None."""
+    hosts = trait_default_hosts(_KIND_BLOCKS, "src/kind.rs")
+    parsed = [
+        _fn("anyhow_kind", "impl AdhocKind"),
+        _fn("anyhow_kind", "impl TraitKind"),
+        _fn("anyhow_kind",
+            '#[cfg(any(feature = "std", not(anyhow_no_core_error)))]\\nimpl BoxedKind'),
+    ]
+    r = route_fn_bodies(parsed, target="impl Adhoc", related=[],
+                        trait_defaults=hosts)
+    assert r.dropped == ()
+    assert [rb.container for rb in r.routed] == [
+        "trait AdhocKind", "trait TraitKind", "trait BoxedKind"]
+    assert all(rb.via_trait_default for rb in r.routed)
+
+
+def test_abbreviated_tag_still_requires_membership() -> None:
+    # `impl Foo` is an INHERENT impl on a type named Foo in real Rust. Only the
+    # membership requirement keeps that reading from being routed as a trait.
+    hosts = trait_default_hosts(_KIND_BLOCKS, "src/kind.rs")
+    r = route_fn_bodies([_fn("not_a_member", "impl AdhocKind")],
+                        target="impl Adhoc", related=[], trait_defaults=hosts)
+    assert r.routed == () and len(r.dropped) == 1
+
+
 def test_trait_default_tier_never_overrides_a_real_container_match() -> None:
     # An impl that DOES declare the member is a genuine override; the default
     # must not swallow it.

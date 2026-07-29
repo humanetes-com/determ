@@ -212,12 +212,13 @@ def test_summary_and_signature_name_the_regression_class() -> None:
     # Each class gets its OWN label and its OWN stall key — collapsing them
     # onto "(pass-count drop)" mislabels a crash and makes two different
     # failures read as one repeated one.
-    crash1 = _cmp(newly_crashed=("tests/a.rs",))
-    assert crash1.summary == "binary crashed: ['tests/a.rs']"
+    crash1 = _cmp(newly_crashed=("tests/a.rs",), crash_lost_pass=1)
+    assert crash1.summary == "binary crashed: ['tests/a.rs'] (net -1 test(s))"
     assert crash1.signature == frozenset({"__binary_crash__:tests/a.rs"})
 
     crash2 = _cmp(newly_crashed=("tests/a.rs", "tests/b.rs"))
-    assert crash2.summary == "binaries crashed: ['tests/a.rs', 'tests/b.rs']"
+    assert crash2.summary == (
+        "binaries crashed: ['tests/a.rs', 'tests/b.rs'] (net +0 test(s))")
     assert crash2.signature == frozenset(
         {"__binary_crash__:tests/a.rs", "__binary_crash__:tests/b.rs"})
 
@@ -243,6 +244,71 @@ def test_crash_outranks_a_count_drop_in_the_label() -> None:
     both = _cmp(newly_crashed=("tests/a.rs",), cur_pass=0, cur_executed=0)
     assert both.summary.startswith("binary crashed")
     assert both.signature == frozenset({"__binary_crash__:tests/a.rs"})
+
+
+def test_a_strict_net_gain_outweighs_a_crashed_binary() -> None:
+    """The live deadlock this rule exists for: `error.rs::construct` is the
+    funnel every `construct_from_*` needs, and filling it crashed one binary
+    that was passing a SINGLE test. Under an absolute veto that one test
+    outranked every test the fill unblocked, so the only fn gating the crate
+    was reverted on every attempt of every run."""
+    cmp = _cmp(newly_crashed=("tests/test_context.rs",), crash_lost_pass=1,
+               base_pass=36, cur_pass=80)
+    assert cmp.net_pass_delta == 43
+    assert not cmp.regressed
+
+
+def test_a_crash_that_costs_more_than_it_buys_still_convicts() -> None:
+    cmp = _cmp(newly_crashed=("tests/a.rs",), crash_lost_pass=9,
+               base_pass=36, cur_pass=40)
+    assert cmp.net_pass_delta == -5
+    assert cmp.regressed and cmp.summary.endswith("(net -5 test(s))")
+
+
+def test_newly_red_is_forgiven_only_by_a_strict_net_gain() -> None:
+    # +2 green for 1 red is progress; a lateral swap (net 0) is not, and keeps
+    # the old absolute rule so the loop cannot thrash on equal-score churn.
+    gain = _cmp(newly_red=frozenset({"t_a"}), base_pass=5, cur_pass=7)
+    assert not gain.regressed
+    swap = _cmp(newly_red=frozenset({"t_a"}), base_pass=5, cur_pass=5)
+    assert swap.regressed
+
+
+def test_vanished_tests_are_never_traded_away() -> None:
+    # Tests that stop EXECUTING inside a still-completing binary are oracle
+    # corruption, not a behavioural cost — no pass-count gain buys them.
+    cmp = _cmp(base_pass=5, cur_pass=40, base_executed=5, cur_executed=4)
+    assert cmp.net_pass_delta == 35 and cmp.regressed
+
+
+def test_compare_readings_charges_the_crash_what_it_was_passing() -> None:
+    base = """\
+    Running tests/a.rs (t/a-1)
+running 3 tests
+test x ... ok
+test y ... ok
+test z ... FAILED
+test result: FAILED. 2 passed; 1 failed; 0 ignored
+"""
+    cur = """\
+    Running tests/a.rs (t/a-1)
+running 3 tests
+test x ...
+"""
+    cmp = compare_readings(_reading(base), _reading(cur))
+    assert cmp.newly_crashed == ("tests/a.rs",)
+    assert cmp.crash_lost_pass == 2
+    # The crashed binary contributes to neither measured total — its cost is
+    # carried by crash_lost_pass alone, so it is counted exactly once.
+    assert (cmp.base_pass, cmp.cur_pass) == (0, 0)
+    assert cmp.net_pass_delta == -2 and cmp.regressed
+
+
+def test_all_red_crash_costs_nothing_without_a_special_case() -> None:
+    # crashed_all_red is now an emergent property of the accounting: a binary
+    # passing zero tests at baseline subtracts zero, so it cannot convict.
+    cmp = _cmp(crashed_all_red=("tests/a.rs",), crash_lost_pass=0)
+    assert cmp.net_pass_delta == 0 and not cmp.regressed
 
 
 def test_compare_all_red_binary_crash_is_not_a_regression() -> None:

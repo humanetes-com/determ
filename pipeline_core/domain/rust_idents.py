@@ -142,6 +142,29 @@ def impl_trait_name(container: str) -> str | None:
     return None
 
 
+def impl_head_name(container: str) -> str | None:
+    """Bare name an ``impl`` header carries when it names only ONE path.
+
+    ``impl AdhocKind`` → ``AdhocKind``; ``#[cfg(…)]\\nimpl BoxedKind`` →
+    ``BoxedKind``; ``impl<T> Foo<T>`` → ``Foo``. None when the header has a
+    ``for`` separator (that is `impl_trait_name`'s job) or names no path.
+
+    In Rust this form is an INHERENT impl on the named type, so it must never
+    be read as "implements that trait" on its own — the only caller is the
+    trait-default routing tier, which additionally requires a trait of that
+    name to exist in the same file AND to declare the member. The model
+    abbreviates ``impl<T> AdhocKind for &T`` to ``impl AdhocKind`` when it tags
+    a returned body, and a tag that names the trait unambiguously is an answer,
+    not a miss."""
+    s = " ".join(_strip_outer_attrs(_unescape_layout(container)).split())
+    if not (s.startswith("impl ") or s.startswith("impl<")):
+        return None
+    if impl_trait_name(s) is not None:
+        return None
+    head = _skip_generics(s[4:].lstrip()).strip().split(" ", 1)[0]
+    return _bare_trait_path(head) or None
+
+
 _TRAIT_DECL_MODIFIERS = frozenset({"unsafe", "auto", "default"})
 
 
@@ -931,6 +954,23 @@ def _strip_lifetimes(s: str) -> str:
     return "".join(out)
 
 
+def _drop_empty_generics(s: str) -> str:
+    """Collapse a generic list left EMPTY by lifetime elision, and close a list
+    the input never closed. Whitespace-free input.
+
+    ``Chain<'_>`` elides to ``Chain<>``, which must equal ``Chain``. The canon
+    also has to be TOTAL over truncated headers: a model tagging a body
+    ``block="impl Default for Chain<'_"`` (the quoted attribute cut at the
+    lifetime) canonicalised to ``DefaultforChain<`` against a target
+    ``DefaultforChain<>`` — a one-character difference that dropped a correct,
+    name-unique answer and escalated the unit to a budget-off retry. Both sides
+    must reduce to the same string, so a dangling ``<`` is treated as the empty
+    list it was on its way to being."""
+    while "<>" in s:
+        s = s.replace("<>", "")
+    return s[:-1] if s.endswith("<") else s
+
+
 def _drop_orphan_plus(s: str) -> str:
     """Clean up the ``+`` left behind by an elided trait-object bound, so
     ``Box<dyn E+Send+'static>`` and ``Box<dyn E+Send>`` agree — as they do in
@@ -1043,4 +1083,5 @@ def canon_container(container: str) -> str:
     if s.endswith(" where"):
         s = s[: -len(" where")]
     s = s.split(" where ")[0]
-    return _drop_orphan_plus("".join(_strip_lifetimes(s).split()))
+    return _drop_empty_generics(
+        _drop_orphan_plus("".join(_strip_lifetimes(s).split())))

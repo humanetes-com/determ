@@ -372,7 +372,7 @@ def fill_impl_blocks(
             has_deliverable=lambda r: bool(extract_fn_bodies(r)),
             log=_log, emit=_emit, max_pulls=_max_pulls)
 
-    # Dispatch families (FR-027): autoref-specialization trait sets dispatched
+    # Dispatch families: autoref-specialization trait sets dispatched
     # by a macro. Their correctness is a cross-impl invariant, so when a block
     # belongs to one we co-design the whole family — broaden related_blocks to
     # every family-trait block and inject the dispatching macro as the spec.
@@ -860,7 +860,7 @@ def fill_impl_blocks(
             _log(f"  [phase-c/impl] {block_id}: skipped (prior retro "
                  "marked exhausted).")
             return
-        # Debt #42: `stub_members` is pass-scan-time state — earlier blocks'
+        # `stub_members` is pass-scan-time state — earlier blocks'
         # family/sibling routing may have already filled members of THIS block.
         # Re-scan before spending an LLM call; a block with nothing left is
         # COMPLETE, not failed (run 187469: `impl NotBothDebug` prompted for an
@@ -916,7 +916,7 @@ def fill_impl_blocks(
                     related_blocks.append(b2)
                     _seen.add(bid)
             dispatch_family_section = _build_dispatch_family_section(_family)
-        # Route-only widening (debt #54): bodies tagged for ANY real impl in
+        # Route-only widening: bodies tagged for ANY real impl in
         # the SAME FILE should splice there — an already-filled target is a
         # safe no-op via the #42 freshness gate — rather than being dropped,
         # even when that container isn't a formal trait/family match. Live
@@ -971,7 +971,7 @@ def fill_impl_blocks(
             target_sig_text=_target_sig_concat,
             max_idioms=5,
         )
-        # FR-024 sibling reference: union over stub/refill member names so e.g.
+        # sibling reference: union over stub/refill member names so e.g.
         # a stub `fmt` sees an already-filled `fmt` from another impl.
         _sib_parts: list[str] = []
         for fn_name in _fill_target_names[:4]:
@@ -1014,8 +1014,8 @@ def fill_impl_blocks(
         salvage = CompilingSalvage()
         last_response = ""
         members_filled_this_block = 0
-        block_already_complete = False  # debt #42: all-target_not_stub ⇒ done
-        # B3 (FR-029): baseline = the crate's error signature with THIS block's
+        block_already_complete = False  # all-target_not_stub ⇒ done
+        # B3: baseline = the crate's error signature with THIS block's
         # stubs still unimplemented. A fill is "non-regressing" if it adds no
         # error beyond this baseline and none on the filled fns — then we keep
         # it even when the crate doesn't fully compile, so prerequisites of an
@@ -1169,7 +1169,7 @@ def fill_impl_blocks(
                         _log(f"  [phase-c/impl] {block_id}: splice "
                              f"`{fn_data['fn_name']}` failed: {reason}")
                 if spliced_now == 0:
-                    # Debt #42: every routed body refused as target_not_stub
+                    # every routed body refused as target_not_stub
                     # ⇒ the members are already filled — the block is
                     # COMPLETE, not failed (don't burn retries or a retro).
                     if routed and all(r == "target_not_stub" for r in refusals):
@@ -1300,7 +1300,7 @@ def fill_impl_blocks(
                             "fix_attempts": fix_attempt,
                         })
                     return FixOutcome("accepted")
-                # B3 (FR-029): keep a NON-REGRESSING fill even when the crate
+                # B3: keep a NON-REGRESSING fill even when the crate
                 # doesn't fully compile — it adds no error beyond baseline and
                 # none on the filled fns, so it's a correct prerequisite of the
                 # interdependent web, not a failure to discard. This dissolves
@@ -1365,7 +1365,7 @@ def fill_impl_blocks(
                 if deps.retire_contradicted_notes is not None and fr_path:
                     deps.retire_contradicted_notes(fr_path, cargo_out)
                 # The fill regressed (a new error, or an error on the filled
-                # fns) — B3 (FR-029) already accepted non-regressing fills
+                # fns) — B3 already accepted non-regressing fills
                 # above. Revert; the driver decides whether to retry.
                 # A compiling attempt is banked first: the regression gate above
                 # already cleared this file image against the pre-splice

@@ -62,23 +62,40 @@ def test_restore_noop_when_nothing_changed(tmp_path: Path) -> None:
     assert (src / "c.rs").exists()
 
 
+_G = frozenset({"a", "b", "c"})
+
+
 def test_ratchet_breach_conditions() -> None:
-    assert ratchet_breach(14, 22, 14, 22) == ""
-    assert ratchet_breach(15, 20, 14, 22) == ""          # improvement, no breach
-    assert "pass_count 13<14" in ratchet_breach(13, 22, 14, 22)
-    # Crash-free snapshot: any vanish is a real regression.
-    assert "oracle missing 1>0" in ratchet_breach(14, 1, 14, 0)
-    # Confounded snapshot (missing>0): counts are non-comparable noise — a
-    # higher reading (even the observed-live 22→23) must NOT breach.
-    assert ratchet_breach(14, 23, 14, 22) == ""
-    assert ratchet_breach(14, 40, 14, 21) == ""
+    assert ratchet_breach(14, 14, _G, _G) == ""
+    assert ratchet_breach(15, 14, _G, _G) == ""          # improvement, no breach
+    assert "pass_count 13<14" in ratchet_breach(13, 14, _G, _G)
 
 
-def test_snapshot_allowed_regimes() -> None:
-    from pipeline_core.application.reconstruct.tdd_ratchet import snapshot_allowed
-    assert snapshot_allowed(0, 0)          # crash-free tree, always ok
-    assert snapshot_allowed(23, 21)        # both confounded: noise can't veto
-    assert not snapshot_allowed(2, 0)      # would trade crash-free for crashy
+def test_costless_crash_is_not_a_breach() -> None:
+    """The live deadlock: filling `error.rs::construct` made a binary that was
+    passing NOTHING start aborting. Every green test at the snapshot is still
+    green, so the tree lost nothing and the fill must survive. Under the old
+    "snapshot was crash-free ⇒ any vanish convicts" rule this reverted every
+    iteration and the loop re-filled the same three fns forever."""
+    assert ratchet_breach(36, 36, _G, _G) == ""
+
+
+def test_lateral_swap_convicts_at_equal_count() -> None:
+    """Count holds while a green test goes away and another arrives — the tree
+    churned, so it is not a new baseline. Only a STRICT gain forgives a loss,
+    otherwise the loop can thrash forever at a constant score."""
+    now = frozenset({"a", "b", "d"})
+    breach = ratchet_breach(14, 14, now, _G)
+    assert "lateral swap" in breach and "'c'" in breach
+    # ...and a strict gain does forgive it.
+    assert ratchet_breach(15, 14, now, _G) == ""
+
+
+def test_crash_partials_cannot_manufacture_a_signal() -> None:
+    """Names come from COMPLETED binaries only, so a crashed binary's varying
+    partial output is absent from both sides of the comparison rather than
+    reading as a nondeterministic loss."""
+    assert ratchet_breach(36, 36, frozenset(), frozenset()) == ""
 
 
 def test_snapshot_due_takes_equal_score_work() -> None:
@@ -154,30 +171,48 @@ def _run_tdd(monkeypatch, tmp_path: Path, outputs, events) -> None:
 _INTACT = ("test t1 ... ok\ntest t2 ... FAILED\n"
            "test result: FAILED. 1 passed; 1 failed; 0 ignored")
 # t2's binary crashed — it vanishes from the output (oracle shrinks by 1).
+# t2 was FAILING at the snapshot, so the crash cost the tree nothing.
 _SHRUNK = ("test t1 ... ok\n"
            "test result: FAILED. 1 passed; 0 failed; 0 ignored")
+# t1's binary crashed instead — a test that was PASSING at the snapshot lost
+# its verdict, so this shrink IS a net loss.
+_LOST_PASS = ("test t2 ... FAILED\n"
+              "test result: FAILED. 0 passed; 1 failed; 0 ignored")
 
 
 def test_unreproduced_breach_does_not_revert(tmp_path: Path, monkeypatch) -> None:
     # Iter 1 snapshots the intact tree; a fill lands; iter 2's first sweep
-    # shrinks (noise) but the confirm re-sweep is intact again → the fill
-    # must survive and no batch_revert event fires.
+    # loses a passing test (noise) but the confirm re-sweep is intact again →
+    # the fill must survive and no batch_revert event fires.
     events: list[tuple[str, dict]] = []
     _run_tdd(monkeypatch, tmp_path,
-             [(_INTACT, False), (_SHRUNK, True), (_INTACT, False)], events)
+             [(_INTACT, False), (_LOST_PASS, True), (_INTACT, False)], events)
     assert (tmp_path / "src" / "a.rs").read_text(encoding="utf-8") == "FILLED"
     assert not any(ev == "phase_c.tdd.batch_revert" for ev, _ in events)
 
 
 def test_reproduced_breach_reverts_to_snapshot(tmp_path: Path, monkeypatch) -> None:
-    # Iter 2's shrink REPRODUCES on the confirm re-sweep → the revert fires
+    # Iter 2's loss REPRODUCES on the confirm re-sweep → the revert fires
     # and the mutated file returns to the snapshotted best state.
     events: list[tuple[str, dict]] = []
     _run_tdd(monkeypatch, tmp_path,
-             [(_INTACT, False), (_SHRUNK, True), (_SHRUNK, False)], events)
+             [(_INTACT, False), (_LOST_PASS, True), (_LOST_PASS, False)], events)
     assert (tmp_path / "src" / "a.rs").read_text(encoding="utf-8") == "orig"
     reverts = [d for ev, d in events if ev == "phase_c.tdd.batch_revert"]
-    assert reverts and "oracle missing" in reverts[0]["breach"]
+    assert reverts and "pass_count 0<1" in reverts[0]["breach"]
+
+
+def test_crash_that_costs_nothing_keeps_the_fill(tmp_path: Path, monkeypatch) -> None:
+    """The live deadlock, end to end. The fill makes an all-red binary abort;
+    every test that was green at the snapshot is still green. The old rule
+    ("snapshot was crash-free ⇒ any vanish convicts") reverted here on EVERY
+    iteration, so the route re-filled the same fns and lost them again forever
+    at zero payoff. A crash costs exactly what it was passing — here, nothing."""
+    events: list[tuple[str, dict]] = []
+    _run_tdd(monkeypatch, tmp_path,
+             [(_INTACT, False), (_SHRUNK, True), (_SHRUNK, False)], events)
+    assert (tmp_path / "src" / "a.rs").read_text(encoding="utf-8") == "FILLED"
+    assert not any(ev == "phase_c.tdd.batch_revert" for ev, _ in events)
 
 
 _ZERO = ("test t1 ... FAILED\ntest t2 ... FAILED\n"

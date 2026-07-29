@@ -256,7 +256,7 @@ class PhaseCFillEngine:
         _no_std_invariant = self.prompt.detect_crate_no_std_invariant(target_src_dir)
         invariants_section = "\n\n".join(
             s for s in (_no_std_invariant, _macro_invariants) if s)
-        # P5.1: crate-wide type records, cluster-filtered (Hard Rule 8).
+        # Crate-wide type records, filtered to what THIS cfg-cluster compiles.
         _crate_type_records = self.ws.cluster_filter_type_methods(
             self.ws.enumerate_types(target_src_dir) or [], cluster)
 
@@ -286,7 +286,7 @@ class PhaseCFillEngine:
             # Plan 4 — restrict this pass to the TDD frontier's fns when supplied.
             if tdd_frontier_keys is not None:
                 stubs = [s for s in stubs if s.key in tdd_frontier_keys]
-            # debt #46 — behavioral RE-FILL targets: frontier fns that are NOT
+            # behavioral RE-FILL targets: frontier fns that are NOT
             # stubs (already filled with a compiling-but-wrong body) yet have a
             # failing attributed test. Under `driver=tdd` these were previously
             # dropped (stub-only enumeration) → wrong bodies were permanent. Emit
@@ -374,7 +374,7 @@ class PhaseCFillEngine:
             # with a barrier between levels.
             _levels = group_priority_levels(stubs, leaf_name_counts)
 
-            # FR-024 cross-iter exhausted skip: load the retrospectives map once.
+            # cross-iter exhausted skip: load the retrospectives map once.
             _retros_cache = self.retros.load(project_dir)
 
             # P2 de-closure: per-pass ctx for the FillOneFn unit.
@@ -619,8 +619,8 @@ class PhaseCFillEngine:
                                     rec_loc = self.mut.locate_fn_by_record(
                                         fp, fn, container_for_fn, "")
                                 if rec_loc is not None:
-                                    _rss, _rbs, _rbe, sig_t = rec_loc
-                                    cur_body = cur_text[_rbs:_rbe]
+                                    sig_t = rec_loc.sig_text
+                                    cur_body = rec_loc.body_text
                                 else:
                                     sloc = self.mut.locate_fn(cur_text, fn)
                                     if sloc is None:

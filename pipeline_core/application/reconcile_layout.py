@@ -21,6 +21,7 @@ from pipeline_core.application.author_layout import (
     LayoutComponentRecord,
     LayoutOutcome,
 )
+from pipeline_core.application.definition_merge import merge_live_bodies
 from pipeline_core.domain.authored_layout import component_uids
 from pipeline_core.domain.private_surface import (
     PrivateSurface,
@@ -85,10 +86,17 @@ def plan_layout_reconciliation(
                                  "declaration could not be located in the live "
                                  "tree; leaving it alone")
                     continue
+                # A reinstall replaces the DECLARATION. Any member body the
+                # live tree has already implemented survives it — otherwise a
+                # trait's default methods go back to `unimplemented!()` on
+                # every startup and the fill loop re-earns them forever.
+                merged = merge_live_bodies(authored, live_key)
                 plan.setdefault(it.file, []).append(
-                    DefReplacement(live_key, authored))
+                    DefReplacement(live_key, merged))
                 notes.append(f"{it.file}: {it.name} — live tree is on a "
-                             "superseded definition")
+                             "superseded definition"
+                             + (" (live member bodies preserved)"
+                                if merged != authored else ""))
     return plan, notes
 
 

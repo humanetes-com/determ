@@ -76,7 +76,7 @@ def run_cargo(
     otherwise the stdout+stderr-block combined layout (legacy parity)."""
     p = cargo.run(cmd, cwd, env=env, timeout=timeout)
     if p.returncode == -1:
-        # Keep the pre-kill partial stdout (names the hung test — debt #80).
+        # Keep the pre-kill partial stdout (names the hung test).
         return -1, (p.stdout + "\n" if p.stdout else "") + p.stderr
     return p.returncode, _combined(p.stdout, p.stderr)
 
@@ -204,6 +204,13 @@ def test_regression_gate(
               "but were all-red at baseline — nothing that worked was lost; "
               "not charged as regression (failure mode moved, panic → abort)")
     if not cmp.regressed:
+        if cmp.newly_crashed or cmp.newly_red:
+            guard("phase-c/net_gain_accept",
+                  f"kept despite cost — net {cmp.net_pass_delta:+d} test(s): "
+                  f"crashed {list(cmp.newly_crashed)} (was passing "
+                  f"{cmp.crash_lost_pass}), newly red {sorted(cmp.newly_red)}. "
+                  "The oracle score is the objective; a strict net gain is "
+                  "not refused over an individual loss")
         return None
     return cmp, render_regression_detail(cmp)
 

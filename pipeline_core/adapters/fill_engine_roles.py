@@ -32,7 +32,7 @@ from pipeline_core.domain.models import (
     FnLocator,
     FnSite,
 )
-from pipeline_core.domain.reconstruction import SpliceOutcome
+from pipeline_core.domain.reconstruction import FnLocation, SpliceOutcome
 from pipeline_core.domain.test_report import U2Verdict
 from pipeline_core.domain.test_results import RegressionComparison, TestStateReading
 from pipeline_core.ports.structure import StructureReader
@@ -66,7 +66,7 @@ class EngineTelemetryAdapter:
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True, slots=True)
 class MutatorAdapter:
-    locate_fn_by_record_fn: Callable[..., tuple[int, int, int, str] | None]
+    locate_fn_by_record_fn: Callable[..., FnLocation | None]
     locate_fn_fn: Callable[[str, str], tuple[str, int, int, int] | None]
     splice_fn_body_at_fn: Callable[..., SpliceOutcome]
     splice_fn_body_fn: Callable[..., SpliceOutcome]
@@ -77,7 +77,7 @@ class MutatorAdapter:
     def locate_fn_by_record(self, file_path: Path, name: str, container: str,
                             sig_text: str,
                             cfg_predicates: tuple[str, ...] | None = None
-                            ) -> tuple[int, int, int, str] | None:
+                            ) -> FnLocation | None:
         return self.locate_fn_by_record_fn(file_path, name, container, sig_text,
                                            cfg_predicates)
 
@@ -124,9 +124,8 @@ class MutatorAdapter:
                                         cfg_predicates)
                if (container or sig_text) else None)
         if loc is not None:
-            _sig_start, body_start, body_end, _sig = loc
             return self.splice_fn_body_at(
-                file_path, body_start, body_end, pre_image,
+                file_path, loc.body_byte_start, loc.body_byte_end, pre_image,
                 allow_nonstub=True, allow_stub_body=True)
         # Same record-locator-then-bare-name ladder as splice_body_scoped: the
         # extractor binary is absent on the fixture path, and a revert that
@@ -163,8 +162,8 @@ class MutatorAdapter:
             loc = self.locate_fn_by_record(file_path, name, container, sig_text,
                                            cfg_predicates)
             if loc is not None:
-                _sig_start, body_start, body_end, _sig = loc
-                return self.splice_fn_body_at(file_path, body_start, body_end,
+                return self.splice_fn_body_at(file_path, loc.body_byte_start,
+                                              loc.body_byte_end,
                                               new_body, allow_nonstub=allow_nonstub,
                                               allow_stub_body=allow_stub_body,
                                               fn_name=name)

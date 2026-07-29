@@ -29,7 +29,7 @@ from pipeline_core.domain.models import (
     ImplBlock,
     TypeRecord,
 )
-from pipeline_core.domain.reconstruction import SpliceOutcome
+from pipeline_core.domain.reconstruction import FnLocation, SpliceOutcome
 from pipeline_core.domain.test_report import U2Verdict
 from pipeline_core.domain.test_results import RegressionComparison, TestStateReading
 
@@ -53,7 +53,7 @@ class Mutator(Protocol):
     def locate_fn_by_record(
         self, file_path: Path, name: str, container: str, sig_text: str,
         cfg_predicates: tuple[str, ...] | None = ...,
-    ) -> tuple[int, int, int, str] | None: ...
+    ) -> FnLocation | None: ...
     def locate_fn(
         self, text: str, name: str,
     ) -> tuple[str, int, int, int] | None: ...
@@ -148,7 +148,7 @@ class WorkspaceModel(Protocol):
     """Read-only static model of the workspace source: stub scans, fn/type
     enumeration, impl-block grouping, container index, cluster membership, and
     the leaf-first ordering. The ONLY allowed source read (post-strip target
-    tree), all via the syn extractor — no original source (Hard Rule 11)."""
+    tree), all via the syn extractor — never the original, pre-strip source."""
 
     def scan_stub_records(
         self, target_src_dir: Path, cluster: BuildCluster | None,

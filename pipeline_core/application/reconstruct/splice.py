@@ -25,7 +25,11 @@ from pipeline_core.application.reconstruct.splice_txn import (
     parse_guarded_write,
 )
 from pipeline_core.domain.llm_output import xml_unescaped_variant
-from pipeline_core.domain.reconstruction import SpliceOutcome, SpliceReason
+from pipeline_core.domain.reconstruction import (
+    FnLocation,
+    SpliceOutcome,
+    SpliceReason,
+)
 from pipeline_core.domain.rust_fn_headers import is_pub_fn, locate_all_fns
 from pipeline_core.domain.rust_idents import canon_container, declares_fn
 from pipeline_core.domain.rust_scan import (
@@ -104,10 +108,11 @@ def locate_fn_by_record(enumerate_fns: Callable[[Path], list[dict[str, Any]] | N
                         file_path: Path, name: str, container: str,
                         sig_text: str,
                         cfg_predicates: tuple[str, ...] | None = None,
-                        ) -> tuple[int, int, int, str] | None:
-    """Re-enumerate `file_path` and return (sig_byte_start, body_byte_start,
-    body_byte_end, fresh_sig_text) for the fn matching (name, container,
-    sig_text). Used by the per-fn loop to splice by EXACT byte offset
+                        ) -> FnLocation | None:
+    """Re-enumerate `file_path` and return the :class:`FnLocation` of the fn
+    matching (name, container, sig_text) — offsets, fresh signature, and the
+    body text as it stands in the SAME read. Used by the per-fn loop to splice
+    by EXACT byte offset
     instead of regex-locating by name (which collides when a file has
     multiple fns sharing a name — e.g. Display::fmt vs Debug::fmt).
 
@@ -119,7 +124,7 @@ def locate_fn_by_record(enumerate_fns: Callable[[Path], list[dict[str, Any]] | N
       1. fn name match
       2. container match (e.g. "impl Display for X")
       3. signature similarity (exact, else normalised whitespace)
-      4. cfg predicates (debt #17a) — two same-name same-sig free fns that
+      4. cfg predicates — two same-name same-sig free fns that
          differ ONLY by `#[cfg]` (the `cap_limit` toggle pair) are otherwise
          indistinguishable; when the caller knows the target's cfg, prefer the
          record whose cfg matches so the right cfg-variant is spliced.
@@ -178,11 +183,12 @@ def locate_fn_by_record(enumerate_fns: Callable[[Path], list[dict[str, Any]] | N
         stubs = [r for r in cands if r.get("has_unimplemented_body")]
         cands = [stubs[0]] if stubs else [cands[0]]
     r = cands[0]
-    return (
+    return FnLocation(
         int(r["sig_byte_start"]),
         int(r["body_byte_start"]),
         int(r["body_byte_end"]),
         r.get("sig_text", ""),
+        r.get("body_text", ""),
     )
 
 
@@ -205,7 +211,7 @@ def splice_fn_body_at(file_path: Path, body_byte_start: int, body_byte_end: int,
     write shifts the byte ranges of later fns in the same file.
 
     Returns a :class:`SpliceOutcome`; every refusal carries its distinct
-    :data:`SpliceReason` (debt #39).
+    :data:`SpliceReason`.
     """
     # The offsets are BYTE offsets from the syn enumerator. They MUST be applied
     # in byte space: a `str` from read_text() is indexed by CHARACTERS, so any
@@ -380,7 +386,7 @@ def splice_fn_body(file_path: Path, fn_name: str, new_body: str,
     name-match (char-space) locate. By default only splices an
     ``unimplemented!()`` stub; ``allow_nonstub=True`` re-fills a wrong body. The
     file is re-read every call so byte offsets stay fresh. Returns a
-    :class:`SpliceOutcome` with the distinct :data:`SpliceReason` (debt #39)."""
+    :class:`SpliceOutcome` with the distinct :data:`SpliceReason`."""
     try:
         text = file_path.read_text(encoding="utf-8")
     except Exception:
@@ -472,7 +478,8 @@ def splice_fn_with_where(
         loc = locate_fn_by_record(enumerate_fns, file_path, fn_name, loose_container, sig_text)
     if loc is None:
         return SpliceOutcome(False, "fn_not_found", 0)
-    sig_byte_start, body_byte_start, body_byte_end, _sig_text = loc
+    sig_byte_start, body_byte_start, body_byte_end = (
+        loc.sig_byte_start, loc.body_byte_start, loc.body_byte_end)
 
     pre_image: bytes | None = None
     if where_clause:

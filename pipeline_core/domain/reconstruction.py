@@ -47,6 +47,28 @@ SpliceReason = Literal[
 ]
 
 
+class FnLocation(NamedTuple):
+    """Where one fn sits in a source file, plus the body found THERE.
+
+    ``body_byte_start``/``body_byte_end`` are BYTE offsets bracketing the text
+    between the fn's braces (the extractor reports `{`-end and `}`-start). They
+    are only meaningful against the exact file state the enumeration read, so
+    ``body_text`` is carried alongside them rather than left to the caller to
+    re-derive: three call sites had independently written
+    ``some_earlier_snapshot[body_byte_start:body_byte_end]``, which indexes a
+    `str` by CHARACTERS with BYTE offsets and reads a stale image besides. Both
+    errors yield a plausible-looking fragment spanning the end of one body and
+    the start of the next signature — silently, and then written back as if it
+    were the original body. Taking the body from the same read that produced
+    the offsets makes that impossible instead of merely discouraged."""
+
+    sig_byte_start: int
+    body_byte_start: int
+    body_byte_end: int
+    sig_text: str
+    body_text: str = ""
+
+
 class SpliceOutcome(NamedTuple):
     """Result of splicing a body into a function: whether it applied, the
     :data:`SpliceReason` cause, and the byte delta the edit introduced. A

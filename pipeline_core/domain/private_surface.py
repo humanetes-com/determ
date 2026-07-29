@@ -13,17 +13,18 @@ private types it points at); t1.5 authors one CONNECTED COMPONENT per turn so
 the scheme is internally consistent by construction (Rule 9). The graph — and
 therefore the component partition — is computed PER cfg-cluster, because a
 private layout can differ by cfg (nightly ``ErrorImpl`` carries a backtrace
-field stable does not — Hard Rule 8).
+field stable does not — so the surface is cluster-scoped).
 
 Pure domain: consumes already-enumerated TypeRecord/FnRecord, no IO, no regex
 (CamelCase reference scan via :func:`rust_idents.camelcase_type_names`).
 """
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum, auto
 
+from pipeline_core.domain.cfg import CfgSet
 from pipeline_core.domain.models import FnRecord, TypeRecord
 from pipeline_core.domain.rust_idents import camelcase_type_names
 from pipeline_core.domain.rust_name_scope import ModuleScopes, NameResolver
@@ -160,11 +161,26 @@ def _reachable_from(
     return frozenset(seen)
 
 
+def _cfg_excluded(preds: Sequence[str], cfg_set: CfgSet | None) -> bool:
+    """True only when this cluster DEFINITELY does not compile the item.
+
+    Same conservative direction as the fill routes' cluster membership: an
+    undecidable predicate keeps the item, because wrongly freezing something
+    the model may author costs one missed choice, while wrongly authoring
+    something another cluster owns rewrites a declaration that cluster still
+    needs — and nothing in this cluster's compile ever notices, since the item
+    is `#[cfg]`-dead here."""
+    if cfg_set is None or not preds:
+        return False
+    return any(cfg_set.evaluate(p) is False for p in preds)
+
+
 def classify_private_surface(
     type_records: list[TypeRecord],
     fn_records: list[FnRecord],
     *,
     cfg_cluster: str = "default",
+    cfg_set: CfgSet | None = None,
     reachable_files: frozenset[str] | None = None,
     scopes: ModuleScopes | None = None,
     author_private_fields: bool = False,
@@ -194,7 +210,17 @@ def classify_private_surface(
     crate's public wrappers keep pointing at whatever private types the original
     chose (`pub struct Error { inner: Own<ErrorImpl> }` pins the whole erasure
     scheme even when every type it names is nominally re-authorable), so the
-    "model owns the private layout" promise stops one field short."""
+    "model owns the private layout" promise stops one field short.
+
+    `cfg_set` scopes the surface to what this cluster actually compiles. A fn
+    gated to ANOTHER cluster is not this cluster's to re-author: authoring it
+    replaces a declaration this build never compiles, so no compile gate here
+    can catch a wrong one, and the other cluster inherits the damage. Observed:
+    `pub(crate) fn provide<'a>(&'a self, …)`, `#[cfg]`-dead under `stable`,
+    came back carrying a different impl's `unsafe fn provide<'a>(this: Ref<'a,
+    Self>, …)` and a doubled `#[cfg]` — invisible to every stable run since.
+    Type records carry no cfg predicates from the extractor, so the filter
+    reaches fn items only; that is where the damage was observed."""
     frozen_public: set[str] = set()
     public_types: list[TypeRecord] = []
     private_types: list[TypeRecord] = []
@@ -250,6 +276,8 @@ def classify_private_surface(
         if (f.is_pub and f.is_exactly_pub) or not f.fn_name:
             continue
         if f.container in trait_owned:
+            continue
+        if _cfg_excluded(f.cfg_predicates, cfg_set):
             continue
         refs = _references(f.sig_text, f.file, resolver)
         if refs:
