@@ -56,6 +56,37 @@ def ratchet_breach(
     return ""
 
 
+def breach_withheld(breach: str, after_layout_retrigger: bool) -> str:
+    """Why this breach must not be ACTED on (''= charge it normally).
+
+    `ratchet_breach` answers "did the tree net-regress"; this answers "is the
+    previous iter's FILLS what regressed it", which is the ratchet's whole
+    premise. A successful layout retrigger breaks that premise on purpose: it
+    re-stubs every fn referencing the re-authored component so they re-fill
+    under the new shape, and a stub panic in drop/vtable code aborts a whole
+    test binary. The next sweep therefore scores BELOW the snapshot by
+    construction — before a single re-fill has run, and whatever the new
+    layout is worth.
+
+    Charging it is not a harmless false positive. The revert is `restore_src_tree`
+    over the whole `src/` tree, so it takes the re-authored DEFINITION down with
+    the surgical revert: the crash the retrigger exists to fix comes back, the
+    capped attempt is spent (the refund path covers only mechanical failures),
+    and the next attempt repeats the identical cycle until the cap. Observed
+    live: `ChainState` attempts 1 and 2 destroyed this way, one iter after each
+    fired, while pass_count sat at its high-water mark.
+
+    Withholding for exactly ONE iter costs the ratchet nothing. The snapshot is
+    untouched (a count below the high-water mark cannot re-snapshot), so if the
+    re-author plus its re-fills land short, the very next iter reverts them on
+    the ordinary rule — against the same best tree. The experiment gets its one
+    iter of evidence; the high-water mark stays absolute."""
+    if breach and after_layout_retrigger:
+        return ("this sweep measures the layout retrigger's deliberate re-stub, "
+                "not last iter's fills — one iter of re-fills gets to run first")
+    return ""
+
+
 def snapshot_due(
     pass_count: int, best_pass: int, tree_sha: str, snap_sha: str | None,
 ) -> bool:

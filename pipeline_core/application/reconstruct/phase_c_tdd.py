@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from pipeline_core.application.retrigger_layout import RetriggerResult
 
 from pipeline_core.application.reconstruct.tdd_ratchet import (
+    breach_withheld,
     ratchet_breach,
     restore_src_tree,
     snapshot_due,
@@ -326,6 +327,13 @@ def run_phase_c_tdd(
     # expected (reverted stubs crash until re-filled) and must not confirm-now
     # a fresh attempt before a single fill pass has run.
     _retrig_cooldown = False
+    # The SAME expected shrink, one consumer over: it also depresses the next
+    # sweep's pass_count, which is what the batch ratchet convicts on. Two
+    # flags rather than one because they are consumed at different points of
+    # the iter — the ratchet reads this one at the top of the sweep, the
+    # cooldown is read further down at the re-fire check. Set by EVERY
+    # retrigger site: all three end in the same surgical revert.
+    _retrig_grace = False
     # Cause-A (build failure) retrigger: consecutive sweeps in which the test
     # binaries did not compile. Carried as evidence, never as a threshold — a
     # tree that cannot build produces no verdict at all, so waiting is pure loss.
@@ -488,6 +496,17 @@ def run_phase_c_tdd(
         # exactly when the tree is at its best.
         _breach = ratchet_breach(pass_count, _bratchet_best,
                                  _sweep.passing, _bratchet_passing)
+        _withheld = breach_withheld(_breach, _retrig_grace)
+        if _withheld:
+            deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: batch ratchet — "
+                     f"breach ({_breach}) NOT charged: {_withheld}.")
+            deps.emit("phase_c.tdd.batch_withheld", data={
+                "cluster": cluster.name, "iter": iter_n,
+                "pass_count": pass_count, "best_pass": _bratchet_best,
+                "breach": _breach, "reason": _withheld,
+            })
+            _breach = ""
+        _retrig_grace = False    # consumed: exactly one iter of evidence
         if _batch_ratchet and _bratchet_snap is not None and _breach:
             # A crashing binary drops a nondeterministic subset of tests, so a
             # single breached reading can be pure noise; re-sweep the UNCHANGED
@@ -828,6 +847,8 @@ def run_phase_c_tdd(
                     "consecutive_broken_sweeps": _compile_broke_streak,
                 })
                 _compile_broke_streak = 0
+                _retrig_cooldown = True
+                _retrig_grace = True
                 state.stalls = 0
                 stall = 0
                 continue
@@ -905,6 +926,7 @@ def run_phase_c_tdd(
                     "cause": _retrig_c.cause,
                     "reverted_count": _retrig_c.reverted_count,
                 })
+                _retrig_grace = True
                 state.stalls = 0
                 stall = 0
                 continue
@@ -939,6 +961,8 @@ def run_phase_c_tdd(
                         "cause": _retrig.cause,
                         "reverted_count": _retrig.reverted_count,
                     })
+                    _retrig_cooldown = True
+                    _retrig_grace = True
                     state.stalls = 0
                     stall = 0
                     continue

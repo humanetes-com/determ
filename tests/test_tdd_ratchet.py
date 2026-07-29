@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from pipeline_core.application.reconstruct.tdd_ratchet import (
+    breach_withheld,
     ratchet_breach,
     restore_src_tree,
     snapshot_due,
@@ -108,7 +109,17 @@ def test_snapshot_due_takes_equal_score_work() -> None:
     assert not snapshot_due(4, 5, "shaNEW", "shaOLD")    # a regression is not a baseline
 
 
-def _driver_deps(run_cargo, inventory, events):
+def test_breach_withheld_only_after_a_retrigger() -> None:
+    """The premise the ratchet convicts on — "this sweep measures last iter's
+    fills" — is false on the sweep right after a layout retrigger re-stubs the
+    component's fns on purpose. Withheld there, charged everywhere else."""
+    assert breach_withheld("pass_count 13<14", after_layout_retrigger=True)
+    assert breach_withheld("pass_count 13<14", after_layout_retrigger=False) == ""
+    # No breach, nothing to withhold — the grace never invents a verdict.
+    assert breach_withheld("", after_layout_retrigger=True) == ""
+
+
+def _driver_deps(run_cargo, inventory, events, retrigger=None):
     from pipeline_core.application.reconstruct.phase_c_tdd import PhaseCTddDeps
     from pipeline_core.domain.models import ClusterFillResult
     return PhaseCTddDeps(
@@ -132,11 +143,11 @@ def _driver_deps(run_cargo, inventory, events):
         task2_fill_fns_one_by_one=lambda **kw: ClusterFillResult(attempts=1),
         checkpoint_fill_tree=lambda pd, cl, d, p, i: None,
         active_test_inventory=inventory,
-        retrigger_layout=None,
+        retrigger_layout=retrigger,
     )
 
 
-def _run_tdd(monkeypatch, tmp_path: Path, outputs, events) -> None:
+def _run_tdd(monkeypatch, tmp_path: Path, outputs, events, retrigger=None) -> None:
     """Drive the TDD loop with ratchet ON over a scripted cargo-output list.
     Each cargo call pops the next output (last one repeats); the call ALSO
     mutates src/a.rs when the popped entry says so — simulating a fill that
@@ -158,7 +169,7 @@ def _run_tdd(monkeypatch, tmp_path: Path, outputs, events) -> None:
 
     run_phase_c_tdd(
         _driver_deps(_cargo, lambda pd, cl, stems, lib=False: (2, frozenset({"t1", "t2"})),
-                     events),
+                     events, retrigger),
         project_dir=tmp_path, target_src_dir=tmp_path, tests_dir_files=[],
         cluster_tests=[("tests/t.rs", "fn t1() {}")], module="m",
         cluster=BuildCluster(
@@ -230,3 +241,62 @@ def test_equal_score_fill_survives_a_later_revert(tmp_path: Path, monkeypatch) -
     assert (tmp_path / "src" / "a.rs").read_text(encoding="utf-8") == "FILLED"
     reverts = [d for ev, d in events if ev == "phase_c.tdd.batch_revert"]
     assert reverts and "pass_count 0<1" in reverts[0]["breach"]
+
+
+def _one_shot_retrigger(src: Path):
+    """A layout retrigger that fires once and does what the real one does:
+    re-stub the fns referencing the re-authored component (here, rewrite the
+    file) so they re-fill under the new shape."""
+    from pipeline_core.application.retrigger_layout import RetriggerResult
+    fired: list[int] = []
+
+    def _retrig(*a: Any, **k: Any) -> RetriggerResult:
+        if fired:
+            return RetriggerResult(fired=False, reason="capped")
+        fired.append(1)
+        (src / "a.rs").write_text("RESTUBBED", encoding="utf-8")
+        return RetriggerResult(fired=True, succeeded=True, reverted_count=3,
+                               cause="RUNTIME_CRASH")
+    return _retrig
+
+
+def test_retrigger_restub_is_not_charged_to_last_iters_fills(
+        tmp_path: Path, monkeypatch) -> None:
+    """The live cycle this pins out. Iter 1's crash fires the retrigger, which
+    re-stubs 3 fns on purpose; iter 2's sweep is therefore BELOW the snapshot
+    by construction. Charging it ran `restore_src_tree` over all of `src/`,
+    which took the re-authored DEFINITION with it — the crash returned, the
+    capped attempt was spent, and the next attempt repeated the cycle
+    (`ChainState` attempts 1 and 2, one iter apart, pass_count pinned at its
+    high-water mark the whole time). Given its one iter, the re-fills recover
+    the count and the new layout is kept."""
+    src = tmp_path / "src"
+    src.mkdir(exist_ok=True)
+    events: list[tuple[str, dict]] = []
+    _run_tdd(monkeypatch, tmp_path,
+             [(_SHRUNK, False), (_SHRUNK, False), (_LOST_PASS, False),
+              (_INTACT, False)], events,
+             retrigger=_one_shot_retrigger(src))
+    assert (src / "a.rs").read_text(encoding="utf-8") == "RESTUBBED"
+    withheld = [d for ev, d in events if ev == "phase_c.tdd.batch_withheld"]
+    assert withheld and "pass_count 0<1" in withheld[0]["breach"]
+    assert not any(ev == "phase_c.tdd.batch_revert" for ev, _ in events)
+
+
+def test_retrigger_grace_lasts_exactly_one_iter(
+        tmp_path: Path, monkeypatch) -> None:
+    """The other half: the grace buys the re-author ONE iter of re-fills, not
+    immunity. If the tree is still short at the next iter the ordinary rule
+    convicts — against the same untouched snapshot, so nothing was lost by
+    waiting. Without this the fix would simply disable the ratchet."""
+    src = tmp_path / "src"
+    src.mkdir(exist_ok=True)
+    events: list[tuple[str, dict]] = []
+    _run_tdd(monkeypatch, tmp_path,
+             [(_SHRUNK, False), (_SHRUNK, False), (_LOST_PASS, False),
+              (_LOST_PASS, False)], events,
+             retrigger=_one_shot_retrigger(src))
+    assert [ev for ev, _ in events].count("phase_c.tdd.batch_withheld") == 1
+    reverts = [d for ev, d in events if ev == "phase_c.tdd.batch_revert"]
+    assert reverts and "pass_count 0<1" in reverts[0]["breach"]
+    assert (src / "a.rs").read_text(encoding="utf-8") == "orig"
