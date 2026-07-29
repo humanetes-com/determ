@@ -45,6 +45,7 @@ class HealthKind(StrEnum):
     ROUTING_DROP = "routing_drop"                # model answered; the body matched no container and was discarded
     PLATEAU_ACROSS_RUNS = "plateau_across_runs"  # same score in N consecutive RUNS — invisible inside any one of them
     WORKSPACE_RESET = "workspace_reset"          # reconstruction was wiped; scores before it describe a tree that no longer exists
+    NO_SEGMENT_EVIDENCE = "no_segment_evidence"  # nothing to analyse — every segment detector is silently vacuous
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,6 +141,23 @@ def analyze(
 ) -> list[HealthFinding]:
     findings: list[HealthFinding] = []
 
+    # -- 0. is there anything to analyse at all? ----------------------------
+    # Every check below reads `segment_lines`. On an empty segment they all
+    # return nothing, which is indistinguishable from "nothing is wrong" —
+    # the report prints a clean bill of health for a run it cannot see. This
+    # happened for hours when the active log was renamed out from under the
+    # writer: `segment lines=0` sat in the header while the live run appended
+    # to an archive. An analyser with no input has to say so, loudly, because
+    # every downstream "GOOD: the grep was empty" is then meaningless.
+    if not segment_lines:
+        findings.append(HealthFinding(
+            HealthKind.NO_SEGMENT_EVIDENCE, "red", "run log",
+            "0 segment line(s) — no evidence to analyse, so every "
+            "segment-scoped detector below is vacuous, NOT green",
+            "check the log the pipeline is actually writing to "
+            "(`ls -l /proc/<pid>/fd/1`) before trusting any empty grep",
+        ))
+
     # -- 1. poisoned model notes ------------------------------------------
     bogus = sum(1 for n in notes if is_bogus_regression_note(n))
     if bogus:
@@ -179,17 +197,29 @@ def analyze(
     if readings and attempts >= burn_min_attempts:
         delta = readings[-1].pass_count - readings[0].pass_count
         landed = count_fills_landed(segment_lines)
-        # Only cry wolf when the tree is genuinely frozen. A stale per-sweep
-        # pass delta ≤ 0 while bodies are still landing = mid-sweep, not a
-        # burning loop — pass= just hasn't been re-measured since the last
-        # sweep boundary. Suppress on landed fills to avoid alarm fatigue.
-        if delta <= 0 and landed == 0:
+        # Landing fills is NOT evidence of progress, and suppressing on it
+        # hid the worst case this detector exists to catch: bodies splicing
+        # in at full rate while the score never moves (observed: 410 fills
+        # across four runs, pass delta 0 every time — the detector was
+        # silent for all of them because `landed` was never 0). What the old
+        # suppression was really guarding against is a delta read BEFORE the
+        # sweep that would move it, so gate on that instead: a delta needs
+        # two readings to exist at all. With ≥2 readings a flat score is a
+        # measured fact, and fills landing into it makes the finding
+        # stronger, not weaker.
+        if delta <= 0 and len(readings) >= 2:
+            what = (f"{landed} fill(s) LANDED and the score still did not move"
+                    if landed else "no fills landed")
             findings.append(HealthFinding(
-                HealthKind.ZERO_PAYOFF_BURN, "warn", "fill/re-fill loop",
+                HealthKind.ZERO_PAYOFF_BURN,
+                "red" if landed else "warn", "fill/re-fill loop",
                 f"{attempts} failed attempt(s) incl. {maximal} maximal, "
-                f"pass delta {delta:+d} across the segment, no fills landed",
-                "the loop is buying nothing — check MODEL_NOTES quality and "
-                "attribution before letting it continue",
+                f"pass delta {delta:+d} across {len(readings)} sweep "
+                f"reading(s), {what}",
+                "the loop is buying nothing — when fills land into a flat "
+                "score the bodies are not what the oracle is blocked on; "
+                "find the one unit the failing tests are all downstream of "
+                "before spending another sweep",
             ))
 
     # -- 3b. shared failure set across unrelated files ----------------------

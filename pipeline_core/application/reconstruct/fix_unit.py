@@ -37,7 +37,7 @@ from pipeline_core.domain.fix_session import FixSession
 from pipeline_core.domain.fix_target import FixTarget, FnTarget, ImplTarget
 from pipeline_core.domain.llm_output import extract_fn_bodies
 from pipeline_core.domain.models import FnLocator, Frontier
-from pipeline_core.domain.rust_idents import is_trait_impl_container
+from pipeline_core.domain.rust_idents import signature_fixed_by_trait
 from pipeline_core.ports.fix_engine import (
     CompileChecker,
     FixModel,
@@ -238,12 +238,12 @@ class FnFixUnit(_BaseFixUnit):
         t = self.target
         assert isinstance(t, FnTarget)
         path = self.session.project_dir / t.file_rel
-        trait_impl = is_trait_impl_container(t.container or "")
+        trait_owned_sig = signature_fixed_by_trait(t.container or "")
         # Frozen-signature authority (E0276 ratchet recovery): a where-clause
-        # once spliced into a trait-impl method sticks — splice_fn_with_where
+        # once spliced into a trait-owned method sticks — splice_fn_with_where
         # only inserts, and this prompt would re-freeze the corrupted sig as
         # "verbatim, do not change". Restore the baked-skeleton sig first.
-        if trait_impl:
+        if trait_owned_sig:
             frozen = _skeleton_frozen_sig(
                 self.session.project_dir, t.file_rel, t.fn_name,
                 self.deps.splicer.locate_fn)
@@ -259,8 +259,9 @@ class FnFixUnit(_BaseFixUnit):
         cur_body = file_text[bs:be]
         # After a body-only attempt stalls, a PRIVATE fn may tighten its bounds
         # (unsized-T: returns `T` by value but `T` is `?Sized` → `where T: Sized`)
-        # — never a trait-impl member, whose signature the trait fixes (E0276).
-        allow_where = (len(history) >= 1 and not trait_impl
+        # — never a trait-owned member (impl member or the trait's own default),
+        # whose signature the trait fixes for every implementor (E0276).
+        allow_where = (len(history) >= 1 and not trait_owned_sig
                        and not self.deps.splicer.is_pub_fn(file_text, t.fn_name))
         sig_rule = _FN_SIG_RULE_RELAX if allow_where else _FN_SIG_RULE_FIXED
         prompt = build_fn_fix_prompt(
@@ -343,10 +344,10 @@ class ImplFixUnit(_BaseFixUnit):
             if not nm or not body:
                 continue
             # Honour a where-clause only for PRIVATE fns (API-surface guard)
-            # that are not trait-impl members (trait fixes the sig — E0276).
+            # whose signature the trait does not own (E0276).
             wc = fb.get("where_clause")
             use_wc = wc if (allow_where and wc
-                            and not is_trait_impl_container(t.container)
+                            and not signature_fixed_by_trait(t.container)
                             and not self.deps.splicer.is_pub_fn(
                                 file_text, nm)) else None
             ok_s, reason, delta = self.deps.splicer.splice_fn(

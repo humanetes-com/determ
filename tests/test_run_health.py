@@ -43,18 +43,37 @@ def test_zero_payoff_burn():
     assert HealthKind.ZERO_PAYOFF_BURN in _kinds(f)
 
 
-def test_zero_payoff_burn_suppressed_when_fills_landed_mid_sweep():
-    # I3: pass= is only re-measured per multi-hour sweep, so a flat delta with
-    # bodies still landing is mid-sweep progress, not a burning loop. Landed
-    # fills must silence the alarm to avoid false-alarm fatigue.
+def test_zero_payoff_burn_escalates_when_fills_land_into_a_flat_score():
+    # This pin used to assert the OPPOSITE — landed fills silenced the alarm as
+    # "mid-sweep progress". That suppression hid the worst case the detector
+    # exists for: 410 fills across four runs with pass delta 0 every time, and
+    # the alarm never once fired because `landed` was never 0. Bodies landing
+    # into a score that does not move is the STRONGEST form of this finding.
     from pipeline_core.domain.run_health import count_fills_landed
     filled = ["  [phase-c/per-fn] 3/68 filled src/error.rs::root_cause (+40 bytes, body=40)",
               "  [phase-c/impl] impl Display for Error: FILLED 2 fn(s) (attempt 1)."]
     assert count_fills_landed(filled) == 2
     lines = ([ITER] + ["  [phase-c/impl] u: U2 test failed (attempt 1)"] * 45
              + filled + [ITER])
-    f = analyze(lines, [])
-    assert HealthKind.ZERO_PAYOFF_BURN not in _kinds(f)
+    f = [x for x in analyze(lines, []) if x.kind == HealthKind.ZERO_PAYOFF_BURN]
+    assert f and f[0].severity == "red"
+    assert "LANDED" in f[0].evidence
+
+
+def test_zero_payoff_burn_needs_two_readings_to_have_a_delta():
+    # The real mid-sweep guard: with a single reading there is no delta to
+    # judge, so the detector must stay quiet rather than score a run against
+    # its own starting point.
+    lines = [ITER] + ["  [phase-c/impl] u: U2 test failed (attempt 1)"] * 45
+    assert HealthKind.ZERO_PAYOFF_BURN not in _kinds(analyze(lines, []))
+
+
+def test_empty_segment_is_reported_not_treated_as_healthy():
+    # An analyser with no input must say so: every segment detector returns
+    # nothing on an empty segment, which reads identically to "all clear".
+    f = [x for x in analyze([], []) if x.kind == HealthKind.NO_SEGMENT_EVIDENCE]
+    assert f and f[0].severity == "red"
+    assert "vacuous" in f[0].evidence
 
 
 def test_attribution_futility_names_units():

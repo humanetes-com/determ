@@ -23,15 +23,39 @@ from typing import Any
 
 from pipeline_core.domain.identity import ContainerId
 from pipeline_core.domain.models import ImplBlock
-from pipeline_core.domain.rust_idents import canon_container
+from pipeline_core.domain.rust_idents import (
+    canon_container,
+    impl_trait_name,
+    trait_def_name,
+)
 
 
 @dataclass(frozen=True, slots=True)
 class RoutedBody:
-    """One returned FN body resolved to the VERBATIM container it splices into."""
+    """One returned FN body resolved to the VERBATIM container it splices into.
+
+    `via_trait_default` records that the body arrived tagged with a trait-IMPL
+    header and was resolved to the trait DECLARATION that hosts the member's
+    default body — the caller must then treat the signature as trait-owned even
+    though the container it splices into is not itself a trait impl."""
 
     fn_data: dict[str, Any]
     container: str
+    via_trait_default: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class TraitDefaultHost:
+    """A trait DECLARATION container and the members whose default body it holds.
+
+    `member_names` is what makes the trait-default tier safe: three traits in
+    one file can declare the same method name (anyhow's `AdhocKind`/`TraitKind`/
+    `BoxedKind` all declare `anyhow_kind`), so a body only routes here when the
+    trait it names actually declares that member."""
+
+    container: str
+    trait_name: str
+    member_names: frozenset[str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,14 +87,41 @@ class BodyRouting:
         return tuple(d.fn_name for d in self.dropped)
 
 
+def trait_default_hosts(
+    blocks: Sequence[ImplBlock], file_rel: str,
+) -> tuple[TraitDefaultHost, ...]:
+    """Trait DECLARATIONS in `file_rel` that can host a returned body.
+
+    A trait's default method is written inside `trait T { fn m() {..} }`, so an
+    `impl T for Ty {}` that overrides nothing is EMPTY and never appears as a
+    fillable container. The model, shown the file, reasonably tags its body with
+    the impl header it read — the trait is where that body has to go."""
+    want = norm_src_rel(file_rel)
+    hosts: list[TraitDefaultHost] = []
+    for b in blocks:
+        if not b.container or norm_src_rel(b.file) != want:
+            continue
+        name = trait_def_name(b.container)
+        if not name:
+            continue
+        hosts.append(TraitDefaultHost(
+            container=b.container, trait_name=name,
+            member_names=frozenset(m.fn_name for m in b.members)))
+    return tuple(hosts)
+
+
 def route_fn_bodies(
     parsed: list[dict[str, Any]], *, target: str, related: list[str],
+    trait_defaults: Sequence[TraitDefaultHost] = (),
 ) -> BodyRouting:
     """Resolve each parsed FN block to the TARGET or a RELATED container.
 
     Tiers per body (first hit wins): exact match on TARGET, exact on RELATED
     (listed order), canonical match on TARGET, canonical on RELATED (listed
-    order). A body matching nothing is dropped by name."""
+    order), then the trait-default tier — a body tagged `impl <Trait> for <Ty>`
+    that matched no container routes to the declaration of `<Trait>` when that
+    trait declares the member. Last because an explicit override always wins
+    over the default it would replace. A body matching nothing is dropped."""
     routed: list[RoutedBody] = []
     dropped: list[DroppedBody] = []
     target_canon = canon_container(target)
@@ -92,8 +143,16 @@ def route_fn_bodies(
         if canonical is not None:
             routed.append(RoutedBody(fn_data, canonical))
             continue
+        fn_name = str(fn_data.get("fn_name", ""))
+        trait = impl_trait_name(block_attr)
+        host = next((h for h in trait_defaults
+                     if h.trait_name == trait and fn_name in h.member_names),
+                    None) if trait else None
+        if host is not None:
+            routed.append(RoutedBody(fn_data, host.container, via_trait_default=True))
+            continue
         dropped.append(DroppedBody(
-            fn_name=str(fn_data.get("fn_name", "")),
+            fn_name=fn_name,
             block_attr=block_attr,
             attr_canon=attr_canon,
         ))

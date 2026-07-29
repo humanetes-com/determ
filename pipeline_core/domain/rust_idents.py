@@ -71,19 +71,117 @@ def is_trait_impl_container(container: str) -> bool:
     """True iff `container` is a TRAIT impl header (``impl Trait for Type``) —
     whose member signatures are fixed by the trait (adding a bound → E0276).
 
-    Container strings come from the syn enumerator token stream
-    (``impl StdError for ContextError < C , E >``) or a compact header
-    (``impl Display for X``). Trait impl iff some whole-word ``for`` token is
-    NOT immediately followed by a ``<`` token — an HRTB renders as
-    ``for < 'a >`` (spaced) or ``for<'a>`` (compact, no bare ``for`` token),
-    so neither form false-positives. Inherent impls (``impl Foo``), trait
-    declarations (``trait Foo``), and free fns (empty container) are False."""
-    ws = container.split()
-    if not ws or ws[0] != "impl":
-        return False
-    return any(
-        tok == "for" and (i + 1 >= len(ws) or not ws[i + 1].startswith("<"))
-        for i, tok in enumerate(ws))
+    Inherent impls (``impl Foo``), trait declarations (``trait Foo``), and free
+    fns (empty container) are False."""
+    return impl_trait_name(container) is not None
+
+
+def _is_ascii_ident_char(c: str) -> bool:
+    """True iff `c` may appear INSIDE a Rust identifier — the word boundary
+    used to tell the keyword `for` from `for_each`/`before`."""
+    return c == "_" or c.isalnum()
+
+
+def _skip_generics(s: str) -> str:
+    """`s` past a leading balanced ``<...>`` list (unchanged when absent)."""
+    if not s.startswith("<"):
+        return s
+    depth = 0
+    for i, ch in enumerate(s):
+        if ch == "<":
+            depth += 1
+        elif ch == ">":
+            depth -= 1
+            if depth == 0:
+                return s[i + 1:].lstrip()
+    return s
+
+
+def _bare_trait_path(path: str) -> str:
+    """Last segment of a trait path, generic args dropped: ``crate::kind::
+    AdhocKind`` and ``Context<T, E>`` → ``AdhocKind`` / ``Context``. An impl may
+    name a trait through a path while its declaration in the same file is bare,
+    so only the final segment carries comparable identity."""
+    head = path.split("<", 1)[0]
+    return head.rsplit("::", 1)[-1].strip()
+
+
+def impl_trait_name(container: str) -> str | None:
+    """Bare trait name implemented by a trait-impl header, else None.
+
+    ``impl<T> AdhocKind for &T where T: Display`` → ``AdhocKind``;
+    ``impl<T, E> Context<T, E> for Result<T, E>`` → ``Context``. Used both to
+    decide that the trait owns the member signatures (E0276) and to route a body
+    the model tagged with an impl header to the trait that declares the member —
+    an empty ``impl Trait for Ty {}`` holds no body, so the only place such a
+    body can live is the trait's own default method.
+
+    Container strings arrive as the syn enumerator token stream
+    (``impl < T > AdhocKind for & T``), as a pretty-printed header with a
+    newline where-clause, or as the model's compact single line
+    (``impl<T> AdhocKind for &T``) — all three must read the same. The trait
+    ends at the first whole-word ``for`` at generic depth 0 that does not
+    introduce an HRTB (``for<'a>`` compact, ``for < 'a >`` spaced)."""
+    s = " ".join(_strip_outer_attrs(_unescape_layout(container)).split())
+    if not (s == "impl" or s.startswith("impl ") or s.startswith("impl<")):
+        return None
+    s = _skip_generics(s[4:].lstrip())
+    depth = 0
+    for i, ch in enumerate(s):
+        if ch == "<":
+            depth += 1
+        elif ch == ">":
+            depth -= 1
+        elif (depth == 0 and s.startswith("for", i)
+              and (i == 0 or not _is_ascii_ident_char(s[i - 1]))
+              and (i + 3 >= len(s) or not _is_ascii_ident_char(s[i + 3]))):
+            rest = s[i + 3:].lstrip()
+            if rest.startswith("<"):        # HRTB, not the trait/type separator
+                continue
+            return _bare_trait_path(s[:i].strip()) or None
+    return None
+
+
+_TRAIT_DECL_MODIFIERS = frozenset({"unsafe", "auto", "default"})
+
+
+def trait_def_name(container: str) -> str | None:
+    """Bare name of a trait DECLARATION container, else None.
+
+    ``pub trait AdhocKind: Sized`` → ``AdhocKind``; ``trait Kind<T>`` →
+    ``Kind``. A trait declaration hosts its members' DEFAULT bodies, so it is a
+    splice target in its own right — distinct from ``impl Trait for Ty``, which
+    only overrides them."""
+    s = " ".join(_strip_outer_attrs(_unescape_layout(container)).split())
+    toks = s.split()
+    if not toks or toks[0] == "impl":
+        return None
+    for i, tok in enumerate(toks):
+        if tok != "trait":
+            # Visibility (`pub`, `pub(crate)`, spaced `pub ( crate )`) and the
+            # declaration modifiers are all that may precede `trait`; anything
+            # else means this is not a trait declaration header.
+            if not (tok.startswith("pub") or tok in _TRAIT_DECL_MODIFIERS
+                    or tok in {"(", ")", "crate", "in", "self", "super"}
+                    or tok.endswith(")")):
+                return None
+            continue
+        if i + 1 >= len(toks):
+            return None
+        name = toks[i + 1].split("<", 1)[0].split(":", 1)[0].strip()
+        return name or None
+    return None
+
+
+def signature_fixed_by_trait(container: str) -> bool:
+    """True iff the trait — not the member — owns the signature of a fn in
+    `container`, so a model-proposed where-clause must be dropped (E0276).
+
+    Holds for a trait IMPL (``impl Display for X``) and equally for the trait
+    DECLARATION itself (``trait AdhocKind``): tightening the bounds of a default
+    method rewrites the contract every implementor is checked against, which the
+    frozen public API forbids just as it forbids tightening an impl member."""
+    return is_trait_impl_container(container) or trait_def_name(container) is not None
 
 
 def declares_fn(sig: str, fn_name: str) -> bool:
@@ -941,17 +1039,7 @@ def canon_container(container: str) -> str:
     body routing."""
     s = " ".join(_strip_outer_attrs(_unescape_layout(container)).split())
     if s.startswith("impl"):
-        s = s[4:].lstrip()
-        if s.startswith("<"):
-            depth = 0
-            for i, ch in enumerate(s):
-                if ch == "<":
-                    depth += 1
-                elif ch == ">":
-                    depth -= 1
-                    if depth == 0:
-                        s = s[i + 1:]
-                        break
+        s = _skip_generics(s[4:].lstrip())
     if s.endswith(" where"):
         s = s[: -len(" where")]
     s = s.split(" where ")[0]

@@ -22,11 +22,14 @@ from pipeline_core.domain.rust_idents import (
     fn_reference_counts,
     identifier_tokens,
     impl_self_type,
+    impl_trait_name,
     is_fn_signature_line,
     is_trait_impl_container,
     is_unsafe_fn,
     mask_identifiers,
     mixed_case_identifiers,
+    signature_fixed_by_trait,
+    trait_def_name,
     use_path_requirement_gaps,
     use_symbol_paths,
 )
@@ -406,3 +409,48 @@ def test_impl_self_type_token_spaced_and_where():
         "impl Context < T , E > for Result < T , E >") == "Result"
     assert impl_self_type(
         "impl<T> Trait for Foo<T> where T: for<'a> Fn(&'a str)") == "Foo"
+
+
+# --- trait identity out of a container header ------------------------------
+
+def test_impl_trait_name_reads_the_trait_a_header_implements() -> None:
+    assert impl_trait_name(
+        "impl<T> AdhocKind for &T\nwhere\n    T: ?Sized + Display,") == "AdhocKind"
+    # generic trait: the args are not part of its identity
+    assert impl_trait_name(
+        "impl<T, E> Context<T, E> for Result<T, E>") == "Context"
+    # path-qualified in the impl, bare in the declaration — same trait
+    assert impl_trait_name("impl crate::kind::BoxedKind for Box<u8>") == "BoxedKind"
+    # HRTB `for<'a>` is not the trait/type separator
+    assert impl_trait_name("impl<F> Apply for F where F: for<'a> Fn(&'a u8)") == "Apply"
+
+
+def test_impl_trait_name_none_for_non_trait_impls() -> None:
+    assert impl_trait_name("impl Adhoc") is None
+    assert impl_trait_name("trait AdhocKind") is None
+    assert impl_trait_name("") is None
+
+
+def test_trait_def_name_reads_a_declaration_header() -> None:
+    assert trait_def_name("trait AdhocKind") == "AdhocKind"
+    assert trait_def_name("pub trait AdhocKind: Sized") == "AdhocKind"
+    assert trait_def_name("pub(crate) unsafe trait Raw<T>") == "Raw"
+    assert trait_def_name("#[doc(hidden)]\npub trait TraitKind: Sized") == "TraitKind"
+
+
+def test_trait_def_name_none_for_impls_and_other_items() -> None:
+    # An `impl Trait for Ty` mentions a trait but declares none — routing a
+    # default body there would write into an empty override.
+    assert trait_def_name("impl<T> AdhocKind for &T") is None
+    assert trait_def_name("impl Adhoc") is None
+    assert trait_def_name("struct Adhoc") is None
+    assert trait_def_name("") is None
+
+
+def test_signature_fixed_by_trait_covers_declaration_and_impl() -> None:
+    # A default method's bounds are the contract EVERY implementor is checked
+    # against, so tightening them is E0276 the same as on an impl member.
+    assert signature_fixed_by_trait("trait AdhocKind: Sized")
+    assert signature_fixed_by_trait("impl Display for Error")
+    assert not signature_fixed_by_trait("impl Error")
+    assert not signature_fixed_by_trait("")

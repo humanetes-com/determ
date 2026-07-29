@@ -11,6 +11,7 @@ from pipeline_core.domain.impl_routing import (
     norm_src_rel,
     refill_authorized_names,
     route_fn_bodies,
+    trait_default_hosts,
 )
 from pipeline_core.domain.models import FnRecord, ImplBlock
 from pipeline_core.domain.rust_idents import canon_container
@@ -289,3 +290,79 @@ def test_plain_headers_are_unchanged_by_the_strip() -> None:
     # carried an attribute.
     assert (canon_container("impl<T, E> Context<T, E> for Result<T, E>\nwhere\n    E: X,")
             == canon_container("impl Context < T , E > for Result < T , E >"))
+
+
+# --- trait-default routing tier -------------------------------------------
+# Live loss (run 2879-66905005, anyhow src/kind.rs, every run since 07-20): the
+# model returned all three `anyhow_kind` bodies tagged with the trait-IMPL
+# headers it read in the file text. Those impls are EMPTY (`impl<T> AdhocKind
+# for &T {}`) — the body lives in the trait's default method — so they are not
+# fillable containers and all three bodies were dropped as "matches no impl in
+# this file", three wasted GPU answers per run.
+
+def _trait_block(container: str, members: tuple[str, ...]) -> ImplBlock:
+    return ImplBlock(
+        file="src/kind.rs", container=container,
+        members=tuple(FnRecord(fn_name=n) for n in members))
+
+
+_KIND_BLOCKS = [
+    _trait_block("trait AdhocKind", ("anyhow_kind",)),
+    _trait_block("trait TraitKind", ("anyhow_kind",)),
+    _trait_block("trait BoxedKind", ("anyhow_kind",)),
+    _block("src/kind.rs", "impl Adhoc"),
+    _block("src/other.rs", "trait Elsewhere"),
+]
+
+
+def test_trait_default_hosts_scoped_to_file_and_declarations() -> None:
+    hosts = trait_default_hosts(_KIND_BLOCKS, "src/kind.rs")
+    assert [h.trait_name for h in hosts] == [
+        "AdhocKind", "TraitKind", "BoxedKind"]
+    assert hosts[0].container == "trait AdhocKind"
+    assert hosts[0].member_names == frozenset({"anyhow_kind"})
+
+
+def test_body_tagged_with_empty_override_routes_to_its_trait_default() -> None:
+    hosts = trait_default_hosts(_KIND_BLOCKS, "src/kind.rs")
+    parsed = [
+        _fn("anyhow_kind",
+            "impl<T> AdhocKind for &T where T: ?Sized + Display + Send"),
+        _fn("anyhow_kind", "impl<E> TraitKind for E where E: Into<Error>"),
+        _fn("anyhow_kind", "impl BoxedKind for Box<dyn StdError + Send + Sync>"),
+    ]
+    r = route_fn_bodies(parsed, target="impl Adhoc", related=[],
+                        trait_defaults=hosts)
+    assert r.dropped == ()
+    # Three same-named methods: each must land on the trait it was tagged with.
+    assert [rb.container for rb in r.routed] == [
+        "trait AdhocKind", "trait TraitKind", "trait BoxedKind"]
+    assert all(rb.via_trait_default for rb in r.routed)
+
+
+def test_trait_default_tier_never_overrides_a_real_container_match() -> None:
+    # An impl that DOES declare the member is a genuine override; the default
+    # must not swallow it.
+    hosts = trait_default_hosts(_KIND_BLOCKS, "src/kind.rs")
+    real = "impl<T> AdhocKind for &T"
+    r = route_fn_bodies([_fn("anyhow_kind", real)],
+                        target=real, related=[], trait_defaults=hosts)
+    assert [rb.container for rb in r.routed] == [real]
+    assert [rb.via_trait_default for rb in r.routed] == [False]
+
+
+def test_trait_default_tier_requires_the_trait_to_declare_the_member() -> None:
+    # Keying on the trait name alone would let any unknown method land on a
+    # same-named trait; membership is what makes the tier safe.
+    hosts = trait_default_hosts(_KIND_BLOCKS, "src/kind.rs")
+    r = route_fn_bodies([_fn("not_a_member", "impl<T> AdhocKind for &T")],
+                        target="impl Adhoc", related=[], trait_defaults=hosts)
+    assert r.routed == ()
+    assert r.dropped_names == ("not_a_member",)
+
+
+def test_trait_default_tier_is_off_by_default() -> None:
+    # Callers that pass no hosts keep the pre-existing drop behaviour verbatim.
+    r = route_fn_bodies([_fn("anyhow_kind", "impl<T> AdhocKind for &T")],
+                        target="impl Adhoc", related=[])
+    assert r.dropped_names == ("anyhow_kind",)

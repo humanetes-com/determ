@@ -39,6 +39,7 @@ from pipeline_core.domain.impl_routing import (
     containers_in_file,
     refill_authorized_names,
     route_fn_bodies,
+    trait_default_hosts,
 )
 from pipeline_core.domain.impl_routing import (
     norm_src_rel as _norm_src_rel,
@@ -74,7 +75,7 @@ from pipeline_core.domain.retro_gate import (
     judge_guidance,
     stamp_conviction,
 )
-from pipeline_core.domain.rust_idents import canon_container, is_trait_impl_container
+from pipeline_core.domain.rust_idents import canon_container, signature_fixed_by_trait
 from pipeline_core.domain.std_api_sigs import std_api_def
 from pipeline_core.domain.test_report import (
     JointImprovement,
@@ -576,8 +577,10 @@ def fill_impl_blocks(
                 # as before.
                 _extra_containers = [c for c in containers_in_file(all_blocks, file_rel)
                                      if c not in containers]
-                routing = route_fn_bodies(parsed, target=containers[0],
-                                          related=containers[1:] + _extra_containers)
+                routing = route_fn_bodies(
+                    parsed, target=containers[0],
+                    related=containers[1:] + _extra_containers,
+                    trait_defaults=trait_default_hosts(all_blocks, file_rel))
                 for _db in routing.dropped:
                     _log(f"  [phase-c/file] {file_rel}: dropped `{_db.fn_name}` — "
                          f"block header does not match any impl in this file. "
@@ -592,7 +595,8 @@ def fill_impl_blocks(
                 _refill_names = refill_authorized_names(all_blocks, file_rel)
                 for rb in routing.routed:
                     wc = rb.fn_data["where_clause"]
-                    if wc and is_trait_impl_container(rb.container):
+                    if wc and (rb.via_trait_default
+                               or signature_fixed_by_trait(rb.container)):
                         wc = None
                     _fn = rb.fn_data["fn_name"]
                     ok, reason, _delta = _splice_fn_with_where(
@@ -602,6 +606,11 @@ def fill_impl_blocks(
                     if ok:
                         spliced_now += 1
                         _landed.append((_fn, rb.container))
+                        if rb.via_trait_default:
+                            _log(f"  [phase-c/file] {file_rel}: `{_fn}` was "
+                                 f"tagged {rb.fn_data['block']!r} (an empty "
+                                 "override) — routed to its default body in "
+                                 f"`{rb.container}`.")
                         if reason == "ok_xml_unescaped":
                             _log(f"  [phase-c/file] {file_rel}: `{_fn}` landed "
                                  "only after resolving XML entities in the body "
@@ -1100,9 +1109,11 @@ def fill_impl_blocks(
                 # match the model's single-line `block` attribute.
                 routing = route_fn_bodies(
                     parsed, target=block.container,
-                    related=[rb.container for rb in _route_candidates])
-                routed: list[tuple[dict[str, Any], str]] = [
-                    (rb.fn_data, rb.container) for rb in routing.routed]
+                    related=[rb.container for rb in _route_candidates],
+                    trait_defaults=trait_default_hosts(blocks, block.file))
+                routed: list[tuple[dict[str, Any], str, bool]] = [
+                    (rb.fn_data, rb.container, rb.via_trait_default)
+                    for rb in routing.routed]
                 if routing.dropped:
                     # The dropped VO carries the ACTUAL rejected block header —
                     # a name re-lookup would collapse two same-named bodies in
@@ -1128,13 +1139,16 @@ def fill_impl_blocks(
                 # Apply each splice. Operating on the same file in
                 # sequence keeps byte offsets consistent because we
                 # re-locate after each splice via the syn enumerator.
-                for fn_data, container in routed:
+                for fn_data, container, _via_default in routed:
                     target_file = target_src_dir / block.file
-                    # Trait-impl members: the trait fixes the signature — a
-                    # model-proposed where-clause would splice E0276 corruption
-                    # into the frozen sig. Drop it (align to fix-loop policy).
+                    # Trait-owned signature (impl member OR the trait's own
+                    # default): a model-proposed where-clause would splice E0276
+                    # corruption into the frozen sig. Drop it (align to fix-loop
+                    # policy). A body routed via the trait-default tier was
+                    # WRITTEN against an impl header, so its clause is even less
+                    # likely to hold for every implementor.
                     wc = fn_data["where_clause"]
-                    if wc and is_trait_impl_container(container):
+                    if wc and (_via_default or signature_fixed_by_trait(container)):
                         _log(f"  [phase-c/impl] {block_id}: dropped where-clause "
                              f"on trait-impl member `{fn_data['fn_name']}`")
                         wc = None
@@ -1303,7 +1317,7 @@ def fill_impl_blocks(
                     _cur_sig = _cargo_err_sig_from_diagnostics(diagnostics)
                     _new_errs = _cur_sig - _baseline_sig
                     _frontier = _frontier_from_diags(diagnostics, target_src_dir)
-                    _filled = {fd["fn_name"] for fd, _ in routed}
+                    _filled = {fd["fn_name"] for fd, _, _ in routed}
                     _on_fill = any(f == block.file and fn in _filled
                                    for (f, fn) in _frontier)
                     if not _new_errs and not _on_fill:
