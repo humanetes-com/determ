@@ -85,10 +85,19 @@ class CrashEvidence:
     """Cause C's typed payload from the TDD driver: which expected tests
     reported no verdict (their binary crashed), which fns those tests
     statically reach (reverse-map targets), and for how many consecutive
-    sweeps the shrink persisted."""
+    sweeps the shrink persisted.
+
+    `blamed_fns` is a SECOND, stronger channel: the fns the crash localizer put
+    in the faulting stack (gdb frames, or ASAN's use-after-free origin). The two
+    are different grades of evidence and must not be merged into one set —
+    `suspect_fns` says a vanished test *could* have called this fn, `blamed_fns`
+    says the fault *was observed* there. Only the second can separate two
+    components that the same vanished test reaches, and that is precisely what
+    cause C could not do while it aimed by record order."""
     vanished: frozenset[str]
     suspect_fns: frozenset[FnLocator]
     consecutive_sweeps: int = 0
+    blamed_fns: frozenset[FnLocator] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,25 +135,51 @@ def classify_compile_retrigger(
     return LayoutRetriggerCause.DESIGN_CONFLICT
 
 
+def _implicates(
+    locators: frozenset[FnLocator],
+    fn_records: list[FnRecord],
+    component_names: frozenset[str],
+) -> bool:
+    """Whether any of `locators` either IS a component member by name or has a
+    filled signature/body that references a component type/fn name — i.e. the
+    crash reaches THIS component's scheme rather than an unrelated body."""
+    if any(fn.fn_name in component_names for fn in locators):
+        return True
+    return bool(set(find_fns_referencing(fn_records, component_names)) & locators)
+
+
 def classify_crash_retrigger(
     evidence: CrashEvidence,
     fn_records: list[FnRecord],
     component_names: frozenset[str],
 ) -> LayoutRetriggerCause:
-    """Cause C decision for ONE frozen component. RUNTIME_CRASH iff a suspect
-    fn (a reverse-map target of a vanished test) either IS a component member
-    by name or its filled signature/body references a component type/fn name —
-    the crash implicates THIS component's scheme, not an unrelated body. No
-    compile-error text is required: the defining feature of the crash class is
-    a clean compile."""
-    if not evidence.vanished or not evidence.suspect_fns:
+    """Cause C decision for ONE frozen component. RUNTIME_CRASH iff the crash
+    implicates this component (`_implicates`). No compile-error text is required:
+    the defining feature of the crash class is a clean compile.
+
+    **When the localizer produced blame, the blame DECIDES and reachability is
+    not consulted.** A vanished test statically reaches most of the crate, so
+    reverse-map suspects implicate several components at once and the caller,
+    scanning components in record order, takes whichever is recorded first. That
+    is how five sessions of cause C fired at `ChainState` and `Quoted` while
+    every ASAN sweep of every iter blamed `src/error.rs::downcast`, which neither
+    component owns — each mis-aimed fire cost a capped attempt, a layout-
+    authoring call, and a re-stub the ratchet then had to undo (measured: 112 →
+    97, twice). A component the observed fault does not touch is not a cause-C
+    candidate, so returning NONE here is what stops the caller falling through to
+    it. Blame is absent (empty) whenever localization was skipped or found no
+    native fault, and then this is exactly the reachability rule it always was."""
+    if not evidence.vanished:
         return LayoutRetriggerCause.NONE
-    if any(fn.fn_name in component_names for fn in evidence.suspect_fns):
-        return LayoutRetriggerCause.RUNTIME_CRASH
-    referencing = set(find_fns_referencing(fn_records, component_names))
-    if referencing & set(evidence.suspect_fns):
-        return LayoutRetriggerCause.RUNTIME_CRASH
-    return LayoutRetriggerCause.NONE
+    if evidence.blamed_fns:
+        return (LayoutRetriggerCause.RUNTIME_CRASH
+                if _implicates(evidence.blamed_fns, fn_records, component_names)
+                else LayoutRetriggerCause.NONE)
+    if not evidence.suspect_fns:
+        return LayoutRetriggerCause.NONE
+    return (LayoutRetriggerCause.RUNTIME_CRASH
+            if _implicates(evidence.suspect_fns, fn_records, component_names)
+            else LayoutRetriggerCause.NONE)
 
 
 def crash_evidence_confounded(
@@ -212,8 +247,16 @@ def should_retrigger(cause: LayoutRetriggerCause) -> bool:
     return cause is not LayoutRetriggerCause.NONE
 
 
-DEFAULT_REFILL_PER_ITER = 4
-DEFAULT_REFILL_GRACE_MAX_ITERS = 12
+# The rate the window is sized against: bodies that actually re-fill per graced
+# iter. 3 is the MEASURED rate (run `1135197`, a 47-body re-stub), not a guess —
+# sizing against an optimistic rate silently under-grants, and the cap below is
+# then what expires the window mid-recovery.
+DEFAULT_REFILL_PER_ITER = 3
+# Runaway bound only. It must NOT bind at observed component sizes, or the
+# window stops being sized to its work exactly where the evidence came from:
+# the largest re-stub seen is 47 bodies -> ceil(47/3) = 16 iters. When it does
+# bind, `RefillGrace.clipped` says so and the grant logs it.
+DEFAULT_REFILL_GRACE_MAX_ITERS = 20
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,7 +271,8 @@ class RefillGrace:
     signals and both are wrong during the window:
 
       * the batch ratchet convicts on "this sweep measures last iter's fills";
-      * the crash retrigger convicts on "the oracle shrank for N sweeps".
+      * the crash retrigger convicts on "the oracle shrank for N sweeps";
+      * the stall budget convicts on "N iters of fills moved no test".
 
     Left ungated, they destroy the re-author and then re-fire on the crash it was
     about to fix — the ratchet's revert is a whole-`src/` restore, so it takes the
@@ -243,7 +287,7 @@ class RefillGrace:
     `StdError` attempts and two 47-body authoring calls for nothing.
 
     So the window is sized to the bodies and then gated on PROGRESS, which is
-    what keeps it safe: it survives only while re-fills keep landing, and the
+    what keeps it safe: it survives only while fills keep landing, and the
     high-water snapshot is never re-taken below its own mark, so an expiring
     grace reverts to exactly the tree a one-iter grace would have. The cost of
     being generous is bounded iters; the cost of being stingy is a run that can
@@ -251,11 +295,20 @@ class RefillGrace:
 
     `restubbed == 0` is a FIRED-but-failed attempt: nothing was re-stubbed, so
     the window suppresses the shrink evidence (no back-to-back re-fire) but
-    excuses no breach — there is no deliberate re-stub to explain one.
+    excuses no breach and freezes no score — there is no deliberate re-stub to
+    explain either.
+
+    `granted_at` is the iter that opened the window, and it exists because the
+    window is granted and spent by the SAME loop: a grant that lands after the
+    iter's read sites must not be spent by that iter's own scoring, or it expires
+    before anything can read it (which is how the failed-attempt window was a
+    silent no-op). One iter of window means one iter of reads.
     """
     iters_left: int
     restubbed: int
     fills_at_grant: int
+    granted_at: int = 0
+    clipped: bool = False
 
     @classmethod
     def none(cls) -> RefillGrace:
@@ -266,43 +319,67 @@ class RefillGrace:
         cls, restubbed: int, fills_so_far: int,
         per_iter: int = DEFAULT_REFILL_PER_ITER,
         max_iters: int = DEFAULT_REFILL_GRACE_MAX_ITERS,
+        granted_at: int = 0,
     ) -> RefillGrace:
         """A window for `restubbed` bodies: one iter per `per_iter` bodies,
         never fewer than one (the smallest re-stub keeps the original
-        semantics exactly) and never more than `max_iters`."""
+        semantics exactly) and never more than `max_iters`. `clipped` records
+        that the cap, not the work, decided the size — the window is then NOT
+        sized to its bodies and expiring short is expected, so say so rather
+        than leaving a future 60-body re-stub to look like a 20-body one."""
         sized = -(-max(restubbed, 0) // max(per_iter, 1))
-        return cls(iters_left=min(max(sized, 1), max(max_iters, 1)),
+        bound = max(max_iters, 1)
+        return cls(iters_left=min(max(sized, 1), bound),
                    restubbed=max(restubbed, 0),
-                   fills_at_grant=fills_so_far)
+                   fills_at_grant=fills_so_far,
+                   granted_at=granted_at,
+                   clipped=sized > bound)
 
     @classmethod
-    def for_failed_attempt(cls, fills_so_far: int) -> RefillGrace:
+    def for_failed_attempt(cls, fills_so_far: int,
+                           granted_at: int = 0) -> RefillGrace:
         """One iter, nothing re-stubbed — a fired attempt that did not land."""
-        return cls(iters_left=1, restubbed=0, fills_at_grant=fills_so_far)
+        return cls(iters_left=1, restubbed=0, fills_at_grant=fills_so_far,
+                   granted_at=granted_at)
 
     @property
     def active(self) -> bool:
         """Whether this sweep's shrink is the window's own doing, so neither the
-        vanish streak nor the accelerated confirm may read it as crash evidence."""
+        vanish streak nor the accelerated confirm may read it as crash evidence.
+        True for a fired-but-failed attempt too: it re-stubbed nothing, but its
+        evidence is the same sweep it just acted on, so re-firing on it is the
+        back-to-back burn this window exists to stop."""
         return self.iters_left > 0
 
     @property
-    def excuses_breach(self) -> bool:
-        """Whether a ratchet breach on this sweep has a deliberate re-stub to
-        explain it. Only a window that actually re-stubbed bodies does."""
+    def bodies_in_flight(self) -> bool:
+        """Whether the window is holding re-stubbed bodies that have yet to
+        re-fill — the state in which the pass count cannot move on the tree's
+        own merits. The consumers that must not read a DEPRESSED SCORE (the
+        ratchet's breach, the stall budget, the abandon-the-bet restore) key on
+        this; only `active` keys on the shrink."""
         return self.active and self.restubbed > 0
 
     def consume(self, fills_so_far: int) -> RefillGrace:
         """The window after one graced iter has run its fills. Survives only
-        while re-fills keep LANDING: an iter that filled nothing has no re-author
+        while fills keep LANDING: an iter that filled nothing has no re-author
         in flight to protect, whatever budget is left. Progress is measured in
         fills rather than pass count on purpose — the blocked-consumer regime
-        above fills bodies for several iters before any test can move."""
+        above fills bodies for several iters before any test can move.
+
+        Counted in the loop's own fill total, so ANY fill keeps the window open,
+        not only a re-fill of a re-stubbed body. That is deliberate: the loop
+        learns which fns filled only after this point, and the same "did
+        anything fill" condition is what re-admits the exhausted re-stubs into
+        the next iter's frontier — a window that outlived their re-admission
+        would protect work that can no longer run."""
         if not self.active or fills_so_far <= self.fills_at_grant:
             return RefillGrace.none()
         return RefillGrace(iters_left=self.iters_left - 1,
                            restubbed=self.restubbed,
-                           fills_at_grant=fills_so_far)
+                           fills_at_grant=fills_so_far,
+                           granted_at=self.granted_at,
+                           clipped=self.clipped)
 
 
 def find_fns_referencing(

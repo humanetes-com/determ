@@ -150,6 +150,71 @@ def test_crash_retrigger_fires_on_member_or_referencing_suspect():
     ) is LayoutRetriggerCause.NONE
 
 
+def test_crash_blame_decides_and_excludes_components_the_fault_never_touched():
+    """The regression that pinned five sessions at ~111: a vanished test reaches
+    most of the crate, so reverse-map suspects implicate several components at
+    once and the caller took whichever was recorded first — firing at `Quoted`
+    while every ASAN sweep blamed `src/error.rs::downcast`. When the localizer
+    named the faulting fn, that blame decides; reachability is not consulted."""
+    from pipeline_core.domain.layout_retrigger import (
+        CrashEvidence,
+        classify_crash_retrigger,
+    )
+    records = [
+        FnRecord(file="src/error.rs", fn_name="downcast",
+                 sig_text="fn downcast<E>(self) -> Result<E, Self>",
+                 body_text="unsafe { (vtable(self.inner.ptr).object_downcast)(x) }"),
+        FnRecord(file="src/fmt.rs", fn_name="quoted_write",
+                 sig_text="fn quoted_write(&self)",
+                 body_text="Quoted::new(self).write()"),
+    ]
+    blamed = frozenset({FnLocator("src/error.rs", "downcast")})
+    # Both components are statically reachable from the same vanished test.
+    reachable = frozenset({FnLocator("src/error.rs", "downcast"),
+                           FnLocator("src/fmt.rs", "quoted_write")})
+    vtable_comp = frozenset({"ErrorVTable", "object_downcast", "vtable"})
+    quoted_comp = frozenset({"Quoted"})
+
+    # Reachability alone cannot separate them — BOTH classify, which is what let
+    # record order pick the wrong one.
+    reach_only = CrashEvidence(vanished=frozenset({"test_downcast"}),
+                               suspect_fns=reachable)
+    assert classify_crash_retrigger(
+        reach_only, records, vtable_comp) is LayoutRetriggerCause.RUNTIME_CRASH
+    assert classify_crash_retrigger(
+        reach_only, records, quoted_comp) is LayoutRetriggerCause.RUNTIME_CRASH
+
+    # With blame, only the component the fault touches remains a candidate, so
+    # the caller has nothing to fall through TO once that one is capped.
+    with_blame = CrashEvidence(vanished=frozenset({"test_downcast"}),
+                               suspect_fns=reachable, blamed_fns=blamed)
+    assert classify_crash_retrigger(
+        with_blame, records, vtable_comp) is LayoutRetriggerCause.RUNTIME_CRASH
+    assert classify_crash_retrigger(
+        with_blame, records, quoted_comp) is LayoutRetriggerCause.NONE
+
+    # Blame reaches a component through a REFERENCE, not only by membership:
+    # `downcast` is not a member of the vtable component, it uses its names.
+    assert "downcast" not in vtable_comp
+
+    # No blame (localization skipped, or no native fault found) → unchanged.
+    assert classify_crash_retrigger(
+        CrashEvidence(vanished=frozenset({"test_downcast"}),
+                      suspect_fns=reachable, blamed_fns=frozenset()),
+        records, quoted_comp) is LayoutRetriggerCause.RUNTIME_CRASH
+    # Blame with no vanished test is not crash evidence at all.
+    assert classify_crash_retrigger(
+        CrashEvidence(vanished=frozenset(), suspect_fns=frozenset(),
+                      blamed_fns=blamed),
+        records, vtable_comp) is LayoutRetriggerCause.NONE
+    # Blame fires even when the reverse map reached nothing: a stack frame is
+    # evidence on its own, and static reachability is what missed `downcast`.
+    assert classify_crash_retrigger(
+        CrashEvidence(vanished=frozenset({"test_downcast"}),
+                      suspect_fns=frozenset(), blamed_fns=blamed),
+        records, vtable_comp) is LayoutRetriggerCause.RUNTIME_CRASH
+
+
 def test_crash_evidence_confounded_thresholds():
     from pipeline_core.domain.layout_retrigger import crash_evidence_confounded
     from pipeline_core.domain.models import FnRecord

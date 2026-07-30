@@ -9,6 +9,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from pipeline_core.application.reconstruct.tdd_ratchet import (
     breach_withheld,
     ratchet_breach,
@@ -127,7 +129,7 @@ def test_breach_withheld_needs_a_restub_to_point_at() -> None:
     ratchet breach with. Withholding there would forgive a real regression."""
     _failed = RefillGrace.for_failed_attempt(fills_so_far=7)
     assert _failed.active                     # the streak still stands down
-    assert not _failed.excuses_breach
+    assert not _failed.bodies_in_flight       # ...and nothing else does
     assert breach_withheld("pass_count 13<14", _failed) == ""
 
 
@@ -144,6 +146,26 @@ def test_refill_window_is_sized_to_the_bodies_it_restubbed() -> None:
     assert RefillGrace.for_restub(1, 0, per_iter=4, max_iters=12).iters_left == 1
     # ...and the ceiling binds however large the re-stub is.
     assert RefillGrace.for_restub(999, 0, per_iter=1, max_iters=4).iters_left == 4
+
+
+def test_the_defaults_cover_the_case_they_were_measured_on() -> None:
+    """The sizing is only "sized to the work" if the CAP does not decide it, and
+    it silently did: `ceil(47/4)` is exactly the old 12-iter cap, so the window
+    for the very re-stub the design was measured on was clipped — and at the
+    measured 3 re-fills/iter, 47 bodies need 16 iters, not 12. The defaults now
+    size against the measured rate and the cap stays a runaway bound only."""
+    _live = RefillGrace.for_restub(47, 0)     # 47 bodies, default rate
+    assert _live.iters_left == 16
+    assert not _live.clipped
+    # The old defaults sized 47 bodies to exactly their own ceiling, which is why
+    # the clip was invisible: nothing was cut, and one more body would have been.
+    _at_the_bound = RefillGrace.for_restub(47, 0, per_iter=4, max_iters=12)
+    assert _at_the_bound.iters_left == 12 and not _at_the_bound.clipped
+    # A cap that DOES decide the size says so, so a future 60-body re-stub cannot
+    # look like a sized window.
+    _clipped = RefillGrace.for_restub(60, 0, per_iter=4, max_iters=12)
+    assert _clipped.iters_left == 12 and _clipped.clipped
+    assert not RefillGrace.for_restub(3, 0).clipped
 
 
 def test_refill_window_survives_only_while_re_fills_land() -> None:
@@ -168,7 +190,7 @@ def test_refill_window_survives_only_while_re_fills_land() -> None:
 
 
 def _driver_deps(run_cargo, inventory, events, retrigger=None, *,
-                 frontier=None, fills_per_iter=0):
+                 frontier=None, fills_per_iter=0, graceful_stop=None, fill=None):
     from pipeline_core.application.reconstruct.phase_c_tdd import PhaseCTddDeps
     from pipeline_core.domain.models import ClusterFillResult
     return PhaseCTddDeps(
@@ -177,7 +199,7 @@ def _driver_deps(run_cargo, inventory, events, retrigger=None, *,
             dict(frontier or {})),
         build_test_reverse_map=lambda *a, **k: {},
         filter_test_targets=lambda frontier, src: frontier,
-        check_graceful_stop=lambda *a, **k: None,
+        check_graceful_stop=graceful_stop or (lambda *a, **k: None),
         check_auto_operator=lambda *a, **k: None,
         converge_in_cluster=lambda *a, **k: None,
         count_relevant_notes=lambda *a, **k: 0,
@@ -190,8 +212,8 @@ def _driver_deps(run_cargo, inventory, events, retrigger=None, *,
         run_cargo=run_cargo,
         scan_unimplemented_for_cluster=lambda *a, **k: [],
         scan_unimplemented_functions=lambda *a, **k: [],
-        task2_fill_fns_one_by_one=lambda **kw: ClusterFillResult(
-            attempts=1, fns_filled=fills_per_iter),
+        task2_fill_fns_one_by_one=fill or (lambda **kw: ClusterFillResult(
+            attempts=1, fns_filled=fills_per_iter)),
         checkpoint_fill_tree=lambda pd, cl, d, p, i: None,
         active_test_inventory=inventory,
         retrigger_layout=retrigger,
@@ -199,7 +221,8 @@ def _driver_deps(run_cargo, inventory, events, retrigger=None, *,
 
 
 def _run_tdd(monkeypatch, tmp_path: Path, outputs, events, retrigger=None, *,
-             frontier=None, fills_per_iter=0, max_stalls="2") -> None:
+             frontier=None, fills_per_iter=0, max_stalls="2",
+             graceful_stop=None, fill=None) -> None:
     """Drive the TDD loop with ratchet ON over a scripted cargo-output list.
     Each cargo call pops the next output (last one repeats); the call ALSO
     mutates src/a.rs when the popped entry says so — simulating a fill that
@@ -223,7 +246,8 @@ def _run_tdd(monkeypatch, tmp_path: Path, outputs, events, retrigger=None, *,
     run_phase_c_tdd(
         _driver_deps(_cargo, lambda pd, cl, stems, lib=False: (2, frozenset({"t1", "t2"})),
                      events, retrigger, frontier=frontier,
-                     fills_per_iter=fills_per_iter),
+                     fills_per_iter=fills_per_iter,
+                     graceful_stop=graceful_stop, fill=fill),
         project_dir=tmp_path, target_src_dir=tmp_path, tests_dir_files=[],
         cluster_tests=[("tests/t.rs", "fn t1() {}")], module="m",
         cluster=BuildCluster(
@@ -374,8 +398,10 @@ def test_big_restub_gets_more_than_one_iter_while_re_fills_land(
     assert len(withheld) > 1, "a 47-body re-stub got only one iter again"
     assert withheld[0]["restubbed"] == 47
     # Every withheld iter spends exactly one of the sized budget.
+    _granted = withheld[0]["grace_iters_left"]
+    assert _granted == 16, "47 bodies at the measured 3/iter"
     assert [d["grace_iters_left"] for d in withheld] == list(
-        range(12, 12 - len(withheld), -1))
+        range(_granted, _granted - len(withheld), -1))
     # The re-author is safe only WHILE the window is open — and the fixture's fn
     # caps out its re-fill attempts, so the window closes on the first iter that
     # lands nothing and the ordinary rule takes over from the next sweep. That
@@ -460,6 +486,150 @@ def test_exiting_with_an_open_window_returns_the_best_tree(
     restored = [d for ev, d in events if ev == "phase_c.tdd.open_window_restored"]
     assert restored and restored[0]["restubbed"] == 47
     assert (src / "a.rs").read_text(encoding="utf-8") == "orig"
+
+
+_GREEN = ("test t1 ... ok\ntest t2 ... ok\n"
+          "test result: ok. 2 passed; 0 failed; 0 ignored")
+
+
+def test_a_green_exit_is_not_an_abandoned_bet(
+        tmp_path: Path, monkeypatch) -> None:
+    """The other side of the restore, and the reason it cannot key on the window
+    alone: the LAST re-fill of a re-author greens the cluster while its window is
+    still open. That exit is the bet PAYING — restoring there would roll the
+    winning tree back to the pre-re-author baseline (harmless only for as long as
+    the same sweep also re-snapshots) and log that it did."""
+    src = tmp_path / "src"
+    src.mkdir(exist_ok=True)
+    events: list[tuple[str, dict]] = []
+    from pipeline_core.domain.models import FnLocator
+    _run_tdd(monkeypatch, tmp_path,
+             [(_INTACT, False), (_SHRUNK, False), (_SHRUNK, False),
+              (_GREEN, False, 0)], events,
+             retrigger=_big_restub_retrigger(src, 47),
+             frontier={FnLocator("src/a.rs", "f"): {"t2"}},
+             fills_per_iter=3, max_stalls="6")
+    kinds = [d.get("kind") for ev, d in events if ev == "phase_c.tdd.iter"]
+    assert "pass" in kinds, "the fixture never reached the green exit"
+    assert not any(ev == "phase_c.tdd.open_window_restored" for ev, _ in events)
+    # The re-authored tree is what the cluster hands on, untouched.
+    assert (src / "a.rs").read_text(encoding="utf-8") == "RESTUBBED"
+
+
+@pytest.mark.parametrize("stop_at", ["iter boundary", "fill pass"])
+def test_a_graceful_stop_mid_window_returns_the_best_tree(
+        tmp_path: Path, monkeypatch, stop_at: str) -> None:
+    """A graceful stop is `sys.exit(0)`: it leaves the loop by RAISING, past every
+    `break` — so an exit restore that only runs after the loop does not run at all,
+    and the resumed run opens on the re-stub's low point instead of the high-water
+    (`111 -> 20`, live). The fill pass is where a stop lands in practice because it
+    owns the hours of the iter and runs its own stop checks; the iter boundary is
+    the other reachable point."""
+    src = tmp_path / "src"
+    src.mkdir(exist_ok=True)
+    events: list[tuple[str, dict]] = []
+    from pipeline_core.domain.models import ClusterFillResult, FnLocator
+
+    def _window_is_open() -> bool:
+        return any(ev == "phase_c.layout_retrigger.fired" for ev, _ in events)
+
+    def _stop_at_boundary(*a: Any, **k: Any) -> None:
+        if stop_at == "iter boundary" and _window_is_open():
+            raise SystemExit(0)
+
+    def _stop_in_fill(**kw: Any) -> ClusterFillResult:
+        if stop_at == "fill pass" and _window_is_open():
+            raise SystemExit(0)
+        return ClusterFillResult(attempts=1, fns_filled=3)
+
+    # iter 1 snapshots the intact tree; iter 2's shrink is confirmed on the
+    # re-sweep and fires the retrigger; from iter 3 the re-stub costs a passing
+    # test, as a real one does (111 -> 20 live) — so the baseline cannot be
+    # re-taken over the re-stubbed tree and the stop has something to return to.
+    with pytest.raises(SystemExit):
+        _run_tdd(monkeypatch, tmp_path,
+                 [(_INTACT, False), (_SHRUNK, False), (_SHRUNK, False),
+                  (_LOST_PASS, False)], events,
+                 retrigger=_big_restub_retrigger(src, 47),
+                 frontier={FnLocator("src/a.rs", "f"): {"t2"}},
+                 max_stalls="6", graceful_stop=_stop_at_boundary,
+                 fill=_stop_in_fill)
+    restored = [d for ev, d in events if ev == "phase_c.tdd.open_window_restored"]
+    assert restored, f"a stop at the {stop_at} kept the re-stubbed tree"
+    assert restored[0]["restubbed"] == 47
+    assert (src / "a.rs").read_text(encoding="utf-8") == "orig"
+
+
+def _failing_retrigger(events: list[tuple[str, dict]]):
+    """A retrigger that FIRES and does not land: the mechanical splice failure
+    (`StdError could not be located in context.rs`). It refunds the attempt on
+    purpose, so it re-fires on identical evidence — which is what makes the one
+    iter of silence load-bearing. Records the iter of each crash-site call."""
+    from pipeline_core.application.retrigger_layout import RetriggerResult
+    fired_at: list[int] = []
+
+    def _retrig(*a: Any, **k: Any) -> RetriggerResult:
+        if k.get("crash_evidence") is not None:
+            fired_at.append(
+                1 + sum(1 for ev, _ in events if ev == "phase_c.tdd.iter"))
+        return RetriggerResult(fired=True, succeeded=False,
+                               reason="could not be located in context.rs")
+    return _retrig, fired_at
+
+
+def test_a_failed_attempt_is_not_re_fired_in_the_next_iter(
+        tmp_path: Path, monkeypatch) -> None:
+    """The grant that does NOT `continue`, and the one place the window can be
+    spent by the very iter that opened it — which made it a no-op: the crash site
+    then re-fired in FIVE consecutive iters, each one a full layout-authoring call
+    on evidence a fill pass had not yet had the chance to change, exhausting the
+    component's capped attempts in as many iters. One iter of window has to mean
+    one iter of reads."""
+    src = tmp_path / "src"
+    src.mkdir(exist_ok=True)
+    events: list[tuple[str, dict]] = []
+    from pipeline_core.domain.models import FnLocator
+    _retrig, fired_at = _failing_retrigger(events)
+    _run_tdd(monkeypatch, tmp_path, [(_SHRUNK, False)], events,
+             retrigger=_retrig,
+             frontier={FnLocator("src/a.rs", "f"): {"t2"}},
+             fills_per_iter=3, max_stalls="4")
+    assert len(fired_at) > 1, "the fixture never re-fired, so it pins nothing"
+    assert all(b - a > 1 for a, b in zip(fired_at, fired_at[1:], strict=False)), \
+        f"a failed attempt re-fired back-to-back: fired in iters {fired_at}"
+    # It bought silence, not a plateau: nothing was re-stubbed, so the stall
+    # budget kept accruing and still ends the cluster.
+    assert "stall_exit" in [d.get("kind") for ev, d in events
+                            if ev == "phase_c.tdd.iter"]
+
+
+def test_a_fired_retrigger_still_reports_its_iter(
+        tmp_path: Path, monkeypatch) -> None:
+    """Every retrigger path `continue`s before the loop's normal iter emit, so
+    `events.jsonl` silently skipped exactly the iters the mechanism fired in. Run
+    `1135197` set its peak (112) and both of its 111s in such iters, and all three
+    had to be reconstructed from log text because `tools/pass_delta.py`,
+    `tools/run_health.py` and the audit's iteration series read this event."""
+    src = tmp_path / "src"
+    src.mkdir(exist_ok=True)
+    events: list[tuple[str, dict]] = []
+    from pipeline_core.domain.models import FnLocator
+    _run_tdd(monkeypatch, tmp_path,
+             [(_INTACT, False), (_SHRUNK, False), (_SHRUNK, False)], events,
+             retrigger=_big_restub_retrigger(src, 47),
+             frontier={FnLocator("src/a.rs", "f"): {"t2"}},
+             fills_per_iter=3, max_stalls="6")
+    assert any(ev == "phase_c.layout_retrigger.fired" for ev, _ in events), \
+        "the fixture never fired the retrigger"
+    fired = [d for ev, d in events
+             if ev == "phase_c.tdd.iter" and d.get("kind") == "retrigger_crash"]
+    assert fired, "the iter a retrigger fired in emitted no phase_c.tdd.iter"
+    # Same payload as the normal emit — a consumer must not need to know which
+    # path produced it — plus the size of the re-stub that made the iter special.
+    assert fired[0]["retrigger_reverted"] == 47
+    for _key in ("pass_count", "fail_count", "tree_sha", "oracle_size",
+                 "binaries", "stall"):
+        assert _key in fired[0], _key
 
 
 def test_retrigger_grace_lasts_exactly_one_iter(

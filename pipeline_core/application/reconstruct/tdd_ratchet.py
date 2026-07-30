@@ -85,8 +85,12 @@ def breach_withheld(breach: str, grace: RefillGrace) -> str:
     below the high-water mark cannot re-snapshot), so a grace that expires short
     reverts to exactly the tree the one-iter rule would have reverted to: the
     experiment gets evidence proportional to the work it started, and the
-    high-water mark stays absolute either way."""
-    if breach and grace.excuses_breach:
+    high-water mark stays absolute either way.
+
+    Only a window with BODIES IN FLIGHT excuses anything. A fired-but-failed
+    attempt re-stubbed nothing, so a breach on its sweep is the tree's own and
+    withholding it would forgive a real regression."""
+    if breach and grace.bodies_in_flight:
         return ("this sweep measures the layout retrigger's deliberate re-stub of "
                 f"{grace.restubbed} body(ies), not last iter's fills — re-fills "
                 f"get {grace.iters_left} more iter(s) while they keep landing")

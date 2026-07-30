@@ -330,11 +330,12 @@ def run_phase_c_tdd(
         os.getenv("PHASE_C_CRASH_RETRIGGER_AFTER", "2"))
     # The window after a retrigger attempt in which the deliberate re-stub —
     # not the tree's quality — explains what the sweep reads. ONE object with
-    # two read sites, because it is one fact: the ratchet reads `excuses_breach`
-    # at the top of the sweep (the re-stub depressed pass_count), the crash
-    # streak reads `active` further down (the re-stub aborted binaries, so the
-    # shrink is not evidence and must not re-fire the retrigger on its own
-    # work). Sized to the bodies re-stubbed and progress-gated — see
+    # several read sites, because it is one fact: everything that reads a
+    # DEPRESSED SCORE (the ratchet's breach at the top of the sweep, the stall
+    # budget, the exit restore) keys on `bodies_in_flight`; the crash streak
+    # further down keys on `active`, because the aborted binaries are its
+    # evidence and a fired-but-failed attempt must not re-fire on the same sweep
+    # it just acted on. Sized to the bodies re-stubbed and progress-gated — see
     # `RefillGrace`. Set by EVERY retrigger site: all three end in the same
     # surgical revert.
     _grace = RefillGrace.none()
@@ -344,22 +345,45 @@ def run_phase_c_tdd(
                                      str(DEFAULT_REFILL_GRACE_MAX_ITERS)))
 
     def _grant_grace(reverted: int) -> RefillGrace:
-        return RefillGrace.for_restub(
-            reverted, total_filled,
-            per_iter=_grace_per_iter, max_iters=_grace_max_iters)
+        """Open a window for a landed re-stub, and SAY SO. Logged here rather
+        than at the three fire sites so the window's size is on the record the
+        moment it is granted: without it a window is only visible once it
+        withholds something, and a clipped one looks exactly like a sized one."""
+        _g = RefillGrace.for_restub(
+            reverted, total_filled, per_iter=_grace_per_iter,
+            max_iters=_grace_max_iters, granted_at=iter_n)
+        deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: re-fill window open for "
+                 f"{_g.iters_left} iter(s) — {_g.restubbed} body(ies) re-stubbed "
+                 f"at ~{_grace_per_iter} re-fill(s)/iter"
+                 + (f"; CLIPPED by the {_grace_max_iters}-iter cap, so it will "
+                    "expire before the bodies land" if _g.clipped else "")
+                 + ". The batch ratchet, the stall budget and the crash streak "
+                 "stand down while re-fills keep landing.")
+        deps.emit("phase_c.tdd.refill_window_open", data={
+            "cluster": cluster.name, "iter": iter_n,
+            "restubbed": _g.restubbed, "iters_granted": _g.iters_left,
+            "per_iter": _grace_per_iter, "clipped": _g.clipped,
+        })
+        return _g
 
     def _score_grace(iter_n: int) -> None:
         """Spend one iter of the re-fill window and score it on what landed.
 
         Called at EVERY point an iter ends having had (or been denied) its fill
-        pass, never at the two read sites: those are reached at different points
-        of the same iter and must agree on which iter they are in, and the
-        progress test needs this iter's fills. An iter that granted the window
-        `continue`s before any of these, so it never also spends it. An iter with
-        no frontier reaches the no-fill path and closes the window there — no
-        work in flight, no protection, and no window that cannot close."""
+        pass, never at the read sites: those are reached at different points of
+        the same iter and must agree on which iter they are in, and the progress
+        test needs this iter's fills. An iter with no frontier reaches the no-fill
+        path and closes the window there — no work in flight, no protection, and
+        no window that cannot close.
+
+        A window granted by THIS iter is not spent by it. Every read site sits
+        above the fire sites, so an iter that grants can never also read: spending
+        it here would expire the window before a single consumer saw it, which is
+        how the fired-but-failed grant (the one grant site that does not
+        `continue`) was a silent no-op that let the crash retrigger re-fire in
+        back-to-back iters — the exact burn it was added to prevent."""
         nonlocal _grace
-        if not _grace.active:
+        if not _grace.active or _grace.granted_at == iter_n:
             return
         _next = _grace.consume(total_filled)
         if not _next.active and _grace.restubbed:
@@ -367,15 +391,74 @@ def run_phase_c_tdd(
                 f"  {tag} [phase-c/tdd] iter {iter_n}: re-fill window closed "
                 f"({_grace.restubbed} body(ies) re-stubbed, "
                 f"{total_filled - _grace.fills_at_grant} re-fill(s) landed this "
-                "iter) — the batch ratchet judges the re-author from the next "
-                "sweep on.")
+                f"iter, {_grace.iters_left - 1} iter(s) of the budget unspent) — "
+                "the batch ratchet judges the re-author from the next sweep on.")
             deps.emit("phase_c.tdd.refill_window_closed", data={
                 "cluster": cluster.name, "iter": iter_n,
                 "restubbed": _grace.restubbed,
                 "fills_this_iter": total_filled - _grace.fills_at_grant,
-                "iters_left": _grace.iters_left,
+                "iters_unspent": _grace.iters_left - 1,
             })
         _grace = _next
+
+    # Set ONLY by the green exit. Every other way out of the loop leaves a
+    # re-fill window's bet unsettled, and the two are not the same thing.
+    _cluster_done = False
+    _bet_restored = False
+
+    def _restore_abandoned_bet(how: str) -> None:
+        """Return the baseline when the loop leaves with re-stubbed bodies still
+        in flight, whatever route it left by.
+
+        Abandoning a bet mid-flight means the tree holds a re-author whose bodies
+        never finished re-filling, so it scores BELOW the high-water by
+        construction and the cluster would hand on its worst tree of the run — and
+        a resumed run then opens on that tree. `bodies_in_flight`, not `active`: a
+        fired-but-failed attempt left the tree exactly as it found it, so there is
+        nothing to settle. A GREEN exit is not an abandonment either — that is the
+        bet paying off — hence `_cluster_done`.
+
+        Idempotent and called from every exit that can be reached with a window
+        open: the loop's own fall-through, plus the two points where a graceful
+        stop's `sys.exit(0)` unwinds past it (the iter's stop check, and the fill
+        pass, which is where a stop lands in practice because it owns the hours).
+        An UNEXPECTED exception from another dep still bypasses this — it also
+        ends the run with a traceback, so the low tree is at least loud."""
+        nonlocal _bet_restored
+        if (_bet_restored or _cluster_done or not _grace.bodies_in_flight
+                or not _batch_ratchet or _bratchet_snap is None):
+            return
+        _bet_restored = True
+        _rev = restore_src_tree(_bratchet_snap)
+        deps.log(f"  {tag} [phase-c/tdd] {how} with an open re-fill window "
+                 f"({_grace.restubbed} body(ies) still re-stubbed) — reverted "
+                 f"{_rev} file(s) to the best-known tree (pass={_bratchet_best}).")
+        deps.emit("phase_c.tdd.open_window_restored", data={
+            "cluster": cluster.name, "restubbed": _grace.restubbed,
+            "files_reverted": _rev, "best_pass": _bratchet_best, "how": how,
+        })
+    def _emit_retrigger_iter(kind_: str, reverted: int) -> None:
+        """Emit this iter's outcome from a retrigger path.
+
+        The loop's normal `phase_c.tdd.iter` emit sits at the bottom, past three
+        `continue`s that a fired retrigger takes — so `events.jsonl` silently
+        skips exactly the iters the most expensive mechanism fires in. Run
+        `1135197` set its peak (112) and both of its 111s in such iters, and every
+        one of those pass counts had to be reconstructed from log text;
+        `tools/pass_delta.py`, `tools/run_health.py` and the audit's iteration
+        series all read this event, so all three were blind to them. Same field
+        set as the normal emit, plus the bodies re-stubbed, so no consumer needs
+        to know which path produced it."""
+        deps.emit("phase_c.tdd.iter", data={
+            **_prov,
+            "cluster": cluster.name, "iter": iter_n, "rc": rc,
+            "frontier_size": len(eligible), "kind": kind_,
+            "pass_count": pass_count, "fail_count": fail_count,
+            "improved": improved, "stall": stall,
+            "binaries": [[lbl, p, f] for lbl, p, f in _bins],
+            "retrigger_reverted": reverted,
+        })
+
     # Cause-A (build failure) retrigger: consecutive sweeps in which the test
     # binaries did not compile. Carried as evidence, never as a threshold — a
     # tree that cannot build produces no verdict at all, so waiting is pure loss.
@@ -492,8 +575,15 @@ def run_phase_c_tdd(
                  "stopping. This should never happen — stall budget should "
                  "have fired first.")
             break
-        deps.check_graceful_stop(f"TDD iter {iter_n}")
-        deps.check_auto_operator(stall, f"TDD iter {iter_n}")
+        try:
+            # Both exit by RAISING (`sys.exit`), so they leave through neither a
+            # `break` nor a `return` — BaseException, because SystemExit is not
+            # an Exception and that is exactly the case being caught.
+            deps.check_graceful_stop(f"TDD iter {iter_n}")
+            deps.check_auto_operator(stall, f"TDD iter {iter_n}")
+        except BaseException:
+            _restore_abandoned_bet("stopped at the iter boundary")
+            raise
         # One fresh, informed retry per iteration boundary for fns/blocks
         # marked fully_exhausted (a DIFFERENT, disk-persisted gate than this
         # loop's own local `permanently_exhausted` — this one lives in the
@@ -656,6 +746,10 @@ def run_phase_c_tdd(
                 "frontier_size": 0, "kind": "pass",
                 "pass_count": pass_count, "fail_count": fail_count,
             })
+            # The one exit that is not an abandonment: a green cluster with an
+            # intact oracle IS the bet paying off, window open or not, so the
+            # restore below must not claim it rolled the winning tree back.
+            _cluster_done = True
             break
         if rc == -1:
             deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: cargo test TIMED OUT "
@@ -693,9 +787,9 @@ def run_phase_c_tdd(
                               improved=improved, note=_regr_note))
         best_pass = int(state.best_metric)
         stall = state.stalls
-        if _grace.active:
+        if _grace.bodies_in_flight:
             # THIRD consumer of the re-stub's depressed count, and the one that
-            # bites only once the window can outlive the stall budget (12 iters
+            # bites only once the window can outlive the stall budget (16 iters
             # vs 3). The budget asks "have the last N iters of fills failed to
             # move the score"; inside a window the score CANNOT move — the
             # re-stubbed bodies have to land first, which is precisely what the
@@ -705,6 +799,9 @@ def run_phase_c_tdd(
             # BELOW the high-water the window exists to protect. Reset exactly as
             # every retrigger site does when it fires. Termination is unaffected:
             # the window is hard-bounded and dies the iter re-fills stop landing.
+            # `bodies_in_flight`, not `active`: a fired-but-failed attempt froze
+            # nothing, so it buys silence from the crash streak but must not buy
+            # a free iter of plateau.
             state.stalls = 0
             stall = 0
 
@@ -905,6 +1002,8 @@ def run_phase_c_tdd(
                 })
                 _compile_broke_streak = 0
                 _grace = _grant_grace(_retrig_k.reverted_count)
+                _emit_retrigger_iter("retrigger_build",
+                                     _retrig_k.reverted_count)
                 state.stalls = 0
                 stall = 0
                 continue
@@ -973,12 +1072,24 @@ def run_phase_c_tdd(
                 crash_evidence=CrashEvidence(
                     vanished=frozenset(_oracle.vanished),
                     suspect_fns=frozenset(_suspects),
-                    consecutive_sweeps=_crash_retrigger_after))
+                    consecutive_sweeps=_crash_retrigger_after,
+                    # The localizer ran ~200 lines above on THIS sweep and
+                    # named the faulting fns; `_suspects` above is only static
+                    # reachability. Withholding the blame here is what let the
+                    # retrigger pick a component in record order that the fault
+                    # never touched (§ `classify_crash_retrigger`).
+                    blamed_fns=frozenset(crash_texts)))
             if _retrig_c.fired:
                 # Fired but did not land: nothing was re-stubbed, so one iter of
                 # silence is all this owes — enough to stop a back-to-back
-                # re-fire, not enough to excuse a breach it cannot explain.
-                _grace = RefillGrace.for_failed_attempt(total_filled)
+                # re-fire, not enough to excuse a breach or a plateau it cannot
+                # explain. `granted_at` is what makes the one iter real: this is
+                # the only grant site that does NOT `continue`, so without it
+                # this iter's own `_score_grace` spends the window before the
+                # next iter's streak check can read it (verified: the crash site
+                # then fired in five consecutive iters, one authoring call each).
+                _grace = RefillGrace.for_failed_attempt(total_filled,
+                                                        granted_at=iter_n)
             if _retrig_c.fired and _retrig_c.succeeded:
                 deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: CRASH layout "
                          f"retrigger fired (cause={_retrig_c.cause}) — reverted "
@@ -990,6 +1101,8 @@ def run_phase_c_tdd(
                     "reverted_count": _retrig_c.reverted_count,
                 })
                 _grace = _grant_grace(_retrig_c.reverted_count)
+                _emit_retrigger_iter("retrigger_crash",
+                                     _retrig_c.reverted_count)
                 state.stalls = 0
                 stall = 0
                 continue
@@ -1025,6 +1138,8 @@ def run_phase_c_tdd(
                         "reverted_count": _retrig.reverted_count,
                     })
                     _grace = _grant_grace(_retrig.reverted_count)
+                    _emit_retrigger_iter("retrigger_stall",
+                                         _retrig.reverted_count)
                     state.stalls = 0
                     stall = 0
                     continue
@@ -1087,25 +1202,32 @@ def run_phase_c_tdd(
         # (not stubs) → the engine will behaviorally re-fill them.
         _stubs_before = set(deps.scan_unimplemented_functions(src_dir))
         _refill_targets = frontier_keys - _stubs_before
-        # Drive the per-fn fill machinery with this frontier.
-        sub = deps.task2_fill_fns_one_by_one(
-            project_dir=project_dir,
-            target_src_dir=target_src_dir,
-            tests_dir_files=tests_dir_files,
-            module_name=module,
-            cluster_name=cluster.name,
-            cluster=cluster,
-            check_cmd=check_cmd,
-            cluster_env=cluster_env,
-            max_passes=1,
-            leaf_name_counts=leaf_counts,
-            fr_path=fr_path,
-            tdd_frontier_keys=frontier_keys,
-            tdd_frontier_tests=FailureFrontier.build(eligible, convicting),
-            tdd_test_cmd=test_cmd,         # Plan 10 U2: scoped cluster test cmd
-            skip_end_pass_test=True,
-            crash_evidence=crash_texts or None,
-        )
+        # Drive the per-fn fill machinery with this frontier. The engine runs its
+        # own graceful-stop checks (worker pools included), so this is where a
+        # stop lands in practice — it owns the hours of the iter — and it exits by
+        # raising past every `break` below.
+        try:
+            sub = deps.task2_fill_fns_one_by_one(
+                project_dir=project_dir,
+                target_src_dir=target_src_dir,
+                tests_dir_files=tests_dir_files,
+                module_name=module,
+                cluster_name=cluster.name,
+                cluster=cluster,
+                check_cmd=check_cmd,
+                cluster_env=cluster_env,
+                max_passes=1,
+                leaf_name_counts=leaf_counts,
+                fr_path=fr_path,
+                tdd_frontier_keys=frontier_keys,
+                tdd_frontier_tests=FailureFrontier.build(eligible, convicting),
+                tdd_test_cmd=test_cmd,     # Plan 10 U2: scoped cluster test cmd
+                skip_end_pass_test=True,
+                crash_evidence=crash_texts or None,
+            )
+        except BaseException:
+            _restore_abandoned_bet("stopped during the fill pass")
+            raise
         total_filled += sub.fns_filled
         total_attempts += sub.attempts
         total_bytes += sub.bytes_filled
@@ -1140,21 +1262,11 @@ def run_phase_c_tdd(
                     last_notes_count[key] = deps.count_relevant_notes(fr_path, key)
         last_total_filled = total_filled
 
-    # The loop left while a re-fill window was still open, so it abandoned a bet
-    # mid-flight: the tree holds a re-author whose bodies never finished
-    # re-filling and scores BELOW the high-water by construction. Abandoning a
-    # bet must return the baseline — otherwise the cluster hands on its worst
-    # tree of the run. One place rather than at each `break`, because every exit
-    # owes this and a future exit path would silently not.
-    if _grace.active and _batch_ratchet and _bratchet_snap is not None:
-        _rev = restore_src_tree(_bratchet_snap)
-        deps.log(f"  {tag} [phase-c/tdd] exited with an open re-fill window "
-                 f"({_grace.restubbed} body(ies) still re-stubbed) — reverted "
-                 f"{_rev} file(s) to the best-known tree (pass={_bratchet_best}).")
-        deps.emit("phase_c.tdd.open_window_restored", data={
-            "cluster": cluster.name, "restubbed": _grace.restubbed,
-            "files_reverted": _rev, "best_pass": _bratchet_best,
-        })
+    # Every `break` above lands here — backstop, timeout, stall exit, and the
+    # green exit that `_cluster_done` excuses. One place rather than at each
+    # `break`, because every exit owes this and a future exit path would silently
+    # not; the raising exits are covered at the two points they raise from.
+    _restore_abandoned_bet("exited")
 
     return ClusterFillResult(
         fns_filled=total_filled,
