@@ -11,7 +11,7 @@ deterministic token / substring scanning — never regex — mirroring the exist
 from __future__ import annotations
 
 import string
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 
 from .rust_idents import declares_fn
 from .rust_lex import code_mask
@@ -1015,6 +1015,59 @@ def locate_top_level_item(
     in. Comment/string aware, so a brace inside a doc example cannot shift the
     depth."""
     mask = code_mask(text)
+    for depth, i, k in _iter_item_headers(text, mask, keyword, name):
+        if depth != 0:
+            continue
+        end = _item_end(text, mask, k)
+        if end is None:
+            return None
+        return item_start(text, mask, i), end
+    return None
+
+
+def locate_item_declaration(
+    text: str, keyword: str, name: str,
+) -> tuple[int, int] | None:
+    """`[start, end)` of the ``<keyword> <name>`` declaration wherever it is
+    written — including inside an inline ``mod`` block — or None.
+
+    Module depth is a property of where a crate CHOSE to put an item, not of
+    whether the item is part of the private surface: `anyhow` declares
+    `trait StdError` and `trait Sealed` inside `mod ext`, and both are ordinary
+    replaceable surface items. A locator that can only see depth 0 reports those
+    as absent, which reads to every caller as "the live tree does not have it"
+    — the propagation then fails MECHANICALLY, refunds its attempt, and re-fires
+    on the identical bug next sweep until the mechanical cap blocks the
+    component for the rest of the run.
+
+    A depth-0 declaration still wins outright, so nothing that resolves today
+    changes. Below that, the match must be UNIQUE: two same-named items in
+    sibling modules are two different types, and a splice that slices the first
+    one it happens to reach rewrites an item the caller never named. Ambiguity
+    is reported as None — the caller's "could not locate" path is recoverable,
+    editing the wrong declaration is not."""
+    mask = code_mask(text)
+    nested: list[tuple[int, int]] = []
+    for depth, i, k in _iter_item_headers(text, mask, keyword, name):
+        end = _item_end(text, mask, k)
+        if end is None:
+            continue
+        span = (item_start(text, mask, i), end)
+        if depth == 0:
+            return span
+        nested.append(span)
+    return nested[0] if len(nested) == 1 else None
+
+
+def _iter_item_headers(
+    text: str, mask: Sequence[bool], keyword: str, name: str,
+) -> Iterator[tuple[int, int, int]]:
+    """Every ``<keyword> <name>`` item header in `text`, in file order, as
+    ``(module_depth, keyword_start, name_end)``.
+
+    Deliberately stops at the header: whether an item whose body never closes is
+    fatal or merely skippable depends on the depth the caller was after, so
+    `_item_end` is the caller's call to make and to react to."""
     n = len(text)
     i = 0
     depth = 0
@@ -1037,7 +1090,7 @@ def locate_top_level_item(
         j = i
         while j < n and not mask[j] and text[j] in _IDENT_CHARS:
             j += 1
-        if depth != 0 or text[i:j] != keyword:
+        if text[i:j] != keyword:
             i = j
             continue
         k = j
@@ -1049,11 +1102,8 @@ def locate_top_level_item(
         if text[s:k] != name:
             i = k or j
             continue
-        end = _item_end(text, mask, k)
-        if end is None:
-            return None
-        return item_start(text, mask, i), end
-    return None
+        yield depth, i, k
+        i = k
 
 
 def _item_end(text: str, mask: Sequence[bool], after_name: int) -> int | None:

@@ -28,7 +28,7 @@ from pipeline_core.domain.private_surface import (
     PrivateSurfaceItem,
     SurfaceItemKind,
 )
-from pipeline_core.domain.rust_scan import locate_top_level_item
+from pipeline_core.domain.rust_scan import locate_item_declaration
 from pipeline_core.domain.scaffold_rewrite import (
     DefReplacement,
     find_definition_span,
@@ -106,11 +106,17 @@ def live_definition(text: str, item: PrivateSurfaceItem) -> str | None:
     Sliced from the file, never taken from an extractor record: syn renders a
     declaration back with its own line wrapping AND trailing commas inside
     wrapped argument lists, so `TypeRecord.definition` is not the bytes on disk
-    for any item wide enough to wrap — matching it locates nothing."""
+    for any item wide enough to wrap — matching it locates nothing.
+
+    Searched at any module depth, not just the file's top level: a surface item
+    is whatever the crate declared, and a crate is free to declare one inside an
+    inline `mod` (`anyhow`'s `mod ext` holds `StdError` and `Sealed`). Scoped to
+    depth 0 this returned None for them, which every caller reads as "not in the
+    live tree" — see `locate_item_declaration`."""
     keyword = _ITEM_KEYWORD.get(item.kind)
     if keyword is None:
         return None
-    span = locate_top_level_item(text, keyword, item.name)
+    span = locate_item_declaration(text, keyword, item.name)
     return None if span is None else text[span[0]:span[1]]
 
 

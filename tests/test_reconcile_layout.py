@@ -184,3 +184,64 @@ def test_locator_ignores_nested_and_commented_occurrences():
     assert text[span[0]:span[1]] == "pub struct Target { real: u8 }"
     assert locate_top_level_item(text, "struct", "Inner") is None   # depth > 0
     assert locate_top_level_item(text, "struct", "Absent") is None
+
+
+# `mod ext { pub trait StdError … }` — a real `anyhow` surface item, and the
+# whole class the depth-0-only locator reported as absent. Absent is what a
+# caller acts on, so the propagation failed MECHANICALLY, refunded its attempt
+# and re-fired on the identical bug until the mechanical cap blocked the
+# component. Live: `StdError could not be located in context.rs`.
+_MOD_NESTED = ("mod ext {\n    use super::*;\n"
+               "    pub trait StdError {\n"
+               "        fn ext_context<C>(self, c: C) -> Error;\n    }\n}\n")
+
+
+def test_declaration_locator_reaches_inside_an_inline_mod():
+    from pipeline_core.domain.rust_scan import (
+        locate_item_declaration,
+        locate_top_level_item,
+    )
+    assert locate_top_level_item(_MOD_NESTED, "trait", "StdError") is None
+    span = locate_item_declaration(_MOD_NESTED, "trait", "StdError")
+    assert span is not None
+    seg = _MOD_NESTED[span[0]:span[1]]
+    assert seg.startswith("pub trait StdError {")
+    assert seg.endswith("}")
+    assert "mod ext" not in seg          # the item, not its module
+
+
+def test_declaration_locator_prefers_the_top_level_declaration():
+    # Additive by construction: anything resolving today must keep resolving to
+    # the same span, so a depth-0 hit wins outright and never ties with a
+    # nested namesake.
+    from pipeline_core.domain.rust_scan import locate_item_declaration
+    text = ("mod inner {\n    pub struct Dup { nested: u8 }\n}\n"
+            "pub struct Dup { top: u8 }\n")
+    span = locate_item_declaration(text, "struct", "Dup")
+    assert text[span[0]:span[1]] == "pub struct Dup { top: u8 }"
+
+
+def test_declaration_locator_refuses_an_ambiguous_nested_name():
+    # Two same-named items in sibling modules are two different types. Slicing
+    # whichever comes first rewrites a declaration the caller never named — and
+    # a "could not locate" is recoverable where a wrong splice is not.
+    from pipeline_core.domain.rust_scan import locate_item_declaration
+    text = ("mod a {\n    pub struct Dup { x: u8 }\n}\n"
+            "mod b {\n    pub struct Dup { y: u8 }\n}\n")
+    assert locate_item_declaration(text, "struct", "Dup") is None
+
+
+def test_live_definition_slices_a_mod_nested_surface_item():
+    # End-to-end over the real caller: `live_definition` is what both the
+    # startup reconciliation and the retrigger's live-tree plan ask, and what
+    # returned None for `mod ext`'s items.
+    from pipeline_core.application.reconcile_layout import live_definition
+    surface = classify_private_surface([
+        TypeRecord(file="context.rs", kind="trait", name="StdError",
+                   is_pub=False, definition="pub trait StdError {}"),
+    ], [], cfg_cluster="stable", author_private_fields=True)
+    item = next(i for i in surface.replaceable if i.name == "StdError")
+    sliced = live_definition(_MOD_NESTED, item)
+    assert sliced is not None
+    assert sliced.startswith("pub trait StdError {")
+    assert _MOD_NESTED.count(sliced) == 1   # a unique splice target
