@@ -1440,13 +1440,31 @@ class StaticSkeletonTask2Generator(Task2Generator):
             })
         _round = 0
         _clean = False
+        _unchecked = False
         _prev_sig = ""
         _last_msg = ""
         while _round < _PREPASS_HEAL_MAX_ROUNDS:
             _rc0, _rendered0, _diags0 = self.cargo.run_check_diag(
                 check_cmd, filled_dir, self._cluster_env(cluster), 180)
-            if _rc0 in (-1, 0):
+            if _rc0 == 0:
                 _clean = True
+                break
+            if _rc0 == -1:
+                # The check did not RUN — timeout, or cargo not found under this
+                # env. It proved NOTHING, and the old code called that clean and
+                # fell through in silence, which is indistinguishable in the log
+                # from a tree that really did compile. A seeded cluster then
+                # entered its fill pass unexamined and spent the pass on
+                # `downstream_only` reverts. Say it, and let the TDD driver's
+                # red-build guard aim the first iteration instead.
+                _unchecked = True
+                self.tel.log(f"  {tag} [pre-pass-heal] check did NOT run "
+                             f"(rc=-1: {(_rendered0 or '').strip()[:120]}) — the "
+                             "seeded tree is UNVERIFIED, not clean.")
+                self.tel.emit("phase_c.cluster.prepass_heal_unchecked", data={
+                    "cluster": cluster.name,
+                    "detail": (_rendered0 or "").strip()[:400],
+                })
                 break
             _pre_impl = self.cargo.implicated_fns_from_check(
                 _diags0, _rendered0 or "", filled_dir)
@@ -1497,6 +1515,17 @@ class StaticSkeletonTask2Generator(Task2Generator):
         elif _round:
             self.tel.log(f"  {tag} [pre-pass-heal] tree compiles again after "
                          f"{_round} round(s).")
+        elif _clean:
+            # The no-op case, said out loud. A silent heal is why a cluster that
+            # opened on 39 rustc errors looked like it had been checked: the only
+            # evidence either way was the ABSENCE of log lines.
+            self.tel.log(f"  {tag} [pre-pass-heal] seeded/resumed tree compiles "
+                         "as-is — no repair needed.")
+        self.tel.emit("phase_c.cluster.prepass_heal_verdict", data={
+            "cluster": cluster.name, "rounds": _round,
+            "verdict": ("clean" if _clean else
+                        "unchecked" if _unchecked else "still_broken"),
+        })
 
         # Propagate gen_tests siblings from project_dir/src/ into filled_dir/src/.
         # task0c commits these as cluster-specific unit-test specs; the bake step
@@ -1969,11 +1998,17 @@ class StaticSkeletonTask2Generator(Task2Generator):
         """Fill remaining `unimplemented!()` stubs in `tree_dir/src` with the
         bodies the same rel-file carries in `donor_dirs` (earlier donor wins).
         gen_tests siblings are skipped — they are cluster-owned test specs, not
-        shared implementation. Returns the number of stub bodies adopted."""
+        shared implementation. Returns the number of stub bodies adopted.
+
+        Bodies are addressed by `FnSlot`, so a donor's `Display::fmt` can never
+        land in the target's `Debug::fmt`; where a slot cannot be matched and the
+        signature is ambiguous the merge refuses, and the refusals are logged
+        because each one is a stub the model now has to fill for money."""
         src_root = tree_dir / "src"
         if not src_root.exists():
             return 0
         adopted = 0
+        refused = 0
         for dst in sorted(src_root.rglob("*.rs")):
             if self.gentests.is_gen_tests_file(dst.name):
                 continue
@@ -1992,10 +2027,15 @@ class StaticSkeletonTask2Generator(Task2Generator):
                 text = dst.read_text(encoding="utf-8")
             except OSError:
                 continue
-            new_text, n = backfill_stub_bodies(text, donors)
-            if n:
-                dst.write_text(new_text, encoding="utf-8")
-                adopted += n
+            _bf = backfill_stub_bodies(text, donors)
+            refused += _bf.ambiguous_skipped
+            if _bf.filled:
+                dst.write_text(_bf.text, encoding="utf-8")
+                adopted += _bf.filled
+        if refused:
+            self.tel.log(f"  [ownership] {refused} donor body(ies) NOT adopted — "
+                         "signature ambiguous across sibling impl blocks and the "
+                         "slot did not match; the fill loop owns those stubs.")
         return adopted
 
     def _post_merge_fill_pass(

@@ -77,3 +77,47 @@ def test_deferred_stubs_are_exactly_the_uncovered_ones() -> None:
     # a refill member of an uncovered block is NOT a stub → never deferred here
     assert stubs_deferred_by_impl_route(
         [_blk("", (), ("refill_only",))], max_stubs=2) == frozenset()
+
+
+# ---- red-build narrowing: while the crate does not compile, only the fns
+# ---- rustc names are worth an LLM call
+
+from pipeline_core.domain.dispatch import restrict_to_compile_blockers  # noqa: E402
+
+_LIB = FnLocator("src/error.rs", "construct")
+_OTHER = FnLocator("src/context.rs", "ext_context")
+_TEST_FN = FnLocator("src/error.gen_tests_a.rs", "test_downcast")
+
+
+def test_unimplicated_frontier_keys_are_withheld_while_red() -> None:
+    frontier = {_LIB: {"t1"}, _OTHER: {"t1", "t2"}}
+    actionable, withheld = restrict_to_compile_blockers(
+        frontier, frozenset({_LIB}))
+    assert actionable == {_LIB: {"t1"}}     # tests preserved for the aimed fn
+    assert withheld == frozenset({_OTHER})
+
+
+def test_implicated_fn_absent_from_the_frontier_is_added_with_no_tests() -> None:
+    """No test can name a fn while nothing runs — being unnamed is the
+    condition, not a reason to skip it."""
+    actionable, withheld = restrict_to_compile_blockers(
+        {_LIB: {"t1"}}, frozenset({_OTHER}))
+    assert actionable == {_OTHER: set()}
+    assert withheld == frozenset({_LIB})
+
+
+def test_added_keys_arrive_unfiltered_so_the_caller_must_refilter() -> None:
+    """The contract the driver depends on: a diagnostic inside a gen_tests fn
+    puts a TEST target in the result, because this function knows nothing about
+    the caller's filters. Pinned so the re-filter at the call site is never
+    dropped as redundant."""
+    actionable, _ = restrict_to_compile_blockers(
+        {_LIB: {"t1"}}, frozenset({_TEST_FN}))
+    assert _TEST_FN in actionable
+
+
+def test_nothing_implicated_yields_an_empty_frontier() -> None:
+    actionable, withheld = restrict_to_compile_blockers(
+        {_LIB: {"t1"}}, frozenset())
+    assert actionable == {}
+    assert withheld == frozenset({_LIB})

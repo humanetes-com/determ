@@ -361,6 +361,9 @@ from pipeline_core.application.reconstruct.failure_diagnosis import (
     classify_phase_c_test_failures as _classify_failures_impl,
 )
 from pipeline_core.application.reconstruct.failure_diagnosis import (
+    implicated_fns_from_cargo_errors as _implicated_fns_from_cargo_impl,
+)
+from pipeline_core.application.reconstruct.failure_diagnosis import (
     implicated_fns_from_check as _implicated_fns_from_check_impl,
 )
 from pipeline_core.application.reconstruct.failure_diagnosis import (
@@ -2129,6 +2132,8 @@ def build_app(
             localize_crashes=_localize_crashes,
             migrate_retro_evidence=_migrate_confounded_retros,
             migrate_retro_gate=_migrate_absolute_gate_retros,
+            implicated_fns=lambda out, tsd: _implicated_fns_from_cargo_impl(
+                out, tsd, enumerate_fns=enumerate_fns),
         ),
         impl_fill_deps=ImplFillDeps(
             build_dispatch_family_section=build_dispatch_family_section,

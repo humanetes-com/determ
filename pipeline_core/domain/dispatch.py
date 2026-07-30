@@ -51,6 +51,42 @@ def defer_blocked_consumers(
     return active, deferred
 
 
+def restrict_to_compile_blockers(
+    frontier: Frontier, implicated: frozenset[FnLocator],
+) -> tuple[Frontier, frozenset[FnLocator]]:
+    """Split `frontier` into (actionable, withheld) for a crate that does NOT
+    COMPILE — where the only fn worth an LLM call is one the compiler names.
+
+    While the build is red no test reports a verdict, so every behavioural
+    signal the attribution chain runs on is absent and the frontier it returns
+    is reachability, not evidence. Dispatching from it spends the budget on fns
+    that are fine: measured live (`anyhow`, cluster `nightly`), a 39-error tree
+    produced a 72-fn frontier of which NONE were implicated, and all 72 came
+    back `signal=downstream_only` — 354 model calls over 8.7 hours that could
+    not have moved the score whatever they wrote, because the errors were always
+    somewhere else.
+
+    Implicated fns the frontier does not already carry are ADDED, with an empty
+    test set: no test can name them while the crate is red, and their being
+    unnamed is the condition, not a reason to skip them. Because they are ADDED
+    they arrive behind whatever filters the caller already applied to the
+    frontier — the test-oracle filter above all, since a red build's diagnostics
+    point at the test binaries — so the caller must re-apply them to the result.
+
+    An empty `implicated` returns an empty frontier. That is the honest answer
+    for "the compiler blames nothing this tree can fill", but it is ALSO what a
+    blind attribution returns: the text scan attributes a macro-expansion error
+    to nothing at all. Read one empty result as "no aim this sweep", never as a
+    verdict on the cluster — a caller that exits on it exits on the attribution's
+    blind spot as readily as on the real thing."""
+    actionable: Frontier = {
+        key: tests for key, tests in frontier.items() if key in implicated}
+    for key in implicated:
+        actionable.setdefault(key, set())
+    withheld = frozenset(frontier) - frozenset(actionable)
+    return actionable, withheld
+
+
 def impl_route_covers(block: ImplBlock, *, max_stubs: int) -> bool:
     """True when the per-impl fill route will attempt `block` at all.
 

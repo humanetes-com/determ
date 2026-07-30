@@ -34,7 +34,10 @@ from pipeline_core.domain.crash_site import (
     crash_evidence_by_locator,
     vanish_is_stub_confounded,
 )
-from pipeline_core.domain.dispatch import defer_blocked_consumers
+from pipeline_core.domain.dispatch import (
+    defer_blocked_consumers,
+    restrict_to_compile_blockers,
+)
 from pipeline_core.domain.layout_retrigger import (
     DEFAULT_REFILL_GRACE_MAX_ITERS,
     DEFAULT_REFILL_PER_ITER,
@@ -112,6 +115,11 @@ class PhaseCTddDeps:
     # Voids convictions earned under the pre-comparative acceptance gate and
     # the pre-group route set. None disables.
     migrate_retro_gate: Callable[..., tuple[int, int]] | None = None
+    # Compile-error attribution: (cargo_output, target_src_dir) -> the fns the
+    # rustc diagnostics implicate. Used only while the build is RED, to aim the
+    # frontier at what the compiler names. None disables the narrowing — a red
+    # sweep then dispatches from the behavioural frontier, as it used to.
+    implicated_fns: Callable[..., list[FnLocator]] | None = None
 
 
 class SweepReading(NamedTuple):
@@ -762,8 +770,17 @@ def run_phase_c_tdd(
             })
             break
 
+        # `output` is final for this iter by here (the ratchet's re-sweeps are
+        # all above), so the compile verdict is read once and shared by every
+        # consumer below rather than re-derived at each.
+        _sweep_compile_broke = "could not compile" in (output or "")
         # Improvement metric: did pass count strictly increase since best?
-        improved = pass_count > best_pass
+        # A compile-broken sweep is NOT a measurement: `pass_count` is 0 because
+        # nothing ran, not because the tree scores 0. Recorded as an
+        # improvement it sets the floor to 0 and resets the stall budget, so the
+        # cluster reads "improving" on the iteration it is most broken —
+        # observed live at `nightly` iter 1 (`pass=0 fail=124 improved=True`).
+        improved = pass_count > best_pass and not _sweep_compile_broke
         if improved:
             best_fail = fail_count
         # Hook 3 — detect a causal regression BEFORE recording, so the note
@@ -785,7 +802,13 @@ def run_phase_c_tdd(
         # log/emit lines below read.
         state.record(Attempt(metric=float(pass_count), iteration=state.iteration,
                               improved=improved, note=_regr_note))
-        best_pass = int(state.best_metric)
+        # `best_metric` is -inf until some iter improves, and a compile-broken
+        # sweep no longer does — so a cluster whose FIRST sweep cannot build
+        # keeps the loop's own initial floor instead of overflowing on
+        # `int(-inf)`. The floor must not move for such a sweep anyway: it
+        # measured nothing.
+        if state.best_metric > float("-inf"):
+            best_pass = int(state.best_metric)
         stall = state.stalls
         if _grace.bodies_in_flight:
             # THIRD consumer of the re-stub's depressed count, and the one that
@@ -937,6 +960,57 @@ def run_phase_c_tdd(
         # deferred consumer is re-admitted the moment its producer fills.
         _stub_keys = frozenset(
             deps.scan_unimplemented_for_cluster(target_src_dir, cluster))
+        if _sweep_compile_broke and deps.implicated_fns is not None:
+            # A red build reports no test verdict, so the frontier above is
+            # reachability rather than evidence and dispatching from it burns
+            # the budget on fns the compiler never named (every attempt comes
+            # back `downstream_only`). Narrow to what the compiler implicates,
+            # which is also the only set a fill can possibly fix.
+            _blockers = frozenset(
+                deps.implicated_fns(output or "", target_src_dir))
+            eligible, _unaimed = restrict_to_compile_blockers(
+                eligible, _blockers)
+            # The narrowing ADDS keys, so it lands them behind the test-oracle
+            # filter applied above — and a red build's diagnostics point at the
+            # test binaries, i.e. straight at gen_tests fns. Re-apply the filter
+            # over what the compiler named: an error INSIDE a test is still not
+            # a licence to rewrite the thing the cluster is scored by.
+            eligible = deps.filter_test_targets(eligible, src_dir)
+            deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: build is RED — "
+                     f"frontier narrowed to the {len(eligible)} fn(s) the "
+                     f"compiler implicates ({len(_unaimed)} withheld: no test "
+                     "can convict them while nothing runs).")
+            deps.emit("phase_c.tdd.compile_blocked_frontier", data={
+                "cluster": cluster.name, "iter": iter_n,
+                "implicated": len(_blockers), "withheld": len(_unaimed),
+                "aimed": len(eligible),
+            })
+            # Red with nothing to aim at: no body the fill loop can write will
+            # change the diagnostics, so iterating is pure burn — that is the
+            # state which spent 8.7 h and 354 model calls looking like an
+            # ordinary plateau. But an empty result is ALSO what the attribution
+            # returns when it cannot see: `implicated_fns` is wired here to the
+            # text scan (raw sweep output carries no structured diagnostics),
+            # which attributes a macro-expansion error to NOTHING, and any error
+            # outside `src/` to nothing as well. So "no fn implicated" is not yet
+            # a diagnosis, and stopping on it at iter 1 would preempt the cause-A
+            # layout retrigger below — the one mechanism built to repair a red
+            # tree, and one that fires on the FIRST broken sweep. Give it its
+            # sweep: only a red build that survives a retrigger's turn convicts.
+            if not eligible and _compile_broke_streak >= 1:
+                deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: STOPPING "
+                         "cluster — the build is red and no rustc diagnostic "
+                         "resolves to a fillable fn in this tree, for "
+                         f"{_compile_broke_streak + 1} consecutive sweep(s), "
+                         "and the layout retrigger has had its turn. No fill "
+                         "can repair it: the baseline itself is broken (bake "
+                         "or seed).")
+                deps.emit("phase_c.tdd.compile_blocked_exit", data={
+                    "cluster": cluster.name, "iter": iter_n,
+                    "broken_sweeps": _compile_broke_streak + 1,
+                    "compile_errors": compile_error_digest(output or "")[0],
+                })
+                break
         eligible, _deferred = defer_blocked_consumers(eligible, _stub_keys)
         if _deferred:
             deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: deferred "
@@ -965,7 +1039,6 @@ def run_phase_c_tdd(
         # re-author would be aimed at nothing. Worse, such a shortfall is
         # CONSTANT: gating on it made every single iteration pay an extra full
         # sweep and declare "crash is deterministic" forever.
-        _sweep_compile_broke = "could not compile" in (output or "")
         # Cause-A layout retrigger, fired on the FIRST broken sweep. A cluster
         # whose test binaries do not build reports no verdict for any test, so
         # every further iteration of fills is spent on a tree that cannot score
