@@ -46,6 +46,45 @@ def test_backfill_stub_bodies_earliest_donor_wins() -> None:
     assert "999" not in r.text and "fn a() { 2 }" not in r.text
 
 
+def test_backfill_carries_the_imports_the_adopted_bodies_resolve_in() -> None:
+    # The live failure: 121 bodies in the right slots, 41 `E0425 cannot find …
+    # in this scope`. The donor earned `use crate::wrapper::MessageError;`
+    # during its own fill; the target's bake never had it.
+    from pipeline_core.application.reconstruct.fill_merge import backfill_stub_bodies
+    target = "use crate::ptr::Own;\nfn a() { unimplemented!() }\n"
+    donor = ("use crate::ptr::Own;\nuse crate::wrapper::MessageError;\n"
+             "fn a() { MessageError(1) }\n")
+    r = backfill_stub_bodies(target, [donor])
+    assert r.filled == 1
+    assert r.uses_added == 1
+    assert "use crate::wrapper::MessageError;" in r.text
+    assert r.text.count("use crate::ptr::Own;") == 1
+
+
+def test_backfill_repairs_scope_on_a_resume_that_places_no_new_body() -> None:
+    # A killed-and-resumed cluster already holds the donor bodies, so nothing is
+    # placed this pass — and the imports those bodies need are still missing.
+    # Gating the repair on "placed something now" leaves that tree red forever.
+    from pipeline_core.application.reconstruct.fill_merge import backfill_stub_bodies
+    target = "fn a() { MessageError(1) }\nfn b() { unimplemented!() }\n"
+    donor = ("use crate::wrapper::MessageError;\n"
+             "fn a() { MessageError(1) }\nfn b() { unimplemented!() }\n")
+    r = backfill_stub_bodies(target, [donor])
+    assert r.filled == 0
+    assert r.uses_added == 1
+    assert r.text.startswith("use crate::wrapper::MessageError;")
+
+
+def test_backfill_import_carry_is_idempotent() -> None:
+    from pipeline_core.application.reconstruct.fill_merge import backfill_stub_bodies
+    target = "fn a() { unimplemented!() }\nfn b() { unimplemented!() }\n"
+    donor = "use crate::wrapper::MessageError;\nfn a() { MessageError(1) }\n"
+    once = backfill_stub_bodies(target, [donor])
+    twice = backfill_stub_bodies(once.text, [donor])
+    assert twice.uses_added == 0
+    assert twice.text.count("use crate::wrapper::MessageError;") == 1
+
+
 def test_backfill_stub_bodies_no_stubs_short_circuits() -> None:
     from pipeline_core.application.reconstruct.fill_merge import backfill_stub_bodies
     target = "fn a() { 1 }\n"

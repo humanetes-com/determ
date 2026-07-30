@@ -19,16 +19,22 @@ import shlex
 import shutil
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ...application.author_layout import (
+    LayoutComponentRecord,
+    LayoutOutcome,
+)
 from ...application.reconcile_layout import plan_layout_reconciliation
 from ...application.reconstruct.fill_merge import backfill_stub_bodies
 from ...application.reconstruct.fill_rules import is_unimplemented_body
 from ...application.reconstruct.heal import HealDeps, heal_file
 from ...application.reconstruct.hollow_repair import repair_hollow_bodies
+from ...application.reconstruct.import_repair import repair_missing_imports
 from ...domain.attribution import FailureFrontier
 from ...domain.cluster_plan import fill_order
 from ...domain.generation import (
@@ -971,19 +977,61 @@ class StaticSkeletonTask2Generator(Task2Generator):
     layout_sync: Any = None
 
     def _sync_layout_into_tree(self, tag: str, project_dir: Path, cluster: Any,
-                               filled_dir: Path) -> None:
+                               filled_dir: Path,
+                               donor_clusters: Sequence[str] = ()) -> None:
         """Reinstall every AUTHORED layout definition the live tree is missing.
         Silent no-op on a healthy tree (nothing is superseded), so this reads a
-        handful of files per cluster start and never rewrites a filled body."""
+        handful of files per cluster start and never rewrites a filled body.
+
+        DONOR clusters' authored definitions count too, and that is not a
+        convenience — it is what makes the cross-cluster body seed sound. Bodies
+        are shared ("fill once, propagate") while the layout store is per
+        cluster, so a component re-authored in one cluster leaves every later
+        cluster inheriting bodies written against a shape its own tree does not
+        declare. Live: the retrigger re-authored `ErrorImpl` in `stable` to
+        `{vtable, backtrace, _error}`; `nightly` kept the baked
+        `{vtable, _data}`, adopted 121 stable bodies, and opened on 31
+        `E0560`/`E0609` that NO per-fn fill can repair, because the fix is a
+        struct declaration and the fill loop only writes bodies. A layout a body
+        was authored against travels with the body, exactly as its imports do.
+
+        This cluster's OWN records win: donor plans are merged in only for
+        declarations this cluster has not itself authored, so a cluster that
+        re-authored a component keeps its own shape."""
         if self.layout_sync is None:
             return
         load_surface, load_records, apply_to_tree = self.layout_sync
         src = filled_dir / "src"
+        read_live = lambda rel: _read_text(src / rel)   # noqa: E731
         try:
+            surface = load_surface(project_dir, cluster.name)
+            own_records = load_records(project_dir, cluster.name)
             plan, notes = plan_layout_reconciliation(
-                load_surface(project_dir, cluster.name),
-                load_records(project_dir, cluster.name),
-                lambda rel: _read_text(src / rel))
+                surface, own_records, read_live)
+            # Precedence is decided from the RECORDS, never from the plans. A
+            # plan is empty when the tree ALREADY holds this cluster's authored
+            # shape, so an empty own-plan means "mine is installed", not "I have
+            # no opinion" — and skipping only what the own-plan happens to
+            # contain lets a donor overwrite a shape this cluster authored and
+            # already had. The next cluster start would then plan the own shape
+            # back and the two would flip-flop, breaking the seeded bodies on
+            # every other iteration.
+            own_uids = {uid for rec in own_records
+                        if rec.outcome is LayoutOutcome.AUTHORED
+                        for uid, _def in rec.defs}
+            for _donor in donor_clusters:
+                _drecs = [
+                    LayoutComponentRecord(
+                        names=rec.names, outcome=rec.outcome,
+                        defs=tuple((uid, d) for uid, d in rec.defs
+                                   if uid not in own_uids))
+                    for rec in load_records(project_dir, _donor)]
+                _dplan, _dnotes = plan_layout_reconciliation(
+                    surface, [r for r in _drecs if r.defs], read_live)
+                for _file, _reps in _dplan.items():
+                    plan.setdefault(_file, []).extend(_reps)
+                notes.extend(f"{n} (from donor cluster '{_donor}')"
+                             for n in _dnotes)
         except Exception as e:                      # never block the fill loop
             self.tel.log(f"  {tag} [layout-sync] skipped: {e}")
             return
@@ -1150,16 +1198,47 @@ class StaticSkeletonTask2Generator(Task2Generator):
                 self.tel.log("  [skeleton] task2a runs clusters serially (debt "
                              "#36 shared-fn seeding); PIPELINE_PARALLELISM "
                              "applies within a cluster, not across clusters.")
+            # The stage marker is all-or-nothing, but the work inside it is
+            # per-cluster and serial — so without a per-cluster marker ANY
+            # re-entry of task2a (a kill mid-cluster-2, a deleted
+            # .skeleton-filled/<later cluster> to force a re-seed) replays
+            # cluster 1's entire Phase A→D from iter 1 before the cluster that
+            # actually needs work is reached. Measured on `anyhow`: `stable`
+            # costs ~4.5 h and hundreds of model calls to re-derive the pass
+            # count its intact tree already holds. A cluster that RAN TO
+            # COMPLETION is checkpointed here, on the same rule task2b/task2c
+            # use: marker valid AND its artifact on disk. Its tree still enters
+            # `donor_dirs`, so a skipped cluster keeps seeding the ones after it
+            # — the seed is read off the tree, never off the run that made it.
             donor_dirs: list[Path] = []
             for _ci, cluster in enumerate(clusters):
-                self.tel.set_current(
-                    project_dir,
-                    f"task2a/{module} / cluster {cluster.name} ({_ci + 1}/{len(clusters)})")
+                _fd = project_dir / ".skeleton-filled" / cluster.name
+                _ckey = f"task2a/{module}/{cluster.name}"
+                _position = f"cluster {cluster.name} ({_ci + 1}/{len(clusters)})"
+                if self.tel.phase_valid(project_dir, _ckey) and _fd.exists():
+                    self.tel.set_current(
+                        project_dir,
+                        f"task2a/{module} / {_position} skipped (checkpoint valid)")
+                    self.tel.log(f"  [{cluster.name}] cluster already reconstructed "
+                                 "(checkpoint valid, filled tree on disk) — skipping "
+                                 "its Phase A→D; its tree still seeds later clusters.")
+                    cluster_summaries.append({"cluster": cluster.name, "ok": True,
+                                              "skipped_checkpoint": True})
+                    donor_dirs.append(_fd)
+                    continue
+                self.tel.set_current(project_dir, f"task2a/{module} / {_position}")
                 _summary = _run_one_cluster(cluster, list(donor_dirs))
                 cluster_summaries.append(_summary)
-                _fd = project_dir / ".skeleton-filled" / cluster.name
                 if _summary.get("ok") and _fd.exists():
                     donor_dirs.append(_fd)
+                    # Only a cluster whose Phase A→D returned ok is checkpointed:
+                    # a crash or an abort leaves no marker, so the next run
+                    # re-enters it and resumes against its partial tree exactly
+                    # as it does today.
+                    self.tel.mark_phase(
+                        project_dir, _ckey, "done",
+                        detail=("validated" if _summary.get("validates")
+                                else "reconstructed"))
             # Only record task2a as done when at least one cluster actually
             # produced something. Marking it done unconditionally meant a
             # total wipeout (every cluster aborted) still got treated as a
@@ -1388,7 +1467,9 @@ class StaticSkeletonTask2Generator(Task2Generator):
         # a mid-run re-author edits the skeleton, so its new type/impl blocks
         # would never reach the tree cargo builds. Reinstall them here, where
         # the seed invariant is established.
-        self._sync_layout_into_tree(tag, project_dir, cluster, filled_dir)
+        self._sync_layout_into_tree(
+            tag, project_dir, cluster, filled_dir,
+            [d.name for d in (donor_dirs or [])])
 
         # Debt #36: adopt the shared-fn bodies earlier clusters already accepted
         # (fill ONCE, propagate). Only `unimplemented!()` stubs are replaced, so
@@ -1443,9 +1524,32 @@ class StaticSkeletonTask2Generator(Task2Generator):
         _unchecked = False
         _prev_sig = ""
         _last_msg = ""
+        _rc0 = 0
+        _check_secs = 0.0
         while _round < _PREPASS_HEAL_MAX_ROUNDS:
+            _t0 = time.monotonic()
             _rc0, _rendered0, _diags0 = self.cargo.run_check_diag(
                 check_cmd, filled_dir, self._cluster_env(cluster), 180)
+            _check_secs = time.monotonic() - _t0
+            if _rc0 == 0:
+                _clean = True
+                break
+            # Deterministic import repair BEFORE any revert. A seeded body is
+            # authored against the DONOR's import block, and a body-only splice
+            # cannot carry a `use` — so a body that is otherwise perfect fails
+            # E0425 here. `_revert_implicated` would answer by throwing the body
+            # away; rustc's own "consider importing" suggestion fixes it for
+            # free. The seed propagates donor imports too, but only the ones the
+            # donor FILE had: a body pulled through the signature fallback can
+            # still name something neither file imports.
+            for _imp_file in dict.fromkeys(
+                    f.file for d in _diags0 for f in d.import_fixes):
+                _imp = repair_missing_imports(
+                    self.cargo.run_check_diag, check_cmd, filled_dir,
+                    self._cluster_env(cluster), _imp_file, _diags0,
+                    self.tel.log, f"{tag} [pre-pass-heal]")
+                if _imp is not None:
+                    _rc0, _rendered0, _diags0 = _imp
             if _rc0 == 0:
                 _clean = True
                 break
@@ -1520,11 +1624,20 @@ class StaticSkeletonTask2Generator(Task2Generator):
             # opened on 39 rustc errors looked like it had been checked: the only
             # evidence either way was the ABSENCE of log lines.
             self.tel.log(f"  {tag} [pre-pass-heal] seeded/resumed tree compiles "
-                         "as-is — no repair needed.")
+                         f"as-is — no repair needed ({check_cmd}, "
+                         f"{_check_secs:.1f}s).")
+        # `rc` and `check_secs` are the falsifiers for the verdict itself. A
+        # "clean" that came back in a fraction of a second on a tree whose src
+        # was just rewritten did not compile anything, and the sweep six seconds
+        # later has repeatedly disagreed with it (`nightly`: heal says clean,
+        # `cargo test` finds 41 rustc errors). Until that is explained, the
+        # verdict is a claim and these two fields are how the next run checks it.
         self.tel.emit("phase_c.cluster.prepass_heal_verdict", data={
             "cluster": cluster.name, "rounds": _round,
             "verdict": ("clean" if _clean else
                         "unchecked" if _unchecked else "still_broken"),
+            "rc": _rc0, "check_secs": round(_check_secs, 2),
+            "check_cmd": check_cmd,
         })
 
         # Propagate gen_tests siblings from project_dir/src/ into filled_dir/src/.
@@ -2009,6 +2122,8 @@ class StaticSkeletonTask2Generator(Task2Generator):
             return 0
         adopted = 0
         refused = 0
+        layout_skipped = 0
+        imported = 0
         for dst in sorted(src_root.rglob("*.rs")):
             if self.gentests.is_gen_tests_file(dst.name):
                 continue
@@ -2029,13 +2144,26 @@ class StaticSkeletonTask2Generator(Task2Generator):
                 continue
             _bf = backfill_stub_bodies(text, donors)
             refused += _bf.ambiguous_skipped
+            layout_skipped += _bf.layout_skipped
             if _bf.filled:
                 dst.write_text(_bf.text, encoding="utf-8")
                 adopted += _bf.filled
+                imported += _bf.uses_added
+        if imported:
+            self.tel.log(f"  [ownership] carried {imported} donor import(s) in "
+                         "with the adopted bodies — a body names what its own "
+                         "file imports, and no per-fn fill can add a file-level "
+                         "`use`.")
         if refused:
             self.tel.log(f"  [ownership] {refused} donor body(ies) NOT adopted — "
                          "signature ambiguous across sibling impl blocks and the "
                          "slot did not match; the fill loop owns those stubs.")
+        if layout_skipped:
+            self.tel.log(
+                f"  [ownership] {layout_skipped} donor body(ies) NOT adopted — "
+                "they read a type this cluster SHAPES differently (its own "
+                "authored layout wins), so no per-fn fill could repair them "
+                "here; this cluster fills them against its own declarations.")
         return adopted
 
     def _post_merge_fill_pass(

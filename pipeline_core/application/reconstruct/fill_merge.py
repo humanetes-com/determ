@@ -38,6 +38,12 @@ from dataclasses import dataclass
 
 from pipeline_core.application.reconstruct.fill_rules import is_unimplemented_body
 from pipeline_core.domain.rust_fn_slots import FnSlot, fn_bodies
+from pipeline_core.domain.rust_scan import contains_word
+from pipeline_core.domain.rust_use_items import (
+    divergent_item_names,
+    insert_use_items,
+    missing_use_items,
+)
 
 
 def fn_body_spans(text: str) -> list[tuple[int, int, int]]:
@@ -61,11 +67,24 @@ class BackfillResult:
     `ambiguous_skipped` is reported rather than swallowed: it is the count of
     stubs a donor HAD a body for and this merge declined to place, and a run
     that starts filling with a non-zero count here is doing avoidable model work
-    that the seed could have done for free."""
+    that the seed could have done for free.
+
+    `uses_added` counts the file-level imports carried over with the bodies. A
+    body placed in the right slot still fails to compile if what it NAMES is not
+    in the target's scope, and no per-fn fill can repair a file-level import.
+
+    `layout_skipped` is counted APART from `ambiguous_skipped` because the two
+    are different findings that happen to have the same remedy. Ambiguity means
+    the merge could not tell which slot a body belongs in; layout divergence
+    means it knew exactly, and the body still cannot compile here. Reporting 61
+    layout refusals under "signature ambiguous across sibling impl blocks" would
+    have sent the next reader hunting a merge bug instead of a shape mismatch."""
 
     text: str
     filled: int
     ambiguous_skipped: int
+    uses_added: int = 0
+    layout_skipped: int = 0
 
 
 def backfill_stub_bodies(
@@ -86,10 +105,31 @@ def backfill_stub_bodies(
         return BackfillResult(target_text, 0, 0)
     out = target_text
     skipped = 0
+    layout = 0
     for donor in donor_texts:
-        out, _n, _skip = _merge(out, donor)
+        out, _placed, _skip, _layout = _merge(out, donor)
         skipped += _skip
-    return BackfillResult(out, before - count_stub_bodies(out), skipped)
+        layout += _layout
+    # A body cannot bring its own import. The donor's bodies were authored
+    # against the donor's import block, which a fill may have GROWN
+    # (`use crate::wrapper::MessageError;`), so adopting bodies without it hands
+    # the cluster a tree of correct code that does not resolve.
+    #
+    # Deliberately NOT gated on bodies placed in THIS call. The scope debt
+    # belongs to the tree, not to the pass: a resumed cluster already holds the
+    # donor bodies from an earlier run, places nothing new, and would keep its
+    # missing imports forever — which is exactly the state a killed-and-resumed
+    # `nightly` was in. Reconciling every time makes the seed idempotent, and
+    # `missing_use_items` only ever ADDS a name the target neither imports nor
+    # binds, so running it twice is a no-op.
+    imported = 0
+    for donor in donor_texts:
+        _adds = missing_use_items(out, donor)
+        if _adds:
+            out = insert_use_items(out, _adds)
+            imported += len(_adds)
+    return BackfillResult(out, before - count_stub_bodies(out), skipped,
+                          imported, layout)
 
 
 def merge_fills_preserving_existing(disk_text: str, model_text: str) -> str:
@@ -113,14 +153,14 @@ def merge_fills_preserving_existing(disk_text: str, model_text: str) -> str:
     return _merge(disk_text, model_text)[0]
 
 
-def _merge(disk_text: str, model_text: str) -> tuple[str, int, int]:
-    """`(merged_text, bodies_placed, ambiguous_refusals)` — the shared core."""
+def _merge(disk_text: str, model_text: str) -> tuple[str, int, int, int]:
+    """`(merged_text, placed, ambiguous_refusals, layout_refusals)` — the core."""
     disk_fns = fn_bodies(disk_text)
     if not disk_fns:
         # Disk has no functions to fill — either an empty or
         # non-Rust-source-ish file. Don't risk overwriting structure;
         # return disk verbatim.
-        return disk_text, 0, 0
+        return disk_text, 0, 0, 0
 
     # The model's bodies, addressed by slot. A body the model regurgitated as
     # `unimplemented!()` adds nothing over what is already on disk.
@@ -163,12 +203,23 @@ def _merge(disk_text: str, model_text: str) -> tuple[str, int, int]:
     }
 
     if not by_slot and not by_sig:
-        return disk_text, 0, 0  # model gave us nothing usable
+        return disk_text, 0, 0, 0  # model gave us nothing usable
+
+    # Types the two files SHAPE differently. A body is written against a layout,
+    # and the layout is authored per cluster while bodies are shared across
+    # them — so a body naming one of these cannot compile here however perfectly
+    # it is placed, and no per-fn fill can repair it because the fix is a
+    # declaration. Refusing costs this cluster a native re-fill; adopting costs
+    # a tree that never builds (`nightly`: 31 `E0560`/`E0609` from `ErrorImpl`
+    # alone). Empty for the model-output merge, where the thin file declares no
+    # items and there is nothing to disagree about.
+    divergent = divergent_item_names(disk_text, model_text)
 
     # Walk disk fns IN REVERSE so character offsets stay valid as we splice.
     out = disk_text
     placed = 0
     refused = 0
+    layout_refused = 0
     for b in reversed(disk_fns):
         if not is_unimplemented_body(disk_text[b.body_start:b.body_end]):
             continue  # already filled — never overwrite
@@ -193,9 +244,15 @@ def _merge(disk_text: str, model_text: str) -> tuple[str, int, int]:
             new_body = by_sig.get(b.signature)
         if new_body is None:
             continue  # model didn't return this function
+        if divergent and any(contains_word(new_body, n) for n in divergent):
+            # Right slot, wrong world. Leave the stub for this cluster's own
+            # fill loop, which will write it against the layout this tree
+            # actually declares.
+            layout_refused += 1
+            continue
         out = out[:b.body_start] + new_body + out[b.body_end:]
         placed += 1
-    return out, placed, refused
+    return out, placed, refused, layout_refused
 
 
 def merge_fn_blocks_into_disk(disk_text: str, fn_blocks: dict[str, str]) -> str:

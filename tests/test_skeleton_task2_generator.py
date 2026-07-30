@@ -28,6 +28,12 @@ class _Diag:
     file: str
     code: str
     message: str
+    # The real `Diagnostic` carries rustc's structured "consider importing"
+    # suggestions, and the pre-pass heal applies them before it reverts anything
+    # — a seeded body that merely needs a `use` must not be thrown away. A fake
+    # missing the field made the heal raise instead of heal, which read in the
+    # assertions as "the poisoned body was never reverted".
+    import_fixes: tuple = ()
 
 
 def _cluster(name: str = "default", *, requires_nightly: bool = False) -> BuildCluster:
@@ -65,6 +71,9 @@ class FakeAdapter:
     attribute_seq: list[tuple[dict[Any, Any], FailureKind]] = field(
         default_factory=list)
     phase_valid_keys: set[str] = field(default_factory=set)
+    # (key, status, detail) per mark_phase — a checkpoint that is never written
+    # replays its whole stage on the next resume, so the write is the assertion.
+    marks: list[tuple[str, str, str]] = field(default_factory=list)
     manifest: list[str] = field(default_factory=list)
     propagate: bool = True
     has_decl_ret: bool = False
@@ -93,7 +102,7 @@ class FakeAdapter:
 
     def mark_phase(self, project_dir: Path, key: str, status: str,
                    detail: str = "") -> None:
-        pass
+        self.marks.append((key, status, detail))
 
     def phase_valid(self, project_dir: Path, key: str) -> bool:
         return key in self.phase_valid_keys
@@ -400,6 +409,78 @@ def test_clusters_run_serially_even_with_parallelism(tmp_path: Path) -> None:
     pd = _make_project(tmp_path, cs)
     assert _run(pd, _gen(fake, _cfg(per_fn=True, tdd=True, parallelism=2))) is True
     assert any("runs clusters serially" in m for m in fake.logs)
+
+
+def test_completed_cluster_is_checkpointed_per_cluster(tmp_path: Path) -> None:
+    # Without a per-cluster marker, re-entering task2a replays cluster 1's whole
+    # Phase A→D before reaching the cluster that needs work. A cluster that ran
+    # to completion records its own key.
+    cs = [_cluster("default"), _cluster("nightly")]
+    fake = FakeAdapter(clusters_list=cs, cluster_tests=[("tests/it.rs", "x")],
+                       run_results=[(0, "ok")])
+    pd = _make_project(tmp_path, cs)
+    assert _run(pd, _gen(fake, _cfg(per_fn=True, tdd=True))) is True
+    keys = [k for k, status, _ in fake.marks if status == "done"]
+    assert "task2a/crate/default" in keys
+    assert "task2a/crate/nightly" in keys
+
+
+def test_aborted_cluster_is_not_checkpointed(tmp_path: Path) -> None:
+    # A cluster that never produced a tree must stay re-runnable: checkpointing
+    # an abort is how a resume inherits a fragment as though it were finished.
+    c = _cluster()
+    fake = FakeAdapter(clusters_list=[c], cluster_tests=[("tests/it.rs", "x")],
+                       raw_results=[(1, "err", "boom"), (1, "err", "boom")],
+                       run_results=[(0, "ok")])
+    fake.generate_fix_loop = lambda **kw: (False, "")  # type: ignore[method-assign]
+    pd = _make_project(tmp_path, [c])
+    assert _run(pd, _gen(fake, _cfg(per_fn=True, tdd=True))) is True
+    assert any("cluster aborted" in m for m in fake.logs)
+    assert "task2a/crate/default" not in [k for k, _s, _d in fake.marks]
+
+
+def test_checkpointed_cluster_is_skipped_but_still_seeds_the_next(
+        tmp_path: Path) -> None:
+    # The resume the whole change exists for: cluster 1 is done and its tree is
+    # on disk, cluster 2 is not. Cluster 1's Phase A→D must not re-run — and
+    # cluster 2 must still be seeded FROM ITS TREE, since the seed is read off
+    # the tree, not off the run that produced it.
+    cs = [_cluster("default"), _cluster("nightly")]
+    fake = FakeAdapter(clusters_list=cs, cluster_tests=[("tests/it.rs", "x")],
+                       run_results=[(0, "ok")],
+                       phase_valid_keys={"task2a/crate/default"})
+    pd = _make_project(tmp_path, cs)
+    done_tree = pd / ".skeleton-filled" / "default" / "src"
+    done_tree.mkdir(parents=True)
+    (done_tree / "lib.rs").write_text("fn foo() -> i32 {\n    42\n}\n",
+                                      encoding="utf-8")
+    filled_for: list[str] = []
+
+    def _fill(**kw: Any) -> ClusterFillResult:
+        filled_for.append(Path(kw["target_src_dir"]).name)
+        lib = kw["target_src_dir"] / "src" / "lib.rs"
+        assert "42" in lib.read_text(encoding="utf-8")
+        return _PER_FN_RESULT
+
+    fake.run_phase_c_tdd = _fill  # type: ignore[method-assign]
+    assert _run(pd, _gen(fake, _cfg(per_fn=True, tdd=True))) is True
+    assert filled_for == ["nightly"]
+    assert any("already reconstructed" in m for m in fake.logs)
+
+
+def test_checkpointed_cluster_reruns_when_its_tree_is_gone(tmp_path: Path) -> None:
+    # Marker without artifact is the stale-checkpoint case task2b/task2c already
+    # guard: the cluster runs, it is not fabricated as ok.
+    cs = [_cluster("default")]
+    fake = FakeAdapter(clusters_list=cs, cluster_tests=[("tests/it.rs", "x")],
+                       run_results=[(0, "ok")],
+                       phase_valid_keys={"task2a/crate/default"})
+    pd = _make_project(tmp_path, cs)
+    ran: list[str] = []
+    fake.run_phase_c_tdd = lambda **kw: (  # type: ignore[method-assign]
+        ran.append(kw["cluster"].name) or _PER_FN_RESULT)
+    assert _run(pd, _gen(fake, _cfg(per_fn=True, tdd=True))) is True
+    assert ran == ["default"]
 
 
 def test_second_cluster_seeds_shared_bodies_from_first(tmp_path: Path) -> None:
