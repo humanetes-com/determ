@@ -1,4 +1,4 @@
-"""When to re-run t1.5 layout authoring for a cluster (F11 M3) — pure domain.
+"""When to re-run t1.5 layout authoring for a cluster — pure domain.
 
 The frozen skeleton's layout gets ONE authoring pass at bake time (M2). Several
 distinct signals say that pass produced a layout the reconstruction cannot live
@@ -210,6 +210,99 @@ def classify_layout_retrigger(
 
 def should_retrigger(cause: LayoutRetriggerCause) -> bool:
     return cause is not LayoutRetriggerCause.NONE
+
+
+DEFAULT_REFILL_PER_ITER = 4
+DEFAULT_REFILL_GRACE_MAX_ITERS = 12
+
+
+@dataclass(frozen=True, slots=True)
+class RefillGrace:
+    """The window in which a successful retrigger's DELIBERATE re-stub must not
+    be read as evidence, sized to the number of bodies it authorised for re-fill.
+
+    A re-author reverts every fn referencing the component to a stub so each
+    re-fills under the new shape. Until they do, the tree is WORSE than before by
+    construction: a stub panic inside drop/vtable code aborts whole test binaries,
+    so the pass count collapses and the oracle shrinks. Two consumers read those
+    signals and both are wrong during the window:
+
+      * the batch ratchet convicts on "this sweep measures last iter's fills";
+      * the crash retrigger convicts on "the oracle shrank for N sweeps".
+
+    Left ungated, they destroy the re-author and then re-fire on the crash it was
+    about to fix — the ratchet's revert is a whole-`src/` restore, so it takes the
+    new DEFINITION down with the stubs, while the capped attempt stays spent.
+
+    A FIXED one-iter window (the first fix) is sized to the mechanism's smallest
+    case, not to its work. Measured live on `anyhow` run `1135197`: a 47-body
+    re-stub landed **3** re-fills in its one graced iter — 25 of the 31 frontier
+    fns were consumers blocked on still-stubbed producers, so they can only fill
+    in dependency order, a few per iter. Iters 1-5 then ran the full cycle twice
+    (pass 111 → 20 → 111 → 20 → 111, the two 20s identical), burning both capped
+    `StdError` attempts and two 47-body authoring calls for nothing.
+
+    So the window is sized to the bodies and then gated on PROGRESS, which is
+    what keeps it safe: it survives only while re-fills keep landing, and the
+    high-water snapshot is never re-taken below its own mark, so an expiring
+    grace reverts to exactly the tree a one-iter grace would have. The cost of
+    being generous is bounded iters; the cost of being stingy is a run that can
+    never repair a layout-dependent crash at all.
+
+    `restubbed == 0` is a FIRED-but-failed attempt: nothing was re-stubbed, so
+    the window suppresses the shrink evidence (no back-to-back re-fire) but
+    excuses no breach — there is no deliberate re-stub to explain one.
+    """
+    iters_left: int
+    restubbed: int
+    fills_at_grant: int
+
+    @classmethod
+    def none(cls) -> RefillGrace:
+        return cls(iters_left=0, restubbed=0, fills_at_grant=0)
+
+    @classmethod
+    def for_restub(
+        cls, restubbed: int, fills_so_far: int,
+        per_iter: int = DEFAULT_REFILL_PER_ITER,
+        max_iters: int = DEFAULT_REFILL_GRACE_MAX_ITERS,
+    ) -> RefillGrace:
+        """A window for `restubbed` bodies: one iter per `per_iter` bodies,
+        never fewer than one (the smallest re-stub keeps the original
+        semantics exactly) and never more than `max_iters`."""
+        sized = -(-max(restubbed, 0) // max(per_iter, 1))
+        return cls(iters_left=min(max(sized, 1), max(max_iters, 1)),
+                   restubbed=max(restubbed, 0),
+                   fills_at_grant=fills_so_far)
+
+    @classmethod
+    def for_failed_attempt(cls, fills_so_far: int) -> RefillGrace:
+        """One iter, nothing re-stubbed — a fired attempt that did not land."""
+        return cls(iters_left=1, restubbed=0, fills_at_grant=fills_so_far)
+
+    @property
+    def active(self) -> bool:
+        """Whether this sweep's shrink is the window's own doing, so neither the
+        vanish streak nor the accelerated confirm may read it as crash evidence."""
+        return self.iters_left > 0
+
+    @property
+    def excuses_breach(self) -> bool:
+        """Whether a ratchet breach on this sweep has a deliberate re-stub to
+        explain it. Only a window that actually re-stubbed bodies does."""
+        return self.active and self.restubbed > 0
+
+    def consume(self, fills_so_far: int) -> RefillGrace:
+        """The window after one graced iter has run its fills. Survives only
+        while re-fills keep LANDING: an iter that filled nothing has no re-author
+        in flight to protect, whatever budget is left. Progress is measured in
+        fills rather than pass count on purpose — the blocked-consumer regime
+        above fills bodies for several iters before any test can move."""
+        if not self.active or fills_so_far <= self.fills_at_grant:
+            return RefillGrace.none()
+        return RefillGrace(iters_left=self.iters_left - 1,
+                           restubbed=self.restubbed,
+                           fills_at_grant=fills_so_far)
 
 
 def find_fns_referencing(

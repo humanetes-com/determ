@@ -35,7 +35,13 @@ from pipeline_core.domain.crash_site import (
     vanish_is_stub_confounded,
 )
 from pipeline_core.domain.dispatch import defer_blocked_consumers
-from pipeline_core.domain.layout_retrigger import CompileEvidence, CrashEvidence
+from pipeline_core.domain.layout_retrigger import (
+    DEFAULT_REFILL_GRACE_MAX_ITERS,
+    DEFAULT_REFILL_PER_ITER,
+    CompileEvidence,
+    CrashEvidence,
+    RefillGrace,
+)
 from pipeline_core.domain.measurement import Measurement, tree_content_sha
 from pipeline_core.domain.models import (
     BuildCluster,
@@ -86,11 +92,11 @@ class PhaseCTddDeps:
     # (project_dir, cluster_name, filled_dir, pass_count, iteration) -> None.
     # None disables checkpointing (heal then has only excision + skeleton).
     checkpoint_fill_tree: Callable[..., None] | None = None
-    # F11 M3: (project_dir, module, cluster_name, target_src_dir, error_text)
-    # -> RetriggerResult, tried once at the stall-exit before giving up on the
-    # cluster. None disables it — the exit behaves exactly as before F11 M3.
+    # Layout re-author: (project_dir, module, cluster_name, target_src_dir,
+    # error_text) -> RetriggerResult, tried once at the stall-exit before giving
+    # up on the cluster. None disables it — the exit is then unconditional.
     retrigger_layout: Callable[..., RetriggerResult] | None = None
-    # FR-024 at the sweep level: (project_dir, cluster) -> (expected_count,
+    # Oracle reconciliation at the sweep level: (project_dir, cluster) -> (expected_count,
     # expected_names) — the cfg-aware static test inventory. None disables
     # oracle reconciliation — sweeps then trust whatever cargo reported.
     active_test_inventory: Callable[..., tuple[int, frozenset[str]]] | None = None
@@ -257,7 +263,7 @@ def run_phase_c_tdd(
     total_bytes = 0
     errors: list[str] = []
 
-    # FR-024: improvement-driven loop. Track passing-test count across iters;
+    # Improvement-driven loop. Track passing-test count across iters;
     # exit only after `max_stalls` consecutive non-improving iters. The 10k
     # backstop in the loop body is a runaway-safety net only.
     # LoopState is the source of truth for the pass_count floor / stall streak
@@ -305,14 +311,13 @@ def run_phase_c_tdd(
         deps.log(f"  {tag} [phase-c/tdd] reverse-map build failed: {_e}")
         test_reverse_map = {}
 
-    # FR-024 at the sweep level: the statically-expected oracle for this
-    # cluster. Vanished tests (expected, but no verdict in the output — their
-    # binary crashed or stopped compiling) are counted as FAILING, so the
-    # loop can neither call a shrunken suite "done" nor snapshot/checkpoint a
-    # tree that silently lost part of its oracle.
-    # Scoped to the very stems this loop's `cargo test --test stem…` runs —
-    # the sweep's denominator, not the whole-crate FR-024 walk (which also
-    # counts src-side/gen_tests tests this command never executes).
+    # The statically-expected oracle for this cluster. Vanished tests (expected,
+    # but no verdict in the output — their binary crashed or stopped compiling)
+    # are counted as FAILING, so the loop can neither call a shrunken suite
+    # "done" nor snapshot/checkpoint a tree that silently lost part of its
+    # oracle. Scoped to the very stems this loop's `cargo test --test stem…`
+    # runs — the sweep's denominator, not the whole-crate inventory walk (which
+    # also counts src-side/gen_tests tests this command never executes).
     _expected_count, _expected_names = (
         deps.active_test_inventory(
             project_dir, cluster, frozenset(test_stems), _sweep_lib)
@@ -323,17 +328,54 @@ def run_phase_c_tdd(
     _vanish_streak = 0
     _crash_retrigger_after = int(
         os.getenv("PHASE_C_CRASH_RETRIGGER_AFTER", "2"))
-    # One-iter cooldown after a retrigger attempt: the next sweep's shrink is
-    # expected (reverted stubs crash until re-filled) and must not confirm-now
-    # a fresh attempt before a single fill pass has run.
-    _retrig_cooldown = False
-    # The SAME expected shrink, one consumer over: it also depresses the next
-    # sweep's pass_count, which is what the batch ratchet convicts on. Two
-    # flags rather than one because they are consumed at different points of
-    # the iter — the ratchet reads this one at the top of the sweep, the
-    # cooldown is read further down at the re-fire check. Set by EVERY
-    # retrigger site: all three end in the same surgical revert.
-    _retrig_grace = False
+    # The window after a retrigger attempt in which the deliberate re-stub —
+    # not the tree's quality — explains what the sweep reads. ONE object with
+    # two read sites, because it is one fact: the ratchet reads `excuses_breach`
+    # at the top of the sweep (the re-stub depressed pass_count), the crash
+    # streak reads `active` further down (the re-stub aborted binaries, so the
+    # shrink is not evidence and must not re-fire the retrigger on its own
+    # work). Sized to the bodies re-stubbed and progress-gated — see
+    # `RefillGrace`. Set by EVERY retrigger site: all three end in the same
+    # surgical revert.
+    _grace = RefillGrace.none()
+    _grace_per_iter = int(os.getenv("PHASE_C_REFILL_GRACE_PER_ITER",
+                                    str(DEFAULT_REFILL_PER_ITER)))
+    _grace_max_iters = int(os.getenv("PHASE_C_REFILL_GRACE_MAX_ITERS",
+                                     str(DEFAULT_REFILL_GRACE_MAX_ITERS)))
+
+    def _grant_grace(reverted: int) -> RefillGrace:
+        return RefillGrace.for_restub(
+            reverted, total_filled,
+            per_iter=_grace_per_iter, max_iters=_grace_max_iters)
+
+    def _score_grace(iter_n: int) -> None:
+        """Spend one iter of the re-fill window and score it on what landed.
+
+        Called at EVERY point an iter ends having had (or been denied) its fill
+        pass, never at the two read sites: those are reached at different points
+        of the same iter and must agree on which iter they are in, and the
+        progress test needs this iter's fills. An iter that granted the window
+        `continue`s before any of these, so it never also spends it. An iter with
+        no frontier reaches the no-fill path and closes the window there — no
+        work in flight, no protection, and no window that cannot close."""
+        nonlocal _grace
+        if not _grace.active:
+            return
+        _next = _grace.consume(total_filled)
+        if not _next.active and _grace.restubbed:
+            deps.log(
+                f"  {tag} [phase-c/tdd] iter {iter_n}: re-fill window closed "
+                f"({_grace.restubbed} body(ies) re-stubbed, "
+                f"{total_filled - _grace.fills_at_grant} re-fill(s) landed this "
+                "iter) — the batch ratchet judges the re-author from the next "
+                "sweep on.")
+            deps.emit("phase_c.tdd.refill_window_closed", data={
+                "cluster": cluster.name, "iter": iter_n,
+                "restubbed": _grace.restubbed,
+                "fills_this_iter": total_filled - _grace.fills_at_grant,
+                "iters_left": _grace.iters_left,
+            })
+        _grace = _next
     # Cause-A (build failure) retrigger: consecutive sweeps in which the test
     # binaries did not compile. Carried as evidence, never as a threshold — a
     # tree that cannot build produces no verdict at all, so waiting is pure loss.
@@ -496,7 +538,7 @@ def run_phase_c_tdd(
         # exactly when the tree is at its best.
         _breach = ratchet_breach(pass_count, _bratchet_best,
                                  _sweep.passing, _bratchet_passing)
-        _withheld = breach_withheld(_breach, _retrig_grace)
+        _withheld = breach_withheld(_breach, _grace)
         if _withheld:
             deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: batch ratchet — "
                      f"breach ({_breach}) NOT charged: {_withheld}.")
@@ -504,9 +546,10 @@ def run_phase_c_tdd(
                 "cluster": cluster.name, "iter": iter_n,
                 "pass_count": pass_count, "best_pass": _bratchet_best,
                 "breach": _breach, "reason": _withheld,
+                "restubbed": _grace.restubbed,
+                "grace_iters_left": _grace.iters_left,
             })
             _breach = ""
-        _retrig_grace = False    # consumed: exactly one iter of evidence
         if _batch_ratchet and _bratchet_snap is not None and _breach:
             # A crashing binary drops a nondeterministic subset of tests, so a
             # single breached reading can be pure noise; re-sweep the UNCHANGED
@@ -599,8 +642,8 @@ def run_phase_c_tdd(
                      + ", ".join(f"{lbl} {p}/{f}" for lbl, p, f in _bins))
         if rc == 0 and not _oracle.intact:
             # cargo says green but part of the expected oracle never reported —
-            # a shrunken suite must not close the cluster (FR-024). Fall
-            # through to the failing path with the vanished tests as failures.
+            # a shrunken suite must not close the cluster. Fall through to the
+            # failing path with the vanished tests as failures.
             deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: rc==0 but the "
                      f"oracle is short {_oracle.missing_count} test(s) — NOT "
                      "declaring the cluster done.")
@@ -650,6 +693,20 @@ def run_phase_c_tdd(
                               improved=improved, note=_regr_note))
         best_pass = int(state.best_metric)
         stall = state.stalls
+        if _grace.active:
+            # THIRD consumer of the re-stub's depressed count, and the one that
+            # bites only once the window can outlive the stall budget (12 iters
+            # vs 3). The budget asks "have the last N iters of fills failed to
+            # move the score"; inside a window the score CANNOT move — the
+            # re-stubbed bodies have to land first, which is precisely what the
+            # window is already progress-gated on. Left accumulating, the loop
+            # takes its stall exit mid-window, and that exit is a bare `break`
+            # with no tree restore: the run would end at the re-stub's low point,
+            # BELOW the high-water the window exists to protect. Reset exactly as
+            # every retrigger site does when it fires. Termination is unaffected:
+            # the window is hard-bounded and dies the iter re-fills stop landing.
+            state.stalls = 0
+            stall = 0
 
         # Attribute failures via the full chain (panics → compile → behavior →
         # classifier → recently_filled → reverse_map). The cluster's in-memory
@@ -847,8 +904,7 @@ def run_phase_c_tdd(
                     "consecutive_broken_sweeps": _compile_broke_streak,
                 })
                 _compile_broke_streak = 0
-                _retrig_cooldown = True
-                _retrig_grace = True
+                _grace = _grant_grace(_retrig_k.reverted_count)
                 state.stalls = 0
                 stall = 0
                 continue
@@ -862,7 +918,19 @@ def run_phase_c_tdd(
                     f"diagnostics ({_retrig_k.reason}) — no repair route; "
                     f"{_err_n} distinct rustc error(s): "
                     + (" | ".join(_err_lines) or "(no parseable location)"))
-        if _oracle.vanished and not _sweep_compile_broke:
+        if _grace.active:
+            # Inside a re-fill window the shrink is the window's OWN doing: the
+            # re-author's surgical revert left the component's fns as stubs, and
+            # a stub panic inside drop/vtable code aborts the test binary, so
+            # every sweep until they re-fill shrinks REGARDLESS of the new
+            # layout's quality. Neither consumer may read it — not the streak,
+            # not the accelerated confirm — or the retrigger fires on its own
+            # re-stub and burns the capped budget it is currently holding
+            # (observed live: attempts 1 and 2 in back-to-back iters). The
+            # streak is left untouched rather than reset: this sweep is silent
+            # about the crash, not proof of its absence.
+            pass
+        elif _oracle.vanished and not _sweep_compile_broke:
             _vanish_streak += 1
             # A shrunk oracle with a clean compile is either the frozen-scheme
             # crash class or a transient. Waiting for the streak proves
@@ -870,15 +938,8 @@ def run_phase_c_tdd(
             # on tests that cannot report verdicts); an immediate re-sweep
             # (<1s) answers the same transient-vs-real question now — a crash
             # that reproduces back-to-back is deterministic, so the streak is
-            # treated as complete this iter. EXCEPT right after a successful
-            # re-author: its surgical revert leaves the component's fns as
-            # stubs, and a stub panic inside drop/vtable code aborts the test
-            # binary — the very next sweep shrinks REGARDLESS of the new
-            # layout's quality. Firing then burns the capped attempt budget
-            # with zero re-fill evidence (observed live: attempts 1 and 2 in
-            # back-to-back iters). The fills of THIS iter must run first.
+            # treated as complete this iter.
             if (_vanish_streak < _crash_retrigger_after
-                    and not _retrig_cooldown
                     and deps.retrigger_layout is not None):
                 _rc2, _out2 = deps.run_cargo(
                     test_cmd, target_src_dir, cluster_env, timeout=test_timeout)
@@ -898,7 +959,6 @@ def run_phase_c_tdd(
             # expected name reported proves the crash class absent and may
             # reset the streak.
             _vanish_streak = 0
-        _retrig_cooldown = False   # one iter of fills has now had its chance
         if (_vanish_streak >= _crash_retrigger_after
                 and deps.retrigger_layout is not None):
             _vanish_streak = 0   # re-arm only after another full streak
@@ -915,7 +975,10 @@ def run_phase_c_tdd(
                     suspect_fns=frozenset(_suspects),
                     consecutive_sweeps=_crash_retrigger_after))
             if _retrig_c.fired:
-                _retrig_cooldown = True
+                # Fired but did not land: nothing was re-stubbed, so one iter of
+                # silence is all this owes — enough to stop a back-to-back
+                # re-fire, not enough to excuse a breach it cannot explain.
+                _grace = RefillGrace.for_failed_attempt(total_filled)
             if _retrig_c.fired and _retrig_c.succeeded:
                 deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: CRASH layout "
                          f"retrigger fired (cause={_retrig_c.cause}) — reverted "
@@ -926,7 +989,7 @@ def run_phase_c_tdd(
                     "cause": _retrig_c.cause,
                     "reverted_count": _retrig_c.reverted_count,
                 })
-                _retrig_grace = True
+                _grace = _grant_grace(_retrig_c.reverted_count)
                 state.stalls = 0
                 stall = 0
                 continue
@@ -941,7 +1004,7 @@ def run_phase_c_tdd(
         # indefinitely. The frontier is now a hint about WHERE to look,
         # not a license to keep iterating.
         if stall >= max_stalls:
-            # F11 M3: before giving up, check whether the plateau is a private
+            # Before giving up, check whether the plateau is a private
             # LAYOUT problem (t1.5 left a component frozen on the original
             # scaffold, and this cluster's fills are fighting it) rather than
             # N independently-hard fns. A successful re-author + surgical
@@ -961,8 +1024,7 @@ def run_phase_c_tdd(
                         "cause": _retrig.cause,
                         "reverted_count": _retrig.reverted_count,
                     })
-                    _retrig_cooldown = True
-                    _retrig_grace = True
+                    _grace = _grant_grace(_retrig.reverted_count)
                     state.stalls = 0
                     stall = 0
                     continue
@@ -1001,6 +1063,7 @@ def run_phase_c_tdd(
             # (Mostly a no-op, but keeps the loop honest: if a flaky
             # failure or test ordering surfaced a fn next iter, we'll
             # pick it up.)
+            _score_grace(iter_n)
             continue
 
         ordered = deps.order_frontier(eligible, leaf_counts)
@@ -1047,6 +1110,7 @@ def run_phase_c_tdd(
         total_attempts += sub.attempts
         total_bytes += sub.bytes_filled
         errors.extend(sub.errors)
+        _score_grace(iter_n)
 
         # Update recently_filled ring buffer with this iter's actual fills.
         # We don't have the exact list from the sub-result, so use the
@@ -1075,6 +1139,22 @@ def run_phase_c_tdd(
                     permanently_exhausted.add(key)
                     last_notes_count[key] = deps.count_relevant_notes(fr_path, key)
         last_total_filled = total_filled
+
+    # The loop left while a re-fill window was still open, so it abandoned a bet
+    # mid-flight: the tree holds a re-author whose bodies never finished
+    # re-filling and scores BELOW the high-water by construction. Abandoning a
+    # bet must return the baseline — otherwise the cluster hands on its worst
+    # tree of the run. One place rather than at each `break`, because every exit
+    # owes this and a future exit path would silently not.
+    if _grace.active and _batch_ratchet and _bratchet_snap is not None:
+        _rev = restore_src_tree(_bratchet_snap)
+        deps.log(f"  {tag} [phase-c/tdd] exited with an open re-fill window "
+                 f"({_grace.restubbed} body(ies) still re-stubbed) — reverted "
+                 f"{_rev} file(s) to the best-known tree (pass={_bratchet_best}).")
+        deps.emit("phase_c.tdd.open_window_restored", data={
+            "cluster": cluster.name, "restubbed": _grace.restubbed,
+            "files_reverted": _rev, "best_pass": _bratchet_best,
+        })
 
     return ClusterFillResult(
         fns_filled=total_filled,

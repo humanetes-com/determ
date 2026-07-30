@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from pipeline_core.domain.layout_retrigger import RefillGrace
+
 
 def ratchet_breach(
     pass_count: int,
@@ -56,7 +58,7 @@ def ratchet_breach(
     return ""
 
 
-def breach_withheld(breach: str, after_layout_retrigger: bool) -> str:
+def breach_withheld(breach: str, grace: RefillGrace) -> str:
     """Why this breach must not be ACTED on (''= charge it normally).
 
     `ratchet_breach` answers "did the tree net-regress"; this answers "is the
@@ -76,14 +78,18 @@ def breach_withheld(breach: str, after_layout_retrigger: bool) -> str:
     live: `ChainState` attempts 1 and 2 destroyed this way, one iter after each
     fired, while pass_count sat at its high-water mark.
 
-    Withholding for exactly ONE iter costs the ratchet nothing. The snapshot is
-    untouched (a count below the high-water mark cannot re-snapshot), so if the
-    re-author plus its re-fills land short, the very next iter reverts them on
-    the ordinary rule — against the same best tree. The experiment gets its one
-    iter of evidence; the high-water mark stays absolute."""
-    if breach and after_layout_retrigger:
-        return ("this sweep measures the layout retrigger's deliberate re-stub, "
-                "not last iter's fills — one iter of re-fills gets to run first")
+    The window is `RefillGrace` and it is sized to the bodies the re-author
+    authorised, because a FIXED one iter reproduced the very cycle above one iter
+    later — `StdError` attempts 1 and 2, a 47-body re-stub that could land only 3
+    re-fills per graced iter. The snapshot stays untouched throughout (a count
+    below the high-water mark cannot re-snapshot), so a grace that expires short
+    reverts to exactly the tree the one-iter rule would have reverted to: the
+    experiment gets evidence proportional to the work it started, and the
+    high-water mark stays absolute either way."""
+    if breach and grace.excuses_breach:
+        return ("this sweep measures the layout retrigger's deliberate re-stub of "
+                f"{grace.restubbed} body(ies), not last iter's fills — re-fills "
+                f"get {grace.iters_left} more iter(s) while they keep landing")
     return ""
 
 
