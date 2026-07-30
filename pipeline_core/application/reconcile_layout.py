@@ -15,14 +15,14 @@ signature, not a whole item, and their bodies belong to the fill loop.
 """
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 
 from pipeline_core.application.author_layout import (
     LayoutComponentRecord,
     LayoutOutcome,
 )
 from pipeline_core.application.definition_merge import merge_live_bodies
-from pipeline_core.domain.authored_layout import component_uids
+from pipeline_core.domain.authored_layout import AuthoredItem, component_uids
 from pipeline_core.domain.private_surface import (
     PrivateSurface,
     PrivateSurfaceItem,
@@ -41,6 +41,68 @@ _ITEM_KEYWORD = {
     SurfaceItemKind.TRAIT: "trait",
     SurfaceItemKind.PUB_FIELDS: "struct",
 }
+
+
+def adopt_registry_definitions(
+    records: Sequence[LayoutComponentRecord],
+    registry: Mapping[str, AuthoredItem],
+) -> tuple[list[LayoutComponentRecord], list[str]]:
+    """`records` with every definition the crate-wide registry has already fixed
+    substituted in, plus a note per substitution.
+
+    The registry holds ONE definition per private item — whichever cfg-cluster
+    reached it first — because the merged crate has exactly one. Adoption is
+    meant to make a later cluster reuse it (`adopt_component`), and when that
+    works there is nothing here to do: the record and the registry agree and
+    every substitution is a no-op.
+
+    It does not always work. A cluster authored before the registry held an item
+    (or one whose adoption fell through and re-authored the component) persists a
+    SECOND definition of a type the crate has already fixed, and that record then
+    outranks the registry forever, because nothing reads the two together.
+    Measured on `anyhow`: `stable` and `nightly` both recorded AUTHORED for the
+    same 35-item component, all 35 uids present in the registry, and 32 of the
+    definitions differed. Two of them are why `nightly` could not compile at all:
+
+        Error      stable/registry: + `unsafe impl Send`/`Sync`   nightly: absent
+        ErrorImpl  stable/registry: {vtable, backtrace, _error}   nightly: {vtable, _data}
+
+    The first is six `E0277 NonNull<ErrorImpl> cannot be sent between threads`
+    in the oracle's own test files; the second is what made 61 of 121 donor
+    bodies unseedable. Neither is repairable by any fill, because the fix is a
+    declaration and the fill loop writes bodies.
+
+    So the registry wins over a per-cluster record. That is the rule the store
+    was built to express, applied at the point the tree is written rather than
+    only at authoring time. The cost is a cluster that genuinely needs its own
+    shape for a shared uid cannot have one — but a cfg-specific item is a
+    different item with a different uid, and a shared uid with two shapes is the
+    contradiction that stops the crate compiling either way.
+
+    Records are rebuilt, never mutated: the caller's copy is the store's."""
+    out: list[LayoutComponentRecord] = []
+    notes: list[str] = []
+    for rec in records:
+        if rec.outcome is not LayoutOutcome.AUTHORED or not rec.defs:
+            out.append(rec)
+            continue
+        swapped: list[tuple[str, str]] = []
+        for uid, stored in rec.defs:
+            fixed = registry.get(uid)
+            # Whitespace-normalised: the two texts are rendered by the same
+            # extractor but not necessarily wrapped identically, and a rewrap
+            # is not a redefinition.
+            if fixed is None or " ".join(fixed.definition.split()) == \
+                    " ".join(stored.split()):
+                swapped.append((uid, stored))
+                continue
+            swapped.append((uid, fixed.definition))
+            notes.append(f"{uid} — this cluster recorded its own definition of "
+                         "an item the crate has already fixed; adopting the "
+                         "registry's")
+        out.append(LayoutComponentRecord(
+            names=rec.names, outcome=rec.outcome, defs=tuple(swapped)))
+    return out, notes
 
 
 def plan_layout_reconciliation(

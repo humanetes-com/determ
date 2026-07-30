@@ -245,3 +245,85 @@ def test_live_definition_slices_a_mod_nested_surface_item():
     assert sliced is not None
     assert sliced.startswith("pub trait StdError {")
     assert _MOD_NESTED.count(sliced) == 1   # a unique splice target
+
+
+# --- the crate-wide registry outranks a per-cluster record -------------------
+#
+# A cluster that authored an item the crate had already fixed persists a SECOND
+# definition of it. Live on `anyhow`: `stable` and `nightly` both recorded
+# AUTHORED for the same 35-item component, every uid present in the registry,
+# and 32 definitions differed — `nightly`'s `Error` lacking the two
+# `unsafe impl`s, which is six `E0277 cannot be sent between threads` in the
+# oracle's own tests and unreachable by any fill.
+
+def _registry(**defs: str):
+    from pipeline_core.domain.authored_layout import AuthoredItem
+    return {uid: AuthoredItem(name=uid, kind="struct", definition=d)
+            for uid, d in defs.items()}
+
+
+def test_registry_definition_replaces_a_second_authored_one():
+    from pipeline_core.application.reconcile_layout import (
+        adopt_registry_definitions,
+    )
+    recs, notes = adopt_registry_definitions(
+        [_record(error_def=_OLD)], _registry(Error=_NEW))
+    assert dict(recs[0].defs)["Error"] == _NEW
+    assert any("already fixed" in n for n in notes)
+
+
+def test_registry_agreement_is_a_silent_no_op():
+    from pipeline_core.application.reconcile_layout import (
+        adopt_registry_definitions,
+    )
+    recs, notes = adopt_registry_definitions(
+        [_record(error_def=_NEW)], _registry(Error=_NEW))
+    assert dict(recs[0].defs)["Error"] == _NEW
+    assert notes == []
+
+
+def test_rewrapping_is_not_a_redefinition():
+    # The record and the registry are rendered by the same extractor but not
+    # necessarily wrapped identically. A rewrap must not read as a second
+    # definition, or every start would log — and replan — the whole component.
+    from pipeline_core.application.reconcile_layout import (
+        adopt_registry_definitions,
+    )
+    rewrapped = _NEW.replace(" { ", " {\n    ").replace(" }", "\n}")
+    recs, notes = adopt_registry_definitions(
+        [_record(error_def=_NEW)], _registry(Error=rewrapped))
+    assert dict(recs[0].defs)["Error"] == _NEW      # the record's text is kept
+    assert notes == []
+
+
+def test_uid_the_registry_does_not_hold_is_left_alone():
+    # A genuinely cluster-private item has no crate-wide definition to adopt.
+    from pipeline_core.application.reconcile_layout import (
+        adopt_registry_definitions,
+    )
+    recs, notes = adopt_registry_definitions([_record(error_def=_OLD)], {})
+    assert dict(recs[0].defs)["Error"] == _OLD
+    assert notes == []
+
+
+def test_adopted_definition_is_then_planned_into_the_live_tree():
+    # End to end: the substitution is worthless unless it reaches the tree.
+    from pipeline_core.application.reconcile_layout import (
+        adopt_registry_definitions,
+    )
+    recs, _ = adopt_registry_definitions(
+        [_record(error_def=_OLD)], _registry(Error=_NEW))
+    plan, _notes = plan_layout_reconciliation(
+        _surface(), recs, lambda rel: _OLD + "\n" + _IMPL_OLD)
+    assert [r.new for r in plan["lib.rs"]] == [_NEW]
+
+
+def test_non_authored_records_are_untouched():
+    from pipeline_core.application.reconcile_layout import (
+        adopt_registry_definitions,
+    )
+    gated = LayoutComponentRecord(
+        frozenset({"Error"}), LayoutOutcome.GATED, (("Error", _OLD),))
+    recs, notes = adopt_registry_definitions([gated], _registry(Error=_NEW))
+    assert recs[0] is gated
+    assert notes == []

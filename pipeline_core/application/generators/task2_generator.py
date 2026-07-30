@@ -29,7 +29,10 @@ from ...application.author_layout import (
     LayoutComponentRecord,
     LayoutOutcome,
 )
-from ...application.reconcile_layout import plan_layout_reconciliation
+from ...application.reconcile_layout import (
+    adopt_registry_definitions,
+    plan_layout_reconciliation,
+)
 from ...application.reconstruct.fill_merge import backfill_stub_bodies
 from ...application.reconstruct.fill_rules import is_unimplemented_body
 from ...application.reconstruct.heal import HealDeps, heal_file
@@ -975,6 +978,10 @@ class StaticSkeletonTask2Generator(Task2Generator):
     # and owned thereafter, so a layout re-authored mid-run reaches the skeleton
     # only — these let the seed step reinstall it. None → skipped.
     layout_sync: Any = None
+    # Crate-wide authored-layout registry loader (`project_dir -> {uid: item}`).
+    # The layout store is per cluster; the crate is not. Optional — omitted, a
+    # cluster's own record stands, which is the pre-registry behaviour.
+    layout_registry: Any = None
 
     def _sync_layout_into_tree(self, tag: str, project_dir: Path, cluster: Any,
                                filled_dir: Path,
@@ -1006,8 +1013,17 @@ class StaticSkeletonTask2Generator(Task2Generator):
         try:
             surface = load_surface(project_dir, cluster.name)
             own_records = load_records(project_dir, cluster.name)
+            # The crate-wide registry outranks this cluster's record. A cluster
+            # that authored an item the crate had already fixed holds a SECOND
+            # definition of it, and `own_uids` below would otherwise defend that
+            # second definition against the donor as if it were a choice.
+            reg_notes: list[str] = []
+            if self.layout_registry is not None:
+                own_records, reg_notes = adopt_registry_definitions(
+                    own_records, self.layout_registry(project_dir))
             plan, notes = plan_layout_reconciliation(
                 surface, own_records, read_live)
+            notes = reg_notes + notes
             # Precedence is decided from the RECORDS, never from the plans. A
             # plan is empty when the tree ALREADY holds this cluster's authored
             # shape, so an empty own-plan means "mine is installed", not "I have
@@ -1519,6 +1535,18 @@ class StaticSkeletonTask2Generator(Task2Generator):
                 "is_test": _rep.is_test,
                 "dropped_stray_brace": _rep.dropped_stray_brace,
             })
+        # `--all-targets`, and this is the whole point of the heal. A bare
+        # `cargo check` compiles the LIB; the sweep that judges the cluster runs
+        # `cargo test`, which also builds every test binary and the `#[cfg(test)]`
+        # gen_tests modules. Measured on `nightly` at the moment this was written:
+        # `cargo +nightly check` -> 0 errors, `cargo +nightly check --all-targets`
+        # -> 7, all of them in `test_autotrait` / `test_fmt`. So the heal was not
+        # reporting a check it never ran -- it was truthfully reporting a NARROWER
+        # compilation than the one it exists to protect, and a cluster whose test
+        # binaries could not build sailed past it into a full fill pass. Validate
+        # the compilation the sweep will do, not a subset of it.
+        _heal_cmd = (check_cmd if "--all-targets" in check_cmd
+                     else check_cmd + " --all-targets")
         _round = 0
         _clean = False
         _unchecked = False
@@ -1529,7 +1557,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
         while _round < _PREPASS_HEAL_MAX_ROUNDS:
             _t0 = time.monotonic()
             _rc0, _rendered0, _diags0 = self.cargo.run_check_diag(
-                check_cmd, filled_dir, self._cluster_env(cluster), 180)
+                _heal_cmd, filled_dir, self._cluster_env(cluster), 180)
             _check_secs = time.monotonic() - _t0
             if _rc0 == 0:
                 _clean = True
@@ -1545,7 +1573,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
             for _imp_file in dict.fromkeys(
                     f.file for d in _diags0 for f in d.import_fixes):
                 _imp = repair_missing_imports(
-                    self.cargo.run_check_diag, check_cmd, filled_dir,
+                    self.cargo.run_check_diag, _heal_cmd, filled_dir,
                     self._cluster_env(cluster), _imp_file, _diags0,
                     self.tel.log, f"{tag} [pre-pass-heal]")
                 if _imp is not None:
@@ -1624,7 +1652,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
             # opened on 39 rustc errors looked like it had been checked: the only
             # evidence either way was the ABSENCE of log lines.
             self.tel.log(f"  {tag} [pre-pass-heal] seeded/resumed tree compiles "
-                         f"as-is — no repair needed ({check_cmd}, "
+                         f"as-is — no repair needed ({_heal_cmd}, "
                          f"{_check_secs:.1f}s).")
         # `rc` and `check_secs` are the falsifiers for the verdict itself. A
         # "clean" that came back in a fraction of a second on a tree whose src
@@ -1637,7 +1665,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
             "verdict": ("clean" if _clean else
                         "unchecked" if _unchecked else "still_broken"),
             "rc": _rc0, "check_secs": round(_check_secs, 2),
-            "check_cmd": check_cmd,
+            "check_cmd": _heal_cmd,
         })
 
         # Propagate gen_tests siblings from project_dir/src/ into filled_dir/src/.
