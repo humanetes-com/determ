@@ -14,7 +14,7 @@ import re
 from typing import Any
 
 from .. import log as _log
-from .rust_fn_headers import unwrap_own_fn_definition
+from .rust_fn_headers import fn_body_within_item, unwrap_own_fn_definition
 from .rust_idents import canon_fn_name
 from .text import extract_code_content
 
@@ -413,6 +413,25 @@ def _skip_ws(text: str, pos: int) -> int:
     return pos
 
 
+def _attr_value_close(text: str, start: int) -> int:
+    """Index of the `"` that CLOSES an attribute value opened at `start`, or -1.
+
+    A backslash-escaped quote does NOT close the value. Models that put a
+    `#[cfg(feature = "std")]` line inside an attribute escape its quotes the
+    JSON way (`\\"std\\"`); reading the first bare `"` as the terminator
+    truncated the value mid-attribute and the whole tag then failed to parse.
+    """
+    i, n = start, len(text)
+    while i < n:
+        if text[i] == "\\":
+            i += 2                           # the escaped char, whatever it is
+            continue
+        if text[i] == '"':
+            return i
+        i += 1
+    return -1
+
+
 def _read_quoted_attr(text: str, pos: int, name: str) -> tuple[str, int] | None:
     """If `text[pos:]` opens with `name="<value>"` (value = `[^"]+`, i.e. ≥1
     non-quote char), return (value, pos-after-closing-quote); else None.
@@ -425,10 +444,10 @@ def _read_quoted_attr(text: str, pos: int, name: str) -> tuple[str, int] | None:
     if not text.startswith(lead, pos):
         return None
     v = pos + len(lead)
-    end = text.find('"', v)
+    end = _attr_value_close(text, v)
     if end in (-1, v):                       # need a closing quote AND ≥1 char
         return None
-    return html.unescape(text[v:end]), end + 1
+    return html.unescape(text[v:end].replace('\\"', '"')), end + 1
 
 
 _XML_ENTITIES = {"amp": "&", "lt": "<", "gt": ">", "quot": '"', "apos": "'"}
@@ -489,24 +508,44 @@ def xml_unescaped_variant(body: str) -> str | None:
 
 
 def _find_fn_close(text: str, start: int) -> tuple[int, int] | None:
-    """Nearest `</FN\\s*>` at/after `start`. Returns (close_start, pos_after_`>`)."""
+    """Nearest `</FN\\s*>` at/after `start`. Returns (close_start, pos_after_`>`).
+
+    A bare `</FN` with no `>` is accepted as a fallback, after every
+    well-formed close has been ruled out: the model DID close the block and
+    fumbled one character, and reading that as unterminated discards the body
+    over punctuation."""
     j = start
+    bare = -1
     while True:
         c = text.find("</FN", j)
         if c == -1:
-            return None
+            return (bare, bare + 4) if bare != -1 else None
         k = _skip_ws(text, c + 4)
         if k < len(text) and text[k] == ">":
             return c, k + 1
+        if bare == -1:
+            bare = c
         j = c + 1
 
 
 def _find_fn_blocks(text: str) -> list[tuple[str, str, str]]:
-    """Tolerant, regex-free replacement for
-    `<FN\\s+name="([^"]+)"\\s+block="([^"]+)"\\s*>(.*?)</FN\\s*>` (DOTALL findall):
-    (name, block, body) per well-formed block, in order. A malformed header or an
-    unterminated block is skipped exactly as a regex non-match would skip it
-    (retry at the next `<FN`); the body is the nearest-close `.*?` span."""
+    """Tolerant, regex-free reader for `<FN name="…" block="…">body</FN>`:
+    (name, block, body) per block, in order.
+
+    Two departures from the strict grammar, both because a tag the reader
+    refuses is a tag the caller reports as `no FN blocks` — indistinguishable
+    from a model that said nothing, and the reply is discarded whole:
+
+    * `block` is OPTIONAL. It disambiguates WHICH container the body belongs
+      to; a reply that omits it has still answered. Absent reads as `""`, a
+      value the attribute reader can never produce (it demands ≥1 char), so
+      "no container named" stays distinguishable downstream.
+    * A missing `</FN>` ends the record with an EMPTY body rather than
+      dropping it — the header's attributes survive, and when the model put
+      the body in one of them :func:`extract_fn_bodies` still recovers it.
+      Deliberately not "take the rest of the reply": that would splice
+      whatever prose followed a truncated body.
+    """
     out: list[tuple[str, str, str]] = []
     n = len(text)
     i = 0
@@ -521,23 +560,103 @@ def _find_fn_blocks(text: str) -> list[tuple[str, str, str]]:
         if name is None:
             i = s + 1; continue
         nm_val, p = name
+        bl_val = ""
         q = _skip_ws(text, p)
-        if q == p:                           # `\s+` between attrs
-            i = s + 1; continue
-        block = _read_quoted_attr(text, q, "block")
-        if block is None:
-            i = s + 1; continue
-        bl_val, p = block
-        p = _skip_ws(text, p)                # `\s*` before `>`
+        block = _read_quoted_attr(text, q, "block") if q > p else None
+        if block is not None:
+            bl_val, q = block
+            q = _skip_ws(text, q)            # `\s*` before `>`
+        p = q
         if p >= n or text[p] != ">":
             i = s + 1; continue
         body_start = p + 1
         close = _find_fn_close(text, body_start)
         if close is None:
-            i = s + 1; continue
+            out.append((nm_val, bl_val, ""))
+            i = body_start; continue
         body_end, after = close
         out.append((nm_val, bl_val, text[body_start:body_end]))
         i = after
+
+
+_CONTAINER_KEYWORDS = ("impl", "trait", "mod")
+
+
+def _is_bare_ident(text: str) -> bool:
+    """`text` is a single Rust identifier — the only thing the `name` slot can
+    hold that actually identifies a function."""
+    t = text.strip()
+    if not t or not (t[0].isalpha() or t[0] == "_"):
+        return False
+    return all(c.isalnum() or c == "_" for c in t)
+
+
+def _names_a_container(text: str) -> bool:
+    """`text` names a CONTAINER (`impl …`, `trait …`, `mod …`, or an attribute
+    decorating one) rather than being a function body."""
+    t = text.strip()
+    if t.startswith("#["):
+        return True
+    head = t.split(None, 1)[0] if t.split() else ""
+    return head.split("<", 1)[0] in _CONTAINER_KEYWORDS
+
+
+def _declared_fn_name(text: str) -> str | None:
+    """Identifier of the first `fn <ident>` DECLARATION in `text`, else None."""
+    n = len(text)
+    i = 0
+    while (k := text.find("fn", i)) != -1:
+        i = k + 2
+        if k and (text[k - 1].isalnum() or text[k - 1] == "_"):
+            continue                         # `my_fn`, `.rfn` — not the keyword
+        if i >= n or not text[i].isspace():
+            continue
+        j = _skip_ws(text, i)
+        e = j
+        while e < n and (text[e].isalnum() or text[e] == "_"):
+            e += 1
+        if e > j and not text[j].isdigit():
+            return text[j:e]
+    return None
+
+
+def _recover_slots(name: str, block: str, body: str) -> tuple[str, str, str]:
+    """Re-assign a tag's three slots — fn name, container, body — by CONTENT.
+
+    The grammar assigns them by POSITION, so a model that shuffles them
+    produced exactly what a model that answered nothing produced: no records,
+    `no FN blocks` in the log, and a discarded call. On 07-31 eight of
+    `anyhow`'s replies arrived shuffled and every one of them carried a usable
+    body — one 53 KB reasoning trace ending in a correct one-line fix, thrown
+    away six GPU-minutes after it was asked for. Three shapes, each
+    unambiguous from the text alone:
+
+        <FN name="source">fn source(…) {…}</FN>            container slot EMPTY
+        <FN name="construct_from_boxed" block="<body>"></FN>  body IN container
+        <FN name="impl From<E> for Error" …>              container in the NAME
+
+    Runs only where the strict reading found nothing usable, so a well-formed
+    reply takes exactly the path it always did."""
+    if not body.strip() and block.strip():
+        # Body slot empty, container slot full: the model wrote the answer
+        # into the attribute. The attribute is then not a container.
+        body, block = block, ""
+    fn_name = name
+    declared = _declared_fn_name(body)
+    if declared is not None and not _is_bare_ident(canon_fn_name(name)):
+        # The name slot holds a container header, so it carries no fn
+        # identity; the body names the fn whenever the reply restated the
+        # definition, and the header is the container that body belongs to.
+        if not block.strip() and _names_a_container(name):
+            block = name
+        fn_name = declared
+    if _names_a_container(body):
+        # The answer restates the whole item. Never true of a body the strict
+        # reading accepted — this text came out of the container slot.
+        inner = fn_body_within_item(body, canon_fn_name(fn_name))
+        if inner is not None:
+            body = inner
+    return fn_name, block, body
 
 
 def _split_leading_where(body: str) -> tuple[str | None, str]:
@@ -572,6 +691,12 @@ def extract_fn_bodies(text: str) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for fn_name, block_header, body in _find_fn_blocks(text or ""):
         body_stripped = body.strip()
+        # A tag whose name slot does not identify a fn, or whose body slot is
+        # empty, was not understood — not answered-with-nothing. Read its
+        # slots by content before giving up on the call (`_recover_slots`).
+        if not (body_stripped and _is_bare_ident(canon_fn_name(fn_name))):
+            fn_name, block_header, body_stripped = _recover_slots(
+                fn_name, block_header, body_stripped)
         # Strip outermost code fence if the model wrapped the body.
         if body_stripped.startswith("```"):
             lines = body_stripped.splitlines()
@@ -599,3 +724,29 @@ def extract_fn_bodies(text: str) -> list[dict[str, Any]]:
             "body": body_stripped,
         })
     return out
+
+
+def fn_tag_occurrences(text: str) -> int:
+    """How many `<FN` tags the reply CONTAINS, parseable or not.
+
+    Lets a caller's log line separate a model that said nothing from one whose
+    answer was not understood. Both used to print `no FN blocks`, and the two
+    call for opposite responses: ask again vs. fix the reader."""
+    return (text or "").count("<FN")
+
+
+def bind_headerless_names(records: list[dict[str, Any]],
+                          member_names: list[str]) -> list[dict[str, Any]]:
+    """Give a fn identity to records that arrived without one.
+
+    A reply whose name slot held a CONTAINER header names no function — the
+    model answered with the prompt's container instead of its member. When
+    the prompt asked about exactly ONE member the answer is that member's;
+    there is nothing else it could be. With two or more targets the record is
+    left alone: a visible `fn_not_found` beats a coin flip."""
+    if len(member_names) != 1:
+        return records
+    only = member_names[0]
+    return [r if _is_bare_ident(str(r.get("fn_name", "")))
+            else {**r, "fn_name": only}
+            for r in records]

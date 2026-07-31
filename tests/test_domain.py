@@ -115,8 +115,6 @@ def test_bad_file_marker_matches_old_regex(text: str, expected: bool) -> None:
     '<FN name="f" block="impl A">  body  </FN>',
     '<FN name="f" block="b">x</FN><FN name="g" block="c">y</FN>',
     '<FN  name="f"  block="b" >spaced</FN >',             # \s+ / \s* tolerance
-    '<FN name="f">missing block</FN>',                    # no block attr → no match
-    '<FN name="f" block="b">unterminated',               # no close
     '<FN name="" block="b">empty name</FN>',             # [^"]+ needs ≥1
     'pre <FN name="f" block="b">B</FN> post',
     '',
@@ -124,6 +122,28 @@ def test_bad_file_marker_matches_old_regex(text: str, expected: bool) -> None:
 def test_find_fn_blocks_matches_old_regex(text: str) -> None:
     from pipeline import _find_fn_blocks
     assert _find_fn_blocks(text) == _OLD_FN_RE.findall(text)
+
+
+@pytest.mark.parametrize("text,expected", [
+    # `block` is OPTIONAL — the attribute says WHICH container, and a reply
+    # that omits it has still answered. Absent reads as "", which the attribute
+    # reader can never produce, so "unnamed" stays distinguishable.
+    ('<FN name="f">missing block</FN>', [("f", "", "missing block")]),
+    # An unterminated block keeps its header rather than vanishing: when the
+    # model put the body in an attribute, that is where the answer is.
+    ('<FN name="f" block="b">unterminated', [("f", "b", "")]),
+])
+def test_find_fn_blocks_departs_from_the_old_regex(
+        text: str, expected: list[tuple[str, str, str]]) -> None:
+    """The two shapes where equivalence with the original regex was GIVEN UP.
+
+    Both used to yield no records, and a caller cannot tell no-records from a
+    model that answered nothing — it logs `no FN blocks` and discards the call
+    either way. Live on 07-31 that cost eight replies, every one of which
+    carried a usable body."""
+    from pipeline import _find_fn_blocks
+    assert _OLD_FN_RE.findall(text) == []
+    assert _find_fn_blocks(text) == expected
 
 
 _OLD_WHERE_RE = re.compile(r'^\s*(where\s[^\n]+)\n', re.MULTILINE)
@@ -582,12 +602,93 @@ def test_extract_fn_bodies_fence_wrapped_and_empty() -> None:
 def test_extract_fn_bodies_malformed_headers_skipped() -> None:
     for bad in [
         '<FNname="f" block="b">x</FN>',      # no whitespace after <FN
-        '<FN name="f">x</FN>',               # missing block attr
         '<FN name="" block="b">x</FN>',      # empty attr value
         '<FN name="f" block="b"x>y</FN>',    # junk before >
-        '<FN name="f" block="b">y</FN x',    # malformed close tag
     ]:
         assert llm_output.extract_fn_bodies(bad) == [], bad
+
+
+def test_extract_fn_bodies_recovers_a_shuffled_reply() -> None:
+    # Live loss (07-31, `anyhow/nightly`): 8 of 370 replies filled the tag's
+    # three slots — fn name, container, body — in the wrong order, and the
+    # positional grammar reported every one as `no FN blocks`: the same output
+    # a model that answered NOTHING produces. One had spent six GPU-minutes and
+    # 53 KB of reasoning on a correct one-line fix. Each shape below is one of
+    # those replies, and each is unambiguous from the text alone.
+
+    # 1. Container slot absent. The body is right there; `block=""` (a value the
+    #    attribute reader can never produce) says "no container named".
+    (a,) = llm_output.extract_fn_bodies(
+        '<FN name="source">\n    fn source(&self) -> Option<&E> {\n'
+        '        Some(&*self.error)\n    }\n</FN>')
+    assert a["fn_name"] == "source" and a["block"] == ""
+    assert a["body"] == "Some(&*self.error)"
+
+    # 2. Body written INTO the container attribute, span left empty.
+    (b,) = llm_output.extract_fn_bodies(
+        '<FN name="construct_from_boxed" block="Self::construct_from_std(e, bt)">'
+        '\n</FN>')
+    assert b["fn_name"] == "construct_from_boxed" and b["block"] == ""
+    assert b["body"] == "Self::construct_from_std(e, bt)"
+
+    # 3. Container header in the NAME slot — the fn names itself in the body,
+    #    and the header is then the container that body belongs to.
+    (c,) = llm_output.extract_fn_bodies(
+        '<FN name="impl From<Error> for Box<dyn StdError>">\n'
+        '    fn from(error: Error) -> Self {\n        error.into_boxed()\n'
+        '    }\n</FN>')
+    assert c["fn_name"] == "from"
+    assert c["block"] == "impl From<Error> for Box<dyn StdError>"
+    assert c["body"] == "error.into_boxed()"
+
+    # 4. The container attribute restates the WHOLE item, escaping its quotes
+    #    the JSON way — and the wanted body is the one inside it.
+    (d,) = llm_output.extract_fn_bodies(
+        '<FN name="impl From<Error> for Box<dyn StdError>" '
+        'block="#[cfg(feature = \\"std\\")]\nimpl From<Error> for Box<dyn StdError> {\n'
+        '    #[cold]\n    fn from(error: Error) -> Self {\n'
+        '        error.into_boxed()\n    }\n}">\n</FN>')
+    assert d["fn_name"] == "from" and d["body"] == "error.into_boxed()"
+    assert d["block"].startswith("impl From<Error>")
+
+    # 5. No close tag at all: the header's attributes still carry the answer.
+    (e,) = llm_output.extract_fn_bodies(
+        '<FN name="impl<C, E> StdError for ContextError<C, E>" '
+        'block="Some(&self.error)">')
+    assert e["body"] == "Some(&self.error)"
+
+    # 6. `</FN` closed without its `>` — one character, not a lost body.
+    (f,) = llm_output.extract_fn_bodies('<FN name="f" block="b">y</FN x')
+    assert f["fn_name"] == "f" and f["block"] == "b" and f["body"] == "y"
+
+
+def test_extract_fn_bodies_leaves_a_well_formed_reply_alone() -> None:
+    # Recovery must be unreachable for a reply the strict reading understood:
+    # a body that happens to open with an attribute or an `impl` is a BODY.
+    (rec,) = llm_output.extract_fn_bodies(
+        '<FN name="f" block="impl X">#[cfg(test)]\nfn helper() { g() }\nself.x()'
+        '</FN>')
+    assert rec["fn_name"] == "f" and rec["block"] == "impl X"
+    assert rec["body"] == "#[cfg(test)]\nfn helper() { g() }\nself.x()"
+
+
+def test_bind_headerless_names_only_with_one_target() -> None:
+    # A record whose name slot held a container header identifies no fn.
+    recs = [{"fn_name": "impl From<E> for Error", "body": "x()"}]
+    assert llm_output.bind_headerless_names(recs, ["from"])[0]["fn_name"] == "from"
+    # Two targets: nothing to pick from, so leave it — a visible fn_not_found
+    # beats a coin flip.
+    assert llm_output.bind_headerless_names(
+        recs, ["from", "source"])[0]["fn_name"] == "impl From<E> for Error"
+    # A record that DID name a fn is never re-pointed at the sole target.
+    named = [{"fn_name": "other", "body": "x()"}]
+    assert llm_output.bind_headerless_names(named, ["from"])[0]["fn_name"] == "other"
+
+
+def test_fn_tag_occurrences_separates_silence_from_a_bad_shape() -> None:
+    assert llm_output.fn_tag_occurrences("I cannot help with that.") == 0
+    assert llm_output.fn_tag_occurrences('<FN name="a" block="b">x</FN>') == 1
+    assert llm_output.fn_tag_occurrences(None) == 0  # type: ignore[arg-type]
 
 
 def test_insert_no_run() -> None:

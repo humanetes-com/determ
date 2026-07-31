@@ -315,11 +315,36 @@ def unwrap_own_fn_definition(body_text: str, fn_name: str) -> str | None:
             return None
     if text[body_end + 1:].strip():
         return None
-    inner = text[body_start:body_end].strip("\n")
+    return _dedent_body(text[body_start:body_end])
+
+
+def _dedent_body(inner_text: str) -> str:
+    """A located body span reduced to splice-ready text: outer newlines gone
+    and the common leading indent — the enclosing item's, not the body's own —
+    removed from every line."""
+    inner = inner_text.strip("\n")
     lines = inner.splitlines()
     indents = [len(ln) - len(ln.lstrip()) for ln in lines if ln.strip()]
     cut = min(indents) if indents else 0
     return "\n".join(ln[cut:] if ln.strip() else "" for ln in lines).strip()
+
+
+def fn_body_within_item(text: str, fn_name: str) -> str | None:
+    """Body of ``fn_name`` where ``text`` RESTATES its enclosing item
+    (``impl … { fn fn_name(…) { … } }``) rather than being a bare body;
+    ``None`` when ``text`` declares it zero or several times.
+
+    :func:`unwrap_own_fn_definition` refuses this shape deliberately — for
+    text that is meant to BE a body, code before the header means the body
+    holds more than the fn, and unwrapping would throw the rest away. Callers
+    reach for this one only where the text came from a slot that is never a
+    function body, so the restatement reading is the only one available."""
+    t = text.strip()
+    locs = locate_all_fns(t, fn_name)
+    if len(locs) != 1:
+        return None
+    _sig, _sig_start, body_start, body_end = locs[0]
+    return _dedent_body(t[body_start:body_end])
 
 
 def is_pub_fn(file_text: str, fn_name: str) -> bool:

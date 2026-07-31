@@ -214,3 +214,23 @@ def test_line_anchored_scan_ignores_a_fn_that_is_not_first_on_its_line() -> None
     anchored = [h.name for h in _fn_headers(src, line_anchored=True)]
     assert anchored == ["real"]
     assert "shadowed" in [h.name for h in _fn_headers(src, line_anchored=False)]
+
+
+def test_fn_body_within_item_reads_a_restated_container() -> None:
+    from pipeline_core.domain.rust_fn_headers import fn_body_within_item
+    # `unwrap_own_fn_definition` refuses this shape on purpose (real code before
+    # the header means a body holds more than the fn). Callers reach for this
+    # one only where the text came from a slot that is never a body.
+    restated = ('#[cfg(feature = "std")]\n'
+                'impl From<Error> for Box<dyn StdError> {\n'
+                '    #[cold]\n'
+                '    fn from(error: Error) -> Self {\n'
+                '        error.into_boxed()\n'
+                '    }\n}')
+    assert unwrap_own_fn_definition(restated, "from") is None
+    assert fn_body_within_item(restated, "from") == "error.into_boxed()"
+    # Ambiguity is never resolved by picking one: two declarations, no answer.
+    twice = ("impl A { fn from(x: u8) -> Self { one() } }\n"
+             "impl B { fn from(x: u8) -> Self { two() } }")
+    assert fn_body_within_item(twice, "from") is None
+    assert fn_body_within_item(restated, "absent") is None

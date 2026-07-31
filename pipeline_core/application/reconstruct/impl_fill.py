@@ -44,7 +44,11 @@ from pipeline_core.domain.impl_routing import (
 from pipeline_core.domain.impl_routing import (
     norm_src_rel as _norm_src_rel,
 )
-from pipeline_core.domain.llm_output import extract_fn_bodies
+from pipeline_core.domain.llm_output import (
+    bind_headerless_names,
+    extract_fn_bodies,
+    fn_tag_occurrences,
+)
 from pipeline_core.domain.models import (
     BuildCluster,
     ClusterFillResult,
@@ -623,12 +627,14 @@ def fill_impl_blocks(
                 "refills": len(refill_names)})
             attempts_total += 1
             try:
-                parsed = extract_fn_bodies(_ask_fill(prompt))
+                _file_reply = _ask_fill(prompt)
+                parsed = extract_fn_bodies(_file_reply)
             except Exception as e:
                 _log(f"  [phase-c/file] {file_rel}: LLM error: {e}")
                 return
             if not parsed:
-                _log(f"  [phase-c/file] {file_rel}: empty/no FN blocks — "
+                _log(f"  [phase-c/file] {file_rel}: empty/no FN blocks "
+                     f"({fn_tag_occurrences(_file_reply)} FN tag(s) in reply) — "
                      "falling back to per-block fills.")
                 return
             with _splice_check_lock:
@@ -1038,6 +1044,11 @@ def fill_impl_blocks(
         _block_where = _extract_impl_where_clause(snapshot, _block_container)
         _member_sigs_text = " ".join(
             (m.sig_text) for m in block.members)
+        # What this block ASKED for. A reply that names its container instead
+        # of a member identifies no fn, and with one target there is only one
+        # fn it can be (`bind_headerless_names`).
+        _block_target_names = [m.fn_name for m in
+                               (*block.stub_members, *block.refill_members)]
         # Crate idioms — surfaces THIS file's repeating patterns (Self::
         # constructor family, vtable dispatch, wrapper construction,
         # unsafe chains) from already-filled fn bodies. The target
@@ -1151,10 +1162,12 @@ def fill_impl_blocks(
                 _log(f"  [phase-c/impl] {block_id}: LLM error: {e}")
                 return FixOutcome("stop")
             last_response = response
-            parsed = extract_fn_bodies(response)
+            parsed = bind_headerless_names(
+                extract_fn_bodies(response), _block_target_names)
             if not parsed:
                 _log(f"  [phase-c/impl] {block_id}: empty/no FN blocks "
-                     f"(attempt {fix_attempt}).")
+                     f"(attempt {fix_attempt}; "
+                     f"{fn_tag_occurrences(response)} FN tag(s) in reply).")
                 return FixOutcome("stop")
             return _splice_and_verify(parsed, fix_attempt)
 
@@ -1512,8 +1525,7 @@ def fill_impl_blocks(
                 _max_cap = int(os.getenv("PHASE_C_MAXIMAL_CHAR_CAP", "120000"))
                 _cur_text = file_path.read_text(encoding="utf-8", errors="replace")
                 _max_tests: list[tuple[str, str]] = []
-                _max_target_names = [m.fn_name for m in
-                                      (*block.stub_members, *block.refill_members)]
+                _max_target_names = _block_target_names
                 for _fn in _max_target_names:
                     for _pth, _txt in _find_tests_referencing_fn(
                             tests_dir_files, _fn, max_blocks=4):
@@ -1537,12 +1549,16 @@ def fill_impl_blocks(
                         "container": block.container,
                         "prompt_chars": len(_max_prompt)})
                     try:
-                        _max_parsed = extract_fn_bodies(_ask_fill(_max_prompt))
+                        _max_reply = _ask_fill(_max_prompt)
+                        _max_parsed = bind_headerless_names(
+                            extract_fn_bodies(_max_reply), _max_target_names)
                         if _max_parsed:
                             _splice_and_verify(_max_parsed, fix_attempt + 1)
                         else:
                             _log(f"  [phase-c/impl] {block_id}: maximal attempt "
-                                 "returned no FN blocks.")
+                                 "returned no FN blocks "
+                                 f"({fn_tag_occurrences(_max_reply)} FN tag(s) "
+                                 "in reply).")
                     except Exception as _me:
                         _log(f"  [phase-c/impl] {block_id}: maximal attempt "
                              f"error: {_me}")

@@ -125,13 +125,22 @@ def route_fn_bodies(
     membership requirement is what makes the abbreviated form safe, since in
     Rust it otherwise reads as an inherent impl on a TYPE of that name. Last
     because an explicit override always wins
-    over the default it would replace. A body matching nothing is dropped."""
+    over the default it would replace. A body matching nothing is dropped.
+
+    A body naming NO container at all routes to the TARGET. That is not a
+    guess: the prompt asked about one container, so an answer that declines to
+    repeat which one is about that one. An empty `block` can only mean the
+    attribute was absent — the tag reader demands ≥1 character of it — so this
+    tier can never fire on a model that named a container and got it wrong."""
     routed: list[RoutedBody] = []
     dropped: list[DroppedBody] = []
     target_canon = canon_container(target)
     related_canon = [(c, canon_container(c)) for c in related]
     for fn_data in parsed:
         block_attr = fn_data.get("block") or ""
+        if not block_attr.strip():
+            routed.append(RoutedBody(fn_data, target))
+            continue
         if block_attr == target:
             routed.append(RoutedBody(fn_data, target))
             continue

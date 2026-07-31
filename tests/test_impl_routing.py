@@ -394,3 +394,20 @@ def test_trait_default_tier_is_off_by_default() -> None:
     r = route_fn_bodies([_fn("anyhow_kind", "impl<T> AdhocKind for &T")],
                         target="impl Adhoc", related=[])
     assert r.dropped_names == ("anyhow_kind",)
+
+
+def test_a_body_naming_no_container_routes_to_the_target() -> None:
+    # The prompt asked about ONE container, so a reply that declines to repeat
+    # which one is about that one. `block=""` is unproducible by the tag reader
+    # (it demands >=1 char), so this tier cannot fire on a NAMED container that
+    # simply failed to match — those still drop, as below.
+    r = route_fn_bodies([_fn("source", "")],
+                        target="impl StdError for E", related=["impl Other"])
+    assert [rb.container for rb in r.routed] == ["impl StdError for E"]
+    assert [rb.via_trait_default for rb in r.routed] == [False]
+    # whitespace-only is the same statement
+    r = route_fn_bodies([_fn("source", "   ")], target="impl X", related=[])
+    assert [rb.container for rb in r.routed] == ["impl X"]
+    # a container that was named and matches nothing is still dropped
+    r = route_fn_bodies([_fn("source", "impl Nope")], target="impl X", related=[])
+    assert r.dropped_names == ("source",)

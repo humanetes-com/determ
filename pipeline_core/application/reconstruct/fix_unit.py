@@ -35,7 +35,10 @@ from pipeline_core.domain.compile_probe import CompileProbe
 from pipeline_core.domain.fix_report import FixReport, UnitRunOutcome
 from pipeline_core.domain.fix_session import FixSession
 from pipeline_core.domain.fix_target import FixTarget, FnTarget, ImplTarget
-from pipeline_core.domain.llm_output import extract_fn_bodies
+from pipeline_core.domain.llm_output import (
+    bind_headerless_names,
+    extract_fn_bodies,
+)
 from pipeline_core.domain.models import FnLocator, Frontier
 from pipeline_core.domain.rust_idents import signature_fixed_by_trait
 from pipeline_core.ports.fix_engine import (
@@ -338,7 +341,11 @@ class ImplFixUnit(_BaseFixUnit):
             tests_block=self.deps.prompts.tests_block(t.member_names()))
         resp = self._ask(prompt, full_error=output)
         spliced = 0
-        for fb in extract_fn_bodies(resp):
+        # A reply that answers with the CONTAINER header names no fn; the
+        # per-fn route above already falls back positionally, so this is the
+        # last route where that shape is still dropped.
+        for fb in bind_headerless_names(
+                extract_fn_bodies(resp), sorted(t.member_names())):
             nm = fb.get("fn_name")
             body = fb.get("body")
             if not nm or not body:
