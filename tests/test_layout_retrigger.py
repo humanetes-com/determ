@@ -7,6 +7,10 @@ from pipeline_core.domain.layout_retrigger import (
     classify_compile_retrigger,
     classify_layout_retrigger,
     find_fns_referencing,
+    inflight_key,
+    mechanical_budget_spent,
+    mechanical_key,
+    reconcile_interrupted_attempts,
     should_retrigger,
 )
 from pipeline_core.domain.models import FnLocator, FnRecord
@@ -281,3 +285,55 @@ def test_compile_evidence_with_empty_digest_does_not_retrigger():
     c = classify_compile_retrigger(
         CompileEvidence(digest="   ", lib_clean=True), _PRIV)
     assert c is LayoutRetriggerCause.NONE
+
+
+# --- an attempt a process kill spent, and never measured ----------------------
+_MEGA = "Backtrace|Error|ErrorImpl"
+
+
+def test_interrupted_attempt_is_refunded_and_counted_as_mechanical():
+    # The checkpoint charges the attempt BEFORE the authoring call, so a kill
+    # anywhere in that window leaves a marker and a charge with no outcome.
+    settled, refunded = reconcile_interrupted_attempts(
+        {_MEGA: 2, inflight_key(_MEGA): 2})
+    assert refunded == (_MEGA,)
+    assert settled[_MEGA] == 1              # the model attempt is given back
+    assert settled[mechanical_key(_MEGA)] == 1   # but the burn is still counted
+    assert inflight_key(_MEGA) not in settled    # settled once, not every sweep
+
+
+def test_reconcile_is_a_no_op_when_every_attempt_reached_an_outcome():
+    attempts = {_MEGA: 2, mechanical_key(_MEGA): 1}
+    settled, refunded = reconcile_interrupted_attempts(attempts)
+    assert refunded == ()
+    assert settled == attempts
+
+
+def test_repeated_interruptions_still_exhaust_the_mechanical_bound():
+    # The refund must not become a budget nothing can spend: an authoring call
+    # that reliably kills the process would otherwise re-fire for ever.
+    attempts: dict[str, int] = {}
+    for _ in range(2):
+        attempts[_MEGA] = attempts.get(_MEGA, 0) + 1
+        attempts[inflight_key(_MEGA)] = attempts[_MEGA]
+        attempts, _ = reconcile_interrupted_attempts(attempts)
+    assert attempts[_MEGA] == 0
+    assert mechanical_budget_spent(attempts, _MEGA)
+
+
+def test_refund_never_drives_the_counter_negative():
+    # A marker whose charge was already rolled back by a mechanical refund.
+    settled, refunded = reconcile_interrupted_attempts(
+        {_MEGA: 0, inflight_key(_MEGA): 1})
+    assert settled[_MEGA] == 0
+    assert refunded == (_MEGA,)
+
+
+def test_bookkeeping_rows_are_never_mistaken_for_a_component():
+    # `mech:` and `inflight:` share the file with the component counters; a
+    # marker naming one of them must not refund a row that is not an attempt.
+    settled, refunded = reconcile_interrupted_attempts(
+        {mechanical_key(_MEGA): 1,
+         inflight_key(mechanical_key(_MEGA)): 1})
+    assert refunded == ()
+    assert settled == {mechanical_key(_MEGA): 1}

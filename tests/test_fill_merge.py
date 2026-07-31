@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 from pipeline_core.application.reconstruct.fill_merge import (
+    backfill_stub_bodies,
     merge_fills_preserving_existing,
+    unbuilt_fn_starts,
 )
+from pipeline_core.domain.cfg import CfgSet
 
 
 def test_fills_only_unimplemented_bodies() -> None:
@@ -223,3 +226,74 @@ def test_merge_fn_blocks_refuses_two_stubs_sharing_one_signature() -> None:
     out2 = merge_fn_blocks_into_disk(
         one_stub, {"fn go(self) -> u32": "from_generic()"})
     assert "from_generic()" in out2 and "already_filled()" in out2
+
+
+# --- a body the donor's own build never compiled ------------------------------
+_TARGET = """\
+impl StdError for BoxedError {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> { unimplemented!() }
+    #[cfg(error_generic_member_access)]
+    fn provide<'a>(&'a self, request: &mut Request<'a>) { unimplemented!() }
+}
+"""
+
+_DONOR = """\
+impl StdError for BoxedError {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> { (&*self.0).source() }
+    #[cfg(error_generic_member_access)]
+    fn provide<'a>(&'a self, request: &mut Request<'a>) { request.provide_ref(&*self.0) }
+}
+"""
+
+_STABLE = CfgSet.of(cfg_true=("feature = \"std\"",),
+                    cfg_false=("error_generic_member_access",))
+_NIGHTLY = CfgSet.of(cfg_true=("feature = \"std\"", "error_generic_member_access"))
+
+
+def test_seed_withholds_a_body_the_donor_never_compiled() -> None:
+    """`stable` filled `provide` inside a cfg its own build excludes, so no
+    compiler ever checked it; adopting it gives the body a verified body's
+    authority with none of the verification. The ungated sibling in the same
+    impl still comes across — the refusal is per occurrence, not per file."""
+    res = backfill_stub_bodies(_TARGET, [_DONOR], [_STABLE])
+    assert res.cfg_skipped == 1
+    assert res.filled == 1
+    assert "(&*self.0).source()" in res.text
+    assert "request.provide_ref" not in res.text
+
+
+def test_seed_adopts_a_gated_body_the_donor_does_build() -> None:
+    res = backfill_stub_bodies(_TARGET, [_DONOR], [_NIGHTLY])
+    assert res.cfg_skipped == 0
+    assert res.filled == 2
+    assert "request.provide_ref" in res.text
+
+
+def test_seed_without_a_donor_cfg_set_trusts_the_donor_whole() -> None:
+    # No verdict is not a False verdict: the pre-existing behaviour stands
+    # wherever the cluster objects are not to hand.
+    res = backfill_stub_bodies(_TARGET, [_DONOR])
+    assert res.cfg_skipped == 0
+    assert res.filled == 2
+
+
+def test_an_undecidable_gate_is_not_convicted() -> None:
+    # `fn_belongs_to_cluster`'s rule, verbatim: only a definite False refuses.
+    unknown = CfgSet.of(cfg_true=("feature = \"std\"",))
+    res = backfill_stub_bodies(_TARGET, [_DONOR], [unknown])
+    assert res.cfg_skipped == 0
+    assert res.filled == 2
+
+
+def test_unbuilt_fn_starts_reads_each_occurrence_separately() -> None:
+    """`error.rs::provide` occurs three times under three gates. A by-name
+    answer would convict the active one on the first inactive one it found."""
+    text = (
+        "#[cfg(error_generic_member_access)]\n"
+        "fn provide(&self) -> u8 { 1 }\n"
+        "fn provide_always(&self) -> u8 { 2 }\n"
+    )
+    starts = unbuilt_fn_starts(text, _STABLE)
+    assert len(starts) == 1
+    gated = next(iter(starts))
+    assert text[gated:].startswith("fn provide(")

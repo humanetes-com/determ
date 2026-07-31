@@ -49,8 +49,10 @@ from pipeline_core.domain.layout_retrigger import (
     classify_layout_retrigger,
     crash_evidence_confounded,
     find_fns_referencing,
+    inflight_key,
     mechanical_budget_spent,
     mechanical_key,
+    reconcile_interrupted_attempts,
     should_retrigger,
 )
 from pipeline_core.domain.models import FnLocator, FnRecord, TypeRecord
@@ -290,7 +292,7 @@ def retrigger_layout(
     if not candidates:
         return RetriggerResult(fired=False, reason="no re-authorable component recorded")
 
-    attempts = deps.load_attempts(project_dir, cfg_cluster)
+    attempts = _settle_interrupted(project_dir, cfg_cluster, deps)
     starv_cause, _evidence = classify_starvation("", "", error_text)
     _live_records: list[FnRecord] | None = None
 
@@ -353,128 +355,183 @@ def retrigger_layout(
             narrowed = with_defs
 
         attempts[key] = attempts.get(key, 0) + 1
+        # Charged AND marked in the same write. The mark is what makes the
+        # charge reversible: everything below can be cut short by a kill, and
+        # without a durable "this attempt never reached an outcome" record the
+        # next process reads a spent attempt it cannot distinguish from one the
+        # model actually failed. See `reconcile_interrupted_attempts`.
+        attempts[inflight_key(key)] = attempts[key]
         deps.save_attempts(project_dir, cfg_cluster, attempts)
         deps.git_commit(
             project_dir,
             f"pre-layout-retrigger checkpoint — {cfg_cluster}/{sorted(names)} "
             f"attempt {attempts[key]}")
 
-        suite = deps.load_suite(project_dir, cfg_cluster)
-        select_pins = make_pin_selector(suite, surface)  # full surface: correct reachability
-        res = author_layout(
-            narrowed, module_name=module_name,
-            public_surface=deps.public_surface_text(project_dir, cfg_cluster),
-            select_pins=select_pins,
-            symbol_inventory=deps.symbol_inventory_text(project_dir, cfg_cluster),
-            deps=deps.author_deps_for(project_dir, cfg_cluster),
-            extra_guidance=(CRASH_GUIDANCE
-                            if cause is LayoutRetriggerCause.RUNTIME_CRASH
-                            else ""))
+        outcome = _run_layout_attempt(
+            project_dir=project_dir, module_name=module_name,
+            cfg_cluster=cfg_cluster, filled_crate_dir=filled_crate_dir,
+            names=names, key=key, narrowed=narrowed, surface=surface,
+            cause=cause, attempts=attempts, deps=deps)
+        # Reached only when the attempt produced an OUTCOME — a kill or an
+        # exception leaves the marker standing, which is the whole point, so
+        # this must stay the single place that clears it. Any future exit added
+        # to `_run_layout_attempt` is settled here for free.
+        attempts.pop(inflight_key(key), None)
+        deps.save_attempts(project_dir, cfg_cluster, attempts)
+        return outcome
 
-        if not res.all_authored:
-            # The cap bounds MODEL attempts. A failure whose reason is splice/
-            # locate infrastructure (the model's output was never evaluated
-            # against the tree) bought no evidence — refund the attempt so a
-            # mechanical bug can never exhaust the budget (observed: the mega
-            # component's cap spent on "could not locate a frozen definition"
-            # before locate-keys were persisted).
-            _mech_markers = ("could not locate a frozen definition",
-                             "skeleton file unreadable",
-                             "authored blocks missing uid")
-            _reasons = [c.reason for c in res.components if not c.authored]
-            if _reasons and all(any(m in r for m in _mech_markers)
-                                for r in _reasons):
-                attempts[key] = max(0, attempts[key] - 1)
-                attempts[mechanical_key(key)] = (
-                    attempts.get(mechanical_key(key), 0) + 1)
-                deps.save_attempts(project_dir, cfg_cluster, attempts)
-                deps.log(f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: "
-                         "re-author died in splice/locate infrastructure — "
-                         "attempt refunded (mechanical failure, no model "
-                         "evidence).")
-                return RetriggerResult(fired=True, succeeded=False,
-                                       cause=cause.name,
-                                       reason="mechanical splice failure "
-                                              "(attempt refunded)")
-            deps.log(f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: re-author "
-                     f"attempt {attempts[key]} still did not compile.")
-            return RetriggerResult(fired=True, succeeded=False, cause=cause.name,
-                                   reason="re-authoring failed again")
+    return RetriggerResult(fired=False, reason="no component matched the evidence")
 
-        # Land the new definitions in the tree that is actually built. Its keys
-        # are derived from the LIVE TREE's own parsed records, never reused from
-        # the skeleton splice: the two trees hold the same definitions only
-        # until one of them is edited alone, and that is exactly the state this
-        # step exists to repair. Done before the revert so the re-fills below
-        # see the new shape.
-        # ONE derivation of the src base, shared by the plan and the splice that
-        # applies it: a private-surface item's `file` is relative to the src dir
-        # it was enumerated from, while `filled_crate_dir` is the crate root that
-        # cargo runs in. Deriving it twice is how the two drift apart.
-        live_src_dir = filled_crate_dir / "src"
-        plan, plan_err = _live_tree_plan(
-            narrowed, res.components, live_src_dir, deps)
-        written, apply_err = (
-            (0, plan_err) if plan_err
-            else deps.apply_layout_to_tree(plan, live_src_dir))
-        merged_defs = tuple(d for c in res.components for d in c.authored_defs)
-        if apply_err:
-            # The model DID produce a layout that compiles; only the propagation
-            # failed. That is mechanical, so the attempt is refunded on the same
-            # rule as a splice/locate miss — a pipeline bug must never be able to
-            # exhaust the budget. The refund is counted, though: an identical
-            # mechanical failure re-fires on the very next sweep, and each
-            # re-fire spends another authoring call on a bug the model cannot
-            # affect.
+
+def _settle_interrupted(
+    project_dir: Path, cfg_cluster: str, deps: RetriggerLayoutDeps,
+) -> dict[str, int]:
+    """Load the attempts store with every interrupted attempt refunded.
+
+    Read at the top of every sweep, so a restart's stolen attempt is repaid
+    before any cap is consulted — and repaid ONCE, because the reconciliation
+    persists the cleared marker."""
+    attempts = deps.load_attempts(project_dir, cfg_cluster)
+    settled, refunded = reconcile_interrupted_attempts(attempts)
+    if not refunded:
+        return attempts
+    deps.save_attempts(project_dir, cfg_cluster, settled)
+    for component in refunded:
+        deps.log(
+            f"  [layout-retrigger] {cfg_cluster}/{component.split('|')}: an "
+            "attempt was charged and never reached an outcome — the process "
+            "that opened it did not survive the authoring call. No model "
+            "evidence was bought, so the attempt is refunded and counted as a "
+            "mechanical failure.")
+    return settled
+
+
+def _run_layout_attempt(
+    *,
+    project_dir: Path, module_name: str, cfg_cluster: str,
+    filled_crate_dir: Path, names: frozenset[str], key: str,
+    narrowed: PrivateSurface, surface: PrivateSurface,
+    cause: LayoutRetriggerCause, attempts: dict[str, int],
+    deps: RetriggerLayoutDeps,
+) -> RetriggerResult:
+    """One CHARGED re-authoring attempt: author, propagate, revert the fns that
+    read the old shape. Mutates `attempts` in place for the refunds it decides;
+    the caller owns the in-flight marker that makes returning from here mean
+    'this attempt was measured'."""
+    suite = deps.load_suite(project_dir, cfg_cluster)
+    select_pins = make_pin_selector(suite, surface)  # full surface: correct reachability
+    res = author_layout(
+        narrowed, module_name=module_name,
+        public_surface=deps.public_surface_text(project_dir, cfg_cluster),
+        select_pins=select_pins,
+        symbol_inventory=deps.symbol_inventory_text(project_dir, cfg_cluster),
+        deps=deps.author_deps_for(project_dir, cfg_cluster),
+        extra_guidance=(CRASH_GUIDANCE
+                        if cause is LayoutRetriggerCause.RUNTIME_CRASH
+                        else ""))
+
+    if not res.all_authored:
+        # The cap bounds MODEL attempts. A failure whose reason is splice/
+        # locate infrastructure (the model's output was never evaluated
+        # against the tree) bought no evidence — refund the attempt so a
+        # mechanical bug can never exhaust the budget (observed: the mega
+        # component's cap spent on "could not locate a frozen definition"
+        # before locate-keys were persisted).
+        _mech_markers = ("could not locate a frozen definition",
+                         "skeleton file unreadable",
+                         "authored blocks missing uid")
+        _reasons = [c.reason for c in res.components if not c.authored]
+        if _reasons and all(any(m in r for m in _mech_markers)
+                            for r in _reasons):
             attempts[key] = max(0, attempts[key] - 1)
             attempts[mechanical_key(key)] = (
                 attempts.get(mechanical_key(key), 0) + 1)
             deps.save_attempts(project_dir, cfg_cluster, attempts)
-            # The SKELETON now holds the authored definitions, so the store must
-            # record them: it is what the seed-time layout reconciliation
-            # reinstalls from (repairing this exact failure with no model call),
-            # and what the next attempt locates by. Left on the old keys, both
-            # fall back to re-deriving from an extractor rendering that is not
-            # the bytes on disk.
-            deps.update_layout_outcome(
-                project_dir, cfg_cluster,
-                ComponentResult(tuple(sorted(names)), authored=True,
-                                authored_defs=merged_defs))
-            deps.log(f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: the "
-                     "re-authored layout compiled in the skeleton but could NOT "
-                     f"be applied to the live tree ({apply_err}) — the build "
-                     "still sees the old layout; not reverting any fn, attempt "
-                     "refunded (mechanical failure, no model evidence).")
-            return RetriggerResult(fired=True, succeeded=False, cause=cause.name,
-                                   reason=f"live-tree splice failed: {apply_err}")
+            deps.log(f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: "
+                     "re-author died in splice/locate infrastructure — "
+                     "attempt refunded (mechanical failure, no model "
+                     "evidence).")
+            return RetriggerResult(fired=True, succeeded=False,
+                                   cause=cause.name,
+                                   reason="mechanical splice failure "
+                                          "(attempt refunded)")
+        deps.log(f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: re-author "
+                 f"attempt {attempts[key]} still did not compile.")
+        return RetriggerResult(fired=True, succeeded=False, cause=cause.name,
+                               reason="re-authoring failed again")
 
-        attempts.pop(mechanical_key(key), None)   # consecutive-failure counter
+    # Land the new definitions in the tree that is actually built. Its keys
+    # are derived from the LIVE TREE's own parsed records, never reused from
+    # the skeleton splice: the two trees hold the same definitions only
+    # until one of them is edited alone, and that is exactly the state this
+    # step exists to repair. Done before the revert so the re-fills below
+    # see the new shape.
+    # ONE derivation of the src base, shared by the plan and the splice that
+    # applies it: a private-surface item's `file` is relative to the src dir
+    # it was enumerated from, while `filled_crate_dir` is the crate root that
+    # cargo runs in. Deriving it twice is how the two drift apart.
+    live_src_dir = filled_crate_dir / "src"
+    plan, plan_err = _live_tree_plan(
+        narrowed, res.components, live_src_dir, deps)
+    written, apply_err = (
+        (0, plan_err) if plan_err
+        else deps.apply_layout_to_tree(plan, live_src_dir))
+    merged_defs = tuple(d for c in res.components for d in c.authored_defs)
+    if apply_err:
+        # The model DID produce a layout that compiles; only the propagation
+        # failed. That is mechanical, so the attempt is refunded on the same
+        # rule as a splice/locate miss — a pipeline bug must never be able to
+        # exhaust the budget. The refund is counted, though: an identical
+        # mechanical failure re-fires on the very next sweep, and each
+        # re-fire spends another authoring call on a bug the model cannot
+        # affect.
+        attempts[key] = max(0, attempts[key] - 1)
+        attempts[mechanical_key(key)] = (
+            attempts.get(mechanical_key(key), 0) + 1)
         deps.save_attempts(project_dir, cfg_cluster, attempts)
-        if deps.upsert_layout_registry is not None:
-            deps.upsert_layout_registry(
-                project_dir,
-                tuple(i for c in res.components for i in c.authored_items))
+        # The SKELETON now holds the authored definitions, so the store must
+        # record them: it is what the seed-time layout reconciliation
+        # reinstalls from (repairing this exact failure with no model call),
+        # and what the next attempt locates by. Left on the old keys, both
+        # fall back to re-deriving from an extractor rendering that is not
+        # the bytes on disk.
         deps.update_layout_outcome(
             project_dir, cfg_cluster,
             ComponentResult(tuple(sorted(names)), authored=True,
                             authored_defs=merged_defs))
-        # `reverted` alone cannot be read: revert_fns skips fns already stubbed,
-        # so 0 means "scope empty", "scope all stubs" or "nothing enumerated"
-        # — three different states, one of which is a silent failure. Report the
-        # enumeration and the scope beside it so a zero is attributable.
-        fn_records = deps.enumerate_fns(filled_crate_dir)
-        referencing = find_fns_referencing(fn_records or [], names)
-        reverted = deps.revert_fns(referencing, filled_crate_dir)
-        scope = ("live tree could not be parsed (extractor unavailable) — "
-                 "revert scope is empty for that reason, not because no fn "
-                 "references the component" if fn_records is None else
-                 f"{len(referencing)} of {len(fn_records)} enumerated fn(s) "
-                 f"reference it, {reverted} had a body to revert")
-        deps.log(f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: re-authored "
-                 f"successfully (attempt {attempts[key]}, cause={cause.name}); "
-                 f"applied to {written} live file(s); "
-                 f"reverted {reverted} referencing fn(s) to re-fill — {scope}.")
-        return RetriggerResult(fired=True, succeeded=True, reverted_count=reverted,
-                               cause=cause.name)
+        deps.log(f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: the "
+                 "re-authored layout compiled in the skeleton but could NOT "
+                 f"be applied to the live tree ({apply_err}) — the build "
+                 "still sees the old layout; not reverting any fn, attempt "
+                 "refunded (mechanical failure, no model evidence).")
+        return RetriggerResult(fired=True, succeeded=False, cause=cause.name,
+                               reason=f"live-tree splice failed: {apply_err}")
 
-    return RetriggerResult(fired=False, reason="no re-authorable component's evidence matched")
+    attempts.pop(mechanical_key(key), None)   # consecutive-failure counter
+    deps.save_attempts(project_dir, cfg_cluster, attempts)
+    if deps.upsert_layout_registry is not None:
+        deps.upsert_layout_registry(
+            project_dir,
+            tuple(i for c in res.components for i in c.authored_items))
+    deps.update_layout_outcome(
+        project_dir, cfg_cluster,
+        ComponentResult(tuple(sorted(names)), authored=True,
+                        authored_defs=merged_defs))
+    # `reverted` alone cannot be read: revert_fns skips fns already stubbed,
+    # so 0 means "scope empty", "scope all stubs" or "nothing enumerated"
+    # — three different states, one of which is a silent failure. Report the
+    # enumeration and the scope beside it so a zero is attributable.
+    fn_records = deps.enumerate_fns(filled_crate_dir)
+    referencing = find_fns_referencing(fn_records or [], names)
+    reverted = deps.revert_fns(referencing, filled_crate_dir)
+    scope = ("live tree could not be parsed (extractor unavailable) — "
+             "revert scope is empty for that reason, not because no fn "
+             "references the component" if fn_records is None else
+             f"{len(referencing)} of {len(fn_records)} enumerated fn(s) "
+             f"reference it, {reverted} had a body to revert")
+    deps.log(f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: re-authored "
+             f"successfully (attempt {attempts[key]}, cause={cause.name}); "
+             f"applied to {written} live file(s); "
+             f"reverted {reverted} referencing fn(s) to re-fill — {scope}.")
+    return RetriggerResult(fired=True, succeeded=True, reverted_count=reverted,
+                           cause=cause.name)

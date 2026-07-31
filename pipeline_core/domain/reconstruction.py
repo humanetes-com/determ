@@ -44,6 +44,11 @@ SpliceReason = Literal[
     "ok", "ok_xml_unescaped", "file_missing", "read_failed", "fn_not_found",
     "bad_offsets", "target_not_stub", "body_is_stub", "parse_broken",
     "ambiguous_name", "sig_not_bare", "item_set_changed", "body_redeclares_fn",
+    # The fn's every stub occurrence is `#[cfg]`-gated OUT of the cluster doing
+    # the splicing. Landing a body there writes code this cluster's build never
+    # compiles — unverified by construction, and the seed then hands it to a
+    # sibling cluster as if it had been checked.
+    "not_in_cluster_cfg",
 ]
 
 

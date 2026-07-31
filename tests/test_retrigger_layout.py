@@ -73,6 +73,9 @@ class _Fakes:
         self.reply = reply
         self.attempts = dict(attempts or {})
         self.saved_attempts: dict[str, int] | None = None
+        # EVERY save, in order — the in-flight marker only exists between two
+        # of them, so a fake that keeps the last one alone cannot see it.
+        self.attempt_saves: list[dict[str, int]] = []
         # Canonical records are SRC-relative; `_fns_for` re-bases them onto
         # whichever dir the caller enumerates, exactly as the extractor does.
         self.fn_records = fn_records if fn_records is not None else [
@@ -153,6 +156,7 @@ class _Fakes:
 
         def save_attempts(pd, c, a):
             self.saved_attempts = dict(a)
+            self.attempt_saves.append(dict(a))
             return Path(pd) / "_attempts.json"
 
         def git_commit(pd, msg):
@@ -557,3 +561,57 @@ def test_unparseable_live_tree_refunds_the_attempt():
     assert res.fired and not res.succeeded
     assert f.saved_attempts == {"ErrorImpl": 0, "mech:ErrorImpl": 1}
     assert any("attempt refunded" in ln for ln in f.logs)
+
+
+# --- an attempt a process kill spent, and never measured ----------------------
+def test_checkpoint_marks_the_attempt_in_flight_and_the_outcome_clears_it():
+    """The charge is persisted before the authoring call — correctly, or a crash
+    could retry it for free. The marker written in the SAME save is what makes
+    that charge reversible: it is the only durable evidence distinguishing 'the
+    model failed' from 'the process did not come back'."""
+    f = _Fakes()
+    res = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, _ERR, f.deps())
+    assert res.fired and res.succeeded
+    checkpoint = f.attempt_saves[0]
+    assert checkpoint == {"ErrorImpl": 1, "inflight:ErrorImpl": 1}
+    # …and no save after an outcome may still carry it.
+    assert "inflight:ErrorImpl" not in f.attempt_saves[-1]
+    assert f.saved_attempts == {"ErrorImpl": 1}
+
+
+def test_a_failed_attempt_also_clears_the_marker():
+    # A measured failure is still a measurement: only an UNRESOLVED attempt may
+    # be refunded, or the cap stops bounding model attempts at all.
+    f = _Fakes(compiles=False)
+    res = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, _ERR, f.deps())
+    assert res.fired and not res.succeeded
+    assert "inflight:ErrorImpl" not in f.saved_attempts
+    assert f.saved_attempts["ErrorImpl"] == 1     # charged, not refunded
+
+
+def test_an_interrupted_attempt_is_refunded_before_the_cap_is_read():
+    """The live case: `nightly`'s two attempts on the 35-name component were
+    both consumed by a process restart mid-authoring — a checkpoint with no
+    outcome line — and the third sweep found the cap reached without a single
+    model evaluation behind it."""
+    f = _Fakes(attempts={"ErrorImpl": 2, "inflight:ErrorImpl": 2})
+    res = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, _ERR, f.deps())
+    assert res.fired and res.succeeded       # cap 2 no longer bars the way
+    assert any("never reached an outcome" in m for m in f.logs)
+    # The settlement is the FIRST write of the sweep: refunded, counted, and
+    # the marker gone — all before the cap could be consulted.
+    assert f.attempt_saves[0] == {"ErrorImpl": 1, "mech:ErrorImpl": 1}
+    # The attempt then re-charges, and succeeding clears the mechanical streak.
+    assert f.saved_attempts == {"ErrorImpl": 2}
+
+
+def test_an_interrupted_attempt_is_refunded_once_not_every_sweep():
+    # The reconciliation persists the cleared marker, so a second sweep over
+    # the same store finds nothing to repay.
+    f = _Fakes(attempts={"ErrorImpl": 2, "inflight:ErrorImpl": 2})
+    retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, _ERR, f.deps())
+    first = dict(f.saved_attempts or {})
+    f.attempts = first
+    f.logs.clear()
+    retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, _ERR, f.deps())
+    assert not any("never reached an outcome" in m for m in f.logs)

@@ -26,7 +26,10 @@ def main() -> int:
     new_count = int(sys.argv[4]) if len(sys.argv) > 4 else 1
     path = Path(project_dir) / ".skeleton" / f"_layout_retrigger_attempts_{cluster}.json"
     data = json.loads(path.read_text(encoding="utf-8"))
-    hits = [k for k in data if key_substr in k]
+    # `mech:` / `inflight:` rows are bookkeeping the store keeps beside the
+    # component counters; matching them would make every substring ambiguous.
+    hits = [k for k in data
+            if key_substr in k and not k.startswith(("mech:", "inflight:"))]
     if len(hits) != 1:
         print(f"need exactly one key matching {key_substr!r}, got {len(hits)}: "
               f"{[h[:80] for h in hits]}")

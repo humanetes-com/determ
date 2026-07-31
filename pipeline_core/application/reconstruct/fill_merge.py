@@ -35,10 +35,13 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Any
 
 from pipeline_core.application.reconstruct.fill_rules import is_unimplemented_body
+from pipeline_core.domain.cfg import cfg_inline_predicates
 from pipeline_core.domain.rust_fn_slots import FnSlot, fn_bodies
-from pipeline_core.domain.rust_scan import contains_word
+from pipeline_core.domain.rust_lex import code_mask
+from pipeline_core.domain.rust_scan import contains_word, item_start
 from pipeline_core.domain.rust_use_items import (
     divergent_item_names,
     insert_use_items,
@@ -85,10 +88,37 @@ class BackfillResult:
     ambiguous_skipped: int
     uses_added: int = 0
     layout_skipped: int = 0
+    cfg_skipped: int = 0
+
+
+def unbuilt_fn_starts(text: str, cfg_set: Any) -> frozenset[int]:
+    """`header_start` of every fn in `text` whose own `#[cfg(...)]` attributes
+    are decidably FALSE under `cfg_set` — the fns this text's OWN build never
+    compiles, and so the ones no compiler has ever checked.
+
+    Per OCCURRENCE, not per name. `error.rs::provide` appears three times under
+    three different gates, and a by-name answer would convict all three on the
+    first one it found. `item_start` bounds the window to this fn's own
+    attributes: a blank line does not delimit an item, so a window walked back
+    to one would inherit the `#[cfg]` of whatever declaration sits above.
+
+    Undecidable predicates are not convicted — the same conservative direction
+    `fn_belongs_to_cluster` takes; only a definite False is evidence."""
+    if cfg_set is None:
+        return frozenset()
+    mask = code_mask(text)
+    out: set[int] = set()
+    for b in fn_bodies(text):
+        window = text[item_start(text, mask, b.header_start):b.header_start + 1]
+        preds = [p.strip() for p in cfg_inline_predicates(window)]
+        if any(cfg_set.evaluate(p) is False for p in preds):
+            out.add(b.header_start)
+    return frozenset(out)
 
 
 def backfill_stub_bodies(
     target_text: str, donor_texts: Sequence[str],
+    donor_cfg_sets: Sequence[Any] | None = None,
 ) -> BackfillResult:
     """Cross-cluster stub backfill: adopt filled fn bodies from sibling-cluster
     copies of the same file into ``target_text``'s remaining ``unimplemented!()``
@@ -99,17 +129,30 @@ def backfill_stub_bodies(
     Donor and target here are two bakes of the SAME file, so their owner chains
     are byte-identical and slot matching is near-total (measured on `anyhow`:
     122 of 124 donor bodies matched by slot); the signature fallback exists for
-    the two that do not and cannot fire on an ambiguous one."""
+    the two that do not and cannot fire on an ambiguous one.
+
+    `donor_cfg_sets` (positionally paired with `donor_texts`, `None` per donor
+    to opt out) withholds bodies the DONOR's own cfg-set never compiled. A
+    cluster can hold a filled body inside a `#[cfg]` it does not build — the
+    compile gate that accepts every other fill simply never sees it — and
+    adopting one hands this cluster code with the authority of a verified body
+    and none of the verification. Observed on `anyhow`: `stable` filled
+    `wrapper.rs::provide` under `#[cfg(error_generic_member_access)]`, which
+    `stable` never compiles, and seeded it to `nightly`, which does."""
     before = count_stub_bodies(target_text)
     if before == 0:
         return BackfillResult(target_text, 0, 0)
+    cfg_sets = list(donor_cfg_sets or ())
     out = target_text
     skipped = 0
     layout = 0
-    for donor in donor_texts:
-        out, _placed, _skip, _layout = _merge(out, donor)
+    cfg_refused = 0
+    for i, donor in enumerate(donor_texts):
+        donor_cfg = cfg_sets[i] if i < len(cfg_sets) else None
+        out, _placed, _skip, _layout, _cfg = _merge(out, donor, donor_cfg)
         skipped += _skip
         layout += _layout
+        cfg_refused += _cfg
     # A body cannot bring its own import. The donor's bodies were authored
     # against the donor's import block, which a fill may have GROWN
     # (`use crate::wrapper::MessageError;`), so adopting bodies without it hands
@@ -129,7 +172,7 @@ def backfill_stub_bodies(
             out = insert_use_items(out, _adds)
             imported += len(_adds)
     return BackfillResult(out, before - count_stub_bodies(out), skipped,
-                          imported, layout)
+                          imported, layout, cfg_refused)
 
 
 def merge_fills_preserving_existing(disk_text: str, model_text: str) -> str:
@@ -153,14 +196,19 @@ def merge_fills_preserving_existing(disk_text: str, model_text: str) -> str:
     return _merge(disk_text, model_text)[0]
 
 
-def _merge(disk_text: str, model_text: str) -> tuple[str, int, int, int]:
-    """`(merged_text, placed, ambiguous_refusals, layout_refusals)` — the core."""
+def _merge(
+    disk_text: str, model_text: str, model_cfg: Any = None,
+) -> tuple[str, int, int, int, int]:
+    """`(merged_text, placed, ambiguous_refusals, layout_refusals,
+    unbuilt_refusals)` — the core. `model_cfg` is the cfg-set the SOURCE text
+    was built under, when there is one (a cross-cluster donor); `None` for the
+    model-output merge, whose thin file was never built by anything."""
     disk_fns = fn_bodies(disk_text)
     if not disk_fns:
         # Disk has no functions to fill — either an empty or
         # non-Rust-source-ish file. Don't risk overwriting structure;
         # return disk verbatim.
-        return disk_text, 0, 0, 0
+        return disk_text, 0, 0, 0, 0
 
     # The model's bodies, addressed by slot. A body the model regurgitated as
     # `unimplemented!()` adds nothing over what is already on disk.
@@ -178,10 +226,18 @@ def _merge(disk_text: str, model_text: str) -> tuple[str, int, int, int]:
     # `model_sig_counts` cannot serve: it counts stubs too, and a refusal to place
     # a body nobody offered is not a stub anyone has to pay to fill.
     model_offered: set[str] = set()
+    # Withheld at the SOURCE, before any key is built from them: a body its own
+    # build never compiled must not become a slot's answer, a signature
+    # fallback, or a refusal anyone is asked to pay for.
+    unbuilt = unbuilt_fn_starts(model_text, model_cfg)
+    unbuilt_offered = 0
     for b in fn_bodies(model_text):
         model_sig_counts[b.signature] += 1
         body = model_text[b.body_start:b.body_end]
         if is_unimplemented_body(body):
+            continue
+        if b.header_start in unbuilt:
+            unbuilt_offered += 1
             continue
         model_offered.add(b.signature)
         slot_bodies.setdefault(b.slot, set()).add(body)
@@ -199,11 +255,12 @@ def _merge(disk_text: str, model_text: str) -> tuple[str, int, int, int]:
         b.signature: model_text[b.body_start:b.body_end]
         for b in fn_bodies(model_text)
         if model_sig_counts[b.signature] == 1
+        and b.header_start not in unbuilt
         and not is_unimplemented_body(model_text[b.body_start:b.body_end])
     }
 
     if not by_slot and not by_sig:
-        return disk_text, 0, 0, 0  # model gave us nothing usable
+        return disk_text, 0, 0, 0, unbuilt_offered  # model gave us nothing usable
 
     # Types the two files SHAPE differently. A body is written against a layout,
     # and the layout is authored per cluster while bodies are shared across
@@ -252,7 +309,7 @@ def _merge(disk_text: str, model_text: str) -> tuple[str, int, int, int]:
             continue
         out = out[:b.body_start] + new_body + out[b.body_end:]
         placed += 1
-    return out, placed, refused, layout_refused
+    return out, placed, refused, layout_refused, unbuilt_offered
 
 
 def merge_fn_blocks_into_disk(disk_text: str, fn_blocks: dict[str, str]) -> str:

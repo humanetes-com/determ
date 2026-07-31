@@ -11,7 +11,6 @@ extractor. No new patterns are authored; the bodies are moved as-is.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import NamedTuple
@@ -203,23 +202,60 @@ def summarize_test_binaries(test_output: str) -> list[tuple[str, int, int]]:
     return out
 
 
+def _count_token(tok: str) -> int | None:
+    """`tok` as a count, or None when it is not one — the token equivalent of
+    `\\d+` bounded by whitespace on both sides."""
+    return int(tok) if tok.isdigit() else None
+
+
+def _word_is(tok: str, word: str) -> bool:
+    """Whether `tok` opens with `word`, case-insensitively — the trailing
+    `;`/`.` cargo and pytest hang off a label is not part of it."""
+    return tok.lower().startswith(word)
+
+
+# The count shapes this fallback recognises, in PRIORITY order: the first shape
+# found anywhere in the output decides, and a later shape is consulted only when
+# no earlier one appears at all. Each is a window over whitespace-separated
+# tokens; `None` is the position holding the number.
+#   "42 passed" · "42 tests passed" · "passed 42" · "42 ok"
+_COUNT_SHAPES: tuple[tuple[str | None, ...], ...] = (
+    (None, "passed"),
+    (None, "test", "passed"),
+    ("passed", None),
+    (None, "ok"),
+)
+
+
 def count_passing_tests(test_output: str) -> int:
     """
     Extract the number of passing tests from test output.
     Handles cargo-nextest, cargo test, pytest, and jest output formats.
     Returns 0 if not parseable.
+
+    A LAST-RESORT parser: `parse_test_counts` reads libtest's own
+    `test result:` trailer and is what every count that matters comes from.
+    This exists for the frameworks that print no such trailer, so it stays
+    deliberately loose — it answers from the first count-shaped phrase in the
+    output rather than from a structure it can verify.
     """
-    patterns = [
-        r'(\d+)\s+passed',          # cargo nextest: "42 passed"
-        r'test result:.*?(\d+)\s+passed',  # cargo test
-        r'(\d+)\s+tests?\s+passed',
-        r'passed\s+(\d+)',
-        r'(\d+)\s+ok',
-    ]
-    for pat in patterns:
-        m = re.search(pat, test_output, re.IGNORECASE)
-        if m:
-            return int(m.group(1))
+    tokens = test_output.split()
+    for shape in _COUNT_SHAPES:
+        for i in range(len(tokens) - len(shape) + 1):
+            found: int | None = None
+            for offset, part in enumerate(shape):
+                tok = tokens[i + offset]
+                if part is None:
+                    found = _count_token(tok)
+                    if found is None:
+                        break
+                # `test`/`tests` — the plural is optional in the shape it came
+                # from, and a prefix test accepts both without a second entry.
+                elif not _word_is(tok, part):
+                    break
+            else:
+                if found is not None:
+                    return found
     return 0
 
 

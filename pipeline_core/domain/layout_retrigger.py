@@ -42,6 +42,7 @@ _LAYOUT_ATTRIBUTABLE_CODES = (
 
 
 MECHANICAL_KEY_PREFIX = "mech:"
+INFLIGHT_KEY_PREFIX = "inflight:"
 DEFAULT_MAX_MECHANICAL = 2
 
 
@@ -51,6 +52,54 @@ def mechanical_key(component_key: str) -> str:
     the attempts file without colliding with a component key (Rust idents
     joined by `|` can never start with `mech:`)."""
     return f"{MECHANICAL_KEY_PREFIX}{component_key}"
+
+
+def inflight_key(component_key: str) -> str:
+    """Attempts-store key marking an attempt that has been CHARGED but whose
+    outcome is not yet known. Same prefixing rule as `mechanical_key`."""
+    return f"{INFLIGHT_KEY_PREFIX}{component_key}"
+
+
+def _is_bookkeeping_key(key: str) -> bool:
+    return key.startswith((MECHANICAL_KEY_PREFIX, INFLIGHT_KEY_PREFIX))
+
+
+def reconcile_interrupted_attempts(
+    attempts: Mapping[str, int],
+) -> tuple[dict[str, int], tuple[str, ...]]:
+    """`(repaired attempts, component keys refunded)` — settle every attempt
+    that was charged and never resolved.
+
+    The counter is incremented and persisted BEFORE the layout-authoring call,
+    which is right: the process must not be able to retry an in-flight attempt
+    for free after a crash. But it also means a kill anywhere in that window —
+    a `--force` restart, an OOM, the operator replacing the process — spends a
+    capped attempt and buys NO model evidence, which is exactly what
+    `mechanical_budget_spent` reserves a refund for. Two of the four attempts
+    ever spent on `anyhow`'s 35-name mega component went that way, silently:
+    a `pre-layout-retrigger checkpoint` with no matching outcome line, and
+    nothing in the pipeline classified a restart as mechanical.
+
+    The marker is written beside the increment and cleared by whichever outcome
+    the attempt reaches, so a marker that OUTLIVED the process that wrote it is
+    proof of an interrupted attempt. Refunding it here — at load, before any
+    cap is read — makes the budget mean what it says: model attempts, not
+    process lifetimes.
+
+    Counted as a mechanical failure rather than erased, on the same bound the
+    splice/locate refunds use: an authoring call that reliably kills the process
+    would otherwise re-fire for ever on a budget nothing can exhaust."""
+    out = dict(attempts)
+    refunded: list[str] = []
+    for key in sorted(k for k in out if k.startswith(INFLIGHT_KEY_PREFIX)):
+        component = key[len(INFLIGHT_KEY_PREFIX):]
+        del out[key]
+        if not component or _is_bookkeeping_key(component):
+            continue
+        out[component] = max(0, out.get(component, 0) - 1)
+        out[mechanical_key(component)] = out.get(mechanical_key(component), 0) + 1
+        refunded.append(component)
+    return out, tuple(refunded)
 
 
 def mechanical_budget_spent(
@@ -256,7 +305,18 @@ DEFAULT_REFILL_PER_ITER = 3
 # window stops being sized to its work exactly where the evidence came from:
 # the largest re-stub seen is 47 bodies -> ceil(47/3) = 16 iters. When it does
 # bind, `RefillGrace.clipped` says so and the grant logs it.
-DEFAULT_REFILL_GRACE_MAX_ITERS = 20
+#
+# Raised 20 -> 40 once the bound was seen to BIND on the case that matters:
+# `anyhow`'s 35-name mega component reverts ~100 bodies, wanting ceil(100/3) =
+# 34 iters, so every grant for it announced `clipped=True` — the window
+# declaring, before the first re-fill, that it would expire mid-recovery. A cap
+# that expires the window it just granted makes the re-author unwinnable no
+# matter how many attempts the budget holds, which is why raising this is the
+# precondition for ever spending one on that component. Safe to raise because
+# the window is gated on PROGRESS, not on the count: `consume` closes it the
+# first iter that lands zero fills, so a bigger bound buys iters only while
+# bodies keep landing and can never hold a stalled re-author open.
+DEFAULT_REFILL_GRACE_MAX_ITERS = 40
 
 
 @dataclass(frozen=True, slots=True)

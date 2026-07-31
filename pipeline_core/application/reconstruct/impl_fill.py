@@ -153,6 +153,77 @@ class ImplFillDeps:
     retire_contradicted_notes: Callable[..., int] | None = None
 
 
+def cluster_inactive_stub_names(
+    target_src_dir: Path, cluster: BuildCluster | None,
+    scan_records: Callable[..., list[dict[str, Any]] | None],
+) -> frozenset[tuple[str, str]]:
+    """The ``(file, fn_name)`` stubs this cluster's cfg-set never compiles.
+
+    Read as the DIFFERENCE between every stub record and the cluster-active
+    ones, so the cfg evaluation stays in `cluster_membership`, which owns it,
+    and this consults its verdict instead of deriving a second one.
+
+    Listed only when EVERY stub occurrence of the name in that file is
+    inactive. `error.rs::provide` occurs three times under different gates, and
+    refusing on the first inactive occurrence would block the ACTIVE one — the
+    same conservative direction `fn_belongs_to_cluster` takes when a predicate
+    is undecidable: better a wasted call than a fn nothing can fill."""
+    if cluster is None:
+        return frozenset()
+    every = scan_records(target_src_dir, None)
+    if every is None:      # extractor unavailable — no verdict to enforce
+        return frozenset()
+    active = {(_norm_src_rel(r.get("file", "")), r.get("fn_name", ""))
+              for r in (scan_records(target_src_dir, cluster) or [])}
+    return frozenset(
+        key for key in ((_norm_src_rel(r.get("file", "")), r.get("fn_name", ""))
+                        for r in every)
+        if key not in active)
+
+
+def cluster_scoped_splice(
+    splice: Callable[..., SpliceOutcome],
+    *,
+    inactive: frozenset[tuple[str, str]],
+    target_src_dir: Path,
+    log: Callable[[str], None],
+) -> Callable[..., SpliceOutcome]:
+    """`splice`, refusing any body aimed at a fn this cluster does not compile.
+
+    `collect_impl_blocks_for_cluster` already makes that decision — it narrows
+    `stub_members` to the cluster-active members and the prompt asks for those
+    only. The decision never reached the SPLICE: the model is shown the whole
+    block, answers a gated sibling too, `route_fn_bodies` routes it to a real
+    container, and the splice fills whatever stub it finds. That is how
+    `stable` came to hold a `wrapper.rs::provide` inside
+    `#[cfg(error_generic_member_access)]` — a body its own build never
+    compiled, which the seed then handed to `nightly` as if it were verified.
+
+    Wrapped around the module's ONE splice binding rather than applied at each
+    call site, because the call sites are the reason this leaked: the per-fn
+    route, the free-fn reroute and the frontier scan all consult membership,
+    and the two impl-routed splices did not. A filter written per site is the
+    same fix three times and a fourth site silently omits it."""
+    if not inactive:
+        return splice
+
+    def _guarded(file_path: Path, container: str, fn_name: str, body: str,
+                 where_clause: str | None = None, **kwargs: Any) -> SpliceOutcome:
+        try:
+            rel = _norm_src_rel(str(Path(file_path).relative_to(target_src_dir)))
+        except ValueError:
+            rel = _norm_src_rel(Path(file_path).name)
+        if (rel, fn_name) in inactive:
+            log(f"  [phase-c/impl] refused `{rel}::{fn_name}` — every stub "
+                "occurrence is cfg-gated out of this cluster, so a body here "
+                "is one this build never compiles and the seed would pass on "
+                "unverified.")
+            return SpliceOutcome(False, "not_in_cluster_cfg", 0)
+        return splice(file_path, container, fn_name, body, where_clause, **kwargs)
+
+    return _guarded
+
+
 def fill_impl_blocks(
     deps: ImplFillDeps,
     project_dir: Path,
@@ -266,6 +337,14 @@ def fill_impl_blocks(
         return frozenset(out)
 
     target_src_dir.mkdir(parents=True, exist_ok=True)
+    # Rebound BEFORE any nested route defines itself, so every splice this
+    # module performs — block, file-first, free-fn reroute, last-resort — goes
+    # through the cluster's own membership verdict exactly once.
+    _splice_fn_with_where = cluster_scoped_splice(
+        _splice_fn_with_where,
+        inactive=cluster_inactive_stub_names(
+            target_src_dir, cluster, _scan_unimplemented_records_for_cluster),
+        target_src_dir=target_src_dir, log=_log)
     # This tree's splice+cargo lock (per-tree: parallel clusters don't share).
     _splice_check_lock = _splice_lock_for(target_src_dir)
     # Guards the plain-Python aggregate counters (`attempts_total`,

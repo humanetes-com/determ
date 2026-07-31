@@ -732,3 +732,21 @@ def test_compile_error_digest_empty_when_no_location() -> None:
     assert test_results.compile_error_digest(
         "error: linking with `cc` failed\nerror: could not compile `anyhow`\n"
     ) == (0, [])
+
+
+def test_count_passing_tests_reads_each_shape_it_claims_to() -> None:
+    """The five regex alternatives this parser used to carry, as behaviours.
+    Priority is what the list order encoded: `N passed` anywhere beats every
+    later shape, so a nextest tail decides even when an `N ok` sits earlier."""
+    c = test_results.count_passing_tests
+    assert c("42 passed") == 42                        # cargo-nextest
+    assert c("test result: ok. 5 passed; 0 failed") == 5
+    assert c("42 tests passed") == 42                  # the number before the noun
+    assert c("1 test passed") == 1                     # singular reads the same
+    assert c("passed 7") == 7
+    assert c("9 ok") == 9
+    assert c("9 ok\nand later 3 passed") == 3          # earlier shape wins
+    assert c("") == 0
+    assert c("no recognisable count") == 0
+    # A count must be a whole token: `passed` describing nothing is not one.
+    assert c("all tests passed") == 0

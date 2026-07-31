@@ -39,6 +39,7 @@ from ...application.reconstruct.heal import HealDeps, heal_file
 from ...application.reconstruct.hollow_repair import repair_hollow_bodies
 from ...application.reconstruct.import_repair import repair_missing_imports
 from ...domain.attribution import FailureFrontier
+from ...domain.cfg import CfgSet
 from ...domain.cluster_plan import fill_order
 from ...domain.generation import (
     GenerationRequest,
@@ -1194,6 +1195,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
                         genesis=genesis,
                         functional_req=functional_req,
                         donor_dirs=donor_dirs,
+                        donor_clusters={c.name: c for c in clusters},
                     )
                 except Exception as _ce:
                     self.tel.log(f"  {tag} cluster crashed: {type(_ce).__name__}: {_ce}")
@@ -1303,9 +1305,10 @@ class StaticSkeletonTask2Generator(Task2Generator):
                          for s in cluster_summaries if s.get("ok")]
             _ok_trees = [d for d in _ok_trees if d.exists()]
             _backfilled = 0
+            _by_name = {c.name: c for c in clusters}
             for _tree in _ok_trees:
                 _backfilled += self._backfill_tree(
-                    _tree, [d for d in _ok_trees if d != _tree])
+                    _tree, [d for d in _ok_trees if d != _tree], _by_name)
             if _backfilled:
                 self.tel.log(f"  [ownership] pre-merge backfill: {_backfilled} "
                              "stub body(ies) adopted from sibling clusters.")
@@ -1370,6 +1373,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
         genesis: str,
         functional_req: str,
         donor_dirs: list[Path] | None = None,
+        donor_clusters: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Run Phase A + B + C + D for a single cluster, returning a stats dict.
 
@@ -1493,7 +1497,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
         # cluster's phase C then only fills its cluster-specific remainder and
         # rewrites a seeded body only when its own compile/tests reject it.
         if donor_dirs:
-            _seeded = self._backfill_tree(filled_dir, donor_dirs)
+            _seeded = self._backfill_tree(filled_dir, donor_dirs, donor_clusters)
             if _seeded:
                 self.tel.log(f"  {tag} [ownership] seeded {_seeded} shared fn "
                              f"body(ies) from {len(donor_dirs)} prior "
@@ -2135,7 +2139,17 @@ class StaticSkeletonTask2Generator(Task2Generator):
                              "be refilled).")
         return reverted
 
-    def _backfill_tree(self, tree_dir: Path, donor_dirs: list[Path]) -> int:
+    @staticmethod
+    def _cfg_set_of(cluster: Any) -> CfgSet | None:
+        """A donor cluster's cfg evaluation context, or None when the cluster is
+        unknown — None means 'no verdict', and the merge then trusts the donor
+        exactly as it did before this gate existed."""
+        if cluster is None:
+            return None
+        return CfgSet.of(set(cluster.cfg_true), set(cluster.cfg_false))
+
+    def _backfill_tree(self, tree_dir: Path, donor_dirs: list[Path],
+                       donor_clusters: dict[str, Any] | None = None) -> int:
         """Fill remaining `unimplemented!()` stubs in `tree_dir/src` with the
         bodies the same rel-file carries in `donor_dirs` (earlier donor wins).
         gen_tests siblings are skipped — they are cluster-owned test specs, not
@@ -2144,19 +2158,34 @@ class StaticSkeletonTask2Generator(Task2Generator):
         Bodies are addressed by `FnSlot`, so a donor's `Display::fmt` can never
         land in the target's `Debug::fmt`; where a slot cannot be matched and the
         signature is ambiguous the merge refuses, and the refusals are logged
-        because each one is a stub the model now has to fill for money."""
+        because each one is a stub the model now has to fill for money.
+
+        `donor_clusters` maps a donor dir NAME to its `BuildCluster`, which is
+        what lets the merge withhold bodies the donor's own build never
+        compiled. Absent (or missing a name) the donor is trusted whole, which
+        is the pre-existing behaviour — the seed still runs when the cluster
+        objects are not to hand rather than silently adopting nothing."""
         src_root = tree_dir / "src"
         if not src_root.exists():
             return 0
         adopted = 0
         refused = 0
         layout_skipped = 0
+        cfg_skipped = 0
         imported = 0
+        cfg_by_dir = {
+            dd: self._cfg_set_of((donor_clusters or {}).get(dd.name))
+            for dd in donor_dirs}
         for dst in sorted(src_root.rglob("*.rs")):
             if self.gentests.is_gen_tests_file(dst.name):
                 continue
             rel = dst.relative_to(tree_dir)
             donors: list[str] = []
+            # Built in the SAME pass as `donors` so the two stay positionally
+            # paired: a donor dir without this file contributes neither a text
+            # nor a cfg-set, and a list built per donor DIR would shift every
+            # later donor's gate onto the wrong text.
+            donor_cfgs: list[Any] = []
             for dd in donor_dirs:
                 dp = dd / rel
                 if dp.exists():
@@ -2164,15 +2193,17 @@ class StaticSkeletonTask2Generator(Task2Generator):
                         donors.append(dp.read_text(encoding="utf-8"))
                     except OSError:
                         continue
+                    donor_cfgs.append(cfg_by_dir.get(dd))
             if not donors:
                 continue
             try:
                 text = dst.read_text(encoding="utf-8")
             except OSError:
                 continue
-            _bf = backfill_stub_bodies(text, donors)
+            _bf = backfill_stub_bodies(text, donors, donor_cfgs)
             refused += _bf.ambiguous_skipped
             layout_skipped += _bf.layout_skipped
+            cfg_skipped += _bf.cfg_skipped
             if _bf.filled:
                 dst.write_text(_bf.text, encoding="utf-8")
                 adopted += _bf.filled
@@ -2192,6 +2223,12 @@ class StaticSkeletonTask2Generator(Task2Generator):
                 "they read a type this cluster SHAPES differently (its own "
                 "authored layout wins), so no per-fn fill could repair them "
                 "here; this cluster fills them against its own declarations.")
+        if cfg_skipped:
+            self.tel.log(
+                f"  [ownership] {cfg_skipped} donor body(ies) NOT adopted — the "
+                "donor's own cfg-set never compiles them, so no compiler has "
+                "ever checked them; a body cannot be inherited as verified by "
+                "a cluster that does build it.")
         return adopted
 
     def _post_merge_fill_pass(
