@@ -48,6 +48,7 @@ from pipeline_core.domain.layout_retrigger import (
     classify_crash_retrigger,
     classify_layout_retrigger,
     crash_evidence_confounded,
+    filled_body_text,
     find_fns_referencing,
     inflight_key,
     mechanical_budget_spent,
@@ -420,12 +421,22 @@ def _run_layout_attempt(
     'this attempt was measured'."""
     suite = deps.load_suite(project_dir, cfg_cluster)
     select_pins = make_pin_selector(suite, surface)  # full surface: correct reachability
+    # The bodies the live tree holds RIGHT NOW, read BEFORE the re-author. They
+    # are the only evidence that can contradict a layout the skeleton compiles,
+    # and in a moment they are the very bodies this attempt reverts — so they
+    # have to be captured first or the check has nothing left to read.
+    #
+    # A second enumeration on purpose: the one below runs after the splice has
+    # moved every byte offset in this one, and its records are what locate the
+    # fns to revert. Sharing one would revert against stale spans.
+    filled = filled_body_text(deps.enumerate_fns(filled_crate_dir) or [])
     res = author_layout(
         narrowed, module_name=module_name,
         public_surface=deps.public_surface_text(project_dir, cfg_cluster),
         select_pins=select_pins,
         symbol_inventory=deps.symbol_inventory_text(project_dir, cfg_cluster),
-        deps=deps.author_deps_for(project_dir, cfg_cluster),
+        deps=replace(deps.author_deps_for(project_dir, cfg_cluster),
+                     filled_bodies=lambda: filled),
         extra_guidance=(CRASH_GUIDANCE
                         if cause is LayoutRetriggerCause.RUNTIME_CRASH
                         else ""))
@@ -455,10 +466,17 @@ def _run_layout_attempt(
                                    cause=cause.name,
                                    reason="mechanical splice failure "
                                           "(attempt refunded)")
+        # Name the reason rather than asserting one. "Still did not compile" is
+        # wrong for every rejection the accept path makes on grounds OTHER than
+        # rustc — a broken public contract, or a layout that drops members the
+        # filled bodies read — and a log that mis-attributes those reads as the
+        # model being unable to write compiling Rust.
+        why = next((c.reason for c in res.components if not c.authored), "")
         deps.log(f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: re-author "
-                 f"attempt {attempts[key]} still did not compile.")
+                 f"attempt {attempts[key]} was not accepted"
+                 + (f": {why}" if why else "."))
         return RetriggerResult(fired=True, succeeded=False, cause=cause.name,
-                               reason="re-authoring failed again")
+                               reason=why or "re-authoring failed again")
 
     # Land the new definitions in the tree that is actually built. Its keys
     # are derived from the LIVE TREE's own parsed records, never reused from

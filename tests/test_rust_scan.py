@@ -742,3 +742,227 @@ def test_drop_duplicate_attributes_does_not_merge_distinct_attributes() -> None:
         "fn f() {}\n"
     )
     assert drop_duplicate_attributes(src) == src
+
+
+def test_trait_impl_blocks_identity_is_the_whole_header() -> None:
+    """Distinct impls must stay distinct. Every pair below lives in `anyhow`'s
+    own `error.rs`/`context.rs` and compiles; an identity that reduced them to
+    trait-name-and-self-type would report nine duplicates in two files, and a
+    splice acting on that would delete working code."""
+    from pipeline_core.domain.rust_scan import trait_impl_blocks
+    src = (
+        "impl AsRef<dyn StdError + Send + Sync> for Error {}\n"
+        "impl AsRef<dyn StdError> for Error {}\n"
+        "impl From<Error> for Box<dyn StdError + Send + Sync + 'static> {}\n"
+        "impl From<Error> for Box<dyn StdError + Send + 'static> {}\n"
+        '#[cfg(feature = "std")]\n'
+        "impl<C, E> StdError for ContextError<C, E> {}\n"
+        '#[cfg(not(feature = "std"))]\n'
+        "impl<C, E> StdError for ContextError<C, E> {}\n"
+    )
+    headers = [b.header for b in trait_impl_blocks(src)]
+    assert len(headers) == 6
+    assert len(set(headers)) == 6, "distinct impls collapsed onto one identity"
+
+
+def test_trait_impl_blocks_identity_ignores_only_whitespace() -> None:
+    """The same impl re-wrapped by a formatter is still the same impl."""
+    from pipeline_core.domain.rust_scan import trait_impl_blocks
+    a = trait_impl_blocks("unsafe impl Send for Error {}\n")
+    b = trait_impl_blocks("unsafe   impl\n    Send for\n    Error {}\n")
+    assert [x.header for x in a] == [x.header for x in b]
+
+
+def test_trait_impl_blocks_identity_keeps_the_cfg_string_literal() -> None:
+    """Two impls gated onto different features both compile, and the only text
+    telling them apart is inside the string literal. Blanking quoted bytes —
+    which is what `code_mask` does, comments and strings together — merges
+    them, and a splice acting on that deletes one of two working impls."""
+    from pipeline_core.domain.rust_scan import trait_impl_blocks
+    src = (
+        '#[cfg(feature = "std")]\n'
+        "impl Debug for Error {}\n"
+        '#[cfg(feature = "alloc")]\n'
+        "impl Debug for Error {}\n"
+    )
+    assert len({b.header for b in trait_impl_blocks(src)}) == 2
+
+
+def test_a_for_inside_a_doc_comment_is_not_a_trait_impl() -> None:
+    """Scanning is comment-blind even though the identity is not: a `for` in a
+    doc comment must not turn an inherent impl into a trait impl."""
+    from pipeline_core.domain.rust_scan import trait_impl_blocks
+    src = "impl /* Display for Error */ Error {\n    fn a() {}\n}\n"
+    assert trait_impl_blocks(src) == []
+
+
+def test_trait_impl_blocks_body_does_not_change_the_identity() -> None:
+    """Two impls with the same header are E0119 whatever their bodies say, so a
+    re-authored body must not read as a different impl."""
+    from pipeline_core.domain.rust_scan import trait_impl_blocks
+    one = trait_impl_blocks("impl Debug for Error { fn fmt() { a() } }")
+    two = trait_impl_blocks("impl Debug for Error { fn fmt() { b() } }")
+    assert one[0].header == two[0].header
+
+
+def test_trait_impl_blocks_skips_inherent_impls_and_nested_ones() -> None:
+    """A type may carry any number of inherent impls, so a second one is not a
+    duplicate; and an impl inside another item's braces is not depth 0."""
+    from pipeline_core.domain.rust_scan import trait_impl_blocks
+    src = (
+        "impl Error {\n    fn a(&self) {}\n}\n"
+        "impl Error {\n    fn b(&self) {}\n}\n"
+        "mod inner {\n    impl Debug for Error {}\n}\n"
+        "impl Debug for Error {}\n"
+    )
+    blocks = trait_impl_blocks(src)
+    assert [b.header for b in blocks] == ["impl Debug for Error"]
+
+
+def test_trait_impl_blocks_spans_attributes_and_a_braced_body() -> None:
+    """The span has to start above the attributes: a deletion that leaves a
+    stranded `#[cfg(...)]` gates whatever item follows it."""
+    from pipeline_core.domain.rust_scan import trait_impl_blocks
+    src = (
+        "struct Error;\n"
+        '#[cfg(feature = "std")]\n'
+        "unsafe impl Sync for Error {\n"
+        "    // }  not a closer\n"
+        "}\n"
+        "struct After;\n"
+    )
+    blocks = trait_impl_blocks(src)
+    assert len(blocks) == 1
+    sliced = src[blocks[0].start:blocks[0].end]
+    assert sliced.startswith('#[cfg(feature = "std")]')
+    assert sliced.endswith("}")
+    assert "struct After" not in sliced
+
+
+def test_trait_impl_blocks_reads_past_a_fn_bound_arrow() -> None:
+    """`->` inside the generic list is not a closing angle bracket. Counting it
+    as one ends the parameter list early, and the `for` that makes this a trait
+    impl is then looked for in the wrong text."""
+    from pipeline_core.domain.rust_scan import trait_impl_blocks
+    src = "impl<F: Fn(u8) -> u8> Handler for Wrap<F> {}\n"
+    assert len(trait_impl_blocks(src)) == 1
+
+
+def test_declared_members_reads_struct_fields_through_qualifiers() -> None:
+    """Visibility and a path-qualified field type must not become members.
+    `crate` is followed by `::`, which is a path separator and not a field's
+    type annotation; reading it as one invents a member that every later
+    definition then appears to drop."""
+    from pipeline_core.domain.rust_scan import declared_members
+    src = (
+        "#[repr(C)]\n"
+        "pub(crate) struct ErrorImpl<E = ()> {\n"
+        "    pub(crate) vtable: &'static crate::error::ErrorVTable,\n"
+        "    backtrace: crate::backtrace::Backtrace,\n"
+        "    _error: E,\n"
+        "}"
+    )
+    assert declared_members(src) == frozenset({"vtable", "backtrace", "_error"})
+
+
+def test_declared_members_skips_a_named_fn_pointer_parameter() -> None:
+    """A vtable field may be written `unsafe fn(e: Own<ErrorImpl>)`. `e` is a
+    parameter of the field's TYPE, not a second member — collecting it invents a
+    member for the next authored definition to drop, and the caller acts on
+    exactly that difference."""
+    from pipeline_core.domain.rust_scan import declared_members
+    src = (
+        "struct ErrorVTable {\n"
+        "    object_drop: unsafe fn(e: Own<ErrorImpl>),\n"
+        "    object_ref: unsafe fn(r: Ref<ErrorImpl>) -> Ref<dyn StdError>,\n"
+        "}"
+    )
+    assert declared_members(src) == frozenset({"object_drop", "object_ref"})
+
+
+def test_declared_members_covers_enum_variants_and_their_fields() -> None:
+    from pipeline_core.domain.rust_scan import declared_members
+    src = (
+        "pub(crate) enum ChainState<'a> {\n"
+        "    Linked { next: Option<&'a (dyn StdError + 'static)> },\n"
+        '    #[cfg(feature = "std")]\n'
+        "    Buffered { rest: vec::IntoIter<&'a (dyn StdError + 'static)> },\n"
+        "}"
+    )
+    assert declared_members(src) == frozenset(
+        {"Linked", "next", "Buffered", "rest"})
+
+
+def test_declared_members_is_empty_for_a_tuple_or_unit_shape() -> None:
+    """Neither shape names anything, so neither can lose a name."""
+    from pipeline_core.domain.rust_scan import declared_members
+    assert declared_members("pub struct Error(NonNull<ErrorImpl>);") == frozenset()
+    assert declared_members("struct Quoted<C>(C);") == frozenset()
+    assert declared_members("pub struct Marker;") == frozenset()
+
+
+def test_field_reads_does_not_count_a_method_of_the_same_name() -> None:
+    """`anyhow` has both a public `Error::backtrace()` method and a private
+    `ErrorImpl.backtrace` field. Counting the call would report the field as
+    load-bearing on evidence that says nothing about the layout — measured on
+    the 93-passing tree, 2 calls against 5 real field reads."""
+    from pipeline_core.domain.rust_scan import field_reads
+    src = (
+        "let a = (*this.as_ptr()).backtrace;\n"
+        "let b = err.backtrace();\n"
+        "let c = other . backtrace ();\n"
+        "let d = self.backtrace;\n"
+    )
+    assert field_reads(src, ["backtrace"]) == {"backtrace": 2}
+
+
+def test_field_reads_reports_a_name_it_never_found_as_zero() -> None:
+    """Zero and absent are different answers: a caller has to be able to tell
+    "looked and found none" from "never asked"."""
+    from pipeline_core.domain.rust_scan import field_reads
+    assert field_reads("let x = a.kept;", ["kept", "gone"]) == {
+        "kept": 1, "gone": 0}
+
+
+def test_field_reads_ignores_a_dot_that_is_not_a_field_access() -> None:
+    from pipeline_core.domain.rust_scan import field_reads
+    src = "let r = ..vtable;\nlet s = \"x.vtable\";\n// y.vtable\nlet t = 1.5;\n"
+    assert field_reads(src, ["vtable"]) == {"vtable": 0}
+
+
+def test_declared_member_count_counts_a_tuple_shape_as_storage() -> None:
+    """Rewriting `struct Error { ptr: Own<ErrorImpl> }` as `struct
+    Error(NonNull<ErrorImpl>)` loses the NAME 34 live bodies read and keeps the
+    storage — those bodies can say `.0`. A count that saw only named members
+    would read the re-spelling as a type emptied to nothing."""
+    from pipeline_core.domain.rust_scan import declared_member_count
+    assert declared_member_count("struct Error { ptr: Own<ErrorImpl> }") == 1
+    assert declared_member_count("pub struct Error(NonNull<ErrorImpl>);") == 1
+    assert declared_member_count("struct Pair(u8, Vec<(u8, u8)>);") == 2
+    assert declared_member_count("struct Marker;") == 0
+
+
+def test_declared_member_count_reads_past_a_generic_default() -> None:
+    """`struct Foo<E = ()>(E);` has two parenthesised groups and only the last
+    one is storage."""
+    from pipeline_core.domain.rust_scan import declared_member_count
+    assert declared_member_count("struct Foo<E = ()>(E);") == 1
+
+
+def test_declared_member_count_reads_only_the_first_item_of_an_entry() -> None:
+    """A stored definition is not always one item. The crate-wide layout
+    registry holds `Error` as a struct plus `unsafe impl Send` plus `unsafe impl
+    Sync` under one key; a scan that runs to the end of the blob finds the last
+    impl's `}` and reports the tuple struct as having no storage at all."""
+    from pipeline_core.domain.rust_scan import (
+        declared_member_count,
+        declared_members,
+    )
+    entry = (
+        "#[repr(transparent)]\n"
+        "pub struct Error(core::ptr::NonNull<crate::error::ErrorImpl>);\n"
+        "unsafe impl Send for Error {}\n"
+        "unsafe impl Sync for Error {}"
+    )
+    assert declared_member_count(entry) == 1
+    assert declared_members(entry) == frozenset()

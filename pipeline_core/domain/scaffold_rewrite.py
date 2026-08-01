@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 from pipeline_core.domain.rust_fn_headers import locate_all_fns
 from pipeline_core.domain.rust_lex import code_mask
-from pipeline_core.domain.rust_scan import item_start
+from pipeline_core.domain.rust_scan import item_start, trait_impl_blocks
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,6 +156,7 @@ def replace_surface_definitions(
                 spans.append((*enclosing, rep.new))
                 break
             pos = start + 1  # sig text hit outside any fn header — keep looking
+    spans.extend(_superseded_trait_impls(text, spans))
     ordered = sorted(spans, reverse=True)
     for (start, _, _), (_, prev_end, _) in zip(ordered, ordered[1:], strict=False):
         if start < prev_end:  # overlapping targets — ambiguous, refuse
@@ -163,3 +164,49 @@ def replace_surface_definitions(
     for start, end, new_def in ordered:
         text = text[:start] + new_def + text[end:]
     return RewriteResult(text, True)
+
+
+def _superseded_trait_impls(
+    text: str, spans: list[tuple[int, int, str]],
+) -> list[tuple[int, int, str]]:
+    """Deletion spans for trait impls the file already has and a replacement is
+    about to write again.
+
+    An item's definition is not always one Rust item. The layout registry's
+    entry for `anyhow`'s `Error` is a struct AND the two auto-trait impls the
+    model wrote beside it::
+
+        #[repr(transparent)]
+        pub struct Error(core::ptr::NonNull<crate::error::ErrorImpl>);
+        unsafe impl Send for Error {}
+        unsafe impl Sync for Error {}
+
+    The span such a definition replaces is located by NAME — the `struct Error`
+    declaration — so it is one item wide while the text going into it is three.
+    On 2026-08-01 the crash retrigger re-authored that component into
+    `.skeleton-filled/nightly/src/lib.rs`, which already held the previous
+    install's copy of the two impls just below the struct. They survived the
+    splice: lines 274/275 and 277/278 became four impls of two traits, rustc
+    answered E0119 twice, and the whole cluster went from 93 passing tests to a
+    tree that does not build. The fill loop then spent every iteration of a
+    26-iteration grace window on a compile error no fn body can reach.
+
+    Deleting the older copy is not a judgement call: two impls with the same
+    header never compile, so the splice either drops the loser or lands code
+    that cannot build. Only impls the incoming text re-declares are touched, and
+    only those outside the span it is replacing — an impl already inside the
+    replaced region goes out with it.
+
+    "The same" is header equality, which is deliberately strict: `impl AsRef<dyn
+    StdError> for Error` and `impl AsRef<dyn StdError + Send + Sync> for Error`
+    both live in this crate's `error.rs` and both compile. A splice that treated
+    them as one impl would delete working code to install a duplicate that never
+    was one."""
+    wanted = {b.header for _, _, new_def in spans
+              for b in trait_impl_blocks(new_def)}
+    if not wanted:
+        return []
+    return [(b.start, b.end, "")
+            for b in trait_impl_blocks(text)
+            if b.header in wanted
+            and all(b.end <= s or b.start >= e for s, e, _ in spans)]

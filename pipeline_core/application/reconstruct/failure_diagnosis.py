@@ -301,7 +301,19 @@ def _locations_to_implicated_fns(
             _rec = line_to_fn_record(text, line_no, _recs)
             if _rec:
                 fn_name = _rec["fn_name"]
-        if fn_name is None:
+        # The backward scan is the fallback for a file the extractor never
+        # enumerated — not a second opinion on one it did. It walks up from the
+        # diagnostic to the nearest line that LOOKS like a fn declaration and
+        # cannot tell "inside that fn" from "somewhere after it", so it always
+        # returns a name; `line_to_fn_record` can return None, and that None is
+        # an answer. On 2026-08-01 an E0119 at `src/lib.rs:277` — a top-level
+        # `unsafe impl Send for Error {}`, inside no fn at all — was blamed on
+        # `fn source`, 11 lines above it and behind a `#[cfg]` this build does
+        # not even compile. The compile-blocked frontier narrows to the fns the
+        # compiler implicates, so `nightly` re-dispatched that one fn every
+        # iteration of a 26-iteration grace window while the error it was meant
+        # to fix lived in an item no fn body can reach.
+        if fn_name is None and rel_p not in _recs_by_file:
             lines = text.splitlines()
             for i in range(min(line_no, len(lines)) - 1, -1, -1):
                 if nm := first_fn_decl_name(lines[i]):

@@ -239,3 +239,77 @@ def test_a_wrapped_attribute_is_compared_whole_after_a_re_splice():
         fn_name="provide")])
     assert res.replaced
     assert duplicate_attribute_runs(res.text) == []
+
+
+_ERROR_DECL = (
+    "#[repr(transparent)]\n"
+    "pub struct Error {\n"
+    "    ptr: core::ptr::NonNull<ErrorImpl>,\n"
+    "}\n"
+)
+_AUTO_TRAITS = (
+    "unsafe impl Send for Error {}\n"
+    "unsafe impl Sync for Error {}\n"
+)
+
+
+def test_reauthoring_a_definition_does_not_leave_its_old_trait_impls():
+    """The live-tree incident of 2026-08-01, in miniature.
+
+    A registry definition is not always one item: `Error` is a struct plus the
+    two auto-trait impls written beside it. The span it replaces is located by
+    the `struct Error` DECLARATION, so three items go into a hole one item
+    wide. The previous install's copies stayed put, rustc reported E0119 twice
+    on `src/lib.rs:277`, `nightly` fell from 93 passing tests to a tree that
+    does not build, and no fill route could aim at the offending lines.
+    """
+    live = "pub use anyhow as format_err;\n" + _ERROR_DECL + "\n" + _AUTO_TRAITS
+    new = (
+        "#[repr(transparent)]\n"
+        "pub struct Error(core::ptr::NonNull<crate::error::ErrorImpl>);\n"
+        + _AUTO_TRAITS.rstrip("\n")
+    )
+    res = replace_surface_definitions(live, [DefReplacement(
+        "#[repr(transparent)] pub struct Error { ptr: core::ptr::NonNull<ErrorImpl>, }",
+        new)])
+    assert res.replaced
+    assert res.text.count("impl Send for Error") == 1
+    assert res.text.count("impl Sync for Error") == 1
+    assert "NonNull<crate::error::ErrorImpl>" in res.text
+
+
+def test_a_trait_impl_inside_the_replaced_span_is_not_deleted_twice():
+    """When the locate key already covers the companion impls, they go out with
+    the span being replaced. Treating them as strays as well would delete the
+    text the splice is standing on."""
+    live = _ERROR_DECL + _AUTO_TRAITS + "struct After;\n"
+    new = _ERROR_DECL.rstrip("\n") + "\n" + _AUTO_TRAITS.rstrip("\n")
+    res = replace_surface_definitions(
+        live, [DefReplacement((_ERROR_DECL + _AUTO_TRAITS).strip(), new)])
+    assert res.replaced
+    assert res.text.count("impl Send for Error") == 1
+    assert res.text.rstrip().endswith("struct After;")
+
+
+def test_an_unrelated_trait_impl_survives_the_splice():
+    """Only impls the incoming text re-declares are strays. Anything else in
+    the file is somebody's working code."""
+    live = _ERROR_DECL + "impl Debug for Error {}\n" + _AUTO_TRAITS
+    new = "pub struct Error(NonNull<ErrorImpl>);\n" + _AUTO_TRAITS.rstrip("\n")
+    res = replace_surface_definitions(live, [DefReplacement(
+        "#[repr(transparent)] pub struct Error { ptr: core::ptr::NonNull<ErrorImpl>, }",
+        new)])
+    assert res.replaced
+    assert res.text.count("impl Debug for Error") == 1
+    assert res.text.count("impl Send for Error") == 1
+
+
+def test_a_fn_replacement_deletes_no_impl():
+    """A fn item declares no trait impl, so a body splice must leave every impl
+    in the file exactly where it was."""
+    live = "impl Send for Error {}\nfn provide(&self) -> u8 { unimplemented!() }\n"
+    res = replace_surface_definitions(live, [DefReplacement(
+        "fn provide(&self) -> u8", "fn provide(&self) -> u8 { 0 }",
+        fn_name="provide")])
+    assert res.replaced
+    assert "impl Send for Error {}" in res.text

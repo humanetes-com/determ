@@ -28,7 +28,12 @@ from enum import Enum, auto
 
 from pipeline_core.domain.models import FnLocator, FnRecord
 from pipeline_core.domain.oracle_immutability import production_fns
-from pipeline_core.domain.rust_scan import contains_word
+from pipeline_core.domain.rust_scan import (
+    contains_word,
+    declared_member_count,
+    declared_members,
+    field_reads,
+)
 from pipeline_core.domain.starvation import StarvationCause
 
 # Diagnostics that, when concentrated on the authored private types, mean the
@@ -460,3 +465,60 @@ def find_fns_referencing(
         if any(contains_word(haystack, n) for n in names):
             out.append(FnLocator(f.file, f.fn_name))
     return out
+
+
+def filled_body_text(fn_records: list[FnRecord]) -> str:
+    """The crate's already-written implementation code as one blob — every
+    production fn that currently has a real body.
+
+    Stubs contribute nothing by construction: an `unimplemented!()` body reads
+    no field, which is exactly why a scaffold of them compiles against any
+    layout at all. Oracle fns are excluded (`production_fns`) because a test
+    body reads the PUBLIC surface, and the public surface is not what a
+    re-author is allowed to change."""
+    return "\n".join(
+        f.body_text for f in production_fns(fn_records)
+        if not f.has_unimplemented_body and f.body_text.strip())
+
+
+def dropped_members_in_use(
+    current_def: str, authored_def: str, filled_bodies: str,
+) -> dict[str, int]:
+    """Members the CURRENT definition declares, an AUTHORED replacement does
+    not, and the crate's filled bodies still read — name → read count, reported
+    only when the replacement declares FEWER storage slots than the definition
+    it replaces.
+
+    This is the judgement the compile gate cannot make. A re-authored layout is
+    accepted on the strength of the SKELETON compiling, and a skeleton's bodies
+    are all `unimplemented!()`: no body constructs the type or reads a field, so
+    every layout that merely parses compiles there — including one that has
+    nowhere left to put the crate's data. Measured on `anyhow`/nightly
+    (2026-08-01): a re-author reduced `ErrorVTable` from 7 fn-pointer fields to
+    1 and replaced `ErrorImpl`'s payload field `_error: E` with
+    `PhantomData<E>`, which stores nothing. It compiled, it passed the layout
+    pins — `Error` is a `NonNull` to `ErrorImpl`, so no repr pin can see through
+    it — and the cluster went from 93 passing tests to a tree in which
+    `construct<E>(error: E, …)` has no field to put `error` into. The evidence
+    that says so was already on disk: 12 reads of the dropped vtable slots and
+    20 of the dropped `ErrorImpl` fields, in bodies that compiled.
+
+    The slot-count condition is what separates an EMPTIED layout from a merely
+    re-shaped one, and it is not optional. A re-trigger reverts every fn that
+    references the component precisely so those fns can be re-written against
+    the new shape — so "a filled body reads this member" is the normal state of
+    affairs for any genuine redesign, and vetoing on it alone would refuse
+    almost every one, turning the crate's escape hatch into a no-op. Rewriting
+    `struct ErrorImpl { vtable: u8 }` as `struct ErrorImpl { msg: String }`
+    trades one slot for one and is exactly the redesign this mechanism exists to
+    obtain. Reducing seven fn pointers to one is not a trade.
+
+    A re-SPELLING is not a reduction either, which is why the count comes from
+    `declared_member_count`: `struct Error { ptr: Own<ErrorImpl> }` written as
+    `struct Error(NonNull<ErrorImpl>)` loses the name 34 bodies read while
+    keeping the storage, and those bodies can say `.0`."""
+    if (declared_member_count(authored_def)
+            >= declared_member_count(current_def)):
+        return {}
+    gone = declared_members(current_def) - declared_members(authored_def)
+    return {n: c for n, c in field_reads(filled_bodies, gone).items() if c}

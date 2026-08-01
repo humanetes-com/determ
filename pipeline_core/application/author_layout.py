@@ -30,6 +30,7 @@ from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.failure_classification import first_diagnostic
 from pipeline_core.domain.layout_chunking import plan_author_chunks
 from pipeline_core.domain.layout_probe import LayoutProbe, build_layout_probe
+from pipeline_core.domain.layout_retrigger import dropped_members_in_use
 from pipeline_core.domain.private_surface import (
     PrivateSurface,
     PrivateSurfaceItem,
@@ -57,6 +58,13 @@ class AuthorLayoutDeps:
     # Layout-pin gate: install probe source into the skeleton (None removes it).
     # Absent ⇒ pins stay advisory, exactly as before the gate existed.
     write_pin_probe: Callable[[str | None], None] | None = None
+    # The crate's ALREADY-FILLED bodies (the live tree cargo builds), as one
+    # blob — the only evidence that can contradict a layout the skeleton
+    # compiles, since a skeleton's bodies are all `unimplemented!()`. Supplied
+    # by the RE-TRIGGER only: at bake time nothing is filled yet, so there is
+    # nothing to contradict and the veto below has no evidence to work from.
+    # Absent ⇒ no veto, exactly as before it existed.
+    filled_bodies: Callable[[], str] | None = None
     max_attempts: int = 3
     # M6 chunking: components above `single_shot_max` items are authored in
     # chunks (types first, then fns) instead of demanding one 40-block reply.
@@ -140,15 +148,20 @@ def _splice_component(
     an authored one would not compile. The reason NAMES the failing uid/file:
     a missing block, an unreadable file and a locate miss are three different
     bugs and collapsing them into one message hides which one is happening."""
+    filled = deps.filled_bodies() if deps.filled_bodies is not None else ""
     for uid, it in zip(component_uids(items), items, strict=True):
-        if it.kind is not SurfaceItemKind.PUB_FIELDS:
-            continue
         block = authored.get(uid)
-        if block is None:
-            return {}, f"authored blocks missing uid {uid}"
-        contract_err = _public_contract_broken(uid, it, block)
-        if contract_err:
-            return {}, contract_err
+        if it.kind is SurfaceItemKind.PUB_FIELDS:
+            if block is None:
+                return {}, f"authored blocks missing uid {uid}"
+            contract_err = _public_contract_broken(uid, it, block)
+            if contract_err:
+                return {}, contract_err
+        if filled and block is not None:
+            evicted = dropped_members_in_use(
+                it.definition, block.definition, filled)
+            if evicted:
+                return {}, _dropped_members_reason(uid, evicted)
     per_file, per_file_uids, plan_err = definition_replacements(items, authored)
     if plan_err:
         return {}, plan_err
@@ -188,6 +201,22 @@ def _public_contract_broken(
         return (f"authored {uid} marks a field `pub`, widening the public API "
                 "— every field of this struct must stay private")
     return ""
+
+
+def _dropped_members_reason(uid: str, evicted: dict[str, int]) -> str:
+    """Retry hint for a layout that removed something the crate is using. Names
+    every member and its read count: the model has to be able to tell which of
+    its choices to undo, and a bare "you dropped a field" leaves it guessing
+    across a component that can carry thirty items."""
+    worst = sorted(evicted.items(), key=lambda kv: (-kv[1], kv[0]))
+    detail = ", ".join(f"`{n}` ({c} read{'s' if c != 1 else ''})"
+                       for n, c in worst)
+    return (f"authored {uid} drops member(s) this crate's already-written "
+            f"bodies still read: {detail}. Those bodies are what the layout "
+            "has to be able to hold — a definition they cannot be written "
+            "against is not a simpler design, it is an empty one. Keep these "
+            "members (the name as well as the storage) and redesign around "
+            "them.")
 
 
 def _head_text(h: TypeHeader | None) -> str:

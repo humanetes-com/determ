@@ -299,3 +299,94 @@ def test_partial_registry_coverage_puts_fixed_defs_in_the_prompt_verbatim():
                   registry={"Other": fixed})
     assert d.prompts                       # the model WAS asked
     assert "struct Other { tag: u32 }" not in d.prompts[0]   # not this component's uid
+
+
+_VTABLE_FROZEN = ("struct ErrorVTable { object_drop: unsafe fn(u8), "
+                  "object_ref: unsafe fn(u8) -> u8, "
+                  "object_downcast: unsafe fn(u8) -> u8 }")
+# the shape of the live incident: seven fn pointers reduced to one
+_EMPTIED = ('<LAYOUT_ITEM name="ErrorVTable" kind="struct">'
+            'struct ErrorVTable { object_drop: unsafe fn(u8) }</LAYOUT_ITEM>')
+# a real redesign of the same type: the slots are traded, not removed
+_RESHAPED = ('<LAYOUT_ITEM name="ErrorVTable" kind="struct">'
+             'struct ErrorVTable { drop_fn: unsafe fn(u8), ref_fn: unsafe fn(u8) -> u8, '
+             'cast_fn: unsafe fn(u8) -> u8 }</LAYOUT_ITEM>')
+
+
+def _vtable_surface():
+    types = [
+        TypeRecord(file="src/lib.rs", kind="struct", name="Error", is_pub=True,
+                   definition="pub struct Error { inner: Box<ErrorVTable> }"),
+        TypeRecord(file="src/error.rs", kind="struct", name="ErrorVTable",
+                   is_pub=False, definition=_VTABLE_FROZEN),
+    ]
+    return classify_private_surface(types, [], cfg_cluster="stable")
+
+
+def _reads_the_vtable():
+    return ("unsafe { (vtable(p).object_ref)(e) }\n"
+            "let f = vtable(p).object_downcast;\n")
+
+
+def _vtable_deps(reply, compiles=(True, True, True)):
+    d = _Deps(reply, list(compiles))
+    d.files = {"src/error.rs": _VTABLE_FROZEN + "\n"}
+    return d
+
+
+def test_layout_dropping_a_member_the_filled_bodies_read_is_refused():
+    """The 2026-08-01 `anyhow`/nightly defect. A re-author is accepted on the
+    strength of the SKELETON compiling, and a skeleton's bodies are all
+    `unimplemented!()` — none constructs the type, none reads a field — so any
+    layout that merely parses compiles there. That day one reduced
+    `ErrorVTable` from 7 fn-pointer fields to 1 and replaced `ErrorImpl`'s
+    payload with `PhantomData`; it compiled, it cleared the layout pins (`Error`
+    is a `NonNull` to `ErrorImpl`, so no repr pin can see through it), and the
+    cluster fell from 93 passing tests to a tree in which `construct<E>(error:
+    E, ...)` has nowhere to put `error`."""
+    d = _vtable_deps(_EMPTIED)
+    deps = dataclasses.replace(d.deps(), filled_bodies=_reads_the_vtable)
+    res = author_layout(_vtable_surface(), module_name="anyhow", public_surface="",
+                        select_pins=_has_pins, symbol_inventory="", deps=deps)
+    assert not res.all_authored
+    # the working tree is left exactly as it was — a refused layout must not be
+    # half-landed, which is what made the live incident unrecoverable
+    assert d.files["src/error.rs"] == _VTABLE_FROZEN + "\n"
+
+
+def test_the_refusal_names_the_member_back_to_the_model():
+    """A rejection the model cannot act on just burns the retry budget. The
+    hint has to name the member and its read count: a component can carry
+    thirty items and "you dropped a field" leaves the model guessing."""
+    d = _vtable_deps(_EMPTIED)
+    deps = dataclasses.replace(d.deps(), filled_bodies=_reads_the_vtable)
+    author_layout(_vtable_surface(), module_name="anyhow", public_surface="",
+                  select_pins=_has_pins, symbol_inventory="", deps=deps)
+    assert len(d.prompts) > 1, "a refused layout must be retried"
+    assert "`object_ref` (1 read)" in d.prompts[1]
+    assert "`object_downcast` (1 read)" in d.prompts[1]
+    assert "PREVIOUS ATTEMPT FAILED" in d.prompts[1]
+
+
+def test_a_redesign_that_trades_slots_rather_than_removing_them_is_accepted():
+    """The check must convict the emptied layout and nothing else. A re-trigger
+    reverts every fn that references the component so those fns can be rewritten
+    against the new shape — "a filled body reads this member" is therefore the
+    normal state of a genuine redesign, and vetoing on it alone would refuse
+    almost every one, turning the crate's escape hatch into a no-op."""
+    d = _vtable_deps(_RESHAPED, compiles=(True,))
+    deps = dataclasses.replace(d.deps(), filled_bodies=_reads_the_vtable)
+    res = author_layout(_vtable_surface(), module_name="anyhow", public_surface="",
+                        select_pins=_has_pins, symbol_inventory="", deps=deps)
+    assert res.all_authored
+    assert "drop_fn" in d.files["src/error.rs"]
+
+
+def test_bake_time_has_no_filled_bodies_and_so_no_veto():
+    """At bake time every body is a stub, so there is no evidence a layout can
+    contradict. The gate must stay exactly as it was — the emptied layout is
+    still the right answer when nothing has been written against it."""
+    d = _vtable_deps(_EMPTIED, compiles=(True,))
+    res = author_layout(_vtable_surface(), module_name="anyhow", public_surface="",
+                        select_pins=_has_pins, symbol_inventory="", deps=d.deps())
+    assert res.all_authored

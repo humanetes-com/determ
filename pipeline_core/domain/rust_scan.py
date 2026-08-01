@@ -11,7 +11,7 @@ deterministic token / substring scanning — never regex — mirroring the exist
 from __future__ import annotations
 
 import string
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 
 from .rust_idents import declares_fn
@@ -1226,6 +1226,432 @@ def locate_item_declaration(
             return span
         nested.append(span)
     return nested[0] if len(nested) == 1 else None
+
+
+_MEMBER_KINDS = frozenset({"struct", "enum", "union"})
+
+
+def _definition_terminator(
+    text: str, mask: Sequence[bool],
+) -> tuple[str, int] | None:
+    """Where the FIRST item in `text` ends: `("{", i)` for a braced shape,
+    `(";", i)` for a tuple or unit one, None if it ends nowhere.
+
+    First, not last, because a stored definition is not always one item. The
+    crate-wide layout registry holds `Error` as a struct plus `unsafe impl Send`
+    plus `unsafe impl Sync` under one key, and a scan that runs to the end of
+    the blob reads the last impl's `}` as the struct's own shape.
+
+    `(`/`[` nesting is tracked because a generic default (`<E = ()>`) and an
+    outer attribute both sit ahead of the body."""
+    nest = 0
+    for i, ch in enumerate(text):
+        if mask[i]:
+            continue
+        if ch in "([":
+            nest += 1
+        elif ch in ")]":
+            nest -= 1
+        elif nest == 0 and ch == "{":
+            return "{", i
+        elif nest == 0 and ch == ";":
+            return ";", i
+    return None
+
+
+def _definition_body_open(text: str, mask: Sequence[bool]) -> int | None:
+    """Offset of the `{` opening a type definition's body, or None for a tuple
+    or unit shape."""
+    end = _definition_terminator(text, mask)
+    return end[1] if end is not None and end[0] == "{" else None
+
+
+def _definition_kind(text: str, mask: Sequence[bool], end: int) -> str:
+    """`struct` / `enum` / `union` read off a definition's head, or ""."""
+    i = 0
+    while i < end:
+        if mask[i] or text[i] not in _IDENT_START:
+            i += 1
+            continue
+        j = i
+        while j < end and not mask[j] and text[j] in _IDENT_CHARS:
+            j += 1
+        if text[i:j] in _MEMBER_KINDS:
+            return text[i:j]
+        i = j
+    return ""
+
+
+def declared_members(definition: str) -> frozenset[str]:
+    """Every member name a struct / enum / union DEFINITION declares: its field
+    names, and for an enum its variant names plus each variant's named fields.
+
+    Tuple and unit shapes contribute nothing — they declare no names that a
+    later definition could drop.
+
+    Fields are read at brace depth 1 (depth 2 inside an enum variant) and only
+    outside `(`/`[` nesting. That nesting rule is what keeps a NAMED fn-pointer
+    parameter out: a vtable may be written `object_drop: unsafe fn(e:
+    Own<ErrorImpl>)`, which declares the member `object_drop` and not a member
+    `e`. Collecting `e` would invent a member for the next authored definition
+    to "drop", and the caller's whole use of this function is to act on what a
+    re-author dropped.
+
+    A `:` followed by another `:` is a path separator rather than a field's type
+    annotation — `vtable: &'static crate::error::ErrorVTable` declares one
+    member, and `crate` is not it."""
+    mask = code_mask(definition)
+    brace = _definition_body_open(definition, mask)
+    if brace is None:
+        return frozenset()
+    kind = _definition_kind(definition, mask, brace)
+    if kind not in _MEMBER_KINDS:
+        return frozenset()
+    field_depth = 2 if kind == "enum" else 1
+    out: set[str] = set()
+    n = len(definition)
+    depth = 0
+    nest = 0
+    i = brace
+    while i < n:
+        if mask[i]:
+            i += 1
+            continue
+        ch = definition[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                break
+        elif ch in "([":
+            nest += 1
+        elif ch in ")]":
+            nest -= 1
+        elif nest == 0 and ch in _IDENT_START:
+            j = i
+            while j < n and not mask[j] and definition[j] in _IDENT_CHARS:
+                j += 1
+            k = j
+            while k < n and definition[k] in " \t\r\n":
+                k += 1
+            annotated = (k < n and definition[k] == ":"
+                         and not definition.startswith("::", k))
+            is_field = depth == field_depth and annotated
+            # An enum's variant name carries no type annotation — it is
+            # followed by its own payload, a comma, a discriminant or the
+            # closing brace.
+            is_variant = (kind == "enum" and depth == 1 and not annotated
+                          and k < n and definition[k] in "{(,=}")
+            if is_field or is_variant:
+                out.add(definition[i:j])
+            i = j
+            continue
+        i += 1
+    return frozenset(out)
+
+
+def _tuple_arity(text: str, mask: Sequence[bool], semi: int) -> int:
+    """Positional field count of the tuple shape terminated by the `;` at
+    `semi` — the `(…)` group closing just before it.
+
+    Found by walking back from that `;` rather than forward from the head,
+    because a generic default carries its own parentheses: in `struct Foo<E =
+    ()>(E);` the first group is the default and the storage is the second. The
+    `;` is the caller's, not the end of the text — a registry entry may hold
+    further items after this one."""
+    close = -1
+    for i in range(semi - 1, -1, -1):
+        if mask[i] or text[i] in " \t\r\n":
+            continue
+        close = i
+        break
+    if close < 0 or text[close] != ")":
+        return 0
+    depth = 0
+    for i in range(close, -1, -1):
+        if mask[i]:
+            continue
+        if text[i] == ")":
+            depth += 1
+        elif text[i] == "(":
+            depth -= 1
+            if depth == 0:
+                inner = text[i + 1:close]
+                if not inner.strip():
+                    return 0
+                nest = 0
+                fields = 1
+                for k, ch in enumerate(inner):
+                    if mask[i + 1 + k]:
+                        continue
+                    if ch in "([<":
+                        nest += 1
+                    elif ch in ")]>":
+                        nest -= 1
+                    elif ch == "," and nest == 0:
+                        fields += 1
+                return fields
+    return 0
+
+
+def declared_member_count(definition: str) -> int:
+    """How many storage slots a definition declares — named members for a
+    braced shape, positional fields for a tuple one.
+
+    Counting the tuple form is the point. `struct Error { ptr: Own<ErrorImpl> }`
+    rewritten as `struct Error(NonNull<ErrorImpl>)` drops the NAME `ptr` while
+    keeping the storage, and a caller that reads only `declared_members` sees
+    that as a type emptied to nothing. It is a re-spelling, and the bodies that
+    said `.ptr` can say `.0`."""
+    mask = code_mask(definition)
+    end = _definition_terminator(definition, mask)
+    if end is None:
+        return 0
+    if end[0] == "{":
+        return len(declared_members(definition))
+    return _tuple_arity(definition, mask, end[1])
+
+
+def field_reads(text: str, names: Iterable[str]) -> dict[str, int]:
+    """How many times each of `names` is read as a FIELD of something in
+    `text` — a `.name` that is not a call.
+
+    Excluding `.name(` is what separates a field from a method that happens to
+    share its name. `anyhow`'s live tree writes both `err.backtrace()` (the
+    public method on `Error`) and `(*this.as_ptr()).backtrace` (the field on
+    `ErrorImpl`); counting the calls would report a field as load-bearing on the
+    strength of a method that says nothing about the layout. Measured on the
+    93-passing tree (2026-08-01), `backtrace` has 2 calls against 5 field reads,
+    and every other member of that component has 0 calls.
+
+    Names absent from `text` are reported as 0 rather than omitted, so a caller
+    can tell "looked and found none" from "never asked"."""
+    wanted = {n for n in names if n}
+    found = dict.fromkeys(wanted, 0)
+    if not wanted:
+        return found
+    mask = code_mask(text)
+    n = len(text)
+    i = 0
+    while i < n:
+        if mask[i] or text[i] != ".":
+            i += 1
+            continue
+        if text.startswith("..", i):
+            # A range or a struct-update base (`..vtable`, `..Default::default()`)
+            # — the second dot would otherwise read as a field access on nothing.
+            i += 2
+            continue
+        j = i + 1
+        while j < n and text[j] in " \t\r\n":
+            j += 1
+        if j >= n or mask[j] or text[j] not in _IDENT_START:
+            i += 1
+            continue
+        e = j
+        while e < n and not mask[e] and text[e] in _IDENT_CHARS:
+            e += 1
+        word = text[j:e]
+        k = e
+        while k < n and text[k] in " \t\r\n":
+            k += 1
+        if word in wanted and not (k < n and text[k] == "("):
+            found[word] += 1
+        i = e
+    return found
+
+
+@dataclass(frozen=True, slots=True)
+class TraitImplBlock:
+    """One ``impl <Trait> for <Type>`` item. `header` is its identity — see
+    `trait_impl_blocks` for what that does and does not compare."""
+
+    header: str
+    start: int
+    end: int
+
+
+def trait_impl_blocks(text: str) -> list[TraitImplBlock]:
+    """Every ``impl <Trait> for <Type>`` block written at brace depth 0, in file
+    order, spanning outer attributes and qualifiers through the closing brace.
+
+    `header` is everything from the start of the item to the opening brace of
+    its body — attributes, `unsafe`, generics, trait, self type — verbatim but
+    for whitespace runs collapsed to one space. Two blocks with equal headers
+    are the same impl written twice, which is E0119 and does not compile. That
+    is what makes the list actionable: text about to be spliced into a file that
+    already holds one of its impls can only build if the older copy goes.
+
+    Verbatim includes comments and string literals. Blanking comments would be
+    convenient and blanking strings comes with it in `code_mask`, which reduces
+    `#[cfg(feature = "std")]` and `#[cfg(feature = "alloc")]` to one header —
+    two impls that are gated apart and both compile. A comment inside an impl
+    header instead costs a missed match, and a missed match is the E0119 the
+    caller would have had regardless.
+
+    The header is compared WHOLE, on purpose. A shorter identity — trait name
+    and self type, the pair rustc's coherence rules ultimately reduce to — is
+    wrong here because reducing them is a type-system judgement this scanner
+    cannot make. Measured on the live `anyhow` tree (2026-08-01), it collapses
+    `impl AsRef<dyn StdError + Send + Sync> for Error` onto `impl AsRef<dyn
+    StdError> for Error`, all three `impl From<…> for Box<…>`, and the two
+    cfg-gated `impl StdError for ContextError<…>` — nine distinct impls in two
+    files, every one of which compiles today. Deleting a working impl is far
+    worse than leaving a duplicate: the duplicate is a compile error the caller
+    already had, the deletion is silent.
+
+    Inherent impls (`impl Error { … }`) are excluded. A type may carry any
+    number of them, so a second one is not evidence of anything.
+
+    Depth 0 only. Coherence is crate-wide, so a duplicate written inside an
+    inline `mod` is still E0119 and is still missed here — again, degrading to
+    the compile error rather than to a wrong edit."""
+    mask = code_mask(text)
+    out: list[TraitImplBlock] = []
+    n = len(text)
+    i = 0
+    depth = 0
+    while i < n:
+        if mask[i]:
+            i += 1
+            continue
+        ch = text[i]
+        if ch == "{":
+            depth += 1
+            i += 1
+            continue
+        if ch == "}":
+            depth -= 1
+            i += 1
+            continue
+        if ch not in _IDENT_START:
+            i += 1
+            continue
+        j = i
+        while j < n and not mask[j] and text[j] in _IDENT_CHARS:
+            j += 1
+        if depth != 0 or text[i:j] != "impl":
+            i = j
+            continue
+        brace = _impl_body_open(text, mask, j)
+        end = None if brace is None else _matching_brace(text, mask, brace)
+        start = item_start(text, mask, i)
+        if end is not None and brace is not None and _is_trait_impl(
+                _blank_comments(text, mask, j, brace)):
+            out.append(TraitImplBlock(
+                " ".join(text[start:brace].split()), start, end))
+        i = j if end is None else end
+    return out
+
+
+def _blank_comments(
+    text: str, mask: Sequence[bool], start: int, end: int,
+) -> str:
+    """`text[start:end]` with every commented or quoted byte blanked out.
+
+    For SCANNING only — a `for` inside a doc comment must not make an inherent
+    impl look like a trait impl. The identity that comes out of the same span is
+    built from the raw bytes; see `trait_impl_blocks`."""
+    return "".join(" " if mask[k] else text[k] for k in range(start, end))
+
+
+def _impl_body_open(text: str, mask: Sequence[bool], start: int) -> int | None:
+    """Offset of the `{` opening an impl body, scanning from just past `impl`.
+
+    `(`/`[` nesting is tracked for the same reason `_item_end` tracks it: an
+    associated const's array length or a `Fn(..)` bound sits in the header."""
+    n = len(text)
+    nest = 0
+    i = start
+    while i < n:
+        if mask[i]:
+            i += 1
+            continue
+        c = text[i]
+        if c in "([":
+            nest += 1
+        elif c in ")]":
+            nest -= 1
+        elif nest == 0 and c == "{":
+            return i
+        elif nest == 0 and c == ";":
+            return None
+        i += 1
+    return None
+
+
+def _matching_brace(text: str, mask: Sequence[bool], open_at: int) -> int | None:
+    """Offset just past the `}` closing the block opened at `open_at`."""
+    depth = 0
+    for i in range(open_at, len(text)):
+        if mask[i]:
+            continue
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return None
+
+
+def _is_trait_impl(header: str) -> bool:
+    """True when the text between `impl` and the body brace names a trait — i.e.
+    it carries a `for` at bracket depth 0, past the generic parameter list.
+
+    Depth matters: `impl<T> Trait for Vec<T> where T: Iterator<Item = for<'a>
+    fn(&'a u8)>` holds three `for`s and only the first at depth 0 is the one
+    that makes this a trait impl rather than an inherent one. A `where` clause
+    at depth 0 ends the search — everything after it is bounds."""
+    rest = _skip_generics(header)
+    depth = 0
+    i = 0
+    while i < len(rest):
+        c = rest[i]
+        if c == "-" and rest[i + 1:i + 2] == ">":   # a return arrow, not a close
+            i += 2
+            continue
+        if c in "<([":
+            depth += 1
+        elif c in ">)]":
+            depth -= 1
+        elif depth == 0 and _word_at(rest, i, "for"):
+            return True
+        elif depth == 0 and _word_at(rest, i, "where"):
+            return False
+        i += 1
+    return False
+
+
+def _skip_generics(header: str) -> str:
+    """`header` past its `impl` generic parameter list, if it has one."""
+    s = header.lstrip()
+    if not s.startswith("<"):
+        return s
+    depth = 0
+    i = 0
+    while i < len(s):
+        if s[i] == "-" and s[i + 1:i + 2] == ">":
+            i += 2
+            continue
+        if s[i] == "<":
+            depth += 1
+        elif s[i] == ">":
+            depth -= 1
+            if depth == 0:
+                return s[i + 1:]
+        i += 1
+    return s
+
+
+def _word_at(text: str, i: int, word: str) -> bool:
+    """True when `word` starts at `i` as a whole identifier token."""
+    if not text.startswith(word, i):
+        return False
+    before = text[i - 1] if i else " "
+    after = text[i + len(word):i + len(word) + 1] or " "
+    return before not in _IDENT_CHARS and after not in _IDENT_CHARS
 
 
 def _iter_item_headers(

@@ -337,3 +337,86 @@ def test_bookkeeping_rows_are_never_mistaken_for_a_component():
          inflight_key(mechanical_key(_MEGA)): 1})
     assert refunded == ()
     assert settled == {mechanical_key(_MEGA): 1}
+
+
+def test_dropped_members_in_use_convicts_an_emptied_layout() -> None:
+    """The 2026-08-01 `anyhow`/nightly incident, in miniature. A re-author cut
+    `ErrorVTable` from seven fn-pointer fields to one; the skeleton compiled
+    (its bodies are all `unimplemented!()`, so none reads a field) and the
+    cluster went from 93 passing tests to a tree that cannot dispatch."""
+    from pipeline_core.domain.layout_retrigger import dropped_members_in_use
+    current = (
+        "struct ErrorVTable {\n"
+        "    object_drop: unsafe fn(Own<ErrorImpl>),\n"
+        "    object_ref: unsafe fn(Ref<ErrorImpl>) -> Ref<dyn StdError>,\n"
+        "    object_downcast: unsafe fn(Ref<ErrorImpl>, TypeId) -> Option<Ref<()>>,\n"
+        "}"
+    )
+    authored = (
+        "pub(crate) struct ErrorVTable {\n"
+        "    object_drop: unsafe fn(core::ptr::NonNull<ErrorImpl>),\n"
+        "}"
+    )
+    bodies = (
+        "unsafe { (vtable(p).object_ref)(e) }\n"
+        "let f = vtable(p).object_downcast;\n"
+        "unsafe { (vtable(p).object_downcast)(e, target) }\n"
+    )
+    assert dropped_members_in_use(current, authored, bodies) == {
+        "object_ref": 1, "object_downcast": 2}
+
+
+def test_dropped_members_in_use_ignores_a_member_nothing_reads() -> None:
+    """`object_backtrace` was dropped by the same re-author and is gated behind
+    a cfg this build does not compile, so no body reads it. A member the crate
+    is not using is not evidence against a redesign — the whole point of the
+    re-trigger is that the model may drop what it does not need."""
+    from pipeline_core.domain.layout_retrigger import dropped_members_in_use
+    current = "struct V { kept: u8, object_backtrace: unsafe fn(u8) -> u8 }"
+    authored = "struct V { kept: u8 }"
+    assert dropped_members_in_use(current, authored, "let x = v.kept;") == {}
+
+
+def test_dropped_members_in_use_passes_an_unchanged_definition() -> None:
+    from pipeline_core.domain.layout_retrigger import dropped_members_in_use
+    same = "struct ErrorImpl<E = ()> { vtable: &'static V, backtrace: B, _error: E }"
+    bodies = "let a = x.vtable; let b = x.backtrace; let c = x._error;"
+    assert dropped_members_in_use(same, same, bodies) == {}
+
+
+def test_filled_body_text_excludes_stubs_and_the_oracle() -> None:
+    """A stub reads no field by construction — that is exactly why a scaffold of
+    them compiles against any layout, and why counting one as evidence would
+    make the check as blind as the compile gate it exists to backstop."""
+    from pipeline_core.domain.layout_retrigger import filled_body_text
+    records = [
+        FnRecord(file="src/error.rs", fn_name="object_ref",
+                 body_text="unsafe { (vtable(p).object_ref)(e) }"),
+        FnRecord(file="src/error.rs", fn_name="construct",
+                 body_text=" unimplemented!() ", has_unimplemented_body=True),
+        FnRecord(file="tests/test_downcast.rs", fn_name="test_downcast",
+                 body_text="let _ = err.backtrace;", is_test=True),
+    ]
+    text = filled_body_text(records)
+    assert "object_ref" in text
+    assert "unimplemented" not in text
+    assert "err.backtrace" not in text
+
+
+def test_dropped_members_in_use_allows_a_redesign_that_trades_slots() -> None:
+    """A re-trigger reverts every fn referencing the component so those fns can
+    be rewritten against the new shape, so a filled body reading a renamed
+    member is the NORMAL state of a genuine redesign. Convicting on that alone
+    would refuse nearly every one and turn the escape hatch into a no-op."""
+    from pipeline_core.domain.layout_retrigger import dropped_members_in_use
+    current = "struct ErrorImpl { vtable: u8 }"
+    authored = "struct ErrorImpl { msg: String }"
+    assert dropped_members_in_use(current, authored, "let v = x.vtable;") == {}
+
+
+def test_dropped_members_in_use_allows_a_named_to_tuple_respelling() -> None:
+    from pipeline_core.domain.layout_retrigger import dropped_members_in_use
+    current = "pub struct Error { ptr: Own<ErrorImpl> }"
+    authored = "#[repr(transparent)]\npub struct Error(NonNull<ErrorImpl>);"
+    bodies = "let p = self.ptr; drop(other.ptr);"
+    assert dropped_members_in_use(current, authored, bodies) == {}
