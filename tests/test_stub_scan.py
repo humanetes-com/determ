@@ -64,3 +64,26 @@ def test_scan_with_cfg_reports_none_when_the_extractor_is_unavailable(tmp_path) 
     (tmp_path / "lib.rs").write_text("fn stub() { unimplemented!() }\n", encoding="utf-8")
     out = scan_unimplemented_with_cfg(tmp_path, enumerate_fns=lambda _p: None)
     assert out == [(("lib.rs", "stub"), None)]
+
+
+def test_scan_never_returns_a_stub_in_an_oracle_file() -> None:
+    """A stub is a fill target by definition, and no fill may rewrite a test.
+    On 2026-08-01 a layout retrigger reverted `tests/common/mod.rs::bail_error`
+    and `tests/test_context.rs::make_chain` to `unimplemented!()`; offering them
+    back would have asked the model to re-author the specification. Both scan
+    forms must refuse them while still returning the production stub."""
+    recs: list[dict[str, Any]] = [
+        {"file": "tests/common/mod.rs", "fn_name": "bail_error",
+         "has_unimplemented_body": True, "body_text": "unimplemented!()"},
+        {"file": "tests/test_context.rs", "fn_name": "make_chain",
+         "has_unimplemented_body": True, "body_text": "unimplemented!()"},
+        {"file": "src/error.gen_tests_1.rs", "fn_name": "fmt",
+         "has_unimplemented_body": True, "body_text": "unimplemented!()"},
+        {"file": "src/error.rs", "fn_name": "chain",
+         "has_unimplemented_body": True, "body_text": "unimplemented!()"},
+    ]
+    enumerate_fns = lambda _d: recs        # noqa: E731
+    assert scan_unimplemented_functions(
+        Path("."), enumerate_fns=enumerate_fns) == [("src/error.rs", "chain")]
+    assert [loc for loc, _cfg in scan_unimplemented_with_cfg(
+        Path("."), enumerate_fns=enumerate_fns)] == [("src/error.rs", "chain")]

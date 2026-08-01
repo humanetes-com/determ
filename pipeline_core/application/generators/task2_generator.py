@@ -652,7 +652,7 @@ class StaticFileListTask2Generator(Task2Generator):
             file_paths = [p for p in file_paths if p.startswith(module_dir_rel)]
         file_paths = [p for p in file_paths if p not in existing_test_files]
 
-        # FR-010: put entry point first; remaining order updated dynamically after each generation.
+        # Put the entry point first; remaining order updated dynamically after each generation.
         cargo_toml = (project_dir / module_dir_rel / "Cargo.toml") if module_dir_rel \
                      else (project_dir / "Cargo.toml")
         entry_point = self.ws.crate_entry_point(cargo_toml, module_dir_rel, set(file_paths))
@@ -904,7 +904,7 @@ Functional requirements:
 {test_files_section}{_w_ctx}{prev_files_section}
 Generate the implementation for `{file_path}` (this call writes ONLY that file).
 """
-            # FR-012: per-file retry — qwen3 thinking mode sometimes returns empty output.
+            # Per-file retry — qwen3 thinking mode sometimes returns empty output.
             _per_file_attempts = 2
             for _attempt in range(_per_file_attempts):
                 response = self.llm.ask(prompt, model=self.cfg.task2_model)
@@ -929,7 +929,7 @@ Generate the implementation for `{file_path}` (this call writes ONLY that file).
                 else:
                     self.tel.log(f"  WARNING: no output for `{file_path}`. Preview: {preview}")
 
-            # FR-010: re-sort remaining files using mod declarations from just-generated file.
+            # Re-sort remaining files using mod declarations from the just-generated file.
             if pending and file_path in all_files:
                 with suppress(Exception):  # cycle or error — keep current order
                     pending = topo_sort_files(pending, all_files)
@@ -1267,7 +1267,23 @@ class StaticSkeletonTask2Generator(Task2Generator):
             # whatever fragments survived the abort, silently losing every fn
             # that never got written. Not marking done here means a retry
             # re-attempts real reconstruction instead of trusting garbage.
-            if any(s.get("ok") for s in cluster_summaries):
+            # …and NOT done while any cluster stopped on a tree that does not
+            # build. This outer marker short-circuits the whole per-cluster
+            # loop above, so setting it while a cluster is unfinished retires
+            # that cluster on every later run — which is how `nightly`, at
+            # 93/103 with a repairable oracle, was skipped straight to the
+            # merge on 2026-08-01. A finished cluster keeps its own checkpoint
+            # and is skipped individually, so re-entering costs only the
+            # unfinished one.
+            _unfinished = [s.get("cluster") for s in cluster_summaries
+                           if getattr(s.get("phase_c"), "baseline_broken", False)]
+            if _unfinished:
+                self.tel.log(f"  [skeleton] task2a/{module}: NOT marking done — "
+                             f"cluster(s) {', '.join(str(c) for c in _unfinished)} "
+                             "stopped on a tree that does not build. The next run "
+                             "re-enters them; clusters that finished keep their "
+                             "own checkpoint and are skipped.")
+            elif any(s.get("ok") for s in cluster_summaries):
                 self.tel.mark_phase(project_dir, f"task2a/{module}", "done",
                                     detail=f"{len(clusters)} cluster(s)")
             else:
@@ -1994,8 +2010,25 @@ class StaticSkeletonTask2Generator(Task2Generator):
                          f"({_health.name}) — {_detail}; NOT marking "
                          "fns exhausted from this state.")
 
-        return {"ok": True, "phase_c": c_result, "phase_d": d_result,
-                "validates": validate_ok}
+        # A cluster whose fill loop stopped on an unbuildable tree is not a
+        # finished cluster, and `validate_ok` cannot see the difference: it
+        # comes from `cargo check`, which builds the LIB, while the targets
+        # that failed were the TEST binaries. Reporting ok here checkpoints the
+        # cluster `done`, and the checkpoint is read on every later run as
+        # "already reconstructed — skipping", so one broken sweep retires the
+        # cluster permanently. Observed 2026-08-01: `nightly` stopped at
+        # pass=0 with two rustc errors in the test oracle and was recorded
+        # `done — validated`; the next run skipped straight past it to the
+        # merge, leaving a cluster that had scored 93/103 an iteration earlier.
+        _baseline_broken = bool(getattr(c_result, "baseline_broken", False))
+        if _baseline_broken:
+            self.tel.log(f"  {tag} [skeleton-C] cluster NOT checkpointed — the "
+                         "fill loop stopped on a tree that does not build, so "
+                         "this is an unfinished cluster, not a done one; the "
+                         "next run re-enters it against the same tree.")
+        return {"ok": not _baseline_broken, "phase_c": c_result,
+                "phase_d": d_result,
+                "validates": validate_ok and not _baseline_broken}
 
     def _git_ancestor_blobs(self, repo: Path, repo_rel: str) -> list[bytes]:
         """Committed versions of `repo_rel` in the workspace git repo, newest

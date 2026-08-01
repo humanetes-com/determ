@@ -88,6 +88,27 @@ def test_collect_impl_blocks_for_cluster_narrows_stub_members_to_active_subset()
     assert [m.fn_name for m in out[0].stub_members] == ["kind"]
 
 
+def test_collect_impl_blocks_for_cluster_drops_oracle_file_block():
+    """This route enumerates impls from the TREE, not from the frontier, so the
+    frontier's `filter_test_targets` never sees them. On 2026-08-01 it filled
+    `tests/drop/mod.rs::DetectDrop` and `tests/test_ensure.rs::DebugforEnum<T>`
+    among ten fixture bodies in the shared test oracle; two stopped compiling
+    and the cluster went from 93/103 to a red build no fill could repair.
+
+    `fn_belongs` says every member is cluster-active — the point is that the
+    block never reaches the cluster question at all."""
+    oracle = ImplBlock(
+        file="tests/drop/mod.rs", container="impl DetectDrop",
+        members=(_member("new", False),), stub_members=())
+    prod = ImplBlock(file="src/error.rs", container="impl Error",
+                     members=(_member("chain", False),), stub_members=())
+    out = cm.collect_impl_blocks_for_cluster(
+        None, object(),
+        collect_impl_blocks=lambda _d: [oracle, prod],
+        fn_belongs=lambda *a, **k: True)
+    assert [b.file for b in out] == ["src/error.rs"]
+
+
 def test_collect_impl_refill_targets_stamps_nonstub_frontier_member():
     block = ImplBlock(file="lib.rs", container="impl Foo",
                       members=(_member("kind", False), _member("name", False)),

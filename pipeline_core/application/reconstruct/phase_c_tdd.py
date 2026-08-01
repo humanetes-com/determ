@@ -523,6 +523,9 @@ def run_phase_c_tdd(
     # binaries did not compile. Carried as evidence, never as a threshold — a
     # tree that cannot build produces no verdict at all, so waiting is pure loss.
     _compile_broke_streak = 0
+    # Set only by the compile-blocked exit below, and returned, so the caller
+    # can tell "this cluster is finished" from "this tree does not build".
+    _baseline_broken = False
 
     def _reconcile(rc_: int, output_: str, pass_n: int, fail_n: int,
                    failed_: set[str]) -> SweepReading:
@@ -1170,6 +1173,7 @@ def run_phase_c_tdd(
                     "broken_sweeps": _compile_broke_streak + 1,
                     "compile_errors": compile_error_digest(output or "")[0],
                 })
+                _baseline_broken = True
                 break
         eligible, _deferred = defer_blocked_consumers(eligible, _stub_keys)
         if _deferred:
@@ -1508,4 +1512,5 @@ def run_phase_c_tdd(
         remaining=len(deps.scan_unimplemented_for_cluster(
             target_src_dir, cluster)),
         errors=tuple(errors),
+        baseline_broken=_baseline_broken,
     )

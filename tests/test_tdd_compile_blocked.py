@@ -45,7 +45,7 @@ def _cluster() -> BuildCluster:
 
 
 def _run(monkeypatch, tmp_path: Path, *, implicated, events, dispatched,
-         retrigger=None, red: str = _RED) -> None:
+         retrigger=None, red: str = _RED) -> ClusterFillResult:
     """Drive the loop over a permanently red tree with a two-fn frontier."""
     monkeypatch.setenv("PHASE_C_TDD_BATCH_RATCHET", "0")
     monkeypatch.setenv("TDD_MAX_STALLS", "4")
@@ -83,7 +83,7 @@ def _run(monkeypatch, tmp_path: Path, *, implicated, events, dispatched,
         retrigger_layout=retrigger,
         implicated_fns=lambda out, tsd: list(implicated),
     )
-    run_phase_c_tdd(
+    return run_phase_c_tdd(
         deps, project_dir=tmp_path, target_src_dir=tmp_path, tests_dir_files=[],
         cluster_tests=[("tests/t.rs", "fn t1() {}")], module="m",
         cluster=_cluster(), check_cmd="cargo check", cluster_env={},
@@ -143,3 +143,33 @@ def test_first_unaimable_red_sweep_does_not_stop_the_cluster(
     assert exits[0]["iter"] == 2
     assert exits[0]["broken_sweeps"] == 2
     assert exits[0]["compile_errors"] == 1
+
+
+def test_compile_blocked_exit_reports_the_baseline_as_broken(
+        tmp_path: Path, monkeypatch) -> None:
+    """The caller checkpoints a cluster on this result, and a checkpoint is read
+    on every later run as "already reconstructed — skipping". So the stop reason
+    has to survive the return: on 2026-08-01 `nightly` exited here at pass=0 and
+    was still recorded `done — validated`, and the next run skipped it straight
+    to the merge. `cargo check` could not have caught it either — it builds the
+    lib, and what failed were the TEST binaries."""
+    events: list[tuple[str, dict]] = []
+
+    def _retrig(*a: Any, **k: Any):
+        from pipeline_core.application.retrigger_layout import RetriggerResult
+        return RetriggerResult(fired=False, reason="no_private_layout")
+
+    result = _run(monkeypatch, tmp_path, implicated=[], events=events,
+                  dispatched=[], retrigger=_retrig, red=_RED_TEST_BIN)
+    assert [d for ev, d in events if ev == "phase_c.tdd.compile_blocked_exit"]
+    assert result.baseline_broken is True
+
+
+def test_a_cluster_that_finishes_normally_is_not_flagged_broken(
+        tmp_path: Path, monkeypatch) -> None:
+    """The flag must mean the compile-blocked exit specifically — every other
+    exit (stall, budget, green) leaves a cluster that IS checkpointable."""
+    events: list[tuple[str, dict]] = []
+    result = _run(monkeypatch, tmp_path, implicated=[_LIB], events=events,
+                  dispatched=[])
+    assert result.baseline_broken is False

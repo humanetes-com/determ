@@ -619,6 +619,15 @@ class ClusterFillResult:
     remaining: int = 0
     impls_filled: int = 0
     impls_failed: int = 0
+    # True when the fill loop gave up because the tree does not BUILD and no
+    # diagnostic resolved to a fillable fn — "the baseline itself is broken",
+    # not "this cluster is finished". The distinction has to survive the
+    # return, because the caller checkpoints on it: on 2026-08-01 `nightly`
+    # stopped this way at pass=0 and was still recorded `done — validated`,
+    # which permanently skips the cluster on every later run. The final
+    # validation could not catch it either — it runs `cargo check`, which
+    # builds the lib, and the broken targets were the TEST binaries.
+    baseline_broken: bool = False
 
 
 @dataclass(frozen=True, slots=True)

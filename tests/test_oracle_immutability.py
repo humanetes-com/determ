@@ -2,7 +2,11 @@
 from __future__ import annotations
 
 from pipeline_core.domain.models import FnRecord
-from pipeline_core.domain.oracle_immutability import is_oracle_fn, production_fns
+from pipeline_core.domain.oracle_immutability import (
+    is_oracle_fn,
+    is_oracle_path,
+    production_fns,
+)
 
 
 def test_gen_tests_sibling_is_oracle_without_any_test_marker():
@@ -25,6 +29,31 @@ def test_production_fn_in_an_ordinary_file_is_not_oracle():
     assert not is_oracle_fn(FnRecord(file="src/error.rs", fn_name="chain"))
     assert not is_oracle_fn(FnRecord(file="src/gen_tests_helper.rs",
                                      fn_name="chain"))
+
+
+def test_integration_test_fixture_is_oracle_without_any_test_marker():
+    """A fixture under the crate's `tests/` root needs no `#[cfg(test)]` — Cargo
+    already builds nothing there into the lib — so it enumerates exactly like a
+    production fn. Measured on the live `nightly` tree (2026-08-01): 34 of the
+    105 records under `tests/` carry no test attribute and no cfg. These three
+    were rewritten by the fill routes that day; two stopped compiling and took
+    the cluster from 93/103 to a red build."""
+    for file, fn in (("tests/drop/mod.rs", "new"),
+                     ("tests/test_ensure.rs", "fmt"),
+                     ("tests/test_source.rs", "source")):
+        rec = FnRecord(file=file, fn_name=fn)
+        assert rec.is_test is False and rec.cfg_predicates == ()
+        assert is_oracle_fn(rec), f"{file}::{fn} must be immutable"
+
+
+def test_oracle_path_covers_test_roots_and_spares_production():
+    assert is_oracle_path("tests/drop/mod.rs")
+    assert is_oracle_path("tests/crate/src/lib.rs")   # compiletest fixture crate
+    assert is_oracle_path("src/error.gen_tests_2.rs")
+    assert not is_oracle_path("src/error.rs")
+    # A FILE called `tests.rs` is production code; only a test DIRECTORY
+    # component disqualifies, so the crate's own `src/tests.rs` stays fillable.
+    assert not is_oracle_path("src/tests.rs")
 
 
 def test_production_fns_keeps_order_and_drops_only_oracle():

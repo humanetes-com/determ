@@ -42,5 +42,6 @@ def filter_test_targets(
     kept = {k: v for k, v in frontier.items() if k not in drop}
     if log:
         for f, fn in frontier.keys() - kept.keys():
-            log(f"  [fix] skipping test-oracle target {f}::{fn} (immutable, FR-018)")
+            log(f"  [fix] skipping test-oracle target {f}::{fn} "
+                f"(immutable: splicing it would rewrite the spec)")
     return kept

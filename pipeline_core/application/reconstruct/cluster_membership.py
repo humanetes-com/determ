@@ -1,4 +1,4 @@
-"""Cluster-aware static membership analysis (FR-040 / P5).
+"""Cluster-aware static membership analysis.
 
 Given a build cluster (its `cfg_true`/`cfg_false` sets), decide which source
 files and functions are *active* — i.e. would compile in that cluster — so the
@@ -31,6 +31,7 @@ from pipeline_core.domain.models import (
     ModRecord,
     TypeRecord,
 )
+from pipeline_core.domain.oracle_immutability import is_oracle_path
 from pipeline_core.domain.rust_lex import code_mask
 from pipeline_core.domain.rust_scan import (
     contains_decl_keyword,
@@ -76,7 +77,7 @@ def cluster_filter_type_methods(
 
 
 def cluster_cfg_attr(cluster: Any, all_clusters: list[Any]) -> str:
-    """The cfg predicate gating code to `cluster` (FR-032). Each active cfg `N`
+    """The cfg predicate gating code to `cluster`. Each active cfg `N`
     → `any(N, feature = "N")`; multiple combine via `all(...)`. The default
     (stable) cluster is gated by the NEGATION of every other cluster's flags
     (its gen_tests were only validated under the default build). No other
@@ -161,14 +162,26 @@ def collect_impl_blocks_for_cluster(
     dropped from `stub_members`. A block with zero cluster-active STUBS but a
     cluster-active already-filled member is still kept (with `stub_members`
     narrowed to `()`) — dropping it here would make an all-filled-but-wrong
-    block unreachable for behavioral re-fill targeting downstream (debt #46
-    point 2 / `collect_impl_refill_targets`). None (extractor unavailable)
-    passes through."""
+    block unreachable for behavioral re-fill targeting downstream (see
+    `collect_impl_refill_targets`). None (extractor unavailable) passes through.
+
+    Blocks in an oracle FILE are dropped outright, before any cluster question
+    is asked. This route enumerates impls from the tree rather than from a
+    frontier, so it is not covered by the frontier's `filter_test_targets`: on
+    2026-08-01 it filled `tests/drop/mod.rs::Flag`, `::DetectDrop`,
+    `::DisplayforDetectDrop`, `::DropforDetectDrop`, `tests/test_ensure.rs::
+    DebugforEnum<T>` and `tests/test_source.rs::DisplayforTestError` — ten
+    fixture bodies in the shared, symlinked test oracle — and two of them did
+    not compile, which took the cluster from 93/103 to a red build it could not
+    repair. An oracle fixture is never a fill target however the cluster gates
+    resolve."""
     blocks = collect_impl_blocks(target_src_dir)
     if blocks is None or cluster is None:
         return blocks
     out: list[ImplBlock] = []
     for b in blocks:
+        if is_oracle_path(b.file):
+            continue
         kept = tuple(
             m for m in b.stub_members
             if fn_belongs(target_src_dir, b.file, m.fn_name, cluster,
@@ -189,7 +202,7 @@ def collect_impl_refill_targets(
     tdd_frontier_keys: set[FnLocator] | None,
     tdd_frontier_tests: FailureFrontier | None,
 ) -> list[ImplBlock]:
-    """debt #46 point 2 — block-level analog of
+    """Block-level analog of
     `PhaseCFillEngine._collect_refill_targets`: for each block, find members
     that are already FILLED (not in `stub_members`) but have a failing
     attributed test, and stamp them onto `refill_members` so the per-impl fill

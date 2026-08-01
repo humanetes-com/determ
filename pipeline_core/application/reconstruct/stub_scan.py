@@ -7,6 +7,14 @@ inline-compressed declarations, cfg-attributed fns). Falls back to a brace-
 scanning fn-header walk when the extractor is unavailable (test-fixture path,
 partial setup) — that fallback reads source text but parses it structurally
 (`fn_headers` + brace counting), never by regex.
+
+A stub in an ORACLE file is never returned, by either route. A stub is a fill
+target by definition, and no fill may rewrite a test; a stub that appears there
+means something already damaged the oracle, so handing it back would ask the
+model to re-author the specification and call the result progress. Observed
+2026-08-01: a layout retrigger reverted `tests/common/mod.rs::bail_error` and
+`tests/test_context.rs::make_chain` (a 29-line fixture) to `unimplemented!()`,
+which this scan would then have offered as ordinary work.
 """
 from __future__ import annotations
 
@@ -16,6 +24,7 @@ from typing import Any
 
 from pipeline_core.application.reconstruct.fill_rules import is_unimplemented_body
 from pipeline_core.domain.models import FnLocator
+from pipeline_core.domain.oracle_immutability import is_oracle_path
 from pipeline_core.domain.rust_fn_headers import fn_headers
 
 
@@ -47,9 +56,10 @@ def scan_unimplemented_with_cfg(
     return [(FnLocator(r["file"], r["fn_name"]),
              tuple(str(c) for c in (r.get("cfg_predicates") or ())))
             for r in recs
-            if r.get("has_unimplemented_body")
-            or is_unimplemented_body(str(r.get("body_text", "")),
-                                     str(r.get("fn_name", "")))]
+            if not is_oracle_path(str(r.get("file", "")))
+            and (r.get("has_unimplemented_body")
+                 or is_unimplemented_body(str(r.get("body_text", "")),
+                                          str(r.get("fn_name", ""))))]
 
 
 def scan_unimplemented_functions(
@@ -72,9 +82,10 @@ def scan_unimplemented_functions(
         # filled while the fn does nothing at all — re-check it here so an
         # already-corrupted tree is re-attempted instead of staying invisible.
         return [FnLocator(r["file"], r["fn_name"]) for r in recs
-                if r.get("has_unimplemented_body")
-                or is_unimplemented_body(str(r.get("body_text", "")),
-                                         str(r.get("fn_name", "")))]
+                if not is_oracle_path(str(r.get("file", "")))
+                and (r.get("has_unimplemented_body")
+                     or is_unimplemented_body(str(r.get("body_text", "")),
+                                              str(r.get("fn_name", ""))))]
     out: list[FnLocator] = []
     for p in sorted(src_dir.rglob("*.rs")):
         try:
@@ -95,6 +106,7 @@ def scan_unimplemented_functions(
             if depth != 0:
                 continue
             body = text[body_start:i - 1]
-            if is_unimplemented_body(body):
-                out.append(FnLocator(str(p.relative_to(src_dir)), fn_name))
+            rel = str(p.relative_to(src_dir))
+            if is_unimplemented_body(body) and not is_oracle_path(rel):
+                out.append(FnLocator(rel, fn_name))
     return out

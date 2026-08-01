@@ -3,13 +3,14 @@ from pipeline.py (P5). The skip-dir / test-dir conventions and the gen_tests
 sibling-name parser live here; the one gen_tests-semantics predicate
 (`is_gen_tests_decl_only`) is passed explicitly by the caller (composition root)
 to the single function that needs it, so the gen_tests family stays in pipeline.py
-and this adapter holds no injected module state (#14).
+and this adapter holds no injected module state.
 """
 from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
 
+from pipeline_core.domain.oracle_immutability import TEST_DIR_NAMES
 from pipeline_core.domain.workspace_layout import SKIP_DIR_NAMES
 
 # Re-export for callers that import from this module (backward-compat).
@@ -18,9 +19,6 @@ __all__ = ["SKIP_DIR_NAMES", "TEST_DIR_NAMES", "match_gen_tests_sibling", "colle
 # Default predicate for `collect_test_files`'s gen_tests-decl filter — overridden
 # by the composition root, which passes the real pipeline implementation.
 _NO_GEN_TESTS_DECL: Callable[[str], bool] = lambda _content: False
-
-TEST_DIR_NAMES: frozenset[str] = frozenset(
-    {"tests", "test", "spec", "specs", "__tests__", "testing"})
 
 def match_gen_tests_sibling(name: str) -> tuple[str, int] | None:
     """Parse a `<stem>.gen_tests_<N>.rs` filename → (stem, N), or None."""
