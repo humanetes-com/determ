@@ -575,12 +575,20 @@ class FillResult:
 
     attempts counts the LLM attempts this fn consumed (0 when skipped before
     any model call). `error` carries the exhaustion message destined for the
-    pass's errors list; None for success, skips, and silent early exits."""
+    pass's errors list; None for success, skips, and silent early exits.
+
+    `blocked_by` names the still-stubbed sites that held every test attributed
+    to this fn — non-empty only when the body COMPILED and was kept
+    external-only (`U2Decision.ACCEPT_EXTERNAL_ONLY`), i.e. it landed but could
+    not be judged. Empty means the unit was judged on its own merits, or landed
+    nothing at all. `domain.pass_payoff` reads these together: a pass in which
+    one site blocks every landed body cannot move a verdict."""
     file: str = ""
     fn_name: str = ""
     filled: bool = False
     attempts: int = 0
     error: str | None = None
+    blocked_by: tuple[FnSite, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -602,8 +610,8 @@ class FnFixContext:
 @dataclass(frozen=True, slots=True)
 class ClusterFillResult:
     """Outcome of one cluster's phase-C fill — the typed result every fill
-    engine (per-fn, per-impl, TDD driver) returns end-to-end (plan #77 T1;
-    the legacy dict bridge is gone)."""
+    engine (per-fn, per-impl, TDD driver) returns end-to-end; the legacy dict
+    bridge is gone."""
     fns_filled: int = 0
     bytes_filled: int = 0
     attempts: int = 0

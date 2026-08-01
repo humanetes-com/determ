@@ -38,9 +38,11 @@ from pipeline_core.domain.enums import FillUnit
 from pipeline_core.domain.models import (
     BuildCluster,
     ClusterFillResult,
+    FillResult,
     FnLocator,
     Stub,
 )
+from pipeline_core.domain.pass_payoff import assess_fill_results
 from pipeline_core.domain.refine import FixProgress, FloorStall
 from pipeline_core.domain.test_results import parse_failed_tests
 from pipeline_core.ports.fill_engine import (
@@ -367,6 +369,10 @@ class PhaseCFillEngine:
             })
             progress_this_pass = 0
             filled_this_pass: list[FnLocator] = []  # [(file_rel, fn_name)]
+            # Every unit's verdict, for the pass-level payoff assessment
+            # — `progress_this_pass` counts bodies that LANDED,
+            # which is not the same question as whether any could be judged.
+            results_this_pass: list[FillResult] = []
             pass_fail_floor = 0  # P7.6: this pass's failing-test floor
 
             # P8: priority-level batching — `stubs` is leaf-first sorted, so
@@ -400,6 +406,7 @@ class PhaseCFillEngine:
             def _worker(work_queue: _queue_mod.Queue[tuple[int, Stub]], *,
                         _pass_ctx: PerFnPassCtx = _pass_ctx,
                         filled_this_pass: list[FnLocator] = filled_this_pass,
+                        results_this_pass: list[FillResult] = results_this_pass,
                         pass_n: int = pass_n) -> None:
                 # B023: the per-LEVEL queue AND the per-pass ctx/list/number are
                 # passed explicitly — free-var reads would rely on late binding.
@@ -429,6 +436,7 @@ class PhaseCFillEngine:
                         continue
                     with _counters_lock:
                         attempts += res.attempts
+                        results_this_pass.append(res)
                         if res.filled:
                             fns_filled += 1
                             progress_this_pass += 1
@@ -781,6 +789,25 @@ class PhaseCFillEngine:
             })
             if progress_this_pass == 0:
                 self.tel.log(f"  [phase-c/per-fn] pass {pass_n} made no progress; stopping.")
+                break
+            # Bodies landed, but could any of them be JUDGED? When one
+            # still-stubbed site blocked every one, no further pass over this
+            # frontier can move a verdict either — the next pass would re-fill
+            # the same units against the same wall (measured: 40 fills, 2.7 h
+            # and the bulk of 3.3 M prompt tokens, all behind
+            # `error.rs::construct`). Stop and hand the blocker to the outer
+            # loop, which can reach it: it is a stub, so it is in the frontier.
+            _payoff = assess_fill_results(results_this_pass)
+            if _payoff.is_zero:
+                self.tel.log(f"  [phase-c/per-fn] pass {pass_n}: PAYOFF ZERO — "
+                             f"{_payoff.summary}. Stopping the per-fn route; "
+                             "the blocker is the only work that can score.")
+                self.tel.emit("phase_c.pass.payoff_zero", data={
+                    "pass_n": pass_n, "cluster": cluster_name,
+                    "landed": _payoff.landed,
+                    "blocking_fns": sorted(
+                        f"{s.file}::{s.fn_name}" for s in _payoff.blockers),
+                })
                 break
             if _pass_gauge.stalled(_pass_max_stalls):
                 self.tel.log(f"  [phase-c/per-fn] cluster {cluster_name}: pass-level floor "

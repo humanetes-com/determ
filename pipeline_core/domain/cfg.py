@@ -110,7 +110,7 @@ class CfgAtom:
         """True when cargo leaves this leaf OFF in the cluster: a custom ``--cfg``
         flag enabled nowhere, or a non-default ``feature = "X"`` not enabled here.
         Builtin/target cfgs and unknown ``key = "v"`` forms return False — never
-        force-exclude what cargo might set (FR-018)."""
+        force-exclude what cargo might set."""
         if self.normalized in cfg_true_norm:
             return False
         if self.value is not None:
@@ -689,7 +689,7 @@ def filter_cfg_inactive_branches(text: str, cfg_set: CfgSet) -> str:
 def cluster_gate_predicate(active_cfg: list[str], excluded_cfg: list[str]) -> str:
     """Build the cfg predicate body (without `#[cfg(...)]` wrapping) that is true
     for this cluster and false for all others — the gate used when several
-    clusters have divergent versions of the same item (FR-032).
+    clusters have divergent versions of the same item.
 
     Each cfg may be activated EITHER as a bare ``--cfg N`` (RUSTFLAGS) OR as a
     cargo ``feature = "N"``, and a cluster sets only ONE of the two. So each
@@ -708,3 +708,32 @@ def cluster_gate_predicate(active_cfg: list[str], excluded_cfg: list[str]) -> st
     if len(terms) == 1:
         return terms[0]
     return "all(" + ", ".join(terms) + ")"
+
+
+def unreachable_under_every_cfg_set(
+    predicates: Iterable[str], cfg_sets: Iterable[CfgSet],
+) -> bool:
+    """True when EVERY baked cfg-set compiles this item out.
+
+    The union of the baked cfg-sets is the whole space the run ever built, so
+    an item excluded by all of them was never reachable by any cluster's Phase
+    C and can never be filled — it is unreachable BY CONSTRUCTION, not
+    un-attempted. Live on `anyhow`: `nightly.rs` lines 12/17/22 (the `Debug`,
+    `Display` and `Error::provide` impls for the local `MyError`) sit inside
+    `#[cfg(anyhow_build_probe)]`, a probe cfg no `cargo test` sets. They are
+    stubbed IDENTICALLY in both cluster trees, so t2b's pre-merge backfill has
+    no donor either, and the final cfg-blind scan would `sys.exit(1)` on them
+    after a fully green suite — converting a genuine success into a failure at
+    the last step, having paid the run's whole cost.
+
+    With NO cfg-sets on hand nothing is provably unreachable: absence of
+    evidence must not become the exemption, or a dropped cluster's real stubs
+    would be excused by the same rule that excuses the probe trio.
+    """
+    sets = list(cfg_sets)
+    preds = [p for p in predicates if p and p.strip()]
+    if not sets or not preds:
+        return False
+    return all(
+        any(cs.excludes_for_cargo(p) for p in preds)
+        for cs in sets)

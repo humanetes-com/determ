@@ -128,6 +128,43 @@ def best_progress_fields(best: FixProgress) -> dict[str, int]:
             BEST_TESTS_KEY: best.failing_tests}
 
 
+def readmission_warranted(
+    *, fills_since_reset: int, best_metric: int, metric_at_last_reset: int,
+) -> bool:
+    """Whether re-admitting previously-exhausted units is bought evidence.
+
+    An exhausted unit is one the loop already convicted of "nothing left to
+    try". Re-admitting the set costs a full extra frontier of model calls, so
+    the price is NEW CONTEXT — and new context is what a retry needs to be
+    anything other than the same attempt again.
+
+    Both conditions are required and neither substitutes for the other:
+
+    * ``fills_since_reset`` — work actually landed in the tree. Necessary
+      (nothing changed otherwise) but NOT sufficient.
+    * ``best_metric > metric_at_last_reset`` — that work moved the score.
+
+    Gating on fills alone counted a fill that changed no verdict exactly like
+    one that fixed a test, so the loop financed its own growth out of work that
+    produced no evidence: live on `anyhow/nightly`, 51 fills moved pass=93 by
+    +0, re-admitted the fns that had already failed, and took the frontier
+    41 -> 73 with iteration cost following to 224 min. Reading the FLOOR rather
+    than the last measurement is what stops one real gain from paying for
+    re-admission twice.
+
+    ``metric_at_last_reset`` is a PRECONDITION on the caller: any score beats
+    a negative sentinel, so an unseeded baseline grants one re-admission
+    unconditionally. That grant is deliberate — it is the only way a unit that
+    is ITSELF the blocker ever gets re-admitted, since the flags persist on
+    disk and releasing them otherwise needs the score move the unit is
+    blocking. What the caller must decide is how often to spend it: run 589477
+    iter 2 spent it on 7 units off a fill phase measured at `by pair: +0 -0`,
+    frontier 40 -> 73. See `run_phase_c_tdd`, which seeds the baseline unless
+    the CODE changed since the process that set the flags.
+    """
+    return fills_since_reset > 0 and best_metric > metric_at_last_reset
+
+
 @dataclass(frozen=True, slots=True)
 class Attempt:
     """One iteration's outcome. `iteration`/`improved` are set by the loop driver, so a strategy

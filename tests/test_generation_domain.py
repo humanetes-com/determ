@@ -213,6 +213,57 @@ def test_gen_tests_decl_blocks_only_real_siblings() -> None:
     assert [b.pass_n for b in blocks] == [1]  # the non-sibling decl is excluded
 
 
+# --- prettyplease re-emission: the decl the pipeline WROTE on one line per
+# attribute comes back with a long `#[allow(...)]` wrapped over several. The
+# gate sits ABOVE that attribute, so a line-at-a-time walk-back stops at its
+# closing `)]` and reports the decl as ungated — the shape that let 20
+# stable-only tests into the nightly oracle as un-runnable "vanished" tests.
+
+_WRAPPED_ALLOW = "\n".join([
+    "#[allow(",
+    "    clippy::all,",
+    "    dead_code,",
+    "    non_snake_case,",
+    "    unreachable_patterns,",
+    "    unsafe_op_in_unsafe_fn,",
+    "    unused,",
+    "    unused_imports,",
+    "    unused_mut",
+    ")]",
+])
+_STABLE_GATE = 'not(any(error_generic_member_access, feature = "error_generic_member_access"))'
+
+
+def test_iter_gen_tests_decls_reads_gate_past_a_wrapped_attribute() -> None:
+    text = "pub fn f() {}\n" + _decl(
+        "error.gen_tests_1.rs", 1, cfg=_STABLE_GATE, allow=_WRAPPED_ALLOW)
+    (decl,) = list(iter_gen_tests_decls(text))
+    assert decl.sibling_name == "error.gen_tests_1.rs"
+    assert decl.gate == _STABLE_GATE
+
+
+def test_strip_gen_tests_decl_removes_a_wrapped_attribute_run_whole() -> None:
+    # `start` must cover the whole block: a strip that leaves the gate and the
+    # wrapped allow behind orphans them onto whatever item follows.
+    text = "pub fn f() {}\n" + _decl(
+        "error.gen_tests_1.rs", 1, cfg=_STABLE_GATE, allow=_WRAPPED_ALLOW)
+    out = strip_gen_tests_decl(text, "error.gen_tests_1.rs", 1)
+    assert out.rstrip() == "pub fn f() {}"
+
+
+def test_attr_run_walk_back_stops_at_the_item_above() -> None:
+    # An unrelated item ending in `]` directly above the run must not be eaten,
+    # and neither must its own attributes.
+    text = ("#[derive(Debug)]\n"
+            "pub struct S(pub [u8; 4]);\n"
+            + _decl("m.gen_tests_1.rs", 1, cfg="nightly", allow=_WRAPPED_ALLOW))
+    (decl,) = list(iter_gen_tests_decls(text))
+    assert decl.gate == "nightly"
+    out = strip_gen_tests_decl(text, "m.gen_tests_1.rs", 1)
+    assert out.rstrip().endswith("pub struct S(pub [u8; 4]);")
+    assert "#[derive(Debug)]" in out
+
+
 # --- P7: gen_tests artifact-naming pins (byte-equivalent to the old regexes) ---
 
 import re  # noqa: E402
@@ -319,6 +370,12 @@ def test_gen_tests_origin_cfgs_scan() -> None:
     )
     assert gen_tests_origin_cfgs(text) == {
         1: 'feature = "std"', 2: "", 3: ""}
+
+
+def test_gen_tests_origin_cfgs_reads_gate_past_a_wrapped_attribute() -> None:
+    text = (_decl("m.gen_tests_1.rs", 1, allow=_WRAPPED_ALLOW)
+            + _decl("m.gen_tests_2.rs", 2, cfg=_STABLE_GATE, allow=_WRAPPED_ALLOW))
+    assert gen_tests_origin_cfgs(text) == {1: "", 2: _STABLE_GATE}
 
 
 def test_inject_gen_prelude_imports_mod_opener_path() -> None:

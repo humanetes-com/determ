@@ -306,3 +306,36 @@ def test_floorstall_rejects_mixed_metric_units() -> None:
     g.observe(FixProgress(2, 0))
     with pytest.raises(TypeError):
         g.observe(3)
+
+
+def test_readmission_warranted_needs_payoff_not_just_activity() -> None:
+    # Live on `anyhow/nightly` (07-30 -> 07-31): 51 fills landed, pass stayed
+    # at 93 across three run boundaries, and the old gate (fills > 0 alone)
+    # re-admitted the fns that had already failed on every one of them. The
+    # frontier went 41 -> 73 and iteration cost followed it to 224 min — the
+    # loop financing its own growth out of work that produced no evidence.
+    from pipeline_core.domain.refine import readmission_warranted as w
+
+    # 51 fills, score unmoved: NOT warranted. This is the case that bled.
+    assert w(fills_since_reset=51, best_metric=93, metric_at_last_reset=93) is False
+    # Fills AND a score move: warranted — the retry has something new to read.
+    assert w(fills_since_reset=51, best_metric=95, metric_at_last_reset=93) is True
+    # A score move with no fills cannot happen from this loop's own work; if
+    # it does, there is still nothing newly written to retry against.
+    assert w(fills_since_reset=0, best_metric=95, metric_at_last_reset=93) is False
+    # A REGRESSION never buys a re-admission either.
+    assert w(fills_since_reset=8, best_metric=90, metric_at_last_reset=93) is False
+    # The sentinel: ANY score beats -1, so an unseeded baseline grants the
+    # first re-admission free. That grant is the DEADLOCK BREAKER and is not
+    # removable — exhaustion flags persist on disk, so a unit that is itself
+    # the blocker could never be re-admitted, its release needing a score move
+    # that cannot happen while it stays exhausted.
+    assert w(fills_since_reset=3, best_metric=93, metric_at_last_reset=-1) is True
+    # What the caller controls is WHEN the sentinel is left in place. Run
+    # 589477 iter 2 spent the free grant on 7 units off an iter-1 fill phase
+    # `pass_delta` scored `by pair: +0 -0`, frontier 40 -> 73, which is once
+    # per PROCESS in a pipeline that dies every few hours. `run_phase_c_tdd`
+    # therefore seeds the baseline whenever the code is unchanged since the
+    # process that set the flags, and leaves the sentinel only for new code —
+    # the same unit `TddFloor` guards on. Seeded, the same iteration withholds.
+    assert w(fills_since_reset=3, best_metric=93, metric_at_last_reset=93) is False

@@ -25,6 +25,8 @@ from pathlib import Path
 
 from pipeline_core.domain.crash_site import (
     CrashSite,
+    asan_stack_excerpt,
+    is_memory_fault_signal,
     parse_asan_report,
     relativize_frame_files,
     site_from_frames,
@@ -43,18 +45,9 @@ class CrashLocalizerDeps:
     log: Callable[[str], None]
 
 
-# Signals that mean "memory was used after it stopped being valid". For this
-# class the faulting frame is routinely INNOCENT — it merely reads a pointer
-# some other fn fabricated — so a backtrace alone points at the wrong fn to
-# fix (live: a dangling stack vtable made `Drop::drop` fault while the defect
-# sat in the constructor that built the vtable on its stack frame). Only a
-# detector that reports where the memory ORIGINATED can name the culprit.
-_MEMORY_FAULT_SIGNALS = ("SIGSEGV", "SIGBUS", "SIGILL", "SIGABRT")
-
-
-def _is_memory_fault(signal: str) -> bool:
-    up = signal.upper()
-    return any(s in up for s in _MEMORY_FAULT_SIGNALS)
+# The memory-fault classification is the domain's (`crash_site`), so the
+# blame rule and the escalation rule below can never drift apart.
+_is_memory_fault = is_memory_fault_signal
 
 
 def _asan_site(
@@ -80,7 +73,19 @@ def _asan_site(
     a_crashed = [b for b in parse_binary_results(out) if not b.completed]
     label = a_crashed[0].label if a_crashed else "?"
     test = a_crashed[0].dangling if a_crashed else None
-    site = site_from_frames(label, test, kind, access, origin_raw_frames=origin)
+    site = site_from_frames(label, test, kind, access, origin_raw_frames=origin,
+                            raw_report=asan_stack_excerpt(out),
+                            origin_capable=True)
+    if site.origin_unattributed:
+        # The report HAD a free/alloc stack (that is what stacks[1] is); every
+        # frame in it was filtered out as non-crate. Say so, and keep the raw
+        # stacks on the site so the next reader can see who freed the memory
+        # without paying for another instrumented build.
+        deps.log("  [phase-c/crash-localizer] "
+                 f"{kind} in {label}: no in-crate frame in the origin stack "
+                 f"({len(origin)} raw frame(s)) — blaming NOBODY. The access "
+                 "path is recorded; the fn that invalidated the memory is not "
+                 "identified.")
     return site if site.all_frames else None
 
 
@@ -112,6 +117,13 @@ def localize_crashes(
     sites: list[CrashSite] = []
     for b in considered:
         if not b.exe_path:
+            # A crashed binary with no executable path cannot be re-run, so it
+            # gets no backtrace and no ASAN blame — and the sweep still counts
+            # its tests as failing. Silence here read as "localized nothing",
+            # which is a different fact from "could not name the target".
+            deps.log(f"  [phase-c/crash-localizer] {b.label} crashed but cargo "
+                     "printed no executable path for it — cannot re-run it, so "
+                     "this binary gets no crash evidence.")
             continue
         exe = Path(b.exe_path)
         if not exe.is_absolute():
@@ -150,6 +162,13 @@ def localize_crashes(
     # blame plus crashes of a different class; the sanitizer halts on the
     # first error, so the next sweep localizes the next origin once this one
     # is fixed.
+    #
+    # That consolidation is conditional on an origin ACTUALLY being known.
+    # When the sanitizer named no in-crate origin the premise is absent —
+    # nothing was localized, so discarding the other backtraces would trade
+    # real evidence for a blame that does not exist.
+    if asan.origin_unattributed:
+        return (asan, *[s for s in sites if s.binary_label != asan.binary_label])
     kept = [s for s in sites
             if s.binary_label != asan.binary_label
             and not (_is_memory_fault(s.signal) and not s.origin_frames)]

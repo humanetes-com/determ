@@ -1,4 +1,4 @@
-"""Pins for futility-triggered attribution escalation (debt #82): when every
+"""Pins for futility-triggered attribution escalation: when every
 fn attributed to a failing test has been rewritten to the same dead end, the
 frontier escalates to producers of the exercised type."""
 from __future__ import annotations
@@ -11,6 +11,7 @@ from pipeline_core.application.reconstruct.attribution import (
     escalate_frontier_to_producers,
     producers_for_types,
 )
+from pipeline_core.domain.models import TypeRecord
 
 RECS = [
     {"file": "src/chain.rs", "fn_name": "len",
@@ -28,10 +29,24 @@ RECS = [
 ]
 
 
-def _deps():
+# The crate's own declarations — the escalation subject must be one of these
+# `Chain` is a real struct; `Context` is a trait and `Result` an
+# alias, and both used to arrive as subjects.
+TYPES = [
+    TypeRecord(kind="struct", name="Chain"),
+    TypeRecord(kind="struct", name="Error"),
+    TypeRecord(kind="trait", name="Context"),
+    TypeRecord(kind="type", name="Result"),
+]
+
+
+def _deps(types=None):
     class _S:
         def enumerate_fns(self, _sd):
             return RECS
+
+        def enumerate_types(self, _sd):
+            return TYPES if types is None else types
     return AttributionDeps(
         structure=_S(), classify=lambda *a, **k: {},
         locate_fn=lambda *a, **k: None, run_check_diag=lambda *a, **k: (0, "", []),
@@ -69,10 +84,48 @@ def test_escalation_failsafe_on_missing_records():
     class _Broken:
         def enumerate_fns(self, _sd):
             raise RuntimeError("no extractor")
+
+        def enumerate_types(self, _sd):
+            raise RuntimeError("no extractor")
     deps = _deps()
     object.__setattr__(deps, "structure", _Broken())
     assert escalate_frontier_to_producers(
         deps, Path("src"), "t", {("f", "g")}) == {}
+
+
+def test_escalation_subject_must_be_a_type_the_crate_declares() -> None:
+    """`impl<E> StdError for E` yields the subject `E`. It is a generic
+    parameter, so "producers of E" is the whole crate — 33 of 186 fns on the
+    live tree. The escalation must name nothing instead."""
+    recs = [
+        {"file": "src/ctx.rs", "fn_name": "ext_context",
+         "container": "impl StdError for E",
+         "sig_text": "fn ext_context<C>(self, context: C) -> Error",
+         "body_text": ""},
+        {"file": "src/error.rs", "fn_name": "msg",
+         "container": "impl Error", "sig_text": "pub fn msg<M>(m: M) -> Self",
+         "body_text": ""},
+    ]
+
+    class _S:
+        def enumerate_fns(self, _sd):
+            return recs
+
+        def enumerate_types(self, _sd):
+            return TYPES
+
+    deps = _deps()
+    object.__setattr__(deps, "structure", _S())
+    assert escalate_frontier_to_producers(
+        deps, Path("src"), "t", {("src/ctx.rs", "ext_context")}) == {}
+
+
+def test_escalation_without_a_readable_type_set_stays_silent() -> None:
+    """Fails toward silence: over-widening is this path's only failure mode."""
+    deps = _deps(types=[])
+    assert escalate_frontier_to_producers(
+        deps, Path("src"), "test_len",
+        futile_units={("src/chain.rs", "len")}) == {}
 
 
 def test_calling_an_associated_item_is_not_producing() -> None:

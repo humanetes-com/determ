@@ -217,3 +217,33 @@ def test_filter_empty_text_returns_empty() -> None:
 def test_filter_no_cfg_returns_text_unchanged() -> None:
     src = 'fn foo() {}\nfn bar() {}\n'
     assert filter_cfg_inactive_branches(src, _STABLE_CTX) == src
+
+
+def test_unreachable_under_every_cfg_set() -> None:
+    from pipeline_core.domain.cfg import unreachable_under_every_cfg_set
+
+    # `anyhow`'s two baked clusters.
+    stable = CfgSet.of(cfg_true=[], cfg_false=["error_generic_member_access"])
+    nightly = CfgSet.of(cfg_true=["error_generic_member_access"], cfg_false=[])
+    both = [stable, nightly]
+
+    # The live case: nightly.rs 12/17/22, the Debug/Display/provide impls for a
+    # local MyError inside #[cfg(anyhow_build_probe)] — a probe cfg no
+    # `cargo test` sets. Stubbed IDENTICALLY in both cluster trees, so t2b's
+    # pre-merge backfill has no donor either, and the final cfg-blind scan
+    # would sys.exit(1) on them after a fully green suite — converting a
+    # genuine success into a failure once the run's whole cost is paid.
+    assert unreachable_under_every_cfg_set(["anyhow_build_probe"], both) is True
+
+    # Reachable under ONE cluster is a real, fillable stub — the case the hard
+    # failure must keep.
+    assert unreachable_under_every_cfg_set(
+        ["error_generic_member_access"], both) is False
+    # Ungated: always reachable.
+    assert unreachable_under_every_cfg_set([], both) is False
+    assert unreachable_under_every_cfg_set([""], both) is False
+
+    # With NO cfg-sets on hand nothing is provably unreachable. Absence of
+    # evidence must not become the exemption, or a dropped cluster's real stubs
+    # would be excused by the rule that exists to excuse the probe trio.
+    assert unreachable_under_every_cfg_set(["anyhow_build_probe"], []) is False

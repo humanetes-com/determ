@@ -518,7 +518,17 @@ pub fn enumerate_fns_in_file(path: &Path, root: &Path) -> Result<Vec<FnRecord>> 
 /// Walk a directory tree and enumerate all fns across all .rs files.
 pub fn enumerate_fns_in_tree(input_dir: &Path) -> Result<Vec<FnRecord>> {
     let mut out = Vec::new();
+    // `follow_links` because a per-cluster tree does not own its tests: the
+    // pipeline symlinks `tests` into each one (measured 2026-08-01,
+    // `.skeleton-filled/{stable,nightly}/tests -> tmp/anyhow/tests`). WalkDir
+    // does not follow links by default, so this walk returned the crate's 186
+    // src fns and NOT one of the 105 fns in its own tests/ — and the sweep
+    // inventory, which indexes test fns by crate-relative path, silently fell
+    // back to the marker scan for every tests/ file. That fallback counts but
+    // cannot NAME, so the expected-name set came back 24 instead of 110 and
+    // the crash localizer lost the vanished names it aims with.
     for entry in walkdir::WalkDir::new(input_dir)
+        .follow_links(true)
         .into_iter()
         .filter_map(|e| e.ok())
     {
@@ -529,11 +539,14 @@ pub fn enumerate_fns_in_tree(input_dir: &Path) -> Result<Vec<FnRecord>> {
         if p.extension().and_then(|s| s.to_str()) != Some("rs") {
             continue;
         }
-        // Skip our own scratch dirs and target/
+        // Skip our own scratch dirs and every cargo artifact root. `target-asan`
+        // is a second artifact tree the ASAN sweep builds beside `target`; it is
+        // not named `target`, so the old check walked into it and yielded a
+        // trybuild scratch source as if it were crate code.
         let rel = p.strip_prefix(input_dir).unwrap_or(p);
         if rel.components().any(|c| {
             let s = c.as_os_str().to_string_lossy();
-            s.starts_with('.') || s == "target"
+            s.starts_with('.') || s == "target" || s.starts_with("target-")
         }) {
             continue;
         }
@@ -1118,7 +1131,7 @@ pub fn enumerate_dispatch_families_in_tree(input_dir: &Path) -> Result<Vec<Dispa
             .filter_map(|m| s.macro_src.get(m).cloned())
             .collect();
 
-        // Chain-following (FR-027): the dispatched method returns tag types;
+        // Chain-following: the dispatched method returns tag types;
         // the macro calls a second method on that result, which lives on the
         // tag's inherent impl (not a trait). Pull those types + their chained
         // methods + files into the family surface so co-design sees the WHOLE

@@ -159,6 +159,11 @@ class FillOneFn:
         container = rec.container
         sig_text = rec.sig_text
         attempts = 0   # LLM attempts this fn consumed — returned in FillResult
+        # Still-stubbed sites that held this fn's attributed tests on the
+        # accepted attempt — the external-only evidence `pass_payoff` reads.
+        # A list so the nested attempt closure can record without `nonlocal`,
+        # matching the other cross-attempt holders in this method.
+        _blocked_by: list[FnSite] = []
         # A crash-implicated fn is never exhaustion-skipped: the localized
         # faulting stack is evidence no prior attempt ever saw.
         _crash_evidence = (ctx.crash_evidence or {}).get(
@@ -377,6 +382,12 @@ class FillOneFn:
                 last_body, error_excerpt, first_failed_body, \
                 first_error_excerpt, retro_bound_methods, last_metric
             attempts += 1
+            # Only the ACCEPTED attempt's blame may leave this unit. An
+            # external-only attempt that the regression gate then reverts goes
+            # back through the fix loop, and a later attempt may well be judged
+            # on its own merits — carrying the earlier blockers out would
+            # report a judgeable fill as unjudgeable.
+            _blocked_by.clear()
             cur_text = file_path.read_text(encoding="utf-8")
             # E/R3: strip inactive #[cfg] branches so the model sees only the
             # active variant (e.g. one StdError definition, not three).
@@ -627,6 +638,12 @@ class FillOneFn:
                     # compiling body and defer to the outer TDD loop (re-runs
                     # once the blocking producers fill). Reverting would be
                     # strictly worse.
+                    #
+                    # Report WHICH sibling held it: a body that landed and
+                    # cannot be judged is the unit of evidence `pass_payoff`
+                    # needs. When one site blocks every landed body in a pass,
+                    # the pass provably could not move a verdict.
+                    _blocked_by[:] = sorted(_v.blocking_fns)
                     _ctx2 = f" [{container}]" if container else ""
                     _why = []
                     if _v.external:
@@ -1045,4 +1062,4 @@ class FillOneFn:
                               attempts=attempts, error=exhaust_error)
 
         return FillResult(file=rel_file, fn_name=fn_name, filled=True,
-                          attempts=attempts)
+                          attempts=attempts, blocked_by=tuple(_blocked_by))

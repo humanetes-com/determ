@@ -17,7 +17,9 @@ from typing import Any
 
 from pipeline_core.domain.rust_idents import crate_lint_attr_args
 from pipeline_core.domain.rust_scan import (
+    MAX_ATTR_LINES,
     after_brace_newline,
+    attr_bracket_delta,
     find_mod_opener,
     gen_mod_body_start,
     strip_line_block_comments,
@@ -149,7 +151,7 @@ class GenerationRequest:
 
 @dataclass(frozen=True, slots=True)
 class Task1Request:
-    """One TASK-1 synthesis request (plan #77 T1) — the inputs the
+    """One TASK-1 synthesis request — the inputs the
     requirements synthesiser consumes, replacing a 10-positional signature.
     `test_files` is the module's (rel_path, content) test spec; the strings
     are optional prompt context, empty when not applicable."""
@@ -406,6 +408,52 @@ def _attr_path_value(stripped_attr: str) -> str | None:
     return stripped_attr[open_q + 1:close_q] if close_q > open_q else None
 
 
+# An attribute wrapped over more lines than this is not one of ours; refuse to
+# keep walking rather than scan back to the top of the file.
+
+
+def _attr_run_before(
+    lines: list[str], anchor: int, *, skip_blanks: bool = False
+) -> tuple[int, list[str]]:
+    """`(start, attrs)` for the contiguous attribute run directly above
+    `anchor` — each attribute joined into a single string, in source order.
+    `start` is the run's first line index (`anchor` when there is none).
+
+    Walks back attribute-by-attribute, not line-by-line. The pipeline writes
+    every `#[...]` on one line, but the Rust side re-emits these files through
+    `prettyplease`, which wraps a long `#[allow(...)]` across several. A
+    line-at-a-time walk stops dead at that attribute's closing `)]` and never
+    reaches the cluster gate above it, so a gated decl reads as ungated and its
+    `start` covers only the tail of its own block."""
+    attrs: list[str] = []
+    start = anchor
+    j = anchor - 1
+    while j >= 0:
+        if skip_blanks and not lines[j].strip():
+            j -= 1
+            continue
+        if not lines[j].strip().endswith("]"):
+            break
+        buf: list[str] = []
+        depth = 0
+        k = j
+        while k >= 0 and j - k < MAX_ATTR_LINES:
+            stripped = lines[k].strip()
+            buf.insert(0, stripped)
+            depth += attr_bracket_delta(stripped)
+            if depth == 0:
+                break
+            k -= 1
+        else:
+            break
+        if depth != 0 or not buf[0].startswith("#["):
+            break
+        attrs.insert(0, " ".join(buf))
+        start = k
+        j = k - 1
+    return start, attrs
+
+
 def iter_gen_tests_decls(text: str) -> Iterator[GenTestsDecl]:
     """Yield every gen_tests path-mod decl block in `text`, scanning each
     `mod gen_tests_<N>;` anchor and walking back over its contiguous `#[...]`
@@ -415,20 +463,18 @@ def iter_gen_tests_decls(text: str) -> Iterator[GenTestsDecl]:
         pass_n = _mod_gen_tests_pass(line.strip())
         if pass_n is None:
             continue
+        start, attrs = _attr_run_before(lines, i)
         sibling_name: str | None = None
         gate = ""
-        start = i
-        j = i - 1
-        while j >= 0 and lines[j].lstrip().startswith("#["):
-            attr = lines[j].strip()
+        # Bottom-to-top, so the OUTERMOST of several same-kind attributes wins
+        # (the order the line-at-a-time walk this replaced produced).
+        for attr in reversed(attrs):
             if attr.startswith("#[path"):
                 sibling_name = _attr_path_value(attr)
             elif attr.startswith("#[cfg(") and attr != "#[cfg(test)]":
                 inner = attr[len("#[cfg("):].rsplit(")]", 1)[0]
                 if inner != "test":
                     gate = inner
-            start = j
-            j -= 1
         yield GenTestsDecl(pass_n, sibling_name, gate, start, i)
 
 
@@ -556,7 +602,7 @@ def testfile_paths(text: str) -> list[str]:
 
 
 def topo_sort_files(file_paths: list[str], known_content: dict[str, str]) -> list[str]:
-    """FR-010: topological order of `file_paths` by `mod` declarations parsed
+    """Topological order of `file_paths` by `mod` declarations parsed
     from `known_content` — a file that declares `mod foo;` must be generated
     before `foo.rs`. Pure: uses stdlib `graphlib` + the domain mod-decl scan."""
     from graphlib import TopologicalSorter
@@ -677,20 +723,14 @@ def gen_tests_origin_cfgs(file_text: str) -> dict[int, str]:
         except ValueError:
             continue
         cfg = ""
-        j = i - 1
-        while j >= 0:
-            a = lines[j].strip()
-            if a.startswith("#["):
-                if a.startswith("#[cfg(") and a.endswith(")]") and a != "#[cfg(test)]":
-                    inner = a[len("#[cfg("):].rsplit(")]", 1)[0]
-                    if inner != "test":
-                        cfg = inner
-                j -= 1
-                continue
-            if a == "":
-                j -= 1
-                continue
-            break
+        # Same attribute-run walk as `iter_gen_tests_decls` — a prettyplease-
+        # wrapped `#[allow(...)]` must not hide the cluster gate above it.
+        _, attrs = _attr_run_before(lines, i, skip_blanks=True)
+        for a in reversed(attrs):
+            if a.startswith("#[cfg(") and a.endswith(")]") and a != "#[cfg(test)]":
+                inner = a[len("#[cfg("):].rsplit(")]", 1)[0]
+                if inner != "test":
+                    cfg = inner
         out[n] = cfg
     return out
 

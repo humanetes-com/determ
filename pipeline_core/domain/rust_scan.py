@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import string
 from collections.abc import Iterator, Sequence
+from dataclasses import dataclass
 
 from .rust_idents import declares_fn
 from .rust_lex import code_mask
@@ -276,6 +277,174 @@ def attributed_test_fn_names(text: str) -> list[str]:
             break
         i = j + 1
     return out
+
+
+def attributed_fn_names(text: str, attr: str) -> list[str]:
+    """Names of every fn carrying `#[<attr>]`, in source order — each fn once,
+    however many times the attribute is repeated on it.
+
+    :func:`count_attrs` counts attribute OCCURRENCES, and the two diverge the
+    moment a splice leaves a duplicate behind. Live on
+    `.skeleton-filled/stable/src/error.rs`: **30 `#[cold]` lines against 16
+    annotated fns**, because 17 attribute runs hold a repeat (several are x3).
+    The standing handover invariant "`#[cold]` = 30, must not grow" was
+    therefore counting the duplication, not the annotation — it reads GREEN on
+    a tree where real `#[cold]` fns were lost and RED on one that was merely
+    cleaned. A guard that moves for the wrong reason in both directions is
+    worse than no guard; this is what it should have counted.
+    """
+    want = "#[" + attr
+    out: list[str] = []
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        s = lines[i].strip()
+        if not s.startswith(want) or (
+                len(s) > len(want) and s[len(want)] in _IDENT_CHARS):
+            i += 1
+            continue
+        j = i
+        while j < len(lines):
+            nxt = lines[j].strip()
+            if j > i and not (not nxt or nxt.startswith(("//", "#"))):
+                name = _fn_name_on_line(lines[j])
+                if name:
+                    out.append(name)
+                break
+            j += 1
+        i = j + 1
+    return out
+
+
+MAX_ATTR_LINES = 64
+"""Ceiling on how many source lines one attribute may span. A guard against a
+runaway scan on malformed input, not a property of Rust."""
+
+
+def attr_bracket_delta(line: str) -> int:
+    """Net `(`/`[` minus `)`/`]` for one line, ignoring bracket characters
+    inside string literals (`#[path = "a(b).rs"]` must not skew the balance)."""
+    depth = 0
+    in_str = False
+    escaped = False
+    for ch in line:
+        if in_str:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+        elif ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth -= 1
+    return depth
+
+
+@dataclass(frozen=True, slots=True)
+class Attribute:
+    """One `#[...]` attribute, however many source lines it occupies.
+
+    `line` / `end_line` are its 0-based first and last lines (equal for the
+    common one-line case) and `text` is the whole attribute joined into a single
+    string, so two attributes are comparable whether or not the emitter chose to
+    wrap them. The span is what lets a caller REMOVE an attribute, not merely
+    count it."""
+
+    line: int
+    end_line: int
+    text: str
+
+
+def attribute_runs(text: str) -> list[list[Attribute]]:
+    """Every contiguous attribute run, in source order.
+
+    Attributes are read attribute-by-attribute, not line-by-line. The pipeline
+    writes each `#[...]` on one line, but the Rust side re-emits these files
+    through `prettyplease`, which wraps a long `#[allow(...)]` across ten. A
+    line-at-a-time scan treats the wrapped attribute's continuation lines as the
+    end of the run, so it sees two short runs where there is one long one — and
+    two attributes it cannot compare where there are two it can.
+    """
+    out: list[list[Attribute]] = []
+    lines = text.splitlines()
+    i, n = 0, len(lines)
+    while i < n:
+        if not lines[i].strip().startswith("#["):
+            i += 1
+            continue
+        run: list[Attribute] = []
+        while i < n and lines[i].strip().startswith("#["):
+            buf: list[str] = []
+            depth = 0
+            j = i
+            while j < n and j - i < MAX_ATTR_LINES:
+                stripped = lines[j].strip()
+                buf.append(stripped)
+                depth += attr_bracket_delta(stripped)
+                if depth <= 0:
+                    break
+                j += 1
+            else:
+                # Unbalanced past the ceiling: take the opening line alone
+                # rather than swallowing the rest of the file.
+                buf, j = [lines[i].strip()], i
+            run.append(Attribute(i, j, " ".join(buf)))
+            i = j + 1
+        out.append(run)
+    return out
+
+
+def duplicate_attribute_runs(text: str) -> list[tuple[int, str]]:
+    """`(1-based line, the repeated attribute)` for every attribute RUN that
+    contains the same attribute twice.
+
+    A splice that re-attaches an item's attributes instead of replacing them
+    accumulates them silently — rustc accepts repeated `cfg`/`cold`, so nothing
+    ever fails. The 2026-07-27 repair (`scaffold_rewrite.DefReplacement` /
+    `rust_scan.item_start` expanding the splice span back over the outer
+    attributes) stopped the accumulation; this is the check that keeps it
+    stopped, since the only symptom is a count nobody re-measures.
+    """
+    out: list[tuple[int, str]] = []
+    for run in attribute_runs(text):
+        seen: set[str] = set()
+        for attr in run:
+            if attr.text in seen:
+                out.append((attr.line + 1, attr.text))
+            seen.add(attr.text)
+    return out
+
+
+def drop_duplicate_attributes(text: str) -> str:
+    """`text` with every repeated attribute removed from its run, first kept.
+
+    The inverse of :func:`duplicate_attribute_runs`, for cleaning residue a
+    since-fixed splice left behind. Deliberately conservative:
+
+    * only whole attributes that are BYTE-identical after joining are removed,
+      so nothing that differs in meaning — or merely in spelling — is touched;
+    * the FIRST occurrence survives with its own lines and indentation intact,
+      so the item keeps the attribute order it was authored with;
+    * nothing outside an attribute run is read or rewritten.
+
+    Repeated `cfg`/`cold` are idempotent to rustc, so this changes no
+    compilation — it changes what a count of those attributes means.
+    """
+    lines = text.splitlines(keepends=True)
+    drop: set[int] = set()
+    for run in attribute_runs(text):
+        seen: set[str] = set()
+        for attr in run:
+            if attr.text in seen:
+                drop.update(range(attr.line, attr.end_line + 1))
+            seen.add(attr.text)
+    if not drop:
+        return text
+    return "".join(ln for k, ln in enumerate(lines) if k not in drop)
 
 
 def _leading_ident(token: str) -> str:

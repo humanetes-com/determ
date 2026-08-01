@@ -17,6 +17,8 @@ from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 
+from pipeline_core.domain.measurement import code_identity
+
 
 def banner_lines(pipeline_file: Path, run_id: str, argv: list[str],
                  parallelism: int) -> list[str]:
@@ -24,6 +26,10 @@ def banner_lines(pipeline_file: Path, run_id: str, argv: list[str],
     historical inline rendering (the md5 is of `pipeline_file` as it is ON
     DISK at startup; the git sha is decorative and absent outside a repo)."""
     py_hash = hashlib.md5(pipeline_file.read_bytes()).hexdigest()[:8]
+    # `pipeline.py=` covers the composition root only, and the logic left it
+    # long ago; `code=` covers everything that actually runs. Both are printed
+    # because existing tooling greps the first — see `code_identity`.
+    code_id = code_identity(pipeline_file.parent)
     git_hash = ""
     with suppress(Exception):
         git_hash = " git=" + subprocess.check_output(
@@ -36,7 +42,7 @@ def banner_lines(pipeline_file: Path, run_id: str, argv: list[str],
         f"\n{bar}",
         bar,
         f"  PIPELINE STARTED — {started} UTC  "
-        f"pipeline.py={py_hash}{git_hash}  run_id={run_id}",
+        f"pipeline.py={py_hash}  code={code_id}{git_hash}  run_id={run_id}",
         f"  CMD: {sys.executable} {' '.join(argv)}",
         f"  PIPELINE_PARALLELISM={parallelism}",
         bar,

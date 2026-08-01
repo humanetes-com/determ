@@ -24,6 +24,7 @@ tools/skeleton_extractor/target/
 *.md
 !README.md
 !CONTRIBUTING.md
+!CLAUDE.md
 !docs/*.md
 
 # Coverage data (xdist workers leave .coverage.<host>.<pid>.* shards).

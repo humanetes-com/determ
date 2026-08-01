@@ -39,6 +39,12 @@ from pipeline_core.domain.test_results import (
     parse_failed_tests,
     parse_rustc_compile_errors,
 )
+from pipeline_core.domain.type_production import EMPTY as EMPTY_PRODUCIBLE
+from pipeline_core.domain.type_production import (
+    ProducibleTypes,
+    constructs_type,
+    returns_type,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -348,7 +354,7 @@ def build_test_reverse_map(
         return {}
     # name → list[(file, fn_name)] for PRODUCTION fns only. A failing test is
     # only ever attributed to a fixable production fn, never to another test
-    # (the test-oracle is immutable — FR-018), so test fns are excluded as
+    # (the test-oracle is immutable), so test fns are excluded as
     # candidates and instead indexed as KEYS by the inline pass below.
     by_name: dict[str, list[FnLocator]] = {}
     src_test_recs: list[dict[str, Any]] = []
@@ -416,7 +422,7 @@ def attribute_failures(
     (frontier, kind, convicting): the dispatch map, the path that produced it,
     and the direct-evidence subset that may revert a unit (paths 1-3 only —
     see `FailureKind.convicts`). Callers pass the result through
-    `_filter_test_targets` (FR-018) — same as the fix dispatchers — so a
+    `_filter_test_targets` — same as the fix dispatchers — so a
     test-oracle fn is never spliced.
     Tries each path until one yields a non-empty frontier:
       1. Runtime panics (unimplemented stubs) — `_extract_tdd_frontier`
@@ -434,7 +440,7 @@ def attribute_failures(
     stall budget exit the loop. Kind tells the caller which path produced
     the frontier (for logs/events).
 
-    The `#[test]`-oracle filter (FR-018) is applied to EACH path's frontier
+    The `#[test]`-oracle filter is applied to EACH path's frontier
     here, not just to the final result by the caller: an assertion failure
     panics at the test's OWN line, so path 1 (runtime panics) would otherwise
     resolve to the immutable test fn, short-circuit the chain, then be emptied
@@ -557,7 +563,7 @@ def attribute_failures(
     return AttributionResult({}, FailureKind.NO_FRONTIER, {})
 
 
-# --- Futility escalation (debt #82, 2026-07-10) ------------------------------
+# --- Futility escalation (2026-07-10) ------------------------------
 # When every fn attributed to a failing test has been rewritten to the same
 # dead end, the defect usually sits in the CONSTRUCTION path of the type those
 # fns read (observed live: test_len blamed on Chain::len/size_hint — accessors
@@ -607,7 +613,12 @@ def producers_for_types(
     producer: that is how CONSUMERS use a type, and matching it turned an
     escalation meant to name a handful of constructors into a third of the
     crate — including the `#[test]` fns that call `Error::msg` on the way to
-    asserting something."""
+    asserting something.
+
+    The matches are on TOKENS (`domain.type_production`), which the docstring
+    above claimed before the code did: `tn in ret` made the one-letter `E` of
+    `impl<E> StdError for E` match `-> Result<T, Error>`, and `f"{tn} {{"`
+    made `Error` match `MyError { … }`."""
     exclude = exclude or set()
     out: list[FnLocator] = []
     seen: set[FnLocator] = set()
@@ -617,13 +628,12 @@ def producers_for_types(
             continue
         sig = r.get("sig_text", "") or ""
         body = r.get("body_text", "") or ""
-        ret = sig.split("->", 1)[1] if "->" in sig else ""
         own_type = container_type_name(r.get("container", "") or "")
         for tn in type_names:
             if not tn:
                 continue
-            returns_self = "Self" in ret and own_type == tn
-            if tn in ret or returns_self or f"{tn} {{" in body:
+            if (returns_type(sig, tn, own_type=own_type)
+                    or constructs_type(body, tn)):
                 out.append(key)
                 seen.add(key)
                 break
@@ -639,24 +649,45 @@ def escalate_frontier_to_producers(
     """Frontier additions for `test_name`: producers of the types whose
     accessors proved futile. Containers come from the fn records (the
     frontier key is a bare (file, fn_name) pair). Fail-safe: empty on any
-    missing input."""
+    missing input.
+
+    The subject types are narrowed to the ones this crate DECLARES as struct or
+    enum (`domain.type_production.ProducibleTypes`). A generic parameter, a
+    foreign type and a type alias each answer "who produces this?" with the
+    whole crate, and on the live tree the unfiltered subject set was
+    ``{E, Option, Result, Box, bool, …}`` — see that module for the measured
+    sizes. When the crate's types cannot be read at all, the subject set is
+    empty and nothing escalates: this path's only failure mode is
+    over-widening, so it fails toward silence."""
     try:
         recs = deps.structure.enumerate_fns(src_dir) or []
     except Exception:
         recs = []
+    try:
+        producible = ProducibleTypes.from_type_records(
+            deps.structure.enumerate_types(src_dir))
+    except Exception:
+        producible = EMPTY_PRODUCIBLE
     containers = {(r.get("file", ""), r.get("fn_name", "")): r.get("container", "")
                   for r in recs}
-    type_names = {container_type_name(containers.get((k[0], k[1]), ""))
+    candidates = {container_type_name(containers.get((k[0], k[1]), ""))
                   for k in futile_units}
-    type_names.discard("")
+    candidates.discard("")
+    type_names = set(producible.filter(candidates))
     if not type_names:
+        if candidates:
+            deps.log(f"  [attribution/escalate] {test_name}: not escalating — "
+                     f"{sorted(candidates)} name no type this crate declares "
+                     "(generic parameter, foreign type or alias)")
         return {}
     producers = producers_for_types(recs, type_names, exclude=futile_units)
     if not producers:
         return {}
+    dropped = sorted(candidates - type_names)
     deps.log(f"  [attribution/escalate] {test_name}: accessors of "
              f"{sorted(type_names)} are futile — escalating to "
              f"{len(producers)} producer fn(s): "
              f"{', '.join(f'{f}::{fn}' for f, fn in producers[:5])}"
-             + ("..." if len(producers) > 5 else ""))
+             + ("..." if len(producers) > 5 else "")
+             + (f" (not escalated: {dropped})" if dropped else ""))
     return {key: {test_name} for key in producers}

@@ -1159,7 +1159,9 @@ def parse_binary_results(test_output: str) -> tuple[BinaryResult, ...]:
         if line.startswith("Running "):
             desc, sep, tail = line[len("Running "):].partition(" (")
             exe = tail[:-1].strip() if sep and tail.endswith(")") else None
-            labels.append((desc.strip() or "?", exe))
+            # Fall back to the executable before `?`: an unnamed target is
+            # still identifiable by the binary cargo ran.
+            labels.append((desc.strip() or exe or "?", exe))
         elif line.startswith("Doc-tests "):
             labels.append(("Doc-tests " + line[len("Doc-tests "):].strip(), None))
 
@@ -1188,8 +1190,19 @@ def parse_binary_results(test_output: str) -> tuple[BinaryResult, ...]:
             # Tolerate headerless captures (truncated logs, minimal
             # fixtures): a verdict/trailer line with no open section opens
             # an implicit one instead of being dropped.
-            if (line.startswith("test result:")
-                    or _verdict_of_test_line(line) is not None):
+            #
+            # A verdict-LESS `test NAME ...` line does NOT: it is the weakest
+            # evidence there is, and cargo re-prints exactly that shape inside
+            # a failed binary's captured stdout — trybuild's own progress lines
+            # (`test tests/ui/x.rs ... ok`, ANSI-coloured so the verdict slot
+            # reads as foreign text) come after that binary's trailer and were
+            # opening a phantom, never-completed section. It counted as a
+            # SECOND crashed binary in every `anyhow` sweep, and had cargo
+            # printed the dump between two targets it would have shifted every
+            # later label by one. `dangling` describes an in-flight test in a
+            # section already open; it must not conjure the section.
+            _open = _verdict_of_test_line(line)
+            if line.startswith("test result:") or (_open is not None and _open[1]):
                 current = _Section()
                 sections.append(current)
             else:
@@ -1223,7 +1236,18 @@ def parse_binary_results(test_output: str) -> tuple[BinaryResult, ...]:
 
     out: list[BinaryResult] = []
     for i, sec in enumerate(sections):
-        label, exe = labels[i] if i < len(labels) else ("?", None)
+        # A section with no matching `Running <desc>` label still has an
+        # IDENTITY — its position in cargo's sequential execution order. The
+        # old `"?"` threw that away, and the docstring above already records a
+        # live episode where EVERY label rendered `?` because the labels are
+        # stderr lines interleaved with stdout. Two costs, both observed on
+        # `anyhow`: the u2 regression verdict logs an exclusion nobody can
+        # audit (`binaries ['?', 'tests/test_downcast.rs'] were already crashed
+        # at baseline`, every few minutes for a whole run), and the crash
+        # localizer skips the binary outright because it also has no exe path.
+        # Naming the section costs nothing and makes both auditable.
+        label, exe = (labels[i] if i < len(labels)
+                      else (f"unnamed section #{i + 1}", None))
         if not sec.completed:
             # crashed section: only the observed verdicts exist
             sec.pass_count, sec.fail_count = len(sec.passed), len(sec.failed)

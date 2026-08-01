@@ -1,6 +1,7 @@
 """Pins for the F11 scaffold rewrite (authored layout → skeleton)."""
 from __future__ import annotations
 
+from pipeline_core.domain.rust_scan import duplicate_attribute_runs
 from pipeline_core.domain.scaffold_rewrite import (
     DefReplacement,
     find_definition_span,
@@ -172,3 +173,69 @@ def test_fn_replacement_without_enclosing_fn_rejects_batch():
         "fn source(&self) -> Opt", "fn source(&self) -> Opt { None }",
         fn_name="source")])
     assert not res.replaced and res.text == skeleton
+
+
+def test_no_attribute_is_ever_repeated_within_a_run_after_a_re_splice():
+    """The invariant behind the specific counts above, asserted directly.
+
+    A splice that re-attaches an item's attributes instead of replacing them
+    accumulates them silently: rustc treats repeated `cfg`/`cold` as
+    idempotent, so no build ever fails and the only symptom is a count nobody
+    re-measures. On `.skeleton-filled/stable/src/error.rs` it reached 17
+    duplicated runs, several of them x3, before the 2026-07-27 repair expanded
+    the splice span back over the outer attributes.
+
+    Stated as "no attribute occurs twice in one run" rather than as a count of
+    one chosen attribute, so a regression on ANY attribute fails this.
+    """
+    skeleton = (
+        '#[cfg(any(feature = "std", not(anyhow_no_core_error)))]\n'
+        "#[cold]\n"
+        "#[inline]\n"
+        "pub(crate) unsafe fn error_mut(this: Mut<Self>) -> &mut dyn E "
+        "{ unimplemented!() }\n"
+    )
+    new = (
+        '#[cfg(any(feature = "std", not(anyhow_no_core_error)))]\n'
+        "#[cold]\n"
+        "#[inline]\n"
+        "pub(crate) unsafe fn error_mut(this: Mut<Self>) -> &mut dyn E "
+        "{ &mut *this }\n"
+    )
+    text = skeleton
+    for _ in range(4):
+        res = replace_surface_definitions(text, [DefReplacement(
+            "pub(crate) unsafe fn error_mut(this: Mut<Self>) -> &mut dyn E",
+            new.rstrip("\n"), fn_name="error_mut")])
+        assert res.replaced
+        text = res.text
+    assert duplicate_attribute_runs(text) == []
+
+
+def test_a_wrapped_attribute_is_compared_whole_after_a_re_splice():
+    """`prettyplease` re-emits a long `#[allow(...)]` across several lines.
+
+    A line-at-a-time guard sees the continuation lines as the end of the run
+    and so cannot compare the two copies at all — it would report a clean file
+    while the duplication accumulated. The check must join each attribute
+    before comparing, which is what makes this pin meaningful on a tree the
+    Rust side has re-emitted.
+    """
+    wrapped = (
+        "#[allow(\n"
+        "    clippy::needless_lifetimes,\n"
+        "    clippy::wrong_self_convention,\n"
+        ")]\n"
+    )
+    item = "pub(crate) fn provide(&self) -> u8 { unimplemented!() }\n"
+    # Two copies of the SAME wrapped attribute — what a re-prepend produces.
+    assert duplicate_attribute_runs(wrapped + wrapped + item) != []
+    # One copy is clean, however many lines it spans.
+    assert duplicate_attribute_runs(wrapped + item) == []
+
+    res = replace_surface_definitions(wrapped + item, [DefReplacement(
+        "pub(crate) fn provide(&self) -> u8",
+        (wrapped + "pub(crate) fn provide(&self) -> u8 { 0 }").rstrip("\n"),
+        fn_name="provide")])
+    assert res.replaced
+    assert duplicate_attribute_runs(res.text) == []

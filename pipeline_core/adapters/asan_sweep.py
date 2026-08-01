@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import shlex
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 
 _HOST_TRIPLE = "x86_64-unknown-linux-gnu"
@@ -69,4 +70,28 @@ def run_asan_sweep(
             timeout=timeout, check=False)
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return None
-    return proc.returncode, proc.stdout + "\n" + proc.stderr
+    out = proc.stdout + "\n" + proc.stderr
+    _archive_report(out)
+    return proc.returncode, out
+
+
+def _archive_report(output: str) -> None:
+    """Keep the WHOLE sanitized run's output under `logs/asan/`.
+
+    The report was parsed and dropped, so the only way to learn who freed the
+    memory was to pay for another instrumented build — minutes of GPU-idle
+    rebuild per question. A capped excerpt on the event is not enough either:
+    it truncated mid-report and made a LeakSanitizer section look like the
+    use-after-free's origin stack. Failures are swallowed — an archive that
+    breaks the sweep it is documenting would be worse than no archive."""
+    try:
+        d = Path("logs/asan")
+        d.mkdir(parents=True, exist_ok=True)
+        # Microseconds, not seconds: two sweeps can land inside one second and
+        # the later would silently overwrite the earlier.
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f")
+        (d / f"asan-{stamp}.txt").write_text(output, encoding="utf-8")
+        for old in sorted(d.glob("asan-*.txt"))[:-20]:   # keep the last 20
+            old.unlink(missing_ok=True)
+    except OSError:
+        pass

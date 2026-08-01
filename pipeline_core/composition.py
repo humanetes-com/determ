@@ -11,6 +11,7 @@ state + the boundary providers derived from them. Later stages move the
 from __future__ import annotations
 
 import functools
+import json
 import os as _os
 import subprocess as _subprocess_mod
 import sys
@@ -1164,13 +1165,15 @@ def build_app(
 
     scan_unimplemented_functions = functools.partial(
         _stub_scan.scan_unimplemented_functions, enumerate_fns=enumerate_fns)
+    scan_unimplemented_with_cfg = functools.partial(
+        _stub_scan.scan_unimplemented_with_cfg, enumerate_fns=enumerate_fns)
     source_hash = functools.partial(
         _structure_source_hash,
         is_gen_tests_sibling_name=_is_gen_tests_sibling_name,
         strip_gen_tests_decls=_gen_strip_all_decls)
 
     def count_active_tests_for_cluster(project_dir: Path, cluster: Any) -> int:
-        """FR-024 strict-verdict gate (application.test_count); the cluster
+        """Strict-verdict gate (application.test_count); the cluster
         caches are re-read per call so a swapped App's fakes win."""
         sc = app_ref().structure_cache if app_ref is not None else structure_cache
         return _tc_app.count_active_tests_for_cluster(
@@ -1186,7 +1189,7 @@ def build_app(
             tests_dir_stems: frozenset[str] | None = None,
             include_lib_sources: bool = False,
     ) -> tuple[int, frozenset[str]]:
-        """Sweep-level FR-024: (expected_count, expected_names) — same walk
+        """Sweep-level strict verdict: (expected_count, expected_names) — same walk
         and deps as `count_active_tests_for_cluster`, scopable to the
         `--test stem…` binaries a TDD sweep runs; `include_lib_sources` adds
         the gen_tests + src-side unit tests a `--lib` sweep also runs."""
@@ -1923,7 +1926,7 @@ def build_app(
         stall_refill=_stall_refill,
     )
     # Attribution deps built as a local first — the TDD driver's futility
-    # escalation (debt #82) closes over it.
+    # escalation closes over it.
     _attr_deps = AttributionDeps(
         structure=helpers.structure_via_app,
         classify=_via("classify_phase_c_test_failures"),
@@ -1962,6 +1965,36 @@ def build_app(
         ports.emit("phase_c.checkpoint", data={
             "cluster": cluster, "pass_count": pass_count,
             "best_tree_files": n, "git_committed": committed})
+
+    def _tdd_floor_path(project_dir: Path, cluster: str) -> Path:
+        return project_dir / ".skeleton" / f"_tdd_floor_{cluster}.json"
+
+    def _load_tdd_floor(project_dir: Path, cluster: str) -> Any | None:
+        """The loop floor a previous PROCESS left for this cluster, or None.
+
+        Never raises: a corrupt or unreadable state file must cost a fresh
+        stall streak, never the run."""
+        p = _tdd_floor_path(project_dir, cluster)
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+
+    def _save_tdd_floor(project_dir: Path, cluster: str,
+                        floor: dict[str, Any]) -> None:
+        """Write the floor after every sweep. Atomic via a same-dir temp file:
+        the process this exists to survive can die mid-write, and a truncated
+        floor would be read back as a fresh start on the next boot — silently
+        undoing the thing it is for."""
+        p = _tdd_floor_path(project_dir, cluster)
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            tmp = p.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(floor, indent=1), encoding="utf-8")
+            tmp.replace(p)
+        except OSError as e:
+            ports.log(f"  [phase-c/tdd] could not persist the loop floor "
+                      f"for {cluster}: {e}")
 
     ws_deps = WorkspaceDeps(log=ports.log, emit=ports.emit)
     ws_scan_deps = WorkspaceScanDeps(
@@ -2072,6 +2105,7 @@ def build_app(
         collect_examples=_disc_collect_examples,
         task3=_via("task3"),
         scan_unimplemented_functions=scan_unimplemented_functions,
+        scan_unimplemented_with_cfg=scan_unimplemented_with_cfg,
     )
 
     _crash_localizer_deps = CrashLocalizerDeps(
@@ -2131,6 +2165,8 @@ def build_app(
             escalate_to_producers=functools.partial(
                 escalate_frontier_to_producers, _attr_deps),
             checkpoint_fill_tree=_checkpoint_fill_tree,
+            load_tdd_floor=_load_tdd_floor,
+            save_tdd_floor=_save_tdd_floor,
             retrigger_layout=retrigger_layout,
             active_test_inventory=active_test_inventory_for_cluster,
             localize_crashes=_localize_crashes,

@@ -661,6 +661,29 @@ def test_extract_fn_bodies_recovers_a_shuffled_reply() -> None:
     (f,) = llm_output.extract_fn_bodies('<FN name="f" block="b">y</FN x')
     assert f["fn_name"] == "f" and f["block"] == "b" and f["body"] == "y"
 
+    # 7. The tag's own terminator arrives XML-escaped. Live loss (07-31 13:37,
+    #    `src/ptr.rs::Own<T>`): a model that renders its generics `&lt;T&gt;`
+    #    renders the `>` closing the header the same way, and BOTH correct
+    #    bodies in that reply were discarded on the one entity. The reply is
+    #    the only one the 304 recovery still dropped.
+    g, h = llm_output.extract_fn_bodies(
+        '<FN name="new" block="impl&lt;T&gt; Own&lt;T&gt;\nwhere\n'
+        '    T: ?Sized,"&gt;\n'
+        'Self { ptr: unsafe { NonNull::new_unchecked(Box::into_raw(ptr)) } }\n'
+        '</FN>\n'
+        '<FN name="boxed" block="impl&lt;T&gt; Own&lt;T&gt;\nwhere\n'
+        '    T: ?Sized,"&gt;\n'
+        'unsafe { Box::from_raw(self.ptr.as_ptr() as *mut T) }\n</FN>')
+    assert g["fn_name"] == "new" and g["block"].startswith("impl<T> Own<T>")
+    assert g["body"] == (
+        "Self { ptr: unsafe { NonNull::new_unchecked(Box::into_raw(ptr)) } }")
+    assert h["fn_name"] == "boxed"
+    assert h["body"] == "unsafe { Box::from_raw(self.ptr.as_ptr() as *mut T) }"
+
+    # 7b. The CLOSE tag escaped too — the body still ends where `</FN` starts.
+    (i,) = llm_output.extract_fn_bodies('<FN name="f" block="b"&gt;y</FN&gt;')
+    assert i["fn_name"] == "f" and i["body"] == "y"
+
 
 def test_extract_fn_bodies_leaves_a_well_formed_reply_alone() -> None:
     # Recovery must be unreachable for a reply the strict reading understood:

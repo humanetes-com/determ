@@ -7,8 +7,12 @@ from __future__ import annotations
 import re
 
 from pipeline_core.domain.rust_scan import (
+    attributed_fn_names,
     branch_guard_label,
+    count_attrs,
     count_cfg_attrs,
+    drop_duplicate_attributes,
+    duplicate_attribute_runs,
     has_code_brace,
     has_nonempty_test_fn,
     is_rust_item_boundary_line,
@@ -650,3 +654,91 @@ def test_balanced_treats_lifetimes_as_carrying_no_delimiter() -> None:
 
 def test_balanced_handles_a_quote_char_literal() -> None:
     assert rust_delimiters_balanced(r"""let q = '"'; let b = '{'; fn a() {}""")
+
+
+def test_attributed_fn_names_counts_fns_not_attribute_lines() -> None:
+    # The live divergence on `.skeleton-filled/stable/src/error.rs`: 30
+    # `#[cold]` LINES against 16 annotated fns, because 17 attribute runs hold
+    # a repeat (several x3). The standing handover invariant "#[cold] = 30,
+    # must not grow" was counting the duplication, so it read GREEN on a tree
+    # where real #[cold] fns were lost and RED on one that was merely cleaned.
+    src = (
+        '#[cfg(feature = "std")]\n'
+        "#[cold]\n"
+        '#[cfg(feature = "std")]\n'
+        "#[cold]\n"
+        "#[cold]\n"
+        "pub fn triplicated(x: u8) -> u8 { x }\n"
+        "\n"
+        "#[cold]\n"
+        "fn plain() {}\n"
+        "\n"
+        "#[coldish]\n"                  # a different attribute, not a prefix match
+        "fn other() {}\n"
+    )
+    assert count_attrs(src, "cold") == 4        # occurrences
+    assert attributed_fn_names(src, "cold") == ["triplicated", "plain"]
+
+
+def test_duplicate_attribute_runs_finds_a_re_prepended_splice() -> None:
+    # rustc accepts repeated cfg/cold, so this never fails a build — the only
+    # symptom is a count nobody re-measures. The 2026-07-27 splice repair
+    # stopped the accumulation; this is what keeps it stopped.
+    src = (
+        '#[cfg(any(feature = "std"))]\n'
+        "#[cold]\n"
+        '#[cfg(any(feature = "std"))]\n'
+        "#[cold]\n"
+        "fn f() {}\n"
+        "\n"
+        "#[inline]\n"                    # a clean run reports nothing
+        "#[must_use]\n"
+        "fn g() -> u8 { 0 }\n"
+    )
+    dups = duplicate_attribute_runs(src)
+    assert [ln for ln, _ in dups] == [3, 4]
+    assert {a for _, a in dups} == {'#[cfg(any(feature = "std"))]', "#[cold]"}
+    assert duplicate_attribute_runs("#[inline]\nfn g() {}\n") == []
+
+
+def test_drop_duplicate_attributes_keeps_the_first_and_its_indentation() -> None:
+    src = (
+        '    #[cfg(any(feature = "std"))]\n'
+        "    #[cold]\n"
+        '#[cfg(any(feature = "std"))]\n'
+        "#[cold]\n"
+        "    pub fn f() {}\n"
+    )
+    assert drop_duplicate_attributes(src) == (
+        '    #[cfg(any(feature = "std"))]\n'
+        "    #[cold]\n"
+        "    pub fn f() {}\n"
+    )
+    assert duplicate_attribute_runs(drop_duplicate_attributes(src)) == []
+
+
+def test_drop_duplicate_attributes_removes_a_wrapped_copy_whole() -> None:
+    wrapped = (
+        "#[allow(\n"
+        "    clippy::needless_lifetimes,\n"
+        "    clippy::wrong_self_convention,\n"
+        ")]\n"
+    )
+    item = "pub fn provide(&self) -> u8 { 0 }\n"
+    assert drop_duplicate_attributes(wrapped + wrapped + item) == wrapped + item
+
+
+def test_drop_duplicate_attributes_leaves_a_clean_file_byte_identical() -> None:
+    src = "#[inline]\n#[must_use]\nfn g() -> u8 { 0 }\n"
+    assert drop_duplicate_attributes(src) is src
+
+
+def test_drop_duplicate_attributes_does_not_merge_distinct_attributes() -> None:
+    """Only byte-identical attributes are residue. Two cfgs that differ are two
+    different gates, and dropping either would change what compiles."""
+    src = (
+        '#[cfg(feature = "std")]\n'
+        '#[cfg(not(anyhow_no_core_error))]\n'
+        "fn f() {}\n"
+    )
+    assert drop_duplicate_attributes(src) == src

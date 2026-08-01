@@ -19,6 +19,7 @@ from typing import Any, Protocol
 
 from pipeline_core.application.cluster_augment import AugmentContext
 from pipeline_core.application.reconstruct.run_context import RunContext
+from pipeline_core.domain.cfg import CfgSet, unreachable_under_every_cfg_set
 from pipeline_core.domain.coverage import CoverageMeasurement
 from pipeline_core.domain.enums import Backend
 from pipeline_core.domain.generation import GenerationRequest
@@ -562,6 +563,11 @@ class RunDeps:
     collect_examples: Callable[..., list[tuple[str, str]]]
     task3: Callable[..., tuple[bool, str]]
     scan_unimplemented_functions: Callable[..., list[FnLocator]]
+    # Same stubs, each paired with the cfg predicates the extractor attributes
+    # to it, so the final scan can tell "never attempted" from "unreachable
+    # under every baked cfg-set". See the FINAL block for why that matters.
+    scan_unimplemented_with_cfg: Callable[
+        ..., list[tuple[FnLocator, tuple[str, ...] | None]]]
 
 
 def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
@@ -1065,12 +1071,36 @@ def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
         # reads every .rs file's raw fn bodies, not just what the current
         # cluster compiles — and is the only thing that can still catch them
         # before claiming success.
-        orphaned_stubs = deps.scan_unimplemented_functions(project_dir)
-        if orphaned_stubs:
-            deps.log(f"\nWARNING: all tests passed, but {len(orphaned_stubs)} "
+        # ...but "cfg-blind" needs a THIRD verdict beside pass/fail. A stub the
+        # UNION of every baked cfg-set compiles out was never reachable by any
+        # cluster's Phase C and cannot be filled by anything — unreachable by
+        # construction, not un-attempted. Live on `anyhow`: the three
+        # `#[cfg(anyhow_build_probe)]` `MyError` impls in `nightly.rs` are
+        # stubbed identically in BOTH cluster trees, so t2b's backfill has no
+        # donor either, and exiting 1 on them converts a genuine success into a
+        # failure at the last step, after the run's whole cost is paid.
+        _cfg_sets = [CfgSet.of(cfg_true=c.cfg_true, cfg_false=c.cfg_false)
+                     for c in (deps.load_baked_clusters(project_dir) or [])]
+        _unreachable: list[FnLocator] = []
+        _orphaned: list[FnLocator] = []
+        for loc, preds in deps.scan_unimplemented_with_cfg(project_dir):
+            if preds and unreachable_under_every_cfg_set(preds, _cfg_sets):
+                _unreachable.append(loc)
+            else:
+                _orphaned.append(loc)
+        if _unreachable:
+            deps.log(f"\nNOTE: {len(_unreachable)} fn(s) remain "
+                     "unimplemented!() but are UNREACHABLE under the union of "
+                     f"all {len(_cfg_sets)} baked cfg-set(s) — no cluster's "
+                     "build can compile them, so no fill could ever have been "
+                     "attempted. Not counted against this run:")
+            for loc in _unreachable:
+                deps.log(f"    {loc.file}::{loc.fn_name}")
+        if _orphaned:
+            deps.log(f"\nWARNING: all tests passed, but {len(_orphaned)} "
                       "fn(s) are STILL unimplemented!() — unreachable from "
                       "every cfg cluster that got built/tested this run:")
-            for loc in orphaned_stubs:
+            for loc in _orphaned:
                 deps.log(f"    {loc.file}::{loc.fn_name}")
             deps.log("         This is NOT a clean success — the fns above "
                       "were never attempted.")

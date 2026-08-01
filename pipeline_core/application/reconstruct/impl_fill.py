@@ -30,6 +30,11 @@ from pipeline_core.application.reconstruct.pull_resolver import (
     ask_with_pulls,
     workspace_file_reader,
 )
+from pipeline_core.domain.attempt_loss import (
+    AttemptLoss,
+    escalation_refusal_note,
+    may_escalate_to_last_resort,
+)
 from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.blueprint import Blueprint, blueprint_path, parse_blueprint
 from pipeline_core.domain.dispatch import impl_route_covers
@@ -59,6 +64,7 @@ from pipeline_core.domain.models import (
     ImplBlock,
     TypeRecord,
 )
+from pipeline_core.domain.pass_payoff import UnitOutcome, assess_pass_payoff
 from pipeline_core.domain.reconstruction import SpliceOutcome
 from pipeline_core.domain.refine import (
     CompilingSalvage,
@@ -362,12 +368,17 @@ def fill_impl_blocks(
     fns_filled_total = 0
     attempts_total = 0
     errors: list[str] = []
+    # One entry per block that LANDED, carrying the still-stubbed sites that
+    # held its tests (empty when the block was judged on its own merits). Read
+    # together at the end of the sweep: when one site blocked every landed
+    # block, this route provably moved no verdict.
+    block_outcomes: list[UnitOutcome] = []
 
     blocks = _collect_impl_blocks_for_cluster(target_src_dir, cluster) or []
     if not blocks:
         return ClusterFillResult()
 
-    # debt #46 point 2 — stamp `refill_members` onto blocks that have an
+    # Stamp `refill_members` onto blocks that have an
     # already-filled, compiling member with a failing attributed test, so the
     # co-designed block is re-attacked WHOLE in one call instead of leaving
     # wrong bodies to a per-fn refill that can only touch one member at a time.
@@ -1024,7 +1035,7 @@ def fill_impl_blocks(
         snapshot = file_path.read_text(encoding="utf-8")
         # Per-block context.
         stub_fn_names = [m.fn_name for m in block.stub_members]
-        # debt #46 point 2: refill members need their OWN failing test(s) and
+        # Refill members need their OWN failing test(s) and
         # blueprint/notes context surfaced too, not just the stubs'.
         refill_fn_names = [m.fn_name for m in block.refill_members]
         _fill_target_names = stub_fn_names + refill_fn_names
@@ -1105,6 +1116,11 @@ def fill_impl_blocks(
         last_response = ""
         members_filled_this_block = 0
         block_already_complete = False  # all-target_not_stub ⇒ done
+        # Why the most recent attempt landed nothing. Gates the budget-off
+        # last-resort below: a routing drop or a splice refusal means the model
+        # already answered, so a bigger prompt buys nothing. A list
+        # so the nested attempt closures write without `nonlocal` chains.
+        _last_loss: list[AttemptLoss] = []
         # B3: baseline = the crate's error signature with THIS block's
         # stubs still unimplemented. A fill is "non-regressing" if it adds no
         # error beyond this baseline and none on the filled fns — then we keep
@@ -1132,6 +1148,10 @@ def fill_impl_blocks(
             nonlocal attempts_total, last_response
             with _counters_lock:
                 attempts_total += 1
+            # Default this attempt's loss to the model's. Only the two
+            # positively-identified pipeline-side losses below overwrite it, so
+            # the escalation stays available exactly where it was before.
+            _last_loss[:] = [AttemptLoss.MODEL_FAILURE]
             # Slice 8a: TYPES_IN_SCOPE re-selected each attempt from the
             # member sigs + impl header + where clause + the current error
             # (Plan 9 F4: E0277/E0599/E0046/E0053 routinely name a trait
@@ -1274,8 +1294,14 @@ def fill_impl_blocks(
                             "container": block.container,
                             "members": len(routed)})
                         return FixOutcome("accepted")
+                    # The model answered — bodies were parsed — and not one
+                    # reached the file. Name which side lost it: a header that
+                    # matched no container, or a write the splice refused.
+                    # Either way this is not evidence the prompt was too small.
+                    _last_loss[:] = [AttemptLoss.ROUTING_DROP if routing.dropped
+                                     else AttemptLoss.SPLICE_REFUSAL]
                     _log(f"  [phase-c/impl] {block_id}: nothing spliced "
-                         f"(attempt {fix_attempt}).")
+                         f"({_last_loss[0].value}, attempt {fix_attempt}).")
                     return FixOutcome("stop")
                 # Run cargo check via the structured-diagnostics wrapper
                 # so error counts come from rustc's own classification
@@ -1376,6 +1402,11 @@ def fill_impl_blocks(
                     members_filled_this_block = spliced_now
                     fns_filled_total += spliced_now
                     impls_filled += 1
+                    block_outcomes.append(UnitOutcome(
+                        landed=True,
+                        blocked_by=(tuple(sorted(_u2_impl.blocking_fns))
+                                    if _u2_external_only and _u2_impl is not None
+                                    else ())))
                     _log(f"  [phase-c/impl] {block_id}: "
                          f"FILLED {spliced_now} fn(s) "
                          f"(attempt {fix_attempt})"
@@ -1398,13 +1429,13 @@ def fill_impl_blocks(
                 # interdependent web, not a failure to discard. This dissolves
                 # the convergence deadlock where every correct piece is reverted
                 # for not single-handedly making rc==0.
-                # debt #46 point 4: B3 keeps ONLY while the crate is RED (rc!=0),
+                # B3 keeps ONLY while the crate is RED (rc!=0),
                 # its actual purpose — accumulating prerequisites of a web that
                 # can't yet compile. When rc==0 the crate compiles and tests CAN
                 # run, so reaching here means U2 FAILED (own tests red): keeping a
                 # green-but-behaviorally-wrong body just masks it as "filled".
                 # Fall through to revert (→ stub) so the per-fn behavioral re-fill
-                # (debt #46 point 1) retries it cleanly with the failing test.
+                # retries it cleanly with the failing test.
                 if _b3_keep and rc != 0:
                     _cur_sig = _cargo_err_sig_from_diagnostics(diagnostics)
                     _new_errs = _cur_sig - _baseline_sig
@@ -1416,6 +1447,11 @@ def fill_impl_blocks(
                         members_filled_this_block = spliced_now
                         fns_filled_total += spliced_now
                         impls_filled += 1
+                        # B3 keeps land while the crate is RED, so no test ran
+                        # and no site can be blamed. Recorded as landed with no
+                        # blocker, which makes the payoff verdict conservative:
+                        # one such block is enough to withhold "payoff zero".
+                        block_outcomes.append(UnitOutcome(landed=True))
                         _log(f"  [phase-c/impl] {block_id}: KEPT {spliced_now} "
                              f"fn(s) (B3 non-regressing; {len(_cur_sig)} crate "
                              f"err(s) remain elsewhere) (attempt {fix_attempt}).")
@@ -1520,8 +1556,16 @@ def fill_impl_blocks(
             # focused error. A defect outside the budgeted window (sibling
             # member, type elsewhere in the file) is invisible to the normal
             # prompt; cost is one LLM call on an already-failed block.
-            if (_retro_round == 1
-                    and os.getenv("PHASE_C_MAXIMAL_LAST_RESORT", "1") != "0"):
+            _loss = _last_loss[0] if _last_loss else None
+            _maximal_on = (_retro_round == 1
+                           and os.getenv("PHASE_C_MAXIMAL_LAST_RESORT", "1") != "0")
+            if _maximal_on and _loss is not None and not may_escalate_to_last_resort(_loss):
+                _log(f"  [phase-c/impl] {block_id}: maximal last-resort "
+                     f"WITHHELD — {escalation_refusal_note(_loss)}.")
+                _emit("phase_c.impl.fill.maximal_withheld", data={
+                    "cluster": cluster_name, "file": block.file,
+                    "container": block.container, "loss": _loss.value})
+            elif _maximal_on:
                 _max_cap = int(os.getenv("PHASE_C_MAXIMAL_CHAR_CAP", "120000"))
                 _cur_text = file_path.read_text(encoding="utf-8", errors="replace")
                 _max_tests: list[tuple[str, str]] = []
@@ -1775,6 +1819,21 @@ def fill_impl_blocks(
             _fill_one_block(block)
     if _retro_gate.total:
         _log(f"  [phase-c/impl] cluster {cluster_name}: {_retro_gate.render()}")
+    # Did this sweep move anything, or did every landed block stall behind the
+    # same stub? The route has no next pass to refuse, so this reports rather
+    # than stops — but it names the one fn the outer loop must reach, and the
+    # event is the counter-part of the 50 `u2.external_only` events that went
+    # out unread in run `2879-66905005`.
+    _payoff = assess_pass_payoff(block_outcomes)
+    if _payoff.is_zero:
+        _log(f"  [phase-c/impl] cluster {cluster_name}: PAYOFF ZERO — "
+             f"{_payoff.summary}.")
+        _emit("phase_c.pass.payoff_zero", data={
+            "cluster": cluster_name, "route": "impl",
+            "landed": _payoff.landed,
+            "blocking_fns": sorted(
+                f"{s.file}::{s.fn_name}" for s in _payoff.blockers),
+        })
     bytes_after = sum(p.stat().st_size for p in target_src_dir.rglob("*.rs"))
     remaining_records = _scan_unimplemented_records_for_cluster(target_src_dir, cluster)
     # None = extractor absent → text-scan fallback; 0 here would make the

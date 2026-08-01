@@ -1,4 +1,4 @@
-"""Sweep-level oracle integrity (FR-024 in the TDD loop).
+"""Sweep-level oracle integrity in the TDD loop.
 
 A test binary that crashes or stops compiling silently removes its tests from
 the cargo output; comparing pass counts over the shrunken denominator hid a
@@ -83,6 +83,7 @@ def _run_driver(monkeypatch, tmp_path: Path, *, run_cargo, inventory,
                 attribution_kwargs: list[dict[str, Any]],
                 checkpoints: list[int], events: list[tuple[str, dict]],
                 retrigger=None, reverse_map=None, localize=None,
+                target_src_dir: Path | None = None,
                 ) -> ClusterFillResult:
     monkeypatch.setenv("PHASE_C_TDD_BATCH_RATCHET", "0")
     monkeypatch.setenv("TDD_MAX_STALLS", "2")
@@ -115,7 +116,9 @@ def _run_driver(monkeypatch, tmp_path: Path, *, run_cargo, inventory,
         localize_crashes=localize,
     )
     return run_phase_c_tdd(
-        deps, project_dir=tmp_path, target_src_dir=tmp_path, tests_dir_files=[],
+        deps, project_dir=tmp_path,
+        target_src_dir=target_src_dir if target_src_dir is not None else tmp_path,
+        tests_dir_files=[],
         cluster_tests=[("tests/t.rs", "fn t1() {}")], module="m",
         cluster=_cluster(), check_cmd="cargo check", cluster_env={},
         leaf_counts=None, fr_path=None,
@@ -507,3 +510,38 @@ def test_broken_lib_never_fires_the_layout_retrigger(
                 attribution_kwargs=[], checkpoints=[], events=[],
                 retrigger=_retrig)
     assert not any(c["compile"] is not None for c in calls)
+
+
+def test_inventory_is_walked_over_the_cluster_tree_not_the_workspace_root(
+        tmp_path: Path, monkeypatch) -> None:
+    """The sweep's denominator must be counted over the tree cargo builds.
+
+    The workspace root cannot answer the question. Its `src/` holds a one-line
+    `lib.rs` stub plus the orphaned `gen_tests` siblings; every parent module
+    carrying a sibling's `#[cfg(...)]` cluster gate exists only in the
+    per-cluster tree. Walked from the root, all 19 siblings fell through the
+    inventory's undeclared-sibling branch, which counts unconditionally and
+    never evaluates a gate — so the 18 tests in `error.gen_tests_1..4` and the
+    2 in `wrapper.gen_tests_4`, gated off nightly and absent from its build,
+    were counted on every sweep. Measured on the live tree 2026-08-01: the
+    root answered 124 where the nightly tree answers 104, and each sweep
+    charged the 20-test difference as crash-vanished and aimed a crash
+    retrigger at tests the binary never contained.
+    """
+    seen: list[Path] = []
+
+    def _inventory(pd, cl, stems, lib=False):
+        seen.append(pd)
+        return (1, frozenset({"t1"}))
+
+    cluster_tree = tmp_path / ".skeleton-filled" / "stable"
+    cluster_tree.mkdir(parents=True)
+    _run_driver(monkeypatch, tmp_path,
+                run_cargo=lambda *a, **k: (0, "test t1 ... ok\n"
+                                           "test result: ok. 1 passed; 0 failed"),
+                inventory=_inventory,
+                attribution_kwargs=[], checkpoints=[], events=[],
+                target_src_dir=cluster_tree)
+    assert seen, "the sweep never consulted the inventory"
+    assert seen[0] == cluster_tree, (
+        f"inventory walked {seen[0]}, not the cluster tree {cluster_tree}")

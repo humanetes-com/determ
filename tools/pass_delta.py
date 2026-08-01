@@ -27,6 +27,19 @@ from pipeline_core.domain.measurement import (  # noqa: E402
 )
 
 
+def _pairs(raw: object) -> frozenset[tuple[str, str]]:
+    """`[[binary, test], …]` → a set of pairs. Pre-93.6 events have no such
+    field and yield the empty set, which the report then treats as "this
+    reading cannot be diffed by pair" rather than as "nothing passed"."""
+    if not isinstance(raw, list):
+        return frozenset()
+    out: set[tuple[str, str]] = set()
+    for item in raw:
+        if isinstance(item, (list, tuple)) and len(item) == 2:
+            out.add((str(item[0]), str(item[1])))
+    return frozenset(out)
+
+
 def load_measurements(events: Path, product: str | None,
                       cluster: str | None) -> list[tuple[str, Measurement]]:
     """(timestamp, Measurement) for every tdd-iteration event, in file order.
@@ -59,6 +72,10 @@ def load_measurements(events: Path, product: str | None,
                     fail_count=int(data["fail_count"]),
                     passed=frozenset(data.get("passed") or ()),
                     failed=frozenset(data.get("failed") or ()),
+                    passed_pairs=_pairs(data.get("passed_pairs")),
+                    failed_pairs=_pairs(data.get("failed_pairs")),
+                    incomplete=frozenset(data.get("incomplete") or ()),
+                    oracle_static=int(data.get("oracle_static") or 0),
                 )))
             except (KeyError, TypeError, ValueError):
                 continue
@@ -80,6 +97,22 @@ def report(rows: list[tuple[str, Measurement]], last: int) -> list[str]:
         d = compare_measurements(prev, cur)
         mark = "OK  " if d.comparable else "NOT "
         lines.append(f"{ts[:19]} {mark}{d.verdict}")
+        # Diff by BINARY-QUALIFIED verdict when both readings carry them. The
+        # bare-name diff is what made every delta in the handovers +-3: a name
+        # that runs in two binaries cannot be told apart, and a crashed binary
+        # keeps its shared names "observed" via a surviving one.
+        if prev.passed_pairs and cur.passed_pairs:
+            won = cur.passed_pairs - prev.passed_pairs
+            lost = prev.passed_pairs - cur.passed_pairs
+            lines.append(
+                f"{ts[:19]}      by pair: +{len(won)} -{len(lost)} "
+                f"(net {len(won) - len(lost):+d})"
+                + (f"  gained {sorted(won)[:4]}" if won else "")
+                + (f"  lost {sorted(lost)[:4]}" if lost else ""))
+        for m, whose in ((prev, "prev"), (cur, "cur")):
+            rec = m.reconcile()
+            if not rec.reconciled:
+                lines.append(f"{ts[:19]}      {whose} UNRECONCILED: {rec.note}")
     return lines[-last:] if last > 0 else lines
 
 

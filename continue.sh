@@ -215,8 +215,22 @@ if pipeline_running; then
     echo "Pipeline already running (PID $(pipeline_pids | head -1)). Not launching another."
     exit 0
 fi
-nohup .venv/bin/python pipeline.py $_PIPELINE_ARGS >> "$LOG_DIR/pipeline_anyhow.log" 2>&1 200<&- &
-echo "Pipeline started (PID $!) — backend: $BACKEND"
+# Launched under lib/record_death.sh, which is the pipeline's PARENT and so
+# can read its exit status. Nothing could before: `nohup ... &` followed by an
+# exit or a `tail -f` throws away the one fact that separates an OOM-kill from
+# a SIGTERM from a traceback, and 23 % of a measured 48 h had nothing running
+# with no record of why. The wrapper appends one line per death to
+# logs/deaths.jsonl and relaunches nothing.
+if [[ -r "$SCRIPT_DIR/lib/record_death.sh" ]]; then
+    nohup bash "$SCRIPT_DIR/lib/record_death.sh" "$LOG_DIR" \
+        .venv/bin/python pipeline.py $_PIPELINE_ARGS \
+        >> "$LOG_DIR/pipeline_anyhow.log" 2>&1 200<&- &
+    echo "Pipeline started under death-watch (supervisor PID $!) — backend: $BACKEND"
+    echo "Deaths log   : $LOG_DIR/deaths.jsonl"
+else
+    nohup .venv/bin/python pipeline.py $_PIPELINE_ARGS >> "$LOG_DIR/pipeline_anyhow.log" 2>&1 200<&- &
+    echo "Pipeline started (PID $!) — backend: $BACKEND"
+fi
 echo "Pipeline log : tail -f $LOG_DIR/pipeline_anyhow.log"
 echo "Guards log   : tail -f $LOG_DIR/pipeline_guards.log"
 echo "Debug log    : tail -f $LLM_DEBUG_LOG"

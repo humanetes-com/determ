@@ -48,15 +48,19 @@ The Rust crate mirrors this: `model.rs` is the serde wire contract, `cfg.rs` the
 `skeleton.rs` / `enumerate.rs` / `merge.rs` the work; the library edge uses `thiserror`, `anyhow`
 lives only in `main.rs`.
 
-## Two hard rules specific to this project
+## Three hard rules specific to this project
 
 1. **The strip boundary is sacred.** After `strip`, no code path may read the original source
    again — not as a fallback, not for hard cases. Source-derived data is extracted once in the
    pre-strip bake step and saved to disk. New needs extend the bake step, never add a post-strip
-   read. (See `CODE_ARCHITECTURE.md` and the project's Hard Rule 11 / FR-022.)
+   read. (See `CODE_ARCHITECTURE.md` and the project's rule on source-derived strategy.)
 2. **Self-hosted only.** The pipeline must solve every reconstruction issue with the locally
    served model. It may never call a cloud LLM — not as a fallback. The fix for "the model is
    stuck" is a better prompt / architecture / model, never outsourcing the call.
+3. **No tracker IDs in code.** Comments, docstrings, tests, prompts, log lines and event payloads
+   must not cite a debt number, plan number or requirement ID — the tracker files are untracked
+   working notes, so the reference resolves to nothing for anyone reading the repository. Write
+   the fact and its evidence instead. See `CLAUDE.md`.
 
 ## Adding a task or an extraction
 

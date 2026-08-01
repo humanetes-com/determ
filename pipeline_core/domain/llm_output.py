@@ -507,6 +507,24 @@ def xml_unescaped_variant(body: str) -> str | None:
     return variant if variant != body else None
 
 
+def _tag_terminator(text: str, pos: int) -> int:
+    """Index just past the `>` that closes a tag at `pos`, or -1.
+
+    `&gt;` is accepted there as well as a literal `>`. A model that renders its
+    generics XML-safe renders the tag's own terminator the same way — live:
+    `<FN name="new" block="impl&lt;T&gt; Own&lt;T&gt;…"&gt;`, two correct
+    bodies for `src/ptr.rs::Own<T>` discarded on that one entity. The reading
+    is decidable rather than a guess: this position is the end of the
+    attribute list, before any body has begun, and the only token the grammar
+    allows there is the terminator.
+    """
+    if pos < len(text) and text[pos] == ">":
+        return pos + 1
+    if text.startswith("&gt;", pos):
+        return pos + 4
+    return -1
+
+
 def _find_fn_close(text: str, start: int) -> tuple[int, int] | None:
     """Nearest `</FN\\s*>` at/after `start`. Returns (close_start, pos_after_`>`).
 
@@ -521,8 +539,9 @@ def _find_fn_close(text: str, start: int) -> tuple[int, int] | None:
         if c == -1:
             return (bare, bare + 4) if bare != -1 else None
         k = _skip_ws(text, c + 4)
-        if k < len(text) and text[k] == ">":
-            return c, k + 1
+        end = _tag_terminator(text, k)
+        if end != -1:
+            return c, end
         if bare == -1:
             bare = c
         j = c + 1
@@ -545,9 +564,9 @@ def _find_fn_blocks(text: str) -> list[tuple[str, str, str]]:
       the body in one of them :func:`extract_fn_bodies` still recovers it.
       Deliberately not "take the rest of the reply": that would splice
       whatever prose followed a truncated body.
+    * Either tag's terminator may arrive as `&gt;` (:func:`_tag_terminator`).
     """
     out: list[tuple[str, str, str]] = []
-    n = len(text)
     i = 0
     while True:
         s = text.find("<FN", i)
@@ -566,10 +585,9 @@ def _find_fn_blocks(text: str) -> list[tuple[str, str, str]]:
         if block is not None:
             bl_val, q = block
             q = _skip_ws(text, q)            # `\s*` before `>`
-        p = q
-        if p >= n or text[p] != ">":
+        body_start = _tag_terminator(text, q)
+        if body_start == -1:
             i = s + 1; continue
-        body_start = p + 1
         close = _find_fn_close(text, body_start)
         if close is None:
             out.append((nm_val, bl_val, ""))

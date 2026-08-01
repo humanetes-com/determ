@@ -147,8 +147,9 @@ mod tests {
 
     #[test]
     fn keeps_cfg_test_mod_unstubbed() {
-        // FR-018: a #[cfg(test)] mod is the original tests (oracle) — kept in place,
-        // its bodies NOT stubbed; only the real impl fn is stubbed.
+        // A #[cfg(test)] mod is the original tests, which ARE the reconstruction's
+        // oracle — kept in place, its bodies NOT stubbed; only the real impl fn
+        // is stubbed. Stubbing the oracle would let any skeleton pass it.
         let src = "pub fn a() -> u32 { 1 } \
                    #[cfg(test)] mod tests { #[test] fn t() { assert_eq!(super::a(), 1); } }";
         let out = skeletonise_str(src);
@@ -567,5 +568,53 @@ mod tests {
         assert_eq!(by_name["pub_mod"], "public");
         assert_eq!(by_name["crate_mod"], "restricted");
         assert_eq!(by_name["private_mod"], "private");
+    }
+
+    #[test]
+    fn tree_walk_follows_a_symlinked_tests_dir_and_skips_artifact_roots() {
+        // A per-cluster tree does not own its tests: the pipeline symlinks
+        // `tests` into each one. WalkDir does not follow links by default, so
+        // this walk returned a cluster tree's src fns and NOT one of the fns in
+        // its own tests/ — measured on the live anyhow tree 2026-08-01, 186 src
+        // records and 0 of the 105 test records. The sweep inventory indexes
+        // test fns by crate-relative path, so every tests/ file fell back to a
+        // scan that counts but cannot NAME, and the crash localizer lost the
+        // vanished names it aims with.
+        //
+        // `target-asan` is the second cargo artifact root the ASAN sweep builds;
+        // it is not named `target`, so the walk used to descend into it and
+        // yield trybuild scratch sources as if they were crate code.
+        use std::fs;
+        let tmp = std::env::temp_dir().join("skel_extractor_symlink_walk_test");
+        if tmp.exists() {
+            fs::remove_dir_all(&tmp).unwrap();
+        }
+        let tree = tmp.join("tree");
+        let real_tests = tmp.join("real_tests");
+        fs::create_dir_all(tree.join("src")).unwrap();
+        fs::create_dir_all(tree.join("target-asan")).unwrap();
+        fs::create_dir_all(&real_tests).unwrap();
+        fs::write(tree.join("src/lib.rs"), "pub fn in_src() {}").unwrap();
+        fs::write(tree.join("target-asan/scratch.rs"), "fn in_artifacts() {}").unwrap();
+        fs::write(real_tests.join("t.rs"), "#[test]\nfn in_tests() {}").unwrap();
+        std::os::unix::fs::symlink(&real_tests, tree.join("tests")).unwrap();
+
+        let recs = enumerate_fns_in_tree(&tree).unwrap();
+        let names: std::collections::BTreeSet<_> =
+            recs.iter().map(|r| r.fn_name.as_str()).collect();
+        assert!(names.contains("in_src"), "src fn missing: {names:?}");
+        assert!(
+            names.contains("in_tests"),
+            "symlinked tests/ fn missing — the walk is not following links: {names:?}"
+        );
+        assert!(
+            !names.contains("in_artifacts"),
+            "walked a cargo artifact root: {names:?}"
+        );
+        // Paths stay crate-relative through the link, which is what the
+        // inventory's per-file index is keyed on.
+        let files: std::collections::BTreeSet<_> =
+            recs.iter().map(|r| r.file.as_str()).collect();
+        assert!(files.contains("tests/t.rs"), "unexpected rel paths: {files:?}");
     }
 }

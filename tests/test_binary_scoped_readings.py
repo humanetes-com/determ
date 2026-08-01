@@ -73,6 +73,22 @@ def test_parse_binary_results_headerless_capture_tolerated() -> None:
     assert only.failed == frozenset({"b"})
 
 
+def test_parse_binary_results_captured_stdout_opens_no_phantom_section() -> None:
+    # trybuild prints its own `test <ui file> ... ok` progress lines, and cargo
+    # replays them from the failed binary's captured stdout AFTER the trailer.
+    # ANSI-coloured, so the verdict slot holds foreign text and the line reads
+    # as an in-flight test. It must not open a section: doing so invented a
+    # second, never-completed "crashed binary" in every anyhow sweep.
+    out = ("running 1 test\n"
+           "test compiles ... FAILED\n"
+           "test result: FAILED. 0 passed; 1 failed; 0 ignored\n"
+           "failures:\n"
+           "---- compiles stdout ----\n"
+           "test \x1b[1mtests/ui/temporary-value.rs\x1b[0m ... \x1b[32mok\n")
+    (only,) = parse_binary_results(out)
+    assert only.completed and only.failed == frozenset({"compiles"})
+
+
 def test_reading_aggregates() -> None:
     r = TestStateReading(parse_binary_results(_TWO_BINARIES))
     assert r.pass_count == 2  # 1 trailer + 1 observed in the crashed section
@@ -407,3 +423,26 @@ test s ...
 """
     r = _reading(text)
     assert r.judged_names == frozenset({"p", "q"})
+
+
+def test_a_section_with_no_label_is_named_by_its_position() -> None:
+    # `Running <desc>` labels are stderr lines and the `running N tests`
+    # sections are stdout; a live episode had EVERY label render as `?`. The
+    # old fallback then applied an un-auditable exclusion to the u2 regression
+    # verdict on its behalf — `binaries ['?', 'tests/test_downcast.rs'] were
+    # already crashed at baseline`, every few minutes for a whole run.
+    out = ("running 1 test\ntest a ... ok\n"
+           "test result: ok. 1 passed; 0 failed; 0 ignored\n"
+           "running 1 test\ntest b ... ")     # second section: no label, crashed
+    res = parse_binary_results(out)
+    assert [b.label for b in res] == ["unnamed section #1", "unnamed section #2"]
+    assert res[1].completed is False and res[1].dangling == "b"
+
+
+def test_an_unnamed_target_falls_back_to_its_executable() -> None:
+    out = ("Running  (target/debug/deps/mystery-9f2)\n"   # empty description
+           "running 1 test\ntest a ... ok\n"
+           "test result: ok. 1 passed; 0 failed; 0 ignored\n")
+    (b,) = parse_binary_results(out)
+    assert b.label == "target/debug/deps/mystery-9f2"
+    assert b.exe_path == "target/debug/deps/mystery-9f2"
