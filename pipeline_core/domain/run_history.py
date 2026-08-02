@@ -26,6 +26,7 @@ from pipeline_core.domain.run_health import (
     HealthFinding,
     HealthKind,
     IterReading,
+    Severity,
     count_fills_landed,
     parse_iter_readings,
 )
@@ -185,7 +186,7 @@ def analyze_history(
         comparable = len(oracles) <= 1
         findings.append(HealthFinding(
             HealthKind.PLATEAU_ACROSS_RUNS,
-            "alert" if comparable else "warn",
+            Severity.ALERT if comparable else Severity.WARN,
             f"pass={tail[-1].score}",
             f"unchanged across {len(tail)} consecutive run(s) "
             f"(since {tail[0].started or 'unknown'}); "
@@ -203,7 +204,7 @@ def analyze_history(
         older = [r for r in runs if r.started and r.started[:19] < _cut]
         if older:
             findings.append(HealthFinding(
-                HealthKind.WORKSPACE_RESET, "alert",
+                HealthKind.WORKSPACE_RESET, Severity.ALERT,
                 f"workspace recreated {workspace_created}",
                 f"{len(older)} logged run(s) predate the current "
                 "reconstruction — their scores describe a tree that no longer "

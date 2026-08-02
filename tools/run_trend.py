@@ -111,8 +111,7 @@ def main() -> int:
         print(f"TREND: no cross-run finding across {len(runs)} run(s)")
         return 0
     for f in findings:
-        prefix = {"info": "·", "warn": "⚠", "alert": "‼"}[f.severity]
-        print(f"TREND {prefix} [{f.kind}] {f.subject} — {f.evidence}")
+        print(f"TREND {f.severity.symbol} [{f.kind}] {f.subject} — {f.evidence}")
         print(f"    → {f.action}")
     return 0
 

@@ -1066,6 +1066,21 @@ def _strip_outer_attrs(s: str) -> str:
     return s[i:]
 
 
+def names_impl_or_trait(header: str) -> bool:
+    """True iff `header` opens an ``impl`` or ``trait`` item — i.e. it is a
+    statement about a CONTAINER, whatever else it gets wrong.
+
+    Leading attributes and comments are stripped first, so a model that echoes
+    the ``#[cfg(...)]`` line above the impl is still recognised. Everything
+    else a model writes where a container header was asked for is not a
+    container statement at all: a comment (``// free function``), or the fn's
+    own signature line (``pub(crate) fn construct_from_std<E> where E: …``).
+    Both shapes arrived in one src/error.rs reply on 2026-08-01."""
+    s = " ".join(_strip_outer_attrs(_unescape_layout(header)).split())
+    return (s in ("impl", "trait")
+            or s.startswith(("impl ", "impl<", "trait ", "trait<")))
+
+
 def canon_container(container: str) -> str:
     """Canonical container identity. The extractor's fn records, the impl-block
     manifest, and model-returned ``block`` attributes render the same impl
@@ -1074,12 +1089,23 @@ def canon_container(container: str) -> str:
     E: ...`` vs the model's single-line ``impl<T, E> Context<T, E> for
     Result<T, E>``). Reduce all to ``<Trait>for<SelfTy>``: normalise literal
     ``\\n`` escapes to real whitespace, drop leading outer attributes/comments,
-    drop a leading impl-generics list, drop the where-clause, drop all
-    whitespace, elide lifetimes. Keys the retrospectives store and the per-impl
-    body routing."""
+    drop a leading impl-generics list, drop the where-clause, drop a trailing
+    body brace, drop all whitespace, elide lifetimes. Keys the retrospectives
+    store and the per-impl body routing.
+
+    The trailing brace is the model copying the header off the file, where the
+    ``{`` that opens the block sits on the header's own line (or the line
+    below). ``#[cfg(...)]\\nimpl Debug for BoxedError\\n{`` canonicalised to
+    ``DebugforBoxedError{`` against the tree's ``DebugforBoxedError`` and both
+    `fmt` bodies for src/wrapper.rs were dropped on 2026-08-01. Only a TRAILING
+    brace is removed, never a split at the first one: a const-generic self type
+    (``impl Foo for Bar<{ N }>``) carries braces that are part of its identity
+    and ends in ``>``."""
     s = " ".join(_strip_outer_attrs(_unescape_layout(container)).split())
     if s.startswith("impl"):
         s = _skip_generics(s[4:].lstrip())
+    while s.rstrip().endswith("{"):
+        s = s.rstrip()[:-1]
     if s.endswith(" where"):
         s = s[: -len(" where")]
     s = s.split(" where ")[0]

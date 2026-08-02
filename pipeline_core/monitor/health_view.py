@@ -40,10 +40,9 @@ def health_lines(log_path: str | Path, project_dir: str | Path) -> list[str]:
     if not findings:
         out = ["no findings — run looks healthy"]
     else:
-        sym = {"info": "·", "warn": "⚠", "alert": "‼"}
         out = []
         for f in findings:
-            out.append(f"{sym[f.severity]} [{f.kind}] {f.subject}")
+            out.append(f"{f.severity.symbol} [{f.kind}] {f.subject}")
             out.append(f"   {f.evidence}")
             out.append(f"   → {f.action}")
     _cache = (now, out)

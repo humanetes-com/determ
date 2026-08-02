@@ -84,8 +84,7 @@ def main() -> int:
         print("HEALTH: no findings")
         return 0
     for f in findings:
-        prefix = {"info": "·", "warn": "⚠", "alert": "‼"}[f.severity]
-        print(f"HEALTH {prefix} [{f.kind}] {f.subject} — {f.evidence}")
+        print(f"HEALTH {f.severity.symbol} [{f.kind}] {f.subject} — {f.evidence}")
         if not args.brief:
             print(f"    → {f.action}")
     return 0

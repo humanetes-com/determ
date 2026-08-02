@@ -42,6 +42,8 @@ from pipeline_core.domain.fill_groups import BlockGroupInput, coupled_fill_group
 from pipeline_core.domain.identity import ContainerId, RetroKey
 from pipeline_core.domain.impl_routing import (
     containers_in_file,
+    joint_overwrite_names,
+    members_in_file,
     refill_authorized_names,
     route_fn_bodies,
     trait_default_hosts,
@@ -673,10 +675,18 @@ def fill_impl_blocks(
                 # as before.
                 _extra_containers = [c for c in containers_in_file(all_blocks, file_rel)
                                      if c not in containers]
+                # The member map is what lets a body the model tagged with
+                # something other than an impl header still reach its
+                # declaration — a `// free function` comment, or the fn's own
+                # signature line. Read off the FULL block list for the same
+                # reason `_extra_containers` is: the tier fires on a name the
+                # file declares exactly once, and a narrowed list makes names
+                # look unique that are not.
                 routing = route_fn_bodies(
                     parsed, target=containers[0],
                     related=containers[1:] + _extra_containers,
-                    trait_defaults=trait_default_hosts(all_blocks, file_rel))
+                    trait_defaults=trait_default_hosts(all_blocks, file_rel),
+                    members=members_in_file(all_blocks, file_rel))
                 for _db in routing.dropped:
                     _log(f"  [phase-c/file] {file_rel}: dropped `{_db.fn_name}` — "
                          f"block header does not match any impl in this file. "
@@ -687,8 +697,16 @@ def fill_impl_blocks(
                 # must be told to overwrite a non-stub for exactly those names,
                 # or the model's correction is refused `target_not_stub` and
                 # silently dropped. Authorization spans the whole file because
-                # this route routes bodies file-wide.
-                _refill_names = refill_authorized_names(all_blocks, file_rel)
+                # this route routes bodies file-wide, and — once the reply
+                # answers a refill target at all — the file's OTHER members it
+                # answered too, because a soundness defect is a property of a
+                # scheme rather than of the one fn a failing test convicts.
+                # This route stands or reverts as one, so the gates below are
+                # what protect the tree; the authorization only decides whether
+                # a joint correction may be joint.
+                _refill_names = joint_overwrite_names(
+                    all_blocks, file_rel,
+                    (rb.fn_data["fn_name"] for rb in routing.routed))
                 for rb in routing.routed:
                     wc = rb.fn_data["where_clause"]
                     if wc and (rb.via_trait_default
@@ -698,10 +716,18 @@ def fill_impl_blocks(
                     ok, reason, _delta = _splice_fn_with_where(
                         file_path, rb.container, _fn,
                         rb.fn_data["body"], wc,
-                        allow_nonstub=_fn in _refill_names)
+                        allow_nonstub=_fn in _refill_names,
+                        sig_text=rb.sig_text)
                     if ok:
                         spliced_now += 1
                         _landed.append((_fn, rb.container))
+                        if rb.via_member_name:
+                            _log(f"  [phase-c/file] {file_rel}: `{_fn}` was "
+                                 f"tagged {rb.fn_data['block']!r}, which names "
+                                 "no impl — routed to the one declaration this "
+                                 "file has of that name"
+                                 + (" (a free fn)." if not rb.container
+                                    else f", in `{rb.container.splitlines()[0]}`."))
                         if rb.via_trait_default:
                             _log(f"  [phase-c/file] {file_rel}: `{_fn}` was "
                                  f"tagged {rb.fn_data['block']!r} (an empty "
@@ -730,11 +756,13 @@ def fill_impl_blocks(
                 # file's FREE functions together with its impls, else a
                 # producer/consumer cycle (the free `not(cond)` that the `Bool`
                 # impls' tests call) can never validate — each half reverts
-                # while the other is a stub. `route_fn_bodies` only matches impl
-                # containers, so free-fn bodies land in `routing.dropped`. Route
-                # each dropped body whose name matches a still-stubbed FREE fn
-                # in THIS file, disambiguating by the stub's verbatim signature
-                # (a free fn has no impl container to narrow on).
+                # while the other is a stub. Routing's member-identity tier now
+                # reaches a free fn the file declares exactly ONCE; what still
+                # arrives here is the ambiguous remainder — a name declared in
+                # several of the file's inline mods, or one the block records
+                # do not cover. Route each such dropped body onto a still-stubbed
+                # module-level fn, disambiguating by the stub's verbatim
+                # signature (a free fn has no impl container to narrow on).
                 _free_stubs: dict[str, list[dict[str, Any]]] = {}
                 for r in (_scan_unimplemented_records_for_cluster(
                         target_src_dir, cluster) or []):
@@ -790,6 +818,8 @@ def fill_impl_blocks(
                             sig_text=str(_rec.get("sig_text", "")))
                         if _ok:
                             spliced_now += 1
+                            _landed.append((_p["fn_name"],
+                                            str(_rec.get("container", ""))))
                             _log(f"  [phase-c/file] {file_rel}: routed free fn "
                                  f"`{_p['fn_name']}` to its module-level stub.")
                         else:
@@ -816,10 +846,19 @@ def fill_impl_blocks(
                     # unconditional ACCEPT, meaning the failing tests the re-fill
                     # exists to fix are never run and the bodies are kept on
                     # compile alone.
+                    # Plus everything this reply actually LANDED. The plan is
+                    # built from the file's fillable impl blocks, which exclude
+                    # its free fns; the model answers for them anyway and
+                    # routing now lands them, so a gate keyed to the plan alone
+                    # judges a src/error.rs rewrite of `object_downcast` and
+                    # `vtable` by the tests of the impl members only — no
+                    # credit for fixing them, no blame for breaking them.
+                    # Judge what was written.
                     _unit_fns = frozenset(
                         FnLocator(file_rel, m.fn_name)
                         for b in fblocks
-                        for m in (*b.stub_members, *b.refill_members))
+                        for m in (*b.stub_members, *b.refill_members)
+                    ) | frozenset(FnLocator(file_rel, n) for n, _c in _landed)
                     # Conviction-scoped, NOT the dispatch set: a test with no
                     # observed link to this file can never be fixed here, so
                     # letting it reject would revert every attempt forever.
@@ -831,7 +870,8 @@ def fill_impl_blocks(
                     _unit_sites = frozenset(
                         FnSite(file_rel, m.fn_name, b.container)
                         for b in fblocks
-                        for m in (*b.stub_members, *b.refill_members))
+                        for m in (*b.stub_members, *b.refill_members)
+                    ) | frozenset(FnSite(file_rel, n, c) for n, c in _landed)
                     _u2_file = _u2_test_gate(_file_tests, _unit_sites, tdd_test_cmd,
                                              target_src_dir, cluster_env)
                 # ACCEPT_EXTERNAL_ONLY (all failures blocked by another file's
@@ -1219,13 +1259,17 @@ def fill_impl_blocks(
                 # related container. Route by canonical impl-header identity
                 # (exact first) — a multi-line where-clause container must
                 # match the model's single-line `block` attribute.
+                # `members` for the same reason the file-first route passes it:
+                # the P6 last-resort prompt this same splice serves shows the
+                # model the ENTIRE file, so a reply can carry a body for a free
+                # fn or for a sibling impl's member tagged with something that
+                # is not an impl header at all.
                 routing = route_fn_bodies(
                     parsed, target=block.container,
                     related=[rb.container for rb in _route_candidates],
-                    trait_defaults=trait_default_hosts(blocks, block.file))
-                routed: list[tuple[dict[str, Any], str, bool]] = [
-                    (rb.fn_data, rb.container, rb.via_trait_default)
-                    for rb in routing.routed]
+                    trait_defaults=trait_default_hosts(blocks, block.file),
+                    members=members_in_file(blocks, block.file))
+                routed = list(routing.routed)
                 if routing.dropped:
                     # The dropped VO carries the ACTUAL rejected block header —
                     # a name re-lookup would collapse two same-named bodies in
@@ -1251,7 +1295,9 @@ def fill_impl_blocks(
                 # Apply each splice. Operating on the same file in
                 # sequence keeps byte offsets consistent because we
                 # re-locate after each splice via the syn enumerator.
-                for fn_data, container, _via_default in routed:
+                for _rb in routed:
+                    fn_data, container = _rb.fn_data, _rb.container
+                    _via_default = _rb.via_trait_default
                     target_file = target_src_dir / block.file
                     # Trait-owned signature (impl member OR the trait's own
                     # default): a model-proposed where-clause would splice E0276
@@ -1268,6 +1314,7 @@ def fill_impl_blocks(
                         target_file, container, fn_data["fn_name"],
                         fn_data["body"], wc,
                         allow_nonstub=fn_data["fn_name"] in _refill_names,
+                        sig_text=_rb.sig_text,
                     )
                     if ok:
                         spliced_now += 1
@@ -1440,7 +1487,7 @@ def fill_impl_blocks(
                     _cur_sig = _cargo_err_sig_from_diagnostics(diagnostics)
                     _new_errs = _cur_sig - _baseline_sig
                     _frontier = _frontier_from_diags(diagnostics, target_src_dir)
-                    _filled = {fd["fn_name"] for fd, _, _ in routed}
+                    _filled = {rb.fn_data["fn_name"] for rb in routed}
                     _on_fill = any(f == block.file and fn in _filled
                                    for (f, fn) in _frontier)
                     if not _new_errs and not _on_fill:

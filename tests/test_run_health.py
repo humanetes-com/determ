@@ -6,6 +6,7 @@ from __future__ import annotations
 from pipeline_core.domain.cluster_membership_report import ClusterMembershipReport
 from pipeline_core.domain.run_health import (
     HealthKind,
+    Severity,
     analyze,
     parse_iter_readings,
 )
@@ -397,3 +398,25 @@ def test_routing_drop_fires_and_names_the_rejected_headers() -> None:
 def test_routing_drop_silent_when_nothing_was_dropped() -> None:
     lines = ["  [phase-c/file] src/wrapper.rs: FILE FILLED 4 fn(s) in one pass."]
     assert not [x for x in analyze(lines, []) if x.kind is HealthKind.ROUTING_DROP]
+
+
+def test_every_severity_renders_a_symbol() -> None:
+    # The gap this closes: `red` was added to the domain for two findings and
+    # the three renderers that turn a finding into a line — tools/run_health.py,
+    # tools/run_trend.py and monitor/health_view.py — each carried their own
+    # copy of a 3-key {"info", "warn", "alert"} dict. All three raised
+    # KeyError: 'red' on the first red finding. On 2026-08-02 the live anyhow
+    # report died after two findings, hiding a ZERO_PAYOFF_BURN that had been
+    # true for four consecutive runs. Symbol lookup now lives on the enum, and
+    # this asserts it is total: a new member with no symbol fails here rather
+    # than in the operator's report.
+    for sev in Severity:
+        assert sev.symbol
+
+
+def test_red_finding_renders_without_raising() -> None:
+    # NO_SEGMENT_EVIDENCE is the cheapest red finding to provoke: an empty
+    # segment. Rendering it the way the CLIs do must not raise.
+    f = [x for x in analyze([], []) if x.kind is HealthKind.NO_SEGMENT_EVIDENCE]
+    assert len(f) == 1 and f[0].severity is Severity.RED
+    assert f"{f[0].severity.symbol} [{f[0].kind}] {f[0].subject}"

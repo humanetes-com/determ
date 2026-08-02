@@ -1,13 +1,16 @@
-"""Body→container routing by canonical impl-header identity (debt #43).
+"""Body→container routing by canonical impl-header identity.
 
-Pins the run-187469 failure: a multi-line where-clause TARGET container must
-match the model's single-line ``block`` attribute instead of dropping every
-returned body."""
+Pins the run-187469 failure: a multi-line where-clause TARGET container
+(``impl<T> Own<T>\\nwhere\\n    T: ?Sized,``) must match the model's single-line
+``block`` attribute (``impl<T> Own<T>``) instead of dropping every returned
+body — 11 drops in one src/ptr.rs call, the whole impl-scope answer wasted."""
 from __future__ import annotations
 
 from pipeline_core.domain.impl_routing import (
     containers_in_file,
     impl_block_id,
+    joint_overwrite_names,
+    members_in_file,
     norm_src_rel,
     refill_authorized_names,
     route_fn_bodies,
@@ -411,3 +414,194 @@ def test_a_body_naming_no_container_routes_to_the_target() -> None:
     # a container that was named and matches nothing is still dropped
     r = route_fn_bodies([_fn("source", "impl Nope")], target="impl X", related=[])
     assert r.dropped_names == ("source",)
+
+
+# --- member identity: the header is not always a container statement --------
+# 2026-08-01, run 328661-13e51032, one src/error.rs file-first reply: the model
+# returned 24 bodies and routing discarded 22 of them. Thirteen carried the
+# block attribute `// free function` (the file's vtable helpers genuinely have
+# no impl to name) and six carried the fn's OWN signature line
+# (`pub(crate) fn construct_from_std<E> where E: StdError + Send + Sync +
+# 'static`). Among the six was `construct` — the funnel every `construct_from_*`
+# calls, and the fn the per-fn route failed twelve times before a joint fill
+# solved it in four minutes. Nineteen of the 22 name a fn src/error.rs declares
+# exactly once; the other three name fns it does not declare at all.
+
+def _member_block(container: str, members: tuple[tuple[str, str], ...]) -> ImplBlock:
+    return ImplBlock(
+        file="src/error.rs", container=container,
+        members=tuple(FnRecord(fn_name=n, sig_text=s) for n, s in members))
+
+
+_ERROR_BLOCKS = [
+    _member_block("impl Error", (
+        ("construct", "unsafe fn construct<E>(error: E, vtable: &'static ErrorVTable) -> Self"),
+        ("provide", "fn provide<'a>(&'a self, request: &mut Request<'a>)"),
+    )),
+    _member_block("", (
+        ("object_downcast", "unsafe fn object_downcast<E>(e: Ref<ErrorImpl>, target: TypeId) -> Option<Ref<()>>"),
+        ("vtable", "unsafe fn vtable(p: NonNull<ErrorImpl>) -> &'static ErrorVTable"),
+    )),
+    _member_block("impl ErrorImpl", (
+        ("provide", "unsafe fn provide<'a>(this: Ref<'a, Self>, request: &mut Request<'a>)"),
+    )),
+]
+
+
+def test_members_in_file_includes_the_free_fn_block() -> None:
+    # The free-fn block's container is "" — the extractor's own rendering, and
+    # precisely the declaration no header can name. Excluding it would leave
+    # the tier unable to reach the only case it exists for.
+    names = [(m.fn_name, m.container) for m in members_in_file(_ERROR_BLOCKS, "src/error.rs")]
+    assert ("object_downcast", "") in names and ("construct", "impl Error") in names
+    assert members_in_file(_ERROR_BLOCKS, "src/ptr.rs") == ()
+
+
+def test_signature_line_as_block_attr_routes_to_the_declaring_impl() -> None:
+    # The live loss. `construct` belongs to `impl Error`; tagged with its own
+    # signature it matched no container and the body was thrown away.
+    mems = members_in_file(_ERROR_BLOCKS, "src/error.rs")
+    r = route_fn_bodies(
+        [_fn("construct", "unsafe fn construct<E> where E: StdError + Send + Sync + 'static")],
+        target="impl ErrorImpl", related=["impl Error"], members=mems)
+    assert r.dropped == ()
+    assert [(rb.container, rb.via_member_name) for rb in r.routed] == [
+        ("impl Error", True)]
+    # and it carries the declaration's signature, which is what lets the splice
+    # find a free fn later in this same reply.
+    assert r.routed[0].sig_text.startswith("unsafe fn construct<E>(error: E")
+
+
+def test_comment_as_block_attr_reaches_the_free_fn() -> None:
+    mems = members_in_file(_ERROR_BLOCKS, "src/error.rs")
+    r = route_fn_bodies([_fn("object_downcast", "// free function")],
+                        target="impl Error", related=[], members=mems)
+    assert r.dropped == ()
+    assert r.routed[0].container == ""
+    assert r.routed[0].via_member_name is True
+    assert "object_downcast" in r.routed[0].sig_text
+
+
+def test_member_tier_refuses_a_name_the_file_declares_twice() -> None:
+    # `provide` is declared by `impl Error` AND `impl ErrorImpl`. With no usable
+    # header there is nothing to choose between them, and choosing anyway would
+    # splice a body into the wrong one.
+    mems = members_in_file(_ERROR_BLOCKS, "src/error.rs")
+    r = route_fn_bodies([_fn("provide", "// free function")],
+                        target="impl Error", related=[], members=mems)
+    assert r.routed == () and r.dropped_names == ("provide",)
+
+
+def test_member_tier_refuses_a_name_the_file_does_not_declare() -> None:
+    # Three of the 22 dropped bodies named fns src/error.rs has never had
+    # (`object_drop_rest_simple`); an invented name must stay dropped.
+    mems = members_in_file(_ERROR_BLOCKS, "src/error.rs")
+    r = route_fn_bodies([_fn("object_drop_rest_simple", "// free function")],
+                        target="impl Error", related=[], members=mems)
+    assert r.routed == () and r.dropped_names == ("object_drop_rest_simple",)
+
+
+def test_member_tier_never_fires_on_a_header_that_names_an_impl() -> None:
+    # The corruption container scoping exists to prevent: `!self` written for
+    # `impl Bool for bool` must never land on the self-less free `fn not(cond)`
+    # just because that free fn is the only `not` in the block records — which
+    # is exactly what a cfg-gated-out impl looks like from here.
+    blocks = [_member_block("", (("not", "fn not(cond: bool) -> bool"),))]
+    mems = members_in_file(blocks, "src/error.rs")
+    for attr in ("impl Bool for bool",
+                 '#[cfg(feature = "std")]\nimpl Bool for bool',
+                 "impl<T> Bool for &T",
+                 "trait Bool"):
+        r = route_fn_bodies([_fn("not", attr)], target="impl Other",
+                            related=[], members=mems)
+        assert r.routed == (), attr
+        assert r.dropped_names == ("not",), attr
+
+
+def test_member_tier_is_off_by_default() -> None:
+    # Callers that pass no members keep the pre-existing drop behaviour.
+    r = route_fn_bodies([_fn("construct", "// free function")],
+                        target="impl Error", related=[])
+    assert r.dropped_names == ("construct",)
+
+
+def test_a_resolvable_header_still_outranks_the_member_tier() -> None:
+    # The model's own claim about its body wins over an inference from the
+    # file: a body tagged with a container that DOES resolve goes there, even
+    # when the name is unique elsewhere.
+    mems = members_in_file(_ERROR_BLOCKS, "src/error.rs")
+    r = route_fn_bodies([_fn("provide", "impl ErrorImpl")],
+                        target="impl Error", related=["impl ErrorImpl"], members=mems)
+    assert [(rb.container, rb.via_member_name) for rb in r.routed] == [
+        ("impl ErrorImpl", False)]
+
+
+def test_block_header_carrying_its_opening_brace_still_matches() -> None:
+    # The model echoes the header off the file text, where `{` opens the block
+    # on the header's own line. Both `fmt` bodies for src/wrapper.rs were
+    # dropped on 2026-08-01 because `DebugforBoxedError{` != `DebugforBoxedError`.
+    tree = "impl Debug for BoxedError"
+    model = '#[cfg(any(feature = "std", not(anyhow_no_core_error)))]\nimpl Debug for BoxedError\n{'
+    assert canon_container(model) == canon_container(tree)
+    r = route_fn_bodies([_fn("fmt", model)], target="impl Display for BoxedError",
+                        related=[tree])
+    assert [rb.container for rb in r.routed] == [tree]
+    # a where-clause header rendered the same way reduces identically
+    assert canon_container("impl<T> Write for Indented<'_, T>\nwhere\n    T: Write,\n{") == \
+        canon_container("impl<T> Write for Indented<'_, T>")
+    # a const-generic self type keeps its braces — they are part of its identity
+    assert canon_container("impl Foo for Bar<{ N }>") != canon_container("impl Foo for Bar")
+
+
+# --- one reply's overwrite authorization -----------------------------------
+# The file-first plan IS the authorization set: both are built from
+# `refill_members`. On 2026-08-01 src/error.rs' plan named `new`, `root_cause`,
+# `downcast`, `downcast_ref`, `downcast_mut` and the trait-impl members — and
+# the crash it was handed (`heap-use-after-free` at src/error.rs:474, in
+# `downcast`) lives in a scheme `downcast` shares with the free `object_downcast`,
+# `object_drop_front` and `vtable`, none of which the plan could overwrite.
+
+def _refill_block(container: str, members: tuple[str, ...],
+                  refill: tuple[str, ...] = ()) -> ImplBlock:
+    return ImplBlock(
+        file="src/error.rs", container=container,
+        members=tuple(FnRecord(fn_name=n) for n in members),
+        refill_members=tuple(FnRecord(fn_name=n) for n in refill))
+
+
+_JOINT_BLOCKS = [
+    _refill_block("impl Error", ("downcast", "construct"), refill=("downcast",)),
+    _refill_block("", ("object_downcast", "vtable")),
+    ImplBlock(file="src/ptr.rs", container="impl<T> Own<T>",
+              members=(FnRecord(fn_name="boxed"),),
+              refill_members=(FnRecord(fn_name="boxed"),)),
+]
+
+
+def test_joint_overwrite_adds_the_siblings_a_reply_co_designed() -> None:
+    got = joint_overwrite_names(
+        _JOINT_BLOCKS, "src/error.rs",
+        ["downcast", "object_downcast", "vtable", "construct"])
+    assert got == {"downcast", "object_downcast", "vtable", "construct"}
+
+
+def test_joint_overwrite_is_inert_without_an_authorized_refill() -> None:
+    # A reply that answers only unauthorized names may still overwrite nothing
+    # but the file's own refill targets — it is not a correction of anything.
+    got = joint_overwrite_names(
+        _JOINT_BLOCKS, "src/error.rs", ["object_downcast", "vtable"])
+    assert got == refill_authorized_names(_JOINT_BLOCKS, "src/error.rs")
+    assert got == {"downcast"}
+    # …and a stub-only file (no refill members at all) is untouched.
+    stubs = [_refill_block("impl Error", ("downcast", "construct"))]
+    assert joint_overwrite_names(stubs, "src/error.rs",
+                                 ["downcast", "construct"]) == frozenset()
+
+
+def test_joint_overwrite_never_leaves_the_file_or_invents_a_name() -> None:
+    # `boxed` is a refill target — in ANOTHER file. A name this file does not
+    # declare is not a member of it however the reply spells it.
+    got = joint_overwrite_names(
+        _JOINT_BLOCKS, "src/error.rs",
+        ["downcast", "boxed", "object_drop_rest_simple"])
+    assert got == {"downcast"}

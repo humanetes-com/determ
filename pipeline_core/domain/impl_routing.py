@@ -16,7 +16,7 @@ without the model, cargo, or the tree.
 """
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any
@@ -27,6 +27,7 @@ from pipeline_core.domain.rust_idents import (
     canon_container,
     impl_head_name,
     impl_trait_name,
+    names_impl_or_trait,
     trait_def_name,
 )
 
@@ -38,11 +39,19 @@ class RoutedBody:
     `via_trait_default` records that the body arrived tagged with a trait-IMPL
     header and was resolved to the trait DECLARATION that hosts the member's
     default body — the caller must then treat the signature as trait-owned even
-    though the container it splices into is not itself a trait impl."""
+    though the container it splices into is not itself a trait impl.
+
+    `via_member_name` records that no header resolved the body and the file's
+    own declaration of that fn name did; `sig_text` then carries that
+    declaration's verbatim signature, which is the only disambiguator a FREE
+    fn has (its container is the empty string, so container narrowing cannot
+    separate it from a same-named impl method)."""
 
     fn_data: dict[str, Any]
     container: str
     via_trait_default: bool = False
+    via_member_name: bool = False
+    sig_text: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +66,19 @@ class TraitDefaultHost:
     container: str
     trait_name: str
     member_names: frozenset[str]
+
+
+@dataclass(frozen=True, slots=True)
+class FileMember:
+    """One fn DECLARATION in the file: which container holds it, and the
+    verbatim signature that identifies it when the container cannot.
+
+    `container` is "" for a free fn — that is the extractor's own rendering,
+    not a missing value, and it is exactly why `sig_text` is carried."""
+
+    fn_name: str
+    container: str
+    sig_text: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,9 +133,29 @@ def trait_default_hosts(
     return tuple(hosts)
 
 
+def members_in_file(
+    blocks: Sequence[ImplBlock], file_rel: str,
+) -> tuple[FileMember, ...]:
+    """Every fn DECLARED in `file_rel`, with the container that declares it.
+
+    Feeds :func:`route_fn_bodies`' member-identity tier. Includes the free-fn
+    block (container "") on purpose — a free fn is where the impl route has no
+    header to match, so it is the case the tier exists for. Callers must pass
+    the FULL block list for the same reason :func:`containers_in_file` does: a
+    frontier-narrowed list omits declarations, and an omitted declaration reads
+    to the tier as "this name is unique in the file" when it is not."""
+    want = norm_src_rel(file_rel)
+    return tuple(
+        FileMember(m.fn_name, b.container, m.sig_text)
+        for b in blocks if norm_src_rel(b.file) == want
+        for m in b.members
+    )
+
+
 def route_fn_bodies(
     parsed: list[dict[str, Any]], *, target: str, related: list[str],
     trait_defaults: Sequence[TraitDefaultHost] = (),
+    members: Sequence[FileMember] = (),
 ) -> BodyRouting:
     """Resolve each parsed FN block to the TARGET or a RELATED container.
 
@@ -123,15 +165,30 @@ def route_fn_bodies(
     or the abbreviated `impl <Trait>` that matched no container routes to the
     declaration of `<Trait>` when that trait declares the member — the
     membership requirement is what makes the abbreviated form safe, since in
-    Rust it otherwise reads as an inherent impl on a TYPE of that name. Last
-    because an explicit override always wins
-    over the default it would replace. A body matching nothing is dropped.
+    Rust it otherwise reads as an inherent impl on a TYPE of that name. Then
+    the MEMBER-IDENTITY tier (below). A body matching nothing is dropped.
 
     A body naming NO container at all routes to the TARGET. That is not a
     guess: the prompt asked about one container, so an answer that declines to
     repeat which one is about that one. An empty `block` can only mean the
     attribute was absent — the tag reader demands ≥1 character of it — so this
-    tier can never fire on a model that named a container and got it wrong."""
+    tier can never fire on a model that named a container and got it wrong.
+
+    **Member identity** (`members`, from :func:`members_in_file`): when the
+    attribute is not a container claim at all — a comment, or the fn's own
+    signature line — and `file_rel` declares that fn name EXACTLY ONCE, the
+    declaration is the answer and the attribute was never information. This is
+    the only tier that can reach a FREE fn, whose container is "" and which no
+    header can name; it carries the declaration's `sig_text` because "" cannot
+    narrow a same-named impl method at splice time.
+
+    Both conditions are load-bearing. Uniqueness alone would let an `impl Bool
+    for bool`-tagged `not` land on the free `fn not(cond)` whenever the impl
+    is cfg-gated out of this cluster and so absent from `blocks`; the container
+    claim alone would let a comment-tagged `fmt` pick one of four `fmt`
+    declarations at random. Last because every header that DOES resolve must
+    win: the model's own claim about its body outranks an inference from the
+    file."""
     routed: list[RoutedBody] = []
     dropped: list[DroppedBody] = []
     target_canon = canon_container(target)
@@ -164,6 +221,13 @@ def route_fn_bodies(
         if host is not None:
             routed.append(RoutedBody(fn_data, host.container, via_trait_default=True))
             continue
+        if not names_impl_or_trait(block_attr):
+            decls = [m for m in members if m.fn_name == fn_name]
+            if len(decls) == 1:
+                routed.append(RoutedBody(
+                    fn_data, decls[0].container,
+                    via_member_name=True, sig_text=decls[0].sig_text))
+                continue
         dropped.append(DroppedBody(
             fn_name=fn_name,
             block_attr=block_attr,
@@ -235,3 +299,46 @@ def refill_authorized_names(
         for b in blocks if norm_src_rel(b.file) == want
         for m in b.refill_members
     )
+
+
+def joint_overwrite_names(
+    blocks: Sequence[ImplBlock], file_rel: str, answered: Iterable[str],
+) -> frozenset[str]:
+    """Fn names ONE file-first reply may overwrite: its authorized re-fill
+    targets, plus every other fn of `file_rel` the same reply answered.
+
+    The widening fires only when the reply actually answers a re-fill target.
+    A reply that fills stubs alone gets `refill_authorized_names` verbatim, so
+    nothing about the stub path changes.
+
+    Why the siblings must come with it: the re-fill plan is built from the
+    frontier — the fns a FAILING TEST convicts — and a soundness defect is not
+    a property of one fn. On 2026-08-01 src/error.rs' plan named `downcast`,
+    `downcast_ref`, `downcast_mut`, `root_cause` and `new` in `impl Error`, and
+    nothing else; the crash it was asked to fix is a `heap-use-after-free`
+    raised at `downcast` (src/error.rs:474) whose scheme `downcast` shares with
+    the free fns `object_downcast`, `object_drop_front` and `vtable` — none of
+    them in the plan, and so none of them overwritable. The model answered for
+    all of them, correctly, having been handed the ASAN report. Asking for a
+    joint property to be repaired one half at a time is why six tests have sat
+    behind that binary since 07-30.
+
+    Refusing the siblings does not protect the tree. The file-first route
+    compiles, runs the U2 gate and runs the whole-suite regression gate over
+    the reply AS ONE, and reverts all of it on any failure — the protection is
+    those gates, not the authorization. What the narrow authorization
+    guarantees is only that a co-designed correction can never be co-designed.
+
+    Scoped to the FILE for the same reason `refill_authorized_names` is: the
+    reply is about one file and routing lands bodies file-wide."""
+    want = norm_src_rel(file_rel)
+    authorized = refill_authorized_names(blocks, file_rel)
+    answered_set = frozenset(answered)
+    if not (authorized & answered_set):
+        return authorized
+    declared = frozenset(
+        m.fn_name
+        for b in blocks if norm_src_rel(b.file) == want
+        for m in b.members
+    )
+    return authorized | (answered_set & declared)

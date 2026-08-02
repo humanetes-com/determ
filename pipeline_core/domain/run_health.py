@@ -21,9 +21,49 @@ __all__ = [
     "HealthFinding",
     "HealthKind",
     "IterReading",
+    "Severity",
     "analyze",
     "parse_iter_readings",
 ]
+
+
+class Severity(StrEnum):
+    """How loudly a finding asks to be read — and the symbol it renders as.
+
+    The symbol lives here because it used to live in three places: the
+    `{"info": "·", "warn": "⚠", "alert": "‼"}` literal was copy-pasted into
+    tools/run_health.py, tools/run_trend.py and monitor/health_view.py. When
+    `red` was added to this file for the two findings that mean "the loop is
+    buying nothing" and "there is no evidence at all", none of the three copies
+    learned about it, and every one of them raised `KeyError: 'red'` on the
+    first red finding. Observed 2026-08-02 against the live anyhow run: the
+    operator report printed two findings, then died on the third — a
+    ZERO_PAYOFF_BURN that had been true for four consecutive runs. A report
+    that crashes on its own most serious finding is worse than one that never
+    ran, because the two findings it did print read as the whole story.
+
+    `severity` is typed as this enum rather than `str` for the same reason
+    `kind` is: a bare string let the producers' vocabulary and the renderers'
+    vocabulary drift apart with nothing to notice. Adding a member here is now
+    a type error at every site that must render it.
+    """
+
+    INFO = "info"
+    WARN = "warn"
+    ALERT = "alert"
+    RED = "red"
+
+    @property
+    def symbol(self) -> str:
+        return _SEVERITY_SYMBOL[self]
+
+
+_SEVERITY_SYMBOL: dict[Severity, str] = {
+    Severity.INFO: "·",
+    Severity.WARN: "⚠",
+    Severity.ALERT: "‼",
+    Severity.RED: "🔴",
+}
 
 
 class HealthKind(StrEnum):
@@ -51,7 +91,7 @@ class HealthKind(StrEnum):
 @dataclass(frozen=True, slots=True)
 class HealthFinding:
     kind: HealthKind
-    severity: str          # "info" | "warn" | "alert"
+    severity: Severity
     subject: str           # what it is about (unit, file, counter…)
     evidence: str          # one line of concrete evidence
     action: str            # what the operator/autopilot should do about it
@@ -151,7 +191,7 @@ def analyze(
     # every downstream "GOOD: the grep was empty" is then meaningless.
     if not segment_lines:
         findings.append(HealthFinding(
-            HealthKind.NO_SEGMENT_EVIDENCE, "red", "run log",
+            HealthKind.NO_SEGMENT_EVIDENCE, Severity.RED, "run log",
             "0 segment line(s) — no evidence to analyse, so every "
             "segment-scoped detector below is vacuous, NOT green",
             "check the log the pipeline is actually writing to "
@@ -162,7 +202,7 @@ def analyze(
     bogus = sum(1 for n in notes if is_bogus_regression_note(n))
     if bogus:
         findings.append(HealthFinding(
-            HealthKind.POISONED_NOTES, "warn", "FR Model Notes",
+            HealthKind.POISONED_NOTES, Severity.WARN, "FR Model Notes",
             f"{bogus} provably-invalid [regression] note(s) on disk "
             "(non-dropping aggregate)",
             "reader filters them at prompt time; if this COUNT GROWS the "
@@ -180,7 +220,8 @@ def analyze(
             else:
                 break
         remaining = last.stall_max - last.stall
-        sev = "alert" if remaining <= 1 else ("warn" if flat >= 2 else "info")
+        sev = (Severity.ALERT if remaining <= 1
+               else Severity.WARN if flat >= 2 else Severity.INFO)
         findings.append(HealthFinding(
             HealthKind.STALL_BUDGET, sev, "tdd driver",
             f"pass={last.pass_count} fail={last.fail_count}, flat for {flat} "
@@ -212,7 +253,7 @@ def analyze(
                     if landed else "no fills landed")
             findings.append(HealthFinding(
                 HealthKind.ZERO_PAYOFF_BURN,
-                "red" if landed else "warn", "fill/re-fill loop",
+                Severity.RED if landed else Severity.WARN, "fill/re-fill loop",
                 f"{attempts} failed attempt(s) incl. {maximal} maximal, "
                 f"pass delta {delta:+d} across {len(readings)} sweep "
                 f"reading(s), {what}",
@@ -243,7 +284,7 @@ def analyze(
         files = {u.split("::", 1)[0] for u in units}
         if len(files) >= 3 and len(units) >= 4:
             findings.append(HealthFinding(
-                HealthKind.SYSTEMIC_SIGNATURE, "alert", "U2 acceptance oracle",
+                HealthKind.SYSTEMIC_SIGNATURE, Severity.ALERT, "U2 acceptance oracle",
                 f"{len(units)} unit(s) across {len(files)} file(s) all rejected "
                 f"with errs={n}: {', '.join(sorted(units)[:4])}",
                 "unrelated units cannot own the same failing set — inspect what "
@@ -263,7 +304,7 @@ def analyze(
     if futile:
         top = ", ".join(f"{u}×{stops[u]}" for u in futile[:4])
         findings.append(HealthFinding(
-            HealthKind.ATTRIBUTION_FUTILITY, "warn", "attribution",
+            HealthKind.ATTRIBUTION_FUTILITY, Severity.WARN, "attribution",
             f"{len(futile)} unit(s) stopped identically ≥{futile_min_stops}×: {top}",
             "every attributed fn is being rewritten to the same dead end — "
             "the defect likely sits in the CONSTRUCTION path of the type the "
@@ -282,7 +323,7 @@ def analyze(
     # above the frozen counter because the counter reads healthy while it holds.
     if membership is not None and membership.emptied:
         findings.append(HealthFinding(
-            HealthKind.MEMBERSHIP_FILTER_EMPTIED, "alert", "cluster cfg filter",
+            HealthKind.MEMBERSHIP_FILTER_EMPTIED, Severity.ALERT, "cluster cfg filter",
             f"cluster {membership.cluster_name}: 0 of {membership.total} stub(s) "
             f"survived the cfg-set — dropped: {_names(membership.skipped)}",
             "no fill route can receive work; every 'behavioral re-fill' reading "
@@ -297,7 +338,7 @@ def analyze(
     if (membership is not None and membership.skipped and behavioral
             and not membership.emptied):
         findings.append(HealthFinding(
-            HealthKind.FROZEN_COUNTER, "info", "stub-fill counter",
+            HealthKind.FROZEN_COUNTER, Severity.INFO, "stub-fill counter",
             f"{len(membership.skipped)} of {membership.total} stub(s) are "
             f"cfg-gated to other clusters ({membership.kept} active); run is in "
             f"behavioral re-fill. Gated: {_names(membership.skipped)}",
@@ -319,7 +360,7 @@ def analyze(
         drops[head] = drops.get(head, 0) + 1
     if drops:
         findings.append(HealthFinding(
-            HealthKind.ROUTING_DROP, "alert", "impl body routing",
+            HealthKind.ROUTING_DROP, Severity.ALERT, "impl body routing",
             f"{sum(drops.values())} returned body(ies) discarded across "
             f"{len(drops)} header(s): {_names(tuple(drops))}",
             "the model answered and the pipeline dropped it — never read this as "
@@ -336,7 +377,7 @@ def analyze(
     for subj, c in heals.items():
         if c >= 2:
             findings.append(HealthFinding(
-                HealthKind.REPEATED_HEAL, "alert", subj,
+                HealthKind.REPEATED_HEAL, Severity.ALERT, subj,
                 f"pre-pass heal fired {c}× on the same implication",
                 "something re-poisons the tree between passes — find the "
                 "writer, do not let the heal loop mask it",
@@ -356,7 +397,7 @@ def analyze(
                 break
         if zero_streak >= 3:
             findings.append(HealthFinding(
-                HealthKind.FROZEN_ZERO_TREE, "alert", "tdd driver",
+                HealthKind.FROZEN_ZERO_TREE, Severity.ALERT, "tdd driver",
                 f"pass=0 fail=0 for {zero_streak} consecutive iter(s) — no test "
                 "reported a verdict",
                 "the tree likely does not parse/compile and the heal is NOT "
@@ -372,7 +413,7 @@ def analyze(
     oracles = [r.oracle for r in readings if r.oracle is not None and r.oracle > 0]
     if len(set(oracles)) > 1:
         findings.append(HealthFinding(
-            HealthKind.ORACLE_DRIFT, "warn", "tdd driver",
+            HealthKind.ORACLE_DRIFT, Severity.WARN, "tdd driver",
             f"oracle size varied {min(oracles)}→{max(oracles)} within the run",
             "the denominator moved — pass counts across these iters are NOT "
             "comparable; a test target's compilation likely flipped",
@@ -412,7 +453,7 @@ def analyze(
     unexplained = no_localize > 0 or (shrunk > 0 and not deferred)
     if shrunk and not blamed and unexplained:
         findings.append(HealthFinding(
-            HealthKind.CRASH_UNLOCALIZED, "alert", "crash localizer",
+            HealthKind.CRASH_UNLOCALIZED, Severity.ALERT, "crash localizer",
             f"{shrunk} ORACLE SHRUNK sweep(s), 0 localized crash site(s)"
             + (f" ({no_localize} explicit no-localize line(s))"
                if no_localize else " (localizer never logged at all)")
@@ -446,7 +487,7 @@ def analyze(
              for ln in reversed(segment_lines)
              if "distinct rustc error(s): " in ln), "")
         findings.append(HealthFinding(
-            HealthKind.CLUSTER_COMPILE_BROKEN, "alert", "tdd driver",
+            HealthKind.CLUSTER_COMPILE_BROKEN, Severity.ALERT, "tdd driver",
             f"cluster test binaries failed to compile on iter(s) "
             f"{','.join(str(i) for i in sorted(_cb))}"
             + (f" — {_digest}" if _digest else ""),
@@ -477,7 +518,7 @@ def analyze(
     if overcount_iters:
         findings.append(HealthFinding(
             HealthKind.INVENTORY_OVERCOUNT,
-            "alert" if len(overcount_iters) >= 2 else "warn",
+            Severity.ALERT if len(overcount_iters) >= 2 else Severity.WARN,
             "tdd driver",
             f"unnamed oracle shortfall on iter(s) "
             f"{','.join(str(i) for i in overcount_iters[:8])} — every expected "
@@ -494,7 +535,7 @@ def analyze(
             continue
         lost = _int_after(ln, "(")   # "(N fill(s) lost" — 0 when absent
         findings.append(HealthFinding(
-            HealthKind.HEAL_SKELETON_LOSS, "warn",
+            HealthKind.HEAL_SKELETON_LOSS, Severity.WARN,
             _unit_of(ln, "restored") or "heal",
             f"whole-file skeleton restore discarded ~{lost or 0} fill(s)",
             "a writer left the file unparseable past surgical/best-tree/git "
@@ -535,7 +576,7 @@ def analyze(
                       if any(s in r for s in _STRUCTURAL)]
         if structural:
             findings.append(HealthFinding(
-                HealthKind.CAPPED_RETRY_FUTILITY, "alert", subj,
+                HealthKind.CAPPED_RETRY_FUTILITY, Severity.ALERT, subj,
                 f"attempt-invariant failure: {structural[0][:120]}",
                 "retries CANNOT fix a coverage/protocol defect — stop the "
                 "pipeline and fix the mechanism now; do not wait out the "
@@ -543,7 +584,7 @@ def analyze(
             ))
         elif len(reasons) >= 2:
             findings.append(HealthFinding(
-                HealthKind.CAPPED_RETRY_FUTILITY, "alert", subj,
+                HealthKind.CAPPED_RETRY_FUTILITY, Severity.ALERT, subj,
                 f"{len(reasons)} re-author attempt(s) failed with no success "
                 "line in this segment",
                 "the same design keeps getting rejected — read the actual "
