@@ -1221,7 +1221,8 @@ def run_phase_c_tdd(
                 compile_evidence=CompileEvidence(
                     digest="\n".join(_err_lines),
                     lib_clean=True,
-                    consecutive_sweeps=_compile_broke_streak))
+                    consecutive_sweeps=_compile_broke_streak),
+                best_pass=best_pass)
             if _retrig_k.fired and _retrig_k.succeeded:
                 deps.log(
                     f"  {tag} [phase-c/tdd] iter {iter_n}: BUILD layout "
@@ -1315,7 +1316,8 @@ def run_phase_c_tdd(
                     # reachability. Withholding the blame here is what let the
                     # retrigger pick a component in record order that the fault
                     # never touched (§ `classify_crash_retrigger`).
-                    blamed_fns=frozenset(crash_texts)))
+                    blamed_fns=frozenset(crash_texts)),
+                best_pass=best_pass)
             if _retrig_c.fired:
                 # Fired but did not land: nothing was re-stubbed, so one iter of
                 # silence is all this owes — enough to stop a back-to-back
@@ -1363,7 +1365,8 @@ def run_phase_c_tdd(
             # failed attempt falls through to the unchanged exit below.
             if deps.retrigger_layout is not None:
                 _retrig = deps.retrigger_layout(
-                    project_dir, module, cluster.name, target_src_dir, output)
+                    project_dir, module, cluster.name, target_src_dir, output,
+                    best_pass=best_pass)
                 if _retrig.fired and _retrig.succeeded:
                     deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: layout "
                          f"retrigger fired (cause={_retrig.cause}) — reverted "

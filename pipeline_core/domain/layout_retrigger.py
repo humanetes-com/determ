@@ -48,7 +48,16 @@ _LAYOUT_ATTRIBUTABLE_CODES = (
 
 MECHANICAL_KEY_PREFIX = "mech:"
 INFLIGHT_KEY_PREFIX = "inflight:"
+PAYOFF_KEY_PREFIX = "payoff:"
 DEFAULT_MAX_MECHANICAL = 2
+
+# Attempts-store keys for the CLUSTER-wide payoff budget (below). Prefixed on
+# the same rule as `mechanical_key`: a component key is Rust idents joined by
+# `|` and can never start with `payoff:`.
+PAYOFF_HIGH_KEY = f"{PAYOFF_KEY_PREFIX}high"      # best pass_count seen so far
+PAYOFF_PENDING_KEY = f"{PAYOFF_KEY_PREFIX}pending"  # a fire awaiting its verdict
+PAYOFF_ZERO_KEY = f"{PAYOFF_KEY_PREFIX}zero"      # consecutive fires that bought nothing
+DEFAULT_MAX_ZERO_PAYOFF = 2
 
 
 def mechanical_key(component_key: str) -> str:
@@ -66,7 +75,110 @@ def inflight_key(component_key: str) -> str:
 
 
 def _is_bookkeeping_key(key: str) -> bool:
-    return key.startswith((MECHANICAL_KEY_PREFIX, INFLIGHT_KEY_PREFIX))
+    return key.startswith(
+        (MECHANICAL_KEY_PREFIX, INFLIGHT_KEY_PREFIX, PAYOFF_KEY_PREFIX))
+
+
+def settle_retrigger_payoff(
+    attempts: Mapping[str, int], best_pass: int | None,
+) -> dict[str, int]:
+    """Charge the PREVIOUS retrigger with what it bought, in pass_count.
+
+    The per-component cap bounds attempts on ONE component; nothing bounded the
+    WALK across components, and `retrigger_layout` `continue`s to the next
+    candidate when a component is capped. On `anyhow`/`nightly`, 2026-08-02,
+    that produced a period-4 limit cycle: iters 4, 8, 12 and 16 each fired a
+    LAYOUT_EXHAUSTION re-author (`Adhoc|AdhocKind` twice, then
+    `Boxed|BoxedKind` twice, the 35-name mega component being already at cap),
+    each re-stubbed 2-3 bodies for `pass=93 -> 79`, and each refilled back to
+    exactly 93 two iters later. Four fires, four returns to the same number,
+    16 to 54 minutes apart. 16 non-gated components are recorded for that
+    cluster (17 rows, one GATED and therefore never a candidate), so 26
+    further attempts stood ready to spend that again on the same result.
+
+    The evidence selecting the next component is attempt-INVARIANT: iters 4
+    and 16 had the same pass_count, the same frontier of 1 fn, the same 18
+    exhausted siblings and the same error text. A different component was
+    chosen only because the previous one was capped, not because anything new
+    implicated it. That is the burn `mechanical_budget_spent` bounds one level
+    down, and it wants the same treatment one level up.
+
+    So: a fire records the pass_count it fired at (`PAYOFF_PENDING_KEY`), and
+    the next decision point settles it. Improvement over the high-water mark
+    clears the streak; no improvement charges one zero-payoff fire. The charge
+    is idempotent — the pending mark is consumed when read — so the three call
+    sites in the TDD driver cannot charge one fire twice.
+
+    `best_pass is None` (or negative, the unset floor) means the caller could
+    not measure, and settles nothing: an unmeasured sweep must not convict a
+    retrigger that may well have paid.
+
+    Two classes of fire are deliberately never marked pending, so they can
+    never be settled here — see `mark_retrigger_pending`: an attempt the
+    action REFUNDED, and a fire aimed by evidence other than the plateau."""
+    if best_pass is None or best_pass < 0:
+        return dict(attempts)
+    out = dict(attempts)
+    high = out.get(PAYOFF_HIGH_KEY)
+    if high is None or best_pass > high:
+        out[PAYOFF_HIGH_KEY] = best_pass
+        out[PAYOFF_ZERO_KEY] = 0
+        out.pop(PAYOFF_PENDING_KEY, None)
+        return out
+    if out.pop(PAYOFF_PENDING_KEY, None) is not None:
+        out[PAYOFF_ZERO_KEY] = out.get(PAYOFF_ZERO_KEY, 0) + 1
+    return out
+
+
+def mark_retrigger_pending(
+    attempts: Mapping[str, int], best_pass: int | None,
+) -> dict[str, int]:
+    """Record that a retrigger has REACHED AN OUTCOME at `best_pass`, so the
+    next decision point can settle what it bought. See
+    `settle_retrigger_payoff`.
+
+    A caller that did not measure a pass_count records NOTHING: payoff is a
+    claim about a number, and a fire nobody scored can neither be convicted of
+    buying nothing nor credited with buying something. This also keeps the
+    attempts store byte-identical for callers that never pass `best_pass`.
+
+    Marked AFTER the attempt, never beside the charge that opens it, and only
+    when the attempt was not refunded. The two failure classes the action
+    refunds — a splice/locate miss, and a process killed inside the authoring
+    call (`reconcile_interrupted_attempts`) — bought no model evidence, and the
+    rule the refund exists to enforce is that no budget may be spent by them.
+    A budget one level up is still a budget: charged at the open, two refunded
+    attempts would stop a whole cluster's walk, and the refusal below would
+    report bodies re-stubbed by attempts that reverted nothing."""
+    if best_pass is None or best_pass < 0:
+        return dict(attempts)
+    out = dict(attempts)
+    out[PAYOFF_PENDING_KEY] = 1
+    out.setdefault(PAYOFF_HIGH_KEY, best_pass)
+    return out
+
+
+def payoff_budget_spent(
+    attempts: Mapping[str, int], cap: int = DEFAULT_MAX_ZERO_PAYOFF,
+) -> bool:
+    """Whether this CLUSTER's last `cap` PLATEAU retriggers each left the
+    pass_count where they found it. Refusing here lets the TDD driver's own
+    plateau exit stand, which is what the module docstring always claimed a
+    capped component would degrade to — true per component, false for the
+    cluster.
+
+    A plateau budget, and only a plateau budget. The claim it rests on is that
+    the evidence is attempt-invariant, which is a statement about the
+    fills-exhausted route: cause A's cluster-wide build failure and cause C's
+    crashed binaries are new events, each with its own streak, and neither is
+    the same unchanged error text a fourth time. Refusing them here would also
+    be terminal — a cluster whose test binaries do not build scores nothing, so
+    the high-water mark that clears this streak can never move again, and cause
+    A is the only route that acts while no test can report a verdict.
+
+    Self-clearing: any sweep that beats the high-water mark resets the streak,
+    so a cluster that starts moving again gets its retriggers back."""
+    return attempts.get(PAYOFF_ZERO_KEY, 0) >= cap
 
 
 def reconcile_interrupted_attempts(

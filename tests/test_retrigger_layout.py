@@ -21,7 +21,11 @@ from pipeline_core.domain.behaviour import (
     ObservableOutcome,
     StaticAssertKind,
 )
-from pipeline_core.domain.layout_retrigger import CompileEvidence
+from pipeline_core.domain.layout_retrigger import (
+    PAYOFF_PENDING_KEY,
+    PAYOFF_ZERO_KEY,
+    CompileEvidence,
+)
 from pipeline_core.domain.models import FnLocator, FnRecord, TypeRecord
 from pipeline_core.domain.private_surface import classify_private_surface
 
@@ -615,3 +619,151 @@ def test_an_interrupted_attempt_is_refunded_once_not_every_sweep():
     f.logs.clear()
     retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, _ERR, f.deps())
     assert not any("never reached an outcome" in m for m in f.logs)
+
+
+def test_a_capped_component_no_longer_hands_the_walk_to_the_next_one():
+    """The 2026-08-02 `anyhow`/nightly limit cycle, at the action.
+
+    The per-component cap held perfectly and bought nothing: the loop
+    `continue`s past a capped component to the next candidate, so with two
+    components recorded the cluster got a second re-author aimed by the same
+    unchanged evidence. Live, that was 17 components — 34 attempts, each
+    re-stubbing bodies for pass 93 -> 79 and each refilling to exactly 93.
+
+    Two fires that leave `best_pass` where they found it now stop the walk, and
+    the TDD driver's own plateau exit — which the module docstring always said
+    a capped component degrades to — finally gets to run."""
+    f = _Fakes(attempts={"ErrorImpl": 2})   # first component already at cap
+    f._records = [
+        LayoutComponentRecord(frozenset({"ErrorImpl"}), LayoutOutcome.FROZEN),
+        # `_ERR` names this one too — as the live error text named each
+        # component the walk reached in turn.
+        LayoutComponentRecord(frozenset({"vtable"}), LayoutOutcome.FROZEN),
+    ]
+    # Two fires at the same score, settled by the third decision point.
+    for _ in range(2):
+        retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, _ERR,
+                         f.deps(), best_pass=93)
+        f.attempts = dict(f.saved_attempts or f.attempts)
+    res = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, _ERR,
+                           f.deps(), best_pass=93)
+    assert not res.fired
+    assert res.reason == "cluster payoff budget spent"
+    assert any("the walk stops here" in ln for ln in f.logs)
+
+
+def test_a_cluster_that_starts_moving_again_gets_its_retriggers_back():
+    """The budget bounds a walk, not the mechanism: one sweep that beats the
+    high-water mark clears the streak, so the next stall may still retrigger."""
+    f = _Fakes(attempts={"ErrorImpl": 2})
+    f._records = [
+        LayoutComponentRecord(frozenset({"ErrorImpl"}), LayoutOutcome.FROZEN),
+        # `_ERR` names this one too — as the live error text named each
+        # component the walk reached in turn.
+        LayoutComponentRecord(frozenset({"vtable"}), LayoutOutcome.FROZEN),
+    ]
+    for _ in range(2):
+        retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, _ERR,
+                         f.deps(), best_pass=93)
+        f.attempts = dict(f.saved_attempts or f.attempts)
+    res = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, _ERR,
+                           f.deps(), best_pass=97)
+    assert res.reason != "cluster payoff budget spent"
+
+
+def _walk_pair() -> _Fakes:
+    """A cluster whose first component is already at cap, so the walk hands the
+    evidence to the next one — the shape the payoff budget bounds. `_ERR` names
+    every one of them, as the live error text named each component the walk
+    reached in turn."""
+    f = _Fakes(attempts={"ErrorImpl": 2})
+    f._records = [
+        LayoutComponentRecord(frozenset({"ErrorImpl"}), LayoutOutcome.FROZEN),
+        LayoutComponentRecord(frozenset({"vtable"}), LayoutOutcome.FROZEN),
+        # A third, still unspent — 17 were recorded live. Reached only once the
+        # two above are out of budget, which is exactly what "the walk" means.
+        LayoutComponentRecord(frozenset({"ErrorImpl", "vtable"}),
+                              LayoutOutcome.FROZEN),
+    ]
+    return f
+
+
+def test_a_refunded_attempt_does_not_spend_the_cluster_budget():
+    """A splice/locate failure REFUNDS the attempt — 'a pipeline bug can never
+    exhaust the budget meant for the model'. A cluster-wide budget is still a
+    budget: charged at the open, two mechanical failures would stop the walk
+    across every remaining component, and the refusal would report bodies
+    re-stubbed by attempts that reverted nothing and re-authored nothing."""
+    f = _walk_pair()
+    f.tree_apply_error = "live tree file unreadable: error.rs"
+    reasons = []
+    for _ in range(3):
+        res = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, _ERR,
+                               f.deps(), best_pass=93)
+        f.attempts = dict(f.saved_attempts or f.attempts)
+        reasons.append(res.reason)
+    # Two refunded fires on one component, and the third call refused by that
+    # component's OWN mechanical budget — the cap that is answerable for this
+    # failure. Pre-fix the third call read "cluster payoff budget spent", which
+    # also takes the untouched third component down with it.
+    assert reasons[0].startswith("live-tree splice failed")
+    assert "cluster payoff budget spent" not in reasons, reasons
+    assert not any("the walk stops here" in ln for ln in f.logs)
+    assert (f.saved_attempts or {}).get(PAYOFF_ZERO_KEY, 0) == 0
+
+
+def test_a_kill_inside_the_authoring_call_leaves_no_payoff_claim():
+    """`reconcile_interrupted_attempts` repays an attempt whose process died in
+    the ~50-minute authoring call, so the budget means model attempts and not
+    process lifetimes. The payoff claim has to obey the same rule, and the only
+    way it can is to not exist yet: the store as it stands when the charge is
+    written is exactly what a kill leaves behind."""
+    f = _walk_pair()
+    retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, _ERR, f.deps(),
+                     best_pass=93)
+    at_charge = next(s for s in f.attempt_saves
+                     if any(k.startswith("inflight:") for k in s))
+    assert PAYOFF_PENDING_KEY not in at_charge, at_charge
+    # …and replaying that state as the next process reads it refunds the
+    # attempt without charging the cluster for it.
+    g = _walk_pair()
+    g.attempts = dict(at_charge)
+    retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, _ERR, g.deps(),
+                     best_pass=93)
+    assert any("never reached an outcome" in ln for ln in g.logs)
+    assert (g.saved_attempts or {}).get(PAYOFF_ZERO_KEY, 0) == 0
+
+
+def test_a_spent_walk_still_reaches_the_broken_build_repair_route():
+    """The budget bounds the PLATEAU walk, whose evidence is the same error
+    text every sweep. A cluster-wide BUILD failure is a new event and the only
+    route that acts while no test can report a verdict — and refusing it here
+    is a one-way door: nothing compiles, so `best_pass` can never rise, so the
+    streak that refused it can never clear itself."""
+    f = _walk_pair()
+    for _ in range(2):
+        retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, _ERR,
+                         f.deps(), best_pass=93)
+        f.attempts = dict(f.saved_attempts or f.attempts)
+    assert retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, _ERR,
+                            f.deps(), best_pass=93).reason == (
+        "cluster payoff budget spent")
+    res = retrigger_layout(
+        Path("/x"), "anyhow", "stable", _CRATE, _ERR, f.deps(), best_pass=93,
+        compile_evidence=CompileEvidence(digest=_ERR, lib_clean=True,
+                                         consecutive_sweeps=1))
+    assert res.fired
+    assert res.reason != "cluster payoff budget spent"
+
+
+def test_a_caller_that_never_scores_is_unaffected():
+    """Every pin above this one calls without `best_pass`. An unscored fire
+    records nothing and can never be refused, so the budget is strictly opt-in
+    on measurement."""
+    f = _Fakes()
+    for _ in range(4):
+        res = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, _ERR,
+                               f.deps())
+        f.attempts = dict(f.saved_attempts or f.attempts)
+        assert res.reason != "cluster payoff budget spent"
+    assert not any(k.startswith("payoff:") for k in (f.saved_attempts or {}))

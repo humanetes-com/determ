@@ -2,15 +2,20 @@
 from __future__ import annotations
 
 from pipeline_core.domain.layout_retrigger import (
+    PAYOFF_HIGH_KEY,
+    PAYOFF_ZERO_KEY,
     CompileEvidence,
     LayoutRetriggerCause,
     classify_compile_retrigger,
     classify_layout_retrigger,
     find_fns_referencing,
     inflight_key,
+    mark_retrigger_pending,
     mechanical_budget_spent,
     mechanical_key,
+    payoff_budget_spent,
     reconcile_interrupted_attempts,
+    settle_retrigger_payoff,
     should_retrigger,
 )
 from pipeline_core.domain.models import FnLocator, FnRecord
@@ -420,3 +425,79 @@ def test_dropped_members_in_use_allows_a_named_to_tuple_respelling() -> None:
     authored = "#[repr(transparent)]\npub struct Error(NonNull<ErrorImpl>);"
     bodies = "let p = self.ptr; drop(other.ptr);"
     assert dropped_members_in_use(current, authored, bodies) == {}
+
+
+# --- the walk across components, and what each fire bought ---------------------
+def _fire(attempts: dict[str, int], best_pass: int) -> dict[str, int]:
+    """One retrigger decision point that FIRES, as `retrigger_layout` does it:
+    settle what the previous fire bought, then mark this one pending."""
+    return mark_retrigger_pending(settle_retrigger_payoff(attempts, best_pass),
+                                  best_pass)
+
+
+def test_a_walk_that_never_moves_the_score_stops_walking() -> None:
+    """The 2026-08-02 `anyhow`/nightly cycle. The per-component cap held — the
+    35-name mega component was refused every iter — but the loop walked past it
+    to `Adhoc|AdhocKind` (twice) and `Boxed|BoxedKind` (twice). Each re-author
+    re-stubbed 2-3 bodies for pass 93 -> 79 and each refilled back to 93: iters
+    4, 8, 12, 16, four fires, four returns to the same number, with 14 further
+    components holding 28 more attempts."""
+    attempts: dict[str, int] = {}
+    attempts = _fire(attempts, 93)          # iter 4  — nothing to settle yet
+    assert not payoff_budget_spent(attempts)
+    attempts = _fire(attempts, 93)          # iter 8  — iter 4 bought nothing
+    assert not payoff_budget_spent(attempts)
+    # iter 12 — iter 8 bought nothing either, and the budget is spent
+    settled = settle_retrigger_payoff(attempts, 93)
+    assert payoff_budget_spent(settled)
+
+
+def test_a_fire_that_pays_clears_the_streak() -> None:
+    """The budget bounds a walk, not the mechanism. One re-author that actually
+    moves the cluster gives every remaining component its attempts back."""
+    attempts = _fire(_fire({}, 93), 93)     # one zero-payoff fire on the books
+    assert attempts[PAYOFF_ZERO_KEY] == 1
+    # The re-fills under the second fire's layout land, and the sweep beats 93.
+    settled = settle_retrigger_payoff(attempts, 97)
+    assert settled[PAYOFF_ZERO_KEY] == 0
+    assert settled[PAYOFF_HIGH_KEY] == 97
+    assert not payoff_budget_spent(settled)
+    # …and the streak it cleared cannot be resurrected by a later equal sweep:
+    # the high-water mark moved, so 97 is no longer an improvement but the two
+    # fires that preceded it have been forgiven.
+    assert not payoff_budget_spent(settle_retrigger_payoff(settled, 97))
+
+
+def test_one_fire_is_charged_once_however_many_call_sites_ask() -> None:
+    """The TDD driver asks at three sites in one iter (build, crash, stall).
+    Settling is idempotent — the pending mark is consumed when read — so one
+    fire can never be charged as three."""
+    attempts = _fire({}, 93)
+    once = settle_retrigger_payoff(attempts, 93)
+    twice = settle_retrigger_payoff(once, 93)
+    thrice = settle_retrigger_payoff(twice, 93)
+    assert once[PAYOFF_ZERO_KEY] == 1
+    assert thrice == once
+
+
+def test_an_unmeasured_sweep_convicts_nothing() -> None:
+    """A sweep whose pass_count the caller could not read must not charge a
+    retrigger that may well have paid — the floor's unset value is -1."""
+    attempts = _fire({}, 93)
+    assert settle_retrigger_payoff(attempts, None) == attempts
+    assert settle_retrigger_payoff(attempts, -1) == attempts
+
+
+def test_payoff_rows_are_never_mistaken_for_a_component() -> None:
+    """`payoff:` shares the attempts file with the component counters, on the
+    same rule as `mech:` and `inflight:`. A marker naming a payoff row must not
+    refund it as though it were an attempt — which would drive the streak
+    DOWN and hand the walk its budget back."""
+    settled, refunded = reconcile_interrupted_attempts(
+        {PAYOFF_ZERO_KEY: 2, inflight_key(PAYOFF_ZERO_KEY): 1})
+    assert refunded == ()
+    assert settled == {PAYOFF_ZERO_KEY: 2}
+    assert payoff_budget_spent(settled)
+    # …and an ordinary fire's own rows survive a reconcile untouched.
+    attempts = _fire({}, 93)
+    assert reconcile_interrupted_attempts(attempts) == (attempts, ())

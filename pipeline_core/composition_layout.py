@@ -98,7 +98,8 @@ def build_retrigger_layout(
     def _run(project_dir: Path, module_name: str, cfg_cluster: str,
               target_src_dir: Path, error_text: str,
               crash_evidence: Any = None,
-              compile_evidence: Any = None) -> RetriggerResult:
+              compile_evidence: Any = None,
+              best_pass: int | None = None) -> RetriggerResult:
         clusters = load_baked_clusters(project_dir) or []
         cluster_by_name = {c.name: c for c in clusters}
 
@@ -156,6 +157,6 @@ def build_retrigger_layout(
         return retrigger_layout(
             project_dir, module_name, cfg_cluster, target_src_dir, error_text,
             deps, crash_evidence=crash_evidence,
-            compile_evidence=compile_evidence)
+            compile_evidence=compile_evidence, best_pass=best_pass)
 
     return _run

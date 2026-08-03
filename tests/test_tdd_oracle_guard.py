@@ -216,7 +216,7 @@ def test_reproducible_first_sweep_shrink_fires_retrigger_immediately(
         cargo_runs.append(1)
         return 101, out
 
-    def _retrig(pd, mod, cl, sd, output, crash_evidence=None):
+    def _retrig(pd, mod, cl, sd, output, crash_evidence=None, **_kw):
         calls.append({"evidence": crash_evidence})
         fired = len(calls) == 1
         return RetriggerResult(fired=fired, succeeded=fired,
@@ -253,7 +253,7 @@ def test_unnamed_shortfall_never_fires_the_crash_retrigger(
         cargo_runs.append(1)
         return 101, out
 
-    def _retrig(pd, mod, cl, sd, output, crash_evidence=None):
+    def _retrig(pd, mod, cl, sd, output, crash_evidence=None, **_kw):
         calls.append(crash_evidence)
         return RetriggerResult(fired=False, succeeded=False,
                                reverted_count=0, cause="")
@@ -284,7 +284,7 @@ def test_retrigger_cooldown_skips_confirm_now_for_one_fill_pass(
            "test result: FAILED. 0 passed; 1 failed; 0 ignored")
     calls: list[int] = []
 
-    def _retrig(pd, mod, cl, sd, output, crash_evidence=None):
+    def _retrig(pd, mod, cl, sd, output, crash_evidence=None, **_kw):
         calls.append(1)
         fired = len(calls) <= 2
         return RetriggerResult(fired=fired, succeeded=fired,
@@ -319,7 +319,7 @@ def test_transient_shrink_confirm_sweep_intact_does_not_fire(
     def _cargo(*a: Any, **k: Any):
         return 101, outs.pop(0) if outs else intact
 
-    def _retrig(pd, mod, cl, sd, output, crash_evidence=None):
+    def _retrig(pd, mod, cl, sd, output, crash_evidence=None, **_kw):
         calls.append({"evidence": crash_evidence})
         from pipeline_core.application.retrigger_layout import RetriggerResult
         return RetriggerResult(fired=False)
@@ -349,7 +349,7 @@ def test_persistent_vanish_fires_crash_retrigger_with_suspects(
            "test result: FAILED. 0 passed; 1 failed; 0 ignored")
     calls: list[dict[str, Any]] = []
 
-    def _retrig(pd, mod, cl, sd, output, crash_evidence=None):
+    def _retrig(pd, mod, cl, sd, output, crash_evidence=None, **_kw):
         calls.append({"evidence": crash_evidence})
         # Succeed once, then report not-fired so the loop can stall-exit.
         fired = len(calls) == 1
@@ -470,7 +470,7 @@ def test_unbuildable_cluster_fires_the_layout_retrigger_on_the_first_sweep(
     calls: list[dict[str, Any]] = []
 
     def _retrig(pd, mod, cl, sd, output, crash_evidence=None,
-                compile_evidence=None):
+                compile_evidence=None, **_kw):
         calls.append({"compile": compile_evidence, "crash": crash_evidence})
         fired = len(calls) == 1
         return RetriggerResult(fired=fired, succeeded=fired, reverted_count=3,
@@ -499,7 +499,7 @@ def test_broken_lib_never_fires_the_layout_retrigger(
     calls: list[dict[str, Any]] = []
 
     def _retrig(pd, mod, cl, sd, output, crash_evidence=None,
-                compile_evidence=None):
+                compile_evidence=None, **_kw):
         calls.append({"compile": compile_evidence})
         return RetriggerResult(fired=False)
 

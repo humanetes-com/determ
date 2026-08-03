@@ -15,6 +15,19 @@ Capped per (cluster, component) via a disk-persisted attempt counter (mirrors
 the `RETRO_RESET_MAX_ATTEMPTS` shape) so a component that can't be
 re-authored within the cap degrades to today's behaviour: exhausted, left
 frozen, the TDD driver's existing stall-exit stands.
+
+That last sentence held for ONE component and not for the cluster: the loop
+below `continue`s past a capped component to the next candidate, and with 16
+non-gated components recorded (`_layout_outcomes_nightly.json`: 17 rows, one
+GATED) the stall-exit could be deferred 32 times. `anyhow`'s `nightly` cluster
+spent 2026-08-02 in the resulting period-4 cycle. The
+CLUSTER-wide payoff budget (`settle_retrigger_payoff`, `payoff_budget_spent`)
+is what now makes the claim true: consecutive fires that leave the pass_count
+where they found it stop the walk and hand the cluster back to its plateau
+exit. It bounds THAT walk only — the plateau route, whose evidence is the same
+error text every sweep. A build failure and a crashed binary are events, they
+carry their own streaks, and a cluster that cannot build cannot ever move the
+pass_count this budget clears itself on.
 """
 from __future__ import annotations
 
@@ -41,6 +54,8 @@ from pipeline_core.domain.authored_layout import (
 from pipeline_core.domain.behaviour import BehaviourSuite
 from pipeline_core.domain.layout_retrigger import (
     DEFAULT_MAX_MECHANICAL,
+    DEFAULT_MAX_ZERO_PAYOFF,
+    PAYOFF_HIGH_KEY,
     CompileEvidence,
     CrashEvidence,
     LayoutRetriggerCause,
@@ -51,9 +66,12 @@ from pipeline_core.domain.layout_retrigger import (
     filled_body_text,
     find_fns_referencing,
     inflight_key,
+    mark_retrigger_pending,
     mechanical_budget_spent,
     mechanical_key,
+    payoff_budget_spent,
     reconcile_interrupted_attempts,
+    settle_retrigger_payoff,
     should_retrigger,
 )
 from pipeline_core.domain.models import FnLocator, FnRecord, TypeRecord
@@ -75,6 +93,12 @@ class RetriggerResult:
     reverted_count: int = 0
     cause: str = ""
     reason: str = ""
+    # The attempt was charged and then GIVEN BACK: it died in splice/locate
+    # infrastructure, so the model's output was never evaluated against the
+    # tree. Typed rather than re-derived from `reason`, because every budget in
+    # this module has to answer the same question — "did this attempt buy
+    # model evidence?" — and a substring of a log sentence is not an answer.
+    refunded: bool = False
 
 
 @dataclass(frozen=True)
@@ -265,6 +289,7 @@ def retrigger_layout(
     deps: RetriggerLayoutDeps,
     crash_evidence: CrashEvidence | None = None,
     compile_evidence: CompileEvidence | None = None,
+    best_pass: int | None = None,
 ) -> RetriggerResult:
     """Try to re-author whichever non-gated component's evidence is implicated.
     Returns fired=False when no frozen component matches (the caller's
@@ -294,6 +319,33 @@ def retrigger_layout(
         return RetriggerResult(fired=False, reason="no re-authorable component recorded")
 
     attempts = _settle_interrupted(project_dir, cfg_cluster, deps)
+    # The payoff budget bounds the PLATEAU walk and nothing else. Its premise
+    # is that the evidence does not change between fires, and that is a
+    # property of this route: a stalled cluster hands the same exhausted-fill
+    # error text to `classify_layout_retrigger` sweep after sweep. A build
+    # failure (cause A) and a crashed binary (cause C) are events — each
+    # already carries its own consecutive-sweep streak, and cause A exists
+    # precisely to act on the FIRST broken sweep rather than wait out a
+    # stall-shaped budget. Charging or refusing them here would also be a
+    # one-way door: a cluster whose test binaries do not build reports no
+    # verdict for any test, so `best_pass` — the only thing that clears this
+    # streak — cannot move again.
+    plateau_walk = compile_evidence is None and crash_evidence is None
+    if plateau_walk:
+        _settled = settle_retrigger_payoff(attempts, best_pass)
+        if _settled != attempts:
+            attempts = _settled
+            deps.save_attempts(project_dir, cfg_cluster, attempts)
+        if payoff_budget_spent(attempts):
+            deps.log(
+                f"  [layout-retrigger] {cfg_cluster}: the last "
+                f"{DEFAULT_MAX_ZERO_PAYOFF} re-author(s) left the cluster's "
+                f"best pass_count at {attempts.get(PAYOFF_HIGH_KEY)} — "
+                "re-authoring a further component is aimed by the same "
+                "unchanged evidence, so the walk stops here and the stall "
+                "exit stands. Clears itself if any sweep beats that count.")
+            return RetriggerResult(
+                fired=False, reason="cluster payoff budget spent")
     starv_cause, _evidence = classify_starvation("", "", error_text)
     _live_records: list[FnRecord] | None = None
 
@@ -378,6 +430,14 @@ def retrigger_layout(
         # this must stay the single place that clears it. Any future exit added
         # to `_run_layout_attempt` is settled here for free.
         attempts.pop(inflight_key(key), None)
+        # …and the same property is what makes this the right place to open the
+        # payoff claim: what a fire bought is measured at the NEXT decision
+        # point, against the pass_count it fired at, and only a fire that
+        # reached an outcome the model was answerable for may be asked. A
+        # refunded attempt is excluded on the rule its refund already states —
+        # no model evidence was bought, so no budget may be spent.
+        if plateau_walk and not outcome.refunded:
+            attempts = mark_retrigger_pending(attempts, best_pass)
         deps.save_attempts(project_dir, cfg_cluster, attempts)
         return outcome
 
@@ -463,7 +523,7 @@ def _run_layout_attempt(
                      "attempt refunded (mechanical failure, no model "
                      "evidence).")
             return RetriggerResult(fired=True, succeeded=False,
-                                   cause=cause.name,
+                                   cause=cause.name, refunded=True,
                                    reason="mechanical splice failure "
                                           "(attempt refunded)")
         # Name the reason rather than asserting one. "Still did not compile" is
@@ -523,6 +583,7 @@ def _run_layout_attempt(
                  "still sees the old layout; not reverting any fn, attempt "
                  "refunded (mechanical failure, no model evidence).")
         return RetriggerResult(fired=True, succeeded=False, cause=cause.name,
+                               refunded=True,
                                reason=f"live-tree splice failed: {apply_err}")
 
     attempts.pop(mechanical_key(key), None)   # consecutive-failure counter

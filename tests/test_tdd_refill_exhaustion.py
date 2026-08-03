@@ -138,7 +138,8 @@ def test_layout_retrigger_resets_stall_and_continues_the_loop(
         cargo_calls[0] += 1
         return (101, "test t1 ... FAILED\ntest result: FAILED. 3 passed; 1 failed")
 
-    def _retrigger(project_dir, module, cluster_name, target_src_dir, error_text):
+    def _retrigger(project_dir, module, cluster_name, target_src_dir,
+                   error_text, **_kw):
         retrig_calls.append((cluster_name, error_text))
         if len(retrig_calls) == 1:
             return RetriggerResult(fired=True, succeeded=True, reverted_count=2,
@@ -160,6 +161,33 @@ def test_layout_retrigger_resets_stall_and_continues_the_loop(
     fired_events = [d for n, d in events if n == "phase_c.layout_retrigger.fired"]
     assert len(fired_events) == 1
     assert fired_events[0]["reverted_count"] == 2
+
+
+def test_the_stall_retrigger_is_told_the_pass_floor_it_fired_at(
+        tmp_path: Path, monkeypatch) -> None:
+    # The retrigger's payoff budget settles a fire against the pass_count it
+    # fired at, and the only thing that can tell it that number is this call
+    # site. `TddDeps.retrigger_layout` is typed `Callable[..., RetriggerResult]`
+    # — a signature no static gate can check an argument against — and the
+    # parameter is optional at the other end, so dropping it here leaves mypy
+    # silent, leaves every pin over the action green, and leaves the budget
+    # unarmed on the live run with nothing anywhere reporting a difference.
+    seen: list[Any] = []
+
+    def _run_cargo(*a, **k):
+        return (101, "test t1 ... FAILED\ntest result: FAILED. 3 passed; 1 failed")
+
+    def _retrigger(project_dir, module, cluster_name, target_src_dir,
+                   error_text, **kw):
+        seen.append(kw)
+        return RetriggerResult(fired=False, reason="cap reached")
+
+    deps = replace(_deps([]), run_cargo=_run_cargo, retrigger_layout=_retrigger)
+    _run(deps, tmp_path, monkeypatch)
+    assert seen, "the stall exit never consulted the retrigger"
+    # 3 passes measured every sweep, so the floor the fire would be judged
+    # against is 3 — not the unset -1, which settles nothing.
+    assert seen[0].get("best_pass") == 3, seen[0]
 
 
 def test_omitting_retrigger_layout_preserves_prior_stall_exit_behaviour(
