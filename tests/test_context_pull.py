@@ -1,5 +1,6 @@
-"""P2 pull protocol: REQUEST parsing, budget arithmetic, resolver containment
-(HR 11), and the bounded ask loop."""
+"""The pull protocol: REQUEST parsing, budget arithmetic, resolver containment
+(no path may escape the reconstruction tree and reach upstream source), and the
+bounded ask loop."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -15,6 +16,7 @@ from pipeline_core.domain.context_pull import (
     PullBudget,
     PullKind,
     extract_context_pull,
+    extract_context_pulls,
 )
 
 
@@ -40,6 +42,35 @@ def test_extract_takes_last_request() -> None:
     r = ('<REQUEST kind="file" arg="src/a.rs"/> hmm no actually\n'
          '<REQUEST kind="type_def" arg="Own"/>')
     assert extract_context_pull(r) == ContextPull(PullKind.TYPE_DEF, "Own")
+
+
+def test_extract_all_requests_in_document_order() -> None:
+    """The reply shape that lost the src/error.rs budget on 2026-08-03: two
+    artifacts named in one batch, of which only the last used to be read."""
+    r = ('<REQUEST kind="file" arg="src/ext.rs"/>'
+         '<REQUEST kind="test_source" arg="test_root_cause"/>')
+    assert extract_context_pulls(r) == (
+        ContextPull(PullKind.FILE, "src/ext.rs"),
+        ContextPull(PullKind.TEST_SOURCE, "test_root_cause"))
+
+
+def test_extract_all_dedupes_and_skips_malformed() -> None:
+    r = ('<REQUEST kind="type_def" arg="Buf"/> '
+         '<REQUEST kind="original_source" arg="x"/> '   # unknown kind
+         '<REQUEST kind="file" arg=""/> '               # argless
+         '<REQUEST kind="type_def" arg="Buf"/>')        # repeat
+    assert extract_context_pulls(r) == (ContextPull(PullKind.TYPE_DEF, "Buf"),)
+
+
+def test_extract_malformed_tail_no_longer_hides_a_good_request() -> None:
+    """The scan skips a bad tag instead of ending on it — a stray `<REQUEST`
+    in prose after a real request used to make the whole reply requestless."""
+    r = '<REQUEST kind="type_def" arg="Buf"/> then I wrote <REQUEST kind=file'
+    assert extract_context_pull(r) == ContextPull(PullKind.TYPE_DEF, "Buf")
+
+
+def test_extract_all_none_when_no_tag() -> None:
+    assert extract_context_pulls("no tag at all") == ()
 
 
 def test_pull_budget_is_hard() -> None:
@@ -68,7 +99,7 @@ def test_workspace_reader_contains_paths(tmp_path: Path) -> None:
     outside.write_text("ORIGINAL SOURCE")
     read = workspace_file_reader(tmp_path)
     assert read("src/a.rs") == "pub struct A;"
-    assert read("../secret.rs") is None            # HR 11: escape refused
+    assert read("../secret.rs") is None            # no walk to upstream source
     assert read("src/a.txt") is None               # .rs only
     assert read("src/missing.rs") is None
 
@@ -149,9 +180,59 @@ def test_ask_loop_deliverable_short_circuits(tmp_path: Path) -> None:
 
 
 def test_ask_loop_budget_exhausts(tmp_path: Path) -> None:
+    """The spent budget buys ONE more ask, and it says the budget is spent."""
     req = '<REQUEST kind="type_def" arg="Buf"/>'
     out, asked = _loop([req, req, req, "ignored"], tmp_path, max_pulls=1)
-    assert out == req and len(asked) == 2       # 1 answered, then stop
+    # ask 1 → request; ask 2 (answered) → request again; ask 3 carries the
+    # refusal notice. Its reply is returned whatever it holds.
+    assert out == req and len(asked) == 3
+    assert "no context requests left" in asked[2]
+    assert "Do NOT request anything further" in asked[2]
+
+
+def test_ask_loop_spent_budget_recovers_the_body(tmp_path: Path) -> None:
+    """The convicting pin. A model that asks once too often is not refusing to
+    answer — told so, it answers, and pre-fix that body did not exist: the
+    request-only reply was returned and the caller logged `empty/no FN blocks`
+    (nightly src/error.rs, 2026-08-03 12:02 UTC)."""
+    req = '<REQUEST kind="type_def" arg="Buf"/>'
+    out, asked = _loop([req, _BODY], tmp_path, max_pulls=0)
+    assert out == _BODY and len(asked) == 2
+    assert "no context requests left" in asked[1]
+
+
+def test_ask_loop_warns_once_and_stops(tmp_path: Path) -> None:
+    """A model that ignores the notice ends the loop — the notice is not a new
+    round-trip budget."""
+    req = '<REQUEST kind="type_def" arg="Buf"/>'
+    out, asked = _loop([req], tmp_path, max_pulls=0)
+    assert out == req and len(asked) == 2
+
+
+def test_ask_loop_answers_every_request_in_one_reply(tmp_path: Path) -> None:
+    """The shape that lost the budget: two artifacts named in one reply. Both
+    are served in ONE round-trip; pre-fix only `Own` was, and `Buf` was dropped
+    without a log line."""
+    two = ('<REQUEST kind="type_def" arg="Buf"/>'
+           '<REQUEST kind="type_def" arg="Own"/>')
+    out, asked = _loop([two, _BODY], tmp_path, max_pulls=2)
+    assert out == _BODY and len(asked) == 2
+    assert "struct Buf;" in asked[1] and "struct Own;" in asked[1]
+    # One task, not two — the closing instruction is rendered once.
+    assert asked[1].count("Now complete the ORIGINAL task") == 1
+
+
+def test_ask_loop_serves_a_batch_only_as_far_as_the_budget(tmp_path: Path) -> None:
+    """Batching cannot buy more context than asking one at a time: the cap is
+    on artifacts served. The unaffordable tail is refused, not silently lost."""
+    three = ('<REQUEST kind="type_def" arg="A"/>'
+             '<REQUEST kind="type_def" arg="B"/>'
+             '<REQUEST kind="type_def" arg="C"/>')
+    out, asked = _loop([three, three, _BODY], tmp_path, max_pulls=2)
+    assert out == _BODY and len(asked) == 3
+    assert "struct A;" in asked[1] and "struct B;" in asked[1]
+    assert "struct C;" not in asked[1]
+    assert 'arg="C"' in asked[2] and "no context requests left" in asked[2]
 
 
 def test_ask_loop_plain_response_passes_through(tmp_path: Path) -> None:
@@ -211,9 +292,28 @@ def test_ladder_budget_falls_through_to_next_rung(tmp_path: Path) -> None:
         client, "PROMPT", "foo", [], sig_text="fn foo()", model="m",
         answer_request=_answerer_for(tmp_path, 1))
     assert body is None
-    # 1 answered re-ask on rung 1, then the 3 rungs exhaust: 4 asks total.
-    assert len(client.calls) == 4
-    assert client.calls[2]["think"] is False           # ladder did move on
+    # 1 answered re-ask on rung 1, then ONE refusal notice re-ask on the same
+    # rung, then the 3 rungs exhaust: 5 asks. The notice is what makes rungs 2
+    # and 3 worth spending — without it they re-ask the original prompt, which
+    # says nothing about the spent budget, and the model just asks again.
+    assert len(client.calls) == 5
+    assert "no context requests left" in client.calls[2]["prompt"]
+    assert client.calls[3]["think"] is False           # ladder did move on
+
+
+def test_ladder_notice_is_issued_once_across_rungs(tmp_path: Path) -> None:
+    """The answerer's budget and its notice both persist across rungs, so a
+    model that keeps asking cannot re-buy an extra ask on every rung.
+
+    The notice TEXT is expected in every later prompt — the ladder carries its
+    augmented prompt forward on purpose. What must not repeat is the notice
+    being APPENDED again, which is what would buy the extra ask."""
+    client = _LadderClient(['<REQUEST kind="type_def" arg="Buf"/>'])
+    ask_per_fn_body(
+        client, "PROMPT", "foo", [], sig_text="fn foo()", model="m",
+        answer_request=_answerer_for(tmp_path, 0))
+    assert client.calls[-1]["prompt"].count("no context requests left") == 1
+    assert len(client.calls) == 4      # 3 rungs + the single notice re-ask
 
 
 def test_ladder_without_answerer_unchanged(tmp_path: Path) -> None:

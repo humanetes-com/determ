@@ -1,18 +1,21 @@
-"""Pull-protocol resolver + bounded ask loop (july_plan P2) — application.
+"""Pull-protocol resolver + bounded ask loop — application.
 
-`PullSources` is the ISP seam: five injected reads, all post-strip-legal
-(Hard Rule 11). `workspace_file_reader` builds the FILE read with structural
-path containment — any path resolving outside the reconstruction tree is
-refused, so original source is unreachable by construction, not by policy.
+`PullSources` is the ISP seam: five injected reads, every one of them served
+from what the reconstruction is allowed to see (workspace tree, tests, baked
+type records, cargo output). `workspace_file_reader` builds the FILE read with
+structural path containment — any path resolving outside the reconstruction
+tree is refused, so the upstream crate source is unreachable by construction
+rather than by policy.
 
 `ask_with_pulls` is the ONE round-trip driver every fill path shares:
 deliverable-first (a reply that already carries FN bodies is never delayed by
-its stray request tag), then at most `PullBudget.remaining` answered requests,
-then the final reply as-is.
+its stray request tag), then at most `PullBudget.remaining` answered requests —
+ALL of a reply's requests are served, not just its last — then one final ask
+that tells a still-asking model the budget is spent, then the reply as-is.
 """
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,9 +24,12 @@ from pipeline_core.domain.context_pull import (
     PullAnswer,
     PullBudget,
     PullKind,
-    extract_context_pull,
+    extract_context_pulls,
 )
-from pipeline_core.prompts.pull_menu import render_pull_followup
+from pipeline_core.prompts.pull_menu import (
+    render_pull_budget_spent,
+    render_pull_followups,
+)
 
 # Payload caps (chars) — generous; `truncated` is flagged so the model knows.
 _CAPS: dict[PullKind, int] = {
@@ -55,8 +61,9 @@ class PullSources:
 
 
 def workspace_file_reader(root: Path) -> Callable[[str], str | None]:
-    """FILE-kind reader locked to the reconstruction tree (HR 11): the
-    resolved path must stay under `root` and be a `.rs` file."""
+    """FILE-kind reader locked to the reconstruction tree: the resolved path
+    must stay under `root` and be a `.rs` file, so no `../` walk can reach the
+    upstream source the reconstruction is being measured against."""
     resolved_root = root.resolve()
 
     def _read(rel: str) -> str | None:
@@ -116,28 +123,25 @@ def resolve_pull(pull: ContextPull, sources: PullSources) -> PullAnswer:
         return PullAnswer(pull, f"lookup failed: {e}", ok=False)
 
 
-def make_request_answerer(
+def _answer_affordable(
+    pulls: Sequence[ContextPull],
+    budget: PullBudget,
     sources: PullSources,
     *,
     log: Callable[[str], None],
     emit: Callable[..., None],
-    max_pulls: int = 2,
-) -> Callable[[str], str | None]:
-    """A stateful answerer for ask ladders that own their retry policy (the
-    per-fn 3-rung ladder): given a raw response, returns the follow-up prompt
-    ADDITION for its request — or None when there is no well-formed request
-    or the shared budget is spent. Budget persists across the ladder's rungs."""
-    budget = PullBudget(max_pulls)
+) -> tuple[list[PullAnswer], PullBudget, tuple[ContextPull, ...]]:
+    """Answer `pulls` in document order for as long as `budget` lasts.
 
-    def _answer(response: str) -> str | None:
-        nonlocal budget
-        pull = extract_context_pull(response)
-        if pull is None:
-            return None
+    Returns the answers, the reduced budget, and the requests the budget could
+    not reach. Every ANSWERED request costs one unit, so the cap stays a cap on
+    artifacts served: batching several into one reply buys the model fewer
+    round-trips, never more context."""
+    answers: list[PullAnswer] = []
+    for i, pull in enumerate(pulls):
         spent = budget.spend()
         if spent is None:
-            log(f"  [pull] budget exhausted — ignoring {pull.tag()}")
-            return None
+            return answers, budget, tuple(pulls[i:])
         budget = spent
         answer = resolve_pull(pull, sources)
         log(f"  [pull] {pull.tag()} → "
@@ -148,7 +152,51 @@ def make_request_answerer(
             "kind": str(pull.kind), "arg": pull.arg, "ok": answer.ok,
             "chars": len(answer.payload), "truncated": answer.truncated,
             "remaining": budget.remaining})
-        return render_pull_followup(pull, answer)
+        answers.append(answer)
+    return answers, budget, ()
+
+
+def _log_refusals(pulls: Sequence[ContextPull],
+                  log: Callable[[str], None]) -> None:
+    for pull in pulls:
+        log(f"  [pull] budget spent — refusing {pull.tag()}; "
+            "asking once more for a body")
+
+
+def make_request_answerer(
+    sources: PullSources,
+    *,
+    log: Callable[[str], None],
+    emit: Callable[..., None],
+    max_pulls: int = 2,
+) -> Callable[[str], str | None]:
+    """A stateful answerer for ask ladders that own their retry policy (the
+    per-fn 3-rung ladder): given a raw response, returns the follow-up prompt
+    ADDITION for its requests — or None when there is no well-formed request,
+    or the budget is spent AND the model has already been told so. Budget
+    persists across the ladder's rungs.
+
+    The one refusal notice is what stops the ladder burning its remaining rungs
+    on a model that is asking rather than answering: without it the rung breaks
+    and the next rung re-asks the ORIGINAL prompt, which says nothing about the
+    spent budget, so the model asks again and rungs 2 and 3 go the same way."""
+    budget = PullBudget(max_pulls)
+    warned = False
+
+    def _answer(response: str) -> str | None:
+        nonlocal budget, warned
+        pulls = extract_context_pulls(response)
+        if not pulls:
+            return None
+        answers, budget, unanswered = _answer_affordable(
+            pulls, budget, sources, log=log, emit=emit)
+        if answers:
+            return render_pull_followups(answers)
+        if warned:
+            return None
+        warned = True
+        _log_refusals(unanswered, log)
+        return render_pull_budget_spent(unanswered)
 
     return _answer
 
@@ -164,30 +212,35 @@ def ask_with_pulls(
     max_pulls: int = 2,
 ) -> str:
     """Drive one fill exchange with at most `max_pulls` answered requests.
-    Deliverable replies short-circuit; unanswerable/malformed requests end
-    the loop with the reply as-is (the caller's normal no-bodies handling
-    applies)."""
+    Deliverable replies short-circuit; a reply with no well-formed request
+    ends the loop as-is (the caller's normal no-bodies handling applies).
+
+    A reply that STILL asks once the budget is spent gets one final ask that
+    says so, and that reply is returned whatever it holds. Returning the
+    request-only reply instead is a whole discarded attempt: on 2026-08-03 the
+    nightly src/error.rs file-first fill spent three round-trips and nine
+    minutes on a 40 000-char prompt, had the crash diagnosed in prose, asked
+    for one more type, and was logged `empty/no FN blocks (0 FN tag(s) in
+    reply) — falling back to per-block fills`. The model had not failed; it was
+    waiting on an answer nothing was going to send. Total asks stay bounded at
+    `max_pulls + 2` and the notice is issued at most once."""
     budget = PullBudget(max_pulls)
     current = prompt
+    warned = False
     while True:
         response = ask(current)
         if has_deliverable(response):
             return response
-        pull = extract_context_pull(response)
-        if pull is None:
+        pulls = extract_context_pulls(response)
+        if not pulls:
             return response
-        spent = budget.spend()
-        if spent is None:
-            log(f"  [pull] budget exhausted — ignoring {pull.tag()}")
+        answers, budget, unanswered = _answer_affordable(
+            pulls, budget, sources, log=log, emit=emit)
+        if answers:
+            current = current + render_pull_followups(answers)
+            continue
+        if warned:
             return response
-        budget = spent
-        answer = resolve_pull(pull, sources)
-        log(f"  [pull] {pull.tag()} → "
-            f"{'ok' if answer.ok else 'unavailable'} "
-            f"({len(answer.payload)} chars"
-            f"{', truncated' if answer.truncated else ''})")
-        emit("pull.answer", data={
-            "kind": str(pull.kind), "arg": pull.arg, "ok": answer.ok,
-            "chars": len(answer.payload), "truncated": answer.truncated,
-            "remaining": budget.remaining})
-        current = current + render_pull_followup(pull, answer)
+        warned = True
+        _log_refusals(unanswered, log)
+        current = current + render_pull_budget_spent(unanswered)

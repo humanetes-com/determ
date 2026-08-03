@@ -1,4 +1,4 @@
-"""The bounded context-pull protocol (july_plan P2) — domain layer.
+"""The bounded context-pull protocol — domain layer.
 
 The pipeline PUSHES heuristic context slices at the model; when the slice
 misses the one fact the fn needs, the model hallucinates (starvation-miner
@@ -7,10 +7,11 @@ ONE bounded round-trip at a time: instead of a body, the model may reply with
 a typed request tag; the pipeline answers with exactly that artifact and
 re-asks. Closed kind menu, hard budget — NOT an agent loop.
 
-Hard Rule 11: the kinds are answerable ONLY from post-strip-legal sources
-(reconstruction workspace, tests, baked type records, cargo output). Original
-source is structurally unreachable — enforcement lives in the resolver's
-workspace-rooted reader.
+Every kind must be answerable from what the reconstruction is allowed to see:
+the workspace tree, the tests, the baked type records and cargo's own output.
+The upstream crate source is never one of them — a pull that could reach it
+would hand the model the answer it is being measured on. That is enforced
+structurally, by the resolver's workspace-rooted reader, not by policy.
 
 This module is pure: the VO set, the budget arithmetic, and the structured
 `<REQUEST …/>` parser (attribute walk, no regex — `extract_fn_bodies` style).
@@ -78,25 +79,58 @@ def _attr(tag: str, name: str) -> str | None:
     return html.unescape(tag[a + len(key):b])
 
 
+def _parse_one(response: str, i: int) -> tuple[ContextPull | None, int]:
+    """Parse the tag opening at `i`; return it (or None if malformed) and the
+    offset to resume scanning from."""
+    end = response.find(">", i)
+    if end == -1:
+        return None, len(response)
+    tag = response[i:end]
+    nxt = end + 1
+    kind_s = _attr(tag, "kind")
+    if kind_s is None:
+        return None, nxt
+    try:
+        kind = PullKind(kind_s.strip())
+    except ValueError:
+        return None, nxt
+    arg = (_attr(tag, "arg") or "").strip()
+    if kind is not PullKind.FULL_ERROR and not arg:
+        return None, nxt
+    return ContextPull(kind, arg), nxt
+
+
+def extract_context_pulls(response: str) -> tuple[ContextPull, ...]:
+    """EVERY well-formed `<REQUEST kind="…" arg="…"/>` in `response`, in
+    document order, first occurrence of each (kind, arg) kept.
+
+    A reply may legitimately name more than one artifact. On 2026-08-03 at
+    11:53 UTC the nightly src/error.rs file-first fill replied
+    `<REQUEST kind="file" arg="src/ext.rs"/><REQUEST kind="test_source"
+    arg="test_root_cause"/>` — a single reasonable batch. Only the second was
+    answered, the first was dropped without a log line, and the model spent
+    two further round-trips asking for other things before the budget ran out
+    with no body written. Reading them all costs one parse and turns that walk
+    into one exchange.
+
+    Malformed tags (unknown kind, argless non-`full_error`, no closing `>`)
+    are skipped rather than ending the scan — a stray `<REQUEST` in prose must
+    not hide a well-formed request that follows it."""
+    out: list[ContextPull] = []
+    seen: set[ContextPull] = set()
+    i = response.find("<REQUEST")
+    while i != -1:
+        pull, i = _parse_one(response, i)
+        if pull is not None and pull not in seen:
+            seen.add(pull)
+            out.append(pull)
+        i = response.find("<REQUEST", i)
+    return tuple(out)
+
+
 def extract_context_pull(response: str) -> ContextPull | None:
     """The LAST well-formed `<REQUEST kind="…" arg="…"/>` in `response`, or
     None. Unknown kinds and argless non-`full_error` requests are ignored
     (malformed output must never crash a fill)."""
-    i = response.rfind("<REQUEST")
-    if i == -1:
-        return None
-    end = response.find(">", i)
-    if end == -1:
-        return None
-    tag = response[i:end]
-    kind_s = _attr(tag, "kind")
-    if kind_s is None:
-        return None
-    try:
-        kind = PullKind(kind_s.strip())
-    except ValueError:
-        return None
-    arg = (_attr(tag, "arg") or "").strip()
-    if kind is not PullKind.FULL_ERROR and not arg:
-        return None
-    return ContextPull(kind, arg)
+    pulls = extract_context_pulls(response)
+    return pulls[-1] if pulls else None
