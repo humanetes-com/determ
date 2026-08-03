@@ -15,6 +15,10 @@ from pipeline_core.domain.llm_output import (
     xml_unescape_strict,
     xml_unescaped_variant,
 )
+from pipeline_core.domain.rust_scan import (
+    body_without_own_closing_brace,
+    top_level_item_names,
+)
 
 _REJECT = lambda _p: False   # noqa: E731 — "syn says broken"
 _ACCEPT = lambda _p: True    # noqa: E731
@@ -168,6 +172,80 @@ def test_splice_reports_parse_broken_when_neither_reading_parses(tmp_path) -> No
     out = splice_fn_body(f, "a", "let x = &amp;;", validate_parse=_REJECT)
     assert out.ok is False and out.reason == "parse_broken"
     assert f.read_text(encoding="utf-8") == original
+
+
+# ---- the reply that closes the body itself -------------------------------
+# nightly/src/error.rs, 2026-08-03 10:37: every one of a 17-body file-first
+# reply ended `\n    }`, every splice refused `item_set_changed`, and the whole
+# attempt landed nothing. The reply for the same file 12 minutes earlier closed
+# no body and spliced 17 for 17 — a per-reply slip, not a prompt property.
+
+def test_body_that_restates_the_fns_closing_brace_still_lands(tmp_path) -> None:
+    f = tmp_path / "m.rs"
+    f.write_text("fn a() -> i32 {\n    unimplemented!()\n}\n"
+                 "fn b() -> i32 {\n    7\n}\n", encoding="utf-8")
+    out = splice_fn_body(f, "a", "    let x = 1;\n    x\n    }",
+                         validate_parse=_ACCEPT)
+    assert out.ok is True and out.reason == "ok_own_brace_dropped"
+    text = f.read_text(encoding="utf-8")
+    assert top_level_item_names(text) == ["fn a", "fn b"]
+    assert text.count("}") == 2          # no brace left over
+
+
+def test_the_brace_repair_is_gated_on_the_item_set_refusal(tmp_path) -> None:
+    # A balanced body is written verbatim: the repair may only ever turn a
+    # refusal into a fill, never rewrite an answer that was already right.
+    f = tmp_path / "m.rs"
+    f.write_text("fn a() {\n    unimplemented!()\n}\n", encoding="utf-8")
+    out = splice_fn_body(f, "a", "if c { g() } else { h() }", validate_parse=_ACCEPT)
+    assert out.ok is True and out.reason == "ok"
+
+
+def test_a_body_that_escapes_its_braces_some_other_way_is_still_refused(
+        tmp_path) -> None:
+    # Two unmatched closes — one brace short of the shape the repair can prove,
+    # so the fingerprint's refusal stands and the file is untouched. The
+    # following `fn b` is what makes the escape VISIBLE to the fingerprint: at
+    # depth -2 it is no longer a depth-0 item.
+    f = tmp_path / "m.rs"
+    f.write_text("fn a() {\n    unimplemented!()\n}\n"
+                 "fn b() -> i32 {\n    7\n}\n", encoding="utf-8")
+    original = f.read_text(encoding="utf-8")
+    out = splice_fn_body(f, "a", "let x = 1;\n}\n}", validate_parse=_ACCEPT)
+    assert out.ok is False and out.reason == "item_set_changed"
+    assert f.read_text(encoding="utf-8") == original
+
+
+def test_body_escaping_to_declare_a_sibling_item_is_still_refused(tmp_path) -> None:
+    # The defect the fingerprint exists for: the body closes the fn early and
+    # declares its own item at file scope (E0255 against the real definition).
+    # Balance is -1 and it ends `}`, so the repair is ATTEMPTED — and rejected,
+    # because dropping that brace does not restore the item list.
+    f = tmp_path / "m.rs"
+    f.write_text("fn a() {\n    unimplemented!()\n}\n", encoding="utf-8")
+    original = f.read_text(encoding="utf-8")
+    out = splice_fn_body(f, "a", "let x = 1;\n}\nfn sneak() -> i32 { 1 }",
+                         validate_parse=_ACCEPT)
+    assert out.ok is False and out.reason == "item_set_changed"
+    assert f.read_text(encoding="utf-8") == original
+
+
+def test_own_brace_repair_reads_braces_as_code_not_as_text() -> None:
+    # A `}` in a comment or a string closes nothing, so a body carrying one is
+    # balanced and must be left exactly as the model wrote it.
+    assert body_without_own_closing_brace('let s = "}";') is None
+    assert body_without_own_closing_brace("let x = 1; // }") is None
+    assert body_without_own_closing_brace("if c { g() }") is None
+    # ...and the real shape, with the brace masked-safe at the end
+    assert body_without_own_closing_brace(
+        "let s = \"}\";\n    s.len()\n    }") == 'let s = "}";\n    s.len()'
+
+
+def test_own_brace_repair_sees_past_a_trailing_comment() -> None:
+    # `}  // done` is the same slip wearing a comment: the brace is still the
+    # last thing the body CLOSES, and a comment closes nothing.
+    assert (body_without_own_closing_brace("let x = 1;\n    }  // done")
+            == "let x = 1;\n      // done")
 
 
 @pytest.mark.skipif(not _BIN.exists(), reason="extractor binary not built")

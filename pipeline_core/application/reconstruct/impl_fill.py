@@ -737,6 +737,10 @@ def fill_impl_blocks(
                             _log(f"  [phase-c/file] {file_rel}: `{_fn}` landed "
                                  "only after resolving XML entities in the body "
                                  "— the reply used the escaped rendering.")
+                        if reason == "ok_own_brace_dropped":
+                            _log(f"  [phase-c/file] {file_rel}: `{_fn}` landed "
+                                 "only after dropping the fn's own closing "
+                                 "brace — the reply closed the body itself.")
                     else:
                         # `target_not_stub` is unfalsifiable from the log alone —
                         # the body is reverted before anyone reads it. Name the
@@ -1323,6 +1327,11 @@ def fill_impl_blocks(
                                  f"`{fn_data['fn_name']}` landed only after "
                                  "resolving XML entities in the body — the "
                                  "reply used the escaped rendering.")
+                        if reason == "ok_own_brace_dropped":
+                            _log(f"  [phase-c/impl] {block_id}: "
+                                 f"`{fn_data['fn_name']}` landed only after "
+                                 "dropping the fn's own closing brace — the "
+                                 "reply closed the body itself.")
                     else:
                         refusals.append(reason)
                         _log(f"  [phase-c/impl] {block_id}: splice "

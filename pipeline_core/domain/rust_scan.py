@@ -1165,6 +1165,45 @@ def top_level_item_names(text: str) -> list[str]:
     return out
 
 
+def body_without_own_closing_brace(body: str) -> str | None:
+    """`body` minus the fn's OWN closing brace, or None if it does not carry one.
+
+    A body written between an existing `{` and `}` must be brace-balanced. A
+    reply that ends its answer with the fn's closing brace is short exactly one
+    `{`, and splicing it verbatim closes the fn early: everything after the
+    splice point shifts out one level and `top_level_item_names` changes, which
+    is the `item_set_changed` refusal. Observed on nightly/src/error.rs
+    2026-08-03 10:37 — all 17 bodies of one file-first reply ended `\\n    }`,
+    every splice refused, the whole file-first attempt landed nothing and fell
+    back to per-block. The adjacent reply for the same file 12 minutes earlier
+    (10:25) closed no body and spliced 17 for 17, so the shape is a per-reply
+    slip, not a property of the prompt.
+
+    Repairs only the exact shape it can prove: masked brace balance exactly -1
+    with that unmatched `}` the last brace-relevant character in the body.
+    Comments and strings are not code, so `}  // done` is the same slip and is
+    repaired; balance -2, or an unbalanced body ending in an expression, is
+    left alone for the caller to refuse, because the point of the item-set
+    fingerprint is that a body which cannot be shown to be balanced is not
+    written."""
+    mask = code_mask(body)
+    depth = 0
+    last_close = -1
+    last_code = -1
+    for i, ch in enumerate(body):
+        if mask[i] or ch.isspace():
+            continue
+        last_code = i
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            last_close = i
+    if depth != -1 or last_close < 0 or last_close != last_code:
+        return None
+    return (body[:last_close] + body[last_close + 1:]).rstrip()
+
+
 def locate_top_level_item(
     text: str, keyword: str, name: str,
 ) -> tuple[int, int] | None:

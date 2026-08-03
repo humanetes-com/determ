@@ -98,3 +98,40 @@ def test_fill_replay_two_members_one_response() -> None:
         assert "unimplemented!()" not in out
         assert "fn a(&self) -> u32 {\n        1" in out
         assert "fn b(&self) -> u32 {\n        2" in out
+
+
+# The reply shape that cost a whole file-first attempt: nightly/src/error.rs,
+# 2026-08-03 10:37, 17 <FN> blocks and every one of them ending `\n    }`. Each
+# body is short one `{`, so each splice closed its fn early, the top-level item
+# fingerprint refused all 17, and the file landed nothing and fell back to
+# per-block fills. Verbatim from that reply's shape, at two members.
+CANNED_SELF_CLOSING = (
+    '<FN name="a" block="impl Pair">\n        1\n    }\n</FN>\n'
+    '<FN name="b" block="impl Pair">\n        2\n    }\n</FN>'
+)
+
+
+def test_fill_replay_reply_that_closes_each_body_itself() -> None:
+    """A reply that restates each fn's closing brace still fills every member.
+
+    The bodies are correct; only the protocol's shape is wrong. Before the
+    splice learnt to drop that brace this response filled NOTHING — 0 of 17 on
+    the live tree — and the fill route reported `nothing spliced`."""
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "lib.rs"
+        p.write_text(
+            "impl Pair {\n"
+            "    fn a(&self) -> u32 {\n        unimplemented!()\n    }\n"
+            "    fn b(&self) -> u32 {\n        unimplemented!()\n    }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        recs = pipeline.extract_fn_bodies(CANNED_SELF_CLOSING)
+        assert [r["fn_name"] for r in recs] == ["a", "b"]
+        for rec in recs:
+            assert _splice(p, rec), rec["fn_name"]
+        out = p.read_text(encoding="utf-8")
+        assert "unimplemented!()" not in out
+        assert out.count("}") == 3          # two fns, the impl, and nothing spare
+        assert "fn a(&self) -> u32 {\n        1" in out
+        assert "fn b(&self) -> u32 {\n        2" in out

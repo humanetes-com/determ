@@ -33,6 +33,7 @@ from pipeline_core.domain.reconstruction import (
 from pipeline_core.domain.rust_fn_headers import is_pub_fn, locate_all_fns
 from pipeline_core.domain.rust_idents import canon_container, declares_fn
 from pipeline_core.domain.rust_scan import (
+    body_without_own_closing_brace,
     has_code_brace,
     redeclared_inner_body,
     strip_outer_attributes,
@@ -60,27 +61,52 @@ def _unwrap_redeclaration(body: str, fn_name: str) -> str | None:
     return None if redeclared_inner_body(body, fn_name) is not None else body
 
 
-def _commit_with_xml_fallback(
+def _commit_with_repairs(
     commit: Callable[[str, SpliceReason], SpliceOutcome], body: str,
 ) -> SpliceOutcome:
-    """Commit `body`, retrying once with XML entities resolved if the verbatim
-    write leaves the file unparseable.
+    """Commit `body`, retrying once per known protocol slip in the reply's SHAPE.
 
-    A model that emits XML-safe attribute values emits them in the body of the
-    same reply, and `match &amp;mut self.state` is not Rust — syn rejects the
-    file and a CORRECT body is reverted and lost. The retry is gated on the
-    parse failure rather than applied up front so that a body legitimately
-    containing `"&amp;"` (a string literal in HTML-handling code) is kept
-    verbatim: it parses, so the fallback never runs.
+    Each retry is gated on the specific refusal that slip produces, never
+    applied up front, so a body that is already right is written verbatim and
+    the repair can only ever turn a refusal into a fill:
+
+    XML entities, on `parse_broken`. A model that emits XML-safe attribute
+    values emits them in the body of the same reply, and `match &amp;mut
+    self.state` is not Rust — syn rejects the file and a CORRECT body is
+    reverted and lost. Gating on the parse failure keeps a body legitimately
+    containing `"&amp;"` (a string literal in HTML-handling code) verbatim: it
+    parses, so the repair never runs.
+
+    The fn's own closing brace, on EITHER refusal. A body that restates it is
+    short one `{` and closes the fn early, and which refusal that produces
+    depends only on what follows the fn in the file: an item after it moves to
+    depth 0 and the fingerprint catches it (`item_set_changed`), while the
+    file's LAST fn escapes into a trailing unmatched `}` that only syn sees
+    (`parse_broken`). Both are the same slip and both are repairable, so the
+    repair is offered to both — observed on a two-member impl where the first
+    member landed and the second did not.
+
+    A repair is only ATTEMPTED when the body can be proven to carry the shape
+    it fixes, and the refusal still stands if the repaired body is refused
+    again: a body that escapes its braces some other way is refused exactly as
+    before.
     """
     out = commit(body, "ok")
-    if out.ok or out.reason != "parse_broken":
+    if out.ok:
         return out
-    variant = xml_unescaped_variant(body)
-    if variant is None:
-        return out
-    retry = commit(variant, "ok_xml_unescaped")
-    return retry if retry.ok else out
+    repairs: list[tuple[str | None, SpliceReason]] = []
+    if out.reason == "parse_broken":
+        repairs.append((xml_unescaped_variant(body), "ok_xml_unescaped"))
+    if out.reason in ("parse_broken", "item_set_changed"):
+        repairs.append(
+            (body_without_own_closing_brace(body), "ok_own_brace_dropped"))
+    for variant, reason in repairs:
+        if variant is None:
+            continue
+        retry = commit(variant, reason)
+        if retry.ok:
+            return retry
+    return out
 
 # Process-global path-keyed splice+cargo locks. One lock per resolved source
 # tree — regression-gate baselines are captured fresh INSIDE this lock, so it
@@ -271,7 +297,7 @@ def splice_fn_body_at(file_path: Path, body_byte_start: int, body_byte_end: int,
             return SpliceOutcome(False, "parse_broken", 0)
         return SpliceOutcome(True, reason, len(new_raw) - len(raw))
 
-    return _commit_with_xml_fallback(_commit, nb)
+    return _commit_with_repairs(_commit, nb)
 
 
 def replace_fn_signature(file_path: Path, fn_name: str, new_sig: str,
@@ -327,7 +353,7 @@ def replace_fn_signature(file_path: Path, fn_name: str, new_sig: str,
             return SpliceOutcome(False, "parse_broken", 0)
         return SpliceOutcome(True, "ok", len(new_text) - len(text))
 
-    return _commit_with_xml_fallback(_commit, new_sig).ok
+    return _commit_with_repairs(_commit, new_sig).ok
 
 
 def restore_frozen_signature(file_path: Path, fn_name: str,
@@ -444,7 +470,7 @@ def splice_fn_body(file_path: Path, fn_name: str, new_body: str,
             return SpliceOutcome(False, "parse_broken", 0)
         return SpliceOutcome(True, reason, len(new_text) - len(text))
 
-    return _commit_with_xml_fallback(_commit, nb)
+    return _commit_with_repairs(_commit, nb)
 
 
 def splice_fn_with_where(

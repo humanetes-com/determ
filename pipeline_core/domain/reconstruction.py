@@ -40,8 +40,16 @@ from typing import Literal, NamedTuple
 #                     A distinct reason because the verbatim body was NOT valid
 #                     Rust: it says the reply used the escaped rendering, which
 #                     is a protocol signal worth seeing, not a plain success
+#   ok_own_brace_dropped — committed, but only after removing the fn's own
+#                     closing brace, which the reply restated at the end of the
+#                     body. Verbatim it is short one `{`, so it closes the fn
+#                     early and trips `item_set_changed`. Distinct for the same
+#                     reason as the entity repair: it reports that the reply did
+#                     not answer in the protocol's shape, which is worth
+#                     counting per model even though the body itself was fine
 SpliceReason = Literal[
-    "ok", "ok_xml_unescaped", "file_missing", "read_failed", "fn_not_found",
+    "ok", "ok_xml_unescaped", "ok_own_brace_dropped",
+    "file_missing", "read_failed", "fn_not_found",
     "bad_offsets", "target_not_stub", "body_is_stub", "parse_broken",
     "ambiguous_name", "sig_not_bare", "item_set_changed", "body_redeclares_fn",
     # The fn's every stub occurrence is `#[cfg]`-gated OUT of the cluster doing

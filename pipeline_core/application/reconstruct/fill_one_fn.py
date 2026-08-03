@@ -573,6 +573,10 @@ class FillOneFn:
                 self.tel.log(f"  [phase-c/per-fn] {fn_name}: landed only after "
                              "resolving XML entities in the body — the reply "
                              "used the escaped rendering.")
+            if ok and splice_out.reason == "ok_own_brace_dropped":
+                self.tel.log(f"  [phase-c/per-fn] {fn_name}: landed only after "
+                             "dropping the fn's own closing brace — the reply "
+                             "closed the body itself.")
             if not ok:
                 ctx.splice_check_lock.release()
                 _lock_released = True
