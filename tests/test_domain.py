@@ -126,18 +126,27 @@ def test_find_fn_blocks_matches_old_regex(text: str) -> None:
 
 @pytest.mark.parametrize("text,expected", [
     # `block` is OPTIONAL — the attribute says WHICH container, and a reply
-    # that omits it has still answered. Absent reads as "", which the attribute
-    # reader can never produce, so "unnamed" stays distinguishable.
+    # that omits it has still answered. Absent reads as "".
     ('<FN name="f">missing block</FN>', [("f", "", "missing block")]),
     # An unterminated block keeps its header rather than vanishing: when the
     # model put the body in an attribute, that is where the answer is.
     ('<FN name="f" block="b">unterminated', [("f", "b", "")]),
+    # An EXPLICITLY empty block reads the same as an absent one. It is what a
+    # FREE fn answers — the protocol asks for `block="IMPL_HEADER"` and a free
+    # fn has no impl header — and refusing it dropped the whole tag, because
+    # the refused read left the scan on `block=""` and the `>` was never found.
+    # nightly/src/error.rs 2026-08-04T16:12:06Z: the first prompt ever to ask
+    # this pipeline's model for free fns got four bodies back for
+    # `object_ref` / `object_downcast` / `context_downcast` /
+    # `context_chain_downcast`, all tagged `block=""`, and logged
+    # `empty/no FN blocks (4 FN tag(s) in reply)`.
+    ('<FN name="f" block="">free fn</FN>', [("f", "", "free fn")]),
 ])
 def test_find_fn_blocks_departs_from_the_old_regex(
         text: str, expected: list[tuple[str, str, str]]) -> None:
-    """The two shapes where equivalence with the original regex was GIVEN UP.
+    """The shapes where equivalence with the original regex was GIVEN UP.
 
-    Both used to yield no records, and a caller cannot tell no-records from a
+    All used to yield no records, and a caller cannot tell no-records from a
     model that answered nothing — it logs `no FN blocks` and discards the call
     either way. Live on 07-31 that cost eight replies, every one of which
     carried a usable body."""
@@ -602,7 +611,7 @@ def test_extract_fn_bodies_fence_wrapped_and_empty() -> None:
 def test_extract_fn_bodies_malformed_headers_skipped() -> None:
     for bad in [
         '<FNname="f" block="b">x</FN>',      # no whitespace after <FN
-        '<FN name="" block="b">x</FN>',      # empty attr value
+        '<FN name="" block="b">x</FN>',      # empty NAME (empty block is legal)
         '<FN name="f" block="b"x>y</FN>',    # junk before >
     ]:
         assert llm_output.extract_fn_bodies(bad) == [], bad

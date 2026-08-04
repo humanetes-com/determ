@@ -139,6 +139,11 @@ def build_file_fill_prompt(
     notes: str,
     prior_error: str = "",
     crash_evidence: str = "",
+    module_name: str = "",
+    cluster_name: str = "",
+    gotchas: str = "",
+    types_section: str = "",
+    invariants_section: str = "",
 ) -> str:
     """P5 file-first fill: everything one file needs in ONE prompt, so the
     model designs the file's impls together (the coherence a fresh reply
@@ -147,7 +152,26 @@ def build_file_fill_prompt(
     it back lets the retry fix the SAME joint design instead of abandoning
     coherence after one miss (a bare one-shot-or-fragment gate throws a
     genuinely co-designed impl cluster to independent per-block fills too
-    early)."""
+    early).
+
+    The last five arguments are the CRATE-LEVEL context the per-impl prompt has
+    always carried and this one did not. Measured over `logs/prompts` on
+    2026-08-04: of 956 file-first prompts, **0** named the cluster or carried
+    `CLUSTER_INVARIANTS`, `RUST_GOTCHAS` or `TYPES_IN_SCOPE`, while 2 503 other
+    prompts carried the invariants and 528 named the compiler cluster. The two
+    fill routes' context sections were disjoint, neither a superset — and 318
+    of the 326 file-first fills in the log are the `nightly` cluster, so in
+    practice the route with less context was the route doing the harder work.
+
+    `invariants_section` is the one that matters most here. The model is shown
+    `src/error.rs` with 25 `#[cfg(error_generic_member_access)]` attributes in
+    it and no statement anywhere of whether that cfg is on, so which arm of
+    `backtrace_if_absent!` is live had to be guessed. A per-impl trace on the
+    same crate reads "the cluster is `nightly`, and from the CLUSTER_INVARIANTS,
+    `error_generic_member_access` is active"; the file-first traces reason from
+    assumptions instead.
+
+    Kept PURE per this module's contract: every section arrives rendered."""
     # `in <header> -> fn, fn`, never `<header>: fn, fn`: a model mirroring the
     # colon shape answers name="Error: root_cause", which resolves to no fn at
     # splice time and loses the body.
@@ -169,16 +193,30 @@ def build_file_fill_prompt(
                   "filling participates in the same scheme, implement it the "
                   "sound way.\n</CRASH_EVIDENCE>\n"
                   if crash_evidence.strip() else "")
+    gotchas_part = (f"\n<RUST_GOTCHAS>\n{gotchas}\n</RUST_GOTCHAS>\n"
+                    if gotchas.strip() else "")
+    types_part = (f"\n<TYPES_IN_SCOPE>\n{types_section}\n</TYPES_IN_SCOPE>\n"
+                  if types_section.strip() else "")
+    invariants_part = (f"\n<CLUSTER_INVARIANTS>\n{invariants_section}\n"
+                       "</CLUSTER_INVARIANTS>\n"
+                       if invariants_section.strip() else "")
+    # `Crate: X | Cluster: Y | File: Z` — the per-impl prompt's own header
+    # line, verbatim, so the two routes identify the work the same way. Falls
+    # back to the bare `File:` when the caller names neither.
+    ident = " | ".join(p for p in (
+        f"Crate: {module_name}" if module_name else "",
+        f"Cluster: {cluster_name}" if cluster_name else "",
+        f"File: {file_rel}") if p)
     return f"""Write EVERY function listed below for this Rust file in one pass —
 design the impl blocks together so they stay mutually consistent. Keep every
 signature EXACTLY as written; write bodies only.
-File: {file_rel}
+{ident}
 Functions to write (by impl block):
 {plan_lines}
 ```rust
 {file_text}
 ```
-{crash_part}{bp_part}{notes_part}{tests_part}{error_part}
+{gotchas_part}{invariants_part}{types_part}{crash_part}{bp_part}{notes_part}{tests_part}{error_part}
 For EACH function, return one block (body statements only — no fn signature
 line, no outer braces). `name` is the BARE function name; the impl header goes
 in `block` and NOWHERE else:

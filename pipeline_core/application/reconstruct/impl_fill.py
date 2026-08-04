@@ -111,6 +111,7 @@ from pipeline_core.prompts.fix_prompts import (
     build_maximal_impl_prompt,
 )
 from pipeline_core.prompts.pull_menu import pull_menu_section
+from pipeline_core.prompts.sections import gotchas_summary as _gotchas_summary
 
 
 @dataclass(frozen=True, slots=True)
@@ -669,6 +670,11 @@ def fill_impl_blocks(
             if loc.file == file_rel))
         prior_error = ""
         for _attempt in range(1, _FILE_FIRST_MAX_ATTEMPTS + 1):
+            # TYPES_IN_SCOPE selected over the WHOLE file, which is this
+            # route's unit — the per-impl path searches one block's member
+            # signatures because that is all it may write.
+            _file_types = _types_section_for_fix(
+                "", snapshot, prior_error, "", "", _crate_type_records)
             prompt = build_file_fill_prompt(
                 file_rel=file_rel, file_text=snapshot,
                 fill_plan=[BlockFillPlan(
@@ -678,7 +684,10 @@ def fill_impl_blocks(
                     for b in fblocks],
                 tests_block="\n\n".join(f"// {p}\n{t}" for p, t in test_blocks),
                 blueprint=_bp_slice, notes=notes_section, prior_error=prior_error,
-                crash_evidence=_file_crash)
+                crash_evidence=_file_crash,
+                module_name=module_name, cluster_name=cluster_name,
+                gotchas=_gotchas_summary(), types_section=_file_types,
+                invariants_section=invariants_section)
             _log(f"  [phase-c/file] {glabel}: file-first fill "
                  f"({len(fblocks)} block(s), {len(stub_names)} stub(s), "
                  f"{len(refill_names)} re-fill(s), "
@@ -988,6 +997,25 @@ def fill_impl_blocks(
                      f"({_revert_reason}) — "
                      + ("retrying file-first once more."
                         if _more else "falling back to per-block fills."))
+                # The route emits `start`, `done` and `mismatch` and emitted
+                # NOTHING here, so a group that burned all three attempts left
+                # no trace in events.jsonl at all — the only record was the
+                # prose line above, which names the verdict and not the
+                # evidence. src/error.rs[group 1/2] on run `360236-3e83b9d1`
+                # reverted `compile failed` three times (15:56 → 16:12 UTC,
+                # 2026-08-04) and neither the rustc codes nor how many bodies
+                # had landed was recoverable afterwards from any log. Carry
+                # the codes: `compile failed` with E0308 is the model writing
+                # the wrong types, with E0119 it is a splice that duplicated an
+                # item, and those are different defects.
+                _emit("phase_c.file.fill.revert", data={
+                    "cluster": cluster_name, "file": file_rel, "group": glabel,
+                    "attempt": _attempt, "max_attempts": _FILE_FIRST_MAX_ATTEMPTS,
+                    "reason": _revert_reason, "spliced": spliced_now,
+                    "planned": len(stub_names) + len(refill_names),
+                    "banked": _bank is not None,
+                    "error_codes": sorted(ecodes_in_text(prior_error)),
+                    "retrying": _more})
 
     def _fill_one_block(block: ImplBlock) -> None:
         """One impl block's fill: context assembly, the `_attempt_impl_fill`

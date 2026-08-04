@@ -127,6 +127,39 @@ def _file_fill(plan: list[BlockFillPlan]) -> str:
         tests_block="", blueprint="", notes="")
 
 
+def test_file_fill_carries_the_crate_level_context_the_per_impl_prompt_has() -> None:
+    """The file-first prompt never told the model which cluster it was filling.
+
+    Measured over `logs/prompts` 2026-08-04: of 956 file-first prompts, 0 named
+    the cluster or carried `CLUSTER_INVARIANTS` / `RUST_GOTCHAS` /
+    `TYPES_IN_SCOPE`, while 2 503 other prompts carried the invariants and 528
+    named the compiler cluster. The two fill routes' context sections were
+    disjoint, and 318 of the 326 file-first fills in the log are `nightly` — so
+    the route with less context was doing the harder work.
+
+    The invariants are the load-bearing part: `src/error.rs` is shown to the
+    model with 25 `#[cfg(error_generic_member_access)]` attributes and nothing
+    anywhere saying whether that cfg is on, so which arm of
+    `backtrace_if_absent!` is live had to be guessed."""
+    p = build_file_fill_prompt(
+        file_rel="src/error.rs", file_text="fn a() {}",
+        fill_plan=[BlockFillPlan("impl Error", (), ("chain",))],
+        tests_block="", blueprint="", notes="",
+        module_name="anyhow", cluster_name="nightly",
+        gotchas="- E0599 → read TYPES_IN_SCOPE",
+        types_section="struct ErrorImpl { _error: E }",
+        invariants_section="backtrace_if_absent!(...) [cfg=error_generic_member_access]")
+    assert "Crate: anyhow | Cluster: nightly | File: src/error.rs" in p
+    assert "<CLUSTER_INVARIANTS>" in p and "error_generic_member_access" in p
+    assert "<RUST_GOTCHAS>" in p and "<TYPES_IN_SCOPE>" in p
+    # Omitted sections leave no empty tags, and the header degrades to the
+    # bare `File:` a caller that names no cluster used to get.
+    bare = _file_fill([BlockFillPlan("impl Error", (), ("chain",))])
+    assert bare.splitlines()[3] == "File: src/error.rs"
+    for tag in ("CLUSTER_INVARIANTS", "RUST_GOTCHAS", "TYPES_IN_SCOPE"):
+        assert tag not in bare
+
+
 def test_file_fill_plan_names_the_refill_members() -> None:
     # Live loss (run 990528): the plan rendered `stub_members` only, so a block
     # in the fill set purely to CORRECT a wrong-but-compiling body arrived as a

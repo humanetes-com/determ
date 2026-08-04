@@ -538,8 +538,15 @@ def test_file_first_retries_with_the_compiler_errors_from_the_failed_attempt(
     res = _run(ws)
     text = (ws / "src" / "lib.rs").read_text()
     assert len(prompts) == 2, "compile failure must be retried file-first"
-    assert "E0432" in prompts[1], "retry prompt must carry attempt 1's errors"
-    assert "E0432" not in prompts[0]
+    # The FEEDBACK section, not a bare code substring: the prompt now carries a
+    # static RUST_GOTCHAS block that names E0432 among its standing rules, so
+    # `"E0432" in prompt` is true of attempt 1 as well and says nothing about
+    # whether attempt 1's diagnostics were fed back.
+    feedback = "Your last attempt at this file failed:"
+    assert feedback not in prompts[0], "attempt 1 has no prior attempt to report"
+    tail = prompts[1].split(feedback, 1)
+    assert len(tail) == 2, "retry prompt must carry attempt 1's errors"
+    assert "E0432" in tail[1]
     assert res.fns_filled == 2 and "unimplemented!()" not in text
 
 
@@ -697,6 +704,54 @@ def test_file_first_plan_names_a_filled_free_fn_the_frontier_convicts(
         f"the free fn is missing from the file-first plan:\n{plan}")
     assert "vtable" in plan, (
         f"the free fn is not named as a target:\n{plan}")
+
+
+def test_file_first_lands_a_free_fn_answered_with_an_empty_block_attr(
+        monkeypatch, tmp_path):
+    """`block=""` is the only honest answer a free fn can give, and it used to
+    cost the whole reply.
+
+    The prompt's protocol is `<FN name="FUNCTION_NAME" block="IMPL_HEADER">`
+    and a free fn has no impl header, so the model empties the attribute.
+    `_read_quoted_attr` demanded a value of >=1 char, returned None, and left
+    the scan sitting on `block=""` — so `>` was never found and
+    `_find_fn_blocks` dropped the record. Every tag in the reply went the same
+    way, and the caller logged `empty/no FN blocks (N FN tag(s) in reply)`.
+
+    nightly/src/error.rs 2026-08-04T16:12:06Z was the first prompt this
+    pipeline ever sent that asked for free fns — `object_ref`,
+    `object_downcast`, `context_downcast`, `context_chain_downcast`, the four
+    that carry the `test_downcast` heap-use-after-free. The model answered all
+    four, correctly enough to name the freed `_error` field, and 4 of 4 were
+    discarded on the attribute.
+
+    The test above pins the PLAN and stops there; its own canned reply carries
+    `block=""` and nothing ever checked what became of it. This pins the body
+    onto disk."""
+    from pipeline_core.domain.models import FnLocator
+    ws = _setup(monkeypatch, tmp_path)
+    (ws / "src" / "lib.rs").write_text(IMPL_LIB_FREE_REFILL)
+    install_cluster_scan(monkeypatch,
+                         impl_blocks=lambda *a, **k: _free_refill_blocks())
+    install_cluster_scan(monkeypatch, stub_records=lambda *a, **k: [])
+    _install_model(monkeypatch, [
+        '<FN name="kind" block="impl Foo">self.tag + 1</FN>\n'
+        '<FN name="vtable" block="">x + 1</FN>'])
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
+    keys = {FnLocator("lib.rs", "kind"), FnLocator("lib.rs", "vtable")}
+    pipeline._phase_c_fill_impl_blocks(
+        project_dir=ws, target_src_dir=ws / "src", tests_dir_files=[],
+        module_name="m", cluster_name="t", cluster=None,
+        check_cmd="cargo check", cluster_env={}, fr_path=None,
+        tdd_frontier_keys=keys,
+        tdd_frontier_tests=FailureFrontier.of_direct(
+            {k: {"test_downcast"} for k in keys}))
+    text = (ws / "src" / "lib.rs").read_text()
+    free_body = text.split("impl Foo", 1)[0]
+    assert "x + 1" in free_body, (
+        "the free fn's body was answered with block=\"\" and never landed:\n"
+        + free_body)
+    assert "x + 999" not in text                # the stale body is gone
 
 
 IMPL_LIB_FREE_REFILL_OVER_BOUND = """\

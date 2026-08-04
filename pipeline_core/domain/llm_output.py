@@ -432,20 +432,39 @@ def _attr_value_close(text: str, start: int) -> int:
     return -1
 
 
-def _read_quoted_attr(text: str, pos: int, name: str) -> tuple[str, int] | None:
+def _read_quoted_attr(text: str, pos: int, name: str,
+                      *, allow_empty: bool = False) -> tuple[str, int] | None:
     """If `text[pos:]` opens with `name="<value>"` (value = `[^"]+`, i.e. ≥1
     non-quote char), return (value, pos-after-closing-quote); else None.
 
     The value is HTML-unescaped: models emit XML-safe attribute values for
     generic headers (`block="impl&lt;T, E&gt; Context&lt;T, E&gt; …"`), which
     would never match a real container (run 346122: every file-first body for
-    src/context.rs dropped on `&lt;`-escaped headers)."""
+    src/context.rs dropped on `&lt;`-escaped headers).
+
+    `allow_empty` accepts a zero-length value, and only the `block` reader asks
+    for it. Refusing one cost the whole tag, not just the attribute: the caller
+    reads `name`, tries `block` at the next position, and a None leaves the
+    scan sitting ON `block=""` — so the `>` is never found and
+    `_find_fn_blocks` drops the record. `block=""` is not malformed, it is the
+    only honest answer a FREE fn can give, since the prompt asks for
+    `block="IMPL_HEADER"` and a free fn has no impl header.
+    nightly/src/error.rs 2026-08-04T16:12:06Z was the first prompt this
+    pipeline ever sent that asked for free fns — `object_ref`,
+    `object_downcast`, `context_downcast`, `context_chain_downcast`, the four
+    carrying the `test_downcast` use-after-free. The model answered all four
+    with `block=""` and the call was logged `empty/no FN blocks (4 FN tag(s) in
+    reply)` and discarded.
+
+    `name` keeps the ≥1-char rule: a tag that names no fn identifies nothing,
+    and empty there is the shape `_find_fn_blocks` is pinned to skip exactly as
+    the regex it replaced did."""
     lead = name + '="'
     if not text.startswith(lead, pos):
         return None
     v = pos + len(lead)
     end = _attr_value_close(text, v)
-    if end in (-1, v):                       # need a closing quote AND ≥1 char
+    if end == -1 or (end == v and not allow_empty):
         return None
     return html.unescape(text[v:end].replace('\\"', '"')), end + 1
 
@@ -556,9 +575,10 @@ def _find_fn_blocks(text: str) -> list[tuple[str, str, str]]:
     from a model that said nothing, and the reply is discarded whole:
 
     * `block` is OPTIONAL. It disambiguates WHICH container the body belongs
-      to; a reply that omits it has still answered. Absent reads as `""`, a
-      value the attribute reader can never produce (it demands ≥1 char), so
-      "no container named" stays distinguishable downstream.
+      to; a reply that omits it has still answered. Absent reads as `""`, and
+      so does an explicitly empty `block=""` — the shape a FREE fn's answer
+      takes, since the prompt asks for an impl header and a free fn has none.
+      Both mean "no container named", which is what the free-fn reroute wants.
     * A missing `</FN>` ends the record with an EMPTY body rather than
       dropping it — the header's attributes survive, and when the model put
       the body in one of them :func:`extract_fn_bodies` still recovers it.
@@ -581,7 +601,8 @@ def _find_fn_blocks(text: str) -> list[tuple[str, str, str]]:
         nm_val, p = name
         bl_val = ""
         q = _skip_ws(text, p)
-        block = _read_quoted_attr(text, q, "block") if q > p else None
+        block = (_read_quoted_attr(text, q, "block", allow_empty=True)
+                 if q > p else None)
         if block is not None:
             bl_val, q = block
             q = _skip_ws(text, q)            # `\s*` before `>`
