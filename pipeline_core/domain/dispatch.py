@@ -112,8 +112,42 @@ def stubs_deferred_by_impl_route(
     is judged "crashed the siblings" and reverted however good the body was —
     the re-fill work is unwinnable until the stub is gone. Running the impl
     route first therefore spends the LLM budget on guaranteed reverts and
-    schedules the one fill that would unblock them last."""
+    schedules the one fill that would unblock them last.
+
+    STUBS only, deliberately: the caller narrows the whole iteration to what
+    this returns, which is justified by the aborting `unimplemented!()` and by
+    nothing else. The re-fill analogue is
+    :func:`refills_deferred_by_impl_route`, which is a diagnostic rather than a
+    schedule."""
     return frozenset(
         FnLocator(b.file, m.fn_name)
         for b in blocks if not impl_route_covers(b, max_stubs=max_stubs)
         for m in b.stub_members)
+
+
+def refills_deferred_by_impl_route(
+    blocks: list[ImplBlock], *, max_stubs: int,
+) -> frozenset[FnLocator]:
+    """Behavioural RE-FILL targets no impl-route unit will attempt — the same
+    free-fn and oversized blocks :func:`stubs_deferred_by_impl_route` covers,
+    read for their `refill_members` instead of their stubs.
+
+    Named because for three days nothing did. A filled free fn implicated by a
+    failing test was reachable by no route at all: the impl route declines the
+    block on `bool(block.container)` and says the per-fn route will take it, the
+    per-fn route is handed the deferred STUBS only, and a filled fn is not a
+    stub. On the live anyhow tree that silently excluded all 13 free fns of
+    `src/error.rs` — `object_downcast`, `object_drop_front`, `vtable`,
+    `context_chain_downcast` and the rest — which is where the crate's
+    remaining `heap-use-after-free` lives. Every fill target named in every
+    prompt over 2026-08-02/03 was an impl member; not one was a free fn.
+
+    The file-first route now plans these (it is the only route with a
+    whole-file view, and the defect they carry is a contract ACROSS several of
+    them rather than a fault in any one body). This predicate is what lets a
+    caller assert that, and what lets one LOG a target that still ends up
+    covered by nothing."""
+    return frozenset(
+        FnLocator(b.file, m.fn_name)
+        for b in blocks if not impl_route_covers(b, max_stubs=max_stubs)
+        for m in b.refill_members)

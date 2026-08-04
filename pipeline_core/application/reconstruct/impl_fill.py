@@ -37,7 +37,10 @@ from pipeline_core.domain.attempt_loss import (
 )
 from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.blueprint import Blueprint, blueprint_path, parse_blueprint
-from pipeline_core.domain.dispatch import impl_route_covers
+from pipeline_core.domain.dispatch import (
+    impl_route_covers,
+    refills_deferred_by_impl_route,
+)
 from pipeline_core.domain.fill_groups import BlockGroupInput, coupled_fill_groups
 from pipeline_core.domain.identity import ContainerId, RetroKey
 from pipeline_core.domain.impl_routing import (
@@ -405,6 +408,15 @@ def fill_impl_blocks(
     # Drop empty / free-fn / oversized blocks (handled by per-fn fallback).
     viable_blocks = [b for b in blocks
                      if impl_route_covers(b, max_stubs=_PER_IMPL_MAX_STUBS)]
+    # …except that for a RE-FILL the per-fn fallback is not a fallback: it is
+    # handed the deferred STUBS only, and a filled fn is not a stub. Those
+    # blocks are carried to the file-first route below, which is the only route
+    # that can name a free fn at all. Kept out of `viable_blocks` so the
+    # per-impl loop's unit — one impl header — is unchanged.
+    _refill_only_deferred = [
+        b for b in blocks
+        if not impl_route_covers(b, max_stubs=_PER_IMPL_MAX_STUBS)
+        and b.refill_members]
     _refill_block_count = sum(1 for b in viable_blocks if b.refill_members)
     _log(f"  [phase-c/impl] cluster {cluster_name}: "
          f"{len(viable_blocks)} impl block(s) viable "
@@ -412,6 +424,17 @@ def fill_impl_blocks(
          "oversized)."
          + (f" {_refill_block_count} behavioral re-fill block(s) "
             "(filled bodies with failing tests)." if _refill_block_count else ""))
+    _deferred_refills = refills_deferred_by_impl_route(
+        blocks, max_stubs=_PER_IMPL_MAX_STUBS)
+    if _deferred_refills:
+        _log(f"  [phase-c/impl] cluster {cluster_name}: "
+             f"{len(_deferred_refills)} re-fill target(s) the per-impl route "
+             "never attempts (free fn / oversized) — carried to the file-first "
+             "route, the only one that can name them: "
+             + ", ".join(sorted(f"{f}::{fn}" for f, fn in _deferred_refills)))
+        _emit("phase_c.dispatch.refills_deferred", data={
+            "cluster": cluster_name,
+            "targets": sorted(f"{f}::{fn}" for f, fn in _deferred_refills)})
 
     # Crate-level context (shared by every block we visit).
     _src_for_macros = target_src_dir / "src" if (target_src_dir / "src").exists() else target_src_dir
@@ -558,26 +581,52 @@ def fill_impl_blocks(
                     FnLocator(file_rel, m.fn_name)))))
             for _i, b in enumerate(fblocks)]
         _packed = coupled_fill_groups(_binputs, max_fns)
-        # Only multi-block groups run here: a lone uncoupled block is exactly
-        # the per-block route's unit, and running it in both routes doubles
-        # its attempts. A single block larger than the bound keeps the old
-        # skip semantics.
+        # Blocks NO other route can take. "Handed to the per-block loop" is a
+        # real handoff for a block that loop iterates and a silent drop for one
+        # it does not: `viable_blocks` excludes free-fn and oversized blocks by
+        # construction, which is the whole reason those two shapes arrive here.
+        # Live anyhow/nightly 2026-08-04 12:12 UTC, with the frontier finally
+        # naming free fns again: src/error.rs packed 35 re-fill fns into one
+        # welded group of 20 and `+12 uncoupled block(s) → per-block loop`, and
+        # the free-fn block holding `object_downcast`, `object_ref`,
+        # `context_downcast` and `context_chain_downcast` — where the crate's
+        # heap-use-after-free lives — was one of the 12. A free-fn block cannot
+        # weld to anything either: welding is keyed on CONVICTING tests and an
+        # escalated producer is attributed by inference, so its test set is
+        # empty and it is always its own singleton component.
+        _orphans = {i for i, b in enumerate(fblocks)
+                    if not impl_route_covers(b, max_stubs=_PER_IMPL_MAX_STUBS)}
+        # A singleton group runs only when it is one of those. Otherwise it is
+        # exactly the per-block route's unit and running it in both routes
+        # doubles its attempts. A single block larger than the bound keeps the
+        # old skip semantics either way.
         _joint = [g for g in _packed
-                  if len(g) >= 2
+                  if (len(g) >= 2 or _orphans.intersection(g))
                   and sum(_binputs[i].fn_count for i in g) <= max_fns]
         _solo = len(_packed) - len(_joint)
+        _stranded = sorted(_orphans - {i for g in _joint for i in g})
+        if _stranded:
+            # Nothing downstream will attempt these; say so where it is read,
+            # rather than let the count above imply the per-block loop has them.
+            _log(f"  [phase-c/file] {file_rel}: {len(_stranded)} block(s) that "
+                 "NO route covers exceed the bound alone and are left unfilled: "
+                 + ", ".join(
+                     f"{fblocks[i].container.splitlines()[0] if fblocks[i].container else 'free fns'}"
+                     f" ({_binputs[i].fn_count} fn(s))" for i in _stranded)
+                 + f" — raise PHASE_C_FILE_MAX_FNS (now {max_fns}) to reach them.")
         if not _joint:
             _log(f"  [phase-c/file] {file_rel}: skipped — {len(wanted_all)} "
                  f"fn(s) exceeds PHASE_C_FILE_MAX_FNS={max_fns} and no "
                  "test-welded multi-block group fits the bound; per-block "
-                 "fills will handle it.")
+                 "fills will handle the blocks that route covers.")
             return
         _sizes = ", ".join(
             str(sum(_binputs[i].fn_count for i in g)) for g in _joint)
         _log(f"  [phase-c/file] {file_rel}: {len(wanted_all)} fn(s) exceeds "
              f"PHASE_C_FILE_MAX_FNS={max_fns} — split into {len(_joint)} "
-             f"test-welded group(s) of {_sizes} fn(s) "
-             f"(+{_solo} uncoupled block(s) → per-block loop).")
+             f"group(s) of {_sizes} fn(s) (test-welded, plus any block no "
+             f"other route covers) (+{_solo} uncoupled block(s) → "
+             "per-block loop).")
         for _gi, _g in enumerate(_joint, 1):
             _fill_block_group(file_rel, [fblocks[i] for i in _g],
                               f"{file_rel}[group {_gi}/{len(_joint)}]")
@@ -1816,8 +1865,23 @@ def fill_impl_blocks(
         _by_file: dict[str, list[ImplBlock]] = {}
         for b in viable_blocks:
             _by_file.setdefault(b.file, []).append(b)
+        # Re-fill targets the per-impl route defers join their file's group.
+        # `_plan_line` already renders an empty container as `free fns`, and
+        # `route_fn_bodies` already routes a body whose block names no impl —
+        # the plan was the only thing withholding them, which is why the
+        # crate's 13 filled free fns were rewritable by nothing. Appended AFTER
+        # the viable blocks so `containers[0]`, the routing target, stays an
+        # impl header for every file that has one.
+        for b in _refill_only_deferred:
+            _by_file.setdefault(b.file, []).append(b)
         for _file_rel, _fblocks in _by_file.items():
-            if len(_fblocks) >= 2:
+            # `>= 2` is there because a lone block is the per-block route's own
+            # unit — which is false of a block that route does not iterate. A
+            # file whose only frontier work is a free-fn or oversized re-fill
+            # gets this route or none.
+            if len(_fblocks) >= 2 or any(
+                    not impl_route_covers(b, max_stubs=_PER_IMPL_MAX_STUBS)
+                    for b in _fblocks):
                 _fill_file_first(_file_rel, _fblocks)
     # Independent FILES dispatch to a thread pool — the LLM call inside
     # each block's fix loop is the slow part; `_splice_check_lock` +

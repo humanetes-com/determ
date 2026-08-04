@@ -807,10 +807,22 @@ _PER_IMPL_MAX_STUBS = int(os.getenv("PHASE_C_IMPL_MAX_STUBS", "12"))
 class _LateStructure:
     """P2 backward-compat: late-binds `_enumerate_fns_via_extractor` so existing tests
     that monkeypatch that pipeline shim are still honoured by the attribution use-case.
-    New tests inject a real `StructureReader` fake via `AttributionDeps.structure`."""
+    New tests inject a real `StructureReader` fake via `AttributionDeps.structure`.
+
+    Every method the attribution use-cases call on `AttributionDeps.structure`
+    must exist here. Carrying only `enumerate_fns` silently disarmed the
+    futility escalation for three days: the 2026-08-01 producer-type narrowing
+    added an `enumerate_types` call, this object answered `AttributeError`, the
+    caller's `except` read that as "the crate declares no nominal types", and
+    every escalation was refused with `['Error'] name no type this crate
+    declares` about a crate whose `src/error.rs` opens with `pub struct Error`.
+    2 995 escalations fired in the three weeks before that date and none after."""
 
     def enumerate_fns(self, src_dir: Path) -> "list[dict] | None":
         return _APP.structure.enumerate_fns(src_dir)
+
+    def enumerate_types(self, src_dir: Path) -> "list | None":
+        return _APP.structure.enumerate_types(src_dir)
 
 
 _FILE_CONSTRAINTS = FileConstraintsReader(

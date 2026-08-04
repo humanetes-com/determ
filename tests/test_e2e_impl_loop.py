@@ -145,7 +145,7 @@ def test_impl_repeated_error_signature_stops_after_two(monkeypatch, tmp_path):
 
 
 def test_impl_b3_keeps_nonregressing_fill(monkeypatch, tmp_path):
-    # B3 (FR-029): crate still has a PRE-EXISTING error elsewhere, but this
+    # B3: crate still has a PRE-EXISTING error elsewhere, but this
     # block's fill adds no NEW error and none lands on the filled fns →
     # keep the fill instead of reverting (convergence-deadlock dissolver).
     ws = _setup(monkeypatch, tmp_path)
@@ -210,7 +210,7 @@ def test_impl_b3_does_not_credit_green_but_test_failing_fill(monkeypatch, tmp_pa
     assert "self.tag" in text
 
 
-# --- debt #46 point 2: per-impl behavioral re-fill (block-level, no stubs left) ---
+# --- per-impl behavioral re-fill (block-level, no stubs left) -----------------
 
 IMPL_LIB_WRONG_KIND = """pub struct Foo { tag: u32 }
 
@@ -246,7 +246,7 @@ def _refill_block() -> ImplBlock:
 
 def test_refill_only_block_reaches_llm_and_splices_with_allow_nonstub(
         monkeypatch, tmp_path):
-    # debt #46 point 2: a block with stub_members=() would previously never be
+    # A block with stub_members=() would previously never be
     # collected (collect_impl_blocks_for_cluster drops all-filled blocks) nor
     # reach `_fill_one_block` (`_viable` required stub_members). With a TDD
     # frontier naming `kind` as test-failing, `collect_impl_refill_targets`
@@ -289,7 +289,7 @@ def test_block_with_no_refill_target_is_not_collected(monkeypatch, tmp_path):
     assert res.attempts == 0
 
 
-# --- debt #42: stale stub_members / already-filled blocks ---------------------
+# --- stale stub_members / already-filled blocks -------------------------------
 
 IMPL_LIB_FILLED = IMPL_LIB.replace("unimplemented!()", "7")
 
@@ -498,7 +498,7 @@ def test_file_first_reverts_on_compile_failure_then_blocks_take_over(
                     (0, "", [])])
     res = _run(ws)
     text = (ws / "src" / "lib.rs").read_text()
-    # debt #54's routing widening lets a per-block turn splice a SIBLING
+    # The routing widening lets a per-block turn splice a SIBLING
     # container's body too (not just its own target) when the model answers
     # both together, as RESPONSE_TWO always does here — Foo's turn now fills
     # BOTH `kind` and `name` in one call, so Bar's own turn finds `name`
@@ -619,6 +619,229 @@ def test_file_first_routes_free_fn_but_never_an_impl_addressed_body(
     assert "!cond" in free_body           # the free-fn body landed in the free fn
     assert "!self.tag" not in text        # the impl-addressed body landed nowhere
     assert "self.tag\n" in text and "self.tag + 1" in text
+
+
+IMPL_LIB_FREE_REFILL = """\
+pub struct Foo { tag: u32 }
+
+pub fn vtable(x: u32) -> u32 {
+    x + 999
+}
+
+impl Foo {
+    pub fn kind(&self) -> u32 {
+        self.tag + 999
+    }
+}
+"""
+
+
+def _free_refill_blocks() -> list[ImplBlock]:
+    """One impl block and one FREE-fn block, both all-filled — the shape
+    `collect_impl_blocks` produces for a file whose free fns have bodies (it
+    groups them under `container=""` and emits that group like any other)."""
+    kind = FnRecord(file="lib.rs", fn_name="kind", container="impl Foo",
+                    sig_text="pub fn kind (& self) -> u32",
+                    body_text="self.tag + 999", has_unimplemented_body=False)
+    vtable = FnRecord(file="lib.rs", fn_name="vtable", container="",
+                      sig_text="pub fn vtable (x : u32) -> u32",
+                      body_text="x + 999", has_unimplemented_body=False)
+    return [ImplBlock(file="lib.rs", container="impl Foo",
+                      members=(kind,), stub_members=()),
+            ImplBlock(file="lib.rs", container="",
+                      members=(vtable,), stub_members=())]
+
+
+def test_file_first_plan_names_a_filled_free_fn_the_frontier_convicts(
+        monkeypatch, tmp_path):
+    """A filled free fn implicated by a failing test must reach a prompt.
+
+    Until this pin it reached none. The per-impl route declines a block on
+    `bool(block.container)` and its docstring says the per-fn route will take
+    it; the per-fn route is handed the deferred STUBS only, and a filled fn is
+    not a stub; the file-first plan was built from the impl route's own viable
+    list. On the live anyhow tree that left all 13 free fns of `src/error.rs`
+    — `object_downcast`, `vtable`, `context_chain_downcast`, … — unwritable,
+    which is where the crate's remaining use-after-free lives. Every fill
+    target named in every prompt over 2026-08-02/03 was an impl member.
+
+    The renderer was always ready: `_plan_line` prints `free fns` for an empty
+    header, and `route_fn_bodies` already routes a body whose block names no
+    impl. The PLAN was the only thing withholding them."""
+    from pipeline_core.domain.models import FnLocator
+    ws = _setup(monkeypatch, tmp_path)
+    (ws / "src" / "lib.rs").write_text(IMPL_LIB_FREE_REFILL)
+    install_cluster_scan(monkeypatch,
+                         impl_blocks=lambda *a, **k: _free_refill_blocks())
+    install_cluster_scan(monkeypatch, stub_records=lambda *a, **k: [])
+    prompts: list[str] = []
+
+    def _capture(prompt, *a, **k):
+        prompts.append(prompt)
+        return ('<FN name="kind" block="impl Foo">self.tag</FN>\n'
+                '<FN name="vtable" block="">x + 1</FN>')
+
+    monkeypatch.setattr(pipeline, "_ask_raw", _capture)
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
+    keys = {FnLocator("lib.rs", "kind"), FnLocator("lib.rs", "vtable")}
+    pipeline._phase_c_fill_impl_blocks(
+        project_dir=ws, target_src_dir=ws / "src", tests_dir_files=[],
+        module_name="m", cluster_name="t", cluster=None,
+        check_cmd="cargo check", cluster_env={}, fr_path=None,
+        tdd_frontier_keys=keys,
+        tdd_frontier_tests=FailureFrontier.of_direct(
+            {k: {"test_downcast"} for k in keys}))
+    assert prompts, "the file-first route must have been reached"
+    plan = prompts[0].split("```rust", 1)[0]
+    assert "free fns" in plan, (
+        f"the free fn is missing from the file-first plan:\n{plan}")
+    assert "vtable" in plan, (
+        f"the free fn is not named as a target:\n{plan}")
+
+
+IMPL_LIB_FREE_REFILL_OVER_BOUND = """\
+pub struct Foo { tag: u32 }
+pub struct Bar { tag: u32 }
+
+pub fn vtable(x: u32) -> u32 {
+    x + 999
+}
+
+impl Foo {
+    pub fn kind(&self) -> u32 {
+        self.tag + 999
+    }
+}
+impl Bar {
+    pub fn name(&self) -> u32 {
+        self.tag + 998
+    }
+}
+"""
+
+
+def _free_refill_blocks_over_bound() -> list[ImplBlock]:
+    """Two filled impl blocks and one filled FREE-fn block — the same shape as
+    `_free_refill_blocks`, sized so the file's total exceeds a small bound and
+    the route has to PARTITION rather than send one prompt."""
+    kind = FnRecord(file="lib.rs", fn_name="kind", container="impl Foo",
+                    sig_text="pub fn kind (& self) -> u32",
+                    body_text="self.tag + 999", has_unimplemented_body=False)
+    name = FnRecord(file="lib.rs", fn_name="name", container="impl Bar",
+                    sig_text="pub fn name (& self) -> u32",
+                    body_text="self.tag + 998", has_unimplemented_body=False)
+    vtable = FnRecord(file="lib.rs", fn_name="vtable", container="",
+                      sig_text="pub fn vtable (x : u32) -> u32",
+                      body_text="x + 999", has_unimplemented_body=False)
+    return [ImplBlock(file="lib.rs", container="impl Foo",
+                      members=(kind,), stub_members=()),
+            ImplBlock(file="lib.rs", container="impl Bar",
+                      members=(name,), stub_members=()),
+            ImplBlock(file="lib.rs", container="",
+                      members=(vtable,), stub_members=())]
+
+
+def _over_bound_frontier():
+    """`vtable` is dispatched but not CONVICTED — the shape a producer
+    escalation creates. A free fn never appears in an assertion's panic
+    location, so the only thing that ever puts one in the frontier is the
+    escalation, and what it adds carries inferred attribution only."""
+    from pipeline_core.domain.models import FnLocator
+    keys = {FnLocator("lib.rs", "kind"), FnLocator("lib.rs", "name"),
+            FnLocator("lib.rs", "vtable")}
+    return keys, FailureFrontier.build(
+        {k: {"test_downcast"} for k in keys},
+        {FnLocator("lib.rs", "kind"): {"test_downcast"},
+         FnLocator("lib.rs", "name"): {"test_downcast"}})
+
+
+def _plans_of(prompts: list[str]) -> list[str]:
+    return [p.split("```rust", 1)[0] for p in prompts
+            if "Functions to write (by impl block)" in p]
+
+
+def test_file_first_over_bound_still_plans_the_block_no_route_covers(
+        monkeypatch, tmp_path):
+    """A file too big for one prompt must not strand its free-fn block.
+
+    Placing free fns in the file-first PLAN is only half a route: when the file
+    exceeds `PHASE_C_FILE_MAX_FNS` the plan is built per welded GROUP, and a
+    group ran only at `len(g) >= 2` because a lone block "is the per-block
+    route's unit". That is false of a free-fn or oversized block — the
+    per-block loop iterates `viable_blocks`, which excludes exactly those two
+    shapes — so the singleton was dropped, not delegated.
+
+    A free-fn block is always a singleton, too: welding is keyed on CONVICTING
+    tests and the escalation that puts a free fn in the frontier attributes it
+    by inference, so its test set is empty and it can weld to nothing.
+
+    Live anyhow/nightly 2026-08-04 12:12 UTC, the first sweep since 07-31 whose
+    frontier named free fns at all: `src/error.rs: 35 fn(s) exceeds
+    PHASE_C_FILE_MAX_FNS=20 — split into 1 test-welded group(s) of 20 fn(s)
+    (+12 uncoupled block(s) → per-block loop)`, and the block holding
+    `object_downcast`, `object_ref`, `context_downcast` and
+    `context_chain_downcast` was among the 12. No prompt in that run named one
+    of them."""
+    ws = _setup(monkeypatch, tmp_path)
+    (ws / "src" / "lib.rs").write_text(IMPL_LIB_FREE_REFILL_OVER_BOUND)
+    install_cluster_scan(
+        monkeypatch, impl_blocks=lambda *a, **k: _free_refill_blocks_over_bound())
+    install_cluster_scan(monkeypatch, stub_records=lambda *a, **k: [])
+    monkeypatch.setenv("PHASE_C_FILE_MAX_FNS", "2")     # 3 fns > bound
+    prompts: list[str] = []
+
+    def _capture(prompt, *a, **k):
+        prompts.append(prompt)
+        return '<FN name="kind" block="impl Foo">self.tag</FN>'
+
+    monkeypatch.setattr(pipeline, "_ask_raw", _capture)
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
+    keys, frontier = _over_bound_frontier()
+    pipeline._phase_c_fill_impl_blocks(
+        project_dir=ws, target_src_dir=ws / "src", tests_dir_files=[],
+        module_name="m", cluster_name="t", cluster=None,
+        check_cmd="cargo check", cluster_env={}, fr_path=None,
+        tdd_frontier_keys=keys, tdd_frontier_tests=frontier)
+    plans = _plans_of(prompts)
+    assert any("free fns" in p and "vtable" in p for p in plans), (
+        "the free-fn block was stranded by the over-bound partition:\n"
+        + "\n---\n".join(plans))
+
+
+def test_file_first_over_bound_leaves_a_covered_block_to_the_per_block_loop(
+        monkeypatch, tmp_path):
+    """…and the singleton rule still holds for every block that route DOES
+    iterate. Widening it to all singletons would run each uncoupled impl block
+    in both routes and double its LLM attempts, which is the cost the `len(g)
+    >= 2` filter was installed to avoid. Only "no other route covers this" buys
+    the exemption."""
+    from pipeline_core.domain.models import FnLocator
+    ws = _setup(monkeypatch, tmp_path)
+    (ws / "src" / "lib.rs").write_text(IMPL_LIB_FREE_REFILL_OVER_BOUND)
+    blocks = [b for b in _free_refill_blocks_over_bound() if b.container]
+    install_cluster_scan(monkeypatch, impl_blocks=lambda *a, **k: blocks)
+    install_cluster_scan(monkeypatch, stub_records=lambda *a, **k: [])
+    monkeypatch.setenv("PHASE_C_FILE_MAX_FNS", "1")     # 2 fns > bound
+    prompts: list[str] = []
+
+    def _capture(prompt, *a, **k):
+        prompts.append(prompt)
+        return '<FN name="kind" block="impl Foo">self.tag</FN>'
+
+    monkeypatch.setattr(pipeline, "_ask_raw", _capture)
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
+    keys = {FnLocator("lib.rs", "kind"), FnLocator("lib.rs", "name")}
+    pipeline._phase_c_fill_impl_blocks(
+        project_dir=ws, target_src_dir=ws / "src", tests_dir_files=[],
+        module_name="m", cluster_name="t", cluster=None,
+        check_cmd="cargo check", cluster_env={}, fr_path=None,
+        tdd_frontier_keys=keys,
+        tdd_frontier_tests=FailureFrontier.of_direct(
+            {FnLocator("lib.rs", "kind"): {"t1"},
+             FnLocator("lib.rs", "name"): {"t2"}}))
+    assert not _plans_of(prompts), (
+        "two uncoupled impl blocks, each of which the per-block loop takes, "
+        "must not get file-first groups of their own")
 
 
 IMPL_LIB_TWO_MODS = """\

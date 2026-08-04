@@ -43,6 +43,7 @@ def test_dispatch_class_values() -> None:
 
 from pipeline_core.domain.dispatch import (  # noqa: E402
     impl_route_covers,
+    refills_deferred_by_impl_route,
     stubs_deferred_by_impl_route,
 )
 from pipeline_core.domain.models import FnRecord, ImplBlock  # noqa: E402
@@ -77,6 +78,31 @@ def test_deferred_stubs_are_exactly_the_uncovered_ones() -> None:
     # a refill member of an uncovered block is NOT a stub → never deferred here
     assert stubs_deferred_by_impl_route(
         [_blk("", (), ("refill_only",))], max_stubs=2) == frozenset()
+
+
+def test_refills_of_uncovered_blocks_are_named_by_their_own_predicate() -> None:
+    """The counterpart to the assertion above, and the hole it used to leave.
+
+    `stubs_deferred_by_impl_route` returning nothing for a refill-only free-fn
+    block is correct — the caller narrows the whole iteration to what it
+    returns, which only an aborting `unimplemented!()` justifies. But nothing
+    else named those targets either, so a filled free fn implicated by a failing
+    test was written by no route at all: the impl route declined it on the
+    container, the per-fn route was handed stubs only, and the file-first plan
+    listed impl blocks. On the live anyhow tree that was all 13 free fns of
+    `src/error.rs`, holding the crate's remaining use-after-free."""
+    free_refill = _blk("", (), ("object_downcast", "vtable"))
+    covered = _blk("impl E", ("a",))
+    oversized = _blk("impl Big", ("x",), ("y", "z"))
+    got = refills_deferred_by_impl_route(
+        [covered, free_refill, oversized], max_stubs=2)
+    assert got == frozenset({FnLocator("src/e.rs", "object_downcast"),
+                             FnLocator("src/e.rs", "vtable"),
+                             FnLocator("src/e.rs", "y"),
+                             FnLocator("src/e.rs", "z")})
+    # stubs are the other predicate's business, never double-counted here
+    assert FnLocator("src/e.rs", "a") not in got
+    assert FnLocator("src/e.rs", "x") not in got
 
 
 # ---- red-build narrowing: while the crate does not compile, only the fns

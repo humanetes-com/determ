@@ -656,18 +656,26 @@ def escalate_frontier_to_producers(
     foreign type and a type alias each answer "who produces this?" with the
     whole crate, and on the live tree the unfiltered subject set was
     ``{E, Option, Result, Box, bool, …}`` — see that module for the measured
-    sizes. When the crate's types cannot be read at all, the subject set is
-    empty and nothing escalates: this path's only failure mode is
-    over-widening, so it fails toward silence."""
+    sizes.
+
+    Failing to READ the crate's types is reported as itself, never as an answer
+    about the crate. Both are silence for the escalation, and treating them as
+    one cost three days: a reader that could not answer `enumerate_types` raised
+    `AttributeError` into a blanket `except`, and 99 refusals then said
+    ``['Error'] name no type this crate declares`` about a crate that declares
+    `Error`. A guard whose read failure is indistinguishable from its verdict
+    cannot be caught by reading the log it writes."""
     try:
         recs = deps.structure.enumerate_fns(src_dir) or []
     except Exception:
         recs = []
+    types_unreadable = ""
     try:
         producible = ProducibleTypes.from_type_records(
             deps.structure.enumerate_types(src_dir))
-    except Exception:
+    except Exception as e:
         producible = EMPTY_PRODUCIBLE
+        types_unreadable = f"{type(e).__name__}: {e}"
     containers = {(r.get("file", ""), r.get("fn_name", "")): r.get("container", "")
                   for r in recs}
     candidates = {container_type_name(containers.get((k[0], k[1]), ""))
@@ -675,7 +683,15 @@ def escalate_frontier_to_producers(
     candidates.discard("")
     type_names = set(producible.filter(candidates))
     if not type_names:
-        if candidates:
+        if candidates and types_unreadable:
+            # Says nothing about the candidates: they were never tested against
+            # anything. The escalation is disarmed until this read works.
+            deps.log(f"  [attribution/escalate] {test_name}: not escalating — "
+                     "COULD NOT READ this crate's type declarations "
+                     f"({types_unreadable}); {len(candidates)} candidate "
+                     "subject(s) went untested. This is a pipeline defect, not "
+                     "a fact about the crate.")
+        elif candidates:
             deps.log(f"  [attribution/escalate] {test_name}: not escalating — "
                      f"{sorted(candidates)} name no type this crate declares "
                      "(generic parameter, foreign type or alias)")

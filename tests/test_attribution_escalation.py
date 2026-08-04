@@ -128,6 +128,62 @@ def test_escalation_without_a_readable_type_set_stays_silent() -> None:
         futile_units={("src/chain.rs", "len")}) == {}
 
 
+def test_unreadable_types_are_reported_as_a_read_failure_not_as_a_verdict() -> None:
+    """The refusal must not describe the crate when it never read the crate.
+
+    A reader missing `enumerate_types` raised `AttributeError` into a blanket
+    `except`, and the escalation then logged `['Chain'] name no type this crate
+    declares` — 99 times over three days, about types the crate declares. Both
+    outcomes are silence; only one of them is a pipeline defect, and the log is
+    the only place that difference can show up."""
+    class _NoTypes:
+        def enumerate_fns(self, _sd):
+            return RECS
+        # deliberately no enumerate_types — the production reader's shape
+
+    lines: list[str] = []
+    deps = _deps()
+    object.__setattr__(deps, "structure", _NoTypes())
+    object.__setattr__(deps, "log", lines.append)
+    assert escalate_frontier_to_producers(
+        deps, Path("src"), "test_len",
+        futile_units={("src/chain.rs", "len")}) == {}
+    msg = "\n".join(lines)
+    assert "COULD NOT READ" in msg
+    assert "AttributeError" in msg
+    assert "pipeline defect" in msg
+    # and it must NOT make the claim the old message made
+    assert "name no type this crate declares" not in msg
+
+
+def test_the_crate_declares_none_message_is_kept_for_the_real_case() -> None:
+    """The other branch still says what it used to: the types WERE read and the
+    candidates genuinely are not among them."""
+    lines: list[str] = []
+    deps = _deps(types=[TypeRecord(kind="struct", name="Unrelated")])
+    object.__setattr__(deps, "log", lines.append)
+    assert escalate_frontier_to_producers(
+        deps, Path("src"), "test_len",
+        futile_units={("src/chain.rs", "len")}) == {}
+    msg = "\n".join(lines)
+    assert "name no type this crate declares" in msg
+    assert "COULD NOT READ" not in msg
+
+
+def test_the_production_reader_can_answer_every_call_escalation_makes() -> None:
+    """The seam pin. Every fake in this file defines `enumerate_types`, so the
+    suite passed for three days while the composed object could not answer it —
+    `AttributionDeps.structure` is `pipeline._LateStructure`, which carried
+    `enumerate_fns` alone. Assert against the PRODUCTION class, not a fake."""
+    import pipeline
+
+    reader = pipeline._LateStructure()
+    for method in ("enumerate_fns", "enumerate_types"):
+        assert callable(getattr(reader, method, None)), (
+            f"_LateStructure cannot answer {method!r}; "
+            "escalate_frontier_to_producers calls it and swallows the failure")
+
+
 def test_calling_an_associated_item_is_not_producing() -> None:
     """`Chain::new(...)` in a body makes the caller a CONSUMER of Chain. Counting
     it as a producer escalated a futile test to a third of the crate — and, since
