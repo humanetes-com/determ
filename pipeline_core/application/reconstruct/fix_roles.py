@@ -59,6 +59,7 @@ class FixSplicerAdapter:
     render_impl_block_fn: Callable[[str, tuple[FnRecord, ...]], str]
     splice_fn_fn: Callable[..., SpliceOutcome]
     splice_body_fn: Callable[..., SpliceOutcome]
+    splice_body_scoped_fn: Callable[..., SpliceOutcome]
     restore_signature_fn: Callable[[Path, str, str], bool]
 
     def locate_fn(self, text: str, name: str,
@@ -82,6 +83,12 @@ class FixSplicerAdapter:
                     allow_nonstub: bool = False) -> SpliceOutcome:
         return self.splice_body_fn(file_path, name, body,
                                    allow_nonstub=allow_nonstub)
+
+    def splice_body_scoped(self, file_path: Path, name: str, container: str,
+                           sig_text: str, new_body: str, *,
+                           allow_nonstub: bool = False) -> SpliceOutcome:
+        return self.splice_body_scoped_fn(file_path, name, container, sig_text,
+                                          new_body, allow_nonstub=allow_nonstub)
 
     def restore_signature(self, file_path: Path, name: str,
                           skeleton_sig: str) -> bool:

@@ -238,6 +238,52 @@ def test_validate_task3_strict_pass_fail_incomplete() -> None:
     assert test_results.validate_task3_output_strict(0, 0, 0, 0, "stable")[0] == "incomplete"
 
 
+def test_validate_task3_strict_catches_a_silent_binary_the_inventory_cannot()\
+        -> None:
+    """A crashed binary is caught by cargo's own announcement, not by the
+    static inventory.
+
+    On the merged tree the per-cluster inventory undershoots by tens of tests
+    (2026-08-05: `expected=104` for nightly against 129 actually run), so
+    `reported < expected` has far too much slack to notice a binary that took
+    its whole test count down with it.
+    """
+    out = (
+        "     Running tests/ok.rs (target/debug/deps/ok-1)\n"
+        "running 2 tests\n"
+        "test a ... ok\ntest b ... ok\n"
+        "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured\n"
+        "     Running tests/boom.rs (target/debug/deps/boom-2)\n"
+        "running 40 tests\n"
+        "error: test failed, to rerun pass `--test boom`\n"
+    )
+    # Clean counts, and the count even CLEARS a small static expectation —
+    # only the announcement shows 40 tests produced no verdict.
+    status, reason = test_results.validate_task3_output_strict(
+        2, 0, 0, 2, "nightly", out)
+    assert status == "incomplete"
+    assert "tests/boom.rs" in reason
+    assert "40" in reason
+    # Without the output the old accounting still reads this as a pass — which
+    # is exactly the hole.
+    assert test_results.validate_task3_output_strict(
+        2, 0, 0, 2, "nightly")[0] == "pass"
+
+
+def test_validate_task3_strict_keeps_fail_but_names_the_silence() -> None:
+    """Failing tests stay FAIL — the retry's TEST mode is aimed by their names
+    — while the silent binary is still reported in the reason."""
+    out = (
+        "     Running tests/boom.rs (target/debug/deps/boom-2)\n"
+        "running 7 tests\n"
+        "error: test failed, to rerun pass `--test boom`\n"
+    )
+    status, reason = test_results.validate_task3_output_strict(
+        10, 2, 0, 12, "stable", out)
+    assert status == "fail"
+    assert "tests/boom.rs" in reason
+
+
 def test_extract_test_output_from_file_strips_genesis_header() -> None:
     blob = "genesis snapshot text\n=== test output ===\nreal cargo output here"
     assert test_results.extract_test_output_from_file(blob) == "real cargo output here"

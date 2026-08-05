@@ -118,10 +118,18 @@ class Cargo(Protocol):
         self, diagnostics: list[Diagnostic], rendered_output: str,
         target_src_dir: Path,
     ) -> list[FnLocator]: ...
+    # `test_texts` carries the failing tests' own sources. Without it the
+    # deterministic behavioral path (failing test BODY → identifier intersection
+    # with fn records) is skipped and attribution falls through to a token match
+    # over the whole test FILE — which is how a 2026-08-05 task3 frontier came to
+    # hold five unrelated `new` fns. `unrepairable_tests` names failures no body
+    # rewrite can satisfy (trybuild compile-fail harnesses).
     def attribute_failures(
         self, test_output: str, src_dir: Path,
         recently_filled: list[FnLocator],
         test_reverse_map: dict[str, set[FnLocator]], cluster_name: str,
+        test_texts: dict[str, str] | None = ...,
+        unrepairable_tests: frozenset[str] = ...,
     ) -> AttributionResult: ...
 
 

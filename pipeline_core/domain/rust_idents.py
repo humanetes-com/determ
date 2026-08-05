@@ -711,6 +711,32 @@ def test_fn_names(text: str) -> list[str]:
     return out
 
 
+def is_compile_fail_test_source(text: str) -> bool:
+    """True when a test file asserts that OTHER programs fail to compile.
+
+    `tests/compiletest.rs` on the anyhow tree is the whole shape:
+
+        #[test]
+        fn ui() {
+            let t = trybuild::TestCases::new();
+            t.compile_fail("tests/ui/*.rs");
+        }
+
+    It asserts that every program under `tests/ui/` is REJECTED by rustc, with
+    stderr byte-matching a committed `.stderr` file. No rewrite of any function
+    body in the crate can change what rustc prints for those programs, so a
+    repair loop that re-authors bodies cannot satisfy it — and on 2026-08-05 it
+    was in the frontier, contributing `lib.rs::not` (from the `not(nightly)` in
+    its own `#[rustversion::attr]`) at a ~2-minute model call.
+
+    Recognised without running anything: the harness crate is named in the
+    source. `trybuild` and `compiletest` are the two in use here; `compile_fail`
+    alone is NOT enough, because a doctest attribute of that name says something
+    different and lives in `///` comments.
+    """
+    return "trybuild" in text or "compiletest_rs" in text
+
+
 def _match_test_attr_fn(text: str, h: int) -> tuple[str, int] | None:
     """Try the ``#[test]`` → next-line ``fn <name>(`` match starting at the `#` at
     `h`; return `(name, end_offset)` or None. Helper for `test_fn_names`."""

@@ -638,6 +638,17 @@ class ClusterFillResult:
     # cluster's cfg excludes from the build is absent, not passing.
     failed_tests: frozenset[str] = frozenset()
     ran_tests: frozenset[str] = frozenset()
+    # What the cluster gave up ON, and whether it gave up at all. A cluster that
+    # plateaus with failing tests is checkpointed with the same marker as one
+    # that finished, and clusters seed forward only — so `nightly` was retired
+    # on 2026-08-04 at 100/104 with four tests still failing, and everything it
+    # had learned while failing stayed behind. Two of those four were fixed for
+    # free by the merge taking the other cluster's bodies; the rest became the
+    # task3 retry's problem, and that loop starts from a bare failing-test name.
+    # `exhausted_fns` is the frontier the driver marked permanently exhausted at
+    # its plateau exit: the fns it tried and could not make pass.
+    exhausted: bool = False
+    exhausted_fns: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

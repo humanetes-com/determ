@@ -3,9 +3,13 @@ whole-file delegate, and the per-impl one-shot fill on a clean-compile/failing
 -test frontier."""
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
+from threading import Lock
 
-from pipeline_core.application.reconstruct.fix_unit import FixUnitDeps
+from pipeline_core.adapters.fill_engine_roles import MutatorAdapter
+from pipeline_core.application.reconstruct.fix_roles import FixSplicerAdapter
+from pipeline_core.application.reconstruct.fix_unit import FixUnitDeps, one_shot_fill
 from pipeline_core.application.reconstruct.generate_fix import (
     GenerateFixDeps,
     PerFnFix,
@@ -13,11 +17,18 @@ from pipeline_core.application.reconstruct.generate_fix import (
     WholeFileFix,
     select_strategy,
 )
+from pipeline_core.application.reconstruct.splice import (
+    locate_fn_by_record,
+    splice_fn_body,
+    splice_fn_body_at,
+)
 from pipeline_core.domain.compile_probe import CompileProbe
 from pipeline_core.domain.enums import FillUnit, FixStrategy
 from pipeline_core.domain.fix_report import FixKind, FixReport
 from pipeline_core.domain.fix_session import FixSession
 from pipeline_core.domain.models import FnRecord, ImplBlock
+from pipeline_core.domain.reconstruction import SpliceOutcome
+from pipeline_core.domain.rust_fn_headers import locate_all_fns
 
 
 class _Model:
@@ -33,6 +44,7 @@ class _Model:
 class _Splicer:
     def __init__(self) -> None:
         self.body_spliced: list[str] = []
+        self.scoped_sigs: list[str] = []
 
     def locate_fn(self, text: str, name: str):
         return (f"fn {name}()", 0, 0, len(text))
@@ -47,8 +59,16 @@ class _Splicer:
         return True, "ok", 1
 
     def splice_body(self, file_path, name, body, *, allow_nonstub=False):
+        raise AssertionError(
+            "the one-shot fill must write through the record locator: the "
+            "bare-name path refuses ambiguous_name on any file holding two fns "
+            "of a name")
+
+    def splice_body_scoped(self, file_path, name, container, sig_text, new_body,
+                           *, allow_nonstub=False):
         self.body_spliced.append(name)
-        return True, "ok", len(body)
+        self.scoped_sigs.append(sig_text)
+        return True, "ok", len(new_body)
 
 
 class _Prompts:
@@ -124,6 +144,74 @@ def test_per_impl_one_shot_fills_tdd_frontier(tmp_path: Path) -> None:
     rep = PerImplFix(_session(tmp_path), d).attempt("test failed", [])
     assert splicer.body_spliced == ["foo"]
     assert rep.summary == "tdd_stub changed=1"
+
+
+def test_one_shot_fill_lands_a_body_when_the_file_holds_two_fns_of_that_name(
+        tmp_path: Path) -> None:
+    """End-to-end against the REAL scoped splice.
+
+    Against the pre-fix code this fails the way the 2026-08-05 run did:
+    `[fix loop/behavior] splice refused src/error.rs::from: ambiguous_name`,
+    a full model call spent and its answer discarded. The body must reach disk
+    in the fn the prompt was built from, and the same-named sibling must be
+    untouched.
+    """
+    src = tmp_path / "src"
+    src.mkdir()
+    f = src / "error.rs"
+    f.write_text(
+        "impl From<E> for Error {\n"
+        "    fn from(error: E) -> Self { unimplemented!() }\n"
+        "}\n"
+        "impl From<Error> for Box<dyn StdError> {\n"
+        "    fn from(error: Error) -> Self { second() }\n"
+        "}\n"
+    )
+    text = f.read_text()
+    first = text.index("unimplemented!()")
+    recs = [
+        {"file": "error.rs", "fn_name": "from",
+         "container": "impl From < E > for Error",
+         "sig_text": "fn from(error: E) -> Self",
+         "sig_byte_start": text.index("    fn from"),
+         "body_byte_start": first, "body_byte_end": first + len("unimplemented!()"),
+         "body_text": "unimplemented!()", "has_unimplemented_body": True},
+        {"file": "error.rs", "fn_name": "from",
+         "container": "impl From < Error > for Box < dyn StdError >",
+         "sig_text": "fn from(error: Error) -> Self",
+         "sig_byte_start": text.rindex("    fn from"),
+         "body_byte_start": text.index("second()"),
+         "body_byte_end": text.index("second()") + len("second()"),
+         "body_text": "second()", "has_unimplemented_body": False},
+    ]
+    mut = MutatorAdapter(
+        locate_fn_by_record_fn=partial(locate_fn_by_record, lambda _sd: recs),
+        locate_fn_fn=lambda t, n: (locate_all_fns(t, n) or [None])[0],
+        splice_fn_body_at_fn=splice_fn_body_at,
+        splice_fn_body_fn=splice_fn_body,
+        replace_fn_signature_fn=lambda *a: False,
+        extract_signature_block_fn=lambda r: None,
+        lock_for_fn=lambda p: Lock(),
+    )
+    splicer = FixSplicerAdapter(
+        locate_fn_fn=mut.locate_fn, is_pub_fn_fn=lambda t, n: False,
+        render_impl_block_fn=lambda t, m: "BLK",
+        splice_fn_fn=lambda *a, **k: SpliceOutcome(False, "unused", 0),
+        splice_body_fn=mut.splice_fn_body,
+        splice_body_scoped_fn=mut.splice_body_scoped,
+        restore_signature_fn=lambda *a: False,
+    )
+    changed = one_shot_fill(
+        {("src/error.rs", "from"): {"test_boxed_str"}}, kind="behavior",
+        behavior_srcs={}, session=_session(tmp_path),
+        model=_Model("<FN name=\"from\" block=\"any\">\n{ first() }\n</FN>"),
+        splicer=splicer, log=lambda _m: None, thinking_directive="T",
+        err_cap=500, src_snip_cap=4000, output="test_boxed_str FAILED")
+    out = f.read_text()
+    assert changed == ["src/error.rs::from"]
+    assert "first()" in out, "the model's body never reached disk"
+    assert "unimplemented!()" not in out, "the stub was not the body replaced"
+    assert "second()" in out, "the same-named sibling was overwritten"
 
 
 # --- splice-unit escalation on identical-error stall (s117 #3) ---------------

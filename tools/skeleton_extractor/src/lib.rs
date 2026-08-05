@@ -50,6 +50,42 @@ mod tests {
     }
 
     #[test]
+    fn visibility_is_the_most_public_declaration_of_a_name() {
+        // Type records are keyed by bare name tree-wide, so a crate that
+        // declares one twice gets ONE record. anyhow declares `Chain` as `pub`
+        // in lib.rs and `pub(crate)` in chain.rs; whichever file the walk
+        // reached last used to decide, and on the reconstructed tree that was
+        // chain.rs — so the API-conformance check reported `struct: Chain`
+        // missing from a tree that declares it publicly.
+        let mut types = std::collections::BTreeMap::new();
+        let a: syn::File = parse_file("pub(crate) struct Chain<'a> { x: u8 }").unwrap();
+        let b: syn::File = parse_file("pub struct Chain<'a> { x: u8 }").unwrap();
+        collect_types_and_methods(&a.items, "chain.rs", &mut types);
+        collect_types_and_methods(&b.items, "lib.rs", &mut types);
+        let rec = types.get("Chain").unwrap();
+        assert!(rec.is_exactly_pub, "a pub declaration must not be hidden");
+
+        // …and the other order must give the same answer.
+        let mut types2 = std::collections::BTreeMap::new();
+        collect_types_and_methods(&b.items, "lib.rs", &mut types2);
+        collect_types_and_methods(&a.items, "chain.rs", &mut types2);
+        assert!(types2.get("Chain").unwrap().is_exactly_pub, "walk order decided");
+    }
+
+    #[test]
+    fn a_traits_visibility_is_also_raised_across_declarations() {
+        // `StdError`: a private trait in lib.rs, a `pub trait` in context.rs.
+        // The trait branch keeps the FIRST record, so this is the mirror image
+        // of the struct case and needs the same rule.
+        let priv_t: syn::File = parse_file("trait StdError { }").unwrap();
+        let pub_t: syn::File = parse_file("pub trait StdError { }").unwrap();
+        let mut types = std::collections::BTreeMap::new();
+        collect_types_and_methods(&priv_t.items, "lib.rs", &mut types);
+        collect_types_and_methods(&pub_t.items, "context.rs", &mut types);
+        assert!(types.get("StdError").unwrap().is_exactly_pub);
+    }
+
+    #[test]
     fn type_definition_locatable_in_skeleton_rendering() {
         // The t1.5 layout splice locates a frozen definition inside a skeleton
         // file (prettyplease output) by whitespace-tolerant text match. A

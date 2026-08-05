@@ -21,6 +21,7 @@ from typing import Any
 
 from pipeline_core.domain.cargo_toml import cargo_default_features
 from pipeline_core.domain.cfg import CfgSet
+from pipeline_core.domain.doc_tests import count_doc_tests
 from pipeline_core.domain.generation import gen_tests_decl_blocks
 from pipeline_core.domain.rust_scan import mod_decls
 from pipeline_core.domain.test_count import (
@@ -266,7 +267,15 @@ def active_test_inventory_for_cluster(
             continue
         _add(sib.relative_to(project_dir).as_posix(), stext)
 
-    # 3. src/**/*.rs (excluding gen_tests siblings) — inline test mods.
+    # 3. src/**/*.rs (excluding gen_tests siblings) — inline test mods, and the
+    #    DOC tests, which have no `#[test]` fn and therefore no record. cargo
+    #    runs them as their own binary and counts them in the same total the
+    #    strict verdict compares against: on the reconstructed anyhow tree they
+    #    are 25 of the 149 `stable` announces, and their absence here is the
+    #    whole of the "expected undershoots by exactly 25 per cluster" gap.
+    #    Counted, never NAMED — rustdoc identifies them as `src/lib.rs - Chain
+    #    (line 284)`, which is not a `#[test]` name and reconciles against
+    #    nothing. `names` is documented as a possible subset of the count.
     for srf in src_dir.rglob("*.rs"):
         if deps.is_gen_tests_file(srf.name):
             continue
@@ -278,4 +287,5 @@ def active_test_inventory_for_cluster(
         except Exception:
             continue
         _add(srf.relative_to(project_dir).as_posix(), stext)
+        total += count_doc_tests(stext)
     return total, frozenset(names)

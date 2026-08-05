@@ -39,6 +39,29 @@ def fn_container_index(
     return idx
 
 
+def fn_occurrence_index(
+    src_dir: Path, *, enumerate_fns: EnumerateFns,
+) -> dict[FnLocator, tuple[tuple[str, str], ...]]:
+    """(file_rel, fn_name) → every occurrence's ``(container, sig_text)``, in
+    record order.
+
+    :func:`fn_container_index` keeps the FIRST record per name, which is right
+    for a caller that has already resolved which definition it means. A repair
+    frontier has not: its key is (file, bare name), so on this crate
+    `kind.rs::new` stands for `Adhoc::new`, `Trait::new` AND `Boxed::new`, and a
+    loop that can only ever address the first re-authored `Adhoc::new` three
+    times across two runs while `Boxed::new` — on the path of the failing test —
+    was unreachable. This index is what lets a caller enumerate the definitions
+    a key stands for and target each one by container.
+    """
+    idx: dict[FnLocator, list[tuple[str, str]]] = {}
+    for rec in (enumerate_fns(src_dir) or []):
+        key = FnLocator(rec.get("file", ""), rec.get("fn_name", ""))
+        idx.setdefault(key, []).append(
+            (rec.get("container", ""), rec.get("sig_text", "")))
+    return {k: tuple(v) for k, v in idx.items()}
+
+
 def collect_impl_blocks(src_dir: Path, *, enumerate_fns: EnumerateFns) -> list[ImplBlock] | None:
     """Return one :class:`ImplBlock` per (file, header_text) pair, or None when
     the extractor binary isn't available."""

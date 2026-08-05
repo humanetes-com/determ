@@ -396,6 +396,9 @@ from pipeline_core.application.reconstruct.impl_blocks import (
 from pipeline_core.application.reconstruct.impl_blocks import (
     fn_container_index as _fn_container_index_impl,
 )
+from pipeline_core.application.reconstruct.impl_blocks import (
+    fn_occurrence_index as _fn_occurrence_index_impl,
+)
 from pipeline_core.application.reconstruct.impl_fill import ImplFillDeps
 from pipeline_core.application.reconstruct.impl_fill import (
     fill_impl_blocks as _fill_impl_blocks,
@@ -649,6 +652,7 @@ from pipeline_core.domain.refine import (
 )
 from pipeline_core.domain.run_state import RunState
 from pipeline_core.domain.rust_fn_headers import is_pub_fn as _domain_is_pub_fn
+from pipeline_core.domain.rust_fn_headers import locate_all_fns as _domain_locate_all_fns
 from pipeline_core.domain.rust_fn_headers import locate_fn as _domain_locate_fn
 from pipeline_core.domain.rust_macros import (
     proc_macro_fallback_requirements as _pm_fallback_reqs,
@@ -1685,7 +1689,8 @@ def build_app(
         implicated_fns_from_check_fn=lambda diags, out, tsd: (
             _implicated_fns_from_check_impl(
                 diags, out, tsd, enumerate_fns=enumerate_fns)),
-        attribute_failures_fn=lambda to, sd, rf, trm, cn: _via("attribute_failures")(to, sd, rf, trm, cn),
+        attribute_failures_fn=lambda to, sd, rf, trm, cn, **kw: _via(
+            "attribute_failures")(to, sd, rf, trm, cn, **kw),
         filter_test_targets_fn=filter_test_targets,
     )
     cluster_merger = ClusterMerger(extractor_bin=cfg.skeleton_extractor_bin, log=ports.log)
@@ -2342,6 +2347,7 @@ def build_app(
             restore_frozen_signature=restore_frozen_signature,
             run_cargo_check_diag=helpers.run_cargo_check_diag,
             splice_fn_body=splice_fn_body,
+            splice_body_scoped=fill_roles.mut.splice_body_scoped,
             splice_fn_with_where=splice_fn_with_where,
             strip_ansi=_strip_ansi,
             tag_block=_tag_block,
@@ -2442,18 +2448,29 @@ def build_app(
                 build_test_reverse_map=build_test_reverse_map,
                 frontier_from_diags=_via("frontier_from_diags"),
                 filter_test_targets=filter_test_targets,
+                expand_frontier_by_calls=functools.partial(
+                    _attribution.expand_frontier_by_calls, _attr_deps),
             ),
             enumerator=Task3Enumerate(
                 cluster_filter_type_methods=fill_roles.ws.cluster_filter_type_methods,
                 enumerate_types=enumerate_types,
                 fn_container_index=fill_roles.ws.fn_container_index,
+                fn_occurrence_index=functools.partial(
+                    _fn_occurrence_index_impl, enumerate_fns=enumerate_fns),
+                collect_crate_macros=fill_roles.prompt.collect_crate_macros,
+                compute_cluster_macro_invariants=(
+                    fill_roles.prompt.compute_cluster_macro_invariants),
+                detect_crate_no_std_invariant=(
+                    fill_roles.prompt.detect_crate_no_std_invariant),
             ),
             retry_fix=RetryDeps(
                 locate_fn=fill_roles.mut.locate_fn,
+                locate_all_fns=_domain_locate_all_fns,
                 gather_fix_context=fill_roles.prompt.gather,
                 build_per_fn_fix_prompt=build_per_fn_fix_prompt,
                 ask_per_fn_body=fill_roles.prompt.ask_per_fn_body,
                 splice_fn_body=fill_roles.mut.splice_fn_body,
+                splice_body_scoped=fill_roles.mut.splice_body_scoped,
                 find_tests_for_fn=fill_roles.tests.find_tests_for_fn,
                 focus_cargo_errors=lambda out, rel_f: fill_roles.cargo.focus_errors(
                     out, rel_f, max_chars=cfg.fix_err_cap),

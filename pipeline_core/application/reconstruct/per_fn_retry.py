@@ -9,16 +9,21 @@ harness-testable without monkeypatching module globals.
 """
 from __future__ import annotations
 
+import json
 import os
 import shlex
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 if TYPE_CHECKING:
     from pipeline_core.domain.models import FnFixContext
 
+from pipeline_core.application.reconstruct.attribution import (
+    not_body_repairable_tests,
+)
 from pipeline_core.application.reconstruct.import_repair import (
     repair_missing_imports,
 )
@@ -32,10 +37,15 @@ from pipeline_core.domain.attribution import AttributionResult
 from pipeline_core.domain.models import FnLocator, Frontier
 from pipeline_core.domain.reconstruction import SpliceOutcome
 from pipeline_core.domain.retry_outcome import (
+    BodyVerdict,
+    ClusterReading,
     RetryMode,
     RetryVerdict,
+    TreeReading,
+    body_verdict,
     build_verdict,
     failing_test_verdict,
+    failure_metric,
 )
 from pipeline_core.domain.source_snapshot import SourceSnapshot
 from pipeline_core.domain.std_api_sigs import std_api_def
@@ -60,19 +70,84 @@ class RetryContext:
     type_recs: list[Any]
     fr_path: Path | None
     tests_dir_files: list[Path]
+    # Every definition a frontier key stands for: (container, sig_text) per
+    # occurrence, in record order. A key is (file, bare name), and this crate
+    # holds three `kind.rs::new` and four `error.rs::from` — without this the
+    # loop can only ever address the first of each.
+    occurrences: dict[FnLocator, tuple[tuple[str, str], ...]] = field(
+        default_factory=dict)
+    # What the cluster NAME in the prompt header actually means: which cfg
+    # atoms are on, and which arm of a multi-variant macro is live — for every
+    # cluster that compiles this tree, not just the one being repaired.
+    invariants_section: str = ""
+    macros_section: str = ""
+    # What the per-cluster loops already learned about a fn before giving up on
+    # it, keyed `file::fn`. A cluster that plateaus with failing tests is
+    # checkpointed and never re-opened, so this is the only channel by which the
+    # attempts it spent reach the loop that inherits the work.
+    prior_effort: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
 class RetryDeps:
     """Collaborators injected by the composition root (pipeline.py)."""
     locate_fn: Callable[[str, str], tuple[Any, ...] | None]
+    # Every occurrence of a name in a file, in source order — what makes a
+    # non-first definition addressable (`kind.rs` holds three `new`).
+    locate_all_fns: Callable[[str, str], list[tuple[str, int, int, int]]] | None
     gather_fix_context: Callable[..., FnFixContext]
     build_per_fn_fix_prompt: Callable[..., str]
     ask_per_fn_body: Callable[..., tuple[str | None, str]]
     splice_fn_body: Callable[..., SpliceOutcome]
+    # The collision-safe write. `splice_fn_body` locates by bare name and
+    # refuses `ambiguous_name` the moment a file holds two fns of that name,
+    # which on this crate is the common case, not the corner: `error.rs::from`
+    # occurs 4x, `kind.rs::new` 3x, `context.rs::source` / `context.rs::context`
+    # / `ptr.rs::new` 2x each. The scoped entry point re-resolves the target
+    # through the syn record using the container and signature this module
+    # already holds, so the body lands at the exact fn the prompt was built
+    # from instead of being thrown away.
+    splice_body_scoped: Callable[..., SpliceOutcome]
     find_tests_for_fn: Callable[..., list[Any]]
     focus_cargo_errors: Callable[[str, str], str]
     is_gen_tests_file: Callable[[str], bool]
+    log: Callable[[str], None]
+
+
+class RepairTarget(NamedTuple):
+    """One definition to re-author: a frontier key plus WHICH occurrence of that
+    name in that file. `occurrence=0` is the first, which is all a (file, name)
+    key could ever express before."""
+    file: str
+    fn: str
+    occurrence: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ClusterProbe:
+    """One cluster's test invocation. The retry measures the tree through every
+    probe, not only the cluster whose failure opened it: the merged tree is one
+    artifact that both clusters compile, and ten bodies were rewritten in files
+    both build on 2026-08-05 while only `nightly` was ever re-run."""
+    name: str
+    command: str
+    env: dict[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class BodyGate:
+    """The per-body accept gate.
+
+    One retry iteration used to be: attribute, re-ask the model for all N
+    bodies, splice them all, then run `cargo test` ONCE. On 2026-08-05 that
+    spent 17 model calls over 42 minutes, one of the bodies broke the build,
+    and the whole batch was reverted — including the bodies that were right.
+    The feedback costs ~1 s per cluster against a ~150 s model call, so it is
+    bought per BODY here, and a body that regresses any cluster is reverted on
+    its own while the rest of the frontier proceeds.
+    """
+    read_tree: Callable[[], TreeReading]
+    baseline: TreeReading
     log: Callable[[str], None]
 
 
@@ -93,6 +168,10 @@ class Task3Attribution:
     build_test_reverse_map: Callable[..., dict[str, set[FnLocator]]]
     frontier_from_diags: Callable[..., Frontier]
     filter_test_targets: Callable[..., Frontier]
+    # Widen an attributed frontier along callee edges, with each key's hop
+    # distance from the seed. Every other path here stops at fns the failing
+    # test NAMES; this is what can reach a defect one call deeper.
+    expand_frontier_by_calls: Callable[..., tuple[Frontier, dict[FnLocator, int]]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +180,13 @@ class Task3Enumerate:
     cluster_filter_type_methods: Callable[..., list[Any]]
     enumerate_types: Callable[..., list[Any] | None]
     fn_container_index: Callable[..., dict[FnLocator, str]]
+    fn_occurrence_index: Callable[
+        ..., dict[FnLocator, tuple[tuple[str, str], ...]]]
+    # The crate-level context the OTHER fill routes have always rendered and
+    # this one passed as empty strings.
+    collect_crate_macros: Callable[[Path], str]
+    compute_cluster_macro_invariants: Callable[[Path, Any], str]
+    detect_crate_no_std_invariant: Callable[[Path], str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +209,7 @@ def run_task3_inline_retry(
     initial_test_output: str,
     cluster: Any,
     *,
+    all_clusters: list[Any] | None = None,
     max_stalls: int | None = None,
     hard_cap: int | None = None,
     deps: Task3RetryDeps,
@@ -166,6 +253,37 @@ def run_task3_inline_retry(
             e.update(cluster.env_extra)
         return e
 
+    def _probe(c: Any) -> ClusterProbe:
+        parts = ["cargo"]
+        if c.toolchain:
+            parts.append(f"+{c.toolchain}")
+        parts += ["test", "--no-fail-fast"]
+        env = deps.cargo.env()
+        if c.env_extra:
+            env.update(c.env_extra)
+        return ClusterProbe(name=c.name, command=shlex.join(parts), env=env)
+
+    # Every cluster that compiles the files this pass may touch. The primary
+    # stays the repair signal (its failures aim the frontier); the others are
+    # here so the accept gate can see a body that fixes one cfg world and
+    # breaks another. Falls back to the primary alone when the caller has no
+    # cluster list — the old single-cluster behaviour, explicitly.
+    _probes: tuple[ClusterProbe, ...] = tuple(
+        _probe(c) for c in (all_clusters or ([cluster] if cluster is not None else []))
+    )
+
+    def _read_tree() -> TreeReading:
+        """One sweep of every cluster: ran-state and failing-test count each."""
+        readings: list[ClusterReading] = []
+        for p in _probes:
+            _rc, out = deps.cargo.run(p.command, project_dir, p.env,
+                                      timeout=deps.test_timeout)
+            p_n, f_n, _ign = parse_test_counts(out)
+            readings.append(ClusterReading(
+                cluster=p.name, ran=(p_n + f_n) > 0,
+                failures=len(parse_failed_tests(out))))
+        return TreeReading(per_cluster=tuple(readings))
+
     # Two modes. TEST mode (some test FAILED) attributes via the test
     # reverse-map/classifier. BUILD mode (zero FAILED lines because the tree did
     # not COMPILE) attributes via structured cargo diagnostics and fixes the fns
@@ -201,6 +319,39 @@ def run_task3_inline_retry(
     _retry_type_recs = deps.enumerator.cluster_filter_type_methods(
         deps.enumerator.enumerate_types(src_root) or [], cluster)
     _retry_containers = deps.enumerator.fn_container_index(src_root)
+    _retry_occurrences = deps.enumerator.fn_occurrence_index(src_root)
+
+    # Say what the cluster NAME means. The prompt has always opened
+    # `Crate: … | Cluster: nightly | File: … | Fn: …` and then carried no
+    # CLUSTER_INVARIANTS block at all, so the model was told a word and left to
+    # guess which cfg atoms it implies; a per-impl trace on this crate reasoned
+    # "from the CLUSTER_INVARIANTS, `error_generic_member_access` is active"
+    # while a route without the section reasoned "I assume it does".
+    #
+    # And it is not one cfg world here. The tree task3 repairs is ONE artifact
+    # that every baked cluster compiles, which is why task3 runs it twice; a
+    # body that satisfies the cluster whose failure opened the retry and breaks
+    # the other is the regression the accept gate exists to refuse. So every
+    # cluster's invariants are rendered, each under its own name, rather than
+    # picking one and calling it "the" cluster.
+    _inv_parts: list[str] = []
+    _no_std = deps.enumerator.detect_crate_no_std_invariant(project_dir)
+    if _no_std:
+        _inv_parts.append(_no_std)
+    _ctx_clusters = all_clusters or ([cluster] if cluster is not None else [])
+    if len(_ctx_clusters) > 1:
+        _inv_parts.append(
+            "This file is compiled by EVERY cluster below. A body must hold "
+            "under all of them: "
+            + ", ".join(sorted(c.name for c in _ctx_clusters)) + ".")
+    for c in sorted(_ctx_clusters, key=lambda c: c.name):
+        _macro_inv = deps.enumerator.compute_cluster_macro_invariants(
+            src_root, c)
+        if _macro_inv:
+            _inv_parts.append(f"[cluster: {c.name}]\n{_macro_inv}")
+    _retry_invariants = "\n\n".join(_inv_parts)
+    _retry_macros = deps.enumerator.collect_crate_macros(src_root)
+    _retry_prior = _prior_effort_notes(project_dir)
     # Model-notes recall + relevant tests: resolve the module FR doc when
     # unambiguous (single-module case: exactly one functional_requirements_*.md;
     # multi-module would need a per-file module map — left as today's None).
@@ -216,13 +367,21 @@ def run_task3_inline_retry(
         type_recs=_retry_type_recs,
         fr_path=_retry_fr_path,
         tests_dir_files=_retry_tests_dir_files,
+        occurrences=_retry_occurrences,
+        invariants_section=_retry_invariants,
+        macros_section=_retry_macros,
+        prior_effort=_retry_prior,
     )
 
     def _run_check_test() -> tuple[bool, str, int]:
         rc, out = deps.cargo.run(test_command, project_dir, _env(),
                                  timeout=deps.test_timeout)
-        f = parse_failed_tests(out)
-        return rc == 0, out, len(f)
+        # Ran-state first. A tree that compiles nothing prints no `FAILED`
+        # lines, so a raw failure count reads 0 — the best score possible — and
+        # the loop's ratchet records a floor no working tree can beat.
+        p_n, f_n, _ign = parse_test_counts(out)
+        return rc == 0, out, failure_metric(
+            ran=(p_n + f_n) > 0, failures=len(parse_failed_tests(out)))
 
     def _run_check_build() -> tuple[bool, str, int]:
         rc, rendered, diags = deps.cargo.check_diag(
@@ -237,30 +396,105 @@ def run_task3_inline_retry(
         # exhaustion; now it has more candidates to try.
         fails_now = sorted(parse_failed_tests(output))
         if not fails_now:
-            return {"abort": True, "reason": "no_failed_tests"}
+            # Distinguish the two silences: every test passing, versus a tree
+            # that produced no verdicts at all. Both print zero FAILED lines and
+            # the second one used to be logged as `no_failed_tests`, which reads
+            # like success in the log of a run that had just broken the build.
+            _p, _f, _i = parse_test_counts(output)
+            return {"abort": True,
+                    "reason": "no_failed_tests" if (_p + _f) > 0
+                    else "tree_produced_no_test_verdicts"}
+        tests_dir_files = list((project_dir / "tests").rglob("*.rs"))
         try:
-            tests_dir_files = list((project_dir / "tests").rglob("*.rs"))
             test_reverse_map = deps.attribution.build_test_reverse_map(
                 tests_dir_files, project_dir)
         except Exception:
             test_reverse_map = {}
+        # The failing tests' OWN sources. Without these the deterministic
+        # behavioral path is skipped and attribution falls through to a token
+        # match over the whole test FILE: on 2026-08-05 that gave `test_boxed_str`
+        # a frontier of 16 (file, fn) pairs from 6 tokens — five of them `new`
+        # fns in unrelated files — while missing `construct_from_boxed`, the fn
+        # that actually holds the defect.
+        _texts: dict[str, str] = {}
+        for tp in tests_dir_files:
+            try:
+                _texts[tp.relative_to(project_dir).as_posix()] = tp.read_text(
+                    encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+        _unrepairable = not_body_repairable_tests(tests_dir_files)
+        _blocked = sorted(t for t in fails_now
+                          if t.split("::")[-1] in _unrepairable)
+        if _blocked:
+            deps.log(f"  [task3-retry] not body-repairable, excluded from the "
+                     f"frontier: {', '.join(_blocked)} (compile-fail harness — "
+                     "its assertion is about rustc's own output).")
         frontier = deps.attribution.filter_test_targets(
             deps.attribution.attribute_failures(
                 output, project_dir,
                 recently_filled=[],  # task3 has no per-cluster fill history
                 test_reverse_map=test_reverse_map,
                 cluster_name=_cluster_label,
+                test_texts=_texts,
+                unrepairable_tests=_unrepairable,
             ).frontier, project_dir)
-        refs: list[FnLocator] = list(frontier.keys())
+        # Then follow callee edges, so a defect the failing test does not name
+        # is reachable at all. Three hops is what this crate needs and where it
+        # saturates: replayed against the merged tree and the 2026-08-05 output,
+        # `test_boxed_str` seeds 3 fns, and `error.rs::construct_from_boxed` —
+        # the fn that holds the defect — enters at hop 3 in a frontier of 37
+        # (hop 4 adds 2 more and finds nothing new). Off with
+        # TASK3_RETRY_CALL_HOPS=0.
+        _hops_max = int(os.getenv("TASK3_RETRY_CALL_HOPS", "3"))
+        _cap = int(os.getenv("TASK3_RETRY_FRONTIER_CAP", "40"))
+        hops: dict[FnLocator, int] = dict.fromkeys(frontier, 0)
+        if _hops_max > 0 and frontier:
+            widened, hops = deps.attribution.expand_frontier_by_calls(
+                frontier, project_dir, max_hops=_hops_max, cap=_cap)
+            widened = deps.attribution.filter_test_targets(widened, project_dir)
+            if len(widened) > len(frontier):
+                deps.log(f"  [task3-retry] frontier {len(frontier)} → "
+                         f"{len(widened)} fn(s) over {_hops_max} call hop(s).")
+            frontier = widened
+        # Nearest first, then most-implicated: the gate can stop the frontier
+        # the moment every cluster passes, so the order decides what a success
+        # costs. Ties break on the name to keep the order reproducible.
+        keys: list[FnLocator] = sorted(
+            frontier.keys(),
+            key=lambda k: (hops.get(k, 0), -len(frontier.get(k) or ()), k[0], k[1]))
+        # One target per DEFINITION, not per name. First occurrences first —
+        # they are what every previous run could address, so the cheap,
+        # already-proven candidates are still attempted before the rest.
+        refs: list[RepairTarget] = [RepairTarget(f, fn, 0) for f, fn in keys]
+        _extra: list[RepairTarget] = []
+        for f, fn in keys:
+            _src_rel = f[4:] if f.startswith("src/") else f
+            n_occ = len(_retry_occurrences.get(FnLocator(_src_rel, fn), ()))
+            _extra += [RepairTarget(f, fn, i) for i in range(1, n_occ)]
+        if _extra:
+            deps.log(f"  [task3-retry] {len(_extra)} further definition(s) of "
+                     f"{len({(t.file, t.fn) for t in _extra})} same-named fn(s) "
+                     "are addressable this pass.")
+        refs += _extra
         if not refs:
             return {"abort": True, "reason": "no_actionable_refs"}
-        fixed_count = apply_per_fn_fixes(refs, output, _retry_ctx, deps.retry_fix)
+        fixed_count = apply_per_fn_fixes(refs, output, _retry_ctx, deps.retry_fix,
+                                         gate=_body_gate())
         return {
             "summary": f"fixed_{fixed_count}/{len(refs)}",
             "fns_touched": refs,
             "abort": fixed_count == 0,
             "reason": "no_fns_spliced" if fixed_count == 0 else "",
         }
+
+    def _body_gate() -> BodyGate | None:
+        """The accept gate for one frontier pass, or None when there is nothing
+        to measure through (no cluster was threaded in)."""
+        if not _probes:
+            return None
+        return BodyGate(read_tree=_read_tree, baseline=_read_tree(),
+                        log=deps.log)
 
     def _do_fix_build(output: str, history: list[dict[str, Any]]) -> dict[str, Any]:
         _, _, diags = deps.cargo.check_diag(
@@ -353,36 +587,100 @@ def run_task3_inline_retry(
     return False, last_out
 
 
+class BodyDraft(NamedTuple):
+    """A model answer for one definition, not yet on disk.
+
+    Generation is the expensive half (~2.5 min per call, measured over 17 calls
+    on 2026-08-05) and it touches nothing; the splice and its accept gate are
+    cheap and must stay serial, because a body's verdict is only meaningful
+    against a tree with the previous body already in it. Splitting them is what
+    lets the calls overlap without letting the measurements overlap.
+    """
+    file: str
+    fn: str
+    container: str
+    sig_text: str
+    body: str
+
+
+def splice_draft(draft: BodyDraft, ctx: RetryContext, deps: RetryDeps) -> bool:
+    """Write a generated body through the container-scoped splice."""
+    fp = ctx.project_dir / draft.file
+    splice_out = deps.splice_body_scoped(fp, draft.fn, draft.container,
+                                         draft.sig_text, draft.body,
+                                         allow_nonstub=True)
+    if splice_out.ok:
+        deps.log(f"  [task3-retry] re-spliced {draft.file}::{draft.fn}.")
+        return True
+    deps.log(f"  [task3-retry] splice refused for {draft.file}::{draft.fn}: "
+             f"{splice_out.reason}.")
+    return False
+
+
 def fix_one_ref(
     rel_f: str, fn: str, output: str, ctx: RetryContext, deps: RetryDeps,
+    *, occurrence: int = 0,
 ) -> bool:
     """Re-ask the model for one (file, fn) body and splice it; True if spliced.
+
+    `occurrence` selects WHICH definition of that name in that file — 0 is the
+    first, which is what every caller meant before a frontier key could stand
+    for more than one.
 
     Frozen tests/gen_tests files: return False (test oracle is immutable).
     Benign no-ops (missing file, fn not located, empty model body): False.
     Transport/model/splice failures: RAISE — the caller isolates per-fn (B2).
     """
+    draft = generate_one_body(rel_f, fn, output, ctx, deps,
+                              occurrence=occurrence)
+    return False if draft is None else splice_draft(draft, ctx, deps)
+
+
+def generate_one_body(
+    rel_f: str, fn: str, output: str, ctx: RetryContext, deps: RetryDeps,
+    *, occurrence: int = 0,
+) -> BodyDraft | None:
+    """Build the prompt for one definition and ask the model. Writes nothing —
+    split from the splice so the calls can overlap while the writes stay
+    serial."""
     if rel_f.startswith("tests/") or deps.is_gen_tests_file(Path(rel_f).name):
-        return False
+        return None
     fp = ctx.project_dir / rel_f
     if not fp.exists():
-        return False
+        return None
     try:
         cur_text = fp.read_text(encoding="utf-8")
     except Exception:
-        return False
-    sloc = deps.locate_fn(cur_text, fn)
-    if sloc is None:
-        return False
-    sig_t = sloc[0]
-    cur_body = cur_text[sloc[2]:sloc[3]]
+        return None
     err_excerpt = deps.focus_cargo_errors(output, rel_f)
     _src_rel = rel_f[4:] if rel_f.startswith("src/") else rel_f
+    _occ = ctx.occurrences.get(FnLocator(_src_rel, fn), ())
+    if occurrence and occurrence < len(_occ):
+        # A non-first definition. Its container comes from the record index and
+        # its sig/body from the matching occurrence in the file, paired by
+        # SIGNATURE rather than by position so a record order and a text order
+        # that disagree cannot show the model one definition and write another.
+        container, rec_sig = _occ[occurrence]
+        located = deps.locate_all_fns(cur_text, fn) if deps.locate_all_fns else []
+        sloc = _pick_occurrence(located, rec_sig, occurrence)
+        if sloc is None:
+            return None
+    else:
+        sloc = deps.locate_fn(cur_text, fn)
+        if sloc is None:
+            return None
+        # One container for both the prompt and the splice. `locate_fn` returns
+        # the FIRST fn of this name and `fn_container_index` records the first
+        # record's container, so the two agree: the body the model is shown and
+        # the byte range it is written to are the same definition.
+        container = ctx.containers.get(FnLocator(_src_rel, fn), "")
+    sig_t = sloc[0]
+    cur_body = cur_text[sloc[2]:sloc[3]]
     fix_ctx = deps.gather_fix_context(
         file_text=cur_text, file_rel=rel_f, fn_name=fn,
         sig_text=sig_t, body_text=cur_body,
         error_excerpt=err_excerpt,
-        container=ctx.containers.get(FnLocator(_src_rel, fn), ""),
+        container=container,
         type_records=ctx.type_recs,
         fr_path=ctx.fr_path,
     )
@@ -398,7 +696,8 @@ def fix_one_ref(
         sections=PerFnFixSections(
             container=fix_ctx.container, types=fix_ctx.types_section,
             notes=fix_ctx.notes_section,
-            macros="", invariants="", retrospective_guidance="",
+            macros=ctx.macros_section, invariants=ctx.invariants_section,
+            retrospective_guidance=ctx.prior_effort.get(f"{_src_rel}::{fn}", ""),
             siblings="", crate_idioms="",
             bound_methods=fix_ctx.bound_methods_section,
             blueprint=fix_ctx.blueprint_section,
@@ -433,29 +732,169 @@ def fix_one_ref(
     new_body, _ = deps.ask_per_fn_body(prompt + _menu, fn, [], sig_text=sig_t,
                                        answer_request=_answerer)
     if not new_body:
-        return False
-    splice_out = deps.splice_fn_body(fp, fn, new_body, allow_nonstub=True)
-    if splice_out.ok:
-        deps.log(f"  [task3-retry] re-spliced {rel_f}::{fn}.")
-        return True
-    deps.log(f"  [task3-retry] splice refused for {rel_f}::{fn}: "
-             f"{splice_out.reason}.")
-    return False
+        return None
+    return BodyDraft(file=rel_f, fn=fn, container=container, sig_text=sig_t,
+                     body=new_body)
+
+
+def _prior_effort_notes(project_dir: Path) -> dict[str, str]:
+    """`file::fn` → what a per-cluster loop already tried on it and gave up.
+
+    Read from the cluster-evidence store the task2a driver writes when a cluster
+    finishes. A cluster that plateaus with failing tests is checkpointed with the
+    same marker as one that passed and is never re-opened, so its attempts,
+    reverted bodies and spent budgets stay behind at that boundary — `nightly`
+    was retired 2026-08-04 at 100/104 with four tests still failing, and the loop
+    that inherited two of them started from a bare failing-test name. This is the
+    channel that carries the fact across.
+    """
+    raw = project_dir / ".skeleton" / "_cluster_evidence.json"
+    try:
+        store = json.loads(raw.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(store, dict):
+        return {}
+    out: dict[str, str] = {}
+    for cluster, ev in store.items():
+        if not isinstance(ev, dict) or ev.get("exit") != "exhausted":
+            continue
+        failed = ", ".join(sorted(ev.get("failed") or [])[:4])
+        for ref in ev.get("exhausted_fns") or []:
+            note = (f"Cluster '{cluster}' re-authored this fn while "
+                    f"{failed or 'its tests'} were failing and could not make "
+                    "them pass — its per-fn budget for it is spent. Treat a body "
+                    "shaped like the one already here as tried: the defect may "
+                    "be in what this fn CALLS rather than in this fn.")
+            out[str(ref)] = (out.get(str(ref), "") + "\n" + note).strip()
+    return out
+
+
+def _pick_occurrence(
+    located: list[tuple[str, int, int, int]], rec_sig: str, index: int,
+) -> tuple[str, int, int, int] | None:
+    """The text occurrence matching a record's signature, or the positional one.
+
+    Signature first because the two orders are produced by different readers
+    (the syn extractor walks the AST, `locate_all_fns` scans the text) and a
+    nested definition could make them disagree. A signature that matches exactly
+    one occurrence settles it; otherwise fall back to position, which is what
+    the two readers agree on for every ordinary file.
+    """
+    if not located:
+        return None
+    if rec_sig:
+        norm = " ".join(rec_sig.split())
+        hits = [loc for loc in located if " ".join(loc[0].split()) == norm]
+        if len(hits) == 1:
+            return hits[0]
+    return located[index] if index < len(located) else None
 
 
 def apply_per_fn_fixes(
-    refs: list[FnLocator], output: str, ctx: RetryContext, deps: RetryDeps,
+    refs: list[Any], output: str, ctx: RetryContext, deps: RetryDeps,
+    *, gate: BodyGate | None = None,
 ) -> int:
     """Re-ask + splice each (file, fn). B2: one fn's exception is logged and
     skipped — never aborts the pass, never masks the other fixable frontier fns.
+
+    With a `gate`, each body is measured the moment it lands and reverted on its
+    own if it regresses any cluster, so one bad body costs one body instead of
+    the whole batch. Without one the bodies are spliced unmeasured and the
+    caller judges the batch — the pre-2026-08-05 behaviour, kept only for
+    callers that have no cluster to measure through.
     """
     fixed_count = 0
-    for rel_f, fn in refs:
+    baseline = gate.baseline if gate else None
+    # A bare (file, fn) key means the first occurrence — every caller that
+    # predates same-name targeting passes one of those.
+    targets = [RepairTarget(*r) for r in refs]
+    for _ref, _draft in _drafts_in_windows(targets, output, ctx, deps):
+        rel_f, fn, _occurrence = _ref
+        fp = ctx.project_dir / rel_f
+        before_text: str | None = None
+        if gate is not None and fp.exists():
+            try:
+                before_text = fp.read_text(encoding="utf-8")
+            except Exception:
+                before_text = None
         try:
-            if fix_one_ref(rel_f, fn, output, ctx, deps):
+            if _draft is None or not splice_draft(_draft, ctx, deps):
+                continue
+            if gate is None or baseline is None:
                 fixed_count += 1
+                continue
+            after = gate.read_tree()
+            verdict = body_verdict(before=baseline, after=after)
+            if verdict is BodyVerdict.KEEP:
+                baseline = after
+                fixed_count += 1
+                if after.ran and after.failures == 0:
+                    # Nothing left to repair — the remaining frontier entries
+                    # would each cost a model call against a passing tree.
+                    gate.log("  [task3-retry] all clusters pass — stopping the "
+                             f"frontier after {rel_f}::{fn}.")
+                    break
+                continue
+            if before_text is not None:
+                fp.write_text(before_text, encoding="utf-8")
+            gate.log(f"  [task3-retry] reverted {rel_f}::{fn}: {verdict} "
+                     f"({_reading_summary(baseline)} → {_reading_summary(after)}).")
         except Exception as e:
             deps.log(
                 f"  [task3-retry] fn {rel_f}::{fn} skipped: {type(e).__name__}: {e}"
             )
     return fixed_count
+
+
+def _drafts_in_windows(
+    targets: list[RepairTarget], output: str, ctx: RetryContext,
+    deps: RetryDeps,
+) -> Iterator[tuple[RepairTarget, BodyDraft | None]]:
+    """Yield (target, draft) with the model calls overlapped, the writes not.
+
+    The retry ran every call on one thread while the fill phases ran four-way
+    parallel against the same vLLM server — the run's own flow audit says so:
+    `C10 parallel-streams PASS 653 llm event(s), max 4 concurrent` during
+    task2c, `SKIP no concurrent llm calls observed` during the task3 retry, one
+    `tid` on every request. At ~2.5 minutes per call a 15-target frontier is 37
+    minutes sequential and roughly 10 at four.
+
+    Generation happens a WINDOW at a time rather than all at once, because the
+    accept gate can stop the frontier as soon as every cluster passes; a window
+    bounds what an early stop throws away to the calls already in flight. One
+    target's exception is its own — it yields no draft and the rest proceed.
+    """
+    width = max(1, int(os.getenv("TASK3_RETRY_PARALLELISM", "4")))
+    if width == 1 or len(targets) == 1:
+        for t in targets:
+            yield t, _draft_or_none(t, output, ctx, deps)
+        return
+    for start in range(0, len(targets), width):
+        window = targets[start:start + width]
+        with ThreadPoolExecutor(max_workers=min(width, len(window)),
+                                thread_name_prefix="task3-retry") as pool:
+            drafts = list(pool.map(
+                lambda t: _draft_or_none(t, output, ctx, deps), window))
+        yield from zip(window, drafts, strict=True)
+
+
+def _draft_or_none(
+    target: RepairTarget, output: str, ctx: RetryContext, deps: RetryDeps,
+) -> BodyDraft | None:
+    """B2 isolation for the generation half: a transport/model failure on one
+    target is logged and skipped, never aborting the pass."""
+    try:
+        return generate_one_body(target.file, target.fn, output, ctx, deps,
+                                 occurrence=target.occurrence)
+    except Exception as e:
+        deps.log(f"  [task3-retry] fn {target.file}::{target.fn} skipped: "
+                 f"{type(e).__name__}: {e}")
+        return None
+
+
+def _reading_summary(r: TreeReading) -> str:
+    """`nightly 2 fail, stable 1 fail` — or `nightly NO VERDICTS`."""
+    return ", ".join(
+        f"{c.cluster} {c.failures} fail" if c.ran else f"{c.cluster} NO VERDICTS"
+        for c in r.per_cluster) or "no clusters"

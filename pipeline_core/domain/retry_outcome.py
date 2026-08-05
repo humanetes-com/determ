@@ -14,7 +14,90 @@ escalate. This module names both:
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import StrEnum
+
+# A tree that produces no test verdicts at all is WORSE than any number of
+# failing tests, and the improvement loop's metric is lower-is-better. Scoring a
+# non-compiling tree as 0 read as the best result possible: on 2026-08-05 a
+# 14-body batch broke the build and `loop.iter` recorded
+# `metric_prev: 2, metric_new: 0, improved: true, metric_best: 0`, poisoning the
+# ratchet with a floor no real tree can beat. The sentinel puts it above every
+# real failure count instead.
+NO_VERDICTS_METRIC = 1_000_000
+
+
+def failure_metric(*, ran: bool, failures: int) -> int:
+    """The improvement loop's lower-is-better reading of one sweep."""
+    return failures if ran else NO_VERDICTS_METRIC
+
+
+@dataclass(frozen=True, slots=True)
+class ClusterReading:
+    """One cluster's verdict on one tree state. `ran` is the compile/run state —
+    a cluster whose binaries never reported has no meaningful `failures`."""
+
+    cluster: str
+    ran: bool
+    failures: int
+
+
+@dataclass(frozen=True, slots=True)
+class TreeReading:
+    """What EVERY cluster says about one tree state.
+
+    task3 runs the merged tree under each cluster's own toolchain and cfg
+    because it is one artifact serving several cfg worlds. A reading taken
+    through a single cluster cannot see a body that fixes that cluster and
+    breaks another, which is the class of regression the retry's floor guard
+    exists to refuse.
+    """
+
+    per_cluster: tuple[ClusterReading, ...] = ()
+
+    @property
+    def ran(self) -> bool:
+        """True when every cluster produced test verdicts."""
+        return bool(self.per_cluster) and all(c.ran for c in self.per_cluster)
+
+    @property
+    def failures(self) -> int:
+        return sum(c.failures for c in self.per_cluster)
+
+    def cluster(self, name: str) -> ClusterReading | None:
+        return next((c for c in self.per_cluster if c.cluster == name), None)
+
+
+class BodyVerdict(StrEnum):
+    """What to do with ONE body the moment it lands."""
+
+    KEEP = "keep"
+    REVERT_BROKE_BUILD = "broke_build"   # a cluster stopped reporting verdicts
+    REVERT_REGRESSED = "regressed"       # a cluster gained failing tests
+
+
+def body_verdict(*, before: TreeReading, after: TreeReading) -> BodyVerdict:
+    """Accept a body only if it regresses NO cluster that builds the file.
+
+    Judged per cluster rather than on the total: a body that fixes one failing
+    test in `nightly` and breaks one in `stable` nets zero and must still be
+    refused.
+
+    Both comparisons are gated on the cluster having RUN before. A cluster that
+    was not producing verdicts has no failure count worth comparing — a body
+    that gets it compiling again reports its first real failures, and reading
+    those as "regressed from 0" would revert exactly the body that fixed the
+    build.
+    """
+    for aft in after.per_cluster:
+        bef = before.cluster(aft.cluster)
+        if bef is None or not bef.ran:
+            continue
+        if not aft.ran:
+            return BodyVerdict.REVERT_BROKE_BUILD
+        if aft.failures > bef.failures:
+            return BodyVerdict.REVERT_REGRESSED
+    return BodyVerdict.KEEP
 
 
 class RetryMode(StrEnum):

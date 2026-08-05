@@ -40,6 +40,14 @@ set -u
 LOG_DIR="$1"; shift
 DEATHS="$LOG_DIR/deaths.jsonl"
 SENTINEL=/tmp/pipeline_graceful_stop
+# The other deliberate stop. `graceful_stop_pipeline` asks the pipeline to exit
+# at its next checkpoint and marks it with SENTINEL; `kill_pipeline` — the
+# documented way to stop a run so it STAYS stopped — signals instead, and used
+# to leave no mark at all. Stopping the 2026-08-05 run that way produced a death
+# row correct in every other respect (uptime_s 33230, signal TERM, heartbeat
+# removed) carrying "deliberate_stop": false, so a later session mining
+# deaths.jsonl for unexplained deaths would count the operator's own stop as one.
+OPERATOR_SENTINEL=/tmp/pipeline_operator_stop
 PIPELINE_LOG="$LOG_DIR/pipeline_anyhow.log"
 HEARTBEAT="$LOG_DIR/supervisor_heartbeat"
 HEARTBEAT_EVERY=60
@@ -132,6 +140,7 @@ fi
 # "23 % downtime" means something different if half of it was deliberate.
 _deliberate=false
 [[ -e "$SENTINEL" ]] && _deliberate=true
+[[ -e "$OPERATOR_SENTINEL" ]] && _deliberate=true
 
 # Kernel evidence, restricted to lines that appeared during this run. An OOM
 # kill names the process and its PID; nothing else in the log will.

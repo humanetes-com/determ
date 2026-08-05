@@ -1323,6 +1323,7 @@ def _task3_inline_retry(
     iteration,
     initial_test_output: str,
     cluster: "BuildCluster | None" = None,
+    all_clusters: "list[BuildCluster] | None" = None,
 ) -> tuple[bool, str]:
     """Composition-root shim -> per_fn_retry.run_task3_inline_retry (chunk H,
     deps migrated into build_app in S27). The deps' fill-role adapters +
@@ -1332,7 +1333,7 @@ def _task3_inline_retry(
     """
     return _per_fn_retry.run_task3_inline_retry(
         project_dir, test_command, iteration, initial_test_output, cluster,
-        deps=_APP.task3_retry_deps)
+        all_clusters=all_clusters, deps=_APP.task3_retry_deps)
 
 
 def _task3_legacy_single(

@@ -433,8 +433,16 @@ def one_shot_fill(
         body = blk.get("body") if blk else None
         if not body:
             continue
-        ok_s, reason_s, delta = splicer.splice_body(path, fn, body,
-                                                    allow_nonstub=True)
+        # Write through the record locator, not the bare-name path. A file that
+        # holds two fns of a name makes `splice_body` refuse `ambiguous_name`,
+        # and on this crate that is the common case: `src/error.rs::from` occurs
+        # 4x and was refused here on 2026-08-05 after a full model call, with the
+        # log blaming the splice rather than the caller. `sig_text` comes from
+        # `locate_fn` above, which returns the FIRST occurrence — the same
+        # definition the prompt's `cur_body` was cut from — so the body lands
+        # where the model was asked to change it.
+        ok_s, reason_s, delta = splicer.splice_body_scoped(
+            path, fn, "", sig_text, body, allow_nonstub=True)
         if ok_s:
             changed.append(f"{rel}::{fn}")
             log(f"  [fix loop/{kind}] spliced {rel}::{fn} ({delta:+d} bytes)")

@@ -258,6 +258,7 @@ class GenerateFixLoopDeps:
     run_cargo_check_diag: Any
     restore_frozen_signature: Any
     splice_fn_body: Any
+    splice_body_scoped: Any
     splice_fn_with_where: Any
     strip_ansi: Any
     tag_block: Any
@@ -512,6 +513,7 @@ def generate_fix_loop(
         locate_fn_fn=deps.locate_fn, is_pub_fn_fn=deps.is_pub_fn,
         render_impl_block_fn=deps.render_impl_block,
         splice_fn_fn=deps.splice_fn_with_where, splice_body_fn=deps.splice_fn_body,
+        splice_body_scoped_fn=deps.splice_body_scoped,
         restore_signature_fn=deps.restore_frozen_signature)
     _fix_prompts = FixPromptsAdapter(
         repo_spec_block_fn=lambda *, file_rel="", fn_name="", container="":

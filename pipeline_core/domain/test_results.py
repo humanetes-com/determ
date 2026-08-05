@@ -46,6 +46,32 @@ def cluster_failure_is_actionable(status: str, rc: int, fail_count: int) -> bool
     return False
 
 
+def rank_repair_candidates(
+    candidates: list[tuple[str, frozenset[str]]],
+    unrepairable: frozenset[str] = frozenset(),
+) -> list[str]:
+    """Order actionable failing clusters by how good a repair signal each is.
+
+    `candidates` is (cluster name, its failing test names). The retry adopts ONE
+    of these as its primary: its failures aim the frontier and its output is
+    what the repair reads. That choice used to fall out of iteration order,
+    which is alphabetical — so on 2026-08-05 `nightly` was picked over `stable`
+    because `"nightly" < "stable"`, and it is the cluster that carries `ui`, a
+    trybuild compile-fail test no body rewrite can satisfy. `stable` failed only
+    `test_boxed_str`.
+
+    Ordering, in words: a cluster with at least one REPAIRABLE failure beats one
+    with none, then fewer failures beats more (a smaller frontier, and the
+    cluster closest to green), then the name so the choice is reproducible.
+    """
+    def key(item: tuple[str, frozenset[str]]) -> tuple[int, int, str]:
+        name, failures = item
+        repairable = {f for f in failures if f.split("::")[-1] not in unrepairable}
+        return (0 if repairable else 1, len(failures), name)
+
+    return [name for name, _ in sorted(candidates, key=key)]
+
+
 @dataclass(frozen=True)
 class TestOutcome:
     """The result of one test-command run — a named value object replacing the
@@ -333,12 +359,14 @@ def count_passing_tests(test_output: str) -> int:
 def validate_task3_output_strict(
     pass_count: int, fail_count: int, ignored_count: int,
     expected_count: int, cluster_name: str,
+    test_output: str = "",
 ) -> tuple[str, str]:
     """strict acceptance for TASK 3 per cluster. Returns (status, reason)
     where status is 'pass' | 'fail' | 'incomplete'.
 
     Pass criteria (ALL must hold):
       - fail_count == 0
+      - no binary announced tests and then reported none (see below)
       - pass_count + ignored_count >= expected_count
         (every expected test reported a verdict, with `ignored` counting
         toward "reported")
@@ -350,13 +378,40 @@ def validate_task3_output_strict(
     to compile, or a binary panicked before reporting all tests. The
     caller treats 'incomplete' as 'fail' for control flow but logs the
     distinct reason for diagnostic value.
+
+    `test_output` arms the check that does not depend on the static
+    inventory. `expected_count` is counted against the cluster's own cfg
+    sets, and on a MERGED tree it undershoots badly — the 2026-08-05 run
+    measured `expected=104` for nightly while 129 tests actually ran, and
+    `expected=124` for stable against 149. With that much slack a crashed
+    binary could take 40 tests down and `reported < expected` would still
+    be false, so the guard that exists to catch exactly that could never
+    fire. `find_unreported_tests` compares what cargo ANNOUNCED (`running
+    N tests`, printed before the binary dies) against what it reported, in
+    the same output, four lines apart — no inventory, no oracle, and it
+    names the silent binary.
     """
     reported = pass_count + fail_count + ignored_count
+    gap = find_unreported_tests(test_output) if test_output else None
+    # Failing tests keep FAIL: they are the most directly actionable signal and
+    # the retry's TEST mode is aimed by their names. A binary that went silent
+    # in the same run is appended to the reason rather than replacing the
+    # status, so the fact is never lost and the control flow is unchanged.
+    silence = ""
+    if gap is not None and gap.missing > 0:
+        silence = (f"; {gap.missing} test(s) announced and never reported "
+                   f"(silent: {', '.join(gap.silent_binaries)})")
     if fail_count > 0:
         return ClusterStatus.FAIL, (
             f"cluster '{cluster_name}': {fail_count} failed, "
             f"{pass_count} passed, {ignored_count} ignored "
-            f"(expected {expected_count})"
+            f"(expected {expected_count}){silence}"
+        )
+    if gap is not None and gap.missing > 0:
+        return ClusterStatus.INCOMPLETE, (
+            f"cluster '{cluster_name}': {gap.announced} tests announced but "
+            f"only {gap.reported} reported — {gap.missing} produced no verdict; "
+            f"silent binaries: {', '.join(gap.silent_binaries)}"
         )
     if expected_count <= 0 and pass_count == 0:
         return ClusterStatus.INCOMPLETE, (

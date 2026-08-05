@@ -45,7 +45,7 @@ from ...application.workspace_lifecycle import (
 from ...domain.attribution import FailureFrontier, FailureKind
 from ...domain.cfg import CfgSet
 from ...domain.cluster_evidence import dominant_cluster
-from ...domain.cluster_plan import fill_order
+from ...domain.cluster_plan import fill_order, merged_view_cluster
 from ...domain.generation import (
     GenerationRequest,
     SkeletonConfig,
@@ -164,7 +164,7 @@ def _read_text(p: Path) -> str | None:
 _EVIDENCE_REL = Path(".skeleton") / "_cluster_evidence.json"
 
 
-def _load_cluster_evidence(project_dir: Path) -> dict[str, dict[str, list[str]]]:
+def _load_cluster_evidence(project_dir: Path) -> dict[str, dict[str, Any]]:
     raw = _read_text(project_dir / _EVIDENCE_REL)
     if not raw:
         return {}
@@ -176,9 +176,23 @@ def _load_cluster_evidence(project_dir: Path) -> dict[str, dict[str, list[str]]]
 
 
 def _save_cluster_evidence(project_dir: Path, cluster: str,
-                           failed: frozenset[str], ran: frozenset[str]) -> None:
+                           failed: frozenset[str], ran: frozenset[str],
+                           exhausted: bool = False,
+                           exhausted_fns: tuple[tuple[str, str], ...] = (),
+                           ) -> None:
     store = _load_cluster_evidence(project_dir)
-    store[cluster] = {"failed": sorted(failed), "ran": sorted(ran)}
+    # `exit` separates a cluster that FINISHED from one that ran out of ideas.
+    # Both are checkpointed with the same marker and neither is ever re-opened,
+    # so this file is the only place the difference can survive: `nightly` was
+    # retired 2026-08-04 at 100/104 with `test_result_with_context_err`,
+    # `test_boxed_str`, `test_root_cause` and `ui` still failing, and the loop
+    # that inherited them had no way to know it was picking up work another
+    # loop had already spent its budgets on. `exhausted_fns` is what it tried.
+    store[cluster] = {
+        "failed": sorted(failed), "ran": sorted(ran),
+        "exit": "exhausted" if exhausted else "done",
+        "exhausted_fns": sorted(f"{f}::{fn}" for f, fn in exhausted_fns),
+    }
     path = project_dir / _EVIDENCE_REL
     path.parent.mkdir(parents=True, exist_ok=True)
     with suppress(OSError):
@@ -1103,12 +1117,57 @@ class StaticSkeletonTask2Generator(Task2Generator):
             self.tel.log(f"  {tag} [layout-sync] {n}")
         if not plan:
             return
+        # The registry is CRATE-WIDE and permanent, and this step reinstalls it
+        # over the live tree on every later start. A retrigger that fired on a
+        # false cause therefore keeps costing: on 2026-08-01 two fired with
+        # `cause=DESIGN_CONFLICT` on rustc errors that came from rewritten test
+        # fixtures, their definitions survived the run, were reinstalled on the
+        # next start, broke the build, and `pre-pass-heal` reverted 41 fns —
+        # 93 passing to 31. The tree can be restored from a snapshot; the
+        # registry cannot.
+        #
+        # So the reinstall gets a build, and is judged the way a body is: kept
+        # only if it does not make a compiling tree stop compiling. A tree that
+        # was ALREADY broken is not held against it — that is the case this step
+        # exists to repair.
+        _check = self._cluster_check_cmd(cluster)
+        _env = self._cluster_env(cluster)
+        _rc_before, _, _ = self.cargo.run_check_diag(_check, filled_dir, _env, 180)
+        _before: dict[Path, str] = {}
+        for _rel in plan:
+            _fp = src / _rel
+            try:
+                _before[_fp] = _fp.read_text(encoding="utf-8")
+            except Exception:
+                continue
         written, err = apply_to_tree(plan, src)
         self.tel.log(
             f"  {tag} [layout-sync] reinstalled "
             f"{sum(len(v) for v in plan.values())} authored definition(s) into "
             f"{written} live file(s)" + (f"; ERROR: {err}" if err else "")
             + " — the tree was building a layout the store had superseded.")
+        if _rc_before != 0:
+            return
+        _rc_after, _out_after, _ = self.cargo.run_check_diag(
+            _check, filled_dir, _env, 180)
+        if _rc_after == 0:
+            return
+        for _fp, _text in _before.items():
+            try:
+                _fp.write_text(_text, encoding="utf-8")
+            except Exception:
+                continue
+        self.tel.log(
+            f"  {tag} [layout-sync] REVERTED: the reinstalled definition(s) "
+            "stopped a compiling tree from compiling. The registry holds a "
+            "layout this cluster's tree cannot build — first errors: "
+            + "; ".join(line for line in _out_after.splitlines()
+                        if "error" in line)[:300])
+        self.tel.emit("phase_c.layout_sync.reverted", data={
+            "cluster": getattr(cluster, "name", ""),
+            "files": sorted(str(p.name) for p in _before),
+            "definitions": sum(len(v) for v in plan.values()),
+        })
 
     def _ensure_blueprint(self, project_dir: Path, module: str,
                           default_cluster: Any, all_test_pairs: list[tuple[str, str]],
@@ -1297,8 +1356,20 @@ class StaticSkeletonTask2Generator(Task2Generator):
                 cluster_summaries.append(_summary)
                 _pc = _summary.get("phase_c")
                 if _pc is not None and getattr(_pc, "ran_tests", None):
-                    _save_cluster_evidence(project_dir, cluster.name,
-                                           _pc.failed_tests, _pc.ran_tests)
+                    _save_cluster_evidence(
+                        project_dir, cluster.name,
+                        _pc.failed_tests, _pc.ran_tests,
+                        exhausted=getattr(_pc, "exhausted", False),
+                        exhausted_fns=getattr(_pc, "exhausted_fns", ()))
+                    if getattr(_pc, "exhausted", False):
+                        self.tel.log(
+                            f"  [skeleton] cluster '{cluster.name}' is EXHAUSTED, "
+                            f"not done: {len(_pc.failed_tests)} test(s) still "
+                            f"failing after its budgets were spent "
+                            f"({', '.join(sorted(_pc.failed_tests)[:4])}). "
+                            f"{len(getattr(_pc, 'exhausted_fns', ()))} fn(s) were "
+                            "tried and could not be made to pass; the evidence is "
+                            "carried to whatever repairs the merged tree.")
                 if _summary.get("ok") and _fd.exists():
                     donor_dirs.append(_fd)
                     # Only a cluster whose Phase A→D returned ok is checkpointed:
@@ -1998,12 +2069,19 @@ class StaticSkeletonTask2Generator(Task2Generator):
         max_validate_iters = self.cfg.validate_iters
         validate_ok = False
         _vr_out = ""
+        # The verdict is computed over EVERY target, not just the lib. A cluster
+        # whose test binaries do not compile is not a validated cluster, and
+        # `cargo check` alone certified one on 2026-08-01. Measured before
+        # switching, per the note this fix was filed with: both cluster trees and
+        # the merged tree pass `cargo check --all-targets` today exactly as they
+        # pass `cargo check`, so nothing that currently validates stops doing so.
+        _verdict_cmd = self._cluster_check_cmd(cluster, all_targets=True)
         for v_iter in range(1, max_validate_iters + 1):
             self.tel.check_stop(f"skeleton-validate iter {v_iter}")
             self.tel.log(f"  {tag} [skeleton-validate] cargo check on filled output "
                          f"(iter {v_iter}/{max_validate_iters})...")
             rc, _vr_out, _vdiags = self.cargo.run_check_diag(
-                check_cmd, filled_dir, self._cluster_env(cluster), 180)
+                _verdict_cmd, filled_dir, self._cluster_env(cluster), 180)
             if rc == -1:
                 self.tel.log(f"  {tag} [skeleton-validate] cargo check timed out.")
                 validate_ok = False
@@ -2023,6 +2101,20 @@ class StaticSkeletonTask2Generator(Task2Generator):
                 self.tel.log(f"    {line}")
             implicated = self.cargo.implicated_fns_from_check(
                 _vdiags, _vr_out, filled_dir)
+            # The verdict now compiles the test binaries, so a diagnostic can
+            # land in one — and the repair below reverts what it is handed to
+            # `unimplemented!()`. The test oracle is immutable: an error in a
+            # test file is evidence about the production API, never a licence to
+            # rewrite the spec. Drop those targets before anything is reverted.
+            _oracle = [(f, fn) for f, fn in implicated
+                       if f.startswith("tests/")
+                       or self.gentests.is_gen_tests_file(Path(f).name)]
+            if _oracle:
+                implicated = [t for t in implicated if t not in _oracle]
+                self.tel.log(
+                    f"  {tag} [skeleton-validate] {len(_oracle)} implicated "
+                    "target(s) are test-oracle content and were NOT reverted: "
+                    + ", ".join(f"{f}::{fn}" for f, fn in _oracle[:4]))
             if not implicated:
                 self.tel.log(f"  {tag} [skeleton-validate] no implicated fns parsed "
                              f"— cannot retry, giving up.")
@@ -2664,7 +2756,13 @@ class StaticSkeletonTask2Generator(Task2Generator):
                 tests_dir_files=tests_dir_files,
                 module_name=module,
                 cluster_name="merged",
-                cluster=None,
+                # A real cfg identity for the merged view, rather than None. The
+                # label "merged" matches no baked cluster, so every
+                # cfg-conditioned prompt section — invariants, the active arm of
+                # a multi-variant macro, the cluster filter on advertised types
+                # — resolved to nothing for this whole stage. The merged
+                # identity asserts only the predicates every cluster agrees on.
+                cluster=merged_view_cluster(clusters),
                 check_cmd="cargo check",
                 cluster_env=self.cargo.env(),
                 max_passes=1,
@@ -2728,12 +2826,21 @@ class StaticSkeletonTask2Generator(Task2Generator):
         return convicted
 
     @staticmethod
-    def _cluster_check_cmd(cluster: BuildCluster) -> str:
+    def _cluster_check_cmd(cluster: BuildCluster, *,
+                           all_targets: bool = False) -> str:
         """Build the cargo check command. Cluster-specific flags are passed via
         env_extra (RUSTFLAGS etc.), not via --features — that distinction depends
         on which cfg names are real Cargo features vs --cfg flags, and
         task0_cfg_scan has already encoded the right form in env_extra. Toolchain
-        is applied via `cargo +nightly` when required."""
+        is applied via `cargo +nightly` when required.
+
+        `all_targets` builds the TEST binaries too. That is what a health
+        VERDICT needs and what the per-fn inner loop must not pay for on every
+        splice: on 2026-08-01 `nightly` stopped with two rustc errors in its test
+        binaries and was still recorded `done — validated`, because a plain
+        `cargo check` builds only the lib and cannot observe the failing
+        targets.
+        """
         # Default message format (not --message-format=short) so the model sees
         # rustc's `note:` and `help:` hints alongside the bare error, which often
         # points directly at the fix (e.g. "consider importing one of these
@@ -2741,6 +2848,8 @@ class StaticSkeletonTask2Generator(Task2Generator):
         parts = ["cargo", "check"]
         if cluster.toolchain:
             parts = ["cargo", f"+{cluster.toolchain}"] + parts[1:]
+        if all_targets:
+            parts.append("--all-targets")
         return shlex.join(parts)
 
     def _cluster_env(self, cluster: BuildCluster) -> dict[str, str]:

@@ -260,6 +260,30 @@ pub(crate) fn render_item_definition(item: &Item) -> String {
     prettyplease::unparse(&file).trim().to_string()
 }
 
+/// Visibility of a name over ALL its declarations, never just the one the walk
+/// happened to keep.
+///
+/// Type records are keyed by bare name tree-wide, so a crate that declares a
+/// name twice gets ONE record and the walk order decides which. anyhow declares
+/// `Chain` as `pub` in lib.rs and `pub(crate)` in chain.rs, and `StdError` as a
+/// private trait in lib.rs and a `pub trait` in context.rs — and the same
+/// extractor over the upstream crate and over its reconstruction disagreed on
+/// both, purely because walkdir reached the files in a different order. That
+/// made `validate_task2_api_surface_conformance` report `API drift — 2 of 52
+/// pub item(s) missing: struct: Chain; trait: StdError` on every task3 entry of
+/// the 2026-08-05 run, accusing the reconstruction of losing public API it had
+/// not lost.
+///
+/// Raising rather than overwriting makes the answer order-independent: the
+/// record reports the most public declaration of the name that exists anywhere
+/// in the tree. It is still a flat, name-keyed view — a `pub` item inside a
+/// private module reads as public here — but both sides of the conformance
+/// check now read it the same way, which is what the check compares.
+fn raise_visibility(entry: &mut TypeRecord, is_pub: bool, is_exactly_pub: bool) {
+    entry.is_pub |= is_pub;
+    entry.is_exactly_pub |= is_exactly_pub;
+}
+
 pub(crate) fn collect_types_and_methods(
     items: &[Item],
     file_rel: &str,
@@ -319,8 +343,7 @@ pub(crate) fn collect_types_and_methods(
                 entry.generics = generics;
                 entry.definition = definition;
                 entry.fields = fields;
-                entry.is_pub = is_pub;
-                entry.is_exactly_pub = is_exactly_pub;
+                raise_visibility(entry, is_pub, is_exactly_pub);
             }
             Item::Enum(e) => {
                 let name = e.ident.to_string();
@@ -335,7 +358,7 @@ pub(crate) fn collect_types_and_methods(
                 );
                 let is_exactly_pub = matches!(e.vis, syn::Visibility::Public(_));
                 let definition = render_item_definition(item);
-                out_types.entry(name.clone()).or_insert(TypeRecord {
+                let entry = out_types.entry(name.clone()).or_insert(TypeRecord {
                     file: file_rel.to_string(),
                     kind: "enum".to_string(),
                     name: name.clone(),
@@ -347,6 +370,7 @@ pub(crate) fn collect_types_and_methods(
                     is_pub,
                     is_exactly_pub,
                 });
+                raise_visibility(entry, is_pub, is_exactly_pub);
             }
             Item::Type(t) => {
                 let name = t.ident.to_string();
@@ -357,7 +381,7 @@ pub(crate) fn collect_types_and_methods(
                 );
                 let is_exactly_pub = matches!(t.vis, syn::Visibility::Public(_));
                 let definition = render_item_definition(item);
-                out_types.entry(name.clone()).or_insert(TypeRecord {
+                let entry = out_types.entry(name.clone()).or_insert(TypeRecord {
                     file: file_rel.to_string(),
                     kind: "type".to_string(),
                     name: name.clone(),
@@ -369,6 +393,7 @@ pub(crate) fn collect_types_and_methods(
                     is_pub,
                     is_exactly_pub,
                 });
+                raise_visibility(entry, is_pub, is_exactly_pub);
             }
             Item::Trait(tr) => {
                 let name = tr.ident.to_string();
@@ -394,7 +419,7 @@ pub(crate) fn collect_types_and_methods(
                         });
                     }
                 }
-                out_types.entry(name.clone()).or_insert(TypeRecord {
+                let entry = out_types.entry(name.clone()).or_insert(TypeRecord {
                     file: file_rel.to_string(),
                     kind: "trait".to_string(),
                     name: name.clone(),
@@ -406,6 +431,7 @@ pub(crate) fn collect_types_and_methods(
                     is_pub,
                     is_exactly_pub,
                 });
+                raise_visibility(entry, is_pub, is_exactly_pub);
             }
             Item::Impl(ii) => {
                 // Inherent impls (no trait_) attach methods to the self_ty.

@@ -29,7 +29,11 @@ from pipeline_core.domain.attribution import (
     line_to_fn_record,
 )
 from pipeline_core.domain.models import Diagnostic, FnLocator, FnSite, Frontier
-from pipeline_core.domain.rust_idents import ascii_word_tokens, test_fn_names
+from pipeline_core.domain.rust_idents import (
+    ascii_word_tokens,
+    is_compile_fail_test_source,
+    test_fn_names,
+)
 from pipeline_core.domain.test_report import FailureKind as TestFailureKind
 from pipeline_core.domain.test_report import parse_test_output
 from pipeline_core.domain.test_results import (
@@ -372,6 +376,13 @@ def build_test_reverse_map(
             text = tp.read_text(encoding="utf-8", errors="replace")
         except Exception:
             continue
+        if is_compile_fail_test_source(text):
+            # A compile-fail harness convicts by coincidence only: the tokens of
+            # `tests/compiletest.rs` are `trybuild`, `TestCases::new` and the
+            # `not(nightly)` of its own attribute, which on the anyhow tree
+            # matched five unrelated `new` fns and `lib.rs::not`. Nothing it
+            # names can be repaired by writing a body.
+            continue
         ids = set(ascii_word_tokens(text))
         # Match each #[test] fn's name; pair it with all fn records whose
         # identifier appears anywhere in the test file. This is file-level
@@ -401,12 +412,119 @@ def build_test_reverse_map(
                 src_bytes[f] = (src_dir / f).read_bytes()
             except Exception:
                 src_bytes[f] = b""
+        # This pass indexes by RECORD, so it sees the compile-fail harness again
+        # even when the file loop above skipped it — `src_dir` is the project
+        # root for the task3 callers, and the extractor walks `tests/` too.
+        if is_compile_fail_test_source(src_bytes[f].decode("utf-8", "replace")):
+            continue
         body = src_bytes[f][s:e].decode("utf-8", "replace")
         candidates = out.setdefault(test_name, set())
         for ident in identifiers_in(body):
             if ident in by_name:
                 candidates.update(by_name[ident])
     return out
+
+def not_body_repairable_tests(test_files: list[Path]) -> frozenset[str]:
+    """Names of failing tests no body rewrite can satisfy — today, the
+    compile-fail harnesses (`trybuild`/`compiletest`).
+
+    Reported rather than silently dropped: the test is a real requirement of the
+    crate, it is just not one this repair loop can meet, and a run that ends
+    with it still failing should say which failures were out of reach instead of
+    looking like it gave up.
+    """
+    out: set[str] = set()
+    for tp in test_files:
+        try:
+            text = tp.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        if is_compile_fail_test_source(text):
+            out.update(test_fn_names(text))
+    return frozenset(out)
+
+
+def expand_frontier_by_calls(
+    deps: AttributionDeps,
+    frontier: Frontier,
+    src_dir: Path,
+    *,
+    max_hops: int = 2,
+    cap: int = 40,
+) -> tuple[Frontier, dict[FnLocator, int]]:
+    """Follow callee edges out of an attributed frontier, returning the widened
+    frontier and each key's hop distance from the seed.
+
+    Every attribution path this pipeline has stops at fns the failing TEST names
+    — by panic location, by identifier intersection, or by token match. A defect
+    one call deeper is invisible to all of them. Measured on the anyhow tree
+    2026-08-05: `test_boxed_str` names `downcast_ref`, `error` and `from`; the
+    fn that actually holds the defect is `error.rs::construct_from_boxed`
+    (it builds the vtable with `object_downcast::<BoxedError>` where the upstream
+    crate uses `object_downcast::<Box<dyn StdError + Send + Sync>>`), and it
+    enters at hop 2 — 23 fn names, 41 (file, fn) pairs.
+
+    The hop distance is returned rather than folded in because it is the
+    ranking: a caller that pays a model call per key wants the seed first and
+    the far edges last, and with an early stop on success it may never reach
+    them. `cap` bounds the walk; the convicting tests of a callee are the
+    caller's, since that is the evidence that led here.
+    """
+    hops: dict[FnLocator, int] = dict.fromkeys(frontier, 0)
+    if max_hops < 1 or not frontier:
+        return dict(frontier), hops
+    recs = deps.structure.enumerate_fns(src_dir) or []
+    by_name: dict[str, list[FnLocator]] = {}
+    # EVERY occurrence's body, not the first. A frontier key is (file, bare
+    # name) and `error.rs::from` is four different fns; reading only the first
+    # would have the walk step out of `impl From<E> for Error` and never see
+    # `From<Box<dyn StdError + Send + Sync>> for Error` call `from_boxed`, which
+    # is the edge that leads to the defect. Reachability is a union over the
+    # definitions a key can stand for.
+    bodies_of: dict[FnLocator, list[tuple[str, int, int]]] = {}
+    for r in recs:
+        name, f = r.get("fn_name", ""), r.get("file", "")
+        if not (name and f) or is_test_fn_record(r):
+            continue
+        key = FnLocator(f, name)
+        if key not in bodies_of:
+            by_name.setdefault(name, []).append(key)
+        bodies_of.setdefault(key, []).append(
+            (f, r.get("body_byte_start", 0), r.get("body_byte_end", 0)))
+    text_of: dict[str, bytes] = {}
+
+    def _body(key: FnLocator) -> str:
+        parts: list[str] = []
+        for f, s, e in bodies_of.get(key, ()):
+            if not f or e <= s:
+                continue
+            if f not in text_of:
+                try:
+                    text_of[f] = (src_dir / f).read_bytes()
+                except Exception:
+                    text_of[f] = b""
+            parts.append(text_of[f][s:e].decode("utf-8", "replace"))
+        return "\n".join(parts)
+
+    out: Frontier = {k: set(v) for k, v in frontier.items()}
+    current = list(frontier)
+    for hop in range(1, max_hops + 1):
+        nxt: list[FnLocator] = []
+        for key in current:
+            if len(out) >= cap:
+                break
+            for ident in identifiers_in(_body(key)):
+                for cand in by_name.get(ident, ()):
+                    if cand in out or len(out) >= cap:
+                        continue
+                    out[cand] = set(out.get(key) or ())
+                    hops[cand] = hop
+                    nxt.append(cand)
+        if not nxt:
+            break
+        current = nxt
+    return out, hops
+
 
 def attribute_failures(
     deps: AttributionDeps,
@@ -417,6 +535,7 @@ def attribute_failures(
     cluster_name: str,
     test_texts: dict[str, str] | None = None,
     extra_failed: frozenset[str] = frozenset(),
+    unrepairable_tests: frozenset[str] = frozenset(),
 ) -> AttributionResult:
     """Robust failure-to-fn attribution chain. Returns
     (frontier, kind, convicting): the dispatch map, the path that produced it,
@@ -468,6 +587,16 @@ def attribute_failures(
     # are empty.
     contributors: list[FailureKind] = []
 
+    def _failing() -> list[str]:
+        """The failing tests this loop can act on. A test whose assertion is
+        about rustc's own output (`trybuild`) is excluded here rather than at
+        each path: it would otherwise convict through whichever fallback ran."""
+        names = parse_failed_tests(test_output) | extra_failed
+        if unrepairable_tests:
+            names = {n for n in names
+                     if n.split("::")[-1] not in unrepairable_tests}
+        return sorted(names)
+
     merged: Frontier = {}
     convicting: Frontier = {}
 
@@ -509,7 +638,7 @@ def attribute_failures(
         return AttributionResult(merged, kind, convicting)
     # 4. LLM classifier — turn off via PHASE_C_TDD_USE_CLASSIFIER=0.
     if os.getenv("PHASE_C_TDD_USE_CLASSIFIER", "1") != "0":
-        failing = sorted(parse_failed_tests(test_output) | extra_failed)
+        failing = _failing()
         if failing:
             classification = deps.classify(
                 test_out=test_output, filled_this_pass=[],
@@ -533,7 +662,7 @@ def attribute_failures(
     # after recent fills, the recent fills are the most likely cause.
     # Queue them in reverse-filled order (newest first).
     if recently_filled:
-        failing = sorted(parse_failed_tests(test_output) | extra_failed)
+        failing = _failing()
         if failing:
             recent_synth: Frontier = {}
             for key in reversed(recently_filled):
@@ -547,7 +676,7 @@ def attribute_failures(
     # is tolerable here — per-fn splice guards reject overwriting
     # non-stub bodies, so already-correct fills aren't clobbered.
     if test_reverse_map:
-        failing = sorted(parse_failed_tests(test_output) | extra_failed)
+        failing = _failing()
         if failing:
             reverse_synth: Frontier = {}
             for tname in failing:

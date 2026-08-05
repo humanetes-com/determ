@@ -21,8 +21,15 @@ kill_pipeline() {
     local _pids
     _pids="$(pipeline_pids | tr '\n' ' ')"
     [[ -z "$_pids" ]] && return 0
+    # Mark the stop as the operator's before signalling, so the death recorder
+    # can tell it from a crash. Its own sentinel, NOT the graceful-stop one:
+    # that file also tells a LIVE pipeline to exit at its next checkpoint, and
+    # this path is about to signal the process rather than ask it. Removed
+    # afterwards so it cannot outlive the stop and label the next death.
+    touch /tmp/pipeline_operator_stop 2>/dev/null || true
     kill $_pids 2>/dev/null || true
     sleep 2
     pkill -9 -f "$_PIPELINE_PGREP" 2>/dev/null || true
     sleep 1
+    rm -f /tmp/pipeline_operator_stop 2>/dev/null || true
 }

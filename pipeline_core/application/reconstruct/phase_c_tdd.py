@@ -1525,4 +1525,10 @@ def run_phase_c_tdd(
         baseline_broken=_baseline_broken,
         failed_tests=last_failed,
         ran_tests=last_ran,
+        # Finishing with failing tests is EXHAUSTED, not done. The checkpoint
+        # marker is the same either way and a cluster is never re-opened, so
+        # without this the distinction is lost at the boundary and whatever
+        # repairs the merged tree starts from a bare failing-test name.
+        exhausted=bool(last_failed),
+        exhausted_fns=tuple(sorted(permanently_exhausted)),
     )

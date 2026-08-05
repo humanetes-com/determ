@@ -195,9 +195,14 @@ class CargoBackendAdapter:
     def attribute_failures(self, test_output: str, src_dir: Path,
                            recently_filled: list[FnLocator],
                            test_reverse_map: dict[str, set[FnLocator]],
-                           cluster_name: str) -> AttributionResult:
+                           cluster_name: str,
+                           test_texts: dict[str, str] | None = None,
+                           unrepairable_tests: frozenset[str] = frozenset(),
+                           ) -> AttributionResult:
         res = self.attribute_failures_fn(test_output, src_dir, recently_filled,
-                                         test_reverse_map, cluster_name)
+                                         test_reverse_map, cluster_name,
+                                         test_texts=test_texts,
+                                         unrepairable_tests=unrepairable_tests)
         # Both projections go through the SAME oracle filter — a test fn left in
         # `convicting` could revert a unit for a key dispatch already dropped.
         return AttributionResult(

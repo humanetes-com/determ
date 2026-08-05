@@ -313,3 +313,48 @@ def nightly_rules_for(cluster: object | None) -> str:
         f"- Do NOT write tests for code gated behind these excluded cfg predicates: {predicates}.\n"
         f"  Skip any source lines inside their `#[cfg(...)]` blocks — they are untestable on this toolchain."
     )
+
+
+def merged_view_cluster(clusters: Iterable[BuildCluster]) -> BuildCluster | None:
+    """The cfg identity of the MERGED tree: what holds in every cluster at once.
+
+    The post-merge fill used to pass `cluster_name="merged", cluster=None`, and
+    there is no `BuildCluster` by that name — so nothing cfg-conditioned could
+    be computed for those prompts even in principle: no invariants, no macro
+    expansion choice, no cluster filter on the advertised types. The model was
+    given a label that resolves to nothing.
+
+    The merged tree is not a new cfg world; it is one artifact that every
+    cluster compiles under its OWN cfg. So the only atoms that can be asserted
+    about it are the ones all clusters agree on — active where every cluster has
+    it active, excluded where every cluster excludes it. An atom the clusters
+    disagree on (this crate's `error_generic_member_access`) is deliberately in
+    neither set: it is genuinely unknown at this level, and claiming either way
+    is how a fill learns a falsehood.
+
+    Returns None for an empty cluster list, matching the "no cluster" case.
+    """
+    cs = list(clusters)
+    if not cs:
+        return None
+    active = set(cs[0].active_cfg or [])
+    excluded = set(cs[0].excluded_cfg or [])
+    for c in cs[1:]:
+        active &= set(c.active_cfg or [])
+        excluded &= set(c.excluded_cfg or [])
+    names = ", ".join(sorted(c.name for c in cs))
+    return BuildCluster(
+        name="merged",
+        env_extra={},
+        tarpaulin_exclude_files=[],
+        excluded_cfg=sorted(excluded),
+        active_cfg=sorted(active),
+        prompt_nightly_rule=(
+            "- COMPILER CLUSTER: merged — this tree is compiled by EVERY "
+            f"cluster ({names}), each under its own cfg. A body must hold in "
+            "all of them. Only the predicates listed as active/excluded here "
+            "are agreed across clusters; any other cfg differs between them, "
+            "so do not assume a value for it."),
+        is_default=False,
+        gated_files=set(),
+    )

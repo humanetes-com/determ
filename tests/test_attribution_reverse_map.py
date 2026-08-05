@@ -11,6 +11,8 @@ from pipeline_core.application.reconstruct.attribution import (
     AttributionDeps,
     attribute_failures,
     build_test_reverse_map,
+    expand_frontier_by_calls,
+    not_body_repairable_tests,
 )
 from pipeline_core.domain.models import FnLocator
 
@@ -316,3 +318,92 @@ def test_classifier_fallback_convicts_nobody(
     assert _res.kind == "classifier"
     assert _res.frontier[FnLocator("src/a.rs", "wrong_fn")] == {"t_x"}
     assert _res.convicting == {}
+
+
+# ── the compile-fail harness, and the callee walk ────────────────────────────
+
+def test_a_trybuild_harness_convicts_nothing(tmp_path: Path) -> None:
+    """`tests/compiletest.rs` is 7 lines and its only crate-name tokens are the
+    `new` of `TestCases::new()` and the `not` of `#[rustversion::attr(not(
+    nightly), …)]`. On the 2026-08-05 merged tree that convicted five unrelated
+    `new` fns and `lib.rs::not`, each at a ~2-minute model call, for a test no
+    body rewrite can satisfy."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "kind.rs").write_text("fn new() {}\n")
+    (src / "lib.rs").write_text("fn not() {}\n")
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    ct = tests / "compiletest.rs"
+    ct.write_text(
+        "#[rustversion::attr(not(nightly), ignore = \"requires nightly\")]\n"
+        "#[test]\n"
+        "fn ui() {\n"
+        "    let t = trybuild::TestCases::new();\n"
+        "    t.compile_fail(\"tests/ui/*.rs\");\n"
+        "}\n")
+    deps = _deps([{"file": "kind.rs", "fn_name": "new"},
+                  {"file": "lib.rs", "fn_name": "not"}])
+    assert build_test_reverse_map(deps, [ct], src) == {}
+    assert not_body_repairable_tests([ct]) == frozenset({"ui"})
+
+
+def test_an_ordinary_test_file_is_untouched_by_the_harness_check(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "kind.rs").write_text("fn new() {}\n")
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    tf = tests / "test_boxed.rs"
+    tf.write_text("#[test]\nfn test_boxed_str() { new(); }\n")
+    deps = _deps([{"file": "kind.rs", "fn_name": "new"}])
+    assert build_test_reverse_map(deps, [tf], src) == {
+        "test_boxed_str": {("kind.rs", "new")}}
+    assert not_body_repairable_tests([tf]) == frozenset()
+
+
+def test_the_callee_walk_reaches_a_fn_the_test_never_names(tmp_path: Path) -> None:
+    """The shape of the anyhow defect: the test names `downcast_ref`, and the
+    body that is wrong is two calls further in."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "error.rs").write_text(
+        "fn downcast_ref() { from_boxed() }\n"
+        "fn from_boxed() { construct_from_boxed() }\n"
+        "fn construct_from_boxed() { WRONG }\n")
+    text = (src / "error.rs").read_text()
+
+    def _span(name: str) -> tuple[int, int]:
+        s = text.index("{", text.index(f"fn {name}"))
+        return s, text.index("}", s) + 1
+
+    recs = [{"file": "error.rs", "fn_name": n,
+             "body_byte_start": _span(n)[0], "body_byte_end": _span(n)[1]}
+            for n in ("downcast_ref", "from_boxed", "construct_from_boxed")]
+    seed = {("error.rs", "downcast_ref"): {"test_boxed_str"}}
+    out, hops = expand_frontier_by_calls(_deps(recs), seed, src, max_hops=2)
+    assert ("error.rs", "construct_from_boxed") in out, \
+        "the fn holding the defect is unreachable from the failing test"
+    assert hops[("error.rs", "construct_from_boxed")] == 2
+    assert hops[("error.rs", "downcast_ref")] == 0
+    assert out[("error.rs", "construct_from_boxed")] == {"test_boxed_str"}, \
+        "a callee inherits the evidence that led to it"
+
+
+def test_the_callee_walk_respects_its_cap_and_can_be_switched_off(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.rs").write_text("fn a() { b() }\nfn b() { c() }\nfn c() { }\n")
+    text = (src / "a.rs").read_text()
+
+    def _span(name: str) -> tuple[int, int]:
+        s = text.index("{", text.index(f"fn {name}"))
+        return s, text.index("}", s) + 1
+
+    recs = [{"file": "a.rs", "fn_name": n, "body_byte_start": _span(n)[0],
+             "body_byte_end": _span(n)[1]} for n in ("a", "b", "c")]
+    seed = {("a.rs", "a"): {"t"}}
+    capped, _ = expand_frontier_by_calls(_deps(recs), seed, src, max_hops=2, cap=2)
+    assert len(capped) == 2
+    off, hops = expand_frontier_by_calls(_deps(recs), seed, src, max_hops=0)
+    assert off == seed and hops == {("a.rs", "a"): 0}

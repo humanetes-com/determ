@@ -36,14 +36,21 @@ def _deps(*, run=None, check_diag=None) -> Task3RetryDeps:
         ),
         attribution=Task3Attribution(
             attribute_failures=_unused, build_test_reverse_map=_unused,
-            frontier_from_diags=_unused, filter_test_targets=_unused),
+            frontier_from_diags=_unused, filter_test_targets=_unused,
+            expand_frontier_by_calls=_unused),
         enumerator=Task3Enumerate(
             cluster_filter_type_methods=lambda recs, cl: [],
-            enumerate_types=lambda root: [], fn_container_index=lambda root: {}),
+            enumerate_types=lambda root: [], fn_container_index=lambda root: {},
+            fn_occurrence_index=lambda root: {},
+            collect_crate_macros=lambda root: "",
+            compute_cluster_macro_invariants=lambda root, cl: "",
+            detect_crate_no_std_invariant=lambda root: ""),
         retry_fix=RetryDeps(
-            locate_fn=_unused, gather_fix_context=_unused,
+            locate_fn=_unused, locate_all_fns=_unused,
+            gather_fix_context=_unused,
             build_per_fn_fix_prompt=_unused, ask_per_fn_body=_unused,
-            splice_fn_body=_unused, find_tests_for_fn=_unused,
+            splice_fn_body=_unused, splice_body_scoped=_unused,
+            find_tests_for_fn=_unused,
             focus_cargo_errors=_unused, is_gen_tests_file=lambda n: False,
             log=lambda *_: None),
         log=lambda *_: None,
@@ -130,3 +137,63 @@ def test_test_mode_passes_immediately(tmp_path: Path) -> None:
         max_stalls=3, hard_cap=10, deps=deps)
     assert passed is True
     assert out == ok_out
+
+
+def test_the_prompt_says_what_the_cluster_name_means(tmp_path: Path) -> None:
+    """The retry named the cluster in its header and passed `invariants=""` /
+    `macros=""`, so the prompt carried no CLUSTER_INVARIANTS block at all
+    (verified on run 741610-02561583's prompt store, 97 671 chars). And the tree
+    it repairs is compiled by EVERY cluster, so one cluster's invariants would
+    still be the wrong statement — all of them are rendered, each named.
+    """
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "lib.rs").write_text("fn f() { unimplemented!() }\n")
+    (tmp_path / "tests").mkdir()
+    seen: dict[str, object] = {}
+
+    class _C:
+        def __init__(self, name: str) -> None:
+            self.name, self.toolchain, self.env_extra = name, "", {}
+
+    deps = _deps(run=lambda *a, **k: (101, _failed(1)))
+    from dataclasses import replace
+    enum = replace(
+        deps.enumerator,
+        compute_cluster_macro_invariants=lambda root, cl: (
+            f"backtrace_if_absent!(...) active for {cl.name}"),
+        detect_crate_no_std_invariant=lambda root: "crate is no_std",
+        fn_container_index=lambda root: {},
+        fn_occurrence_index=lambda root: {},
+    )
+    fix = replace(
+        deps.retry_fix,
+        locate_fn=lambda text, fn: ("fn f()", 0, 9, 26),
+        locate_all_fns=lambda text, fn: [],
+        gather_fix_context=lambda **kw: type(
+            "C", (), {"container": "", "types_section": "",
+                      "notes_section": "", "bound_methods_section": "",
+                      "blueprint_section": ""})(),
+        find_tests_for_fn=lambda *a, **kw: [],
+        focus_cargo_errors=lambda out, rel: "",
+        build_per_fn_fix_prompt=lambda **kw: seen.update(
+            sections=kw["sections"]) or "prompt",
+        ask_per_fn_body=lambda *a, **kw: (None, ""),
+    )
+    attr = replace(
+        deps.attribution,
+        build_test_reverse_map=lambda files, root: {},
+        attribute_failures=lambda *a, **kw: type(
+            "R", (), {"frontier": {("src/lib.rs", "f"): {"t_0"}}})(),
+        filter_test_targets=lambda fr, root: fr,
+        expand_frontier_by_calls=lambda fr, root, **kw: (fr, dict.fromkeys(fr, 0)),
+    )
+    deps = replace(deps, enumerator=enum, retry_fix=fix, attribution=attr)
+    run_task3_inline_retry(
+        tmp_path, "cargo test", 1, _failed(1), _C("nightly"),
+        all_clusters=[_C("nightly"), _C("stable")],
+        max_stalls=1, hard_cap=1, deps=deps)
+    inv = seen["sections"].invariants  # type: ignore[union-attr]
+    assert "nightly" in inv and "stable" in inv, \
+        "a shared artifact's prompt must name every cfg world it must satisfy"
+    assert "crate is no_std" in inv
+    assert "[cluster: nightly]" in inv and "[cluster: stable]" in inv

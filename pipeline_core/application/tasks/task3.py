@@ -18,12 +18,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ...application.reconstruct.attribution import not_body_repairable_tests
 from ...domain.test_results import (
     OUTPUT_SEPARATOR,
     ClusterStatus,
     cluster_failure_is_actionable,
     compile_gate_reason,
+    parse_failed_tests,
     parse_test_counts,
+    rank_repair_candidates,
     validate_task3_output_strict,
 )
 from ...log import emit, log
@@ -113,11 +116,15 @@ def run_clusters_strict(project_dir: Path, clusters: list[Any],
         pass_n, fail_n, ign_n = parse_test_counts(output)
         expected_n = deps.count_active_tests_for_cluster(project_dir, cluster)
         status, reason = validate_task3_output_strict(
-            pass_n, fail_n, ign_n, expected_n, cluster.name,
+            pass_n, fail_n, ign_n, expected_n, cluster.name, output,
         )
         if (status == ClusterStatus.INCOMPLETE and rc != 0
                 and pass_n + fail_n + ign_n == 0):
-            # debt #34: a 1-error compile gate misread as a harness crash.
+            # A cluster whose tests did not COMPILE reports zero of everything,
+            # which is indistinguishable by counts alone from a harness that
+            # crashed before running anything. When cargo's own diagnostics say
+            # the build failed, that is the reason to report — otherwise the
+            # log blames the harness for a plain compile error.
             reason = compile_gate_reason(cluster.name, output) or reason
         log(f"  [task3/{cluster.name}] {status}: {reason} "
             f"(rc={rc}, {dt:.1f}s)")
@@ -209,12 +216,29 @@ def task3(project_dir: Path, test_command: str, iteration: int | str,
             r for r in cluster_results if r["status"] != "pass"
             and not cluster_failure_is_actionable(r["status"], r["rc"], r["fail"])
         ]
-        for r in cluster_results:
+        # Choose the primary by EVIDENCE, not by name order. `run_clusters_strict`
+        # iterates name-sorted, so taking the first actionable failure picked
+        # `nightly` over `stable` on 2026-08-05 because "nightly" < "stable" —
+        # and `nightly` is the cluster carrying `ui`, a trybuild compile-fail
+        # test no body rewrite can satisfy, while `stable` failed only
+        # `test_boxed_str`.
+        _actionable = [
+            r for r in cluster_results
             if r["status"] != "pass" and cluster_failure_is_actionable(
-                    r["status"], r["rc"], r["fail"]):
-                primary_test_output = r["output"]
-                primary_cluster = _cluster_by_name[r["cluster"]]
-                break
+                r["status"], r["rc"], r["fail"])]
+        if _actionable:
+            _unrepairable = not_body_repairable_tests(
+                list((project_dir / "tests").rglob("*.rs")))
+            _by_name = {r["cluster"]: r for r in _actionable}
+            _order = rank_repair_candidates(
+                [(r["cluster"], frozenset(parse_failed_tests(r["output"])))
+                 for r in _actionable], _unrepairable)
+            _chosen = _by_name[_order[0]]
+            primary_test_output = _chosen["output"]
+            primary_cluster = _cluster_by_name[_chosen["cluster"]]
+            if len(_order) > 1:
+                log(f"  [task3] repairing via cluster '{_order[0]}' "
+                    f"(candidates: {', '.join(_order)}).")
         if primary_cluster is None and _unactionable_shortfalls:
             for r in _unactionable_shortfalls:
                 log(f"  [task3/{r['cluster']}] count/oracle mismatch — clean run "
@@ -269,6 +293,11 @@ def task3(project_dir: Path, test_command: str, iteration: int | str,
                 iteration=iteration,
                 initial_test_output=primary_test_output,
                 cluster=primary_cluster,
+                # Every baked cluster, not just the one whose failure opened the
+                # retry: the tree it repairs is one artifact that all of them
+                # compile, so the accept gate has to be able to see a body that
+                # fixes this cluster and breaks another.
+                all_clusters=clusters,
             )
             # Re-verify across all clusters ONLY on genuine progress, and only
             # while the budget lasts (see _should_reverify).

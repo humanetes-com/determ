@@ -55,6 +55,17 @@ class FixSplicer(Protocol):
         self, file_path: Path, name: str, body: str, *,
         allow_nonstub: bool = ...,
     ) -> SpliceOutcome: ...
+    # The collision-safe write. `splice_body` locates by bare name and refuses
+    # `ambiguous_name` the moment a file holds two fns of that name — on the
+    # anyhow tree that is the common case (`error.rs::from` 4x, `kind.rs::new`
+    # 3x), and the one-shot behaviour fill refused `src/error.rs::from` that way
+    # on 2026-08-05 after a full model call. Passing the signature the caller
+    # already located re-resolves the target through the syn record, so the body
+    # lands on the definition the prompt was built from.
+    def splice_body_scoped(
+        self, file_path: Path, name: str, container: str, sig_text: str,
+        new_body: str, *, allow_nonstub: bool = ...,
+    ) -> SpliceOutcome: ...
     def restore_signature(
         self, file_path: Path, name: str, skeleton_sig: str,
     ) -> bool: ...
