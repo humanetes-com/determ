@@ -121,3 +121,36 @@ def test_best_tree_ratchet_roundtrip(tmp_path) -> None:
     save_best_tree(tmp_path, ["src/lib.rs"], 80, iteration=4)
     assert best_tree_pass_count(tmp_path) == 80
     assert restore_best_tree(tmp_path) == ["src/lib.rs"]
+
+
+def test_merged_best_tree_is_scoped_and_does_not_wipe_cluster_snapshots(tmp_path) -> None:
+    """task2c had no ratchet at all — it tracked `best_pass` only to compute
+    `improved`, so the stage ended on whatever its last iteration produced. It
+    also cannot borrow task2a's: `save_best_tree` owns the whole `.best_tree/`
+    dir and rmtree's it on every save, which would delete the per-cluster
+    snapshots heal restores from."""
+    from pipeline_core.application.workspace_lifecycle import (
+        merged_best_pass_count,
+        restore_merged_best_tree,
+        save_cluster_best_tree,
+        save_merged_best_tree,
+    )
+    assert merged_best_pass_count(tmp_path) is None
+    assert restore_merged_best_tree(tmp_path) == []
+
+    # A cluster snapshot that must survive every merged save.
+    filled = tmp_path / ".skeleton-filled" / "nightly"
+    (filled / "src").mkdir(parents=True)
+    (filled / "src/lib.rs").write_text("cluster body")
+    save_cluster_best_tree(tmp_path, "nightly", filled, 100, iteration=6)
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src/error.rs").write_text("good merged body")
+    assert save_merged_best_tree(tmp_path, 139, iteration=2) == 1
+    assert merged_best_pass_count(tmp_path) == 139
+    assert (tmp_path / ".best_tree/nightly/src/lib.rs").read_text() == "cluster body"
+
+    (tmp_path / "src/error.rs").write_text("REGRESSED")
+    assert restore_merged_best_tree(tmp_path) == ["src/error.rs"]
+    assert (tmp_path / "src/error.rs").read_text() == "good merged body"
+    assert (tmp_path / ".best_tree/nightly/src/lib.rs").exists()

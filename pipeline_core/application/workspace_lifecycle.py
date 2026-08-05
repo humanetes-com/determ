@@ -203,6 +203,58 @@ def save_cluster_best_tree(
     return saved
 
 
+# The merged tree gets its own slot under the same root. It cannot use
+# `save_best_tree`/`restore_best_tree`: those own the WHOLE `.best_tree/` dir
+# and `rmtree` it on every save, which would delete the per-cluster snapshots
+# heal restores from. `_merged` is a name no cluster can take — cluster names
+# come from the baked cfg scan and are cfg atoms.
+MERGED_BEST = "_merged"
+
+
+def save_merged_best_tree(project_dir: Path, pass_count: int,
+                          iteration: int = 0) -> int:
+    """Snapshot the merged `src/` at its best. task2c tracked `best_pass` only
+    to compute `improved`; nothing kept the tree that earned it, so the stage
+    ended on whatever its last iteration produced. task2a has had this ratchet
+    all along."""
+    return save_cluster_best_tree(project_dir, MERGED_BEST, project_dir / "src",
+                                  pass_count, iteration)
+
+
+def merged_best_pass_count(project_dir: Path) -> int | None:
+    """Pass count of the merged snapshot, or None if there is none."""
+    import json
+    meta = project_dir / BEST_TREE_DIR / MERGED_BEST / _BEST_META
+    try:
+        return int(json.loads(meta.read_text(encoding="utf-8"))["pass_count"])
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def restore_merged_best_tree(project_dir: Path) -> list[str]:
+    """Copy the merged snapshot back over `src/`. Returns restored rel paths."""
+    best = project_dir / BEST_TREE_DIR / MERGED_BEST
+    if not best.is_dir():
+        return []
+    import shutil
+    restored: list[str] = []
+    for src in sorted(best.rglob("*.rs")):
+        if not src.is_file():
+            continue
+        # Project-relative, like `restore_best_tree` — the snapshot is rooted
+        # at `src/` but every caller and log line speaks in project paths.
+        rel = Path("src") / src.relative_to(best)
+        dst = project_dir / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+        restored.append(str(rel))
+    if restored:
+        log(f"  [ratchet] restored merged best tree ({len(restored)} file(s), "
+            f"{merged_best_pass_count(project_dir)} passing) — iteration ended "
+            "below the floor.")
+    return restored
+
+
 def restore_best_tree(project_dir: Path) -> list[str]:
     """Copy the snapshotted best tree back over the working tree. Returns the
     restored relative paths ([] if no snapshot)."""

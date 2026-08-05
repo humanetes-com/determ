@@ -38,8 +38,13 @@ from ...application.reconstruct.fill_rules import is_unimplemented_body
 from ...application.reconstruct.heal import HealDeps, heal_file
 from ...application.reconstruct.hollow_repair import repair_hollow_bodies
 from ...application.reconstruct.import_repair import repair_missing_imports
-from ...domain.attribution import FailureFrontier
+from ...application.workspace_lifecycle import (
+    restore_merged_best_tree,
+    save_merged_best_tree,
+)
+from ...domain.attribution import FailureFrontier, FailureKind
 from ...domain.cfg import CfgSet
+from ...domain.cluster_evidence import dominant_cluster
 from ...domain.cluster_plan import fill_order
 from ...domain.generation import (
     GenerationRequest,
@@ -59,7 +64,7 @@ from ...domain.models import (
 )
 from ...domain.rust_fn_headers import locate_all_fns
 from ...domain.rust_scan import item_names
-from ...domain.test_results import parse_test_counts
+from ...domain.test_results import find_unreported_tests, parse_test_counts
 from ...domain.text import (
     extract_code_content,
     smart_truncate,
@@ -135,11 +140,49 @@ PROC_MACRO_NOTE = (
 )
 
 
+def _first_error_line(output: str) -> str:
+    """The first rustc `error` line in a cargo run, for a one-line log."""
+    for line in (output or "").splitlines():
+        if line.startswith("error"):
+            return line.strip()[:200]
+    return "(no error line)"
+
+
 def _read_text(p: Path) -> str | None:
     try:
         return p.read_text(encoding="utf-8")
     except OSError:
         return None
+
+
+# Where a cluster's last verdict sets live between runs. A cluster that RAN TO
+# COMPLETION is checkpointed and skipped on every later run, so by merge time
+# its tree is on disk and the evidence for it is not — the merge would then have
+# nothing to prefer a divergent body by except the cluster's name. Written when
+# a cluster finishes, read at merge time by every cluster including the skipped
+# ones.
+_EVIDENCE_REL = Path(".skeleton") / "_cluster_evidence.json"
+
+
+def _load_cluster_evidence(project_dir: Path) -> dict[str, dict[str, list[str]]]:
+    raw = _read_text(project_dir / _EVIDENCE_REL)
+    if not raw:
+        return {}
+    try:
+        loaded = json.loads(raw)
+    except ValueError:
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _save_cluster_evidence(project_dir: Path, cluster: str,
+                           failed: frozenset[str], ran: frozenset[str]) -> None:
+    store = _load_cluster_evidence(project_dir)
+    store[cluster] = {"failed": sorted(failed), "ran": sorted(ran)}
+    path = project_dir / _EVIDENCE_REL
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with suppress(OSError):
+        path.write_text(json.dumps(store, indent=2), encoding="utf-8")
 
 
 class Task2Generator(ABC):
@@ -1234,19 +1277,28 @@ class StaticSkeletonTask2Generator(Task2Generator):
                 _ckey = f"task2a/{module}/{cluster.name}"
                 _position = f"cluster {cluster.name} ({_ci + 1}/{len(clusters)})"
                 if self.tel.phase_valid(project_dir, _ckey) and _fd.exists():
-                    self.tel.set_current(
-                        project_dir,
-                        f"task2a/{module} / {_position} skipped (checkpoint valid)")
-                    self.tel.log(f"  [{cluster.name}] cluster already reconstructed "
-                                 "(checkpoint valid, filled tree on disk) — skipping "
-                                 "its Phase A→D; its tree still seeds later clusters.")
-                    cluster_summaries.append({"cluster": cluster.name, "ok": True,
-                                              "skipped_checkpoint": True})
-                    donor_dirs.append(_fd)
-                    continue
+                    if self._reopen_stale_cluster(project_dir, module, cluster.name,
+                                                  clusters):
+                        self.tel.log(f"  [{cluster.name}] checkpoint CLEARED — "
+                                     "re-entering its Phase A→D.")
+                    else:
+                        self.tel.set_current(
+                            project_dir,
+                            f"task2a/{module} / {_position} skipped (checkpoint valid)")
+                        self.tel.log(f"  [{cluster.name}] cluster already reconstructed "
+                                     "(checkpoint valid, filled tree on disk) — skipping "
+                                     "its Phase A→D; its tree still seeds later clusters.")
+                        cluster_summaries.append({"cluster": cluster.name, "ok": True,
+                                                  "skipped_checkpoint": True})
+                        donor_dirs.append(_fd)
+                        continue
                 self.tel.set_current(project_dir, f"task2a/{module} / {_position}")
                 _summary = _run_one_cluster(cluster, list(donor_dirs))
                 cluster_summaries.append(_summary)
+                _pc = _summary.get("phase_c")
+                if _pc is not None and getattr(_pc, "ran_tests", None):
+                    _save_cluster_evidence(project_dir, cluster.name,
+                                           _pc.failed_tests, _pc.ran_tests)
                 if _summary.get("ok") and _fd.exists():
                     donor_dirs.append(_fd)
                     # Only a cluster whose Phase A→D returned ok is checkpointed:
@@ -1330,10 +1382,25 @@ class StaticSkeletonTask2Generator(Task2Generator):
                              "stub body(ies) adopted from sibling clusters.")
             self.tel.log(f"\n  [skeleton-merge] composing {len(cluster_summaries)} cluster output(s) "
                          f"into {project_dir}/src/")
-            merge_stats = self.fill.merge_cluster_outputs(
-                project_dir=project_dir,
-                cluster_specs={c.name: c for c in clusters},
-                successes=[s for s in cluster_summaries if s.get("ok")],
+            _successes = [s for s in cluster_summaries if s.get("ok")]
+            _specs = {c.name: c for c in clusters}
+            # Which cluster's body wins an off-axis divergence. Gating by
+            # provenance is right only while both bodies are equally believed;
+            # once one cluster's failures are a strict subset of another's on
+            # the tests they share, they are not. Computed here because the
+            # evidence is the pipeline's, not the trees'.
+            _evidence = _load_cluster_evidence(project_dir)
+            _prefer = dominant_cluster(
+                {k: set(v.get("failed", ())) for k, v in _evidence.items()},
+                {k: set(v.get("ran", ())) for k, v in _evidence.items()},
+            )
+            if _prefer:
+                self.tel.log(f"  [skeleton-merge] preferring '{_prefer}' bodies on "
+                             "divergences every cluster compiles — its failures are "
+                             "a strict subset of the others' on the shared tests.")
+            merge_stats = self._merge_and_verify(
+                project_dir=project_dir, module=module, cluster_specs=_specs,
+                successes=_successes, prefer_cluster=_prefer,
             )
             self.tel.log(f"  [skeleton-merge] {merge_stats['files_written']} file(s) written, "
                          f"{merge_stats['cfg_gated_fns']} cfg-gated divergence(s).")
@@ -1361,13 +1428,25 @@ class StaticSkeletonTask2Generator(Task2Generator):
             self.tel.log("  task2c (merged-tree fill) already done — skipping.")
         else:
             self.tel.set_current(project_dir, f"task2c/{module} / merged-tree fill")
-            self._post_merge_fill_pass(
+            _t2c_ok = self._post_merge_fill_pass(
                 project_dir=project_dir,
                 clusters=clusters,
                 module=module,
                 functional_req=functional_req,
             )
-            self.tel.mark_phase(project_dir, f"task2c/{module}", "done")
+            # Marked done on the RETURN, never unconditionally. The pass returns
+            # on a stall exit, a timeout, a hard cap and a clean pass alike, so
+            # an unconditional mark recorded `done` for a merged tree that never
+            # built — the loop takes `no_frontier_continue` every iteration and
+            # returns having measured nothing. task2a refuses the analogous
+            # marker explicitly; this is the same refusal one stage later.
+            if _t2c_ok:
+                self.tel.mark_phase(project_dir, f"task2c/{module}", "done")
+            else:
+                self.tel.log(f"  task2c/{module}: NOT marking done — the pass "
+                             "ended without a tree it can stand behind (timeout, "
+                             "no verdicts, or tests that never reported). The "
+                             "next run re-enters this stage.")
 
         # Update the manifest so downstream task3/4 see the generated files.
         if manifest_path:
@@ -2264,13 +2343,124 @@ class StaticSkeletonTask2Generator(Task2Generator):
                 "a cluster that does build it.")
         return adopted
 
+    def _merge_and_verify(self, *, project_dir: Path, module: str,
+                          cluster_specs: dict[str, BuildCluster],
+                          successes: list[dict[str, Any]],
+                          prefer_cluster: str | None) -> dict[str, Any]:
+        """Run the cross-cluster merge, report what it did, and prove it builds.
+
+        The merge emitted NOTHING before this: run `525803-9a51be5a` wrote 2 510
+        records and not one named it, so `files_written` — which counts an AST
+        merge and the passthrough fallback identically — was the only trace, and
+        the three defects found on 2026-08-05 all had to be established by
+        re-running the merge by hand.
+
+        The preference is a heuristic over test evidence, so it is verified
+        rather than trusted: one `cargo check` on the merged tree, and on
+        failure the merge is redone with the preference off. That is the same
+        cost the stage already pays at its first `cargo test` and it keeps a
+        wrong preference from costing an iteration — or a run.
+        """
+        stats = self.fill.merge_cluster_outputs(
+            project_dir=project_dir, cluster_specs=cluster_specs,
+            successes=successes, prefer_cluster=prefer_cluster,
+        )
+        if prefer_cluster and stats.get("preferred"):
+            rc, out = self.cargo.run("cargo check", project_dir, self.cargo.env(),
+                                     timeout=self.cfg.post_merge_test_timeout)
+            if rc != 0:
+                self.tel.log("  [skeleton-merge] preferred merge does not build "
+                             f"(rc={rc}) — redoing with provenance gating. First "
+                             f"error: {_first_error_line(out)}")
+                self.tel.emit("task2b.merge.preference_reverted", data={
+                    "prefer_cluster": prefer_cluster,
+                    "preferred_count": len(stats.get("preferred", [])),
+                    "error": _first_error_line(out),
+                })
+                stats = self.fill.merge_cluster_outputs(
+                    project_dir=project_dir, cluster_specs=cluster_specs,
+                    successes=successes, prefer_cluster=None,
+                )
+        if stats.get("items_dropped"):
+            self.tel.log("  [skeleton-merge] WARN: merge emitted "
+                         f"{stats['items_dropped']} fewer item(s) than its richest "
+                         "input held — something was dropped.")
+        self.tel.emit("task2b.merge", data={
+            "module": module,
+            "clusters": sorted(cluster_specs),
+            "files_written": stats.get("files_written", 0),
+            "files_ast_merged": stats.get("files_ast_merged", 0),
+            "files_passthrough": stats.get("files_passthrough", 0),
+            "items_in_max": stats.get("items_in_max", 0),
+            "items_out": stats.get("items_out", 0),
+            "items_dropped": stats.get("items_dropped", 0),
+            "cfg_gated_fns": stats.get("cfg_gated_fns", 0),
+            "prefer_cluster": stats.get("prefer_cluster", ""),
+            "preferred": list(stats.get("preferred", []))[:200],
+        })
+        return stats
+
+    def _reopen_stale_cluster(self, project_dir: Path, module: str, cluster: str,
+                              clusters: Sequence[BuildCluster]) -> bool:
+        """Should this checkpointed cluster be re-entered, and if so, clear it.
+
+        A per-cluster checkpoint is permanent: marker valid + tree on disk ⇒
+        skipped, on every later run, forever. Clusters also seed FORWARD only,
+        so a cluster that ran first never sees what a later one worked out.
+        Together those two rules froze `anyhow`'s `stable` at its 2026-07-30
+        state — `test_downcast` and `test_large_alignment` still in its
+        `failed[]` — while `nightly` passed both on 08-04, and the merge kept
+        shipping stable's bodies to the default build.
+
+        Re-entering costs a full Phase A→D for that cluster (measured at ~4.5 h
+        on `anyhow`), which is why it is not the default: the merge-time
+        preference already keeps the frozen bodies out of the built tree, and
+        this is the deeper repair for when the trees themselves must agree.
+        `TASK2A_REOPEN_STALE_CLUSTERS=1` turns it on. Either way the finding is
+        logged and emitted, so a run that does NOT re-open still says so.
+        """
+        store = _load_cluster_evidence(project_dir)
+        mine = store.get(cluster)
+        if not mine:
+            return False
+        my_failed = set(mine.get("failed", ()))
+        overtaken: set[str] = set()
+        for other in clusters:
+            if other.name == cluster:
+                continue
+            theirs = store.get(other.name)
+            if not theirs:
+                continue
+            # A test the other cluster RAN and did not fail, that this one
+            # fails. Restricted to what the other actually ran: a test its cfg
+            # excludes from the build is absent, not passing.
+            their_passes = set(theirs.get("ran", ())) - set(theirs.get("failed", ()))
+            overtaken |= my_failed & their_passes
+        if not overtaken:
+            return False
+        names = ", ".join(sorted(overtaken)[:8])
+        self.tel.log(f"  [{cluster}] checkpointed with {len(overtaken)} test(s) "
+                     f"another cluster now PASSES: {names}. Its tree cannot "
+                     "improve on its own — clusters seed forward only.")
+        self.tel.emit("task2a.cluster.stale", data={
+            "cluster": cluster, "overtaken": sorted(overtaken),
+        })
+        if os.getenv("TASK2A_REOPEN_STALE_CLUSTERS", "0") in ("", "0", "false"):
+            self.tel.log(f"  [{cluster}] NOT re-opening (set "
+                         "TASK2A_REOPEN_STALE_CLUSTERS=1 to re-run it); the "
+                         "merge prefers the better-evidenced body instead.")
+            return False
+        self.tel.mark_phase(project_dir, f"task2a/{module}/{cluster}",
+                            "stale", detail=f"{len(overtaken)} test(s) overtaken")
+        return True
+
     def _post_merge_fill_pass(
         self,
         project_dir: Path,
         clusters: list[BuildCluster],
         module: str,
         functional_req: str,
-    ) -> None:
+    ) -> bool:
         """FR-024 improvement-driven loop on the merged tree.
 
         Runs cargo test on `project_dir`, attributes failures via the full chain
@@ -2280,6 +2470,11 @@ class StaticSkeletonTask2Generator(Task2Generator):
         per-cluster / merged-view mismatch where Phase C declares done but the
         merged source still has unfilled stubs under the default cfg TASK 3 runs
         under.
+
+        Returns True only when the tree it leaves behind is one the stage can
+        stand behind: a clean `cargo test`, or a stall/cap exit that measured
+        real verdicts. False for a timeout, and for a tree that never built —
+        the caller marks `task2c` done on the return value, not unconditionally.
         """
         max_stalls = self.cfg.post_merge_max_stalls
         # Hard cap is now a runaway-safety backstop only — floor-stall
@@ -2287,7 +2482,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
         # (legacy behaviour preserved).
         hard_cap = self.cfg.post_merge_hard_cap
         if hard_cap <= 0:
-            return
+            return False
         tag = "[skeleton-merge]"
         tests_dir_files: list[Path] = list((project_dir / "tests").rglob("*.rs"))
         fr_path = project_dir / f"functional_requirements_{module}.md"
@@ -2313,6 +2508,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
         best_pass = -1
         best_fail = None
         iter_n = 0
+        measured_any = False
         while iter_n < hard_cap:
             iter_n += 1
             self.tel.check_stop(f"post-merge fill iter {iter_n}")
@@ -2323,34 +2519,100 @@ class StaticSkeletonTask2Generator(Task2Generator):
                                         timeout=test_timeout)
             dt = time.monotonic() - t0
             pass_count, fail_count, _ignored = parse_test_counts(output)
+            # A binary that dies prints no `test result:` line, so its tests
+            # leave the numerator AND the denominator together and the total
+            # looks internally consistent. On 2026-08-05 this loop logged
+            # `pass=139 fail=1` while tests/test_downcast.rs cored after its
+            # first test and 6 of its 7 reported nothing — the same defect that
+            # cost `nightly` three sessions under the name `missing=6`, in the
+            # one stage that had neither task2a's `oracle_vanished` nor task3's
+            # reported-vs-expected check. cargo announces `running N tests` for
+            # the crashed binary before it dies, so no static inventory is
+            # needed to see it.
+            gap = find_unreported_tests(output)
+            if gap:
+                self.tel.log(f"  {tag} post-merge iter {iter_n}: "
+                             f"{gap.missing} test(s) announced but never reported "
+                             f"— binaries produced no `test result:` line: "
+                             f"{', '.join(gap.silent_binaries)}. The pass/fail "
+                             f"pair below counts {gap.reported} of {gap.announced}.")
+                self.tel.emit("post_merge.tests_vanished", data={
+                    "iter": iter_n, "announced": gap.announced,
+                    "reported": gap.reported, "missing": gap.missing,
+                    "silent_binaries": list(gap.silent_binaries),
+                })
             if rc == 0:
                 self.tel.log(f"  {tag} post-merge cargo test PASSED "
                              f"({pass_count} passed, {dt:.1f}s).")
                 self.tel.emit("post_merge.fill.iter", data={
                     "iter": iter_n, "rc": 0, "frontier_size": 0, "kind": "pass",
                     "pass_count": pass_count, "fail_count": fail_count,
+                    "missing": gap.missing,
                 })
-                return
+                if pass_count > best_pass:
+                    save_merged_best_tree(project_dir, pass_count, iter_n)
+                return not gap
             if rc == -1:
                 self.tel.log(f"  {tag} post-merge cargo test TIMED OUT. Stopping.")
                 self.tel.emit("post_merge.fill.iter", data={
                     "iter": iter_n, "rc": -1, "frontier_size": 0, "kind": "timeout",
                     "pass_count": pass_count, "fail_count": fail_count,
                 })
-                return
+                return False
+            # A sweep with no verdicts at all is a BUILD, not a score. The loop
+            # may still repair it — `attribute_failures` builds a compile
+            # frontier from the diagnostics — but the stage must not later be
+            # recorded done having never measured one.
+            measured_any = measured_any or (pass_count + fail_count) > 0
 
             improved = pass_count > best_pass
             if improved:
                 best_pass = pass_count
                 best_fail = fail_count
                 stall = 0
+                save_merged_best_tree(project_dir, pass_count, iter_n)
             else:
                 stall += 1
+                if best_pass > 0 and pass_count < best_pass:
+                    # Below the floor: the fills this iteration made things
+                    # worse. task2a restores here and always has; task2c kept
+                    # `best_pass` only to compute `improved`, so it ended on
+                    # whatever its last iteration happened to produce.
+                    restored = restore_merged_best_tree(project_dir)
+                    if restored:
+                        self.tel.emit("post_merge.tree_restored", data={
+                            "iter": iter_n, "pass_count": pass_count,
+                            "best_pass": best_pass, "files": len(restored),
+                        })
 
             _attr = self.cargo.attribute_failures(
                 output, project_dir, recently_filled, test_reverse_map, "merged",
             )
             frontier, kind = _attr.frontier, _attr.kind
+            # A crashed binary prints no FAILED lines, so its tests convict
+            # nothing and no fill is ever aimed at them — and they are the only
+            # tests whose repair would move the score. The ASAN blame and crash
+            # retrigger that eventually cleared exactly this on `nightly` live
+            # in the TDD driver and are not reachable from here, but the reverse
+            # map is already built above and answers the same question one step
+            # coarser: which fns does this binary's source exercise?
+            if gap:
+                crash_frontier = self._frontier_from_silent_binaries(
+                    gap.silent_binaries, tests_dir_files, test_reverse_map)
+                new_keys = {k: v for k, v in crash_frontier.items()
+                            if k not in frontier}
+                if new_keys:
+                    frontier = {**frontier, **new_keys}
+                    kind = FailureKind.CRASHED_BINARY
+                    self.tel.log(f"  {tag} post-merge iter {iter_n}: "
+                                 f"{len(new_keys)} fn(s) added to the frontier "
+                                 "from the crashed binary's own tests (no FAILED "
+                                 "line names them).")
+                    self.tel.emit("post_merge.crash_frontier", data={
+                        "iter": iter_n,
+                        "silent_binaries": list(gap.silent_binaries),
+                        "fns_added": len(new_keys),
+                    })
             eligible = {k: v for k, v in frontier.items()
                         if k not in permanently_exhausted}
             # Stall on pass_count is the sole real terminator. A non-empty
@@ -2370,8 +2632,11 @@ class StaticSkeletonTask2Generator(Task2Generator):
                     "kind": "stall_exit",
                     "pass_count": pass_count, "fail_count": fail_count,
                     "improved": improved, "stall": stall,
+                    "missing": gap.missing,
                 })
-                return
+                if best_pass > 0 and pass_count < best_pass:
+                    restore_merged_best_tree(project_dir)
+                return measured_any
             if not eligible:
                 self.tel.log(f"  {tag} post-merge iter {iter_n}: no actionable "
                              f"frontier (stall={stall}/{max_stalls}); continuing.")
@@ -2428,6 +2693,39 @@ class StaticSkeletonTask2Generator(Task2Generator):
                          f"{sub.fns_filled} fn(s) filled, "
                          f"{sub.attempts} attempt(s).")
         self.tel.log(f"  {tag} post-merge hard cap {hard_cap} reached (safety net).")
+        if best_pass > 0:
+            restore_merged_best_tree(project_dir)
+        return measured_any
+
+    @staticmethod
+    def _frontier_from_silent_binaries(
+        silent_binaries: Sequence[str],
+        tests_dir_files: Sequence[Path],
+        test_reverse_map: dict[str, set[FnLocator]],
+    ) -> dict[FnLocator, set[str]]:
+        """Fns the tests of a binary that produced no verdict exercise.
+
+        `silent_binaries` are cargo's own `Running tests/foo.rs` labels. The
+        reverse map is keyed by TEST NAME, so the binary is resolved to its test
+        names by matching the file it was built from. Each fn is convicted by
+        the whole binary rather than by one test — which is the honest
+        granularity: a binary that dies takes its tests down together and
+        nothing in the output says which one did it."""
+        convicted: dict[FnLocator, set[str]] = {}
+        stems = {Path(label.split()[-1]).stem for label in silent_binaries if label}
+        for tf in tests_dir_files:
+            if tf.stem not in stems:
+                continue
+            try:
+                body = tf.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            for test_name, keys in test_reverse_map.items():
+                if test_name not in body:
+                    continue
+                for key in keys:
+                    convicted.setdefault(key, set()).add(test_name)
+        return convicted
 
     @staticmethod
     def _cluster_check_cmd(cluster: BuildCluster) -> str:

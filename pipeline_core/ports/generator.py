@@ -166,7 +166,7 @@ class FillEngine(Protocol):
     ) -> list[FnLocator]: ...
     def merge_cluster_outputs(
         self, *, project_dir: Path, cluster_specs: dict[str, BuildCluster],
-        successes: list[dict[str, Any]],
+        successes: list[dict[str, Any]], prefer_cluster: str | None = ...,
     ) -> dict[str, Any]: ...
     def generate_fix_loop(
         self, *, project_dir: Path, check_cmd: str, source_paths: list[Path],

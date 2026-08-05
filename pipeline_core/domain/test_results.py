@@ -136,6 +136,77 @@ def parse_test_counts(test_output: str) -> tuple[int, int, int]:
     return (passed, failed, ignored)
 
 
+@dataclass(frozen=True, slots=True)
+class TestReportGap:
+    """Tests a `cargo test` run ANNOUNCED but never reported a verdict for.
+
+    `parse_test_counts` sums the `test result:` lines, and a binary that
+    segfaults prints none — so its tests leave the numerator and the denominator
+    together and the total looks internally consistent. Measured on `anyhow`
+    2026-08-05: the post-merge loop logged `pass=139 fail=1` while
+    `tests/test_downcast.rs` cored after its first test, and 6 of its 7
+    produced no verdict at all.
+
+    Nothing else in the output has to be trusted to see this: cargo prints
+    `running N tests` for the crashed binary before it dies, so the announcement
+    is right there next to the silence. `expected` counts from a static
+    inventory are not needed and cannot be wrong here.
+    """
+
+    announced: int
+    reported: int
+    silent_binaries: tuple[str, ...]
+
+    @property
+    def missing(self) -> int:
+        return max(0, self.announced - self.reported)
+
+    def __bool__(self) -> bool:
+        """True when a binary went silent — the shape callers branch on."""
+        return bool(self.silent_binaries)
+
+
+def find_unreported_tests(test_output: str) -> TestReportGap:
+    """Compare what `cargo test` announced against what it reported.
+
+    Each test binary prints ``Running <label> (<path>)``, then ``running N
+    tests``, then — only if it survives — ``test result: …``. A binary with an
+    announcement and no result line took its whole `N` out of the counts.
+    """
+    announced = reported = 0
+    current = ""
+    pending: dict[str, int] = {}
+    silent: list[str] = []
+    for line in (test_output or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith(("Running ", "Doc-tests ")):
+            # A previous binary that never reported goes down as silent.
+            if current and current in pending:
+                silent.append(current)
+            current = stripped.split(" (", 1)[0]
+            continue
+        # `running 1 test` is SINGULAR — a binary with exactly one test says
+        # "test", not "tests", and matching only the plural silently undercounts
+        # the announcement. On the merged `anyhow` tree that was 2 of 149.
+        if stripped.startswith("running ") and stripped.endswith(("test", "tests")):
+            parts = stripped.split()
+            if len(parts) >= 2 and parts[1].isdigit():
+                n = int(parts[1])
+                announced += n
+                if n:
+                    pending[current] = n
+            continue
+        if "test result:" in stripped:
+            t = _tallies_on_result_line(stripped)
+            reported += (t.get("passed", 0) + t.get("failed", 0)
+                         + t.get("ignored", 0))
+            pending.pop(current, None)
+    if current and current in pending:
+        silent.append(current)
+    return TestReportGap(announced=announced, reported=reported,
+                         silent_binaries=tuple(silent))
+
+
 # This is a module-public parser (sibling to count_passing_tests /
 # validate_task3_output_strict) — the public name is the canonical one; the old
 # `_`-prefixed name is kept as a back-compat alias for the pipeline.py test seam

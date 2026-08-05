@@ -33,14 +33,45 @@ def configure(*, events_log: str) -> None:
 
 
 def pipeline_start_time() -> float:
-    """Return the mtime of /proc/{pid} for the running pipeline process (= process start time).
-    Returns 0.0 if no pipeline process is found."""
+    """Wall-clock start of the running pipeline process, or 0.0 if none.
+
+    Two defects made this return a time HOURS after the real start, and every
+    panel keyed to "this run" then rendered blank because every one of the
+    run's events sorted as older than its own start:
+
+    * `/proc/{pid}` mtime is not the process start time. The supervisor's
+      (`lib/record_death.sh`) read 2026-08-04 21:15:33 local for a process that
+      began at 18:56:21 — the directory's mtime moves during the process's
+      life. Field 22 of `/proc/{pid}/stat` is the real start, in clock ticks
+      since boot.
+    * `pgrep -f pipeline.py` matches every command line CONTAINING the string:
+      the `record_death.sh … pipeline.py` supervisor wrapper, and any shell
+      whose own command mentions it. The first pid listed is the lowest, which
+      is the supervisor, not the pipeline. Match the python invocation.
+
+    Callers should prefer scoping by `run_id` (:func:`read_recent_events`) —
+    that needs no clock and cannot drift. This stays for the panels that want
+    an elapsed-time reading.
+    """
     try:
-        out = subprocess.run(["pgrep", "-f", "pipeline.py"], capture_output=True, text=True).stdout
+        out = subprocess.run(
+            ["pgrep", "-f", r"python.*pipeline\.py"],
+            capture_output=True, text=True).stdout
         for pid in out.strip().split():
-            proc_dir = f"/proc/{pid}"
-            if os.path.exists(proc_dir):
-                return os.path.getmtime(proc_dir)
+            try:
+                with open(f"/proc/{pid}/stat", encoding="utf-8") as fh:
+                    stat = fh.read()
+                # comm can contain spaces AND ')' — split after the last ')'.
+                fields = stat[stat.rindex(")") + 1:].split()
+                start_ticks = int(fields[19])          # field 22, 1-indexed
+            except (OSError, ValueError, IndexError):
+                continue
+            ticks = os.sysconf("SC_CLK_TCK") or 100
+            with open("/proc/stat", encoding="utf-8") as fh:
+                boot = next((float(ln.split()[1]) for ln in fh
+                             if ln.startswith("btime ")), 0.0)
+            if boot:
+                return boot + start_ticks / ticks
     except Exception:
         pass
     return 0.0
@@ -114,6 +145,13 @@ def pipeline_log_facts() -> dict[str, Any]:
     so no PIPELINE-STARTED reset is needed. `last_line`/`age` are NOT facts — they
     are raw-log presentation and stay in run_data.log_tail_meta()."""
     attempt = max_attempt = "?"
+    # Whether this run has a task0c phase AT ALL. Every field below is fed only
+    # by `task0c.*` events, and a RESUMED run skips task0c entirely — the
+    # clusters are baked and the finished ones are checkpointed — so on such a
+    # run the loop-hierarchy rows render `attempt ?/? · file ? 0/0` forever.
+    # They are honest and useless; the caller uses this to render the live
+    # counter that DOES move (the TDD iter) instead.
+    saw_task0c = False
     errors = 0
     current_file = "?"
     files_this_pass: list[str] = []
@@ -129,6 +167,8 @@ def pipeline_log_facts() -> dict[str, Any]:
         name = ev.get("event", "")
         d = ev.get("data") or {}
         f = ev.get("file")
+        if name.startswith("task0c."):
+            saw_task0c = True
         if name == "task0c.attempt":
             attempt, max_attempt = str(d.get("attempt", "?")), str(d.get("max_attempt", "?"))
             files_this_pass = []
@@ -173,6 +213,7 @@ def pipeline_log_facts() -> dict[str, Any]:
         "file_history": file_history, "queue_history": queue_history,
         "current_cluster": current_cluster, "quick_cov_history": quick_cov_history,
         "inner_retry": inner_retry, "inner_retry_max": inner_retry_max,
+        "has_task0c": saw_task0c,
     }
 
 
@@ -200,15 +241,21 @@ def vllm_runtime() -> dict[str, Any]:
 def read_recent_events(want: Callable[[str], bool]) -> list[dict[str, Any]]:
     """Tail events.jsonl (last 1 MB) → this run's records whose event name passes `want`.
 
-    Records older than the most recent pipeline start are dropped so panels
-    reflect the live run, not historical noise.
+    Scoped by `run_id`: every record the emitter writes carries the run's id,
+    so "this run" is the newest id present in the window and needs no clock.
+    It replaced a comparison against :func:`pipeline_start_time`, which read the
+    supervisor's `/proc` mtime and could land HOURS after the real start — on
+    2026-08-04 it returned 19:15:33 UTC for a run begun at 16:56:21, so every
+    one of that run's events was dropped as "historical" and the whole Phase C
+    panel rendered empty (`?/?`, `0/0`, no pass count) while the run was
+    healthy and filling. A timestamp answers "recent"; only the id answers
+    "same run", and restarts here are frequent enough that the difference shows.
+
+    Falls back to the timestamp filter for records written before the emitter
+    carried a `run_id`.
     """
     if not os.path.exists(EVENTS_LOG):
         return []
-    try:
-        run_start = pipeline_start_time()
-    except Exception:
-        run_start = 0
     try:
         with open(EVENTS_LOG, "rb") as fh:
             fh.seek(0, 2)
@@ -217,15 +264,29 @@ def read_recent_events(want: Callable[[str], bool]) -> list[dict[str, Any]]:
             raw = fh.read()
     except Exception:
         return []
-    events: list[dict[str, Any]] = []
+    parsed: list[dict[str, Any]] = []
     for line in raw.decode("utf-8", errors="replace").splitlines():
         try:
-            rec = _json.loads(line)
+            parsed.append(_json.loads(line))
         except Exception:
             continue
+    # The LAST non-empty run_id in the window is the live run's; a restart
+    # inside the window leaves the previous run's records ahead of it.
+    run_id = next((r.get("run_id") for r in reversed(parsed) if r.get("run_id")), "")
+    run_start = 0.0
+    if not run_id:
+        try:
+            run_start = pipeline_start_time()
+        except Exception:
+            run_start = 0.0
+    events: list[dict[str, Any]] = []
+    for rec in parsed:
         if not want(rec.get("event", "")):
             continue
-        if run_start > 0:
+        if run_id:
+            if rec.get("run_id") != run_id:
+                continue
+        elif run_start > 0:
             try:
                 ts = datetime.fromisoformat(rec["ts"].replace("Z", "+00:00")).timestamp()
                 if ts < run_start:

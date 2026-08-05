@@ -121,6 +121,9 @@ from pipeline_core.monitor.render import (
     event_format as _event_format,
 )
 from pipeline_core.monitor.render import (
+    loop_hierarchy_rows as _loop_hierarchy_rows,
+)
+from pipeline_core.monitor.render import (
     plain as _plain,
 )
 from pipeline_core.monitor.render import (
@@ -638,6 +641,9 @@ def pipeline_status():
 
     # ── P3.11: Phase C per-fn panel (visible when the skeleton backend
     # is running). Pulls structured data from logs/events.jsonl.
+    # Bound before the try: the loop-hierarchy rows below read it too, and a
+    # panel error must not turn into a NameError that blanks the whole screen.
+    _pc: dict[str, Any] = {}
     try:
         _pc = _phase_c_state()
         for r in _phase_c_panel_rows(_pc):
@@ -649,53 +655,9 @@ def pipeline_status():
     if _dr:
         rows.append(_dr)
 
-    # ── Loop hierarchy: cluster → attempt → file → retry ────────────────────
-    #
-    #  cluster  ✓stable  ▶nightly  ○...       [██░░░░░░] 1/3
-    #    └ attempt                             [████░░░░] 2/10
-    #        └ file  context.rs               [████████] 4/8
-    #             └ retry                     [██░░░░░░] 1/2   (only when active)
-
-    # Level 0 — cluster row
-    n_clusters = len(clusters)
-    n_done_cl  = len(done_set)
-    cl_i       = next((i for i, n in enumerate(clusters) if n == cur_cl), n_done_cl)
-    cl_pct     = (cl_i / n_clusters * 100) if n_clusters else 0
-    cl_parts: list[str] = []
-    for name in clusters:
-        ab = name[:10]
-        if name in done_set:   cl_parts.append(green(f"✓{ab}"))
-        elif name == cur_cl:   cl_parts.append(yellow(bold(f"▶{ab}")))
-        else:                  cl_parts.append(dim(f"○{ab}"))
-    cl_names = "  ".join(cl_parts)
-    cl_bar   = f"[{bar(cl_pct, 10)}] {cl_i}/{n_clusters}" if n_clusters else ""
-    rows.append(f"  cluster  {cl_names}  {dim(cl_bar)}")
-
-    # Level 1 — attempt row
-    try:    att_i = int(prog["attempt"]); att_t = int(prog["max_attempt"])
-    except: att_i = 0; att_t = 0
-    att_pct = (att_i / att_t * 100) if att_t else 0
-    att_bar = f"[{bar(att_pct, 14)}] {prog['attempt']}/{prog['max_attempt']}"
-    rows.append(f"    └ attempt  {att_bar}")
-
-    # Level 2 — file row
-    _cl_files = prog["cluster_files"]
-    all_f  = _cl_files if (cur_cl and cur_cl not in ("stable", "") and _cl_files) else prog["all_files"]
-    this_p = prog["files_this_pass"]
-    ft = max(len(all_f), len(this_p))
-    fi = len(this_p)
-    cf = prog["current_file"].replace("src/", "") if prog["current_file"] != "?" else "?"
-    file_pct = (fi / ft * 100) if ft else 0
-    file_bar = f"[{bar(file_pct, 12)}] {fi}/{ft}"
-    rows.append(f"        └ file  {cyan(cf):<18}  {file_bar}")
-
-    # Level 3 — inner retry (only when active)
-    ir, ir_max = prog.get("inner_retry", "?"), prog.get("inner_retry_max", "?")
-    if ir != "?" and ir_max != "?":
-        try:    r_pct = int(ir) / int(ir_max) * 100
-        except: r_pct = 0
-        retry_bar = f"[{bar(r_pct, 10)}] {ir}/{ir_max}"
-        rows.append(f"             └ retry  {retry_bar}")
+    rows.extend(_loop_hierarchy_rows(
+        clusters=clusters, done_set=done_set, cur_cl=cur_cl,
+        prog=prog, phase_c=_pc))
 
     # Row 4: uncovered-lines history for last 4 files  (e.g. error.rs:92→ 72→ 45)
     hist = prog["file_history"]

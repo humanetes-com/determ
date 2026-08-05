@@ -24,6 +24,14 @@ class FailureKind(StrEnum):
     RECENTLY_FILLED = "recently_filled"
     REVERSE_MAP = "reverse_map"
     MERGED = "merged"
+    # Fns reached through a test binary that produced NO verdict at all. A
+    # binary that segfaults prints no `FAILED` line, so its tests convict
+    # nothing and every other path is blind to them — and on `anyhow`
+    # 2026-08-05 those were the only tests whose repair could have moved the
+    # merged tree's score. It does NOT convict: the binary went down as a
+    # whole and nothing in the output says which of its tests did it, so this
+    # is "who might be responsible", never grounds to revert a fill.
+    CRASHED_BINARY = "crashed_binary"
     NO_FRONTIER = "no_frontier"
 
     @property

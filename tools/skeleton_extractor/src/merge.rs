@@ -31,7 +31,7 @@ use syn::parse_file;
 // Round-tripped via prettyplease for stable formatting.
 // ---------------------------------------------------------------------------
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// One cluster's view of a file plus the cfg expression that gates the
 /// cluster (e.g. "all(not(error_generic_member_access), not(anyhow_no_core_error))"
@@ -80,6 +80,18 @@ fn item_kind_name(item: &syn::Item) -> (String, String) {
         syn::Item::Trait(t) => ("trait".to_string(), t.ident.to_string()),
         syn::Item::TraitAlias(t) => ("trait_alias".to_string(), t.ident.to_string()),
         syn::Item::Type(t) => ("type".to_string(), t.ident.to_string()),
+        // An anonymous `const _: () = { … }` has the LITERAL ident `_`, so
+        // keying a const by its ident collapses every anonymous const in a
+        // file into one bucket and the merge emits one of them. Measured on
+        // `anyhow` 2026-08-05: both cluster trees carry
+        // `#[cfg(anyhow_build_probe)] const _: Option<&str> =
+        // option_env!("RUSTC_BOOTSTRAP");` in src/nightly.rs alongside a second
+        // anonymous const, and the merged output carried it zero times — an
+        // item every input held, emitted never. Identless items are keyed by
+        // content, exactly as `Item::Macro` below already does.
+        syn::Item::Const(c) if c.ident == "_" => {
+            ("const".to_string(), token_hash(&quote!(#c)))
+        }
         syn::Item::Const(c) => ("const".to_string(), c.ident.to_string()),
         syn::Item::Static(s) => ("static".to_string(), s.ident.to_string()),
         syn::Item::Mod(m) => ("mod".to_string(), m.ident.to_string()),
@@ -289,6 +301,167 @@ pub(crate) fn own_cfg_pred(attrs: &[syn::Attribute]) -> String {
     preds.join(" & ")
 }
 
+/// What the merge needs to know beyond the items themselves: which cfg atoms
+/// separate the clusters, and which cluster's answers carry the better evidence.
+pub(crate) struct MergeCtx {
+    /// Every leaf cfg atom appearing in any cluster's gate predicate. An item
+    /// whose OWN cfg mentions one of these is decided BY the cluster axis; an
+    /// item whose cfg mentions none of them is live in every cluster.
+    pub(crate) axis_atoms: BTreeSet<String>,
+    /// The cluster whose body wins an off-axis divergence, when one cluster's
+    /// test evidence strictly dominates another's. Empty when it does not.
+    pub(crate) prefer_cluster: Option<String>,
+    /// Divergences resolved by preference, for the caller's telemetry.
+    pub(crate) preferred: std::cell::RefCell<Vec<String>>,
+}
+
+impl MergeCtx {
+    pub(crate) fn new(gates: &[&str], prefer_cluster: Option<String>) -> Self {
+        let mut axis_atoms = BTreeSet::new();
+        for g in gates {
+            predicate_leaf_atoms(g, &mut axis_atoms);
+        }
+        Self {
+            axis_atoms,
+            prefer_cluster,
+            preferred: std::cell::RefCell::new(Vec::new()),
+        }
+    }
+
+    /// True when the item's own cfg is DECIDED by the cluster axis — i.e. it
+    /// mentions at least one atom the clusters differ on, so the item is live
+    /// in some clusters and compiled out of the rest.
+    ///
+    /// This is the premise the single-body branch rests on, stated as a check
+    /// rather than assumed. It does not hold for an item whose own cfg is
+    /// orthogonal to the axis: that item is live in EVERY cluster, every
+    /// cluster filled it, and the bodies may legitimately differ. Measured on
+    /// `anyhow` 2026-08-05: five fns in src/error.rs carrying
+    /// `#[cfg(any(feature = "std", not(anyhow_no_core_error)))]` — true in both
+    /// clusters — diverged and one body was dropped with no gate, no log line
+    /// and no event, chosen by nothing but `"nightly" < "stable"`.
+    pub(crate) fn own_cfg_is_on_axis(&self, own_cfg: &str) -> bool {
+        if own_cfg.trim().is_empty() {
+            return false;
+        }
+        let mut atoms = BTreeSet::new();
+        predicate_leaf_atoms(own_cfg, &mut atoms);
+        atoms.intersection(&self.axis_atoms).next().is_some()
+    }
+
+    /// Index of the entry to keep when an off-axis divergence is settled by
+    /// evidence instead of by provenance.
+    ///
+    /// Gating a divergence by the cluster it came from is right only while both
+    /// bodies are equally believed. When one cluster's failing-test set is a
+    /// strict subset of another's on the tests they share, they are not:
+    /// `anyhow` 2026-08-05 shipped `stable`'s 07-30 bodies for
+    /// `object_downcast` / `object_drop_front` / `context_chain_downcast` under
+    /// the default cfg and cored on `tests/test_downcast.rs`, while the same
+    /// merged file under `--cfg error_generic_member_access` passed all 7 —
+    /// same file, same merge, opposite outcome, decided entirely by which
+    /// cluster's copy the default build takes.
+    ///
+    /// Applies ONLY to a real divergence across clusters that all carry the
+    /// item. A cluster-exclusive item stays gated to the clusters that have it:
+    /// preferring it would emit it ungated and leak it into a cluster whose
+    /// tree never held it.
+    ///
+    /// And only when the divergence is confined to a fn BODY — `body_only`.
+    /// Choosing a declaration is not the same act as choosing a body, and the
+    /// difference is not academic: `anyhow`'s `TraitKind::anyhow_kind` is a
+    /// required method in `nightly`'s tree and a defaulted one in `stable`'s,
+    /// with `stable`'s `impl TraitKind for E` empty because it leans on that
+    /// default. Preferring `nightly`'s declaration kept the requirement and
+    /// left the impl that satisfies it gated to the other cluster — E0046, the
+    /// crate stopped compiling. A body swap cannot do that: the item's shape,
+    /// and so every other item's relationship to it, is unchanged.
+    fn preferred_entry<T>(
+        &self,
+        bucket: &[(&str, &str, &T)],
+        by_content: &BTreeMap<String, Vec<(&str, &str, &T)>>,
+        total_clusters: usize,
+        key: &ItemKey,
+        body_only: bool,
+    ) -> Option<usize> {
+        let want = self.prefer_cluster.as_deref()?;
+        if by_content.len() < 2 || bucket.len() != total_clusters || !body_only {
+            return None;
+        }
+        let idx = bucket.iter().position(|(c, _, _)| *c == want)?;
+        self.preferred
+            .borrow_mut()
+            .push(format!("{}::{} -> {}", key.0, key.1, want));
+        Some(idx)
+    }
+}
+
+/// The signature of a fn-like node that HAS a body, rendered for comparison.
+/// `None` for anything else — a const whose value differs, a type alias, a
+/// trait method with no default: those are declarations, not bodies.
+fn fn_sig_with_body(item: &syn::Item) -> Option<String> {
+    match item {
+        syn::Item::Fn(f) => {
+            let sig = &f.sig;
+            Some(quote!(#sig).to_string())
+        }
+        _ => None,
+    }
+}
+
+fn impl_fn_sig_with_body(item: &syn::ImplItem) -> Option<String> {
+    match item {
+        syn::ImplItem::Fn(f) => {
+            let sig = &f.sig;
+            Some(quote!(#sig).to_string())
+        }
+        _ => None,
+    }
+}
+
+fn trait_fn_sig_with_body(item: &syn::TraitItem) -> Option<String> {
+    match item {
+        syn::TraitItem::Fn(f) if f.default.is_some() => {
+            let sig = &f.sig;
+            Some(quote!(#sig).to_string())
+        }
+        _ => None,
+    }
+}
+
+/// True when every variant in the bucket is a fn with a body and they all share
+/// one signature — i.e. the clusters disagree about the body and nothing else.
+fn divergence_is_body_only<T>(
+    bucket: &[(&str, &str, &T)],
+    sig: impl Fn(&T) -> Option<String>,
+) -> bool {
+    let mut sigs = bucket.iter().map(|(_, _, it)| sig(it));
+    let Some(Some(first)) = sigs.next() else {
+        return false;
+    };
+    sigs.all(|s| s.as_deref() == Some(first.as_str()))
+}
+
+/// Collect the leaf cfg atoms of a raw predicate string (the form
+/// [`own_cfg_pred`] and the cluster gates are written in) into `out`.
+pub(crate) fn predicate_leaf_atoms(pred: &str, out: &mut BTreeSet<String>) {
+    for part in pred.split(" & ") {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let Some(attr) = cfg_attr_from_predicate(part) else {
+            continue;
+        };
+        let syn::Meta::List(ml) = &attr.meta else {
+            continue;
+        };
+        if let Ok(cond) = syn::parse2::<syn::Meta>(ml.tokens.clone()) {
+            crate::cfg::cfg_meta_leaves(&cond, out);
+        }
+    }
+}
+
 /// True when a fn-like body is just an `unimplemented!()`/`todo!()`/`panic!()`
 /// skeleton stub. When the SAME cfg-variant item is filled in its live cluster
 /// but left a stub in a cfg-dead cluster, the merge must keep the FILLED body.
@@ -316,6 +489,7 @@ fn trait_item_is_stub(item: &syn::TraitItem) -> bool {
 /// cfg predicate.
 pub(crate) fn merge_trait_items(
     cluster_items: &[(&str, &str, &[syn::TraitItem])],
+    ctx: &MergeCtx,
 ) -> Vec<syn::TraitItem> {
     let mut groups: BTreeMap<ItemKey, Vec<(&str, &str, &syn::TraitItem)>> = BTreeMap::new();
     let mut order: Vec<ItemKey> = Vec::new();
@@ -349,12 +523,24 @@ pub(crate) fn merge_trait_items(
             continue;
         }
         // Self-gated cfg-variant assoc item → emit once (filled body), no cluster gate.
-        if !key.2.is_empty() {
+        if ctx.own_cfg_is_on_axis(&key.2) {
             let rep = bucket
                 .iter()
                 .find(|(_, _, it)| !trait_item_is_stub(it))
                 .unwrap_or(&bucket[0]);
             out.push(rep.2.clone());
+            continue;
+        }
+        // Off-axis divergence: every cluster compiles this item, so exactly one
+        // body is right and the better-evidenced cluster's is it.
+        if let Some(i) = ctx.preferred_entry(
+            &bucket,
+            &by_content,
+            total_clusters,
+            &key,
+            divergence_is_body_only(&bucket, trait_fn_sig_with_body),
+        ) {
+            out.push(bucket[i].2.clone());
             continue;
         }
         // Otherwise: emit each unique content with cluster cfg gates joined by `any(...)`.
@@ -376,6 +562,7 @@ pub(crate) fn merge_trait_items(
 /// Recursive merge for impl body items. Same shape as `merge_trait_items`.
 pub(crate) fn merge_impl_items(
     cluster_items: &[(&str, &str, &[syn::ImplItem])],
+    ctx: &MergeCtx,
 ) -> Vec<syn::ImplItem> {
     let mut groups: BTreeMap<ItemKey, Vec<(&str, &str, &syn::ImplItem)>> = BTreeMap::new();
     let mut order: Vec<ItemKey> = Vec::new();
@@ -405,12 +592,22 @@ pub(crate) fn merge_impl_items(
             continue;
         }
         // Self-gated cfg-variant assoc item → emit once (filled body), no cluster gate.
-        if !key.2.is_empty() {
+        if ctx.own_cfg_is_on_axis(&key.2) {
             let rep = bucket
                 .iter()
                 .find(|(_, _, it)| !impl_item_is_stub(it))
                 .unwrap_or(&bucket[0]);
             out.push(rep.2.clone());
+            continue;
+        }
+        if let Some(i) = ctx.preferred_entry(
+            &bucket,
+            &by_content,
+            total_clusters,
+            &key,
+            divergence_is_body_only(&bucket, impl_fn_sig_with_body),
+        ) {
+            out.push(bucket[i].2.clone());
             continue;
         }
         for (_h, entries) in by_content {
@@ -444,7 +641,10 @@ pub(crate) fn compose_gates_any(gates: &[&str]) -> String {
 }
 
 /// Recursive merge of top-level items across clusters.
-pub(crate) fn merge_top_items(cluster_files: &[(String, String, syn::File)]) -> Vec<syn::Item> {
+pub(crate) fn merge_top_items(
+    cluster_files: &[(String, String, syn::File)],
+    ctx: &MergeCtx,
+) -> Vec<syn::Item> {
     let mut groups: BTreeMap<ItemKey, Vec<(&str, &str, &syn::Item)>> = BTreeMap::new();
     let mut order: Vec<ItemKey> = Vec::new();
     for (name, gate, file) in cluster_files {
@@ -472,17 +672,17 @@ pub(crate) fn merge_top_items(cluster_files: &[(String, String, syn::File)]) -> 
         // bodies may diverge while signatures don't.
         let kind = &key.0;
         if kind == "trait" {
-            let merged = merge_trait_block(&bucket);
+            let merged = merge_trait_block(&bucket, ctx);
             out.push(syn::Item::Trait(merged));
             continue;
         }
         if kind == "impl" {
-            let merged = merge_impl_block(&bucket);
+            let merged = merge_impl_block(&bucket, ctx);
             out.push(syn::Item::Impl(merged));
             continue;
         }
         if kind == "mod" {
-            let merged = merge_mod_block(&bucket);
+            let merged = merge_mod_block(&bucket, ctx);
             out.push(syn::Item::Mod(merged));
             continue;
         }
@@ -498,13 +698,25 @@ pub(crate) fn merge_top_items(cluster_files: &[(String, String, syn::File)]) -> 
             out.push(bucket[0].2.clone());
             continue;
         }
-        // Self-gated cfg-variant item (it carries its OWN #[cfg]): the cfg
+        // Self-gated cfg-variant item whose cfg is ON THE CLUSTER AXIS: the cfg
         // already gates it per cluster, so emit it ONCE — never stack a
         // cluster gate (that yields any(x, not(x)) garbage). The live cluster
         // filled it; cfg-dead clusters left a stub → keep the filled body.
-        if !key.2.is_empty() {
+        // An item whose own cfg is orthogonal to the axis is live everywhere
+        // and does NOT belong here; see `own_cfg_is_on_axis`.
+        if ctx.own_cfg_is_on_axis(&key.2) {
             let rep = bucket.iter().find(|(_, _, it)| !item_is_stub(it)).unwrap_or(&bucket[0]);
             out.push(rep.2.clone());
+            continue;
+        }
+        if let Some(i) = ctx.preferred_entry(
+            &bucket,
+            &by_content,
+            total_clusters,
+            &key,
+            divergence_is_body_only(&bucket, fn_sig_with_body),
+        ) {
+            out.push(bucket[i].2.clone());
             continue;
         }
         for (_h, entries) in by_content {
@@ -518,7 +730,10 @@ pub(crate) fn merge_top_items(cluster_files: &[(String, String, syn::File)]) -> 
     out
 }
 
-pub(crate) fn merge_trait_block(bucket: &[(&str, &str, &syn::Item)]) -> syn::ItemTrait {
+pub(crate) fn merge_trait_block(
+    bucket: &[(&str, &str, &syn::Item)],
+    ctx: &MergeCtx,
+) -> syn::ItemTrait {
     // Base trait from first entry; merge bodies across all entries.
     let base = match bucket[0].2 {
         syn::Item::Trait(t) => t.clone(),
@@ -531,14 +746,17 @@ pub(crate) fn merge_trait_block(bucket: &[(&str, &str, &syn::Item)]) -> syn::Ite
             _ => (*c, *g, &[] as &[syn::TraitItem]),
         })
         .collect();
-    let merged_items = merge_trait_items(&cluster_items);
+    let merged_items = merge_trait_items(&cluster_items, ctx);
     syn::ItemTrait {
         items: merged_items,
         ..base
     }
 }
 
-pub(crate) fn merge_impl_block(bucket: &[(&str, &str, &syn::Item)]) -> syn::ItemImpl {
+pub(crate) fn merge_impl_block(
+    bucket: &[(&str, &str, &syn::Item)],
+    ctx: &MergeCtx,
+) -> syn::ItemImpl {
     let base = match bucket[0].2 {
         syn::Item::Impl(i) => i.clone(),
         _ => unreachable!("merge_impl_block called on non-impl item"),
@@ -550,14 +768,17 @@ pub(crate) fn merge_impl_block(bucket: &[(&str, &str, &syn::Item)]) -> syn::Item
             _ => (*c, *g, &[] as &[syn::ImplItem]),
         })
         .collect();
-    let merged_items = merge_impl_items(&cluster_items);
+    let merged_items = merge_impl_items(&cluster_items, ctx);
     syn::ItemImpl {
         items: merged_items,
         ..base
     }
 }
 
-pub(crate) fn merge_mod_block(bucket: &[(&str, &str, &syn::Item)]) -> syn::ItemMod {
+pub(crate) fn merge_mod_block(
+    bucket: &[(&str, &str, &syn::Item)],
+    ctx: &MergeCtx,
+) -> syn::ItemMod {
     let base = match bucket[0].2 {
         syn::Item::Mod(m) => m.clone(),
         _ => unreachable!("merge_mod_block called on non-mod item"),
@@ -589,7 +810,7 @@ pub(crate) fn merge_mod_block(bucket: &[(&str, &str, &syn::Item)]) -> syn::ItemM
             _ => None,
         })
         .collect();
-    let merged_items = merge_top_items(&virtual_files);
+    let merged_items = merge_top_items(&virtual_files, ctx);
     let mut out = base;
     if let Some((brace, _)) = &out.content {
         out.content = Some((*brace, merged_items));
@@ -684,26 +905,102 @@ pub(crate) fn normalize_doc_attrs_in_items(items: &mut [syn::Item]) {
     }
 }
 
+/// Knobs the caller sets per merge run. Defaults reproduce provenance-only
+/// gating, which is what a single-cluster merge and every unit fixture want.
+#[derive(Default)]
+pub struct MergeOptions {
+    /// Cluster whose body wins an off-axis divergence. The CALLER decides this
+    /// — it is a statement about test evidence, and the evidence lives in the
+    /// pipeline's per-cluster sweep records, not in the source trees.
+    pub prefer_cluster: Option<String>,
+}
+
+/// What one file's merge did, for the caller to report. The merge used to
+/// return only the text, so a degraded run and a clean one were
+/// indistinguishable downstream.
+pub struct MergeOutcome {
+    pub text: String,
+    /// Items in the RICHEST single input — every top-level item plus every
+    /// impl/trait member and inline-mod item, counted recursively.
+    ///
+    /// The max over clusters, not the sum, is what makes the number an
+    /// invariant: an item present in several clusters is counted once per
+    /// cluster on the way in and emitted once on the way out, so
+    /// `items_out < items_in_max` means the merge dropped something. Summing
+    /// the inputs would make the comparison vacuously true and catch nothing —
+    /// which is why the anonymous-const loss on `anyhow` went unseen.
+    pub items_in_max: usize,
+    pub items_out: usize,
+    /// `kind::name -> cluster` for each divergence settled by preference.
+    pub preferred: Vec<String>,
+}
+
+/// Count every item a file holds, descending into impl/trait bodies and inline
+/// modules — the unit the merge actually operates on.
+fn count_items(items: &[syn::Item]) -> usize {
+    items
+        .iter()
+        .map(|it| {
+            1 + match it {
+                syn::Item::Impl(i) => i.items.len(),
+                syn::Item::Trait(t) => t.items.len(),
+                syn::Item::Mod(m) => m
+                    .content
+                    .as_ref()
+                    .map(|(_, inner)| count_items(inner))
+                    .unwrap_or(0),
+                _ => 0,
+            }
+        })
+        .sum()
+}
+
 pub fn merge_cluster_files(files: Vec<ClusterFile>) -> Result<String> {
+    Ok(merge_cluster_files_with(files, &MergeOptions::default())?.text)
+}
+
+pub fn merge_cluster_files_with(
+    files: Vec<ClusterFile>,
+    opts: &MergeOptions,
+) -> Result<MergeOutcome> {
     if files.is_empty() {
-        return Ok(String::new());
+        return Ok(MergeOutcome {
+            text: String::new(),
+            items_in_max: 0,
+            items_out: 0,
+            preferred: Vec::new(),
+        });
     }
     let parsed: Vec<(String, String, syn::File)> = files
         .iter()
         .map(|f| f.ast().map(|a| (f.name.clone(), f.cfg_gate.clone(), a)))
         .collect::<Result<_>>()?;
 
-    // Preserve shebang and inner attrs from the first cluster (base).
-    let base_ast = &parsed[0].2;
-    let merged_items = merge_top_items(&parsed);
-    let mut merged = syn::File {
-        shebang: base_ast.shebang.clone(),
-        attrs: base_ast.attrs.clone(),
-        items: merged_items,
-    };
-    // FR-033: normalise doc comments to one line per `#[doc]` so prettyplease
-    // renders them uniformly (no `///`↔`/** */` alternation that breaks docs).
-    normalize_doc_attrs(&mut merged.attrs);
-    normalize_doc_attrs_in_items(&mut merged.items);
-    Ok(prettyplease::unparse(&merged))
+    let gates: Vec<&str> = files.iter().map(|f| f.cfg_gate.as_str()).collect();
+    let ctx = MergeCtx::new(&gates, opts.prefer_cluster.clone());
+    let items_in_max = parsed
+        .iter()
+        .map(|(_, _, f)| count_items(&f.items))
+        .max()
+        .unwrap_or(0);
+    let merged_items = merge_top_items(&parsed, &ctx);
+
+    // Emission preserves each item's original text where it can (see `emit`);
+    // the shebang, inner attributes and file header come from the first cluster
+    // (base) exactly as they always did.
+    let sources = crate::emit::Sources::new(&files);
+    let mut text = crate::emit::file_prefix(&files[0], &parsed[0].2);
+    for item in &merged_items {
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(crate::emit::emit_item(item, &sources).trim_end());
+        text.push('\n');
+    }
+    Ok(MergeOutcome {
+        text,
+        items_in_max,
+        items_out: count_items(&merged_items),
+        preferred: ctx.preferred.into_inner(),
+    })
 }

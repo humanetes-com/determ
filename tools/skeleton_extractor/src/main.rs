@@ -76,6 +76,15 @@ struct Cli {
     #[arg(long)]
     merge_output: Option<PathBuf>,
 
+    /// Cluster whose body wins when clusters diverge on an item that every one
+    /// of them compiles (merge mode). Without it such a divergence is gated by
+    /// provenance and the default build takes whichever cluster's cfg it
+    /// matches — which is how a cluster frozen with failing tests keeps
+    /// shipping its bodies. The CALLER decides the preference: the evidence is
+    /// the per-cluster sweep record, which the trees do not carry.
+    #[arg(long)]
+    prefer_cluster: Option<String>,
+
     /// cfg predicate that is TRUE under the active cluster (repeatable).
     #[arg(long = "cfg-true")]
     cfg_true: Vec<String>,
@@ -112,12 +121,28 @@ fn main() -> Result<()> {
                 cfg_gate,
             });
         }
-        let merged = skeleton_extractor::merge_cluster_files(files)?;
+        let opts = skeleton_extractor::MergeOptions {
+            prefer_cluster: cli.prefer_cluster,
+        };
+        let outcome = skeleton_extractor::merge_cluster_files_with(files, &opts)?;
         if let Some(parent) = out_path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
-        std::fs::write(&out_path, merged)
+        std::fs::write(&out_path, &outcome.text)
             .with_context(|| format!("write merged file {}", out_path.display()))?;
+        // Counts on stdout so the caller can assert items-in >= items-out and
+        // report what the merge actually did. Three findings on 2026-08-05 —
+        // a dropped anonymous const, five silently discarded bodies and every
+        // line comment in the crate — all had to be established by re-running
+        // the merge by hand, because it reported nothing at all.
+        println!(
+            "{}",
+            serde_json::json!({
+                "items_in_max": outcome.items_in_max,
+                "items_out": outcome.items_out,
+                "preferred": outcome.preferred,
+            })
+        );
         return Ok(());
     }
 

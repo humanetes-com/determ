@@ -6,9 +6,67 @@ import re
 
 from pipeline_core.domain.test_results import (
     TestOutcome,
+    find_unreported_tests,
     is_compiler_output_line,
+    parse_test_counts,
     rustc_error_codes,
 )
+
+# The shape `cargo test --no-fail-fast` produced on the merged `anyhow` tree at
+# 2026-08-05 02:27 UTC: one binary dies after its first test and never prints a
+# `test result:` line, so its 7 tests leave the numerator AND the denominator.
+_CRASHED_RUN = """     Running unittests src/lib.rs (target/debug/deps/anyhow-951ab)
+
+running 54 tests
+test result: FAILED. 53 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+
+     Running tests/test_downcast.rs (target/debug/deps/test_downcast-3d447)
+
+running 7 tests
+test test_as_ref ... ok
+error: test failed, to rerun pass `--test test_downcast`
+
+     Running tests/test_ensure.rs (target/debug/deps/test_ensure-0e38d)
+
+running 18 tests
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+"""
+
+
+def test_a_crashed_binary_leaves_the_counts_internally_consistent():
+    # This is why the defect survived: 71 + 1 is a perfectly plausible pair.
+    assert parse_test_counts(_CRASHED_RUN) == (71, 1, 0)
+
+
+def test_find_unreported_tests_names_the_binary_that_went_silent():
+    gap = find_unreported_tests(_CRASHED_RUN)
+    assert gap.announced == 79           # 54 + 7 + 18
+    assert gap.reported == 72            # 53 + 1 + 18
+    assert gap.missing == 7
+    assert gap.silent_binaries == ("Running tests/test_downcast.rs",)
+    assert gap, "a gap must be truthy — callers branch on it"
+
+
+def test_a_single_test_binary_announces_in_the_singular():
+    # `running 1 test`, not `1 tests`. Matching only the plural undercounted the
+    # announcement by 2 on the merged `anyhow` tree (compiletest and
+    # test_backtrace each hold one).
+    one = ("     Running tests/compiletest.rs (target/debug/deps/c)\n"
+           "\nrunning 1 test\n"
+           "test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured\n")
+    gap = find_unreported_tests(one)
+    assert gap.announced == 1 and gap.reported == 1
+    assert not gap
+
+
+def test_a_clean_run_reports_no_gap():
+    clean = ("     Running tests/test_ensure.rs (target/debug/deps/x)\n"
+             "\nrunning 18 tests\n"
+             "test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured\n")
+    gap = find_unreported_tests(clean)
+    assert not gap
+    assert gap.missing == 0
+    assert gap.announced == gap.reported == 18
 
 
 def test_test_outcome_event_data_byte_identical_to_legacy_dicts():

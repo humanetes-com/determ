@@ -344,6 +344,11 @@ def run_phase_c_tdd(
     # changed last iter. A test that flips pass→fail right after a fill is a
     # regression attributable to that fill.
     prev_failed: set[str] = set()
+    # The LAST sweep's verdict sets, carried out on the result. The merge needs
+    # them and cannot recompute them — a checkpointed cluster is skipped, so by
+    # then only its tree survives, not the evidence for it.
+    last_failed: frozenset[str] = frozenset()
+    last_ran: frozenset[str] = frozenset()
     last_newly_filled: list[FnLocator] = []
     _regression_notes = os.getenv("TDD_REGRESSION_NOTES", "1") == "1"
     # Build the test reverse map once per cluster — cheap (one extractor
@@ -810,6 +815,8 @@ def run_phase_c_tdd(
             # derived (`fail_count` is itself `oracle - pass`), so an invariant
             # stated over it is circular and can never catch anything.
             oracle_static=_expected_count)
+        last_failed = frozenset(_measure.failed)
+        last_ran = frozenset(_measure.passed) | last_failed
         _rec = _measure.reconcile()
         if not _rec.reconciled:
             deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: VERDICT MISMATCH — "
@@ -1516,4 +1523,6 @@ def run_phase_c_tdd(
             target_src_dir, cluster)),
         errors=tuple(errors),
         baseline_broken=_baseline_broken,
+        failed_tests=last_failed,
+        ran_tests=last_ran,
     )

@@ -21,6 +21,19 @@
 # relaunch half needs a decision about unattended GPU spend, and is deliberately
 # not taken here.
 #
+# The child runs in its OWN SESSION, and that is the whole point of the
+# `setsid` below. On 2026-08-05 at 03:05:36 UTC run 525803-9a51be5a and this
+# supervisor (pid 525793) vanished in the same instant, 10 h 09 m in, and
+# deaths.jsonl has no row for it: the process group went away together, and the
+# only component that could have said what happened was inside it. A supervisor
+# that dies with its child cannot report the deaths that are not already
+# understood — which are exactly the ones worth reporting. Separate sessions
+# mean a group-wide signal can reach one or the other but not both.
+#
+# Deliberate stops are unaffected: `lib/pipeline_pids.sh` kills the resolved
+# python interpreter pids, never a process group, so it still reaches the child
+# across the session boundary.
+#
 #   bash lib/record_death.sh <log_dir> <python> <script> [args...]
 set -u
 
@@ -28,6 +41,8 @@ LOG_DIR="$1"; shift
 DEATHS="$LOG_DIR/deaths.jsonl"
 SENTINEL=/tmp/pipeline_graceful_stop
 PIPELINE_LOG="$LOG_DIR/pipeline_anyhow.log"
+HEARTBEAT="$LOG_DIR/supervisor_heartbeat"
+HEARTBEAT_EVERY=60
 
 _json_escape() {
     # Minimal JSON string escaping for the fields below (no control chars
@@ -44,13 +59,63 @@ _code_id="$(md5sum pipeline.py 2>/dev/null | cut -c1-8)"
 # dmesg cursor: only lines that arrive AFTER launch can be about this death.
 _dmesg_before="$(dmesg 2>/dev/null | wc -l)"
 
-"$@" >> "$PIPELINE_LOG" 2>&1 &
-_pid=$!
+# `--wait` matters: plain `setsid` forks and exits immediately, which would
+# throw away the exit status this whole wrapper exists to read. With it, setsid
+# waits for the child and exits WITH the child's status, so `wait` below still
+# sees 137 vs 143 vs 1. Falls back to a direct launch where setsid is absent —
+# losing the session split but never the recording.
+if command -v setsid > /dev/null 2>&1; then
+    setsid --wait "$@" >> "$PIPELINE_LOG" 2>&1 &
+    _pid=$!
+    # setsid may fork (when it is already a group leader) or exec in place. The
+    # pid file must name the PIPELINE either way, because that is what readers
+    # signal and poll.
+    _child="$(pgrep -P "$_pid" 2>/dev/null | head -1)"
+    _pipeline_pid="${_child:-$_pid}"
+else
+    "$@" >> "$PIPELINE_LOG" 2>&1 &
+    _pid=$!
+    _pipeline_pid=$_pid
+fi
 # The child's PID, for anyone who wants it without pgrep. `pipeline_pids`
 # still resolves the real interpreter, and is what every other caller uses.
-echo "$_pid" > /tmp/determ_pipeline.pid
+echo "$_pipeline_pid" > /tmp/determ_pipeline.pid
+
+# A death nobody recorded is at least BOUNDED in time by this. The 03:05:36
+# disappearance was pinned only because the per-worker stream logs happened to
+# stop mid-sentence; a heartbeat says "the supervisor was alive at T" without
+# depending on that luck.
+_heartbeat_loop() {
+    while :; do
+        printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_pipeline_pid" \
+            > "$HEARTBEAT"
+        sleep "$HEARTBEAT_EVERY"
+    done
+}
+_heartbeat_loop &
+_hb_pid=$!
+
+# A signal aimed at this supervisor is forwarded to the child and then WAITED
+# OUT, so the death still gets a row. Without the trap a stop delivered here
+# would end the recorder first and leave the one death it was watching for
+# unrecorded.
+_forward() {
+    kill -"$1" "$_pipeline_pid" 2>/dev/null || true
+}
+trap '_forward TERM' TERM
+trap '_forward INT' INT
+trap '_forward HUP' HUP
+
 wait "$_pid"
 _status=$?
+# `wait` returns >128 when interrupted by a trapped signal rather than by the
+# child exiting; keep waiting until the child is really gone.
+while kill -0 "$_pipeline_pid" 2>/dev/null; do
+    wait "$_pid"
+    _status=$?
+done
+kill "$_hb_pid" 2>/dev/null || true
+rm -f "$HEARTBEAT"
 
 _ended_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 _uptime=$(( $(date +%s) - _started_s ))
@@ -81,7 +146,7 @@ _log_tail="$(tail -3 "$PIPELINE_LOG" 2>/dev/null)"
     printf '"started_at":"%s",'   "$_started_at"
     printf '"ended_at":"%s",'     "$_ended_at"
     printf '"uptime_s":%d,'       "$_uptime"
-    printf '"pid":%d,'            "$_pid"
+    printf '"pid":%d,'            "$_pipeline_pid"
     printf '"exit_status":%d,'    "$_status"
     printf '"signal":"%s",'       "$(_json_escape "$_signal")"
     printf '"deliberate_stop":%s,' "$_deliberate"
@@ -94,7 +159,7 @@ _log_tail="$(tail -3 "$PIPELINE_LOG" 2>/dev/null)"
 # Also say it in the pipeline log, where a human is already looking.
 {
     printf '[death-watch] pipeline %d ended after %dm%02ds — exit=%d%s%s\n' \
-        "$_pid" $(( _uptime / 60 )) $(( _uptime % 60 )) "$_status" \
+        "$_pipeline_pid" $(( _uptime / 60 )) $(( _uptime % 60 )) "$_status" \
         "${_signal:+ signal=$_signal}" \
         "$( [[ "$_deliberate" == true ]] && echo ' (deliberate stop)' )"
     [[ -n "$_dmesg_new" ]] && printf '[death-watch] kernel: %s\n' "$_dmesg_new"

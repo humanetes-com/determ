@@ -33,6 +33,48 @@ def test_read_recent_events_filters_name_and_run_start(tmp_path, monkeypatch):
     assert len(got) == 1 and got[0]["data"]["n"] == 1
 
 
+def test_read_recent_events_scopes_by_run_id_not_by_a_clock(tmp_path, monkeypatch):
+    """A restart inside the 1 MB window must show the NEW run only, and must
+    not depend on a start time that can be wrong.
+
+    Live on 2026-08-04: `pipeline_start_time` read the mtime of the
+    supervisor's `/proc/{pid}` — which drifts during the process's life — and
+    returned 19:15:33 UTC for a run begun at 16:56:21. Every event of the live
+    run then sorted as older than its own start and was dropped, so the whole
+    Phase C panel rendered `?/?`, `0/0` and no pass count while the run was
+    healthy and filling. Scoping on the id the emitter already writes cannot
+    fail that way."""
+    ev = tmp_path / "events.jsonl"
+    _write(
+        ev,
+        {"ts": "2026-08-04T16:00:00+00:00", "event": "x.keep",
+         "run_id": "old-run", "data": {"n": "previous"}},
+        {"ts": "2026-08-04T16:56:23+00:00", "event": "x.keep",
+         "run_id": "525803-9a51be5a", "data": {"n": "live"}},
+        {"ts": "2026-08-04T17:10:00+00:00", "event": "x.keep",
+         "run_id": "525803-9a51be5a", "data": {"n": "live2"}},
+    )
+    # A start time hours AFTER every record — the exact failure observed. The
+    # id filter must ignore it entirely.
+    _patch(monkeypatch, ev, run_start=4_102_444_800.0)
+    got = ed.read_recent_events(lambda n: n == "x.keep")
+    assert [g["data"]["n"] for g in got] == ["live", "live2"]
+
+
+def test_read_recent_events_falls_back_to_the_clock_without_a_run_id(
+        tmp_path, monkeypatch):
+    """Records predating the emitter's `run_id` keep the timestamp filter."""
+    ev = tmp_path / "events.jsonl"
+    _write(
+        ev,
+        {"ts": "1999-01-01T00:00:00+00:00", "event": "x.keep", "data": {"n": "old"}},
+        {"ts": "2026-06-10T00:00:00+00:00", "event": "x.keep", "data": {"n": "new"}},
+    )
+    _patch(monkeypatch, ev, run_start=1_750_000_000.0)
+    got = ed.read_recent_events(lambda n: n == "x.keep")
+    assert [g["data"]["n"] for g in got] == ["new"]
+
+
 def test_task_progression_from_events(tmp_path, monkeypatch):
     # debt#7: stage progression derived from structured events (no log scrape).
     ev = tmp_path / "events.jsonl"
@@ -381,3 +423,33 @@ def test_phase_c_state_driver_per_fn_when_no_tdd_iter(tmp_path, monkeypatch):
     _patch(monkeypatch, ev)
     s = ed.phase_c_state()
     assert s["driver"] == "per-fn" and s["pass_n"] == 2
+
+
+def test_pipeline_log_facts_reports_whether_the_run_had_a_task0c_phase(tmp_path, monkeypatch):
+    """The loop-hierarchy rows are fed ONLY by task0c events. A resumed run
+    skips task0c entirely — the clusters are baked and the finished ones are
+    checkpointed — so those rows render `attempt ?/? · file ? 0/0` for the whole
+    run: honest and useless. The renderer needs to know which case it is in."""
+    ev = tmp_path / "events.jsonl"
+    _write(
+        ev,
+        {"ts": "2026-08-05T00:00:00+00:00", "run_id": "r1",
+         "event": "compiler.cluster.start", "cluster": "nightly", "data": {}},
+        {"ts": "2026-08-05T00:00:01+00:00", "run_id": "r1",
+         "event": "phase_c.tdd.iter", "data": {"cluster": "nightly", "iter": 3}},
+    )
+    _patch(monkeypatch, ev)
+    facts = ed.pipeline_log_facts()
+    assert facts["has_task0c"] is False
+    assert facts["attempt"] == "?" and facts["max_attempt"] == "?"
+
+    ev2 = tmp_path / "events2.jsonl"
+    _write(
+        ev2,
+        {"ts": "2026-08-05T00:00:00+00:00", "run_id": "r2",
+         "event": "task0c.attempt", "data": {"attempt": 2, "max_attempt": 10}},
+    )
+    _patch(monkeypatch, ev2)
+    facts2 = ed.pipeline_log_facts()
+    assert facts2["has_task0c"] is True
+    assert facts2["attempt"] == "2" and facts2["max_attempt"] == "10"

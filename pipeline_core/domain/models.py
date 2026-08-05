@@ -628,6 +628,16 @@ class ClusterFillResult:
     # validation could not catch it either — it runs `cargo check`, which
     # builds the lib, and the broken targets were the TEST binaries.
     baseline_broken: bool = False
+    # The last sweep's verdict sets, carried out of the driver because the MERGE
+    # needs them and cannot recompute them: a checkpointed cluster is skipped on
+    # every later run, so by merge time its tree is on disk and its evidence is
+    # not. Without these the merge can only gate a divergent body by the cluster
+    # it came from, which is how `stable`'s 2026-07-30 bodies kept reaching the
+    # default build after `nightly` had fixed the same fns on 08-04.
+    # `ran_tests` is the scope the two sets are meaningful in — a test one
+    # cluster's cfg excludes from the build is absent, not passing.
+    failed_tests: frozenset[str] = frozenset()
+    ran_tests: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)

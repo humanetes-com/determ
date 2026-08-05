@@ -27,6 +27,7 @@ pub use model::*;
 mod cfg;
 pub use cfg::CfgSet;
 
+mod emit;
 mod enumerate;
 mod merge;
 mod skeleton;
@@ -616,5 +617,146 @@ mod tests {
         let files: std::collections::BTreeSet<_> =
             recs.iter().map(|r| r.file.as_str()).collect();
         assert!(files.contains("tests/t.rs"), "unexpected rel paths: {files:?}");
+    }
+
+    // ── the cluster axis, the anonymous const, the comments and the preference ──
+
+    const NG: &str = "any(egma, feature = \"egma\")";
+    const ST: &str = "not(any(egma, feature = \"egma\"))";
+
+    fn two_clusters(nightly: &str, stable: &str) -> Vec<ClusterFile> {
+        vec![
+            ClusterFile {
+                name: "nightly".into(),
+                source: nightly.into(),
+                cfg_gate: NG.into(),
+            },
+            ClusterFile {
+                name: "stable".into(),
+                source: stable.into(),
+                cfg_gate: ST.into(),
+            },
+        ]
+    }
+
+    #[test]
+    fn merge_keeps_both_bodies_when_the_items_own_cfg_is_off_the_cluster_axis() {
+        // `#[cfg(any(feature = "std", not(no_core_error)))]` mentions no atom
+        // the clusters differ on, so the item is LIVE IN BOTH and each cluster
+        // filled it. Emitting one body silently discards the other cluster's
+        // answer — measured on `anyhow` 2026-08-05 for `context_downcast`,
+        // `error_mut`, `new`, `object_reallocate_boxed` and `root_cause`, all
+        // resolved by nothing but `"nightly" < "stable"`.
+        let mk = |body: &str| {
+            format!(
+                "#[cfg(any(feature = \"std\", not(no_core_error)))]\n\
+                 fn root_cause() -> u8 {{ {body} }}\n"
+            )
+        };
+        let out = merge_cluster_files(two_clusters(&mk("1"), &mk("2"))).unwrap();
+        assert_eq!(out.matches("fn root_cause").count(), 2, "both kept:\n{out}");
+        assert!(out.contains('1') && out.contains('2'), "{out}");
+        assert!(out.contains("egma"), "each variant gated by cluster:\n{out}");
+    }
+
+    #[test]
+    fn merge_still_collapses_a_variant_whose_own_cfg_is_on_the_cluster_axis() {
+        // The original premise, now checked rather than assumed: `egma` IS the
+        // axis, so the item is live in one cluster and stubbed in the other and
+        // exactly one body is right. Stacking a cluster gate here would yield
+        // `any(x, not(x))` garbage.
+        let out = merge_cluster_files(two_clusters(
+            "#[cfg(egma)]\nfn provide() -> u8 { 7 }\n",
+            "#[cfg(egma)]\nfn provide() -> u8 { ::core::unimplemented!() }\n",
+        ))
+        .unwrap();
+        assert_eq!(out.matches("fn provide").count(), 1, "one def:\n{out}");
+        assert!(out.contains('7'), "filled body kept:\n{out}");
+        assert!(!out.contains("unimplemented"), "stub survived:\n{out}");
+    }
+
+    #[test]
+    fn merge_keeps_every_anonymous_const_in_a_file() {
+        // `const _` has the literal ident `_`, so keying by ident put both in
+        // one bucket and emitted one. On `anyhow` the loss was
+        // `option_env!("RUSTC_BOOTSTRAP")` from src/nightly.rs — present
+        // identically in BOTH inputs, emitted zero times.
+        let src = "#[cfg(probe)]\nconst _: () = { let _x = 1; };\n\
+                   #[cfg(probe)]\nconst _: Option<&str> = option_env!(\"BOOTSTRAP\");\n";
+        let out = merge_cluster_files(two_clusters(src, src)).unwrap();
+        assert_eq!(out.matches("const _").count(), 2, "both consts kept:\n{out}");
+        assert!(out.contains("BOOTSTRAP"), "{out}");
+    }
+
+    #[test]
+    fn merge_preserves_line_comments_in_bodies_and_above_items() {
+        // Non-doc comments are not tokens, so a syn round-trip drops them. The
+        // note this test carries is the shape of the one actually lost on
+        // `anyhow`: the reason an unsafe cast is sound, written by the model
+        // that got the fn right.
+        let src = "// why this fn exists\n\
+                   fn drop_front() {\n    \
+                   // Cast to ManuallyDrop<E> to suppress the double-free.\n    \
+                   let _ = 1;\n}\n\
+                   impl Foo {\n    \
+                   fn m(&self) {\n        // member comment\n        let _ = 2;\n    }\n}\n";
+        let out = merge_cluster_files(two_clusters(src, src)).unwrap();
+        assert!(out.contains("// why this fn exists"), "header:\n{out}");
+        assert!(out.contains("suppress the double-free"), "body:\n{out}");
+        assert!(out.contains("// member comment"), "impl member:\n{out}");
+        // Still parses — a splice that broke the file would be worse than the loss.
+        syn::parse_file(&out).expect("merged output must parse");
+    }
+
+    #[test]
+    fn merge_prefers_the_named_clusters_body_for_an_off_axis_divergence() {
+        // `stable` was frozen 2026-07-30 with `test_downcast` failing and can
+        // never be re-swept; `nightly` fixed it on 08-04. Gating by provenance
+        // ships the frozen body to the default build, which is why the merged
+        // tree cored while both cluster trees were the best they had ever been.
+        let mk = |body: &str| format!("fn object_downcast() -> u8 {{ {body} }}\n");
+        let opts = MergeOptions {
+            prefer_cluster: Some("nightly".into()),
+        };
+        let out = merge_cluster_files_with(two_clusters(&mk("1"), &mk("2")), &opts).unwrap();
+        assert_eq!(out.text.matches("fn object_downcast").count(), 1, "{}", out.text);
+        assert!(out.text.contains('1'), "nightly's body:\n{}", out.text);
+        assert!(!out.text.contains('2'), "stable's body survived:\n{}", out.text);
+        assert_eq!(out.preferred, vec!["fn::object_downcast -> nightly"]);
+    }
+
+    #[test]
+    fn merge_never_prefers_a_declaration_only_a_body() {
+        // `anyhow`'s `TraitKind::anyhow_kind` is required in nightly's tree and
+        // defaulted in stable's, and stable's `impl TraitKind for E` is empty
+        // because it leans on that default. Preferring nightly's DECLARATION
+        // kept the requirement and left the impl satisfying it gated to the
+        // other cluster: E0046, the crate stopped compiling.
+        let nightly = "trait TraitKind {\n    fn anyhow_kind(&self) -> u8;\n}\n";
+        let stable = "trait TraitKind {\n    fn anyhow_kind(&self) -> u8 { 0 }\n}\n";
+        let opts = MergeOptions {
+            prefer_cluster: Some("nightly".into()),
+        };
+        let out = merge_cluster_files_with(two_clusters(nightly, stable), &opts).unwrap();
+        assert!(out.preferred.is_empty(), "declaration preferred: {:?}", out.preferred);
+        assert!(out.text.contains("egma"), "both variants gated:\n{}", out.text);
+    }
+
+    #[test]
+    fn merge_reports_item_counts_so_a_drop_is_visible() {
+        // items_in_max is the RICHEST single input, not the sum: an item every
+        // cluster carries is counted once per cluster going in and once coming
+        // out, so `items_out < items_in_max` means something was dropped.
+        // Against the sum the comparison is vacuous and catches nothing.
+        let src = "fn a() {}\nimpl S {\n    fn b(&self) {}\n    fn c(&self) {}\n}\n";
+        let out =
+            merge_cluster_files_with(two_clusters(src, src), &MergeOptions::default()).unwrap();
+        assert_eq!(out.items_in_max, 4, "fn a + impl S + two members");
+        assert!(
+            out.items_out >= out.items_in_max,
+            "merge dropped items: in={} out={}",
+            out.items_in_max,
+            out.items_out
+        );
     }
 }

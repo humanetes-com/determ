@@ -15,6 +15,7 @@ the extractor binary path and a log sink.
 
 from __future__ import annotations
 
+import json
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -26,6 +27,20 @@ from ..domain.rust_scan import count_cfg_attrs
 
 
 @dataclass(frozen=True, slots=True)
+class MergedFile:
+    """What the extractor did to one file. `ast_merged` False means the
+    passthrough fallback ran — a verbatim copy of the base cluster with no
+    divergence handling at all, which used to be counted in `files_written`
+    exactly like a real merge and so left a fully degraded run
+    indistinguishable from a clean one."""
+
+    ast_merged: bool
+    items_in_max: int = 0
+    items_out: int = 0
+    preferred: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class ClusterMerger:
     """AST-based cross-cluster merge with its I/O collaborators injected."""
 
@@ -33,34 +48,62 @@ class ClusterMerger:
     log: Callable[[str], None]
 
     def _ast_merge_files(self, out_path: Path,
-                         cluster_files: list[tuple[str, Path, str]]) -> bool:
+                         cluster_files: list[tuple[str, Path, str]],
+                         prefer_cluster: str | None) -> MergedFile | None:
         """Invoke the syn merger on a single file. `cluster_files` is a list of
-        (cluster_name, source_path, cfg_predicate). Writes to `out_path`."""
+        (cluster_name, source_path, cfg_predicate). Writes to `out_path` and
+        returns what the merge did, or None when it could not run."""
         if not self.extractor_bin.exists():
-            return False
+            return None
         cmd: list[str] = [
             str(self.extractor_bin),
             "--merge-clusters",
             "--merge-output", str(out_path),
         ]
+        if prefer_cluster:
+            cmd += ["--prefer-cluster", prefer_cluster]
         for name, src_path, cfg_pred in cluster_files:
             cmd += ["--cluster", f"{name}:{src_path}:{cfg_pred}"]
         try:
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         except Exception as e:
             self.log(f"  [skeleton-merge] extractor invocation failed: {e}")
-            return False
+            return None
         if r.returncode != 0:
             self.log(f"  [skeleton-merge] extractor returned rc={r.returncode}: "
                      f"{(r.stderr or '').strip()[:240]}")
-            return False
-        return True
+            return None
+        try:
+            counts = json.loads((r.stdout or "").strip() or "{}")
+        except ValueError:
+            counts = {}
+        return MergedFile(
+            ast_merged=True,
+            items_in_max=int(counts.get("items_in_max", 0)),
+            items_out=int(counts.get("items_out", 0)),
+            preferred=tuple(counts.get("preferred", ())),
+        )
 
     def merge_cluster_outputs(self, project_dir: Path, cluster_specs: dict[str, Any],
-                              successes: list[dict[str, Any]]) -> dict[str, int]:
+                              successes: list[dict[str, Any]],
+                              prefer_cluster: str | None = None) -> dict[str, Any]:
         """Compose per-cluster filled source dirs into `project_dir/src/` with
-        cfg-gated divergence. Returns {'files_written', 'cfg_gated_fns'} (the
-        latter approximate — derived from a post-merge attribute count)."""
+        cfg-gated divergence.
+
+        `prefer_cluster` names the cluster whose body wins when the clusters
+        diverge on an item every one of them compiles; see the extractor's
+        `--prefer-cluster`. The evidence for that choice is the per-cluster
+        sweep record and so belongs to the caller, not here.
+
+        The returned stats are what a later reader has to reconstruct the run
+        from. They used to be `files_written` and an approximate gate count,
+        and `files_written` counted a real AST merge and the passthrough
+        fallback identically — so a run where the extractor binary was missing
+        and every file degraded to a verbatim copy reported the same figure as
+        a clean merge. `files_ast_merged` / `files_passthrough` separate them,
+        and `items_dropped` is the invariant: an item every cluster carries is
+        counted once per cluster going in and once coming out, so a positive
+        number means the merge lost something."""
         cluster_dirs: dict[str, Path] = {}
         for s in successes:
             cname = s["cluster"]
@@ -68,7 +111,9 @@ class ClusterMerger:
             if d.exists():
                 cluster_dirs[cname] = d
         if not cluster_dirs:
-            return {"files_written": 0, "cfg_gated_fns": 0}
+            return {"files_written": 0, "cfg_gated_fns": 0, "files_ast_merged": 0,
+                    "files_passthrough": 0, "items_in_max": 0, "items_out": 0,
+                    "items_dropped": 0, "preferred": [], "prefer_cluster": ""}
 
         # Collect every file path across all cluster outputs.
         all_paths: set[str] = set()
@@ -91,12 +136,20 @@ class ClusterMerger:
             self.log("  [skeleton-merge] WARN: extractor binary missing; falling "
                      "back to base-cluster passthrough (no divergence handling).")
 
+        files_ast_merged = 0
+        files_passthrough = 0
+        items_in_max = 0
+        items_out = 0
+        preferred: list[str] = []
         for rel in sorted(all_paths):
             if ".gen_tests_" in rel:
                 continue
             # Gather (cluster_name, path, cfg_predicate) for every cluster that
-            # has this file. Lexicographic order means a stable cluster is base
-            # when present, keeping merge output deterministic.
+            # has this file, in lexicographic order so the merge output is
+            # deterministic. The base — the cluster the passthrough fallback
+            # copies — is therefore `sorted()[0]`, which is whichever cluster
+            # name sorts first and NOT necessarily a stable one: on `anyhow`
+            # the names are `nightly` and `stable`, so the base is `nightly`.
             cluster_files: list[tuple[str, Path, str]] = []
             for cname in sorted(cluster_dirs.keys()):
                 p = cluster_dirs[cname] / rel
@@ -114,10 +167,10 @@ class ClusterMerger:
             out_path = project_dir / rel
             out_path.parent.mkdir(parents=True, exist_ok=True)
 
-            merged_ok = False
+            merged: MergedFile | None = None
             if extractor_available:
-                merged_ok = self._ast_merge_files(out_path, cluster_files)
-            if not merged_ok:
+                merged = self._ast_merge_files(out_path, cluster_files, prefer_cluster)
+            if merged is None:
                 # Fallback: copy the base cluster's file verbatim. Loses
                 # divergence handling but never corrupts output. Only hit when
                 # the extractor binary is missing or fails on a specific file.
@@ -128,6 +181,17 @@ class ClusterMerger:
                 except Exception as e:
                     self.log(f"  [skeleton-merge] copy fallback failed for {rel}: {e}")
                     continue
+                files_passthrough += 1
+            else:
+                files_ast_merged += 1
+                items_in_max += merged.items_in_max
+                items_out += merged.items_out
+                preferred.extend(f"{rel}::{p}" for p in merged.preferred)
+                if merged.items_out < merged.items_in_max:
+                    self.log(f"  [skeleton-merge] WARN: {rel} lost "
+                             f"{merged.items_in_max - merged.items_out} item(s) "
+                             f"({merged.items_in_max} in the richest input, "
+                             f"{merged.items_out} out).")
             files_written += 1
             # Approximate cfg_gated_fns from #[cfg(...)] attributes in the
             # merged output matching our cluster gates (log line only).
@@ -138,4 +202,14 @@ class ClusterMerger:
                 except Exception:
                     pass
 
-        return {"files_written": files_written, "cfg_gated_fns": cfg_gated_fns}
+        return {
+            "files_written": files_written,
+            "cfg_gated_fns": cfg_gated_fns,
+            "files_ast_merged": files_ast_merged,
+            "files_passthrough": files_passthrough,
+            "items_in_max": items_in_max,
+            "items_out": items_out,
+            "items_dropped": max(0, items_in_max - items_out),
+            "preferred": preferred,
+            "prefer_cluster": prefer_cluster or "",
+        }
