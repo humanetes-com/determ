@@ -24,7 +24,99 @@ from pipeline_core.domain.coverage import CoverageMeasurement
 from pipeline_core.domain.enums import Backend
 from pipeline_core.domain.generation import GenerationRequest
 from pipeline_core.domain.models import BuildCluster, FnLocator
+from pipeline_core.domain.reference_floor import orphaned_stubs
 from pipeline_core.domain.run_state import RunPlan
+
+
+@dataclass(frozen=True, slots=True)
+class StubVerdict:
+    """The three states a still-hollow fn can be in at completion time.
+
+    Only `orphaned` is a defect. The other two exist because "every
+    `unimplemented!()` is a hole we failed to fill" is false about real crates,
+    and holding it cost a run its verdict after the whole cost was paid.
+    """
+
+    orphaned: tuple[FnLocator, ...] = ()
+    unreachable: tuple[FnLocator, ...] = ()
+    upstream_hollow: tuple[FnLocator, ...] = ()
+
+
+def classify_remaining_stubs(
+    stubs: Iterable[tuple[FnLocator, tuple[str, ...] | None]],
+    cfg_sets: Iterable[CfgSet],
+    reference_hollow: Iterable[tuple[str, str]] = (),
+) -> StubVerdict:
+    """Split the fns still holding `unimplemented!()` into un-attempted,
+    cfg-unreachable, and hollow-upstream-too.
+
+    Two filters, and the ORDER matters. First reachability: a stub the union of
+    the baked cfg-sets compiles out was never reachable by any cluster's Phase C
+    and no fill could ever have been attempted. Then the reference: a body the
+    ORIGINAL also leaves hollow is not a hole this pipeline dug.
+
+    Live on `anyhow`, all three of `src/nightly.rs`'s stubs leave at the first
+    filter — they sit under `#[cfg(anyhow_build_probe)]`, false in both baked
+    clusters — so the second never fires there. It still earns its place, and
+    the evidence is in the same file: upstream writes `unimplemented!()` itself
+    in two of those three bodies (`Debug::fmt` and `Display::fmt` on the probe's
+    `MyError`), so the reconstruction is byte-correct and a reachability-only
+    gate would have been right by luck. A `todo!()` a crate ships, a cluster
+    does compile, and no test exercises hits the second filter and nothing else.
+
+    Both call sites use this. The single-module completion (the anyhow/hardcrate
+    path, where these crates actually finish) previously ran a cfg-BLIND scan
+    with no unreachable verdict at all, so a fully green suite still exited 1 on
+    those three bodies while the multi-module FINAL — which those crates never
+    reach — excused them correctly.
+    """
+    sets = list(cfg_sets)
+    unreachable: list[FnLocator] = []
+    reachable: list[FnLocator] = []
+    for loc, preds in stubs:
+        if preds and unreachable_under_every_cfg_set(preds, sets):
+            unreachable.append(loc)
+        else:
+            reachable.append(loc)
+    hollow_upstream = frozenset(reference_hollow)
+    orphaned_keys = orphaned_stubs(
+        [(loc.file, loc.fn_name) for loc in reachable], hollow_upstream)
+    return StubVerdict(
+        orphaned=tuple(loc for loc in reachable
+                       if (loc.file, loc.fn_name) in orphaned_keys),
+        unreachable=tuple(unreachable),
+        upstream_hollow=tuple(loc for loc in reachable
+                              if (loc.file, loc.fn_name) not in orphaned_keys),
+    )
+
+
+def report_stub_verdict(verdict: StubVerdict, log: Callable[[str], None],
+                        cfg_set_count: int) -> bool:
+    """Log all three buckets and return True when the run may claim success."""
+    if verdict.unreachable:
+        log(f"\nNOTE: {len(verdict.unreachable)} fn(s) remain unimplemented!() "
+            f"but are UNREACHABLE under the union of all {cfg_set_count} baked "
+            "cfg-set(s) — no cluster's build can compile them, so no fill could "
+            "ever have been attempted. Not counted against this run:")
+        for loc in verdict.unreachable:
+            log(f"    {loc.file}::{loc.fn_name}")
+    if verdict.upstream_hollow:
+        log(f"\nNOTE: {len(verdict.upstream_hollow)} fn(s) remain "
+            "unimplemented!() and the ORIGINAL crate leaves them hollow too — "
+            "reproducing a stub is not failing to fill one. Not counted "
+            "against this run:")
+        for loc in verdict.upstream_hollow:
+            log(f"    {loc.file}::{loc.fn_name}")
+    if verdict.orphaned:
+        log(f"\nWARNING: all tests passed, but {len(verdict.orphaned)} fn(s) "
+            "are STILL unimplemented!() — reachable under a baked cfg-set and "
+            "implemented in the original:")
+        for loc in verdict.orphaned:
+            log(f"    {loc.file}::{loc.fn_name}")
+        log("         This is NOT a clean success — the fns above were never "
+            "attempted.")
+        return False
+    return True
 
 # The --phase-*-only / --skeleton-backend standalone subcommands, in dispatch
 # order. Each maps an `args` flag attribute to a handler keyed by the same name.
@@ -415,6 +507,16 @@ class LockDeps:
     log: Callable[[str], None]
     sys_exit: Callable[[int], None]
     scan_unimplemented_functions: Callable[..., list[FnLocator]]
+    # The cfg-aware scan + the baked cfg-sets + what the ORIGINAL leaves hollow.
+    # Defaulted so the many test fixtures that build a LockDeps keep working;
+    # with no cfg-sets nothing is provably unreachable and with no reference
+    # nothing is provably hollow-upstream, so the defaults degrade to exactly
+    # the cfg-blind absolute this gate used to be.
+    scan_unimplemented_with_cfg: Callable[
+        ..., list[tuple[FnLocator, tuple[str, ...] | None]]] | None = None
+    load_baked_clusters: Callable[[Path], list[Any]] = lambda _p: []
+    reference_hollow: Callable[[Path], frozenset[tuple[str, str]]] = (
+        lambda _p: frozenset())
 
 
 def lock_or_complete(
@@ -451,19 +553,30 @@ def lock_or_complete(
         locked_modules.add(module_name)
         deps.git_commit(project_dir, locked_commit_msg)
     else:
-        # Same cfg-blind stub scan as the multi-module final check in
+        # The SAME stub verdict as the multi-module final check in
         # `run_pipeline` — single-module projects (the common case: anyhow,
         # hardcrate, most real crates) complete HERE, not there, so without
         # this the whole-tree check would never run for them.
-        orphaned_stubs = deps.scan_unimplemented_functions(project_dir)
-        if orphaned_stubs:
-            deps.log(f"\nWARNING: all tests passed, but {len(orphaned_stubs)} "
-                      "fn(s) are STILL unimplemented!() — unreachable from "
-                      "every cfg cluster that got built/tested this run:")
-            for loc in orphaned_stubs:
-                deps.log(f"    {loc.file}::{loc.fn_name}")
-            deps.log("         This is NOT a clean success — the fns above "
-                      "were never attempted.")
+        #
+        # It used to be the same SCAN and not the same verdict: this path called
+        # the cfg-blind `scan_unimplemented_functions` and had no notion of a
+        # stub no baked cfg-set can compile, while the multi-module path did.
+        # A fully green `anyhow` therefore still exited 1 on the three
+        # `#[cfg(anyhow_build_probe)]` bodies in `src/nightly.rs` — two of which
+        # are byte-identical to the `unimplemented!()` upstream writes there.
+        if deps.scan_unimplemented_with_cfg is not None:
+            _clusters = deps.load_baked_clusters(project_dir) or []
+            _cfg_sets = [CfgSet.of(cfg_true=c.cfg_true, cfg_false=c.cfg_false)
+                         for c in _clusters]
+            _verdict = classify_remaining_stubs(
+                deps.scan_unimplemented_with_cfg(project_dir), _cfg_sets,
+                deps.reference_hollow(project_dir))
+            _clean = report_stub_verdict(_verdict, deps.log, len(_cfg_sets))
+        else:
+            _stubs = deps.scan_unimplemented_functions(project_dir)
+            _clean = report_stub_verdict(
+                StubVerdict(orphaned=tuple(_stubs)), deps.log, 0)
+        if not _clean:
             if complete_commit_msg is not None:
                 deps.git_commit(project_dir, complete_commit_msg)
             deps.sys_exit(1)
@@ -568,6 +681,10 @@ class RunDeps:
     # under every baked cfg-set". See the FINAL block for why that matters.
     scan_unimplemented_with_cfg: Callable[
         ..., list[tuple[FnLocator, tuple[str, ...] | None]]]
+    # `(file, fn_name)` the pristine tree leaves hollow. Empty when no reference
+    # could be measured, which degrades this gate to the reachability-only form.
+    reference_hollow: Callable[[Path], frozenset[tuple[str, str]]] = (
+        lambda _p: frozenset())
 
 
 def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
@@ -1079,31 +1196,16 @@ def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
         # stubbed identically in BOTH cluster trees, so t2b's backfill has no
         # donor either, and exiting 1 on them converts a genuine success into a
         # failure at the last step, after the run's whole cost is paid.
+        # ...and a THIRD verdict beside those two: a body the ORIGINAL leaves
+        # hollow is not a hole this run failed to fill. `classify_remaining_stubs`
+        # applies both filters in order and is shared with `lock_or_complete`,
+        # which is where single-module crates actually finish.
         _cfg_sets = [CfgSet.of(cfg_true=c.cfg_true, cfg_false=c.cfg_false)
                      for c in (deps.load_baked_clusters(project_dir) or [])]
-        _unreachable: list[FnLocator] = []
-        _orphaned: list[FnLocator] = []
-        for loc, preds in deps.scan_unimplemented_with_cfg(project_dir):
-            if preds and unreachable_under_every_cfg_set(preds, _cfg_sets):
-                _unreachable.append(loc)
-            else:
-                _orphaned.append(loc)
-        if _unreachable:
-            deps.log(f"\nNOTE: {len(_unreachable)} fn(s) remain "
-                     "unimplemented!() but are UNREACHABLE under the union of "
-                     f"all {len(_cfg_sets)} baked cfg-set(s) — no cluster's "
-                     "build can compile them, so no fill could ever have been "
-                     "attempted. Not counted against this run:")
-            for loc in _unreachable:
-                deps.log(f"    {loc.file}::{loc.fn_name}")
-        if _orphaned:
-            deps.log(f"\nWARNING: all tests passed, but {len(_orphaned)} "
-                      "fn(s) are STILL unimplemented!() — unreachable from "
-                      "every cfg cluster that got built/tested this run:")
-            for loc in _orphaned:
-                deps.log(f"    {loc.file}::{loc.fn_name}")
-            deps.log("         This is NOT a clean success — the fns above "
-                      "were never attempted.")
+        _verdict = classify_remaining_stubs(
+            deps.scan_unimplemented_with_cfg(project_dir), _cfg_sets,
+            deps.reference_hollow(project_dir))
+        if not report_stub_verdict(_verdict, deps.log, len(_cfg_sets)):
             sys.exit(1)
         deps.log("\nSUCCESS: all tests passed.")
         sys.exit(0)

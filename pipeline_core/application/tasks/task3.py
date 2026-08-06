@@ -19,11 +19,17 @@ from pathlib import Path
 from typing import Any
 
 from ...application.reconstruct.attribution import not_body_repairable_tests
+from ...domain.reference_floor import (
+    ReferenceMeasurement,
+    judge_against_reference,
+    pairs_of,
+)
 from ...domain.test_results import (
     OUTPUT_SEPARATOR,
     ClusterStatus,
     cluster_failure_is_actionable,
     compile_gate_reason,
+    parse_binary_results,
     parse_failed_tests,
     parse_test_counts,
     rank_repair_candidates,
@@ -47,6 +53,20 @@ class Task3Deps:
     read: Callable[[Any], str]
     write: Callable[[Any, str], None]
     test_timeout: int
+    # The pristine tree's verdict vector, or None when no reference could be
+    # measured. A CALLABLE because the measurement is per-run and this record is
+    # built once at composition time, before any project_dir is known.
+    #
+    # Deliberately NOT wired to `count_active_tests_for_cluster`. The reference
+    # announces 99 tests per cluster on `anyhow` while the reconstruction
+    # announces 129 (nightly) and 149 (stable) — the difference is the
+    # `src/*.gen_tests_*.rs` augmentation, which upstream does not have — so
+    # taking the expected count from the reference would undershoot by 30–50 and
+    # break the announcement guard in the opposite direction from the one it was
+    # already broken in. The denominator stays with `find_unreported_tests`,
+    # which reconciles cargo's own `running N` against its own silence and needs
+    # no inventory at all.
+    reference: Callable[[Path], ReferenceMeasurement | None] = lambda _p: None
 
 
 def _should_reverify(primary_output: str, retry_output: str, retry_passed: bool,
@@ -82,9 +102,21 @@ def run_clusters_strict(project_dir: Path, clusters: list[Any],
     Returns (all_pass, aggregated_output, per_cluster_results). Each result
     dict carries the cluster's raw `output`; callers strip that key before
     emitting events.
+
+    A cluster whose only failures are ones the PRISTINE tree also fails passes
+    here. `anyhow`'s `ui` is a trybuild harness whose assertion is about rustc's
+    own diagnostic rendering, and upstream regenerates its `.stderr` fixtures
+    per nightly; on 2026-08-06 the reconstruction scored `nightly` 128/1 and the
+    pristine `1dbe1862 Release 1.0.104` scored 98/1 on the same machine, failing
+    the same test. Holding `all_pass` false on that forever is what sent ten
+    module iterations of model calls at a guaranteed exit 1. Only test FAILURES
+    are excused: an INCOMPLETE cluster (tests announced and never reported, a
+    crashed binary) keeps its status, because the reference says nothing about
+    whether this tree's binaries survived.
     """
     per_cluster_results: list[dict[str, Any]] = []
     aggregated_output_chunks: list[str] = []
+    reference = deps.reference(project_dir)
     all_pass = True
     for cluster in sorted(clusters, key=lambda c: c.name):
         cmd_parts = ["cargo"]
@@ -126,11 +158,37 @@ def run_clusters_strict(project_dir: Path, clusters: list[Any],
             # the build failed, that is the reason to report — otherwise the
             # log blames the harness for a plain compile error.
             reason = compile_gate_reason(cluster.name, output) or reason
+        floor_met = False
+        if status == ClusterStatus.FAIL and reference is not None:
+            cluster_ref = reference.for_cluster(cluster.name)
+            if cluster_ref is not None:
+                _ours_pass, _ours_fail, _, _ = pairs_of(parse_binary_results(output))
+                verdict = judge_against_reference(
+                    cluster_ref, _ours_pass, _ours_fail)
+                if verdict.met:
+                    floor_met = True
+                    status = ClusterStatus.PASS
+                    reason = (f"cluster '{cluster.name}': {pass_n} passed, "
+                              f"{fail_n} failing test(s) the original fails too, "
+                              f"{ign_n} ignored — {verdict.reason}")
+                    log(f"  [task3/{cluster.name}] the {fail_n} remaining "
+                        f"failure(s) are failures of the ORIGINAL crate on this "
+                        f"machine, not of the reconstruction — floor met.")
+                    emit("task3.floor_met", data={
+                        "cluster": cluster.name, "reference_key": reference.key,
+                        "exceeded": verdict.exceeded,
+                        "advisory_unmet": sorted(f"{a}::{b}" for a, b
+                                                 in verdict.advisory_unmet)})
+                elif verdict.advisory_unmet:
+                    log(f"  [task3/{cluster.name}] note: "
+                        f"{len(verdict.advisory_unmet)} doc test(s) the original "
+                        "passes are absent here (not gated).")
         log(f"  [task3/{cluster.name}] {status}: {reason} "
             f"(rc={rc}, {dt:.1f}s)")
         per_cluster_results.append({
             "cluster": cluster.name,
             "status": status,
+            "floor_met": floor_met,
             "rc": rc,
             "pass": pass_n,
             "fail": fail_n,

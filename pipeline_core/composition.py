@@ -337,6 +337,7 @@ from pipeline_core.application.reconstruct import test_targets as _test_targets_
 from pipeline_core.application.reconstruct.attribution import (
     AttributionDeps,
     escalate_frontier_to_producers,
+    not_body_repairable_tests,
 )
 from pipeline_core.application.reconstruct.cargo_errors import (
     categorize_compile_error as _categorize_compile_error,
@@ -455,6 +456,10 @@ from pipeline_core.application.reconstruct.test_locator import (
 )
 from pipeline_core.application.reconstruct.test_locator import (
     find_tests_referencing_fn as _find_tests_referencing_fn,
+)
+from pipeline_core.application.reference_run import (
+    ReferenceDeps,
+    measure_reference,
 )
 from pipeline_core.application.strip_bake import (
     BakeArtifactsDeps,
@@ -683,10 +688,16 @@ from pipeline_core.domain.test_results import (
     is_compiler_output_line as _is_compiler_output_line,
 )
 from pipeline_core.domain.test_results import (
+    parse_failed_tests as _parse_failed_tests,
+)
+from pipeline_core.domain.test_results import (
     rustc_error_codes as _rustc_error_codes,
 )
 from pipeline_core.domain.test_results import (
     rustc_error_signatures as _rustc_error_signatures,
+)
+from pipeline_core.domain.test_results import (
+    split_reachable_failures as _split_reachable_failures,
 )
 from pipeline_core.domain.test_results import strip_ansi as _strip_ansi
 from pipeline_core.domain.text import block_is_prose as _text_block_is_prose
@@ -1615,6 +1626,66 @@ def build_app(
         ),
     )
 
+    # ---- the reference floor -------------------------------------------------
+    # Measured ONCE per run and memoized: `run_clusters_strict` is called by
+    # task3, by the post-task3 fix loop's check, and by every re-verify, and the
+    # measurement is a `git worktree add` plus one `cargo test` per cluster
+    # (0.4 s and 1.1 s on `anyhow`). `None` means no floor could be measured, and
+    # every consumer then falls back to the absolute criterion.
+    #
+    # REFERENCE_FLOOR=0 disables it. The escape hatch exists because this changes
+    # what "done" MEANS: with it off, the run is judged by "every test passes and
+    # no fn is hollow" exactly as before.
+    _reference_cache: dict[Path, Any] = {}
+
+    def _reference(project_dir: Path) -> Any:
+        if _os.getenv("REFERENCE_FLOOR", "1") == "0":
+            return None
+        if project_dir not in _reference_cache:
+            _reference_cache[project_dir] = measure_reference(
+                project_dir, _load_baked_clusters(project_dir),
+                ReferenceDeps(cargo_env=ports.cargo_env, parse_cmd=_parse_cmd,
+                              enumerate_fns=enumerate_fns,
+                              test_timeout=cfg.test_timeout))
+        return _reference_cache[project_dir]
+
+    def _reference_hollow(project_dir: Path) -> frozenset[tuple[str, str]]:
+        measured = _reference(project_dir)
+        return measured.hollow if measured is not None else frozenset()
+
+    def _reference_excused(project_dir: Path) -> frozenset[str]:
+        """Bare names of tests the pristine tree fails or skips in ANY cluster."""
+        measured = _reference(project_dir)
+        if measured is None:
+            return frozenset()
+        return frozenset(
+            name for c in measured.clusters.values() for _label, name in c.neutral)
+
+    def _out_of_reach(ctx: Any, test_output: str) -> str:
+        """Why no remaining failure can be repaired by rewriting a body, or "".
+
+        Two sources of "cannot": the test's assertion is not about a body
+        (`not_body_repairable_tests` — the taxonomy that already prunes the
+        task3 retry frontier and logged `not body-repairable, excluded from the
+        frontier: ui` live on 2026-08-06), or the pristine crate fails it here
+        too. Answering "" whenever ANY failure is still reachable keeps this
+        strictly a stopping rule: it can end a loop early, never continue one.
+        """
+        failed = _parse_failed_tests(test_output)
+        if not failed:
+            return ""
+        tests_dir = ctx.project_dir / "tests"
+        unrepairable = (not_body_repairable_tests(list(tests_dir.rglob("*.rs")))
+                        if tests_dir.is_dir() else frozenset())
+        reachable, blocked = _split_reachable_failures(
+            failed, unrepairable, _reference_excused(ctx.project_dir))
+        if reachable or not blocked:
+            return ""
+        return (f"the {len(blocked)} remaining failure(s) "
+                f"({', '.join(sorted(blocked))}) are not repairable by rewriting "
+                "a body — the assertion is about compiler output, or the "
+                "original crate fails them on this machine too")
+
     _emitter = JsonlEventEmitter(events_log, run_context if run_context is not None else {})
     _task3_deps = Task3Deps(
         phase=_emitter.phase,
@@ -1628,6 +1699,7 @@ def build_app(
         read=read,
         write=write,
         test_timeout=cfg.test_timeout,
+        reference=_reference,
     )
 
     def _cluster_check_factory(project_dir: Path) -> Callable[[], tuple[bool, str]] | None:
@@ -1879,6 +1951,9 @@ def build_app(
         lock_module=lock_module, git_commit=git_commit, log=ports.log,
         sys_exit=sys.exit,
         scan_unimplemented_functions=scan_unimplemented_functions,
+        scan_unimplemented_with_cfg=scan_unimplemented_with_cfg,
+        load_baked_clusters=_load_baked_clusters,
+        reference_hollow=_reference_hollow,
     )
     reattach_deps = ReattachDeps(
         log=ports.log, emit=ports.emit, derive_gentest_prelude=helpers.derive_gentest_prelude,
@@ -1929,6 +2004,7 @@ def build_app(
         plateau_abort=cfg.module_plateau_abort,
         stall_refill_iters=cfg.stall_refill_iters,
         stall_refill=_stall_refill,
+        out_of_reach=_out_of_reach,
     )
     # Attribution deps built as a local first — the TDD driver's futility
     # escalation closes over it.
@@ -2111,6 +2187,7 @@ def build_app(
         task3=_via("task3"),
         scan_unimplemented_functions=scan_unimplemented_functions,
         scan_unimplemented_with_cfg=scan_unimplemented_with_cfg,
+        reference_hollow=_reference_hollow,
     )
 
     _crash_localizer_deps = CrashLocalizerDeps(

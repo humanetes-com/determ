@@ -27,6 +27,10 @@ class ModuleResult(NamedTuple):
     total_iters: int
     coverage_strategy: str
     converged: bool
+    # Set when the loop stopped because nothing left failing is repairable by a
+    # body rewrite. Distinct from a plateau: a plateau says the model has not
+    # improved for N iterations and might yet, this says no iteration can.
+    out_of_reach: str = ""
 
 
 class ModuleReconstructor:
@@ -35,10 +39,23 @@ class ModuleReconstructor:
         telemetry: Telemetry, plateau_abort: int = 0,
         stall_refill_iters: int = 0,
         stall_refill: Callable[[Path, str], None] | None = None,
+        out_of_reach: Callable[[RunContext, str], str] | None = None,
     ) -> None:
         self._step = step
         self._analysis = analysis
         self._tel = telemetry
+        # Given (ctx, test_output), why no remaining failure can be repaired by
+        # rewriting a body — or "" while one still can. Checked BEFORE
+        # FailureAnalysisStep, because that step is TASK 4: on `anyhow`
+        # 2026-08-06 every TASK 4 call in the run was spent on `ui`, a trybuild
+        # harness, and its iteration-1 genesis update was +64 lines of which the
+        # new rules 10 and 16 and the `[UI-SNAPSHOT]` model note were all three
+        # about that one test — rule 16 instructing the model to treat
+        # diagnostic formatting differences as non-failures, which cannot move a
+        # verdict decided by cargo's exit code. Those prompts logged
+        # `prompt 309,632 chars = 105% of SINGLE_CALL_CHAR_LIMIT`, so past the
+        # budget every appended rule displaced context that was doing work.
+        self._out_of_reach = out_of_reach
         # Outer-loop fixed-point terminator: stop after this
         # many consecutive non-improving iterations. The loop previously only exited
         # on a lock, so a module the model can't converge looped unbounded (the
@@ -78,6 +95,19 @@ class ModuleReconstructor:
             outcome = self._step.run(ctx, state, coverage_strategy=coverage_strategy)
             if outcome.locked:
                 break
+
+            if self._out_of_reach is not None:
+                why = self._out_of_reach(ctx, outcome.test_output)
+                if why:
+                    self._tel.log(
+                        f"\n  [out-of-reach] {ctx.module_name}: {why} — no "
+                        "iteration can move this verdict, so the repair loop "
+                        "stops here instead of running to the plateau cap. "
+                        "TASK 4 is not called; the best tree is kept.")
+                    self._tel.emit("module.out_of_reach", module=ctx.module_name,
+                                   data={"iteration": state.iteration,
+                                         "reason": why})
+                    return ModuleResult(total_iters, coverage_strategy, False, why)
 
             result = self._analysis.run(
                 ctx, state, outcome,

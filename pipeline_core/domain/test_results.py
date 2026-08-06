@@ -11,6 +11,7 @@ extractor. No new patterns are authored; the bodies are moved as-is.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import NamedTuple
@@ -70,6 +71,37 @@ def rank_repair_candidates(
         return (0 if repairable else 1, len(failures), name)
 
     return [name for name, _ in sorted(candidates, key=key)]
+
+
+def split_reachable_failures(
+    failed: Iterable[str], unrepairable: Iterable[str] = (),
+    excused: Iterable[str] = (),
+) -> tuple[frozenset[str], frozenset[str]]:
+    """`(reachable, out_of_reach)` over a set of failing test names.
+
+    A failure is out of reach when a body rewrite cannot address it — either
+    because the test's assertion is not about a body at all (`unrepairable`,
+    e.g. a trybuild harness asserting on rustc's own stderr) or because the
+    pristine crate fails it here too (`excused`).
+
+    The distinction decides whether another iteration can accomplish anything.
+    On `anyhow` 2026-08-06 the answer was no from the first iteration on:
+    `ui` was the only failure, `per_fn_retry` had already excluded it from the
+    frontier with "not body-repairable", and the loop still ran the fix loop
+    three times and TASK 4 once per module iteration — seven model calls and
+    13 min 06 s per iteration, every one recording
+    `metric_prev 10001, metric_new 10001, improved False` — with
+    `MODULE_PLATEAU_ABORT=10` between it and a guaranteed exit 1.
+
+    Names are compared on their last `::` segment, matching
+    :func:`rank_repair_candidates`: cargo reports a test as `module::path::name`
+    in one binary and bare in another, and the taxonomy is keyed on the bare
+    name.
+    """
+    stop = {str(x).split("::")[-1] for x in unrepairable}
+    stop |= {str(x).split("::")[-1] for x in excused}
+    reachable = {f for f in failed if str(f).split("::")[-1] not in stop}
+    return frozenset(reachable), frozenset(set(failed) - reachable)
 
 
 @dataclass(frozen=True)
@@ -649,6 +681,50 @@ def split_test_stdout_sections(output: str) -> list[tuple[str, str]]:
     if cur_name is not None:
         sections.append((cur_name, cur_body))
     return [(name, "\n".join(body).strip()) for name, body in sections]
+
+
+def build_phase_output(output: str) -> str:
+    """The part of a `cargo test` capture that precedes the first test binary
+    announcing tests — i.e. the BUILD phase.
+
+    Once any binary prints `running N tests`, the crate compiled: cargo builds a
+    target before it runs it. Everything from there on is something a TEST said,
+    and a test is free to say anything, including a compiler diagnostic.
+
+    That distinction decides a whole run's routing and getting it wrong cost
+    one. `tests/compiletest.rs` is a trybuild harness; when the `ui` test fails
+    it prints the expected and the actual `.stderr` fixtures, and those fixtures
+    ARE rustc diagnostics. Measured on the live `anyhow` tree 2026-08-06:
+    `error[E0599` appears twice in that output, both at lines 3035 and 3071 of
+    3122, with the only `running 1 test` line at 1513 — so every hit is past the
+    build phase, and no build signal appears before it at all. `classify_failure`
+    matched `error[e` anywhere and returned `build`, and TASK 4 was handed the
+    prompt that opens *"The implementation failed to COMPILE this iteration —
+    the tests could not even run. This is a STRUCTURAL failure: the generated
+    code was missing required files, had wrong module declarations, or had
+    incorrect workspace layout"* while cargo had just reported 128 of 129 tests
+    passing. The model wrote genesis rules about workspace layout, and said so
+    itself the next iteration: "My previous genesis.md changes had NO EFFECT
+    because the structural rules (rules 10–15) already covered module layout."
+
+    It generalises past trybuild to any test that asserts on a compiler
+    diagnostic — a `compile_fail` doc test, a test comparing an error string
+    containing `error[E0308]`.
+
+    Note the asymmetry this leaves for the caller: under `--no-fail-fast` cargo
+    runs the targets that DID build and then reports the ones that did not, so a
+    genuine compile failure can appear after the build phase. What identifies it
+    there is the driver's own wording (`error: could not compile …`), never a
+    rustc diagnostic — see `failure_classification._DRIVER_BUILD_SIGNALS`.
+    """
+    lines = output.splitlines()
+    for i, ln in enumerate(lines):
+        stripped = ln.strip()
+        if stripped.startswith("running ") and stripped.endswith(("test", "tests")):
+            return "\n".join(lines[:i])
+        if stripped.startswith("test result:"):
+            return "\n".join(lines[:i])
+    return output
 
 
 def failure_bodies_for(output: str, names: set[str]) -> dict[str, str]:
