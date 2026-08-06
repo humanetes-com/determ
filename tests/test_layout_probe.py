@@ -14,7 +14,11 @@ from pipeline_core.domain.behaviour import (
     StaticAssertKind,
 )
 from pipeline_core.domain.layout_pins import harvest_layout_pin_behaviours
-from pipeline_core.domain.layout_probe import build_layout_probe
+from pipeline_core.domain.layout_probe import (
+    build_field_path_probe,
+    build_layout_probe,
+)
+from pipeline_core.domain.oracle_field_paths import FieldPath
 
 
 def _pin(kind: StaticAssertKind, expr: str) -> BehaviourSpec:
@@ -200,3 +204,62 @@ def test_balanced_span_rejects_a_start_that_is_not_the_opening_bracket() -> None
     assert _balanced_span("size_of::<T>()", 0, "<", ">") == -1
     assert _balanced_span("", 0, "(", ")") == -1
     assert _balanced_span("<T>", 0, "<", ">") == 3
+
+
+# --- the oracle's member paths as a compile gate ------------------------------
+# `cargo check --lib` never builds `#[cfg(test)]` code, so a layout that renames
+# a field the crate's own write-protected tests read passes the pin gate and
+# fails at the first `cargo test` — on `anyhow` (2026-08-06) with
+# `error[E0609]: no field 'inner' on type 'Error'`, taking all 56 unit tests of
+# both clusters with it. These probes move that question back to the gate.
+
+def test_field_path_probe_renders_a_borrow_per_path() -> None:
+    p = build_field_path_probe([FieldPath("Error", ("inner", "ptr"))])
+    assert p.checks_anything
+    assert "fn _layout_pin_field_path_0(v: &Error) { let _ = &v.inner.ptr; }" in p.source
+    assert p.gated == ("Error.inner.ptr",)
+    assert p.skipped == ()
+
+
+def test_field_path_probe_needs_no_constructor() -> None:
+    """A borrow through a reference parameter, so the probe is answerable by a
+    skeleton whose every body is `unimplemented!()` — the tree it runs on."""
+    src = build_field_path_probe([FieldPath("Error", ("inner",))]).source
+    assert "&Error" in src and "Error::" not in src and "new(" not in src
+
+
+def test_field_path_probe_numbers_each_item_uniquely() -> None:
+    p = build_field_path_probe([
+        FieldPath("Error", ("inner", "ptr")), FieldPath("Error", ("vtable",))])
+    assert "_layout_pin_field_path_0" in p.source
+    assert "_layout_pin_field_path_1" in p.source
+    assert p.gated == ("Error.inner.ptr", "Error.vtable")
+
+
+def test_field_path_probe_skips_a_generic_root_instead_of_guessing() -> None:
+    """`fn p(v: &ContextError)` on a root declared `ContextError<C, E>` is
+    E0107 — the probe would be wrong about itself, and a probe that cannot
+    compile for its own reasons must not be allowed to reject a layout."""
+    p = build_field_path_probe(
+        [FieldPath("ContextError", ("error",))],
+        generic_roots=frozenset({"ContextError"}))
+    assert not p.checks_anything
+    assert p.skipped == ("ContextError.error",)
+    assert p.source == ""
+
+
+def test_field_path_probe_skips_a_rootless_path() -> None:
+    p = build_field_path_probe([FieldPath("Error", ())])
+    assert not p.checks_anything and p.skipped == ("Error",)
+
+
+def test_field_path_probe_gates_what_it_can_and_names_what_it_cannot() -> None:
+    p = build_field_path_probe(
+        [FieldPath("Error", ("inner",)), FieldPath("ContextError", ("error",))],
+        generic_roots=frozenset({"ContextError"}))
+    assert p.gated == ("Error.inner",)
+    assert p.skipped == ("ContextError.error",)
+
+
+def test_no_paths_renders_no_probe() -> None:
+    assert not build_field_path_probe([]).checks_anything

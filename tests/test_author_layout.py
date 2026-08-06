@@ -7,6 +7,9 @@ from pipeline_core.application.author_layout import (
     AuthorLayoutDeps,
     ComponentResult,
     LayoutOutcome,
+    _calibrated_field_path_probe,
+    _component_field_paths,
+    _oracle_sources,
     author_layout,
     component_outcome,
 )
@@ -17,7 +20,12 @@ from pipeline_core.domain.behaviour import (
     StaticAssertKind,
 )
 from pipeline_core.domain.models import FieldRecord, TypeRecord
-from pipeline_core.domain.private_surface import classify_private_surface
+from pipeline_core.domain.oracle_field_paths import FieldPath
+from pipeline_core.domain.private_surface import (
+    PrivateSurfaceItem,
+    SurfaceItemKind,
+    classify_private_surface,
+)
 
 
 def _surface():
@@ -390,3 +398,163 @@ def test_bake_time_has_no_filled_bodies_and_so_no_veto():
     res = author_layout(_vtable_surface(), module_name="anyhow", public_surface="",
                         select_pins=_has_pins, symbol_inventory="", deps=d.deps())
     assert res.all_authored
+
+
+# --- the oracle's member paths as an authoring constraint ---------------------
+# t1.5 elides the private fields of a public struct and asks the model to design
+# them. The in-crate augmented tests are generated BEFORE that, from the original
+# source where those fields were visible, and are write-protected afterwards — so
+# a layout that renames a field they read makes a file no stage may edit
+# uncompilable. On `anyhow` (2026-08-06) the authored `Error { ptr: … }` passed
+# `cargo check --lib`, which never builds `#[cfg(test)]` code, and the first
+# `cargo test` failed `error[E0609]: no field 'inner' on type 'Error'` — 0/56
+# unit tests in both clusters, with the only diagnostic pointing into the oracle.
+
+def _item(name, definition, kind=SurfaceItemKind.STRUCT):
+    return PrivateSurfaceItem(kind=kind, name=name, file="src/error.rs",
+                              definition=definition)
+
+
+def test_an_unreadable_oracle_degrades_instead_of_failing_authoring():
+    """The constraint is an improvement on authoring blind, never a new way for
+    the phase to die: an oracle that cannot be read leaves the behaviour that
+    existed before it did."""
+    logs: list[str] = []
+
+    def boom():
+        raise OSError("permission denied")
+
+    deps = dataclasses.replace(
+        _Deps(_GOOD, [True]).deps(), oracle_sources=boom, log=logs.append)
+    assert _oracle_sources(deps) == {}
+    assert any("authoring without them" in ln for ln in logs)
+
+
+def test_no_oracle_dep_means_no_field_path_constraint():
+    deps = _Deps(_GOOD, [True]).deps()
+    assert deps.oracle_sources is None
+    assert _oracle_sources(deps) == {}
+
+
+def test_field_paths_are_read_for_the_component_that_owns_the_root():
+    comp = (_item("Error", "pub struct Error { }", SurfaceItemKind.PUB_FIELDS),)
+    oracle = {"src/error.gen_tests_3.rs":
+              'let err = Error::msg("x");\nlet _ = err.inner.ptr.as_ptr();\n'}
+    paths = _component_field_paths(comp, oracle)
+    assert [p.expr for p in paths] == ["Error.inner.ptr"]
+
+
+def test_a_pub_fields_root_is_exempt_from_the_declares_it_check():
+    """The freeze REMOVED this root's fields, so there is nothing left in the
+    skeleton to check the oracle's name against — the oracle is the only
+    surviving record of what the field was called."""
+    comp = (_item("Error", "pub struct Error { }", SurfaceItemKind.PUB_FIELDS),)
+    oracle = {"t.rs": 'let e: Error = make();\nlet _ = e.inner;\n'}
+    assert [p.expr for p in _component_field_paths(comp, oracle)] == ["Error.inner"]
+
+
+def test_a_path_whose_frozen_root_does_not_declare_the_first_hop_is_dropped():
+    """A still-frozen definition is the authority on its own field names. If it
+    does not declare the hop, the oracle's binding was resolved to the wrong
+    type — and imposing a wrong path would freeze a component that was fine."""
+    comp = (_item("ErrorImpl", "struct ErrorImpl { vtable: u8 }"),)
+    oracle = {"t.rs": 'let e: ErrorImpl = make();\nlet _ = e.nonexistent;\n'}
+    assert _component_field_paths(comp, oracle) == ()
+
+
+def test_a_path_the_frozen_root_does_declare_is_kept():
+    comp = (_item("ErrorImpl", "struct ErrorImpl { vtable: u8 }"),)
+    oracle = {"t.rs": 'let e: ErrorImpl = make();\nlet _ = e.vtable;\n'}
+    assert [p.expr for p in _component_field_paths(comp, oracle)] == ["ErrorImpl.vtable"]
+
+
+def test_the_same_path_read_in_two_files_is_one_constraint():
+    comp = (_item("Error", "pub struct Error { }", SurfaceItemKind.PUB_FIELDS),)
+    src = 'let e: Error = make();\nlet _ = e.inner;\n'
+    paths = _component_field_paths(comp, {"a.rs": src, "b.rs": src})
+    assert [p.expr for p in paths] == ["Error.inner"]
+
+
+def test_no_oracle_means_no_paths():
+    comp = (_item("Error", "pub struct Error { }", SurfaceItemKind.PUB_FIELDS),)
+    assert _component_field_paths(comp, {}) == ()
+
+
+class _FieldProbeDeps:
+    """Deps for the field-path probe calibration: records what was written to
+    the probe slot and answers `compile_check` with a scripted result."""
+
+    def __init__(self, compiles, errors=""):
+        self.compiles = compiles
+        self.errors = errors
+        self.written: list[str | None] = []
+        self.logs: list[str] = []
+
+    def deps(self):
+        return AuthorLayoutDeps(
+            run_model=lambda p: "",
+            read_skeleton=lambda rel: "",
+            write_skeleton=lambda rel, txt: None,
+            compile_check=lambda: (self.compiles, self.errors),
+            write_pin_probe=self.written.append,
+            log=self.logs.append)
+
+
+def _probe_for(paths, deps, comp=None):
+    surface = _surface()
+    comp = comp or (_item("Error", "pub struct Error { }", SurfaceItemKind.PUB_FIELDS),)
+    return _calibrated_field_path_probe(surface, comp, tuple(paths), deps)
+
+
+def test_a_path_probe_that_compiles_on_the_frozen_scaffold_is_gated():
+    d = _FieldProbeDeps(compiles=True)
+    probe = _probe_for([FieldPath("Error", ("inner",))], d.deps())
+    assert probe.gated == ("Error.inner",)
+    assert d.written[-1] is None, "the probe slot must be cleared after the check"
+
+
+def test_a_path_probe_failing_ONLY_on_E0609_is_still_gated():
+    """`no field 'inner' on type 'Error'` against an ELIDED struct is the
+    expected reading of a correct probe — the fields are exactly what this
+    component is about to author. Requiring the probe to hold first, as the pin
+    probe does, would disable the gate precisely where it is needed."""
+    d = _FieldProbeDeps(compiles=False,
+                   errors="error[E0609]: no field `inner` on type `Error`")
+    probe = _probe_for([FieldPath("Error", ("inner",))], d.deps())
+    assert probe.gated == ("Error.inner",)
+
+
+def test_a_path_probe_wrong_about_itself_disables_gating_loudly():
+    """E0616 is the probe failing for its OWN reason — it sits at the crate root
+    and cannot see a field the oracle's own module can. Gating on it would
+    reject every correct layout, so it is dropped and said out loud."""
+    d = _FieldProbeDeps(compiles=False,
+                   errors="error[E0616]: field `inner` of `Error` is private")
+    probe = _probe_for([FieldPath("Error", ("inner",))], d.deps())
+    assert probe.gated == ()
+    assert probe.skipped == ("Error.inner",)
+    assert any("wrong about itself" in ln for ln in d.logs)
+
+
+def test_a_generic_root_is_named_as_skipped_not_guessed_at():
+    d = _FieldProbeDeps(compiles=True)
+    comp = (_item("ContextError", "struct ContextError<C, E> { context: C, error: E }"),)
+    probe = _probe_for([FieldPath("ContextError", ("context",))], d.deps(), comp)
+    assert probe.gated == ()
+    assert probe.skipped == ("ContextError.context",)
+    assert any("generic root" in ln for ln in d.logs)
+    assert d.written == [], "nothing renderable, so nothing is compiled"
+
+
+def test_no_paths_writes_no_probe():
+    d = _FieldProbeDeps(compiles=True)
+    assert _probe_for([], d.deps()).gated == ()
+    assert d.written == []
+
+
+def test_no_probe_writer_means_no_path_gating():
+    """Callers that cannot place a probe file (the bake-time path) keep the
+    behaviour they had before the gate existed."""
+    d = _FieldProbeDeps(compiles=True)
+    deps = dataclasses.replace(d.deps(), write_pin_probe=None)
+    assert _probe_for([FieldPath("Error", ("inner",))], deps).gated == ()
