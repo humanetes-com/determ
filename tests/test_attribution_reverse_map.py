@@ -362,6 +362,67 @@ def test_an_ordinary_test_file_is_untouched_by_the_harness_check(tmp_path: Path)
     assert not_body_repairable_tests([tf]) == frozenset()
 
 
+def test_the_harness_is_excluded_from_the_path_that_CONVICTS(tmp_path: Path) -> None:
+    """The reverse map is not the only route a compile-fail harness can convict
+    through, and it is not the dangerous one.
+
+    The behavioral path reads the failing test's OWN body and intersects its
+    identifiers with the crate's fn records — and it is a CONVICTING kind, so its
+    frontier may revert a unit. `ui`'s body is `trybuild::TestCases::new()` plus
+    a glob, so a crate with a free `new` is named by it on identifier
+    coincidence alone. The first cut of the exclusion filtered only inside the
+    helper the fallback paths call, which left this one uncovered.
+    """
+    from pipeline_core.domain.rust_fn_headers import locate_fn
+
+    recs = [{"file": "src/kind.rs", "fn_name": "new", "container": ""}]
+    deps = AttributionDeps(
+        structure=_FakeStructure(recs),
+        classify=lambda **_k: {},
+        locate_fn=locate_fn,
+        run_check_diag=lambda *_a, **_k: (0, "", []),
+        derive_check_only_cmd=lambda c: c,
+        is_gen_tests_file=lambda _f: False,
+        log=lambda _m: None,
+    )
+    texts = {"tests/compiletest.rs": (
+        "#[test]\n"
+        "fn ui() {\n"
+        "    let t = trybuild::TestCases::new();\n"
+        "    t.compile_fail(\"tests/ui/*.rs\");\n"
+        "}\n")}
+    output = ("running 1 test\ntest ui ... FAILED\n\nfailures:\n    ui\n")
+
+    unguarded = attribute_failures(
+        deps, output, tmp_path, recently_filled=[], test_reverse_map={},
+        cluster_name="nightly", test_texts=texts)
+    assert unguarded.convicting[FnLocator("src/kind.rs", "new")] == {"ui"}, \
+        "without the exclusion the harness convicts by coincidence"
+
+    guarded = attribute_failures(
+        deps, output, tmp_path, recently_filled=[], test_reverse_map={},
+        cluster_name="nightly", test_texts=texts,
+        unrepairable_tests=frozenset({"ui"}))
+    assert guarded.frontier == {}
+    assert guarded.convicting == {}
+
+
+def test_an_unrepairable_vanished_test_dispatches_nobody(tmp_path: Path) -> None:
+    """The vanished-test merge reads `extra_failed` directly, so it is a third
+    way in. A harness test that stopped reporting is still not repairable by
+    writing a body."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "lib.rs").write_text("pub fn crashy() {}\n", encoding="utf-8")
+    recs = [{"file": "lib.rs", "fn_name": "crashy"}]
+    _res = attribute_failures(
+        _deps(recs), "", src, recently_filled=[],
+        test_reverse_map={"ui": {("lib.rs", "crashy")}},
+        cluster_name="nightly", extra_failed=frozenset({"ui"}),
+        unrepairable_tests=frozenset({"ui"}))
+    assert _res.frontier == {}
+
+
 def test_the_callee_walk_reaches_a_fn_the_test_never_names(tmp_path: Path) -> None:
     """The shape of the anyhow defect: the test names `downcast_ref`, and the
     body that is wrong is two calls further in."""

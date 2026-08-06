@@ -49,6 +49,7 @@ from pipeline_core.domain.retry_outcome import (
 )
 from pipeline_core.domain.source_snapshot import SourceSnapshot
 from pipeline_core.domain.std_api_sigs import std_api_def
+from pipeline_core.domain.test_cmd import build_test_cmd
 from pipeline_core.domain.test_results import (
     parse_failed_tests,
     parse_test_counts,
@@ -254,14 +255,13 @@ def run_task3_inline_retry(
         return e
 
     def _probe(c: Any) -> ClusterProbe:
-        parts = ["cargo"]
-        if c.toolchain:
-            parts.append(f"+{c.toolchain}")
-        parts += ["test", "--no-fail-fast"]
+        # Through the shared renderer, so the gate measures with the SAME command
+        # shape task3's own per-cluster run used. No stems and no `--lib` is the
+        # unscoped `cargo [+toolchain] test --no-fail-fast` that stage issues.
         env = deps.cargo.env()
         if c.env_extra:
             env.update(c.env_extra)
-        return ClusterProbe(name=c.name, command=shlex.join(parts), env=env)
+        return ClusterProbe(name=c.name, command=build_test_cmd([], c), env=env)
 
     # Every cluster that compiles the files this pass may touch. The primary
     # stays the repair signal (its failures aim the frontier); the others are
@@ -271,6 +271,14 @@ def run_task3_inline_retry(
     _probes: tuple[ClusterProbe, ...] = tuple(
         _probe(c) for c in (all_clusters or ([cluster] if cluster is not None else []))
     )
+    # The failures this loop is allowed to count as its own. A trybuild harness
+    # is excluded from the frontier, so counting it here too would leave the
+    # gate's "every cluster passes" condition permanently false on any crate that
+    # has one — `nightly` fails `ui` on every sweep of this crate — and the
+    # early stop that justifies ordering the frontier nearest-hop-first could
+    # never fire. Comparisons are unaffected either way: a constant cancels.
+    _unrepairable_all = not_body_repairable_tests(
+        list((project_dir / "tests").rglob("*.rs")))
 
     def _read_tree() -> TreeReading:
         """One sweep of every cluster: ran-state and failing-test count each."""
@@ -279,9 +287,10 @@ def run_task3_inline_retry(
             _rc, out = deps.cargo.run(p.command, project_dir, p.env,
                                       timeout=deps.test_timeout)
             p_n, f_n, _ign = parse_test_counts(out)
+            _fails = {t for t in parse_failed_tests(out)
+                      if t.split("::")[-1] not in _unrepairable_all}
             readings.append(ClusterReading(
-                cluster=p.name, ran=(p_n + f_n) > 0,
-                failures=len(parse_failed_tests(out))))
+                cluster=p.name, ran=(p_n + f_n) > 0, failures=len(_fails)))
         return TreeReading(per_cluster=tuple(readings))
 
     # Two modes. TEST mode (some test FAILED) attributes via the test
@@ -423,7 +432,7 @@ def run_task3_inline_retry(
                     encoding="utf-8", errors="replace")
             except Exception:
                 continue
-        _unrepairable = not_body_repairable_tests(tests_dir_files)
+        _unrepairable = _unrepairable_all
         _blocked = sorted(t for t in fails_now
                           if t.split("::")[-1] in _unrepairable)
         if _blocked:
@@ -655,11 +664,19 @@ def generate_one_body(
     err_excerpt = deps.focus_cargo_errors(output, rel_f)
     _src_rel = rel_f[4:] if rel_f.startswith("src/") else rel_f
     _occ = ctx.occurrences.get(FnLocator(_src_rel, fn), ())
-    if occurrence and occurrence < len(_occ):
+    if occurrence:
         # A non-first definition. Its container comes from the record index and
         # its sig/body from the matching occurrence in the file, paired by
         # SIGNATURE rather than by position so a record order and a text order
         # that disagree cannot show the model one definition and write another.
+        if occurrence >= len(_occ):
+            # REFUSE rather than fall through. The `else` branch below targets
+            # the FIRST definition, so a caller asking for the Nth would have
+            # been silently answered about a different fn and had the body
+            # written there — the exact confusion this parameter exists to end.
+            deps.log(f"  [task3-retry] {rel_f}::{fn} occurrence {occurrence} is "
+                     f"not in the record index ({len(_occ)} known) — skipped.")
+            return None
         container, rec_sig = _occ[occurrence]
         located = deps.locate_all_fns(cur_text, fn) if deps.locate_all_fns else []
         sloc = _pick_occurrence(located, rec_sig, occurrence)
@@ -747,6 +764,11 @@ def _prior_effort_notes(project_dir: Path) -> dict[str, str]:
     was retired 2026-08-04 at 100/104 with four tests still failing, and the loop
     that inherited two of them started from a bare failing-test name. This is the
     channel that carries the fact across.
+
+    Keys are SRC-RELATIVE (`error.rs::from`) — the form this module's fn indexes
+    use, since they enumerate over `project_dir / "src"`. The writer normalises;
+    phase-c's own frontier keys are crate-root-relative (`src/error.rs::from`)
+    and a store holding those made every lookup here miss without a trace.
     """
     raw = project_dir / ".skeleton" / "_cluster_evidence.json"
     try:

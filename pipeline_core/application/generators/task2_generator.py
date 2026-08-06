@@ -188,10 +188,19 @@ def _save_cluster_evidence(project_dir: Path, cluster: str,
     # `test_boxed_str`, `test_root_cause` and `ui` still failing, and the loop
     # that inherited them had no way to know it was picking up work another
     # loop had already spent its budgets on. `exhausted_fns` is what it tried.
+    # Written SRC-RELATIVE (`error.rs::from`), because that is the key the only
+    # reader has. Phase-c builds its frontier over the CRATE ROOT, so its keys
+    # arrive here as `src/error.rs::from`; the task3 retry indexes fns over
+    # `project_dir / "src"` and looks them up with the `src/` prefix already
+    # stripped. Storing the crate-root form made every lookup miss silently and
+    # the guidance this file exists to carry was never attached to a prompt.
+    # Normalised at the write because that is where the two vocabularies meet.
     store[cluster] = {
         "failed": sorted(failed), "ran": sorted(ran),
         "exit": "exhausted" if exhausted else "done",
-        "exhausted_fns": sorted(f"{f}::{fn}" for f, fn in exhausted_fns),
+        "exhausted_fns": sorted(
+            f"{f[4:] if f.startswith('src/') else f}::{fn}"
+            for f, fn in exhausted_fns),
     }
     path = project_dir / _EVIDENCE_REL
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -2116,8 +2125,18 @@ class StaticSkeletonTask2Generator(Task2Generator):
                     "target(s) are test-oracle content and were NOT reverted: "
                     + ", ".join(f"{f}::{fn}" for f, fn in _oracle[:4]))
             if not implicated:
-                self.tel.log(f"  {tag} [skeleton-validate] no implicated fns parsed "
-                             f"— cannot retry, giving up.")
+                # Two different dead ends, and they call for different reading.
+                # Nothing parsed means the diagnostics carried no location this
+                # walk could resolve; everything dropped means the errors ARE
+                # located and they are in the immutable oracle, so the cluster
+                # is genuinely broken and no body rewrite is the answer.
+                self.tel.log(
+                    f"  {tag} [skeleton-validate] "
+                    + (f"every implicated target ({len(_oracle)}) is test-oracle "
+                       "content — the errors are in the spec, not in a body this "
+                       "loop may rewrite; giving up."
+                       if _oracle else
+                       "no implicated fns parsed — cannot retry, giving up."))
                 break
             self.tel.log(f"  {tag} [skeleton-validate] implicated fns: "
                          f"{', '.join(f'{f}::{fn}' for f, fn in implicated[:6])}"

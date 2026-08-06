@@ -1,10 +1,12 @@
-"""Cluster test-count orchestration (debt #29 extraction).
+"""Cluster test-count orchestration.
 
-`count_active_tests_for_cluster` is the FR-024 strict-verdict helper: how many
+`count_active_tests_for_cluster` is the strict-verdict helper: how many
 `#[test]` fns SHOULD run if cargo compiles every test source active under the
 cluster's cfg. It walks `tests/`, the `gen_tests_*` siblings, and `src/`,
 cfg-filtering each file so cargo-cannot-compile tests don't inflate the expected
-count (an UNDERcount would manufacture a fraudulent TASK-3 SUCCESS — FR-022).
+count. An UNDERcount would manufacture a fraudulent TASK 3 SUCCESS: the
+verdict passes when `pass + ignored >= expected`, so every test the walk fails
+to expect is one that may silently never run.
 
 The impure collaborators (syn extractor for fn records + mod records, the
 per-file cfg-predicate lookup) are injected via :class:`TestCountDeps`; the pure
@@ -57,7 +59,7 @@ def file_active_for_cluster(
 
     Undecidable predicates and unmatched files count as ACTIVE — may
     under-exclude but never over-exclude (the strict verdict must not silently
-    shrink the oracle, FR-018)."""
+    shrink the oracle)."""
     stem = file_path.stem
     if stem in ("lib", "main") or _depth > 32:
         return True
@@ -87,7 +89,7 @@ def count_active_tests_for_cluster(
     cluster: Any,
     deps: TestCountDeps,
 ) -> int:
-    """FR-024 strict-verdict helper — see module docstring. Counts three
+    """Strict-verdict helper — see module docstring. Counts three
     sources (tests/, gen_tests siblings, src/), all cfg-filtered against the
     cluster's (cfg_true, cfg_false) sets. Returns the cfg-aware total."""
     return active_test_inventory_for_cluster(project_dir, cluster, deps)[0]
@@ -110,15 +112,23 @@ def active_test_inventory_for_cluster(
 
     `tests_dir_stems`: when given, the `tests/` walk covers ONLY files with
     those stems — the integration binaries a `cargo test --test stem…` sweep
-    names. None keeps the full FR-024 `tests/` walk.
+    names. None keeps the full `tests/` walk, which is the denominator of an
+    unscoped `cargo test`.
 
     `include_lib_sources`: also count the crate unit-test binary (gen_tests
     siblings + src-side `#[cfg(test)]`) — the denominator of a sweep that adds
     `--lib`. It composes with `tests_dir_stems`: a `--lib` sweep names its
     `tests/` stems AND runs the lib binary, so its oracle is the stem-scoped
     `tests/` walk PLUS the lib sources. (With `tests_dir_stems=None` the lib
-    sources are already included — the full FR-024 walk — so the flag only
-    matters when `tests/` is stem-scoped.)"""
+    sources are already included — the full walk — so the flag only matters
+    when `tests/` is stem-scoped.)
+
+    DOC tests are counted only for the unscoped walk. Any target-selection flag
+    — `--lib`, `--test stem` — drops cargo's doc target, so a stem-scoped sweep
+    runs none of them however many the crate has. Measured on the reconstructed
+    anyhow tree 2026-08-06: `cargo test --no-fail-fast --lib --test test_boxed`
+    prints no `Doc-tests` section at all, while the unscoped run reports
+    `running 25 tests` for it."""
     if cluster is None:
         cfg_true: set[str] = set()
         cfg_false: set[str] = set()
@@ -127,8 +137,8 @@ def active_test_inventory_for_cluster(
         cfg_false = set(getattr(cluster, "cfg_false", []) or [])
 
     # Crate default features — a `feature = "X"` that IS a default is ON even
-    # when the cluster sets don't list it, so it must NOT be force-excluded
-    # (FR-018).
+    # when the cluster sets don't list it, so it must NOT be force-excluded:
+    # excluding it would drop tests cargo really compiles and shrink the oracle.
     cargo_toml = project_dir / "Cargo.toml"
     default_features: frozenset[str] = frozenset()
     if cargo_toml.exists():
@@ -138,12 +148,12 @@ def active_test_inventory_for_cluster(
         except Exception:
             default_features = frozenset()
 
-    # Typed-record path (FR-024 fraud-safety): count test fns off the syn
-    # extractor's FnRecords (is_test + accumulated cfg_predicates) rather than a
-    # line-level marker scan. Enumerated ONCE over the whole crate, indexed by
+    # Typed-record path, for the same fraud-safety reason: count test fns off
+    # the syn extractor's FnRecords (is_test + accumulated cfg_predicates)
+    # rather than a line-level marker scan. Enumerated ONCE per crate, indexed by
     # crate-relative path. A file absent from the index (extractor unavailable,
     # parse failure, or no fns) falls back to the marker scan — conservative:
-    # never undercount (FR-022), and cargo can't run a file that doesn't parse
+    # never undercount, and cargo can't run a file that doesn't parse
     # anyway, so an over-count merely keeps the cluster 'incomplete'.
     fn_recs = deps.enumerate_fns(project_dir)
     by_file: dict[str, list[dict[str, Any]]] | None = None
@@ -276,6 +286,16 @@ def active_test_inventory_for_cluster(
     #    Counted, never NAMED — rustdoc identifies them as `src/lib.rs - Chain
     #    (line 284)`, which is not a `#[test]` name and reconciles against
     #    nothing. `names` is documented as a possible subset of the count.
+    #
+    #    ONLY for the unscoped walk. A stem-scoped sweep passes `--lib --test
+    #    stem…`, and a target-selection flag drops cargo's doc target entirely,
+    #    so those 25 can never report a verdict there. Counting them anyway put
+    #    25 into `reconcile_sweep`'s deficit on every phase-c sweep with no
+    #    vanished NAME to explain it, charged 25 phantom failures, and left
+    #    `SweepOracle.intact` unsatisfiable — the state in which a cluster at
+    #    100 % real pass can never be declared done. That is the same shape as
+    #    the duplicate-record inflation `domain/test_count.py` describes.
+    _count_doc_tests = tests_dir_stems is None
     for srf in src_dir.rglob("*.rs"):
         if deps.is_gen_tests_file(srf.name):
             continue
@@ -287,5 +307,6 @@ def active_test_inventory_for_cluster(
         except Exception:
             continue
         _add(srf.relative_to(project_dir).as_posix(), stext)
-        total += count_doc_tests(stext)
+        if _count_doc_tests:
+            total += count_doc_tests(stext)
     return total, frozenset(names)

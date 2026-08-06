@@ -49,3 +49,31 @@ def test_a_file_with_neither_kind_of_test_counts_zero(tmp_path: Path) -> None:
     (tmp_path / "src" / "lib.rs").write_text(
         "/// Not an example, just prose.\npub fn f() {}\n")
     assert active_test_inventory_for_cluster(tmp_path, None, _deps())[0] == 0
+
+
+def test_a_stem_scoped_sweep_expects_no_doc_tests(tmp_path: Path) -> None:
+    """A sweep that names its targets cannot run the doc target, so counting doc
+    tests into ITS denominator is a phantom failure on every iteration.
+
+    `--lib --test stem` drops cargo's doc target: measured on the reconstructed
+    anyhow tree 2026-08-06, `cargo test --no-fail-fast --lib --test test_boxed`
+    prints no `Doc-tests` section, while the unscoped run reports `running 25
+    tests` for it. Counting the 25 anyway put them in `reconcile_sweep`'s deficit
+    with no vanished NAME to explain them, so `SweepOracle.intact` could not hold
+    and phase-c's `Cluster done` exit became unreachable.
+    """
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "lib.rs").write_text(
+        "/// ```\n/// let x = 1;\n/// ```\npub fn f() {}\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "t_a.rs").write_text("#[test]\nfn integ() {}\n")
+
+    unscoped = active_test_inventory_for_cluster(tmp_path, None, _deps())[0]
+    scoped = active_test_inventory_for_cluster(
+        tmp_path, None, _deps(),
+        tests_dir_stems=frozenset({"t_a"}), include_lib_sources=True)[0]
+    # The unscoped walk is the denominator of `cargo test`: the doc test and the
+    # integration test. The scoped one is the denominator of
+    # `cargo test --lib --test t_a`, which runs only the latter.
+    assert unscoped == 2
+    assert scoped == 1

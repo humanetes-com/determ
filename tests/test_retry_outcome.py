@@ -205,6 +205,29 @@ def test_an_exhausted_clusters_effort_reaches_the_loop_that_inherits_it(tmp_path
     assert "error.rs::from" not in notes
 
 
+def test_the_writers_keys_are_the_keys_the_reader_looks_up(tmp_path) -> None:
+    """Drive the REAL writer, not a canned store.
+
+    The test above hand-writes `error.rs::downcast_ref` and so passed while the
+    writer was emitting `src/error.rs::downcast_ref`: phase-c builds its frontier
+    over the crate root, this module indexes fns over `project_dir / "src"` and
+    strips the prefix before looking up, and nothing logged the miss. The two
+    halves must be driven end to end or the vocabularies are free to drift.
+    """
+    from pipeline_core.application.generators.task2_generator import (
+        _save_cluster_evidence,
+    )
+    _save_cluster_evidence(
+        tmp_path, "nightly",
+        frozenset({"test_boxed_str"}), frozenset({"test_boxed_str"}),
+        exhausted=True,
+        # Exactly what `phase_c_tdd` hands over: frontier keys, crate-root form.
+        exhausted_fns=(("src/error.rs", "downcast_ref"),))
+    notes = _prior_effort_notes(tmp_path)
+    assert "error.rs::downcast_ref" in notes, notes
+    assert "src/error.rs::downcast_ref" not in notes
+
+
 def test_a_missing_or_corrupt_evidence_store_is_not_an_error(tmp_path) -> None:
     assert _prior_effort_notes(tmp_path) == {}
     (tmp_path / ".skeleton").mkdir()

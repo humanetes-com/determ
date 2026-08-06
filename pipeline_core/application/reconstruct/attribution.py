@@ -13,7 +13,7 @@ Cargo-output parsing goes through the structured `domain.test_report` parser
 from __future__ import annotations
 
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -197,13 +197,24 @@ def behavior_frontier(
 def behavior_frontier_from_texts(
     deps: AttributionDeps,
     test_output: str, texts: dict[str, str], fns_root: Path,
+    unrepairable_tests: frozenset[str] = frozenset(),
 ) -> tuple[Frontier, dict[str, tuple[str, str]]]:
     """Core of :func:`behavior_frontier` over already-loaded test texts
     ({rel_path: content}) — the phase-c TDD loop holds the cluster's test pairs
     in memory, so it attributes without re-reading files. `fns_root` is the
     tree whose fn records are the attribution candidates (the cluster's target
-    tree in phase-c; the project dir in the fix loop)."""
+    tree in phase-c; the project dir in the fix loop).
+
+    `unrepairable_tests` (bare names) are dropped before anything is attributed.
+    This path CONVICTS — its frontier may revert a unit — so a test whose
+    assertion is about rustc's own output rather than about any body must not
+    reach it. The body of `tests/compiletest.rs` is `trybuild::TestCases::new()`
+    plus a glob, and its identifiers are the whole basis on which this path would
+    name fns."""
     failed = failing_test_names(test_output)
+    if unrepairable_tests:
+        failed = [t for t in failed
+                  if t.split("::")[-1] not in unrepairable_tests]
     if not failed or not texts:
         return {}, {}
     index = build_test_name_index(texts)
@@ -462,7 +473,9 @@ def expand_frontier_by_calls(
     fn that actually holds the defect is `error.rs::construct_from_boxed`
     (it builds the vtable with `object_downcast::<BoxedError>` where the upstream
     crate uses `object_downcast::<Box<dyn StdError + Send + Sync>>`), and it
-    enters at hop 2 — 23 fn names, 41 (file, fn) pairs.
+    enters at hop 3. Re-measured 2026-08-06 by running this function over the
+    merged tree from that 3-fn seed: 37 keys, distributed 3 / 14 / 9 / 11 over
+    hops 0-3, and hop 4 adds 2 more and finds nothing new.
 
     The hop distance is returned rather than folded in because it is the
     ranking: a caller that pays a model call per key wants the seed first and
@@ -587,15 +600,25 @@ def attribute_failures(
     # are empty.
     contributors: list[FailureKind] = []
 
+    def _repairable(names: Iterable[str]) -> set[str]:
+        """Drop the failures no body rewrite can satisfy — a `trybuild` harness
+        asserts about rustc's own output, so nothing it names is answerable by
+        writing a body.
+
+        Applied at EVERY path, not only the fallbacks. The first cut filtered
+        inside the `_failing()` helper, which paths 4-6 call and paths 1-3 do
+        not — and path 3 is the one that CONVICTS, so an exclusion that skips it
+        leaves the worst case uncovered."""
+        if not unrepairable_tests:
+            return set(names)
+        return {n for n in names
+                if n.split("::")[-1] not in unrepairable_tests}
+
     def _failing() -> list[str]:
-        """The failing tests this loop can act on. A test whose assertion is
-        about rustc's own output (`trybuild`) is excluded here rather than at
-        each path: it would otherwise convict through whichever fallback ran."""
-        names = parse_failed_tests(test_output) | extra_failed
-        if unrepairable_tests:
-            names = {n for n in names
-                     if n.split("::")[-1] not in unrepairable_tests}
-        return sorted(names)
+        """The failing tests this loop can act on, for the fallback paths."""
+        return sorted(_repairable(parse_failed_tests(test_output) | extra_failed))
+
+    _vanished = _repairable(extra_failed)
 
     merged: Frontier = {}
     convicting: Frontier = {}
@@ -614,7 +637,7 @@ def attribute_failures(
            FailureKind.COMPILE)
     if test_texts:
         _bf, _srcs = behavior_frontier_from_texts(
-            deps, test_output, test_texts, src_dir)
+            deps, test_output, test_texts, src_dir, unrepairable_tests)
         _merge(_strip(_bf), FailureKind.BEHAVIOR)
     # Vanished tests (`extra_failed` — expected but absent from the output:
     # their binary segfaulted or stopped compiling) leave NO panic line, no
@@ -623,9 +646,9 @@ def attribute_failures(
     # Route them through the static reverse map HERE, unioned like 1-3, or a
     # crashing filled body is never re-dispatched while ordinary stub panics
     # keep the merged frontier non-empty.
-    if extra_failed and test_reverse_map:
+    if _vanished and test_reverse_map:
         vanished_fr: Frontier = {}
-        for tname in sorted(extra_failed):
+        for tname in sorted(_vanished):
             bare = tname.split("::")[-1]
             cands = test_reverse_map.get(bare) or test_reverse_map.get(tname) or set()
             for key in cands:
