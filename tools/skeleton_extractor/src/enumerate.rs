@@ -8,7 +8,7 @@ use crate::skeleton::*;
 use proc_macro2::TokenStream;
 use quote::quote;
 use std::path::Path;
-use syn::{ImplItem, Item, ItemImpl, TraitItem, parse_file};
+use syn::{Expr, ImplItem, Item, ItemImpl, Stmt, TraitItem, parse_file};
 
 pub(crate) struct FnEnumerator<'a> {
     source: &'a str,
@@ -99,6 +99,49 @@ impl<'a> FnEnumerator<'a> {
 
     fn walk_items(&mut self, items: &[Item]) {
         for item in items {
+            self.walk_item(item);
+        }
+    }
+
+    /// Descend into a `const`/`static` initializer for the items nested in it.
+    ///
+    /// `const _: () = { … };` is the idiom for scoping trait impls and
+    /// compile-time assertions, and the items inside it are ordinary items that
+    /// rustc compiles. The skeletoniser already reaches them — it is a
+    /// `syn::visit_mut::VisitMut`, which recurses through expressions by
+    /// default — so it HOLLOWS bodies there. This walk is hand-rolled and its
+    /// catch-all arm used to swallow `Item::Const` whole, so the same fns were
+    /// never enumerated.
+    ///
+    /// The asymmetry made those bodies unaddressable in both directions.
+    /// Measured on `tmp/anyhow/src/nightly.rs` (2026-08-06): the file holds
+    /// seven fns and `--enumerate-fns` returned FOUR, omitting `Debug::fmt`,
+    /// `Display::fmt` and `Error::provide` on the build probe's `MyError` —
+    /// all three inside `#[cfg(anyhow_build_probe)] const _: () = { … }`, all
+    /// three carrying `::core::unimplemented!()` that the skeletoniser itself
+    /// had written (`skeleton.rs`'s stub form; upstream writes bare
+    /// `unimplemented!()` in two of them and real code in the third). Across
+    /// that whole tree the enumerator reported ZERO hollow bodies.
+    ///
+    /// Every fill route keys on `FnRecord` — the frontier, the container index,
+    /// the attribution reverse-map, the leaf-first ordering — so a fn with no
+    /// record is not hard to fill, it is unaddressable; and both completion
+    /// stub gates filter extractor records, so such a body could never be
+    /// reported either. On `anyhow` the block is cfg-dead and nothing was lost.
+    /// On a crate that puts live code in a `const _` block, the pipeline would
+    /// strip it, never fill it, and still claim success.
+    fn walk_const_initializer(&mut self, expr: &Expr) {
+        if let Expr::Block(block) = expr {
+            for stmt in &block.block.stmts {
+                if let Stmt::Item(item) = stmt {
+                    self.walk_item(item);
+                }
+            }
+        }
+    }
+
+    fn walk_item(&mut self, item: &Item) {
+        {
             // Push cfg from item attrs (so nested fns inherit).
             let item_cfgs = extract_cfg_predicates(item_attrs(item));
             for c in &item_cfgs {
@@ -177,6 +220,16 @@ impl<'a> FnEnumerator<'a> {
                         self.walk_items(items);
                         self.container_stack.pop();
                     }
+                }
+                // See `walk_const_initializer`: the skeletoniser hollows fns in
+                // here, so the enumerator has to be able to name them.
+                // See `walk_const_initializer`: the skeletoniser hollows fns in
+                // here, so the enumerator has to be able to name them.
+                Item::Const(item_const) => {
+                    self.walk_const_initializer(&item_const.expr);
+                }
+                Item::Static(item_static) => {
+                    self.walk_const_initializer(&item_static.expr);
                 }
                 _ => {}
             }
@@ -531,12 +584,22 @@ pub fn enumerate_types_in_tree(input_dir: &Path) -> Result<Vec<TypeRecord>> {
 /// Parse a single file and emit one FnRecord per fn item.
 pub fn enumerate_fns_in_file(path: &Path, root: &Path) -> Result<Vec<FnRecord>> {
     let source = std::fs::read_to_string(path).map_err(|e| ExtractError::read(path, e))?;
-    let ast: syn::File = parse_file(&source).map_err(|e| ExtractError::parse(path, e))?;
     let rel = path
         .strip_prefix(root)
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| path.to_string_lossy().to_string());
+    let ast: syn::File = parse_file(&source).map_err(|e| ExtractError::parse(path, e))?;
     let mut en = FnEnumerator::new(&source, rel);
+    en.walk_items(&ast.items);
+    Ok(en.records)
+}
+
+/// Same enumeration over source held in memory. Exists so the walk can be
+/// exercised on a string — in particular against skeletoniser OUTPUT, which is
+/// how the two halves are held to the same set of fns.
+pub fn enumerate_fns_in_source(source: &str, rel: &str) -> Result<Vec<FnRecord>> {
+    let ast: syn::File = parse_file(source).map_err(|e| ExtractError::parse(Path::new(rel), e))?;
+    let mut en = FnEnumerator::new(source, rel.to_string());
     en.walk_items(&ast.items);
     Ok(en.records)
 }

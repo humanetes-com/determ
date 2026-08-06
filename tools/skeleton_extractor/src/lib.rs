@@ -49,6 +49,107 @@ mod tests {
         prettyplease::unparse(&ast)
     }
 
+    /// `const _: () = { … };` — the idiom for scoping trait impls and
+    /// compile-time assertions. Shaped after `anyhow`'s `src/nightly.rs`, whose
+    /// build probe puts three impl fns inside one.
+    const CONST_BLOCK_SRC: &str = r#"
+        #[cfg(probe)]
+        const _: () = {
+            use core::fmt::{self, Debug, Display};
+            struct MyError;
+            impl Debug for MyError {
+                fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                    write!(f, "debug")
+                }
+            }
+            impl Display for MyError {
+                fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                    write!(f, "display")
+                }
+            }
+        };
+        pub fn top_level() -> u8 { 1 }
+    "#;
+
+    #[test]
+    fn fns_inside_a_const_block_are_enumerated() {
+        // The skeletoniser is a VisitMut and recurses into the const's
+        // initializer, so it HOLLOWS these. The enumerator's walk is
+        // hand-rolled and its catch-all arm used to swallow `Item::Const`
+        // whole, so the same fns were never reported: measured on
+        // `tmp/anyhow/src/nightly.rs` (2026-08-06), a file of SEVEN fns
+        // enumerated as FOUR, omitting `Debug::fmt`, `Display::fmt` and
+        // `Error::provide` on the build probe's `MyError`.
+        let recs = enumerate_fns_in_source(CONST_BLOCK_SRC, "t.rs").unwrap();
+        let names: Vec<_> = recs.iter().map(|r| r.fn_name.as_str()).collect();
+        assert_eq!(names, vec!["fmt", "fmt", "top_level"], "got {names:?}");
+        // Same name twice in one file: the container is what disambiguates
+        // them, and a splice that cannot tell them apart refuses on
+        // `ambiguous_name`.
+        let containers: Vec<_> = recs
+            .iter()
+            .filter(|r| r.fn_name == "fmt")
+            .map(|r| r.container.as_str())
+            .collect();
+        assert_eq!(
+            containers,
+            vec!["impl Debug for MyError", "impl Display for MyError"]
+        );
+        // The enclosing const's cfg has to reach them, or the completion gate
+        // cannot tell "unreachable under every baked cfg-set" from "never
+        // attempted" — which is the difference between exit 0 and exit 1.
+        for r in recs.iter().filter(|r| r.fn_name == "fmt") {
+            assert_eq!(r.cfg_predicates, vec!["probe".to_string()]);
+        }
+    }
+
+    #[test]
+    fn every_body_the_skeletoniser_hollows_is_reported_hollow() {
+        // THE invariant the asymmetry violated: a body the strip half writes
+        // must be one the enumerate half can name again. Every fill route keys
+        // on FnRecord — frontier, container index, attribution reverse-map,
+        // leaf-first ordering — so a hollowed fn with no record is not hard to
+        // fill, it is unaddressable; and both completion stub gates filter
+        // records, so it could never be reported either. On the live `anyhow`
+        // tree the counts were 3 on disk against 0 reported.
+        let stubbed = skeletonise_str(CONST_BLOCK_SRC);
+        let on_disk = stubbed.matches("unimplemented!()").count();
+        let recs = enumerate_fns_in_source(&stubbed, "t.rs").unwrap();
+        let reported = recs.iter().filter(|r| r.has_unimplemented_body).count();
+        assert_eq!(on_disk, 3, "skeletoniser hollowed {on_disk}, expected 3");
+        assert_eq!(
+            on_disk, reported,
+            "{on_disk} hollow bodies on disk but {reported} reported by the enumerator"
+        );
+    }
+
+    #[test]
+    fn a_static_initializer_is_walked_too() {
+        let src = r#"
+            static _X: () = {
+                impl Foo {
+                    fn hidden(&self) -> u8 { 7 }
+                }
+            };
+        "#;
+        let recs = enumerate_fns_in_source(src, "t.rs").unwrap();
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].fn_name, "hidden");
+    }
+
+    #[test]
+    fn a_plain_const_is_not_mistaken_for_a_block() {
+        // Only a block initializer holds items; a value initializer must not
+        // be walked into, and nothing about ordinary consts may change.
+        let recs = enumerate_fns_in_source(
+            "const N: usize = 3; pub fn f() -> usize { N }",
+            "t.rs",
+        )
+        .unwrap();
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].fn_name, "f");
+    }
+
     #[test]
     fn visibility_is_the_most_public_declaration_of_a_name() {
         // Type records are keyed by bare name tree-wide, so a crate that
